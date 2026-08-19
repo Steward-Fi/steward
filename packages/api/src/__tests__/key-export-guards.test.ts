@@ -162,6 +162,9 @@ describeWithDatabase("key export guards", () => {
     });
 
     expect(res.status).toBe(200);
+    expect(res.headers.get("Cache-Control")).toBe("no-store, max-age=0");
+    expect(res.headers.get("Pragma")).toBe("no-cache");
+    expect(res.headers.get("Expires")).toBe("0");
     const body = (await res.json()) as { ok: boolean; data?: { evm?: { privateKey: string } } };
     expect(body.ok).toBe(true);
     expect(body.data?.evm?.privateKey).toStartWith("0x");

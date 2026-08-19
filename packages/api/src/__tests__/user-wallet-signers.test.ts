@@ -1,8 +1,19 @@
 import { afterAll, beforeAll, describe, expect, it, spyOn } from "bun:test";
-import { agentSigners, agents, closeDb, getDb, tenants, users, userTenants } from "@stwd/db";
+import {
+  agentSigners,
+  agents,
+  auditEvents,
+  closeDb,
+  getDb,
+  policies,
+  tenants,
+  transactions,
+  users,
+  userTenants,
+} from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { Vault } from "@stwd/vault";
-import { eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 
 const USER_ID = crypto.randomUUID();
 const USER_ADDRESS = "0x1234567890123456789012345678901234567890";
@@ -20,6 +31,7 @@ describe("user wallet additional signers API", () => {
     process.env.STEWARD_MASTER_PASSWORD = "user-wallet-signers-master-password";
     process.env.STEWARD_JWT_SECRET = "user-wallet-signers-jwt-secret-32chars";
     process.env.STEWARD_AUDIT_HMAC_KEY = "user-wallet-signers-audit-hmac-key-32chars";
+    process.env.STEWARD_SIGNER_CREDENTIAL_PEPPER = "user-wallet-signers-credential-pepper-32chars";
     process.env.STEWARD_ALLOW_UNSAFE_MESSAGE_SIGNING = "true";
     process.env.STEWARD_ALLOW_USER_UNSAFE_MESSAGE_SIGNING = "true";
 
@@ -66,6 +78,7 @@ describe("user wallet additional signers API", () => {
     delete process.env.STEWARD_MASTER_PASSWORD;
     delete process.env.STEWARD_JWT_SECRET;
     delete process.env.STEWARD_AUDIT_HMAC_KEY;
+    delete process.env.STEWARD_SIGNER_CREDENTIAL_PEPPER;
     delete process.env.STEWARD_ALLOW_UNSAFE_MESSAGE_SIGNING;
     delete process.env.STEWARD_ALLOW_USER_UNSAFE_MESSAGE_SIGNING;
   });
@@ -96,10 +109,35 @@ describe("user wallet additional signers API", () => {
     });
     const body = (await response.json()) as {
       data: { id: string; credentialSecret?: string };
+      error?: string;
     };
-    expect(response.status).toBe(201);
+    if (response.status !== 201) throw new Error(`signer creation failed: ${body.error}`);
     expect(typeof body.data.credentialSecret).toBe("string");
     return { id: body.data.id, credentialSecret: body.data.credentialSecret as string };
+  }
+
+  async function signerRequest(
+    signer: { id: string; credentialSecret: string },
+    body: Record<string, unknown>,
+    headers: Record<string, string> = {},
+  ) {
+    return userRoutes.request("/me/wallet/sign", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-steward-signer-id": signer.id,
+        "x-steward-signer-secret": signer.credentialSecret,
+        ...headers,
+      },
+      body: JSON.stringify({
+        walletIndex: 2,
+        to: RECIPIENT,
+        value: "1",
+        chainId: 8453,
+        broadcast: false,
+        ...body,
+      }),
+    });
   }
 
   it("requires recent MFA to create user-wallet signer credentials", async () => {
@@ -278,6 +316,180 @@ describe("user wallet additional signers API", () => {
     }
   });
 
+  it("requires replay protection for broadcasts and passes the requested persistence status", async () => {
+    const signer = await createSigner("device-replay-status", ["sign_transaction"]);
+    const rpcSpy = spyOn(Vault.prototype, "rpcPassthrough").mockResolvedValue({
+      jsonrpc: "2.0",
+      id: 1,
+      result: "0x",
+    } as Awaited<ReturnType<Vault["rpcPassthrough"]>>);
+    const signSpy = spyOn(Vault.prototype, "signTransaction").mockResolvedValue("0xsigned");
+    try {
+      const missingKey = await signerRequest(signer, { broadcast: true });
+      expect(missingKey.status).toBe(400);
+      expect(signSpy).not.toHaveBeenCalled();
+      expect(rpcSpy).not.toHaveBeenCalled();
+
+      const signed = await signerRequest(signer, { broadcast: false });
+      expect(signed.status).toBe(200);
+      expect(signSpy.mock.calls[0]?.[1]?.status).toBe("signed");
+
+      const broadcast = await signerRequest(
+        signer,
+        { broadcast: true },
+        { "Idempotency-Key": crypto.randomUUID() },
+      );
+      expect(broadcast.status).toBe(200);
+      expect(signSpy.mock.calls[1]?.[1]?.status).toBe("broadcast");
+    } finally {
+      rpcSpy.mockRestore();
+      signSpy.mockRestore();
+    }
+  });
+
+  it("rejects non-uint256 values and caller-controlled gas before RPC or signing", async () => {
+    const signer = await createSigner("device-value-guards", ["sign_transaction"]);
+    const rpcSpy = spyOn(Vault.prototype, "rpcPassthrough").mockResolvedValue({
+      jsonrpc: "2.0",
+      id: 1,
+      result: "0x",
+    } as Awaited<ReturnType<Vault["rpcPassthrough"]>>);
+    const signSpy = spyOn(Vault.prototype, "signTransaction").mockResolvedValue("0xsigned");
+    try {
+      const invalidValues: unknown[] = ["-1", "1.5", "1e3", "abc", 1, (2n ** 256n).toString()];
+      for (const value of invalidValues) {
+        expect((await signerRequest(signer, { value })).status).toBe(400);
+      }
+      expect((await signerRequest(signer, { gasLimit: "21000" })).status).toBe(403);
+      expect(rpcSpy).not.toHaveBeenCalled();
+      expect(signSpy).not.toHaveBeenCalled();
+
+      expect((await signerRequest(signer, { value: "0" })).status).toBe(200);
+      const maxBoundary = await signerRequest(signer, { value: (2n ** 256n - 1n).toString() });
+      expect(maxBoundary.status).not.toBe(400);
+      expect(rpcSpy).toHaveBeenCalledTimes(2);
+    } finally {
+      rpcSpy.mockRestore();
+      signSpy.mockRestore();
+    }
+  });
+
+  it("fails closed when recipient contract-code verification is unavailable or unsafe", async () => {
+    const signer = await createSigner("device-recipient-guard", ["sign_transaction"]);
+    const rpcSpy = spyOn(Vault.prototype, "rpcPassthrough");
+    const signSpy = spyOn(Vault.prototype, "signTransaction").mockResolvedValue("0xsigned");
+    try {
+      for (const result of [
+        Promise.reject(new Error("provider unavailable")),
+        Promise.resolve({ jsonrpc: "2.0", id: 1, error: { code: -1, message: "no" } }),
+        Promise.resolve({ jsonrpc: "2.0", id: 1, result: "malformed" }),
+        Promise.resolve({ jsonrpc: "2.0", id: 1, result: "0x6000" }),
+      ]) {
+        rpcSpy.mockImplementationOnce(() => result as ReturnType<Vault["rpcPassthrough"]>);
+      }
+      expect((await signerRequest(signer, {})).status).toBe(502);
+      expect((await signerRequest(signer, {})).status).toBe(502);
+      expect((await signerRequest(signer, {})).status).toBe(502);
+      expect((await signerRequest(signer, {})).status).toBe(403);
+      expect(signSpy).not.toHaveBeenCalled();
+    } finally {
+      rpcSpy.mockRestore();
+      signSpy.mockRestore();
+    }
+  });
+
+  it("enforces indexed-wallet policy against aggregate user-wallet spend", async () => {
+    const signer = await createSigner("device-aggregate-spend", ["sign_transaction"]);
+    const policyId = `aggregate-${crypto.randomUUID()}`;
+    const transactionId = `aggregate-${crypto.randomUUID()}`;
+    await getDb()
+      .insert(policies)
+      .values({
+        id: policyId,
+        agentId: WALLET_AGENT_ID,
+        type: "spending-limit",
+        config: { maxPerTx: "100", maxPerDay: "100", maxPerWeek: "100" },
+      });
+    await getDb().insert(transactions).values({
+      id: transactionId,
+      agentId: PRIMARY_WALLET_AGENT_ID,
+      status: "signed",
+      toAddress: RECIPIENT,
+      value: "60",
+      chainId: 8453,
+    });
+    const rpcSpy = spyOn(Vault.prototype, "rpcPassthrough").mockResolvedValue({
+      jsonrpc: "2.0",
+      id: 1,
+      result: "0x",
+    } as Awaited<ReturnType<Vault["rpcPassthrough"]>>);
+    const signSpy = spyOn(Vault.prototype, "signTransaction").mockResolvedValue("0xsigned");
+    try {
+      const response = await signerRequest(signer, { value: "60" });
+      expect(response.status).toBe(403);
+      expect(signSpy).not.toHaveBeenCalled();
+    } finally {
+      rpcSpy.mockRestore();
+      signSpy.mockRestore();
+      await getDb().delete(transactions).where(eq(transactions.id, transactionId));
+      await getDb().delete(policies).where(eq(policies.id, policyId));
+    }
+  });
+
+  it("returns a completed signing result when only completion auditing fails", async () => {
+    const signer = await createSigner("device-bookkeeping-failure", ["sign_transaction"]);
+    await getDb().execute(
+      sql.raw(`
+      CREATE OR REPLACE FUNCTION fail_user_wallet_completion_audit()
+      RETURNS trigger AS $$
+      BEGIN
+        IF NEW.action = 'user.wallet.sign' THEN
+          RAISE EXCEPTION 'hostile completion audit failure';
+        END IF;
+        RETURN NEW;
+      END;
+      $$ LANGUAGE plpgsql
+    `),
+    );
+    await getDb().execute(
+      sql.raw(`
+      CREATE TRIGGER user_wallet_completion_audit_failure
+      BEFORE INSERT ON audit_events
+      FOR EACH ROW EXECUTE FUNCTION fail_user_wallet_completion_audit()
+    `),
+    );
+    const rpcSpy = spyOn(Vault.prototype, "rpcPassthrough").mockResolvedValue({
+      jsonrpc: "2.0",
+      id: 1,
+      result: "0x",
+    } as Awaited<ReturnType<Vault["rpcPassthrough"]>>);
+    const signSpy = spyOn(Vault.prototype, "signTransaction").mockResolvedValue("0xcompleted");
+    try {
+      const response = await signerRequest(signer, {});
+      const body = (await response.json()) as { ok: boolean; data?: { txHash: string } };
+      expect(response.status).toBe(200);
+      expect(body).toMatchObject({ ok: true, data: { txHash: "0xcompleted" } });
+      const actions = await getDb()
+        .select({ action: auditEvents.action })
+        .from(auditEvents)
+        .where(
+          and(
+            eq(auditEvents.tenantId, PERSONAL_TENANT_ID),
+            sql`${auditEvents.action} in ('user.wallet.sign.authorized', 'user.wallet.sign.failed')`,
+          ),
+        );
+      expect(actions.some(({ action }) => action === "user.wallet.sign.authorized")).toBe(true);
+      expect(actions.some(({ action }) => action === "user.wallet.sign.failed")).toBe(false);
+    } finally {
+      rpcSpy.mockRestore();
+      signSpy.mockRestore();
+      await getDb().execute(
+        sql.raw("DROP TRIGGER user_wallet_completion_audit_failure ON audit_events"),
+      );
+      await getDb().execute(sql.raw("DROP FUNCTION fail_user_wallet_completion_audit()"));
+    }
+  });
+
   it("rejects a user-wallet signer credential for a different selected walletIndex", async () => {
     const signer = await createSigner("device-wrong-wallet", ["sign_transaction"]);
     const response = await userRoutes.request("/me/wallet/sign", {
@@ -335,6 +547,67 @@ describe("user wallet additional signers API", () => {
         });
         expect(response.status).toBe(401);
       }
+    } finally {
+      signSpy.mockRestore();
+    }
+  });
+
+  it("durably records authorization before an unsafe message-signing attempt", async () => {
+    const signer = await createSigner("device-message-failure", ["sign_message"]);
+    const authorizedBefore = await getDb()
+      .select({ action: auditEvents.action })
+      .from(auditEvents)
+      .where(
+        and(
+          eq(auditEvents.tenantId, PERSONAL_TENANT_ID),
+          eq(auditEvents.action, "user.wallet.sign_message.authorized"),
+        ),
+      );
+    const completedBefore = await getDb()
+      .select({ action: auditEvents.action })
+      .from(auditEvents)
+      .where(
+        and(
+          eq(auditEvents.tenantId, PERSONAL_TENANT_ID),
+          eq(auditEvents.action, "user.wallet.sign_message"),
+        ),
+      );
+    const signSpy = spyOn(Vault.prototype, "signMessage").mockRejectedValue(
+      new Error("hostile signer failure"),
+    );
+    try {
+      const response = await userRoutes.request("/me/wallet/sign-message", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-steward-signer-id": signer.id,
+          "x-steward-signer-secret": signer.credentialSecret,
+        },
+        body: JSON.stringify({ walletIndex: 2, message: "behavioral audit ordering" }),
+      });
+      expect(response.status).toBe(500);
+
+      const after = await getDb()
+        .select({ action: auditEvents.action, metadata: auditEvents.metadata })
+        .from(auditEvents)
+        .where(
+          and(
+            eq(auditEvents.tenantId, PERSONAL_TENANT_ID),
+            sql`${auditEvents.action} in ('user.wallet.sign_message.authorized', 'user.wallet.sign_message')`,
+          ),
+        );
+      const authorized = after.filter(
+        ({ action }) => action === "user.wallet.sign_message.authorized",
+      );
+      expect(authorized).toHaveLength(authorizedBefore.length + 1);
+      expect(
+        authorized.some(
+          ({ metadata }) => metadata.unsafeCompatibilityMode === true && metadata.walletIndex === 2,
+        ),
+      ).toBe(true);
+      expect(after.filter(({ action }) => action === "user.wallet.sign_message")).toHaveLength(
+        completedBefore.length,
+      );
     } finally {
       signSpy.mockRestore();
     }
