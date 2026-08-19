@@ -865,15 +865,7 @@ export class Vault {
     const db = getDb();
     const txId = options.txId ?? crypto.randomUUID();
     const signedAt = new Date();
-    const [existingTransaction] = await db
-      .select({ agentId: transactions.agentId })
-      .from(transactions)
-      .where(eq(transactions.id, txId));
-    if (existingTransaction && existingTransaction.agentId !== request.agentId) {
-      throw new Error("Transaction id already belongs to a different agent");
-    }
-
-    await db
+    const recordedTransactions = await db
       .insert(transactions)
       .values({
         id: txId,
@@ -893,7 +885,6 @@ export class Vault {
       .onConflictDoUpdate({
         target: transactions.id,
         set: {
-          agentId: request.agentId,
           status: shouldBroadcast ? (options.status ?? "signed") : "signed",
           toAddress: request.to,
           value: request.value,
@@ -905,7 +896,12 @@ export class Vault {
           policyResults: options.policyResults ?? [],
           signedAt,
         },
-      });
+        setWhere: eq(transactions.agentId, request.agentId),
+      })
+      .returning({ agentId: transactions.agentId });
+    if (recordedTransactions.length !== 1) {
+      throw new Error("Transaction id already belongs to a different agent");
+    }
   }
 
   /**
