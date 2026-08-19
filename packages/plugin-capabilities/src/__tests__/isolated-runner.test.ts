@@ -16,26 +16,43 @@ async function fixtureRoot(): Promise<string> {
   return path;
 }
 
-async function run(root: string, filters: string[] = [], overrides: Record<string, string> = {}) {
+function spawnRunner(root: string, filters: string[] = [], overrides: Record<string, string> = {}) {
   const child = Bun.spawn(["bun", runner, ...filters], {
     cwd: join(import.meta.dir, "../.."),
     env: {
       ...process.env,
       ISOLATED_TEST_ROOT: root,
       TEST_TIMEOUT: "5000",
-      TEST_WALL_TIMEOUT_MS: "2000",
+      TEST_WALL_TIMEOUT_MS: "10000",
       TEST_KILL_GRACE_MS: "100",
       ...overrides,
     },
     stdout: "pipe",
     stderr: "pipe",
   });
-  const [stdout, stderr, code] = await Promise.all([
+  const result = Promise.all([
     new Response(child.stdout).text(),
     new Response(child.stderr).text(),
     child.exited,
-  ]);
-  return { code, output: stdout + stderr };
+  ]).then(([stdout, stderr, code]) => ({ code, output: stdout + stderr }));
+  return { child, result };
+}
+
+async function run(root: string, filters: string[] = [], overrides: Record<string, string> = {}) {
+  return spawnRunner(root, filters, overrides).result;
+}
+
+async function waitForFile(path: string, attempts = 400): Promise<boolean> {
+  for (let i = 0; i < attempts; i += 1) {
+    if (
+      await readFile(path)
+        .then(() => true)
+        .catch(() => false)
+    )
+      return true;
+    await Bun.sleep(20);
+  }
+  return false;
 }
 
 async function waitForProcessExit(pid: number): Promise<boolean> {
@@ -81,20 +98,28 @@ describe("isolated test runner", () => {
     const descendantPidFile = join(root, "descendant-pid");
     const childTermFile = join(root, "child-term");
     const descendantTermFile = join(root, "descendant-term");
-    const descendantSource = `import { writeFileSync } from "node:fs"; writeFileSync(${JSON.stringify(descendantPidFile)},String(process.pid)); process.on("SIGTERM",()=>writeFileSync(${JSON.stringify(descendantTermFile)},"term")); await new Promise(()=>{});`;
+    const descendantSource = `import { writeFileSync } from "node:fs"; process.on("SIGTERM",()=>writeFileSync(${JSON.stringify(descendantTermFile)},"term")); writeFileSync(${JSON.stringify(descendantPidFile)},String(process.pid)); await new Promise(()=>{});`;
     await writeFile(
       join(root, "kill.spec.ts"),
-      `import { writeFileSync } from "node:fs"; writeFileSync(${JSON.stringify(childPidFile)},String(process.pid)); Bun.spawn(["bun","-e",${JSON.stringify(descendantSource)}],{stdout:"ignore",stderr:"ignore"}); process.on("SIGTERM",()=>writeFileSync(${JSON.stringify(childTermFile)},"term")); await new Promise(()=>{});`,
+      `import { writeFileSync } from "node:fs"; process.on("SIGTERM",()=>writeFileSync(${JSON.stringify(childTermFile)},"term")); Bun.spawn(["bun","-e",${JSON.stringify(descendantSource)}],{stdout:"ignore",stderr:"ignore"}); writeFileSync(${JSON.stringify(childPidFile)},String(process.pid)); await new Promise(()=>{});`,
     );
 
-    const result = await run(root, [], {
-      TEST_WALL_TIMEOUT_MS: "800",
+    const execution = spawnRunner(root, [], {
+      TEST_WALL_TIMEOUT_MS: "10000",
       TEST_KILL_GRACE_MS: "200",
     });
-    expect(result.code).not.toBe(0);
-    expect(result.output).toContain("wall timeout after 800ms");
-    expect(await readFile(childTermFile, "utf8")).toBe("term");
-    expect(await readFile(descendantTermFile, "utf8")).toBe("term");
+    try {
+      expect(await waitForFile(childPidFile)).toBe(true);
+      expect(await waitForFile(descendantPidFile)).toBe(true);
+      const result = await execution.result;
+      expect(result.code).not.toBe(0);
+      expect(result.output).toContain("wall timeout after 10000ms");
+      expect(await readFile(childTermFile, "utf8")).toBe("term");
+      expect(await readFile(descendantTermFile, "utf8")).toBe("term");
+    } finally {
+      execution.child.kill("SIGKILL");
+      await execution.child.exited;
+    }
 
     const childPid = Number(await readFile(childPidFile, "utf8"));
     const descendantPid = Number(await readFile(descendantPidFile, "utf8"));
@@ -106,14 +131,25 @@ describe("isolated test runner", () => {
 
   test("forwards timeout TERM to the child and reports nonzero/no-match", async () => {
     const root = await fixtureRoot();
+    const ready = join(root, "term-handler-ready");
     const marker = join(root, "term-marker");
     await writeFile(
       join(root, "signal.test.ts"),
-      `import { writeFileSync } from "node:fs"; process.on("SIGTERM",()=>{writeFileSync(${JSON.stringify(marker)},"term");process.exit(143)}); await new Promise(()=>{});`,
+      `import { writeFileSync } from "node:fs"; process.on("SIGTERM",()=>{writeFileSync(${JSON.stringify(marker)},"term");process.exit(143)}); writeFileSync(${JSON.stringify(ready)},"ready"); await new Promise(()=>{});`,
     );
-    const signaled = await run(root, [], { TEST_WALL_TIMEOUT_MS: "800" });
-    expect(signaled.code).not.toBe(0);
-    expect(await readFile(marker, "utf8")).toBe("term");
+    const execution = spawnRunner(root, [], {
+      TEST_WALL_TIMEOUT_MS: "10000",
+      TEST_KILL_GRACE_MS: "2000",
+    });
+    try {
+      expect(await waitForFile(ready)).toBe(true);
+      const signaled = await execution.result;
+      expect(signaled.code).not.toBe(0);
+      expect(await readFile(marker, "utf8")).toBe("term");
+    } finally {
+      execution.child.kill("SIGKILL");
+      await execution.child.exited;
+    }
     expect((await run(root, ["does-not-match"])).code).not.toBe(0);
 
     await writeFile(
