@@ -9,9 +9,7 @@ const sql = databaseUrl ? postgres(databaseUrl, { max: 3 }) : null;
 
 setDefaultTimeout(30_000);
 
-type ObservedOutcome<T> =
-  | { ok: true; value: T }
-  | { ok: false; error: unknown };
+type ObservedOutcome<T> = { ok: true; value: T } | { ok: false; error: unknown };
 
 function observePromise<T>(promise: Promise<T>): Promise<ObservedOutcome<T>> {
   return promise.then(
