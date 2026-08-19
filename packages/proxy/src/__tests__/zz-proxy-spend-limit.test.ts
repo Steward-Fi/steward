@@ -872,6 +872,164 @@ describe("proxy spend-limit enforcement", () => {
     expect(((await second.json()) as { error: string }).error).toContain("already forwarded");
   });
 
+  test("preserves a successful upstream response when replay completion persistence fails", async () => {
+    spendResult.configured = false;
+    const {
+      __clearProxyReplayClaimsForTests,
+      __setCheckProxySpendLimitForTests,
+      createProxyHandler,
+      handleProxy,
+    } = await loadProxy();
+    __clearProxyReplayClaimsForTests();
+    __setCheckProxySpendLimitForTests(async () => spendResult);
+    const diagnosticCalls: unknown[][] = [];
+    const originalConsoleError = console.error;
+    console.error = (...args: unknown[]) => diagnosticCalls.push(args);
+    let completionAttempts = 0;
+    const request = () =>
+      makeContext("/proxy/example.com/v1/echo", {
+        method: "POST",
+        headers: { "Idempotency-Key": "completion-failure-success" },
+        body: JSON.stringify({ op: "create" }),
+      });
+
+    try {
+      const handler = createProxyHandler({
+        completeReplayClaim: async () => {
+          completionAttempts++;
+          throw new Error("Bearer completion-secret-must-not-be-logged");
+        },
+      });
+      const first = await handler(request());
+      const retry = await handleProxy(request());
+
+      expect(first.status).toBe(200);
+      expect(await first.text()).toBe(JSON.stringify({ ok: true }));
+      expect(retry.status).toBe(409);
+      expect(((await retry.json()) as { error: string }).error).toContain("already processing");
+      expect(fetchCalls).toBe(1);
+      expect(completionAttempts).toBe(1);
+      expect(JSON.stringify(diagnosticCalls)).toContain(
+        "Failed to persist post-forward idempotency completion",
+      );
+      expect(JSON.stringify(diagnosticCalls)).not.toContain("completion-secret-must-not-be-logged");
+    } finally {
+      console.error = originalConsoleError;
+    }
+  });
+
+  test("keeps a single winner while replay completion is still unresolved", async () => {
+    spendResult.configured = false;
+    const {
+      __clearProxyReplayClaimsForTests,
+      __setCheckProxySpendLimitForTests,
+      createProxyHandler,
+      handleProxy,
+    } = await loadProxy();
+    __clearProxyReplayClaimsForTests();
+    __setCheckProxySpendLimitForTests(async () => spendResult);
+    let completionStarted!: () => void;
+    const completionStartedPromise = new Promise<void>((resolve) => {
+      completionStarted = resolve;
+    });
+    let rejectCompletion!: (reason: Error) => void;
+    const completionBarrier = new Promise<void>((_resolve, reject) => {
+      rejectCompletion = reject;
+    });
+    const diagnosticCalls: unknown[][] = [];
+    const originalConsoleError = console.error;
+    console.error = (...args: unknown[]) => diagnosticCalls.push(args);
+    const request = () =>
+      makeContext("/proxy/example.com/v1/echo", {
+        method: "POST",
+        headers: { "Idempotency-Key": "completion-in-flight-single-winner" },
+        body: JSON.stringify({ op: "create" }),
+      });
+
+    try {
+      const handler = createProxyHandler({
+        completeReplayClaim: async () => {
+          completionStarted();
+          await completionBarrier;
+        },
+      });
+      const firstPromise = handler(request());
+      await completionStartedPromise;
+
+      const concurrentRetry = await handleProxy(request());
+      expect(concurrentRetry.status).toBe(409);
+      expect(((await concurrentRetry.json()) as { error: string }).error).toContain(
+        "already processing",
+      );
+      expect(fetchCalls).toBe(1);
+
+      rejectCompletion(new Error("Bearer concurrent-completion-secret-must-not-be-logged"));
+      const first = await firstPromise;
+      expect(first.status).toBe(200);
+      expect(await first.text()).toBe(JSON.stringify({ ok: true }));
+      expect(fetchCalls).toBe(1);
+      expect(JSON.stringify(diagnosticCalls)).not.toContain(
+        "concurrent-completion-secret-must-not-be-logged",
+      );
+    } finally {
+      console.error = originalConsoleError;
+      // Avoid an unhandled rejection if an assertion above fails before the
+      // request awaiting the completion barrier can observe it.
+      rejectCompletion(new Error("test cleanup"));
+      await completionBarrier.catch(() => undefined);
+    }
+  });
+
+  test("preserves a sanitized upstream failure when replay completion persistence fails", async () => {
+    spendResult.configured = false;
+    const {
+      __clearProxyReplayClaimsForTests,
+      __setCheckProxySpendLimitForTests,
+      createProxyHandler,
+      handleProxy,
+    } = await loadProxy();
+    __clearProxyReplayClaimsForTests();
+    __setCheckProxySpendLimitForTests(async () => spendResult);
+    globalThis.fetch = (async () => {
+      fetchCalls++;
+      throw new Error("Bearer upstream-secret-must-not-be-logged");
+    }) as typeof fetch;
+    const diagnosticCalls: unknown[][] = [];
+    const originalConsoleError = console.error;
+    console.error = (...args: unknown[]) => diagnosticCalls.push(args);
+    let completionAttempts = 0;
+    const request = () =>
+      makeContext("/proxy/example.com/v1/echo", {
+        method: "POST",
+        headers: { "Idempotency-Key": "completion-failure-upstream" },
+        body: JSON.stringify({ op: "create" }),
+      });
+
+    try {
+      const handler = createProxyHandler({
+        completeReplayClaim: async () => {
+          completionAttempts++;
+          throw new Error("Bearer completion-secret-must-not-be-logged");
+        },
+      });
+      const first = await handler(request());
+      const retry = await handleProxy(request());
+
+      expect(first.status).toBe(502);
+      expect(await first.json()).toEqual({ ok: false, error: "Upstream request failed" });
+      expect(retry.status).toBe(409);
+      expect(((await retry.json()) as { error: string }).error).toContain("already processing");
+      expect(fetchCalls).toBe(1);
+      expect(completionAttempts).toBe(1);
+      const diagnostics = JSON.stringify(diagnosticCalls);
+      expect(diagnostics).toContain("Failed to persist post-forward idempotency completion");
+      expect(diagnostics).not.toContain("upstream-secret-must-not-be-logged");
+      expect(diagnostics).not.toContain("completion-secret-must-not-be-logged");
+    } finally {
+      console.error = originalConsoleError;
+    }
+  });
+
   test("blocks injected credentials reflected in upstream response headers", async () => {
     spendResult.configured = false;
     globalThis.fetch = (async (url: string | URL | Request) => {
