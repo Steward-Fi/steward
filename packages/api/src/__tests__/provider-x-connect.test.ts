@@ -899,6 +899,24 @@ describe("connect exchange recovery", () => {
       );
     expect(staleLifecycle.providerAccountId).toBeNull();
 
+    const [newerLifecycle] = await getDb()
+      .select({ createdAt: providerXCredentialLifecycles.createdAt })
+      .from(providerXCredentialLifecycles)
+      .where(
+        and(
+          eq(providerXCredentialLifecycles.providerAccountId, newerAccountId),
+          eq(providerXCredentialLifecycles.kind, "connect_exchange"),
+          eq(providerXCredentialLifecycles.state, "adopted"),
+        ),
+      );
+    if (!newerLifecycle) throw new Error("newer adopted connect lifecycle missing");
+    // A timestamp-only lineage check cannot distinguish this valid ordering.
+    // The audit sequence must remain authoritative even when timestamps tie.
+    await getDb()
+      .update(providerXCredentialLifecycles)
+      .set({ createdAt: newerLifecycle.createdAt })
+      .where(eq(providerXCredentialLifecycles.id, staleLifecycle.id));
+
     const recovery = installFakeX({ revokeStatuses: [200] });
     const swept = await runXCredentialLifecycleSweep({
       vault,
