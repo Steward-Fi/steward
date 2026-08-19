@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
-import { agents, closeDb, getDb, tenants } from "@stwd/db";
+import { agents, closeDb, conditionSets, getDb, tenants } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
+import { and, eq, sql } from "drizzle-orm";
 import { Hono } from "hono";
 import type { AppVariables } from "../services/context";
 
@@ -229,6 +230,61 @@ describeConditionSets("condition sets", () => {
     expect(response.status).toBe(403);
   });
 
+  it("returns a generic 500 and rolls back creation when the required audit fails", async () => {
+    const canary = "postgres://internal.example/condition-set-secret";
+    await getDb().execute(
+      sql.raw(`
+      CREATE OR REPLACE FUNCTION fail_condition_set_completion_audit()
+      RETURNS trigger AS $$
+      BEGIN
+        IF NEW.action = 'condition_set.create' THEN
+          RAISE EXCEPTION '${canary}';
+        END IF;
+        RETURN NEW;
+      END;
+      $$ LANGUAGE plpgsql
+    `),
+    );
+    await getDb().execute(
+      sql.raw(`
+      CREATE TRIGGER condition_set_completion_audit_failure
+      BEFORE INSERT ON audit_events
+      FOR EACH ROW EXECUTE FUNCTION fail_condition_set_completion_audit()
+    `),
+    );
+
+    try {
+      const response = await app.request("/condition-sets", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: "must roll back",
+          ownerId: "owner-key-rollback",
+        }),
+      });
+
+      expect(response.status).toBe(500);
+      const body = (await response.json()) as { ok: boolean; error: string };
+      expect(body).toEqual({ ok: false, error: "Internal server error" });
+      expect(JSON.stringify(body)).not.toContain(canary);
+
+      const surviving = await getDb()
+        .select({ id: conditionSets.id })
+        .from(conditionSets)
+        .where(
+          and(eq(conditionSets.tenantId, TENANT_ID), eq(conditionSets.name, "must roll back")),
+        );
+      expect(surviving).toHaveLength(0);
+    } finally {
+      await getDb().execute(
+        sql.raw("DROP TRIGGER IF EXISTS condition_set_completion_audit_failure ON audit_events"),
+      );
+      await getDb().execute(
+        sql.raw("DROP FUNCTION IF EXISTS fail_condition_set_completion_audit()"),
+      );
+    }
+  });
+
   it("rejects policy templates that reference missing condition sets", async () => {
     const response = await app.request("/policies", {
       method: "POST",
@@ -241,7 +297,7 @@ describeConditionSets("condition sets", () => {
             type: "condition-set",
             enabled: true,
             config: {
-              conditionSetId: "00000000-0000-0000-0000-000000000000",
+              conditionSetId: "10000000-0000-4000-8000-000000000000",
               operator: "not_in_condition_set",
             },
           },
@@ -303,7 +359,7 @@ describeConditionSets("condition sets", () => {
             type: "condition-set",
             enabled: true,
             config: {
-              conditionSetId: "00000000-0000-0000-0000-000000000000",
+              conditionSetId: "10000000-0000-4000-8000-000000000000",
               operator: "not_in_condition_set",
             },
           },
