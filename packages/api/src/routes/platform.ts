@@ -729,6 +729,25 @@ platform.use("*", async (c, next) => {
 // after the platform key and route scope have been verified above.
 platform.use("*", async (c, next) => {
   const pathname = new URL(c.req.url).pathname.replace(/^\/platform(?=\/)/, "");
+  const agentRevocationMatch = pathname.match(/^\/agents\/([^/]+)\/revoke-tokens$/);
+  if (agentRevocationMatch) {
+    if (!hasPlatformScope(c.get("platformScopes"), "platform:agent-token:revoke")) return next();
+    const agentId = agentRevocationMatch[1] ?? "";
+    if (!isValidAgentId(agentId)) return next();
+    const result = await getDb().execute(
+      sql`SELECT * FROM steward_bootstrap.agent_tenant_subject(${agentId})`,
+    );
+    const [subject] = (
+      Array.isArray(result) ? result : ((result as { rows?: unknown[] }).rows ?? [])
+    ) as Array<{ tenant_id: string }> | [];
+    if (!subject?.tenant_id) return next();
+    return continueWithTenantDatabase(
+      subject.tenant_id,
+      "platform-agent-token-revocation",
+      "platform",
+      next,
+    );
+  }
   let tenantId = pathname.startsWith("/tenants/")
     ? c.req.param("tenantId") || c.req.param("id")
     : "";
@@ -737,6 +756,14 @@ platform.use("*", async (c, next) => {
     try {
       const body = (await c.req.raw.clone().json()) as { id?: unknown };
       tenantId = typeof body.id === "string" ? body.id : "";
+    } catch {
+      tenantId = "";
+    }
+  }
+  if (!tenantId && ["POST", "PUT", "PATCH"].includes(c.req.method)) {
+    try {
+      const body = (await c.req.raw.clone().json()) as { tenantId?: unknown };
+      tenantId = typeof body.tenantId === "string" ? body.tenantId.trim() : "";
     } catch {
       tenantId = "";
     }
@@ -2827,6 +2854,9 @@ platform.post("/users", async (c) => {
         ? body.externalId
         : undefined;
   const tenantId = typeof body.tenantId === "string" ? body.tenantId.trim() : undefined;
+  if (tenantId !== undefined && !isValidTenantId(tenantId)) {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid tenant id format" }, 400);
+  }
   if (walletExternalId !== undefined) {
     if (!tenantId)
       return c.json<ApiResponse>(
@@ -2878,7 +2908,7 @@ platform.post("/users", async (c) => {
       }
     }
     await writeAuditEvent({
-      tenantId: PLATFORM_AUDIT_TENANT_ID,
+      tenantId: tenantId ?? PLATFORM_AUDIT_TENANT_ID,
       actorType: "platform",
       action: "user.provision.existing",
       resourceType: "user",
@@ -2901,7 +2931,7 @@ platform.post("/users", async (c) => {
   }
 
   await writeAuditEvent({
-    tenantId: PLATFORM_AUDIT_TENANT_ID,
+    tenantId: tenantId ?? PLATFORM_AUDIT_TENANT_ID,
     actorType: "platform",
     action: "user.provision.create",
     resourceType: "user",
@@ -2941,7 +2971,7 @@ platform.post("/users", async (c) => {
     }
   }
 
-  dispatchWebhook(PLATFORM_AUDIT_TENANT_ID, newUser.id, "user.created", {
+  dispatchWebhook(tenantId ?? PLATFORM_AUDIT_TENANT_ID, newUser.id, "user.created", {
     userId: newUser.id,
     source: "platform.provision",
     hasEmail: true,
@@ -3862,7 +3892,7 @@ platform.post("/users/:userId/accounts", async (c) => {
   }
 
   await writeAuditEvent({
-    tenantId: PLATFORM_AUDIT_TENANT_ID,
+    tenantId: tenantId ?? PLATFORM_AUDIT_TENANT_ID,
     actorType: "platform",
     action: "user.account.link",
     resourceType: "user",
@@ -3874,7 +3904,7 @@ platform.post("/users/:userId/accounts", async (c) => {
     .insert(accounts)
     .values({ userId, provider, providerAccountId })
     .returning();
-  dispatchWebhook(PLATFORM_AUDIT_TENANT_ID, userId, "user.linked_account", {
+  dispatchWebhook(tenantId ?? PLATFORM_AUDIT_TENANT_ID, userId, "user.linked_account", {
     userId,
     provider,
   });

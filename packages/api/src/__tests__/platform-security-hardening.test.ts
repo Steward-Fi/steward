@@ -163,6 +163,8 @@ describe("platform security hardening", () => {
       'requirePlatformRouteScope(c, "platform:agent-token:revoke")',
       "revocationStore.revokeAgentTokens(agentId)",
     );
+    expect(platformSource).toContain("steward_bootstrap.agent_tenant_subject");
+    expect(platformSource).toContain('"platform-agent-token-revocation"');
     expectBefore('requirePlatformRouteScope(c, "platform:agent:create")', "vault().createAgent");
     expectBefore(
       'requirePlatformRouteScope(c, "platform:tenant-member:write")',

@@ -98,6 +98,19 @@ AS $$
   LIMIT 1
 $$;
 
+CREATE OR REPLACE FUNCTION "steward_bootstrap"."agent_tenant_subject"(p_agent_id text)
+RETURNS TABLE (tenant_id varchar(64))
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $$
+  SELECT a.tenant_id
+  FROM public.agents a
+  WHERE a.id = p_agent_id
+  LIMIT 1
+$$;
+
 CREATE OR REPLACE FUNCTION "steward_bootstrap"."app_client_subject"(
   p_tenant_id text,
   p_client_id text
