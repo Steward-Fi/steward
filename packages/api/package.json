@@ -46,7 +46,7 @@
     "@stwd/vault": "workspace:*",
     "@stwd/webhooks": "workspace:*",
     "bs58": "^6.0.0",
-    "drizzle-orm": "^0.44.5",
+    "drizzle-orm": "^0.45.2",
     "graphene-pk11": "^2.2.0",
     "hono": "^4.12.34",
     "jose": "^6.2.1",

@@ -20,7 +20,7 @@
     "@electric-sql/pglite": "^0.4.2",
     "@neondatabase/serverless": "^0.10.4",
     "@stwd/shared": "workspace:*",
-    "drizzle-orm": "^0.44.5",
+    "drizzle-orm": "^0.45.2",
     "postgres": "^3.4.7"
   },
   "devDependencies": {
