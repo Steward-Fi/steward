@@ -41,7 +41,8 @@ integration("Postgres email challenge publication", () => {
       { key: reservationKey, value: "published-new", ttlMs: 60_000, expected: "generation-new" },
     ] as const;
     expect(await backend.publish(current)).toBe(true);
+    expect(await backend.consume("challenge-new")).toBe("active-new");
     expect(await backend.publish(current)).toBe(true);
-    expect(await backend.get("challenge-new")).toBe("active-new");
+    expect(await backend.get("challenge-new")).toBeNull();
   });
 });

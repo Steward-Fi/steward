@@ -34,22 +34,33 @@ class CapturingBackend implements StoreBackend {
   failDeletes = false;
   replaceGuardBeforeTransition = false;
 
-  private isActivation(value: string | null): boolean {
+  private isActivation(key: string, value: string | null): boolean {
     if (value === null) return false;
-    return (
+    if (
       value.includes('"status":"active"') ||
-      (value.includes('"purpose":"email-login"') && value.includes('"status":"pending"')) ||
-      (value.includes('"email":') && !value.includes('"status":"delivery_pending"'))
-    );
+      (value.includes('"purpose":"email-login"') && value.includes('"status":"pending"'))
+    ) {
+      return true;
+    }
+    if (key.length !== 64) return false;
+    try {
+      const parsed = JSON.parse(value) as Record<string, unknown>;
+      return (
+        typeof parsed.email === "string" &&
+        Object.keys(parsed).every((field) => field === "email" || field === "tenantId")
+      );
+    } catch {
+      return false;
+    }
   }
 
   async set(key: string, value: string, ttlMs: number): Promise<void> {
     if (this.failWrites) throw new Error("durable store unavailable");
-    if (this.failActiveWrites && this.isActivation(value)) {
+    if (this.failActiveWrites && this.isActivation(key, value)) {
       throw new Error("durable activation unavailable");
     }
     this.values.set(key, { value, expiresAt: Date.now() + ttlMs });
-    if (this.failActiveWritesAfterCommit && this.isActivation(value)) {
+    if (this.failActiveWritesAfterCommit && this.isActivation(key, value)) {
       throw new Error("durable activation response lost");
     }
   }
@@ -105,9 +116,6 @@ class CapturingBackend implements StoreBackend {
 
   async publish(entries: readonly StorePublishEntry[]): Promise<boolean> {
     if (this.failWrites) throw new Error("durable store unavailable");
-    if (this.failActiveWrites && entries.some((entry) => this.isActivation(entry.value))) {
-      throw new Error("durable activation unavailable");
-    }
     const now = Date.now();
     if (this.replaceGuardBeforeTransition) {
       const guardedTarget = entries.find(
@@ -121,11 +129,19 @@ class CapturingBackend implements StoreBackend {
       }
       this.replaceGuardBeforeTransition = false;
     }
-    for (const entry of entries) {
-      if (entry.expected === undefined) continue;
+    const guarded = entries.filter((entry) => entry.expected !== undefined);
+    const states = guarded.map((entry) => {
       const existing = this.values.get(entry.key);
       const current = existing && now <= existing.expiresAt ? existing.value : null;
-      if (current !== entry.expected && current !== entry.value) return false;
+      return { expected: current === entry.expected, desired: current === entry.value };
+    });
+    if (states.length > 0 && states.every((state) => state.desired)) return true;
+    if (states.some((state) => !state.expected)) return false;
+    if (
+      this.failActiveWrites &&
+      entries.some((entry) => this.isActivation(entry.key, entry.value))
+    ) {
+      throw new Error("durable activation unavailable");
     }
     for (const entry of entries) {
       if (entry.value === null) this.values.delete(entry.key);
@@ -133,7 +149,7 @@ class CapturingBackend implements StoreBackend {
     }
     if (
       this.failActiveWritesAfterCommit &&
-      entries.some((entry) => this.isActivation(entry.value)) &&
+      entries.some((entry) => this.isActivation(entry.key, entry.value)) &&
       this.activeTransitionFailuresAfterCommit++ === 0
     ) {
       throw new Error("durable activation response lost");
@@ -195,7 +211,12 @@ async function legacyVerifyOtp(
   const stored = await backend.consume(key);
   if (!stored) return false;
   try {
-    return (JSON.parse(stored) as { email?: unknown }).email === email;
+    const parsed = JSON.parse(stored) as Record<string, unknown>;
+    return (
+      parsed.email === email &&
+      (parsed.tenantId === undefined || parsed.tenantId === tenantId) &&
+      Object.keys(parsed).every((key) => key === "email" || key === "tenantId")
+    );
   } catch {
     return stored === email;
   }
@@ -685,7 +706,7 @@ describe("fail-closed magic-link delivery", () => {
 
     accept();
     await sending;
-    expect(await auth.verifyOtp(email, code, tenantId)).toBe(true);
+    expect(await legacyVerifyOtp(backend, email, code, tenantId)).toBe(true);
     auth.destroy();
   });
 
@@ -776,7 +797,7 @@ describe("fail-closed magic-link delivery", () => {
     );
 
     await auth.sendMagicLink("ack-loss@example.com", { tenantId: "tenant-a" });
-    expect(backend.activeTransitionFailuresAfterCommit).toBe(2);
+    expect(backend.activeTransitionFailuresAfterCommit).toBe(1);
     backend.failReadsAfterActiveCommit = false;
     const token = text.match(/[?&]token=([a-f0-9]{64})/)?.[1] ?? "";
     expect(await auth.verifyMagicLink(token, "ack-loss@example.com", "tenant-a")).toMatchObject({
@@ -800,7 +821,7 @@ describe("fail-closed magic-link delivery", () => {
     );
 
     await auth.sendOtp("otp-ack-loss@example.com", { tenantId: "tenant-a" });
-    expect(backend.activeTransitionFailuresAfterCommit).toBe(2);
+    expect(backend.activeTransitionFailuresAfterCommit).toBe(1);
     const code = text.match(/\b(\d{6})\b/)?.[1] ?? "";
     expect(await auth.verifyOtp("otp-ack-loss@example.com", code, "tenant-a")).toBe(true);
     auth.destroy();

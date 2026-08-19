@@ -867,8 +867,7 @@ export class EmailAuth {
         ...(priorStoreKey ? [{ key: priorStoreKey, value: null, ttlMs: remainingTtlMs }] : []),
         {
           key: storeKey,
-          // Publication proves acceptance; keep the committed record directly
-          // readable by pods deployed before staged delivery existed.
+          // Deployed pre-staging readers accept only the raw two-field payload.
           value: JSON.stringify(payload),
           ttlMs: remainingTtlMs,
         },

@@ -24,8 +24,9 @@ export interface StorePublishEntry {
   ttlMs: number;
   /**
    * Optional compare-and-publish guard. Null means the key must be absent or
-   * expired. An already-published desired value also satisfies the guard so a
-   * caller can safely retry after losing the acknowledgement.
+   * expired. If every guard already contains its desired value, publication
+   * succeeds as a no-op so a lost-ack retry cannot recreate consumed entries.
+   * Otherwise every guard must still contain its expected value.
    */
   expected?: string | null;
 }
@@ -198,11 +199,13 @@ export class MemoryBackend implements StoreBackend {
       if (!current || now > current.expiresAt) return null;
       return current.value;
     };
-    for (const entry of entries) {
-      if (entry.expected === undefined) continue;
+    const guarded = entries.filter((entry) => entry.expected !== undefined);
+    const states = guarded.map((entry) => {
       const current = currentValue(entry.key);
-      if (current !== entry.expected && current !== entry.value) return false;
-    }
+      return { expected: current === entry.expected, desired: current === entry.value };
+    });
+    if (states.length > 0 && states.every((state) => state.desired)) return true;
+    if (states.some((state) => !state.expected)) return false;
     for (const entry of entries) {
       if (entry.value === null) this.store.delete(entry.key);
       else this.store.set(entry.key, { value: entry.value, expiresAt: now + entry.ttlMs });
@@ -329,7 +332,7 @@ export class RedisBackend implements StoreBackend {
       entry.expected ?? "",
     ]);
     const result = await this.client.eval(
-      "for i=1,#KEYS do local j=(i-1)*5; local v=redis.call('GET',KEYS[i]); local kind=ARGV[j+4]; if kind~='0' then local expected=(kind=='1' and not v) or (kind=='2' and v==ARGV[j+5]); local desired=(ARGV[j+1]=='D' and not v) or (ARGV[j+1]=='S' and v==ARGV[j+2]); if not expected and not desired then return 0 end end end; for i=1,#KEYS do local j=(i-1)*5; if ARGV[j+1]=='D' then redis.call('DEL',KEYS[i]) else redis.call('SET',KEYS[i],ARGV[j+2],'PX',ARGV[j+3]) end end; return 1",
+      "local guarded=0; local all_expected=true; local all_desired=true; for i=1,#KEYS do local j=(i-1)*5; local v=redis.call('GET',KEYS[i]); local kind=ARGV[j+4]; if kind~='0' then guarded=guarded+1; local expected=(kind=='1' and not v) or (kind=='2' and v==ARGV[j+5]); local desired=(ARGV[j+1]=='D' and not v) or (ARGV[j+1]=='S' and v==ARGV[j+2]); if not expected then all_expected=false end; if not desired then all_desired=false end end end; if guarded>0 and all_desired then return 1 end; if not all_expected then return 0 end; for i=1,#KEYS do local j=(i-1)*5; if ARGV[j+1]=='D' then redis.call('DEL',KEYS[i]) else redis.call('SET',KEYS[i],ARGV[j+2],'PX',ARGV[j+3]) end end; return 1",
       keys.length,
       ...keys,
       ...args,
@@ -508,6 +511,8 @@ export class PostgresBackend implements StoreBackend {
           )
         `;
       }
+      let allExpected = true;
+      let allDesired = guarded.length > 0;
       for (const entry of guarded) {
         const rows = await transaction<Array<{ value: string }>>`
           SELECT value
@@ -518,10 +523,13 @@ export class PostgresBackend implements StoreBackend {
            LIMIT 1
         `;
         const current = rows[0]?.value ?? null;
-        if (current !== entry.expected && current !== entry.value) {
-          published = false;
-          return;
-        }
+        if (current !== entry.expected) allExpected = false;
+        if (current !== entry.value) allDesired = false;
+      }
+      if (allDesired) return;
+      if (!allExpected) {
+        published = false;
+        return;
       }
       for (const entry of prepared) {
         if (entry.value === null) {
