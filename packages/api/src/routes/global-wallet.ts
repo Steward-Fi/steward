@@ -8,6 +8,7 @@ import {
   userWalletAppConsents,
 } from "@stwd/db";
 import type { ApiResponse, SignTypedDataRequest } from "@stwd/shared";
+import { runtimeEnvironmentFlag, runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 import { Vault } from "@stwd/vault";
 import { and, eq, sql } from "drizzle-orm";
 import type { Context, Next } from "hono";
@@ -61,7 +62,7 @@ const SIGNING_RPC_METHODS = new Set([
 ]);
 const MFA_MAX_AGE_MS = 10 * 60_000;
 function envFlag(name: string): boolean {
-  return process.env[name] === "true";
+  return runtimeEnvironmentFlag(name);
 }
 const ACTION_CONFIRMATION_TTL_MS = 5 * 60_000;
 const MAX_TRANSACTION_DATA_BYTES = 16_384;
@@ -373,7 +374,7 @@ function parseRpcQuantity(value: unknown): bigint | string {
 
 function parseRpcChainId(value: unknown): number | string {
   if (value === undefined || value === null || value === "") {
-    return Number(process.env.CHAIN_ID || "84532");
+    return Number(runtimeEnvironmentValue("CHAIN_ID") || "84532");
   }
   const parsed = parseRpcQuantity(value);
   if (typeof parsed === "string")
@@ -996,7 +997,10 @@ globalWalletRoutes.post("/rpc/confirm", async (c) => {
     walletIndex,
   });
   const confirmation = await getDb().transaction(async (tx) => {
-    if (process.env.STEWARD_DB_MODE !== "pglite" && process.env.STEWARD_PGLITE_MEMORY !== "true") {
+    if (
+      runtimeEnvironmentValue("STEWARD_DB_MODE") !== "pglite" &&
+      runtimeEnvironmentValue("STEWARD_PGLITE_MEMORY") !== "true"
+    ) {
       await tx.execute(
         sql`select pg_advisory_xact_lock(hashtext(${`global-wallet-confirmation:${consent.id}:${method}:${requestHash}`}))`,
       );
@@ -1632,7 +1636,7 @@ globalWalletRoutes.post("/rpc", async (c) => {
   const result =
     method === "eth_accounts"
       ? [wallet.walletAddress]
-      : `0x${Number(process.env.CHAIN_ID || "84532").toString(16)}`;
+      : `0x${Number(runtimeEnvironmentValue("CHAIN_ID") || "84532").toString(16)}`;
   return c.json<ApiResponse>({
     ok: true,
     data: { jsonrpc: body.jsonrpc ?? "2.0", id: body.id ?? null, result },

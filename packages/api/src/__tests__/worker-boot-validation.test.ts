@@ -7,8 +7,14 @@
 
 import { afterEach, describe, expect, it } from "bun:test";
 import { signAgentToken } from "@stwd/auth/jwt";
+import { runtimeEnvironmentFlag, withRuntimeEnvironment } from "@stwd/shared/runtime-env";
 import { decodeJwt, jwtVerify } from "jose";
-import worker, { hydrateProcessEnv } from "../worker";
+import { configuredDefaultTenantId } from "../routes/auth";
+import { buildTenantSecurityChecklist } from "../routes/tenant-config";
+import { getRateLimitMaxRequests, getRateLimitWindowMs } from "../services/context";
+import { resolveRequestSecurityPosture } from "../services/request-security-config";
+import { validateWebhookUrl } from "../services/webhook-url";
+import worker from "../worker";
 
 /**
  * Keys this file mutates: bindings hydrateProcessEnv copies onto the global
@@ -25,6 +31,13 @@ const MANAGED_KEYS = [
   "STEWARD_DB_MODE",
   "STEWARD_PGLITE_MEMORY",
   "AGENT_TOKEN_EXPIRY",
+  "STEWARD_ALLOW_INSECURE_WEBHOOK_URLS",
+  "STEWARD_ALLOW_GLOBAL_WALLET_SEND_TRANSACTION",
+  "STEWARD_DEFAULT_TENANT_ID",
+  "STEWARD_RATE_LIMIT_WINDOW_MS",
+  "STEWARD_RATE_LIMIT_MAX_REQUESTS",
+  "STEWARD_REQUIRE_REQUEST_EXPIRY",
+  "STEWARD_REQUIRE_AUTH_SIGNATURE",
 ] as const;
 
 describe("workers boot JWT env validation (SEC-134)", () => {
@@ -93,47 +106,49 @@ describe("workers boot JWT env validation (SEC-134)", () => {
 
   it("validates concurrent request bindings before either database selection", async () => {
     snapshotEnv();
-    const shortSecret = worker.fetch(
-      new Request("https://workers.test/short-secret"),
-      { NODE_ENV: "production", STEWARD_JWT_SECRET: "short", DATABASE_DRIVER: "bogus" },
-      {},
-    );
-    const malformedExpiry = worker.fetch(
-      new Request("https://workers.test/malformed-expiry"),
-      {
-        STEWARD_JWT_SECRET: "workers-boot-test-secret-32-chars-long!!",
-        AGENT_TOKEN_EXPIRY: "not-a-duration",
-        DATABASE_DRIVER: "bogus",
-      },
-      {},
-    );
+    const shortSecret = expect(
+      worker.fetch(
+        new Request("https://workers.test/short-secret"),
+        { NODE_ENV: "production", STEWARD_JWT_SECRET: "short", DATABASE_DRIVER: "bogus" },
+        {},
+      ),
+    ).rejects.toThrow("at least 32 characters in production");
+    const malformedExpiry = expect(
+      worker.fetch(
+        new Request("https://workers.test/malformed-expiry"),
+        {
+          STEWARD_JWT_SECRET: "workers-boot-test-secret-32-chars-long!!",
+          AGENT_TOKEN_EXPIRY: "not-a-duration",
+          DATABASE_DRIVER: "bogus",
+        },
+        {},
+      ),
+    ).rejects.toThrow('AGENT_TOKEN_EXPIRY "not-a-duration" is not a valid positive duration');
 
-    await expect(shortSecret).rejects.toThrow("at least 32 characters in production");
-    await expect(malformedExpiry).rejects.toThrow(
-      'AGENT_TOKEN_EXPIRY "not-a-duration" is not a valid positive duration',
-    );
+    await Promise.all([shortSecret, malformedExpiry]);
   });
 
   it("uses the current Worker expiry binding when minting after module initialization", async () => {
     snapshotEnv();
     const firstSecret = "workers-first-rotated-secret-at-least-32-chars";
     const rotatedSecret = "workers-second-rotated-secret-at-least-32-chars";
-    hydrateProcessEnv({
-      STEWARD_JWT_SECRET: firstSecret,
-      AGENT_TOKEN_EXPIRY: "1h",
-      DATABASE_URL: "unused",
-    });
-    const firstToken = await signAgentToken({ agentId: "worker-agent", tenantId: "worker-tenant" });
+    const firstToken = await withRuntimeEnvironment(
+      {
+        STEWARD_JWT_SECRET: firstSecret,
+        AGENT_TOKEN_EXPIRY: "1h",
+        DATABASE_URL: "unused",
+      },
+      () => signAgentToken({ agentId: "worker-agent", tenantId: "worker-tenant" }),
+    );
     const first = decodeJwt(firstToken);
-    hydrateProcessEnv({
-      STEWARD_JWT_SECRET: rotatedSecret,
-      AGENT_TOKEN_EXPIRY: "5m",
-      DATABASE_URL: "unused",
-    });
-    const rotatedToken = await signAgentToken({
-      agentId: "worker-agent",
-      tenantId: "worker-tenant",
-    });
+    const rotatedToken = await withRuntimeEnvironment(
+      {
+        STEWARD_JWT_SECRET: rotatedSecret,
+        AGENT_TOKEN_EXPIRY: "5m",
+        DATABASE_URL: "unused",
+      },
+      () => signAgentToken({ agentId: "worker-agent", tenantId: "worker-tenant" }),
+    );
     const rotated = decodeJwt(rotatedToken);
 
     expect((first.exp ?? 0) - (first.iat ?? 0)).toBe(3600);
@@ -145,6 +160,130 @@ describe("workers boot JWT env validation (SEC-134)", () => {
       jwtVerify(rotatedToken, new TextEncoder().encode(rotatedSecret)),
     ).resolves.toBeDefined();
     await expect(jwtVerify(rotatedToken, new TextEncoder().encode(firstSecret))).rejects.toThrow();
+  });
+
+  it("keeps hostile concurrent post-await security bindings request-local", async () => {
+    snapshotEnv();
+    process.env.STEWARD_ALLOW_INSECURE_WEBHOOK_URLS = "true";
+    process.env.STEWARD_ALLOW_GLOBAL_WALLET_SEND_TRANSACTION = "true";
+    process.env.STEWARD_REQUIRE_REQUEST_EXPIRY = "true";
+    process.env.STEWARD_REQUIRE_AUTH_SIGNATURE = "true";
+
+    const firstSecret = "workers-concurrent-first-secret-at-least-32-chars";
+    const secondSecret = "workers-concurrent-second-secret-at-least-32-chars";
+    let markSecondReady!: () => void;
+    let releaseSecond!: () => void;
+    const secondReady = new Promise<void>((resolve) => {
+      markSecondReady = resolve;
+    });
+    const secondCanRead = new Promise<void>((resolve) => {
+      releaseSecond = resolve;
+    });
+
+    async function readRequestSettings() {
+      const token = await signAgentToken({ agentId: "worker-agent", tenantId: "worker-tenant" });
+      const checklist = buildTenantSecurityChecklist("worker-tenant", undefined, [], [], []);
+      return {
+        token,
+        tenantId: configuredDefaultTenantId(),
+        rateWindowMs: getRateLimitWindowMs(),
+        rateMax: getRateLimitMaxRequests(),
+        insecureWebhookError: validateWebhookUrl("http://public.example.test/hook"),
+        walletSendEnabled: runtimeEnvironmentFlag("STEWARD_ALLOW_GLOBAL_WALLET_SEND_TRANSACTION"),
+        posture: resolveRequestSecurityPosture(),
+        checklist: Object.fromEntries(
+          checklist.items
+            .filter((item) => ["request-expiry", "authorization-signatures"].includes(item.id))
+            .map((item) => [item.id, { status: item.status, description: item.description }]),
+        ),
+      };
+    }
+
+    const first = withRuntimeEnvironment(
+      {
+        STEWARD_JWT_SECRET: firstSecret,
+        AGENT_TOKEN_EXPIRY: "1h",
+        STEWARD_DEFAULT_TENANT_ID: "tenant-first",
+        STEWARD_RATE_LIMIT_WINDOW_MS: "1000",
+        STEWARD_RATE_LIMIT_MAX_REQUESTS: "7",
+        STEWARD_ALLOW_INSECURE_WEBHOOK_URLS: "true",
+        STEWARD_ALLOW_GLOBAL_WALLET_SEND_TRANSACTION: "true",
+        STEWARD_REQUIRE_REQUEST_EXPIRY: "true",
+        STEWARD_REQUIRE_AUTH_SIGNATURE: "true",
+        STEWARD_REQUEST_SIGNING_SECRET: "request-signing-secret",
+      },
+      async () => {
+        await secondReady;
+        const settings = await readRequestSettings();
+        releaseSecond();
+        return settings;
+      },
+    );
+    const second = withRuntimeEnvironment(
+      {
+        STEWARD_JWT_SECRET: secondSecret,
+        AGENT_TOKEN_EXPIRY: "5m",
+        STEWARD_DEFAULT_TENANT_ID: "tenant-second",
+        STEWARD_RATE_LIMIT_WINDOW_MS: "2000",
+        STEWARD_RATE_LIMIT_MAX_REQUESTS: "9",
+      },
+      async () => {
+        markSecondReady();
+        await secondCanRead;
+        return readRequestSettings();
+      },
+    );
+
+    const [firstSettings, secondSettings] = await Promise.all([first, second]);
+    expect(firstSettings).toMatchObject({
+      tenantId: "tenant-first",
+      rateWindowMs: 1000,
+      rateMax: 7,
+      insecureWebhookError: null,
+      walletSendEnabled: true,
+      posture: { requestExpiryRequired: true, authorizationSignatureRequired: true },
+      checklist: {
+        "request-expiry": {
+          status: "pass",
+          description:
+            "Sensitive mutating requests require an expiry or timestamp freshness header.",
+        },
+        "authorization-signatures": {
+          status: "pass",
+          description:
+            "Sensitive mutating requests require X-Steward-Signature and have an env, app-client, or tenant signing key available.",
+        },
+      },
+    });
+    expect(secondSettings).toMatchObject({
+      tenantId: "tenant-second",
+      rateWindowMs: 2000,
+      rateMax: 9,
+      insecureWebhookError: "url must use https",
+      walletSendEnabled: false,
+      posture: { requestExpiryRequired: false, authorizationSignatureRequired: false },
+      checklist: {
+        "request-expiry": {
+          status: "warning",
+          description:
+            "Sensitive mutating requests validate freshness headers when present but do not require them.",
+        },
+        "authorization-signatures": {
+          status: "fail",
+          description:
+            "Sensitive mutating requests need enforced HMAC signatures and configured signing secrets.",
+        },
+      },
+    });
+    await expect(
+      jwtVerify(firstSettings.token, new TextEncoder().encode(firstSecret)),
+    ).resolves.toBeDefined();
+    await expect(
+      jwtVerify(secondSettings.token, new TextEncoder().encode(secondSecret)),
+    ).resolves.toBeDefined();
+    await expect(
+      jwtVerify(firstSettings.token, new TextEncoder().encode(secondSecret)),
+    ).rejects.toThrow();
   });
 
   it("validates scheduled security bindings before opening any database handle", async () => {

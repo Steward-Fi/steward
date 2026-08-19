@@ -59,10 +59,11 @@ export async function runUpstreamCredentialLeaseSweep() {
 }
 
 function configuredInterval(): number {
-  if (process.env.STEWARD_UPSTREAM_LEASE_SWEEP_INTERVAL_MS === undefined) {
+  const configuredInterval = runtimeEnvironmentValue("STEWARD_UPSTREAM_LEASE_SWEEP_INTERVAL_MS");
+  if (configuredInterval === undefined) {
     return DEFAULT_INTERVAL_MS;
   }
-  const parsed = Number(process.env.STEWARD_UPSTREAM_LEASE_SWEEP_INTERVAL_MS);
+  const parsed = Number(configuredInterval);
   if (!Number.isSafeInteger(parsed) || parsed < 1_000 || parsed > MAX_INTERVAL_MS) {
     throw new Error(
       `STEWARD_UPSTREAM_LEASE_SWEEP_INTERVAL_MS must be between 1000 and ${MAX_INTERVAL_MS}`,
@@ -87,7 +88,7 @@ export async function startUpstreamCredentialLeaseScheduler(options?: {
     remaining?: boolean;
   }>;
 }): Promise<() => Promise<void>> {
-  if (process.env.STEWARD_UPSTREAM_LEASE_SWEEPER === "false") {
+  if (runtimeEnvironmentValue("STEWARD_UPSTREAM_LEASE_SWEEPER") === "false") {
     Object.assign(schedulerHealth, {
       enabled: false,
       inFlight: false,
@@ -160,3 +161,5 @@ export async function startUpstreamCredentialLeaseScheduler(options?: {
     schedulerHealth.inFlight = false;
   };
 }
+
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";

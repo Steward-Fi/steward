@@ -1,5 +1,7 @@
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 import { createMiddleware } from "hono/factory";
 import type { ApiResponse, AppVariables } from "../services/context";
+import { resolveRequestSecurityPosture } from "../services/request-security-config";
 import { isSensitivePath } from "./sensitive-paths";
 
 const DEFAULT_MAX_CLOCK_SKEW_MS = 5 * 60 * 1000;
@@ -45,21 +47,23 @@ export function requestExpiry(options?: RequestExpiryOptions) {
     const timestampHeader = c.req.header("X-Steward-Request-Timestamp");
 
     if (!expiresAtHeader && !timestampHeader) {
-      const required =
-        options?.required ??
-        (process.env.STEWARD_REQUIRE_REQUEST_EXPIRY === "true" ||
-          (process.env.NODE_ENV === "production" &&
-            process.env.STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS !== "true"));
+      const required = options?.required ?? resolveRequestSecurityPosture().requestExpiryRequired;
       if (!required) return next();
       return c.json<ApiResponse>({ ok: false, error: "Request expiry header required" }, 400);
     }
 
     const maxClockSkewMs =
       options?.maxClockSkewMs ??
-      parsePositiveInt(process.env.STEWARD_REQUEST_EXPIRY_MAX_SKEW_MS, DEFAULT_MAX_CLOCK_SKEW_MS);
+      parsePositiveInt(
+        runtimeEnvironmentValue("STEWARD_REQUEST_EXPIRY_MAX_SKEW_MS"),
+        DEFAULT_MAX_CLOCK_SKEW_MS,
+      );
     const timestampTtlMs =
       options?.timestampTtlMs ??
-      parsePositiveInt(process.env.STEWARD_REQUEST_TIMESTAMP_TTL_MS, DEFAULT_TIMESTAMP_TTL_MS);
+      parsePositiveInt(
+        runtimeEnvironmentValue("STEWARD_REQUEST_TIMESTAMP_TTL_MS"),
+        DEFAULT_TIMESTAMP_TTL_MS,
+      );
     const currentTime = now();
     const expiresAt = parseHttpTime(expiresAtHeader);
     if (expiresAtHeader && expiresAt === null) {

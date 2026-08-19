@@ -54,6 +54,7 @@ import {
   isValidOAuthOpaqueToken,
   MAX_OAUTH_TOKEN_LENGTH,
 } from "@stwd/shared";
+import { currentRuntimeEnvironment, type RuntimeEnvironment } from "@stwd/shared/runtime-env";
 import type { SecretVault } from "@stwd/vault";
 
 type DbBase = ReturnType<typeof getDb>;
@@ -287,7 +288,9 @@ export interface XConnectConfig {
  * user-auth `TWITTER_CLIENT_ID` / `TWITTER_CLIENT_SECRET` (login plane). See
  * .env.example for the separation rationale.
  */
-export function resolveXConnectConfig(env: NodeJS.ProcessEnv = process.env): XConnectConfig {
+export function resolveXConnectConfig(
+  env: RuntimeEnvironment = currentRuntimeEnvironment(),
+): XConnectConfig {
   const clientId = env.X_CLIENT_ID?.trim();
   const clientSecret = env.X_CLIENT_SECRET?.trim();
   if (!clientId || !clientSecret) {

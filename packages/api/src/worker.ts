@@ -40,8 +40,7 @@
  */
 
 // Import the dependency-light JWT module directly. Importing the auth barrel
-// here would evaluate Worker-sensitive auth modules before bindings are
-// hydrated into process.env.
+// here would evaluate Worker-sensitive auth modules before cold initialization.
 import { validateJwtSecretEnv } from "@stwd/auth/jwt";
 import {
   createDbForRequest,
@@ -50,6 +49,7 @@ import {
   type NeonTransactionDbHandle,
   withRequestDatabase,
 } from "@stwd/db";
+import { runtimeEnvironmentValue, withRuntimeEnvironment } from "@stwd/shared/runtime-env";
 import { initRedis } from "./middleware/redis";
 
 export interface Env {
@@ -200,76 +200,81 @@ export async function runWorkerUpstreamCredentialLeaseSweep(
     sweep?: () => Promise<WorkerLeaseSweepResult>;
   },
 ): Promise<WorkerLeaseSweepResult | null> {
-  hydrateProcessEnv(env);
-  const capabilitiesEnabled =
-    options?.capabilitiesEnabled ??
-    (await import("./plugin-config")).resolveEnabledPlugins().has("capabilities");
-  if (!capabilitiesEnabled || process.env.STEWARD_UPSTREAM_LEASE_SWEEPER === "false") return null;
-  const sweep =
-    options?.sweep ??
-    (await import("./services/upstream-credential-lease-scheduler"))
-      .runUpstreamCredentialLeaseSweep;
-  return sweep();
+  return withRuntimeEnvironment({ ...env, STEWARD_RUNTIME: "workers" }, async () => {
+    const capabilitiesEnabled =
+      options?.capabilitiesEnabled ??
+      (await import("./plugin-config"))
+        .resolveEnabledPlugins({
+          STEWARD_PLUGINS: runtimeEnvironmentValue("STEWARD_PLUGINS"),
+          STEWARD_ENABLE_TRADING: runtimeEnvironmentValue("STEWARD_ENABLE_TRADING"),
+        })
+        .has("capabilities");
+    if (
+      !capabilitiesEnabled ||
+      runtimeEnvironmentValue("STEWARD_UPSTREAM_LEASE_SWEEPER") === "false"
+    )
+      return null;
+    const sweep =
+      options?.sweep ??
+      (await import("./services/upstream-credential-lease-scheduler"))
+        .runUpstreamCredentialLeaseSweep;
+    return sweep();
+  });
 }
 
 export async function runWorkerGoogleCredentialLifecycleSweep(
   env: Env,
   options?: { sweep?: () => Promise<unknown> },
 ): Promise<unknown | null> {
-  hydrateProcessEnv(env);
-  if (
-    process.env.STEWARD_GOOGLE_LIFECYCLE_SWEEPER === "false" ||
-    !process.env.GOOGLE_PROVIDER_CLIENT_ID ||
-    !process.env.GOOGLE_PROVIDER_CLIENT_SECRET
-  ) {
-    return null;
-  }
-  const sweep =
-    options?.sweep ??
-    (await import("./services/provider-google-lifecycle-scheduler"))
-      .runGoogleCredentialLifecycleRecoverySweep;
-  return sweep();
+  return withRuntimeEnvironment({ ...env, STEWARD_RUNTIME: "workers" }, async () => {
+    if (
+      runtimeEnvironmentValue("STEWARD_GOOGLE_LIFECYCLE_SWEEPER") === "false" ||
+      !runtimeEnvironmentValue("GOOGLE_PROVIDER_CLIENT_ID") ||
+      !runtimeEnvironmentValue("GOOGLE_PROVIDER_CLIENT_SECRET")
+    ) {
+      return null;
+    }
+    const sweep =
+      options?.sweep ??
+      (await import("./services/provider-google-lifecycle-scheduler"))
+        .runGoogleCredentialLifecycleRecoverySweep;
+    return sweep();
+  });
 }
 
 export async function runWorkerXCredentialLifecycleSweep(
   env: Env,
   options?: { sweep?: () => Promise<unknown> },
 ): Promise<unknown | null> {
-  hydrateProcessEnv(env);
-  if (
-    process.env.STEWARD_X_LIFECYCLE_SWEEPER === "false" ||
-    !process.env.X_CLIENT_ID ||
-    !process.env.X_CLIENT_SECRET ||
-    !process.env.STEWARD_MASTER_PASSWORD
-  ) {
-    return null;
-  }
-  const sweep =
-    options?.sweep ??
-    (await import("./services/provider-x-lifecycle-scheduler"))
-      .runXCredentialLifecycleRecoverySweep;
-  return sweep();
+  return withRuntimeEnvironment({ ...env, STEWARD_RUNTIME: "workers" }, async () => {
+    if (
+      runtimeEnvironmentValue("STEWARD_X_LIFECYCLE_SWEEPER") === "false" ||
+      !runtimeEnvironmentValue("X_CLIENT_ID") ||
+      !runtimeEnvironmentValue("X_CLIENT_SECRET") ||
+      !runtimeEnvironmentValue("STEWARD_MASTER_PASSWORD")
+    ) {
+      return null;
+    }
+    const sweep =
+      options?.sweep ??
+      (await import("./services/provider-x-lifecycle-scheduler"))
+        .runXCredentialLifecycleRecoverySweep;
+    return sweep();
+  });
 }
 
 /**
- * Pull Worker `env` bindings into `globalThis.process.env` so any code that
- * reads `process.env.X` at request time (e.g. JWT secret, RPC URL) can find it.
+ * Pull the first Worker's bindings into `globalThis.process.env` for legacy
+ * modules that capture process settings during cold initialization.
  *
  * Workers expose `nodejs_compat`'s `process.env` as an empty object on cold
  * boot — bindings come in via the `fetch` handler's `env` argument instead.
- * This runs on EVERY request (SEC-148): Workers may reuse isolates across
- * different deployments (and therefore different binding sets), and rotated
- * bindings/secrets must take effect without waiting for an isolate recycle.
- * Keys we hydrated that disappear from a later binding set are deleted again
- * so stale values cannot linger. Module-init-time readers still see only the
- * first binding set an isolate ever served (imports are cached per isolate) —
- * that is inherent to the module registry and unchanged by this.
+ * This compatibility bridge runs only during isolate initialization. Request-
+ * time security settings use an immutable async-local binding snapshot; they
+ * must never depend on this isolate-global object.
  *
- * Known trade-off (accepted, SEC-148): string bindings — including secrets —
- * are copied onto the global `process.env`, because the entire codebase reads
- * configuration through `process.env`. Moving every reader onto per-request
- * binding access is out of scope; per-request hydration at least keeps the
- * values current and bounded to the current binding set.
+ * Legacy module-init readers still require process.env until they are migrated.
+ * Re-running this bridge per request would create cross-request binding races.
  */
 const hydratedEnvKeys = new Set<string>();
 
@@ -298,9 +303,8 @@ let workerInit: Promise<void> | null = null;
 
 function validateWorkerSecurityEnv(): void {
   // Validate authentication-critical bindings before opening a database
-  // connection. This must stay synchronous with hydrateProcessEnv(): yielding
-  // between them would let another request replace the isolate-wide env before
-  // this request's bindings are checked.
+  // connection. The async-local environment belongs to this event, so another
+  // concurrent request cannot replace the bindings being checked.
   validateJwtSecretEnv();
 }
 
@@ -340,7 +344,7 @@ async function ensureWorkerInit(env: Env): Promise<void> {
           dbUrl.includes("sslmode=verify-ca") ||
           dbUrl.includes("sslmode=verify-full"),
         hstsEnabled: isHstsEnabled(),
-        insecureDbAllowed: process.env.STEWARD_ALLOW_INSECURE_DB === "true",
+        insecureDbAllowed: runtimeEnvironmentValue("STEWARD_ALLOW_INSECURE_DB") === "true",
         runtime: "workers",
       },
     });
@@ -381,39 +385,38 @@ async function getComposedApp() {
 
 export default {
   async fetch(request: Request, env: Env, ctx: unknown): Promise<Response> {
-    // SEC-148: refresh process.env from the CURRENT request's bindings on every
-    // request (not once per isolate) so rotated bindings take effect promptly;
-    // the once-per-isolate init below only bootstraps stores/imports.
-    hydrateProcessEnv(env);
-    validateWorkerSecurityEnv();
-    const executionCtx = ctx as { waitUntil?: (promise: Promise<unknown>) => void };
-    const waitUntil =
-      typeof executionCtx?.waitUntil === "function"
-        ? executionCtx.waitUntil.bind(executionCtx)
-        : undefined;
-    return withWorkerRequestDatabase(
-      env,
-      async () => {
-        await ensureWorkerInit(env);
-        const app = await getComposedApp();
-        return app.fetch(request, env, ctx as never);
-      },
-      waitUntil ? { waitUntil } : undefined,
-    );
+    return withRuntimeEnvironment({ ...env, STEWARD_RUNTIME: "workers" }, async () => {
+      validateWorkerSecurityEnv();
+      const executionCtx = ctx as { waitUntil?: (promise: Promise<unknown>) => void };
+      const waitUntil =
+        typeof executionCtx?.waitUntil === "function"
+          ? executionCtx.waitUntil.bind(executionCtx)
+          : undefined;
+      return withWorkerRequestDatabase(
+        env,
+        async () => {
+          await ensureWorkerInit(env);
+          const app = await getComposedApp();
+          return app.fetch(request, env, ctx as never);
+        },
+        waitUntil ? { waitUntil } : undefined,
+      );
+    });
   },
   async scheduled(
     _controller: unknown,
     env: Env,
     ctx: { waitUntil(promise: Promise<unknown>): void },
   ) {
-    hydrateProcessEnv(env);
-    validateWorkerSecurityEnv();
-    ctx.waitUntil(
-      Promise.all([
-        withWorkerRequestDatabase(env, () => runWorkerUpstreamCredentialLeaseSweep(env)),
-        withWorkerRequestDatabase(env, () => runWorkerGoogleCredentialLifecycleSweep(env)),
-        withWorkerRequestDatabase(env, () => runWorkerXCredentialLifecycleSweep(env)),
-      ]),
-    );
+    withRuntimeEnvironment({ ...env, STEWARD_RUNTIME: "workers" }, () => {
+      validateWorkerSecurityEnv();
+      ctx.waitUntil(
+        Promise.all([
+          withWorkerRequestDatabase(env, () => runWorkerUpstreamCredentialLeaseSweep(env)),
+          withWorkerRequestDatabase(env, () => runWorkerGoogleCredentialLifecycleSweep(env)),
+          withWorkerRequestDatabase(env, () => runWorkerXCredentialLifecycleSweep(env)),
+        ]),
+      );
+    });
   },
 };

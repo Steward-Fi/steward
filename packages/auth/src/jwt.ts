@@ -1,4 +1,5 @@
 import { randomUUID, scryptSync } from "node:crypto";
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 import {
   calculateJwkThumbprint,
   exportJWK,
@@ -52,7 +53,7 @@ export interface RefreshTokenPayload extends StewardJwtPayload {
 }
 
 export interface JwtSecretOptions {
-  /** Defaults to process.env.NODE_ENV. */
+  /** Defaults to the current runtime environment's NODE_ENV. */
   nodeEnv?: string;
   /** Defaults to console.warn. Pass null to silence warnings. */
   warn?: ((message: string) => void) | null;
@@ -100,10 +101,10 @@ function deriveEmbeddedJwtSecret(masterPassword: string): string {
 
 function isEmbeddedMode(): boolean {
   return (
-    process.env.STEWARD_EMBEDDED === "true" ||
-    process.env.STEWARD_EMBEDDED_MODE === "true" ||
-    process.env.STEWARD_DB_MODE === "pglite" ||
-    process.env.DATABASE_URL === "pglite://embedded"
+    runtimeEnvironmentValue("STEWARD_EMBEDDED") === "true" ||
+    runtimeEnvironmentValue("STEWARD_EMBEDDED_MODE") === "true" ||
+    runtimeEnvironmentValue("STEWARD_DB_MODE") === "pglite" ||
+    runtimeEnvironmentValue("DATABASE_URL") === "pglite://embedded"
   );
 }
 
@@ -118,13 +119,15 @@ function isEmbeddedMode(): boolean {
  * Exported so other packages (vault, webhooks, api key stores) can apply the
  * same consistent guard.
  */
-export function isDevSecretAllowed(nodeEnv: string | undefined = process.env.NODE_ENV): boolean {
+export function isDevSecretAllowed(
+  nodeEnv: string | undefined = runtimeEnvironmentValue("NODE_ENV"),
+): boolean {
   if (nodeEnv === "production") return false;
   // Canonical var is STEWARD_ALLOW_DEV_SECRETS; the singular
   // STEWARD_ALLOW_DEV_SECRET is accepted for backwards compatibility.
   return (
-    process.env.STEWARD_ALLOW_DEV_SECRETS === "true" ||
-    process.env.STEWARD_ALLOW_DEV_SECRET === "true"
+    runtimeEnvironmentValue("STEWARD_ALLOW_DEV_SECRETS") === "true" ||
+    runtimeEnvironmentValue("STEWARD_ALLOW_DEV_SECRET") === "true"
   );
 }
 
@@ -166,7 +169,7 @@ export function checkJwtSecretStrength(
   options: { nodeEnv?: string; warn?: ((message: string) => void) | null } = {},
 ): void {
   if (secret.length >= 32) return;
-  const nodeEnv = options.nodeEnv ?? process.env.NODE_ENV;
+  const nodeEnv = options.nodeEnv ?? runtimeEnvironmentValue("NODE_ENV");
   if (nodeEnv === "production") {
     throw new Error(
       `⛔ ${sourceName} must be at least 32 characters in production (canonical env var: STEWARD_JWT_SECRET).`,
@@ -190,10 +193,11 @@ export function checkJwtSecretStrength(
  * derivation input — never used verbatim (see deriveEmbeddedJwtSecret).
  */
 export function getJwtSecret(options: JwtSecretOptions = {}): string {
-  const nodeEnv = options.nodeEnv ?? process.env.NODE_ENV;
+  const nodeEnv = options.nodeEnv ?? runtimeEnvironmentValue("NODE_ENV");
   const warn = options.warn === undefined ? console.warn : options.warn;
-  const jwtSecret = process.env.STEWARD_JWT_SECRET;
-  const sessionSecret = process.env.STEWARD_SESSION_SECRET;
+  const jwtSecret = runtimeEnvironmentValue("STEWARD_JWT_SECRET");
+  const sessionSecret = runtimeEnvironmentValue("STEWARD_SESSION_SECRET");
+  const masterPassword = runtimeEnvironmentValue("STEWARD_MASTER_PASSWORD");
 
   let sourceName:
     | "STEWARD_JWT_SECRET"
@@ -209,9 +213,9 @@ export function getJwtSecret(options: JwtSecretOptions = {}): string {
     sourceName = "STEWARD_SESSION_SECRET";
     secret = sessionSecret;
     warnOnce("session", warn);
-  } else if (isEmbeddedMode() && process.env.STEWARD_MASTER_PASSWORD) {
+  } else if (isEmbeddedMode() && masterPassword) {
     sourceName = "STEWARD_MASTER_PASSWORD";
-    secret = deriveEmbeddedJwtSecret(process.env.STEWARD_MASTER_PASSWORD);
+    secret = deriveEmbeddedJwtSecret(masterPassword);
     warnOnce("master", warn);
   } else {
     sourceName = "dev-secret";
@@ -252,7 +256,7 @@ function normalizePrivateKeyInput(value: string): string {
 }
 
 function getIdentityJwtAlgorithm(): IdentityJwtAlgorithm {
-  const alg = process.env.STEWARD_IDENTITY_JWT_ALG?.trim() || "RS256";
+  const alg = runtimeEnvironmentValue("STEWARD_IDENTITY_JWT_ALG")?.trim() || "RS256";
   if (alg !== "RS256" && alg !== "ES256") {
     throw new Error("STEWARD_IDENTITY_JWT_ALG must be RS256 or ES256");
   }
@@ -260,7 +264,7 @@ function getIdentityJwtAlgorithm(): IdentityJwtAlgorithm {
 }
 
 function getIdentityJwtPrivateKeyInput(): string | undefined {
-  return process.env.STEWARD_IDENTITY_JWT_PRIVATE_KEY?.trim() || undefined;
+  return runtimeEnvironmentValue("STEWARD_IDENTITY_JWT_PRIVATE_KEY")?.trim() || undefined;
 }
 
 export function isAsymmetricIdentityJwtConfigured(): boolean {
@@ -269,15 +273,15 @@ export function isAsymmetricIdentityJwtConfigured(): boolean {
 
 export function getIdentityJwtIssuer(requestOrigin?: string): string {
   return (
-    process.env.STEWARD_IDENTITY_JWT_ISSUER?.trim().replace(/\/$/, "") ||
-    process.env.APP_URL?.trim().replace(/\/$/, "") ||
+    runtimeEnvironmentValue("STEWARD_IDENTITY_JWT_ISSUER")?.trim().replace(/\/$/, "") ||
+    runtimeEnvironmentValue("APP_URL")?.trim().replace(/\/$/, "") ||
     requestOrigin?.trim().replace(/\/$/, "") ||
     JWT_ISSUER
   );
 }
 
 export function getIdentityJwtAudience(): string {
-  return process.env.STEWARD_IDENTITY_JWT_AUDIENCE?.trim() || JWT_AUDIENCE;
+  return runtimeEnvironmentValue("STEWARD_IDENTITY_JWT_AUDIENCE")?.trim() || JWT_AUDIENCE;
 }
 
 async function importIdentityPrivateKey(alg: IdentityJwtAlgorithm) {
@@ -300,7 +304,7 @@ async function identityPublicJwk(alg: IdentityJwtAlgorithm): Promise<JWK | null>
   publicJwk.alg = alg;
   publicJwk.use = "sig";
   publicJwk.kid =
-    process.env.STEWARD_IDENTITY_JWT_KID?.trim() ||
+    runtimeEnvironmentValue("STEWARD_IDENTITY_JWT_KID")?.trim() ||
     publicJwk.kid ||
     (await calculateJwkThumbprint(publicJwk));
   delete publicJwk.d;
@@ -405,12 +409,11 @@ export function parseDurationSeconds(value: string): number | null {
  * value otherwise surfaces as a 500 at token-signing time, and an unbounded
  * value mints effectively-permanent agent tokens.
  *
- * The default reads process.env at CALL time (not the module-init constant):
- * on the Workers boot path, bindings are hydrated into process.env per request
- * (SEC-148) and module-init constants may have been captured before hydration.
+ * The default reads the current runtime environment at call time so a Worker
+ * request uses its immutable binding snapshot rather than module-init state.
  */
 export function validateAgentTokenExpiryEnv(
-  value: string = process.env.AGENT_TOKEN_EXPIRY || "30d",
+  value: string = runtimeEnvironmentValue("AGENT_TOKEN_EXPIRY") || "30d",
 ): void {
   const seconds = parseDurationSeconds(value);
   if (seconds === null) {
@@ -427,7 +430,7 @@ export function validateAgentTokenExpiryEnv(
 
 /** Resolve and validate the current agent-token TTL at call time. */
 export function getAgentTokenExpiry(
-  value: string = process.env.AGENT_TOKEN_EXPIRY || AGENT_TOKEN_EXPIRY,
+  value: string = runtimeEnvironmentValue("AGENT_TOKEN_EXPIRY") || AGENT_TOKEN_EXPIRY,
 ): string {
   const normalized = value.trim();
   validateAgentTokenExpiryEnv(normalized);

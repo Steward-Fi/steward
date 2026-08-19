@@ -1,8 +1,9 @@
 import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
+import { runtimeEnvironmentFlag } from "@stwd/shared/runtime-env";
 
 function allowInsecureWebhookUrls(): boolean {
-  return process.env.STEWARD_ALLOW_INSECURE_WEBHOOK_URLS === "true";
+  return runtimeEnvironmentFlag("STEWARD_ALLOW_INSECURE_WEBHOOK_URLS");
 }
 
 function isNonPublicIpv4(hostname: string): boolean {

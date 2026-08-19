@@ -48,6 +48,7 @@ import {
   withTenantAuditedTransaction,
 } from "@stwd/db";
 import { isValidOAuthBearerToken, isValidOAuthOpaqueToken } from "@stwd/shared";
+import { currentRuntimeEnvironment, type RuntimeEnvironment } from "@stwd/shared/runtime-env";
 import type { SecretVault } from "@stwd/vault";
 
 type DbBase = ReturnType<typeof getDb>;
@@ -81,7 +82,7 @@ export const GOOGLE_CONNECT_STATE_TTL_MS = 10 * 60 * 1000;
 
 export function assertGoogleConnectStoreIsSafe(
   source: "redis" | "postgres" | "memory",
-  env: NodeJS.ProcessEnv = process.env,
+  env: RuntimeEnvironment = currentRuntimeEnvironment(),
 ): void {
   const requiresDurableStore = env.NODE_ENV === "production" || env.STEWARD_RUNTIME === "workers";
   if (
@@ -329,7 +330,7 @@ export interface GoogleConnectConfig {
  * .env.example for the separation rationale.
  */
 export function resolveGoogleConnectConfig(
-  env: NodeJS.ProcessEnv = process.env,
+  env: RuntimeEnvironment = currentRuntimeEnvironment(),
 ): GoogleConnectConfig {
   const clientId = env.GOOGLE_PROVIDER_CLIENT_ID?.trim();
   const clientSecret = env.GOOGLE_PROVIDER_CLIENT_SECRET?.trim();

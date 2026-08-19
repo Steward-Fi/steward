@@ -38,6 +38,7 @@ import type {
   TenantTestAccountConfig,
   TenantTheme,
 } from "@stwd/shared";
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 import { type EncryptedKey, KeyStore } from "@stwd/vault";
 import { and, eq } from "drizzle-orm";
 import { Hono } from "hono";
@@ -64,6 +65,10 @@ import {
 import { normalizeGasSponsorshipConfig } from "../services/gas-sponsorship";
 import { normalizeOidcProviders } from "../services/oidc-provider-config";
 import { getPolicyRulesValidationError } from "../services/policy-validation";
+import {
+  configuredRequestSigningSecrets,
+  resolveRequestSecurityPosture,
+} from "../services/request-security-config";
 import { buildSamlServiceProviderUrls, normalizeSamlSsoUpdate } from "../services/saml-sso-config";
 import {
   createTenantTestAccountConfig,
@@ -587,15 +592,6 @@ function hasLocalhostUrl(value: string): boolean {
   }
 }
 
-function configuredRequestSigningSecrets(): string[] {
-  return [
-    ...(process.env.STEWARD_REQUEST_SIGNING_SECRETS ?? "").split(","),
-    process.env.STEWARD_REQUEST_SIGNING_SECRET ?? "",
-  ]
-    .map((secret) => secret.trim())
-    .filter(Boolean);
-}
-
 function checklistSummary(
   items: TenantSecurityChecklistItem[],
 ): TenantSecurityChecklist["summary"] {
@@ -608,7 +604,7 @@ function checklistSummary(
   );
 }
 
-function buildTenantSecurityChecklist(
+export function buildTenantSecurityChecklist(
   tenantId: string,
   row:
     | {
@@ -621,13 +617,13 @@ function buildTenantSecurityChecklist(
   appClientSecrets: TenantAppClientSecret[],
   requestSigningKeys: TenantRequestSigningKey[],
 ): TenantSecurityChecklist {
-  const production = process.env.NODE_ENV === "production";
+  const production = runtimeEnvironmentValue("NODE_ENV") === "production";
   // SEC-010: these mirror the ACTUAL enforcement posture of the mounted
   // guards (app.ts). Freshness/signature headers are always verified when
   // present; they are REQUIRED only via the explicit env opt-ins, so the
   // checklist must not claim production enforcement that does not exist.
-  const requestExpiryRequired = process.env.STEWARD_REQUIRE_REQUEST_EXPIRY === "true";
-  const authSignatureRequired = process.env.STEWARD_REQUIRE_AUTH_SIGNATURE === "true";
+  const { requestExpiryRequired, authorizationSignatureRequired: authSignatureRequired } =
+    resolveRequestSecurityPosture();
   const signingSecrets = configuredRequestSigningSecrets();
   const appClientSigningSecrets = appClientSecrets.filter(
     (secret) =>

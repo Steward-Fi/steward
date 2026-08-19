@@ -7,6 +7,7 @@ import {
   waitUntilRequestDatabaseTask,
 } from "@stwd/db";
 import { createPGLiteDb } from "@stwd/db/pglite";
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 import {
   hydrateProcessEnv,
   runWorkerGoogleCredentialLifecycleSweep,
@@ -527,6 +528,9 @@ test("Worker cron runs Google lifecycle recovery when provider credentials are c
     },
     {
       sweep: async () => {
+        await Promise.resolve();
+        expect(runtimeEnvironmentValue("GOOGLE_PROVIDER_CLIENT_ID")).toBe("provider-client");
+        expect(runtimeEnvironmentValue("STEWARD_MASTER_PASSWORD")).toBe("worker-master");
         calls += 1;
         return { processed: 2, adopted: 1, revoked: 1, attention: 0, remaining: false };
       },
@@ -547,6 +551,9 @@ test("Worker cron runs X lifecycle recovery when provider credentials are config
     },
     {
       sweep: async () => {
+        await Promise.resolve();
+        expect(runtimeEnvironmentValue("X_CLIENT_ID")).toBe("provider-client");
+        expect(runtimeEnvironmentValue("STEWARD_MASTER_PASSWORD")).toBe("worker-master");
         calls += 1;
         return { processed: 2, adopted: 1, revoked: 0, attention: 1, remaining: false };
       },

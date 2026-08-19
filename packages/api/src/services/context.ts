@@ -50,6 +50,7 @@ import {
   type Tenant,
   type TenantConfig,
 } from "@stwd/shared";
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 import type { Vault } from "@stwd/vault";
 import { WebhookDispatcher } from "@stwd/webhooks";
 import { and, eq, gte, sql } from "drizzle-orm";
@@ -70,7 +71,7 @@ export const DEFAULT_TENANT_ID = "default";
  * value can never silently disable a guard — it just reverts to the default.
  */
 function positiveIntEnv(name: string, fallback: number): number {
-  const raw = process.env[name]?.trim();
+  const raw = runtimeEnvironmentValue(name)?.trim();
   if (!raw) return fallback;
   const parsed = Number(raw);
   if (!Number.isInteger(parsed) || parsed <= 0) return fallback;
@@ -92,7 +93,7 @@ export function getRateLimitMaxRequests(): number {
   return positiveIntEnv("STEWARD_RATE_LIMIT_MAX_REQUESTS", 100);
 }
 export const isWorkersRuntime =
-  process.env.STEWARD_RUNTIME === "workers" ||
+  runtimeEnvironmentValue("STEWARD_RUNTIME") === "workers" ||
   (typeof navigator !== "undefined" && navigator.userAgent === "Cloudflare-Workers");
 
 // ─── JWT helpers ──────────────────────────────────────────────────────────────
@@ -286,21 +287,19 @@ export { extractRpcErrorMessage, isRpcError } from "./rpc-error";
 // ─── Environment ──────────────────────────────────────────────────────────────
 
 function requireEnv(name: string): string {
-  const value = process.env[name]?.trim();
+  const value = runtimeEnvironmentValue(name)?.trim();
   if (!value) throw new Error(`${name} is required`);
   return value;
 }
 
 const isPGLiteRuntime =
-  process.env.STEWARD_DB_MODE === "pglite" || process.env.STEWARD_PGLITE_MEMORY === "true";
+  runtimeEnvironmentValue("STEWARD_DB_MODE") === "pglite" ||
+  runtimeEnvironmentValue("STEWARD_PGLITE_MEMORY") === "true";
 
 export const DATABASE_URL =
-  process.env.DATABASE_URL?.trim() || (isPGLiteRuntime ? "" : requireEnv("DATABASE_URL"));
+  runtimeEnvironmentValue("DATABASE_URL")?.trim() ||
+  (isPGLiteRuntime ? "" : requireEnv("DATABASE_URL"));
 export const MASTER_PASSWORD = requireEnv("STEWARD_MASTER_PASSWORD");
-
-if (process.env.DATABASE_URL) {
-  process.env.DATABASE_URL = DATABASE_URL;
-}
 
 // ─── Singletons ───────────────────────────────────────────────────────────────
 
@@ -394,7 +393,7 @@ export const defaultTenantReady = db
     // value fails closed (default tenant unreachable); empty stays 403.
     // SEC-153: this legacy tenant-wide key is unscoped full-tenant authority
     // with no per-key revocation; prefer app-client secrets for new deployments.
-    apiKeyHash: process.env.STEWARD_DEFAULT_TENANT_KEY || "",
+    apiKeyHash: runtimeEnvironmentValue("STEWARD_DEFAULT_TENANT_KEY") || "",
   })
   .onConflictDoNothing();
 

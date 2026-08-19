@@ -8,11 +8,16 @@ import {
   tenantAppClients,
   tenantRequestSigningKeys,
 } from "@stwd/db";
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 import { type EncryptedKey, KeyStore } from "@stwd/vault";
 import { and, eq } from "drizzle-orm";
 import type { Context } from "hono";
 import { createMiddleware } from "hono/factory";
 import { type ApiResponse, type AppVariables, isValidTenantId } from "../services/context";
+import {
+  configuredRequestSigningSecrets,
+  resolveRequestSecurityPosture,
+} from "../services/request-security-config";
 import { isSensitivePath } from "./sensitive-paths";
 
 const MUTATING_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
@@ -63,16 +68,7 @@ export type AuthorizationSignatureOptions = {
 };
 
 function configuredSecrets(): string[] {
-  const combined = [
-    process.env.STEWARD_REQUEST_SIGNING_SECRETS,
-    process.env.STEWARD_REQUEST_SIGNING_SECRET,
-  ]
-    .filter(Boolean)
-    .join(",");
-  return combined
-    .split(",")
-    .map((secret) => secret.trim())
-    .filter(Boolean);
+  return configuredRequestSigningSecrets();
 }
 
 function parseAppId(
@@ -167,7 +163,7 @@ async function tenantRequestSigningKeyCandidates(
   // reach the indexed lookup and subsequent decrypt.
   const keyId = request.headers.get("X-Steward-Signing-Key-Id");
   if (!keyId || !SIGNING_KEY_ID_PATTERN.test(keyId)) return [];
-  const masterPassword = process.env.STEWARD_MASTER_PASSWORD;
+  const masterPassword = runtimeEnvironmentValue("STEWARD_MASTER_PASSWORD");
   if (!masterPassword) return [];
 
   const now = new Date();
@@ -814,20 +810,18 @@ export function authorizationSignature(options?: AuthorizationSignatureOptions) 
     const rawSignature = c.req.header("X-Steward-Signature");
     if (!rawSignature) {
       const required =
-        options?.required ??
-        (process.env.STEWARD_REQUIRE_AUTH_SIGNATURE === "true" ||
-          process.env.NODE_ENV === "production");
+        options?.required ?? resolveRequestSecurityPosture().authorizationSignatureRequired;
       if (!required) return next();
       return c.json<ApiResponse>({ ok: false, error: "X-Steward-Signature header required" }, 401);
     }
 
     const secrets = options?.secrets ?? configuredSecrets();
     const maxClockSkewMs = parsePositiveInt(
-      process.env.STEWARD_REQUEST_EXPIRY_MAX_SKEW_MS,
+      runtimeEnvironmentValue("STEWARD_REQUEST_EXPIRY_MAX_SKEW_MS"),
       DEFAULT_MAX_CLOCK_SKEW_MS,
     );
     const timestampTtlMs = parsePositiveInt(
-      process.env.STEWARD_REQUEST_TIMESTAMP_TTL_MS,
+      runtimeEnvironmentValue("STEWARD_REQUEST_TIMESTAMP_TTL_MS"),
       DEFAULT_TIMESTAMP_TTL_MS,
     );
 

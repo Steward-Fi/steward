@@ -146,30 +146,22 @@ describe("requestExpiry", () => {
     expect(nonSensitive.status).toBe(200);
   });
 
-  it("requires expiry headers by default for sensitive production mutations", async () => {
+  it("keeps production enforcement explicit when the requirement is unset", async () => {
     const originalNodeEnv = process.env.NODE_ENV;
     const originalRequire = process.env.STEWARD_REQUIRE_REQUEST_EXPIRY;
-    const originalAllow = process.env.STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS;
     try {
       process.env.NODE_ENV = "production";
       delete process.env.STEWARD_REQUIRE_REQUEST_EXPIRY;
-      delete process.env.STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS;
       const app = makeDefaultApp();
 
       const res = await app.request("/vault/agent-1/sign", { method: "POST" });
 
-      expect(res.status).toBe(400);
-      expect(await res.json()).toEqual({
-        ok: false,
-        error: "Request expiry header required",
-      });
+      expect(res.status).toBe(200);
     } finally {
       if (originalNodeEnv === undefined) delete process.env.NODE_ENV;
       else process.env.NODE_ENV = originalNodeEnv;
       if (originalRequire === undefined) delete process.env.STEWARD_REQUIRE_REQUEST_EXPIRY;
       else process.env.STEWARD_REQUIRE_REQUEST_EXPIRY = originalRequire;
-      if (originalAllow === undefined) delete process.env.STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS;
-      else process.env.STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS = originalAllow;
     }
   });
 });
