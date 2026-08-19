@@ -1,7 +1,7 @@
 /**
- * provider-authority fake-transport static inventory (U1 / M01 / PN01 / PN02).
+ * Fake-transport static inventory (U1 / M01 / PN01 / PN02).
  *
- * A source-introspection CI guard (same technique as the governed-execution
+ * A source-introspection CI guard (same technique as the governed-decrypt
  * governed-decrypt-inventory scan) that proves, WITHOUT running the flow, that
  * the deterministic fake provider transport is UNSELECTABLE in a production
  * build:
@@ -59,7 +59,7 @@ function repoSourceFiles(): { path: string; isTest: boolean; isHarness: boolean 
 
 const FAKE_IMPORT = /\bfrom\s+["'][^"']*fake-provider-transport(?:\.js)?["']/;
 
-describe("provider-authority fake-transport static inventory (U1)", () => {
+describe("fake-transport static inventory (U1)", () => {
   test("M01/PN01: fake-provider-transport is imported ONLY by test files", async () => {
     const files = repoSourceFiles();
     // Sanity: the scan found a non-trivial tree.

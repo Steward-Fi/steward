@@ -1,5 +1,5 @@
 /**
- * provider-authority deterministic in-process fake provider transport (TEST-ONLY).
+ * Deterministic in-process fake provider transport (test only).
  *
  * WHAT THIS IS
  * ------------
@@ -292,8 +292,7 @@ export const GITHUB_FIXTURES = {
 } as const;
 
 /**
- * Canonical X-shaped fixtures (spec predates the live X provider; provider-authority adds an X
- * leg to the fake matrix — see the drift note in the PR body).
+ * Canonical X-shaped fixtures for the provider transport contract.
  */
 export const X_FIXTURES = {
   usersMe: { data: { id: "999", name: "Sandbox", username: "sandbox" } },

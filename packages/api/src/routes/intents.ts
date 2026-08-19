@@ -1610,7 +1610,7 @@ async function updateIntentStatus(
     .where(and(eq(intents.id, intentId), eq(intents.tenantId, tenantId)));
   if (!existing) return c.json<ApiResponse>({ ok: false, error: "Intent not found" }, 404);
 
-  // PR3 (N50, I1/I4/I12): a governed provider-action intent's lifecycle is owned
+  // N50/I1/I4/I12: a governed provider-action intent's lifecycle is owned
   // exclusively by the provider approval service + its companion binding/queue.
   // The generic intent status endpoint MUST NOT set authorized/executed/etc on a
   // provider action (that would bypass the exact approval + safe-resume state

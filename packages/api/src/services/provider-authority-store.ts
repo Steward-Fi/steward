@@ -573,7 +573,7 @@ export class ProviderAuthorityStore {
    * initiate/complete/disconnect an X (or other provider) OAuth connection when
    * they are a tenant authority admin OR hold an active workspace_admin /
    * workspace_approver binding for the target workspace (environment + temporal
-   * validity enforced). Mirrors the admin-OR-approver gate of PR3's
+   * validity enforced). Mirrors the admin-or-approver gate of
    * hasWorkspaceRoleAuthority, scoped to the connect surface.
    */
   async canConnectProviderAccounts(
