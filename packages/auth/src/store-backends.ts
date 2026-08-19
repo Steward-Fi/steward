@@ -23,7 +23,13 @@ export interface StoreBackend {
   get(key: string): Promise<string | null>;
   consume(key: string): Promise<string | null>;
   /** Atomically replace an exact value. Repeating an already-applied transition succeeds. */
-  transition(key: string, expected: string, desired: string, ttlMs: number): Promise<boolean>;
+  transition(
+    key: string,
+    expected: string,
+    desired: string,
+    ttlMs: number,
+    guard?: { key: string; expected: string },
+  ): Promise<boolean>;
   delete(key: string): Promise<void>;
 }
 
@@ -68,8 +74,15 @@ export class NamespacedStoreBackend implements StoreBackend {
     expected: string,
     desired: string,
     ttlMs: number,
+    guard?: { key: string; expected: string },
   ): Promise<boolean> {
-    return this.backend.transition(this.key(key), expected, desired, ttlMs);
+    return this.backend.transition(
+      this.key(key),
+      expected,
+      desired,
+      ttlMs,
+      guard ? { key: this.key(guard.key), expected: guard.expected } : undefined,
+    );
   }
 
   async delete(key: string): Promise<void> {
@@ -140,7 +153,15 @@ export class MemoryBackend implements StoreBackend {
     expected: string,
     desired: string,
     ttlMs: number,
+    guard?: { key: string; expected: string },
   ): Promise<boolean> {
+    if (guard) {
+      const guarded = this.store.get(guard.key);
+      if (!guarded || Date.now() > guarded.expiresAt || guarded.value !== guard.expected) {
+        if (guarded && Date.now() > guarded.expiresAt) this.store.delete(guard.key);
+        return false;
+      }
+    }
     const entry = this.store.get(key);
     if (!entry || Date.now() > entry.expiresAt) {
       this.store.delete(key);
@@ -228,7 +249,21 @@ export class RedisBackend implements StoreBackend {
     expected: string,
     desired: string,
     ttlMs: number,
+    guard?: { key: string; expected: string },
   ): Promise<boolean> {
+    if (guard) {
+      const result = await this.client.eval(
+        "if redis.call('GET',KEYS[2])~=ARGV[4] then return 0 end; local v=redis.call('GET',KEYS[1]); if v==ARGV[1] or v==ARGV[2] then redis.call('SET',KEYS[1],ARGV[2],'PX',ARGV[3]); return 1 end; return 0",
+        2,
+        this.prefix + key,
+        this.prefix + guard.key,
+        expected,
+        desired,
+        ttlMs,
+        guard.expected,
+      );
+      return result === 1 || result === "1";
+    }
     const result = await this.client.eval(
       "local v=redis.call('GET',KEYS[1]); if v==ARGV[1] or v==ARGV[2] then redis.call('SET',KEYS[1],ARGV[2],'PX',ARGV[3]); return 1 end; return 0",
       1,
@@ -356,11 +391,29 @@ export class PostgresBackend implements StoreBackend {
     expected: string,
     desired: string,
     ttlMs: number,
+    guard?: { key: string; expected: string },
   ): Promise<boolean> {
     await this.ensureTable();
     const sql = this.getSqlClient();
     const expiresAt = new Date(Date.now() + ttlMs).toISOString();
-    const rows = await sql<Array<{ id: string }>>`
+    const rows = guard
+      ? await sql<Array<{ id: string }>>`
+      UPDATE auth_kv_store
+         SET value = ${desired}, expires_at = ${expiresAt}
+       WHERE id = ${key}
+         AND namespace = ${this.namespace}
+         AND expires_at > now()
+         AND (value = ${expected} OR value = ${desired})
+         AND EXISTS (
+           SELECT 1 FROM auth_kv_store AS guard_row
+            WHERE guard_row.id = ${guard.key}
+              AND guard_row.namespace = ${this.namespace}
+              AND guard_row.expires_at > now()
+              AND guard_row.value = ${guard.expected}
+         )
+      RETURNING id
+    `
+      : await sql<Array<{ id: string }>>`
       UPDATE auth_kv_store
          SET value = ${desired}, expires_at = ${expiresAt}
        WHERE id = ${key}
