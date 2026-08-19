@@ -139,5 +139,12 @@ describe("TOTP (RFC 6238)", () => {
       secret: `JBSWY3DPEHPK3PXP${"=".repeat(200_000)}`,
     });
     expect(uri).toContain("secret=JBSWY3DPEHPK3PXP&");
+    expect(() =>
+      buildOtpauthUri({
+        issuer: "Steward",
+        accountName: "alice@example.com",
+        secret: `JBSWY3DPEHPK3PXP${"=".repeat(200_000)}!`,
+      }),
+    ).toThrow("invalid character");
   });
 });

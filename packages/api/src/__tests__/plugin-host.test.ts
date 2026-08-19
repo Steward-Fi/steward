@@ -125,6 +125,31 @@ describe("PluginHost — fail closed", () => {
     const p = recordingPlugin("p", [], { dependsOn: ["absent-dep"] });
     await expect(host.register(app, ctx, p)).rejects.toThrow(/absent-dep/);
   });
+
+  it("rejects migration ids whose legacy sanitization aliases one journal", async () => {
+    const host = new PluginHost<Ctx>();
+    const first = {
+      name: "first",
+      migrations: { id: "a-b", migrationsFolder: "/tmp/first" },
+    };
+    const second = {
+      name: "second",
+      migrations: { id: "a.b", migrationsFolder: "/tmp/second" },
+    };
+    await expect(host.register(app, ctx, first, second)).rejects.toThrow(/aliases the journal/);
+    expect(host.describe().plugins).toEqual([]);
+  });
+
+  it("preserves legacy sanitized migration ids when they are unique", () => {
+    const host = new PluginHost<Ctx>();
+    host.collectMigrations({
+      name: "legacy",
+      migrations: { id: "Demo-Plugin", migrationsFolder: "/tmp/legacy" },
+    });
+    expect(host.describe().migrationSources).toEqual({
+      legacy: { id: "Demo-Plugin", migrationsTable: "__drizzle_migrations_plugin_demo_plugin" },
+    });
+  });
 });
 
 describe("PluginHost — webhook event contribution", () => {

@@ -29,6 +29,18 @@ function isSensitiveProviderKey(key: string): boolean {
     normalized.endsWith("hmacsignature")
   );
 }
+function joinedLabelVariants(parts: readonly string[]): string[] {
+  let variants = [parts[0]];
+  for (const part of parts.slice(1)) {
+    variants = variants.flatMap((prefix) => [
+      `${prefix}-${part}`,
+      `${prefix}_${part}`,
+      `${prefix}${part}`,
+    ]);
+  }
+  return variants;
+}
+
 const SECRET_LABELS = [
   "authorization",
   "auth",
@@ -67,15 +79,9 @@ const SECRET_LABELS = [
   "client-secret",
   "client_secret",
   "clientsecret",
-  "access-key",
-  "access_key",
-  "accesskey",
-  "access-key-id",
-  "access_key_id",
-  "accesskeyid",
-  "secret-access-key",
-  "secret_access_key",
-  "secretaccesskey",
+  ...joinedLabelVariants(["access", "key"]),
+  ...joinedLabelVariants(["access", "key", "id"]),
+  ...joinedLabelVariants(["secret", "access", "key"]),
   "session-id",
   "session_id",
   "sessionid",
@@ -98,7 +104,16 @@ const SECRET_LABELS = [
   "pat",
 ] as const;
 
+const SECRET_LABELS_BY_FIRST = new Map<number, string[]>();
+for (const label of ["bearer", ...SECRET_LABELS].sort((a, b) => b.length - a.length)) {
+  const first = label.charCodeAt(0);
+  const entries = SECRET_LABELS_BY_FIRST.get(first) ?? [];
+  entries.push(label);
+  SECRET_LABELS_BY_FIRST.set(first, entries);
+}
+
 type TextRange = { start: number; end: number };
+const MAX_PROVIDER_TEXT_LENGTH = 1_048_576;
 
 function isAsciiAlphaNumeric(code: number): boolean {
   return (
@@ -131,6 +146,13 @@ function asciiStartsWithIgnoreCase(value: string, index: number, expected: strin
   return true;
 }
 
+function asciiIndexOfIgnoreCase(value: string, expected: string, from: number): number {
+  for (let index = from; index + expected.length <= value.length; index += 1) {
+    if (asciiStartsWithIgnoreCase(value, index, expected)) return index;
+  }
+  return -1;
+}
+
 function addPrefixedTokenRange(
   value: string,
   ranges: TextRange[],
@@ -138,11 +160,13 @@ function addPrefixedTokenRange(
   prefixLength: number,
   minimumSuffix: number,
   suffixCode: (code: number) => boolean,
-): void {
-  if (start > 0 && isWordCode(value.charCodeAt(start - 1))) return;
+): number | undefined {
+  if (start > 0 && isWordCode(value.charCodeAt(start - 1))) return undefined;
   let end = start + prefixLength;
   while (end < value.length && suffixCode(value.charCodeAt(end))) end += 1;
-  if (end - (start + prefixLength) >= minimumSuffix) ranges.push({ start, end });
+  if (end - (start + prefixLength) < minimumSuffix) return undefined;
+  ranges.push({ start, end });
+  return end;
 }
 
 function collectStructuredSecretRanges(value: string, ranges: TextRange[]): void {
@@ -163,20 +187,26 @@ function collectStructuredSecretRanges(value: string, ranges: TextRange[]): void
           continue;
         }
       }
+      // A nested `eyj` in the same uninterrupted base64url candidate cannot
+      // begin another independently delimited credential. Skip the candidate
+      // once so malformed near-misses remain linear.
+      index = end - 1;
+      continue;
     }
+    let tokenEnd: number | undefined;
     if (asciiStartsWithIgnoreCase(value, index, "sk-")) {
-      addPrefixedTokenRange(value, ranges, index, 3, 8, isBase64UrlCode);
+      tokenEnd = addPrefixedTokenRange(value, ranges, index, 3, 8, isBase64UrlCode);
     } else if (
       asciiStartsWithIgnoreCase(value, index, "ghp_") ||
       asciiStartsWithIgnoreCase(value, index, "gho_")
     ) {
-      addPrefixedTokenRange(value, ranges, index, 4, 8, isAsciiAlphaNumeric);
+      tokenEnd = addPrefixedTokenRange(value, ranges, index, 4, 8, isAsciiAlphaNumeric);
     } else if (
       ["xoxb-", "xoxa-", "xoxp-", "xoxr-", "xoxs-"].some((prefix) =>
         asciiStartsWithIgnoreCase(value, index, prefix),
       )
     ) {
-      addPrefixedTokenRange(
+      tokenEnd = addPrefixedTokenRange(
         value,
         ranges,
         index,
@@ -199,15 +229,20 @@ function collectStructuredSecretRanges(value: string, ranges: TextRange[]): void
         (end === value.length || !isWordCode(value.charCodeAt(end)))
       ) {
         ranges.push({ start: index, end });
+        tokenEnd = end;
       }
     }
+    if (tokenEnd !== undefined) index = tokenEnd - 1;
   }
 }
 
 function collectLabeledSecretRanges(value: string, ranges: TextRange[]): void {
-  const labels = ["bearer", ...SECRET_LABELS] as const;
-  for (const label of labels) {
-    for (let start = 0; start < value.length; start += 1) {
+  for (let start = 0; start < value.length; start += 1) {
+    let first = value.charCodeAt(start);
+    if (first >= 0x41 && first <= 0x5a) first += 0x20;
+    const labels = SECRET_LABELS_BY_FIRST.get(first);
+    if (!labels) continue;
+    for (const label of labels) {
       if (!asciiStartsWithIgnoreCase(value, start, label)) continue;
       let cursor = start + label.length;
       const whitespaceStart = cursor;
@@ -233,45 +268,40 @@ function collectLabeledSecretRanges(value: string, ranges: TextRange[]): void {
       if (cursor > secretStart) {
         ranges.push({ start, end: cursor });
         start = cursor - 1;
+        break;
       }
     }
   }
 }
 
 function collectArmoredKeyRanges(value: string, ranges: TextRange[]): void {
-  const privateBegins = [
-    "-----BEGIN PRIVATE KEY-----",
-    "-----BEGIN ENCRYPTED PRIVATE KEY-----",
-    "-----BEGIN RSA PRIVATE KEY-----",
-    "-----BEGIN EC PRIVATE KEY-----",
-    "-----BEGIN DSA PRIVATE KEY-----",
-    "-----BEGIN OPENSSH PRIVATE KEY-----",
-    "-----BEGIN PGP PRIVATE KEY BLOCK-----",
-  ];
-  const privateEnds = [
-    "-----END PRIVATE KEY-----",
-    "-----END ENCRYPTED PRIVATE KEY-----",
-    "-----END RSA PRIVATE KEY-----",
-    "-----END EC PRIVATE KEY-----",
-    "-----END DSA PRIVATE KEY-----",
-    "-----END OPENSSH PRIVATE KEY-----",
-    "-----END PGP PRIVATE KEY BLOCK-----",
-  ];
-  for (const begin of privateBegins) {
-    let start = value.indexOf(begin);
-    while (start !== -1) {
-      let end = value.length;
-      for (const marker of privateEnds) {
-        const candidate = value.indexOf(marker, start + begin.length);
-        if (candidate !== -1 && candidate + marker.length < end) end = candidate + marker.length;
-      }
+  const markers = [
+    ["-----BEGIN PRIVATE KEY-----", "-----END PRIVATE KEY-----"],
+    ["-----BEGIN ENCRYPTED PRIVATE KEY-----", "-----END ENCRYPTED PRIVATE KEY-----"],
+    ["-----BEGIN RSA PRIVATE KEY-----", "-----END RSA PRIVATE KEY-----"],
+    ["-----BEGIN EC PRIVATE KEY-----", "-----END EC PRIVATE KEY-----"],
+    ["-----BEGIN DSA PRIVATE KEY-----", "-----END DSA PRIVATE KEY-----"],
+    ["-----BEGIN OPENSSH PRIVATE KEY-----", "-----END OPENSSH PRIVATE KEY-----"],
+    ["-----BEGIN PGP PRIVATE KEY BLOCK-----", "-----END PGP PRIVATE KEY BLOCK-----"],
+  ] as const;
+  for (let start = 0; start < value.length; start += 1) {
+    for (const [begin, endMarker] of markers) {
+      if (!asciiStartsWithIgnoreCase(value, start, begin.toLowerCase())) continue;
+      const markerStart = asciiIndexOfIgnoreCase(
+        value,
+        endMarker.toLowerCase(),
+        start + begin.length,
+      );
+      const end = markerStart === -1 ? value.length : markerStart + endMarker.length;
       ranges.push({ start, end });
-      start = value.indexOf(begin, end);
+      start = end - 1;
+      break;
     }
   }
 }
 
 function redactSecretText(value: string): string {
+  if (value.length > MAX_PROVIDER_TEXT_LENGTH) return "[redacted]";
   const ranges: TextRange[] = [];
   collectArmoredKeyRanges(value, ranges);
   collectLabeledSecretRanges(value, ranges);

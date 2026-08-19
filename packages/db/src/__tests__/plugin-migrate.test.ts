@@ -56,10 +56,10 @@ describe("plugin migrations: namespaced-journal isolation", () => {
     expect(() => sanitizePluginMigrationId("///")).toThrow();
     expect(() => sanitizePluginMigrationId("")).toThrow();
     // the derived table name carries the sanitized id, never raw input
-    expect(pluginMigrationsTable("trading")).toBe("__drizzle_migrations_plugin_trading");
+    expect(pluginMigrationsTable("Trading")).toBe("__drizzle_migrations_plugin_trading");
     expect(sanitizePluginMigrationId(`${"_".repeat(200_000)}safe`)).toBe("safe");
-    expect(() => pluginMigrationsTable("a-b")).toThrow(/canonical lowercase/);
-    expect(() => pluginMigrationsTable("a.b")).toThrow(/canonical lowercase/);
+    expect(pluginMigrationsTable("a-b")).toBe("__drizzle_migrations_plugin_a_b");
+    expect(pluginMigrationsTable("a.b")).toBe("__drizzle_migrations_plugin_a_b");
     expect(() => pluginMigrationsTable("a".repeat(36))).toThrow(/exceeds 35 characters/);
   });
 
@@ -75,7 +75,7 @@ describe("plugin migrations: namespaced-journal isolation", () => {
     );
 
     const result = await runPluginMigrations(
-      { id: "demo_plugin", migrationsFolder: folder },
+      { id: "demo-plugin", migrationsFolder: folder },
       {
         db,
         client,
@@ -84,7 +84,7 @@ describe("plugin migrations: namespaced-journal isolation", () => {
       },
     );
 
-    expect(result.id).toBe("demo_plugin");
+    expect(result.id).toBe("demo-plugin");
     expect(result.migrationsTable).toBe("__drizzle_migrations_plugin_demo_plugin");
 
     // (a) the plugin's table was created
@@ -106,7 +106,7 @@ describe("plugin migrations: namespaced-journal isolation", () => {
 
     // (d) idempotent: a second run applies nothing and does not throw
     const again = await runPluginMigrations(
-      { id: "demo_plugin", migrationsFolder: folder },
+      { id: "demo-plugin", migrationsFolder: folder },
       { db, client, useAdvisoryLock: false, migrateFn: pgliteMigrate as never },
     );
     expect(again.migrationsTable).toBe("__drizzle_migrations_plugin_demo_plugin");

@@ -258,7 +258,10 @@ describe("signEndpointUrl normalization", () => {
   });
   test("handles adversarial slash runs without regex backtracking", () => {
     const slashes = "/".repeat(200_000);
-    expect(signEndpointUrl(`${slashes}x`)).toBe(`${slashes}x/sign`);
+    expect(signEndpointUrl(`x${slashes}`)).toBe("x/sign");
+    expect(signEndpointUrl(`https://builder.example/path${slashes}`)).toBe(
+      "https://builder.example/path/sign",
+    );
   });
 });
 

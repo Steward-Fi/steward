@@ -242,15 +242,33 @@ describe("CI test inventory", () => {
   });
 
   test("does not accept Ruby filename lookalikes as test commands", () => {
+    for (const command of [
+      "ruby packages/ruby/test/security_test.rbx packages/ruby",
+      "ruby contest/security_test.rb packages/ruby",
+    ]) {
+      const job = extractJob(
+        [
+          "  dedicated:",
+          "    steps:",
+          "      - name: Test package",
+          `        run: ${command}`,
+        ].join("\n"),
+        "dedicated",
+      );
+      expect(jobExecutesPackageTests(job, "packages/ruby")).toBe(false);
+    }
+  });
+
+  test("ignores runner words and package paths in shell comments", () => {
     const job = extractJob(
       [
         "  dedicated:",
         "    steps:",
         "      - name: Test package",
-        "        run: ruby packages/ruby/test/security_test.rbx packages/ruby",
+        "        run: bun --help # test packages/a",
       ].join("\n"),
       "dedicated",
     );
-    expect(jobExecutesPackageTests(job, "packages/ruby")).toBe(false);
+    expect(jobExecutesPackageTests(job, "packages/a")).toBe(false);
   });
 });

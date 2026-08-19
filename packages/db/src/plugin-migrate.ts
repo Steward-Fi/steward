@@ -91,14 +91,8 @@ export function sanitizePluginMigrationId(id: string): string {
   return sanitized;
 }
 
-function canonicalPluginMigrationId(id: string): string {
+function boundedPluginMigrationId(id: string): string {
   const sanitized = sanitizePluginMigrationId(id);
-  if (id !== sanitized) {
-    throw new Error(
-      `plugin migration id "${id}" must already be canonical lowercase [a-z0-9_] text; ` +
-        "lossy sanitization can alias another plugin's migration journal.",
-    );
-  }
   if (sanitized.length > MAX_PLUGIN_MIGRATION_ID_LENGTH) {
     throw new Error(
       `plugin migration id exceeds ${MAX_PLUGIN_MIGRATION_ID_LENGTH} characters; ` +
@@ -114,7 +108,7 @@ function canonicalPluginMigrationId(id: string): string {
  * core's `__drizzle_migrations`.
  */
 export function pluginMigrationsTable(id: string): string {
-  return `${PLUGIN_MIGRATIONS_TABLE_PREFIX}${canonicalPluginMigrationId(id)}`;
+  return `${PLUGIN_MIGRATIONS_TABLE_PREFIX}${boundedPluginMigrationId(id)}`;
 }
 
 /**
@@ -124,7 +118,7 @@ export function pluginMigrationsTable(id: string): string {
  * another plugin's run.
  */
 export function pluginAdvisoryLockKey(id: string): string {
-  return `steward_plugin_migrations_${canonicalPluginMigrationId(id)}`;
+  return `steward_plugin_migrations_${boundedPluginMigrationId(id)}`;
 }
 
 /**

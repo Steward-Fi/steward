@@ -160,11 +160,16 @@ function parseMagicLink(text: string): { magicLink?: string; token?: string } {
     while (segmentEnd < text.length && text[segmentEnd].trim().length !== 0) segmentEnd += 1;
     if (segmentEnd === segmentStart) break;
 
-    const http = text.indexOf("http://", segmentStart);
-    const https = text.indexOf("https://", segmentStart);
-    const candidates = [http, https].filter((index) => index >= segmentStart && index < segmentEnd);
-    const schemeStart = candidates.length > 0 ? Math.min(...candidates) : -1;
+    let schemeStart = -1;
+    for (let index = segmentStart; index < segmentEnd; index += 1) {
+      if (text.startsWith("http://", index) || text.startsWith("https://", index)) {
+        schemeStart = index;
+        break;
+      }
+    }
     if (schemeStart !== -1) {
+      let tokenStart = -1;
+      let tokenEnd = -1;
       for (let index = schemeStart; index < segmentEnd; index += 1) {
         if (text.startsWith("?token=", index) || text.startsWith("&token=", index)) {
           const candidate = index + 7;
@@ -176,9 +181,9 @@ function parseMagicLink(text: string): { magicLink?: string; token?: string } {
             code === 0x2d ||
             code === 0x5f
           ) {
-            let tokenEnd = candidate;
-            while (tokenEnd < segmentEnd) {
-              const tokenCode = text.charCodeAt(tokenEnd);
+            let candidateEnd = candidate;
+            while (candidateEnd < segmentEnd) {
+              const tokenCode = text.charCodeAt(candidateEnd);
               if (
                 (tokenCode >= 0x30 && tokenCode <= 0x39) ||
                 (tokenCode >= 0x41 && tokenCode <= 0x5a) ||
@@ -186,17 +191,21 @@ function parseMagicLink(text: string): { magicLink?: string; token?: string } {
                 tokenCode === 0x2d ||
                 tokenCode === 0x5f
               ) {
-                tokenEnd += 1;
+                candidateEnd += 1;
               } else {
                 break;
               }
             }
-            return {
-              magicLink: text.slice(schemeStart, tokenEnd),
-              token: text.slice(candidate, tokenEnd),
-            };
+            tokenStart = candidate;
+            tokenEnd = candidateEnd;
           }
         }
+      }
+      if (tokenStart !== -1) {
+        return {
+          magicLink: text.slice(schemeStart, tokenEnd),
+          token: text.slice(tokenStart, tokenEnd),
+        };
       }
     }
     segmentStart = segmentEnd + 1;
