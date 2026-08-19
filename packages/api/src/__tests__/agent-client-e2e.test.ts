@@ -52,6 +52,9 @@ const CAP_MIGRATIONS = fileURLToPath(
   new URL("../../../plugin-capabilities/drizzle", import.meta.url),
 );
 const TEST_ENV_KEYS = [
+  "NODE_ENV",
+  "STEWARD_KDF_SALT",
+  "REDIS_REQUIRED",
   "STEWARD_PGLITE_MEMORY",
   "STEWARD_MASTER_PASSWORD",
   "STEWARD_JWT_SECRET",
@@ -149,6 +152,9 @@ async function buildStewardAppContext() {
 
 beforeAll(async () => {
   originalEnv = new Map(TEST_ENV_KEYS.map((key) => [key, process.env[key]]));
+  process.env.NODE_ENV = "test";
+  process.env.STEWARD_KDF_SALT = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+  process.env.REDIS_REQUIRED = "false";
   process.env.STEWARD_PGLITE_MEMORY = "true";
   process.env.STEWARD_MASTER_PASSWORD = MASTER_PASSWORD;
   process.env.STEWARD_JWT_SECRET = "a3-agent-client-e2e-jwt-secret-with-enough-bytes-0123456789";
