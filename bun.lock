@@ -493,6 +493,7 @@
       "name": "@stwd/seed",
       "version": "0.4.0",
       "dependencies": {
+        "@stwd/auth": "workspace:*",
         "@stwd/db": "workspace:*",
         "@stwd/shared": "workspace:*",
         "@stwd/vault": "workspace:*",

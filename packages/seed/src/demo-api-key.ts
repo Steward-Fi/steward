@@ -10,8 +10,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname, resolve } from "node:path";
-import { generateApiKey } from "../../auth/src/api-keys";
-import type { ApiKeyPair } from "../../auth/src/types";
+import { type ApiKeyPair, generateApiKey } from "@stwd/auth";
 
 /**
  * Mint a fresh credential for each demo seed run.
