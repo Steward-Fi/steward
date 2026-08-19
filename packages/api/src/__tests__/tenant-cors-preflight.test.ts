@@ -27,6 +27,15 @@ describe("tenant CORS preflight", () => {
         tenantId: "cors-patch-tenant",
         allowedOrigins: [ALLOWED_ORIGIN],
       });
+    await getDb().insert(tenants).values({
+      id: "cors-empty-tenant",
+      name: "CORS empty tenant",
+      apiKeyHash: "cors-empty-tenant-hash",
+    });
+    await getDb().insert(tenantConfigs).values({
+      tenantId: "cors-empty-tenant",
+      allowedOrigins: [],
+    });
   });
 
   afterAll(async () => {
