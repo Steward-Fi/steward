@@ -159,7 +159,7 @@ console.log(host.describe()); // loaded plugins + every contribution
 the host refuses to compose an ambiguous or unsafe surface. a plugin:
 
 - cannot shadow a core policy rule type, and cannot reuse a rule type another plugin already registered.
-- cannot write into or read from the core migration journal - its migration ledger lives in its own namespaced table (`drizzle.__drizzle_migrations_plugin_<id>`). migration ids must already be canonical lowercase `[a-z0-9_]` text and fit the PostgreSQL identifier bound; lossy aliases are rejected.
+- cannot write into or read from the core migration journal - its migration ledger lives in its own namespaced table (`drizzle.__drizzle_migrations_plugin_<sanitized id>`). legacy sanitized ids remain supported, while overlong ids and aliases across registered plugins are rejected.
 - cannot silently overwrite a registered adapter - a `(category, provider)` collision throws, as does an unknown category, an empty provider, or a missing adapter instance.
 - cannot register against a half-built dependency - a missing or cyclic `dependsOn`, or a duplicate plugin name, throws before anything registers.
 

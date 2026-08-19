@@ -497,6 +497,38 @@ export class PluginHost<Ctx> {
     this.policyRegistry = policyRegistry ?? policyRuleRegistry;
   }
 
+  private prepareMigrationSources(
+    plugins: ReadonlyArray<StewardPlugin<StewardApp, Ctx>>,
+  ): Array<{ pluginName: string; source: PluginMigrationSource }> {
+    const owners = new Map(
+      this.migrationSources.map(({ pluginName, source }) => [
+        pluginMigrationsTable(source.id),
+        pluginName,
+      ]),
+    );
+    const additions: Array<{ pluginName: string; source: PluginMigrationSource }> = [];
+    for (const plugin of plugins) {
+      if (!plugin.migrations) continue;
+      let table: string;
+      try {
+        table = pluginMigrationsTable(plugin.migrations.id);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        throw new PluginHostError(`plugin "${plugin.name}" migration id is invalid: ${message}`);
+      }
+      const owner = owners.get(table);
+      if (owner) {
+        throw new PluginHostError(
+          `plugin "${plugin.name}" migration id aliases the journal already owned by ` +
+            `plugin "${owner}" (${table}); refusing cross-plugin migration state.`,
+        );
+      }
+      owners.set(table, plugin.name);
+      additions.push({ pluginName: plugin.name, source: plugin.migrations });
+    }
+    return additions;
+  }
+
   /** the webhook event registry this host merges plugin events into. */
   get webhookEventRegistry(): WebhookEventRegistry {
     return this.eventRegistry;
@@ -520,6 +552,7 @@ export class PluginHost<Ctx> {
     ...plugins: Array<StewardPlugin<StewardApp, Ctx>>
   ): Promise<void> {
     const ordered = orderByDependencies(plugins);
+    const migrationSources = this.prepareMigrationSources(ordered);
 
     // Phase 1: merge declared webhook events FIRST, so a plugin's `register`
     // (and any concurrent dispatch) sees its own events as already valid.
@@ -645,11 +678,7 @@ export class PluginHost<Ctx> {
     // applied by runMigrations(), called from the boot/migrate path after core
     // migrations. Stored in dependency order so a dependent plugin's migrations
     // apply after the plugins it depends on (it may FK their tables).
-    for (const plugin of ordered) {
-      if (plugin.migrations) {
-        this.migrationSources.push({ pluginName: plugin.name, source: plugin.migrations });
-      }
-    }
+    this.migrationSources.push(...migrationSources);
 
     // Phase 2: run each plugin's imperative register hook in dependency order.
     for (const plugin of ordered) {
@@ -672,11 +701,7 @@ export class PluginHost<Ctx> {
    */
   collectMigrations(...plugins: Array<StewardPlugin<StewardApp, Ctx>>): this {
     const ordered = orderByDependencies(plugins);
-    for (const plugin of ordered) {
-      if (plugin.migrations) {
-        this.migrationSources.push({ pluginName: plugin.name, source: plugin.migrations });
-      }
-    }
+    this.migrationSources.push(...this.prepareMigrationSources(ordered));
     return this;
   }
 

@@ -411,16 +411,16 @@ describe("approvalRequiredEvaluator", () => {
 
 describe("Amount parsing (via transfer handler)", () => {
   const cases = [
-    { input: "0.01 ETH", shouldFail: false },
-    { input: "1.5 BNB", shouldFail: false },
-    { input: "100 USDC", shouldFail: false },
-    { input: "0.001", shouldFail: false },
-    { input: "", shouldFail: true },
-    { input: "abc xyz", shouldFail: true },
-    { input: "-5 ETH", shouldFail: true },
+    { input: "0.01 ETH", chain: "base", shouldFail: false },
+    { input: "1.5 BNB", chain: "bsc", shouldFail: false },
+    { input: "100 USDC", chain: "base", shouldFail: true },
+    { input: "0.001", chain: "base", shouldFail: false },
+    { input: "", chain: "base", shouldFail: true },
+    { input: "abc xyz", chain: "base", shouldFail: true },
+    { input: "-5 ETH", chain: "base", shouldFail: true },
   ];
 
-  for (const { input, shouldFail } of cases) {
+  for (const { input, chain, shouldFail } of cases) {
     it(`${shouldFail ? "rejects" : "accepts"} "${input}"`, async () => {
       const service = {
         isConnected: () => true,
@@ -434,7 +434,7 @@ describe("Amount parsing (via transfer handler)", () => {
         parameters: {
           to: "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045",
           amount: input,
-          chain: "base",
+          chain,
         },
       });
 

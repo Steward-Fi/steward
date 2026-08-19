@@ -182,7 +182,10 @@ export function jobExecutesPackageTests(job: string, packagePath: string): boole
       .split(/\r?\n/)
       .map((line) => line.trim())
       .some((line) => {
-        const shellSyntax = line.replace(/'(?:[^']*)'/g, "").replace(/"(?:\\.|[^"\\])*"/g, "");
+        const executableLine = stripUnquotedShellComment(line).trimEnd();
+        const shellSyntax = executableLine
+          .replace(/'(?:[^']*)'/g, "")
+          .replace(/"(?:\\.|[^"\\])*"/g, "");
         // A command that masks its own failure or explicitly disables tests is
         // not CI evidence even if its spelling otherwise resembles a runner.
         if (
@@ -190,13 +193,36 @@ export function jobExecutesPackageTests(job: string, packagePath: string): boole
         ) {
           return false;
         }
-        if (!isExecutableTestCommand(line)) return false;
+        if (!isExecutableTestCommand(executableLine)) return false;
         // Bind the package reference to the same executable line. Merely
         // echoing a package name elsewhere in a multiline step cannot make an
         // unrelated test command satisfy this target.
-        return step.workingDirectory === packagePath || line.includes(packagePath);
+        return step.workingDirectory === packagePath || executableLine.includes(packagePath);
       });
   });
+}
+
+function stripUnquotedShellComment(line: string): string {
+  let quote: '"' | "'" | undefined;
+  for (let index = 0; index < line.length; index += 1) {
+    const char = line[index];
+    if (quote === '"' && char === "\\") {
+      index += 1;
+      continue;
+    }
+    if (char === '"' || char === "'") {
+      quote = quote === char ? undefined : quote === undefined ? char : quote;
+      continue;
+    }
+    if (
+      char === "#" &&
+      quote === undefined &&
+      (index === 0 || isShellWhitespace(line[index - 1]))
+    ) {
+      return line.slice(0, index);
+    }
+  }
+  return line;
 }
 
 function isShellWhitespace(char: string | undefined): boolean {
@@ -294,6 +320,7 @@ function isExecutableTestCommand(line: string): boolean {
   if (startsWithWord(command, "ruby")) {
     const testPath = command.indexOf("test/");
     if (testPath === -1) return false;
+    if (testPath > 0 && isWordCode(command.charCodeAt(testPath - 1))) return false;
     const tokenEnd = command.indexOf(" ", testPath);
     const pathToken = command.slice(testPath, tokenEnd === -1 ? undefined : tokenEnd);
     const suffix = pathToken.indexOf("_test.rb");

@@ -107,9 +107,7 @@ export interface PolicyRuleContribution<Ctx = unknown> {
  * WIRED in Phase 2c. The host applies these via `@stwd/db`'s
  * `runPluginMigrations`, which runs the plugin's drizzle migrations into a
  * SEPARATE, PER-PLUGIN bookkeeping table derived from `id`
- * (`__drizzle_migrations_plugin_<id>` in the `drizzle` schema). The id must
- * already be canonical lowercase `[a-z0-9_]` text and fit PostgreSQL's
- * identifier limit; lossy aliases are rejected rather than sharing a ledger.
+ * (`__drizzle_migrations_plugin_<sanitized id>` in the `drizzle` schema). The
  * isolation guarantee is total: a plugin's applied-migrations ledger is NEVER
  * written into or read from the core's `drizzle.__drizzle_migrations` journal, so
  * a plugin owns its schema and CANNOT clobber the core's migration state. The
@@ -123,9 +121,9 @@ export interface PluginMigrationSource {
    * derive the per-plugin bookkeeping table name + advisory-lock key, so a
    * plugin's migration ledger is isolated from the core's and from every other
    * plugin's. MUST be stable across releases (changing it orphans the prior
-   * ledger and re-applies every migration). It must already be canonical
-   * lowercase `[a-z0-9_]` text and no longer than the runner's documented
-   * PostgreSQL-safe bound; lossy or overlong ids are rejected (fail closed).
+   * ledger and re-applies every migration). sanitized to a safe SQL identifier
+   * by the runner; an id that sanitizes to empty or exceeds the PostgreSQL-safe
+   * bound is rejected. The host rejects aliases across its registered plugins.
    */
   readonly id: string;
   /**

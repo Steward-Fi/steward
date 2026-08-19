@@ -129,5 +129,9 @@ class StewardClientTest < Minitest::Test
     )
 
     assert_equal "https://api.example.test", client.instance_variable_get(:@base_url)
+
+    near_miss = "https://api.example.test/path#{"/" * 200_000}!"
+    client = Steward::Client.new(base_url: near_miss, api_key: "tenant-key")
+    assert_equal near_miss, client.instance_variable_get(:@base_url)
   end
 end

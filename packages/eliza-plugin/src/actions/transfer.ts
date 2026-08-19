@@ -112,7 +112,7 @@ export const transferAction: Action = {
     },
     {
       name: "amount",
-      description: 'Human-readable amount (e.g. "0.1 ETH", "50 USDC")',
+      description: 'Native-token amount (e.g. "0.1 ETH", "0.5 BNB")',
       required: true,
       schema: { type: "string" },
     },

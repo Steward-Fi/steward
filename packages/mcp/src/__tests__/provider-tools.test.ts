@@ -308,6 +308,44 @@ describe("credential redaction", () => {
 
     const whitespaceRun = `jwt${" ".repeat(200_000)}`;
     expect(sanitizeProviderPayload(whitespaceRun)).toBe(whitespaceRun);
+    expect(sanitizeProviderPayload("x".repeat(1_048_577))).toBe("[redacted]");
+  });
+
+  test("matches armored key end markers without exposing trailing key material", () => {
+    const text =
+      "-----BEGIN PRIVATE KEY-----canary-before-wrong-end" +
+      "-----END RSA PRIVATE KEY-----canary-after-wrong-end-----END PRIVATE KEY----- public";
+    const clean = sanitizeProviderPayload(text) as string;
+    expect(clean).not.toContain("canary-before-wrong-end");
+    expect(clean).not.toContain("canary-after-wrong-end");
+    expect(clean).toContain(" public");
+
+    const lower = sanitizeProviderPayload(
+      "-----begin encrypted private key-----mixed-case-canary-----end encrypted private key-----",
+    ) as string;
+    expect(lower).not.toContain("mixed-case-canary");
+  });
+
+  test("covers every optional-separator access-key label", () => {
+    const joins = ["-", "_", ""];
+    const labels = [
+      ...joins.flatMap((first) => joins.map((second) => `access${first}key${second}id`)),
+      ...joins.flatMap((first) => joins.map((second) => `secret${first}access${second}key`)),
+    ];
+    for (const label of labels) {
+      const clean = sanitizeProviderPayload(`${label}=separator-canary`) as string;
+      expect(clean).not.toContain("separator-canary");
+    }
+  });
+
+  test("advances across repeated structured-token and armored candidates", () => {
+    for (const input of [
+      "eyj".repeat(100_000),
+      "xoxb-".repeat(100_000),
+      "-----BEGIN PRIVATE KEY-----x-----END PRIVATE KEY-----".repeat(10_000),
+    ]) {
+      expect(typeof sanitizeProviderPayload(input)).toBe("string");
+    }
   });
 
   test("fails closed on accessors and cycles without invoking provider code", () => {
