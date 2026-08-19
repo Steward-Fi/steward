@@ -150,6 +150,20 @@ describe("NamespacedStoreBackend", () => {
     }
   });
 
+  it("replaces a memory set-if-absent entry at its exact deadline", async () => {
+    const now = spyOn(Date, "now").mockReturnValue(1_000);
+    const backend = new MemoryBackend();
+    try {
+      expect(await backend.setIfNotExists("reservation", "old", 1_000)).toBe(true);
+      now.mockReturnValue(2_000);
+      expect(await backend.setIfNotExists("reservation", "replacement", 1_000)).toBe(true);
+      expect(await backend.get("reservation")).toBe("replacement");
+    } finally {
+      backend.destroy();
+      now.mockRestore();
+    }
+  });
+
   it("passes absolute deadlines to an atomic Redis server-time publication", async () => {
     let observedScript = "";
     let observedArgs: Array<string | number> = [];

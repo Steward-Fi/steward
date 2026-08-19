@@ -156,7 +156,7 @@ export class MemoryBackend implements StoreBackend {
   async setIfNotExists(key: string, value: string, ttlMs: number): Promise<boolean> {
     const existing = this.store.get(key);
     if (existing) {
-      if (Date.now() <= existing.expiresAt) return false;
+      if (Date.now() < existing.expiresAt) return false;
       this.store.delete(key);
     }
     this.store.set(key, { value, expiresAt: Date.now() + ttlMs });
