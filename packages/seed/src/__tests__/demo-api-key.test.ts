@@ -33,6 +33,13 @@ describe("demo API key", () => {
       symlinkSync(path, symlink);
       expect(() => writeDemoCredentials("other", pair.key, symlink)).toThrow();
       expect(readFileSync(path, "utf8")).toContain("STEWARD_TENANT_ID=waifu.fun");
+
+      const linkedParent = join(root, "linked-parent");
+      symlinkSync(dirname(path), linkedParent);
+      expect(() =>
+        writeDemoCredentials("other", pair.key, join(linkedParent, "other.env")),
+      ).toThrow("parent must be a real directory");
+      expect(() => readFileSync(join(dirname(path), "other.env"), "utf8")).toThrow();
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

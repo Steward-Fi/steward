@@ -4,6 +4,7 @@ import {
   constants as fsConstants,
   fstatSync,
   ftruncateSync,
+  lstatSync,
   mkdirSync,
   openSync,
   writeFileSync,
@@ -33,7 +34,15 @@ export function writeDemoCredentials(
     throw new Error("Demo credential tenant id is invalid");
   }
   const path = resolve(outputPath);
-  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  const parentPath = dirname(path);
+  mkdirSync(parentPath, { recursive: true, mode: 0o700 });
+  const parent = lstatSync(parentPath);
+  if (!parent.isDirectory() || parent.isSymbolicLink()) {
+    throw new Error("Demo credentials parent must be a real directory");
+  }
+  if (typeof process.geteuid === "function" && parent.uid !== process.geteuid()) {
+    throw new Error("Demo credentials parent must be owned by the current user");
+  }
   const fd = openSync(
     path,
     fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK,
