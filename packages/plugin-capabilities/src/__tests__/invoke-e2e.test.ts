@@ -50,6 +50,8 @@ let authMiddleware: typeof import("@stwd/proxy/src/middleware/auth")["authMiddle
 let handleProxy: typeof import("@stwd/proxy/src/handlers/proxy")["handleProxy"];
 let setForwardProxyRequestForTests: typeof import("@stwd/proxy/src/handlers/proxy")["__setForwardProxyRequestForTests"];
 let setResolveProxyHostForTests: typeof import("@stwd/proxy/src/handlers/proxy")["__setResolveProxyHostForTests"];
+let setCheckProxyRateLimitForTests: typeof import("@stwd/proxy/src/handlers/proxy")["__setCheckProxyRateLimitForTests"];
+let resetProxyHandlerTestHooksForTests: typeof import("@stwd/proxy/src/handlers/proxy")["__resetProxyHandlerTestHooksForTests"];
 
 interface ForwardedCapture {
   url: string;
@@ -60,6 +62,7 @@ interface ForwardedCapture {
 let lastForwarded: ForwardedCapture | null = null;
 let proxyApp: Hono | null = null;
 const realFetch = globalThis.fetch;
+const originalProxyDevMode = process.env.STEWARD_PROXY_DEV_MODE;
 
 // the policy set the injected getPolicySet returns for the current test.
 let currentPolicySet: PolicyRule[] = [];
@@ -89,6 +92,7 @@ beforeAll(async () => {
   process.env.STEWARD_PROXY_REQUIRE_REQUEST_SIGNATURE = "true";
   process.env.STEWARD_PROXY_REQUEST_SIGNING_SECRET = SIGNING_SECRET;
   process.env.STEWARD_PROXY_ALLOWED_HOSTS = "api.github.com,api.openai.com";
+  process.env.STEWARD_PROXY_DEV_MODE = "true";
   // the invoke route reads these to build its proxy client (fail-closed if absent).
   process.env.STEWARD_PROXY_URL = PROXY_URL;
 
@@ -107,11 +111,14 @@ beforeAll(async () => {
     handleProxy,
     __setForwardProxyRequestForTests: setForwardProxyRequestForTests,
     __setResolveProxyHostForTests: setResolveProxyHostForTests,
+    __setCheckProxyRateLimitForTests: setCheckProxyRateLimitForTests,
+    __resetProxyHandlerTestHooksForTests: resetProxyHandlerTestHooksForTests,
   } = await import("@stwd/proxy/src/handlers/proxy"));
 
   // deterministic public ip so route-match -> decrypt -> inject -> forward runs
   // with no external network (mirrors the #149 e2e).
   setResolveProxyHostForTests(async () => [{ address: "93.184.216.34", family: 4 }]);
+  setCheckProxyRateLimitForTests(async () => ({ allowed: true, resetMs: 0 }));
   setForwardProxyRequestForTests(async (url, method, headers, body) => {
     const bodyText = body ? await new Response(body).text() : null;
     lastForwarded = { url: url.toString(), method, headers, bodyText };
@@ -153,6 +160,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   globalThis.fetch = realFetch;
+  resetProxyHandlerTestHooksForTests();
   await closeDb().catch(() => {});
   delete process.env.STEWARD_PGLITE_MEMORY;
   delete process.env.STEWARD_MASTER_PASSWORD;
@@ -161,6 +169,8 @@ afterAll(async () => {
   delete process.env.STEWARD_PROXY_REQUEST_SIGNING_SECRET;
   delete process.env.STEWARD_PROXY_ALLOWED_HOSTS;
   delete process.env.STEWARD_PROXY_URL;
+  if (originalProxyDevMode === undefined) delete process.env.STEWARD_PROXY_DEV_MODE;
+  else process.env.STEWARD_PROXY_DEV_MODE = originalProxyDevMode;
 });
 
 let tenantId: string;
