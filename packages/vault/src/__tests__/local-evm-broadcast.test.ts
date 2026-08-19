@@ -72,6 +72,77 @@ describe("local EVM deterministic broadcast lifecycle", () => {
     expect(subject.events).toEqual(["prepare", "checkpoint", "release"]);
   });
 
+  test("preserves pre-broadcast failures and reports release failures with redacted diagnostics", async () => {
+    const originalConsoleError = console.error;
+    const diagnostics: unknown[][] = [];
+    console.error = (...args: unknown[]) => diagnostics.push(args);
+
+    try {
+      for (const stage of ["prepare", "checkpoint"] as const) {
+        const operationError = new Error(`${stage} failed`);
+        const subject = lifecycle({
+          prepare: async () => {
+            subject.events.push("prepare");
+            if (stage === "prepare") throw operationError;
+            return SERIALIZED;
+          },
+          checkpoint: async () => {
+            subject.events.push("checkpoint");
+            if (stage === "checkpoint") throw operationError;
+          },
+          releaseBeforeBroadcast: async () => {
+            subject.events.push("release");
+            throw new Error("DATABASE_URL=postgres://nonce-release-secret");
+          },
+        });
+
+        expect(await executeLocalEvmBroadcast(subject).catch((error) => error)).toBe(
+          operationError,
+        );
+        expect(subject.events).toEqual(
+          stage === "prepare" ? ["prepare", "release"] : ["prepare", "checkpoint", "release"],
+        );
+      }
+    } finally {
+      console.error = originalConsoleError;
+    }
+
+    expect(diagnostics).toEqual([
+      [
+        "[vault] Failed to release EVM nonce after pre-broadcast failure",
+        { errorClass: "Error", errorCode: null },
+      ],
+      [
+        "[vault] Failed to release EVM nonce after pre-broadcast failure",
+        { errorClass: "Error", errorCode: null },
+      ],
+    ]);
+    expect(JSON.stringify(diagnostics)).not.toContain("nonce-release-secret");
+  });
+
+  test("preserves the operation failure when the diagnostic sink throws", async () => {
+    const originalConsoleError = console.error;
+    const operationError = new Error("checkpoint failed");
+    console.error = () => {
+      throw new Error("diagnostic sink failed");
+    };
+
+    try {
+      const subject = lifecycle({
+        checkpoint: async () => {
+          throw operationError;
+        },
+        releaseBeforeBroadcast: async () => {
+          throw new Error("release failed");
+        },
+      });
+
+      expect(await executeLocalEvmBroadcast(subject).catch((error) => error)).toBe(operationError);
+    } finally {
+      console.error = originalConsoleError;
+    }
+  });
+
   test("reconciles a lost RPC response by deterministic hash without rebroadcasting", async () => {
     let broadcasts = 0;
     const subject = lifecycle({
