@@ -74,6 +74,7 @@ jobs:
           # consumes NUL-delimited filenames so hostile names cannot bypass the
           # package check.
           bun test scripts/__tests__/check-public-package-metadata.test.ts
+          bun test scripts/__tests__/wallet-e2e-authorization.test.ts
           bun scripts/check-public-package-metadata.ts "$BASE_SHA" "$HEAD_SHA"
 
       - name: Check PR title
