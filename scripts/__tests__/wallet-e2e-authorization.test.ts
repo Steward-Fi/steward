@@ -186,6 +186,25 @@ describe("wallet E2E target authorization", () => {
     expect(result.stderr).toContain("every required develop check");
   });
 
+  for (const latest of [
+    { conclusion: null, status: "in_progress" },
+    { conclusion: "failure", status: "completed" },
+  ] as const) {
+    test(`rejects an ambiguous same-second ${latest.status} required-check rerun`, async () => {
+      const fixtures = baselineFixtures();
+      fixtures.checkRuns.push({
+        ...fixtures.checkRuns[0],
+        completed_at: latest.status === "completed" ? "2026-08-19T20:00:20Z" : null,
+        conclusion: latest.conclusion,
+        id: 101,
+        status: latest.status,
+      });
+      const result = await execute(fixtures);
+      expect(result.exitCode).not.toBe(0);
+      expect(result.stderr).toContain("every required develop check");
+    });
+  }
+
   test("rejects a later changes-requested review", async () => {
     const fixtures = baselineFixtures();
     fixtures.reviews.push({

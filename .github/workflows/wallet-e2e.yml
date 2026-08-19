@@ -146,10 +146,11 @@ jobs:
                     (.started_at | type) == "string" and
                     (.started_at | length) > 0) and
                   (($matches | map(.id) | unique | length) == ($matches | length)) and
-                  ($matches |
-                    max_by([.started_at, (.completed_at // ""), .id])) as $latest |
-                  $latest.status == "completed" and
-                  $latest.conclusion == "success") and
+                  ($matches | map(.started_at) | max) as $latest_started_at |
+                  ([$matches[] | select(.started_at == $latest_started_at)]) as $latest |
+                  ($latest | length) == 1 and
+                  $latest[0].status == "completed" and
+                  $latest[0].conclusion == "success") and
                 all($status_contexts[];
                   . as $context |
                   ([$commit_statuses[] | select(.context == $context)]) as $matches |
