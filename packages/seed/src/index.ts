@@ -13,7 +13,7 @@ import {
   transactions,
 } from "../../db/src/index.ts";
 import { KeyStore } from "../../vault/src/index.ts";
-import { generateDemoApiKey } from "./demo-api-key";
+import { generateDemoApiKey, writeDemoCredentials } from "./demo-api-key";
 
 /* ──────────────────────────────────────────────────────────────────────────── */
 /*  Constants                                                                  */
@@ -162,6 +162,7 @@ async function seed() {
         updatedAt,
       },
     });
+  const demoCredentialsPath = writeDemoCredentials(TENANT_ID, DEMO_API_KEY.key);
 
   /* ════════════════════════════════════════════════════════════════════════ */
   /*  AGENT DEFINITIONS                                                      */
@@ -1996,7 +1997,7 @@ async function seed() {
 
   /* ── Summary ───────────────────────────────────────────────────────────── */
   console.log(`\nSeeded tenant: ${TENANT_ID}`);
-  console.log(`Demo API key:  ${DEMO_API_KEY.key}`);
+  console.log(`Demo credentials: ${demoCredentialsPath} (mode 0600)`);
   console.log(`Agents:        ${agentDefs.length}`);
   console.log(`Policies:      ${policySeeds.length}`);
   console.log(`Transactions:  ${txSeeds.length}`);
