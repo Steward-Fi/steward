@@ -8,15 +8,16 @@
  * (status, body, and content type), so requesters cannot enumerate tenant ids.
  */
 
-import { afterAll, beforeAll, describe, expect, it, setDefaultTimeout } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it, setDefaultTimeout, spyOn } from "bun:test";
 import { closeDb, getDb, tenants } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { Hono } from "hono";
 
-import { generateApiKey } from "../api-keys";
+import * as apiKeys from "../api-keys";
 
 const TENANT_ID = "sec132-known-tenant";
 const ENV_KEYS = ["STEWARD_PGLITE_MEMORY", "STEWARD_DB_MODE", "STEWARD_MASTER_PASSWORD"] as const;
+const UNKNOWN_TENANT_DUMMY_HASH = apiKeys.hashApiKey("steward-unknown-tenant-dummy-key");
 
 setDefaultTimeout(30_000);
 
@@ -24,18 +25,20 @@ describe("tenantAuthMiddleware unknown-tenant hardening (SEC-132)", () => {
   const savedEnv: Record<string, string | undefined> = {};
   let app: Hono;
   let validKey: string;
+  let validateApiKeySpy: ReturnType<typeof spyOn> | undefined;
 
   beforeAll(async () => {
     for (const key of ENV_KEYS) savedEnv[key] = process.env[key];
     process.env.STEWARD_PGLITE_MEMORY = "true";
     process.env.STEWARD_DB_MODE = "pglite";
     process.env.STEWARD_MASTER_PASSWORD ??= "sec132-middleware-test-master-password";
+    validateApiKeySpy = spyOn(apiKeys, "validateApiKey");
     const { db, client } = await createPGLiteDb("memory://");
     setPGLiteOverride(db, async () => {
       await client.close();
     });
 
-    const keyPair = generateApiKey();
+    const keyPair = apiKeys.generateApiKey();
     validKey = keyPair.key;
     await getDb()
       .insert(tenants)
@@ -50,12 +53,19 @@ describe("tenantAuthMiddleware unknown-tenant hardening (SEC-132)", () => {
   });
 
   afterAll(async () => {
-    await closeDb();
-    for (const key of ENV_KEYS) {
-      if (savedEnv[key] === undefined) {
-        delete process.env[key];
-      } else {
-        process.env[key] = savedEnv[key];
+    try {
+      await closeDb();
+    } finally {
+      try {
+        validateApiKeySpy?.mockRestore();
+      } finally {
+        for (const key of ENV_KEYS) {
+          if (savedEnv[key] === undefined) {
+            delete process.env[key];
+          } else {
+            process.env[key] = savedEnv[key];
+          }
+        }
       }
     }
   });
@@ -87,6 +97,7 @@ describe("tenantAuthMiddleware unknown-tenant hardening (SEC-132)", () => {
     expect(unknownTenantRes.headers.get("content-type")).toBe(
       knownBadKeyRes.headers.get("content-type"),
     );
+    expect(validateApiKeySpy).toHaveBeenCalledWith("stw_wrong_key", UNKNOWN_TENANT_DUMMY_HASH);
   });
 
   it("keeps the healthcheck bypass exact: GET / and /health only", async () => {
