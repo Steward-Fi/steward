@@ -342,10 +342,12 @@ describe("steward init", () => {
       );
       const [stderr, exitCode] = await Promise.all([new Response(proc.stderr).text(), proc.exited]);
       expect(exitCode).toBe(1);
-      // SEC-087: the gate now demands a server-authenticating TLS mode —
-      // sslmode=require alone no longer satisfies it.
-      expect(stderr).toContain("sslmode=verify-full");
-      expect(stderr).toContain("sslmode=verify-ca");
+      // SEC-087: the child reached the TLS gate rather than attempting a
+      // network connection. The migrator exposes only this fixed diagnostic
+      // code; raw exception text and the connection URL remain redacted.
+      expect(stderr).toContain('errorCode: "DB_TLS_REQUIRED"');
+      expect(stderr).not.toContain("192.0.2.1");
+      expect(stderr).not.toContain("sslmode=verify-full");
       expect(stderr).not.toContain("STEWARD_ALLOW_INSECURE_DB=true —");
     } finally {
       rmSync(dir, { recursive: true, force: true });

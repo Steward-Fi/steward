@@ -136,6 +136,11 @@ describe("redactedThrownDiagnostics", () => {
     });
     expect(
       redactedThrownDiagnostics(
+        Object.assign(new Error("database-url-canary"), { code: "DB_TLS_REQUIRED" }),
+      ),
+    ).toEqual({ errorClass: "Error", errorCode: "DB_TLS_REQUIRED" });
+    expect(
+      redactedThrownDiagnostics(
         Object.assign(new Error("message-canary"), { code: "SECRET code canary" }),
       ),
     ).toEqual({ errorClass: "Error", errorCode: null });
