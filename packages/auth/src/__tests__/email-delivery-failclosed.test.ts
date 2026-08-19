@@ -14,6 +14,7 @@ import {
   ConsoleProvider,
   EmailDeliveryError,
   EmailDeliveryNotConfiguredError,
+  type EmailDeliveryReceipt,
   type EmailProvider,
   MockEmailInbox,
   MockEmailProvider,
@@ -155,6 +156,28 @@ describe("fail-closed magic-link delivery", () => {
     ).toBe(false);
 
     auth.destroy();
+  });
+
+  it("rejects oversized and accessor-backed acceptance receipts without activating", async () => {
+    for (const receipt of [
+      { provider: "x".repeat(65) },
+      { provider: "test", id: "x".repeat(513) },
+      Object.defineProperty({}, "provider", {
+        get() {
+          throw new Error("receipt getter must not run");
+        },
+      }),
+    ]) {
+      const backend = new CapturingBackend();
+      const auth = buildAuth({ send: async () => receipt as EmailDeliveryReceipt }, backend);
+      await expect(
+        auth.sendMagicLink("receipt@example.com", { tenantId: "tenant-a" }),
+      ).rejects.toThrow(EmailDeliveryError);
+      expect(
+        [...backend.values.values()].some((entry) => entry.value.includes('"status":"active"')),
+      ).toBe(false);
+      auth.destroy();
+    }
   });
 
   it("succeeds and keeps the challenge redeemable when the provider returns a receipt", async () => {

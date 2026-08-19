@@ -297,6 +297,39 @@ type OtpChallengeRecord = {
   payload: MagicLinkPayload;
 };
 
+const MAX_EMAIL_RECEIPT_PROVIDER_LENGTH = 64;
+const MAX_EMAIL_RECEIPT_ID_LENGTH = 512;
+
+function boundedReceiptText(value: unknown, maxLength: number): value is string {
+  if (typeof value !== "string" || value.length === 0 || value.length > maxLength) return false;
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code < 0x20 || code === 0x7f) return false;
+  }
+  return value.trim().length > 0;
+}
+
+function isValidDeliveryReceipt(value: unknown): value is EmailDeliveryReceipt {
+  if (!value || typeof value !== "object") return false;
+  try {
+    const provider = Object.getOwnPropertyDescriptor(value, "provider");
+    if (
+      !provider ||
+      !("value" in provider) ||
+      !boundedReceiptText(provider.value, MAX_EMAIL_RECEIPT_PROVIDER_LENGTH)
+    ) {
+      return false;
+    }
+    const id = Object.getOwnPropertyDescriptor(value, "id");
+    return (
+      id === undefined ||
+      ("value" in id && boundedReceiptText(id.value, MAX_EMAIL_RECEIPT_ID_LENGTH))
+    );
+  } catch {
+    return false;
+  }
+}
+
 function encodeOtpChallenge(
   status: OtpChallengeRecord["status"],
   payload: MagicLinkPayload,
@@ -425,13 +458,7 @@ export class EmailAuth {
       console.error("[steward:auth] email provider rejected send", redactedThrownDiagnostics(err));
       throw new EmailDeliveryError();
     }
-    if (
-      !receipt ||
-      typeof receipt.provider !== "string" ||
-      receipt.provider.trim().length === 0 ||
-      (receipt.id !== undefined &&
-        (typeof receipt.id !== "string" || receipt.id.trim().length === 0))
-    ) {
+    if (!isValidDeliveryReceipt(receipt)) {
       console.error("[steward:auth] email provider returned no acceptance receipt");
       throw new EmailDeliveryError("Email provider returned no acceptance receipt");
     }
