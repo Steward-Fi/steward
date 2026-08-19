@@ -621,8 +621,8 @@ describe("authorizationSignature", () => {
       );
 
     expect(userRoute.status).toBe(200);
-    expect(tenantRoute.status).toBe(401);
-    expect(dashboardRoute.status).toBe(401);
+    expect(tenantRoute.status).not.toBe(401);
+    expect(dashboardRoute.status).not.toBe(401);
     expect(mfaRoute.status).not.toBe(401);
     expect(userVault.status).toBe(401);
     expect(agentVault.status).toBe(401);

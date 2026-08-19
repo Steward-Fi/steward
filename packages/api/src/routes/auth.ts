@@ -154,6 +154,7 @@ import {
   isAllowedOidcClientSecretEnvForTenant,
   normalizeOidcProviders,
 } from "../services/oidc-provider-config";
+import { processCacheIdentity } from "../services/process-cache-identity";
 import { socketPeerFromEnv } from "../services/runtime-gate";
 import { buildSamlServiceProviderUrls } from "../services/saml-sso-config";
 import { lockUserSession } from "../services/session-lock";
@@ -1711,10 +1712,8 @@ export function getPasskeyAuth(requestOrigin?: string): PasskeyAuth {
 // ─── EmailAuth cache ──────────────────────────────────────────────────────────
 
 const _emailAuthByTenant = new Map<string, Promise<EmailAuth>>();
-type KeyStoreConfiguration = { masterPassword: string; masterSalt: string };
-
-let _emailKeyStore: { configuration: KeyStoreConfiguration; keyStore: KeyStore } | null = null;
-let _oauthKeyStore: { configuration: KeyStoreConfiguration; keyStore: KeyStore } | null = null;
+let _emailKeyStore: { identity: string; keyStore: KeyStore } | null = null;
+let _oauthKeyStore: { identity: string; keyStore: KeyStore } | null = null;
 
 function createConfiguredKeyStore(missingPasswordMessage: string): KeyStore {
   const masterPassword = runtimeEnvironmentValue("STEWARD_MASTER_PASSWORD");
@@ -1728,18 +1727,11 @@ function createConfiguredKeyStore(missingPasswordMessage: string): KeyStore {
   return new KeyStore(masterPassword, masterSalt);
 }
 
-function keyStoreConfiguration(): KeyStoreConfiguration {
-  return {
-    masterPassword: runtimeEnvironmentValue("STEWARD_MASTER_PASSWORD") || "dev-secret",
-    masterSalt: runtimeEnvironmentValue("STEWARD_KDF_SALT") || "",
-  };
-}
-
-function sameKeyStoreConfiguration(
-  left: KeyStoreConfiguration,
-  right: KeyStoreConfiguration,
-): boolean {
-  return left.masterPassword === right.masterPassword && left.masterSalt === right.masterSalt;
+function keyStoreIdentity(): string {
+  return processCacheIdentity([
+    runtimeEnvironmentValue("STEWARD_MASTER_PASSWORD") || "dev-secret",
+    runtimeEnvironmentValue("STEWARD_KDF_SALT") || "",
+  ]);
 }
 
 function getEmailKeyStore(): KeyStore {
@@ -1748,14 +1740,12 @@ function getEmailKeyStore(): KeyStore {
       "STEWARD_MASTER_PASSWORD is required. For local development only, set STEWARD_ALLOW_DEV_SECRETS=true to use the insecure dev key.",
     );
   }
-  const configuration = keyStoreConfiguration();
-  if (_emailKeyStore && sameKeyStoreConfiguration(_emailKeyStore.configuration, configuration)) {
-    return _emailKeyStore.keyStore;
-  }
+  const identity = keyStoreIdentity();
+  if (_emailKeyStore?.identity === identity) return _emailKeyStore.keyStore;
   const keyStore = createConfiguredKeyStore(
     "STEWARD_MASTER_PASSWORD is required. For local development only, set STEWARD_ALLOW_DEV_SECRETS=true to use the insecure dev key.",
   );
-  _emailKeyStore = { configuration, keyStore };
+  _emailKeyStore = { identity, keyStore };
   return keyStore;
 }
 
@@ -1765,14 +1755,12 @@ function getOAuthKeyStore(): KeyStore {
       "STEWARD_MASTER_PASSWORD is required to encrypt OAuth provider tokens. For local development only, set STEWARD_ALLOW_DEV_SECRETS=true to use the insecure dev key.",
     );
   }
-  const configuration = keyStoreConfiguration();
-  if (_oauthKeyStore && sameKeyStoreConfiguration(_oauthKeyStore.configuration, configuration)) {
-    return _oauthKeyStore.keyStore;
-  }
+  const identity = keyStoreIdentity();
+  if (_oauthKeyStore?.identity === identity) return _oauthKeyStore.keyStore;
   const keyStore = createConfiguredKeyStore(
     "STEWARD_MASTER_PASSWORD is required to encrypt OAuth provider tokens. For local development only, set STEWARD_ALLOW_DEV_SECRETS=true to use the insecure dev key.",
   );
-  _oauthKeyStore = { configuration, keyStore };
+  _oauthKeyStore = { identity, keyStore };
   return keyStore;
 }
 
