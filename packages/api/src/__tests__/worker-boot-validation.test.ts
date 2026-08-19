@@ -8,7 +8,7 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { signAgentToken } from "@stwd/auth/jwt";
 import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
-import { decodeJwt } from "jose";
+import { decodeJwt, jwtVerify } from "jose";
 import worker, { hydrateProcessEnv } from "../worker";
 
 /**
@@ -168,26 +168,35 @@ describe("workers boot JWT env validation (SEC-134)", () => {
 
   it("uses the current Worker expiry binding when minting after module initialization", async () => {
     snapshotEnv();
-    const secret = "workers-rotated-expiry-secret-at-least-32-chars";
+    const firstSecret = "workers-first-rotated-secret-at-least-32-chars";
+    const rotatedSecret = "workers-second-rotated-secret-at-least-32-chars";
     hydrateProcessEnv({
-      STEWARD_JWT_SECRET: secret,
+      STEWARD_JWT_SECRET: firstSecret,
       AGENT_TOKEN_EXPIRY: "1h",
       DATABASE_URL: "unused",
     });
-    const first = decodeJwt(
-      await signAgentToken({ agentId: "worker-agent", tenantId: "worker-tenant" }),
-    );
+    const firstToken = await signAgentToken({ agentId: "worker-agent", tenantId: "worker-tenant" });
+    const first = decodeJwt(firstToken);
     hydrateProcessEnv({
-      STEWARD_JWT_SECRET: secret,
+      STEWARD_JWT_SECRET: rotatedSecret,
       AGENT_TOKEN_EXPIRY: "5m",
       DATABASE_URL: "unused",
     });
-    const rotated = decodeJwt(
-      await signAgentToken({ agentId: "worker-agent", tenantId: "worker-tenant" }),
-    );
+    const rotatedToken = await signAgentToken({
+      agentId: "worker-agent",
+      tenantId: "worker-tenant",
+    });
+    const rotated = decodeJwt(rotatedToken);
 
     expect((first.exp ?? 0) - (first.iat ?? 0)).toBe(3600);
     expect((rotated.exp ?? 0) - (rotated.iat ?? 0)).toBe(300);
+    await expect(
+      jwtVerify(firstToken, new TextEncoder().encode(firstSecret)),
+    ).resolves.toBeDefined();
+    await expect(
+      jwtVerify(rotatedToken, new TextEncoder().encode(rotatedSecret)),
+    ).resolves.toBeDefined();
+    await expect(jwtVerify(rotatedToken, new TextEncoder().encode(firstSecret))).rejects.toThrow();
   });
 
   it("validates scheduled security bindings before opening any database handle", async () => {
