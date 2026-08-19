@@ -480,8 +480,39 @@ type RequestDatabase = ReturnType<typeof createDb>["db"];
 interface RequestDatabaseContext {
   db: RequestDatabase | undefined;
   active: boolean;
+  backgroundTasks: Set<Promise<void>>;
 }
 const requestDatabaseStorage = new AsyncLocalStorage<RequestDatabaseContext>();
+
+async function drainRequestDatabaseTasks(context: RequestDatabaseContext): Promise<void> {
+  while (context.backgroundTasks.size > 0) {
+    await Promise.allSettled([...context.backgroundTasks]);
+  }
+}
+
+/**
+ * Keep a request-owned database capability alive for explicitly registered
+ * background work. Worker entry points hand the resulting drain promise to
+ * `waitUntil`, so the response may return without closing a WebSocket pool out
+ * from under webhook/audit writes. Outside a request context this is a no-op.
+ */
+export function registerRequestDatabaseTask<T>(task: Promise<T>): Promise<T> {
+  const context = requestDatabaseStorage.getStore();
+  if (!context) return task;
+  if (!context.active) return Promise.reject(new Error("REQUEST_DATABASE_CONTEXT_CLOSED"));
+
+  let tracked!: Promise<void>;
+  tracked = Promise.resolve(task)
+    .then(
+      () => undefined,
+      () => undefined,
+    )
+    .finally(() => {
+      context.backgroundTasks.delete(tracked);
+    });
+  context.backgroundTasks.add(tracked);
+  return task;
+}
 
 /**
  * Bind one explicitly owned database handle to the current async request.
@@ -495,19 +526,43 @@ const requestDatabaseStorage = new AsyncLocalStorage<RequestDatabaseContext>();
 export async function withRequestDatabase<T>(
   db: RequestDatabase,
   callback: () => Promise<T>,
+  options?: { deferCleanup?: (cleanup: Promise<void>) => void },
 ): Promise<T> {
   if (requestDatabaseStorage.getStore()) {
     throw new Error("REQUEST_DATABASE_CONTEXT_NESTED");
   }
-  const context: RequestDatabaseContext = { db, active: true };
-  try {
-    return await requestDatabaseStorage.run(context, callback);
-  } finally {
-    // Detached tasks inherit AsyncLocalStorage. Revoke their capability before
-    // the owning Worker closes its socket so late getDb() calls fail before I/O.
-    context.active = false;
-    context.db = undefined;
-  }
+  const context: RequestDatabaseContext = { db, active: true, backgroundTasks: new Set() };
+  return requestDatabaseStorage.run(context, async () => {
+    const noCallbackError = Symbol("no-callback-error");
+    let callbackError: unknown | typeof noCallbackError = noCallbackError;
+    let result: T | undefined;
+    try {
+      result = await callback();
+    } catch (error) {
+      callbackError = error;
+    }
+
+    const cleanup = drainRequestDatabaseTasks(context).finally(() => {
+      // Unregistered detached tasks still inherit AsyncLocalStorage. Revoke
+      // their capability before the owning Worker closes its socket so late
+      // getDb() calls fail before I/O.
+      context.active = false;
+      context.db = undefined;
+    });
+    if (options?.deferCleanup) {
+      try {
+        options.deferCleanup(cleanup);
+      } catch (error) {
+        await cleanup;
+        if (callbackError === noCallbackError) throw error;
+      }
+    } else {
+      await cleanup;
+    }
+
+    if (callbackError !== noCallbackError) throw callbackError;
+    return result as T;
+  });
 }
 
 // ─── Global singleton ─────────────────────────────────────────────────────────

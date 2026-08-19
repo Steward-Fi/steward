@@ -1,5 +1,11 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { closeDb, getDb, getSql, withRequestDatabase } from "../client";
+import {
+  closeDb,
+  getDb,
+  getSql,
+  registerRequestDatabaseTask,
+  withRequestDatabase,
+} from "../client";
 
 const originalDriver = process.env.DATABASE_DRIVER;
 
@@ -81,5 +87,41 @@ describe("request-scoped database context", () => {
     });
     release.resolve();
     await detached;
+  });
+
+  test("defers revocation until registered background database work settles", async () => {
+    const requestDb = { marker: "request" } as unknown as ReturnType<typeof getDb>;
+    const release = deferred();
+    let cleanup!: Promise<void>;
+    let background!: Promise<void>;
+
+    const result = await withRequestDatabase(
+      requestDb,
+      async () => {
+        background = registerRequestDatabaseTask(
+          (async () => {
+            await release.promise;
+            expect(getDb()).toBe(requestDb);
+          })(),
+        );
+        return "response";
+      },
+      {
+        deferCleanup(promise) {
+          cleanup = promise;
+        },
+      },
+    );
+
+    expect(result).toBe("response");
+    let cleaned = false;
+    void cleanup.then(() => {
+      cleaned = true;
+    });
+    await Promise.resolve();
+    expect(cleaned).toBe(false);
+    release.resolve();
+    await Promise.all([background, cleanup]);
+    expect(cleaned).toBe(true);
   });
 });
