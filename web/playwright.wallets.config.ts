@@ -24,17 +24,17 @@ export default defineConfig({
   workers: 1,
   reporter: process.env.CI ? "github" : "list",
   timeout: 120_000,
-  expect: { timeout: 15_000 },
-
-  globalSetup: require.resolve("./e2e/global-setup.ts"),
-  globalTeardown: require.resolve("./e2e/global-teardown.ts"),
-
   use: {
+    actionTimeout: 20_000,
     baseURL: BASE_URL,
     trace: "retain-on-failure",
     screenshot: "only-on-failure",
     video: "retain-on-failure",
   },
+  expect: { timeout: 15_000 },
+
+  globalSetup: require.resolve("./e2e/wallets/wallet-global-setup.ts"),
+  globalTeardown: require.resolve("./e2e/global-teardown.ts"),
 
   projects: [{ name: "wallets" }],
 });

@@ -415,7 +415,7 @@ jobs:
 
       - name: Test web/src
         working-directory: web
-        run: bun test src
+        run: bun test src e2e/wallets/wallet-e2e-contract.test.ts
 
   unit-redis:
     name: Unit Tests (packages/redis)
