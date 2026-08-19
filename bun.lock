@@ -486,6 +486,7 @@
       },
       "devDependencies": {
         "@simplewebauthn/browser": "^13.0.0",
+        "jose": "^6.2.1",
       },
     },
     "packages/seed": {
