@@ -23,10 +23,14 @@ async function releaseBeforeBroadcast(lifecycle: LocalEvmBroadcastLifecycle): Pr
   } catch (error) {
     // Preserve the operation failure for callers while making allocator cleanup
     // failures visible without exposing database or provider diagnostics.
-    console.error(
-      "[vault] Failed to release EVM nonce after pre-broadcast failure",
-      redactedThrownDiagnostics(error),
-    );
+    try {
+      console.error(
+        "[vault] Failed to release EVM nonce after pre-broadcast failure",
+        redactedThrownDiagnostics(error),
+      );
+    } catch {
+      // Diagnostics are best-effort and must never replace the operation error.
+    }
   }
 }
 

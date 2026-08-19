@@ -120,6 +120,29 @@ describe("local EVM deterministic broadcast lifecycle", () => {
     expect(JSON.stringify(diagnostics)).not.toContain("nonce-release-secret");
   });
 
+  test("preserves the operation failure when the diagnostic sink throws", async () => {
+    const originalConsoleError = console.error;
+    const operationError = new Error("checkpoint failed");
+    console.error = () => {
+      throw new Error("diagnostic sink failed");
+    };
+
+    try {
+      const subject = lifecycle({
+        checkpoint: async () => {
+          throw operationError;
+        },
+        releaseBeforeBroadcast: async () => {
+          throw new Error("release failed");
+        },
+      });
+
+      expect(await executeLocalEvmBroadcast(subject).catch((error) => error)).toBe(operationError);
+    } finally {
+      console.error = originalConsoleError;
+    }
+  });
+
   test("reconciles a lost RPC response by deterministic hash without rebroadcasting", async () => {
     let broadcasts = 0;
     const subject = lifecycle({
