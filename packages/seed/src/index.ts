@@ -11,9 +11,10 @@ import {
   policies,
   tenants,
   transactions,
+  withTenantAuditedTransactionOnDb,
 } from "../../db/src/index.ts";
 import { KeyStore } from "../../vault/src/index.ts";
-import { generateDemoApiKey, writeDemoCredentials } from "./demo-api-key";
+import { generateDemoApiKey, rotateDemoCredentials } from "./demo-api-key";
 
 /* ──────────────────────────────────────────────────────────────────────────── */
 /*  Constants                                                                  */
@@ -136,36 +137,45 @@ async function seed() {
     throw new Error("STEWARD_MASTER_PASSWORD is required");
   }
 
-  // Persist the one-time credential before touching the database. If the
-  // destination is unsafe or unwritable, fail without rotating the tenant's
-  // stored hash to a key the operator can no longer recover.
-  const demoCredentialsPath = writeDemoCredentials(TENANT_ID, DEMO_API_KEY.key);
   const db = getDb();
   const keyStore = new KeyStore(process.env.STEWARD_MASTER_PASSWORD);
   const createdAt = hoursAgo(168); // 7 days ago — agent creation time
   const updatedAt = hoursAgo(1);
 
-  console.log("Cleaning existing waifu.fun data...");
-  await cleanWaifuData();
-
-  /* ── Tenant upsert ─────────────────────────────────────────────────────── */
-  await db
-    .insert(tenants)
-    .values({
-      id: TENANT_ID,
-      name: TENANT_NAME,
-      apiKeyHash: DEMO_API_KEY.hash,
-      createdAt,
-      updatedAt,
-    })
-    .onConflictDoUpdate({
-      target: tenants.id,
-      set: {
-        name: TENANT_NAME,
-        apiKeyHash: DEMO_API_KEY.hash,
-        updatedAt,
-      },
+  /* ── Tenant credential rotation ───────────────────────────────────────── */
+  const demoCredentialsPath = await rotateDemoCredentials(TENANT_ID, DEMO_API_KEY.key, async () => {
+    console.log("Cleaning existing waifu.fun data...");
+    await cleanWaifuData();
+    await withTenantAuditedTransactionOnDb(db, TENANT_ID, async (txRaw, appendAudit) => {
+      const tx = txRaw as typeof db;
+      await tx
+        .insert(tenants)
+        .values({
+          id: TENANT_ID,
+          name: TENANT_NAME,
+          apiKeyHash: DEMO_API_KEY.hash,
+          createdAt,
+          updatedAt,
+        })
+        .onConflictDoUpdate({
+          target: tenants.id,
+          set: {
+            name: TENANT_NAME,
+            apiKeyHash: DEMO_API_KEY.hash,
+            updatedAt,
+          },
+        });
+      await appendAudit({
+        tenantId: TENANT_ID,
+        actorType: "system",
+        actorId: "demo-seed",
+        action: "tenant.api_key.rotate",
+        resourceType: "tenant",
+        resourceId: TENANT_ID,
+        metadata: { source: "demo-seed" },
+      });
     });
+  });
   /* ════════════════════════════════════════════════════════════════════════ */
   /*  AGENT DEFINITIONS                                                      */
   /* ════════════════════════════════════════════════════════════════════════ */
