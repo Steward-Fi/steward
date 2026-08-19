@@ -22,6 +22,8 @@ export interface StoreBackend {
   setIfNotExists(key: string, value: string, ttlMs: number): Promise<boolean>;
   get(key: string): Promise<string | null>;
   consume(key: string): Promise<string | null>;
+  /** Atomically replace an exact value. Repeating an already-applied transition succeeds. */
+  transition(key: string, expected: string, desired: string, ttlMs: number): Promise<boolean>;
   delete(key: string): Promise<void>;
 }
 
@@ -59,6 +61,15 @@ export class NamespacedStoreBackend implements StoreBackend {
 
   async consume(key: string): Promise<string | null> {
     return this.backend.consume(this.key(key));
+  }
+
+  async transition(
+    key: string,
+    expected: string,
+    desired: string,
+    ttlMs: number,
+  ): Promise<boolean> {
+    return this.backend.transition(this.key(key), expected, desired, ttlMs);
   }
 
   async delete(key: string): Promise<void> {
@@ -124,6 +135,22 @@ export class MemoryBackend implements StoreBackend {
     return entry.value;
   }
 
+  async transition(
+    key: string,
+    expected: string,
+    desired: string,
+    ttlMs: number,
+  ): Promise<boolean> {
+    const entry = this.store.get(key);
+    if (!entry || Date.now() > entry.expiresAt) {
+      this.store.delete(key);
+      return false;
+    }
+    if (entry.value !== expected && entry.value !== desired) return false;
+    this.store.set(key, { value: desired, expiresAt: Date.now() + ttlMs });
+    return true;
+  }
+
   async delete(key: string): Promise<void> {
     this.store.delete(key);
   }
@@ -162,6 +189,7 @@ export interface RedisLike {
   get(key: string): Promise<string | null>;
   getdel?(key: string): Promise<string | null>;
   del(...keys: string[]): Promise<number>;
+  eval(script: string, numberOfKeys: number, ...args: Array<string | number>): Promise<unknown>;
 }
 
 /**
@@ -193,6 +221,23 @@ export class RedisBackend implements StoreBackend {
       return this.client.getdel(this.prefix + key);
     }
     throw new Error("Redis backend does not support atomic GETDEL token consumption");
+  }
+
+  async transition(
+    key: string,
+    expected: string,
+    desired: string,
+    ttlMs: number,
+  ): Promise<boolean> {
+    const result = await this.client.eval(
+      "local v=redis.call('GET',KEYS[1]); if v==ARGV[1] or v==ARGV[2] then redis.call('SET',KEYS[1],ARGV[2],'PX',ARGV[3]); return 1 end; return 0",
+      1,
+      this.prefix + key,
+      expected,
+      desired,
+      ttlMs,
+    );
+    return result === 1 || result === "1";
   }
 
   async delete(key: string): Promise<void> {
@@ -304,6 +349,27 @@ export class PostgresBackend implements StoreBackend {
       RETURNING value
     `;
     return rows[0]?.value ?? null;
+  }
+
+  async transition(
+    key: string,
+    expected: string,
+    desired: string,
+    ttlMs: number,
+  ): Promise<boolean> {
+    await this.ensureTable();
+    const sql = this.getSqlClient();
+    const expiresAt = new Date(Date.now() + ttlMs).toISOString();
+    const rows = await sql<Array<{ id: string }>>`
+      UPDATE auth_kv_store
+         SET value = ${desired}, expires_at = ${expiresAt}
+       WHERE id = ${key}
+         AND namespace = ${this.namespace}
+         AND expires_at > now()
+         AND (value = ${expected} OR value = ${desired})
+      RETURNING id
+    `;
+    return rows.length > 0;
   }
 
   async delete(key: string): Promise<void> {

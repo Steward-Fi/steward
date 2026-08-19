@@ -4,6 +4,7 @@ import {
   buildBackend,
   MemoryBackend,
   NamespacedStoreBackend,
+  RedisBackend,
   type RedisLike,
   type StoreBackend,
 } from "../store-backends";
@@ -25,6 +26,12 @@ function redisLike(overrides: Partial<RedisLike> = {}): RedisLike {
       let removed = 0;
       for (const key of keys) if (store.delete(key)) removed += 1;
       return removed;
+    },
+    eval: async (_script, _keys, key, expected, desired) => {
+      const current = store.get(String(key));
+      if (current !== expected && current !== desired) return 0;
+      store.set(String(key), String(desired));
+      return 1;
     },
     ...overrides,
   };
@@ -54,6 +61,26 @@ describe("buildBackend Redis smoke test", () => {
 });
 
 describe("NamespacedStoreBackend", () => {
+  it("applies staged transitions atomically and idempotently across reconstructed stores", async () => {
+    const backend = new MemoryBackend();
+    const first = new NamespacedStoreBackend(backend, "email");
+    const second = new NamespacedStoreBackend(backend, "email");
+    await first.set("challenge", "staged", 60_000);
+    expect(await second.transition("challenge", "staged", "active", 60_000)).toBe(true);
+    expect(await first.transition("challenge", "staged", "active", 60_000)).toBe(true);
+    expect(await first.transition("challenge", "staged", "other", 60_000)).toBe(false);
+    expect(await second.get("challenge")).toBe("active");
+    backend.destroy();
+  });
+
+  it("uses an idempotent atomic Redis transition", async () => {
+    const store = new RedisBackend(redisLike(), "test:");
+    await store.set("challenge", "staged", 60_000);
+    expect(await store.transition("challenge", "staged", "active", 60_000)).toBe(true);
+    expect(await store.transition("challenge", "staged", "active", 60_000)).toBe(true);
+    expect(await store.transition("challenge", "staged", "other", 60_000)).toBe(false);
+  });
+
   it("shares values across reconstructed stores in the same namespace", async () => {
     const backend = new MemoryBackend();
     const first = new NamespacedStoreBackend(backend, "wallet-link");
@@ -100,6 +127,7 @@ describe("NamespacedStoreBackend", () => {
       setIfNotExists: async () => true,
       get: async () => null,
       consume: async () => null,
+      transition: async () => false,
       delete: async () => undefined,
     };
     const store = new NamespacedStoreBackend(backend, "oauth-link");
@@ -119,6 +147,7 @@ describe("NamespacedStoreBackend", () => {
         consumeCalls += 1;
         throw new Error("durable backend unavailable");
       },
+      transition: async () => false,
       delete: async () => undefined,
     };
     const store = new NamespacedStoreBackend(backend, "wallet-link");

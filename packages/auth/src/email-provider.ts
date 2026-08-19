@@ -98,8 +98,11 @@ export class ResendProvider implements EmailProvider {
     if (error) {
       throw new Error(`Resend error: ${error.message}`);
     }
+    if (!data || typeof data.id !== "string" || data.id.trim().length === 0) {
+      throw new Error("Resend returned no delivery acceptance id");
+    }
 
-    return { provider: "resend", ...(data?.id ? { id: data.id } : {}) };
+    return { provider: "resend", id: data.id };
   }
 }
 

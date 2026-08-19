@@ -9,6 +9,7 @@
  */
 import { afterEach, describe, expect, it } from "bun:test";
 
+import { hashSha256Hex } from "../crypto";
 import { EmailAuth } from "../email";
 import {
   ConsoleProvider,
@@ -20,7 +21,7 @@ import {
   MockEmailProvider,
   ResendProvider,
 } from "../email-provider";
-import type { StoreBackend } from "../store-backends";
+import { MemoryBackend, type StoreBackend } from "../store-backends";
 import { TokenStore } from "../token-store";
 
 class CapturingBackend implements StoreBackend {
@@ -28,32 +29,24 @@ class CapturingBackend implements StoreBackend {
   failWrites = false;
   failActiveWrites = false;
   failActiveWritesAfterCommit = false;
+  failReadsAfterActiveCommit = false;
+  activeTransitionFailuresAfterCommit = 0;
   failDeletes = false;
 
-  private isActivationWrite(key: string, value: string): boolean {
-    if (
-      key.startsWith("email-login:pending:") &&
-      value.includes('"status":"pending"') &&
-      value.includes('"emailHash"')
-    ) {
-      return true;
-    }
-    if (key.length !== 64) return false;
-    try {
-      const parsed = JSON.parse(value) as Record<string, unknown>;
-      return typeof parsed.email === "string" && parsed.status === undefined;
-    } catch {
-      return false;
-    }
+  private isActivation(value: string): boolean {
+    return (
+      value.includes('"status":"active"') ||
+      (value.includes('"purpose":"email-login"') && value.includes('"status":"pending"'))
+    );
   }
 
   async set(key: string, value: string, ttlMs: number): Promise<void> {
     if (this.failWrites) throw new Error("durable store unavailable");
-    if (this.failActiveWrites && this.isActivationWrite(key, value)) {
+    if (this.failActiveWrites && this.isActivation(value)) {
       throw new Error("durable activation unavailable");
     }
     this.values.set(key, { value, expiresAt: Date.now() + ttlMs });
-    if (this.failActiveWritesAfterCommit && this.isActivationWrite(key, value)) {
+    if (this.failActiveWritesAfterCommit && this.isActivation(value)) {
       throw new Error("durable activation response lost");
     }
   }
@@ -65,6 +58,9 @@ class CapturingBackend implements StoreBackend {
   }
 
   async get(key: string): Promise<string | null> {
+    if (this.failReadsAfterActiveCommit && this.activeTransitionFailuresAfterCommit > 0) {
+      throw new Error("durable read unavailable");
+    }
     const entry = this.values.get(key);
     if (!entry) return null;
     if (Date.now() > entry.expiresAt) {
@@ -78,6 +74,23 @@ class CapturingBackend implements StoreBackend {
     const value = await this.get(key);
     this.values.delete(key);
     return value;
+  }
+
+  async transition(
+    key: string,
+    expected: string,
+    desired: string,
+    ttlMs: number,
+  ): Promise<boolean> {
+    const entry = this.values.get(key);
+    const current = entry && Date.now() <= entry.expiresAt ? entry.value : null;
+    if (current !== expected && current !== desired) return false;
+    if (this.failActiveWrites) throw new Error("durable activation unavailable");
+    this.values.set(key, { value: desired, expiresAt: Date.now() + ttlMs });
+    if (this.failActiveWritesAfterCommit && this.activeTransitionFailuresAfterCommit++ === 0) {
+      throw new Error("durable activation response lost");
+    }
+    return true;
   }
 
   async delete(key: string): Promise<void> {
@@ -156,6 +169,49 @@ describe("fail-closed magic-link delivery", () => {
     auth.destroy();
   });
 
+  it("bounds provider waits and keeps timed-out credentials staged", async () => {
+    const backend = new CapturingBackend();
+    const auth = new EmailAuth({
+      from: "login@steward.fi",
+      baseUrl: "https://steward.fi",
+      provider: { send: () => new Promise(() => {}) },
+      tokenStore: new TokenStore({ backend }),
+      codeVerifierSecret: "fail-closed-test-secret-at-least-32-characters",
+      deliveryTimeoutMs: 10,
+    });
+    await expect(auth.sendMagicLink("timeout@example.com")).rejects.toThrow(EmailDeliveryError);
+    expect(
+      [...backend.values.values()].some(({ value }) => value.includes('"delivery_pending"')),
+    ).toBe(true);
+    auth.destroy();
+  });
+
+  it("redacts failures from hostile receipt getters", async () => {
+    const backend = new CapturingBackend();
+    const secret = "receipt-getter-secret-canary";
+    const errors: unknown[] = [];
+    const originalError = console.error;
+    console.error = (...args: unknown[]) => errors.push(args);
+    try {
+      const auth = buildAuth(
+        {
+          send: async () =>
+            Object.defineProperty({}, "provider", {
+              get: () => {
+                throw new Error(secret);
+              },
+            }) as never,
+        },
+        backend,
+      );
+      await expect(auth.sendMagicLink("getter@example.com")).rejects.toThrow(EmailDeliveryError);
+      expect(JSON.stringify(errors)).not.toContain(secret);
+      auth.destroy();
+    } finally {
+      console.error = originalError;
+    }
+  });
+
   it("treats a missing acceptance receipt as delivery failure without activating", async () => {
     const backend = new CapturingBackend();
     // Legacy void-returning provider: resolves but produces NO receipt.
@@ -221,34 +277,79 @@ describe("fail-closed magic-link delivery", () => {
     auth.destroy();
   });
 
-  it("writes active magic-link and OTP records in the deployed-reader formats", async () => {
+  it("writes committed credentials in the legacy-readable rolling-deploy format", async () => {
     const backend = new CapturingBackend();
-    const messages: string[] = [];
-    const auth = buildAuth(
+    let text = "";
+    const writer = buildAuth(
       {
         send: async (_to, _subject, body) => {
-          messages.push(body);
-          return { provider: "test", id: `accepted-${messages.length}` };
+          text = body;
+          return { provider: "test", id: "rolling-compatible" };
         },
       },
       backend,
     );
 
-    const issued = await auth.sendMagicLink("rolling@example.com", { tenantId: "tenant-a" });
-    const challengeId = await backend.consume(`email-login:link:${issued.tokenHash}`);
-    expect(challengeId).toBe(issued.challengeId);
-    const challenge = JSON.parse(
-      (await backend.consume(`email-login:pending:${challengeId}`)) ?? "null",
-    ) as Record<string, unknown> | null;
-    expect(challenge?.status).toBe("pending");
-    expect(challenge?.purpose).toBe("email-login");
+    await writer.sendMagicLink("rolling@example.com", { tenantId: "tenant-a" });
+    const linkAlias = [...backend.values.entries()].find(([key]) =>
+      key.startsWith("email-login:link:"),
+    )?.[1].value;
+    expect(linkAlias).toBeTruthy();
+    const oldMagicRecord = JSON.parse(
+      backend.values.get(`email-login:pending:${linkAlias}`)?.value ?? "null",
+    );
+    expect(oldMagicRecord).toMatchObject({ status: "pending", purpose: "email-login" });
 
-    await auth.sendOtp("rolling-otp@example.com", { tenantId: "tenant-a" });
-    const otpKey = [...backend.values.keys()].find((key) => key.length === 64);
-    expect(otpKey).toBeDefined();
-    const otpPayload = JSON.parse((await backend.consume(otpKey ?? "")) ?? "null");
-    expect(otpPayload).toEqual({ email: "rolling-otp@example.com", tenantId: "tenant-a" });
+    await writer.sendOtp("rolling@example.com", { tenantId: "tenant-a" });
+    const otpKey = [...backend.values.entries()].find(([key]) =>
+      key.startsWith("email-otp:active:"),
+    )?.[1].value;
+    const oldOtpRecord = JSON.parse(backend.values.get(otpKey ?? "")?.value ?? "null");
+    expect(oldOtpRecord).toEqual({
+      email: "rolling@example.com",
+      tenantId: "tenant-a",
+    });
+    expect(text).not.toBe("");
+    writer.destroy();
+  });
 
+  it("allows exactly one redemption across independent instances sharing a backend", async () => {
+    const backend = new MemoryBackend();
+    let text = "";
+    const config = {
+      from: "login@steward.fi",
+      baseUrl: "https://steward.fi",
+      provider: {
+        send: async (_to: string, _subject: string, body: string) => {
+          text = body;
+          return { provider: "test", id: "shared-backend" };
+        },
+      },
+      codeVerifierSecret: "fail-closed-test-secret-at-least-32-characters",
+    };
+    const writer = new EmailAuth({ ...config, tokenStore: new TokenStore({ backend }) });
+    const verifier = new EmailAuth({ ...config, tokenStore: new TokenStore({ backend }) });
+    await writer.sendMagicLink("multi@example.com", { tenantId: "tenant-a" });
+    const token = text.match(/[?&]token=([a-f0-9]{64})/)?.[1] ?? "";
+    const results = await Promise.all([
+      writer.verifyMagicLink(token, "multi@example.com", "tenant-a"),
+      verifier.verifyMagicLink(token, "multi@example.com", "tenant-a"),
+    ]);
+    expect(results.filter((result) => result.valid)).toHaveLength(1);
+    writer.destroy();
+    verifier.destroy();
+    backend.destroy();
+  });
+
+  it("reads mixed-case OTP records issued by a legacy pod", async () => {
+    const backend = new CapturingBackend();
+    const auth = buildAuth({ send: async () => ({ provider: "test" }) }, backend);
+    const code = "123456";
+    const legacyEmail = "MixedCase@Example.com";
+    const key = hashSha256Hex(`email-otp:tenant-a:${legacyEmail}:${code}`);
+    await backend.set(key, JSON.stringify({ email: legacyEmail, tenantId: "tenant-a" }), 60_000);
+    expect(await auth.verifyOtp(legacyEmail, code, "tenant-a")).toBe(true);
+    expect(await auth.verifyOtp(legacyEmail, code, "tenant-a")).toBe(false);
     auth.destroy();
   });
 
@@ -472,6 +573,7 @@ describe("fail-closed magic-link delivery", () => {
         send: async (_to, _subject, body) => {
           text = body;
           backend.failActiveWritesAfterCommit = true;
+          backend.failReadsAfterActiveCommit = true;
           return { provider: "test", id: "accepted-before-ack-loss" };
         },
       },
@@ -479,6 +581,7 @@ describe("fail-closed magic-link delivery", () => {
     );
 
     await auth.sendMagicLink("ack-loss@example.com", { tenantId: "tenant-a" });
+    backend.failReadsAfterActiveCommit = false;
     const token = text.match(/[?&]token=([a-f0-9]{64})/)?.[1] ?? "";
     expect(await auth.verifyMagicLink(token, "ack-loss@example.com", "tenant-a")).toMatchObject({
       valid: true,
@@ -543,47 +646,6 @@ describe("fail-closed magic-link delivery", () => {
     auth.destroy();
   });
 
-  it("redeems active wrapper records emitted before the rolling-format fix", async () => {
-    const backend = new CapturingBackend();
-    const messages: string[] = [];
-    const auth = buildAuth(
-      {
-        send: async (_to, _subject, body) => {
-          messages.push(body);
-          return { provider: "test", id: `accepted-${messages.length}` };
-        },
-      },
-      backend,
-    );
-
-    await auth.sendMagicLink("active-wrapper@example.com", { tenantId: "tenant-a" });
-    const magicRecord = [...backend.values.values()].find((entry) =>
-      entry.value.includes('"purpose":"email-login"'),
-    );
-    expect(magicRecord).toBeDefined();
-    if (magicRecord) {
-      magicRecord.value = JSON.stringify({ ...JSON.parse(magicRecord.value), status: "active" });
-    }
-    const token = messages[0]?.match(/[?&]token=([a-f0-9]{64})/)?.[1] ?? "";
-    expect(
-      await auth.verifyMagicLink(token, "active-wrapper@example.com", "tenant-a"),
-    ).toMatchObject({ valid: true });
-
-    await auth.sendOtp("active-wrapper-otp@example.com", { tenantId: "tenant-a" });
-    const otpRecord = [...backend.values.entries()].find(([key]) => key.length === 64);
-    expect(otpRecord).toBeDefined();
-    if (otpRecord) {
-      otpRecord[1].value = JSON.stringify({
-        status: "active",
-        payload: JSON.parse(otpRecord[1].value),
-      });
-    }
-    const otpCode = messages[1]?.match(/\b(\d{6})\b/)?.[1] ?? "";
-    expect(await auth.verifyOtp("active-wrapper-otp@example.com", otpCode, "tenant-a")).toBe(true);
-
-    auth.destroy();
-  });
-
   it("rejects malformed active magic-link and OTP records", async () => {
     const magicBackend = new CapturingBackend();
     let magicText = "";
@@ -619,7 +681,10 @@ describe("fail-closed magic-link delivery", () => {
       otpBackend,
     );
     await otpAuth.sendOtp("malformed-otp@example.com", { tenantId: "tenant-a" });
-    const otpRecord = [...otpBackend.values.entries()].find(([key]) => key.length === 64);
+    const otpRecord = [...otpBackend.values.entries()].find(
+      ([key, entry]) =>
+        key.length === 64 && entry.value.includes('"email":"malformed-otp@example.com"'),
+    );
     expect(otpRecord).toBeDefined();
     if (otpRecord) {
       otpRecord[1].value = JSON.stringify({
@@ -761,8 +826,9 @@ describe("acceptance receipts per provider", () => {
     (provider as any).client = {
       emails: { send: async () => ({ data: null, error: null }) },
     };
-    // Accepted but no id: still a receipt, id omitted.
-    expect(await provider.send("a@example.com", "s", "t")).toEqual({ provider: "resend" });
+    await expect(provider.send("a@example.com", "s", "t")).rejects.toThrow(
+      "no delivery acceptance id",
+    );
 
     (provider as any).client = {
       emails: { send: async () => ({ data: null, error: { message: "invalid api key" } }) },
