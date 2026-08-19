@@ -105,6 +105,28 @@ Partitioned tables require policies on the parent plus an activation assertion
 over `pg_partition_tree`. The catalog gate must also reject every non-inventory
 table in future migrations.
 
+`inspectRlsCatalog` is the read-only structural gate for that maintenance
+window. The caller must name the runtime role being assessed; the inspection
+connection is not assumed to be the runtime identity. The gate rejects owner
+roles whose privileges the runtime can inherit or assume, plus any assumable
+`SUPERUSER` or `BYPASSRLS` role. It traverses partition trees by relation OID,
+including partitions stored outside the root table's schema.
+
+The mandatory inventory includes every core Drizzle table. A deployment using
+the PostgreSQL auth compatibility store must add the exported auth inventory
+contribution for `auth_kv_store`; deployments with plugin-owned relations must
+likewise pass an explicit protected or RLS-excluded contribution for every
+plugin. Contributions can extend but cannot replace the mandatory inventory.
+Unknown, missing, duplicate, or ambiguously classified relations fail closed.
+The gate accepts a fully inactive catalog (including policies staged while all
+RLS flags remain off), but once any protected table or partition has an RLS
+flag it requires the complete inventoried set to be `ENABLE` + `FORCE`.
+
+The gate counts policy coverage; it does not prove policy expressions correct
+and is not wired to production startup yet. Activation still requires the
+policy generator, restricted bootstrap roles/functions, transaction
+propagation, and the full cross-tenant suite.
+
 ## Roles and activation order
 
 1. Create a NOLOGIN migration owner and a distinct LOGIN application role with
