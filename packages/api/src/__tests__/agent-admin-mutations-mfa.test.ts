@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it, setDefaultTimeout } from "bun:test";
 import { revocationStore } from "@stwd/auth";
 import {
+  __resetAuditHmacKeyCacheForTests,
   agents,
   agentWallets,
   auditEvents,
@@ -26,6 +27,14 @@ import type { AppVariables } from "../services/context";
 
 const TENANT_ID = `agent-admin-mutations-${Date.now()}`;
 const AGENT_ID = `agent-admin-mutations-agent-${Date.now()}`;
+const MUTATED_ENV = [
+  "STEWARD_PGLITE_MEMORY",
+  "STEWARD_MASTER_PASSWORD",
+  "STEWARD_JWT_SECRET",
+  "STEWARD_AUDIT_HMAC_KEY",
+  "STEWARD_ALLOW_API_KEY_ADMIN_MUTATIONS",
+] as const;
+const originalEnv = new Map(MUTATED_ENV.map((name) => [name, process.env[name]]));
 
 setDefaultTimeout(30000);
 
@@ -57,6 +66,7 @@ describe("agent admin mutations require human session + MFA (SEC-209)", () => {
     process.env.STEWARD_MASTER_PASSWORD = "agent-admin-mutations-master-password";
     process.env.STEWARD_JWT_SECRET = "agent-admin-mutations-jwt-secret-with-enough-entropy";
     process.env.STEWARD_AUDIT_HMAC_KEY = "agent-admin-mutations-audit-hmac-key-entropy";
+    __resetAuditHmacKeyCacheForTests();
     const { db, client } = await createPGLiteDb("memory://");
     setPGLiteOverride(db, async () => {
       await client.close();
@@ -76,11 +86,11 @@ describe("agent admin mutations require human session + MFA (SEC-209)", () => {
 
   afterAll(async () => {
     await closeDb();
-    delete process.env.STEWARD_PGLITE_MEMORY;
-    delete process.env.STEWARD_MASTER_PASSWORD;
-    delete process.env.STEWARD_JWT_SECRET;
-    delete process.env.STEWARD_AUDIT_HMAC_KEY;
-    delete process.env.STEWARD_ALLOW_API_KEY_ADMIN_MUTATIONS;
+    for (const [name, value] of originalEnv) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+    __resetAuditHmacKeyCacheForTests();
   });
 
   it("rejects a bare tenant API key on all three root-equivalent mutations", async () => {
@@ -196,8 +206,9 @@ describe("agent admin mutations require human session + MFA (SEC-209)", () => {
       .where(eq(policies.agentId, AGENT_ID));
     expect(await revocationStore.getAgentRevokedBefore(AGENT_ID)).toBeNull();
 
-    await getDb().execute(
-      sql.raw(`
+    try {
+      await getDb().execute(
+        sql.raw(`
         CREATE OR REPLACE FUNCTION fail_agent_authorization_audit()
         RETURNS trigger AS $$
         BEGIN
@@ -212,17 +223,15 @@ describe("agent admin mutations require human session + MFA (SEC-209)", () => {
           RETURN NEW;
         END;
         $$ LANGUAGE plpgsql
-      `),
-    );
-    await getDb().execute(
-      sql.raw(`
+        `),
+      );
+      await getDb().execute(
+        sql.raw(`
         CREATE TRIGGER agent_authorization_audit_failure
         BEFORE INSERT ON audit_events
         FOR EACH ROW EXECUTE FUNCTION fail_agent_authorization_audit()
-      `),
-    );
-
-    try {
+        `),
+      );
       const responses = [
         await app.request("/agents", {
           method: "POST",
@@ -275,8 +284,9 @@ describe("agent admin mutations require human session + MFA (SEC-209)", () => {
     const beforeEvmKeys = await getDb().select().from(encryptedKeys);
     const beforeChainKeys = await getDb().select().from(encryptedChainKeys);
 
-    await getDb().execute(
-      sql.raw(`
+    try {
+      await getDb().execute(
+        sql.raw(`
         CREATE OR REPLACE FUNCTION fail_agent_completion_audit()
         RETURNS trigger AS $$
         BEGIN
@@ -286,17 +296,15 @@ describe("agent admin mutations require human session + MFA (SEC-209)", () => {
           RETURN NEW;
         END;
         $$ LANGUAGE plpgsql
-      `),
-    );
-    await getDb().execute(
-      sql.raw(`
+        `),
+      );
+      await getDb().execute(
+        sql.raw(`
         CREATE TRIGGER agent_completion_audit_failure
         BEFORE INSERT ON audit_events
         FOR EACH ROW EXECUTE FUNCTION fail_agent_completion_audit()
-      `),
-    );
-
-    try {
+        `),
+      );
       const createResponse = await app.request("/agents", {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -450,8 +458,9 @@ describe("agent admin mutations require human session + MFA (SEC-209)", () => {
       .from(policies)
       .where(eq(policies.agentId, AGENT_ID));
 
-    await getDb().execute(
-      sql.raw(`
+    try {
+      await getDb().execute(
+        sql.raw(`
         CREATE OR REPLACE FUNCTION fail_agent_delete_completion_audit()
         RETURNS trigger AS $$
         BEGIN
@@ -461,17 +470,15 @@ describe("agent admin mutations require human session + MFA (SEC-209)", () => {
           RETURN NEW;
         END;
         $$ LANGUAGE plpgsql
-      `),
-    );
-    await getDb().execute(
-      sql.raw(`
+        `),
+      );
+      await getDb().execute(
+        sql.raw(`
         CREATE TRIGGER agent_delete_completion_audit_failure
         BEFORE INSERT ON audit_events
         FOR EACH ROW EXECUTE FUNCTION fail_agent_delete_completion_audit()
-      `),
-    );
-
-    try {
+        `),
+      );
       const failed = await app.request(`/agents/${AGENT_ID}`, { method: "DELETE" });
       expect(failed.status).toBe(500);
       expect(await getDb().select().from(agents).where(eq(agents.id, AGENT_ID))).toEqual(

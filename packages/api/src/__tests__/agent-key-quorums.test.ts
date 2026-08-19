@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import {
+  __resetAuditHmacKeyCacheForTests,
   agentKeyQuorums,
   agentSigners,
   agents,
@@ -15,6 +16,12 @@ import type { AppVariables } from "../services/context";
 
 const TENANT_ID = `agent-quorums-tenant-${Date.now()}`;
 const AGENT_ID = `agent-quorums-agent-${Date.now()}`;
+const MUTATED_ENV = [
+  "STEWARD_PGLITE_MEMORY",
+  "STEWARD_MASTER_PASSWORD",
+  "STEWARD_AUDIT_HMAC_KEY",
+] as const;
+const originalEnv = new Map(MUTATED_ENV.map((name) => [name, process.env[name]]));
 
 async function makeApp(authMode: "admin" | "admin-no-mfa" | "api-key" = "admin") {
   const { agentRoutes } = await import("../routes/agents");
@@ -47,6 +54,7 @@ describe("agent key quorum API", () => {
     process.env.STEWARD_PGLITE_MEMORY = "true";
     process.env.STEWARD_MASTER_PASSWORD = "agent-quorums-master-password";
     process.env.STEWARD_AUDIT_HMAC_KEY = "agent-quorums-audit-hmac-key-with-enough-entropy";
+    __resetAuditHmacKeyCacheForTests();
     const { db, client } = await createPGLiteDb("memory://");
     setPGLiteOverride(db, async () => {
       await client.close();
@@ -111,9 +119,11 @@ describe("agent key quorum API", () => {
 
   afterAll(async () => {
     await closeDb();
-    delete process.env.STEWARD_PGLITE_MEMORY;
-    delete process.env.STEWARD_MASTER_PASSWORD;
-    delete process.env.STEWARD_AUDIT_HMAC_KEY;
+    for (const [name, value] of originalEnv) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+    __resetAuditHmacKeyCacheForTests();
   });
 
   it("creates, lists, updates, and revokes key quorums", async () => {
@@ -285,6 +295,10 @@ describe("agent key quorum API", () => {
 
   it("requires recent MFA for key quorum creation and privilege changes", async () => {
     const noMfaApp = await makeApp("admin-no-mfa");
+    const beforeQuorum = await getDb()
+      .select()
+      .from(agentKeyQuorums)
+      .where(eq(agentKeyQuorums.id, quorumId));
     const createResponse = await noMfaApp.request(`/agents/${AGENT_ID}/key-quorums`, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -311,6 +325,30 @@ describe("agent key quorum API", () => {
       ok: false,
       error: expect.stringContaining("recent MFA"),
     });
+
+    const statusResponse = await noMfaApp.request(`/agents/${AGENT_ID}/key-quorums/${quorumId}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ status: "paused" }),
+    });
+    expect(statusResponse.status).toBe(403);
+    await expect(statusResponse.json()).resolves.toMatchObject({
+      ok: false,
+      error: expect.stringContaining("recent MFA"),
+    });
+
+    const deleteResponse = await noMfaApp.request(`/agents/${AGENT_ID}/key-quorums/${quorumId}`, {
+      method: "DELETE",
+    });
+    expect(deleteResponse.status).toBe(403);
+    await expect(deleteResponse.json()).resolves.toMatchObject({
+      ok: false,
+      error: expect.stringContaining("recent MFA"),
+    });
+
+    expect(
+      await getDb().select().from(agentKeyQuorums).where(eq(agentKeyQuorums.id, quorumId)),
+    ).toEqual(beforeQuorum);
   });
 
   it("rolls back quorum creation, update, and revocation when completion audits fail", async () => {
@@ -328,8 +366,9 @@ describe("agent key quorum API", () => {
       })
       .returning();
 
-    await getDb().execute(
-      sql.raw(`
+    try {
+      await getDb().execute(
+        sql.raw(`
         CREATE OR REPLACE FUNCTION fail_agent_quorum_completion_audit()
         RETURNS trigger AS $$
         BEGIN
@@ -343,17 +382,15 @@ describe("agent key quorum API", () => {
           RETURN NEW;
         END;
         $$ LANGUAGE plpgsql
-      `),
-    );
-    await getDb().execute(
-      sql.raw(`
+        `),
+      );
+      await getDb().execute(
+        sql.raw(`
         CREATE TRIGGER agent_quorum_completion_audit_failure
         BEFORE INSERT ON audit_events
         FOR EACH ROW EXECUTE FUNCTION fail_agent_quorum_completion_audit()
-      `),
-    );
-
-    try {
+        `),
+      );
       const create = await app.request(`/agents/${AGENT_ID}/key-quorums`, {
         method: "POST",
         headers: { "content-type": "application/json" },

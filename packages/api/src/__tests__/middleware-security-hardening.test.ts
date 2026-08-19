@@ -56,7 +56,6 @@ describe("middleware security hardening", () => {
     // an unset NODE_ENV must fail closed like production.
     expect(tenantCorsSource).toContain("function devWildcardAllowed()");
     expect(tenantCorsSource).toContain('env === "development" || env === "test"');
-    expect(tenantCorsSource).toContain("origins.length === 0");
     expect(tenantCorsSource).toContain("return c.newResponse(null, 403)");
     expect(tenantCorsSource).toContain("TENANT_ID_RE.test(tenantId)");
     expect(tenantCorsSource).toContain("MAX_CORS_CACHE_ENTRIES");

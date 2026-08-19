@@ -1,5 +1,13 @@
 import { afterAll, beforeAll, describe, expect, it, setDefaultTimeout } from "bun:test";
-import { agentPolicies, agents, auditEvents, closeDb, getDb, tenants } from "@stwd/db";
+import {
+  __resetAuditHmacKeyCacheForTests,
+  agentPolicies,
+  agents,
+  auditEvents,
+  closeDb,
+  getDb,
+  tenants,
+} from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { and, asc, eq, sql } from "drizzle-orm";
 import { Hono } from "hono";
@@ -15,6 +23,12 @@ import type { AppVariables } from "../services/context";
 const TENANT_ID = `agent-trade-policy-admin-${Date.now()}`;
 const AGENT_ID = `agent-trade-policy-admin-agent-${Date.now()}`;
 const USE_REAL_POSTGRES = Boolean(process.env.DATABASE_URL);
+const MUTATED_ENV = [
+  "STEWARD_PGLITE_MEMORY",
+  "STEWARD_MASTER_PASSWORD",
+  "STEWARD_AUDIT_HMAC_KEY",
+] as const;
+const originalEnv = new Map(MUTATED_ENV.map((name) => [name, process.env[name]]));
 
 setDefaultTimeout(30000);
 
@@ -52,6 +66,7 @@ describe("agent trade policy admin path (SEC-208)", () => {
   beforeAll(async () => {
     process.env.STEWARD_MASTER_PASSWORD = "agent-trade-policy-admin-master-password";
     process.env.STEWARD_AUDIT_HMAC_KEY = "agent-trade-policy-admin-audit-hmac-key-entropy";
+    __resetAuditHmacKeyCacheForTests();
     if (!USE_REAL_POSTGRES) {
       process.env.STEWARD_PGLITE_MEMORY = "true";
       const { db, client } = await createPGLiteDb("memory://");
@@ -83,9 +98,11 @@ describe("agent trade policy admin path (SEC-208)", () => {
       await getDb().delete(tenants).where(eq(tenants.id, TENANT_ID));
     }
     await closeDb();
-    delete process.env.STEWARD_PGLITE_MEMORY;
-    delete process.env.STEWARD_MASTER_PASSWORD;
-    delete process.env.STEWARD_AUDIT_HMAC_KEY;
+    for (const [name, value] of originalEnv) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+    __resetAuditHmacKeyCacheForTests();
   });
 
   it("rejects a tenant API key with 403 (no machine self-escalation)", async () => {
@@ -160,8 +177,9 @@ describe("agent trade policy admin path (SEC-208)", () => {
       .where(eq(agentPolicies.agentId, AGENT_ID));
     const reason = "must roll back with audit";
 
-    await getDb().execute(
-      sql.raw(`
+    try {
+      await getDb().execute(
+        sql.raw(`
         CREATE OR REPLACE FUNCTION fail_agent_policy_completion_audit()
         RETURNS trigger AS $$
         BEGIN
@@ -171,17 +189,15 @@ describe("agent trade policy admin path (SEC-208)", () => {
           RETURN NEW;
         END;
         $$ LANGUAGE plpgsql
-      `),
-    );
-    await getDb().execute(
-      sql.raw(`
+        `),
+      );
+      await getDb().execute(
+        sql.raw(`
         CREATE TRIGGER agent_policy_completion_audit_failure
         BEFORE INSERT ON audit_events
         FOR EACH ROW EXECUTE FUNCTION fail_agent_policy_completion_audit()
-      `),
-    );
-
-    try {
+        `),
+      );
       const response = await putPolicy(app, { dailyCap: 9000, reason });
       expect(response.status).toBe(500);
       await expect(response.json()).resolves.toEqual({

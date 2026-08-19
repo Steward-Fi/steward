@@ -1,7 +1,16 @@
 import { afterAll, beforeAll, describe, expect, it, setDefaultTimeout } from "bun:test";
 import { createHash } from "node:crypto";
 import { generateP256KeyPair } from "@stwd/auth";
-import { agentSigners, agents, auditEvents, closeDb, getDb, policies, tenants } from "@stwd/db";
+import {
+  __resetAuditHmacKeyCacheForTests,
+  agentSigners,
+  agents,
+  auditEvents,
+  closeDb,
+  getDb,
+  policies,
+  tenants,
+} from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { and, asc, eq, inArray, sql } from "drizzle-orm";
 import { Hono } from "hono";
@@ -10,6 +19,12 @@ import type { AppVariables } from "../services/context";
 const TENANT_ID = `agent-signers-tenant-${Date.now()}`;
 const AGENT_ID = `agent-signers-agent-${Date.now()}`;
 const savedSignerCredentialPepper = process.env.STEWARD_SIGNER_CREDENTIAL_PEPPER;
+const MUTATED_ENV = [
+  "STEWARD_PGLITE_MEMORY",
+  "STEWARD_MASTER_PASSWORD",
+  "STEWARD_AUDIT_HMAC_KEY",
+] as const;
+const originalEnv = new Map(MUTATED_ENV.map((name) => [name, process.env[name]]));
 
 setDefaultTimeout(30000);
 
@@ -43,6 +58,7 @@ describe("agent signer API", () => {
     process.env.STEWARD_AUDIT_HMAC_KEY = "agent-signers-audit-hmac-key-with-enough-entropy";
     process.env.STEWARD_SIGNER_CREDENTIAL_PEPPER =
       "agent-signers-credential-pepper-with-enough-entropy";
+    __resetAuditHmacKeyCacheForTests();
     const { db, client } = await createPGLiteDb("memory://");
     setPGLiteOverride(db, async () => {
       await client.close();
@@ -81,9 +97,11 @@ describe("agent signer API", () => {
 
   afterAll(async () => {
     await closeDb();
-    delete process.env.STEWARD_PGLITE_MEMORY;
-    delete process.env.STEWARD_MASTER_PASSWORD;
-    delete process.env.STEWARD_AUDIT_HMAC_KEY;
+    for (const [name, value] of originalEnv) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+    __resetAuditHmacKeyCacheForTests();
     if (savedSignerCredentialPepper === undefined) {
       delete process.env.STEWARD_SIGNER_CREDENTIAL_PEPPER;
     } else {
@@ -276,6 +294,22 @@ describe("agent signer API", () => {
 
   it("requires recent MFA before changing signer policy scope", async () => {
     const noMfaApp = await makeApp("admin-no-mfa");
+    const createResponse = await noMfaApp.request(`/agents/${AGENT_ID}/signers`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        signerType: "delegated",
+        subjectType: "external",
+        subjectId: "no-mfa-basic-create",
+        permissions: ["sign_message"],
+      }),
+    });
+    expect(createResponse.status).toBe(403);
+    await expect(createResponse.json()).resolves.toMatchObject({
+      ok: false,
+      error: expect.stringContaining("recent MFA"),
+    });
+
     const response = await noMfaApp.request(`/agents/${AGENT_ID}/signers/${signerId}`, {
       method: "PATCH",
       headers: { "content-type": "application/json" },
@@ -285,6 +319,12 @@ describe("agent signer API", () => {
     expect(response.status).toBe(403);
     expect(body.ok).toBe(false);
     expect(body.error).toContain("Signer updates requires recent MFA verification");
+    expect(
+      await getDb()
+        .select({ id: agentSigners.id })
+        .from(agentSigners)
+        .where(eq(agentSigners.subjectId, "no-mfa-basic-create")),
+    ).toHaveLength(0);
   });
 
   it("rejects caller-chosen delegated signer credential secrets", async () => {
@@ -432,8 +472,9 @@ describe("agent signer API", () => {
       })
       .returning();
 
-    await getDb().execute(
-      sql.raw(`
+    try {
+      await getDb().execute(
+        sql.raw(`
         CREATE OR REPLACE FUNCTION fail_agent_signer_completion_audit()
         RETURNS trigger AS $$
         BEGIN
@@ -447,17 +488,15 @@ describe("agent signer API", () => {
           RETURN NEW;
         END;
         $$ LANGUAGE plpgsql
-      `),
-    );
-    await getDb().execute(
-      sql.raw(`
+        `),
+      );
+      await getDb().execute(
+        sql.raw(`
         CREATE TRIGGER agent_signer_completion_audit_failure
         BEFORE INSERT ON audit_events
         FOR EACH ROW EXECUTE FUNCTION fail_agent_signer_completion_audit()
-      `),
-    );
-
-    try {
+        `),
+      );
       const create = await app.request(`/agents/${AGENT_ID}/signers`, {
         method: "POST",
         headers: { "content-type": "application/json" },

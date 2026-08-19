@@ -1,5 +1,13 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
-import { agents, auditEvents, closeDb, getDb, policies, tenants } from "@stwd/db";
+import {
+  __resetAuditHmacKeyCacheForTests,
+  agents,
+  auditEvents,
+  closeDb,
+  getDb,
+  policies,
+  tenants,
+} from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { and, asc, eq, inArray, sql } from "drizzle-orm";
 import { Hono } from "hono";
@@ -8,6 +16,12 @@ import type { AppVariables } from "../services/context";
 const TENANT_ID = `policy-rules-tenant-${Date.now()}`;
 const AGENT_ID = `policy-rules-agent-${Date.now()}`;
 const TYPED_DATA_AGENT_ID = `typed-data-policy-agent-${Date.now()}`;
+const MUTATED_ENV = [
+  "STEWARD_PGLITE_MEMORY",
+  "STEWARD_MASTER_PASSWORD",
+  "STEWARD_AUDIT_HMAC_KEY",
+] as const;
+const originalEnv = new Map(MUTATED_ENV.map((name) => [name, process.env[name]]));
 
 async function makeApp(authMode: "admin" | "admin-no-mfa" = "admin") {
   const { agentRoutes } = await import("../routes/agents");
@@ -33,6 +47,7 @@ describe("agent policy rule CRUD", () => {
     process.env.STEWARD_MASTER_PASSWORD = "agent-policy-rules-master-password";
     process.env.STEWARD_AUDIT_HMAC_KEY =
       "agent-policy-rules-test-audit-hmac-key-0123456789abcdef0123456789";
+    __resetAuditHmacKeyCacheForTests();
     const { db, client } = await createPGLiteDb("memory://");
     setPGLiteOverride(db, async () => {
       await client.close();
@@ -72,9 +87,11 @@ describe("agent policy rule CRUD", () => {
 
   afterAll(async () => {
     await closeDb();
-    delete process.env.STEWARD_PGLITE_MEMORY;
-    delete process.env.STEWARD_MASTER_PASSWORD;
-    delete process.env.STEWARD_AUDIT_HMAC_KEY;
+    for (const [name, value] of originalEnv) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+    __resetAuditHmacKeyCacheForTests();
   });
 
   it("creates, lists, gets, updates, and deletes nested policy rules", async () => {
@@ -273,8 +290,9 @@ describe("agent policy rule CRUD", () => {
       .returning();
     const before = await getDb().select().from(policies).where(eq(policies.agentId, AGENT_ID));
 
-    await getDb().execute(
-      sql.raw(`
+    try {
+      await getDb().execute(
+        sql.raw(`
         CREATE OR REPLACE FUNCTION fail_agent_policy_rule_completion_audit()
         RETURNS trigger AS $$
         BEGIN
@@ -289,17 +307,15 @@ describe("agent policy rule CRUD", () => {
           RETURN NEW;
         END;
         $$ LANGUAGE plpgsql
-      `),
-    );
-    await getDb().execute(
-      sql.raw(`
+        `),
+      );
+      await getDb().execute(
+        sql.raw(`
         CREATE TRIGGER agent_policy_rule_completion_audit_failure
         BEFORE INSERT ON audit_events
         FOR EACH ROW EXECUTE FUNCTION fail_agent_policy_rule_completion_audit()
-      `),
-    );
-
-    try {
+        `),
+      );
       const replace = await app.request(`/agents/${AGENT_ID}/policies`, {
         method: "PUT",
         headers: { "content-type": "application/json" },
