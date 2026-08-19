@@ -16,6 +16,7 @@ import type { AppVariables } from "../services/context";
 
 const TENANT_ID = `agent-quorums-tenant-${Date.now()}`;
 const AGENT_ID = `agent-quorums-agent-${Date.now()}`;
+const AUDIT_TRIGGER_SUFFIX = `${process.pid}_${Math.random().toString(36).slice(2, 8)}`;
 const MUTATED_ENV = [
   "STEWARD_PGLITE_MEMORY",
   "STEWARD_MASTER_PASSWORD",
@@ -118,12 +119,15 @@ describe("agent key quorum API", () => {
   });
 
   afterAll(async () => {
-    await closeDb();
-    for (const [name, value] of originalEnv) {
-      if (value === undefined) delete process.env[name];
-      else process.env[name] = value;
+    try {
+      await closeDb();
+    } finally {
+      for (const [name, value] of originalEnv) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+      __resetAuditHmacKeyCacheForTests();
     }
-    __resetAuditHmacKeyCacheForTests();
   });
 
   it("creates, lists, updates, and revokes key quorums", async () => {
@@ -299,6 +303,10 @@ describe("agent key quorum API", () => {
       .select()
       .from(agentKeyQuorums)
       .where(eq(agentKeyQuorums.id, quorumId));
+    const beforeAudits = await getDb()
+      .select({ id: auditEvents.id })
+      .from(auditEvents)
+      .where(eq(auditEvents.tenantId, TENANT_ID));
     const createResponse = await noMfaApp.request(`/agents/${AGENT_ID}/key-quorums`, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -349,6 +357,12 @@ describe("agent key quorum API", () => {
     expect(
       await getDb().select().from(agentKeyQuorums).where(eq(agentKeyQuorums.id, quorumId)),
     ).toEqual(beforeQuorum);
+    expect(
+      await getDb()
+        .select({ id: auditEvents.id })
+        .from(auditEvents)
+        .where(eq(auditEvents.tenantId, TENANT_ID)),
+    ).toEqual(beforeAudits);
   });
 
   it("rolls back quorum creation, update, and revocation when completion audits fail", async () => {
@@ -369,10 +383,10 @@ describe("agent key quorum API", () => {
     try {
       await getDb().execute(
         sql.raw(`
-        CREATE OR REPLACE FUNCTION fail_agent_quorum_completion_audit()
+        CREATE OR REPLACE FUNCTION fail_agent_quorum_completion_audit_${AUDIT_TRIGGER_SUFFIX}()
         RETURNS trigger AS $$
         BEGIN
-          IF NEW.action IN (
+          IF NEW.tenant_id = '${TENANT_ID}' AND NEW.action IN (
             'agent.key_quorum.create',
             'agent.key_quorum.update',
             'agent.key_quorum.revoke'
@@ -386,9 +400,9 @@ describe("agent key quorum API", () => {
       );
       await getDb().execute(
         sql.raw(`
-        CREATE TRIGGER agent_quorum_completion_audit_failure
+        CREATE TRIGGER agent_quorum_completion_audit_failure_${AUDIT_TRIGGER_SUFFIX}
         BEFORE INSERT ON audit_events
-        FOR EACH ROW EXECUTE FUNCTION fail_agent_quorum_completion_audit()
+        FOR EACH ROW EXECUTE FUNCTION fail_agent_quorum_completion_audit_${AUDIT_TRIGGER_SUFFIX}()
         `),
       );
       const create = await app.request(`/agents/${AGENT_ID}/key-quorums`, {
@@ -433,10 +447,14 @@ describe("agent key quorum API", () => {
       ).toEqual([seeded]);
     } finally {
       await getDb().execute(
-        sql.raw("DROP TRIGGER IF EXISTS agent_quorum_completion_audit_failure ON audit_events"),
+        sql.raw(
+          `DROP TRIGGER IF EXISTS agent_quorum_completion_audit_failure_${AUDIT_TRIGGER_SUFFIX} ON audit_events`,
+        ),
       );
       await getDb().execute(
-        sql.raw("DROP FUNCTION IF EXISTS fail_agent_quorum_completion_audit()"),
+        sql.raw(
+          `DROP FUNCTION IF EXISTS fail_agent_quorum_completion_audit_${AUDIT_TRIGGER_SUFFIX}()`,
+        ),
       );
     }
   });

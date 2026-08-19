@@ -22,6 +22,7 @@ import type { AppVariables } from "../services/context";
 
 const TENANT_ID = `agent-trade-policy-admin-${Date.now()}`;
 const AGENT_ID = `agent-trade-policy-admin-agent-${Date.now()}`;
+const AUDIT_TRIGGER_SUFFIX = `${process.pid}_${Math.random().toString(36).slice(2, 8)}`;
 const USE_REAL_POSTGRES = Boolean(process.env.DATABASE_URL);
 const MUTATED_ENV = [
   "STEWARD_PGLITE_MEMORY",
@@ -90,19 +91,22 @@ describe("agent trade policy admin path (SEC-208)", () => {
   });
 
   afterAll(async () => {
-    if (USE_REAL_POSTGRES) {
-      await getDb().delete(agentPolicies).where(eq(agentPolicies.agentId, AGENT_ID));
-      await getDb().delete(auditEvents).where(eq(auditEvents.tenantId, TENANT_ID));
-      await getDb().execute(sql`DELETE FROM audit_chain_heads WHERE tenant_id = ${TENANT_ID}`);
-      await getDb().delete(agents).where(eq(agents.id, AGENT_ID));
-      await getDb().delete(tenants).where(eq(tenants.id, TENANT_ID));
+    try {
+      if (USE_REAL_POSTGRES) {
+        await getDb().delete(agentPolicies).where(eq(agentPolicies.agentId, AGENT_ID));
+        await getDb().delete(auditEvents).where(eq(auditEvents.tenantId, TENANT_ID));
+        await getDb().execute(sql`DELETE FROM audit_chain_heads WHERE tenant_id = ${TENANT_ID}`);
+        await getDb().delete(agents).where(eq(agents.id, AGENT_ID));
+        await getDb().delete(tenants).where(eq(tenants.id, TENANT_ID));
+      }
+      await closeDb();
+    } finally {
+      for (const [name, value] of originalEnv) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+      __resetAuditHmacKeyCacheForTests();
     }
-    await closeDb();
-    for (const [name, value] of originalEnv) {
-      if (value === undefined) delete process.env[name];
-      else process.env[name] = value;
-    }
-    __resetAuditHmacKeyCacheForTests();
   });
 
   it("rejects a tenant API key with 403 (no machine self-escalation)", async () => {
@@ -180,10 +184,10 @@ describe("agent trade policy admin path (SEC-208)", () => {
     try {
       await getDb().execute(
         sql.raw(`
-        CREATE OR REPLACE FUNCTION fail_agent_policy_completion_audit()
+        CREATE OR REPLACE FUNCTION fail_agent_policy_completion_audit_${AUDIT_TRIGGER_SUFFIX}()
         RETURNS trigger AS $$
         BEGIN
-          IF NEW.action = 'agent.policy.updated' THEN
+          IF NEW.tenant_id = '${TENANT_ID}' AND NEW.action = 'agent.policy.updated' THEN
             RAISE EXCEPTION 'required agent policy audit failed';
           END IF;
           RETURN NEW;
@@ -193,9 +197,9 @@ describe("agent trade policy admin path (SEC-208)", () => {
       );
       await getDb().execute(
         sql.raw(`
-        CREATE TRIGGER agent_policy_completion_audit_failure
+        CREATE TRIGGER agent_policy_completion_audit_failure_${AUDIT_TRIGGER_SUFFIX}
         BEFORE INSERT ON audit_events
-        FOR EACH ROW EXECUTE FUNCTION fail_agent_policy_completion_audit()
+        FOR EACH ROW EXECUTE FUNCTION fail_agent_policy_completion_audit_${AUDIT_TRIGGER_SUFFIX}()
         `),
       );
       const response = await putPolicy(app, { dailyCap: 9000, reason });
@@ -224,10 +228,14 @@ describe("agent trade policy admin path (SEC-208)", () => {
       ).toHaveLength(0);
     } finally {
       await getDb().execute(
-        sql.raw("DROP TRIGGER IF EXISTS agent_policy_completion_audit_failure ON audit_events"),
+        sql.raw(
+          `DROP TRIGGER IF EXISTS agent_policy_completion_audit_failure_${AUDIT_TRIGGER_SUFFIX} ON audit_events`,
+        ),
       );
       await getDb().execute(
-        sql.raw("DROP FUNCTION IF EXISTS fail_agent_policy_completion_audit()"),
+        sql.raw(
+          `DROP FUNCTION IF EXISTS fail_agent_policy_completion_audit_${AUDIT_TRIGGER_SUFFIX}()`,
+        ),
       );
     }
   });

@@ -2,6 +2,7 @@ import { describe, expect, setDefaultTimeout, test } from "bun:test";
 import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { PGlite } from "@electric-sql/pglite";
+import postgres from "postgres";
 
 setDefaultTimeout(120_000);
 const migrations = new URL("../../drizzle", import.meta.url).pathname;
@@ -60,6 +61,28 @@ describe("0109 agent policy builder-perps reconciliation", () => {
       expect(after.rows).toEqual([{ column_default: "false", is_nullable: "NO" }]);
     } finally {
       await client.close();
+    }
+  });
+
+  const realPostgresTest = process.env.DATABASE_URL ? test : test.skip;
+  realPostgresTest("is present after the journal-driven production migrator", async () => {
+    const sql = postgres(process.env.DATABASE_URL!, { max: 1 });
+    try {
+      const column = await sql<{ column_default: string; is_nullable: string }[]>`
+        SELECT column_default,is_nullable FROM information_schema.columns
+        WHERE table_name='agent_policies' AND column_name='allow_builder_perps'
+      `;
+      expect(column).toEqual([{ column_default: "false", is_nullable: "NO" }]);
+
+      const applied = await sql<{ count: number; newest: number }[]>`
+        SELECT count(*)::int AS count FROM drizzle.__drizzle_migrations
+      `;
+      const journal = JSON.parse(
+        await readFile(join(migrations, "meta", "_journal.json"), "utf8"),
+      ) as { entries: unknown[] };
+      expect(applied[0]?.count).toBe(journal.entries.length);
+    } finally {
+      await sql.end({ timeout: 5 });
     }
   });
 });

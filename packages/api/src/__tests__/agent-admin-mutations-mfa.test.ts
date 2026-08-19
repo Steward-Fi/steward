@@ -29,6 +29,7 @@ import type { AppVariables } from "../services/context";
 
 const TENANT_ID = `agent-admin-mutations-${Date.now()}`;
 const AGENT_ID = `agent-admin-mutations-agent-${Date.now()}`;
+const AUDIT_TRIGGER_SUFFIX = `${process.pid}_${Math.random().toString(36).slice(2, 8)}`;
 const MUTATED_ENV = [
   "STEWARD_PGLITE_MEMORY",
   "STEWARD_MASTER_PASSWORD",
@@ -87,12 +88,15 @@ describe("agent admin mutations require human session + MFA (SEC-209)", () => {
   });
 
   afterAll(async () => {
-    await closeDb();
-    for (const [name, value] of originalEnv) {
-      if (value === undefined) delete process.env[name];
-      else process.env[name] = value;
+    try {
+      await closeDb();
+    } finally {
+      for (const [name, value] of originalEnv) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+      __resetAuditHmacKeyCacheForTests();
     }
-    __resetAuditHmacKeyCacheForTests();
   });
 
   it("rejects a bare tenant API key on all three root-equivalent mutations", async () => {
@@ -237,10 +241,10 @@ describe("agent admin mutations require human session + MFA (SEC-209)", () => {
     try {
       await getDb().execute(
         sql.raw(`
-        CREATE OR REPLACE FUNCTION fail_agent_authorization_audit()
+        CREATE OR REPLACE FUNCTION fail_agent_authorization_audit_${AUDIT_TRIGGER_SUFFIX}()
         RETURNS trigger AS $$
         BEGIN
-          IF NEW.action IN (
+          IF NEW.tenant_id = '${TENANT_ID}' AND NEW.action IN (
             'agent.create.authorized',
             'agent.wallet.create.authorized',
             'agent.policies.update.authorized',
@@ -255,9 +259,9 @@ describe("agent admin mutations require human session + MFA (SEC-209)", () => {
       );
       await getDb().execute(
         sql.raw(`
-        CREATE TRIGGER agent_authorization_audit_failure
+        CREATE TRIGGER agent_authorization_audit_failure_${AUDIT_TRIGGER_SUFFIX}
         BEFORE INSERT ON audit_events
-        FOR EACH ROW EXECUTE FUNCTION fail_agent_authorization_audit()
+        FOR EACH ROW EXECUTE FUNCTION fail_agent_authorization_audit_${AUDIT_TRIGGER_SUFFIX}()
         `),
       );
       const responses = [
@@ -299,9 +303,13 @@ describe("agent admin mutations require human session + MFA (SEC-209)", () => {
       expect(await revocationStore.getAgentRevokedBefore(AGENT_ID)).toBeNull();
     } finally {
       await getDb().execute(
-        sql.raw("DROP TRIGGER IF EXISTS agent_authorization_audit_failure ON audit_events"),
+        sql.raw(
+          `DROP TRIGGER IF EXISTS agent_authorization_audit_failure_${AUDIT_TRIGGER_SUFFIX} ON audit_events`,
+        ),
       );
-      await getDb().execute(sql.raw("DROP FUNCTION IF EXISTS fail_agent_authorization_audit()"));
+      await getDb().execute(
+        sql.raw(`DROP FUNCTION IF EXISTS fail_agent_authorization_audit_${AUDIT_TRIGGER_SUFFIX}()`),
+      );
     }
   });
 
@@ -315,10 +323,10 @@ describe("agent admin mutations require human session + MFA (SEC-209)", () => {
     try {
       await getDb().execute(
         sql.raw(`
-        CREATE OR REPLACE FUNCTION fail_agent_completion_audit()
+        CREATE OR REPLACE FUNCTION fail_agent_completion_audit_${AUDIT_TRIGGER_SUFFIX}()
         RETURNS trigger AS $$
         BEGIN
-          IF NEW.action IN ('agent.create', 'agent.wallet.create') THEN
+          IF NEW.tenant_id = '${TENANT_ID}' AND NEW.action IN ('agent.create', 'agent.wallet.create') THEN
             RAISE EXCEPTION 'required agent completion audit failed';
           END IF;
           RETURN NEW;
@@ -328,9 +336,9 @@ describe("agent admin mutations require human session + MFA (SEC-209)", () => {
       );
       await getDb().execute(
         sql.raw(`
-        CREATE TRIGGER agent_completion_audit_failure
+        CREATE TRIGGER agent_completion_audit_failure_${AUDIT_TRIGGER_SUFFIX}
         BEFORE INSERT ON audit_events
-        FOR EACH ROW EXECUTE FUNCTION fail_agent_completion_audit()
+        FOR EACH ROW EXECUTE FUNCTION fail_agent_completion_audit_${AUDIT_TRIGGER_SUFFIX}()
         `),
       );
       const createResponse = await app.request("/agents", {
@@ -353,9 +361,13 @@ describe("agent admin mutations require human session + MFA (SEC-209)", () => {
       expect(await getDb().select().from(encryptedChainKeys)).toEqual(beforeChainKeys);
     } finally {
       await getDb().execute(
-        sql.raw("DROP TRIGGER IF EXISTS agent_completion_audit_failure ON audit_events"),
+        sql.raw(
+          `DROP TRIGGER IF EXISTS agent_completion_audit_failure_${AUDIT_TRIGGER_SUFFIX} ON audit_events`,
+        ),
       );
-      await getDb().execute(sql.raw("DROP FUNCTION IF EXISTS fail_agent_completion_audit()"));
+      await getDb().execute(
+        sql.raw(`DROP FUNCTION IF EXISTS fail_agent_completion_audit_${AUDIT_TRIGGER_SUFFIX}()`),
+      );
     }
   });
 
@@ -512,10 +524,10 @@ describe("agent admin mutations require human session + MFA (SEC-209)", () => {
     try {
       await getDb().execute(
         sql.raw(`
-        CREATE OR REPLACE FUNCTION fail_agent_delete_completion_audit()
+        CREATE OR REPLACE FUNCTION fail_agent_delete_completion_audit_${AUDIT_TRIGGER_SUFFIX}()
         RETURNS trigger AS $$
         BEGIN
-          IF NEW.action = 'agent.delete' THEN
+          IF NEW.tenant_id = '${TENANT_ID}' AND NEW.action = 'agent.delete' THEN
             RAISE EXCEPTION 'required agent delete audit failed';
           END IF;
           RETURN NEW;
@@ -525,9 +537,9 @@ describe("agent admin mutations require human session + MFA (SEC-209)", () => {
       );
       await getDb().execute(
         sql.raw(`
-        CREATE TRIGGER agent_delete_completion_audit_failure
+        CREATE TRIGGER agent_delete_completion_audit_failure_${AUDIT_TRIGGER_SUFFIX}
         BEFORE INSERT ON audit_events
-        FOR EACH ROW EXECUTE FUNCTION fail_agent_delete_completion_audit()
+        FOR EACH ROW EXECUTE FUNCTION fail_agent_delete_completion_audit_${AUDIT_TRIGGER_SUFFIX}()
         `),
       );
       const failed = await app.request(`/agents/${AGENT_ID}`, { method: "DELETE" });
@@ -559,10 +571,14 @@ describe("agent admin mutations require human session + MFA (SEC-209)", () => {
       expect(await revocationStore.getAgentRevokedBefore(AGENT_ID)).not.toBeNull();
     } finally {
       await getDb().execute(
-        sql.raw("DROP TRIGGER IF EXISTS agent_delete_completion_audit_failure ON audit_events"),
+        sql.raw(
+          `DROP TRIGGER IF EXISTS agent_delete_completion_audit_failure_${AUDIT_TRIGGER_SUFFIX} ON audit_events`,
+        ),
       );
       await getDb().execute(
-        sql.raw("DROP FUNCTION IF EXISTS fail_agent_delete_completion_audit()"),
+        sql.raw(
+          `DROP FUNCTION IF EXISTS fail_agent_delete_completion_audit_${AUDIT_TRIGGER_SUFFIX}()`,
+        ),
       );
     }
 

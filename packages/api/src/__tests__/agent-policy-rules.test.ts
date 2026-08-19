@@ -15,6 +15,7 @@ import type { AppVariables } from "../services/context";
 
 const TENANT_ID = `policy-rules-tenant-${Date.now()}`;
 const AGENT_ID = `policy-rules-agent-${Date.now()}`;
+const AUDIT_TRIGGER_SUFFIX = `${process.pid}_${Math.random().toString(36).slice(2, 8)}`;
 const TYPED_DATA_AGENT_ID = `typed-data-policy-agent-${Date.now()}`;
 const MUTATED_ENV = [
   "STEWARD_PGLITE_MEMORY",
@@ -86,12 +87,15 @@ describe("agent policy rule CRUD", () => {
   });
 
   afterAll(async () => {
-    await closeDb();
-    for (const [name, value] of originalEnv) {
-      if (value === undefined) delete process.env[name];
-      else process.env[name] = value;
+    try {
+      await closeDb();
+    } finally {
+      for (const [name, value] of originalEnv) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+      __resetAuditHmacKeyCacheForTests();
     }
-    __resetAuditHmacKeyCacheForTests();
   });
 
   it("creates, lists, gets, updates, and deletes nested policy rules", async () => {
@@ -293,10 +297,10 @@ describe("agent policy rule CRUD", () => {
     try {
       await getDb().execute(
         sql.raw(`
-        CREATE OR REPLACE FUNCTION fail_agent_policy_rule_completion_audit()
+        CREATE OR REPLACE FUNCTION fail_agent_policy_rule_completion_audit_${AUDIT_TRIGGER_SUFFIX}()
         RETURNS trigger AS $$
         BEGIN
-          IF NEW.action IN (
+          IF NEW.tenant_id = '${TENANT_ID}' AND NEW.action IN (
             'agent.policies.update',
             'agent.policy_rule.create',
             'agent.policy_rule.update',
@@ -311,9 +315,9 @@ describe("agent policy rule CRUD", () => {
       );
       await getDb().execute(
         sql.raw(`
-        CREATE TRIGGER agent_policy_rule_completion_audit_failure
+        CREATE TRIGGER agent_policy_rule_completion_audit_failure_${AUDIT_TRIGGER_SUFFIX}
         BEFORE INSERT ON audit_events
-        FOR EACH ROW EXECUTE FUNCTION fail_agent_policy_rule_completion_audit()
+        FOR EACH ROW EXECUTE FUNCTION fail_agent_policy_rule_completion_audit_${AUDIT_TRIGGER_SUFFIX}()
         `),
       );
       const replace = await app.request(`/agents/${AGENT_ID}/policies`, {
@@ -365,11 +369,13 @@ describe("agent policy rule CRUD", () => {
     } finally {
       await getDb().execute(
         sql.raw(
-          "DROP TRIGGER IF EXISTS agent_policy_rule_completion_audit_failure ON audit_events",
+          `DROP TRIGGER IF EXISTS agent_policy_rule_completion_audit_failure_${AUDIT_TRIGGER_SUFFIX} ON audit_events`,
         ),
       );
       await getDb().execute(
-        sql.raw("DROP FUNCTION IF EXISTS fail_agent_policy_rule_completion_audit()"),
+        sql.raw(
+          `DROP FUNCTION IF EXISTS fail_agent_policy_rule_completion_audit_${AUDIT_TRIGGER_SUFFIX}()`,
+        ),
       );
     }
   });

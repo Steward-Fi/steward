@@ -18,6 +18,7 @@ import type { AppVariables } from "../services/context";
 
 const TENANT_ID = `agent-signers-tenant-${Date.now()}`;
 const AGENT_ID = `agent-signers-agent-${Date.now()}`;
+const AUDIT_TRIGGER_SUFFIX = `${process.pid}_${Math.random().toString(36).slice(2, 8)}`;
 const savedSignerCredentialPepper = process.env.STEWARD_SIGNER_CREDENTIAL_PEPPER;
 const MUTATED_ENV = [
   "STEWARD_PGLITE_MEMORY",
@@ -96,16 +97,19 @@ describe("agent signer API", () => {
   });
 
   afterAll(async () => {
-    await closeDb();
-    for (const [name, value] of originalEnv) {
-      if (value === undefined) delete process.env[name];
-      else process.env[name] = value;
-    }
-    __resetAuditHmacKeyCacheForTests();
-    if (savedSignerCredentialPepper === undefined) {
-      delete process.env.STEWARD_SIGNER_CREDENTIAL_PEPPER;
-    } else {
-      process.env.STEWARD_SIGNER_CREDENTIAL_PEPPER = savedSignerCredentialPepper;
+    try {
+      await closeDb();
+    } finally {
+      for (const [name, value] of originalEnv) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+      __resetAuditHmacKeyCacheForTests();
+      if (savedSignerCredentialPepper === undefined) {
+        delete process.env.STEWARD_SIGNER_CREDENTIAL_PEPPER;
+      } else {
+        process.env.STEWARD_SIGNER_CREDENTIAL_PEPPER = savedSignerCredentialPepper;
+      }
     }
   });
 
@@ -294,6 +298,10 @@ describe("agent signer API", () => {
 
   it("requires recent MFA before changing signer policy scope", async () => {
     const noMfaApp = await makeApp("admin-no-mfa");
+    const beforeAudits = await getDb()
+      .select({ id: auditEvents.id })
+      .from(auditEvents)
+      .where(eq(auditEvents.tenantId, TENANT_ID));
     const createResponse = await noMfaApp.request(`/agents/${AGENT_ID}/signers`, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -325,6 +333,12 @@ describe("agent signer API", () => {
         .from(agentSigners)
         .where(eq(agentSigners.subjectId, "no-mfa-basic-create")),
     ).toHaveLength(0);
+    expect(
+      await getDb()
+        .select({ id: auditEvents.id })
+        .from(auditEvents)
+        .where(eq(auditEvents.tenantId, TENANT_ID)),
+    ).toEqual(beforeAudits);
   });
 
   it("rejects caller-chosen delegated signer credential secrets", async () => {
@@ -475,10 +489,10 @@ describe("agent signer API", () => {
     try {
       await getDb().execute(
         sql.raw(`
-        CREATE OR REPLACE FUNCTION fail_agent_signer_completion_audit()
+        CREATE OR REPLACE FUNCTION fail_agent_signer_completion_audit_${AUDIT_TRIGGER_SUFFIX}()
         RETURNS trigger AS $$
         BEGIN
-          IF NEW.action IN (
+          IF NEW.tenant_id = '${TENANT_ID}' AND NEW.action IN (
             'agent.signer.create',
             'agent.signer.update',
             'agent.signer.revoke'
@@ -492,9 +506,9 @@ describe("agent signer API", () => {
       );
       await getDb().execute(
         sql.raw(`
-        CREATE TRIGGER agent_signer_completion_audit_failure
+        CREATE TRIGGER agent_signer_completion_audit_failure_${AUDIT_TRIGGER_SUFFIX}
         BEFORE INSERT ON audit_events
-        FOR EACH ROW EXECUTE FUNCTION fail_agent_signer_completion_audit()
+        FOR EACH ROW EXECUTE FUNCTION fail_agent_signer_completion_audit_${AUDIT_TRIGGER_SUFFIX}()
         `),
       );
       const create = await app.request(`/agents/${AGENT_ID}/signers`, {
@@ -539,10 +553,14 @@ describe("agent signer API", () => {
       ).toEqual([seeded]);
     } finally {
       await getDb().execute(
-        sql.raw("DROP TRIGGER IF EXISTS agent_signer_completion_audit_failure ON audit_events"),
+        sql.raw(
+          `DROP TRIGGER IF EXISTS agent_signer_completion_audit_failure_${AUDIT_TRIGGER_SUFFIX} ON audit_events`,
+        ),
       );
       await getDb().execute(
-        sql.raw("DROP FUNCTION IF EXISTS fail_agent_signer_completion_audit()"),
+        sql.raw(
+          `DROP FUNCTION IF EXISTS fail_agent_signer_completion_audit_${AUDIT_TRIGGER_SUFFIX}()`,
+        ),
       );
     }
   });
