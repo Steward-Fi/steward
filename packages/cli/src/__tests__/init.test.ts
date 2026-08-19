@@ -188,7 +188,6 @@ describe("steward init", () => {
         "STEWARD_MASTER_PASSWORD",
         "STEWARD_JWT_SECRET",
         "STEWARD_EXECUTION_AUTH_SECRET",
-        "STEWARD_SESSION_SECRET",
         "STEWARD_KDF_SALT",
         "STEWARD_AUDIT_HMAC_KEY",
         "STEWARD_AUDIT_SIGNING_KEY",
@@ -202,6 +201,9 @@ describe("steward init", () => {
         expect(vb).toBeTruthy();
         expect(va).not.toBe(vb);
       }
+
+      expect(ea).not.toContain("STEWARD_SESSION_SECRET=");
+      expect(eb).not.toContain("STEWARD_SESSION_SECRET=");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -264,7 +266,6 @@ describe("steward init", () => {
         "STEWARD_MASTER_PASSWORD",
         "STEWARD_JWT_SECRET",
         "STEWARD_EXECUTION_AUTH_SECRET",
-        "STEWARD_SESSION_SECRET",
         "STEWARD_KDF_SALT",
         "STEWARD_AUDIT_HMAC_KEY",
         "STEWARD_AUDIT_SIGNING_KEY",
@@ -272,6 +273,7 @@ describe("steward init", () => {
         "STEWARD_PROXY_REQUEST_SIGNING_SECRETS",
       ];
       const combined = stdout + stderr;
+      expect(env).not.toContain("STEWARD_SESSION_SECRET=");
       for (const key of secretKeys) {
         const value = envValue(env, key);
         expect(value).toBeTruthy();
@@ -383,7 +385,6 @@ describe("steward init", () => {
         "STEWARD_MASTER_PASSWORD",
         "STEWARD_JWT_SECRET",
         "STEWARD_EXECUTION_AUTH_SECRET",
-        "STEWARD_SESSION_SECRET",
         "STEWARD_KDF_SALT",
         "STEWARD_AUDIT_HMAC_KEY",
         "STEWARD_AUDIT_SIGNING_KEY",
