@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
+import { withRuntimeEnvironment } from "@stwd/shared/runtime-env";
 import {
   _clearConfiguredVaultsForTests,
   assertProductionCustodyAcknowledged,
@@ -102,6 +103,27 @@ describe("vault factory", () => {
 
     process.env.STEWARD_MASTER_PASSWORD = "factory-master-two";
     expect(getConfiguredVault()).not.toBe(first);
+  });
+
+  it("does not retain request-scoped vault master passwords across Worker snapshots", async () => {
+    const first = await withRuntimeEnvironment(
+      {
+        NODE_ENV: "test",
+        STEWARD_MASTER_PASSWORD: "request-vault-master-one",
+        STEWARD_KDF_SALT: TEST_KDF_SALT,
+      },
+      () => getConfiguredVault(),
+    );
+    const second = await withRuntimeEnvironment(
+      {
+        NODE_ENV: "test",
+        STEWARD_MASTER_PASSWORD: "request-vault-master-two",
+        STEWARD_KDF_SALT: TEST_KDF_SALT,
+      },
+      () => getConfiguredVault(),
+    );
+
+    expect(second).not.toBe(first);
   });
 
   it("fails closed when non-platform callers have no master password", () => {

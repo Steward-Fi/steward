@@ -432,7 +432,7 @@ const requestExpiresAtHeader = headerParameter(
 );
 const stewardSignatureHeader = headerParameter(
   "X-Steward-Signature",
-  "Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>.",
+  "Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>.",
 );
 const signingKeyIdHeader = headerParameter(
   "X-Steward-Signing-Key-Id",
@@ -6362,7 +6362,7 @@ function addHardeningInventory(spec: OpenApiSpec): OpenApiSpec {
         authorizationSignature: {
           // Mounted globally (app.ts): a presented X-Steward-Signature is
           // always verified and production requires it by default.
-          requiredWhen: "NODE_ENV=production or STEWARD_REQUIRE_AUTH_SIGNATURE=true",
+          requiredWhen: "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
           header: "X-Steward-Signature",
           schemes: ["v1=hmac-sha256", "p256=ecdsa-secp256r1"],
           managedTenantKeyHeader: "X-Steward-Signing-Key-Id",

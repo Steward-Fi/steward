@@ -10,8 +10,7 @@ export function resolveRequestSecurityPosture(): RequestSecurityPosture {
   const production = runtimeEnvironmentValue("NODE_ENV") === "production";
   return {
     requestExpiryRequired: runtimeEnvironmentFlag("STEWARD_REQUIRE_REQUEST_EXPIRY") || production,
-    authorizationSignatureRequired:
-      runtimeEnvironmentFlag("STEWARD_REQUIRE_AUTH_SIGNATURE") || production,
+    authorizationSignatureRequired: runtimeEnvironmentFlag("STEWARD_REQUIRE_AUTH_SIGNATURE"),
   };
 }
 

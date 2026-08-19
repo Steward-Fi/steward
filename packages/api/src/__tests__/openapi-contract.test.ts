@@ -13,7 +13,7 @@ describe("generated OpenAPI contract", () => {
         acceptedHeaders: ["X-Steward-Request-Timestamp", "X-Steward-Request-Expires-At"],
       },
       authorizationSignature: {
-        requiredWhen: "NODE_ENV=production or STEWARD_REQUIRE_AUTH_SIGNATURE=true",
+        requiredWhen: "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
         header: "X-Steward-Signature",
         schemes: ["v1=hmac-sha256", "p256=ecdsa-secp256r1"],
       },

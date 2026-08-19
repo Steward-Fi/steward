@@ -61,9 +61,11 @@ Sensitive mutating routes can be protected with an HMAC request signature:
   secret, trade, approval, intent, audit, webhook, policy, and condition-set
   mutation paths.
 
-By default, signatures are required in production and verified when present in
-development. Set `STEWARD_REQUIRE_AUTH_SIGNATURE=true` to require signatures
-outside production. Configure one or more comma-separated secrets with
+Signatures are verified whenever present. Set
+`STEWARD_REQUIRE_AUTH_SIGNATURE=true` to require them for every sensitive
+mutation in server-to-server deployments. Browser bootstrap and authentication
+flows cannot safely hold a shared HMAC root, so production does not enable this
+requirement implicitly. Configure one or more comma-separated secrets with
 `STEWARD_REQUEST_SIGNING_SECRETS`, or a single secret with
 `STEWARD_REQUEST_SIGNING_SECRET`. Tenant app-client secrets can also sign
 requests: when a request uses Basic auth plus `X-Steward-App-Id`, Steward

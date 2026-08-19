@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { agents, closeDb, getDb, refreshTokens, tenantConfigs, tenants, users } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
+import { withRuntimeEnvironment } from "@stwd/shared/runtime-env";
 import { KeyStore } from "@stwd/vault";
 import { eq } from "drizzle-orm";
 import { clearEmailAuthTenantCacheForTests, getEmailAuthForTenant } from "../routes/auth";
@@ -23,6 +24,7 @@ describe("platform tenant creation", () => {
         "platform:agent:create",
         "platform:tenant:delete",
         "platform:tenant-policy:write",
+        "platform:tenant-email-config:write",
       ],
     });
 
@@ -243,6 +245,50 @@ describe("platform tenant creation", () => {
 
     await getDb().delete(tenants).where(eq(tenants.id, tenantId));
     clearEmailAuthTenantCacheForTests();
+  });
+
+  it("encrypts tenant email configuration with the current request master password", async () => {
+    const update = async (masterPassword: string, apiKey: string, from: string) =>
+      withRuntimeEnvironment(
+        {
+          NODE_ENV: "production",
+          STEWARD_MASTER_PASSWORD: masterPassword,
+          STEWARD_PLATFORM_KEYS: PLATFORM_KEY,
+          STEWARD_PLATFORM_KEY_SCOPES: JSON.stringify({
+            [PLATFORM_KEY]: ["platform:write", "platform:tenant-email-config:write"],
+          }),
+          STEWARD_EMAIL_CODE_SECRET: `${masterPassword}-email-code-secret-at-least-32-bytes`,
+          APP_URL: "https://platform-email.example.com",
+        },
+        async () => {
+          const response = await platformRoutes.request(`/tenants/${TENANT_ID}/email-config`, {
+            method: "PATCH",
+            headers: {
+              "Content-Type": "application/json",
+              "X-Steward-Platform-Key": PLATFORM_KEY,
+            },
+            body: JSON.stringify({ provider: "resend", apiKey, from }),
+          });
+          expect(response.status).toBe(200);
+          clearEmailAuthTenantCacheForTests();
+          return getEmailAuthForTenant(TENANT_ID);
+        },
+      );
+
+    const first = await update(
+      "platform-email-first-master-password",
+      "platform-email-first-resend-key",
+      "First platform <login@first-platform.example.com>",
+    );
+    expect((first as any).from).toBe("First platform <login@first-platform.example.com>");
+
+    const second = await update(
+      "platform-email-second-master-password",
+      "platform-email-second-resend-key",
+      "Second platform <login@second-platform.example.com>",
+    );
+    expect(second).not.toBe(first);
+    expect((second as any).from).toBe("Second platform <login@second-platform.example.com>");
   });
 
   it("rejects invalid batch applyPolicies before creating agents", async () => {

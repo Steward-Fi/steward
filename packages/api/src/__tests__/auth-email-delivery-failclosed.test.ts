@@ -104,6 +104,7 @@ describe("fail-closed email delivery routes (production)", () => {
     body: unknown,
     tenantId?: string,
     signed = true,
+    fresh = signed,
   ): Promise<Response> {
     const encodedBody = JSON.stringify(body);
     const timestamp = String(Math.floor(Date.now() / 1000));
@@ -126,9 +127,9 @@ describe("fail-closed email delivery routes (production)", () => {
       headers: {
         "Content-Type": "application/json",
         ...(tenantId ? { "X-Steward-Tenant": tenantId } : {}),
+        ...(fresh ? { "X-Steward-Request-Timestamp": timestamp } : {}),
         ...(signed
           ? {
-              "X-Steward-Request-Timestamp": timestamp,
               "X-Steward-Signature": signature as string,
               "Idempotency-Key": idempotencyKey,
             }
@@ -149,6 +150,22 @@ describe("fail-closed email delivery routes (production)", () => {
     expect(await response.json()).toEqual({
       ok: false,
       error: "Request expiry header required",
+    });
+  });
+
+  it("allows fresh unsigned browser authentication in production", async () => {
+    clearEmailAuthTenantCacheForTests();
+    const response = await postJson(
+      "/auth/email/send",
+      { email: "browser@example.com" },
+      undefined,
+      false,
+      true,
+    );
+    expect(response.status).toBe(503);
+    expect(await response.json()).toMatchObject({
+      ok: false,
+      error: "Email delivery is not configured",
     });
   });
 

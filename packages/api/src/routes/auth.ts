@@ -1278,7 +1278,7 @@ let _authStoreSources: AuthStoreSources = {
   mfa: "memory",
   importSession: "memory",
 };
-let _phoneAuth: PhoneAuth | null = null;
+let _phoneAuth: { fingerprint: string; auth: PhoneAuth } | null = null;
 
 export type AuthStoreSource = "redis" | "postgres" | "memory";
 export type AuthStoreSources = {
@@ -1575,8 +1575,8 @@ export function decryptImportSessionJson<T>(value: string): T {
   return JSON.parse(getOAuthKeyStore().decrypt(encrypted)) as T;
 }
 
-let _passkeyAuth: PasskeyAuth | null = null;
-const _passkeyAuthByOrigin = new Map<string, PasskeyAuth>();
+let _passkeyAuth: { fingerprint: string; auth: PasskeyAuth } | null = null;
+const _passkeyAuthByOrigin = new Map<string, { fingerprint: string; auth: PasskeyAuth }>();
 
 /**
  * Get PasskeyAuth for a specific origin (multi-tenant passkey support).
@@ -1622,26 +1622,42 @@ function resolveRpID(requestHostname: string, allowedOrigins: string[], fallback
   return best;
 }
 
-function getPasskeyAuth(requestOrigin?: string): PasskeyAuth {
+export function getPasskeyAuth(requestOrigin?: string): PasskeyAuth {
+  const requestScoped = currentRuntimeEnvironment() !== process.env;
   const defaultRpID = runtimeEnvironmentValue("PASSKEY_RP_ID") || "steward.fi";
   const defaultOrigin = runtimeEnvironmentValue("PASSKEY_ORIGIN") || "https://steward.fi";
   const rpName = runtimeEnvironmentValue("PASSKEY_RP_NAME") || "Steward";
 
   // If no origin provided, use the default singleton
   if (!requestOrigin) {
-    if (!_passkeyAuth) {
-      const origins = (runtimeEnvironmentValue("PASSKEY_ALLOWED_ORIGINS") || defaultOrigin)
-        .split(",")
-        .map((o) => o.trim())
-        .filter(Boolean);
-      _passkeyAuth = new PasskeyAuth({
+    const origins = (runtimeEnvironmentValue("PASSKEY_ALLOWED_ORIGINS") || defaultOrigin)
+      .split(",")
+      .map((o) => o.trim())
+      .filter(Boolean);
+    if (requestScoped) {
+      return new PasskeyAuth({
         rpName,
         rpID: defaultRpID,
         origin: origins.length > 1 ? origins : defaultOrigin,
         challengeStore: getChallengeStore(),
       });
     }
-    return _passkeyAuth;
+    const fingerprint = hashSha256Hex(
+      JSON.stringify({
+        rpName,
+        rpID: defaultRpID,
+        origin: origins.length > 1 ? origins : defaultOrigin,
+      }),
+    );
+    if (_passkeyAuth?.fingerprint === fingerprint) return _passkeyAuth.auth;
+    const auth = new PasskeyAuth({
+      rpName,
+      rpID: defaultRpID,
+      origin: origins.length > 1 ? origins : defaultOrigin,
+      challengeStore: getChallengeStore(),
+    });
+    _passkeyAuth = { fingerprint, auth };
+    return auth;
   }
 
   // Parse origin to get hostname
@@ -1667,8 +1683,11 @@ function getPasskeyAuth(requestOrigin?: string): PasskeyAuth {
   const rpID = resolveRpID(requestHostname, allowed, defaultRpID);
 
   // Cache per rpID
-  const cached = _passkeyAuthByOrigin.get(rpID);
-  if (cached) return cached;
+  if (!requestScoped) {
+    const cached = _passkeyAuthByOrigin.get(rpID);
+    const fingerprint = hashSha256Hex(JSON.stringify({ rpName, rpID, origin: allowed }));
+    if (cached?.fingerprint === fingerprint) return cached.auth;
+  }
 
   // Origin list passed to PasskeyAuth covers all variants the browser may
   // present (apex + www) so SimpleWebAuthn accepts assertions from either.
@@ -1680,15 +1699,20 @@ function getPasskeyAuth(requestOrigin?: string): PasskeyAuth {
     origin: acceptedOrigins,
     challengeStore: getChallengeStore(),
   });
-  _passkeyAuthByOrigin.set(rpID, auth);
+  if (!requestScoped) {
+    _passkeyAuthByOrigin.set(rpID, {
+      fingerprint: hashSha256Hex(JSON.stringify({ rpName, rpID, origin: acceptedOrigins })),
+      auth,
+    });
+  }
   return auth;
 }
 
 // ─── EmailAuth cache ──────────────────────────────────────────────────────────
 
 const _emailAuthByTenant = new Map<string, Promise<EmailAuth>>();
-let _emailKeyStore: KeyStore | null = null;
-let _oauthKeyStore: KeyStore | null = null;
+let _emailKeyStore: { fingerprint: string; keyStore: KeyStore } | null = null;
+let _oauthKeyStore: { fingerprint: string; keyStore: KeyStore } | null = null;
 
 function createConfiguredKeyStore(missingPasswordMessage: string): KeyStore {
   const masterPassword = runtimeEnvironmentValue("STEWARD_MASTER_PASSWORD");
@@ -1707,10 +1731,15 @@ function getEmailKeyStore(): KeyStore {
       "STEWARD_MASTER_PASSWORD is required. For local development only, set STEWARD_ALLOW_DEV_SECRETS=true to use the insecure dev key.",
     );
   }
-  _emailKeyStore ??= createConfiguredKeyStore(
+  const fingerprint = hashSha256Hex(
+    runtimeEnvironmentValue("STEWARD_MASTER_PASSWORD") || "dev-secret",
+  );
+  if (_emailKeyStore?.fingerprint === fingerprint) return _emailKeyStore.keyStore;
+  const keyStore = createConfiguredKeyStore(
     "STEWARD_MASTER_PASSWORD is required. For local development only, set STEWARD_ALLOW_DEV_SECRETS=true to use the insecure dev key.",
   );
-  return _emailKeyStore;
+  _emailKeyStore = { fingerprint, keyStore };
+  return keyStore;
 }
 
 function getOAuthKeyStore(): KeyStore {
@@ -1719,10 +1748,15 @@ function getOAuthKeyStore(): KeyStore {
       "STEWARD_MASTER_PASSWORD is required to encrypt OAuth provider tokens. For local development only, set STEWARD_ALLOW_DEV_SECRETS=true to use the insecure dev key.",
     );
   }
-  _oauthKeyStore ??= createConfiguredKeyStore(
+  const fingerprint = hashSha256Hex(
+    runtimeEnvironmentValue("STEWARD_MASTER_PASSWORD") || "dev-secret",
+  );
+  if (_oauthKeyStore?.fingerprint === fingerprint) return _oauthKeyStore.keyStore;
+  const keyStore = createConfiguredKeyStore(
     "STEWARD_MASTER_PASSWORD is required to encrypt OAuth provider tokens. For local development only, set STEWARD_ALLOW_DEV_SECRETS=true to use the insecure dev key.",
   );
-  return _oauthKeyStore;
+  _oauthKeyStore = { fingerprint, keyStore };
+  return keyStore;
 }
 
 type OAuthEncryptedTokenFields = Pick<
@@ -2763,7 +2797,7 @@ async function requireRecentFactorEnrollmentStepUp(
 }
 
 export function getPhoneAuth(): PhoneAuth {
-  if (_phoneAuth) return _phoneAuth;
+  const requestScoped = currentRuntimeEnvironment() !== process.env;
 
   let provider: SmsProvider | undefined;
   const twilioAccountSid = runtimeEnvironmentValue("TWILIO_ACCOUNT_SID");
@@ -2784,11 +2818,23 @@ export function getPhoneAuth(): PhoneAuth {
     throw new Error("SMS provider not configured");
   }
 
-  _phoneAuth = new PhoneAuth({
+  const fingerprint = hashSha256Hex(
+    JSON.stringify({
+      provider: runtimeEnvironmentValue("SMS_PROVIDER") || "console",
+      nodeEnv: runtimeEnvironmentValue("NODE_ENV") || "",
+      twilioAccountSid: twilioAccountSid || "",
+      twilioAuthToken: twilioAuthToken || "",
+      twilioFrom: twilioFrom || "",
+    }),
+  );
+  if (!requestScoped && _phoneAuth?.fingerprint === fingerprint) return _phoneAuth.auth;
+
+  const phoneAuth = new PhoneAuth({
     provider,
     tokenStore: new TokenStore({ backend: getMfaBackend() }),
   });
-  return _phoneAuth;
+  if (!requestScoped) _phoneAuth = { fingerprint, auth: phoneAuth };
+  return phoneAuth;
 }
 
 function isWhatsAppOtpEnabled(): boolean {

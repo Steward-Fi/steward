@@ -56,6 +56,7 @@ import {
   type TenantOidcProviderConfig,
   type TenantTestAccountConfig,
 } from "@stwd/shared";
+import { currentRuntimeEnvironment, runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 import { KeyStore, Vault } from "@stwd/vault";
 import { and, count, eq, ilike, inArray, isNull, ne, or, type SQL, sql } from "drizzle-orm";
 import { type Context, Hono } from "hono";
@@ -293,7 +294,7 @@ function auditCtx(c: {
 }
 
 function platformIdentityMigrationAllowed(): boolean {
-  return process.env.STEWARD_ALLOW_PLATFORM_IDENTITY_MIGRATION === "true";
+  return runtimeEnvironmentValue("STEWARD_ALLOW_PLATFORM_IDENTITY_MIGRATION") === "true";
 }
 
 function platformIdentityMigrationDisabledResponse(c: Context) {
@@ -318,11 +319,10 @@ function vault(): Vault {
   return getVault();
 }
 
-let _platformKeyStore: KeyStore | undefined;
+let _platformKeyStore: { fingerprint: string; keyStore: KeyStore } | undefined;
 function platformKeyStore(): KeyStore {
-  if (_platformKeyStore) return _platformKeyStore;
-
-  const masterPassword = process.env.STEWARD_MASTER_PASSWORD;
+  const requestScoped = currentRuntimeEnvironment() !== process.env;
+  const masterPassword = runtimeEnvironmentValue("STEWARD_MASTER_PASSWORD");
   if (!masterPassword) {
     if (!isDevSecretAllowed()) {
       throw new Error(
@@ -335,8 +335,14 @@ function platformKeyStore(): KeyStore {
     );
   }
 
-  _platformKeyStore = new KeyStore(masterPassword || "dev-secret");
-  return _platformKeyStore;
+  const effectivePassword = masterPassword || "dev-secret";
+  const fingerprint = hashSha256Hex(effectivePassword);
+  if (!requestScoped && _platformKeyStore?.fingerprint === fingerprint) {
+    return _platformKeyStore.keyStore;
+  }
+  const keyStore = new KeyStore(effectivePassword);
+  if (!requestScoped) _platformKeyStore = { fingerprint, keyStore };
+  return keyStore;
 }
 
 // ─── Validation helpers ───────────────────────────────────────────────────────

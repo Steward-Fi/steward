@@ -619,8 +619,8 @@ export function buildTenantSecurityChecklist(
 ): TenantSecurityChecklist {
   const production = runtimeEnvironmentValue("NODE_ENV") === "production";
   // These mirror the mounted guards: invalid presented headers always fail,
-  // production requires both controls, and explicit REQUIRE settings enable
-  // them elsewhere.
+  // production requires freshness, and signatures become mandatory only when
+  // the operator explicitly enables them for server-to-server clients.
   const { requestExpiryRequired, authorizationSignatureRequired: authSignatureRequired } =
     resolveRequestSecurityPosture();
   const signingSecrets = configuredRequestSigningSecrets();
@@ -698,18 +698,14 @@ export function buildTenantSecurityChecklist(
           standaloneSigningKeys.length > 0
           ? "pass"
           : "fail"
-        : signingSecrets.length > 0 ||
-            appClientSigningSecrets.length > 0 ||
-            standaloneSigningKeys.length > 0
-          ? "warning"
-          : "fail",
+        : "warning",
       description:
         authSignatureRequired &&
         (signingSecrets.length > 0 ||
           appClientSigningSecrets.length > 0 ||
           standaloneSigningKeys.length > 0)
           ? "Sensitive mutating requests require X-Steward-Signature and have an env, app-client, or tenant signing key available."
-          : "Sensitive mutating requests need enforced HMAC signatures and configured signing secrets.",
+          : "Authorization signatures are verified when present but are not required for every sensitive mutation.",
       remediation:
         authSignatureRequired &&
         (signingSecrets.length > 0 ||

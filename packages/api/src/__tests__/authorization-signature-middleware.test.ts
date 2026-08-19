@@ -540,13 +540,13 @@ describe("authorizationSignature", () => {
     expect(nonSensitive.status).toBe(200);
   });
 
-  it("fails closed in a production request snapshot when the requirement is unset", async () => {
+  it("does not force browser bootstrap to hold a server secret in production", async () => {
     const app = makeDefaultApp();
 
     const res = await withRuntimeEnvironment({ NODE_ENV: "production" }, () =>
       app.request("/vault/agent-1/sign", { method: "POST", body: BODY }),
     );
 
-    expect(res.status).toBe(401);
+    expect(res.status).toBe(200);
   });
 });
