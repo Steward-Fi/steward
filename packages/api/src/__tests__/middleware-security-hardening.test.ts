@@ -1,7 +1,9 @@
-import { describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import app from "../app";
+import { Hono } from "hono";
+import { securityHeaders } from "../middleware/security-headers";
+import { tenantCors } from "../middleware/tenant-cors";
 
 const apiRoot = join(import.meta.dir, "..");
 const idempotencySource = readFileSync(join(apiRoot, "middleware", "idempotency.ts"), "utf8");
@@ -14,7 +16,6 @@ const securityHeadersSource = readFileSync(
   join(apiRoot, "middleware", "security-headers.ts"),
   "utf8",
 );
-const tenantCorsSource = readFileSync(join(apiRoot, "middleware", "tenant-cors.ts"), "utf8");
 const globalRateLimitSource = readFileSync(
   join(apiRoot, "middleware", "global-rate-limit.ts"),
   "utf8",
@@ -27,6 +28,18 @@ const webMiddlewareSource = readFileSync(join(webRoot, "middleware.ts"), "utf8")
 // The dashboard CSP is constructed in web/src/lib/csp.ts (extracted from
 // middleware.ts for unit-testing) and applied by middleware.ts.
 const webCspSource = readFileSync(join(webRoot, "lib", "csp.ts"), "utf8");
+const originalNodeEnv = process.env.NODE_ENV;
+const corsApp = new Hono();
+corsApp.use("*", tenantCors);
+corsApp.all("*", (c) => c.text("ok"));
+const securityHeadersApp = new Hono();
+securityHeadersApp.use("*", securityHeaders);
+securityHeadersApp.get("*", (c) => c.text("ok"));
+
+afterEach(() => {
+  if (originalNodeEnv === undefined) delete process.env.NODE_ENV;
+  else process.env.NODE_ENV = originalNodeEnv;
+});
 
 describe("middleware security hardening", () => {
   it("uses durable production idempotency and avoids broad unauthenticated reservations", () => {
@@ -51,34 +64,42 @@ describe("middleware security hardening", () => {
     expect(redisEnforcementSource).toContain("Rate limit enforcement is unavailable");
   });
 
-  it("fails closed for tenant CORS in production and rejects JWT/header tenant mismatch", () => {
-    // Wildcard CORS requires an explicit non-production NODE_ENV (SEC-067):
-    // an unset NODE_ENV must fail closed like production.
-    expect(tenantCorsSource).toContain("function devWildcardAllowed()");
-    expect(tenantCorsSource).toContain('env === "development" || env === "test"');
-    expect(tenantCorsSource).toContain("origins.length === 0");
-    expect(tenantCorsSource).toContain("return c.newResponse(null, 403)");
-    expect(tenantCorsSource).toContain("TENANT_ID_RE.test(tenantId)");
-    expect(tenantCorsSource).toContain("MAX_CORS_CACHE_ENTRIES");
-    // Bogus/unknown tenant headers are negative-cached briefly (SEC-067).
-    expect(tenantCorsSource).toContain("NEGATIVE_CACHE_TTL_MS");
-    expect(tenantCorsSource).toContain("if (!row && clientRows.length === 0) {");
-    expect(tenantCorsSource).toContain("if (origins.includes(origin))");
-    expect(tenantCorsSource).not.toContain('origins.includes("*")');
-    // ACAO depends on both Origin and the tenant header (SEC-067).
-    expect(tenantCorsSource).toContain('"Origin, X-Steward-Tenant"');
-    // Vary is established before DB lookups/early 403s so denied responses
-    // cannot poison a shared cache for another origin or tenant.
-    const tenantCorsBody = tenantCorsSource.slice(
-      tenantCorsSource.indexOf("export async function tenantCors"),
-    );
-    expect(tenantCorsBody.indexOf('c.header("Vary"')).toBeLessThan(
-      tenantCorsBody.indexOf("await getAllAllowedOrigins()"),
-    );
-    expect(tenantCorsSource).toContain("X-Steward-Request-Timestamp");
-    expect(tenantCorsSource).toContain("X-Steward-Request-Expires-At");
+  it("rejects JWT/header tenant mismatch", () => {
     expect(contextSource).toContain("headerTenant && headerTenant !== payload.tenantId");
     expect(contextSource).toContain('"Tenant header does not match token"');
+  });
+
+  it("advertises PATCH for allowed browser preflights", async () => {
+    process.env.NODE_ENV = "test";
+    const response = await corsApp.request("/health", {
+      method: "OPTIONS",
+      headers: {
+        origin: "https://app.example",
+        "Access-Control-Request-Method": "PATCH",
+        "Access-Control-Request-Headers": "Authorization, X-Steward-Tenant",
+      },
+    });
+
+    expect(response.status).toBe(204);
+    expect(response.headers.get("Access-Control-Allow-Origin")).toBe("*");
+    expect(response.headers.get("Access-Control-Allow-Methods")?.split(/,\s*/)).toContain("PATCH");
+    expect(response.headers.get("Vary")).toBe("Origin, X-Steward-Tenant");
+  });
+
+  it("fails closed for unknown production CORS tenants and varies every denial", async () => {
+    process.env.NODE_ENV = "production";
+    const response = await corsApp.request("/health", {
+      method: "OPTIONS",
+      headers: {
+        origin: "https://untrusted.example",
+        "X-Steward-Tenant": "invalid tenant id",
+        "Access-Control-Request-Method": "PATCH",
+      },
+    });
+
+    expect(response.status).toBe(403);
+    expect(response.headers.get("Access-Control-Allow-Origin")).toBeNull();
+    expect(response.headers.get("Vary")).toBe("Origin, X-Steward-Tenant");
   });
 
   it("applies Bun runtime gates before Hono route dispatch", () => {
@@ -125,7 +146,7 @@ describe("middleware security hardening", () => {
   });
 
   it("emits API security headers behaviorally and suppresses HSTS on localhost", async () => {
-    const response = await app.request("/health", {
+    const response = await securityHeadersApp.request("https://api.example.com/health", {
       headers: { host: "api.example.com" },
     });
     expect(response.status).toBe(200);
@@ -137,7 +158,7 @@ describe("middleware security hardening", () => {
     expect(response.headers.get("Permissions-Policy")).toContain("geolocation=()");
     expect(response.headers.get("Strict-Transport-Security")).toContain("includeSubDomains");
 
-    const localResponse = await app.request("/health", {
+    const localResponse = await securityHeadersApp.request("http://localhost:8787/health", {
       headers: { host: "localhost:8787" },
     });
     expect(localResponse.status).toBe(200);
