@@ -148,10 +148,9 @@
     },
     "packages/eliza-plugin": {
       "name": "@stwd/eliza-plugin",
-      "version": "0.4.3",
+      "version": "0.4.4",
       "dependencies": {
         "@stwd/sdk": "^0.10.0",
-        "@stwd/shared": "workspace:*",
       },
       "devDependencies": {
         "@elizaos/core": "2.0.0-alpha.77",
@@ -159,6 +158,7 @@
         "@stwd/db": "workspace:*",
         "@stwd/proxy": "workspace:*",
         "@stwd/proxy-client": "workspace:*",
+        "@stwd/shared": "workspace:*",
         "@types/node": "^25.5.0",
         "hono": "^4.12.34",
         "tsup": "^8.0.0",
@@ -493,6 +493,7 @@
       "version": "0.4.0",
       "dependencies": {
         "@stwd/db": "workspace:*",
+        "@stwd/shared": "workspace:*",
         "@stwd/vault": "workspace:*",
         "drizzle-orm": "^0.44.5",
         "viem": "^2.30.0",

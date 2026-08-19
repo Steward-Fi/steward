@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { redactedThrownDiagnostics } from "@stwd/shared";
 import { migrate } from "drizzle-orm/postgres-js/migrator";
 
 import { createDb } from "./client";
@@ -180,7 +181,7 @@ if (isEntrypoint) {
       }
     })
     .catch((error) => {
-      console.error("Failed to run migrations", error);
+      console.error("Failed to run migrations", redactedThrownDiagnostics(error));
       process.exitCode = 1;
     });
 }
