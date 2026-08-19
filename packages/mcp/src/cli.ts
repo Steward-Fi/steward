@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { describeThrown } from "@stwd/shared";
+import { redactedThrownDiagnostics } from "@stwd/shared";
 import { createStewardClient, loadConfig, redactConfig } from "./config.js";
 import { createStewardMcpServer } from "./server.js";
 
@@ -17,8 +17,8 @@ async function main(): Promise<void> {
   try {
     config = loadConfig(process.env);
   } catch (err) {
-    const message = describeThrown(err);
-    process.stderr.write(`[stwd-mcp] Configuration error: ${message}\n`);
+    const diagnostics = redactedThrownDiagnostics(err);
+    process.stderr.write(`[stwd-mcp] Configuration error: ${JSON.stringify(diagnostics)}\n`);
     process.exit(1);
     return;
   }
@@ -49,7 +49,7 @@ async function main(): Promise<void> {
 }
 
 main().catch((err) => {
-  const message = describeThrown(err);
-  process.stderr.write(`[stwd-mcp] Fatal error: ${message}\n`);
+  const diagnostics = redactedThrownDiagnostics(err);
+  process.stderr.write(`[stwd-mcp] Fatal error: ${JSON.stringify(diagnostics)}\n`);
   process.exit(1);
 });

@@ -164,8 +164,15 @@ function unsafeTelemetryArguments(source: ts.SourceFile): string[] {
           ts.isIdentifier(node.expression.expression) &&
           node.expression.expression.text === "console" &&
           ["error", "warn", "log"].includes(node.expression.name.text);
+        const isProcessStreamSink =
+          ts.isPropertyAccessExpression(node.expression) &&
+          node.expression.name.text === "write" &&
+          ts.isPropertyAccessExpression(node.expression.expression) &&
+          ts.isIdentifier(node.expression.expression.expression) &&
+          node.expression.expression.expression.text === "process" &&
+          ["stderr", "stdout"].includes(node.expression.expression.name.text);
         const name = sinkName(node.expression);
-        if (isConsoleSink || isTelemetrySinkName(name)) {
+        if (isConsoleSink || isProcessStreamSink || isTelemetrySinkName(name)) {
           for (const argument of node.arguments) {
             if (isTainted(argument)) report(argument);
           }
@@ -357,6 +364,28 @@ describe("runtime error logging", () => {
         doOtherThing().then(undefined, writeAuditEvent);
       `),
     ).toHaveLength(2);
+  });
+
+  test("flags raw throwables written to process streams", () => {
+    expect(
+      failuresForSnippet(`
+        doThing().catch((error) => {
+          const message = describeThrown(error);
+          process.stderr.write(\`failed: \${message}\\n\`);
+        });
+      `),
+    ).toHaveLength(1);
+  });
+
+  test("allows bounded diagnostics written to process streams", () => {
+    expect(
+      failuresForSnippet(`
+        doThing().catch((error) => {
+          const diagnostics = redactedThrownDiagnostics(error);
+          process.stderr.write(JSON.stringify(diagnostics));
+        });
+      `),
+    ).toEqual([]);
   });
 
   test("allows bounded diagnostics in Promise rejection callbacks", () => {
