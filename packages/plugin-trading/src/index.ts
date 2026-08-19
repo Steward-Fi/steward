@@ -67,8 +67,8 @@ export const isOperatorRecoveryPath = (path: string): boolean =>
  * {@link tradingPlugin}'s `webhookEvents` so the plugin host merges them into the
  * core's runtime event registry (core ∪ plugin-declared) — a webhook can then be
  * configured for these event names even though the lean core's closed event
- * union never enumerates them. This is the Phase 2a contribution point proven
- * end-to-end.
+ * union never enumerates them. The host treats this declaration as the
+ * authoritative plugin contribution to the runtime event registry.
  *
  * Naming mirrors the plugin's existing `trade.*` audit-action vocabulary so the
  * webhook stream and the audit log speak the same event language.

@@ -364,8 +364,8 @@ export function createOperatorRecoveryRoutes(
    * getTransactionStats(agentId, chainId): the recent-tx counts feed rate-limit
    * rules, and the spend sums — scoped to Arbitrum so they stay in the same
    * native-wei unit the policy gate denominates `value` in — feed daily/weekly
-   * spending-limit rules. Previously both routes hardcoded zeroes here, which
-   * made every rate-limit and daily/weekly spend rule structurally inert.
+   * spending-limit rules. These authoritative counters keep the policy gate
+   * effective across every operator transfer rail.
    */
   type OperatorQueryDb = Pick<typeof db, "select">;
   async function getOperatorSpendStats(
@@ -1154,10 +1154,9 @@ export function createOperatorRecoveryRoutes(
       );
     }
 
-    // Validate the USDC amount exactly like /withdraw: reject over-precision the
-    // 6-decimal conversion can't represent, and enforce the per-call safety
-    // ceiling so a compromised operator client cannot move the whole venue
-    // balance in one call (previously this rail had NO cap at all).
+    // Reject precision the six-decimal conversion cannot represent and enforce
+    // the per-call safety ceiling so one compromised operator request cannot
+    // move the venue's entire USDC balance.
     if (hasTooManyUsdcDecimals(amount)) {
       return c.json<ApiResponse>(
         { ok: false, error: "amount has more than 6 decimal places" },
