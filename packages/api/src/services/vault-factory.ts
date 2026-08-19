@@ -232,7 +232,9 @@ function configuredMode(): VaultMode {
 function resolveMasterPassword(options: ConfiguredVaultOptions): string {
   const configured = runtimeEnvironmentValue("STEWARD_MASTER_PASSWORD")?.trim();
   if (configured) return configured;
-  if (options.fallbackPassword?.trim()) return options.fallbackPassword.trim();
+  if (currentRuntimeEnvironment() === process.env && options.fallbackPassword?.trim()) {
+    return options.fallbackPassword.trim();
+  }
 
   if (options.allowDevSecretFallback) {
     if (!isDevSecretAllowed()) {

@@ -584,7 +584,7 @@ describe("authorizationSignature", () => {
       ]),
     );
 
-    const [userRoute, tenantRoute, dashboardRoute, mfaRoute, agentVault] =
+    const [userRoute, tenantRoute, dashboardRoute, mfaRoute, userVault, agentVault] =
       await withRuntimeEnvironment(environment, () =>
         Promise.all([
           app.request("/user/me/wallet/sign", {
@@ -609,6 +609,11 @@ describe("authorizationSignature", () => {
           }),
           app.request("/vault/agent-1/sign", {
             method: "POST",
+            headers: { authorization: `Bearer ${userToken}` },
+            body: BODY,
+          }),
+          app.request("/vault/agent-1/sign", {
+            method: "POST",
             headers: { authorization: `Bearer ${agentToken}` },
             body: BODY,
           }),
@@ -619,6 +624,7 @@ describe("authorizationSignature", () => {
     expect(tenantRoute.status).toBe(401);
     expect(dashboardRoute.status).toBe(401);
     expect(mfaRoute.status).not.toBe(401);
+    expect(userVault.status).toBe(401);
     expect(agentVault.status).toBe(401);
   });
 
@@ -636,9 +642,8 @@ describe("authorizationSignature", () => {
       }),
     );
 
-    const [platform, automation, decoratedBootstrap] = await withRuntimeEnvironment(
-      environment,
-      () =>
+    const [platform, automation, enrollment, versionedEnrollment, decoratedBootstrap] =
+      await withRuntimeEnvironment(environment, () =>
         Promise.all([
           app.request("/platform/tenants", {
             method: "POST",
@@ -647,16 +652,29 @@ describe("authorizationSignature", () => {
               "X-Steward-Platform-Key": "platform-key",
             },
           }),
-          app.request("/auth/test/token", { method: "POST" }),
+          app.request("/auth/test/token", {
+            method: "POST",
+            headers: { authorization: `Bearer ${userToken}` },
+          }),
+          app.request("/agent-enroll/verify", {
+            method: "POST",
+            headers: { authorization: `Bearer ${userToken}` },
+          }),
+          app.request("/v1/agent-enroll/verify", {
+            method: "POST",
+            headers: { authorization: `Bearer ${userToken}` },
+          }),
           app.request("/auth/passkey/register/options", {
             method: "POST",
             headers: { "X-Steward-Key": "tenant-machine-key" },
           }),
         ]),
-    );
+      );
 
     expect(platform.status).toBe(401);
     expect(automation.status).toBe(401);
+    expect(enrollment.status).toBe(401);
+    expect(versionedEnrollment.status).toBe(401);
     expect(decoratedBootstrap.status).toBe(401);
   });
 

@@ -619,8 +619,7 @@ export function buildTenantSecurityChecklist(
   const production = runtimeEnvironmentValue("NODE_ENV") === "production";
   // These mirror the mounted guards: invalid presented headers always fail;
   // production machine requests require freshness and signatures; public auth
-  // bootstrap, authenticated browser auth mutations, and verified user-session
-  // requests under /user retain their browser-safe exemption.
+  // bootstrap and verified user sessions on enumerated browser surfaces retain their exemption.
   const { requestExpiryRequired, authorizationSignatureRequired: authSignatureRequired } =
     resolveRequestSecurityPosture();
   const signingSecrets = configuredRequestSigningSecrets();
@@ -704,7 +703,7 @@ export function buildTenantSecurityChecklist(
         (signingSecrets.length > 0 ||
           appClientSigningSecrets.length > 0 ||
           standaloneSigningKeys.length > 0)
-          ? "Sensitive machine requests require X-Steward-Signature and have an env, app-client, or tenant signing key available; public auth bootstrap, authenticated browser auth mutations, and verified user-session requests under /user are exempt unless explicitly forced."
+          ? "Sensitive machine requests require X-Steward-Signature and have an env, app-client, or tenant signing key available; exact public auth routes and verified user sessions on enumerated auth, user, tenant, and dashboard surfaces are exempt unless explicitly forced."
           : "Authorization signatures are verified when present but are not required by this deployment posture.",
       remediation:
         authSignatureRequired &&

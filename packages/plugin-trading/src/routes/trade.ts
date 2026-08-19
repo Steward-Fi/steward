@@ -26,6 +26,7 @@ import {
 } from "@stwd/policy-engine";
 import { checkRateLimit } from "@stwd/redis";
 import { type ApiResponse, type AppVariables, redactedThrownDiagnostics } from "@stwd/shared";
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 import { type TradeSession, TradeSessionManager } from "@stwd/trade-sessions";
 import {
   getMarketableLimitPx,
@@ -1461,15 +1462,12 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
   // lift them. If no master password is configured the cache is SKIPPED
   // entirely (fail closed: never write plaintext; re-derive per order).
   const PM_CREDS_CACHE_PREFIX = "stwd_pmclob_v1:";
-  let pmCredsDerivedKey: { source: string; key: Buffer } | null = null;
-
   function pmCredsCacheEncryptionKey(): Buffer | null {
-    const masterPassword = process.env.STEWARD_MASTER_PASSWORD;
+    const masterPassword = runtimeEnvironmentValue("STEWARD_MASTER_PASSWORD");
     if (!masterPassword) return null;
-    if (pmCredsDerivedKey?.source === masterPassword) return pmCredsDerivedKey.key;
-    const key = scryptSync(masterPassword, "steward-kdf:pm-clob-l2-cache:v1", 32) as Buffer;
-    pmCredsDerivedKey = { source: masterPassword, key };
-    return key;
+    // Derive on demand rather than retaining the plaintext source password or
+    // a reusable fast verifier in plugin process state.
+    return scryptSync(masterPassword, "steward-kdf:pm-clob-l2-cache:v1", 32) as Buffer;
   }
 
   function encryptPmCredsCacheValue(plaintext: string, cacheKey: string): string | null {

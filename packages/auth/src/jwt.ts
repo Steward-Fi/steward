@@ -72,13 +72,6 @@ let warnedDevSecret = false;
 let warnedShortSecret = false;
 
 /**
- * Embedded-mode JWT secret derivation cache. Deriving via scrypt costs ~50ms,
- * and getJwtSecret() runs on every token sign/verify, so the derived key is
- * memoized per distinct source password.
- */
-let embeddedJwtDerivation: { source: string; derived: string } | null = null;
-
-/**
  * Derive the embedded-mode JWT signing secret from STEWARD_MASTER_PASSWORD.
  *
  * The raw master password is NEVER used as the JWT secret (SEC-013): every
@@ -89,17 +82,9 @@ let embeddedJwtDerivation: { source: string; derived: string } | null = null;
  * from the vault root key and offline guesses cost a scrypt each.
  */
 function deriveEmbeddedJwtSecret(masterPassword: string): string {
-  // This is exact process-local cache identity, not password verification.
-  // Avoid a reusable fast digest of the vault root; the JWT key itself remains
-  // independently derived with scrypt below.
-  if (embeddedJwtDerivation?.source === masterPassword) {
-    return embeddedJwtDerivation.derived;
-  }
-  const derived = (scryptSync(masterPassword, "steward-kdf:jwt-signing:v1", 32) as Buffer).toString(
-    "hex",
-  );
-  embeddedJwtDerivation = { source: masterPassword, derived };
-  return derived;
+  // Embedded mode favors bounded secret lifetime over memoizing the plaintext
+  // source password or a reusable fast verifier in process state.
+  return (scryptSync(masterPassword, "steward-kdf:jwt-signing:v1", 32) as Buffer).toString("hex");
 }
 
 function isEmbeddedMode(): boolean {

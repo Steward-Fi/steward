@@ -629,7 +629,7 @@ function toExternalKeyWalletMetadata(
  */
 export class Vault {
   private keyStore: KeystoreBackend;
-  private config: VaultConfig;
+  private config: Pick<VaultConfig, "chainId" | "rpcUrl">;
   private externalKeyCustodyProvider?: ExternalKeyCustodyProvider;
   private moneroBackend?: MoneroWalletBackend;
 
@@ -637,7 +637,10 @@ export class Vault {
     if (config.externalKeyCustodyProvider) {
       assertExternalKeyCustodyProviderV1(config.externalKeyCustodyProvider);
     }
-    this.config = config;
+    // Retain only non-secret routing configuration. Custody backends already
+    // own their derived keys/clients; keeping the full constructor object would
+    // duplicate plaintext master/provider credentials for the Vault lifetime.
+    this.config = { chainId: config.chainId, rpcUrl: config.rpcUrl };
     this.externalKeyCustodyProvider = config.externalKeyCustodyProvider;
     this.moneroBackend = config.moneroBackend;
     // Signing-vault keeps the legacy (undomain) root so existing wallet ciphertext

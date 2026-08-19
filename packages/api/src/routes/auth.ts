@@ -1278,15 +1278,7 @@ let _authStoreSources: AuthStoreSources = {
   mfa: "memory",
   importSession: "memory",
 };
-type PhoneAuthConfiguration = {
-  provider: string;
-  nodeEnv: string;
-  twilioAccountSid: string;
-  twilioAuthToken: string;
-  twilioFrom: string;
-};
-
-let _phoneAuth: { configuration: PhoneAuthConfiguration; auth: PhoneAuth } | null = null;
+let _phoneAuth: { identity: string; auth: PhoneAuth } | null = null;
 
 export type AuthStoreSource = "redis" | "postgres" | "memory";
 export type AuthStoreSources = {
@@ -2843,22 +2835,14 @@ export function getPhoneAuth(): PhoneAuth {
     throw new Error("SMS provider not configured");
   }
 
-  const configuration: PhoneAuthConfiguration = {
-    provider: runtimeEnvironmentValue("SMS_PROVIDER") || "console",
-    nodeEnv: runtimeEnvironmentValue("NODE_ENV") || "",
-    twilioAccountSid: twilioAccountSid || "",
-    twilioAuthToken: twilioAuthToken || "",
-    twilioFrom: twilioFrom || "",
-  };
-  if (
-    !requestScoped &&
-    _phoneAuth &&
-    Object.keys(configuration).every(
-      (key) =>
-        _phoneAuth?.configuration[key as keyof PhoneAuthConfiguration] ===
-        configuration[key as keyof PhoneAuthConfiguration],
-    )
-  ) {
+  const identity = processCacheIdentity([
+    runtimeEnvironmentValue("SMS_PROVIDER") || "console",
+    runtimeEnvironmentValue("NODE_ENV") || "",
+    twilioAccountSid || "",
+    twilioAuthToken || "",
+    twilioFrom || "",
+  ]);
+  if (!requestScoped && _phoneAuth?.identity === identity) {
     return _phoneAuth.auth;
   }
 
@@ -2866,7 +2850,7 @@ export function getPhoneAuth(): PhoneAuth {
     provider,
     tokenStore: new TokenStore({ backend: getMfaBackend() }),
   });
-  if (!requestScoped) _phoneAuth = { configuration, auth: phoneAuth };
+  if (!requestScoped) _phoneAuth = { identity, auth: phoneAuth };
   return phoneAuth;
 }
 

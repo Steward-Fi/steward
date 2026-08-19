@@ -79,8 +79,8 @@ import {
 } from "@stwd/policy-engine";
 import type { PluginMigrationSource, StewardPlugin } from "@stwd/shared";
 import { WebhookEventRegistry } from "@stwd/shared";
-import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
-import { KeyStore, SecretVault } from "@stwd/vault";
+import { currentRuntimeEnvironment, runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
+import { KeyStore } from "@stwd/vault";
 import type { Hono } from "hono";
 import {
   requireAgentJwt,
@@ -104,6 +104,8 @@ import {
   vault,
 } from "./services/context";
 import { createEnvEvmSimulator, type EvmSimulator } from "./services/evm-simulator";
+import { processCacheIdentity } from "./services/process-cache-identity";
+import { getConfiguredSecretVault } from "./services/secret-vault-factory";
 import { CONFIGURED_WEBHOOK_EVENT_TYPES } from "./services/webhook-events";
 
 /** the steward app a plugin mounts onto: a hono app with the shared variables. */
@@ -260,14 +262,25 @@ export type StewardApiPlugin = StewardPlugin<StewardApp, StewardAppContext, Eval
  * singleton + auth middleware into one object. called once at the composition
  * root and passed to {@link registerPlugin}.
  */
-export function buildPluginContext(): StewardAppContext {
+let processLeaseKeyStore: { identity: string; keyStore: KeyStore } | null = null;
+
+function configuredLeaseKeyStore(): KeyStore {
   const masterPassword = runtimeEnvironmentValue("STEWARD_MASTER_PASSWORD");
   const masterSalt = runtimeEnvironmentValue("STEWARD_KDF_SALT");
   if (!masterPassword || !masterSalt) {
     throw new Error("STEWARD_MASTER_PASSWORD and STEWARD_KDF_SALT are required");
   }
-  const credentialVault = new SecretVault(masterPassword, masterSalt);
-  const leaseKeyStore = new KeyStore(masterPassword, masterSalt, "credential-lease");
+  if (currentRuntimeEnvironment() !== process.env) {
+    return new KeyStore(masterPassword, masterSalt, "credential-lease");
+  }
+  const identity = processCacheIdentity([masterPassword, masterSalt]);
+  if (processLeaseKeyStore?.identity === identity) return processLeaseKeyStore.keyStore;
+  const keyStore = new KeyStore(masterPassword, masterSalt, "credential-lease");
+  processLeaseKeyStore = { identity, keyStore };
+  return keyStore;
+}
+
+export function buildPluginContext(): StewardAppContext {
   return {
     db,
     vault,
@@ -288,11 +301,15 @@ export function buildPluginContext(): StewardAppContext {
     getAgentTokenStatus,
     getRedisClient,
     exerciseCredentialSecret: (tenantId, secretId, use) =>
-      credentialVault.exerciseSecret(tenantId, secretId, use),
+      getConfiguredSecretVault().exerciseSecret(tenantId, secretId, use),
     sealCredentialLeaseToken: async (tenantId, leaseId, token) =>
-      leaseKeyStore.encrypt(token, { tenantId, name: `upstream-lease:${leaseId}`, version: 1 }),
+      configuredLeaseKeyStore().encrypt(token, {
+        tenantId,
+        name: `upstream-lease:${leaseId}`,
+        version: 1,
+      }),
     exerciseCredentialLeaseToken: async (tenantId, leaseId, sealed, use) => {
-      const token = leaseKeyStore.decrypt(sealed, {
+      const token = configuredLeaseKeyStore().decrypt(sealed, {
         tenantId,
         name: `upstream-lease:${leaseId}`,
         version: 1,
