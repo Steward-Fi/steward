@@ -45,6 +45,7 @@ if (
 
 type Child = ReturnType<typeof Bun.spawn>;
 const active = new Set<Child>();
+const terminations = new Map<Child, Promise<void>>();
 let interruptedSignal: "SIGINT" | "SIGTERM" | undefined;
 
 function signalTree(child: Child, signal: "SIGTERM" | "SIGKILL"): void {
@@ -59,15 +60,24 @@ function signalTree(child: Child, signal: "SIGTERM" | "SIGKILL"): void {
   }
 }
 
-async function terminate(child: Child): Promise<void> {
-  signalTree(child, "SIGTERM");
-  const killer = setTimeout(() => signalTree(child, "SIGKILL"), killGrace);
-  try {
-    await child.exited;
-  } finally {
-    clearTimeout(killer);
-    active.delete(child);
-  }
+function terminate(child: Child): Promise<void> {
+  if (!active.has(child)) return child.exited.then(() => {});
+  const pending = terminations.get(child);
+  if (pending) return pending;
+
+  let termination!: Promise<void>;
+  termination = (async () => {
+    signalTree(child, "SIGTERM");
+    const killer = setTimeout(() => signalTree(child, "SIGKILL"), killGrace);
+    try {
+      await child.exited;
+    } finally {
+      clearTimeout(killer);
+      active.delete(child);
+    }
+  })().finally(() => terminations.delete(child));
+  terminations.set(child, termination);
+  return termination;
 }
 
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
@@ -86,6 +96,11 @@ async function drainTail(stream: ReadableStream<Uint8Array>): Promise<string> {
   for (;;) {
     const { done, value } = await reader.read();
     if (done) break;
+    // Allows the runner's own adversarial tests to exercise rejected stream reads.
+    const drainFailureSentinel = process.env.ISOLATED_RUNNER_TEST_DRAIN_FAILURE_AFTER;
+    if (drainFailureSentinel && new TextDecoder().decode(value).includes(drainFailureSentinel)) {
+      throw new Error("simulated isolated runner stream failure");
+    }
     const combined = new Uint8Array(retained.length + value.length);
     combined.set(retained);
     combined.set(value, retained.length);
@@ -105,18 +120,29 @@ try {
       detached: true,
     });
     active.add(child);
+    const exited = child.exited.finally(() => active.delete(child));
     let timedOut = false;
     const deadline = setTimeout(() => {
+      if (!active.has(child)) return;
       timedOut = true;
       void terminate(child);
     }, wallTimeout);
-    const [stdout, stderr, exitCode] = await Promise.all([
-      drainTail(child.stdout),
-      drainTail(child.stderr),
-      child.exited,
-    ]);
-    clearTimeout(deadline);
-    active.delete(child);
+    let stdout: string;
+    let stderr: string;
+    let exitCode: number;
+    try {
+      [stdout, stderr, exitCode] = await Promise.all([
+        drainTail(child.stdout),
+        drainTail(child.stderr),
+        exited,
+      ]);
+    } catch (error) {
+      if (active.has(child)) await terminate(child);
+      throw error;
+    } finally {
+      clearTimeout(deadline);
+      active.delete(child);
+    }
     const ok = exitCode === 0 && !timedOut;
     console.log(`[isolated] ${ok ? "PASS" : "FAIL"} ${relativeName(path)}`);
     if (!ok) {

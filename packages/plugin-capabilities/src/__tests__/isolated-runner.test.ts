@@ -38,6 +38,18 @@ async function run(root: string, filters: string[] = [], overrides: Record<strin
   return { code, output: stdout + stderr };
 }
 
+async function waitForProcessExit(pid: number): Promise<boolean> {
+  for (let i = 0; i < 100; i += 1) {
+    try {
+      process.kill(pid, 0);
+      await Bun.sleep(20);
+    } catch {
+      return true;
+    }
+  }
+  return false;
+}
+
 describe("isolated test runner", () => {
   test("discovers canonical test/spec TypeScript and TSX names", async () => {
     const root = await fixtureRoot();
@@ -53,7 +65,7 @@ describe("isolated test runner", () => {
     expect(result.output).toContain("4/4 test files passed");
   });
 
-  test("bounds top-level module hangs with TERM then KILL", async () => {
+  test("bounds top-level module hangs with an external wall deadline", async () => {
     const root = await fixtureRoot();
     await writeFile(join(root, "hang.test.ts"), "await new Promise(() => {});");
     const started = Date.now();
@@ -61,6 +73,35 @@ describe("isolated test runner", () => {
     expect(result.code).not.toBe(0);
     expect(result.output).toContain("wall timeout after 300ms");
     expect(Date.now() - started).toBeLessThan(2_000);
+  });
+
+  test("escalates to KILL and removes a TERM-ignoring descendant process group", async () => {
+    const root = await fixtureRoot();
+    const childPidFile = join(root, "child-pid");
+    const descendantPidFile = join(root, "descendant-pid");
+    const childTermFile = join(root, "child-term");
+    const descendantTermFile = join(root, "descendant-term");
+    const descendantSource = `import { writeFileSync } from "node:fs"; writeFileSync(${JSON.stringify(descendantPidFile)},String(process.pid)); process.on("SIGTERM",()=>writeFileSync(${JSON.stringify(descendantTermFile)},"term")); await new Promise(()=>{});`;
+    await writeFile(
+      join(root, "kill.spec.ts"),
+      `import { writeFileSync } from "node:fs"; writeFileSync(${JSON.stringify(childPidFile)},String(process.pid)); Bun.spawn(["bun","-e",${JSON.stringify(descendantSource)}],{stdout:"ignore",stderr:"ignore"}); process.on("SIGTERM",()=>writeFileSync(${JSON.stringify(childTermFile)},"term")); await new Promise(()=>{});`,
+    );
+
+    const result = await run(root, [], {
+      TEST_WALL_TIMEOUT_MS: "800",
+      TEST_KILL_GRACE_MS: "200",
+    });
+    expect(result.code).not.toBe(0);
+    expect(result.output).toContain("wall timeout after 800ms");
+    expect(await readFile(childTermFile, "utf8")).toBe("term");
+    expect(await readFile(descendantTermFile, "utf8")).toBe("term");
+
+    const childPid = Number(await readFile(childPidFile, "utf8"));
+    const descendantPid = Number(await readFile(descendantPidFile, "utf8"));
+    expect(childPid).toBeGreaterThan(1);
+    expect(descendantPid).toBeGreaterThan(1);
+    expect(await waitForProcessExit(childPid)).toBe(true);
+    expect(await waitForProcessExit(descendantPid)).toBe(true);
   });
 
   test("forwards timeout TERM to the child and reports nonzero/no-match", async () => {
@@ -110,16 +151,29 @@ describe("isolated test runner", () => {
     expect(childPid).toBeGreaterThan(1);
     parent.kill("SIGTERM");
     expect(await parent.exited).toBe(143);
-    for (let i = 0; i < 50; i += 1) {
-      try {
-        process.kill(childPid, 0);
-        await Bun.sleep(20);
-      } catch {
-        childPid = 0;
-        break;
-      }
-    }
-    expect(childPid).toBe(0);
+    expect(await waitForProcessExit(childPid)).toBe(true);
+  });
+
+  test("clears the wall deadline and terminates the child when stream draining rejects", async () => {
+    const root = await fixtureRoot();
+    const pidFile = join(root, "drain-failure-pid");
+    await writeFile(
+      join(root, "drain-failure.test.ts"),
+      `import { writeFileSync } from "node:fs"; writeFileSync(${JSON.stringify(pidFile)},String(process.pid)); console.log("DRAIN_FAILURE_SENTINEL"); process.on("SIGTERM",()=>{}); await new Promise(()=>{});`,
+    );
+    const started = Date.now();
+    const result = await run(root, [], {
+      ISOLATED_RUNNER_TEST_DRAIN_FAILURE_AFTER: "DRAIN_FAILURE_SENTINEL",
+      TEST_WALL_TIMEOUT_MS: "5000",
+      TEST_KILL_GRACE_MS: "100",
+    });
+    const elapsed = Date.now() - started;
+    const childPid = Number(await readFile(pidFile, "utf8"));
+
+    expect(result.code).not.toBe(0);
+    expect(result.output).toContain("simulated isolated runner stream failure");
+    expect(elapsed).toBeLessThan(2_000);
+    expect(await waitForProcessExit(childPid)).toBe(true);
   });
 
   test("discards success output and retains only a bounded failure tail", async () => {
