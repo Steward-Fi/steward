@@ -2890,9 +2890,11 @@ class ProviderActionService {
    * This sweeper drains every undelivered outbox row for the tenant (optionally
    * scoped to one intent). It is safe to run repeatedly and concurrently: the
    * drain marks `delivered_at` per row after the signed append, and
-   * `writeAuditEvent` is itself per-tenant serialized, so a signed event is
-   * produced EXACTLY ONCE per outbox row. Call it opportunistically (any read
-   * path) and/or from a periodic job; a killed drain is always recoverable.
+   * `writeAuditEvent` is itself process-locally serialized, so repeated drains
+   * in one process avoid duplicate signed events. Cross-replica recovery is
+   * best effort because the audit lookup and append are not one unique DB
+   * transaction. Call it opportunistically (any read path) and/or from a
+   * periodic job; an undelivered row remains recoverable.
    *
    * Returns the number of rows delivered in this pass.
    */
@@ -2911,14 +2913,13 @@ class ProviderActionService {
       );
     let delivered = 0;
     for (const row of rows) {
-      // Crash-safe exactly-once. The source of truth for "is this
+      // Process-local idempotent recovery. The source of truth for "is this
       // event signed?" is the audit chain itself, keyed by the deterministic
       // correlation (tenant, resource_id=intentId, action). `delivered_at` is
       // only an optimization. We serialize the whole check+sign+mark per tenant
       // (same queue writeAuditEvent uses) so two in-process sweeps cannot both
-      // sign, and if a prior sweep crashed AFTER signing but BEFORE marking, this
-      // sweep observes the existing signed event and just marks the row — never
-      // a duplicate, never a permanently-unsigned intent.
+      // sign. A cross-replica race can still duplicate the signed event because
+      // the audit table has no matching unique constraint.
       const signedNow = await withTenantAuditQueue(row.tenantId, async () => {
         const existing = await this.db().execute(
           sql`SELECT 1 FROM audit_events
@@ -3176,8 +3177,8 @@ class ProviderActionService {
   // ── Required-audit outbox drain (post-commit, pre-stub) ──
   private async drainAuditOutbox(tenantId: string, intentId: string): Promise<boolean> {
     // Delegate to the CAS-guarded recovery path so the inline drain and the
-    // crash-recovery sweeper share exactly-once semantics (spec §7.3). Any signer
-    // failure propagates (caller maps it to EVIDENCE_REQUIRED_AUDIT_UNAVAILABLE).
+    // crash-recovery sweeper share the same process-local idempotency path. Any
+    // signer failure propagates (caller maps it to EVIDENCE_REQUIRED_AUDIT_UNAVAILABLE).
     await this.recoverUnsignedIntents(tenantId, intentId);
     return true;
   }
