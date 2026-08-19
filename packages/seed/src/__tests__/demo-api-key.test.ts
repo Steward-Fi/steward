@@ -1,8 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import {
+  closeSync,
+  constants as fsConstants,
+  fstatSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
+  openSync,
   readdirSync,
   readFileSync,
   realpathSync,
@@ -24,6 +28,17 @@ function tempRoot(prefix: string): string {
   return realpathSync(mkdtempSync(join(tmpdir(), prefix)));
 }
 
+function readCredentialFile(path: string): { contents: string; mode: number } {
+  const fd = openSync(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
+  try {
+    const stat = fstatSync(fd);
+    if (!stat.isFile()) throw new Error("Expected a regular credential file");
+    return { contents: readFileSync(fd, "utf8"), mode: stat.mode };
+  } finally {
+    closeSync(fd);
+  }
+}
+
 describe("demo API key", () => {
   test("is fresh, high-entropy, and verifies only against its own hash", () => {
     const first = generateDemoApiKey();
@@ -43,12 +58,11 @@ describe("demo API key", () => {
       promoteDemoCredentials(stageDemoCredentials("waifu.fun", oldKey, path));
       const nextKey = generateDemoApiKey().key;
       const pending = stageDemoCredentials("waifu.fun", nextKey, path);
+      const staged = readCredentialFile(pending.pendingPath);
       expect(lstatSync(dirname(path)).mode & 0o777).toBe(0o700);
-      expect(lstatSync(pending.pendingPath).mode & 0o777).toBe(0o600);
+      expect(staged.mode & 0o777).toBe(0o600);
       expect(readFileSync(path, "utf8")).toContain(`STEWARD_API_KEY=${oldKey}`);
-      expect(readFileSync(pending.pendingPath, "utf8")).toBe(
-        `STEWARD_TENANT_ID=waifu.fun\nSTEWARD_API_KEY=${nextKey}\n`,
-      );
+      expect(staged.contents).toBe(`STEWARD_TENANT_ID=waifu.fun\nSTEWARD_API_KEY=${nextKey}\n`);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -172,8 +186,8 @@ describe("demo API key", () => {
       symlinkSync(canonical, linkedFile);
       const pending = stageDemoCredentials("waifu.fun", generateDemoApiKey().key, linkedFile);
       promoteDemoCredentials(pending);
-      expect(lstatSync(linkedFile).isSymbolicLink()).toBe(false);
-      expect(readFileSync(canonical, "utf8")).not.toBe(readFileSync(linkedFile, "utf8"));
+      const promoted = readCredentialFile(linkedFile);
+      expect(readCredentialFile(canonical).contents).not.toBe(promoted.contents);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

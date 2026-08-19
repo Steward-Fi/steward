@@ -6,7 +6,6 @@ import {
   fstatSync,
   fsyncSync,
   linkSync,
-  lstatSync,
   mkdirSync,
   openSync,
   realpathSync,
@@ -43,21 +42,22 @@ function assertApiKey(apiKey: string): void {
 function credentialParent(path: string): { device: number; inode: number } {
   const parentPath = dirname(path);
   mkdirSync(parentPath, { recursive: true, mode: 0o700 });
-  const parent = lstatSync(parentPath);
-  if (!parent.isDirectory() || parent.isSymbolicLink() || realpathSync(parentPath) !== parentPath) {
+  let fd: number;
+  try {
+    fd = openSync(
+      parentPath,
+      fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW,
+    );
+  } catch {
     throw new Error("Demo credentials parent must not contain redirected directories");
   }
-  if (typeof process.geteuid === "function" && parent.uid !== process.geteuid()) {
-    throw new Error("Demo credentials parent must be owned by the current user");
-  }
-  const fd = openSync(
-    parentPath,
-    fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW,
-  );
   try {
     const opened = fstatSync(fd);
-    if (!opened.isDirectory() || opened.dev !== parent.dev || opened.ino !== parent.ino) {
-      throw new Error("Demo credentials parent changed during validation");
+    if (!opened.isDirectory() || realpathSync(parentPath) !== parentPath) {
+      throw new Error("Demo credentials parent must not contain redirected directories");
+    }
+    if (typeof process.geteuid === "function" && opened.uid !== process.geteuid()) {
+      throw new Error("Demo credentials parent must be owned by the current user");
     }
     fchmodSync(fd, 0o700);
     return { device: opened.dev, inode: opened.ino };
@@ -181,48 +181,37 @@ export function promoteDemoCredentials(pending: PendingDemoCredentials): string 
         throw new Error(`Could not allocate promotion link; recover ${pending.pendingPath}`);
       }
 
-      const linkedPath = lstatSync(promotionPath);
       const promotionFd = openSync(
         promotionPath,
         fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK,
       );
       try {
         const linkedFd = fstatSync(promotionFd);
-        if (
-          !linkedPath.isFile() ||
-          !linkedFd.isFile() ||
-          linkedPath.dev !== staged.dev ||
-          linkedPath.ino !== staged.ino ||
-          linkedFd.dev !== staged.dev ||
-          linkedFd.ino !== staged.ino
-        ) {
+        if (!linkedFd.isFile() || linkedFd.dev !== staged.dev || linkedFd.ino !== staged.ino) {
           throw new Error(
             `Pending credential changed during promotion; recover ${pending.pendingPath}`,
           );
         }
 
-        const beforeRename = lstatSync(promotionPath);
-        if (
-          !beforeRename.isFile() ||
-          beforeRename.dev !== linkedFd.dev ||
-          beforeRename.ino !== linkedFd.ino
-        ) {
-          throw new Error(
-            `Pending credential changed before canonical rename; recover ${pending.pendingPath}`,
-          );
-        }
-
         renameSync(promotionPath, pending.finalPath);
         promotionPath = undefined;
-        const canonical = lstatSync(pending.finalPath);
-        if (
-          !canonical.isFile() ||
-          canonical.dev !== linkedFd.dev ||
-          canonical.ino !== linkedFd.ino
-        ) {
-          throw new Error(
-            `Canonical credential changed during promotion; recover ${pending.pendingPath}`,
-          );
+        const canonicalFd = openSync(
+          pending.finalPath,
+          fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK,
+        );
+        try {
+          const canonical = fstatSync(canonicalFd);
+          if (
+            !canonical.isFile() ||
+            canonical.dev !== linkedFd.dev ||
+            canonical.ino !== linkedFd.ino
+          ) {
+            throw new Error(
+              `Canonical credential changed during promotion; recover ${pending.pendingPath}`,
+            );
+          }
+        } finally {
+          closeSync(canonicalFd);
         }
       } finally {
         closeSync(promotionFd);
