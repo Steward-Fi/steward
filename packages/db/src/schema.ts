@@ -557,9 +557,40 @@ export const vaultSigningFreezes = pgTable(
   }),
 );
 
+/**
+ * Globally claims an EVM (address, chain) nonce namespace for exactly one
+ * tenant. The counter itself is tenant-scoped for RLS, while this claim keeps
+ * duplicate custody of the same address in two tenants from allocating the
+ * same on-chain nonce independently.
+ */
+export const evmWalletNonceOwners = pgTable(
+  "evm_wallet_nonce_owners",
+  {
+    tenantId: varchar("tenant_id", { length: 64 })
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    walletAddress: varchar("wallet_address", { length: 42 }).notNull(),
+    chainId: integer("chain_id").notNull(),
+    claimedAt: timestamp("claimed_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    key: primaryKey({ columns: [table.walletAddress, table.chainId] }),
+    tenantWalletChainUniqueIdx: uniqueIndex("evm_wallet_nonce_owners_tenant_key_idx").on(
+      table.tenantId,
+      table.walletAddress,
+      table.chainId,
+    ),
+    addressCheck: check(
+      "evm_wallet_nonce_owners_address_chk",
+      sql`${table.walletAddress} ~ '^0x[0-9a-f]{40}$'`,
+    ),
+  }),
+);
+
 export const evmWalletNonces = pgTable(
   "evm_wallet_nonces",
   {
+    tenantId: varchar("tenant_id", { length: 64 }).notNull(),
     walletAddress: varchar("wallet_address", { length: 42 }).notNull(),
     chainId: integer("chain_id").notNull(),
     nextNonce: bigint("next_nonce", { mode: "number" }).notNull(),
@@ -570,9 +601,19 @@ export const evmWalletNonces = pgTable(
   },
   (table) => ({
     walletChainUniqueIdx: uniqueIndex("evm_wallet_nonces_wallet_chain_idx").on(
+      table.tenantId,
       table.walletAddress,
       table.chainId,
     ),
+    ownerFk: foreignKey({
+      columns: [table.tenantId, table.walletAddress, table.chainId],
+      foreignColumns: [
+        evmWalletNonceOwners.tenantId,
+        evmWalletNonceOwners.walletAddress,
+        evmWalletNonceOwners.chainId,
+      ],
+      name: "evm_wallet_nonces_owner_fk",
+    }).onDelete("cascade"),
   }),
 );
 
@@ -586,6 +627,7 @@ export const evmWalletNonces = pgTable(
 export const evmWalletNonceInflight = pgTable(
   "evm_wallet_nonce_inflight",
   {
+    tenantId: varchar("tenant_id", { length: 64 }).notNull(),
     walletAddress: varchar("wallet_address", { length: 42 }).notNull(),
     chainId: integer("chain_id").notNull(),
     nonce: bigint("nonce", { mode: "number" }).notNull(),
@@ -598,16 +640,27 @@ export const evmWalletNonceInflight = pgTable(
   },
   (table) => ({
     walletChainNonceUniqueIdx: uniqueIndex("evm_wallet_nonce_inflight_key_idx").on(
+      table.tenantId,
       table.walletAddress,
       table.chainId,
       table.nonce,
     ),
     reclaimIdx: index("evm_wallet_nonce_inflight_reclaim_idx").on(
+      table.tenantId,
       table.walletAddress,
       table.chainId,
       table.state,
       table.nonce,
     ),
+    ownerFk: foreignKey({
+      columns: [table.tenantId, table.walletAddress, table.chainId],
+      foreignColumns: [
+        evmWalletNonceOwners.tenantId,
+        evmWalletNonceOwners.walletAddress,
+        evmWalletNonceOwners.chainId,
+      ],
+      name: "evm_wallet_nonce_inflight_owner_fk",
+    }).onDelete("cascade"),
   }),
 );
 
