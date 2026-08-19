@@ -28,6 +28,34 @@ function redisLike(overrides: Partial<RedisLike> = {}): RedisLike {
       return removed;
     },
     eval: async (_script, keys, key, ...args) => {
+      const all = [key, ...args].map(String);
+      if (all.length === keys * 6) {
+        const publishKeys = all.slice(0, keys);
+        const publishArgs = all.slice(keys);
+        const states = publishKeys.flatMap((publishKey, index) => {
+          const offset = index * 5;
+          const operation = publishArgs[offset];
+          const desiredValue = publishArgs[offset + 1];
+          const guardKind = publishArgs[offset + 3];
+          const expectedValue = publishArgs[offset + 4];
+          if (guardKind === "0") return [];
+          const current = store.get(publishKey);
+          return [
+            {
+              expected: guardKind === "1" ? current === undefined : current === expectedValue,
+              desired: operation === "D" ? current === undefined : current === desiredValue,
+            },
+          ];
+        });
+        if (states.length > 0 && states.every((state) => state.desired)) return 1;
+        if (states.some((state) => !state.expected)) return 0;
+        for (let index = 0; index < publishKeys.length; index += 1) {
+          const offset = index * 5;
+          if (publishArgs[offset] === "D") store.delete(publishKeys[index]);
+          else store.set(publishKeys[index], publishArgs[offset + 1]);
+        }
+        return 1;
+      }
       const [guardKey, expected, desired, _ttl, guardExpected] =
         keys === 2 ? args : [undefined, ...args];
       if (guardKey !== undefined && store.get(String(guardKey)) !== guardExpected) return 0;
@@ -64,6 +92,40 @@ describe("buildBackend Redis smoke test", () => {
 });
 
 describe("NamespacedStoreBackend", () => {
+  it("conditionally publishes all keys or none and makes retries no-ops", async () => {
+    for (const backend of [new MemoryBackend(), new RedisBackend(redisLike(), "test:")]) {
+      await backend.set("generation", "reservation-a", 60_000);
+
+      const entries = [
+        {
+          key: "generation",
+          value: "published-a",
+          ttlMs: 60_000,
+          expected: "reservation-a",
+        },
+        { key: "credential", value: "active", ttlMs: 60_000 },
+        { key: "prior-credential", value: null, ttlMs: 60_000 },
+      ] as const;
+      expect(await backend.publish(entries)).toBe(true);
+      expect(await backend.consume("credential")).toBe("active");
+      // A lost-ack retry must be a no-op. Reapplying the unconditional entries
+      // here would recreate a credential that was already consumed.
+      expect(await backend.publish(entries)).toBe(true);
+      expect(await backend.get("credential")).toBeNull();
+
+      await backend.set("generation", "reservation-newer", 60_000);
+      expect(
+        await backend.publish([
+          ...entries,
+          { key: "should-not-publish", value: "unsafe", ttlMs: 60_000 },
+        ]),
+      ).toBe(false);
+      expect(await backend.get("generation")).toBe("reservation-newer");
+      expect(await backend.get("should-not-publish")).toBeNull();
+      if (backend instanceof MemoryBackend) backend.destroy();
+    }
+  });
+
   it("applies staged transitions atomically and idempotently across reconstructed stores", async () => {
     const backend = new MemoryBackend();
     const first = new NamespacedStoreBackend(backend, "email");
@@ -153,6 +215,7 @@ describe("NamespacedStoreBackend", () => {
       get: async () => null,
       consume: async () => null,
       transition: async () => false,
+      publish: async () => true,
       delete: async () => undefined,
     };
     const store = new NamespacedStoreBackend(backend, "oauth-link");
@@ -173,6 +236,7 @@ describe("NamespacedStoreBackend", () => {
         throw new Error("durable backend unavailable");
       },
       transition: async () => false,
+      publish: async () => true,
       delete: async () => undefined,
     };
     const store = new NamespacedStoreBackend(backend, "wallet-link");

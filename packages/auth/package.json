@@ -22,6 +22,7 @@
     "viem": "^2.30.0"
   },
   "devDependencies": {
+    "postgres": "^3.4.7",
     "@types/node": "^24.5.2"
   },
   "description": "Timing-safe API key validation and tenant middleware for Steward services"

@@ -17,6 +17,20 @@ import { redactedThrownDiagnostics } from "@stwd/shared";
 
 // ─── Interface ────────────────────────────────────────────────────────────────
 
+export interface StorePublishEntry {
+  key: string;
+  /** A null value deletes the key as part of the atomic publication. */
+  value: string | null;
+  ttlMs: number;
+  /**
+   * Optional compare-and-publish guard. Null means the key must be absent or
+   * expired. If every guard already contains its desired value, publication
+   * succeeds as a no-op so a lost-ack retry cannot recreate consumed entries.
+   * Otherwise every guard must still contain its expected value.
+   */
+  expected?: string | null;
+}
+
 export interface StoreBackend {
   set(key: string, value: string, ttlMs: number): Promise<void>;
   setIfNotExists(key: string, value: string, ttlMs: number): Promise<boolean>;
@@ -30,6 +44,8 @@ export interface StoreBackend {
     ttlMs: number,
     guard?: { key: string; expected: string },
   ): Promise<boolean>;
+  /** Atomically make every entry visible, or make none of them visible. */
+  publish(entries: readonly StorePublishEntry[]): Promise<boolean>;
   delete(key: string): Promise<void>;
 }
 
@@ -83,6 +99,10 @@ export class NamespacedStoreBackend implements StoreBackend {
       ttlMs,
       guard ? { key: this.key(guard.key), expected: guard.expected } : undefined,
     );
+  }
+
+  async publish(entries: readonly StorePublishEntry[]): Promise<boolean> {
+    return this.backend.publish(entries.map((entry) => ({ ...entry, key: this.key(entry.key) })));
   }
 
   async delete(key: string): Promise<void> {
@@ -172,6 +192,27 @@ export class MemoryBackend implements StoreBackend {
     return true;
   }
 
+  async publish(entries: readonly StorePublishEntry[]): Promise<boolean> {
+    const now = Date.now();
+    const currentValue = (key: string): string | null => {
+      const current = this.store.get(key);
+      if (!current || now > current.expiresAt) return null;
+      return current.value;
+    };
+    const guarded = entries.filter((entry) => entry.expected !== undefined);
+    const states = guarded.map((entry) => {
+      const current = currentValue(entry.key);
+      return { expected: current === entry.expected, desired: current === entry.value };
+    });
+    if (states.length > 0 && states.every((state) => state.desired)) return true;
+    if (states.some((state) => !state.expected)) return false;
+    for (const entry of entries) {
+      if (entry.value === null) this.store.delete(entry.key);
+      else this.store.set(entry.key, { value: entry.value, expiresAt: now + entry.ttlMs });
+    }
+    return true;
+  }
+
   async delete(key: string): Promise<void> {
     this.store.delete(key);
   }
@@ -212,6 +253,11 @@ export interface RedisLike {
   del(...keys: string[]): Promise<number>;
   eval(script: string, numberOfKeys: number, ...args: Array<string | number>): Promise<unknown>;
 }
+
+type TransactionSql = <T extends readonly unknown[] = readonly unknown[]>(
+  strings: TemplateStringsArray,
+  ...values: readonly unknown[]
+) => Promise<T>;
 
 /**
  * Redis-backed store backend.
@@ -271,6 +317,25 @@ export class RedisBackend implements StoreBackend {
       expected,
       desired,
       ttlMs,
+    );
+    return result === 1 || result === "1";
+  }
+
+  async publish(entries: readonly StorePublishEntry[]): Promise<boolean> {
+    if (entries.length === 0) return true;
+    const keys = entries.map((entry) => this.prefix + entry.key);
+    const args = entries.flatMap((entry) => [
+      entry.value === null ? "D" : "S",
+      entry.value ?? "",
+      entry.ttlMs,
+      entry.expected === undefined ? "0" : entry.expected === null ? "1" : "2",
+      entry.expected ?? "",
+    ]);
+    const result = await this.client.eval(
+      "local guarded=0; local all_expected=true; local all_desired=true; for i=1,#KEYS do local j=(i-1)*5; local v=redis.call('GET',KEYS[i]); local kind=ARGV[j+4]; if kind~='0' then guarded=guarded+1; local expected=(kind=='1' and not v) or (kind=='2' and v==ARGV[j+5]); local desired=(ARGV[j+1]=='D' and not v) or (ARGV[j+1]=='S' and v==ARGV[j+2]); if not expected then all_expected=false end; if not desired then all_desired=false end end end; if guarded>0 and all_desired then return 1 end; if not all_expected then return 0 end; for i=1,#KEYS do local j=(i-1)*5; if ARGV[j+1]=='D' then redis.call('DEL',KEYS[i]) else redis.call('SET',KEYS[i],ARGV[j+2],'PX',ARGV[j+3]) end end; return 1",
+      keys.length,
+      ...keys,
+      ...args,
     );
     return result === 1 || result === "1";
   }
@@ -423,6 +488,68 @@ export class PostgresBackend implements StoreBackend {
       RETURNING id
     `;
     return rows.length > 0;
+  }
+
+  async publish(entries: readonly StorePublishEntry[]): Promise<boolean> {
+    if (entries.length === 0) return true;
+    await this.ensureTable();
+    const sql = this.getSqlClient();
+    const prepared = entries.map((entry) => ({
+      ...entry,
+      expiresAt: new Date(Date.now() + entry.ttlMs).toISOString(),
+    }));
+    let published = true;
+    await sql.begin(async (transaction: TransactionSql) => {
+      const ordered = [...prepared].sort((left, right) => left.key.localeCompare(right.key));
+      const guarded = ordered.filter((entry) => entry.expected !== undefined);
+      for (const entry of ordered) {
+        // An advisory transaction lock also serializes the absent-row case,
+        // which SELECT ... FOR UPDATE alone cannot protect at READ COMMITTED.
+        await transaction`
+          SELECT pg_advisory_xact_lock(
+            hashtextextended(${`${this.namespace}:${entry.key}`}, 0)
+          )
+        `;
+      }
+      let allExpected = true;
+      let allDesired = guarded.length > 0;
+      for (const entry of guarded) {
+        const rows = await transaction<Array<{ value: string }>>`
+          SELECT value
+            FROM auth_kv_store
+           WHERE id = ${entry.key}
+             AND namespace = ${this.namespace}
+             AND expires_at > now()
+           LIMIT 1
+        `;
+        const current = rows[0]?.value ?? null;
+        if (current !== entry.expected) allExpected = false;
+        if (current !== entry.value) allDesired = false;
+      }
+      if (allDesired) return;
+      if (!allExpected) {
+        published = false;
+        return;
+      }
+      for (const entry of prepared) {
+        if (entry.value === null) {
+          await transaction`
+            DELETE FROM auth_kv_store
+             WHERE id = ${entry.key}
+               AND namespace = ${this.namespace}
+          `;
+        } else {
+          await transaction`
+            INSERT INTO auth_kv_store (id, namespace, value, expires_at)
+            VALUES (${entry.key}, ${this.namespace}, ${entry.value}, ${entry.expiresAt})
+            ON CONFLICT (id, namespace) DO UPDATE
+              SET value      = EXCLUDED.value,
+                  expires_at = EXCLUDED.expires_at
+          `;
+        }
+      }
+    });
+    return published;
   }
 
   async delete(key: string): Promise<void> {

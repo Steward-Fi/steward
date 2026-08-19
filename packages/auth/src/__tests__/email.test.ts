@@ -2,7 +2,7 @@ import { describe, expect, it, mock } from "bun:test";
 
 import { EmailAuth } from "../email";
 import type { EmailProvider } from "../email-provider";
-import type { StoreBackend } from "../store-backends";
+import type { StoreBackend, StorePublishEntry } from "../store-backends";
 import { TokenStore } from "../token-store";
 
 class CapturingBackend implements StoreBackend {
@@ -43,6 +43,23 @@ class CapturingBackend implements StoreBackend {
     const current = await this.get(key);
     if (current !== expected && current !== desired) return false;
     await this.set(key, desired, ttlMs);
+    return true;
+  }
+
+  async publish(entries: readonly StorePublishEntry[]): Promise<boolean> {
+    const now = Date.now();
+    const guarded = entries.filter((entry) => entry.expected !== undefined);
+    const states = guarded.map((entry) => {
+      const existing = this.values.get(entry.key);
+      const current = existing && now <= existing.expiresAt ? existing.value : null;
+      return { expected: current === entry.expected, desired: current === entry.value };
+    });
+    if (states.length > 0 && states.every((state) => state.desired)) return true;
+    if (states.some((state) => !state.expected)) return false;
+    for (const entry of entries) {
+      if (entry.value === null) this.values.delete(entry.key);
+      else this.values.set(entry.key, { value: entry.value, expiresAt: now + entry.ttlMs });
+    }
     return true;
   }
 
