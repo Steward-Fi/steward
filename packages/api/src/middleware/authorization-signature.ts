@@ -149,6 +149,12 @@ async function appClientSecretSigningCandidates(request: Request): Promise<strin
 // Tenant signing-key ids are server-generated UUIDs (tenant-config.ts uses
 // `randomUUID()`), so a non-UUID header value can be rejected without a query.
 const SIGNING_KEY_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+let tenantKeyKdfObserverForTests: (() => void) | null = null;
+
+/** Test-only proof point immediately before tenant-key KDF/decrypt work begins. */
+export function __setTenantKeyKdfObserverForTests(observer: (() => void) | null): void {
+  tenantKeyKdfObserverForTests = observer;
+}
 
 async function tenantRequestSigningKeyCandidates(request: Request): Promise<string[]> {
   const tenantId = request.headers.get("X-Steward-Tenant");
@@ -176,6 +182,7 @@ async function tenantRequestSigningKeyCandidates(request: Request): Promise<stri
   // Defer KeyStore construction (itself a scrypt KDF) until a row exists, so
   // an unknown key id costs only the cheap lookup above.
   if (rows.length === 0) return [];
+  tenantKeyKdfObserverForTests?.();
   const keyStore = new KeyStore(masterPassword, undefined, "secret-vault");
   return rows.flatMap((row) => {
     if (row.revokedAt) return [];
