@@ -57,7 +57,7 @@ import type {
   StewardUser,
   StewardWhatsAppOtpResult,
 } from "./auth-types.ts";
-import { assertSecureBaseUrl } from "./base-url.ts";
+import { assertSecureBaseUrl, stripTrailingSlashes } from "./base-url.ts";
 import { StewardApiError } from "./client.ts";
 
 // ─── Storage key ──────────────────────────────────────────────────────────────
@@ -198,7 +198,7 @@ function isBrowser(): boolean {
  * to another origin. Protocol-relative URLs are cross-origin capable too. */
 function normalizeAuthProxyUrl(value: string | undefined): string | undefined {
   if (!value) return undefined;
-  const trimmed = value.replace(/\/+$/, "");
+  const trimmed = stripTrailingSlashes(value);
   if (!trimmed) throw new Error("authProxyUrl must identify a non-root path");
   if (!isBrowser()) {
     if (!trimmed.startsWith("/") || trimmed.startsWith("//")) {
@@ -222,7 +222,7 @@ function normalizeAuthProxyUrl(value: string | undefined): string | undefined {
   ) {
     throw new Error("authProxyUrl must be a credential-free same-origin HTTP(S) URL");
   }
-  return trimmed.startsWith("/") ? trimmed : resolved.href.replace(/\/+$/, "");
+  return trimmed.startsWith("/") ? trimmed : stripTrailingSlashes(resolved.href);
 }
 
 function getSignInOrigin(): { domain: string; origin: string } {
@@ -314,7 +314,7 @@ async function authRequest<T>(
 
   let response: Response;
   try {
-    response = await fetch(`${baseUrl.replace(/\/+$/, "")}${path}`, {
+    response = await fetch(`${stripTrailingSlashes(baseUrl)}${path}`, {
       ...init,
       headers,
       redirect: "error",
@@ -366,7 +366,7 @@ export class StewardAuth {
     allowInsecureBaseUrl,
   }: StewardAuthConfig) {
     assertSecureBaseUrl(baseUrl, allowInsecureBaseUrl);
-    this.baseUrl = baseUrl.replace(/\/+$/, "");
+    this.baseUrl = stripTrailingSlashes(baseUrl);
     this.tenantId = tenantId;
     this.authProxyUrl = normalizeAuthProxyUrl(authProxyUrl);
 

@@ -91,7 +91,10 @@ module Steward
     )
       raise ArgumentError, "base_url is required" if base_url.to_s.strip.empty?
 
-      @base_url = base_url.to_s.sub(%r{/+\z}, "")
+      raw_base_url = base_url.to_s
+      base_url_end = raw_base_url.bytesize
+      base_url_end -= 1 while base_url_end.positive? && raw_base_url.getbyte(base_url_end - 1) == 47
+      @base_url = raw_base_url.byteslice(0, base_url_end)
       self.class.assert_secure_base_url!(@base_url, allow_insecure_base_url)
       @api_key = api_key
       @bearer_token = bearer_token

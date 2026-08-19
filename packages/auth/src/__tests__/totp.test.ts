@@ -131,4 +131,13 @@ describe("TOTP (RFC 6238)", () => {
     expect(uri).toContain("My%20Co%2FSteward");
     expect(uri).toContain("a%2Bb%40example.com");
   });
+
+  test("strips adversarial base32 padding without regex backtracking", () => {
+    const uri = buildOtpauthUri({
+      issuer: "Steward",
+      accountName: "alice@example.com",
+      secret: `JBSWY3DPEHPK3PXP${"=".repeat(200_000)}`,
+    });
+    expect(uri).toContain("secret=JBSWY3DPEHPK3PXP&");
+  });
 });

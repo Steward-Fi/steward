@@ -12,7 +12,7 @@ import { describe, expect, spyOn, test } from "bun:test";
 import { AgentClient } from "../agent-client";
 import { AgentKeypair } from "../agent-keypair";
 import { StewardAuth } from "../auth";
-import { assertSecureBaseUrl } from "../base-url";
+import { assertSecureBaseUrl, stripTrailingSlashes } from "../base-url";
 import { StewardClient } from "../client";
 import { generateMockKeyPair } from "./agent-client-mock-server";
 
@@ -58,6 +58,14 @@ describe("assertSecureBaseUrl", () => {
   test("the insecure opt-out permits HTTP only, never arbitrary URL schemes", () => {
     expect(() => assertSecureBaseUrl("ftp://api.steward.example", true)).toThrow(/HTTP\(S\)/);
   });
+});
+
+test("trailing slash normalization stays linear on adversarial input", () => {
+  const suffix = "/".repeat(200_000);
+  expect(stripTrailingSlashes(`https://api.steward.example${suffix}`)).toBe(
+    "https://api.steward.example",
+  );
+  expect(stripTrailingSlashes(`${suffix}x`)).toBe(`${suffix}x`);
 });
 
 describe("SDK constructors enforce HTTPS baseUrl", () => {

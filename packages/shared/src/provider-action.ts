@@ -1499,7 +1499,12 @@ export function canonicalizeHeaders(raw: ReadonlyArray<[string, string]>): Array
 }
 
 function trimOws(s: string): string {
-  return s.replace(/^[ \t]+/, "").replace(/[ \t]+$/, "");
+  let start = 0;
+  let end = s.length;
+  while (start < end && (s.charCodeAt(start) === 0x20 || s.charCodeAt(start) === 0x09)) start += 1;
+  while (end > start && (s.charCodeAt(end - 1) === 0x20 || s.charCodeAt(end - 1) === 0x09))
+    end -= 1;
+  return start === 0 && end === s.length ? s : s.slice(start, end);
 }
 
 function assertHeaderValueClean(v: string): void {

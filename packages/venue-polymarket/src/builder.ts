@@ -152,12 +152,18 @@ export function signEndpointUrl(base: string | undefined): string {
   // at the PATH only (e.g. `https://h/sign?env=prod` must not become `.../sign?env=prod/sign`).
   try {
     const u = new URL(trimmed);
-    const path = u.pathname.replace(/\/+$/, "");
+    const path = stripTrailingSlashes(u.pathname);
     u.pathname = /\/sign$/.test(path) ? path : `${path}/sign`;
     return u.toString();
   } catch {
     // Not an absolute URL (relative path/host fragment) — fall back to string handling.
-    const noTrailing = trimmed.replace(/\/+$/, "");
+    const noTrailing = stripTrailingSlashes(trimmed);
     return /\/sign$/.test(noTrailing) ? noTrailing : `${noTrailing}/sign`;
   }
+}
+
+function stripTrailingSlashes(value: string): string {
+  let end = value.length;
+  while (end > 0 && value.charCodeAt(end - 1) === 0x2f) end -= 1;
+  return end === value.length ? value : value.slice(0, end);
 }

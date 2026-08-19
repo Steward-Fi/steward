@@ -170,8 +170,6 @@ function extractRunSteps(job: string): WorkflowStep[] {
 }
 
 export function jobExecutesPackageTests(job: string, packagePath: string): boolean {
-  const executableTestCommand =
-    /^(?:\(?\s*)?(?:[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|[^\s]+)\s+)*(?:(?:bun|cargo|flutter|go|mvn|swift)\b[^\n]*\b(?:test|run-tests)\b|dotnet\s+run\b|python3?\s+-m\s+unittest\b|ruby\b[^\n]*\btest\/[^\s]*_test\.rb\b)/;
   return extractRunSteps(job).some((step) => {
     // Only an inline scalar can be checked as one shell command without a
     // shell parser. Literal/folded blocks can hide apparent runner lines in a
@@ -192,13 +190,118 @@ export function jobExecutesPackageTests(job: string, packagePath: string): boole
         ) {
           return false;
         }
-        if (!executableTestCommand.test(line)) return false;
+        if (!isExecutableTestCommand(line)) return false;
         // Bind the package reference to the same executable line. Merely
         // echoing a package name elsewhere in a multiline step cannot make an
         // unrelated test command satisfy this target.
         return step.workingDirectory === packagePath || line.includes(packagePath);
       });
   });
+}
+
+function isShellWhitespace(char: string | undefined): boolean {
+  return char !== undefined && char.trim().length === 0;
+}
+
+function skipEnvironmentAssignments(line: string, initial: number): number {
+  let cursor = initial;
+  while (cursor < line.length) {
+    const assignmentStart = cursor;
+    const first = line.charCodeAt(cursor);
+    if (!((first >= 0x41 && first <= 0x5a) || (first >= 0x61 && first <= 0x7a) || first === 0x5f))
+      break;
+    cursor += 1;
+    while (cursor < line.length) {
+      const code = line.charCodeAt(cursor);
+      if (
+        (code >= 0x41 && code <= 0x5a) ||
+        (code >= 0x61 && code <= 0x7a) ||
+        (code >= 0x30 && code <= 0x39) ||
+        code === 0x5f
+      ) {
+        cursor += 1;
+      } else {
+        break;
+      }
+    }
+    if (line[cursor] !== "=") return assignmentStart;
+    cursor += 1;
+    const quote = line[cursor] === '"' || line[cursor] === "'" ? line[cursor] : undefined;
+    if (quote) {
+      cursor += 1;
+      while (cursor < line.length && line[cursor] !== quote) cursor += 1;
+      if (line[cursor] !== quote) return assignmentStart;
+      cursor += 1;
+    } else {
+      const valueStart = cursor;
+      while (cursor < line.length && !isShellWhitespace(line[cursor])) cursor += 1;
+      if (cursor === valueStart) return assignmentStart;
+    }
+    if (!isShellWhitespace(line[cursor])) return assignmentStart;
+    while (isShellWhitespace(line[cursor])) cursor += 1;
+  }
+  return cursor;
+}
+
+function isWordCode(code: number): boolean {
+  return (
+    (code >= 0x30 && code <= 0x39) ||
+    (code >= 0x41 && code <= 0x5a) ||
+    (code >= 0x61 && code <= 0x7a) ||
+    code === 0x5f
+  );
+}
+
+function startsWithWord(value: string, word: string): boolean {
+  return (
+    value.startsWith(word) &&
+    (value.length === word.length || !isWordCode(value.charCodeAt(word.length)))
+  );
+}
+
+function containsBoundedWord(value: string, word: string): boolean {
+  let index = value.indexOf(word);
+  while (index !== -1) {
+    const before = index === 0 ? -1 : value.charCodeAt(index - 1);
+    const afterIndex = index + word.length;
+    const after = afterIndex === value.length ? -1 : value.charCodeAt(afterIndex);
+    if ((before === -1 || !isWordCode(before)) && (after === -1 || !isWordCode(after))) return true;
+    index = value.indexOf(word, index + 1);
+  }
+  return false;
+}
+
+function isExecutableTestCommand(line: string): boolean {
+  let cursor = 0;
+  if (line[cursor] === "(") cursor += 1;
+  while (isShellWhitespace(line[cursor])) cursor += 1;
+  cursor = skipEnvironmentAssignments(line, cursor);
+  const command = line.slice(cursor);
+
+  for (const runner of ["bun", "cargo", "flutter", "go", "mvn", "swift"]) {
+    if (startsWithWord(command, runner)) {
+      return containsBoundedWord(command, "test") || containsBoundedWord(command, "run-tests");
+    }
+  }
+  if (startsWithWord(command, "dotnet")) {
+    const remainder = command.slice("dotnet".length).trimStart();
+    return startsWithWord(remainder, "run");
+  }
+  if (startsWithWord(command, "python") || startsWithWord(command, "python3")) {
+    const tokens = command.split(/\s+/);
+    return tokens[1] === "-m" && tokens[2] === "unittest";
+  }
+  if (startsWithWord(command, "ruby")) {
+    const testPath = command.indexOf("test/");
+    if (testPath === -1) return false;
+    const tokenEnd = command.indexOf(" ", testPath);
+    const pathToken = command.slice(testPath, tokenEnd === -1 ? undefined : tokenEnd);
+    const suffix = pathToken.indexOf("_test.rb");
+    if (suffix === -1) return false;
+    const afterSuffix = suffix + "_test.rb".length;
+    return afterSuffix === pathToken.length || !isWordCode(pathToken.charCodeAt(afterSuffix));
+  }
+  return false;
 }
 
 export function assertCompleteCoverage(

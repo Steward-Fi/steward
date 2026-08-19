@@ -31,7 +31,7 @@
  */
 
 import { AgentKeypair } from "./agent-keypair.ts";
-import { assertSecureBaseUrl } from "./base-url.ts";
+import { assertSecureBaseUrl, stripTrailingSlashes } from "./base-url.ts";
 
 // ─── Errors ───────────────────────────────────────────────────────────────────
 
@@ -236,7 +236,7 @@ export class AgentClient {
       throw new Error("keypair must be an AgentKeypair (the private key never leaves it)");
     }
     assertSecureBaseUrl(config.baseUrl, config.allowInsecureBaseUrl);
-    this.baseUrl = config.baseUrl.replace(/\/+$/, "");
+    this.baseUrl = stripTrailingSlashes(config.baseUrl);
     this.agentId = config.agentId;
     this.keypair = config.keypair;
     this.renewLeadMs = config.renewLeadMs ?? 60_000;

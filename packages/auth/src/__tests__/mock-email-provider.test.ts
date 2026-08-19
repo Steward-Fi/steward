@@ -48,4 +48,24 @@ describe("MockEmailProvider", () => {
     MockEmailInbox.clear("c@example.com");
     expect(MockEmailInbox.all("c@example.com")).toHaveLength(0);
   });
+
+  it("preserves first-token extraction semantics without regex backtracking", async () => {
+    const provider = new MockEmailProvider();
+    await provider.send(
+      "tokens@example.com",
+      "tokens",
+      "open https://steward.fi/callback?token=first&next=1&token=second&after=ignored",
+    );
+    const msg = MockEmailInbox.last("tokens@example.com");
+    expect(msg?.token).toBe("first");
+    expect(msg?.magicLink).toBe("https://steward.fi/callback?token=first");
+  });
+
+  it("handles adversarial scheme runs without regex backtracking", async () => {
+    const provider = new MockEmailProvider();
+    await provider.send("redos@example.com", "redos", `${"http://".repeat(100_000)}no-token`);
+    const msg = MockEmailInbox.last("redos@example.com");
+    expect(msg?.token).toBeUndefined();
+    expect(msg?.magicLink).toBeUndefined();
+  });
 });

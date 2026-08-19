@@ -1332,7 +1332,7 @@ function canonicalizeGenericHeaders(raw: ReadonlyArray<[string, string]>): Array
       throw new CanonError("CANON_HEADER_CREDENTIAL_FORBIDDEN", `forbidden header '${name}'`);
     if (byName.has(name))
       throw new CanonError("CANON_HEADER_DUPLICATE", `duplicate header '${name}'`);
-    const value = rawValue.replace(/^[ \t]+/, "").replace(/[ \t]+$/, "");
+    const value = trimOws(rawValue);
     for (let i = 0; i < value.length; i++) {
       const c = value.charCodeAt(i);
       if (c === 0x09 || c === 0x0a || c === 0x0d || c < 0x20 || c === 0x7f)
@@ -1343,6 +1343,16 @@ function canonicalizeGenericHeaders(raw: ReadonlyArray<[string, string]>): Array
   return [...byName.entries()]
     .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
     .map(([n, v]) => [n, v] as [string, string]);
+}
+
+function trimOws(value: string): string {
+  let start = 0;
+  let end = value.length;
+  while (start < end && (value.charCodeAt(start) === 0x20 || value.charCodeAt(start) === 0x09))
+    start += 1;
+  while (end > start && (value.charCodeAt(end - 1) === 0x20 || value.charCodeAt(end - 1) === 0x09))
+    end -= 1;
+  return start === 0 && end === value.length ? value : value.slice(start, end);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
