@@ -325,12 +325,12 @@ describe("provider authority foundation", () => {
       .select()
       .from(providerAccounts)
       .where(eq(providerAccounts.id, accountId));
-    store.faultHooks.beforeProviderAccountDisableUpdate = () => {
+    const failingUpdateStore = new ProviderAuthorityStore(async () => {
       throw new Error("simulated provider-account disable update failure");
-    };
+    });
     try {
       await expect(
-        store.disableProviderAccount(
+        failingUpdateStore.disableProviderAccount(
           mutation({
             actorUserId: ADMIN,
             tenantRole: "admin",
@@ -351,7 +351,6 @@ describe("provider authority foundation", () => {
         .where(eq(persistedAuditEvents.resourceId, accountId));
       expect(events.map(({ action }) => action)).toEqual(["provider.account.disable"]);
     } finally {
-      store.faultHooks = {};
       await getDb().delete(providerAccounts).where(eq(providerAccounts.id, accountId));
     }
   });
@@ -425,12 +424,6 @@ describe("provider authority foundation", () => {
       .select()
       .from(providerAccounts)
       .where(eq(providerAccounts.id, accountId));
-    store.faultHooks.beforeProviderAccountDisableUpdate = async () => {
-      await getDb()
-        .update(providerAccounts)
-        .set({ revision: sql`${providerAccounts.revision} + 1` })
-        .where(eq(providerAccounts.id, accountId));
-    };
     try {
       await expect(
         store.disableProviderAccount(
@@ -438,7 +431,13 @@ describe("provider authority foundation", () => {
             actorUserId: ADMIN,
             tenantRole: "admin",
             expectedRevision: before.revision,
-            audit: persistedAuthorityAudit,
+            audit: async (event) => {
+              await persistedAuthorityAudit(event);
+              await getDb()
+                .update(providerAccounts)
+                .set({ revision: sql`${providerAccounts.revision} + 1` })
+                .where(eq(providerAccounts.id, accountId));
+            },
           }),
           accountId,
         ),
@@ -454,7 +453,6 @@ describe("provider authority foundation", () => {
         .where(eq(persistedAuditEvents.resourceId, accountId));
       expect(events.map(({ action }) => action)).toEqual(["provider.account.disable"]);
     } finally {
-      store.faultHooks = {};
       await getDb().delete(providerAccounts).where(eq(providerAccounts.id, accountId));
     }
   });
@@ -487,12 +485,6 @@ describe("provider authority foundation", () => {
       .select()
       .from(providerAccounts)
       .where(eq(providerAccounts.id, accountId));
-    store.faultHooks.beforeProviderAccountDisableUpdate = async () => {
-      await getDb()
-        .update(providerRoleBindings)
-        .set({ status: "revoked" })
-        .where(eq(providerRoleBindings.id, bindingId));
-    };
     try {
       await expect(
         store.disableProviderAccount(
@@ -500,7 +492,13 @@ describe("provider authority foundation", () => {
             actorUserId: OTHER,
             tenantRole: "member",
             expectedRevision: before.revision,
-            audit: persistedAuthorityAudit,
+            audit: async (event) => {
+              await persistedAuthorityAudit(event);
+              await getDb()
+                .update(providerRoleBindings)
+                .set({ status: "revoked" })
+                .where(eq(providerRoleBindings.id, bindingId));
+            },
           }),
           accountId,
         ),
@@ -516,7 +514,6 @@ describe("provider authority foundation", () => {
         .where(eq(persistedAuditEvents.resourceId, accountId));
       expect(events.map(({ action }) => action)).toEqual(["provider.account.disable"]);
     } finally {
-      store.faultHooks = {};
       await getDb().delete(providerAccounts).where(eq(providerAccounts.id, accountId));
       await getDb().delete(providerRoleBindings).where(eq(providerRoleBindings.id, bindingId));
     }

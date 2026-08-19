@@ -390,12 +390,7 @@ export class ProviderAuthorityStore {
   ) {}
   /** Test-only race hooks. Runtime callers never set these. */
   faultHooks: Partial<
-    Record<
-      | "afterBudgetPreflight"
-      | "afterOperationRoutePreflight"
-      | "beforeProviderAccountDisableUpdate",
-      () => void | Promise<void>
-    >
+    Record<"afterBudgetPreflight" | "afterOperationRoutePreflight", () => void | Promise<void>>
   > = {};
 
   private db() {
@@ -848,7 +843,6 @@ export class ProviderAuthorityStore {
         reason: ctx.reason,
       },
     });
-    await this.faultHooks.beforeProviderAccountDisableUpdate?.();
     return this.runAuditedTransaction(ctx.tenantId, async (txRaw, appendRequiredAudit) => {
       const tx = txRaw as DbExecutor;
       const [lockedRow] = await tx

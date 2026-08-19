@@ -1198,6 +1198,24 @@ describe("connect exchange recovery", () => {
       .select()
       .from(providerAccounts)
       .where(eq(providerAccounts.id, accountId));
+    // Failed legacy disables are durable authorization intents, not account
+    // mutations. Even a long run of them must not hide the completed refresh
+    // that authoritatively superseded the staged connect response.
+    for (let index = 0; index < 17; index += 1) {
+      await writeAuditEvent({
+        tenantId: TENANT,
+        actorType: "user",
+        actorId: ADMIN,
+        action: "provider.account.disable",
+        resourceType: "provider_account",
+        resourceId: accountId,
+        metadata: {
+          workspaceId: WORKSPACE,
+          expectedRevision: accountBeforeRecovery.revision,
+          reason: `simulated failed generic disable ${index}`,
+        },
+      });
+    }
     const credentialBeforeRecovery = await decryptCredential(accountId);
     expect(credentialBeforeRecovery).toMatchObject({
       accessToken: "access-current-after-refresh",
@@ -1623,10 +1641,6 @@ describe("connect exchange recovery", () => {
     const disableMayContinue = new Promise<void>((resolve) => {
       releaseDisable = resolve;
     });
-    providerAuthorityStore.faultHooks.beforeProviderAccountDisableUpdate = async () => {
-      signalDisableIntent();
-      await disableMayContinue;
-    };
     const disablePromise = providerAuthorityStore.disableProviderAccount(
       {
         tenantId: TENANT,
@@ -1646,6 +1660,10 @@ describe("connect exchange recovery", () => {
             resourceId: event.resourceId,
             metadata: event.metadata,
           });
+          if (event.action === "provider.account.disable") {
+            signalDisableIntent();
+            await disableMayContinue;
+          }
         },
       },
       accountId,
@@ -1697,7 +1715,6 @@ describe("connect exchange recovery", () => {
       expect(disableActions.map(({ action }) => action)).toEqual(["provider.account.disable"]);
     } finally {
       releaseDisable();
-      providerAuthorityStore.faultHooks = {};
       recovery.restore();
     }
   });
