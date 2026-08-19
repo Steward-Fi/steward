@@ -73,7 +73,14 @@ proof() {
     echo "  baseline UNEXPECTED FAIL ✗ (proof invalid)"; fail_count=$((fail_count+1)); return
   fi
   cp "$target" "$target.bak"
-  sed -i "$sedexpr" "$target"
+  sed -i.mutation-backup "$sedexpr" "$target"
+  rm -f "$target.mutation-backup"
+  if cmp -s "$target" "$target.bak"; then
+    echo "  mutation target did not match guarded source ✗"
+    fail_count=$((fail_count+1))
+    mv "$target.bak" "$target"
+    return
+  fi
   if run_mutated "$dir" "$file" "$filter"; then
     echo "  post-mutation still PASSES ✗ (mutation did not kill the test)"; fail_count=$((fail_count+1))
   else
