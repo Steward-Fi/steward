@@ -62,11 +62,13 @@ describe("agent signer API", () => {
       "agent-signers-credential-pepper-with-enough-entropy";
     __resetAuditHmacKeyCacheForTests();
     await setupAgentBehaviorTestDatabase();
-    await getDb().insert(tenants).values({
-      id: TENANT_ID,
-      name: "Agent Signers Tenant",
-      apiKeyHash: "hash",
-    });
+    await getDb()
+      .insert(tenants)
+      .values({
+        id: TENANT_ID,
+        name: "Agent Signers Tenant",
+        apiKeyHash: `api-key-hash-${TENANT_ID}`,
+      });
     await getDb().insert(agents).values({
       id: AGENT_ID,
       tenantId: TENANT_ID,

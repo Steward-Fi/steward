@@ -70,11 +70,13 @@ describe("agent trade policy admin path (SEC-208)", () => {
     process.env.STEWARD_AUDIT_HMAC_KEY = "agent-trade-policy-admin-audit-hmac-key-entropy";
     __resetAuditHmacKeyCacheForTests();
     await setupAgentBehaviorTestDatabase();
-    await getDb().insert(tenants).values({
-      id: TENANT_ID,
-      name: "Trade Policy Admin Tenant",
-      apiKeyHash: "hash",
-    });
+    await getDb()
+      .insert(tenants)
+      .values({
+        id: TENANT_ID,
+        name: "Trade Policy Admin Tenant",
+        apiKeyHash: `api-key-hash-${TENANT_ID}`,
+      });
     await getDb().insert(agents).values({
       id: AGENT_ID,
       tenantId: TENANT_ID,

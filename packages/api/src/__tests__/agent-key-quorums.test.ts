@@ -58,11 +58,13 @@ describe("agent key quorum API", () => {
     process.env.STEWARD_AUDIT_HMAC_KEY = "agent-quorums-audit-hmac-key-with-enough-entropy";
     __resetAuditHmacKeyCacheForTests();
     await setupAgentBehaviorTestDatabase();
-    await getDb().insert(tenants).values({
-      id: TENANT_ID,
-      name: "Agent Quorums Tenant",
-      apiKeyHash: "hash",
-    });
+    await getDb()
+      .insert(tenants)
+      .values({
+        id: TENANT_ID,
+        name: "Agent Quorums Tenant",
+        apiKeyHash: `api-key-hash-${TENANT_ID}`,
+      });
     await getDb().insert(agents).values({
       id: AGENT_ID,
       tenantId: TENANT_ID,

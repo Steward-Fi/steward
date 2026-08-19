@@ -75,11 +75,13 @@ describe("agent admin mutations require human session + MFA (SEC-209)", () => {
     process.env.STEWARD_AUDIT_HMAC_KEY = "agent-admin-mutations-audit-hmac-key-entropy";
     __resetAuditHmacKeyCacheForTests();
     await setupAgentBehaviorTestDatabase();
-    await getDb().insert(tenants).values({
-      id: TENANT_ID,
-      name: "Admin Mutations Tenant",
-      apiKeyHash: "hash",
-    });
+    await getDb()
+      .insert(tenants)
+      .values({
+        id: TENANT_ID,
+        name: "Admin Mutations Tenant",
+        apiKeyHash: `api-key-hash-${TENANT_ID}`,
+      });
     await getDb().insert(agents).values({
       id: AGENT_ID,
       tenantId: TENANT_ID,
@@ -123,7 +125,10 @@ describe("agent admin mutations require human session + MFA (SEC-209)", () => {
 
   it("rejects agent, wallet, batch, and token provisioning without recent MFA", async () => {
     const app = await makeApp("admin-no-mfa");
-    const beforeAgents = await getDb().select({ id: agents.id }).from(agents);
+    const beforeAgents = await getDb()
+      .select({ id: agents.id })
+      .from(agents)
+      .where(eq(agents.tenantId, TENANT_ID));
     const beforeWallets = await getDb()
       .select({ id: agentWallets.id })
       .from(agentWallets)
@@ -163,7 +168,9 @@ describe("agent admin mutations require human session + MFA (SEC-209)", () => {
       });
     }
 
-    expect(await getDb().select({ id: agents.id }).from(agents)).toEqual(beforeAgents);
+    expect(
+      await getDb().select({ id: agents.id }).from(agents).where(eq(agents.tenantId, TENANT_ID)),
+    ).toEqual(beforeAgents);
     expect(
       await getDb()
         .select({ id: agentWallets.id })
@@ -228,7 +235,10 @@ describe("agent admin mutations require human session + MFA (SEC-209)", () => {
   it("does not mutate agents, wallets, policies, or revocation state when authorization audit fails", async () => {
     const app = await makeApp("admin");
     const canary = "postgres://agent-authorization-audit-secret";
-    const beforeAgents = await getDb().select({ id: agents.id }).from(agents);
+    const beforeAgents = await getDb()
+      .select({ id: agents.id })
+      .from(agents)
+      .where(eq(agents.tenantId, TENANT_ID));
     const beforeWallets = await getDb()
       .select()
       .from(agentWallets)
@@ -294,7 +304,9 @@ describe("agent admin mutations require human session + MFA (SEC-209)", () => {
         expect(await response.text()).not.toContain(canary);
       }
 
-      expect(await getDb().select({ id: agents.id }).from(agents)).toEqual(beforeAgents);
+      expect(
+        await getDb().select({ id: agents.id }).from(agents).where(eq(agents.tenantId, TENANT_ID)),
+      ).toEqual(beforeAgents);
       expect(
         await getDb().select().from(agentWallets).where(eq(agentWallets.agentId, AGENT_ID)),
       ).toEqual(beforeWallets);
@@ -321,10 +333,23 @@ describe("agent admin mutations require human session + MFA (SEC-209)", () => {
 
   it("removes newly created agent and wallet records when completion audit fails", async () => {
     const app = await makeApp("admin");
-    const beforeAgents = await getDb().select().from(agents);
-    const beforeWallets = await getDb().select().from(agentWallets);
-    const beforeEvmKeys = await getDb().select().from(encryptedKeys);
-    const beforeChainKeys = await getDb().select().from(encryptedChainKeys);
+    const tenantAgentIds = getDb()
+      .select({ id: agents.id })
+      .from(agents)
+      .where(eq(agents.tenantId, TENANT_ID));
+    const beforeAgents = await getDb().select().from(agents).where(eq(agents.tenantId, TENANT_ID));
+    const beforeWallets = await getDb()
+      .select()
+      .from(agentWallets)
+      .where(inArray(agentWallets.agentId, tenantAgentIds));
+    const beforeEvmKeys = await getDb()
+      .select()
+      .from(encryptedKeys)
+      .where(inArray(encryptedKeys.agentId, tenantAgentIds));
+    const beforeChainKeys = await getDb()
+      .select()
+      .from(encryptedChainKeys)
+      .where(inArray(encryptedChainKeys.agentId, tenantAgentIds));
 
     try {
       await getDb().execute(
@@ -361,10 +386,27 @@ describe("agent admin mutations require human session + MFA (SEC-209)", () => {
       });
       expect(walletResponse.status).toBeGreaterThanOrEqual(400);
 
-      expect(await getDb().select().from(agents)).toEqual(beforeAgents);
-      expect(await getDb().select().from(agentWallets)).toEqual(beforeWallets);
-      expect(await getDb().select().from(encryptedKeys)).toEqual(beforeEvmKeys);
-      expect(await getDb().select().from(encryptedChainKeys)).toEqual(beforeChainKeys);
+      expect(await getDb().select().from(agents).where(eq(agents.tenantId, TENANT_ID))).toEqual(
+        beforeAgents,
+      );
+      expect(
+        await getDb()
+          .select()
+          .from(agentWallets)
+          .where(inArray(agentWallets.agentId, tenantAgentIds)),
+      ).toEqual(beforeWallets);
+      expect(
+        await getDb()
+          .select()
+          .from(encryptedKeys)
+          .where(inArray(encryptedKeys.agentId, tenantAgentIds)),
+      ).toEqual(beforeEvmKeys);
+      expect(
+        await getDb()
+          .select()
+          .from(encryptedChainKeys)
+          .where(inArray(encryptedChainKeys.agentId, tenantAgentIds)),
+      ).toEqual(beforeChainKeys);
     } finally {
       try {
         await getDb().execute(

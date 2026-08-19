@@ -51,11 +51,13 @@ describe("agent policy rule CRUD", () => {
       "agent-policy-rules-test-audit-hmac-key-0123456789abcdef0123456789";
     __resetAuditHmacKeyCacheForTests();
     await setupAgentBehaviorTestDatabase();
-    await getDb().insert(tenants).values({
-      id: TENANT_ID,
-      name: "Policy Rules Tenant",
-      apiKeyHash: "hash",
-    });
+    await getDb()
+      .insert(tenants)
+      .values({
+        id: TENANT_ID,
+        name: "Policy Rules Tenant",
+        apiKeyHash: `api-key-hash-${TENANT_ID}`,
+      });
     await getDb()
       .insert(agents)
       .values([
