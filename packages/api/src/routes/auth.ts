@@ -1439,7 +1439,14 @@ async function lockOAuthCodeRedemption(code: string): Promise<boolean> {
 }
 
 async function releaseOAuthCodeRedemptionLock(code: string): Promise<void> {
-  await getOAuthCodeStore().delete(`oauth-code-lock:${code}`);
+  try {
+    await getOAuthCodeStore().delete(`oauth-code-lock:${code}`);
+  } catch (error) {
+    // Atomic consume is the single-use security boundary. Lock cleanup is
+    // advisory because its bounded TTL preserves liveness when deletion is
+    // unavailable after a terminal consume result.
+    console.warn("[OAuthAuth] Redemption lock cleanup failed", redactedThrownDiagnostics(error));
+  }
 }
 
 async function markOidcIdTokenUsedOnce(
@@ -2036,6 +2043,7 @@ export function _clearOAuthCodeStoreForTests(): void {
   _oauthCodeStore = null;
 }
 
+/** Test-only seam for exercising durable OAuth-code backend failures. */
 // ─── Vault helper ─────────────────────────────────────────────────────────────
 
 function getVault(): Vault {
