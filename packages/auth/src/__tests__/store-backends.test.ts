@@ -64,6 +64,36 @@ describe("buildBackend Redis smoke test", () => {
 });
 
 describe("NamespacedStoreBackend", () => {
+  it("conditionally publishes all keys or none and permits idempotent retries", async () => {
+    const backend = new MemoryBackend();
+    await backend.set("generation", "reservation-a", 60_000);
+
+    const entries = [
+      {
+        key: "generation",
+        value: "published-a",
+        ttlMs: 60_000,
+        expected: "reservation-a",
+      },
+      { key: "credential", value: "active", ttlMs: 60_000 },
+      { key: "prior-credential", value: null, ttlMs: 60_000 },
+    ] as const;
+    expect(await backend.publish(entries)).toBe(true);
+    expect(await backend.publish(entries)).toBe(true);
+    expect(await backend.get("credential")).toBe("active");
+
+    await backend.set("generation", "reservation-newer", 60_000);
+    expect(
+      await backend.publish([
+        ...entries,
+        { key: "should-not-publish", value: "unsafe", ttlMs: 60_000 },
+      ]),
+    ).toBe(false);
+    expect(await backend.get("generation")).toBe("reservation-newer");
+    expect(await backend.get("should-not-publish")).toBeNull();
+    backend.destroy();
+  });
+
   it("applies staged transitions atomically and idempotently across reconstructed stores", async () => {
     const backend = new MemoryBackend();
     const first = new NamespacedStoreBackend(backend, "email");
@@ -153,6 +183,7 @@ describe("NamespacedStoreBackend", () => {
       get: async () => null,
       consume: async () => null,
       transition: async () => false,
+      publish: async () => true,
       delete: async () => undefined,
     };
     const store = new NamespacedStoreBackend(backend, "oauth-link");
@@ -173,6 +204,7 @@ describe("NamespacedStoreBackend", () => {
         throw new Error("durable backend unavailable");
       },
       transition: async () => false,
+      publish: async () => true,
       delete: async () => undefined,
     };
     const store = new NamespacedStoreBackend(backend, "wallet-link");

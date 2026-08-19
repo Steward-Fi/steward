@@ -117,6 +117,7 @@
       },
       "devDependencies": {
         "@types/node": "^24.5.2",
+        "postgres": "^3.4.7",
       },
     },
     "packages/cli": {

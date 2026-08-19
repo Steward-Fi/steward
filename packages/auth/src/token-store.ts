@@ -13,7 +13,7 @@
  *   const ts = new TokenStore({ backend: new RedisBackend(redisClient) });
  */
 
-import type { StoreBackend } from "./store-backends";
+import type { StoreBackend, StorePublishEntry } from "./store-backends";
 import { MemoryBackend } from "./store-backends";
 
 const DEFAULT_TTL_MS = 10 * 60 * 1000; // 10 minutes
@@ -71,6 +71,10 @@ export class TokenStore {
     guard?: { key: string; expected: string },
   ): Promise<boolean> {
     return this.backend.transition(hash, expected, desired, ttlMs, guard);
+  }
+
+  async publish(entries: readonly StorePublishEntry[]): Promise<boolean> {
+    return this.backend.publish(entries);
   }
 
   /**
