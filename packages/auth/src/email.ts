@@ -1,4 +1,4 @@
-import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import { createHmac, randomBytes, randomInt, timingSafeEqual } from "node:crypto";
 import { redactedThrownDiagnostics } from "@stwd/shared";
 
 import { hashSha256Hex } from "./crypto";
@@ -92,18 +92,8 @@ function generateOpaqueId(): string {
 }
 
 function generateOtpCode(): string {
-  // Crypto-random 6-digit code with rejection sampling to avoid modulo bias.
-  const max = 10 ** OTP_DIGITS;
-  // 2^32 / 10^6 -> keep draws below the largest multiple of max to stay uniform.
-  const limit = Math.floor(0x1_0000_0000 / max) * max;
-  for (;;) {
-    const bytes = randomBytes(4);
-    const draw =
-      ((bytes[0] << 24) >>> 0) + ((bytes[1] << 16) >>> 0) + ((bytes[2] << 8) >>> 0) + bytes[3];
-    if (draw < limit) {
-      return String(draw % max).padStart(OTP_DIGITS, "0");
-    }
-  }
+  // randomInt uses rejection sampling internally and avoids modulo bias.
+  return String(randomInt(10 ** OTP_DIGITS)).padStart(OTP_DIGITS, "0");
 }
 
 function hashToken(token: string): string {

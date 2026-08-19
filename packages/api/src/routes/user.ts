@@ -1136,6 +1136,13 @@ function parseBoundedOffset(value: string | null): number {
   return Math.min(Math.floor(parsed), 100_000);
 }
 
+function escapeLikePattern(value: string): string {
+  // PostgreSQL LIKE uses backslash as its default escape character. Escape it
+  // before '%' and '_' so a caller cannot turn our escaping back into a
+  // wildcard by supplying a preceding backslash.
+  return value.replace(/[\\%_]/g, "\\$&");
+}
+
 function isUuid(value: string): boolean {
   return UUID_RE.test(value);
 }
@@ -6791,7 +6798,7 @@ user.get("/me/tenants/:tenantId/users", async (c) => {
   const whereConditions = [eq(userTenants.tenantId, tenantId)];
   if (email) whereConditions.push(eq(users.email, email));
   if (q) {
-    const like = `%${q.replace(/[%_]/g, "\\$&")}%`;
+    const like = `%${escapeLikePattern(q)}%`;
     whereConditions.push(
       or(ilike(users.email, like), ilike(users.name, like), sql`${users.id}::text ilike ${like}`)!,
     );
@@ -7069,7 +7076,7 @@ user.get("/me/tenants/:tenantId/users/export", async (c) => {
   const whereConditions = [eq(userTenants.tenantId, tenantId)];
   if (email) whereConditions.push(eq(users.email, email));
   if (q) {
-    const like = `%${q.replace(/[%_]/g, "\\$&")}%`;
+    const like = `%${escapeLikePattern(q)}%`;
     whereConditions.push(
       or(ilike(users.email, like), ilike(users.name, like), sql`${users.id}::text ilike ${like}`)!,
     );
