@@ -16,7 +16,12 @@ export const RLS_ACTIVATION_TABLES = [
   ...Object.keys(BOOTSTRAP_ROOT_TABLES),
 ].sort();
 
-export const CORE_RLS_EXCLUDED_TABLES = [...Object.keys(INTENTIONALLY_GLOBAL_TABLES)].sort();
+export const CORE_RLS_EXCLUDED_TABLES = [
+  ...Object.keys(INTENTIONALLY_GLOBAL_TABLES),
+  // Migration 0009 always creates this auth compatibility store. It has no
+  // tenant column; tenant binding lives in opaque, namespaced keys.
+  "auth_kv_store",
+].sort();
 
 export interface RlsCatalogInventory {
   protectedTables: readonly string[];
@@ -28,13 +33,6 @@ export interface RlsCatalogInventoryContribution {
   protectedTables?: readonly string[];
   rlsExcludedTables?: readonly string[];
 }
-
-export const AUTH_RLS_CATALOG_INVENTORY_CONTRIBUTION: RlsCatalogInventoryContribution = {
-  owner: "@stwd/auth",
-  // This compatibility store exists only when auth uses PostgreSQL. It has no
-  // tenant column; tenant binding lives in opaque, namespaced keys.
-  rlsExcludedTables: ["auth_kv_store"],
-};
 
 export const CORE_RLS_CATALOG_INVENTORY: RlsCatalogInventory = {
   protectedTables: RLS_ACTIVATION_TABLES,
@@ -137,12 +135,19 @@ WITH runtime_role AS (
   SELECT oid
     FROM pg_catalog.pg_roles
    WHERE rolname = $2
+), server_capabilities AS (
+  SELECT current_setting('server_version_num')::integer >= 160000 AS role_membership_options
 ), assumable_roles AS (
   SELECT candidate.oid, candidate.rolsuper, candidate.rolbypassrls
     FROM pg_catalog.pg_roles candidate
     CROSS JOIN runtime_role runtime
+    CROSS JOIN server_capabilities capabilities
    WHERE candidate.oid = runtime.oid
-      OR pg_catalog.pg_has_role(runtime.oid, candidate.oid, 'SET')
+      OR pg_catalog.pg_has_role(
+           runtime.oid,
+           candidate.oid,
+           CASE WHEN capabilities.role_membership_options THEN 'SET' ELSE 'MEMBER' END
+         )
 ), usable_roles AS (
   SELECT candidate.oid
     FROM pg_catalog.pg_roles candidate

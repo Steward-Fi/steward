@@ -51,7 +51,6 @@ export {
   sanitizePluginMigrationId,
 } from "./plugin-migrate";
 export {
-  AUTH_RLS_CATALOG_INVENTORY_CONTRIBUTION,
   assessRlsCatalogSnapshot,
   CORE_RLS_CATALOG_INVENTORY,
   CORE_RLS_EXCLUDED_TABLES,

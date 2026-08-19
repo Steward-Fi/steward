@@ -112,12 +112,16 @@ roles whose privileges the runtime can inherit or assume, plus any assumable
 `SUPERUSER` or `BYPASSRLS` role. It traverses partition trees by relation OID,
 including partitions stored outside the root table's schema.
 
-The mandatory inventory includes every core Drizzle table. A deployment using
-the PostgreSQL auth compatibility store must add the exported auth inventory
-contribution for `auth_kv_store`; deployments with plugin-owned relations must
-likewise pass an explicit protected or RLS-excluded contribution for every
-plugin. Contributions can extend but cannot replace the mandatory inventory.
-Unknown, missing, duplicate, or ambiguously classified relations fail closed.
+On PostgreSQL 16 and newer, assumability follows the membership grant's `SET`
+option while inherited owner privileges follow `USAGE`. PostgreSQL 15 has no
+per-membership `SET` option, so every `MEMBER` role is conservatively treated
+as assumable; inherited owner privileges still use `USAGE`.
+
+The mandatory inventory includes every core Drizzle table plus the
+always-migrated `auth_kv_store`. Deployments with plugin-owned relations must
+pass an explicit protected or RLS-excluded contribution for every plugin.
+Contributions can extend but cannot replace the mandatory inventory. Unknown,
+missing, duplicate, or ambiguously classified relations fail closed.
 The gate accepts a fully inactive catalog (including policies staged while all
 RLS flags remain off), but once any protected table or partition has an RLS
 flag it requires the complete inventoried set to be `ENABLE` + `FORCE`.

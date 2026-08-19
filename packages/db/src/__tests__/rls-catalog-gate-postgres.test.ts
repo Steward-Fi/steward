@@ -2,7 +2,6 @@ import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "
 import { randomUUID } from "node:crypto";
 import postgres from "postgres";
 import {
-  AUTH_RLS_CATALOG_INVENTORY_CONTRIBUTION,
   inspectRlsCatalog,
   RLS_ACTIVATION_TABLES,
   type RlsCatalogClient,
@@ -33,6 +32,7 @@ function identifier(value: string): string {
 describeWithPostgres("SEC-169 catalog activation gate on real Postgres", () => {
   const client = postgres(process.env.DATABASE_URL as string, { max: 1, prepare: false });
   let administratorRole = "";
+  let serverVersionNumber = 0;
   const rootTable = RLS_ACTIVATION_TABLES[0];
   const protectedTables = [...RLS_ACTIVATION_TABLES, ...(pluginContribution.protectedTables ?? [])];
   const excludedTables = [
@@ -45,27 +45,30 @@ describeWithPostgres("SEC-169 catalog activation gate on real Postgres", () => {
     return inspectRlsCatalog(client as unknown as RlsCatalogClient, {
       schema: schemaName,
       runtimeRole,
-      inventoryContributions: withPlugin
-        ? [AUTH_RLS_CATALOG_INVENTORY_CONTRIBUTION, pluginContribution]
-        : [AUTH_RLS_CATALOG_INVENTORY_CONTRIBUTION],
+      inventoryContributions: withPlugin ? [pluginContribution] : [],
     });
   }
 
   beforeAll(async () => {
-    const [identity] = await client<Array<{ current_user: string }>>`
-      SELECT current_user
+    const [identity] = await client<Array<{ current_user: string; server_version_num: number }>>`
+      SELECT current_user, current_setting('server_version_num')::integer AS server_version_num
     `;
     administratorRole = identity?.current_user ?? "";
+    serverVersionNumber = identity?.server_version_num ?? 0;
     await client.unsafe(`
       CREATE ROLE ${identifier(ownerRole)} NOLOGIN NOSUPERUSER NOBYPASSRLS;
       CREATE ROLE ${identifier(applicationRole)} NOLOGIN NOSUPERUSER NOBYPASSRLS;
       CREATE ROLE ${identifier(ownerMemberRole)} NOLOGIN NOSUPERUSER NOBYPASSRLS;
       CREATE ROLE ${identifier(bypassRole)} NOLOGIN NOSUPERUSER BYPASSRLS;
-      GRANT ${identifier(ownerRole)} TO ${identifier(ownerMemberRole)}
-        WITH INHERIT TRUE, SET TRUE;
       CREATE SCHEMA ${identifier(schemaName)};
       CREATE SCHEMA ${identifier(partitionSchemaName)};
     `);
+    await client.unsafe(
+      serverVersionNumber >= 160000
+        ? `GRANT ${identifier(ownerRole)} TO ${identifier(ownerMemberRole)} ` +
+            "WITH INHERIT TRUE, SET FALSE"
+        : `GRANT ${identifier(ownerRole)} TO ${identifier(ownerMemberRole)}`,
+    );
     for (const table of [...protectedTables, ...excludedTables]) {
       const qualified = `${identifier(schemaName)}.${identifier(table)}`;
       if (table === rootTable) {
@@ -142,8 +145,33 @@ describeWithPostgres("SEC-169 catalog activation gate on real Postgres", () => {
     });
     await expect(inspectAs(ownerMemberRole)).rejects.toThrow("RLS_CATALOG_UNSAFE_APPLICATION_ROLE");
     await client.unsafe(
-      `GRANT ${identifier(bypassRole)} TO ${identifier(applicationRole)} WITH SET TRUE`,
+      serverVersionNumber >= 160000
+        ? `GRANT ${identifier(bypassRole)} TO ${identifier(applicationRole)} ` +
+            "WITH INHERIT FALSE, SET TRUE"
+        : `GRANT ${identifier(bypassRole)} TO ${identifier(applicationRole)}`,
     );
+    if (serverVersionNumber >= 160000) {
+      const [membership] = await client<
+        Array<{
+          owner_set: boolean;
+          owner_usage: boolean;
+          bypass_set: boolean;
+          bypass_usage: boolean;
+        }>
+      >`
+        SELECT
+          pg_has_role(${ownerMemberRole}, ${ownerRole}, 'SET') AS owner_set,
+          pg_has_role(${ownerMemberRole}, ${ownerRole}, 'USAGE') AS owner_usage,
+          pg_has_role(${applicationRole}, ${bypassRole}, 'SET') AS bypass_set,
+          pg_has_role(${applicationRole}, ${bypassRole}, 'USAGE') AS bypass_usage
+      `;
+      expect(membership).toEqual({
+        owner_set: false,
+        owner_usage: true,
+        bypass_set: true,
+        bypass_usage: false,
+      });
+    }
     await expect(inspectAs(applicationRole)).rejects.toThrow(
       "RLS_CATALOG_UNSAFE_APPLICATION_ROLE: bypassrls",
     );
