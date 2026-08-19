@@ -65,7 +65,7 @@ jobs:
           readiness="$({
             gh pr view "$pr_number" \
               --repo "$GITHUB_REPOSITORY" \
-              --json headRefOid,isDraft,state,mergeStateStatus,reviewDecision,statusCheckRollup
+              --json headRefOid,isDraft,state,mergeStateStatus,reviewDecision
           })"
           if ! jq -e \
             --arg sha "$TARGET_SHA" \
@@ -73,18 +73,98 @@ jobs:
              .state == "OPEN" and
              .isDraft == false and
              .mergeStateStatus == "CLEAN" and
-             .reviewDecision == "APPROVED" and
-             (.statusCheckRollup | length > 0) and
-             all(.statusCheckRollup[];
-               if .__typename == "CheckRun" then
-                 .status == "COMPLETED" and
-                 (.conclusion == "SUCCESS" or .conclusion == "NEUTRAL" or .conclusion == "SKIPPED")
-               elif .__typename == "StatusContext" then
-                 .state == "SUCCESS"
-               else
-                 false
-               end)' <<< "$readiness" >/dev/null; then
-            echo "target PR must be approved, conflict-free, and green at the exact target SHA" >&2
+             .reviewDecision == "APPROVED"' <<< "$readiness" >/dev/null; then
+            echo "target PR must be approved and conflict-free at the exact target SHA" >&2
+            exit 1
+          fi
+
+          required_file="$(mktemp)"
+          check_runs_file="$(mktemp)"
+          statuses_file="$(mktemp)"
+          trap 'rm -f "$required_file" "$check_runs_file" "$statuses_file"' EXIT
+          gh api \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "repos/$GITHUB_REPOSITORY/branches/develop/protection/required_status_checks" \
+            > "$required_file"
+          gh api \
+            --paginate \
+            --slurp \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "repos/$GITHUB_REPOSITORY/commits/$TARGET_SHA/check-runs?filter=latest&per_page=100" \
+            | jq '[.[] | .check_runs[]]' > "$check_runs_file"
+          gh api \
+            --paginate \
+            --slurp \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "repos/$GITHUB_REPOSITORY/commits/$TARGET_SHA/statuses?per_page=100" \
+            | jq 'add // []' > "$statuses_file"
+          if ! jq -n -e \
+            --arg sha "$TARGET_SHA" \
+            --slurpfile protection "$required_file" \
+            --slurpfile check_runs "$check_runs_file" \
+            --slurpfile statuses "$statuses_file" \
+            '
+              ($protection[0]) as $policy |
+              if
+                ($policy | type) != "object" or
+                (($policy.checks // []) | type) != "array" or
+                (($policy.contexts // []) | type) != "array" or
+                (($check_runs[0]) | type) != "array" or
+                (($statuses[0]) | type) != "array"
+              then false
+              else
+                ($policy.checks // []) as $required_checks |
+                ($policy.contexts // []) as $required_contexts |
+                ($required_checks | map(.context)) as $pinned_contexts |
+                ($required_contexts |
+                  map(. as $context |
+                    select(($pinned_contexts | index($context)) == null))) as $status_contexts |
+                ($check_runs[0]) as $runs |
+                ($statuses[0]) as $commit_statuses |
+                (($required_checks | length) + ($status_contexts | length) > 0) and
+                all($required_checks[];
+                  (.context | type) == "string" and
+                  (.context | length) > 0 and
+                  (.app_id | type) == "number") and
+                all($required_contexts[];
+                  type == "string" and length > 0) and
+                (($pinned_contexts | unique | length) == ($pinned_contexts | length)) and
+                (($required_contexts | unique | length) == ($required_contexts | length)) and
+                all($required_checks[];
+                  . as $required |
+                  ([$runs[] | select(
+                    .head_sha == $sha and
+                    .name == $required.context and
+                    .app.id == $required.app_id
+                  )]) as $matches |
+                  ($matches | length) > 0 and
+                  all($matches[];
+                    (.id | type) == "number" and
+                    (.started_at | type) == "string" and
+                    (.started_at | length) > 0) and
+                  (($matches | map(.id) | unique | length) == ($matches | length)) and
+                  ($matches |
+                    max_by([.started_at, (.completed_at // ""), .id])) as $latest |
+                  $latest.status == "completed" and
+                  $latest.conclusion == "success") and
+                all($status_contexts[];
+                  . as $context |
+                  ([$commit_statuses[] | select(.context == $context)]) as $matches |
+                  ($matches | length) > 0 and
+                  all($matches[];
+                    (.id | type) == "number" and
+                    (.created_at | type) == "string" and
+                    (.created_at | length) > 0) and
+                  (($matches | map(.id) | unique | length) == ($matches | length)) and
+                  ($matches |
+                    max_by([.created_at, (.updated_at // ""), .id]) |
+                    .state) == "success")
+              end
+            ' >/dev/null; then
+            echo "every required develop check must have a latest exact successful result from its configured app" >&2
             exit 1
           fi
 
@@ -127,6 +207,9 @@ jobs:
             echo "target PR must have a current approval from an independent write-capable reviewer" >&2
             exit 1
           fi
+          # The configured app authenticates the check producer, not the workflow definition.
+          # Exact-head approval by an independent write-capable reviewer is the trust gate for
+          # target-controlled workflow changes that could reuse a required job name.
           echo "target_sha=$TARGET_SHA" >> "$GITHUB_OUTPUT"
           echo "Authorized PR #$pr_number at $TARGET_SHA after approval by $approved_by"
 
