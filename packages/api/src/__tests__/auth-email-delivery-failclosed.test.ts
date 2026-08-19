@@ -65,8 +65,8 @@ describe("fail-closed email delivery routes (production)", () => {
     process.env.STEWARD_EMAIL_CODE_SECRET = "route-fail-closed-email-code-secret";
     process.env.STEWARD_ALLOW_AUTH_RATE_LIMIT_SOFT_FAIL = "true";
     // This suite owns provider-delivery behavior, not the independently tested
-    // request-expiry guard. Keep the production bypass explicit and prove below
-    // that removing it restores the fail-closed boundary.
+    // request-expiry guard. Keep the production exception explicit and prove
+    // below that removing it restores the fail-closed boundary.
     process.env.STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS = "true";
     process.env.STEWARD_REQUEST_SIGNING_SECRET = REQUEST_SIGNING_SECRET;
     delete process.env.STEWARD_REQUEST_SIGNING_SECRETS;
@@ -143,7 +143,7 @@ describe("fail-closed email delivery routes (production)", () => {
     });
   }
 
-  it("keeps production request-expiry enforcement outside the scoped fixture bypass", async () => {
+  it("keeps production request-expiry enforcement outside the scoped fixture exception", async () => {
     delete process.env.STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS;
     process.env.STEWARD_REQUIRE_REQUEST_EXPIRY = "true";
     try {

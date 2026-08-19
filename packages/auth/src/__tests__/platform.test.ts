@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
+import { withRuntimeEnvironment } from "@stwd/shared/runtime-env";
 import { getPlatformKeyScopes, isValidPlatformKey } from "../platform";
 
 const ORIGINAL_PLATFORM_KEY = process.env.STEWARD_PLATFORM_KEY;
@@ -55,5 +56,65 @@ describe("platform key validation", () => {
       "platform:write",
       "platform:tenant:create",
     ]);
+  });
+
+  it("isolates overlapping platform keys and scopes by request", async () => {
+    resetPlatformKeyEnv();
+    process.env.STEWARD_PLATFORM_KEY = "global-platform-key-must-not-leak";
+    process.env.STEWARD_PLATFORM_KEY_SCOPES = JSON.stringify({
+      "global-platform-key-must-not-leak": ["platform:*"],
+    });
+    let releaseFirst!: () => void;
+    const firstCanRead = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const first = withRuntimeEnvironment(
+      {
+        STEWARD_PLATFORM_KEY: "first-request-platform-key",
+        STEWARD_PLATFORM_KEY_SCOPES: JSON.stringify({
+          "first-request-platform-key": ["platform:read"],
+        }),
+      },
+      async () => {
+        await firstCanRead;
+        return {
+          ownValid: isValidPlatformKey("first-request-platform-key"),
+          otherValid: isValidPlatformKey("second-request-platform-key"),
+          globalValid: isValidPlatformKey("global-platform-key-must-not-leak"),
+          scopes: getPlatformKeyScopes("first-request-platform-key"),
+        };
+      },
+    );
+    const second = withRuntimeEnvironment(
+      {
+        STEWARD_PLATFORM_KEYS: "second-request-platform-key",
+        STEWARD_PLATFORM_KEY_SCOPES: JSON.stringify({
+          "second-request-platform-key": ["platform:write"],
+        }),
+      },
+      async () => {
+        releaseFirst();
+        await Promise.resolve();
+        return {
+          ownValid: isValidPlatformKey("second-request-platform-key"),
+          otherValid: isValidPlatformKey("first-request-platform-key"),
+          globalValid: isValidPlatformKey("global-platform-key-must-not-leak"),
+          scopes: getPlatformKeyScopes("second-request-platform-key"),
+        };
+      },
+    );
+
+    expect(await Promise.all([first, second])).toEqual([
+      { ownValid: true, otherValid: false, globalValid: false, scopes: ["platform:read"] },
+      { ownValid: true, otherValid: false, globalValid: false, scopes: ["platform:write"] },
+    ]);
+  });
+
+  it("does not inherit a global platform key when the request snapshot omits it", () => {
+    resetPlatformKeyEnv();
+    process.env.STEWARD_PLATFORM_KEY = "global-platform-key-must-not-leak";
+    expect(
+      withRuntimeEnvironment({}, () => isValidPlatformKey("global-platform-key-must-not-leak")),
+    ).toBe(false);
   });
 });

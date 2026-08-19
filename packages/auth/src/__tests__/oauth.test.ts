@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { createHash } from "node:crypto";
+import { withRuntimeEnvironment } from "@stwd/shared/runtime-env";
 import { getEnabledProviders, getProviderConfig, isBuiltInProvider, OAuthClient } from "../oauth";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -154,6 +155,68 @@ describe("getProviderConfig", () => {
     delete process.env.GOOGLE_CLIENT_ID;
     delete process.env.GOOGLE_CLIENT_SECRET;
     expect(() => getProviderConfig("google")).toThrow("Google OAuth not configured");
+  });
+
+  it("isolates overlapping provider credentials and endpoint overrides", async () => {
+    process.env.GOOGLE_CLIENT_ID = "global-client-must-not-leak";
+    process.env.GOOGLE_CLIENT_SECRET = "global-secret-must-not-leak";
+    let releaseFirst!: () => void;
+    const firstCanRead = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const first = withRuntimeEnvironment(
+      {
+        GOOGLE_CLIENT_ID: "first-client",
+        GOOGLE_CLIENT_SECRET: "first-secret",
+        GOOGLE_AUTHORIZATION_URL: "https://first.example.com/authorize",
+        GOOGLE_TOKEN_URL: "https://first.example.com/token",
+      },
+      async () => {
+        await firstCanRead;
+        return getProviderConfig("google");
+      },
+    );
+    const second = withRuntimeEnvironment(
+      {
+        GOOGLE_CLIENT_ID: "second-client",
+        GOOGLE_CLIENT_SECRET: "second-secret",
+        GOOGLE_AUTHORIZATION_URL: "https://second.example.com/authorize",
+        GOOGLE_TOKEN_URL: "https://second.example.com/token",
+      },
+      async () => {
+        releaseFirst();
+        await Promise.resolve();
+        return getProviderConfig("google");
+      },
+    );
+
+    const [firstConfig, secondConfig] = await Promise.all([first, second]);
+    expect(firstConfig).toMatchObject({
+      clientId: "first-client",
+      clientSecret: "first-secret",
+      authorizationUrl: "https://first.example.com/authorize",
+      tokenUrl: "https://first.example.com/token",
+    });
+    expect(secondConfig).toMatchObject({
+      clientId: "second-client",
+      clientSecret: "second-secret",
+      authorizationUrl: "https://second.example.com/authorize",
+      tokenUrl: "https://second.example.com/token",
+    });
+    delete process.env.GOOGLE_CLIENT_ID;
+    delete process.env.GOOGLE_CLIENT_SECRET;
+  });
+
+  it("does not inherit a global provider secret when the request snapshot omits it", () => {
+    process.env.GOOGLE_CLIENT_ID = "global-client-must-not-leak";
+    process.env.GOOGLE_CLIENT_SECRET = "global-secret-must-not-leak";
+    expect(() =>
+      withRuntimeEnvironment({ GOOGLE_CLIENT_ID: "request-client" }, () =>
+        getProviderConfig("google"),
+      ),
+    ).toThrow("Google OAuth not configured");
+    delete process.env.GOOGLE_CLIENT_ID;
+    delete process.env.GOOGLE_CLIENT_SECRET;
   });
 
   it("throws when discord env vars are missing", () => {

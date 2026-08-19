@@ -2,6 +2,7 @@ import { lookup as dnsLookup } from "node:dns";
 import { request as httpsRequest } from "node:https";
 import { isIP } from "node:net";
 import type { TenantOidcProviderConfig } from "@stwd/shared";
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 import {
   createRemoteJWKSet,
   customFetch,
@@ -36,7 +37,8 @@ const JWKS_MAX_AGE_MS = (() => {
 })();
 function allowTestJwksFetch(): boolean {
   return (
-    process.env.NODE_ENV === "test" && process.env.STEWARD_ALLOW_INSECURE_OIDC_JWKS_FETCH === "true"
+    runtimeEnvironmentValue("NODE_ENV") === "test" &&
+    runtimeEnvironmentValue("STEWARD_ALLOW_INSECURE_OIDC_JWKS_FETCH") === "true"
   );
 }
 

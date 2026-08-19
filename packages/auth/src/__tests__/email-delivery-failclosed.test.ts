@@ -8,6 +8,7 @@
  * a false green for a challenge no one could ever receive.
  */
 import { afterEach, describe, expect, it } from "bun:test";
+import { withRuntimeEnvironment } from "@stwd/shared/runtime-env";
 
 import { hashSha256Hex } from "../crypto";
 import { EmailAuth } from "../email";
@@ -1293,6 +1294,29 @@ describe("email code verifier secret hardening", () => {
     process.env.STEWARD_ALLOW_DEV_SECRETS = "true";
     const allowed = new EmailAuth(config);
     allowed.destroy();
+  });
+
+  it("uses the request-local environment for production and verifier-secret policy", () => {
+    process.env.NODE_ENV = "production";
+    process.env.STEWARD_EMAIL_CODE_SECRET = "global-secret-must-not-leak-000000000000";
+    const config = {
+      from: "login@steward.fi",
+      baseUrl: "https://steward.fi",
+      provider: new MockEmailProvider(),
+    };
+
+    expect(() =>
+      withRuntimeEnvironment({ NODE_ENV: "production" }, () => new EmailAuth(config)),
+    ).toThrow("STEWARD_EMAIL_CODE_SECRET is required");
+
+    const isolated = withRuntimeEnvironment(
+      {
+        NODE_ENV: "production",
+        STEWARD_EMAIL_CODE_SECRET: "request-local-email-secret-000000000000",
+      },
+      () => new EmailAuth(config),
+    );
+    isolated.destroy();
   });
 });
 
