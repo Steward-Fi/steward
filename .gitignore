@@ -21,6 +21,7 @@ __pycache__/
 .env.local
 .env.*.local
 !.env.example
+.steward/
 # Operator-local fleet inventory (SEC-130 — node IPs are never committed)
 scripts/deploy-nodes.local.conf
 
