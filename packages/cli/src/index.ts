@@ -229,7 +229,7 @@ Usage:
   steward provider-action execute --id ID [--idempotency-key KEY]
   steward provider-action evidence --id ID [--out bundle.json] [--verify --fp HEX]
 
-provider-action commands are thin wrappers over the PR2-PR5 governed routes
+provider-action commands are thin wrappers over the governed routes
 (convenience only; the authoritative proof is
 scripts/provider-authority-golden-path.mjs). No new authority is introduced.
 
@@ -740,7 +740,7 @@ async function providerActionCommand(action: string | undefined, ctx: CommandCon
       else
         console.error(
           "WARNING: no --fp supplied; verifying against the EMBEDDED key proves " +
-            "self-consistency only, NOT trust to a known signing root (PR5 E7).",
+            "self-consistency only, NOT trust to a known signing root.",
         );
       const result = spawnSync(process.execPath, args, { stdio: "inherit" });
       if (result.status !== 0) throw new Error("Offline evidence bundle verification failed");

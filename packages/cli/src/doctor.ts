@@ -104,8 +104,8 @@ export async function runDoctor(
       name: "strict:governed-route-prerequisites",
       ok: Boolean(env.STEWARD_EXECUTION_AUTH_SECRET) && Boolean(env.STEWARD_AUDIT_SIGNING_KEY),
       detail:
-        "governed provider dispatch requires STEWARD_EXECUTION_AUTH_SECRET (PR4 " +
-        "mint/claim) and STEWARD_AUDIT_SIGNING_KEY (PR5 /evidence). Missing either " +
+        "governed provider dispatch requires STEWARD_EXECUTION_AUTH_SECRET for " +
+        "mint/claim and STEWARD_AUDIT_SIGNING_KEY for /evidence. Missing either " +
         "fails closed at dispatch/evidence, never a silent pass.",
     });
   }
