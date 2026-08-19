@@ -73,6 +73,49 @@ describe("SUBMIT_TRADE action", () => {
     );
   });
 
+  it("normalizes adversarial API URL slash runs without regex backtracking", async () => {
+    const nearMiss = `https://steward.example/${"/".repeat(200_000)}x`;
+    process.env.STEWARD_API_URL = nearMiss;
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(JSON.stringify({ ok: true, data: { status: "active" } }), { status: 200 }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      submitTradeAction.validate({} as any, mockMemory("buy 0.01 BTC") as any),
+    ).resolves.toBe(true);
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(`${nearMiss}/v1/trade/sessions/ses_test`);
+  });
+
+  it("strips terminal slash runs while preserving redirect refusal", async () => {
+    process.env.STEWARD_API_URL = `https://steward.example${"/".repeat(200_000)}`;
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(JSON.stringify({ ok: true, data: { status: "active" } }), { status: 200 }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      submitTradeAction.validate({} as any, mockMemory("buy 0.01 BTC") as any),
+    ).resolves.toBe(true);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://steward.example/v1/trade/sessions/ses_test",
+      expect.objectContaining({ redirect: "error" }),
+    );
+  });
+
+  it("rejects credential-bearing URLs after terminal slash normalization", async () => {
+    process.env.STEWARD_API_URL = "https://user:secret@steward.example////";
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      submitTradeAction.validate({} as any, mockMemory("buy 0.01 BTC") as any),
+    ).resolves.toBe(false);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("posts parsed order with Bearer JWT and returns confirmation", async () => {
     const fetchMock = vi.fn(
       async () =>
