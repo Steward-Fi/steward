@@ -39,7 +39,10 @@
  *                                   configured Redis is unreachable
  */
 
-import { validateJwtSecretEnv } from "@stwd/auth";
+// Import the dependency-light JWT module directly. Importing the auth barrel
+// here would evaluate Worker-sensitive auth modules before bindings are
+// hydrated into process.env.
+import { validateJwtSecretEnv } from "@stwd/auth/jwt";
 import {
   createDbForRequest,
   createNeonTransactionDbForRequest,
