@@ -1,3 +1,4 @@
+import { redactedThrownDiagnostics } from "@stwd/shared";
 import { type Hex, keccak256 } from "viem";
 import { ExternalBroadcastOutcomeUnknownError } from "./external-key-custody";
 
@@ -14,6 +15,19 @@ export interface LocalEvmBroadcastLifecycle {
   releaseBeforeBroadcast: () => Promise<void>;
   /** Persist accepted state and confirm allocator bookkeeping. */
   finalizeAccepted: (transactionHash: Hex) => Promise<void>;
+}
+
+async function releaseBeforeBroadcast(lifecycle: LocalEvmBroadcastLifecycle): Promise<void> {
+  try {
+    await lifecycle.releaseBeforeBroadcast();
+  } catch (error) {
+    // Preserve the operation failure for callers while making allocator cleanup
+    // failures visible without exposing database or provider diagnostics.
+    console.error(
+      "[vault] Failed to release EVM nonce after pre-broadcast failure",
+      redactedThrownDiagnostics(error),
+    );
+  }
 }
 
 /**
@@ -33,7 +47,7 @@ export async function executeLocalEvmBroadcast(
   try {
     serializedTransaction = await lifecycle.prepare();
   } catch (error) {
-    await lifecycle.releaseBeforeBroadcast().catch(() => {});
+    await releaseBeforeBroadcast(lifecycle);
     throw error;
   }
 
@@ -42,7 +56,7 @@ export async function executeLocalEvmBroadcast(
     await lifecycle.checkpoint(transactionHash);
   } catch (error) {
     // No mutating RPC has happened, so this is the final safe release point.
-    await lifecycle.releaseBeforeBroadcast().catch(() => {});
+    await releaseBeforeBroadcast(lifecycle);
     throw error;
   }
 
