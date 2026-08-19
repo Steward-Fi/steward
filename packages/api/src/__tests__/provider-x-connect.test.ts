@@ -33,7 +33,7 @@ import {
 } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { SecretVault } from "@stwd/vault";
-import { and, eq } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import { providerAuthorityStore } from "../services/provider-authority-store";
 import {
   __runDefaultXForwardForTests,
@@ -2231,7 +2231,7 @@ describe("disconnect", () => {
     });
   });
 
-  test("malformed credentials cannot block local revocation or later reconnect", async () => {
+  test("malformed deterministic lineage fails closed without destructive action", async () => {
     const { completed } = await connectHappy(new MemoryConnectStore());
     const malformed = await vault.rotateSecret(
       TENANT,
@@ -2252,40 +2252,28 @@ describe("disconnect", () => {
         vault,
         config: CONFIG,
       }),
-    ).resolves.toMatchObject({ revoked: false });
+    ).rejects.toMatchObject({ code: "X_CREDENTIAL_NEEDS_ATTENTION" });
     expect(malformedFake.counters.revoke).toBe(0);
     malformedFake.restore();
-    const [locallyRevoked] = await getDb()
+    const [unchangedAccount] = await getDb()
       .select()
       .from(providerAccounts)
       .where(eq(providerAccounts.id, completed.providerAccountId));
-    expect(locallyRevoked).toMatchObject({
-      status: "revoked",
-      credentialSecretId: null,
-      credentialVersion: null,
+    expect(unchangedAccount).toMatchObject({
+      status: "active",
+      credentialSecretId: malformed.id,
+      credentialVersion: malformed.version,
     });
-    const [unrecoverable] = await getDb()
+    const [unchangedSecret] = await getDb()
+      .select()
+      .from(secrets)
+      .where(eq(secrets.id, malformed.id));
+    expect(unchangedSecret.deletedAt).toBeNull();
+    const disconnectLifecycles = await getDb()
       .select()
       .from(providerXCredentialLifecycles)
       .where(eq(providerXCredentialLifecycles.kind, "disconnect_revoke"));
-    expect(unrecoverable).toMatchObject({
-      state: "needs_attention",
-      credentialSecretId: null,
-      lastErrorCode: "DISCONNECT_REVOCATION_HANDLE_UNAVAILABLE",
-    });
-    const reconnect = await connectHappy(new MemoryConnectStore());
-    expect(reconnect.completed).toMatchObject({
-      providerAccountId: completed.providerAccountId,
-      reconnected: true,
-    });
-    const [superseded] = await getDb()
-      .select()
-      .from(providerXCredentialLifecycles)
-      .where(eq(providerXCredentialLifecycles.id, unrecoverable.id));
-    expect(superseded).toMatchObject({
-      state: "superseded",
-      lastErrorCode: "SUPERSEDED_BY_RECONNECT",
-    });
+    expect(disconnectLifecycles).toEqual([]);
   });
 
   test("a wrong secret pointer cannot revoke, delete, or disable unrelated authority", async () => {
@@ -2430,6 +2418,188 @@ describe("disconnect", () => {
     const [route] = await db.select().from(secretRoutes).where(eq(secretRoutes.id, routeId));
     expect(route).toMatchObject({ enabled: false, authorityRevision: 2 });
     fake.restore();
+  });
+
+  test("a null pointer revokes every live owned lineage version and route", async () => {
+    const { completed } = await connectHappy(new MemoryConnectStore());
+    const db = getDb();
+    const [accountBefore] = await db
+      .select()
+      .from(providerAccounts)
+      .where(eq(providerAccounts.id, completed.providerAccountId));
+    const firstSecretId = accountBefore.credentialSecretId as string;
+    const firstPayload = await decryptCredential(completed.providerAccountId);
+    const secondSecret = await vault.rotateSecret(
+      TENANT,
+      xCredentialSecretName(WORKSPACE, firstPayload.xUserId),
+      JSON.stringify({
+        ...firstPayload,
+        accessToken: "access-second-live-version",
+        refreshToken: "refresh-second-live-version",
+        obtainedAt: new Date().toISOString(),
+      } satisfies XCredentialPayload),
+    );
+    // Simulate a committed legacy/corrupt state that the real schema permits:
+    // uniqueness is per version, not per live deterministic name.
+    await db.update(secrets).set({ deletedAt: null }).where(eq(secrets.id, firstSecretId));
+    const routeIds = [
+      "50000000-0000-4000-8000-0000000000e4",
+      "50000000-0000-4000-8000-0000000000e5",
+    ];
+    await db.insert(secretRoutes).values([
+      {
+        id: routeIds[0],
+        tenantId: TENANT,
+        secretId: firstSecretId,
+        hostPattern: "api.x.com",
+        pathPattern: "/2/tweets",
+        method: "POST",
+        injectAs: "header",
+        injectKey: "Authorization",
+        injectFormat: "Bearer {value}",
+      },
+      {
+        id: routeIds[1],
+        tenantId: TENANT,
+        secretId: secondSecret.id,
+        hostPattern: "api.x.com",
+        pathPattern: "/2/users/me",
+        method: "GET",
+        injectAs: "header",
+        injectKey: "Authorization",
+        injectFormat: "Bearer {value}",
+      },
+    ]);
+    await db
+      .update(providerAccounts)
+      .set({ credentialSecretId: null, credentialVersion: null })
+      .where(eq(providerAccounts.id, completed.providerAccountId));
+
+    const fake = installFakeX();
+    await expect(
+      disconnectXProviderCredential({
+        tenantId: TENANT,
+        workspaceId: WORKSPACE,
+        accountId: completed.providerAccountId,
+        callerUserId: ADMIN,
+        vault,
+        config: CONFIG,
+      }),
+    ).resolves.toMatchObject({ revoked: true });
+    expect(fake.counters.revoke).toBe(2);
+    expect(
+      fake.counters.revokeBodies.map((body) => new URLSearchParams(body).get("token")).sort(),
+    ).toEqual(["refresh-initial", "refresh-second-live-version"].sort());
+    fake.restore();
+
+    const lineage = await db
+      .select()
+      .from(secrets)
+      .where(inArray(secrets.id, [firstSecretId, secondSecret.id]));
+    expect(lineage).toHaveLength(2);
+    expect(lineage.every((secret) => secret.deletedAt !== null)).toBe(true);
+    const routes = await db.select().from(secretRoutes).where(inArray(secretRoutes.id, routeIds));
+    expect(routes).toHaveLength(2);
+    expect(routes.every((route) => !route.enabled && route.authorityRevision === 2)).toBe(true);
+    const lifecycles = await db
+      .select()
+      .from(providerXCredentialLifecycles)
+      .where(eq(providerXCredentialLifecycles.kind, "disconnect_revoke"));
+    expect(lifecycles).toHaveLength(2);
+    expect(
+      lifecycles.every(
+        (lifecycle) => lifecycle.state === "revoked" && lifecycle.credentialSecretId === null,
+      ),
+    ).toBe(true);
+  });
+
+  test("same-name mismatched binding aborts without touching owned or unrelated authority", async () => {
+    const { completed } = await connectHappy(new MemoryConnectStore());
+    const db = getDb();
+    const [accountBefore] = await db
+      .select()
+      .from(providerAccounts)
+      .where(eq(providerAccounts.id, completed.providerAccountId));
+    const ownedSecretId = accountBefore.credentialSecretId as string;
+    const ownedPayload = await decryptCredential(completed.providerAccountId);
+    const unrelatedSecret = await vault.rotateSecret(
+      TENANT,
+      xCredentialSecretName(WORKSPACE, ownedPayload.xUserId),
+      JSON.stringify({
+        ...ownedPayload,
+        accessToken: "unrelated-access-handle",
+        refreshToken: "unrelated-refresh-handle",
+        xUserId: "999999999",
+        xUsername: "unrelated",
+        obtainedAt: new Date().toISOString(),
+      } satisfies XCredentialPayload),
+    );
+    await db.update(secrets).set({ deletedAt: null }).where(eq(secrets.id, ownedSecretId));
+    const routeIds = [
+      "50000000-0000-4000-8000-0000000000e6",
+      "50000000-0000-4000-8000-0000000000e7",
+    ];
+    await db.insert(secretRoutes).values([
+      {
+        id: routeIds[0],
+        tenantId: TENANT,
+        secretId: ownedSecretId,
+        hostPattern: "api.x.com",
+        pathPattern: "/2/tweets",
+        method: "POST",
+        injectAs: "header",
+        injectKey: "Authorization",
+        injectFormat: "Bearer {value}",
+      },
+      {
+        id: routeIds[1],
+        tenantId: TENANT,
+        secretId: unrelatedSecret.id,
+        hostPattern: "api.unrelated.test",
+        pathPattern: "/live",
+        method: "POST",
+        injectAs: "header",
+        injectKey: "Authorization",
+        injectFormat: "Bearer {value}",
+      },
+    ]);
+
+    const fake = installFakeX();
+    await expect(
+      disconnectXProviderCredential({
+        tenantId: TENANT,
+        workspaceId: WORKSPACE,
+        accountId: completed.providerAccountId,
+        callerUserId: ADMIN,
+        vault,
+        config: CONFIG,
+      }),
+    ).rejects.toMatchObject({ code: "X_CREDENTIAL_NEEDS_ATTENTION" });
+    expect(fake.counters.revoke).toBe(0);
+    fake.restore();
+
+    const [accountAfter] = await db
+      .select()
+      .from(providerAccounts)
+      .where(eq(providerAccounts.id, completed.providerAccountId));
+    expect(accountAfter).toMatchObject({
+      status: "active",
+      credentialSecretId: ownedSecretId,
+      credentialVersion: accountBefore.credentialVersion,
+      revision: accountBefore.revision,
+    });
+    const lineage = await db
+      .select()
+      .from(secrets)
+      .where(inArray(secrets.id, [ownedSecretId, unrelatedSecret.id]));
+    expect(lineage.every((secret) => secret.deletedAt === null)).toBe(true);
+    const routes = await db.select().from(secretRoutes).where(inArray(secretRoutes.id, routeIds));
+    expect(routes.every((route) => route.enabled && route.authorityRevision === 1)).toBe(true);
+    const disconnectLifecycles = await db
+      .select()
+      .from(providerXCredentialLifecycles)
+      .where(eq(providerXCredentialLifecycles.kind, "disconnect_revoke"));
+    expect(disconnectLifecycles).toEqual([]);
   });
 
   test("disconnect of a missing account => X_ACCOUNT_NOT_FOUND", async () => {
