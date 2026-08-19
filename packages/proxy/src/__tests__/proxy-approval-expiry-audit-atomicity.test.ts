@@ -1,6 +1,7 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, setDefaultTimeout } from "bun:test";
 import { signAgentToken } from "@stwd/auth";
 import {
+  __resetAuditHmacKeyCacheForTests,
   agents,
   and,
   auditEvents,
@@ -55,6 +56,20 @@ let resetReleaseClaimBarrier: typeof import("../handlers/release")["__resetRelea
 let setForwardProxyRequest: typeof import("../handlers/proxy")["__setForwardProxyRequestForTests"];
 let proxyMod: typeof import("../handlers/proxy");
 
+const FIXTURE_ENV_KEYS = [
+  "NODE_ENV",
+  "STEWARD_PGLITE_MEMORY",
+  "STEWARD_MASTER_PASSWORD",
+  "STEWARD_JWT_SECRET",
+  "STEWARD_AUDIT_HMAC_KEY",
+  "STEWARD_PROXY_ALLOWED_HOSTS",
+  "STEWARD_SECRET_ROUTE_ALLOWED_HOSTS",
+  "STEWARD_ALLOW_BROAD_SECRET_ROUTES",
+  "STEWARD_PROXY_DEV_MODE",
+  "STEWARD_PROXY_REQUIRE_REQUEST_SIGNATURE",
+] as const;
+const previousEnv = new Map<(typeof FIXTURE_ENV_KEYS)[number], string | undefined>();
+
 // ─── Audit-chain-insert fault injection ───────────────────────────────────────
 //
 // When `faultAuditInsert` is true, the FIRST `insert into audit_events`
@@ -102,6 +117,8 @@ function installFaultInjectingDb(db: unknown): void {
 }
 
 beforeAll(async () => {
+  for (const key of FIXTURE_ENV_KEYS) previousEnv.set(key, process.env[key]);
+  process.env.NODE_ENV = "test";
   process.env.STEWARD_PGLITE_MEMORY = "true";
   process.env.STEWARD_MASTER_PASSWORD = MASTER_PASSWORD;
   process.env.STEWARD_JWT_SECRET = "proxy-expiry-audit-jwt-secret-with-enough-bytes-here";
@@ -109,6 +126,9 @@ beforeAll(async () => {
   process.env.STEWARD_PROXY_ALLOWED_HOSTS = "api.example.com";
   process.env.STEWARD_SECRET_ROUTE_ALLOWED_HOSTS = "api.example.com";
   process.env.STEWARD_ALLOW_BROAD_SECRET_ROUTES = "true";
+  process.env.STEWARD_PROXY_DEV_MODE = "true";
+  process.env.STEWARD_PROXY_REQUIRE_REQUEST_SIGNATURE = "false";
+  __resetAuditHmacKeyCacheForTests();
 
   const { db, client } = await createPGLiteDb("memory://");
   installFaultInjectingDb(db);
@@ -135,14 +155,15 @@ afterEach(() => {
 });
 
 afterAll(async () => {
+  proxyMod?.__resetProxyHandlerTestHooksForTests();
   await closeDb().catch(() => {});
-  delete process.env.STEWARD_PGLITE_MEMORY;
-  delete process.env.STEWARD_MASTER_PASSWORD;
-  delete process.env.STEWARD_JWT_SECRET;
-  delete process.env.STEWARD_AUDIT_HMAC_KEY;
-  delete process.env.STEWARD_PROXY_ALLOWED_HOSTS;
-  delete process.env.STEWARD_SECRET_ROUTE_ALLOWED_HOSTS;
-  delete process.env.STEWARD_ALLOW_BROAD_SECRET_ROUTES;
+  for (const key of FIXTURE_ENV_KEYS) {
+    const previous = previousEnv.get(key);
+    if (previous === undefined) delete process.env[key];
+    else process.env[key] = previous;
+  }
+  previousEnv.clear();
+  __resetAuditHmacKeyCacheForTests();
 });
 
 function buildApp() {
@@ -250,6 +271,29 @@ function installCountedForwarder() {
 }
 
 describe("proxy approval-expiry audit atomicity (fault injection)", () => {
+  it("scopes unsigned polling to explicit dev mode and keeps production fail-closed", async () => {
+    const tenantId = `t-auth-boundary-${crypto.randomUUID()}`;
+    const agentId = `a-${crypto.randomUUID()}`;
+    await ensureTenant(tenantId);
+    await ensureAgent(tenantId, agentId);
+    const token = await tokenFor(agentId, tenantId);
+
+    const devResponse = await poll(crypto.randomUUID(), token);
+    expect(devResponse.status).not.toBe(401);
+
+    process.env.NODE_ENV = "production";
+    try {
+      const productionResponse = await poll(crypto.randomUUID(), token);
+      expect(productionResponse.status).toBe(401);
+      expect(await productionResponse.json()).toEqual({
+        ok: false,
+        error: "X-Steward-Signature header required",
+      });
+    } finally {
+      process.env.NODE_ENV = "test";
+    }
+  });
+
   it("poll-time expiry writes the tamper-evident audit_events chain event (happy path)", async () => {
     const tenantId = `t-pollexp-${crypto.randomUUID()}`;
     const agentId = `a-${crypto.randomUUID()}`;
