@@ -147,9 +147,9 @@ export async function withWorkerRequestDatabase<T>(
     );
   }
   if (driver === "neon-http") {
-    if (env.NODE_ENV === "production") {
+    if (env.NODE_ENV !== "development" && env.NODE_ENV !== "test") {
       throw new Error(
-        "WORKER_DATABASE_DRIVER_NOT_TRANSACTIONAL: production Workers require neon-websocket",
+        "WORKER_DATABASE_DRIVER_NOT_TRANSACTIONAL: Workers require neon-websocket unless NODE_ENV is explicitly development or test",
       );
     }
     const db = (options?.createHttpDb ?? createDbForRequest)(env);

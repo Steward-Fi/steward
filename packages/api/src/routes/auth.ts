@@ -172,18 +172,19 @@ async function withVerifiedAuthTenant<T>(
   subject: string,
   callback: () => Promise<T>,
 ): Promise<T> {
-  if (hasTenantTransactionDatabase()) return callback();
+  if (hasTenantTransactionDatabase({ tenantId, userId: subject })) return callback();
   const context = tenantContextFromAuthenticatedPrincipal({
     tenantId,
     method: "verified-auth-flow",
     subject,
+    userId: subject,
   });
   const driver =
     process.env.STEWARD_DB_MODE === "pglite" || process.env.STEWARD_PGLITE_MEMORY === "true"
       ? "pglite"
       : getDatabaseDriver();
   return withTenantRlsTransaction(getDb() as never, driver, context, async (tx) =>
-    withTenantTransactionDatabase(tx as never, callback),
+    withTenantTransactionDatabase(tx as never, { tenantId, userId: subject }, callback),
   );
 }
 
@@ -7732,17 +7733,21 @@ auth.post("/refresh", async (c) => {
 
   const rotatedRefresh = await rotateRefreshTokenForUserSession(body.refreshToken, body.tenantId);
   if (rotatedRefresh.status === "reused") {
-    const { issuedBefore: revokedBefore } = await revokeUserRefreshSessions(rotatedRefresh.userId);
-    await writeAuditEvent({
-      tenantId: rotatedRefresh.tenantId,
-      actorType: "user",
-      actorId: rotatedRefresh.userId,
-      action: "auth.refresh.reuse_detected",
-      resourceType: "session",
-      metadata: { revokedRefreshTokens: true, revokedAccessTokensIssuedBefore: revokedBefore },
-      ipAddress: c.req.header("x-forwarded-for") ?? null,
-      userAgent: c.req.header("user-agent") ?? null,
-      requestId: c.get("requestId") ?? null,
+    await withVerifiedAuthTenant(rotatedRefresh.tenantId, rotatedRefresh.userId, async () => {
+      const { issuedBefore: revokedBefore } = await revokeUserRefreshSessions(
+        rotatedRefresh.userId,
+      );
+      await writeAuditEvent({
+        tenantId: rotatedRefresh.tenantId,
+        actorType: "user",
+        actorId: rotatedRefresh.userId,
+        action: "auth.refresh.reuse_detected",
+        resourceType: "session",
+        metadata: { revokedRefreshTokens: true, revokedAccessTokensIssuedBefore: revokedBefore },
+        ipAddress: c.req.header("x-forwarded-for") ?? null,
+        userAgent: c.req.header("user-agent") ?? null,
+        requestId: c.get("requestId") ?? null,
+      });
     });
     return c.json<ApiResponse>(
       { ok: false, error: "Refresh token reuse detected. Please sign in again." },
@@ -7766,23 +7771,25 @@ auth.post("/refresh", async (c) => {
   }
 
   const { record, newAccessToken, newRefreshToken } = rotatedRefresh;
-  const db = getDb();
-  try {
-    await writeAuditEvent({
-      tenantId: record.tenantId,
-      actorType: "user",
-      actorId: record.userId,
-      action: "auth.refresh",
-      resourceType: "session",
-      metadata: { rotated: true },
-      ipAddress: c.req.header("x-forwarded-for") ?? null,
-      userAgent: c.req.header("user-agent") ?? null,
-      requestId: c.get("requestId") ?? null,
-    });
-  } catch (err) {
-    await db.delete(refreshTokens).where(eq(refreshTokens.tokenHash, hashToken(newRefreshToken)));
-    throw err;
-  }
+  await withVerifiedAuthTenant(record.tenantId, record.userId, async () => {
+    const db = getDb();
+    try {
+      await writeAuditEvent({
+        tenantId: record.tenantId,
+        actorType: "user",
+        actorId: record.userId,
+        action: "auth.refresh",
+        resourceType: "session",
+        metadata: { rotated: true },
+        ipAddress: c.req.header("x-forwarded-for") ?? null,
+        userAgent: c.req.header("user-agent") ?? null,
+        requestId: c.get("requestId") ?? null,
+      });
+    } catch (err) {
+      await db.delete(refreshTokens).where(eq(refreshTokens.tokenHash, hashToken(newRefreshToken)));
+      throw err;
+    }
+  });
   dispatchUserAuthenticated(record.tenantId, record.userId, "refresh");
 
   return c.json({

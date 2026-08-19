@@ -15,6 +15,7 @@ export type TenantRlsDriver = "postgres-js" | "pglite" | "neon-http" | "neon-web
  */
 export interface TrustedTenantContext {
   readonly tenantId: string;
+  readonly userId?: string;
   readonly authority:
     | {
         readonly kind: "authenticated-principal";
@@ -35,6 +36,7 @@ export function tenantContextFromAuthenticatedPrincipal(input: {
   tenantId: string;
   method: string;
   subject: string;
+  userId?: string;
 }): TrustedTenantContext {
   assertTenantId(input.tenantId);
   if (
@@ -44,8 +46,15 @@ export function tenantContextFromAuthenticatedPrincipal(input: {
     /[\u0000-\u001f\u007f]/.test(input.subject)
   )
     throw new Error("RLS_TENANT_AUTHORITY_INVALID");
+  if (
+    input.userId !== undefined &&
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(input.userId)
+  ) {
+    throw new Error("RLS_USER_CONTEXT_INVALID");
+  }
   const context = Object.freeze({
     tenantId: input.tenantId,
+    ...(input.userId ? { userId: input.userId } : {}),
     authority: Object.freeze({
       kind: "authenticated-principal" as const,
       method: input.method,
@@ -96,8 +105,9 @@ function rowsOf(result: unknown): unknown[] {
   return Array.isArray(result) ? result : ((result as { rows?: unknown[] } | null)?.rows ?? []);
 }
 
-function contextTenantId(result: unknown): unknown {
-  return (rowsOf(result)[0] as { tenant_id?: unknown } | undefined)?.tenant_id;
+function contextSettings(result: unknown): { tenantId: unknown; userId: unknown } {
+  const row = rowsOf(result)[0] as { tenant_id?: unknown; user_id?: unknown } | undefined;
+  return { tenantId: row?.tenant_id, userId: row?.user_id };
 }
 
 /**
@@ -124,26 +134,42 @@ export async function withTenantRlsTransaction<Tx extends TenantTransactionExecu
     // setting or the helper was nested inside another tenant transaction.
     // Overwriting either would conceal a lifecycle bug and could restore the
     // stale session value after commit, so reject before exposing the tx.
-    const prior = await tx.execute(
-      sql`SELECT NULLIF(current_setting('steward.tenant_id', true), '') AS tenant_id`,
-    );
-    if (contextTenantId(prior) != null) {
+    const prior = await tx.execute(sql`
+      SELECT
+        NULLIF(current_setting('steward.tenant_id', true), '') AS tenant_id,
+        NULLIF(current_setting('steward.user_id', true), '') AS user_id
+    `);
+    const priorContext = contextSettings(prior);
+    if (priorContext.tenantId != null || priorContext.userId != null) {
       // Clear the session-scoped contamination and commit that cleanup before
       // reporting the error. Throwing inside this transaction would roll the
       // reset back and return a still-dangerous connection to the pool.
       await tx.execute(sql`SELECT set_config('steward.tenant_id', '', false)`);
-      const cleared = await tx.execute(
-        sql`SELECT NULLIF(current_setting('steward.tenant_id', true), '') AS tenant_id`,
-      );
-      if (contextTenantId(cleared) != null) throw new Error("RLS_TENANT_CONTEXT_CLEAR_FAILED");
+      await tx.execute(sql`SELECT set_config('steward.user_id', '', false)`);
+      const cleared = await tx.execute(sql`
+        SELECT
+          NULLIF(current_setting('steward.tenant_id', true), '') AS tenant_id,
+          NULLIF(current_setting('steward.user_id', true), '') AS user_id
+      `);
+      const clearedContext = contextSettings(cleared);
+      if (clearedContext.tenantId != null || clearedContext.userId != null) {
+        throw new Error("RLS_TENANT_CONTEXT_CLEAR_FAILED");
+      }
       return { kind: "dirty" as const };
     }
 
     await tx.execute(sql`SELECT set_config('steward.tenant_id', ${context.tenantId}, true)`);
-    const result = await tx.execute(
-      sql`SELECT current_setting('steward.tenant_id', true) AS tenant_id`,
-    );
-    if (contextTenantId(result) !== context.tenantId)
+    await tx.execute(sql`SELECT set_config('steward.user_id', ${context.userId ?? ""}, true)`);
+    const result = await tx.execute(sql`
+      SELECT
+        current_setting('steward.tenant_id', true) AS tenant_id,
+        NULLIF(current_setting('steward.user_id', true), '') AS user_id
+    `);
+    const boundContext = contextSettings(result);
+    if (
+      boundContext.tenantId !== context.tenantId ||
+      (boundContext.userId ?? undefined) !== context.userId
+    )
       throw new Error("RLS_TENANT_CONTEXT_NOT_BOUND");
     return { kind: "ok" as const, value: await callback(tx) };
   });

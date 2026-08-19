@@ -1,10 +1,12 @@
-import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it, setDefaultTimeout } from "bun:test";
 import { agents, closeDb, getDb, refreshTokens, tenants, users } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
+import { Hono } from "hono";
 
 const PLATFORM_KEY = "platform-tenant-create-key";
 const TENANT_ID = "platform-tenant-create-tenant";
+setDefaultTimeout(30_000);
 
 describe("platform tenant creation", () => {
   let platformRoutes: Awaited<typeof import("../routes/platform")>["platformRoutes"];
@@ -12,6 +14,7 @@ describe("platform tenant creation", () => {
   beforeAll(async () => {
     process.env.STEWARD_PGLITE_MEMORY = "true";
     process.env.STEWARD_MASTER_PASSWORD = "platform-tenant-create-master-password";
+    process.env.STEWARD_AUDIT_HMAC_KEY = "platform-tenant-create-audit-key-with-enough-bytes";
     process.env.STEWARD_PLATFORM_KEYS = PLATFORM_KEY;
     process.env.STEWARD_PLATFORM_KEY_SCOPES = JSON.stringify({
       [PLATFORM_KEY]: [
@@ -47,6 +50,7 @@ describe("platform tenant creation", () => {
       .catch(() => {});
     await closeDb();
     delete process.env.STEWARD_MASTER_PASSWORD;
+    delete process.env.STEWARD_AUDIT_HMAC_KEY;
     delete process.env.STEWARD_PLATFORM_KEYS;
     delete process.env.STEWARD_PLATFORM_KEY_SCOPES;
   });
@@ -215,5 +219,22 @@ describe("platform tenant creation", () => {
       .from(agents)
       .where(eq(agents.id, agentId));
     expect(createdAgents).toEqual([]);
+  });
+
+  it("binds the named Hono tenant parameter before a reachable route executes", async () => {
+    const { bindPlatformTenantDatabase } = await import("../routes/platform");
+    const probe = new Hono();
+    probe.use("/tenants/:tenantId/*", bindPlatformTenantDatabase as never);
+    probe.get("/tenants/:tenantId/probe", async (c) => {
+      const result = await getDb().execute(
+        sql`SELECT NULLIF(current_setting('steward.tenant_id', true), '') AS tenant_id`,
+      );
+      const [row] = Array.isArray(result) ? result : (result.rows ?? []);
+      return c.json({ tenantId: (row as { tenant_id?: string })?.tenant_id ?? null });
+    });
+
+    const response = await probe.request(`/tenants/${TENANT_ID}/probe`);
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({ tenantId: TENANT_ID });
   });
 });

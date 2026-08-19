@@ -7,6 +7,7 @@ import {
   closeDb,
   getDb,
   getSql,
+  hasTenantTransactionDatabase,
   waitUntilRequestDatabaseTask,
   withRequestDatabase,
   withTenantTransactionDatabase,
@@ -36,16 +37,45 @@ describe("request-scoped database context", () => {
     const transactionDb = { marker: "tenant-transaction" } as unknown as ReturnType<typeof getDb>;
     await withRequestDatabase(requestDb, async () => {
       expect((getDb() as unknown as { marker: string }).marker).toBe("request");
-      await withTenantTransactionDatabase(transactionDb, async () => {
+      await withTenantTransactionDatabase(transactionDb, { tenantId: "tenant-a" }, async () => {
         await Promise.resolve();
         expect((getDb() as unknown as { marker: string }).marker).toBe("tenant-transaction");
         expect(() => getSql()).toThrow("RLS_TENANT_RAW_SQL_UNAVAILABLE");
         await expect(
-          withTenantTransactionDatabase(transactionDb, async () => undefined),
+          withTenantTransactionDatabase(
+            transactionDb,
+            { tenantId: "tenant-a" },
+            async () => undefined,
+          ),
         ).rejects.toThrow("RLS_TENANT_DATABASE_CONTEXT_NESTED");
       });
       expect((getDb() as unknown as { marker: string }).marker).toBe("request");
     });
+  });
+
+  test("rejects reuse of an active tenant transaction for another tenant or user", async () => {
+    const transactionDb = { marker: "tenant-transaction" } as unknown as ReturnType<typeof getDb>;
+    await withTenantTransactionDatabase(
+      transactionDb,
+      { tenantId: "tenant-a", userId: "11111111-1111-4111-8111-111111111111" },
+      async () => {
+        expect(
+          hasTenantTransactionDatabase({
+            tenantId: "tenant-a",
+            userId: "11111111-1111-4111-8111-111111111111",
+          }),
+        ).toBe(true);
+        expect(() => hasTenantTransactionDatabase({ tenantId: "tenant-b" })).toThrow(
+          "RLS_TENANT_DATABASE_CONTEXT_MISMATCH",
+        );
+        expect(() =>
+          hasTenantTransactionDatabase({
+            tenantId: "tenant-a",
+            userId: "22222222-2222-4222-8222-222222222222",
+          }),
+        ).toThrow("RLS_TENANT_DATABASE_CONTEXT_MISMATCH");
+      },
+    );
   });
 
   test("tenant transaction drains registered work and revokes retained capabilities", async () => {
@@ -55,14 +85,18 @@ describe("request-scoped database context", () => {
     let retained!: ReturnType<typeof getDb>;
     let finished = false;
     await withRequestDatabase(requestDb, async () => {
-      const owner = withTenantTransactionDatabase(transactionDb, async () => {
-        retained = getDb();
-        void waitUntilRequestDatabaseTask(async () => {
-          await release.promise;
-          expect((getDb() as unknown as { marker: string }).marker).toBe("tenant-transaction");
-          finished = true;
-        });
-      });
+      const owner = withTenantTransactionDatabase(
+        transactionDb,
+        { tenantId: "tenant-a" },
+        async () => {
+          retained = getDb();
+          void waitUntilRequestDatabaseTask(async () => {
+            await release.promise;
+            expect((getDb() as unknown as { marker: string }).marker).toBe("tenant-transaction");
+            finished = true;
+          });
+        },
+      );
       await Promise.resolve();
       expect(finished).toBe(false);
       release.resolve();

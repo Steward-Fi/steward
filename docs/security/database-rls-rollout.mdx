@@ -11,6 +11,12 @@ production enforcement is not active until an operator completes every gate in
 this runbook and runs the atomic activation script. Application predicates
 remain the production boundary before that point.
 
+Landing order is strict: merge the database-capability membrane repair in PR
+#590, then the agent-deletion migrations through `0110` in PR #595, then
+restack this RLS series and land `0111`. Do not copy the membrane delta into
+this series. The aggregate tree must pass the real-Postgres gate below after
+that final restack.
+
 Authenticated tenant, dashboard, user-wallet, and global-wallet middleware now
 own one `withTenantRlsTransaction` and bind its transaction into downstream
 `getDb()` resolution. Production Workers use request-owned Neon WebSockets;
@@ -27,17 +33,16 @@ transaction receipt, and tenant retention sweeps now run once per tenant.
 
 The remaining activation blockers are explicit and must not be waived:
 
-- `/auth` refresh lookup now uses a fixed bootstrap function, while refresh
-  writes, membership links, identity claims, and personal-tenant wallet
-  provisioning run after verified identity in tenant transactions. Remaining
-  pre-context tenant/join/SSO discovery and cross-tenant refresh switching need
-  fixed-shape bootstrap/transfer functions;
-- platform global-user/identity routes and agent-id-only token revocation still
-  need a tenant derivation or narrowly shaped cross-tenant bootstrap API;
-- global deactivated-user retention still needs a fixed maintenance function
-  that checks ownership across every tenant before deletion;
+- pure global platform identity operations still need a truthful reserved audit
+  tenant/context strategy; tenant-addressed operations and agent-id token
+  revocation are now derived and bound before their protected handlers;
 - the newly propagated platform/proxy/background paths still need final
-  deployment-role real-Postgres route/job proofs.
+  deployment-role real-Postgres route/job proofs covering every production path.
+
+Pre-context auth discovery, tenant configuration, cross-tenant refresh
+rotation, system-tenant creation, and deactivated-user retention now use
+fixed-shape bootstrap functions. Those functions reduce the remaining surface;
+they do not waive either activation blocker above.
 
 Until those paths are complete, do not run `rls-activate.sql` in production.
 
@@ -138,8 +143,9 @@ table in future migrations.
 
 ## Roles and activation order
 
-1. Create a NOLOGIN migration owner and a distinct LOGIN application role with
-   `rolsuper = false`, `rolbypassrls = false`, and no membership in the owner.
+1. Create distinct LOGIN application and migration-maintenance roles plus a
+   NOLOGIN bootstrap-definer role. The login roles have `rolsuper = false`,
+   `rolbypassrls = false`, and no membership in either privileged role.
 2. Deploy transaction-capable Bun and Workers paths. Convert request handlers
    and background jobs to use only the transaction object inside a trusted
    tenant context.
@@ -151,7 +157,7 @@ table in future migrations.
 6. Run real-Postgres cross-tenant read/write/upsert/delete/join tests plus
    concurrent pool-reuse and background-job tests against the deployment role.
 
-Create/finalize roles after migration `0110` (the invoking operator needs
+Create/finalize roles after migration `0111` (the invoking operator needs
 `CREATEROLE` and schema ownership):
 
 ```bash

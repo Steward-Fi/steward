@@ -487,15 +487,28 @@ interface RequestDatabaseContext {
   sourceDb: RequestDatabase;
   db: RequestDatabase | undefined;
   active: boolean;
+  tenantId?: string;
+  userId?: string;
   pendingTasks: Set<Promise<unknown>>;
   guardedObjects: WeakMap<object, object>;
 }
 const requestDatabaseStorage = new AsyncLocalStorage<RequestDatabaseContext>();
 const tenantTransactionDatabaseStorage = new AsyncLocalStorage<RequestDatabaseContext>();
 
-export function hasTenantTransactionDatabase(): boolean {
+export function hasTenantTransactionDatabase(expected?: {
+  tenantId: string;
+  userId?: string;
+}): boolean {
   const context = tenantTransactionDatabaseStorage.getStore();
-  return Boolean(context?.active && context.db);
+  if (!context?.active || !context.db) return false;
+  if (
+    expected &&
+    (context.tenantId !== expected.tenantId ||
+      (expected.userId !== undefined && context.userId !== expected.userId))
+  ) {
+    throw new Error("RLS_TENANT_DATABASE_CONTEXT_MISMATCH");
+  }
+  return true;
 }
 
 function assertRequestDatabaseContextActive(
@@ -616,6 +629,7 @@ export function waitUntilRequestDatabaseTask<T>(task: () => Promise<T>): Promise
  */
 export async function withTenantTransactionDatabase<T>(
   transactionDb: RequestDatabase,
+  identity: { tenantId: string; userId?: string },
   callback: () => Promise<T>,
 ): Promise<T> {
   if (tenantTransactionDatabaseStorage.getStore()) {
@@ -625,6 +639,8 @@ export async function withTenantTransactionDatabase<T>(
     sourceDb: transactionDb,
     db: undefined,
     active: true,
+    tenantId: identity.tenantId,
+    userId: identity.userId,
     pendingTasks: new Set(),
     guardedObjects: new WeakMap(),
   };

@@ -13,8 +13,23 @@
   \set steward_bootstrap_role steward_bootstrap_owner
 \endif
 
-SELECT set_config('steward.bootstrap.app_role', :'steward_app_role', false);
-SELECT set_config('steward.bootstrap.migration_role', :'steward_migration_role', false);
+BEGIN;
+SET LOCAL lock_timeout = '10s';
+SELECT set_config('steward.bootstrap.app_role', :'steward_app_role', true);
+SELECT set_config('steward.bootstrap.migration_role', :'steward_migration_role', true);
+SELECT set_config('steward.bootstrap.definer_role', :'steward_bootstrap_role', true);
+
+DO $$
+BEGIN
+  IF current_setting('steward.bootstrap.app_role') IN (
+      current_setting('steward.bootstrap.migration_role'),
+      current_setting('steward.bootstrap.definer_role')
+    ) OR current_setting('steward.bootstrap.migration_role') =
+      current_setting('steward.bootstrap.definer_role') THEN
+    RAISE EXCEPTION 'SEC-169 app, migration-maintenance, and definer roles must be distinct';
+  END IF;
+END
+$$;
 
 -- Run as a PostgreSQL role with CREATEROLE and ownership of the migrated
 -- Steward schema. Role names are identifiers and are quoted through format().
@@ -118,5 +133,44 @@ BEGIN
   ) THEN
     RAISE EXCEPTION 'SEC-169 app role must not inherit or assume migration role';
   END IF;
+  IF pg_has_role(
+    current_setting('steward.bootstrap.app_role'),
+    current_setting('steward.bootstrap.definer_role'),
+    'MEMBER'
+  ) OR pg_has_role(
+    current_setting('steward.bootstrap.migration_role'),
+    current_setting('steward.bootstrap.definer_role'),
+    'MEMBER'
+  ) THEN
+    RAISE EXCEPTION 'SEC-169 login roles must not inherit or assume definer role';
+  END IF;
+  IF EXISTS (
+    SELECT 1 FROM pg_roles
+    WHERE rolname = current_setting('steward.bootstrap.definer_role')
+      AND (rolcanlogin OR rolsuper OR NOT rolbypassrls)
+  ) THEN
+    RAISE EXCEPTION 'SEC-169 definer role must be NOLOGIN NOSUPERUSER BYPASSRLS';
+  END IF;
+  IF has_schema_privilege(current_setting('steward.bootstrap.app_role'), 'public', 'CREATE')
+     OR has_schema_privilege(current_setting('steward.bootstrap.app_role'), 'steward_bootstrap', 'CREATE')
+     OR has_schema_privilege(current_setting('steward.bootstrap.app_role'), 'steward_rls', 'CREATE') THEN
+    RAISE EXCEPTION 'SEC-169 app role must not create schema objects';
+  END IF;
+  IF EXISTS (
+    SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE n.nspname IN ('public', 'drizzle') AND c.relkind IN ('r', 'p')
+      AND pg_get_userbyid(c.relowner) <> current_setting('steward.bootstrap.migration_role')
+  ) THEN
+    RAISE EXCEPTION 'SEC-169 migrated table ownership drift';
+  END IF;
+  IF EXISTS (
+    SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+    WHERE n.nspname = 'steward_bootstrap'
+      AND pg_get_userbyid(p.proowner) <> current_setting('steward.bootstrap.definer_role')
+  ) THEN
+    RAISE EXCEPTION 'SEC-169 bootstrap function ownership drift';
+  END IF;
 END
 $$;
+
+COMMIT;

@@ -724,9 +724,7 @@ platform.use("*", async (c, next) => {
   return next();
 });
 
-// Platform authority is cross-tenant, but the database capability is not. For
-// every tenant-addressed operation, bind the operator-selected tenant only
-// after the platform key and route scope have been verified above.
+// Resolve exceptional tenant authority that is not carried in a tenant route.
 platform.use("*", async (c, next) => {
   const pathname = new URL(c.req.url).pathname.replace(/^\/platform(?=\/)/, "");
   const agentRevocationMatch = pathname.match(/^\/agents\/([^/]+)\/revoke-tokens$/);
@@ -748,25 +746,53 @@ platform.use("*", async (c, next) => {
       next,
     );
   }
-  let tenantId = pathname.startsWith("/tenants/")
-    ? c.req.param("tenantId") || c.req.param("id")
-    : "";
-  if (pathname === "/apps/gas_spend") tenantId = c.req.query("tenant_id")?.trim() || "";
-  if (pathname === "/tenants" && c.req.method === "POST") {
-    try {
-      const body = (await c.req.raw.clone().json()) as { id?: unknown };
-      tenantId = typeof body.id === "string" ? body.id : "";
-    } catch {
-      tenantId = "";
-    }
-  }
-  if (!tenantId && ["POST", "PUT", "PATCH"].includes(c.req.method)) {
+  if (pathname.startsWith("/tenants/")) return next();
+  let tenantId = "";
+  if (["POST", "PUT", "PATCH"].includes(c.req.method)) {
     try {
       const body = (await c.req.raw.clone().json()) as { tenantId?: unknown };
       tenantId = typeof body.tenantId === "string" ? body.tenantId.trim() : "";
     } catch {
-      tenantId = "";
+      // The route owns malformed-body reporting; do not mint an RLS context.
     }
+  }
+  if (!tenantId || !isValidTenantId(tenantId)) return next();
+  return continueWithTenantDatabase(tenantId, "platform-tenant-operation", "platform", next);
+});
+
+// A named middleware route limits this to reachable tenant routes. Hono does
+// not expose a later handler's params while earlier middleware is executing,
+// so resolve the value from the matched path segment before entering downstream.
+export async function bindPlatformTenantDatabase(
+  c: Context<{ Variables: AppVariables }>,
+  next: () => Promise<void>,
+) {
+  const match = new URL(c.req.url).pathname.match(/(?:^|\/platform)\/tenants\/([^/]+)(?:\/|$)/);
+  let tenantId = "";
+  try {
+    tenantId = match ? decodeURIComponent(match[1]) : "";
+  } catch {
+    return next();
+  }
+  if (!tenantId || !isValidTenantId(tenantId)) return next();
+  return continueWithTenantDatabase(tenantId, "platform-tenant-operation", "platform", next);
+}
+
+platform.use("/tenants/:tenantId", bindPlatformTenantDatabase);
+platform.use("/tenants/:tenantId/*", bindPlatformTenantDatabase);
+platform.use("/apps/gas_spend", async (c, next) => {
+  const tenantId = c.req.query("tenant_id")?.trim() || "";
+  if (!tenantId || !isValidTenantId(tenantId)) return next();
+  return continueWithTenantDatabase(tenantId, "platform-tenant-operation", "platform", next);
+});
+platform.use("/tenants", async (c, next) => {
+  if (c.req.method !== "POST") return next();
+  let tenantId = "";
+  try {
+    const body = (await c.req.raw.clone().json()) as { id?: unknown };
+    tenantId = typeof body.id === "string" ? body.id : "";
+  } catch {
+    // The route owns malformed-body reporting; do not mint an RLS context.
   }
   if (!tenantId || !isValidTenantId(tenantId)) return next();
   return continueWithTenantDatabase(tenantId, "platform-tenant-operation", "platform", next);

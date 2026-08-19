@@ -100,7 +100,13 @@ async function userSessionAuth(
   if (!payload.tenantId) {
     return c.json<ApiResponse>({ ok: false, error: "Session token missing tenantId claim" }, 401);
   }
-  await continueWithTenantDatabase(payload.tenantId, "global-wallet-jwt", payload.userId, next);
+  await continueWithTenantDatabase(
+    payload.tenantId,
+    "global-wallet-jwt",
+    payload.userId,
+    next,
+    payload.userId,
+  );
   return undefined;
 }
 

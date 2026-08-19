@@ -1737,7 +1737,7 @@ export async function userSessionAuth(
   if (!payload.tenantId) {
     return c.json<ApiResponse>({ ok: false, error: "Session token missing tenantId claim" }, 401);
   }
-  await continueWithTenantDatabase(payload.tenantId, "user-session-jwt", userId, next);
+  await continueWithTenantDatabase(payload.tenantId, "user-session-jwt", userId, next, userId);
 }
 
 // ─── Route group ──────────────────────────────────────────────────────────────

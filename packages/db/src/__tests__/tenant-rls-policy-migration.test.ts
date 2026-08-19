@@ -84,8 +84,15 @@ describe("0111 tenant RLS policy installation", () => {
     const bootstrap = await readFile(new URL("rls-bootstrap.sql", scripts), "utf8");
     const activate = await readFile(new URL("rls-activate.sql", scripts), "utf8");
     const rollback = await readFile(new URL("rls-rollback.sql", scripts), "utf8");
+    const inventory = await readFile(new URL("rls-policy-inventory.sql", scripts), "utf8");
     expect(bootstrap).toContain("NOINHERIT NOBYPASSRLS");
+    expect(bootstrap).toContain("app, migration-maintenance, and definer roles must be distinct");
     expect(bootstrap).toContain("app role must not inherit or assume migration role");
+    expect(bootstrap).toContain("BEGIN;");
+    expect(bootstrap).toContain("COMMIT;");
+    expect(inventory).toContain("exactly 71 relations and 73 policies");
+    expect(activate).toContain("\\ir rls-policy-inventory.sql");
+    expect(rollback).toContain("\\ir rls-policy-inventory.sql");
     expect(activate).toContain("ENABLE ROW LEVEL SECURITY");
     expect(activate).toContain("FORCE ROW LEVEL SECURITY");
     expect(activate).toContain("steward_migration_maintenance");

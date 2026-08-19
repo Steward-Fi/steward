@@ -314,7 +314,7 @@ export async function authMiddleware(c: Context, next: Next) {
         ? "pglite"
         : getDatabaseDriver();
     await withTenantRlsTransaction(getDb() as never, driver, context, async (tx) =>
-      withTenantTransactionDatabase(tx as never, next),
+      withTenantTransactionDatabase(tx as never, { tenantId }, next),
     );
   } catch {
     // Keep jose and revocation-store diagnostics behind the authentication

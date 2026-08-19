@@ -348,7 +348,9 @@ BEGIN
   WHERE r.token_hash = p_source_token_hash AND r.expires_at >= now()
   FOR UPDATE;
   IF NOT FOUND THEN RETURN; END IF;
-  IF EXISTS (SELECT 1 FROM public.users u WHERE u.id = source.user_id AND u.deactivated_at IS NOT NULL)
+  IF NULLIF(current_setting('steward.tenant_id', true), '') IS DISTINCT FROM source.tenant_id
+    OR NULLIF(current_setting('steward.user_id', true), '')::uuid IS DISTINCT FROM source.user_id
+    OR EXISTS (SELECT 1 FROM public.users u WHERE u.id = source.user_id AND u.deactivated_at IS NOT NULL)
     OR NOT EXISTS (
       SELECT 1 FROM public.user_tenants ut
       WHERE ut.user_id = source.user_id AND ut.tenant_id = p_target_tenant_id

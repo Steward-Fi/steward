@@ -50,6 +50,6 @@ export async function runInternalJobForTenant<T>(
       ? "pglite"
       : getDatabaseDriver(),
     context,
-    async (tx) => withTenantTransactionDatabase(tx as never, callback),
+    async (tx) => withTenantTransactionDatabase(tx as never, { tenantId }, callback),
   );
 }

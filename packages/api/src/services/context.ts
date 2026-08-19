@@ -754,12 +754,13 @@ export async function withAuthenticatedTenantDatabase<T>(
   method: string,
   subject: string,
   callback: () => Promise<T>,
+  userId?: string,
 ): Promise<T> {
-  if (hasTenantTransactionDatabase()) return callback();
-  const context = tenantContextFromAuthenticatedPrincipal({ tenantId, method, subject });
+  if (hasTenantTransactionDatabase({ tenantId, userId })) return callback();
+  const context = tenantContextFromAuthenticatedPrincipal({ tenantId, method, subject, userId });
   const driver = isPGLiteRuntime ? "pglite" : getDatabaseDriver();
   return withTenantRlsTransaction(getDb() as never, driver, context, async (tx) =>
-    withTenantTransactionDatabase(tx as never, callback),
+    withTenantTransactionDatabase(tx as never, { tenantId, userId }, callback),
   );
 }
 
@@ -768,8 +769,9 @@ export async function continueWithTenantDatabase(
   method: string,
   subject: string,
   next: Next,
+  userId?: string,
 ) {
-  return withAuthenticatedTenantDatabase(tenantId, method, subject, next);
+  return withAuthenticatedTenantDatabase(tenantId, method, subject, next, userId);
 }
 
 export async function tenantAuth(
@@ -905,6 +907,7 @@ export async function tenantAuth(
           isAgentToken ? "agent-jwt" : "session-jwt",
           isAgentToken ? String(payload.agentId) : String(payload.userId),
           next,
+          isAgentToken ? undefined : payload.userId,
         );
       }
     }
@@ -1023,6 +1026,7 @@ export async function sessionAuth(c: Context<{ Variables: AppVariables }>, next:
     "session-jwt",
     String(payload.userId ?? payload.address),
     next,
+    payload.userId,
   );
 }
 
@@ -1140,7 +1144,13 @@ export async function dashboardAuthMiddleware(c: Context<{ Variables: AppVariabl
     c.set("sessionMfaMethod", payload.mfaMethod);
   }
 
-  return continueWithTenantDatabase(payload.tenantId, "dashboard-jwt", payload.userId, next);
+  return continueWithTenantDatabase(
+    payload.tenantId,
+    "dashboard-jwt",
+    payload.userId,
+    next,
+    payload.userId,
+  );
 }
 
 // Re-export drizzle schemas used in route modules
