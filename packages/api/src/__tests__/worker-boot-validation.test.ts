@@ -309,7 +309,7 @@ describe("workers boot JWT env validation (SEC-134)", () => {
         "authorization-signatures": {
           status: "pass",
           description:
-            "Sensitive machine requests require X-Steward-Signature and have an env, app-client, or tenant signing key available; public browser auth and verified user access sessions are exempt unless explicitly forced.",
+            "Sensitive machine requests require X-Steward-Signature and have an env, app-client, or tenant signing key available; public auth bootstrap, authenticated browser auth mutations, and verified user-session requests under /user are exempt unless explicitly forced.",
         },
       },
     });

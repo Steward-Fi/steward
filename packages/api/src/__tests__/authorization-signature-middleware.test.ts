@@ -552,26 +552,22 @@ describe("authorizationSignature", () => {
   it("keeps machine signing fail-closed while allowing browser bootstrap in production", async () => {
     const app = makeDefaultApp();
 
-    const [machine, email, passkey, jwtLogin, logout] = await withRuntimeEnvironment(
+    const [machine, email, jwtLogin] = await withRuntimeEnvironment(
       { NODE_ENV: "production" },
       () =>
         Promise.all([
           app.request("/vault/agent-1/sign", { method: "POST", body: BODY }),
           app.request("/auth/email/send", { method: "POST", body: BODY }),
-          app.request("/auth/passkey/register/options", { method: "POST", body: BODY }),
           app.request("/auth/jwt/login", { method: "POST", body: BODY }),
-          app.request("/auth/logout", { method: "POST", body: BODY }),
         ]),
     );
 
     expect(machine.status).toBe(401);
     expect(email.status).toBe(200);
-    expect(passkey.status).not.toBe(401);
     expect(jwtLogin.status).not.toBe(401);
-    expect(logout.status).not.toBe(401);
   });
 
-  it("exempts verified user sessions across browser surfaces from the production machine guard", async () => {
+  it("exempts verified user sessions only on approved browser surfaces", async () => {
     const app = makeDefaultApp();
     const environment = {
       NODE_ENV: "production",
@@ -620,8 +616,8 @@ describe("authorizationSignature", () => {
       );
 
     expect(userRoute.status).toBe(200);
-    expect(tenantRoute.status).not.toBe(401);
-    expect(dashboardRoute.status).not.toBe(401);
+    expect(tenantRoute.status).toBe(401);
+    expect(dashboardRoute.status).toBe(401);
     expect(mfaRoute.status).not.toBe(401);
     expect(agentVault.status).toBe(401);
   });

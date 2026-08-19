@@ -329,9 +329,9 @@ export const db: DbHandle = new Proxy({} as DbHandle, {
 });
 
 // `vault` is a late-bound Proxy resolving the Vault for the current immutable
-// runtime configuration. Process deployments retain one live instance under
-// an opaque keyed cache identity; request-scoped runtimes construct an isolated
-// local Vault and never reuse another request's custody authority.
+// runtime configuration. Process deployments retain one live instance while
+// its exact in-memory configuration remains unchanged; request-scoped runtimes
+// construct an isolated local Vault and never reuse another request's custody authority.
 //
 // In the single-process api test suite, individual files set their own
 // STEWARD_MASTER_PASSWORD in beforeAll, and a few construct their OWN Vault with

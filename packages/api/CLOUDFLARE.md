@@ -78,7 +78,7 @@ stores, so provision each deployed target explicitly (`wrangler secret put
 | `KV_REST_API_TOKEN`             | Upstash REST token.                                                    |
 | `STEWARD_JWT_SECRET`            | Canonical HS256 JWT signing and verification secret. Minimum 32 characters in production. |
 | `STEWARD_MASTER_PASSWORD`       | Vault keystore master password. Used by `KeyStore` (AES-256-GCM).      |
-| `STEWARD_KDF_SALT`              | Per-deployment hex salt for the KeyStore KDF. Recommended for prod.    |
+| `STEWARD_KDF_SALT`              | Per-deployment hex salt for the KeyStore KDF. Required in production. |
 | `STEWARD_REQUEST_SIGNING_SECRETS` | API HMAC roots for production machine requests. Browser clients never receive these values. |
 | `RESEND_API_KEY`                | Magic-link email delivery.                                             |
 | `EMAIL_FROM`                    | Optional: from address for magic links.                                |

@@ -176,7 +176,7 @@ Steward backup.
 | `STEWARD_PGLITE_PATH` | PGLite persistence directory | `~/.steward/data` | Used only by PGLite. |
 | `STEWARD_PGLITE_MEMORY` | Use in-memory PGLite | `false` | Set exactly `true`; data is discarded on restart. |
 | `STEWARD_MASTER_PASSWORD` | Root secret for vault encryption and JWT fallback | none | Required by normal API startup; production throws without it. Use a long random value and keep it stable. |
-| `STEWARD_KDF_SALT` | Deployment salt for scrypt master-key derivation | legacy built-in salt | Hex string; at least 32 hex chars recommended. Production warns when absent. |
+| `STEWARD_KDF_SALT` | Deployment salt for scrypt master-key derivation | legacy built-in salt outside production | Hex string; at least 32 hex chars. Production fails closed when absent. |
 | `STEWARD_JWT_SECRET` | Canonical JWT signing/verification secret used by API, proxy, auth routes, user sessions, agent-scoped tokens | falls back to `STEWARD_SESSION_SECRET` (deprecated) then `STEWARD_MASTER_PASSWORD` in embedded/dev mode | Required in production; must be ≥32 characters. Set separately from master password. |
 | `STEWARD_SESSION_SECRET` | Deprecated. Backward-compatibility fallback for `STEWARD_JWT_SECRET` | none | Deployments should rename to `STEWARD_JWT_SECRET`. Will be removed in a future release. |
 | `AGENT_TOKEN_EXPIRY` | Expiry for agent-scoped JWTs | API context: `30d`; `.env.example`/Compose set `24h` | Must be accepted by `jose` `setExpirationTime`, e.g. `24h`, `7d`. |
