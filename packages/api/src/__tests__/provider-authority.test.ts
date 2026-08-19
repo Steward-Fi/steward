@@ -448,6 +448,69 @@ describe("provider authority foundation", () => {
     }
   });
 
+  test("revalidates workspace authority under the disable transaction lock", async () => {
+    const accountId = crypto.randomUUID();
+    const bindingId = crypto.randomUUID();
+    await getDb()
+      .insert(providerAccounts)
+      .values({
+        id: accountId,
+        tenantId: "tenant-main",
+        workspaceId: WORKSPACE_A,
+        adapterKey: "github",
+        externalRef: `disable-authority-race-${accountId}`,
+        displayName: "Disable authority race",
+      });
+    await getDb().insert(providerRoleBindings).values({
+      id: bindingId,
+      tenantId: "tenant-main",
+      workspaceId: WORKSPACE_A,
+      principalType: "human",
+      principalId: OTHER,
+      roleKey: "workspace_admin",
+      status: "active",
+      grantedByUserId: ADMIN,
+      reason: "disable authority race fixture",
+    });
+    const [before] = await getDb()
+      .select()
+      .from(providerAccounts)
+      .where(eq(providerAccounts.id, accountId));
+    store.faultHooks.beforeProviderAccountDisableUpdate = async () => {
+      await getDb()
+        .update(providerRoleBindings)
+        .set({ status: "revoked" })
+        .where(eq(providerRoleBindings.id, bindingId));
+    };
+    try {
+      await expect(
+        store.disableProviderAccount(
+          mutation({
+            actorUserId: OTHER,
+            tenantRole: "member",
+            expectedRevision: before.revision,
+            audit: persistedAuthorityAudit,
+          }),
+          accountId,
+        ),
+      ).rejects.toMatchObject({ code: "not_found", status: 404 });
+      const [after] = await getDb()
+        .select()
+        .from(providerAccounts)
+        .where(eq(providerAccounts.id, accountId));
+      expect(after).toEqual(before);
+      const events = await getDb()
+        .select({ action: persistedAuditEvents.action })
+        .from(persistedAuditEvents)
+        .where(eq(persistedAuditEvents.resourceId, accountId));
+      expect(events.map(({ action }) => action)).toEqual(["provider.account.disable"]);
+    } finally {
+      store.faultHooks = {};
+      await getDb().delete(providerAccounts).where(eq(providerAccounts.id, accountId));
+      await getDb().delete(providerRoleBindings).where(eq(providerRoleBindings.id, bindingId));
+    }
+  });
+
   test("enforces matrix scope and non-enumerating cross-workspace/tenant behavior", async () => {
     await getDb()
       .insert(providerRoleBindings)

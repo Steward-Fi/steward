@@ -47,6 +47,7 @@ import {
   disconnectXProviderCredential,
   initiateXConnect,
   type PendingConnectStore,
+  reconcileXConnectLifecycle,
   refreshXProviderCredential,
   runXCredentialLifecycleSweep,
   X_ADAPTER_KEY,
@@ -77,6 +78,8 @@ const CONFIG = { clientId: "x-client-id", clientSecret: "x-client-secret" };
 
 const MASTER = process.env.STEWARD_MASTER_PASSWORD ?? "steward-api-test-suite-master-password";
 const vault = new SecretVault(MASTER);
+const USING_REAL_POSTGRES =
+  process.env.STEWARD_X_CONNECT_REAL_PG === "true" && Boolean(process.env.DATABASE_URL);
 
 async function readAuditActions(tenantId: string): Promise<string[]> {
   const db = getDb();
@@ -286,19 +289,30 @@ async function seed() {
 beforeAll(async () => {
   process.env.STEWARD_MASTER_PASSWORD ??= MASTER;
   process.env.STEWARD_AUDIT_HMAC_KEY ??= "a".repeat(64);
-  process.env.STEWARD_PGLITE_MEMORY ??= "true";
-  process.env.STEWARD_DB_MODE ??= "pglite";
-  // Fresh, isolated schema for this file (matches the per-file convention). The
-  // override's teardown closes the client exactly once via closeDb() in afterAll.
-  const { db, client } = await createPGLiteDb("memory://");
-  setPGLiteOverride(db, async () => {
-    await client.close();
-  });
+  if (!USING_REAL_POSTGRES) {
+    process.env.STEWARD_PGLITE_MEMORY ??= "true";
+    process.env.STEWARD_DB_MODE ??= "pglite";
+    // Fresh, isolated schema for this file (matches the per-file convention).
+    const { db, client } = await createPGLiteDb("memory://");
+    setPGLiteOverride(db, async () => {
+      await client.close();
+    });
+  } else {
+    delete process.env.STEWARD_PGLITE_MEMORY;
+    delete process.env.STEWARD_DB_MODE;
+  }
   await seed();
 });
 
 afterAll(async () => {
   __setXForwardForTests(null);
+  if (USING_REAL_POSTGRES) {
+    const db = getDb();
+    await db.delete(auditEventsTable).where(eq(auditEventsTable.tenantId, TENANT));
+    await db.execute(sql`DELETE FROM audit_chain_heads WHERE tenant_id = ${TENANT}`);
+    await db.delete(tenants).where(eq(tenants.id, TENANT));
+    await db.delete(users).where(inArray(users.id, [ADMIN, APPROVER, VIEWER, OUTSIDER]));
+  }
   await closeDb();
 });
 
@@ -1370,6 +1384,99 @@ describe("connect exchange recovery", () => {
     recovery.restore();
   });
 
+  test("recovery preserves a legacy disable whose intent and exact account CAS both landed", async () => {
+    const initial = await connectHappy(new MemoryConnectStore());
+    const accountId = initial.completed.providerAccountId;
+    const [accountBeforeDisable] = await getDb()
+      .select()
+      .from(providerAccounts)
+      .where(eq(providerAccounts.id, accountId));
+    const credentialBeforeDisable = await decryptCredential(accountId);
+
+    const staleStore = new MemoryConnectStore();
+    const stagedFake = installFakeX({
+      exchangeToken: {
+        access_token: "access-staged-before-legacy-disable",
+        refresh_token: "refresh-staged-before-legacy-disable",
+      },
+    });
+    const initiated = await initiateXConnect({
+      tenantId: TENANT,
+      workspaceId: WORKSPACE,
+      initiatedByUserId: ADMIN,
+      redirectUri: REDIRECT,
+      config: CONFIG,
+      store: staleStore,
+    });
+    __setAfterXCredentialStageForTests(async () => {
+      throw new Error("simulated crash before legacy generic disable");
+    });
+    await expect(
+      completeXConnect({
+        tenantId: TENANT,
+        workspaceId: WORKSPACE,
+        callerUserId: ADMIN,
+        code: "auth-code",
+        state: initiated.state,
+        connectToken: initiated.connectToken,
+        redirectUri: REDIRECT,
+        config: CONFIG,
+        store: staleStore,
+        vault,
+      }),
+    ).rejects.toThrow("simulated crash before legacy generic disable");
+    __setAfterXCredentialStageForTests(null);
+    stagedFake.restore();
+
+    await writeAuditEvent({
+      tenantId: TENANT,
+      actorType: "user",
+      actorId: ADMIN,
+      action: "provider.account.disable",
+      resourceType: "provider_account",
+      resourceId: accountId,
+      metadata: {
+        workspaceId: WORKSPACE,
+        expectedRevision: accountBeforeDisable.revision,
+        reason: "simulated pre-completion-event generic disable",
+      },
+    });
+    await getDb()
+      .update(providerAccounts)
+      .set({
+        status: "disabled",
+        revision: accountBeforeDisable.revision + 1,
+        updatedAt: new Date(),
+      })
+      .where(
+        and(
+          eq(providerAccounts.id, accountId),
+          eq(providerAccounts.revision, accountBeforeDisable.revision),
+        ),
+      );
+
+    const recovery = installFakeX({ revokeStatuses: [200] });
+    const swept = await runXCredentialLifecycleSweep({
+      vault,
+      config: CONFIG,
+      now: new Date(Date.now() + 70_000),
+    });
+    expect(swept).toMatchObject({ processed: 1, adopted: 0, revoked: 1, attention: 0 });
+    const [accountAfterRecovery] = await getDb()
+      .select()
+      .from(providerAccounts)
+      .where(eq(providerAccounts.id, accountId));
+    expect(accountAfterRecovery).toMatchObject({
+      status: "disabled",
+      revision: accountBeforeDisable.revision + 1,
+      credentialSecretId: accountBeforeDisable.credentialSecretId,
+      credentialVersion: accountBeforeDisable.credentialVersion,
+    });
+    expect(await decryptCredential(accountId)).toEqual(credentialBeforeDisable);
+    expect(recovery.counters).toMatchObject({ identity: 1, revoke: 1 });
+    recovery.restore();
+  });
+
   test("recovery ignores a disable intent whose account update never completed", async () => {
     const initial = await connectHappy(new MemoryConnectStore());
     const accountId = initial.completed.providerAccountId;
@@ -1451,6 +1558,146 @@ describe("connect exchange recovery", () => {
     });
     expect(recovery.counters).toMatchObject({ identity: 1, revoke: 0 });
     recovery.restore();
+  });
+
+  test("concurrent recovery wins a disable CAS only when no completion lineage exists", async () => {
+    const initial = await connectHappy(new MemoryConnectStore());
+    const accountId = initial.completed.providerAccountId;
+    const [accountBeforeRace] = await getDb()
+      .select()
+      .from(providerAccounts)
+      .where(eq(providerAccounts.id, accountId));
+
+    const staleStore = new MemoryConnectStore();
+    const stagedFake = installFakeX({
+      exchangeToken: {
+        access_token: "access-staged-disable-race",
+        refresh_token: "refresh-staged-disable-race",
+      },
+    });
+    const initiated = await initiateXConnect({
+      tenantId: TENANT,
+      workspaceId: WORKSPACE,
+      initiatedByUserId: ADMIN,
+      redirectUri: REDIRECT,
+      config: CONFIG,
+      store: staleStore,
+    });
+    __setAfterXCredentialStageForTests(async () => {
+      throw new Error("simulated crash before disable/recovery race");
+    });
+    await expect(
+      completeXConnect({
+        tenantId: TENANT,
+        workspaceId: WORKSPACE,
+        callerUserId: ADMIN,
+        code: "auth-code",
+        state: initiated.state,
+        connectToken: initiated.connectToken,
+        redirectUri: REDIRECT,
+        config: CONFIG,
+        store: staleStore,
+        vault,
+      }),
+    ).rejects.toThrow("simulated crash before disable/recovery race");
+    __setAfterXCredentialStageForTests(null);
+    stagedFake.restore();
+    const [stagedLifecycle] = await getDb()
+      .select({ id: providerXCredentialLifecycles.id })
+      .from(providerXCredentialLifecycles)
+      .where(
+        and(
+          eq(providerXCredentialLifecycles.kind, "connect_exchange"),
+          eq(providerXCredentialLifecycles.state, "credential_staged"),
+        ),
+      );
+    if (!stagedLifecycle) throw new Error("expected staged connect lifecycle");
+
+    let signalDisableIntent!: () => void;
+    const disableIntentWritten = new Promise<void>((resolve) => {
+      signalDisableIntent = resolve;
+    });
+    let releaseDisable!: () => void;
+    const disableMayContinue = new Promise<void>((resolve) => {
+      releaseDisable = resolve;
+    });
+    providerAuthorityStore.faultHooks.beforeProviderAccountDisableUpdate = async () => {
+      signalDisableIntent();
+      await disableMayContinue;
+    };
+    const disablePromise = providerAuthorityStore.disableProviderAccount(
+      {
+        tenantId: TENANT,
+        actorUserId: ADMIN,
+        tenantRole: "admin",
+        mfaVerifiedAt: Date.now(),
+        idempotencyKey: `disable-recovery-race-${crypto.randomUUID()}`,
+        expectedRevision: accountBeforeRace.revision,
+        reason: "test disable and staged recovery CAS",
+        audit: async (event) => {
+          await writeAuditEvent({
+            tenantId: TENANT,
+            actorType: "user",
+            actorId: ADMIN,
+            action: event.action,
+            resourceType: event.resourceType,
+            resourceId: event.resourceId,
+            metadata: event.metadata,
+          });
+        },
+      },
+      accountId,
+    );
+    await disableIntentWritten;
+
+    const recovery = installFakeX();
+    try {
+      expect(
+        await reconcileXConnectLifecycle({
+          tenantId: TENANT,
+          workspaceId: WORKSPACE,
+          lifecycleId: stagedLifecycle.id,
+          vault,
+          config: CONFIG,
+        }),
+      ).toMatchObject({
+        providerAccountId: accountId,
+        credentialVersion: (accountBeforeRace.credentialVersion as number) + 1,
+        reconnected: true,
+      });
+      releaseDisable();
+      await expect(disablePromise).rejects.toMatchObject({
+        code: "revision_conflict",
+        status: 409,
+      });
+      const [accountAfterRace] = await getDb()
+        .select()
+        .from(providerAccounts)
+        .where(eq(providerAccounts.id, accountId));
+      expect(accountAfterRace).toMatchObject({
+        status: "active",
+        revision: accountBeforeRace.revision + 1,
+        credentialVersion: (accountBeforeRace.credentialVersion as number) + 1,
+      });
+      const disableActions = await getDb()
+        .select({ action: auditEventsTable.action })
+        .from(auditEventsTable)
+        .where(
+          and(
+            eq(auditEventsTable.tenantId, TENANT),
+            eq(auditEventsTable.resourceId, accountId),
+            inArray(auditEventsTable.action, [
+              "provider.account.disable",
+              "provider.account.disable.completed",
+            ]),
+          ),
+        );
+      expect(disableActions.map(({ action }) => action)).toEqual(["provider.account.disable"]);
+    } finally {
+      releaseDisable();
+      providerAuthorityStore.faultHooks = {};
+      recovery.restore();
+    }
   });
 
   test("a staged connect cannot re-enable an account disabled by the generic authority path", async () => {

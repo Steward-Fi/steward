@@ -851,19 +851,34 @@ export class ProviderAuthorityStore {
     await this.faultHooks.beforeProviderAccountDisableUpdate?.();
     return this.runAuditedTransaction(ctx.tenantId, async (txRaw, appendRequiredAudit) => {
       const tx = txRaw as DbExecutor;
+      const [lockedRow] = await tx
+        .select()
+        .from(providerAccounts)
+        .where(and(eq(providerAccounts.id, id), eq(providerAccounts.tenantId, ctx.tenantId)))
+        .limit(1)
+        .for("update");
+      if (!lockedRow) throw new ProviderAuthorityError("resource not found", "not_found", 404);
+      await this.requireWorkspaceAdmin(ctx, lockedRow.workspaceId, true, tx);
+      if (lockedRow.revision !== ctx.expectedRevision) {
+        throw new ProviderAuthorityError(
+          "provider account revision conflict",
+          "revision_conflict",
+          409,
+        );
+      }
       const [updated] = await tx
         .update(providerAccounts)
         .set({
           status: "disabled",
-          revision: row.revision + 1,
+          revision: lockedRow.revision + 1,
           updatedAt: new Date(),
         })
         .where(
           and(
             eq(providerAccounts.id, id),
             eq(providerAccounts.tenantId, ctx.tenantId),
-            eq(providerAccounts.workspaceId, row.workspaceId),
-            eq(providerAccounts.revision, row.revision),
+            eq(providerAccounts.workspaceId, lockedRow.workspaceId),
+            eq(providerAccounts.revision, lockedRow.revision),
           ),
         )
         .returning();
@@ -878,8 +893,8 @@ export class ProviderAuthorityStore {
         resourceType: "provider_account",
         resourceId: id,
         metadata: {
-          workspaceId: row.workspaceId,
-          expectedRevision: row.revision,
+          workspaceId: lockedRow.workspaceId,
+          expectedRevision: lockedRow.revision,
           resultingRevision: updated.revision,
           reason: ctx.reason,
         },

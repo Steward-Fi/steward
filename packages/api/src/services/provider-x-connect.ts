@@ -1143,7 +1143,7 @@ async function persistConnectedAccount(input: PersistInput): Promise<CompleteCon
             .orderBy(desc(auditEvents.seq))
             .limit(1)
         : [];
-    const [latestAccountMutation] =
+    const accountMutationCandidates =
       account && connectIntentAudit
         ? await tx
             .select({
@@ -1164,13 +1164,29 @@ async function persistConnectedAccount(input: PersistInput): Promise<CompleteCon
                   "provider.x.refresh.needs_attention",
                   "provider.x.refresh.revoked",
                   "provider.x.disconnect.completed",
+                  "provider.account.disable",
                   "provider.account.disable.completed",
                 ]),
               ),
             )
             .orderBy(desc(auditEvents.seq))
-            .limit(1)
+            .limit(16)
         : [];
+    // Before provider.account.disable.completed existed, a successful generic
+    // disable left only its authorization event. Treat that legacy event as
+    // authoritative only when the currently locked row proves the exact CAS
+    // landed. A newer orphan intent from an update failure/CAS loss is skipped
+    // so it cannot manufacture durable recovery lineage.
+    const latestAccountMutation = accountMutationCandidates.find((event) => {
+      if (event.action !== "provider.account.disable") return true;
+      const expectedRevision = event.metadata.expectedRevision;
+      return (
+        account?.status === "disabled" &&
+        typeof expectedRevision === "number" &&
+        Number.isSafeInteger(expectedRevision) &&
+        account.revision === expectedRevision + 1
+      );
+    });
     // An existing account is only safe to rotate when its current credential
     // has an authoritative X-connect adoption before this intent. A generic
     // provider-account insert (or a selectively missing adoption record) gives
@@ -1223,7 +1239,8 @@ async function persistConnectedAccount(input: PersistInput): Promise<CompleteCon
         const expectedStatus =
           latestAccountMutation.action === "provider.x.refresh.revoked"
             ? "revoked"
-            : latestAccountMutation.action === "provider.account.disable.completed" ||
+            : latestAccountMutation.action === "provider.account.disable" ||
+                latestAccountMutation.action === "provider.account.disable.completed" ||
                 (latestAccountMutation.action === "provider.x.refresh.needs_attention" &&
                   latestAccountMutation.metadata.accountDisabled === true)
               ? "disabled"
@@ -1264,7 +1281,10 @@ async function persistConnectedAccount(input: PersistInput): Promise<CompleteCon
             "current X account credential lineage cannot be established",
           );
         }
-        if (latestAccountMutation.action === "provider.account.disable.completed") {
+        if (
+          latestAccountMutation.action === "provider.account.disable" ||
+          latestAccountMutation.action === "provider.account.disable.completed"
+        ) {
           const disabledRevision = latestAccountMutation.metadata.expectedRevision;
           if (
             typeof disabledRevision !== "number" ||
