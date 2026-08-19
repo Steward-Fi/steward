@@ -35,8 +35,11 @@ import {
   hashSha256Hex,
   isBuiltInProvider,
   isValidE164,
+  MemoryBackend,
+  NamespacedStoreBackend,
   OAuthClient,
   revocationStore,
+  type StoreBackend,
   type TelegramLoginPayload,
   uint8ArrayToBase64url,
   verifyFarcasterLogin,
@@ -193,11 +196,38 @@ const USER_ACCOUNT_CAPABILITIES = [
 const USD_SCALE_DECIMALS = 18;
 const WALLET_LINK_CHALLENGE_TTL_MS = 5 * 60_000;
 const WALLET_LINK_REDEEM_LOCK_TTL_MS = 10_000;
-const walletLinkChallenges = new ChallengeStore({ ttlMs: WALLET_LINK_CHALLENGE_TTL_MS });
 const SOCIAL_LINK_CHALLENGE_TTL_MS = 5 * 60_000;
-const socialLinkChallenges = new ChallengeStore({ ttlMs: SOCIAL_LINK_CHALLENGE_TTL_MS });
 const OAUTH_LINK_CHALLENGE_TTL_MS = 5 * 60_000;
-const oauthLinkChallenges = new ChallengeStore({ ttlMs: OAUTH_LINK_CHALLENGE_TTL_MS });
+const initialUserLinkBackend = new MemoryBackend();
+let currentUserLinkBackend: StoreBackend | null = null;
+let walletLinkChallenges: ChallengeStore;
+let socialLinkChallenges: ChallengeStore;
+let oauthLinkChallenges: ChallengeStore;
+
+/** Bind account-link challenges to auth startup's selected durable backend. */
+export function initUserLinkChallengeStores(backend: StoreBackend): void {
+  const supersededBackend = currentUserLinkBackend;
+  currentUserLinkBackend = backend;
+  walletLinkChallenges = new ChallengeStore({
+    backend: new NamespacedStoreBackend(backend, "user-link-wallet"),
+    ttlMs: WALLET_LINK_CHALLENGE_TTL_MS,
+  });
+  socialLinkChallenges = new ChallengeStore({
+    backend: new NamespacedStoreBackend(backend, "user-link-social"),
+    ttlMs: SOCIAL_LINK_CHALLENGE_TTL_MS,
+  });
+  oauthLinkChallenges = new ChallengeStore({
+    backend: new NamespacedStoreBackend(backend, "user-link-oauth"),
+    ttlMs: OAUTH_LINK_CHALLENGE_TTL_MS,
+  });
+  if (supersededBackend instanceof MemoryBackend && supersededBackend !== backend) {
+    supersededBackend.destroy();
+  }
+}
+
+// Development and tests remain process-local until auth startup selects the
+// shared backend. Every entry is still bounded by the flow-specific TTL.
+initUserLinkChallengeStores(initialUserLinkBackend);
 const TELEGRAM_LINK_MAX_AGE_SEC = 24 * 60 * 60;
 const TENANT_ROLES = ["owner", "admin", "developer", "billing", "viewer", "member"] as const;
 type TenantRole = (typeof TENANT_ROLES)[number];

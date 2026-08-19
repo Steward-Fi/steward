@@ -25,6 +25,47 @@ export interface StoreBackend {
   delete(key: string): Promise<void>;
 }
 
+/**
+ * Adds a collision-safe logical namespace to every key sent to a shared
+ * backend. This lets related stores share one durable backend selection while
+ * preserving independent key spaces and atomic backend operations.
+ */
+export class NamespacedStoreBackend implements StoreBackend {
+  private readonly keyPrefix: string;
+
+  constructor(
+    private readonly backend: StoreBackend,
+    namespace: string,
+  ) {
+    if (namespace.length === 0) throw new Error("Store namespace must not be empty");
+    this.keyPrefix = `${namespace.length}:${namespace}:`;
+  }
+
+  private key(key: string): string {
+    return this.keyPrefix + key;
+  }
+
+  async set(key: string, value: string, ttlMs: number): Promise<void> {
+    await this.backend.set(this.key(key), value, ttlMs);
+  }
+
+  async setIfNotExists(key: string, value: string, ttlMs: number): Promise<boolean> {
+    return this.backend.setIfNotExists(this.key(key), value, ttlMs);
+  }
+
+  async get(key: string): Promise<string | null> {
+    return this.backend.get(this.key(key));
+  }
+
+  async consume(key: string): Promise<string | null> {
+    return this.backend.consume(this.key(key));
+  }
+
+  async delete(key: string): Promise<void> {
+    await this.backend.delete(this.key(key));
+  }
+}
+
 // ─── In-memory backend ─────────────────────────────────────────────────────
 
 interface MemoryEntry {

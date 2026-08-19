@@ -1346,6 +1346,9 @@ export async function initAuthStores(usePostgres = false): Promise<void> {
   });
   _importSessionBackend = importSessionBackend;
 
+  const { initUserLinkChallengeStores } = await import("./user.js");
+  initUserLinkChallengeStores(challengeBackend);
+
   // Reset singletons so they pick up the new stores on next use
   _passkeyAuth = null;
   _phoneAuth = null;
