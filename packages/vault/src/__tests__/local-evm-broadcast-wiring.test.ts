@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, setDefaultTimeout, test } from "bun:test";
-import { eq, evmWalletNonceInflight, getDb, tenants, transactions } from "@stwd/db";
+import { closeDb, eq, evmWalletNonceInflight, getDb, tenants, transactions } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { type Hex, keccak256 } from "viem";
 import { ExternalBroadcastOutcomeUnknownError } from "../external-key-custody";
@@ -10,7 +10,7 @@ setDefaultTimeout(30_000);
 const TENANT_ID = "local-broadcast-tenant";
 const AGENT_ID = "local-broadcast-agent";
 const CHAIN_ID = 84532;
-const openClients: Array<{ close: () => Promise<void> }> = [];
+const originalPgliteMemory = process.env.STEWARD_PGLITE_MEMORY;
 
 function jsonRpcResponse(id: number, result: unknown): Response {
   return Response.json({ jsonrpc: "2.0", id, result });
@@ -18,14 +18,14 @@ function jsonRpcResponse(id: number, result: unknown): Response {
 
 describe("local EVM broadcast wiring", () => {
   afterAll(async () => {
-    for (const client of openClients) await client.close().catch(() => {});
-    delete process.env.STEWARD_PGLITE_MEMORY;
+    await closeDb();
+    if (originalPgliteMemory === undefined) delete process.env.STEWARD_PGLITE_MEMORY;
+    else process.env.STEWARD_PGLITE_MEMORY = originalPgliteMemory;
   });
 
   test("public Vault signing checkpoints before one raw broadcast and retains an ambiguous nonce", async () => {
     process.env.STEWARD_PGLITE_MEMORY = "true";
     const { db, client } = await createPGLiteDb("memory://");
-    openClients.push(client);
     setPGLiteOverride(db as never, async () => client.close());
     await getDb().insert(tenants).values({
       id: TENANT_ID,
