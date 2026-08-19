@@ -64,6 +64,17 @@ function isPublicBrowserAuthMutation(path: string): boolean {
   );
 }
 
+function isAuthenticatedBrowserAuthMutation(path: string): boolean {
+  return (
+    path === "/auth/logout" ||
+    path === "/auth/sessions" ||
+    path === "/auth/guest" ||
+    path === "/auth/guest/upgrade" ||
+    path.startsWith("/auth/mfa/") ||
+    path.startsWith("/auth/passkey/register/")
+  );
+}
+
 function carriesMachineAuthority(request: Request): boolean {
   if (MACHINE_AUTHORITY_HEADERS.some((header) => request.headers.has(header))) return true;
   const authorization = request.headers.get("authorization");
@@ -79,9 +90,16 @@ function carriesMachineAuthority(request: Request): boolean {
 export function isBrowserSessionSignatureExempt(request: Request, path: string): Promise<boolean> {
   if (carriesMachineAuthority(request)) return Promise.resolve(false);
 
+  // These are unauthenticated browser bootstrap/exchange endpoints. An
+  // incidental Bearer header (for example, an SDK carrying a still-valid user
+  // session) must not turn the same public request into a machine-only request.
+  if (isPublicBrowserAuthMutation(path)) return Promise.resolve(true);
+
   const authorization = request.headers.get("authorization");
-  if (!authorization) return Promise.resolve(isPublicBrowserAuthMutation(path));
-  if (path !== "/user" && !path.startsWith("/user/")) return Promise.resolve(false);
+  if (!authorization) return Promise.resolve(false);
+  if (path !== "/user" && !path.startsWith("/user/") && !isAuthenticatedBrowserAuthMutation(path)) {
+    return Promise.resolve(false);
+  }
 
   const cached = browserSignatureExemptionByRequest.get(request);
   if (cached) return cached;
