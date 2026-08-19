@@ -619,8 +619,8 @@ export function buildTenantSecurityChecklist(
 ): TenantSecurityChecklist {
   const production = runtimeEnvironmentValue("NODE_ENV") === "production";
   // These mirror the mounted guards: invalid presented headers always fail,
-  // production requires both controls (subject to the documented freshness
-  // exception), and explicit REQUIRE settings enable them elsewhere.
+  // production requires both controls, and explicit REQUIRE settings enable
+  // them elsewhere.
   const { requestExpiryRequired, authorizationSignatureRequired: authSignatureRequired } =
     resolveRequestSecurityPosture();
   const signingSecrets = configuredRequestSigningSecrets();

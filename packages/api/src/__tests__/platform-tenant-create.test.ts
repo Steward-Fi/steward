@@ -1,7 +1,9 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
-import { agents, closeDb, getDb, refreshTokens, tenants, users } from "@stwd/db";
+import { agents, closeDb, getDb, refreshTokens, tenantConfigs, tenants, users } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
+import { KeyStore } from "@stwd/vault";
 import { eq } from "drizzle-orm";
+import { clearEmailAuthTenantCacheForTests, getEmailAuthForTenant } from "../routes/auth";
 
 const PLATFORM_KEY = "platform-tenant-create-key";
 const TENANT_ID = "platform-tenant-create-tenant";
@@ -184,6 +186,63 @@ describe("platform tenant creation", () => {
       .from(refreshTokens)
       .where(eq(refreshTokens.tenantId, tenantId));
     expect(remaining).toEqual([]);
+  });
+
+  it("evicts decrypted email configuration when a tenant is deleted", async () => {
+    const tenantId = `${TENANT_ID}-delete-email-cache`;
+    const keyStore = new KeyStore(process.env.STEWARD_MASTER_PASSWORD as string);
+    clearEmailAuthTenantCacheForTests();
+    await getDb()
+      .insert(tenants)
+      .values({
+        id: tenantId,
+        name: "Platform Tenant Cached Email",
+        apiKeyHash: `${tenantId}-hash`,
+      });
+    await getDb()
+      .insert(tenantConfigs)
+      .values({
+        tenantId,
+        emailConfig: {
+          provider: "resend",
+          apiKeyEncrypted: JSON.stringify(keyStore.encrypt("deleted-tenant-resend-key")),
+          from: "Deleted tenant <login@deleted.example.com>",
+        },
+      });
+    const deletedTenantAuth = await getEmailAuthForTenant(tenantId);
+    expect((deletedTenantAuth as any).from).toBe("Deleted tenant <login@deleted.example.com>");
+
+    const deleteResponse = await platformRoutes.request(`/tenants/${tenantId}`, {
+      method: "DELETE",
+      headers: { "X-Steward-Platform-Key": PLATFORM_KEY },
+    });
+    expect(deleteResponse.status).toBe(200);
+
+    await getDb()
+      .insert(tenants)
+      .values({
+        id: tenantId,
+        name: "Recreated Platform Tenant",
+        apiKeyHash: `${tenantId}-recreated-hash`,
+      });
+    await getDb()
+      .insert(tenantConfigs)
+      .values({
+        tenantId,
+        emailConfig: {
+          provider: "resend",
+          apiKeyEncrypted: JSON.stringify(keyStore.encrypt("recreated-tenant-resend-key")),
+          from: "Recreated tenant <login@recreated.example.com>",
+        },
+      });
+    const recreatedTenantAuth = await getEmailAuthForTenant(tenantId);
+    expect(recreatedTenantAuth).not.toBe(deletedTenantAuth);
+    expect((recreatedTenantAuth as any).from).toBe(
+      "Recreated tenant <login@recreated.example.com>",
+    );
+
+    await getDb().delete(tenants).where(eq(tenants.id, tenantId));
+    clearEmailAuthTenantCacheForTests();
   });
 
   it("rejects invalid batch applyPolicies before creating agents", async () => {

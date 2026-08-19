@@ -41,9 +41,7 @@ Sensitive mutating routes can validate request freshness with:
 
 The middleware validates these headers on sensitive mutating routes and requires
 one by default in production. Set `STEWARD_REQUIRE_REQUEST_EXPIRY=true` to
-force the requirement outside production, or set
-`STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true` only for controlled production
-exceptions.
+force the requirement outside production.
 
 Defaults:
 

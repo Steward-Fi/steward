@@ -1690,39 +1690,38 @@ const _emailAuthByTenant = new Map<string, Promise<EmailAuth>>();
 let _emailKeyStore: KeyStore | null = null;
 let _oauthKeyStore: KeyStore | null = null;
 
-function getEmailKeyStore(): KeyStore {
-  if (_emailKeyStore) return _emailKeyStore;
-
+function createConfiguredKeyStore(missingPasswordMessage: string): KeyStore {
   const masterPassword = runtimeEnvironmentValue("STEWARD_MASTER_PASSWORD");
   if (!masterPassword) {
     if (!isDevSecretAllowed()) {
-      throw new Error(
-        "STEWARD_MASTER_PASSWORD is required. For local development only, set STEWARD_ALLOW_DEV_SECRETS=true to use the insecure dev key.",
-      );
+      throw new Error(missingPasswordMessage);
     }
-    _emailKeyStore = new KeyStore("dev-secret");
-    return _emailKeyStore;
+    return new KeyStore("dev-secret");
   }
+  return new KeyStore(masterPassword);
+}
 
-  _emailKeyStore = new KeyStore(masterPassword);
+function getEmailKeyStore(): KeyStore {
+  if (currentRuntimeEnvironment() !== process.env) {
+    return createConfiguredKeyStore(
+      "STEWARD_MASTER_PASSWORD is required. For local development only, set STEWARD_ALLOW_DEV_SECRETS=true to use the insecure dev key.",
+    );
+  }
+  _emailKeyStore ??= createConfiguredKeyStore(
+    "STEWARD_MASTER_PASSWORD is required. For local development only, set STEWARD_ALLOW_DEV_SECRETS=true to use the insecure dev key.",
+  );
   return _emailKeyStore;
 }
 
 function getOAuthKeyStore(): KeyStore {
-  if (_oauthKeyStore) return _oauthKeyStore;
-
-  const masterPassword = runtimeEnvironmentValue("STEWARD_MASTER_PASSWORD");
-  if (!masterPassword) {
-    if (!isDevSecretAllowed()) {
-      throw new Error(
-        "STEWARD_MASTER_PASSWORD is required to encrypt OAuth provider tokens. For local development only, set STEWARD_ALLOW_DEV_SECRETS=true to use the insecure dev key.",
-      );
-    }
-    _oauthKeyStore = new KeyStore("dev-secret");
-    return _oauthKeyStore;
+  if (currentRuntimeEnvironment() !== process.env) {
+    return createConfiguredKeyStore(
+      "STEWARD_MASTER_PASSWORD is required to encrypt OAuth provider tokens. For local development only, set STEWARD_ALLOW_DEV_SECRETS=true to use the insecure dev key.",
+    );
   }
-
-  _oauthKeyStore = new KeyStore(masterPassword);
+  _oauthKeyStore ??= createConfiguredKeyStore(
+    "STEWARD_MASTER_PASSWORD is required to encrypt OAuth provider tokens. For local development only, set STEWARD_ALLOW_DEV_SECRETS=true to use the insecure dev key.",
+  );
   return _oauthKeyStore;
 }
 
@@ -2045,6 +2044,7 @@ export function invalidateEmailAuthForTenant(tenantId: string): void {
 
 export function clearEmailAuthTenantCacheForTests(): void {
   _emailAuthByTenant.clear();
+  _emailKeyStore = null;
 }
 
 export function clearOAuthTokenKeyStoreForTests(): void {

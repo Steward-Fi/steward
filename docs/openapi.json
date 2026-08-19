@@ -422,7 +422,7 @@
           "sensitive": true,
           "sensitivePrefix": "/auth",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -728,7 +728,7 @@
           "sensitive": true,
           "sensitivePrefix": "/auth",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -1047,7 +1047,7 @@
           "sensitive": true,
           "sensitivePrefix": "/auth",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -1364,7 +1364,7 @@
           "sensitive": true,
           "sensitivePrefix": "/auth",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -1667,7 +1667,7 @@
           "sensitive": true,
           "sensitivePrefix": "/auth",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -1991,7 +1991,7 @@
           "sensitive": true,
           "sensitivePrefix": "/auth",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -2292,7 +2292,7 @@
           "sensitive": true,
           "sensitivePrefix": "/auth",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -2597,7 +2597,7 @@
           "sensitive": true,
           "sensitivePrefix": "/auth",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -2902,7 +2902,7 @@
           "sensitive": true,
           "sensitivePrefix": "/auth",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -3207,7 +3207,7 @@
           "sensitive": true,
           "sensitivePrefix": "/auth",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -3505,7 +3505,7 @@
           "sensitive": true,
           "sensitivePrefix": "/auth",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -3774,7 +3774,7 @@
           "sensitive": true,
           "sensitivePrefix": "/auth",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -4086,7 +4086,7 @@
           "sensitive": true,
           "sensitivePrefix": "/auth",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -4398,7 +4398,7 @@
           "sensitive": true,
           "sensitivePrefix": "/auth",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -4664,7 +4664,7 @@
           "sensitive": true,
           "sensitivePrefix": "/auth",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -4964,7 +4964,7 @@
           "sensitive": true,
           "sensitivePrefix": "/auth",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -5229,7 +5229,7 @@
           "sensitive": true,
           "sensitivePrefix": "/auth",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -5623,7 +5623,7 @@
           "sensitive": true,
           "sensitivePrefix": "/v2/provider-actions",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -6078,7 +6078,7 @@
           "sensitive": true,
           "sensitivePrefix": "/v2/workspaces",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -6387,7 +6387,7 @@
           "sensitive": true,
           "sensitivePrefix": "/v2/workspaces",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -6851,7 +6851,7 @@
           "sensitive": true,
           "sensitivePrefix": "/v2/provider-accounts",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -7160,7 +7160,7 @@
           "sensitive": true,
           "sensitivePrefix": "/v2/provider-accounts",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -7634,7 +7634,7 @@
           "sensitive": true,
           "sensitivePrefix": "/v2/provider-accounts",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -8098,7 +8098,7 @@
           "sensitive": true,
           "sensitivePrefix": "/v2/provider-role-bindings",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -8407,7 +8407,7 @@
           "sensitive": true,
           "sensitivePrefix": "/v2/provider-role-bindings",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -8871,7 +8871,7 @@
           "sensitive": true,
           "sensitivePrefix": "/v2/provider-grants",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -9180,7 +9180,7 @@
           "sensitive": true,
           "sensitivePrefix": "/v2/provider-grants",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -10120,7 +10120,7 @@
           "sensitive": true,
           "sensitivePrefix": "/v2/provider-actions",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -10413,7 +10413,7 @@
           "sensitive": true,
           "sensitivePrefix": "/v2/provider-actions",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -12531,7 +12531,7 @@
           "sensitive": true,
           "sensitivePrefix": "/accounts",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -13705,7 +13705,7 @@
           "sensitive": true,
           "sensitivePrefix": "/accounts",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -13960,7 +13960,7 @@
           "sensitive": true,
           "sensitivePrefix": "/accounts",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -15128,7 +15128,7 @@
           "sensitive": true,
           "sensitivePrefix": "/accounts",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -15643,7 +15643,7 @@
           "sensitive": true,
           "sensitivePrefix": "/accounts",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -16815,7 +16815,7 @@
           "sensitive": true,
           "sensitivePrefix": "/v1/accounts",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -17989,7 +17989,7 @@
           "sensitive": true,
           "sensitivePrefix": "/v1/accounts",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -18244,7 +18244,7 @@
           "sensitive": true,
           "sensitivePrefix": "/v1/accounts",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -19412,7 +19412,7 @@
           "sensitive": true,
           "sensitivePrefix": "/v1/accounts",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -19927,7 +19927,7 @@
           "sensitive": true,
           "sensitivePrefix": "/v1/accounts",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -20474,7 +20474,7 @@
           "sensitive": true,
           "sensitivePrefix": "/policies",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -20873,7 +20873,7 @@
           "sensitive": true,
           "sensitivePrefix": "/policies",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -21401,7 +21401,7 @@
           "sensitive": true,
           "sensitivePrefix": "/policies",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -21653,7 +21653,7 @@
           "sensitive": true,
           "sensitivePrefix": "/policies",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -21954,7 +21954,7 @@
           "sensitive": true,
           "sensitivePrefix": "/policies",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -22501,7 +22501,7 @@
           "sensitive": true,
           "sensitivePrefix": "/v1/policies",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -22900,7 +22900,7 @@
           "sensitive": true,
           "sensitivePrefix": "/v1/policies",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -23428,7 +23428,7 @@
           "sensitive": true,
           "sensitivePrefix": "/v1/policies",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -23680,7 +23680,7 @@
           "sensitive": true,
           "sensitivePrefix": "/v1/policies",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -23981,7 +23981,7 @@
           "sensitive": true,
           "sensitivePrefix": "/v1/policies",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -24543,7 +24543,7 @@
           "sensitive": true,
           "sensitivePrefix": "/condition-sets",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -25071,7 +25071,7 @@
           "sensitive": true,
           "sensitivePrefix": "/condition-sets",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -25319,7 +25319,7 @@
           "sensitive": true,
           "sensitivePrefix": "/condition-sets",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -25881,7 +25881,7 @@
           "sensitive": true,
           "sensitivePrefix": "/condition-sets",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -26212,7 +26212,7 @@
           "sensitive": true,
           "sensitivePrefix": "/condition-sets",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -26739,7 +26739,7 @@
           "sensitive": true,
           "sensitivePrefix": "/condition-sets",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -26987,7 +26987,7 @@
           "sensitive": true,
           "sensitivePrefix": "/condition-sets",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -27549,7 +27549,7 @@
           "sensitive": true,
           "sensitivePrefix": "/v1/condition-sets",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -28077,7 +28077,7 @@
           "sensitive": true,
           "sensitivePrefix": "/v1/condition-sets",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -28325,7 +28325,7 @@
           "sensitive": true,
           "sensitivePrefix": "/v1/condition-sets",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -28887,7 +28887,7 @@
           "sensitive": true,
           "sensitivePrefix": "/v1/condition-sets",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -29218,7 +29218,7 @@
           "sensitive": true,
           "sensitivePrefix": "/v1/condition-sets",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -29745,7 +29745,7 @@
           "sensitive": true,
           "sensitivePrefix": "/v1/condition-sets",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -29993,7 +29993,7 @@
           "sensitive": true,
           "sensitivePrefix": "/v1/condition-sets",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -30915,7 +30915,7 @@
           "sensitive": true,
           "sensitivePrefix": "/agents",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -31403,7 +31403,7 @@
           "sensitive": true,
           "sensitivePrefix": "/agents",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -31774,7 +31774,7 @@
           "sensitive": true,
           "sensitivePrefix": "/agents",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -32409,7 +32409,7 @@
           "sensitive": true,
           "sensitivePrefix": "/agents",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -32801,7 +32801,7 @@
           "sensitive": true,
           "sensitivePrefix": "/agents",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -33124,7 +33124,7 @@
           "sensitive": true,
           "sensitivePrefix": "/agents",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -34046,7 +34046,7 @@
           "sensitive": true,
           "sensitivePrefix": "/v1/agents",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -34534,7 +34534,7 @@
           "sensitive": true,
           "sensitivePrefix": "/v1/agents",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -34905,7 +34905,7 @@
           "sensitive": true,
           "sensitivePrefix": "/v1/agents",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -35540,7 +35540,7 @@
           "sensitive": true,
           "sensitivePrefix": "/v1/agents",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -35932,7 +35932,7 @@
           "sensitive": true,
           "sensitivePrefix": "/v1/agents",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -36255,7 +36255,7 @@
           "sensitive": true,
           "sensitivePrefix": "/v1/agents",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -37345,7 +37345,7 @@
           "sensitive": true,
           "sensitivePrefix": "/intents",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -38203,7 +38203,7 @@
           "sensitive": true,
           "sensitivePrefix": "/intents",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -38693,7 +38693,7 @@
           "sensitive": true,
           "sensitivePrefix": "/intents",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -39182,7 +39182,7 @@
           "sensitive": true,
           "sensitivePrefix": "/intents",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -39671,7 +39671,7 @@
           "sensitive": true,
           "sensitivePrefix": "/intents",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -40160,7 +40160,7 @@
           "sensitive": true,
           "sensitivePrefix": "/intents",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -40649,7 +40649,7 @@
           "sensitive": true,
           "sensitivePrefix": "/intents",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -41138,7 +41138,7 @@
           "sensitive": true,
           "sensitivePrefix": "/intents",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -45602,7 +45602,7 @@
           "sensitive": true,
           "sensitivePrefix": "/user",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -45931,7 +45931,7 @@
           "sensitive": true,
           "sensitivePrefix": "/user",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -46698,7 +46698,7 @@
           "sensitive": true,
           "sensitivePrefix": "/user",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -47102,7 +47102,7 @@
           "sensitive": true,
           "sensitivePrefix": "/user",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -48948,7 +48948,7 @@
           "sensitive": true,
           "sensitivePrefix": "/wallets/batch",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -49327,7 +49327,7 @@
           "sensitive": true,
           "sensitivePrefix": "/v1/wallets/batch",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -49909,7 +49909,7 @@
           "sensitive": true,
           "sensitivePrefix": "/adapters",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -50324,7 +50324,7 @@
           "sensitive": true,
           "sensitivePrefix": "/adapters",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -51096,7 +51096,7 @@
           "sensitive": true,
           "sensitivePrefix": "/adapters",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -51431,7 +51431,7 @@
           "sensitive": true,
           "sensitivePrefix": "/adapters",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -51901,7 +51901,7 @@
           "sensitive": true,
           "sensitivePrefix": "/adapters",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -52473,7 +52473,7 @@
           "sensitive": true,
           "sensitivePrefix": "/adapters",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -52938,7 +52938,7 @@
           "sensitive": true,
           "sensitivePrefix": "/adapters",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -53497,7 +53497,7 @@
           "sensitive": true,
           "sensitivePrefix": "/adapters",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -54264,7 +54264,7 @@
           "sensitive": true,
           "sensitivePrefix": "/adapters",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -54599,7 +54599,7 @@
           "sensitive": true,
           "sensitivePrefix": "/adapters",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -54931,7 +54931,7 @@
           "sensitive": true,
           "sensitivePrefix": "/adapters",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -55485,7 +55485,7 @@
           "sensitive": true,
           "sensitivePrefix": "/adapters",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -55827,7 +55827,7 @@
           "sensitive": true,
           "sensitivePrefix": "/adapters",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -56173,7 +56173,7 @@
           "sensitive": true,
           "sensitivePrefix": "/adapters",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -56453,7 +56453,7 @@
           "sensitive": true,
           "sensitivePrefix": "/adapters",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -56790,7 +56790,7 @@
           "sensitive": true,
           "sensitivePrefix": "/adapters",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -57494,7 +57494,7 @@
           "sensitive": true,
           "sensitivePrefix": "/adapters",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -58076,7 +58076,7 @@
           "sensitive": true,
           "sensitivePrefix": "/v1/adapters",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -58491,7 +58491,7 @@
           "sensitive": true,
           "sensitivePrefix": "/v1/adapters",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -59263,7 +59263,7 @@
           "sensitive": true,
           "sensitivePrefix": "/v1/adapters",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -59598,7 +59598,7 @@
           "sensitive": true,
           "sensitivePrefix": "/v1/adapters",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -60068,7 +60068,7 @@
           "sensitive": true,
           "sensitivePrefix": "/v1/adapters",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -60640,7 +60640,7 @@
           "sensitive": true,
           "sensitivePrefix": "/v1/adapters",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -61105,7 +61105,7 @@
           "sensitive": true,
           "sensitivePrefix": "/v1/adapters",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -61664,7 +61664,7 @@
           "sensitive": true,
           "sensitivePrefix": "/v1/adapters",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -62431,7 +62431,7 @@
           "sensitive": true,
           "sensitivePrefix": "/v1/adapters",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -62766,7 +62766,7 @@
           "sensitive": true,
           "sensitivePrefix": "/v1/adapters",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -63098,7 +63098,7 @@
           "sensitive": true,
           "sensitivePrefix": "/v1/adapters",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -63652,7 +63652,7 @@
           "sensitive": true,
           "sensitivePrefix": "/v1/adapters",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -63994,7 +63994,7 @@
           "sensitive": true,
           "sensitivePrefix": "/v1/adapters",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -64340,7 +64340,7 @@
           "sensitive": true,
           "sensitivePrefix": "/v1/adapters",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -64620,7 +64620,7 @@
           "sensitive": true,
           "sensitivePrefix": "/v1/adapters",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -64957,7 +64957,7 @@
           "sensitive": true,
           "sensitivePrefix": "/v1/adapters",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -65661,7 +65661,7 @@
           "sensitive": true,
           "sensitivePrefix": "/v1/adapters",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -66298,7 +66298,7 @@
           "sensitive": true,
           "sensitivePrefix": "/v1/users",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -66647,7 +66647,7 @@
           "sensitive": true,
           "sensitivePrefix": "/v1/users",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -67213,7 +67213,7 @@
           "sensitive": true,
           "sensitivePrefix": "/v1/users",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -67547,7 +67547,7 @@
           "sensitive": true,
           "sensitivePrefix": "/v1/users",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -67903,7 +67903,7 @@
           "sensitive": true,
           "sensitivePrefix": "/v1/users",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -68489,7 +68489,7 @@
           "sensitive": true,
           "sensitivePrefix": "/v1/users",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -70168,7 +70168,7 @@
           "sensitive": true,
           "sensitivePrefix": "/audit",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -70894,7 +70894,7 @@
           "sensitive": true,
           "sensitivePrefix": "/secrets",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -71586,7 +71586,7 @@
           "sensitive": true,
           "sensitivePrefix": "/secrets",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -72017,7 +72017,7 @@
           "sensitive": true,
           "sensitivePrefix": "/secrets",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -72270,7 +72270,7 @@
           "sensitive": true,
           "sensitivePrefix": "/secrets",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -72789,7 +72789,7 @@
           "sensitive": true,
           "sensitivePrefix": "/secrets",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -73042,7 +73042,7 @@
           "sensitive": true,
           "sensitivePrefix": "/secrets",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -73365,7 +73365,7 @@
           "sensitive": true,
           "sensitivePrefix": "/secrets",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -73994,7 +73994,7 @@
           "sensitive": true,
           "sensitivePrefix": "/webhooks",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -74392,7 +74392,7 @@
           "sensitive": true,
           "sensitivePrefix": "/webhooks",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -74649,7 +74649,7 @@
           "sensitive": true,
           "sensitivePrefix": "/webhooks",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -74923,7 +74923,7 @@
           "sensitive": true,
           "sensitivePrefix": "/webhooks",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -75821,7 +75821,7 @@
           "sensitive": true,
           "sensitivePrefix": "/webhooks",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -76142,7 +76142,7 @@
           "sensitive": true,
           "sensitivePrefix": "/webhooks",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -76980,7 +76980,7 @@
           "sensitive": true,
           "sensitivePrefix": "/approvals",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -77340,7 +77340,7 @@
           "sensitive": true,
           "sensitivePrefix": "/approvals",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -77934,7 +77934,7 @@
           "sensitive": true,
           "sensitivePrefix": "/approvals",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -78806,7 +78806,7 @@
           "sensitive": true,
           "sensitivePrefix": "/global-wallet",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -79447,7 +79447,7 @@
           "sensitive": true,
           "sensitivePrefix": "/global-wallet",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -79796,7 +79796,7 @@
           "sensitive": true,
           "sensitivePrefix": "/global-wallet",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -80215,7 +80215,7 @@
           "sensitive": true,
           "sensitivePrefix": "/global-wallet",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -80532,7 +80532,7 @@
           "sensitive": true,
           "sensitivePrefix": "/global-wallet",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -81050,7 +81050,7 @@
           "sensitive": true,
           "sensitivePrefix": "/trade",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -81594,7 +81594,7 @@
           "sensitive": true,
           "sensitivePrefix": "/trade",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -82026,7 +82026,7 @@
           "sensitive": true,
           "sensitivePrefix": "/trade",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -82371,7 +82371,7 @@
           "sensitive": true,
           "sensitivePrefix": "/trade",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -82700,7 +82700,7 @@
           "sensitive": true,
           "sensitivePrefix": "/trade",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -83099,7 +83099,7 @@
           "sensitive": true,
           "sensitivePrefix": "/trade",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -83435,7 +83435,7 @@
           "sensitive": true,
           "sensitivePrefix": "/trade",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -83773,7 +83773,7 @@
           "sensitive": true,
           "sensitivePrefix": "/trade",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -84126,7 +84126,7 @@
           "sensitive": true,
           "sensitivePrefix": "/trade",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -84644,7 +84644,7 @@
           "sensitive": true,
           "sensitivePrefix": "/v1/trade",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -85188,7 +85188,7 @@
           "sensitive": true,
           "sensitivePrefix": "/v1/trade",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -85620,7 +85620,7 @@
           "sensitive": true,
           "sensitivePrefix": "/v1/trade",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -85965,7 +85965,7 @@
           "sensitive": true,
           "sensitivePrefix": "/v1/trade",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -86294,7 +86294,7 @@
           "sensitive": true,
           "sensitivePrefix": "/v1/trade",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -86693,7 +86693,7 @@
           "sensitive": true,
           "sensitivePrefix": "/v1/trade",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -87029,7 +87029,7 @@
           "sensitive": true,
           "sensitivePrefix": "/v1/trade",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -87367,7 +87367,7 @@
           "sensitive": true,
           "sensitivePrefix": "/v1/trade",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -87720,7 +87720,7 @@
           "sensitive": true,
           "sensitivePrefix": "/v1/trade",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -88647,7 +88647,7 @@
           "sensitive": true,
           "sensitivePrefix": "/tenants",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -89137,7 +89137,7 @@
           "sensitive": true,
           "sensitivePrefix": "/tenants",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -89586,7 +89586,7 @@
           "sensitive": true,
           "sensitivePrefix": "/tenants",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -90695,7 +90695,7 @@
           "sensitive": true,
           "sensitivePrefix": "/tenants",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -91024,7 +91024,7 @@
           "sensitive": true,
           "sensitivePrefix": "/tenants",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -91575,7 +91575,7 @@
           "sensitive": true,
           "sensitivePrefix": "/platform",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -91887,7 +91887,7 @@
           "sensitive": true,
           "sensitivePrefix": "/platform",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -92135,7 +92135,7 @@
           "sensitive": true,
           "sensitivePrefix": "/platform",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -92816,7 +92816,7 @@
           "sensitive": true,
           "sensitivePrefix": "/platform",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -93084,7 +93084,7 @@
           "sensitive": true,
           "sensitivePrefix": "/platform",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -93422,7 +93422,7 @@
           "sensitive": true,
           "sensitivePrefix": "/platform",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -94121,7 +94121,7 @@
           "sensitive": true,
           "sensitivePrefix": "/platform",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -94431,7 +94431,7 @@
           "sensitive": true,
           "sensitivePrefix": "/platform",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -94823,7 +94823,7 @@
           "sensitive": true,
           "sensitivePrefix": "/platform",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -95383,7 +95383,7 @@
           "sensitive": true,
           "sensitivePrefix": "/platform",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -96190,7 +96190,7 @@
           "sensitive": true,
           "sensitivePrefix": "/user",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -96727,7 +96727,7 @@
           "sensitive": true,
           "sensitivePrefix": "/vault",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -97045,7 +97045,7 @@
           "sensitive": true,
           "sensitivePrefix": "/vault",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -97547,7 +97547,7 @@
           "sensitive": true,
           "sensitivePrefix": "/vault",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -98059,7 +98059,7 @@
           "sensitive": true,
           "sensitivePrefix": "/vault",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -98691,7 +98691,7 @@
           "sensitive": true,
           "sensitivePrefix": "/vault",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -99198,7 +99198,7 @@
           "sensitive": true,
           "sensitivePrefix": "/vault",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -99808,7 +99808,7 @@
           "sensitive": true,
           "sensitivePrefix": "/vault",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
@@ -100380,7 +100380,7 @@
           "sensitive": true,
           "sensitivePrefix": "/vault",
           "requestExpiry": {
-            "requiredWhen": "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "requiredWhen": "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"

@@ -34,7 +34,6 @@ const ORIGINAL_ENV = {
   REDIS_URL: process.env.REDIS_URL,
   STEWARD_EMAIL_CODE_SECRET: process.env.STEWARD_EMAIL_CODE_SECRET,
   STEWARD_ALLOW_AUTH_RATE_LIMIT_SOFT_FAIL: process.env.STEWARD_ALLOW_AUTH_RATE_LIMIT_SOFT_FAIL,
-  STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS: process.env.STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS,
   STEWARD_REQUIRE_REQUEST_EXPIRY: process.env.STEWARD_REQUIRE_REQUEST_EXPIRY,
   STEWARD_REQUEST_SIGNING_SECRET: process.env.STEWARD_REQUEST_SIGNING_SECRET,
   STEWARD_REQUEST_SIGNING_SECRETS: process.env.STEWARD_REQUEST_SIGNING_SECRETS,
@@ -64,10 +63,6 @@ describe("fail-closed email delivery routes (production)", () => {
     process.env.APP_URL = "https://app.example.com";
     process.env.STEWARD_EMAIL_CODE_SECRET = "route-fail-closed-email-code-secret";
     process.env.STEWARD_ALLOW_AUTH_RATE_LIMIT_SOFT_FAIL = "true";
-    // This suite owns provider-delivery behavior, not the independently tested
-    // request-expiry guard. Keep the production exception explicit and prove
-    // below that removing it restores the fail-closed boundary.
-    process.env.STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS = "true";
     process.env.STEWARD_REQUEST_SIGNING_SECRET = REQUEST_SIGNING_SECRET;
     delete process.env.STEWARD_REQUEST_SIGNING_SECRETS;
     process.env.STEWARD_PGLITE_MEMORY = "true";
@@ -143,25 +138,18 @@ describe("fail-closed email delivery routes (production)", () => {
     });
   }
 
-  it("keeps production request-expiry enforcement outside the scoped fixture exception", async () => {
-    delete process.env.STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS;
-    process.env.STEWARD_REQUIRE_REQUEST_EXPIRY = "true";
-    try {
-      const response = await postJson(
-        "/auth/email/send",
-        { email: "user@example.com" },
-        undefined,
-        false,
-      );
-      expect(response.status).toBe(400);
-      expect(await response.json()).toEqual({
-        ok: false,
-        error: "Request expiry header required",
-      });
-    } finally {
-      delete process.env.STEWARD_REQUIRE_REQUEST_EXPIRY;
-      process.env.STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS = "true";
-    }
+  it("keeps production request-expiry enforcement load-bearing", async () => {
+    const response = await postJson(
+      "/auth/email/send",
+      { email: "user@example.com" },
+      undefined,
+      false,
+    );
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({
+      ok: false,
+      error: "Request expiry header required",
+    });
   });
 
   it("returns 503 (not a false ok:true) when no global provider is configured", async () => {

@@ -1948,6 +1948,7 @@ platform.delete("/tenants/:id", async (c) => {
     await tx.delete(proxyAuditLog).where(eq(proxyAuditLog.tenantId, tenantId));
     await tx.delete(tenants).where(eq(tenants.id, tenantId));
   });
+  invalidateEmailAuthForTenant(tenantId);
 
   return c.json<ApiResponse>({ ok: true });
 });

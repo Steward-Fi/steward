@@ -147,18 +147,13 @@ describe("requestExpiry", () => {
     expect(nonSensitive.status).toBe(200);
   });
 
-  it("fails closed in production unless the stale-request exception is explicit", async () => {
+  it("fails closed in production even without an explicit requirement", async () => {
     const app = makeDefaultApp();
 
     const denied = await withRuntimeEnvironment({ NODE_ENV: "production" }, () =>
       app.request("/vault/agent-1/sign", { method: "POST" }),
     );
-    const explicitlyAllowed = await withRuntimeEnvironment(
-      { NODE_ENV: "production", STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS: "true" },
-      () => app.request("/vault/agent-1/sign", { method: "POST" }),
-    );
 
     expect(denied.status).toBe(400);
-    expect(explicitlyAllowed.status).toBe(200);
   });
 });

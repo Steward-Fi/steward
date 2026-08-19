@@ -6356,8 +6356,7 @@ function addHardeningInventory(spec: OpenApiSpec): OpenApiSpec {
         requestExpiry: {
           // Mounted globally (app.ts): freshness headers are always validated
           // when present and are required by the resolved security posture.
-          requiredWhen:
-            "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+          requiredWhen: "NODE_ENV=production or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
           acceptedHeaders: ["X-Steward-Request-Timestamp", "X-Steward-Request-Expires-At"],
         },
         authorizationSignature: {

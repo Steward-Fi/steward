@@ -122,6 +122,59 @@ describe("getEmailAuthForTenant", () => {
     }
   });
 
+  it("uses the current Worker master password for encrypted tenant providers", async () => {
+    clearEmailAuthTenantCacheForTests();
+    const dbHandle = getDb();
+    const secondMasterPassword = "tenant-email-config-second-master-password";
+    const firstEncrypted = new KeyStore(MASTER_PASSWORD).encrypt("first-tenant-resend-key");
+    await dbHandle.delete(tenantConfigs).where(eq(tenantConfigs.tenantId, TEST_TENANT_ID));
+    await dbHandle.insert(tenantConfigs).values({
+      tenantId: TEST_TENANT_ID,
+      emailConfig: {
+        provider: "resend",
+        apiKeyEncrypted: JSON.stringify(firstEncrypted),
+        from: "First tenant <login@first-tenant.example.com>",
+      },
+    });
+
+    const first = await withRuntimeEnvironment(
+      {
+        NODE_ENV: "production",
+        STEWARD_MASTER_PASSWORD: MASTER_PASSWORD,
+        STEWARD_EMAIL_CODE_SECRET: "first-tenant-code-secret-at-least-32-bytes",
+        APP_URL: "https://first-tenant.example.com",
+      },
+      () => getEmailAuthForTenant(TEST_TENANT_ID),
+    );
+    expect((first as any).from).toBe("First tenant <login@first-tenant.example.com>");
+
+    const secondEncrypted = new KeyStore(secondMasterPassword).encrypt("second-tenant-resend-key");
+    await dbHandle
+      .update(tenantConfigs)
+      .set({
+        emailConfig: {
+          provider: "resend",
+          apiKeyEncrypted: JSON.stringify(secondEncrypted),
+          from: "Second tenant <login@second-tenant.example.com>",
+        },
+      })
+      .where(eq(tenantConfigs.tenantId, TEST_TENANT_ID));
+
+    const second = await withRuntimeEnvironment(
+      {
+        NODE_ENV: "production",
+        STEWARD_MASTER_PASSWORD: secondMasterPassword,
+        STEWARD_EMAIL_CODE_SECRET: "second-tenant-code-secret-at-least-32-bytes",
+        APP_URL: "https://second-tenant.example.com",
+      },
+      () => getEmailAuthForTenant(TEST_TENANT_ID),
+    );
+    expect((second as any).from).toBe("Second tenant <login@second-tenant.example.com>");
+
+    await dbHandle.delete(tenantConfigs).where(eq(tenantConfigs.tenantId, TEST_TENANT_ID));
+    clearEmailAuthTenantCacheForTests();
+  });
+
   it("uses the tenant-specific config when emailConfig is set", async () => {
     clearEmailAuthTenantCacheForTests();
 

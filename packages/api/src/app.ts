@@ -151,9 +151,8 @@ export function createApp(): Hono<{ Variables: AppVariables }> {
   // verified on every sensitive mutating route (they were unmounted dead code
   // while /openapi.json and the tenant security checklist claimed enforcement).
   // Presented freshness and signature headers always fail closed when invalid.
-  // Production also requires freshness (unless the documented stale-request
-  // exception is enabled) and authorization signatures; explicit REQUIRE
-  // settings enable the same posture outside production. Mounted here so both
+  // Production also requires freshness and authorization signatures; explicit
+  // REQUIRE settings enable the same posture outside production. Mounted here so both
   // guards always run before idempotency middleware.
   // Resolve binding-backed strictness and signing secrets per request so a
   // long-lived Worker isolate cannot retain a revoked deployment setting.
