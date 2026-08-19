@@ -114,13 +114,11 @@ describe("request-scoped database context", () => {
     const release = deferred();
     let detachedFinished = false;
     const owner = withRequestDatabase(requestDb, async () => {
-      void waitUntilRequestDatabaseTask(
-        (async () => {
-          await release.promise;
-          expect(getDb()).not.toBe(requestDb);
-          detachedFinished = true;
-        })(),
-      );
+      void waitUntilRequestDatabaseTask(async () => {
+        await release.promise;
+        expect(getDb()).not.toBe(requestDb);
+        detachedFinished = true;
+      });
       return "response";
     });
 
@@ -136,13 +134,11 @@ describe("request-scoped database context", () => {
     const release = deferred();
     let detachedFinished = false;
     const owner = withRequestDatabase(requestDb, async () => {
-      void waitUntilRequestDatabaseTask(
-        (async () => {
-          await release.promise;
-          expect((getDb() as unknown as { marker: string }).marker).toBe("request");
-          detachedFinished = true;
-        })(),
-      );
+      void waitUntilRequestDatabaseTask(async () => {
+        await release.promise;
+        expect((getDb() as unknown as { marker: string }).marker).toBe("request");
+        detachedFinished = true;
+      });
       throw new Error("owner failed");
     });
 
@@ -150,5 +146,27 @@ describe("request-scoped database context", () => {
     release.resolve();
     await expect(owner).rejects.toThrow("owner failed");
     expect(detachedFinished).toBe(true);
+  });
+
+  test("does not let unregistered work piggyback on a registered task lifetime", async () => {
+    const requestDb = { marker: "request" } as unknown as ReturnType<typeof getDb>;
+    const release = deferred();
+    let registered!: Promise<void>;
+    let unregistered!: Promise<void>;
+
+    const owner = withRequestDatabase(requestDb, async () => {
+      registered = waitUntilRequestDatabaseTask(async () => {
+        await release.promise;
+        expect((getDb() as unknown as { marker: string }).marker).toBe("request");
+      });
+      unregistered = (async () => {
+        await release.promise;
+        expect(() => getDb()).toThrow("REQUEST_DATABASE_CONTEXT_CLOSED");
+      })();
+    });
+
+    await Promise.resolve();
+    release.resolve();
+    await Promise.all([owner, registered, unregistered]);
   });
 });

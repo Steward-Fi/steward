@@ -56,7 +56,7 @@ export function dispatchWebhook(
   // its reads/writes finish before the WebSocket pool is closed. Bun keeps its
   // existing process-owned fire-and-forget behavior when no request lease is
   // active.
-  void waitUntilRequestDatabaseTask(
+  void waitUntilRequestDatabaseTask(() =>
     dispatchConfiguredWebhooks(event, configuredType, isPluginEvent ? type : null).catch(
       (error) => {
         console.error(

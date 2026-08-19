@@ -143,13 +143,11 @@ test("Worker drains fire-and-forget webhook work before closing its request pool
     async () => {
       // dispatchWebhook uses this same request-lifetime hook for its intentionally
       // unawaited configured delivery fan-out.
-      void waitUntilRequestDatabaseTask(
-        (async () => {
-          await deliveryGate;
-          expect((getDb() as unknown as { marker: string }).marker).toBe("worker-webhook");
-          deliveryFinished = true;
-        })(),
-      );
+      void waitUntilRequestDatabaseTask(async () => {
+        await deliveryGate;
+        expect((getDb() as unknown as { marker: string }).marker).toBe("worker-webhook");
+        deliveryFinished = true;
+      });
       return new Response("accepted");
     },
     {

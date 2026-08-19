@@ -478,6 +478,7 @@ export function setPGLiteOverride(
 
 type RequestDatabase = ReturnType<typeof createDb>["db"];
 interface RequestDatabaseContext {
+  sourceDb: RequestDatabase;
   db: RequestDatabase | undefined;
   active: boolean;
   pendingTasks: Set<Promise<unknown>>;
@@ -515,9 +516,27 @@ function trackRequestDatabaseTask<T>(
  * a request-owned database context this is a no-op, preserving Bun's existing
  * process-owned background-work behavior.
  */
-export function waitUntilRequestDatabaseTask<T>(task: Promise<T>): Promise<T> {
+export function waitUntilRequestDatabaseTask<T>(task: () => Promise<T>): Promise<T> {
   const context = requestDatabaseStorage.getStore();
-  return context ? trackRequestDatabaseTask(context, task) : task;
+  if (!context) return task();
+  assertRequestDatabaseContextActive(context);
+
+  const backgroundContext: RequestDatabaseContext = {
+    sourceDb: context.sourceDb,
+    db: undefined,
+    active: true,
+    pendingTasks: context.pendingTasks,
+    guardedObjects: new WeakMap(),
+  };
+  backgroundContext.db = guardRequestDatabaseValue(backgroundContext.sourceDb, backgroundContext);
+  const promise = requestDatabaseStorage.run(backgroundContext, task);
+  const tracked = trackRequestDatabaseTask(context, promise);
+  const revokeBackgroundContext = () => {
+    backgroundContext.active = false;
+    backgroundContext.db = undefined;
+  };
+  void promise.then(revokeBackgroundContext, revokeBackgroundContext);
+  return tracked;
 }
 
 /**
@@ -588,6 +607,7 @@ export async function withRequestDatabase<T>(
     throw new Error("REQUEST_DATABASE_CONTEXT_NESTED");
   }
   const context: RequestDatabaseContext = {
+    sourceDb: db,
     db: undefined,
     active: true,
     pendingTasks: new Set(),
@@ -604,9 +624,10 @@ export async function withRequestDatabase<T>(
       } catch (error) {
         callbackError = error;
       }
-      // Registered work owns this same capability even when the route fails.
-      // Drain it before revocation so the error path cannot close the pool under
-      // a webhook/audit write that the handler started before throwing.
+      // Revoke the owner immediately. Registered work runs in isolated child
+      // contexts; unregistered detached work retains this closed owner context.
+      context.active = false;
+      context.db = undefined;
       await drainRequestDatabaseTasks(context);
       if (callbackError !== noCallbackError) throw callbackError;
       return result as T;
