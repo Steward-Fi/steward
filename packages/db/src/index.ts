@@ -51,11 +51,18 @@ export {
   sanitizePluginMigrationId,
 } from "./plugin-migrate";
 export {
+  AUTH_RLS_CATALOG_INVENTORY_CONTRIBUTION,
   assessRlsCatalogSnapshot,
+  CORE_RLS_CATALOG_INVENTORY,
+  CORE_RLS_EXCLUDED_TABLES,
+  composeRlsCatalogInventory,
+  type InspectRlsCatalogOptions,
   inspectRlsCatalog,
   RLS_ACTIVATION_TABLES,
   type RlsCatalogAssessment,
   type RlsCatalogClient,
+  type RlsCatalogInventory,
+  type RlsCatalogInventoryContribution,
   type RlsCatalogRow,
 } from "./rls-catalog-gate";
 export {
