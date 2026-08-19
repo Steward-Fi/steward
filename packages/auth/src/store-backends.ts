@@ -31,6 +31,18 @@ export interface StorePublishEntry {
   expected?: string | null;
 }
 
+function assertUniquePublishKeys(entries: readonly StorePublishEntry[]): void {
+  const keys = new Set<string>();
+  for (const entry of entries) {
+    if (keys.has(entry.key)) {
+      // Duplicate operations have backend-dependent last-write-wins semantics
+      // and can make a guard describe a different write than the one applied.
+      throw new Error("Store publication contains duplicate keys");
+    }
+    keys.add(entry.key);
+  }
+}
+
 export interface StoreBackend {
   set(key: string, value: string, ttlMs: number): Promise<void>;
   setIfNotExists(key: string, value: string, ttlMs: number): Promise<boolean>;
@@ -193,6 +205,7 @@ export class MemoryBackend implements StoreBackend {
   }
 
   async publish(entries: readonly StorePublishEntry[]): Promise<boolean> {
+    assertUniquePublishKeys(entries);
     const now = Date.now();
     const currentValue = (key: string): string | null => {
       const current = this.store.get(key);
@@ -322,6 +335,7 @@ export class RedisBackend implements StoreBackend {
   }
 
   async publish(entries: readonly StorePublishEntry[]): Promise<boolean> {
+    assertUniquePublishKeys(entries);
     if (entries.length === 0) return true;
     const keys = entries.map((entry) => this.prefix + entry.key);
     const args = entries.flatMap((entry) => [
@@ -499,6 +513,7 @@ export class PostgresBackend implements StoreBackend {
   }
 
   async publish(entries: readonly StorePublishEntry[]): Promise<boolean> {
+    assertUniquePublishKeys(entries);
     if (entries.length === 0) return true;
     await this.ensureTable();
     const sql = this.getSqlClient();

@@ -92,6 +92,19 @@ describe("buildBackend Redis smoke test", () => {
 });
 
 describe("NamespacedStoreBackend", () => {
+  it("rejects duplicate publish keys without applying either value", async () => {
+    for (const backend of [new MemoryBackend(), new RedisBackend(redisLike(), "test:")]) {
+      await expect(
+        backend.publish([
+          { key: "credential", value: "first", ttlMs: 60_000 },
+          { key: "credential", value: "second", ttlMs: 60_000 },
+        ]),
+      ).rejects.toThrow("Store publication contains duplicate keys");
+      expect(await backend.get("credential")).toBeNull();
+      if (backend instanceof MemoryBackend) backend.destroy();
+    }
+  });
+
   it("conditionally publishes all keys or none and makes retries no-ops", async () => {
     for (const backend of [new MemoryBackend(), new RedisBackend(redisLike(), "test:")]) {
       await backend.set("generation", "reservation-a", 60_000);
