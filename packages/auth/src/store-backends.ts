@@ -376,19 +376,27 @@ export class PostgresBackend implements StoreBackend {
   private async ensureTable(): Promise<void> {
     if (this.initialized) return;
     const sql = this.getSqlClient();
-    await sql`
-      CREATE TABLE IF NOT EXISTS auth_kv_store (
-        id          TEXT        NOT NULL,
-        namespace   TEXT        NOT NULL,
-        value       TEXT        NOT NULL,
-        expires_at  TIMESTAMPTZ NOT NULL,
-        PRIMARY KEY (id, namespace)
-      )
-    `;
-    await sql`
-      CREATE INDEX IF NOT EXISTS auth_kv_store_expires_idx
-        ON auth_kv_store (expires_at)
-    `;
+    await sql.begin(async (transaction: TransactionSql) => {
+      // CREATE TABLE IF NOT EXISTS can still race in PostgreSQL's catalogs when
+      // separate fresh backend instances initialize concurrently. Production
+      // normally migrates this table first; serialize the compatibility fallback.
+      await transaction`
+        SELECT pg_advisory_xact_lock(hashtextextended('steward:auth_kv_store:init', 0))
+      `;
+      await transaction`
+        CREATE TABLE IF NOT EXISTS auth_kv_store (
+          id          TEXT        NOT NULL,
+          namespace   TEXT        NOT NULL,
+          value       TEXT        NOT NULL,
+          expires_at  TIMESTAMPTZ NOT NULL,
+          PRIMARY KEY (id, namespace)
+        )
+      `;
+      await transaction`
+        CREATE INDEX IF NOT EXISTS auth_kv_store_expires_idx
+          ON auth_kv_store (expires_at)
+      `;
+    });
     this.initialized = true;
   }
 
