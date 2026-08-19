@@ -345,6 +345,51 @@ describe("POST /v1/trade/polymarket/order", () => {
     }
   });
 
+  it("releases the metadata-failure claim when the audit backend is unavailable", async () => {
+    const { tenantId, agentId, sessionId } = await seedSession({
+      allowedAssets: [`pm:cond:${COND_ID}`],
+    });
+    stubWallet(true);
+    const { createTradeRoutes } = await import("../routes/trade");
+    const auditOutageRoutes = createTradeRoutes({
+      ...sharedTestContext,
+      writeAuditEvent: async () => {
+        throw new Error("AUDIT_BACKEND_SECRET_CANARY");
+      },
+    });
+    const app = makeApp(tenantId, agentId, auditOutageRoutes);
+    const key = crypto.randomUUID();
+    const fetchSpy = spyOn(globalThis, "fetch").mockRejectedValue(
+      new Error("TOKEN_METADATA_SECRET_CANARY"),
+    );
+    const originalError = console.error;
+    const logs: string[] = [];
+    console.error = (...args: unknown[]) => logs.push(args.map(String).join(" "));
+
+    try {
+      const first = await postOrder(app, sessionId, key);
+      expect(first.status).toBe(502);
+      expect(await first.json()).toEqual({
+        ok: false,
+        error: "Unable to verify Polymarket market binding",
+      });
+
+      const retry = await postOrder(app, sessionId, key);
+      expect(retry.status).toBe(502);
+      expect(await retry.json()).toEqual({
+        ok: false,
+        error: "Unable to verify Polymarket market binding",
+      });
+      expect(fetchSpy).toHaveBeenCalledTimes(2);
+      expect(logs.join("\n")).not.toContain("AUDIT_BACKEND_SECRET_CANARY");
+      expect(logs.join("\n")).not.toContain("TOKEN_METADATA_SECRET_CANARY");
+      expect(await dailySpendOf(sessionId)).toBe(0);
+    } finally {
+      console.error = originalError;
+      fetchSpy.mockRestore();
+    }
+  });
+
   it("SEC-041: SELL notional is floored at the CLOB best bid (low-limit cap bypass fails)", async () => {
     // perOrderCap 50. A FOK sell of 100 shares at limit 0.01 would fill at the
     // best bid (0.90): real notional ~$90 must be capped, not the caller-stated
