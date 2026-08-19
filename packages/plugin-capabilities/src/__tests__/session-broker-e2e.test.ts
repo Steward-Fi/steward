@@ -29,6 +29,7 @@
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it, setDefaultTimeout } from "bun:test";
 import { fileURLToPath } from "node:url";
+import { signAgentToken } from "@stwd/auth";
 import { agents, closeDb, eq, getDb, runPluginMigrations, tenants } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import type { AppVariables, PolicyRule } from "@stwd/shared";
@@ -54,6 +55,7 @@ const BROKER_HOST = "broker.cap-e2e.test";
 const CAP_NAME = "broker.session.render";
 const MIGRATIONS_FOLDER = fileURLToPath(new URL("../../drizzle", import.meta.url));
 const TEST_ENV_KEYS = [
+  "NODE_ENV",
   "STEWARD_PGLITE_MEMORY",
   "STEWARD_MASTER_PASSWORD",
   "STEWARD_JWT_SECRET",
@@ -84,6 +86,7 @@ let lastForwarded: ForwardedCapture | null = null;
 let brokerResponseBody: string = JSON.stringify({ ok: true, rendered: "small" });
 let proxyApp: Hono | null = null;
 let proxyRateLimitChecks = 0;
+let lastProxyRequestHeaders: Headers | null = null;
 const realFetch = globalThis.fetch;
 
 // the policy set the injected getPolicySet returns for the current test.
@@ -108,6 +111,7 @@ function capRule(
 
 beforeAll(async () => {
   for (const key of TEST_ENV_KEYS) originalEnv.set(key, process.env[key]);
+  process.env.NODE_ENV = "test";
   process.env.STEWARD_PGLITE_MEMORY = "true";
   process.env.STEWARD_MASTER_PASSWORD = MASTER_PASSWORD;
   process.env.STEWARD_JWT_SECRET = "broker-e2e-jwt-secret-with-enough-bytes-0123456789ab";
@@ -169,6 +173,7 @@ beforeAll(async () => {
       typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
     if (url.startsWith(PROXY_URL) && proxyApp) {
       const path = url.slice(PROXY_URL.length) || "/";
+      lastProxyRequestHeaders = new Headers(init?.headers);
       return proxyApp.request(path, init as RequestInit);
     }
     return realFetch(input as RequestInfo, init);
@@ -295,10 +300,33 @@ beforeEach(async () => {
   currentPolicySet = [];
   lastForwarded = null;
   proxyRateLimitChecks = 0;
+  lastProxyRequestHeaders = null;
   brokerResponseBody = JSON.stringify({ ok: true, rendered: "small" });
 });
 
 describe("session-broker e2e: full arc through the real proxy", () => {
+  it("keeps unsigned proxy requests fail-closed in production despite dev mode", async () => {
+    const token = await signAgentToken({ agentId, tenantId, scopes: ["api:proxy"] }, "5m");
+    process.env.STEWARD_PROXY_REQUIRE_REQUEST_SIGNATURE = "false";
+    process.env.NODE_ENV = "production";
+    try {
+      const response = await proxyApp!.request(`/proxy/${BROKER_HOST}/render`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}` },
+      });
+
+      expect(response.status).toBe(401);
+      expect(await response.json()).toEqual({
+        ok: false,
+        error: "X-Steward-Signature header required",
+      });
+      expect(lastForwarded).toBeNull();
+    } finally {
+      process.env.NODE_ENV = "test";
+      process.env.STEWARD_PROXY_REQUIRE_REQUEST_SIGNATURE = "true";
+    }
+  });
+
   it("allowed POST invoke injects the broker token, passes the JSON body through, token never seen by agent, records allow", async () => {
     const capId = await seedBrokerCapability("POST");
     currentPolicySet = [capRule("r1", "allow", { argEquals: { sessionId: "sess_123" } })];
@@ -316,6 +344,8 @@ describe("session-broker e2e: full arc through the real proxy", () => {
     // broker 200 passed through verbatim.
     expect(res.status).toBe(200);
     expect(proxyRateLimitChecks).toBe(1);
+    expect(lastProxyRequestHeaders?.get("x-steward-signature")).toMatch(/^v1=[0-9a-f]{64}$/);
+    expect(lastProxyRequestHeaders?.get("x-steward-request-timestamp")).toMatch(/^\d+$/);
     const passthrough = await res.text();
     const parsed = JSON.parse(passthrough) as { ok: boolean; rendered: string };
     expect(parsed.ok).toBe(true);
