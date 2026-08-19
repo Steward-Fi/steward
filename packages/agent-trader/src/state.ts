@@ -131,30 +131,7 @@ async function getTokenPrice(tokenAddress: string, chainId: number): Promise<Pri
   const oracleQuote = await getHardenedOracleQuote(tokenAddress, chainId);
   if (oracleQuote) return { price: oracleQuote, confidence: "high" };
 
-  // 2. External price oracle (env: PRICE_ORACLE_URL or per-token override).
-  //    A single unauthenticated endpoint with no corroboration → LOW confidence.
-  const oracleUrl =
-    process.env[`PRICE_ORACLE_${tokenAddress.toLowerCase()}`] ?? process.env.PRICE_ORACLE_URL;
-
-  if (oracleUrl) {
-    try {
-      const url = oracleUrl.replace("{token}", tokenAddress);
-      const resp = await fetch(url, { signal: AbortSignal.timeout(5000) });
-      if (resp.ok) {
-        const json = (await resp.json()) as { price?: string };
-        if (json.price) {
-          const price = BigInt(json.price);
-          if (price > 0n) return { price, confidence: "low" };
-        }
-      }
-    } catch {
-      logWarn("Env price oracle request failed, falling back to DEX reserves", {
-        tokenAddress,
-      });
-    }
-  }
-
-  // 3. DEX pair reserve ratio — a single-pair spot price is trivially
+  // 2. DEX pair reserve ratio — a single-pair spot price is trivially
   //    manipulable (flash-loan/reserve imbalance), so it is LOW confidence and
   //    cannot, by itself, trigger a trade (gated in the strategy layer).
   const pairAddress =
@@ -195,7 +172,7 @@ async function getTokenPrice(tokenAddress: string, chainId: number): Promise<Pri
     }
   }
 
-  // 4. Fallback — strategies must handle tokenPrice === 0n
+  // 3. Fallback — strategies must handle tokenPrice === 0n
   logWarn("Could not determine token price — returning 0", { tokenAddress });
   return NO_PRICE;
 }
