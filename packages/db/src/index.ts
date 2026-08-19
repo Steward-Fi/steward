@@ -36,6 +36,7 @@ export {
   getDb,
   getSql,
   setPGLiteOverride,
+  waitUntilRequestDatabaseTask,
   withDatabaseDeadline,
   withRequestDatabase,
 } from "./client";

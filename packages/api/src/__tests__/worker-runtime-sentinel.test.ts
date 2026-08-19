@@ -1,7 +1,8 @@
 import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { getDb } from "@stwd/db";
+import { getDb, tenants, waitUntilRequestDatabaseTask } from "@stwd/db";
+import { createPGLiteDb } from "@stwd/db/pglite";
 import {
   hydrateProcessEnv,
   runWorkerGoogleCredentialLifecycleSweep,
@@ -44,7 +45,8 @@ test("Worker request database is exact, request-owned, and always closed", async
       env,
       async () => {
         await Promise.resolve();
-        expect(getDb()).toBe(requestDb);
+        expect(getDb()).not.toBe(requestDb);
+        expect((getDb() as unknown as { marker: string }).marker).toBe("worker-request");
         return "ok";
       },
       { createHandle },
@@ -56,7 +58,7 @@ test("Worker request database is exact, request-owned, and always closed", async
     withWorkerRequestDatabase(
       env,
       async () => {
-        expect(getDb()).toBe(requestDb);
+        expect((getDb() as unknown as { marker: string }).marker).toBe("worker-request");
         throw new Error("handler failed");
       },
       { createHandle },
@@ -75,7 +77,8 @@ test("Worker HTTP mode binds an exact request database without a persistent hand
     },
     async () => {
       await Promise.resolve();
-      expect(getDb()).toBe(requestDb);
+      expect(getDb()).not.toBe(requestDb);
+      expect((getDb() as unknown as { marker: string }).marker).toBe("worker-http-request");
       return "http";
     },
     {
@@ -88,6 +91,23 @@ test("Worker HTTP mode binds an exact request database without a persistent hand
   );
   expect(result).toBe("http");
   expect(created).toBe(0);
+});
+
+test("Worker request membrane preserves real Drizzle query execution", async () => {
+  const { db: pgliteDb, client } = await createPGLiteDb("memory://");
+  try {
+    const rows = await withWorkerRequestDatabase(
+      {
+        DATABASE_URL: "postgresql://worker.invalid/steward",
+        DATABASE_DRIVER: "neon-http",
+      },
+      () => getDb().select({ id: tenants.id }).from(tenants).limit(1),
+      { createHttpDb: () => pgliteDb },
+    );
+    expect(Array.isArray(rows)).toBe(true);
+  } finally {
+    await client.close();
+  }
 });
 
 test("Worker database selection rejects missing or unsupported drivers", async () => {
@@ -110,6 +130,57 @@ test("every autonomous recovery sweep owns its own request database", () => {
   ]) {
     expect(source).toContain(`withWorkerRequestDatabase(env, () => ${sweep}(env))`);
   }
+});
+
+test("Worker drains fire-and-forget webhook work before closing its request pool", async () => {
+  let releaseDelivery!: () => void;
+  const deliveryGate = new Promise<void>((resolve) => {
+    releaseDelivery = resolve;
+  });
+  let closes = 0;
+  let deliveryFinished = false;
+  const requestDb = { marker: "worker-webhook" } as unknown as ReturnType<typeof getDb>;
+  const owner = withWorkerRequestDatabase(
+    {
+      DATABASE_URL: "postgresql://worker.invalid/steward",
+      DATABASE_DRIVER: "neon-websocket",
+    },
+    async () => {
+      // dispatchWebhook uses this same request-lifetime hook for its intentionally
+      // unawaited configured delivery fan-out.
+      void waitUntilRequestDatabaseTask(async () => {
+        await deliveryGate;
+        expect((getDb() as unknown as { marker: string }).marker).toBe("worker-webhook");
+        deliveryFinished = true;
+      });
+      return new Response("accepted");
+    },
+    {
+      createHandle: () => ({
+        driver: "neon-websocket" as const,
+        db: requestDb as never,
+        async close() {
+          expect(deliveryFinished).toBe(true);
+          closes += 1;
+        },
+      }),
+    },
+  );
+
+  await Promise.resolve();
+  expect(closes).toBe(0);
+  releaseDelivery();
+  expect((await owner).status).toBe(200);
+  expect(deliveryFinished).toBe(true);
+  expect(closes).toBe(1);
+
+  const webhookSource = readFileSync(
+    join(import.meta.dir, "../services/webhook-dispatch.ts"),
+    "utf8",
+  );
+  expect(webhookSource).toContain("waitUntilRequestDatabaseTask(");
+  const auditSource = readFileSync(join(import.meta.dir, "../services/audit.ts"), "utf8");
+  expect(auditSource).toContain("waitUntilRequestDatabaseTask(");
 });
 
 test("Worker socket cleanup diagnostics are fixed and cannot replace handler errors", async () => {
