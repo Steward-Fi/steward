@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { and, eq, webhookConfigs, webhookDeliveries } from "@stwd/db";
+import { and, eq, waitUntilRequestDatabaseTask, webhookConfigs, webhookDeliveries } from "@stwd/db";
 import { redactedThrownDiagnostics, type WebhookEvent } from "@stwd/shared";
 import {
   decryptWebhookSecret,
@@ -51,13 +51,20 @@ export function dispatchWebhook(
     data: redactedData,
     timestamp: new Date(),
   };
-  void dispatchConfiguredWebhooks(event, configuredType, isPluginEvent ? type : null).catch(
-    (error) => {
-      console.error(
-        "[webhooks] Failed to dispatch configured webhooks",
-        redactedThrownDiagnostics(error),
-      );
-    },
+  // Route callers intentionally do not await webhook delivery. In a Worker,
+  // register that detached promise with the request-owned database lease so
+  // its reads/writes finish before the WebSocket pool is closed. Bun keeps its
+  // existing process-owned fire-and-forget behavior when no request lease is
+  // active.
+  void waitUntilRequestDatabaseTask(
+    dispatchConfiguredWebhooks(event, configuredType, isPluginEvent ? type : null).catch(
+      (error) => {
+        console.error(
+          "[webhooks] Failed to dispatch configured webhooks",
+          redactedThrownDiagnostics(error),
+        );
+      },
+    ),
   );
 
   // SEC-101: the unverifiable tenant-route webhookUrl field is retired. The

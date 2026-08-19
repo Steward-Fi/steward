@@ -480,8 +480,96 @@ type RequestDatabase = ReturnType<typeof createDb>["db"];
 interface RequestDatabaseContext {
   db: RequestDatabase | undefined;
   active: boolean;
+  pendingTasks: Set<Promise<unknown>>;
+  guardedObjects: WeakMap<object, object>;
 }
 const requestDatabaseStorage = new AsyncLocalStorage<RequestDatabaseContext>();
+
+function assertRequestDatabaseContextActive(
+  context: RequestDatabaseContext,
+): asserts context is RequestDatabaseContext & { db: RequestDatabase } {
+  if (!context.active) throw new Error("REQUEST_DATABASE_CONTEXT_CLOSED");
+  if (!context.db) throw new Error("REQUEST_DATABASE_CONTEXT_INVALID");
+}
+
+function trackRequestDatabaseTask<T>(
+  context: RequestDatabaseContext,
+  task: Promise<T>,
+): Promise<T> {
+  assertRequestDatabaseContextActive(context);
+  const tracked = task as Promise<unknown>;
+  context.pendingTasks.add(tracked);
+  void tracked.then(
+    () => context.pendingTasks.delete(tracked),
+    () => context.pendingTasks.delete(tracked),
+  );
+  return task;
+}
+
+/**
+ * Keep explicitly detached work inside the current request database lifetime.
+ *
+ * Worker services that intentionally start best-effort asynchronous work must
+ * register the resulting promise here. The request owner drains registered
+ * work before revoking the database capability and closing its socket. Outside
+ * a request-owned database context this is a no-op, preserving Bun's existing
+ * process-owned background-work behavior.
+ */
+export function waitUntilRequestDatabaseTask<T>(task: Promise<T>): Promise<T> {
+  const context = requestDatabaseStorage.getStore();
+  return context ? trackRequestDatabaseTask(context, task) : task;
+}
+
+/**
+ * Build a revocable membrane around a request-owned Drizzle handle.
+ *
+ * Revoking only AsyncLocalStorage is insufficient: a detached closure can call
+ * getDb() while the request is active, retain the returned handle (or a query
+ * builder/method derived from it), and use that retained capability after the
+ * Worker closes its pool. Every property access and invocation through this
+ * membrane re-checks the owner lease. Promise-returning driver operations are
+ * also tracked so an operation started during the request is drained before
+ * the transport is released.
+ */
+function guardRequestDatabaseValue<T>(value: T, context: RequestDatabaseContext): T {
+  if ((typeof value !== "object" || value === null) && typeof value !== "function") return value;
+  if (value instanceof Promise) {
+    return trackRequestDatabaseTask(context, value) as T;
+  }
+
+  const objectValue = value as object;
+  const existing = context.guardedObjects.get(objectValue);
+  if (existing) return existing as T;
+
+  const guarded = new Proxy(objectValue, {
+    get(target, property) {
+      assertRequestDatabaseContextActive(context);
+      const member = Reflect.get(target, property, target);
+      if (typeof member === "function") {
+        return (...args: unknown[]) => {
+          assertRequestDatabaseContextActive(context);
+          const result = Reflect.apply(member, target, args);
+          return guardRequestDatabaseValue(result, context);
+        };
+      }
+      return guardRequestDatabaseValue(member, context);
+    },
+    set(target, property, nextValue) {
+      assertRequestDatabaseContextActive(context);
+      return Reflect.set(target, property, nextValue, target);
+    },
+  });
+  context.guardedObjects.set(objectValue, guarded);
+  return guarded as T;
+}
+
+async function drainRequestDatabaseTasks(context: RequestDatabaseContext): Promise<void> {
+  // A registered task may enqueue another registered task before it settles.
+  // Keep the owner lease active until the set reaches a stable empty state.
+  while (context.pendingTasks.size > 0) {
+    await Promise.allSettled([...context.pendingTasks]);
+  }
+}
 
 /**
  * Bind one explicitly owned database handle to the current async request.
@@ -499,9 +587,30 @@ export async function withRequestDatabase<T>(
   if (requestDatabaseStorage.getStore()) {
     throw new Error("REQUEST_DATABASE_CONTEXT_NESTED");
   }
-  const context: RequestDatabaseContext = { db, active: true };
+  const context: RequestDatabaseContext = {
+    db: undefined,
+    active: true,
+    pendingTasks: new Set(),
+    guardedObjects: new WeakMap(),
+  };
+  context.db = guardRequestDatabaseValue(db, context);
   try {
-    return await requestDatabaseStorage.run(context, callback);
+    return await requestDatabaseStorage.run(context, async () => {
+      const noCallbackError = Symbol("no-request-database-callback-error");
+      let callbackError: unknown | typeof noCallbackError = noCallbackError;
+      let result: T | undefined;
+      try {
+        result = await callback();
+      } catch (error) {
+        callbackError = error;
+      }
+      // Registered work owns this same capability even when the route fails.
+      // Drain it before revocation so the error path cannot close the pool under
+      // a webhook/audit write that the handler started before throwing.
+      await drainRequestDatabaseTasks(context);
+      if (callbackError !== noCallbackError) throw callbackError;
+      return result as T;
+    });
   } finally {
     // Detached tasks inherit AsyncLocalStorage. Revoke their capability before
     // the owning Worker closes its socket so late getDb() calls fail before I/O.
@@ -544,8 +653,7 @@ function buildGlobalDb(): GlobalDbHandle {
 export function getDb() {
   const requestContext = requestDatabaseStorage.getStore();
   if (requestContext) {
-    if (!requestContext.active) throw new Error("REQUEST_DATABASE_CONTEXT_CLOSED");
-    if (!requestContext.db) throw new Error("REQUEST_DATABASE_CONTEXT_INVALID");
+    assertRequestDatabaseContextActive(requestContext);
     return requestContext.db;
   }
   if (pgliteOverride) return pgliteOverride.db as ReturnType<typeof createDb>["db"];
