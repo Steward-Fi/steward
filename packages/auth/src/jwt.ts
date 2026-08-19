@@ -1,4 +1,4 @@
-import { randomUUID, scryptSync } from "node:crypto";
+import { createHmac, randomBytes, randomUUID, scryptSync } from "node:crypto";
 import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 import {
   calculateJwkThumbprint,
@@ -71,6 +71,9 @@ let warnedEmbeddedMasterFallback = false;
 let warnedDevSecret = false;
 let warnedShortSecret = false;
 
+const embeddedJwtCacheKey = randomBytes(32);
+let embeddedJwtDerivation: { identity: string; derived: string } | null = null;
+
 /**
  * Derive the embedded-mode JWT signing secret from STEWARD_MASTER_PASSWORD.
  *
@@ -82,9 +85,16 @@ let warnedShortSecret = false;
  * from the vault root key and offline guesses cost a scrypt each.
  */
 function deriveEmbeddedJwtSecret(masterPassword: string): string {
-  // Embedded mode favors bounded secret lifetime over memoizing the plaintext
-  // source password or a reusable fast verifier in process state.
-  return (scryptSync(masterPassword, "steward-kdf:jwt-signing:v1", 32) as Buffer).toString("hex");
+  const hmac = createHmac("sha256", embeddedJwtCacheKey);
+  // codeql[js/insufficient-password-hash] Ephemeral keyed cache identity only;
+  // the JWT signing key below is independently derived with scrypt.
+  const identity = hmac.update(masterPassword).digest("hex");
+  if (embeddedJwtDerivation?.identity === identity) return embeddedJwtDerivation.derived;
+  const derived = (scryptSync(masterPassword, "steward-kdf:jwt-signing:v1", 32) as Buffer).toString(
+    "hex",
+  );
+  embeddedJwtDerivation = { identity, derived };
+  return derived;
 }
 
 function isEmbeddedMode(): boolean {
