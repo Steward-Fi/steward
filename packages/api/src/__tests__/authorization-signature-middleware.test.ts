@@ -46,7 +46,7 @@ function makeDefaultApp() {
   return app;
 }
 
-async function signedHeaders(path = "/vault/agent-1/sign", body = BODY) {
+async function signedHeaders(path = "/vault/agent-1/sign", body = BODY, secret = SECRET) {
   const authorization = "Bearer token-a";
   const signature = await createAuthorizationSignature(
     {
@@ -58,7 +58,7 @@ async function signedHeaders(path = "/vault/agent-1/sign", body = BODY) {
       idempotencyKey: "idem-key-123",
       body,
     },
-    SECRET,
+    secret,
   );
   return {
     "content-type": "application/json",
@@ -126,6 +126,74 @@ async function signedAppSecretHeaders(path = "/agents", body = BODY) {
 }
 
 describe("authorizationSignature", () => {
+  it("applies rotated required mode and signing secrets without rebuilding", async () => {
+    const originalRequire = process.env.STEWARD_REQUIRE_AUTH_SIGNATURE;
+    const originalSecret = process.env.STEWARD_REQUEST_SIGNING_SECRET;
+    const originalSecrets = process.env.STEWARD_REQUEST_SIGNING_SECRETS;
+    const originalNodeEnv = process.env.NODE_ENV;
+    const firstSecret = "first-worker-request-signing-secret-with-enough-entropy";
+    const rotatedSecret = "rotated-worker-request-signing-secret-with-enough-entropy";
+    try {
+      process.env.NODE_ENV = "test";
+      delete process.env.STEWARD_REQUIRE_AUTH_SIGNATURE;
+      delete process.env.STEWARD_REQUEST_SIGNING_SECRETS;
+      process.env.STEWARD_REQUEST_SIGNING_SECRET = firstSecret;
+      const app = new Hono<{ Variables: { requestSignatureVerified?: boolean } }>();
+      app.use("*", authorizationSignature());
+      app.post("/vault/:agentId/sign", (c) =>
+        c.json({ ok: true, verified: Boolean(c.get("requestSignatureVerified")) }),
+      );
+
+      expect(
+        (await app.request("/vault/agent-1/sign", { method: "POST", body: BODY })).status,
+      ).toBe(200);
+      process.env.STEWARD_REQUIRE_AUTH_SIGNATURE = "true";
+      expect(
+        (await app.request("/vault/agent-1/sign", { method: "POST", body: BODY })).status,
+      ).toBe(401);
+
+      const firstHeaders = await signedHeaders("/vault/agent-1/sign", BODY, firstSecret);
+      expect(
+        (
+          await app.request("/vault/agent-1/sign", {
+            method: "POST",
+            headers: firstHeaders,
+            body: BODY,
+          })
+        ).status,
+      ).toBe(200);
+
+      process.env.STEWARD_REQUEST_SIGNING_SECRET = rotatedSecret;
+      expect(
+        (
+          await app.request("/vault/agent-1/sign", {
+            method: "POST",
+            headers: firstHeaders,
+            body: BODY,
+          })
+        ).status,
+      ).toBe(401);
+      expect(
+        (
+          await app.request("/vault/agent-1/sign", {
+            method: "POST",
+            headers: await signedHeaders("/vault/agent-1/sign", BODY, rotatedSecret),
+            body: BODY,
+          })
+        ).status,
+      ).toBe(200);
+    } finally {
+      if (originalRequire === undefined) delete process.env.STEWARD_REQUIRE_AUTH_SIGNATURE;
+      else process.env.STEWARD_REQUIRE_AUTH_SIGNATURE = originalRequire;
+      if (originalSecret === undefined) delete process.env.STEWARD_REQUEST_SIGNING_SECRET;
+      else process.env.STEWARD_REQUEST_SIGNING_SECRET = originalSecret;
+      if (originalSecrets === undefined) delete process.env.STEWARD_REQUEST_SIGNING_SECRETS;
+      else process.env.STEWARD_REQUEST_SIGNING_SECRETS = originalSecrets;
+      if (originalNodeEnv === undefined) delete process.env.NODE_ENV;
+      else process.env.NODE_ENV = originalNodeEnv;
+    }
+  });
+
   it("allows sensitive mutating requests without a signature while optional", async () => {
     const app = makeApp();
 

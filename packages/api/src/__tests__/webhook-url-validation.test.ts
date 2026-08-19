@@ -2,6 +2,21 @@ import { describe, expect, it } from "bun:test";
 import { validateWebhookUrl, validateWebhookUrlResolved } from "../services/webhook-url";
 
 describe("webhook URL validation", () => {
+  it("revokes insecure HTTP immediately after a binding rotation", () => {
+    const original = process.env.STEWARD_ALLOW_INSECURE_WEBHOOK_URLS;
+    try {
+      delete process.env.STEWARD_ALLOW_INSECURE_WEBHOOK_URLS;
+      expect(validateWebhookUrl("http://93.184.216.34/hook")).toBe("url must use https");
+      process.env.STEWARD_ALLOW_INSECURE_WEBHOOK_URLS = "true";
+      expect(validateWebhookUrl("http://93.184.216.34/hook")).toBeNull();
+      delete process.env.STEWARD_ALLOW_INSECURE_WEBHOOK_URLS;
+      expect(validateWebhookUrl("http://93.184.216.34/hook")).toBe("url must use https");
+    } finally {
+      if (original === undefined) delete process.env.STEWARD_ALLOW_INSECURE_WEBHOOK_URLS;
+      else process.env.STEWARD_ALLOW_INSECURE_WEBHOOK_URLS = original;
+    }
+  });
+
   it("rejects IPv4-mapped IPv6 private addresses in dotted and hex forms", () => {
     for (const url of [
       "https://[::ffff:127.0.0.1]/hook",

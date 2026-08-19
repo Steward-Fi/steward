@@ -34,17 +34,6 @@ function parseHttpTime(value: string | undefined): number | null {
 }
 
 export function requestExpiry(options?: RequestExpiryOptions) {
-  const required =
-    options?.required ??
-    (process.env.STEWARD_REQUIRE_REQUEST_EXPIRY === "true" ||
-      (process.env.NODE_ENV === "production" &&
-        process.env.STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS !== "true"));
-  const maxClockSkewMs =
-    options?.maxClockSkewMs ??
-    parsePositiveInt(process.env.STEWARD_REQUEST_EXPIRY_MAX_SKEW_MS, DEFAULT_MAX_CLOCK_SKEW_MS);
-  const timestampTtlMs =
-    options?.timestampTtlMs ??
-    parsePositiveInt(process.env.STEWARD_REQUEST_TIMESTAMP_TTL_MS, DEFAULT_TIMESTAMP_TTL_MS);
   const now = options?.now ?? (() => Date.now());
 
   return createMiddleware<{ Variables: AppVariables }>(async (c, next) => {
@@ -56,10 +45,21 @@ export function requestExpiry(options?: RequestExpiryOptions) {
     const timestampHeader = c.req.header("X-Steward-Request-Timestamp");
 
     if (!expiresAtHeader && !timestampHeader) {
+      const required =
+        options?.required ??
+        (process.env.STEWARD_REQUIRE_REQUEST_EXPIRY === "true" ||
+          (process.env.NODE_ENV === "production" &&
+            process.env.STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS !== "true"));
       if (!required) return next();
       return c.json<ApiResponse>({ ok: false, error: "Request expiry header required" }, 400);
     }
 
+    const maxClockSkewMs =
+      options?.maxClockSkewMs ??
+      parsePositiveInt(process.env.STEWARD_REQUEST_EXPIRY_MAX_SKEW_MS, DEFAULT_MAX_CLOCK_SKEW_MS);
+    const timestampTtlMs =
+      options?.timestampTtlMs ??
+      parsePositiveInt(process.env.STEWARD_REQUEST_TIMESTAMP_TTL_MS, DEFAULT_TIMESTAMP_TTL_MS);
     const currentTime = now();
     const expiresAt = parseHttpTime(expiresAtHeader);
     if (expiresAtHeader && expiresAt === null) {

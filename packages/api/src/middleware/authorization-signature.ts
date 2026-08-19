@@ -801,23 +801,10 @@ export async function buildAuthorizationCanonicalString(
 }
 
 export function authorizationSignature(options?: AuthorizationSignatureOptions) {
-  const required =
-    options?.required ??
-    (process.env.STEWARD_REQUIRE_AUTH_SIGNATURE === "true" ||
-      process.env.NODE_ENV === "production");
-  const secrets = options?.secrets ?? configuredSecrets();
   const appSecretResolver = options?.appSecretResolver ?? appClientSecretSigningCandidates;
   const tenantKeyStoreFactory =
     options?.tenantKeyStoreFactory ??
     ((masterPassword, masterSalt, domain) => new KeyStore(masterPassword, masterSalt, domain));
-  const maxClockSkewMs = parsePositiveInt(
-    process.env.STEWARD_REQUEST_EXPIRY_MAX_SKEW_MS,
-    DEFAULT_MAX_CLOCK_SKEW_MS,
-  );
-  const timestampTtlMs = parsePositiveInt(
-    process.env.STEWARD_REQUEST_TIMESTAMP_TTL_MS,
-    DEFAULT_TIMESTAMP_TTL_MS,
-  );
 
   return createMiddleware<{ Variables: AppVariables }>(async (c, next) => {
     if (!MUTATING_METHODS.has(c.req.method.toUpperCase()) || !isSensitivePath(c.req.path)) {
@@ -826,9 +813,23 @@ export function authorizationSignature(options?: AuthorizationSignatureOptions) 
 
     const rawSignature = c.req.header("X-Steward-Signature");
     if (!rawSignature) {
+      const required =
+        options?.required ??
+        (process.env.STEWARD_REQUIRE_AUTH_SIGNATURE === "true" ||
+          process.env.NODE_ENV === "production");
       if (!required) return next();
       return c.json<ApiResponse>({ ok: false, error: "X-Steward-Signature header required" }, 401);
     }
+
+    const secrets = options?.secrets ?? configuredSecrets();
+    const maxClockSkewMs = parsePositiveInt(
+      process.env.STEWARD_REQUEST_EXPIRY_MAX_SKEW_MS,
+      DEFAULT_MAX_CLOCK_SKEW_MS,
+    );
+    const timestampTtlMs = parsePositiveInt(
+      process.env.STEWARD_REQUEST_TIMESTAMP_TTL_MS,
+      DEFAULT_TIMESTAMP_TTL_MS,
+    );
 
     // Scheme selection: the SAME header carries either an HMAC `v1=` signature
     // or an asymmetric P-256 `p256=` signature. The prefix is self-describing;
