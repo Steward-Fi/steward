@@ -1,8 +1,15 @@
-import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 import { isDevSecretAllowed } from "@stwd/auth";
 import { currentRuntimeEnvironment, runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
-import { AwsKmsExternalKeyCustodyProvider, KmsEnvelopeKeystore, Vault } from "@stwd/vault";
+import {
+  AwsKmsExternalKeyCustodyProvider,
+  backendFromKeyStore,
+  KeyStore,
+  KmsEnvelopeKeystore,
+  type KmsEnvelopeOptions,
+  Vault,
+} from "@stwd/vault";
+import { configurationFingerprint } from "./config-fingerprint";
 
 const require = createRequire(import.meta.url);
 
@@ -74,6 +81,22 @@ export interface ConfiguredVaultOptions {
 let processVaultCache: { fingerprint: string; vault: Vault } | null = null;
 let warnedDevSecretFallback = false;
 
+interface ResolvedVaultConfiguration {
+  mode: VaultMode;
+  masterPassword: string;
+  kdfSalt?: string;
+  rpcUrl: string;
+  chainId: number;
+  kmsEnvelope?: KmsEnvelopeOptions;
+  externalCustody?: {
+    provider: ExternalCustodyProviderName;
+    region: string;
+    maxGasLimit: bigint;
+    maxGasPriceWei: bigint;
+    maxTotalFeeWei: bigint;
+  };
+}
+
 function configuredKmsProvider(): "aws" | "pkcs11" | undefined {
   const value = runtimeEnvironmentValue("STEWARD_KMS_PROVIDER")?.trim();
   if (!value) return undefined;
@@ -88,7 +111,15 @@ function configuredExternalCustodyProvider(): ExternalCustodyProviderName | unde
   throw new Error(`Unsupported STEWARD_EXTERNAL_CUSTODY_PROVIDER: ${value}`);
 }
 
-function createExternalCustodyProvider() {
+function requiredPositiveBigInt(name: string): bigint {
+  const raw = runtimeEnvironmentValue(name)?.trim();
+  if (!raw || !/^\d+$/.test(raw) || BigInt(raw) <= 0n) {
+    throw new Error(`${name} is required and must be a positive integer`);
+  }
+  return BigInt(raw);
+}
+
+function resolveExternalCustodyConfiguration(): ResolvedVaultConfiguration["externalCustody"] {
   const provider = configuredExternalCustodyProvider();
   if (!provider) return undefined;
   // External signing uses the same optional AWS SDK package as envelope mode,
@@ -101,7 +132,13 @@ function createExternalCustodyProvider() {
       "@aws-sdk/client-kms is required when STEWARD_EXTERNAL_CUSTODY_PROVIDER=aws-kms",
     );
   }
-  return AwsKmsExternalKeyCustodyProvider.fromEnv();
+  return {
+    provider,
+    region: runtimeEnvironmentValue("STEWARD_EXTERNAL_CUSTODY_AWS_REGION") ?? "",
+    maxGasLimit: requiredPositiveBigInt("STEWARD_EXTERNAL_CUSTODY_AWS_MAX_GAS_LIMIT"),
+    maxGasPriceWei: requiredPositiveBigInt("STEWARD_EXTERNAL_CUSTODY_AWS_MAX_GAS_PRICE_WEI"),
+    maxTotalFeeWei: requiredPositiveBigInt("STEWARD_EXTERNAL_CUSTODY_AWS_MAX_TOTAL_FEE_WEI"),
+  };
 }
 
 function requireKmsConfiguration(provider: "aws" | "pkcs11"): void {
@@ -216,44 +253,90 @@ function resolveMasterPassword(options: ConfiguredVaultOptions): string {
   throw new Error("STEWARD_MASTER_PASSWORD is required");
 }
 
-export function createConfiguredVault(options: ConfiguredVaultOptions = {}): Vault {
+function resolveConfiguredVault(options: ConfiguredVaultOptions): ResolvedVaultConfiguration {
   const mode = configuredMode();
-  // Root-of-trust gate: never silently boot local plaintext custody in prod.
   assertProductionCustodyAcknowledged(mode);
-  const masterPassword = resolveMasterPassword(options);
-  return new Vault({
-    masterPassword,
+  const kmsEnvelope: KmsEnvelopeOptions | undefined =
+    mode === "kms-envelope:aws"
+      ? {
+          provider: "aws",
+          keyId:
+            runtimeEnvironmentValue("STEWARD_KMS_KEY_ID") ??
+            runtimeEnvironmentValue("STEWARD_AWS_KMS_KEY_ARN"),
+          region:
+            runtimeEnvironmentValue("STEWARD_AWS_REGION") ?? runtimeEnvironmentValue("AWS_REGION"),
+        }
+      : mode === "kms-envelope:pkcs11"
+        ? {
+            provider: "pkcs11",
+            modulePath: runtimeEnvironmentValue("STEWARD_PKCS11_MODULE"),
+            pin: runtimeEnvironmentValue("STEWARD_PKCS11_PIN"),
+            keyLabel: runtimeEnvironmentValue("STEWARD_PKCS11_KEY_LABEL"),
+          }
+        : undefined;
+
+  return {
+    mode,
+    masterPassword: resolveMasterPassword(options),
+    kdfSalt: runtimeEnvironmentValue("STEWARD_KDF_SALT") || undefined,
     rpcUrl: runtimeEnvironmentValue("RPC_URL") || "https://sepolia.base.org",
     chainId: parseInt(runtimeEnvironmentValue("CHAIN_ID") || "84532", 10),
-    ...(mode === "local" ? {} : { keystoreBackend: KmsEnvelopeKeystore.fromEnv() }),
-    ...(configuredExternalCustodyProvider()
-      ? { externalKeyCustodyProvider: createExternalCustodyProvider() }
+    kmsEnvelope,
+    externalCustody: resolveExternalCustodyConfiguration(),
+  };
+}
+
+function instantiateConfiguredVault(configuration: ResolvedVaultConfiguration): Vault {
+  const { mode, masterPassword, kdfSalt, rpcUrl, chainId, kmsEnvelope, externalCustody } =
+    configuration;
+  return new Vault({
+    masterPassword,
+    rpcUrl,
+    chainId,
+    keystoreBackend:
+      mode === "local"
+        ? backendFromKeyStore(new KeyStore(masterPassword, kdfSalt))
+        : new KmsEnvelopeKeystore(kmsEnvelope),
+    ...(externalCustody
+      ? {
+          externalKeyCustodyProvider: new AwsKmsExternalKeyCustodyProvider({
+            region: externalCustody.region,
+            maxGasLimit: externalCustody.maxGasLimit,
+            maxGasPriceWei: externalCustody.maxGasPriceWei,
+            maxTotalFeeWei: externalCustody.maxTotalFeeWei,
+          }),
+        }
       : {}),
   });
 }
 
+export function createConfiguredVault(options: ConfiguredVaultOptions = {}): Vault {
+  return instantiateConfiguredVault(resolveConfiguredVault(options));
+}
+
+function configuredVaultFingerprint(configuration: ResolvedVaultConfiguration): string {
+  const { externalCustody, ...rest } = configuration;
+  return configurationFingerprint({
+    ...rest,
+    externalCustody: externalCustody
+      ? {
+          ...externalCustody,
+          maxGasLimit: externalCustody.maxGasLimit.toString(),
+          maxGasPriceWei: externalCustody.maxGasPriceWei.toString(),
+          maxTotalFeeWei: externalCustody.maxTotalFeeWei.toString(),
+        }
+      : undefined,
+  });
+}
+
 export function getConfiguredVault(options: ConfiguredVaultOptions = {}): Vault {
-  const mode = configuredMode();
-  const externalCustody = configuredExternalCustodyProvider() ?? "none";
-  const masterPassword = resolveMasterPassword(options);
+  const configuration = resolveConfiguredVault(options);
   if (currentRuntimeEnvironment() !== process.env) {
-    return createConfiguredVault({ ...options, fallbackPassword: masterPassword });
+    return instantiateConfiguredVault(configuration);
   }
-  const fingerprint = createHash("sha256")
-    .update(
-      JSON.stringify({
-        mode,
-        externalCustody,
-        masterPassword,
-        rpcUrl: runtimeEnvironmentValue("RPC_URL") || "https://sepolia.base.org",
-        chainId: runtimeEnvironmentValue("CHAIN_ID") || "84532",
-        kmsKeyId: runtimeEnvironmentValue("STEWARD_KMS_KEY_ID") || "",
-        kmsKeyArn: runtimeEnvironmentValue("STEWARD_AWS_KMS_KEY_ARN") || "",
-      }),
-    )
-    .digest("hex");
+  const fingerprint = configuredVaultFingerprint(configuration);
   if (processVaultCache?.fingerprint === fingerprint) return processVaultCache.vault;
-  const vault = createConfiguredVault({ ...options, fallbackPassword: masterPassword });
+  const vault = instantiateConfiguredVault(configuration);
   processVaultCache = { fingerprint, vault };
   return vault;
 }

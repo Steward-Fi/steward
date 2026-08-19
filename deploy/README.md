@@ -240,6 +240,7 @@ sudo nginx -t
 | `STEWARD_PROXY_PORT` | No | `8080` | Port the proxy gateway listens on. |
 | `STEWARD_PROXY_URL` | No | `http://steward-proxy:8080` in root Compose | Proxy URL used inside the API container; host-side clients normally use `http://localhost:8080`. |
 | `STEWARD_PROXY_REQUEST_SIGNING_SECRET` / `_SECRETS` | **Yes for full API+proxy Compose** | — | Shared HMAC root for signed proxy requests. Generate with `openssl rand -hex 32`; keep distinct from JWT/audit/master secrets. |
+| `STEWARD_REQUEST_SIGNING_SECRET` / `_SECRETS` | **Yes for production machine API requests** | — | API HMAC root for production machine mutations. Generate with `openssl rand -hex 32`; keep distinct from proxy/JWT/audit/master secrets. Browser auth and verified user sessions do not receive this secret. |
 | `STEWARD_DB_MODE` | No | — | Set to `pglite` for embedded DB (no Postgres needed). For local dev only. |
 | `POSTGRES_USER` | No | `steward` | Postgres user (Docker Compose internal DB). |
 | `POSTGRES_PASSWORD` | No | `changeme` | Postgres password (Docker Compose internal DB). Change this! |

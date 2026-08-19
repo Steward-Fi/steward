@@ -111,6 +111,7 @@ chmod 600 /opt/steward/.env"
 | `STEWARD_BIND_HOST` | Must be `0.0.0.0` for Docker containers to reach it | Yes |
 | `REDIS_URL` | Redis connection string for rate limiting + spend tracking | Yes (production) |
 | `STEWARD_PROXY_REQUEST_SIGNING_SECRETS` | Shared secret(s) the proxy uses to verify every request signature | Yes (production) |
+| `STEWARD_REQUEST_SIGNING_SECRETS` | Distinct API HMAC root for production machine-request signatures | Yes (production) |
 | `RPC_URL` | EVM RPC endpoint (default: Base mainnet) | No |
 
 ### Step 4: Create systemd services

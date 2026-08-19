@@ -1,7 +1,7 @@
 import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 import { createMiddleware } from "hono/factory";
 import type { ApiResponse, AppVariables } from "../services/context";
-import { resolveRequestSecurityPosture } from "../services/request-security-config";
+import { requestExpiryRequiredForRequest } from "../services/request-security-config";
 import { isSensitivePath } from "./sensitive-paths";
 
 const DEFAULT_MAX_CLOCK_SKEW_MS = 5 * 60 * 1000;
@@ -47,7 +47,8 @@ export function requestExpiry(options?: RequestExpiryOptions) {
     const timestampHeader = c.req.header("X-Steward-Request-Timestamp");
 
     if (!expiresAtHeader && !timestampHeader) {
-      const required = options?.required ?? resolveRequestSecurityPosture().requestExpiryRequired;
+      const required =
+        options?.required ?? (await requestExpiryRequiredForRequest(c.req.raw, c.req.path));
       if (!required) return next();
       return c.json<ApiResponse>({ ok: false, error: "Request expiry header required" }, 400);
     }

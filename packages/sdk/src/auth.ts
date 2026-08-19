@@ -311,6 +311,12 @@ async function authRequest<T>(
   if (init.headers) {
     new Headers(init.headers).forEach((value, key) => headers.set(key, value));
   }
+  const method = (init.method ?? "GET").toUpperCase();
+  if (["POST", "PUT", "PATCH", "DELETE"].includes(method)) {
+    if (!headers.has("X-Steward-Request-Timestamp")) {
+      headers.set("X-Steward-Request-Timestamp", String(Math.floor(Date.now() / 1000)));
+    }
+  }
 
   let response: Response;
   try {

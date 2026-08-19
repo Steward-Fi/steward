@@ -61,6 +61,7 @@ import { KeyStore, Vault } from "@stwd/vault";
 import { and, count, eq, ilike, inArray, isNull, ne, or, type SQL, sql } from "drizzle-orm";
 import { type Context, Hono } from "hono";
 import { writeAuditEvent } from "../services/audit";
+import { configurationFingerprint } from "../services/config-fingerprint";
 import {
   type AppVariables,
   createAgentToken,
@@ -336,11 +337,12 @@ function platformKeyStore(): KeyStore {
   }
 
   const effectivePassword = masterPassword || "dev-secret";
-  const fingerprint = hashSha256Hex(effectivePassword);
+  const masterSalt = runtimeEnvironmentValue("STEWARD_KDF_SALT");
+  const fingerprint = configurationFingerprint({ effectivePassword, masterSalt: masterSalt || "" });
   if (!requestScoped && _platformKeyStore?.fingerprint === fingerprint) {
     return _platformKeyStore.keyStore;
   }
-  const keyStore = new KeyStore(effectivePassword);
+  const keyStore = new KeyStore(effectivePassword, masterSalt);
   if (!requestScoped) _platformKeyStore = { fingerprint, keyStore };
   return keyStore;
 }

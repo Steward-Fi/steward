@@ -37,6 +37,8 @@ const ENV_KEYS = [
   "STEWARD_PKCS11_KEY_LABEL",
   "STEWARD_ACK_LOCAL_CUSTODY",
   "STEWARD_KDF_SALT",
+  "RPC_URL",
+  "CHAIN_ID",
 ] as const;
 
 // A known-valid KDF salt (>=32 hex chars). Production-boot tests pin this
@@ -93,6 +95,19 @@ afterEach(() => {
 });
 
 describe("vault factory", () => {
+  function internals(vault: ReturnType<typeof getConfiguredVault>) {
+    return vault as unknown as {
+      config: { rpcUrl: string; chainId: number };
+      keyStore: { options?: Record<string, string> };
+      externalKeyCustodyProvider?: {
+        region: string;
+        maxGasLimit: bigint;
+        maxGasPriceWei: bigint;
+        maxTotalFeeWei: bigint;
+      };
+    };
+  }
+
   it("memoizes configured vaults by effective password", () => {
     process.env.STEWARD_MASTER_PASSWORD = "factory-master-one";
     delete process.env.STEWARD_KMS_PROVIDER;
@@ -124,6 +139,154 @@ describe("vault factory", () => {
     );
 
     expect(second).not.toBe(first);
+  });
+
+  it("constructs overlapping non-local vaults entirely from their request snapshots", async () => {
+    let started = 0;
+    let release!: () => void;
+    let bothStarted!: () => void;
+    const barrier = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const ready = new Promise<void>((resolve) => {
+      bothStarted = resolve;
+    });
+    const afterOverlap = async () => {
+      started += 1;
+      if (started === 2) bothStarted();
+      await barrier;
+      return getConfiguredVault();
+    };
+
+    const awsVaultPromise = withRuntimeEnvironment(
+      {
+        NODE_ENV: "test",
+        STEWARD_MASTER_PASSWORD: "request-aws-master",
+        STEWARD_KDF_SALT: "1".repeat(64),
+        STEWARD_KMS_PROVIDER: "aws",
+        STEWARD_KMS_KEY_ID: "alias/request-aws-key",
+        STEWARD_AWS_REGION: "us-east-1",
+        STEWARD_EXTERNAL_CUSTODY_PROVIDER: "aws-kms",
+        STEWARD_EXTERNAL_CUSTODY_AWS_REGION: "us-west-2",
+        STEWARD_EXTERNAL_CUSTODY_AWS_MAX_GAS_LIMIT: "111111",
+        STEWARD_EXTERNAL_CUSTODY_AWS_MAX_GAS_PRICE_WEI: "222222",
+        STEWARD_EXTERNAL_CUSTODY_AWS_MAX_TOTAL_FEE_WEI: "333333",
+        RPC_URL: "https://request-one.invalid",
+        CHAIN_ID: "111",
+      },
+      afterOverlap,
+    );
+    const pkcs11VaultPromise = withRuntimeEnvironment(
+      {
+        NODE_ENV: "test",
+        STEWARD_MASTER_PASSWORD: "request-pkcs11-master",
+        STEWARD_KDF_SALT: "2".repeat(64),
+        STEWARD_KMS_PROVIDER: "pkcs11",
+        STEWARD_PKCS11_MODULE: "/request/two/pkcs11.so",
+        STEWARD_PKCS11_PIN: "request-two-pin",
+        STEWARD_PKCS11_KEY_LABEL: "request-two-key",
+        RPC_URL: "https://request-two.invalid",
+        CHAIN_ID: "222",
+      },
+      afterOverlap,
+    );
+
+    await ready;
+    process.env.STEWARD_KMS_PROVIDER = "aws";
+    process.env.STEWARD_KMS_KEY_ID = "alias/poison-global-key";
+    process.env.STEWARD_AWS_REGION = "eu-west-1";
+    process.env.STEWARD_EXTERNAL_CUSTODY_AWS_REGION = "eu-central-1";
+    process.env.STEWARD_EXTERNAL_CUSTODY_AWS_MAX_GAS_LIMIT = "999999";
+    process.env.STEWARD_EXTERNAL_CUSTODY_AWS_MAX_GAS_PRICE_WEI = "999999";
+    process.env.STEWARD_EXTERNAL_CUSTODY_AWS_MAX_TOTAL_FEE_WEI = "999999";
+    process.env.RPC_URL = "https://poison-global.invalid";
+    process.env.CHAIN_ID = "999";
+    release();
+
+    const [awsVault, pkcs11Vault] = await Promise.all([awsVaultPromise, pkcs11VaultPromise]);
+    const aws = internals(awsVault);
+    expect(aws.keyStore.options).toMatchObject({
+      provider: "aws",
+      keyId: "alias/request-aws-key",
+      region: "us-east-1",
+    });
+    expect(aws.config).toMatchObject({ rpcUrl: "https://request-one.invalid", chainId: 111 });
+    expect(aws.externalKeyCustodyProvider).toMatchObject({
+      region: "us-west-2",
+      maxGasLimit: 111111n,
+      maxGasPriceWei: 222222n,
+      maxTotalFeeWei: 333333n,
+    });
+
+    const pkcs11 = internals(pkcs11Vault);
+    expect(pkcs11.keyStore.options).toMatchObject({
+      provider: "pkcs11",
+      modulePath: "/request/two/pkcs11.so",
+      pin: "request-two-pin",
+      keyLabel: "request-two-key",
+    });
+    expect(pkcs11.config).toMatchObject({ rpcUrl: "https://request-two.invalid", chainId: 222 });
+    expect(pkcs11.externalKeyCustodyProvider).toBeUndefined();
+  });
+
+  it("rotates the process vault cache for every behavior-affecting custody setting", () => {
+    process.env.NODE_ENV = "test";
+    process.env.STEWARD_MASTER_PASSWORD = "cache-master";
+    process.env.STEWARD_KDF_SALT = "3".repeat(64);
+    process.env.RPC_URL = "https://cache-one.invalid";
+    process.env.CHAIN_ID = "1001";
+    delete process.env.STEWARD_KMS_PROVIDER;
+
+    let previous = getConfiguredVault();
+    const expectRotation = () => {
+      const next = getConfiguredVault();
+      expect(next).not.toBe(previous);
+      previous = next;
+    };
+
+    process.env.STEWARD_KDF_SALT = "4".repeat(64);
+    expectRotation();
+    process.env.RPC_URL = "https://cache-two.invalid";
+    expectRotation();
+    process.env.CHAIN_ID = "1002";
+    expectRotation();
+
+    process.env.STEWARD_KMS_PROVIDER = "aws";
+    process.env.STEWARD_KMS_KEY_ID = "alias/cache-one";
+    process.env.STEWARD_AWS_REGION = "us-east-1";
+    expectRotation();
+    process.env.STEWARD_KMS_KEY_ID = "alias/cache-two";
+    expectRotation();
+    process.env.STEWARD_AWS_REGION = "us-west-2";
+    expectRotation();
+
+    process.env.STEWARD_KMS_PROVIDER = "pkcs11";
+    process.env.STEWARD_PKCS11_MODULE = "/cache/one/pkcs11.so";
+    process.env.STEWARD_PKCS11_PIN = "cache-pin-one";
+    process.env.STEWARD_PKCS11_KEY_LABEL = "cache-label-one";
+    expectRotation();
+    process.env.STEWARD_PKCS11_MODULE = "/cache/two/pkcs11.so";
+    expectRotation();
+    process.env.STEWARD_PKCS11_PIN = "cache-pin-two";
+    expectRotation();
+    process.env.STEWARD_PKCS11_KEY_LABEL = "cache-label-two";
+    expectRotation();
+
+    delete process.env.STEWARD_KMS_PROVIDER;
+    process.env.STEWARD_EXTERNAL_CUSTODY_PROVIDER = "aws-kms";
+    process.env.STEWARD_EXTERNAL_CUSTODY_AWS_REGION = "us-east-1";
+    process.env.STEWARD_EXTERNAL_CUSTODY_AWS_MAX_GAS_LIMIT = "100000";
+    process.env.STEWARD_EXTERNAL_CUSTODY_AWS_MAX_GAS_PRICE_WEI = "2000000000";
+    process.env.STEWARD_EXTERNAL_CUSTODY_AWS_MAX_TOTAL_FEE_WEI = "100000000000000";
+    expectRotation();
+    process.env.STEWARD_EXTERNAL_CUSTODY_AWS_REGION = "us-west-2";
+    expectRotation();
+    process.env.STEWARD_EXTERNAL_CUSTODY_AWS_MAX_GAS_LIMIT = "100001";
+    expectRotation();
+    process.env.STEWARD_EXTERNAL_CUSTODY_AWS_MAX_GAS_PRICE_WEI = "2000000001";
+    expectRotation();
+    process.env.STEWARD_EXTERNAL_CUSTODY_AWS_MAX_TOTAL_FEE_WEI = "100000000000001";
+    expectRotation();
   });
 
   it("fails closed when non-platform callers have no master password", () => {

@@ -149,6 +149,7 @@ import {
   validateWalletAbusePolicy,
   verifyCaptchaToken,
 } from "../services/auth-abuse";
+import { configurationFingerprint } from "../services/config-fingerprint";
 import { verifyEip1271 } from "../services/eip1271";
 import {
   isAllowedOidcClientSecretEnvForTenant,
@@ -1716,13 +1717,21 @@ let _oauthKeyStore: { fingerprint: string; keyStore: KeyStore } | null = null;
 
 function createConfiguredKeyStore(missingPasswordMessage: string): KeyStore {
   const masterPassword = runtimeEnvironmentValue("STEWARD_MASTER_PASSWORD");
+  const masterSalt = runtimeEnvironmentValue("STEWARD_KDF_SALT");
   if (!masterPassword) {
     if (!isDevSecretAllowed()) {
       throw new Error(missingPasswordMessage);
     }
-    return new KeyStore("dev-secret");
+    return new KeyStore("dev-secret", masterSalt);
   }
-  return new KeyStore(masterPassword);
+  return new KeyStore(masterPassword, masterSalt);
+}
+
+function keyStoreConfigurationFingerprint(): string {
+  return configurationFingerprint({
+    masterPassword: runtimeEnvironmentValue("STEWARD_MASTER_PASSWORD") || "dev-secret",
+    masterSalt: runtimeEnvironmentValue("STEWARD_KDF_SALT") || "",
+  });
 }
 
 function getEmailKeyStore(): KeyStore {
@@ -1731,9 +1740,7 @@ function getEmailKeyStore(): KeyStore {
       "STEWARD_MASTER_PASSWORD is required. For local development only, set STEWARD_ALLOW_DEV_SECRETS=true to use the insecure dev key.",
     );
   }
-  const fingerprint = hashSha256Hex(
-    runtimeEnvironmentValue("STEWARD_MASTER_PASSWORD") || "dev-secret",
-  );
+  const fingerprint = keyStoreConfigurationFingerprint();
   if (_emailKeyStore?.fingerprint === fingerprint) return _emailKeyStore.keyStore;
   const keyStore = createConfiguredKeyStore(
     "STEWARD_MASTER_PASSWORD is required. For local development only, set STEWARD_ALLOW_DEV_SECRETS=true to use the insecure dev key.",
@@ -1748,9 +1755,7 @@ function getOAuthKeyStore(): KeyStore {
       "STEWARD_MASTER_PASSWORD is required to encrypt OAuth provider tokens. For local development only, set STEWARD_ALLOW_DEV_SECRETS=true to use the insecure dev key.",
     );
   }
-  const fingerprint = hashSha256Hex(
-    runtimeEnvironmentValue("STEWARD_MASTER_PASSWORD") || "dev-secret",
-  );
+  const fingerprint = keyStoreConfigurationFingerprint();
   if (_oauthKeyStore?.fingerprint === fingerprint) return _oauthKeyStore.keyStore;
   const keyStore = createConfiguredKeyStore(
     "STEWARD_MASTER_PASSWORD is required to encrypt OAuth provider tokens. For local development only, set STEWARD_ALLOW_DEV_SECRETS=true to use the insecure dev key.",
@@ -2818,15 +2823,13 @@ export function getPhoneAuth(): PhoneAuth {
     throw new Error("SMS provider not configured");
   }
 
-  const fingerprint = hashSha256Hex(
-    JSON.stringify({
-      provider: runtimeEnvironmentValue("SMS_PROVIDER") || "console",
-      nodeEnv: runtimeEnvironmentValue("NODE_ENV") || "",
-      twilioAccountSid: twilioAccountSid || "",
-      twilioAuthToken: twilioAuthToken || "",
-      twilioFrom: twilioFrom || "",
-    }),
-  );
+  const fingerprint = configurationFingerprint({
+    provider: runtimeEnvironmentValue("SMS_PROVIDER") || "console",
+    nodeEnv: runtimeEnvironmentValue("NODE_ENV") || "",
+    twilioAccountSid: twilioAccountSid || "",
+    twilioAuthToken: twilioAuthToken || "",
+    twilioFrom: twilioFrom || "",
+  });
   if (!requestScoped && _phoneAuth?.fingerprint === fingerprint) return _phoneAuth.auth;
 
   const phoneAuth = new PhoneAuth({

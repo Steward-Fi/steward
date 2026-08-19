@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import { accounts, closeDb, tenantConfigs, tenants, users } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
+import { withRuntimeEnvironment } from "@stwd/shared/runtime-env";
 import { eq } from "drizzle-orm";
 import {
   authRoutes,
@@ -38,6 +39,7 @@ describe("OAuth provider token encryption", () => {
     clearOAuthTokenKeyStoreForTests();
     await closeDb().catch(() => {});
     delete process.env.STEWARD_MASTER_PASSWORD;
+    delete process.env.STEWARD_KDF_SALT;
     delete process.env.JWT_SECRET;
     delete process.env.APP_URL;
     delete process.env.GOOGLE_CLIENT_ID;
@@ -77,6 +79,90 @@ describe("OAuth provider token encryption", () => {
         salt: encrypted.accessTokenSalt ?? null,
       }),
     ).toThrow(/Failed to decrypt OAuth provider token: check STEWARD_MASTER_PASSWORD/);
+  });
+
+  it("isolates overlapping OAuth KeyStores by request-local KDF salt", async () => {
+    let release!: () => void;
+    let markReady!: () => void;
+    const barrier = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const ready = new Promise<void>((resolve) => {
+      markReady = resolve;
+    });
+    const encryptInSnapshot = (salt: string, plaintext: string, waits: boolean) =>
+      withRuntimeEnvironment(
+        {
+          NODE_ENV: "test",
+          STEWARD_MASTER_PASSWORD: MASTER_PASSWORD,
+          STEWARD_KDF_SALT: salt,
+        },
+        async () => {
+          if (waits) {
+            markReady();
+            await barrier;
+          } else {
+            await ready;
+          }
+          const encrypted = encryptOAuthProviderTokens(plaintext);
+          const decrypted = decryptOAuthProviderToken({
+            ciphertext: encrypted.accessTokenEncrypted ?? null,
+            iv: encrypted.accessTokenIv ?? null,
+            tag: encrypted.accessTokenTag ?? null,
+            salt: encrypted.accessTokenSalt ?? null,
+          });
+          if (!waits) release();
+          return { encrypted, decrypted };
+        },
+      );
+
+    const firstPromise = encryptInSnapshot("1".repeat(64), "first-request-token", true);
+    const secondPromise = encryptInSnapshot("2".repeat(64), "second-request-token", false);
+    const [first, second] = await Promise.all([firstPromise, secondPromise]);
+    expect(first.decrypted).toBe("first-request-token");
+    expect(second.decrypted).toBe("second-request-token");
+
+    expect(() =>
+      withRuntimeEnvironment(
+        {
+          NODE_ENV: "test",
+          STEWARD_MASTER_PASSWORD: MASTER_PASSWORD,
+          STEWARD_KDF_SALT: "2".repeat(64),
+        },
+        () =>
+          decryptOAuthProviderToken({
+            ciphertext: first.encrypted.accessTokenEncrypted ?? null,
+            iv: first.encrypted.accessTokenIv ?? null,
+            tag: first.encrypted.accessTokenTag ?? null,
+            salt: first.encrypted.accessTokenSalt ?? null,
+          }),
+      ),
+    ).toThrow(/Failed to decrypt OAuth provider token/);
+  });
+
+  it("rotates the process OAuth KeyStore when the KDF salt rotates", () => {
+    process.env.STEWARD_KDF_SALT = "3".repeat(64);
+    const encrypted = encryptOAuthProviderTokens("salt-rotation-token");
+
+    process.env.STEWARD_KDF_SALT = "4".repeat(64);
+    expect(() =>
+      decryptOAuthProviderToken({
+        ciphertext: encrypted.accessTokenEncrypted ?? null,
+        iv: encrypted.accessTokenIv ?? null,
+        tag: encrypted.accessTokenTag ?? null,
+        salt: encrypted.accessTokenSalt ?? null,
+      }),
+    ).toThrow(/Failed to decrypt OAuth provider token/);
+
+    process.env.STEWARD_KDF_SALT = "3".repeat(64);
+    expect(
+      decryptOAuthProviderToken({
+        ciphertext: encrypted.accessTokenEncrypted ?? null,
+        iv: encrypted.accessTokenIv ?? null,
+        tag: encrypted.accessTokenTag ?? null,
+        salt: encrypted.accessTokenSalt ?? null,
+      }),
+    ).toBe("salt-rotation-token");
   });
 
   it("completes the mocked OAuth token flow and stores provider tokens encrypted", async () => {

@@ -1,22 +1,11 @@
 /**
  * Single source of truth for the set of request paths considered
  * "sensitive" — i.e. money-, key-, auth-, or tenant-administration surfaces
- * that MUST be both freshness-checked (request-expiry) AND signature-checked
- * (authorization-signature) when those guards are enabled.
- *
- * Previously this predicate was duplicated byte-for-byte in
- * `request-expiry.ts` and `authorization-signature.ts`. Keeping two copies in
- * lockstep is a drift hazard: if one copy gained or dropped a prefix, a path
- * could be freshness-checked but not signature-checked (or vice-versa),
- * silently weakening a load-bearing guard. Both middlewares now import this
- * one helper so the two guards always cover the exact same surface.
- *
- * The prefix set is the conservative UNION of what each copy historically
- * treated as sensitive (the two copies were already identical, so the union is
- * that same set), plus the money-/key-/auth-adjacent surfaces added in SEC-150
- * (`/v1/kms`, `/v2/provider-actions`, `/dashboard`, `/agent-enroll`). Adding a
- * prefix here tightens BOTH guards together; never narrow it without auditing
- * both call sites.
+ * that are freshness-checked and signature-checked according to the resolved
+ * request posture. Public authentication and verified user-session requests
+ * have a narrow browser exemption because they cannot safely hold a shared
+ * server HMAC root; agent and other machine credentials remain fail-closed in
+ * production. Adding or removing a prefix changes both middleware guards.
  */
 
 /** Path prefixes whose mutating requests are treated as sensitive. */
@@ -53,9 +42,8 @@ export const SENSITIVE_PATH_PREFIXES: readonly string[] = [
   "/v2/provider-accounts",
   "/v2/provider-role-bindings",
   "/v2/provider-grants",
-  // Money-movement + key-material + auth-adjacent surfaces that must stay
-  // covered (SEC-150): KMS key ops, provider action execution/approval,
-  // dashboard session mutations, and agent enrollment.
+  // KMS key operations, provider action execution and approval, dashboard
+  // session mutations, and agent enrollment remain sensitive surfaces.
   "/v1/kms",
   "/v2/provider-actions",
   "/dashboard",

@@ -618,9 +618,9 @@ export function buildTenantSecurityChecklist(
   requestSigningKeys: TenantRequestSigningKey[],
 ): TenantSecurityChecklist {
   const production = runtimeEnvironmentValue("NODE_ENV") === "production";
-  // These mirror the mounted guards: invalid presented headers always fail,
-  // production requires freshness, and signatures become mandatory only when
-  // the operator explicitly enables them for server-to-server clients.
+  // These mirror the mounted guards: invalid presented headers always fail;
+  // production machine requests require freshness and signatures; public auth
+  // bootstrap and verified user sessions retain their browser-safe exemption.
   const { requestExpiryRequired, authorizationSignatureRequired: authSignatureRequired } =
     resolveRequestSecurityPosture();
   const signingSecrets = configuredRequestSigningSecrets();
@@ -683,7 +683,7 @@ export function buildTenantSecurityChecklist(
       label: "Request freshness",
       status: requestExpiryRequired ? "pass" : production ? "fail" : "warning",
       description: requestExpiryRequired
-        ? "Sensitive mutating requests require an expiry or timestamp freshness header."
+        ? "Sensitive machine requests require an expiry or timestamp freshness header; browser auth and verified user sessions are exempt unless explicitly forced."
         : "Sensitive mutating requests validate freshness headers when present but do not require them.",
       remediation: requestExpiryRequired
         ? undefined
@@ -704,8 +704,8 @@ export function buildTenantSecurityChecklist(
         (signingSecrets.length > 0 ||
           appClientSigningSecrets.length > 0 ||
           standaloneSigningKeys.length > 0)
-          ? "Sensitive mutating requests require X-Steward-Signature and have an env, app-client, or tenant signing key available."
-          : "Authorization signatures are verified when present but are not required for every sensitive mutation.",
+          ? "Sensitive machine requests require X-Steward-Signature and have an env, app-client, or tenant signing key available; browser auth and verified user sessions are exempt unless explicitly forced."
+          : "Authorization signatures are verified when present but are not required by this deployment posture.",
       remediation:
         authSignatureRequired &&
         (signingSecrets.length > 0 ||

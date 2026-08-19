@@ -15,8 +15,8 @@ import type { Context } from "hono";
 import { createMiddleware } from "hono/factory";
 import { type ApiResponse, type AppVariables, isValidTenantId } from "../services/context";
 import {
+  authorizationSignatureRequiredForRequest,
   configuredRequestSigningSecrets,
-  resolveRequestSecurityPosture,
 } from "../services/request-security-config";
 import { isSensitivePath } from "./sensitive-paths";
 
@@ -810,7 +810,8 @@ export function authorizationSignature(options?: AuthorizationSignatureOptions) 
     const rawSignature = c.req.header("X-Steward-Signature");
     if (!rawSignature) {
       const required =
-        options?.required ?? resolveRequestSecurityPosture().authorizationSignatureRequired;
+        options?.required ??
+        (await authorizationSignatureRequiredForRequest(c.req.raw, c.req.path));
       if (!required) return next();
       return c.json<ApiResponse>({ ok: false, error: "X-Steward-Signature header required" }, 401);
     }

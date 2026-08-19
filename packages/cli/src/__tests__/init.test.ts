@@ -192,6 +192,7 @@ describe("steward init", () => {
         "STEWARD_AUDIT_HMAC_KEY",
         "STEWARD_AUDIT_SIGNING_KEY",
         "STEWARD_PLATFORM_KEY",
+        "STEWARD_REQUEST_SIGNING_SECRETS",
         "STEWARD_PROXY_REQUEST_SIGNING_SECRETS",
       ];
       for (const key of keys) {
@@ -270,6 +271,7 @@ describe("steward init", () => {
         "STEWARD_AUDIT_HMAC_KEY",
         "STEWARD_AUDIT_SIGNING_KEY",
         "STEWARD_PLATFORM_KEY",
+        "STEWARD_REQUEST_SIGNING_SECRETS",
         "STEWARD_PROXY_REQUEST_SIGNING_SECRETS",
       ];
       const combined = stdout + stderr;
@@ -388,6 +390,7 @@ describe("steward init", () => {
         "STEWARD_KDF_SALT",
         "STEWARD_AUDIT_HMAC_KEY",
         "STEWARD_AUDIT_SIGNING_KEY",
+        "STEWARD_REQUEST_SIGNING_SECRETS",
         "STEWARD_PROXY_REQUEST_SIGNING_SECRETS",
       ];
       for (const key of secretKeys) {

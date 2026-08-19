@@ -91,6 +91,11 @@ export async function runDoctor(
       detail: "platform key should include platform:tenant:create for steward tenant create",
     });
     checks.push({
+      name: "strict:api-request-signing",
+      ok: Boolean(env.STEWARD_REQUEST_SIGNING_SECRETS ?? env.STEWARD_REQUEST_SIGNING_SECRET),
+      detail: "required for production machine-request signatures",
+    });
+    checks.push({
       name: "strict:proxy-request-signing",
       ok: Boolean(env.STEWARD_PROXY_REQUEST_SIGNING_SECRETS),
       detail: "required for production proxy request signing",

@@ -52,6 +52,7 @@ services:
       REDIS_URL: "redis://redis:6379"
       STEWARD_MASTER_PASSWORD: "${STEWARD_MASTER_PASSWORD:?required}"
       STEWARD_JWT_SECRET: "${STEWARD_JWT_SECRET:?required}"
+      STEWARD_REQUEST_SIGNING_SECRETS: "${STEWARD_REQUEST_SIGNING_SECRETS:?required}"
       STEWARD_EXECUTION_AUTH_SECRET: "${STEWARD_EXECUTION_AUTH_SECRET:?required}"
       STEWARD_KDF_SALT: "${STEWARD_KDF_SALT:?required}"
       # Custody posture: no STEWARD_KMS_PROVIDER is set, so the vault runs in

@@ -98,6 +98,7 @@ function renderEnv(options: InitOptions): string {
     "RPC_URL=https://mainnet.base.org",
     "CHAIN_ID=8453",
     "REDIS_URL=redis://redis:6379",
+    "STEWARD_REQUEST_SIGNING_SECRETS=" + hex(32),
     "STEWARD_PROXY_REQUEST_SIGNING_SECRETS=" + hex(32),
     "APP_URL=https://steward.localhost",
     "PASSKEY_RP_NAME=Steward",

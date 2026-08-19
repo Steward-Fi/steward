@@ -106,6 +106,8 @@ POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-$(env_get POSTGRES_PASSWORD)}"
 [[ -n "${POSTGRES_PASSWORD}" ]] || POSTGRES_PASSWORD="$(openssl rand -hex 32)"
 STEWARD_PROXY_REQUEST_SIGNING_SECRETS="${STEWARD_PROXY_REQUEST_SIGNING_SECRETS:-$(env_get STEWARD_PROXY_REQUEST_SIGNING_SECRETS)}"
 [[ -n "${STEWARD_PROXY_REQUEST_SIGNING_SECRETS}" ]] || STEWARD_PROXY_REQUEST_SIGNING_SECRETS="$(openssl rand -hex 32)"
+STEWARD_REQUEST_SIGNING_SECRETS="${STEWARD_REQUEST_SIGNING_SECRETS:-$(env_get STEWARD_REQUEST_SIGNING_SECRETS)}"
+[[ -n "${STEWARD_REQUEST_SIGNING_SECRETS}" ]] || STEWARD_REQUEST_SIGNING_SECRETS="$(openssl rand -hex 32)"
 PLATFORM_KEY="${STEWARD_PLATFORM_KEY:-$(env_get STEWARD_PLATFORM_KEY)}"
 [[ -n "${PLATFORM_KEY}" ]] || PLATFORM_KEY="$(openssl rand -hex 32)"
 
@@ -113,7 +115,8 @@ PLATFORM_KEY="${STEWARD_PLATFORM_KEY:-$(env_get STEWARD_PLATFORM_KEY)}"
 # injection without ever echoing the value itself. Platform keys additionally
 # use the documented URL-safe token alphabet consumed by the curl header seam.
 for env_name in STEWARD_MASTER_PASSWORD STEWARD_JWT_SECRET STEWARD_KDF_SALT \
-  STEWARD_AUDIT_HMAC_KEY PLATFORM_KEY STEWARD_PROXY_REQUEST_SIGNING_SECRETS \
+  STEWARD_AUDIT_HMAC_KEY PLATFORM_KEY STEWARD_REQUEST_SIGNING_SECRETS \
+  STEWARD_PROXY_REQUEST_SIGNING_SECRETS \
   POSTGRES_PASSWORD DATABASE_URL REDIS_URL RPC_URL SOLANA_RPC_URL; do
   env_value="${!env_name-}"
   if [[ "${env_value}" == *$'\n'* || "${env_value}" == *$'\r'* ]]; then
@@ -136,6 +139,7 @@ STEWARD_JWT_SECRET=${STEWARD_JWT_SECRET}
 STEWARD_KDF_SALT=${STEWARD_KDF_SALT}
 STEWARD_AUDIT_HMAC_KEY=${STEWARD_AUDIT_HMAC_KEY}
 STEWARD_PLATFORM_KEY=${PLATFORM_KEY}
+STEWARD_REQUEST_SIGNING_SECRETS=${STEWARD_REQUEST_SIGNING_SECRETS}
 STEWARD_PROXY_REQUEST_SIGNING_SECRETS=${STEWARD_PROXY_REQUEST_SIGNING_SECRETS}
 POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
 DATABASE_URL=${DATABASE_URL:-}
@@ -212,8 +216,9 @@ echo "  Platform Key:   (written to ${REMOTE_DIR}/deploy/.env, mode 0600, on the
 echo ""
 echo "  Agent config (add to container env):"
 echo "    STEWARD_API_URL=http://steward:3200"
+echo "    STEWARD_REQUEST_SIGNING_SECRETS=(retrieve from ${REMOTE_DIR}/deploy/.env on the node, not printed here)"
 echo "    STEWARD_PROXY_REQUEST_SIGNING_SECRETS=(retrieve from ${REMOTE_DIR}/deploy/.env on the node, not printed here)"
-echo "    # Agents must use this shared secret to sign proxied requests; the node-side .env is mode 0600."
+echo "    # Agents use distinct API and proxy roots; the node-side .env is mode 0600."
 echo "    (agents on milady-isolated network reach Steward by container name)"
 echo ""
 echo "  External access (ports 3200/8080 are bound to 127.0.0.1 — no plain-HTTP exposure):"

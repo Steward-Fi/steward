@@ -5819,11 +5819,12 @@ export class StewardClient {
   private async buildRequestHeaders(path: string, init: RequestInit): Promise<Headers> {
     const headers = this.buildHeaders(init.headers);
     const method = (init.method ?? "GET").toUpperCase();
-    if (!this.requestSigningSecret || !isSensitiveMutatingRequest(path, method)) return headers;
+    if (!isSensitiveMutatingRequest(path, method)) return headers;
 
     if (!headers.has("X-Steward-Request-Timestamp")) {
       headers.set("X-Steward-Request-Timestamp", String(Math.floor(Date.now() / 1000)));
     }
+    if (!this.requestSigningSecret) return headers;
     if (!headers.has("Idempotency-Key")) {
       headers.set("Idempotency-Key", randomIdempotencyKey());
     }

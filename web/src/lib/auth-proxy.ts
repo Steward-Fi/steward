@@ -243,7 +243,11 @@ export async function forwardToApi(
       // recipient, so redirects are always a hard failure at this boundary.
       redirect: "error",
       signal: controller.signal,
-      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        "X-Steward-Request-Timestamp": String(Math.floor(Date.now() / 1000)),
+      },
       body: JSON.stringify(payload),
     });
 

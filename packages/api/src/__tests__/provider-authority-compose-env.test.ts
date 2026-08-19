@@ -61,6 +61,18 @@ describe("governed-route environment wiring", () => {
     }
   });
 
+  test("production API compose profiles require a distinct machine-request signing root", () => {
+    for (const [path, service] of [
+      [ROOT_COMPOSE, "steward-api"],
+      [DEPLOY_COMPOSE, "steward"],
+      [COMPOSE, "steward-api"],
+    ] as const) {
+      const source = composeService(path, service);
+      expect(source).toMatch(/STEWARD_REQUEST_SIGNING_SECRETS?:/);
+      expect(source).toMatch(/STEWARD_REQUEST_SIGNING_SECRETS?[^\n]*:\?/);
+    }
+  });
+
   test("deployment guides keep JWT signing material server-side", () => {
     for (const path of [
       join(ROOT, "README.md"),

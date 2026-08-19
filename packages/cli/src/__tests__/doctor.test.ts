@@ -25,6 +25,7 @@ const DOCTOR_ENV_KEYS = [
   "STEWARD_AUDIT_HMAC_KEY",
   "STEWARD_AUDIT_SIGNING_KEY",
   "STEWARD_PLATFORM_KEY_SCOPES",
+  "STEWARD_REQUEST_SIGNING_SECRETS",
   "STEWARD_PROXY_REQUEST_SIGNING_SECRETS",
 ] as const;
 const savedDoctorEnv = new Map<string, string | undefined>();

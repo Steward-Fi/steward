@@ -39,9 +39,12 @@ Sensitive mutating routes can validate request freshness with:
 - `X-Steward-Request-Expires-At`: ISO-8601 time, Unix seconds, or Unix milliseconds.
 - `X-Steward-Request-Timestamp`: ISO-8601 time, Unix seconds, or Unix milliseconds.
 
-The middleware validates these headers on sensitive mutating routes and requires
-one by default in production. Set `STEWARD_REQUIRE_REQUEST_EXPIRY=true` to
-force the requirement outside production.
+The middleware validates these headers on sensitive mutating routes. Production
+requires one for machine requests. Public `/auth` bootstrap and requests with a
+verified user access JWT are exempt so browser clients do not need a server
+secret; agent JWTs and other machine credentials are not exempt. Set
+`STEWARD_REQUIRE_REQUEST_EXPIRY=true` to require freshness on every sensitive
+mutation, including browser flows, outside or inside production.
 
 Defaults:
 
@@ -61,11 +64,12 @@ Sensitive mutating routes can be protected with an HMAC request signature:
   secret, trade, approval, intent, audit, webhook, policy, and condition-set
   mutation paths.
 
-Signatures are verified whenever present. Set
-`STEWARD_REQUIRE_AUTH_SIGNATURE=true` to require them for every sensitive
-mutation in server-to-server deployments. Browser bootstrap and authentication
-flows cannot safely hold a shared HMAC root, so production does not enable this
-requirement implicitly. Configure one or more comma-separated secrets with
+Signatures are verified whenever present. Production requires them for sensitive
+machine requests. Public `/auth` bootstrap and requests with a verified user
+access JWT are exempt because browser clients cannot safely hold a shared HMAC
+root; agent JWTs and other machine credentials remain signature-required. Set
+`STEWARD_REQUIRE_AUTH_SIGNATURE=true` to require signatures for every sensitive
+mutation, including browser flows. Configure one or more comma-separated secrets with
 `STEWARD_REQUEST_SIGNING_SECRETS`, or a single secret with
 `STEWARD_REQUEST_SIGNING_SECRET`. Tenant app-client secrets can also sign
 requests: when a request uses Basic auth plus `X-Steward-App-Id`, Steward

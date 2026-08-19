@@ -989,6 +989,19 @@ describe("Request headers", () => {
     );
   });
 
+  it("adds freshness to unsigned browser mutations without exposing a signing root", async () => {
+    installMockFetch({ ok: true, data: { txHash: "0xdeadbeef" } });
+    const client = makeClient({ bearerToken: "user-session-token" });
+
+    await client.signTransaction("agent-1", {
+      to: "0x1234567890123456789012345678901234567890",
+      value: "1000000000000000000",
+    });
+
+    expect(lastCapture?.headers["x-steward-request-timestamp"]).toMatch(/^\d{10}$/);
+    expect(lastCapture?.headers["x-steward-signature"]).toBeUndefined();
+  });
+
   it("sends request signing key ids on signed sensitive mutations", async () => {
     installMockFetch({ ok: true, data: { txHash: "0xdeadbeef" } });
     const client = makeClient({

@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { signAccessToken, signAgentToken } from "@stwd/auth";
 import { withRuntimeEnvironment } from "@stwd/shared/runtime-env";
 import { Hono } from "hono";
 import { requestExpiry } from "../middleware/request-expiry";
@@ -45,6 +46,7 @@ function makeDefaultApp() {
     }),
   );
   app.post("/vault/:agentId/sign", (c) => c.json({ ok: true }));
+  app.post("/auth/email/send", (c) => c.json({ ok: true }));
   return app;
 }
 
@@ -155,5 +157,53 @@ describe("requestExpiry", () => {
     );
 
     expect(denied.status).toBe(400);
+  });
+
+  it("allows public browser bootstrap without weakening machine freshness", async () => {
+    const app = makeDefaultApp();
+
+    const [machine, browser] = await withRuntimeEnvironment({ NODE_ENV: "production" }, () =>
+      Promise.all([
+        app.request("/vault/agent-1/sign", { method: "POST" }),
+        app.request("/auth/email/send", { method: "POST" }),
+      ]),
+    );
+
+    expect(machine.status).toBe(400);
+    expect(browser.status).toBe(200);
+  });
+
+  it("exempts verified user sessions but not agent JWTs from production freshness", async () => {
+    const app = makeDefaultApp();
+    const environment = {
+      NODE_ENV: "production",
+      STEWARD_JWT_SECRET: "production-jwt-secret-with-more-than-32-characters",
+    };
+    const [userToken, agentToken] = await withRuntimeEnvironment(environment, () =>
+      Promise.all([
+        signAccessToken({
+          address: "0x0000000000000000000000000000000000000001",
+          tenantId: "tenant-1",
+          userId: "user-1",
+        }),
+        signAgentToken({ agentId: "agent-1", tenantId: "tenant-1" }),
+      ]),
+    );
+
+    const [user, agent] = await withRuntimeEnvironment(environment, () =>
+      Promise.all([
+        app.request("/vault/agent-1/sign", {
+          method: "POST",
+          headers: { authorization: `Bearer ${userToken}` },
+        }),
+        app.request("/vault/agent-1/sign", {
+          method: "POST",
+          headers: { authorization: `Bearer ${agentToken}` },
+        }),
+      ]),
+    );
+
+    expect(user.status).toBe(200);
+    expect(agent.status).toBe(400);
   });
 });

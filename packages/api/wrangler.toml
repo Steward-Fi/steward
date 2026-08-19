@@ -34,6 +34,7 @@ REDIS_DRIVER = "upstash"
 #   STEWARD_JWT_SECRET               Canonical HS256 JWT signing secret
 #   STEWARD_MASTER_PASSWORD          Vault keystore master
 #   STEWARD_KDF_SALT                 Per-deployment hex salt for the KeyStore KDF
+#   STEWARD_REQUEST_SIGNING_SECRETS  API HMAC roots for production machine requests
 #
 # Email
 #   RESEND_API_KEY                   Magic-link email provider

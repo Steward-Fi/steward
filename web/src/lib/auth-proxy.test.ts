@@ -151,7 +151,10 @@ describe("auth proxy CSRF/header checks (SEC-018)", () => {
 describe("forwardToApi (SEC-018)", () => {
   test("posts JSON to the configured Steward API and parses the response", async () => {
     const { createServer } = await import("node:http");
+    let requestTimestamp: string | undefined;
     const server = createServer((req, res) => {
+      const header = req.headers["x-steward-request-timestamp"];
+      requestTimestamp = Array.isArray(header) ? header[0] : header;
       let body = "";
       req.on("data", (chunk) => {
         body += chunk;
@@ -173,6 +176,7 @@ describe("forwardToApi (SEC-018)", () => {
       expect(result.status).toBe(200);
       expect(result.json?.ok).toBe(true);
       expect((result.json?.echo as { refreshToken?: string })?.refreshToken).toBe("rt-1");
+      expect(requestTimestamp).toMatch(/^\d{10}$/);
     } finally {
       delete process.env.NEXT_PUBLIC_STEWARD_API_URL;
       server.close();

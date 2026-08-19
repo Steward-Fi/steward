@@ -50,8 +50,8 @@ app.use("*", async (c, next) => {
 });
 ```
 
-(Currently Steward calls `getDb()` directly in route handlers; it's still
-correct on Workers because the neon-http client is cheap to construct.)
+Worker requests use the request-owned database context; the neon-http client is
+cheap to construct and never escapes the event lifetime.
 
 ## One-time setup
 
@@ -76,6 +76,7 @@ directory. Do NOT put them in `wrangler.toml`.
 | `STEWARD_JWT_SECRET`            | Canonical HS256 JWT signing and verification secret. Minimum 32 characters in production. |
 | `STEWARD_MASTER_PASSWORD`       | Vault keystore master password. Used by `KeyStore` (AES-256-GCM).      |
 | `STEWARD_KDF_SALT`              | Per-deployment hex salt for the KeyStore KDF. Recommended for prod.    |
+| `STEWARD_REQUEST_SIGNING_SECRETS` | API HMAC roots for production machine requests. Browser clients never receive these values. |
 | `RESEND_API_KEY`                | Magic-link email delivery.                                             |
 | `EMAIL_FROM`                    | Optional: from address for magic links.                                |
 | `APP_URL`                       | Optional: base URL for magic-link callbacks.                           |
