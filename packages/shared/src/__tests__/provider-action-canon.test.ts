@@ -219,6 +219,12 @@ describe("headers", () => {
       ["if-none-match", '"abc"'],
     ]);
   });
+  it("trims adversarial OWS runs without regex backtracking", () => {
+    const ows = " \t".repeat(100_000);
+    expect(canonicalizeHeaders([["if-none-match", `${ows}"abc"${ows}`]])).toEqual([
+      ["if-none-match", '"abc"'],
+    ]);
+  });
   it("accepts weak etag", () => {
     expect(canonicalizeHeaders([["if-none-match", 'W/"7"']])).toEqual([["if-none-match", 'W/"7"']]);
   });

@@ -256,6 +256,10 @@ describe("signEndpointUrl normalization", () => {
     expect(signEndpointUrl(undefined)).toBe("/sign");
     expect(signEndpointUrl("")).toBe("/sign");
   });
+  test("handles adversarial slash runs without regex backtracking", () => {
+    const slashes = "/".repeat(200_000);
+    expect(signEndpointUrl(`${slashes}x`)).toBe(`${slashes}x/sign`);
+  });
 });
 
 describe("builder attribution defaults OFF", () => {

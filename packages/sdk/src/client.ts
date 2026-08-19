@@ -1,4 +1,4 @@
-import { assertSecureBaseUrl } from "./base-url.ts";
+import { assertSecureBaseUrl, stripTrailingSlashes } from "./base-url.ts";
 import type {
   AgentAccountSummary,
   AgentBalance,
@@ -1459,7 +1459,7 @@ export class StewardClient {
       );
     }
     assertSecureBaseUrl(baseUrl, allowInsecureBaseUrl);
-    this.baseUrl = baseUrl.replace(/\/+$/, "");
+    this.baseUrl = stripTrailingSlashes(baseUrl);
     this.apiKey = apiKey;
     this.appId = appId;
     this.appSecret = appSecret;

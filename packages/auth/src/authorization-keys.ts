@@ -44,7 +44,9 @@ export type P256PublicKeyInput = string | JsonWebKey | CryptoKey;
 
 function base64ToBytes(value: string): Uint8Array | null {
   const normalized = value.replace(/-/g, "+").replace(/_/g, "/");
-  const trimmed = normalized.replace(/=+$/, "");
+  let paddingStart = normalized.length;
+  while (paddingStart > 0 && normalized.charCodeAt(paddingStart - 1) === 0x3d) paddingStart -= 1;
+  const trimmed = normalized.slice(0, paddingStart);
   // Reject anything that is not valid base64 alphabet so a hex/garbage string
   // doesn't get silently mangled by atob.
   if (!/^[A-Za-z0-9+/]*$/.test(trimmed)) return null;

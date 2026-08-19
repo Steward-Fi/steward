@@ -152,12 +152,60 @@ export interface MockEmailMessage {
   magicLink?: string;
 }
 
-const MAGIC_LINK_RE = /https?:\/\/\S*[?&]token=([A-Za-z0-9_-]+)/;
-
 function parseMagicLink(text: string): { magicLink?: string; token?: string } {
-  const match = text.match(MAGIC_LINK_RE);
-  if (!match) return {};
-  return { magicLink: match[0], token: match[1] };
+  let segmentStart = 0;
+  while (segmentStart < text.length) {
+    while (segmentStart < text.length && text[segmentStart].trim().length === 0) segmentStart += 1;
+    let segmentEnd = segmentStart;
+    while (segmentEnd < text.length && text[segmentEnd].trim().length !== 0) segmentEnd += 1;
+    if (segmentEnd === segmentStart) break;
+
+    const http = text.indexOf("http://", segmentStart);
+    const https = text.indexOf("https://", segmentStart);
+    const candidates = [http, https].filter((index) => index >= segmentStart && index < segmentEnd);
+    const schemeStart = candidates.length > 0 ? Math.min(...candidates) : -1;
+    if (schemeStart !== -1) {
+      let tokenStart = -1;
+      for (let index = schemeStart; index < segmentEnd; index += 1) {
+        if (text.startsWith("?token=", index) || text.startsWith("&token=", index)) {
+          const candidate = index + 7;
+          const code = text.charCodeAt(candidate);
+          if (
+            (code >= 0x30 && code <= 0x39) ||
+            (code >= 0x41 && code <= 0x5a) ||
+            (code >= 0x61 && code <= 0x7a) ||
+            code === 0x2d ||
+            code === 0x5f
+          ) {
+            tokenStart = candidate;
+          }
+        }
+      }
+      if (tokenStart !== -1) {
+        let tokenEnd = tokenStart;
+        while (tokenEnd < segmentEnd) {
+          const code = text.charCodeAt(tokenEnd);
+          if (
+            (code >= 0x30 && code <= 0x39) ||
+            (code >= 0x41 && code <= 0x5a) ||
+            (code >= 0x61 && code <= 0x7a) ||
+            code === 0x2d ||
+            code === 0x5f
+          ) {
+            tokenEnd += 1;
+          } else {
+            break;
+          }
+        }
+        return {
+          magicLink: text.slice(schemeStart, tokenEnd),
+          token: text.slice(tokenStart, tokenEnd),
+        };
+      }
+    }
+    segmentStart = segmentEnd + 1;
+  }
+  return {};
 }
 
 class MockEmailInboxRegistry {

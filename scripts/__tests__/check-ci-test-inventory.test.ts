@@ -208,4 +208,49 @@ describe("CI test inventory", () => {
       expect(jobExecutesPackageTests(extractJob(echoed, "dedicated"), target)).toBe(false);
     }
   });
+
+  test("rejects adversarial environment prefixes without regex backtracking", () => {
+    const command = `A=${'"" A='.repeat(20_000)}! echo packages/a`;
+    const job = ["  dedicated:", "    steps:", `      - run: ${command}`].join("\n");
+    expect(jobExecutesPackageTests(extractJob(job, "dedicated"), "packages/a")).toBe(false);
+  });
+
+  test("parses multiple quoted environment assignments and fails closed on malformed prefixes", () => {
+    const jobFor = (command: string) =>
+      extractJob(
+        [
+          "  dedicated:",
+          "    steps:",
+          "      - name: Test package",
+          `        run: ${command}`,
+        ].join("\n"),
+        "dedicated",
+      );
+    expect(
+      jobExecutesPackageTests(
+        jobFor(`A="value with spaces" B='other value' bun test packages/a`),
+        "packages/a",
+      ),
+    ).toBe(true);
+    expect(
+      jobExecutesPackageTests(jobFor(`A="unterminated bun test packages/a`), "packages/a"),
+    ).toBe(false);
+    expect(jobExecutesPackageTests(jobFor(`A= bun test packages/a`), "packages/a")).toBe(false);
+    expect(
+      jobExecutesPackageTests(jobFor(`A="value" echo bun test packages/a`), "packages/a"),
+    ).toBe(false);
+  });
+
+  test("does not accept Ruby filename lookalikes as test commands", () => {
+    const job = extractJob(
+      [
+        "  dedicated:",
+        "    steps:",
+        "      - name: Test package",
+        "        run: ruby packages/ruby/test/security_test.rbx packages/ruby",
+      ].join("\n"),
+      "dedicated",
+    );
+    expect(jobExecutesPackageTests(job, "packages/ruby")).toBe(false);
+  });
 });

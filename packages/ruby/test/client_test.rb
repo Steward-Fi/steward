@@ -121,4 +121,13 @@ class StewardClientTest < Minitest::Test
     end
     assert_includes err, "not HTTPS"
   end
+
+  def test_trailing_slash_normalization_is_linear_on_adversarial_input
+    client = Steward::Client.new(
+      base_url: "https://api.example.test#{"/" * 200_000}",
+      api_key: "tenant-key"
+    )
+
+    assert_equal "https://api.example.test", client.instance_variable_get(:@base_url)
+  end
 end

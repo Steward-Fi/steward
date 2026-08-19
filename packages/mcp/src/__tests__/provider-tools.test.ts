@@ -212,6 +212,16 @@ describe("createProviderApi HTTP transport", () => {
     expect(headers.get("x-steward-tenant")).toBe("tenant-a");
   });
 
+  test("normalizes an adversarial trailing-slash run before transport", async () => {
+    const { seen } = stubFetch(200, { ok: true });
+    const api = createProviderApi({
+      baseUrl: `https://steward.example${"/".repeat(200_000)}`,
+      bearerToken: "agent-jwt",
+    });
+    await api.request("/v2/provider-actions");
+    expect(seen[0]?.url).toBe("https://steward.example/v2/provider-actions");
+  });
+
   test("redacts secrets in a real non-ok error body before throwing", async () => {
     const canary = "canary-http-5xx-9a1";
     stubFetch(403, {
@@ -290,6 +300,14 @@ describe("credential redaction", () => {
     for (const canary of [openAiKey, awsAccessKey, "private-key-canary"]) {
       expect(clean).not.toContain(canary);
     }
+  });
+
+  test("redacts incomplete armored keys and stays linear on adversarial text", () => {
+    const incompleteKey = `-----BEGIN PRIVATE KEY-----${"private-key-material".repeat(20_000)}`;
+    expect(sanitizeProviderPayload(incompleteKey)).toBe("[redacted]");
+
+    const whitespaceRun = `jwt${" ".repeat(200_000)}`;
+    expect(sanitizeProviderPayload(whitespaceRun)).toBe(whitespaceRun);
   });
 
   test("fails closed on accessors and cycles without invoking provider code", () => {
