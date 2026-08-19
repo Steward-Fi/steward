@@ -68,11 +68,11 @@ function terminate(child: Child): Promise<void> {
   let termination!: Promise<void>;
   termination = (async () => {
     signalTree(child, "SIGTERM");
-    const killer = setTimeout(() => signalTree(child, "SIGKILL"), killGrace);
     try {
+      await Bun.sleep(killGrace);
+      signalTree(child, "SIGKILL");
       await child.exited;
     } finally {
-      clearTimeout(killer);
       active.delete(child);
     }
   })().finally(() => terminations.delete(child));
@@ -120,7 +120,7 @@ try {
       detached: true,
     });
     active.add(child);
-    const exited = child.exited.finally(() => active.delete(child));
+    const exited = child.exited;
     let timedOut = false;
     const deadline = setTimeout(() => {
       if (!active.has(child)) return;
@@ -136,6 +136,8 @@ try {
         drainTail(child.stderr),
         exited,
       ]);
+      const pendingTermination = terminations.get(child);
+      if (pendingTermination) await pendingTermination;
     } catch (error) {
       if (active.has(child)) await terminate(child);
       throw error;

@@ -46,7 +46,7 @@ async function waitForFile(path: string, attempts = 400): Promise<boolean> {
   for (let i = 0; i < attempts; i += 1) {
     if (
       await readFile(path)
-        .then(() => true)
+        .then((value) => value.length > 0)
         .catch(() => false)
     )
       return true;
@@ -92,7 +92,7 @@ describe("isolated test runner", () => {
     expect(Date.now() - started).toBeLessThan(2_000);
   });
 
-  test("escalates to KILL and removes a TERM-ignoring descendant process group", async () => {
+  test("kills a TERM-ignoring descendant after its group leader exits on TERM", async () => {
     const root = await fixtureRoot();
     const childPidFile = join(root, "child-pid");
     const descendantPidFile = join(root, "descendant-pid");
@@ -101,7 +101,7 @@ describe("isolated test runner", () => {
     const descendantSource = `import { writeFileSync } from "node:fs"; process.on("SIGTERM",()=>writeFileSync(${JSON.stringify(descendantTermFile)},"term")); writeFileSync(${JSON.stringify(descendantPidFile)},String(process.pid)); await new Promise(()=>{});`;
     await writeFile(
       join(root, "kill.spec.ts"),
-      `import { writeFileSync } from "node:fs"; process.on("SIGTERM",()=>writeFileSync(${JSON.stringify(childTermFile)},"term")); Bun.spawn(["bun","-e",${JSON.stringify(descendantSource)}],{stdout:"ignore",stderr:"ignore"}); writeFileSync(${JSON.stringify(childPidFile)},String(process.pid)); await new Promise(()=>{});`,
+      `import { writeFileSync } from "node:fs"; process.on("SIGTERM",()=>{writeFileSync(${JSON.stringify(childTermFile)},"term");setTimeout(()=>process.exit(0),50)}); Bun.spawn(["bun","-e",${JSON.stringify(descendantSource)}],{stdout:"ignore",stderr:"ignore"}); writeFileSync(${JSON.stringify(childPidFile)},String(process.pid)); await new Promise(()=>{});`,
     );
 
     const execution = spawnRunner(root, [], {
@@ -111,9 +111,9 @@ describe("isolated test runner", () => {
     try {
       expect(await waitForFile(childPidFile)).toBe(true);
       expect(await waitForFile(descendantPidFile)).toBe(true);
+      execution.child.kill("SIGTERM");
       const result = await execution.result;
-      expect(result.code).not.toBe(0);
-      expect(result.output).toContain("wall timeout after 10000ms");
+      expect(result.code).toBe(143);
       expect(await readFile(childTermFile, "utf8")).toBe("term");
       expect(await readFile(descendantTermFile, "utf8")).toBe("term");
     } finally {
@@ -179,11 +179,8 @@ describe("isolated test runner", () => {
       stdout: "pipe",
       stderr: "pipe",
     });
-    let childPid = 0;
-    for (let i = 0; i < 50 && childPid === 0; i += 1) {
-      await Bun.sleep(20);
-      childPid = Number(await readFile(pidFile, "utf8").catch(() => "0"));
-    }
+    expect(await waitForFile(pidFile)).toBe(true);
+    let childPid = Number(await readFile(pidFile, "utf8"));
     expect(childPid).toBeGreaterThan(1);
     parent.kill("SIGTERM");
     expect(await parent.exited).toBe(143);
