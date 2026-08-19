@@ -112,6 +112,7 @@ export async function withWorkerRequestDatabase<T>(
   options?: {
     createHandle?: WorkerDatabaseHandleFactory;
     createHttpDb?: WorkerHttpDatabaseFactory;
+    waitUntil?: (promise: Promise<unknown>) => void;
   },
 ): Promise<T> {
   const driver = env.DATABASE_DRIVER?.trim().toLowerCase();
@@ -122,21 +123,46 @@ export async function withWorkerRequestDatabase<T>(
   }
   if (driver === "neon-http") {
     const db = (options?.createHttpDb ?? createDbForRequest)(env);
-    return withRequestDatabase(db as unknown as ReturnType<typeof getDb>, callback);
+    return withRequestDatabase(
+      db as unknown as ReturnType<typeof getDb>,
+      callback,
+      options?.waitUntil ? { deferCleanup: options.waitUntil } : undefined,
+    );
   }
   const handle = (options?.createHandle ?? createNeonTransactionDbForRequest)(env);
   const noCallbackError = Symbol("no-callback-error");
   let callbackError: unknown | typeof noCallbackError = noCallbackError;
   let result: T | undefined;
+  let closeDeferred = false;
   try {
-    result = await withRequestDatabase(handle.db as unknown as ReturnType<typeof getDb>, callback);
+    result = await withRequestDatabase(
+      handle.db as unknown as ReturnType<typeof getDb>,
+      callback,
+      options?.waitUntil
+        ? {
+            deferCleanup(cleanup) {
+              const deferredClose = cleanup.then(async () => {
+                try {
+                  await handle.close();
+                } catch {
+                  throw new Error("WORKER_DATABASE_CLOSE_FAILED");
+                }
+              });
+              options.waitUntil?.(deferredClose);
+              closeDeferred = true;
+            },
+          }
+        : undefined,
+    );
   } catch (error) {
     callbackError = error;
   }
-  try {
-    await handle.close();
-  } catch {
-    if (callbackError === noCallbackError) throw new Error("WORKER_DATABASE_CLOSE_FAILED");
+  if (!closeDeferred) {
+    try {
+      await handle.close();
+    } catch {
+      if (callbackError === noCallbackError) throw new Error("WORKER_DATABASE_CLOSE_FAILED");
+    }
   }
   if (callbackError !== noCallbackError) throw callbackError;
   return result as T;
@@ -349,17 +375,28 @@ export default {
     // the once-per-isolate init below only bootstraps stores/imports.
     hydrateProcessEnv(env);
     await validateWorkerSecurityEnv();
-    return withWorkerRequestDatabase(env, async () => {
-      await ensureWorkerInit(env);
-      const app = await getComposedApp();
-      return app.fetch(request, env, ctx as never);
-    });
+    const executionCtx = ctx as { waitUntil?: (promise: Promise<unknown>) => void };
+    const waitUntil =
+      typeof executionCtx?.waitUntil === "function"
+        ? executionCtx.waitUntil.bind(executionCtx)
+        : undefined;
+    return withWorkerRequestDatabase(
+      env,
+      async () => {
+        await ensureWorkerInit(env);
+        const app = await getComposedApp();
+        return app.fetch(request, env, ctx as never);
+      },
+      waitUntil ? { waitUntil } : undefined,
+    );
   },
   async scheduled(
     _controller: unknown,
     env: Env,
     ctx: { waitUntil(promise: Promise<unknown>): void },
   ) {
+    hydrateProcessEnv(env);
+    await validateWorkerSecurityEnv();
     ctx.waitUntil(
       Promise.all([
         withWorkerRequestDatabase(env, () => runWorkerUpstreamCredentialLeaseSweep(env)),

@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { getDb } from "@stwd/db";
+import { getDb, registerRequestDatabaseTask } from "@stwd/db";
 import {
   hydrateProcessEnv,
   runWorkerGoogleCredentialLifecycleSweep,
@@ -88,6 +88,51 @@ test("Worker HTTP mode binds an exact request database without a persistent hand
   );
   expect(result).toBe("http");
   expect(created).toBe(0);
+});
+
+test("Worker waitUntil keeps the request database alive for registered background work", async () => {
+  const requestDb = { marker: "worker-background" } as unknown as ReturnType<typeof getDb>;
+  let closes = 0;
+  let deferredCleanup!: Promise<unknown>;
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let background!: Promise<void>;
+
+  const result = await withWorkerRequestDatabase(
+    {
+      DATABASE_URL: "postgresql://worker.invalid/steward",
+      DATABASE_DRIVER: "neon-websocket",
+    },
+    async () => {
+      background = registerRequestDatabaseTask(
+        (async () => {
+          await gate;
+          expect(getDb()).toBe(requestDb);
+        })(),
+      );
+      return "response";
+    },
+    {
+      createHandle: () => ({
+        driver: "neon-websocket" as const,
+        db: requestDb as never,
+        async close() {
+          closes += 1;
+        },
+      }),
+      waitUntil(promise) {
+        deferredCleanup = promise;
+      },
+    },
+  );
+
+  expect(result).toBe("response");
+  expect(closes).toBe(0);
+  release();
+  await Promise.all([background, deferredCleanup]);
+  expect(closes).toBe(1);
 });
 
 test("Worker database selection rejects missing or unsupported drivers", async () => {

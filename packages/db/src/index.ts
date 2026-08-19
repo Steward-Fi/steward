@@ -35,6 +35,7 @@ export {
   getDatabaseUrl,
   getDb,
   getSql,
+  registerRequestDatabaseTask,
   setPGLiteOverride,
   withDatabaseDeadline,
   withRequestDatabase,

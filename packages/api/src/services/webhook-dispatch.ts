@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { and, eq, webhookConfigs, webhookDeliveries } from "@stwd/db";
+import { and, eq, registerRequestDatabaseTask, webhookConfigs, webhookDeliveries } from "@stwd/db";
 import { redactedThrownDiagnostics, type WebhookEvent } from "@stwd/shared";
 import {
   decryptWebhookSecret,
@@ -51,13 +51,15 @@ export function dispatchWebhook(
     data: redactedData,
     timestamp: new Date(),
   };
-  void dispatchConfiguredWebhooks(event, configuredType, isPluginEvent ? type : null).catch(
-    (error) => {
-      console.error(
-        "[webhooks] Failed to dispatch configured webhooks",
-        redactedThrownDiagnostics(error),
-      );
-    },
+  void registerRequestDatabaseTask(
+    dispatchConfiguredWebhooks(event, configuredType, isPluginEvent ? type : null).catch(
+      (error) => {
+        console.error(
+          "[webhooks] Failed to dispatch configured webhooks",
+          redactedThrownDiagnostics(error),
+        );
+      },
+    ),
   );
 
   // SEC-101: the unverifiable tenant-route webhookUrl field is retired. The

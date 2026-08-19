@@ -90,4 +90,27 @@ describe("workers boot JWT env validation (SEC-134)", () => {
       ),
     ).rejects.toThrow('AGENT_TOKEN_EXPIRY "not-a-duration" is not a valid positive duration');
   });
+
+  it("validates scheduled security bindings before opening any database handle", async () => {
+    snapshotEnv();
+    const worker = await freshWorker();
+    let waitUntilCalls = 0;
+    await expect(
+      worker.scheduled(
+        {},
+        {
+          NODE_ENV: "production",
+          STEWARD_JWT_SECRET: "short",
+          DATABASE_DRIVER: "bogus",
+          DATABASE_URL: "postgresql://credential-canary@worker.invalid/steward",
+        },
+        {
+          waitUntil() {
+            waitUntilCalls += 1;
+          },
+        },
+      ),
+    ).rejects.toThrow("at least 32 characters in production");
+    expect(waitUntilCalls).toBe(0);
+  });
 });
