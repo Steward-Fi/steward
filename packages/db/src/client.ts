@@ -496,22 +496,30 @@ async function drainRequestDatabaseTasks(context: RequestDatabaseContext): Promi
  * `waitUntil`, so the response may return without closing a WebSocket pool out
  * from under webhook/audit writes. Outside a request context this is a no-op.
  */
-export function registerRequestDatabaseTask<T>(task: Promise<T>): Promise<T> {
+export function registerRequestDatabaseTask<T>(task: () => Promise<T>): Promise<T> {
   const context = requestDatabaseStorage.getStore();
-  if (!context) return task;
+  if (!context) return task();
   if (!context.active) return Promise.reject(new Error("REQUEST_DATABASE_CONTEXT_CLOSED"));
 
+  const backgroundContext: RequestDatabaseContext = {
+    db: context.db,
+    active: true,
+    backgroundTasks: context.backgroundTasks,
+  };
+  const promise = requestDatabaseStorage.run(backgroundContext, async () => task());
   let tracked!: Promise<void>;
-  tracked = Promise.resolve(task)
+  tracked = promise
     .then(
       () => undefined,
       () => undefined,
     )
     .finally(() => {
+      backgroundContext.active = false;
+      backgroundContext.db = undefined;
       context.backgroundTasks.delete(tracked);
     });
   context.backgroundTasks.add(tracked);
-  return task;
+  return promise;
 }
 
 /**
@@ -542,13 +550,12 @@ export async function withRequestDatabase<T>(
       callbackError = error;
     }
 
-    const cleanup = drainRequestDatabaseTasks(context).finally(() => {
-      // Unregistered detached tasks still inherit AsyncLocalStorage. Revoke
-      // their capability before the owning Worker closes its socket so late
-      // getDb() calls fail before I/O.
-      context.active = false;
-      context.db = undefined;
-    });
+    // Revoke the owner context as soon as its callback settles. Registered
+    // tasks run in child contexts with their own bounded capability lifetime;
+    // unregistered detached work retains this revoked owner context.
+    context.active = false;
+    context.db = undefined;
+    const cleanup = drainRequestDatabaseTasks(context);
     if (options?.deferCleanup) {
       try {
         options.deferCleanup(cleanup);

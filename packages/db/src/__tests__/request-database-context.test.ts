@@ -98,12 +98,10 @@ describe("request-scoped database context", () => {
     const result = await withRequestDatabase(
       requestDb,
       async () => {
-        background = registerRequestDatabaseTask(
-          (async () => {
-            await release.promise;
-            expect(getDb()).toBe(requestDb);
-          })(),
-        );
+        background = registerRequestDatabaseTask(async () => {
+          await release.promise;
+          expect(getDb()).toBe(requestDb);
+        });
         return "response";
       },
       {
@@ -123,5 +121,35 @@ describe("request-scoped database context", () => {
     release.resolve();
     await Promise.all([background, cleanup]);
     expect(cleaned).toBe(true);
+  });
+
+  test("does not let unregistered work piggyback on a registered task lifetime", async () => {
+    const requestDb = { marker: "request" } as unknown as ReturnType<typeof getDb>;
+    const release = deferred();
+    let cleanup!: Promise<void>;
+    let registered!: Promise<void>;
+    let detached!: Promise<void>;
+
+    await withRequestDatabase(
+      requestDb,
+      async () => {
+        registered = registerRequestDatabaseTask(async () => {
+          await release.promise;
+          expect(getDb()).toBe(requestDb);
+        });
+        detached = (async () => {
+          await release.promise;
+          expect(() => getDb()).toThrow("REQUEST_DATABASE_CONTEXT_CLOSED");
+        })();
+      },
+      {
+        deferCleanup(promise) {
+          cleanup = promise;
+        },
+      },
+    );
+
+    release.resolve();
+    await Promise.all([registered, detached, cleanup]);
   });
 });
