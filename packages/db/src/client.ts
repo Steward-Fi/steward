@@ -478,11 +478,73 @@ export function setPGLiteOverride(
 
 type RequestDatabase = ReturnType<typeof createDb>["db"];
 interface RequestDatabaseContext {
+  rawDb: RequestDatabase | undefined;
   db: RequestDatabase | undefined;
   active: boolean;
   backgroundTasks: Set<Promise<void>>;
+  guardedObjects: WeakMap<object, object>;
 }
 const requestDatabaseStorage = new AsyncLocalStorage<RequestDatabaseContext>();
+
+function assertRequestDatabaseContextActive(
+  context: RequestDatabaseContext,
+): asserts context is RequestDatabaseContext & { db: RequestDatabase } {
+  if (!context.active) throw new Error("REQUEST_DATABASE_CONTEXT_CLOSED");
+  if (!context.db) throw new Error("REQUEST_DATABASE_CONTEXT_INVALID");
+}
+
+function guardRequestDatabaseValue<T>(value: T, context: RequestDatabaseContext): T {
+  if ((typeof value !== "object" || value === null) && typeof value !== "function") return value;
+  if (value instanceof Promise) {
+    let settled!: Promise<void>;
+    const tracked = value.finally(() => context.backgroundTasks.delete(settled));
+    settled = tracked.then(
+      () => undefined,
+      () => undefined,
+    );
+    context.backgroundTasks.add(settled);
+    return tracked as T;
+  }
+
+  const objectValue = value as object;
+  const existing = context.guardedObjects.get(objectValue);
+  if (existing) return existing as T;
+
+  const guarded = new Proxy(objectValue, {
+    get(target, property) {
+      assertRequestDatabaseContextActive(context);
+      const member = Reflect.get(target, property, target);
+      if (typeof member === "function") {
+        return (...args: unknown[]) => {
+          assertRequestDatabaseContextActive(context);
+          return guardRequestDatabaseValue(Reflect.apply(member, target, args), context);
+        };
+      }
+      return guardRequestDatabaseValue(member, context);
+    },
+    set(target, property, nextValue) {
+      assertRequestDatabaseContextActive(context);
+      return Reflect.set(target, property, nextValue, target);
+    },
+  });
+  context.guardedObjects.set(objectValue, guarded);
+  return guarded as T;
+}
+
+function createRequestDatabaseContext(
+  rawDb: RequestDatabase,
+  backgroundTasks: Set<Promise<void>>,
+): RequestDatabaseContext {
+  const context: RequestDatabaseContext = {
+    rawDb,
+    db: undefined,
+    active: true,
+    backgroundTasks,
+    guardedObjects: new WeakMap(),
+  };
+  context.db = guardRequestDatabaseValue(rawDb, context);
+  return context;
+}
 
 async function drainRequestDatabaseTasks(context: RequestDatabaseContext): Promise<void> {
   while (context.backgroundTasks.size > 0) {
@@ -501,11 +563,8 @@ export function registerRequestDatabaseTask<T>(task: () => Promise<T>): Promise<
   if (!context) return task();
   if (!context.active) return Promise.reject(new Error("REQUEST_DATABASE_CONTEXT_CLOSED"));
 
-  const backgroundContext: RequestDatabaseContext = {
-    db: context.db,
-    active: true,
-    backgroundTasks: context.backgroundTasks,
-  };
+  if (!context.rawDb) return Promise.reject(new Error("REQUEST_DATABASE_CONTEXT_INVALID"));
+  const backgroundContext = createRequestDatabaseContext(context.rawDb, context.backgroundTasks);
   const promise = requestDatabaseStorage.run(backgroundContext, async () => task());
   let tracked!: Promise<void>;
   tracked = promise
@@ -515,6 +574,7 @@ export function registerRequestDatabaseTask<T>(task: () => Promise<T>): Promise<
     )
     .finally(() => {
       backgroundContext.active = false;
+      backgroundContext.rawDb = undefined;
       backgroundContext.db = undefined;
       context.backgroundTasks.delete(tracked);
     });
@@ -539,7 +599,7 @@ export async function withRequestDatabase<T>(
   if (requestDatabaseStorage.getStore()) {
     throw new Error("REQUEST_DATABASE_CONTEXT_NESTED");
   }
-  const context: RequestDatabaseContext = { db, active: true, backgroundTasks: new Set() };
+  const context = createRequestDatabaseContext(db, new Set());
   return requestDatabaseStorage.run(context, async () => {
     const noCallbackError = Symbol("no-callback-error");
     let callbackError: unknown | typeof noCallbackError = noCallbackError;
@@ -554,6 +614,7 @@ export async function withRequestDatabase<T>(
     // tasks run in child contexts with their own bounded capability lifetime;
     // unregistered detached work retains this revoked owner context.
     context.active = false;
+    context.rawDb = undefined;
     context.db = undefined;
     const cleanup = drainRequestDatabaseTasks(context);
     if (options?.deferCleanup) {
@@ -606,8 +667,7 @@ function buildGlobalDb(): GlobalDbHandle {
 export function getDb() {
   const requestContext = requestDatabaseStorage.getStore();
   if (requestContext) {
-    if (!requestContext.active) throw new Error("REQUEST_DATABASE_CONTEXT_CLOSED");
-    if (!requestContext.db) throw new Error("REQUEST_DATABASE_CONTEXT_INVALID");
+    assertRequestDatabaseContextActive(requestContext);
     return requestContext.db;
   }
   if (pgliteOverride) return pgliteOverride.db as ReturnType<typeof createDb>["db"];

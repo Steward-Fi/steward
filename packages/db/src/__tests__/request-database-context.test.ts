@@ -29,9 +29,10 @@ describe("request-scoped database context", () => {
     expect(
       await withRequestDatabase(requestDb, async () => {
         await Promise.resolve();
-        return getDb();
+        expect(getDb()).not.toBe(requestDb);
+        return (getDb() as unknown as { marker: string }).marker;
       }),
-    ).toBe(requestDb);
+    ).toBe("request");
 
     process.env.DATABASE_DRIVER = "neon-websocket";
     expect(() => getDb()).toThrow("RLS_TRANSACTION_HANDLE_REQUIRED");
@@ -44,17 +45,17 @@ describe("request-scoped database context", () => {
     const releaseA = deferred();
 
     const a = withRequestDatabase(dbA, async () => {
-      expect(getDb()).toBe(dbA);
+      expect((getDb() as unknown as { marker: string }).marker).toBe("a");
       aEntered.resolve();
       await releaseA.promise;
-      expect(getDb()).toBe(dbA);
+      expect((getDb() as unknown as { marker: string }).marker).toBe("a");
       return "a";
     });
     await aEntered.promise;
     const b = withRequestDatabase(dbB, async () => {
-      expect(getDb()).toBe(dbB);
+      expect((getDb() as unknown as { marker: string }).marker).toBe("b");
       await Promise.resolve();
-      expect(getDb()).toBe(dbB);
+      expect((getDb() as unknown as { marker: string }).marker).toBe("b");
       return "b";
     });
     expect(await b).toBe("b");
@@ -70,7 +71,7 @@ describe("request-scoped database context", () => {
         "REQUEST_DATABASE_CONTEXT_NESTED",
       );
       expect(() => getSql()).toThrow("REQUEST_DATABASE_RAW_SQL_UNAVAILABLE");
-      expect(getDb()).toBe(outer);
+      expect((getDb() as unknown as { marker: string }).marker).toBe("outer");
     });
   });
 
@@ -89,6 +90,25 @@ describe("request-scoped database context", () => {
     await detached;
   });
 
+  test("revokes a database handle and derived query captured before owner completion", async () => {
+    const rawSelect = () => ({ from: () => Promise.resolve([]) });
+    const requestDb = { select: rawSelect } as unknown as ReturnType<typeof getDb>;
+    let capturedDb!: ReturnType<typeof getDb>;
+    let capturedSelect!: ReturnType<typeof getDb>["select"];
+    let capturedQuery!: ReturnType<ReturnType<typeof getDb>["select"]>;
+
+    await withRequestDatabase(requestDb, async () => {
+      capturedDb = getDb();
+      capturedSelect = capturedDb.select;
+      capturedQuery = capturedDb.select();
+    });
+
+    expect(capturedDb).not.toBe(requestDb);
+    expect(() => capturedDb.select()).toThrow("REQUEST_DATABASE_CONTEXT_CLOSED");
+    expect(() => capturedSelect()).toThrow("REQUEST_DATABASE_CONTEXT_CLOSED");
+    expect(() => capturedQuery.from({} as never)).toThrow("REQUEST_DATABASE_CONTEXT_CLOSED");
+  });
+
   test("defers revocation until registered background database work settles", async () => {
     const requestDb = { marker: "request" } as unknown as ReturnType<typeof getDb>;
     const release = deferred();
@@ -100,7 +120,7 @@ describe("request-scoped database context", () => {
       async () => {
         background = registerRequestDatabaseTask(async () => {
           await release.promise;
-          expect(getDb()).toBe(requestDb);
+          expect((getDb() as unknown as { marker: string }).marker).toBe("request");
         });
         return "response";
       },
@@ -135,7 +155,7 @@ describe("request-scoped database context", () => {
       async () => {
         registered = registerRequestDatabaseTask(async () => {
           await release.promise;
-          expect(getDb()).toBe(requestDb);
+          expect((getDb() as unknown as { marker: string }).marker).toBe("request");
         });
         detached = (async () => {
           await release.promise;

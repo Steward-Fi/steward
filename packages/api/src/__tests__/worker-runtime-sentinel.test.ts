@@ -1,7 +1,8 @@
 import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { getDb, registerRequestDatabaseTask } from "@stwd/db";
+import { getDb, registerRequestDatabaseTask, tenants } from "@stwd/db";
+import { createPGLiteDb } from "@stwd/db/pglite";
 import {
   hydrateProcessEnv,
   runWorkerGoogleCredentialLifecycleSweep,
@@ -44,7 +45,8 @@ test("Worker request database is exact, request-owned, and always closed", async
       env,
       async () => {
         await Promise.resolve();
-        expect(getDb()).toBe(requestDb);
+        expect(getDb()).not.toBe(requestDb);
+        expect((getDb() as unknown as { marker: string }).marker).toBe("worker-request");
         return "ok";
       },
       { createHandle },
@@ -56,7 +58,7 @@ test("Worker request database is exact, request-owned, and always closed", async
     withWorkerRequestDatabase(
       env,
       async () => {
-        expect(getDb()).toBe(requestDb);
+        expect((getDb() as unknown as { marker: string }).marker).toBe("worker-request");
         throw new Error("handler failed");
       },
       { createHandle },
@@ -75,7 +77,8 @@ test("Worker HTTP mode binds an exact request database without a persistent hand
     },
     async () => {
       await Promise.resolve();
-      expect(getDb()).toBe(requestDb);
+      expect(getDb()).not.toBe(requestDb);
+      expect((getDb() as unknown as { marker: string }).marker).toBe("worker-http-request");
       return "http";
     },
     {
@@ -88,6 +91,23 @@ test("Worker HTTP mode binds an exact request database without a persistent hand
   );
   expect(result).toBe("http");
   expect(created).toBe(0);
+});
+
+test("Worker request membrane preserves real Drizzle query execution", async () => {
+  const { db: pgliteDb, client } = await createPGLiteDb("memory://");
+  try {
+    const rows = await withWorkerRequestDatabase(
+      {
+        DATABASE_URL: "postgresql://worker.invalid/steward",
+        DATABASE_DRIVER: "neon-http",
+      },
+      () => getDb().select({ id: tenants.id }).from(tenants).limit(1),
+      { createHttpDb: () => pgliteDb },
+    );
+    expect(Array.isArray(rows)).toBe(true);
+  } finally {
+    await client.close();
+  }
 });
 
 test("Worker waitUntil keeps the request database alive for registered background work", async () => {
@@ -108,7 +128,7 @@ test("Worker waitUntil keeps the request database alive for registered backgroun
     async () => {
       background = registerRequestDatabaseTask(async () => {
         await gate;
-        expect(getDb()).toBe(requestDb);
+        expect((getDb() as unknown as { marker: string }).marker).toBe("worker-background");
       });
       return "response";
     },
