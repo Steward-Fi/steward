@@ -103,6 +103,7 @@ describe("tenant CORS preflight", () => {
 
     expect(response.status).toBe(403);
     expect(response.headers.get("access-control-allow-origin")).toBeNull();
+    expect(response.headers.get("access-control-allow-credentials")).toBeNull();
     expect(response.headers.get("vary")).toBe("Origin, X-Steward-Tenant");
   });
 });
