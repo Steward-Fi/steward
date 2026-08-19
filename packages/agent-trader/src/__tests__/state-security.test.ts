@@ -6,6 +6,7 @@ test("agent state never fetches an operator-controlled price-oracle URL", () => 
   const source = readFileSync(join(import.meta.dir, "../state.ts"), "utf8");
   expect(source).not.toContain("PRICE_ORACLE_URL");
   expect(source).not.toContain("PRICE_ORACLE_");
-  expect(source).not.toContain("fetch(url");
+  expect(source).not.toContain("await fetch(");
+  expect(source).not.toContain("globalThis.fetch");
   expect(source).toContain("getHardenedOracleQuote(tokenAddress, chainId)");
 });

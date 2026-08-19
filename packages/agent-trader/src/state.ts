@@ -4,18 +4,16 @@
  * Gathers the current on-chain + off-chain state needed by strategies:
  *   - Native balance (ETH/BNB)     ← viem publicClient
  *   - Token balance (ERC-20)       ← viem publicClient
- *   - Token price                  ← hardened price oracle, else env oracle / DEX reserve ratio
+ *   - Token price                  ← hardened price oracle, else DEX reserve ratio
  *   - Last trade age + daily vol   ← Steward history
  *
  * Token price resolution order (each tick is tagged with a confidence level):
  *   1. Hardened @stwd/shared price oracle — liquidity-weighted, multi-pair,
  *      fails to null. Tagged "high"; this is the only source that may, on its
  *      own, trigger a trade.
- *   2. priceOracleUrl env var (simple JSON API returning { price: "1234" }).
- *      Tagged "low" — an arbitrary single endpoint with no corroboration.
- *   3. DEX reserve ratio (single Uniswap-V2 pair getReserves). Tagged "low" —
+ *   2. DEX reserve ratio (single Uniswap-V2 pair getReserves). Tagged "low" —
  *      a single-pair spot ratio is trivially manipulable (flash-loan/imbalance).
- *   4. Fallback: 0n / "none" (strategies hold).
+ *   3. Fallback: 0n / "none" (strategies hold).
  *
  * Low-confidence ticks feed treasury/threshold math but are gated by the
  * strategy layer so a manipulable price cannot, by itself, trigger a swap.
