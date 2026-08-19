@@ -72,6 +72,7 @@ interface ForwardedCapture {
 }
 let lastForwarded: ForwardedCapture | null = null;
 let proxyApp: Hono | null = null;
+let proxyRateLimitChecks = 0;
 const realFetch = globalThis.fetch;
 
 // the policy set the injected getPolicySet returns for the current test.
@@ -128,7 +129,10 @@ beforeAll(async () => {
   // deterministic public ip so route-match -> decrypt -> inject -> forward runs
   // with no external network (mirrors the #149 e2e).
   setResolveProxyHostForTests(async () => [{ address: "93.184.216.34", family: 4 }]);
-  setCheckProxyRateLimitForTests(async () => ({ allowed: true, resetMs: 0 }));
+  setCheckProxyRateLimitForTests(async () => {
+    proxyRateLimitChecks += 1;
+    return { allowed: true, resetMs: 0 };
+  });
   setForwardProxyRequestForTests(async (url, method, headers, body) => {
     const bodyText = body ? await new Response(body).text() : null;
     lastForwarded = { url: url.toString(), method, headers, bodyText };
@@ -170,12 +174,18 @@ beforeAll(async () => {
 
 afterAll(async () => {
   globalThis.fetch = realFetch;
-  resetProxyHandlerTestHooksForTests();
-  await closeDb().catch(() => {});
-  for (const key of TEST_ENV_KEYS) {
-    const original = originalEnv.get(key);
-    if (original === undefined) delete process.env[key];
-    else process.env[key] = original;
+  try {
+    resetProxyHandlerTestHooksForTests?.();
+  } finally {
+    try {
+      await closeDb().catch(() => {});
+    } finally {
+      for (const key of TEST_ENV_KEYS) {
+        const original = originalEnv.get(key);
+        if (original === undefined) delete process.env[key];
+        else process.env[key] = original;
+      }
+    }
   }
 });
 
@@ -305,6 +315,7 @@ beforeEach(async () => {
   await seedTenantAgent();
   currentPolicySet = [];
   lastForwarded = null;
+  proxyRateLimitChecks = 0;
 });
 
 describe("invoke e2e: full arc through the real proxy", () => {
@@ -464,6 +475,7 @@ describe("invoke e2e: full arc through the real proxy", () => {
     });
     // first invoke: count 0 < 1 => forwards (upstream 201).
     expect(first.status).toBe(201);
+    expect(proxyRateLimitChecks).toBe(1);
 
     const second = await app.request("/capabilities/github.pr.comment/invoke", {
       method: "POST",
@@ -472,6 +484,7 @@ describe("invoke e2e: full arc through the real proxy", () => {
     });
     // second invoke: count 1 >= 1 => rate constraint denies the allow => 403.
     expect(second.status).toBe(403);
+    expect(proxyRateLimitChecks).toBe(1);
 
     const rows = await agentInvocations(capId);
     expect(rows.filter((r) => r.decision === "allow").length).toBe(1);
@@ -658,6 +671,7 @@ describe("OpenAI-compatible capability adapter", () => {
       body: JSON.stringify({ model: "gpt-test", messages: [{ role: "user", content: "one" }] }),
     });
     expect(first.status).toBe(200);
+    expect(proxyRateLimitChecks).toBe(1);
 
     const second = await app.request("/capabilities/openai.chat/openai/v1/chat/completions", {
       method: "POST",
@@ -665,6 +679,7 @@ describe("OpenAI-compatible capability adapter", () => {
       body: JSON.stringify({ model: "gpt-test", messages: [{ role: "user", content: "two" }] }),
     });
     expect(second.status).toBe(403);
+    expect(proxyRateLimitChecks).toBe(1);
 
     const rows = await agentInvocations(capId);
     expect(rows.filter((r) => r.decision === "allow").length).toBe(1);
