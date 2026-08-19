@@ -56,7 +56,9 @@ SELECT format(
   :'steward_bootstrap_role'
 ) \gexec
 SELECT format('GRANT INSERT ON public.tenants TO %I', :'steward_bootstrap_role') \gexec
+SELECT format('GRANT UPDATE ON public.tenants TO %I', :'steward_bootstrap_role') \gexec
 SELECT format('GRANT INSERT, UPDATE, DELETE ON public.refresh_tokens TO %I', :'steward_bootstrap_role') \gexec
+SELECT format('GRANT DELETE ON public.users TO %I', :'steward_bootstrap_role') \gexec
 SELECT format('ALTER SCHEMA steward_rls OWNER TO %I', :'steward_migration_role') \gexec
 SELECT format('ALTER FUNCTION steward_rls.tenant_id() OWNER TO %I', :'steward_migration_role') \gexec
 SELECT format('ALTER FUNCTION steward_rls.user_id() OWNER TO %I', :'steward_migration_role') \gexec
@@ -68,6 +70,8 @@ SELECT format('ALTER FUNCTION steward_bootstrap.agent_tenant_subject(text) OWNER
 SELECT format('ALTER FUNCTION steward_bootstrap.app_client_subject(text,text) OWNER TO %I', :'steward_bootstrap_role') \gexec
 SELECT format('ALTER FUNCTION steward_bootstrap.tenant_ids_for_internal_job() OWNER TO %I', :'steward_bootstrap_role') \gexec
 SELECT format('ALTER FUNCTION steward_bootstrap.ensure_default_tenant(text) OWNER TO %I', :'steward_bootstrap_role') \gexec
+SELECT format('ALTER FUNCTION steward_bootstrap.ensure_system_tenant() OWNER TO %I', :'steward_bootstrap_role') \gexec
+SELECT format('ALTER FUNCTION steward_bootstrap.retention_delete_deactivated_users(integer) OWNER TO %I', :'steward_bootstrap_role') \gexec
 SELECT format('ALTER FUNCTION steward_bootstrap.platform_stats() OWNER TO %I', :'steward_bootstrap_role') \gexec
 SELECT format('ALTER FUNCTION steward_bootstrap.platform_tenants(integer,integer) OWNER TO %I', :'steward_bootstrap_role') \gexec
 SELECT format('ALTER FUNCTION steward_bootstrap.auth_refresh_subject(text) OWNER TO %I', :'steward_bootstrap_role') \gexec

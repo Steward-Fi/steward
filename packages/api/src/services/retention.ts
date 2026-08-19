@@ -17,7 +17,7 @@ import { redactedThrownDiagnostics } from "@stwd/shared";
 import { sql } from "drizzle-orm";
 import { writeAuditEvent } from "./audit";
 import { runTenantAuditRetention } from "./audit-archive";
-import { runInternalJobForEachTenant } from "./tenant-job";
+import { runInternalJobForEachTenant, runInternalJobForTenant } from "./tenant-job";
 
 const SYSTEM_TENANT_ID = "system";
 
@@ -219,37 +219,12 @@ async function sweepDeactivatedUsers(ctx: RetentionSweepContext): Promise<SweepR
   }
   await writeRetentionAuthorization("users.deactivated", ctx);
 
-  const db = getDb();
-  let deleted = 0;
-  await db.transaction(async (tx) => {
-    await tx.execute(sql`
-      DELETE FROM refresh_tokens
-      WHERE user_id IN (
-        SELECT id FROM users
-        WHERE deactivated_at IS NOT NULL
-          AND deactivated_at < now() - make_interval(days => ${days})
-          AND NOT EXISTS (
-            SELECT 1 FROM user_tenants
-            WHERE user_tenants.user_id = users.id
-              AND user_tenants.role = 'owner'
-          )
-      )
-    `);
-    const removed = rowsFromExecute<{ id: string }>(
-      await tx.execute(sql`
-      DELETE FROM users
-      WHERE deactivated_at IS NOT NULL
-        AND deactivated_at < now() - make_interval(days => ${days})
-        AND NOT EXISTS (
-          SELECT 1 FROM user_tenants
-          WHERE user_tenants.user_id = users.id
-            AND user_tenants.role = 'owner'
-        )
-      RETURNING id
-    `),
-    );
-    deleted = removed.length;
-  });
+  const [row] = rowsFromExecute<{ deleted: number }>(
+    await getDb().execute(
+      sql`SELECT steward_bootstrap.retention_delete_deactivated_users(${days}) AS deleted`,
+    ),
+  );
+  const deleted = Number(row?.deleted ?? 0);
 
   return { table: "users.deactivated", deleted };
 }
@@ -312,11 +287,21 @@ export async function runRetentionSweep(
   });
   results.push(...tenantRuns.flatMap(({ value }) => value));
 
-  const globalContext: RetentionSweepContext = { ...shared, tenantId: SYSTEM_TENANT_ID };
-  for (const sweeper of globalSweepers) {
-    const result = await runRetentionSweeper(sweeper, globalContext);
-    if (result) results.push(result);
-  }
+  await getDb().execute(sql`SELECT steward_bootstrap.ensure_system_tenant()`);
+  const globalResults = await runInternalJobForTenant(
+    SYSTEM_TENANT_ID,
+    "global-data-retention",
+    async () => {
+      const values: SweepResult[] = [];
+      const globalContext: RetentionSweepContext = { ...shared, tenantId: SYSTEM_TENANT_ID };
+      for (const sweeper of globalSweepers) {
+        const result = await runRetentionSweeper(sweeper, globalContext);
+        if (result) values.push(result);
+      }
+      return values;
+    },
+  );
+  results.push(...globalResults);
   return results;
 }
 

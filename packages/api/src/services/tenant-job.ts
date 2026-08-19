@@ -31,16 +31,25 @@ export async function runInternalJobForEachTenant<T>(
   const tenantIds = await internalJobTenantIds();
   const results: Array<{ tenantId: string; value: T }> = [];
   for (const tenantId of tenantIds) {
-    const context = tenantContextForInternalJob({ tenantId, job });
-    const value = await withTenantRlsTransaction(
-      getDb() as never,
-      process.env.STEWARD_DB_MODE === "pglite" || process.env.STEWARD_PGLITE_MEMORY === "true"
-        ? "pglite"
-        : getDatabaseDriver(),
-      context,
-      async (tx) => withTenantTransactionDatabase(tx as never, () => callback(tenantId)),
-    );
+    const value = await runInternalJobForTenant(tenantId, job, () => callback(tenantId));
     results.push({ tenantId, value });
   }
   return results;
+}
+
+/** Execute one fixed, server-selected tenant job in its own transaction. */
+export async function runInternalJobForTenant<T>(
+  tenantId: string,
+  job: string,
+  callback: () => Promise<T>,
+): Promise<T> {
+  const context = tenantContextForInternalJob({ tenantId, job });
+  return withTenantRlsTransaction(
+    getDb() as never,
+    process.env.STEWARD_DB_MODE === "pglite" || process.env.STEWARD_PGLITE_MEMORY === "true"
+      ? "pglite"
+      : getDatabaseDriver(),
+    context,
+    async (tx) => withTenantTransactionDatabase(tx as never, callback),
+  );
 }

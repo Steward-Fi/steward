@@ -141,7 +141,9 @@ STABLE
 SECURITY DEFINER
 SET search_path = pg_catalog
 AS $$
-  SELECT t.id FROM public.tenants t ORDER BY t.id
+  SELECT t.id FROM public.tenants t
+  WHERE t.id NOT IN ('system', 'platform')
+  ORDER BY t.id
 $$;
 
 CREATE OR REPLACE FUNCTION "steward_bootstrap"."ensure_default_tenant"(p_api_key_hash text)
@@ -154,6 +156,44 @@ AS $$
   INSERT INTO public.tenants(id, name, api_key_hash)
   VALUES ('default', 'Default Tenant', p_api_key_hash)
   ON CONFLICT (id) DO NOTHING
+$$;
+
+CREATE OR REPLACE FUNCTION "steward_bootstrap"."ensure_system_tenant"()
+RETURNS text
+LANGUAGE sql
+VOLATILE
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $$
+  INSERT INTO public.tenants(id, name, api_key_hash)
+  VALUES ('system', 'Steward Internal Jobs', 'disabled-internal-tenant')
+  ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name
+  RETURNING id
+$$;
+
+CREATE OR REPLACE FUNCTION "steward_bootstrap"."retention_delete_deactivated_users"(p_days integer)
+RETURNS bigint
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $$
+DECLARE
+  deleted_count bigint;
+BEGIN
+  IF p_days < 30 OR p_days > 36500 THEN
+    RAISE EXCEPTION 'deactivated-user retention days outside safe bounds';
+  END IF;
+  DELETE FROM public.users u
+  WHERE u.deactivated_at IS NOT NULL
+    AND u.deactivated_at < now() - make_interval(days => p_days)
+    AND NOT EXISTS (
+      SELECT 1 FROM public.user_tenants ut
+      WHERE ut.user_id = u.id AND ut.role = 'owner'
+    );
+  GET DIAGNOSTICS deleted_count = ROW_COUNT;
+  RETURN deleted_count;
+END
 $$;
 
 CREATE OR REPLACE FUNCTION "steward_bootstrap"."platform_stats"()
