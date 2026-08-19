@@ -192,13 +192,10 @@ async function dispatchConfiguredWebhook(
   },
 ): Promise<typeof webhookDeliveries.$inferSelect> {
   const signingSecret = decryptWebhookSecret(config.secret);
-  // SEC-088: legacy plaintext config rows are upgraded LAZILY here — CAS on
-  // the previously stored value — not by an eager boot-time backfill. A mass
-  // rewrite would need the encryption key during migrations and would race
-  // concurrently booting replicas; delivery rows below only ever snapshot the
-  // encrypted form. Residual risk (documented in deploy/DEPLOYMENT.md): a
-  // config that never fires and is never re-saved keeps its plaintext secret
-  // until an operator rotates/re-saves it.
+  // Plaintext compatibility rows are upgraded lazily with a compare-and-set.
+  // This avoids requiring the encryption key during migrations or racing
+  // concurrently booting replicas; delivery rows snapshot only ciphertext.
+  // A dormant compatibility row remains plaintext until delivery or rotation.
   const encryptedSecret = isEncryptedWebhookSecret(config.secret)
     ? config.secret
     : encryptWebhookSecret(signingSecret);

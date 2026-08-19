@@ -1502,13 +1502,9 @@ platform.get("/tenants/:tenantId/join-mode", async (c) => {
  * tenantId is auto-linked), 'invite' (existing user_tenants link required), or
  * 'closed' (no new members).
  *
- * This is the ONLY write surface for join_mode: the column was previously
- * settable by nothing but raw SQL, so the 0048 hardening backfill (every
- * 'open' tenant force-flipped to 'invite') left public-product tenants —
- * e.g. a consumer cloud's primary tenant — silently rejecting all NEW signups
- * after any fresh-environment migration replay, with no operator remedy short
- * of psql. Mirrors the email-config PATCH (scope gate, audit pair,
- * snapshot/restore on audit failure, update-or-insert).
+ * This is the only application write surface for join_mode. It mirrors the
+ * email-config mutation contract: scoped authorization, paired audits,
+ * rollback on audit failure, and update-or-insert persistence.
  */
 platform.patch("/tenants/:tenantId/join-mode", async (c) => {
   const scopeResponse = requirePlatformRouteScope(c, "platform:tenant-join-mode:write");

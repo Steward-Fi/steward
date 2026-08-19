@@ -142,11 +142,9 @@ const MAX_AGE = "86400";
 // ─── Middleware ───────────────────────────────────────────────────────────────
 
 /**
- * The wildcard CORS fallback is a dev-only convenience and requires an EXPLICIT
- * non-production NODE_ENV ("development"/"test"). Bare `bun run` leaves
- * NODE_ENV unset and previously got `Access-Control-Allow-Origin: *` with all
- * X-Steward-* and Authorization headers allowed — unset/unknown values now
- * fail closed exactly like production.
+ * The wildcard CORS fallback is a development-only convenience and requires an
+ * explicit "development" or "test" environment. Unset, unknown, and production
+ * environments all fail closed.
  */
 function devWildcardAllowed(): boolean {
   const env = process.env.NODE_ENV;

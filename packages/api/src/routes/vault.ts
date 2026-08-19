@@ -888,15 +888,9 @@ function getSendCallsActionPayload(payload: unknown): {
 }
 
 /**
- * Raised when a stored `transaction` action payload contains a present field of
- * the wrong type / out-of-range value. Replaying such a payload previously
- * silently coerced or dropped the offending field (e.g. a non-boolean broadcast
- * coerced to true, a string/float/negative/unsafe nonce dropped, wrong-type
- * gasLimit/venue/walletAddress dropped). That silent normalization changed the
- * caller's approved intent under the approval digest and could route a mutated
- * request to raw signing. The strict validator now throws instead, and the
- * approval replay path converts this into a fail-closed 409 with a specific
- * rejection audit (malformed_transaction_action_payload).
+ * Raised when a stored transaction action contains a present field with the
+ * wrong type or range. The approval replay path converts it into a fail-closed
+ * 409 and a malformed_transaction_action_payload audit.
  */
 class TransactionActionPayloadValidationError extends Error {
   constructor(
@@ -931,9 +925,7 @@ function getTransactionActionPayload(payload: unknown): {
   const value = payload as Record<string, unknown>;
   if (value.type !== "transaction") return null;
 
-  // broadcast: REQUIRED boolean. A missing or non-boolean broadcast was
-  // previously coerced (value.broadcast !== false) to true, silently promoting
-  // an ambiguous payload to a broadcast execution. Require it explicitly.
+  // broadcast is required; an ambiguous value must never imply execution.
   if (typeof value.broadcast !== "boolean") {
     throw new TransactionActionPayloadValidationError(
       "transaction action payload 'broadcast' must be a boolean",
@@ -941,15 +933,9 @@ function getTransactionActionPayload(payload: unknown): {
     );
   }
 
-  // nonce: OPTIONAL, but a PRESENT value (including an explicit null) must be a
-  // non-negative safe integer. Absence is distinguished from a present-null via
-  // Object.hasOwn: a legitimately-minted payload omits the key entirely (the
-  // transactionActionPayload builder spreads it in only when defined+non-null,
-  // and jsonb storage never injects nulls for omitted keys), so a present null
-  // can only come from a malformed/adversarial payload and must fail closed
-  // rather than be silently normalized to "omitted". A string/object/float/
-  // negative/unsafe-integer nonce was likewise previously dropped, silently
-  // changing the digested intent.
+  // nonce is optional, but a present value (including null) must be a
+  // non-negative safe integer. Object.hasOwn distinguishes absence from an
+  // adversarial present-null value.
   let nonce: number | undefined;
   if (Object.hasOwn(value, "nonce")) {
     if (typeof value.nonce !== "number" || !Number.isSafeInteger(value.nonce) || value.nonce < 0) {
@@ -961,10 +947,8 @@ function getTransactionActionPayload(payload: unknown): {
     nonce = value.nonce;
   }
 
-  // gasLimit: OPTIONAL, but a PRESENT value (including explicit null) must be a
-  // decimal uint string (its actual contract, e.g. "65000"). Absence vs
-  // present-null distinguished via Object.hasOwn; a wrong-type or present-null
-  // gasLimit was previously dropped.
+  // gasLimit is optional, but a present value (including null) must be a
+  // decimal uint string such as "65000".
   let gasLimit: string | undefined;
   if (Object.hasOwn(value, "gasLimit")) {
     if (!isUint256DecimalString(value.gasLimit)) {
@@ -976,10 +960,7 @@ function getTransactionActionPayload(payload: unknown): {
     gasLimit = value.gasLimit;
   }
 
-  // venue / walletAddress: OPTIONAL, but a PRESENT value (including explicit
-  // null) must be a string. Absence vs present-null distinguished via
-  // Object.hasOwn; wrong-type or present-null values were previously dropped,
-  // changing the resolved signing wallet/venue.
+  // venue and walletAddress are optional, but present values must be strings.
   let venue: string | undefined;
   if (Object.hasOwn(value, "venue")) {
     if (typeof value.venue !== "string") {
@@ -3959,9 +3940,8 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
       }
 
       if (isRawEvmSigningCandidate) {
-        // 1. Require a valid typed transaction action payload. A missing/malformed
-        //    actionPayload previously flipped isPrimaryEvmApproval=false and fell
-        //    through to raw signing. Now it fails closed.
+        // 1. Require a valid typed transaction action payload. Missing or
+        //    malformed action metadata must never fall through to raw signing.
         if (!isPrimaryEvmApproval) {
           return failClosed(
             "missing_or_malformed_transaction_action_payload",

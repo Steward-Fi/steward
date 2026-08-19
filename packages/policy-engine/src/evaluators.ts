@@ -808,11 +808,8 @@ async function evaluateSpendingLimit(
       }
     }
 
-    // USD limits hold. Wei-denominated caps declared in the SAME config are
-    // conjunctive, not alternative: previously any USD field short-circuited
-    // the whole wei section, so an operator's per-tx wei cap silently went
-    // unenforced (SEC-037). Fall through to the wei evaluation — undeclared
-    // wei fields normalize to MAX_UINT256, so only explicit caps bite.
+    // USD and wei-denominated caps in the same config are conjunctive. Continue
+    // into wei evaluation; undeclared wei fields normalize to MAX_UINT256.
     if (
       !hasOwnDefined(configRecord, "maxPerTx") &&
       !hasOwnDefined(configRecord, "maxPerDay") &&

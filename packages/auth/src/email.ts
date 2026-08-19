@@ -413,13 +413,8 @@ export class EmailAuth {
       );
     }
     this.provider = config.provider ?? new ConsoleProvider();
-    // Fail closed (elizaOS/eliza#18452): in production the ConsoleProvider —
-    // whether the silent default when no provider is configured, or passed
-    // explicitly — must never back login sends. Sends throw a typed
-    // EmailDeliveryNotConfiguredError BEFORE any challenge state is stored,
-    // so the API maps it to 503 instead of returning a false ok:true for a
-    // challenge nobody can ever receive. Verification of previously issued
-    // challenges is unaffected.
+    // Console delivery is forbidden in production. Reject before storing a
+    // challenge so the API cannot report success for an undeliverable login.
     this.deliveryNotConfigured =
       process.env.NODE_ENV === "production" && this.provider instanceof ConsoleProvider;
     this.tokenStore = config.tokenStore ?? new TokenStore();

@@ -18,14 +18,9 @@ import { handleProxy } from "./proxy";
  * Atomically expire a pending|approved proxy-approval row AND append its
  * tamper-evident `proxy.approval.expired` audit-chain event in ONE transaction.
  *
- * Both the poll-time and claim-time expiry paths previously flipped the row to
- * `expired` in a bare UPDATE and then wrote ONLY a `proxy_audit_log` row via
- * `recordRequiredAudit` — that operational log is NOT the tamper-evident
- * `audit_events` chain, so a proxy-side expiry produced no chain evidence and
- * the state change + its record were not both-or-neither (invariant I14, spec
- * section 11 item #10). This mirrors the api-side `expireProxyApprovals`, using
- * the shared `@stwd/db` `withTenantAuditedTransaction` primitive so the proxy
- * package can extend the chain without importing `@stwd/api`.
+ * The state change and tamper-evident audit append share one transaction. The
+ * proxy uses the shared database primitive so it does not depend on the API
+ * package to extend the audit chain.
  *
  * The guarded `status = 'expired' WHERE status IN ('pending','approved') AND
  * expiresAt <= now()` predicate keeps a post-crash retry idempotent: only one
