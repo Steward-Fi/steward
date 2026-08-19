@@ -21,6 +21,7 @@ describe("SUBMIT_TRADE action", () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     vi.restoreAllMocks();
     process.env = { ...OLD_ENV };
   });
@@ -62,9 +63,14 @@ describe("SUBMIT_TRADE action", () => {
     await expect(
       submitTradeAction.validate({} as any, mockMemory("buy 0.01 BTC") as any),
     ).resolves.toBe(true);
-    expect(fetchMock).toHaveBeenCalledWith("https://steward.example/v1/trade/sessions/ses_test", {
-      headers: { Authorization: "Bearer jwt-test", Accept: "application/json" },
-    });
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://steward.example/v1/trade/sessions/ses_test",
+      expect.objectContaining({
+        headers: { Authorization: "Bearer jwt-test", Accept: "application/json" },
+        redirect: "error",
+        signal: expect.any(AbortSignal),
+      }),
+    );
   });
 
   it("posts parsed order with Bearer JWT and returns confirmation", async () => {
@@ -92,6 +98,8 @@ describe("SUBMIT_TRADE action", () => {
     const [, request] = fetchMock.mock.calls[0];
     expect(fetchMock.mock.calls[0][0]).toBe("https://steward.example/v1/trade/hyperliquid/order");
     expect(request.headers.Authorization).toBe("Bearer jwt-test");
+    expect(request.redirect).toBe("error");
+    expect(request.signal).toBeInstanceOf(AbortSignal);
     expect(JSON.parse(request.body)).toMatchObject({
       sessionId: "ses_test",
       coin: "BTC",
@@ -141,6 +149,61 @@ describe("SUBMIT_TRADE action", () => {
     const result = await submitTradeAction.handler({} as any, mockMemory("buy 0.01 BTC") as any);
     expect(result?.success).toBe(false);
     expect(result?.text).toBe("venue error, will retry later");
+  });
+
+  it("rejects oversized chunked responses without reflecting their contents", async () => {
+    const secretCanary = "provider-secret-canary";
+    let cancelled = false;
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode("x".repeat(1024 * 1024)));
+        controller.enqueue(new TextEncoder().encode(secretCanary));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(body, { status: 502 })),
+    );
+
+    const result = await submitTradeAction.handler({} as any, mockMemory("buy 0.01 BTC") as any);
+
+    expect(result?.success).toBe(false);
+    expect(result?.text).toBe("venue error, will retry later");
+    expect(JSON.stringify(result)).not.toContain(secretCanary);
+    expect(cancelled).toBe(true);
+  });
+
+  it("aborts a stalled request at the bounded deadline", async () => {
+    vi.useFakeTimers();
+    let observedSignal: AbortSignal | undefined;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async (_url: string, init?: RequestInit) =>
+          await new Promise<Response>((_resolve, reject) => {
+            observedSignal = init?.signal as AbortSignal;
+            observedSignal.addEventListener(
+              "abort",
+              () => reject(new Error("secret socket error")),
+              {
+                once: true,
+              },
+            );
+          }),
+      ),
+    );
+
+    const pending = submitTradeAction.handler({} as any, mockMemory("buy 0.01 BTC") as any);
+    await vi.advanceTimersByTimeAsync(10_000);
+    const result = await pending;
+
+    expect(observedSignal?.aborted).toBe(true);
+    expect(result?.success).toBe(false);
+    expect(result?.text).toBe("venue error, will retry later");
+    expect(JSON.stringify(result)).not.toContain("secret socket error");
   });
 
   it("rejects a non-localhost plaintext STEWARD_API_URL before any request", async () => {

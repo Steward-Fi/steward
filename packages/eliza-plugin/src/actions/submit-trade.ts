@@ -13,6 +13,8 @@ import { assertSecureApiUrl } from "../services/StewardService.js";
 
 const ACTION_NAME = "SUBMIT_TRADE";
 const DEFAULT_LEVERAGE = 1;
+const STEWARD_REQUEST_TIMEOUT_MS = 10_000;
+const MAX_STEWARD_RESPONSE_BYTES = 1024 * 1024;
 
 type Coin = "BTC" | "ETH";
 type Side = "buy" | "sell";
@@ -186,13 +188,95 @@ export function parseSubmitTrade(
   };
 }
 
-async function parseResponseJson(response: Response): Promise<unknown> {
-  const text = await response.text();
+async function readResponseText(response: Response, signal: AbortSignal): Promise<string> {
+  const declaredLength = response.headers.get("content-length");
+  if (declaredLength !== null) {
+    const parsedLength = Number(declaredLength);
+    if (!Number.isSafeInteger(parsedLength) || parsedLength < 0) {
+      void response.body?.cancel().catch(() => undefined);
+      throw new Error("Invalid Steward response length");
+    }
+    if (parsedLength > MAX_STEWARD_RESPONSE_BYTES) {
+      void response.body?.cancel().catch(() => undefined);
+      throw new Error("Steward response exceeded size limit");
+    }
+  }
+
+  const reader = response.body?.getReader();
+  if (!reader) return "";
+  const chunks: Uint8Array[] = [];
+  let totalBytes = 0;
+  const onAbort = () => {
+    void reader.cancel().catch(() => undefined);
+  };
+  signal.addEventListener("abort", onAbort, { once: true });
+  const aborted = new Promise<never>((_, reject) => {
+    if (signal.aborted) {
+      reject(new Error("Steward request timed out"));
+      return;
+    }
+    signal.addEventListener("abort", () => reject(new Error("Steward request timed out")), {
+      once: true,
+    });
+  });
+  try {
+    while (true) {
+      const result = await Promise.race([reader.read(), aborted]);
+      if (result.done) break;
+      if (!result.value) continue;
+      totalBytes += result.value.byteLength;
+      if (totalBytes > MAX_STEWARD_RESPONSE_BYTES) {
+        void reader.cancel().catch(() => undefined);
+        throw new Error("Steward response exceeded size limit");
+      }
+      chunks.push(result.value);
+    }
+  } finally {
+    signal.removeEventListener("abort", onAbort);
+  }
+  const bytes = new Uint8Array(totalBytes);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    throw new Error("Steward response was not valid UTF-8");
+  }
+}
+
+async function parseResponseJson(response: Response, signal: AbortSignal): Promise<unknown> {
+  const text = await readResponseText(response, signal);
   if (!text) return undefined;
   try {
     return JSON.parse(text);
   } catch {
     return { error: text };
+  }
+}
+
+async function fetchStewardJson(
+  url: string,
+  init: RequestInit,
+): Promise<{ status: number; ok: boolean; data: unknown }> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), STEWARD_REQUEST_TIMEOUT_MS);
+  try {
+    const response = await fetch(url, {
+      ...init,
+      redirect: "error",
+      signal: controller.signal,
+    });
+    const data = await parseResponseJson(response, controller.signal);
+    return { status: response.status, ok: response.ok, data };
+  } catch {
+    throw new Error(
+      controller.signal.aborted ? "Steward request timed out" : "Steward request failed",
+    );
+  } finally {
+    clearTimeout(timeout);
   }
 }
 
@@ -226,7 +310,7 @@ async function postOrder(
   }
 
   const idempotencyKey = crypto.randomUUID();
-  const response = await fetch(`${apiUrl}/v1/trade/hyperliquid/order`, {
+  const response = await fetchStewardJson(`${apiUrl}/v1/trade/hyperliquid/order`, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${jwt}`,
@@ -245,7 +329,7 @@ async function postOrder(
       idempotencyKey,
     }),
   });
-  return { status: response.status, data: await parseResponseJson(response) };
+  return { status: response.status, data: response.data };
 }
 
 async function hasActiveSession(runtime: IAgentRuntime): Promise<boolean> {
@@ -260,11 +344,14 @@ async function hasActiveSession(runtime: IAgentRuntime): Promise<boolean> {
   if (!apiUrl || !jwt || !sessionId) return false;
 
   try {
-    const response = await fetch(`${apiUrl}/v1/trade/sessions/${encodeURIComponent(sessionId)}`, {
-      headers: { Authorization: `Bearer ${jwt}`, Accept: "application/json" },
-    });
+    const response = await fetchStewardJson(
+      `${apiUrl}/v1/trade/sessions/${encodeURIComponent(sessionId)}`,
+      {
+        headers: { Authorization: `Bearer ${jwt}`, Accept: "application/json" },
+      },
+    );
     if (!response.ok) return false;
-    const data = await parseResponseJson(response);
+    const data = response.data;
     const session =
       data && typeof data === "object" && "data" in data
         ? (data as { data?: Record<string, unknown> }).data
