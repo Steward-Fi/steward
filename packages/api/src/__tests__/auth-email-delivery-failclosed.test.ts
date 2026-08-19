@@ -13,7 +13,9 @@ import type { EmailDeliveryReceipt, EmailProvider } from "@stwd/auth";
 import { closeDb, getDb, tenantConfigs, tenants } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import type { Hono } from "hono";
+import { createAuthorizationSignature } from "../middleware/authorization-signature";
 import {
+  authRoutes,
   clearEmailAuthTenantCacheForTests,
   getEmailAuthForTenant,
   initAuthStores,
@@ -32,6 +34,9 @@ const ORIGINAL_ENV = {
   REDIS_URL: process.env.REDIS_URL,
   STEWARD_EMAIL_CODE_SECRET: process.env.STEWARD_EMAIL_CODE_SECRET,
   STEWARD_ALLOW_AUTH_RATE_LIMIT_SOFT_FAIL: process.env.STEWARD_ALLOW_AUTH_RATE_LIMIT_SOFT_FAIL,
+  STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS: process.env.STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS,
+  STEWARD_REQUEST_SIGNING_SECRET: process.env.STEWARD_REQUEST_SIGNING_SECRET,
+  STEWARD_REQUEST_SIGNING_SECRETS: process.env.STEWARD_REQUEST_SIGNING_SECRETS,
   STEWARD_PGLITE_MEMORY: process.env.STEWARD_PGLITE_MEMORY,
   STEWARD_MASTER_PASSWORD: process.env.STEWARD_MASTER_PASSWORD,
   STEWARD_JWT_SECRET: process.env.STEWARD_JWT_SECRET,
@@ -45,6 +50,8 @@ function restoreEnv(): void {
 }
 
 let app: Hono;
+const REQUEST_SIGNING_SECRET = "email-delivery-fixture-request-signing-secret";
+let requestSequence = 0;
 
 describe("fail-closed email delivery routes (production)", () => {
   beforeAll(async () => {
@@ -56,6 +63,12 @@ describe("fail-closed email delivery routes (production)", () => {
     process.env.APP_URL = "https://app.example.com";
     process.env.STEWARD_EMAIL_CODE_SECRET = "route-fail-closed-email-code-secret";
     process.env.STEWARD_ALLOW_AUTH_RATE_LIMIT_SOFT_FAIL = "true";
+    // This suite owns provider-delivery behavior, not the independently tested
+    // request-expiry guard. Keep the production bypass explicit and prove below
+    // that removing it restores the fail-closed boundary.
+    process.env.STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS = "true";
+    process.env.STEWARD_REQUEST_SIGNING_SECRET = REQUEST_SIGNING_SECRET;
+    delete process.env.STEWARD_REQUEST_SIGNING_SECRETS;
     process.env.STEWARD_PGLITE_MEMORY = "true";
     process.env.STEWARD_MASTER_PASSWORD = "route-fail-closed-master-password";
     process.env.STEWARD_JWT_SECRET = "route-fail-closed-jwt-secret-32-chars!!";
@@ -79,7 +92,9 @@ describe("fail-closed email delivery routes (production)", () => {
       emailConfig: { apiKeyEncrypted: '{"ciphertext":"x","iv":"x","tag":"x","salt":"x"}' },
     });
 
-    ({ app } = await import("../app"));
+    const { createApp } = await import("../app");
+    app = createApp();
+    app.route("/auth", authRoutes);
   });
 
   afterAll(async () => {
@@ -88,16 +103,63 @@ describe("fail-closed email delivery routes (production)", () => {
     restoreEnv();
   });
 
-  async function postJson(path: string, body: unknown, tenantId?: string): Promise<Response> {
+  async function postJson(
+    path: string,
+    body: unknown,
+    tenantId?: string,
+    signed = true,
+  ): Promise<Response> {
+    const encodedBody = JSON.stringify(body);
+    const timestamp = String(Math.floor(Date.now() / 1000));
+    const idempotencyKey = `email-delivery-${++requestSequence}`;
+    const signature = signed
+      ? await createAuthorizationSignature(
+          {
+            method: "POST",
+            url: path,
+            tenantId,
+            timestamp,
+            idempotencyKey,
+            body: encodedBody,
+          },
+          REQUEST_SIGNING_SECRET,
+        )
+      : undefined;
     return app.request(path, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         ...(tenantId ? { "X-Steward-Tenant": tenantId } : {}),
+        ...(signed
+          ? {
+              "X-Steward-Request-Timestamp": timestamp,
+              "X-Steward-Signature": signature as string,
+              "Idempotency-Key": idempotencyKey,
+            }
+          : {}),
       },
-      body: JSON.stringify(body),
+      body: encodedBody,
     });
   }
+
+  it("keeps production request-expiry enforcement outside the scoped fixture bypass", async () => {
+    delete process.env.STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS;
+    try {
+      const response = await postJson(
+        "/auth/email/send",
+        { email: "user@example.com" },
+        undefined,
+        false,
+      );
+      expect(response.status).toBe(400);
+      expect(await response.json()).toEqual({
+        ok: false,
+        error: "Request expiry header required",
+      });
+    } finally {
+      process.env.STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS = "true";
+    }
+  });
 
   it("returns 503 (not a false ok:true) when no global provider is configured", async () => {
     clearEmailAuthTenantCacheForTests();

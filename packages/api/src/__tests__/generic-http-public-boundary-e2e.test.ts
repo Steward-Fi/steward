@@ -157,6 +157,9 @@ describe("#201 generic-http true public-boundary E2E", () => {
 
     const proxy = await import("@stwd/proxy/src/handlers/proxy");
     ({ dispatchGovernedExecution } = await import("@stwd/proxy/src/handlers/governed-execution"));
+    // The public-boundary proof owns authority, credential injection, and
+    // dispatch behavior; Redis enforcement has separate fail-closed coverage.
+    proxy.__setCheckProxyRateLimitForTests(async () => ({ allowed: true, resetMs: 0 }));
     proxy.__setResolveProxyHostForTests(async () => [{ address: "93.184.216.34", family: 4 }]);
     proxy.__setForwardProxyRequestForTests(async (url, method, headers, body) => {
       const bytes = body
@@ -173,6 +176,8 @@ describe("#201 generic-http true public-boundary E2E", () => {
   });
 
   afterAll(async () => {
+    const proxy = await import("@stwd/proxy/src/handlers/proxy");
+    proxy.__resetProxyHandlerTestHooksForTests();
     await closeDb();
     await new Promise<void>((resolve) => jwksServer.close(() => resolve()));
     for (const key of [

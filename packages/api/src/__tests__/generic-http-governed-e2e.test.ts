@@ -489,6 +489,10 @@ describe("#201 generic-http governed provider-action E2E", () => {
     setPGLiteOverride(db, async () => client.close());
     const proxy = await import("@stwd/proxy/src/handlers/proxy");
     ({ dispatchGovernedExecution } = await import("@stwd/proxy/src/handlers/governed-execution"));
+    // This fixture proves governed authoring/dispatch semantics, not Redis
+    // availability. Keep the rate boundary deterministic and restore the real
+    // fail-closed dependency after the suite.
+    proxy.__setCheckProxyRateLimitForTests(async () => ({ allowed: true, resetMs: 0 }));
     proxy.__setResolveProxyHostForTests(async () => [{ address: "93.184.216.34", family: 4 }]);
     proxy.__setForwardProxyRequestForTests(async (url, method, headers, body) => {
       const bytes = body
@@ -504,6 +508,8 @@ describe("#201 generic-http governed provider-action E2E", () => {
     });
   });
   afterAll(async () => {
+    const proxy = await import("@stwd/proxy/src/handlers/proxy");
+    proxy.__resetProxyHandlerTestHooksForTests();
     await closeDb();
     delete process.env.STEWARD_PGLITE_MEMORY;
   });
