@@ -749,18 +749,27 @@ export async function getTransactionStats(agentId: string, chainId?: number) {
 
 // ─── Auth middleware ──────────────────────────────────────────────────────────
 
+export async function withAuthenticatedTenantDatabase<T>(
+  tenantId: string,
+  method: string,
+  subject: string,
+  callback: () => Promise<T>,
+): Promise<T> {
+  if (hasTenantTransactionDatabase()) return callback();
+  const context = tenantContextFromAuthenticatedPrincipal({ tenantId, method, subject });
+  const driver = isPGLiteRuntime ? "pglite" : getDatabaseDriver();
+  return withTenantRlsTransaction(getDb() as never, driver, context, async (tx) =>
+    withTenantTransactionDatabase(tx as never, callback),
+  );
+}
+
 export async function continueWithTenantDatabase(
   tenantId: string,
   method: string,
   subject: string,
   next: Next,
 ) {
-  if (hasTenantTransactionDatabase()) return next();
-  const context = tenantContextFromAuthenticatedPrincipal({ tenantId, method, subject });
-  const driver = isPGLiteRuntime ? "pglite" : getDatabaseDriver();
-  return withTenantRlsTransaction(getDb() as never, driver, context, async (tx) =>
-    withTenantTransactionDatabase(tx as never, next),
-  );
+  return withAuthenticatedTenantDatabase(tenantId, method, subject, next);
 }
 
 export async function tenantAuth(

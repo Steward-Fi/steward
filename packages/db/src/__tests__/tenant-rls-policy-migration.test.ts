@@ -56,6 +56,7 @@ describe("0111 tenant RLS policy installation", () => {
     expect(functions.rows.map((row) => row.proname)).toEqual([
       "agent_subject",
       "app_client_subject",
+      "auth_refresh_subject",
       "ensure_default_tenant",
       "platform_stats",
       "platform_tenants",

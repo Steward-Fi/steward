@@ -173,6 +173,19 @@ AS $$
   OFFSET GREATEST(p_offset, 0)
 $$;
 
+CREATE OR REPLACE FUNCTION "steward_bootstrap"."auth_refresh_subject"(p_token_hash text)
+RETURNS TABLE (user_id uuid, tenant_id varchar(64), expires_at timestamptz)
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $$
+  SELECT r.user_id, r.tenant_id, r.expires_at
+  FROM public.refresh_tokens r
+  WHERE r.token_hash = p_token_hash
+  LIMIT 1
+$$;
+
 REVOKE ALL ON ALL FUNCTIONS IN SCHEMA "steward_bootstrap" FROM PUBLIC;
 
 DO $$

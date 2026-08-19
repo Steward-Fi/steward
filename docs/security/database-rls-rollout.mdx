@@ -27,8 +27,11 @@ transaction receipt, and tenant retention sweeps now run once per tenant.
 
 The remaining activation blockers are explicit and must not be waived:
 
-- pre-context `/auth` mutations that create or change tenant memberships still
-  need fixed-shape bootstrap functions or post-verification tenant transactions;
+- `/auth` refresh lookup now uses a fixed bootstrap function, while refresh
+  writes, membership links, identity claims, and personal-tenant wallet
+  provisioning run after verified identity in tenant transactions. Remaining
+  pre-context tenant/join/SSO discovery and cross-tenant refresh switching need
+  fixed-shape bootstrap/transfer functions;
 - platform global-user/identity routes and agent-id-only token revocation still
   need a tenant derivation or narrowly shaped cross-tenant bootstrap API;
 - global deactivated-user retention still needs a fixed maintenance function

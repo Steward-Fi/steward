@@ -112,11 +112,14 @@ import {
 import {
   accounts,
   authenticators,
+  getDatabaseDriver,
   getDb,
+  hasTenantTransactionDatabase,
   refreshTokens,
   type TenantEmailConfig,
   tenantAppClients,
   tenantConfigs,
+  tenantContextFromAuthenticatedPrincipal,
   tenantSamlAssertionReplays,
   tenantSamlAuthnRequests,
   tenantSamlSsoConfigs,
@@ -124,6 +127,8 @@ import {
   tenants,
   users,
   userTenants,
+  withTenantRlsTransaction,
+  withTenantTransactionDatabase,
 } from "@stwd/db";
 import {
   type ApiResponse,
@@ -164,6 +169,26 @@ import { dispatchWebhook } from "../services/webhook-dispatch";
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 const _DEFAULT_TENANT_ID = process.env.STEWARD_DEFAULT_TENANT_ID || "default";
+
+async function withVerifiedAuthTenant<T>(
+  tenantId: string,
+  subject: string,
+  callback: () => Promise<T>,
+): Promise<T> {
+  if (hasTenantTransactionDatabase()) return callback();
+  const context = tenantContextFromAuthenticatedPrincipal({
+    tenantId,
+    method: "verified-auth-flow",
+    subject,
+  });
+  const driver =
+    process.env.STEWARD_DB_MODE === "pglite" || process.env.STEWARD_PGLITE_MEMORY === "true"
+      ? "pglite"
+      : getDatabaseDriver();
+  return withTenantRlsTransaction(getDb() as never, driver, context, async (tx) =>
+    withTenantTransactionDatabase(tx as never, callback),
+  );
+}
 
 function isValidTenantId(value: unknown): value is string {
   return typeof value === "string" && /^[a-zA-Z0-9_\-.:]{1,64}$/.test(value);
@@ -788,15 +813,17 @@ export async function createSessionToken(
 }
 
 async function isActiveTenantMember(userId: string, tenantId: string): Promise<boolean> {
-  const [row] = await getDb()
-    .select({ userId: users.id })
-    .from(users)
-    .innerJoin(
-      userTenants,
-      and(eq(userTenants.userId, users.id), eq(userTenants.tenantId, tenantId)),
-    )
-    .where(and(eq(users.id, userId), sql`${users.deactivatedAt} is null`));
-  return Boolean(row);
+  return withVerifiedAuthTenant(tenantId, userId, async () => {
+    const [row] = await getDb()
+      .select({ userId: users.id })
+      .from(users)
+      .innerJoin(
+        userTenants,
+        and(eq(userTenants.userId, users.id), eq(userTenants.tenantId, tenantId)),
+      )
+      .where(and(eq(users.id, userId), sql`${users.deactivatedAt} is null`));
+    return Boolean(row);
+  });
 }
 
 async function buildIdentityClaims(
@@ -814,30 +841,30 @@ async function buildIdentityClaims(
   walletChain: string | null;
   customMetadata: Record<string, unknown>;
 }> {
-  const db = getDb();
-  const [user] = await db.select().from(users).where(eq(users.id, userId));
-  if (!user) throw new Error("User not found");
+  return withVerifiedAuthTenant(tenantId, userId, async () => {
+    const db = getDb();
+    const [user] = await db.select().from(users).where(eq(users.id, userId));
+    if (!user) throw new Error("User not found");
 
-  const [tenantMembership] = await db
-    .select({ customMetadata: userTenants.customMetadata })
-    .from(userTenants)
-    .where(and(eq(userTenants.userId, userId), eq(userTenants.tenantId, tenantId)));
-  if (!tenantMembership) {
-    throw new Error("Not a member of this tenant");
-  }
+    const [tenantMembership] = await db
+      .select({ customMetadata: userTenants.customMetadata })
+      .from(userTenants)
+      .where(and(eq(userTenants.userId, userId), eq(userTenants.tenantId, tenantId)));
+    if (!tenantMembership) throw new Error("Not a member of this tenant");
 
-  return {
-    sub: user.id,
-    userId: user.id,
-    tenantId,
-    email: user.email,
-    emailVerified: user.emailVerified,
-    name: user.name,
-    image: user.image,
-    walletAddress: user.walletAddress,
-    walletChain: user.walletChain,
-    customMetadata: tenantMembership.customMetadata ?? {},
-  };
+    return {
+      sub: user.id,
+      userId: user.id,
+      tenantId,
+      email: user.email,
+      emailVerified: user.emailVerified,
+      name: user.name,
+      image: user.image,
+      walletAddress: user.walletAddress,
+      walletChain: user.walletChain,
+      customMetadata: tenantMembership.customMetadata ?? {},
+    };
+  });
 }
 
 function tenantIdentityJwtIssuer(tenantId: string): string {
@@ -882,20 +909,22 @@ async function createRefreshToken(
   tenantId: string,
   sessionClaims?: Record<string, unknown>,
 ): Promise<string> {
-  const db = getDb();
-  const raw = randomBytes(40).toString("hex");
-  const id = randomBytes(16).toString("hex");
-  const tokenHash = hashToken(raw);
-  const expiresAt = new Date(Date.now() + REFRESH_TOKEN_EXPIRY_DAYS * 86400 * 1000);
-  await db.insert(refreshTokens).values({ id, userId, tenantId, tokenHash, expiresAt });
-  if (sessionClaims && Object.keys(sessionClaims).length > 0) {
-    await writeMfaJson(
-      `refresh:claims:${tokenHash}`,
-      sessionClaims,
-      REFRESH_TOKEN_EXPIRY_DAYS * 86400 * 1000,
-    );
-  }
-  return raw;
+  return withVerifiedAuthTenant(tenantId, userId, async () => {
+    const db = getDb();
+    const raw = randomBytes(40).toString("hex");
+    const id = randomBytes(16).toString("hex");
+    const tokenHash = hashToken(raw);
+    const expiresAt = new Date(Date.now() + REFRESH_TOKEN_EXPIRY_DAYS * 86400 * 1000);
+    await db.insert(refreshTokens).values({ id, userId, tenantId, tokenHash, expiresAt });
+    if (sessionClaims && Object.keys(sessionClaims).length > 0) {
+      await writeMfaJson(
+        `refresh:claims:${tokenHash}`,
+        sessionClaims,
+        REFRESH_TOKEN_EXPIRY_DAYS * 86400 * 1000,
+      );
+    }
+    return raw;
+  });
 }
 
 type RefreshRotationResult =
@@ -934,6 +963,29 @@ async function revokeUserRefreshSessions(userId: string) {
 }
 
 async function rotateRefreshTokenForUserSession(
+  raw: string,
+  requestedTenantId?: string,
+): Promise<RefreshRotationResult> {
+  const tokenHash = hashToken(raw);
+  const result = await getDb().execute(sql`
+    SELECT user_id, tenant_id
+    FROM steward_bootstrap.auth_refresh_subject(${tokenHash})
+  `);
+  const [subject] = (
+    Array.isArray(result) ? result : ((result as { rows?: unknown[] }).rows ?? [])
+  ) as Array<{ user_id: string; tenant_id: string }> | [];
+  const used = subject
+    ? null
+    : await readMfaJson<UsedRefreshTokenRecord>(`refresh:used:${tokenHash}`);
+  const tenantId = subject?.tenant_id ?? used?.tenantId;
+  const userId = subject?.user_id ?? used?.userId;
+  if (!tenantId || !userId) return { status: "invalid" };
+  return withVerifiedAuthTenant(tenantId, userId, () =>
+    rotateRefreshTokenInsideTenant(raw, requestedTenantId),
+  );
+}
+
+async function rotateRefreshTokenInsideTenant(
   raw: string,
   requestedTenantId?: string,
 ): Promise<RefreshRotationResult> {
@@ -2576,14 +2628,15 @@ function verifySolanaMessageSignature(
  * the user's provisioned wallet agent (wallet always lives under personal tenant).
  */
 async function ensurePersonalTenant(userId: string, displayName: string): Promise<string> {
-  const db = getDb();
   const tenantId = `personal-${userId}`;
-  const { hash } = generateApiKey();
-  await db
-    .insert(tenants)
-    .values({ id: tenantId, name: displayName, apiKeyHash: hash })
-    .onConflictDoNothing();
-  return tenantId;
+  return withVerifiedAuthTenant(tenantId, userId, async () => {
+    const { hash } = generateApiKey();
+    await getDb()
+      .insert(tenants)
+      .values({ id: tenantId, name: displayName, apiKeyHash: hash })
+      .onConflictDoNothing();
+    return tenantId;
+  });
 }
 
 /**
@@ -2596,8 +2649,9 @@ async function ensureUserTenantLink(
   tenantId: string,
   role: string = "member",
 ): Promise<void> {
-  const db = getDb();
-  await db.insert(userTenants).values({ userId, tenantId, role }).onConflictDoNothing();
+  await withVerifiedAuthTenant(tenantId, userId, async () => {
+    await getDb().insert(userTenants).values({ userId, tenantId, role }).onConflictDoNothing();
+  });
 }
 
 /**
@@ -2610,20 +2664,21 @@ async function provisionWalletForUser(
   userId: string,
   email: string,
 ): Promise<{ walletAddress: string; personalTenantId: string }> {
-  const personalTenantId = await ensurePersonalTenant(userId, email);
-  const vault = getVault();
-  const result = await provisionUserWallet(vault, userId, email, personalTenantId);
-  const db = getDb();
-  await db
-    .update(users)
-    .set({
-      walletAddress: result.walletAddress,
-      stewardWalletId: result.agentId,
-    })
-    .where(eq(users.id, userId));
-  // Also link user to their personal tenant
-  await ensureUserTenantLink(userId, personalTenantId, "owner");
-  return { walletAddress: result.walletAddress, personalTenantId };
+  const personalTenantId = `personal-${userId}`;
+  return withVerifiedAuthTenant(personalTenantId, userId, async () => {
+    await ensurePersonalTenant(userId, email);
+    const vault = getVault();
+    const result = await provisionUserWallet(vault, userId, email, personalTenantId);
+    await getDb()
+      .update(users)
+      .set({
+        walletAddress: result.walletAddress,
+        stewardWalletId: result.agentId,
+      })
+      .where(eq(users.id, userId));
+    await ensureUserTenantLink(userId, personalTenantId, "owner");
+    return { walletAddress: result.walletAddress, personalTenantId };
+  });
 }
 
 // ─── Request body helper ──────────────────────────────────────────────────────
@@ -9005,10 +9060,12 @@ auth.post("/guest", async (c) => {
   // Link the guest to the requesting tenant with the LIMITED "guest" role so the
   // session cannot satisfy requireTenantLevel(). onConflictDoNothing keeps this
   // idempotent against a racing insert on the (userId, tenantId) unique index.
-  await db
-    .insert(userTenants)
-    .values({ userId: guest.id, tenantId, role: GUEST_TENANT_ROLE })
-    .onConflictDoNothing();
+  await withVerifiedAuthTenant(tenantId, guest.id, async () => {
+    await getDb()
+      .insert(userTenants)
+      .values({ userId: guest.id, tenantId, role: GUEST_TENANT_ROLE })
+      .onConflictDoNothing();
+  });
 
   // Provision the guest's wallet under its own personal namespace so it has a
   // wallet/agents immediately AND those rows survive a later upgrade unchanged.

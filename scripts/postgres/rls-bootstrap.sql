@@ -52,7 +52,7 @@ SELECT format('GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO %I', :'s
 SELECT format(
   'GRANT SELECT ON public.tenants, public.users, public.user_tenants, public.agents, '
   'public.session_signers, public.tenant_app_clients, public.tenant_app_client_secrets, '
-  'public.transactions TO %I',
+  'public.transactions, public.refresh_tokens TO %I',
   :'steward_bootstrap_role'
 ) \gexec
 SELECT format('GRANT INSERT ON public.tenants TO %I', :'steward_bootstrap_role') \gexec
@@ -68,6 +68,7 @@ SELECT format('ALTER FUNCTION steward_bootstrap.tenant_ids_for_internal_job() OW
 SELECT format('ALTER FUNCTION steward_bootstrap.ensure_default_tenant(text) OWNER TO %I', :'steward_bootstrap_role') \gexec
 SELECT format('ALTER FUNCTION steward_bootstrap.platform_stats() OWNER TO %I', :'steward_bootstrap_role') \gexec
 SELECT format('ALTER FUNCTION steward_bootstrap.platform_tenants(integer,integer) OWNER TO %I', :'steward_bootstrap_role') \gexec
+SELECT format('ALTER FUNCTION steward_bootstrap.auth_refresh_subject(text) OWNER TO %I', :'steward_bootstrap_role') \gexec
 
 SELECT format('ALTER TABLE %I.%I OWNER TO %I', n.nspname, c.relname, :'steward_migration_role')
 FROM pg_class c
