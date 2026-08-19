@@ -73,12 +73,24 @@ export interface JwtRuntimeEnvironment {
   readonly STEWARD_ALLOW_DEV_SECRETS?: string;
   readonly STEWARD_ALLOW_DEV_SECRET?: string;
   readonly AGENT_TOKEN_EXPIRY?: string;
+  readonly STEWARD_IDENTITY_JWT_ALG?: string;
+  readonly STEWARD_IDENTITY_JWT_PRIVATE_KEY?: string;
+  readonly STEWARD_IDENTITY_JWT_KID?: string;
+  readonly STEWARD_IDENTITY_JWT_ISSUER?: string;
+  readonly STEWARD_IDENTITY_JWT_AUDIENCE?: string;
+  readonly APP_URL?: string;
 }
 
-/** Immutable HMAC signing and default agent-token lifetime for one request. */
+/** Immutable symmetric and asymmetric JWT authority for one request. */
 export interface JwtRuntimeAuthority {
   readonly jwtSecret: string;
   readonly agentTokenExpiry: string;
+  readonly identityJwtAlgorithm: IdentityJwtAlgorithm;
+  readonly identityJwtPrivateKey?: string;
+  readonly identityJwtKid?: string;
+  readonly identityJwtIssuer?: string;
+  readonly identityJwtAudience: string;
+  readonly appUrl?: string;
 }
 
 const jwtRuntimeAuthorityStorage = new AsyncLocalStorage<JwtRuntimeAuthority>();
@@ -283,15 +295,25 @@ function normalizePrivateKeyInput(value: string): string {
   return value.trim().replace(/\\n/g, "\n");
 }
 
-function getIdentityJwtAlgorithm(): IdentityJwtAlgorithm {
-  const alg = process.env.STEWARD_IDENTITY_JWT_ALG?.trim() || "RS256";
+function resolveIdentityJwtAlgorithm(value?: string): IdentityJwtAlgorithm {
+  const alg = value?.trim() || "RS256";
   if (alg !== "RS256" && alg !== "ES256") {
     throw new Error("STEWARD_IDENTITY_JWT_ALG must be RS256 or ES256");
   }
   return alg;
 }
 
+function getIdentityJwtAlgorithm(): IdentityJwtAlgorithm {
+  const authority = jwtRuntimeAuthorityStorage.getStore();
+  return (
+    authority?.identityJwtAlgorithm ??
+    resolveIdentityJwtAlgorithm(process.env.STEWARD_IDENTITY_JWT_ALG)
+  );
+}
+
 function getIdentityJwtPrivateKeyInput(): string | undefined {
+  const authority = jwtRuntimeAuthorityStorage.getStore();
+  if (authority) return authority.identityJwtPrivateKey;
   return process.env.STEWARD_IDENTITY_JWT_PRIVATE_KEY?.trim() || undefined;
 }
 
@@ -300,6 +322,15 @@ export function isAsymmetricIdentityJwtConfigured(): boolean {
 }
 
 export function getIdentityJwtIssuer(requestOrigin?: string): string {
+  const authority = jwtRuntimeAuthorityStorage.getStore();
+  if (authority) {
+    return (
+      authority.identityJwtIssuer ||
+      authority.appUrl ||
+      requestOrigin?.trim().replace(/\/$/, "") ||
+      JWT_ISSUER
+    );
+  }
   return (
     process.env.STEWARD_IDENTITY_JWT_ISSUER?.trim().replace(/\/$/, "") ||
     process.env.APP_URL?.trim().replace(/\/$/, "") ||
@@ -309,7 +340,11 @@ export function getIdentityJwtIssuer(requestOrigin?: string): string {
 }
 
 export function getIdentityJwtAudience(): string {
-  return process.env.STEWARD_IDENTITY_JWT_AUDIENCE?.trim() || JWT_AUDIENCE;
+  return (
+    jwtRuntimeAuthorityStorage.getStore()?.identityJwtAudience ??
+    process.env.STEWARD_IDENTITY_JWT_AUDIENCE?.trim() ??
+    JWT_AUDIENCE
+  );
 }
 
 async function importIdentityPrivateKey(alg: IdentityJwtAlgorithm) {
@@ -331,10 +366,12 @@ async function identityPublicJwk(alg: IdentityJwtAlgorithm): Promise<JWK | null>
   const publicJwk = await exportJWK(privateKey);
   publicJwk.alg = alg;
   publicJwk.use = "sig";
-  publicJwk.kid =
-    process.env.STEWARD_IDENTITY_JWT_KID?.trim() ||
-    publicJwk.kid ||
-    (await calculateJwkThumbprint(publicJwk));
+  const authority = jwtRuntimeAuthorityStorage.getStore();
+  publicJwk.kid = authority
+    ? authority.identityJwtKid || publicJwk.kid || (await calculateJwkThumbprint(publicJwk))
+    : process.env.STEWARD_IDENTITY_JWT_KID?.trim() ||
+      publicJwk.kid ||
+      (await calculateJwkThumbprint(publicJwk));
   delete publicJwk.d;
   delete publicJwk.dp;
   delete publicJwk.dq;
@@ -492,7 +529,23 @@ export function createJwtRuntimeAuthority(
   const agentTokenExpiry = getAgentTokenExpiry(
     environment.AGENT_TOKEN_EXPIRY ?? AGENT_TOKEN_EXPIRY,
   );
-  return Object.freeze({ jwtSecret, agentTokenExpiry });
+  const identityJwtAlgorithm = resolveIdentityJwtAlgorithm(environment.STEWARD_IDENTITY_JWT_ALG);
+  const identityJwtPrivateKey = environment.STEWARD_IDENTITY_JWT_PRIVATE_KEY?.trim() || undefined;
+  const identityJwtKid = environment.STEWARD_IDENTITY_JWT_KID?.trim() || undefined;
+  const identityJwtIssuer =
+    environment.STEWARD_IDENTITY_JWT_ISSUER?.trim().replace(/\/$/, "") || undefined;
+  const identityJwtAudience = environment.STEWARD_IDENTITY_JWT_AUDIENCE?.trim() || JWT_AUDIENCE;
+  const appUrl = environment.APP_URL?.trim().replace(/\/$/, "") || undefined;
+  return Object.freeze({
+    jwtSecret,
+    agentTokenExpiry,
+    identityJwtAlgorithm,
+    identityJwtPrivateKey,
+    identityJwtKid,
+    identityJwtIssuer,
+    identityJwtAudience,
+    appUrl,
+  });
 }
 
 /** Bind one immutable JWT authority to all asynchronous work spawned by a request. */
@@ -503,6 +556,12 @@ export function withJwtRuntimeAuthority<T>(
   const immutableAuthority = Object.freeze({
     jwtSecret: authority.jwtSecret,
     agentTokenExpiry: authority.agentTokenExpiry,
+    identityJwtAlgorithm: authority.identityJwtAlgorithm,
+    identityJwtPrivateKey: authority.identityJwtPrivateKey,
+    identityJwtKid: authority.identityJwtKid,
+    identityJwtIssuer: authority.identityJwtIssuer,
+    identityJwtAudience: authority.identityJwtAudience,
+    appUrl: authority.appUrl,
   });
   return jwtRuntimeAuthorityStorage.run(immutableAuthority, callback);
 }

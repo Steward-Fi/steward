@@ -6,9 +6,9 @@
  */
 
 import { afterEach, describe, expect, it } from "bun:test";
-import { signAgentToken } from "@stwd/auth/jwt";
+import { signAgentToken, signIdentityJwtPayload } from "@stwd/auth/jwt";
 import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
-import { decodeJwt, jwtVerify } from "jose";
+import { decodeJwt, decodeProtectedHeader, exportPKCS8, generateKeyPair, jwtVerify } from "jose";
 import worker, { hydrateProcessEnv, withWorkerJwtAuthority } from "../worker";
 
 /**
@@ -27,6 +27,12 @@ const MANAGED_KEYS = [
   "STEWARD_PGLITE_MEMORY",
   "AGENT_TOKEN_EXPIRY",
   "STEWARD_OIDC_JWKS_MAX_AGE_MS",
+  "STEWARD_IDENTITY_JWT_ALG",
+  "STEWARD_IDENTITY_JWT_PRIVATE_KEY",
+  "STEWARD_IDENTITY_JWT_KID",
+  "STEWARD_IDENTITY_JWT_ISSUER",
+  "STEWARD_IDENTITY_JWT_AUDIENCE",
+  "APP_URL",
 ] as const;
 
 describe("workers boot JWT env validation (SEC-134)", () => {
@@ -259,6 +265,82 @@ describe("workers boot JWT env validation (SEC-134)", () => {
     await expect(
       jwtVerify(secondToken, new TextEncoder().encode(firstEnv.STEWARD_JWT_SECRET)),
     ).rejects.toThrow();
+  });
+
+  it("isolates asymmetric identity signing authority across overlapping Worker invocations", async () => {
+    snapshotEnv();
+    const firstKeys = await generateKeyPair("RS256", { extractable: true });
+    const secondKeys = await generateKeyPair("RS256", { extractable: true });
+    const firstEnv = {
+      NODE_ENV: "production",
+      STEWARD_JWT_SECRET: "workers-identity-first-hmac-secret-at-least-32-chars",
+      STEWARD_IDENTITY_JWT_ALG: "RS256",
+      STEWARD_IDENTITY_JWT_PRIVATE_KEY: await exportPKCS8(firstKeys.privateKey),
+      STEWARD_IDENTITY_JWT_KID: "worker-identity-first",
+      STEWARD_IDENTITY_JWT_ISSUER: "https://first.identity.test",
+      STEWARD_IDENTITY_JWT_AUDIENCE: "first-audience",
+      DATABASE_URL: "unused-first",
+    };
+    const secondEnv = {
+      NODE_ENV: "production",
+      STEWARD_JWT_SECRET: "workers-identity-second-hmac-secret-at-least-32-chars",
+      STEWARD_IDENTITY_JWT_ALG: "RS256",
+      STEWARD_IDENTITY_JWT_PRIVATE_KEY: await exportPKCS8(secondKeys.privateKey),
+      STEWARD_IDENTITY_JWT_KID: "worker-identity-second",
+      STEWARD_IDENTITY_JWT_ISSUER: "https://second.identity.test",
+      STEWARD_IDENTITY_JWT_AUDIENCE: "second-audience",
+      DATABASE_URL: "unused-second",
+    };
+    let markFirstReady!: () => void;
+    let releaseFirst!: () => void;
+    const firstReady = new Promise<void>((resolve) => {
+      markFirstReady = resolve;
+    });
+    const firstBarrier = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+
+    const firstMint = withWorkerJwtAuthority(firstEnv, async () => {
+      hydrateProcessEnv(firstEnv);
+      markFirstReady();
+      await firstBarrier;
+      return signIdentityJwtPayload({ sub: "worker-first" });
+    });
+    await firstReady;
+
+    let secondToken: string;
+    try {
+      secondToken = await withWorkerJwtAuthority(secondEnv, async () => {
+        hydrateProcessEnv(secondEnv);
+        return signIdentityJwtPayload({ sub: "worker-second" });
+      });
+    } finally {
+      releaseFirst();
+    }
+    const firstToken = await firstMint;
+
+    expect(decodeProtectedHeader(firstToken)).toMatchObject({
+      alg: "RS256",
+      kid: firstEnv.STEWARD_IDENTITY_JWT_KID,
+    });
+    expect(decodeProtectedHeader(secondToken)).toMatchObject({
+      alg: "RS256",
+      kid: secondEnv.STEWARD_IDENTITY_JWT_KID,
+    });
+    await expect(
+      jwtVerify(firstToken, firstKeys.publicKey, {
+        issuer: firstEnv.STEWARD_IDENTITY_JWT_ISSUER,
+        audience: firstEnv.STEWARD_IDENTITY_JWT_AUDIENCE,
+      }),
+    ).resolves.toBeDefined();
+    await expect(
+      jwtVerify(secondToken, secondKeys.publicKey, {
+        issuer: secondEnv.STEWARD_IDENTITY_JWT_ISSUER,
+        audience: secondEnv.STEWARD_IDENTITY_JWT_AUDIENCE,
+      }),
+    ).resolves.toBeDefined();
+    await expect(jwtVerify(firstToken, secondKeys.publicKey)).rejects.toThrow();
+    await expect(jwtVerify(secondToken, firstKeys.publicKey)).rejects.toThrow();
   });
 
   it("validates scheduled security bindings before opening any database handle", async () => {
