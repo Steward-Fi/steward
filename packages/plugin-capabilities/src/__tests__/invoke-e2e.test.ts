@@ -55,7 +55,7 @@ const TEST_ENV_KEYS = [
   "STEWARD_PROXY_DEV_MODE",
   "STEWARD_PROXY_URL",
 ] as const;
-const originalEnv = new Map(TEST_ENV_KEYS.map((key) => [key, process.env[key]]));
+const originalEnv = new Map<(typeof TEST_ENV_KEYS)[number], string | undefined>();
 
 let authMiddleware: typeof import("@stwd/proxy/src/middleware/auth")["authMiddleware"];
 let handleProxy: typeof import("@stwd/proxy/src/handlers/proxy")["handleProxy"];
@@ -97,6 +97,7 @@ function capRule(
 }
 
 beforeAll(async () => {
+  for (const key of TEST_ENV_KEYS) originalEnv.set(key, process.env[key]);
   process.env.STEWARD_PGLITE_MEMORY = "true";
   process.env.STEWARD_MASTER_PASSWORD = MASTER_PASSWORD;
   process.env.STEWARD_JWT_SECRET = "cap-invoke-e2e-jwt-secret-with-enough-bytes-0123456789";
@@ -185,6 +186,7 @@ afterAll(async () => {
         if (original === undefined) delete process.env[key];
         else process.env[key] = original;
       }
+      originalEnv.clear();
     }
   }
 });
