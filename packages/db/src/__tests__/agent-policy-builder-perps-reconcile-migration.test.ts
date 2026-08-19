@@ -153,6 +153,13 @@ describe("0109 agent policy builder-perps reconciliation", () => {
             ) AS exists
           `;
           expect(leaseAgentFk).toEqual([{ exists: false }]);
+          const leaseAgentFence = await verified<{ exists: boolean }[]>`
+            SELECT EXISTS (
+              SELECT 1 FROM pg_trigger
+              WHERE tgname='upstream_credential_leases_agent_fence' AND NOT tgisinternal
+            ) AS exists
+          `;
+          expect(leaseAgentFence).toEqual([{ exists: true }]);
           const applied = await verified<{ count: number }[]>`
           SELECT count(*)::int AS count FROM drizzle.__drizzle_migrations
         `;

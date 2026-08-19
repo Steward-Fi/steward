@@ -683,12 +683,13 @@ describe("agent admin mutations require human session + MFA (SEC-209)", () => {
         resourceHash: "a".repeat(64),
         authorityDigest: "b".repeat(64),
         idempotencyKeyHash: "c".repeat(64),
-        tokenHash: "d".repeat(64),
-        tokenCiphertext: "lease-ciphertext",
-        tokenIv: "lease-iv",
-        tokenAuthTag: "lease-tag",
-        tokenSalt: "lease-salt",
-        status: "active",
+        tokenHash: null,
+        tokenCiphertext: null,
+        tokenIv: null,
+        tokenAuthTag: null,
+        tokenSalt: null,
+        status: "revoked",
+        revokedAt: new Date(),
       });
     await getDb()
       .insert(upstreamCredentialLeases)
@@ -704,11 +705,11 @@ describe("agent admin mutations require human session + MFA (SEC-209)", () => {
         resourceHash: "e".repeat(64),
         authorityDigest: "f".repeat(64),
         idempotencyKeyHash: "0".repeat(64),
-        tokenHash: "1".repeat(64),
-        tokenCiphertext: "expired-ciphertext",
-        tokenIv: "expired-iv",
-        tokenAuthTag: "expired-tag",
-        tokenSalt: "expired-salt",
+        tokenHash: null,
+        tokenCiphertext: null,
+        tokenIv: null,
+        tokenAuthTag: null,
+        tokenSalt: null,
         status: "expired",
       });
     await getDb()
@@ -935,9 +936,9 @@ describe("agent admin mutations require human session + MFA (SEC-209)", () => {
     ).toEqual([
       expect.objectContaining({
         tenantId: TENANT_ID,
-        action: "lease.revoked",
+        action: "lease.agent_authority_deleted",
         decision: "deny",
-        metadata: { reason: "agent_deleted" },
+        metadata: { terminalStatus: "revoked" },
       }),
     ]);
     const [preservedExpiredLease] = await getDb()
@@ -953,12 +954,22 @@ describe("agent admin mutations require human session + MFA (SEC-209)", () => {
       tokenAuthTag: null,
       tokenSalt: null,
     });
-    expect(
-      await getDb()
-        .select()
-        .from(upstreamCredentialLeaseEvents)
-        .where(eq(upstreamCredentialLeaseEvents.leaseId, expiredLeaseId)),
-    ).toEqual(beforeExpiredLeaseEvents);
+    const expiredLeaseEvents = await getDb()
+      .select()
+      .from(upstreamCredentialLeaseEvents)
+      .where(eq(upstreamCredentialLeaseEvents.leaseId, expiredLeaseId));
+    expect(expiredLeaseEvents).toHaveLength(beforeExpiredLeaseEvents.length + 1);
+    expect(expiredLeaseEvents).toEqual(
+      expect.arrayContaining([
+        ...beforeExpiredLeaseEvents,
+        expect.objectContaining({
+          tenantId: TENANT_ID,
+          action: "lease.agent_authority_deleted",
+          decision: "deny",
+          metadata: { terminalStatus: "expired" },
+        }),
+      ]),
+    );
 
     const deleteAudits = await getDb()
       .select({ action: auditEvents.action })

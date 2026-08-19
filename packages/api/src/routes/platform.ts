@@ -31,7 +31,6 @@ import {
   encryptedKeys,
   getDb,
   isPersistedPolicyType,
-  pendingProxyRequests,
   policies,
   proxyAuditLog,
   refreshTokens,
@@ -43,8 +42,6 @@ import {
   tenants,
   toPersistedPolicyRule,
   transactions,
-  upstreamCredentialLeaseEvents,
-  upstreamCredentialLeases,
   users,
   userTenants,
   vaultSigningFreezes,
@@ -62,7 +59,8 @@ import {
 import { KeyStore, Vault } from "@stwd/vault";
 import { and, count, eq, ilike, inArray, isNull, ne, or, type SQL, sql } from "drizzle-orm";
 import { type Context, Hono } from "hono";
-import { withTenantAuditedTransaction, writeAuditEvent } from "../services/audit";
+import { deleteAgentAuthority } from "../services/agent-deletion";
+import { writeAuditEvent } from "../services/audit";
 import {
   type AppVariables,
   createAgentToken,
@@ -2406,145 +2404,32 @@ platform.delete("/tenants/:id/agents/:agentId", async (c) => {
 
   // Revoke outstanding agent tokens before tearing down the agent's rows.
   const issuedBefore = await revocationStore.revokeAgentTokens(agentId);
-  const deleted = await withTenantAuditedTransaction(
+  const deletion = await deleteAgentAuthority({
     tenantId,
-    async (txRaw, appendRequiredAudit) => {
-      const tx = txRaw as typeof db;
-      const [lockedAgent] = await tx
-        .select({ id: agents.id })
-        .from(agents)
-        .where(and(eq(agents.id, agentId), eq(agents.tenantId, tenantId)))
-        .for("update");
-      if (!lockedAgent) return false;
-
-      const [executingProxyRequest] = await tx
-        .select({ id: pendingProxyRequests.id })
-        .from(pendingProxyRequests)
-        .where(
-          and(
-            eq(pendingProxyRequests.tenantId, tenantId),
-            eq(pendingProxyRequests.agentId, agentId),
-            eq(pendingProxyRequests.status, "executing"),
-          ),
-        )
-        .limit(1)
-        .for("update");
-      if (executingProxyRequest) return "executing" as const;
-
-      const disposedLeases = await tx
-        .update(upstreamCredentialLeases)
-        .set({
-          status: "revoked",
-          revokedAt: new Date(),
-          tokenHash: null,
-          tokenCiphertext: null,
-          tokenIv: null,
-          tokenAuthTag: null,
-          tokenSalt: null,
-          lastError: "agent authority deleted",
-          updatedAt: new Date(),
-        })
-        .where(
-          and(
-            eq(upstreamCredentialLeases.tenantId, tenantId),
-            eq(upstreamCredentialLeases.agentId, agentId),
-            inArray(upstreamCredentialLeases.status, [
-              "issuing",
-              "delivery_pending",
-              "acknowledging",
-              "active",
-              "revoking",
-              "needs_attention",
-            ]),
-          ),
-        )
-        .returning({ id: upstreamCredentialLeases.id });
-      if (disposedLeases.length > 0) {
-        await tx.insert(upstreamCredentialLeaseEvents).values(
-          disposedLeases.map(({ id }) => ({
-            leaseId: id,
-            tenantId,
-            action: "lease.revoked",
-            decision: "deny",
-            metadata: { reason: "agent_deleted" },
-          })),
-        );
-      }
-      await tx
-        .update(upstreamCredentialLeases)
-        .set({
-          tokenHash: null,
-          tokenCiphertext: null,
-          tokenIv: null,
-          tokenAuthTag: null,
-          tokenSalt: null,
-          updatedAt: new Date(),
-        })
-        .where(
-          and(
-            eq(upstreamCredentialLeases.tenantId, tenantId),
-            eq(upstreamCredentialLeases.agentId, agentId),
-            inArray(upstreamCredentialLeases.status, ["revoked", "expired", "failed"]),
-            sql`(${upstreamCredentialLeases.tokenHash} IS NOT NULL OR ${upstreamCredentialLeases.tokenCiphertext} IS NOT NULL OR ${upstreamCredentialLeases.tokenIv} IS NOT NULL OR ${upstreamCredentialLeases.tokenAuthTag} IS NOT NULL OR ${upstreamCredentialLeases.tokenSalt} IS NOT NULL)`,
-          ),
-        );
-      await tx
-        .update(secretRoutes)
-        .set({ enabled: false })
-        .where(
-          and(
-            eq(secretRoutes.tenantId, tenantId),
-            eq(secretRoutes.agentId, agentId),
-            eq(secretRoutes.enabled, true),
-          ),
-        );
-      const terminalizedAt = new Date();
-      await tx
-        .update(pendingProxyRequests)
-        .set({
-          status: "denied",
-          deniedAt: terminalizedAt,
-          deniedBy: "system:agent-delete",
-          denialReason: "agent authority deleted",
-          updatedAt: terminalizedAt,
-        })
-        .where(
-          and(
-            eq(pendingProxyRequests.tenantId, tenantId),
-            eq(pendingProxyRequests.agentId, agentId),
-            inArray(pendingProxyRequests.status, ["pending", "approved"]),
-          ),
-        );
-      await tx.delete(approvalQueue).where(eq(approvalQueue.agentId, agentId));
-      await tx.delete(transactions).where(eq(transactions.agentId, agentId));
-      await tx.delete(policies).where(eq(policies.agentId, agentId));
-      await tx.delete(encryptedChainKeys).where(eq(encryptedChainKeys.agentId, agentId));
-      await tx.delete(encryptedKeys).where(eq(encryptedKeys.agentId, agentId));
-      await tx.delete(agentWallets).where(eq(agentWallets.agentId, agentId));
-      const removedAgents = await tx
-        .delete(agents)
-        .where(and(eq(agents.id, agentId), eq(agents.tenantId, tenantId)))
-        .returning({ id: agents.id });
-      if (removedAgents.length !== 1) throw new Error("Agent changed concurrently");
-      await appendRequiredAudit({
-        tenantId,
-        actorType: "platform",
-        action: "agent.delete",
-        resourceType: "agent",
-        resourceId: agentId,
-        metadata: { revokedAgentTokensIssuedBefore: issuedBefore },
-        ...auditCtx(c),
-      });
-      return true;
+    agentId,
+    completionAudit: {
+      tenantId,
+      actorType: "platform",
+      action: "agent.delete",
+      resourceType: "agent",
+      resourceId: agentId,
+      metadata: { revokedAgentTokensIssuedBefore: issuedBefore },
+      ...auditCtx(c),
     },
-  );
-  if (deleted === "executing") {
+  });
+  if (deletion === "blocked_by_upstream_lease") {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Agent has unresolved upstream credential leases" },
+      409,
+    );
+  }
+  if (deletion === "blocked_by_executing_proxy") {
     return c.json<ApiResponse>(
       { ok: false, error: "Agent has an executing proxy request; retry deletion later" },
       409,
     );
   }
-  if (!deleted) {
+  if (deletion === "missing") {
     return c.json<ApiResponse>({ ok: false, error: "Agent not found in tenant" }, 404);
   }
 

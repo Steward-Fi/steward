@@ -2659,8 +2659,9 @@ export const upstreamCredentialLeases = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
-    // Lease evidence intentionally outlives deleted agent authority. The API
-    // terminalizes and scrubs leases transactionally before deleting an agent.
+    // Lease evidence intentionally outlives deleted agent authority. A database
+    // trigger serializes new lease publication with agent deletion because an
+    // ordinary retention-blocking agent FK is deliberately absent.
     workspaceFk: foreignKey({
       columns: [table.tenantId, table.workspaceId],
       foreignColumns: [workspaces.tenantId, workspaces.id],
