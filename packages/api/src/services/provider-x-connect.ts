@@ -1072,6 +1072,36 @@ async function persistConnectedAccount(input: PersistInput): Promise<CompleteCon
       .limit(1)
       .for("update");
 
+    // Do not compare provider_accounts.updatedAt with this lifecycle. Account
+    // timestamps are supplied by application replicas while lifecycle
+    // timestamps are database-owned, so clock skew can let an older staged
+    // response overwrite a reconnect. The adopted connect journal gives us a
+    // database-ordered lineage marker under the account lock instead.
+    const [newerConnectAdoption] = account
+      ? await tx
+          .select({ id: providerXCredentialLifecycles.id })
+          .from(providerXCredentialLifecycles)
+          .where(
+            and(
+              eq(providerXCredentialLifecycles.tenantId, input.tenantId),
+              eq(providerXCredentialLifecycles.workspaceId, input.workspaceId),
+              eq(providerXCredentialLifecycles.providerAccountId, account.id),
+              eq(providerXCredentialLifecycles.kind, "connect_exchange"),
+              eq(providerXCredentialLifecycles.state, "adopted"),
+              sql`${providerXCredentialLifecycles.createdAt} > ${connectLifecycle.createdAt}`,
+            ),
+          )
+          .limit(1)
+          .for("update")
+      : [];
+    if (newerConnectAdoption) {
+      throw new XConnectError(
+        "X_CREDENTIAL_NEEDS_ATTENTION",
+        409,
+        "a newer X credential already superseded this staged connect response",
+      );
+    }
+
     const unresolvedLifecycles = account
       ? await tx
           .select({
@@ -2187,7 +2217,24 @@ export async function runXCredentialLifecycleSweep(input: {
         result.attention += 1;
       }
     } catch {
-      result.attention += 1;
+      // Connect reconciliation deliberately rethrows its adoption error after
+      // compensating a stale staged grant. Classify the durable terminal state
+      // instead of reporting a successfully revoked grant as unresolved.
+      const [reconciled] = await (getDb() as DbExecutor)
+        .select({ state: providerXCredentialLifecycles.state })
+        .from(providerXCredentialLifecycles)
+        .where(
+          and(
+            eq(providerXCredentialLifecycles.tenantId, row.tenantId),
+            eq(providerXCredentialLifecycles.id, row.id),
+          ),
+        )
+        .limit(1);
+      if (row.kind === "connect_exchange" && reconciled?.state === "revoked") {
+        result.revoked += 1;
+      } else {
+        result.attention += 1;
+      }
     }
   }
   result.remaining = rows.length === limit && result.attention === 0;

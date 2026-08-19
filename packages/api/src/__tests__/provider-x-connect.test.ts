@@ -834,6 +834,93 @@ describe("connect exchange recovery", () => {
     fake.restore();
   });
 
+  test("a stale staged connect grant is revoked instead of overwriting a newer reconnect", async () => {
+    const firstStore = new MemoryConnectStore();
+    const firstFake = installFakeX({
+      exchangeToken: {
+        access_token: "access-stale-first",
+        refresh_token: "refresh-stale-first",
+      },
+    });
+    const initiated = await initiateXConnect({
+      tenantId: TENANT,
+      workspaceId: WORKSPACE,
+      initiatedByUserId: ADMIN,
+      redirectUri: REDIRECT,
+      config: CONFIG,
+      store: firstStore,
+    });
+    __setAfterXCredentialStageForTests(async () => {
+      throw new Error("simulated process crash after first connect staging");
+    });
+    await expect(
+      completeXConnect({
+        tenantId: TENANT,
+        workspaceId: WORKSPACE,
+        callerUserId: ADMIN,
+        code: "auth-code",
+        state: initiated.state,
+        connectToken: initiated.connectToken,
+        redirectUri: REDIRECT,
+        config: CONFIG,
+        store: firstStore,
+        vault,
+      }),
+    ).rejects.toThrow("simulated process crash after first connect staging");
+    __setAfterXCredentialStageForTests(null);
+    firstFake.restore();
+
+    const newer = await connectHappy(new MemoryConnectStore(), {
+      exchangeToken: {
+        access_token: "access-current-second",
+        refresh_token: "refresh-current-second",
+      },
+    });
+    const newerAccountId = newer.completed.providerAccountId;
+    const beforeSweep = await decryptCredential(newerAccountId);
+    expect(beforeSweep.accessToken).toBe("access-current-second");
+
+    // The guard must be database-lineage based, not a comparison against an
+    // application-supplied account timestamp that can move backwards under
+    // replica clock skew.
+    await getDb()
+      .update(providerAccounts)
+      .set({ updatedAt: new Date(0) })
+      .where(eq(providerAccounts.id, newerAccountId));
+
+    const [staleLifecycle] = await getDb()
+      .select()
+      .from(providerXCredentialLifecycles)
+      .where(
+        and(
+          eq(providerXCredentialLifecycles.kind, "connect_exchange"),
+          eq(providerXCredentialLifecycles.state, "credential_staged"),
+        ),
+      );
+    expect(staleLifecycle.providerAccountId).toBeNull();
+
+    const recovery = installFakeX({ revokeStatuses: [200] });
+    const swept = await runXCredentialLifecycleSweep({
+      vault,
+      config: CONFIG,
+      now: new Date(Date.now() + 70_000),
+    });
+    expect(swept).toMatchObject({ processed: 1, revoked: 1, adopted: 0, attention: 0 });
+    expect(recovery.counters).toMatchObject({ exchange: 0, identity: 1, revoke: 1 });
+
+    const afterSweep = await decryptCredential(newerAccountId);
+    expect(afterSweep.accessToken).toBe("access-current-second");
+    expect(afterSweep.refreshToken).toBe("refresh-current-second");
+
+    const [revokedLifecycle] = await getDb()
+      .select()
+      .from(providerXCredentialLifecycles)
+      .where(eq(providerXCredentialLifecycles.id, staleLifecycle.id));
+    expect(revokedLifecycle.state).toBe("revoked");
+    expect(revokedLifecycle.credentialSecretId).toBeNull();
+    recovery.restore();
+  });
+
   test("failed identity revocation is durably retried with backoff and a hard ceiling", async () => {
     const store = new MemoryConnectStore();
     const fake = installFakeX({ identityStatus: 503, revokeStatuses: [503, 503, 503, 503, 503] });
