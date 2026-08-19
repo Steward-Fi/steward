@@ -17,8 +17,13 @@ describe("condition set audit rollback hardening", () => {
     expect(routeSource).toContain("async function restoreConditionSet");
     expect(routeSource).toContain("async function restoreConditionSetItems");
 
+    const createStart = routeSource.indexOf('conditionSetRoutes.post("/",');
+    const createEnd = routeSource.indexOf("conditionSetRoutes.", createStart + 1);
+    const createRoute = routeSource.slice(createStart, createEnd);
+    expect(createRoute).toContain("withTenantAuditedTransaction");
+    expect(createRoute).toContain("appendRequiredAudit");
+
     for (const [marker, rollback] of [
-      ['conditionSetRoutes.post("/",', "db\n        .delete(conditionSets)"],
       ['conditionSetRoutes.patch("/:id",', "restoreConditionSet(tenantId, current"],
       ['conditionSetRoutes.delete("/:id",', "restoreConditionSet(tenantId, current, currentItems)"],
       ['conditionSetRoutes.post("/:id/items",', "restoreConditionSetItems(tenantId, set.id"],
