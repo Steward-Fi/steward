@@ -39,9 +39,11 @@ jobs:
           fi
           target_pr="$({
             gh api \
+              --paginate \
+              --slurp \
               -H "Accept: application/vnd.github+json" \
               "repos/$GITHUB_REPOSITORY/commits/$TARGET_SHA/pulls"
-          } | jq -r \
+          } | jq -r 'add' | jq -r \
             --arg repository "$GITHUB_REPOSITORY" \
             --arg sha "$TARGET_SHA" \
             '[.[] | select(
@@ -56,20 +58,71 @@ jobs:
             exit 1
           fi
           IFS=$'\t' read -r pr_number pr_author <<< "$target_pr"
-          approved_by="$({
+
+          readiness="$({
+            gh pr view "$pr_number" \
+              --repo "$GITHUB_REPOSITORY" \
+              --json headRefOid,isDraft,state,mergeStateStatus,reviewDecision,statusCheckRollup
+          })"
+          if ! jq -e \
+            --arg sha "$TARGET_SHA" \
+            '.headRefOid == $sha and
+             .state == "OPEN" and
+             .isDraft == false and
+             .mergeStateStatus == "CLEAN" and
+             .reviewDecision == "APPROVED" and
+             (.statusCheckRollup | length > 0) and
+             all(.statusCheckRollup[];
+               if .__typename == "CheckRun" then
+                 .status == "COMPLETED" and
+                 (.conclusion == "SUCCESS" or .conclusion == "NEUTRAL" or .conclusion == "SKIPPED")
+               elif .__typename == "StatusContext" then
+                 .state == "SUCCESS"
+               else
+                 false
+               end)' <<< "$readiness" >/dev/null; then
+            echo "target PR must be approved, conflict-free, and green at the exact target SHA" >&2
+            exit 1
+          fi
+
+          latest_reviews="$({
             gh api \
+              --paginate \
+              --slurp \
               -H "Accept: application/vnd.github+json" \
               "repos/$GITHUB_REPOSITORY/pulls/$pr_number/reviews"
-          } | jq -r \
+          } | jq -r 'add' | jq -r \
             --arg author "$pr_author" \
             --arg sha "$TARGET_SHA" \
-            '[.[] | select(
-              .state == "APPROVED" and
-              .commit_id == $sha and
-              .user.login != $author
-            )] | last | .user.login // empty')"
+            '[.[] | select(.commit_id == $sha)] |
+             sort_by(.submitted_at, .id) |
+             group_by(.user.login | ascii_downcase) |
+             map(last) |
+             .[] |
+             select(
+               .state == "APPROVED" and
+               .user.type == "User" and
+               (.user.login | ascii_downcase) != ($author | ascii_downcase)
+             ) |
+             .user.login')"
+          approved_by=""
+          while IFS= read -r reviewer; do
+            [ -n "$reviewer" ] || continue
+            permission="$(
+              gh api \
+                -H "Accept: application/vnd.github+json" \
+                "repos/$GITHUB_REPOSITORY/collaborators/$reviewer/permission" \
+                --jq '.permission' 2>/dev/null || true
+            )"
+            case "$permission" in
+              admin|maintain|write)
+                approved_by="$reviewer"
+                break
+                ;;
+            esac
+          done <<< "$latest_reviews"
           if [ -z "$approved_by" ]; then
-            echo "target PR must have an independent APPROVED review" >&2
+            echo "target PR must have a current approval from an independent write-capable reviewer" >&2
             exit 1
           fi
           echo "target_sha=$TARGET_SHA" >> "$GITHUB_OUTPUT"
