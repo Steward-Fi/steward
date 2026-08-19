@@ -16,19 +16,31 @@ cd "$ROOT"
 
 API="packages/api"
 PROXY="packages/proxy"
+WEB="web"
+
 # Guard test files.
 INVENTORY_TEST="src/__tests__/fake-provider-transport-inventory.test.ts" # in PROXY
+UX_TEST="src/app/dashboard/provider-trust-ux.test.ts"                     # in WEB
 CLAIMS_TEST="src/__tests__/provider-authority-claims-scanner.test.ts"     # in API
 COMPOSE_TEST="src/__tests__/provider-authority-compose-env.test.ts"       # in API
 
 # Target (GUARDED) files — production source, page source, docs, config.
 PROXY_SRC="$PROXY/src/handlers/proxy.ts"
 FAKE="$PROXY/src/__tests__/fake-provider-transport.ts"
+APPROVAL_PAGE="$WEB/src/app/dashboard/approvals/[id]/page.tsx"
+CASE_PAGE="$WEB/src/app/dashboard/actions/[id]/page.tsx"
 THREAT_DOC="docs/security/provider-authority-threat-model.mdx"
 COMPOSE="deploy/enterprise-reference/docker-compose.yml"
 
 pass_count=0
 fail_count=0
+active_target=""
+cleanup() {
+  if [ -n "$active_target" ] && [ -f "$active_target.bak" ]; then
+    mv "$active_target.bak" "$active_target"
+  fi
+}
+trap cleanup EXIT INT TERM
 
 # _run_once <pkg-dir> <test-file> <filter>
 _run_once() {
@@ -46,11 +58,13 @@ proof() {
   if run_baseline "$dir" "$file" "$filter"; then echo "  baseline PASS ✓"
   else echo "  baseline UNEXPECTED FAIL ✗ (proof invalid)"; fail_count=$((fail_count+1)); return; fi
   cp "$target" "$target.bak"
+  active_target="$target"
   perl -0pi -e "$expr" "$target"
   if cmp -s "$target" "$target.bak"; then
     echo "  mutation target did not match guarded source ✗"
     fail_count=$((fail_count+1))
     mv "$target.bak" "$target"
+    active_target=""
     return
   fi
   if run_mutated "$dir" "$file" "$filter"; then
@@ -59,6 +73,7 @@ proof() {
     echo "  post-mutation FAILS ✓ (predicate killed)"; pass_count=$((pass_count+1))
   fi
   mv "$target.bak" "$target"
+  active_target=""
 }
 
 # ── U1 static-inventory / SSRF guards (mutate PRODUCTION proxy.ts) ────────────
@@ -80,6 +95,28 @@ proof "2 seam: extra forwarder rebinding path detected (PN02)" \
 proof "3 U1: SSRF public-DNS guard must remain on the forward path (U1)" \
   "$PROXY" "$INVENTORY_TEST" "SSRF/public-DNS guards remain present" "$PROXY_SRC" \
   's/await verifyProxyHostResolvesPublicly\(target\.host\)/\/* removed *\/ Promise.resolve(target.host)/'
+
+# ── UX honesty / equal-weight guards (mutate page source) ────────────────────
+
+proof "4 UX: equal-weight approve/deny (M11)" \
+  "$WEB" "$UX_TEST" "equal-weight" "$APPROVAL_PAGE" \
+  's/(aria-label="Approve this provider action"\s*\n\s*className="flex-1 )px-4 py-2/${1}px-8 py-2/'
+
+proof "5 UX: typed reason required for both decisions (M13)" \
+  "$WEB" "$UX_TEST" "typed reason is required for BOTH" "$APPROVAL_PAGE" \
+  's/if \(reason\.trim\(\)\.length === 0\) \{/if (false) {/'
+
+proof "6 UX: completeness rendered verbatim, never upgraded (PN34)" \
+  "$WEB" "$UX_TEST" "completeness is rendered VERBATIM" "$CASE_PAGE" \
+  's/if \(c === "complete"\) return "border-success/if (true) return "border-success/'
+
+proof "7 UX: operator-key trust limit + fingerprint verify command (E7)" \
+  "$WEB" "$UX_TEST" "operator-key trust limit" "$CASE_PAGE" \
+  's/--expected-key-fingerprint/--EMBEDDED-KEY-ONLY/g'
+
+proof "8 UX: only the provider idempotency HASH is surfaced (PN28-adjacent)" \
+  "$WEB" "$UX_TEST" "no credential or canonical bytes" "$CASE_PAGE" \
+  's/providerIdempotencyKeyHash/providerIdempotencyKeyRaw/g'
 
 # ── Claims-discipline guard (mutate DOC) ─────────────────────────────────────
 
