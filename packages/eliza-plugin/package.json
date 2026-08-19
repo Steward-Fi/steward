@@ -4,6 +4,10 @@
   "description": "ElizaOS integration for Steward-scoped wallet and provider capabilities",
   "license": "MIT",
   "type": "module",
+  "files": [
+    "dist",
+    "CHANGELOG.md"
+  ],
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "exports": {

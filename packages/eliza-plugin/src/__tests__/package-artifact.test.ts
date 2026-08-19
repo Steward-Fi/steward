@@ -12,6 +12,7 @@ let packedPackageJson: {
   dependencies?: Record<string, string>;
 };
 let packedEntrypoint = "";
+let packedFiles: string[] = [];
 
 beforeAll(() => {
   execFileSync("bunx", ["turbo", "run", "build", "--filter=@stwd/eliza-plugin"], {
@@ -24,7 +25,11 @@ beforeAll(() => {
     ["pack", "--json", "--ignore-scripts", "--pack-destination", artifactDirectory],
     { cwd: PACKAGE_ROOT, encoding: "utf8" },
   );
-  const [{ filename }] = JSON.parse(packOutput) as Array<{ filename: string }>;
+  const [{ filename, files }] = JSON.parse(packOutput) as Array<{
+    filename: string;
+    files: Array<{ path: string }>;
+  }>;
+  packedFiles = files.map((file) => file.path).sort();
   const tarball = join(artifactDirectory, filename);
   const extracted = join(artifactDirectory, "extracted");
   mkdirSync(extracted);
@@ -41,6 +46,17 @@ afterAll(() => {
 });
 
 describe("published package artifact", () => {
+  test("contains only the manifest, changelog, and built distribution", () => {
+    expect(packedFiles).toContain("package.json");
+    expect(packedFiles).toContain("CHANGELOG.md");
+    expect(packedFiles.some((path) => path.startsWith("dist/"))).toBe(true);
+    expect(
+      packedFiles.every(
+        (path) => path === "package.json" || path === "CHANGELOG.md" || path.startsWith("dist/"),
+      ),
+    ).toBe(true);
+  });
+
   test("contains no workspace protocol runtime dependencies", () => {
     expect(
       Object.values(packedPackageJson.dependencies ?? {}).some((value) =>
