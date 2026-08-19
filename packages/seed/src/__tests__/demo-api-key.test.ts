@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { lstatSync, mkdtempSync, readFileSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { validateApiKey } from "../../../auth/src/api-keys";
+import { validateApiKey } from "@stwd/auth";
 import { generateDemoApiKey, writeDemoCredentials } from "../demo-api-key";
 
 describe("demo API key", () => {
