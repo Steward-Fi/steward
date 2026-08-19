@@ -254,6 +254,10 @@ jobs:
             # context from their package-local bunfig.toml. Running them from
             # the repository root skips that preload and fails at module init.
             (cd "${{ matrix.package }}" && bun run test)
+          elif [ "${{ matrix.package }}" = "packages/trade-sessions" ]; then
+            # PGLite migrations can exceed Bun's 5s default on hosted runners.
+            # Keep file isolation while honoring the package's 30s test budget.
+            bun test --isolate --timeout 30000 packages/trade-sessions
           else
             bun test --isolate ${{ matrix.package }}
           fi

@@ -25,6 +25,13 @@ describe("CI test inventory", () => {
     }
   });
 
+  test("trade-session CI preserves the package's PGLite timeout", () => {
+    for (const workflow of [".github/workflows/ci.yml", ".github/workflows/pr.yml"]) {
+      const source = readFileSync(workflow, "utf8");
+      expect(source).toContain("bun test --isolate --timeout 30000 packages/trade-sessions");
+    }
+  });
+
   test("a future unlisted test package fails closed", () => {
     expect(() =>
       assertCompleteCoverage(["packages/a", "packages/new"], ["packages/a"], []),
