@@ -39,7 +39,6 @@ import {
   sign,
   verify,
 } from "node:crypto";
-import { processCacheIdentity } from "./process-cache-identity";
 
 // This package is typechecked with @cloudflare/workers-types in scope, whose
 // `Buffer` shadows Node's and lacks `concat` / "base64". We therefore avoid
@@ -359,7 +358,7 @@ export function createCheckpointSigner(rawKey: string): AuditCheckpointSigner {
 }
 
 let cachedSigner: AuditCheckpointSigner | null = null;
-let cachedSignerIdentity: string | null = null;
+let cachedSignerKeySource: string | null = null;
 
 /**
  * Whether an audit signing key is configured. Callers (bundle route) use this
@@ -384,19 +383,18 @@ export function getCheckpointSigner(): AuditCheckpointSigner {
         "openssl genpkey -algorithm ed25519 -out audit-signing.pem",
     );
   }
-  const identity = processCacheIdentity([env]);
-  if (cachedSigner && cachedSignerIdentity === identity) {
+  if (cachedSigner && cachedSignerKeySource === env) {
     return cachedSigner;
   }
   cachedSigner = createCheckpointSigner(env);
-  cachedSignerIdentity = identity;
+  cachedSignerKeySource = env;
   return cachedSigner;
 }
 
 /** Test hook: drop the cached signer so a changed env var takes effect. */
 export function resetCheckpointSignerCache(): void {
   cachedSigner = null;
-  cachedSignerIdentity = null;
+  cachedSignerKeySource = null;
 }
 
 /**

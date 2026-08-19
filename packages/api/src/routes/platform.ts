@@ -71,7 +71,6 @@ import {
 import { normalizeGasSpendQuery, querySponsoredGasSpend } from "../services/gas-sponsorship";
 import { normalizeOidcProviders } from "../services/oidc-provider-config";
 import { getPolicyRulesValidationError } from "../services/policy-validation";
-import { processCacheIdentity } from "../services/process-cache-identity";
 import { lockUserSession, lockUserSessions } from "../services/session-lock";
 import {
   createTenantTestAccountConfig,
@@ -320,7 +319,11 @@ function vault(): Vault {
   return getVault();
 }
 
-let _platformKeyStore: { identity: string; keyStore: KeyStore } | undefined;
+type PlatformKeyStoreConfiguration = { masterPassword: string; masterSalt: string };
+
+let _platformKeyStore:
+  | { configuration: PlatformKeyStoreConfiguration; keyStore: KeyStore }
+  | undefined;
 function platformKeyStore(): KeyStore {
   const requestScoped = currentRuntimeEnvironment() !== process.env;
   const masterPassword = runtimeEnvironmentValue("STEWARD_MASTER_PASSWORD");
@@ -338,12 +341,19 @@ function platformKeyStore(): KeyStore {
 
   const effectivePassword = masterPassword || "dev-secret";
   const masterSalt = runtimeEnvironmentValue("STEWARD_KDF_SALT");
-  const identity = processCacheIdentity([effectivePassword, masterSalt || ""]);
-  if (!requestScoped && _platformKeyStore?.identity === identity) {
+  const configuration: PlatformKeyStoreConfiguration = {
+    masterPassword: effectivePassword,
+    masterSalt: masterSalt || "",
+  };
+  if (
+    !requestScoped &&
+    _platformKeyStore?.configuration.masterPassword === configuration.masterPassword &&
+    _platformKeyStore.configuration.masterSalt === configuration.masterSalt
+  ) {
     return _platformKeyStore.keyStore;
   }
   const keyStore = new KeyStore(effectivePassword, masterSalt);
-  if (!requestScoped) _platformKeyStore = { identity, keyStore };
+  if (!requestScoped) _platformKeyStore = { configuration, keyStore };
   return keyStore;
 }
 
