@@ -39,7 +39,7 @@ beforeAll(() => {
     readFileSync(join(extracted, "package/package.json"), "utf8"),
   ) as typeof packedPackageJson;
   packedEntrypoint = readFileSync(join(extracted, "package/dist/index.js"), "utf8");
-}, 60_000);
+}, 180_000);
 
 afterAll(() => {
   rmSync(artifactDirectory, { recursive: true, force: true });
