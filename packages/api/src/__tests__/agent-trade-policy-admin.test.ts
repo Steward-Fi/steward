@@ -213,16 +213,19 @@ describe("agent trade policy admin path (SEC-208)", () => {
           ),
       ).toHaveLength(0);
     } finally {
-      await getDb().execute(
-        sql.raw(
-          `DROP TRIGGER IF EXISTS agent_policy_completion_audit_failure_${AUDIT_TRIGGER_SUFFIX} ON audit_events`,
-        ),
-      );
-      await getDb().execute(
-        sql.raw(
-          `DROP FUNCTION IF EXISTS fail_agent_policy_completion_audit_${AUDIT_TRIGGER_SUFFIX}()`,
-        ),
-      );
+      try {
+        await getDb().execute(
+          sql.raw(
+            `DROP TRIGGER IF EXISTS agent_policy_completion_audit_failure_${AUDIT_TRIGGER_SUFFIX} ON audit_events`,
+          ),
+        );
+      } finally {
+        await getDb().execute(
+          sql.raw(
+            `DROP FUNCTION IF EXISTS fail_agent_policy_completion_audit_${AUDIT_TRIGGER_SUFFIX}()`,
+          ),
+        );
+      }
     }
   });
 

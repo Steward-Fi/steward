@@ -2,6 +2,9 @@ import { afterAll, beforeAll, describe, expect, it, setDefaultTimeout } from "bu
 import { revocationStore } from "@stwd/auth";
 import {
   __resetAuditHmacKeyCacheForTests,
+  agentKeyQuorums,
+  agentPolicies,
+  agentSigners,
   agents,
   agentWallets,
   approvalQueue,
@@ -300,14 +303,19 @@ describe("agent admin mutations require human session + MFA (SEC-209)", () => {
       );
       expect(await revocationStore.getAgentRevokedBefore(AGENT_ID)).toBeNull();
     } finally {
-      await getDb().execute(
-        sql.raw(
-          `DROP TRIGGER IF EXISTS agent_authorization_audit_failure_${AUDIT_TRIGGER_SUFFIX} ON audit_events`,
-        ),
-      );
-      await getDb().execute(
-        sql.raw(`DROP FUNCTION IF EXISTS fail_agent_authorization_audit_${AUDIT_TRIGGER_SUFFIX}()`),
-      );
+      try {
+        await getDb().execute(
+          sql.raw(
+            `DROP TRIGGER IF EXISTS agent_authorization_audit_failure_${AUDIT_TRIGGER_SUFFIX} ON audit_events`,
+          ),
+        );
+      } finally {
+        await getDb().execute(
+          sql.raw(
+            `DROP FUNCTION IF EXISTS fail_agent_authorization_audit_${AUDIT_TRIGGER_SUFFIX}()`,
+          ),
+        );
+      }
     }
   });
 
@@ -358,14 +366,17 @@ describe("agent admin mutations require human session + MFA (SEC-209)", () => {
       expect(await getDb().select().from(encryptedKeys)).toEqual(beforeEvmKeys);
       expect(await getDb().select().from(encryptedChainKeys)).toEqual(beforeChainKeys);
     } finally {
-      await getDb().execute(
-        sql.raw(
-          `DROP TRIGGER IF EXISTS agent_completion_audit_failure_${AUDIT_TRIGGER_SUFFIX} ON audit_events`,
-        ),
-      );
-      await getDb().execute(
-        sql.raw(`DROP FUNCTION IF EXISTS fail_agent_completion_audit_${AUDIT_TRIGGER_SUFFIX}()`),
-      );
+      try {
+        await getDb().execute(
+          sql.raw(
+            `DROP TRIGGER IF EXISTS agent_completion_audit_failure_${AUDIT_TRIGGER_SUFFIX} ON audit_events`,
+          ),
+        );
+      } finally {
+        await getDb().execute(
+          sql.raw(`DROP FUNCTION IF EXISTS fail_agent_completion_audit_${AUDIT_TRIGGER_SUFFIX}()`),
+        );
+      }
     }
   });
 
@@ -443,7 +454,7 @@ describe("agent admin mutations require human session + MFA (SEC-209)", () => {
     }
   });
 
-  it("restores rows after a failed delete audit, retains revocation, and succeeds on retry", async () => {
+  it("atomically rolls back dependent rows on failed delete audit and succeeds on retry", async () => {
     const app = await makeApp("admin");
     const walletResponse = await app.request(`/agents/${AGENT_ID}/wallets`, {
       method: "POST",
@@ -492,6 +503,50 @@ describe("agent admin mutations require human session + MFA (SEC-209)", () => {
       agentId: AGENT_ID,
       status: "pending",
     });
+    const [dependentSigner] = await getDb()
+      .insert(agentSigners)
+      .values({
+        tenantId: TENANT_ID,
+        agentId: AGENT_ID,
+        signerType: "delegated",
+        subjectType: "external",
+        subjectId: "delete-retry-dependent-signer",
+        permissions: ["sign_transaction"],
+        status: "active",
+        createdBy: "test",
+      })
+      .returning();
+    const [childQuorum] = await getDb()
+      .insert(agentKeyQuorums)
+      .values({
+        tenantId: TENANT_ID,
+        agentId: AGENT_ID,
+        name: "Delete retry child quorum",
+        threshold: 1,
+        memberSignerIds: [dependentSigner!.id],
+        permissions: ["sign_transaction"],
+        status: "active",
+        createdBy: "test",
+      })
+      .returning();
+    await getDb()
+      .insert(agentKeyQuorums)
+      .values({
+        tenantId: TENANT_ID,
+        agentId: AGENT_ID,
+        name: "Delete retry nested quorum",
+        threshold: 1,
+        memberQuorumIds: [childQuorum!.id],
+        permissions: ["sign_transaction"],
+        status: "active",
+        createdBy: "test",
+      });
+    await getDb().insert(agentPolicies).values({
+      tenantId: TENANT_ID,
+      agentId: AGENT_ID,
+      updatedBy: "test",
+      updatedReason: "dependent rollback fixture",
+    });
 
     const beforeAgent = await getDb().select().from(agents).where(eq(agents.id, AGENT_ID));
     const beforeWallets = await getDb()
@@ -518,6 +573,18 @@ describe("agent admin mutations require human session + MFA (SEC-209)", () => {
       .select()
       .from(approvalQueue)
       .where(eq(approvalQueue.agentId, AGENT_ID));
+    const beforeSigners = await getDb()
+      .select()
+      .from(agentSigners)
+      .where(eq(agentSigners.agentId, AGENT_ID));
+    const beforeQuorums = await getDb()
+      .select()
+      .from(agentKeyQuorums)
+      .where(eq(agentKeyQuorums.agentId, AGENT_ID));
+    const beforeTradePolicies = await getDb()
+      .select()
+      .from(agentPolicies)
+      .where(eq(agentPolicies.agentId, AGENT_ID));
 
     try {
       await getDb().execute(
@@ -566,18 +633,30 @@ describe("agent admin mutations require human session + MFA (SEC-209)", () => {
       expect(
         await getDb().select().from(approvalQueue).where(eq(approvalQueue.agentId, AGENT_ID)),
       ).toEqual(beforeApprovals);
+      expect(
+        await getDb().select().from(agentSigners).where(eq(agentSigners.agentId, AGENT_ID)),
+      ).toEqual(beforeSigners);
+      expect(
+        await getDb().select().from(agentKeyQuorums).where(eq(agentKeyQuorums.agentId, AGENT_ID)),
+      ).toEqual(beforeQuorums);
+      expect(
+        await getDb().select().from(agentPolicies).where(eq(agentPolicies.agentId, AGENT_ID)),
+      ).toEqual(beforeTradePolicies);
       expect(await revocationStore.getAgentRevokedBefore(AGENT_ID)).not.toBeNull();
     } finally {
-      await getDb().execute(
-        sql.raw(
-          `DROP TRIGGER IF EXISTS agent_delete_completion_audit_failure_${AUDIT_TRIGGER_SUFFIX} ON audit_events`,
-        ),
-      );
-      await getDb().execute(
-        sql.raw(
-          `DROP FUNCTION IF EXISTS fail_agent_delete_completion_audit_${AUDIT_TRIGGER_SUFFIX}()`,
-        ),
-      );
+      try {
+        await getDb().execute(
+          sql.raw(
+            `DROP TRIGGER IF EXISTS agent_delete_completion_audit_failure_${AUDIT_TRIGGER_SUFFIX} ON audit_events`,
+          ),
+        );
+      } finally {
+        await getDb().execute(
+          sql.raw(
+            `DROP FUNCTION IF EXISTS fail_agent_delete_completion_audit_${AUDIT_TRIGGER_SUFFIX}()`,
+          ),
+        );
+      }
     }
 
     const retry = await app.request(`/agents/${AGENT_ID}`, { method: "DELETE" });
@@ -594,6 +673,15 @@ describe("agent admin mutations require human session + MFA (SEC-209)", () => {
     ).toHaveLength(0);
     expect(
       await getDb().select().from(approvalQueue).where(eq(approvalQueue.agentId, AGENT_ID)),
+    ).toHaveLength(0);
+    expect(
+      await getDb().select().from(agentSigners).where(eq(agentSigners.agentId, AGENT_ID)),
+    ).toHaveLength(0);
+    expect(
+      await getDb().select().from(agentKeyQuorums).where(eq(agentKeyQuorums.agentId, AGENT_ID)),
+    ).toHaveLength(0);
+    expect(
+      await getDb().select().from(agentPolicies).where(eq(agentPolicies.agentId, AGENT_ID)),
     ).toHaveLength(0);
 
     const deleteAudits = await getDb()

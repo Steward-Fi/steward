@@ -11,7 +11,11 @@ import { redactedThrownDiagnostics } from "@stwd/shared";
 import { and, eq, gte, inArray, isNull, sql } from "drizzle-orm";
 import { type Context, Hono } from "hono";
 import { isRedisAvailable } from "../middleware/redis";
-import { withTenantAuditedTransaction, writeAuditEvent } from "../services/audit";
+import {
+  type AuditEventInput,
+  withTenantAuditedTransaction,
+  writeAuditEvent,
+} from "../services/audit";
 import {
   AGENT_TOKEN_EXPIRY,
   type AgentIdentity,
@@ -214,7 +218,7 @@ function agentWalletRowsToAccountWallets(
   ];
 }
 
-async function writeAgentAudit(
+function agentAuditEvent(
   c: Parameters<typeof requireTenantLevel>[0],
   event: {
     tenantId: string;
@@ -223,9 +227,9 @@ async function writeAgentAudit(
     resourceId: string;
     metadata?: Record<string, unknown>;
   },
-): Promise<void> {
+): AuditEventInput {
   const authType = c.get("authType");
-  await writeAuditEvent({
+  return {
     tenantId: event.tenantId,
     actorType: authType === "api-key" ? "api-key" : "user",
     actorId:
@@ -237,7 +241,14 @@ async function writeAgentAudit(
     ipAddress: c.req.header("x-forwarded-for") ?? null,
     userAgent: c.req.header("user-agent") ?? null,
     requestId: c.get("requestId") ?? null,
-  });
+  };
+}
+
+async function writeAgentAudit(
+  c: Parameters<typeof requireTenantLevel>[0],
+  event: Parameters<typeof agentAuditEvent>[1],
+): Promise<void> {
+  await writeAuditEvent(agentAuditEvent(c, event));
 }
 
 function parseDurationSeconds(value: string): number | null {
@@ -1953,31 +1964,6 @@ agentRoutes.delete("/:agentId", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
   }
 
-  const deleteSnapshot = await db.transaction(async (tx) => {
-    const [agentRow] = await tx
-      .select()
-      .from(agents)
-      .where(and(eq(agents.id, agentId), eq(agents.tenantId, tenantId)));
-    return {
-      agent: agentRow ?? null,
-      approvalQueue: await tx
-        .select()
-        .from(approvalQueue)
-        .where(eq(approvalQueue.agentId, agentId)),
-      transactions: await tx.select().from(transactions).where(eq(transactions.agentId, agentId)),
-      policies: await tx.select().from(policies).where(eq(policies.agentId, agentId)),
-      encryptedChainKeys: await tx
-        .select()
-        .from(encryptedChainKeys)
-        .where(eq(encryptedChainKeys.agentId, agentId)),
-      encryptedKeys: await tx
-        .select()
-        .from(encryptedKeys)
-        .where(eq(encryptedKeys.agentId, agentId)),
-      agentWallets: await tx.select().from(agentWallets).where(eq(agentWallets.agentId, agentId)),
-    };
-  });
-  let agentRowsDeleted = false;
   try {
     await writeAgentAudit(c, {
       tenantId,
@@ -1988,7 +1974,8 @@ agentRoutes.delete("/:agentId", async (c) => {
     });
     const issuedBefore = Math.floor(Date.now() / 1000);
     await revocationStore.revokeAgentTokens(agentId, issuedBefore);
-    await db.transaction(async (tx) => {
+    await withTenantAuditedTransaction(tenantId, async (txRaw, appendRequiredAudit) => {
+      const tx = txRaw as typeof db;
       // Cascade delete in dependency order
       await tx.delete(approvalQueue).where(eq(approvalQueue.agentId, agentId));
       await tx.delete(transactions).where(eq(transactions.agentId, agentId));
@@ -1997,14 +1984,15 @@ agentRoutes.delete("/:agentId", async (c) => {
       await tx.delete(encryptedKeys).where(eq(encryptedKeys.agentId, agentId));
       await tx.delete(agentWallets).where(eq(agentWallets.agentId, agentId));
       await tx.delete(agents).where(and(eq(agents.id, agentId), eq(agents.tenantId, tenantId)));
-    });
-    agentRowsDeleted = true;
-    await writeAgentAudit(c, {
-      tenantId,
-      action: "agent.delete",
-      resourceType: "agent",
-      resourceId: agentId,
-      metadata: { revokedAgentTokensIssuedBefore: issuedBefore },
+      await appendRequiredAudit(
+        agentAuditEvent(c, {
+          tenantId,
+          action: "agent.delete",
+          resourceType: "agent",
+          resourceId: agentId,
+          metadata: { revokedAgentTokensIssuedBefore: issuedBefore },
+        }),
+      );
     });
 
     return c.json<ApiResponse<{ deleted: string }>>({
@@ -2012,32 +2000,6 @@ agentRoutes.delete("/:agentId", async (c) => {
       data: { deleted: agentId },
     });
   } catch (e: unknown) {
-    if (agentRowsDeleted && deleteSnapshot.agent) {
-      await db.transaction(async (tx) => {
-        await tx.insert(agents).values(deleteSnapshot.agent).onConflictDoNothing();
-        if (deleteSnapshot.agentWallets.length > 0) {
-          await tx.insert(agentWallets).values(deleteSnapshot.agentWallets).onConflictDoNothing();
-        }
-        if (deleteSnapshot.encryptedKeys.length > 0) {
-          await tx.insert(encryptedKeys).values(deleteSnapshot.encryptedKeys).onConflictDoNothing();
-        }
-        if (deleteSnapshot.encryptedChainKeys.length > 0) {
-          await tx
-            .insert(encryptedChainKeys)
-            .values(deleteSnapshot.encryptedChainKeys)
-            .onConflictDoNothing();
-        }
-        if (deleteSnapshot.policies.length > 0) {
-          await tx.insert(policies).values(deleteSnapshot.policies).onConflictDoNothing();
-        }
-        if (deleteSnapshot.transactions.length > 0) {
-          await tx.insert(transactions).values(deleteSnapshot.transactions).onConflictDoNothing();
-        }
-        if (deleteSnapshot.approvalQueue.length > 0) {
-          await tx.insert(approvalQueue).values(deleteSnapshot.approvalQueue).onConflictDoNothing();
-        }
-      });
-    }
     const requestId = c.get("requestId") || "unknown";
     console.error(`[${requestId}] Failed to delete agent ${agentId}`, redactedThrownDiagnostics(e));
     return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(e) }, 500);

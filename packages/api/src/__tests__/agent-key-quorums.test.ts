@@ -444,16 +444,19 @@ describe("agent key quorum API", () => {
         await getDb().select().from(agentKeyQuorums).where(eq(agentKeyQuorums.id, seeded.id)),
       ).toEqual([seeded]);
     } finally {
-      await getDb().execute(
-        sql.raw(
-          `DROP TRIGGER IF EXISTS agent_quorum_completion_audit_failure_${AUDIT_TRIGGER_SUFFIX} ON audit_events`,
-        ),
-      );
-      await getDb().execute(
-        sql.raw(
-          `DROP FUNCTION IF EXISTS fail_agent_quorum_completion_audit_${AUDIT_TRIGGER_SUFFIX}()`,
-        ),
-      );
+      try {
+        await getDb().execute(
+          sql.raw(
+            `DROP TRIGGER IF EXISTS agent_quorum_completion_audit_failure_${AUDIT_TRIGGER_SUFFIX} ON audit_events`,
+          ),
+        );
+      } finally {
+        await getDb().execute(
+          sql.raw(
+            `DROP FUNCTION IF EXISTS fail_agent_quorum_completion_audit_${AUDIT_TRIGGER_SUFFIX}()`,
+          ),
+        );
+      }
     }
   });
 });

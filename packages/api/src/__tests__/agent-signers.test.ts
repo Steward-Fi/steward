@@ -448,6 +448,14 @@ describe("agent signer API", () => {
     });
     expect(createResponse.status).toBe(201);
     const created = (await createResponse.json()) as { data: { id: string } };
+    const beforeSigner = await getDb()
+      .select()
+      .from(agentSigners)
+      .where(eq(agentSigners.id, created.data.id));
+    const beforeAudits = await getDb()
+      .select({ id: auditEvents.id })
+      .from(auditEvents)
+      .where(eq(auditEvents.tenantId, TENANT_ID));
 
     const pauseResponse = await noMfaApp.request(`/agents/${AGENT_ID}/signers/${created.data.id}`, {
       method: "PATCH",
@@ -467,6 +475,15 @@ describe("agent signer API", () => {
     expect(revokeResponse.status).toBe(403);
     expect(revoke.ok).toBe(false);
     expect(revoke.error).toContain("recent MFA");
+    expect(
+      await getDb().select().from(agentSigners).where(eq(agentSigners.id, created.data.id)),
+    ).toEqual(beforeSigner);
+    expect(
+      await getDb()
+        .select({ id: auditEvents.id })
+        .from(auditEvents)
+        .where(eq(auditEvents.tenantId, TENANT_ID)),
+    ).toEqual(beforeAudits);
   });
 
   it("rolls back signer creation, update, and revocation when completion audits fail", async () => {
@@ -550,16 +567,19 @@ describe("agent signer API", () => {
         await getDb().select().from(agentSigners).where(eq(agentSigners.id, seeded.id)),
       ).toEqual([seeded]);
     } finally {
-      await getDb().execute(
-        sql.raw(
-          `DROP TRIGGER IF EXISTS agent_signer_completion_audit_failure_${AUDIT_TRIGGER_SUFFIX} ON audit_events`,
-        ),
-      );
-      await getDb().execute(
-        sql.raw(
-          `DROP FUNCTION IF EXISTS fail_agent_signer_completion_audit_${AUDIT_TRIGGER_SUFFIX}()`,
-        ),
-      );
+      try {
+        await getDb().execute(
+          sql.raw(
+            `DROP TRIGGER IF EXISTS agent_signer_completion_audit_failure_${AUDIT_TRIGGER_SUFFIX} ON audit_events`,
+          ),
+        );
+      } finally {
+        await getDb().execute(
+          sql.raw(
+            `DROP FUNCTION IF EXISTS fail_agent_signer_completion_audit_${AUDIT_TRIGGER_SUFFIX}()`,
+          ),
+        );
+      }
     }
   });
 

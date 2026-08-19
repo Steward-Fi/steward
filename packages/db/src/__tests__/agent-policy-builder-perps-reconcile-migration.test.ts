@@ -1,8 +1,12 @@
 import { describe, expect, setDefaultTimeout, test } from "bun:test";
-import { readdir, readFile } from "node:fs/promises";
+import { cp, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PGlite } from "@electric-sql/pglite";
+import { drizzle } from "drizzle-orm/postgres-js";
+import { migrate } from "drizzle-orm/postgres-js/migrator";
 import postgres from "postgres";
+import { runMigrations } from "../migrate";
 
 setDefaultTimeout(120_000);
 const migrations = new URL("../../drizzle", import.meta.url).pathname;
@@ -65,24 +69,75 @@ describe("0109 agent policy builder-perps reconciliation", () => {
   });
 
   const realPostgresTest = process.env.DATABASE_URL ? test : test.skip;
-  realPostgresTest("is present after the journal-driven production migrator", async () => {
-    const sql = postgres(process.env.DATABASE_URL!, { max: 1 });
-    try {
-      const column = await sql<{ column_default: string; is_nullable: string }[]>`
-        SELECT column_default,is_nullable FROM information_schema.columns
-        WHERE table_name='agent_policies' AND column_name='allow_builder_perps'
-      `;
-      expect(column).toEqual([{ column_default: "false", is_nullable: "NO" }]);
+  realPostgresTest(
+    "upgrades a true journal-at-0108 database through 0109 exactly once",
+    async () => {
+      const originalDatabaseUrl = process.env.DATABASE_URL!;
+      const admin = postgres(originalDatabaseUrl, { max: 1 });
+      const databaseName = `steward_0109_${process.pid}_${crypto.randomUUID().replaceAll("-", "")}`;
+      const databaseUrl = new URL(originalDatabaseUrl);
+      databaseUrl.pathname = `/${databaseName}`;
+      const migrationsAt0108 = await mkdtemp(join(tmpdir(), "steward-migrations-0108-"));
+      let databaseCreated = false;
+      try {
+        const journal = JSON.parse(
+          await readFile(join(migrations, "meta", "_journal.json"), "utf8"),
+        ) as { entries: Array<{ idx: number; tag: string }> };
+        await cp(migrations, migrationsAt0108, { recursive: true });
+        await writeFile(
+          join(migrationsAt0108, "meta", "_journal.json"),
+          `${JSON.stringify(
+            { ...journal, entries: journal.entries.filter(({ idx }) => idx <= 108) },
+            null,
+            2,
+          )}\n`,
+        );
 
-      const applied = await sql<{ count: number; newest: number }[]>`
-        SELECT count(*)::int AS count FROM drizzle.__drizzle_migrations
-      `;
-      const journal = JSON.parse(
-        await readFile(join(migrations, "meta", "_journal.json"), "utf8"),
-      ) as { entries: unknown[] };
-      expect(applied[0]?.count).toBe(journal.entries.length);
-    } finally {
-      await sql.end({ timeout: 5 });
-    }
-  });
+        await admin`CREATE DATABASE ${admin(databaseName)}`;
+        databaseCreated = true;
+        const target = postgres(databaseUrl.toString(), { max: 1 });
+        try {
+          await migrate(drizzle(target), { migrationsFolder: migrationsAt0108 });
+          const before = await target<{ exists: boolean }[]>`
+          SELECT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name='agent_policies' AND column_name='allow_builder_perps'
+          ) AS exists
+        `;
+          expect(before).toEqual([{ exists: false }]);
+        } finally {
+          await target.end({ timeout: 5 });
+        }
+
+        process.env.DATABASE_URL = databaseUrl.toString();
+        const first = await runMigrations();
+        expect(first.applied).toEqual(["0109_agent_policy_builder_perps_reconcile"]);
+        const second = await runMigrations();
+        expect(second.applied).toEqual([]);
+
+        const verified = postgres(databaseUrl.toString(), { max: 1 });
+        try {
+          const column = await verified<{ column_default: string; is_nullable: string }[]>`
+          SELECT column_default,is_nullable FROM information_schema.columns
+          WHERE table_name='agent_policies' AND column_name='allow_builder_perps'
+        `;
+          expect(column).toEqual([{ column_default: "false", is_nullable: "NO" }]);
+          const applied = await verified<{ count: number }[]>`
+          SELECT count(*)::int AS count FROM drizzle.__drizzle_migrations
+        `;
+          expect(applied).toEqual([{ count: journal.entries.length }]);
+        } finally {
+          await verified.end({ timeout: 5 });
+        }
+      } finally {
+        process.env.DATABASE_URL = originalDatabaseUrl;
+        try {
+          if (databaseCreated) await admin`DROP DATABASE ${admin(databaseName)} WITH (FORCE)`;
+        } finally {
+          await admin.end({ timeout: 5 });
+          await rm(migrationsAt0108, { recursive: true, force: true });
+        }
+      }
+    },
+  );
 });
