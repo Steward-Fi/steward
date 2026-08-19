@@ -112,5 +112,4 @@ describe("middleware security hardening", () => {
     expect(localResponse.headers.get("Content-Security-Policy")).toContain("default-src 'none'");
     expect(localResponse.headers.get("Strict-Transport-Security")).toBeNull();
   });
-
 });
