@@ -1,0 +1,95 @@
+name: Wallet E2E (Manual)
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_sha:
+        description: Exact reviewed Steward commit to exercise
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: wallet-e2e-manual
+  cancel-in-progress: false
+
+jobs:
+  authorize-target:
+    name: Validate exact target
+    runs-on: ubuntu-latest
+    outputs:
+      target_sha: ${{ steps.target.outputs.target_sha }}
+    steps:
+      - name: Require the trusted default-branch dispatcher
+        env:
+          TARGET_SHA: ${{ inputs.target_sha }}
+        id: target
+        run: |
+          if [ "$GITHUB_REF" != "refs/heads/develop" ]; then
+            echo "Wallet E2E must be dispatched from develop" >&2
+            exit 1
+          fi
+          if [[ ! "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "target_sha must be a full lowercase commit SHA" >&2
+            exit 1
+          fi
+          echo "target_sha=$TARGET_SHA" >> "$GITHUB_OUTPUT"
+
+  wallet-e2e:
+    name: MetaMask SIWE + Phantom SIWS (${{ needs.authorize-target.outputs.target_sha }})
+    if: github.ref == 'refs/heads/develop'
+    needs: authorize-target
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    environment: wallet-e2e
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+          ref: ${{ needs.authorize-target.outputs.target_sha }}
+
+      - name: Verify exact checkout
+        env:
+          TARGET_SHA: ${{ needs.authorize-target.outputs.target_sha }}
+        run: test "$(git rev-parse HEAD)" = "$TARGET_SHA"
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: "1.3"
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Build embedded API runtime dependencies
+        run: bunx turbo run build --filter=@stwd/api...
+
+      - name: Install Chromium and Linux browser dependencies
+        run: bunx playwright install --with-deps chromium
+
+      - name: Fail closed when wallet credentials are not provisioned
+        env: &wallet-credentials
+          E2E_METAMASK_SEED_PHRASE: ${{ secrets.E2E_METAMASK_SEED_PHRASE }}
+          E2E_METAMASK_PASSWORD: ${{ secrets.E2E_METAMASK_PASSWORD }}
+          E2E_PHANTOM_SEED_PHRASE: ${{ secrets.E2E_PHANTOM_SEED_PHRASE }}
+          E2E_PHANTOM_PASSWORD: ${{ secrets.E2E_PHANTOM_PASSWORD }}
+        run: bun run test:e2e:wallets:preflight
+
+      - name: Verify wallet spec collection
+        run: bun run test:e2e:wallets:list
+
+      - name: Build isolated wallet-extension profiles
+        env: *wallet-credentials
+        run: xvfb-run -a bun run test:e2e:wallets:cache
+
+      - name: Run real wallet authentication flows
+        env: *wallet-credentials
+        run: xvfb-run -a bun run test:e2e:wallets
+
+      - name: Remove wallet profiles and test artifacts
+        if: always()
+        run: bun run test:e2e:wallets:cleanup
