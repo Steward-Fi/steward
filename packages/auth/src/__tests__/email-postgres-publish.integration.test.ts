@@ -204,6 +204,58 @@ integration("Postgres email challenge publication", () => {
     await sql`DELETE FROM auth_kv_store WHERE namespace = ${namespace}`;
   });
 
+  it("rolls back when a row lock delays a write past expiry", async () => {
+    if (!sql) throw new Error("DATABASE_URL required");
+    const namespace = `email-publish-write-expiry-${crypto.randomUUID()}`;
+    const backend = new PostgresBackend(namespace);
+    const reservationKey = "reservation";
+    const credentialKey = "credential";
+    await backend.set(reservationKey, "reserved", 60_000);
+    await backend.set(credentialKey, "original", 60_000);
+
+    const locker = await sql.reserve();
+    const [{ pid: lockerPid }] = await locker<
+      Array<{ pid: number }>
+    >`SELECT pg_backend_pid() AS pid`;
+    const expiresAt = Date.now() + 300;
+    let transactionOpen = false;
+    let publicationOutcome: Promise<ObservedOutcome<boolean>> | undefined;
+    try {
+      await locker`BEGIN`;
+      transactionOpen = true;
+      await locker`
+        SELECT value FROM auth_kv_store
+         WHERE id = ${credentialKey} AND namespace = ${namespace}
+         FOR UPDATE
+      `;
+      publicationOutcome = observePromise(
+        backend.publish([
+          {
+            key: reservationKey,
+            value: "published",
+            expiresAt,
+            expected: "reserved",
+          },
+          { key: credentialKey, value: "active", expiresAt },
+        ]),
+      );
+      await waitForPublisherBlockedAfterGuard(`${namespace}:${reservationKey}`, lockerPid);
+      const delayMs = expiresAt - Date.now() + 30;
+      if (delayMs > 0) await Bun.sleep(delayMs);
+    } finally {
+      if (transactionOpen) await locker`COMMIT`;
+      locker.release();
+    }
+
+    if (!publicationOutcome) throw new Error("publication did not start");
+    const result = await publicationOutcome;
+    if (!result.ok) throw result.error;
+    expect(result.value).toBe(false);
+    expect(await backend.get(credentialKey)).toBe("original");
+    expect(await backend.get(reservationKey)).toBe("reserved");
+    await sql`DELETE FROM auth_kv_store WHERE namespace = ${namespace}`;
+  });
+
   it("never overwrites an ordinary writer that commits after the guard read", async () => {
     if (!sql) throw new Error("DATABASE_URL required");
     const namespace = `email-publish-post-guard-${crypto.randomUUID()}`;

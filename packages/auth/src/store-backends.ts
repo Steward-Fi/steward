@@ -282,6 +282,8 @@ function postgresErrorCode(error: unknown): string | undefined {
     : undefined;
 }
 
+class PublicationExpiredError extends Error {}
+
 /**
  * Redis-backed store backend.
  * Uses atomic SET key value PX ttlMs for writes; native TTL handles expiry.
@@ -556,15 +558,17 @@ export class PostgresBackend implements StoreBackend {
               )
             `;
           }
-          if (earliestValueExpiry !== null) {
+          const valueDeadlineIsLive = async (): Promise<boolean> => {
+            if (earliestValueExpiry === null) return true;
             const [{ valid }] = await transaction<Array<{ valid: boolean }>>`
               SELECT clock_timestamp() < ${new Date(earliestValueExpiry).toISOString()}::timestamptz
                 AS valid
             `;
-            if (!valid) {
-              published = false;
-              return;
-            }
+            return valid;
+          };
+          if (!(await valueDeadlineIsLive())) {
+            published = false;
+            return;
           }
           let allExpected = true;
           let allDesired = guarded.length > 0;
@@ -603,9 +607,13 @@ export class PostgresBackend implements StoreBackend {
               `;
             }
           }
+          // A legacy writer or database lock can delay the UPSERT after the
+          // first deadline check. Roll back the whole batch if that happened.
+          if (!(await valueDeadlineIsLive())) throw new PublicationExpiredError();
         });
         return published;
       } catch (error) {
+        if (error instanceof PublicationExpiredError) return false;
         if (postgresErrorCode(error) !== "40001" || attempt === 2) throw error;
       }
     }
