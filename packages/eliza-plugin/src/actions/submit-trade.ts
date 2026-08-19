@@ -206,19 +206,16 @@ async function readResponseText(response: Response, signal: AbortSignal): Promis
   if (!reader) return "";
   const chunks: Uint8Array[] = [];
   let totalBytes = 0;
+  let rejectAborted: (reason: Error) => void = () => {};
+  const aborted = new Promise<never>((_, reject) => {
+    rejectAborted = reject;
+  });
   const onAbort = () => {
     void reader.cancel().catch(() => undefined);
+    rejectAborted(new Error("Steward request timed out"));
   };
   signal.addEventListener("abort", onAbort, { once: true });
-  const aborted = new Promise<never>((_, reject) => {
-    if (signal.aborted) {
-      reject(new Error("Steward request timed out"));
-      return;
-    }
-    signal.addEventListener("abort", () => reject(new Error("Steward request timed out")), {
-      once: true,
-    });
-  });
+  if (signal.aborted) onAbort();
   try {
     while (true) {
       const result = await Promise.race([reader.read(), aborted]);
@@ -233,6 +230,7 @@ async function readResponseText(response: Response, signal: AbortSignal): Promis
     }
   } finally {
     signal.removeEventListener("abort", onAbort);
+    reader.releaseLock();
   }
   const bytes = new Uint8Array(totalBytes);
   let offset = 0;
@@ -270,6 +268,10 @@ async function fetchStewardJson(
       signal: controller.signal,
     });
     const data = await parseResponseJson(response, controller.signal);
+    // cancel() may resolve an outstanding reader.read() with { done: true }
+    // before the abort rejection wins Promise.race. Preserve the deadline as
+    // the outcome even in that ordering instead of accepting a partial body.
+    if (controller.signal.aborted) throw new Error("Steward request timed out");
     return { status: response.status, ok: response.ok, data };
   } catch {
     throw new Error(

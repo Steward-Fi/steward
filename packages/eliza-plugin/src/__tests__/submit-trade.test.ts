@@ -206,6 +206,53 @@ describe("SUBMIT_TRADE action", () => {
     expect(JSON.stringify(result)).not.toContain("secret socket error");
   });
 
+  it("cancels a stalled response body at the same bounded deadline", async () => {
+    vi.useFakeTimers();
+    let cancelled = false;
+    const body = new ReadableStream<Uint8Array>({
+      pull: () => new Promise<void>(() => {}),
+      cancel() {
+        cancelled = true;
+      },
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(body, { status: 502 })),
+    );
+
+    const pending = submitTradeAction.handler({} as any, mockMemory("buy 0.01 BTC") as any);
+    await vi.advanceTimersByTimeAsync(10_000);
+    const result = await pending;
+
+    expect(cancelled).toBe(true);
+    expect(result?.success).toBe(false);
+    expect(result?.error).toBe("Steward request timed out");
+    expect(result?.text).toBe("venue error, will retry later");
+  });
+
+  it("removes its response-body abort listener after a completed response", async () => {
+    let signal: AbortSignal | undefined;
+    let addSpy: ReturnType<typeof vi.spyOn> | undefined;
+    let removeSpy: ReturnType<typeof vi.spyOn> | undefined;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init?: RequestInit) => {
+        signal = init?.signal as AbortSignal;
+        addSpy = vi.spyOn(signal, "addEventListener");
+        removeSpy = vi.spyOn(signal, "removeEventListener");
+        return new Response(JSON.stringify({ error: "HL unavailable" }), { status: 502 });
+      }),
+    );
+
+    const result = await submitTradeAction.handler({} as any, mockMemory("buy 0.01 BTC") as any);
+
+    expect(result?.success).toBe(false);
+    expect(addSpy).toHaveBeenCalledTimes(1);
+    const listener = addSpy?.mock.calls[0]?.[1];
+    expect(removeSpy).toHaveBeenCalledWith("abort", listener);
+    expect(signal?.aborted).toBe(false);
+  });
+
   it("rejects a non-localhost plaintext STEWARD_API_URL before any request", async () => {
     process.env.STEWARD_API_URL = "http://steward.example";
     const fetchMock = vi.fn();
