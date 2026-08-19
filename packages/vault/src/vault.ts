@@ -2170,7 +2170,7 @@ export class Vault {
 
     // Wrap all writes atomically - roll back on any failure
     await db.transaction(async (tx) => {
-      // Re-audit: the SEC-024 custody guard below used to run BEFORE this
+      // The SEC-024 custody guard below runs after this
       // transaction — check-then-act with no DB serialization. A concurrent
       // importExternalKeyHandle for the same (agent, chain family) could
       // interleave between the check and these writes, leaving both a
@@ -2388,7 +2388,7 @@ export class Vault {
     const now = new Date();
 
     await db.transaction(async (tx) => {
-      // Re-audit: the custody guards below were check-then-act with no DB
+      // The custody guards below run under the DB
       // serialization — a concurrent importKey (or a second handle import)
       // for the same (agent, chain family, venue) scope could interleave
       // between the checks and the wallet write, leaving both a

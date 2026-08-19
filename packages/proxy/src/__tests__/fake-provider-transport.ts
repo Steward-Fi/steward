@@ -1,5 +1,5 @@
 /**
- * PR6 deterministic in-process fake provider transport (TEST-ONLY).
+ * provider-authority deterministic in-process fake provider transport (TEST-ONLY).
  *
  * WHAT THIS IS
  * ------------
@@ -292,7 +292,7 @@ export const GITHUB_FIXTURES = {
 } as const;
 
 /**
- * Canonical X-shaped fixtures (spec predates the live X provider; PR6 adds an X
+ * Canonical X-shaped fixtures (spec predates the live X provider; provider-authority adds an X
  * leg to the fake matrix — see the drift note in the PR body).
  */
 export const X_FIXTURES = {

@@ -227,7 +227,7 @@ export interface StewardAppContext {
    */
   requireCapabilityAgentJwt: typeof requireCapabilityAgentJwt;
   /**
-   * PR2 provider-action authenticator: verifies the agent JWT and installs the
+   * canonical-action provider-action authenticator: verifies the agent JWT and installs the
    * runtime-neutral principal WITHOUT a trading/proxy scope check. Provider-action
    * routes use this; it is a NEW field and does NOT replace `requireAgentJwt`.
    */

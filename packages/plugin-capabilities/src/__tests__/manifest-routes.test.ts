@@ -1,6 +1,6 @@
 /**
  * manifest-routes.test.ts — E2E for the agent-facing manifest + issuance/renewal
- * routes (lane A1, scope 2-5). Mounts createManifestRoutes on a bare hono app
+ * routes. Mounts createManifestRoutes on a bare Hono app
  * with an agent-token stub + real pglite store. Proves:
  *   - GET /manifest lists the agent's manifest entries,
  *   - token-mode (github) issue returns a short-lived scoped token,

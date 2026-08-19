@@ -290,7 +290,7 @@ describe("steward init", () => {
     const previousCwd = process.cwd();
     try {
       // Decoy at <cwd>/packages/db/src/migrate.ts: exits 0 and drops a marker.
-      // Pre-fix, `steward init --migrate` executed exactly this path.
+      // `steward init --migrate` executes exactly this path.
       const decoyDir = join(dir, "packages", "db", "src");
       mkdirSync(decoyDir, { recursive: true });
       const marker = join(dir, "decoy-executed");
@@ -318,8 +318,8 @@ describe("steward init", () => {
   test("--migrate does not default STEWARD_ALLOW_INSECURE_DB on for the child", async () => {
     // With NODE_ENV=production and a non-loopback DATABASE_URL lacking a
     // verifying sslmode, the shipped migrator must hit the db package's TLS
-    // gate. Pre-fix the CLI forced STEWARD_ALLOW_INSECURE_DB=true into the
-    // child env, silently disabling that gate; post-fix the gate fires.
+    // gate. The CLI must not force STEWARD_ALLOW_INSECURE_DB=true into the
+    // child env, silently disabling that gate. The child must receive the value.
     const dir = mkdtempSync(join(tmpdir(), "steward-cli-migrate-tls-"));
     try {
       const envPath = join(dir, ".env");

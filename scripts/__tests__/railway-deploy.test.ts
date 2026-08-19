@@ -24,7 +24,7 @@ function redact(input: string): string {
 
 describe("SEC-129 railway-deploy.sh fails closed by default", () => {
   test("no-log control-plane rejection is a hard failure unless explicitly downgraded", () => {
-    // Pre-fix: LOGS_EMPTY=1 exited 0 unless RAILWAY_STRICT=true — CI went
+    // LOGS_EMPTY=1 must fail even when RAILWAY_STRICT is not set, so CI cannot
     // green on a deploy that never happened.
     expect(source).not.toContain("RAILWAY_STRICT");
     expect(source).toContain("RAILWAY_ALLOW_REJECTED_DEPLOY:-false");

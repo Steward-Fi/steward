@@ -110,7 +110,7 @@ beforeAll(async () => {
     config: { threshold: "0" },
   });
 
-  // Approval reads/decisions are recent-MFA gated (PR #79 hardening); mint
+  // Approval reads and decisions are recent-MFA gated; mint
   // session tokens carrying a fresh MFA verification timestamp.
   requesterToken = await signAccessToken({
     address: "0x0000000000000000000000000000000000000001",
@@ -146,7 +146,7 @@ function bearer(token: string) {
   return {
     Authorization: `Bearer ${token}`,
     "Content-Type": "application/json",
-    // Broadcast signing requires an Idempotency-Key header (PR #79 hardening).
+    // Broadcast signing requires an Idempotency-Key header.
     "Idempotency-Key": `test-${crypto.randomUUID()}`,
   };
 }
@@ -182,7 +182,7 @@ describe.skipIf(SKIP)("approval principal tracking and 4-eyes enforcement", () =
   });
 
   it("rejects approval by the same authenticated principal", async () => {
-    // PR #79 hardening: vault-transaction approvals must go through the
+    // Vault-transaction approvals must go through the
     // authoritative vault path, which enforces separation of duties.
     const res = await app.request(`/vault/${TEST_AGENT}/approve/${queuedTxId}`, {
       method: "POST",
@@ -196,7 +196,7 @@ describe.skipIf(SKIP)("approval principal tracking and 4-eyes enforcement", () =
   });
 
   it("allows a different authenticated principal and ignores body-supplied approvedBy", async () => {
-    // PR #79 hardening: approvals execute through the authoritative vault path,
+    // Approvals execute through the authoritative vault path,
     // which derives the approver from the authenticated session (not the body)
     // and re-evaluates policy before signing/broadcasting.
     const res = await app.request(`/vault/${TEST_AGENT}/approve/${queuedTxId}`, {

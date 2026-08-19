@@ -47,7 +47,7 @@ process.env.STEWARD_AUDIT_HMAC_KEY ??= "a".repeat(64);
 // Signer credential pepper (SEC-073 fails closed when unset); a real test
 // pepper keeps the suite on the production-shaped code path.
 process.env.STEWARD_SIGNER_CREDENTIAL_PEPPER ??= "steward-api-test-suite-signer-credential-pepper";
-// PR4 execution authorization v2 key. Separate from STEWARD_JWT_SECRET (X7,
+// governed-execution execution authorization v2 key. Separate from STEWARD_JWT_SECRET (X7,
 // never a fallback). A `keyId:secret` rotation list; the first key signs. Tests
 // that assert the fail-closed absent-key path (P48/P49/F06) delete this env in
 // their own setup, so the default here must NOT clobber an explicit unset.

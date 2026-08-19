@@ -300,7 +300,7 @@ fn handle(state: &mut ShareState, method: &str, url: &str, body: &str) -> (u16, 
                 .to_string(),
         ),
         ("POST", "/commit") => {
-            // SEC-083 bounds the map; the re-audit follow-up: a hard 429 at
+            // The map is bounded; a hard 429 at
             // the cap let an authenticated coordinator park 1024 rounds
             // forever and wedge the signer (availability). Evict the oldest
             // parked round instead — its /sign will fail closed with
@@ -564,7 +564,7 @@ mod tests {
         (code, nonce_id)
     }
 
-    // Re-audit: the bare 429 cap let an authenticated coordinator park
+    // The request cap must prevent an authenticated coordinator from parking
     // MAX_PENDING_NONCES rounds forever and wedge the share service. /commit
     // must evict the oldest parked round instead of refusing new rounds.
     #[test]

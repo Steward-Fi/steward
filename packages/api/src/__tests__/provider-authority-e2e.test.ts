@@ -1,15 +1,15 @@
 /**
- * PR6 — end-to-end governed provider proof (fake transport).
+ * End-to-end governed provider proof using the fake transport.
  *
  * This IS the fake CI proof body (§2.5). It drives the IDENTICAL governed code
  * path the real sandbox run uses (`scripts/provider-authority-sandbox.mjs`),
  * differing ONLY in the terminal forwarder (U2): here the terminal forwarder is
  * the deterministic in-process fake (`fake-provider-transport.ts`) injected via
  * the existing `__setForwardProxyRequestForTests` seam (U1). No new authority is
- * minted (U3): every allow/approve/resume/dispatch goes through the real PR1-PR5
+ * minted: every allow, approve, resume, and dispatch goes through the real
  * service functions.
  *
- * DISPATCH TOPOLOGY (anchor drift C1, see PR6-ANCHORS.md):
+ * Dispatch topology:
  * On develop the ALLOWED READ op terminates at an in-process stub
  * (`executeProviderActionStub`), NOT the governed forwarder. Only the
  * WRITE/APPROVAL path (create → approve → resume → dispatchGovernedExecution)
@@ -55,14 +55,14 @@ import {
 import { KeyStore } from "@stwd/vault";
 import { and, eq, sql } from "drizzle-orm";
 
-// Real PR1-PR5 services (the authority code path under proof).
+// Real authority services under proof.
 import { providerActionService } from "../services/provider-action-service";
 import { providerApprovalService } from "../services/provider-approval";
 import { getProviderCase } from "../services/provider-case";
 
 setDefaultTimeout(120_000);
 
-// PR4 governed dispatcher + the injectable proxy forwarder seam.
+// Governed dispatcher and injectable proxy forwarder seam.
 type ProxyMod = typeof import("@stwd/proxy/src/handlers/proxy");
 type DispatchMod = typeof import("@stwd/proxy/src/handlers/governed-execution");
 let proxyMod: ProxyMod;
@@ -361,7 +361,7 @@ afterEach(async () => {
   fake.reset();
 });
 
-describe("PR6 governed provider E2E — fake transport, real authority (U1-U3)", () => {
+describe("governed provider E2E — fake transport, real authority", () => {
   it("M14: happy write path create→approve→resume→dispatch→succeeded via fake forwarder", async () => {
     const [op] = await getDb()
       .select({ id: sql<string>`id` })
@@ -535,7 +535,7 @@ describe("PR6 governed provider E2E — fake transport, real authority (U1-U3)",
   });
 
   it("M05/PN17: route revision bumped after resume — claim fails STALE_ROUTE, zero forward", async () => {
-    // Drift note (see PR6-ANCHORS.md): the PR4 claim's LIVE-revision staleness
+    // The execution claim's live-revision staleness
     // checks are ROUTE-revision and SECRET-version (the approval commitment is
     // frozen at mint, so grant IDs+revisions are re-derived from the frozen
     // commitment and cannot drift at claim). Grant REVOCATION is enforced at

@@ -1,5 +1,5 @@
 /**
- * PR5 independent adversarial probes (review-gate). Two probes NOT duplicating
+ * evidence independent adversarial probes (review-gate). Two probes NOT duplicating
  * the PR's own suite:
  *
  *  P-A "byte-flip in a stored event's metadata": mutate ONE byte in a correlated
@@ -67,7 +67,7 @@ function runVerifier(env: unknown, args: string[] = []) {
   return { code: r.status ?? -1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
 }
 
-describe("PR5 independent adversarial probes", () => {
+describe("evidence independent adversarial probes", () => {
   beforeAll(async () => {
     tmpDir = mkdtempSync(join(tmpdir(), "pr5-adv-"));
     process.env.STEWARD_PGLITE_MEMORY = "true";

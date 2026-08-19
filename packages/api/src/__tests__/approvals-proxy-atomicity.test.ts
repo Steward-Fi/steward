@@ -14,9 +14,9 @@ import { and, eq } from "drizzle-orm";
 import { Hono } from "hono";
 import type { AppVariables } from "../services/context";
 
-// Fault-injection proof for approval/audit ATOMICITY on the PR #181 proxy flow.
+// Fault-injection proof for approval/audit atomicity on the proxy flow.
 //
-// The PR3 spec (section 11 item #10, invariant I14) flags that the proxy
+// The approval-lifecycle spec (section 11 item #10, invariant I14) flags that the proxy
 // approve/deny/expire transitions committed their state change and their audit
 // event in SEPARATE transactions, so a crash or audit failure between them
 // could leave an approved/denied/expired row with NO audit record.
