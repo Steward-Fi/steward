@@ -12,6 +12,7 @@
     "e2e:wallets:cache:phantom": "bun run scripts/cache-wallet-e2e.ts phantom --force",
     "e2e:wallets:cache": "bun run e2e:wallets:cache:metamask && bun run e2e:wallets:cache:phantom",
     "e2e:wallets:preflight": "bun run scripts/preflight-wallet-e2e.ts",
+    "e2e:wallets:cleanup": "bun run scripts/cleanup-wallet-e2e.ts",
     "e2e:wallets:list": "playwright test --config=playwright.wallets.config.ts --list",
     "e2e:wallets": "bun run scripts/run-wallet-e2e.ts",
     "e2e:trust-ux": "NEXT_PUBLIC_STEWARD_API_URL=http://127.0.0.1:3299 E2E_ALLOW_INSECURE_HTTP=true bun run build && playwright test --config=playwright.trust.config.ts",

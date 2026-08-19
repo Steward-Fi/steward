@@ -15,11 +15,7 @@ jobs:
     name: MetaMask SIWE + Phantom SIWS
     runs-on: ubuntu-latest
     timeout-minutes: 35
-    env:
-      E2E_METAMASK_SEED_PHRASE: ${{ secrets.E2E_METAMASK_SEED_PHRASE }}
-      E2E_METAMASK_PASSWORD: ${{ secrets.E2E_METAMASK_PASSWORD }}
-      E2E_PHANTOM_SEED_PHRASE: ${{ secrets.E2E_PHANTOM_SEED_PHRASE }}
-      E2E_PHANTOM_PASSWORD: ${{ secrets.E2E_PHANTOM_PASSWORD }}
+    environment: wallet-e2e
 
     steps:
       - name: Checkout
@@ -37,13 +33,24 @@ jobs:
         run: bunx playwright install --with-deps chromium
 
       - name: Fail closed when wallet credentials are not provisioned
+        env: &wallet-credentials
+          E2E_METAMASK_SEED_PHRASE: ${{ secrets.E2E_METAMASK_SEED_PHRASE }}
+          E2E_METAMASK_PASSWORD: ${{ secrets.E2E_METAMASK_PASSWORD }}
+          E2E_PHANTOM_SEED_PHRASE: ${{ secrets.E2E_PHANTOM_SEED_PHRASE }}
+          E2E_PHANTOM_PASSWORD: ${{ secrets.E2E_PHANTOM_PASSWORD }}
         run: bun run test:e2e:wallets:preflight
 
       - name: Verify wallet spec collection
         run: bun run test:e2e:wallets:list
 
       - name: Build isolated wallet-extension profiles
+        env: *wallet-credentials
         run: xvfb-run -a bun run test:e2e:wallets:cache
 
       - name: Run real wallet authentication flows
+        env: *wallet-credentials
         run: xvfb-run -a bun run test:e2e:wallets
+
+      - name: Remove wallet profiles and test artifacts
+        if: always()
+        run: bun run test:e2e:wallets:cleanup

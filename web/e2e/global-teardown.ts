@@ -47,15 +47,21 @@ function validatedDataDir(value: unknown): string | undefined {
   return resolved;
 }
 
-function killProcess(processIdentity: ProcessIdentity | undefined, name: string): void {
+function killProcess(
+  processIdentity: ProcessIdentity | undefined,
+  name: string,
+  inheritedEnvironment: Readonly<NodeJS.ProcessEnv>,
+): void {
   if (processIdentity === undefined) return;
   const { pid, startedAt, command } = processIdentity;
   const currentStartedAt = spawnSync("ps", ["-p", String(pid), "-o", "lstart="], {
     encoding: "utf8",
+    env: inheritedEnvironment,
   }).stdout.trim();
   if (!currentStartedAt) return;
   const currentCommand = spawnSync("ps", ["-p", String(pid), "-o", "command="], {
     encoding: "utf8",
+    env: inheritedEnvironment,
   }).stdout.trim();
   if (currentStartedAt !== startedAt || currentCommand !== command) {
     throw new Error(`Refusing to signal reused ${name} PID`);
@@ -83,7 +89,11 @@ async function removeDirWithRetry(path: string): Promise<void> {
  * Exported for tests; Playwright calls the default export, which binds the
  * real harness paths.
  */
-export async function runGlobalTeardown(pidFile: string, nextBuildDir: string): Promise<void> {
+export async function runGlobalTeardown(
+  pidFile: string,
+  nextBuildDir: string,
+  inheritedEnvironment: Readonly<NodeJS.ProcessEnv> = process.env,
+): Promise<void> {
   try {
     // Setup persists state after each process spawn, but a failure before the
     // first spawn can still leave no file after producing a flag-built .next.
@@ -115,7 +125,7 @@ export async function runGlobalTeardown(pidFile: string, nextBuildDir: string): 
           [fakeOAuth, "fakeOAuth"],
         ] as const) {
           try {
-            killProcess(identity, name);
+            killProcess(identity, name, inheritedEnvironment);
           } catch (error) {
             cleanupError ??= error;
           }
@@ -144,6 +154,12 @@ export async function runGlobalTeardown(pidFile: string, nextBuildDir: string): 
   }
 }
 
+export async function runDefaultGlobalTeardown(
+  inheritedEnvironment: Readonly<NodeJS.ProcessEnv> = process.env,
+): Promise<void> {
+  await runGlobalTeardown(PID_FILE, NEXT_BUILD_DIR, inheritedEnvironment);
+}
+
 export default async function globalTeardown(): Promise<void> {
-  await runGlobalTeardown(PID_FILE, NEXT_BUILD_DIR);
+  await runDefaultGlobalTeardown();
 }

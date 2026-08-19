@@ -7,12 +7,20 @@ import {
 } from "@synthetixio/synpress-cache";
 import { PHANTOM_CHROME_EXTENSION_ID } from "../e2e/wallets/cache-contract";
 import { assertWalletE2ECredentials } from "../e2e/wallets/credentials";
-import { prepareStewardMetaMaskExtension } from "../e2e/wallets/metamask-extension";
+import {
+  assertExtensionDigest,
+  prepareStewardMetaMaskExtension,
+} from "../e2e/wallets/metamask-extension";
 import metamaskSetup from "../e2e/wallets/setup/metamask/metamask.setup";
 import phantomSetup from "../e2e/wallets/setup/phantom/phantom.setup";
 
 const PHANTOM_CHROME_UPDATE_URL =
   "https://clients2.google.com/service/update2/crx?response=redirect&prodversion=131.0.0.0&acceptformat=crx2,crx3&x=id%3Dbfnaelmomeimhlpmgjnjophhpkkoljpa%26uc";
+// The Chrome update endpoint is mutable. Pin the accepted archive bytes so a
+// publisher update requires an explicit, reviewed digest change here.
+export const PHANTOM_EXTENSION_VERSION = "26.26.0";
+export const PHANTOM_EXTENSION_SHA256 =
+  "24226235e21defc34868487f9e205bb63dcdf4dc0d277a9afac48f98c2bae265";
 
 async function preparePhantomExtension(): Promise<string> {
   const download = await downloadFile({
@@ -20,6 +28,7 @@ async function preparePhantomExtension(): Promise<string> {
     outputDir: ensureCacheDirExists(),
     url: PHANTOM_CHROME_UPDATE_URL,
   });
+  await assertExtensionDigest(download.filePath, PHANTOM_EXTENSION_SHA256);
   const unpacked = await unzipArchivePhantom({ archivePath: download.filePath });
   return unpacked.outputPath;
 }

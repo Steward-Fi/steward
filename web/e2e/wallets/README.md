@@ -30,8 +30,9 @@ These specs run the **real** MetaMask and Phantom browser extensions via
 
 3. Prime the ignored local wallet caches. The two commands deliberately use
    separate setup roots because Synpress runs every setup file beneath the
-   directory it receives. Phantom is downloaded from its Chrome Web Store ID;
-   Synpress 4.1.2's legacy Phantom backup hostname is no longer available:
+   directory it receives. The accepted MetaMask release and Phantom Chrome Web
+   Store archive are SHA-256 pinned; an extension update fails closed until its
+   version and reviewed digest are updated:
 
    ```sh
    bun run test:e2e:wallets:cache
@@ -57,7 +58,11 @@ a graphical Chromium session.
 
 ## Test seed
 
-Credential values are read only from the environment and the generated browser
-profiles remain under ignored `web/.cache-synpress/`. Use repository or
-environment secrets for the manual workflow; never put seed phrases in source,
-workflow YAML, command-line arguments, logs, artifacts, or funded wallets.
+Credential values are read only from the environment. The manual workflow uses
+the protected `wallet-e2e` GitHub environment and exposes them only to the
+preflight, profile-build, and real-flow steps. The API, web, and fake-provider
+child processes receive a sanitized environment. Generated profiles remain
+under ignored `web/.cache-synpress/` locally and the workflow removes them and
+all Playwright output in its unconditional final step. Never put seed phrases
+in source, workflow YAML, command-line arguments, logs, artifacts, or funded
+wallets.

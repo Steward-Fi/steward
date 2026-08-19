@@ -1,11 +1,11 @@
-const CREDENTIAL_NAMES = [
+export const WALLET_E2E_CREDENTIAL_NAMES = [
   "E2E_METAMASK_SEED_PHRASE",
   "E2E_METAMASK_PASSWORD",
   "E2E_PHANTOM_SEED_PHRASE",
   "E2E_PHANTOM_PASSWORD",
 ] as const;
 
-type CredentialName = (typeof CREDENTIAL_NAMES)[number];
+type CredentialName = (typeof WALLET_E2E_CREDENTIAL_NAMES)[number];
 type CredentialEnvironment = Readonly<Record<string, string | undefined>>;
 
 export interface WalletE2ECredentials {
@@ -41,7 +41,9 @@ function assertPassword(name: CredentialName, value: string): void {
 export function readWalletE2ECredentials(
   env: CredentialEnvironment = process.env,
 ): WalletE2ECredentials {
-  const missing = CREDENTIAL_NAMES.filter((name) => requiredValue(env, name).length === 0);
+  const missing = WALLET_E2E_CREDENTIAL_NAMES.filter(
+    (name) => requiredValue(env, name).length === 0,
+  );
   if (missing.length > 0) {
     throw new Error(
       `Wallet E2E credentials are not provisioned. Missing: ${missing.join(", ")}. Use dedicated empty test wallets; never use live or funded wallet material.`,
@@ -63,4 +65,16 @@ export function readWalletE2ECredentials(
 
 export function assertWalletE2ECredentials(env: CredentialEnvironment = process.env): void {
   readWalletE2ECredentials(env);
+}
+
+/**
+ * Wallet material is needed by the Playwright process, but never by the API,
+ * web, or fake-provider services that the harness starts.
+ */
+export function environmentWithoutWalletCredentials(
+  env: CredentialEnvironment = process.env,
+): NodeJS.ProcessEnv {
+  const sanitized: Record<string, string | undefined> = { ...env };
+  for (const name of WALLET_E2E_CREDENTIAL_NAMES) delete sanitized[name];
+  return sanitized as NodeJS.ProcessEnv;
 }

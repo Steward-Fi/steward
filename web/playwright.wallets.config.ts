@@ -34,7 +34,7 @@ export default defineConfig({
   expect: { timeout: 15_000 },
 
   globalSetup: require.resolve("./e2e/wallets/wallet-global-setup.ts"),
-  globalTeardown: require.resolve("./e2e/global-teardown.ts"),
+  globalTeardown: require.resolve("./e2e/wallets/wallet-global-teardown.ts"),
 
   projects: [{ name: "wallets" }],
 });
