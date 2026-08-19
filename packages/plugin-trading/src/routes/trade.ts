@@ -381,14 +381,9 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
     side: "buy" | "sell",
     limitPx: string | number | undefined,
   ): Promise<string | number> {
-    // Respect a caller-supplied limit price for BOTH sides. Previously the sell
-    // branch ignored `limitPx` entirely and always returned a MARKETABLE price,
-    // so a resting limit-sell ABOVE market (e.g. a breakeven take-profit) executed
-    // immediately at the bid instead of resting. A provided limitPx is the caller's
-    // intent for the ORDER price — use it; only synthesize a marketable price when
-    // none is given. NOTE: this is the ORDER price; policy NOTIONAL sizing must be
-    // computed separately via resolveSizingPx (a low sell limit must NOT understate
-    // the notional for cap enforcement).
+    // A supplied limit price is the caller's order-price intent for either side;
+    // synthesize a marketable price only when it is omitted. Policy notional uses
+    // resolveSizingPx separately so a low sell limit cannot understate exposure.
     if (limitPx !== undefined && limitPx !== null && limitPx !== "") return limitPx;
     if (side !== "sell") return getMarketableLimitPx(asset, true);
     try {
@@ -1091,10 +1086,9 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
       reduceOnly: body.reduceOnly,
       ...(body.orderType ? { orderType: body.orderType } : {}),
     };
-    // SEC-184: enforce the adapter contract check (the result was previously
-    // discarded) BEFORE reserving spend or signing. Every field is already
-    // validated upstream, so a failure here is an internal inconsistency —
-    // fail closed.
+    // Revalidate the complete adapter contract before reserving spend or signing.
+    // Any mismatch between the route inputs and adapter schema is an internal
+    // inconsistency and therefore fails closed.
     const parsedOrder = hyperliquidOrderSchema.safeParse(order);
     if (!parsedOrder.success) {
       return rejectPolicy(
@@ -1357,11 +1351,9 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
   // prediction-market policy gate (checkActiveOrder), spend reserve→release-on-
   // failure, the vault→ethers-signer bridge, the venue adapter call, audit events.
   //
-  // Phase C creds-provisioning is NOT wired yet: the L2 CLOB apiCredentials +
-  // funder Safe are resolved from the agent's polymarket venue wallet. Until
-  // provisioning writes them, resolvePolymarketAccount returns null and the route
-  // FAILS CLOSED with a typed 409 ("polymarket creds not provisioned"). We never
-  // invent credentials.
+  // L2 CLOB credentials and the funder Safe must resolve from the agent's
+  // Polymarket venue wallet. Missing provisioning fails closed with a typed 409;
+  // the route never invents or falls back to credentials.
   // ===========================================================================
 
   // Idempotency for the Polymarket body shape. Mirrors getIdempotency() but keyed
@@ -1848,16 +1840,14 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
     // all in one pass. checkActiveOrder loads the session and runs checkOrderAllowed
     // against the allowlist + per-order/daily caps.
     //
-    // SECURITY: we deliberately do NOT forward the caller-supplied `conditionId` to
+    // We deliberately do not forward the caller-supplied `conditionId` to
     // the allowlist check. The order is submitted for `tokenId` only, so trusting an
     // UNVERIFIED conditionId would let an agent pair any non-allowlisted token with
     // an allowlisted `pm:cond:<id>` and bypass the market allowlist. Until the
     // token->condition mapping is resolved from VERIFIED Polymarket metadata, the
     // order route honors ONLY exact `pm:<tokenId>` entries. A `pm:cond:<id>`
-    // session grant therefore requires the per-token entry to also be present to
-    // trade (or a future Phase C resolver that derives + verifies the condition).
-    // TODO(phase-c): resolve the token's true conditionId from venue metadata and
-    // pass it here so market-wide grants can be honored safely.
+    // session grant therefore does not authorize this route by itself; an exact
+    // per-token grant is required.
     const { session, check } = await getSessionManager().checkActiveOrder({
       tenantId,
       id: body.sessionId,
