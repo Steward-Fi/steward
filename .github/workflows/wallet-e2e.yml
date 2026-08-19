@@ -8,11 +8,7 @@ on:
         required: true
         type: string
 
-permissions:
-  checks: read
-  contents: read
-  pull-requests: read
-  statuses: read
+permissions: {}
 
 concurrency:
   group: wallet-e2e-manual
@@ -22,6 +18,11 @@ jobs:
   authorize-target:
     name: Validate exact target
     runs-on: ubuntu-latest
+    permissions:
+      checks: read
+      contents: read
+      pull-requests: read
+      statuses: read
     outputs:
       target_sha: ${{ steps.target.outputs.target_sha }}
     steps:
@@ -136,6 +137,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 35
     environment: wallet-e2e
+    permissions:
+      contents: read
 
     steps:
       - name: Checkout
