@@ -136,6 +136,10 @@ async function seed() {
     throw new Error("STEWARD_MASTER_PASSWORD is required");
   }
 
+  // Persist the one-time credential before touching the database. If the
+  // destination is unsafe or unwritable, fail without rotating the tenant's
+  // stored hash to a key the operator can no longer recover.
+  const demoCredentialsPath = writeDemoCredentials(TENANT_ID, DEMO_API_KEY.key);
   const db = getDb();
   const keyStore = new KeyStore(process.env.STEWARD_MASTER_PASSWORD);
   const createdAt = hoursAgo(168); // 7 days ago — agent creation time
@@ -162,8 +166,6 @@ async function seed() {
         updatedAt,
       },
     });
-  const demoCredentialsPath = writeDemoCredentials(TENANT_ID, DEMO_API_KEY.key);
-
   /* ════════════════════════════════════════════════════════════════════════ */
   /*  AGENT DEFINITIONS                                                      */
   /* ════════════════════════════════════════════════════════════════════════ */
