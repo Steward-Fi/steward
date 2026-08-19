@@ -199,6 +199,55 @@ AS $$
   LIMIT 1
 $$;
 
+CREATE OR REPLACE FUNCTION "steward_bootstrap"."auth_tenant_subject"(
+  p_tenant_id text,
+  p_user_id uuid DEFAULT NULL
+)
+RETURNS TABLE (tenant_id varchar(64), membership_role varchar(32), join_mode varchar(16))
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $$
+  SELECT t.id, ut.role, tc.join_mode
+  FROM public.tenants t
+  LEFT JOIN public.user_tenants ut
+    ON p_user_id IS NOT NULL AND ut.tenant_id = t.id AND ut.user_id = p_user_id
+  LEFT JOIN public.tenant_configs tc ON tc.tenant_id = t.id
+  WHERE t.id = p_tenant_id
+  LIMIT 1
+$$;
+
+CREATE OR REPLACE FUNCTION "steward_bootstrap"."auth_sso_domain_subject"(
+  p_tenant_id text,
+  p_domain text
+)
+RETURNS TABLE (tenant_id varchar(64), sso_required boolean)
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $$
+  SELECT d.tenant_id, d.sso_required
+  FROM public.tenant_sso_domains d
+  WHERE d.tenant_id = p_tenant_id AND d.domain = p_domain AND d.status = 'verified'
+  LIMIT 1
+$$;
+
+CREATE OR REPLACE FUNCTION "steward_bootstrap"."auth_sso_discovery_subject"(p_domain text)
+RETURNS TABLE (tenant_id varchar(64), domain varchar(255), sso_required boolean)
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $$
+  SELECT d.tenant_id, d.domain, d.sso_required
+  FROM public.tenant_sso_domains d
+  WHERE d.domain = p_domain AND d.status = 'verified'
+  ORDER BY d.tenant_id
+  LIMIT 2
+$$;
+
 REVOKE ALL ON ALL FUNCTIONS IN SCHEMA "steward_bootstrap" FROM PUBLIC;
 
 DO $$

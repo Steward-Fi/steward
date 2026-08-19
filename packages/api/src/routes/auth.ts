@@ -123,7 +123,6 @@ import {
   tenantSamlAssertionReplays,
   tenantSamlAuthnRequests,
   tenantSamlSsoConfigs,
-  tenantSsoDomains,
   tenants,
   users,
   userTenants,
@@ -722,18 +721,11 @@ async function requireTenantLoginMethodAllowed(
 async function isSsoRequiredForEmailDomain(tenantId: string, email: string): Promise<boolean> {
   const domain = normalizeEmailDomain(email);
   if (!domain) return false;
-  const [row] = await getDb()
-    .select({ ssoRequired: tenantSsoDomains.ssoRequired })
-    .from(tenantSsoDomains)
-    .where(
-      and(
-        eq(tenantSsoDomains.tenantId, tenantId),
-        eq(tenantSsoDomains.domain, domain),
-        eq(tenantSsoDomains.status, "verified"),
-      ),
-    )
-    .limit(1);
-  return row?.ssoRequired === true;
+  const result = await getDb().execute(
+    sql`SELECT * FROM steward_bootstrap.auth_sso_domain_subject(${tenantId}, ${domain})`,
+  );
+  const [row] = bootstrapRows<{ sso_required: boolean }>(result);
+  return row?.sso_required === true;
 }
 
 async function requireNonSsoEmailLoginAllowed(
@@ -755,26 +747,37 @@ async function isVerifiedSsoEmailDomainForTenant(
 ): Promise<boolean> {
   const domain = normalizeEmailDomain(email);
   if (!domain) return false;
-  const [row] = await getDb()
-    .select({ tenantId: tenantSsoDomains.tenantId })
-    .from(tenantSsoDomains)
-    .where(
-      and(
-        eq(tenantSsoDomains.tenantId, tenantId),
-        eq(tenantSsoDomains.domain, domain),
-        eq(tenantSsoDomains.status, "verified"),
-      ),
-    )
-    .limit(1);
+  const result = await getDb().execute(
+    sql`SELECT * FROM steward_bootstrap.auth_sso_domain_subject(${tenantId}, ${domain})`,
+  );
+  const [row] = bootstrapRows<{ tenant_id: string }>(result);
   return Boolean(row);
 }
 
+function bootstrapRows<T>(result: unknown): T[] {
+  return (
+    Array.isArray(result) ? result : ((result as { rows?: unknown[] } | null)?.rows ?? [])
+  ) as T[];
+}
+
+type AuthTenantSubject = {
+  tenant_id: string;
+  membership_role: string | null;
+  join_mode: string | null;
+};
+
+async function authTenantSubject(
+  tenantId: string,
+  userId?: string | null,
+): Promise<AuthTenantSubject | null> {
+  const result = await getDb().execute(
+    sql`SELECT * FROM steward_bootstrap.auth_tenant_subject(${tenantId}, ${userId ?? null}::uuid)`,
+  );
+  return bootstrapRows<AuthTenantSubject>(result)[0] ?? null;
+}
+
 async function tenantExists(tenantId: string): Promise<boolean> {
-  const [row] = await getDb()
-    .select({ id: tenants.id })
-    .from(tenants)
-    .where(eq(tenants.id, tenantId));
-  return Boolean(row);
+  return Boolean(await authTenantSubject(tenantId));
 }
 
 async function validateExplicitAuthTenantHint(
@@ -2158,34 +2161,18 @@ async function resolveAndValidateTenant(
     return { ok: false, status: 403, error: "Personal tenants cannot be self-joined" };
   }
 
-  const db = getDb();
-
-  // 1. Verify the tenant exists
-  const [tenant] = await db
-    .select({ id: tenants.id })
-    .from(tenants)
-    .where(eq(tenants.id, requested));
-  if (!tenant) {
+  const subject = await authTenantSubject(requested, userId);
+  if (!subject) {
     return { ok: false, status: 404, error: `Tenant '${requested}' not found` };
   }
 
   // 2. Check if user already has a link (always allowed regardless of join_mode)
-  const [existingLink] = await db
-    .select({ id: userTenants.id })
-    .from(userTenants)
-    .where(and(eq(userTenants.userId, userId), eq(userTenants.tenantId, requested)));
-
-  if (existingLink) {
+  if (subject.membership_role) {
     return { ok: true, tenantId: requested, isPersonal: false };
   }
 
   // 3. No existing link; check join_mode from tenant_configs
-  const [config] = await db
-    .select({ joinMode: tenantConfigs.joinMode })
-    .from(tenantConfigs)
-    .where(eq(tenantConfigs.tenantId, requested));
-
-  const joinMode = config?.joinMode;
+  const joinMode = subject.join_mode;
 
   if (joinMode === "open") {
     return { ok: true, tenantId: requested, isPersonal: false };
@@ -2249,28 +2236,20 @@ async function resolveEmailTenantBeforeMutation(
     return { ok: false, status: 403, error: "Personal tenants cannot be self-joined" };
   }
 
-  const db = getDb();
-  const [tenant] = await db
-    .select({ id: tenants.id })
-    .from(tenants)
-    .where(eq(tenants.id, requestedTenantId));
-  if (!tenant) {
+  const subject = await authTenantSubject(requestedTenantId);
+  if (!subject) {
     return { ok: false, status: 404, error: `Tenant '${requestedTenantId}' not found` };
   }
-  const [config] = await db
-    .select({ joinMode: tenantConfigs.joinMode })
-    .from(tenantConfigs)
-    .where(eq(tenantConfigs.tenantId, requestedTenantId));
-  if (config?.joinMode === "open") {
+  if (subject.join_mode === "open") {
     return { ok: true, tenantId: requestedTenantId, isPersonal: false };
   }
   return {
     ok: false,
     status: 403,
     error:
-      config?.joinMode === "closed"
+      subject.join_mode === "closed"
         ? `Tenant '${requestedTenantId}' is not accepting new members`
-        : config?.joinMode === "invite"
+        : subject.join_mode === "invite"
           ? `Tenant '${requestedTenantId}' requires an invitation to join`
           : `Tenant '${requestedTenantId}' is not configured for self-join`,
   };
@@ -3539,26 +3518,17 @@ async function validateOidcJitTenant(tenantId: string): Promise<
   if (isReservedTenantId(tenantId)) {
     return { ok: false, status: 403, error: "Personal tenants cannot be self-joined" };
   }
-  const db = getDb();
-  const [tenant] = await db
-    .select({ id: tenants.id })
-    .from(tenants)
-    .where(eq(tenants.id, tenantId));
-  if (!tenant) return { ok: false, status: 404, error: `Tenant '${tenantId}' not found` };
-
-  const [config] = await db
-    .select({ joinMode: tenantConfigs.joinMode })
-    .from(tenantConfigs)
-    .where(eq(tenantConfigs.tenantId, tenantId));
-  if (config?.joinMode === "open") return { ok: true };
-  if (!config?.joinMode) {
+  const subject = await authTenantSubject(tenantId);
+  if (!subject) return { ok: false, status: 404, error: `Tenant '${tenantId}' not found` };
+  if (subject.join_mode === "open") return { ok: true };
+  if (!subject.join_mode) {
     return {
       ok: false,
       status: 403,
       error: `Tenant '${tenantId}' is not configured for self-join`,
     };
   }
-  if (config.joinMode === "invite") {
+  if (subject.join_mode === "invite") {
     return {
       ok: false,
       status: 403,
@@ -4077,19 +4047,23 @@ auth.post("/sso/discover", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: "Valid email is required" }, 400);
   }
 
-  const rows = await getDb()
-    .select({
-      tenantId: tenantSsoDomains.tenantId,
-      domain: tenantSsoDomains.domain,
-      ssoRequired: tenantSsoDomains.ssoRequired,
-    })
-    .from(tenantSsoDomains)
-    .where(and(eq(tenantSsoDomains.domain, domain), eq(tenantSsoDomains.status, "verified")))
-    .limit(2);
+  const result = await getDb().execute(
+    sql`SELECT * FROM steward_bootstrap.auth_sso_discovery_subject(${domain})`,
+  );
+  const rows = bootstrapRows<{
+    tenant_id: string;
+    domain: string;
+    sso_required: boolean;
+  }>(result);
 
   const data: SsoDiscoveryResult =
     rows.length === 1
-      ? { domain, tenantId: rows[0].tenantId, ssoRequired: rows[0].ssoRequired, available: true }
+      ? {
+          domain,
+          tenantId: rows[0].tenant_id,
+          ssoRequired: rows[0].sso_required,
+          available: true,
+        }
       : { domain, tenantId: null, ssoRequired: false, available: false };
   return c.json<ApiResponse<SsoDiscoveryResult>>({ ok: true, data });
 });
