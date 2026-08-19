@@ -35,6 +35,7 @@ const ORIGINAL_ENV = {
   STEWARD_EMAIL_CODE_SECRET: process.env.STEWARD_EMAIL_CODE_SECRET,
   STEWARD_ALLOW_AUTH_RATE_LIMIT_SOFT_FAIL: process.env.STEWARD_ALLOW_AUTH_RATE_LIMIT_SOFT_FAIL,
   STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS: process.env.STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS,
+  STEWARD_REQUIRE_REQUEST_EXPIRY: process.env.STEWARD_REQUIRE_REQUEST_EXPIRY,
   STEWARD_REQUEST_SIGNING_SECRET: process.env.STEWARD_REQUEST_SIGNING_SECRET,
   STEWARD_REQUEST_SIGNING_SECRETS: process.env.STEWARD_REQUEST_SIGNING_SECRETS,
   STEWARD_PGLITE_MEMORY: process.env.STEWARD_PGLITE_MEMORY,
@@ -144,6 +145,7 @@ describe("fail-closed email delivery routes (production)", () => {
 
   it("keeps production request-expiry enforcement outside the scoped fixture bypass", async () => {
     delete process.env.STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS;
+    process.env.STEWARD_REQUIRE_REQUEST_EXPIRY = "true";
     try {
       const response = await postJson(
         "/auth/email/send",
@@ -157,6 +159,7 @@ describe("fail-closed email delivery routes (production)", () => {
         error: "Request expiry header required",
       });
     } finally {
+      delete process.env.STEWARD_REQUIRE_REQUEST_EXPIRY;
       process.env.STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS = "true";
     }
   });
