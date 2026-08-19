@@ -13,6 +13,7 @@ concurrency:
 jobs:
   wallet-e2e:
     name: MetaMask SIWE + Phantom SIWS
+    if: github.ref == 'refs/heads/develop'
     runs-on: ubuntu-latest
     timeout-minutes: 35
     environment: wallet-e2e
@@ -28,6 +29,9 @@ jobs:
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
+
+      - name: Build embedded API runtime dependencies
+        run: bunx turbo run build --filter=@stwd/api...
 
       - name: Install Chromium and Linux browser dependencies
         run: bunx playwright install --with-deps chromium

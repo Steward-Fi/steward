@@ -641,6 +641,7 @@
         "@axe-core/playwright": "^4.13.0",
         "@opennextjs/cloudflare": "^1.19.11",
         "@playwright/test": "^1.60.0",
+        "@scure/bip39": "1.6.0",
         "@synthetixio/synpress": "4.1.2",
         "@synthetixio/synpress-cache": "0.0.14",
         "@types/node": "25.5.0",

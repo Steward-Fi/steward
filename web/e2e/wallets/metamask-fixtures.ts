@@ -1,10 +1,10 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { cp, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type BrowserContext, test as base, chromium, type Page } from "@playwright/test";
 import { getExtensionId, MetaMask } from "@synthetixio/synpress/playwright";
 import { prepareStewardMetaMaskExtension } from "./metamask-extension";
-import { PASSWORD, SEED_PHRASE } from "./setup/metamask/metamask.setup";
+import { METAMASK_CACHE_ID, PASSWORD } from "./setup/metamask/metamask.setup";
 
 type MetaMaskFixtures = {
   dappPage: Page;
@@ -19,93 +19,87 @@ export async function approveMetaMaskNotification(
 ): Promise<void> {
   const notificationUrl = `chrome-extension://${extensionId}/notification.html`;
   const matchesNotification = (candidate: Page) => candidate.url().startsWith(notificationUrl);
-  const existing = context.pages().find(matchesNotification);
-  const page =
-    existing ??
-    (await context.waitForEvent("page", {
-      predicate: matchesNotification,
-      timeout: 20_000,
-    }));
-  await page.waitForLoadState("domcontentloaded");
-  await page.getByRole("button", { name: buttonName }).click();
-}
-
-async function importMetaMask12(page: Page): Promise<void> {
-  await page.getByTestId("onboarding-terms-checkbox").click();
-  await page.getByTestId("onboarding-import-wallet").click();
-  await page.getByTestId("metametrics-no-thanks").click();
-  for (const [index, word] of SEED_PHRASE.split(" ").entries()) {
-    await page.getByTestId(`import-srp__srp-word-${index}`).fill(word);
-  }
-  await page.getByTestId("import-srp-confirm").click();
-  await page.getByTestId("create-password-new").fill(PASSWORD);
-  await page.getByTestId("create-password-confirm").fill(PASSWORD);
-  await page.getByTestId("create-password-terms").click();
-  await page.getByTestId("create-password-import").click();
-
-  await page.getByRole("button", { exact: true, name: "Done" }).click();
-  await page.waitForTimeout(1_500);
-}
-
-async function finishAndCloseMetaMaskOnboarding(context: BrowserContext): Promise<void> {
-  for (let round = 0; round < 8; round += 1) {
-    let acted = false;
-    for (const page of context.pages()) {
-      if (page.isClosed() || !page.url().startsWith("chrome-extension://")) continue;
-      for (const name of [/remind me later/i, /skip|got it|confirm/i, /^done$/i, /^next$/i]) {
-        const button = page.getByRole("button", { name }).first();
-        if (await button.isVisible().catch(() => false)) {
-          await button.click().catch(() => undefined);
-          acted = true;
-          break;
-        }
+  const deadline = Date.now() + 20_000;
+  while (Date.now() < deadline) {
+    for (const page of context.pages().filter(matchesNotification).reverse()) {
+      if (page.isClosed()) continue;
+      const unlockPassword = page.getByTestId("unlock-password");
+      if (await unlockPassword.isVisible().catch(() => false)) {
+        await unlockPassword.fill(PASSWORD).catch(() => undefined);
+        await page
+          .getByRole("button", { name: /^unlock$/i })
+          .click()
+          .catch(() => undefined);
+        continue;
+      }
+      const button = page.getByRole("button", { name: buttonName });
+      if (await button.isVisible().catch(() => false)) {
+        await button.click();
+        return;
       }
     }
-    if (!acted) break;
-    await new Promise((resolve) => setTimeout(resolve, 500));
+    await new Promise((resolve) => setTimeout(resolve, 250));
   }
-
-  for (const page of context.pages()) {
-    if (!page.isClosed() && page.url().startsWith("chrome-extension://")) {
-      await page.close();
-    }
-  }
+  throw new Error(`MetaMask notification action ${buttonName} did not become available`);
 }
 
 export const metamaskTest = base.extend<MetaMaskFixtures>({
   walletContext: async ({ browserName: _ }, use, testInfo) => {
     const profile = await mkdtemp(join(tmpdir(), `steward-metamask-${testInfo.workerIndex}-`));
-    const extensionPath = await prepareStewardMetaMaskExtension();
-    const context = await chromium.launchPersistentContext(profile, {
-      args: [`--disable-extensions-except=${extensionPath}`, `--load-extension=${extensionPath}`],
-      headless: false,
-    });
+    let context: BrowserContext | undefined;
     try {
+      await cp(join(process.cwd(), ".cache-synpress", METAMASK_CACHE_ID), profile, {
+        recursive: true,
+      });
+      const extensionPath = await prepareStewardMetaMaskExtension();
+      context = await chromium.launchPersistentContext(profile, {
+        args: [`--disable-extensions-except=${extensionPath}`, `--load-extension=${extensionPath}`],
+        headless: false,
+      });
       await use(context);
     } finally {
-      await context.close();
-      await rm(profile, { force: true, recursive: true });
+      try {
+        await context?.close();
+      } finally {
+        await rm(profile, { force: true, recursive: true });
+      }
     }
   },
   metamask: async ({ walletContext }, use) => {
     const extensionId = await getExtensionId(walletContext, "MetaMask");
-    const onboardingPage = walletContext.pages()[0] ?? (await walletContext.newPage());
-    await onboardingPage.goto(`chrome-extension://${extensionId}/home.html`);
-    await importMetaMask12(onboardingPage);
-    await finishAndCloseMetaMaskOnboarding(walletContext);
-
-    // Keep the driver on a fresh page after every auto-opened onboarding tab
-    // has reached a terminal state.
-    const page = await walletContext.newPage();
+    const page = walletContext.pages()[0] ?? (await walletContext.newPage());
     await page.goto(`chrome-extension://${extensionId}/home.html`);
     const metamask = new MetaMask(walletContext, page, PASSWORD, extensionId);
-    if (
-      await page
-        .getByTestId("unlock-password")
-        .isVisible()
-        .catch(() => false)
-    ) {
-      await metamask.unlock();
+    const deadline = Date.now() + 20_000;
+    while (Date.now() < deadline) {
+      if (
+        await page
+          .getByTestId("account-menu-icon")
+          .isVisible()
+          .catch(() => false)
+      )
+        break;
+      if (
+        await page
+          .getByTestId("unlock-password")
+          .isVisible()
+          .catch(() => false)
+      ) {
+        await page.getByTestId("unlock-password").fill(PASSWORD);
+        await page.getByTestId("unlock-submit").click({ force: true });
+        await page.waitForTimeout(500);
+        continue;
+      }
+      let acted = false;
+      for (const name of [/remind me later/i, /skip|got it|confirm/i, /^done$/i, /^next$/i]) {
+        const button = page.getByRole("button", { name }).first();
+        if (await button.isVisible().catch(() => false)) {
+          await button.click();
+          acted = true;
+          break;
+        }
+      }
+      await page.waitForTimeout(acted ? 500 : 250);
     }
     await page.getByTestId("account-menu-icon").waitFor();
     await page.waitForTimeout(500);

@@ -10,37 +10,31 @@
  */
 
 import { defineWalletSetup } from "@synthetixio/synpress";
-import { MetaMask } from "@synthetixio/synpress/playwright";
 
 // The collection-only command imports this module without provisioning
 // credentials. Cache and execution commands run the fail-closed preflight
 // before either value reaches a browser.
-export const SEED_PHRASE = process.env.E2E_METAMASK_SEED_PHRASE ?? "";
-export const PASSWORD = process.env.E2E_METAMASK_PASSWORD ?? "";
-export const METAMASK_CACHE_ID = "steward-metamask-siwe-v6";
+export const SEED_PHRASE = process.env.E2E_METAMASK_SEED_PHRASE?.trim() ?? "";
+export const PASSWORD = process.env.E2E_METAMASK_PASSWORD?.trim() ?? "";
+export const METAMASK_CACHE_ID = "steward-metamask-siwe-v8";
 
-const metamaskSetup = defineWalletSetup(PASSWORD, async (context, walletPage) => {
-  const metamask = new MetaMask(context, walletPage, PASSWORD);
-  await metamask.importWallet(SEED_PHRASE);
-  // MetaMask 13 leaves setup on a final "Your wallet is ready" gate. The
-  // cached profile must advance into the wallet itself or later provider
-  // requests have no active keyring despite the vault having been created.
-  const openWallet = walletPage.getByRole("button", { name: /open wallet/i });
-  if (await openWallet.isVisible()) {
-    await openWallet.click();
-    await walletPage.waitForTimeout(1_000).catch(() => undefined);
-    const activeWalletPage =
-      context
-        .pages()
-        .find((page) => !page.isClosed() && page.url().startsWith("chrome-extension://")) ??
-      walletPage;
-    if (!activeWalletPage.isClosed()) {
-      const extensionUrl = new URL(activeWalletPage.url());
-      const extensionOrigin = `${extensionUrl.protocol}//${extensionUrl.host}`;
-      await activeWalletPage.goto(`${extensionOrigin}/home.html`);
-      await activeWalletPage.getByTestId("account-menu-icon").waitFor();
-    }
+const metamaskSetup = defineWalletSetup(PASSWORD, async (_context, walletPage) => {
+  // Synpress 4.1.2's importer targets newer MetaMask onboarding and attempts
+  // the import button before accepting v12's terms. Drive the pinned v12.20.1
+  // contract explicitly so cache construction cannot succeed only from stale
+  // local state.
+  await walletPage.getByTestId("onboarding-terms-checkbox").click();
+  await walletPage.getByTestId("onboarding-import-wallet").click();
+  await walletPage.getByTestId("metametrics-no-thanks").click();
+  for (const [index, word] of SEED_PHRASE.split(" ").entries()) {
+    await walletPage.getByTestId(`import-srp__srp-word-${index}`).fill(word);
   }
+  await walletPage.getByTestId("import-srp-confirm").click();
+  await walletPage.getByTestId("create-password-new").fill(PASSWORD);
+  await walletPage.getByTestId("create-password-confirm").fill(PASSWORD);
+  await walletPage.getByTestId("create-password-terms").click();
+  await walletPage.getByTestId("create-password-import").click();
+  await walletPage.getByRole("button", { exact: true, name: "Done" }).click();
 });
 
 // Synpress hashes Function.toString(), which differs between Bun's and

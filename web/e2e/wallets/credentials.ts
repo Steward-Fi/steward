@@ -1,3 +1,6 @@
+import { validateMnemonic } from "@scure/bip39";
+import { wordlist } from "@scure/bip39/wordlists/english";
+
 export const WALLET_E2E_CREDENTIAL_NAMES = [
   "E2E_METAMASK_SEED_PHRASE",
   "E2E_METAMASK_PASSWORD",
@@ -25,6 +28,9 @@ function assertSeedPhrase(name: CredentialName, value: string): void {
     throw new Error(
       `${name} must contain a complete BIP-39 word count (12, 15, 18, 21, or 24 words)`,
     );
+  }
+  if (!validateMnemonic(value, wordlist)) {
+    throw new Error(`${name} must contain a valid BIP-39 mnemonic`);
   }
 }
 

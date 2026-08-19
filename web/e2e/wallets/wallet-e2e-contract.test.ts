@@ -52,7 +52,8 @@ describe("wallet extension E2E contract", () => {
   });
 
   test("accepts complete dedicated test-wallet credentials", () => {
-    const seed = Array.from({ length: 12 }, (_, index) => `word${index}`).join(" ");
+    const seed =
+      "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
     expect(
       readWalletE2ECredentials({
         E2E_METAMASK_SEED_PHRASE: seed,
@@ -66,6 +67,18 @@ describe("wallet extension E2E contract", () => {
       phantomSeedPhrase: seed,
       phantomPassword: "phantom-test-password",
     });
+  });
+
+  test("rejects a mnemonic with the right word count but an invalid checksum", () => {
+    const invalidSeed = Array.from({ length: 12 }, () => "abandon").join(" ");
+    expect(() =>
+      readWalletE2ECredentials({
+        E2E_METAMASK_SEED_PHRASE: invalidSeed,
+        E2E_METAMASK_PASSWORD: "metamask-test-password",
+        E2E_PHANTOM_SEED_PHRASE: invalidSeed,
+        E2E_PHANTOM_PASSWORD: "phantom-test-password",
+      }),
+    ).toThrow("E2E_METAMASK_SEED_PHRASE must contain a valid BIP-39 mnemonic");
   });
 
   test("keeps wallet credentials out of every harness child process", () => {
@@ -91,7 +104,8 @@ describe("wallet extension E2E contract", () => {
 
   test("scopes protected wallet credentials to the three steps that consume them", async () => {
     const workflowPath = join(import.meta.dir, "../../../.github/workflows/wallet-e2e.yml");
-    const workflow = Bun.YAML.parse(await readFile(workflowPath, "utf8")) as {
+    const workflowSource = await readFile(workflowPath, "utf8");
+    const workflow = Bun.YAML.parse(workflowSource) as {
       on?: Record<string, unknown>;
       jobs?: Record<
         string,
@@ -106,6 +120,8 @@ describe("wallet extension E2E contract", () => {
     expect(Object.keys(workflow.on ?? {})).toEqual(["workflow_dispatch"]);
     expect(job?.environment).toBe("wallet-e2e");
     expect(job?.env).toBeUndefined();
+    expect(workflowSource).toContain("if: github.ref == 'refs/heads/develop'");
+    expect(workflowSource).toContain("bunx turbo run build --filter=@stwd/api...");
 
     const secretSteps = (job?.steps ?? [])
       .filter((step) => step.env !== undefined)
@@ -187,5 +203,5 @@ describe("wallet extension E2E contract", () => {
     const defaultOutput = defaultList.stdout.toString();
     expect(defaultOutput).not.toContain("metamask-siwe.spec.ts");
     expect(defaultOutput).not.toContain("phantom-siws.spec.ts");
-  });
+  }, 20_000);
 });

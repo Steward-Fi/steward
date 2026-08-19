@@ -12,9 +12,9 @@
 import { defineWalletSetup } from "@synthetixio/synpress";
 import { Phantom } from "@synthetixio/synpress/playwright";
 
-export const PHANTOM_SEED = process.env.E2E_PHANTOM_SEED_PHRASE ?? "";
-export const PHANTOM_PASSWORD = process.env.E2E_PHANTOM_PASSWORD ?? "";
-export const PHANTOM_CACHE_ID = "steward-phantom-siws-v1";
+export const PHANTOM_SEED = process.env.E2E_PHANTOM_SEED_PHRASE?.trim() ?? "";
+export const PHANTOM_PASSWORD = process.env.E2E_PHANTOM_PASSWORD?.trim() ?? "";
+export const PHANTOM_CACHE_ID = "steward-phantom-siws-v5";
 
 const phantomSetup = defineWalletSetup(PHANTOM_PASSWORD, async (context, walletPage) => {
   const phantom = new Phantom(context, walletPage, PHANTOM_PASSWORD);
@@ -24,8 +24,10 @@ const phantomSetup = defineWalletSetup(PHANTOM_PASSWORD, async (context, walletP
     if (!String(error).includes("All Done success screen should be visible")) {
       throw error;
     }
-    await walletPage.getByText("You're good to go!", { exact: true }).waitFor();
-    await walletPage.getByRole("button", { name: "Get Started", exact: true }).click();
+    // The current Chrome Web Store build inserts a username step
+    // after password creation instead of Synpress's legacy success heading.
+    await walletPage.getByRole("button", { name: /^suggested:/i }).click();
+    await walletPage.getByTestId("onboarding-create-username-continue").click();
   }
 });
 

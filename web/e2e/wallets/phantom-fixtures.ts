@@ -16,19 +16,22 @@ type PhantomFixtures = {
 export const phantomTest = base.extend<PhantomFixtures>({
   walletContext: async ({ browserName: _ }, use, testInfo) => {
     const profile = await mkdtemp(join(tmpdir(), `steward-phantom-${testInfo.workerIndex}-`));
-    const sourceProfile = join(process.cwd(), ".cache-synpress", PHANTOM_CACHE_ID);
-    await cp(sourceProfile, profile, { recursive: true });
-
-    const extensionPath = phantomExtensionPath();
-    const context = await chromium.launchPersistentContext(profile, {
-      args: [`--disable-extensions-except=${extensionPath}`, `--load-extension=${extensionPath}`],
-      headless: false,
-    });
+    let context: BrowserContext | undefined;
     try {
+      const sourceProfile = join(process.cwd(), ".cache-synpress", PHANTOM_CACHE_ID);
+      await cp(sourceProfile, profile, { recursive: true });
+      const extensionPath = phantomExtensionPath();
+      context = await chromium.launchPersistentContext(profile, {
+        args: [`--disable-extensions-except=${extensionPath}`, `--load-extension=${extensionPath}`],
+        headless: false,
+      });
       await use(context);
     } finally {
-      await context.close();
-      await rm(profile, { force: true, recursive: true });
+      try {
+        await context?.close();
+      } finally {
+        await rm(profile, { force: true, recursive: true });
+      }
     }
   },
   extensionId: async ({ walletContext: _ }, use) => {
