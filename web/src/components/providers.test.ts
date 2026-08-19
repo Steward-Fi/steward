@@ -5,8 +5,17 @@ import { join } from "node:path";
 
 const providersSource = readFileSync(join(import.meta.dir, "providers.tsx"), "utf8");
 const apiSource = readFileSync(join(import.meta.dir, "..", "lib", "api.ts"), "utf8");
+const webRoot = join(import.meta.dir, "..", "..");
+const webManifest = JSON.parse(readFileSync(join(webRoot, "package.json"), "utf8")) as {
+  dependencies?: Record<string, string>;
+};
 
 describe("AuthTokenSync security invariants", () => {
+  test("keeps the legacy URL parser dependency available to the production wallet bundle", () => {
+    expect(webManifest.dependencies?.punycode).toBe("^2.3.1");
+    expect(Bun.resolveSync("punycode/", webRoot)).toContain("punycode");
+  });
+
   test("syncs the legacy API client from the current session token", () => {
     expect(providersSource).toContain("const sessionToken = auth.session?.token ?? null");
     expect(providersSource).toContain("const token = sessionToken ?? auth.getToken()");
