@@ -34,6 +34,12 @@ function assertTenantId(tenantId: string): void {
   }
 }
 
+function assertApiKey(apiKey: string): void {
+  if (!/^stw_[0-9a-f]{32}$/.test(apiKey)) {
+    throw new Error("Demo credential API key is invalid");
+  }
+}
+
 function credentialParent(path: string): { device: number; inode: number } {
   const parentPath = dirname(path);
   mkdirSync(parentPath, { recursive: true, mode: 0o700 });
@@ -109,6 +115,7 @@ export function stageDemoCredentials(
   outputPath = process.env.STEWARD_DEMO_CREDENTIALS_FILE ?? ".steward/demo-credentials.env",
 ): PendingDemoCredentials {
   assertTenantId(tenantId);
+  assertApiKey(apiKey);
   const finalPath = resolve(outputPath);
   const parent = credentialParent(finalPath);
   for (let attempt = 0; attempt < 4; attempt++) {
@@ -133,38 +140,76 @@ export function stageDemoCredentials(
 }
 
 /** Atomically make a staged credential canonical after the DB commit. */
-export function promoteDemoCredentials(pending: PendingDemoCredentials): string {
+export function promoteDemoCredentials(
+  pending: PendingDemoCredentials,
+  afterPendingOpen?: () => void,
+): string {
   const parent = credentialParent(pending.finalPath);
   if (parent.device !== pending.parentDevice || parent.inode !== pending.parentInode) {
     throw new Error(`Credential directory changed; recover ${pending.pendingPath}`);
   }
-  const staged = lstatSync(pending.pendingPath);
-  if (!staged.isFile() || staged.isSymbolicLink() || staged.nlink !== 1) {
-    throw new Error(`Pending credential is unsafe; recover ${pending.pendingPath}`);
-  }
-  if (typeof process.geteuid === "function" && staged.uid !== process.geteuid()) {
-    throw new Error(`Pending credential owner changed; recover ${pending.pendingPath}`);
-  }
-  let promotionPath: string | undefined;
-  for (let attempt = 0; attempt < 4; attempt++) {
-    const candidate = `${pending.finalPath}.promote-${randomBytes(12).toString("hex")}`;
-    try {
-      linkSync(pending.pendingPath, candidate);
-      promotionPath = candidate;
-      break;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST" || attempt === 3) throw error;
+  const pendingFd = openSync(
+    pending.pendingPath,
+    fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK,
+  );
+  try {
+    const staged = fstatSync(pendingFd);
+    if (!staged.isFile() || staged.nlink !== 1 || (staged.mode & 0o777) !== 0o600) {
+      throw new Error(`Pending credential is unsafe; recover ${pending.pendingPath}`);
     }
+    if (typeof process.geteuid === "function" && staged.uid !== process.geteuid()) {
+      throw new Error(`Pending credential owner changed; recover ${pending.pendingPath}`);
+    }
+
+    afterPendingOpen?.();
+
+    let promotionPath: string | undefined;
+    for (let attempt = 0; attempt < 4; attempt++) {
+      const candidate = `${pending.finalPath}.promote-${randomBytes(12).toString("hex")}`;
+      try {
+        linkSync(pending.pendingPath, candidate);
+        promotionPath = candidate;
+        break;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST" || attempt === 3) throw error;
+      }
+    }
+    if (!promotionPath) {
+      throw new Error(`Could not allocate promotion link; recover ${pending.pendingPath}`);
+    }
+
+    const linkedPath = lstatSync(promotionPath);
+    const promotionFd = openSync(
+      promotionPath,
+      fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK,
+    );
+    try {
+      const linkedFd = fstatSync(promotionFd);
+      if (
+        !linkedPath.isFile() ||
+        !linkedFd.isFile() ||
+        linkedPath.dev !== staged.dev ||
+        linkedPath.ino !== staged.ino ||
+        linkedFd.dev !== staged.dev ||
+        linkedFd.ino !== staged.ino
+      ) {
+        throw new Error(
+          `Pending credential changed during promotion; recover ${pending.pendingPath}`,
+        );
+      }
+    } finally {
+      closeSync(promotionFd);
+    }
+
+    renameSync(promotionPath, pending.finalPath);
+    syncDirectory(dirname(pending.finalPath), parent);
+    // The canonical name is durable now. Removing the recovery name is cleanup:
+    // if the process crashes first, both names point to the same valid key.
+    unlinkSync(pending.pendingPath);
+    return pending.finalPath;
+  } finally {
+    closeSync(pendingFd);
   }
-  if (!promotionPath) {
-    throw new Error(`Could not allocate promotion link; recover ${pending.pendingPath}`);
-  }
-  renameSync(promotionPath, pending.finalPath);
-  syncDirectory(dirname(pending.finalPath), parent);
-  // The canonical name is durable now. Removing the recovery name is cleanup:
-  // if the process crashes first, both names point to the same valid key.
-  unlinkSync(pending.pendingPath);
-  return pending.finalPath;
 }
 
 /** Preserve a recoverable pending key across ambiguous DB or promotion failures. */

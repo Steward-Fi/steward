@@ -5,8 +5,10 @@ import {
   readdirSync,
   readFileSync,
   realpathSync,
+  renameSync,
   rmSync,
   symlinkSync,
+  writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -47,6 +49,23 @@ describe("demo API key", () => {
       expect(readFileSync(pending.pendingPath, "utf8")).toBe(
         `STEWARD_TENANT_ID=waifu.fun\nSTEWARD_API_KEY=${nextKey}\n`,
       );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("rejects dotenv injection through the exported staging API", () => {
+    const root = tempRoot("steward-demo-validation-");
+    try {
+      const path = join(root, "demo.env");
+      const key = generateDemoApiKey().key;
+      expect(() => stageDemoCredentials("waifu.fun\nOTHER=x", key, path)).toThrow(
+        "tenant id is invalid",
+      );
+      expect(() => stageDemoCredentials("waifu.fun", `${key}\nOTHER=x`, path)).toThrow(
+        "API key is invalid",
+      );
+      expect(readdirSync(root)).toEqual([]);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -155,6 +174,33 @@ describe("demo API key", () => {
       promoteDemoCredentials(pending);
       expect(lstatSync(linkedFile).isSymbolicLink()).toBe(false);
       expect(readFileSync(canonical, "utf8")).not.toBe(readFileSync(linkedFile, "utf8"));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("never promotes a pending pathname swapped after inode validation", () => {
+    const root = tempRoot("steward-demo-race-");
+    try {
+      const path = join(root, "demo.env");
+      const oldKey = generateDemoApiKey().key;
+      promoteDemoCredentials(stageDemoCredentials("waifu.fun", oldKey, path));
+      const nextKey = generateDemoApiKey().key;
+      const pending = stageDemoCredentials("waifu.fun", nextKey, path);
+      const originalPending = `${pending.pendingPath}.original`;
+      expect(() =>
+        promoteDemoCredentials(pending, () => {
+          renameSync(pending.pendingPath, originalPending);
+          writeFileSync(
+            pending.pendingPath,
+            "STEWARD_TENANT_ID=attacker\nSTEWARD_API_KEY=stw_00000000000000000000000000000000\n",
+            { mode: 0o600 },
+          );
+        }),
+      ).toThrow("changed during promotion");
+      expect(readFileSync(path, "utf8")).toContain(`STEWARD_API_KEY=${oldKey}`);
+      expect(readFileSync(path, "utf8")).not.toContain("stw_00000000000000000000000000000000");
+      expect(readFileSync(originalPending, "utf8")).toContain(`STEWARD_API_KEY=${nextKey}`);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
