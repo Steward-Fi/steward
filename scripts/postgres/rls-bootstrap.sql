@@ -56,6 +56,7 @@ SELECT format(
   :'steward_bootstrap_role'
 ) \gexec
 SELECT format('GRANT INSERT ON public.tenants TO %I', :'steward_bootstrap_role') \gexec
+SELECT format('GRANT INSERT, UPDATE, DELETE ON public.refresh_tokens TO %I', :'steward_bootstrap_role') \gexec
 SELECT format('ALTER SCHEMA steward_rls OWNER TO %I', :'steward_migration_role') \gexec
 SELECT format('ALTER FUNCTION steward_rls.tenant_id() OWNER TO %I', :'steward_migration_role') \gexec
 SELECT format('ALTER FUNCTION steward_rls.user_id() OWNER TO %I', :'steward_migration_role') \gexec
@@ -73,6 +74,9 @@ SELECT format('ALTER FUNCTION steward_bootstrap.auth_refresh_subject(text) OWNER
 SELECT format('ALTER FUNCTION steward_bootstrap.auth_tenant_subject(text,uuid) OWNER TO %I', :'steward_bootstrap_role') \gexec
 SELECT format('ALTER FUNCTION steward_bootstrap.auth_sso_domain_subject(text,text) OWNER TO %I', :'steward_bootstrap_role') \gexec
 SELECT format('ALTER FUNCTION steward_bootstrap.auth_sso_discovery_subject(text) OWNER TO %I', :'steward_bootstrap_role') \gexec
+SELECT format('ALTER FUNCTION steward_bootstrap.auth_tenant_config_subject(text) OWNER TO %I', :'steward_bootstrap_role') \gexec
+SELECT format('ALTER FUNCTION steward_bootstrap.auth_app_clients_subject(text) OWNER TO %I', :'steward_bootstrap_role') \gexec
+SELECT format('ALTER FUNCTION steward_bootstrap.auth_rotate_refresh_token(text,text,text,text,timestamptz) OWNER TO %I', :'steward_bootstrap_role') \gexec
 
 SELECT format('ALTER TABLE %I.%I OWNER TO %I', n.nspname, c.relname, :'steward_migration_role')
 FROM pg_class c

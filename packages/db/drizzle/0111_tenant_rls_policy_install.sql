@@ -248,6 +248,87 @@ AS $$
   LIMIT 2
 $$;
 
+CREATE OR REPLACE FUNCTION "steward_bootstrap"."auth_tenant_config_subject"(p_tenant_id text)
+RETURNS TABLE (
+  auth_abuse_config jsonb, allowed_origins text[], email_config jsonb,
+  oidc_providers jsonb, test_account jsonb, allowed_redirect_urls text[]
+)
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $$
+  SELECT
+    c.auth_abuse_config, c.allowed_origins, c.email_config,
+    c.oidc_providers, c.test_account, c.allowed_redirect_urls
+  FROM public.tenant_configs c
+  WHERE c.tenant_id = p_tenant_id
+  LIMIT 1
+$$;
+
+CREATE OR REPLACE FUNCTION "steward_bootstrap"."auth_app_clients_subject"(p_tenant_id text)
+RETURNS TABLE (
+  id varchar(64), allowed_redirect_urls text[], login_methods jsonb,
+  allowed_bundle_ids text[], allowed_package_names text[]
+)
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $$
+  SELECT
+    c.id, c.allowed_redirect_urls, c.login_methods,
+    c.allowed_bundle_ids, c.allowed_package_names
+  FROM public.tenant_app_clients c
+  WHERE c.tenant_id = p_tenant_id AND c.enabled = true
+  ORDER BY c.id
+$$;
+
+CREATE OR REPLACE FUNCTION "steward_bootstrap"."auth_rotate_refresh_token"(
+  p_source_token_hash text,
+  p_target_tenant_id text,
+  p_successor_id text,
+  p_successor_token_hash text,
+  p_successor_expires_at timestamptz
+)
+RETURNS TABLE (
+  id text, user_id uuid, tenant_id varchar(64), token_hash text,
+  expires_at timestamptz, created_at timestamptz
+)
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $$
+DECLARE
+  source public.refresh_tokens%ROWTYPE;
+BEGIN
+  SELECT r.* INTO source
+  FROM public.refresh_tokens r
+  WHERE r.token_hash = p_source_token_hash AND r.expires_at >= now()
+  FOR UPDATE;
+  IF NOT FOUND THEN RETURN; END IF;
+  IF EXISTS (SELECT 1 FROM public.users u WHERE u.id = source.user_id AND u.deactivated_at IS NOT NULL)
+    OR NOT EXISTS (
+      SELECT 1 FROM public.user_tenants ut
+      WHERE ut.user_id = source.user_id AND ut.tenant_id = p_target_tenant_id
+    )
+  THEN
+    RETURN;
+  END IF;
+
+  DELETE FROM public.refresh_tokens r WHERE r.id = source.id;
+  INSERT INTO public.refresh_tokens(id, user_id, tenant_id, token_hash, expires_at)
+  VALUES (
+    p_successor_id, source.user_id, p_target_tenant_id,
+    p_successor_token_hash, p_successor_expires_at
+  );
+  RETURN QUERY SELECT
+    source.id, source.user_id, p_target_tenant_id::varchar(64),
+    source.token_hash, source.expires_at, source.created_at;
+END
+$$;
+
 REVOKE ALL ON ALL FUNCTIONS IN SCHEMA "steward_bootstrap" FROM PUBLIC;
 
 DO $$

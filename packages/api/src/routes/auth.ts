@@ -117,8 +117,6 @@ import {
   hasTenantTransactionDatabase,
   refreshTokens,
   type TenantEmailConfig,
-  tenantAppClients,
-  tenantConfigs,
   tenantContextFromAuthenticatedPrincipal,
   tenantSamlAssertionReplays,
   tenantSamlAuthnRequests,
@@ -629,11 +627,7 @@ async function clearTotpVerifyFailures(scope: string): Promise<void> {
 }
 
 async function getTenantAuthAbuseConfig(tenantId: string) {
-  const [row] = await getDb()
-    .select({ authAbuseConfig: tenantConfigs.authAbuseConfig })
-    .from(tenantConfigs)
-    .where(eq(tenantConfigs.tenantId, tenantId));
-  return row?.authAbuseConfig ?? {};
+  return (await authTenantConfigSubject(tenantId))?.auth_abuse_config ?? {};
 }
 
 function validateUserAuthAbusePolicy(
@@ -657,17 +651,10 @@ async function getTenantAppClientLoginMethods(
 ): Promise<TenantAuthAbuseConfig["loginMethods"] | undefined> {
   const normalizedClientId = normalizePublicClientId(clientId);
   if (!normalizedClientId) return undefined;
-  const [row] = await getDb()
-    .select({ loginMethods: tenantAppClients.loginMethods })
-    .from(tenantAppClients)
-    .where(
-      and(
-        eq(tenantAppClients.tenantId, tenantId),
-        eq(tenantAppClients.id, normalizedClientId),
-        eq(tenantAppClients.enabled, true),
-      ),
-    );
-  return (row?.loginMethods as TenantAuthAbuseConfig["loginMethods"] | undefined) ?? undefined;
+  const row = (await authAppClientSubjects(tenantId)).find(
+    (client) => client.id === normalizedClientId,
+  );
+  return (row?.login_methods as TenantAuthAbuseConfig["loginMethods"] | undefined) ?? undefined;
 }
 
 type LoginMethodName =
@@ -765,6 +752,37 @@ type AuthTenantSubject = {
   membership_role: string | null;
   join_mode: string | null;
 };
+
+type AuthTenantConfigSubject = {
+  auth_abuse_config: TenantAuthAbuseConfig;
+  allowed_origins: string[];
+  email_config: TenantEmailConfig | null;
+  oidc_providers: unknown;
+  test_account: TenantTestAccountConfig;
+  allowed_redirect_urls: string[];
+};
+
+type AuthAppClientSubject = {
+  id: string;
+  allowed_redirect_urls: string[];
+  login_methods: TenantAuthAbuseConfig["loginMethods"] | null;
+  allowed_bundle_ids: string[];
+  allowed_package_names: string[];
+};
+
+async function authTenantConfigSubject(tenantId: string): Promise<AuthTenantConfigSubject | null> {
+  const result = await getDb().execute(
+    sql`SELECT * FROM steward_bootstrap.auth_tenant_config_subject(${tenantId})`,
+  );
+  return bootstrapRows<AuthTenantConfigSubject>(result)[0] ?? null;
+}
+
+async function authAppClientSubjects(tenantId: string): Promise<AuthAppClientSubject[]> {
+  const result = await getDb().execute(
+    sql`SELECT * FROM steward_bootstrap.auth_app_clients_subject(${tenantId})`,
+  );
+  return bootstrapRows<AuthAppClientSubject>(result);
+}
 
 async function authTenantSubject(
   tenantId: string,
@@ -1025,7 +1043,8 @@ async function rotateRefreshTokenInsideTenant(
       sql`select pg_advisory_xact_lock(hashtextextended(${`refresh_token_${tokenHash}`}, 0))`,
     );
     const [record] = await tx
-      .delete(refreshTokens)
+      .select()
+      .from(refreshTokens)
       .where(
         and(
           eq(refreshTokens.tokenHash, tokenHash),
@@ -1033,7 +1052,7 @@ async function rotateRefreshTokenInsideTenant(
           gte(refreshTokens.expiresAt, now),
         ),
       )
-      .returning();
+      .for("update");
 
     if (!record) {
       const used = await readMfaJson<UsedRefreshTokenRecord>(`refresh:used:${tokenHash}`);
@@ -1051,12 +1070,6 @@ async function rotateRefreshTokenInsideTenant(
       return { status: "invalid" };
     }
 
-    await writeMfaJson(
-      `refresh:used:${tokenHash}`,
-      { userId: record.userId, tenantId: record.tenantId },
-      REFRESH_TOKEN_EXPIRY_DAYS * 86400 * 1000,
-    );
-
     const [user] = await tx.select().from(users).where(eq(users.id, record.userId)).for("update");
     if (user?.deactivatedAt) {
       await tx.delete(refreshTokens).where(eq(refreshTokens.userId, record.userId));
@@ -1064,12 +1077,8 @@ async function rotateRefreshTokenInsideTenant(
     }
 
     const targetTenantId = requestedTenantId ?? record.tenantId;
-    const [membership] = await tx
-      .select({ id: userTenants.id })
-      .from(userTenants)
-      .where(and(eq(userTenants.userId, record.userId), eq(userTenants.tenantId, targetTenantId)))
-      .for("update");
-    if (!membership) {
+    const membership = await authTenantSubject(targetTenantId, record.userId);
+    if (!membership?.membership_role) {
       await tx
         .delete(refreshTokens)
         .where(
@@ -1098,13 +1107,17 @@ async function rotateRefreshTokenInsideTenant(
 
     const newRefreshToken = randomBytes(40).toString("hex");
     const newRefreshTokenHash = hashToken(newRefreshToken);
-    await tx.insert(refreshTokens).values({
-      id: randomBytes(16).toString("hex"),
-      userId: record.userId,
-      tenantId: targetTenantId,
-      tokenHash: newRefreshTokenHash,
-      expiresAt: new Date(Date.now() + REFRESH_TOKEN_EXPIRY_DAYS * 86400 * 1000),
-    });
+    const successorId = randomBytes(16).toString("hex");
+    const successorExpiresAt = new Date(Date.now() + REFRESH_TOKEN_EXPIRY_DAYS * 86400 * 1000);
+    const rotated = bootstrapRows<{ id: string }>(
+      await tx.execute(sql`
+        SELECT * FROM steward_bootstrap.auth_rotate_refresh_token(
+          ${tokenHash}, ${targetTenantId}, ${successorId},
+          ${newRefreshTokenHash}, ${successorExpiresAt}
+        )
+      `),
+    );
+    if (rotated.length !== 1) return { status: "invalid" };
     // Keep a bounded predecessor link so a concurrent single-session revoke
     // that started with the just-spent token can delete its rotated successor
     // after acquiring the same user/advisory locks. Otherwise refresh can win
@@ -1981,13 +1994,7 @@ function parseEncryptedEmailApiKey(value: string): {
 }
 
 async function loadTenantEmailConfig(tenantId: string): Promise<TenantEmailConfig | null> {
-  const db = getDb();
-  const [row] = await db
-    .select({ emailConfig: tenantConfigs.emailConfig })
-    .from(tenantConfigs)
-    .where(eq(tenantConfigs.tenantId, tenantId));
-
-  return row?.emailConfig ?? null;
+  return (await authTenantConfigSubject(tenantId))?.email_config ?? null;
 }
 
 async function createEmailAuthForTenant(tenantId: string): Promise<EmailAuth> {
@@ -2819,12 +2826,8 @@ async function requiredTelegramOriginHostFromRequest(
     return getAllowedSiweDomains().includes(originHost) ? originHost : null;
   }
 
-  const [row] = await getDb()
-    .select({ allowedOrigins: tenantConfigs.allowedOrigins })
-    .from(tenantConfigs)
-    .where(eq(tenantConfigs.tenantId, tenantId));
-
-  for (const allowedOrigin of row?.allowedOrigins ?? []) {
+  const config = await authTenantConfigSubject(tenantId);
+  for (const allowedOrigin of config?.allowed_origins ?? []) {
     if (allowedOrigin.trim() === "*") continue;
     try {
       if (new URL(allowedOrigin).host.toLowerCase() === originHost) return originHost;
@@ -3293,22 +3296,14 @@ function deviceUserCodeKey(userCode: string): string {
 }
 
 async function getEnabledTenantAppClient(tenantId: string, clientId: string) {
-  const [client] = await getDb()
-    .select({
-      id: tenantAppClients.id,
-      allowedBundleIds: tenantAppClients.allowedBundleIds,
-      allowedPackageNames: tenantAppClients.allowedPackageNames,
-    })
-    .from(tenantAppClients)
-    .where(
-      and(
-        eq(tenantAppClients.tenantId, tenantId),
-        eq(tenantAppClients.id, clientId),
-        eq(tenantAppClients.enabled, true),
-      ),
-    )
-    .limit(1);
-  return client ?? null;
+  const client = (await authAppClientSubjects(tenantId)).find((row) => row.id === clientId);
+  return client
+    ? {
+        id: client.id,
+        allowedBundleIds: client.allowed_bundle_ids,
+        allowedPackageNames: client.allowed_package_names,
+      }
+    : null;
 }
 
 function normalizeNativeBundleId(value: unknown): string | null {
@@ -3485,15 +3480,11 @@ async function readDeviceAuthorizationRecordByUserCode(
 }
 
 async function getTenantOidcProviders(tenantId: string): Promise<TenantOidcProviderConfig[]> {
-  const db = getDb();
-  const [row] = await db
-    .select({ oidcProviders: tenantConfigs.oidcProviders })
-    .from(tenantConfigs)
-    .where(eq(tenantConfigs.tenantId, tenantId));
+  const config = await authTenantConfigSubject(tenantId);
   // Revalidate persisted JSON on every trust-boundary read. Older rows can
   // predate write-time validation; treating their TypeScript cast as trusted
   // would re-enable unsafe algorithms or malformed endpoint configuration.
-  const normalized = normalizeOidcProviders(row?.oidcProviders ?? [], tenantId);
+  const normalized = normalizeOidcProviders(config?.oidc_providers ?? [], tenantId);
   return typeof normalized === "string" ? [] : normalized;
 }
 
@@ -5311,11 +5302,7 @@ auth.post("/test/token", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: "tenantId is required" }, 400);
   }
 
-  const [row] = await getDb()
-    .select({ testAccount: tenantConfigs.testAccount })
-    .from(tenantConfigs)
-    .where(eq(tenantConfigs.tenantId, tenantId));
-  const testAccount = row?.testAccount;
+  const testAccount = (await authTenantConfigSubject(tenantId))?.test_account;
   if (!isEnabledTestAccount(testAccount)) {
     return c.json<ApiResponse>(invalidTestAccountCredentials(), 401);
   }
@@ -8968,17 +8955,14 @@ async function resolveGuestTenant(
   if (isReservedTenantId(requested)) {
     return { ok: false, status: 403, error: "Guests cannot be created in a personal tenant" };
   }
-  if (!(await tenantExists(requested))) {
+  const subject = await authTenantSubject(requested);
+  if (!subject) {
     return { ok: false, status: 404, error: `Tenant '${requested}' not found` };
   }
   if (requested === _DEFAULT_TENANT_ID) {
     return { ok: true, tenantId: requested, isPersonal: false };
   }
-  const [config] = await getDb()
-    .select({ joinMode: tenantConfigs.joinMode })
-    .from(tenantConfigs)
-    .where(eq(tenantConfigs.tenantId, requested));
-  if (config?.joinMode === "open") {
+  if (subject.join_mode === "open") {
     return { ok: true, tenantId: requested, isPersonal: false };
   }
   return {
@@ -10600,20 +10584,12 @@ async function getAllowedOAuthRedirectEntries(
   const entries = new Set<string>();
 
   const normalizedClientId = normalizePublicClientId(clientId);
-  const appClientRows = await getDb()
-    .select({
-      id: tenantAppClients.id,
-      allowedRedirectUrls: tenantAppClients.allowedRedirectUrls,
-    })
-    .from(tenantAppClients)
-    .where(
-      and(eq(tenantAppClients.tenantId, resolvedTenantId), eq(tenantAppClients.enabled, true)),
-    );
+  const appClientRows = await authAppClientSubjects(resolvedTenantId);
 
   if (normalizedClientId) {
     const client = appClientRows.find((candidate) => candidate.id === normalizedClientId);
     if (client) {
-      for (const entry of client.allowedRedirectUrls ?? []) {
+      for (const entry of client.allowed_redirect_urls ?? []) {
         const trimmed = entry.trim();
         if (trimmed && trimmed !== "*") entries.add(trimmed);
       }
@@ -10621,14 +10597,8 @@ async function getAllowedOAuthRedirectEntries(
     return [...entries];
   }
 
-  const [row] = await getDb()
-    .select({
-      allowedRedirectUrls: tenantConfigs.allowedRedirectUrls,
-    })
-    .from(tenantConfigs)
-    .where(eq(tenantConfigs.tenantId, resolvedTenantId));
-
-  for (const entry of row?.allowedRedirectUrls ?? []) {
+  const config = await authTenantConfigSubject(resolvedTenantId);
+  for (const entry of config?.allowed_redirect_urls ?? []) {
     const trimmed = entry.trim();
     if (trimmed && trimmed !== "*") {
       entries.add(trimmed);
@@ -10636,7 +10606,7 @@ async function getAllowedOAuthRedirectEntries(
   }
 
   for (const client of appClientRows) {
-    for (const entry of client.allowedRedirectUrls ?? []) {
+    for (const entry of client.allowed_redirect_urls ?? []) {
       const trimmed = entry.trim();
       if (trimmed && trimmed !== "*") entries.add(trimmed);
     }
