@@ -83,7 +83,7 @@ export interface JwtRuntimeEnvironment {
 
 /** Immutable symmetric and asymmetric JWT authority for one request. */
 export interface JwtRuntimeAuthority {
-  readonly nodeEnv?: string;
+  readonly nodeEnv: string | undefined;
   readonly jwtSecret: string;
   readonly agentTokenExpiry: string;
   readonly identityJwtAlgorithm: IdentityJwtAlgorithm;

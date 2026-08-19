@@ -74,7 +74,7 @@ describe("identity JWKS discovery", () => {
     const firstKeys = await generateKeyPair("RS256", { extractable: true });
     const secondKeys = await generateKeyPair("ES256", { extractable: true });
     const firstEnv = {
-      NODE_ENV: "test",
+      NODE_ENV: "production",
       STEWARD_JWT_SECRET: "discovery-first-session-secret-at-least-32-characters",
       STEWARD_IDENTITY_JWT_ALG: "RS256",
       STEWARD_IDENTITY_JWT_PRIVATE_KEY: await exportPKCS8(firstKeys.privateKey),
@@ -83,7 +83,7 @@ describe("identity JWKS discovery", () => {
       STEWARD_IDENTITY_JWT_AUDIENCE: "authority-a-audience",
     };
     const secondEnv = {
-      NODE_ENV: "test",
+      NODE_ENV: "production",
       STEWARD_JWT_SECRET: "discovery-second-session-secret-at-least-32-characters",
       STEWARD_IDENTITY_JWT_ALG: "ES256",
       STEWARD_IDENTITY_JWT_PRIVATE_KEY: await exportPKCS8(secondKeys.privateKey),
@@ -93,6 +93,10 @@ describe("identity JWKS discovery", () => {
     };
 
     async function exerciseRoutes(userId: string, requestOrigin: string) {
+      // Session revocation intentionally uses its in-memory test backend here;
+      // JWT and discovery readers must still retain the production authority
+      // captured above rather than this hostile compatibility-mirror change.
+      process.env.NODE_ENV = "test";
       const sessionToken = await createSessionToken("0xauthority", tenantId, { userId });
       expect(await verifySessionToken(sessionToken)).toMatchObject({ userId, tenantId });
       const identityResponse = await authRoutes.request("/identity-token", {
@@ -209,6 +213,24 @@ describe("identity JWKS discovery", () => {
         tenant_id: tenantId,
       });
     }
+  });
+
+  it("keeps missing production discovery configuration fail-closed despite ambient dev state", async () => {
+    process.env.NODE_ENV = "test";
+    process.env.APP_URL = "https://ambient.identity.test";
+
+    const response = await withWorkerJwtAuthority(
+      {
+        NODE_ENV: "production",
+        STEWARD_JWT_SECRET: "identity-production-posture-secret-at-least-32-characters",
+      },
+      () =>
+        identityDiscoveryRoutes.request(
+          "https://request.identity.test/.well-known/openid-configuration",
+        ),
+    );
+
+    expect(response.status).toBe(500);
   });
 
   it("publishes only public key material for configured identity-token signing keys", async () => {
