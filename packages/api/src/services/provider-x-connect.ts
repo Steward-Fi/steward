@@ -36,6 +36,7 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import {
   and,
   asc,
+  desc,
   eq,
   getDb,
   inArray,
@@ -1034,6 +1035,7 @@ async function persistConnectedAccount(input: PersistInput): Promise<CompleteCon
 
   return withTenantAuditedTransaction(input.tenantId, async (txRaw, append) => {
     const tx = txRaw as DbExecutor;
+    let routesDisabledByDisconnect: Array<{ id: string; authorityRevision: number }> = [];
 
     const [connectLifecycle] = await tx
       .select()
@@ -1070,14 +1072,46 @@ async function persistConnectedAccount(input: PersistInput): Promise<CompleteCon
       .limit(1)
       .for("update");
 
-    const unresolvedRefreshes = account
+    // Do not compare provider_accounts.updatedAt with this lifecycle. Account
+    // timestamps are supplied by application replicas while lifecycle
+    // timestamps are database-owned, so clock skew can let an older staged
+    // response overwrite a reconnect. The adopted connect journal gives us a
+    // database-ordered lineage marker under the account lock instead.
+    const [newerConnectAdoption] = account
+      ? await tx
+          .select({ id: providerXCredentialLifecycles.id })
+          .from(providerXCredentialLifecycles)
+          .where(
+            and(
+              eq(providerXCredentialLifecycles.tenantId, input.tenantId),
+              eq(providerXCredentialLifecycles.workspaceId, input.workspaceId),
+              eq(providerXCredentialLifecycles.providerAccountId, account.id),
+              eq(providerXCredentialLifecycles.kind, "connect_exchange"),
+              eq(providerXCredentialLifecycles.state, "adopted"),
+              sql`${providerXCredentialLifecycles.createdAt} > ${connectLifecycle.createdAt}`,
+            ),
+          )
+          .limit(1)
+          .for("update")
+      : [];
+    if (newerConnectAdoption) {
+      throw new XConnectError(
+        "X_CREDENTIAL_NEEDS_ATTENTION",
+        409,
+        "a newer X credential already superseded this staged connect response",
+      );
+    }
+
+    const unresolvedLifecycles = account
       ? await tx
           .select({
             id: providerXCredentialLifecycles.id,
+            kind: providerXCredentialLifecycles.kind,
             state: providerXCredentialLifecycles.state,
             credentialSecretId: providerXCredentialLifecycles.credentialSecretId,
             expectedAccountRevision: providerXCredentialLifecycles.expectedAccountRevision,
             lastErrorCode: providerXCredentialLifecycles.lastErrorCode,
+            disabledRoutes: providerXCredentialLifecycles.disabledRoutes,
           })
           .from(providerXCredentialLifecycles)
           .where(
@@ -1097,38 +1131,61 @@ async function persistConnectedAccount(input: PersistInput): Promise<CompleteCon
           .for("update")
       : [];
 
-    const supersedableRefreshes = account
-      ? unresolvedRefreshes.filter(
+    const supersedableLifecycles = account
+      ? unresolvedLifecycles.filter(
           (row) =>
             row.state === "needs_attention" &&
             row.credentialSecretId === null &&
-            row.lastErrorCode === "REFRESH_OUTCOME_UNKNOWN" &&
             row.expectedAccountRevision !== null &&
-            row.expectedAccountRevision <= account.revision,
+            row.expectedAccountRevision <= account.revision &&
+            ((row.kind === "refresh_rotation" && row.lastErrorCode === "REFRESH_OUTCOME_UNKNOWN") ||
+              (row.kind === "disconnect_revoke" &&
+                row.lastErrorCode === "DISCONNECT_REVOCATION_HANDLE_UNAVAILABLE")),
         )
       : [];
-    if (supersedableRefreshes.length !== unresolvedRefreshes.length) {
+    if (supersedableLifecycles.length !== unresolvedLifecycles.length) {
       throw new XConnectError(
         "X_CREDENTIAL_NEEDS_ATTENTION",
         409,
-        "previous X refresh must be reconciled before reconnect",
+        "previous X credential lifecycle must be reconciled before reconnect",
       );
     }
 
+    const supersedableDisconnect = supersedableLifecycles.find(
+      (row) => row.kind === "disconnect_revoke",
+    );
+    if (supersedableDisconnect) {
+      routesDisabledByDisconnect = supersedableDisconnect.disabledRoutes;
+    } else if (account) {
+      const [completedDisconnect] = await tx
+        .select({ disabledRoutes: providerXCredentialLifecycles.disabledRoutes })
+        .from(providerXCredentialLifecycles)
+        .where(
+          and(
+            eq(providerXCredentialLifecycles.tenantId, input.tenantId),
+            eq(providerXCredentialLifecycles.workspaceId, input.workspaceId),
+            eq(providerXCredentialLifecycles.providerAccountId, account.id),
+            eq(providerXCredentialLifecycles.kind, "disconnect_revoke"),
+            eq(providerXCredentialLifecycles.state, "revoked"),
+          ),
+        )
+        .orderBy(desc(providerXCredentialLifecycles.updatedAt))
+        .limit(1)
+        .for("update");
+      routesDisabledByDisconnect = completedDisconnect?.disabledRoutes ?? [];
+    }
+
     const [existingSecret] = await tx
-      .select({ id: secrets.id })
+      .select({ id: secrets.id, deletedAt: secrets.deletedAt })
       .from(secrets)
-      .where(
-        and(
-          eq(secrets.tenantId, input.tenantId),
-          eq(secrets.name, secretName),
-          sql`${secrets.deletedAt} IS NULL`,
-        ),
-      )
+      .where(and(eq(secrets.tenantId, input.tenantId), eq(secrets.name, secretName)))
+      .orderBy(desc(secrets.version))
       .limit(1)
       .for("update");
     const meta = existingSecret
-      ? await input.vault.rotateSecretWithinTx(tx, input.tenantId, secretName, serialized)
+      ? await input.vault.rotateSecretWithinTx(tx, input.tenantId, secretName, serialized, {
+          allowDeletedCurrent: existingSecret.deletedAt !== null,
+        })
       : await input.vault.createSecretWithinTx(tx, input.tenantId, secretName, serialized, {
           description: "X (Twitter) provider-account OAuth credential",
         });
@@ -1161,6 +1218,30 @@ async function persistConnectedAccount(input: PersistInput): Promise<CompleteCon
         .returning();
       if (!updated) {
         throw new XConnectError("X_REFRESH_FAILED", 409, "account revision conflict on reconnect");
+      }
+      for (const route of routesDisabledByDisconnect) {
+        if (
+          !route ||
+          typeof route.id !== "string" ||
+          !Number.isSafeInteger(route.authorityRevision) ||
+          route.authorityRevision < 1
+        ) {
+          continue;
+        }
+        await tx
+          .update(secretRoutes)
+          .set({ enabled: true })
+          .where(
+            and(
+              eq(secretRoutes.tenantId, input.tenantId),
+              eq(secretRoutes.id, route.id),
+              eq(secretRoutes.secretId, meta.id),
+              eq(secretRoutes.enabled, false),
+              // Disconnect and credential rotation each advance the route
+              // revision. Only untouched routes are restored automatically.
+              eq(secretRoutes.authorityRevision, route.authorityRevision + 2),
+            ),
+          );
       }
     } else {
       reconnected = false;
@@ -1233,8 +1314,8 @@ async function persistConnectedAccount(input: PersistInput): Promise<CompleteCon
         ),
       );
 
-    if (supersedableRefreshes.length > 0) {
-      const lifecycleIds = supersedableRefreshes.map((row) => row.id).sort();
+    if (supersedableLifecycles.length > 0) {
+      const lifecycleIds = supersedableLifecycles.map((row) => row.id).sort();
       const superseded = await tx
         .update(providerXCredentialLifecycles)
         .set({
@@ -1250,28 +1331,27 @@ async function persistConnectedAccount(input: PersistInput): Promise<CompleteCon
             inArray(providerXCredentialLifecycles.id, lifecycleIds),
             eq(providerXCredentialLifecycles.state, "needs_attention"),
             sql`${providerXCredentialLifecycles.credentialSecretId} IS NULL`,
-            eq(providerXCredentialLifecycles.lastErrorCode, "REFRESH_OUTCOME_UNKNOWN"),
           ),
         )
         .returning({ id: providerXCredentialLifecycles.id });
-      if (superseded.length !== supersedableRefreshes.length) {
+      if (superseded.length !== supersedableLifecycles.length) {
         throw new XConnectError(
           "X_CREDENTIAL_NEEDS_ATTENTION",
           409,
-          "X refresh lifecycle changed during reconnect",
+          "X credential lifecycle changed during reconnect",
         );
       }
       await append({
         tenantId: input.tenantId,
         actorType: "user",
         actorId: input.callerUserId,
-        action: "provider.x.refresh.superseded_by_reconnect",
+        action: "provider.x.lifecycle.superseded_by_reconnect",
         resourceType: "provider_account",
         resourceId: providerAccountId,
         metadata: {
           workspaceId: input.workspaceId,
           lifecycleIds,
-          priorStates: supersedableRefreshes.map((row) => row.state).sort(),
+          priorKinds: supersedableLifecycles.map((row) => row.kind).sort(),
           newAccountRevision: account ? account.revision + 1 : 1,
           requestId: input.requestId,
         },
@@ -2137,7 +2217,24 @@ export async function runXCredentialLifecycleSweep(input: {
         result.attention += 1;
       }
     } catch {
-      result.attention += 1;
+      // Connect reconciliation deliberately rethrows its adoption error after
+      // compensating a stale staged grant. Classify the durable terminal state
+      // instead of reporting a successfully revoked grant as unresolved.
+      const [reconciled] = await (getDb() as DbExecutor)
+        .select({ state: providerXCredentialLifecycles.state })
+        .from(providerXCredentialLifecycles)
+        .where(
+          and(
+            eq(providerXCredentialLifecycles.tenantId, row.tenantId),
+            eq(providerXCredentialLifecycles.id, row.id),
+          ),
+        )
+        .limit(1);
+      if (row.kind === "connect_exchange" && reconciled?.state === "revoked") {
+        result.revoked += 1;
+      } else {
+        result.attention += 1;
+      }
     }
   }
   result.remaining = rows.length === limit && result.attention === 0;
@@ -2502,9 +2599,10 @@ export interface DisconnectResult {
 }
 
 /**
- * Disconnect a connected X account: best-effort revoke at X, degrade the account
- * (status revoked), bump revision, audit. Revocation failure at X does NOT block
- * the local degrade — we fail CLOSED locally regardless.
+ * Disconnect a connected X account. Local credential authority and an encrypted
+ * upstream-revocation handle are committed in one transaction. Provider cleanup
+ * then uses the common leased retry path, so a crash cannot restore local access
+ * or discard either the stored grant or a separately staged rotated grant.
  */
 export async function disconnectXProviderCredential(
   input: DisconnectInput,
@@ -2528,39 +2626,108 @@ export async function disconnectXProviderCredential(
       throw new XConnectError("X_ACCOUNT_NOT_X", 400, "provider account is not an X account");
     }
 
-    let credential: LoadedCredential | null = null;
-    if (account.credentialSecretId) {
-      credential = await loadCredential(
-        input.vault,
-        input.tenantId,
-        account.credentialSecretId,
-        tx,
-      );
-      if (credential.payload.xUserId !== account.externalRef) {
-        throw new XConnectError("X_REFRESH_FAILED", 409, "credential account binding mismatch");
-      }
+    if (account.status === "revoked" && !account.credentialSecretId) {
+      return { lifecycleId: null, retryAt: null };
     }
-    const [activeLifecycle] = await tx
-      .select()
-      .from(providerXCredentialLifecycles)
-      .where(
-        and(
-          eq(providerXCredentialLifecycles.tenantId, input.tenantId),
-          eq(providerXCredentialLifecycles.providerAccountId, account.id),
-          inArray(providerXCredentialLifecycles.state, [
-            "inflight",
-            "credential_staged",
-            "revocation_pending",
-            "needs_attention",
-          ]),
-        ),
-      )
-      .limit(1)
-      .for("update");
+
+    const now = new Date();
+    const material = account.credentialSecretId
+      ? await readXDisconnectRevocationMaterial(
+          tx,
+          input.vault,
+          input.tenantId,
+          account.credentialSecretId,
+          account.externalRef,
+        )
+      : null;
+    const routesToDisable = account.credentialSecretId
+      ? await tx
+          .select({ id: secretRoutes.id, authorityRevision: secretRoutes.authorityRevision })
+          .from(secretRoutes)
+          .where(
+            and(
+              eq(secretRoutes.tenantId, input.tenantId),
+              eq(secretRoutes.secretId, account.credentialSecretId),
+              eq(secretRoutes.enabled, true),
+            ),
+          )
+          .for("update")
+      : [];
+
+    const lifecycleId = account.credentialSecretId ? randomUUID() : null;
+    let lifecycleSecretId: string | null = null;
+    const hasRevocationHandle = Boolean(material?.accessToken || material?.refreshToken);
+    if (lifecycleId && hasRevocationHandle) {
+      const secret = await input.vault.createSecretWithinTx(
+        tx,
+        input.tenantId,
+        `provider-x-lifecycle:${lifecycleId}:disconnect`,
+        JSON.stringify({
+          schemaVersion: "steward.provider-x.lifecycle.v1",
+          token: {
+            access_token: material?.accessToken ?? undefined,
+            refresh_token: material?.refreshToken ?? undefined,
+          },
+        } satisfies XRefreshLifecycleSecret),
+        { description: "Encrypted transient X OAuth revocation material" },
+      );
+      lifecycleSecretId = secret.id;
+    }
+    if (lifecycleId) {
+      await tx.insert(providerXCredentialLifecycles).values({
+        id: lifecycleId,
+        tenantId: input.tenantId,
+        workspaceId: input.workspaceId,
+        providerAccountId: account.id,
+        kind: "disconnect_revoke",
+        state: lifecycleSecretId ? "revocation_pending" : "needs_attention",
+        credentialSecretId: lifecycleSecretId,
+        expectedAccountRevision: account.revision + 1,
+        attempts: 0,
+        nextRetryAt: lifecycleSecretId ? now : null,
+        lastErrorCode: lifecycleSecretId
+          ? "DISCONNECT_REVOCATION_PENDING"
+          : "DISCONNECT_REVOCATION_HANDLE_UNAVAILABLE",
+        disabledRoutes: routesToDisable,
+      });
+      await append({
+        tenantId: input.tenantId,
+        actorType: "user",
+        actorId: input.callerUserId,
+        action: "provider.x.disconnect.intent_staged",
+        resourceType: "provider_x_credential_lifecycle",
+        resourceId: lifecycleId,
+        metadata: {
+          workspaceId: input.workspaceId,
+          providerAccountId: account.id,
+          revocationHandleAvailable: hasRevocationHandle,
+          credentialIssue: material?.issue ?? null,
+        },
+      });
+    }
+
+    if (account.credentialSecretId) {
+      await tx
+        .update(secretRoutes)
+        .set({ enabled: false })
+        .where(
+          and(
+            eq(secretRoutes.tenantId, input.tenantId),
+            eq(secretRoutes.secretId, account.credentialSecretId),
+            eq(secretRoutes.enabled, true),
+          ),
+        );
+    }
 
     const [degraded] = await tx
       .update(providerAccounts)
-      .set({ status: "revoked", revision: account.revision + 1, updatedAt: new Date() })
+      .set({
+        status: "revoked",
+        credentialSecretId: null,
+        credentialVersion: null,
+        revision: account.revision + 1,
+        updatedAt: now,
+      })
       .where(
         and(
           eq(providerAccounts.tenantId, input.tenantId),
@@ -2573,69 +2740,17 @@ export async function disconnectXProviderCredential(
       throw new XConnectError("X_REFRESH_FAILED", 409, "account revision conflict on disconnect");
     }
 
-    const lifecycleId = credential ? (activeLifecycle?.id ?? randomUUID()) : null;
-    let lifecycleSecretId = activeLifecycle?.credentialSecretId ?? null;
-    if (credential && lifecycleId) {
-      if (!lifecycleSecretId) {
-        const secret = await input.vault.createSecretWithinTx(
-          tx,
-          input.tenantId,
-          `provider-x-lifecycle:${lifecycleId}:disconnect`,
-          JSON.stringify({
-            schemaVersion: "steward.provider-x.lifecycle.v1",
-            token: {
-              access_token: credential.payload.accessToken,
-              refresh_token: credential.refreshToken ?? undefined,
-            },
-          } satisfies XRefreshLifecycleSecret),
-          { description: "Encrypted transient X OAuth revocation material" },
+    if (account.credentialSecretId) {
+      await tx
+        .update(secrets)
+        .set({ deletedAt: now, updatedAt: now })
+        .where(
+          and(
+            eq(secrets.tenantId, input.tenantId),
+            eq(secrets.id, account.credentialSecretId),
+            sql`${secrets.deletedAt} IS NULL`,
+          ),
         );
-        lifecycleSecretId = secret.id;
-      }
-      if (activeLifecycle) {
-        const retryAt = new Date();
-        await tx
-          .update(providerXCredentialLifecycles)
-          .set({
-            kind: activeLifecycle.credentialSecretId ? activeLifecycle.kind : "disconnect_revoke",
-            state: "revocation_pending",
-            credentialSecretId: lifecycleSecretId,
-            expectedAccountRevision: degraded.revision,
-            attempts: 0,
-            nextRetryAt: retryAt,
-            lastErrorCode: "DISCONNECT_REVOCATION_PENDING",
-            updatedAt: retryAt,
-          })
-          .where(
-            and(
-              eq(providerXCredentialLifecycles.tenantId, input.tenantId),
-              eq(providerXCredentialLifecycles.id, lifecycleId),
-            ),
-          );
-      } else {
-        const retryAt = new Date();
-        await tx.insert(providerXCredentialLifecycles).values({
-          id: lifecycleId,
-          tenantId: input.tenantId,
-          workspaceId: input.workspaceId,
-          providerAccountId: account.id,
-          kind: "disconnect_revoke",
-          state: "revocation_pending",
-          credentialSecretId: lifecycleSecretId,
-          expectedAccountRevision: degraded.revision,
-          attempts: 0,
-          nextRetryAt: retryAt,
-        });
-      }
-      await append({
-        tenantId: input.tenantId,
-        actorType: "user",
-        actorId: input.callerUserId,
-        action: "provider.x.disconnect.intent_staged",
-        resourceType: "provider_x_credential_lifecycle",
-        resourceId: lifecycleId,
-        metadata: { workspaceId: input.workspaceId, providerAccountId: account.id },
-      });
     }
 
     await append({
@@ -2649,7 +2764,9 @@ export async function disconnectXProviderCredential(
         workspaceId: input.workspaceId,
         xUserId: account.externalRef,
         revokedAtUpstream: false,
-        upstreamRevocationPending: Boolean(lifecycleId),
+        upstreamRevocationPending: Boolean(lifecycleSecretId),
+        revocationHandleAvailable: hasRevocationHandle,
+        disabledRouteCount: routesToDisable.length,
         previousRevision: account.revision,
         newRevision: degraded.revision,
         requestId: input.requestId ?? null,
@@ -2658,31 +2775,59 @@ export async function disconnectXProviderCredential(
 
     return {
       lifecycleId,
+      retryAt: lifecycleSecretId ? now : null,
     };
   });
 
-  if (!prepared.lifecycleId) {
+  if (!prepared.lifecycleId || !prepared.retryAt) {
     return { providerAccountId: input.accountId, revoked: false };
   }
   await afterXDisconnectJournalForTests?.();
-  const [lifecycle] = await (getDb() as DbExecutor)
-    .select({ nextRetryAt: providerXCredentialLifecycles.nextRetryAt })
-    .from(providerXCredentialLifecycles)
-    .where(
-      and(
-        eq(providerXCredentialLifecycles.tenantId, input.tenantId),
-        eq(providerXCredentialLifecycles.id, prepared.lifecycleId),
-      ),
-    )
-    .limit(1);
-  const revokedAtUpstream = lifecycle
-    ? await reconcileStagedXCredentialRevocation({
-        ...input,
-        lifecycleId: prepared.lifecycleId,
-        now: lifecycle.nextRetryAt ?? new Date(),
-      })
-    : false;
+  const revokedAtUpstream = await reconcileStagedXCredentialRevocation({
+    ...input,
+    lifecycleId: prepared.lifecycleId,
+    now: prepared.retryAt,
+  });
   return { providerAccountId: input.accountId, revoked: revokedAtUpstream };
+}
+
+async function readXDisconnectRevocationMaterial(
+  tx: DbExecutor,
+  vault: SecretVault,
+  tenantId: string,
+  secretId: string,
+  expectedXUserId: string,
+): Promise<{
+  accessToken: string | null;
+  refreshToken: string | null;
+  issue: string | null;
+}> {
+  const [row] = (await tx
+    .select()
+    .from(secrets)
+    .where(and(eq(secrets.tenantId, tenantId), eq(secrets.id, secretId)))
+    .limit(1)) as Secret[];
+  if (!row) {
+    return { accessToken: null, refreshToken: null, issue: "CREDENTIAL_SECRET_MISSING" };
+  }
+  try {
+    const parsed = JSON.parse(vault.decryptSecretRow(tenantId, row)) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return { accessToken: null, refreshToken: null, issue: "CREDENTIAL_PAYLOAD_INVALID" };
+    }
+    const candidate = parsed as Record<string, unknown>;
+    const accessToken = boundedStagedToken(candidate.accessToken);
+    const refreshToken = boundedStagedToken(candidate.refreshToken);
+    const issue =
+      typeof candidate.xUserId === "string" && candidate.xUserId !== expectedXUserId
+        ? "CREDENTIAL_BINDING_MISMATCH"
+        : accessToken || refreshToken
+          ? null
+          : "CREDENTIAL_REVOCATION_HANDLE_INVALID";
+    return { accessToken, refreshToken, issue };
+  } catch {
+    return { accessToken: null, refreshToken: null, issue: "CREDENTIAL_DECRYPT_FAILED" };
+  }
 }
 
 async function revokeUpstreamBestEffort(

@@ -29,7 +29,7 @@ describe("WebhookDispatcher retry classification (SEC-179)", () => {
     });
     expect(ssrf.success).toBe(false);
     expect(ssrf.attempts).toBe(1);
-    expect(ssrf.error).toContain("must resolve to a public address");
+    expect(ssrf.error).toBe("Webhook validation failed");
 
     // https-scheme rejection (no insecure-http escape hatch): permanent as well.
     const httpsOnly = new WebhookDispatcher({
@@ -45,7 +45,7 @@ describe("WebhookDispatcher retry classification (SEC-179)", () => {
     });
     expect(plainHttp.success).toBe(false);
     expect(plainHttp.attempts).toBe(1);
-    expect(plainHttp.error).toContain("must use https");
+    expect(plainHttp.error).toBe("Webhook validation failed");
 
     const badScheme = await dispatcher.dispatch(makeEvent(), {
       url: "ftp://example.com/hook",
@@ -79,5 +79,24 @@ describe("WebhookDispatcher retry classification (SEC-179)", () => {
     });
     expect(result.success).toBe(false);
     expect(result.attempts).toBe(3);
+  });
+
+  it("does not return transport exception text", async () => {
+    const canary = "https://user:webhook-secret@internal.example/";
+    const dispatcher = new WebhookDispatcher({
+      maxRetries: 0,
+      timeoutMs: 500,
+      allowPrivateNetwork: false,
+      allowInsecureHttp: true,
+      lookup: (_hostname, _options, callback) =>
+        callback(new Error(canary), "" as never, 0 as never),
+    });
+
+    const result = await dispatcher.dispatch(makeEvent(), {
+      url: "http://example.test/hook",
+      secret: SECRET,
+    });
+    expect(result.error).toBe("Webhook delivery failed");
+    expect(JSON.stringify(result)).not.toContain(canary);
   });
 });

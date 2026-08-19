@@ -24,6 +24,7 @@ import {
   providerAccounts,
   providerRoleBindings,
   providerXCredentialLifecycles,
+  secretRoutes,
   secrets,
   tenants,
   users,
@@ -307,10 +308,11 @@ afterEach(async () => {
   __setAfterXRevocationClaimForTests(null);
   // Reset connected accounts + credential secrets between tests.
   const db = getDb();
-  await db.delete(providerAccounts).where(eq(providerAccounts.tenantId, TENANT));
   await db
     .delete(providerXCredentialLifecycles)
     .where(eq(providerXCredentialLifecycles.tenantId, TENANT));
+  await db.delete(providerAccounts).where(eq(providerAccounts.tenantId, TENANT));
+  await db.delete(secretRoutes).where(eq(secretRoutes.tenantId, TENANT));
   await db.delete(secrets).where(eq(secrets.tenantId, TENANT));
 });
 
@@ -830,6 +832,93 @@ describe("connect exchange recovery", () => {
     expect(lifecycle.state).toBe("adopted");
     expect(lifecycle.credentialSecretId).toBeNull();
     fake.restore();
+  });
+
+  test("a stale staged connect grant is revoked instead of overwriting a newer reconnect", async () => {
+    const firstStore = new MemoryConnectStore();
+    const firstFake = installFakeX({
+      exchangeToken: {
+        access_token: "access-stale-first",
+        refresh_token: "refresh-stale-first",
+      },
+    });
+    const initiated = await initiateXConnect({
+      tenantId: TENANT,
+      workspaceId: WORKSPACE,
+      initiatedByUserId: ADMIN,
+      redirectUri: REDIRECT,
+      config: CONFIG,
+      store: firstStore,
+    });
+    __setAfterXCredentialStageForTests(async () => {
+      throw new Error("simulated process crash after first connect staging");
+    });
+    await expect(
+      completeXConnect({
+        tenantId: TENANT,
+        workspaceId: WORKSPACE,
+        callerUserId: ADMIN,
+        code: "auth-code",
+        state: initiated.state,
+        connectToken: initiated.connectToken,
+        redirectUri: REDIRECT,
+        config: CONFIG,
+        store: firstStore,
+        vault,
+      }),
+    ).rejects.toThrow("simulated process crash after first connect staging");
+    __setAfterXCredentialStageForTests(null);
+    firstFake.restore();
+
+    const newer = await connectHappy(new MemoryConnectStore(), {
+      exchangeToken: {
+        access_token: "access-current-second",
+        refresh_token: "refresh-current-second",
+      },
+    });
+    const newerAccountId = newer.completed.providerAccountId;
+    const beforeSweep = await decryptCredential(newerAccountId);
+    expect(beforeSweep.accessToken).toBe("access-current-second");
+
+    // The guard must be database-lineage based, not a comparison against an
+    // application-supplied account timestamp that can move backwards under
+    // replica clock skew.
+    await getDb()
+      .update(providerAccounts)
+      .set({ updatedAt: new Date(0) })
+      .where(eq(providerAccounts.id, newerAccountId));
+
+    const [staleLifecycle] = await getDb()
+      .select()
+      .from(providerXCredentialLifecycles)
+      .where(
+        and(
+          eq(providerXCredentialLifecycles.kind, "connect_exchange"),
+          eq(providerXCredentialLifecycles.state, "credential_staged"),
+        ),
+      );
+    expect(staleLifecycle.providerAccountId).toBeNull();
+
+    const recovery = installFakeX({ revokeStatuses: [200] });
+    const swept = await runXCredentialLifecycleSweep({
+      vault,
+      config: CONFIG,
+      now: new Date(Date.now() + 70_000),
+    });
+    expect(swept).toMatchObject({ processed: 1, revoked: 1, adopted: 0, attention: 0 });
+    expect(recovery.counters).toMatchObject({ exchange: 0, identity: 1, revoke: 1 });
+
+    const afterSweep = await decryptCredential(newerAccountId);
+    expect(afterSweep.accessToken).toBe("access-current-second");
+    expect(afterSweep.refreshToken).toBe("refresh-current-second");
+
+    const [revokedLifecycle] = await getDb()
+      .select()
+      .from(providerXCredentialLifecycles)
+      .where(eq(providerXCredentialLifecycles.id, staleLifecycle.id));
+    expect(revokedLifecycle.state).toBe("revoked");
+    expect(revokedLifecycle.credentialSecretId).toBeNull();
+    recovery.restore();
   });
 
   test("failed identity revocation is durably retried with backoff and a hard ceiling", async () => {
@@ -1545,7 +1634,7 @@ describe("refresh", () => {
     expect(superseded.state).toBe("superseded");
     expect(superseded.credentialSecretId).toBeNull();
     const events = await readAuditActions(TENANT);
-    expect(events).toContain("provider.x.refresh.superseded_by_reconnect");
+    expect(events).toContain("provider.x.lifecycle.superseded_by_reconnect");
   });
 
   test("revokes a rotated grant held in memory when encrypted staging fails", async () => {
@@ -1992,10 +2081,256 @@ describe("disconnect", () => {
       .from(providerAccounts)
       .where(eq(providerAccounts.id, completed.providerAccountId));
     expect(acct.status).toBe("revoked");
+    expect(acct.credentialSecretId).toBeNull();
+    expect(acct.credentialVersion).toBeNull();
     fake.restore();
 
     const events = await readAuditActions(TENANT);
     expect(events.includes("provider.x.disconnect.completed")).toBe(true);
+  });
+
+  test("removes local credential authority and restores only unchanged routes on reconnect", async () => {
+    const { completed } = await connectHappy(new MemoryConnectStore());
+    const db = getDb();
+    const [before] = await db
+      .select()
+      .from(providerAccounts)
+      .where(eq(providerAccounts.id, completed.providerAccountId));
+    const restoredRouteId = "50000000-0000-4000-8000-0000000000d1";
+    const operatorDisabledRouteId = "50000000-0000-4000-8000-0000000000d2";
+    const adminMutatedRouteId = "50000000-0000-4000-8000-0000000000d3";
+    await db.insert(secretRoutes).values([
+      {
+        id: restoredRouteId,
+        tenantId: TENANT,
+        secretId: before.credentialSecretId as string,
+        hostPattern: "api.x.com",
+        pathPattern: "/2/tweets",
+        method: "POST",
+        injectAs: "header",
+        injectKey: "Authorization",
+        injectFormat: "Bearer {value}",
+      },
+      {
+        id: operatorDisabledRouteId,
+        tenantId: TENANT,
+        secretId: before.credentialSecretId as string,
+        hostPattern: "api.x.com",
+        pathPattern: "/2/users/me",
+        method: "GET",
+        injectAs: "header",
+        injectKey: "Authorization",
+        injectFormat: "Bearer {value}",
+        enabled: false,
+      },
+      {
+        id: adminMutatedRouteId,
+        tenantId: TENANT,
+        secretId: before.credentialSecretId as string,
+        hostPattern: "api.x.com",
+        pathPattern: "/2/users/by",
+        method: "GET",
+        injectAs: "header",
+        injectKey: "Authorization",
+        injectFormat: "Bearer {value}",
+      },
+    ]);
+
+    const fake = installFakeX();
+    await expect(
+      disconnectXProviderCredential({
+        tenantId: TENANT,
+        workspaceId: WORKSPACE,
+        accountId: completed.providerAccountId,
+        callerUserId: ADMIN,
+        vault,
+        config: CONFIG,
+      }),
+    ).resolves.toMatchObject({ revoked: true });
+    fake.restore();
+
+    const [disconnected] = await db
+      .select()
+      .from(providerAccounts)
+      .where(eq(providerAccounts.id, completed.providerAccountId));
+    expect(disconnected).toMatchObject({
+      status: "revoked",
+      credentialSecretId: null,
+      credentialVersion: null,
+    });
+    const [disabledRoute] = await db
+      .select()
+      .from(secretRoutes)
+      .where(eq(secretRoutes.id, restoredRouteId));
+    expect(disabledRoute).toMatchObject({ enabled: false, authorityRevision: 2 });
+    const [oldSecret] = await db
+      .select()
+      .from(secrets)
+      .where(eq(secrets.id, before.credentialSecretId as string));
+    expect(oldSecret.deletedAt).not.toBeNull();
+    await db
+      .update(secretRoutes)
+      .set({ pathPattern: "/2/users/by/changed" })
+      .where(eq(secretRoutes.id, adminMutatedRouteId));
+
+    const reconnect = await connectHappy(new MemoryConnectStore());
+    expect(reconnect.completed).toMatchObject({
+      providerAccountId: completed.providerAccountId,
+      reconnected: true,
+    });
+    const [reconnected] = await db
+      .select()
+      .from(providerAccounts)
+      .where(eq(providerAccounts.id, completed.providerAccountId));
+    const [restoredRoute] = await db
+      .select()
+      .from(secretRoutes)
+      .where(eq(secretRoutes.id, restoredRouteId));
+    expect(restoredRoute).toMatchObject({
+      enabled: true,
+      secretId: reconnected.credentialSecretId,
+      authorityRevision: 4,
+    });
+    const [stillOperatorDisabled] = await db
+      .select()
+      .from(secretRoutes)
+      .where(eq(secretRoutes.id, operatorDisabledRouteId));
+    expect(stillOperatorDisabled).toMatchObject({
+      enabled: false,
+      secretId: reconnected.credentialSecretId,
+      authorityRevision: 2,
+    });
+    const [stillAdminDisabled] = await db
+      .select()
+      .from(secretRoutes)
+      .where(eq(secretRoutes.id, adminMutatedRouteId));
+    expect(stillAdminDisabled).toMatchObject({
+      enabled: false,
+      pathPattern: "/2/users/by/changed",
+      secretId: reconnected.credentialSecretId,
+      authorityRevision: 4,
+    });
+  });
+
+  test("malformed credentials cannot block local revocation or later reconnect", async () => {
+    const { completed } = await connectHappy(new MemoryConnectStore());
+    const malformed = await vault.rotateSecret(
+      TENANT,
+      xCredentialSecretName(WORKSPACE, "1234567890"),
+      "{",
+    );
+    await getDb()
+      .update(providerAccounts)
+      .set({ credentialSecretId: malformed.id, credentialVersion: malformed.version })
+      .where(eq(providerAccounts.id, completed.providerAccountId));
+    const malformedFake = installFakeX();
+    await expect(
+      disconnectXProviderCredential({
+        tenantId: TENANT,
+        workspaceId: WORKSPACE,
+        accountId: completed.providerAccountId,
+        callerUserId: ADMIN,
+        vault,
+        config: CONFIG,
+      }),
+    ).resolves.toMatchObject({ revoked: false });
+    expect(malformedFake.counters.revoke).toBe(0);
+    malformedFake.restore();
+    const [locallyRevoked] = await getDb()
+      .select()
+      .from(providerAccounts)
+      .where(eq(providerAccounts.id, completed.providerAccountId));
+    expect(locallyRevoked).toMatchObject({
+      status: "revoked",
+      credentialSecretId: null,
+      credentialVersion: null,
+    });
+    const [unrecoverable] = await getDb()
+      .select()
+      .from(providerXCredentialLifecycles)
+      .where(eq(providerXCredentialLifecycles.kind, "disconnect_revoke"));
+    expect(unrecoverable).toMatchObject({
+      state: "needs_attention",
+      credentialSecretId: null,
+      lastErrorCode: "DISCONNECT_REVOCATION_HANDLE_UNAVAILABLE",
+    });
+    const reconnect = await connectHappy(new MemoryConnectStore());
+    expect(reconnect.completed).toMatchObject({
+      providerAccountId: completed.providerAccountId,
+      reconnected: true,
+    });
+    const [superseded] = await getDb()
+      .select()
+      .from(providerXCredentialLifecycles)
+      .where(eq(providerXCredentialLifecycles.id, unrecoverable.id));
+    expect(superseded).toMatchObject({
+      state: "superseded",
+      lastErrorCode: "SUPERSEDED_BY_RECONNECT",
+    });
+  });
+
+  test("disconnect revokes exact bounded handles even when identity binding is invalid", async () => {
+    const { completed } = await connectHappy(new MemoryConnectStore());
+    const current = await decryptCredential(completed.providerAccountId);
+    const misbound = await vault.rotateSecret(
+      TENANT,
+      xCredentialSecretName(WORKSPACE, "1234567890"),
+      JSON.stringify({
+        ...current,
+        accessToken: "misbound-access-handle",
+        refreshToken: "misbound-refresh-handle",
+        xUserId: "999999999",
+      }),
+    );
+    await getDb()
+      .update(providerAccounts)
+      .set({ credentialSecretId: misbound.id, credentialVersion: misbound.version })
+      .where(eq(providerAccounts.id, completed.providerAccountId));
+    const fake = installFakeX();
+    await expect(
+      disconnectXProviderCredential({
+        tenantId: TENANT,
+        workspaceId: WORKSPACE,
+        accountId: completed.providerAccountId,
+        callerUserId: ADMIN,
+        vault,
+        config: CONFIG,
+      }),
+    ).resolves.toMatchObject({ revoked: true });
+    expect(new URLSearchParams(fake.counters.revokeBodies[0]).get("token")).toBe(
+      "misbound-refresh-handle",
+    );
+    fake.restore();
+  });
+
+  test("a missing credential link cannot prevent local revocation", async () => {
+    const { completed } = await connectHappy(new MemoryConnectStore());
+    await getDb()
+      .update(providerAccounts)
+      .set({ credentialSecretId: null, credentialVersion: null })
+      .where(eq(providerAccounts.id, completed.providerAccountId));
+    const fake = installFakeX();
+    await expect(
+      disconnectXProviderCredential({
+        tenantId: TENANT,
+        workspaceId: WORKSPACE,
+        accountId: completed.providerAccountId,
+        callerUserId: ADMIN,
+        vault,
+        config: CONFIG,
+      }),
+    ).resolves.toMatchObject({ revoked: false });
+    expect(fake.counters.revoke).toBe(0);
+    const [account] = await getDb()
+      .select()
+      .from(providerAccounts)
+      .where(eq(providerAccounts.id, completed.providerAccountId));
+    expect(account).toMatchObject({
+      status: "revoked",
+      credentialSecretId: null,
+      credentialVersion: null,
+    });
+    fake.restore();
   });
 
   test("disconnect of a missing account => X_ACCOUNT_NOT_FOUND", async () => {
@@ -2036,6 +2371,8 @@ describe("disconnect", () => {
       .from(providerAccounts)
       .where(eq(providerAccounts.id, completed.providerAccountId));
     expect(account.status).toBe("revoked");
+    expect(account.credentialSecretId).toBeNull();
+    expect(account.credentialVersion).toBeNull();
     expect(fake.counters.revoke).toBe(0);
     const [pending] = await getDb()
       .select()
@@ -2092,10 +2429,9 @@ describe("disconnect", () => {
     fake.restore();
   });
 
-  test("disconnect retains its exact handle until X returns RFC 7009 status 200", async () => {
+  test("retains the disconnect handle until X confirms RFC 7009 status 200", async () => {
     const { completed } = await connectHappy(new MemoryConnectStore());
     const fake = installFakeX({ revokeStatuses: [202, 200] });
-
     const disconnected = await disconnectXProviderCredential({
       tenantId: TENANT,
       workspaceId: WORKSPACE,
@@ -2127,16 +2463,95 @@ describe("disconnect", () => {
     const swept = await runXCredentialLifecycleSweep({
       vault,
       config: CONFIG,
-      now: new Date(Date.now() + 120_000),
+      now: pending.nextRetryAt as Date,
     });
     expect(swept).toMatchObject({ processed: 1, revoked: 1, attention: 0 });
     expect(fake.counters.revoke).toBe(2);
-    const [recovered] = await getDb()
+    const [revoked] = await getDb()
       .select()
       .from(providerXCredentialLifecycles)
       .where(eq(providerXCredentialLifecycles.id, pending.id));
-    expect(recovered).toMatchObject({ state: "revoked", attempts: 2 });
-    expect(recovered.credentialSecretId).toBeNull();
+    expect(revoked).toMatchObject({ state: "revoked", attempts: 2 });
+    expect(revoked.credentialSecretId).toBeNull();
+    fake.restore();
+  });
+
+  test("preserves a staged rotated grant while disconnect revokes the stored grant separately", async () => {
+    const { completed } = await connectHappy(new MemoryConnectStore());
+    const fake = installFakeX();
+    const restoreStageCrash = __setAfterXCredentialStageForTests(async () => {
+      throw new Error("simulated crash after rotated grant staging");
+    });
+    await expect(
+      refreshXProviderCredential({
+        tenantId: TENANT,
+        workspaceId: WORKSPACE,
+        accountId: completed.providerAccountId,
+        vault,
+        config: CONFIG,
+        force: true,
+      }),
+    ).rejects.toThrow("simulated crash after rotated grant staging");
+    restoreStageCrash();
+    const [stagedBefore] = await getDb()
+      .select()
+      .from(providerXCredentialLifecycles)
+      .where(eq(providerXCredentialLifecycles.kind, "refresh_rotation"));
+    expect(stagedBefore.state).toBe("credential_staged");
+    expect(stagedBefore.credentialSecretId).not.toBeNull();
+
+    await expect(
+      disconnectXProviderCredential({
+        tenantId: TENANT,
+        workspaceId: WORKSPACE,
+        accountId: completed.providerAccountId,
+        callerUserId: ADMIN,
+        vault,
+        config: CONFIG,
+      }),
+    ).resolves.toMatchObject({ revoked: true });
+    const rows = await getDb()
+      .select()
+      .from(providerXCredentialLifecycles)
+      .where(eq(providerXCredentialLifecycles.providerAccountId, completed.providerAccountId));
+    const stagedAfter = rows.find((row) => row.kind === "refresh_rotation");
+    const disconnect = rows.find((row) => row.kind === "disconnect_revoke");
+    expect(stagedAfter).toMatchObject({
+      id: stagedBefore.id,
+      state: "credential_staged",
+      credentialSecretId: stagedBefore.credentialSecretId,
+    });
+    expect(disconnect).toMatchObject({ state: "revoked", credentialSecretId: null });
+    expect(fake.counters.revoke).toBe(1);
+    expect(new URLSearchParams(fake.counters.revokeBodies[0]).get("token")).toBe("refresh-initial");
+
+    await runXCredentialLifecycleSweep({
+      vault,
+      config: CONFIG,
+      now: new Date(stagedBefore.updatedAt.getTime() + 60_000),
+    });
+    const [pendingRotated] = await getDb()
+      .select()
+      .from(providerXCredentialLifecycles)
+      .where(eq(providerXCredentialLifecycles.id, stagedBefore.id));
+    expect(pendingRotated).toMatchObject({
+      state: "revocation_pending",
+      credentialSecretId: stagedBefore.credentialSecretId,
+    });
+    await runXCredentialLifecycleSweep({
+      vault,
+      config: CONFIG,
+      now: pendingRotated.nextRetryAt as Date,
+    });
+    expect(fake.counters.revoke).toBe(2);
+    expect(new URLSearchParams(fake.counters.revokeBodies[1]).get("token")).toBe(
+      "refresh-rotated-1",
+    );
+    const [rotatedRevoked] = await getDb()
+      .select()
+      .from(providerXCredentialLifecycles)
+      .where(eq(providerXCredentialLifecycles.id, stagedBefore.id));
+    expect(rotatedRevoked).toMatchObject({ state: "revoked", credentialSecretId: null });
     fake.restore();
   });
 
@@ -2184,9 +2599,26 @@ describe("disconnect", () => {
       .where(eq(providerAccounts.id, completed.providerAccountId));
     expect(account.status).toBe("revoked");
     expect(fake.counters.refresh).toBe(1);
-    // One revoke covers the old stored grant and one compensates the rotated
-    // response that could no longer be staged after disconnect took ownership.
+    expect(fake.counters.revoke).toBe(1);
+    const [rotated] = await getDb()
+      .select()
+      .from(providerXCredentialLifecycles)
+      .where(
+        and(
+          eq(providerXCredentialLifecycles.providerAccountId, completed.providerAccountId),
+          eq(providerXCredentialLifecycles.kind, "refresh_rotation"),
+        ),
+      );
+    expect(rotated).toMatchObject({ state: "revocation_pending" });
+    await runXCredentialLifecycleSweep({
+      vault,
+      config: CONFIG,
+      now: rotated.nextRetryAt as Date,
+    });
     expect(fake.counters.revoke).toBe(2);
+    expect(new URLSearchParams(fake.counters.revokeBodies[1]).get("token")).toBe(
+      "refresh-rotated-1",
+    );
     fake.restore();
   });
 });

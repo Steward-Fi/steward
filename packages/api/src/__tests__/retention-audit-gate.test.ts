@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
-import { closeDb, getDb } from "@stwd/db";
+import { closeDb, getDb, tenants } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
-import { sql } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import type { AuditEventInput } from "../services/audit";
 
 const TENANT_ID = "retention-audit-gate";
@@ -86,5 +86,33 @@ describe("retention audit gate", () => {
       "system.retention.sweep",
     ]);
     expect(await proxyPaths()).toEqual(["/fresh"]);
+  });
+
+  it("returns a stable audit-retention failure without exposing the runner exception", async () => {
+    const { runRetentionSweep } = await import("../services/retention");
+    const canary = "postgres://operator:retention-secret@example.test/audit";
+    await getDb()
+      .insert(tenants)
+      .values({ id: TENANT_ID, name: TENANT_ID, apiKeyHash: `hash-${TENANT_ID}` })
+      .onConflictDoNothing();
+    await getDb().execute(sql`
+      INSERT INTO audit_retention_policies
+        (tenant_id, retention_days, enabled, updated_at)
+      VALUES (${TENANT_ID}, 365, true, now())
+      ON CONFLICT (tenant_id) DO UPDATE SET enabled = true
+    `);
+
+    const results = await runRetentionSweep({
+      auditWriter: async () => {},
+      auditRetentionRunner: async () => {
+        throw new Error(canary);
+      },
+    });
+    const audit = results.find((result) => result.table === "audit_events");
+    expect(audit?.failures).toEqual([{ tenantId: TENANT_ID, error: "audit retention failed" }]);
+    expect(JSON.stringify(audit)).not.toContain(canary);
+
+    await getDb().execute(sql`DELETE FROM audit_retention_policies WHERE tenant_id = ${TENANT_ID}`);
+    await getDb().delete(tenants).where(eq(tenants.id, TENANT_ID));
   });
 });

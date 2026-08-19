@@ -4,23 +4,22 @@ import { join, relative } from "node:path";
 import ts from "typescript";
 
 const ROOT = join(import.meta.dir, "../..");
-const RUNTIME_ROOTS = [
-  "packages/api/src",
-  "packages/proxy/src",
-  "packages/auth/src",
-  "packages/plugin-trading/src",
-  "packages/redis/src",
-  "packages/agent-trader/src",
-];
+const RUNTIME_ROOTS = ["packages", "web/src"];
 
 async function runtimeSources(directory: string): Promise<string[]> {
   const paths: string[] = [];
   for (const entry of await readdir(directory, { withFileTypes: true })) {
     const path = join(directory, entry.name);
     if (entry.isDirectory()) {
-      if (entry.name === "__tests__" || entry.name === "dist") continue;
+      if (entry.name === "__tests__" || entry.name === "dist" || entry.name === "node_modules")
+        continue;
       paths.push(...(await runtimeSources(path)));
-    } else if (entry.isFile() && entry.name.endsWith(".ts") && !entry.name.endsWith(".test.ts")) {
+    } else if (
+      entry.isFile() &&
+      /\.tsx?$/.test(entry.name) &&
+      !/\.(?:test|spec)\.tsx?$/.test(entry.name) &&
+      !entry.name.endsWith(".d.ts")
+    ) {
       paths.push(path);
     }
   }
@@ -44,6 +43,7 @@ function isTelemetrySinkName(name: string): boolean {
       "recordAudit",
       "recordRequiredAudit",
       "appendRequiredAudit",
+      "recordReservationFailure",
     ].includes(name) ||
     name.endsWith("Audit") ||
     /^audit[A-Z]/.test(name)
@@ -52,65 +52,126 @@ function isTelemetrySinkName(name: string): boolean {
 
 function unsafeTelemetryArguments(source: ts.SourceFile): string[] {
   const failures: string[] = [];
-  const caughtThrowables = new Set<string>();
+  const report = (node: ts.Node): void => {
+    const line = source.getLineAndCharacterOfPosition(node.getStart(source)).line + 1;
+    failures.push(`${source.fileName}:${line}: ${node.getText(source).slice(0, 160)}`);
+  };
+  const bindingNames = (name: ts.BindingName): string[] => {
+    if (ts.isIdentifier(name)) return [name.text];
+    return name.elements.flatMap((element) =>
+      ts.isOmittedExpression(element) ? [] : bindingNames(element.name),
+    );
+  };
+  const inspectCatch = (clause: ts.CatchClause, caughtName: string): void => {
+    const tainted = new Set([caughtName]);
+    const taintMutationTarget = (candidate: ts.Expression): void => {
+      let target: ts.Expression = candidate;
+      while (ts.isPropertyAccessExpression(target) || ts.isElementAccessExpression(target)) {
+        target = target.expression;
+      }
+      if (ts.isIdentifier(target)) tainted.add(target.text);
+    };
+    const isTainted = (candidate: ts.Node): boolean => {
+      if (
+        ts.isPropertyAccessExpression(candidate) &&
+        ["field", "transactionHash"].includes(candidate.name.text)
+      ) {
+        // These typed domain-error fields are intentionally bounded identifiers,
+        // not provider-controlled exception text.
+        return false;
+      }
+      if (ts.isCallExpression(candidate)) {
+        const name = sinkName(candidate.expression);
+        if (
+          [
+            "extractRpcErrorMessage",
+            "isDefiniteVenueRejection",
+            "isRpcError",
+            "redactedThrownDiagnostics",
+            "sanitizeErrorMessage",
+          ].includes(name) ||
+          (ts.isPropertyAccessExpression(candidate.expression) &&
+            ["endsWith", "includes", "startsWith"].includes(candidate.expression.name.text))
+        ) {
+          return false;
+        }
+      }
+      if (ts.isConditionalExpression(candidate)) {
+        return isTainted(candidate.whenTrue) || isTainted(candidate.whenFalse);
+      }
+      if (ts.isIdentifier(candidate) && tainted.has(candidate.text)) {
+        const parent = candidate.parent;
+        if (
+          (ts.isPropertyAssignment(parent) && parent.name === candidate) ||
+          (ts.isPropertyAccessExpression(parent) && parent.name === candidate) ||
+          (ts.isMethodDeclaration(parent) && parent.name === candidate)
+        ) {
+          return false;
+        }
+        return true;
+      }
+      return candidate.getChildren(source).some(isTainted);
+    };
+    const visitCatchNode = (node: ts.Node): void => {
+      if (node !== clause.block && ts.isCatchClause(node)) return;
+      if (ts.isVariableDeclaration(node)) {
+        const names = bindingNames(node.name);
+        if (node.initializer && isTainted(node.initializer)) {
+          for (const name of names) tainted.add(name);
+        }
+      }
+      if (
+        ts.isBinaryExpression(node) &&
+        node.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+        isTainted(node.right)
+      ) {
+        if (ts.isIdentifier(node.left)) {
+          tainted.add(node.left.text);
+        } else if (
+          ts.isPropertyAccessExpression(node.left) ||
+          ts.isElementAccessExpression(node.left)
+        ) {
+          taintMutationTarget(node.left);
+        }
+      }
+      if (ts.isCallExpression(node)) {
+        if (
+          ts.isPropertyAccessExpression(node.expression) &&
+          ["push", "unshift", "splice", "set"].includes(node.expression.name.text) &&
+          node.arguments.some(isTainted)
+        ) {
+          taintMutationTarget(node.expression.expression);
+        }
+        if (
+          ts.isPropertyAccessExpression(node.expression) &&
+          ts.isIdentifier(node.expression.expression) &&
+          node.expression.expression.text === "Object" &&
+          node.expression.name.text === "assign" &&
+          node.arguments.length > 1 &&
+          node.arguments.slice(1).some(isTainted)
+        ) {
+          taintMutationTarget(node.arguments[0]);
+        }
+        const isConsoleSink =
+          ts.isPropertyAccessExpression(node.expression) &&
+          ts.isIdentifier(node.expression.expression) &&
+          node.expression.expression.text === "console" &&
+          ["error", "warn", "log"].includes(node.expression.name.text);
+        const name = sinkName(node.expression);
+        if (isConsoleSink || isTelemetrySinkName(name)) {
+          for (const argument of node.arguments) {
+            if (isTainted(argument)) report(argument);
+          }
+        }
+      }
+      ts.forEachChild(node, visitCatchNode);
+    };
+    visitCatchNode(clause.block);
+  };
   const visit = (node: ts.Node): void => {
     if (ts.isCatchClause(node)) {
       const variable = node.variableDeclaration?.name;
-      if (variable && ts.isIdentifier(variable)) {
-        caughtThrowables.add(variable.text);
-        ts.forEachChild(node.block, visit);
-        caughtThrowables.delete(variable.text);
-        return;
-      }
-    }
-    if (ts.isCallExpression(node)) {
-      const isConsoleSink =
-        ts.isPropertyAccessExpression(node.expression) &&
-        ts.isIdentifier(node.expression.expression) &&
-        node.expression.expression.text === "console" &&
-        ["error", "warn", "log"].includes(node.expression.name.text);
-      const name = sinkName(node.expression);
-      const isTelemetrySink = isTelemetrySinkName(name);
-      if (!isConsoleSink && !isTelemetrySink) {
-        ts.forEachChild(node, visit);
-        return;
-      }
-      for (const argument of node.arguments) {
-        const text = argument.getText(source);
-        const referencesCaughtThrowable = (candidate: ts.Node): boolean => {
-          if (
-            ts.isCallExpression(candidate) &&
-            ts.isIdentifier(candidate.expression) &&
-            candidate.expression.text === "redactedThrownDiagnostics"
-          ) {
-            return false;
-          }
-          if (ts.isIdentifier(candidate) && caughtThrowables.has(candidate.text)) {
-            const parent = candidate.parent;
-            // Property names such as `{ error: "fixed" }` and `value.error`
-            // are labels, not references to a catch binding with the same name.
-            if (
-              (ts.isPropertyAssignment(parent) && parent.name === candidate) ||
-              (ts.isPropertyAccessExpression(parent) && parent.name === candidate) ||
-              (ts.isMethodDeclaration(parent) && parent.name === candidate)
-            ) {
-              return false;
-            }
-            return true;
-          }
-          return candidate.getChildren(source).some(referencesCaughtThrowable);
-        };
-        if (
-          referencesCaughtThrowable(argument) ||
-          /^(?:err|error|e|reason|releaseError)$/i.test(text) ||
-          /(?:err|error|reason|releaseError)\s*\.\s*(?:message|stack)\b/i.test(text) ||
-          /String\(\s*(?:err|error|e|reason|releaseError)\s*\)/i.test(text) ||
-          /\$\{\s*(?:err|error|e|reason|releaseError)\s*\}/i.test(text)
-        ) {
-          const line = source.getLineAndCharacterOfPosition(argument.getStart(source)).line + 1;
-          failures.push(`${source.fileName}:${line}: ${text.slice(0, 160)}`);
-        }
-      }
+      if (variable && ts.isIdentifier(variable)) inspectCatch(node, variable.text);
     }
     ts.forEachChild(node, visit);
   };
@@ -195,7 +256,52 @@ describe("runtime error logging", () => {
     ).toHaveLength(2);
   });
 
-  test("never passes raw throwables, messages, or stacks to console sinks", async () => {
+  test("tracks aliases passed to telemetry sinks", () => {
+    expect(
+      failuresForSnippet(`
+        try {
+          doThing();
+        } catch (err) {
+          const detail = err.message;
+          const payload = { detail };
+          console.error(payload);
+        }
+      `),
+    ).toHaveLength(1);
+  });
+
+  test("tracks caught values written into mutable telemetry payloads", () => {
+    expect(
+      failuresForSnippet(`
+        try {
+          doThing();
+        } catch (err) {
+          const payload = { detail: "safe" };
+          payload.detail = err.message;
+          console.error(payload);
+
+          const values = [];
+          values.push(err.stack);
+          writeAuditEvent({ values });
+        }
+      `),
+    ).toHaveLength(2);
+  });
+
+  test("allows aliases of bounded diagnostics", () => {
+    expect(
+      failuresForSnippet(`
+        try {
+          doThing();
+        } catch (err) {
+          const diagnostics = redactedThrownDiagnostics(err);
+          console.error("failed", diagnostics);
+        }
+      `),
+    ).toEqual([]);
+  });
+
+  test("never passes raw throwables, messages, or stacks to runtime telemetry", async () => {
     const failures: string[] = [];
     for (const root of RUNTIME_ROOTS) {
       for (const path of await runtimeSources(join(ROOT, root))) {

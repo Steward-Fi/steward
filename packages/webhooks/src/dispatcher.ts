@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { LookupAddress } from "node:dns";
 import type { RequestOptions } from "node:http";
 import { isIP, type LookupFunction } from "node:net";
-import type { WebhookEvent } from "@stwd/shared";
+import { redactedThrownDiagnostics, type WebhookEvent } from "@stwd/shared";
 
 import type { WebhookConfig, WebhookDeliveryResult, WebhookDispatcherOptions } from "./types";
 
@@ -529,7 +529,11 @@ export class WebhookDispatcher {
           break;
         }
       } catch (error) {
-        lastError = error instanceof Error ? error.message : "Unknown webhook delivery error";
+        lastError =
+          error instanceof WebhookValidationError
+            ? "Webhook validation failed"
+            : "Webhook delivery failed";
+        console.warn("[webhooks] delivery attempt failed", redactedThrownDiagnostics(error));
         // SEC-179: a deterministic validation rejection (bad scheme, non-public
         // host/address, unparseable URL) can never succeed on retry — stop
         // immediately instead of burning maxRetries+1 attempts with backoff and
