@@ -150,13 +150,11 @@ export function createApp(): Hono<{ Variables: AppVariables }> {
   // Mounted globally so freshness headers and request signatures are actually
   // verified on every sensitive mutating route (they were unmounted dead code
   // while /openapi.json and the tenant security checklist claimed enforcement).
-  // Default posture is verify-when-present: a request carrying stale/invalid
-  // freshness or signature headers fails closed, but the headers are not
-  // required unless the operator opts in via STEWARD_REQUIRE_REQUEST_EXPIRY /
-  // STEWARD_REQUIRE_AUTH_SIGNATURE. The env opt-in (not NODE_ENV) drives the
-  // strict mode so browser/unsigned SDK clients keep working until an operator
-  // has rolled out signing clients. Mounted here (phase 1) so they always run
-  // BEFORE the idempotency middleware (phase 2).
+  // Presented freshness and signature headers always fail closed when invalid.
+  // Production also requires freshness (unless the documented stale-request
+  // exception is enabled) and authorization signatures; explicit REQUIRE
+  // settings enable the same posture outside production. Mounted here so both
+  // guards always run before idempotency middleware.
   // Resolve binding-backed strictness and signing secrets per request so a
   // long-lived Worker isolate cannot retain a revoked deployment setting.
   app.use("*", requestExpiry());

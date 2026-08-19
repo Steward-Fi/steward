@@ -133,7 +133,7 @@ import {
   type TenantSamlSsoConfig,
   type TenantTestAccountConfig,
 } from "@stwd/shared";
-import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
+import { currentRuntimeEnvironment, runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 import { KeyStore, provisionUserWallet, Vault } from "@stwd/vault";
 import bs58 from "bs58";
 import { and, eq, gte, inArray, isNull, lt, sql } from "drizzle-orm";
@@ -2019,6 +2019,15 @@ async function createEmailAuthForTenant(tenantId: string): Promise<EmailAuth> {
 }
 
 export async function getEmailAuthForTenant(tenantId: string): Promise<EmailAuth> {
+  // Worker requests carry an immutable binding snapshot in AsyncLocalStorage.
+  // Never reuse an EmailAuth constructed under another request's provider,
+  // sender, base URL, or verifier secret. Bun/Node deployments continue to
+  // cache the process-wide configuration and explicitly invalidate it after a
+  // tenant configuration update.
+  if (currentRuntimeEnvironment() !== process.env) {
+    return createEmailAuthForTenant(tenantId);
+  }
+
   const cached = _emailAuthByTenant.get(tenantId);
   if (cached) return cached;
 

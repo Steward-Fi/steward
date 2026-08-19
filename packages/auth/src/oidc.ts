@@ -29,12 +29,14 @@ const JWKS_CACHE_MAX_ENTRIES = 256;
 // jose's internal cooldown only limits how *often* it refetches on unknown-kid;
 // it never evicts known keys, so a process-lifetime cache would not pick up an
 // IdP emergency key revocation. Rebuilding the set after this TTL guarantees a
-// rotated/revoked key stops verifying within the window. Configurable via env.
-const JWKS_MAX_AGE_MS = (() => {
-  const raw = Number(process.env.STEWARD_OIDC_JWKS_MAX_AGE_MS);
+// rotated/revoked key stops verifying within the window. Resolve the binding
+// for each cache decision so a long-lived Worker observes a tightened window.
+const DEFAULT_JWKS_MAX_AGE_MS = 60 * 60 * 1000;
+function jwksMaxAgeMs(): number {
+  const raw = Number(runtimeEnvironmentValue("STEWARD_OIDC_JWKS_MAX_AGE_MS"));
   if (Number.isFinite(raw) && raw >= 60_000) return raw;
-  return 60 * 60 * 1000; // 1 hour default
-})();
+  return DEFAULT_JWKS_MAX_AGE_MS;
+}
 function allowTestJwksFetch(): boolean {
   return (
     runtimeEnvironmentValue("NODE_ENV") === "test" &&
@@ -116,7 +118,7 @@ export async function assertPublicJwksDestination(jwksUri: string): Promise<void
 /**
  * Builds (or returns a cached) remote JWKS set whose key fetches are routed
  * through the SSRF-guarded {@link fetchPublicJwks} transport. The set is
- * rebuilt once it exceeds {@link JWKS_MAX_AGE_MS} so rotated or emergency-
+ * rebuilt once it exceeds the configured maximum age so rotated or emergency-
  * revoked IdP keys stop verifying within the window.
  *
  * Reused by both the tenant OIDC path ({@link verifyOidcJwt}) and the
@@ -132,7 +134,7 @@ export async function getPublicRemoteJWKSet(
 ): Promise<ReturnType<typeof createRemoteJWKSet>> {
   assertPinnedDnsTransportSupported("OIDC jwksUri");
   const cached = JWKS_CACHE.get(cacheKey);
-  if (cached && Date.now() - cached.createdAt <= JWKS_MAX_AGE_MS) {
+  if (cached && Date.now() - cached.createdAt <= jwksMaxAgeMs()) {
     // Refresh insertion order so the bounded map acts as an LRU cache.
     JWKS_CACHE.delete(cacheKey);
     JWKS_CACHE.set(cacheKey, cached);

@@ -6355,15 +6355,15 @@ function addHardeningInventory(spec: OpenApiSpec): OpenApiSpec {
         sensitivePrefix: sensitivePrefixForOpenApiPath(path),
         requestExpiry: {
           // Mounted globally (app.ts): freshness headers are always validated
-          // when present; they are REQUIRED only under the explicit opt-in.
-          requiredWhen: "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+          // when present and are required by the resolved security posture.
+          requiredWhen:
+            "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
           acceptedHeaders: ["X-Steward-Request-Timestamp", "X-Steward-Request-Expires-At"],
         },
         authorizationSignature: {
           // Mounted globally (app.ts): a presented X-Steward-Signature is
-          // always verified (fail closed); it is REQUIRED only under the
-          // explicit opt-in.
-          requiredWhen: "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
+          // always verified and production requires it by default.
+          requiredWhen: "NODE_ENV=production or STEWARD_REQUIRE_AUTH_SIGNATURE=true",
           header: "X-Steward-Signature",
           schemes: ["v1=hmac-sha256", "p256=ecdsa-secp256r1"],
           managedTenantKeyHeader: "X-Steward-Signing-Key-Id",

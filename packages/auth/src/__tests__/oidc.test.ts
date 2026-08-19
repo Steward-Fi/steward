@@ -1,5 +1,6 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, spyOn } from "bun:test";
 import { readFileSync } from "node:fs";
+import { withRuntimeEnvironment } from "@stwd/shared/runtime-env";
 
 import {
   assertPublicJwksDestination,
@@ -91,5 +92,30 @@ describe("assertPublicJwksDestination SSRF guard", () => {
     const reloaded = await getPublicRemoteJWKSet("https://idp.example.com/jwks", "tenant:first");
     expect(reloaded).not.toBe(first);
     clearOidcJwksCacheForTests();
+  });
+
+  it("applies the request-local JWKS maximum age to each cache decision", async () => {
+    clearOidcJwksCacheForTests();
+    let now = 1_000_000;
+    const nowSpy = spyOn(Date, "now").mockImplementation(() => now);
+    try {
+      const first = await withRuntimeEnvironment({ STEWARD_OIDC_JWKS_MAX_AGE_MS: "60000" }, () =>
+        getPublicRemoteJWKSet("https://idp.example.com/jwks", "tenant:runtime-age"),
+      );
+      now += 60_001;
+      const retained = await withRuntimeEnvironment(
+        { STEWARD_OIDC_JWKS_MAX_AGE_MS: "120000" },
+        () => getPublicRemoteJWKSet("https://idp.example.com/jwks", "tenant:runtime-age"),
+      );
+      expect(retained).toBe(first);
+
+      const rebuilt = await withRuntimeEnvironment({ STEWARD_OIDC_JWKS_MAX_AGE_MS: "60000" }, () =>
+        getPublicRemoteJWKSet("https://idp.example.com/jwks", "tenant:runtime-age"),
+      );
+      expect(rebuilt).not.toBe(first);
+    } finally {
+      nowSpy.mockRestore();
+      clearOidcJwksCacheForTests();
+    }
   });
 });

@@ -618,10 +618,9 @@ export function buildTenantSecurityChecklist(
   requestSigningKeys: TenantRequestSigningKey[],
 ): TenantSecurityChecklist {
   const production = runtimeEnvironmentValue("NODE_ENV") === "production";
-  // SEC-010: these mirror the ACTUAL enforcement posture of the mounted
-  // guards (app.ts). Freshness/signature headers are always verified when
-  // present; they are REQUIRED only via the explicit env opt-ins, so the
-  // checklist must not claim production enforcement that does not exist.
+  // These mirror the mounted guards: invalid presented headers always fail,
+  // production requires both controls (subject to the documented freshness
+  // exception), and explicit REQUIRE settings enable them elsewhere.
   const { requestExpiryRequired, authorizationSignatureRequired: authSignatureRequired } =
     resolveRequestSecurityPosture();
   const signingSecrets = configuredRequestSigningSecrets();

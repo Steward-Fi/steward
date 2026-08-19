@@ -9,9 +9,12 @@ describe("generated OpenAPI contract", () => {
       sensitive: true,
       sensitivePrefix,
       requestExpiry: {
+        requiredWhen:
+          "NODE_ENV=production unless STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true, or STEWARD_REQUIRE_REQUEST_EXPIRY=true",
         acceptedHeaders: ["X-Steward-Request-Timestamp", "X-Steward-Request-Expires-At"],
       },
       authorizationSignature: {
+        requiredWhen: "NODE_ENV=production or STEWARD_REQUIRE_AUTH_SIGNATURE=true",
         header: "X-Steward-Signature",
         schemes: ["v1=hmac-sha256", "p256=ecdsa-secp256r1"],
       },

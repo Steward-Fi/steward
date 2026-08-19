@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { readFileSync } from "node:fs";
 import { closeDb, getDb, tenantConfigs, tenants } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
+import { withRuntimeEnvironment } from "@stwd/shared/runtime-env";
 import { KeyStore } from "@stwd/vault";
 import { eq } from "drizzle-orm";
 import {
@@ -58,6 +59,67 @@ describe("getEmailAuthForTenant", () => {
     expect(provider.constructor.name).toBe("ResendProvider");
     expect(provider.from).toBe("Global <login@example.com>");
     expect(provider.replyTo).toBeUndefined();
+  });
+
+  it("isolates overlapping Worker email configuration for the same tenant", async () => {
+    clearEmailAuthTenantCacheForTests();
+    const dbHandle = getDb();
+    await dbHandle.delete(tenantConfigs).where(eq(tenantConfigs.tenantId, TEST_TENANT_ID));
+
+    process.env.APP_URL = "https://global-poison.example";
+    process.env.EMAIL_FROM = "Poison <poison@example.com>";
+    process.env.RESEND_API_KEY = "global-poison-key";
+    process.env.STEWARD_EMAIL_CODE_SECRET = "global-poison-secret-that-must-not-be-inherited";
+
+    try {
+      const first = withRuntimeEnvironment(
+        {
+          NODE_ENV: "production",
+          STEWARD_MASTER_PASSWORD: MASTER_PASSWORD,
+          APP_URL: "https://first.example.com",
+          EMAIL_FROM: "First <login@first.example.com>",
+          RESEND_API_KEY: "first-resend-key",
+          STEWARD_EMAIL_CODE_SECRET: "first-email-code-secret-at-least-32-bytes",
+        },
+        () => getEmailAuthForTenant(TEST_TENANT_ID),
+      );
+      const second = withRuntimeEnvironment(
+        {
+          NODE_ENV: "production",
+          STEWARD_MASTER_PASSWORD: MASTER_PASSWORD,
+          APP_URL: "https://second.example.com",
+          EMAIL_FROM: "Second <login@second.example.com>",
+          RESEND_API_KEY: "second-resend-key",
+          STEWARD_EMAIL_CODE_SECRET: "second-email-code-secret-at-least-32-bytes",
+        },
+        () => getEmailAuthForTenant(TEST_TENANT_ID),
+      );
+
+      const [firstAuth, secondAuth] = await Promise.all([first, second]);
+      expect(firstAuth).not.toBe(secondAuth);
+      expect((firstAuth as any).baseUrl).toBe("https://first.example.com");
+      expect((firstAuth as any).from).toBe("First <login@first.example.com>");
+      expect((secondAuth as any).baseUrl).toBe("https://second.example.com");
+      expect((secondAuth as any).from).toBe("Second <login@second.example.com>");
+
+      await expect(
+        withRuntimeEnvironment(
+          {
+            NODE_ENV: "production",
+            STEWARD_MASTER_PASSWORD: MASTER_PASSWORD,
+            APP_URL: "https://missing-secret.example.com",
+            EMAIL_FROM: "Missing <login@missing-secret.example.com>",
+            RESEND_API_KEY: "missing-secret-resend-key",
+          },
+          () => getEmailAuthForTenant(TEST_TENANT_ID),
+        ),
+      ).rejects.toThrow("STEWARD_EMAIL_CODE_SECRET is required");
+    } finally {
+      process.env.APP_URL = "https://app.example.com";
+      process.env.EMAIL_FROM = "Global <login@example.com>";
+      process.env.RESEND_API_KEY = "global-resend-key";
+      delete process.env.STEWARD_EMAIL_CODE_SECRET;
+    }
   });
 
   it("uses the tenant-specific config when emailConfig is set", async () => {
