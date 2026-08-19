@@ -566,22 +566,60 @@ function guardRequestDatabaseValue<T>(value: T, context: RequestDatabaseContext)
   const existing = context.guardedObjects.get(objectValue);
   if (existing) return existing as T;
 
+  const guardMember = (target: object, member: unknown): unknown => {
+    if (typeof member === "function") {
+      return (...args: unknown[]) => {
+        assertRequestDatabaseContextActive(context);
+        const result = Reflect.apply(member, target, args);
+        return guardRequestDatabaseValue(result, context);
+      };
+    }
+    return guardRequestDatabaseValue(member, context);
+  };
+
   const guarded = new Proxy(objectValue, {
     get(target, property) {
       assertRequestDatabaseContextActive(context);
       const member = Reflect.get(target, property, target);
-      if (typeof member === "function") {
-        return (...args: unknown[]) => {
-          assertRequestDatabaseContextActive(context);
-          const result = Reflect.apply(member, target, args);
-          return guardRequestDatabaseValue(result, context);
-        };
-      }
-      return guardRequestDatabaseValue(member, context);
+      return guardMember(target, member);
     },
     set(target, property, nextValue) {
       assertRequestDatabaseContextActive(context);
       return Reflect.set(target, property, nextValue, target);
+    },
+    getOwnPropertyDescriptor(target, property) {
+      assertRequestDatabaseContextActive(context);
+      const descriptor = Reflect.getOwnPropertyDescriptor(target, property);
+      if (!descriptor) return undefined;
+      if (!descriptor.configurable) {
+        throw new Error("REQUEST_DATABASE_REFLECTION_UNAVAILABLE");
+      }
+      if ("value" in descriptor) {
+        return { ...descriptor, value: guardMember(target, descriptor.value) };
+      }
+      return {
+        ...descriptor,
+        get: descriptor.get
+          ? () => {
+              assertRequestDatabaseContextActive(context);
+              return guardRequestDatabaseValue(Reflect.apply(descriptor.get!, target, []), context);
+            }
+          : undefined,
+        set: descriptor.set
+          ? (nextValue: unknown) => {
+              assertRequestDatabaseContextActive(context);
+              Reflect.apply(descriptor.set!, target, [nextValue]);
+            }
+          : undefined,
+      };
+    },
+    getPrototypeOf() {
+      assertRequestDatabaseContextActive(context);
+      throw new Error("REQUEST_DATABASE_REFLECTION_UNAVAILABLE");
+    },
+    ownKeys(target) {
+      assertRequestDatabaseContextActive(context);
+      return Reflect.ownKeys(target);
     },
   });
   context.guardedObjects.set(objectValue, guarded);

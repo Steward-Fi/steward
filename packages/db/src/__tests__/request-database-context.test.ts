@@ -109,6 +109,26 @@ describe("request-scoped database context", () => {
     expect(() => capturedQuery.from({} as never)).toThrow("REQUEST_DATABASE_CONTEXT_CLOSED");
   });
 
+  test("does not expose raw capabilities through property descriptors or prototypes", async () => {
+    const rawSession = { execute: () => "mutated" };
+    const requestDb = { session: rawSession } as unknown as ReturnType<typeof getDb>;
+    let capturedSession!: typeof rawSession;
+
+    await withRequestDatabase(requestDb, async () => {
+      const guarded = getDb();
+      expect(Reflect.ownKeys(guarded)).toContain("session");
+      const descriptor = Object.getOwnPropertyDescriptor(guarded, "session");
+      capturedSession = descriptor?.value as typeof rawSession;
+      expect(capturedSession).not.toBe(rawSession);
+      expect(capturedSession.execute()).toBe("mutated");
+      expect(() => Object.getPrototypeOf(guarded)).toThrow(
+        "REQUEST_DATABASE_REFLECTION_UNAVAILABLE",
+      );
+    });
+
+    expect(() => capturedSession.execute()).toThrow("REQUEST_DATABASE_CONTEXT_CLOSED");
+  });
+
   test("drains registered detached work before revoking its database capability", async () => {
     const requestDb = { marker: "request" } as unknown as ReturnType<typeof getDb>;
     const release = deferred();
