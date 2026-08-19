@@ -36,14 +36,19 @@ export function assertSecureBaseUrl(baseUrl: string): void {
   try {
     parsed = new URL(baseUrl);
   } catch {
-    throw new Error(`Invalid STEWARD_URL: ${JSON.stringify(baseUrl)} is not a valid URL`);
+    // Never reflect the supplied value: operators sometimes accidentally put
+    // credentials in this variable, and validation failures reach stderr.
+    throw new Error("Invalid STEWARD_URL: value is not a valid URL");
+  }
+  if (parsed.username || parsed.password) {
+    throw new Error("Invalid STEWARD_URL: embedded credentials are not allowed");
   }
   if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
-    throw new Error(`Invalid STEWARD_URL protocol "${parsed.protocol}": only http(s) is supported`);
+    throw new Error("Invalid STEWARD_URL protocol: only http(s) is supported");
   }
   if (parsed.protocol === "http:" && !LOCAL_HOSTS.has(parsed.hostname)) {
     throw new Error(
-      `Insecure STEWARD_URL "${baseUrl}": http:// is only allowed for localhost. Use https:// for remote hosts.`,
+      "Insecure STEWARD_URL: http:// is only allowed for localhost. Use https:// for remote hosts.",
     );
   }
 }
