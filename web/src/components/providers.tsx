@@ -2,7 +2,15 @@
 
 import { StewardProvider, useAuth } from "@stwd/react";
 import { usePathname } from "next/navigation";
-import { createElement, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import {
+  createElement,
+  type ReactNode,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { clearAuthToken, setAuthToken, steward } from "@/lib/api";
 import { STEWARD_API_URL } from "@/lib/steward-api-url";
 
@@ -56,15 +64,17 @@ function removeLegacyRefreshToken(): void {
 }
 
 /**
- * Syncs the Steward auth JWT into the legacy API client once.
- * Uses a ref to avoid re-creating the client on every render.
+ * Syncs each new Steward auth JWT into the legacy API client.
+ * Uses a ref to avoid reconfiguring the client on unrelated renders.
  */
 function AuthTokenSync({ children }: { children: ReactNode }) {
   const auth = useAuth();
   const lastToken = useRef<string | null>(null);
   const sessionToken = auth.session?.token ?? null;
 
-  useEffect(() => {
+  // Install the rotated token before descendant passive effects can issue
+  // tenant-scoped requests through the compatibility client.
+  useLayoutEffect(() => {
     if (!auth.isAuthenticated) {
       lastToken.current = null;
       clearAuthToken();

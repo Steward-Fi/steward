@@ -45,10 +45,6 @@ export default function ApprovalsPage() {
     try {
       setLoading(true);
       setError(null);
-      // AuthTokenSync is an ancestor effect. Yield one task so a tenant switch
-      // installs its rotated access token before this request uses the shared
-      // browser client.
-      await new Promise<void>((resolve) => setTimeout(resolve, 0));
       // Request the max page size so the dashboard shows all pending items in a single load.
       const items = await steward.listApprovals({ limit: 200 });
       if (requestGeneration.current !== generation) return;
@@ -64,11 +60,12 @@ export default function ApprovalsPage() {
   }, [activeTenantId]);
 
   useEffect(() => {
+    if (auth.isLoading || !auth.isAuthenticated || !activeTenantId) return;
     void loadPending();
     return () => {
       requestGeneration.current += 1;
     };
-  }, [loadPending]);
+  }, [activeTenantId, auth.isAuthenticated, auth.isLoading, loadPending]);
 
   async function handleAction(txId: string, action: "approve" | "reject") {
     const generation = requestGeneration.current;
@@ -163,7 +160,7 @@ export default function ApprovalsPage() {
           <p className="text-text-secondary text-sm mb-1">Failed to load approvals</p>
           <p className="text-text-tertiary text-xs mb-4 font-mono">{visibleError}</p>
           <button
-            onClick={loadPending}
+            onClick={() => void loadPending()}
             className="px-4 py-2 text-sm bg-accent text-bg hover:bg-accent-hover transition-colors"
           >
             Retry
