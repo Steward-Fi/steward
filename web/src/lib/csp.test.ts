@@ -64,7 +64,6 @@ describe("CSP connect-src allowlist (SEC-077)", () => {
       "https://mainnet.optimism.io",
       "https://arb1.arbitrum.io",
       "https://rpc.ankr.com",
-      "https://api.web3modal.org",
       "https://*.walletconnect.com",
       "https://*.walletconnect.org",
       "wss://*.walletconnect.com",

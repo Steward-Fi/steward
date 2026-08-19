@@ -35,7 +35,6 @@ const EVM_RPC_ORIGINS = [
 ] as const;
 
 const WALLETCONNECT_ORIGINS = [
-  "https://api.web3modal.org",
   "https://*.walletconnect.com",
   "https://*.walletconnect.org",
   "wss://*.walletconnect.com",

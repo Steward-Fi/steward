@@ -7,6 +7,7 @@ export const WALLET_E2E_CREDENTIAL_NAMES = [
   "E2E_PHANTOM_SEED_PHRASE",
   "E2E_PHANTOM_PASSWORD",
 ] as const;
+export const WALLET_E2E_PASSWORD_NAMES = ["E2E_METAMASK_PASSWORD", "E2E_PHANTOM_PASSWORD"] as const;
 
 type CredentialName = (typeof WALLET_E2E_CREDENTIAL_NAMES)[number];
 type CredentialEnvironment = Readonly<Record<string, string | undefined>>;
@@ -71,6 +72,15 @@ export function readWalletE2ECredentials(
 
 export function assertWalletE2ECredentials(env: CredentialEnvironment = process.env): void {
   readWalletE2ECredentials(env);
+}
+
+/** Real flows unlock already-built profiles and must not receive seed phrases. */
+export function assertWalletE2EPasswords(env: CredentialEnvironment = process.env): void {
+  const missing = WALLET_E2E_PASSWORD_NAMES.filter((name) => requiredValue(env, name).length === 0);
+  if (missing.length > 0) {
+    throw new Error(`Wallet E2E passwords are not provisioned. Missing: ${missing.join(", ")}`);
+  }
+  for (const name of WALLET_E2E_PASSWORD_NAMES) assertPassword(name, requiredValue(env, name));
 }
 
 /**

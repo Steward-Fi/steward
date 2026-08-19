@@ -1,8 +1,13 @@
-import { readdirSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 
 const WORKFLOWS = [".github/workflows/pr.yml", ".github/workflows/ci.yml"] as const;
 const NON_WORKSPACE_MATRIX_ENTRIES = ["scripts/__tests__"] as const;
+const WALLET_CONTRACT = "web/e2e/wallets/wallet-e2e-contract.test.ts";
+const WALLET_SPECS = [
+  "web/e2e/wallets/metamask-siwe.spec.ts",
+  "web/e2e/wallets/phantom-siws.spec.ts",
+] as const;
 const PACKAGE_TEST_FILE_PATTERNS = [
   "src/**/*.test.ts",
   "src/**/*.spec.ts",
@@ -353,7 +358,33 @@ export function assertCompleteCoverage(
     throw new Error(`CI inventory contains non-test targets: ${stale.join(", ")}`);
 }
 
+export function assertWalletE2EInventory(rootDir: string): void {
+  for (const path of [WALLET_CONTRACT, ...WALLET_SPECS]) {
+    if (!existsSync(resolve(rootDir, path)))
+      throw new Error(`wallet E2E inventory is missing ${path}`);
+  }
+  for (const workflowPath of WORKFLOWS) {
+    const workflow = readFileSync(resolve(rootDir, workflowPath), "utf8");
+    if (!workflow.includes("bun test src e2e/wallets/wallet-e2e-contract.test.ts")) {
+      throw new Error(`${workflowPath} does not explicitly execute the wallet E2E contract`);
+    }
+  }
+
+  const walletWorkflowPath = ".github/workflows/wallet-e2e.yml";
+  const walletWorkflow = readFileSync(resolve(rootDir, walletWorkflowPath), "utf8");
+  for (const command of [
+    "bun test e2e/wallets/wallet-e2e-contract.test.ts",
+    "bun run test:e2e:wallets:list",
+    "bun run test:e2e:wallets",
+  ]) {
+    if (!walletWorkflow.includes(command)) {
+      throw new Error(`${walletWorkflowPath} does not explicitly execute ${command}`);
+    }
+  }
+}
+
 export function checkCiTestInventory(rootDir = resolve(import.meta.dir, "..")): void {
+  assertWalletE2EInventory(rootDir);
   const testTargets = repositoryTestTargets(rootDir);
   const dedicatedPaths = Object.keys(DEDICATED_JOBS);
   let canonicalMatrix: string[] | undefined;

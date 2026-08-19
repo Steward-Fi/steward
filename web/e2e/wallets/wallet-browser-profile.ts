@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { BrowserContext } from "@playwright/test";
@@ -23,7 +23,9 @@ export async function withWalletBrowserProfile<TContext extends Pick<BrowserCont
   use,
   environment = process.env,
 }: WalletBrowserProfileOptions<TContext>): Promise<void> {
-  const profile = await mkdtemp(join(tmpdir(), prefix));
+  const profileRoot = process.env.STEWARD_WALLET_PROFILE_ROOT ?? tmpdir();
+  await mkdir(profileRoot, { recursive: true, mode: 0o700 });
+  const profile = await mkdtemp(join(profileRoot, prefix));
   let context: TContext | undefined;
   try {
     await prepare?.(profile);

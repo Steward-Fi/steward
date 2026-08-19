@@ -78,6 +78,7 @@
     "socket.io-parser": "^4.2.7",
     "elliptic": "^6.6.1",
     "hono": "^4.12.34",
-    "@hono/node-server": "^1.19.15"
+    "@hono/node-server": "^1.19.15",
+    "tsup": "^8.5.1"
   }
 }

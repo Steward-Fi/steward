@@ -6,18 +6,51 @@ import walletConfig from "../../playwright.wallets.config";
 import { cleanupWalletE2E } from "../../scripts/cleanup-wallet-e2e";
 import { assertWalletCaches, walletCacheRequirements } from "../../scripts/run-wallet-e2e";
 import { e2eChildProcessEnvironment } from "../global-setup";
+import { assertWalletExtensionIntegrity } from "./cache-contract";
 import {
+  assertWalletE2EPasswords,
   environmentWithoutWalletCredentials,
   readWalletE2ECredentials,
   WALLET_E2E_CREDENTIAL_NAMES,
+  WALLET_E2E_PASSWORD_NAMES,
   withWalletCredentialsRemoved,
 } from "./credentials";
-import { assertExtensionDigest } from "./metamask-extension";
 import { METAMASK_CACHE_ID } from "./setup/metamask/metamask.setup";
 import { PHANTOM_CACHE_ID } from "./setup/phantom/phantom.setup";
 import { withWalletBrowserProfile } from "./wallet-browser-profile";
+import { writeWalletCacheManifest } from "./wallet-cache-provenance";
 
 const temporaryDirectories: string[] = [];
+
+async function waitForFile(path: string): Promise<string> {
+  for (let attempt = 0; attempt < 400; attempt += 1) {
+    const value = await readFile(path, "utf8").catch(() => "");
+    if (value) return value;
+    await Bun.sleep(20);
+  }
+  throw new Error(`Timed out waiting for ${path}`);
+}
+
+async function stopHarness(child: ReturnType<typeof Bun.spawn>): Promise<void> {
+  if (child.exitCode === null) {
+    child.kill("SIGTERM");
+    await Promise.race([child.exited, Bun.sleep(1000)]);
+  }
+  if (child.exitCode === null) child.kill("SIGKILL");
+  await child.exited;
+}
+
+async function processExited(pid: number): Promise<boolean> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    try {
+      process.kill(pid, 0);
+      await Bun.sleep(20);
+    } catch {
+      return true;
+    }
+  }
+  return false;
+}
 
 afterEach(async () => {
   await Promise.all(
@@ -70,6 +103,24 @@ describe("wallet extension E2E contract", () => {
       phantomSeedPhrase: seed,
       phantomPassword: "phantom-test-password",
     });
+  });
+
+  test("real flows require only passwords and reject missing or short values", () => {
+    expect(() =>
+      assertWalletE2EPasswords({
+        E2E_METAMASK_PASSWORD: "metamask-test-password",
+        E2E_PHANTOM_PASSWORD: "phantom-test-password",
+      }),
+    ).not.toThrow();
+    expect(() => assertWalletE2EPasswords({})).toThrow(
+      "Wallet E2E passwords are not provisioned. Missing: E2E_METAMASK_PASSWORD, E2E_PHANTOM_PASSWORD",
+    );
+    expect(() =>
+      assertWalletE2EPasswords({
+        E2E_METAMASK_PASSWORD: "short",
+        E2E_PHANTOM_PASSWORD: "phantom-test-password",
+      }),
+    ).toThrow("E2E_METAMASK_PASSWORD must contain at least 12 characters");
   });
 
   test("rejects a mnemonic with the right word count but an invalid checksum", () => {
@@ -158,6 +209,62 @@ describe("wallet extension E2E contract", () => {
     await expect(stat(profilePath)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
+  test("forwards TERM, escalates to KILL, and removes the wallet child process group", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "steward-wallet-process-group-"));
+    temporaryDirectories.push(cwd);
+    const childPidFile = join(cwd, "child-pid");
+    const descendantPidFile = join(cwd, "descendant-pid");
+    const childTermFile = join(cwd, "child-term");
+    const descendantTermFile = join(cwd, "descendant-term");
+    const descendantSource = `import { writeFileSync } from "node:fs"; process.on("SIGTERM",()=>writeFileSync(${JSON.stringify(descendantTermFile)},"term")); writeFileSync(${JSON.stringify(descendantPidFile)},String(process.pid)); await new Promise(()=>{});`;
+    const childSource = `import { writeFileSync } from "node:fs"; process.on("SIGTERM",()=>writeFileSync(${JSON.stringify(childTermFile)},"term")); Bun.spawn(["bun","-e",${JSON.stringify(descendantSource)}],{stdout:"ignore",stderr:"ignore"}); writeFileSync(${JSON.stringify(childPidFile)},String(process.pid)); await new Promise(()=>{});`;
+    const processGroupModule = join(import.meta.dir, "process-group.ts");
+    const harness = join(cwd, "harness.ts");
+    await writeFile(
+      harness,
+      `import { runProcessGroup } from ${JSON.stringify(processGroupModule)}; process.exitCode = await runProcessGroup(["bun","-e",${JSON.stringify(childSource)}],{cwd:${JSON.stringify(cwd)},stdin:"inherit",stdout:"inherit",stderr:"inherit"},200);`,
+    );
+    const parent = Bun.spawn(["bun", harness], { cwd, stderr: "pipe", stdout: "pipe" });
+    try {
+      const childPid = Number(await waitForFile(childPidFile));
+      const descendantPid = Number(await waitForFile(descendantPidFile));
+      parent.kill("SIGTERM");
+
+      expect(await parent.exited).toBe(143);
+      expect(await readFile(childTermFile, "utf8")).toBe("term");
+      expect(await readFile(descendantTermFile, "utf8")).toBe("term");
+      expect(await processExited(childPid)).toBe(true);
+      expect(await processExited(descendantPid)).toBe(true);
+    } finally {
+      await stopHarness(parent);
+    }
+  });
+
+  test("removes a browser descendant left behind by a successful child", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "steward-wallet-final-cleanup-"));
+    temporaryDirectories.push(cwd);
+    const descendantPidFile = join(cwd, "descendant-pid");
+    const descendantTermFile = join(cwd, "descendant-term");
+    const descendantSource = `import { writeFileSync } from "node:fs"; process.on("SIGTERM",()=>writeFileSync(${JSON.stringify(descendantTermFile)},"term")); writeFileSync(${JSON.stringify(descendantPidFile)},String(process.pid)); await new Promise(()=>{});`;
+    const childSource = `const descendant=Bun.spawn(["bun","-e",${JSON.stringify(descendantSource)}],{stdout:"ignore",stderr:"ignore"}); descendant.unref(); while (!require("node:fs").existsSync(${JSON.stringify(descendantPidFile)})) await Bun.sleep(10);`;
+    const processGroupModule = join(import.meta.dir, "process-group.ts");
+    const harness = join(cwd, "harness.ts");
+    await writeFile(
+      harness,
+      `import { runProcessGroup } from ${JSON.stringify(processGroupModule)}; process.exitCode = await runProcessGroup(["bun","-e",${JSON.stringify(childSource)}],{cwd:${JSON.stringify(cwd)},stdin:"inherit",stdout:"inherit",stderr:"inherit"},200);`,
+    );
+    const parent = Bun.spawn(["bun", harness], { cwd, stderr: "pipe", stdout: "pipe" });
+    try {
+      const descendantPid = Number(await waitForFile(descendantPidFile));
+
+      expect(await parent.exited).toBe(0);
+      expect(await readFile(descendantTermFile, "utf8")).toBe("term");
+      expect(await processExited(descendantPid)).toBe(true);
+    } finally {
+      await stopHarness(parent);
+    }
+  });
+
   test("scrubs Synpress Cache child environment and restores the owning process", async () => {
     const originals = new Map(
       WALLET_E2E_CREDENTIAL_NAMES.map((name) => [name, process.env[name]] as const),
@@ -203,6 +310,7 @@ describe("wallet extension E2E contract", () => {
     const workflowPath = join(import.meta.dir, "../../../.github/workflows/wallet-e2e.yml");
     const workflowSource = await readFile(workflowPath, "utf8");
     const workflow = Bun.YAML.parse(workflowSource) as {
+      permissions?: Record<string, string>;
       on?: {
         workflow_dispatch?: {
           inputs?: Record<string, { required?: boolean; type?: string }>;
@@ -214,6 +322,7 @@ describe("wallet extension E2E contract", () => {
           env?: Record<string, string>;
           environment?: string;
           needs?: string;
+          permissions?: Record<string, string>;
           steps?: Array<{
             env?: Record<string, string>;
             name?: string;
@@ -231,14 +340,24 @@ describe("wallet extension E2E contract", () => {
       required: true,
       type: "string",
     });
+    expect(workflow.permissions).toEqual({});
     expect(authorize?.environment).toBeUndefined();
+    expect(authorize?.permissions).toEqual({
+      checks: "read",
+      contents: "read",
+      "pull-requests": "read",
+      statuses: "read",
+    });
     expect(JSON.stringify(authorize)).not.toContain("secrets.");
     expect(authorize?.steps?.[0]?.run).toContain('"refs/heads/develop"');
+    expect(authorize?.steps?.[0]?.run).toContain("group_by(.user.login | ascii_downcase)");
+    expect(authorize?.steps?.[0]?.run).toContain("map(sort_by(.submitted_at, .id) | last)");
     expect(job?.environment).toBe("wallet-e2e");
     expect(job?.needs).toBe("authorize-target");
     expect(job?.env).toBeUndefined();
+    expect(job?.permissions).toEqual({ contents: "read" });
     expect(workflowSource).toContain("if: github.ref == 'refs/heads/develop'");
-    expect(workflowSource).toContain("bunx turbo run build --filter=@stwd/api...");
+    expect(workflowSource).toContain("bunx turbo run build --filter=@stwd/web...");
     const checkout = job?.steps?.find((step) => step.name === "Checkout");
     expect(checkout?.with).toMatchObject({
       "persist-credentials": false,
@@ -248,13 +367,16 @@ describe("wallet extension E2E contract", () => {
     const secretSteps = (job?.steps ?? [])
       .filter((step) => WALLET_E2E_CREDENTIAL_NAMES.some((name) => step.env?.[name] !== undefined))
       .map((step) => ({ names: Object.keys(step.env ?? {}).sort(), step: step.name }));
-    expect(secretSteps).toEqual(
-      [
+    expect(secretSteps).toEqual([
+      ...[
         "Fail closed when wallet credentials are not provisioned",
         "Build isolated wallet-extension profiles",
-        "Run real wallet authentication flows",
       ].map((step) => ({ names: [...WALLET_E2E_CREDENTIAL_NAMES].sort(), step })),
-    );
+      {
+        names: [...WALLET_E2E_PASSWORD_NAMES].sort(),
+        step: "Run real wallet authentication flows",
+      },
+    ]);
   });
 
   test("rejects downloaded wallet extension bytes that do not match the reviewed digest", async () => {
@@ -263,8 +385,8 @@ describe("wallet extension E2E contract", () => {
     const extension = join(cwd, "wallet-extension.zip");
     await writeFile(extension, "unreviewed extension bytes");
 
-    await expect(assertExtensionDigest(extension, "0".repeat(64))).rejects.toThrow(
-      "Downloaded wallet extension failed SHA-256 verification",
+    await expect(assertWalletExtensionIntegrity(extension, "0".repeat(64))).rejects.toThrow(
+      "Wallet extension artifact failed SHA-256 integrity verification",
     );
   });
 
@@ -289,21 +411,30 @@ describe("wallet extension E2E contract", () => {
     temporaryDirectories.push(cwd);
 
     const requirements = walletCacheRequirements(cwd);
-    expect(requirements.map(({ name }) => name)).toEqual(["MetaMask", "Phantom"]);
+    expect(requirements.map(({ name }) => name)).toEqual([
+      "MetaMask",
+      "Phantom",
+      "Phantom extension",
+    ]);
     expect(requirements.map(({ path }) => path.split("/").at(-1))).toEqual([
       METAMASK_CACHE_ID,
       PHANTOM_CACHE_ID,
+      "bfnaelmomeimhlpmgjnjophhpkkoljpa",
     ]);
     await expect(assertWalletCaches(cwd)).rejects.toThrow(
-      "Missing Synpress cache for MetaMask, Phantom",
+      "Missing Synpress cache for MetaMask, Phantom, Phantom extension",
     );
 
     for (const requirement of requirements) {
       await mkdir(requirement.path, { recursive: true });
       await writeFile(join(requirement.path, "cache-ready"), "test cache marker");
+      await writeWalletCacheManifest(requirement.path, requirement.identity);
     }
     await expect(assertWalletCaches(cwd)).resolves.toBeUndefined();
-  });
+
+    await writeFile(join(requirements[0].path, "cache-ready"), "tampered cache marker");
+    await expect(assertWalletCaches(cwd)).rejects.toThrow("Missing Synpress cache for MetaMask");
+  }, 20_000);
 
   test("collects only the two wallet specs and excludes them from the default suite", async () => {
     const walletList = Bun.spawnSync(

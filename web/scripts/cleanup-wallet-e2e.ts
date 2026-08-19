@@ -7,6 +7,7 @@ const PID_FILE = resolve(WEB_ROOT, "e2e/.e2e-pids.json");
 const NEXT_BUILD_DIR = resolve(WEB_ROOT, ".next");
 const GENERATED_WALLET_PATHS = [
   resolve(WEB_ROOT, ".cache-synpress"),
+  resolve(WEB_ROOT, ".wallet-e2e-profiles"),
   resolve(WEB_ROOT, "test-results"),
   resolve(WEB_ROOT, "playwright-report"),
   resolve(WEB_ROOT, "blob-report"),
