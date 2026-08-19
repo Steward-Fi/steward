@@ -20,6 +20,9 @@ export const DIRECT_TENANT_TABLES = [
   "digital_asset_account_aggregations",
   "digital_asset_account_wallets",
   "digital_asset_accounts",
+  "evm_wallet_nonce_inflight",
+  "evm_wallet_nonce_owners",
+  "evm_wallet_nonces",
   "execution_authorization_nonces",
   "global_wallet_action_confirmations",
   "intents",
@@ -74,12 +77,7 @@ export const INDIRECT_TENANT_TABLES = {
   transactions: "EXISTS agents(id = agent_id AND tenant_id = current tenant)",
 } as const;
 
-export const TENANT_COLUMN_BACKFILL_TABLES = {
-  evm_wallet_nonce_inflight:
-    "wallet addresses are not tenant-unique; add tenant_id and a composite ownership FK before RLS",
-  evm_wallet_nonces:
-    "wallet addresses are not tenant-unique; add tenant_id and a composite ownership FK before RLS",
-} as const;
+export const TENANT_COLUMN_BACKFILL_TABLES = {} as const;
 
 export const HYBRID_SCOPE_TABLES = {
   approval_queue:

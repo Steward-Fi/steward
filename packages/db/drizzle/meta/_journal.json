@@ -617,6 +617,13 @@
       "when": 1787111201000,
       "tag": "0107_x_disconnect_route_recovery",
       "breakpoints": true
+    },
+    {
+      "idx": 108,
+      "version": "7",
+      "when": 1787111202000,
+      "tag": "0108_evm_nonce_tenant_ownership",
+      "breakpoints": true
     }
   ]
 }

@@ -1851,6 +1851,7 @@ export class Vault {
         const allocatedNonce =
           request.nonce === undefined
             ? await allocateEvmNonce({
+                tenantId: request.tenantId,
                 walletAddress: account.address,
                 chainId,
                 getPendingNonce: (address) =>
@@ -1870,6 +1871,7 @@ export class Vault {
           if (allocatedNonce !== undefined) {
             // Best-effort: confirmation bookkeeping must not fail a good send.
             await confirmEvmNonce({
+              tenantId: request.tenantId,
               walletAddress: account.address,
               chainId,
               nonce: allocatedNonce,
@@ -1880,6 +1882,7 @@ export class Vault {
             // Best-effort: mark the dropped nonce reclaimable so the wallet
             // doesn't wedge behind a permanent hole.
             await markEvmNonceDropped({
+              tenantId: request.tenantId,
               walletAddress: account.address,
               chainId,
               nonce: allocatedNonce,
@@ -1897,6 +1900,7 @@ export class Vault {
         const nonce =
           request.nonce ??
           (await allocateEvmNonce({
+            tenantId: request.tenantId,
             walletAddress: account.address,
             chainId,
             getPendingNonce: (address) =>

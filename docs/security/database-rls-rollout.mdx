@@ -85,9 +85,11 @@ a Drizzle table is added without classification.
   reputation cache, and archive chunks) use an `EXISTS` policy through their
   tenant-owned parent. Parent indexes and immutable ownership constraints are
   activation prerequisites.
-- EVM nonce tables cannot safely infer a tenant from wallet address because an
-  address is not tenant-unique. Add and backfill `tenant_id` plus a composite
-  ownership foreign key before enabling their policies.
+- EVM nonce counters are tenant-scoped and reference the globally unique
+  `(wallet_address, chain_id)` claim in `evm_wallet_nonce_owners`. Migration
+  `0108` backfills only namespaces that resolve to exactly one tenant and fails
+  closed on missing or ambiguous legacy ownership; the claim prevents two
+  tenants from allocating the same on-chain nonce independently.
 - `user_push_subscriptions` has intentionally nullable `tenant_id`. Tenant
   subscriptions and global user subscriptions require separate, explicit
   policies; it must not inherit the uniform direct-table policy generator.
