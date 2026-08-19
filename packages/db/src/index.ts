@@ -51,6 +51,14 @@ export {
   sanitizePluginMigrationId,
 } from "./plugin-migrate";
 export {
+  assessRlsCatalogSnapshot,
+  inspectRlsCatalog,
+  RLS_ACTIVATION_TABLES,
+  type RlsCatalogAssessment,
+  type RlsCatalogClient,
+  type RlsCatalogRow,
+} from "./rls-catalog-gate";
+export {
   ALL_INVENTORIED_TABLES,
   BOOTSTRAP_ROOT_TABLES,
   DIRECT_TENANT_TABLES,

@@ -105,6 +105,17 @@ Partitioned tables require policies on the parent plus an activation assertion
 over `pg_partition_tree`. The catalog gate must also reject every non-inventory
 table in future migrations.
 
+`inspectRlsCatalog` is the read-only structural gate for that maintenance
+window. It accepts a fully inactive catalog (including policies staged while
+all RLS flags remain off), but once any protected table or partition has an RLS
+flag it requires the complete inventoried set to be `ENABLE` + `FORCE`. It also
+rejects inventory drift, RLS on intentionally global tables, orphan
+partitions, table ownership by the runtime role, `SUPERUSER`, and
+`BYPASSRLS`. The gate counts policy coverage; it does not prove policy
+expressions correct and is not wired to production startup yet. Activation
+still requires the policy generator, restricted bootstrap roles/functions,
+transaction propagation, and the full cross-tenant suite.
+
 ## Roles and activation order
 
 1. Create a NOLOGIN migration owner and a distinct LOGIN application role with
