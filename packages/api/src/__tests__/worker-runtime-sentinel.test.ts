@@ -133,6 +133,37 @@ test("Worker waitUntil keeps the request database alive for registered backgroun
   expect(closes).toBe(1);
 });
 
+test("Worker closes a deferred database exactly once when waitUntil registration fails", async () => {
+  const requestDb = { marker: "worker-wait-until-failure" } as unknown as ReturnType<typeof getDb>;
+  let closes = 0;
+
+  await expect(
+    withWorkerRequestDatabase(
+      {
+        DATABASE_URL: "postgresql://worker.invalid/steward",
+        DATABASE_DRIVER: "neon-websocket",
+      },
+      async () => {
+        await registerRequestDatabaseTask(async () => {});
+        return "response";
+      },
+      {
+        createHandle: () => ({
+          driver: "neon-websocket" as const,
+          db: requestDb as never,
+          async close() {
+            closes += 1;
+          },
+        }),
+        waitUntil() {
+          throw new Error("waitUntil registration failed");
+        },
+      },
+    ),
+  ).rejects.toThrow("waitUntil registration failed");
+  expect(closes).toBe(1);
+});
+
 test("Worker database selection rejects missing or unsupported drivers", async () => {
   for (const DATABASE_DRIVER of [undefined, "", "postgres-js", "bogus"]) {
     await expect(
