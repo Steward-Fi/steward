@@ -15,7 +15,7 @@ describe("generated OpenAPI contract", () => {
       },
       authorizationSignature: {
         requiredWhen:
-          "STEWARD_REQUIRE_AUTH_SIGNATURE=true, or NODE_ENV=production for requests other than exact public auth bootstrap routes and verified user sessions on enumerated auth, user, tenant, and dashboard surfaces",
+          "STEWARD_REQUIRE_AUTH_SIGNATURE=true, or NODE_ENV=production for requests other than public auth bootstrap, authenticated browser auth mutations, and verified user-session requests under /user",
         header: "X-Steward-Signature",
         schemes: ["v1=hmac-sha256", "p256=ecdsa-secp256r1"],
       },

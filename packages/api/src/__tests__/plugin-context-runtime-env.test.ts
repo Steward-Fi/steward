@@ -8,35 +8,21 @@ const SALT_B = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 
 describe("plugin credential roots", () => {
   it("binds lease encryption to the current immutable runtime environment", async () => {
-    const context = buildPluginContext();
-    const sealed = await withRuntimeEnvironment(
+    const first = await withRuntimeEnvironment(
       { STEWARD_MASTER_PASSWORD: "plugin-master-a", STEWARD_KDF_SALT: SALT_A },
-      () => context.sealCredentialLeaseToken("tenant-a", "lease-a", "credential-a"),
+      () => buildPluginContext(),
     );
+    const second = await withRuntimeEnvironment(
+      { STEWARD_MASTER_PASSWORD: "plugin-master-b", STEWARD_KDF_SALT: SALT_B },
+      () => buildPluginContext(),
+    );
+    const sealed = await first.sealCredentialLeaseToken("tenant-a", "lease-a", "credential-a");
 
     await expect(
-      withRuntimeEnvironment(
-        { STEWARD_MASTER_PASSWORD: "plugin-master-a", STEWARD_KDF_SALT: SALT_A },
-        () =>
-          context.exerciseCredentialLeaseToken(
-            "tenant-a",
-            "lease-a",
-            sealed,
-            async (token) => token,
-          ),
-      ),
+      first.exerciseCredentialLeaseToken("tenant-a", "lease-a", sealed, async (token) => token),
     ).resolves.toBe("credential-a");
     await expect(
-      withRuntimeEnvironment(
-        { STEWARD_MASTER_PASSWORD: "plugin-master-b", STEWARD_KDF_SALT: SALT_B },
-        () =>
-          context.exerciseCredentialLeaseToken(
-            "tenant-a",
-            "lease-a",
-            sealed,
-            async (token) => token,
-          ),
-      ),
+      second.exerciseCredentialLeaseToken("tenant-a", "lease-a", sealed, async (token) => token),
     ).rejects.toThrow();
   });
 
