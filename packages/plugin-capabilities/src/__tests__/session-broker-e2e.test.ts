@@ -54,8 +54,12 @@ const PROXY_URL = "https://proxy.broker-e2e.test";
 const BROKER_HOST = "broker.cap-e2e.test";
 const CAP_NAME = "broker.session.render";
 const MIGRATIONS_FOLDER = fileURLToPath(new URL("../../drizzle", import.meta.url));
+const TEST_KDF_SALT = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 const TEST_ENV_KEYS = [
   "NODE_ENV",
+  "STEWARD_KDF_SALT",
+  "REDIS_REQUIRED",
+  "STEWARD_ALLOW_PROXY_REDIS_SOFT_FAIL",
   "STEWARD_PGLITE_MEMORY",
   "STEWARD_MASTER_PASSWORD",
   "STEWARD_JWT_SECRET",
@@ -112,6 +116,9 @@ function capRule(
 beforeAll(async () => {
   for (const key of TEST_ENV_KEYS) originalEnv.set(key, process.env[key]);
   process.env.NODE_ENV = "test";
+  process.env.STEWARD_KDF_SALT = TEST_KDF_SALT;
+  process.env.REDIS_REQUIRED = "false";
+  process.env.STEWARD_ALLOW_PROXY_REDIS_SOFT_FAIL = "false";
   process.env.STEWARD_PGLITE_MEMORY = "true";
   process.env.STEWARD_MASTER_PASSWORD = MASTER_PASSWORD;
   process.env.STEWARD_JWT_SECRET = "broker-e2e-jwt-secret-with-enough-bytes-0123456789ab";
@@ -305,6 +312,13 @@ beforeEach(async () => {
 });
 
 describe("session-broker e2e: full arc through the real proxy", () => {
+  it("pins hermetic test security settings independently of the ambient environment", () => {
+    expect(process.env.NODE_ENV).toBe("test");
+    expect(process.env.STEWARD_KDF_SALT).toBe(TEST_KDF_SALT);
+    expect(process.env.REDIS_REQUIRED).toBe("false");
+    expect(process.env.STEWARD_ALLOW_PROXY_REDIS_SOFT_FAIL).toBe("false");
+  });
+
   it("keeps unsigned proxy requests fail-closed in production despite dev mode", async () => {
     const token = await signAgentToken({ agentId, tenantId, scopes: ["api:proxy"] }, "5m");
     process.env.STEWARD_PROXY_REQUIRE_REQUEST_SIGNATURE = "false";
