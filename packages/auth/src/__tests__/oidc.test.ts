@@ -1,8 +1,9 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, spyOn } from "bun:test";
 import { EventEmitter } from "node:events";
 import type { ClientRequest, IncomingMessage, RequestOptions } from "node:http";
 import type { RequestOptions as HttpsRequestOptions } from "node:https";
 import type { LookupFunction } from "node:net";
+import { withRuntimeEnvironment } from "@stwd/shared/runtime-env";
 
 import {
   assertPublicJwksDestination,
@@ -20,6 +21,7 @@ class JwksTransportHarness {
   requestEnded = false;
   responseResumed = false;
   responseDestroyed = false;
+  destroyError: Error | undefined;
   timeoutMs: number | undefined;
   lookupCalls = 0;
   requestLookup: LookupFunction | undefined;
@@ -30,6 +32,7 @@ class JwksTransportHarness {
   constructor() {
     this.request.destroy = (() => {
       this.requestDestroyed = true;
+      if (this.destroyError) throw this.destroyError;
       return this.request;
     }) as ClientRequest["destroy"];
     this.request.end = (() => {
@@ -77,6 +80,7 @@ class JwksTransportHarness {
     }) as IncomingMessage["resume"];
     response.destroy = (() => {
       this.responseDestroyed = true;
+      if (this.destroyError) throw this.destroyError;
       return response;
     }) as IncomingMessage["destroy"];
     this.responseHandler(response);
@@ -164,6 +168,16 @@ describe("assertPublicJwksDestination SSRF guard", () => {
         expect(harness.responseResumed).toBe(false);
       }
     }
+  });
+
+  it("preserves fixed terminal errors when best-effort socket destruction throws", async () => {
+    const harness = new JwksTransportHarness();
+    harness.destroyError = new Error("injected destroy detail");
+    const pending = createPublicJwksTransport(harness.dependencies)("https://idp.example.com/jwks");
+    expect(() => harness.respond(302)).not.toThrow();
+    await expect(pending).rejects.toThrow("OIDC jwksUri redirects are not allowed");
+    expect(harness.responseDestroyed).toBe(true);
+    expect(harness.requestDestroyed).toBe(true);
   });
 
   it("rejects deadline, request timeout, and request failure", async () => {
@@ -313,5 +327,30 @@ describe("assertPublicJwksDestination SSRF guard", () => {
     const reloaded = await getPublicRemoteJWKSet("https://idp.example.com/jwks", "tenant:first");
     expect(reloaded).not.toBe(first);
     clearOidcJwksCacheForTests();
+  });
+
+  it("applies the request-local JWKS maximum age to each cache decision", async () => {
+    clearOidcJwksCacheForTests();
+    let now = 1_000_000;
+    const nowSpy = spyOn(Date, "now").mockImplementation(() => now);
+    try {
+      const first = await withRuntimeEnvironment({ STEWARD_OIDC_JWKS_MAX_AGE_MS: "60000" }, () =>
+        getPublicRemoteJWKSet("https://idp.example.com/jwks", "tenant:runtime-age"),
+      );
+      now += 60_001;
+      const retained = await withRuntimeEnvironment(
+        { STEWARD_OIDC_JWKS_MAX_AGE_MS: "120000" },
+        () => getPublicRemoteJWKSet("https://idp.example.com/jwks", "tenant:runtime-age"),
+      );
+      expect(retained).toBe(first);
+
+      const rebuilt = await withRuntimeEnvironment({ STEWARD_OIDC_JWKS_MAX_AGE_MS: "60000" }, () =>
+        getPublicRemoteJWKSet("https://idp.example.com/jwks", "tenant:runtime-age"),
+      );
+      expect(rebuilt).not.toBe(first);
+    } finally {
+      nowSpy.mockRestore();
+      clearOidcJwksCacheForTests();
+    }
   });
 });

@@ -2,6 +2,7 @@ import { lookup as dnsLookup } from "node:dns";
 import { request as httpsRequest } from "node:https";
 import { isIP } from "node:net";
 import type { TenantOidcProviderConfig } from "@stwd/shared";
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 import {
   createRemoteJWKSet,
   customFetch,
@@ -28,15 +29,18 @@ const JWKS_CACHE_MAX_ENTRIES = 256;
 // jose's internal cooldown only limits how *often* it refetches on unknown-kid;
 // it never evicts known keys, so a process-lifetime cache would not pick up an
 // IdP emergency key revocation. Rebuilding the set after this TTL guarantees a
-// rotated/revoked key stops verifying within the window. Configurable via env.
-const JWKS_MAX_AGE_MS = (() => {
-  const raw = Number(process.env.STEWARD_OIDC_JWKS_MAX_AGE_MS);
+// rotated/revoked key stops verifying within the window. Resolve the binding
+// for each cache decision so a long-lived Worker observes a tightened window.
+const DEFAULT_JWKS_MAX_AGE_MS = 60 * 60 * 1000;
+function jwksMaxAgeMs(): number {
+  const raw = Number(runtimeEnvironmentValue("STEWARD_OIDC_JWKS_MAX_AGE_MS"));
   if (Number.isFinite(raw) && raw >= 60_000) return raw;
-  return 60 * 60 * 1000; // 1 hour default
-})();
+  return DEFAULT_JWKS_MAX_AGE_MS;
+}
 function allowTestJwksFetch(): boolean {
   return (
-    process.env.NODE_ENV === "test" && process.env.STEWARD_ALLOW_INSECURE_OIDC_JWKS_FETCH === "true"
+    runtimeEnvironmentValue("NODE_ENV") === "test" &&
+    runtimeEnvironmentValue("STEWARD_ALLOW_INSECURE_OIDC_JWKS_FETCH") === "true"
   );
 }
 
@@ -114,7 +118,7 @@ export async function assertPublicJwksDestination(jwksUri: string): Promise<void
 /**
  * Builds (or returns a cached) remote JWKS set whose key fetches are routed
  * through the SSRF-guarded {@link fetchPublicJwks} transport. The set is
- * rebuilt once it exceeds {@link JWKS_MAX_AGE_MS} so rotated or emergency-
+ * rebuilt once it exceeds the configured maximum age so rotated or emergency-
  * revoked IdP keys stop verifying within the window.
  *
  * Reused by both the tenant OIDC path ({@link verifyOidcJwt}) and the
@@ -130,7 +134,7 @@ export async function getPublicRemoteJWKSet(
 ): Promise<ReturnType<typeof createRemoteJWKSet>> {
   assertPinnedDnsTransportSupported("OIDC jwksUri");
   const cached = JWKS_CACHE.get(cacheKey);
-  if (cached && Date.now() - cached.createdAt <= JWKS_MAX_AGE_MS) {
+  if (cached && Date.now() - cached.createdAt <= jwksMaxAgeMs()) {
     // Refresh insertion order so the bounded map acts as an LRU cache.
     JWKS_CACHE.delete(cacheKey);
     JWKS_CACHE.set(cacheKey, cached);
@@ -179,6 +183,13 @@ export function createPublicJwksTransport(
 ): (url: string | URL, init?: RequestInit) => Promise<Response> {
   const { request, createLookup, setDeadline, clearDeadline } = dependencies;
   const { timeoutMs, maxBytes } = limits;
+  const destroySafely = (stream: { destroy(): unknown } | undefined) => {
+    try {
+      stream?.destroy();
+    } catch {
+      // The fixed transport classification already settled the public promise.
+    }
+  };
   return async (url: string | URL, init?: RequestInit): Promise<Response> => {
     const jwksUrl = assertSafeJwksUri(url.toString());
     assertPinnedDnsTransportSupported("OIDC jwksUri");
@@ -197,12 +208,12 @@ export function createPublicJwksTransport(
         fn(value);
       };
       const abortRequest = () => {
-        req?.destroy();
         finish(reject, new Error("OIDC JWKS request was aborted"));
+        destroySafely(req);
       };
       const deadline = setDeadline(() => {
-        req?.destroy();
         finish(reject, new Error("OIDC JWKS request timed out"));
+        destroySafely(req);
       }, timeoutMs);
 
       if (init?.signal?.aborted) {
@@ -222,16 +233,16 @@ export function createPublicJwksTransport(
           },
           (res) => {
             if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400) {
-              req?.destroy();
-              res.destroy();
               finish(reject, new Error("OIDC jwksUri redirects are not allowed"));
+              destroySafely(res);
+              destroySafely(req);
               return;
             }
             const declaredLength = Number(res.headers["content-length"]);
             if (Number.isFinite(declaredLength) && declaredLength > maxBytes) {
-              req?.destroy();
-              res.destroy();
               finish(reject, new Error("OIDC JWKS response is too large"));
+              destroySafely(res);
+              destroySafely(req);
               return;
             }
             const chunks: Uint8Array[] = [];
@@ -240,8 +251,9 @@ export function createPublicJwksTransport(
               if (settled) return;
               size += chunk.byteLength;
               if (size > maxBytes) {
-                req?.destroy();
                 finish(reject, new Error("OIDC JWKS response is too large"));
+                destroySafely(res);
+                destroySafely(req);
                 return;
               }
               chunks.push(chunk);
@@ -276,14 +288,14 @@ export function createPublicJwksTransport(
         );
 
         req.on("timeout", () => {
-          req?.destroy();
           finish(reject, new Error("OIDC JWKS request timed out"));
+          destroySafely(req);
         });
         req.on("error", () => finish(reject, new Error("OIDC JWKS request failed")));
         req.end();
       } catch {
-        req?.destroy();
         finish(reject, new Error("OIDC JWKS request failed"));
+        destroySafely(req);
       }
     });
 

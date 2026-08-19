@@ -17,6 +17,10 @@
     "./sensitive-keys": {
       "types": "./dist/sensitive-keys.d.ts",
       "import": "./dist/sensitive-keys.js"
+    },
+    "./runtime-env": {
+      "types": "./dist/runtime-env.d.ts",
+      "import": "./dist/runtime-env.js"
     }
   },
   "files": [
