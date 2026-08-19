@@ -2217,7 +2217,24 @@ export async function runXCredentialLifecycleSweep(input: {
         result.attention += 1;
       }
     } catch {
-      result.attention += 1;
+      // Connect reconciliation deliberately rethrows its adoption error after
+      // compensating a stale staged grant. Classify the durable terminal state
+      // instead of reporting a successfully revoked grant as unresolved.
+      const [reconciled] = await (getDb() as DbExecutor)
+        .select({ state: providerXCredentialLifecycles.state })
+        .from(providerXCredentialLifecycles)
+        .where(
+          and(
+            eq(providerXCredentialLifecycles.tenantId, row.tenantId),
+            eq(providerXCredentialLifecycles.id, row.id),
+          ),
+        )
+        .limit(1);
+      if (row.kind === "connect_exchange" && reconciled?.state === "revoked") {
+        result.revoked += 1;
+      } else {
+        result.attention += 1;
+      }
     }
   }
   result.remaining = rows.length === limit && result.attention === 0;
