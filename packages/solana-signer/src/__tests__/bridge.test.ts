@@ -1,7 +1,9 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import { connect } from "node:net";
 import { Keypair, Transaction } from "@solana/web3.js";
 import {
   BRIDGE_MAX_BODY_BYTES,
+  BRIDGE_MAX_TOKEN_BYTES,
   BRIDGE_MIN_TOKEN_BYTES,
   BRIDGE_TOKEN_ENV,
   BRIDGE_TOKEN_HEADER,
@@ -52,6 +54,37 @@ function authed(path: string, init: RequestInit = {}): Promise<Response> {
   return fetch(`${bridgeUrl}${path}`, {
     ...init,
     headers: { ...(init.headers ?? {}), [BRIDGE_TOKEN_HEADER]: bridgeToken },
+  });
+}
+
+/** Send exact duplicate fields without Fetch/Headers combining them. */
+async function rawBridgeStatus(headerLines: string[]): Promise<number> {
+  const url = new URL(bridgeUrl);
+  return new Promise<number>((resolve, reject) => {
+    const socket = connect(Number(url.port), url.hostname);
+    let response = "";
+    socket.setEncoding("utf8");
+    socket.on("connect", () => {
+      socket.write(
+        [
+          `GET /pubkey HTTP/1.1`,
+          `Host: ${url.host}`,
+          ...headerLines,
+          "Connection: close",
+          "",
+          "",
+        ].join("\r\n"),
+      );
+    });
+    socket.on("data", (chunk) => {
+      response += chunk;
+    });
+    socket.on("end", () => {
+      const match = /^HTTP\/1\.1 (\d{3}) /.exec(response);
+      if (!match) return reject(new Error("bridge returned no HTTP status"));
+      resolve(Number(match[1]));
+    });
+    socket.on("error", reject);
   });
 }
 
@@ -177,11 +210,55 @@ describe("bridge shared-secret auth", () => {
     expect(body.address.length).toBeGreaterThan(30);
   });
 
+  it("treats the bearer scheme case-insensitively", async () => {
+    const res = await fetch(`${bridgeUrl}/pubkey`, {
+      headers: { authorization: `bearer ${bridgeToken}` },
+    });
+    expect(res.status).toBe(200);
+  });
+
   it("refuses a wrong bearer token with 401", async () => {
     const res = await fetch(`${bridgeUrl}/pubkey`, {
       headers: { authorization: `Bearer ${bridgeToken}x` },
     });
     expect(res.status).toBe(401);
+  });
+
+  it("rejects ambiguous bearer whitespace, folded values, and duplicate fields", async () => {
+    for (const authorization of [
+      `Bearer  ${bridgeToken}`,
+      `Bearer\t${bridgeToken}`,
+      `Bearer ${bridgeToken}, Bearer ${bridgeToken}`,
+    ]) {
+      const res = await fetch(`${bridgeUrl}/pubkey`, { headers: { authorization } });
+      expect(res.status).toBe(401);
+    }
+    expect(
+      await rawBridgeStatus([
+        `Authorization: Bearer ${bridgeToken}`,
+        `Authorization: Bearer ${bridgeToken}`,
+      ]),
+    ).toBe(401);
+    expect(
+      await rawBridgeStatus([
+        `${BRIDGE_TOKEN_HEADER}: ${bridgeToken}`,
+        `${BRIDGE_TOKEN_HEADER}: ${bridgeToken}`,
+        `Authorization: Bearer ${bridgeToken}`,
+      ]),
+    ).toBe(401);
+  });
+
+  it("bounds bearer and configured tokens without reflecting them", async () => {
+    const canary = "TOKEN_SECRET_CANARY";
+    const oversized = `${canary}${"a".repeat(BRIDGE_MAX_TOKEN_BYTES)}`;
+    const res = await fetch(`${bridgeUrl}/pubkey`, {
+      headers: { authorization: `Bearer ${oversized}` },
+    });
+    expect(res.status).toBe(401);
+    expect(await res.text()).not.toContain(canary);
+    await expect(startSignerBridge(signer, { token: oversized })).rejects.toThrow(
+      new RegExp(`at most ${BRIDGE_MAX_TOKEN_BYTES} bytes`),
+    );
   });
 
   it("the custom header wins over a bearer header when both are present", async () => {
