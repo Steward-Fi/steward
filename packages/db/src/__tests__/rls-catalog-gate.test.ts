@@ -226,6 +226,7 @@ describe("SEC-169 catalog activation gate", () => {
       },
     ]);
     expect(composed.protectedTables).toContain("plugin_tenant_table");
+    expect(composed.rlsExcludedTables).toContain("auth_kv_store");
     expect(composed.rlsExcludedTables).toContain("plugin_global_table");
     expect(() =>
       composeRlsCatalogInventory([{ owner: "invalid-plugin", rlsExcludedTables: ["agents"] }]),
