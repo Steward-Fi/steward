@@ -164,7 +164,8 @@ async function tenantRequestSigningKeyCandidates(
   const keyId = request.headers.get("X-Steward-Signing-Key-Id");
   if (!keyId || !SIGNING_KEY_ID_PATTERN.test(keyId)) return [];
   const masterPassword = runtimeEnvironmentValue("STEWARD_MASTER_PASSWORD");
-  if (!masterPassword) return [];
+  const masterSalt = runtimeEnvironmentValue("STEWARD_KDF_SALT");
+  if (!masterPassword || !masterSalt) return [];
 
   const now = new Date();
   const rows = await getDb()
@@ -180,7 +181,7 @@ async function tenantRequestSigningKeyCandidates(
   // Defer KeyStore construction (itself a scrypt KDF) until a row exists, so
   // an unknown key id costs only the cheap lookup above.
   if (rows.length === 0) return [];
-  const keyStore = createKeyStore(masterPassword, undefined, "secret-vault");
+  const keyStore = createKeyStore(masterPassword, masterSalt, "secret-vault");
   return rows.flatMap((row) => {
     if (row.revokedAt) return [];
     if (row.expiresAt && row.expiresAt <= now) return [];
@@ -190,13 +191,17 @@ async function tenantRequestSigningKeyCandidates(
       tag: row.secretAuthTag,
       salt: row.secretSalt,
     };
-    return [
-      keyStore.decrypt(encrypted, {
-        tenantId: row.tenantId,
-        name: `request-signing-key:${row.id}`,
-        version: 1,
-      }),
-    ];
+    try {
+      return [
+        keyStore.decrypt(encrypted, {
+          tenantId: row.tenantId,
+          name: `request-signing-key:${row.id}`,
+          version: 1,
+        }),
+      ];
+    } catch {
+      return [];
+    }
   });
 }
 

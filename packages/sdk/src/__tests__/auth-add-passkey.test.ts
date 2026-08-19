@@ -4,7 +4,7 @@ import type { SessionStorage } from "../auth-types";
 import { StewardApiError } from "../client";
 
 // Track requests and responses to model an end-to-end addPasskey call.
-type Captured = { url: string; body?: Record<string, unknown> };
+type Captured = { url: string; body?: Record<string, unknown>; headers: Headers };
 let captured: Captured[];
 let originalFetch: typeof fetch;
 let originalWindow: unknown;
@@ -35,7 +35,7 @@ function installFetch(): void {
           ? input.toString()
           : (input as Request).url;
     const body = init?.body ? JSON.parse(init.body as string) : undefined;
-    captured.push({ url, body });
+    captured.push({ url, body, headers: new Headers(init?.headers) });
     // /auth/passkey/register/options returns the WebAuthn options directly
     // (no { ok, data } envelope) so the SDK can pass them to startRegistration.
     if (url.endsWith("/auth/passkey/register/options")) {
@@ -138,7 +138,10 @@ afterEach(() => {
 
 describe("StewardAuth.addPasskey", () => {
   it("registers a fresh credential by going straight to register/options + verify", async () => {
-    const auth = new StewardAuth({ baseUrl: "https://api.example.test" });
+    const storage = memoryStorage();
+    const token = fakeJwt();
+    storage.setItem("steward_session_token", token);
+    const auth = new StewardAuth({ baseUrl: "https://api.example.test", storage });
     const result = await auth.addPasskey("shadow@shad0w.xyz");
 
     // It must call register/options first, then register/verify.
@@ -148,6 +151,8 @@ describe("StewardAuth.addPasskey", () => {
     // The email is forwarded on both calls.
     expect(captured[0]?.body?.email).toBe("shadow@shad0w.xyz");
     expect(captured[1]?.body?.email).toBe("shadow@shad0w.xyz");
+    expect(captured[0]?.headers.get("authorization")).toBe(`Bearer ${token}`);
+    expect(captured[1]?.headers.get("authorization")).toBe(`Bearer ${token}`);
 
     // The browser attestation response is forwarded to verify.
     expect((captured[1]?.body as Record<string, unknown>)?.response).toMatchObject({
@@ -183,7 +188,7 @@ describe("StewardAuth.addPasskey", () => {
     global.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = typeof input === "string" ? input : input.toString();
       const body = init?.body ? JSON.parse(init.body as string) : undefined;
-      captured.push({ url, body });
+      captured.push({ url, body, headers: new Headers(init?.headers) });
       if (url.endsWith("/auth/passkey/login/options")) {
         return new Response(
           JSON.stringify({
@@ -223,7 +228,7 @@ describe("StewardAuth.addPasskey", () => {
     global.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = typeof input === "string" ? input : input.toString();
       const body = init?.body ? JSON.parse(init.body as string) : undefined;
-      captured.push({ url, body });
+      captured.push({ url, body, headers: new Headers(init?.headers) });
       if (url.endsWith("/auth/mfa/passkey/options")) {
         expect(new Headers(init?.headers).get("authorization")).toBe(`Bearer ${initialToken}`);
         return new Response(

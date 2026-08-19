@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import { closeDb, getDb, tenantRequestSigningKeys, tenants } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
+import { withRuntimeEnvironment } from "@stwd/shared/runtime-env";
 import { KeyStore } from "@stwd/vault";
 import { Hono } from "hono";
 import type { AppVariables } from "../services/context";
@@ -65,6 +66,7 @@ async function signedWith(secret: string, extraHeaders: Record<string, string> =
 beforeAll(async () => {
   process.env.STEWARD_PGLITE_MEMORY = "true";
   process.env.STEWARD_MASTER_PASSWORD = "sig-keys-master-password";
+  process.env.STEWARD_KDF_SALT = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
   const { db, client } = await createPGLiteDb("memory://");
   setPGLiteOverride(db, async () => {
     await client.close();
@@ -120,6 +122,27 @@ describe("authorizationSignature tenant signing keys", () => {
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ ok: true, verified: true });
     expect(tenantKeyStoreConstructionCount).toBe(1);
+  });
+
+  it("never falls back to an isolate-global KDF salt under a request snapshot", async () => {
+    const app = makeApp();
+    const headers = await signedWith(TENANT_KEY_SECRET, {
+      "x-steward-signing-key-id": KEY_ID,
+    });
+    const response = await withRuntimeEnvironment(
+      {
+        STEWARD_MASTER_PASSWORD: process.env.STEWARD_MASTER_PASSWORD,
+        STEWARD_KDF_SALT: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+      },
+      () =>
+        app.request(PATH, {
+          method: "POST",
+          headers,
+          body: BODY,
+        }),
+    );
+
+    expect(response.status).toBe(401);
   });
 
   it("rejects an unknown (well-formed) signing key id without decrypt work", async () => {

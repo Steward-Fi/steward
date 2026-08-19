@@ -552,18 +552,26 @@ describe("authorizationSignature", () => {
   it("keeps machine signing fail-closed while allowing browser bootstrap in production", async () => {
     const app = makeDefaultApp();
 
-    const [machine, browser] = await withRuntimeEnvironment({ NODE_ENV: "production" }, () =>
-      Promise.all([
-        app.request("/vault/agent-1/sign", { method: "POST", body: BODY }),
-        app.request("/auth/email/send", { method: "POST", body: BODY }),
-      ]),
+    const [machine, email, passkey, jwtLogin, logout] = await withRuntimeEnvironment(
+      { NODE_ENV: "production" },
+      () =>
+        Promise.all([
+          app.request("/vault/agent-1/sign", { method: "POST", body: BODY }),
+          app.request("/auth/email/send", { method: "POST", body: BODY }),
+          app.request("/auth/passkey/register/options", { method: "POST", body: BODY }),
+          app.request("/auth/jwt/login", { method: "POST", body: BODY }),
+          app.request("/auth/logout", { method: "POST", body: BODY }),
+        ]),
     );
 
     expect(machine.status).toBe(401);
-    expect(browser.status).toBe(200);
+    expect(email.status).toBe(200);
+    expect(passkey.status).not.toBe(401);
+    expect(jwtLogin.status).not.toBe(401);
+    expect(logout.status).not.toBe(401);
   });
 
-  it("exempts verified user sessions only on user routes from the production machine guard", async () => {
+  it("exempts verified user sessions across browser surfaces from the production machine guard", async () => {
     const app = makeDefaultApp();
     const environment = {
       NODE_ENV: "production",
@@ -580,28 +588,41 @@ describe("authorizationSignature", () => {
       ]),
     );
 
-    const [userRoute, userVault, agentVault] = await withRuntimeEnvironment(environment, () =>
-      Promise.all([
-        app.request("/user/me/wallet/sign", {
-          method: "POST",
-          headers: { authorization: `Bearer ${userToken}` },
-          body: BODY,
-        }),
-        app.request("/vault/agent-1/sign", {
-          method: "POST",
-          headers: { authorization: `Bearer ${userToken}` },
-          body: BODY,
-        }),
-        app.request("/vault/agent-1/sign", {
-          method: "POST",
-          headers: { authorization: `Bearer ${agentToken}` },
-          body: BODY,
-        }),
-      ]),
-    );
+    const [userRoute, tenantRoute, dashboardRoute, mfaRoute, agentVault] =
+      await withRuntimeEnvironment(environment, () =>
+        Promise.all([
+          app.request("/user/me/wallet/sign", {
+            method: "POST",
+            headers: { authorization: `Bearer ${userToken}` },
+            body: BODY,
+          }),
+          app.request("/tenants/tenant-1/config", {
+            method: "POST",
+            headers: { authorization: `Bearer ${userToken}` },
+            body: BODY,
+          }),
+          app.request("/dashboard/agent-1", {
+            method: "POST",
+            headers: { authorization: `Bearer ${userToken}` },
+            body: BODY,
+          }),
+          app.request("/auth/mfa/totp/status", {
+            method: "POST",
+            headers: { authorization: `Bearer ${userToken}` },
+            body: BODY,
+          }),
+          app.request("/vault/agent-1/sign", {
+            method: "POST",
+            headers: { authorization: `Bearer ${agentToken}` },
+            body: BODY,
+          }),
+        ]),
+      );
 
     expect(userRoute.status).toBe(200);
-    expect(userVault.status).toBe(401);
+    expect(tenantRoute.status).not.toBe(401);
+    expect(dashboardRoute.status).not.toBe(401);
+    expect(mfaRoute.status).not.toBe(401);
     expect(agentVault.status).toBe(401);
   });
 
@@ -619,21 +640,28 @@ describe("authorizationSignature", () => {
       }),
     );
 
-    const [platform, automation] = await withRuntimeEnvironment(environment, () =>
-      Promise.all([
-        app.request("/platform/tenants", {
-          method: "POST",
-          headers: {
-            authorization: `Bearer ${userToken}`,
-            "X-Steward-Platform-Key": "platform-key",
-          },
-        }),
-        app.request("/auth/test/token", { method: "POST" }),
-      ]),
+    const [platform, automation, decoratedBootstrap] = await withRuntimeEnvironment(
+      environment,
+      () =>
+        Promise.all([
+          app.request("/platform/tenants", {
+            method: "POST",
+            headers: {
+              authorization: `Bearer ${userToken}`,
+              "X-Steward-Platform-Key": "platform-key",
+            },
+          }),
+          app.request("/auth/test/token", { method: "POST" }),
+          app.request("/auth/passkey/register/options", {
+            method: "POST",
+            headers: { "X-Steward-Key": "tenant-machine-key" },
+          }),
+        ]),
     );
 
     expect(platform.status).toBe(401);
     expect(automation.status).toBe(401);
+    expect(decoratedBootstrap.status).toBe(401);
   });
 
   it("keeps public JWT login browser-compatible without exempting machine authority", async () => {

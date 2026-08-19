@@ -28,6 +28,9 @@ const MANAGED_KEYS = [
   "STEWARD_JWT_SECRET",
   "STEWARD_SESSION_SECRET",
   "STEWARD_MASTER_PASSWORD",
+  "STEWARD_KDF_SALT",
+  "STEWARD_KMS_PROVIDER",
+  "STEWARD_EXTERNAL_CUSTODY_PROVIDER",
   "STEWARD_DB_MODE",
   "STEWARD_PGLITE_MEMORY",
   "AGENT_TOKEN_EXPIRY",
@@ -121,6 +124,42 @@ describe("workers boot JWT env validation (SEC-134)", () => {
         {},
       ),
     ).rejects.toThrow("STEWARD_REQUEST_SIGNING_SECRETS");
+  });
+
+  it("rejects production Workers without complete local custody roots", async () => {
+    snapshotEnv();
+    await expect(
+      worker.fetch(
+        new Request("https://workers.test/"),
+        {
+          NODE_ENV: "production",
+          STEWARD_JWT_SECRET: "workers-boot-test-secret-32-chars-long!!",
+          STEWARD_REQUEST_SIGNING_SECRETS: "v1:request-root",
+          STEWARD_MASTER_PASSWORD: "worker-master-password",
+          DATABASE_DRIVER: "bogus",
+        },
+        {},
+      ),
+    ).rejects.toThrow("STEWARD_MASTER_PASSWORD and STEWARD_KDF_SALT");
+  });
+
+  it("rejects custody backends whose credentials cannot be request-owned", async () => {
+    snapshotEnv();
+    await expect(
+      worker.fetch(
+        new Request("https://workers.test/"),
+        {
+          NODE_ENV: "production",
+          STEWARD_JWT_SECRET: "workers-boot-test-secret-32-chars-long!!",
+          STEWARD_REQUEST_SIGNING_SECRETS: "v1:request-root",
+          STEWARD_MASTER_PASSWORD: "worker-master-password",
+          STEWARD_KDF_SALT: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+          STEWARD_KMS_PROVIDER: "aws",
+          DATABASE_DRIVER: "bogus",
+        },
+        {},
+      ),
+    ).rejects.toThrow("WORKER_CUSTODY_UNSUPPORTED");
   });
 
   it("validates concurrent request bindings before either database selection", async () => {
@@ -270,7 +309,7 @@ describe("workers boot JWT env validation (SEC-134)", () => {
         "authorization-signatures": {
           status: "pass",
           description:
-            "Sensitive machine requests require X-Steward-Signature and have an env, app-client, or tenant signing key available; public browser auth and verified user sessions under /user are exempt unless explicitly forced.",
+            "Sensitive machine requests require X-Steward-Signature and have an env, app-client, or tenant signing key available; public browser auth and verified user access sessions are exempt unless explicitly forced.",
         },
       },
     });

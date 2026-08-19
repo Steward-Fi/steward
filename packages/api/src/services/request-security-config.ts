@@ -23,7 +23,6 @@ const PUBLIC_BROWSER_AUTH_MUTATIONS = new Set([
   "/auth/telegram/challenge",
   "/auth/telegram/verify",
   "/auth/farcaster/verify",
-  "/auth/jwt/login",
   "/auth/sms/send",
   "/auth/sms/verify",
   "/auth/whatsapp/send",
@@ -35,6 +34,10 @@ const PUBLIC_BROWSER_AUTH_MUTATIONS = new Set([
   "/auth/device/token",
   "/auth/passkey/login/options",
   "/auth/passkey/login/verify",
+  "/auth/passkey/register/options",
+  "/auth/passkey/register/verify",
+  "/auth/jwt/login",
+  "/auth/logout",
   "/auth/email/send",
   "/auth/email/verify",
   "/auth/email/code/verify",
@@ -65,17 +68,6 @@ function isPublicBrowserAuthMutation(path: string): boolean {
   );
 }
 
-function isAuthenticatedBrowserAuthMutation(path: string): boolean {
-  return (
-    path === "/auth/logout" ||
-    path === "/auth/sessions" ||
-    path === "/auth/guest" ||
-    path === "/auth/guest/upgrade" ||
-    path.startsWith("/auth/mfa/") ||
-    path.startsWith("/auth/passkey/register/")
-  );
-}
-
 function carriesMachineAuthority(request: Request): boolean {
   if (MACHINE_AUTHORITY_HEADERS.some((header) => request.headers.has(header))) return true;
   const authorization = request.headers.get("authorization");
@@ -98,9 +90,6 @@ export function isBrowserSessionSignatureExempt(request: Request, path: string):
 
   const authorization = request.headers.get("authorization");
   if (!authorization) return Promise.resolve(false);
-  if (path !== "/user" && !path.startsWith("/user/") && !isAuthenticatedBrowserAuthMutation(path)) {
-    return Promise.resolve(false);
-  }
 
   const cached = browserSignatureExemptionByRequest.get(request);
   if (cached) return cached;

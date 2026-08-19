@@ -66,7 +66,10 @@ cheap to construct and never escapes the event lifetime.
 ## Secrets
 
 Set these via `wrangler secret put <NAME>` from the `packages/api`
-directory. Do NOT put them in `wrangler.toml`.
+directory. The default, staging, and production Workers have separate secret
+stores, so provision each deployed target explicitly (`wrangler secret put
+<NAME>`, `wrangler secret put <NAME> --env staging`, and `wrangler secret put
+<NAME> --env production`). Do NOT put secret values in `wrangler.toml`.
 
 | Secret                          | Why                                                                    |
 | ------------------------------- | ---------------------------------------------------------------------- |
@@ -90,7 +93,15 @@ directory. Do NOT put them in `wrangler.toml`.
 | `PASSKEY_RP_NAME`               | Display name for the WebAuthn UI.                                      |
 | `PASSKEY_ALLOWED_ORIGINS`       | Optional comma-separated additional origins for multi-tenant passkeys. |
 
-`SKIP_MIGRATIONS=1`, `DATABASE_DRIVER=neon-http`, and `REDIS_DRIVER=upstash`
+The Workers target currently supports only the local encrypted vault backend.
+`STEWARD_KMS_PROVIDER` and `STEWARD_EXTERNAL_CUSTODY_PROVIDER` are rejected at
+boot because their provider credential chains are process-global; accepting
+request-local binding options while executing under different global authority
+would cross a tenant/deployment trust boundary. Use the Bun/Node deployment for
+AWS KMS, PKCS#11, or external custody until request-owned provider clients are
+available on Workers.
+
+`NODE_ENV=production`, `SKIP_MIGRATIONS=1`, `DATABASE_DRIVER=neon-http`, and `REDIS_DRIVER=upstash`
 are already in `wrangler.toml` `[vars]` so they ship with every deploy.
 
 Non-secret client-IP trust config (auth rate limiting) can go in `[vars]`:

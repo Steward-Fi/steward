@@ -67,6 +67,9 @@ export interface Env {
   /** Deprecated compatibility fallback for existing Worker deployments. */
   STEWARD_SESSION_SECRET?: string;
   STEWARD_MASTER_PASSWORD?: string;
+  STEWARD_KDF_SALT?: string;
+  STEWARD_KMS_PROVIDER?: string;
+  STEWARD_EXTERNAL_CUSTODY_PROVIDER?: string;
   STEWARD_REQUEST_SIGNING_SECRETS?: string;
   STEWARD_REQUEST_SIGNING_SECRET?: string;
   RESEND_API_KEY?: string;
@@ -315,6 +318,21 @@ function validateWorkerSecurityEnv(): void {
   ) {
     throw new Error(
       "STEWARD_REQUEST_SIGNING_SECRETS or STEWARD_REQUEST_SIGNING_SECRET is required in production",
+    );
+  }
+  if (
+    runtimeEnvironmentValue("NODE_ENV") === "production" &&
+    (!runtimeEnvironmentValue("STEWARD_MASTER_PASSWORD") ||
+      !runtimeEnvironmentValue("STEWARD_KDF_SALT"))
+  ) {
+    throw new Error("STEWARD_MASTER_PASSWORD and STEWARD_KDF_SALT are required in production");
+  }
+  if (
+    runtimeEnvironmentValue("STEWARD_KMS_PROVIDER") ||
+    runtimeEnvironmentValue("STEWARD_EXTERNAL_CUSTODY_PROVIDER")
+  ) {
+    throw new Error(
+      "WORKER_CUSTODY_UNSUPPORTED: KMS, PKCS11, and external custody require request-owned provider credentials that are not available on the Workers target",
     );
   }
 }

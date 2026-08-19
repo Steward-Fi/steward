@@ -57,7 +57,6 @@ import {
   db,
   ensureAgentForTenant,
   getConditionSetReferenceValidationError,
-  MASTER_PASSWORD,
   requireTenantLevel,
   safeJsonParse,
   setNoStoreHeaders,
@@ -620,7 +619,7 @@ export function buildTenantSecurityChecklist(
   const production = runtimeEnvironmentValue("NODE_ENV") === "production";
   // These mirror the mounted guards: invalid presented headers always fail;
   // production machine requests require freshness and signatures; public auth
-  // bootstrap and verified user sessions under /user retain their browser-safe exemption.
+  // bootstrap and verified user access sessions retain their browser-safe exemption.
   const { requestExpiryRequired, authorizationSignatureRequired: authSignatureRequired } =
     resolveRequestSecurityPosture();
   const signingSecrets = configuredRequestSigningSecrets();
@@ -704,7 +703,7 @@ export function buildTenantSecurityChecklist(
         (signingSecrets.length > 0 ||
           appClientSigningSecrets.length > 0 ||
           standaloneSigningKeys.length > 0)
-          ? "Sensitive machine requests require X-Steward-Signature and have an env, app-client, or tenant signing key available; public browser auth and verified user sessions under /user are exempt unless explicitly forced."
+          ? "Sensitive machine requests require X-Steward-Signature and have an env, app-client, or tenant signing key available; public browser auth and verified user access sessions are exempt unless explicitly forced."
           : "Authorization signatures are verified when present but are not required by this deployment posture.",
       remediation:
         authSignatureRequired &&
@@ -1017,7 +1016,12 @@ function serializeTenantAppClientSecret(
 }
 
 function requestSigningKeyStore(): KeyStore {
-  return new KeyStore(MASTER_PASSWORD, undefined, "secret-vault");
+  const masterPassword = runtimeEnvironmentValue("STEWARD_MASTER_PASSWORD");
+  const masterSalt = runtimeEnvironmentValue("STEWARD_KDF_SALT");
+  if (!masterPassword || !masterSalt) {
+    throw new Error("STEWARD_MASTER_PASSWORD and STEWARD_KDF_SALT are required");
+  }
+  return new KeyStore(masterPassword, masterSalt, "secret-vault");
 }
 
 function generateRequestSigningSecret(): { secret: string; prefix: string } {

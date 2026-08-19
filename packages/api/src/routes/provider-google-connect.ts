@@ -21,11 +21,9 @@
 
 import { buildBackend, ChallengeStore } from "@stwd/auth";
 import type { AppVariables } from "@stwd/shared";
-import { SecretVault } from "@stwd/vault";
 import type { Context, Hono } from "hono";
 import {
   type ApiResponse,
-  MASTER_PASSWORD,
   safeJsonParse,
   setNoStoreHeaders,
   tenantAuth,
@@ -43,6 +41,7 @@ import {
   resolveGoogleConnectConfig,
 } from "../services/provider-google-connect";
 import { hasRecentGoogleConnectMfa } from "../services/provider-google-connect-mfa";
+import { getConfiguredSecretVault } from "../services/secret-vault-factory";
 import { assertAllowedOAuthRedirectUri } from "./auth";
 
 type RouteContext = Context<{ Variables: AppVariables }>;
@@ -74,11 +73,7 @@ export function __setProviderGoogleConnectStoreForTests(store: PendingConnectSto
   _connectStore = store;
 }
 
-let _vault: SecretVault | null = null;
-function getVault(): SecretVault {
-  _vault ??= new SecretVault(MASTER_PASSWORD);
-  return _vault;
-}
+const getVault = getConfiguredSecretVault;
 
 function fail(c: RouteContext, error: unknown): Response {
   if (error instanceof GoogleConnectError) {

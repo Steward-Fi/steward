@@ -24,9 +24,14 @@ function configuredInterval(): number {
 
 export async function runXCredentialLifecycleRecoverySweep(): Promise<XCredentialLifecycleSweepResult> {
   const password = runtimeEnvironmentValue("STEWARD_MASTER_PASSWORD")?.trim();
-  if (!password) throw new Error("STEWARD_MASTER_PASSWORD is required for X OAuth recovery");
+  const salt = runtimeEnvironmentValue("STEWARD_KDF_SALT")?.trim();
+  if (!password || !salt) {
+    throw new Error(
+      "STEWARD_MASTER_PASSWORD and STEWARD_KDF_SALT are required for X OAuth recovery",
+    );
+  }
   return runXCredentialLifecycleSweep({
-    vault: new SecretVault(password),
+    vault: new SecretVault(password, salt),
     config: resolveXConnectConfig(),
   });
 }

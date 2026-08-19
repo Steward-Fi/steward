@@ -24,9 +24,14 @@ function configuredInterval(): number {
 
 export async function runGoogleCredentialLifecycleRecoverySweep(): Promise<GoogleCredentialLifecycleSweepResult> {
   const password = runtimeEnvironmentValue("STEWARD_MASTER_PASSWORD")?.trim();
-  if (!password) throw new Error("STEWARD_MASTER_PASSWORD is required for Google OAuth recovery");
+  const salt = runtimeEnvironmentValue("STEWARD_KDF_SALT")?.trim();
+  if (!password || !salt) {
+    throw new Error(
+      "STEWARD_MASTER_PASSWORD and STEWARD_KDF_SALT are required for Google OAuth recovery",
+    );
+  }
   return runGoogleCredentialLifecycleSweep({
-    vault: new SecretVault(password),
+    vault: new SecretVault(password, salt),
     config: resolveGoogleConnectConfig(),
   });
 }

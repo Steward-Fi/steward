@@ -65,6 +65,7 @@ const fromB64 = (s: string) => Buffer.from(s, "base64");
 beforeAll(async () => {
   process.env.STEWARD_PGLITE_MEMORY = "true";
   process.env.STEWARD_MASTER_PASSWORD ??= "kms-routes-test-master-password";
+  process.env.STEWARD_KDF_SALT ??= "6b6d732d726f757465732d746573742d73616c74";
   process.env.STEWARD_JWT_SECRET ??= "kms-routes-test-jwt-secret-with-enough-entropy-0123456789";
   process.env.STEWARD_AUDIT_HMAC_KEY ??= "b".repeat(64);
 

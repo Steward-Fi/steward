@@ -75,6 +75,11 @@ that.
 | **external custody: AWS KMS** | `STEWARD_EXTERNAL_CUSTODY_PROVIDER=aws-kms` (separate from `STEWARD_KMS_PROVIDER`) | **No** — Steward stores an opaque asymmetric KMS key handle and public address only | **No** | an `ECC_SECG_P256K1` `SIGN_VERIFY` key signs the EVM transaction digest inside AWS KMS | plaintext-at-rest **and** plaintext-at-sign-time in Steward; database-only key recovery | trust in AWS KMS/IAM and the live Steward process's authority to request signatures; EVM transactions only |
 | **external custody: custom v1 provider** | `VaultConfig.externalKeyCustodyProvider` | Provider-defined, but v1 forbids private material in the contract and private-key export | Provider-defined | operator implementation | depends on provider | provider and transport trust; must pass the exported v1 conformance suite |
 
+The Cloudflare Workers target currently supports only local encrypted custody.
+KMS-envelope, PKCS#11, and external-custody modes require request-owned provider
+credential clients that are not available in the Workers adapter, so Workers
+reject those selectors at boot. Use the Bun/Node deployment for those modes.
+
 > **Note on `kms-envelope:pkcs11` in this release:** the built-in PKCS#11 path
 > requires an operator-supplied `Pkcs11ClientLike` adapter for `C_WrapKey` /
 > `C_UnwrapKey`. Without it, the backend fails closed

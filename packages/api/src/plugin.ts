@@ -79,6 +79,7 @@ import {
 } from "@stwd/policy-engine";
 import type { PluginMigrationSource, StewardPlugin } from "@stwd/shared";
 import { WebhookEventRegistry } from "@stwd/shared";
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 import { KeyStore, SecretVault } from "@stwd/vault";
 import type { Hono } from "hono";
 import {
@@ -96,7 +97,6 @@ import {
   ensureAgentForTenant,
   getPolicySet,
   isValidAnyAddress,
-  MASTER_PASSWORD,
   policyEngine,
   priceOracle,
   safeJsonParse,
@@ -261,8 +261,13 @@ export type StewardApiPlugin = StewardPlugin<StewardApp, StewardAppContext, Eval
  * root and passed to {@link registerPlugin}.
  */
 export function buildPluginContext(): StewardAppContext {
-  const credentialVault = new SecretVault(MASTER_PASSWORD);
-  const leaseKeyStore = new KeyStore(MASTER_PASSWORD, undefined, "credential-lease");
+  const masterPassword = runtimeEnvironmentValue("STEWARD_MASTER_PASSWORD");
+  const masterSalt = runtimeEnvironmentValue("STEWARD_KDF_SALT");
+  if (!masterPassword || !masterSalt) {
+    throw new Error("STEWARD_MASTER_PASSWORD and STEWARD_KDF_SALT are required");
+  }
+  const credentialVault = new SecretVault(masterPassword, masterSalt);
+  const leaseKeyStore = new KeyStore(masterPassword, masterSalt, "credential-lease");
   return {
     db,
     vault,

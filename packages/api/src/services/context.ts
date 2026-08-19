@@ -328,10 +328,10 @@ export const db: DbHandle = new Proxy({} as DbHandle, {
   },
 });
 
-// `vault` is a late-bound Proxy resolving the Vault for the CURRENT master
-// password, memoized per password. In production STEWARD_MASTER_PASSWORD is
-// fixed before this module loads, so exactly one Vault is ever built and every
-// access returns it — behaviorally identical to `const vault = new Vault(...)`.
+// `vault` is a late-bound Proxy resolving the Vault for the current immutable
+// runtime configuration. Process deployments retain one live instance under
+// an opaque keyed cache identity; request-scoped runtimes construct an isolated
+// local Vault and never reuse another request's custody authority.
 //
 // In the single-process api test suite, individual files set their own
 // STEWARD_MASTER_PASSWORD in beforeAll, and a few construct their OWN Vault with
@@ -339,9 +339,9 @@ export const db: DbHandle = new Proxy({} as DbHandle, {
 // singleton would have frozen the first (preload) password, so the route-level
 // vault could not decrypt keys those files sealed under a different password —
 // surfacing as AES-GCM "Unsupported state or unable to authenticate data". A
-// per-password memo keeps the route vault in lockstep with whatever password
-// sealed each key. MASTER_PASSWORD (captured at import) is the fallback when the
-// env var is transiently unset (e.g. another file's afterAll deleted it).
+// Runtime resolution keeps the route vault in lockstep with the configuration
+// that sealed each key. MASTER_PASSWORD remains only a Bun/test compatibility
+// fallback when no request-scoped runtime environment is active.
 function activeVault(): Vault {
   return getConfiguredVault({ fallbackPassword: MASTER_PASSWORD });
 }

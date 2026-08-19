@@ -432,7 +432,7 @@ const requestExpiresAtHeader = headerParameter(
 );
 const stewardSignatureHeader = headerParameter(
   "X-Steward-Signature",
-  "Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>.",
+  "Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user access sessions are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>.",
 );
 const signingKeyIdHeader = headerParameter(
   "X-Steward-Signing-Key-Id",
@@ -6365,7 +6365,7 @@ function addHardeningInventory(spec: OpenApiSpec): OpenApiSpec {
           // signature for machine requests; public auth bootstrap and verified
           // user sessions under /user cannot safely hold a shared HMAC root.
           requiredWhen:
-            "STEWARD_REQUIRE_AUTH_SIGNATURE=true, or NODE_ENV=production for requests other than public auth bootstrap and verified user sessions under /user",
+            "STEWARD_REQUIRE_AUTH_SIGNATURE=true, or NODE_ENV=production for requests other than public auth bootstrap and verified user access sessions",
           header: "X-Steward-Signature",
           schemes: ["v1=hmac-sha256", "p256=ecdsa-secp256r1"],
           managedTenantKeyHeader: "X-Steward-Signing-Key-Id",

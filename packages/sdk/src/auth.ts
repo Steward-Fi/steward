@@ -911,7 +911,12 @@ export class StewardAuth {
         0,
       );
     }
-    return this.completePasskeyRegister(email, browserLib, options.emailGrant);
+    return this.completePasskeyRegister(
+      email,
+      browserLib,
+      options.emailGrant,
+      options.emailGrant ? undefined : (this.getToken() ?? undefined),
+    );
   }
 
   private async completePasskeyLogin(
@@ -965,6 +970,7 @@ export class StewardAuth {
     email: string,
     lib: Pick<SimpleWebAuthnBrowser, "startRegistration">,
     emailGrant?: string,
+    sessionToken?: string,
   ): Promise<StewardAuthResult | StewardMfaRequiredResult> {
     // Fetch registration options. When an `emailGrant` is supplied (from
     // `verifyEmailOtp`), Steward accepts it in place of a session so a
@@ -982,6 +988,7 @@ export class StewardAuth {
           ...(this.tenantId ? { tenantId: this.tenantId } : {}),
         }),
       },
+      sessionToken,
     );
 
     if (!regOptsRes.ok) {
@@ -1013,6 +1020,7 @@ export class StewardAuth {
           ...(this.tenantId ? { tenantId: this.tenantId } : {}),
         }),
       },
+      sessionToken,
     );
 
     if (!verifyRes.ok) {

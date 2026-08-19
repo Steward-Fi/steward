@@ -108,11 +108,11 @@ export class SecretVault {
   // root, then disable the fallback (see allowLegacySecretRootFallback).
   private legacyKeyStore: KeyStore;
 
-  constructor(masterPassword: string) {
+  constructor(masterPassword: string, masterSalt?: string) {
     // Domain-separate the secret-vault root from the wallet signing-vault root so
     // compromising one path does not compromise the other (they share masterPassword).
-    this.keyStore = new KeyStore(masterPassword, undefined, "secret-vault");
-    this.legacyKeyStore = new KeyStore(masterPassword);
+    this.keyStore = new KeyStore(masterPassword, masterSalt, "secret-vault");
+    this.legacyKeyStore = new KeyStore(masterPassword, masterSalt);
   }
 
   /**

@@ -15,6 +15,7 @@ crons = ["* * * * *"]
 enabled = true
 
 [vars]
+NODE_ENV = "production"
 SKIP_MIGRATIONS = "1"
 DATABASE_DRIVER = "neon-http"
 REDIS_DRIVER = "upstash"
