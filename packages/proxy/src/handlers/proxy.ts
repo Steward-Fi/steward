@@ -423,8 +423,14 @@ type ProxyReplayClaim = {
   expiresAt: number;
 };
 
+export type ProxyReplayCompletionClaim = {
+  ok: true;
+  storageKey: string;
+  storage: "memory" | "redis";
+};
+
 type ProxyReplayClaimResult =
-  | { ok: true; storageKey: string; storage: "memory" | "redis" }
+  | ProxyReplayCompletionClaim
   | { ok: false; status: number; error: string };
 
 const proxyReplayClaims = new Map<string, ProxyReplayClaim>();
@@ -865,6 +871,28 @@ async function completeUnsafeProxyRequest(claimResult: ProxyReplayClaimResult): 
   if (claim) proxyReplayClaims.set(storageKey, { ...claim, status: "completed" });
 }
 
+export type ProxyReplayCompletion = (claimResult: ProxyReplayCompletionClaim) => Promise<void>;
+
+export type ProxyHandlerDependencies = Readonly<{
+  completeReplayClaim?: ProxyReplayCompletion;
+}>;
+
+async function persistPostForwardReplayCompletion(
+  claimResult: ProxyReplayCompletionClaim,
+  completeReplayClaim: ProxyReplayCompletion,
+): Promise<void> {
+  try {
+    await completeReplayClaim(claimResult);
+  } catch (error) {
+    // The upstream attempt has already happened. Preserve its outcome and the
+    // processing claim so a retry cannot repeat a potentially committed side effect.
+    console.error(
+      "[proxy] Failed to persist post-forward idempotency completion",
+      redactedThrownDiagnostics(error),
+    );
+  }
+}
+
 async function releaseUnsafeProxyRequest(claimResult: ProxyReplayClaimResult): Promise<void> {
   if (!claimResult.ok || !claimResult.storageKey) return;
   if (claimResult.storage === "redis") {
@@ -1262,7 +1290,10 @@ export function __resetProxyHandlerTestHooksForTests(): void {
  * This is the catch-all handler mounted on the Hono app.
  * Auth middleware has already run, so agentId and tenantId are available.
  */
-export async function handleProxy(c: Context): Promise<Response> {
+async function handleProxyWithReplayCompletion(
+  c: Context,
+  completeReplayClaim: ProxyReplayCompletion,
+): Promise<Response> {
   setProxyContextNoStore(c);
   const startTime = Date.now();
   const agentId = c.get("agentId") as string;
@@ -2070,7 +2101,7 @@ export async function handleProxy(c: Context): Promise<Response> {
     });
 
     await releaseProxySpendReservation(agentId, tenantId, target.host, spendReservation);
-    await completeUnsafeProxyRequest(replayClaim);
+    await persistPostForwardReplayCompletion(replayClaim, completeReplayClaim);
     proxySlot.release();
     return c.json({ ok: false, error: "Upstream request failed" }, 502);
   } finally {
@@ -2079,7 +2110,7 @@ export async function handleProxy(c: Context): Promise<Response> {
     // The credential variable goes out of scope here.
     credential = "";
   }
-  await completeUnsafeProxyRequest(replayClaim);
+  await persistPostForwardReplayCompletion(replayClaim, completeReplayClaim);
 
   const latencyMs = Date.now() - startTime;
 
@@ -2441,6 +2472,16 @@ export async function handleProxy(c: Context): Promise<Response> {
     headers: responseHeaders,
   });
 }
+
+/** Create an isolated proxy handler with immutable request-lifecycle dependencies. */
+export function createProxyHandler(
+  dependencies: ProxyHandlerDependencies = {},
+): (c: Context) => Promise<Response> {
+  const completeReplayClaim = dependencies.completeReplayClaim ?? completeUnsafeProxyRequest;
+  return (c: Context) => handleProxyWithReplayCompletion(c, completeReplayClaim);
+}
+
+export const handleProxy = createProxyHandler();
 
 /** Null means Slack explicitly attested success; any string is a safe failure code. */
 export function classifySlackWebApiPayload(bodyText: string): string | null {
