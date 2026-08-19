@@ -432,7 +432,7 @@ const requestExpiresAtHeader = headerParameter(
 );
 const stewardSignatureHeader = headerParameter(
   "X-Steward-Signature",
-  "Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>.",
+  "Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>.",
 );
 const signingKeyIdHeader = headerParameter(
   "X-Steward-Signing-Key-Id",
@@ -6357,15 +6357,15 @@ function addHardeningInventory(spec: OpenApiSpec): OpenApiSpec {
           // Mounted globally (app.ts): freshness headers are always validated
           // when present and are required by the resolved security posture.
           requiredWhen:
-            "STEWARD_REQUIRE_REQUEST_EXPIRY=true, or NODE_ENV=production for requests other than public auth bootstrap and verified user sessions",
+            "STEWARD_REQUIRE_REQUEST_EXPIRY=true, or NODE_ENV=production for every sensitive mutation",
           acceptedHeaders: ["X-Steward-Request-Timestamp", "X-Steward-Request-Expires-At"],
         },
         authorizationSignature: {
           // Presented signatures are always verified. Production requires a
-          // signature for machine requests; browser auth and verified user
-          // sessions cannot safely hold a shared server HMAC root.
+          // signature for machine requests; public auth bootstrap and verified
+          // user sessions under /user cannot safely hold a shared HMAC root.
           requiredWhen:
-            "STEWARD_REQUIRE_AUTH_SIGNATURE=true, or NODE_ENV=production for requests other than public auth bootstrap and verified user sessions",
+            "STEWARD_REQUIRE_AUTH_SIGNATURE=true, or NODE_ENV=production for requests other than public auth bootstrap and verified user sessions under /user",
           header: "X-Steward-Signature",
           schemes: ["v1=hmac-sha256", "p256=ecdsa-secp256r1"],
           managedTenantKeyHeader: "X-Steward-Signing-Key-Id",

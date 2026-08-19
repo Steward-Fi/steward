@@ -16,7 +16,7 @@ export function resolveRequestSecurityPosture(): RequestSecurityPosture {
   };
 }
 
-const browserSessionExemptionByRequest = new WeakMap<Request, Promise<boolean>>();
+const browserSignatureExemptionByRequest = new WeakMap<Request, Promise<boolean>>();
 
 /**
  * Browser authentication endpoints cannot hold a server request-signing root.
@@ -24,10 +24,11 @@ const browserSessionExemptionByRequest = new WeakMap<Request, Promise<boolean>>(
  * JWTs, refresh tokens, identity tokens, and malformed bearer values never
  * qualify for this exemption and retain the production machine-request guards.
  */
-export function isBrowserSessionSecurityExempt(request: Request, path: string): Promise<boolean> {
+export function isBrowserSessionSignatureExempt(request: Request, path: string): Promise<boolean> {
   if (path === "/auth" || path.startsWith("/auth/")) return Promise.resolve(true);
+  if (path !== "/user" && !path.startsWith("/user/")) return Promise.resolve(false);
 
-  const cached = browserSessionExemptionByRequest.get(request);
+  const cached = browserSignatureExemptionByRequest.get(request);
   if (cached) return cached;
 
   const result = (async () => {
@@ -49,17 +50,15 @@ export function isBrowserSessionSecurityExempt(request: Request, path: string): 
       return false;
     }
   })();
-  browserSessionExemptionByRequest.set(request, result);
+  browserSignatureExemptionByRequest.set(request, result);
   return result;
 }
 
 export async function requestExpiryRequiredForRequest(
-  request: Request,
-  path: string,
+  _request: Request,
+  _path: string,
 ): Promise<boolean> {
-  if (runtimeEnvironmentFlag("STEWARD_REQUIRE_REQUEST_EXPIRY")) return true;
-  if (runtimeEnvironmentValue("NODE_ENV") !== "production") return false;
-  return !(await isBrowserSessionSecurityExempt(request, path));
+  return resolveRequestSecurityPosture().requestExpiryRequired;
 }
 
 export async function authorizationSignatureRequiredForRequest(
@@ -68,7 +67,7 @@ export async function authorizationSignatureRequiredForRequest(
 ): Promise<boolean> {
   if (runtimeEnvironmentFlag("STEWARD_REQUIRE_AUTH_SIGNATURE")) return true;
   if (runtimeEnvironmentValue("NODE_ENV") !== "production") return false;
-  return !(await isBrowserSessionSecurityExempt(request, path));
+  return !(await isBrowserSessionSignatureExempt(request, path));
 }
 
 export function configuredRequestSigningSecrets(): string[] {

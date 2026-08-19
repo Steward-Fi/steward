@@ -10,12 +10,12 @@ describe("generated OpenAPI contract", () => {
       sensitivePrefix,
       requestExpiry: {
         requiredWhen:
-          "STEWARD_REQUIRE_REQUEST_EXPIRY=true, or NODE_ENV=production for requests other than public auth bootstrap and verified user sessions",
+          "STEWARD_REQUIRE_REQUEST_EXPIRY=true, or NODE_ENV=production for every sensitive mutation",
         acceptedHeaders: ["X-Steward-Request-Timestamp", "X-Steward-Request-Expires-At"],
       },
       authorizationSignature: {
         requiredWhen:
-          "STEWARD_REQUIRE_AUTH_SIGNATURE=true, or NODE_ENV=production for requests other than public auth bootstrap and verified user sessions",
+          "STEWARD_REQUIRE_AUTH_SIGNATURE=true, or NODE_ENV=production for requests other than public auth bootstrap and verified user sessions under /user",
         header: "X-Steward-Signature",
         schemes: ["v1=hmac-sha256", "p256=ecdsa-secp256r1"],
       },

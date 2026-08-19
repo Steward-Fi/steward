@@ -159,7 +159,7 @@ describe("requestExpiry", () => {
     expect(denied.status).toBe(400);
   });
 
-  it("allows public browser bootstrap without weakening machine freshness", async () => {
+  it("requires freshness for public browser bootstrap in production", async () => {
     const app = makeDefaultApp();
 
     const [machine, browser] = await withRuntimeEnvironment({ NODE_ENV: "production" }, () =>
@@ -170,10 +170,10 @@ describe("requestExpiry", () => {
     );
 
     expect(machine.status).toBe(400);
-    expect(browser.status).toBe(200);
+    expect(browser.status).toBe(400);
   });
 
-  it("exempts verified user sessions but not agent JWTs from production freshness", async () => {
+  it("requires freshness for both verified user sessions and agent JWTs", async () => {
     const app = makeDefaultApp();
     const environment = {
       NODE_ENV: "production",
@@ -203,7 +203,7 @@ describe("requestExpiry", () => {
       ]),
     );
 
-    expect(user.status).toBe(200);
+    expect(user.status).toBe(400);
     expect(agent.status).toBe(400);
   });
 });

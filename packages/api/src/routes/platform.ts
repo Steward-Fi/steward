@@ -61,7 +61,6 @@ import { KeyStore, Vault } from "@stwd/vault";
 import { and, count, eq, ilike, inArray, isNull, ne, or, type SQL, sql } from "drizzle-orm";
 import { type Context, Hono } from "hono";
 import { writeAuditEvent } from "../services/audit";
-import { configurationFingerprint } from "../services/config-fingerprint";
 import {
   type AppVariables,
   createAgentToken,
@@ -320,7 +319,11 @@ function vault(): Vault {
   return getVault();
 }
 
-let _platformKeyStore: { fingerprint: string; keyStore: KeyStore } | undefined;
+type PlatformKeyStoreConfiguration = { masterPassword: string; masterSalt: string };
+
+let _platformKeyStore:
+  | { configuration: PlatformKeyStoreConfiguration; keyStore: KeyStore }
+  | undefined;
 function platformKeyStore(): KeyStore {
   const requestScoped = currentRuntimeEnvironment() !== process.env;
   const masterPassword = runtimeEnvironmentValue("STEWARD_MASTER_PASSWORD");
@@ -338,12 +341,19 @@ function platformKeyStore(): KeyStore {
 
   const effectivePassword = masterPassword || "dev-secret";
   const masterSalt = runtimeEnvironmentValue("STEWARD_KDF_SALT");
-  const fingerprint = configurationFingerprint({ effectivePassword, masterSalt: masterSalt || "" });
-  if (!requestScoped && _platformKeyStore?.fingerprint === fingerprint) {
+  const configuration: PlatformKeyStoreConfiguration = {
+    masterPassword: effectivePassword,
+    masterSalt: masterSalt || "",
+  };
+  if (
+    !requestScoped &&
+    _platformKeyStore?.configuration.masterPassword === configuration.masterPassword &&
+    _platformKeyStore.configuration.masterSalt === configuration.masterSalt
+  ) {
     return _platformKeyStore.keyStore;
   }
   const keyStore = new KeyStore(effectivePassword, masterSalt);
-  if (!requestScoped) _platformKeyStore = { fingerprint, keyStore };
+  if (!requestScoped) _platformKeyStore = { configuration, keyStore };
   return keyStore;
 }
 

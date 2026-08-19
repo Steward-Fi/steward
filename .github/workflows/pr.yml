@@ -820,6 +820,7 @@ jobs:
           STEWARD_EMAIL_CODE_SECRET: "ci-email-code-secret-must-be-at-least-32-chars-long"
           STEWARD_EXECUTION_AUTH_SECRET: "v2-ci-1:ci-execution-auth-secret-must-be-at-least-32-bytes-long"
           STEWARD_AUDIT_HMAC_KEY: "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+          STEWARD_REQUEST_SIGNING_SECRET: "ci-api-signing-secret-must-be-at-least-32-bytes"
           # Dummy HMAC root so the required compose var interpolates; production
           # supplies a real value. Does not weaken fail-closed behavior.
           STEWARD_PROXY_REQUEST_SIGNING_SECRET: "ci-proxy-signing-secret-must-be-at-least-32-bytes"
@@ -871,6 +872,7 @@ jobs:
           # so every required variable from the up step must be present here too
           # or the teardown fails (exit 1) despite all tests passing.
           STEWARD_AUDIT_HMAC_KEY: "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+          STEWARD_REQUEST_SIGNING_SECRET: "ci-api-signing-secret-must-be-at-least-32-bytes"
           STEWARD_PROXY_REQUEST_SIGNING_SECRET: "ci-proxy-signing-secret-must-be-at-least-32-bytes"
           POSTGRES_DB: "steward_test"
           POSTGRES_USER: "steward"

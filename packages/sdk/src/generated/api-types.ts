@@ -27,7 +27,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -164,7 +164,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -319,7 +319,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -477,7 +477,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -634,7 +634,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -787,7 +787,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -955,7 +955,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -1110,7 +1110,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -1272,7 +1272,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -1429,7 +1429,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -1585,7 +1585,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -1739,7 +1739,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -1885,7 +1885,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -2044,7 +2044,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -2203,7 +2203,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -2341,7 +2341,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -2497,7 +2497,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -2635,7 +2635,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -2903,7 +2903,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -3061,7 +3061,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -3312,7 +3312,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -3470,7 +3470,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -3725,7 +3725,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -3976,7 +3976,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -4134,7 +4134,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -4385,7 +4385,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -4543,7 +4543,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -5032,7 +5032,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -5187,7 +5187,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -5859,7 +5859,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -6254,7 +6254,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -6375,7 +6375,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -6921,7 +6921,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -7203,7 +7203,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -7496,7 +7496,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -7891,7 +7891,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -8012,7 +8012,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -8558,7 +8558,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -8840,7 +8840,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -9079,7 +9079,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -9232,7 +9232,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -9513,7 +9513,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -9654,7 +9654,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -9788,7 +9788,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -10034,7 +10034,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -10187,7 +10187,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -10468,7 +10468,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -10609,7 +10609,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -10743,7 +10743,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -10993,7 +10993,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -11253,7 +11253,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -11371,7 +11371,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -11634,7 +11634,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -11775,7 +11775,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -12038,7 +12038,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -12157,7 +12157,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -12417,7 +12417,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -12677,7 +12677,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -12795,7 +12795,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -13058,7 +13058,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -13199,7 +13199,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -13462,7 +13462,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -13581,7 +13581,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -13864,7 +13864,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -14084,7 +14084,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -14235,7 +14235,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -14536,7 +14536,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -14705,7 +14705,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -14843,7 +14843,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -15137,7 +15137,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -15357,7 +15357,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -15508,7 +15508,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -15809,7 +15809,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -15978,7 +15978,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -16116,7 +16116,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -16432,7 +16432,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -16804,7 +16804,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -17003,7 +17003,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -17199,7 +17199,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -17395,7 +17395,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -17591,7 +17591,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -17787,7 +17787,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -17983,7 +17983,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -19887,7 +19887,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -20046,7 +20046,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -20329,7 +20329,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -20517,7 +20517,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -21375,7 +21375,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -21540,7 +21540,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -21815,7 +21815,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -21992,7 +21992,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -22419,7 +22419,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -22574,7 +22574,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -22729,7 +22729,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -22918,7 +22918,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -23134,7 +23134,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -23456,7 +23456,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -23852,7 +23852,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -24002,7 +24002,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -24157,7 +24157,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -24430,7 +24430,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -24586,7 +24586,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -24743,7 +24743,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -24904,7 +24904,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -25042,7 +25042,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -25434,7 +25434,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -25686,7 +25686,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -25863,7 +25863,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -26290,7 +26290,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -26445,7 +26445,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -26600,7 +26600,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -26789,7 +26789,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -27005,7 +27005,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -27327,7 +27327,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -27723,7 +27723,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -27873,7 +27873,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -28028,7 +28028,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -28301,7 +28301,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -28457,7 +28457,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -28614,7 +28614,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -28775,7 +28775,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -28913,7 +28913,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -29305,7 +29305,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -29666,7 +29666,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -29805,7 +29805,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -30073,7 +30073,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -30220,7 +30220,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -30374,7 +30374,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -30663,7 +30663,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -31478,7 +31478,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -31843,7 +31843,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -32120,7 +32120,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -32303,7 +32303,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -32472,7 +32472,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -32716,7 +32716,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -32857,7 +32857,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -32994,7 +32994,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -33257,7 +33257,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -33420,7 +33420,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -33568,7 +33568,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -33706,7 +33706,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -34118,7 +34118,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -34269,7 +34269,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -34669,7 +34669,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -34832,7 +34832,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -35097,7 +35097,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -35439,7 +35439,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -35758,7 +35758,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -35921,7 +35921,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -36081,7 +36081,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -36258,7 +36258,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -36521,7 +36521,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -36814,7 +36814,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -36952,7 +36952,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -37124,7 +37124,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -37289,7 +37289,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -37452,7 +37452,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -37624,7 +37624,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -37791,7 +37791,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -37959,7 +37959,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -38234,7 +38234,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -38527,7 +38527,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -38665,7 +38665,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -38837,7 +38837,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -39002,7 +39002,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -39165,7 +39165,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -39337,7 +39337,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -39504,7 +39504,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -39672,7 +39672,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -40128,7 +40128,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -40472,7 +40472,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -40723,7 +40723,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -41335,7 +41335,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -41498,7 +41498,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -41756,7 +41756,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -41911,7 +41911,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -42033,7 +42033,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -42297,7 +42297,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -42470,7 +42470,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -42601,7 +42601,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -42896,7 +42896,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -43062,7 +43062,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -43207,7 +43207,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -43373,7 +43373,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -43863,7 +43863,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -44122,7 +44122,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -44280,7 +44280,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -44435,7 +44435,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -44662,7 +44662,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -44897,7 +44897,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -45180,7 +45180,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -45560,7 +45560,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
@@ -45846,7 +45846,7 @@ export interface paths {
                     "X-Steward-Request-Timestamp"?: string;
                     /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
                     "X-Steward-Request-Expires-At"?: string;
-                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
+                    /** @description Authorization signature for sensitive mutating machine requests in production, or every sensitive mutation when STEWARD_REQUIRE_AUTH_SIGNATURE=true. Public auth bootstrap and verified user-session requests under /user are exempt from the production default. Presented signatures are always verified. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
                     /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;

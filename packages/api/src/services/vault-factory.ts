@@ -9,7 +9,6 @@ import {
   type KmsEnvelopeOptions,
   Vault,
 } from "@stwd/vault";
-import { configurationFingerprint } from "./config-fingerprint";
 
 const require = createRequire(import.meta.url);
 
@@ -78,7 +77,7 @@ export interface ConfiguredVaultOptions {
   fallbackPassword?: string;
 }
 
-let processVaultCache: { fingerprint: string; vault: Vault } | null = null;
+let processVaultCache: { configuration: ResolvedVaultConfiguration; vault: Vault } | null = null;
 let warnedDevSecretFallback = false;
 
 interface ResolvedVaultConfiguration {
@@ -310,34 +309,85 @@ function instantiateConfiguredVault(configuration: ResolvedVaultConfiguration): 
   });
 }
 
-export function createConfiguredVault(options: ConfiguredVaultOptions = {}): Vault {
-  return instantiateConfiguredVault(resolveConfiguredVault(options));
+function assertRequestScopedCustodySupported(configuration: ResolvedVaultConfiguration): void {
+  if (currentRuntimeEnvironment() === process.env) return;
+  if (configuration.mode === "local" && !configuration.externalCustody) return;
+  // KMS and external-custody clients still obtain credentials from process-global
+  // provider chains. Until explicit request-owned clients are injected, refuse to
+  // validate request-local options and then silently execute under global authority.
+  throw new Error("Request-scoped KMS custody configuration is not supported");
 }
 
-function configuredVaultFingerprint(configuration: ResolvedVaultConfiguration): string {
-  const { externalCustody, ...rest } = configuration;
-  return configurationFingerprint({
-    ...rest,
-    externalCustody: externalCustody
-      ? {
-          ...externalCustody,
-          maxGasLimit: externalCustody.maxGasLimit.toString(),
-          maxGasPriceWei: externalCustody.maxGasPriceWei.toString(),
-          maxTotalFeeWei: externalCustody.maxTotalFeeWei.toString(),
-        }
-      : undefined,
-  });
+export function createConfiguredVault(options: ConfiguredVaultOptions = {}): Vault {
+  const configuration = resolveConfiguredVault(options);
+  assertRequestScopedCustodySupported(configuration);
+  return instantiateConfiguredVault(configuration);
+}
+
+function sameKmsEnvelopeOptions(
+  left: KmsEnvelopeOptions | undefined,
+  right: KmsEnvelopeOptions | undefined,
+): boolean {
+  if (!left || !right) return left === right;
+  if (left.provider !== right.provider) return false;
+  if (left.provider === "aws" && right.provider === "aws") {
+    return left.keyId === right.keyId && left.region === right.region;
+  }
+  if (left.provider === "pkcs11" && right.provider === "pkcs11") {
+    return (
+      left.modulePath === right.modulePath &&
+      left.pin === right.pin &&
+      left.keyLabel === right.keyLabel
+    );
+  }
+  return false;
+}
+
+function sameExternalCustodyConfiguration(
+  left: ResolvedVaultConfiguration["externalCustody"],
+  right: ResolvedVaultConfiguration["externalCustody"],
+): boolean {
+  if (!left || !right) return left === right;
+  return (
+    left.provider === right.provider &&
+    left.region === right.region &&
+    left.maxGasLimit === right.maxGasLimit &&
+    left.maxGasPriceWei === right.maxGasPriceWei &&
+    left.maxTotalFeeWei === right.maxTotalFeeWei
+  );
+}
+
+function sameResolvedVaultConfiguration(
+  left: ResolvedVaultConfiguration,
+  right: ResolvedVaultConfiguration,
+): boolean {
+  return (
+    left.mode === right.mode &&
+    left.masterPassword === right.masterPassword &&
+    left.kdfSalt === right.kdfSalt &&
+    left.rpcUrl === right.rpcUrl &&
+    left.chainId === right.chainId &&
+    sameKmsEnvelopeOptions(left.kmsEnvelope, right.kmsEnvelope) &&
+    sameExternalCustodyConfiguration(left.externalCustody, right.externalCustody)
+  );
 }
 
 export function getConfiguredVault(options: ConfiguredVaultOptions = {}): Vault {
   const configuration = resolveConfiguredVault(options);
+  assertRequestScopedCustodySupported(configuration);
   if (currentRuntimeEnvironment() !== process.env) {
     return instantiateConfiguredVault(configuration);
   }
-  const fingerprint = configuredVaultFingerprint(configuration);
-  if (processVaultCache?.fingerprint === fingerprint) return processVaultCache.vault;
+  // This is cache identity, not password verification. Exact process-local
+  // equality avoids creating a reusable fast hash of the custody secrets.
+  if (
+    processVaultCache &&
+    sameResolvedVaultConfiguration(processVaultCache.configuration, configuration)
+  ) {
+    return processVaultCache.vault;
+  }
   const vault = instantiateConfiguredVault(configuration);
-  processVaultCache = { fingerprint, vault };
+  processVaultCache = { configuration, vault };
   return vault;
 }
 

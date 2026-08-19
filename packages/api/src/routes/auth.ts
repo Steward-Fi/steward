@@ -149,7 +149,6 @@ import {
   validateWalletAbusePolicy,
   verifyCaptchaToken,
 } from "../services/auth-abuse";
-import { configurationFingerprint } from "../services/config-fingerprint";
 import { verifyEip1271 } from "../services/eip1271";
 import {
   isAllowedOidcClientSecretEnvForTenant,
@@ -1279,7 +1278,15 @@ let _authStoreSources: AuthStoreSources = {
   mfa: "memory",
   importSession: "memory",
 };
-let _phoneAuth: { fingerprint: string; auth: PhoneAuth } | null = null;
+type PhoneAuthConfiguration = {
+  provider: string;
+  nodeEnv: string;
+  twilioAccountSid: string;
+  twilioAuthToken: string;
+  twilioFrom: string;
+};
+
+let _phoneAuth: { configuration: PhoneAuthConfiguration; auth: PhoneAuth } | null = null;
 
 export type AuthStoreSource = "redis" | "postgres" | "memory";
 export type AuthStoreSources = {
@@ -1712,8 +1719,10 @@ export function getPasskeyAuth(requestOrigin?: string): PasskeyAuth {
 // ─── EmailAuth cache ──────────────────────────────────────────────────────────
 
 const _emailAuthByTenant = new Map<string, Promise<EmailAuth>>();
-let _emailKeyStore: { fingerprint: string; keyStore: KeyStore } | null = null;
-let _oauthKeyStore: { fingerprint: string; keyStore: KeyStore } | null = null;
+type KeyStoreConfiguration = { masterPassword: string; masterSalt: string };
+
+let _emailKeyStore: { configuration: KeyStoreConfiguration; keyStore: KeyStore } | null = null;
+let _oauthKeyStore: { configuration: KeyStoreConfiguration; keyStore: KeyStore } | null = null;
 
 function createConfiguredKeyStore(missingPasswordMessage: string): KeyStore {
   const masterPassword = runtimeEnvironmentValue("STEWARD_MASTER_PASSWORD");
@@ -1727,11 +1736,18 @@ function createConfiguredKeyStore(missingPasswordMessage: string): KeyStore {
   return new KeyStore(masterPassword, masterSalt);
 }
 
-function keyStoreConfigurationFingerprint(): string {
-  return configurationFingerprint({
+function keyStoreConfiguration(): KeyStoreConfiguration {
+  return {
     masterPassword: runtimeEnvironmentValue("STEWARD_MASTER_PASSWORD") || "dev-secret",
     masterSalt: runtimeEnvironmentValue("STEWARD_KDF_SALT") || "",
-  });
+  };
+}
+
+function sameKeyStoreConfiguration(
+  left: KeyStoreConfiguration,
+  right: KeyStoreConfiguration,
+): boolean {
+  return left.masterPassword === right.masterPassword && left.masterSalt === right.masterSalt;
 }
 
 function getEmailKeyStore(): KeyStore {
@@ -1740,12 +1756,14 @@ function getEmailKeyStore(): KeyStore {
       "STEWARD_MASTER_PASSWORD is required. For local development only, set STEWARD_ALLOW_DEV_SECRETS=true to use the insecure dev key.",
     );
   }
-  const fingerprint = keyStoreConfigurationFingerprint();
-  if (_emailKeyStore?.fingerprint === fingerprint) return _emailKeyStore.keyStore;
+  const configuration = keyStoreConfiguration();
+  if (_emailKeyStore && sameKeyStoreConfiguration(_emailKeyStore.configuration, configuration)) {
+    return _emailKeyStore.keyStore;
+  }
   const keyStore = createConfiguredKeyStore(
     "STEWARD_MASTER_PASSWORD is required. For local development only, set STEWARD_ALLOW_DEV_SECRETS=true to use the insecure dev key.",
   );
-  _emailKeyStore = { fingerprint, keyStore };
+  _emailKeyStore = { configuration, keyStore };
   return keyStore;
 }
 
@@ -1755,12 +1773,14 @@ function getOAuthKeyStore(): KeyStore {
       "STEWARD_MASTER_PASSWORD is required to encrypt OAuth provider tokens. For local development only, set STEWARD_ALLOW_DEV_SECRETS=true to use the insecure dev key.",
     );
   }
-  const fingerprint = keyStoreConfigurationFingerprint();
-  if (_oauthKeyStore?.fingerprint === fingerprint) return _oauthKeyStore.keyStore;
+  const configuration = keyStoreConfiguration();
+  if (_oauthKeyStore && sameKeyStoreConfiguration(_oauthKeyStore.configuration, configuration)) {
+    return _oauthKeyStore.keyStore;
+  }
   const keyStore = createConfiguredKeyStore(
     "STEWARD_MASTER_PASSWORD is required to encrypt OAuth provider tokens. For local development only, set STEWARD_ALLOW_DEV_SECRETS=true to use the insecure dev key.",
   );
-  _oauthKeyStore = { fingerprint, keyStore };
+  _oauthKeyStore = { configuration, keyStore };
   return keyStore;
 }
 
@@ -2823,20 +2843,30 @@ export function getPhoneAuth(): PhoneAuth {
     throw new Error("SMS provider not configured");
   }
 
-  const fingerprint = configurationFingerprint({
+  const configuration: PhoneAuthConfiguration = {
     provider: runtimeEnvironmentValue("SMS_PROVIDER") || "console",
     nodeEnv: runtimeEnvironmentValue("NODE_ENV") || "",
     twilioAccountSid: twilioAccountSid || "",
     twilioAuthToken: twilioAuthToken || "",
     twilioFrom: twilioFrom || "",
-  });
-  if (!requestScoped && _phoneAuth?.fingerprint === fingerprint) return _phoneAuth.auth;
+  };
+  if (
+    !requestScoped &&
+    _phoneAuth &&
+    Object.keys(configuration).every(
+      (key) =>
+        _phoneAuth?.configuration[key as keyof PhoneAuthConfiguration] ===
+        configuration[key as keyof PhoneAuthConfiguration],
+    )
+  ) {
+    return _phoneAuth.auth;
+  }
 
   const phoneAuth = new PhoneAuth({
     provider,
     tokenStore: new TokenStore({ backend: getMfaBackend() }),
   });
-  if (!requestScoped) _phoneAuth = { fingerprint, auth: phoneAuth };
+  if (!requestScoped) _phoneAuth = { configuration, auth: phoneAuth };
   return phoneAuth;
 }
 

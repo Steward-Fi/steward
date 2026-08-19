@@ -45,6 +45,9 @@ function makeDefaultApp() {
   app.post("/vault/:agentId/sign", (c) =>
     c.json({ ok: true, verified: Boolean(c.get("requestSignatureVerified")) }),
   );
+  app.post("/user/me/wallet/sign", (c) =>
+    c.json({ ok: true, verified: Boolean(c.get("requestSignatureVerified")) }),
+  );
   app.post("/auth/email/send", (c) => c.json({ ok: true }));
   return app;
 }
@@ -556,7 +559,7 @@ describe("authorizationSignature", () => {
     expect(browser.status).toBe(200);
   });
 
-  it("exempts verified user sessions but never agent JWTs from the production machine guard", async () => {
+  it("exempts verified user sessions only on user routes from the production machine guard", async () => {
     const app = makeDefaultApp();
     const environment = {
       NODE_ENV: "production",
@@ -573,8 +576,13 @@ describe("authorizationSignature", () => {
       ]),
     );
 
-    const [user, agent] = await withRuntimeEnvironment(environment, () =>
+    const [userRoute, userVault, agentVault] = await withRuntimeEnvironment(environment, () =>
       Promise.all([
+        app.request("/user/me/wallet/sign", {
+          method: "POST",
+          headers: { authorization: `Bearer ${userToken}` },
+          body: BODY,
+        }),
         app.request("/vault/agent-1/sign", {
           method: "POST",
           headers: { authorization: `Bearer ${userToken}` },
@@ -588,7 +596,8 @@ describe("authorizationSignature", () => {
       ]),
     );
 
-    expect(user.status).toBe(200);
-    expect(agent.status).toBe(401);
+    expect(userRoute.status).toBe(200);
+    expect(userVault.status).toBe(401);
+    expect(agentVault.status).toBe(401);
   });
 });
