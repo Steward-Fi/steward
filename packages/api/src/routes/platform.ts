@@ -79,6 +79,7 @@ import { deleteAgentAuthority } from "../services/agent-deletion";
 import { withTenantAuditedTransaction, writeAuditEvent } from "../services/audit";
 import {
   type AppVariables,
+  continueWithTenantDatabase,
   createAgentTokenForExistingAgent,
   getConditionSetReferenceValidationError,
   parseAgentTokenScopes,
@@ -723,6 +724,27 @@ platform.use("*", async (c, next) => {
   return next();
 });
 
+// Platform authority is cross-tenant, but the database capability is not. For
+// every tenant-addressed operation, bind the operator-selected tenant only
+// after the platform key and route scope have been verified above.
+platform.use("*", async (c, next) => {
+  const pathname = new URL(c.req.url).pathname.replace(/^\/platform(?=\/)/, "");
+  let tenantId = pathname.startsWith("/tenants/")
+    ? c.req.param("tenantId") || c.req.param("id")
+    : "";
+  if (pathname === "/apps/gas_spend") tenantId = c.req.query("tenant_id")?.trim() || "";
+  if (pathname === "/tenants" && c.req.method === "POST") {
+    try {
+      const body = (await c.req.raw.clone().json()) as { id?: unknown };
+      tenantId = typeof body.id === "string" ? body.id : "";
+    } catch {
+      tenantId = "";
+    }
+  }
+  if (!tenantId || !isValidTenantId(tenantId)) return next();
+  return continueWithTenantDatabase(tenantId, "platform-tenant-operation", "platform", next);
+});
+
 function requirePlatformRouteScope(
   c: Context<{ Variables: AppVariables }>,
   scope: string,
@@ -746,20 +768,17 @@ platform.get("/stats", async (c) => {
   const scopeResponse = requirePlatformRouteScope(c, "platform:stats:read");
   if (scopeResponse) return scopeResponse;
 
-  const db = getDb();
-
-  const [[tenantCount], [agentCount], [txCount]] = await Promise.all([
-    db.select({ total: count() }).from(tenants),
-    db.select({ total: count() }).from(agents),
-    db.select({ total: count() }).from(transactions),
-  ]);
+  const result = await getDb().execute(sql`SELECT * FROM steward_bootstrap.platform_stats()`);
+  const [stats] = (
+    Array.isArray(result) ? result : ((result as { rows?: unknown[] }).rows ?? [])
+  ) as Array<{ tenant_count: number; agent_count: number; transaction_count: number }> | [];
 
   return c.json<ApiResponse<{ tenants: number; agents: number; transactions: number }>>({
     ok: true,
     data: {
-      tenants: tenantCount?.total ?? 0,
-      agents: agentCount?.total ?? 0,
-      transactions: txCount?.total ?? 0,
+      tenants: Number(stats?.tenant_count ?? 0),
+      agents: Number(stats?.agent_count ?? 0),
+      transactions: Number(stats?.transaction_count ?? 0),
     },
   });
 });
@@ -985,21 +1004,29 @@ platform.get("/tenants", async (c) => {
   const scopeResponse = requirePlatformRouteScope(c, "platform:tenant:read");
   if (scopeResponse) return scopeResponse;
 
-  const db = getDb();
   const limit = parseListLimit(c.req.query("limit"));
   const offset = parseListOffset(c.req.query("offset"));
-
-  const rows = await db
-    .select({
-      id: tenants.id,
-      name: tenants.name,
-      ownerAddress: tenants.ownerAddress,
-      createdAt: tenants.createdAt,
-      updatedAt: tenants.updatedAt,
-    })
-    .from(tenants)
-    .limit(limit)
-    .offset(offset);
+  const result = await getDb().execute(
+    sql`SELECT * FROM steward_bootstrap.platform_tenants(${limit}, ${offset})`,
+  );
+  const rawRows = (
+    Array.isArray(result) ? result : ((result as { rows?: unknown[] }).rows ?? [])
+  ) as
+    | Array<{
+        id: string;
+        name: string;
+        owner_address: string | null;
+        created_at: Date | string;
+        updated_at: Date | string;
+      }>
+    | [];
+  const rows = rawRows.map((row) => ({
+    id: row.id,
+    name: row.name,
+    ownerAddress: row.owner_address,
+    createdAt: new Date(row.created_at),
+    updatedAt: new Date(row.updated_at),
+  }));
 
   return c.json<ApiResponse<typeof rows>>({ ok: true, data: rows });
 });

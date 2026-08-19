@@ -57,6 +57,8 @@ describe("0111 tenant RLS policy installation", () => {
       "agent_subject",
       "app_client_subject",
       "ensure_default_tenant",
+      "platform_stats",
+      "platform_tenants",
       "session_subject",
       "tenant_api_key_subject",
       "tenant_ids_for_internal_job",

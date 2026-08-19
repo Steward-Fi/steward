@@ -143,6 +143,36 @@ AS $$
   ON CONFLICT (id) DO NOTHING
 $$;
 
+CREATE OR REPLACE FUNCTION "steward_bootstrap"."platform_stats"()
+RETURNS TABLE (tenant_count bigint, agent_count bigint, transaction_count bigint)
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $$
+  SELECT
+    (SELECT count(*) FROM public.tenants),
+    (SELECT count(*) FROM public.agents),
+    (SELECT count(*) FROM public.transactions)
+$$;
+
+CREATE OR REPLACE FUNCTION "steward_bootstrap"."platform_tenants"(p_limit integer, p_offset integer)
+RETURNS TABLE (
+  id varchar(64), name varchar(255), owner_address varchar(128),
+  created_at timestamptz, updated_at timestamptz
+)
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $$
+  SELECT t.id, t.name, t.owner_address, t.created_at, t.updated_at
+  FROM public.tenants t
+  ORDER BY t.created_at DESC, t.id
+  LIMIT LEAST(GREATEST(p_limit, 1), 200)
+  OFFSET GREATEST(p_offset, 0)
+$$;
+
 REVOKE ALL ON ALL FUNCTIONS IN SCHEMA "steward_bootstrap" FROM PUBLIC;
 
 DO $$

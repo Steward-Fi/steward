@@ -18,15 +18,23 @@ production `neon-http` is rejected. The Google, X, and upstream-credential
 lifecycle sweeps enumerate tenants through a fixed bootstrap function and run
 one transaction per tenant.
 
+The standalone proxy now verifies its agent through the fixed bootstrap API and
+binds the full handler chain to one tenant transaction. Tenant-addressed
+platform operations bind the operator-selected tenant after platform key and
+scope verification; cross-tenant platform stats and tenant listing use two
+fixed-shape bootstrap functions. Webhook retry, provider reservation,
+transaction receipt, and tenant retention sweeps now run once per tenant.
+
 The remaining activation blockers are explicit and must not be waived:
 
 - pre-context `/auth` mutations that create or change tenant memberships still
   need fixed-shape bootstrap functions or post-verification tenant transactions;
-- platform routes intentionally operate across tenants and must be decomposed
-  into tenant transactions (tenant creation must use a narrow bootstrap API);
-- the standalone proxy entry and the retention, webhook-retry, provider
-  reservation, and transaction-receipt background schedulers need the same
-  transaction propagation and real-Postgres route/job proofs.
+- platform global-user/identity routes and agent-id-only token revocation still
+  need a tenant derivation or narrowly shaped cross-tenant bootstrap API;
+- global deactivated-user retention still needs a fixed maintenance function
+  that checks ownership across every tenant before deletion;
+- the newly propagated platform/proxy/background paths still need final
+  deployment-role real-Postgres route/job proofs.
 
 Until those paths are complete, do not run `rls-activate.sql` in production.
 

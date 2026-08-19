@@ -131,11 +131,11 @@ describe("platform security hardening", () => {
     expect(platformSource).toContain("function requirePlatformRouteScope");
     expectBefore(
       'requirePlatformRouteScope(c, "platform:stats:read")',
-      "db.select({ total: count() }).from(tenants)",
+      "steward_bootstrap.platform_stats()",
     );
     expectBefore(
       'requirePlatformRouteScope(c, "platform:tenant:read")',
-      ".select({\n      id: tenants.id",
+      "steward_bootstrap.platform_tenants",
     );
     expectBefore(
       'requirePlatformRouteScope(c, "platform:agent:read")',

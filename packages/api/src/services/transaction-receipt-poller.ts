@@ -3,6 +3,7 @@ import { and, asc, eq, inArray, isNotNull, sql } from "drizzle-orm";
 import { createPublicClient, http, type TransactionReceipt } from "viem";
 import { withTenantAuditedTransaction, writeAuditEvent } from "./audit";
 import { agents, db, transactions } from "./context";
+import { runInternalJobForEachTenant } from "./tenant-job";
 import { dispatchWebhook } from "./webhook-dispatch";
 
 const DEFAULT_RECEIPT_POLL_INTERVAL_MS = 60_000;
@@ -565,6 +566,24 @@ export async function pollBroadcastTransactionReceipts(
   return summary;
 }
 
+export async function pollBroadcastTransactionReceiptsForAllTenants(
+  options: TransactionReceiptPollerOptions = {},
+) {
+  const tenantResults = await runInternalJobForEachTenant("transaction-receipt-poll", () =>
+    pollBroadcastTransactionReceipts(options),
+  );
+  return tenantResults.reduce(
+    (total, { value }) => ({
+      checked: total.checked + value.checked,
+      confirmed: total.confirmed + value.confirmed,
+      reverted: total.reverted + value.reverted,
+      pending: total.pending + value.pending,
+      skipped: total.skipped + value.skipped,
+    }),
+    { checked: 0, confirmed: 0, reverted: 0, pending: 0, skipped: 0 },
+  );
+}
+
 export function startTransactionReceiptPollingScheduler(): () => void {
   if (process.env.STEWARD_TRANSACTION_RECEIPT_POLLER === "false") {
     console.log("[tx-poller] Disabled by STEWARD_TRANSACTION_RECEIPT_POLLER=false");
@@ -602,7 +621,7 @@ export function startTransactionReceiptPollingScheduler(): () => void {
   const tick = () => {
     if (running) return;
     running = true;
-    void pollBroadcastTransactionReceipts({
+    void pollBroadcastTransactionReceiptsForAllTenants({
       batchSize,
       minConfirmations,
       stillPendingAfterMs,

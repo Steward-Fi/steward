@@ -51,7 +51,8 @@ SELECT format('GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO %I', :'s
 -- The function owner is non-login and may read only the fixed bootstrap inputs.
 SELECT format(
   'GRANT SELECT ON public.tenants, public.users, public.user_tenants, public.agents, '
-  'public.session_signers, public.tenant_app_clients, public.tenant_app_client_secrets TO %I',
+  'public.session_signers, public.tenant_app_clients, public.tenant_app_client_secrets, '
+  'public.transactions TO %I',
   :'steward_bootstrap_role'
 ) \gexec
 SELECT format('GRANT INSERT ON public.tenants TO %I', :'steward_bootstrap_role') \gexec
@@ -65,6 +66,8 @@ SELECT format('ALTER FUNCTION steward_bootstrap.agent_subject(text,text,text) OW
 SELECT format('ALTER FUNCTION steward_bootstrap.app_client_subject(text,text) OWNER TO %I', :'steward_bootstrap_role') \gexec
 SELECT format('ALTER FUNCTION steward_bootstrap.tenant_ids_for_internal_job() OWNER TO %I', :'steward_bootstrap_role') \gexec
 SELECT format('ALTER FUNCTION steward_bootstrap.ensure_default_tenant(text) OWNER TO %I', :'steward_bootstrap_role') \gexec
+SELECT format('ALTER FUNCTION steward_bootstrap.platform_stats() OWNER TO %I', :'steward_bootstrap_role') \gexec
+SELECT format('ALTER FUNCTION steward_bootstrap.platform_tenants(integer,integer) OWNER TO %I', :'steward_bootstrap_role') \gexec
 
 SELECT format('ALTER TABLE %I.%I OWNER TO %I', n.nspname, c.relname, :'steward_migration_role')
 FROM pg_class c
