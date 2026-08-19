@@ -9,8 +9,10 @@ on:
         type: string
 
 permissions:
+  checks: read
   contents: read
   pull-requests: read
+  statuses: read
 
 concurrency:
   group: wallet-e2e-manual
@@ -95,9 +97,8 @@ jobs:
             --arg author "$pr_author" \
             --arg sha "$TARGET_SHA" \
             '[.[] | select(.commit_id == $sha)] |
-             sort_by(.submitted_at, .id) |
              group_by(.user.login | ascii_downcase) |
-             map(last) |
+             map(sort_by(.submitted_at, .id) | last) |
              .[] |
              select(
                .state == "APPROVED" and
