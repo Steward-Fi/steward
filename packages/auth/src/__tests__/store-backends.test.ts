@@ -27,7 +27,10 @@ function redisLike(overrides: Partial<RedisLike> = {}): RedisLike {
       for (const key of keys) if (store.delete(key)) removed += 1;
       return removed;
     },
-    eval: async (_script, _keys, key, expected, desired) => {
+    eval: async (_script, keys, key, ...args) => {
+      const [guardKey, expected, desired, _ttl, guardExpected] =
+        keys === 2 ? args : [undefined, ...args];
+      if (guardKey !== undefined && store.get(String(guardKey)) !== guardExpected) return 0;
       const current = store.get(String(key));
       if (current !== expected && current !== desired) return 0;
       store.set(String(key), String(desired));
@@ -79,6 +82,28 @@ describe("NamespacedStoreBackend", () => {
     expect(await store.transition("challenge", "staged", "active", 60_000)).toBe(true);
     expect(await store.transition("challenge", "staged", "active", 60_000)).toBe(true);
     expect(await store.transition("challenge", "staged", "other", 60_000)).toBe(false);
+  });
+
+  it("binds transitions to an exact live guard in memory and Redis", async () => {
+    for (const store of [new MemoryBackend(), new RedisBackend(redisLike(), "test:")]) {
+      await store.set("challenge", "staged", 60_000);
+      await store.set("target", "newest", 60_000);
+      expect(
+        await store.transition("challenge", "staged", "active", 60_000, {
+          key: "target",
+          expected: "superseded",
+        }),
+      ).toBe(false);
+      expect(await store.get("challenge")).toBe("staged");
+      expect(
+        await store.transition("challenge", "staged", "active", 60_000, {
+          key: "target",
+          expected: "newest",
+        }),
+      ).toBe(true);
+      expect(await store.get("challenge")).toBe("active");
+      if (store instanceof MemoryBackend) store.destroy();
+    }
   });
 
   it("shares values across reconstructed stores in the same namespace", async () => {

@@ -68,8 +68,9 @@ export class TokenStore {
     expected: string,
     desired: string,
     ttlMs: number = DEFAULT_TTL_MS,
+    guard?: { key: string; expected: string },
   ): Promise<boolean> {
-    return this.backend.transition(hash, expected, desired, ttlMs);
+    return this.backend.transition(hash, expected, desired, ttlMs, guard);
   }
 
   /**

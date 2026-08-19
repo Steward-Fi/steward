@@ -84,6 +84,7 @@ const OTP_DIGITS = 6;
 const EMAIL_LOGIN_PURPOSE = "email-login";
 const MAX_EMAIL_LOGIN_CODE_ATTEMPTS = 5;
 const DEFAULT_DELIVERY_TIMEOUT_MS = 30_000;
+const MAX_DELIVERY_TIMEOUT_MS = 5 * 60_000;
 
 function generateToken(): string {
   // URL-safe hex token (64 chars from 32 bytes)
@@ -402,8 +403,14 @@ export class EmailAuth {
     this.callbackPath = config.callbackPath ?? DEFAULT_CALLBACK;
     this.tokenTtlMs = config.tokenTtlMs ?? DEFAULT_TTL_MS;
     this.deliveryTimeoutMs = config.deliveryTimeoutMs ?? DEFAULT_DELIVERY_TIMEOUT_MS;
-    if (!Number.isSafeInteger(this.deliveryTimeoutMs) || this.deliveryTimeoutMs <= 0) {
-      throw new Error("deliveryTimeoutMs must be a positive safe integer");
+    if (
+      !Number.isSafeInteger(this.deliveryTimeoutMs) ||
+      this.deliveryTimeoutMs <= 0 ||
+      this.deliveryTimeoutMs > MAX_DELIVERY_TIMEOUT_MS
+    ) {
+      throw new Error(
+        `deliveryTimeoutMs must be an integer between 1 and ${MAX_DELIVERY_TIMEOUT_MS}`,
+      );
     }
     this.provider = config.provider ?? new ConsoleProvider();
     // Fail closed (elizaOS/eliza#18452): in production the ConsoleProvider —
@@ -517,11 +524,12 @@ export class EmailAuth {
     staged: string,
     active: string,
     ttlMs: number,
+    guard: { key: string; expected: string },
   ): Promise<boolean> {
     let lastError: unknown;
     for (let attempt = 0; attempt < 3; attempt += 1) {
       try {
-        return await this.tokenStore.transition(key, staged, active, ttlMs);
+        return await this.tokenStore.transition(key, staged, active, ttlMs, guard);
       } catch (error) {
         lastError = error;
       }
@@ -640,6 +648,7 @@ export class EmailAuth {
         // issued credentials during a rolling deployment.
         JSON.stringify({ ...challenge, status: "pending" } satisfies EmailLoginChallengeRecord),
         remainingTtlMs,
+        { key: targetKey, expected: challengeId },
       );
       if (!activated) throw new Error("challenge changed before activation");
     } catch (err) {
@@ -721,6 +730,7 @@ export class EmailAuth {
         encodeOtpChallenge("delivery_pending"),
         JSON.stringify(payload),
         remainingTtlMs,
+        { key: targetKey, expected: storeKey },
       );
       if (!activated) throw new Error("OTP changed before activation");
     } catch (err) {
