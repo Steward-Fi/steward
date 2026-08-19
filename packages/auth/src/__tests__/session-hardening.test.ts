@@ -1,10 +1,20 @@
-import { describe, expect, it } from "bun:test";
-import { jwtVerify } from "jose";
+import { afterEach, describe, expect, it } from "bun:test";
+import { decodeJwt, jwtVerify } from "jose";
 
-import { validateAgentTokenExpiryEnv } from "../jwt";
+import { signAgentToken, validateAgentTokenExpiryEnv } from "../jwt";
 import { SessionManager } from "../session";
 
 describe("validateAgentTokenExpiryEnv (SEC-134)", () => {
+  const originalExpiry = process.env.AGENT_TOKEN_EXPIRY;
+  const originalSecret = process.env.STEWARD_JWT_SECRET;
+
+  afterEach(() => {
+    if (originalExpiry === undefined) delete process.env.AGENT_TOKEN_EXPIRY;
+    else process.env.AGENT_TOKEN_EXPIRY = originalExpiry;
+    if (originalSecret === undefined) delete process.env.STEWARD_JWT_SECRET;
+    else process.env.STEWARD_JWT_SECRET = originalSecret;
+  });
+
   it("accepts valid durations", () => {
     for (const value of ["30d", "15m", "12h", "1y", "45 minutes", "2 weeks"]) {
       expect(() => validateAgentTokenExpiryEnv(value)).not.toThrow();
@@ -21,6 +31,21 @@ describe("validateAgentTokenExpiryEnv (SEC-134)", () => {
     for (const value of ["2y", "400d", "53 weeks"]) {
       expect(() => validateAgentTokenExpiryEnv(value)).toThrow(/one-year maximum/);
     }
+  });
+
+  it("reads a rotated default at token-mint time instead of module initialization", async () => {
+    process.env.STEWARD_JWT_SECRET = "rotated-expiry-test-secret-at-least-32-chars";
+    process.env.AGENT_TOKEN_EXPIRY = "1h";
+    const first = decodeJwt(
+      await signAgentToken({ agentId: "agent-expiry", tenantId: "tenant-expiry" }),
+    );
+    process.env.AGENT_TOKEN_EXPIRY = "5m";
+    const rotated = decodeJwt(
+      await signAgentToken({ agentId: "agent-expiry", tenantId: "tenant-expiry" }),
+    );
+
+    expect((first.exp ?? 0) - (first.iat ?? 0)).toBe(3600);
+    expect((rotated.exp ?? 0) - (rotated.iat ?? 0)).toBe(300);
   });
 });
 

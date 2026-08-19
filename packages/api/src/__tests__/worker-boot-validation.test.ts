@@ -6,7 +6,9 @@
  */
 
 import { afterEach, describe, expect, it } from "bun:test";
-import worker from "../worker";
+import { signAgentToken } from "@stwd/auth/jwt";
+import { decodeJwt } from "jose";
+import worker, { hydrateProcessEnv } from "../worker";
 
 /**
  * Keys this file mutates: bindings hydrateProcessEnv copies onto the global
@@ -110,6 +112,30 @@ describe("workers boot JWT env validation (SEC-134)", () => {
     await expect(malformedExpiry).rejects.toThrow(
       'AGENT_TOKEN_EXPIRY "not-a-duration" is not a valid positive duration',
     );
+  });
+
+  it("uses the current Worker expiry binding when minting after module initialization", async () => {
+    snapshotEnv();
+    const secret = "workers-rotated-expiry-secret-at-least-32-chars";
+    hydrateProcessEnv({
+      STEWARD_JWT_SECRET: secret,
+      AGENT_TOKEN_EXPIRY: "1h",
+      DATABASE_URL: "unused",
+    });
+    const first = decodeJwt(
+      await signAgentToken({ agentId: "worker-agent", tenantId: "worker-tenant" }),
+    );
+    hydrateProcessEnv({
+      STEWARD_JWT_SECRET: secret,
+      AGENT_TOKEN_EXPIRY: "5m",
+      DATABASE_URL: "unused",
+    });
+    const rotated = decodeJwt(
+      await signAgentToken({ agentId: "worker-agent", tenantId: "worker-tenant" }),
+    );
+
+    expect((first.exp ?? 0) - (first.iat ?? 0)).toBe(3600);
+    expect((rotated.exp ?? 0) - (rotated.iat ?? 0)).toBe(300);
   });
 
   it("validates scheduled security bindings before opening any database handle", async () => {

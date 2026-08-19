@@ -4,7 +4,12 @@
  * Mount: app.route("/agents", agentRoutes)
  */
 
-import { hashSha256Hex, importP256PublicKey, revocationStore } from "@stwd/auth";
+import {
+  getAgentTokenExpiry,
+  hashSha256Hex,
+  importP256PublicKey,
+  revocationStore,
+} from "@stwd/auth";
 import { agentPolicies, toPersistedPolicyRule } from "@stwd/db";
 import { getSpend, getSpendByHost, invalidateCache, type SpendPeriod } from "@stwd/redis";
 import { redactedThrownDiagnostics } from "@stwd/shared";
@@ -13,7 +18,6 @@ import { type Context, Hono } from "hono";
 import { isRedisAvailable } from "../middleware/redis";
 import { withTenantAuditedTransaction, writeAuditEvent } from "../services/audit";
 import {
-  AGENT_TOKEN_EXPIRY,
   type AgentIdentity,
   type ApiResponse,
   type AppVariables,
@@ -251,7 +255,8 @@ function parseDurationSeconds(value: string): number | null {
 }
 
 function normalizeAgentTokenExpiry(value: unknown): string | null {
-  const requested = typeof value === "string" && value.trim() ? value.trim() : AGENT_TOKEN_EXPIRY;
+  const requested =
+    typeof value === "string" && value.trim() ? value.trim() : getAgentTokenExpiry();
   const seconds = parseDurationSeconds(requested);
   if (!seconds || seconds > MAX_AGENT_TOKEN_SECONDS) return null;
   return requested;
