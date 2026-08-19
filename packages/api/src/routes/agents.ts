@@ -1992,6 +1992,20 @@ agentRoutes.delete("/:agentId", async (c) => {
           .for("update");
         if (!lockedAgent) return false;
 
+        const [executingProxyRequest] = await tx
+          .select({ id: pendingProxyRequests.id })
+          .from(pendingProxyRequests)
+          .where(
+            and(
+              eq(pendingProxyRequests.tenantId, tenantId),
+              eq(pendingProxyRequests.agentId, agentId),
+              eq(pendingProxyRequests.status, "executing"),
+            ),
+          )
+          .limit(1)
+          .for("update");
+        if (executingProxyRequest) return "executing" as const;
+
         const disposedLeases = await tx
           .update(upstreamCredentialLeases)
           .set({
@@ -2009,6 +2023,14 @@ agentRoutes.delete("/:agentId", async (c) => {
             and(
               eq(upstreamCredentialLeases.tenantId, tenantId),
               eq(upstreamCredentialLeases.agentId, agentId),
+              inArray(upstreamCredentialLeases.status, [
+                "issuing",
+                "delivery_pending",
+                "acknowledging",
+                "active",
+                "revoking",
+                "needs_attention",
+              ]),
             ),
           )
           .returning({ id: upstreamCredentialLeases.id });
@@ -2023,6 +2045,24 @@ agentRoutes.delete("/:agentId", async (c) => {
             })),
           );
         }
+        await tx
+          .update(upstreamCredentialLeases)
+          .set({
+            tokenHash: null,
+            tokenCiphertext: null,
+            tokenIv: null,
+            tokenAuthTag: null,
+            tokenSalt: null,
+            updatedAt: new Date(),
+          })
+          .where(
+            and(
+              eq(upstreamCredentialLeases.tenantId, tenantId),
+              eq(upstreamCredentialLeases.agentId, agentId),
+              inArray(upstreamCredentialLeases.status, ["revoked", "expired", "failed"]),
+              sql`(${upstreamCredentialLeases.tokenHash} IS NOT NULL OR ${upstreamCredentialLeases.tokenCiphertext} IS NOT NULL OR ${upstreamCredentialLeases.tokenIv} IS NOT NULL OR ${upstreamCredentialLeases.tokenAuthTag} IS NOT NULL OR ${upstreamCredentialLeases.tokenSalt} IS NOT NULL)`,
+            ),
+          );
 
         await tx
           .update(secretRoutes)
@@ -2051,21 +2091,6 @@ agentRoutes.delete("/:agentId", async (c) => {
               inArray(pendingProxyRequests.status, ["pending", "approved"]),
             ),
           );
-        await tx
-          .update(pendingProxyRequests)
-          .set({
-            status: "failed",
-            executedAt: terminalizedAt,
-            executionError: "agent authority deleted",
-            updatedAt: terminalizedAt,
-          })
-          .where(
-            and(
-              eq(pendingProxyRequests.tenantId, tenantId),
-              eq(pendingProxyRequests.agentId, agentId),
-              eq(pendingProxyRequests.status, "executing"),
-            ),
-          );
         // Cascade delete in dependency order
         await tx.delete(approvalQueue).where(eq(approvalQueue.agentId, agentId));
         await tx.delete(transactions).where(eq(transactions.agentId, agentId));
@@ -2091,6 +2116,12 @@ agentRoutes.delete("/:agentId", async (c) => {
       },
     );
 
+    if (deleted === "executing") {
+      return c.json<ApiResponse>(
+        { ok: false, error: "Agent has an executing proxy request; retry deletion later" },
+        409,
+      );
+    }
     if (!deleted) {
       return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
     }

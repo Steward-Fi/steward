@@ -29,11 +29,29 @@ describe("0109 agent policy builder-perps reconciliation", () => {
     expect(journal.entries.some(({ tag }) => tag === omittedMigration.replace(/\.sql$/, ""))).toBe(
       false,
     );
-    expect(journal.entries.slice(-3).map(({ idx, tag }) => ({ idx, tag }))).toEqual([
-      { idx: 108, tag: "0108_evm_nonce_tenant_ownership" },
-      { idx: 109, tag: "0109_agent_policy_builder_perps_reconcile" },
-      { idx: 110, tag: "0110_agent_delete_lease_lifecycle" },
-    ]);
+    const nonceIndex = journal.entries.findIndex(
+      ({ tag }) => tag === "0108_evm_nonce_tenant_ownership",
+    );
+    const reconciliationIndex = journal.entries.findIndex(
+      ({ tag }) => tag === "0109_agent_policy_builder_perps_reconcile",
+    );
+    const deleteLifecycleIndex = journal.entries.findIndex(
+      ({ tag }) => tag === "0110_agent_delete_lease_lifecycle",
+    );
+    expect(journal.entries[nonceIndex]).toMatchObject({
+      idx: 108,
+      tag: "0108_evm_nonce_tenant_ownership",
+    });
+    expect(journal.entries[reconciliationIndex]).toMatchObject({
+      idx: 109,
+      tag: "0109_agent_policy_builder_perps_reconcile",
+    });
+    expect(journal.entries[deleteLifecycleIndex]).toMatchObject({
+      idx: 110,
+      tag: "0110_agent_delete_lease_lifecycle",
+    });
+    expect(reconciliationIndex).toBe(nonceIndex + 1);
+    expect(deleteLifecycleIndex).toBe(reconciliationIndex + 1);
   });
 
   test("repairs a production-journal schema that skipped 0073 and is idempotent", async () => {
@@ -114,10 +132,10 @@ describe("0109 agent policy builder-perps reconciliation", () => {
 
         process.env.DATABASE_URL = databaseUrl.toString();
         const first = await runMigrations();
-        expect(first.applied).toEqual([
-          "0109_agent_policy_builder_perps_reconcile",
-          "0110_agent_delete_lease_lifecycle",
-        ]);
+        const expectedAfter0108 = journal.entries
+          .filter(({ idx }) => idx > 108)
+          .map(({ tag }) => tag);
+        expect(first.applied).toEqual(expectedAfter0108);
         const second = await runMigrations();
         expect(second.applied).toEqual([]);
 

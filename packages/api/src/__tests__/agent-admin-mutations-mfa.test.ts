@@ -606,6 +606,7 @@ describe("agent admin mutations require human session + MFA (SEC-209)", () => {
     const secretId = crypto.randomUUID();
     const routeId = crypto.randomUUID();
     const leaseId = crypto.randomUUID();
+    const expiredLeaseId = crypto.randomUUID();
     const pendingRequestId = crypto.randomUUID();
     const executingRequestId = crypto.randomUUID();
     const workspaceCreatorId = crypto.randomUUID();
@@ -646,7 +647,7 @@ describe("agent admin mutations require human session + MFA (SEC-209)", () => {
       injectKey: "authorization",
       enabled: true,
     });
-    const proxyRequestFixture = (id: string, status: "pending" | "executing") => ({
+    const proxyRequestFixture = (id: string, status: "pending" | "approved") => ({
       id,
       tenantId: TENANT_ID,
       agentId: AGENT_ID,
@@ -666,7 +667,7 @@ describe("agent admin mutations require human session + MFA (SEC-209)", () => {
       .insert(pendingProxyRequests)
       .values([
         proxyRequestFixture(pendingRequestId, "pending"),
-        proxyRequestFixture(executingRequestId, "executing"),
+        proxyRequestFixture(executingRequestId, "approved"),
       ]);
     await getDb()
       .insert(upstreamCredentialLeases)
@@ -688,6 +689,36 @@ describe("agent admin mutations require human session + MFA (SEC-209)", () => {
         tokenAuthTag: "lease-tag",
         tokenSalt: "lease-salt",
         status: "active",
+      });
+    await getDb()
+      .insert(upstreamCredentialLeases)
+      .values({
+        id: expiredLeaseId,
+        tenantId: TENANT_ID,
+        workspaceId,
+        agentId: AGENT_ID,
+        grantId: crypto.randomUUID(),
+        capabilityId: crypto.randomUUID(),
+        issuer: "github-app-installation",
+        resource: {},
+        resourceHash: "e".repeat(64),
+        authorityDigest: "f".repeat(64),
+        idempotencyKeyHash: "0".repeat(64),
+        tokenHash: "1".repeat(64),
+        tokenCiphertext: "expired-ciphertext",
+        tokenIv: "expired-iv",
+        tokenAuthTag: "expired-tag",
+        tokenSalt: "expired-salt",
+        status: "expired",
+      });
+    await getDb()
+      .insert(upstreamCredentialLeaseEvents)
+      .values({
+        leaseId: expiredLeaseId,
+        tenantId: TENANT_ID,
+        action: "lease.expired",
+        decision: "deny",
+        metadata: { reason: "fixture" },
       });
 
     const beforeAgent = await getDb().select().from(agents).where(eq(agents.id, AGENT_ID));
@@ -739,6 +770,10 @@ describe("agent admin mutations require human session + MFA (SEC-209)", () => {
       .select()
       .from(upstreamCredentialLeases)
       .where(eq(upstreamCredentialLeases.agentId, AGENT_ID));
+    const beforeExpiredLeaseEvents = await getDb()
+      .select()
+      .from(upstreamCredentialLeaseEvents)
+      .where(eq(upstreamCredentialLeaseEvents.leaseId, expiredLeaseId));
 
     try {
       await getDb().execute(
@@ -815,6 +850,12 @@ describe("agent admin mutations require human session + MFA (SEC-209)", () => {
         await getDb()
           .select()
           .from(upstreamCredentialLeaseEvents)
+          .where(eq(upstreamCredentialLeaseEvents.leaseId, expiredLeaseId)),
+      ).toEqual(beforeExpiredLeaseEvents);
+      expect(
+        await getDb()
+          .select()
+          .from(upstreamCredentialLeaseEvents)
           .where(eq(upstreamCredentialLeaseEvents.leaseId, leaseId)),
       ).toHaveLength(0);
       expect(await revocationStore.getAgentRevokedBefore(AGENT_ID)).not.toBeNull();
@@ -870,7 +911,7 @@ describe("agent admin mutations require human session + MFA (SEC-209)", () => {
     expect(new Map(terminalProxyRequests.map(({ id, status }) => [id, status]))).toEqual(
       new Map([
         [pendingRequestId, "denied"],
-        [executingRequestId, "failed"],
+        [executingRequestId, "denied"],
       ]),
     );
     const [disposedLease] = await getDb()
@@ -899,6 +940,25 @@ describe("agent admin mutations require human session + MFA (SEC-209)", () => {
         metadata: { reason: "agent_deleted" },
       }),
     ]);
+    const [preservedExpiredLease] = await getDb()
+      .select()
+      .from(upstreamCredentialLeases)
+      .where(eq(upstreamCredentialLeases.id, expiredLeaseId));
+    expect(preservedExpiredLease).toMatchObject({
+      status: "expired",
+      revokedAt: null,
+      tokenHash: null,
+      tokenCiphertext: null,
+      tokenIv: null,
+      tokenAuthTag: null,
+      tokenSalt: null,
+    });
+    expect(
+      await getDb()
+        .select()
+        .from(upstreamCredentialLeaseEvents)
+        .where(eq(upstreamCredentialLeaseEvents.leaseId, expiredLeaseId)),
+    ).toEqual(beforeExpiredLeaseEvents);
 
     const deleteAudits = await getDb()
       .select({ action: auditEvents.action })
@@ -947,5 +1007,188 @@ describe("agent admin mutations require human session + MFA (SEC-209)", () => {
         ),
       );
     expect(completionAudits).toEqual([{ action: "agent.delete" }]);
+  });
+
+  it("refuses deletion while proxy work is executing, then deletes after completion", async () => {
+    const executingAgentId = `executing-delete-${crypto.randomUUID()}`;
+    const requestId = crypto.randomUUID();
+    await getDb().insert(agents).values({
+      id: executingAgentId,
+      tenantId: TENANT_ID,
+      name: "Executing delete",
+      walletAddress: "0x8888888888888888888888888888888888888888",
+    });
+    await getDb()
+      .insert(pendingProxyRequests)
+      .values({
+        id: requestId,
+        tenantId: TENANT_ID,
+        agentId: executingAgentId,
+        routeId: crypto.randomUUID(),
+        method: "POST",
+        targetHost: "executing-delete.example.test",
+        targetPath: "/mutation",
+        requestDigest: "9".repeat(64),
+        bodyCiphertext: "body",
+        bodyIv: "iv",
+        bodyAuthTag: "tag",
+        bodySalt: "salt",
+        status: "executing",
+        expiresAt: new Date(Date.now() + 60_000),
+      });
+    const app = await makeApp("admin");
+    const blocked = await app.request(`/agents/${executingAgentId}`, { method: "DELETE" });
+    expect(blocked.status).toBe(409);
+    expect(await getDb().select().from(agents).where(eq(agents.id, executingAgentId))).toHaveLength(
+      1,
+    );
+    await getDb()
+      .update(pendingProxyRequests)
+      .set({ status: "executed", executedAt: new Date() })
+      .where(eq(pendingProxyRequests.id, requestId));
+    const completed = await app.request(`/agents/${executingAgentId}`, { method: "DELETE" });
+    expect(completed.status).toBe(200);
+    expect(await getDb().select().from(agents).where(eq(agents.id, executingAgentId))).toHaveLength(
+      0,
+    );
+  });
+
+  it("fences lease and proxy creation behind a concurrent parent delete on real Postgres", async () => {
+    if (!USING_REAL_POSTGRES) return;
+    const creatorId = crypto.randomUUID();
+    const workspaceId = crypto.randomUUID();
+    await getDb()
+      .insert(users)
+      .values({
+        id: creatorId,
+        email: `${creatorId}@delete-race.test`,
+      });
+    await getDb()
+      .insert(workspaces)
+      .values({
+        id: workspaceId,
+        tenantId: TENANT_ID,
+        key: `delete-race-${workspaceId}`,
+        name: "Delete race workspace",
+        environment: "production",
+        createdBy: creatorId,
+      });
+
+    for (const kind of ["lease", "pending", "executing"] as const) {
+      const agentId = `${kind}-delete-race-${crypto.randomUUID()}`;
+      const proxyRequestId = crypto.randomUUID();
+      await getDb()
+        .insert(agents)
+        .values({
+          id: agentId,
+          tenantId: TENANT_ID,
+          name: `${kind} delete race`,
+          walletAddress:
+            kind === "lease"
+              ? "0x7777777777777777777777777777777777777777"
+              : "0x6666666666666666666666666666666666666666",
+        });
+      if (kind === "executing") {
+        await getDb()
+          .insert(pendingProxyRequests)
+          .values({
+            id: proxyRequestId,
+            tenantId: TENANT_ID,
+            agentId,
+            routeId: crypto.randomUUID(),
+            method: "POST",
+            targetHost: "delete-race.example.test",
+            targetPath: "/mutation",
+            requestDigest: "6".repeat(64),
+            bodyCiphertext: "body",
+            bodyIv: "iv",
+            bodyAuthTag: "tag",
+            bodySalt: "salt",
+            status: "approved",
+            expiresAt: new Date(Date.now() + 60_000),
+          });
+      }
+      let releaseDelete!: () => void;
+      const mayDelete = new Promise<void>((resolve) => {
+        releaseDelete = resolve;
+      });
+      let signalLocked!: () => void;
+      const parentLocked = new Promise<void>((resolve) => {
+        signalLocked = resolve;
+      });
+      const deleteTx = getDb().transaction(async (tx) => {
+        await tx
+          .select({ id: agents.id })
+          .from(agents)
+          .where(and(eq(agents.id, agentId), eq(agents.tenantId, TENANT_ID)))
+          .for("update");
+        signalLocked();
+        await mayDelete;
+        await tx
+          .update(pendingProxyRequests)
+          .set({ status: "denied", denialReason: "agent authority deleted" })
+          .where(
+            and(
+              eq(pendingProxyRequests.tenantId, TENANT_ID),
+              eq(pendingProxyRequests.agentId, agentId),
+              inArray(pendingProxyRequests.status, ["pending", "approved"]),
+            ),
+          );
+        await tx.delete(agents).where(and(eq(agents.id, agentId), eq(agents.tenantId, TENANT_ID)));
+      });
+      await parentLocked;
+      const creation =
+        kind === "lease"
+          ? getDb()
+              .insert(upstreamCredentialLeases)
+              .values({
+                tenantId: TENANT_ID,
+                workspaceId,
+                agentId,
+                grantId: crypto.randomUUID(),
+                capabilityId: crypto.randomUUID(),
+                issuer: "github-app-installation",
+                resource: {},
+                resourceHash: "2".repeat(64),
+                authorityDigest: "3".repeat(64),
+                idempotencyKeyHash: "4".repeat(64),
+              })
+          : kind === "pending"
+            ? getDb()
+                .insert(pendingProxyRequests)
+                .values({
+                  tenantId: TENANT_ID,
+                  agentId,
+                  routeId: crypto.randomUUID(),
+                  method: "POST",
+                  targetHost: "delete-race.example.test",
+                  targetPath: "/mutation",
+                  requestDigest: "5".repeat(64),
+                  bodyCiphertext: "body",
+                  bodyIv: "iv",
+                  bodyAuthTag: "tag",
+                  bodySalt: "salt",
+                  expiresAt: new Date(Date.now() + 60_000),
+                })
+            : getDb()
+                .update(pendingProxyRequests)
+                .set({ status: "executing" })
+                .where(eq(pendingProxyRequests.id, proxyRequestId));
+      let settled = false;
+      const observedCreation = creation.then(
+        () => ({ ok: true as const, error: null }),
+        (error: unknown) => ({ ok: false as const, error }),
+      );
+      void observedCreation.then(() => {
+        settled = true;
+      });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(settled).toBe(false);
+      releaseDelete();
+      await deleteTx;
+      const result = await observedCreation;
+      expect(result.ok).toBe(false);
+      expect(result.error).toBeInstanceOf(Error);
+    }
   });
 });
