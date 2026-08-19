@@ -26,6 +26,7 @@
 - In auth-proxy mode, persist an issued access token only after the HttpOnly refresh-token handoff succeeds, so a failed handoff cannot leave a partially authenticated local session.
 
 ### Docs
+- Refresh agent bootstrap and keypair-client terminology to describe the current sovereign-custody contract without internal lane or pillar labels; runtime behavior is unchanged.
 - Point example `baseUrl` values at a self-hosted instance (`http://localhost:3200`) instead of a hosted `api.steward.fi` URL. Steward is self-host-first today; there is no shared hosted API. JSDoc/README/test-fixture only, no runtime or API change (the SDK `baseUrl` remains a required field with no default).
 
 ## 0.10.1
