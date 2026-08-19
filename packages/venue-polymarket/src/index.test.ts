@@ -18,7 +18,13 @@ import {
   signEndpointUrl,
   toClobCompatibleSigner,
 } from "./index";
-import { getBatchPriceHistory, getOrderbooks, getPriceHistory, getPrices } from "./marketdata";
+import {
+  getBatchPriceHistory,
+  getMarketByToken,
+  getOrderbooks,
+  getPriceHistory,
+  getPrices,
+} from "./marketdata";
 
 // ---------------------------------------------------------------------------
 // Test fixtures — a fake signer + account. NO network.
@@ -701,6 +707,88 @@ describe("credential helpers", () => {
 // ---------------------------------------------------------------------------
 
 describe("marketdata batch", () => {
+  test("getMarketByToken returns only an authoritative response containing the requested token", async () => {
+    const tokenId = "7".repeat(72);
+    const sibling = "8".repeat(72);
+    const conditionId = `0x${"a".repeat(64)}`;
+    let requestedUrl = "";
+    const fetchMock = (async (input: string | URL | Request) => {
+      requestedUrl = String(input);
+      return new Response(
+        JSON.stringify({
+          condition_id: conditionId.toUpperCase().replace("0X", "0x"),
+          primary_token_id: tokenId,
+          secondary_token_id: sibling,
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }) as typeof fetch;
+
+    expect(
+      await getMarketByToken(tokenId, {
+        fetch: fetchMock,
+        clobUrl: "https://clob.example.test/gateway",
+      }),
+    ).toEqual({ conditionId, primaryTokenId: tokenId, secondaryTokenId: sibling });
+    expect(requestedUrl).toBe(`https://clob.example.test/gateway/markets-by-token/${tokenId}`);
+  });
+
+  test("getMarketByToken rejects a response that does not contain the requested token", async () => {
+    const tokenId = "7".repeat(72);
+    const fetchMock = (async () =>
+      new Response(
+        JSON.stringify({
+          condition_id: `0x${"a".repeat(64)}`,
+          primary_token_id: "8".repeat(72),
+          secondary_token_id: "9".repeat(72),
+        }),
+        { status: 200 },
+      )) as typeof fetch;
+    await expect(getMarketByToken(tokenId, { fetch: fetchMock })).rejects.toThrow(
+      "does not contain the requested token",
+    );
+  });
+
+  test("getMarketByToken rejects malformed and oversized responses", async () => {
+    const tokenId = "7".repeat(72);
+    const malformed = (async () =>
+      new Response(
+        JSON.stringify({
+          condition_id: "0xabc",
+          primary_token_id: tokenId,
+          secondary_token_id: "8".repeat(72),
+        }),
+        { status: 200 },
+      )) as typeof fetch;
+    await expect(getMarketByToken(tokenId, { fetch: malformed })).rejects.toThrow(
+      "response is invalid",
+    );
+
+    let canceled = false;
+    const oversized = (async () =>
+      new Response(
+        new ReadableStream({
+          cancel() {
+            canceled = true;
+          },
+        }),
+        { status: 200, headers: { "Content-Length": "20000" } },
+      )) as typeof fetch;
+    await expect(getMarketByToken(tokenId, { fetch: oversized })).rejects.toThrow(
+      "response is too large",
+    );
+    expect(canceled).toBe(true);
+
+    const duplicateKey = (async () =>
+      new Response(
+        `{"condition_id":"0x${"a".repeat(64)}","condition_id":"0x${"b".repeat(64)}","primary_token_id":"${tokenId}","secondary_token_id":"${"8".repeat(72)}"}`,
+        { status: 200 },
+      )) as typeof fetch;
+    await expect(getMarketByToken(tokenId, { fetch: duplicateKey })).rejects.toThrow(
+      "not valid JSON",
+    );
+  });
+
   test("getOrderbooks maps by asset_id, keeps empties for misses", async () => {
     const t1 = "1".repeat(72);
     const t2 = "2".repeat(72);

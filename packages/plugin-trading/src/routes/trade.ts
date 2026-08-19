@@ -38,6 +38,7 @@ import {
   clobApiCredentialsSchema,
   deriveApiCredentials,
   type EthersSignerLike,
+  getMarketByToken,
   getPrices,
   isPolymarketPostNotAttempted,
   isPolymarketUnauthorized,
@@ -60,7 +61,7 @@ import { DurableIdempotencyStore } from "./idempotency";
 // public route (not just seeded out of band).
 const sessionPredictionMarketAssetSchema = z
   .string()
-  .regex(/^pm:(cond:0x[0-9a-fA-F]{1,64}|[0-9]{1,128})$/);
+  .regex(/^pm:(cond:0x[0-9a-fA-F]{64}|[0-9]{1,128})$/);
 
 const createSessionSchema = z
   .object({
@@ -141,7 +142,7 @@ const pmSubmitOrderSchema = z.object({
   // market (both YES/NO outcomes) without a per-token entry.
   conditionId: z
     .string()
-    .regex(/^0x[0-9a-fA-F]{1,64}$/, "conditionId must be a 0x-hex string")
+    .regex(/^0x[0-9a-fA-F]{64}$/, "conditionId must be a bytes32 hex string")
     .optional(),
   side: z.enum(["buy", "sell"]),
   // BUY: amount is USD notional to spend. SELL: amount is shares.
@@ -1836,24 +1837,14 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
       notionalUsd = polymarketNotionalUsd(body.side, amount, price);
     }
 
-    // Session fetch + ownership + venue check + the prediction-market policy gate,
-    // all in one pass. checkActiveOrder loads the session and runs checkOrderAllowed
-    // against the allowlist + per-order/daily caps.
-    //
-    // We deliberately do not forward the caller-supplied `conditionId` to
-    // the allowlist check. The order is submitted for `tokenId` only, so trusting an
-    // UNVERIFIED conditionId would let an agent pair any non-allowlisted token with
-    // an allowlisted `pm:cond:<id>` and bypass the market allowlist. Until the
-    // token->condition mapping is resolved from VERIFIED Polymarket metadata, the
-    // order route honors ONLY exact `pm:<tokenId>` entries. A `pm:cond:<id>`
-    // session grant therefore does not authorize this route by itself; an exact
-    // per-token grant is required.
-    const { session, check } = await getSessionManager().checkActiveOrder({
+    // Exact token grants are evaluated without a network dependency. If only a
+    // market-wide grant could authorize the order, resolve the token's parent
+    // condition from the CLOB and evaluate again using that verified binding.
+    let { session, check } = await getSessionManager().checkActiveOrder({
       tenantId,
       id: body.sessionId,
       order: {
         tokenId: body.tokenId,
-        // conditionId intentionally omitted — see SECURITY note above.
         notionalUsd,
       },
     });
@@ -1866,13 +1857,73 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
       return c.json<ApiResponse>({ ok: false, error: "Active Polymarket session required" }, 403);
     }
 
+    let verifiedConditionId: string | undefined;
+    const hasMarketGrant = session.allowedAssets.some((asset) => asset.startsWith("pm:cond:"));
+    if (!check.allowed && check.reason === "market-not-allowed" && hasMarketGrant) {
+      try {
+        const clobUrl = configuredPolymarketClobUrl();
+        const market = await getMarketByToken(body.tokenId, clobUrl ? { clobUrl } : undefined);
+        verifiedConditionId = market.conditionId;
+      } catch (error) {
+        await auditTradeEvent(tenantId, agentId, "trade.order.policy-rejected", {
+          sessionId: session.id,
+          venue: "polymarket",
+          tokenId: body.tokenId,
+          side: body.side,
+          amount,
+          price,
+          notionalUsd,
+          reason: "market-metadata-unavailable",
+          ...redactedThrownDiagnostics(error),
+        });
+        await idempotency.release?.();
+        return c.json<ApiResponse>(
+          { ok: false, error: "Unable to verify Polymarket market binding" },
+          502,
+        );
+      }
+
+      if (
+        body.conditionId !== undefined &&
+        body.conditionId.toLowerCase() !== verifiedConditionId
+      ) {
+        const envelope: TradeIdempotencyResponse = {
+          status: 400,
+          body: { code: "policy-violation", reason: "condition-id-mismatch" },
+        };
+        await auditTradeEvent(tenantId, agentId, "trade.order.policy-rejected", {
+          sessionId: session.id,
+          venue: "polymarket",
+          tokenId: body.tokenId,
+          conditionId: verifiedConditionId,
+          side: body.side,
+          amount,
+          price,
+          notionalUsd,
+          reason: "condition-id-mismatch",
+        });
+        await idempotency.store?.(envelope);
+        return c.json(envelope.body, envelope.status);
+      }
+
+      ({ session, check } = await getSessionManager().checkActiveOrder({
+        tenantId,
+        id: body.sessionId,
+        order: { tokenId: body.tokenId, conditionId: verifiedConditionId, notionalUsd },
+      }));
+      if (session.agentId !== agentId || session.venue !== "polymarket") {
+        await idempotency.release?.();
+        return c.json<ApiResponse>({ ok: false, error: "Active Polymarket session required" }, 403);
+      }
+    }
+
     if (!check.allowed) {
       const status = pmPolicyRejectStatus(check.reason);
       await auditTradeEvent(tenantId, agentId, "trade.order.policy-rejected", {
         sessionId: session.id,
         venue: "polymarket",
         tokenId: body.tokenId,
-        conditionId: body.conditionId ?? null,
+        conditionId: verifiedConditionId ?? null,
         side: body.side,
         amount,
         price,
@@ -1905,7 +1956,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
         sessionId: session.id,
         venue: "polymarket",
         tokenId: body.tokenId,
-        conditionId: body.conditionId ?? null,
+        conditionId: verifiedConditionId ?? null,
         reason: creds.reason,
       });
       await idempotency.release?.();
@@ -1921,7 +1972,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
         sessionId: session.id,
         venue: "polymarket",
         tokenId: body.tokenId,
-        conditionId: body.conditionId ?? null,
+        conditionId: verifiedConditionId ?? null,
         reason: "wallet-binding-mismatch",
         sessionWallet: session.walletId,
         resolvedWallet: creds.walletAddress,
@@ -1992,7 +2043,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
           sessionId: session.id,
           venue: "polymarket",
           tokenId: body.tokenId,
-          conditionId: body.conditionId ?? null,
+          conditionId: verifiedConditionId ?? null,
           side: body.side,
           amount,
           price,
@@ -2025,7 +2076,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
             sessionId: session.id,
             venue: "polymarket",
             tokenId: body.tokenId,
-            conditionId: body.conditionId ?? null,
+            conditionId: verifiedConditionId ?? null,
             notionalUsd,
             reason: "pre-submit-build-failed",
             ...redactedThrownDiagnostics(err),
@@ -2091,7 +2142,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
               sessionId: session.id,
               venue: "polymarket",
               tokenId: body.tokenId,
-              conditionId: body.conditionId ?? null,
+              conditionId: verifiedConditionId ?? null,
               notionalUsd,
               reason: "pre-submit-build-failed",
               ...redactedThrownDiagnostics(err),
@@ -2109,7 +2160,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
             sessionId: session.id,
             venue: "polymarket",
             tokenId: body.tokenId,
-            conditionId: body.conditionId ?? null,
+            conditionId: verifiedConditionId ?? null,
             notionalUsd,
             reason: "submit-status-unknown",
             ...redactedThrownDiagnostics(err),
@@ -2151,7 +2202,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
             sessionId: session.id,
             venue: "polymarket",
             tokenId: body.tokenId,
-            conditionId: body.conditionId ?? null,
+            conditionId: verifiedConditionId ?? null,
             side: body.side,
             amount,
             price,
@@ -2181,7 +2232,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
             sessionId: session.id,
             venue: "polymarket",
             tokenId: body.tokenId,
-            conditionId: body.conditionId ?? null,
+            conditionId: verifiedConditionId ?? null,
             side: body.side,
             amount,
             price,
@@ -2213,7 +2264,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
             sessionId: session.id,
             venue: "polymarket",
             tokenId: body.tokenId,
-            conditionId: body.conditionId ?? null,
+            conditionId: verifiedConditionId ?? null,
             side: body.side,
             amount,
             price,

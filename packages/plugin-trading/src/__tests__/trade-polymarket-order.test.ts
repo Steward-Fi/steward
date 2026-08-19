@@ -1,20 +1,10 @@
 /**
  * Behavioral coverage for POST /v1/trade/polymarket/order.
  *
- * Mirrors the Hyperliquid venue-submit fence harness: real in-memory PGLite,
- * TradeSessionManager, policy/session routes, vault provisioning, credential
- * derivation, and execution adapter. Focused fault-path cases retain narrow
- * wallet/adapter spies. The deterministic E2E case uses the real vault signer
- * and Polymarket SDK, intercepting only the SDK's HTTP methods at the network
- * edge.
- *
- * Coverage:
- *   (a) policy-reject: market-not-allowed -> 400 policy-violation + audit, no spend.
- *   (b) policy-reject: per-order-cap-exceeded -> 400 policy-violation + audit.
- *   (c) idempotency: conflict (same key, different body) -> 409; replay -> same envelope.
- *   (d) session-not-active (revoked) -> 403.
- *   (e) creds-not-provisioned -> 409 fail-closed, no spend reserved.
- *   (f) happy path (mocked adapter returns filled) -> 200 + spend reserved + submitted audit.
+ * The harness uses PGLite, TradeSessionManager, the public route, vault
+ * provisioning, credential derivation, and the execution adapter. Focused
+ * fault cases retain narrow wallet/adapter spies; the deterministic end-to-end
+ * case uses the real vault signer and SDK while intercepting only network I/O.
  */
 import {
   afterAll,
@@ -49,7 +39,8 @@ import type { AppVariables } from "../services/context";
 setDefaultTimeout(30000);
 
 const TOKEN_ID = "71321045679252212594626385532706912750332728571942532289631379312455583992563";
-const COND_ID = "0xabc123";
+const COND_ID = `0x${"a".repeat(64)}`;
+const OTHER_COND_ID = `0x${"b".repeat(64)}`;
 const FUNDER = "0x0985cCC0fD7C568d493874D845471D5F4B1D9c3c";
 const WALLET = "0x1111111111111111111111111111111111111111";
 
@@ -254,25 +245,104 @@ describe("POST /v1/trade/polymarket/order", () => {
     expect(await dailySpendOf(sessionId)).toBe(0);
   });
 
-  it("SECURITY: a caller-supplied conditionId does NOT grant a non-allowlisted token", async () => {
-    // Session allowlists ONLY the market (pm:cond:<id>), not the specific token.
-    // The order route must NOT trust the caller's conditionId (the order is
-    // submitted for tokenId only), so pairing the real token with the allowlisted
-    // condition id must STILL be rejected as market-not-allowed — no bypass.
+  it("rejects a caller conditionId that disagrees with authoritative token metadata", async () => {
     const { tenantId, agentId, sessionId } = await seedSession({
       allowedAssets: [`pm:cond:${COND_ID}`],
     });
     stubWallet(true);
     const app = makeApp(tenantId, agentId, tradeRoutes);
+    const fetchSpy = spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          condition_id: OTHER_COND_ID,
+          primary_token_id: TOKEN_ID,
+          secondary_token_id: "8".repeat(72),
+        }),
+        { status: 200 },
+      ),
+    );
 
-    const res = await postOrder(app, sessionId, crypto.randomUUID(), {
-      conditionId: COND_ID,
+    try {
+      const res = await postOrder(app, sessionId, crypto.randomUUID(), {
+        conditionId: COND_ID,
+      });
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { code?: string; reason?: string };
+      expect(body).toEqual({ code: "policy-violation", reason: "condition-id-mismatch" });
+      expect(await dailySpendOf(sessionId)).toBe(0);
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it("authorizes a market-wide grant only after resolving the token's condition", async () => {
+    const { tenantId, agentId, sessionId } = await seedSession({
+      allowedAssets: [`pm:cond:0x${"A".repeat(64)}`],
     });
-    expect(res.status).toBe(400);
-    const body = (await res.json()) as { code?: string; reason?: string };
-    expect(body.code).toBe("policy-violation");
-    expect(body.reason).toBe("market-not-allowed");
-    expect(await dailySpendOf(sessionId)).toBe(0);
+    stubWallet(true);
+    const app = makeApp(tenantId, agentId, tradeRoutes);
+    const fetchSpy = spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          condition_id: COND_ID,
+          primary_token_id: TOKEN_ID,
+          secondary_token_id: "8".repeat(72),
+        }),
+        { status: 200 },
+      ),
+    );
+
+    try {
+      const res = await postOrder(app, sessionId, crypto.randomUUID());
+      expect(res.status).toBe(409);
+      expect(((await res.json()) as { error?: string }).error).toContain(
+        "credentials are not provisioned",
+      );
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+      expect(await dailySpendOf(sessionId)).toBe(0);
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it("keeps metadata outages retryable without authorizing an unverified market grant", async () => {
+    const { tenantId, agentId, sessionId } = await seedSession({
+      allowedAssets: [`pm:cond:${COND_ID}`],
+    });
+    stubWallet(true);
+    const app = makeApp(tenantId, agentId, tradeRoutes);
+    const key = crypto.randomUUID();
+    const fetchSpy = spyOn(globalThis, "fetch")
+      .mockRejectedValueOnce(new Error("TOKEN_METADATA_SECRET_CANARY"))
+      .mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            condition_id: COND_ID,
+            primary_token_id: TOKEN_ID,
+            secondary_token_id: "8".repeat(72),
+          }),
+          { status: 200 },
+        ),
+      );
+
+    try {
+      const first = await postOrder(app, sessionId, key);
+      expect(first.status).toBe(502);
+      expect(await first.json()).toEqual({
+        ok: false,
+        error: "Unable to verify Polymarket market binding",
+      });
+
+      const retry = await postOrder(app, sessionId, key);
+      expect(retry.status).toBe(409);
+      expect(((await retry.json()) as { error?: string }).error).toContain(
+        "credentials are not provisioned",
+      );
+      expect(fetchSpy).toHaveBeenCalledTimes(2);
+      expect(await dailySpendOf(sessionId)).toBe(0);
+    } finally {
+      fetchSpy.mockRestore();
+    }
   });
 
   it("SEC-041: SELL notional is floored at the CLOB best bid (low-limit cap bypass fails)", async () => {
@@ -358,16 +428,22 @@ describe("POST /v1/trade/polymarket/order", () => {
   });
 
   it("honors an exact pm:<tokenId> allowlist entry (passes the policy gate)", async () => {
-    // The per-token entry IS the executable unit — it grants exactly this token.
     const { tenantId, agentId, sessionId } = await seedSession({
       allowedAssets: [`pm:${TOKEN_ID}`],
     });
     stubWallet(true); // funder present, L2 creds unprovisioned -> 409 past the gate
     const app = makeApp(tenantId, agentId, tradeRoutes);
+    const fetchSpy = spyOn(globalThis, "fetch").mockRejectedValue(
+      new Error("exact token grants must not require market metadata"),
+    );
 
-    const res = await postOrder(app, sessionId, crypto.randomUUID());
-    // Policy gate PASSED (token allowed) -> reaches the creds gate -> 409.
-    expect(res.status).toBe(409);
+    try {
+      const res = await postOrder(app, sessionId, crypto.randomUUID());
+      expect(res.status).toBe(409);
+      expect(fetchSpy).not.toHaveBeenCalled();
+    } finally {
+      fetchSpy.mockRestore();
+    }
   });
 
   it("returns 409 on idempotency-key reuse with a different body; replays the same envelope", async () => {

@@ -1,3 +1,4 @@
+import { strictParseJson } from "@stwd/shared";
 import {
   DEFAULT_FETCH_TIMEOUT_MS,
   POLYMARKET_BATCH_PRICE_HISTORY_LIMIT,
@@ -6,8 +7,10 @@ import {
 import type { PolymarketFetchOptions } from "./discovery";
 import { isPricePoint } from "./parsing";
 import {
+  marketByTokenSchema,
   type OrderSide,
   type PolymarketBestPrice,
+  type PolymarketMarketByToken,
   type PolymarketOrderbook,
   type PolymarketPricePoint,
   type PolymarketTickSize,
@@ -23,6 +26,94 @@ function timeoutSignal(opts?: PolymarketFetchOptions): AbortSignal | undefined {
   if (opts?.signal) return opts.signal;
   if (DEFAULT_FETCH_TIMEOUT_MS <= 0) return undefined;
   return AbortSignal.timeout(DEFAULT_FETCH_TIMEOUT_MS);
+}
+
+const MAX_MARKET_BY_TOKEN_RESPONSE_BYTES = 16 * 1024;
+
+async function readBoundedMarketJson(response: Response): Promise<unknown> {
+  const declared = response.headers.get("content-length");
+  if (declared !== null) {
+    if (!/^\d+$/.test(declared)) {
+      throw new Error("Polymarket market metadata returned an invalid Content-Length");
+    }
+    if (Number(declared) > MAX_MARKET_BY_TOKEN_RESPONSE_BYTES) {
+      try {
+        await response.body?.cancel();
+      } catch {
+        throw new Error("Polymarket market metadata overflow could not be canceled");
+      }
+      throw new Error("Polymarket market metadata response is too large");
+    }
+  }
+  if (!response.body) throw new Error("Polymarket market metadata response has no body");
+
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    while (true) {
+      const next = await reader.read();
+      if (next.done) break;
+      total += next.value.byteLength;
+      if (total > MAX_MARKET_BY_TOKEN_RESPONSE_BYTES) {
+        try {
+          await reader.cancel();
+        } catch {
+          throw new Error("Polymarket market metadata overflow could not be canceled");
+        }
+        throw new Error("Polymarket market metadata response is too large");
+      }
+      chunks.push(next.value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  try {
+    return strictParseJson(text);
+  } catch {
+    throw new Error("Polymarket market metadata response is not valid JSON");
+  }
+}
+
+/** Resolve the authoritative condition and sibling token for a CLOB token ID. */
+export async function getMarketByToken(
+  tokenId: string,
+  opts?: PolymarketFetchOptions,
+): Promise<PolymarketMarketByToken> {
+  if (!/^[0-9]{1,128}$/.test(tokenId)) {
+    throw new Error("Polymarket token id must be a bounded numeric string");
+  }
+  const doFetch = opts?.fetch ?? fetch;
+  const clobBase = opts?.clobUrl ?? POLYMARKET_CLOB_API_BASE;
+  const url = new URL(
+    `markets-by-token/${tokenId}`,
+    clobBase.endsWith("/") ? clobBase : `${clobBase}/`,
+  );
+  const response = await doFetch(url.toString(), {
+    headers: { Accept: "application/json" },
+    signal: timeoutSignal(opts),
+  });
+  if (!response.ok) {
+    throw new Error(`Polymarket market metadata error: ${response.status}`);
+  }
+  const parsed = marketByTokenSchema.safeParse(await readBoundedMarketJson(response));
+  if (!parsed.success) throw new Error("Polymarket market metadata response is invalid");
+  if (tokenId !== parsed.data.primary_token_id && tokenId !== parsed.data.secondary_token_id) {
+    throw new Error("Polymarket market metadata does not contain the requested token");
+  }
+  return {
+    conditionId: parsed.data.condition_id.toLowerCase(),
+    primaryTokenId: parsed.data.primary_token_id,
+    secondaryTokenId: parsed.data.secondary_token_id,
+  };
 }
 
 interface RawOrderbook {
