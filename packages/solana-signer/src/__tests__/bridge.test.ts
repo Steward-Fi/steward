@@ -261,11 +261,34 @@ describe("bridge shared-secret auth", () => {
     );
   });
 
-  it("the custom header wins over a bearer header when both are present", async () => {
-    const res = await fetch(`${bridgeUrl}/pubkey`, {
+  it("accepts the exact maximum token68 boundary on both transports", async () => {
+    const suffix = "-._~+/==";
+    const maxToken = `${"a".repeat(BRIDGE_MAX_TOKEN_BYTES - suffix.length)}${suffix}`;
+    expect(Buffer.byteLength(maxToken, "utf8")).toBe(BRIDGE_MAX_TOKEN_BYTES);
+    const boundaryBridge = await startSignerBridge(signer, { token: maxToken });
+    try {
+      const bearer = await fetch(`${boundaryBridge.url}/pubkey`, {
+        headers: { authorization: `bEaReR ${maxToken}` },
+      });
+      expect(bearer.status).toBe(200);
+      const custom = await fetch(`${boundaryBridge.url}/pubkey`, {
+        headers: { [BRIDGE_TOKEN_HEADER]: maxToken },
+      });
+      expect(custom.status).toBe(200);
+    } finally {
+      await boundaryBridge.close();
+    }
+  });
+
+  it("the custom header wins fail-closed over a bearer header when both are present", async () => {
+    const rejected = await fetch(`${bridgeUrl}/pubkey`, {
       headers: { [BRIDGE_TOKEN_HEADER]: `${bridgeToken}x`, authorization: `Bearer ${bridgeToken}` },
     });
-    expect(res.status).toBe(401);
+    expect(rejected.status).toBe(401);
+    const accepted = await fetch(`${bridgeUrl}/pubkey`, {
+      headers: { [BRIDGE_TOKEN_HEADER]: bridgeToken, authorization: "Basic ignored" },
+    });
+    expect(accepted.status).toBe(200);
   });
 
   it(`honors ${BRIDGE_TOKEN_ENV} from the env, the var both sides read`, async () => {
