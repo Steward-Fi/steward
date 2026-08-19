@@ -1520,9 +1520,15 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
   function configuredPolymarketClobUrl(): string | undefined {
     const raw = process.env.POLYMARKET_CLOB_API_URL?.trim();
     if (!raw) return undefined;
+    if (raw.length > 2_048 || /[\u0000-\u001f\u007f]/.test(raw)) {
+      throw new Error("POLYMARKET_CLOB_API_URL is invalid");
+    }
     const url = new URL(raw);
     if (url.protocol !== "http:" && url.protocol !== "https:") {
       throw new Error("POLYMARKET_CLOB_API_URL must use http or https");
+    }
+    if (url.username || url.password || url.search || url.hash) {
+      throw new Error("POLYMARKET_CLOB_API_URL must not contain credentials, query, or fragment");
     }
     if (process.env.NODE_ENV === "production" && url.protocol !== "https:") {
       throw new Error("POLYMARKET_CLOB_API_URL must use https in production");
@@ -1865,18 +1871,23 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
         const market = await getMarketByToken(body.tokenId, clobUrl ? { clobUrl } : undefined);
         verifiedConditionId = market.conditionId;
       } catch (error) {
-        await auditTradeEvent(tenantId, agentId, "trade.order.policy-rejected", {
-          sessionId: session.id,
-          venue: "polymarket",
-          tokenId: body.tokenId,
-          side: body.side,
-          amount,
-          price,
-          notionalUsd,
-          reason: "market-metadata-unavailable",
-          ...redactedThrownDiagnostics(error),
-        });
-        await idempotency.release?.();
+        try {
+          await auditTradeEvent(tenantId, agentId, "trade.order.policy-rejected", {
+            sessionId: session.id,
+            venue: "polymarket",
+            tokenId: body.tokenId,
+            side: body.side,
+            amount,
+            price,
+            notionalUsd,
+            reason: "market-metadata-unavailable",
+            ...redactedThrownDiagnostics(error),
+          });
+        } finally {
+          // Metadata reads are pre-execution. Even if the audit sink fails, do
+          // not strand the request's claim and make a safe retry impossible.
+          await idempotency.release?.();
+        }
         return c.json<ApiResponse>(
           { ok: false, error: "Unable to verify Polymarket market binding" },
           502,
@@ -1891,17 +1902,24 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
           status: 400,
           body: { code: "policy-violation", reason: "condition-id-mismatch" },
         };
-        await auditTradeEvent(tenantId, agentId, "trade.order.policy-rejected", {
-          sessionId: session.id,
-          venue: "polymarket",
-          tokenId: body.tokenId,
-          conditionId: verifiedConditionId,
-          side: body.side,
-          amount,
-          price,
-          notionalUsd,
-          reason: "condition-id-mismatch",
-        });
+        try {
+          await auditTradeEvent(tenantId, agentId, "trade.order.policy-rejected", {
+            sessionId: session.id,
+            venue: "polymarket",
+            tokenId: body.tokenId,
+            conditionId: verifiedConditionId,
+            side: body.side,
+            amount,
+            price,
+            notionalUsd,
+            reason: "condition-id-mismatch",
+          });
+        } catch (error) {
+          // The mismatch is definite but still pre-execution. Release rather
+          // than leaving a 24-hour pending claim when its audit write fails.
+          await idempotency.release?.();
+          throw error;
+        }
         await idempotency.store?.(envelope);
         return c.json(envelope.body, envelope.status);
       }

@@ -712,8 +712,10 @@ describe("marketdata batch", () => {
     const sibling = "8".repeat(72);
     const conditionId = `0x${"a".repeat(64)}`;
     let requestedUrl = "";
-    const fetchMock = (async (input: string | URL | Request) => {
+    const fetchMock = (async (input: string | URL | Request, init?: RequestInit) => {
       requestedUrl = String(input);
+      expect(init?.redirect).toBe("error");
+      expect(init?.signal).toBeInstanceOf(AbortSignal);
       return new Response(
         JSON.stringify({
           condition_id: conditionId.toUpperCase().replace("0X", "0x"),
@@ -787,6 +789,72 @@ describe("marketdata batch", () => {
     await expect(getMarketByToken(tokenId, { fetch: duplicateKey })).rejects.toThrow(
       "not valid JSON",
     );
+
+    for (const clobUrl of [
+      "not-a-url-MARKET_URL_SECRET_CANARY",
+      "https://user:MARKET_URL_SECRET_CANARY@clob.example.test",
+      "https://clob.example.test/?token=MARKET_URL_SECRET_CANARY",
+    ]) {
+      const error = await getMarketByToken(tokenId, { clobUrl }).catch((cause) => cause);
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).toBe("Polymarket market metadata URL is invalid");
+      expect((error as Error).message).not.toContain("MARKET_URL_SECRET_CANARY");
+    }
+  });
+
+  test("getMarketByToken bounds stalled bodies and never awaits hostile cancellation", async () => {
+    const tokenId = "7".repeat(72);
+    const stalled = (async () =>
+      new Response(
+        new ReadableStream({
+          start() {
+            // Intentionally never enqueue or close.
+          },
+        }),
+        { status: 200 },
+      )) as typeof fetch;
+    await expect(
+      getMarketByToken(tokenId, { fetch: stalled, signal: AbortSignal.timeout(20) }),
+    ).rejects.toThrow("request was aborted");
+
+    const hostileDeclaredOverflow = (async () =>
+      new Response(
+        new ReadableStream({
+          cancel() {
+            return new Promise<void>(() => {});
+          },
+        }),
+        { status: 200, headers: { "Content-Length": "20000" } },
+      )) as typeof fetch;
+    await expect(
+      Promise.race([
+        getMarketByToken(tokenId, { fetch: hostileDeclaredOverflow }),
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error("hostile cancel blocked rejection")), 500),
+        ),
+      ]),
+    ).rejects.toThrow("response is too large");
+
+    const hostileStreamOverflow = (async () =>
+      new Response(
+        new ReadableStream({
+          start(controller) {
+            controller.enqueue(new Uint8Array(17 * 1024));
+          },
+          cancel() {
+            return new Promise<void>(() => {});
+          },
+        }),
+        { status: 200 },
+      )) as typeof fetch;
+    await expect(
+      Promise.race([
+        getMarketByToken(tokenId, { fetch: hostileStreamOverflow }),
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error("hostile reader cancel blocked rejection")), 500),
+        ),
+      ]),
+    ).rejects.toThrow("response is too large");
   });
 
   test("getOrderbooks maps by asset_id, keeps empties for misses", async () => {
