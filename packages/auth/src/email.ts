@@ -343,8 +343,9 @@ function encodeOtpChallenge(
 ): string {
   if (status === "delivery_pending") return JSON.stringify({ status } satisfies OtpChallengeRecord);
   if (!payload) throw new Error("Active OTP challenge requires a payload");
-  // Keep legacy top-level fields so old pods can verify credentials issued
-  // during a rolling deployment. New readers require the nested payload too.
+  // Retain support for the short-lived active wrapper emitted after staged
+  // delivery first shipped. New writes use the older raw payload below so
+  // every pod in a rolling deployment can redeem an accepted code.
   return JSON.stringify({ status, payload, ...payload } satisfies OtpChallengeRecord);
 }
 
@@ -718,7 +719,7 @@ export class EmailAuth {
       const activated = await this.transitionChallenge(
         storeKey,
         encodeOtpChallenge("delivery_pending"),
-        encodeOtpChallenge("active", payload),
+        JSON.stringify(payload),
         remainingTtlMs,
       );
       if (!activated) throw new Error("OTP changed before activation");

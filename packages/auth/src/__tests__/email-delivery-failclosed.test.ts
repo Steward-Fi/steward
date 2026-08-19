@@ -305,8 +305,7 @@ describe("fail-closed magic-link delivery", () => {
       key.startsWith("email-otp:active:"),
     )?.[1].value;
     const oldOtpRecord = JSON.parse(backend.values.get(otpKey ?? "")?.value ?? "null");
-    expect(oldOtpRecord).toMatchObject({
-      status: "active",
+    expect(oldOtpRecord).toEqual({
       email: "rolling@example.com",
       tenantId: "tenant-a",
     });
@@ -683,7 +682,8 @@ describe("fail-closed magic-link delivery", () => {
     );
     await otpAuth.sendOtp("malformed-otp@example.com", { tenantId: "tenant-a" });
     const otpRecord = [...otpBackend.values.entries()].find(
-      ([key, entry]) => key.length === 64 && entry.value.includes('"status":"active"'),
+      ([key, entry]) =>
+        key.length === 64 && entry.value.includes('"email":"malformed-otp@example.com"'),
     );
     expect(otpRecord).toBeDefined();
     if (otpRecord) {
