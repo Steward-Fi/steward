@@ -15,6 +15,7 @@ All notable changes to `@stwd/react` are documented here.
 - Point example `baseUrl` values in JSDoc (`StewardProvider`, `StewardLogin`) and the README at a self-hosted instance (`http://localhost:3200`) instead of a hosted `api.steward.fi` URL. Steward is self-host-first today; there is no shared hosted API. Docs/comment only, no source behavior change.
 
 ### Tests
+- Refresh the StewardLogin rules-of-hooks regression description to state the current invariant without historical implementation labels; behavior is unchanged.
 - Added test coverage for utilities (format, theme, walletPanelRegistry), context hooks (useAuth, useSteward), data hooks (useWallet, useTransactions, useApprovals, usePolicies, useSpend), and SSR branch coverage for the component surface (auth guard, user button, tenant picker, spend dashboard, approval queue, wallet overview, policy controls, email/OAuth callbacks, passkey enrollment). Suite goes from 56 to 195 passing. No source changes.
 
 ## 0.9.1
