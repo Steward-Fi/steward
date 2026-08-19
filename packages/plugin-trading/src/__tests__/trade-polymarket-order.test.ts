@@ -286,6 +286,38 @@ describe("POST /v1/trade/polymarket/order", () => {
     }
   });
 
+  it("rejects a caller conditionId mismatch even when the token itself is directly allowlisted", async () => {
+    const { tenantId, agentId, sessionId } = await seedSession({
+      allowedAssets: [`pm:${TOKEN_ID}`],
+    });
+    const app = makeApp(tenantId, agentId, tradeRoutes);
+    const fetchSpy = spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          condition_id: OTHER_COND_ID,
+          primary_token_id: TOKEN_ID,
+          secondary_token_id: "8".repeat(72),
+        }),
+        { status: 200 },
+      ),
+    );
+
+    try {
+      const res = await postOrder(app, sessionId, crypto.randomUUID(), {
+        conditionId: COND_ID,
+      });
+      expect(res.status).toBe(400);
+      expect((await res.json()) as { code?: string; reason?: string }).toEqual({
+        code: "policy-violation",
+        reason: "condition-id-mismatch",
+      });
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+      expect(await dailySpendOf(sessionId)).toBe(0);
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
   it("authorizes a market-wide grant only after resolving the token's condition", async () => {
     const { tenantId, agentId, sessionId } = await seedSession({
       allowedAssets: [`pm:cond:0x${"A".repeat(64)}`],
