@@ -8816,7 +8816,7 @@ auth.post("/email/otp/send", async (c) => {
     ({ expiresAt } = await emailAuth.sendOtp(email, { tenantId: resolvedTenantId }));
   } catch (err) {
     // Fail closed: mirror /email/send — no ok:true without an acceptance
-    // receipt, and the stored code is deleted by EmailAuth on failure.
+    // receipt, and EmailAuth keeps an unaccepted code non-redeemable.
     const deliveryFailure = emailDeliveryFailureResponse(c, err);
     if (deliveryFailure) return deliveryFailure;
     throw err;
