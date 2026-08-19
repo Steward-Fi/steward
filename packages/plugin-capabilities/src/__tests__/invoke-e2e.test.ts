@@ -45,6 +45,17 @@ const FAKE_OPENAI_KEY = "sk-test-openai-e2e-do-not-use-0123456789abcdef";
 const STEWARD_TOKEN_SENTINEL = "steward-agent-token-sentinel-never-upstream";
 const PROXY_URL = "https://proxy.cap-e2e.test";
 const MIGRATIONS_FOLDER = fileURLToPath(new URL("../../drizzle", import.meta.url));
+const TEST_ENV_KEYS = [
+  "STEWARD_PGLITE_MEMORY",
+  "STEWARD_MASTER_PASSWORD",
+  "STEWARD_JWT_SECRET",
+  "STEWARD_PROXY_REQUIRE_REQUEST_SIGNATURE",
+  "STEWARD_PROXY_REQUEST_SIGNING_SECRET",
+  "STEWARD_PROXY_ALLOWED_HOSTS",
+  "STEWARD_PROXY_DEV_MODE",
+  "STEWARD_PROXY_URL",
+] as const;
+const originalEnv = new Map(TEST_ENV_KEYS.map((key) => [key, process.env[key]]));
 
 let authMiddleware: typeof import("@stwd/proxy/src/middleware/auth")["authMiddleware"];
 let handleProxy: typeof import("@stwd/proxy/src/handlers/proxy")["handleProxy"];
@@ -62,7 +73,6 @@ interface ForwardedCapture {
 let lastForwarded: ForwardedCapture | null = null;
 let proxyApp: Hono | null = null;
 const realFetch = globalThis.fetch;
-const originalProxyDevMode = process.env.STEWARD_PROXY_DEV_MODE;
 
 // the policy set the injected getPolicySet returns for the current test.
 let currentPolicySet: PolicyRule[] = [];
@@ -162,15 +172,11 @@ afterAll(async () => {
   globalThis.fetch = realFetch;
   resetProxyHandlerTestHooksForTests();
   await closeDb().catch(() => {});
-  delete process.env.STEWARD_PGLITE_MEMORY;
-  delete process.env.STEWARD_MASTER_PASSWORD;
-  delete process.env.STEWARD_JWT_SECRET;
-  delete process.env.STEWARD_PROXY_REQUIRE_REQUEST_SIGNATURE;
-  delete process.env.STEWARD_PROXY_REQUEST_SIGNING_SECRET;
-  delete process.env.STEWARD_PROXY_ALLOWED_HOSTS;
-  delete process.env.STEWARD_PROXY_URL;
-  if (originalProxyDevMode === undefined) delete process.env.STEWARD_PROXY_DEV_MODE;
-  else process.env.STEWARD_PROXY_DEV_MODE = originalProxyDevMode;
+  for (const key of TEST_ENV_KEYS) {
+    const original = originalEnv.get(key);
+    if (original === undefined) delete process.env[key];
+    else process.env[key] = original;
+  }
 });
 
 let tenantId: string;
