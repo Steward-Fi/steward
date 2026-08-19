@@ -2249,7 +2249,7 @@ export class Vault {
 
       // ── Also write to multi-wallet tables so new signing paths find the key ─
       // Upsert into encrypted_chain_keys (replace if key already imported).
-      // Sprint 4: target the partial unique index on (agent_id, chain_family)
+      // Target the partial unique index on (agent_id, chain_family)
       // WHERE venue IS NULL so this only conflicts with the legacy row, not
       // with venue-scoped wallets that share the same chain family.
       await tx
@@ -2502,7 +2502,7 @@ export class Vault {
         and(
           eq(encryptedChainKeys.agentId, agentId),
           eq(encryptedChainKeys.chainFamily, chainFamilyToUse),
-          // Sprint 4: legacy lookup, NULL-venue only.
+          // Legacy lookup, NULL-venue only.
           isNull(encryptedChainKeys.venue),
         ),
       );

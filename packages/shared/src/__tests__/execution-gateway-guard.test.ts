@@ -64,7 +64,7 @@ describe("execution gateway guard", () => {
     // LEGACY_EVM_SIGN_CALL_SITES and RAW_EVM_SIGN_INVENTORY are two lenses on the
     // same raw-sign surface:
     //  - LEGACY enumerates non-primary EVM sign SURFACES (route-local policy
-    //    only; PR5b convergence), including the vault.ts transfer + approval-
+    //    only; pending gateway convergence), including the vault.ts transfer + approval-
     //    transfer branches.
     //  - The inventory classifies each raw call by REACHABILITY: the two vault.ts
     //    primary/approval fallbacks are "migrated-invariant-guarded" (an

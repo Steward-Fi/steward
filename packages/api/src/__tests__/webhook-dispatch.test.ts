@@ -278,7 +278,7 @@ describe("dispatchWebhook", () => {
     expect(insertedDeliveries).toHaveLength(0);
   });
 
-  // ── Phase 2b: plugin-declared event emission ───────────────────────────────
+  // ── Plugin-declared event emission ────────────────────────────────────────
   it("emits a PLUGIN-declared event to a config that subscribes to it", async () => {
     // a plugin registered this event name into the runtime registry at compose
     // time (host.register merges StewardPlugin.webhookEvents). The core's closed

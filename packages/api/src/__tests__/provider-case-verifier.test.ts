@@ -190,7 +190,7 @@ function run(obj: unknown, args: string[] = []) {
 
 describe("evidence offline verifier (synthetic bundles)", () => {
   beforeAll(() => {
-    tmpDir = mkdtempSync(join(tmpdir(), "pr5-verify-"));
+    tmpDir = mkdtempSync(join(tmpdir(), "provider-case-verify-"));
     const { privateKey, publicKey } = generateKeyPairSync("ed25519");
     priv = privateKey;
     pubPem = publicKey.export({ format: "pem", type: "spki" }).toString();

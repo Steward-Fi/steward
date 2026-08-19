@@ -489,7 +489,7 @@ export const agentWallets = pgTable(
     chainFamily: chainFamilyEnum("chain_family").notNull(),
     address: varchar("address", { length: 128 }).notNull(),
     /**
-     * Sprint 4: trading venue this wallet is scoped to (e.g. "hyperliquid").
+     * Trading venue this wallet is scoped to (e.g. "hyperliquid").
      * NULL on legacy rows; vault lookups fall back to chainFamily when
      * venue isn't provided. See VenueId in @stwd/shared.
      */
@@ -507,7 +507,7 @@ export const agentWallets = pgTable(
       sql`COALESCE(${table.venue}, '')`,
     ),
     /**
-     * Sprint 4: partial unique index on the legacy NULL-venue subset.
+     * Partial unique index on the legacy NULL-venue subset.
      * Targeted by importKey()'s upsert (drizzle's onConflictDoUpdate
      * needs a named unique index, not an expression index).
      */
@@ -933,7 +933,7 @@ export const encryptedChainKeys = pgTable(
   "encrypted_chain_keys",
   {
     /**
-     * Sprint 4: surrogate PK so a single (agentId, chainFamily) can have
+     * Surrogate PK so a single (agentId, chainFamily) can have
      * multiple rows, one per venue. The uniqueness invariant moves to
      * `agent_chain_venue_idx` below.
      */
@@ -943,7 +943,7 @@ export const encryptedChainKeys = pgTable(
       .references(() => agents.id, { onDelete: "cascade" }),
     chainFamily: chainFamilyEnum("chain_family").notNull(),
     /**
-     * Sprint 4: trading venue this key is scoped to (e.g. "hyperliquid").
+     * Trading venue this key is scoped to (e.g. "hyperliquid").
      * NULL on legacy rows; vault lookups fall back to chainFamily when
      * venue isn't provided.
      */

@@ -13,7 +13,7 @@
  * WHY IT LIVES HERE (policy-engine) BUT LOOKS LIKE A PLUGIN CONTRIBUTION
  * ---------------------------------------------------------------------
  * it is authored AS a {@link PolicyRuleContribution} — the exact shape a plugin
- * registers via the Phase-2b registry — so W-1a's capability plugin can register
+ * registers via the provider-mode registry — so the capability plugin can register
  * it through the plugin host with ZERO rework. but the evaluator + config schema
  * + tests are a library export of `@stwd/policy-engine` (not a route, not a
  * package): W-1b ships the decision logic; the plugin package (W-1a) owns

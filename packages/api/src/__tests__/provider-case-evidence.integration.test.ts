@@ -107,14 +107,15 @@ function runVerifier(bundleOrEnvelope: unknown, extraArgs: string[] = []) {
 
 describe("evidence /case + /evidence routes + offline verifier", () => {
   beforeAll(async () => {
-    tmpDir = mkdtempSync(join(tmpdir(), "pr5-evi-"));
+    tmpDir = mkdtempSync(join(tmpdir(), "provider-case-evi-"));
     process.env.STEWARD_PGLITE_MEMORY = "true";
     process.env.STEWARD_AUDIT_HMAC_KEY = "0".repeat(64);
-    process.env.STEWARD_MASTER_PASSWORD = "pr5-evidence-master-password";
+    process.env.STEWARD_MASTER_PASSWORD = "provider-case-evidence-master-password";
     // Canonical JWT secret for minting real session/agent tokens (see note in
     // provider-case-route-wiring). Required in a clean CI env.
     process.env.STEWARD_JWT_SECRET =
-      process.env.STEWARD_JWT_SECRET || "pr5-evidence-jwt-secret-0123456789abcdef0123456789";
+      process.env.STEWARD_JWT_SECRET ||
+      "provider-case-evidence-jwt-secret-0123456789abcdef0123456789";
     const { privateKey, publicKey } = generateKeyPairSync("ed25519");
     process.env.STEWARD_AUDIT_SIGNING_KEY = privateKey
       .export({ format: "pem", type: "pkcs8" })

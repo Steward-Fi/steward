@@ -24,7 +24,7 @@
  * Anything that must NOT run on Workers (timers, blocking I/O at module init,
  * Node-only APIs) belongs in `index.ts`, not here.
  *
- * ── Construction is two-phase ──────────────────────────────────────────────────
+ * ── Construction ordering ──────────────────────────────────────────────────────
  * `createApp()` registers global middleware + all CORE per-route auth, but does
  * NOT install the global idempotency middleware or mount any routes.
  * `mountCoreIdempotencyAndRoutes(app)` installs idempotency + the core routes.
@@ -32,7 +32,7 @@
  * plugin's AUTH MIDDLEWARE before idempotency and its ROUTES after idempotency,
  * preserving the canonical order [auth -> idempotency -> routes]. for callers that
  * just want the assembled lean core, `app` (and the default export) is the result
- * of running both phases — trading-free.
+ * of running both construction steps — trading-free.
  */
 
 import { platformAuthMiddleware } from "@stwd/auth";
@@ -93,7 +93,7 @@ const startTime = Date.now();
 /**
  * Build the lean core app with global middleware and all core per-route
  * auth middleware. does NOT install the global idempotency middleware and does
- * NOT mount any routes (those are phase 2: {@link mountCoreIdempotencyAndRoutes}).
+ * NOT mount any routes (those are installed by {@link mountCoreIdempotencyAndRoutes}).
  * trading is NOT part of the core — it is registered as an opt-in plugin at the
  * composition root (see compose.ts).
  */
@@ -155,8 +155,8 @@ export function createApp(): Hono<{ Variables: AppVariables }> {
   // required unless the operator opts in via STEWARD_REQUIRE_REQUEST_EXPIRY /
   // STEWARD_REQUIRE_AUTH_SIGNATURE. The env opt-in (not NODE_ENV) drives the
   // strict mode so browser/unsigned SDK clients keep working until an operator
-  // has rolled out signing clients. Mounted here (phase 1) so they always run
-  // BEFORE the idempotency middleware (phase 2).
+  // has rolled out signing clients. Mounted in pre-idempotency setup so these
+  // guards always run before the idempotency middleware.
   app.use("*", requestExpiry({ required: process.env.STEWARD_REQUIRE_REQUEST_EXPIRY === "true" }));
   app.use(
     "*",
@@ -246,9 +246,9 @@ export function createApp(): Hono<{ Variables: AppVariables }> {
 
 /**
  * Install the global idempotency middleware and mount all core routes onto
- * an app produced by {@link createApp}. KEPT SEPARATE from phase 1 so the
+ * an app produced by {@link createApp}. Kept separate from pre-idempotency setup so the
  * composition root can slot an opt-in plugin's auth middleware in BEFORE
- * idempotency (phase-1 boundary) and its routes AFTER idempotency (this phase).
+ * idempotency and its routes after idempotency (this route-mounting step).
  * the registration order here is identical to the pre-refactor app.ts, minus
  * trading (which the plugin contributes).
  */
@@ -305,7 +305,7 @@ export function mountCoreIdempotencyAndRoutes(
   app.route("/v1/adapters", adapterRoutes);
   app.route("/v1/users", fiatRoutes);
   app.route("/policies", policiesStandaloneRoutes);
-  // provider-account X OAuth connect (#195 workstream A). Registered CONCRETELY
+  // Provider-account X OAuth connect routes. Registered concretely
   // and BEFORE the `/v2` authority sub-app so the specific connect paths win
   // over the authority `/provider-accounts/:id/...` wildcards.
   registerProviderXConnectRoutes(app);
@@ -333,7 +333,7 @@ export function mountCoreIdempotencyAndRoutes(
 }
 
 /**
- * The assembled LEAN CORE app (both phases run, trading-free). default export +
+ * The assembled lean core app (both construction steps run, trading-free). Default export +
  * named `app` for callers/tests that want the core directly. THIS repo's
  * deployable server does NOT use this — it uses `composeApp()` (compose.ts) which
  * also registers the trading plugin.

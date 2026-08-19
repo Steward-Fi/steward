@@ -69,13 +69,14 @@ function runVerifier(env: unknown, args: string[] = []) {
 
 describe("evidence independent adversarial probes", () => {
   beforeAll(async () => {
-    tmpDir = mkdtempSync(join(tmpdir(), "pr5-adv-"));
+    tmpDir = mkdtempSync(join(tmpdir(), "provider-case-adv-"));
     process.env.STEWARD_PGLITE_MEMORY = "true";
     process.env.STEWARD_AUDIT_HMAC_KEY = "0".repeat(64);
-    process.env.STEWARD_MASTER_PASSWORD = "pr5-adv-master-password";
+    process.env.STEWARD_MASTER_PASSWORD = "provider-case-adv-master-password";
     // Canonical JWT secret for minting the admin session token (clean-CI safe).
     process.env.STEWARD_JWT_SECRET =
-      process.env.STEWARD_JWT_SECRET || "pr5-adv-jwt-secret-0123456789abcdef0123456789abcd";
+      process.env.STEWARD_JWT_SECRET ||
+      "provider-case-adv-jwt-secret-0123456789abcdef0123456789abcd";
     const { privateKey } = generateKeyPairSync("ed25519");
     process.env.STEWARD_AUDIT_SIGNING_KEY = privateKey
       .export({ format: "pem", type: "pkcs8" })

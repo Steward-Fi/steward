@@ -11,7 +11,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "bun:test"
 
 process.env.STEWARD_PGLITE_MEMORY = "true";
 process.env.STEWARD_AUDIT_HMAC_KEY ||= "0".repeat(64);
-process.env.STEWARD_MASTER_PASSWORD ||= "pr5-idem-hash-master";
+process.env.STEWARD_MASTER_PASSWORD ||= "provider-case-idem-hash-master";
 
 import { closeDb, executionAuthorizationNonces, getDb } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";

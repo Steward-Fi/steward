@@ -17,7 +17,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 const DOCS_ROOT = join(import.meta.dir, "..", "..", "..", "..", "docs");
-const PR6_DOCS = [
+const AUTHORITY_DOCS = [
   join(DOCS_ROOT, "guides", "provider-authority-golden-path.mdx"),
   join(DOCS_ROOT, "security", "provider-authority-threat-model.mdx"),
   join(DOCS_ROOT, "runbooks", "provider-authority-operations.mdx"),
@@ -53,7 +53,7 @@ function stripNegatingContext(line: string): string {
 }
 
 describe("provider-authority prohibited-claim scanner (U8/PN38)", () => {
-  for (const path of PR6_DOCS) {
+  for (const path of AUTHORITY_DOCS) {
     test(`no affirmative prohibited claim in ${path.split("/docs/")[1]}`, () => {
       const text = readFileSync(path, "utf8");
       const offenders: string[] = [];
@@ -68,7 +68,7 @@ describe("provider-authority prohibited-claim scanner (U8/PN38)", () => {
   }
 
   test("the threat-model doc DOES state the required negations (fail-closed on missing)", () => {
-    const tm = readFileSync(PR6_DOCS[1], "utf8");
+    const tm = readFileSync(AUTHORITY_DOCS[1], "utf8");
     // These explicit negations are REQUIRED (U8): their absence is a gate
     // failure. Markdown emphasis (**not**) is tolerated between tokens.
     expect(tm).toMatch(/operator-integrity proof/i);
