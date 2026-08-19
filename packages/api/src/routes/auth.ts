@@ -162,7 +162,9 @@ import { dispatchWebhook } from "../services/webhook-dispatch";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-const _DEFAULT_TENANT_ID = process.env.STEWARD_DEFAULT_TENANT_ID || "default";
+export function configuredDefaultTenantId(): string {
+  return process.env.STEWARD_DEFAULT_TENANT_ID || "default";
+}
 
 function isValidTenantId(value: unknown): value is string {
   return typeof value === "string" && /^[a-zA-Z0-9_\-.:]{1,64}$/.test(value);
@@ -761,7 +763,9 @@ async function validateExplicitAuthTenantHint(
 }
 
 function authTenantHint(c: Context, bodyTenantId?: string): string {
-  return c.req.header("X-Steward-Tenant")?.trim() || bodyTenantId?.trim() || _DEFAULT_TENANT_ID;
+  return (
+    c.req.header("X-Steward-Tenant")?.trim() || bodyTenantId?.trim() || configuredDefaultTenantId()
+  );
 }
 
 function smsLoginPurpose(tenantId: string): string {
@@ -3822,7 +3826,8 @@ async function completeEmailAuth(
   tenantId?: string,
   opts: { allowTenantJoin?: boolean } = {},
 ): Promise<CompletedEmailAuthResult> {
-  const hintedTenantId = c.req.header("X-Steward-Tenant") || tenantId || _DEFAULT_TENANT_ID;
+  const hintedTenantId =
+    c.req.header("X-Steward-Tenant") || tenantId || configuredDefaultTenantId();
   const hintedAuthAbuseConfig = await getTenantAuthAbuseConfig(hintedTenantId);
   const hintedEmailPolicyError = validateEmailAbusePolicy(email, hintedAuthAbuseConfig);
   if (hintedEmailPolicyError) {
@@ -7932,7 +7937,9 @@ auth.post("/passkey/register/options", async (c) => {
 
   if (typeof body.emailGrant === "string" && body.emailGrant.length > 0) {
     const resolvedTenantId =
-      c.req.header("X-Steward-Tenant")?.trim() || body.tenantId?.trim() || _DEFAULT_TENANT_ID;
+      c.req.header("X-Steward-Tenant")?.trim() ||
+      body.tenantId?.trim() ||
+      configuredDefaultTenantId();
     const methodResponse = await requireTenantLoginMethodAllowed(c, resolvedTenantId, "passkey");
     if (methodResponse) return methodResponse;
     // Peek (not consume): the grant is only burned at register/verify so a
@@ -8053,7 +8060,9 @@ auth.post("/passkey/register/verify", async (c) => {
     // user's OTP verification, while consumption before any state change
     // keeps it strictly single-use.
     grantTenantId =
-      c.req.header("X-Steward-Tenant")?.trim() || body.tenantId?.trim() || _DEFAULT_TENANT_ID;
+      c.req.header("X-Steward-Tenant")?.trim() ||
+      body.tenantId?.trim() ||
+      configuredDefaultTenantId();
     const grantOk = await peekEmailGrant(body.emailGrant as string, email, grantTenantId);
     if (!grantOk) {
       return c.json<ApiResponse>({ ok: false, error: "Invalid or expired email grant" }, 401);
@@ -8412,7 +8421,7 @@ auth.post("/email/send", async (c) => {
   const email = body.email.toLowerCase().trim();
   const headerTenantId = c.req.header("X-Steward-Tenant")?.trim();
   const bodyTenantId = body.tenantId?.trim();
-  const resolvedTenantId = headerTenantId || bodyTenantId || _DEFAULT_TENANT_ID;
+  const resolvedTenantId = headerTenantId || bodyTenantId || configuredDefaultTenantId();
   const tenantHintError = await validateExplicitAuthTenantHint(
     resolvedTenantId,
     Boolean(headerTenantId || bodyTenantId),
@@ -8494,7 +8503,7 @@ auth.get("/callback/email", async (c) => {
   }
 
   const email = emailParam.toLowerCase().trim();
-  const resolvedTenantId = tenantId || _DEFAULT_TENANT_ID;
+  const resolvedTenantId = tenantId || configuredDefaultTenantId();
   const methodResponse = await requireTenantLoginMethodAllowed(c, resolvedTenantId, "email");
   if (methodResponse) return redirectEmailAuthFailure(c, "method_disabled");
   const ssoRequiredResponse = await requireNonSsoEmailLoginAllowed(
@@ -8593,7 +8602,7 @@ auth.post("/email/verify", async (c) => {
   const email = body.email.toLowerCase().trim();
   const headerTenantId = c.req.header("X-Steward-Tenant")?.trim();
   const bodyTenantId = body.tenantId?.trim();
-  const resolvedTenantId = headerTenantId || bodyTenantId || _DEFAULT_TENANT_ID;
+  const resolvedTenantId = headerTenantId || bodyTenantId || configuredDefaultTenantId();
   const tenantHintError = await validateExplicitAuthTenantHint(
     resolvedTenantId,
     Boolean(headerTenantId || bodyTenantId),
@@ -8657,7 +8666,8 @@ auth.post("/email/code/verify", async (c) => {
 
   const email = body.email.toLowerCase().trim();
   const code = body.code.trim();
-  const resolvedTenantId = c.req.header("X-Steward-Tenant") || body.tenantId || _DEFAULT_TENANT_ID;
+  const resolvedTenantId =
+    c.req.header("X-Steward-Tenant") || body.tenantId || configuredDefaultTenantId();
   const methodResponse = await requireTenantLoginMethodAllowed(c, resolvedTenantId, "email");
   if (methodResponse) return methodResponse;
   const ssoRequiredResponse = await requireNonSsoEmailLoginAllowed(
@@ -8722,7 +8732,7 @@ auth.post("/email/status", async (c) => {
   }
   const headerTenantId = c.req.header("X-Steward-Tenant")?.trim();
   const bodyTenantId = body.tenantId?.trim();
-  const resolvedTenantId = headerTenantId || bodyTenantId || _DEFAULT_TENANT_ID;
+  const resolvedTenantId = headerTenantId || bodyTenantId || configuredDefaultTenantId();
   const tenantHintError = await validateExplicitAuthTenantHint(
     resolvedTenantId,
     Boolean(headerTenantId || bodyTenantId),
@@ -8769,7 +8779,7 @@ auth.post("/email/otp/send", async (c) => {
   const email = body.email.toLowerCase().trim();
   const headerTenantId = c.req.header("X-Steward-Tenant")?.trim();
   const bodyTenantId = body.tenantId?.trim();
-  const resolvedTenantId = headerTenantId || bodyTenantId || _DEFAULT_TENANT_ID;
+  const resolvedTenantId = headerTenantId || bodyTenantId || configuredDefaultTenantId();
   const tenantHintError = await validateExplicitAuthTenantHint(
     resolvedTenantId,
     Boolean(headerTenantId || bodyTenantId),
@@ -8844,7 +8854,8 @@ auth.post("/email/otp/verify", async (c) => {
 
   const email = body.email.toLowerCase().trim();
   const code = body.code.trim();
-  const resolvedTenantId = c.req.header("X-Steward-Tenant") || body.tenantId || _DEFAULT_TENANT_ID;
+  const resolvedTenantId =
+    c.req.header("X-Steward-Tenant") || body.tenantId || configuredDefaultTenantId();
   const methodResponse = await requireTenantLoginMethodAllowed(c, resolvedTenantId, "email");
   if (methodResponse) return methodResponse;
   const ssoRequiredResponse = await requireNonSsoEmailLoginAllowed(
@@ -8927,7 +8938,7 @@ async function resolveGuestTenant(
   const requested =
     headerTenant ||
     (typeof bodyTenantId === "string" ? bodyTenantId.trim() : "") ||
-    _DEFAULT_TENANT_ID;
+    configuredDefaultTenantId();
 
   if (!isValidTenantId(requested)) {
     return { ok: false, status: 400, error: "Invalid tenant id format" };
@@ -8938,7 +8949,7 @@ async function resolveGuestTenant(
   if (!(await tenantExists(requested))) {
     return { ok: false, status: 404, error: `Tenant '${requested}' not found` };
   }
-  if (requested === _DEFAULT_TENANT_ID) {
+  if (requested === configuredDefaultTenantId()) {
     return { ok: true, tenantId: requested, isPersonal: false };
   }
   const [config] = await getDb()
@@ -10561,7 +10572,7 @@ async function getAllowedOAuthRedirectEntries(
   clientId?: string,
 ): Promise<string[]> {
   const explicitTenantId = tenantId?.trim() || undefined;
-  const resolvedTenantId = explicitTenantId || _DEFAULT_TENANT_ID;
+  const resolvedTenantId = explicitTenantId || configuredDefaultTenantId();
   const entries = new Set<string>();
 
   const normalizedClientId = normalizePublicClientId(clientId);

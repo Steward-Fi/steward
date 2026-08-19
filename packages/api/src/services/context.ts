@@ -84,6 +84,13 @@ function positiveIntEnv(name: string, fallback: number): number {
 // falls back to that default, so this can never weaken the guard unintentionally.
 export const RATE_LIMIT_WINDOW_MS = positiveIntEnv("STEWARD_RATE_LIMIT_WINDOW_MS", 60_000);
 export const RATE_LIMIT_MAX_REQUESTS = positiveIntEnv("STEWARD_RATE_LIMIT_MAX_REQUESTS", 100);
+/** Resolve Worker binding rotations without changing the Bun entry's startup snapshot. */
+export function getRateLimitWindowMs(): number {
+  return positiveIntEnv("STEWARD_RATE_LIMIT_WINDOW_MS", 60_000);
+}
+export function getRateLimitMaxRequests(): number {
+  return positiveIntEnv("STEWARD_RATE_LIMIT_MAX_REQUESTS", 100);
+}
 export const isWorkersRuntime =
   process.env.STEWARD_RUNTIME === "workers" ||
   (typeof navigator !== "undefined" && navigator.userAgent === "Cloudflare-Workers");

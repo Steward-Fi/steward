@@ -60,13 +60,9 @@ const SIGNING_RPC_METHODS = new Set([
   "wallet_signCalls",
 ]);
 const MFA_MAX_AGE_MS = 10 * 60_000;
-const ALLOW_UNSAFE_MESSAGE_SIGNING = process.env.STEWARD_ALLOW_UNSAFE_MESSAGE_SIGNING === "true";
-const ALLOW_GLOBAL_WALLET_PERSONAL_SIGN =
-  process.env.STEWARD_ALLOW_GLOBAL_WALLET_PERSONAL_SIGN === "true";
-const ALLOW_GLOBAL_WALLET_TYPED_DATA_SIGNING =
-  process.env.STEWARD_ALLOW_GLOBAL_WALLET_TYPED_DATA_SIGNING === "true";
-const ALLOW_GLOBAL_WALLET_SEND_TRANSACTION =
-  process.env.STEWARD_ALLOW_GLOBAL_WALLET_SEND_TRANSACTION === "true";
+function envFlag(name: string): boolean {
+  return process.env[name] === "true";
+}
 const ACTION_CONFIRMATION_TTL_MS = 5 * 60_000;
 const MAX_TRANSACTION_DATA_BYTES = 16_384;
 
@@ -1174,6 +1170,7 @@ globalWalletRoutes.post("/rpc/scan", async (c) => {
     },
   ];
   const blocked = hasCalldata;
+  const executionSupported = envFlag("STEWARD_ALLOW_GLOBAL_WALLET_SEND_TRANSACTION") && !blocked;
   await writeGlobalWalletAudit(c, {
     tenantId: parsed.tenantId,
     action: "global_wallet.rpc.transaction_scanned",
@@ -1203,13 +1200,12 @@ globalWalletRoutes.post("/rpc/scan", async (c) => {
       riskLevel: blocked ? "blocked" : parsedTx.valueWei === "0" ? "low" : "medium",
       warnings,
       confirmationRequired: true,
-      executionSupported: ALLOW_GLOBAL_WALLET_SEND_TRANSACTION && !blocked,
-      unsupportedReason:
-        ALLOW_GLOBAL_WALLET_SEND_TRANSACTION && !blocked
-          ? null
-          : blocked
-            ? "Global wallet transaction execution is disabled for contract calldata until selector-aware scanning is configured."
-            : "Global wallet transaction execution is disabled. Set STEWARD_ALLOW_GLOBAL_WALLET_SEND_TRANSACTION=true only after native transfer controls are audited.",
+      executionSupported,
+      unsupportedReason: executionSupported
+        ? null
+        : blocked
+          ? "Global wallet transaction execution is disabled for contract calldata until selector-aware scanning is configured."
+          : "Global wallet transaction execution is disabled. Set STEWARD_ALLOW_GLOBAL_WALLET_SEND_TRANSACTION=true only after native transfer controls are audited.",
     },
   });
 });
@@ -1296,7 +1292,10 @@ globalWalletRoutes.post("/rpc", async (c) => {
   }
 
   if (method === "personal_sign") {
-    if (!ALLOW_UNSAFE_MESSAGE_SIGNING || !ALLOW_GLOBAL_WALLET_PERSONAL_SIGN) {
+    if (
+      !envFlag("STEWARD_ALLOW_UNSAFE_MESSAGE_SIGNING") ||
+      !envFlag("STEWARD_ALLOW_GLOBAL_WALLET_PERSONAL_SIGN")
+    ) {
       return c.json<ApiResponse>(
         {
           ok: false,
@@ -1395,7 +1394,7 @@ globalWalletRoutes.post("/rpc", async (c) => {
   }
 
   if (method === "eth_signTypedData_v4") {
-    if (!ALLOW_GLOBAL_WALLET_TYPED_DATA_SIGNING) {
+    if (!envFlag("STEWARD_ALLOW_GLOBAL_WALLET_TYPED_DATA_SIGNING")) {
       return c.json<ApiResponse>(
         {
           ok: false,
@@ -1498,7 +1497,7 @@ globalWalletRoutes.post("/rpc", async (c) => {
   }
 
   if (method === "eth_sendTransaction") {
-    if (!ALLOW_GLOBAL_WALLET_SEND_TRANSACTION) {
+    if (!envFlag("STEWARD_ALLOW_GLOBAL_WALLET_SEND_TRANSACTION")) {
       return c.json<ApiResponse>(
         {
           ok: false,

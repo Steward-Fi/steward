@@ -621,6 +621,29 @@ describe("global wallet routes", () => {
       }),
     });
 
+    process.env.STEWARD_ALLOW_UNSAFE_MESSAGE_SIGNING = "false";
+    process.env.STEWARD_ALLOW_GLOBAL_WALLET_PERSONAL_SIGN = "false";
+    try {
+      const disabledAfterRotation = await routes.request("/rpc", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${await token()}`,
+          "Content-Type": "application/json",
+          Origin: ORIGIN,
+        },
+        body: JSON.stringify({
+          app_id: appId(),
+          method: "personal_sign",
+          params: ["hello steward", walletAddress],
+        }),
+      });
+      expect(disabledAfterRotation.status).toBe(403);
+      expect(await disabledAfterRotation.text()).toContain("personal_sign is disabled");
+    } finally {
+      process.env.STEWARD_ALLOW_UNSAFE_MESSAGE_SIGNING = "true";
+      process.env.STEWARD_ALLOW_GLOBAL_WALLET_PERSONAL_SIGN = "true";
+    }
+
     const staleMfa = await routes.request("/rpc", {
       method: "POST",
       headers: {

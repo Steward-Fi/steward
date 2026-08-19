@@ -1,7 +1,9 @@
 import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
 
-const ALLOW_INSECURE_WEBHOOK_URLS = process.env.STEWARD_ALLOW_INSECURE_WEBHOOK_URLS === "true";
+function allowInsecureWebhookUrls(): boolean {
+  return process.env.STEWARD_ALLOW_INSECURE_WEBHOOK_URLS === "true";
+}
 
 function isNonPublicIpv4(hostname: string): boolean {
   const octets = hostname.split(".").map((part) => Number(part));
@@ -155,7 +157,7 @@ export function validateWebhookUrl(url: string): string | null {
     if (parsed.username || parsed.password) return "url must not include credentials";
 
     if (parsed.protocol !== "https:") {
-      if (!ALLOW_INSECURE_WEBHOOK_URLS || parsed.protocol !== "http:") {
+      if (!allowInsecureWebhookUrls() || parsed.protocol !== "http:") {
         return "url must use https";
       }
     }

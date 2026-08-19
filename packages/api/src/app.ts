@@ -157,11 +157,10 @@ export function createApp(): Hono<{ Variables: AppVariables }> {
   // strict mode so browser/unsigned SDK clients keep working until an operator
   // has rolled out signing clients. Mounted here (phase 1) so they always run
   // BEFORE the idempotency middleware (phase 2).
-  app.use("*", requestExpiry({ required: process.env.STEWARD_REQUIRE_REQUEST_EXPIRY === "true" }));
-  app.use(
-    "*",
-    authorizationSignature({ required: process.env.STEWARD_REQUIRE_AUTH_SIGNATURE === "true" }),
-  );
+  // Resolve binding-backed strictness and signing secrets per request so a
+  // long-lived Worker isolate cannot retain a revoked deployment setting.
+  app.use("*", requestExpiry());
+  app.use("*", authorizationSignature());
 
   // ─── Auth middleware per route group ────────────────────────────────────────
 

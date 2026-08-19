@@ -48,6 +48,27 @@ function makeDefaultApp() {
 }
 
 describe("requestExpiry", () => {
+  it("applies a rotated requirement without rebuilding the middleware", async () => {
+    const originalRequire = process.env.STEWARD_REQUIRE_REQUEST_EXPIRY;
+    const originalNodeEnv = process.env.NODE_ENV;
+    try {
+      process.env.NODE_ENV = "test";
+      delete process.env.STEWARD_REQUIRE_REQUEST_EXPIRY;
+      const app = makeDefaultApp();
+
+      expect((await app.request("/vault/agent-1/sign", { method: "POST" })).status).toBe(200);
+      process.env.STEWARD_REQUIRE_REQUEST_EXPIRY = "true";
+      expect((await app.request("/vault/agent-1/sign", { method: "POST" })).status).toBe(400);
+      delete process.env.STEWARD_REQUIRE_REQUEST_EXPIRY;
+      expect((await app.request("/vault/agent-1/sign", { method: "POST" })).status).toBe(200);
+    } finally {
+      if (originalRequire === undefined) delete process.env.STEWARD_REQUIRE_REQUEST_EXPIRY;
+      else process.env.STEWARD_REQUIRE_REQUEST_EXPIRY = originalRequire;
+      if (originalNodeEnv === undefined) delete process.env.NODE_ENV;
+      else process.env.NODE_ENV = originalNodeEnv;
+    }
+  });
+
   it("allows sensitive mutating requests without expiry while hook is optional", async () => {
     const app = makeApp();
 

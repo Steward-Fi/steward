@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { Hono } from "hono";
 import { workersGlobalRateLimit } from "../middleware/global-rate-limit";
+import { configuredDefaultTenantId } from "../routes/auth";
 
 /**
  * SEC-068: the Workers entry has no in-memory global limiter (no cross-isolate
@@ -19,6 +20,9 @@ const ENV_VARS = [
   "UPSTASH_REDIS_REST_TOKEN",
   "STEWARD_ALLOW_AUTH_RATE_LIMIT_SOFT_FAIL",
   "STEWARD_AUTH_RATE_LIMIT_OUTAGE_VALVE_MAX",
+  "STEWARD_RATE_LIMIT_WINDOW_MS",
+  "STEWARD_RATE_LIMIT_MAX_REQUESTS",
+  "STEWARD_DEFAULT_TENANT_ID",
 ] as const;
 const saved = new Map<string, string | undefined>();
 
@@ -57,6 +61,33 @@ function probeApp() {
 }
 
 describe("workersGlobalRateLimit (SEC-068)", () => {
+  test("uses rotated Worker limits without rebuilding the middleware", async () => {
+    redisUnconfigured();
+    process.env.NODE_ENV = "production";
+    process.env.STEWARD_RATE_LIMIT_WINDOW_MS = "1000";
+    process.env.STEWARD_RATE_LIMIT_MAX_REQUESTS = "7";
+    const app = probeApp();
+
+    const initial = await app.request("/thing");
+    expect(initial.status).toBe(429);
+    expect(initial.headers.get("RateLimit-Policy")).toContain("w=1");
+
+    process.env.STEWARD_RATE_LIMIT_WINDOW_MS = "2000";
+    process.env.STEWARD_RATE_LIMIT_MAX_REQUESTS = "9";
+    const rotated = await app.request("/thing");
+    expect(rotated.status).toBe(429);
+    expect(rotated.headers.get("RateLimit-Policy")).toContain("w=2");
+  });
+
+  test("resolves the default tenant from the current Worker binding", () => {
+    process.env.STEWARD_DEFAULT_TENANT_ID = "tenant-before-rotation";
+    expect(configuredDefaultTenantId()).toBe("tenant-before-rotation");
+    process.env.STEWARD_DEFAULT_TENANT_ID = "tenant-after-rotation";
+    expect(configuredDefaultTenantId()).toBe("tenant-after-rotation");
+    delete process.env.STEWARD_DEFAULT_TENANT_ID;
+    expect(configuredDefaultTenantId()).toBe("default");
+  });
+
   test("fails closed in production when Redis was never configured", async () => {
     redisUnconfigured();
     process.env.NODE_ENV = "production";
