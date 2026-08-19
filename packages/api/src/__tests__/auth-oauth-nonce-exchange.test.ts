@@ -43,6 +43,16 @@ function failOAuthLockDeletion() {
   });
 }
 
+function hangOAuthLockDeletion() {
+  const originalDelete = ChallengeStore.prototype.delete;
+  return spyOn(ChallengeStore.prototype, "delete").mockImplementation(async function (key) {
+    if (key.startsWith("oauth-code-lock:")) {
+      return new Promise<void>(() => {});
+    }
+    return originalDelete.call(this, key);
+  });
+}
+
 function makeApp(): Hono {
   const app = new Hono();
   app.route("/auth", authRoutes);
@@ -182,6 +192,32 @@ describe("POST /auth/oauth/exchange", () => {
     expect(second.json.code).toBe("code_invalid");
   });
 
+  it("allows exactly one concurrent redemption of the same code", async () => {
+    const app = makeApp();
+    _seedOAuthExchangeCodeForTests("nonce-concurrent", {
+      token: "concurrent-access",
+      refreshToken: "concurrent-refresh",
+      redirectUri: REDIRECT_URI,
+      tenantId: TENANT_ID,
+    });
+    const redeem = () =>
+      postExchange(app, {
+        code: "nonce-concurrent",
+        redirect_uri: REDIRECT_URI,
+        tenant_id: TENANT_ID,
+      });
+
+    const responses = await Promise.all([redeem(), redeem()]);
+    expect(responses.filter(({ status }) => status === 200)).toHaveLength(1);
+    expect(responses.filter(({ json }) => json.token === "concurrent-access")).toHaveLength(1);
+    const rejected = responses.find(({ status }) => status !== 200);
+    expect([401, 409]).toContain(rejected?.status);
+    expect(rejected?.json.token).toBeUndefined();
+
+    const replay = await redeem();
+    expect(replay).toMatchObject({ status: 401, json: { code: "code_invalid" } });
+  });
+
   it("returns a consumed nonce exchange when ancillary lock cleanup fails", async () => {
     _seedOAuthExchangeCodeForTests("nonce-cleanup-failure", {
       token: "access-after-cleanup-failure",
@@ -221,6 +257,39 @@ describe("POST /auth/oauth/exchange", () => {
     }
   });
 
+  it("bounds a lock cleanup that never settles after consuming the code", async () => {
+    _seedOAuthExchangeCodeForTests("nonce-cleanup-hang", {
+      token: "access-after-cleanup-hang",
+      refreshToken: "refresh-after-cleanup-hang",
+      redirectUri: REDIRECT_URI,
+      tenantId: TENANT_ID,
+    });
+    const deleteHang = hangOAuthLockDeletion();
+    const warn = spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const startedAt = Date.now();
+      const response = await postExchange(makeApp(), {
+        code: "nonce-cleanup-hang",
+        redirect_uri: REDIRECT_URI,
+        tenant_id: TENANT_ID,
+      });
+
+      expect(Date.now() - startedAt).toBeLessThan(1_000);
+      expect(response).toMatchObject({
+        status: 200,
+        json: {
+          ok: true,
+          token: "access-after-cleanup-hang",
+          refreshToken: "refresh-after-cleanup-hang",
+        },
+      });
+      expect(JSON.stringify(warn.mock.calls)).not.toContain("access-after-cleanup-hang");
+    } finally {
+      deleteHang.mockRestore();
+      warn.mockRestore();
+    }
+  });
+
   it("returns a consumed provider-token exchange when ancillary lock cleanup fails", async () => {
     process.env.STEWARD_OAUTH_ALLOWED_REDIRECTS = REDIRECT_URI;
     _seedOAuthExchangeCodeForTests("provider-cleanup-failure", {
@@ -247,7 +316,6 @@ describe("POST /auth/oauth/exchange", () => {
       expect(json.token).toBe("provider-access-after-cleanup-failure");
       expect(json.refreshToken).toBe("provider-refresh-after-cleanup-failure");
       expect(JSON.stringify(warn.mock.calls)).not.toContain("sk-cleanup-canary");
-
       const second = await makeApp().request("/auth/oauth/google/token", {
         method: "POST",
         headers: { "Content-Type": "application/json" },

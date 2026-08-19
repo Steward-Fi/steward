@@ -1432,6 +1432,7 @@ async function peekEmailGrant(grant: string, email: string, tenantId: string): P
 }
 
 const OAUTH_CODE_REDEEM_LOCK_TTL_MS = 10 * 1000;
+const OAUTH_CODE_REDEEM_LOCK_CLEANUP_TIMEOUT_MS = 250;
 
 async function lockOAuthCodeRedemption(code: string): Promise<boolean> {
   return getOAuthCodeStore().setIfNotExists(
@@ -1442,13 +1443,24 @@ async function lockOAuthCodeRedemption(code: string): Promise<boolean> {
 }
 
 async function releaseOAuthCodeRedemptionLock(code: string): Promise<void> {
+  let cleanupTimer: ReturnType<typeof setTimeout> | undefined;
   try {
-    await getOAuthCodeStore().delete(`oauth-code-lock:${code}`);
+    await Promise.race([
+      getOAuthCodeStore().delete(`oauth-code-lock:${code}`),
+      new Promise<never>((_, reject) => {
+        cleanupTimer = setTimeout(
+          () => reject(new Error("OAuth redemption lock cleanup timed out")),
+          OAUTH_CODE_REDEEM_LOCK_CLEANUP_TIMEOUT_MS,
+        );
+      }),
+    ]);
   } catch (error) {
     // Atomic consume is the single-use security boundary. Lock cleanup is
     // advisory because its bounded TTL preserves liveness when deletion is
-    // unavailable after a terminal consume result.
+    // unavailable or does not settle after a terminal consume result.
     console.warn("[OAuthAuth] Redemption lock cleanup failed", redactedThrownDiagnostics(error));
+  } finally {
+    if (cleanupTimer !== undefined) clearTimeout(cleanupTimer);
   }
 }
 
@@ -2046,7 +2058,6 @@ export function _clearOAuthCodeStoreForTests(): void {
   _oauthCodeStore = null;
 }
 
-/** Test-only seam for exercising durable OAuth-code backend failures. */
 // ─── Vault helper ─────────────────────────────────────────────────────────────
 
 function getVault(): Vault {
