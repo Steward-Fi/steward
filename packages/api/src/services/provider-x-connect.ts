@@ -2658,7 +2658,7 @@ export async function disconnectXProviderCredential(
     // ownership. Resolve disconnect authority from the deterministic X account
     // lineage so a corrupt pointer can neither sacrifice an unrelated secret
     // nor hide the actual X grant from local revocation.
-    const [lineageSecret] = (await tx
+    const lineageSecrets = (await tx
       .select()
       .from(secrets)
       .where(
@@ -2669,62 +2669,79 @@ export async function disconnectXProviderCredential(
         ),
       )
       .orderBy(desc(secrets.version))
-      .limit(1)
       .for("update")) as Secret[];
-    const lineageSecretId = lineageSecret?.id ?? null;
+    const classifiedLineage = lineageSecrets.map((secret) =>
+      classifyXDisconnectLineageSecret(input.vault, input.tenantId, secret, account.externalRef),
+    );
+    const ambiguousLineage = classifiedLineage.filter((entry) => !entry.owned);
+    if (ambiguousLineage.length > 0) {
+      throw new XConnectError(
+        "X_CREDENTIAL_NEEDS_ATTENTION",
+        409,
+        "X credential lineage ownership is ambiguous",
+      );
+    }
+    const ownedLineage = classifiedLineage.filter(
+      (entry): entry is XOwnedDisconnectLineageSecret => entry.owned,
+    );
+    const ownedLineageIds = ownedLineage.map((entry) => entry.secret.id);
 
-    if (account.status === "revoked" && !account.credentialSecretId && !lineageSecretId) {
-      return { lifecycleId: null, retryAt: null };
+    if (account.status === "revoked" && !account.credentialSecretId && ownedLineage.length === 0) {
+      return { lifecycles: [], allHandlesAvailable: false };
     }
 
     const pointerIssue = !account.credentialSecretId
       ? "CREDENTIAL_POINTER_MISSING"
-      : account.credentialSecretId !== lineageSecretId
+      : !ownedLineageIds.includes(account.credentialSecretId)
         ? "CREDENTIAL_POINTER_MISMATCH"
         : null;
-    const material = lineageSecretId
-      ? await readXDisconnectRevocationMaterial(
-          tx,
-          input.vault,
-          input.tenantId,
-          lineageSecretId,
-          account.externalRef,
-        )
-      : null;
-    const routesToDisable = lineageSecretId
-      ? await tx
-          .select({ id: secretRoutes.id, authorityRevision: secretRoutes.authorityRevision })
-          .from(secretRoutes)
-          .where(
-            and(
-              eq(secretRoutes.tenantId, input.tenantId),
-              eq(secretRoutes.secretId, lineageSecretId),
-              eq(secretRoutes.enabled, true),
-            ),
-          )
-          .for("update")
-      : [];
+    const routesToDisable =
+      ownedLineageIds.length > 0
+        ? await tx
+            .select({ id: secretRoutes.id, authorityRevision: secretRoutes.authorityRevision })
+            .from(secretRoutes)
+            .where(
+              and(
+                eq(secretRoutes.tenantId, input.tenantId),
+                inArray(secretRoutes.secretId, ownedLineageIds),
+                eq(secretRoutes.enabled, true),
+              ),
+            )
+            .for("update")
+        : [];
 
-    const lifecycleId = randomUUID();
-    let lifecycleSecretId: string | null = null;
-    const hasRevocationHandle = Boolean(material?.accessToken || material?.refreshToken);
-    if (lifecycleId && hasRevocationHandle) {
-      const secret = await input.vault.createSecretWithinTx(
-        tx,
-        input.tenantId,
-        `provider-x-lifecycle:${lifecycleId}:disconnect`,
-        JSON.stringify({
-          schemaVersion: "steward.provider-x.lifecycle.v1",
-          token: {
-            access_token: material?.accessToken ?? undefined,
-            refresh_token: material?.refreshToken ?? undefined,
-          },
-        } satisfies XRefreshLifecycleSecret),
-        { description: "Encrypted transient X OAuth revocation material" },
-      );
-      lifecycleSecretId = secret.id;
-    }
-    if (lifecycleId) {
+    const lifecycleMaterials =
+      ownedLineage.length > 0
+        ? ownedLineage
+        : [
+            {
+              secret: null,
+              accessToken: null,
+              refreshToken: null,
+              issue: "CREDENTIAL_LINEAGE_MISSING",
+            },
+          ];
+    const lifecycles: Array<{ lifecycleId: string; retryAt: Date | null }> = [];
+    for (const material of lifecycleMaterials) {
+      const lifecycleId = randomUUID();
+      const hasRevocationHandle = Boolean(material.accessToken || material.refreshToken);
+      let lifecycleSecretId: string | null = null;
+      if (hasRevocationHandle) {
+        const secret = await input.vault.createSecretWithinTx(
+          tx,
+          input.tenantId,
+          `provider-x-lifecycle:${lifecycleId}:disconnect`,
+          JSON.stringify({
+            schemaVersion: "steward.provider-x.lifecycle.v1",
+            token: {
+              access_token: material.accessToken ?? undefined,
+              refresh_token: material.refreshToken ?? undefined,
+            },
+          } satisfies XRefreshLifecycleSecret),
+          { description: "Encrypted transient X OAuth revocation material" },
+        );
+        lifecycleSecretId = secret.id;
+      }
       await tx.insert(providerXCredentialLifecycles).values({
         id: lifecycleId,
         tenantId: input.tenantId,
@@ -2754,20 +2771,21 @@ export async function disconnectXProviderCredential(
           revocationHandleAvailable: hasRevocationHandle,
           credentialIssue:
             pointerIssue ??
-            material?.issue ??
-            (lineageSecretId ? null : "CREDENTIAL_LINEAGE_MISSING"),
+            material.issue ??
+            (ownedLineage.length > 1 ? "CREDENTIAL_LINEAGE_MULTIPLE" : null),
         },
       });
+      lifecycles.push({ lifecycleId, retryAt: lifecycleSecretId ? now : null });
     }
 
-    if (lineageSecretId) {
+    if (ownedLineageIds.length > 0) {
       await tx
         .update(secretRoutes)
         .set({ enabled: false })
         .where(
           and(
             eq(secretRoutes.tenantId, input.tenantId),
-            eq(secretRoutes.secretId, lineageSecretId),
+            inArray(secretRoutes.secretId, ownedLineageIds),
             eq(secretRoutes.enabled, true),
           ),
         );
@@ -2794,14 +2812,14 @@ export async function disconnectXProviderCredential(
       throw new XConnectError("X_REFRESH_FAILED", 409, "account revision conflict on disconnect");
     }
 
-    if (lineageSecretId) {
+    if (ownedLineageIds.length > 0) {
       await tx
         .update(secrets)
         .set({ deletedAt: now, updatedAt: now })
         .where(
           and(
             eq(secrets.tenantId, input.tenantId),
-            eq(secrets.id, lineageSecretId),
+            inArray(secrets.id, ownedLineageIds),
             sql`${secrets.deletedAt} IS NULL`,
           ),
         );
@@ -2818,8 +2836,11 @@ export async function disconnectXProviderCredential(
         workspaceId: input.workspaceId,
         xUserId: account.externalRef,
         revokedAtUpstream: false,
-        upstreamRevocationPending: Boolean(lifecycleSecretId),
-        revocationHandleAvailable: hasRevocationHandle,
+        upstreamRevocationPending: lifecycles.some((entry) => entry.retryAt !== null),
+        revocationHandleAvailable:
+          ownedLineage.length > 0 &&
+          ownedLineage.every((entry) => Boolean(entry.accessToken || entry.refreshToken)),
+        credentialLineageCount: ownedLineage.length,
         disabledRouteCount: routesToDisable.length,
         previousRevision: account.revision,
         newRevision: degraded.revision,
@@ -2828,59 +2849,79 @@ export async function disconnectXProviderCredential(
     });
 
     return {
-      lifecycleId,
-      retryAt: lifecycleSecretId ? now : null,
+      lifecycles,
+      allHandlesAvailable:
+        ownedLineage.length > 0 &&
+        ownedLineage.every((entry) => Boolean(entry.accessToken || entry.refreshToken)),
     };
   });
 
-  if (!prepared.lifecycleId || !prepared.retryAt) {
+  const pendingLifecycles = prepared.lifecycles.filter(
+    (entry): entry is { lifecycleId: string; retryAt: Date } => entry.retryAt !== null,
+  );
+  if (pendingLifecycles.length === 0) {
     return { providerAccountId: input.accountId, revoked: false };
   }
   await afterXDisconnectJournalForTests?.();
-  const revokedAtUpstream = await reconcileStagedXCredentialRevocation({
-    ...input,
-    lifecycleId: prepared.lifecycleId,
-    now: prepared.retryAt,
-  });
-  return { providerAccountId: input.accountId, revoked: revokedAtUpstream };
+  const revocationResults: boolean[] = [];
+  for (const lifecycle of pendingLifecycles) {
+    revocationResults.push(
+      await reconcileStagedXCredentialRevocation({
+        ...input,
+        lifecycleId: lifecycle.lifecycleId,
+        now: lifecycle.retryAt,
+      }),
+    );
+  }
+  return {
+    providerAccountId: input.accountId,
+    revoked: prepared.allHandlesAvailable && revocationResults.every(Boolean),
+  };
 }
 
-async function readXDisconnectRevocationMaterial(
-  tx: DbExecutor,
-  vault: SecretVault,
-  tenantId: string,
-  secretId: string,
-  expectedXUserId: string,
-): Promise<{
+interface XOwnedDisconnectLineageSecret {
+  owned: true;
+  secret: Secret;
   accessToken: string | null;
   refreshToken: string | null;
   issue: string | null;
-}> {
-  const [row] = (await tx
-    .select()
-    .from(secrets)
-    .where(and(eq(secrets.tenantId, tenantId), eq(secrets.id, secretId)))
-    .limit(1)) as Secret[];
-  if (!row) {
-    return { accessToken: null, refreshToken: null, issue: "CREDENTIAL_SECRET_MISSING" };
-  }
+}
+
+interface XAmbiguousDisconnectLineageSecret {
+  owned: false;
+  secret: Secret;
+  issue: "CREDENTIAL_BINDING_MISMATCH" | "CREDENTIAL_PAYLOAD_INVALID" | "CREDENTIAL_DECRYPT_FAILED";
+}
+
+function classifyXDisconnectLineageSecret(
+  vault: SecretVault,
+  tenantId: string,
+  secret: Secret,
+  expectedXUserId: string,
+): XOwnedDisconnectLineageSecret | XAmbiguousDisconnectLineageSecret {
   try {
-    const parsed = JSON.parse(vault.decryptSecretRow(tenantId, row)) as unknown;
+    const parsed = JSON.parse(vault.decryptSecretRow(tenantId, secret)) as unknown;
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-      return { accessToken: null, refreshToken: null, issue: "CREDENTIAL_PAYLOAD_INVALID" };
+      return { owned: false, secret, issue: "CREDENTIAL_PAYLOAD_INVALID" };
     }
     const candidate = parsed as Record<string, unknown>;
+    if (candidate.schemaVersion !== "steward.provider-x.credential.v1") {
+      return { owned: false, secret, issue: "CREDENTIAL_PAYLOAD_INVALID" };
+    }
+    if (candidate.xUserId !== expectedXUserId) {
+      return { owned: false, secret, issue: "CREDENTIAL_BINDING_MISMATCH" };
+    }
     const accessToken = boundedStagedToken(candidate.accessToken);
     const refreshToken = boundedStagedToken(candidate.refreshToken);
-    const issue =
-      typeof candidate.xUserId === "string" && candidate.xUserId !== expectedXUserId
-        ? "CREDENTIAL_BINDING_MISMATCH"
-        : accessToken || refreshToken
-          ? null
-          : "CREDENTIAL_REVOCATION_HANDLE_INVALID";
-    return { accessToken, refreshToken, issue };
+    return {
+      owned: true,
+      secret,
+      accessToken,
+      refreshToken,
+      issue: accessToken || refreshToken ? null : "CREDENTIAL_REVOCATION_HANDLE_INVALID",
+    };
   } catch {
-    return { accessToken: null, refreshToken: null, issue: "CREDENTIAL_DECRYPT_FAILED" };
+    return { owned: false, secret, issue: "CREDENTIAL_DECRYPT_FAILED" };
   }
 }
 
