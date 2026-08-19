@@ -106,12 +106,10 @@ test("Worker waitUntil keeps the request database alive for registered backgroun
       DATABASE_DRIVER: "neon-websocket",
     },
     async () => {
-      background = registerRequestDatabaseTask(
-        (async () => {
-          await gate;
-          expect(getDb()).toBe(requestDb);
-        })(),
-      );
+      background = registerRequestDatabaseTask(async () => {
+        await gate;
+        expect(getDb()).toBe(requestDb);
+      });
       return "response";
     },
     {

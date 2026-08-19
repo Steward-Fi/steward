@@ -51,7 +51,7 @@ export function dispatchWebhook(
     data: redactedData,
     timestamp: new Date(),
   };
-  void registerRequestDatabaseTask(
+  void registerRequestDatabaseTask(() =>
     dispatchConfiguredWebhooks(event, configuredType, isPluginEvent ? type : null).catch(
       (error) => {
         console.error(
