@@ -225,6 +225,90 @@ describe("EVM nonce manager", () => {
     expect(counters[0]?.nextNonce).toBe(3);
   });
 
+  test("serializes simultaneous cross-tenant claims so exactly one tenant owns the namespace", async () => {
+    const walletAddress = "0x9999999999999999999999999999999999999999";
+    const results = await Promise.allSettled([
+      allocateEvmNonce({
+        tenantId: TENANT_A,
+        walletAddress,
+        chainId: 8453,
+        getPendingNonce: async () => 4,
+      }),
+      allocateEvmNonce({
+        tenantId: TENANT_B,
+        walletAddress,
+        chainId: 8453,
+        getPendingNonce: async () => 4,
+      }),
+    ]);
+
+    expect(results.filter(({ status }) => status === "fulfilled")).toHaveLength(1);
+    expect(results.filter(({ status }) => status === "rejected")).toHaveLength(1);
+    const [owner] = await getDb().select().from(evmWalletNonceOwners);
+    expect(owner?.tenantId).toBe(TENANT_A);
+    const [counter] = await getDb().select().from(evmWalletNonces);
+    expect(counter?.tenantId).toBe(TENANT_A);
+    expect(counter?.nextNonce).toBe(5);
+  });
+
+  test("wrong-tenant drop and confirmation cannot mutate the owner's in-flight nonce", async () => {
+    const walletAddress = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const chainId = 8453;
+    const nonce = await allocateEvmNonce({
+      tenantId: TENANT_A,
+      walletAddress,
+      chainId,
+      getPendingNonce: async () => 4,
+    });
+
+    await markEvmNonceDropped({
+      tenantId: TENANT_B,
+      walletAddress,
+      chainId,
+      nonce,
+    });
+    await confirmEvmNonce({
+      tenantId: TENANT_B,
+      walletAddress,
+      chainId,
+      nonce,
+    });
+
+    const [afterCrossTenantMutation] = await getDb()
+      .select()
+      .from(evmWalletNonceInflight)
+      .where(
+        and(
+          eq(evmWalletNonceInflight.tenantId, TENANT_A),
+          eq(evmWalletNonceInflight.walletAddress, walletAddress),
+          eq(evmWalletNonceInflight.chainId, chainId),
+          eq(evmWalletNonceInflight.nonce, nonce),
+        ),
+      );
+    expect(afterCrossTenantMutation?.state).toBe("allocated");
+
+    await markEvmNonceDropped({
+      tenantId: TENANT_A,
+      walletAddress,
+      chainId,
+      nonce,
+    });
+    const [afterOwnerDrop] = await getDb()
+      .select()
+      .from(evmWalletNonceInflight)
+      .where(eq(evmWalletNonceInflight.tenantId, TENANT_A));
+    expect(afterOwnerDrop?.state).toBe("dropped");
+
+    await confirmEvmNonce({
+      tenantId: TENANT_A,
+      walletAddress,
+      chainId,
+      nonce,
+    });
+    const remaining = await getDb().select().from(evmWalletNonceInflight);
+    expect(remaining).toHaveLength(0);
+  });
+
   test("allows the same address on a different chain to have a different tenant owner", async () => {
     const walletAddress = "0x8888888888888888888888888888888888888888";
     const [baseNonce, mainnetNonce] = await Promise.all([
