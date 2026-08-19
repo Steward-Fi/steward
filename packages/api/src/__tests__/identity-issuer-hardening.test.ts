@@ -5,6 +5,7 @@ import { join } from "node:path";
 const apiRoot = join(import.meta.dir, "..");
 const authSource = readFileSync(join(apiRoot, "routes", "auth.ts"), "utf8");
 const discoverySource = readFileSync(join(apiRoot, "routes", "discovery.ts"), "utf8");
+const jwtSource = readFileSync(join(apiRoot, "..", "..", "auth", "src", "jwt.ts"), "utf8");
 
 describe("identity issuer hardening", () => {
   it("does not mint identity tokens with a request Host-derived issuer", () => {
@@ -19,10 +20,11 @@ describe("identity issuer hardening", () => {
   });
 
   it("requires a canonical identity discovery base URL in production", () => {
-    expect(discoverySource).toContain("STEWARD_IDENTITY_JWT_ISSUER");
-    expect(discoverySource).toContain("APP_URL");
-    expect(discoverySource).toContain('process.env.NODE_ENV === "production"');
-    expect(discoverySource).toContain(
+    expect(discoverySource).toContain("getIdentityDiscoveryBaseUrl(requestUrl)");
+    expect(discoverySource).not.toContain("process.env");
+    expect(jwtSource).toContain("authority.identityJwtIssuer || authority.appUrl");
+    expect(jwtSource).toContain('authority.nodeEnv === "production"');
+    expect(jwtSource).toContain(
       "STEWARD_IDENTITY_JWT_ISSUER or APP_URL is required for identity discovery",
     );
   });

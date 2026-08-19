@@ -1,11 +1,14 @@
 import { afterEach, describe, expect, it } from "bun:test";
+import { randomUUID } from "node:crypto";
 import { getIdentityJwks, signIdentityJwtPayload, verifyToken } from "@stwd/auth";
-import { closeDb, getDb, tenants } from "@stwd/db";
+import { closeDb, getDb, tenants, users, userTenants } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { decodeProtectedHeader, exportPKCS8, generateKeyPair, importJWK, jwtVerify } from "jose";
 import { identityDiscoveryRoutes } from "../routes/discovery";
+import { hydrateProcessEnv, withWorkerJwtAuthority } from "../worker";
 
 const ORIGINAL_ENV = {
+  NODE_ENV: process.env.NODE_ENV,
   APP_URL: process.env.APP_URL,
   STEWARD_IDENTITY_JWT_PRIVATE_KEY: process.env.STEWARD_IDENTITY_JWT_PRIVATE_KEY,
   STEWARD_IDENTITY_JWT_ALG: process.env.STEWARD_IDENTITY_JWT_ALG,
@@ -13,6 +16,8 @@ const ORIGINAL_ENV = {
   STEWARD_IDENTITY_JWT_ISSUER: process.env.STEWARD_IDENTITY_JWT_ISSUER,
   STEWARD_IDENTITY_JWT_AUDIENCE: process.env.STEWARD_IDENTITY_JWT_AUDIENCE,
   STEWARD_JWT_SECRET: process.env.STEWARD_JWT_SECRET,
+  STEWARD_MASTER_PASSWORD: process.env.STEWARD_MASTER_PASSWORD,
+  STEWARD_PGLITE_MEMORY: process.env.STEWARD_PGLITE_MEMORY,
 };
 
 async function configureRs256IdentityKey() {
@@ -36,6 +41,176 @@ afterEach(async () => {
 });
 
 describe("identity JWKS discovery", () => {
+  it("keeps identity-token and discovery routes on each overlapping Worker authority", async () => {
+    const { db, client } = await createPGLiteDb("memory://");
+    setPGLiteOverride(db, async () => {
+      await client.close();
+    });
+    process.env.STEWARD_MASTER_PASSWORD = "identity-discovery-master-password";
+    process.env.STEWARD_PGLITE_MEMORY = "true";
+    const { authRoutes, createSessionToken, verifySessionToken } = await import("../routes/auth");
+    const tenantId = "authority-overlap";
+    const firstUserId = randomUUID();
+    const secondUserId = randomUUID();
+    await getDb().insert(tenants).values({
+      id: tenantId,
+      name: "Authority overlap",
+      apiKeyHash: "hash",
+      ownerAddress: "0x0000000000000000000000000000000000000000",
+    });
+    await getDb()
+      .insert(users)
+      .values([
+        { id: firstUserId, email: "authority-a@example.test" },
+        { id: secondUserId, email: "authority-b@example.test" },
+      ]);
+    await getDb()
+      .insert(userTenants)
+      .values([
+        { userId: firstUserId, tenantId },
+        { userId: secondUserId, tenantId },
+      ]);
+
+    const firstKeys = await generateKeyPair("RS256", { extractable: true });
+    const secondKeys = await generateKeyPair("ES256", { extractable: true });
+    const firstEnv = {
+      NODE_ENV: "test",
+      STEWARD_JWT_SECRET: "discovery-first-session-secret-at-least-32-characters",
+      STEWARD_IDENTITY_JWT_ALG: "RS256",
+      STEWARD_IDENTITY_JWT_PRIVATE_KEY: await exportPKCS8(firstKeys.privateKey),
+      STEWARD_IDENTITY_JWT_KID: "discovery-first-rsa",
+      STEWARD_IDENTITY_JWT_ISSUER: "https://authority-a.identity.test",
+      STEWARD_IDENTITY_JWT_AUDIENCE: "authority-a-audience",
+    };
+    const secondEnv = {
+      NODE_ENV: "test",
+      STEWARD_JWT_SECRET: "discovery-second-session-secret-at-least-32-characters",
+      STEWARD_IDENTITY_JWT_ALG: "ES256",
+      STEWARD_IDENTITY_JWT_PRIVATE_KEY: await exportPKCS8(secondKeys.privateKey),
+      STEWARD_IDENTITY_JWT_KID: "discovery-second-ec",
+      STEWARD_IDENTITY_JWT_AUDIENCE: "authority-b-audience",
+      APP_URL: "https://authority-b.app.test",
+    };
+
+    async function exerciseRoutes(userId: string, requestOrigin: string) {
+      const sessionToken = await createSessionToken("0xauthority", tenantId, { userId });
+      expect(await verifySessionToken(sessionToken)).toMatchObject({ userId, tenantId });
+      const identityResponse = await authRoutes.request("/identity-token", {
+        headers: { Authorization: `Bearer ${sessionToken}` },
+      });
+      expect(identityResponse.status).toBe(200);
+      const identity = (await identityResponse.json()) as { token: string };
+
+      const rootJwksResponse = await identityDiscoveryRoutes.request(
+        `${requestOrigin}/.well-known/jwks.json`,
+      );
+      const tenantJwksResponse = await identityDiscoveryRoutes.request(
+        `${requestOrigin}/tenants/${tenantId}/.well-known/jwks.json`,
+      );
+      const rootDiscoveryResponse = await identityDiscoveryRoutes.request(
+        `${requestOrigin}/.well-known/openid-configuration`,
+      );
+      const tenantDiscoveryResponse = await identityDiscoveryRoutes.request(
+        `${requestOrigin}/tenants/${tenantId}/.well-known/openid-configuration`,
+      );
+      expect([
+        rootJwksResponse.status,
+        tenantJwksResponse.status,
+        rootDiscoveryResponse.status,
+        tenantDiscoveryResponse.status,
+      ]).toEqual([200, 200, 200, 200]);
+      return {
+        token: identity.token,
+        rootJwks: (await rootJwksResponse.json()) as { keys: Array<Record<string, unknown>> },
+        tenantJwks: (await tenantJwksResponse.json()) as {
+          keys: Array<Record<string, unknown>>;
+        },
+        rootDiscovery: (await rootDiscoveryResponse.json()) as Record<string, unknown>,
+        tenantDiscovery: (await tenantDiscoveryResponse.json()) as Record<string, unknown>,
+      };
+    }
+
+    let markFirstReady!: () => void;
+    let releaseFirst!: () => void;
+    const firstReady = new Promise<void>((resolve) => {
+      markFirstReady = resolve;
+    });
+    const firstBarrier = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const firstRun = withWorkerJwtAuthority(firstEnv, async () => {
+      hydrateProcessEnv(firstEnv);
+      markFirstReady();
+      await firstBarrier;
+      return exerciseRoutes(firstUserId, "https://request-a.invalid");
+    });
+    await firstReady;
+
+    const secondRun = withWorkerJwtAuthority(secondEnv, async () => {
+      hydrateProcessEnv(secondEnv);
+      return exerciseRoutes(secondUserId, "https://request-b.invalid");
+    });
+    const [secondResult, firstResult] = await Promise.all([
+      Promise.resolve(secondRun).finally(releaseFirst),
+      firstRun,
+    ]);
+
+    const expectations = [
+      {
+        result: firstResult,
+        alg: "RS256",
+        kty: "RSA",
+        kid: firstEnv.STEWARD_IDENTITY_JWT_KID,
+        issuer: firstEnv.STEWARD_IDENTITY_JWT_ISSUER,
+        audience: firstEnv.STEWARD_IDENTITY_JWT_AUDIENCE,
+        publicKey: firstKeys.publicKey,
+      },
+      {
+        result: secondResult,
+        alg: "ES256",
+        kty: "EC",
+        kid: secondEnv.STEWARD_IDENTITY_JWT_KID,
+        issuer: secondEnv.APP_URL,
+        audience: secondEnv.STEWARD_IDENTITY_JWT_AUDIENCE,
+        publicKey: secondKeys.publicKey,
+      },
+    ] as const;
+    for (const expected of expectations) {
+      expect(decodeProtectedHeader(expected.result.token)).toMatchObject({
+        alg: expected.alg,
+        kid: expected.kid,
+      });
+      await expect(
+        jwtVerify(expected.result.token, expected.publicKey, {
+          issuer: `${expected.issuer}/tenants/${tenantId}`,
+          audience: expected.audience,
+          algorithms: [expected.alg],
+        }),
+      ).resolves.toBeDefined();
+      for (const jwks of [expected.result.rootJwks, expected.result.tenantJwks]) {
+        expect(jwks.keys).toHaveLength(1);
+        expect(jwks.keys[0]).toMatchObject({
+          alg: expected.alg,
+          kid: expected.kid,
+          kty: expected.kty,
+          use: "sig",
+        });
+        expect(jwks.keys[0]?.d).toBeUndefined();
+      }
+      expect(expected.result.rootDiscovery).toMatchObject({
+        issuer: expected.issuer,
+        jwks_uri: `${expected.issuer}/.well-known/jwks.json`,
+        id_token_signing_alg_values_supported: [expected.alg],
+      });
+      expect(expected.result.tenantDiscovery).toMatchObject({
+        issuer: `${expected.issuer}/tenants/${tenantId}`,
+        jwks_uri: `${expected.issuer}/tenants/${tenantId}/.well-known/jwks.json`,
+        id_token_signing_alg_values_supported: [expected.alg],
+        tenant_id: tenantId,
+      });
+    }
+  });
+
   it("publishes only public key material for configured identity-token signing keys", async () => {
     await configureRs256IdentityKey();
     const { db, client } = await createPGLiteDb("memory://");

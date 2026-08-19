@@ -83,6 +83,7 @@ export interface JwtRuntimeEnvironment {
 
 /** Immutable symmetric and asymmetric JWT authority for one request. */
 export interface JwtRuntimeAuthority {
+  readonly nodeEnv?: string;
   readonly jwtSecret: string;
   readonly agentTokenExpiry: string;
   readonly identityJwtAlgorithm: IdentityJwtAlgorithm;
@@ -339,6 +340,33 @@ export function getIdentityJwtIssuer(requestOrigin?: string): string {
   );
 }
 
+/**
+ * Resolve the externally visible identity-discovery base for the current
+ * request. Worker requests use their immutable authority snapshot so an
+ * overlapping invocation cannot substitute its process.env compatibility
+ * mirror while this request is suspended.
+ */
+export function getIdentityDiscoveryBaseUrl(requestUrl: string): string {
+  const authority = jwtRuntimeAuthorityStorage.getStore();
+  if (authority) {
+    const configured = authority.identityJwtIssuer || authority.appUrl;
+    if (configured) return configured;
+    if (authority.nodeEnv === "production") {
+      throw new Error("STEWARD_IDENTITY_JWT_ISSUER or APP_URL is required for identity discovery");
+    }
+    return new URL(requestUrl).origin;
+  }
+
+  const configured =
+    process.env.STEWARD_IDENTITY_JWT_ISSUER?.trim().replace(/\/$/, "") ||
+    process.env.APP_URL?.trim().replace(/\/$/, "");
+  if (configured) return configured;
+  if (process.env.NODE_ENV === "production") {
+    throw new Error("STEWARD_IDENTITY_JWT_ISSUER or APP_URL is required for identity discovery");
+  }
+  return new URL(requestUrl).origin;
+}
+
 export function getIdentityJwtAudience(): string {
   return (
     jwtRuntimeAuthorityStorage.getStore()?.identityJwtAudience ??
@@ -537,6 +565,7 @@ export function createJwtRuntimeAuthority(
   const identityJwtAudience = environment.STEWARD_IDENTITY_JWT_AUDIENCE?.trim() || JWT_AUDIENCE;
   const appUrl = environment.APP_URL?.trim().replace(/\/$/, "") || undefined;
   return Object.freeze({
+    nodeEnv: environment.NODE_ENV,
     jwtSecret,
     agentTokenExpiry,
     identityJwtAlgorithm,
@@ -554,6 +583,7 @@ export function withJwtRuntimeAuthority<T>(
   callback: () => T,
 ): T {
   const immutableAuthority = Object.freeze({
+    nodeEnv: authority.nodeEnv,
     jwtSecret: authority.jwtSecret,
     agentTokenExpiry: authority.agentTokenExpiry,
     identityJwtAlgorithm: authority.identityJwtAlgorithm,

@@ -1,4 +1,5 @@
 import {
+  getIdentityDiscoveryBaseUrl,
   getIdentityJwks,
   getIdentityJwtConfig,
   getIdentityJwtIssuer,
@@ -7,21 +8,6 @@ import {
 import { getDb, tenants } from "@stwd/db";
 import { eq } from "drizzle-orm";
 import { Hono } from "hono";
-
-function requestOrigin(requestUrl: string): string {
-  return new URL(requestUrl).origin;
-}
-
-function publicBaseUrl(requestUrl: string): string {
-  const configured =
-    process.env.STEWARD_IDENTITY_JWT_ISSUER?.trim().replace(/\/$/, "") ||
-    process.env.APP_URL?.trim().replace(/\/$/, "");
-  if (configured) return configured;
-  if (process.env.NODE_ENV === "production") {
-    throw new Error("STEWARD_IDENTITY_JWT_ISSUER or APP_URL is required for identity discovery");
-  }
-  return requestOrigin(requestUrl);
-}
 
 function tenantIdentityIssuer(baseUrl: string, tenantId: string): string {
   return `${baseUrl}/tenants/${encodeURIComponent(tenantId)}`;
@@ -32,7 +18,7 @@ function isValidDiscoveryTenantId(value: string): boolean {
 }
 
 function discoveryMetadata(requestUrl: string, tenantId?: string) {
-  const baseUrl = publicBaseUrl(requestUrl);
+  const baseUrl = getIdentityDiscoveryBaseUrl(requestUrl);
   const issuer = tenantId ? tenantIdentityIssuer(baseUrl, tenantId) : getIdentityJwtIssuer(baseUrl);
   const jwksUri = tenantId
     ? `${baseUrl}/tenants/${encodeURIComponent(tenantId)}/.well-known/jwks.json`
@@ -81,7 +67,7 @@ identityDiscoveryRoutes.get("/.well-known/jwks.json", async (c) => {
 
 identityDiscoveryRoutes.get("/.well-known/openid-configuration", async (c) => {
   c.header("Cache-Control", "public, max-age=300");
-  const config = await getIdentityJwtConfig(publicBaseUrl(c.req.url));
+  const config = await getIdentityJwtConfig(getIdentityDiscoveryBaseUrl(c.req.url));
   return c.json({
     ...discoveryMetadata(c.req.url),
     id_token_signing_alg_values_supported: config ? [config.alg] : ["RS256", "ES256"],
@@ -109,7 +95,7 @@ identityDiscoveryRoutes.get("/tenants/:tenantId/.well-known/openid-configuration
     return c.json({ ok: false, error: "Tenant not found" }, 404);
   }
   c.header("Cache-Control", "public, max-age=300");
-  const config = await getIdentityJwtConfig(publicBaseUrl(c.req.url));
+  const config = await getIdentityJwtConfig(getIdentityDiscoveryBaseUrl(c.req.url));
   return c.json({
     ...discoveryMetadata(c.req.url, tenantId),
     id_token_signing_alg_values_supported: config ? [config.alg] : ["RS256", "ES256"],
