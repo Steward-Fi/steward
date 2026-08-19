@@ -63,6 +63,15 @@ export class TokenStore {
     return this.backend.consume(hash);
   }
 
+  async transition(
+    hash: string,
+    expected: string,
+    desired: string,
+    ttlMs: number = DEFAULT_TTL_MS,
+  ): Promise<boolean> {
+    return this.backend.transition(hash, expected, desired, ttlMs);
+  }
+
   /**
    * Delete a hash from the store (called after one-time token consumption).
    */

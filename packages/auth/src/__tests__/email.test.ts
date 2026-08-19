@@ -34,6 +34,18 @@ class CapturingBackend implements StoreBackend {
     return value;
   }
 
+  async transition(
+    key: string,
+    expected: string,
+    desired: string,
+    ttlMs: number,
+  ): Promise<boolean> {
+    const current = await this.get(key);
+    if (current !== expected && current !== desired) return false;
+    await this.set(key, desired, ttlMs);
+    return true;
+  }
+
   async delete(key: string): Promise<void> {
     this.values.delete(key);
   }
