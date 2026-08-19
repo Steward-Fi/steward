@@ -1100,10 +1100,10 @@ async function persistConnectedAccount(input: PersistInput): Promise<CompleteCon
         "staged X connect lineage cannot be established",
       );
     }
-    const [newerConnectAdoption] =
+    const [latestConnectAdoption] =
       account && connectIntentAudit
         ? await tx
-            .select({ id: auditEvents.id })
+            .select({ id: auditEvents.id, seq: auditEvents.seq })
             .from(auditEvents)
             .where(
               and(
@@ -1114,13 +1114,28 @@ async function persistConnectedAccount(input: PersistInput): Promise<CompleteCon
                   "provider.x.connect.completed",
                   "provider.x.connect.reconnected",
                 ]),
-                sql`${auditEvents.seq} > ${connectIntentAudit.seq}`,
               ),
             )
             .orderBy(desc(auditEvents.seq))
             .limit(1)
         : [];
-    if (newerConnectAdoption) {
+    // An existing account is only safe to rotate when its current credential
+    // has an authoritative X-connect adoption before this intent. A generic
+    // provider-account insert (or a selectively missing adoption record) gives
+    // us no total-order proof that the staged response is newer, so fail closed
+    // and let the outer reconciler revoke the staged grant.
+    if (account && !latestConnectAdoption) {
+      throw new XConnectError(
+        "X_CREDENTIAL_NEEDS_ATTENTION",
+        409,
+        "current X account adoption lineage cannot be established",
+      );
+    }
+    if (
+      latestConnectAdoption &&
+      connectIntentAudit &&
+      latestConnectAdoption.seq >= connectIntentAudit.seq
+    ) {
       throw new XConnectError(
         "X_CREDENTIAL_NEEDS_ATTENTION",
         409,

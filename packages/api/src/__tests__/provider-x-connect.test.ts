@@ -30,6 +30,7 @@ import {
   users,
   userTenants,
   workspaces,
+  writeAuditEvent,
 } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { SecretVault } from "@stwd/vault";
@@ -937,6 +938,122 @@ describe("connect exchange recovery", () => {
       .where(eq(providerXCredentialLifecycles.id, staleLifecycle.id));
     expect(revokedLifecycle.state).toBe("revoked");
     expect(revokedLifecycle.credentialSecretId).toBeNull();
+    recovery.restore();
+  });
+
+  test("a staged connect cannot overwrite a newer generic X account without an X adoption anchor", async () => {
+    const store = new MemoryConnectStore();
+    const stagedFake = installFakeX({
+      exchangeToken: {
+        access_token: "access-staged-before-generic",
+        refresh_token: "refresh-staged-before-generic",
+      },
+    });
+    const initiated = await initiateXConnect({
+      tenantId: TENANT,
+      workspaceId: WORKSPACE,
+      initiatedByUserId: ADMIN,
+      redirectUri: REDIRECT,
+      config: CONFIG,
+      store,
+    });
+    __setAfterXCredentialStageForTests(async () => {
+      throw new Error("simulated crash before generic account creation");
+    });
+    await expect(
+      completeXConnect({
+        tenantId: TENANT,
+        workspaceId: WORKSPACE,
+        callerUserId: ADMIN,
+        code: "auth-code",
+        state: initiated.state,
+        connectToken: initiated.connectToken,
+        redirectUri: REDIRECT,
+        config: CONFIG,
+        store,
+        vault,
+      }),
+    ).rejects.toThrow("simulated crash before generic account creation");
+    __setAfterXCredentialStageForTests(null);
+    stagedFake.restore();
+
+    const currentPayload: XCredentialPayload = {
+      schemaVersion: "steward.provider-x.credential.v1",
+      accessToken: "access-current-generic",
+      refreshToken: "refresh-current-generic",
+      scopesGranted: [...X_DEFAULT_SCOPES],
+      xUserId: "1234567890",
+      xUsername: "steward_test",
+      obtainedAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 7_200_000).toISOString(),
+    };
+    const currentSecret = await vault.createSecret(
+      TENANT,
+      "provider-x/generic-current-account",
+      JSON.stringify(currentPayload),
+    );
+    const [workspace] = await getDb()
+      .select({ revision: workspaces.revision })
+      .from(workspaces)
+      .where(and(eq(workspaces.tenantId, TENANT), eq(workspaces.id, WORKSPACE)))
+      .limit(1);
+    const genericAccount = await providerAuthorityStore.createProviderAccount(
+      {
+        tenantId: TENANT,
+        actorUserId: ADMIN,
+        tenantRole: "admin",
+        mfaVerifiedAt: Date.now(),
+        idempotencyKey: `generic-x-${crypto.randomUUID()}`,
+        expectedRevision: workspace.revision,
+        reason: "test generic X account interleaving",
+        audit: async (event) => {
+          await writeAuditEvent({
+            tenantId: TENANT,
+            actorType: "user",
+            actorId: ADMIN,
+            action: event.action,
+            resourceType: event.resourceType,
+            resourceId: event.resourceId,
+            metadata: event.metadata,
+          });
+        },
+      },
+      {
+        workspaceId: WORKSPACE,
+        adapterKey: X_ADAPTER_KEY,
+        externalRef: currentPayload.xUserId,
+        displayName: `@${currentPayload.xUsername}`,
+        credentialSecretId: currentSecret.id,
+        credentialVersion: currentSecret.version,
+      },
+    );
+    expect((await readAuditActions(TENANT)).includes("provider.account.create")).toBe(true);
+
+    const recovery = installFakeX({ revokeStatuses: [200] });
+    const swept = await runXCredentialLifecycleSweep({
+      vault,
+      config: CONFIG,
+      now: new Date(Date.now() + 70_000),
+    });
+    expect(swept).toMatchObject({ processed: 1, revoked: 1, adopted: 0, attention: 0 });
+    expect(recovery.counters).toMatchObject({ exchange: 0, identity: 1, revoke: 1 });
+
+    const [accountAfter] = await getDb()
+      .select()
+      .from(providerAccounts)
+      .where(eq(providerAccounts.id, genericAccount.id));
+    expect(accountAfter).toMatchObject({
+      credentialSecretId: currentSecret.id,
+      credentialVersion: currentSecret.version,
+      revision: genericAccount.revision,
+      status: "active",
+    });
+    expect(await decryptCredential(genericAccount.id)).toEqual(currentPayload);
+    const [stagedLifecycle] = await getDb()
+      .select()
+      .from(providerXCredentialLifecycles)
+      .where(eq(providerXCredentialLifecycles.kind, "connect_exchange"));
+    expect(stagedLifecycle).toMatchObject({ state: "revoked", credentialSecretId: null });
     recovery.restore();
   });
 
