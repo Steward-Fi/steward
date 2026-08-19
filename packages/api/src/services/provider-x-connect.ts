@@ -1164,7 +1164,7 @@ async function persistConnectedAccount(input: PersistInput): Promise<CompleteCon
                   "provider.x.refresh.needs_attention",
                   "provider.x.refresh.revoked",
                   "provider.x.disconnect.completed",
-                  "provider.account.disable",
+                  "provider.account.disable.completed",
                 ]),
               ),
             )
@@ -1223,7 +1223,7 @@ async function persistConnectedAccount(input: PersistInput): Promise<CompleteCon
         const expectedStatus =
           latestAccountMutation.action === "provider.x.refresh.revoked"
             ? "revoked"
-            : latestAccountMutation.action === "provider.account.disable" ||
+            : latestAccountMutation.action === "provider.account.disable.completed" ||
                 (latestAccountMutation.action === "provider.x.refresh.needs_attention" &&
                   latestAccountMutation.metadata.accountDisabled === true)
               ? "disabled"
@@ -1264,7 +1264,7 @@ async function persistConnectedAccount(input: PersistInput): Promise<CompleteCon
             "current X account credential lineage cannot be established",
           );
         }
-        if (latestAccountMutation.action === "provider.account.disable") {
+        if (latestAccountMutation.action === "provider.account.disable.completed") {
           const disabledRevision = latestAccountMutation.metadata.expectedRevision;
           if (
             typeof disabledRevision !== "number" ||

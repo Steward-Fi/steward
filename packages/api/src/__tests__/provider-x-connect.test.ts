@@ -1370,6 +1370,89 @@ describe("connect exchange recovery", () => {
     recovery.restore();
   });
 
+  test("recovery ignores a disable intent whose account update never completed", async () => {
+    const initial = await connectHappy(new MemoryConnectStore());
+    const accountId = initial.completed.providerAccountId;
+    const [accountBeforeIntent] = await getDb()
+      .select()
+      .from(providerAccounts)
+      .where(eq(providerAccounts.id, accountId));
+
+    const staleStore = new MemoryConnectStore();
+    const stagedFake = installFakeX({
+      exchangeToken: {
+        access_token: "access-staged-after-failed-disable",
+        refresh_token: "refresh-staged-after-failed-disable",
+      },
+    });
+    const initiated = await initiateXConnect({
+      tenantId: TENANT,
+      workspaceId: WORKSPACE,
+      initiatedByUserId: ADMIN,
+      redirectUri: REDIRECT,
+      config: CONFIG,
+      store: staleStore,
+    });
+    __setAfterXCredentialStageForTests(async () => {
+      throw new Error("simulated crash before failed generic disable");
+    });
+    await expect(
+      completeXConnect({
+        tenantId: TENANT,
+        workspaceId: WORKSPACE,
+        callerUserId: ADMIN,
+        code: "auth-code",
+        state: initiated.state,
+        connectToken: initiated.connectToken,
+        redirectUri: REDIRECT,
+        config: CONFIG,
+        store: staleStore,
+        vault,
+      }),
+    ).rejects.toThrow("simulated crash before failed generic disable");
+    __setAfterXCredentialStageForTests(null);
+    stagedFake.restore();
+
+    // This is the durable residue left by the old ordering when its separate
+    // account update failed. It is authorization intent, not mutation proof.
+    await writeAuditEvent({
+      tenantId: TENANT,
+      actorType: "user",
+      actorId: ADMIN,
+      action: "provider.account.disable",
+      resourceType: "provider_account",
+      resourceId: accountId,
+      metadata: {
+        workspaceId: WORKSPACE,
+        expectedRevision: accountBeforeIntent.revision,
+        reason: "simulated failed generic disable",
+      },
+    });
+
+    const recovery = installFakeX();
+    const swept = await runXCredentialLifecycleSweep({
+      vault,
+      config: CONFIG,
+      now: new Date(Date.now() + 70_000),
+    });
+    expect(swept).toMatchObject({ processed: 1, adopted: 1, revoked: 0, attention: 0 });
+    const [accountAfterRecovery] = await getDb()
+      .select()
+      .from(providerAccounts)
+      .where(eq(providerAccounts.id, accountId));
+    expect(accountAfterRecovery).toMatchObject({
+      status: "active",
+      revision: accountBeforeIntent.revision + 1,
+      credentialVersion: (accountBeforeIntent.credentialVersion as number) + 1,
+    });
+    expect(await decryptCredential(accountId)).toMatchObject({
+      accessToken: "access-staged-after-failed-disable",
+      refreshToken: "refresh-staged-after-failed-disable",
+    });
+    expect(recovery.counters).toMatchObject({ identity: 1, revoke: 0 });
+    recovery.restore();
+  });
+
   test("a staged connect cannot re-enable an account disabled by the generic authority path", async () => {
     const initial = await connectHappy(new MemoryConnectStore());
     const accountId = initial.completed.providerAccountId;

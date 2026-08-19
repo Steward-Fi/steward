@@ -390,7 +390,12 @@ export class ProviderAuthorityStore {
   ) {}
   /** Test-only race hooks. Runtime callers never set these. */
   faultHooks: Partial<
-    Record<"afterBudgetPreflight" | "afterOperationRoutePreflight", () => void | Promise<void>>
+    Record<
+      | "afterBudgetPreflight"
+      | "afterOperationRoutePreflight"
+      | "beforeProviderAccountDisableUpdate",
+      () => void | Promise<void>
+    >
   > = {};
 
   private db() {
@@ -843,29 +848,44 @@ export class ProviderAuthorityStore {
         reason: ctx.reason,
       },
     });
-    const [updated] = await this.db()
-      .update(providerAccounts)
-      .set({
-        status: "disabled",
-        revision: row.revision + 1,
-        updatedAt: new Date(),
-      })
-      .where(
-        and(
-          eq(providerAccounts.id, id),
-          eq(providerAccounts.tenantId, ctx.tenantId),
-          eq(providerAccounts.workspaceId, row.workspaceId),
-          eq(providerAccounts.revision, row.revision),
-        ),
-      )
-      .returning();
-    if (!updated)
-      throw new ProviderAuthorityError(
-        "provider account revision conflict",
-        "revision_conflict",
-        409,
-      );
-    return updated;
+    await this.faultHooks.beforeProviderAccountDisableUpdate?.();
+    return this.runAuditedTransaction(ctx.tenantId, async (txRaw, appendRequiredAudit) => {
+      const tx = txRaw as DbExecutor;
+      const [updated] = await tx
+        .update(providerAccounts)
+        .set({
+          status: "disabled",
+          revision: row.revision + 1,
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(providerAccounts.id, id),
+            eq(providerAccounts.tenantId, ctx.tenantId),
+            eq(providerAccounts.workspaceId, row.workspaceId),
+            eq(providerAccounts.revision, row.revision),
+          ),
+        )
+        .returning();
+      if (!updated)
+        throw new ProviderAuthorityError(
+          "provider account revision conflict",
+          "revision_conflict",
+          409,
+        );
+      await appendAuthorityMutationAudit(ctx, appendRequiredAudit, {
+        action: "provider.account.disable.completed",
+        resourceType: "provider_account",
+        resourceId: id,
+        metadata: {
+          workspaceId: row.workspaceId,
+          expectedRevision: row.revision,
+          resultingRevision: updated.revision,
+          reason: ctx.reason,
+        },
+      });
+      return updated;
+    });
   }
 
   async registerOperation(
