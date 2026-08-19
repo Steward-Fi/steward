@@ -84,6 +84,37 @@ describe("workers boot JWT env validation (SEC-134)", () => {
     ).rejects.toThrow("STEWARD_JWT_SECRET is required in production");
   });
 
+  it("rejects missing and short canonical deployment JWT roots before database selection", async () => {
+    snapshotEnv();
+    delete process.env.STEWARD_JWT_SECRET;
+    delete process.env.STEWARD_SESSION_SECRET;
+    delete process.env.STEWARD_MASTER_PASSWORD;
+    delete process.env.STEWARD_DB_MODE;
+    delete process.env.STEWARD_PGLITE_MEMORY;
+    const canonicalBindings = {
+      NODE_ENV: "production",
+      SKIP_MIGRATIONS: "1",
+      DATABASE_DRIVER: "canonical-database-must-not-be-selected",
+      REDIS_DRIVER: "upstash",
+    };
+    const missing = expect(
+      worker.fetch(
+        new Request("https://workers.test/canonical-missing-jwt"),
+        canonicalBindings,
+        {},
+      ),
+    ).rejects.toThrow("STEWARD_JWT_SECRET is required in production");
+    const short = expect(
+      worker.fetch(
+        new Request("https://workers.test/canonical-short-jwt"),
+        { ...canonicalBindings, STEWARD_JWT_SECRET: "short" },
+        {},
+      ),
+    ).rejects.toThrow("at least 32 characters in production");
+
+    await Promise.all([missing, short]);
+  });
+
   it("rejects a malformed AGENT_TOKEN_EXPIRY at cold start", async () => {
     snapshotEnv();
     await expect(

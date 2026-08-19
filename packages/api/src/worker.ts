@@ -24,8 +24,11 @@
  *   - KV_REST_API_URL               Upstash REST endpoint
  *   - KV_REST_API_TOKEN             Upstash REST token
  *   - SKIP_MIGRATIONS=1             Migrations run via wrangler-driven CI script
+ *   - NODE_ENV=production           Enables production validation in every deploy environment
  *   - STEWARD_JWT_SECRET            Canonical HS256 JWT signing secret
  *   - STEWARD_MASTER_PASSWORD       Vault keystore master password
+ *   - STEWARD_KDF_SALT              Per-deployment vault KDF salt
+ *   - STEWARD_AUDIT_HMAC_KEY        Tamper-evident audit-chain HMAC root
  *   - RESEND_API_KEY                Magic-link email provider
  *   - GOOGLE/DISCORD/GITHUB/TWITTER OAuth client IDs + secrets
  *   - PASSKEY_RP_ID, PASSKEY_ORIGIN, PASSKEY_RP_NAME
