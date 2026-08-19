@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { withRuntimeEnvironment } from "@stwd/shared/runtime-env";
 import { Hono } from "hono";
 import {
   authorizationSignature,
@@ -539,22 +540,13 @@ describe("authorizationSignature", () => {
     expect(nonSensitive.status).toBe(200);
   });
 
-  it("keeps production enforcement explicit when the requirement is unset", async () => {
-    const originalNodeEnv = process.env.NODE_ENV;
-    const originalRequire = process.env.STEWARD_REQUIRE_AUTH_SIGNATURE;
-    try {
-      process.env.NODE_ENV = "production";
-      delete process.env.STEWARD_REQUIRE_AUTH_SIGNATURE;
-      const app = makeDefaultApp();
+  it("fails closed in a production request snapshot when the requirement is unset", async () => {
+    const app = makeDefaultApp();
 
-      const res = await app.request("/vault/agent-1/sign", { method: "POST", body: BODY });
+    const res = await withRuntimeEnvironment({ NODE_ENV: "production" }, () =>
+      app.request("/vault/agent-1/sign", { method: "POST", body: BODY }),
+    );
 
-      expect(res.status).toBe(200);
-    } finally {
-      if (originalNodeEnv === undefined) delete process.env.NODE_ENV;
-      else process.env.NODE_ENV = originalNodeEnv;
-      if (originalRequire === undefined) delete process.env.STEWARD_REQUIRE_AUTH_SIGNATURE;
-      else process.env.STEWARD_REQUIRE_AUTH_SIGNATURE = originalRequire;
-    }
+    expect(res.status).toBe(401);
   });
 });

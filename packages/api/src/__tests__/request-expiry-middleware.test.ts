@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { withRuntimeEnvironment } from "@stwd/shared/runtime-env";
 import { Hono } from "hono";
 import { requestExpiry } from "../middleware/request-expiry";
 
@@ -146,22 +147,18 @@ describe("requestExpiry", () => {
     expect(nonSensitive.status).toBe(200);
   });
 
-  it("keeps production enforcement explicit when the requirement is unset", async () => {
-    const originalNodeEnv = process.env.NODE_ENV;
-    const originalRequire = process.env.STEWARD_REQUIRE_REQUEST_EXPIRY;
-    try {
-      process.env.NODE_ENV = "production";
-      delete process.env.STEWARD_REQUIRE_REQUEST_EXPIRY;
-      const app = makeDefaultApp();
+  it("fails closed in production unless the stale-request exception is explicit", async () => {
+    const app = makeDefaultApp();
 
-      const res = await app.request("/vault/agent-1/sign", { method: "POST" });
+    const denied = await withRuntimeEnvironment({ NODE_ENV: "production" }, () =>
+      app.request("/vault/agent-1/sign", { method: "POST" }),
+    );
+    const explicitlyAllowed = await withRuntimeEnvironment(
+      { NODE_ENV: "production", STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS: "true" },
+      () => app.request("/vault/agent-1/sign", { method: "POST" }),
+    );
 
-      expect(res.status).toBe(200);
-    } finally {
-      if (originalNodeEnv === undefined) delete process.env.NODE_ENV;
-      else process.env.NODE_ENV = originalNodeEnv;
-      if (originalRequire === undefined) delete process.env.STEWARD_REQUIRE_REQUEST_EXPIRY;
-      else process.env.STEWARD_REQUIRE_REQUEST_EXPIRY = originalRequire;
-    }
+    expect(denied.status).toBe(400);
+    expect(explicitlyAllowed.status).toBe(200);
   });
 });

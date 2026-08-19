@@ -6,6 +6,7 @@ import {
   fstatSync,
   fsyncSync,
   linkSync,
+  lstatSync,
   mkdirSync,
   openSync,
   realpathSync,
@@ -190,6 +191,19 @@ export function promoteDemoCredentials(pending: PendingDemoCredentials): string 
         if (!linkedFd.isFile() || linkedFd.dev !== staged.dev || linkedFd.ino !== staged.ino) {
           throw new Error(
             `Pending credential changed during promotion; recover ${pending.pendingPath}`,
+          );
+        }
+
+        // Same-UID writers are within this local trust boundary, but preserve the
+        // staged-file identity guarantee immediately before the atomic install.
+        const beforeRename = lstatSync(promotionPath);
+        if (
+          !beforeRename.isFile() ||
+          beforeRename.dev !== linkedFd.dev ||
+          beforeRename.ino !== linkedFd.ino
+        ) {
+          throw new Error(
+            `Pending credential changed before canonical rename; recover ${pending.pendingPath}`,
           );
         }
 

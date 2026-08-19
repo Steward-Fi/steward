@@ -5,11 +5,15 @@ export interface RequestSecurityPosture {
   authorizationSignatureRequired: boolean;
 }
 
-/** Sensitive-request enforcement remains an explicit operator rollout. */
+/** Production is fail-closed; explicit flags can also enable the guards elsewhere. */
 export function resolveRequestSecurityPosture(): RequestSecurityPosture {
+  const production = runtimeEnvironmentValue("NODE_ENV") === "production";
   return {
-    requestExpiryRequired: runtimeEnvironmentFlag("STEWARD_REQUIRE_REQUEST_EXPIRY"),
-    authorizationSignatureRequired: runtimeEnvironmentFlag("STEWARD_REQUIRE_AUTH_SIGNATURE"),
+    requestExpiryRequired:
+      runtimeEnvironmentFlag("STEWARD_REQUIRE_REQUEST_EXPIRY") ||
+      (production && runtimeEnvironmentValue("STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS") !== "true"),
+    authorizationSignatureRequired:
+      runtimeEnvironmentFlag("STEWARD_REQUIRE_AUTH_SIGNATURE") || production,
   };
 }
 
