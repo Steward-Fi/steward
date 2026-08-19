@@ -139,12 +139,15 @@ export function stageDemoCredentials(
   throw new Error("Could not allocate a unique pending credential file");
 }
 
-/** Atomically make a staged credential canonical after the DB commit. */
-export function promoteDemoCredentials(
-  pending: PendingDemoCredentials,
-  afterPendingOpen?: () => void,
-  beforePromotionRename?: (promotionPath: string) => void,
-): string {
+/**
+ * Make a staged credential canonical after the DB commit.
+ *
+ * The credential directory and files are restricted to the current user. Every
+ * process that can write to that directory as the same UID is therefore inside
+ * this trust boundary: JavaScript pathname APIs cannot eliminate lstat/link/
+ * rename races against another same-UID writer.
+ */
+export function promoteDemoCredentials(pending: PendingDemoCredentials): string {
   const parent = credentialParent(pending.finalPath);
   if (parent.device !== pending.parentDevice || parent.inode !== pending.parentInode) {
     throw new Error(`Credential directory changed; recover ${pending.pendingPath}`);
@@ -161,8 +164,6 @@ export function promoteDemoCredentials(
     if (typeof process.geteuid === "function" && staged.uid !== process.geteuid()) {
       throw new Error(`Pending credential owner changed; recover ${pending.pendingPath}`);
     }
-
-    afterPendingOpen?.();
 
     let promotionPath: string | undefined;
     try {
@@ -200,7 +201,6 @@ export function promoteDemoCredentials(
           );
         }
 
-        beforePromotionRename?.(promotionPath);
         const beforeRename = lstatSync(promotionPath);
         if (
           !beforeRename.isFile() ||
