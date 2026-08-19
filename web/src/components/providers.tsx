@@ -165,6 +165,9 @@ function WalletProviderTree({ children }: { children: ReactNode }) {
     let cancelled = false;
     void resolveWalletRuntime().then((runtime) => {
       if (cancelled) return;
+      if (runtime.status === "failed") {
+        console.error("Wallet runtime unavailable; wallet features are disabled");
+      }
       setWalletRuntime(runtime);
     });
     return () => {

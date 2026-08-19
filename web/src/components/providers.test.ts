@@ -29,6 +29,20 @@ describe("AuthTokenSync security invariants", () => {
     expect(Date.now() - startedAt).toBeLessThan(1_000);
   });
 
+  test("ignores a wallet chunk that resolves after the loading deadline", async () => {
+    const { resolveWalletRuntime } = await import("./providers");
+    let resolveLoad: ((runtime: never) => void) | undefined;
+    const lateLoad = new Promise<never>((resolve) => {
+      resolveLoad = resolve;
+    });
+
+    const result = await resolveWalletRuntime(() => lateLoad, 1);
+    resolveLoad?.([] as never);
+    await Promise.resolve();
+
+    expect(result).toEqual({ status: "failed" });
+  });
+
   test("keeps the legacy URL parser dependency available to the production wallet bundle", () => {
     expect(webManifest.dependencies?.punycode).toBe("^2.3.1");
     expect(Bun.resolveSync("punycode/", webRoot)).toContain("punycode");
