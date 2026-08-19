@@ -16,8 +16,10 @@ import {
   expect,
   it,
   setDefaultTimeout,
+  spyOn,
 } from "bun:test";
 import { readFileSync } from "node:fs";
+import { ChallengeStore } from "@stwd/auth";
 import { closeDb } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { Hono } from "hono";
@@ -30,6 +32,16 @@ const TENANT_ID = "elizacloud";
 let authRoutes: typeof import("../routes/auth").authRoutes;
 let _clearOAuthCodeStoreForTests: typeof import("../routes/auth")._clearOAuthCodeStoreForTests;
 let _seedOAuthExchangeCodeForTests: typeof import("../routes/auth")._seedOAuthExchangeCodeForTests;
+
+function failOAuthLockDeletion() {
+  const originalDelete = ChallengeStore.prototype.delete;
+  return spyOn(ChallengeStore.prototype, "delete").mockImplementation(async function (key) {
+    if (key.startsWith("oauth-code-lock:")) {
+      throw new Error("lock delete failed with bearer sk-cleanup-canary");
+    }
+    return originalDelete.call(this, key);
+  });
+}
 
 function makeApp(): Hono {
   const app = new Hono();
@@ -168,6 +180,133 @@ describe("POST /auth/oauth/exchange", () => {
     });
     expect(second.status).toBe(401);
     expect(second.json.code).toBe("code_invalid");
+  });
+
+  it("returns a consumed nonce exchange when ancillary lock cleanup fails", async () => {
+    _seedOAuthExchangeCodeForTests("nonce-cleanup-failure", {
+      token: "access-after-cleanup-failure",
+      refreshToken: "refresh-after-cleanup-failure",
+      redirectUri: REDIRECT_URI,
+      tenantId: TENANT_ID,
+    });
+    const deleteFailure = failOAuthLockDeletion();
+    const warn = spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const first = await postExchange(makeApp(), {
+        code: "nonce-cleanup-failure",
+        redirect_uri: REDIRECT_URI,
+        tenant_id: TENANT_ID,
+      });
+
+      expect(first).toMatchObject({
+        status: 200,
+        json: {
+          ok: true,
+          token: "access-after-cleanup-failure",
+          refreshToken: "refresh-after-cleanup-failure",
+        },
+      });
+      expect(JSON.stringify(warn.mock.calls)).not.toContain("sk-cleanup-canary");
+
+      const second = await postExchange(makeApp(), {
+        code: "nonce-cleanup-failure",
+        redirect_uri: REDIRECT_URI,
+        tenant_id: TENANT_ID,
+      });
+      expect(second.status).toBe(401);
+      expect(second.json.code).toBe("code_invalid");
+    } finally {
+      deleteFailure.mockRestore();
+      warn.mockRestore();
+    }
+  });
+
+  it("returns a consumed provider-token exchange when ancillary lock cleanup fails", async () => {
+    process.env.STEWARD_OAUTH_ALLOWED_REDIRECTS = REDIRECT_URI;
+    _seedOAuthExchangeCodeForTests("provider-cleanup-failure", {
+      token: "provider-access-after-cleanup-failure",
+      refreshToken: "provider-refresh-after-cleanup-failure",
+      redirectUri: REDIRECT_URI,
+      tenantId: null,
+      providerName: "google",
+    });
+    const deleteFailure = failOAuthLockDeletion();
+    const warn = spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const response = await makeApp().request("/auth/oauth/google/token", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          code: "provider-cleanup-failure",
+          redirectUri: REDIRECT_URI,
+        }),
+      });
+      const json = (await response.json()) as Record<string, unknown>;
+
+      expect(response.status).toBe(200);
+      expect(json.token).toBe("provider-access-after-cleanup-failure");
+      expect(json.refreshToken).toBe("provider-refresh-after-cleanup-failure");
+      expect(JSON.stringify(warn.mock.calls)).not.toContain("sk-cleanup-canary");
+
+      const second = await makeApp().request("/auth/oauth/google/token", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          code: "provider-cleanup-failure",
+          redirectUri: REDIRECT_URI,
+        }),
+      });
+      expect(second.status).toBe(401);
+    } finally {
+      deleteFailure.mockRestore();
+      warn.mockRestore();
+    }
+  });
+
+  it("still fails closed and preserves the code when atomic consume fails", async () => {
+    _seedOAuthExchangeCodeForTests("nonce-consume-failure", {
+      token: "must-not-be-returned",
+      refreshToken: "must-not-be-returned-either",
+      redirectUri: REDIRECT_URI,
+      tenantId: TENANT_ID,
+    });
+    const originalConsume = ChallengeStore.prototype.consume;
+    const consumeFailure = spyOn(ChallengeStore.prototype, "consume").mockImplementation(
+      async function (key) {
+        if (key === "oauth-code:nonce-consume-failure") {
+          throw new Error("consume backend unavailable");
+        }
+        return originalConsume.call(this, key);
+      },
+    );
+
+    try {
+      const response = await makeApp().request("/auth/oauth/exchange", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          code: "nonce-consume-failure",
+          redirect_uri: REDIRECT_URI,
+          tenant_id: TENANT_ID,
+        }),
+      });
+      const text = await response.text();
+
+      expect(response.status).toBe(500);
+      expect(text).not.toContain("must-not-be-returned");
+    } finally {
+      consumeFailure.mockRestore();
+    }
+
+    const retry = await postExchange(makeApp(), {
+      code: "nonce-consume-failure",
+      redirect_uri: REDIRECT_URI,
+      tenant_id: TENANT_ID,
+    });
+    expect(retry).toMatchObject({
+      status: 200,
+      json: { token: "must-not-be-returned", refreshToken: "must-not-be-returned-either" },
+    });
   });
 
   it("rejects a redirect_uri mismatch with code_redirect_mismatch without burning the nonce", async () => {
