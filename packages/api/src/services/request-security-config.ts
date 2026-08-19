@@ -34,7 +34,10 @@ const PUBLIC_BROWSER_AUTH_MUTATIONS = new Set([
   "/auth/device/token",
   "/auth/passkey/login/options",
   "/auth/passkey/login/verify",
+  "/auth/passkey/register/options",
+  "/auth/passkey/register/verify",
   "/auth/jwt/login",
+  "/auth/logout",
   "/auth/email/send",
   "/auth/email/verify",
   "/auth/email/code/verify",
@@ -65,11 +68,17 @@ function isPublicBrowserAuthMutation(path: string): boolean {
   );
 }
 
-function isAuthenticatedBrowserAuthMutation(path: string): boolean {
+function isAuthenticatedBrowserMutation(path: string): boolean {
   return (
-    path === "/auth/logout" ||
+    path === "/user" ||
+    path.startsWith("/user/") ||
+    path === "/v1/users" ||
+    path.startsWith("/v1/users/") ||
+    path === "/tenants" ||
+    path.startsWith("/tenants/") ||
+    path === "/dashboard" ||
+    path.startsWith("/dashboard/") ||
     path === "/auth/sessions" ||
-    path === "/auth/guest" ||
     path === "/auth/guest/upgrade" ||
     path.startsWith("/auth/mfa/") ||
     path.startsWith("/auth/passkey/register/")
@@ -98,9 +107,7 @@ export function isBrowserSessionSignatureExempt(request: Request, path: string):
 
   const authorization = request.headers.get("authorization");
   if (!authorization) return Promise.resolve(false);
-  if (path !== "/user" && !path.startsWith("/user/") && !isAuthenticatedBrowserAuthMutation(path)) {
-    return Promise.resolve(false);
-  }
+  if (!isAuthenticatedBrowserMutation(path)) return Promise.resolve(false);
 
   const cached = browserSignatureExemptionByRequest.get(request);
   if (cached) return cached;

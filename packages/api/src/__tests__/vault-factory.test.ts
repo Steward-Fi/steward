@@ -102,6 +102,10 @@ describe("vault factory", () => {
     const first = getConfiguredVault();
     const second = getConfiguredVault();
     expect(second).toBe(first);
+    expect((first as unknown as { config: Record<string, unknown> }).config).toEqual({
+      chainId: 84532,
+      rpcUrl: "https://sepolia.base.org",
+    });
 
     process.env.STEWARD_MASTER_PASSWORD = "factory-master-two";
     expect(getConfiguredVault()).not.toBe(first);
@@ -247,6 +251,15 @@ describe("vault factory", () => {
 
     expect(() => createConfiguredVault()).toThrow("STEWARD_MASTER_PASSWORD is required");
     expect(() => createConfiguredVault({ allowDevSecretFallback: true })).not.toThrow();
+  });
+
+  it("never inherits a process fallback inside a request snapshot", () => {
+    process.env.STEWARD_MASTER_PASSWORD = "process-master-must-not-cross";
+    expect(() =>
+      withRuntimeEnvironment({}, () =>
+        createConfiguredVault({ fallbackPassword: "captured-process-master" }),
+      ),
+    ).toThrow("STEWARD_MASTER_PASSWORD is required");
   });
 
   it("fails closed in production when configured KMS cannot initialize", () => {

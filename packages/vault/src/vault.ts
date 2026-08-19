@@ -638,7 +638,7 @@ export class Vault {
       assertExternalKeyCustodyProviderV1(config.externalKeyCustodyProvider);
     }
     // Retain only non-secret routing configuration. Custody backends already
-    // own their derived keys/clients; retaining the constructor object would
+    // own their derived keys/clients; keeping the full constructor object would
     // duplicate plaintext master/provider credentials for the Vault lifetime.
     this.config = { chainId: config.chainId, rpcUrl: config.rpcUrl };
     this.externalKeyCustodyProvider = config.externalKeyCustodyProvider;

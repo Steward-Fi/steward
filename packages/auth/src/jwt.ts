@@ -1,4 +1,4 @@
-import { randomUUID, scryptSync } from "node:crypto";
+import { createHmac, randomBytes, randomUUID, scryptSync } from "node:crypto";
 import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 import {
   calculateJwkThumbprint,
@@ -71,12 +71,8 @@ let warnedEmbeddedMasterFallback = false;
 let warnedDevSecret = false;
 let warnedShortSecret = false;
 
-/**
- * Embedded-mode JWT secret derivation cache. Deriving via scrypt costs ~50ms,
- * and getJwtSecret() runs on every token sign/verify, so the derived key is
- * memoized per distinct source password.
- */
-let embeddedJwtDerivation: { source: string; derived: string } | null = null;
+const embeddedJwtCacheKey = randomBytes(32);
+let embeddedJwtDerivation: { identity: string; derived: string } | null = null;
 
 /**
  * Derive the embedded-mode JWT signing secret from STEWARD_MASTER_PASSWORD.
@@ -89,16 +85,15 @@ let embeddedJwtDerivation: { source: string; derived: string } | null = null;
  * from the vault root key and offline guesses cost a scrypt each.
  */
 function deriveEmbeddedJwtSecret(masterPassword: string): string {
-  // This is exact process-local cache identity, not password verification.
-  // Avoid a reusable fast digest of the vault root; the JWT key itself remains
-  // independently derived with scrypt below.
-  if (embeddedJwtDerivation?.source === masterPassword) {
-    return embeddedJwtDerivation.derived;
-  }
+  const hmac = createHmac("sha256", embeddedJwtCacheKey);
+  // codeql[js/insufficient-password-hash] Ephemeral keyed cache identity only;
+  // the JWT signing key below is independently derived with scrypt.
+  const identity = hmac.update(masterPassword).digest("hex"); // lgtm[js/insufficient-password-hash]
+  if (embeddedJwtDerivation?.identity === identity) return embeddedJwtDerivation.derived;
   const derived = (scryptSync(masterPassword, "steward-kdf:jwt-signing:v1", 32) as Buffer).toString(
     "hex",
   );
-  embeddedJwtDerivation = { source: masterPassword, derived };
+  embeddedJwtDerivation = { identity, derived };
   return derived;
 }
 

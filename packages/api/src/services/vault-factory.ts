@@ -9,6 +9,7 @@ import {
   type KmsEnvelopeOptions,
   Vault,
 } from "@stwd/vault";
+import { processCacheIdentity } from "./process-cache-identity";
 
 const require = createRequire(import.meta.url);
 
@@ -77,7 +78,7 @@ export interface ConfiguredVaultOptions {
   fallbackPassword?: string;
 }
 
-let processVaultCache: { configuration: ResolvedVaultConfiguration; vault: Vault } | null = null;
+let processVaultCache: { identity: string; vault: Vault } | null = null;
 let warnedDevSecretFallback = false;
 
 interface ResolvedVaultConfiguration {
@@ -232,7 +233,9 @@ function configuredMode(): VaultMode {
 function resolveMasterPassword(options: ConfiguredVaultOptions): string {
   const configured = runtimeEnvironmentValue("STEWARD_MASTER_PASSWORD")?.trim();
   if (configured) return configured;
-  if (options.fallbackPassword?.trim()) return options.fallbackPassword.trim();
+  if (currentRuntimeEnvironment() === process.env && options.fallbackPassword?.trim()) {
+    return options.fallbackPassword.trim();
+  }
 
   if (options.allowDevSecretFallback) {
     if (!isDevSecretAllowed()) {
@@ -324,52 +327,25 @@ export function createConfiguredVault(options: ConfiguredVaultOptions = {}): Vau
   return instantiateConfiguredVault(configuration);
 }
 
-function sameKmsEnvelopeOptions(
-  left: KmsEnvelopeOptions | undefined,
-  right: KmsEnvelopeOptions | undefined,
-): boolean {
-  if (!left || !right) return left === right;
-  if (left.provider !== right.provider) return false;
-  if (left.provider === "aws" && right.provider === "aws") {
-    return left.keyId === right.keyId && left.region === right.region;
-  }
-  if (left.provider === "pkcs11" && right.provider === "pkcs11") {
-    return (
-      left.modulePath === right.modulePath &&
-      left.pin === right.pin &&
-      left.keyLabel === right.keyLabel
-    );
-  }
-  return false;
-}
-
-function sameExternalCustodyConfiguration(
-  left: ResolvedVaultConfiguration["externalCustody"],
-  right: ResolvedVaultConfiguration["externalCustody"],
-): boolean {
-  if (!left || !right) return left === right;
-  return (
-    left.provider === right.provider &&
-    left.region === right.region &&
-    left.maxGasLimit === right.maxGasLimit &&
-    left.maxGasPriceWei === right.maxGasPriceWei &&
-    left.maxTotalFeeWei === right.maxTotalFeeWei
-  );
-}
-
-function sameResolvedVaultConfiguration(
-  left: ResolvedVaultConfiguration,
-  right: ResolvedVaultConfiguration,
-): boolean {
-  return (
-    left.mode === right.mode &&
-    left.masterPassword === right.masterPassword &&
-    left.kdfSalt === right.kdfSalt &&
-    left.rpcUrl === right.rpcUrl &&
-    left.chainId === right.chainId &&
-    sameKmsEnvelopeOptions(left.kmsEnvelope, right.kmsEnvelope) &&
-    sameExternalCustodyConfiguration(left.externalCustody, right.externalCustody)
-  );
+function vaultConfigurationIdentity(configuration: ResolvedVaultConfiguration): string {
+  const kms = configuration.kmsEnvelope;
+  const external = configuration.externalCustody;
+  return processCacheIdentity([
+    configuration.mode,
+    configuration.masterPassword,
+    configuration.kdfSalt ?? "",
+    configuration.rpcUrl,
+    String(configuration.chainId),
+    kms?.provider ?? "",
+    kms?.provider === "aws" ? (kms.keyId ?? "") : (kms?.modulePath ?? ""),
+    kms?.provider === "aws" ? (kms.region ?? "") : (kms?.pin ?? ""),
+    kms?.provider === "pkcs11" ? (kms.keyLabel ?? "") : "",
+    external?.provider ?? "",
+    external?.region ?? "",
+    external ? String(external.maxGasLimit) : "",
+    external ? String(external.maxGasPriceWei) : "",
+    external ? String(external.maxTotalFeeWei) : "",
+  ]);
 }
 
 export function getConfiguredVault(options: ConfiguredVaultOptions = {}): Vault {
@@ -378,16 +354,10 @@ export function getConfiguredVault(options: ConfiguredVaultOptions = {}): Vault 
   if (currentRuntimeEnvironment() !== process.env) {
     return instantiateConfiguredVault(configuration);
   }
-  // This is cache identity, not password verification. Exact process-local
-  // equality avoids creating a reusable fast hash of the custody secrets.
-  if (
-    processVaultCache &&
-    sameResolvedVaultConfiguration(processVaultCache.configuration, configuration)
-  ) {
-    return processVaultCache.vault;
-  }
+  const identity = vaultConfigurationIdentity(configuration);
+  if (processVaultCache?.identity === identity) return processVaultCache.vault;
   const vault = instantiateConfiguredVault(configuration);
-  processVaultCache = { configuration, vault };
+  processVaultCache = { identity, vault };
   return vault;
 }
 
