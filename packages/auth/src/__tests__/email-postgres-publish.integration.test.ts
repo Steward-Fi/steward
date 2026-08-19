@@ -9,6 +9,17 @@ const sql = databaseUrl ? postgres(databaseUrl, { max: 3 }) : null;
 
 setDefaultTimeout(30_000);
 
+type ObservedOutcome<T> =
+  | { ok: true; value: T }
+  | { ok: false; error: unknown };
+
+function observePromise<T>(promise: Promise<T>): Promise<ObservedOutcome<T>> {
+  return promise.then(
+    (value) => ({ ok: true, value }),
+    (error) => ({ ok: false, error }),
+  );
+}
+
 async function waitForBlockedPublisher(lockKey: string, lockerPid: number): Promise<number> {
   if (!sql) throw new Error("DATABASE_URL required");
   for (let attempt = 0; attempt < 500; attempt += 1) {
@@ -81,6 +92,7 @@ integration("Postgres email challenge publication", () => {
     >`SELECT pg_backend_pid() AS pid`;
     let locked = false;
     let stale: Promise<boolean> | undefined;
+    let staleOutcome: Promise<ObservedOutcome<boolean>> | undefined;
     try {
       await locker`SELECT pg_advisory_lock(hashtextextended(${lockKey}, 0))`;
       locked = true;
@@ -93,6 +105,7 @@ integration("Postgres email challenge publication", () => {
           expected: "generation-old",
         },
       ]);
+      staleOutcome = observePromise(stale);
 
       const publisherPid = await waitForBlockedPublisher(lockKey, lockerPid);
       expect(publisherPid).not.toBe(lockerPid);
@@ -106,10 +119,13 @@ integration("Postgres email challenge publication", () => {
         await locker`SELECT pg_advisory_unlock(hashtextextended(${lockKey}, 0))`;
       }
       locker.release();
+      if (staleOutcome) await staleOutcome;
     }
 
-    if (!stale) throw new Error("stale publication did not start");
-    expect(await stale).toBe(false);
+    if (!staleOutcome || !stale) throw new Error("stale publication did not start");
+    const staleResult = await staleOutcome;
+    if (!staleResult.ok) throw staleResult.error;
+    expect(staleResult.value).toBe(false);
     expect(await backend.get("challenge-old")).toBeNull();
     const current = [
       { key: "challenge-new", value: "active-new", ttlMs: 60_000 },
@@ -144,6 +160,7 @@ integration("Postgres email challenge publication", () => {
     >`SELECT pg_backend_pid() AS pid`;
     let transactionOpen = false;
     let publication: Promise<boolean> | undefined;
+    let publicationOutcome: Promise<ObservedOutcome<boolean>> | undefined;
     try {
       await locker`BEGIN`;
       transactionOpen = true;
@@ -162,6 +179,7 @@ integration("Postgres email challenge publication", () => {
           expected: "generation-old",
         },
       ]);
+      publicationOutcome = observePromise(publication);
 
       const publisherPid = await waitForPublisherBlockedAfterGuard(
         `${namespace}:${targetKey}`,
@@ -182,10 +200,13 @@ integration("Postgres email challenge publication", () => {
     } finally {
       if (transactionOpen) await locker`ROLLBACK`;
       locker.release();
+      if (publicationOutcome) await publicationOutcome;
     }
 
-    if (!publication) throw new Error("publication did not start");
-    expect(await publication).toBe(false);
+    if (!publicationOutcome || !publication) throw new Error("publication did not start");
+    const publicationResult = await publicationOutcome;
+    if (!publicationResult.ok) throw publicationResult.error;
+    expect(publicationResult.value).toBe(false);
     expect(await backend.get(targetKey)).toBe("generation-ordinary");
     expect(await backend.get(blockerKey)).toBe("blocker-original");
     expect(await backend.get("challenge")).toBeNull();
@@ -212,6 +233,7 @@ integration("Postgres email challenge publication", () => {
       >`SELECT pg_backend_pid() AS pid`;
       let transactionOpen = false;
       let publication: Promise<boolean> | undefined;
+      let publicationOutcome: Promise<ObservedOutcome<boolean>> | undefined;
       try {
         await locker`BEGIN`;
         transactionOpen = true;
@@ -225,6 +247,7 @@ integration("Postgres email challenge publication", () => {
           { key: "challenge", value: "active", ttlMs: 60_000 },
           { key: targetKey, value: "generation-published", ttlMs: 60_000, expected: null },
         ]);
+        publicationOutcome = observePromise(publication);
 
         await waitForPublisherBlockedAfterGuard(`${namespace}:${targetKey}`, lockerPid);
         await sql`
@@ -238,10 +261,13 @@ integration("Postgres email challenge publication", () => {
       } finally {
         if (transactionOpen) await locker`ROLLBACK`;
         locker.release();
+        if (publicationOutcome) await publicationOutcome;
       }
 
-      if (!publication) throw new Error("publication did not start");
-      expect(await publication).toBe(false);
+      if (!publicationOutcome || !publication) throw new Error("publication did not start");
+      const publicationResult = await publicationOutcome;
+      if (!publicationResult.ok) throw publicationResult.error;
+      expect(publicationResult.value).toBe(false);
       expect(await backend.get(targetKey)).toBe("generation-ordinary");
       expect(await backend.get(blockerKey)).toBe("blocker-original");
       expect(await backend.get("challenge")).toBeNull();
