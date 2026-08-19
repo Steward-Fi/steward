@@ -85,7 +85,7 @@ jobs:
           gh api \
             -H "Accept: application/vnd.github+json" \
             -H "X-GitHub-Api-Version: 2022-11-28" \
-            "repos/$GITHUB_REPOSITORY/branches/develop/protection/required_status_checks" \
+            "repos/$GITHUB_REPOSITORY/branches/develop" \
             > "$required_file"
           gh api \
             --paginate \
@@ -107,7 +107,7 @@ jobs:
             --slurpfile check_runs "$check_runs_file" \
             --slurpfile statuses "$statuses_file" \
             '
-              ($protection[0]) as $policy |
+              ($protection[0].protection.required_status_checks) as $policy |
               if
                 ($policy | type) != "object" or
                 (($policy.checks // []) | type) != "array" or
