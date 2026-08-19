@@ -569,11 +569,23 @@ export class EmailAuth {
   private async publishChallenge(
     entries: readonly StorePublishEntry[],
     confirmOwnPublication?: () => Promise<boolean>,
+    absoluteExpiresAtMs?: number,
   ): Promise<boolean> {
     let lastError: unknown;
     for (let attempt = 0; attempt < 3; attempt += 1) {
+      let attemptEntries = entries;
+      if (absoluteExpiresAtMs !== undefined) {
+        const remainingTtlMs = absoluteExpiresAtMs - Date.now();
+        if (remainingTtlMs <= 0) {
+          throw new Error("Email challenge expired before publication completed");
+        }
+        attemptEntries = entries.map((entry) => ({
+          ...entry,
+          ttlMs: Math.min(entry.ttlMs, remainingTtlMs),
+        }));
+      }
       try {
-        const published = await this.tokenStore.publish(entries);
+        const published = await this.tokenStore.publish(attemptEntries);
         if (published || !lastError || !confirmOwnPublication) return published;
         return await confirmOwnPublication();
       } catch (error) {
@@ -789,6 +801,7 @@ export class EmailAuth {
         async () =>
           (await this.tokenStore.verify(publicationReceiptKey)) === publicationReceipt &&
           (await this.tokenStore.verify(targetKey)) === challengeId,
+        expiresAt.getTime(),
       );
       if (!published) throw new Error("email issuance was superseded");
     } catch (err) {
@@ -925,6 +938,7 @@ export class EmailAuth {
         async () =>
           (await this.tokenStore.verify(publicationReceiptKey)) === publicationReceipt &&
           (await this.tokenStore.verify(targetKey)) === storeKey,
+        expiresAt.getTime(),
       );
       if (!published) throw new Error("email issuance was superseded");
     } catch (err) {

@@ -31,6 +31,8 @@ class CapturingBackend implements StoreBackend {
   failActiveWritesAfterCommit = false;
   failReadsAfterActiveCommit = false;
   activeTransitionFailuresAfterCommit = 0;
+  failFirstActivationPublishAfterMs = 0;
+  activationPublishTtls: number[] = [];
   afterActivationCommitBeforeLostAck?: () => Promise<void>;
   failDeletes = false;
   replaceGuardBeforeTransition = false;
@@ -118,6 +120,14 @@ class CapturingBackend implements StoreBackend {
   async publish(entries: readonly StorePublishEntry[]): Promise<boolean> {
     if (this.failWrites) throw new Error("durable store unavailable");
     const now = Date.now();
+    const activationEntry = entries.find((entry) => this.isActivation(entry.key, entry.value));
+    if (activationEntry) {
+      this.activationPublishTtls.push(activationEntry.ttlMs);
+      if (this.failFirstActivationPublishAfterMs > 0 && this.activationPublishTtls.length === 1) {
+        await Bun.sleep(this.failFirstActivationPublishAfterMs);
+        throw new Error("delayed durable activation failure");
+      }
+    }
     if (this.replaceGuardBeforeTransition) {
       const guardedTarget = entries.find(
         (entry) => entry.expected !== undefined && entry.key.startsWith("email-login:active:"),
@@ -181,13 +191,18 @@ function restoreEnv(): void {
   else process.env.STEWARD_ALLOW_DEV_SECRET = ORIGINAL_ALLOW_DEV_SECRET;
 }
 
-function buildAuth(provider: EmailProvider | undefined, backend: CapturingBackend): EmailAuth {
+function buildAuth(
+  provider: EmailProvider | undefined,
+  backend: CapturingBackend,
+  options: { tokenTtlMs?: number } = {},
+): EmailAuth {
   return new EmailAuth({
     from: "login@steward.fi",
     baseUrl: "https://steward.fi",
     ...(provider ? { provider } : {}),
     tokenStore: new TokenStore({ backend }),
     codeVerifierSecret: "fail-closed-test-secret-at-least-32-characters",
+    ...options,
   });
 }
 
@@ -845,6 +860,59 @@ describe("fail-closed magic-link delivery", () => {
     expect(backend.activeTransitionFailuresAfterCommit).toBe(1);
     const code = text.match(/\b(\d{6})\b/)?.[1] ?? "";
     expect(await auth.verifyOtp("otp-ack-loss@example.com", code, "tenant-a")).toBe(true);
+    auth.destroy();
+  });
+
+  it("preserves the absolute expiry when a delayed publish failure is retried successfully", async () => {
+    const backend = new CapturingBackend();
+    backend.failFirstActivationPublishAfterMs = 120;
+    let text = "";
+    const auth = buildAuth(
+      {
+        send: async (_to, _subject, body) => {
+          text = body;
+          return { provider: "test", id: "accepted-before-delayed-publish" };
+        },
+      },
+      backend,
+      { tokenTtlMs: 500 },
+    );
+
+    const { expiresAt } = await auth.sendOtp("otp-delayed-retry@example.com", {
+      tenantId: "tenant-a",
+    });
+
+    expect(backend.activationPublishTtls).toHaveLength(2);
+    expect(backend.activationPublishTtls[1]!).toBeLessThan(backend.activationPublishTtls[0]! - 80);
+    for (const entry of backend.values.values()) {
+      expect(entry.expiresAt).toBeLessThanOrEqual(expiresAt.getTime());
+    }
+    const code = text.match(/\b(\d{6})\b/)?.[1] ?? "";
+    expect(await auth.verifyOtp("otp-delayed-retry@example.com", code, "tenant-a")).toBe(true);
+    auth.destroy();
+  });
+
+  it("rejects a publish retry after the challenge absolute expiry", async () => {
+    const backend = new CapturingBackend();
+    backend.failFirstActivationPublishAfterMs = 80;
+    let text = "";
+    const auth = buildAuth(
+      {
+        send: async (_to, _subject, body) => {
+          text = body;
+          return { provider: "test", id: "accepted-before-expired-publish" };
+        },
+      },
+      backend,
+      { tokenTtlMs: 40 },
+    );
+
+    await expect(
+      auth.sendOtp("otp-expired-retry@example.com", { tenantId: "tenant-a" }),
+    ).rejects.toThrow(EmailDeliveryError);
+    expect(backend.activationPublishTtls).toHaveLength(1);
+    const code = text.match(/\b(\d{6})\b/)?.[1] ?? "";
+    expect(await auth.verifyOtp("otp-expired-retry@example.com", code, "tenant-a")).toBe(false);
     auth.destroy();
   });
 
