@@ -69,6 +69,7 @@ import {
 import { deriveBitcoinKey, deriveEvmKey, deriveSolanaKey, generateMnemonic } from "./hd-wallet";
 import { type EncryptedKey, KeyStore } from "./keystore";
 import { backendFromKeyStore, type KeystoreBackend } from "./keystore-backend";
+import { executeLocalEvmBroadcast } from "./local-evm-broadcast";
 import {
   createMoneroBackendFromEnv,
   generateMoneroWallet,
@@ -1844,7 +1845,10 @@ export class Vault {
         });
         const publicClient = createPublicClient({
           chain,
-          transport: http(rpcUrl),
+          // The signed bytes are submitted exactly once at the application and
+          // transport layers. A lost response is reconciled by hash, never by
+          // replaying eth_sendRawTransaction.
+          transport: http(rpcUrl, { retryCount: 0 }),
         });
         // Track only allocator-issued nonces for in-flight reclaim; a
         // caller-supplied `request.nonce` is the caller's responsibility.
@@ -1860,36 +1864,65 @@ export class Vault {
             : undefined;
         const nonce = request.nonce ?? (allocatedNonce as number);
 
-        try {
-          hash = await client.sendTransaction({
-            to: request.to as `0x${string}`,
-            value: BigInt(request.value),
-            data: request.data as `0x${string}` | undefined,
-            gas: request.gasLimit ? BigInt(request.gasLimit) : undefined,
-            nonce,
-          });
-          if (allocatedNonce !== undefined) {
-            // Best-effort: confirmation bookkeeping must not fail a good send.
-            await confirmEvmNonce({
-              tenantId: request.tenantId,
-              walletAddress: account.address,
-              chainId,
-              nonce: allocatedNonce,
-            }).catch(() => {});
-          }
-        } catch (err) {
-          if (allocatedNonce !== undefined) {
-            // Best-effort: mark the dropped nonce reclaimable so the wallet
-            // doesn't wedge behind a permanent hole.
+        // Keep the pre-broadcast checkpoint and accepted update on one durable
+        // transaction id even for legacy callers that did not supply one.
+        const localRecordOptions: SignTransactionOptions = {
+          ...options,
+          txId: options.txId ?? randomUUID(),
+        };
+
+        return executeLocalEvmBroadcast({
+          prepare: async () => {
+            const prepared = await client.prepareTransactionRequest({
+              to: request.to as `0x${string}`,
+              value: BigInt(request.value),
+              data: request.data as `0x${string}` | undefined,
+              gas: request.gasLimit ? BigInt(request.gasLimit) : undefined,
+              nonce,
+            });
+            return client.signTransaction(prepared);
+          },
+          checkpoint: (transactionHash) =>
+            this.recordSignedTransaction(request, chainId, true, transactionHash, {
+              ...localRecordOptions,
+              status: "outcome_unknown",
+            }),
+          broadcast: (serializedTransaction) =>
+            publicClient.sendRawTransaction({ serializedTransaction }),
+          reconcile: async (transactionHash) => {
+            try {
+              const transaction = await publicClient.getTransaction({ hash: transactionHash });
+              return transaction.hash.toLowerCase() === transactionHash.toLowerCase();
+            } catch {
+              return false;
+            }
+          },
+          releaseBeforeBroadcast: async () => {
+            if (allocatedNonce === undefined) return;
             await markEvmNonceDropped({
               tenantId: request.tenantId,
               walletAddress: account.address,
               chainId,
               nonce: allocatedNonce,
-            }).catch(() => {});
-          }
-          throw err;
-        }
+            });
+          },
+          finalizeAccepted: async (transactionHash) => {
+            if (allocatedNonce !== undefined) {
+              // Best-effort: allocator bookkeeping cannot invalidate an
+              // accepted, deterministically identified transaction.
+              await confirmEvmNonce({
+                tenantId: request.tenantId,
+                walletAddress: account.address,
+                chainId,
+                nonce: allocatedNonce,
+              }).catch(() => {});
+            }
+            await this.recordSignedTransaction(request, chainId, true, transactionHash, {
+              ...localRecordOptions,
+              status: localRecordOptions.status ?? "broadcast",
+            });
+          },
+        });
       } else {
         // Sign without broadcasting - return the serialized signed transaction
         const rpcUrl = CHAIN_RPCS[chainId] ?? this.config.rpcUrl;

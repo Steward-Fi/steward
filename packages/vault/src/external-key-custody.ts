@@ -59,10 +59,13 @@ export interface ExternalKeySignTransactionResult {
 }
 
 /**
- * The signed bytes have been submitted to the provider RPC, but Steward could
- * not prove whether the RPC accepted them. The locally-derived transaction
- * hash is safe to expose and is the only identifier callers may reconcile;
- * provider errors and signed bytes deliberately remain private.
+ * Signed EVM bytes have reached a mutating RPC boundary, but Steward could not
+ * prove whether the RPC accepted them. The locally-derived transaction hash is
+ * safe to expose and is the only identifier callers may reconcile; provider
+ * errors and signed bytes deliberately remain private.
+ *
+ * The historical class and wire-code names are retained for compatibility,
+ * but this fail-closed envelope now covers both external and local EVM custody.
  */
 export class ExternalBroadcastOutcomeUnknownError extends Error {
   readonly code = "external_broadcast_outcome_unknown" as const;
@@ -71,7 +74,7 @@ export class ExternalBroadcastOutcomeUnknownError extends Error {
     readonly transactionHash: string,
     options?: { cause?: unknown },
   ) {
-    super("External custody broadcast outcome is unknown", options);
+    super("EVM broadcast outcome is unknown", options);
     this.name = "ExternalBroadcastOutcomeUnknownError";
   }
 }
