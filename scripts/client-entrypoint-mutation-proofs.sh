@@ -9,7 +9,7 @@
 #               from the client entrypoint (drags node:crypto into the
 #               client graph).
 #   Mutation 2: point a migrated web import back at the top-level
-#               @stwd/shared barrel required by the Cloudflare build.
+#               @stwd/shared barrel, which the Cloudflare client build must reject.
 #
 # Run from the repo root:  bash scripts/client-entrypoint-mutation-proofs.sh
 set -euo pipefail
