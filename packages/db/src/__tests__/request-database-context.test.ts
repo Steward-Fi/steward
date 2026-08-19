@@ -9,6 +9,7 @@ import {
   getSql,
   waitUntilRequestDatabaseTask,
   withRequestDatabase,
+  withTenantTransactionDatabase,
 } from "../client";
 import { createPGLiteDb } from "../pglite";
 import { tenants } from "../schema";
@@ -30,6 +31,49 @@ function deferred() {
 }
 
 describe("request-scoped database context", () => {
+  test("tenant transaction shadows the request handle for the full downstream chain", async () => {
+    const requestDb = { marker: "request" } as unknown as ReturnType<typeof getDb>;
+    const transactionDb = { marker: "tenant-transaction" } as unknown as ReturnType<typeof getDb>;
+    await withRequestDatabase(requestDb, async () => {
+      expect((getDb() as unknown as { marker: string }).marker).toBe("request");
+      await withTenantTransactionDatabase(transactionDb, async () => {
+        await Promise.resolve();
+        expect((getDb() as unknown as { marker: string }).marker).toBe("tenant-transaction");
+        expect(() => getSql()).toThrow("RLS_TENANT_RAW_SQL_UNAVAILABLE");
+        await expect(
+          withTenantTransactionDatabase(transactionDb, async () => undefined),
+        ).rejects.toThrow("RLS_TENANT_DATABASE_CONTEXT_NESTED");
+      });
+      expect((getDb() as unknown as { marker: string }).marker).toBe("request");
+    });
+  });
+
+  test("tenant transaction drains registered work and revokes retained capabilities", async () => {
+    const requestDb = { marker: "request" } as unknown as ReturnType<typeof getDb>;
+    const transactionDb = { marker: "tenant-transaction" } as unknown as ReturnType<typeof getDb>;
+    const release = deferred();
+    let retained!: ReturnType<typeof getDb>;
+    let finished = false;
+    await withRequestDatabase(requestDb, async () => {
+      const owner = withTenantTransactionDatabase(transactionDb, async () => {
+        retained = getDb();
+        void waitUntilRequestDatabaseTask(async () => {
+          await release.promise;
+          expect((getDb() as unknown as { marker: string }).marker).toBe("tenant-transaction");
+          finished = true;
+        });
+      });
+      await Promise.resolve();
+      expect(finished).toBe(false);
+      release.resolve();
+      await owner;
+      expect(finished).toBe(true);
+      expect(() => (retained as unknown as { marker: string }).marker).toThrow(
+        "REQUEST_DATABASE_CONTEXT_CLOSED",
+      );
+    });
+  });
+
   test("routes getDb through the exact async request and clears it afterward", async () => {
     const requestDb = { marker: "request" } as unknown as ReturnType<typeof getDb>;
     expect(

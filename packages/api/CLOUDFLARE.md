@@ -7,16 +7,19 @@ Steward now ships three runtime adapters that share the same Hono app
 | -------------- | ------------------------------------ | ----------------------------------------------------------------- |
 | Bun (existing) | `packages/api/src/index.ts`          | Production server with TCP Postgres + ioredis. Long-lived process.|
 | PGLite         | `packages/api/src/embedded.ts`       | Electrobun / desktop. In-process WASM Postgres, no external deps.  |
-| Workers (new)  | `packages/api/src/worker.ts`         | Cloudflare Workers. HTTP Postgres (Neon) + REST Redis (Upstash). |
+| Workers (new)  | `packages/api/src/worker.ts`         | Cloudflare Workers. Request-owned Neon WebSocket Postgres + REST Redis (Upstash). |
 
 The adapters are additive — switching to Workers does NOT change the Bun
 or PGLite paths.
 
 ## Architecture
 
-- **DB driver** is selected by the `DATABASE_DRIVER` env var:
+- **DB driver** is selected by the `DATABASE_DRIVER` env var. Production uses
+  `neon-websocket` so every authenticated request can own one tenant-scoped
+  transaction; `neon-http` is limited to local/test compatibility:
   - `postgres-js` (default): TCP pool, used by Bun/Node.
-  - `neon-http`: Neon's HTTP/fetch driver, used by Workers.
+  - `neon-websocket`: request-owned Neon pool, used by production Workers.
+  - `neon-http`: local/test compatibility only; production Worker boot rejects it.
   - PGLite (set via `setPGLiteOverride()` in `embedded.ts`).
 - **Redis** is selected by `REDIS_DRIVER`:
   - `ioredis` (default): persistent TCP connection, used by Bun/Node.
@@ -37,21 +40,24 @@ or PGLite paths.
 
 ### Per-request usage on Workers
 
-The neon-http driver is HTTP-only, so a fresh client per request is
-acceptable. For the singleton case `getDb()` continues to work, but for
-hot paths consider:
+The Worker entry creates one Neon WebSocket handle per request and binds it to
+the async request context. Authenticated middleware then pins downstream
+`getDb()` calls to one tenant transaction on that handle. The entry owns and
+awaits cleanup; route code must not create or retain its own socket pool.
 
 ```ts
-import { createDbForRequest } from "@stwd/db";
+import { createNeonTransactionDbForRequest, withRequestDatabase } from "@stwd/db";
 
-app.use("*", async (c, next) => {
-  c.set("db", createDbForRequest(c.env));
-  await next();
-});
+const handle = createNeonTransactionDbForRequest(env);
+try {
+  return await withRequestDatabase(handle.db, () => app.fetch(request, env));
+} finally {
+  await handle.close();
+}
 ```
 
-(Currently Steward calls `getDb()` directly in route handlers; it's still
-correct on Workers because the neon-http client is cheap to construct.)
+Steward's `worker.ts` already owns this lifecycle; the snippet documents the
+required shape for alternate Worker composition roots.
 
 ## One-time setup
 
@@ -87,7 +93,7 @@ rejected before any database handle is selected.
 
 | Binding                         | Why                                                                    |
 | ------------------------------- | ---------------------------------------------------------------------- |
-| `DATABASE_URL`                  | Neon connection string. Workers use HTTP; migrations need TCP.         |
+| `DATABASE_URL`                  | Neon connection string. Workers use request-owned WebSockets; migrations use the same PostgreSQL endpoint out of band. |
 | `KV_REST_API_URL`               | Upstash REST endpoint.                                                 |
 | `KV_REST_API_TOKEN`             | Upstash REST token.                                                    |
 | `STEWARD_JWT_SECRET`            | Canonical HS256 JWT signing and verification secret. Minimum 32 characters in production. |
@@ -116,7 +122,7 @@ environment-scoped secret above and configure the matching non-secret
 each Wrangler environment. Do not reuse one environment's issuer or private
 key in another environment.
 
-`SKIP_MIGRATIONS=1`, `DATABASE_DRIVER=neon-http`, and `REDIS_DRIVER=upstash`
+`SKIP_MIGRATIONS=1`, `DATABASE_DRIVER=neon-websocket`, and `REDIS_DRIVER=upstash`
 are already in `wrangler.toml` `[vars]` so they ship with every deploy.
 
 Non-secret client-IP trust config (auth rate limiting) can go in `[vars]`:
@@ -200,9 +206,9 @@ RESEND_API_KEY=...
   TTL-driven cleanup in the storage backends. Anything new that needs a
   cron should use Cloudflare Cron Triggers (add a `scheduled()` handler in
   `worker.ts`).
-- **Per-request DB client.** `neon-http` is fetch-based, so we don't
-  benefit from connection pooling. For very high QPS, look at
-  Hyperdrive (Cloudflare's Postgres pooler) or sharding the workload.
+- **Per-request DB client.** Each request owns a max=1 WebSocket pool so tenant
+  context and route SQL stay on one transaction connection. For very high QPS,
+  evaluate Hyperdrive with the same transaction and cleanup invariants.
 - **No `node:fs` at runtime.** PGLite, the Drizzle file-based migrator,
   and any code that reads from the SQL migrations folder cannot run on a
   Worker. The pluggable factories make sure these paths are dead-code in

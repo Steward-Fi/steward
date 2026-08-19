@@ -1,0 +1,309 @@
+-- SEC-169 policy installation checkpoint.
+--
+-- This migration deliberately installs the complete policy surface without
+-- enabling RLS. Activation is a separate, operator-controlled step after the
+-- application role, bootstrap functions, request transactions, and background
+-- jobs have passed the real-Postgres gate. Installing policies first is safe on
+-- existing deployments because PostgreSQL ignores them until ENABLE ROW LEVEL
+-- SECURITY is applied.
+
+CREATE SCHEMA IF NOT EXISTS "steward_rls";
+REVOKE ALL ON SCHEMA "steward_rls" FROM PUBLIC;
+
+CREATE OR REPLACE FUNCTION "steward_rls"."tenant_id"()
+RETURNS text
+LANGUAGE sql
+STABLE
+PARALLEL SAFE
+SET search_path = pg_catalog
+AS $$
+  SELECT NULLIF(current_setting('steward.tenant_id', true), '')
+$$;
+REVOKE ALL ON FUNCTION "steward_rls"."tenant_id"() FROM PUBLIC;
+
+CREATE OR REPLACE FUNCTION "steward_rls"."user_id"()
+RETURNS uuid
+LANGUAGE sql
+STABLE
+PARALLEL SAFE
+SET search_path = pg_catalog
+AS $$
+  SELECT NULLIF(current_setting('steward.user_id', true), '')::uuid
+$$;
+REVOKE ALL ON FUNCTION "steward_rls"."user_id"() FROM PUBLIC;
+
+CREATE SCHEMA IF NOT EXISTS "steward_bootstrap";
+REVOKE ALL ON SCHEMA "steward_bootstrap" FROM PUBLIC;
+
+CREATE OR REPLACE FUNCTION "steward_bootstrap"."tenant_api_key_subject"(p_tenant_id text)
+RETURNS TABLE (
+  id varchar(64), name varchar(255), api_key_hash text, owner_address varchar(128),
+  created_at timestamptz, updated_at timestamptz
+)
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $$
+  SELECT t.id, t.name, t.api_key_hash, t.owner_address, t.created_at, t.updated_at
+  FROM public.tenants t
+  WHERE t.id = p_tenant_id
+  LIMIT 1
+$$;
+
+CREATE OR REPLACE FUNCTION "steward_bootstrap"."session_subject"(
+  p_user_id uuid,
+  p_tenant_id text
+)
+RETURNS TABLE (
+  deactivated_at timestamptz, is_guest boolean, guest_expires_at timestamptz,
+  membership_role varchar(32)
+)
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $$
+  SELECT u.deactivated_at, u.is_guest, u.guest_expires_at, ut.role
+  FROM public.users u
+  LEFT JOIN public.user_tenants ut
+    ON ut.user_id = u.id AND ut.tenant_id = p_tenant_id
+  WHERE u.id = p_user_id
+  LIMIT 1
+$$;
+
+CREATE OR REPLACE FUNCTION "steward_bootstrap"."agent_subject"(
+  p_agent_id text,
+  p_tenant_id text,
+  p_jti text DEFAULT NULL
+)
+RETURNS TABLE (
+  agent_id varchar(64), agent_name varchar(255), wallet_address varchar(128),
+  signer_id uuid, signer_policy_ids jsonb, signer_expires_at timestamptz,
+  signer_revoked_at timestamptz
+)
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $$
+  SELECT a.id, a.name, a.wallet_address, ss.id, ss.policy_ids, ss.expires_at, ss.revoked_at
+  FROM public.agents a
+  LEFT JOIN public.session_signers ss
+    ON p_jti IS NOT NULL
+   AND ss.jti = p_jti
+   AND ss.tenant_id = p_tenant_id
+   AND ss.agent_id = p_agent_id
+  WHERE a.id = p_agent_id AND a.tenant_id = p_tenant_id
+  LIMIT 1
+$$;
+
+CREATE OR REPLACE FUNCTION "steward_bootstrap"."app_client_subject"(
+  p_tenant_id text,
+  p_client_id text
+)
+RETURNS TABLE (
+  secret_id uuid, secret_hash text, secret_status varchar(16),
+  expires_at timestamptz, revoked_at timestamptz, client_enabled boolean
+)
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $$
+  SELECT s.id, s.secret_hash, s.status, s.expires_at, s.revoked_at, c.enabled
+  FROM public.tenant_app_client_secrets s
+  JOIN public.tenant_app_clients c
+    ON c.tenant_id = s.tenant_id AND c.id = s.client_id
+  WHERE s.tenant_id = p_tenant_id
+    AND s.client_id = p_client_id
+    AND s.status IN ('active', 'retiring')
+    AND c.enabled = true
+$$;
+
+CREATE OR REPLACE FUNCTION "steward_bootstrap"."tenant_ids_for_internal_job"()
+RETURNS TABLE (tenant_id varchar(64))
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $$
+  SELECT t.id FROM public.tenants t ORDER BY t.id
+$$;
+
+CREATE OR REPLACE FUNCTION "steward_bootstrap"."ensure_default_tenant"(p_api_key_hash text)
+RETURNS void
+LANGUAGE sql
+VOLATILE
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $$
+  INSERT INTO public.tenants(id, name, api_key_hash)
+  VALUES ('default', 'Default Tenant', p_api_key_hash)
+  ON CONFLICT (id) DO NOTHING
+$$;
+
+REVOKE ALL ON ALL FUNCTIONS IN SCHEMA "steward_bootstrap" FROM PUBLIC;
+
+DO $$
+DECLARE
+  table_name text;
+BEGIN
+  FOREACH table_name IN ARRAY ARRAY[
+    'agent_key_quorums', 'agent_policies', 'agent_registrations', 'agent_signers',
+    'agents', 'audit_archives', 'audit_chain_heads', 'audit_checkpoints',
+    'audit_events', 'audit_retention_policies', 'auto_approval_rules',
+    'condition_set_items', 'condition_sets', 'digital_asset_account_aggregations',
+    'digital_asset_account_wallets', 'digital_asset_accounts',
+    'evm_wallet_nonce_inflight', 'evm_wallet_nonce_owners', 'evm_wallet_nonces',
+    'execution_authorization_nonces', 'global_wallet_action_confirmations', 'intents',
+    'operator_transfer_reservations', 'pending_proxy_requests', 'policy_templates',
+    'provider_accounts', 'provider_action_approvals', 'provider_action_audit_outbox',
+    'provider_action_bindings', 'provider_action_reservation_generations',
+    'provider_agent_budgets', 'provider_authority_tenant_state',
+    'provider_google_credential_lifecycles', 'provider_grants', 'provider_operations',
+    'provider_role_bindings', 'provider_x_credential_lifecycles', 'proxy_audit_log',
+    'refresh_tokens', 'secret_routes', 'secrets', 'session_signers',
+    'sponsored_gas_events', 'tenant_app_client_secrets', 'tenant_app_clients',
+    'tenant_configs', 'tenant_invitations', 'tenant_request_signing_keys',
+    'tenant_saml_assertion_replays', 'tenant_saml_authn_requests',
+    'tenant_saml_sso_configs', 'tenant_sso_domains', 'trade_sessions',
+    'upstream_credential_lease_events', 'upstream_credential_leases', 'user_tenants',
+    'user_wallet_app_consents', 'vault_signing_freezes', 'webhook_configs',
+    'webhook_deliveries', 'workspaces'
+  ] LOOP
+    EXECUTE format('DROP POLICY IF EXISTS steward_tenant_isolation ON public.%I', table_name);
+    EXECUTE format(
+      'CREATE POLICY steward_tenant_isolation ON public.%I FOR ALL USING '
+      || '(tenant_id = steward_rls.tenant_id()) WITH CHECK '
+      || '(tenant_id = steward_rls.tenant_id())',
+      table_name
+    );
+  END LOOP;
+END
+$$;
+
+DROP POLICY IF EXISTS "steward_tenant_isolation" ON "tenants";
+CREATE POLICY "steward_tenant_isolation" ON "tenants"
+  FOR ALL
+  USING ("id" = "steward_rls"."tenant_id"())
+  WITH CHECK ("id" = "steward_rls"."tenant_id"());
+
+DROP POLICY IF EXISTS "steward_tenant_isolation" ON "agent_wallets";
+CREATE POLICY "steward_tenant_isolation" ON "agent_wallets"
+  FOR ALL USING (EXISTS (
+    SELECT 1 FROM "agents" parent
+    WHERE parent."id" = "agent_wallets"."agent_id"
+      AND parent."tenant_id" = "steward_rls"."tenant_id"()
+  )) WITH CHECK (EXISTS (
+    SELECT 1 FROM "agents" parent
+    WHERE parent."id" = "agent_wallets"."agent_id"
+      AND parent."tenant_id" = "steward_rls"."tenant_id"()
+  ));
+
+DROP POLICY IF EXISTS "steward_tenant_isolation" ON "encrypted_chain_keys";
+CREATE POLICY "steward_tenant_isolation" ON "encrypted_chain_keys"
+  FOR ALL USING (EXISTS (
+    SELECT 1 FROM "agents" parent
+    WHERE parent."id" = "encrypted_chain_keys"."agent_id"
+      AND parent."tenant_id" = "steward_rls"."tenant_id"()
+  )) WITH CHECK (EXISTS (
+    SELECT 1 FROM "agents" parent
+    WHERE parent."id" = "encrypted_chain_keys"."agent_id"
+      AND parent."tenant_id" = "steward_rls"."tenant_id"()
+  ));
+
+DROP POLICY IF EXISTS "steward_tenant_isolation" ON "encrypted_keys";
+CREATE POLICY "steward_tenant_isolation" ON "encrypted_keys"
+  FOR ALL USING (EXISTS (
+    SELECT 1 FROM "agents" parent
+    WHERE parent."id" = "encrypted_keys"."agent_id"
+      AND parent."tenant_id" = "steward_rls"."tenant_id"()
+  )) WITH CHECK (EXISTS (
+    SELECT 1 FROM "agents" parent
+    WHERE parent."id" = "encrypted_keys"."agent_id"
+      AND parent."tenant_id" = "steward_rls"."tenant_id"()
+  ));
+
+DROP POLICY IF EXISTS "steward_tenant_isolation" ON "policies";
+CREATE POLICY "steward_tenant_isolation" ON "policies"
+  FOR ALL USING (EXISTS (
+    SELECT 1 FROM "agents" parent
+    WHERE parent."id" = "policies"."agent_id"
+      AND parent."tenant_id" = "steward_rls"."tenant_id"()
+  )) WITH CHECK (EXISTS (
+    SELECT 1 FROM "agents" parent
+    WHERE parent."id" = "policies"."agent_id"
+      AND parent."tenant_id" = "steward_rls"."tenant_id"()
+  ));
+
+DROP POLICY IF EXISTS "steward_tenant_isolation" ON "reputation_cache";
+CREATE POLICY "steward_tenant_isolation" ON "reputation_cache"
+  FOR ALL USING (EXISTS (
+    SELECT 1 FROM "agents" parent
+    WHERE parent."id" = "reputation_cache"."agent_id"
+      AND parent."tenant_id" = "steward_rls"."tenant_id"()
+  )) WITH CHECK (EXISTS (
+    SELECT 1 FROM "agents" parent
+    WHERE parent."id" = "reputation_cache"."agent_id"
+      AND parent."tenant_id" = "steward_rls"."tenant_id"()
+  ));
+
+DROP POLICY IF EXISTS "steward_tenant_isolation" ON "transactions";
+CREATE POLICY "steward_tenant_isolation" ON "transactions"
+  FOR ALL USING (EXISTS (
+    SELECT 1 FROM "agents" parent
+    WHERE parent."id" = "transactions"."agent_id"
+      AND parent."tenant_id" = "steward_rls"."tenant_id"()
+  )) WITH CHECK (EXISTS (
+    SELECT 1 FROM "agents" parent
+    WHERE parent."id" = "transactions"."agent_id"
+      AND parent."tenant_id" = "steward_rls"."tenant_id"()
+  ));
+
+DROP POLICY IF EXISTS "steward_tenant_isolation" ON "audit_archive_chunks";
+CREATE POLICY "steward_tenant_isolation" ON "audit_archive_chunks"
+  FOR ALL USING (EXISTS (
+    SELECT 1 FROM "audit_archives" parent
+    WHERE parent."id" = "audit_archive_chunks"."archive_id"
+      AND parent."tenant_id" = "steward_rls"."tenant_id"()
+  )) WITH CHECK (EXISTS (
+    SELECT 1 FROM "audit_archives" parent
+    WHERE parent."id" = "audit_archive_chunks"."archive_id"
+      AND parent."tenant_id" = "steward_rls"."tenant_id"()
+  ));
+
+DROP POLICY IF EXISTS "steward_tenant_direct" ON "approval_queue";
+DROP POLICY IF EXISTS "steward_tenant_derived" ON "approval_queue";
+CREATE POLICY "steward_tenant_direct" ON "approval_queue"
+  FOR ALL
+  USING ("tenant_id" = "steward_rls"."tenant_id"())
+  WITH CHECK ("tenant_id" = "steward_rls"."tenant_id"());
+CREATE POLICY "steward_tenant_derived" ON "approval_queue"
+  FOR ALL USING (
+    "tenant_id" IS NULL AND EXISTS (
+      SELECT 1 FROM "agents" parent
+      WHERE parent."id" = "approval_queue"."agent_id"
+        AND parent."tenant_id" = "steward_rls"."tenant_id"()
+    )
+  ) WITH CHECK (
+    "tenant_id" IS NULL AND EXISTS (
+      SELECT 1 FROM "agents" parent
+      WHERE parent."id" = "approval_queue"."agent_id"
+        AND parent."tenant_id" = "steward_rls"."tenant_id"()
+    )
+  );
+
+DROP POLICY IF EXISTS "steward_tenant_subscription" ON "user_push_subscriptions";
+DROP POLICY IF EXISTS "steward_global_user_subscription" ON "user_push_subscriptions";
+CREATE POLICY "steward_tenant_subscription" ON "user_push_subscriptions"
+  FOR ALL
+  USING ("tenant_id" = "steward_rls"."tenant_id"())
+  WITH CHECK ("tenant_id" = "steward_rls"."tenant_id"());
+CREATE POLICY "steward_global_user_subscription" ON "user_push_subscriptions"
+  FOR ALL
+  USING ("tenant_id" IS NULL AND "user_id" = "steward_rls"."user_id"())
+  WITH CHECK ("tenant_id" IS NULL AND "user_id" = "steward_rls"."user_id"());
+
+COMMENT ON SCHEMA "steward_rls" IS
+  'SEC-169 policy helpers. Policies are installed by 0110 but activation remains an explicit gated operator action.';

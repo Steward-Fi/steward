@@ -5,10 +5,30 @@ description: "SEC-169 activation design, bootstrap boundary, runtime requirement
 
 # PostgreSQL tenant RLS rollout
 
-SEC-169 is not active yet. Application predicates remain the production tenant
-boundary until every activation gate below is complete. The executable
-`withTenantRlsTransaction` helper and schema inventory are groundwork; they do
-not justify enabling a partial policy set.
+Migration `0111_tenant_rls_policy_install` installs the complete current policy
+and bootstrap-function surface, but intentionally leaves RLS disabled. Routine
+production enforcement is not active until an operator completes every gate in
+this runbook and runs the atomic activation script. Application predicates
+remain the production boundary before that point.
+
+Authenticated tenant, dashboard, user-wallet, and global-wallet middleware now
+own one `withTenantRlsTransaction` and bind its transaction into downstream
+`getDb()` resolution. Production Workers use request-owned Neon WebSockets;
+production `neon-http` is rejected. The Google, X, and upstream-credential
+lifecycle sweeps enumerate tenants through a fixed bootstrap function and run
+one transaction per tenant.
+
+The remaining activation blockers are explicit and must not be waived:
+
+- pre-context `/auth` mutations that create or change tenant memberships still
+  need fixed-shape bootstrap functions or post-verification tenant transactions;
+- platform routes intentionally operate across tenants and must be decomposed
+  into tenant transactions (tenant creation must use a narrow bootstrap API);
+- the standalone proxy entry and the retention, webhook-retry, provider
+  reservation, and transaction-receipt background schedulers need the same
+  transaction propagation and real-Postgres route/job proofs.
+
+Until those paths are complete, do not run `rls-activate.sql` in production.
 
 ## Non-forgeable context boundary
 
@@ -120,6 +140,38 @@ table in future migrations.
 6. Run real-Postgres cross-tenant read/write/upsert/delete/join tests plus
    concurrent pool-reuse and background-job tests against the deployment role.
 
+Create/finalize roles after migration `0110` (the invoking operator needs
+`CREATEROLE` and schema ownership):
+
+```bash
+psql "$DATABASE_URL" \
+  -v steward_app_role=steward_app \
+  -v steward_migration_role=steward_migrator \
+  -v steward_bootstrap_role=steward_bootstrap_owner \
+  -f scripts/postgres/rls-bootstrap.sql
+```
+
+The app and migration roles are separate login identities asserted
+`NOSUPERUSER NOBYPASSRLS`; the migration role owns the application relations,
+while the app cannot inherit or assume it. Supply their credentials through the
+database provider or `ALTER ROLE` outside source control. The bootstrap function owner is a
+non-login role with `BYPASSRLS` and only the narrow table privileges required by
+the fixed-shape functions. The app receives `EXECUTE`, never membership.
+
+After all residual code paths and exact deployment-role tests pass, activate in
+one maintenance transaction:
+
+```bash
+psql "$DATABASE_URL" \
+  -v steward_migration_role=steward_migrator \
+  -f scripts/postgres/rls-activate.sql
+```
+
+The script enables and forces every relation carrying a checked-in Steward
+policy and adds an explicit all-row policy only for the named `NOBYPASSRLS`
+migration role. It aborts if any current `tenant_id` table is not both enabled
+and forced.
+
 ## Rollback
 
 Rollback is an operator action using the migration role, never a permission
@@ -129,3 +181,9 @@ maintenance transaction, roll back the application to pre-RLS transaction
 plumbing, and restart. Do not selectively disable one policy while routine
 traffic continues. Preserve the catalog snapshot, migration id, actor, time,
 and incident reason in the audit record.
+
+The atomic database step is:
+
+```bash
+psql "$DATABASE_URL" -f scripts/postgres/rls-rollback.sql
+```
