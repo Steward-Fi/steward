@@ -38,7 +38,7 @@ realPostgresIt(
   "serializes aggregate spend admission across concurrent indexed user wallets",
   async () => {
     const suffix = crypto.randomUUID().replaceAll("-", "");
-    const userId = `walletlock${suffix}`;
+    const userId = crypto.randomUUID();
     const tenantId = `personal-${userId}`;
     const baseAgentId = `user-wallet-${userId}`;
     const indexedAgentId = `${baseAgentId}-2`;
