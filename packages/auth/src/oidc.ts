@@ -222,14 +222,16 @@ export function createPublicJwksTransport(
           },
           (res) => {
             if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400) {
+              req?.destroy();
+              res.destroy();
               finish(reject, new Error("OIDC jwksUri redirects are not allowed"));
-              res.resume();
               return;
             }
             const declaredLength = Number(res.headers["content-length"]);
             if (Number.isFinite(declaredLength) && declaredLength > maxBytes) {
+              req?.destroy();
+              res.destroy();
               finish(reject, new Error("OIDC JWKS response is too large"));
-              res.resume();
               return;
             }
             const chunks: Uint8Array[] = [];
@@ -285,10 +287,11 @@ export function createPublicJwksTransport(
       }
     });
 
+    // Fetch forbids response bodies for 204/205. Ignore an upstream's hostile
+    // or non-conforming bytes rather than letting Response construction throw
+    // a runtime TypeError after the bounded transport has otherwise settled.
     const responseBody =
-      result.body.byteLength === 0 && (result.status === 204 || result.status === 205)
-        ? null
-        : new Uint8Array(result.body);
+      result.status === 204 || result.status === 205 ? null : new Uint8Array(result.body);
     return new Response(responseBody, { headers: result.headers, status: result.status });
   };
 }

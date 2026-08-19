@@ -19,8 +19,11 @@ class JwksTransportHarness {
   requestDestroyed = false;
   requestEnded = false;
   responseResumed = false;
+  responseDestroyed = false;
   timeoutMs: number | undefined;
   lookupCalls = 0;
+  requestLookup: LookupFunction | undefined;
+  readonly lookup = (() => {}) as LookupFunction;
   private responseHandler: ((response: IncomingMessage) => void) | undefined;
   private deadlineCallbacks = new Map<ReturnType<typeof setTimeout>, () => void>();
 
@@ -43,12 +46,13 @@ class JwksTransportHarness {
     ) => {
       this.requestCalls += 1;
       this.timeoutMs = options.timeout as number | undefined;
+      this.requestLookup = options.lookup;
       this.responseHandler = handler;
       return this.request;
     }) as PublicJwksTransportDependencies["request"],
     createLookup: ((_resource: string) => {
       this.lookupCalls += 1;
-      return (() => {}) as LookupFunction;
+      return this.lookup;
     }) as PublicJwksTransportDependencies["createLookup"],
     setDeadline: (callback, _timeoutMs) => {
       const deadline = Object.create(null) as ReturnType<typeof setTimeout>;
@@ -71,6 +75,10 @@ class JwksTransportHarness {
       this.responseResumed = true;
       return response;
     }) as IncomingMessage["resume"];
+    response.destroy = (() => {
+      this.responseDestroyed = true;
+      return response;
+    }) as IncomingMessage["destroy"];
     this.responseHandler(response);
     return response;
   }
@@ -101,10 +109,28 @@ describe("assertPublicJwksDestination SSRF guard", () => {
     expect(await result.text()).toBe('{"error":"unauthorized"}');
     expect(harness.timeoutMs).toBe(1234);
     expect(harness.lookupCalls).toBe(1);
+    expect(harness.requestLookup).toBe(harness.lookup);
     expect(harness.requestEnded).toBe(true);
     expect(harness.deadlines.size).toBe(0);
     controller.abort();
     expect(harness.requestDestroyed).toBe(false);
+  });
+
+  it("drops non-conforming upstream bytes for bodyless success statuses", async () => {
+    for (const status of [204, 205]) {
+      const harness = new JwksTransportHarness();
+      const pending = createPublicJwksTransport(harness.dependencies)(
+        "https://idp.example.com/jwks",
+      );
+      const response = harness.respond(status);
+      response.emit("data", Buffer.from("hostile-body"));
+      response.emit("end");
+
+      const result = await pending;
+      expect(result.status).toBe(status);
+      expect(await result.text()).toBe("");
+      expect(harness.deadlines.size).toBe(0);
+    }
   });
 
   it("rejects redirects and oversized declared or streamed bodies", async () => {
@@ -132,10 +158,10 @@ describe("assertPublicJwksDestination SSRF guard", () => {
       response.emit("data", Buffer.alloc(1024));
       response.emit("end");
       expect(harness.deadlines.size).toBe(0);
+      expect(harness.requestDestroyed).toBe(true);
       if (testCase.status === 302 || "content-length" in testCase.headers) {
-        expect(harness.responseResumed).toBe(true);
-      } else {
-        expect(harness.requestDestroyed).toBe(true);
+        expect(harness.responseDestroyed).toBe(true);
+        expect(harness.responseResumed).toBe(false);
       }
     }
   });
