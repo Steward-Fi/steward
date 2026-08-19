@@ -29,44 +29,101 @@ function timeoutSignal(opts?: PolymarketFetchOptions): AbortSignal | undefined {
 }
 
 const MAX_MARKET_BY_TOKEN_RESPONSE_BYTES = 16 * 1024;
+const MARKET_BY_TOKEN_TIMEOUT_MS =
+  Number.isSafeInteger(DEFAULT_FETCH_TIMEOUT_MS) && DEFAULT_FETCH_TIMEOUT_MS > 0
+    ? Math.min(DEFAULT_FETCH_TIMEOUT_MS, 60_000)
+    : 15_000;
 
-async function readBoundedMarketJson(response: Response): Promise<unknown> {
+class PolymarketMarketMetadataError extends Error {}
+
+function marketMetadataError(message: string): PolymarketMarketMetadataError {
+  return new PolymarketMarketMetadataError(message);
+}
+
+function cancelBody(body: ReadableStream<Uint8Array> | null): void {
+  try {
+    void Promise.resolve(body?.cancel()).catch(() => undefined);
+  } catch {
+    // Cancellation is best-effort and must never delay or replace a fixed error.
+  }
+}
+
+function cancelReader(reader: ReadableStreamDefaultReader<Uint8Array>): void {
+  try {
+    void Promise.resolve(reader.cancel()).catch(() => undefined);
+  } catch {
+    // Hostile/custom streams cannot delay or replace the bounded transport error.
+  }
+}
+
+function marketByTokenUrl(tokenId: string, rawBase: string): URL {
+  if (rawBase.length > 2_048 || /[\u0000-\u001f\u007f]/.test(rawBase)) {
+    throw marketMetadataError("Polymarket market metadata URL is invalid");
+  }
+  let base: URL;
+  try {
+    base = new URL(rawBase);
+  } catch {
+    throw marketMetadataError("Polymarket market metadata URL is invalid");
+  }
+  if (
+    (base.protocol !== "https:" && base.protocol !== "http:") ||
+    base.username ||
+    base.password ||
+    base.search ||
+    base.hash
+  ) {
+    throw marketMetadataError("Polymarket market metadata URL is invalid");
+  }
+  return new URL(`markets-by-token/${tokenId}`, base.href.endsWith("/") ? base : `${base.href}/`);
+}
+
+async function readBoundedMarketJson(
+  response: Response,
+  signal: AbortSignal,
+  deadline: Promise<never>,
+): Promise<unknown> {
+  if (signal.aborted) {
+    throw marketMetadataError("Polymarket market metadata request was aborted");
+  }
   const declared = response.headers.get("content-length");
   if (declared !== null) {
     if (!/^\d+$/.test(declared)) {
-      throw new Error("Polymarket market metadata returned an invalid Content-Length");
+      throw marketMetadataError("Polymarket market metadata returned an invalid Content-Length");
     }
-    if (Number(declared) > MAX_MARKET_BY_TOKEN_RESPONSE_BYTES) {
-      try {
-        await response.body?.cancel();
-      } catch {
-        throw new Error("Polymarket market metadata overflow could not be canceled");
-      }
-      throw new Error("Polymarket market metadata response is too large");
+    const length = Number(declared);
+    if (!Number.isSafeInteger(length) || length > MAX_MARKET_BY_TOKEN_RESPONSE_BYTES) {
+      cancelBody(response.body);
+      throw marketMetadataError("Polymarket market metadata response is too large");
     }
   }
-  if (!response.body) throw new Error("Polymarket market metadata response has no body");
+  if (!response.body) {
+    throw marketMetadataError("Polymarket market metadata response has no body");
+  }
 
   const reader = response.body.getReader();
   const chunks: Uint8Array[] = [];
   let total = 0;
+  const cancelOnAbort = () => cancelReader(reader);
+  signal.addEventListener("abort", cancelOnAbort, { once: true });
   try {
     while (true) {
-      const next = await reader.read();
+      const next = await Promise.race([reader.read(), deadline]);
       if (next.done) break;
       total += next.value.byteLength;
       if (total > MAX_MARKET_BY_TOKEN_RESPONSE_BYTES) {
-        try {
-          await reader.cancel();
-        } catch {
-          throw new Error("Polymarket market metadata overflow could not be canceled");
-        }
-        throw new Error("Polymarket market metadata response is too large");
+        cancelReader(reader);
+        throw marketMetadataError("Polymarket market metadata response is too large");
       }
       chunks.push(next.value);
     }
   } finally {
-    reader.releaseLock();
+    signal.removeEventListener("abort", cancelOnAbort);
+    try {
+      reader.releaseLock();
+    } catch {
+      // A hostile or already-cancelled stream must not replace the fixed error.
+    }
   }
 
   const bytes = new Uint8Array(total);
@@ -79,7 +136,7 @@ async function readBoundedMarketJson(response: Response): Promise<unknown> {
   try {
     return strictParseJson(text);
   } catch {
-    throw new Error("Polymarket market metadata response is not valid JSON");
+    throw marketMetadataError("Polymarket market metadata response is not valid JSON");
   }
 }
 
@@ -89,31 +146,72 @@ export async function getMarketByToken(
   opts?: PolymarketFetchOptions,
 ): Promise<PolymarketMarketByToken> {
   if (!/^[0-9]{1,128}$/.test(tokenId)) {
-    throw new Error("Polymarket token id must be a bounded numeric string");
+    throw marketMetadataError("Polymarket token id must be a bounded numeric string");
   }
   const doFetch = opts?.fetch ?? fetch;
   const clobBase = opts?.clobUrl ?? POLYMARKET_CLOB_API_BASE;
-  const url = new URL(
-    `markets-by-token/${tokenId}`,
-    clobBase.endsWith("/") ? clobBase : `${clobBase}/`,
-  );
-  const response = await doFetch(url.toString(), {
-    headers: { Accept: "application/json" },
-    signal: timeoutSignal(opts),
-  });
-  if (!response.ok) {
-    throw new Error(`Polymarket market metadata error: ${response.status}`);
-  }
-  const parsed = marketByTokenSchema.safeParse(await readBoundedMarketJson(response));
-  if (!parsed.success) throw new Error("Polymarket market metadata response is invalid");
-  if (tokenId !== parsed.data.primary_token_id && tokenId !== parsed.data.secondary_token_id) {
-    throw new Error("Polymarket market metadata does not contain the requested token");
-  }
-  return {
-    conditionId: parsed.data.condition_id.toLowerCase(),
-    primaryTokenId: parsed.data.primary_token_id,
-    secondaryTokenId: parsed.data.secondary_token_id,
+  const url = marketByTokenUrl(tokenId, clobBase);
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let timedOut = false;
+  let callerAborted = opts?.signal?.aborted ?? false;
+  let rejectDeadline: ((error: Error) => void) | undefined;
+  const abortFromCaller = () => {
+    callerAborted = true;
+    controller.abort();
+    rejectDeadline?.(marketMetadataError("Polymarket market metadata request was aborted"));
   };
+  const deadline = new Promise<never>((_resolve, reject) => {
+    rejectDeadline = reject;
+    timer = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+      reject(marketMetadataError("Polymarket market metadata request timed out"));
+    }, MARKET_BY_TOKEN_TIMEOUT_MS);
+  });
+  opts?.signal?.addEventListener("abort", abortFromCaller, { once: true });
+
+  try {
+    if (callerAborted) {
+      throw marketMetadataError("Polymarket market metadata request was aborted");
+    }
+    const response = await Promise.race([
+      doFetch(url.toString(), {
+        headers: { Accept: "application/json" },
+        redirect: "error",
+        signal: controller.signal,
+      }),
+      deadline,
+    ]);
+    if (!response.ok) {
+      cancelBody(response.body);
+      throw marketMetadataError(`Polymarket market metadata error: ${response.status}`);
+    }
+    const parsed = marketByTokenSchema.safeParse(
+      await readBoundedMarketJson(response, controller.signal, deadline),
+    );
+    if (!parsed.success) {
+      throw marketMetadataError("Polymarket market metadata response is invalid");
+    }
+    if (tokenId !== parsed.data.primary_token_id && tokenId !== parsed.data.secondary_token_id) {
+      throw marketMetadataError("Polymarket market metadata does not contain the requested token");
+    }
+    return {
+      conditionId: parsed.data.condition_id.toLowerCase(),
+      primaryTokenId: parsed.data.primary_token_id,
+      secondaryTokenId: parsed.data.secondary_token_id,
+    };
+  } catch (error) {
+    if (timedOut) throw marketMetadataError("Polymarket market metadata request timed out");
+    if (callerAborted) {
+      throw marketMetadataError("Polymarket market metadata request was aborted");
+    }
+    if (error instanceof PolymarketMarketMetadataError) throw error;
+    throw marketMetadataError("Polymarket market metadata request failed");
+  } finally {
+    if (timer) clearTimeout(timer);
+    opts?.signal?.removeEventListener("abort", abortFromCaller);
+  }
 }
 
 interface RawOrderbook {

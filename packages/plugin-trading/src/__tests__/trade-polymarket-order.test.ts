@@ -48,6 +48,7 @@ let submitSpy: ReturnType<typeof spyOn> | undefined;
 let getWalletSpy: ReturnType<typeof spyOn> | undefined;
 let buildSpy: ReturnType<typeof spyOn> | undefined;
 let fenceSpy: ReturnType<typeof spyOn> | undefined;
+let createTradeRoutesForTest: typeof import("../routes/trade").createTradeRoutes;
 
 // Inject a polymarket venue wallet WITH funder metadata so the creds resolver
 // gets past the wallet step. Whether the L2 creds resolve (Phase C) is toggled
@@ -156,6 +157,15 @@ async function auditCount(tenantId: string, action: string): Promise<number> {
   return rows.length;
 }
 
+async function auditMetadata(tenantId: string, action: string): Promise<Record<string, unknown>> {
+  const [row] = await getDb()
+    .select({ metadata: auditEvents.metadata })
+    .from(auditEvents)
+    .where(and(eq(auditEvents.action, action), eq(auditEvents.tenantId, tenantId)))
+    .limit(1);
+  return row?.metadata ?? {};
+}
+
 // Module-level DB + fence setup shared by both describe blocks. The api suite
 // runs all test files in one process; a per-describe closeDb() would tear down
 // PGLite before the second describe's beforeAll re-imports routes.
@@ -185,6 +195,7 @@ beforeAll(async () => {
     }) as never,
   );
   const { createTradeRoutes } = await import("../routes/trade");
+  createTradeRoutesForTest = createTradeRoutes;
   const { testCtx } = await import("./_ctx");
   sharedTestContext = testCtx();
   sharedTradeRoutes = createTradeRoutes(sharedTestContext);
@@ -305,6 +316,39 @@ describe("POST /v1/trade/polymarket/order", () => {
     }
   });
 
+  it("rejects authoritative token metadata for a different, non-allowlisted condition", async () => {
+    const { tenantId, agentId, sessionId } = await seedSession({
+      allowedAssets: [`pm:cond:${COND_ID}`],
+    });
+    const app = makeApp(tenantId, agentId, tradeRoutes);
+    const fetchSpy = spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          condition_id: OTHER_COND_ID,
+          primary_token_id: TOKEN_ID,
+          secondary_token_id: "8".repeat(72),
+        }),
+        { status: 200 },
+      ),
+    );
+
+    try {
+      const res = await postOrder(app, sessionId, crypto.randomUUID());
+      expect(res.status).toBe(400);
+      expect(await res.json()).toEqual({
+        code: "policy-violation",
+        reason: "market-not-allowed",
+      });
+      expect(await dailySpendOf(sessionId)).toBe(0);
+      expect(await auditMetadata(tenantId, "trade.order.policy-rejected")).toMatchObject({
+        conditionId: OTHER_COND_ID,
+        reason: "market-not-allowed",
+      });
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
   it("keeps metadata outages retryable without authorizing an unverified market grant", async () => {
     const { tenantId, agentId, sessionId } = await seedSession({
       allowedAssets: [`pm:cond:${COND_ID}`],
@@ -340,8 +384,68 @@ describe("POST /v1/trade/polymarket/order", () => {
       );
       expect(fetchSpy).toHaveBeenCalledTimes(2);
       expect(await dailySpendOf(sessionId)).toBe(0);
+      const metadata = await auditMetadata(tenantId, "trade.order.policy-rejected");
+      expect(metadata).toMatchObject({
+        reason: "market-metadata-unavailable",
+        errorClass: "Error",
+        errorCode: null,
+      });
+      expect(JSON.stringify(metadata)).not.toContain("TOKEN_METADATA_SECRET_CANARY");
     } finally {
       fetchSpy.mockRestore();
+    }
+  });
+
+  it("releases metadata and mismatch claims when the audit sink fails", async () => {
+    const failingRoutes = createTradeRoutesForTest({
+      ...sharedTestContext,
+      writeAuditEvent: async () => {
+        throw new Error("audit unavailable");
+      },
+    });
+    failingRoutes.onError(() => new Response("audit unavailable", { status: 500 }));
+
+    const originalError = console.error;
+    const logs: string[] = [];
+    console.error = (...args: unknown[]) => logs.push(args.map(String).join(" "));
+    try {
+      for (const scenario of ["metadata", "mismatch"] as const) {
+        const { tenantId, agentId, sessionId } = await seedSession({
+          allowedAssets: [`pm:cond:${COND_ID}`],
+        });
+        const app = makeApp(tenantId, agentId, failingRoutes);
+        const key = crypto.randomUUID();
+        const fetchSpy = spyOn(globalThis, "fetch").mockImplementation(
+          scenario === "metadata"
+            ? async () => {
+                throw new Error("metadata unavailable");
+              }
+            : async () =>
+                new Response(
+                  JSON.stringify({
+                    condition_id: OTHER_COND_ID,
+                    primary_token_id: TOKEN_ID,
+                    secondary_token_id: "8".repeat(72),
+                  }),
+                  { status: 200 },
+                ),
+        );
+
+        try {
+          const extra = scenario === "mismatch" ? { conditionId: COND_ID } : {};
+          const expectedStatus = scenario === "metadata" ? 502 : 500;
+          expect((await postOrder(app, sessionId, key, extra)).status).toBe(expectedStatus);
+          expect((await postOrder(app, sessionId, key, extra)).status).toBe(expectedStatus);
+          expect(fetchSpy).toHaveBeenCalledTimes(2);
+          expect(await dailySpendOf(sessionId)).toBe(0);
+        } finally {
+          fetchSpy.mockRestore();
+        }
+      }
+      expect(logs.join("\n")).not.toContain("audit unavailable");
+      expect(logs.join("\n")).not.toContain("metadata unavailable");
+    } finally {
+      console.error = originalError;
     }
   });
 
@@ -578,6 +682,35 @@ describe("POST /v1/trade/polymarket/order", () => {
       if (prevMemoryAck === undefined) delete process.env.STEWARD_ALLOW_MEMORY_TRADING_IDEMPOTENCY;
       else process.env.STEWARD_ALLOW_MEMORY_TRADING_IDEMPOTENCY = prevMemoryAck;
       delete process.env.POLYMARKET_CLOB_API_URL;
+      delete process.env.STEWARD_PM_TEST_CREDS;
+    }
+  });
+
+  it("rejects credential-bearing or non-canonical CLOB endpoint overrides", async () => {
+    const { tenantId, agentId, sessionId } = await seedSession({});
+    stubWallet(true);
+    const app = makeApp(tenantId, agentId, tradeRoutes);
+    const previous = process.env.POLYMARKET_CLOB_API_URL;
+    process.env.STEWARD_PM_TEST_CREDS = "1";
+
+    try {
+      for (const value of [
+        "https://user:secret@clob.e2e.invalid/base",
+        "https://clob.e2e.invalid/base?token=secret",
+        "https://clob.e2e.invalid/base#secret",
+        "https://clob.e2e.invalid/line\nbreak",
+        `https://clob.e2e.invalid/${"a".repeat(2_048)}`,
+      ]) {
+        process.env.POLYMARKET_CLOB_API_URL = value;
+        const res = await postOrder(app, sessionId, crypto.randomUUID());
+        expect(res.status).toBe(409);
+        const responseText = await res.text();
+        expect(responseText).not.toContain("secret");
+        expect(await dailySpendOf(sessionId)).toBe(0);
+      }
+    } finally {
+      if (previous === undefined) delete process.env.POLYMARKET_CLOB_API_URL;
+      else process.env.POLYMARKET_CLOB_API_URL = previous;
       delete process.env.STEWARD_PM_TEST_CREDS;
     }
   });
