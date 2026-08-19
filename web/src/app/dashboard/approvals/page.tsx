@@ -6,53 +6,11 @@ import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useAuth } from "@/components/auth-provider";
 import { ChainBadge } from "@/components/chain-badge";
+import { useWalletRuntimeReady } from "@/components/providers";
 import { STEWARD_API_URL } from "@/lib/steward-api-url";
 import { formatDate, formatNativeAmount, shortenAddress } from "@/lib/utils";
 
 type PendingItem = ApprovalQueueEntry;
-
-interface ApprovalLoad {
-  promise: Promise<PendingItem[]>;
-  value?: PendingItem[];
-}
-
-// StewardProvider owns the session object above WalletProviderTree, whose
-// client-only provider activation can remount dashboard children once. Keep
-// one weakly-held load per session/tenant so that remount cannot duplicate the
-// request. A tenant rotation creates a new session object, and explicit retry
-// replaces the cached attempt.
-const approvalLoads = new WeakMap<object, Map<string, ApprovalLoad>>();
-
-function loadApprovalsForSession(
-  session: object,
-  tenantId: string,
-  client: StewardClient,
-  force: boolean,
-): Promise<PendingItem[]> {
-  let tenantLoads = approvalLoads.get(session);
-  if (!tenantLoads) {
-    tenantLoads = new Map();
-    approvalLoads.set(session, tenantLoads);
-  }
-  const existing = tenantLoads.get(tenantId);
-  if (existing && !force) return existing.promise;
-
-  const load: ApprovalLoad = {
-    promise: client.listApprovals({ limit: 200 }).then((items) => {
-      load.value = items;
-      return items;
-    }),
-  };
-  tenantLoads.set(tenantId, load);
-  return load.promise;
-}
-
-function removeCachedApproval(session: object, tenantId: string, txId: string): void {
-  const load = approvalLoads.get(session)?.get(tenantId);
-  if (!load?.value) return;
-  load.value = load.value.filter((item) => item.txId !== txId);
-  load.promise = Promise.resolve(load.value);
-}
 
 interface Toast {
   id: string;
@@ -62,6 +20,7 @@ interface Toast {
 
 export default function ApprovalsPage() {
   const auth = useAuth();
+  const walletRuntimeReady = useWalletRuntimeReady();
   const activeTenantId = auth.tenant?.tenantId ?? null;
   const authReady =
     auth.isAuthenticated &&
@@ -69,7 +28,7 @@ export default function ApprovalsPage() {
     activeTenantId !== null &&
     auth.sessionTenantId === activeTenantId &&
     auth.accessToken !== null &&
-    auth.sessionIdentity !== null;
+    walletRuntimeReady;
   const client = useMemo(
     () =>
       authReady
@@ -94,41 +53,33 @@ export default function ApprovalsPage() {
     }, 3000);
   }
 
-  const loadPending = useCallback(
-    async (force = false) => {
-      const generation = ++requestGeneration.current;
-      const tenantId = activeTenantId;
-      setPending([]);
-      setLoadedTenantId(null);
-      setActionLoading(null);
-      if (!authReady) {
-        setLoading(true);
-        setError(null);
-        return;
-      }
-      try {
-        setLoading(true);
-        setError(null);
-        // Request the max page size so the dashboard shows all pending items in a single load.
-        const items = await loadApprovalsForSession(
-          auth.sessionIdentity!,
-          tenantId!,
-          client!,
-          force,
-        );
-        if (requestGeneration.current !== generation) return;
-        setPending(items);
-        setLoadedTenantId(tenantId);
-      } catch (e: unknown) {
-        if (requestGeneration.current !== generation) return;
-        setError(e instanceof Error ? e.message : "Failed to load approvals");
-        setLoadedTenantId(tenantId);
-      } finally {
-        if (requestGeneration.current === generation) setLoading(false);
-      }
-    },
-    [activeTenantId, auth.sessionIdentity, authReady, client],
-  );
+  const loadPending = useCallback(async () => {
+    const generation = ++requestGeneration.current;
+    const tenantId = activeTenantId;
+    setPending([]);
+    setLoadedTenantId(null);
+    setActionLoading(null);
+    if (!authReady) {
+      setLoading(true);
+      setError(null);
+      return;
+    }
+    try {
+      setLoading(true);
+      setError(null);
+      // Request the max page size so the dashboard shows all pending items in a single load.
+      const items = await client!.listApprovals({ limit: 200 });
+      if (requestGeneration.current !== generation) return;
+      setPending(items);
+      setLoadedTenantId(tenantId);
+    } catch (e: unknown) {
+      if (requestGeneration.current !== generation) return;
+      setError(e instanceof Error ? e.message : "Failed to load approvals");
+      setLoadedTenantId(tenantId);
+    } finally {
+      if (requestGeneration.current === generation) setLoading(false);
+    }
+  }, [activeTenantId, authReady, client]);
 
   useEffect(() => {
     if (!authReady) {
@@ -158,7 +109,6 @@ export default function ApprovalsPage() {
         await client!.denyTransaction(txId, "Rejected from dashboard");
       }
       if (requestGeneration.current !== generation || activeTenantId !== tenantId) return;
-      removeCachedApproval(auth.sessionIdentity!, tenantId!, txId);
       setPending((prev) => prev.filter((item) => item.txId !== txId));
       addToast(
         action === "approve"
@@ -240,7 +190,7 @@ export default function ApprovalsPage() {
           <p className="text-text-secondary text-sm mb-1">Failed to load approvals</p>
           <p className="text-text-tertiary text-xs mb-4 font-mono">{visibleError}</p>
           <button
-            onClick={() => void loadPending(true)}
+            onClick={() => void loadPending()}
             className="px-4 py-2 text-sm bg-accent text-bg hover:bg-accent-hover transition-colors"
           >
             Retry

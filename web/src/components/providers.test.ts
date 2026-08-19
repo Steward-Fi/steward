@@ -11,6 +11,24 @@ const webManifest = JSON.parse(readFileSync(join(webRoot, "package.json"), "utf8
 };
 
 describe("AuthTokenSync security invariants", () => {
+  test("settles wallet chunk failures so non-wallet pages can continue", async () => {
+    const { resolveWalletRuntime } = await import("./providers");
+    const result = await resolveWalletRuntime(async () => {
+      throw new Error("wallet chunk unavailable");
+    });
+
+    expect(result).toEqual({ status: "failed" });
+  });
+
+  test("bounds a wallet chunk that never settles", async () => {
+    const { resolveWalletRuntime } = await import("./providers");
+    const startedAt = Date.now();
+    const result = await resolveWalletRuntime(() => new Promise(() => {}), 5);
+
+    expect(result).toEqual({ status: "failed" });
+    expect(Date.now() - startedAt).toBeLessThan(1_000);
+  });
+
   test("keeps the legacy URL parser dependency available to the production wallet bundle", () => {
     expect(webManifest.dependencies?.punycode).toBe("^2.3.1");
     expect(Bun.resolveSync("punycode/", webRoot)).toContain("punycode");

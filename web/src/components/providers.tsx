@@ -3,8 +3,10 @@
 import { StewardProvider, useAuth } from "@stwd/react";
 import { usePathname } from "next/navigation";
 import {
+  createContext,
   createElement,
   type ReactNode,
+  useContext,
   useEffect,
   useLayoutEffect,
   useMemo,
@@ -18,6 +20,58 @@ import { STEWARD_API_URL } from "@/lib/steward-api-url";
 import "@simplewebauthn/browser";
 
 const API_URL = STEWARD_API_URL;
+const WalletRuntimeReadyContext = createContext(true);
+
+interface WalletRuntime {
+  EVMWalletProvider: React.ComponentType<{ config: unknown; children: ReactNode }>;
+  SolanaWalletProvider: React.ComponentType<{ endpoint: string; children: ReactNode }>;
+  config: unknown;
+  rpc: string;
+}
+
+type WalletRuntimeState =
+  | { status: "loading" }
+  | { status: "ready"; runtime: WalletRuntime }
+  | { status: "failed" };
+
+type WalletRuntimeLoader = () => Promise<
+  readonly [typeof import("@stwd/react/wallet"), typeof import("@/lib/wagmi")]
+>;
+
+export async function resolveWalletRuntime(
+  load: WalletRuntimeLoader = () =>
+    Promise.all([import("@stwd/react/wallet"), import("@/lib/wagmi")]),
+  timeoutMs = 10_000,
+): Promise<WalletRuntimeState> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const [wallet, wagmi] = await Promise.race([
+      load(),
+      new Promise<never>((_, reject) => {
+        timeout = setTimeout(() => reject(new Error("Wallet runtime load timed out")), timeoutMs);
+      }),
+    ]);
+    return {
+      status: "ready",
+      runtime: {
+        EVMWalletProvider: wallet.EVMWalletProvider as never,
+        SolanaWalletProvider: wallet.SolanaWalletProvider as never,
+        config: wagmi.getWagmiConfig(),
+        rpc: wagmi.SOLANA_RPC_URL,
+      },
+    };
+  } catch {
+    // Wallet UI is optional for non-wallet pages such as the approval queue.
+    // A chunk/config failure must not leave those pages permanently blocked.
+    return { status: "failed" };
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+}
+
+export function useWalletRuntimeReady(): boolean {
+  return useContext(WalletRuntimeReadyContext);
+}
 
 /**
  * SECURITY (SEC-018): the long-lived Steward REFRESH token is no longer kept
@@ -105,23 +159,13 @@ function AuthTokenSync({ children }: { children: ReactNode }) {
  */
 function WalletProviderTree({ children }: { children: ReactNode }) {
   const pathname = usePathname();
-  const [Mounted, setMounted] = useState<{
-    EVMWalletProvider: React.ComponentType<{ config: unknown; children: ReactNode }>;
-    SolanaWalletProvider: React.ComponentType<{ endpoint: string; children: ReactNode }>;
-    config: unknown;
-    rpc: string;
-  } | null>(null);
+  const [walletRuntime, setWalletRuntime] = useState<WalletRuntimeState>({ status: "loading" });
 
   useEffect(() => {
     let cancelled = false;
-    Promise.all([import("@stwd/react/wallet"), import("@/lib/wagmi")]).then(([wallet, wagmi]) => {
+    void resolveWalletRuntime().then((runtime) => {
       if (cancelled) return;
-      setMounted({
-        EVMWalletProvider: wallet.EVMWalletProvider as never,
-        SolanaWalletProvider: wallet.SolanaWalletProvider as never,
-        config: wagmi.getWagmiConfig(),
-        rpc: wagmi.SOLANA_RPC_URL,
-      });
+      setWalletRuntime(runtime);
     });
     return () => {
       cancelled = true;
@@ -135,18 +179,26 @@ function WalletProviderTree({ children }: { children: ReactNode }) {
     return children;
   }
 
-  if (!Mounted) {
+  if (walletRuntime.status !== "ready") {
     // Server render and pre-hydration client render: pass children
     // through unchanged. Wallet UI just won't be available until the
     // dynamic chunks land. Pages without wallets render normally.
-    return <>{children}</>;
+    return createElement(
+      WalletRuntimeReadyContext.Provider as any,
+      { value: walletRuntime.status === "failed" },
+      children,
+    ) as any;
   }
 
-  return (
+  const Mounted = walletRuntime.runtime;
+
+  return createElement(
+    WalletRuntimeReadyContext.Provider as any,
+    { value: true },
     <Mounted.EVMWalletProvider config={Mounted.config}>
       <Mounted.SolanaWalletProvider endpoint={Mounted.rpc}>{children}</Mounted.SolanaWalletProvider>
-    </Mounted.EVMWalletProvider>
-  );
+    </Mounted.EVMWalletProvider>,
+  ) as any;
 }
 
 export function Providers({ children }: { children: ReactNode }) {

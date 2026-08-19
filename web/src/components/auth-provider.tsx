@@ -29,7 +29,6 @@ export interface AuthContextType {
   isLoading: boolean;
   accessToken: string | null;
   sessionTenantId: string | null;
-  sessionIdentity: object | null;
   signIn: () => Promise<void>;
   signInWithPasskey: (email: string) => Promise<void>;
   signInWithEmail: (email: string) => Promise<{ ok: boolean; expiresAt?: string }>;
@@ -60,7 +59,6 @@ export function useAuth(): AuthContextType {
       isLoading: auth.isLoading,
       accessToken: auth.session?.token ?? auth.getToken(),
       sessionTenantId: auth.session?.tenantId ?? null,
-      sessionIdentity: auth.session,
       signIn: async () => {},
       signInWithPasskey: async (email: string) => {
         await auth.signInWithPasskey(email);
