@@ -9,6 +9,7 @@ import type { AppVariables } from "../services/context";
 
 const TENANT_ID = `agent-signers-tenant-${Date.now()}`;
 const AGENT_ID = `agent-signers-agent-${Date.now()}`;
+const savedSignerCredentialPepper = process.env.STEWARD_SIGNER_CREDENTIAL_PEPPER;
 
 setDefaultTimeout(30000);
 
@@ -39,6 +40,8 @@ describe("agent signer API", () => {
     process.env.STEWARD_PGLITE_MEMORY = "true";
     process.env.STEWARD_MASTER_PASSWORD = "agent-signers-master-password";
     process.env.STEWARD_AUDIT_HMAC_KEY = "agent-signers-audit-hmac-key-with-enough-entropy";
+    process.env.STEWARD_SIGNER_CREDENTIAL_PEPPER =
+      "agent-signers-credential-pepper-with-enough-entropy";
     const { db, client } = await createPGLiteDb("memory://");
     setPGLiteOverride(db, async () => {
       await client.close();
@@ -80,6 +83,11 @@ describe("agent signer API", () => {
     delete process.env.STEWARD_PGLITE_MEMORY;
     delete process.env.STEWARD_MASTER_PASSWORD;
     delete process.env.STEWARD_AUDIT_HMAC_KEY;
+    if (savedSignerCredentialPepper === undefined) {
+      delete process.env.STEWARD_SIGNER_CREDENTIAL_PEPPER;
+    } else {
+      process.env.STEWARD_SIGNER_CREDENTIAL_PEPPER = savedSignerCredentialPepper;
+    }
   });
 
   it("creates, lists, updates, and revokes delegated signer metadata", async () => {
