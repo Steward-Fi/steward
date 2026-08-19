@@ -16,6 +16,7 @@ import {
 
 const TENANT_ID = "test-tenant";
 const AGENT_ID = "sol";
+const CONDITION_ID = `0x${"a".repeat(64)}`;
 
 const openClients: Array<{ close: () => Promise<void> }> = [];
 
@@ -292,15 +293,16 @@ describe("prediction-market allowlist (pure)", () => {
         "pm:71321045679252212594626385532706912750332728571942532289631379312455583992563",
       ).success,
     ).toBe(true);
-    expect(allowedAssetSchema.safeParse("pm:cond:0xabc123").success).toBe(true);
+    expect(allowedAssetSchema.safeParse(`pm:cond:${CONDITION_ID}`).success).toBe(true);
+    expect(allowedAssetSchema.safeParse("pm:cond:0xabc123").success).toBe(false);
     expect(allowedAssetSchema.safeParse("pm:not-a-token!").success).toBe(false);
   });
 
   test("pm asset helpers", () => {
     expect(predictionMarketTokenAsset("123")).toBe("pm:123");
-    expect(predictionMarketConditionAsset("0xabc")).toBe("pm:cond:0xabc");
+    expect(predictionMarketConditionAsset(CONDITION_ID)).toBe(`pm:cond:${CONDITION_ID}`);
     expect(isPredictionMarketAsset("pm:123")).toBe(true);
-    expect(isPredictionMarketAsset("pm:cond:0xabc")).toBe(true);
+    expect(isPredictionMarketAsset(`pm:cond:${CONDITION_ID}`)).toBe(true);
     expect(isPredictionMarketAsset("NEAR")).toBe(false);
   });
 
@@ -309,8 +311,11 @@ describe("prediction-market allowlist (pure)", () => {
     expect(isPredictionMarketAllowed(byToken, "123")).toBe(true);
     expect(isPredictionMarketAllowed(byToken, "999")).toBe(false);
 
-    const byCond = ["pm:cond:0xabc"];
-    expect(isPredictionMarketAllowed(byCond, "123", "0xabc")).toBe(true); // token via condition grant
+    const byCond = [`pm:cond:${CONDITION_ID}`];
+    expect(isPredictionMarketAllowed(byCond, "123", CONDITION_ID)).toBe(true);
+    expect(isPredictionMarketAllowed([`pm:cond:0x${"A".repeat(64)}`], "123", CONDITION_ID)).toBe(
+      true,
+    );
     expect(isPredictionMarketAllowed(byCond, "123", "0xdef")).toBe(false);
     expect(isPredictionMarketAllowed(byCond, "123")).toBe(false); // no condition passed
   });
@@ -322,7 +327,7 @@ describe("checkOrderAllowed (pure pre-venue gate)", () => {
     "status" | "allowedAssets" | "perOrderCapUsd" | "dailyCapUsd" | "dailySpendUsd"
   > = {
     status: "active",
-    allowedAssets: ["NEAR", "pm:123", "pm:cond:0xabc"],
+    allowedAssets: ["NEAR", "pm:123", `pm:cond:${CONDITION_ID}`],
     perOrderCapUsd: 1000,
     dailyCapUsd: 5000,
     dailySpendUsd: 0,
@@ -340,7 +345,7 @@ describe("checkOrderAllowed (pure pre-venue gate)", () => {
 
   test("allows a pm token via condition grant", () => {
     expect(
-      checkOrderAllowed(base, { tokenId: "777", conditionId: "0xabc", notionalUsd: 500 }),
+      checkOrderAllowed(base, { tokenId: "777", conditionId: CONDITION_ID, notionalUsd: 500 }),
     ).toEqual({
       allowed: true,
     });

@@ -18,6 +18,21 @@ export type OrderType = z.infer<typeof orderTypeSchema>;
 // token_id is the unit of everything on the order side (NOT the slug). Big numeric string.
 export const tokenIdSchema = z.string().regex(/^[0-9]+$/, "token_id must be a numeric string");
 
+export const marketByTokenSchema = z
+  .object({
+    condition_id: z.string().regex(/^0x[0-9a-fA-F]{64}$/, "condition_id must be bytes32 hex"),
+    primary_token_id: z.string().regex(/^[0-9]{1,128}$/, "primary token id must be numeric"),
+    secondary_token_id: z.string().regex(/^[0-9]{1,128}$/, "secondary token id must be numeric"),
+  })
+  .refine((value) => value.primary_token_id !== value.secondary_token_id, {
+    message: "market token ids must be distinct",
+  });
+export type PolymarketMarketByToken = {
+  conditionId: string;
+  primaryTokenId: string;
+  secondaryTokenId: string;
+};
+
 // ---------------------------------------------------------------------------
 // createOrder options (tickSize + negRisk) — MUST be passed to createOrder
 // ---------------------------------------------------------------------------

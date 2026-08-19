@@ -5,7 +5,7 @@ import { type PolymarketEvent, type PolymarketMarket } from "./types";
 // ---------------------------------------------------------------------------
 // Discovery — Gamma. Keyset/cursor pagination is the stable path for backfills.
 // `offset` is REJECTED on keyset endpoints; keyset events expose `closed` but
-// NOT `active` (filter active client-side). See KNOWLEDGE-DUMP §3.
+// not `active`, so active state is filtered client-side.
 // ---------------------------------------------------------------------------
 
 export interface PolymarketFetchOptions {

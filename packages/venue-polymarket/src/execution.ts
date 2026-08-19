@@ -171,8 +171,8 @@ export function deriveActualFill(
 
 // ---------------------------------------------------------------------------
 // clob-client construction — sigType 2 + funder Safe + builder attribution.
-// The clob-client is typed against ethers v5 Wallet; we cast the injected
-// (v6-shaped) signer. Known wart — see KNOWLEDGE-DUMP §5/§8.
+// The clob-client expects the ethers v5 signer surface; the adapter below
+// exposes that surface over the injected signer without exporting custody.
 // ---------------------------------------------------------------------------
 
 /**

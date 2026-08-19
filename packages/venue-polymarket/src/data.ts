@@ -5,10 +5,8 @@ import { type PolymarketPosition } from "./types";
 // ---------------------------------------------------------------------------
 // Data API — positions / trades / activity (public reads).
 //
-// matchr read positions via a Goldsky subgraph + Supabase market enrichment.
-// In steward we DON'T have those; use the public Data API /positions endpoint
-// keyed by the funder Safe address. Pure read, no DB enrichment here — leave
-// market-metadata joins to the tenant layer (Phase B/C).
+// Positions are read from the public /positions endpoint keyed by the funder
+// Safe address. This adapter does not join tenant-owned market metadata.
 // ---------------------------------------------------------------------------
 
 function timeoutSignal(opts?: PolymarketFetchOptions): AbortSignal | undefined {

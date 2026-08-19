@@ -1,6 +1,5 @@
 // Polymarket runs on Polygon (chain id 137), settled in USDC (6 decimals).
 // Three hosts, three jobs: Gamma=discover, CLOB=quote+trade, Data=positions.
-// See POLYMARKET-KNOWLEDGE-DUMP.md §2.
 
 export const POLYMARKET_GAMMA_API_BASE = "https://gamma-api.polymarket.com";
 export const POLYMARKET_CLOB_API_BASE = "https://clob.polymarket.com";
