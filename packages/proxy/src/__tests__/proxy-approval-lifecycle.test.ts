@@ -1,6 +1,7 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, setDefaultTimeout } from "bun:test";
 import { signAgentToken } from "@stwd/auth";
 import {
+  __resetAuditHmacKeyCacheForTests,
   agents,
   and,
   closeDb,
@@ -32,6 +33,20 @@ let setPendingProxyExecution: typeof import("../handlers/release")["__setPending
 let setForwardProxyRequest: typeof import("../handlers/proxy")["__setForwardProxyRequestForTests"];
 let proxyMod: typeof import("../handlers/proxy");
 
+const FIXTURE_ENV_KEYS = [
+  "NODE_ENV",
+  "STEWARD_PGLITE_MEMORY",
+  "STEWARD_MASTER_PASSWORD",
+  "STEWARD_JWT_SECRET",
+  "STEWARD_AUDIT_HMAC_KEY",
+  "STEWARD_PROXY_ALLOWED_HOSTS",
+  "STEWARD_SECRET_ROUTE_ALLOWED_HOSTS",
+  "STEWARD_ALLOW_BROAD_SECRET_ROUTES",
+  "STEWARD_PROXY_DEV_MODE",
+  "STEWARD_PROXY_REQUIRE_REQUEST_SIGNATURE",
+] as const;
+const previousEnv = new Map<(typeof FIXTURE_ENV_KEYS)[number], string | undefined>();
+
 // A counted, successful stub upstream. Tests that must prove whether (and how
 // many times) execution actually reached the wire install this and read
 // `executions`. It returns a clean JSON body that never reflects the injected
@@ -50,6 +65,8 @@ function installCountedForwarder(opts: { delayMs?: number } = {}) {
 }
 
 beforeAll(async () => {
+  for (const key of FIXTURE_ENV_KEYS) previousEnv.set(key, process.env[key]);
+  process.env.NODE_ENV = "test";
   process.env.STEWARD_PGLITE_MEMORY = "true";
   process.env.STEWARD_MASTER_PASSWORD = MASTER_PASSWORD;
   process.env.STEWARD_JWT_SECRET = "proxy-approval-lifecycle-jwt-secret-with-enough-bytes";
@@ -59,6 +76,9 @@ beforeAll(async () => {
   process.env.STEWARD_PROXY_ALLOWED_HOSTS = "api.example.com";
   process.env.STEWARD_SECRET_ROUTE_ALLOWED_HOSTS = "api.example.com";
   process.env.STEWARD_ALLOW_BROAD_SECRET_ROUTES = "true";
+  process.env.STEWARD_PROXY_DEV_MODE = "true";
+  process.env.STEWARD_PROXY_REQUIRE_REQUEST_SIGNATURE = "false";
+  __resetAuditHmacKeyCacheForTests();
 
   const { db, client } = await createPGLiteDb("memory://");
   setPGLiteOverride(db, async () => {
@@ -94,14 +114,15 @@ afterEach(() => {
 });
 
 afterAll(async () => {
+  proxyMod?.__resetProxyHandlerTestHooksForTests();
   await closeDb().catch(() => {});
-  delete process.env.STEWARD_PGLITE_MEMORY;
-  delete process.env.STEWARD_MASTER_PASSWORD;
-  delete process.env.STEWARD_JWT_SECRET;
-  delete process.env.STEWARD_AUDIT_HMAC_KEY;
-  delete process.env.STEWARD_PROXY_ALLOWED_HOSTS;
-  delete process.env.STEWARD_SECRET_ROUTE_ALLOWED_HOSTS;
-  delete process.env.STEWARD_ALLOW_BROAD_SECRET_ROUTES;
+  for (const key of FIXTURE_ENV_KEYS) {
+    const previous = previousEnv.get(key);
+    if (previous === undefined) delete process.env[key];
+    else process.env[key] = previous;
+  }
+  previousEnv.clear();
+  __resetAuditHmacKeyCacheForTests();
 });
 
 function buildApp() {
@@ -190,6 +211,29 @@ async function poll(app: Hono, id: string, token: string): Promise<Response> {
 }
 
 describe("proxy approval lifecycle enforcement (PGLite)", () => {
+  it("scopes unsigned polling to explicit dev mode and keeps production fail-closed", async () => {
+    const tenantId = `t-auth-boundary-${crypto.randomUUID()}`;
+    const agentId = `a-${crypto.randomUUID()}`;
+    await ensureTenant(tenantId);
+    await ensureAgent(tenantId, agentId);
+    const token = await tokenFor(agentId, tenantId);
+
+    const devResponse = await poll(buildApp(), crypto.randomUUID(), token);
+    expect(devResponse.status).not.toBe(401);
+
+    process.env.NODE_ENV = "production";
+    try {
+      const productionResponse = await poll(buildApp(), crypto.randomUUID(), token);
+      expect(productionResponse.status).toBe(401);
+      expect(await productionResponse.json()).toEqual({
+        ok: false,
+        error: "X-Steward-Signature header required",
+      });
+    } finally {
+      process.env.NODE_ENV = "test";
+    }
+  });
+
   it("does not execute a request denied through the operator deny guard", async () => {
     const tenantId = `t-deny-${crypto.randomUUID()}`;
     const agentId = `a-${crypto.randomUUID()}`;
