@@ -1859,7 +1859,10 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
 
     let verifiedConditionId: string | undefined;
     const hasMarketGrant = session.allowedAssets.some((asset) => asset.startsWith("pm:cond:"));
-    if (!check.allowed && check.reason === "market-not-allowed" && hasMarketGrant) {
+    const needsVerifiedConditionId =
+      body.conditionId !== undefined ||
+      (!check.allowed && check.reason === "market-not-allowed" && hasMarketGrant);
+    if (needsVerifiedConditionId) {
       try {
         const clobUrl = configuredPolymarketClobUrl();
         const market = await getMarketByToken(body.tokenId, clobUrl ? { clobUrl } : undefined);
@@ -1905,15 +1908,19 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
         await idempotency.store?.(envelope);
         return c.json(envelope.body, envelope.status);
       }
-
-      ({ session, check } = await getSessionManager().checkActiveOrder({
-        tenantId,
-        id: body.sessionId,
-        order: { tokenId: body.tokenId, conditionId: verifiedConditionId, notionalUsd },
-      }));
-      if (session.agentId !== agentId || session.venue !== "polymarket") {
-        await idempotency.release?.();
-        return c.json<ApiResponse>({ ok: false, error: "Active Polymarket session required" }, 403);
+      if (!check.allowed && check.reason === "market-not-allowed" && hasMarketGrant) {
+        ({ session, check } = await getSessionManager().checkActiveOrder({
+          tenantId,
+          id: body.sessionId,
+          order: { tokenId: body.tokenId, conditionId: verifiedConditionId, notionalUsd },
+        }));
+        if (session.agentId !== agentId || session.venue !== "polymarket") {
+          await idempotency.release?.();
+          return c.json<ApiResponse>(
+            { ok: false, error: "Active Polymarket session required" },
+            403,
+          );
+        }
       }
     }
 

@@ -99,6 +99,7 @@ export async function getMarketByToken(
   );
   const response = await doFetch(url.toString(), {
     headers: { Accept: "application/json" },
+    redirect: "error",
     signal: timeoutSignal(opts),
   });
   if (!response.ok) {

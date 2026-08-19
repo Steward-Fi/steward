@@ -712,8 +712,10 @@ describe("marketdata batch", () => {
     const sibling = "8".repeat(72);
     const conditionId = `0x${"a".repeat(64)}`;
     let requestedUrl = "";
-    const fetchMock = (async (input: string | URL | Request) => {
+    let requestedRedirect: RequestRedirect | undefined;
+    const fetchMock = (async (input: string | URL | Request, init?: RequestInit) => {
       requestedUrl = String(input);
+      requestedRedirect = init?.redirect;
       return new Response(
         JSON.stringify({
           condition_id: conditionId.toUpperCase().replace("0X", "0x"),
@@ -731,6 +733,7 @@ describe("marketdata batch", () => {
       }),
     ).toEqual({ conditionId, primaryTokenId: tokenId, secondaryTokenId: sibling });
     expect(requestedUrl).toBe(`https://clob.example.test/gateway/markets-by-token/${tokenId}`);
+    expect(requestedRedirect).toBe("error");
   });
 
   test("getMarketByToken rejects a response that does not contain the requested token", async () => {
