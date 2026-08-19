@@ -3,7 +3,7 @@
 import type { ApprovalQueueEntry } from "@stwd/sdk";
 import { AnimatePresence, motion } from "framer-motion";
 import Link from "next/link";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useAuth } from "@/components/auth-provider";
 import { ChainBadge } from "@/components/chain-badge";
 import { steward } from "@/lib/api";
@@ -18,12 +18,15 @@ interface Toast {
 }
 
 export default function ApprovalsPage() {
-  useAuth();
+  const auth = useAuth();
+  const activeTenantId = auth.tenant?.tenantId ?? null;
   const [pending, setPending] = useState<PendingItem[]>([]);
+  const [loadedTenantId, setLoadedTenantId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
   const [toasts, setToasts] = useState<Toast[]>([]);
+  const requestGeneration = useRef(0);
 
   function addToast(message: string, kind: Toast["kind"]) {
     const id = `${Date.now()}-${Math.random()}`;
@@ -34,24 +37,42 @@ export default function ApprovalsPage() {
   }
 
   const loadPending = useCallback(async () => {
+    const generation = ++requestGeneration.current;
+    const tenantId = activeTenantId;
+    setPending([]);
+    setLoadedTenantId(null);
+    setActionLoading(null);
     try {
       setLoading(true);
       setError(null);
+      // AuthTokenSync is an ancestor effect. Yield one task so a tenant switch
+      // installs its rotated access token before this request uses the shared
+      // browser client.
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
       // Request the max page size so the dashboard shows all pending items in a single load.
       const items = await steward.listApprovals({ limit: 200 });
+      if (requestGeneration.current !== generation) return;
       setPending(items);
+      setLoadedTenantId(tenantId);
     } catch (e: unknown) {
+      if (requestGeneration.current !== generation) return;
       setError(e instanceof Error ? e.message : "Failed to load approvals");
+      setLoadedTenantId(tenantId);
     } finally {
-      setLoading(false);
+      if (requestGeneration.current === generation) setLoading(false);
     }
-  }, []);
+  }, [activeTenantId]);
 
   useEffect(() => {
     void loadPending();
+    return () => {
+      requestGeneration.current += 1;
+    };
   }, [loadPending]);
 
   async function handleAction(txId: string, action: "approve" | "reject") {
+    const generation = requestGeneration.current;
+    const tenantId = activeTenantId;
     const key = `${txId}-${action}`;
     setActionLoading(key);
     try {
@@ -60,6 +81,7 @@ export default function ApprovalsPage() {
       } else {
         await steward.denyTransaction(txId, "Rejected from dashboard");
       }
+      if (requestGeneration.current !== generation || activeTenantId !== tenantId) return;
       setPending((prev) => prev.filter((item) => item.txId !== txId));
       addToast(
         action === "approve"
@@ -68,13 +90,20 @@ export default function ApprovalsPage() {
         "success",
       );
     } catch (e: unknown) {
+      if (requestGeneration.current !== generation || activeTenantId !== tenantId) return;
       addToast(e instanceof Error ? e.message : `Failed to ${action}`, "error");
     } finally {
-      setActionLoading(null);
+      if (requestGeneration.current === generation && activeTenantId === tenantId) {
+        setActionLoading(null);
+      }
     }
   }
 
-  if (loading) {
+  const tenantIsCurrent = loadedTenantId === activeTenantId;
+  const visiblePending = tenantIsCurrent ? pending : [];
+  const visibleError = tenantIsCurrent ? error : null;
+
+  if (loading || !tenantIsCurrent) {
     return (
       <div className="space-y-8">
         <div className="h-8 w-48 bg-bg-surface animate-pulse" />
@@ -101,9 +130,9 @@ export default function ApprovalsPage() {
             Transactions exceeding policy thresholds
           </p>
         </div>
-        {pending.length > 0 && (
+        {visiblePending.length > 0 && (
           <span className="text-xs text-amber-400 font-medium tabular-nums">
-            {pending.length} pending
+            {visiblePending.length} pending
           </span>
         )}
       </div>
@@ -129,10 +158,10 @@ export default function ApprovalsPage() {
         </AnimatePresence>
       </div>
 
-      {error && !loading && (
+      {visibleError && !loading && (
         <div className="py-16 text-center border border-red-400/20 bg-red-400/5">
           <p className="text-text-secondary text-sm mb-1">Failed to load approvals</p>
-          <p className="text-text-tertiary text-xs mb-4 font-mono">{error}</p>
+          <p className="text-text-tertiary text-xs mb-4 font-mono">{visibleError}</p>
           <button
             onClick={loadPending}
             className="px-4 py-2 text-sm bg-accent text-bg hover:bg-accent-hover transition-colors"
@@ -142,7 +171,7 @@ export default function ApprovalsPage() {
         </div>
       )}
 
-      {pending.length === 0 && !error ? (
+      {visiblePending.length === 0 && !visibleError ? (
         <div className="py-20 text-center border border-border-subtle">
           <p className="font-display text-lg font-600 text-text-secondary">Queue is clear</p>
           <p className="text-sm text-text-tertiary mt-2 max-w-sm mx-auto">
@@ -153,7 +182,7 @@ export default function ApprovalsPage() {
       ) : (
         <div className="space-y-3">
           <AnimatePresence initial={false}>
-            {pending.map((item, i) => (
+            {visiblePending.map((item, i) => (
               <motion.div
                 key={item.id}
                 initial={{ opacity: 0, y: 8 }}
