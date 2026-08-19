@@ -2652,35 +2652,60 @@ export async function disconnectXProviderCredential(
       throw new XConnectError("X_ACCOUNT_NOT_X", 400, "provider account is not an X account");
     }
 
-    if (account.status === "revoked" && !account.credentialSecretId) {
+    const now = new Date();
+    const expectedSecretName = xCredentialSecretName(input.workspaceId, account.externalRef);
+    // The account pointer is mutable bookkeeping, not proof of credential
+    // ownership. Resolve disconnect authority from the deterministic X account
+    // lineage so a corrupt pointer can neither sacrifice an unrelated secret
+    // nor hide the actual X grant from local revocation.
+    const [lineageSecret] = (await tx
+      .select()
+      .from(secrets)
+      .where(
+        and(
+          eq(secrets.tenantId, input.tenantId),
+          eq(secrets.name, expectedSecretName),
+          sql`${secrets.deletedAt} IS NULL`,
+        ),
+      )
+      .orderBy(desc(secrets.version))
+      .limit(1)
+      .for("update")) as Secret[];
+    const lineageSecretId = lineageSecret?.id ?? null;
+
+    if (account.status === "revoked" && !account.credentialSecretId && !lineageSecretId) {
       return { lifecycleId: null, retryAt: null };
     }
 
-    const now = new Date();
-    const material = account.credentialSecretId
+    const pointerIssue = !account.credentialSecretId
+      ? "CREDENTIAL_POINTER_MISSING"
+      : account.credentialSecretId !== lineageSecretId
+        ? "CREDENTIAL_POINTER_MISMATCH"
+        : null;
+    const material = lineageSecretId
       ? await readXDisconnectRevocationMaterial(
           tx,
           input.vault,
           input.tenantId,
-          account.credentialSecretId,
+          lineageSecretId,
           account.externalRef,
         )
       : null;
-    const routesToDisable = account.credentialSecretId
+    const routesToDisable = lineageSecretId
       ? await tx
           .select({ id: secretRoutes.id, authorityRevision: secretRoutes.authorityRevision })
           .from(secretRoutes)
           .where(
             and(
               eq(secretRoutes.tenantId, input.tenantId),
-              eq(secretRoutes.secretId, account.credentialSecretId),
+              eq(secretRoutes.secretId, lineageSecretId),
               eq(secretRoutes.enabled, true),
             ),
           )
           .for("update")
       : [];
 
-    const lifecycleId = account.credentialSecretId ? randomUUID() : null;
+    const lifecycleId = randomUUID();
     let lifecycleSecretId: string | null = null;
     const hasRevocationHandle = Boolean(material?.accessToken || material?.refreshToken);
     if (lifecycleId && hasRevocationHandle) {
@@ -2727,19 +2752,22 @@ export async function disconnectXProviderCredential(
           workspaceId: input.workspaceId,
           providerAccountId: account.id,
           revocationHandleAvailable: hasRevocationHandle,
-          credentialIssue: material?.issue ?? null,
+          credentialIssue:
+            pointerIssue ??
+            material?.issue ??
+            (lineageSecretId ? null : "CREDENTIAL_LINEAGE_MISSING"),
         },
       });
     }
 
-    if (account.credentialSecretId) {
+    if (lineageSecretId) {
       await tx
         .update(secretRoutes)
         .set({ enabled: false })
         .where(
           and(
             eq(secretRoutes.tenantId, input.tenantId),
-            eq(secretRoutes.secretId, account.credentialSecretId),
+            eq(secretRoutes.secretId, lineageSecretId),
             eq(secretRoutes.enabled, true),
           ),
         );
@@ -2766,14 +2794,14 @@ export async function disconnectXProviderCredential(
       throw new XConnectError("X_REFRESH_FAILED", 409, "account revision conflict on disconnect");
     }
 
-    if (account.credentialSecretId) {
+    if (lineageSecretId) {
       await tx
         .update(secrets)
         .set({ deletedAt: now, updatedAt: now })
         .where(
           and(
             eq(secrets.tenantId, input.tenantId),
-            eq(secrets.id, account.credentialSecretId),
+            eq(secrets.id, lineageSecretId),
             sql`${secrets.deletedAt} IS NULL`,
           ),
         );

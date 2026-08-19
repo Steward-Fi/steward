@@ -49,6 +49,7 @@ import {
   refreshXProviderCredential,
   runXCredentialLifecycleSweep,
   X_ADAPTER_KEY,
+  X_DEFAULT_SCOPES,
   XConnectError,
   type XCredentialPayload,
   type XForwardRequest,
@@ -2287,22 +2288,57 @@ describe("disconnect", () => {
     });
   });
 
-  test("disconnect revokes exact bounded handles even when identity binding is invalid", async () => {
+  test("a wrong secret pointer cannot revoke, delete, or disable unrelated authority", async () => {
     const { completed } = await connectHappy(new MemoryConnectStore());
-    const current = await decryptCredential(completed.providerAccountId);
-    const misbound = await vault.rotateSecret(
+    const db = getDb();
+    const [before] = await db
+      .select()
+      .from(providerAccounts)
+      .where(eq(providerAccounts.id, completed.providerAccountId));
+    const correctRouteId = "50000000-0000-4000-8000-0000000000e1";
+    const unrelatedRouteId = "50000000-0000-4000-8000-0000000000e2";
+    const unrelated = await vault.createSecret(
       TENANT,
-      xCredentialSecretName(WORKSPACE, "1234567890"),
+      "unrelated/provider-credential",
       JSON.stringify({
-        ...current,
-        accessToken: "misbound-access-handle",
-        refreshToken: "misbound-refresh-handle",
+        schemaVersion: "steward.provider-x.credential.v1",
+        accessToken: "unrelated-access-handle",
+        refreshToken: "unrelated-refresh-handle",
+        tokenType: "bearer",
+        scopesGranted: [...X_DEFAULT_SCOPES],
         xUserId: "999999999",
+        xUsername: "unrelated",
+        obtainedAt: new Date().toISOString(),
+        expiresAt: null,
       }),
     );
-    await getDb()
+    await db.insert(secretRoutes).values([
+      {
+        id: correctRouteId,
+        tenantId: TENANT,
+        secretId: before.credentialSecretId as string,
+        hostPattern: "api.x.com",
+        pathPattern: "/2/tweets",
+        method: "POST",
+        injectAs: "header",
+        injectKey: "Authorization",
+        injectFormat: "Bearer {value}",
+      },
+      {
+        id: unrelatedRouteId,
+        tenantId: TENANT,
+        secretId: unrelated.id,
+        hostPattern: "api.unrelated.test",
+        pathPattern: "/live",
+        method: "POST",
+        injectAs: "header",
+        injectKey: "Authorization",
+        injectFormat: "Bearer {value}",
+      },
+    ]);
+    await db
       .update(providerAccounts)
-      .set({ credentialSecretId: misbound.id, credentialVersion: misbound.version })
+      .set({ credentialSecretId: unrelated.id, credentialVersion: unrelated.version })
       .where(eq(providerAccounts.id, completed.providerAccountId));
     const fake = installFakeX();
     await expect(
@@ -2315,15 +2351,52 @@ describe("disconnect", () => {
         config: CONFIG,
       }),
     ).resolves.toMatchObject({ revoked: true });
-    expect(new URLSearchParams(fake.counters.revokeBodies[0]).get("token")).toBe(
-      "misbound-refresh-handle",
-    );
+    expect(new URLSearchParams(fake.counters.revokeBodies[0]).get("token")).toBe("refresh-initial");
     fake.restore();
+
+    const [correctSecret] = await db
+      .select()
+      .from(secrets)
+      .where(eq(secrets.id, before.credentialSecretId as string));
+    expect(correctSecret.deletedAt).not.toBeNull();
+    const [unrelatedSecret] = await db.select().from(secrets).where(eq(secrets.id, unrelated.id));
+    expect(unrelatedSecret.deletedAt).toBeNull();
+    const [correctRoute] = await db
+      .select()
+      .from(secretRoutes)
+      .where(eq(secretRoutes.id, correctRouteId));
+    expect(correctRoute).toMatchObject({ enabled: false, authorityRevision: 2 });
+    const [unrelatedRoute] = await db
+      .select()
+      .from(secretRoutes)
+      .where(eq(secretRoutes.id, unrelatedRouteId));
+    expect(unrelatedRoute).toMatchObject({
+      secretId: unrelated.id,
+      enabled: true,
+      authorityRevision: 1,
+    });
   });
 
-  test("a missing credential link cannot prevent local revocation", async () => {
+  test("a null pointer discovers and revokes the deterministic live X lineage", async () => {
     const { completed } = await connectHappy(new MemoryConnectStore());
-    await getDb()
+    const db = getDb();
+    const [before] = await db
+      .select()
+      .from(providerAccounts)
+      .where(eq(providerAccounts.id, completed.providerAccountId));
+    const routeId = "50000000-0000-4000-8000-0000000000e3";
+    await db.insert(secretRoutes).values({
+      id: routeId,
+      tenantId: TENANT,
+      secretId: before.credentialSecretId as string,
+      hostPattern: "api.x.com",
+      pathPattern: "/2/tweets",
+      method: "POST",
+      injectAs: "header",
+      injectKey: "Authorization",
+      injectFormat: "Bearer {value}",
+    });
+    await db
       .update(providerAccounts)
       .set({ credentialSecretId: null, credentialVersion: null })
       .where(eq(providerAccounts.id, completed.providerAccountId));
@@ -2337,9 +2410,10 @@ describe("disconnect", () => {
         vault,
         config: CONFIG,
       }),
-    ).resolves.toMatchObject({ revoked: false });
-    expect(fake.counters.revoke).toBe(0);
-    const [account] = await getDb()
+    ).resolves.toMatchObject({ revoked: true });
+    expect(fake.counters.revoke).toBe(1);
+    expect(new URLSearchParams(fake.counters.revokeBodies[0]).get("token")).toBe("refresh-initial");
+    const [account] = await db
       .select()
       .from(providerAccounts)
       .where(eq(providerAccounts.id, completed.providerAccountId));
@@ -2348,6 +2422,13 @@ describe("disconnect", () => {
       credentialSecretId: null,
       credentialVersion: null,
     });
+    const [lineageSecret] = await db
+      .select()
+      .from(secrets)
+      .where(eq(secrets.id, before.credentialSecretId as string));
+    expect(lineageSecret.deletedAt).not.toBeNull();
+    const [route] = await db.select().from(secretRoutes).where(eq(secretRoutes.id, routeId));
+    expect(route).toMatchObject({ enabled: false, authorityRevision: 2 });
     fake.restore();
   });
 
