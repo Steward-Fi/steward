@@ -569,23 +569,11 @@ export class EmailAuth {
   private async publishChallenge(
     entries: readonly StorePublishEntry[],
     confirmOwnPublication?: () => Promise<boolean>,
-    absoluteExpiresAtMs?: number,
   ): Promise<boolean> {
     let lastError: unknown;
     for (let attempt = 0; attempt < 3; attempt += 1) {
-      let attemptEntries = entries;
-      if (absoluteExpiresAtMs !== undefined) {
-        const remainingTtlMs = absoluteExpiresAtMs - Date.now();
-        if (remainingTtlMs <= 0) {
-          throw new Error("Email challenge expired before publication completed");
-        }
-        attemptEntries = entries.map((entry) => ({
-          ...entry,
-          ttlMs: Math.min(entry.ttlMs, remainingTtlMs),
-        }));
-      }
       try {
-        const published = await this.tokenStore.publish(attemptEntries);
+        const published = await this.tokenStore.publish(entries);
         if (published || !lastError || !confirmOwnPublication) return published;
         return await confirmOwnPublication();
       } catch (error) {
@@ -615,7 +603,12 @@ export class EmailAuth {
       const reservation = encodeIssuanceReservation(reservationId, prior);
       if (
         await this.publishChallenge([
-          { key: reservationKey, value: reservation, ttlMs, expected: current },
+          {
+            key: reservationKey,
+            value: reservation,
+            expiresAt: Date.now() + ttlMs,
+            expected: current,
+          },
         ])
       ) {
         return { reservationKey, reservation, prior };
@@ -631,7 +624,7 @@ export class EmailAuth {
   ): Promise<void> {
     try {
       await this.publishChallenge([
-        { key: reservationKey, value: null, ttlMs, expected: reservation },
+        { key: reservationKey, value: null, expiresAt: Date.now() + ttlMs, expected: reservation },
       ]);
     } catch {
       // A newer issuance may own the target. Never overwrite its reservation.
@@ -746,18 +739,18 @@ export class EmailAuth {
       // commits, neither old nor new pods can discover the staged credential.
       const published = await this.publishChallenge(
         [
-          { key: stagingKey, value: null, ttlMs: remainingTtlMs },
+          { key: stagingKey, value: null, expiresAt: expiresAt.getTime() },
           ...(priorChallengeId
             ? [
                 {
                   key: emailLoginChallengeKey(priorChallengeId),
                   value: null,
-                  ttlMs: remainingTtlMs,
+                  expiresAt: expiresAt.getTime(),
                 },
                 {
                   key: emailLoginStatusKey(priorChallengeId),
                   value: null,
-                  ttlMs: remainingTtlMs,
+                  expiresAt: expiresAt.getTime(),
                 },
               ]
             : []),
@@ -767,7 +760,7 @@ export class EmailAuth {
               ...challenge,
               status: "pending",
             } satisfies EmailLoginChallengeRecord),
-            ttlMs: remainingTtlMs,
+            expiresAt: expiresAt.getTime(),
           },
           {
             key: emailLoginStatusKey(challengeId),
@@ -775,33 +768,40 @@ export class EmailAuth {
               ...stagedStatus,
               status: "pending",
             } satisfies EmailLoginStatusRecord),
-            ttlMs: remainingTtlMs,
+            expiresAt: expiresAt.getTime(),
           },
-          { key: emailLoginLinkAliasKey(tokenHash), value: challengeId, ttlMs: remainingTtlMs },
-          { key: emailLoginCodeAliasKey(codeVerifier), value: challengeId, ttlMs: remainingTtlMs },
+          {
+            key: emailLoginLinkAliasKey(tokenHash),
+            value: challengeId,
+            expiresAt: expiresAt.getTime(),
+          },
+          {
+            key: emailLoginCodeAliasKey(codeVerifier),
+            value: challengeId,
+            expiresAt: expiresAt.getTime(),
+          },
           {
             key: targetKey,
             value: challengeId,
-            ttlMs: remainingTtlMs,
+            expiresAt: expiresAt.getTime(),
             expected: priorChallengeId,
           },
           {
             key: reservationKey,
             value: publicationReceipt,
-            ttlMs: remainingTtlMs,
+            expiresAt: expiresAt.getTime(),
             expected: reservation,
           },
           {
             key: publicationReceiptKey,
             value: publicationReceipt,
-            ttlMs: remainingTtlMs,
+            expiresAt: expiresAt.getTime(),
             expected: null,
           },
         ],
         async () =>
           (await this.tokenStore.verify(publicationReceiptKey)) === publicationReceipt &&
           (await this.tokenStore.verify(targetKey)) === challengeId,
-        expiresAt.getTime(),
       );
       if (!published) throw new Error("email issuance was superseded");
     } catch (err) {
@@ -908,37 +908,38 @@ export class EmailAuth {
     try {
       const published = await this.publishChallenge(
         [
-          { key: stagingKey, value: null, ttlMs: remainingTtlMs },
-          ...(priorStoreKey ? [{ key: priorStoreKey, value: null, ttlMs: remainingTtlMs }] : []),
+          { key: stagingKey, value: null, expiresAt: expiresAt.getTime() },
+          ...(priorStoreKey
+            ? [{ key: priorStoreKey, value: null, expiresAt: expiresAt.getTime() }]
+            : []),
           {
             key: storeKey,
             // Deployed pre-staging readers accept only the raw two-field payload.
             value: JSON.stringify(payload),
-            ttlMs: remainingTtlMs,
+            expiresAt: expiresAt.getTime(),
           },
           {
             key: targetKey,
             value: storeKey,
-            ttlMs: remainingTtlMs,
+            expiresAt: expiresAt.getTime(),
             expected: priorStoreKey,
           },
           {
             key: reservationKey,
             value: publicationReceipt,
-            ttlMs: remainingTtlMs,
+            expiresAt: expiresAt.getTime(),
             expected: reservation,
           },
           {
             key: publicationReceiptKey,
             value: publicationReceipt,
-            ttlMs: remainingTtlMs,
+            expiresAt: expiresAt.getTime(),
             expected: null,
           },
         ],
         async () =>
           (await this.tokenStore.verify(publicationReceiptKey)) === publicationReceipt &&
           (await this.tokenStore.verify(targetKey)) === storeKey,
-        expiresAt.getTime(),
       );
       if (!published) throw new Error("email issuance was superseded");
     } catch (err) {

@@ -95,11 +95,11 @@ integration("Postgres email challenge publication", () => {
       await locker`SELECT pg_advisory_lock(hashtextextended(${lockKey}, 0))`;
       locked = true;
       stale = backend.publish([
-        { key: "challenge-old", value: "active-old", ttlMs: 60_000 },
+        { key: "challenge-old", value: "active-old", expiresAt: Date.now() + 60_000 },
         {
           key: reservationKey,
           value: "published-old",
-          ttlMs: 60_000,
+          expiresAt: Date.now() + 60_000,
           expected: "generation-old",
         },
       ]);
@@ -126,8 +126,13 @@ integration("Postgres email challenge publication", () => {
     expect(staleResult.value).toBe(false);
     expect(await backend.get("challenge-old")).toBeNull();
     const current = [
-      { key: "challenge-new", value: "active-new", ttlMs: 60_000 },
-      { key: reservationKey, value: "published-new", ttlMs: 60_000, expected: "generation-new" },
+      { key: "challenge-new", value: "active-new", expiresAt: Date.now() + 60_000 },
+      {
+        key: reservationKey,
+        value: "published-new",
+        expiresAt: Date.now() + 60_000,
+        expected: "generation-new",
+      },
     ] as const;
     expect(await backend.publish(current)).toBe(true);
     expect(await backend.consume("challenge-new")).toBe("active-new");
@@ -136,11 +141,66 @@ integration("Postgres email challenge publication", () => {
 
     await expect(
       backend.publish([
-        { key: "duplicate", value: "first", ttlMs: 60_000 },
-        { key: "duplicate", value: "second", ttlMs: 60_000 },
+        { key: "duplicate", value: "first", expiresAt: Date.now() + 60_000 },
+        { key: "duplicate", value: "second", expiresAt: Date.now() + 60_000 },
       ]),
     ).rejects.toThrow("Store publication contains duplicate keys");
     expect(await backend.get("duplicate")).toBeNull();
+  });
+
+  it("keeps the supplied deadline when a successful publication is delayed past expiry", async () => {
+    if (!sql) throw new Error("DATABASE_URL required");
+    const namespace = `email-publish-expiry-${crypto.randomUUID()}`;
+    const backend = new PostgresBackend(namespace);
+    const reservationKey = "reservation";
+    const credentialKey = "credential";
+    await backend.set(reservationKey, "reserved", 60_000);
+
+    const locker = await sql.reserve();
+    const lockKey = `${namespace}:${reservationKey}`;
+    const [{ pid: lockerPid }] = await locker<
+      Array<{ pid: number }>
+    >`SELECT pg_backend_pid() AS pid`;
+    const expiresAt = Date.now() + 250;
+    let locked = false;
+    let publication: Promise<boolean> | undefined;
+    let publicationOutcome: Promise<ObservedOutcome<boolean>> | undefined;
+    try {
+      await locker`SELECT pg_advisory_lock(hashtextextended(${lockKey}, 0))`;
+      locked = true;
+      publication = backend.publish([
+        { key: credentialKey, value: "active", expiresAt },
+        {
+          key: reservationKey,
+          value: "published",
+          expiresAt,
+          expected: "reserved",
+        },
+      ]);
+      publicationOutcome = observePromise(publication);
+      await waitForBlockedPublisher(lockKey, lockerPid);
+      const delayMs = expiresAt - Date.now() + 30;
+      if (delayMs > 0) await Bun.sleep(delayMs);
+    } finally {
+      if (locked) {
+        await locker`SELECT pg_advisory_unlock(hashtextextended(${lockKey}, 0))`;
+      }
+      locker.release();
+      if (publicationOutcome) await publicationOutcome;
+    }
+
+    if (!publicationOutcome || !publication) throw new Error("publication did not start");
+    const result = await publicationOutcome;
+    if (!result.ok) throw result.error;
+    expect(result.value).toBe(true);
+    expect(await backend.get(credentialKey)).toBeNull();
+    const rows = await sql<Array<{ expiresAt: Date }>>`
+      SELECT expires_at AS "expiresAt"
+        FROM auth_kv_store
+       WHERE id = ${credentialKey} AND namespace = ${namespace}
+    `;
+    expect(rows[0]?.expiresAt.getTime()).toBe(expiresAt);
+    await sql`DELETE FROM auth_kv_store WHERE namespace = ${namespace}`;
   });
 
   it("never overwrites an ordinary writer that commits after the guard read", async () => {
@@ -168,12 +228,12 @@ integration("Postgres email challenge publication", () => {
          FOR UPDATE
       `;
       publication = backend.publish([
-        { key: blockerKey, value: "blocker-published", ttlMs: 60_000 },
-        { key: "challenge", value: "active", ttlMs: 60_000 },
+        { key: blockerKey, value: "blocker-published", expiresAt: Date.now() + 60_000 },
+        { key: "challenge", value: "active", expiresAt: Date.now() + 60_000 },
         {
           key: targetKey,
           value: "generation-published",
-          ttlMs: 60_000,
+          expiresAt: Date.now() + 60_000,
           expected: "generation-old",
         },
       ]);
@@ -241,9 +301,14 @@ integration("Postgres email challenge publication", () => {
            FOR UPDATE
         `;
         publication = backend.publish([
-          { key: blockerKey, value: "blocker-published", ttlMs: 60_000 },
-          { key: "challenge", value: "active", ttlMs: 60_000 },
-          { key: targetKey, value: "generation-published", ttlMs: 60_000, expected: null },
+          { key: blockerKey, value: "blocker-published", expiresAt: Date.now() + 60_000 },
+          { key: "challenge", value: "active", expiresAt: Date.now() + 60_000 },
+          {
+            key: targetKey,
+            value: "generation-published",
+            expiresAt: Date.now() + 60_000,
+            expected: null,
+          },
         ]);
         publicationOutcome = observePromise(publication);
 

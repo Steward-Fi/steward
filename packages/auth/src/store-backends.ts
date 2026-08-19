@@ -21,7 +21,8 @@ export interface StorePublishEntry {
   key: string;
   /** A null value deletes the key as part of the atomic publication. */
   value: string | null;
-  ttlMs: number;
+  /** Absolute Unix epoch deadline. Publication must never extend this expiry. */
+  expiresAt: number;
   /**
    * Optional compare-and-publish guard. Null means the key must be absent or
    * expired. If every guard already contains its desired value, publication
@@ -221,7 +222,7 @@ export class MemoryBackend implements StoreBackend {
     if (states.some((state) => !state.expected)) return false;
     for (const entry of entries) {
       if (entry.value === null) this.store.delete(entry.key);
-      else this.store.set(entry.key, { value: entry.value, expiresAt: now + entry.ttlMs });
+      else this.store.set(entry.key, { value: entry.value, expiresAt: entry.expiresAt });
     }
     return true;
   }
@@ -349,12 +350,12 @@ export class RedisBackend implements StoreBackend {
     const args = entries.flatMap((entry) => [
       entry.value === null ? "D" : "S",
       entry.value ?? "",
-      entry.ttlMs,
+      entry.expiresAt,
       entry.expected === undefined ? "0" : entry.expected === null ? "1" : "2",
       entry.expected ?? "",
     ]);
     const result = await this.client.eval(
-      "local guarded=0; local all_expected=true; local all_desired=true; for i=1,#KEYS do local j=(i-1)*5; local v=redis.call('GET',KEYS[i]); local kind=ARGV[j+4]; if kind~='0' then guarded=guarded+1; local expected=(kind=='1' and not v) or (kind=='2' and v==ARGV[j+5]); local desired=(ARGV[j+1]=='D' and not v) or (ARGV[j+1]=='S' and v==ARGV[j+2]); if not expected then all_expected=false end; if not desired then all_desired=false end end end; if guarded>0 and all_desired then return 1 end; if not all_expected then return 0 end; for i=1,#KEYS do local j=(i-1)*5; if ARGV[j+1]=='D' then redis.call('DEL',KEYS[i]) else redis.call('SET',KEYS[i],ARGV[j+2],'PX',ARGV[j+3]) end end; return 1",
+      "local guarded=0; local all_expected=true; local all_desired=true; for i=1,#KEYS do local j=(i-1)*5; local v=redis.call('GET',KEYS[i]); local kind=ARGV[j+4]; if kind~='0' then guarded=guarded+1; local expected=(kind=='1' and not v) or (kind=='2' and v==ARGV[j+5]); local desired=(ARGV[j+1]=='D' and not v) or (ARGV[j+1]=='S' and v==ARGV[j+2]); if not expected then all_expected=false end; if not desired then all_desired=false end end end; if guarded>0 and all_desired then return 1 end; if not all_expected then return 0 end; local now=redis.call('TIME'); local now_ms=tonumber(now[1])*1000+math.floor(tonumber(now[2])/1000); local ttls={}; for i=1,#KEYS do local j=(i-1)*5; if ARGV[j+1]=='S' then local ttl=tonumber(ARGV[j+3])-now_ms; if ttl<=0 then return -1 end; ttls[i]=ttl end end; for i=1,#KEYS do local j=(i-1)*5; if ARGV[j+1]=='D' then redis.call('DEL',KEYS[i]) else redis.call('SET',KEYS[i],ARGV[j+2],'PX',ttls[i]) end end; return 1",
       keys.length,
       ...keys,
       ...args,
@@ -527,7 +528,7 @@ export class PostgresBackend implements StoreBackend {
     const sql = this.getSqlClient();
     const prepared = entries.map((entry) => ({
       ...entry,
-      expiresAt: new Date(Date.now() + entry.ttlMs).toISOString(),
+      expiresAtIso: new Date(entry.expiresAt).toISOString(),
     }));
     for (let attempt = 0; attempt < 3; attempt += 1) {
       let published = true;
@@ -577,7 +578,7 @@ export class PostgresBackend implements StoreBackend {
             } else {
               await transaction`
                 INSERT INTO auth_kv_store (id, namespace, value, expires_at)
-                VALUES (${entry.key}, ${this.namespace}, ${entry.value}, ${entry.expiresAt})
+                VALUES (${entry.key}, ${this.namespace}, ${entry.value}, ${entry.expiresAtIso})
                 ON CONFLICT (id, namespace) DO UPDATE
                   SET value      = EXCLUDED.value,
                       expires_at = EXCLUDED.expires_at

@@ -32,7 +32,8 @@ class CapturingBackend implements StoreBackend {
   failReadsAfterActiveCommit = false;
   activeTransitionFailuresAfterCommit = 0;
   failFirstActivationPublishAfterMs = 0;
-  activationPublishTtls: number[] = [];
+  delaySuccessfulActivationPublishMs = 0;
+  activationPublishExpiresAt: number[] = [];
   afterActivationCommitBeforeLostAck?: () => Promise<void>;
   failDeletes = false;
   replaceGuardBeforeTransition = false;
@@ -119,15 +120,18 @@ class CapturingBackend implements StoreBackend {
 
   async publish(entries: readonly StorePublishEntry[]): Promise<boolean> {
     if (this.failWrites) throw new Error("durable store unavailable");
-    const now = Date.now();
     const activationEntry = entries.find((entry) => this.isActivation(entry.key, entry.value));
     if (activationEntry) {
-      this.activationPublishTtls.push(activationEntry.ttlMs);
-      if (this.failFirstActivationPublishAfterMs > 0 && this.activationPublishTtls.length === 1) {
+      this.activationPublishExpiresAt.push(activationEntry.expiresAt);
+      if (
+        this.failFirstActivationPublishAfterMs > 0 &&
+        this.activationPublishExpiresAt.length === 1
+      ) {
         await Bun.sleep(this.failFirstActivationPublishAfterMs);
         throw new Error("delayed durable activation failure");
       }
     }
+    const now = Date.now();
     if (this.replaceGuardBeforeTransition) {
       const guardedTarget = entries.find(
         (entry) => entry.expected !== undefined && entry.key.startsWith("email-login:active:"),
@@ -148,6 +152,9 @@ class CapturingBackend implements StoreBackend {
     });
     if (states.length > 0 && states.every((state) => state.desired)) return true;
     if (states.some((state) => !state.expected)) return false;
+    if (activationEntry && this.delaySuccessfulActivationPublishMs > 0) {
+      await Bun.sleep(this.delaySuccessfulActivationPublishMs);
+    }
     if (
       this.failActiveWrites &&
       entries.some((entry) => this.isActivation(entry.key, entry.value))
@@ -156,7 +163,7 @@ class CapturingBackend implements StoreBackend {
     }
     for (const entry of entries) {
       if (entry.value === null) this.values.delete(entry.key);
-      else this.values.set(entry.key, { value: entry.value, expiresAt: now + entry.ttlMs });
+      else this.values.set(entry.key, { value: entry.value, expiresAt: entry.expiresAt });
     }
     if (
       this.failActiveWritesAfterCommit &&
@@ -882,8 +889,8 @@ describe("fail-closed magic-link delivery", () => {
       tenantId: "tenant-a",
     });
 
-    expect(backend.activationPublishTtls).toHaveLength(2);
-    expect(backend.activationPublishTtls[1]!).toBeLessThan(backend.activationPublishTtls[0]! - 80);
+    expect(backend.activationPublishExpiresAt).toHaveLength(2);
+    expect(backend.activationPublishExpiresAt[1]).toBe(backend.activationPublishExpiresAt[0]);
     for (const entry of backend.values.values()) {
       expect(entry.expiresAt).toBeLessThanOrEqual(expiresAt.getTime());
     }
@@ -892,9 +899,9 @@ describe("fail-closed magic-link delivery", () => {
     auth.destroy();
   });
 
-  it("rejects a publish retry after the challenge absolute expiry", async () => {
+  it("does not extend an OTP after a delayed successful publish passes its advertised expiry", async () => {
     const backend = new CapturingBackend();
-    backend.failFirstActivationPublishAfterMs = 80;
+    backend.delaySuccessfulActivationPublishMs = 80;
     let text = "";
     const auth = buildAuth(
       {
@@ -907,12 +914,43 @@ describe("fail-closed magic-link delivery", () => {
       { tokenTtlMs: 40 },
     );
 
-    await expect(
-      auth.sendOtp("otp-expired-retry@example.com", { tenantId: "tenant-a" }),
-    ).rejects.toThrow(EmailDeliveryError);
-    expect(backend.activationPublishTtls).toHaveLength(1);
+    const { expiresAt } = await auth.sendOtp("otp-expired-publish@example.com", {
+      tenantId: "tenant-a",
+    });
+    expect(Date.now()).toBeGreaterThan(expiresAt.getTime());
+    expect(backend.activationPublishExpiresAt).toHaveLength(1);
     const code = text.match(/\b(\d{6})\b/)?.[1] ?? "";
-    expect(await auth.verifyOtp("otp-expired-retry@example.com", code, "tenant-a")).toBe(false);
+    expect(await auth.verifyOtp("otp-expired-publish@example.com", code, "tenant-a")).toBe(false);
+    auth.destroy();
+  });
+
+  it("does not extend a magic link after a delayed successful publish passes its advertised expiry", async () => {
+    const backend = new CapturingBackend();
+    backend.delaySuccessfulActivationPublishMs = 80;
+    let text = "";
+    const auth = buildAuth(
+      {
+        send: async (_to, _subject, body) => {
+          text = body;
+          return { provider: "test", id: "accepted-before-expired-magic-publish" };
+        },
+      },
+      backend,
+      { tokenTtlMs: 40 },
+    );
+
+    const { expiresAt } = await auth.sendMagicLink("magic-expired-publish@example.com", {
+      tenantId: "tenant-a",
+    });
+    expect(Date.now()).toBeGreaterThan(expiresAt.getTime());
+    const token = text.match(/[?&]token=([a-f0-9]{64})/)?.[1] ?? "";
+    const code = text.match(/\b(\d{6})\b/)?.[1] ?? "";
+    expect(
+      await auth.verifyMagicLink(token, "magic-expired-publish@example.com", "tenant-a"),
+    ).toMatchObject({ valid: false });
+    expect(
+      await auth.verifyEmailLoginCode("magic-expired-publish@example.com", code, "tenant-a"),
+    ).toMatchObject({ valid: false });
     auth.destroy();
   });
 
