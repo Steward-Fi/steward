@@ -5,14 +5,16 @@ import {
   agentSigners,
   agents,
   auditEvents,
-  closeDb,
   getDb,
   tenants,
 } from "@stwd/db";
-import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { and, asc, eq, inArray, sql } from "drizzle-orm";
 import { Hono } from "hono";
 import type { AppVariables } from "../services/context";
+import {
+  cleanupAgentBehaviorTestDatabase,
+  setupAgentBehaviorTestDatabase,
+} from "./agent-behavior-test-database";
 
 const TENANT_ID = `agent-quorums-tenant-${Date.now()}`;
 const AGENT_ID = `agent-quorums-agent-${Date.now()}`;
@@ -52,14 +54,10 @@ describe("agent key quorum API", () => {
   let quorumId = "";
 
   beforeAll(async () => {
-    process.env.STEWARD_PGLITE_MEMORY = "true";
     process.env.STEWARD_MASTER_PASSWORD = "agent-quorums-master-password";
     process.env.STEWARD_AUDIT_HMAC_KEY = "agent-quorums-audit-hmac-key-with-enough-entropy";
     __resetAuditHmacKeyCacheForTests();
-    const { db, client } = await createPGLiteDb("memory://");
-    setPGLiteOverride(db, async () => {
-      await client.close();
-    });
+    await setupAgentBehaviorTestDatabase();
     await getDb().insert(tenants).values({
       id: TENANT_ID,
       name: "Agent Quorums Tenant",
@@ -120,7 +118,7 @@ describe("agent key quorum API", () => {
 
   afterAll(async () => {
     try {
-      await closeDb();
+      await cleanupAgentBehaviorTestDatabase(TENANT_ID);
     } finally {
       for (const [name, value] of originalEnv) {
         if (value === undefined) delete process.env[name];

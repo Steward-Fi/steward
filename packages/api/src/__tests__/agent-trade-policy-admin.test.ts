@@ -4,14 +4,16 @@ import {
   agentPolicies,
   agents,
   auditEvents,
-  closeDb,
   getDb,
   tenants,
 } from "@stwd/db";
-import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { and, asc, eq, sql } from "drizzle-orm";
 import { Hono } from "hono";
 import type { AppVariables } from "../services/context";
+import {
+  cleanupAgentBehaviorTestDatabase,
+  setupAgentBehaviorTestDatabase,
+} from "./agent-behavior-test-database";
 
 /**
  * SEC-208 regression: PUT /agents/:agentId/policy is the only writer of the
@@ -23,7 +25,6 @@ import type { AppVariables } from "../services/context";
 const TENANT_ID = `agent-trade-policy-admin-${Date.now()}`;
 const AGENT_ID = `agent-trade-policy-admin-agent-${Date.now()}`;
 const AUDIT_TRIGGER_SUFFIX = `${process.pid}_${Math.random().toString(36).slice(2, 8)}`;
-const USE_REAL_POSTGRES = Boolean(process.env.DATABASE_URL);
 const MUTATED_ENV = [
   "STEWARD_PGLITE_MEMORY",
   "STEWARD_MASTER_PASSWORD",
@@ -68,15 +69,7 @@ describe("agent trade policy admin path (SEC-208)", () => {
     process.env.STEWARD_MASTER_PASSWORD = "agent-trade-policy-admin-master-password";
     process.env.STEWARD_AUDIT_HMAC_KEY = "agent-trade-policy-admin-audit-hmac-key-entropy";
     __resetAuditHmacKeyCacheForTests();
-    if (!USE_REAL_POSTGRES) {
-      process.env.STEWARD_PGLITE_MEMORY = "true";
-      const { db, client } = await createPGLiteDb("memory://");
-      setPGLiteOverride(db, async () => {
-        await client.close();
-      });
-    } else {
-      delete process.env.STEWARD_PGLITE_MEMORY;
-    }
+    await setupAgentBehaviorTestDatabase();
     await getDb().insert(tenants).values({
       id: TENANT_ID,
       name: "Trade Policy Admin Tenant",
@@ -92,14 +85,7 @@ describe("agent trade policy admin path (SEC-208)", () => {
 
   afterAll(async () => {
     try {
-      if (USE_REAL_POSTGRES) {
-        await getDb().delete(agentPolicies).where(eq(agentPolicies.agentId, AGENT_ID));
-        await getDb().delete(auditEvents).where(eq(auditEvents.tenantId, TENANT_ID));
-        await getDb().execute(sql`DELETE FROM audit_chain_heads WHERE tenant_id = ${TENANT_ID}`);
-        await getDb().delete(agents).where(eq(agents.id, AGENT_ID));
-        await getDb().delete(tenants).where(eq(tenants.id, TENANT_ID));
-      }
-      await closeDb();
+      await cleanupAgentBehaviorTestDatabase(TENANT_ID);
     } finally {
       for (const [name, value] of originalEnv) {
         if (value === undefined) delete process.env[name];

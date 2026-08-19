@@ -3,15 +3,17 @@ import {
   __resetAuditHmacKeyCacheForTests,
   agents,
   auditEvents,
-  closeDb,
   getDb,
   policies,
   tenants,
 } from "@stwd/db";
-import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { and, asc, eq, inArray, sql } from "drizzle-orm";
 import { Hono } from "hono";
 import type { AppVariables } from "../services/context";
+import {
+  cleanupAgentBehaviorTestDatabase,
+  setupAgentBehaviorTestDatabase,
+} from "./agent-behavior-test-database";
 
 const TENANT_ID = `policy-rules-tenant-${Date.now()}`;
 const AGENT_ID = `policy-rules-agent-${Date.now()}`;
@@ -44,15 +46,11 @@ describe("agent policy rule CRUD", () => {
   let app: Awaited<ReturnType<typeof makeApp>>;
 
   beforeAll(async () => {
-    process.env.STEWARD_PGLITE_MEMORY = "true";
     process.env.STEWARD_MASTER_PASSWORD = "agent-policy-rules-master-password";
     process.env.STEWARD_AUDIT_HMAC_KEY =
       "agent-policy-rules-test-audit-hmac-key-0123456789abcdef0123456789";
     __resetAuditHmacKeyCacheForTests();
-    const { db, client } = await createPGLiteDb("memory://");
-    setPGLiteOverride(db, async () => {
-      await client.close();
-    });
+    await setupAgentBehaviorTestDatabase();
     await getDb().insert(tenants).values({
       id: TENANT_ID,
       name: "Policy Rules Tenant",
@@ -88,7 +86,7 @@ describe("agent policy rule CRUD", () => {
 
   afterAll(async () => {
     try {
-      await closeDb();
+      await cleanupAgentBehaviorTestDatabase(TENANT_ID);
     } finally {
       for (const [name, value] of originalEnv) {
         if (value === undefined) delete process.env[name];

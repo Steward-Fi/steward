@@ -6,7 +6,6 @@ import {
   agentWallets,
   approvalQueue,
   auditEvents,
-  closeDb,
   encryptedChainKeys,
   encryptedKeys,
   getDb,
@@ -14,10 +13,13 @@ import {
   tenants,
   transactions,
 } from "@stwd/db";
-import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { and, asc, eq, inArray, sql } from "drizzle-orm";
 import { Hono } from "hono";
 import type { AppVariables } from "../services/context";
+import {
+  cleanupAgentBehaviorTestDatabase,
+  setupAgentBehaviorTestDatabase,
+} from "./agent-behavior-test-database";
 
 /**
  * SEC-209 regression: minting agent tokens, replacing an agent's vault policy
@@ -65,15 +67,11 @@ async function makeApp(authMode: AuthMode) {
 
 describe("agent admin mutations require human session + MFA (SEC-209)", () => {
   beforeAll(async () => {
-    process.env.STEWARD_PGLITE_MEMORY = "true";
     process.env.STEWARD_MASTER_PASSWORD = "agent-admin-mutations-master-password";
     process.env.STEWARD_JWT_SECRET = "agent-admin-mutations-jwt-secret-with-enough-entropy";
     process.env.STEWARD_AUDIT_HMAC_KEY = "agent-admin-mutations-audit-hmac-key-entropy";
     __resetAuditHmacKeyCacheForTests();
-    const { db, client } = await createPGLiteDb("memory://");
-    setPGLiteOverride(db, async () => {
-      await client.close();
-    });
+    await setupAgentBehaviorTestDatabase();
     await getDb().insert(tenants).values({
       id: TENANT_ID,
       name: "Admin Mutations Tenant",
@@ -89,7 +87,7 @@ describe("agent admin mutations require human session + MFA (SEC-209)", () => {
 
   afterAll(async () => {
     try {
-      await closeDb();
+      await cleanupAgentBehaviorTestDatabase(TENANT_ID);
     } finally {
       for (const [name, value] of originalEnv) {
         if (value === undefined) delete process.env[name];

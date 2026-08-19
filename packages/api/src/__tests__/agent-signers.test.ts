@@ -6,15 +6,17 @@ import {
   agentSigners,
   agents,
   auditEvents,
-  closeDb,
   getDb,
   policies,
   tenants,
 } from "@stwd/db";
-import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { and, asc, eq, inArray, sql } from "drizzle-orm";
 import { Hono } from "hono";
 import type { AppVariables } from "../services/context";
+import {
+  cleanupAgentBehaviorTestDatabase,
+  setupAgentBehaviorTestDatabase,
+} from "./agent-behavior-test-database";
 
 const TENANT_ID = `agent-signers-tenant-${Date.now()}`;
 const AGENT_ID = `agent-signers-agent-${Date.now()}`;
@@ -54,16 +56,12 @@ describe("agent signer API", () => {
   let signerId = "";
 
   beforeAll(async () => {
-    process.env.STEWARD_PGLITE_MEMORY = "true";
     process.env.STEWARD_MASTER_PASSWORD = "agent-signers-master-password";
     process.env.STEWARD_AUDIT_HMAC_KEY = "agent-signers-audit-hmac-key-with-enough-entropy";
     process.env.STEWARD_SIGNER_CREDENTIAL_PEPPER =
       "agent-signers-credential-pepper-with-enough-entropy";
     __resetAuditHmacKeyCacheForTests();
-    const { db, client } = await createPGLiteDb("memory://");
-    setPGLiteOverride(db, async () => {
-      await client.close();
-    });
+    await setupAgentBehaviorTestDatabase();
     await getDb().insert(tenants).values({
       id: TENANT_ID,
       name: "Agent Signers Tenant",
@@ -98,7 +96,7 @@ describe("agent signer API", () => {
 
   afterAll(async () => {
     try {
-      await closeDb();
+      await cleanupAgentBehaviorTestDatabase(TENANT_ID);
     } finally {
       for (const [name, value] of originalEnv) {
         if (value === undefined) delete process.env[name];
