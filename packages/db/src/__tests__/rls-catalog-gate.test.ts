@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { assessRlsCatalogSnapshot, type RlsCatalogRow } from "../rls-catalog-gate";
+import {
+  assessRlsCatalogSnapshot,
+  inspectRlsCatalog,
+  type RlsCatalogRow,
+} from "../rls-catalog-gate";
 
 function row(table_name: string, overrides: Partial<RlsCatalogRow> = {}): RlsCatalogRow {
   return {
@@ -54,6 +58,30 @@ describe("SEC-169 catalog activation gate", () => {
         [],
       ),
     ).toThrow("RLS_CATALOG_UNSAFE_APPLICATION_ROLE");
+  });
+
+  test("rejects active SUPERUSER and table-owner application roles", () => {
+    const active = { rls_enabled: true, rls_forced: true, policy_count: 1 };
+    expect(() =>
+      assessRlsCatalogSnapshot([row("a", { ...active, role_super: true })], ["a"], []),
+    ).toThrow("RLS_CATALOG_UNSAFE_APPLICATION_ROLE: superuser");
+    expect(() =>
+      assessRlsCatalogSnapshot([row("a", { ...active, owned_by_current_role: true })], ["a"], []),
+    ).toThrow("RLS_CATALOG_UNSAFE_APPLICATION_ROLE: owner:a");
+  });
+
+  test("rejects an invalid schema before querying the catalog", async () => {
+    let queried = false;
+    const client = {
+      async unsafe() {
+        queried = true;
+        return [];
+      },
+    };
+    await expect(inspectRlsCatalog(client, "public; SET ROLE owner")).rejects.toThrow(
+      "RLS_CATALOG_SCHEMA_INVALID",
+    );
+    expect(queried).toBe(false);
   });
 
   test("rejects inventory drift, protected global tables, and orphan partitions", () => {
