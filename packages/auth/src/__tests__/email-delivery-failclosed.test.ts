@@ -31,6 +31,7 @@ class CapturingBackend implements StoreBackend {
   failActiveWritesAfterCommit = false;
   failReadsAfterActiveCommit = false;
   activeTransitionFailuresAfterCommit = 0;
+  afterActivationCommitBeforeLostAck?: () => Promise<void>;
   failDeletes = false;
   replaceGuardBeforeTransition = false;
 
@@ -152,6 +153,7 @@ class CapturingBackend implements StoreBackend {
       entries.some((entry) => this.isActivation(entry.key, entry.value)) &&
       this.activeTransitionFailuresAfterCommit++ === 0
     ) {
+      await this.afterActivationCommitBeforeLostAck?.();
       throw new Error("durable activation response lost");
     }
     return true;
@@ -825,6 +827,104 @@ describe("fail-closed magic-link delivery", () => {
     const code = text.match(/\b(\d{6})\b/)?.[1] ?? "";
     expect(await auth.verifyOtp("otp-ack-loss@example.com", code, "tenant-a")).toBe(true);
     auth.destroy();
+  });
+
+  it("confirms a magic-link commit after lost acknowledgement and a newer failed reservation", async () => {
+    const backend = new CapturingBackend();
+    let firstText = "";
+    let secondProviderStarted!: () => void;
+    const secondProviderEntered = new Promise<void>((resolve) => {
+      secondProviderStarted = resolve;
+    });
+    let rejectSecond!: (reason: unknown) => void;
+    const secondProviderResult = new Promise<never>((_resolve, reject) => {
+      rejectSecond = reject;
+    });
+    const first = buildAuth(
+      {
+        send: async (_to, _subject, body) => {
+          firstText = body;
+          backend.failActiveWritesAfterCommit = true;
+          return { provider: "test", id: "first-committed-before-ack-loss" };
+        },
+      },
+      backend,
+    );
+    const second = buildAuth(
+      {
+        send: async () => {
+          secondProviderStarted();
+          return secondProviderResult;
+        },
+      },
+      backend,
+    );
+    let secondSend: Promise<unknown> | undefined;
+    backend.afterActivationCommitBeforeLostAck = async () => {
+      secondSend = second.sendMagicLink("ack-reservation@example.com", {
+        tenantId: "tenant-a",
+      });
+      await secondProviderEntered;
+    };
+
+    await first.sendMagicLink("ack-reservation@example.com", { tenantId: "tenant-a" });
+    rejectSecond(new Error("SECOND_PROVIDER_SECRET_CANARY"));
+    if (!secondSend) throw new Error("newer issuance did not start");
+    await expect(secondSend).rejects.toThrow(EmailDeliveryError);
+
+    const token = firstText.match(/[?&]token=([a-f0-9]{64})/)?.[1] ?? "";
+    expect(
+      await first.verifyMagicLink(token, "ack-reservation@example.com", "tenant-a"),
+    ).toMatchObject({ valid: true });
+    first.destroy();
+    second.destroy();
+  });
+
+  it("confirms an OTP commit after lost acknowledgement and a newer failed reservation", async () => {
+    const backend = new CapturingBackend();
+    let firstText = "";
+    let secondProviderStarted!: () => void;
+    const secondProviderEntered = new Promise<void>((resolve) => {
+      secondProviderStarted = resolve;
+    });
+    let rejectSecond!: (reason: unknown) => void;
+    const secondProviderResult = new Promise<never>((_resolve, reject) => {
+      rejectSecond = reject;
+    });
+    const first = buildAuth(
+      {
+        send: async (_to, _subject, body) => {
+          firstText = body;
+          backend.failActiveWritesAfterCommit = true;
+          return { provider: "test", id: "first-otp-committed-before-ack-loss" };
+        },
+      },
+      backend,
+    );
+    const second = buildAuth(
+      {
+        send: async () => {
+          secondProviderStarted();
+          return secondProviderResult;
+        },
+      },
+      backend,
+    );
+    let secondSend: Promise<unknown> | undefined;
+    backend.afterActivationCommitBeforeLostAck = async () => {
+      secondSend = second.sendOtp("otp-ack-reservation@example.com", { tenantId: "tenant-a" });
+      await secondProviderEntered;
+    };
+
+    await first.sendOtp("otp-ack-reservation@example.com", { tenantId: "tenant-a" });
+    rejectSecond(new Error("SECOND_PROVIDER_SECRET_CANARY"));
+    if (!secondSend) throw new Error("newer OTP issuance did not start");
+    await expect(secondSend).rejects.toThrow(EmailDeliveryError);
+
+    const code = firstText.match(/\b(\d{6})\b/)?.[1] ?? "";
+    expect(await first.verifyOtp("otp-ack-reservation@example.com", code, "tenant-a")).toBe(true);
+    first.destroy();
+    second.destroy();
   });
 
   it("keeps only the newest concurrently published challenge across independent instances", async () => {
