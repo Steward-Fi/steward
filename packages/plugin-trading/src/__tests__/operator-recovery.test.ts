@@ -116,7 +116,7 @@ async function seedAgent(opts: {
   agentId: string;
   approvedAddresses?: string[];
 }) {
-  // api_key_hash and owner_address are unique per tenant (PR #79 constraints),
+  // api_key_hash and owner_address are unique per tenant,
   // so derive them from the tenant id rather than reusing fixed values.
   await getDb()
     .insert(tenants)

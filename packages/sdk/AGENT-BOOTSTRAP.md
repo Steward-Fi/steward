@@ -1,4 +1,4 @@
-# Agent Bootstrap — keypair-only boot (Pillar A / lane A3)
+# Agent Bootstrap — keypair-only boot
 
 The `@stwd/sdk` **agent client** lets an Eliza/agent process boot holding
 **nothing but its P-256 identity keypair** (plus the Steward base URL) and obtain

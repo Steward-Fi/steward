@@ -14,7 +14,7 @@ import { join } from "node:path";
 //      stale message cannot burn a fresh nonce.
 //
 // This mirrors the existing structural style of auth-nonce-binding.test.ts and
-// fails on the pre-fix source (which has no expirationTime/notBefore handling).
+// rejects implementations without expirationTime and notBefore handling.
 
 const authSource = readFileSync(join(import.meta.dir, "..", "routes", "auth.ts"), "utf8");
 

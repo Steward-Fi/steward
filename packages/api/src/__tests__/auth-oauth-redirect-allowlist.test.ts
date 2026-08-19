@@ -19,7 +19,7 @@ import { authRoutes, clearOAuthTokenKeyStoreForTests } from "../routes/auth";
  * NOTE on test isolation:
  *   Uses the ambient `DATABASE_URL` from the `Integration Tests (Postgres)`
  *   CI job rather than swapping pglite into the global handle. Closing a
- *   pglite handle in `afterAll` previously poisoned every subsequent test
+ *   PGLite handle in `afterAll` must not poison subsequent tests
  *   in `bun test packages/api` with `error: PGlite is closed`. We use a
  *   unique tenant prefix and clean up the rows in `afterAll` instead.
  */

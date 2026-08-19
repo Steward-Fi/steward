@@ -1,5 +1,5 @@
 /**
- * PR4 migration 0082 schema-invariant tests. Mirrors
+ * governed-execution migration 0082 schema-invariant tests. Mirrors
  * exact-approval-migration.test.ts: asserts the raw-SQL-only invariants that
  * drizzle-kit cannot express survive migration, so accidental removal fails CI.
  *
@@ -24,7 +24,7 @@ let client: PGlite;
 // `createPGLiteDb` runs the FULL migration set (including 0082) on init, so we
 // assert against the already-migrated schema — no manual re-apply (that would
 // double-create the enums/tables). This mirrors the sibling migration tests.
-describe("PR4 execution-authorization-v2 migration (0082)", () => {
+describe("governed-execution execution-authorization-v2 migration (0082)", () => {
   beforeAll(async () => {
     ({ client } = await createPGLiteDb("memory://"));
   });

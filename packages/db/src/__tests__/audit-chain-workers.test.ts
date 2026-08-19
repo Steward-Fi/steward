@@ -1,7 +1,7 @@
 /**
  * SEC-166: pin the Workers (neon-http) audit-append posture.
  *
- * CLOUDFLARE.md previously claimed advisory locks are unused; in reality the
+ * The Workers contract must account for advisory locks used by the
  * audit chain acquires `pg_advisory_xact_lock` on every non-PGLite append
  * (`appendAuditEvent`, `withTenantAuditedTransaction`). On Workers the point
  * is moot today: drizzle's neon-http driver throws

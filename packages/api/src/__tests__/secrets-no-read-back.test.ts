@@ -1,7 +1,7 @@
 /**
  * secrets-no-read-back.test.ts — static proof that the /secrets HTTP surface
- * cannot return a plaintext secret value (sovereign-custody Pillar A / A2,
- * converged from PR #245 onto the existing SecretVault plane).
+ * cannot return a plaintext secret value. SecretVault is the canonical
+ * sovereign-custody plane.
  *
  * The property: once stored, NO API path returns a secret's plaintext. Secrets
  * are write + exercise only — values enter via POST/PUT/rotate and are consumed

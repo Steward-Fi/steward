@@ -1,5 +1,5 @@
 /**
- * manifest.ts — the per-agent capability MANIFEST resolver (lane A1, scope 2).
+ * Per-agent capability manifest resolver.
  *
  * A manifest is the declarative view of what an agent may request, expressed in
  * the abstract `provider:kind[:agent]` grammar (provider-modes.ts). It is NOT a

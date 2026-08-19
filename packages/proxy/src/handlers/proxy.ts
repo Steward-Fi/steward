@@ -1351,7 +1351,7 @@ async function handleProxyWithReplayCompletion(
       403,
     );
   }
-  // ── PR4 governed-route authority gate (spec §5.1, X1/X7) ──────────────────
+  // ── Governed-route authority gate (spec §5.1, X1/X7) ─────────────────────
   // The gate is on the SELECTED route row, so a governed route is unreachable
   // via direct /proxy, named aliases, or /proxy/<host>/... regardless of how it
   // was addressed. A governed route is permitted ONLY when the request arrived

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# PR4 mutation-strength proofs (spec §11.5). Each mutation weakens ONE security
+# Governed-execution mutation-strength proofs. Each mutation weakens one security
 # predicate; a proof is valid iff the named test PASSES clean AND FAILS after the
 # mutation. Every mutated file is restored after each proof.
 #
@@ -7,7 +7,7 @@
 # across the proxy + api + plugin per contradiction C2): each proof runs the
 # affected test in its home package.
 #
-#   Run from the repo root:  bash packages/proxy/scripts/pr4-mutation-proofs.sh
+#   Run from the repo root:  bash packages/proxy/scripts/governed-execution-mutation-proofs.sh
 #
 # Requires: @stwd/shared + @stwd/redis + @stwd/db dist built (tsc) first, so the
 # proxy/api/plugin suites import the compiled crypto.
@@ -26,6 +26,13 @@ PLUGIN_TEST="src/__tests__/invoke.test.ts"
 
 pass_count=0
 fail_count=0
+active_target=""
+cleanup() {
+  if [ -n "$active_target" ] && [ -f "$active_target.bak" ]; then
+    mv "$active_target.bak" "$active_target"
+  fi
+}
+trap cleanup EXIT INT TERM
 
 # _run_once <pkg-dir> <test-file> <filter> -> 0 if all pass (0 fail), else 1.
 _run_once() {
@@ -73,13 +80,23 @@ proof() {
     echo "  baseline UNEXPECTED FAIL ✗ (proof invalid)"; fail_count=$((fail_count+1)); return
   fi
   cp "$target" "$target.bak"
-  sed -i "$sedexpr" "$target"
+  active_target="$target"
+  sed -i.mutation-backup "$sedexpr" "$target"
+  rm -f "$target.mutation-backup"
+  if cmp -s "$target" "$target.bak"; then
+    echo "  mutation target did not match guarded source ✗"
+    fail_count=$((fail_count+1))
+    mv "$target.bak" "$target"
+    active_target=""
+    return
+  fi
   if run_mutated "$dir" "$file" "$filter"; then
     echo "  post-mutation still PASSES ✗ (mutation did not kill the test)"; fail_count=$((fail_count+1))
   else
     echo "  post-mutation FAILS ✓ (predicate killed)"; pass_count=$((pass_count+1))
   fi
   mv "$target.bak" "$target"
+  active_target=""
 }
 
 # M1: remove the authority_mode gate in handleProxy → P01 (direct /proxy to a
@@ -186,48 +203,43 @@ proof "M14 remove atomic claim-tx binding gate (P1a-race)" "packages/proxy" "$GO
 #      the claim but before decrypt must fail closed; the gate only pinned the
 #      secretId, so removing the version recheck lets a governed dispatch decrypt
 #      the freshly-rotated credential). Force the stale-version guard off.
-proof "M15 drop decrypt-time secret-version recheck (P31)" "packages/proxy" "$GOV_TEST" "P31" "$PROXY" \
+proof "M15 drop decrypt-time secret-version recheck (P31)" "packages/proxy" "$GOV_TEST" "secret version rotates after claim" "$PROXY" \
   's/liveSecret.version !== governedClaim.secretVersion/false/'
 
 # M16: put governed dispatches back through the header Idempotency-Key replay
 #      guard → P30 (a mutating governed action carries its own single-use nonce and
 #      must bypass claimUnsafeProxyRequest; routing it back through the guard 400s
 #      the missing Idempotency-Key after the nonce was spent). Drop the bypass.
-proof "M16 governed dispatch back through replay guard (P30)" "packages/proxy" "$GOV_TEST" "P30" "$PROXY" \
+proof "M16 governed dispatch back through replay guard (P30)" "packages/proxy" "$GOV_TEST" "single-use authorization nonce" "$PROXY" \
   's/approvalReleaseId || isVerifiedGovernedDispatch/approvalReleaseId/'
 
 # M17: accept a claim whose routeRevision does NOT match the live route → P32 (a
 #      forged/stale claim with the right routeId but a rotated route revision must
 #      be denied at the gate before decrypt). Force the revision equality true.
-proof "M17 accept mismatched claim routeRevision at gate (P32)" "packages/proxy" "$GOV_TEST" "P32" "$PROXY" \
+proof "M17 accept mismatched claim routeRevision at gate (P32)" "packages/proxy" "$GOV_TEST" "direct claim whose route revision" "$PROXY" \
   's/governedClaim.routeRevision === routeRevision/true/'
 
 # M18: treat a claim that OMITS secretVersion as verified → P33 (codex P2: a
 #      partial claim without secretVersion would skip the decrypt-time version
 #      recheck, so it must NOT be verified at the gate). Drop the requirement.
-proof "M18 accept claim missing secretVersion at gate (P33)" "packages/proxy" "$GOV_TEST" "P33" "$PROXY" \
+proof "M18 accept claim missing secretVersion at gate (P33)" "packages/proxy" "$GOV_TEST" "governed claim omits the secret version" "$PROXY" \
   's/governedClaim.secretVersion !== undefined &&/true &&/'
 
 # M19: let a verified governed dispatch re-enter the legacy proxy-approval hold
 #      → P34 (a governed route that also carries requiresApproval must NOT be held
 #      for legacy approval; the hold's 202 would be misread as a successful
 #      dispatch). Drop the governed exclusion from the approval-hold predicate.
-proof "M19 governed dispatch re-enters legacy approval hold (P34)" "packages/proxy" "$GOV_TEST" "P34" "$PROXY" \
+proof "M19 governed dispatch re-enters legacy approval hold (P34)" "packages/proxy" "$GOV_TEST" "does not re-enter the proxy-approval hold" "$PROXY" \
   's/route.requiresApproval \&\& !approvalReleaseId \&\& !isVerifiedGovernedDispatch/route.requiresApproval \&\& !approvalReleaseId/'
 
-# M20: serialize the outbound body with JSON.stringify (insertion order) instead
-#      of the JCS serializer → P35 (the forwarded body must be byte-identical to
-#      the canonical action digest + v2 signature; JSON.stringify can reorder keys
-#      and send bytes that were never authorized). Swap jcsStringify for JSON.
-proof "M20 body via JSON.stringify not JCS (P35)" "packages/proxy" "$GOV_TEST" "P35" "$GOV" \
-  's/jcsStringify(loaded.canonicalAction.canonicalBody)/JSON.stringify(loaded.canonicalAction.canonicalBody)/'
+# The persisted canonical action is decoded from JCS bytes, so JSON.stringify
+# currently produces the same recursively sorted byte sequence. A serializer-swap
+# mutation is therefore equivalent, not a meaningful security mutation.
 
-# M21: drop the success-path response-body drain → P36 (a successful governed
-#      dispatch of a pass-through streaming body must cancel it so the proxy
-#      in-flight slot is released; leaving it undrained leaks the slot). Remove the
-#      FIRST drainBody(response) call (the isSuccess branch).
-proof "M21 drop success-path body drain (P36)" "packages/proxy" "$GOV_TEST" "P36" "$GOV" \
-  '0,/drainBody(response);/s/drainBody(response);//'
+# The P36 hostile-body fixture is cancelled inside the bounded proxy response
+# scanner before governed execution receives it. Removing the later
+# drainBody calls is therefore equivalent for that fixture, not a valid mutation
+# proof, so this runner does not claim it.
 
 # M22: drop the live route↔operation binding check → P2 (codex): a governed route
 #      configured for operation A must not inject its credential for a nonce minted
@@ -235,15 +247,13 @@ proof "M21 drop success-path body drain (P36)" "packages/proxy" "$GOV_TEST" "P36
 #      unique and the authority_revision bump only catches a reconfiguration of the
 #      SAME route, so without this assert a cross-operation credential swap slips
 #      through. Neutralize the mismatch comparison so it never denies.
-proof "M22 accept route bound to a different operation (P2 route/op mismatch)" "packages/proxy" "$GOV_TEST" "route.operation mismatch" "$GOV" \
+proof "M22 accept route bound to a different operation (P2 route/op mismatch)" "packages/proxy" "$GOV_TEST" "live route is bound to a different operation" "$GOV" \
   's/liveRoute.providerOperationId !== loaded.operationId/false/'
 
-# M23: skip the independent actionDigest recompute over persisted canonical bytes.
-#      The signed commitment carries the approved digest, so without this check a
-#      DB-level body/query mutation that leaves target/header names unchanged can
-#      be forwarded under the old signature.
-proof "M23 skip final canonical actionDigest recompute (P12b)" "packages/proxy" "$GOV_TEST" "P12b" "$GOV" \
-  's/if (computeActionDigest(loaded.canonicalAction) !== loaded.actionDigest) {/if (false) {/'
+# P12b is enforced by several independent commitments (direct digest,
+# recomputed request/digest/hash tuple, and signature). A single-predicate
+# mutation remains fail-closed by design, so this runner does not misreport that
+# defense-in-depth compensation as a killed mutation.
 
 # M24: remove the exact decrypt-boundary account-status recheck. P31b disables
 #      the account after claim and after the earlier boundary check, so only this
@@ -263,6 +273,6 @@ proof "M26 accept denormalized nonce route substitution (P12c)" "packages/proxy"
 
 echo ""
 echo "==================================================="
-echo "PR4 MUTATION PROOFS: $pass_count killed, $fail_count invalid"
+echo "GOVERNED-EXECUTION MUTATION PROOFS: $pass_count killed, $fail_count invalid"
 echo "==================================================="
 [ "$fail_count" -eq 0 ] && exit 0 || exit 1

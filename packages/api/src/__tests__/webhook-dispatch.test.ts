@@ -88,7 +88,7 @@ mock.module("@stwd/db", () => ({
 // NOTE: bun's mock.module replaces the ENTIRE module and is sticky per-process,
 // so this mock must re-export every binding the module-under-test (and any
 // sibling test running in the same process) imports from @stwd/webhooks.
-// Omitting the secret-codec helpers previously cascaded into "export not found"
+// The secret-codec helpers are required to keep the module mock structurally complete.
 // failures across the webhook + approvals API suites. We mock only the
 // dispatcher and pass the real secret-codec functions through.
 mock.module("@stwd/webhooks", () => ({

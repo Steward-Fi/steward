@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * PR6 provider-authority GOLDEN PATH — single-command FAKE proof (§2.7, §5.4).
+ * Provider-authority golden path — single-command fake-provider proof (§2.7, §5.4).
  *
  * WHAT THIS IS
  * ------------
@@ -190,7 +190,7 @@ function main() {
 
   // 5) verifier-report.txt — the E2E's evidence round-trip (M09/M15) runs the
   //    offline verifier for the clean + tamper cases. We surface a summary; the
-  //    PR5 provider-case-evidence integration test is the exhaustive verifier
+  //    evidence provider-case-evidence integration test is the exhaustive verifier
   //    proof (clean PASS + tamper FAIL for every fixture).
   const verifierReport =
     `provider-authority verifier summary (fake run)\n` +

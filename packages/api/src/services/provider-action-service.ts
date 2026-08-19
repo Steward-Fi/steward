@@ -1,5 +1,5 @@
 /**
- * provider-action-service.ts — the PR2 provider-action authority pipeline.
+ * provider-action-service.ts — the provider-action authority pipeline.
  *
  * Given a verified provider principal + a validated GitHub action build, this
  * service runs the transactional authority pipeline (spec §6.4):
@@ -22,7 +22,7 @@
  * a reused key with any different binding is REPLAY_IDEMPOTENCY_CONFLICT (409).
  *
  * The service NEVER decrypts a credential, calls the proxy, mints execution
- * authorization, or performs network I/O. That is PR4.
+ * authorization, or performs network I/O. Execution and dispatch own those operations.
  */
 
 import { randomUUID } from "node:crypto";
@@ -117,7 +117,7 @@ export type ConcreteProviderActionBuild =
   | GenericHttpActionBuild;
 
 /**
- * #201: a DEFERRED build for a config-driven (generic-http) operation. The route
+ * A deferred build for a config-driven (generic-http) operation. The route
  * cannot canonicalize it because the operator-authored descriptor lives on the
  * resolved provider_operations row. The service finalizes it (loads + validates
  * the descriptor, then `buildGenericHttpAction`) immediately after scope
@@ -195,7 +195,7 @@ function stableProviderActionId(createIdentity: string): string {
 }
 
 /**
- * A handle to an atomic cumulative-spend reservation (#206). #240 persists this
+ * A handle to an atomic cumulative-spend reservation. The binding persists this
  * exact identity on the binding so a known outcome can be reconciled after a
  * process crash. On outcome_unknown the sweeper deliberately does NEITHER - the
  * reservation ages out at the window edge (fail closed for a money cap).
@@ -214,7 +214,7 @@ export interface CumulativeSpendReservationHandle {
   amount: number;
 }
 
-/** A handle to an atomic windowed-invoke (maxCalls) reservation (#206). */
+/** A handle to an atomic windowed-invoke (maxCalls) reservation. */
 export interface WindowedInvokeReservationHandle {
   tenantId?: string;
   agentId: string;
@@ -277,8 +277,7 @@ function persistedReservationHandles(
   if (cumulativeSpend.length === 0 && windowedInvoke === undefined) return null;
   return {
     // v2 makes the tenant namespace an immutable part of every Redis handle.
-    // The parser retains v1 solely so pre-rollout generations remain
-    // reconcilable during a rolling deployment.
+    // The parser retains v1 so version-1 generations remain reconcilable.
     schemaVersion: "steward.provider-policy-reservations.v2",
     generation,
     phase,
@@ -761,13 +760,13 @@ export interface CreateProviderActionInput {
   summonAttestation?: unknown;
 }
 
-// ─── The in-process executor stub (PR2 only — NEVER real dispatch) ─────────────
+// ─── In-process executor stub (never real dispatch) ───────────────────────────
 
 /**
- * The PR2 executor stub. It accepts ONLY a persisted intent id and reloads the
+ * The executor stub accepts only a persisted intent id and reloads the
  * immutable facts; it accepts no replacement action or identity. It performs no
  * credential decrypt and no network I/O. A successful stub call is NOT proof of
- * credential-bound enforcement (that is PR4).
+ * credential-bound enforcement.
  */
 export async function executeProviderActionStub(
   intentId: string,
@@ -978,7 +977,7 @@ class ProviderActionService {
     const { workspace, account, operation } = resolved;
     const environment = workspace.environment as PersistedAccessDecisionV1["environment"];
 
-    // ── #201: finalize a deferred generic-http build now that the operation
+    // Finalize a deferred generic-http build after resolving the operation
     // (and its operator-authored descriptor) is resolved. Fail closed on an
     // unregistered profile or an invalid descriptor with a stable CANON_* code
     // (mapped to a 400 deny by the route). The descriptor is loaded from the
@@ -996,7 +995,7 @@ class ProviderActionService {
       throw e;
     }
 
-    // #201 fail-closed consumption site: the canonical profile stamped on the
+    // Fail-closed consumption site: the canonical profile stamped on the
     // action MUST be registered before we digest/store/dispatch it. An
     // unregistered profile (e.g. a corrupted or forged build) is rejected here
     // with a stable code rather than persisted.
@@ -1098,9 +1097,8 @@ class ProviderActionService {
       // policy inputs that authorized it. requestedAt/nonce differ per call, so
       // requestHash itself is not the replay key. New bindings persist the
       // policy-input digest inside their immutable, request-hash-bound envelope.
-      // Legacy envelopes have no such member and retain the historical
-      // action-only replay behavior; this is a bounded compatibility path for
-      // pre-rollout rows, never used by a newly-created binding.
+      // Version-1 envelopes have no such member and retain action-only replay
+      // behavior; newly created bindings always include the digest.
       const persistedEnvelope = priorBinding.requestEnvelope as Record<string, unknown>;
       const persistedPolicyInputDigest = persistedEnvelope.policyInputDigest;
       const persistedXSummonAttestationDigest = persistedEnvelope.xSummonAttestationDigest;
@@ -1146,7 +1144,7 @@ class ProviderActionService {
     // Outer-scope handles the tx fills so the post-commit branching can read them.
     let access!: { effect: "allow" | "deny"; doc: PersistedAccessDecisionV1 };
     let policy: PolicyResult | null = null;
-    // #206: hoisted so the catch/drain-failure paths can reclaim reservations
+    // Hoisted so catch and drain-failure paths can reclaim reservations
     // even where TS narrows `policy` to never inside the tx-callback flow.
     let cumulativeSpendReservations: CumulativeSpendReservationHandle[] = [];
     let windowedInvokeReservation: WindowedInvokeReservationHandle | undefined;
@@ -1307,9 +1305,9 @@ class ProviderActionService {
           expiresAt: new Date(input.expiresAt),
         });
 
-        // PR3 (§6.3): for the approval-required arm, build the exact approval
+        // For the approval-required arm (§6.3), build the exact approval
         // commitment + queue row inside THIS create transaction (AFTER the intent
-        // insert the queue FK references). A missing PR1 execution dependency
+        // insert the queue FK references). A missing execution dependency
         // (route/credential) throws ApprovalArmError => creation fails closed.
         let approvalQueueId: string | null = null;
         let approvalCommitmentHash: string | null = null;
@@ -1334,7 +1332,7 @@ class ProviderActionService {
             policyRevisionHash: (policy as PolicyResult).doc.policyRevisionHash,
             evaluatorVersion: EVALUATOR_VERSION,
             requesterSeparation: extractRequesterSeparation(txOperation.requestProfile),
-            // #205: read + fail-closed-validate the quorum config from the same
+            // Read and fail-closed-validate the quorum config from the same
             // request-profile source. A malformed quorum throws ApprovalArmError
             // (creation fails closed); absent quorum => single-approver path.
             quorum: extractQuorumConfig(txOperation.requestProfile),
@@ -1400,8 +1398,8 @@ class ProviderActionService {
         }
 
         // Required audit intent -> transactional outbox (drained post-commit).
-        // PR5 C1: correlated lifecycle events set resource_type='provider_action'
-        // and resource_id=intents.id (not the operation id) so PR5 can correlate
+        // Correlated lifecycle events set resource_type='provider_action' and
+        // resource_id=intents.id (not the operation id) so case assembly can correlate
         // online by the lifecycle root.
         await tx.insert(providerActionAuditOutbox).values({
           tenantId,
@@ -1415,7 +1413,7 @@ class ProviderActionService {
           resourceType: "provider_action",
           resourceId: intentId,
           metadata: {
-            // PR5 C1: metadata.intentId is the offline-authoritative correlation
+            // metadata.intentId is the offline-authoritative correlation
             // key (inside the signed eventsDigest).
             intentId,
             actorAgentId,
@@ -1458,7 +1456,7 @@ class ProviderActionService {
         }
       });
     } catch (e) {
-      // #206: the decision transaction failed to persist, so the action WILL NOT
+      // The decision transaction failed to persist, so the action will not
       // execute (the stub is never reached). Reclaim any cumulative-spend
       // reservations taken during eval so a persistence failure does not leak
       // budget. This is a KNOWN non-execution (distinct from the stub-threw
@@ -1467,11 +1465,11 @@ class ProviderActionService {
         await this.finalizeCumulativeSpend(cumulativeSpendReservations, "failure");
         await this.finalizeWindowedInvoke(windowedInvokeReservation, "failure");
       }
-      // A missing PR1 execution dependency (route/credential) fails approval
+      // A missing execution dependency (route or credential) fails approval
       // creation CLOSED (spec §5.2) — surfaced as an evidence failure so no
       // partial approval arm is ever visible.
       if (e instanceof ApprovalArmError) {
-        // A malformed #205 quorum config fails creation CLOSED at store time
+        // A malformed quorum config fails creation closed at store time
         // (spec §7) and surfaces its specific code so the misconfig is
         // observable; a missing execution dependency (route/credential) uses
         // the generic evidence-failure code (spec §5.2). No partial approval
@@ -1521,7 +1519,7 @@ class ProviderActionService {
     // ── Step 3: drain the required-audit outbox before the stub can run. ──
     const drained = await this.drainAuditOutbox(tenantId, intentId).catch(() => false);
     if (!drained) {
-      // #206 (codex P1): the binding ALREADY committed. If its status is an
+      // The binding has already committed. If its status is an
       // allow-committed `allowed_stub`, a later idempotent replay WILL execute it
       // via outcomeFromBinding WITHOUT re-evaluating or re-reserving. Releasing
       // the reservations here would then let that replay bypass the spend/count
@@ -1557,7 +1555,7 @@ class ProviderActionService {
       };
     }
     if (effects.policy === "hard_deny") {
-      // #206: reclaim any cumulative-spend reservations this decision holds. A
+      // Reclaim any cumulative-spend reservations this decision holds. A
       // spend-cap breach already released its own reservations during eval; this
       // covers a deny for a DIFFERENT reason where a cumulativeSpend rule had
       // passed and reserved - the action will not execute, so free its budget.
@@ -1593,7 +1591,7 @@ class ProviderActionService {
     try {
       stub = await executeProviderActionStub(intentId);
     } catch {
-      // #206: OUTCOME_UNKNOWN. The stub threw AFTER we admitted + reserved; we
+      // OUTCOME_UNKNOWN: the stub threw after admission and reservation; we
       // cannot prove the action did or did not spend. Deliberately DO NOT release
       // the spend OR the maxCalls reservation - both age out at the window edge.
       // Fail closed: never free a slot/budget that may have really been consumed
@@ -1635,7 +1633,7 @@ class ProviderActionService {
           ),
         );
     });
-    // #240: status is the durable outcome source. Reconcile only AFTER the
+    // Status is the durable outcome source. Reconcile only after the
     // terminal transition so a crash at any instruction boundary is retryable.
     await this.reconcilePolicyReservations(tenantId, intentId);
 
@@ -1651,7 +1649,7 @@ class ProviderActionService {
   }
 
   /**
-   * #201: finalize a deferred generic-http build against the resolved
+   * Finalize a deferred generic-http build against the resolved
    * operation's operator-authored descriptor. The descriptor is read from
    * `requestProfile.operationDescriptor`, STRICTLY validated
    * (`validateGenericHttpDescriptor`, fail-closed), and the caller-supplied
@@ -1976,7 +1974,7 @@ class ProviderActionService {
   }
 
   /**
-   * #206: atomically reserve this invoke's spend for every governing
+   * Atomically reserve this invoke's spend for every governing
    * cumulativeSpend rule, and return the per-scope prior sums to feed the policy
    * composer.
    *
@@ -2034,7 +2032,7 @@ class ProviderActionService {
 
     // Compute the bucket key (scope+window+max+currency) the COMPOSER reads for a
     // given cap, and the STREAM key (scope+scopeKey+currency) the Redis reservation
-    // uses (codex P1: history keyed by stream, not cap threshold).
+    // uses; history is keyed by stream, not cap threshold.
     const scopeKeyOf = (scope: "operation" | "agent" | "grant") =>
       scope === "operation" ? input.operationKey : scope === "grant" ? (input.grantId ?? "") : "";
     const bucketKeyOf = (g: (typeof governing)[number]) =>
@@ -2056,7 +2054,7 @@ class ProviderActionService {
       return { contextSums: sums, reservations: [] };
     }
 
-    // FAIL CLOSED on a grant-scoped cap with NO grant identity (codex P1): access
+    // Fail closed on a grant-scoped cap with no grant identity: access
     // can be allowed via a role binding with an empty matchedGrantIds, in which
     // case a `grant`-scoped rule has no grant to scope to. Reserving against a
     // shared empty scopeKey would let unrelated agents share one fake bucket and
@@ -2078,7 +2076,7 @@ class ProviderActionService {
     // GROUP caps by STREAM (scope+scopeKey+currency). A single invoke governed by
     // several caps on the same stream (e.g. a 1h AND a 24h cap, or two rules) is
     // reserved ONCE against that stream with ALL its caps checked atomically (the
-    // invoke is counted once, never double-counted; codex P2). priorSums come back
+    // invoke is counted once, never double-counted). priorSums come back
     // per cap in the order supplied, which we map to each cap's bucket key.
     const streams = new Map<
       string,
@@ -2460,7 +2458,7 @@ class ProviderActionService {
     const { operation, build } = args;
 
     // The capability-intent rules that govern this operation come from the
-    // operation's request profile. PR2 reads the enabled capability-intent rules
+    // operation's request profile. The service reads enabled capability-intent rules
     // declared on the provider operation's request_profile.policyRules; absent =>
     // no governing rules (default deny).
     const rules = extractCapabilityIntentRules(operation.requestProfile);
@@ -2471,7 +2469,7 @@ class ProviderActionService {
     // policyText, so this is undefined and any content-pattern rule fails closed.
     const policyText = "policyText" in build ? build.policyText : undefined;
 
-    // -- #206: cumulative-spend aggregate wiring + atomic reservation. --
+    // Cumulative-spend aggregate wiring and atomic reservation.
     // Resolve the operation's declared spend field/currency and, for each
     // governing cumulativeSpend rule, ATOMICALLY reserve this invoke's spend
     // against the trailing-window cap. The reservation is the authoritative,
@@ -2533,18 +2531,18 @@ class ProviderActionService {
         policyArgs: build.policyArgs,
         reservationGeneration: args.reservationGeneration ?? 1,
       });
-      // #206 configurable count cap (maxCalls + callWindow): ATOMICALLY reserve one
+      // For a configurable count cap (maxCalls and callWindow), atomically reserve one
       // invoke slot against the trailing-window count so concurrent invokes cannot
-      // collectively exceed maxCalls (single-winner, like the spend path; codex P2).
+      // collectively exceed maxCalls (single-winner, like the spend path).
       // The reserved priorCount is fed to the composer so its check agrees; a
       // REJECTED reservation feeds a count AT the cap so the composer denies. Absent
       // reservation (no governing maxCalls rule, or a Redis failure) leaves
       // windowedInvokeCount undefined => a maxCalls rule fails closed
       // (POLICY_INPUT_UNAVAILABLE). The slot is settled (kept) on a known-success
       // allow and released on any deny/failure below.
-      // #206 configurable count caps: ATOMICALLY reserve ONE invoke slot against
+      // Atomically reserve one invoke slot against
       // ALL count windows at once (a single invoke is counted ONCE across an hourly
-      // AND a daily cap; codex P2). Each window's count is fed to the composer keyed
+      // and a daily cap). Each window's count is fed to the composer keyed
       // by its own bucket. A rejection on ANY window denies (no slot taken); a
       // Redis failure feeds every cap AT its max so the composer fails closed.
       const govMaxCalls = extractGoverningMaxCalls(rules, operation.operationKey);
@@ -2600,14 +2598,14 @@ class ProviderActionService {
         host: hostFromOrigin(build.action.origin),
         path: build.action.normalizedPath,
         evaluatedAt: decidedAt,
-        // Trailing-hour count is not wired in PR2; rules that require it will
+        // The generic trailing-hour count is unavailable; rules that require it
         // fail closed (POLICY_INPUT_UNAVAILABLE) exactly as specified.
         invokeCount1h: undefined,
-        // #206 configurable count caps: per-cap trailing-window counts (undefined
+        // Per-cap trailing-window counts (undefined
         // when unwired => a maxCalls rule fails closed).
         ...(windowedInvokeCounts !== undefined ? { windowedInvokeCounts } : {}),
         ...(policyText !== undefined ? { policyText } : {}),
-        // #206 cumulative-spend aggregate + declaration. spendDeclaration absent =>
+        // Cumulative-spend aggregate and declaration. spendDeclaration absent means
         // a cumulativeSpend rule fails closed (NO_SPEND_FIELD). cumulativeSpend
         // carries the reserved priorSum per scope; absent scope => fail closed
         // (INPUT_UNAVAILABLE). See reserveCumulativeSpendForInvoke.
@@ -2616,8 +2614,8 @@ class ProviderActionService {
           ? { cumulativeSpend: cumulative.contextSums }
           : {}),
         // Permissioned-X authoritative inputs (post count / accumulated spend /
-        // now-minute) are NOT wired into the service in Phase 1 — exactly the same
-        // posture as invokeCount1h above. A permissioned-X rule that REQUIRES one
+        // now-minute) are not supplied by this service, matching invokeCount1h.
+        // A permissioned-X rule that requires one
         // of these inputs (maxPostsPerWindow / spendPolicy / quietHours) therefore
         // fails closed (POLICY_INPUT_UNAVAILABLE) until the trailing-window
         // accumulator lands. Content/reply/URL rules need no external input and are
@@ -2913,7 +2911,7 @@ class ProviderActionService {
       );
     let delivered = 0;
     for (const row of rows) {
-      // Crash-safe exactly-once (codex P1). The SOURCE OF TRUTH for "is this
+      // Crash-safe exactly-once. The source of truth for "is this
       // event signed?" is the audit chain itself, keyed by the deterministic
       // correlation (tenant, resource_id=intentId, action). `delivered_at` is
       // only an optimization. We serialize the whole check+sign+mark per tenant
@@ -2960,7 +2958,7 @@ class ProviderActionService {
         .returning({ id: providerActionAuditOutbox.id });
       if (marked.length > 0 && signedNow) delivered += 1;
     }
-    // #240 extends the same C2 pass to durable policy reservations. Audit and
+    // The same recovery pass covers durable policy reservations. Audit and
     // reservation recovery are independently idempotent; a Redis outage leaves
     // the reservation pending and fail-closed for the next sweep.
     await this.reconcilePolicyReservations(tenantId, intentId);
@@ -3297,7 +3295,7 @@ class ProviderActionService {
         actionDigest: b.actionDigest,
       };
     }
-    // Approval-required lineage (PR3). A create-replay of a governed provider
+    // Approval-required lineage. A create replay of a governed provider
     // action must NEVER report POLICY_ALLOW/stub_succeeded (that would fabricate
     // an allow for an action that requires a human decision). The agent's create
     // contract is 202 APPROVAL_REQUIRED regardless of where the out-of-band
@@ -3452,7 +3450,7 @@ function extractCapabilityIntentRules(
 }
 
 /**
- * Extract the operation's DECLARED spend field (#206). The OPERATION - not the
+ * Extract the operation's declared spend field. The operation, not the
  * caller - declares which validated `policyArgs` field carries the per-invoke
  * spend amount and its currency, via
  * `request_profile.spendDeclaration: { field: string, currency: string }`.
@@ -3573,7 +3571,7 @@ function extractGoverningMaxCalls(
       continue;
     }
     // Each DISTINCT (window, max) is an independent count cap with its own count
-    // (codex P2). Dedupe identical caps.
+    // Dedupe identical caps.
     const key = `${windowSeconds}:${c.maxCalls}`;
     if (seen.has(key)) continue;
     seen.add(key);
@@ -3619,12 +3617,9 @@ function parseIso8601DurationSecondsForApi(input: unknown): number | null {
 }
 
 /**
- * Extract the operation's requester-separation requirement (spec I10). PR1 does
- * not yet ship a structured approval-requirements field, so PR3 reads it from
- * `request_profile.approvalRequirements.requesterSeparation` when present
- * (forward-compatible) and defaults to false. Documented deviation: when PR1
- * lands a first-class approval-requirements field the commitment builder should
- * read that instead.
+ * Extract the operation's requester-separation requirement (spec I10) from
+ * `request_profile.approvalRequirements.requesterSeparation`. An absent value
+ * defaults to false.
  */
 export function extractRequesterSeparation(requestProfile: Record<string, unknown>): boolean {
   const reqs = (requestProfile as { approvalRequirements?: unknown }).approvalRequirements;
@@ -3633,8 +3628,8 @@ export function extractRequesterSeparation(requestProfile: Record<string, unknow
 }
 
 /**
- * Extract + FAIL-CLOSED-validate the operation's #205 quorum config from
- * `request_profile.approvalRequirements.quorum`, the same forward-compatible
+ * Extract and fail-closed-validate the operation's quorum config from
+ * `request_profile.approvalRequirements.quorum`, the same authoritative
  * source as {@link extractRequesterSeparation}. Returns:
  *   - `undefined` when no quorum is configured => single-approver legacy path.
  *   - `{ threshold, eligibleApproverUserIds }` when a well-formed quorum is set.

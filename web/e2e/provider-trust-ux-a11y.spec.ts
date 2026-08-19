@@ -56,15 +56,21 @@ function approvalDetail(status = "pending_approval") {
   };
 }
 
-function caseManifest() {
+function caseManifest(
+  overrides: Partial<ReturnType<typeof baseCaseManifest>> & Record<string, unknown> = {},
+) {
+  return { ...baseCaseManifest(), ...overrides };
+}
+
+function baseCaseManifest() {
   return {
     caseId: ACTION_ID,
     tenantId: "tenant-trust",
     workspaceId: "workspace-trust",
     terminalState: "succeeded",
-    completeness: "complete",
-    missingRequiredRoles: [],
-    incompletenessReasons: [],
+    completeness: "complete" as "complete" | "incomplete" | "unknown",
+    missingRequiredRoles: [] as string[],
+    incompletenessReasons: [] as string[],
     actionDigest: HASH_B,
     requestHash: HASH_A,
     idempotencyKeyHash: `sha256:${"c".repeat(64)}`,
@@ -86,15 +92,25 @@ function caseManifest() {
   };
 }
 
+interface TrustFixtureOptions {
+  approvalStatus?: string;
+  approvalErrorStatus?: number;
+  caseErrorStatus?: number;
+  manifest?: ReturnType<typeof baseCaseManifest> & Record<string, unknown>;
+}
+
 /**
  * Browser-only fixture for accessibility and keyboard interaction. This does
  * NOT prove API authentication: real auth/MFA remains covered by API suites.
  * The fixture nevertheless fails closed on missing auth or binding mismatch so
  * the UI cannot pass while sending an incomplete approval request.
  */
-async function mockAccessibilityApis(page: Page): Promise<{ attempts: ApprovalAttempt[] }> {
+async function mockAccessibilityApis(
+  page: Page,
+  options: TrustFixtureOptions = {},
+): Promise<{ attempts: ApprovalAttempt[] }> {
   const attempts: ApprovalAttempt[] = [];
-  let status = "pending_approval";
+  let status = options.approvalStatus ?? "pending_approval";
   await page.route(`${API}/**`, async (route) => {
     const request = route.request();
     const path = new URL(request.url()).pathname;
@@ -122,8 +138,34 @@ async function mockAccessibilityApis(page: Page): Promise<{ attempts: ApprovalAt
         },
       });
     }
+    if (path === "/approvals") {
+      return route.fulfill({
+        json: {
+          ok: true,
+          data: [
+            {
+              id: "approval-trust",
+              txId: "transaction-trust",
+              agentId: "agent-trust",
+              agentName: "Trust agent",
+              status: "pending",
+              requestedAt: "2026-08-16T22:00:00.000Z",
+              chainId: 8453,
+              toAddress: `0x${"1".repeat(40)}`,
+              value: "1",
+            },
+          ],
+        },
+      });
+    }
     if (path === `/v2/provider-actions/${ACTION_ID}/approval`) {
       if (request.method() === "GET") {
+        if (options.approvalErrorStatus) {
+          return route.fulfill({
+            status: options.approvalErrorStatus,
+            json: { ok: false, error: { code: `PRIVATE_${options.approvalErrorStatus}` } },
+          });
+        }
         return route.fulfill({ json: { ok: true, data: approvalDetail(status) } });
       }
       const body = request.postDataJSON() as Record<string, unknown>;
@@ -156,7 +198,13 @@ async function mockAccessibilityApis(page: Page): Promise<{ attempts: ApprovalAt
       return route.fulfill({ json: { id: ACTION_ID, status, version: 2 } });
     }
     if (path === `/v2/provider-actions/${ACTION_ID}/case`) {
-      return route.fulfill({ json: caseManifest() });
+      if (options.caseErrorStatus) {
+        return route.fulfill({
+          status: options.caseErrorStatus,
+          json: { ok: false, error: { code: `PRIVATE_${options.caseErrorStatus}` } },
+        });
+      }
+      return route.fulfill({ json: options.manifest ?? caseManifest() });
     }
     return route.fulfill({ status: 404, json: { ok: false, error: "NOT_FOUND" } });
   });
@@ -201,6 +249,12 @@ test("mocked-session approval detail passes WCAG 2.1 AA and complete binding is 
   await expect(page.getByRole("heading", { name: "Exact action" })).toBeVisible();
   await expectWcag21Aa(page, 'main[aria-labelledby="approval-detail-heading"]');
 
+  const approve = page.getByRole("button", { name: "Approve this provider action" });
+  const deny = page.getByRole("button", { name: "Deny this provider action" });
+  const [approveBox, denyBox] = await Promise.all([approve.boundingBox(), deny.boundingBox()]);
+  expect(approveBox?.width).toBe(denyBox?.width);
+  expect(approveBox?.height).toBe(denyBox?.height);
+
   // The mock is deliberately fail-closed: a stale/mismatched commitment must
   // be rejected and must not alter the pending approval state.
   const mismatchStatus = await page.evaluate(
@@ -228,6 +282,12 @@ test("mocked-session approval detail passes WCAG 2.1 AA and complete binding is 
   );
   expect(mismatchStatus).toBe(409);
   expect(mocked.attempts[0]).toMatchObject({ accepted: false, tenant: "tenant-trust" });
+
+  await approve.click();
+  await expect(
+    page.getByText("A typed reason is required for both approve and deny."),
+  ).toBeVisible();
+  expect(mocked.attempts).toHaveLength(1);
 
   const reason = page.getByLabel("Reason (required for approve and deny)");
   await focusWithTab(page, reason);
@@ -297,4 +357,78 @@ test("mocked-session case detail passes WCAG 2.1 AA without widening the scan", 
   await expect(page.getByRole("heading", { name: "Provider action case" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Commitments" })).toBeVisible();
   await expectWcag21Aa(page, 'main[aria-labelledby="case-heading"]');
+});
+
+test("case detail preserves incomplete and unknown evidence without exposing raw authority", async ({
+  browser,
+  page,
+}) => {
+  const rawCredential = "ghp_raw-provider-secret-must-not-render";
+  await mockAccessibilityApis(page, {
+    manifest: caseManifest({
+      completeness: "incomplete",
+      incompletenessReasons: ["provider receipt missing"],
+      missingRequiredRoles: ["provider_receipt"],
+      canonicalBytes: rawCredential,
+      credential: { value: rawCredential },
+    }),
+  });
+  await page.goto(`/dashboard/actions/${ACTION_ID}`);
+  await expect(page.getByText("Completeness: incomplete")).toBeVisible();
+  await expect(page.getByText("provider receipt missing")).toBeVisible();
+  await expect(page.getByText(/Missing required roles:/)).toContainText("provider_receipt");
+  await expect(page.getByText(/NOT an operator-integrity proof/)).toBeVisible();
+  await expect(page.getByText(/--expected-key-fingerprint/)).toBeVisible();
+  await expect(page.getByText(HASH_A)).toBeVisible();
+  await expect(page.getByText(HASH_B)).toBeVisible();
+  await expect(page.getByText(rawCredential)).toHaveCount(0);
+
+  const unknownContext = await browser.newContext();
+  const unknownPage = await unknownContext.newPage();
+  await seedSession(unknownPage);
+  await mockAccessibilityApis(unknownPage, {
+    manifest: caseManifest({ completeness: "unknown", incompletenessReasons: ["audit gap"] }),
+  });
+  await unknownPage.goto(`/dashboard/actions/${ACTION_ID}`);
+  await expect(unknownPage.getByText("Completeness: unknown")).toBeVisible();
+  await expect(unknownPage.getByText("audit gap")).toBeVisible();
+  await unknownContext.close();
+});
+
+test("terminal approvals disable both decisions and errors do not enumerate private resources", async ({
+  browser,
+  page,
+}) => {
+  await mockAccessibilityApis(page, { approvalStatus: "approved" });
+  await page.goto(`/dashboard/approvals/${ACTION_ID}`);
+  await expect(page.getByText(/Decision controls are disabled/)).toBeVisible();
+  await expect(page.getByRole("button", { name: "Approve this provider action" })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Deny this provider action" })).toBeDisabled();
+
+  const renderedErrors: string[] = [];
+  for (const status of [403, 404]) {
+    const context = await browser.newContext();
+    const errorPage = await context.newPage();
+    await seedSession(errorPage);
+    await mockAccessibilityApis(errorPage, { caseErrorStatus: status });
+    await errorPage.goto(`/dashboard/actions/${ACTION_ID}`);
+    const alert = errorPage.getByRole("alert");
+    await expect(alert.getByText("Not found or not authorized")).toBeVisible();
+    renderedErrors.push(await alert.getByText("Not found or not authorized").innerText());
+    await context.close();
+  }
+  expect(renderedErrors).toEqual(["Not found or not authorized", "Not found or not authorized"]);
+});
+
+test("the approval queue exposes per-item decisions without a bulk-approval control", async ({
+  page,
+}) => {
+  await mockAccessibilityApis(page);
+  await page.goto("/dashboard/approvals");
+  await expect(page.getByRole("heading", { name: "Approval Queue" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Approve", exact: true })).toHaveCount(1);
+  await expect(page.getByRole("button", { name: "Reject", exact: true })).toHaveCount(1);
+  await expect(
+    page.getByRole("button", { name: /approve all|bulk approve|select all/i }),
+  ).toHaveCount(0);
 });

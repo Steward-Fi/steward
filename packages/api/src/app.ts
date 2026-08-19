@@ -91,7 +91,7 @@ import {
 const startTime = Date.now();
 
 /**
- * Phase 1: build the lean core app with global middleware + all CORE per-route
+ * Build the lean core app with global middleware and all core per-route
  * auth middleware. does NOT install the global idempotency middleware and does
  * NOT mount any routes (those are phase 2: {@link mountCoreIdempotencyAndRoutes}).
  * trading is NOT part of the core — it is registered as an opt-in plugin at the
@@ -244,7 +244,7 @@ export function createApp(): Hono<{ Variables: AppVariables }> {
 }
 
 /**
- * Phase 2: install the global idempotency middleware + mount all CORE routes onto
+ * Install the global idempotency middleware and mount all core routes onto
  * an app produced by {@link createApp}. KEPT SEPARATE from phase 1 so the
  * composition root can slot an opt-in plugin's auth middleware in BEFORE
  * idempotency (phase-1 boundary) and its routes AFTER idempotency (this phase).
@@ -309,7 +309,7 @@ export function mountCoreIdempotencyAndRoutes(
   // over the authority `/provider-accounts/:id/...` wildcards.
   registerProviderXConnectRoutes(app);
   registerProviderGoogleConnectRoutes(app);
-  // PR5 case/evidence routes: registered CONCRETELY and BEFORE the `/v2`
+  // Evidence case/evidence routes are registered concretely before the `/v2`
   // authority sub-app so the specific /provider-actions/:id/{case,evidence}
   // paths win over the authority wildcards (same pattern as provider-actions).
   registerProviderCaseRoutes(app);
@@ -318,7 +318,7 @@ export function mountCoreIdempotencyAndRoutes(
   // middleware directly on the app (see registerProviderActionRoutes) to avoid a
   // second `/v2` sub-app mount colliding with the authority wildcard.
   registerProviderActionRoutes(app);
-  // PR3 approval + safe-resume routes (also registered directly to avoid the
+  // Approval and safe-resume routes are registered directly to avoid the
   // /v2 authority-wildcard collision).
   registerProviderApprovalRoutes(app);
 

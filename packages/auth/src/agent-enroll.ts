@@ -1,7 +1,7 @@
 /**
  * agent-enroll.ts — keypair-only agent enrollment / self-authentication.
  *
- * The sovereign-custody premise (Pillar A): an agent container boots holding ONLY
+ * The sovereign-custody premise: an agent container boots holding only
  * its identity keypair (+ the Steward endpoint). It must be able to authenticate
  * to Steward and obtain a SHORT-LIVED agent token WITHOUT an operator minting a
  * long-lived token by hand. This module is the crypto + protocol core of that

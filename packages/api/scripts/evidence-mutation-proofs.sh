@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# PR5 mutation-strength proofs (spec §9). Each mutation weakens ONE evidence
+# Evidence mutation-strength proofs. Each mutation weakens one evidence
 # security predicate; a proof is valid iff the named test PASSES clean AND FAILS
 # after the mutation. Every mutated file is restored after each proof.
 #
-#   Run from the repo root:  bash packages/api/scripts/pr5-mutation-proofs.sh
+#   Run from the repo root:  bash packages/api/scripts/evidence-mutation-proofs.sh
 #
 # Requires @stwd/shared + @stwd/redis + @stwd/db dist built (tsc) first.
 set -uo pipefail
@@ -20,6 +20,13 @@ SVC_TEST="src/__tests__/provider-case-service.test.ts"
 API="packages/api"
 pass_count=0
 fail_count=0
+active_target=""
+cleanup() {
+  if [ -n "$active_target" ] && [ -f "$active_target.bak" ]; then
+    mv "$active_target.bak" "$active_target"
+  fi
+}
+trap cleanup EXIT INT TERM
 
 _run_once() {
   local file="$1" filter="$2" out
@@ -36,13 +43,23 @@ proof() {
   if run_baseline "$file" "$filter"; then echo "  baseline PASS ✓"
   else echo "  baseline UNEXPECTED FAIL ✗ (proof invalid)"; fail_count=$((fail_count+1)); return; fi
   cp "$target" "$target.bak"
-  sed -i "$sedexpr" "$target"
+  active_target="$target"
+  sed -i.mutation-backup "$sedexpr" "$target"
+  rm -f "$target.mutation-backup"
+  if cmp -s "$target" "$target.bak"; then
+    echo "  mutation target did not match guarded source ✗"
+    fail_count=$((fail_count+1))
+    mv "$target.bak" "$target"
+    active_target=""
+    return
+  fi
   if run_mutated "$file" "$filter"; then
     echo "  post-mutation still PASSES ✗ (mutation did not kill the test)"; fail_count=$((fail_count+1))
   else
     echo "  post-mutation FAILS ✓ (predicate killed)"; pass_count=$((pass_count+1))
   fi
   mv "$target.bak" "$target"
+  active_target=""
 }
 
 # ── Verifier guards (spec §9.1) ──────────────────────────────────────────────
@@ -99,6 +116,6 @@ proof "M10 drop workspace scoping (D2 enumeration)" "$SVC_TEST" "foreign workspa
 
 echo ""
 echo "==================================================================="
-echo "PR5 mutation proofs: $pass_count killed, $fail_count invalid/survived"
+echo "EVIDENCE MUTATION PROOFS: $pass_count killed, $fail_count invalid/survived"
 echo "==================================================================="
 [ "$fail_count" -eq 0 ] && exit 0 || exit 1

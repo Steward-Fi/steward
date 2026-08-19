@@ -1,7 +1,7 @@
 /**
  * Default-tenant API key provisioning (SEC-012).
  *
- * Pre-fix, scripts/provision-agent.ts inserted the `default` tenant with
+ * scripts/provision-agent.ts must not insert the `default` tenant with
  * apiKeyHash = sha256("provision-agent:default") — a key anyone can derive
  * from this public repo, and a valid `X-Steward-Key` credential on any
  * instance where this script created the tenant before the API bootstrap

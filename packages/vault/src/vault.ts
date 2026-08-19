@@ -2170,8 +2170,8 @@ export class Vault {
 
     // Wrap all writes atomically - roll back on any failure
     await db.transaction(async (tx) => {
-      // Re-audit: the SEC-024 custody guard below used to run BEFORE this
-      // transaction — check-then-act with no DB serialization. A concurrent
+      // The SEC-024 custody guard below runs inside this transaction after the
+      // per-scope advisory lock. A concurrent
       // importExternalKeyHandle for the same (agent, chain family) could
       // interleave between the check and these writes, leaving both a
       // server-managed key and an external-custody wallet row. Serialize
@@ -2388,8 +2388,8 @@ export class Vault {
     const now = new Date();
 
     await db.transaction(async (tx) => {
-      // Re-audit: the custody guards below were check-then-act with no DB
-      // serialization — a concurrent importKey (or a second handle import)
+      // The custody guards below run under DB serialization — a concurrent
+      // importKey (or a second handle import)
       // for the same (agent, chain family, venue) scope could interleave
       // between the checks and the wallet write, leaving both a
       // server-managed key and an external-custody wallet row. Serialize
@@ -3777,7 +3777,7 @@ export class Vault {
   }
 
   // ──────────────────────────────────────────────────────────────────────
-  // Sprint 4 Phase 1 Day 1: venue-scoped wallet API
+  // Venue-scoped wallet API.
   // ──────────────────────────────────────────────────────────────────────
   //
   // Wallets used to be keyed by (agentId, chainFamily). Trade-sessions now

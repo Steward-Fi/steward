@@ -1,7 +1,7 @@
 /**
- * PR5 real-app route-wiring regression (review-gate hardening).
+ * evidence real-app route-wiring regression (review-gate hardening).
  *
- * The existing PR5 integration tests mount `providerCaseRoutes` on a MOCK Hono
+ * The existing evidence integration tests mount `providerCaseRoutes` on a MOCK Hono
  * app that manually injects `authType`/`tenantRole`/`tenantId`/`sessionMfaVerifiedAt`.
  * That bypasses the real middleware chain, so it cannot catch a missing
  * `tenantAuth` registration on `/v2/provider-actions/:id/{case,evidence}` in the
@@ -12,7 +12,7 @@
  *   - the negative-auth matrix (unauth, member role, stale MFA, agent token)
  *     is rejected with 403 through the real chain.
  *
- * Regression guard for: PR5 originally forgot to wire `tenantAuth` on the case
+ * Regression guard for: evidence originally forgot to wire `tenantAuth` on the case
  * subpaths (the global app.ts only wires it for /v2/workspaces|provider-accounts
  * |...), so every request 403'd and the feature was unreachable in production.
  */
@@ -36,7 +36,7 @@ import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 const TENANT = "default";
 const CASE_ID = "pa_0123abcd-0123-0123-0123-0123456789ab".slice(0, 39);
 
-describe("PR5 case routes: real composed-app auth wiring", () => {
+describe("evidence case routes: real composed-app auth wiring", () => {
   let app: any;
   let ownerToken: string;
   let memberToken: string;
@@ -49,7 +49,7 @@ describe("PR5 case routes: real composed-app auth wiring", () => {
 
     await getDb()
       .insert(tenants)
-      .values({ id: TENANT, name: "PR5 Wiring", apiKeyHash: "pr5-wiring" })
+      .values({ id: TENANT, name: "Evidence Wiring", apiKeyHash: "pr5-wiring" })
       .onConflictDoNothing();
     const [owner] = await getDb()
       .insert(users)

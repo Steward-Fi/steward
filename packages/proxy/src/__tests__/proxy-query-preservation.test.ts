@@ -2,7 +2,7 @@
  * Governed-request query-preservation integration tests.
  *
  * The proxy handler resolves the upstream target from `c.req.path`, which Hono
- * strips of any query string. Before the fix this meant a governed request such
+ * strips of any query string. A governed request such
  * as `GET /github/search/issues?q=foo&page=2` was forwarded upstream as
  * `/search/issues` with the query silently dropped — a correctness bug that
  * breaks paginated / filtered APIs and can change request semantics.
