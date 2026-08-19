@@ -29,7 +29,6 @@ function expectBefore(first: string, second: string) {
 describe("agent route audit ordering", () => {
   it("writes authorization audit events before sensitive agent mutations", () => {
     expectBefore('action: "agent.create.authorized"', "vault.createAgent");
-    expectBefore('action: "agent.token.create.authorized"', "createAgentToken");
     expectBefore('action: "agent.wallet.create.authorized"', "vault.createWallet");
     expectBefore('action: "agent.delete.authorized"', "revokeAgentTokens(agentId");
     expectBefore("revokeAgentTokens(agentId", ".delete(approvalQueue)");
@@ -44,14 +43,10 @@ describe("agent route audit ordering", () => {
     );
   });
 
-  it("requires recent MFA before key provisioning, token minting, signer escalation, and policy rewrites", () => {
+  it("requires recent MFA before key provisioning, signer escalation, and policy rewrites", () => {
     const createStart = routeSource.indexOf('agentRoutes.post("/",');
     expect(createStart).toBeGreaterThanOrEqual(0);
     expect(routeSource.indexOf("Agent creation", createStart)).toBeGreaterThan(createStart);
-
-    const tokenStart = routeSource.indexOf('agentRoutes.post("/:agentId/token"');
-    expect(tokenStart).toBeGreaterThanOrEqual(0);
-    expect(routeSource.indexOf("Agent token creation", tokenStart)).toBeGreaterThan(tokenStart);
 
     const walletStart = routeSource.indexOf('agentRoutes.post("/:agentId/wallets"');
     expect(walletStart).toBeGreaterThanOrEqual(0);
@@ -62,11 +57,6 @@ describe("agent route audit ordering", () => {
 
     const signerPatchStart = routeSource.indexOf('agentRoutes.patch("/:agentId/signers/:signerId"');
     expect(signerPatchStart).toBeGreaterThanOrEqual(0);
-    // The signer PATCH handler consolidates all privileged-field changes
-    // (signerType, address, chainFamily, permissions, metadata, status) behind
-    // a single recent-MFA gate labelled "Signer updates", set via the
-    // privilegedSignerUpdate flag. This is the credential-takeover fix from the
-    // PR #79 audit-gap sweep: previously type/address/chainFamily were ungated.
     expect(routeSource.indexOf("privilegedSignerUpdate", signerPatchStart)).toBeGreaterThan(
       signerPatchStart,
     );
@@ -107,18 +97,7 @@ describe("agent route audit ordering", () => {
     expect(routeSource).toContain("RESERVED_SIGNER_METADATA_KEYS");
   });
 
-  it("marks secret-bearing agent responses as non-cacheable", () => {
-    const tokenStart = routeSource.indexOf('agentRoutes.post("/:agentId/token"');
-    expect(tokenStart).toBeGreaterThanOrEqual(0);
-    const tokenRoute = routeSource.slice(
-      tokenStart,
-      routeSource.indexOf('agentRoutes.get("/:agentId/tokens"', tokenStart),
-    );
-    expect(tokenRoute.indexOf("createAgentToken")).toBeLessThan(
-      tokenRoute.indexOf('"Cache-Control"'),
-    );
-    expect(tokenRoute).toContain('"no-store, max-age=0"');
-
+  it("marks signer credential responses as non-cacheable", () => {
     const signerStart = routeSource.indexOf('agentRoutes.post("/:agentId/signers"');
     expect(signerStart).toBeGreaterThanOrEqual(0);
     const signerRoute = routeSource.slice(

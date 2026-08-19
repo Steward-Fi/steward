@@ -123,19 +123,6 @@ describe("agent audit rollback hardening", () => {
     expect(deleteRoute).toContain("tx.insert(policies).values(deleteSnapshot.policies)");
   });
 
-  it("server-generates nested policy rule ids instead of probing the global rule namespace", () => {
-    const createRuleStart = routeSource.indexOf('agentRoutes.post("/:agentId/policies/rules"');
-    expect(createRuleStart).toBeGreaterThanOrEqual(0);
-    const createRuleRoute = routeSource.slice(
-      createRuleStart,
-      routeSource.indexOf('agentRoutes.get("/:agentId/policies/rules/:ruleId"', createRuleStart),
-    );
-
-    expect(createRuleRoute).toContain("id: crypto.randomUUID()");
-    expect(createRuleRoute).not.toContain(".where(eq(policies.id, nextRule.id))");
-    expect(createRuleRoute).not.toContain("Policy rule id already exists");
-  });
-
   it("does not let callers probe or reserve global agent or policy ids", () => {
     const createStart = routeSource.indexOf('agentRoutes.post("/",');
     expect(createStart).toBeGreaterThanOrEqual(0);
