@@ -267,6 +267,62 @@ describe("request-scoped database context", () => {
     );
   });
 
+  test("revokes Promise and thenable client capabilities without revoking result rows", async () => {
+    const rawClient = {
+      query: () => "raw-client-query",
+      release: () => "raw-client-release",
+    };
+    const rawRows = [{ id: "row-1", query: "ordinary-data" }];
+    type AsyncCapabilityDb = {
+      rows(): Promise<typeof rawRows>;
+      $client: {
+        connect(): Promise<typeof rawClient>;
+        connectThenable(): {
+          then(resolve: (client: typeof rawClient) => void): void;
+        };
+      };
+    };
+    const requestDbSource: AsyncCapabilityDb = {
+      rows: async () => rawRows,
+      $client: {
+        connect: async () => rawClient,
+        connectThenable: () => ({
+          // biome-ignore lint/suspicious/noThenProperty: exercises a driver PromiseLike boundary
+          then(resolve: (client: typeof rawClient) => void) {
+            resolve(rawClient);
+          },
+        }),
+      },
+    };
+    const requestDb = requestDbSource as unknown as ReturnType<typeof getDb>;
+    let rows!: typeof rawRows;
+    let capturedClient!: typeof rawClient;
+    let capturedThenableClient!: typeof rawClient;
+
+    await withRequestDatabase(requestDb, async () => {
+      const guardedDb = getDb() as unknown as AsyncCapabilityDb;
+      const guardedClient = guardedDb.$client;
+      rows = await guardedDb.rows();
+      capturedClient = await guardedClient.connect();
+      guardedClient.connectThenable().then((client) => {
+        capturedThenableClient = client;
+      });
+
+      expect(rows).toBe(rawRows);
+      expect(capturedClient).not.toBe(rawClient);
+      expect(capturedThenableClient).not.toBe(rawClient);
+      expect(capturedClient.query()).toBe("raw-client-query");
+      expect(capturedThenableClient.release()).toBe("raw-client-release");
+    });
+
+    expect(rows).toEqual([{ id: "row-1", query: "ordinary-data" }]);
+    expect(rows[0]?.id).toBe("row-1");
+    expect(() => capturedClient.query()).toThrow("REQUEST_DATABASE_CONTEXT_CLOSED");
+    expect(() => capturedClient.release()).toThrow("REQUEST_DATABASE_CONTEXT_CLOSED");
+    expect(() => capturedThenableClient.query()).toThrow("REQUEST_DATABASE_CONTEXT_CLOSED");
+    expect(() => capturedThenableClient.release()).toThrow("REQUEST_DATABASE_CONTEXT_CLOSED");
+  });
+
   test("revokes a real PGLite transaction passed into a callback", async () => {
     const { client, db } = await createPGLiteDb("memory://");
     let capturedTransaction:
@@ -286,6 +342,39 @@ describe("request-scoped database context", () => {
         "REQUEST_DATABASE_CONTEXT_CLOSED",
       );
     } finally {
+      await client.close();
+    }
+  });
+
+  test("revokes a real PGLite listener cleanup resolved through the driver Promise", async () => {
+    const { client, db } = await createPGLiteDb("memory://");
+    const channel = "request_database_membrane";
+    let unsubscribe!: () => Promise<void>;
+    let queryResult!: { rows: Array<{ value: number }> };
+
+    try {
+      await withRequestDatabase(db as ReturnType<typeof getDb>, async () => {
+        queryResult = (await getDb().execute(
+          sql`select 1 as value`,
+        )) as unknown as typeof queryResult;
+        unsubscribe = await (
+          getDb() as unknown as {
+            $client: {
+              listen(
+                name: string,
+                callback: (payload: string) => void,
+              ): Promise<() => Promise<void>>;
+            };
+          }
+        ).$client.listen(channel, () => undefined);
+
+        expect(typeof unsubscribe).toBe("function");
+      });
+
+      expect(queryResult.rows).toEqual([{ value: 1 }]);
+      expect(() => unsubscribe()).toThrow("REQUEST_DATABASE_CONTEXT_CLOSED");
+    } finally {
+      await client.unlisten(channel);
       await client.close();
     }
   });

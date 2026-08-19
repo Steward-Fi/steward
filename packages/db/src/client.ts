@@ -513,6 +513,59 @@ function trackRequestDatabaseTask<T>(
   return task;
 }
 
+const REQUEST_DATABASE_CAPABILITY_METHODS = [
+  "batch",
+  "close",
+  "connect",
+  "copyFrom",
+  "copyTo",
+  "cursor",
+  "end",
+  "execute",
+  "listen",
+  "prepare",
+  "query",
+  "release",
+  "stream",
+  "transaction",
+  "unlisten",
+] as const;
+
+/**
+ * Promise results are normally inert query data and must remain usable after
+ * the request closes. A driver can also resolve a live transport capability,
+ * though: PGLite `listen()` resolves an unsubscribe callable and pool
+ * `connect()` methods resolve clients. Identify those callable/client-like
+ * results without turning ordinary row arrays and objects into revoked
+ * proxies.
+ */
+function isRequestDatabaseCapabilityResult(value: unknown): value is object {
+  if (typeof value === "function") return true;
+  if (typeof value !== "object" || value === null) return false;
+
+  try {
+    let cursor: object | null = value;
+    while (cursor) {
+      for (const property of REQUEST_DATABASE_CAPABILITY_METHODS) {
+        const descriptor = Reflect.getOwnPropertyDescriptor(cursor, property);
+        if (!descriptor) continue;
+        if ("value" in descriptor) {
+          if (typeof descriptor.value === "function") return true;
+        } else if (descriptor.get || descriptor.set) {
+          // Do not invoke an unknown transport accessor merely to classify it.
+          return true;
+        }
+      }
+      cursor = Reflect.getPrototypeOf(cursor);
+    }
+  } catch {
+    // Driver objects are trusted, but reflection failure must not turn an
+    // opaque result into an unguarded request-owned capability.
+    return true;
+  }
+  return false;
+}
+
 /**
  * Keep explicitly detached work inside the current request database lifetime.
  *
@@ -559,11 +612,22 @@ export function waitUntilRequestDatabaseTask<T>(task: () => Promise<T>): Promise
 function guardRequestDatabaseValue<T>(value: T, context: RequestDatabaseContext): T {
   if ((typeof value !== "object" || value === null) && typeof value !== "function") return value;
 
+  const guardPromiseFulfillment = <R>(result: R): R =>
+    isRequestDatabaseCapabilityResult(result) ? guardRequestDatabaseValue(result, context) : result;
+
   const objectValue = value as object;
   const existing = context.guardedObjects.get(objectValue);
   if (existing) return existing as T;
   if (value instanceof Promise) {
-    return trackRequestDatabaseTask(context, value) as T;
+    const guardedPromise = value.then(
+      (result) => guardPromiseFulfillment(result),
+      (error) => {
+        throw guardPromiseFulfillment(error);
+      },
+    );
+    context.guardedObjects.set(objectValue, guardedPromise);
+    context.guardedObjects.set(guardedPromise, guardedPromise);
+    return trackRequestDatabaseTask(context, guardedPromise) as T;
   }
 
   const guardCallback = (callback: (...args: unknown[]) => unknown) => {
@@ -583,6 +647,14 @@ function guardRequestDatabaseValue<T>(value: T, context: RequestDatabaseContext)
         : argument,
     );
 
+  const guardPromiseContinuation = (callback: (...args: unknown[]) => unknown) => {
+    return function guardedDatabasePromiseContinuation(this: unknown, ...args: unknown[]): unknown {
+      const guardedThis = guardPromiseFulfillment(this);
+      const guardedArgs = args.map(guardPromiseFulfillment);
+      return Reflect.apply(callback, guardedThis, guardedArgs);
+    };
+  };
+
   const guardMember = (target: object, member: unknown, property?: PropertyKey): unknown => {
     if (typeof member === "function") {
       // Drizzle's cross-bundle entity check walks
@@ -596,11 +668,17 @@ function guardRequestDatabaseValue<T>(value: T, context: RequestDatabaseContext)
       }
       return (...args: unknown[]) => {
         assertRequestDatabaseContextActive(context);
-        // Drizzle query builders are PromiseLike. Their `then` callbacks are
-        // native assimilation continuations receiving ordinary result data,
-        // not database capabilities; wrapping them would proxy result arrays
-        // and make a completed query unusable after the request closes.
-        const guardedArgs = property === "then" ? args : guardCallbackArguments(args);
+        // Drizzle query builders are PromiseLike. Preserve ordinary result
+        // rows, but membrane callable/client-like fulfillment values supplied
+        // by either a driver thenable or a native assimilation continuation.
+        const guardedArgs =
+          property === "then"
+            ? args.map((argument) =>
+                typeof argument === "function"
+                  ? guardPromiseContinuation(argument as (...callbackArgs: unknown[]) => unknown)
+                  : argument,
+              )
+            : guardCallbackArguments(args);
         const result = Reflect.apply(member, target, guardedArgs);
         return guardRequestDatabaseValue(result, context);
       };
