@@ -55,6 +55,11 @@ export type AuthorizationSignatureOptions = {
   required?: boolean;
   secrets?: string[];
   appSecretResolver?: (request: Request) => Promise<string[]> | string[];
+  tenantKeyStoreFactory?: (
+    masterPassword: string,
+    masterSalt: string | undefined,
+    domain: "secret-vault",
+  ) => Pick<KeyStore, "decrypt">;
 };
 
 function configuredSecrets(): string[] {
@@ -150,7 +155,10 @@ async function appClientSecretSigningCandidates(request: Request): Promise<strin
 // `randomUUID()`), so a non-UUID header value can be rejected without a query.
 const SIGNING_KEY_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-async function tenantRequestSigningKeyCandidates(request: Request): Promise<string[]> {
+async function tenantRequestSigningKeyCandidates(
+  request: Request,
+  createKeyStore: NonNullable<AuthorizationSignatureOptions["tenantKeyStoreFactory"]>,
+): Promise<string[]> {
   const tenantId = request.headers.get("X-Steward-Tenant");
   if (!isValidTenantId(tenantId)) return [];
 
@@ -176,7 +184,7 @@ async function tenantRequestSigningKeyCandidates(request: Request): Promise<stri
   // Defer KeyStore construction (itself a scrypt KDF) until a row exists, so
   // an unknown key id costs only the cheap lookup above.
   if (rows.length === 0) return [];
-  const keyStore = new KeyStore(masterPassword, undefined, "secret-vault");
+  const keyStore = createKeyStore(masterPassword, undefined, "secret-vault");
   return rows.flatMap((row) => {
     if (row.revokedAt) return [];
     if (row.expiresAt && row.expiresAt <= now) return [];
@@ -799,6 +807,9 @@ export function authorizationSignature(options?: AuthorizationSignatureOptions) 
       process.env.NODE_ENV === "production");
   const secrets = options?.secrets ?? configuredSecrets();
   const appSecretResolver = options?.appSecretResolver ?? appClientSecretSigningCandidates;
+  const tenantKeyStoreFactory =
+    options?.tenantKeyStoreFactory ??
+    ((masterPassword, masterSalt, domain) => new KeyStore(masterPassword, masterSalt, domain));
   const maxClockSkewMs = parsePositiveInt(
     process.env.STEWARD_REQUEST_EXPIRY_MAX_SKEW_MS,
     DEFAULT_MAX_CLOCK_SKEW_MS,
@@ -902,7 +913,9 @@ export function authorizationSignature(options?: AuthorizationSignatureOptions) 
     // requests fall through to the static/app-secret candidates and never
     // trigger tenant-key work — closing the unauthenticated CPU-amplification
     // DoS the global SEC-010 mount exposed.
-    const tenantKeySecrets = signingKeyId ? await tenantRequestSigningKeyCandidates(c.req.raw) : [];
+    const tenantKeySecrets = signingKeyId
+      ? await tenantRequestSigningKeyCandidates(c.req.raw, tenantKeyStoreFactory)
+      : [];
     if (signingKeyId && tenantKeySecrets.length === 0) {
       return c.json<ApiResponse>({ ok: false, error: "Invalid signing key id" }, 401);
     }

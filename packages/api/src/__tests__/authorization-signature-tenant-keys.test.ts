@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, spyOn } from "bun:test";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import { closeDb, getDb, tenantRequestSigningKeys, tenants } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { KeyStore } from "@stwd/vault";
@@ -18,11 +18,21 @@ const BODY = JSON.stringify({ value: "1000" });
 const FRESH_TS = () => String(Math.floor(Date.now() / 1000));
 let authorizationSignature: typeof import("../middleware/authorization-signature")["authorizationSignature"];
 let createAuthorizationSignature: typeof import("../middleware/authorization-signature")["createAuthorizationSignature"];
-let decryptSpy: ReturnType<typeof spyOn>;
+let tenantKeyStoreConstructionCount = 0;
 
 function makeApp() {
   const app = new Hono<{ Variables: AppVariables }>();
-  app.use("*", authorizationSignature({ required: true, secrets: [STATIC_SECRET] }));
+  app.use(
+    "*",
+    authorizationSignature({
+      required: true,
+      secrets: [STATIC_SECRET],
+      tenantKeyStoreFactory(masterPassword, masterSalt, domain) {
+        tenantKeyStoreConstructionCount += 1;
+        return new KeyStore(masterPassword, masterSalt, domain);
+      },
+    }),
+  );
   app.post("/vault/:agentId/sign", (c) =>
     c.json({ ok: true, verified: Boolean(c.get("requestSignatureVerified")) }),
   );
@@ -94,11 +104,7 @@ afterAll(async () => {
 });
 
 beforeEach(() => {
-  decryptSpy = spyOn(KeyStore.prototype, "decrypt");
-});
-
-afterEach(() => {
-  decryptSpy.mockRestore();
+  tenantKeyStoreConstructionCount = 0;
 });
 
 describe("authorizationSignature tenant signing keys", () => {
@@ -113,7 +119,7 @@ describe("authorizationSignature tenant signing keys", () => {
 
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ ok: true, verified: true });
-    expect(decryptSpy).toHaveBeenCalledTimes(1);
+    expect(tenantKeyStoreConstructionCount).toBe(1);
   });
 
   it("rejects an unknown (well-formed) signing key id without decrypt work", async () => {
@@ -129,7 +135,7 @@ describe("authorizationSignature tenant signing keys", () => {
 
     expect(res.status).toBe(401);
     expect(await res.json()).toEqual({ ok: false, error: "Invalid signing key id" });
-    expect(decryptSpy).not.toHaveBeenCalled();
+    expect(tenantKeyStoreConstructionCount).toBe(0);
   });
 
   it("rejects a malformed signing key id cheaply (no uuid DB error)", async () => {
@@ -145,7 +151,7 @@ describe("authorizationSignature tenant signing keys", () => {
 
     expect(res.status).toBe(401);
     expect(await res.json()).toEqual({ ok: false, error: "Invalid signing key id" });
-    expect(decryptSpy).not.toHaveBeenCalled();
+    expect(tenantKeyStoreConstructionCount).toBe(0);
   });
 
   it("does not use tenant signing keys when no key id is named", async () => {
@@ -162,7 +168,7 @@ describe("authorizationSignature tenant signing keys", () => {
 
     expect(res.status).toBe(401);
     expect(await res.json()).toEqual({ ok: false, error: "Invalid request signature" });
-    expect(decryptSpy).not.toHaveBeenCalled();
+    expect(tenantKeyStoreConstructionCount).toBe(0);
   });
 
   it("still verifies key-id-less requests signed with a configured static secret", async () => {
@@ -176,6 +182,6 @@ describe("authorizationSignature tenant signing keys", () => {
 
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ ok: true, verified: true });
-    expect(decryptSpy).not.toHaveBeenCalled();
+    expect(tenantKeyStoreConstructionCount).toBe(0);
   });
 });
