@@ -529,6 +529,7 @@ const REQUEST_DATABASE_CAPABILITY_METHODS = [
   "stream",
   "transaction",
   "unlisten",
+  "unsubscribe",
 ] as const;
 
 /**

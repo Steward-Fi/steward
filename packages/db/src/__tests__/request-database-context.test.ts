@@ -1,5 +1,8 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { PGlite } from "@electric-sql/pglite";
+import { live } from "@electric-sql/pglite/live";
 import { eq, sql } from "drizzle-orm";
+import { drizzle } from "drizzle-orm/pglite";
 import {
   closeDb,
   getDb,
@@ -273,6 +276,7 @@ describe("request-scoped database context", () => {
       release: () => "raw-client-release",
     };
     const rawRows = [{ id: "row-1", query: "ordinary-data" }];
+    const rawSubscription = { unsubscribe: () => "raw-subscription-unsubscribed" };
     type AsyncCapabilityDb = {
       rows(): Promise<typeof rawRows>;
       $client: {
@@ -280,6 +284,8 @@ describe("request-scoped database context", () => {
         connectThenable(): {
           then(resolve: (client: typeof rawClient) => void): void;
         };
+        rejectedSubscription(): Promise<never>;
+        subscribe(): Promise<typeof rawSubscription>;
       };
     };
     const requestDbSource: AsyncCapabilityDb = {
@@ -292,18 +298,28 @@ describe("request-scoped database context", () => {
             resolve(rawClient);
           },
         }),
+        rejectedSubscription: () => Promise.reject(rawSubscription),
+        subscribe: async () => rawSubscription,
       },
     };
     const requestDb = requestDbSource as unknown as ReturnType<typeof getDb>;
     let rows!: typeof rawRows;
     let capturedClient!: typeof rawClient;
     let capturedThenableClient!: typeof rawClient;
+    let capturedRejectedSubscription!: typeof rawSubscription;
+    let capturedSubscription!: typeof rawSubscription;
 
     await withRequestDatabase(requestDb, async () => {
       const guardedDb = getDb() as unknown as AsyncCapabilityDb;
       const guardedClient = guardedDb.$client;
       rows = await guardedDb.rows();
       capturedClient = await guardedClient.connect();
+      capturedSubscription = await guardedClient.subscribe();
+      try {
+        await guardedClient.rejectedSubscription();
+      } catch (error) {
+        capturedRejectedSubscription = error as typeof rawSubscription;
+      }
       guardedClient.connectThenable().then((client) => {
         capturedThenableClient = client;
       });
@@ -311,8 +327,12 @@ describe("request-scoped database context", () => {
       expect(rows).toBe(rawRows);
       expect(capturedClient).not.toBe(rawClient);
       expect(capturedThenableClient).not.toBe(rawClient);
+      expect(capturedSubscription).not.toBe(rawSubscription);
+      expect(capturedRejectedSubscription).not.toBe(rawSubscription);
       expect(capturedClient.query()).toBe("raw-client-query");
       expect(capturedThenableClient.release()).toBe("raw-client-release");
+      expect(capturedSubscription.unsubscribe()).toBe("raw-subscription-unsubscribed");
+      expect(capturedRejectedSubscription.unsubscribe()).toBe("raw-subscription-unsubscribed");
     });
 
     expect(rows).toEqual([{ id: "row-1", query: "ordinary-data" }]);
@@ -321,6 +341,30 @@ describe("request-scoped database context", () => {
     expect(() => capturedClient.release()).toThrow("REQUEST_DATABASE_CONTEXT_CLOSED");
     expect(() => capturedThenableClient.query()).toThrow("REQUEST_DATABASE_CONTEXT_CLOSED");
     expect(() => capturedThenableClient.release()).toThrow("REQUEST_DATABASE_CONTEXT_CLOSED");
+    expect(() => capturedSubscription.unsubscribe()).toThrow("REQUEST_DATABASE_CONTEXT_CLOSED");
+    expect(() => capturedRejectedSubscription.unsubscribe()).toThrow(
+      "REQUEST_DATABASE_CONTEXT_CLOSED",
+    );
+  });
+
+  test("preserves ordinary native driver rejection errors after request cleanup", async () => {
+    const driverError = new Error("driver rejected the query");
+    const requestDb = {
+      execute: () => Promise.reject(driverError),
+    } as unknown as ReturnType<typeof getDb>;
+    let capturedError: unknown;
+
+    await withRequestDatabase(requestDb, async () => {
+      try {
+        await getDb().execute(sql`select 1`);
+      } catch (error) {
+        capturedError = error;
+      }
+    });
+
+    expect(capturedError).toBe(driverError);
+    expect(capturedError).toBeInstanceOf(Error);
+    expect((capturedError as Error).message).toBe("driver rejected the query");
   });
 
   test("revokes a real PGLite transaction passed into a callback", async () => {
@@ -375,6 +419,32 @@ describe("request-scoped database context", () => {
       expect(() => unsubscribe()).toThrow("REQUEST_DATABASE_CONTEXT_CLOSED");
     } finally {
       await client.unlisten(channel);
+      await client.close();
+    }
+  });
+
+  test("revokes a real PGLite live-query subscription resolved through the driver Promise", async () => {
+    const client = new PGlite("memory://", { extensions: { live } });
+    const db = drizzle(client);
+    let liveQuery!: Awaited<ReturnType<typeof client.live.query>>;
+    let initialValue!: number;
+
+    try {
+      await client.waitReady;
+      await withRequestDatabase(db as ReturnType<typeof getDb>, async () => {
+        liveQuery = await (
+          getDb() as unknown as {
+            $client: typeof client;
+          }
+        ).$client.live.query<{ value: number }>("select 1 as value");
+        initialValue = liveQuery.initialResults.rows[0]!.value;
+        expect(initialValue).toBe(1);
+      });
+
+      expect(initialValue).toBe(1);
+      expect(() => liveQuery.unsubscribe()).toThrow("REQUEST_DATABASE_CONTEXT_CLOSED");
+      expect(() => liveQuery.refresh()).toThrow("REQUEST_DATABASE_CONTEXT_CLOSED");
+    } finally {
       await client.close();
     }
   });
