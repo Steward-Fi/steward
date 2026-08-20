@@ -162,7 +162,7 @@ table in future migrations.
 6. Run real-Postgres cross-tenant read/write/upsert/delete/join tests plus
    concurrent pool-reuse and background-job tests against the deployment role.
 
-Create/finalize roles after migration `0111` (the invoking operator needs
+Create/finalize roles after migration `0112` (the invoking operator needs
 `CREATEROLE` and schema ownership):
 
 ```bash
@@ -170,15 +170,28 @@ psql "$DATABASE_URL" \
   -v steward_app_role=steward_app \
   -v steward_migration_role=steward_migrator \
   -v steward_bootstrap_role=steward_bootstrap_owner \
+  -v steward_platform_role=steward_platform \
   -f scripts/postgres/rls-bootstrap.sql
 ```
 
-The app and migration roles are separate login identities asserted
-`NOSUPERUSER NOBYPASSRLS`; the migration role owns the application relations,
-while the app cannot inherit or assume it. Supply their credentials through the
-database provider or `ALTER ROLE` outside source control. The bootstrap function owner is a
-non-login role with `BYPASSRLS` and only the narrow table privileges required by
-the fixed-shape functions. The app receives `EXECUTE`, never membership.
+The app, platform-authority, and migration roles are separate login identities
+asserted `NOSUPERUSER NOBYPASSRLS`; the migration role owns the application
+relations, while the app cannot inherit or assume either privileged login.
+Supply their credentials through the database provider or `ALTER ROLE` outside
+source control. Set `DATABASE_URL`/`STEWARD_APP_DATABASE_ROLE` to the app login
+and `STEWARD_PLATFORM_DATABASE_URL`/`STEWARD_PLATFORM_DATABASE_ROLE` to the
+platform login. The bootstrap function owner is a non-login `BYPASSRLS` role
+with only narrow table privileges. The app loses EXECUTE on destructive global
+functions; only the platform login receives those named grants.
+
+`bun scripts/generate-rls-policy-manifest.ts` replays the immutable migrations
+and the capabilities plugin migrations, then refreshes the committed exact relation/partition and policy-definition
+manifest. Run it for every schema or policy change and commit both generated
+outputs. Production startup and `/ready` compare the live role, ownership,
+relation/partition graph, and policy definitions to this manifest before
+serving. Core is always required at exactly 71 protected relations and 73
+policies. If any capabilities relation is installed, all three capabilities
+relations and all three exact policies are required and activated as one group.
 
 After all residual code paths and exact deployment-role tests pass, activate in
 one maintenance transaction:
@@ -189,10 +202,10 @@ psql "$DATABASE_URL" \
   -f scripts/postgres/rls-activate.sql
 ```
 
-The script enables and forces every relation carrying a checked-in Steward
-policy and adds an explicit all-row policy only for the named `NOBYPASSRLS`
-migration role. It aborts if any current `tenant_id` table is not both enabled
-and forced.
+The script enables and forces every inventoried Steward relation and adds an
+explicit all-row policy only for the named `NOBYPASSRLS` migration role. It
+aborts on any missing/extra public relation or partition edge, or any drift in
+policy name, command, roles, permissiveness, `USING`, or `WITH CHECK`.
 
 ## Rollback
 

@@ -22,6 +22,13 @@
       "when": 1783000000000,
       "tag": "0002_agent_grant_lifecycle",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1787203700000,
+      "tag": "0003_tenant_rls_policies",
+      "breakpoints": true
     }
   ]
 }

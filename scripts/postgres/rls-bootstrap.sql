@@ -12,21 +12,31 @@
 \else
   \set steward_bootstrap_role steward_bootstrap_owner
 \endif
+\if :{?steward_platform_role}
+\else
+  \set steward_platform_role steward_platform
+\endif
 
 BEGIN;
 SET LOCAL lock_timeout = '10s';
 SELECT set_config('steward.bootstrap.app_role', :'steward_app_role', true);
 SELECT set_config('steward.bootstrap.migration_role', :'steward_migration_role', true);
 SELECT set_config('steward.bootstrap.definer_role', :'steward_bootstrap_role', true);
+SELECT set_config('steward.bootstrap.platform_role', :'steward_platform_role', true);
 
 DO $$
 BEGIN
   IF current_setting('steward.bootstrap.app_role') IN (
       current_setting('steward.bootstrap.migration_role'),
-      current_setting('steward.bootstrap.definer_role')
+      current_setting('steward.bootstrap.definer_role'),
+      current_setting('steward.bootstrap.platform_role')
     ) OR current_setting('steward.bootstrap.migration_role') =
-      current_setting('steward.bootstrap.definer_role') THEN
-    RAISE EXCEPTION 'SEC-169 app, migration-maintenance, and definer roles must be distinct';
+      ANY (ARRAY[
+        current_setting('steward.bootstrap.definer_role'),
+        current_setting('steward.bootstrap.platform_role')
+      ]) OR current_setting('steward.bootstrap.definer_role') =
+      current_setting('steward.bootstrap.platform_role') THEN
+    RAISE EXCEPTION 'SEC-169 app, platform, migration-maintenance, and definer roles must be distinct';
   END IF;
 END
 $$;
@@ -45,10 +55,15 @@ SELECT format(
   'CREATE ROLE %I NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT BYPASSRLS',
   :'steward_bootstrap_role'
 ) WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = :'steward_bootstrap_role') \gexec
+SELECT format(
+  'CREATE ROLE %I LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS',
+  :'steward_platform_role'
+) WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = :'steward_platform_role') \gexec
 
 SELECT format('ALTER ROLE %I LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS', :'steward_app_role') \gexec
 SELECT format('ALTER ROLE %I LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS', :'steward_migration_role') \gexec
 SELECT format('ALTER ROLE %I NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT BYPASSRLS', :'steward_bootstrap_role') \gexec
+SELECT format('ALTER ROLE %I LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS', :'steward_platform_role') \gexec
 
 REVOKE CREATE ON SCHEMA public FROM PUBLIC;
 REVOKE ALL ON SCHEMA steward_bootstrap FROM PUBLIC;
@@ -60,6 +75,27 @@ SELECT format('GRANT %I TO %I', :'steward_migration_role', current_user) \gexec
 SELECT format('GRANT USAGE, CREATE ON SCHEMA public TO %I', :'steward_migration_role') \gexec
 SELECT format('GRANT USAGE ON SCHEMA public, steward_bootstrap, steward_rls TO %I', :'steward_app_role') \gexec
 SELECT format('GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA steward_bootstrap, steward_rls TO %I', :'steward_app_role') \gexec
+SELECT format(
+  'REVOKE EXECUTE ON FUNCTION '
+  'steward_bootstrap.platform_set_user_deactivation(uuid,boolean), '
+  'steward_bootstrap.platform_delete_user(uuid), '
+  'steward_bootstrap.platform_revoke_user_refresh_tokens(uuid), '
+  'steward_bootstrap.retention_delete_deactivated_users(integer) FROM %I',
+  :'steward_app_role'
+) \gexec
+SELECT format('GRANT USAGE ON SCHEMA steward_bootstrap TO %I', :'steward_platform_role') \gexec
+SELECT format(
+  'GRANT SELECT, INSERT, UPDATE ON public.audit_events, public.audit_chain_heads TO %I',
+  :'steward_platform_role'
+) \gexec
+SELECT format(
+  'GRANT EXECUTE ON FUNCTION '
+  'steward_bootstrap.platform_set_user_deactivation(uuid,boolean), '
+  'steward_bootstrap.platform_delete_user(uuid), '
+  'steward_bootstrap.platform_revoke_user_refresh_tokens(uuid), '
+  'steward_bootstrap.retention_delete_deactivated_users(integer) TO %I',
+  :'steward_platform_role'
+) \gexec
 SELECT format('GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO %I', :'steward_app_role') \gexec
 SELECT format('GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO %I', :'steward_app_role') \gexec
 
@@ -125,7 +161,8 @@ BEGIN
     SELECT 1 FROM pg_roles
     WHERE rolname IN (
       current_setting('steward.bootstrap.app_role'),
-      current_setting('steward.bootstrap.migration_role')
+      current_setting('steward.bootstrap.migration_role'),
+      current_setting('steward.bootstrap.platform_role')
     )
       AND (rolsuper OR rolbypassrls)
   ) THEN
@@ -137,6 +174,13 @@ BEGIN
     'MEMBER'
   ) THEN
     RAISE EXCEPTION 'SEC-169 app role must not inherit or assume migration role';
+  END IF;
+  IF pg_has_role(
+    current_setting('steward.bootstrap.app_role'),
+    current_setting('steward.bootstrap.platform_role'),
+    'MEMBER'
+  ) THEN
+    RAISE EXCEPTION 'SEC-169 app role must not inherit or assume platform role';
   END IF;
   IF pg_has_role(
     current_setting('steward.bootstrap.app_role'),

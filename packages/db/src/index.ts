@@ -41,6 +41,7 @@ export {
   withDatabaseDeadline,
   withRequestDatabase,
   withTenantTransactionDatabase,
+  withTenantTransactionDatabaseDeadline,
 } from "./client";
 export { runMigrations } from "./migrate";
 export { getMigrationExpectation, type MigrationExpectation } from "./migration-status";
@@ -52,6 +53,7 @@ export {
   runPluginMigrations,
   sanitizePluginMigrationId,
 } from "./plugin-migrate";
+export { assertRlsDeploymentSafety } from "./rls-deployment-safety";
 export {
   ALL_INVENTORIED_TABLES,
   BOOTSTRAP_ROOT_TABLES,
