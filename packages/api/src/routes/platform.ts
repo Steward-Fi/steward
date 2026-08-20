@@ -120,6 +120,7 @@ interface TenantCapabilityCleanup {
   activeGrantsRetired: number;
   terminalGrantsRemoved: number;
   capabilitiesRemoved: number;
+  rateLimitBucketsRemoved: number;
   invocationEvidenceRetained: number;
 }
 
@@ -133,12 +134,14 @@ async function cleanupOptionalTenantCapabilities(
 ): Promise<TenantCapabilityCleanup | null> {
   const [relations] = resultRows<{
     capabilities: string | null;
+    buckets: string | null;
     grants: string | null;
     invocations: string | null;
   }>(
     await tx.execute(sql`
       SELECT
         to_regclass('public.capabilities')::text AS capabilities,
+        to_regclass('public.capability_rate_limit_buckets')::text AS buckets,
         to_regclass('public.capability_grants')::text AS grants,
         to_regclass('public.capability_invocations')::text AS invocations
     `),
@@ -147,8 +150,20 @@ async function cleanupOptionalTenantCapabilities(
     activeGrantsRetired: 0,
     terminalGrantsRemoved: 0,
     capabilitiesRemoved: 0,
+    rateLimitBucketsRemoved: 0,
     invocationEvidenceRetained: 0,
   };
+
+  if (relations?.buckets) {
+    const removed = resultRows<{ tenant_id: string }>(
+      await tx.execute(sql`
+        DELETE FROM public.capability_rate_limit_buckets
+        WHERE tenant_id = ${tenantId}
+        RETURNING tenant_id
+      `),
+    );
+    cleanup.rateLimitBucketsRemoved = removed.length;
+  }
 
   let tenantCapabilityIds: string[] = [];
   if (relations?.capabilities) {

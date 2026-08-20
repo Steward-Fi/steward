@@ -89,7 +89,7 @@ import {
   requireProviderAgentJwt,
 } from "./middleware/agent-jwt";
 import { operatorAuth } from "./middleware/operator-auth";
-import { getRedisClient } from "./middleware/redis";
+import { getRedisClient, isRedisConfigured } from "./middleware/redis";
 import { getAgentTokenStatus } from "./services/agent-token-status";
 import { writeAuditEvent } from "./services/audit";
 import {
@@ -104,6 +104,7 @@ import {
   safeJsonParse,
   tenantAuth,
   vault,
+  withAuthenticatedTenantDatabase,
 } from "./services/context";
 import { createEnvEvmSimulator, type EvmSimulator } from "./services/evm-simulator";
 import { CONFIGURED_WEBHOOK_EVENT_TYPES } from "./services/webhook-events";
@@ -203,6 +204,11 @@ export interface StewardAppContext {
   ): Promise<T>;
   getAgentTokenStatus: typeof getAgentTokenStatus;
   getRedisClient: typeof getRedisClient;
+  isRedisConfigured: typeof isRedisConfigured;
+  withCapabilityTenantDatabase<T>(
+    tenantId: string,
+    use: (tenantDb: ReturnType<typeof getDb>) => Promise<T>,
+  ): Promise<T>;
   exerciseCredentialSecret<T>(
     tenantId: string,
     secretId: string,
@@ -290,6 +296,11 @@ export function buildPluginContext(): StewardAppContext {
     },
     getAgentTokenStatus,
     getRedisClient,
+    isRedisConfigured,
+    withCapabilityTenantDatabase: (tenantId, use) =>
+      withAuthenticatedTenantDatabase(tenantId, "capability-rate-limit", tenantId, () =>
+        use(getDb()),
+      ),
     exerciseCredentialSecret: (tenantId, secretId, use) =>
       credentialVault.exerciseSecret(tenantId, secretId, use),
     sealCredentialLeaseToken: async (tenantId, leaseId, token) =>

@@ -28,6 +28,7 @@ import { composeApp } from "./compose";
 import { getRedisClient, initRedis, isRedisConfigured, shutdownRedis } from "./middleware/redis";
 import { resolveEnabledPlugins } from "./plugin-config";
 import { assertAuthStoresAreSafe, getAuthStoreSources, initAuthStores } from "./routes/auth";
+import { checkCapabilityRateLimitReadiness } from "./services/capability-rate-limit-readiness";
 import {
   API_VERSION,
   type ApiResponse,
@@ -215,6 +216,10 @@ app.get("/ready", async (c) => {
         : { ok: false, required: false, error: "Redis is not configured (optional mode)" };
   } catch {
     checks.redis = { ok: false, error: "Redis health check failed" };
+  }
+
+  if (capabilitiesEnabled) {
+    checks.capabilityRateLimit = await checkCapabilityRateLimitReadiness();
   }
 
   const proxyUrl = process.env.STEWARD_PROXY_URL?.replace(/\/+$/, "");

@@ -41,20 +41,30 @@ export async function cleanupAgentBehaviorTestDatabase(tenantId: string): Promis
   const capabilityTables = await db.execute(
     sql`SELECT
       to_regclass('public.capabilities')::text AS capabilities,
+      to_regclass('public.capability_rate_limit_buckets')::text AS buckets,
       to_regclass('public.capability_invocations')::text AS invocations`,
   );
   const capabilityRows = Array.isArray(capabilityTables)
     ? capabilityTables
     : ((
         capabilityTables as {
-          rows?: Array<{ capabilities: string | null; invocations: string | null }>;
+          rows?: Array<{
+            buckets: string | null;
+            capabilities: string | null;
+            invocations: string | null;
+          }>;
         }
       ).rows ?? []);
   const pluginTables = capabilityRows[0] as
-    | { capabilities?: string | null; invocations?: string | null }
+    | { buckets?: string | null; capabilities?: string | null; invocations?: string | null }
     | undefined;
   if (pluginTables?.invocations) {
     await db.execute(sql`DELETE FROM public.capability_invocations WHERE tenant_id = ${tenantId}`);
+  }
+  if (pluginTables?.buckets) {
+    await db.execute(
+      sql`DELETE FROM public.capability_rate_limit_buckets WHERE tenant_id = ${tenantId}`,
+    );
   }
   if (pluginTables?.capabilities) {
     await db.execute(sql`DELETE FROM public.capabilities WHERE tenant_id = ${tenantId}`);

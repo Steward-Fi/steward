@@ -658,7 +658,7 @@ export function createInvokeRoutes(ctx: StewardAppContext): Hono<{ Variables: Ap
 
     // Per-agent throttle BEFORE any DB/upstream work (SEC-094); the 429 path
     // deliberately writes no invocation row (that write is the vector throttled).
-    const rate = await enforceCapabilityRateLimit(ctx, "invoke", agentId);
+    const rate = await enforceCapabilityRateLimit(ctx, "invoke", tenantId, agentId);
     if (!rate.allowed) {
       const res = jsonResponse({ ok: false, error: "capability invoke rate limit exceeded" }, 429);
       res.headers.set("Retry-After", String(Math.ceil(rate.resetMs / 1000)));
@@ -737,7 +737,7 @@ export function createInvokeRoutes(ctx: StewardAppContext): Hono<{ Variables: Ap
     }
 
     // Same per-agent throttle as the envelope invoke route (SEC-094).
-    const rate = await enforceCapabilityRateLimit(ctx, "invoke", agentId);
+    const rate = await enforceCapabilityRateLimit(ctx, "invoke", tenantId, agentId);
     if (!rate.allowed) {
       const res = openAIError("capability invoke rate limit exceeded", 429);
       res.headers.set("Retry-After", String(Math.ceil(rate.resetMs / 1000)));

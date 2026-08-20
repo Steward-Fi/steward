@@ -122,6 +122,12 @@ export const EXPECTED_PUBLIC_RELATIONS = [
     "partition_parents": ""
   },
   {
+    "policy_group": "capabilities",
+    "relation_name": "capability_rate_limit_buckets",
+    "relation_kind": "r",
+    "partition_parents": ""
+  },
+  {
     "policy_group": "core",
     "relation_name": "condition_set_items",
     "relation_kind": "r",
@@ -657,6 +663,16 @@ export const EXPECTED_RLS_POLICY_DEFINITIONS = [
   {
     "policy_group": "capabilities",
     "relation_name": "capability_invocations",
+    "policy_name": "steward_tenant_isolation",
+    "command": "*",
+    "permissive": true,
+    "roles": "PUBLIC",
+    "using_expression": "(tenant_id = steward_rls.tenant_id())",
+    "check_expression": "(tenant_id = steward_rls.tenant_id())"
+  },
+  {
+    "policy_group": "capabilities",
+    "relation_name": "capability_rate_limit_buckets",
     "policy_name": "steward_tenant_isolation",
     "command": "*",
     "permissive": true,

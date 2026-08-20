@@ -185,16 +185,30 @@ export async function deleteAgentAuthority(
     // lock used by plugin migration 0002's writer fence. This prevents an old
     // active grant from surviving deletion or becoming live again if an agent
     // identifier is later reused.
-    const capabilityTable = resultRows<{ relation: string | null }>(
-      await tx.execute(sql`SELECT to_regclass('public.capability_grants')::text AS relation`),
-    )[0]?.relation;
-    if (capabilityTable) {
+    const capabilityRelations = resultRows<{
+      buckets: string | null;
+      grants: string | null;
+    }>(
+      await tx.execute(sql`
+        SELECT
+          to_regclass('public.capability_rate_limit_buckets')::text AS buckets,
+          to_regclass('public.capability_grants')::text AS grants
+      `),
+    )[0];
+    if (capabilityRelations?.grants) {
       await tx.execute(sql`
         UPDATE public.capability_grants
         SET status = 'revoked'
         WHERE tenant_id = ${tenantId}
           AND agent_id = ${agentId}
           AND status = 'active'
+      `);
+    }
+    if (capabilityRelations?.buckets) {
+      await tx.execute(sql`
+        DELETE FROM public.capability_rate_limit_buckets
+        WHERE tenant_id = ${tenantId}
+          AND agent_id = ${agentId}
       `);
     }
 
