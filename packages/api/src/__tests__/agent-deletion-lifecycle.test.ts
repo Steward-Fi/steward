@@ -558,4 +558,123 @@ describe("agent deletion upstream credential boundary", () => {
       }
     },
   );
+
+  it.skipIf(!USING_REAL_POSTGRES)(
+    "prevents retained authority rows from being reactivated after agent deletion",
+    async () => {
+      const agentId = `authority-reactivation-${crypto.randomUUID()}`;
+      await createAgent(agentId);
+      const leaseId = await createLease(agentId, "revoked");
+      const { grantId, routeId } = await createCapability(agentId);
+      await getDb()
+        .update(capabilityGrants)
+        .set({ status: "revoked" })
+        .where(eq(capabilityGrants.id, grantId as string));
+      await getDb()
+        .update(secretRoutes)
+        .set({ enabled: false })
+        .where(eq(secretRoutes.id, routeId as string));
+
+      const holder = postgres(process.env.DATABASE_URL as string, { max: 1 });
+      const leaseWriter = postgres(process.env.DATABASE_URL as string, { max: 1 });
+      const routeWriter = postgres(process.env.DATABASE_URL as string, { max: 1 });
+      const grantWriter = postgres(process.env.DATABASE_URL as string, { max: 1 });
+      const observer = postgres(process.env.DATABASE_URL as string, { max: 1 });
+      const writerPids = await Promise.all(
+        [leaseWriter, routeWriter, grantWriter].map(async (writer) => {
+          const [row] = await writer<{ pid: number }[]>`select pg_backend_pid()::int as pid`;
+          return row?.pid ?? 0;
+        }),
+      );
+      const leaseWriterPid = writerPids[0] as number;
+      const routeWriterPid = writerPids[1] as number;
+      const grantWriterPid = writerPids[2] as number;
+      let releaseHolder!: () => void;
+      const release = new Promise<void>((resolve) => {
+        releaseHolder = resolve;
+      });
+      let holderReady!: () => void;
+      const ready = new Promise<void>((resolve) => {
+        holderReady = resolve;
+      });
+      const holderTransaction = holder.begin(async (tx) => {
+        await tx`select id from agents where tenant_id = ${TENANT_ID} and id = ${agentId} for update`;
+        holderReady();
+        await release;
+        await tx`delete from agents where tenant_id = ${TENANT_ID} and id = ${agentId}`;
+      });
+      await ready;
+
+      const outcomes = [
+        leaseWriter`
+          update upstream_credential_leases
+          set status = 'active', token_hash = ${"e".repeat(64)},
+              token_ciphertext = 'late-token', token_iv = 'late-iv',
+              token_auth_tag = 'late-tag', token_salt = 'late-salt'
+          where id = ${leaseId}
+        `,
+        routeWriter`
+          update secret_routes set enabled = true where id = ${routeId as string}
+        `,
+        grantWriter`
+          update capability_grants set status = 'active' where id = ${grantId as string}
+        `,
+      ].map((operation) =>
+        operation.then(
+          () => ({ ok: true }),
+          (error) => ({ ok: false, error }),
+        ),
+      );
+
+      try {
+        let allBlocked = false;
+        for (let attempt = 0; attempt < 400 && !allBlocked; attempt += 1) {
+          const rows = await observer<{ pid: number; blocked: boolean }[]>`
+            select activity.pid::int as pid, activity.wait_event_type = 'Lock' as blocked
+            from pg_stat_activity activity
+            where activity.pid = ${leaseWriterPid}
+               or activity.pid = ${routeWriterPid}
+               or activity.pid = ${grantWriterPid}
+          `;
+          allBlocked =
+            rows.length === writerPids.length && rows.every((row) => row.blocked === true);
+          if (!allBlocked) await Bun.sleep(10);
+        }
+        expect(allBlocked).toBe(true);
+
+        releaseHolder();
+        await holderTransaction;
+        expect(await Promise.all(outcomes)).toEqual([
+          { ok: false, error: expect.objectContaining({ code: "23503" }) },
+          { ok: false, error: expect.objectContaining({ code: "23503" }) },
+          { ok: false, error: expect.objectContaining({ code: "23503" }) },
+        ]);
+        expect(
+          await getDb()
+            .select()
+            .from(upstreamCredentialLeases)
+            .where(eq(upstreamCredentialLeases.id, leaseId)),
+        ).toMatchObject([{ status: "revoked", tokenCiphertext: null }]);
+        expect(
+          await getDb().select().from(secretRoutes).where(eq(secretRoutes.id, routeId as string)),
+        ).toMatchObject([{ enabled: false }]);
+        expect(
+          await getDb()
+            .select()
+            .from(capabilityGrants)
+            .where(eq(capabilityGrants.id, grantId as string)),
+        ).toMatchObject([{ status: "revoked" }]);
+      } finally {
+        releaseHolder();
+        await Promise.allSettled([holderTransaction, ...outcomes]);
+        await Promise.all([
+          holder.end(),
+          leaseWriter.end(),
+          routeWriter.end(),
+          grantWriter.end(),
+          observer.end(),
+        ]);
+      }
+    },
+  );
 });

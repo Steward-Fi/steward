@@ -26,7 +26,8 @@ $$;
 DROP TRIGGER IF EXISTS capability_grants_agent_fence ON public.capability_grants;
 --> statement-breakpoint
 CREATE TRIGGER capability_grants_agent_fence
-BEFORE INSERT OR UPDATE OF tenant_id, agent_id ON public.capability_grants
+BEFORE INSERT OR UPDATE OF tenant_id, agent_id, status, secret_route_id
+ON public.capability_grants
 FOR EACH ROW
 EXECUTE FUNCTION capability_grants_agent_fence();
 --> statement-breakpoint

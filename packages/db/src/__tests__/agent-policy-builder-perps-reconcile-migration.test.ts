@@ -160,6 +160,31 @@ describe("0109 agent policy builder-perps reconciliation", () => {
             ) AS exists
           `;
           expect(leaseAgentFence).toEqual([{ exists: true }]);
+          const fenceFunction = await verified<{
+            definition: string;
+            settings: string[] | null;
+          }[]>`
+            SELECT pg_get_functiondef(proc.oid) AS definition, proc.proconfig AS settings
+            FROM pg_proc proc
+            WHERE proc.oid = 'public.steward_fence_agent_authority_creation()'::regprocedure
+          `;
+          expect(fenceFunction[0]?.definition).toContain("FROM public.agents");
+          expect(fenceFunction[0]?.settings).toContain("search_path=pg_catalog, public");
+          const fenceDefinitions = await verified<{ name: string; definition: string }[]>`
+            SELECT trigger.tgname AS name, pg_get_triggerdef(trigger.oid) AS definition
+            FROM pg_trigger trigger
+            WHERE trigger.tgname IN (
+              'upstream_credential_leases_agent_fence',
+              'secret_routes_agent_fence'
+            )
+          `;
+          expect(
+            fenceDefinitions.find(({ name }) => name === "upstream_credential_leases_agent_fence")
+              ?.definition,
+          ).toContain("UPDATE OF tenant_id, agent_id, status, token_hash, token_ciphertext");
+          expect(
+            fenceDefinitions.find(({ name }) => name === "secret_routes_agent_fence")?.definition,
+          ).toContain("UPDATE OF tenant_id, agent_id, enabled");
           const applied = await verified<{ count: number }[]>`
           SELECT count(*)::int AS count FROM drizzle.__drizzle_migrations
         `;
