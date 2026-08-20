@@ -753,7 +753,7 @@ describe("wallet transfer actions", () => {
       });
       throw new ExternalBroadcastOutcomeUnknownError(signature);
     };
-    const request = (value = "123") =>
+    const request = (value = "123", referenceId = "durable-spl-reference") =>
       app.request(`/vault/${SOLANA_AGENT_ID}/actions/transfer`, {
         method: "POST",
         headers: { "content-type": "application/json", "Idempotency-Key": "durable-spl" },
@@ -763,6 +763,7 @@ describe("wallet transfer actions", () => {
           value,
           chainId: 101,
           broadcast: true,
+          referenceId,
         }),
       });
 
@@ -779,6 +780,8 @@ describe("wallet transfer actions", () => {
       expect(signCalls).toBe(1);
       const mismatch = await request("124");
       expect(mismatch.status).toBe(409);
+      const referenceMismatch = await request("123", "durable-spl-other-reference");
+      expect(referenceMismatch.status).toBe(409);
       expect(signCalls).toBe(1);
 
       const [row] = await getDb()
