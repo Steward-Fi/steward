@@ -4070,6 +4070,166 @@ function redirectEmailAuthFailure(c: Context, reason: string): Response {
   );
 }
 
+type OAuthCallbackFailureStatus = 400 | 401 | 403 | 404 | 409 | 500 | 502 | 503;
+
+interface OAuthCallbackFailureOptions {
+  code: string;
+  message: string;
+  status: OAuthCallbackFailureStatus;
+  redirectUrl?: URL;
+  appState?: string;
+}
+
+function escapeOAuthCallbackHtml(value: string): string {
+  return value.replace(/[&<>"']/g, (character) => {
+    switch (character) {
+      case "&":
+        return "&amp;";
+      case "<":
+        return "&lt;";
+      case ">":
+        return "&gt;";
+      case '"':
+        return "&quot;";
+      default:
+        return "&#39;";
+    }
+  });
+}
+
+function oauthCallbackPrefersHtml(c: Context): boolean {
+  const accept = c.req.header("accept")?.toLowerCase() ?? "";
+  const qualityFor = (target: "application/json" | "text/html"): number | undefined => {
+    const [targetType] = target.split("/");
+    let bestMatch: { specificity: number; quality: number } | undefined;
+    for (const range of accept.split(",")) {
+      const [mediaType, ...parameters] = range.split(";").map((part) => part.trim());
+      const qualityParameter = parameters.find((parameter) => parameter.startsWith("q="));
+      const quality = qualityParameter ? Number(qualityParameter.slice(2)) : 1;
+      const normalizedQuality =
+        Number.isFinite(quality) && quality >= 0 && quality <= 1 ? quality : 0;
+      const specificity =
+        mediaType === target
+          ? 2
+          : mediaType === `${targetType}/*`
+            ? 1
+            : mediaType === "*/*"
+              ? 0
+              : -1;
+      if (
+        specificity >= 0 &&
+        (!bestMatch ||
+          specificity > bestMatch.specificity ||
+          (specificity === bestMatch.specificity && normalizedQuality > bestMatch.quality))
+      ) {
+        bestMatch = { specificity, quality: normalizedQuality };
+      }
+    }
+    return bestMatch?.quality;
+  };
+
+  const htmlQuality = qualityFor("text/html") ?? 0;
+  const jsonQuality = qualityFor("application/json") ?? 0;
+  if (htmlQuality <= 0) return false;
+  if (htmlQuality !== jsonQuality) return htmlQuality > jsonQuality;
+  return c.req.header("sec-fetch-mode")?.toLowerCase() === "navigate";
+}
+
+async function oauthCallbackRecoveryFromStoredState(
+  kind: "oauth" | "oidc",
+  state: string | undefined,
+  providerName: string,
+): Promise<{ redirectUrl: URL; appState?: string } | undefined> {
+  if (!state || state.length > 256) return undefined;
+  try {
+    const rawPayload = await getChallengeStore().get(`${kind}:${state}`);
+    if (!rawPayload) return undefined;
+    const stateData = JSON.parse(rawPayload) as Record<string, unknown>;
+    const storedProvider = kind === "oauth" ? stateData.provider : stateData.providerId;
+    if (storedProvider !== providerName || typeof stateData.redirectUri !== "string") {
+      return undefined;
+    }
+    const tenantId = typeof stateData.tenantId === "string" ? stateData.tenantId : undefined;
+    const clientId = typeof stateData.clientId === "string" ? stateData.clientId : undefined;
+    const redirectUrl = await assertAllowedOAuthRedirectUri(
+      stateData.redirectUri,
+      tenantId,
+      clientId,
+    );
+    return {
+      redirectUrl,
+      appState: typeof stateData.appState === "string" ? stateData.appState : undefined,
+    };
+  } catch {
+    // Recovery is optional. Invalid, stale, or unavailable state must never
+    // replace the original callback failure or create an unvalidated link.
+    return undefined;
+  }
+}
+
+function oauthCallbackFailure(c: Context, options: OAuthCallbackFailureOptions): Response {
+  if (!oauthCallbackPrefersHtml(c)) {
+    return c.json<ApiResponse>(
+      { ok: false, error: options.message, code: options.code } as ApiResponse & { code: string },
+      options.status,
+    );
+  }
+
+  let recoveryLink = "";
+  if (options.redirectUrl) {
+    const recoveryUrl = new URL(options.redirectUrl);
+    recoveryUrl.searchParams.set("error", options.code);
+    if (options.appState) recoveryUrl.searchParams.set("state", options.appState);
+    recoveryLink = `<a class="stwd-oauth-error__action" href="${escapeOAuthCallbackHtml(
+      recoveryUrl.toString(),
+    )}">Return and try again</a>`;
+  }
+
+  const escapedMessage = escapeOAuthCallbackHtml(options.message);
+  const escapedCode = escapeOAuthCallbackHtml(options.code);
+  const recoveryInstruction = recoveryLink
+    ? recoveryLink
+    : '<p class="stwd-oauth-error__hint">Close this window and restart sign-in from the application.</p>';
+  const body = `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sign-in could not be completed | Steward</title>
+  <style>
+    :root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, sans-serif; }
+    * { box-sizing: border-box; }
+    body { min-height: 100vh; margin: 0; display: grid; place-items: center; padding: 24px; background: #090b10; color: #f6f7fb; }
+    .stwd-oauth-error { width: min(100%, 520px); padding: 32px; border: 1px solid #2a3040; border-radius: 18px; background: #121621; box-shadow: 0 24px 70px rgb(0 0 0 / 35%); }
+    .stwd-oauth-error__eyebrow { margin: 0 0 10px; color: #98a2b8; font-size: 13px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+    h1 { margin: 0; font-size: clamp(24px, 6vw, 34px); line-height: 1.15; }
+    .stwd-oauth-error__message { margin: 18px 0; color: #cbd1de; line-height: 1.6; }
+    .stwd-oauth-error__code { display: inline-block; margin-bottom: 24px; padding: 6px 9px; border-radius: 7px; background: #080a0f; color: #aab4ca; font-size: 12px; }
+    .stwd-oauth-error__action { display: inline-block; padding: 12px 18px; border-radius: 9px; background: #f6f7fb; color: #11141c; font-weight: 750; text-decoration: none; }
+    .stwd-oauth-error__action:focus-visible { outline: 3px solid #7aa2ff; outline-offset: 3px; }
+    .stwd-oauth-error__hint { margin: 0; color: #98a2b8; line-height: 1.5; }
+  </style>
+</head>
+<body>
+  <main class="stwd-oauth-error" data-error-code="${escapedCode}">
+    <p class="stwd-oauth-error__eyebrow">Steward authentication</p>
+    <h1>Sign-in could not be completed</h1>
+    <p class="stwd-oauth-error__message">${escapedMessage}</p>
+    <code class="stwd-oauth-error__code">${escapedCode}</code>
+    <div>${recoveryInstruction}</div>
+  </main>
+</body>
+</html>`;
+
+  return c.html(body, options.status, {
+    "Cache-Control": "no-store",
+    "Content-Security-Policy":
+      "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'",
+    "Referrer-Policy": "no-referrer",
+    "X-Content-Type-Options": "nosniff",
+  });
+}
+
 // ─── Route group ──────────────────────────────────────────────────────────────
 
 const auth = new Hono();
@@ -5109,19 +5269,41 @@ auth.get("/oidc/:provider/callback", async (c) => {
   if (errorParam) {
     // Provider-supplied query text is untrusted and may contain diagnostics or
     // attacker-controlled markup. Do not reflect it to the browser.
-    return c.json<ApiResponse>({ ok: false, error: "OIDC authorization failed" }, 400);
+    const recovery = await oauthCallbackRecoveryFromStoredState("oidc", state, providerId);
+    return oauthCallbackFailure(c, {
+      code: "oidc_authorization_failed",
+      message: "The identity provider did not authorize this sign-in.",
+      status: 400,
+      ...recovery,
+    });
   }
   if (!code || !state) {
-    return c.json<ApiResponse>({ ok: false, error: "code and state are required" }, 400);
+    const recovery = await oauthCallbackRecoveryFromStoredState("oidc", state, providerId);
+    return oauthCallbackFailure(c, {
+      code: "oidc_callback_incomplete",
+      message: "The identity provider returned an incomplete sign-in response.",
+      status: 400,
+      ...recovery,
+    });
   }
   if (code.length > 4_096 || state.length > 256) {
-    return c.json<ApiResponse>({ ok: false, error: "code or state is too long" }, 400);
+    const recovery = await oauthCallbackRecoveryFromStoredState("oidc", state, providerId);
+    return oauthCallbackFailure(c, {
+      code: "oidc_callback_invalid",
+      message: "The identity provider returned an invalid sign-in response.",
+      status: 400,
+      ...recovery,
+    });
   }
 
   const stateKey = `oidc:${state}`;
   const rawPayload = await getChallengeStore().get(stateKey);
   if (!rawPayload) {
-    return c.json<ApiResponse>({ ok: false, error: "Invalid or expired OIDC state" }, 401);
+    return oauthCallbackFailure(c, {
+      code: "oidc_state_expired",
+      message: "This sign-in attempt is invalid or has expired.",
+      status: 401,
+    });
   }
 
   let stateData: {
@@ -5138,15 +5320,27 @@ auth.get("/oidc/:provider/callback", async (c) => {
   try {
     stateData = JSON.parse(rawPayload) as typeof stateData;
   } catch {
-    return c.json<ApiResponse>({ ok: false, error: "Malformed OIDC state payload" }, 400);
+    return oauthCallbackFailure(c, {
+      code: "oidc_state_invalid",
+      message: "This sign-in attempt could not be validated.",
+      status: 400,
+    });
   }
   if (stateData.providerId !== providerId) {
-    return c.json<ApiResponse>({ ok: false, error: "Provider mismatch in state" }, 400);
+    return oauthCallbackFailure(c, {
+      code: "oidc_provider_mismatch",
+      message: "The identity provider does not match this sign-in attempt.",
+      status: 400,
+    });
   }
 
   const provider = selectOidcProvider(await getTenantOidcProviders(stateData.tenantId), providerId);
   if (!provider?.clientId || !provider.tokenUrl) {
-    return c.json<ApiResponse>({ ok: false, error: "OIDC provider not found or disabled" }, 404);
+    return oauthCallbackFailure(c, {
+      code: "oidc_provider_unavailable",
+      message: "This identity provider is not available.",
+      status: 404,
+    });
   }
 
   const methodResponse = await requireTenantLoginMethodAllowed(
@@ -5156,7 +5350,13 @@ auth.get("/oidc/:provider/callback", async (c) => {
     provider.id,
     stateData.clientId,
   );
-  if (methodResponse) return methodResponse;
+  if (methodResponse) {
+    return oauthCallbackFailure(c, {
+      code: "oidc_login_disabled",
+      message: "OIDC sign-in is disabled for this application.",
+      status: 403,
+    });
+  }
 
   let redirectUrl: URL;
   try {
@@ -5166,10 +5366,12 @@ auth.get("/oidc/:provider/callback", async (c) => {
       stateData.clientId,
     );
   } catch (err) {
-    return c.json<ApiResponse>(
-      { ok: false, error: err instanceof Error ? err.message : "Invalid redirect_uri" },
-      400,
-    );
+    console.error("[OidcAuth] Callback redirect validation failed", redactedThrownDiagnostics(err));
+    return oauthCallbackFailure(c, {
+      code: "oidc_redirect_invalid",
+      message: "The application return address is not allowed.",
+      status: 400,
+    });
   }
 
   let idToken: string;
@@ -5182,32 +5384,54 @@ auth.get("/oidc/:provider/callback", async (c) => {
       codeVerifier: stateData.codeVerifier,
     });
   } catch (err) {
-    return c.json<ApiResponse>(
-      { ok: false, error: err instanceof Error ? err.message : "OIDC token exchange failed" },
-      502,
-    );
+    console.error("[OidcAuth] Callback token exchange failed", redactedThrownDiagnostics(err));
+    return oauthCallbackFailure(c, {
+      code: "oidc_token_exchange_failed",
+      message: "The identity provider could not complete sign-in. Please try again.",
+      status: 502,
+      redirectUrl,
+      appState: stateData.appState,
+    });
   }
 
   try {
     const verified = await verifyOidcJwt(stateData.tenantId, provider, idToken);
     if (verified.claims.nonce !== stateData.nonce) {
-      return c.json<ApiResponse>({ ok: false, error: "OIDC nonce mismatch" }, 401);
+      return oauthCallbackFailure(c, {
+        code: "oidc_nonce_mismatch",
+        message: "This sign-in response could not be matched to your browser.",
+        status: 401,
+        redirectUrl,
+        appState: stateData.appState,
+      });
     }
     if (!verified.email || verified.emailVerified !== true) {
-      return c.json<ApiResponse>(
-        { ok: false, error: "Enterprise OIDC SSO requires a verified email claim" },
-        403,
-      );
+      return oauthCallbackFailure(c, {
+        code: "oidc_verified_email_required",
+        message: "Enterprise OIDC sign-in requires a verified email address.",
+        status: 403,
+        redirectUrl,
+        appState: stateData.appState,
+      });
     }
     if (!(await isVerifiedSsoEmailDomainForTenant(stateData.tenantId, verified.email))) {
-      return c.json<ApiResponse>(
-        { ok: false, error: "Enterprise OIDC SSO email domain is not verified for this tenant" },
-        403,
-      );
+      return oauthCallbackFailure(c, {
+        code: "oidc_email_domain_unverified",
+        message: "Your email domain is not approved for this organization.",
+        status: 403,
+        redirectUrl,
+        appState: stateData.appState,
+      });
     }
     const consumedPayload = await getChallengeStore().consume(stateKey);
     if (consumedPayload !== rawPayload) {
-      return c.json<ApiResponse>({ ok: false, error: "Invalid or already-used OIDC state" }, 401);
+      return oauthCallbackFailure(c, {
+        code: "oidc_state_consumed",
+        message: "This sign-in attempt is invalid or has already been used.",
+        status: 401,
+        redirectUrl,
+        appState: stateData.appState,
+      });
     }
     await withPreAuthTenant(stateData.tenantId, "oidc-callback-authorization-audit", () =>
       writeAuditEvent({
@@ -5239,16 +5463,31 @@ auth.get("/oidc/:provider/callback", async (c) => {
       tenantRole: "viewer",
     });
     if (!result.ok) {
-      redirectUrl.searchParams.set("error", result.error);
-      return c.redirect(redirectUrl.toString(), 302);
+      return oauthCallbackFailure(c, {
+        code: "oidc_account_provisioning_failed",
+        message: "Your account could not be prepared for sign-in.",
+        status: result.status ?? 500,
+        redirectUrl,
+        appState: stateData.appState,
+      });
     }
     if (result.response.ok === false) {
-      redirectUrl.searchParams.set("error", String(result.response.error || "auth_failed"));
-      return c.redirect(redirectUrl.toString(), 302);
+      return oauthCallbackFailure(c, {
+        code: "oidc_authentication_failed",
+        message: "Sign-in could not be completed.",
+        status: 403,
+        redirectUrl,
+        appState: stateData.appState,
+      });
     }
     if (result.response.mfaRequired) {
-      redirectUrl.searchParams.set("error", "mfa_required");
-      return c.redirect(redirectUrl.toString(), 302);
+      return oauthCallbackFailure(c, {
+        code: "mfa_required",
+        message: "Additional verification is required to complete sign-in.",
+        status: 403,
+        redirectUrl,
+        appState: stateData.appState,
+      });
     }
 
     const exchangeCode = randomBase64Url(32);
@@ -5271,13 +5510,14 @@ auth.get("/oidc/:provider/callback", async (c) => {
     setRedirectFragment(redirectUrl, { code: exchangeCode, state: stateData.appState });
     return c.redirect(redirectUrl.toString(), 302);
   } catch (err) {
-    return c.json<ApiResponse>(
-      {
-        ok: false,
-        error: err instanceof Error ? err.message : "OIDC token verification failed",
-      },
-      401,
-    );
+    console.error("[OidcAuth] Callback verification failed", redactedThrownDiagnostics(err));
+    return oauthCallbackFailure(c, {
+      code: "oidc_token_verification_failed",
+      message: "The identity provider response could not be verified.",
+      status: 401,
+      redirectUrl,
+      appState: stateData.appState,
+    });
   }
 });
 
@@ -9551,15 +9791,33 @@ auth.get("/oauth/:provider/callback", async (c) => {
   const errorParam = c.req.query("error");
 
   if (errorParam) {
-    return c.json<ApiResponse>({ ok: false, error: `OAuth error: ${errorParam}` }, 400);
+    // Provider-controlled text may contain markup, credentials, or diagnostics.
+    // Keep the browser response stable and non-reflective.
+    const recovery = await oauthCallbackRecoveryFromStoredState("oauth", state, providerName);
+    return oauthCallbackFailure(c, {
+      code: "oauth_authorization_failed",
+      message: "The provider did not authorize this sign-in.",
+      status: 400,
+      ...recovery,
+    });
   }
 
   if (!isBuiltInProvider(providerName)) {
-    return c.json<ApiResponse>({ ok: false, error: `Unknown provider: ${providerName}` }, 400);
+    return oauthCallbackFailure(c, {
+      code: "oauth_provider_unknown",
+      message: "This sign-in provider is not supported.",
+      status: 400,
+    });
   }
 
   if (!code || !state) {
-    return c.json<ApiResponse>({ ok: false, error: "code and state are required" }, 400);
+    const recovery = await oauthCallbackRecoveryFromStoredState("oauth", state, providerName);
+    return oauthCallbackFailure(c, {
+      code: "oauth_callback_incomplete",
+      message: "The provider returned an incomplete sign-in response.",
+      status: 400,
+      ...recovery,
+    });
   }
 
   // Load state before provider calls, then consume it only after provider token
@@ -9568,7 +9826,11 @@ auth.get("/oauth/:provider/callback", async (c) => {
   const stateKey = `oauth:${state}`;
   const rawPayload = await getChallengeStore().get(stateKey);
   if (!rawPayload) {
-    return c.json<ApiResponse>({ ok: false, error: "Invalid or expired OAuth state" }, 401);
+    return oauthCallbackFailure(c, {
+      code: "oauth_state_expired",
+      message: "This sign-in attempt is invalid or has expired.",
+      status: 401,
+    });
   }
 
   let stateData: {
@@ -9586,11 +9848,19 @@ auth.get("/oauth/:provider/callback", async (c) => {
   try {
     stateData = JSON.parse(rawPayload) as typeof stateData;
   } catch {
-    return c.json<ApiResponse>({ ok: false, error: "Malformed OAuth state payload" }, 400);
+    return oauthCallbackFailure(c, {
+      code: "oauth_state_invalid",
+      message: "This sign-in attempt could not be validated.",
+      status: 400,
+    });
   }
 
   if (stateData.provider !== providerName) {
-    return c.json<ApiResponse>({ ok: false, error: "Provider mismatch in state" }, 400);
+    return oauthCallbackFailure(c, {
+      code: "oauth_provider_mismatch",
+      message: "The provider does not match this sign-in attempt.",
+      status: 400,
+    });
   }
   const methodResponse = await requireTenantLoginMethodAllowed(
     c,
@@ -9599,7 +9869,13 @@ auth.get("/oauth/:provider/callback", async (c) => {
     providerName,
     stateData.clientId,
   );
-  if (methodResponse) return methodResponse;
+  if (methodResponse) {
+    return oauthCallbackFailure(c, {
+      code: "oauth_login_disabled",
+      message: "OAuth sign-in is disabled for this application.",
+      status: 403,
+    });
+  }
 
   let redirectUrl: URL;
   try {
@@ -9609,26 +9885,29 @@ auth.get("/oauth/:provider/callback", async (c) => {
       stateData.clientId,
     );
   } catch (err) {
-    return c.json<ApiResponse>(
-      {
-        ok: false,
-        error: err instanceof Error ? err.message : "Invalid redirect_uri",
-      },
-      400,
+    console.error(
+      "[OAuthAuth] Callback redirect validation failed",
+      redactedThrownDiagnostics(err),
     );
+    return oauthCallbackFailure(c, {
+      code: "oauth_redirect_invalid",
+      message: "The application return address is not allowed.",
+      status: 400,
+    });
   }
 
   let oauthClient: OAuthClient;
   try {
     oauthClient = new OAuthClient(getProviderConfig(providerName));
   } catch (err) {
-    return c.json<ApiResponse>(
-      {
-        ok: false,
-        error: err instanceof Error ? err.message : "Provider not configured",
-      },
-      503,
-    );
+    console.error("[OAuthAuth] Callback provider setup failed", redactedThrownDiagnostics(err));
+    return oauthCallbackFailure(c, {
+      code: "oauth_provider_unavailable",
+      message: "This sign-in provider is not available.",
+      status: 503,
+      redirectUrl,
+      appState: stateData.appState,
+    });
   }
 
   const callbackUrl = buildOAuthCallbackUrl(c, providerName);
@@ -9641,13 +9920,14 @@ auth.get("/oauth/:provider/callback", async (c) => {
   try {
     tokenResponse = await oauthClient.exchangeCode(code, callbackUrl, stateData.codeVerifier);
   } catch (err) {
-    return c.json<ApiResponse>(
-      {
-        ok: false,
-        error: err instanceof Error ? err.message : "Token exchange failed",
-      },
-      502,
-    );
+    console.error("[OAuthAuth] Callback token exchange failed", redactedThrownDiagnostics(err));
+    return oauthCallbackFailure(c, {
+      code: "oauth_token_exchange_failed",
+      message: "The provider could not complete sign-in. Please try again.",
+      status: 502,
+      redirectUrl,
+      appState: stateData.appState,
+    });
   }
 
   // Fetch user info from provider
@@ -9655,13 +9935,14 @@ auth.get("/oauth/:provider/callback", async (c) => {
   try {
     providerUser = await oauthClient.getUserInfo(tokenResponse.access_token);
   } catch (err) {
-    return c.json<ApiResponse>(
-      {
-        ok: false,
-        error: err instanceof Error ? err.message : "Failed to fetch user info",
-      },
-      502,
-    );
+    console.error("[OAuthAuth] Callback profile fetch failed", redactedThrownDiagnostics(err));
+    return oauthCallbackFailure(c, {
+      code: "oauth_profile_fetch_failed",
+      message: "The provider profile could not be loaded. Please try again.",
+      status: 502,
+      redirectUrl,
+      appState: stateData.appState,
+    });
   }
 
   // Twitter and some providers do not return an email address.
@@ -9669,10 +9950,13 @@ auth.get("/oauth/:provider/callback", async (c) => {
   // This email is never displayed or sent — it is purely an internal identity key.
   if (!providerUser.email) {
     if (!providerUser.id) {
-      return c.json<ApiResponse>(
-        { ok: false, error: "Provider returned neither email nor user ID" },
-        400,
-      );
+      return oauthCallbackFailure(c, {
+        code: "oauth_identity_incomplete",
+        message: "The provider did not return enough account information.",
+        status: 400,
+        redirectUrl,
+        appState: stateData.appState,
+      });
     }
     providerUser = {
       ...providerUser,
@@ -9683,7 +9967,13 @@ auth.get("/oauth/:provider/callback", async (c) => {
 
   const consumedPayload = await getChallengeStore().consume(stateKey);
   if (consumedPayload !== rawPayload) {
-    return c.json<ApiResponse>({ ok: false, error: "Invalid or already-used OAuth state" }, 401);
+    return oauthCallbackFailure(c, {
+      code: "oauth_state_consumed",
+      message: "This sign-in attempt is invalid or has already been used.",
+      status: 401,
+      redirectUrl,
+      appState: stateData.appState,
+    });
   }
 
   // Create/find user + provision wallet + link tenant
@@ -9696,17 +9986,39 @@ auth.get("/oauth/:provider/callback", async (c) => {
   });
 
   if (!result.ok) {
-    return c.json<ApiResponse>({ ok: false, error: result.error }, result.status ?? 500);
+    const isUnverifiedEmail =
+      result.error === "Provider email must be verified before OAuth sign-in is allowed";
+    return oauthCallbackFailure(c, {
+      code: isUnverifiedEmail
+        ? "oauth_verified_email_required"
+        : "oauth_account_provisioning_failed",
+      message: isUnverifiedEmail
+        ? "Provider email must be verified before OAuth sign-in is allowed."
+        : "Your account could not be prepared for sign-in.",
+      status: result.status ?? 500,
+      redirectUrl,
+      appState: stateData.appState,
+    });
   }
 
   if (result.response.ok === false) {
-    redirectUrl.searchParams.set("error", String(result.response.error || "auth_failed"));
-    return c.redirect(redirectUrl.toString(), 302);
+    return oauthCallbackFailure(c, {
+      code: "oauth_authentication_failed",
+      message: "Sign-in could not be completed.",
+      status: 403,
+      redirectUrl,
+      appState: stateData.appState,
+    });
   }
 
   if (result.response.mfaRequired) {
-    redirectUrl.searchParams.set("error", "mfa_required");
-    return c.redirect(redirectUrl.toString(), 302);
+    return oauthCallbackFailure(c, {
+      code: "mfa_required",
+      message: "Additional verification is required to complete sign-in.",
+      status: 403,
+      redirectUrl,
+      appState: stateData.appState,
+    });
   }
 
   // Nonce-exchange path: issue a one-time, short-lived (60s) code that the

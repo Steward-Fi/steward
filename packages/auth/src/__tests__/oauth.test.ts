@@ -721,6 +721,111 @@ describe("OAuthClient.getUserInfo — provider response normalization", () => {
     globalThis.fetch = originalFetch;
   });
 
+  it("resolves a public GitHub email's verified status through /user/emails", async () => {
+    const originalFetch = globalThis.fetch;
+    const requestedUrls: string[] = [];
+    globalThis.fetch = asFetchMock(async (input) => {
+      const url = String(input);
+      requestedUrls.push(url);
+      if (url.endsWith("/userinfo")) {
+        return Response.json({
+          id: "gh-public-verified",
+          email: "Public@Example.com",
+          login: "public-user",
+        });
+      }
+      return Response.json([
+        { email: "other@example.com", primary: true, verified: true },
+        { email: "public@example.com", primary: false, verified: true },
+      ]);
+    });
+    try {
+      const client = new OAuthClient({
+        clientId: "c",
+        clientSecret: "s",
+        authorizationUrl: "https://example.com/auth",
+        tokenUrl: "https://example.com/token",
+        userInfoUrl: "https://example.com/userinfo",
+        emailUrl: "https://example.com/emails",
+        scopes: [],
+      });
+
+      const info = await client.getUserInfo("tok");
+
+      expect(requestedUrls).toEqual(["https://example.com/userinfo", "https://example.com/emails"]);
+      expect(info.email).toBe("public@example.com");
+      expect(info.verified_email).toBe(true);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("keeps a public GitHub email unverified when /user/emails says it is unverified", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = asFetchMock(async (input) => {
+      if (String(input).endsWith("/userinfo")) {
+        return Response.json({
+          id: "gh-public-unverified",
+          email: "unverified@example.com",
+          login: "unverified-user",
+        });
+      }
+      return Response.json([
+        { email: "primary@example.com", primary: true, verified: true },
+        { email: "unverified@example.com", primary: false, verified: false },
+      ]);
+    });
+    try {
+      const client = new OAuthClient({
+        clientId: "c",
+        clientSecret: "s",
+        authorizationUrl: "https://example.com/auth",
+        tokenUrl: "https://example.com/token",
+        userInfoUrl: "https://example.com/userinfo",
+        emailUrl: "https://example.com/emails",
+        scopes: [],
+      });
+
+      const info = await client.getUserInfo("tok");
+
+      expect(info.email).toBe("unverified@example.com");
+      expect(info.verified_email).toBe(false);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("does not override an explicit false verification claim with the email endpoint", async () => {
+    const originalFetch = globalThis.fetch;
+    let callCount = 0;
+    globalThis.fetch = asFetchMock(async () => {
+      callCount += 1;
+      return Response.json({
+        id: "explicitly-unverified",
+        email: "unverified@example.com",
+        verified_email: false,
+      });
+    });
+    try {
+      const client = new OAuthClient({
+        clientId: "c",
+        clientSecret: "s",
+        authorizationUrl: "https://example.com/auth",
+        tokenUrl: "https://example.com/token",
+        userInfoUrl: "https://example.com/userinfo",
+        emailUrl: "https://example.com/emails",
+        scopes: [],
+      });
+
+      const info = await client.getUserInfo("tok");
+
+      expect(callCount).toBe(1);
+      expect(info.verified_email).toBe(false);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it("maps custom provider profile fields including nested array paths", async () => {
     const originalFetch = globalThis.fetch;
     globalThis.fetch = asFetchMock(
