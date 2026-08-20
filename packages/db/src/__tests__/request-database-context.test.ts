@@ -86,6 +86,27 @@ describe("request-scoped database context", () => {
     );
   });
 
+  test("validates snapshot characteristics before reusing a tenant transaction", async () => {
+    const transactionDb = { marker: "snapshot" } as unknown as ReturnType<typeof getDb>;
+    await withTenantTransactionDatabase(
+      transactionDb,
+      { tenantId: "tenant-a" },
+      async () => {
+        expect(
+          hasTenantTransactionDatabase({
+            tenantId: "tenant-a",
+            isolationLevel: "repeatable read",
+            readOnly: true,
+          }),
+        ).toBe(true);
+        expect(() =>
+          hasTenantTransactionDatabase({ tenantId: "tenant-a", readOnly: false }),
+        ).toThrow("RLS_TENANT_DATABASE_CHARACTERISTICS_MISMATCH");
+      },
+      { isolationLevel: "repeatable read", readOnly: true },
+    );
+  });
+
   test("deadline phases preserve the exact tenant transaction capability", async () => {
     const executed: unknown[] = [];
     const transactionDb = {
