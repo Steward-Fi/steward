@@ -8,8 +8,9 @@
 
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { randomUUID } from "node:crypto";
-import { getDb } from "@stwd/db";
+import { appendAuditEvent, getDb } from "@stwd/db";
 import { sql } from "drizzle-orm";
+import { verifyAuditChain } from "../services/audit";
 
 const SKIP = !process.env.DATABASE_URL;
 
@@ -24,7 +25,10 @@ async function cleanup(): Promise<void> {
   await db.execute(sql`DELETE FROM refresh_tokens WHERE tenant_id = ${TENANT}`);
   await db.execute(sql`DELETE FROM transactions WHERE agent_id = ${AGENT}`);
   await db.execute(sql`DELETE FROM agents WHERE id = ${AGENT}`);
-  await db.execute(sql`DELETE FROM audit_events WHERE tenant_id = ${TENANT}`);
+  await db.transaction(async (tx) => {
+    await tx.execute(sql`DELETE FROM audit_events WHERE tenant_id = ${TENANT}`);
+    await tx.execute(sql`DELETE FROM audit_chain_heads WHERE tenant_id = ${TENANT}`);
+  });
   await db.execute(sql`DELETE FROM auth_kv_store WHERE namespace = ${`retention-test-${SUFFIX}`}`);
   await db.execute(sql`DELETE FROM tenants WHERE id = ${TENANT}`);
   await db.execute(sql`DELETE FROM users WHERE id = ${USER_ID}`);
@@ -148,22 +152,25 @@ describe.skipIf(SKIP)("retention sweep", () => {
     const { runRetentionSweep } = await import("../services/retention");
     delete process.env.STEWARD_RETENTION_AUDIT_EVENTS_DAYS;
     const db = getDb();
-    // Insert an ancient audit event directly (bypassing the chain — just for retention assertion).
-    await db.execute(sql`
-      INSERT INTO audit_events
-        (tenant_id, seq, prev_hash, hmac, actor_type, action, created_at)
-      VALUES
-        (${TENANT}, 1, '\\x00'::bytea, '\\x00'::bytea, 'system', 'test.old',
-         now() - interval '1000 days')
-    `);
+    // Earlier sweep cases emit retention audit events for this tenant. Reset
+    // both the rows and their out-of-band high-water mark atomically so this
+    // assertion owns a valid tenant-local chain beginning at seq 1.
+    await db.transaction(async (tx) => {
+      await tx.execute(sql`DELETE FROM audit_events WHERE tenant_id = ${TENANT}`);
+      await tx.execute(sql`DELETE FROM audit_chain_heads WHERE tenant_id = ${TENANT}`);
+    });
+    // Use the production writer so the survival assertion begins and ends with
+    // a valid event plus matching out-of-band chain head.
+    await appendAuditEvent({ tenantId: TENANT, actorType: "system", action: "test.old" });
 
     const results = await runRetentionSweep();
     expect(results.find((r) => r.table === "audit_events")).toBeUndefined();
 
     const rows = (await db.execute(
-      sql`SELECT seq FROM audit_events WHERE tenant_id = ${TENANT}`,
+      sql`SELECT seq FROM audit_events WHERE tenant_id = ${TENANT} AND action = 'test.old'`,
     )) as Array<{ seq: number | string }>;
     expect(rows.length).toBe(1);
+    expect(await verifyAuditChain(TENANT, { requireHead: true })).toMatchObject({ valid: true });
   });
 
   it("deletes expired auth_kv_store rows", async () => {

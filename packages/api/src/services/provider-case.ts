@@ -23,6 +23,7 @@ import {
   approvalQueue,
   executionAuthorizationNonces,
   getDb,
+  hasTenantTransactionDatabase,
   providerAccounts,
   providerActionBindings,
   providerOperations,
@@ -315,9 +316,18 @@ export async function getProviderCase(
   caseId: string,
   authorizedWorkspaceIds: string[],
 ): Promise<ProviderCaseAssembly | null> {
-  return runInSnapshot((sdb) =>
+  return runInSnapshot(tenantId, (sdb) =>
     assembleWithinSnapshot(sdb, tenantId, caseId, authorizedWorkspaceIds),
   );
+}
+
+export interface ProviderCaseEvidenceSnapshot {
+  tenantId: string;
+  caseId: string;
+  assembly: ProviderCaseAssembly;
+  bundleData: AuditBundleData;
+  segmentFrom: number;
+  segmentTo: number;
 }
 
 /**
@@ -331,47 +341,54 @@ export async function getProviderCaseEvidence(
   caseId: string,
   authorizedWorkspaceIds: string[],
 ): Promise<ProviderCaseEvidenceV1 | null> {
-  // 1) Assemble the manifest + fix the segment bounds inside ONE read-only
-  //    snapshot (all correlation/verify reads coherent).
-  const assembly = await runInSnapshot((sdb) =>
-    assembleWithinSnapshot(sdb, tenantId, caseId, authorizedWorkspaceIds),
-  );
-  if (!assembly) return null;
+  const snapshot = await readProviderCaseEvidenceSnapshot(tenantId, caseId, authorizedWorkspaceIds);
+  return snapshot ? signProviderCaseEvidenceSnapshot(snapshot) : null;
+}
 
-  const { manifest, segmentFrom, segmentTo } = assembly;
-
-  // 2) Read the bundle segment + sign OUTSIDE the read-only snapshot. The
-  //    audit chain is append-only and immutable once written, so re-reading the
-  //    SAME fixed [segmentFrom, segmentTo] range returns byte-identical events;
-  //    doing the signing (which persists a checkpoint best-effort) outside the
-  //    snapshot avoids a write-inside-read-only-tx deadlock on PGLite's single
-  //    connection while preserving manifest↔bundle consistency (the manifest's
-  //    seq+hmac index already pins exactly which events belong to the case).
-  let bundle: SignedAuditBundle;
-  if (segmentFrom == null || segmentTo == null) {
-    const empty: AuditBundleData = {
-      head: null,
-      events: [],
-      bundleHeadHmac: null,
-      bundleHeadSeq: null,
-    };
-    bundle = await signAuditBundle(tenantId, 0, 0, empty);
-  } else {
-    // Enforce the segment cap before reading the range: a case whose
-    // contiguous span exceeds MAX_CASE_SEGMENT_EVENTS (pathological same-tenant
-    // interleave, KC15) must NOT materialize/sign an unbounded range of
-    // unrelated audit rows via /evidence. Fail closed with a typed error the
-    // route maps to 400 CASE_RANGE_TOO_LARGE (§5.4); the manifest already
-    // carries `unknown` + a size-exceeded reason, and /case (manifest-only)
-    // still works for triage.
-    if (segmentTo - segmentFrom + 1 > MAX_CASE_SEGMENT_EVENTS) {
+/**
+ * Read every manifest and bundle input in one snapshot. Route callers end the
+ * read-only transaction before passing this immutable material to the signer,
+ * whose best-effort checkpoint persistence is intentionally a separate write.
+ */
+export async function readProviderCaseEvidenceSnapshot(
+  tenantId: string,
+  caseId: string,
+  authorizedWorkspaceIds: string[],
+): Promise<ProviderCaseEvidenceSnapshot | null> {
+  return runInSnapshot(tenantId, async (sdb) => {
+    const assembly = await assembleWithinSnapshot(sdb, tenantId, caseId, authorizedWorkspaceIds);
+    if (!assembly) return null;
+    const { segmentFrom, segmentTo } = assembly;
+    if (
+      segmentFrom != null &&
+      segmentTo != null &&
+      segmentTo - segmentFrom + 1 > MAX_CASE_SEGMENT_EVENTS
+    ) {
       throw new CaseRangeTooLargeError(
         `case segment [${segmentFrom},${segmentTo}] exceeds ${MAX_CASE_SEGMENT_EVENTS} events`,
       );
     }
-    const bundleData = await readAuditBundleData(tenantId, segmentFrom, segmentTo);
-    bundle = await signAuditBundle(tenantId, segmentFrom, segmentTo, bundleData);
-  }
+    const from = segmentFrom ?? 0;
+    const to = segmentTo ?? 0;
+    const bundleData =
+      segmentFrom == null || segmentTo == null
+        ? { head: null, events: [], bundleHeadHmac: null, bundleHeadSeq: null }
+        : await readAuditBundleData(tenantId, segmentFrom, segmentTo, sdb);
+    return { tenantId, caseId, assembly, bundleData, segmentFrom: from, segmentTo: to };
+  });
+}
+
+export async function signProviderCaseEvidenceSnapshot(
+  snapshot: ProviderCaseEvidenceSnapshot,
+): Promise<ProviderCaseEvidenceV1> {
+  const { tenantId, caseId, assembly, bundleData, segmentFrom, segmentTo } = snapshot;
+  const { manifest } = assembly;
+  const bundle: SignedAuditBundle = await signAuditBundle(
+    tenantId,
+    segmentFrom,
+    segmentTo,
+    bundleData,
+  );
 
   return {
     version: 1,
@@ -841,20 +858,27 @@ async function loadAccount(
  * non-blocking (§4.1). The audit chain-verify + bundle read are threaded the tx
  * executor so they share this snapshot (KC06).
  */
-async function runInSnapshot<T>(fn: (sdb: SnapshotDb) => Promise<T>): Promise<T> {
+async function runInSnapshot<T>(tenantId: string, fn: (sdb: SnapshotDb) => Promise<T>): Promise<T> {
   const db = getDb();
+  // Mounted case routes deliberately establish this tenant-bound snapshot
+  // before entering the service. A nested Drizzle transaction would only be a
+  // savepoint, so reuse is permitted only when the tenant and transaction
+  // characteristics match exactly; ordinary READ COMMITTED reuse fails closed.
+  if (
+    hasTenantTransactionDatabase({
+      tenantId,
+      isolationLevel: "repeatable read",
+      readOnly: true,
+    })
+  ) {
+    return fn(db as SnapshotDb);
+  }
   try {
     return await db.transaction(async (tx) => {
       if (!isPGLiteRuntime()) {
-        try {
-          await (tx as unknown as AuditReadExecutor).execute(
-            sql`SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY`,
-          );
-        } catch {
-          // Some drivers set isolation only at BEGIN; a failure here is
-          // non-fatal — the reads are still coherent enough for a monotonic
-          // append-only chain. Never fail the read on this.
-        }
+        await (tx as unknown as AuditReadExecutor).execute(
+          sql`SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY`,
+        );
       }
       return await fn(tx as unknown as SnapshotDb);
     });

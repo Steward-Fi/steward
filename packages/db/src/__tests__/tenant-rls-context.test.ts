@@ -187,4 +187,32 @@ describe("tenant RLS transaction context", () => {
     expect(result).toBe("bound");
     expect(executeCount).toBe(4);
   });
+
+  test("establishes repeatable-read read-only before any tenant context query", async () => {
+    const calls: unknown[] = [];
+    let executeCount = 0;
+    const tx = {
+      async execute(query: unknown) {
+        calls.push(query);
+        executeCount += 1;
+        return executeCount === 5 ? [{ tenant_id: "tenant-snapshot", user_id: null }] : [];
+      },
+    };
+    const db = {
+      async transaction<T>(callback: (value: typeof tx) => Promise<T>) {
+        return callback(tx);
+      },
+    };
+    await withTenantRlsTransaction(
+      db,
+      "postgres-js",
+      tenantContextForInternalJob({ tenantId: "tenant-snapshot", job: "provider-case" }),
+      async () => undefined,
+      { isolationLevel: "repeatable read", readOnly: true },
+    );
+    expect(calls).toHaveLength(5);
+    expect(JSON.stringify(calls[0])).toContain(
+      "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY",
+    );
+  });
 });
