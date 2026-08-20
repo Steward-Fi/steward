@@ -17,7 +17,6 @@
     "@stwd/auth": "workspace:*",
     "@stwd/db": "workspace:*",
     "@stwd/shared": "workspace:*",
-    "@stwd/vault": "workspace:*",
     "drizzle-orm": "^0.45.2",
     "viem": "^2.30.0"
   },
