@@ -462,6 +462,234 @@ describeWithPostgres("SEC-169 operator lifecycle on the real Steward schema", ()
       }
 
       await admin.unsafe(`CREATE ROLE ${hostileRole} NOLOGIN`);
+
+      // A stale TRUNCATE grant bypasses RLS. Both pre-traffic gates must reject
+      // it, and a bootstrap rerun must remove it rather than merely adding the
+      // expected DML privileges alongside it.
+      await db.unsafe(`GRANT TRUNCATE ON public.users TO ${appRole}`);
+      await db.unsafe(`GRANT UPDATE ON SEQUENCE public.audit_events_id_seq TO ${appRole}`);
+      await db.unsafe(
+        `GRANT EXECUTE ON FUNCTION public.steward_lock_tenant_deletion(text) TO ${appRole} WITH GRANT OPTION`,
+      );
+      const appRelationDrift = createDb(appDatabaseUrl());
+      try {
+        await expect(
+          assertRlsDeploymentSafety(appRelationDrift.db, {
+            expectedRole: appRole,
+            expectedPlatformRole: platformRole,
+            expectedBootstrapRole: definerRole,
+            expectedMigrationRole: migrationRole,
+          }),
+        ).rejects.toThrow("RLS_DEPLOYMENT_APP_ACL_DRIFT");
+        await expect(runOperatorScript("rls-activate.sql")).rejects.toThrow(
+          "application named ACL drift",
+        );
+      } finally {
+        await appRelationDrift.client.end({ timeout: 5 });
+      }
+      await runOperatorScript("rls-bootstrap.sql", true);
+      const [resetAppNamedAcls] = await db<
+        {
+          can_truncate: boolean;
+          can_create: boolean;
+          can_update_sequence: boolean;
+          function_grantable: boolean;
+        }[]
+      >`
+        SELECT
+          has_table_privilege(${appRole}, 'public.users', 'TRUNCATE') AS can_truncate,
+          has_schema_privilege(${appRole}, 'public', 'CREATE') AS can_create,
+          has_sequence_privilege(
+            ${appRole}, 'public.audit_events_id_seq', 'UPDATE'
+          ) AS can_update_sequence,
+          EXISTS (
+            SELECT 1 FROM pg_proc function_object
+            CROSS JOIN LATERAL aclexplode(function_object.proacl) privilege
+            JOIN pg_roles granted ON granted.oid = privilege.grantee
+            WHERE function_object.oid =
+              'public.steward_lock_tenant_deletion(text)'::regprocedure
+              AND granted.rolname = ${appRole} AND privilege.is_grantable
+          ) AS function_grantable
+      `;
+      expect(resetAppNamedAcls).toEqual({
+        can_truncate: false,
+        can_create: false,
+        can_update_sequence: false,
+        function_grantable: false,
+      });
+
+      // CREATE on a protected schema is also rejected by the role gate before
+      // the exhaustive named-ACL comparison and removed by bootstrap.
+      await db.unsafe(`GRANT CREATE ON SCHEMA public TO ${appRole}`);
+      const appSchemaCreateDrift = createDb(appDatabaseUrl());
+      try {
+        await expect(
+          assertRlsDeploymentSafety(appSchemaCreateDrift.db, {
+            expectedRole: appRole,
+            expectedPlatformRole: platformRole,
+            expectedBootstrapRole: definerRole,
+            expectedMigrationRole: migrationRole,
+          }),
+        ).rejects.toThrow("RLS_DEPLOYMENT_ROLE_UNSAFE");
+        await expect(runOperatorScript("rls-activate.sql")).rejects.toThrow(
+          "app role has assumable bypass or schema-owner authority",
+        );
+      } finally {
+        await appSchemaCreateDrift.client.end({ timeout: 5 });
+      }
+      await runOperatorScript("rls-bootstrap.sql", true);
+      const [resetAppSchemaCreate] = await db<{ can_create: boolean }[]>`
+        SELECT has_schema_privilege(${appRole}, 'public', 'CREATE') AS can_create
+      `;
+      expect(resetAppSchemaCreate.can_create).toBe(false);
+
+      await admin.unsafe(`GRANT CREATE ON DATABASE ${databaseName} TO ${appRole}`);
+      await db.unsafe(
+        `ALTER DEFAULT PRIVILEGES FOR ROLE ${migrationRole} IN SCHEMA public GRANT TRUNCATE ON TABLES TO ${appRole}`,
+      );
+      const appDatabaseDrift = createDb(appDatabaseUrl());
+      try {
+        await expect(
+          assertRlsDeploymentSafety(appDatabaseDrift.db, {
+            expectedRole: appRole,
+            expectedPlatformRole: platformRole,
+            expectedBootstrapRole: definerRole,
+            expectedMigrationRole: migrationRole,
+          }),
+        ).rejects.toThrow("RLS_DEPLOYMENT_APP_DATABASE_ACL_DRIFT");
+        await expect(runOperatorScript("rls-activate.sql")).rejects.toThrow(
+          "application database/default ACL drift",
+        );
+      } finally {
+        await appDatabaseDrift.client.end({ timeout: 5 });
+      }
+      await runOperatorScript("rls-bootstrap.sql", true);
+      const [resetAppDatabase] = await db<{ can_create: boolean; default_truncate: boolean }[]>`
+        SELECT
+          has_database_privilege(${appRole}, current_database(), 'CREATE') AS can_create,
+          EXISTS (
+            SELECT 1 FROM pg_default_acl defaults
+            CROSS JOIN LATERAL aclexplode(defaults.defaclacl) privilege
+            JOIN pg_roles granted ON granted.oid = privilege.grantee
+            WHERE granted.rolname = ${appRole} AND privilege.privilege_type = 'TRUNCATE'
+          ) AS default_truncate
+      `;
+      expect(resetAppDatabase).toEqual({ can_create: false, default_truncate: false });
+
+      await admin.unsafe(`GRANT CONNECT ON DATABASE postgres TO ${appRole}`);
+      const crossDatabaseApp = createDb(appDatabaseUrl());
+      try {
+        await expect(
+          assertRlsDeploymentSafety(crossDatabaseApp.db, {
+            expectedRole: appRole,
+            expectedPlatformRole: platformRole,
+            expectedBootstrapRole: definerRole,
+            expectedMigrationRole: migrationRole,
+          }),
+        ).rejects.toThrow("RLS_DEPLOYMENT_APP_DATABASE_ACL_DRIFT");
+        await expect(runOperatorScript("rls-activate.sql")).rejects.toThrow(
+          "application database/default ACL drift",
+        );
+      } finally {
+        await crossDatabaseApp.client.end({ timeout: 5 });
+      }
+      await runOperatorScript("rls-bootstrap.sql", true);
+      const [resetCrossDatabaseApp] = await admin<{ has_direct_grant: boolean }[]>`
+        SELECT EXISTS (
+          SELECT 1 FROM pg_database database_object
+          CROSS JOIN LATERAL aclexplode(database_object.datacl) privilege
+          JOIN pg_roles granted ON granted.oid = privilege.grantee
+          WHERE database_object.datname = 'postgres' AND granted.rolname = ${appRole}
+        ) AS has_direct_grant
+      `;
+      expect(resetCrossDatabaseApp.has_direct_grant).toBe(false);
+
+      await admin.unsafe(`GRANT CONNECT ON DATABASE postgres TO ${platformRole}`);
+      const crossDatabasePlatform = createDb(platformDatabaseUrl());
+      const appCrossDatabasePlatform = createDb(appDatabaseUrl());
+      try {
+        await expect(
+          assertPlatformDatabaseAuthority(crossDatabasePlatform.db, platformRole),
+        ).rejects.toThrow("PLATFORM_DATABASE_ACL_UNSAFE");
+        await expect(
+          assertRlsDeploymentSafety(appCrossDatabasePlatform.db, {
+            expectedRole: appRole,
+            expectedPlatformRole: platformRole,
+            expectedBootstrapRole: definerRole,
+            expectedMigrationRole: migrationRole,
+          }),
+        ).rejects.toThrow("RLS_DEPLOYMENT_PLATFORM_ACL_DRIFT");
+        await expect(runOperatorScript("rls-activate.sql")).rejects.toThrow(
+          "platform database/default ACL drift",
+        );
+      } finally {
+        await crossDatabasePlatform.client.end({ timeout: 5 });
+        await appCrossDatabasePlatform.client.end({ timeout: 5 });
+        await admin.unsafe(`REVOKE CONNECT ON DATABASE postgres FROM ${platformRole}`);
+      }
+
+      await db.unsafe(
+        `ALTER DEFAULT PRIVILEGES FOR ROLE ${migrationRole} IN SCHEMA public GRANT SELECT ON TABLES TO ${platformRole}`,
+      );
+      const platformDefaultDrift = createDb(platformDatabaseUrl());
+      try {
+        await expect(
+          assertPlatformDatabaseAuthority(platformDefaultDrift.db, platformRole),
+        ).rejects.toThrow("PLATFORM_DATABASE_ACL_UNSAFE");
+        await expect(runOperatorScript("rls-activate.sql")).rejects.toThrow(
+          "platform database/default ACL drift",
+        );
+      } finally {
+        await platformDefaultDrift.client.end({ timeout: 5 });
+      }
+      await runOperatorScript("rls-bootstrap.sql", true);
+
+      await admin.unsafe(`ALTER ROLE ${hostileRole} BYPASSRLS`);
+      await admin.unsafe(`GRANT ${hostileRole} TO ${migrationRole}`);
+      const migrationAssumptionDrift = createDb(appDatabaseUrl());
+      try {
+        await expect(
+          assertRlsDeploymentSafety(migrationAssumptionDrift.db, {
+            expectedRole: appRole,
+            expectedPlatformRole: platformRole,
+            expectedBootstrapRole: definerRole,
+            expectedMigrationRole: migrationRole,
+          }),
+        ).rejects.toThrow("RLS_DEPLOYMENT_ROLE_UNSAFE");
+        await expect(runOperatorScript("rls-activate.sql")).rejects.toThrow(
+          "migration role has assumable privileged or owner authority",
+        );
+        await expect(runOperatorScript("rls-bootstrap.sql", true)).rejects.toThrow(
+          "migration role has assumable privileged or owner authority",
+        );
+      } finally {
+        await migrationAssumptionDrift.client.end({ timeout: 5 });
+        await admin.unsafe(`REVOKE ${hostileRole} FROM ${migrationRole}`);
+        await admin.unsafe(`ALTER ROLE ${hostileRole} NOBYPASSRLS`);
+      }
+
+      await admin.unsafe(`GRANT ${definerRole} TO ${hostileRole}`);
+      const bootstrapMembershipDrift = createDb(appDatabaseUrl());
+      try {
+        await expect(
+          assertRlsDeploymentSafety(bootstrapMembershipDrift.db, {
+            expectedRole: appRole,
+            expectedPlatformRole: platformRole,
+            expectedBootstrapRole: definerRole,
+            expectedMigrationRole: migrationRole,
+          }),
+        ).rejects.toThrow("RLS_DEPLOYMENT_ROLE_UNSAFE");
+        await expect(runOperatorScript("rls-activate.sql")).rejects.toThrow(
+          "bootstrap role membership graph must be empty",
+        );
+        await expect(runOperatorScript("rls-bootstrap.sql", true)).rejects.toThrow(
+          "definer role membership graph must be empty",
+        );
+      } finally {
+        await bootstrapMembershipDrift.client.end({ timeout: 5 });
+        await admin.unsafe(`REVOKE ${definerRole} FROM ${hostileRole}`);
+      }
+
       await db.unsafe(
         `GRANT EXECUTE ON FUNCTION steward_bootstrap.platform_stats() TO ${hostileRole}`,
       );

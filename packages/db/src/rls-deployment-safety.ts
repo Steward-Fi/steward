@@ -39,6 +39,8 @@ const PLATFORM_EXECUTABLE_FUNCTIONS = [
   "steward_bootstrap.retention_delete_deactivated_users(integer)",
 ] as const;
 
+const APP_PUBLIC_EXECUTABLE_FUNCTIONS = ["steward_lock_tenant_deletion(text)"] as const;
+
 const EXPECTED_PLATFORM_NAMED_ACLS = [
   "function:steward_bootstrap.platform_delete_user(uuid):EXECUTE:false",
   "function:steward_bootstrap.platform_revoke_user_refresh_tokens(uuid):EXECUTE:false",
@@ -147,6 +149,32 @@ export async function assertPlatformDatabaseAuthority(
     throw new Error("PLATFORM_DATABASE_ROLE_UNSAFE");
   }
 
+  const databaseAndDefaultAclDrift = rowsOf<{ object_name: string }>(
+    await db.execute(sql`
+      SELECT 'database:' || database_object.datname AS object_name
+      FROM pg_database database_object
+      CROSS JOIN LATERAL aclexplode(database_object.datacl) privilege
+      JOIN pg_roles granted_role ON granted_role.oid = privilege.grantee
+      WHERE granted_role.rolname = ${expectedRole}
+        AND (database_object.datname <> current_database()
+          OR privilege.privilege_type <> 'CONNECT' OR privilege.is_grantable)
+      UNION ALL
+      SELECT 'default:' || owner_role.rolname || ':' || defaults.defaclobjtype::text || ':' ||
+        COALESCE(namespace.nspname, '') || ':' || privilege.privilege_type::text || ':' ||
+        privilege.is_grantable
+      FROM pg_default_acl defaults
+      JOIN pg_roles owner_role ON owner_role.oid = defaults.defaclrole
+      LEFT JOIN pg_namespace namespace ON namespace.oid = defaults.defaclnamespace
+      CROSS JOIN LATERAL aclexplode(defaults.defaclacl) privilege
+      JOIN pg_roles granted_role ON granted_role.oid = privilege.grantee
+      WHERE granted_role.rolname = ${expectedRole}
+      ORDER BY object_name
+    `),
+  );
+  if (databaseAndDefaultAclDrift.length > 0) {
+    throw new Error("PLATFORM_DATABASE_ACL_UNSAFE");
+  }
+
   const namedAcls = rowsOf<{ acl: string }>(
     await db.execute(sql`
       SELECT 'schema:' || namespace.nspname || ':' || privilege.privilege_type || ':' ||
@@ -221,6 +249,8 @@ export async function assertRlsDeploymentSafety(
     platform_role_safe: boolean;
     migration_role_safe: boolean;
     bootstrap_role_safe: boolean;
+    migration_assumable_authority: boolean;
+    bootstrap_membership_drift: boolean;
   }>(
     await db.execute(sql`
       SELECT current_user::text, session_user::text, role.rolcanlogin, role.rolinherit,
@@ -293,6 +323,32 @@ export async function assertRlsDeploymentSafety(
             AND NOT pg_has_role(${options.expectedRole}, bootstrap.oid, 'MEMBER')
             AND NOT pg_has_role(${options.expectedPlatformRole}, bootstrap.oid, 'MEMBER')
         ) AS bootstrap_role_safe
+        , EXISTS (
+          SELECT 1 FROM pg_roles migration
+          JOIN pg_roles candidate ON candidate.oid <> migration.oid
+          WHERE migration.rolname = ${options.expectedMigrationRole}
+            AND pg_has_role(migration.oid, candidate.oid, 'MEMBER')
+            AND (
+              candidate.rolsuper OR candidate.rolbypassrls OR candidate.rolcreatedb
+              OR candidate.rolcreaterole OR candidate.rolreplication
+              OR EXISTS (
+                SELECT 1 FROM pg_database database_object
+                WHERE database_object.datname = current_database()
+                  AND database_object.datdba = candidate.oid
+              )
+              OR EXISTS (
+                SELECT 1 FROM pg_namespace namespace
+                WHERE namespace.nspname IN ('public', 'steward_rls', 'steward_bootstrap')
+                  AND (namespace.nspowner = candidate.oid
+                    OR has_schema_privilege(candidate.oid, namespace.oid, 'CREATE'))
+              )
+            )
+        ) AS migration_assumable_authority,
+        EXISTS (
+          SELECT 1 FROM pg_auth_members membership
+          JOIN pg_roles bootstrap ON bootstrap.rolname = ${options.expectedBootstrapRole}
+          WHERE membership.member = bootstrap.oid OR membership.roleid = bootstrap.oid
+        ) AS bootstrap_membership_drift
       FROM pg_roles role WHERE role.rolname = current_user
     `),
   );
@@ -313,7 +369,9 @@ export async function assertRlsDeploymentSafety(
     role.can_create_protected_schema ||
     !role.platform_role_safe ||
     !role.migration_role_safe ||
-    !role.bootstrap_role_safe
+    !role.bootstrap_role_safe ||
+    role.migration_assumable_authority ||
+    role.bootstrap_membership_drift
   ) {
     throw new Error("RLS_DEPLOYMENT_ROLE_UNSAFE");
   }
@@ -334,6 +392,47 @@ export async function assertRlsDeploymentSafety(
     `),
   );
   if (databaseAclDrift.length > 0) throw new Error("RLS_DEPLOYMENT_DATABASE_ACL_DRIFT");
+
+  const appDatabaseAndDefaultAcls = rowsOf<{ acl: string }>(
+    await db.execute(sql`
+      SELECT 'database:' || database_object.datname || ':' || privilege.privilege_type || ':' ||
+        privilege.is_grantable AS acl
+      FROM pg_database database_object
+      CROSS JOIN LATERAL aclexplode(database_object.datacl) privilege
+      JOIN pg_roles granted_role ON granted_role.oid = privilege.grantee
+      WHERE granted_role.rolname = ${options.expectedRole}
+      UNION ALL
+      SELECT 'default:' || owner_role.rolname || ':' || defaults.defaclobjtype::text || ':' ||
+        COALESCE(namespace.nspname, '') || ':' || privilege.privilege_type::text || ':' ||
+        privilege.is_grantable
+      FROM pg_default_acl defaults
+      JOIN pg_roles owner_role ON owner_role.oid = defaults.defaclrole
+      LEFT JOIN pg_namespace namespace ON namespace.oid = defaults.defaclnamespace
+      CROSS JOIN LATERAL aclexplode(defaults.defaclacl) privilege
+      JOIN pg_roles granted_role ON granted_role.oid = privilege.grantee
+      WHERE granted_role.rolname = ${options.expectedRole}
+      ORDER BY acl
+    `),
+  );
+  const expectedAppDatabaseAndDefaultAcls = [
+    `database:${
+      rowsOf<{ database_name: string }>(
+        await db.execute(sql`SELECT current_database()::text AS database_name`),
+      )[0]?.database_name
+    }:CONNECT:false`,
+    `default:${options.expectedMigrationRole}:S:public:SELECT:false`,
+    `default:${options.expectedMigrationRole}:S:public:USAGE:false`,
+    `default:${options.expectedMigrationRole}:r:public:DELETE:false`,
+    `default:${options.expectedMigrationRole}:r:public:INSERT:false`,
+    `default:${options.expectedMigrationRole}:r:public:SELECT:false`,
+    `default:${options.expectedMigrationRole}:r:public:UPDATE:false`,
+  ].sort();
+  if (
+    stable(appDatabaseAndDefaultAcls.map((row) => row.acl)) !==
+    stable(expectedAppDatabaseAndDefaultAcls)
+  ) {
+    throw new Error("RLS_DEPLOYMENT_APP_DATABASE_ACL_DRIFT");
+  }
 
   const relations = rowsOf<{
     relation_name: string;
@@ -554,6 +653,63 @@ export async function assertRlsDeploymentSafety(
     throw new Error("RLS_DEPLOYMENT_FUNCTION_ACL_DRIFT");
   }
 
+  const appNamedAcls = rowsOf<{ acl: string }>(
+    await db.execute(sql`
+      SELECT 'schema:' || namespace.nspname || ':' || privilege.privilege_type || ':' ||
+        privilege.is_grantable AS acl
+      FROM pg_namespace namespace
+      CROSS JOIN LATERAL aclexplode(namespace.nspacl) privilege
+      JOIN pg_roles granted_role ON granted_role.oid = privilege.grantee
+      WHERE granted_role.rolname = ${options.expectedRole}
+      UNION ALL
+      SELECT 'relation:' || namespace.nspname || '.' || relation.relname || ':' ||
+        privilege.privilege_type || ':' || privilege.is_grantable AS acl
+      FROM pg_class relation
+      JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+      CROSS JOIN LATERAL aclexplode(relation.relacl) privilege
+      JOIN pg_roles granted_role ON granted_role.oid = privilege.grantee
+      WHERE relation.relkind IN ('r', 'p', 'v', 'm', 'f', 'S')
+        AND granted_role.rolname = ${options.expectedRole}
+      UNION ALL
+      SELECT 'function:' || function_object.oid::regprocedure::text || ':' ||
+        privilege.privilege_type || ':' || privilege.is_grantable AS acl
+      FROM pg_proc function_object
+      CROSS JOIN LATERAL aclexplode(function_object.proacl) privilege
+      JOIN pg_roles granted_role ON granted_role.oid = privilege.grantee
+      WHERE granted_role.rolname = ${options.expectedRole}
+      ORDER BY acl
+    `),
+  );
+  const sequenceRows = rowsOf<{ identity: string }>(
+    await db.execute(sql`
+      SELECT namespace.nspname || '.' || relation.relname AS identity
+      FROM pg_class relation JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+      WHERE namespace.nspname = 'public' AND relation.relkind = 'S'
+      ORDER BY identity
+    `),
+  );
+  const expectedAppNamedAcls = [
+    "schema:public:USAGE:false",
+    "schema:steward_bootstrap:USAGE:false",
+    "schema:steward_rls:USAGE:false",
+    ...expectedRelations.flatMap((relation) =>
+      ["DELETE", "INSERT", "SELECT", "UPDATE"].map(
+        (privilege) => `relation:public.${relation.relation_name}:${privilege}:false`,
+      ),
+    ),
+    ...sequenceRows.flatMap((sequence) => [
+      `relation:${sequence.identity}:SELECT:false`,
+      `relation:${sequence.identity}:USAGE:false`,
+    ]),
+    ...EXPECTED_RLS_FUNCTION_DEFINITIONS.filter((definition) => definition.appExecute).map(
+      (definition) => `function:${definition.identity}:EXECUTE:false`,
+    ),
+    ...APP_PUBLIC_EXECUTABLE_FUNCTIONS.map((identity) => `function:${identity}:EXECUTE:false`),
+  ].sort();
+  if (stable(appNamedAcls.map((row) => row.acl)) !== stable(expectedAppNamedAcls)) {
+    throw new Error("RLS_DEPLOYMENT_APP_ACL_DRIFT");
+  }
+
   const unknownExecutableDefiners = rowsOf<{ identity: string }>(
     await db.execute(sql`
       SELECT function.oid::regprocedure::text AS identity
@@ -642,6 +798,32 @@ export async function assertRlsDeploymentSafety(
     `),
   );
   if (aclDrift.length > 0) throw new Error("RLS_DEPLOYMENT_ACL_DRIFT");
+
+  const platformDatabaseAndDefaultAclDrift = rowsOf<{ object_name: string }>(
+    await db.execute(sql`
+      SELECT 'database:' || database_object.datname AS object_name
+      FROM pg_database database_object
+      CROSS JOIN LATERAL aclexplode(database_object.datacl) privilege
+      JOIN pg_roles granted_role ON granted_role.oid = privilege.grantee
+      WHERE granted_role.rolname = ${options.expectedPlatformRole}
+        AND (database_object.datname <> current_database()
+          OR privilege.privilege_type <> 'CONNECT' OR privilege.is_grantable)
+      UNION ALL
+      SELECT 'default:' || owner_role.rolname || ':' || defaults.defaclobjtype::text || ':' ||
+        COALESCE(namespace.nspname, '') || ':' || privilege.privilege_type::text || ':' ||
+        privilege.is_grantable
+      FROM pg_default_acl defaults
+      JOIN pg_roles owner_role ON owner_role.oid = defaults.defaclrole
+      LEFT JOIN pg_namespace namespace ON namespace.oid = defaults.defaclnamespace
+      CROSS JOIN LATERAL aclexplode(defaults.defaclacl) privilege
+      JOIN pg_roles granted_role ON granted_role.oid = privilege.grantee
+      WHERE granted_role.rolname = ${options.expectedPlatformRole}
+      ORDER BY object_name
+    `),
+  );
+  if (platformDatabaseAndDefaultAclDrift.length > 0) {
+    throw new Error("RLS_DEPLOYMENT_PLATFORM_ACL_DRIFT");
+  }
 
   const platformNamedAcls = rowsOf<{ acl: string }>(
     await db.execute(sql`

@@ -170,6 +170,52 @@ WHERE n.nspname IN ('steward_bootstrap', 'steward_rls')
 GROUP BY p.oid, grantee.rolname
 \gexec
 
+-- Reset every persisted application grant in the Steward namespaces before
+-- rebuilding the runtime allowlist. GRANT is additive: without this reset a
+-- stale TRUNCATE privilege would survive forever and bypass row security.
+SELECT format(
+  'REVOKE ALL PRIVILEGES ON DATABASE %I FROM %I',
+  database_object.datname,
+  :'steward_app_role'
+)
+FROM pg_database database_object
+CROSS JOIN LATERAL aclexplode(database_object.datacl) privilege
+JOIN pg_roles granted_role ON granted_role.oid = privilege.grantee
+WHERE granted_role.rolname = :'steward_app_role'
+GROUP BY database_object.datname
+\gexec
+SELECT format('REVOKE ALL PRIVILEGES ON SCHEMA %I FROM %I', namespace.nspname, :'steward_app_role')
+FROM pg_namespace namespace
+WHERE namespace.nspname IN ('public', 'steward_bootstrap', 'steward_rls')
+\gexec
+SELECT format(
+  'REVOKE ALL PRIVILEGES ON %s %I.%I FROM %I',
+  CASE WHEN relation.relkind = 'S' THEN 'SEQUENCE' ELSE 'TABLE' END,
+  namespace.nspname,
+  relation.relname,
+  :'steward_app_role'
+)
+FROM pg_class relation
+JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+WHERE namespace.nspname = 'public' AND relation.relkind IN ('r', 'p', 'v', 'm', 'f', 'S')
+\gexec
+SELECT format(
+  'REVOKE ALL PRIVILEGES ON %s %s FROM %I',
+  CASE WHEN function_object.prokind = 'p' THEN 'PROCEDURE' ELSE 'FUNCTION' END,
+  function_object.oid::regprocedure,
+  :'steward_app_role'
+)
+FROM pg_proc function_object
+JOIN pg_namespace namespace ON namespace.oid = function_object.pronamespace
+WHERE namespace.nspname IN ('public', 'steward_bootstrap', 'steward_rls')
+\gexec
+SELECT format(
+  'ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA public REVOKE ALL PRIVILEGES ON %s FROM %I',
+  :'steward_migration_role', object_kind, :'steward_app_role'
+)
+FROM (VALUES ('TABLES'), ('SEQUENCES'), ('FUNCTIONS'), ('TYPES')) kinds(object_kind)
+\gexec
+
 SELECT format('GRANT %I TO %I', :'steward_migration_role', current_user) \gexec
 SELECT format('REVOKE CONNECT ON DATABASE %I FROM PUBLIC', current_database()) \gexec
 SELECT format(
@@ -245,6 +291,12 @@ CROSS JOIN LATERAL aclexplode(function_object.proacl) privilege
 JOIN pg_roles granted_role ON granted_role.oid = privilege.grantee
 WHERE granted_role.rolname = :'steward_platform_role'
 GROUP BY function_object.oid, function_object.prokind
+\gexec
+SELECT format(
+  'ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA public REVOKE ALL PRIVILEGES ON %s FROM %I',
+  :'steward_migration_role', object_kind, :'steward_platform_role'
+)
+FROM (VALUES ('TABLES'), ('SEQUENCES'), ('FUNCTIONS'), ('TYPES')) kinds(object_kind)
 \gexec
 
 SELECT format('GRANT USAGE ON SCHEMA steward_bootstrap, steward_rls TO %I', :'steward_platform_role') \gexec
@@ -414,6 +466,38 @@ BEGIN
     'MEMBER'
   ) THEN
     RAISE EXCEPTION 'SEC-169 login roles must not inherit or assume definer role';
+  END IF;
+  IF EXISTS (
+    SELECT 1
+    FROM pg_roles migration
+    JOIN pg_roles candidate ON candidate.oid <> migration.oid
+    WHERE migration.rolname = current_setting('steward.bootstrap.migration_role')
+      AND pg_has_role(migration.oid, candidate.oid, 'MEMBER')
+      AND (
+        candidate.rolsuper OR candidate.rolbypassrls OR candidate.rolcreatedb
+        OR candidate.rolcreaterole OR candidate.rolreplication
+        OR EXISTS (
+          SELECT 1 FROM pg_database database_object
+          WHERE database_object.datname = current_database()
+            AND database_object.datdba = candidate.oid
+        )
+        OR EXISTS (
+          SELECT 1 FROM pg_namespace namespace
+          WHERE namespace.nspname IN ('public', 'steward_rls', 'steward_bootstrap')
+            AND (namespace.nspowner = candidate.oid
+              OR has_schema_privilege(candidate.oid, namespace.oid, 'CREATE'))
+        )
+      )
+  ) THEN
+    RAISE EXCEPTION 'SEC-169 migration role has assumable privileged or owner authority';
+  END IF;
+  IF EXISTS (
+    SELECT 1 FROM pg_auth_members membership
+    JOIN pg_roles bootstrap
+      ON bootstrap.rolname = current_setting('steward.bootstrap.definer_role')
+    WHERE membership.member = bootstrap.oid OR membership.roleid = bootstrap.oid
+  ) THEN
+    RAISE EXCEPTION 'SEC-169 definer role membership graph must be empty';
   END IF;
   IF EXISTS (
     SELECT 1 FROM pg_roles

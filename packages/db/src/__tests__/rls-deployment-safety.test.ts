@@ -15,6 +15,8 @@ function database(options?: {
   aclDrift?: boolean;
   functionDrift?: boolean;
   functionAclDrift?: boolean;
+  appAclDrift?: boolean;
+  appDatabaseAclDrift?: boolean;
   platformAclDrift?: boolean;
   publicDefiner?: boolean;
 }) {
@@ -41,11 +43,29 @@ function database(options?: {
             platform_role_safe: true,
             migration_role_safe: true,
             bootstrap_role_safe: true,
+            migration_assumable_authority: false,
+            bootstrap_membership_drift: false,
           },
         ];
       }
       if (query === 2) return [];
       if (query === 3) {
+        const acls = [
+          { acl: "database:steward:CONNECT:false" },
+          { acl: "default:steward_migrator:S:public:SELECT:false" },
+          { acl: "default:steward_migrator:S:public:USAGE:false" },
+          { acl: "default:steward_migrator:r:public:DELETE:false" },
+          { acl: "default:steward_migrator:r:public:INSERT:false" },
+          { acl: "default:steward_migrator:r:public:SELECT:false" },
+          { acl: "default:steward_migrator:r:public:UPDATE:false" },
+        ];
+        if (options?.appDatabaseAclDrift) {
+          acls.push({ acl: "database:steward:CREATE:false" });
+        }
+        return acls;
+      }
+      if (query === 4) return [{ database_name: "steward" }];
+      if (query === 5) {
         let relations = EXPECTED_PUBLIC_RELATIONS.filter(
           (relation) => relation.policy_group === "core" || options?.capabilities,
         ).map(({ policy_group: _group, ...relation }) => ({
@@ -80,7 +100,7 @@ function database(options?: {
         }
         return relations;
       }
-      if (query === 5) {
+      if (query === 7) {
         const definitions = EXPECTED_RLS_FUNCTION_DEFINITIONS.map((definition) => ({
           identity: definition.identity,
           result: definition.result,
@@ -99,7 +119,7 @@ function database(options?: {
           definitions[0] = { ...definitions[0], body_md5: "0".repeat(32) };
         return definitions;
       }
-      if (query === 6) {
+      if (query === 8) {
         const rows = EXPECTED_RLS_FUNCTION_DEFINITIONS.flatMap((definition) => {
           const owner =
             definition.owner === "bootstrap" ? "steward_bootstrap_owner" : "steward_migrator";
@@ -146,12 +166,34 @@ function database(options?: {
             left.grantee.localeCompare(right.grantee),
         );
       }
-      if (query === 7) return options?.publicDefiner ? [{ identity: "public.hostile()" }] : [];
-      if (query === 8) return [];
       if (query === 9) {
+        const appAcls = [
+          "schema:public:USAGE:false",
+          "schema:steward_bootstrap:USAGE:false",
+          "schema:steward_rls:USAGE:false",
+          "function:steward_lock_tenant_deletion(text):EXECUTE:false",
+          ...EXPECTED_RLS_FUNCTION_DEFINITIONS.filter((definition) => definition.appExecute).map(
+            (definition) => `function:${definition.identity}:EXECUTE:false`,
+          ),
+          ...EXPECTED_PUBLIC_RELATIONS.filter(
+            (relation) => relation.policy_group === "core" || options?.capabilities,
+          ).flatMap((relation) =>
+            ["DELETE", "INSERT", "SELECT", "UPDATE"].map(
+              (privilege) => `relation:public.${relation.relation_name}:${privilege}:false`,
+            ),
+          ),
+        ];
+        if (options?.appAclDrift) appAcls.push("relation:public.users:TRUNCATE:false");
+        return appAcls.sort().map((acl) => ({ acl }));
+      }
+      if (query === 10) return [];
+      if (query === 11) return options?.publicDefiner ? [{ identity: "public.hostile()" }] : [];
+      if (query === 12) return [];
+      if (query === 13) {
         return options?.aclDrift ? [{ object_name: "steward_bootstrap.unknown_authority" }] : [];
       }
-      if (query === 10) {
+      if (query === 14) return [];
+      if (query === 15) {
         const acls = [
           "function:steward_bootstrap.platform_delete_user(uuid):EXECUTE:false",
           "function:steward_bootstrap.platform_revoke_user_refresh_tokens(uuid):EXECUTE:false",
@@ -173,7 +215,7 @@ function database(options?: {
         if (options?.platformAclDrift) acls.push("relation:public.users:DELETE:false");
         return acls.map((acl) => ({ acl }));
       }
-      if (query > 10) return [];
+      if (query > 15) return [];
       const policies = EXPECTED_RLS_POLICY_DEFINITIONS.filter(
         (policy) => policy.policy_group === "core" || options?.capabilities,
       ).map(({ policy_group: _group, ...policy }) => ({ ...policy }));
@@ -233,6 +275,12 @@ describe("RLS deployment safety gate", () => {
     await expect(
       assertRlsDeploymentSafety(database({ functionAclDrift: true }), roles),
     ).rejects.toThrow("RLS_DEPLOYMENT_FUNCTION_ACL_DRIFT");
+    await expect(
+      assertRlsDeploymentSafety(database({ appDatabaseAclDrift: true }), roles),
+    ).rejects.toThrow("RLS_DEPLOYMENT_APP_DATABASE_ACL_DRIFT");
+    await expect(assertRlsDeploymentSafety(database({ appAclDrift: true }), roles)).rejects.toThrow(
+      "RLS_DEPLOYMENT_APP_ACL_DRIFT",
+    );
     await expect(
       assertRlsDeploymentSafety(database({ platformAclDrift: true }), roles),
     ).rejects.toThrow("RLS_DEPLOYMENT_PLATFORM_ACL_DRIFT");

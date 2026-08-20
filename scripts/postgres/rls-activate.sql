@@ -77,6 +77,38 @@ BEGIN
   ) THEN
     RAISE EXCEPTION 'SEC-169 migration role must not assume bootstrap role';
   END IF;
+  IF EXISTS (
+    SELECT 1
+    FROM pg_roles migration
+    JOIN pg_roles candidate ON candidate.oid <> migration.oid
+    WHERE migration.rolname = current_setting('steward.activation.migration_role')
+      AND pg_has_role(migration.oid, candidate.oid, 'MEMBER')
+      AND (
+        candidate.rolsuper OR candidate.rolbypassrls OR candidate.rolcreatedb
+        OR candidate.rolcreaterole OR candidate.rolreplication
+        OR EXISTS (
+          SELECT 1 FROM pg_database database_object
+          WHERE database_object.datname = current_database()
+            AND database_object.datdba = candidate.oid
+        )
+        OR EXISTS (
+          SELECT 1 FROM pg_namespace namespace
+          WHERE namespace.nspname IN ('public', 'steward_rls', 'steward_bootstrap')
+            AND (namespace.nspowner = candidate.oid
+              OR has_schema_privilege(candidate.oid, namespace.oid, 'CREATE'))
+        )
+      )
+  ) THEN
+    RAISE EXCEPTION 'SEC-169 migration role has assumable privileged or owner authority';
+  END IF;
+  IF EXISTS (
+    SELECT 1 FROM pg_auth_members membership
+    JOIN pg_roles bootstrap
+      ON bootstrap.rolname = current_setting('steward.activation.bootstrap_role')
+    WHERE membership.member = bootstrap.oid OR membership.roleid = bootstrap.oid
+  ) THEN
+    RAISE EXCEPTION 'SEC-169 bootstrap role membership graph must be empty';
+  END IF;
   IF pg_has_role(
     current_setting('steward.activation.app_role'),
     current_setting('steward.activation.platform_role'),
@@ -209,6 +241,112 @@ BEGIN
     WHERE actual.identity IS NULL OR expected.identity IS NULL
   ) THEN
     RAISE EXCEPTION 'SEC-169 privileged function ACL manifest drift';
+  END IF;
+  IF EXISTS (
+    WITH actual AS (
+      SELECT 'database:' || database_object.datname || ':' || acl.privilege_type || ':' ||
+        acl.is_grantable AS acl
+      FROM pg_database database_object
+      CROSS JOIN LATERAL aclexplode(database_object.datacl) acl
+      JOIN pg_roles granted ON granted.oid = acl.grantee
+      WHERE granted.rolname = current_setting('steward.activation.app_role')
+      UNION ALL
+      SELECT 'default:' || owner_role.rolname || ':' || defaults.defaclobjtype::text || ':' ||
+        COALESCE(namespace.nspname, '') || ':' || acl.privilege_type || ':' || acl.is_grantable
+      FROM pg_default_acl defaults
+      JOIN pg_roles owner_role ON owner_role.oid = defaults.defaclrole
+      LEFT JOIN pg_namespace namespace ON namespace.oid = defaults.defaclnamespace
+      CROSS JOIN LATERAL aclexplode(defaults.defaclacl) acl
+      JOIN pg_roles granted ON granted.oid = acl.grantee
+      WHERE granted.rolname = current_setting('steward.activation.app_role')
+    ), expected(acl) AS (VALUES
+      ('database:' || current_database() || ':CONNECT:false'),
+      ('default:' || current_setting('steward.activation.migration_role') || ':S:public:SELECT:false'),
+      ('default:' || current_setting('steward.activation.migration_role') || ':S:public:USAGE:false'),
+      ('default:' || current_setting('steward.activation.migration_role') || ':r:public:DELETE:false'),
+      ('default:' || current_setting('steward.activation.migration_role') || ':r:public:INSERT:false'),
+      ('default:' || current_setting('steward.activation.migration_role') || ':r:public:SELECT:false'),
+      ('default:' || current_setting('steward.activation.migration_role') || ':r:public:UPDATE:false')
+    )
+    SELECT 1 FROM actual FULL JOIN expected USING (acl)
+    WHERE actual.acl IS NULL OR expected.acl IS NULL
+  ) THEN
+    RAISE EXCEPTION 'SEC-169 application database/default ACL drift';
+  END IF;
+  IF EXISTS (
+    WITH actual AS (
+      SELECT 'schema:' || n.nspname || ':' || acl.privilege_type || ':' ||
+        acl.is_grantable AS acl
+      FROM pg_namespace n
+      CROSS JOIN LATERAL aclexplode(n.nspacl) acl
+      JOIN pg_roles granted ON granted.oid = acl.grantee
+      WHERE granted.rolname = current_setting('steward.activation.app_role')
+      UNION ALL
+      SELECT 'relation:' || n.nspname || '.' || c.relname || ':' ||
+        acl.privilege_type || ':' || acl.is_grantable
+      FROM pg_class c
+      JOIN pg_namespace n ON n.oid = c.relnamespace
+      CROSS JOIN LATERAL aclexplode(c.relacl) acl
+      JOIN pg_roles granted ON granted.oid = acl.grantee
+      WHERE c.relkind IN ('r', 'p', 'v', 'm', 'f', 'S')
+        AND granted.rolname = current_setting('steward.activation.app_role')
+      UNION ALL
+      SELECT 'function:' || p.oid::regprocedure::text || ':' || acl.privilege_type || ':' ||
+        acl.is_grantable
+      FROM pg_proc p
+      CROSS JOIN LATERAL aclexplode(p.proacl) acl
+      JOIN pg_roles granted ON granted.oid = acl.grantee
+      WHERE granted.rolname = current_setting('steward.activation.app_role')
+    ), expected AS (
+      SELECT acl FROM (VALUES
+        ('schema:public:USAGE:false'),
+        ('schema:steward_bootstrap:USAGE:false'),
+        ('schema:steward_rls:USAGE:false'),
+        ('function:steward_lock_tenant_deletion(text):EXECUTE:false')
+      ) fixed(acl)
+      UNION ALL
+      SELECT 'relation:public.' || relation.relation_name || ':' || privilege || ':false'
+      FROM steward_expected_public_relations relation
+      CROSS JOIN (VALUES ('DELETE'), ('INSERT'), ('SELECT'), ('UPDATE')) privileges(privilege)
+      UNION ALL
+      SELECT 'relation:public.' || sequence.relname || ':' || privilege || ':false'
+      FROM pg_class sequence
+      JOIN pg_namespace namespace ON namespace.oid = sequence.relnamespace
+      CROSS JOIN (VALUES ('SELECT'), ('USAGE')) privileges(privilege)
+      WHERE namespace.nspname = 'public' AND sequence.relkind = 'S'
+      UNION ALL
+      SELECT 'function:' || manifest.identity || ':EXECUTE:false'
+      FROM steward_expected_rls_functions manifest WHERE manifest.app_execute
+    )
+    SELECT 1 FROM actual FULL JOIN expected USING (acl)
+    WHERE actual.acl IS NULL OR expected.acl IS NULL
+  ) THEN
+    RAISE EXCEPTION 'SEC-169 application named ACL drift';
+  END IF;
+  IF EXISTS (
+    WITH actual AS (
+      SELECT 'database:' || database_object.datname || ':' || acl.privilege_type || ':' ||
+        acl.is_grantable AS acl
+      FROM pg_database database_object
+      CROSS JOIN LATERAL aclexplode(database_object.datacl) acl
+      JOIN pg_roles granted ON granted.oid = acl.grantee
+      WHERE granted.rolname = current_setting('steward.activation.platform_role')
+      UNION ALL
+      SELECT 'default:' || owner_role.rolname || ':' || defaults.defaclobjtype::text || ':' ||
+        COALESCE(namespace.nspname, '') || ':' || acl.privilege_type || ':' || acl.is_grantable
+      FROM pg_default_acl defaults
+      JOIN pg_roles owner_role ON owner_role.oid = defaults.defaclrole
+      LEFT JOIN pg_namespace namespace ON namespace.oid = defaults.defaclnamespace
+      CROSS JOIN LATERAL aclexplode(defaults.defaclacl) acl
+      JOIN pg_roles granted ON granted.oid = acl.grantee
+      WHERE granted.rolname = current_setting('steward.activation.platform_role')
+    ), expected(acl) AS (VALUES
+      ('database:' || current_database() || ':CONNECT:false')
+    )
+    SELECT 1 FROM actual FULL JOIN expected USING (acl)
+    WHERE actual.acl IS NULL OR expected.acl IS NULL
+  ) THEN
+    RAISE EXCEPTION 'SEC-169 platform database/default ACL drift';
   END IF;
   IF EXISTS (
     WITH actual AS (
