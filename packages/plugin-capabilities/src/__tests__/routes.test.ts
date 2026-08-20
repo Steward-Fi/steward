@@ -274,6 +274,16 @@ describe("capability CRUD happy path (authorized)", () => {
     expect(res.status).toBe(400);
   });
 
+  test.each([
+    "/repos/acme/widgets?account=secondary",
+    "/repos/acme/widgets#fragment",
+  ])("create rejects query/fragment-bearing pathPattern: %s", async (pathPattern) => {
+    const app = authedApp(harness!.db);
+    const res = await createCap(app, { pathPattern });
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toContain("query or fragment delimiters");
+  });
+
   test("bad capability name -> 400", async () => {
     const app = authedApp(harness!.db);
     const res = await createCap(app, { name: "Bad Name!" });
@@ -355,6 +365,21 @@ describe("grant + patch route behaviors (authorized)", () => {
       body: JSON.stringify({ pathPattern: "/repos/acme/*" }),
     });
     expect(patch.status).toBe(400);
+  });
+
+  test.each([
+    "/repos/acme/widgets?account=secondary",
+    "/repos/acme/widgets#fragment",
+  ])("PATCH rejects query/fragment-bearing pathPattern: %s", async (pathPattern) => {
+    const app = authedApp(harness!.db);
+    const capId = (await (await createCap(app)).json()).data.id as string;
+    const patch = await app.request(`/capabilities/${capId}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ pathPattern }),
+    });
+    expect(patch.status).toBe(400);
+    expect((await patch.json()).error).toContain("query or fragment delimiters");
   });
 
   test("grant with a past expiresAt -> 400", async () => {

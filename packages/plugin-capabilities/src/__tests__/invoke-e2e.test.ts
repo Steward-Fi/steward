@@ -107,6 +107,9 @@ beforeAll(async () => {
   process.env.STEWARD_PGLITE_MEMORY = "true";
   process.env.STEWARD_MASTER_PASSWORD = MASTER_PASSWORD;
   process.env.STEWARD_JWT_SECRET = "cap-invoke-e2e-jwt-secret-with-enough-bytes-0123456789";
+  // This hermetic in-process fixture deliberately uses the explicit dev-only
+  // replay/rate stores. Production still requires shared Redis and fails closed.
+  process.env.STEWARD_PROXY_DEV_MODE = "true";
   process.env.STEWARD_PROXY_REQUIRE_REQUEST_SIGNATURE = "true";
   process.env.STEWARD_PROXY_REQUEST_SIGNING_SECRET = SIGNING_SECRET;
   process.env.STEWARD_PROXY_ALLOWED_HOSTS = "api.github.com,api.openai.com";

@@ -76,6 +76,9 @@ beforeAll(async () => {
   process.env.STEWARD_PGLITE_MEMORY = "true";
   process.env.STEWARD_MASTER_PASSWORD = MASTER_PASSWORD;
   process.env.STEWARD_JWT_SECRET = "proxy-client-e2e-jwt-secret-with-enough-bytes";
+  // This hermetic in-process fixture deliberately uses the explicit dev-only
+  // replay store. Production still requires shared Redis and fails closed.
+  process.env.STEWARD_PROXY_DEV_MODE = "true";
   // Force the production-grade request-signature requirement so the e2e also
   // exercises the client's HMAC signer against the proxy verifier.
   process.env.STEWARD_PROXY_REQUIRE_REQUEST_SIGNATURE = "true";
