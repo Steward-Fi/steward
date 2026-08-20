@@ -9,7 +9,7 @@ import { type PolicyRule, redactedThrownDiagnostics } from "@stwd/shared";
 import { and, desc, eq, inArray, type SQL, sql } from "drizzle-orm";
 import { type Context, Hono } from "hono";
 import { enforceRateLimit, recordVaultSpend } from "../middleware/redis-enforcement";
-import { type ActorType, writeAuditEvent } from "../services/audit";
+import { type ActorType, withTenantAuditedTransaction, writeAuditEvent } from "../services/audit";
 import {
   type ApiResponse,
   type AppVariables,
@@ -1879,30 +1879,50 @@ async function updateIntentStatus(
       string,
       unknown
     >;
-    const now = new Date();
-    const [row] = await db
-      .update(intents)
-      .set({
-        status: "executed",
-        executionResult: storedExecutionResult,
-        updatedAt: now,
-        executedAt: now,
-        executedBy: actorId(c),
-      })
-      .where(
-        and(
-          eq(intents.id, intentId),
-          eq(intents.tenantId, tenantId),
-          eq(intents.status, "executing"),
-        ),
-      )
-      .returning();
+    const row = await withTenantAuditedTransaction(tenantId, async (txRaw, appendRequiredAudit) => {
+      const tx = txRaw as typeof db;
+      const now = new Date();
+      const [finalized] = await tx
+        .update(intents)
+        .set({
+          status: "executed",
+          executionResult: storedExecutionResult,
+          updatedAt: now,
+          executedAt: now,
+          executedBy: actorId(c),
+        })
+        .where(
+          and(
+            eq(intents.id, intentId),
+            eq(intents.tenantId, tenantId),
+            eq(intents.status, "executing"),
+          ),
+        )
+        .returning();
+      if (!finalized) return null;
+
+      await appendRequiredAudit({
+        tenantId,
+        actorType: auditActorType(c),
+        actorId: actorId(c),
+        action: "intent.executed",
+        resourceType: "intent",
+        resourceId: finalized.id,
+        metadata: {
+          agentId: finalized.agentId,
+          intentType: finalized.intentType,
+        },
+        ipAddress: c.req.header("x-forwarded-for") ?? null,
+        userAgent: c.req.header("user-agent") ?? null,
+        requestId: c.get("requestId") ?? null,
+      });
+      return finalized;
+    });
     if (!row) return c.json<ApiResponse>({ ok: false, error: "Intent lifecycle conflict" }, 409);
 
-    await writeIntentAudit(c, "intent.executed", row.id, {
-      agentId: row.agentId,
-      intentType: row.intentType,
-    });
+    // External success effects are emitted only after the executed row and its
+    // required tamper-evident audit commit atomically. A failed audit rolls the
+    // status transition back to `executing` and reaches neither webhook.
     dispatchWalletActionSuccessWebhook(tenantId, row.agentId, executionResult);
     dispatchIntentWebhook(tenantId, row.agentId, "intent.executed", row);
     return c.json<ApiResponse>({
