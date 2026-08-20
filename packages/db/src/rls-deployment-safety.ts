@@ -21,27 +21,69 @@ function stable(value: unknown): string {
  */
 export async function assertRlsDeploymentSafety(
   db: SqlDatabase,
-  options: { expectedRole: string; requireActivated?: boolean },
+  options: { expectedRole: string; expectedPlatformRole: string; requireActivated?: boolean },
 ): Promise<void> {
-  if (!/^[A-Za-z_][A-Za-z0-9_$-]{0,62}$/.test(options.expectedRole)) {
+  const roleName = /^[A-Za-z_][A-Za-z0-9_$-]{0,62}$/;
+  if (!roleName.test(options.expectedRole) || !roleName.test(options.expectedPlatformRole)) {
     throw new Error("RLS_DEPLOYMENT_ROLE_EXPECTATION_INVALID");
   }
   const [role] = rowsOf<{
     current_user: string;
     session_user: string;
+    rolcanlogin: boolean;
+    rolinherit: boolean;
     rolsuper: boolean;
     rolbypassrls: boolean;
+    rolcreatedb: boolean;
+    rolcreaterole: boolean;
+    rolreplication: boolean;
     owns_rls_relation: boolean;
+    has_assumable_privilege: boolean;
+    can_create_protected_schema: boolean;
+    platform_role_safe: boolean;
   }>(
     await db.execute(sql`
-      SELECT current_user::text, session_user::text, role.rolsuper, role.rolbypassrls,
+      SELECT current_user::text, session_user::text, role.rolcanlogin, role.rolinherit,
+        role.rolsuper, role.rolbypassrls, role.rolcreatedb, role.rolcreaterole,
+        role.rolreplication,
         EXISTS (
           SELECT 1 FROM pg_class relation
           JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
           WHERE namespace.nspname = 'public'
             AND relation.relname = ANY(${[...new Set(EXPECTED_RLS_POLICY_DEFINITIONS.map((p) => p.relation_name))]})
             AND relation.relowner = role.oid
-        ) AS owns_rls_relation
+        ) AS owns_rls_relation,
+        EXISTS (
+          SELECT 1 FROM pg_roles privileged
+          WHERE privileged.oid <> role.oid
+            AND pg_has_role(session_user, privileged.oid, 'MEMBER')
+            AND (privileged.rolsuper OR privileged.rolbypassrls OR privileged.rolcreatedb
+              OR privileged.rolcreaterole OR privileged.rolreplication)
+        ) AS has_assumable_privilege,
+        EXISTS (
+          SELECT 1 FROM pg_roles candidate
+          CROSS JOIN pg_namespace namespace
+          WHERE namespace.nspname IN ('public', 'steward_rls', 'steward_bootstrap')
+            AND pg_has_role(session_user, candidate.oid, 'MEMBER')
+            AND (candidate.oid = namespace.nspowner
+              OR has_schema_privilege(candidate.oid, namespace.oid, 'CREATE'))
+        ) AS can_create_protected_schema,
+        EXISTS (
+          SELECT 1 FROM pg_roles platform
+          WHERE platform.rolname = ${options.expectedPlatformRole}
+            AND platform.rolcanlogin AND NOT platform.rolinherit
+            AND NOT platform.rolsuper AND NOT platform.rolbypassrls
+            AND NOT platform.rolcreatedb AND NOT platform.rolcreaterole
+            AND NOT platform.rolreplication
+            AND NOT pg_has_role(${options.expectedRole}, platform.oid, 'MEMBER')
+            AND NOT pg_has_role(${options.expectedPlatformRole}, role.oid, 'MEMBER')
+            AND NOT EXISTS (
+              SELECT 1 FROM pg_class relation
+              JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+              WHERE namespace.nspname = 'public' AND relation.relkind IN ('r', 'p')
+                AND relation.relowner = platform.oid
+            )
+        ) AS platform_role_safe
       FROM pg_roles role WHERE role.rolname = current_user
     `),
   );
@@ -49,9 +91,17 @@ export async function assertRlsDeploymentSafety(
     !role ||
     role.current_user !== options.expectedRole ||
     role.session_user !== options.expectedRole ||
+    !role.rolcanlogin ||
+    role.rolinherit ||
     role.rolsuper ||
     role.rolbypassrls ||
-    role.owns_rls_relation
+    role.rolcreatedb ||
+    role.rolcreaterole ||
+    role.rolreplication ||
+    role.owns_rls_relation ||
+    role.has_assumable_privilege ||
+    role.can_create_protected_schema ||
+    !role.platform_role_safe
   ) {
     throw new Error("RLS_DEPLOYMENT_ROLE_UNSAFE");
   }
@@ -146,4 +196,72 @@ export async function assertRlsDeploymentSafety(
   if (stable(policies) !== stable(comparablePolicies)) {
     throw new Error("RLS_DEPLOYMENT_POLICY_DEFINITION_DRIFT");
   }
+
+  const helperDrift = rowsOf<{ function_name: string }>(
+    await db.execute(sql`
+      SELECT function.proname::text AS function_name
+      FROM pg_proc function
+      JOIN pg_namespace namespace ON namespace.oid = function.pronamespace
+      JOIN pg_language language ON language.oid = function.prolang
+      WHERE namespace.nspname = 'steward_rls'
+        AND function.proname IN ('tenant_id', 'user_id')
+        AND (
+          function.prosecdef OR function.provolatile <> 's' OR function.proparallel <> 's'
+          OR language.lanname <> 'sql'
+          OR pg_get_function_identity_arguments(function.oid) <> ''
+          OR function.proconfig IS DISTINCT FROM ARRAY['search_path=pg_catalog']::text[]
+          OR btrim(function.prosrc, E' \t\n\r') <> CASE function.proname
+            WHEN 'tenant_id' THEN 'SELECT NULLIF(current_setting(''steward.tenant_id'', true), '''')'
+            ELSE 'SELECT NULLIF(current_setting(''steward.user_id'', true), '''')::uuid'
+          END
+        )
+      UNION ALL
+      SELECT 'helper_count'
+      WHERE (
+        SELECT count(*) FROM pg_proc function
+        JOIN pg_namespace namespace ON namespace.oid = function.pronamespace
+        WHERE namespace.nspname = 'steward_rls'
+          AND function.proname IN ('tenant_id', 'user_id')
+      ) <> 2
+    `),
+  );
+  if (helperDrift.length > 0) throw new Error("RLS_DEPLOYMENT_HELPER_DRIFT");
+
+  const aclDrift = rowsOf<{ object_name: string }>(
+    await db.execute(sql`
+      WITH functions AS (
+        SELECT function.oid, namespace.nspname, function.proname,
+          function.proname IN (
+            'platform_set_user_deactivation', 'platform_delete_user',
+            'platform_revoke_user_refresh_tokens', 'retention_delete_deactivated_users'
+          ) AS destructive
+        FROM pg_proc function
+        JOIN pg_namespace namespace ON namespace.oid = function.pronamespace
+        WHERE namespace.nspname IN ('steward_bootstrap', 'steward_rls')
+      ), function_drift AS (
+        SELECT format('%I.%I', nspname, proname) AS object_name
+        FROM functions
+        WHERE has_function_privilege('PUBLIC', oid, 'EXECUTE')
+          OR has_function_privilege(${options.expectedRole}, oid, 'EXECUTE') <>
+            (nspname = 'steward_rls' OR NOT destructive)
+          OR has_function_privilege(${options.expectedPlatformRole}, oid, 'EXECUTE') <>
+            ((nspname = 'steward_rls' AND proname = 'tenant_id')
+              OR (nspname = 'steward_bootstrap' AND destructive))
+      ), schema_drift AS (
+        SELECT namespace.nspname::text AS object_name
+        FROM pg_namespace namespace
+        WHERE namespace.nspname IN ('steward_bootstrap', 'steward_rls')
+          AND (
+            NOT has_schema_privilege(${options.expectedRole}, namespace.oid, 'USAGE')
+            OR has_schema_privilege(${options.expectedRole}, namespace.oid, 'CREATE')
+            OR NOT has_schema_privilege(${options.expectedPlatformRole}, namespace.oid, 'USAGE')
+            OR has_schema_privilege(${options.expectedPlatformRole}, namespace.oid, 'CREATE')
+          )
+      )
+      SELECT object_name FROM function_drift
+      UNION ALL SELECT object_name FROM schema_drift
+      ORDER BY object_name
+    `),
+  );
+  if (aclDrift.length > 0) throw new Error("RLS_DEPLOYMENT_ACL_DRIFT");
 }
