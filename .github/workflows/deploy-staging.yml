@@ -4,9 +4,10 @@
 #   develop  ──(this workflow, auto)──▶  STAGING
 #   main     ──(deploy-railway.yml, manual/gated)──▶  PRODUCTION
 #
-# This runs automatically after the Docker image for `develop` is built +
-# pushed, then points the Railway staging steward-api service at that image.
-# Staging therefore always tracks the latest green develop, so it can never
+# This runs automatically after the full CI workflow for `develop` succeeds,
+# then verifies the exact Docker image also built successfully before pointing
+# Railway staging at that immutable image. Staging therefore tracks accepted
+# develop commits, so it can never
 # silently drift behind (the failure mode that stranded staging on a stale
 # pre-#129 build and broke the cloud→Steward auth-gate).
 #
@@ -15,11 +16,10 @@
 name: Deploy Staging
 
 on:
-  # Run after the Docker build+push workflow completes successfully on develop.
-  # Gating on workflow_run (not push) means we only ship an image that actually
-  # built + passed the Docker workflow — no half-built staging.
+  # Run only after the complete CI workflow finishes on develop. The job then
+  # waits for and verifies the independent exact-SHA Docker build.
   workflow_run:
-    workflows: ["Docker"]
+    workflows: ["CI"]
     types: [completed]
     branches: [develop]
 
@@ -33,6 +33,7 @@ on:
         default: "develop"
 
 permissions:
+  actions: read
   contents: read
   deployments: write
 
@@ -45,11 +46,9 @@ concurrency:
 jobs:
   deploy-staging:
     runs-on: ubuntu-latest
-    # On workflow_run, deploy only a successful Docker build for the commit
-    # that is still at the tip of develop. GITHUB_SHA for workflow_run is the
-    # default-branch tip when this downstream run is created; without this
-    # equality check, a slower Docker run for an older push can deploy after a
-    # newer commit has already landed.
+    # On workflow_run, deploy only after the complete CI workflow succeeds.
+    # The verification step below independently binds the SHA to live develop
+    # and to a completed successful Docker build.
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (github.event.workflow_run.conclusion == 'success' &&
@@ -58,6 +57,22 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Setup Bun
+        if: github.event_name == 'workflow_run'
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: "1.3"
+
+      - name: Verify exact CI candidate and Docker image
+        if: github.event_name == 'workflow_run'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET_REPOSITORY: ${{ github.repository }}
+          TARGET_SHA: ${{ github.event.workflow_run.head_sha }}
+          TARGET_BRANCH: develop
+          TARGET_CI_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+        run: bun scripts/verify-staging-deploy-readiness.ts
 
       - name: Resolve image tag
         id: resolve
