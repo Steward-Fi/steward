@@ -30,6 +30,31 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
+async function waitForOwnedSignal<T>(
+  signal: Promise<T>,
+  owner: Promise<unknown>,
+  label: string,
+  timeoutMs = 5_000,
+): Promise<T> {
+  let deadline: ReturnType<typeof setTimeout> | undefined;
+  const ownerSettled = owner.then(
+    () => {
+      throw new Error(`${label}: owning operation completed before its signal`);
+    },
+    (cause) => {
+      throw new Error(`${label}: owning operation failed before its signal`, { cause });
+    },
+  );
+  const timedOut = new Promise<never>((_, reject) => {
+    deadline = setTimeout(() => reject(new Error(`${label}: signal deadline exceeded`)), timeoutMs);
+  });
+  try {
+    return await Promise.race([signal, ownerSettled, timedOut]);
+  } finally {
+    if (deadline) clearTimeout(deadline);
+  }
+}
+
 describePostgres("Monero relay parent/idempotency locks (real Postgres)", () => {
   const suffix = crypto.randomUUID().replaceAll("-", "");
   const tenantId = `monero-lock-tenant-${suffix}`;
@@ -167,11 +192,11 @@ describePostgres("Monero relay parent/idempotency locks (real Postgres)", () => 
     let second: ReturnType<typeof attempt> | undefined;
     try {
       first = attempt(firstBackend);
-      await firstEntered.promise;
+      await waitForOwnedSignal(firstEntered.promise, first, "first relay entry");
       second = attempt(secondBackend);
       const [holderPid, waiterPid] = await Promise.all([
-        firstBackend.promise,
-        secondBackend.promise,
+        waitForOwnedSignal(firstBackend.promise, first, "first relay backend"),
+        waitForOwnedSignal(secondBackend.promise, second, "second relay backend"),
       ]);
       expect(waiterPid).not.toBe(holderPid);
       await waitForExactAdvisoryWaiter(agentId, holderPid, waiterPid);
@@ -226,7 +251,7 @@ describePostgres("Monero relay parent/idempotency locks (real Postgres)", () => 
         },
         relayBackend.resolve,
       );
-      await relayEntered.promise;
+      await waitForOwnedSignal(relayEntered.promise, relay, "relay-first entry");
       deletion = deletionClient.begin(async (tx) => {
         const [backend] = await tx<{ pid: number }[]>`select pg_backend_pid()::int as pid`;
         if (!backend) throw new Error("delete backend is unavailable");
@@ -234,8 +259,8 @@ describePostgres("Monero relay parent/idempotency locks (real Postgres)", () => 
         await tx`delete from agents where id = ${agentId}`;
       });
       const [blockerPid, waiterPid] = await Promise.all([
-        relayBackend.promise,
-        deletionBackend.promise,
+        waitForOwnedSignal(relayBackend.promise, relay, "relay-first backend"),
+        waitForOwnedSignal(deletionBackend.promise, deletion, "relay-first delete backend"),
       ]);
       await waitForExactAgentTupleWaiter(tuple, blockerPid, waiterPid);
       expect(relays).toBe(1);
@@ -271,7 +296,7 @@ describePostgres("Monero relay parent/idempotency locks (real Postgres)", () => 
         deleteHeld.resolve();
         await releaseDelete.promise;
       });
-      await deleteHeld.promise;
+      await waitForOwnedSignal(deleteHeld.promise, deletion, "delete-first parent deletion");
       relay = withMoneroRelayLock(
         agentId,
         async () => {
@@ -280,8 +305,8 @@ describePostgres("Monero relay parent/idempotency locks (real Postgres)", () => 
         relayBackend.resolve,
       );
       const [blockerPid, waiterPid] = await Promise.all([
-        deletionBackend.promise,
-        relayBackend.promise,
+        waitForOwnedSignal(deletionBackend.promise, deletion, "delete-first backend"),
+        waitForOwnedSignal(relayBackend.promise, relay, "delete-first relay backend"),
       ]);
       await waitForExactAgentTupleWaiter(tuple, blockerPid, waiterPid);
       expect(relays).toBe(0);
