@@ -93,10 +93,14 @@ describe("webhook retry hardening", () => {
     expect(enable).toBeGreaterThan(created);
   });
 
-  it("encrypts legacy tenant webhook secrets before storing them", () => {
-    expect(tenantRoutesSource).toContain('import { encryptWebhookSecret } from "@stwd/webhooks"');
-    expect(tenantRoutesSource).toContain("secret: encryptWebhookSecret(generateWebhookSecret())");
-    expect(tenantRoutesSource).not.toContain("secret: generateWebhookSecret()");
+  it("rejects retired tenant webhook secrets instead of storing them", () => {
+    const routeStart = tenantRoutesSource.indexOf('tenantRoutes.put("/:id/webhook"');
+    expect(routeStart).toBeGreaterThanOrEqual(0);
+    const route = tenantRoutesSource.slice(routeStart);
+    expect(route).toContain("if (body.webhookUrl !== undefined)");
+    expect(route).toContain("LEGACY_WEBHOOK_DEPRECATION_ERROR");
+    expect(route).toContain(", 410)");
+    expect(route).not.toContain("generateWebhookSecret");
   });
 
   it("does not copy legacy plaintext webhook secrets into delivery snapshots", () => {

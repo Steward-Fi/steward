@@ -28,25 +28,44 @@ describe("external agent JWT hardening", () => {
     expect(source).toContain("agent is not registered for tenant");
   });
 
-  it("requires explicit trade scope and configured production JWKS for external agent order JWTs", () => {
+  it("requires explicit trade scope and configured JWKS for external agent order JWTs", () => {
     expect(source).toContain('const TRADE_ORDER_SCOPE = "trade:order"');
     expect(source).toContain('stringArrayClaim(payload, "scopes", "scope")');
     expect(source).toContain("auth.scopes.includes(TRADE_ORDER_SCOPE)");
     expect(source).toContain("Token missing required ${TRADE_ORDER_SCOPE} scope");
-    expect(source).toContain(
-      'process.env.NODE_ENV === "production" && !process.env.ELIZA_CLOUD_JWKS_URL',
-    );
+    // SEC-069: no implicit hardcoded trust anchor — production requires
+    // ELIZA_CLOUD_JWKS_URL, and the dev anchor requires an explicit opt-in.
+    expect(source).toContain("function resolveJwksUrl()");
+    expect(source).toContain('process.env.STEWARD_ALLOW_DEFAULT_ELIZA_JWKS === "true"');
     expect(source).toContain('throw new Error("jwks-url-required")');
   });
 
   it("does not treat api:proxy as implicit broad agent metadata scope", () => {
     expect(contextSource).not.toContain("new Set([AGENT_SCOPE])");
     expect(contextSource).toContain("if (!scopes || scopes.length === 0) return [AGENT_SCOPE]");
-    expect(contextSource).toContain(
-      'c.set("agentScopes", normalizeAgentTokenScopes(payload.scopes))',
-    );
+    expect(contextSource).toContain('c.set("agentScopes", agentTokenScopes)');
     expect(contextSource).toContain(
       'agentScope === c.req.param("agentId") && hasAgentTokenScope(c.get("agentScopes"))',
     );
+  });
+
+  it("refuses capability-scoped (cap:) tokens on the general tenant surface", () => {
+    // SEC-033: a token-mode capability token authorizes EXACTLY one capability.
+    // The tenant gate must reject any agent token carrying a `cap:` scope —
+    // even one that also stamps the broad `agent` scope — so it can never act
+    // as a general agent credential.
+    expect(contextSource).toContain('CAPABILITY_TOKEN_SCOPE_PREFIX = "cap:"');
+    expect(contextSource).toContain(
+      "agentTokenScopes.some((scope) => scope.startsWith(CAPABILITY_TOKEN_SCOPE_PREFIX))",
+    );
+    // The refusal happens BEFORE any agent lookup/context install (fail fast).
+    const refusal = contextSource.indexOf(
+      "agentTokenScopes.some((scope) => scope.startsWith(CAPABILITY_TOKEN_SCOPE_PREFIX))",
+    );
+    const agentLookup = contextSource.indexOf(
+      "const agent = await ensureAgentForTenant(payload.tenantId, payload.agentId as string);",
+    );
+    expect(refusal).toBeGreaterThanOrEqual(0);
+    expect(agentLookup).toBeGreaterThan(refusal);
   });
 });

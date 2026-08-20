@@ -9,7 +9,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 
 export type InitOptions = {
   envPath?: string;
@@ -67,19 +67,23 @@ function renderEnv(options: InitOptions): string {
     "STEWARD_MASTER_PASSWORD=" + hex(32),
     "STEWARD_JWT_SECRET=" + hex(32),
     "STEWARD_EMAIL_CODE_SECRET=" + hex(32),
-    // PR4 provider execution authorization key rotation list. The active first
+    // Provider execution authorization key rotation list. The active first
     // entry signs and all entries verify. Keep this separate from JWT material.
     "STEWARD_EXECUTION_AUTH_SECRET=v1:" + hex(32),
-    "STEWARD_SESSION_SECRET=" + hex(32),
     "STEWARD_KDF_SALT=" + hex(32),
     // This env sets NODE_ENV=production with no STEWARD_KMS_PROVIDER, so the
     // vault resolves to `local` custody (plaintext key in app memory at sign
     // time). The production custody gate refuses to boot local mode unless the
-    // posture is acknowledged, so a generated env must carry the ack to boot.
-    // Generating local custody IS the deliberate default choice; record it
-    // explicitly and auditably. To harden, set STEWARD_KMS_PROVIDER=aws|pkcs11
-    // and clear this. See docs/security/custody-posture.md.
-    "STEWARD_ACK_LOCAL_CUSTODY=true",
+    // posture is acknowledged. The ack is deliberately emitted COMMENTED OUT:
+    // an operator who accepts local custody uncomments it, recording the
+    // decision explicitly and auditably (SEC-120).
+    "# Custody posture: no STEWARD_KMS_PROVIDER is set, so the vault runs in",
+    "# `local` mode (plaintext key in app memory at sign time). The production",
+    "# custody gate refuses to boot local mode unless the posture is explicitly",
+    "# acknowledged. To accept local custody, uncomment the line below (records",
+    "# the decision). To harden instead, set STEWARD_KMS_PROVIDER=aws|pkcs11.",
+    "# See docs/security/custody-posture.md.",
+    "# STEWARD_ACK_LOCAL_CUSTODY=true",
     "STEWARD_AUDIT_HMAC_KEY=" + hex(32),
     "# Raw 32-byte Ed25519 seed hex; supported by packages/api/src/services/audit-checkpoint.ts.",
     "STEWARD_AUDIT_SIGNING_KEY=" + hex(32),
@@ -170,12 +174,18 @@ export function runInit(options: InitOptions = {}): InitResult {
   if (options.runMigrations) {
     const envSource = readFileSync(envPath, "utf8");
     const databaseUrl = options.databaseUrl ?? readEnvValue(envSource, "DATABASE_URL");
-    const result = spawnSync("bun", ["packages/db/src/migrate.ts"], {
-      cwd: process.cwd(),
+    // Resolve the migrator against THIS CLI's install tree and run it with the
+    // current runtime. A CWD-relative path would execute whatever
+    // packages/db/src/migrate.ts exists beneath the operator's (possibly
+    // attacker-writable) working directory, with every generated secret below
+    // in its environment.
+    const result = spawnSync(process.execPath, [join(import.meta.dir, "../../db/src/migrate.ts")], {
       env: {
         ...process.env,
         DATABASE_URL: databaseUrl ?? process.env.DATABASE_URL ?? "",
-        STEWARD_ALLOW_INSECURE_DB: process.env.STEWARD_ALLOW_INSECURE_DB ?? "true",
+        // STEWARD_ALLOW_INSECURE_DB is inherited only when the operator set it
+        // explicitly — never defaulted on, so the production DB-TLS gate
+        // (packages/db/src/client.ts) is not silently bypassed.
       },
       stdio: "inherit",
     });

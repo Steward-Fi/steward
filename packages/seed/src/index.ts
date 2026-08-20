@@ -1,4 +1,4 @@
-import crypto, { createHash } from "node:crypto";
+import crypto from "node:crypto";
 import { encodeFunctionData, parseAbi } from "viem";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import {
@@ -11,8 +11,10 @@ import {
   policies,
   tenants,
   transactions,
+  withTenantAuditedTransactionOnDb,
 } from "../../db/src/index.ts";
 import { KeyStore } from "../../vault/src/index.ts";
+import { generateDemoApiKey, rotateDemoCredentials } from "./demo-api-key";
 
 /* ──────────────────────────────────────────────────────────────────────────── */
 /*  Constants                                                                  */
@@ -20,7 +22,7 @@ import { KeyStore } from "../../vault/src/index.ts";
 
 const TENANT_ID = "waifu.fun";
 const TENANT_NAME = "waifu.fun";
-const DEMO_API_KEY = "stw_demo_waifu_fun_dashboard";
+const DEMO_API_KEY = generateDemoApiKey();
 
 const ERC20_ABI = parseAbi(["function transfer(address to, uint256 amount)"]);
 
@@ -89,10 +91,6 @@ type ApprovalSeed = {
 /*  Helpers                                                                    */
 /* ──────────────────────────────────────────────────────────────────────────── */
 
-function hashApiKey(key: string): string {
-  return createHash("sha256").update(key).digest("hex");
-}
-
 function randomTxHash(): `0x${string}` {
   return `0x${crypto.randomBytes(32).toString("hex")}`;
 }
@@ -144,28 +142,40 @@ async function seed() {
   const createdAt = hoursAgo(168); // 7 days ago — agent creation time
   const updatedAt = hoursAgo(1);
 
-  console.log("Cleaning existing waifu.fun data...");
-  await cleanWaifuData();
-
-  /* ── Tenant upsert ─────────────────────────────────────────────────────── */
-  await db
-    .insert(tenants)
-    .values({
-      id: TENANT_ID,
-      name: TENANT_NAME,
-      apiKeyHash: hashApiKey(DEMO_API_KEY),
-      createdAt,
-      updatedAt,
-    })
-    .onConflictDoUpdate({
-      target: tenants.id,
-      set: {
-        name: TENANT_NAME,
-        apiKeyHash: hashApiKey(DEMO_API_KEY),
-        updatedAt,
-      },
+  /* ── Tenant credential rotation ───────────────────────────────────────── */
+  const demoCredentialsPath = await rotateDemoCredentials(TENANT_ID, DEMO_API_KEY.key, async () => {
+    console.log("Cleaning existing waifu.fun data...");
+    await cleanWaifuData();
+    await withTenantAuditedTransactionOnDb(db, TENANT_ID, async (txRaw, appendAudit) => {
+      const tx = txRaw as typeof db;
+      await tx
+        .insert(tenants)
+        .values({
+          id: TENANT_ID,
+          name: TENANT_NAME,
+          apiKeyHash: DEMO_API_KEY.hash,
+          createdAt,
+          updatedAt,
+        })
+        .onConflictDoUpdate({
+          target: tenants.id,
+          set: {
+            name: TENANT_NAME,
+            apiKeyHash: DEMO_API_KEY.hash,
+            updatedAt,
+          },
+        });
+      await appendAudit({
+        tenantId: TENANT_ID,
+        actorType: "system",
+        actorId: "demo-seed",
+        action: "tenant.api_key.rotate",
+        resourceType: "tenant",
+        resourceId: TENANT_ID,
+        metadata: { source: "demo-seed" },
+      });
     });
-
+  });
   /* ════════════════════════════════════════════════════════════════════════ */
   /*  AGENT DEFINITIONS                                                      */
   /* ════════════════════════════════════════════════════════════════════════ */
@@ -1999,7 +2009,7 @@ async function seed() {
 
   /* ── Summary ───────────────────────────────────────────────────────────── */
   console.log(`\nSeeded tenant: ${TENANT_ID}`);
-  console.log(`Demo API key:  ${DEMO_API_KEY}`);
+  console.log(`Demo credentials: ${demoCredentialsPath} (mode 0600)`);
   console.log(`Agents:        ${agentDefs.length}`);
   console.log(`Policies:      ${policySeeds.length}`);
   console.log(`Transactions:  ${txSeeds.length}`);

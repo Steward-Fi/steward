@@ -26,6 +26,7 @@
 import crypto from "node:crypto";
 
 import { agents, getDb, policies } from "@stwd/db";
+import { redactedThrownDiagnostics } from "@stwd/shared";
 import { and, eq } from "drizzle-orm";
 
 export interface SeedSolDefaultPolicyArgs {
@@ -147,7 +148,7 @@ if (isEntrypoint) {
       );
     })
     .catch((err) => {
-      console.error("seedSolDefaultPolicy failed:", err instanceof Error ? err.message : err);
+      console.error("seedSolDefaultPolicy failed:", redactedThrownDiagnostics(err));
       process.exitCode = 1;
     });
 }

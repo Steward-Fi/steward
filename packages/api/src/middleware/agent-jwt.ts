@@ -22,8 +22,12 @@ type CacheEntry = {
 
 const JWKS_CACHE_MS = 5 * 60 * 1000;
 const AGENT_TOKEN_EXPIRING_THRESHOLD_SECONDS = 5 * 60;
+// Dev convenience trust anchor. SEC-069: only honored behind an explicit
+// opt-in (STEWARD_ALLOW_DEFAULT_ELIZA_JWKS=true) outside production — domain
+// takeover/compromise of this host would otherwise silently become a minting
+// oracle for any staging/self-hosted deployment that forgot to configure
+// ELIZA_CLOUD_JWKS_URL.
 const DEFAULT_ELIZA_CLOUD_JWKS_URL = "https://milady.shad0w.xyz/.well-known/jwks.json";
-const ELIZA_CLOUD_JWKS_URL = process.env.ELIZA_CLOUD_JWKS_URL || DEFAULT_ELIZA_CLOUD_JWKS_URL;
 const TRADE_ORDER_SCOPE = "trade:order";
 
 let jwksCache: CacheEntry | null = null;
@@ -32,14 +36,29 @@ function invalid(c: Context, reason: string, status: 401 = 401) {
   return c.json({ code: "invalid-jwt", reason }, status);
 }
 
-async function loadJwks(): Promise<Map<string, Awaited<ReturnType<typeof importJWK>>>> {
-  if (process.env.NODE_ENV === "production" && !process.env.ELIZA_CLOUD_JWKS_URL) {
-    throw new Error("jwks-url-required");
+/**
+ * Resolve the JWKS trust anchor. Production always requires an explicit
+ * ELIZA_CLOUD_JWKS_URL; outside production the hardcoded dev anchor requires
+ * the STEWARD_ALLOW_DEFAULT_ELIZA_JWKS=true opt-in. Fails closed otherwise.
+ */
+function resolveJwksUrl(): string {
+  const configured = process.env.ELIZA_CLOUD_JWKS_URL?.trim();
+  if (configured) return configured;
+  if (
+    process.env.NODE_ENV !== "production" &&
+    process.env.STEWARD_ALLOW_DEFAULT_ELIZA_JWKS === "true"
+  ) {
+    return DEFAULT_ELIZA_CLOUD_JWKS_URL;
   }
+  throw new Error("jwks-url-required");
+}
+
+async function loadJwks(): Promise<Map<string, Awaited<ReturnType<typeof importJWK>>>> {
+  const jwksUrl = resolveJwksUrl();
   const now = Date.now();
   if (jwksCache && jwksCache.expiresAt > now) return jwksCache.keys;
 
-  const response = await fetch(ELIZA_CLOUD_JWKS_URL, {
+  const response = await fetch(jwksUrl, {
     headers: { accept: "application/json" },
     signal: AbortSignal.timeout(10_000),
   });
@@ -244,7 +263,7 @@ export function isAgentJwtFailure(
  * {@link AgentJwtAuthenticationFailure} the caller maps to a response.
  *
  * This is the single Eliza-Cloud RS256 authenticator (iss=eliza-cloud,
- * aud=steward). Multi-issuer discovery is deliberately out of PR2 scope.
+ * aud=steward). Multi-issuer discovery is deliberately outside this boundary.
  */
 export async function authenticateAgentJwt(
   c: Context<{ Variables: AppVariables }>,
@@ -385,6 +404,37 @@ export async function requireAgentJwt(c: Context<{ Variables: AppVariables }>, n
       { ok: false, error: `Token missing required ${TRADE_ORDER_SCOPE} scope` },
       403,
     );
+  }
+
+  await installAgentJwtContext(c, auth);
+  return next();
+}
+
+/**
+ * CAPABILITY middleware. Authenticates the agent JWT and installs context with
+ * NO `trade:order` requirement. The agent-facing capability surface (invoke /
+ * manifest / issuance) is authorized per-call by the capability grant +
+ * capability-intent policy (default-deny), never by the trading scope — so
+ * requiring `trade:order` here both locked out capability-only agents and
+ * handed every trading agent implicit capability access (scope conflation).
+ * Wire behavior matches the legacy gate this replaces on that surface.
+ */
+export async function requireCapabilityAgentJwt(
+  c: Context<{ Variables: AppVariables }>,
+  next: Next,
+) {
+  const auth = await authenticateAgentJwt(c);
+  if (isAgentJwtFailure(auth)) {
+    if (auth.kind === "tenant-not-found") {
+      return c.json<ApiResponse>({ ok: false, error: "Tenant not found" }, 404);
+    }
+    if (auth.kind === "agent-not-registered") {
+      return c.json<ApiResponse>(
+        { ok: false, error: "Forbidden: agent is not registered for tenant" },
+        403,
+      );
+    }
+    return invalid(c, auth.reason, 401);
   }
 
   await installAgentJwtContext(c, auth);

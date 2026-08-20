@@ -41,6 +41,12 @@ migrations run at boot before the server accepts traffic. that's it - the core i
 
 ## door 2 - write a plugin (author)
 
+> **Security boundary:** plugins execute in-process with full host trust. The
+> injected context includes the raw database and vault, so a plugin can read or
+> rewrite tenant state and sign outside the policy engine. There is no sandbox.
+> Register only code you would trust with root access and master signing keys;
+> pin and audit its dependency tree, and never load an untrusted runtime plugin.
+
 a plugin is one object. you import everything from a single package:
 
 ```ts
@@ -68,6 +74,8 @@ mount hono routes/middleware onto the core app. `ctx` is injected: it carries th
 
 ```ts
 register(app, ctx) {
+  // NOTE: /example/ping is deliberately unauthenticated (constant payload,
+  // hello-world only). Any route touching real state MUST be gated:
   app.get("/example/ping", (c) => c.json({ ok: true }));
   // gate a route: app.post("/example/do", ctx.requireAgentJwt, handler);
 }
@@ -151,7 +159,7 @@ console.log(host.describe()); // loaded plugins + every contribution
 the host refuses to compose an ambiguous or unsafe surface. a plugin:
 
 - cannot shadow a core policy rule type, and cannot reuse a rule type another plugin already registered.
-- cannot write into or read from the core migration journal - its migration ledger lives in its own namespaced table (`drizzle.__drizzle_migrations_plugin_<id>`).
+- cannot write into or read from the core migration journal - its migration ledger lives in its own namespaced table (`drizzle.__drizzle_migrations_plugin_<sanitized id>`). legacy sanitized ids remain supported, while overlong ids and aliases across registered plugins are rejected.
 - cannot silently overwrite a registered adapter - a `(category, provider)` collision throws, as does an unknown category, an empty provider, or a missing adapter instance.
 - cannot register against a half-built dependency - a missing or cyclic `dependsOn`, or a duplicate plugin name, throws before anything registers.
 

@@ -69,6 +69,33 @@ Use a durable storage implementation in production. The SDK intentionally accept
 a small async key/value interface so apps can use secure storage on mobile and
 isolated storage in tests.
 
+## Secure session storage (production)
+
+`MemoryStewardSessionStorage` keeps values for the process lifetime only — it
+is for tests and examples. Session tokens, refresh tokens, and OAuth PKCE
+verifiers all flow through `StewardSessionStorage`, so a shipped app must back
+it with platform secure storage. A complete, copy-pasteable implementation
+backed by `flutter_secure_storage` (Keychain on iOS,
+EncryptedSharedPreferences/Keystore on Android) ships in
+[`example/secure_session_storage.dart`](example/secure_session_storage.dart):
+
+```dart
+final auth = StewardAuth(
+  StewardAuthConfig(
+    baseUrl: 'https://api.steward.example',
+    tenantId: 'my-app',
+    storage: FlutterSecureSessionStorage(),
+  ),
+);
+```
+
+Add `flutter_secure_storage: ^9.2.2` to your app's `pubspec.yaml` to use it.
+
+Note on session claims: `StewardSession.userId`/`tenantId`/`email`/`expiresAt`
+are decoded from the JWT payload client-side without signature verification
+(the API verifies the signature on every request). Treat them as display and
+expiry hints only — never as a client-side authorization decision.
+
 ## OAuth Redirects
 
 ```dart

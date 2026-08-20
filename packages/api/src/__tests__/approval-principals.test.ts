@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it, spyOn } from "bun:test";
 
 const SKIP = !process.env.DATABASE_URL;
 
@@ -14,6 +14,7 @@ import {
   users,
   userTenants,
 } from "@stwd/db";
+import { GovernedVault, Vault } from "@stwd/vault";
 import { and, eq, inArray } from "drizzle-orm";
 
 const unique = crypto.randomUUID();
@@ -27,6 +28,9 @@ let app: { request: (input: string | Request, init?: RequestInit) => Promise<Res
 let requesterToken: string;
 let approverToken: string;
 let queuedTxId: string;
+let restoreRpc: (() => void) | undefined;
+let restoreGovernedSign: (() => void) | undefined;
+let governedSignCalls = 0;
 
 beforeAll(async () => {
   if (SKIP) return;
@@ -42,6 +46,22 @@ beforeAll(async () => {
     import("../routes/vault"),
   ]);
   const { tenantAuth, vault } = contextModule;
+  // Keep this principal/queue test hermetic across the native-transfer guard:
+  // the read-only lookup proves the recipient is an EOA without public RPC.
+  const rpcSpy = spyOn(Vault.prototype, "rpcPassthrough").mockResolvedValue({
+    jsonrpc: "2.0",
+    id: 1,
+    result: "0x",
+  } as Awaited<ReturnType<Vault["rpcPassthrough"]>>);
+  restoreRpc = () => rpcSpy.mockRestore();
+  const governedSignSpy = spyOn(
+    GovernedVault.prototype,
+    "signTransactionAuthorized",
+  ).mockImplementation(async () => {
+    governedSignCalls += 1;
+    return `0x${"ab".repeat(32)}`;
+  });
+  restoreGovernedSign = () => governedSignSpy.mockRestore();
   const testApp = new Hono();
   testApp.use("/vault/*", (c, next) => tenantAuth(c, next));
   testApp.use("/approvals", (c, next) => tenantAuth(c, next));
@@ -90,7 +110,7 @@ beforeAll(async () => {
     config: { threshold: "0" },
   });
 
-  // Approval reads/decisions are recent-MFA gated (PR #79 hardening); mint
+  // Approval reads and decisions are recent-MFA gated; mint
   // session tokens carrying a fresh MFA verification timestamp.
   requesterToken = await signAccessToken({
     address: "0x0000000000000000000000000000000000000001",
@@ -109,6 +129,9 @@ beforeAll(async () => {
 afterAll(async () => {
   if (SKIP) return;
 
+  restoreRpc?.();
+  restoreGovernedSign?.();
+
   const db = getDb();
   await db.delete(approvalQueue).where(eq(approvalQueue.agentId, TEST_AGENT));
   await db.delete(transactions).where(eq(transactions.agentId, TEST_AGENT));
@@ -123,7 +146,7 @@ function bearer(token: string) {
   return {
     Authorization: `Bearer ${token}`,
     "Content-Type": "application/json",
-    // Broadcast signing requires an Idempotency-Key header (PR #79 hardening).
+    // Broadcast signing requires an Idempotency-Key header.
     "Idempotency-Key": `test-${crypto.randomUUID()}`,
   };
 }
@@ -159,7 +182,7 @@ describe.skipIf(SKIP)("approval principal tracking and 4-eyes enforcement", () =
   });
 
   it("rejects approval by the same authenticated principal", async () => {
-    // PR #79 hardening: vault-transaction approvals must go through the
+    // Vault-transaction approvals must go through the
     // authoritative vault path, which enforces separation of duties.
     const res = await app.request(`/vault/${TEST_AGENT}/approve/${queuedTxId}`, {
       method: "POST",
@@ -173,7 +196,7 @@ describe.skipIf(SKIP)("approval principal tracking and 4-eyes enforcement", () =
   });
 
   it("allows a different authenticated principal and ignores body-supplied approvedBy", async () => {
-    // PR #79 hardening: approvals execute through the authoritative vault path,
+    // Approvals execute through the authoritative vault path,
     // which derives the approver from the authenticated session (not the body)
     // and re-evaluates policy before signing/broadcasting.
     const res = await app.request(`/vault/${TEST_AGENT}/approve/${queuedTxId}`, {
@@ -186,6 +209,7 @@ describe.skipIf(SKIP)("approval principal tracking and 4-eyes enforcement", () =
     const body = await res.json();
     expect(body.ok).toBe(true);
     expect(body.data.txId).toBe(queuedTxId);
+    expect(governedSignCalls).toBe(1);
 
     const db = getDb();
     const [approval] = await db

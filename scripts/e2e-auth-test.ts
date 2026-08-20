@@ -1,6 +1,4 @@
 #!/usr/bin/env bun
-import { existsSync, readFileSync } from "node:fs";
-import path from "node:path";
 
 /**
  * Steward Auth E2E Test
@@ -18,6 +16,24 @@ import path from "node:path";
 // ─── Config ──────────────────────────────────────────────────────────────────
 
 const STEWARD_URL = (process.env.STEWARD_URL || "http://localhost:3200").replace(/\/$/, "");
+
+function assertSecureServiceUrl(name: string, value: string): void {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error(`${name} must be an absolute http(s) URL`);
+  }
+  const loopback = new Set(["localhost", "127.0.0.1", "::1", "[::1]"]).has(url.hostname);
+  if (url.protocol !== "https:" && !(url.protocol === "http:" && loopback)) {
+    throw new Error(`${name} must use https:// unless it targets loopback`);
+  }
+  if (url.username || url.password) {
+    throw new Error(`${name} must not embed credentials in the URL`);
+  }
+}
+
+assertSecureServiceUrl("STEWARD_URL", STEWARD_URL);
 
 function firstNonEmpty(...values: Array<string | null | undefined>): string {
   for (const value of values) {
@@ -40,32 +56,14 @@ function firstPlatformKeyFromList(value?: string): string {
   );
 }
 
-function resolveStoredPlatformKey(): string {
-  const homeDir = process.env.HOME?.trim();
-  if (!homeDir) {
-    return "";
-  }
-
-  const credentialsPath = path.join(homeDir, ".milady", "steward-credentials.json");
-  if (!existsSync(credentialsPath)) {
-    return "";
-  }
-
-  try {
-    const credentials = JSON.parse(readFileSync(credentialsPath, "utf8")) as {
-      apiKey?: string;
-    };
-    return firstNonEmpty(credentials.apiKey);
-  } catch {
-    return "";
-  }
-}
-
+// SEC-203: the platform key must be explicitly exported for THIS run. Do not
+// fall back to ~/.milady/steward-credentials.json — silently authenticating
+// with a live platform admin key against whatever STEWARD_URL points at must
+// require an operator opt-in.
 const PLATFORM_KEY = firstNonEmpty(
   process.env.PLATFORM_KEY,
   process.env.STEWARD_PLATFORM_KEY,
   firstPlatformKeyFromList(process.env.STEWARD_PLATFORM_KEYS),
-  resolveStoredPlatformKey(),
 );
 const REQUEST_TIMEOUT_MS = 10_000;
 const TEST_TENANT_ID = `e2e-auth-test-${Date.now()}`;
@@ -382,7 +380,7 @@ async function testOAuthAuthorize(provider: "google" | "discord") {
  */
 async function testSiweNonce() {
   try {
-    // SIWE nonce requests are bound to an allowed Origin (PR #79 hardening).
+    // SIWE nonce requests are bound to an allowed Origin.
     const { status, data } = await api("GET", "/auth/nonce", {
       // Exercise the configured deployment origin instead of hard-coding the
       // hosted domain, which makes local TLS-safe smoke tests fail spuriously.

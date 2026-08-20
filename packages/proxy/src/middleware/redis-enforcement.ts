@@ -21,7 +21,9 @@ import {
   type SpendReservation,
   settleReservedSpend,
 } from "@stwd/redis";
+import { redactedThrownDiagnostics } from "@stwd/shared";
 import { and, eq } from "drizzle-orm";
+import { boundedPositiveIntegerEnv, isProxyDevMode } from "../config";
 
 // ─── State ───────────────────────────────────────────────────────────────────
 
@@ -47,7 +49,7 @@ export async function initProxyRedis(): Promise<boolean> {
     return true;
   } catch (err) {
     redisAvailable = false;
-    console.warn("[proxy:redis] Failed to connect:", (err as Error).message);
+    console.warn("[proxy:redis] Failed to connect", redactedThrownDiagnostics(err));
     return false;
   }
 }
@@ -65,8 +67,16 @@ export async function shutdownProxyRedis(): Promise<void> {
 
 // ─── Default rate limits for proxy (per-agent per-host) ──────────────────────
 
-const DEFAULT_PROXY_RATE_LIMIT_WINDOW_MS = 60_000; // 1 minute
-const DEFAULT_PROXY_RATE_LIMIT_MAX = 60; // 60 requests/minute per agent per host
+const DEFAULT_PROXY_RATE_LIMIT_WINDOW_MS = boundedPositiveIntegerEnv(
+  "STEWARD_PROXY_RATE_LIMIT_WINDOW_MS",
+  60_000,
+  24 * 60 * 60 * 1000,
+);
+const DEFAULT_PROXY_RATE_LIMIT_MAX = boundedPositiveIntegerEnv(
+  "STEWARD_PROXY_RATE_LIMIT_MAX",
+  60,
+  1_000_000,
+);
 
 const PERMISSIVE: RateLimitResult = {
   allowed: true,
@@ -75,11 +85,17 @@ const PERMISSIVE: RateLimitResult = {
 };
 
 function isRedisRequired(): boolean {
-  return (
-    process.env.REDIS_REQUIRED === "true" ||
-    (process.env.NODE_ENV === "production" &&
-      process.env.STEWARD_ALLOW_PROXY_REDIS_SOFT_FAIL !== "true")
-  );
+  if (process.env.REDIS_REQUIRED === "true") return true;
+  // Explicit operator opt-out, honored in every environment (as before
+  // SEC-175) — but an explicit production NODE_ENV still overrides a stray
+  // STEWARD_PROXY_DEV_MODE below.
+  if (process.env.STEWARD_ALLOW_PROXY_REDIS_SOFT_FAIL === "true") return false;
+  // SEC-175: default-deny — Redis enforcement is required in every
+  // environment unless the operator explicitly opts into the soft
+  // development posture. NODE_ENV alone no longer unlocks it, and a
+  // production NODE_ENV overrides the dev-mode flag.
+  if (process.env.NODE_ENV === "production") return true;
+  return !isProxyDevMode();
 }
 
 /**
@@ -107,7 +123,7 @@ export async function checkProxyRateLimit(
     const key = `ratelimit:proxy:${agentId}:${host}:${windowMs}`;
     return await checkRateLimit(key, windowMs, maxRequests);
   } catch (err) {
-    console.error("[proxy:redis] Rate limit check failed:", (err as Error).message);
+    console.error("[proxy:redis] Rate limit check failed", redactedThrownDiagnostics(err));
     if (isRedisRequired()) {
       return {
         allowed: false,
@@ -159,7 +175,7 @@ export async function trackProxySpend(
     }
     return cost;
   } catch (err) {
-    console.error("[proxy:redis] Spend tracking failed:", (err as Error).message);
+    console.error("[proxy:redis] Spend tracking failed", redactedThrownDiagnostics(err));
     return 0;
   }
 }
@@ -439,7 +455,7 @@ export async function checkProxySpendLimit(
       }
     );
   } catch (err) {
-    console.error("[proxy:redis] Spend limit check failed:", (err as Error).message);
+    console.error("[proxy:redis] Spend limit check failed", redactedThrownDiagnostics(err));
     if (isRedisRequired()) {
       return {
         allowed: false,

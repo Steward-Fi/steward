@@ -17,6 +17,7 @@ import { hashSha256Hex } from "@stwd/auth";
 import { closeDb } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { Hono } from "hono";
+import { SOCKET_PEER_ENV_KEY } from "../services/runtime-gate";
 
 // ─── @stwd/redis counting mock ───────────────────────────────────────────────
 
@@ -225,13 +226,14 @@ describe("trustedClientIp", () => {
         "x-forwarded-for": "203.0.113.5, 198.51.100.7, 10.0.0.9",
       }),
     ).toBe("198.51.100.7");
-    // ...but Envoy still rescues when the positional read cannot parse.
+    // A missing positional entry is a topology failure. Envoy names the
+    // adjacent proxy here and must not be accepted as the external client.
     expect(
       await probeIp({
         "x-envoy-external-address": "10.0.0.9",
         "x-forwarded-for": "203.0.113.5",
       }),
-    ).toBe("10.0.0.9");
+    ).toBeNull();
   });
 
   it("parses ip:port and [ipv6]:port in the trusted XFF position; bare IPv6 is never mangled", async () => {
@@ -263,10 +265,16 @@ describe("trustedClientIp", () => {
     expect(
       await probeIp({ "cf-connecting-ip": "9.9.9.9", "x-forwarded-for": "198.51.100.7" }),
     ).toBe("9.9.9.9");
-    // Flag on + invalid CF value falls through to the XFF path.
-    expect(await probeIp({ "cf-connecting-ip": "junk", "x-forwarded-for": "198.51.100.7" })).toBe(
-      "198.51.100.7",
-    );
+    // Flag on makes CF authoritative. Missing/invalid values fail closed and
+    // cannot fall through to client-controlled proxy headers.
+    expect(
+      await probeIp({
+        "cf-connecting-ip": "junk",
+        "x-forwarded-for": "198.51.100.7",
+        "x-envoy-external-address": "203.0.113.9",
+      }),
+    ).toBeNull();
+    expect(await probeIp({ "x-envoy-external-address": "203.0.113.9" })).toBeNull();
   });
 });
 
@@ -381,6 +389,35 @@ describe("auth rate-limit keying (route harness)", () => {
       expect(call.key).not.toContain(hashSha256Hex("global"));
       expect(call.key).not.toContain("global");
     }
+  });
+
+  it("prefers the entry-injected socket peer over the Host fallback when no trusted IP exists", async () => {
+    await connectMockRedis();
+    delete process.env.STEWARD_TRUSTED_PROXY_HOPS;
+    delete process.env.STEWARD_TRUST_PROXY_HEADERS;
+
+    // The socket peer is injected by the server entry (Bun requestIP) via the
+    // Hono env bag — no client-controlled header can mint or rotate it.
+    await authRoutes.request(
+      "/nonce",
+      { headers: { host: "api.steward.example" } },
+      { [SOCKET_PEER_ENV_KEY]: "198.51.100.60" },
+    );
+    expect(capturedKeys("siwe-nonce")).toEqual([
+      `ratelimit:auth:siwe-nonce:${hashSha256Hex("ip:198.51.100.60")}:60000`,
+    ]);
+
+    // A non-IP injection (runtime could not supply a peer) must NOT become an
+    // ip: bucket — the request degrades to the coarse per-host fallback.
+    rateLimitCalls.length = 0;
+    await authRoutes.request(
+      "/nonce",
+      { headers: { host: "api.steward.example" } },
+      { [SOCKET_PEER_ENV_KEY]: "not-an-ip" },
+    );
+    expect(capturedKeys("siwe-nonce")).toEqual([
+      `ratelimit:auth:siwe-nonce:${hashSha256Hex("host:api.steward.example")}:60000`,
+    ]);
   });
 
   it("hashes subjectOverride subjects: destination emails never reach Redis raw", async () => {

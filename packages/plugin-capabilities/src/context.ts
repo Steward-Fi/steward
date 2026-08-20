@@ -15,7 +15,7 @@
  * the underlying `@stwd/*` package types, never `@stwd/api`.
  */
 
-import type { getDb } from "@stwd/db";
+import type { AppendRequiredAudit, getDb } from "@stwd/db";
 import type { PolicyEngine } from "@stwd/policy-engine";
 import type { IoredisLike } from "@stwd/redis";
 import type { AgentIdentity, AppVariables, PolicyRule, PriceOracle } from "@stwd/shared";
@@ -46,6 +46,13 @@ export interface AgentTokenStatus {
   observedAt: number;
 }
 
+export interface SealedCredentialLeaseToken {
+  ciphertext: string;
+  iv: string;
+  tag: string;
+  salt: string;
+}
+
 /** a hono middleware over the steward app's per-request variables. */
 export type StewardMiddleware = (
   c: Context<{ Variables: AppVariables }>,
@@ -73,13 +80,47 @@ export interface StewardAppContext {
 
   // ── audit + token status (from @stwd/api services) ────────────────────────
   writeAuditEvent(ev: AuditEventInput): Promise<void>;
+  withTenantAuditedTransaction<T>(
+    tenantId: string,
+    fn: (tx: unknown, appendRequiredAudit: AppendRequiredAudit) => Promise<T>,
+  ): Promise<T>;
+  withCredentialLeaseDatabaseDeadline?<T>(
+    deadlineAt: number,
+    use: (
+      db: DbHandle,
+      auditedTransaction: StewardAppContext["withTenantAuditedTransaction"],
+    ) => Promise<T>,
+  ): Promise<T>;
   getAgentTokenStatus(agentId: string): Promise<AgentTokenStatus | null>;
 
   // ── redis (from @stwd/api middleware/redis) ───────────────────────────────
   getRedisClient(): IoredisLike | null;
 
+  /** Use-only access to an encrypted provider bootstrap credential. The
+   * plaintext exists only inside the callback and is never returned by an API. */
+  exerciseCredentialSecret?<T>(
+    tenantId: string,
+    secretId: string,
+    use: (plaintext: string) => Promise<T>,
+  ): Promise<T>;
+  sealCredentialLeaseToken?(
+    tenantId: string,
+    leaseId: string,
+    token: string,
+  ): Promise<SealedCredentialLeaseToken>;
+  exerciseCredentialLeaseToken?<T>(
+    tenantId: string,
+    leaseId: string,
+    sealed: SealedCredentialLeaseToken,
+    use: (token: string) => Promise<T>,
+  ): Promise<T>;
+
   // ── auth middleware the plugin installs on its own routes ─────────────────
   requireAgentJwt: StewardMiddleware;
+  /** capability-surface agent authenticator: verifies the agent JWT WITHOUT the
+   * legacy `trade:order` scope gate — capability authz is the grant +
+   * capability-intent policy (default-deny), not the trading scope. */
+  requireCapabilityAgentJwt: StewardMiddleware;
   operatorAuth: StewardMiddleware;
   tenantAuth: (
     c: Context<{ Variables: AppVariables }>,

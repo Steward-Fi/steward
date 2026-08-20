@@ -1,5 +1,5 @@
 /**
- * PR6 deterministic in-process fake provider transport (TEST-ONLY).
+ * Deterministic in-process fake provider transport (test only).
  *
  * WHAT THIS IS
  * ------------
@@ -79,6 +79,12 @@ export interface FakeCallRecord {
   headerNames: string[];
   /** True iff SOME credential-bearing header (authorization / injected key) was present. */
   credentialHeaderPresent: boolean;
+  /** SHA-256 of the credential header value. Safe evidence; never the plaintext. */
+  credentialValueHash: string | null;
+  /** In-memory equality against the test's expected credential, without recording either value. */
+  credentialMatchesExpected: boolean | null;
+  /** Exact outbound host observed by the terminal forwarder. */
+  host: string;
   bodyHash: string | null;
   at: number; // monotonic call ordinal, not wall-clock
 }
@@ -98,6 +104,7 @@ export class FakeProviderTransport {
   private scripts = new Map<string, FakeScript>();
   private records: FakeCallRecord[] = [];
   private callOrdinal = 0;
+  private expectedCredential: { headerName: string; valueHash: string } | null = null;
   /**
    * Optional barrier a "timeout"/"ok" script awaits before resolving/rejecting.
    * Lets a test hold the terminal I/O open to interleave a concurrent claim or
@@ -125,6 +132,18 @@ export class FakeProviderTransport {
   private fallback: FakeScript = { mode: "ok", status: 200, json: [] };
   setFallback(entry: FakeScript): this {
     this.fallback = entry;
+    return this;
+  }
+
+  /**
+   * Require an exact injected credential at the terminal boundary. The raw
+   * expected/observed values stay in this closure and are never recorded.
+   */
+  expectCredential(headerName: string, plaintext: string): this {
+    this.expectedCredential = {
+      headerName: headerName.toLowerCase(),
+      valueHash: sha256(plaintext),
+    };
     return this;
   }
 
@@ -157,6 +176,7 @@ export class FakeProviderTransport {
     this.scripts.clear();
     this.records = [];
     this.callOrdinal = 0;
+    this.expectedCredential = null;
     this.barrier = null;
     this.releaseBarrier = null;
     this.fallback = { mode: "ok", status: 200, json: [] };
@@ -176,10 +196,21 @@ export class FakeProviderTransport {
       // Record header NAMES only. Never a value.
       const headerNames: string[] = [];
       let credentialHeaderPresent = false;
-      headers.forEach((_value, name) => {
+      let credentialValueHash: string | null = null;
+      let credentialMatchesExpected: boolean | null = this.expectedCredential ? false : null;
+      headers.forEach((value, name) => {
         const lower = name.toLowerCase();
         headerNames.push(lower);
-        if (CREDENTIAL_HEADER_NAMES.has(lower)) credentialHeaderPresent = true;
+        if (CREDENTIAL_HEADER_NAMES.has(lower)) {
+          credentialHeaderPresent = true;
+          const valueHash = sha256(value);
+          if (lower === this.expectedCredential?.headerName) {
+            credentialValueHash = valueHash;
+            credentialMatchesExpected = valueHash === this.expectedCredential.valueHash;
+          } else if (!this.expectedCredential && credentialValueHash === null) {
+            credentialValueHash = valueHash;
+          }
+        }
       });
       headerNames.sort();
 
@@ -187,8 +218,11 @@ export class FakeProviderTransport {
         key,
         method: method.toUpperCase(),
         path,
+        host: url.host,
         headerNames,
         credentialHeaderPresent,
+        credentialValueHash,
+        credentialMatchesExpected,
         bodyHash,
         at: this.callOrdinal++,
       });
@@ -214,6 +248,10 @@ export class FakeProviderTransport {
       return jsonResponse(entry.status ?? 200, entry.json ?? {}, entry.headers);
     };
   }
+}
+
+function sha256(value: string): string {
+  return createHash("sha256").update(value).digest("hex");
 }
 
 function jsonResponse(status: number, json: unknown, headers?: Record<string, string>): Response {
@@ -254,8 +292,7 @@ export const GITHUB_FIXTURES = {
 } as const;
 
 /**
- * Canonical X-shaped fixtures (spec predates the live X provider; PR6 adds an X
- * leg to the fake matrix — see the drift note in the PR body).
+ * Canonical X-shaped fixtures for the provider transport contract.
  */
 export const X_FIXTURES = {
   usersMe: { data: { id: "999", name: "Sandbox", username: "sandbox" } },

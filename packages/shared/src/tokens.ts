@@ -92,6 +92,15 @@ export function getNativeDecimals(chainId: number): number {
 }
 
 /**
+ * Strict variant of {@link getNativeDecimals} for money-conversion paths:
+ * returns null for unknown chains instead of guessing 18 decimals, so callers
+ * fail closed rather than misprice by orders of magnitude (SEC-190).
+ */
+export function getNativeDecimalsStrict(chainId: number): number | null {
+  return NATIVE_TOKENS[chainId]?.decimals ?? null;
+}
+
+/**
  * Get the symbol for a chain's native token.
  * Returns "ETH" for unknown chains.
  */
@@ -113,6 +122,21 @@ export function getTokenDecimals(chainId: number, tokenAddress?: string): number
   if (knownToken) return knownToken.decimals;
   const key = `${chainId}:${tokenAddress.toLowerCase()}`;
   return KNOWN_TOKEN_DECIMALS[key] ?? 18;
+}
+
+/**
+ * Strict variant of {@link getTokenDecimals} for money-conversion paths:
+ * returns null for unknown chains/tokens instead of guessing 18 decimals, so
+ * callers fail closed rather than misprice by orders of magnitude (SEC-190).
+ */
+export function getTokenDecimalsStrict(chainId: number, tokenAddress?: string): number | null {
+  if (!tokenAddress || tokenAddress === "native" || tokenAddress === "") {
+    return getNativeDecimalsStrict(chainId);
+  }
+  const knownToken = getKnownToken(chainId, tokenAddress);
+  if (knownToken) return knownToken.decimals;
+  const key = `${chainId}:${tokenAddress.toLowerCase()}`;
+  return KNOWN_TOKEN_DECIMALS[key] ?? null;
 }
 
 /**

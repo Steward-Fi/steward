@@ -44,7 +44,9 @@ export type P256PublicKeyInput = string | JsonWebKey | CryptoKey;
 
 function base64ToBytes(value: string): Uint8Array | null {
   const normalized = value.replace(/-/g, "+").replace(/_/g, "/");
-  const trimmed = normalized.replace(/=+$/, "");
+  let paddingStart = normalized.length;
+  while (paddingStart > 0 && normalized.charCodeAt(paddingStart - 1) === 0x3d) paddingStart -= 1;
+  const trimmed = normalized.slice(0, paddingStart);
   // Reject anything that is not valid base64 alphabet so a hex/garbage string
   // doesn't get silently mangled by atob.
   if (!/^[A-Za-z0-9+/]*$/.test(trimmed)) return null;
@@ -72,17 +74,37 @@ function hexToBytes(value: string): Uint8Array | null {
   return bytes;
 }
 
-/** Decode a string that may be hex (with/without 0x) or base64/base64url. */
-function decodeFlexible(value: string): Uint8Array | null {
+/**
+ * Decode a string that may be hex (with/without 0x) or base64/base64url into
+ * CANDIDATE byte decodings, most-likely first.
+ *
+ * Every even-length bare-hex string is also valid base64 alphabet, so a single
+ * decode is ambiguous (SEC-063): decoding base64-first makes documented
+ * bare-hex encodings unreachable, and decoding hex-first would misread
+ * all-hex-alphabet base64. Callers must therefore try each candidate in order
+ * and keep the first whose bytes actually import/normalize — the format check
+ * downstream disambiguates, and every failure still fails closed.
+ */
+function decodeFlexibleCandidates(value: string): Uint8Array[] {
   const trimmed = value.trim();
-  if (!trimmed) return null;
-  if (/^0x[0-9a-fA-F]+$/.test(trimmed)) return hexToBytes(trimmed);
-  // A pure even-length hex string is ambiguous with base64; prefer hex only when
-  // it cannot also be the canonical raw point misread. We try base64 first
-  // (covers SPKI + base64 raw), then fall back to hex.
+  if (!trimmed) return [];
+  if (/^0x[0-9a-fA-F]+$/.test(trimmed)) {
+    const hex = hexToBytes(trimmed);
+    return hex ? [hex] : [];
+  }
+  const candidates: Uint8Array[] = [];
   const asBase64 = base64ToBytes(trimmed);
-  if (asBase64) return asBase64;
-  return hexToBytes(trimmed);
+  if (asBase64) candidates.push(asBase64);
+  const asHex = hexToBytes(trimmed);
+  if (
+    asHex &&
+    (!asBase64 ||
+      asHex.length !== asBase64.length ||
+      asHex.some((byte, index) => byte !== asBase64[index]))
+  ) {
+    candidates.push(asHex);
+  }
+  return candidates;
 }
 
 function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
@@ -195,30 +217,26 @@ export async function importP256PublicKey(input: P256PublicKeyInput): Promise<Cr
       return await crypto.subtle.importKey("jwk", parsed, EC_KEY_IMPORT_PARAMS, false, ["verify"]);
     }
 
-    const bytes = decodeFlexible(text);
-    if (!bytes) return null;
+    const candidates = decodeFlexibleCandidates(text);
+    for (const bytes of candidates) {
+      // Raw uncompressed EC point: 0x04 || X || Y.
+      if (bytes.length === P256_RAW_POINT_BYTES && bytes[0] === 0x04) {
+        const key = await crypto.subtle
+          .importKey("raw", toArrayBuffer(bytes), EC_KEY_IMPORT_PARAMS, false, ["verify"])
+          .catch(() => null);
+        if (key) return key;
+        continue;
+      }
 
-    // Raw uncompressed EC point: 0x04 || X || Y.
-    if (bytes.length === P256_RAW_POINT_BYTES && bytes[0] === 0x04) {
-      return await crypto.subtle.importKey(
-        "raw",
-        toArrayBuffer(bytes),
-        EC_KEY_IMPORT_PARAMS,
-        false,
-        ["verify"],
-      );
+      // Otherwise treat as SPKI/DER. importKey enforces the curve, so a P-384 /
+      // secp256k1 SPKI blob is rejected here (fail closed) because namedCurve
+      // mismatches.
+      const key = await crypto.subtle
+        .importKey("spki", toArrayBuffer(bytes), EC_KEY_IMPORT_PARAMS, false, ["verify"])
+        .catch(() => null);
+      if (key) return key;
     }
-
-    // Otherwise treat as SPKI/DER. importKey enforces the curve, so a P-384 /
-    // secp256k1 SPKI blob is rejected here (fail closed) because namedCurve
-    // mismatches.
-    return await crypto.subtle.importKey(
-      "spki",
-      toArrayBuffer(bytes),
-      EC_KEY_IMPORT_PARAMS,
-      false,
-      ["verify"],
-    );
+    return null;
   } catch {
     return null;
   }
@@ -243,9 +261,11 @@ export async function verifyP256Signature(
     const key = await importP256PublicKey(publicKey);
     if (!key) return false;
 
-    const sigBytes = decodeFlexible(signatureBase64);
-    if (!sigBytes) return false;
-    const normalized = normalizeSignatureBytes(sigBytes);
+    // Try each decoding candidate (base64 vs bare-hex ambiguity, SEC-063)
+    // until one normalizes to a fixed-width r||s signature.
+    const normalized = decodeFlexibleCandidates(signatureBase64)
+      .map((bytes) => normalizeSignatureBytes(bytes))
+      .find((bytes) => bytes !== null);
     if (!normalized) return false;
 
     const data = new TextEncoder().encode(canonicalString);

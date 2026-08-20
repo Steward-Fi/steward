@@ -1,4 +1,5 @@
-import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import { createHmac, randomBytes, randomInt, timingSafeEqual } from "node:crypto";
+import { redactedThrownDiagnostics } from "@stwd/shared";
 
 import { hashSha256Hex } from "./crypto";
 import type { EmailDeliveryReceipt, EmailProvider } from "./email-provider";
@@ -15,6 +16,7 @@ import {
   type RenderedMagicLinkTemplate,
 } from "./email-templates";
 import { isDevSecretAllowed } from "./jwt";
+import type { StorePublishEntry } from "./store-backends";
 import { TokenStore } from "./token-store";
 
 // ---------------------------------------------------------------------------
@@ -33,6 +35,8 @@ export interface EmailAuthConfig {
   provider?: EmailProvider;
   /** Token TTL in milliseconds. Default: 10 minutes. */
   tokenTtlMs?: number;
+  /** Maximum time to wait for a provider acceptance receipt. Default: 30 seconds. */
+  deliveryTimeoutMs?: number;
   /** Path that receives the magic-link callback. Default: "/auth/callback/email" */
   callbackPath?: string;
   /**
@@ -80,6 +84,8 @@ const DEFAULT_CALLBACK = "/auth/callback/email";
 const OTP_DIGITS = 6;
 const EMAIL_LOGIN_PURPOSE = "email-login";
 const MAX_EMAIL_LOGIN_CODE_ATTEMPTS = 5;
+const DEFAULT_DELIVERY_TIMEOUT_MS = 30_000;
+const MAX_DELIVERY_TIMEOUT_MS = 5 * 60_000;
 
 function generateToken(): string {
   // URL-safe hex token (64 chars from 32 bytes)
@@ -91,18 +97,8 @@ function generateOpaqueId(): string {
 }
 
 function generateOtpCode(): string {
-  // Crypto-random 6-digit code with rejection sampling to avoid modulo bias.
-  const max = 10 ** OTP_DIGITS;
-  // 2^32 / 10^6 -> keep draws below the largest multiple of max to stay uniform.
-  const limit = Math.floor(0x1_0000_0000 / max) * max;
-  for (;;) {
-    const bytes = randomBytes(4);
-    const draw =
-      ((bytes[0] << 24) >>> 0) + ((bytes[1] << 16) >>> 0) + ((bytes[2] << 8) >>> 0) + bytes[3];
-    if (draw < limit) {
-      return String(draw % max).padStart(OTP_DIGITS, "0");
-    }
-  }
+  // randomInt uses rejection sampling internally and avoids modulo bias.
+  return String(randomInt(10 ** OTP_DIGITS)).padStart(OTP_DIGITS, "0");
 }
 
 function hashToken(token: string): string {
@@ -160,8 +156,8 @@ type MagicLinkPayload = {
   tenantId?: string;
 };
 
-type EmailLoginPendingChallenge = {
-  status: "pending";
+type EmailLoginChallengeRecord = {
+  status: "delivery_pending" | "active" | "pending";
   challengeId: string;
   emailHash: string;
   tenantId?: string;
@@ -172,7 +168,7 @@ type EmailLoginPendingChallenge = {
 };
 
 type EmailLoginStatusRecord = {
-  status: "pending" | "consumed" | "locked";
+  status: "delivery_pending" | "pending" | "consumed" | "locked";
   challengeId: string;
   pollSecretHash: string;
   expiresAt: string;
@@ -192,6 +188,10 @@ function otpStoreKey(email: string, tenantId: string | undefined, code: string):
   return hashSha256Hex(`email-otp:${tenantId ?? ""}:${email}:${code}`);
 }
 
+function otpTargetKey(email: string, tenantId: string | undefined): string {
+  return `email-otp:active:${hashSha256Hex(`${tenantId ?? ""}:${email}`)}`;
+}
+
 function emailLoginBinding(email: string, tenantId: string | undefined): string {
   return `${tenantId ?? ""}:${email}:${EMAIL_LOGIN_PURPOSE}`;
 }
@@ -200,8 +200,13 @@ function emailLoginTargetKey(email: string, tenantId: string | undefined): strin
   return `email-login:active:${hashSha256Hex(emailLoginBinding(email, tenantId))}`;
 }
 
-function emailLoginPendingKey(challengeId: string): string {
+function emailLoginChallengeKey(challengeId: string): string {
+  // Keep the established durable key prefix for rolling-deploy compatibility.
   return `email-login:pending:${challengeId}`;
+}
+
+function emailLoginStagingKey(challengeId: string): string {
+  return `email-login:staged:${challengeId}`;
 }
 
 function emailLoginStatusKey(challengeId: string): string {
@@ -220,12 +225,63 @@ function emailLoginFailureKey(challengeId: string, slot: number): string {
   return `email-login:failure:${challengeId}:${slot}`;
 }
 
-function parsePendingChallenge(value: string | null): EmailLoginPendingChallenge | null {
+function otpStagingKey(challengeId: string): string {
+  return `email-otp:staged:${challengeId}`;
+}
+
+function issuanceReservationKey(targetKey: string): string {
+  return `email-issuance:reservation:${hashSha256Hex(targetKey)}`;
+}
+
+interface IssuanceReservation {
+  kind: "email-issuance-reservation";
+  id: string;
+  prior: string | null;
+}
+
+function encodeIssuanceReservation(id: string, prior: string | null): string {
+  return JSON.stringify({
+    kind: "email-issuance-reservation",
+    id,
+    prior,
+  } satisfies IssuanceReservation);
+}
+
+function issuancePublicationMarker(reservation: string): string {
+  return `published:${hashSha256Hex(reservation)}`;
+}
+
+function issuancePublicationReceiptKey(reservation: string): string {
+  return `email-issuance:published:${hashSha256Hex(reservation)}`;
+}
+
+function parseIssuanceReservation(value: string | null): IssuanceReservation | null {
+  if (!value?.startsWith("{")) return null;
+  try {
+    const parsed = JSON.parse(value) as Partial<IssuanceReservation>;
+    if (
+      parsed.kind === "email-issuance-reservation" &&
+      typeof parsed.id === "string" &&
+      (typeof parsed.prior === "string" || parsed.prior === null)
+    ) {
+      return parsed as IssuanceReservation;
+    }
+  } catch {
+    // Legacy target values are opaque identifiers, not JSON.
+  }
+  return null;
+}
+
+function parseEmailLoginChallenge(value: string | null): EmailLoginChallengeRecord | null {
   if (!value) return null;
   try {
-    const parsed = JSON.parse(value) as Partial<EmailLoginPendingChallenge>;
+    const parsed = JSON.parse(value) as Omit<Partial<EmailLoginChallengeRecord>, "status"> & {
+      status?: string;
+    };
     if (
-      parsed.status === "pending" &&
+      (parsed.status === "delivery_pending" ||
+        parsed.status === "active" ||
+        parsed.status === "pending") &&
       typeof parsed.challengeId === "string" &&
       typeof parsed.emailHash === "string" &&
       parsed.purpose === EMAIL_LOGIN_PURPOSE &&
@@ -233,7 +289,10 @@ function parsePendingChallenge(value: string | null): EmailLoginPendingChallenge
       typeof parsed.pollSecretHash === "string" &&
       typeof parsed.expiresAt === "string"
     ) {
-      return parsed as EmailLoginPendingChallenge;
+      return {
+        ...(parsed as EmailLoginChallengeRecord),
+        status: parsed.status === "pending" ? "active" : parsed.status,
+      };
     }
   } catch {
     return null;
@@ -249,7 +308,10 @@ function parseStatusRecord(value: string | null): EmailLoginStatusRecord | null 
       typeof parsed.challengeId === "string" &&
       typeof parsed.pollSecretHash === "string" &&
       typeof parsed.expiresAt === "string" &&
-      (parsed.status === "pending" || parsed.status === "consumed" || parsed.status === "locked")
+      (parsed.status === "delivery_pending" ||
+        parsed.status === "pending" ||
+        parsed.status === "consumed" ||
+        parsed.status === "locked")
     ) {
       return parsed as EmailLoginStatusRecord;
     }
@@ -257,10 +319,6 @@ function parseStatusRecord(value: string | null): EmailLoginStatusRecord | null 
     return null;
   }
   return null;
-}
-
-function encodeMagicLinkPayload(payload: MagicLinkPayload): string {
-  return JSON.stringify(payload);
 }
 
 function decodeMagicLinkPayload(value: string): MagicLinkPayload {
@@ -271,6 +329,98 @@ function decodeMagicLinkPayload(value: string): MagicLinkPayload {
     // Backward-compatible legacy tokens stored the email as the raw value.
   }
   return { email: value };
+}
+
+function decodeLegacyOtpPayload(value: string): MagicLinkPayload | null {
+  try {
+    const parsed = JSON.parse(value) as Record<string, unknown>;
+    if (
+      typeof parsed.email === "string" &&
+      (parsed.tenantId === undefined || typeof parsed.tenantId === "string") &&
+      Object.keys(parsed).every((key) => key === "email" || key === "tenantId")
+    ) {
+      return parsed as MagicLinkPayload;
+    }
+  } catch {
+    // The earliest OTP records stored the email directly.
+    return value.startsWith("{") ? null : { email: value };
+  }
+  return null;
+}
+
+type OtpChallengeRecord =
+  | { status: "delivery_pending" }
+  | {
+      status: "active";
+      payload: MagicLinkPayload;
+      email?: string;
+      tenantId?: string;
+    };
+
+const MAX_EMAIL_RECEIPT_PROVIDER_LENGTH = 64;
+const MAX_EMAIL_RECEIPT_ID_LENGTH = 512;
+
+function boundedReceiptText(value: unknown, maxLength: number): value is string {
+  if (typeof value !== "string" || value.length === 0 || value.length > maxLength) return false;
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code < 0x20 || code === 0x7f) return false;
+  }
+  return value.trim().length > 0;
+}
+
+function isValidDeliveryReceipt(value: unknown): value is EmailDeliveryReceipt {
+  if (!value || typeof value !== "object") return false;
+  try {
+    const provider = Object.getOwnPropertyDescriptor(value, "provider");
+    if (
+      !provider ||
+      !("value" in provider) ||
+      !boundedReceiptText(provider.value, MAX_EMAIL_RECEIPT_PROVIDER_LENGTH)
+    ) {
+      return false;
+    }
+    const id = Object.getOwnPropertyDescriptor(value, "id");
+    return (
+      id === undefined ||
+      ("value" in id && boundedReceiptText(id.value, MAX_EMAIL_RECEIPT_ID_LENGTH))
+    );
+  } catch {
+    return false;
+  }
+}
+
+function encodeOtpChallenge(
+  status: OtpChallengeRecord["status"],
+  payload?: MagicLinkPayload,
+): string {
+  if (status === "delivery_pending") return JSON.stringify({ status } satisfies OtpChallengeRecord);
+  if (!payload) throw new Error("Active OTP challenge requires a payload");
+  // Retain support for the short-lived active wrapper emitted after staged
+  // delivery first shipped. New writes use the older raw payload below so
+  // every pod in a rolling deployment can redeem an accepted code.
+  return JSON.stringify({ status, payload, ...payload } satisfies OtpChallengeRecord);
+}
+
+function decodeOtpChallenge(value: string | null): OtpChallengeRecord | null {
+  if (!value) return null;
+  try {
+    const parsed = JSON.parse(value) as Record<string, any>;
+    if (parsed.status === "delivery_pending") return { status: "delivery_pending" };
+    if (
+      parsed.status === "active" &&
+      parsed.payload &&
+      typeof parsed.payload.email === "string" &&
+      (parsed.payload.tenantId === undefined || typeof parsed.payload.tenantId === "string") &&
+      (parsed.email === undefined || parsed.email === parsed.payload.email) &&
+      (parsed.tenantId === undefined || parsed.tenantId === parsed.payload.tenantId)
+    ) {
+      return parsed as OtpChallengeRecord;
+    }
+  } catch {
+    return null;
+  }
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -284,6 +434,7 @@ export class EmailAuth {
   private baseUrl: string;
   private callbackPath: string;
   private tokenTtlMs: number;
+  private deliveryTimeoutMs: number;
   private from: string;
   private replyTo?: string;
   private templateId?: string;
@@ -303,14 +454,19 @@ export class EmailAuth {
     this.baseUrl = config.baseUrl.replace(/\/$/, ""); // strip trailing slash
     this.callbackPath = config.callbackPath ?? DEFAULT_CALLBACK;
     this.tokenTtlMs = config.tokenTtlMs ?? DEFAULT_TTL_MS;
+    this.deliveryTimeoutMs = config.deliveryTimeoutMs ?? DEFAULT_DELIVERY_TIMEOUT_MS;
+    if (
+      !Number.isSafeInteger(this.deliveryTimeoutMs) ||
+      this.deliveryTimeoutMs <= 0 ||
+      this.deliveryTimeoutMs > MAX_DELIVERY_TIMEOUT_MS
+    ) {
+      throw new Error(
+        `deliveryTimeoutMs must be an integer between 1 and ${MAX_DELIVERY_TIMEOUT_MS}`,
+      );
+    }
     this.provider = config.provider ?? new ConsoleProvider();
-    // Fail closed (elizaOS/eliza#18452): in production the ConsoleProvider —
-    // whether the silent default when no provider is configured, or passed
-    // explicitly — must never back login sends. Sends throw a typed
-    // EmailDeliveryNotConfiguredError BEFORE any challenge state is stored,
-    // so the API maps it to 503 instead of returning a false ok:true for a
-    // challenge nobody can ever receive. Verification of previously issued
-    // challenges is unaffected.
+    // Console delivery is forbidden in production. Reject before storing a
+    // challenge so the API cannot report success for an undeliverable login.
     this.deliveryNotConfigured =
       process.env.NODE_ENV === "production" && this.provider instanceof ConsoleProvider;
     this.tokenStore = config.tokenStore ?? new TokenStore();
@@ -360,56 +516,41 @@ export class EmailAuth {
     }
   }
 
-  /**
-   * Dispatch through the provider and require an acceptance receipt.
-   * Fail closed: on provider throw/rejection OR a missing receipt, run
-   * `invalidate` (best-effort) so any just-minted challenge state is no
-   * longer redeemable, then surface a typed EmailDeliveryError. Only the
-   * error NAME is logged — never the recipient, subject, token, code, or
-   * raw provider error text.
-   */
-  private async sendOrInvalidate(
-    message: { to: string; subject: string; text: string; html?: string },
-    invalidate: () => Promise<void>,
-  ): Promise<EmailDeliveryReceipt> {
+  /** Dispatch through the provider and require a redacted acceptance receipt. */
+  private async sendAccepted(message: {
+    to: string;
+    subject: string;
+    text: string;
+    html?: string;
+  }): Promise<EmailDeliveryReceipt> {
     let receipt: EmailDeliveryReceipt | undefined;
     try {
-      receipt = await this.provider.send(message.to, message.subject, message.text, message.html, {
-        replyTo: this.replyTo,
-      });
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      try {
+        receipt = await Promise.race([
+          this.provider.send(message.to, message.subject, message.text, message.html, {
+            replyTo: this.replyTo,
+          }),
+          new Promise<never>((_, reject) => {
+            timeout = setTimeout(
+              () => reject(new Error("email provider acceptance timed out")),
+              this.deliveryTimeoutMs,
+            );
+          }),
+        ]);
+      } finally {
+        if (timeout) clearTimeout(timeout);
+      }
+      // Receipt objects can come from third-party code. Keep validation inside
+      // the redacting error boundary; the validator also rejects accessors.
+      if (!isValidDeliveryReceipt(receipt)) {
+        throw new Error("email provider returned no acceptance receipt");
+      }
     } catch (err) {
-      console.error(
-        "[steward:auth] email provider rejected send:",
-        err instanceof Error ? err.name : typeof err,
-      );
-      await invalidate().catch(() => {});
+      console.error("[steward:auth] email provider rejected send", redactedThrownDiagnostics(err));
       throw new EmailDeliveryError();
     }
-    if (!receipt || typeof receipt.provider !== "string" || receipt.provider.length === 0) {
-      console.error("[steward:auth] email provider returned no acceptance receipt");
-      await invalidate().catch(() => {});
-      throw new EmailDeliveryError("Email provider returned no acceptance receipt");
-    }
     return receipt;
-  }
-
-  /**
-   * Remove every record of a pending email-login challenge so neither the
-   * magic link nor the companion code can ever redeem it. Aliases go first
-   * (they are the redemption entry points); all deletes are idempotent.
-   */
-  private async invalidateEmailLoginChallenge(params: {
-    challengeId: string;
-    tokenHash: string;
-    codeVerifier: string;
-    email: string;
-    tenantId?: string;
-  }): Promise<void> {
-    await this.tokenStore.delete(emailLoginLinkAliasKey(params.tokenHash));
-    await this.tokenStore.delete(emailLoginCodeAliasKey(params.codeVerifier));
-    await this.tokenStore.delete(emailLoginPendingKey(params.challengeId));
-    await this.tokenStore.delete(emailLoginStatusKey(params.challengeId));
-    await this.tokenStore.delete(emailLoginTargetKey(params.email, params.tenantId));
   }
 
   private async markEmailLoginConsumed(challengeId: string): Promise<void> {
@@ -423,6 +564,79 @@ export class EmailAuth {
       JSON.stringify({ ...current, status: "consumed" } satisfies EmailLoginStatusRecord),
       ttlMs,
     );
+  }
+
+  private async publishChallenge(
+    entries: readonly StorePublishEntry[],
+    confirmOwnPublication?: () => Promise<boolean>,
+  ): Promise<boolean> {
+    let lastError: unknown;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try {
+        const published = await this.tokenStore.publish(entries);
+        if (published || !lastError || !confirmOwnPublication) return published;
+        return await confirmOwnPublication();
+      } catch (error) {
+        lastError = error;
+        if (confirmOwnPublication) {
+          try {
+            if (await confirmOwnPublication()) return true;
+          } catch {
+            // The durable outcome remains ambiguous; retry the atomic publish.
+          }
+        }
+      }
+    }
+    throw lastError;
+  }
+
+  private async reserveIssuance(
+    targetKey: string,
+    reservationId: string,
+    ttlMs: number,
+  ): Promise<{ reservationKey: string; reservation: string; prior: string | null }> {
+    const reservationKey = issuanceReservationKey(targetKey);
+    for (let attempt = 0; attempt < 10; attempt += 1) {
+      const current = await this.tokenStore.verify(reservationKey);
+      const prior =
+        parseIssuanceReservation(current)?.prior ?? (await this.tokenStore.verify(targetKey));
+      const reservation = encodeIssuanceReservation(reservationId, prior);
+      if (
+        await this.publishChallenge([
+          {
+            key: reservationKey,
+            value: reservation,
+            expiresAt: Date.now() + ttlMs,
+            expected: current,
+          },
+        ])
+      ) {
+        return { reservationKey, reservation, prior };
+      }
+    }
+    throw new EmailDeliveryError("Email challenge activation failed");
+  }
+
+  private async releaseIssuance(
+    reservationKey: string,
+    reservation: string,
+    ttlMs: number,
+  ): Promise<void> {
+    try {
+      await this.publishChallenge([
+        { key: reservationKey, value: null, expiresAt: Date.now() + ttlMs, expected: reservation },
+      ]);
+    } catch {
+      // A newer issuance may own the target. Never overwrite its reservation.
+    }
+  }
+
+  private async discardStaging(key: string): Promise<void> {
+    try {
+      await this.tokenStore.delete(key);
+    } catch {
+      // Staging records are opaque and TTL-bounded; cleanup is best-effort.
+    }
   }
 
   /**
@@ -443,27 +657,17 @@ export class EmailAuth {
     const ttlMs = Math.min(this.tokenTtlMs, DEFAULT_TTL_MS);
     const expiresAt = new Date(Date.now() + ttlMs);
     const targetKey = emailLoginTargetKey(email, context.tenantId);
-    const priorChallengeId = await this.tokenStore.verify(targetKey);
-    if (priorChallengeId) {
-      await this.tokenStore.consume(emailLoginPendingKey(priorChallengeId));
-      const priorStatus = parseStatusRecord(
-        await this.tokenStore.verify(emailLoginStatusKey(priorChallengeId)),
-      );
-      await this.tokenStore.store(
-        emailLoginStatusKey(priorChallengeId),
-        JSON.stringify({
-          status: "consumed",
-          challengeId: priorChallengeId,
-          pollSecretHash: priorStatus?.pollSecretHash ?? "",
-          expiresAt: new Date().toISOString(),
-        }),
-        1_000,
-      );
-    }
+    const {
+      reservationKey,
+      reservation,
+      prior: priorChallengeId,
+    } = await this.reserveIssuance(targetKey, challengeId, ttlMs);
+    const publicationReceiptKey = issuancePublicationReceiptKey(reservation);
+    const publicationReceipt = issuancePublicationMarker(reservation);
 
     const codeVerifier = this.codeVerifier(email, context.tenantId, code);
-    const pending: EmailLoginPendingChallenge = {
-      status: "pending",
+    const challenge: EmailLoginChallengeRecord = {
+      status: "delivery_pending",
       challengeId,
       emailHash: this.emailHash(email, context.tenantId),
       tenantId: context.tenantId,
@@ -472,18 +676,23 @@ export class EmailAuth {
       pollSecretHash: this.pollSecretHash(challengeId, pollSecret),
       expiresAt: expiresAt.toISOString(),
     };
-    const status: EmailLoginStatusRecord = {
-      status: "pending",
+    const stagedStatus: EmailLoginStatusRecord = {
+      status: "delivery_pending",
       challengeId,
-      pollSecretHash: pending.pollSecretHash,
-      expiresAt: pending.expiresAt,
+      pollSecretHash: challenge.pollSecretHash,
+      expiresAt: challenge.expiresAt,
     };
 
-    await this.tokenStore.store(emailLoginPendingKey(challengeId), JSON.stringify(pending), ttlMs);
-    await this.tokenStore.store(emailLoginStatusKey(challengeId), JSON.stringify(status), ttlMs);
-    await this.tokenStore.store(emailLoginLinkAliasKey(tokenHash), challengeId, ttlMs);
-    await this.tokenStore.store(emailLoginCodeAliasKey(codeVerifier), challengeId, ttlMs);
-    await this.tokenStore.store(targetKey, challengeId, ttlMs);
+    const stagingKey = emailLoginStagingKey(challengeId);
+    try {
+      await this.tokenStore.store(stagingKey, JSON.stringify(challenge), ttlMs);
+    } catch (error) {
+      await Promise.all([
+        this.releaseIssuance(reservationKey, reservation, ttlMs),
+        this.discardStaging(stagingKey),
+      ]);
+      throw error;
+    }
 
     // Build and send the email
     const magicLink = buildMagicLink(
@@ -504,18 +713,108 @@ export class EmailAuth {
     const body = rendered.text;
     const html = rendered.html;
 
-    // Fail closed: success only after the provider ACCEPTED the message. On
-    // rejection or a missing receipt the just-minted challenge is invalidated
-    // so a false ok:true can never leave a live, undeliverable challenge.
-    await this.sendOrInvalidate({ to: email, subject, text: body, html }, () =>
-      this.invalidateEmailLoginChallenge({
-        challengeId,
-        tokenHash,
-        codeVerifier,
-        email,
-        tenantId: context.tenantId,
-      }),
-    );
+    // Provider ambiguity never requires cleanup for safety: every persisted
+    // record remains non-redeemable until the acceptance receipt is validated.
+    try {
+      await this.sendAccepted({ to: email, subject, text: body, html });
+    } catch (error) {
+      await Promise.all([
+        this.releaseIssuance(reservationKey, reservation, ttlMs),
+        this.discardStaging(stagingKey),
+      ]);
+      throw error;
+    }
+
+    const remainingTtlMs = expiresAt.getTime() - Date.now();
+    if (remainingTtlMs <= 0) {
+      await Promise.all([
+        this.releaseIssuance(reservationKey, reservation, 1),
+        this.discardStaging(stagingKey),
+      ]);
+      console.error("[steward:auth] email challenge expired before activation");
+      throw new EmailDeliveryError("Email challenge activation failed");
+    }
+    try {
+      // Publish only legacy-readable records. Until this atomic operation
+      // commits, neither old nor new pods can discover the staged credential.
+      const published = await this.publishChallenge(
+        [
+          { key: stagingKey, value: null, expiresAt: expiresAt.getTime() },
+          ...(priorChallengeId
+            ? [
+                {
+                  key: emailLoginChallengeKey(priorChallengeId),
+                  value: null,
+                  expiresAt: expiresAt.getTime(),
+                },
+                {
+                  key: emailLoginStatusKey(priorChallengeId),
+                  value: null,
+                  expiresAt: expiresAt.getTime(),
+                },
+              ]
+            : []),
+          {
+            key: emailLoginChallengeKey(challengeId),
+            value: JSON.stringify({
+              ...challenge,
+              status: "pending",
+            } satisfies EmailLoginChallengeRecord),
+            expiresAt: expiresAt.getTime(),
+          },
+          {
+            key: emailLoginStatusKey(challengeId),
+            value: JSON.stringify({
+              ...stagedStatus,
+              status: "pending",
+            } satisfies EmailLoginStatusRecord),
+            expiresAt: expiresAt.getTime(),
+          },
+          {
+            key: emailLoginLinkAliasKey(tokenHash),
+            value: challengeId,
+            expiresAt: expiresAt.getTime(),
+          },
+          {
+            key: emailLoginCodeAliasKey(codeVerifier),
+            value: challengeId,
+            expiresAt: expiresAt.getTime(),
+          },
+          {
+            key: targetKey,
+            value: challengeId,
+            expiresAt: expiresAt.getTime(),
+            expected: priorChallengeId,
+          },
+          {
+            key: reservationKey,
+            value: publicationReceipt,
+            expiresAt: expiresAt.getTime(),
+            expected: reservation,
+          },
+          {
+            key: publicationReceiptKey,
+            value: publicationReceipt,
+            expiresAt: expiresAt.getTime(),
+            expected: null,
+          },
+        ],
+        async () =>
+          (await this.tokenStore.verify(publicationReceiptKey)) === publicationReceipt &&
+          (await this.tokenStore.verify(targetKey)) === challengeId,
+      );
+      if (!published) throw new Error("email issuance was superseded");
+    } catch (err) {
+      await Promise.all([
+        this.releaseIssuance(reservationKey, reservation, remainingTtlMs),
+        this.discardStaging(stagingKey),
+      ]);
+      console.error(
+        "[steward:auth] email challenge activation failed",
+        redactedThrownDiagnostics(err),
+      );
+      throw new EmailDeliveryError("Email challenge activation failed");
+    }
 
     return { tokenHash, expiresAt, challengeId, pollSecret };
   }
@@ -530,14 +829,49 @@ export class EmailAuth {
     context: { tenantId?: string; tenantName?: string } = {},
   ): Promise<{ expiresAt: Date }> {
     this.assertDeliveryConfigured();
-    const code = generateOtpCode();
+    email = email.toLowerCase().trim();
+    let code = generateOtpCode();
+    const stagingId = generateOpaqueId();
     const expiresAt = new Date(Date.now() + this.tokenTtlMs);
 
-    await this.tokenStore.store(
-      otpStoreKey(email, context.tenantId, code),
-      encodeMagicLinkPayload({ email, tenantId: context.tenantId }),
-      this.tokenTtlMs,
-    );
+    const targetKey = otpTargetKey(email, context.tenantId);
+    const {
+      reservationKey,
+      reservation,
+      prior: priorStoreKey,
+    } = await this.reserveIssuance(targetKey, stagingId, this.tokenTtlMs);
+    const publicationReceiptKey = issuancePublicationReceiptKey(reservation);
+    const publicationReceipt = issuancePublicationMarker(reservation);
+    let storeKey = otpStoreKey(email, context.tenantId, code);
+    // A repeated six-digit code would derive the prior issuance's exact key
+    // and make an old email valid again. Regenerate before superseding it.
+    for (
+      let attempt = 0;
+      priorStoreKey && storeKey === priorStoreKey && attempt < 10;
+      attempt += 1
+    ) {
+      code = generateOtpCode();
+      storeKey = otpStoreKey(email, context.tenantId, code);
+    }
+    if (priorStoreKey && storeKey === priorStoreKey) {
+      await this.releaseIssuance(reservationKey, reservation, this.tokenTtlMs);
+      throw new EmailDeliveryError("Could not generate a fresh email challenge");
+    }
+    const payload = { email, tenantId: context.tenantId };
+    const stagingKey = otpStagingKey(stagingId);
+    try {
+      await this.tokenStore.store(
+        stagingKey,
+        encodeOtpChallenge("delivery_pending"),
+        Math.min(this.tokenTtlMs, DEFAULT_TTL_MS),
+      );
+    } catch (error) {
+      await Promise.all([
+        this.releaseIssuance(reservationKey, reservation, this.tokenTtlMs),
+        this.discardStaging(stagingKey),
+      ]);
+      throw error;
+    }
 
     const minutes = Math.floor(this.tokenTtlMs / (60 * 1000));
     const brand = context.tenantName || "Steward";
@@ -548,12 +882,74 @@ export class EmailAuth {
       expiresInMinutes: minutes,
     });
 
-    // Fail closed: delete the just-stored code if the provider did not accept
-    // the message, so an unsendable code is never left redeemable.
-    await this.sendOrInvalidate(
-      { to: email, subject: rendered.subject, text: rendered.text, html: rendered.html },
-      () => this.tokenStore.delete(otpStoreKey(email, context.tenantId, code)),
-    );
+    try {
+      await this.sendAccepted({
+        to: email,
+        subject: rendered.subject,
+        text: rendered.text,
+        html: rendered.html,
+      });
+    } catch (error) {
+      await Promise.all([
+        this.releaseIssuance(reservationKey, reservation, this.tokenTtlMs),
+        this.discardStaging(stagingKey),
+      ]);
+      throw error;
+    }
+    const remainingTtlMs = expiresAt.getTime() - Date.now();
+    if (remainingTtlMs <= 0) {
+      await Promise.all([
+        this.releaseIssuance(reservationKey, reservation, 1),
+        this.discardStaging(stagingKey),
+      ]);
+      console.error("[steward:auth] email OTP expired before activation");
+      throw new EmailDeliveryError("Email challenge activation failed");
+    }
+    try {
+      const published = await this.publishChallenge(
+        [
+          { key: stagingKey, value: null, expiresAt: expiresAt.getTime() },
+          ...(priorStoreKey
+            ? [{ key: priorStoreKey, value: null, expiresAt: expiresAt.getTime() }]
+            : []),
+          {
+            key: storeKey,
+            // Deployed pre-staging readers accept only the raw two-field payload.
+            value: JSON.stringify(payload),
+            expiresAt: expiresAt.getTime(),
+          },
+          {
+            key: targetKey,
+            value: storeKey,
+            expiresAt: expiresAt.getTime(),
+            expected: priorStoreKey,
+          },
+          {
+            key: reservationKey,
+            value: publicationReceipt,
+            expiresAt: expiresAt.getTime(),
+            expected: reservation,
+          },
+          {
+            key: publicationReceiptKey,
+            value: publicationReceipt,
+            expiresAt: expiresAt.getTime(),
+            expected: null,
+          },
+        ],
+        async () =>
+          (await this.tokenStore.verify(publicationReceiptKey)) === publicationReceipt &&
+          (await this.tokenStore.verify(targetKey)) === storeKey,
+      );
+      if (!published) throw new Error("email issuance was superseded");
+    } catch (err) {
+      await Promise.all([
+        this.releaseIssuance(reservationKey, reservation, remainingTtlMs),
+        this.discardStaging(stagingKey),
+      ]);
+      console.error("[steward:auth] email OTP activation failed", redactedThrownDiagnostics(err));
+      throw new EmailDeliveryError("Email challenge activation failed");
+    }
 
     return { expiresAt };
   }
@@ -564,10 +960,40 @@ export class EmailAuth {
    */
   async verifyOtp(email: string, code: string, tenantId?: string): Promise<boolean> {
     if (!/^\d{6}$/.test(code)) return false;
-    const stored = await this.tokenStore.consume(otpStoreKey(email, tenantId, code));
-    if (!stored) return false;
-    const payload = decodeMagicLinkPayload(stored);
-    return payload.email === email && (payload.tenantId ?? undefined) === (tenantId ?? undefined);
+    const legacyEmail = email.trim();
+    email = legacyEmail.toLowerCase();
+    const storeKey = otpStoreKey(email, tenantId, code);
+    let resolvedStoreKey = storeKey;
+    let stored = await this.tokenStore.verify(resolvedStoreKey);
+    if (!stored && legacyEmail !== email) {
+      resolvedStoreKey = otpStoreKey(legacyEmail, tenantId, code);
+      stored = await this.tokenStore.verify(resolvedStoreKey);
+    }
+    const current = decodeOtpChallenge(stored);
+    if (!current) {
+      // Rolling-deploy compatibility for codes issued before staged delivery.
+      if (!stored) return false;
+      const consumed = await this.tokenStore.consume(resolvedStoreKey);
+      if (!consumed) return false;
+      const legacy = decodeLegacyOtpPayload(consumed);
+      if (!legacy) return false;
+      return (
+        legacy.email.toLowerCase().trim() === email &&
+        (legacy.tenantId ?? undefined) === (tenantId ?? undefined)
+      );
+    }
+    if (
+      current.status !== "active" ||
+      (await this.tokenStore.verify(otpTargetKey(email, tenantId))) !== storeKey
+    ) {
+      return false;
+    }
+    const consumed = decodeOtpChallenge(await this.tokenStore.consume(storeKey));
+    if (!consumed || consumed.status !== "active") return false;
+    return (
+      consumed.payload.email === email &&
+      (consumed.payload.tenantId ?? undefined) === (tenantId ?? undefined)
+    );
   }
 
   async sendTenantInvitation(email: string, context: TenantInvitationEmailContext): Promise<void> {
@@ -622,7 +1048,7 @@ export class EmailAuth {
     // hashed in tenant_invitations before this call); surface a typed error so
     // callers report emailSent=false instead of a false green. Nothing here is
     // invalidated because EmailAuth does not own that record.
-    await this.sendOrInvalidate({ to: email, subject, text, html }, async () => {});
+    await this.sendAccepted({ to: email, subject, text, html });
   }
 
   /**
@@ -635,7 +1061,7 @@ export class EmailAuth {
     tenantId?: string,
   ): Promise<EmailLoginVerifyResult> {
     const tokenHash = hashToken(token);
-    const challengeId = await this.tokenStore.consume(emailLoginLinkAliasKey(tokenHash));
+    const challengeId = await this.tokenStore.verify(emailLoginLinkAliasKey(tokenHash));
 
     if (!challengeId) {
       const legacy = await this.tokenStore.consume(tokenHash);
@@ -643,9 +1069,10 @@ export class EmailAuth {
       const payload = decodeMagicLinkPayload(legacy);
       return { email: payload.email, tenantId: payload.tenantId, valid: true, challengeId: "" };
     }
-    const stored = await this.tokenStore.consume(emailLoginPendingKey(challengeId));
-    const payload = parsePendingChallenge(stored);
-    if (!payload) {
+    const payload = parseEmailLoginChallenge(
+      await this.tokenStore.verify(emailLoginChallengeKey(challengeId)),
+    );
+    if (!payload || payload.status !== "active") {
       return { email: "", valid: false };
     }
 
@@ -658,9 +1085,21 @@ export class EmailAuth {
     ) {
       return { email: "", valid: false };
     }
-    await this.tokenStore.delete(emailLoginTargetKey(normalizedEmail, resolvedTenantId));
-    await this.tokenStore.delete(emailLoginCodeAliasKey(payload.codeVerifier));
-    await this.markEmailLoginConsumed(challengeId);
+    if (
+      (await this.tokenStore.verify(emailLoginTargetKey(normalizedEmail, resolvedTenantId))) !==
+      challengeId
+    ) {
+      return { email: "", valid: false };
+    }
+    const consumed = parseEmailLoginChallenge(
+      await this.tokenStore.consume(emailLoginChallengeKey(challengeId)),
+    );
+    if (!consumed || consumed.status !== "active") return { email: "", valid: false };
+    await Promise.allSettled([
+      this.tokenStore.delete(emailLoginLinkAliasKey(tokenHash)),
+      this.tokenStore.delete(emailLoginCodeAliasKey(payload.codeVerifier)),
+      this.markEmailLoginConsumed(challengeId),
+    ]);
     return { email: normalizedEmail, tenantId: payload.tenantId, valid: true, challengeId };
   }
 
@@ -675,41 +1114,63 @@ export class EmailAuth {
       return { email: "", valid: false, reason: reason === "locked" ? "locked" : "invalid" };
     }
     const verifier = this.codeVerifier(email, tenantId, code);
-    const challengeId = await this.tokenStore.consume(emailLoginCodeAliasKey(verifier));
+    const challengeId = await this.tokenStore.verify(emailLoginCodeAliasKey(verifier));
     if (!challengeId) {
       const reason = await this.recordEmailLoginCodeFailure(email, tenantId);
       return { email: "", valid: false, reason: reason === "locked" ? "locked" : "invalid" };
     }
-    const stored = await this.tokenStore.consume(emailLoginPendingKey(challengeId));
-    const payload = parsePendingChallenge(stored);
+    const payload = parseEmailLoginChallenge(
+      await this.tokenStore.verify(emailLoginChallengeKey(challengeId)),
+    );
     if (
       !payload ||
+      payload.status !== "active" ||
       (payload.tenantId ?? undefined) !== (tenantId ?? undefined) ||
       payload.emailHash !== this.emailHash(email, tenantId)
     ) {
       return { email: "", valid: false };
     }
-    await this.tokenStore.delete(emailLoginTargetKey(email, tenantId));
-    await this.markEmailLoginConsumed(challengeId);
+    if ((await this.tokenStore.verify(emailLoginTargetKey(email, tenantId))) !== challengeId) {
+      return { email: "", valid: false };
+    }
+    const consumed = parseEmailLoginChallenge(
+      await this.tokenStore.consume(emailLoginChallengeKey(challengeId)),
+    );
+    if (!consumed || consumed.status !== "active") return { email: "", valid: false };
+    await Promise.allSettled([
+      this.tokenStore.delete(emailLoginCodeAliasKey(verifier)),
+      this.markEmailLoginConsumed(challengeId),
+    ]);
     return { email, tenantId: payload.tenantId, valid: true, challengeId };
   }
 
+  /**
+   * Record a failed code attempt against the pending challenge; locks the
+   * challenge after MAX_EMAIL_LOGIN_CODE_ATTEMPTS failures.
+   *
+   * Accepted trade-off (SEC-136): the attempt counter is keyed by email, so
+   * anyone who knows a victim's address can burn the attempts and force the
+   * victim to re-request a code. That is inherent to any attempt limiter —
+   * the alternative (no limiter) leaves the 6-digit code brute-forceable.
+   * Impact is availability-only (re-request); no code is ever confirmed or
+   * consumed by failed attempts.
+   */
   async recordEmailLoginCodeFailure(
     email: string,
     tenantId?: string,
   ): Promise<"failed" | "locked"> {
     const challengeId = await this.tokenStore.verify(emailLoginTargetKey(email, tenantId));
     if (!challengeId) return "failed";
-    const pending = parsePendingChallenge(
-      await this.tokenStore.verify(emailLoginPendingKey(challengeId)),
+    const challenge = parseEmailLoginChallenge(
+      await this.tokenStore.verify(emailLoginChallengeKey(challengeId)),
     );
-    if (!pending) {
+    if (!challenge || challenge.status !== "active") {
       const status = parseStatusRecord(
         await this.tokenStore.verify(emailLoginStatusKey(challengeId)),
       );
       return status?.status === "locked" ? "locked" : "failed";
     }
-    const ttlMs = Math.max(1, new Date(pending.expiresAt).getTime() - Date.now());
+    const ttlMs = Math.max(1, new Date(challenge.expiresAt).getTime() - Date.now());
     for (let i = 1; i <= MAX_EMAIL_LOGIN_CODE_ATTEMPTS; i++) {
       const reserved = await this.tokenStore.setIfNotExists(
         emailLoginFailureKey(challengeId, i),
@@ -718,15 +1179,15 @@ export class EmailAuth {
       );
       if (reserved) {
         if (i === MAX_EMAIL_LOGIN_CODE_ATTEMPTS) {
-          await this.tokenStore.consume(emailLoginPendingKey(challengeId));
-          await this.tokenStore.delete(emailLoginCodeAliasKey(pending.codeVerifier));
+          await this.tokenStore.consume(emailLoginChallengeKey(challengeId));
+          await this.tokenStore.delete(emailLoginCodeAliasKey(challenge.codeVerifier));
           await this.tokenStore.store(
             emailLoginStatusKey(challengeId),
             JSON.stringify({
               status: "locked",
               challengeId,
-              pollSecretHash: pending.pollSecretHash,
-              expiresAt: pending.expiresAt,
+              pollSecretHash: challenge.pollSecretHash,
+              expiresAt: challenge.expiresAt,
             } satisfies EmailLoginStatusRecord),
             ttlMs,
           );
@@ -751,7 +1212,9 @@ export class EmailAuth {
     }
     return current.status === "pending"
       ? { status: "pending", expiresAt: current.expiresAt }
-      : { status: current.status };
+      : current.status === "delivery_pending"
+        ? { status: "invalid" }
+        : { status: current.status };
   }
 
   /**

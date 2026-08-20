@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * PR6 provider-authority GOLDEN PATH — single-command FAKE proof (§2.7, §5.4).
+ * Provider-authority golden path — single-command fake-provider proof (§2.7, §5.4).
  *
  * WHAT THIS IS
  * ------------
@@ -66,6 +66,7 @@ const CANARY_PATTERNS = [
   "-----BEGIN",
   "Bearer ",
   "SENTINEL_credential",
+  "X_SENTINEL_credential",
 ];
 
 function run(label, cmd, args, opts = {}) {
@@ -88,6 +89,20 @@ function countMatches(text, re) {
   return (text.match(re) ?? []).length;
 }
 
+function parseMatrixEvidence(text) {
+  const records = [];
+  const pattern = /STEWARD_MATRIX_EVIDENCE (\{[^\n]+\})/g;
+  for (const match of text.matchAll(pattern)) {
+    try {
+      records.push(JSON.parse(match[1]));
+    } catch {
+      // Invalid machine-readable evidence is handled by the fail-closed gate.
+      records.push({ leg: "invalid-json", rawParseFailed: true });
+    }
+  }
+  return records;
+}
+
 function main() {
   mkdirSync(OUT_DIR, { recursive: true });
 
@@ -106,7 +121,38 @@ function main() {
   // 3) test-report.json — parse the bun-test summary.
   const passCount = countMatches(combinedLogs, /\(pass\)/g);
   const failCount = countMatches(combinedLogs, /\(fail\)/g);
-  const allGreen = e2e.ok && inventory.ok && failCount === 0 && passCount > 0;
+  const matrixEvidence = parseMatrixEvidence(combinedLogs);
+  const evidenceByLeg = new Map(matrixEvidence.map((record) => [record.leg, record]));
+  const xLeg = evidenceByLeg.get("M19-x-write");
+  const githubLeg = evidenceByLeg.get("M14-github-write");
+  const requiredZeroDispatchLegs = [
+    "M04-pending-approval",
+    "M03-cross-workspace-deny",
+    "M05-stale-route",
+  ];
+  const evidenceValid =
+    matrixEvidence.length >= 7 &&
+    githubLeg?.dispatchCount === 1 &&
+    githubLeg?.dispatchState === "succeeded" &&
+    githubLeg?.host === "api.github.com" &&
+    githubLeg?.path === "/repos/steward-sandbox/hello/issues/1/comments" &&
+    githubLeg?.credentialMatchesExpected === true &&
+    githubLeg?.bodyHash === githubLeg?.expectedBodyHash &&
+    typeof githubLeg?.bodyHash === "string" &&
+    /^[0-9a-f]{64}$/.test(githubLeg.bodyHash) &&
+    typeof githubLeg?.credentialValueHash === "string" &&
+    /^[0-9a-f]{64}$/.test(githubLeg.credentialValueHash) &&
+    xLeg?.adapterKey === "x" &&
+    xLeg?.host === "api.x.com" &&
+    xLeg?.path === "/2/tweets" &&
+    xLeg?.dispatchCount === 1 &&
+    xLeg?.dispatchState === "succeeded" &&
+    xLeg?.credentialMatchesExpected === true &&
+    xLeg?.bodyHash === xLeg?.expectedBodyHash &&
+    typeof xLeg?.bodyHash === "string" &&
+    /^[0-9a-f]{64}$/.test(xLeg.bodyHash) &&
+    requiredZeroDispatchLegs.every((leg) => evidenceByLeg.get(leg)?.dispatchCount === 0);
+  const allGreen = e2e.ok && inventory.ok && failCount === 0 && passCount > 0 && evidenceValid;
   const testReport = {
     schemaVersion: 1,
     generatedAt: new Date().toISOString(),
@@ -118,19 +164,24 @@ function main() {
     ],
     passCount,
     failCount,
+    machineReadableEvidence: {
+      recordCount: matrixEvidence.length,
+      valid: evidenceValid,
+      requiredLegs: ["M14-github-write", "M19-x-write", ...requiredZeroDispatchLegs],
+    },
     green: allGreen,
     invariants: ["U1", "U2", "U3", "U5", "U6", "U8", "U10"],
   };
   writeFileSync(join(OUT_DIR, "test-report.json"), `${JSON.stringify(testReport, null, 2)}\n`);
 
-  // 4) dispatch-count.json — the matrix asserts dispatch==1 on success, 0 on
-  //    denials in-process (via the fake recorder). We record the assertion
-  //    outcome here (the authoritative per-action counts live in the test body).
+  // 4) dispatch-count.json — copied from the fake recorder's machine-readable
+  //    per-leg output. Never synthesize a dispatch count from aggregate suite
+  //    success: a missing/malformed required leg fails evidenceValid above.
   const dispatchCount = {
     schemaVersion: 1,
-    note: "Per-action dispatch counts are asserted inside the E2E (fake.dispatchCount()). Success legs assert exactly 1; denial/stale legs assert 0.",
-    happyPathDispatch: allGreen ? 1 : null,
-    denialDispatch: 0,
+    source: "STEWARD_MATRIX_EVIDENCE records emitted by the terminal fake recorder assertions",
+    valid: evidenceValid,
+    legs: matrixEvidence,
   };
   writeFileSync(
     join(OUT_DIR, "dispatch-count.json"),
@@ -139,7 +190,7 @@ function main() {
 
   // 5) verifier-report.txt — the E2E's evidence round-trip (M09/M15) runs the
   //    offline verifier for the clean + tamper cases. We surface a summary; the
-  //    PR5 provider-case-evidence integration test is the exhaustive verifier
+  //    evidence provider-case-evidence integration test is the exhaustive verifier
   //    proof (clean PASS + tamper FAIL for every fixture).
   const verifierReport =
     `provider-authority verifier summary (fake run)\n` +

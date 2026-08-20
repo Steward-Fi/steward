@@ -1,8 +1,8 @@
 /**
- * PR4 governed proxy cutover — proxy-side claim/dispatch + authority gate.
+ * Governed proxy execution — proxy-side claim, dispatch, and authority gate.
  *
  * Covers the security-critical proxy invariants against PGLite with the existing
- * forwarder stub (the "test transport seam"; PR6 owns the real sandbox):
+ * forwarder stub (the test transport seam):
  *   - X1 governed routes unreachable via direct /proxy / forged header (P01/P05)
  *   - §6.3 unknown authority_mode default-deny (P53)
  *   - X3 single-winner claim under concurrency (K01), double-claim (P43)
@@ -31,6 +31,7 @@ import { createHmac, hkdfSync, randomUUID } from "node:crypto";
 import {
   agents,
   approvalQueue,
+  auditEvents,
   closeDb,
   executionAuthorizationNonces,
   getDb,
@@ -52,15 +53,18 @@ import {
   canonicalActionBytes,
   computeActionDigest,
   computeApprovalCommitmentHash,
+  computeGenericHttpActionDigest,
   computeProviderExecutionCommitmentHash,
+  type GenericHttpCanonicalActionV1,
   type GithubCanonicalActionV1,
+  genericHttpCanonicalActionBytes,
   jcsStringify,
   type ProviderApprovalCommitmentV1,
   providerExecutionSignatureInput,
   sha256HexPrefixed,
 } from "@stwd/shared";
 import { KeyStore } from "@stwd/vault";
-import { eq, sql } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 
 setDefaultTimeout(30000);
 
@@ -74,8 +78,9 @@ let handleProxy: typeof import("../handlers/proxy")["handleProxy"];
 
 let captured: { url: string; method: string } | null = null;
 let capturedBody: string | null = null;
+let capturedHeaders: Record<string, string> | null = null;
 // Set true when the forwarder's streaming response body is cancelled/drained.
-// Proves the governed dispatcher releases the proxy in-flight slot (codex P2).
+// Proves the governed dispatcher releases the proxy in-flight slot.
 let streamingBodyCancelled = false;
 let forwarderMode: "ok" | "throw" | "500" | "stream" = "ok";
 
@@ -131,7 +136,10 @@ const ACTION: GithubCanonicalActionV1 = {
     ["per_page", "30"],
     ["state", "open"],
   ],
-  selectedHeaders: [["accept", "application/vnd.github+json"]],
+  selectedHeaders: [
+    ["accept", "application/vnd.github+json"],
+    ["x-github-api-version", "2022-11-28"],
+  ],
   canonicalBody: null,
 };
 
@@ -194,7 +202,7 @@ async function seedBase() {
     workspaceId: IDS.workspace,
     providerAccountId: IDS.account,
     secretRouteId: IDS.route,
-    operationKey: "issues.list",
+    operationKey: "github.issue.list",
     riskClass: "read",
     revision: 1,
   });
@@ -218,6 +226,9 @@ interface SeedNonceOpts {
   status?: "active" | "consumed";
   dispatchState?: string;
   intentSuffix?: string;
+  action?: GithubCanonicalActionV1 | GenericHttpCanonicalActionV1;
+  requestEnvelope?: Record<string, unknown>;
+  safeSummary?: Record<string, unknown>;
 }
 
 async function seedExecutionReady(opts: SeedNonceOpts = {}) {
@@ -231,8 +242,60 @@ async function seedExecutionReady(opts: SeedNonceOpts = {}) {
   const expiresAt = new Date(now.getTime() + (opts.expiresInMs ?? 300_000));
   const routeRevision = opts.routeRevision ?? 1;
   const secretVersion = opts.secretVersion ?? 1;
-  const actionDigest = computeActionDigest(ACTION);
-  const requestHash = sha256HexPrefixed(`req:${intentId}`);
+  const action = opts.action ?? ACTION;
+  const generic = action.profile === "generic-http.provider-action.v1";
+  if (generic) {
+    await db
+      .update(providerOperations)
+      .set({
+        requestProfile: {
+          profile: "generic-http.provider-action.v1",
+          operationDescriptor: {
+            profile: "generic-http.provider-action.v1",
+            origin: "https://api.customer.example",
+            methods: ["POST"],
+            pathTemplate: [{ literal: "v1" }, { literal: "items" }],
+            query: [
+              {
+                name: "mode",
+                type: "string",
+                required: true,
+                pattern: "^safe$",
+              },
+            ],
+            headers: [{ name: "accept", value: "application/json" }],
+            body: {
+              contentType: "application/json",
+              fields: [
+                {
+                  name: "name",
+                  type: "string",
+                  required: true,
+                  pattern: "^[a-z]{1,64}$",
+                  maxBytes: 64,
+                },
+                { name: "alpha", type: "int" },
+                { name: "zeta", type: "int" },
+              ],
+            },
+            projection: { policyArgs: [], safeSummary: [] },
+          },
+        },
+      })
+      .where(eq(providerOperations.id, IDS.operation));
+    await db.execute(sql`UPDATE provider_operations SET revision = 1 WHERE id = ${IDS.operation}`);
+  }
+  const actionDigest = generic
+    ? computeGenericHttpActionDigest(action as GenericHttpCanonicalActionV1)
+    : computeActionDigest(action as GithubCanonicalActionV1);
+  const actionBytes = generic
+    ? genericHttpCanonicalActionBytes(action as GenericHttpCanonicalActionV1)
+    : canonicalActionBytes(action as GithubCanonicalActionV1);
+  const requestEnvelope = opts.requestEnvelope ?? { schemaVersion: "steward.provider-request.v1" };
+  const requestHash =
+    opts.requestEnvelope === undefined
+      ? sha256HexPrefixed(`req:${intentId}`)
+      : sha256HexPrefixed(jcsStringify(requestEnvelope));
   const policyRevisionHash = sha256HexPrefixed("policy:1");
   const accessDecisionHash = sha256HexPrefixed("access:1");
   const approvalId = `aq_${randomUUID().slice(0, 8)}`;
@@ -246,10 +309,10 @@ async function seedExecutionReady(opts: SeedNonceOpts = {}) {
     providerAccount: { id: IDS.account, revision: 1, status: "active" },
     operation: {
       id: IDS.operation,
-      key: "issues.list",
+      key: "github.issue.list",
       revision: 1,
       riskClass: "read",
-      canonicalProfile: "github.provider-action.v1",
+      canonicalProfile: action.profile,
     },
     requestHash,
     actionDigest,
@@ -284,10 +347,26 @@ async function seedExecutionReady(opts: SeedNonceOpts = {}) {
     expiresAt: expiresAt.toISOString(),
   };
   const approvalCommitmentHash = computeApprovalCommitmentHash(approvalCommitment);
+  const executionPolicyDecision = {
+    schemaVersion: "steward.provider-policy-decision.v1",
+    decisionId: randomUUID(),
+    intentId,
+    requestHash,
+    actionDigest,
+    operationId: IDS.operation,
+    operationKey: "github.issue.list",
+    effect: "approval_required",
+    reasonCodes: ["APPROVAL_REQUIRED"],
+    policyResults: [],
+    policyRevisionHash,
+    evaluatorVersion: "provider-action.v1",
+    decidedAt: now.toISOString(),
+  };
+  const executionPolicyDecisionHash = sha256HexPrefixed(jcsStringify(executionPolicyDecision));
 
   const commitment = buildProviderExecutionCommitmentV2({
     approval: approvalCommitment,
-    action: ACTION,
+    action,
     approvalCommitmentHash,
     approvalId,
     authorizationId,
@@ -321,13 +400,13 @@ async function seedExecutionReady(opts: SeedNonceOpts = {}) {
     providerAccountId: IDS.account,
     operationId: IDS.operation,
     operationRevision: 1,
-    canonicalProfile: "github.provider-action.v1",
-    canonicalActionBytes: Buffer.from(canonicalActionBytes(ACTION), "utf8"),
+    canonicalProfile: action.profile,
+    canonicalActionBytes: Buffer.from(actionBytes, "utf8"),
     actionDigest,
-    requestEnvelope: { schemaVersion: "steward.provider-request.v1" },
+    requestEnvelope,
     requestHash,
-    idempotencyKeyHash: sha256HexPrefixed("idem:1"),
-    safeSummary: {},
+    idempotencyKeyHash: sha256HexPrefixed(`idem:${intentId}`),
+    safeSummary: opts.safeSummary ?? {},
     accessDecisionId: randomUUID(),
     accessEffect: "allow",
     accessReasonCode: "ok",
@@ -350,6 +429,11 @@ async function seedExecutionReady(opts: SeedNonceOpts = {}) {
     resumeActor: "steward-system",
     resumeAttemptId: randomUUID(),
     resumeValidatedAt: now,
+    executionPolicyDecisionId: executionPolicyDecision.decisionId,
+    executionPolicyRevisionHash: policyRevisionHash,
+    executionPolicyDecision,
+    executionPolicyDecisionHash,
+    executionPolicyEvaluatedAt: now,
   });
   await db.insert(approvalQueue).values({
     id: approvalId,
@@ -424,6 +508,9 @@ beforeAll(async () => {
   process.env.STEWARD_JWT_SECRET = "proxy-governed-jwt-secret-with-enough-bytes-here-0123";
   process.env.STEWARD_AUDIT_HMAC_KEY = "a".repeat(64);
   process.env.STEWARD_EXECUTION_AUTH_SECRET = EXEC_SECRET;
+  // Dispatch is exercised against the in-process replay store and no Redis —
+  // the soft development posture, an explicit opt-in since SEC-175.
+  process.env.STEWARD_PROXY_DEV_MODE = "true";
 
   const { db, client } = await createPGLiteDb("memory://");
   setPGLiteOverride(db, async () => {
@@ -436,10 +523,11 @@ beforeAll(async () => {
   dispatchGovernedExecution = dispatchMod.dispatchGovernedExecution;
 
   proxyMod.__setResolveProxyHostForTests(async () => [{ address: "140.82.112.6", family: 4 }]);
-  proxyMod.__setForwardProxyRequestForTests(async (url, method, _headers, body) => {
+  proxyMod.__setForwardProxyRequestForTests(async (url, method, headers, body) => {
     captured = { url: url.toString(), method };
+    capturedHeaders = Object.fromEntries(headers.entries());
     // Capture the exact outbound body bytes (JCS-serialized by the dispatcher) so
-    // tests can assert byte-fidelity of the forwarded request (codex P2).
+    // tests can assert byte fidelity of the forwarded request.
     capturedBody = null;
     if (body) {
       const reader = (body as ReadableStream<Uint8Array>).getReader();
@@ -512,11 +600,13 @@ afterAll(async () => {
   delete process.env.STEWARD_MASTER_PASSWORD;
   delete process.env.STEWARD_JWT_SECRET;
   delete process.env.STEWARD_EXECUTION_AUTH_SECRET;
+  delete process.env.STEWARD_PROXY_DEV_MODE;
 });
 
 beforeEach(async () => {
   captured = null;
   capturedBody = null;
+  capturedHeaders = null;
   streamingBodyCancelled = false;
   forwarderMode = "ok";
   const db = getDb();
@@ -573,7 +663,7 @@ function fakeDirectContext(path: string, forgedClaim?: unknown) {
   } as unknown as import("hono").Context;
 }
 
-describe("PR4 governed proxy authority gate (X1, §5.1)", () => {
+describe("governed proxy authority gate (X1, §5.1)", () => {
   it("P01: direct /proxy to a governed route is denied 403, zero forward", async () => {
     await seedExecutionReady();
     const res = await handleProxy(
@@ -644,12 +734,88 @@ describe("PR4 governed proxy authority gate (X1, §5.1)", () => {
   });
 });
 
-describe("PR4 dispatchGovernedExecution claim + dispatch", () => {
+describe("dispatchGovernedExecution claim and dispatch", () => {
   it("EXEC_AUTH_NOT_READY when the intent has no active v2 nonce (P25)", async () => {
     const res = await dispatchGovernedExecution("pa_missing", IDS.tenant);
     expect(res.ok).toBe(false);
     expect(res.code).toBe("EXEC_AUTH_NOT_READY");
     expect(res.httpStatus).toBe(409);
+  });
+
+  it("does not dispatch a signed nonce without execute-time policy evidence", async () => {
+    const { intentId, authorizationId } = await seedExecutionReady();
+    const db = getDb();
+    // Simulate a pre-0084 row. The live schema prevents creating this shape, so
+    // temporarily remove only the two rollout guards, mutate it, then restore
+    // both before calling the production boundary.
+    await db.execute(
+      sql`ALTER TABLE provider_action_bindings DROP CONSTRAINT provider_action_bindings_execution_policy_ready_chk`,
+    );
+    await db.execute(
+      sql`DROP TRIGGER provider_action_bindings_immutable ON provider_action_bindings`,
+    );
+    await db
+      .update(providerActionBindings)
+      .set({
+        executionPolicyDecisionId: null,
+        executionPolicyRevisionHash: null,
+        executionPolicyDecision: null,
+        executionPolicyDecisionHash: null,
+        executionPolicyEvaluatedAt: null,
+      })
+      .where(eq(providerActionBindings.intentId, intentId));
+    await db.execute(sql`
+      CREATE TRIGGER provider_action_bindings_immutable
+      BEFORE UPDATE ON provider_action_bindings
+      FOR EACH ROW EXECUTE FUNCTION steward_provider_action_binding_guard()
+    `);
+    await db.execute(sql`
+      ALTER TABLE provider_action_bindings
+      ADD CONSTRAINT provider_action_bindings_execution_policy_ready_chk CHECK (
+        status NOT IN ('execution_ready','executing') OR execution_policy_decision_id IS NOT NULL
+      ) NOT VALID
+    `);
+
+    const res = await dispatchGovernedExecution(intentId, IDS.tenant);
+    expect(res).toMatchObject({
+      ok: false,
+      code: "EXEC_AUTH_POLICY_EVIDENCE_MISSING",
+      httpStatus: 409,
+    });
+    const [nonce] = await db
+      .select({ status: executionAuthorizationNonces.status })
+      .from(executionAuthorizationNonces)
+      .where(eq(executionAuthorizationNonces.authorizationId, authorizationId));
+    expect(nonce.status).toBe("active");
+  });
+
+  it("never claims or dispatches corrupt execute-time policy evidence", async () => {
+    const { intentId, authorizationId } = await seedExecutionReady();
+    const db = getDb();
+    await db.execute(
+      sql`DROP TRIGGER provider_action_bindings_immutable ON provider_action_bindings`,
+    );
+    await db
+      .update(providerActionBindings)
+      .set({ executionPolicyDecisionHash: `sha256:${"0".repeat(64)}` })
+      .where(eq(providerActionBindings.intentId, intentId));
+    await db.execute(sql`
+      CREATE TRIGGER provider_action_bindings_immutable
+      BEFORE UPDATE ON provider_action_bindings
+      FOR EACH ROW EXECUTE FUNCTION steward_provider_action_binding_guard()
+    `);
+
+    expect(await dispatchGovernedExecution(intentId, IDS.tenant)).toMatchObject({
+      ok: false,
+      code: "EXEC_AUTH_POLICY_EVIDENCE_MISSING",
+      httpStatus: 409,
+    });
+    const [nonce] = await db
+      .select({ status: executionAuthorizationNonces.status })
+      .from(executionAuthorizationNonces)
+      .where(eq(executionAuthorizationNonces.authorizationId, authorizationId));
+    expect(nonce.status).toBe("active");
+    expect(captured).toBeNull();
   });
 
   it("happy path: gate permits, claim consumes exactly once, one dispatch", async () => {
@@ -669,6 +835,215 @@ describe("PR4 dispatchGovernedExecution claim + dispatch", () => {
     // dispatch_state advanced past 'none' (claimed/dispatched/terminal).
     expect(n.ds).not.toBe("none");
     expect(res.intentId).toBe(intentId);
+  });
+
+  it("dispatches generic HTTP without environment host widening and records evidence", async () => {
+    const genericAction: GenericHttpCanonicalActionV1 = {
+      profile: "generic-http.provider-action.v1",
+      method: "POST",
+      origin: "https://api.customer.example",
+      normalizedPath: "/v1/items",
+      orderedQueryPairs: [["mode", "safe"]],
+      selectedHeaders: [
+        ["accept", "application/json"],
+        ["content-type", "application/json"],
+      ],
+      canonicalBody: { name: "widget" },
+    };
+    await getDb()
+      .update(secretRoutes)
+      .set({ hostPattern: "api.customer.example", pathPattern: "/v1/items", method: "POST" })
+      .where(eq(secretRoutes.id, IDS.route));
+    await getDb()
+      .update(providerOperations)
+      .set({
+        requestProfile: {
+          profile: "generic-http.provider-action.v1",
+          operationDescriptor: {
+            profile: "generic-http.provider-action.v1",
+            origin: "https://api.customer.example",
+            methods: ["POST"],
+            pathTemplate: [{ literal: "v1" }, { literal: "items" }],
+            query: [{ name: "mode", type: "string", pattern: "^safe$" }],
+            headers: [{ name: "accept", value: "application/json" }],
+            body: {
+              contentType: "application/json",
+              fields: [{ name: "name", type: "string", pattern: "^.{1,64}$", maxBytes: 64 }],
+            },
+            projection: { policyArgs: [], safeSummary: ["name"] },
+          },
+        },
+      })
+      .where(eq(providerOperations.id, IDS.operation));
+    // The fixture authors the descriptor before minting and verifies the exact
+    // operation revision that the binding will carry.
+    await getDb().execute(
+      sql`UPDATE secret_routes SET authority_revision = 1 WHERE id = ${IDS.route}`,
+    );
+    const [configuredOperation] = await getDb()
+      .select({ revision: providerOperations.revision })
+      .from(providerOperations)
+      .where(eq(providerOperations.id, IDS.operation));
+    expect(configuredOperation.revision).toBe(1);
+    const saved = process.env.STEWARD_PROXY_ALLOWED_HOSTS;
+    delete process.env.STEWARD_PROXY_ALLOWED_HOSTS;
+    try {
+      const { intentId } = await seedExecutionReady({ action: genericAction });
+      const result = await dispatchGovernedExecution(intentId, IDS.tenant);
+      expect(result).toMatchObject({
+        ok: true,
+        dispatchState: "succeeded",
+        upstreamStatusCode: 200,
+      });
+      expect(captured).toEqual({
+        url: "https://api.customer.example/v1/items?mode=safe",
+        method: "POST",
+      });
+      expect(capturedBody).toBe('{"name":"widget"}');
+      expect(capturedHeaders?.authorization).toBe("ghp_test_token");
+      expect(JSON.stringify(result)).not.toContain("ghp_test_token");
+      const evidence = await getDb()
+        .select({ action: auditEvents.action })
+        .from(auditEvents)
+        .where(and(eq(auditEvents.tenantId, IDS.tenant), eq(auditEvents.resourceId, intentId)));
+      expect(evidence.map((row) => row.action)).toContain("provider.execution.dispatched");
+      expect(evidence.map((row) => row.action)).toContain("provider.execution.succeeded");
+      expect(JSON.stringify(evidence)).not.toContain("ghp_test_token");
+    } finally {
+      if (saved === undefined) delete process.env.STEWARD_PROXY_ALLOWED_HOSTS;
+      else process.env.STEWARD_PROXY_ALLOWED_HOSTS = saved;
+    }
+  });
+
+  it("denies malformed and operation-widening canonical bytes before claim or forward", async () => {
+    const mutations: GithubCanonicalActionV1[] = [
+      {
+        ...ACTION,
+        selectedHeaders: [["authorization", "registered-malicious-canary"]],
+      },
+      { ...ACTION, origin: "https://attacker.example" },
+      { ...ACTION, method: "POST" },
+      { ...ACTION, normalizedPath: "/repos/acme/widgets/hooks" },
+      { ...ACTION, canonicalBody: { client_secret: "registered-malicious-canary" } },
+      { ...ACTION, canonicalBody: { harmless: true } },
+      {
+        ...ACTION,
+        selectedHeaders: [["content-type", "text/plain"]],
+        canonicalBody: { harmless: true },
+      },
+    ];
+    for (const poisoned of mutations) {
+      const { intentId, authorizationId } = await seedExecutionReady({ action: poisoned });
+      const result = await dispatchGovernedExecution(intentId, IDS.tenant);
+      expect(result).toMatchObject({
+        ok: false,
+        code: "EXEC_AUTH_STALE_DEPENDENCY",
+        httpStatus: 409,
+      });
+      const [nonce] = await getDb()
+        .select({ status: executionAuthorizationNonces.status })
+        .from(executionAuthorizationNonces)
+        .where(eq(executionAuthorizationNonces.authorizationId, authorizationId));
+      expect(nonce.status).toBe("active");
+      expect(captured).toBeNull();
+    }
+
+    await getDb()
+      .update(secretRoutes)
+      .set({ hostPattern: "api.customer.example", pathPattern: "/v1/items", method: "POST" })
+      .where(eq(secretRoutes.id, IDS.route));
+    await getDb().execute(
+      sql`UPDATE secret_routes SET authority_revision = 1 WHERE id = ${IDS.route}`,
+    );
+    const generic: GenericHttpCanonicalActionV1 = {
+      profile: "generic-http.provider-action.v1",
+      method: "POST",
+      origin: "https://api.customer.example",
+      normalizedPath: "/v1/items",
+      orderedQueryPairs: [["mode", "safe"]],
+      selectedHeaders: [
+        ["accept", "application/json"],
+        ["content-type", "application/json"],
+      ],
+      canonicalBody: { name: "safe" },
+    };
+    for (const poisoned of [
+      { ...generic, orderedQueryPairs: [["mode", "unsafe"]] as Array<[string, string]> },
+      { ...generic, canonicalBody: { name: "ATTACKER" } },
+      {
+        ...generic,
+        selectedHeaders: [["content-type", "application/json"]] as Array<[string, string]>,
+      },
+    ]) {
+      const { intentId, authorizationId } = await seedExecutionReady({ action: poisoned });
+      const result = await dispatchGovernedExecution(intentId, IDS.tenant);
+      expect(result).toMatchObject({
+        ok: false,
+        code: "EXEC_AUTH_STALE_DEPENDENCY",
+        httpStatus: 409,
+      });
+      const [nonce] = await getDb()
+        .select({ status: executionAuthorizationNonces.status })
+        .from(executionAuthorizationNonces)
+        .where(eq(executionAuthorizationNonces.authorizationId, authorizationId));
+      expect(nonce.status).toBe("active");
+      expect(captured).toBeNull();
+    }
+  });
+
+  it("denies an action-controlled origin before claim or forward", async () => {
+    const poisoned = { ...ACTION, origin: "https://attacker.example" };
+    const { intentId, authorizationId } = await seedExecutionReady({ action: poisoned });
+    const result = await dispatchGovernedExecution(intentId, IDS.tenant);
+    expect(result).toMatchObject({
+      ok: false,
+      code: "EXEC_AUTH_STALE_DEPENDENCY",
+      httpStatus: 409,
+    });
+    const [nonce] = await getDb()
+      .select({ status: executionAuthorizationNonces.status })
+      .from(executionAuthorizationNonces)
+      .where(eq(executionAuthorizationNonces.authorizationId, authorizationId));
+    expect(nonce.status).toBe("active");
+    expect(captured).toBeNull();
+  });
+
+  it("derives a generic origin from the bound operation descriptor, not action bytes", async () => {
+    await getDb()
+      .update(providerOperations)
+      .set({
+        requestProfile: {
+          profile: "generic-http.provider-action.v1",
+          operationDescriptor: {
+            profile: "generic-http.provider-action.v1",
+            origin: "https://api.customer.example",
+            methods: ["GET"],
+            pathTemplate: [{ literal: "v1" }, { literal: "items" }],
+            projection: { policyArgs: [], safeSummary: [] },
+          },
+        },
+      })
+      .where(eq(providerOperations.id, IDS.operation));
+    const poisonedAction: GenericHttpCanonicalActionV1 = {
+      profile: "generic-http.provider-action.v1",
+      method: "GET",
+      origin: "https://attacker.example",
+      normalizedPath: "/v1/items",
+      orderedQueryPairs: [],
+      selectedHeaders: [],
+      canonicalBody: null,
+    };
+    const poisoned = await seedExecutionReady({ action: poisonedAction });
+    expect(await dispatchGovernedExecution(poisoned.intentId, IDS.tenant)).toMatchObject({
+      ok: false,
+      code: "EXEC_AUTH_STALE_DEPENDENCY",
+    });
+    const [nonce] = await getDb()
+      .select({ status: executionAuthorizationNonces.status })
+      .from(executionAuthorizationNonces)
+      .where(eq(executionAuthorizationNonces.authorizationId, poisoned.authorizationId));
+    expect(nonce.status).toBe("active");
+    expect(captured).toBeNull();
   });
 
   it("K01/P43: two concurrent claims → exactly one consumes, one dispatch", async () => {
@@ -715,7 +1090,7 @@ describe("PR4 dispatchGovernedExecution claim + dispatch", () => {
     expect(captured).toBeNull();
   });
 
-  it("P2 (codex): a live route bound to a DIFFERENT operation than the nonce fails closed (route↔operation mismatch), no decrypt", async () => {
+  it("fails closed without decrypt when the live route is bound to a different operation", async () => {
     const { intentId } = await seedExecutionReady();
     // Repoint the LIVE governed route's provider_operation_id at a DIFFERENT
     // operation than the one the nonce was minted for, WITHOUT bumping
@@ -825,7 +1200,7 @@ describe("PR4 dispatchGovernedExecution claim + dispatch", () => {
   it("P12c: substituted nonce route revision cannot escape the signed approval tuple", async () => {
     const { intentId, authorizationId } = await seedExecutionReady();
     // Move both the live route and the denormalized nonce column to revision 2,
-    // while leaving the signed PR3 approval commitment at revision 1. Comparing
+    // while leaving the signed approval commitment at revision 1. Comparing
     // only nonce-to-live would accept this substitution; signed-to-loaded tuple
     // equality must reject it before claim.
     await getDb()
@@ -854,6 +1229,72 @@ describe("PR4 dispatchGovernedExecution claim + dispatch", () => {
     expect(captured).toBeNull();
   });
 
+  it.each([
+    ["expired", "succeeded", "adapter-current", "EXEC_TERMINAL_STATE"],
+    ["key-rotated", "succeeded", "adapter-removed", "EXEC_TERMINAL_STATE"],
+    ["expired", "outcome_unknown", "adapter-current", "EXEC_DISPATCH_OUTCOME_UNKNOWN"],
+    ["key-rotated", "outcome_unknown", "adapter-removed", "EXEC_DISPATCH_OUTCOME_UNKNOWN"],
+  ])("P26: %s summon evidence preserves %s replay state", async (_case, dispatchState, keyId, expectedCode) => {
+    const summonDigest = `sha256:${"7".repeat(64)}`;
+    const { intentId } = await seedExecutionReady({
+      status: "consumed",
+      dispatchState,
+      requestEnvelope: {
+        schemaVersion: "steward.provider-request.v1",
+        xSummonAttestationDigest: summonDigest,
+      },
+      safeSummary: {
+        xSummonAttestation: {
+          schemaVersion: "steward.x-summon-attestation.v1",
+          keyId,
+          expiresAt: "2020-01-01T00:00:00.000Z",
+        },
+      },
+    });
+    delete process.env.STEWARD_X_SUMMON_ATTESTATION_PUBLIC_KEYS;
+
+    const res = await dispatchGovernedExecution(intentId, IDS.tenant);
+    expect(res).toMatchObject({
+      ok: false,
+      code: expectedCode,
+      dispatchState,
+    });
+    expect(captured).toBeNull();
+  });
+
+  it("P26: invalid summon evidence on a fresh execution is denied before claim", async () => {
+    const summonDigest = `sha256:${"8".repeat(64)}`;
+    const { intentId, authorizationId } = await seedExecutionReady({
+      requestEnvelope: {
+        schemaVersion: "steward.provider-request.v1",
+        xSummonAttestationDigest: summonDigest,
+      },
+      safeSummary: {
+        xSummonAttestation: {
+          schemaVersion: "steward.x-summon-attestation.v1",
+          keyId: "adapter-removed",
+          expiresAt: "2020-01-01T00:00:00.000Z",
+        },
+      },
+    });
+    delete process.env.STEWARD_X_SUMMON_ATTESTATION_PUBLIC_KEYS;
+
+    const res = await dispatchGovernedExecution(intentId, IDS.tenant);
+    expect(res).toMatchObject({
+      ok: false,
+      code: "EXEC_AUTH_SUMMON_ATTESTATION_INVALID",
+    });
+    expect(captured).toBeNull();
+    const [nonce] = await getDb()
+      .select({
+        status: executionAuthorizationNonces.status,
+        dispatchState: executionAuthorizationNonces.dispatchState,
+      })
+      .from(executionAuthorizationNonces)
+      .where(eq(executionAuthorizationNonces.authorizationId, authorizationId));
+    expect(nonce).toEqual({ status: "active", dispatchState: "none" });
+  });
+
   it("P48/F06: absent STEWARD_EXECUTION_AUTH_SECRET fails closed at dispatch (503)", async () => {
     const { intentId } = await seedExecutionReady();
     const saved = process.env.STEWARD_EXECUTION_AUTH_SECRET;
@@ -869,7 +1310,7 @@ describe("PR4 dispatchGovernedExecution claim + dispatch", () => {
     }
   });
 
-  // ── §9 fault matrix + more §8 negatives (added lane pr4-13452) ─────────────
+  // ── §9 fault matrix and additional §8 negative cases ──────────────────────
 
   it("K13/K14: upstream throw AFTER dispatch => outcome_unknown, exactly one forward, NO blind retry (X8)", async () => {
     const { intentId, authorizationId } = await seedExecutionReady();
@@ -945,7 +1386,7 @@ describe("PR4 dispatchGovernedExecution claim + dispatch", () => {
     expect(b.status).toBe("failed");
   });
 
-  it("P19: a disabled workspace fails at the boundary (post-claim), no dispatch (codex P1b)", async () => {
+  it("fails at the post-claim boundary without dispatch when the workspace is disabled", async () => {
     const { intentId } = await seedExecutionReady();
     await getDb()
       .update(workspaces)
@@ -957,7 +1398,7 @@ describe("PR4 dispatchGovernedExecution claim + dispatch", () => {
     expect(captured).toBeNull();
   });
 
-  it("P18b: a disabled provider operation fails at the boundary (codex P1b), no dispatch", async () => {
+  it("fails at the boundary without dispatch when the provider operation is disabled", async () => {
     const { intentId } = await seedExecutionReady();
     await getDb()
       .update(providerOperations)
@@ -1059,17 +1500,32 @@ describe("PR4 dispatchGovernedExecution claim + dispatch", () => {
     expect(captured).toBeNull();
   });
 
-  it("P30: a MUTATING (POST) governed action dispatches without an Idempotency-Key 400 (codex P1: the single-use v2 nonce is the replay guard)", async () => {
+  it("uses the single-use authorization nonce as the replay guard for mutating actions", async () => {
     // Point the seeded action + route at a POST so handleProxy's unsafe-method
     // idempotency guard would fire for a legacy request. A governed dispatch must
     // bypass that guard (it carries its own single-use nonce), so the forward is
     // reached instead of a local 400 for a missing Idempotency-Key.
-    const savedMethod = ACTION.method;
-    const savedBody = ACTION.canonicalBody;
-    (ACTION as { method: string }).method = "POST";
-    (ACTION as { canonicalBody: unknown }).canonicalBody = { title: "bug" };
-    try {
-      const { intentId, authorizationId } = await seedExecutionReady();
+    const action: GenericHttpCanonicalActionV1 = {
+      profile: "generic-http.provider-action.v1",
+      method: "POST",
+      origin: "https://api.customer.example",
+      normalizedPath: "/v1/items",
+      orderedQueryPairs: [["mode", "safe"]],
+      selectedHeaders: [
+        ["accept", "application/json"],
+        ["content-type", "application/json"],
+      ],
+      canonicalBody: { name: "bug" },
+    };
+    await getDb()
+      .update(secretRoutes)
+      .set({ hostPattern: "api.customer.example", pathPattern: "/v1/items", method: "POST" })
+      .where(eq(secretRoutes.id, IDS.route));
+    await getDb().execute(
+      sql`UPDATE secret_routes SET authority_revision = 1 WHERE id = ${IDS.route}`,
+    );
+    {
+      const { intentId, authorizationId } = await seedExecutionReady({ action });
       const res = await dispatchGovernedExecution(intentId, IDS.tenant);
       // The forward was reached (no 400 idempotency short-circuit) and the method
       // is the mutating one.
@@ -1086,9 +1542,6 @@ describe("PR4 dispatchGovernedExecution claim + dispatch", () => {
       expect(n.status).toBe("consumed");
       expect(n.ds).not.toBe("none");
       void res;
-    } finally {
-      (ACTION as { method: string }).method = savedMethod;
-      (ACTION as { canonicalBody: unknown }).canonicalBody = savedBody;
     }
   });
 
@@ -1117,7 +1570,7 @@ describe("PR4 dispatchGovernedExecution claim + dispatch", () => {
     expect(captured).toBeNull();
   });
 
-  it("P31: a secret VERSION rotated AFTER the claim but before decrypt fails closed (409 stale) with no forward (codex P1 stale-credential race)", async () => {
+  it("returns stale without forwarding when the secret version rotates after claim", async () => {
     // The claim succeeds (route + secret bound), then between claim and decrypt the
     // backing secret is rotated to a new version via the beforeForward hook. The
     // decrypt-time recheck must refuse to decrypt the freshly-rotated credential.
@@ -1154,7 +1607,7 @@ describe("PR4 dispatchGovernedExecution claim + dispatch", () => {
     expect(captured).toBeNull();
   });
 
-  it("P32: a forged direct claim with the right routeId + secretId but a WRONG routeRevision is denied at the gate (codex P1 stale-route)", async () => {
+  it("denies a direct claim whose route revision does not match", async () => {
     await seedExecutionReady();
     // Correct routeId + secretId (so ONLY the routeRevision guard can deny it),
     // stale/forged routeRevision. The gate must fail closed before any decrypt.
@@ -1178,7 +1631,7 @@ describe("PR4 dispatchGovernedExecution claim + dispatch", () => {
     expect(captured).toBeNull();
   });
 
-  it("P33: a governed claim that OMITS secretVersion is not verified at the gate (codex P2: missing = stale, fail closed)", async () => {
+  it("fails closed when a governed claim omits the secret version", async () => {
     await seedExecutionReady();
     // Correct routeId + routeRevision + secretId, but NO secretVersion. Without
     // it the decrypt-time version recheck could be skipped, so the gate must
@@ -1202,13 +1655,16 @@ describe("PR4 dispatchGovernedExecution claim + dispatch", () => {
     expect(captured).toBeNull();
   });
 
-  it("P36: a successful governed dispatch DRAINS the proxy response body so the in-flight slot is released (codex P2 slot leak)", async () => {
+  it("P36: an oversized credential-bearing response fails closed and releases the in-flight slot", async () => {
     const { intentId } = await seedExecutionReady();
     forwarderMode = "stream"; // 200 with an open, never-auto-closing body
     const res = await dispatchGovernedExecution(intentId, IDS.tenant);
-    expect(res.ok).toBe(true);
-    // The dispatcher drains the body fire-and-forget (never blocking the outcome
-    // path), so the cancel resolves on a subsequent microtask/tick. Poll briefly.
+    // The response declares a body larger than the bounded credential scanner
+    // permits. The proxy must reject it as an unambiguous upstream failure and
+    // cancel the hostile open stream, which also releases the in-flight slot.
+    expect(res.ok).toBe(false);
+    expect(res.code).toBe("EXEC_DISPATCH_UPSTREAM_ERROR");
+    // Stream cancellation can resolve on a later microtask/tick. Poll briefly.
     for (let i = 0; i < 50 && !streamingBodyCancelled; i++) {
       await new Promise((r) => setTimeout(r, 10));
     }
@@ -1216,16 +1672,31 @@ describe("PR4 dispatchGovernedExecution claim + dispatch", () => {
     expect(streamingBodyCancelled).toBe(true);
   });
 
-  it("P35: the forwarded body is JCS-serialized (byte-identical to the committed canonical action), NOT JSON.stringify insertion order (codex P2)", async () => {
-    const savedMethod = ACTION.method;
-    const savedBody = ACTION.canonicalBody;
-    // Keys deliberately in NON-lexicographic insertion order + an integer-like key
-    // so JSON.stringify (insertion order) and JCS (sorted) produce DIFFERENT bytes.
-    const body = { zeta: 1, alpha: 2, "10": 3, "2": 4 } as Record<string, unknown>;
-    (ACTION as { method: string }).method = "POST";
-    (ACTION as { canonicalBody: unknown }).canonicalBody = body;
-    try {
-      const { intentId } = await seedExecutionReady();
+  it("forwards the JCS bytes committed by the authorization", async () => {
+    // Keys deliberately in NON-lexicographic insertion order so JSON.stringify
+    // (insertion order) and JCS (sorted) produce DIFFERENT bytes.
+    const body = { zeta: 1, name: "safe", alpha: 2 } as Record<string, unknown>;
+    const action: GenericHttpCanonicalActionV1 = {
+      profile: "generic-http.provider-action.v1",
+      method: "POST",
+      origin: "https://api.customer.example",
+      normalizedPath: "/v1/items",
+      orderedQueryPairs: [["mode", "safe"]],
+      selectedHeaders: [
+        ["accept", "application/json"],
+        ["content-type", "application/json"],
+      ],
+      canonicalBody: body,
+    };
+    await getDb()
+      .update(secretRoutes)
+      .set({ hostPattern: "api.customer.example", pathPattern: "/v1/items", method: "POST" })
+      .where(eq(secretRoutes.id, IDS.route));
+    await getDb().execute(
+      sql`UPDATE secret_routes SET authority_revision = 1 WHERE id = ${IDS.route}`,
+    );
+    {
+      const { intentId } = await seedExecutionReady({ action });
       await dispatchGovernedExecution(intentId, IDS.tenant);
       expect(captured).not.toBeNull();
       // The forwarded bytes must equal the JCS serialization, and must NOT equal
@@ -1234,13 +1705,10 @@ describe("PR4 dispatchGovernedExecution claim + dispatch", () => {
       const insertion = JSON.stringify(body);
       expect(capturedBody).toBe(jcs);
       expect(jcs).not.toBe(insertion); // guard: the fixture actually differentiates
-    } finally {
-      (ACTION as { method: string }).method = savedMethod;
-      (ACTION as { canonicalBody: unknown }).canonicalBody = savedBody;
     }
   });
 
-  it("P34: a governed route that ALSO has requiresApproval does NOT re-enter the legacy proxy-approval hold; it forwards (codex P1)", async () => {
+  it("does not re-enter the proxy-approval hold after governed approval", async () => {
     const { intentId, authorizationId } = await seedExecutionReady();
     // The route carries the legacy requiresApproval flag too. A verified governed
     // dispatch already had its approval adjudicated by the v2 flow, so it must NOT

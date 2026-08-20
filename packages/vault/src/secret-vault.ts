@@ -4,7 +4,7 @@
  * Reuses the KeyStore's AES-256-GCM encryption. Secrets are encrypted per-tenant
  * using the same master key hierarchy as wallet keys.
  *
- * NO READ-BACK is a property of THIS plane (sovereign-custody Pillar A / A2):
+ * NO READ-BACK is a property of this sovereign-custody plane:
  *
  *   - No HTTP route returns a plaintext secret value. The /secrets routes
  *     return {@link SecretMetadata} only (enforced by the static route scan in
@@ -19,7 +19,7 @@
  *
  * Custody strength is orthogonal and inherited: the master-password root can be
  * wrapped by KMS-envelope (aws|pkcs11) via vault-factory custody modes, and the
- * TEE path (Pillar B) swaps the master-key source for an attestation-gated
+ * The TEE path swaps the master-key source for an attestation-gated
  * release WITHOUT changing this API. There is deliberately NO parallel
  * file-based secret store — one custody plane, one audit surface.
  */
@@ -30,6 +30,7 @@ import {
   desc,
   eq,
   getDb,
+  gt,
   inArray,
   isNull,
   type Secret,
@@ -38,6 +39,12 @@ import {
   secrets,
 } from "@stwd/db";
 import { type EncryptedKey, KeyStore } from "./keystore";
+import {
+  assertGovernedRouteUpdateIsSafe,
+  assertNoOppositeAuthorityOverlap,
+  lockSecretRouteNamespaces,
+  SecretRouteAuthorityConflict,
+} from "./secret-route-authority";
 import { validateSecretRouteConfig } from "./secret-route-validator";
 
 export interface SecretMetadata {
@@ -58,19 +65,47 @@ export interface CreateSecretOptions {
 }
 
 /**
+ * SEC-164: result of {@link SecretVault.migrateLegacyRootSecrets} — the forced
+ * re-encryption of pre-domain-separation secret rows into the domain-separated
+ * `secret-vault` root. Counts only; never contains plaintext.
+ */
+export interface LegacyRootSecretMigration {
+  /** Total secret rows examined (active AND soft-deleted versions). */
+  scanned: number;
+  /**
+   * Rows re-encrypted from the legacy (undomained) root into the domain root.
+   * In dry-run mode, the count of rows that WOULD be re-encrypted.
+   */
+  migrated: number;
+  /** Rows that already authenticated under the domain-separated root (skipped). */
+  alreadyDomainSeparated: number;
+  /**
+   * Row ids that authenticated under NEITHER root (corrupt row or wrong master
+   * password). Left untouched; never silently dropped.
+   */
+  failed: string[];
+}
+
+/**
  * A drizzle executor (the top-level db OR an open transaction) accepted by the
  * *WithinTx helpers so a caller can rotate a secret inside its OWN transaction
  * without a nested `db.transaction` (which deadlocks single-connection PGLite).
  */
-type SecretTxExecutor = DbBase | Parameters<Parameters<DbBase["transaction"]>[0]>[0];
+export type SecretTxExecutor = DbBase | Parameters<Parameters<DbBase["transaction"]>[0]>[0];
 type DbBase = ReturnType<typeof getDb>;
+
+// SEC-164 migration walk: uuid cursor pagination (mirrors the rotation script).
+const ZERO_UUID = "00000000-0000-0000-0000-000000000000";
+const LEGACY_MIGRATION_BATCH = 100;
 
 export class SecretVault {
   private keyStore: KeyStore;
   // Legacy root (no domain label) — secrets encrypted before domain separation
   // shared the signing-vault's root. Kept only for decrypt fallback so existing
   // ciphertext stays readable; new secrets are always written under the
-  // domain-separated `secret-vault` root above.
+  // domain-separated `secret-vault` root above. SEC-164: run
+  // {@link migrateLegacyRootSecrets} to re-encrypt legacy rows into the domain
+  // root, then disable the fallback (see allowLegacySecretRootFallback).
   private legacyKeyStore: KeyStore;
 
   constructor(masterPassword: string) {
@@ -107,6 +142,37 @@ export class SecretVault {
       })
       .returning();
 
+    return this.toMetadata(row);
+  }
+
+  /**
+   * Create a secret inside a caller-owned transaction. This is the atomic
+   * counterpart to {@link createSecret}: callers that also link the new secret
+   * from another row can commit the ciphertext, link, and required audit event
+   * as one unit instead of leaving an orphan if the outer mutation fails.
+   */
+  async createSecretWithinTx(
+    tx: SecretTxExecutor,
+    tenantId: string,
+    name: string,
+    value: string,
+    options?: CreateSecretOptions,
+  ): Promise<SecretMetadata> {
+    const encrypted = this.keyStore.encrypt(value, { tenantId, name, version: 1 });
+    const [row] = await tx
+      .insert(secrets)
+      .values({
+        tenantId,
+        name,
+        description: options?.description ?? null,
+        ciphertext: encrypted.ciphertext,
+        iv: encrypted.iv,
+        authTag: encrypted.tag,
+        salt: encrypted.salt,
+        version: 1,
+        expiresAt: options?.expiresAt ?? null,
+      })
+      .returning();
     return this.toMetadata(row);
   }
 
@@ -235,9 +301,12 @@ export class SecretVault {
     const context = { tenantId, name: row.name, version: row.version };
     try {
       return this.keyStore.decrypt(encrypted, context);
-    } catch {
+    } catch (error) {
       // Backward compat: secrets written before domain separation are under the
       // legacy (shared) root. New secrets always use the domain-separated root above.
+      // SEC-164: the fallback stays enabled until an operator migrates legacy
+      // rows (migrateLegacyRootSecrets) and opts out via env; then it fails closed.
+      if (!allowLegacySecretRootFallback()) throw error;
       return this.legacyKeyStore.decrypt(encrypted, context);
     }
   }
@@ -249,18 +318,26 @@ export class SecretVault {
    * account refresh that holds a SELECT ... FOR UPDATE lock) without a nested
    * transaction. The single-flight/atomicity guarantee is the CALLER's outer
    * transaction; this method only appends the new version + repoints routes +
-   * soft-deletes the prior version.
+   * soft-deletes the prior version. Deleted lineages stay unavailable by
+   * default; recovery callers must explicitly opt in to append a replacement.
    */
   async rotateSecretWithinTx(
     tx: SecretTxExecutor,
     tenantId: string,
     name: string,
     newValue: string,
+    options?: { allowDeletedCurrent?: boolean },
   ): Promise<SecretMetadata> {
     const [current] = await tx
       .select()
       .from(secrets)
-      .where(and(eq(secrets.tenantId, tenantId), eq(secrets.name, name), isNull(secrets.deletedAt)))
+      .where(
+        and(
+          eq(secrets.tenantId, tenantId),
+          eq(secrets.name, name),
+          options?.allowDeletedCurrent ? undefined : isNull(secrets.deletedAt),
+        ),
+      )
       .orderBy(desc(secrets.version))
       .limit(1);
     if (!current) {
@@ -419,6 +496,123 @@ export class SecretVault {
     return result;
   }
 
+  /**
+   * SEC-164: forced re-encryption of pre-domain-separation secret rows.
+   *
+   * Secrets written before KDF domain separation are encrypted under the
+   * legacy (undomained) root and only decrypt via the fallback in
+   * {@link decryptSecretRow} — meaning the shared signing-vault root can also
+   * decrypt them, which weakens the domain separation until they are rotated.
+   * This migration walks EVERY secret row (including soft-deleted versions,
+   * whose ciphertext remains at rest and readable by historical-version
+   * consumers such as KMS decrypt-old-version) and re-encrypts any row that
+   * only authenticates under the legacy root INTO the domain-separated root,
+   * in place: id/tenantId/name/version are untouched, so the production AAD
+   * context { tenantId, name, version } is preserved and no route or metadata
+   * changes.
+   *
+   * Idempotent: rows already under the domain root are skipped, so an
+   * interrupted run can be rerun safely. Rows authenticating under neither
+   * root are reported in `failed` and left as-is.
+   *
+   * Operator flow (scripts/migrate-legacy-secret-root.ts wraps this): dry-run,
+   * then write mode, then a verifying dry-run that must report every row
+   * alreadyDomainSeparated with failed empty — after which
+   * STEWARD_SECRET_VAULT_LEGACY_ROOT_FALLBACK=false makes the compat fallback
+   * fail closed. See docs/runbooks/key-rotation.md.
+   */
+  async migrateLegacyRootSecrets(options?: {
+    dryRun?: boolean;
+    /** Caller-owned executor so the walk can run inside one outer transaction. */
+    db?: SecretTxExecutor;
+  }): Promise<LegacyRootSecretMigration> {
+    const db = options?.db ?? getDb();
+    const result: LegacyRootSecretMigration = {
+      scanned: 0,
+      migrated: 0,
+      alreadyDomainSeparated: 0,
+      failed: [],
+    };
+    let cursor = ZERO_UUID;
+    while (true) {
+      // NOTE: no deletedAt filter — soft-deleted versions hold ciphertext too
+      // and must not be left dependent on the legacy root.
+      const rows = await db
+        .select({
+          id: secrets.id,
+          tenantId: secrets.tenantId,
+          name: secrets.name,
+          version: secrets.version,
+          ciphertext: secrets.ciphertext,
+          iv: secrets.iv,
+          authTag: secrets.authTag,
+          salt: secrets.salt,
+        })
+        .from(secrets)
+        .where(gt(secrets.id, cursor))
+        .orderBy(secrets.id)
+        .limit(LEGACY_MIGRATION_BATCH);
+      if (rows.length === 0) break;
+
+      for (const row of rows) {
+        result.scanned += 1;
+        const context = { tenantId: row.tenantId, name: row.name, version: row.version };
+        const encrypted: EncryptedKey = {
+          ciphertext: row.ciphertext,
+          iv: row.iv,
+          tag: row.authTag,
+          salt: row.salt,
+        };
+        try {
+          this.keyStore.decrypt(encrypted, context);
+          result.alreadyDomainSeparated += 1;
+          continue;
+        } catch {
+          // Not under the domain root — try the legacy (undomained) root.
+        }
+        try {
+          const plaintext = this.legacyKeyStore.decrypt(encrypted, context);
+          if (!options?.dryRun) {
+            const reEncrypted = this.keyStore.encrypt(plaintext, context);
+            const rewritten = await db
+              .update(secrets)
+              .set({
+                ciphertext: reEncrypted.ciphertext,
+                iv: reEncrypted.iv,
+                authTag: reEncrypted.tag,
+                salt: reEncrypted.salt,
+              })
+              // Compare-and-set all authenticated bytes. A concurrent master
+              // password rotation or secret rewrite must win rather than be
+              // silently overwritten with ciphertext derived from our stale
+              // read. The enclosing migration transaction will roll back if
+              // this row changed after classification.
+              .where(
+                and(
+                  eq(secrets.id, row.id),
+                  eq(secrets.ciphertext, row.ciphertext),
+                  eq(secrets.iv, row.iv),
+                  eq(secrets.authTag, row.authTag),
+                  eq(secrets.salt, row.salt),
+                ),
+              )
+              .returning({ id: secrets.id });
+            if (rewritten.length !== 1) {
+              result.failed.push(row.id);
+              continue;
+            }
+          }
+          result.migrated += 1;
+        } catch {
+          result.failed.push(row.id);
+        }
+      }
+      cursor = rows[rows.length - 1].id;
+      if (rows.length < LEGACY_MIGRATION_BATCH) break;
+    }
+    return result;
+  }
+
   // ─── Route management ────────────────────────────────────────────────────────
 
   async createRoute(
@@ -432,13 +626,38 @@ export class SecretVault {
       injectAs: string;
       injectKey: string;
       injectFormat?: string;
+      injectionStrategy?: "header" | "sigv4";
+      injectionConfig?: { service?: string; region?: string };
       priority?: number;
       enabled?: boolean;
       requiresApproval?: boolean;
       approvalConfig?: Record<string, unknown>;
     },
   ): Promise<SecretRoute> {
-    const db = getDb();
+    return getDb().transaction((tx) => this.createRouteWithinTx(tx, tenantId, secretId, config));
+  }
+
+  /** Create a route inside a caller-owned transaction. */
+  async createRouteWithinTx(
+    db: SecretTxExecutor,
+    tenantId: string,
+    secretId: string,
+    config: {
+      agentId: string;
+      hostPattern: string;
+      pathPattern?: string;
+      method?: string;
+      injectAs: string;
+      injectKey: string;
+      injectFormat?: string;
+      injectionStrategy?: "header" | "sigv4";
+      injectionConfig?: { service?: string; region?: string };
+      priority?: number;
+      enabled?: boolean;
+      requiresApproval?: boolean;
+      approvalConfig?: Record<string, unknown>;
+    },
+  ): Promise<SecretRoute> {
     const normalizedConfig = {
       ...config,
       hostPattern: config.hostPattern.trim().toLowerCase(),
@@ -446,13 +665,21 @@ export class SecretVault {
       method: config.method?.trim().toUpperCase() ?? "GET",
       injectKey: config.injectKey.trim(),
       injectFormat: config.injectFormat ?? "{value}",
+      injectionStrategy: config.injectionStrategy ?? "header",
+      injectionConfig: config.injectionConfig ?? {},
       priority: config.priority ?? 0,
     };
     const validationError = validateSecretRouteConfig(normalizedConfig);
     if (validationError) throw new Error(validationError);
 
     // Verify secret exists and belongs to tenant
-    const secret = await this.getSecretById(tenantId, secretId);
+    const [secret] = await db
+      .select()
+      .from(secrets)
+      .where(
+        and(eq(secrets.id, secretId), eq(secrets.tenantId, tenantId), isNull(secrets.deletedAt)),
+      )
+      .limit(1);
     if (!secret) {
       throw new Error(`Secret ${secretId} not found for tenant ${tenantId}`);
     }
@@ -468,6 +695,11 @@ export class SecretVault {
       throw new Error(`Agent ${normalizedConfig.agentId} not found for tenant ${tenantId}`);
     }
 
+    // Preserve the precise validation contract above, then take the durable
+    // namespace lock immediately before mutation. If the agent disappears in
+    // the validation/lock gap, the lock helper still fails closed.
+    await lockSecretRouteNamespaces(db as never, tenantId, [normalizedConfig.agentId]);
+
     const [row] = await db
       .insert(secretRoutes)
       .values({
@@ -480,12 +712,19 @@ export class SecretVault {
         injectAs: normalizedConfig.injectAs,
         injectKey: normalizedConfig.injectKey,
         injectFormat: normalizedConfig.injectFormat,
+        injectionStrategy: normalizedConfig.injectionStrategy,
+        injectionConfig: normalizedConfig.injectionConfig,
         priority: normalizedConfig.priority,
         enabled: config.enabled ?? true,
         requiresApproval: config.requiresApproval ?? false,
         approvalConfig: config.approvalConfig ?? {},
       })
       .returning();
+
+    await assertNoOppositeAuthorityOverlap(db as never, {
+      ...row,
+      agentId: config.agentId,
+    });
 
     return row;
   }
@@ -519,13 +758,38 @@ export class SecretVault {
       injectAs: string;
       injectKey: string;
       injectFormat: string;
+      injectionStrategy: "header" | "sigv4";
+      injectionConfig: { service?: string; region?: string };
       priority: number;
       enabled: boolean;
       requiresApproval: boolean;
       approvalConfig: Record<string, unknown>;
     }>,
   ): Promise<SecretRoute | null> {
-    const db = getDb();
+    return getDb().transaction((tx) => this.updateRouteWithinTx(tx, tenantId, routeId, updates));
+  }
+
+  /** Update a route inside a caller-owned transaction. */
+  async updateRouteWithinTx(
+    db: SecretTxExecutor,
+    tenantId: string,
+    routeId: string,
+    updates: Partial<{
+      hostPattern: string;
+      agentId: string;
+      pathPattern: string;
+      method: string;
+      injectAs: string;
+      injectKey: string;
+      injectFormat: string;
+      injectionStrategy: "header" | "sigv4";
+      injectionConfig: { service?: string; region?: string };
+      priority: number;
+      enabled: boolean;
+      requiresApproval: boolean;
+      approvalConfig: Record<string, unknown>;
+    }>,
+  ): Promise<SecretRoute | null> {
     const allowedUpdates: typeof updates = {};
     for (const key of [
       "hostPattern",
@@ -535,6 +799,8 @@ export class SecretVault {
       "injectAs",
       "injectKey",
       "injectFormat",
+      "injectionStrategy",
+      "injectionConfig",
       "priority",
       "enabled",
       "requiresApproval",
@@ -543,8 +809,36 @@ export class SecretVault {
       if (updates[key] !== undefined) allowedUpdates[key] = updates[key] as never;
     }
     if (Object.keys(allowedUpdates).length === 0) {
-      return this.getRoute(tenantId, routeId);
+      const [unchanged] = await db
+        .select()
+        .from(secretRoutes)
+        .where(and(eq(secretRoutes.id, routeId), eq(secretRoutes.tenantId, tenantId)))
+        .limit(1);
+      return unchanged ?? null;
     }
+    const [beforeLock] = await db
+      .select()
+      .from(secretRoutes)
+      .where(and(eq(secretRoutes.id, routeId), eq(secretRoutes.tenantId, tenantId)))
+      .limit(1);
+    if (!beforeLock) return null;
+    if (!beforeLock.agentId) {
+      throw new SecretRouteAuthorityConflict("route has no agent namespace");
+    }
+    const destinationAgentId = allowedUpdates.agentId ?? beforeLock.agentId;
+    await lockSecretRouteNamespaces(db as never, tenantId, [
+      beforeLock.agentId,
+      destinationAgentId,
+    ]);
+    const [lockedCurrent] = await db
+      .select()
+      .from(secretRoutes)
+      .where(and(eq(secretRoutes.id, routeId), eq(secretRoutes.tenantId, tenantId)))
+      .limit(1);
+    if (!lockedCurrent || lockedCurrent.agentId !== beforeLock.agentId) {
+      throw new SecretRouteAuthorityConflict("route changed during update");
+    }
+    assertGovernedRouteUpdateIsSafe(lockedCurrent, allowedUpdates);
     // Partial-patch validation: skip per-host strictness here (the patch may not
     // carry method/path). The merged pass below enforces strict-host rules.
     const validationError = validateSecretRouteConfig(allowedUpdates, {
@@ -560,7 +854,11 @@ export class SecretVault {
     // moot — and blocking it would prevent an admin from disabling a legacy
     // strict-host route that predates these rules (a safety-REDUCING action must
     // never be blocked by a stricter narrowness rule).
-    const current = await this.getRoute(tenantId, routeId);
+    const [current] = await db
+      .select()
+      .from(secretRoutes)
+      .where(and(eq(secretRoutes.id, routeId), eq(secretRoutes.tenantId, tenantId)))
+      .limit(1);
     const willBeEnabled = allowedUpdates.enabled ?? current?.enabled ?? true;
     if (current && willBeEnabled) {
       const mergedValidationError = validateSecretRouteConfig({
@@ -570,6 +868,9 @@ export class SecretVault {
         injectAs: allowedUpdates.injectAs ?? current.injectAs ?? undefined,
         injectKey: allowedUpdates.injectKey ?? current.injectKey ?? undefined,
         injectFormat: allowedUpdates.injectFormat ?? current.injectFormat ?? undefined,
+        injectionStrategy:
+          allowedUpdates.injectionStrategy ?? current.injectionStrategy ?? undefined,
+        injectionConfig: allowedUpdates.injectionConfig ?? current.injectionConfig ?? undefined,
       });
       if (mergedValidationError) throw new Error(mergedValidationError);
     }
@@ -599,6 +900,12 @@ export class SecretVault {
       .set(allowedUpdates)
       .where(and(eq(secretRoutes.id, routeId), eq(secretRoutes.tenantId, tenantId)))
       .returning();
+    if (row) {
+      await assertNoOppositeAuthorityOverlap(db as never, {
+        ...row,
+        agentId: destinationAgentId,
+      });
+    }
     return row ?? null;
   }
 
@@ -626,4 +933,19 @@ export class SecretVault {
       updatedAt: row.updatedAt,
     };
   }
+}
+
+/**
+ * SEC-164: the legacy-root decrypt fallback exists only so pre-domain-
+ * separation secrets stay readable until they are re-encrypted under the
+ * domain-separated root. Production defaults to fail closed; an operator with
+ * unmigrated rows must explicitly acknowledge the temporary compatibility
+ * window with STEWARD_SECRET_VAULT_LEGACY_ROOT_FALLBACK=true, run the migration,
+ * then remove the flag. Non-production retains the compatibility default.
+ */
+function allowLegacySecretRootFallback(): boolean {
+  const configured = process.env.STEWARD_SECRET_VAULT_LEGACY_ROOT_FALLBACK;
+  if (configured === "true") return true;
+  if (configured === "false") return false;
+  return process.env.NODE_ENV !== "production";
 }

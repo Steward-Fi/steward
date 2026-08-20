@@ -16,9 +16,7 @@
   },
   "dependencies": {
     "@stwd/db": "workspace:*",
-    "@stwd/redis": "workspace:*",
-    "@stwd/shared": "workspace:*",
-    "drizzle-orm": "^0.44.5",
+    "drizzle-orm": "^0.45.2",
     "zod": "^4.3.6"
   },
   "devDependencies": {

@@ -71,7 +71,7 @@ async function setup(opts?: {
   });
   const keypair = await AgentKeypair.fromPkcs8Base64(kp.pkcs8Base64);
   const client = new AgentClient({
-    baseUrl: "http://mock",
+    baseUrl: "http://localhost",
     agentId: AGENT_ID,
     keypair,
     fetchImpl: server.fetch,
@@ -88,6 +88,21 @@ afterEach(() => {
 });
 
 describe("AgentClient — enroll (keypair-only boot)", () => {
+  test("refuses redirects for enrollment and authenticated requests", async () => {
+    const { client, server } = await setup();
+    const realFetch = server.fetch;
+    let requests = 0;
+    (client as unknown as { fetchImpl: typeof fetch }).fetchImpl = async (input, init) => {
+      requests += 1;
+      expect(init?.redirect).toBe("error");
+      return realFetch(input, init);
+    };
+
+    await client.enroll();
+    await client.manifest();
+    expect(requests).toBeGreaterThanOrEqual(3);
+  });
+
   test("boots with keypair only and gets a short-lived agent token", async () => {
     const { client, server } = await setup();
     const result = await client.enroll();
@@ -114,7 +129,7 @@ describe("AgentClient — enroll (keypair-only boot)", () => {
     const wrong = await generateMockKeyPair();
     const wrongKeypair = await AgentKeypair.fromPkcs8Base64(wrong.pkcs8Base64);
     const client = new AgentClient({
-      baseUrl: "http://mock",
+      baseUrl: "http://localhost",
       agentId: AGENT_ID,
       keypair: wrongKeypair,
       fetchImpl: server.fetch,
@@ -126,7 +141,7 @@ describe("AgentClient — enroll (keypair-only boot)", () => {
     const correct = await generateMockKeyPair();
     server.activeSigner(AGENT_ID)!.publicKeyRawBase64 = correct.publicKeyRawBase64;
     const good = new AgentClient({
-      baseUrl: "http://mock",
+      baseUrl: "http://localhost",
       agentId: AGENT_ID,
       keypair: await AgentKeypair.fromPkcs8Base64(correct.pkcs8Base64),
       fetchImpl: server.fetch,
@@ -139,7 +154,7 @@ describe("AgentClient — enroll (keypair-only boot)", () => {
     const { server, kp } = await setup();
     server.revokeSigner(AGENT_ID);
     const client = new AgentClient({
-      baseUrl: "http://mock",
+      baseUrl: "http://localhost",
       agentId: AGENT_ID,
       keypair: await AgentKeypair.fromPkcs8Base64(kp.pkcs8Base64),
       fetchImpl: server.fetch,
@@ -325,6 +340,78 @@ describe("AgentClient — clock-skew tolerance", () => {
     // advance the client clock near expiry; isEnrolled still true within skew.
     clientNow += 250_000;
     expect(client.isEnrolled()).toBe(true);
+  });
+});
+
+describe("AgentClient — bounded credential transport", () => {
+  test("rejects public plaintext and credential-bearing base URLs", async () => {
+    const kp = await generateMockKeyPair();
+    const keypair = await AgentKeypair.fromPkcs8Base64(kp.pkcs8Base64);
+    expect(
+      () =>
+        new AgentClient({
+          baseUrl: "http://steward.example.test",
+          agentId: AGENT_ID,
+          keypair,
+        }),
+    ).toThrow("must use HTTPS");
+    expect(
+      () =>
+        new AgentClient({
+          baseUrl: "https://user:secret@steward.example.test",
+          agentId: AGENT_ID,
+          keypair,
+        }),
+    ).toThrow("must not embed credentials");
+  });
+
+  test("disables redirects and aborts a stalled authenticated request", async () => {
+    const { client } = await setup();
+    await client.enroll();
+    let redirect: RequestRedirect | undefined;
+    let signal: AbortSignal | undefined;
+    (client as unknown as { requestTimeoutMs: number }).requestTimeoutMs = 10;
+    (client as unknown as { fetchImpl: typeof fetch }).fetchImpl = async (_url, init) => {
+      redirect = init?.redirect;
+      signal = init?.signal as AbortSignal;
+      return new Promise(() => {});
+    };
+
+    await expect(client.manifest()).rejects.toMatchObject({
+      message: "network request timed out",
+      status: 0,
+    });
+    expect(redirect).toBe("error");
+    expect(signal?.aborted).toBe(true);
+  });
+
+  test("rejects oversized authenticated responses before parsing", async () => {
+    const { client } = await setup();
+    await client.enroll();
+    (client as unknown as { fetchImpl: typeof fetch }).fetchImpl = async () =>
+      new Response("{}", {
+        status: 200,
+        headers: { "content-length": String(1024 * 1024 + 1) },
+      });
+    await expect(client.manifest()).rejects.toMatchObject({
+      message: "response exceeded maximum size",
+    });
+  });
+
+  test("acknowledges one-time lease delivery with token proof", async () => {
+    const { client } = await setup();
+    await client.enroll();
+    let requestUrl = "";
+    let requestBody = "";
+    (client as unknown as { fetchImpl: typeof fetch }).fetchImpl = async (url, init) => {
+      requestUrl = String(url);
+      requestBody = String(init?.body);
+      return Response.json({ ok: true, data: { active: true } });
+    };
+
+    await client.acknowledgeLease("lease/one", "github-token-proof");
+    expect(requestUrl).toEndWith("/capabilities/manifest/leases/lease%2Fone/ack");
+    expect(JSON.parse(requestBody)).toEqual({ token: "github-token-proof" });
   });
 });
 

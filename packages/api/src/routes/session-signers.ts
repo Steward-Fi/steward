@@ -8,12 +8,31 @@
  *  - operator-friendly label for the dashboard / audit log
  *
  * Mount: app.route("/agents/:agentId/session-signers", sessionSignerRoutes)
+ *
+ * ⚠️ INTENTIONALLY UNMOUNTED (SEC-211). This module mints delegated agent
+ * signing tokens, so it is not wired into app.ts/compose.ts/index.ts/
+ * worker.ts/embedded.ts today — only tests mount it. Before mounting it in any
+ * entrypoint you MUST re-verify the whole auth posture, because the route-level
+ * guards below are only half of the boundary:
+ *  1. The mount path MUST sit behind `tenantAuth` with
+ *     `{ requireTenantMatch: <agentId's tenant> }` (the in-route checks rely on
+ *     `tenantId`/`tenantRole`/`sessionMfaVerifiedAt` context variables set by
+ *     that middleware; mounted bare, `requireTenantAdminSession` fails closed
+ *     but every request 403s, and a future refactor of those checks would open
+ *     a token-minting surface).
+ *  2. Creation/listing/revocation require a human owner/admin SESSION
+ *     (`session-jwt`, never an api-key or agent token) with MFA verified within
+ *     the last 5 minutes — do not weaken `requireTenantAdminSession` /
+ *     `requireRecentAdminMfa` when mounting.
+ *  3. Minted tokens are agent JWTs trusted by `tenantAuth` for agent-scoped
+ *     signing; treat this as a credential-issuance surface (audit rollback on
+ *     issuance failure is mandatory — keep the blocking `writeAuditEvent`).
  */
 
 import { randomUUID } from "node:crypto";
-
 import { revocationStore, signAgentToken } from "@stwd/auth";
 import { auditEvents, sessionSigners } from "@stwd/db";
+import { redactedThrownDiagnostics } from "@stwd/shared";
 import { and, desc, eq, isNull } from "drizzle-orm";
 import { Hono } from "hono";
 import { writeAuditEvent } from "../services/audit";
@@ -29,6 +48,7 @@ import {
   safeJsonParse,
   setNoStoreHeaders,
 } from "../services/context";
+import { isRecentMfaTimestamp } from "../services/recent-mfa";
 
 const MAX_LIFETIME_MS = 30 * 24 * 3600 * 1000;
 const DEFAULT_LIFETIME_MS = 24 * 3600 * 1000;
@@ -58,12 +78,7 @@ function requireTenantAdminSession(c: Parameters<typeof requireTenantLevel>[0]):
 }
 
 function hasRecentSessionMfa(c: Parameters<typeof requireTenantLevel>[0], maxAgeMs = 5 * 60_000) {
-  const verifiedAt = c.get("sessionMfaVerifiedAt");
-  return (
-    typeof verifiedAt === "number" &&
-    Number.isFinite(verifiedAt) &&
-    Date.now() - verifiedAt <= maxAgeMs
-  );
+  return isRecentMfaTimestamp(c.get("sessionMfaVerifiedAt"), maxAgeMs);
 }
 
 function requireRecentAdminMfa(c: Parameters<typeof requireTenantLevel>[0], reason: string) {
@@ -235,15 +250,18 @@ sessionSignerRoutes.post("/", async (c) => {
       requestId: c.get("requestId") ?? null,
     });
   } catch (err) {
-    console.error(`[session-signer] audit write failed; rolling back issuance ${row.id}:`, err);
+    console.error(
+      `[session-signer] audit write failed; rolling back issuance ${row.id}`,
+      redactedThrownDiagnostics(err),
+    );
     try {
       await revocationStore.revokeToken(jti, Math.floor(expiresAt.getTime() / 1000));
       await db.delete(sessionSigners).where(eq(sessionSigners.id, row.id));
     } catch (rollbackErr) {
       // Best-effort cleanup failed; the jti was at least revocation-attempted.
       console.error(
-        `[session-signer] rollback after audit failure failed for ${row.id}:`,
-        rollbackErr,
+        `[session-signer] rollback after audit failure failed for ${row.id}`,
+        redactedThrownDiagnostics(rollbackErr),
       );
     }
     return c.json<ApiResponse>(
@@ -359,8 +377,8 @@ sessionSignerRoutes.delete("/:id", async (c) => {
         await writeSessionSignerRevokedAudit(c, tenantId, agentId, signerId, existing.jti);
       } catch (err) {
         console.error(
-          `[session-signer] audit repair failed for already-revoked signer ${signerId}:`,
-          err,
+          `[session-signer] audit repair failed for already-revoked signer ${signerId}`,
+          redactedThrownDiagnostics(err),
         );
         return c.json<ApiResponse>(
           {
@@ -389,7 +407,10 @@ sessionSignerRoutes.delete("/:id", async (c) => {
   try {
     await writeSessionSignerRevokedAudit(c, tenantId, agentId, signerId, existing.jti);
   } catch (err) {
-    console.error(`[session-signer] audit write failed for revocation ${signerId}:`, err);
+    console.error(
+      `[session-signer] audit write failed for revocation ${signerId}`,
+      redactedThrownDiagnostics(err),
+    );
     return c.json<ApiResponse>(
       {
         ok: false,

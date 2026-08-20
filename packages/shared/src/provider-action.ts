@@ -1,7 +1,7 @@
 /**
  * provider-action.ts — the `github.provider-action.v1` canonicalization profile.
  *
- * This module owns, for PR2 of the governed-provider-authority plan:
+ * This module owns the governed-provider canonicalization contract:
  *   - a strict, in-house RFC 8785 (JCS) serializer (Conflict 13, RATIFIED: no new
  *     runtime dependency, reject non-JSON runtime values, never coerce);
  *   - the canonical action object + digest (`actionDigest`);
@@ -41,6 +41,7 @@ export const CANON_ERROR_CODES = [
   "CANON_INVALID_UTF8",
   "CANON_JSON_SYNTAX_INVALID",
   "CANON_JSON_DUPLICATE_KEY",
+  "CANON_JSON_FORBIDDEN_KEY",
   "CANON_JSON_SHAPE_INVALID",
   "CANON_UNKNOWN_FIELD",
   "CANON_REQUIRED_FIELD_MISSING",
@@ -106,6 +107,7 @@ const CANON_ERROR_HTTP: Record<CanonErrorCode, number> = {
   CANON_INVALID_UTF8: 400,
   CANON_JSON_SYNTAX_INVALID: 400,
   CANON_JSON_DUPLICATE_KEY: 400,
+  CANON_JSON_FORBIDDEN_KEY: 400,
   CANON_JSON_SHAPE_INVALID: 400,
   CANON_UNKNOWN_FIELD: 400,
   CANON_REQUIRED_FIELD_MISSING: 400,
@@ -203,6 +205,9 @@ export const MIN_SAFE_JSON_INT = -9007199254740991;
 // duplicate keys (Conflict 10) and accepts numbers we must reject. This is a
 // bespoke recursive-descent parser over a UTF-8 string that:
 //   - rejects duplicate member names at EVERY depth (CANON_JSON_DUPLICATE_KEY);
+//   - rejects `__proto__`/`constructor`/`prototype` member names at EVERY depth
+//     (CANON_JSON_FORBIDDEN_KEY) — plain assignment would replace the result's
+//     prototype or silently drop the member instead of creating an own key;
 //   - rejects the profile-forbidden number lexemes (decimals/exp/leading-zero/-0);
 //   - rejects trailing tokens, comments, trailing commas, BOM;
 //   - rejects lone surrogates in strings (CANON_UNICODE_INVALID);
@@ -266,6 +271,15 @@ class JsonScanner {
       this.ws();
       if (this.s[this.i] !== '"') fail("CANON_JSON_SYNTAX_INVALID", "expected object key string");
       const key = this.string();
+      // Prototype-pollution guard: a member named `__proto__` never becomes an
+      // own property under plain assignment (an object value REPLACES the
+      // result's prototype; a primitive is silently dropped), and
+      // `constructor`/`prototype` reads follow the prototype chain. These keys
+      // are ambiguous across JS consumer patterns, so reject them outright
+      // instead of silently collapsing them.
+      if (key === "__proto__" || key === "constructor" || key === "prototype") {
+        fail("CANON_JSON_FORBIDDEN_KEY", `forbidden object key ${JSON.stringify(key)}`);
+      }
       if (seen.has(key)) fail("CANON_JSON_DUPLICATE_KEY", `duplicate key ${JSON.stringify(key)}`);
       seen.add(key);
       this.ws();
@@ -577,7 +591,18 @@ function serializeObject(obj: Record<string, unknown>): string {
   const keys = Object.keys(obj).sort(compareUtf16);
   const parts: string[] = [];
   for (const k of keys) {
-    const val = obj[k];
+    // Read via the property descriptor, NOT obj[k]: an accessor property
+    // would run user code, and a value-changing getter could desync
+    // mint-vs-verify digests. SEC-191: the header contract rejects getter
+    // side effects — enforce it instead of invoking them (fail closed).
+    const desc = Object.getOwnPropertyDescriptor(obj, k);
+    if (!desc || desc.get !== undefined || desc.set !== undefined) {
+      fail(
+        "CANON_RUNTIME_VALUE_UNSUPPORTED",
+        `member '${k}' is an accessor property (getter side effects are rejected)`,
+      );
+    }
+    const val = desc.value;
     // JCS drops nothing: an explicit `undefined` member is a runtime error here
     // (it is not a JSON value). Members we intend to omit must be omitted by the
     // builder, never present-as-undefined.
@@ -700,6 +725,10 @@ export interface ProviderRequestEnvelopeV1 {
    * provider request includes it.
    */
   policyInputDigest?: string;
+  /** Digest of an authenticated X summon provenance record. The signed record
+   * is stored separately in the immutable safe summary; this digest makes it a
+   * load-bearing part of requestHash without putting raw post content here. */
+  xSummonAttestationDigest?: string;
   idempotencyKeyHash: string;
   requestedAt: string;
   expiresAt: string;
@@ -766,8 +795,10 @@ function toEnvelopeObject(e: ProviderRequestEnvelopeV1): Record<string, unknown>
     expiresAt: e.expiresAt,
     nonce: e.nonce,
   };
-  // Preserve the byte-for-byte hash of legacy envelopes that predate #229.
+  // Preserve the byte-for-byte hash of version-1 envelopes without policy inputs.
   if (e.policyInputDigest !== undefined) envelope.policyInputDigest = e.policyInputDigest;
+  if (e.xSummonAttestationDigest !== undefined)
+    envelope.xSummonAttestationDigest = e.xSummonAttestationDigest;
   return envelope;
 }
 
@@ -777,11 +808,11 @@ export function computeRequestHash(e: ProviderRequestEnvelopeV1): string {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// PR4: provider execution authorization v2 commitment (spec §3)
+// Provider execution authorization v2 commitment (spec §3)
 //
 // The v2 authorization is bound by an HMAC over a canonical commitment document
 // serialized with the SAME strict RFC 8785 JCS used above (adjudication conflict
-// 13 in-house JCS). The commitment binds the EXACT outbound bytes, the EXACT PR3
+// 13 in-house JCS). The commitment binds the exact outbound bytes, the exact
 // approval, rotation revisions, and the pinned request line so a claimed
 // authorization cannot be replayed against a different route/method/path/header
 // profile/secret. `commitmentHash` is a content hash; the HMAC signature is
@@ -840,6 +871,57 @@ export interface ProviderExecutionCommitmentV2 {
   issuedAt: string;
   expiresAt: string;
   keyId: string;
+}
+
+export interface ProviderExecutionPolicyEvidenceExpectation {
+  decisionId: string;
+  intentId: string;
+  requestHash: string;
+  actionDigest: string;
+  operationId: string;
+  operationKey: string;
+  policyRevisionHash: string;
+  decidedAt: string;
+}
+
+/**
+ * Verify the complete execute-time policy evidence before an authorization is
+ * minted or claimed. Keeping this check shared prevents the API and proxy
+ * boundaries from accepting different evidence shapes during rollout.
+ */
+export function verifyProviderExecutionPolicyEvidence(
+  decision: unknown,
+  decisionHash: string | null | undefined,
+  expected: ProviderExecutionPolicyEvidenceExpectation,
+): boolean {
+  if (!decision || typeof decision !== "object" || Array.isArray(decision) || !decisionHash) {
+    return false;
+  }
+  const doc = decision as Record<string, unknown>;
+  if (
+    doc.schemaVersion !== "steward.provider-policy-decision.v1" ||
+    doc.decisionId !== expected.decisionId ||
+    doc.intentId !== expected.intentId ||
+    doc.requestHash !== expected.requestHash ||
+    doc.actionDigest !== expected.actionDigest ||
+    doc.operationId !== expected.operationId ||
+    doc.operationKey !== expected.operationKey ||
+    doc.policyRevisionHash !== expected.policyRevisionHash ||
+    doc.decidedAt !== expected.decidedAt ||
+    typeof doc.evaluatorVersion !== "string" ||
+    doc.evaluatorVersion.length === 0 ||
+    !Array.isArray(doc.reasonCodes) ||
+    doc.reasonCodes.some((code) => typeof code !== "string") ||
+    !Array.isArray(doc.policyResults) ||
+    (doc.effect !== "allow" && doc.effect !== "approval_required")
+  ) {
+    return false;
+  }
+  try {
+    return sha256HexPrefixed(jcsStringify(doc)) === decisionHash;
+  } catch {
+    return false;
+  }
 }
 
 function toExecutionCommitmentObject(c: ProviderExecutionCommitmentV2): Record<string, unknown> {
@@ -906,11 +988,11 @@ export function providerExecutionSignatureInput(c: ProviderExecutionCommitmentV2
 }
 
 /**
- * sha256: hex of JCS of the sorted selected-header NAME set from a PR2 canonical
+ * sha256: hex of JCS of the sorted selected-header name set from a canonical
  * action. Binds the outbound header profile into the commitment so a claimed
  * authorization cannot be replayed with a different header set (P31/P32/P33).
  * Only header NAMES are committed (values are already in the actionDigest); the
- * injected credential header is never among selectedHeaders (PR2 rule).
+ * injected credential header is never among selectedHeaders.
  */
 export function computeHeaderAllowlistDigest(action: GithubCanonicalActionV1): string {
   const names = action.selectedHeaders
@@ -920,14 +1002,14 @@ export function computeHeaderAllowlistDigest(action: GithubCanonicalActionV1): s
   return sha256HexPrefixed(jcsStringify(names));
 }
 
-// PR4 deterministic v2 commitment builder + grant-dependency hash + outbound
+// Deterministic v2 commitment builder, grant-dependency hash, and outbound
 // query serialization. These are PURE (no DB, no crypto key) so the API minter
 // and the separate-process proxy verifier reconstruct the SAME commitment bytes
-// from the SAME persisted PR3 approval commitment + PR2 canonical action.
+// from the same persisted approval commitment and canonical action.
 
 /**
  * Deterministic grant/binding dependency hash. Binds the EXACT matched
- * grant/binding ids+revisions the PR3 access decision committed, so a revoked or
+ * grant/binding ids and revisions the access decision committed, so a revoked or
  * re-revised grant fails the claim (X5, P15). Arrays are sorted by uuid bytes
  * (same rule as the approval commitment) then JCS-serialized.
  */
@@ -950,7 +1032,7 @@ export function computeGrantDependencyHash(access: {
 
 /**
  * Serialize canonical `orderedQueryPairs` into an outbound query string (WITHOUT
- * the leading `?`) using the PR2 RFC3986 encoding rule (uppercase percent hex,
+ * the leading `?`) using the canonical RFC 3986 encoding rule (uppercase percent hex,
  * `%20` not `+`). Duplicate keys and order are preserved exactly. Empty list ->
  * "". This is the ONLY governed query source (spec section 5.4): the proxy
  * rebuilds the outbound query from these canonical pairs, never from a raw stored
@@ -964,7 +1046,7 @@ export function serializeCanonicalOutboundQuery(
     .join("&");
 }
 
-/** Inputs to reconstruct a v2 commitment from the PR3 approval commitment. */
+/** Inputs to reconstruct a v2 commitment from the persisted approval commitment. */
 export interface ProviderExecutionCommitmentBuildInput {
   approval: {
     intentId: string;
@@ -1003,8 +1085,8 @@ export interface ProviderExecutionCommitmentBuildInput {
 }
 
 /**
- * Reconstruct the exact v2 commitment document from a PR3 approval commitment +
- * PR2 canonical action + mint params. Both the API mint and the proxy claim call
+ * Reconstruct the exact v2 commitment document from an approval commitment,
+ * canonical action, and mint parameters. Both the API mint and proxy claim call
  * this so the commitment bytes (and thus `commitmentHash` and the HMAC) are
  * byte-identical on both sides. `target` and `headerAllowlistDigest` come from
  * the canonical action (pinned origin host, normalized path, method, sorted
@@ -1417,7 +1499,12 @@ export function canonicalizeHeaders(raw: ReadonlyArray<[string, string]>): Array
 }
 
 function trimOws(s: string): string {
-  return s.replace(/^[ \t]+/, "").replace(/[ \t]+$/, "");
+  let start = 0;
+  let end = s.length;
+  while (start < end && (s.charCodeAt(start) === 0x20 || s.charCodeAt(start) === 0x09)) start += 1;
+  while (end > start && (s.charCodeAt(end - 1) === 0x20 || s.charCodeAt(end - 1) === 0x09))
+    end -= 1;
+  return start === 0 && end === s.length ? s : s.slice(start, end);
 }
 
 function assertHeaderValueClean(v: string): void {
@@ -1501,7 +1588,7 @@ export function canonicalizeContentType(raw: string): string {
 /**
  * A raw, INTERNAL HTTP representation of a provider action. This is NOT the
  * public API shape — it is what the GitHub adapter constructs from validated
- * operation arguments, and what the PR4 proxy recomputation + the offline
+ * operation arguments, and what proxy recomputation and the offline
  * verifier feed in. Because ALL of these consumers call
  * {@link canonicalizeRawInternalAction}, there is exactly ONE canonicalization
  * path and the golden corpus proves it byte-for-byte.
@@ -1571,7 +1658,7 @@ export function canonicalizeRawInternalAction(raw: RawInternalAction): GithubCan
       fail("CANON_JSON_SHAPE_INVALID", "body must be a JSON object");
     canonicalBody = raw.body;
   } else {
-    // DELETE: bodyless only in PR2 (no operation declares a DELETE body).
+    // DELETE is bodyless in the current profile; no operation declares a DELETE body.
     if (hasBody || hasContentType) fail("CANON_BODY_FORBIDDEN", `${method} must not carry a body`);
   }
 

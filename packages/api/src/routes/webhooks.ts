@@ -6,7 +6,7 @@
 
 import { randomBytes } from "node:crypto";
 import { tenantConfigs as tenantConfigsTable } from "@stwd/db";
-import type { TenantAuthAbuseConfig } from "@stwd/shared";
+import { redactedThrownDiagnostics, type TenantAuthAbuseConfig } from "@stwd/shared";
 import { encryptWebhookSecret } from "@stwd/webhooks";
 import { and, count, desc, eq, or, type SQL, sql } from "drizzle-orm";
 import { Hono } from "hono";
@@ -22,6 +22,7 @@ import {
   webhookConfigs,
   webhookDeliveries,
 } from "../services/context";
+import { isRecentMfaTimestamp } from "../services/recent-mfa";
 import { dispatchReplayWebhook, dispatchTestWebhook } from "../services/webhook-dispatch";
 import {
   acceptsConfiguredWebhookEvent,
@@ -30,7 +31,7 @@ import {
   isValidConfigurableWebhookEvent,
   listValidConfigurableWebhookEvents,
 } from "../services/webhook-events";
-import { validateWebhookUrl } from "../services/webhook-url";
+import { validateWebhookUrlResolved } from "../services/webhook-url";
 
 export const webhookRoutes = new Hono<{ Variables: AppVariables }>();
 
@@ -80,12 +81,7 @@ function requireTenantAdminSession(c: Parameters<typeof requireTenantLevel>[0]):
 }
 
 function hasRecentSessionMfa(c: Parameters<typeof requireTenantLevel>[0], maxAgeMs = 5 * 60_000) {
-  const verifiedAt = c.get("sessionMfaVerifiedAt");
-  return (
-    typeof verifiedAt === "number" &&
-    Number.isFinite(verifiedAt) &&
-    Date.now() - verifiedAt <= maxAgeMs
-  );
+  return isRecentMfaTimestamp(c.get("sessionMfaVerifiedAt"), maxAgeMs);
 }
 
 type TenantMfaPolicyConfig = {
@@ -342,7 +338,11 @@ webhookRoutes.post("/", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
   }
 
-  const urlError = isNonEmptyString(body.url) ? validateWebhookUrl(body.url) : "url is required";
+  // SEC-017: resolve DNS and reject non-public answers (string checks alone
+  // miss public-hostname-to-private-IP and rebinding).
+  const urlError = isNonEmptyString(body.url)
+    ? await validateWebhookUrlResolved(body.url)
+    : "url is required";
   if (urlError) {
     return c.json<ApiResponse>({ ok: false, error: urlError }, 400);
   }
@@ -532,7 +532,9 @@ webhookRoutes.put("/:id", async (c) => {
   }
 
   if (body.url !== undefined) {
-    const urlError = isNonEmptyString(body.url) ? validateWebhookUrl(body.url) : "url is required";
+    const urlError = isNonEmptyString(body.url)
+      ? await validateWebhookUrlResolved(body.url)
+      : "url is required";
     if (urlError) {
       return c.json<ApiResponse>({ ok: false, error: urlError }, 400);
     }
@@ -793,8 +795,8 @@ webhookRoutes.post("/:id/test", async (c) => {
     });
   } catch (error) {
     console.error(
-      `[webhooks] Test webhook ${delivery.id} was dispatched but final audit failed:`,
-      error,
+      `[webhooks] Test webhook ${delivery.id} was dispatched but final audit failed`,
+      redactedThrownDiagnostics(error),
     );
     return c.json<ApiResponse>(
       {
@@ -1028,8 +1030,8 @@ webhookRoutes.post("/deliveries/:id/replay", async (c) => {
     });
   } catch (error) {
     console.error(
-      `[webhooks] Replay webhook ${replayed.id} was dispatched but final audit failed:`,
-      error,
+      `[webhooks] Replay webhook ${replayed.id} was dispatched but final audit failed`,
+      redactedThrownDiagnostics(error),
     );
     return c.json<ApiResponse>(
       {

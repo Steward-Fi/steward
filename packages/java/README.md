@@ -37,3 +37,13 @@ mkdir -p packages/java/build/classes
 javac -d packages/java/build/classes $(find packages/java/src/main/java packages/java/src/test/java -name '*.java')
 java -cp packages/java/build/classes com.steward.sdk.StewardClientTest
 ```
+
+Maven build (compiles, runs the same plain-main test harness in the `test`
+phase, and packages the jar):
+
+```sh
+cd packages/java && mvn verify
+```
+
+Remaining work for publish-grade releases: GPG signing and a Sonatype
+Central publishing profile, owned by the release process.

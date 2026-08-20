@@ -94,8 +94,15 @@ export function StewardProvider({
       baseUrl: authConfig.baseUrl,
       storage: authConfig.storage,
       tenantId: authConfig.tenantId ?? tenantIdProp,
+      authProxyUrl: authConfig.authProxyUrl,
     });
-  }, [authConfig?.baseUrl, authConfig?.storage, authConfig?.tenantId, tenantIdProp]);
+  }, [
+    authConfig?.baseUrl,
+    authConfig?.storage,
+    authConfig?.tenantId,
+    authConfig?.authProxyUrl,
+    tenantIdProp,
+  ]);
 
   const [authSession, setAuthSession] = useState<StewardSession | null>(null);
   const [authLoading, setAuthLoading] = useState(false);

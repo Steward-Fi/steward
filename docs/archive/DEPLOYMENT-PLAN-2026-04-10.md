@@ -25,7 +25,7 @@
    - Optionally run migrations
    - Restart steward + steward-proxy services
    - Health check after restart
-   - Works for both `milady` (89.167.63.246) and core-1 through core-6
+   - Works for both `milady` (<NODE_IP>) and core-1 through core-6
 
 3. **Create `scripts/deploy-all.sh`** — deploy to all 7 nodes
    - Deploy to milady (primary) first, verify health
@@ -84,7 +84,7 @@
    - Get API key from resend.com
    - Test sending from `login@steward.fi`
 
-4. **Update prod env on milady (89.167.63.246):**
+4. **Update prod env on milady (<NODE_IP>):**
    ```bash
    # Add to /opt/steward/.env:
    REDIS_URL=redis://localhost:6379

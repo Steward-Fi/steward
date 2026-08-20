@@ -85,11 +85,15 @@ describe("Contract Allowlist Policy", () => {
     contracts: [{ address: contract, selectors: [selector] }],
   });
 
-  it("passes native value transfers with no calldata", async () => {
+  it("passes native value transfers with no calldata (SEC-183 documented seam)", async () => {
     const result = await evaluatePolicy(rule, makeContext());
 
     expect(result.passed).toBe(true);
-    expect(result.reason).toBe("No contract calldata");
+    // The reason names the seam so the audit trail shows the rule did not
+    // gate this transfer.
+    expect(result.reason).toBe(
+      "No contract calldata: native transfer is not gated by contract-allowlist",
+    );
   });
 
   it("passes when target contract and selector are explicitly allowed", async () => {
@@ -188,6 +192,60 @@ describe("Contract Allowlist Policy", () => {
 
     expect(result.passed).toBe(false);
     expect(result.reason).toContain("exceeds selector maxNativeValueWei 1");
+  });
+
+  it("fails closed when a constraint is declared for a selector the engine cannot decode (SEC-038)", async () => {
+    // swapExactTokensForTokens(uint256,uint256,address[],address,uint256) —
+    // allowlisted, but not one of the 8 selectors with a constraint decoder.
+    const swapSelector = "0x38ed1739";
+    const swapRule = makeContractAllowlistRule({
+      contracts: [
+        {
+          address: contract,
+          selectors: [swapSelector],
+          constraints: { [swapSelector]: { maxAmount: "1000" } },
+        },
+      ],
+    });
+    const result = await evaluatePolicy(
+      swapRule,
+      makeContext({
+        request: {
+          ...makeContext().request,
+          to: contract,
+          data: `${swapSelector}${abiUint(500)}${abiUint(1)}`,
+        },
+      }),
+    );
+
+    expect(result.passed).toBe(false);
+    expect(result.reason).toContain("unrecognized selector");
+  });
+
+  it("still passes an unrecognized selector when only maxNativeValueWei is constrained", async () => {
+    const swapSelector = "0x38ed1739";
+    const swapRule = makeContractAllowlistRule({
+      contracts: [
+        {
+          address: contract,
+          selectors: [swapSelector],
+          constraints: { [swapSelector]: { maxNativeValueWei: "10", recipientAllowlist: [] } },
+        },
+      ],
+    });
+    const result = await evaluatePolicy(
+      swapRule,
+      makeContext({
+        request: {
+          ...makeContext().request,
+          to: contract,
+          value: "10",
+          data: `${swapSelector}00`,
+        },
+      }),
+    );
+
+    expect(result.passed).toBe(true);
   });
 
   it("fails when selector is not allowed for the contract", async () => {
@@ -443,6 +501,265 @@ describe("Spending Limit Policy", () => {
       spentToday: BigInt("4500000000000000000"), // already spent 4.5 ETH
     });
     const result = await evaluatePolicy(rule, ctx);
+
+    expect(result.passed).toBe(false);
+    expect(result.reason).toContain("daily spending limit");
+  });
+
+  // ─── Mixed wei + USD limits are conjunctive (SEC-037) ────────────────────
+
+  const ethPriceOracle = {
+    getNativeUsdPrice: async () => 2000,
+    getTokenUsdPrice: async () => null,
+    weiToUsd: async (wei: string) => (Number(BigInt(wei)) / 1e18) * 2000,
+    usdToWei: async () => null,
+  };
+
+  it("enforces an explicit wei cap even when a USD limit is also configured", async () => {
+    const rule = makeSpendingRule({
+      maxPerTx: "10000000000000000", // 0.01 ETH
+      maxPerDayUsd: 5000, // USD daily cap the tx satisfies ($2000 < $5000)
+    });
+
+    const ctx = makeContext({
+      request: { ...makeContext().request, value: "1000000000000000000" }, // 1 ETH
+      priceOracle: ethPriceOracle,
+    });
+    const result = await evaluatePolicy(rule, ctx);
+
+    // Previously the USD branch returned early and the wei cap never fired.
+    expect(result.passed).toBe(false);
+    expect(result.reason).toContain("per-tx limit");
+  });
+
+  it("passes a mixed wei+USD config only when both limits hold", async () => {
+    const rule = makeSpendingRule({
+      maxPerTx: "10000000000000000", // 0.01 ETH
+      maxPerDayUsd: 5000,
+    });
+
+    const ctx = makeContext({
+      request: { ...makeContext().request, value: "5000000000000000" }, // 0.005 ETH = $10
+      priceOracle: ethPriceOracle,
+    });
+    const result = await evaluatePolicy(rule, ctx);
+
+    expect(result.passed).toBe(true);
+  });
+
+  it("counts pending operator USDC against the USD cap without corrupting the wei cap", async () => {
+    const rule = makeSpendingRule({
+      maxPerDay: "1000000000000000000", // 1 ETH raw cap
+      maxPerDayUsd: 100,
+    });
+
+    const evaluation = await new PolicyEngine().evaluate(
+      [rule],
+      makeContext({
+        request: { ...makeContext().request, value: "5000000000000000" }, // $10, 0.005 ETH
+        spentToday: 0n,
+        additionalUsdSpentTodayMicros: 95_000_000n, // pending/final operator USDC
+        priceOracle: ethPriceOracle,
+      }),
+    );
+
+    expect(evaluation.approved).toBe(false);
+    expect(evaluation.results[0]?.reason).toContain("daily USD spending limit");
+  });
+
+  it("keeps operator USD micros out of raw-denominated counters", async () => {
+    const rule = makeSpendingRule({ maxPerDay: "1000" });
+    const result = await evaluatePolicy(
+      rule,
+      makeContext({
+        request: { ...makeContext().request, value: "100" },
+        spentToday: 0n,
+        additionalUsdSpentTodayMicros: 900_000_000n,
+      }),
+    );
+
+    expect(result.passed).toBe(true);
+  });
+
+  it("never rounds a safe-integer operator micro balance below its exact USD value", async () => {
+    const micros = 9_007_199_254_740_983n;
+    const roundedDownLimit = Number(micros) / 1_000_000;
+    const rule = makeSpendingRule({ maxPerDayUsd: roundedDownLimit });
+    const result = await evaluatePolicy(
+      rule,
+      makeContext({
+        request: { ...makeContext().request, value: "0" },
+        spentToday: 0n,
+        additionalUsdSpentTodayMicros: micros,
+        priceOracle: ethPriceOracle,
+      }),
+    );
+
+    expect(result.passed).toBe(false);
+    expect(result.reason).toContain("daily USD spending limit");
+  });
+
+  it("enforces a mixed daily wei cap when maxPerTx is omitted", async () => {
+    const rule = makeSpendingRule({
+      maxPerDay: "1000000000000000000", // 1 ETH
+      maxPerDayUsd: 5000,
+    });
+
+    const result = await evaluatePolicy(
+      rule,
+      makeContext({
+        request: { ...makeContext().request, value: "200000000000000000" }, // 0.2 ETH
+        spentToday: BigInt("900000000000000000"), // 0.9 ETH
+        priceOracle: ethPriceOracle,
+      }),
+    );
+
+    expect(result.passed).toBe(false);
+    expect(result.reason).toContain("daily spending limit");
+  });
+
+  it("enforces a canonical daily wei cap without requiring maxPerTx", async () => {
+    const rule = makeSpendingRule({ maxPerDay: "1000" });
+    const result = await evaluatePolicy(
+      rule,
+      makeContext({
+        request: { ...makeContext().request, value: "200" },
+        spentToday: 900n,
+      }),
+    );
+
+    expect(result.passed).toBe(false);
+    expect(result.reason).toContain("daily spending limit");
+  });
+
+  it("enforces a mixed weekly wei cap when per-tx and daily caps are omitted", async () => {
+    const rule = makeSpendingRule({
+      maxPerWeek: "1000000000000000000", // 1 ETH
+      maxPerWeekUsd: 5000,
+    });
+    const result = await evaluatePolicy(
+      rule,
+      makeContext({
+        request: { ...makeContext().request, value: "200000000000000000" },
+        spentThisWeek: BigInt("900000000000000000"),
+        priceOracle: ethPriceOracle,
+      }),
+    );
+
+    expect(result.passed).toBe(false);
+    expect(result.reason).toContain("weekly spending limit");
+  });
+
+  it("preserves a legacy maxAmount cap when a USD cap is added", async () => {
+    const rule = makeSpendingRule({
+      maxAmount: "1000000000000000000", // 1 ETH daily and per transaction
+      period: "day",
+      maxPerDayUsd: 5000,
+    });
+    const result = await evaluatePolicy(
+      rule,
+      makeContext({
+        request: { ...makeContext().request, value: "200000000000000000" }, // 0.2 ETH
+        spentToday: BigInt("900000000000000000"), // 0.9 ETH
+        priceOracle: ethPriceOracle,
+      }),
+    );
+
+    expect(result.passed).toBe(false);
+    expect(result.reason).toContain("daily spending limit");
+  });
+
+  it("fails closed without throwing on non-record spending configs", async () => {
+    for (const config of [null, [], "1000"]) {
+      const rule = makeSpendingRule(config as never);
+      const result = await evaluatePolicy(rule, makeContext());
+      expect(result.passed).toBe(false);
+      expect(result.reason).toContain("non-empty canonical or legacy limit config");
+    }
+  });
+
+  it("rejects numeric wei config instead of accepting a precision-lost BigInt cap", async () => {
+    const result = await evaluatePolicy(
+      makeSpendingRule({ maxPerTx: Number.MAX_SAFE_INTEGER + 2 }),
+      makeContext({ request: { ...makeContext().request, value: "1" } }),
+    );
+
+    expect(result.passed).toBe(false);
+    expect(result.reason).toContain("uint256 strings");
+  });
+
+  it("rejects numeric legacy maxAmount instead of coercing it", async () => {
+    const result = await evaluatePolicy(
+      makeSpendingRule({ maxAmount: Number.MAX_SAFE_INTEGER + 2, period: "day" }),
+      makeContext({ request: { ...makeContext().request, value: "1" } }),
+    );
+
+    expect(result.passed).toBe(false);
+    expect(result.reason).toContain("uint256 strings");
+  });
+
+  it("fails closed for an empty spending config even on a zero-value request", async () => {
+    const result = await evaluatePolicy(
+      makeSpendingRule({}),
+      makeContext({ request: { ...makeContext().request, value: "0" } }),
+    );
+
+    expect(result.passed).toBe(false);
+    expect(result.reason).toContain("non-empty canonical or legacy limit config");
+  });
+
+  it("ignores inherited canonical fields that would erase a legacy daily cap", async () => {
+    const config = Object.assign(
+      Object.create({
+        maxPerTx: "115792089237316195423570985008687907853269984665640564039457584007913129639935",
+      }),
+      {
+        maxAmount: "1000",
+        period: "day",
+      },
+    ) as Record<string, unknown>;
+    const result = await evaluatePolicy(
+      makeSpendingRule(config),
+      makeContext({
+        request: { ...makeContext().request, value: "200" },
+        spentToday: 900n,
+      }),
+    );
+
+    expect(result.passed).toBe(false);
+    expect(result.reason).toContain("daily spending limit");
+  });
+
+  it("preserves untouched legacy dimensions when a canonical weekly cap is added", async () => {
+    const rule = makeSpendingRule({
+      maxAmount: "100",
+      period: "day",
+      maxPerWeek: "1000",
+    });
+    const result = await evaluatePolicy(
+      rule,
+      makeContext({
+        request: { ...makeContext().request, value: "20" },
+        spentToday: 90n,
+      }),
+    );
+
+    expect(result.passed).toBe(false);
+    expect(result.reason).toContain("daily spending limit");
+  });
+
+  it("lets an explicit canonical dimension replace only its legacy counterpart", async () => {
+    const rule = makeSpendingRule({
+      maxAmount: "100",
+      period: "day",
+      maxPerTx: "200",
+    });
+    const result = await evaluatePolicy(
+      rule,
+      makeContext({
+        request: { ...makeContext().request, value: "150" },
+      }),
+    );
 
     expect(result.passed).toBe(false);
     expect(result.reason).toContain("daily spending limit");
@@ -860,26 +1177,30 @@ describe("Approved Addresses Policy", () => {
     expect(result.passed).toBe(true);
   });
 
-  it("passes withdrawal when destination is approved", async () => {
-    const destination = "0xfeed00000000000000000000000000000000beef";
+  it("ignores a smuggled destination field — request.to is authoritative (SEC-001)", async () => {
+    const whitelisted = "0xfeed00000000000000000000000000000000beef";
     const rule = makeAddressRule({
-      addresses: [destination],
+      addresses: [whitelisted],
       mode: "whitelist",
     });
 
+    // { to: <attacker>, destination: <whitelisted> } must NOT pass: the engine
+    // evaluates only the address actually signed (`to`), never envelope shadow
+    // fields.
     const ctx = makeContext({
       request: {
         ...makeContext().request,
         to: "0x0000000000000000000000000000000000000000",
-        destination,
+        destination: whitelisted,
       } as SignRequest & { destination: string },
     });
     const result = await evaluatePolicy(rule, ctx);
 
-    expect(result.passed).toBe(true);
+    expect(result.passed).toBe(false);
+    expect(result.reason).toContain("not in whitelist");
   });
 
-  it("rejects withdrawal when destination is not approved", async () => {
+  it("passes when request.to is approved even if a shadow destination is not", async () => {
     const destination = "0xfeed00000000000000000000000000000000beef";
     const rule = makeAddressRule({
       addresses: ["0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
@@ -889,15 +1210,19 @@ describe("Approved Addresses Policy", () => {
     const ctx = makeContext({
       request: {
         ...makeContext().request,
-        to: "0x0000000000000000000000000000000000000000",
+        to: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         destination,
-      } as SignRequest & { destination: string },
+        action: { destination },
+        withdraw: { destination },
+      } as SignRequest & {
+        destination: string;
+        action: { destination: string };
+        withdraw: { destination: string };
+      },
     });
     const result = await evaluatePolicy(rule, ctx);
 
-    expect(result.passed).toBe(false);
-    expect(result.reason).toContain("Destination address");
-    expect(result.reason).toContain("not in whitelist");
+    expect(result.passed).toBe(true);
   });
 });
 
@@ -970,7 +1295,7 @@ describe("Rate Limit Policy", () => {
 // ─── Time Window Tests ────────────────────────────────────────────────────
 
 describe("Time Window Policy", () => {
-  it("passes when no hour or day restrictions are set (always open)", async () => {
+  it("fails closed when no hour or day restrictions are set (SEC-180: empty rule is a misconfigured no-op)", async () => {
     const rule = makeTimeWindowRule({
       allowedHours: [],
       allowedDays: [],
@@ -979,7 +1304,8 @@ describe("Time Window Policy", () => {
     const ctx = makeContext();
     const result = await evaluatePolicy(rule, ctx);
 
-    expect(result.passed).toBe(true);
+    expect(result.passed).toBe(false);
+    expect(result.reason).toContain("no allowed days or hours");
   });
 
   it("passes when window covers all 24 hours and all 7 days", async () => {
@@ -1084,7 +1410,7 @@ describe("Time Window Policy", () => {
     // Combine a never-matching window with an always-matching one
     const rule = makeTimeWindowRule({
       allowedHours: [
-        { start: 24, end: 25 }, // never matches
+        { start: 23, end: 23 }, // valid but zero-length, never matches
         { start: 0, end: 24 }, // always matches
       ],
       allowedDays: [],
@@ -1383,6 +1709,34 @@ describe("PolicyEngine.evaluate()", () => {
     expect(result.results).toHaveLength(0);
   });
 
+  it("policies with falsy non-false `enabled` hit the deny-all branch (SEC-103)", async () => {
+    // Hand-authored rules carrying enabled: undefined/null bypass the API
+    // write validator's boolean check. They are "disabled" for pass purposes,
+    // so an all-such set must deny — never auto-approve.
+    const policies = [
+      { id: "p1", type: "spending-limit", enabled: undefined, config: {} },
+      { id: "p2", type: "rate-limit", enabled: null, config: {} },
+    ] as unknown as PolicyRule[];
+
+    const result = await engine.evaluate(policies, makeEngineCtx());
+
+    expect(result.approved).toBe(false);
+  });
+
+  it("a non-boolean `enabled` fails closed instead of evaluating (SEC-103)", async () => {
+    const rule = {
+      id: "p1",
+      type: "spending-limit",
+      enabled: "yes",
+      config: { maxPerTx: "1", maxPerDay: "1", maxPerWeek: "1" },
+    } as unknown as PolicyRule;
+
+    const result = await evaluatePolicy(rule, makeContext());
+
+    expect(result.passed).toBe(false);
+    expect(result.reason).toContain("enabled");
+  });
+
   it("all hard policies pass → approved", async () => {
     const policies: PolicyRule[] = [
       makeSpendingRule({
@@ -1671,5 +2025,241 @@ describe("PolicyEngine.evaluate()", () => {
     expect(result.approved).toBe(true);
     expect(result.requiresManualApproval).toBe(false);
     expect(result.results).toHaveLength(2);
+  });
+});
+
+describe("Malformed evaluator config fails closed instead of throwing (SEC-105)", () => {
+  it("time-window with non-array allowedDays/allowedHours returns a structured deny", async () => {
+    for (const config of [
+      { allowedDays: undefined, allowedHours: [] },
+      { allowedDays: [], allowedHours: "9-17" },
+      {},
+    ]) {
+      const result = await evaluatePolicy(makeTimeWindowRule(config), makeContext());
+      expect(result.passed).toBe(false);
+      expect(result.reason).toContain("must be arrays");
+    }
+  });
+
+  it("time-window with malformed nested windows returns a structured deny", async () => {
+    for (const config of [
+      { allowedDays: [], allowedHours: [null] },
+      { allowedDays: ["monday"], allowedHours: [] },
+      { allowedDays: [], allowedHours: [{ start: 9, end: "17" }] },
+    ]) {
+      const result = await evaluatePolicy(makeTimeWindowRule(config as never), makeContext());
+      expect(result.passed).toBe(false);
+      expect(result.reason).toContain("must be arrays");
+    }
+  });
+
+  it("allowed-chains with a non-array chains config returns a structured deny", async () => {
+    const rule: PolicyRule = {
+      id: "chains-bad",
+      type: "allowed-chains",
+      enabled: true,
+      config: { chains: "eip155:8453" },
+    };
+    const result = await evaluatePolicy(rule, makeContext());
+    expect(result.passed).toBe(false);
+    expect(result.reason).toContain("must be an array");
+  });
+
+  it("approved-addresses with a non-array addresses config returns a structured deny", async () => {
+    const result = await evaluatePolicy(
+      makeAddressRule({ addresses: "0x1234567890123456789012345678901234567890" }),
+      makeContext(),
+    );
+    expect(result.passed).toBe(false);
+    expect(result.reason).toContain("must be an array");
+  });
+
+  it("approved-addresses rejects malformed entries and mode without throwing", async () => {
+    for (const config of [
+      { addresses: [null], mode: "whitelist" },
+      { addresses: ["not-an-address"], mode: "blacklist" },
+      { addresses: ["0x1234567890123456789012345678901234567890"] },
+      { addresses: ["0x1234567890123456789012345678901234567890"], mode: "unknown" },
+    ]) {
+      const result = await evaluatePolicy(makeAddressRule(config as never), makeContext());
+      expect(result.passed).toBe(false);
+      expect(result.reason).toMatch(/array of strings|address family|invalid address/);
+    }
+  });
+
+  it("approved-addresses supports exact multichain families without lowercasing base58", async () => {
+    const solana = "7J9kqM5kV8Fh1Q3b6N2pR4tYwLcXzAaBbCcDdEeFfGg";
+    const matching = await evaluatePolicy(
+      makeAddressRule({
+        addresses: ["0x1234567890123456789012345678901234567890", solana],
+        mode: "whitelist",
+      }),
+      makeContext({ request: { ...makeContext().request, to: solana, chainId: 101 } }),
+    );
+    expect(matching.passed).toBe(true);
+
+    const wrongCaseAddress = solana.replace("J", "j");
+    const wrongCase = await evaluatePolicy(
+      makeAddressRule({ addresses: [wrongCaseAddress], mode: "whitelist" }),
+      makeContext({ request: { ...makeContext().request, to: solana, chainId: 101 } }),
+    );
+    expect(wrongCase.passed).toBe(false);
+    expect(wrongCase.reason).toContain("not in whitelist");
+
+    const bitcoin = "tb1q50rtrmj2f8vl9tem8qpfw36ylw5jg9j20l03x8";
+    const bitcoinMatch = await evaluatePolicy(
+      makeAddressRule({ addresses: [bitcoin], mode: "whitelist" }),
+      makeContext({ request: { ...makeContext().request, to: bitcoin, chainId: 202 } }),
+    );
+    expect(bitcoinMatch.passed).toBe(true);
+
+    const monero =
+      "49wsWmQA1WyM4gNpPkx1cRUCAamWaSBbMMmiGWNWGfWZRiXUH9DdMMi5ZJUM98K2xk62AEX3C6pCDMp1iXt2PLqX54LVKjA";
+    const moneroMatch = await evaluatePolicy(
+      makeAddressRule({ addresses: [monero], mode: "whitelist" }),
+      makeContext({ request: { ...makeContext().request, to: monero, chainId: 301 } }),
+    );
+    expect(moneroMatch.passed).toBe(true);
+  });
+
+  it("approved-addresses rejects malformed and cross-chain address inputs", async () => {
+    const evm = "0x1234567890123456789012345678901234567890";
+    for (const address of [
+      "1111111111111111111111111111111",
+      "tb1Q50rtrmj2f8vl9tem8qpfw36ylw5jg9j20l03x8",
+      "tb1q50rtrmj2f8vl9tem8qpfw36ylw5jg9j20l03x9",
+      "4".repeat(94),
+      "not-an-address",
+    ]) {
+      const result = await evaluatePolicy(
+        makeAddressRule({ addresses: [address], mode: "whitelist" }),
+        makeContext(),
+      );
+      expect(result.passed).toBe(false);
+      expect(result.reason).toMatch(/address family|invalid address/);
+    }
+
+    const crossChain = await evaluatePolicy(
+      makeAddressRule({ addresses: [evm], mode: "whitelist" }),
+      makeContext({ request: { ...makeContext().request, to: evm, chainId: 101 } }),
+    );
+    expect(crossChain.passed).toBe(false);
+    expect(crossChain.reason).toContain("destination address family");
+  });
+
+  it("rejects mixed-case and checksum-invalid Bitcoin addresses", async () => {
+    const bitcoin = "bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu";
+    const upper = bitcoin.toUpperCase();
+    const uppercaseMatch = await evaluatePolicy(
+      makeAddressRule({ addresses: [upper], mode: "whitelist" }),
+      makeContext({ request: { ...makeContext().request, to: bitcoin, chainId: 201 } }),
+    );
+    expect(uppercaseMatch.passed).toBe(true);
+
+    for (const invalid of [
+      `bC${bitcoin.slice(2)}`,
+      `${bitcoin.slice(0, -1)}q`,
+      "1BoatSLRHtKNngkdXEeobR76b53LETtpyU",
+    ]) {
+      const result = await evaluatePolicy(
+        makeAddressRule({ addresses: [bitcoin], mode: "whitelist" }),
+        makeContext({ request: { ...makeContext().request, to: invalid, chainId: 201 } }),
+      );
+      expect(result.passed).toBe(false);
+      expect(result.reason).toContain("address family");
+    }
+  });
+
+  it("rejects Bitcoin regtest addresses on the testnet policy chain", async () => {
+    const regtest = "bcrt1q50rtrmj2f8vl9tem8qpfw36ylw5jg9j2qzhx4";
+    const result = await evaluatePolicy(
+      makeAddressRule({ addresses: [regtest], mode: "whitelist" }),
+      makeContext({ request: { ...makeContext().request, to: regtest, chainId: 202 } }),
+    );
+    expect(result.passed).toBe(false);
+    expect(result.reason).toContain("address family");
+  });
+
+  it("binds Bitcoin and Monero policy addresses to the request network", async () => {
+    const bitcoinMainnet = "1BoatSLRHtKNngkdXEeobR76b53LETtpyT";
+    const moneroMainnet =
+      "45AmZ2FRjuqZts5NGzb7ZXSNRuwS9MUqEeakpyEeSHsB5mywLwBzzq2cTsbJzTVUuLSHxtbfgKyZJVBqPffpP8fm79sjAcK";
+    for (const [address, chainId] of [
+      [bitcoinMainnet, 202],
+      [moneroMainnet, 302],
+    ] as const) {
+      const result = await evaluatePolicy(
+        makeAddressRule({ addresses: [address], mode: "whitelist" }),
+        makeContext({ request: { ...makeContext().request, to: address, chainId } }),
+      );
+      expect(result.passed).toBe(false);
+      expect(result.reason).toContain("address family");
+    }
+  });
+
+  it("accepts checksum-valid Bitcoin and Monero addresses on their own networks", async () => {
+    for (const [address, chainId] of [
+      ["tb1q50rtrmj2f8vl9tem8qpfw36ylw5jg9j20l03x8", 202],
+      [
+        "49wsWmQA1WyM4gNpPkx1cRUCAamWaSBbMMmiGWNWGfWZRiXUH9DdMMi5ZJUM98K2xk62AEX3C6pCDMp1iXt2PLqX54LVKjA",
+        301,
+      ],
+    ] as const) {
+      const result = await evaluatePolicy(
+        makeAddressRule({ addresses: [address], mode: "whitelist" }),
+        makeContext({ request: { ...makeContext().request, to: address, chainId } }),
+      );
+      expect(result.passed).toBe(true);
+    }
+  });
+
+  it("rejects malformed decoded lengths and tampered Monero checksums", async () => {
+    const monero =
+      "45AmZ2FRjuqZts5NGzb7ZXSNRuwS9MUqEeakpyEeSHsB5mywLwBzzq2cTsbJzTVUuLSHxtbfgKyZJVBqPffpP8fm79sjAcK";
+    for (const [address, chainId] of [
+      ["111111111111111111111111111111111", 101],
+      [`${monero.slice(0, -1)}M`, 301],
+    ] as const) {
+      const result = await evaluatePolicy(
+        makeAddressRule({ addresses: [address], mode: "whitelist" }),
+        makeContext({ request: { ...makeContext().request, to: address, chainId } }),
+      );
+      expect(result.passed).toBe(false);
+      expect(result.reason).toContain("address family");
+    }
+  });
+
+  it("rejects checksum-valid Monero identity and torsion points in both public keys", async () => {
+    for (const address of [
+      // Identity and small-order/torsion public spend keys, respectively.
+      "41fJjQDhryD11111111111111111111111111111111116M6xLGByLYcTsbJzTVUuLSHxtbfgKyZJVBqPffpP8fm7BapnRj",
+      "41d7FXjswpK11111111111111111111111111111111116M6xLGByLYcTsbJzTVUuLSHxtbfgKyZJVBqPffpP8fm7C8GNnw",
+      // The same invalid points in the public view-key position.
+      "45AmZ2FRjuqZts5NGzb7ZXSNRuwS9MUqEeakpyEeSHsB5gg2sUQdweP11111111111111111111111111111111113vBvjU",
+      "45AmZ2FRjuqZts5NGzb7ZXSNRuwS9MUqEeakpyEeSHsB5gdqPbvp2VV111111111111111111111111111111111179TEUy",
+    ]) {
+      const result = await evaluatePolicy(
+        makeAddressRule({ addresses: [address], mode: "whitelist" }),
+        makeContext({ request: { ...makeContext().request, to: address, chainId: 301 } }),
+      );
+      expect(result.passed).toBe(false);
+      expect(result.reason).toContain("address family");
+    }
+  });
+
+  it("filters valid mixed-family policy entries to the request chain", async () => {
+    const evm = "0x1234567890123456789012345678901234567890";
+    const solana = "11111111111111111111111111111111";
+    const rule = makeAddressRule({ addresses: [evm, solana], mode: "whitelist" });
+    const evmResult = await evaluatePolicy(
+      rule,
+      makeContext({ request: { ...makeContext().request, to: evm, chainId: 1 } }),
+    );
+    const solanaResult = await evaluatePolicy(
+      rule,
+      makeContext({ request: { ...makeContext().request, to: solana, chainId: 101 } }),
+    );
+    expect(evmResult.passed).toBe(true);
+    expect(solanaResult.passed).toBe(true);
   });
 });

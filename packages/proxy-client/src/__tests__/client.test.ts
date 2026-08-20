@@ -106,6 +106,39 @@ describe("StewardProxyClient.fetch headers", () => {
     expect(calls[0].headers.get("idempotency-key")).toBeNull();
   });
 
+  test("auto-attaches replay-bound Idempotency-Key on signed GET", async () => {
+    const { fetch, calls } = makeCapturingFetch();
+    const client = new StewardProxyClient({
+      proxyUrl: "https://proxy.test",
+      token: "tok",
+      signingSecret: "signing-secret",
+      tenantId: "tenant-1",
+      agentId: "agent-1",
+      fetch,
+    });
+    await client.fetch("/proxy/broker.example.com/api/items?limit=10", { method: "GET" });
+    expect(calls[0].headers.get("idempotency-key")).toMatch(/^[0-9a-f-]{36}$/);
+    expect(calls[0].headers.get("x-steward-signature")).toMatch(/^v1=[0-9a-f]{64}$/);
+  });
+
+  test("preserves caller-supplied replay key on signed HEAD", async () => {
+    const { fetch, calls } = makeCapturingFetch();
+    const client = new StewardProxyClient({
+      proxyUrl: "https://proxy.test",
+      token: "tok",
+      signingSecret: "signing-secret",
+      tenantId: "tenant-1",
+      agentId: "agent-1",
+      fetch,
+    });
+    await client.fetch("/proxy/broker.example.com/api/items", {
+      method: "HEAD",
+      headers: { "idempotency-key": "caller-safe-request-key" },
+    });
+    expect(calls[0].headers.get("idempotency-key")).toBe("caller-safe-request-key");
+    expect(calls[0].headers.get("x-steward-signature")).toMatch(/^v1=[0-9a-f]{64}$/);
+  });
+
   test("preserves a caller-supplied Idempotency-Key", async () => {
     const { fetch, calls } = makeCapturingFetch();
     const client = new StewardProxyClient({

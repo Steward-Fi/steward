@@ -46,9 +46,21 @@ function isBlockedHost(host: string): boolean {
   return false;
 }
 
-function isAllowedDirectProxyHost(host: string): boolean {
+function isPublicDnsHost(host: string): boolean {
   const normalized = host.toLowerCase();
   if (!normalized.includes(".") || isBlockedHost(normalized)) return false;
+  if (normalized.length > 253) return false;
+  if (
+    !normalized.split(".").every((label) => /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(label))
+  ) {
+    return false;
+  }
+  return true;
+}
+
+function isAllowedDirectProxyHost(host: string): boolean {
+  const normalized = host.toLowerCase();
+  if (!isPublicDnsHost(normalized)) return false;
   return configuredDirectProxyHosts().has(normalized);
 }
 
@@ -72,7 +84,10 @@ function hasUnsafePath(path: string): boolean {
  * @param requestPath - The path from the incoming request (e.g. "/openai/v1/chat/completions")
  * @returns Resolved target or null if path doesn't match any alias or proxy pattern
  */
-export function resolveTarget(requestPath: string): ResolvedTarget | null {
+export function resolveTarget(
+  requestPath: string,
+  options: { governed?: boolean } = {},
+): ResolvedTarget | null {
   // Strip leading slash and split into segments
   const cleaned = requestPath.startsWith("/") ? requestPath.slice(1) : requestPath;
   if (!cleaned) return null;
@@ -110,7 +125,12 @@ export function resolveTarget(requestPath: string): ResolvedTarget | null {
     const host = rawHost.toLowerCase();
     const path = hostSlashIdx === -1 ? "/" : afterProxy.slice(hostSlashIdx);
 
-    if (!isAllowedDirectProxyHost(host)) return null;
+    // Config-driven governed operations bind this exact host to a selected DB
+    // route and carry a non-forgeable in-process execution claim. They must not
+    // require a second environment allowlist. Direct/legacy traffic retains the
+    // explicit STEWARD_PROXY_ALLOWED_HOSTS gate.
+    if (!isAllowedDirectProxyHost(host) && !options.governed) return null;
+    if (!isPublicDnsHost(host)) return null;
     if (hasUnsafePath(path)) return null;
 
     return {

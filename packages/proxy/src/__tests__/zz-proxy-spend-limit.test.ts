@@ -26,6 +26,7 @@ const route = {
   pathPattern: "/*",
   method: "*",
   injectAs: "header",
+  injectionStrategy: "header",
   injectKey: "x-api-key",
   injectFormat: "Bearer {value}",
   priority: 0,
@@ -108,6 +109,21 @@ mock.module("@stwd/db", () => {
     workspaces,
     policies,
     proxyAuditLog,
+    // Table/function stubs for modules outside this suite's scope (provider
+    // authority, google/slack credential lifecycles, audit chain). bun
+    // validates named imports against this mock namespace at link time, so
+    // every name any transitively-loaded module imports must exist here.
+    approvalQueue: { id: "id" },
+    auditEvents: { id: "id" },
+    executionAuthorizationNonces: { id: "id" },
+    intents: { id: "id" },
+    providerActionBindings: { id: "id" },
+    providerGoogleCredentialLifecycles: { id: "id" },
+    users: { id: "id" },
+    withTenantAuditedTransaction: async (
+      _tenantId: unknown,
+      fn: (tx: unknown, appendRequiredAudit: (event: unknown) => Promise<void>) => Promise<unknown>,
+    ) => fn({}, async () => {}),
     getDb: () => ({
       select: () => ({
         from: (table: unknown) => ({
@@ -220,11 +236,16 @@ describe("proxy spend-limit enforcement", () => {
   afterEach(() => {
     globalThis.fetch = originalFetch;
     delete process.env.STEWARD_PROXY_ALLOWED_HOSTS;
+    delete process.env.STEWARD_PROXY_DEV_MODE;
   });
 
   beforeEach(() => {
     process.env.STEWARD_MASTER_PASSWORD = "test-master-password";
     process.env.STEWARD_PROXY_ALLOWED_HOSTS = "example.com";
+    // These tests exercise handler logic under the soft development posture
+    // (in-process replay store, no Redis). SEC-175 made that posture an
+    // explicit opt-in, so set the flag here.
+    process.env.STEWARD_PROXY_DEV_MODE = "true";
     route.injectAs = "header";
     route.injectKey = "x-api-key";
     route.injectFormat = "Bearer {value}";
@@ -281,6 +302,16 @@ describe("proxy spend-limit enforcement", () => {
       expect(headers.get("x-steward-key")).toBeNull();
       expect(headers.get("x-steward-platform-key")).toBeNull();
       expect(headers.get("x-steward-signature")).toBeNull();
+      // SEC-097: alternate client-IP headers must not be relayed upstream.
+      expect(headers.get("x-client-ip")).toBeNull();
+      expect(headers.get("cf-connecting-ip")).toBeNull();
+      expect(headers.get("true-client-ip")).toBeNull();
+      expect(headers.get("fastly-client-ip")).toBeNull();
+      expect(headers.get("x-cluster-client-ip")).toBeNull();
+      expect(headers.get("x-original-forwarded-for")).toBeNull();
+      // SEC-099: request-signing window metadata is internal to the proxy.
+      expect(headers.get("x-steward-request-timestamp")).toBeNull();
+      expect(headers.get("x-steward-request-expires-at")).toBeNull();
       expect(headers.get("x-http-method-override")).toBeNull();
       expect(headers.get("x-method-override")).toBeNull();
       expect(headers.get("x-original-url")).toBeNull();
@@ -306,6 +337,14 @@ describe("proxy spend-limit enforcement", () => {
           "X-Steward-Key": "tenant-key",
           "X-Steward-Platform-Key": "platform-key",
           "X-Steward-Signature": "signature",
+          "X-Client-IP": "127.0.0.1",
+          "CF-Connecting-IP": "127.0.0.1",
+          "True-Client-IP": "127.0.0.1",
+          "Fastly-Client-IP": "127.0.0.1",
+          "X-Cluster-Client-IP": "127.0.0.1",
+          "X-Original-Forwarded-For": "127.0.0.1",
+          "X-Steward-Request-Timestamp": "1700000000",
+          "X-Steward-Request-Expires-At": "1700000300",
           "X-HTTP-Method-Override": "DELETE",
           "X-Method-Override": "PATCH",
           "X-Original-URL": "/v1/admin/delete-all",
@@ -317,6 +356,44 @@ describe("proxy spend-limit enforcement", () => {
 
     expect(res.status).toBe(200);
     expect(fetchCalls).toBe(1);
+  });
+
+  test("strips upstream Set-Cookie so agents never receive credential-derived sessions (SEC-098)", async () => {
+    spendResult.configured = false;
+    globalThis.fetch = (async (url: string | URL | Request, _init?: RequestInit) => {
+      fetchCalls++;
+      expect(String(url)).toBe("https://example.com/v1/echo");
+      return new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: {
+          "content-type": "application/json",
+          "set-cookie": "provider_session=abc123; HttpOnly; Path=/",
+        },
+      });
+    }) as typeof fetch;
+    const { handleProxy, __setCheckProxySpendLimitForTests } = await loadProxy();
+    __setCheckProxySpendLimitForTests(async () => spendResult);
+
+    const res = await handleProxy(makeContext());
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("set-cookie")).toBeNull();
+    expect(fetchCalls).toBe(1);
+  });
+
+  test("unknown injectAs fails closed with 400 and never reaches upstream (SEC-176)", async () => {
+    spendResult.configured = false;
+    route.injectAs = "carrier-pigeon";
+    const { handleProxy, __setCheckProxySpendLimitForTests } = await loadProxy();
+    __setCheckProxySpendLimitForTests(async () => spendResult);
+
+    const res = await handleProxy(makeContext());
+    const body = (await res.json()) as { error?: string };
+
+    expect(res.status).toBe(400);
+    expect(body.error).toContain("Invalid credential injection configuration");
+    expect(fetchCalls).toBe(0);
+    expect(audits.some((entry) => entry?.reason === "credential-injection-failed")).toBe(true);
   });
 
   test("agent over daily budget returns 402 and does not call upstream", async () => {
@@ -548,6 +625,50 @@ describe("proxy spend-limit enforcement", () => {
     );
   });
 
+  for (const [label, declaredLength] of [
+    ["missing Content-Length", undefined],
+    ["lying small Content-Length", "1"],
+  ] as const) {
+    test(`bounds credential response inspection with ${label}`, async () => {
+      spendResult.configured = false;
+      let cancelled = false;
+      globalThis.fetch = (async () => {
+        fetchCalls++;
+        let chunks = 0;
+        const stream = new ReadableStream<Uint8Array>({
+          pull(controller) {
+            chunks += 1;
+            controller.enqueue(new Uint8Array(64 * 1024));
+            if (chunks >= 40) controller.close();
+          },
+          cancel() {
+            cancelled = true;
+          },
+        });
+        const headers = new Headers({ "content-type": "application/octet-stream" });
+        if (declaredLength !== undefined) headers.set("content-length", declaredLength);
+        return new Response(stream, { status: 200, headers });
+      }) as typeof fetch;
+
+      const { handleProxy, __setCheckProxySpendLimitForTests } = await loadProxy();
+      __setCheckProxySpendLimitForTests(async () => spendResult);
+
+      const response = await handleProxy(makeContext());
+      const body = await response.text();
+      expect(response.status).toBe(502);
+      expect(body).toContain("could not be inspected safely");
+      expect(body).not.toContain("test-secret");
+      expect(cancelled).toBe(true);
+      expect(audits).toContainEqual(
+        expect.objectContaining({
+          targetHost: "example.com",
+          statusCode: 502,
+          reason: "credential-response-inspection-failed",
+        }),
+      );
+    });
+  }
+
   test("blocks streaming responses after injecting a credential", async () => {
     spendResult.configured = false;
     globalThis.fetch = (async (url: string | URL | Request) => {
@@ -627,7 +748,17 @@ describe("proxy spend-limit enforcement", () => {
       await loadProxy();
     __setCheckProxySpendLimitForTests(async () => spendResult);
 
-    for (const address of ["64:ff9b::a9fe:a9fe", "64:ff9b:1::a9fe:a9fe", "2002:7f00:1::"]) {
+    for (const address of [
+      "64:ff9b::a9fe:a9fe",
+      "64:ff9b:1::a9fe:a9fe",
+      // RFC 8215 local-use /48: the embedded IPv4 position is operator-defined,
+      // so a non-zero fourth word must not bypass the public-address boundary.
+      "64:ff9b:1:1::808:808",
+      // Exercise the final address in the reserved /48 so the guard cannot
+      // accidentally regress to a narrower implementation-defined subnet.
+      "64:ff9b:1:ffff:ffff:ffff:ffff:ffff",
+      "2002:7f00:1::",
+    ]) {
       audits.length = 0;
       __setResolveProxyHostForTests(async () => [{ address, family: 6 }]);
 
@@ -739,6 +870,164 @@ describe("proxy spend-limit enforcement", () => {
     expect(second.status).toBe(409);
     expect(fetchCalls).toBe(1);
     expect(((await second.json()) as { error: string }).error).toContain("already forwarded");
+  });
+
+  test("preserves a successful upstream response when replay completion persistence fails", async () => {
+    spendResult.configured = false;
+    const {
+      __clearProxyReplayClaimsForTests,
+      __setCheckProxySpendLimitForTests,
+      createProxyHandler,
+      handleProxy,
+    } = await loadProxy();
+    __clearProxyReplayClaimsForTests();
+    __setCheckProxySpendLimitForTests(async () => spendResult);
+    const diagnosticCalls: unknown[][] = [];
+    const originalConsoleError = console.error;
+    console.error = (...args: unknown[]) => diagnosticCalls.push(args);
+    let completionAttempts = 0;
+    const request = () =>
+      makeContext("/proxy/example.com/v1/echo", {
+        method: "POST",
+        headers: { "Idempotency-Key": "completion-failure-success" },
+        body: JSON.stringify({ op: "create" }),
+      });
+
+    try {
+      const handler = createProxyHandler({
+        completeReplayClaim: async () => {
+          completionAttempts++;
+          throw new Error("Bearer completion-secret-must-not-be-logged");
+        },
+      });
+      const first = await handler(request());
+      const retry = await handleProxy(request());
+
+      expect(first.status).toBe(200);
+      expect(await first.text()).toBe(JSON.stringify({ ok: true }));
+      expect(retry.status).toBe(409);
+      expect(((await retry.json()) as { error: string }).error).toContain("already processing");
+      expect(fetchCalls).toBe(1);
+      expect(completionAttempts).toBe(1);
+      expect(JSON.stringify(diagnosticCalls)).toContain(
+        "Failed to persist post-forward idempotency completion",
+      );
+      expect(JSON.stringify(diagnosticCalls)).not.toContain("completion-secret-must-not-be-logged");
+    } finally {
+      console.error = originalConsoleError;
+    }
+  });
+
+  test("keeps a single winner while replay completion is still unresolved", async () => {
+    spendResult.configured = false;
+    const {
+      __clearProxyReplayClaimsForTests,
+      __setCheckProxySpendLimitForTests,
+      createProxyHandler,
+      handleProxy,
+    } = await loadProxy();
+    __clearProxyReplayClaimsForTests();
+    __setCheckProxySpendLimitForTests(async () => spendResult);
+    let completionStarted!: () => void;
+    const completionStartedPromise = new Promise<void>((resolve) => {
+      completionStarted = resolve;
+    });
+    let rejectCompletion!: (reason: Error) => void;
+    const completionBarrier = new Promise<void>((_resolve, reject) => {
+      rejectCompletion = reject;
+    });
+    const diagnosticCalls: unknown[][] = [];
+    const originalConsoleError = console.error;
+    console.error = (...args: unknown[]) => diagnosticCalls.push(args);
+    const request = () =>
+      makeContext("/proxy/example.com/v1/echo", {
+        method: "POST",
+        headers: { "Idempotency-Key": "completion-in-flight-single-winner" },
+        body: JSON.stringify({ op: "create" }),
+      });
+
+    try {
+      const handler = createProxyHandler({
+        completeReplayClaim: async () => {
+          completionStarted();
+          await completionBarrier;
+        },
+      });
+      const firstPromise = handler(request());
+      await completionStartedPromise;
+
+      const concurrentRetry = await handleProxy(request());
+      expect(concurrentRetry.status).toBe(409);
+      expect(((await concurrentRetry.json()) as { error: string }).error).toContain(
+        "already processing",
+      );
+      expect(fetchCalls).toBe(1);
+
+      rejectCompletion(new Error("Bearer concurrent-completion-secret-must-not-be-logged"));
+      const first = await firstPromise;
+      expect(first.status).toBe(200);
+      expect(await first.text()).toBe(JSON.stringify({ ok: true }));
+      expect(fetchCalls).toBe(1);
+      expect(JSON.stringify(diagnosticCalls)).not.toContain(
+        "concurrent-completion-secret-must-not-be-logged",
+      );
+    } finally {
+      console.error = originalConsoleError;
+      // Avoid an unhandled rejection if an assertion above fails before the
+      // request awaiting the completion barrier can observe it.
+      rejectCompletion(new Error("test cleanup"));
+      await completionBarrier.catch(() => undefined);
+    }
+  });
+
+  test("preserves a sanitized upstream failure when replay completion persistence fails", async () => {
+    spendResult.configured = false;
+    const {
+      __clearProxyReplayClaimsForTests,
+      __setCheckProxySpendLimitForTests,
+      createProxyHandler,
+      handleProxy,
+    } = await loadProxy();
+    __clearProxyReplayClaimsForTests();
+    __setCheckProxySpendLimitForTests(async () => spendResult);
+    globalThis.fetch = (async () => {
+      fetchCalls++;
+      throw new Error("Bearer upstream-secret-must-not-be-logged");
+    }) as typeof fetch;
+    const diagnosticCalls: unknown[][] = [];
+    const originalConsoleError = console.error;
+    console.error = (...args: unknown[]) => diagnosticCalls.push(args);
+    let completionAttempts = 0;
+    const request = () =>
+      makeContext("/proxy/example.com/v1/echo", {
+        method: "POST",
+        headers: { "Idempotency-Key": "completion-failure-upstream" },
+        body: JSON.stringify({ op: "create" }),
+      });
+
+    try {
+      const handler = createProxyHandler({
+        completeReplayClaim: async () => {
+          completionAttempts++;
+          throw new Error("Bearer completion-secret-must-not-be-logged");
+        },
+      });
+      const first = await handler(request());
+      const retry = await handleProxy(request());
+
+      expect(first.status).toBe(502);
+      expect(await first.json()).toEqual({ ok: false, error: "Upstream request failed" });
+      expect(retry.status).toBe(409);
+      expect(((await retry.json()) as { error: string }).error).toContain("already processing");
+      expect(fetchCalls).toBe(1);
+      expect(completionAttempts).toBe(1);
+      const diagnostics = JSON.stringify(diagnosticCalls);
+      expect(diagnostics).toContain("Failed to persist post-forward idempotency completion");
+      expect(diagnostics).not.toContain("upstream-secret-must-not-be-logged");
+      expect(diagnostics).not.toContain("completion-secret-must-not-be-logged");
+    } finally {
+      console.error = originalConsoleError;
+    }
   });
 
   test("blocks injected credentials reflected in upstream response headers", async () => {

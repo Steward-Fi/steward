@@ -20,6 +20,17 @@ public final class StewardAndroidClient {
         );
     }
 
+    /** Permit a plaintext non-loopback baseUrl (warns at construction). HTTPS is
+     * required by default so credentials never travel cleartext off-loopback (SEC-200). */
+    public static StewardAndroidClient withBearerToken(String baseUrl, String bearerToken, boolean allowInsecureBaseUrl) {
+        return new StewardAndroidClient(
+            new StewardClient(StewardClient.config(baseUrl)
+                .bearerToken(bearerToken)
+                .allowInsecureBaseUrl(allowInsecureBaseUrl)
+                .build())
+        );
+    }
+
     public Map<String, Object> registerFcmPushToken(DevicePushRegistration registration) {
         PushSubscriptionInput.Builder builder = PushSubscriptionInput.builder("fcm", registration.getToken())
             .platform("android");

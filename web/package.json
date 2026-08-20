@@ -8,10 +8,18 @@
     "start": "next start --port ${PORT:-3202}",
     "e2e": "playwright test",
     "e2e:chromium": "playwright test --project=chromium",
+    "e2e:wallets:cache:metamask": "bun run scripts/cache-wallet-e2e.ts metamask",
+    "e2e:wallets:cache:phantom": "bun run scripts/cache-wallet-e2e.ts phantom",
+    "e2e:wallets:cache": "bun run e2e:wallets:cache:metamask && bun run e2e:wallets:cache:phantom",
+    "e2e:wallets:preflight": "bun run scripts/preflight-wallet-e2e.ts",
+    "e2e:wallets:cleanup": "bun run scripts/cleanup-wallet-e2e.ts",
+    "e2e:wallets:list": "playwright test --config=playwright.wallets.config.ts --list",
+    "e2e:wallets": "bun run scripts/run-wallet-e2e.ts",
+    "e2e:trust-ux": "NEXT_PUBLIC_STEWARD_API_URL=http://127.0.0.1:3299 E2E_ALLOW_INSECURE_HTTP=true bun run build && playwright test --config=playwright.trust.config.ts",
     "e2e:install": "playwright install chromium firefox webkit",
-    "cf:build": "opennextjs-cloudflare build",
-    "cf:preview": "opennextjs-cloudflare preview",
-    "cf:deploy": "opennextjs-cloudflare build && wrangler deploy"
+    "cf:build": "node scripts/assert-production-deploy-env.mjs && opennextjs-cloudflare build",
+    "cf:preview": "node scripts/assert-production-deploy-env.mjs && opennextjs-cloudflare preview",
+    "cf:deploy": "node scripts/assert-production-deploy-env.mjs && opennextjs-cloudflare build && wrangler deploy"
   },
   "dependencies": {
     "@rainbow-me/rainbowkit": "^2.2.10",
@@ -26,6 +34,7 @@
     "@tanstack/react-query": "^5.90.21",
     "framer-motion": "^12.36.0",
     "next": "^15.5.16",
+    "punycode": "^2.3.1",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "viem": "^2.50.4",
@@ -37,16 +46,21 @@
     "@solana/wallet-adapter-coin98": "^0.5.24"
   },
   "devDependencies": {
+    "@axe-core/playwright": "^4.13.0",
+    "@opennextjs/cloudflare": "^1.19.11",
     "@playwright/test": "^1.60.0",
+    "@scure/bip39": "1.6.0",
+    "@synthetixio/synpress": "4.1.2",
+    "@synthetixio/synpress-cache": "0.0.14",
     "@types/node": "25.5.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
     "autoprefixer": "^10.4.0",
     "bs58": "^6.0.0",
+    "happy-dom": "^20.11.6",
     "postcss": "^8.4.0",
     "tailwindcss": "^3.4.0",
     "typescript": "^5.8.0",
-    "@opennextjs/cloudflare": "^1.19.11",
     "wrangler": "^4.95.0"
   }
 }

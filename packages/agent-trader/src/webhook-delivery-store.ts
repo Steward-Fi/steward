@@ -1,4 +1,6 @@
 import { createHash } from "node:crypto";
+import { assertRedisUrlTls } from "@stwd/redis";
+import { redactedThrownDiagnostics } from "@stwd/shared";
 import { Redis } from "ioredis";
 
 export const WEBHOOK_DELIVERY_REPLAY_TTL_MS = 10 * 60 * 1000;
@@ -182,6 +184,10 @@ export function createUpstashReplaySetClient(
 
 function defaultRedisFactory(kind: "redis" | "upstash", env: NodeJS.ProcessEnv): RedisSetNxPx {
   if (kind === "redis") {
+    // SEC-032: replay-protection state is enforcement data — route through the
+    // shared TLS assertion so production cannot run this store over cleartext
+    // redis:// to a remote host without the explicit insecure override.
+    assertRedisUrlTls(env.REDIS_URL as string, env);
     const client = new Redis(env.REDIS_URL as string, {
       enableReadyCheck: true,
       maxRetriesPerRequest: 3,
@@ -190,7 +196,7 @@ function defaultRedisFactory(kind: "redis" | "upstash", env: NodeJS.ProcessEnv):
     // Prevent an EventEmitter "error" event from terminating the process. SET
     // still rejects, and the request path converts that failure to a 503.
     client.on("error", (error) => {
-      console.error("[agent-trader] webhook replay Redis error:", error.message);
+      console.error("[agent-trader] webhook replay Redis error", redactedThrownDiagnostics(error));
     });
     return client;
   }

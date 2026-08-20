@@ -51,7 +51,7 @@ curl http://127.0.0.1:3200/ready
 curl http://127.0.0.1:8080/health
 ```
 
-`/health` is a liveness check. `/ready` verifies migrations have completed, the database is reachable, and `STEWARD_MASTER_PASSWORD` is set.
+`/health` is a liveness check. `/ready` verifies migrations have completed, the database is reachable, and `STEWARD_MASTER_PASSWORD` is set. Unauthenticated `/ready` responses contain only the status code and per-check `ok` flags; set `STEWARD_READY_PROBE_TOKEN` and send it as the `X-Steward-Probe-Token` header to receive the full diagnostic detail (migration tags, backend identity, clock skew).
 
 Create a platform key by generating a random value and putting it in `STEWARD_PLATFORM_KEYS` before startup. Multiple platform keys can be configured as a comma-separated list.
 
@@ -188,6 +188,7 @@ Steward backup.
 | `WXMR_SOLANA_RPC_URL` | Solana mainnet RPC used to verify the wxmr bridge's global and connected-wallet withdrawal fees | `SOLANA_RPC_URL`, then Solana's public mainnet endpoint | Optional; use a reliable operator-controlled HTTPS RPC in production. Plain HTTP is accepted only on loopback. Only used when the `wxmr` plugin is enabled. |
 | `REDIS_URL` | Redis for rate limiting, token/challenge stores, proxy spend tracking/cache | none | Optional when Postgres is available; production fails startup if auth stores cannot initialize on Redis or Postgres. |
 | `STEWARD_ALLOW_MEMORY_AUTH_STORES` | Explicit single-instance acknowledgement for restart-unsafe auth state | none | Never recommended for multi-instance production. Exact `true` is required before production/Workers may use memory-backed challenge, token, nonce, MFA, or import-session state. |
+| `STEWARD_ALLOW_MEMORY_TRADING_IDEMPOTENCY` | Explicit single-instance acknowledgement for restart-unsafe trading idempotency | none | Never enable for multi-instance production. Exact `true` is required when production has no Redis-backed atomic claims. |
 | `RESEND_API_KEY` | Email magic-link delivery | none | If absent, email auth logs/dev-returns tokens instead of sending mail. |
 | `EMAIL_FROM` | Magic-link sender | `login@localhost` in `.env.example`/Compose; code fallback is `login@steward.fi` | Must be accepted by your mail provider when email delivery is enabled. |
 | `APP_URL` | Public base URL for auth links/callbacks | `http://localhost:3200` in `.env.example`/Compose; production OAuth requires an explicit public value | Set to your app/API-facing URL for magic links. |
@@ -200,6 +201,7 @@ Steward backup.
 | `DISCORD_CLIENT_ID` / `DISCORD_CLIENT_SECRET` | Discord OAuth | none | Required only for Discord OAuth. |
 | `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` | GitHub OAuth | none | Present in `.env.example`; only useful where corresponding routes are enabled. |
 | `TWITTER_CLIENT_ID` / `TWITTER_CLIENT_SECRET` | Twitter/X OAuth | none | Required only for Twitter/X OAuth. |
+| `X_CLIENT_ID` / `X_CLIENT_SECRET` | Provider-account X OAuth connect and lifecycle recovery | none | Required together on the API when governed X accounts are enabled. These are distinct from the human sign-in credentials above. |
 | `SIWE_ALLOWED_DOMAINS` | Optional SIWE domain allowlist | none | Comma-separated domains; when set, SIWE messages must match. |
 | `STEWARD_PROXY_PORT` | Proxy listen port | `8080` | Must parse as an integer. Compose exposes `127.0.0.1:8080` by default. |
 | `NEXT_PUBLIC_STEWARD_API_URL` | Browser-facing API URL for the Next.js web app | `http://localhost:3200` | Used by `web/`, not the API process. |

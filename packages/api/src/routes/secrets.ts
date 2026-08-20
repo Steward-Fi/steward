@@ -20,7 +20,11 @@ import {
 import { SecretVault, validateSecretRouteConfig } from "@stwd/vault";
 import { and, eq, inArray } from "drizzle-orm";
 import { type Context, Hono } from "hono";
-import { type AuditEventInput, writeAuditEvent } from "../services/audit";
+import {
+  type AuditEventInput,
+  withTenantAuditedTransaction,
+  writeAuditEvent,
+} from "../services/audit";
 import {
   type ApiResponse,
   type AppVariables,
@@ -31,6 +35,13 @@ import {
   sanitizeErrorMessage,
   setNoStoreHeaders,
 } from "../services/context";
+import { isRecentMfaTimestamp } from "../services/recent-mfa";
+import {
+  assertGovernedRouteUpdateIsSafe,
+  assertNoOppositeAuthorityOverlap,
+  lockSecretRouteNamespaces,
+  SecretRouteAuthorityConflict,
+} from "../services/secret-route-authority";
 
 export const secretsRoutes = new Hono<{ Variables: AppVariables }>();
 
@@ -43,13 +54,23 @@ async function writeSecretsAudit(
   c: Context<{ Variables: AppVariables }>,
   event: Omit<AuditEventInput, "ipAddress" | "userAgent" | "requestId">,
 ): Promise<void> {
-  await writeAuditEvent({
+  await writeAuditEvent(secretsAuditEvent(c, event));
+}
+
+function secretsAuditEvent(
+  c: Context<{ Variables: AppVariables }>,
+  event: Omit<AuditEventInput, "ipAddress" | "userAgent" | "requestId">,
+): AuditEventInput {
+  return {
     ...event,
     ipAddress: c.req.header("x-forwarded-for") ?? null,
     userAgent: c.req.header("user-agent") ?? null,
     requestId: c.get("requestId") ?? null,
-  });
+  };
 }
+
+type VaultDb = ReturnType<typeof getVaultDb>;
+type VaultTx = Parameters<Parameters<VaultDb["transaction"]>[0]>[0];
 
 // Route-config validation (host allowlist, path/method/injectAs/injectKey/
 // injectFormat rules, per-host strictness) lives in the shared
@@ -64,6 +85,8 @@ const SECRET_ROUTE_UPDATE_KEYS = new Set([
   "injectAs",
   "injectKey",
   "injectFormat",
+  "injectionStrategy",
+  "injectionConfig",
   "priority",
   "enabled",
   "requiresApproval",
@@ -78,6 +101,8 @@ type SecretRouteUpdate = Partial<{
   injectAs: string;
   injectKey: string;
   injectFormat: string;
+  injectionStrategy: "header" | "sigv4";
+  injectionConfig: { service?: string; region?: string };
   priority: number;
   enabled: boolean;
   requiresApproval: boolean;
@@ -93,6 +118,8 @@ type SecretRouteCreate = {
   injectAs: string;
   injectKey: string;
   injectFormat?: string;
+  injectionStrategy?: "header" | "sigv4";
+  injectionConfig?: { service?: string; region?: string };
   priority?: number;
   enabled?: boolean;
   requiresApproval?: boolean;
@@ -123,6 +150,7 @@ function parseSecretRouteUpdate(body: Record<string, unknown>):
     "injectAs",
     "injectKey",
     "injectFormat",
+    "injectionStrategy",
   ] as const;
 
   for (const field of stringFields) {
@@ -131,7 +159,17 @@ function parseSecretRouteUpdate(body: Record<string, unknown>):
     if (typeof value !== "string") {
       return { ok: false, error: `'${field}' must be a string` };
     }
-    update[field] = value;
+    update[field] = value as never;
+  }
+  if (body.injectionConfig !== undefined) {
+    if (
+      typeof body.injectionConfig !== "object" ||
+      body.injectionConfig === null ||
+      Array.isArray(body.injectionConfig)
+    ) {
+      return { ok: false, error: "'injectionConfig' must be an object" };
+    }
+    update.injectionConfig = body.injectionConfig as { service?: string; region?: string };
   }
 
   if (body.priority !== undefined) {
@@ -198,6 +236,21 @@ function parseSecretRouteCreate(
   if (body.injectFormat !== undefined && typeof body.injectFormat !== "string") {
     return { ok: false, error: "'injectFormat' must be a string" };
   }
+  if (
+    body.injectionStrategy !== undefined &&
+    body.injectionStrategy !== "header" &&
+    body.injectionStrategy !== "sigv4"
+  ) {
+    return { ok: false, error: "'injectionStrategy' must be header or sigv4" };
+  }
+  if (
+    body.injectionConfig !== undefined &&
+    (typeof body.injectionConfig !== "object" ||
+      body.injectionConfig === null ||
+      Array.isArray(body.injectionConfig))
+  ) {
+    return { ok: false, error: "'injectionConfig' must be an object" };
+  }
   if (body.priority !== undefined) {
     if (
       typeof body.priority !== "number" ||
@@ -236,6 +289,9 @@ function parseSecretRouteCreate(
       injectAs: body.injectAs as string,
       injectKey: body.injectKey as string,
       injectFormat: body.injectFormat as string | undefined,
+      injectionStrategy: (body.injectionStrategy as "header" | "sigv4" | undefined) ?? "header",
+      injectionConfig:
+        (body.injectionConfig as { service?: string; region?: string } | undefined) ?? {},
       priority: body.priority as number | undefined,
       enabled: body.enabled as boolean | undefined,
       requiresApproval: body.requiresApproval as boolean | undefined,
@@ -257,12 +313,7 @@ function requireTenantAdminSession(c: Context<{ Variables: AppVariables }>): boo
 }
 
 function hasRecentSessionMfa(c: Context<{ Variables: AppVariables }>, maxAgeMs = 5 * 60_000) {
-  const verifiedAt = c.get("sessionMfaVerifiedAt");
-  return (
-    typeof verifiedAt === "number" &&
-    Number.isFinite(verifiedAt) &&
-    Date.now() - verifiedAt <= maxAgeMs
-  );
+  return isRecentMfaTimestamp(c.get("sessionMfaVerifiedAt"), maxAgeMs);
 }
 
 type TenantMfaPolicyConfig = {
@@ -422,6 +473,8 @@ secretsRoutes.post("/routes", async (c) => {
     injectAs: string;
     injectKey: string;
     injectFormat?: string;
+    injectionStrategy?: "header" | "sigv4";
+    injectionConfig?: { service?: string; region?: string };
     priority?: number;
     enabled?: boolean;
     requiresApproval?: boolean;
@@ -470,48 +523,59 @@ secretsRoutes.post("/routes", async (c) => {
         approvalConfig: routeInput.approvalConfig ?? {},
       },
     });
-    const route = await sv.createRoute(tenantId, routeInput.secretId, {
-      agentId: routeInput.agentId,
-      hostPattern: routeInput.hostPattern,
-      pathPattern: routeInput.pathPattern,
-      method: routeInput.method,
-      injectAs: routeInput.injectAs,
-      injectKey: routeInput.injectKey,
-      injectFormat: routeInput.injectFormat,
-      priority: routeInput.priority,
-      enabled: routeInput.enabled,
-      requiresApproval: routeInput.requiresApproval,
-      approvalConfig: routeInput.approvalConfig,
-    });
-    try {
-      await writeSecretsAudit(c, {
-        tenantId,
-        actorType: "user",
-        actorId: c.get("userId") ?? c.get("authType") ?? tenantId,
-        action: "secret_route.create",
-        resourceType: "secret_route",
-        resourceId: route.id,
-        metadata: {
-          secretId: routeInput.secretId,
-          agentId: routeInput.agentId,
-          hostPattern: routeInput.hostPattern,
-          pathPattern: routeInput.pathPattern,
-          method: routeInput.method,
-          injectAs: routeInput.injectAs,
-          injectKey: routeInput.injectKey,
-          priority: routeInput.priority ?? 0,
-          enabled: routeInput.enabled ?? true,
-          requiresApproval: routeInput.requiresApproval ?? false,
-          approvalConfig: routeInput.approvalConfig ?? {},
-        },
+    const route = await withTenantAuditedTransaction(tenantId, async (txRaw, appendAudit) => {
+      const tx = txRaw as VaultTx;
+      await lockSecretRouteNamespaces(tx, tenantId, [routeInput.agentId]);
+      const created = await sv.createRouteWithinTx(tx, tenantId, routeInput.secretId, {
+        agentId: routeInput.agentId,
+        hostPattern: routeInput.hostPattern,
+        pathPattern: routeInput.pathPattern,
+        method: routeInput.method,
+        injectAs: routeInput.injectAs,
+        injectKey: routeInput.injectKey,
+        injectFormat: routeInput.injectFormat,
+        injectionStrategy: routeInput.injectionStrategy,
+        injectionConfig: routeInput.injectionConfig,
+        priority: routeInput.priority,
+        enabled: routeInput.enabled,
+        requiresApproval: routeInput.requiresApproval,
+        approvalConfig: routeInput.approvalConfig,
       });
-    } catch (err) {
-      await sv.deleteRoute(tenantId, route.id);
-      throw err;
-    }
+      await assertNoOppositeAuthorityOverlap(tx, {
+        ...created,
+        agentId: routeInput.agentId,
+      });
+      await appendAudit(
+        secretsAuditEvent(c, {
+          tenantId,
+          actorType: "user",
+          actorId: c.get("userId") ?? c.get("authType") ?? tenantId,
+          action: "secret_route.create",
+          resourceType: "secret_route",
+          resourceId: created.id,
+          metadata: {
+            secretId: routeInput.secretId,
+            agentId: routeInput.agentId,
+            hostPattern: routeInput.hostPattern,
+            pathPattern: routeInput.pathPattern,
+            method: routeInput.method,
+            injectAs: routeInput.injectAs,
+            injectKey: routeInput.injectKey,
+            priority: routeInput.priority ?? 0,
+            enabled: routeInput.enabled ?? true,
+            requiresApproval: routeInput.requiresApproval ?? false,
+            approvalConfig: routeInput.approvalConfig ?? {},
+          },
+        }),
+      );
+      return created;
+    });
     return c.json<ApiResponse>({ ok: true, data: route }, 201);
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : "Unknown error";
+    if (e instanceof SecretRouteAuthorityConflict) {
+      return c.json<ApiResponse>({ ok: false, error: msg }, 409);
+    }
     if (msg.includes("not found")) {
       return c.json<ApiResponse>({ ok: false, error: msg }, 404);
     }
@@ -573,6 +637,12 @@ secretsRoutes.put("/routes/:id", async (c) => {
   if (!existing) {
     return c.json<ApiResponse>({ ok: false, error: "Route not found" }, 404);
   }
+  try {
+    assertGovernedRouteUpdateIsSafe(existing, update);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : "Route update conflicts with governed authority";
+    return c.json<ApiResponse>({ ok: false, error: msg }, 409);
+  }
   // Fail-closed re-validation against the MERGED config. A partial update (e.g.
   // changing only pathPattern or method) is validated in isolation above and so
   // would not trigger per-host strictness for a route that already targets a
@@ -607,43 +677,62 @@ secretsRoutes.put("/routes/:id", async (c) => {
     resourceId: routeId,
     metadata: { before: existing, updates: update },
   });
-  const updated = await sv.updateRoute(tenantId, routeId, update);
+  let updated: Awaited<ReturnType<typeof sv.updateRoute>>;
+  try {
+    updated = await withTenantAuditedTransaction(tenantId, async (txRaw, appendAudit) => {
+      const tx = txRaw as VaultTx;
+      const [currentBeforeLock] = await tx
+        .select()
+        .from(secretRouteRows)
+        .where(and(eq(secretRouteRows.id, routeId), eq(secretRouteRows.tenantId, tenantId)))
+        .limit(1);
+      if (!currentBeforeLock) return null;
+      if (!currentBeforeLock.agentId) {
+        throw new SecretRouteAuthorityConflict("route has no agent namespace");
+      }
+      const destinationAgentId = update.agentId ?? currentBeforeLock.agentId;
+      await lockSecretRouteNamespaces(tx, tenantId, [
+        currentBeforeLock.agentId,
+        destinationAgentId,
+      ]);
+      const [current] = await tx
+        .select()
+        .from(secretRouteRows)
+        .where(and(eq(secretRouteRows.id, routeId), eq(secretRouteRows.tenantId, tenantId)))
+        .limit(1);
+      if (!current || current.agentId !== currentBeforeLock.agentId) {
+        throw new SecretRouteAuthorityConflict("route changed during update");
+      }
+      assertGovernedRouteUpdateIsSafe(current, update);
+      const changed = await sv.updateRouteWithinTx(tx, tenantId, routeId, update);
+      if (changed) {
+        await assertNoOppositeAuthorityOverlap(tx, {
+          ...changed,
+          agentId: destinationAgentId,
+        });
+        await appendAudit(
+          secretsAuditEvent(c, {
+            tenantId,
+            actorType: "user",
+            actorId: c.get("userId") ?? c.get("authType") ?? tenantId,
+            action: "secret_route.update",
+            resourceType: "secret_route",
+            resourceId: routeId,
+            metadata: { before: current, after: changed },
+          }),
+        );
+      }
+      return changed;
+    });
+  } catch (e) {
+    if (e instanceof SecretRouteAuthorityConflict) {
+      return c.json<ApiResponse>({ ok: false, error: e.message }, 409);
+    }
+    throw e;
+  }
 
   if (!updated) {
     return c.json<ApiResponse>({ ok: false, error: "Route not found" }, 404);
-  }
-
-  try {
-    await writeSecretsAudit(c, {
-      tenantId,
-      actorType: "user",
-      actorId: c.get("userId") ?? c.get("authType") ?? tenantId,
-      action: "secret_route.update",
-      resourceType: "secret_route",
-      resourceId: routeId,
-      metadata: { before: existing, after: updated },
-    });
-  } catch (err) {
-    await getVaultDb()
-      .update(secretRouteRows)
-      .set({
-        tenantId: existing.tenantId,
-        agentId: existing.agentId,
-        secretId: existing.secretId,
-        hostPattern: existing.hostPattern,
-        pathPattern: existing.pathPattern,
-        method: existing.method,
-        injectAs: existing.injectAs,
-        injectKey: existing.injectKey,
-        injectFormat: existing.injectFormat,
-        priority: existing.priority,
-        enabled: existing.enabled,
-        requiresApproval: existing.requiresApproval,
-        approvalConfig: existing.approvalConfig,
-        createdAt: existing.createdAt,
-      })
-      .where(and(eq(secretRouteRows.id, routeId), eq(secretRouteRows.tenantId, tenantId)));
-    throw err;
   }
 
   return c.json<ApiResponse>({ ok: true, data: updated });
@@ -670,39 +759,55 @@ secretsRoutes.delete("/routes/:id", async (c) => {
     resourceId: routeId,
     metadata: { deleted: existing },
   });
-  const deleted = await sv.deleteRoute(tenantId, routeId);
+  let deleted: typeof secretRouteRows.$inferSelect | null;
+  try {
+    deleted = await withTenantAuditedTransaction(tenantId, async (txRaw, appendAudit) => {
+      const tx = txRaw as VaultTx;
+      const [currentBeforeLock] = await tx
+        .select()
+        .from(secretRouteRows)
+        .where(and(eq(secretRouteRows.id, routeId), eq(secretRouteRows.tenantId, tenantId)))
+        .limit(1);
+      if (!currentBeforeLock) return null;
+      if (!currentBeforeLock.agentId) {
+        throw new SecretRouteAuthorityConflict("route has no agent namespace");
+      }
+      await lockSecretRouteNamespaces(tx, tenantId, [currentBeforeLock.agentId]);
+      const [current] = await tx
+        .select()
+        .from(secretRouteRows)
+        .where(and(eq(secretRouteRows.id, routeId), eq(secretRouteRows.tenantId, tenantId)))
+        .limit(1);
+      if (!current || current.agentId !== currentBeforeLock.agentId) {
+        throw new SecretRouteAuthorityConflict("route changed during delete");
+      }
+      const [removed] = await tx
+        .delete(secretRouteRows)
+        .where(and(eq(secretRouteRows.id, routeId), eq(secretRouteRows.tenantId, tenantId)))
+        .returning();
+      if (!removed) return null;
+      await appendAudit(
+        secretsAuditEvent(c, {
+          tenantId,
+          actorType: "user",
+          actorId: c.get("userId") ?? c.get("authType") ?? tenantId,
+          action: "secret_route.delete",
+          resourceType: "secret_route",
+          resourceId: routeId,
+          metadata: { deleted: current },
+        }),
+      );
+      return removed;
+    });
+  } catch (e) {
+    if (e instanceof SecretRouteAuthorityConflict) {
+      return c.json<ApiResponse>({ ok: false, error: e.message }, 409);
+    }
+    throw e;
+  }
 
   if (!deleted) {
     return c.json<ApiResponse>({ ok: false, error: "Route not found" }, 404);
-  }
-
-  try {
-    await writeSecretsAudit(c, {
-      tenantId,
-      actorType: "user",
-      actorId: c.get("userId") ?? c.get("authType") ?? tenantId,
-      action: "secret_route.delete",
-      resourceType: "secret_route",
-      resourceId: routeId,
-      metadata: { deleted: existing },
-    });
-  } catch (err) {
-    await getVaultDb().insert(secretRouteRows).values({
-      id: existing.id,
-      tenantId: existing.tenantId,
-      agentId: existing.agentId,
-      secretId: existing.secretId,
-      hostPattern: existing.hostPattern,
-      pathPattern: existing.pathPattern,
-      method: existing.method,
-      injectAs: existing.injectAs,
-      injectKey: existing.injectKey,
-      injectFormat: existing.injectFormat,
-      priority: existing.priority,
-      enabled: existing.enabled,
-      createdAt: existing.createdAt,
-    });
-    throw err;
   }
 
   return c.json<ApiResponse>({ ok: true, data: { deleted: routeId } });

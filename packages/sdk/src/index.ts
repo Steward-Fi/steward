@@ -117,6 +117,7 @@ export type {
   SignTransactionResult,
   SignTypedDataOptions,
   SignUserOperationOptions,
+  StewardBroadcastOutcomeUnknown,
   StewardClientConfig,
   StewardErrorResponse,
   StewardHistoryEntry,
@@ -143,11 +144,17 @@ export type {
   UserSocialAccountLinkResult,
   UserSolanaWalletLinkNonce,
   UserSolanaWalletLinkResult,
+  VaultApprovalResult,
   WalletActionOptions,
   WalletBatchCreateResult,
   WalletBatchSpec,
 } from "./client.ts";
-export { isStewardMfaRequiredError, StewardApiError, StewardClient } from "./client.ts";
+export {
+  isStewardBroadcastOutcomeUnknown,
+  isStewardMfaRequiredError,
+  StewardApiError,
+  StewardClient,
+} from "./client.ts";
 // v0.4.0 - Tenant config, dashboard, approvals, webhooks
 export type {
   AgentAccountCapability,
@@ -251,6 +258,21 @@ export type {
   PolicyTemplateCreate,
   PolicyTemplateUpdate,
   PolicyType,
+  ProviderActionApprovalDecisionInput,
+  ProviderActionApprovalDetail,
+  ProviderActionBindingStatus,
+  ProviderActionInvokeDeniedResult,
+  ProviderActionInvokeInput,
+  ProviderActionInvokeResult,
+  ProviderActionInvokeSuccessResult,
+  ProviderActionStatus,
+  ProviderActionTransitionResult,
+  ProviderApprovalReasonCode,
+  ProviderCaseDispatchState,
+  ProviderCaseEventRole,
+  ProviderCaseEvidence,
+  ProviderCaseManifest,
+  ProviderCaseTerminalState,
   RateLimitConfig,
   RouteRecord,
   SecretRecord,

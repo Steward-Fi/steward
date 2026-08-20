@@ -128,6 +128,45 @@ describe("ERC8183Client", () => {
       });
     }).toThrow("missing evaluatorRouter, optimisticPolicy, paymentToken");
   });
+
+  test("createJob ignores lookalike JobCreated logs from other emitters", async () => {
+    const lookalike = "0x0000000000000000000000000000000000000bad" as Address;
+    const client = makeClient({
+      publicClient: {
+        async waitForTransactionReceipt() {
+          // the forged log comes FIRST: without an emitter check it wins.
+          return { logs: [jobCreatedLog(999n, lookalike), jobCreatedLog(42n)] };
+        },
+      },
+    });
+
+    const result = await client.createJob({
+      provider: PROVIDER,
+      expiredAt: 1_800_000_000n,
+      description: "agent delivery",
+    });
+
+    expect(result.jobId).toBe(42n);
+  });
+
+  test("createJob throws when only foreign-emitter JobCreated logs are present", async () => {
+    const lookalike = "0x0000000000000000000000000000000000000bad" as Address;
+    const client = makeClient({
+      publicClient: {
+        async waitForTransactionReceipt() {
+          return { logs: [jobCreatedLog(999n, lookalike)] };
+        },
+      },
+    });
+
+    await expect(
+      client.createJob({
+        provider: PROVIDER,
+        expiredAt: 1_800_000_000n,
+        description: "agent delivery",
+      }),
+    ).rejects.toThrow("JobCreated event not found in createJob receipt");
+  });
 });
 
 function makeClient(overrides: {
@@ -158,7 +197,10 @@ function mockSigner(): SignerAdapter {
   };
 }
 
-function jobCreatedLog(jobId: bigint): { data: Hex; topics: Hex[] } {
+function jobCreatedLog(
+  jobId: bigint,
+  emitter: Address = AGENTIC_COMMERCE,
+): { address: Address; data: Hex; topics: Hex[] } {
   const topics = encodeEventTopics({
     abi: AGENTIC_COMMERCE_ABI,
     eventName: "JobCreated",
@@ -172,5 +214,9 @@ function jobCreatedLog(jobId: bigint): { data: Hex; topics: Hex[] } {
     ],
     [EVALUATOR_ROUTER, 1_800_000_000n, "agent delivery"],
   );
-  return { data, topics: topics.filter((topic): topic is Hex => typeof topic === "string") };
+  return {
+    address: emitter,
+    data,
+    topics: topics.filter((topic): topic is Hex => typeof topic === "string"),
+  };
 }

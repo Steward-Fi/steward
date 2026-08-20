@@ -16,6 +16,7 @@ import {
 
 const TENANT_ID = "test-tenant";
 const AGENT_ID = "sol";
+const CONDITION_ID = `0x${"a".repeat(64)}`;
 
 const openClients: Array<{ close: () => Promise<void> }> = [];
 
@@ -228,6 +229,59 @@ describe("TradeSessionManager", () => {
     expect(expired?.status).toBe("expired");
     expect(await manager.getActive(TENANT_ID, session.id)).toBeNull();
   });
+
+  test("SEC-044: the submission fence does not hold its transaction across the callback", async () => {
+    const manager = await freshManager();
+    const session = await manager.createSession(baseInput());
+
+    // A callback that issues its OWN base-connection DB reads/writes (exactly
+    // what the order routes do: reserveSpend, releaseSpend, audit writes)
+    // deadlocks against the fence's open transaction under a single-connection
+    // database. After SEC-044 the advisory lock + active check COMMIT before
+    // the callback runs, so these complete. The callback must not wait on itself;
+    // race turns the deadlock into a failure instead of a stuck suite.
+    const result = await Promise.race([
+      manager.withActiveSubmissionFence(
+        { tenantId: TENANT_ID, id: session.id },
+        async (fencedSession) => {
+          expect(fencedSession.id).toBe(session.id);
+          const fresh = await manager.getSession({ tenantId: TENANT_ID, id: session.id });
+          const reserved = await manager.reserveSpend({
+            tenantId: TENANT_ID,
+            id: session.id,
+            amountUsd: 10,
+          });
+          return { freshId: fresh?.id ?? null, reserved: reserved !== null };
+        },
+      ),
+      new Promise<never>((_, reject) =>
+        setTimeout(
+          () => reject(new Error("fence callback deadlocked inside the transaction")),
+          8000,
+        ),
+      ),
+    ]);
+
+    expect(result).toEqual({ freshId: session.id, reserved: true });
+  });
+
+  test("SEC-044: the submission fence returns null for a revoked session", async () => {
+    const manager = await freshManager();
+    const session = await manager.createSession(baseInput());
+    await manager.revokeSession({ tenantId: TENANT_ID, id: session.id });
+
+    let callbackRan = false;
+    const result = await manager.withActiveSubmissionFence(
+      { tenantId: TENANT_ID, id: session.id },
+      async () => {
+        callbackRan = true;
+        return "submitted";
+      },
+    );
+
+    expect(result).toBeNull();
+    expect(callbackRan).toBe(false);
+  });
 });
 
 describe("prediction-market allowlist (pure)", () => {
@@ -239,15 +293,16 @@ describe("prediction-market allowlist (pure)", () => {
         "pm:71321045679252212594626385532706912750332728571942532289631379312455583992563",
       ).success,
     ).toBe(true);
-    expect(allowedAssetSchema.safeParse("pm:cond:0xabc123").success).toBe(true);
+    expect(allowedAssetSchema.safeParse(`pm:cond:${CONDITION_ID}`).success).toBe(true);
+    expect(allowedAssetSchema.safeParse("pm:cond:0xabc123").success).toBe(false);
     expect(allowedAssetSchema.safeParse("pm:not-a-token!").success).toBe(false);
   });
 
   test("pm asset helpers", () => {
     expect(predictionMarketTokenAsset("123")).toBe("pm:123");
-    expect(predictionMarketConditionAsset("0xabc")).toBe("pm:cond:0xabc");
+    expect(predictionMarketConditionAsset(CONDITION_ID)).toBe(`pm:cond:${CONDITION_ID}`);
     expect(isPredictionMarketAsset("pm:123")).toBe(true);
-    expect(isPredictionMarketAsset("pm:cond:0xabc")).toBe(true);
+    expect(isPredictionMarketAsset(`pm:cond:${CONDITION_ID}`)).toBe(true);
     expect(isPredictionMarketAsset("NEAR")).toBe(false);
   });
 
@@ -256,8 +311,11 @@ describe("prediction-market allowlist (pure)", () => {
     expect(isPredictionMarketAllowed(byToken, "123")).toBe(true);
     expect(isPredictionMarketAllowed(byToken, "999")).toBe(false);
 
-    const byCond = ["pm:cond:0xabc"];
-    expect(isPredictionMarketAllowed(byCond, "123", "0xabc")).toBe(true); // token via condition grant
+    const byCond = [`pm:cond:${CONDITION_ID}`];
+    expect(isPredictionMarketAllowed(byCond, "123", CONDITION_ID)).toBe(true);
+    expect(isPredictionMarketAllowed([`pm:cond:0x${"A".repeat(64)}`], "123", CONDITION_ID)).toBe(
+      true,
+    );
     expect(isPredictionMarketAllowed(byCond, "123", "0xdef")).toBe(false);
     expect(isPredictionMarketAllowed(byCond, "123")).toBe(false); // no condition passed
   });
@@ -269,7 +327,7 @@ describe("checkOrderAllowed (pure pre-venue gate)", () => {
     "status" | "allowedAssets" | "perOrderCapUsd" | "dailyCapUsd" | "dailySpendUsd"
   > = {
     status: "active",
-    allowedAssets: ["NEAR", "pm:123", "pm:cond:0xabc"],
+    allowedAssets: ["NEAR", "pm:123", `pm:cond:${CONDITION_ID}`],
     perOrderCapUsd: 1000,
     dailyCapUsd: 5000,
     dailySpendUsd: 0,
@@ -287,7 +345,7 @@ describe("checkOrderAllowed (pure pre-venue gate)", () => {
 
   test("allows a pm token via condition grant", () => {
     expect(
-      checkOrderAllowed(base, { tokenId: "777", conditionId: "0xabc", notionalUsd: 500 }),
+      checkOrderAllowed(base, { tokenId: "777", conditionId: CONDITION_ID, notionalUsd: 500 }),
     ).toEqual({
       allowed: true,
     });

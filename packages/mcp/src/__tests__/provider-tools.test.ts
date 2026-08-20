@@ -76,7 +76,7 @@ describe("governed provider action tools", () => {
 
   test("uses only fixed status, approval, case, and evidence routes", async () => {
     const routes = {
-      [`/intents/${ACTION_ID}`]: { status: "authorized" },
+      [`/v2/provider-actions/${ACTION_ID}`]: { status: "authorized" },
       [`/v2/provider-actions/${ACTION_ID}/approval`]: { status: "pending" },
       [`/v2/provider-actions/${ACTION_ID}/case`]: { kind: "case" },
       [`/v2/provider-actions/${ACTION_ID}/evidence`]: { kind: "evidence" },
@@ -87,6 +87,29 @@ describe("governed provider action tools", () => {
       expect(result.isError).toBeUndefined();
     }
     expect(calls.map((call) => call.path)).toEqual(Object.keys(routes));
+  });
+
+  test("status uses the agent-scoped route and preserves its least-privilege DTO", async () => {
+    const status = {
+      ok: true,
+      data: {
+        id: ACTION_ID,
+        status: "pending_approval",
+        version: 1,
+        workspaceId: "20000000-0000-4000-8000-000000000001",
+        providerAccountId: "30000000-0000-4000-8000-000000000001",
+        operationId: "40000000-0000-4000-8000-000000000001",
+        operationRevision: 1,
+      },
+    };
+    const path = `/v2/provider-actions/${ACTION_ID}`;
+    const { tools, calls } = harness({ [path]: status });
+
+    const result = await tools.get("provider_action_status")!.handler({ actionId: ACTION_ID });
+
+    expect(result.isError).toBeUndefined();
+    expect(result.structuredContent).toEqual(status);
+    expect(calls).toEqual([{ path, init: undefined }]);
   });
 
   test("rejects tenant, workspace substitution, host injection, and unknown keys", async () => {
@@ -189,6 +212,16 @@ describe("createProviderApi HTTP transport", () => {
     expect(headers.get("x-steward-tenant")).toBe("tenant-a");
   });
 
+  test("normalizes an adversarial trailing-slash run before transport", async () => {
+    const { seen } = stubFetch(200, { ok: true });
+    const api = createProviderApi({
+      baseUrl: `https://steward.example${"/".repeat(200_000)}`,
+      bearerToken: "agent-jwt",
+    });
+    await api.request("/v2/provider-actions");
+    expect(seen[0]?.url).toBe("https://steward.example/v2/provider-actions");
+  });
+
   test("redacts secrets in a real non-ok error body before throwing", async () => {
     const canary = "canary-http-5xx-9a1";
     stubFetch(403, {
@@ -219,5 +252,129 @@ describe("credential redaction", () => {
     );
     expect(clean).not.toContain(canary);
     expect(clean).toContain("[redacted]");
+  });
+
+  test("redacts password/private-key/jwt/request-signature keyed fields", () => {
+    const canary = "keyed-canary-b51f0";
+    const clean = JSON.stringify(
+      sanitizeProviderPayload({
+        password: canary,
+        passphrase: canary,
+        private_key: canary,
+        clientJwt: canary,
+        clientSecretValue: canary,
+        cookieHeader: canary,
+        accessKeyId: canary,
+        requestSignature: canary,
+        nested: { sessionPassword: canary },
+      }),
+    );
+    expect(clean).not.toContain(canary);
+  });
+
+  test("redacts secret shapes embedded in free-text error messages", () => {
+    const jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.sigcanary01";
+    const apiKey = "sk-livecanary123456789";
+    const ghToken = "ghp_canarytoken123456";
+    const slackToken = "xoxb-canary-123456789";
+    const password = "free-text-passwd-canary";
+    const opaqueJwt = "opaque-jwt-canary";
+    const signature = "signature-canary";
+    const clean = sanitizeProviderPayload(
+      `upstream 500: jwt=${jwt} opaque jwt=${opaqueJwt} key=${apiKey} gh=${ghToken} slack=${slackToken} password: ${password} request_signature=${signature}`,
+    ) as string;
+    for (const canary of [jwt, opaqueJwt, apiKey, ghToken, slackToken, password, signature]) {
+      expect(clean).not.toContain(canary);
+    }
+    expect(clean).toContain("[redacted]");
+  });
+
+  test("redacts current credential formats and armored private keys in free text", () => {
+    const openAiKey = "sk-proj-example_canary_1234567890";
+    const awsAccessKey = "AKIAIOSFODNN7EXAMPLE";
+    const privateKey = "-----BEGIN PRIVATE KEY-----\nprivate-key-canary\n-----END PRIVATE KEY-----";
+    const clean = sanitizeProviderPayload(
+      `provider failed: ${openAiKey} ${awsAccessKey}\n${privateKey}`,
+    ) as string;
+
+    for (const canary of [openAiKey, awsAccessKey, "private-key-canary"]) {
+      expect(clean).not.toContain(canary);
+    }
+  });
+
+  test("redacts incomplete armored keys and stays linear on adversarial text", () => {
+    const incompleteKey = `-----BEGIN PRIVATE KEY-----${"private-key-material".repeat(20_000)}`;
+    expect(sanitizeProviderPayload(incompleteKey)).toBe("[redacted]");
+
+    const whitespaceRun = `jwt${" ".repeat(200_000)}`;
+    expect(sanitizeProviderPayload(whitespaceRun)).toBe(whitespaceRun);
+    expect(sanitizeProviderPayload("x".repeat(1_048_577))).toBe("[redacted]");
+  });
+
+  test("matches armored key end markers without exposing trailing key material", () => {
+    const text =
+      "-----BEGIN PRIVATE KEY-----canary-before-wrong-end" +
+      "-----END RSA PRIVATE KEY-----canary-after-wrong-end-----END PRIVATE KEY----- public";
+    const clean = sanitizeProviderPayload(text) as string;
+    expect(clean).not.toContain("canary-before-wrong-end");
+    expect(clean).not.toContain("canary-after-wrong-end");
+    expect(clean).toContain(" public");
+
+    const lower = sanitizeProviderPayload(
+      "-----begin encrypted private key-----mixed-case-canary-----end encrypted private key-----",
+    ) as string;
+    expect(lower).not.toContain("mixed-case-canary");
+  });
+
+  test("covers every optional-separator access-key label", () => {
+    const joins = ["-", "_", ""];
+    const labels = [
+      ...joins.flatMap((first) => joins.map((second) => `access${first}key${second}id`)),
+      ...joins.flatMap((first) => joins.map((second) => `secret${first}access${second}key`)),
+    ];
+    for (const label of labels) {
+      const clean = sanitizeProviderPayload(`${label}=separator-canary`) as string;
+      expect(clean).not.toContain("separator-canary");
+    }
+  });
+
+  test("advances across repeated structured-token and armored candidates", () => {
+    for (const input of [
+      "eyj".repeat(100_000),
+      "xoxb-".repeat(100_000),
+      "-----BEGIN PRIVATE KEY-----x-----END PRIVATE KEY-----".repeat(10_000),
+    ]) {
+      expect(typeof sanitizeProviderPayload(input)).toBe("string");
+    }
+  });
+
+  test("fails closed on accessors and cycles without invoking provider code", () => {
+    let invoked = false;
+    const payload: Record<string, unknown> = { public: "safe" };
+    Object.defineProperty(payload, "computed", {
+      enumerable: true,
+      get() {
+        invoked = true;
+        return "getter-secret";
+      },
+    });
+    payload.self = payload;
+
+    expect(sanitizeProviderPayload(payload)).toEqual({
+      public: "safe",
+      computed: "[redacted]",
+      self: "[redacted]",
+    });
+    expect(invoked).toBe(false);
+  });
+
+  test("leaves non-secret free text and identifiers intact", () => {
+    const text =
+      "order oid_123 failed: insufficient balance for 0.01 BTC; transaction signature=5publicTxSignature; tx 0x" +
+      "a".repeat(64);
+    expect(sanitizeProviderPayload(text)).toBe(text);
+    expect(sanitizeProviderPayload({ signature: "5publicTxSignature" })).toEqual({
+      signature: "5publicTxSignature",
+    });
   });
 });

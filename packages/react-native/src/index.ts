@@ -50,6 +50,14 @@ function storageKey(namespace: string, key: string): string {
  * Adapts React Native AsyncStorage to the synchronous storage interface used by
  * the shared TypeScript SDK. Call `hydrate()` before constructing `StewardAuth`,
  * or use `createStewardNativeAuth()`.
+ *
+ * SECURITY: this adapter persists `steward_session_token` and
+ * `steward_refresh_token` wherever the backing store puts them.
+ * `@react-native-async-storage/async-storage` is UNENCRYPTED plaintext
+ * (readable on rooted/jailbroken devices and via Android backups). For session
+ * tokens prefer a Keychain/Keystore-backed store — expo-secure-store or
+ * react-native-keychain — wrapped in the same AsyncKeyValueStorage shape (see
+ * the package README for an example).
  */
 export function createReactNativeSessionStorage(
   storage: AsyncKeyValueStorage,
@@ -129,11 +137,22 @@ export async function createStewardNativeAuth({
 }
 
 export interface StewardNativeClientConfig extends StewardClientConfig {
+  /**
+   * Convenience alias for `bearerToken`. Function token providers are not
+   * supported; resolve the token and pass a static string.
+   */
   token?: string | (() => string | null | Promise<string | null>);
 }
 
 export function createStewardNativeClient(config: StewardNativeClientConfig): StewardClient {
-  return new StewardClient(config);
+  const { token, ...rest } = config;
+  if (typeof token === "function") {
+    throw new StewardApiError(
+      "createStewardNativeClient does not support function token providers; resolve the token and pass a static string instead.",
+      0,
+    );
+  }
+  return new StewardClient({ ...rest, bearerToken: rest.bearerToken ?? token });
 }
 
 export function getNativeSession(auth: StewardAuth): StewardSession | null {

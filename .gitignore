@@ -10,12 +10,22 @@ out/
 .next/
 .turbo/
 *.tsbuildinfo
+.build/
+bin/
+obj/
+__pycache__/
+*.pyc
 
 # ─── Environment ───────────────────────────────────────────────────────────────
 .env
 .env.local
 .env.*.local
 !.env.example
+.dev.vars
+!.dev.vars.example
+.steward/
+# Operator-local fleet inventory (SEC-130 — node IPs are never committed)
+scripts/deploy-nodes.local.conf
 
 # ─── Logs ──────────────────────────────────────────────────────────────────────
 *.log
@@ -36,6 +46,7 @@ Thumbs.db
 # ─── Testing ───────────────────────────────────────────────────────────────────
 coverage/
 .nyc_output/
+.cache-synpress/
 
 # ─── Deployment ────────────────────────────────────────────────────────────────
 .vercel
@@ -49,5 +60,6 @@ docker-compose.override.yml
 *.tgz
 *.tar.gz
 web/test-results/
+/test-results/
 .claude/
 artifacts/

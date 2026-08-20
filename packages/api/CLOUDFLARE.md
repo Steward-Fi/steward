@@ -7,16 +7,19 @@ Steward now ships three runtime adapters that share the same Hono app
 | -------------- | ------------------------------------ | ----------------------------------------------------------------- |
 | Bun (existing) | `packages/api/src/index.ts`          | Production server with TCP Postgres + ioredis. Long-lived process.|
 | PGLite         | `packages/api/src/embedded.ts`       | Electrobun / desktop. In-process WASM Postgres, no external deps.  |
-| Workers (new)  | `packages/api/src/worker.ts`         | Cloudflare Workers. HTTP Postgres (Neon) + REST Redis (Upstash). |
+| Workers (new)  | `packages/api/src/worker.ts`         | Cloudflare Workers. Request-owned Neon WebSocket Postgres + REST Redis (Upstash). |
 
 The adapters are additive — switching to Workers does NOT change the Bun
 or PGLite paths.
 
 ## Architecture
 
-- **DB driver** is selected by the `DATABASE_DRIVER` env var:
+- **DB driver** is selected by the `DATABASE_DRIVER` env var. Production uses
+  `neon-websocket` so every authenticated request can own one tenant-scoped
+  transaction; `neon-http` is limited to local/test compatibility:
   - `postgres-js` (default): TCP pool, used by Bun/Node.
-  - `neon-http`: Neon's HTTP/fetch driver, used by Workers.
+  - `neon-websocket`: request-owned Neon pool, used by production Workers.
+  - `neon-http`: local/test compatibility only; production Worker boot rejects it.
   - PGLite (set via `setPGLiteOverride()` in `embedded.ts`).
 - **Redis** is selected by `REDIS_DRIVER`:
   - `ioredis` (default): persistent TCP connection, used by Bun/Node.
@@ -37,21 +40,24 @@ or PGLite paths.
 
 ### Per-request usage on Workers
 
-The neon-http driver is HTTP-only, so a fresh client per request is
-acceptable. For the singleton case `getDb()` continues to work, but for
-hot paths consider:
+The Worker entry creates one Neon WebSocket handle per request and binds it to
+the async request context. Authenticated middleware then pins downstream
+`getDb()` calls to one tenant transaction on that handle. The entry owns and
+awaits cleanup; route code must not create or retain its own socket pool.
 
 ```ts
-import { createDbForRequest } from "@stwd/db";
+import { createNeonTransactionDbForRequest, withRequestDatabase } from "@stwd/db";
 
-app.use("*", async (c, next) => {
-  c.set("db", createDbForRequest(c.env));
-  await next();
-});
+const handle = createNeonTransactionDbForRequest(env);
+try {
+  return await withRequestDatabase(handle.db, () => app.fetch(request, env));
+} finally {
+  await handle.close();
+}
 ```
 
-(Currently Steward calls `getDb()` directly in route handlers; it's still
-correct on Workers because the neon-http client is cheap to construct.)
+Steward's `worker.ts` already owns this lifecycle; the snippet documents the
+required shape for alternate Worker composition roots.
 
 ## One-time setup
 
@@ -68,17 +74,37 @@ correct on Workers because the neon-http client is cheap to construct.)
 Set these via `wrangler secret put <NAME>` from the `packages/api`
 directory. Do NOT put them in `wrangler.toml`.
 
-| Secret                          | Why                                                                    |
+Wrangler secrets are scoped per environment. Configure the unqualified,
+staging, and production Workers separately; setting one does not populate the
+others:
+
+```bash
+bunx wrangler secret put STEWARD_JWT_SECRET
+bunx wrangler secret put STEWARD_JWT_SECRET --env staging
+bunx wrangler secret put STEWARD_JWT_SECRET --env production
+```
+
+Repeat those three commands for every sensitive binding below. Put non-secret
+bindings such as `APP_URL` and `STEWARD_IDENTITY_JWT_ISSUER` in the matching
+Wrangler `[vars]` table for each environment. The committed default, staging,
+and production variable sets all declare
+`NODE_ENV=production`, so a missing or shorter-than-32-character JWT secret is
+rejected before any database handle is selected.
+
+| Binding                         | Why                                                                    |
 | ------------------------------- | ---------------------------------------------------------------------- |
-| `DATABASE_URL`                  | Neon connection string. Workers use HTTP; migrations need TCP.         |
+| `DATABASE_URL`                  | Neon connection string. Workers use request-owned WebSockets; migrations use the same PostgreSQL endpoint out of band. |
 | `KV_REST_API_URL`               | Upstash REST endpoint.                                                 |
 | `KV_REST_API_TOKEN`             | Upstash REST token.                                                    |
-| `STEWARD_SESSION_SECRET`        | HS256 JWT signing secret. Canonical name (auth.ts and context.ts).     |
+| `STEWARD_JWT_SECRET`            | Canonical HS256 JWT signing and verification secret. Minimum 32 characters in production. |
 | `STEWARD_MASTER_PASSWORD`       | Vault keystore master password. Used by `KeyStore` (AES-256-GCM).      |
-| `STEWARD_KDF_SALT`              | Per-deployment hex salt for the KeyStore KDF. Recommended for prod.    |
+| `STEWARD_KDF_SALT`              | Per-deployment hex salt for the KeyStore KDF. Required in production.  |
+| `STEWARD_AUDIT_HMAC_KEY`        | Separate high-entropy root for the tamper-evident audit chain. Required in production. |
+| `STEWARD_IDENTITY_JWT_PRIVATE_KEY` | Optional PKCS#8 RS256/ES256 identity-token key. Set separately in each environment that serves identity tokens. |
 | `RESEND_API_KEY`                | Magic-link email delivery.                                             |
 | `EMAIL_FROM`                    | Optional: from address for magic links.                                |
-| `APP_URL`                       | Optional: base URL for magic-link callbacks.                           |
+| `APP_URL`                       | Canonical HTTPS public base for identity discovery/tokens and magic links. Required unless `STEWARD_IDENTITY_JWT_ISSUER` is set. |
+| `STEWARD_IDENTITY_JWT_ISSUER`   | Optional dedicated canonical HTTPS identity base. Required when `APP_URL` is absent. |
 | `EMAIL_AUTH_REDIRECT_BASE_URL`  | Optional: where to redirect after email auth (defaults elizacloud.ai). |
 | `GOOGLE_CLIENT_ID`/`_SECRET`    | Google OAuth.                                                          |
 | `DISCORD_CLIENT_ID`/`_SECRET`   | Discord OAuth.                                                         |
@@ -89,7 +115,14 @@ directory. Do NOT put them in `wrangler.toml`.
 | `PASSKEY_RP_NAME`               | Display name for the WebAuthn UI.                                      |
 | `PASSKEY_ALLOWED_ORIGINS`       | Optional comma-separated additional origins for multi-tenant passkeys. |
 
-`SKIP_MIGRATIONS=1`, `DATABASE_DRIVER=neon-http`, and `REDIS_DRIVER=upstash`
+When asymmetric identity tokens are enabled, put the private key in the
+environment-scoped secret above and configure the matching non-secret
+`STEWARD_IDENTITY_JWT_ALG`, `STEWARD_IDENTITY_JWT_KID`,
+`STEWARD_IDENTITY_JWT_ISSUER`, and `STEWARD_IDENTITY_JWT_AUDIENCE` variables in
+each Wrangler environment. Do not reuse one environment's issuer or private
+key in another environment.
+
+`SKIP_MIGRATIONS=1`, `DATABASE_DRIVER=neon-websocket`, and `REDIS_DRIVER=upstash`
 are already in `wrangler.toml` `[vars]` so they ship with every deploy.
 
 Non-secret client-IP trust config (auth rate limiting) can go in `[vars]`:
@@ -125,6 +158,8 @@ example.
 cd packages/api
 
 # Local smoke test (boots a workerd instance against your local secrets):
+cp .dev.vars.example .dev.vars
+# Replace the database and Upstash placeholders in .dev.vars first.
 bunx wrangler dev
 
 # Real deploy to staging or prod:
@@ -133,21 +168,33 @@ bunx wrangler deploy --env production
 ```
 
 `wrangler deploy --dry-run --outdir=dist` (or `bun run wrangler:dry-run`)
-builds the worker bundle without uploading. Current bundle size:
-**3.3 MiB raw / 949 KiB gzipped** — comfortably under the 10 MiB compressed
-Workers limit.
+builds the worker bundle without uploading. The lockfile's Wrangler 4.105.0
+currently reports **6.88 MiB raw / 1.85 MiB gzipped** — comfortably under the
+10 MiB compressed Workers limit.
 
 ## Testing locally
 
-`wrangler dev` boots a local workerd instance with full nodejs_compat. It
-will read `.dev.vars` for secrets — do NOT commit it. Example shape:
+`wrangler dev` boots a local workerd instance with full nodejs_compat. The
+committed deployment vars intentionally enforce production validation, so
+local development must copy `.dev.vars.example` to the ignored `.dev.vars`.
+That file explicitly selects `NODE_ENV=development` and opts into development
+secret fallbacks; never use it for a shared preview or deployment. Replace its
+database and Upstash placeholders before starting workerd. To exercise the
+production posture locally instead, remove the development override and set
+complete high-entropy roots, including `STEWARD_JWT_SECRET`,
+`STEWARD_MASTER_PASSWORD`, `STEWARD_KDF_SALT`, and
+`STEWARD_AUDIT_HMAC_KEY`.
+
+Example production-like `.dev.vars` shape:
 
 ```
 DATABASE_URL=postgres://USER:PASS@ep-XYZ.us-east-2.aws.neon.tech/db?sslmode=require
 KV_REST_API_URL=https://YOUR-DB.upstash.io
 KV_REST_API_TOKEN=YOUR_TOKEN
-STEWARD_SESSION_SECRET=...
+STEWARD_JWT_SECRET=...
 STEWARD_MASTER_PASSWORD=...
+STEWARD_KDF_SALT=...
+STEWARD_AUDIT_HMAC_KEY=...
 RESEND_API_KEY=...
 ```
 
@@ -159,9 +206,9 @@ RESEND_API_KEY=...
   TTL-driven cleanup in the storage backends. Anything new that needs a
   cron should use Cloudflare Cron Triggers (add a `scheduled()` handler in
   `worker.ts`).
-- **Per-request DB client.** `neon-http` is fetch-based, so we don't
-  benefit from connection pooling. For very high QPS, look at
-  Hyperdrive (Cloudflare's Postgres pooler) or sharding the workload.
+- **Per-request DB client.** Each request owns a max=1 WebSocket pool so tenant
+  context and route SQL stay on one transaction connection. For very high QPS,
+  evaluate Hyperdrive with the same transaction and cleanup invariants.
 - **No `node:fs` at runtime.** PGLite, the Drizzle file-based migrator,
   and any code that reads from the SQL migrations folder cannot run on a
   Worker. The pluggable factories make sure these paths are dead-code in

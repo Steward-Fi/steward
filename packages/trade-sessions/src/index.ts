@@ -27,9 +27,7 @@ const namespacedAssetSchema = z.string().regex(/^[a-z0-9]+:[A-Z0-9]+$/);
 //   `pm:cond:<conditionId>` — a whole market (both outcomes) by condition id
 // Stored alongside crypto assets in the same `allowedAssets` text[] so no schema
 // migration is needed; the venue layer interprets the `pm:` namespace.
-const predictionMarketAssetSchema = z
-  .string()
-  .regex(/^pm:(cond:0x[0-9a-fA-F]{1,64}|[0-9]{1,128})$/);
+const predictionMarketAssetSchema = z.string().regex(/^pm:(cond:0x[0-9a-fA-F]{64}|[0-9]{1,128})$/);
 export const allowedAssetSchema = z.union([
   coreAllowedAssetSchema,
   predictionMarketAssetSchema,
@@ -46,7 +44,7 @@ export function predictionMarketTokenAsset(tokenId: string): string {
 }
 
 export function predictionMarketConditionAsset(conditionId: string): string {
-  return `pm:cond:${conditionId}`;
+  return `pm:cond:${conditionId.toLowerCase()}`;
 }
 
 export function isPredictionMarketAsset(asset: string): boolean {
@@ -66,7 +64,14 @@ export function isPredictionMarketAllowed(
 ): boolean {
   const set = new Set(allowedAssets);
   if (set.has(predictionMarketTokenAsset(tokenId))) return true;
-  if (conditionId && set.has(predictionMarketConditionAsset(conditionId))) return true;
+  if (
+    conditionId &&
+    allowedAssets.some(
+      (asset) => asset.toLowerCase() === predictionMarketConditionAsset(conditionId),
+    )
+  ) {
+    return true;
+  }
   return false;
 }
 
@@ -486,7 +491,17 @@ export class TradeSessionManager {
     input: SessionFenceInput,
     callback: (session: TradeSession) => Promise<T>,
   ): Promise<T | null> {
-    return getDb().transaction(async (tx) => {
+    // SEC-044: hold the advisory lock + transaction ONLY around the DB-level
+    // active check — never across the callback. The order routes' callbacks
+    // perform vault signing and venue HTTP round-trips (seconds under load);
+    // holding the lock across that network I/O serialized all submissions for
+    // a session, blocked revocation for the duration, and pinned a
+    // connection-pool slot per in-flight order (pool-exhaustion /
+    // revocation-latency DoS). Revoke-vs-submit ordering is re-established by
+    // (a) the atomic reserveSpend, whose WHERE clause re-checks
+    // status="active", and (b) the routes' pre-submit activity re-check and
+    // post-submit re-verification.
+    const session = await getDb().transaction(async (tx) => {
       await tx.execute(
         sql`select pg_advisory_xact_lock(hashtextextended(${sessionFenceKey(input.tenantId, input.id)}, 0))`,
       );
@@ -501,9 +516,10 @@ export class TradeSessionManager {
             sql`${tradeSessions.expiresAt} > ${this.now().toISOString()}`,
           ),
         );
-      if (!row) return null;
-      return callback(rowToSession(row));
+      return row ? rowToSession(row) : null;
     });
+    if (!session) return null;
+    return callback(session);
   }
 
   async releaseSpend(input: IncrementSpendInput): Promise<TradeSession | null> {

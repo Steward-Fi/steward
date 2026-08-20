@@ -62,10 +62,27 @@ describe("generated OpenAPI contract", () => {
     expect(spec.paths).toHaveProperty("/platform/users/wallet/external-id/connect-or-create");
     expect(spec.paths).toHaveProperty("/platform/apps/gas_spend");
     expect(spec.paths).toHaveProperty("/vault/{agentId}/transactions");
+    expect(spec.paths).toHaveProperty("/vault/{agentId}/sign");
+    const signOperation = spec.paths["/vault/{agentId}/sign"].post;
+    expect(signOperation.responses).toHaveProperty("202");
+    const signAcceptedVariants = signOperation.responses["202"].content["application/json"].schema
+      .oneOf as Array<Record<string, unknown>>;
+    expect(signAcceptedVariants).toHaveLength(2);
+    expect(signAcceptedVariants[1].properties.data.properties.code.const).toBe(
+      "external_broadcast_outcome_unknown",
+    );
+    expect(signAcceptedVariants[1].properties.data.properties.reconciliationRequired.const).toBe(
+      true,
+    );
     expect(spec.paths).toHaveProperty("/vault/{agentId}/actions/transfer/quote");
     expect(spec.paths).toHaveProperty("/vault/{agentId}/actions/transfer");
     expect(spec.paths).toHaveProperty("/vault/{agentId}/actions/send-calls");
     expect(spec.paths).toHaveProperty("/vault/{agentId}/actions/{actionId}");
+    const transferStatus =
+      spec.paths["/vault/{agentId}/actions/{actionId}"].get.responses["200"].content[
+        "application/json"
+      ].schema.properties.data.properties.status.enum;
+    expect(transferStatus).toContain("outcome_unknown");
     expect(spec.paths).toHaveProperty("/vault/{agentId}/import/init");
     expect(spec.paths).toHaveProperty("/vault/{agentId}/import/submit");
     expect(spec.paths).toHaveProperty("/user/me/wallet/import/init");
@@ -96,6 +113,7 @@ describe("generated OpenAPI contract", () => {
     expect(spec.paths).toHaveProperty("/audit/export");
     expect(spec.paths).toHaveProperty("/audit/events");
     expect(spec.paths).toHaveProperty("/audit/verify");
+    expect(spec.paths).toHaveProperty("/audit/integrity");
     expect(spec.paths).toHaveProperty("/intents");
     expect(spec.paths).toHaveProperty("/intents/{intentId}/approve");
     expect(spec.paths).toHaveProperty("/v1/intents/{intentId}/approve");
@@ -489,6 +507,11 @@ describe("generated OpenAPI contract", () => {
       "rejected",
       "all",
     ]);
+    expect(approvalsList.parameters.find((param) => param.name === "agentId").schema).toEqual({
+      type: "string",
+      minLength: 1,
+      maxLength: 64,
+    });
     expect(
       approvalsList.responses["200"].content["application/json"].schema.properties.data.items
         .properties.status.enum,
@@ -834,6 +857,7 @@ describe("generated OpenAPI contract", () => {
       "broadcast",
       "confirmed",
       "failed",
+      "outcome_unknown",
     ]);
     expect(transfer.responses).toHaveProperty("202");
     expect(transfer.responses).toHaveProperty("429");
@@ -914,6 +938,64 @@ describe("generated OpenAPI contract", () => {
     expect(paths["/v2/provider-grants"]).toHaveProperty("post");
     expect(paths["/v2/provider-grants/{id}/revoke"]).toHaveProperty("post");
     expect(paths["/v2/provider-access/check"]).toHaveProperty("post");
+    expect(paths["/v2/provider-actions/{id}"]).toHaveProperty("get");
+
+    const status = paths["/v2/provider-actions/{id}"].get;
+    expect(status.security).toEqual([{ bearerAuth: [] }]);
+    expect(status.description).toContain("cross-agent");
+    expect(status.description).toContain("human/MFA-gated");
+    const responseStatus =
+      status.responses["200"].content["application/json"].schema.properties.data;
+    expect(responseStatus.additionalProperties).toBe(false);
+    expect(Object.keys(responseStatus.properties).sort()).toEqual(
+      [
+        "actionDigest",
+        "createdAt",
+        "expiresAt",
+        "id",
+        "operationId",
+        "operationRevision",
+        "providerAccountId",
+        "requestHash",
+        "status",
+        "updatedAt",
+        "version",
+        "workspaceId",
+      ].sort(),
+    );
+    expect(responseStatus.properties).not.toHaveProperty("payload");
+    expect(responseStatus.properties).not.toHaveProperty("executionResult");
+    expect(responseStatus.properties).not.toHaveProperty("safeSummary");
+
+    expect(paths["/v2/provider-actions"]).toHaveProperty("post");
+    expect(paths["/v2/provider-actions/{id}/approval"]).toHaveProperty("get");
+    expect(paths["/v2/provider-actions/{id}/approval"]).toHaveProperty("post");
+    expect(paths["/v2/provider-actions/{id}/execute"]).toHaveProperty("post");
+    expect(paths["/v2/provider-actions/{id}/case"]).toHaveProperty("get");
+    expect(paths["/v2/provider-actions/{id}/evidence"]).toHaveProperty("get");
+    expect(paths["/v2/provider-actions/{id}/approval"].get.description).toContain("recent MFA");
+    expect(paths["/v2/provider-actions/{id}/case"].get.description).toContain("human session");
+    expect(paths["/v2/provider-actions"].post.description).toContain("never accepted");
+    const invokeForbidden =
+      paths["/v2/provider-actions"].post.responses["403"].content["application/json"].schema;
+    expect(invokeForbidden.oneOf).toHaveLength(2);
+    const invokeDenial = invokeForbidden.oneOf[1];
+    expect(invokeDenial.properties.data.properties.status.enum).toEqual([
+      "denied_access",
+      "denied_policy",
+    ]);
+    expect(invokeForbidden.oneOf[0].required).toEqual(["ok", "error"]);
+    const bindingStatuses =
+      paths["/v2/provider-actions/{id}"].get.responses["200"].content["application/json"].schema
+        .properties.data.properties.status.enum;
+    expect(bindingStatuses).toContain("execution_ready");
+    expect(bindingStatuses).toContain("outcome_unknown");
+    const caseManifest =
+      paths["/v2/provider-actions/{id}/case"].get.responses["200"].content["application/json"]
+        .schema;
+    expect(caseManifest.required).toContain("requestActor");
+    expect(caseManifest.required).toContain("dependencyRevisions");
+    expect(caseManifest.required).toContain("events");
   });
 
   it("serves the generated contract at /openapi.json", async () => {

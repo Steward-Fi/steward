@@ -11,13 +11,14 @@ import {
   canonicalJsonStringify,
   type ExecutionAuthorization,
   type ExecutionCapability,
+  loadExecutionAuthV2Keys,
   type NormalizedEvmExecutionPayload,
   normalizeEvmExecutionPayload,
   type PolicyRule,
   type SignRequest,
 } from "@stwd/shared";
 
-// PR4 v2 signing crypto lives in @stwd/shared (pure, no DB) so the separate
+// V2 signing crypto lives in @stwd/shared (pure, no DB) so the separate
 // proxy process can verify without depending on @stwd/api. Re-export here for
 // existing api-side callers/tests.
 export {
@@ -116,6 +117,7 @@ export interface MintExecutionAuthorizationInput {
   capability: ExecutionCapability;
   payloadDigest: string;
   backend: ExecutionAuthorization["backend"];
+  backendIdentityDigest?: string;
   policyRevisionHash?: string;
   approvalId?: string;
   idempotencyKey?: string;
@@ -125,6 +127,16 @@ export interface MintExecutionAuthorizationInput {
 export async function mintExecutionAuthorization(
   input: MintExecutionAuthorizationInput,
 ): Promise<ExecutionAuthorization> {
+  if (
+    (input.backend === "external-custody" &&
+      !/^[0-9a-f]{64}$/.test(input.backendIdentityDigest ?? "")) ||
+    (input.backend !== "external-custody" && input.backendIdentityDigest !== undefined)
+  ) {
+    throw new ExecutionAuthorizationError(
+      "External custody authorization requires an exact provider/key/address identity digest",
+      "context_mismatch",
+    );
+  }
   const now = input.now ?? new Date();
   const expiresAt = new Date(now.getTime() + EXECUTION_AUTHORIZATION_TTL_MS);
   const authorization: ExecutionAuthorization = {
@@ -135,6 +147,7 @@ export async function mintExecutionAuthorization(
     capability: input.capability,
     payloadDigest: input.payloadDigest,
     backend: input.backend,
+    backendIdentityDigest: input.backendIdentityDigest,
     policyRevisionHash: input.policyRevisionHash,
     approvalId: input.approvalId,
     nonce: base64Url(randomBytes(24)),
@@ -152,6 +165,7 @@ export async function mintExecutionAuthorization(
     agentId: authorization.agentId,
     capability: authorization.capability,
     backend: authorization.backend,
+    backendIdentityDigest: authorization.backendIdentityDigest,
     payloadDigest: authorization.payloadDigest,
     policyRevisionHash: authorization.policyRevisionHash,
     approvalId: authorization.approvalId,
@@ -171,6 +185,7 @@ export interface ConsumeExecutionAuthorizationContext {
   agentId: string;
   capability: ExecutionCapability;
   backend: ExecutionAuthorization["backend"];
+  backendIdentityDigest?: string;
   payloadDigest: string;
 }
 
@@ -186,6 +201,13 @@ export async function consumeExecutionAuthorization(
       and(
         eq(executionAuthorizationNonces.authorizationId, authorization.id),
         eq(executionAuthorizationNonces.nonce, authorization.nonce),
+        eq(executionAuthorizationNonces.backend, authorization.backend),
+        authorization.backendIdentityDigest
+          ? eq(
+              executionAuthorizationNonces.backendIdentityDigest,
+              authorization.backendIdentityDigest,
+            )
+          : sql`${executionAuthorizationNonces.backendIdentityDigest} IS NULL`,
         eq(executionAuthorizationNonces.status, "active"),
         sql`${executionAuthorizationNonces.expiresAt} > now()`,
       ),
@@ -217,6 +239,7 @@ export function verifyExecutionAuthorization(
     authorization.agentId !== expected.agentId ||
     authorization.capability !== expected.capability ||
     authorization.backend !== expected.backend ||
+    authorization.backendIdentityDigest !== expected.backendIdentityDigest ||
     authorization.payloadDigest !== expected.payloadDigest ||
     authorization.status !== "active"
   ) {
@@ -243,16 +266,27 @@ function signExecutionAuthorization(authorization: ExecutionAuthorization): stri
 }
 
 function executionAuthorizationKey(): Uint8Array {
-  const secret = process.env.STEWARD_JWT_SECRET?.trim();
-  if (!secret) {
+  // SEC-074: derive from the dedicated execution-auth secret, NEVER from
+  // STEWARD_JWT_SECRET (the most widely-used secret in the deployment; its
+  // compromise must not yield forgeable execution authorizations). Mirrors the
+  // v2 mint posture (provider-execution.ts, X7): no JWT-secret fallback. v1
+  // authorizations are minted and consumed inside this process within a 60s
+  // TTL, so the active (first) key entry suffices; v1 keeps its own HKDF
+  // salt/info above for domain separation from the v2 derived keys.
+  let secret: Uint8Array;
+  try {
+    // Reuse the v2 parser so v1 cannot bypass its 32-character entropy floor,
+    // malformed-entry rejection, or rotation-list semantics.
+    secret = loadExecutionAuthV2Keys()[0]!.key;
+  } catch {
     throw new ExecutionAuthorizationError(
-      "STEWARD_JWT_SECRET is required for execution authorization",
+      "STEWARD_EXECUTION_AUTH_SECRET is required for execution authorization",
       "secret_unavailable",
     );
   }
   const key = hkdfSync(
     "sha256",
-    new TextEncoder().encode(secret),
+    secret,
     new TextEncoder().encode(EXECUTION_AUTHORIZATION_HKDF_SALT),
     new TextEncoder().encode(EXECUTION_AUTHORIZATION_HKDF_INFO),
     32,
@@ -269,6 +303,7 @@ function signaturePayload(authorization: ExecutionAuthorization): Record<string,
     capability: authorization.capability,
     payloadDigest: authorization.payloadDigest,
     backend: authorization.backend,
+    backendIdentityDigest: authorization.backendIdentityDigest ?? null,
     policyRevisionHash: authorization.policyRevisionHash ?? null,
     approvalId: authorization.approvalId ?? null,
     nonce: authorization.nonce,

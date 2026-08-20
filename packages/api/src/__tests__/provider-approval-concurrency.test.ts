@@ -1,5 +1,5 @@
 /**
- * PR3 concurrency + fault-injection matrix (spec §13) + C2 crash recovery.
+ * approval-lifecycle concurrency + fault-injection matrix (spec §13) + C2 crash recovery.
  * Uses real Promise.all races and the service's named fault hooks (production
  * no-ops; not settable from runtime input). Under PGLite the per-tenant audit
  * queue + unique/revision constraints yield exactly one transition (C14).
@@ -108,16 +108,20 @@ function decideBody(
   };
 }
 
-describe("PR3 concurrency + fault matrix", () => {
+describe("approval-lifecycle concurrency + fault matrix", () => {
+  const priorExecutionAuthSecret = process.env.STEWARD_EXECUTION_AUTH_SECRET;
   beforeAll(async () => {
     process.env.STEWARD_PGLITE_MEMORY = "true";
     process.env.STEWARD_AUDIT_HMAC_KEY ||= "0".repeat(64);
+    process.env.STEWARD_EXECUTION_AUTH_SECRET = "1".repeat(64);
     const { db, client } = await createPGLiteDb("memory://");
     setPGLiteOverride(db, async () => client.close());
   });
   afterAll(async () => {
     await closeDb();
     delete process.env.STEWARD_PGLITE_MEMORY;
+    if (priorExecutionAuthSecret === undefined) delete process.env.STEWARD_EXECUTION_AUTH_SECRET;
+    else process.env.STEWARD_EXECUTION_AUTH_SECRET = priorExecutionAuthSecret;
   });
   beforeEach(async () => {
     await wipe();

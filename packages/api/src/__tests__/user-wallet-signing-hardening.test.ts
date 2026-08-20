@@ -67,7 +67,7 @@ describe("user wallet signing hardening", () => {
     const lock = routeBody.indexOf("withAgentSpendLock(");
     const userWalletLock = routeBody.indexOf("`user-wallet-${userId}`", lock);
     const aggregateStats = routeBody.indexOf(
-      "getUserWalletTransactionStats(userId)",
+      "getUserWalletTransactionStats(userId, chainId)",
       userWalletLock,
     );
     const policyEvaluation = routeBody.indexOf("engine.evaluate", aggregateStats);

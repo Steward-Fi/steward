@@ -60,6 +60,9 @@ COPY packages/plugin-sdk/package.json         packages/plugin-sdk/package.json
 COPY packages/plugin-trading/package.json     packages/plugin-trading/package.json
 COPY packages/plugin-wxmr/package.json        packages/plugin-wxmr/package.json
 COPY packages/provider-github/package.json    packages/provider-github/package.json
+COPY packages/provider-slack/package.json     packages/provider-slack/package.json
+COPY packages/provider-google/package.json    packages/provider-google/package.json
+COPY packages/provider-aws/package.json       packages/provider-aws/package.json
 COPY packages/provider-x/package.json         packages/provider-x/package.json
 COPY packages/proxy-client/package.json       packages/proxy-client/package.json
 COPY packages/policy-engine/package.json     packages/policy-engine/package.json
@@ -70,6 +73,7 @@ COPY packages/redis/package.json             packages/redis/package.json
 COPY packages/seed/package.json              packages/seed/package.json
 COPY packages/shared/package.json            packages/shared/package.json
 COPY packages/signer-frost/package.json      packages/signer-frost/package.json
+COPY packages/solana-signer/package.json     packages/solana-signer/package.json
 COPY packages/sdk/package.json               packages/sdk/package.json
 COPY packages/trade-sessions/package.json    packages/trade-sessions/package.json
 COPY packages/vault/package.json             packages/vault/package.json
@@ -104,6 +108,9 @@ COPY packages/plugin-sdk/package.json         packages/plugin-sdk/package.json
 COPY packages/plugin-trading/package.json     packages/plugin-trading/package.json
 COPY packages/plugin-wxmr/package.json        packages/plugin-wxmr/package.json
 COPY packages/provider-github/package.json    packages/provider-github/package.json
+COPY packages/provider-slack/package.json     packages/provider-slack/package.json
+COPY packages/provider-google/package.json    packages/provider-google/package.json
+COPY packages/provider-aws/package.json       packages/provider-aws/package.json
 COPY packages/provider-x/package.json         packages/provider-x/package.json
 COPY packages/proxy-client/package.json       packages/proxy-client/package.json
 COPY packages/policy-engine/package.json     packages/policy-engine/package.json
@@ -114,6 +121,7 @@ COPY packages/redis/package.json             packages/redis/package.json
 COPY packages/seed/package.json              packages/seed/package.json
 COPY packages/shared/package.json            packages/shared/package.json
 COPY packages/signer-frost/package.json      packages/signer-frost/package.json
+COPY packages/solana-signer/package.json     packages/solana-signer/package.json
 COPY packages/sdk/package.json               packages/sdk/package.json
 COPY packages/trade-sessions/package.json    packages/trade-sessions/package.json
 COPY packages/vault/package.json             packages/vault/package.json
@@ -138,6 +146,9 @@ COPY packages/plugin-capabilities packages/plugin-capabilities
 COPY packages/plugin-trading packages/plugin-trading
 COPY packages/plugin-wxmr packages/plugin-wxmr
 COPY packages/provider-github packages/provider-github
+COPY packages/provider-slack packages/provider-slack
+COPY packages/provider-google packages/provider-google
+COPY packages/provider-aws packages/provider-aws
 COPY packages/provider-x packages/provider-x
 COPY packages/proxy-client packages/proxy-client
 COPY packages/policy-engine packages/policy-engine
@@ -168,6 +179,9 @@ RUN mkdir -p node_modules/@stwd && \
     ln -sf ../../../packages/plugin-trading    node_modules/@stwd/plugin-trading && \
     ln -sf ../../../packages/plugin-wxmr       node_modules/@stwd/plugin-wxmr && \
     ln -sf ../../../packages/provider-github   node_modules/@stwd/provider-github && \
+    ln -sf ../../../packages/provider-slack    node_modules/@stwd/provider-slack && \
+    ln -sf ../../../packages/provider-google   node_modules/@stwd/provider-google && \
+    ln -sf ../../../packages/provider-aws      node_modules/@stwd/provider-aws && \
     ln -sf ../../../packages/provider-x         node_modules/@stwd/provider-x && \
     ln -sf ../../../packages/proxy-client      node_modules/@stwd/proxy-client && \
     ln -sf ../../../packages/trade-sessions    node_modules/@stwd/trade-sessions && \
@@ -209,6 +223,9 @@ COPY packages/plugin-sdk/package.json         packages/plugin-sdk/package.json
 COPY packages/plugin-trading/package.json     packages/plugin-trading/package.json
 COPY packages/plugin-wxmr/package.json        packages/plugin-wxmr/package.json
 COPY packages/provider-github/package.json    packages/provider-github/package.json
+COPY packages/provider-slack/package.json     packages/provider-slack/package.json
+COPY packages/provider-google/package.json    packages/provider-google/package.json
+COPY packages/provider-aws/package.json       packages/provider-aws/package.json
 COPY packages/provider-x/package.json         packages/provider-x/package.json
 COPY packages/proxy-client/package.json       packages/proxy-client/package.json
 COPY packages/policy-engine/package.json     packages/policy-engine/package.json
@@ -219,6 +236,7 @@ COPY packages/redis/package.json             packages/redis/package.json
 COPY packages/seed/package.json              packages/seed/package.json
 COPY packages/shared/package.json            packages/shared/package.json
 COPY packages/signer-frost/package.json      packages/signer-frost/package.json
+COPY packages/solana-signer/package.json     packages/solana-signer/package.json
 COPY packages/sdk/package.json               packages/sdk/package.json
 COPY packages/trade-sessions/package.json    packages/trade-sessions/package.json
 COPY packages/vault/package.json             packages/vault/package.json
@@ -228,12 +246,6 @@ COPY packages/webhooks/package.json          packages/webhooks/package.json
 COPY packages/examples/                      packages/examples/
 
 COPY --from=deps /app/bun.lock ./bun.lock
-# Install only the two runtime entrypoints and their declared workspace
-# dependency closure. An unfiltered monorepo install also pulls the web wallet
-# stack into this server image, making the image large enough to exhaust hosted
-# runners during Docker export.
-RUN bun install --production --frozen-lockfile --ignore-scripts \
-    --filter @stwd/api --filter @stwd/proxy
 
 # Copy compiled output from build stage
 COPY --from=build /app/packages/adapters    packages/adapters
@@ -245,6 +257,9 @@ COPY --from=build /app/packages/plugin-capabilities packages/plugin-capabilities
 COPY --from=build /app/packages/plugin-trading packages/plugin-trading
 COPY --from=build /app/packages/plugin-wxmr packages/plugin-wxmr
 COPY --from=build /app/packages/provider-github packages/provider-github
+COPY --from=build /app/packages/provider-slack packages/provider-slack
+COPY --from=build /app/packages/provider-google packages/provider-google
+COPY --from=build /app/packages/provider-aws packages/provider-aws
 COPY --from=build /app/packages/provider-x packages/provider-x
 COPY --from=build /app/packages/proxy-client packages/proxy-client
 COPY --from=build /app/packages/policy-engine packages/policy-engine
@@ -276,6 +291,9 @@ RUN mkdir -p node_modules/@stwd && \
     ln -sf ../../../packages/plugin-trading    node_modules/@stwd/plugin-trading && \
     ln -sf ../../../packages/plugin-wxmr       node_modules/@stwd/plugin-wxmr && \
     ln -sf ../../../packages/provider-github   node_modules/@stwd/provider-github && \
+    ln -sf ../../../packages/provider-slack    node_modules/@stwd/provider-slack && \
+    ln -sf ../../../packages/provider-google   node_modules/@stwd/provider-google && \
+    ln -sf ../../../packages/provider-aws      node_modules/@stwd/provider-aws && \
     ln -sf ../../../packages/provider-x         node_modules/@stwd/provider-x && \
     ln -sf ../../../packages/proxy-client      node_modules/@stwd/proxy-client && \
     ln -sf ../../../packages/trade-sessions    node_modules/@stwd/trade-sessions && \
@@ -283,14 +301,16 @@ RUN mkdir -p node_modules/@stwd && \
     ln -sf ../../../packages/venue-polymarket  node_modules/@stwd/venue-polymarket && \
     ln -sf ../../../packages/eliza-plugin  node_modules/@stwd/eliza-plugin 2>/dev/null; true
 
-# Re-run the production install AFTER copying the built packages. The
+# Install the production dependency closure AFTER copying the built packages.
 # `COPY --from=build /app/packages/*` lines above overwrite each package dir
 # (including its per-package node_modules) with the BUILD stage's version, whose
 # third-party-dep symlinks (e.g. packages/api/node_modules/drizzle-orm) point at the
 # build stage's `.bun` store paths that don't exist here — leaving DANGLING
 # symlinks (ENOENT reading drizzle-orm at boot). Re-installing rebuilds the
 # per-package node_modules symlinks against THIS stage's `.bun` store, so runtime
-# resolution is correct + deterministic regardless of resolution drift.
+# resolution is correct + deterministic regardless of resolution drift. Doing
+# this exactly once also avoids retaining a complete, immediately-obsolete
+# dependency layer in the exported image.
 RUN bun install --production --frozen-lockfile --ignore-scripts \
     --filter @stwd/api --filter @stwd/proxy
 

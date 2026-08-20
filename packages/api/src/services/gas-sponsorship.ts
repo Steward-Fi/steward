@@ -7,6 +7,7 @@ import type {
   TenantGasSponsorshipConfig,
 } from "@stwd/shared";
 import { and, desc, eq, gte, inArray, lte, sql } from "drizzle-orm";
+import { validateWebhookUrl } from "./webhook-url";
 
 type SponsoredGasChainFamily = "evm" | "solana";
 
@@ -44,19 +45,30 @@ function normalizeHttpsUrl(value: unknown, field: string): string | undefined | 
   } catch {
     return `${field} must be a valid URL`;
   }
+  const localProviderUrlsAllowed =
+    process.env.STEWARD_ALLOW_LOCAL_PROVIDER_URLS === "true" ||
+    process.env.NODE_ENV === "test" ||
+    process.env.NODE_ENV === "development";
   if (url.protocol !== "https:" && url.hostname !== "localhost" && url.hostname !== "127.0.0.1") {
     return `${field} must use https`;
   }
-  if (
-    url.protocol !== "https:" &&
-    process.env.STEWARD_ALLOW_LOCAL_PROVIDER_URLS !== "true" &&
-    process.env.NODE_ENV !== "test" &&
-    process.env.NODE_ENV !== "development"
-  ) {
+  if (url.protocol !== "https:" && !localProviderUrlsAllowed) {
     return `${field} must use https unless local provider URLs are explicitly enabled`;
   }
   if (url.username || url.password || url.hash) {
     return `${field} must not include credentials or fragments`;
+  }
+  // SEC-072: tenant-controlled paymaster/bundler URLs become live server-side
+  // fetch sinks the moment a provider adapter is installed, so they must pass
+  // the same string-level public-host guard as the webhook/OIDC/SAML surfaces
+  // (private/loopback/link-local IPs, .local/.internal names). The explicit
+  // localhost exception above (dev/test or STEWARD_ALLOW_LOCAL_PROVIDER_URLS)
+  // is the only bypass.
+  const isLocalException =
+    localProviderUrlsAllowed && (url.hostname === "localhost" || url.hostname === "127.0.0.1");
+  if (!isLocalException) {
+    const ssrfError = validateWebhookUrl(url.toString());
+    if (ssrfError) return `${field} must be a public https URL (${ssrfError})`;
   }
   return url.toString();
 }

@@ -21,16 +21,12 @@ import {
   transactions,
   vault,
 } from "../services/context";
+import { isRecentMfaTimestamp } from "../services/recent-mfa";
 
 export const dashboardRoutes = new Hono<{ Variables: AppVariables }>();
 
 function hasRecentSessionMfa(c: Parameters<typeof requireTenantLevel>[0], maxAgeMs = 5 * 60_000) {
-  const verifiedAt = c.get("sessionMfaVerifiedAt");
-  return (
-    typeof verifiedAt === "number" &&
-    Number.isFinite(verifiedAt) &&
-    Date.now() - verifiedAt <= maxAgeMs
-  );
+  return isRecentMfaTimestamp(c.get("sessionMfaVerifiedAt"), maxAgeMs);
 }
 
 // ─── GET /dashboard/:agentId — aggregated agent dashboard ─────────────────────

@@ -5,7 +5,7 @@
  * unless the provider ACCEPTED the message:
  *   - production with no delivery-capable provider  → 503, no challenge issued
  *   - tenant with partial/unsupported email config  → 503, no challenge issued
- *   - provider rejects the send                     → 502, challenge invalidated
+ *   - provider rejects the send                     → 502, challenge remains staged
  *   - provider returns an acceptance receipt        → 200, challenge live
  */
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
@@ -73,7 +73,7 @@ describe("fail-closed email delivery routes (production)", () => {
       { id: TENANT_LIVE, name: "Live Provider", apiKeyHash: "hash-2" },
     ]);
     // Partial per-tenant config: an encrypted key blob but NO provider field.
-    // Pre-fix this silently fell back to ConsoleProvider and returned ok:true.
+    // This must not silently fall back to ConsoleProvider and return ok:true.
     await dbHandle.insert(tenantConfigs).values({
       tenantId: TENANT_PARTIAL,
       emailConfig: { apiKeyEncrypted: '{"ciphertext":"x","iv":"x","tag":"x","salt":"x"}' },
@@ -135,7 +135,7 @@ describe("fail-closed email delivery routes (production)", () => {
     expect(body.error).toBe("Email delivery is not configured");
   });
 
-  it("returns 502, invalidates the challenge, and keeps logs redacted when the provider rejects", async () => {
+  it("returns 502, keeps the challenge staged, and redacts logs when the provider rejects", async () => {
     // Prime the tenant cache with a delivery-capable EmailAuth (Resend key
     // present), then swap in a rejecting provider — the seam a Resend outage
     // or invalid key hits in production.
@@ -174,7 +174,7 @@ describe("fail-closed email delivery routes (production)", () => {
     expect(body.ok).toBe(false);
     expect(body.error).toBe("Email could not be sent. Please try again later.");
 
-    // The would-be credentials must not redeem (challenge invalidated).
+    // The would-be credentials must not redeem while delivery remains staged.
     const token = text.match(/[?&]token=([a-f0-9]{64})/)?.[1] ?? "";
     const code = text.match(/\b(\d{6})\b/)?.[1] ?? "";
     expect(token).not.toBe("");

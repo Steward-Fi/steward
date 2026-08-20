@@ -57,6 +57,10 @@ describe("plugin migrations: namespaced-journal isolation", () => {
     expect(() => sanitizePluginMigrationId("")).toThrow();
     // the derived table name carries the sanitized id, never raw input
     expect(pluginMigrationsTable("Trading")).toBe("__drizzle_migrations_plugin_trading");
+    expect(sanitizePluginMigrationId(`${"_".repeat(200_000)}safe`)).toBe("safe");
+    expect(pluginMigrationsTable("a-b")).toBe("__drizzle_migrations_plugin_a_b");
+    expect(pluginMigrationsTable("a.b")).toBe("__drizzle_migrations_plugin_a_b");
+    expect(() => pluginMigrationsTable("a".repeat(36))).toThrow(/exceeds 35 characters/);
   });
 
   test("records the plugin migration in its OWN table, never the core journal, idempotently", async () => {

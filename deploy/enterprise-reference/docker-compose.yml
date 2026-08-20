@@ -20,14 +20,22 @@ services:
     environment:
       DATABASE_URL: "${DATABASE_URL:-postgresql://steward:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD required}@postgres:5432/steward}"
       # Explicit acknowledgement is required because this allows plaintext DB
-      # transport. The bundled Postgres is isolated on steward-backend, but an
-      # operator-supplied external DATABASE_URL must never inherit this silently.
+      # transport. The bundled Postgres is isolated on the internal steward-data
+      # network, but an operator-supplied external DATABASE_URL must never
+      # inherit this silently.
       STEWARD_ALLOW_INSECURE_DB: "${STEWARD_ALLOW_INSECURE_DB:?required for the internal plaintext Postgres profile}"
+      STEWARD_ALLOW_UNVERIFIED_DB_TLS: "${STEWARD_ALLOW_UNVERIFIED_DB_TLS:-}"
     depends_on:
       postgres:
         condition: service_healthy
     networks:
-      - steward-backend
+      # Dual-homed: reaches the bundled postgres via steward-data, and an
+      # operator-supplied external DATABASE_URL via steward-backend egress.
+      steward-backend:
+        # Compose does not define a default gateway for equal priorities. Pin
+        # the egress-capable network explicitly (Compose >= 2.33.1).
+        gw_priority: 1
+      steward-data: {}
     restart: "no"
 
   steward-api:
@@ -45,7 +53,6 @@ services:
       STEWARD_MASTER_PASSWORD: "${STEWARD_MASTER_PASSWORD:?required}"
       STEWARD_JWT_SECRET: "${STEWARD_JWT_SECRET:?required}"
       STEWARD_EXECUTION_AUTH_SECRET: "${STEWARD_EXECUTION_AUTH_SECRET:?required}"
-      STEWARD_SESSION_SECRET: "${STEWARD_SESSION_SECRET:?required}"
       STEWARD_KDF_SALT: "${STEWARD_KDF_SALT:?required}"
       # Custody posture: no STEWARD_KMS_PROVIDER is set, so the vault runs in
       # `local` mode (plaintext key in app memory at sign time). With
@@ -69,8 +76,11 @@ services:
       PASSKEY_RP_NAME: "${PASSKEY_RP_NAME:-Steward}"
       PASSKEY_RP_ID: "${PASSKEY_RP_ID:-steward.localhost}"
       PASSKEY_ORIGIN: "${PASSKEY_ORIGIN:-https://steward.localhost}"
+      X_CLIENT_ID: "${X_CLIENT_ID:-}"
+      X_CLIENT_SECRET: "${X_CLIENT_SECRET:-}"
       SKIP_MIGRATIONS: "true"
       STEWARD_ALLOW_INSECURE_DB: "${STEWARD_ALLOW_INSECURE_DB:?required for the internal plaintext Postgres profile}"
+      STEWARD_ALLOW_UNVERIFIED_DB_TLS: "${STEWARD_ALLOW_UNVERIFIED_DB_TLS:-}"
     depends_on:
       steward-migrate:
         condition: service_completed_successfully
@@ -83,7 +93,9 @@ services:
       start_period: 30s
       retries: 8
     networks:
-      - steward-backend
+      steward-backend:
+        gw_priority: 1
+      steward-data: {}
 
   steward-proxy:
     profiles: ["enterprise-reference"]
@@ -108,6 +120,7 @@ services:
       STEWARD_AUDIT_HMAC_KEY: "${STEWARD_AUDIT_HMAC_KEY:?required}"
       STEWARD_PROXY_REQUEST_SIGNING_SECRETS: "${STEWARD_PROXY_REQUEST_SIGNING_SECRETS:?required}"
       STEWARD_ALLOW_INSECURE_DB: "${STEWARD_ALLOW_INSECURE_DB:?required for the internal plaintext Postgres profile}"
+      STEWARD_ALLOW_UNVERIFIED_DB_TLS: "${STEWARD_ALLOW_UNVERIFIED_DB_TLS:-}"
     depends_on:
       steward-api:
         condition: service_healthy
@@ -118,7 +131,9 @@ services:
       start_period: 15s
       retries: 5
     networks:
-      - steward-backend
+      steward-backend:
+        gw_priority: 1
+      steward-data: {}
 
   caddy:
     profiles: ["enterprise-reference"]
@@ -157,7 +172,7 @@ services:
       timeout: 5s
       retries: 6
     networks:
-      - steward-backend
+      - steward-data
 
   redis:
     profiles: ["enterprise-reference"]
@@ -171,22 +186,249 @@ services:
       timeout: 5s
       retries: 6
     networks:
-      - steward-backend
+      - steward-data
 
   backup:
     profiles: ["enterprise-reference", "backup"]
     image: postgres:16-alpine@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685
     entrypoint: ["/bin/sh", "-ec"]
-    command: "pg_dump \"$${DATABASE_URL}\" > /backups/steward-$$(date -u +%Y%m%dT%H%M%SZ).sql"
-    environment:
-      DATABASE_URL: "${DATABASE_URL:-postgresql://steward:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD required}@postgres:5432/steward}"
+    # SEC-081:
+    #  - The DSN is sourced from the mounted env FILE, not container env, so
+    #    the DB password no longer appears in `docker inspect`.
+    #  - SEC-050: pg_dump's argv is visible in the HOST process list
+    #    (/proc/<pid>/cmdline), so the password must not ride inside the DSN
+    #    either. The command below strips both userinfo and libpq query-string
+    #    passwords from the DSN and authenticates via PGPASSWORD (same pattern
+    #    as scripts/migrate.sh).
+    #  - umask 077: dumps contain tenant PII, audit events, and encrypted key
+    #    blobs in PLAINTEXT — they are written mode 0600. Keep ./backups
+    #    mode 0700 on the host (or on encrypted storage), restrict it to the
+    #    operator account, and encrypt/prune dumps per your retention policy.
+    command:
+      - |
+        # Never source the dotenv file as shell code. `steward init` accepts an
+        # operator-supplied DATABASE_URL, and URI bytes such as '&' and '$()'
+        # must remain inert data rather than becoming shell syntax. Read only
+        # the two keys this one-shot backup needs, without eval/`.`.
+        read_steward_env_value() {
+          steward_env_key="$$1"
+          steward_env_value="$$(sed -n "s/^$${steward_env_key}=//p" /run/steward/env | sed -n '1p')"
+          case "$$steward_env_value" in
+            \'*\') steward_env_value="$${steward_env_value#\'}"; steward_env_value="$${steward_env_value%\'}" ;;
+            \"*\") steward_env_value="$${steward_env_value#\"}"; steward_env_value="$${steward_env_value%\"}" ;;
+            \'*|\"*) echo "Malformed quoted $$steward_env_key in Steward env file" >&2; return 1 ;;
+          esac
+          printf '%s' "$$steward_env_value"
+        }
+        DATABASE_URL="$$(read_steward_env_value DATABASE_URL)"
+        POSTGRES_PASSWORD="$$(read_steward_env_value POSTGRES_PASSWORD)"
+        export DATABASE_URL POSTGRES_PASSWORD
+        umask 077
+        # Never inherit a separately supplied password into pg_dump. The only
+        # credential allowed below is one decoded from DATABASE_URL itself.
+        unset PGPASSWORD
+        dsn="$${DATABASE_URL:-postgresql://steward:$${POSTGRES_PASSWORD:?}@postgres:5432/steward}"
+        # libpq accepts a raw '?' inside userinfo even though RFC 3986 normally
+        # requires it to be percent-encoded. A fragment, however, is never a
+        # supported connection target and makes delimiter parsing ambiguous.
+        # Reject it before any password-bearing value can reach pg_dump argv.
+        case "$$dsn" in
+          *\#*) echo 'DATABASE_URL fragments are not supported' >&2; exit 1 ;;
+        esac
+        # POSIX-portable percent-decoder (octal printf works in dash/BusyBox ash;
+        # printf '%b' with \xHH does not). Defined before first use.
+        pg_url_decode() {
+          pg_encoded="$$1"
+          if printf '%s' "$$pg_encoded" | grep -q '[[:cntrl:]]'; then
+            return 1
+          fi
+          # A malformed escape can make our redacted URI differ from libpq's
+          # interpretation. Refuse it instead of passing an ambiguous DSN to
+          # pg_dump.
+          case "$$(printf '%s' "$$pg_encoded" | sed 's/%[0-9A-Fa-f][0-9A-Fa-f]//g')" in
+            *%*) return 1 ;;
+          esac
+          pg_decoded=
+          while [ -n "$$pg_encoded" ]; do
+            pg_char="$${pg_encoded%"$${pg_encoded#?}"}"
+            pg_encoded="$${pg_encoded#?}"
+            if [ "$$pg_char" = '%' ]; then
+              pg_hex="$${pg_encoded%"$${pg_encoded#??}"}"
+              pg_encoded="$${pg_encoded#??}"
+              case "$$pg_hex" in
+                00|0a|0A|0d|0D) return 1 ;; # NUL/CR/LF cannot be env data
+                [0-9A-Fa-f][0-9A-Fa-f]) ;;
+                *) return 1 ;;
+              esac
+              pg_oct="$$(printf '%03o' "$$((0x$$pg_hex))")"
+              pg_char="$$(printf "\\$$pg_oct")"
+            fi
+            pg_decoded="$$pg_decoded$$pg_char"
+          done
+          printf '%s' "$$pg_decoded"
+        }
+        # Strip user:password@ and ?password= from the DSN; pass the password
+        # via PGPASSWORD so it never appears on pg_dump's argv (SEC-050). A
+        # passwordless DSN is passed through unchanged. Query keywords are
+        # case-insensitive in libpq and may percent-encode their names, so
+        # decode keys before matching and fail closed on malformed escapes.
+        case "$$dsn" in
+          postgres://*|postgresql://*)
+            pg_scheme="$${dsn%%://*}"
+            pg_rest="$${dsn#*://}"
+            # Isolate the authority before looking for userinfo. When a path is
+            # present, '/' is the unambiguous authority terminator; importantly,
+            # libpq accepts a raw '?' in userinfo, so treating '?' as the first
+            # terminator can leave the password-bearing DSN on pg_dump argv.
+            # Without a path, '?' followed by '@' is intrinsically ambiguous
+            # (raw userinfo vs. a query value), so reject it fail-closed.
+            case "$$pg_rest" in
+              */*) pg_authority="$${pg_rest%%/*}" ;;
+              *\?*@*) echo 'DATABASE_URL contains ambiguous user information' >&2; exit 1 ;;
+              *) pg_authority="$$(printf '%s' "$$pg_rest" | sed 's|[?].*||')" ;;
+            esac
+            pg_suffix="$${pg_rest#"$$pg_authority"}"
+            # A raw '/' inside userinfo terminates the authority before '@',
+            # while multiple raw '@' delimiters have no safe, unique split.
+            # Reject both ambiguous forms instead of letting their secret bytes
+            # survive in the redacted DSN passed on pg_dump's argv.
+            case "$${pg_suffix%%\?*}" in
+              *@*) echo 'DATABASE_URL contains ambiguous user information' >&2; exit 1 ;;
+            esac
+            case "$$pg_authority" in
+              *@*@*) echo 'DATABASE_URL contains ambiguous user information' >&2; exit 1 ;;
+            esac
+            case "$$pg_authority" in
+              *:*@*)
+                pg_userinfo="$${pg_authority%%@*}"
+                pg_host="$${pg_authority#*@}"
+                pg_user="$${pg_userinfo%%:*}"
+                pg_pw="$${pg_userinfo#*:}"
+                dsn="$${pg_scheme}://$${pg_user}@$${pg_host}$${pg_suffix}"
+                # Percent-decode the password component (PGPASSWORD is literal).
+                # Reject malformed escapes and NUL, which cannot be represented
+                # in an environment and must never be silently truncated. Decode
+                # via pg_url_decode: octal printf is POSIX-portable (dash,
+                # BusyBox ash), whereas printf '%b' with \xHH is not.
+                case "$$(printf '%s' "$$pg_pw" | sed 's/%[0-9A-Fa-f][0-9A-Fa-f]//g')" in
+                  *%*) echo 'Invalid percent escape in DATABASE_URL password' >&2; exit 1 ;;
+                esac
+                case "$$pg_pw" in *%00*) echo 'NUL is not allowed in DATABASE_URL password' >&2; exit 1 ;; esac
+                if ! pg_pw="$$(pg_url_decode "$$pg_pw")"; then
+                  echo 'Invalid percent escape in DATABASE_URL password' >&2; exit 1
+                fi
+                PGPASSWORD="$$pg_pw"
+                export PGPASSWORD
+                ;;
+            esac
+            ;;
+          *)
+            # Steward DATABASE_URL accepts only libpq URI form. In particular,
+            # never pass a keyword/value conninfo string through unchanged: it
+            # can carry password=... directly on pg_dump's argv.
+            echo 'DATABASE_URL must use postgres:// or postgresql://' >&2
+            exit 1
+            ;;
+        esac
+        pg_query_password=
+        pg_query_password_found=
+        # Query parameters are part of the DSN passed to pg_dump, so remove
+        # every password keyword before the invocation. Retain all unrelated
+        # query bytes byte-for-byte (including user= and ordering).
+        case "$$dsn" in
+          *\?*)
+            pg_query_base="$${dsn%%\?*}"
+            pg_query="$${dsn#*\?}"
+            pg_retained_query=
+            pg_retained_query_started=
+            pg_query_done=
+            pg_query_candidate=
+            while :; do
+              case "$$pg_query" in
+                *\&*)
+                  pg_part="$${pg_query%%\&*}"
+                  pg_query="$${pg_query#*\&}"
+                  ;;
+                *)
+                  pg_part="$$pg_query"
+                  pg_query=
+                  pg_query_done=1
+                  ;;
+              esac
+              case "$$pg_part" in
+                *=*)
+                  pg_raw_key="$${pg_part%%=*}"
+                  pg_raw_value="$${pg_part#*=}"
+                  ;;
+                *)
+                  pg_raw_key="$$pg_part"
+                  pg_raw_value=
+                  ;;
+              esac
+              if ! pg_query_key="$$(pg_url_decode "$$pg_raw_key")"; then
+                echo 'Invalid percent escape in DATABASE_URL query' >&2
+                exit 1
+              fi
+              # Validate values even when they are not passwords; otherwise a
+              # malformed escape could be interpreted differently by libpq.
+              if ! pg_url_decode "$$pg_raw_value" >/dev/null; then
+                echo 'Invalid percent escape in DATABASE_URL query' >&2
+                exit 1
+              fi
+              case "$$pg_query_key" in
+                [Pp][Aa][Ss][Ss][Ww][Oo][Rr][Dd])
+                  if [ -n "$$pg_raw_value" ]; then
+                    if ! pg_query_candidate="$$(pg_url_decode "$$pg_raw_value")"; then
+                      echo 'Invalid percent escape in DATABASE_URL password' >&2
+                      exit 1
+                    fi
+                    if [ -n "$$pg_query_candidate" ]; then
+                      pg_query_password="$$pg_query_candidate"
+                      pg_query_password_found=1
+                    fi
+                  fi
+                  ;;
+                *)
+                  if [ -n "$$pg_retained_query_started" ]; then
+                    pg_retained_query="$$pg_retained_query&$$pg_part"
+                  else
+                    pg_retained_query="$$pg_part"
+                    pg_retained_query_started=1
+                  fi
+                  ;;
+              esac
+              [ -n "$$pg_query_done" ] && break
+            done
+            dsn="$$pg_query_base"
+            if [ -n "$$pg_retained_query_started" ]; then
+              dsn="$$dsn?$$pg_retained_query"
+            fi
+            if [ -n "$$pg_query_password_found" ]; then
+              PGPASSWORD="$$pg_query_password"
+              export PGPASSWORD
+            fi
+            ;;
+        esac
+        # The env file was sourced with `set -a`; remove original
+        # password-bearing variables before execing pg_dump so its process
+        # environment does not undo the argv hardening above.
+        unset DATABASE_URL POSTGRES_PASSWORD pg_pw pg_rest pg_userinfo pg_authority \
+          pg_query pg_query_candidate pg_query_password pg_raw_value pg_encoded \
+          pg_decoded pg_char pg_hex pg_oct pg_query_key pg_raw_key pg_part \
+          pg_query_base pg_retained_query pg_retained_query_started pg_query_done
+        pg_dump "$$dsn" > "/backups/steward-$$(date -u +%Y%m%dT%H%M%SZ).sql"
     volumes:
       - ./backups:/backups
+      - ./.env:/run/steward/env:ro
     depends_on:
       postgres:
         condition: service_healthy
     networks:
-      - steward-backend
+      # Dual-homed like steward-migrate: bundled postgres via steward-data,
+      # external DATABASE_URL (if overridden) via steward-backend egress.
+      steward-backend:
+        gw_priority: 1
+      steward-data: {}
     restart: "no"
 
 volumes:
@@ -196,5 +438,13 @@ volumes:
   caddy-config:
 
 networks:
+  # Egress-capable: steward-api (chain RPCs), steward-proxy (LLM upstreams),
+  # and caddy (ACME) need outbound access, so this bridge is not internal.
   steward-backend:
     driver: bridge
+  # Data plane (SEC-161): postgres/redis publish no ports and need no egress,
+  # so they sit on an internal-only network (mirrors the root compose's
+  # `backend` network). steward-api/steward-proxy are dual-homed to reach it.
+  steward-data:
+    driver: bridge
+    internal: true

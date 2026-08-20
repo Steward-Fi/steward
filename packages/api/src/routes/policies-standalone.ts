@@ -28,6 +28,7 @@ import {
   safeJsonParse,
 } from "../services/context";
 import { getPolicyRulesValidationError } from "../services/policy-validation";
+import { isRecentMfaTimestamp } from "../services/recent-mfa";
 
 type PolicyRow = typeof policies.$inferSelect;
 
@@ -405,12 +406,7 @@ function policyAuditActor(c: Parameters<typeof requireTenantLevel>[0], tenantId:
 }
 
 function hasRecentSessionMfa(c: Parameters<typeof requireTenantLevel>[0], maxAgeMs = 5 * 60_000) {
-  const verifiedAt = c.get("sessionMfaVerifiedAt");
-  return (
-    typeof verifiedAt === "number" &&
-    Number.isFinite(verifiedAt) &&
-    Date.now() - verifiedAt <= maxAgeMs
-  );
+  return isRecentMfaTimestamp(c.get("sessionMfaVerifiedAt"), maxAgeMs);
 }
 
 function requireRecentAdminMfa(c: Parameters<typeof requireTenantLevel>[0], reason: string) {
@@ -977,6 +973,8 @@ policiesStandaloneRoutes.post("/simulate", async (c) => {
       recentTxCount1h: liveStats?.recentTxCount1h ?? 0,
       spentToday: liveStats?.spentToday ?? 0n,
       spentThisWeek: liveStats?.spentThisWeek ?? 0n,
+      additionalUsdSpentTodayMicros: liveStats?.additionalUsdSpentTodayMicros ?? 0n,
+      additionalUsdSpentThisWeekMicros: liveStats?.additionalUsdSpentThisWeekMicros ?? 0n,
       priceOracle,
       conditionSets,
     });
@@ -994,6 +992,12 @@ policiesStandaloneRoutes.post("/simulate", async (c) => {
               recentTxCount1h: liveStats?.recentTxCount1h ?? 0,
               spentToday: (liveStats?.spentToday ?? 0n).toString(),
               spentThisWeek: (liveStats?.spentThisWeek ?? 0n).toString(),
+              additionalUsdSpentTodayMicros: (
+                liveStats?.additionalUsdSpentTodayMicros ?? 0n
+              ).toString(),
+              additionalUsdSpentThisWeekMicros: (
+                liveStats?.additionalUsdSpentThisWeekMicros ?? 0n
+              ).toString(),
             }
           : { source: "synthetic-zero" },
       },

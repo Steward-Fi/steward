@@ -3,7 +3,7 @@
 #
 # ⚠️  DEV-ONLY — NEVER RUN ON A PUBLIC HOST. ⚠️
 # This file ships throwaway default secrets (STEWARD_MASTER_PASSWORD,
-# STEWARD_SESSION_SECRET, platform/tenant keys) purely for local convenience.
+# STEWARD_JWT_SECRET, platform/tenant keys) purely for local convenience.
 # Published ports are bound to 127.0.0.1 so the dev stack is not reachable from
 # the network, but the defaults here are not safe for any shared or internet-
 # facing machine. Use docker-compose.yml (which requires real secrets) for
@@ -45,7 +45,7 @@ services:
       REDIS_URL: ""
       STEWARD_MASTER_PASSWORD: "${STEWARD_MASTER_PASSWORD:-dev_master_password_not_for_prod}"
       STEWARD_EMAIL_CODE_SECRET: "${STEWARD_EMAIL_CODE_SECRET:-dev_email_code_secret_not_for_prod}"
-      STEWARD_SESSION_SECRET: "${STEWARD_SESSION_SECRET:-dev_session_secret}"
+      STEWARD_JWT_SECRET: "${STEWARD_JWT_SECRET:-dev_jwt_secret_not_for_prod}"
       STEWARD_PLATFORM_KEYS: "${STEWARD_PLATFORM_KEYS:-dev_platform_key}"
       STEWARD_DEFAULT_TENANT_KEY: "${STEWARD_DEFAULT_TENANT_KEY:-dev_tenant_key}"
       AGENT_TOKEN_EXPIRY: "7d"
@@ -77,6 +77,10 @@ services:
     environment:
       NODE_ENV: "development"
       STEWARD_PROXY_PORT: "8080"
+      # SEC-175: the proxy fails closed by default (request signing, shared
+      # replay store, Redis rate limiting). Dev has no Redis/signing secrets,
+      # so opt into the soft posture explicitly.
+      STEWARD_PROXY_DEV_MODE: "true"
       # Proxy also uses PGLite in dev
       STEWARD_DB_MODE: "pglite"
       STEWARD_PGLITE_PATH: "/app/.pglite"
@@ -84,7 +88,7 @@ services:
       REDIS_URL: ""
       STEWARD_MASTER_PASSWORD: "${STEWARD_MASTER_PASSWORD:-dev_master_password_not_for_prod}"
       STEWARD_EMAIL_CODE_SECRET: "${STEWARD_EMAIL_CODE_SECRET:-dev_email_code_secret_not_for_prod}"
-      STEWARD_SESSION_SECRET: "${STEWARD_SESSION_SECRET:-dev_session_secret}"
+      STEWARD_JWT_SECRET: "${STEWARD_JWT_SECRET:-dev_jwt_secret_not_for_prod}"
     volumes:
       - ./packages:/app/packages
       - pglite-data:/app/.pglite

@@ -24,17 +24,29 @@ export async function loginWithMagicLink(
     });
 
   await expect.poll(() => page.url(), { timeout: 30_000 }).toMatch(/\/dashboard/);
+  // SEC-018: the access token lives in sessionStorage; the long-lived refresh
+  // token must be in an HttpOnly cookie, never in JS-readable storage.
   await expect
     .poll(
       () =>
         page.evaluate(() => ({
           sessionToken: window.sessionStorage.getItem("steward_session_token"),
           refreshToken: window.sessionStorage.getItem("steward_refresh_token"),
+          localRefreshToken: window.localStorage.getItem("steward_refresh_token"),
         })),
       { timeout: 30_000 },
     )
     .toMatchObject({
       sessionToken: expect.stringMatching(/^[^.]+\.[^.]+\.[^.]+$/),
-      refreshToken: expect.any(String),
+      refreshToken: null,
+      localRefreshToken: null,
     });
+  await expect
+    .poll(async () => {
+      // NOTE: no URL filter — the cookie is Path-scoped to /api/auth, and
+      // cookies(url) path-matches, so filtering by the app root would hide it.
+      const cookies = await page.context().cookies();
+      return cookies.find((cookie) => cookie.name === "steward_rt") ?? null;
+    })
+    .toMatchObject({ httpOnly: true, sameSite: "Strict", value: expect.any(String) });
 }

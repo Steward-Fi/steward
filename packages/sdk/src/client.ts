@@ -1,3 +1,4 @@
+import { assertSecureBaseUrl, stripTrailingSlashes } from "./base-url.ts";
 import type {
   AgentAccountSummary,
   AgentBalance,
@@ -81,6 +82,14 @@ import type {
   PolicyTemplateUpdate,
   PregeneratedUserWalletClaimResult,
   PregeneratedUserWalletCreateResult,
+  ProviderActionApprovalDecisionInput,
+  ProviderActionApprovalDetail,
+  ProviderActionInvokeInput,
+  ProviderActionInvokeResult,
+  ProviderActionStatus,
+  ProviderActionTransitionResult,
+  ProviderCaseEvidence,
+  ProviderCaseManifest,
   RouteRecord,
   RpcResponse,
   SecretRecord,
@@ -186,6 +195,21 @@ export interface StewardClientConfig {
    * injected scripts can read request headers. Prefer bearerToken in browsers.
    */
   allowUnsafeBrowserSecrets?: boolean;
+  /**
+   * Permit a plaintext non-loopback baseUrl (warns at construction). HTTPS is
+   * required by default so credentials never travel cleartext off-loopback.
+   */
+  allowInsecureBaseUrl?: boolean;
+  /**
+   * End-to-end request deadline, including request-header signing, receipt of
+   * response headers, and consumption of the response body. Defaults to 30s.
+   */
+  requestTimeoutMs?: number;
+  /**
+   * Maximum decoded response-body bytes accepted from the API. Defaults to
+   * 8 MiB and can never exceed the SDK's 16 MiB safety ceiling.
+   */
+  maxResponseBodyBytes?: number;
 }
 
 export interface QuorumSignerCredential {
@@ -274,6 +298,18 @@ export interface RpcPassthroughInput {
 export interface StewardPendingApproval {
   status: "pending_approval";
   results: PolicyResult[];
+}
+
+/**
+ * The provider produced a deterministic transaction hash, but Steward could
+ * not prove whether the upstream broadcast was accepted. Callers must
+ * reconcile `txHash` and must not submit the intent again.
+ */
+export interface StewardBroadcastOutcomeUnknown {
+  code: "external_broadcast_outcome_unknown";
+  txId: string;
+  txHash: string;
+  reconciliationRequired: true;
 }
 
 export interface StewardHistoryEntry {
@@ -457,6 +493,9 @@ export interface TradeSessionState {
   revokedBy?: string | null;
 }
 
+// Keep in lockstep with the equivalent list in EVERY other SDK (go, java,
+// python, ruby, rust, swift, csharp, flutter): mutations under these prefixes
+// are HMAC-signed, and divergence silently downgrades integrity (SEC-049).
 const SENSITIVE_SIGNED_PATHS = [
   "/vault",
   "/agents",
@@ -473,6 +512,8 @@ const SENSITIVE_SIGNED_PATHS = [
   "/condition-sets",
   "/condition_sets",
   "/v1/condition_sets",
+  "/global-wallet",
+  "/accounts",
 ];
 const MUTATING_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 
@@ -847,7 +888,8 @@ export type GetHistoryResult = StewardHistoryEntry[];
 export type SignTransactionResult =
   | { txHash: string; caip2?: string }
   | { signedTx: string; caip2?: string }
-  | StewardPendingApproval;
+  | StewardPendingApproval
+  | StewardBroadcastOutcomeUnknown;
 export interface TransferActionQuoteInput {
   to: string;
   /** ERC20 token contract address. Defaults to native chain asset. */
@@ -1063,7 +1105,8 @@ export type TransferActionStatus =
   | "signed"
   | "broadcast"
   | "confirmed"
-  | "failed";
+  | "failed"
+  | "outcome_unknown";
 export interface TransferAction {
   id: string;
   type: "transfer";
@@ -1132,6 +1175,11 @@ export type TransactionListResult = {
   transactions: TxRecord[];
   limit: number;
   offset: number;
+};
+export type VaultApprovalResult = {
+  txId: string;
+  txHash?: string;
+  signedTx?: string;
 };
 export type TransactionLifecycleEventType =
   | "transaction.broadcasted"
@@ -1340,8 +1388,36 @@ export function isStewardMfaRequiredError(
   return error instanceof StewardApiError && error.mfaRequired;
 }
 
+export function isStewardBroadcastOutcomeUnknown(
+  result: SignTransactionResult,
+): result is StewardBroadcastOutcomeUnknown {
+  return (
+    "code" in result &&
+    result.code === "external_broadcast_outcome_unknown" &&
+    result.reconciliationRequired === true
+  );
+}
+
 function isBrowserRuntime(): boolean {
   return typeof globalThis.window !== "undefined" && typeof globalThis.document !== "undefined";
+}
+
+const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
+const MAX_REQUEST_TIMEOUT_MS = 5 * 60_000;
+const DEFAULT_MAX_RESPONSE_BODY_BYTES = 8 * 1024 * 1024;
+const MAX_RESPONSE_BODY_BYTES = 16 * 1024 * 1024;
+
+function boundedPositiveInteger(
+  name: string,
+  value: number | undefined,
+  fallback: number,
+  maximum: number,
+): number {
+  const resolved = value ?? fallback;
+  if (!Number.isSafeInteger(resolved) || resolved <= 0 || resolved > maximum) {
+    throw new StewardApiError(`${name} must be a positive integer no greater than ${maximum}`, 0);
+  }
+  return resolved;
 }
 
 export class StewardClient {
@@ -1354,6 +1430,8 @@ export class StewardClient {
   private readonly tenantId?: string;
   private readonly requestSigningSecret?: string;
   private readonly requestSigningKeyId?: string;
+  private readonly requestTimeoutMs: number;
+  private readonly maxResponseBodyBytes: number;
 
   constructor({
     baseUrl,
@@ -1366,6 +1444,9 @@ export class StewardClient {
     requestSigningSecret,
     requestSigningKeyId,
     allowUnsafeBrowserSecrets,
+    allowInsecureBaseUrl,
+    requestTimeoutMs,
+    maxResponseBodyBytes,
   }: StewardClientConfig) {
     if (
       isBrowserRuntime() &&
@@ -1377,7 +1458,8 @@ export class StewardClient {
         0,
       );
     }
-    this.baseUrl = baseUrl.replace(/\/+$/, "");
+    assertSecureBaseUrl(baseUrl, allowInsecureBaseUrl);
+    this.baseUrl = stripTrailingSlashes(baseUrl);
     this.apiKey = apiKey;
     this.appId = appId;
     this.appSecret = appSecret;
@@ -1386,6 +1468,18 @@ export class StewardClient {
     this.tenantId = tenantId;
     this.requestSigningSecret = requestSigningSecret;
     this.requestSigningKeyId = requestSigningKeyId;
+    this.requestTimeoutMs = boundedPositiveInteger(
+      "requestTimeoutMs",
+      requestTimeoutMs,
+      DEFAULT_REQUEST_TIMEOUT_MS,
+      MAX_REQUEST_TIMEOUT_MS,
+    );
+    this.maxResponseBodyBytes = boundedPositiveInteger(
+      "maxResponseBodyBytes",
+      maxResponseBodyBytes,
+      DEFAULT_MAX_RESPONSE_BODY_BYTES,
+      MAX_RESPONSE_BODY_BYTES,
+    );
   }
 
   readonly tradeSessions = {
@@ -1440,6 +1534,90 @@ export class StewardClient {
         return response.data;
       },
     },
+  };
+
+  /**
+   * Governed workspace-provider action lifecycle.
+   *
+   * Invoke and get are agent-JWT surfaces. Approval reads/decisions and case
+   * evidence retain the API human-session + MFA gates; the SDK only types those
+   * routes and never substitutes credentials or actors. Execute is authorized
+   * by the API against the persisted action owner/approval state.
+   */
+  readonly providerActions = {
+    invoke: async (input: ProviderActionInvokeInput): Promise<ProviderActionInvokeResult> => {
+      try {
+        return await this.requestRawJson<ProviderActionInvokeResult>("/v2/provider-actions", {
+          method: "POST",
+          body: JSON.stringify(input),
+        });
+      } catch (error) {
+        if (error instanceof StewardApiError && error.status === 403) {
+          const envelope = error.data as {
+            error?: string;
+            data?: { id?: string; status?: string; requestHash?: string; actionDigest?: string };
+          };
+          const denial = envelope?.data;
+          if (
+            denial?.id &&
+            (denial.status === "denied_access" || denial.status === "denied_policy") &&
+            denial.requestHash &&
+            denial.actionDigest
+          ) {
+            return {
+              id: denial.id,
+              status: denial.status,
+              reasonCode: envelope.error ?? error.message,
+              requestHash: denial.requestHash,
+              actionDigest: denial.actionDigest,
+              persisted: true,
+            };
+          }
+        }
+        throw error;
+      }
+    },
+
+    get: async (actionId: string): Promise<ProviderActionStatus> => {
+      const response = await this.request<ProviderActionStatus, StewardErrorResponse>(
+        `/v2/provider-actions/${encodeURIComponent(actionId)}`,
+      );
+      if (!response.ok) throw new StewardApiError(response.error, response.status, response.data);
+      return response.data;
+    },
+
+    getApproval: async (actionId: string): Promise<ProviderActionApprovalDetail> => {
+      const response = await this.requestRawJson<{
+        ok: true;
+        data: ProviderActionApprovalDetail;
+      }>(`/v2/provider-actions/${encodeURIComponent(actionId)}/approval`);
+      return response.data;
+    },
+
+    decideApproval: async (
+      actionId: string,
+      input: ProviderActionApprovalDecisionInput,
+    ): Promise<ProviderActionTransitionResult> =>
+      this.requestRawJson<ProviderActionTransitionResult>(
+        `/v2/provider-actions/${encodeURIComponent(actionId)}/approval`,
+        { method: "POST", body: JSON.stringify(input) },
+      ),
+
+    execute: async (actionId: string): Promise<ProviderActionTransitionResult> =>
+      this.requestRawJson<ProviderActionTransitionResult>(
+        `/v2/provider-actions/${encodeURIComponent(actionId)}/execute`,
+        { method: "POST" },
+      ),
+
+    getCase: async (actionId: string): Promise<ProviderCaseManifest> =>
+      this.requestRawJson<ProviderCaseManifest>(
+        `/v2/provider-actions/${encodeURIComponent(actionId)}/case`,
+      ),
+
+    getEvidence: async (actionId: string): Promise<ProviderCaseEvidence> =>
+      this.requestRawJson<ProviderCaseEvidence>(
+        `/v2/provider-actions/${encodeURIComponent(actionId)}/evidence`,
+      ),
   };
 
   getBaseUrl(): string {
@@ -2008,7 +2186,7 @@ export class StewardClient {
   ): Promise<SignTransactionResult> {
     const response = await this.request<
       { txHash: string },
-      StewardPendingApproval | StewardErrorResponse
+      StewardPendingApproval | StewardBroadcastOutcomeUnknown | StewardErrorResponse
     >(`/vault/${encodeURIComponent(agentId)}/sign`, {
       method: "POST",
       headers: signerHeaders(options),
@@ -2020,6 +2198,10 @@ export class StewardClient {
     }
 
     if (response.status === 202 && this.isPendingApproval(response.data)) {
+      return response.data;
+    }
+
+    if (response.status === 202 && this.isBroadcastOutcomeUnknown(response.data)) {
       return response.data;
     }
 
@@ -2541,11 +2723,15 @@ export class StewardClient {
   async signSolanaTransaction(
     agentId: string,
     input: SignSolanaTransactionInput,
+    options?: IdempotencyOptions,
   ): Promise<SignSolanaTransactionResult> {
     const response = await this.request<SignSolanaTransactionResult, StewardErrorResponse>(
       `/vault/${encodeURIComponent(agentId)}/sign-solana`,
       {
         method: "POST",
+        headers: options?.idempotencyKey
+          ? { "Idempotency-Key": options.idempotencyKey }
+          : undefined,
         body: JSON.stringify(input),
       },
     );
@@ -4418,16 +4604,40 @@ export class StewardClient {
 
   // ─── Approvals ────────────────────────────────────────────────
 
+  /**
+   * Execute an approved vault transaction through the policy-revalidating
+   * vault route. The generic approval endpoint deliberately cannot sign or
+   * broadcast vault transactions.
+   */
+  async approveVaultTransaction(agentId: string, txId: string): Promise<VaultApprovalResult> {
+    const response = await this.request<VaultApprovalResult, StewardErrorResponse>(
+      `/vault/${encodeURIComponent(agentId)}/approve/${encodeURIComponent(txId)}`,
+      {
+        method: "POST",
+        body: JSON.stringify({}),
+      },
+    );
+    if (!response.ok) throw new StewardApiError(response.error, response.status, response.data);
+    return response.data;
+  }
+
   /** List approval queue entries for the tenant. */
   async listApprovals(opts?: {
     status?: string;
+    agentId?: string;
     limit?: number;
     offset?: number;
+    cursorRequestedAt?: string;
+    cursorId?: string;
   }): Promise<ApprovalQueueEntry[]> {
     const params = new URLSearchParams();
     if (opts?.status) params.set("status", opts.status);
-    if (opts?.limit) params.set("limit", String(opts.limit));
-    if (opts?.offset) params.set("offset", String(opts.offset));
+    if (opts?.agentId !== undefined) params.set("agentId", opts.agentId);
+    if (opts?.limit !== undefined) params.set("limit", String(opts.limit));
+    if (opts?.offset !== undefined) params.set("offset", String(opts.offset));
+    if (opts?.cursorRequestedAt !== undefined)
+      params.set("cursorRequestedAt", opts.cursorRequestedAt);
+    if (opts?.cursorId !== undefined) params.set("cursorId", opts.cursorId);
     const qs = params.toString();
     const response = await this.request<ApprovalQueueEntry[], StewardErrorResponse>(
       `/approvals${qs ? `?${qs}` : ""}`,
@@ -4736,6 +4946,7 @@ export class StewardClient {
     try {
       response = await fetch(url, {
         headers: this.buildHeaders({ Accept: "text/csv" }),
+        redirect: "error",
       });
     } catch (error) {
       throw new StewardApiError(
@@ -5228,7 +5439,7 @@ export class StewardClient {
     const url = `${this.baseUrl}/audit/export${qs ? `?${qs}` : ""}`;
     let response: Response;
     try {
-      response = await fetch(url, { headers: this.buildHeaders() });
+      response = await fetch(url, { headers: this.buildHeaders(), redirect: "error" });
     } catch (error) {
       throw new StewardApiError(
         error instanceof Error ? error.message : "Network request failed",
@@ -5339,7 +5550,7 @@ export class StewardClient {
     const url = `${this.baseUrl}/user/me/tenants/${encodeURIComponent(tenantId)}/users/export${qs ? `?${qs}` : ""}`;
     let response: Response;
     try {
-      response = await fetch(url, { headers: this.buildHeaders() });
+      response = await fetch(url, { headers: this.buildHeaders(), redirect: "error" });
     } catch (error) {
       throw new StewardApiError(
         error instanceof Error ? error.message : "Network request failed",
@@ -5533,22 +5744,10 @@ export class StewardClient {
     path: string,
     init: RequestInit = {},
   ): Promise<ApiRequestResult<TSuccess, TFailure>> {
-    let response: Response;
-
-    try {
-      const headers = await this.buildRequestHeaders(path, init);
-      response = await fetch(`${this.baseUrl}${path}`, {
-        ...init,
-        headers,
-      });
-    } catch (error) {
-      throw new StewardApiError(
-        error instanceof Error ? error.message : "Network request failed",
-        0,
-      );
-    }
-
-    const payload = await this.parseJson<ApiResponse<TSuccess | TFailure>>(response);
+    const { response, payload } = await this.fetchJson<ApiResponse<TSuccess | TFailure>>(
+      path,
+      init,
+    );
 
     if (!payload.ok) {
       return {
@@ -5568,6 +5767,27 @@ export class StewardClient {
       status: response.status,
       data: payload.data as TSuccess,
     };
+  }
+
+  /** Handle lifecycle endpoints whose successful response is intentionally raw. */
+  private async requestRawJson<T>(path: string, init: RequestInit = {}): Promise<T> {
+    const { response, payload } = await this.fetchJson<unknown>(path, init);
+    if (!response.ok) {
+      let message = `Request failed with status ${response.status}`;
+      if (payload && typeof payload === "object") {
+        const candidate = payload as {
+          error?: string | { code?: string; message?: string };
+          code?: string;
+          message?: string;
+        };
+        if (typeof candidate.error === "string") message = candidate.error;
+        else if (candidate.error && typeof candidate.error === "object") {
+          message = candidate.error.code ?? candidate.error.message ?? message;
+        } else message = candidate.code ?? candidate.message ?? message;
+      }
+      throw new StewardApiError(message, response.status, payload);
+    }
+    return payload as T;
   }
 
   private buildHeaders(headers?: HeadersInit): Headers {
@@ -5646,8 +5866,102 @@ export class StewardClient {
     return headers;
   }
 
-  private async parseJson<T>(response: Response): Promise<T> {
-    const text = await response.text();
+  private async fetchJson<T>(
+    path: string,
+    init: RequestInit,
+  ): Promise<{ response: Response; payload: T }> {
+    const controller = new AbortController();
+    const deadlineAt = Date.now() + this.requestTimeoutMs;
+    const callerSignal = init.signal;
+    let timedOut = false;
+    let callerCancelled = callerSignal?.aborted ?? false;
+    const cancelFromCaller = () => {
+      callerCancelled = true;
+      controller.abort();
+    };
+    callerSignal?.addEventListener("abort", cancelFromCaller, { once: true });
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, this.requestTimeoutMs);
+
+    try {
+      if (callerCancelled) throw new DOMException("Request cancelled", "AbortError");
+      const headers = await this.buildRequestHeaders(path, init);
+      if (controller.signal.aborted) throw new DOMException("Request aborted", "AbortError");
+      const response = await fetch(`${this.baseUrl}${path}`, {
+        ...init,
+        headers,
+        redirect: "error",
+        signal: controller.signal,
+      });
+      const payload = await this.parseJson<T>(response, controller.signal);
+      if (Date.now() >= deadlineAt) {
+        timedOut = true;
+        controller.abort();
+        throw new DOMException("Request deadline elapsed", "AbortError");
+      }
+      return { response, payload };
+    } catch (error) {
+      if (timedOut) throw new StewardApiError("Steward API request timed out", 0);
+      if (callerCancelled) throw new StewardApiError("Steward API request was cancelled", 0);
+      if (error instanceof StewardApiError) throw error;
+      throw new StewardApiError("Network request failed", 0);
+    } finally {
+      clearTimeout(timeout);
+      callerSignal?.removeEventListener("abort", cancelFromCaller);
+    }
+  }
+
+  private async parseJson<T>(response: Response, signal: AbortSignal): Promise<T> {
+    const declaredLength = response.headers.get("content-length");
+    if (declaredLength !== null) {
+      const parsedLength = Number(declaredLength);
+      if (Number.isFinite(parsedLength) && parsedLength > this.maxResponseBodyBytes) {
+        void response.body?.cancel().catch(() => undefined);
+        throw new StewardApiError(
+          "Steward API response exceeded the configured size limit",
+          response.status,
+        );
+      }
+    }
+
+    const reader = response.body?.getReader();
+    const chunks: Uint8Array[] = [];
+    let totalBytes = 0;
+    if (reader) {
+      try {
+        while (true) {
+          const { done, value } = await this.readResponseChunk(reader, signal);
+          if (done) break;
+          totalBytes += value.byteLength;
+          if (totalBytes > this.maxResponseBodyBytes) {
+            void reader.cancel().catch(() => undefined);
+            throw new StewardApiError(
+              "Steward API response exceeded the configured size limit",
+              response.status,
+            );
+          }
+          chunks.push(value);
+        }
+      } finally {
+        if (signal.aborted) void reader.cancel().catch(() => undefined);
+        try {
+          reader.releaseLock();
+        } catch {
+          // An abort may leave a hostile/custom stream's read pending. The
+          // controller and cancel above still ensure this request stops waiting.
+        }
+      }
+    }
+
+    const body = new Uint8Array(totalBytes);
+    let offset = 0;
+    for (const chunk of chunks) {
+      body.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    const text = new TextDecoder().decode(body);
 
     if (!text) {
       return { ok: response.ok } as T;
@@ -5660,9 +5974,50 @@ export class StewardClient {
     }
   }
 
+  private async readResponseChunk(
+    reader: ReadableStreamDefaultReader<Uint8Array>,
+    signal: AbortSignal,
+  ): Promise<{ done: false; value: Uint8Array } | { done: true; value?: Uint8Array }> {
+    if (signal.aborted) throw new DOMException("Request aborted", "AbortError");
+    let onAbort: (() => void) | undefined;
+    const aborted = new Promise<never>((_resolve, reject) => {
+      onAbort = () => reject(new DOMException("Request aborted", "AbortError"));
+      signal.addEventListener("abort", onAbort, { once: true });
+    });
+    try {
+      return await Promise.race([reader.read(), aborted]);
+    } finally {
+      if (onAbort) signal.removeEventListener("abort", onAbort);
+    }
+  }
+
   private isPendingApproval(
-    data: StewardPendingApproval | StewardErrorResponse | undefined,
+    data:
+      | StewardPendingApproval
+      | StewardBroadcastOutcomeUnknown
+      | StewardErrorResponse
+      | undefined,
   ): data is StewardPendingApproval {
     return typeof data !== "undefined" && "status" in data && data.status === "pending_approval";
+  }
+
+  private isBroadcastOutcomeUnknown(
+    data:
+      | StewardPendingApproval
+      | StewardBroadcastOutcomeUnknown
+      | StewardErrorResponse
+      | undefined,
+  ): data is StewardBroadcastOutcomeUnknown {
+    return (
+      typeof data !== "undefined" &&
+      "code" in data &&
+      data.code === "external_broadcast_outcome_unknown" &&
+      "reconciliationRequired" in data &&
+      data.reconciliationRequired === true &&
+      "txHash" in data &&
+      typeof data.txHash === "string" &&
+      "txId" in data &&
+      typeof data.txId === "string"
+    );
   }
 }

@@ -170,7 +170,7 @@ function DashboardNav() {
           </div>
 
           {/* User button */}
-          <StewardUserButton onSignOut={() => router.push("/login")} />
+          <StewardUserButton showTenantSwitcher onSignOut={() => router.push("/login")} />
         </div>
       </div>
     </header>
@@ -206,6 +206,13 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   }
 
   return (
+    // SEC-154: StewardAuthGuard is a CLIENT-only check — unauthenticated
+    // visitors still receive the full dashboard HTML/JS and are bounced only
+    // after hydration. That is safe ONLY because every dashboard page is
+    // "use client" and renders no data server-side (all fetches are
+    // Bearer-authenticated API calls that 401). Do not introduce
+    // server-rendered data under this route tree without adding a server-side
+    // session check first; dashboard-client-only.test.ts guards the invariant.
     <StewardAuthGuard fallback={<RedirectToLogin />} loadingFallback={<LoadingSpinner />}>
       <div className="min-h-screen bg-bg">
         {/*

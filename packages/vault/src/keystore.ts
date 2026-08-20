@@ -8,6 +8,7 @@
 //     alternative - note that switching KDFs invalidates existing encrypted
 //     records (operator decision, not a transparent migration).
 import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from "node:crypto";
+import { decodeKdfSalt } from "./kdf-salt.mjs";
 import type { KeystoreContext } from "./keystore-backend";
 
 /**
@@ -40,7 +41,7 @@ export interface EncryptedKey {
  *                data encrypted before domain separation existed.
  * - "signing-vault" / "secret-vault" → independent roots.
  */
-export type KeyStoreDomain = "signing-vault" | "secret-vault";
+export type KeyStoreDomain = "signing-vault" | "secret-vault" | "credential-lease";
 
 export class KeyStore {
   private masterKey: Buffer;
@@ -64,15 +65,7 @@ export class KeyStore {
     const envSalt = masterSalt ?? process.env.STEWARD_KDF_SALT;
     let salt: Buffer;
     if (envSalt) {
-      if (envSalt.length < 32) {
-        throw new Error(
-          "STEWARD_KDF_SALT must be at least 32 hex characters (16 bytes). Generate with: openssl rand -hex 32",
-        );
-      }
-      salt = Buffer.from(envSalt, "hex");
-      if (salt.length < 16) {
-        throw new Error("STEWARD_KDF_SALT must decode to at least 16 bytes of randomness.");
-      }
+      salt = decodeKdfSalt(envSalt);
     } else {
       if (process.env.NODE_ENV === "production") {
         throw new Error(

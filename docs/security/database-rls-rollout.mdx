@@ -1,0 +1,211 @@
+---
+title: "PostgreSQL tenant RLS rollout"
+description: "SEC-169 activation design, bootstrap boundary, runtime requirements, and rollback"
+---
+
+# PostgreSQL tenant RLS rollout
+
+Migration `0111_tenant_rls_policy_install` installs the complete current policy
+and bootstrap-function surface, but intentionally leaves RLS disabled. Routine
+production enforcement is not active until an operator completes every gate in
+this runbook and runs the atomic activation script. Application predicates
+remain the production boundary before that point.
+
+Landing order is strict: merge the database-capability membrane repair in PR
+#590, then the agent-deletion migrations through `0110` in PR #595, then
+restack this RLS series and land `0111`. Do not copy the membrane delta into
+this series. The aggregate tree must pass the real-Postgres gate below after
+that final restack.
+
+Authenticated tenant, dashboard, user-wallet, and global-wallet middleware now
+own one `withTenantRlsTransaction` and bind its transaction into downstream
+`getDb()` resolution. Production Workers use request-owned Neon WebSockets;
+production `neon-http` is rejected. The Google, X, and upstream-credential
+lifecycle sweeps enumerate tenants through a fixed bootstrap function and run
+one transaction per tenant.
+
+The standalone proxy now verifies its agent through the fixed bootstrap API and
+binds the full handler chain to one tenant transaction. Tenant-addressed
+platform operations bind the operator-selected tenant after platform key and
+scope verification; cross-tenant platform stats and tenant listing use two
+fixed-shape bootstrap functions. Webhook retry, provider reservation,
+transaction receipt, and tenant retention sweeps now run once per tenant.
+
+Pure global platform identity operations bind a reserved `platform` tenant
+context after platform-key and scope verification. Fixed-shape bootstrap
+functions provide cross-tenant membership projection, owner-safe lifecycle
+mutation, and refresh-token revocation; platform audit records are written in
+that same reserved transaction context.
+
+The disposable-schema operator test connects a separate process as the exact
+`NOBYPASSRLS` application role. It exercises the propagated production context
+classes through real routes and schedulers: platform global identity, tenant
+API-key, user JWT, pre-auth SAML, per-tenant background enumeration, lifecycle
+revocation and audit, plus global auth-KV retention.
+
+Pre-context auth discovery, tenant configuration, cross-tenant refresh
+rotation, system-tenant creation, and deactivated-user retention now use
+fixed-shape bootstrap functions.
+
+Do not run `rls-activate.sql` in production until the prerequisite stack has
+landed, this branch has been restacked on the final exact base, and the full
+aggregate validation has passed again.
+
+## Non-forgeable context boundary
+
+Only verified JWT/API-key/app-secret middleware may mint
+`tenantContextFromAuthenticatedPrincipal`. A route parameter, header, JSON
+field, or provider payload must never be passed directly to the RLS helper.
+Background workers must first enumerate tenant ids using a maintenance path,
+then mint one `tenantContextForInternalJob` and one transaction per tenant.
+
+The helper checks out one transaction connection, executes
+`set_config('steward.tenant_id', tenant_id, true)`, verifies the value, runs the
+unit of work on that same transaction object, and releases it. The `true`
+argument is load-bearing: it makes the setting transaction-local and prevents
+pool reuse from inheriting a prior tenant.
+
+Before binding, the helper also requires the connection's tenant setting to be
+empty. A non-empty value indicates session-level contamination and fails
+closed. The helper clears that session-level value, commits the cleanup, and
+only then reports the error; throwing before commit would roll the reset back
+and return a contaminated connection to the pool. It also rejects a Drizzle
+`PgTransaction` as its database argument: a `SET LOCAL` issued by a nested
+`.transaction()` runs inside a savepoint and would otherwise survive its
+release until the caller's outer transaction ended. Tenant contexts are tracked
+by object identity, not a copyable property, so cloning a context cannot change
+its tenant authority.
+
+Custom PostgreSQL settings are assignable by the application role. This design
+therefore catches missing application predicates and connection-lifecycle bugs;
+it is not a boundary against SQL injection or arbitrary SQL execution by a
+compromised application process. Tenant transaction callbacks must never
+execute claimant-supplied SQL or expose a general-purpose query interface.
+
+`neon-http` has no callback transaction support in the current Drizzle version.
+Workers must move to a transaction-capable transport (Neon WebSockets or
+Cloudflare Hyperdrive with a PostgreSQL driver) before RLS activation. The
+helper rejects `neon-http` rather than silently falling back to a session GUC or
+separate HTTP statements.
+
+## Bootstrap SECURITY DEFINER surface
+
+Authentication necessarily reads before tenant context exists. Activation must
+create a separate, NOLOGIN-owned `steward_bootstrap` schema containing only
+fixed-shape, SQL-language SECURITY DEFINER functions for these lookups:
+
+| Function | Input accepted only after | Narrow result |
+| --- | --- | --- |
+| `tenant_api_key_subject(tenant_id)` | tenant id is a lookup hint; supplied key is still constant-time verified in app | tenant id, name, API-key hash |
+| `session_subject(user_id, tenant_id)` | JWT signature, type, expiry, and revocation checks | user active/guest state and exact membership role |
+| `agent_subject(agent_id, tenant_id, jti)` | agent JWT signature, issuer, audience, expiry, and scope checks | exact agent and optional session-signer state |
+| `app_client_subject(tenant_id, client_id)` | syntactically valid app id | active/retiring secret hashes and client status |
+
+Each function must set `search_path = pg_catalog`, fully schema-qualify every
+application relation, use no dynamic SQL, select explicit columns, return at
+most the rows needed for credential verification, and be owned by a role that
+the application cannot assume. Do not put `public` or any application-writable
+schema on a SECURITY DEFINER search path. Revoke `CREATE` on schema `public`
+and all bootstrap schema/function privileges from `PUBLIC`; grant EXECUTE only
+to the NO-BYPASS application role. No general-purpose bootstrap query or
+arbitrary tenant setter is permitted.
+
+After a bootstrap credential is verified, the application mints the trusted
+context and starts a tenant transaction. Bootstrap output is not itself tenant
+authority.
+
+## Policy inventory
+
+`packages/db/src/rls-inventory.ts` is the machine-checked inventory. CI fails if
+a Drizzle table is added without classification.
+
+- Direct tables compare their `tenant_id` with
+  `NULLIF(current_setting('steward.tenant_id', true), '')` in both `USING` and
+  `WITH CHECK`.
+- Indirect tables (`policies`, `transactions`, encrypted key/wallet tables,
+  reputation cache, and archive chunks) use an `EXISTS` policy through their
+  tenant-owned parent. Parent indexes and immutable ownership constraints are
+  activation prerequisites.
+- EVM nonce counters are tenant-scoped and reference the globally unique
+  `(wallet_address, chain_id)` claim in `evm_wallet_nonce_owners`. Migration
+  `0108` backfills only namespaces that resolve to exactly one tenant and fails
+  closed on missing or ambiguous legacy ownership; the claim prevents two
+  tenants from allocating the same on-chain nonce independently.
+- `user_push_subscriptions` has intentionally nullable `tenant_id`. Tenant
+  subscriptions and global user subscriptions require separate, explicit
+  policies; it must not inherit the uniform direct-table policy generator.
+- `approval_queue` is also hybrid: provider-action rows carry `tenant_id`, while
+  legacy transaction approvals derive tenant ownership through `agent_id`.
+- `tenants` is a bootstrap root: tenant transactions see only `id = current
+  tenant`; credential lookup uses the restricted functions above.
+- Global user identity tables remain outside tenant RLS because one user can
+  belong to several tenants. Tenant-owned access must join through the RLS
+  protected `user_tenants` table. `registry_index` is a public-chain cache.
+
+Partitioned tables require policies on the parent plus an activation assertion
+over `pg_partition_tree`. The catalog gate must also reject every non-inventory
+table in future migrations.
+
+## Roles and activation order
+
+1. Create distinct LOGIN application and migration-maintenance roles plus a
+   NOLOGIN bootstrap-definer role. The login roles have `rolsuper = false`,
+   `rolbypassrls = false`, and no membership in either privileged role.
+2. Deploy transaction-capable Bun and Workers paths. Convert request handlers
+   and background jobs to use only the transaction object inside a trusted
+   tenant context.
+3. Deploy the restricted bootstrap functions and switch pre-context auth reads.
+4. Apply policies to every direct and indirect tenant table, then `ENABLE ROW
+   LEVEL SECURITY` and `FORCE ROW LEVEL SECURITY` in one maintenance window.
+5. Assert at startup that the connected role is neither table owner nor
+   BYPASSRLS and that every catalog table/partition matches the inventory.
+6. Run real-Postgres cross-tenant read/write/upsert/delete/join tests plus
+   concurrent pool-reuse and background-job tests against the deployment role.
+
+Create/finalize roles after migration `0111` (the invoking operator needs
+`CREATEROLE` and schema ownership):
+
+```bash
+psql "$DATABASE_URL" \
+  -v steward_app_role=steward_app \
+  -v steward_migration_role=steward_migrator \
+  -v steward_bootstrap_role=steward_bootstrap_owner \
+  -f scripts/postgres/rls-bootstrap.sql
+```
+
+The app and migration roles are separate login identities asserted
+`NOSUPERUSER NOBYPASSRLS`; the migration role owns the application relations,
+while the app cannot inherit or assume it. Supply their credentials through the
+database provider or `ALTER ROLE` outside source control. The bootstrap function owner is a
+non-login role with `BYPASSRLS` and only the narrow table privileges required by
+the fixed-shape functions. The app receives `EXECUTE`, never membership.
+
+After all residual code paths and exact deployment-role tests pass, activate in
+one maintenance transaction:
+
+```bash
+psql "$DATABASE_URL" \
+  -v steward_migration_role=steward_migrator \
+  -f scripts/postgres/rls-activate.sql
+```
+
+The script enables and forces every relation carrying a checked-in Steward
+policy and adds an explicit all-row policy only for the named `NOBYPASSRLS`
+migration role. It aborts if any current `tenant_id` table is not both enabled
+and forced.
+
+## Rollback
+
+Rollback is an operator action using the migration role, never a permission
+granted to the API. Stop API/workers, retain application-layer tenant
+predicates, disable RLS on the complete activated table set in one audited
+maintenance transaction, roll back the application to pre-RLS transaction
+plumbing, and restart. Do not selectively disable one policy while routine
+traffic continues. Preserve the catalog snapshot, migration id, actor, time,
+and incident reason in the audit record.
+
+The atomic database step is:
+
+```bash
+psql "$DATABASE_URL" -f scripts/postgres/rls-rollback.sql
+```

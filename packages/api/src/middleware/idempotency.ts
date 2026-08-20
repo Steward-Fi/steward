@@ -1,5 +1,7 @@
+import { redactedThrownDiagnostics } from "@stwd/shared";
 import { createMiddleware } from "hono/factory";
 import type { ApiResponse, AppVariables } from "../services/context";
+import { isRecentMfaTimestamp } from "../services/recent-mfa";
 import { getRedisClient } from "./redis";
 
 type IdempotencyStatus = "processing" | "completed";
@@ -186,8 +188,8 @@ async function recordIdempotencyMetricInRedis(
     await pipeline.exec();
   } catch (error) {
     console.error(
-      "[steward:idempotency] Failed to record Redis idempotency metrics:",
-      error instanceof Error ? error.message : String(error),
+      "[steward:idempotency] Failed to record Redis idempotency metrics",
+      redactedThrownDiagnostics(error),
     );
   }
 }
@@ -581,6 +583,28 @@ function isAuthTokenResponseReplaySuppressedPath(pathname: string): boolean {
   return pathname === "/auth" || pathname.startsWith("/auth/");
 }
 
+// SEC-070: secret-bearing mutating routes must never have their response
+// bodies persisted to the idempotency store (Redis or memory, up to 24h).
+// The reservation itself is still recorded (409-on-reuse semantics are
+// preserved); the completed body is suppressed exactly like /auth token
+// responses. Named per the audit: wallet export key material, KMS decrypt
+// plaintext, and the /secrets value plane.
+const SECRET_BEARING_RESPONSE_PATTERNS = [
+  /^\/vault\/[^/]+\/export$/, // POST /vault/:agentId/export — wallet key material
+  /^\/user\/me\/wallet\/export$/, // POST /user/me/wallet/export — user wallet key material
+  /^\/v1\/kms\/keys\/[^/]+\/decrypt$/, // POST /v1/kms/keys/:keyId/decrypt — plaintext
+  /^\/secrets(?:\/|$)/, // POST /secrets — secret values
+  /^\/(?:v1\/)?capabilities\/manifest\/[^/]+\/(?:issue|renew)\/?$/, // POST …/issue|renew — one-time upstream credential
+  // Review-wave extension of the audit's named list (same issue class):
+  // recovery setup returns the one-time BIP39 mnemonic ("shown once, not
+  // stored"), so its body must never land in the idempotency store either.
+  /^\/user\/me\/wallet\/recovery\/setup$/, // POST …/recovery/setup — one-time BIP39 mnemonic
+];
+
+function isSecretBearingResponseReplaySuppressedPath(pathname: string): boolean {
+  return SECRET_BEARING_RESPONSE_PATTERNS.some((pattern) => pattern.test(pathname));
+}
+
 function hasReplaySafeAuthenticatedContext(c: { get: (key: keyof AppVariables) => unknown }) {
   if (c.get("requestSignatureVerified")) return true;
   const authType = c.get("authType");
@@ -588,12 +612,7 @@ function hasReplaySafeAuthenticatedContext(c: { get: (key: keyof AppVariables) =
     return true;
   }
   if (authType !== "session-jwt") return false;
-  const verifiedAt = c.get("sessionMfaVerifiedAt");
-  return (
-    typeof verifiedAt === "number" &&
-    Number.isFinite(verifiedAt) &&
-    Date.now() - verifiedAt <= 5 * 60_000
-  );
+  return isRecentMfaTimestamp(c.get("sessionMfaVerifiedAt"), 5 * 60_000);
 }
 
 function hasReplaySafePublicContext(c: { req: { path: string } }) {
@@ -628,6 +647,22 @@ export function idempotencyMiddleware(options?: { store?: IdempotencyStore; ttlM
     if (!IDEMPOTENCY_KEY_RE.test(key)) {
       recordIdempotencyMetric(metricsTenantId, "invalidKeys");
       return c.json<ApiResponse>({ ok: false, error: "Invalid Idempotency-Key header" }, 400);
+    }
+    // Solana broadcast requests bind this key to their durable transaction row.
+    // Let that database state machine serve every auth mode consistently,
+    // including recovery after a process dies while this cache says processing.
+    if (/^\/vault\/[^/]+\/sign-solana$/.test(c.req.path)) {
+      const body = await c.req.raw
+        .clone()
+        .json()
+        .catch(() => null);
+      if (
+        body &&
+        typeof body === "object" &&
+        (body as { broadcast?: unknown }).broadcast !== false
+      ) {
+        return next();
+      }
     }
 
     const [fingerprint, storageKey] = await Promise.all([
@@ -698,7 +733,10 @@ export function idempotencyMiddleware(options?: { store?: IdempotencyStore; ttlM
         return;
       }
       try {
-        if (isAuthTokenResponseReplaySuppressedPath(c.req.path)) {
+        if (
+          isAuthTokenResponseReplaySuppressedPath(c.req.path) ||
+          isSecretBearingResponseReplaySuppressedPath(c.req.path)
+        ) {
           await store.setCompleted(storageKey);
           recordIdempotencyMetric(metricsTenantId, "suppressedAuthResponses");
         } else {

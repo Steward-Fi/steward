@@ -6,9 +6,16 @@
  */
 
 import { assertTokenNotRevoked, verifyToken } from "@stwd/auth";
-import { agents, and, eq, getDb } from "@stwd/db";
+import {
+  getDatabaseDriver,
+  getDb,
+  tenantContextFromAuthenticatedPrincipal,
+  withTenantRlsTransaction,
+  withTenantTransactionDatabase,
+} from "@stwd/db";
+import { sql } from "drizzle-orm";
 import type { Context, Next } from "hono";
-import { PROXY_SCOPE } from "../config";
+import { boundedPositiveIntegerEnv, isProxyDevMode, PROXY_SCOPE } from "../config";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -23,15 +30,20 @@ export interface AgentClaims {
 
 const SIGNATURE_PREFIX = "v1=";
 const MAX_SIGNATURE_AGE_MS = 5 * 60_000;
-const MAX_SIGNED_PROXY_BODY_BYTES = Number(
-  process.env.STEWARD_PROXY_SIGNED_BODY_BYTES ?? 2 * 1024 * 1024,
+const MAX_SIGNED_PROXY_BODY_BYTES = boundedPositiveIntegerEnv(
+  "STEWARD_PROXY_SIGNED_BODY_BYTES",
+  2 * 1024 * 1024,
+  100 * 1024 * 1024,
 );
 
 function proxyRequestSignatureRequired(): boolean {
-  return (
-    process.env.STEWARD_PROXY_REQUIRE_REQUEST_SIGNATURE === "true" ||
-    process.env.NODE_ENV === "production"
-  );
+  if (process.env.STEWARD_PROXY_REQUIRE_REQUEST_SIGNATURE === "true") return true;
+  // SEC-175: default-deny. Unsigned requests are allowed only with an
+  // explicit dev-mode opt-in — never silently because NODE_ENV is unset.
+  // An explicit production NODE_ENV overrides even the opt-in, so a stray
+  // STEWARD_PROXY_DEV_MODE can never weaken a production deployment.
+  if (process.env.NODE_ENV === "production") return true;
+  return !isProxyDevMode();
 }
 
 function configuredProxySigningSecrets(): string[] {
@@ -271,10 +283,12 @@ export async function authMiddleware(c: Context, next: Next) {
       return c.json({ ok: false, error: `Token missing required ${PROXY_SCOPE} scope` }, 403);
     }
 
-    const [agent] = await getDb()
-      .select({ id: agents.id })
-      .from(agents)
-      .where(and(eq(agents.id, agentId), eq(agents.tenantId, tenantId)));
+    const bootstrapResult = await getDb().execute(sql`
+      SELECT agent_id FROM steward_bootstrap.agent_subject(${agentId}, ${tenantId}, NULL)
+    `);
+    const [agent] = Array.isArray(bootstrapResult)
+      ? bootstrapResult
+      : ((bootstrapResult as { rows?: unknown[] }).rows ?? []);
     if (!agent) {
       return c.json({ ok: false, error: "Agent not found" }, 403);
     }
@@ -290,7 +304,18 @@ export async function authMiddleware(c: Context, next: Next) {
     c.set("agentId", agentId);
     c.set("tenantId", tenantId);
 
-    await next();
+    const context = tenantContextFromAuthenticatedPrincipal({
+      tenantId,
+      method: "proxy-agent-jwt",
+      subject: agentId,
+    });
+    const driver =
+      process.env.STEWARD_DB_MODE === "pglite" || process.env.STEWARD_PGLITE_MEMORY === "true"
+        ? "pglite"
+        : getDatabaseDriver();
+    await withTenantRlsTransaction(getDb() as never, driver, context, async (tx) =>
+      withTenantTransactionDatabase(tx as never, { tenantId }, next),
+    );
   } catch {
     // Keep jose and revocation-store diagnostics behind the authentication
     // boundary; exposing them creates a token/configuration oracle.

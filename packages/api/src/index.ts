@@ -12,12 +12,15 @@
  *   - `Bun.serve` plus SIGINT/SIGTERM graceful shutdown
  */
 
+import { createHash, timingSafeEqual } from "node:crypto";
 import { validateJwtSecretEnv } from "@stwd/auth";
-import { closeDb, getDb, runMigrations } from "@stwd/db";
+import { closeDb, getDb, getMigrationExpectation, runMigrations } from "@stwd/db";
 import { shouldUsePGLite } from "@stwd/db/pglite";
+import { redactedThrownDiagnostics } from "@stwd/shared";
 import { sql } from "drizzle-orm";
 import { composeApp } from "./compose";
-import { initRedis, shutdownRedis } from "./middleware/redis";
+import { getRedisClient, initRedis, isRedisConfigured, shutdownRedis } from "./middleware/redis";
+import { resolveEnabledPlugins } from "./plugin-config";
 import { assertAuthStoresAreSafe, getAuthStoreSources, initAuthStores } from "./routes/auth";
 import {
   API_VERSION,
@@ -26,8 +29,22 @@ import {
   RATE_LIMIT_MAX_REQUESTS,
   RATE_LIMIT_WINDOW_MS,
 } from "./services/context";
+import { startGoogleCredentialLifecycleScheduler } from "./services/provider-google-lifecycle-scheduler";
+import { startProviderReservationReconciliationScheduler } from "./services/provider-reservation-reconciliation-scheduler";
+import { startXCredentialLifecycleScheduler } from "./services/provider-x-lifecycle-scheduler";
 import { startRetentionScheduler } from "./services/retention";
+import {
+  InMemoryRateLimiter,
+  parseNonNegativeInt,
+  parsePositiveInt,
+  resolveClientIp,
+  SOCKET_PEER_ENV_KEY,
+} from "./services/runtime-gate";
 import { startTransactionReceiptPollingScheduler } from "./services/transaction-receipt-poller";
+import {
+  getUpstreamCredentialLeaseSchedulerHealth,
+  startUpstreamCredentialLeaseScheduler,
+} from "./services/upstream-credential-lease-scheduler";
 import { configuredVaultStartupLogLine, getConfiguredVault } from "./services/vault-factory";
 import { startWebhookRetryScheduler } from "./services/webhook-retry-scheduler";
 
@@ -47,19 +64,35 @@ validateJwtSecretEnv();
 // plugin is dynamically imported so the lean core graph never statically pulls
 // in the trading stack. top-level await is supported by the Bun entry.
 const app = await composeApp();
+const capabilitiesEnabled = resolveEnabledPlugins().has("capabilities");
 
 // ─── In-memory rate-limit log + shutdown guard ───────────────────────────────
 //
-// NOT used by the Workers entry — Workers should rely on the Redis-backed
-// sliding-window rate limiter (or a Workers-native KV-backed alternative).
+// NOT used by the Workers entry — the Workers runtime mounts the shared
+// Redis-backed sliding-window limiter across all routes instead (SEC-068,
+// see middleware/global-rate-limit.ts, gated on isWorkersRuntime in app.ts).
+//
+// SEC-014: the limiter keys on the socket peer unless the operator declares
+// STEWARD_TRUSTED_PROXY_HOPS > 0, in which case the client IP is derived from
+// the rightmost trusted XFF entries (client-supplied XFF prefixes are never
+// trusted). The key space is capped and fails closed when full.
 
-const requestLog = new Map<string, { count: number; resetAt: number }>();
+const trustedProxyHops = parseNonNegativeInt(process.env.STEWARD_TRUSTED_PROXY_HOPS, 0);
+const rateLimiter = new InMemoryRateLimiter(
+  RATE_LIMIT_MAX_REQUESTS,
+  RATE_LIMIT_WINDOW_MS,
+  parsePositiveInt(process.env.STEWARD_RATE_LIMIT_MAX_KEYS, 10_000),
+);
 let isShuttingDown = false;
 let cancelRetention: (() => void) | undefined;
+let cancelProviderReservationReconciliation: (() => void) | undefined;
 let cancelTransactionReceiptPolling: (() => void) | undefined;
 let cancelWebhookRetryScheduler: (() => void) | undefined;
+let cancelUpstreamCredentialLeaseScheduler: (() => Promise<void>) | undefined;
+let cancelGoogleCredentialLifecycleScheduler: (() => Promise<void>) | undefined;
+let cancelXCredentialLifecycleScheduler: (() => Promise<void>) | undefined;
 
-function runtimeGate(request: Request): Response | null {
+function runtimeGate(request: Request, peerAddress: string | null): Response | null {
   const url = new URL(request.url);
   if (url.pathname === "/health" || url.pathname === "/ready") return null;
 
@@ -69,53 +102,132 @@ function runtimeGate(request: Request): Response | null {
     });
   }
 
-  const forwardedFor = request.headers.get("x-forwarded-for");
-  const ip = forwardedFor?.split(",")[0]?.trim() || request.headers.get("x-real-ip") || "unknown";
-  const now = Date.now();
-  const current = requestLog.get(ip);
-
-  if (!current || current.resetAt <= now) {
-    requestLog.set(ip, { count: 1, resetAt: now + RATE_LIMIT_WINDOW_MS });
-    return null;
-  }
-
-  if (current.count >= RATE_LIMIT_MAX_REQUESTS) {
+  const ip = resolveClientIp(request.headers, peerAddress, trustedProxyHops);
+  const verdict = rateLimiter.check(ip);
+  if (verdict.limited) {
     return Response.json({ ok: false, error: "Rate limit exceeded" } satisfies ApiResponse, {
       status: 429,
-      headers: {
-        "Retry-After": Math.ceil((current.resetAt - now) / 1000).toString(),
-      },
+      headers: { "Retry-After": verdict.retryAfterSeconds.toString() },
     });
   }
-
-  current.count += 1;
-  requestLog.set(ip, current);
   return null;
 }
 
 const requestLogCleanupTimer = setInterval(() => {
-  const now = Date.now();
-  for (const [ip, entry] of requestLog.entries()) {
-    if (entry.resetAt <= now) requestLog.delete(ip);
-  }
+  rateLimiter.sweep();
 }, RATE_LIMIT_WINDOW_MS);
 
 // ─── /ready — deep readiness probe ───────────────────────────────────────────
 //
 // Only mounted on the Bun entry. Workers expose `/health` (in app.ts) and rely
 // on the Cloudflare control plane for instance health.
+//
+// SEC-071: the full check payload discloses deployment fingerprint details
+// (migration tags, auth-store/Redis backend identity, whether
+// STEWARD_MASTER_PASSWORD is set, DB/proxy clock skew, error strings).
+// Unauthenticated callers get the same 200/503 status plus per-check ok flags
+// only; operators can set STEWARD_READY_PROBE_TOKEN and send it as
+// X-Steward-Probe-Token to receive the full diagnostic detail.
+
+function readyProbeAuthorized(presented: string | undefined): boolean {
+  const expected = process.env.STEWARD_READY_PROBE_TOKEN;
+  if (!expected || !presented) return false;
+  const a = createHash("sha256").update(expected).digest();
+  const b = createHash("sha256").update(presented).digest();
+  return timingSafeEqual(a, b);
+}
 
 app.get("/ready", async (c) => {
-  const checks: Record<string, { ok: boolean; error?: string; source?: string }> = {};
+  const checks: Record<
+    string,
+    { ok: boolean; required?: boolean; error?: string; source?: string; detail?: unknown }
+  > = {};
 
-  checks.migrations = { ok: migrationsRan };
+  const expectedMigration = getMigrationExpectation();
+  checks.migrations = { ok: false, detail: { expected: expectedMigration.tag } };
 
   try {
     const db = getDb();
-    await db.execute(sql`SELECT 1`);
-    checks.database = { ok: true };
-  } catch (err: unknown) {
-    checks.database = { ok: false, error: err instanceof Error ? err.message : "unknown" };
+    const pglite = shouldUsePGLite();
+    const result = pglite
+      ? await db.execute(sql`
+          SELECT
+            EXTRACT(EPOCH FROM CURRENT_TIMESTAMP) * 1000 AS database_time_ms,
+            EXISTS(
+              SELECT 1 FROM __steward_migrations WHERE tag = ${expectedMigration.tag}
+            ) AS expected_migration_applied
+        `)
+      : await db.execute(sql`
+          SELECT
+            EXTRACT(EPOCH FROM clock_timestamp()) * 1000 AS database_time_ms,
+            (SELECT MAX(created_at) FROM drizzle.__drizzle_migrations) AS migration_created_at
+        `);
+    const rows = Array.isArray(result)
+      ? result
+      : ((result as unknown as { rows?: unknown[] }).rows ?? []);
+    const row = rows[0] as
+      | { database_time_ms?: string | number; migration_created_at?: string | number | null }
+      | undefined;
+    const databaseTimeMs = Number(row?.database_time_ms);
+    const migrationCreatedAt = Number(row?.migration_created_at);
+    const expectedMigrationApplied =
+      (row as { expected_migration_applied?: unknown } | undefined)?.expected_migration_applied ===
+      true;
+    const databaseSkewMs = Math.abs(Date.now() - databaseTimeMs);
+    checks.database = {
+      ok: Number.isFinite(databaseTimeMs) && databaseSkewMs <= 30_000,
+      detail: { clockSkewMs: Math.round(databaseSkewMs), serverTime: new Date().toISOString() },
+    };
+    checks.migrations = {
+      ok:
+        migrationsRan &&
+        (pglite ? expectedMigrationApplied : migrationCreatedAt === expectedMigration.createdAt),
+      detail: {
+        expected: expectedMigration.tag,
+        expectedCreatedAt: expectedMigration.createdAt,
+        ...(pglite
+          ? { expectedMigrationApplied }
+          : { actualCreatedAt: Number.isFinite(migrationCreatedAt) ? migrationCreatedAt : null }),
+      },
+    };
+  } catch {
+    checks.database = { ok: false, error: "Database health check failed" };
+  }
+
+  try {
+    const redis = getRedisClient();
+    checks.redis = redis
+      ? { ok: (await redis.ping()).toUpperCase() === "PONG" }
+      : isRedisConfigured()
+        ? { ok: false, error: "Redis is configured but not connected" }
+        : { ok: false, required: false, error: "Redis is not configured (optional mode)" };
+  } catch {
+    checks.redis = { ok: false, error: "Redis health check failed" };
+  }
+
+  const proxyUrl = process.env.STEWARD_PROXY_URL?.replace(/\/+$/, "");
+  if (!proxyUrl) {
+    checks.proxyClock = {
+      ok: false,
+      required: false,
+      error: "STEWARD_PROXY_URL not configured",
+    };
+  } else {
+    try {
+      const startedAt = Date.now();
+      const response = await fetch(`${proxyUrl}/health`, { signal: AbortSignal.timeout(3_000) });
+      const body = (await response.json()) as { serverTime?: unknown };
+      const endedAt = Date.now();
+      const proxyTime = Date.parse(String(body.serverTime ?? ""));
+      const midpoint = startedAt + (endedAt - startedAt) / 2;
+      const skewMs = Math.abs(proxyTime - midpoint);
+      checks.proxyClock = {
+        ok: response.ok && Number.isFinite(proxyTime) && skewMs <= 30_000,
+        detail: { clockSkewMs: Math.round(skewMs) },
+      };
+    } catch {
+      checks.proxyClock = { ok: false, error: "Proxy health check failed" };
+    }
   }
 
   if (!process.env.STEWARD_MASTER_PASSWORD) {
@@ -141,13 +253,35 @@ app.get("/ready", async (c) => {
       : {}),
   };
 
-  const allOk = Object.values(checks).every((c) => c.ok);
+  if (capabilitiesEnabled) {
+    const health = getUpstreamCredentialLeaseSchedulerHealth();
+    checks.upstreamCredentialLeases = {
+      ok: health.ok,
+      detail: {
+        enabled: health.enabled,
+        inFlight: health.inFlight,
+        lastStartedAt: health.lastStartedAt,
+        lastSucceededAt: health.lastSucceededAt,
+        lastFailedAt: health.lastFailedAt,
+      },
+      ...(health.lastError ? { error: health.lastError } : {}),
+    };
+  }
+
+  const allOk = Object.values(checks).every((check) => check.ok || check.required === false);
+  const verbose = readyProbeAuthorized(c.req.header("x-steward-probe-token"));
+  const publicChecks = Object.fromEntries(
+    Object.entries(checks).map(([name, check]) => [
+      name,
+      { ok: check.ok, ...(check.required === false ? { required: false } : {}) },
+    ]),
+  );
   return c.json(
     {
       status: allOk ? "ready" : "not_ready",
       version: API_VERSION,
       uptime: Math.floor((Date.now() - startTime) / 1000),
-      checks,
+      checks: verbose ? checks : publicChecks,
     },
     allOk ? 200 : 503,
   );
@@ -177,7 +311,10 @@ if (shouldUsePGLite()) {
           metadata: { count: applied.length, names: applied },
         });
       } catch (auditErr) {
-        console.error("[steward] Failed to record migration audit event:", auditErr);
+        console.error(
+          "[steward] Failed to record migration audit event",
+          redactedThrownDiagnostics(auditErr),
+        );
       }
     } else {
       console.log("[steward] Migrations already up to date.");
@@ -199,7 +336,7 @@ if (shouldUsePGLite()) {
       );
     }
   } catch (err) {
-    console.error("[steward] Migration failed — cannot start:", err);
+    console.error("[steward] Migration failed — cannot start", redactedThrownDiagnostics(err));
     process.exit(1);
   }
 }
@@ -210,7 +347,10 @@ let redisOk = false;
 try {
   redisOk = await initRedis();
 } catch (err) {
-  console.warn("[steward] Redis initialization failed; trying Postgres auth storage:", err);
+  console.warn(
+    "[steward] Redis initialization failed; trying Postgres auth storage",
+    redactedThrownDiagnostics(err),
+  );
 }
 
 // Postgres is the durable fallback for the long-lived server when Redis is not
@@ -222,9 +362,21 @@ assertAuthStoresAreSafe();
 // ─── Data retention scheduler (SOC2 CC2) ────────────────────────────────────
 
 if (migrationsRan) {
+  if (process.env.GOOGLE_PROVIDER_CLIENT_ID && process.env.GOOGLE_PROVIDER_CLIENT_SECRET) {
+    cancelGoogleCredentialLifecycleScheduler = startGoogleCredentialLifecycleScheduler();
+  }
+  if (process.env.X_CLIENT_ID && process.env.X_CLIENT_SECRET) {
+    cancelXCredentialLifecycleScheduler = startXCredentialLifecycleScheduler();
+  }
   cancelRetention = startRetentionScheduler();
+  if (redisOk) {
+    cancelProviderReservationReconciliation = startProviderReservationReconciliationScheduler();
+  }
   cancelTransactionReceiptPolling = startTransactionReceiptPollingScheduler();
   cancelWebhookRetryScheduler = startWebhookRetryScheduler();
+  if (capabilitiesEnabled) {
+    cancelUpstreamCredentialLeaseScheduler = await startUpstreamCredentialLeaseScheduler();
+  }
 }
 
 // Resolve custody before accepting traffic. A configured backend that cannot
@@ -239,7 +391,16 @@ const BIND_HOST = process.env.STEWARD_BIND_HOST || "127.0.0.1";
 const serverOptions = {
   hostname: BIND_HOST,
   port: PORT,
-  fetch: (request: Request) => runtimeGate(request) ?? app.fetch(request),
+  fetch: (request: Request, server: { requestIP(req: Request): { address: string } | null }) => {
+    const peerAddress = server.requestIP(request)?.address ?? null;
+    // Hand the runtime-observed socket peer to the app via Hono's env bag so
+    // per-route limiters (auth) can key on it when no trusted forwarding
+    // config exists — it cannot be client-influenced, unlike any header.
+    return (
+      runtimeGate(request, peerAddress) ??
+      app.fetch(request, { [SOCKET_PEER_ENV_KEY]: peerAddress })
+    );
+  },
   idleTimeout: 30,
 } as Parameters<typeof Bun.serve>[0] & { hostname?: string };
 
@@ -254,14 +415,18 @@ const shutdown = async (signal: string) => {
   clearInterval(requestLogCleanupTimer);
   if (nonceCleanupTimer) clearInterval(nonceCleanupTimer);
   if (cancelRetention) cancelRetention();
+  if (cancelProviderReservationReconciliation) cancelProviderReservationReconciliation();
   if (cancelTransactionReceiptPolling) cancelTransactionReceiptPolling();
   if (cancelWebhookRetryScheduler) cancelWebhookRetryScheduler();
-  requestLog.clear();
+  if (cancelUpstreamCredentialLeaseScheduler) await cancelUpstreamCredentialLeaseScheduler();
+  if (cancelGoogleCredentialLifecycleScheduler) await cancelGoogleCredentialLifecycleScheduler();
+  if (cancelXCredentialLifecycleScheduler) await cancelXCredentialLifecycleScheduler();
+  rateLimiter.clear();
 
   try {
     await Promise.all([closeDb(), shutdownRedis()]);
   } catch (error) {
-    console.error("Failed to close connections cleanly", error);
+    console.error("Failed to close connections cleanly", redactedThrownDiagnostics(error));
   }
 
   process.exit(0);

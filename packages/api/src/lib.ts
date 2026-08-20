@@ -30,3 +30,16 @@ export {
   type StewardApp,
   type StewardAppContext,
 } from "./plugin";
+export {
+  AuditCheckpointAnchorError,
+  type AuditCheckpointAnchorMode,
+  type AuditCheckpointAnchorProof,
+  type AuditCheckpointAnchorProofVerifier,
+  type AuditCheckpointAnchorSink,
+  type AuditCheckpointAnchorSinkFactory,
+  type CustomCheckpointAnchorProof,
+  type Rfc3161CheckpointAnchorProof,
+  Rfc3161TimestampSink,
+  registerAuditCheckpointAnchorSink,
+  verifyRfc3161TimestampResponse,
+} from "./services/audit-checkpoint-anchor";

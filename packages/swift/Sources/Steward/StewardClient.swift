@@ -1,5 +1,18 @@
+#if canImport(CryptoKit)
 import CryptoKit
+#else
+// Linux/Windows: swift-crypto provides the same HMAC/SHA256/SymmetricKey API
+// surface under the `Crypto` module (declared in Package.swift for non-Apple
+// platforms only).
+import Crypto
+#endif
 import Foundation
+#if canImport(FoundationNetworking)
+// Linux/Windows: URLRequest/URLSession/HTTPURLResponse live in the separate
+// FoundationNetworking module; on Apple platforms Foundation already provides
+// them (defaultTransport is the only consumer).
+import FoundationNetworking
+#endif
 
 public typealias StewardJSON = [String: Any]
 public typealias StewardTransport = (String, URL, [String: String], Data?, TimeInterval) throws -> (Int, [String: String], Data)
@@ -14,6 +27,10 @@ public struct StewardConfig {
     public var tenantID: String?
     public var requestSigningSecret: String?
     public var requestSigningKeyID: String?
+    /// Permit a plaintext non-loopback baseURL (warns at construction). HTTPS
+    /// is required by default so credentials never travel cleartext
+    /// off-loopback (SEC-200).
+    public var allowInsecureBaseURL: Bool
     public var timeout: TimeInterval
     public var transport: StewardTransport?
     public var now: () -> Date
@@ -29,6 +46,7 @@ public struct StewardConfig {
         tenantID: String? = nil,
         requestSigningSecret: String? = nil,
         requestSigningKeyID: String? = nil,
+        allowInsecureBaseURL: Bool = false,
         timeout: TimeInterval = 30,
         transport: StewardTransport? = nil,
         now: @escaping () -> Date = Date.init,
@@ -43,6 +61,7 @@ public struct StewardConfig {
         self.tenantID = tenantID
         self.requestSigningSecret = requestSigningSecret
         self.requestSigningKeyID = requestSigningKeyID
+        self.allowInsecureBaseURL = allowInsecureBaseURL
         self.timeout = timeout
         self.transport = transport
         self.now = now
@@ -60,6 +79,9 @@ public final class StewardClient {
     private let config: StewardConfig
     public let baseURL: String
 
+    // Keep in lockstep with the equivalent list in EVERY other SDK (sdk, go,
+    // java, python, ruby, rust, csharp, flutter): mutations under these
+    // prefixes are HMAC-signed; divergence silently downgrades integrity (SEC-049).
     private static let sensitivePrefixes = [
         "/vault",
         "/agents",
@@ -76,6 +98,8 @@ public final class StewardClient {
         "/condition-sets",
         "/condition_sets",
         "/v1/condition_sets",
+        "/global-wallet",
+        "/accounts",
     ]
 
     public init(config: StewardConfig) throws {
@@ -85,6 +109,38 @@ public final class StewardClient {
         }
         self.config = config
         self.baseURL = String(trimmed.drop(whileTrailing: { $0 == "/" }))
+        try StewardClient.assertSecureBaseURL(self.baseURL, allowInsecureBaseURL: config.allowInsecureBaseURL)
+    }
+
+    // Keep in lockstep with the equivalent check in EVERY other SDK (sdk, go,
+    // java, python, ruby, rust, csharp, flutter): these clients transmit API
+    // keys, bearer tokens, and HMAC-signed credentials, none of which may
+    // travel to a plaintext non-loopback endpoint (SEC-200, mirroring SEC-048).
+    private static func assertSecureBaseURL(_ baseURL: String, allowInsecureBaseURL: Bool) throws {
+        guard let components = URLComponents(string: baseURL),
+              let scheme = components.scheme?.lowercased(),
+              let host = components.host?.lowercased() else {
+            throw StewardAPIError(status: 0, message: "baseURL must be a valid absolute URL", data: nil)
+        }
+        guard scheme == "http" || scheme == "https" else {
+            throw StewardAPIError(status: 0, message: "baseURL must use HTTP or HTTPS", data: nil)
+        }
+        guard components.user == nil, components.password == nil else {
+            throw StewardAPIError(status: 0, message: "baseURL must not embed credentials", data: nil)
+        }
+        if scheme == "https" || (scheme == "http" && isLoopbackHost(host)) {
+            return
+        }
+        if allowInsecureBaseURL {
+            let warning = "[steward-sdk] WARNING: baseURL is not HTTPS; credentials travel in cleartext. Use allowInsecureBaseURL only on trusted private networks.\n"
+            FileHandle.standardError.write(Data(warning.utf8))
+            return
+        }
+        throw StewardAPIError(status: 0, message: "baseURL must use HTTPS unless it targets loopback (http://localhost, http://127.0.0.1, http://[::1]). Set allowInsecureBaseURL to override on trusted private networks.", data: nil)
+    }
+
+    private static func isLoopbackHost(_ host: String) -> Bool {
+        host == "localhost" || host == "127.0.0.1" || host == "::1" || host == "[::1]"
     }
 
     public func get(_ path: String, query: [String: String?] = [:], headers: [String: String] = [:]) throws -> Any? {

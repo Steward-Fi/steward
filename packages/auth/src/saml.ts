@@ -45,7 +45,21 @@ export interface BuiltSamlAuthorizeUrl {
   requestId: string;
 }
 
-class SingleUseInResponseToCache implements CacheProvider {
+/**
+ * ExpectedRequestIdEchoCache — a CacheProvider that ECHOES the expected
+ * SAML request ID so node-saml's InResponseTo comparison can run against a
+ * caller-verified request id.
+ *
+ * Deliberately NOT a single-use replay cache (despite node-saml's cache
+ * provider shape): getAsync returns the expected id on every call and
+ * removeAsync is a no-op. Actual replay protection lives in the API layer —
+ * the atomic consumeSamlAuthnRequest + the tenantSamlAssertionReplays unique
+ * index — which consumes the authn request before this verifier runs and
+ * rejects duplicate assertion ids at insert time. When no expectedRequestId
+ * is supplied, getAsync returns null and node-saml treats InResponseTo as
+ * "never validate" — IdP-initiated SSO responses carry none by design.
+ */
+class ExpectedRequestIdEchoCache implements CacheProvider {
   constructor(private readonly expectedRequestId?: string) {}
 
   async saveAsync(key: string, value: string): Promise<CacheItem> {
@@ -116,7 +130,7 @@ export async function verifySamlAcsResponse(
     validateInResponseTo: input.expectedRequestId
       ? ValidateInResponseTo.always
       : ValidateInResponseTo.never,
-    cacheProvider: new SingleUseInResponseToCache(input.expectedRequestId),
+    cacheProvider: new ExpectedRequestIdEchoCache(input.expectedRequestId),
     signatureAlgorithm: "sha256",
     digestAlgorithm: "sha256",
     disableRequestedAuthnContext: true,
@@ -161,7 +175,7 @@ export async function buildSamlAuthorizeUrl(
     wantAssertionsSigned: true,
     wantAuthnResponseSigned: true,
     validateInResponseTo: ValidateInResponseTo.always,
-    cacheProvider: new SingleUseInResponseToCache(input.requestId),
+    cacheProvider: new ExpectedRequestIdEchoCache(input.requestId),
     generateUniqueId: () => input.requestId,
     signatureAlgorithm: "sha256",
     digestAlgorithm: "sha256",

@@ -7,7 +7,7 @@ Steward is an open-source, self-hostable governed credential proxy and policy an
 
 Steward runs in your infrastructure. Configured provider calls can receive credentials at the proxy without returning those credentials to the supported agent caller. Governed wallet routes evaluate policy and approval before signing. The primary EVM transaction sign path adds a signed, short-lived, payload-bound, single-use authorization immediately before raw signing.
 
-Steward also maintains a tenant-scoped HMAC audit chain and exports Ed25519-signed evidence bundles. Verify a bundle offline with `scripts/verify-evidence-bundle.mjs <bundle.json>`. The script checks the signature against the public key carried in the bundle. Separately compare that key with an out-of-band trusted Steward signing key or fingerprint. Verification detects changes relative to that trust root. It does not exclude fabrication by an operator controlling all relevant keys.
+Steward also maintains a tenant-scoped HMAC audit chain and exports Ed25519-signed evidence bundles. Verify a bundle offline with `scripts/verify-evidence-bundle.mjs <bundle.json>`. The script checks the signature against the public key carried in the bundle. Separately compare that key with an out-of-band trusted Steward signing key or fingerprint. Optional RFC 3161 anchoring can add an auditor-verifiable third-party time bound. Verification detects changes relative to those trust roots; it does not make the system operator-proof.
 
 <CardGroup cols={2}>
   <Card title="Wallet vault" icon="vault" href="/concepts/wallet-vault">
@@ -60,7 +60,7 @@ Configured provider calls and wallet actions then enter Steward through authenti
 - **Credential proxy:** configured provider requests receive credentials server-side without returning them to the supported agent caller.
 - **Audit evidence:** HMAC chaining, Ed25519 checkpoints, bundle export, and offline verification, with a separate out-of-band check of the bundled public key.
 - **Self-hosting:** Docker with PostgreSQL and Redis, or embedded PGLite for local and desktop use.
-- **Custody choices:** local encrypted storage, AWS KMS envelope wrapping, a PKCS#11 wrapping adapter, and an external custody interface. Steward does not claim MPC or native HSM signing.
+- **Custody choices:** local encrypted storage, AWS KMS envelope wrapping, a PKCS#11 wrapping adapter, a versioned external-custody interface, and an EVM-only AWS KMS asymmetric signing reference provider. Steward does not claim MPC or threshold signing.
 
 ## Direction
 

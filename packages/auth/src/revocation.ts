@@ -8,7 +8,10 @@
  * back to in-memory state suitable only for single-instance/embedded mode.
  */
 
+import { assertRedisUrlTls } from "@stwd/redis";
+import { redactedThrownDiagnostics } from "@stwd/shared";
 import { Redis } from "ioredis";
+import { MONOTONIC_REVOCATION_SCRIPT } from "./revocation-script";
 
 export class TokenRevokedError extends Error {
   constructor(message = "Token has been revoked") {
@@ -37,20 +40,6 @@ function ttlMs(expiresAt: ExpiresAt, now = Date.now()): number {
 }
 
 const DEFAULT_AGENT_REVOCATION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
-const MONOTONIC_REVOCATION_SCRIPT = `
-local markerKey = KEYS[1]
-local latestKey = KEYS[2]
-local issuedBefore = tonumber(ARGV[1])
-local ttlMs = tonumber(ARGV[2])
-local existing = tonumber(redis.call("GET", latestKey) or "-1")
-redis.call("SET", markerKey, "1", "PX", ttlMs)
-if existing == nil or issuedBefore > existing then
-  redis.call("SET", latestKey, ARGV[1], "PX", ttlMs)
-  return issuedBefore
-end
-redis.call("PEXPIRE", latestKey, ttlMs)
-return existing
-`;
 
 class InMemoryRevocationStore implements RevocationStore {
   private readonly revokedJtis = new Map<string, number>();
@@ -86,10 +75,13 @@ class InMemoryRevocationStore implements RevocationStore {
   ): Promise<number> {
     const expiresAtMs = toMillis(expiresAt);
     const existing = this.agentIssuedBefore.get(agentId);
-    if (!existing || issuedBefore > existing.issuedBefore) {
-      this.agentIssuedBefore.set(agentId, { issuedBefore, expiresAtMs });
-    }
-    return issuedBefore;
+    const active = existing && existing.expiresAtMs > Date.now() ? existing : null;
+    const effectiveIssuedBefore = Math.max(active?.issuedBefore ?? -1, issuedBefore);
+    this.agentIssuedBefore.set(agentId, {
+      issuedBefore: effectiveIssuedBefore,
+      expiresAtMs: Math.max(active?.expiresAtMs ?? -1, expiresAtMs),
+    });
+    return effectiveIssuedBefore;
   }
 
   async getAgentRevokedBefore(agentId: string): Promise<number | null> {
@@ -109,10 +101,13 @@ class InMemoryRevocationStore implements RevocationStore {
   ): Promise<number> {
     const expiresAtMs = toMillis(expiresAt);
     const existing = this.userIssuedBefore.get(userId);
-    if (!existing || issuedBefore > existing.issuedBefore) {
-      this.userIssuedBefore.set(userId, { issuedBefore, expiresAtMs });
-    }
-    return issuedBefore;
+    const active = existing && existing.expiresAtMs > Date.now() ? existing : null;
+    const effectiveIssuedBefore = Math.max(active?.issuedBefore ?? -1, issuedBefore);
+    this.userIssuedBefore.set(userId, {
+      issuedBefore: effectiveIssuedBefore,
+      expiresAtMs: Math.max(active?.expiresAtMs ?? -1, expiresAtMs),
+    });
+    return effectiveIssuedBefore;
   }
 
   async getUserRevokedBefore(userId: string): Promise<number | null> {
@@ -129,22 +124,37 @@ class InMemoryRevocationStore implements RevocationStore {
 class RedisRevocationStore implements RevocationStore {
   private redis: Redis | null = null;
   private readonly fallback = new InMemoryRevocationStore();
+  private warnedMemoryFallback = false;
 
   private getRedis(): Redis | null {
     if (!process.env.REDIS_URL) {
       if (process.env.NODE_ENV === "production") {
         throw new Error("Shared token revocation store unavailable");
       }
+      // SEC-056: revocation state silently degrading to per-process memory
+      // breaks logout/user-wide revocation across instances — say so loudly.
+      if (!this.warnedMemoryFallback) {
+        this.warnedMemoryFallback = true;
+        console.warn(
+          "[steward:auth] REDIS_URL unset — token revocation uses per-process memory; " +
+            "logout and user/agent-wide revocation do NOT propagate across instances " +
+            "(production would fail closed).",
+        );
+      }
       return null;
     }
     if (!this.redis) {
+      // SEC-032: enforce the same rediss:// production TLS assertion as the
+      // shared client in @stwd/redis — revocation state is auth data and must
+      // not cross a cleartext link.
+      assertRedisUrlTls(process.env.REDIS_URL);
       this.redis = new Redis(process.env.REDIS_URL, {
         maxRetriesPerRequest: 1,
         lazyConnect: false,
         enableReadyCheck: true,
       });
       this.redis.on("error", (err) => {
-        console.warn("[steward:auth] Redis revocation unavailable:", err.message);
+        console.warn("[steward:auth] Redis revocation unavailable", redactedThrownDiagnostics(err));
       });
     }
     return this.redis;
@@ -193,11 +203,14 @@ class RedisRevocationStore implements RevocationStore {
     try {
       const markerKey = `revoked-agent:${agentId}:${issuedBefore}`;
       const latestKey = `revoked-agent:${agentId}:issued-before`;
-      await redis.eval(MONOTONIC_REVOCATION_SCRIPT, 2, markerKey, latestKey, issuedBefore, ms);
+      const effective = Number(
+        await redis.eval(MONOTONIC_REVOCATION_SCRIPT, 2, markerKey, latestKey, issuedBefore, ms),
+      );
+      if (!Number.isFinite(effective)) throw new Error("invalid Redis revocation line result");
+      return effective;
     } catch (error) {
       throw new Error("Shared agent revocation store unavailable", { cause: error });
     }
-    return issuedBefore;
   }
 
   async getAgentRevokedBefore(agentId: string): Promise<number | null> {
@@ -226,11 +239,14 @@ class RedisRevocationStore implements RevocationStore {
     try {
       const markerKey = `revoked-user:${userId}:${issuedBefore}`;
       const latestKey = `revoked-user:${userId}:issued-before`;
-      await redis.eval(MONOTONIC_REVOCATION_SCRIPT, 2, markerKey, latestKey, issuedBefore, ms);
+      const effective = Number(
+        await redis.eval(MONOTONIC_REVOCATION_SCRIPT, 2, markerKey, latestKey, issuedBefore, ms),
+      );
+      if (!Number.isFinite(effective)) throw new Error("invalid Redis revocation line result");
+      return effective;
     } catch (error) {
       throw new Error("Shared user revocation store unavailable", { cause: error });
     }
-    return issuedBefore;
   }
 
   async getUserRevokedBefore(userId: string): Promise<number | null> {

@@ -7,7 +7,10 @@
 # spending policies.
 #
 # Usage:
-#   ./deploy/migrate-agent-keys.sh <node-ip> <platform-key> [--dry-run]
+#   ./deploy/migrate-agent-keys.sh <node-ip> [--dry-run]
+#
+# The platform key is read ON THE NODE from the mode-0600 deploy/.env and is
+# never accepted as an argument (argv is visible through ps and shell history).
 #
 # Requirements:
 #   - Steward must be running on the node (port 3200)
@@ -23,20 +26,64 @@
 set -euo pipefail
 
 # ── Args ─────────────────────────────────────────────────────────────────────
-NODE_IP="${1:?Usage: $0 <node-ip> <platform-key> [--dry-run]}"
-PLATFORM_KEY="${2:?Usage: $0 <node-ip> <platform-key> [--dry-run]}"
+NODE_IP="${1:?Usage: $0 <node-ip> [--dry-run]}"
+shift
 DRY_RUN=false
-if [[ "${3:-}" == "--dry-run" ]]; then
-  DRY_RUN=true
-fi
+for arg in "$@"; do
+  case "$arg" in
+    --dry-run) DRY_RUN=true ;;
+    -*)
+      echo "❌ Unknown flag: $arg"
+      exit 1
+      ;;
+    *)
+      echo "❌ Unexpected positional argument (platform keys are never accepted on argv)"
+      exit 1
+      ;;
+  esac
+done
 
 # ── Config ───────────────────────────────────────────────────────────────────
 SSH_KEY="${SSH_KEY:-$HOME/.ssh/id_ed25519}"
-SSH_OPTS="-o StrictHostKeyChecking=no -o ConnectTimeout=10 -i ${SSH_KEY}"
-SSH_CMD="ssh ${SSH_OPTS} root@${NODE_IP}"
+# Host-key checking: TOFU (accept-new) at minimum — never "no" (SEC-019).
+# Set STRICT_HOST_KEY=yes to require a pre-pinned known_hosts entry instead.
+if [[ "${STRICT_HOST_KEY:-}" == "yes" ]]; then
+  SSH_CMD=(ssh -o StrictHostKeyChecking=yes -o ConnectTimeout=10 -i "${SSH_KEY}" "root@${NODE_IP}")
+else
+  SSH_CMD=(ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 -i "${SSH_KEY}" "root@${NODE_IP}")
+fi
 STEWARD_URL="${STEWARD_URL:-http://localhost:3200}"
 TENANT_ID="${TENANT_ID:-milady-cloud}"
 DEFAULT_DAILY_LIMIT="${DEFAULT_DAILY_LIMIT:-100}"
+REMOTE_DIR="${REMOTE_DIR:-/opt/steward}"
+
+# Values below are embedded into a remote shell program. Keep their accepted
+# syntax deliberately narrow so operator configuration or container metadata
+# cannot terminate a quoted argument and execute commands as remote root.
+[[ "${NODE_IP}" =~ ^[A-Za-z0-9._:\[\]-]+$ ]] || { echo "❌ Invalid node address"; exit 1; }
+[[ "${STEWARD_URL}" =~ ^https?://[A-Za-z0-9._:\[\]/-]+$ ]] || { echo "❌ Invalid Steward URL"; exit 1; }
+[[ "${TENANT_ID}" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "❌ Invalid tenant ID"; exit 1; }
+[[ "${DEFAULT_DAILY_LIMIT}" =~ ^[0-9]+([.][0-9]{1,2})?$ ]] || { echo "❌ Invalid daily limit"; exit 1; }
+[[ "${REMOTE_DIR}" =~ ^/[A-Za-z0-9._/-]+$ ]] || { echo "❌ Invalid remote directory"; exit 1; }
+
+# ── Platform key handling (SEC-020) ──────────────────────────────────────────
+# The remote shell reads the key from the node's mode-0600 deploy/.env.
+PK_SNIPPET="PK=\$(sed -n 's/^STEWARD_PLATFORM_KEY=//p' ${REMOTE_DIR}/deploy/.env | head -n1)"
+# Fail-closed preflight: the key must be readable on the node.
+if ! "${SSH_CMD[@]}" "grep -q '^STEWARD_PLATFORM_KEY=.\+' ${REMOTE_DIR}/deploy/.env" 2>/dev/null; then
+  echo "❌ No STEWARD_PLATFORM_KEY found in ${REMOTE_DIR}/deploy/.env on ${NODE_IP}"
+  echo "   Provision the node first (deploy/provision-steward-node.sh)."
+  exit 1
+fi
+
+# curl expands a literal `-H "...${PK}"` into its process argv, even when PK
+# was populated by the remote shell. Put the header in a mode-0600 temporary
+# file and pass only that filename to curl so the key is absent from both the
+# local ssh argv and the remote curl argv. Before writing it, reject anything
+# outside the documented URL-safe token alphabet so CR/LF cannot inject a
+# second header and quotes/backslashes cannot become config syntax if this is
+# ever migrated back to `curl -K`.
+AUTH_HEADER_SNIPPET="case \"\${PK}\" in ''|*[!A-Za-z0-9._~-]*) exit 1;; esac; [ \"\${#PK}\" -le 512 ] || exit 1; AUTH_FILE=\$(mktemp); chmod 600 \"\${AUTH_FILE}\"; trap 'rm -f \"\${AUTH_FILE}\"' EXIT; printf 'X-Steward-Platform-Key: %s\\n' \"\${PK}\" > \"\${AUTH_FILE}\""
 
 echo "══════════════════════════════════════════════════════════════"
 echo "  Steward Agent Key Migration"
@@ -48,7 +95,7 @@ echo ""
 
 # ── Check Steward health ────────────────────────────────────────────────────
 echo "▸ Checking Steward health..."
-if ! ${SSH_CMD} "curl -sf ${STEWARD_URL}/health" >/dev/null 2>&1; then
+if ! "${SSH_CMD[@]}" "curl -sf ${STEWARD_URL}/health" >/dev/null 2>&1; then
   echo "❌ Steward is not reachable at ${STEWARD_URL}"
   echo "   Make sure Steward is running: docker compose -f /opt/steward/deploy/docker-compose.yml up -d"
   exit 1
@@ -58,7 +105,7 @@ echo ""
 
 # ── Discover agent containers ───────────────────────────────────────────────
 echo "▸ Discovering agent containers..."
-CONTAINERS=$(${SSH_CMD} "docker ps --format '{{.Names}}' | grep '^milady-'" || true)
+CONTAINERS=$("${SSH_CMD[@]}" "docker ps --format '{{.Names}}' | grep '^milady-'" || true)
 
 if [[ -z "${CONTAINERS}" ]]; then
   echo "  ⚠  No milady agent containers found"
@@ -84,13 +131,17 @@ while IFS= read -r CONTAINER; do
   echo "  Container: ${CONTAINER}"
 
   # Read env vars from container
-  AGENT_ENV=$(${SSH_CMD} "docker inspect ${CONTAINER} --format '{{range .Config.Env}}{{println .}}{{end}}'" 2>/dev/null || true)
+  AGENT_ENV=$("${SSH_CMD[@]}" "docker inspect ${CONTAINER} --format '{{range .Config.Env}}{{println .}}{{end}}'" 2>/dev/null || true)
 
   # Extract relevant keys
   MILADY_API_TOKEN=$(echo "${AGENT_ENV}" | grep '^MILADY_API_TOKEN=' | cut -d= -f2- || true)
   EVM_PRIVATE_KEY=$(echo "${AGENT_ENV}" | grep '^EVM_PRIVATE_KEY=' | cut -d= -f2- || true)
   SOLANA_PRIVATE_KEY=$(echo "${AGENT_ENV}" | grep '^SOLANA_PRIVATE_KEY=' | cut -d= -f2- || true)
   AGENT_NAME=$(echo "${AGENT_ENV}" | grep '^AGENT_NAME=' | cut -d= -f2- || echo "agent-${AGENT_UUID:0:8}")
+  if [[ ! "${AGENT_NAME}" =~ ^[A-Za-z0-9._\ -]{1,128}$ ]]; then
+    echo "  ⚠  Unsafe AGENT_NAME metadata ignored"
+    AGENT_NAME="agent-${AGENT_UUID:0:8}"
+  fi
 
   echo "  Name: ${AGENT_NAME}"
   echo "  Has MILADY_API_TOKEN: $([[ -n "${MILADY_API_TOKEN}" ]] && echo 'yes' || echo 'no')"
@@ -105,9 +156,11 @@ while IFS= read -r CONTAINER; do
 
   # ── Create agent in Steward ──────────────────────────────────────────────
   echo "  Creating agent in Steward..."
-  CREATE_RESP=$(${SSH_CMD} "curl -sf -X POST '${STEWARD_URL}/platform/tenants/${TENANT_ID}/agents' \
+  # The platform key is resolved on the REMOTE side (${PK_SNIPPET}) and never
+  # placed on the remote curl argv (visible in the node's process list).
+  CREATE_RESP=$("${SSH_CMD[@]}" "${PK_SNIPPET}; ${AUTH_HEADER_SNIPPET}; curl -sf -X POST '${STEWARD_URL}/platform/tenants/${TENANT_ID}/agents' \
     -H 'Content-Type: application/json' \
-    -H 'X-Steward-Platform-Key: ${PLATFORM_KEY}' \
+    -H \"@\${AUTH_FILE}\" \
     -d '{
       \"id\": \"${AGENT_UUID}\",
       \"name\": \"${AGENT_NAME}\",
@@ -127,9 +180,9 @@ while IFS= read -r CONTAINER; do
 
   # ── Set default policies ─────────────────────────────────────────────────
   echo "  Setting default policies..."
-  POLICY_RESP=$(${SSH_CMD} "curl -sf -X PUT '${STEWARD_URL}/platform/tenants/${TENANT_ID}/policies' \
+  POLICY_RESP=$("${SSH_CMD[@]}" "${PK_SNIPPET}; ${AUTH_HEADER_SNIPPET}; curl -sf -X PUT '${STEWARD_URL}/platform/tenants/${TENANT_ID}/policies' \
     -H 'Content-Type: application/json' \
-    -H 'X-Steward-Platform-Key: ${PLATFORM_KEY}' \
+    -H \"@\${AUTH_FILE}\" \
     -d '{
       \"agentId\": \"${AGENT_UUID}\",
       \"policies\": [
@@ -186,10 +239,14 @@ echo "  Failed:   ${FAILED}"
 echo "══════════════════════════════════════════════════════════════"
 
 if [[ -n "${NEW_ENV_VARS}" ]]; then
+  # Agent tokens are credentials: write them to a mode-0600 file (mktemp
+  # creates 0600) instead of stdout, where they would persist in scrollback
+  # and CI logs (SEC-020).
+  ENV_OUT_FILE="$(mktemp "${TMPDIR:-/tmp}/steward-agent-env.XXXXXX")"
+  printf '%s\n' "${NEW_ENV_VARS}" > "${ENV_OUT_FILE}"
   echo ""
-  echo "New environment variables for agents:"
-  echo "────────────────────────────────────────────────────────────"
-  echo "${NEW_ENV_VARS}"
+  echo "New environment variables for agents were written to:"
+  echo "  ${ENV_OUT_FILE} (mode 0600 — not printed here)"
   echo ""
   echo "Add these to each agent's container env to use Steward"
   echo "for key management instead of direct private key access."

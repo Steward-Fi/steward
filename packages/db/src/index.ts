@@ -17,23 +17,33 @@ export {
   appendAuditEventWithinTx,
   redactWebhookSecrets,
   withTenantAuditedTransaction,
+  withTenantAuditedTransactionOnDb,
   withTenantAuditQueue,
   writeAuditEvent,
 } from "./audit-chain";
-export type { DatabaseDriver } from "./client";
+export type { DatabaseDriver, NeonTransactionDbHandle } from "./client";
 export {
   closeDb,
   createDb,
   createDbForRequest,
   createNeonHttpDb,
+  createNeonTransactionDbForRequest,
   createPostgresClient,
+  DATABASE_DEADLINE_EXCEEDED_MESSAGE,
+  DatabaseDeadlineExceededError,
   getDatabaseDriver,
   getDatabaseUrl,
   getDb,
   getSql,
+  hasTenantTransactionDatabase,
   setPGLiteOverride,
+  waitUntilRequestDatabaseTask,
+  withDatabaseDeadline,
+  withRequestDatabase,
+  withTenantTransactionDatabase,
 } from "./client";
 export { runMigrations } from "./migrate";
+export { getMigrationExpectation, type MigrationExpectation } from "./migration-status";
 export { encryptOAuthAccountPlaintextTokens } from "./oauth-token-encryption";
 export {
   pluginAdvisoryLockKey,
@@ -42,10 +52,27 @@ export {
   runPluginMigrations,
   sanitizePluginMigrationId,
 } from "./plugin-migrate";
+export {
+  ALL_INVENTORIED_TABLES,
+  BOOTSTRAP_ROOT_TABLES,
+  DIRECT_TENANT_TABLES,
+  HYBRID_SCOPE_TABLES,
+  INDIRECT_TENANT_TABLES,
+  INTENTIONALLY_GLOBAL_TABLES,
+  TENANT_COLUMN_BACKFILL_TABLES,
+} from "./rls-inventory";
 // PGLite exports live in the `@stwd/db/pglite` subpath so Cloudflare Worker
 // bundles can import `@stwd/db` without pulling node:fs/node:path dependencies.
 export * from "./schema";
 export * from "./schema-auth";
+export {
+  assertTenantRlsDriver,
+  type TenantRlsDriver,
+  type TrustedTenantContext,
+  tenantContextForInternalJob,
+  tenantContextFromAuthenticatedPrincipal,
+  withTenantRlsTransaction,
+} from "./tenant-rls-context";
 
 import type { Agent, Policy, Transaction } from "./schema";
 import { policyTypeEnum } from "./schema";

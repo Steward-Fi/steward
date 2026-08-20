@@ -1,5 +1,5 @@
 import { type PolicyRule, StewardApiError, StewardClient, type TxRecord } from "@stwd/sdk";
-import type { ApiResponse, WebhookEvent } from "@stwd/shared";
+import { type ApiResponse, redactedThrownDiagnostics, type WebhookEvent } from "@stwd/shared";
 
 const BASE_CHAIN_ID = 8453;
 const USDC_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
@@ -383,7 +383,7 @@ async function main() {
     } catch (error) {
       console.log("Small tx passed policy but could not be broadcast.");
       detail("likely cause", "fund the demo wallet with ETH on Base so the signer can pay gas");
-      detail("error", error instanceof Error ? error.message : "Unknown error");
+      detail("error diagnostics", redactedThrownDiagnostics(error));
     }
 
     const mediumTxValue = parseEther("0.05").toString();
@@ -471,6 +471,6 @@ async function main() {
 
 await main().catch((error) => {
   console.error("\nWaifu integration example failed.");
-  console.error(error instanceof Error ? (error.stack ?? error.message) : error);
+  console.error(redactedThrownDiagnostics(error));
   process.exitCode = 1;
 });

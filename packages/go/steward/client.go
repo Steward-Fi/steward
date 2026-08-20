@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"strings"
@@ -28,9 +29,21 @@ type Config struct {
 	TenantID             string
 	RequestSigningSecret string
 	RequestSigningKeyID  string
-	HTTPClient           *http.Client
-	Now                  func() time.Time
-	NewID                func() string
+	// AllowInsecureBaseURL permits a plaintext non-loopback BaseURL (warns at
+	// construction). HTTPS is required by default so credentials never travel
+	// cleartext off-loopback (SEC-200).
+	AllowInsecureBaseURL bool
+	// HTTPClient, when set, REPLACES the default client — including its
+	// CheckRedirect hook, which strips Authorization / X-Steward-* credential
+	// and signing headers on cross-host or HTTPS-downgrade redirects
+	// (SEC-126). A custom client whose CheckRedirect does not re-apply that
+	// stripping silently re-enables credential exfiltration via open
+	// redirects / hostile proxies: net/http copies X-Steward-* headers to
+	// any redirect target. Either disable redirects or strip those headers
+	// on any host change (see stripStewardCredentialsOnCrossHostRedirect).
+	HTTPClient *http.Client
+	Now        func() time.Time
+	NewID      func() string
 }
 
 type Client struct {
@@ -38,7 +51,7 @@ type Client struct {
 	config  Config
 	http    *http.Client
 	now     func() time.Time
-	newID   func() string
+	newID   func() (string, error)
 }
 
 type APIError struct {
@@ -60,6 +73,9 @@ type apiEnvelope struct {
 	Error string          `json:"error,omitempty"`
 }
 
+// Keep in lockstep with the equivalent list in EVERY other SDK (sdk, java,
+// python, ruby, rust, swift, csharp, flutter): mutations under these prefixes
+// are HMAC-signed, and divergence silently downgrades integrity (SEC-049).
 var sensitivePrefixes = []string{
 	"/vault",
 	"/agents",
@@ -76,6 +92,79 @@ var sensitivePrefixes = []string{
 	"/condition-sets",
 	"/condition_sets",
 	"/v1/condition_sets",
+	"/global-wallet",
+	"/accounts",
+}
+
+func isLoopbackHost(hostname string) bool {
+	return hostname == "localhost" || hostname == "127.0.0.1" || hostname == "::1"
+}
+
+// Keep in lockstep with the equivalent check in EVERY other SDK (sdk, java,
+// python, ruby, rust, swift, csharp, flutter): these clients transmit API
+// keys, bearer tokens, and HMAC-signed credentials, none of which may travel
+// to a plaintext non-loopback endpoint (SEC-200, mirroring SEC-048).
+func assertSecureBaseURL(base *url.URL, allowInsecure bool) error {
+	if base.User != nil {
+		return errors.New("base URL must not embed credentials")
+	}
+	if base.Scheme != "http" && base.Scheme != "https" {
+		return errors.New("base URL must use HTTP or HTTPS")
+	}
+	if base.Scheme == "https" || (base.Scheme == "http" && isLoopbackHost(base.Hostname())) {
+		return nil
+	}
+	if allowInsecure {
+		log.Printf("[steward-sdk] WARNING: base URL is not HTTPS; credentials travel in cleartext. Use AllowInsecureBaseURL only on trusted private networks.")
+		return nil
+	}
+	return errors.New("base URL must use HTTPS unless it targets loopback (http://localhost, http://127.0.0.1, http://[::1]); set AllowInsecureBaseURL to override on trusted private networks")
+}
+
+func effectivePort(u *url.URL) string {
+	if port := u.Port(); port != "" {
+		return port
+	}
+	if strings.EqualFold(u.Scheme, "https") {
+		return "443"
+	}
+	if strings.EqualFold(u.Scheme, "http") {
+		return "80"
+	}
+	return ""
+}
+
+func sameOrigin(a *url.URL, b *url.URL) bool {
+	return strings.EqualFold(a.Scheme, b.Scheme) &&
+		strings.EqualFold(a.Hostname(), b.Hostname()) &&
+		effectivePort(a) == effectivePort(b)
+}
+
+// stewardRedirectPolicy permits only same-origin, credential-free redirect
+// targets. Merely stripping Steward headers is insufficient: following an
+// attacker-selected cross-origin Location turns server-side SDK consumers into
+// an SSRF primitive. Embedded URL credentials are also never accepted.
+func stewardRedirectPolicy(req *http.Request, via []*http.Request) error {
+	if len(via) == 0 {
+		return nil
+	}
+	if req == nil || req.URL == nil || via[0] == nil || via[0].URL == nil {
+		return errors.New("refusing redirect with missing origin metadata")
+	}
+	return stewardRedirectPolicyFromOrigin(req, via[0].URL, len(via))
+}
+
+func stewardRedirectPolicyFromOrigin(req *http.Request, origin *url.URL, redirectCount int) error {
+	if redirectCount >= 10 {
+		return errors.New("stopped after 10 redirects")
+	}
+	if req == nil || req.URL == nil || origin == nil {
+		return errors.New("refusing redirect with missing origin metadata")
+	}
+	if req.URL.User != nil || !sameOrigin(req.URL, origin) {
+		return fmt.Errorf("refusing cross-origin or credential-bearing redirect to %q", req.URL.Redacted())
+	}
+	return nil
 }
 
 func NewClient(config Config) (*Client, error) {
@@ -83,19 +172,55 @@ func NewClient(config Config) (*Client, error) {
 		return nil, errors.New("base URL is required")
 	}
 	base := strings.TrimRight(config.BaseURL, "/")
-	if _, err := url.ParseRequestURI(base); err != nil {
+	parsed, err := url.ParseRequestURI(base)
+	if err != nil {
 		return nil, fmt.Errorf("invalid base URL: %w", err)
+	}
+	if err := assertSecureBaseURL(parsed, config.AllowInsecureBaseURL); err != nil {
+		return nil, err
 	}
 	httpClient := config.HTTPClient
 	if httpClient == nil {
-		httpClient = &http.Client{Timeout: 30 * time.Second}
+		httpClient = &http.Client{
+			Timeout: 30 * time.Second,
+		}
 	}
+	// Copy caller-owned clients instead of mutating them, then compose their
+	// redirect policy behind Steward's mandatory origin boundary.
+	configuredRedirect := httpClient.CheckRedirect
+	httpClientCopy := *httpClient
+	// Anchor every hop to construction-time configuration, not to via[0]. A
+	// caller callback can retain and mutate a prior hop's request before a later
+	// callback; deriving the origin from that mutable chain would make a
+	// multi-hop redirect compare against attacker-controlled state.
+	redirectOrigin := *parsed
+	httpClientCopy.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if err := stewardRedirectPolicyFromOrigin(req, &redirectOrigin, len(via)); err != nil {
+			return err
+		}
+		if len(via) == 0 || via[0] == nil || via[0].URL == nil {
+			return errors.New("refusing redirect with missing origin metadata")
+		}
+		if configuredRedirect != nil {
+			if err := configuredRedirect(req, via); err != nil {
+				return err
+			}
+		}
+		// A caller policy is allowed to mutate req. Re-enforce Steward's mandatory
+		// boundary after it runs so mutation cannot redirect credentials or turn
+		// the client into an SSRF primitive after the initial check.
+		return stewardRedirectPolicyFromOrigin(req, &redirectOrigin, len(via))
+	}
+	httpClient = &httpClientCopy
 	now := config.Now
 	if now == nil {
 		now = time.Now
 	}
-	newID := config.NewID
-	if newID == nil {
+	newID := func() (string, error) { return "", nil }
+	if config.NewID != nil {
+		userNewID := config.NewID
+		newID = func() (string, error) { return userNewID(), nil }
+	} else {
 		newID = randomID
 	}
 	return &Client{baseURL: base, config: config, http: httpClient, now: now, newID: newID}, nil
@@ -135,7 +260,9 @@ func (c *Client) Request(ctx context.Context, method string, path string, body a
 	if err != nil {
 		return err
 	}
-	c.applyHeaders(req, method, canonicalPath, rawBody)
+	if err := c.applyHeaders(req, method, canonicalPath, rawBody); err != nil {
+		return err
+	}
 	res, err := c.http.Do(req)
 	if err != nil {
 		return err
@@ -148,7 +275,7 @@ func (c *Client) Request(ctx context.Context, method string, path string, body a
 	return decodeResponse(res.StatusCode, payload, out)
 }
 
-func (c *Client) applyHeaders(req *http.Request, method string, path string, body []byte) {
+func (c *Client) applyHeaders(req *http.Request, method string, path string, body []byte) error {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 	switch {
@@ -174,7 +301,11 @@ func (c *Client) applyHeaders(req *http.Request, method string, path string, bod
 		}
 		idempotencyKey := req.Header.Get("Idempotency-Key")
 		if idempotencyKey == "" {
-			idempotencyKey = c.newID()
+			generated, err := c.newID()
+			if err != nil {
+				return err
+			}
+			idempotencyKey = generated
 			req.Header.Set("Idempotency-Key", idempotencyKey)
 		}
 		if c.config.RequestSigningKeyID != "" && req.Header.Get("X-Steward-Signing-Key-Id") == "" {
@@ -187,6 +318,7 @@ func (c *Client) applyHeaders(req *http.Request, method string, path string, bod
 		mac.Write([]byte(canonical))
 		req.Header.Set("X-Steward-Signature", "v1="+hex.EncodeToString(mac.Sum(nil)))
 	}
+	return nil
 }
 
 func decodeResponse(status int, payload []byte, out any) error {
@@ -242,12 +374,14 @@ func isSensitiveMutation(path string, method string) bool {
 	return false
 }
 
-func randomID() string {
+func randomID() (string, error) {
 	var b [16]byte
 	if _, err := rand.Read(b[:]); err != nil {
-		return fmt.Sprintf("%d", time.Now().UnixNano())
+		// Fail closed: never fall back to a predictable (timestamp-derived)
+		// idempotency key (SEC-196).
+		return "", fmt.Errorf("crypto/rand unavailable for idempotency key: %w", err)
 	}
 	b[6] = (b[6] & 0x0f) | 0x40
 	b[8] = (b[8] & 0x3f) | 0x80
-	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16]), nil
 }

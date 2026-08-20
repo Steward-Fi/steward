@@ -111,8 +111,14 @@ Components include `StewardLogin`, `StewardAuthGuard`, `StewardUserButton`, `Ste
 ```bash
 git clone https://github.com/Steward-Fi/steward.git && cd steward
 cp .env.example .env
-# Set STEWARD_MASTER_PASSWORD, POSTGRES_PASSWORD, STEWARD_PLATFORM_KEYS,
-# STEWARD_SESSION_SECRET, and STEWARD_JWT_SECRET in .env.
+# Set every value required by docker-compose.yml in .env: POSTGRES_PASSWORD,
+# STEWARD_MASTER_PASSWORD, STEWARD_JWT_SECRET, STEWARD_EMAIL_CODE_SECRET,
+# STEWARD_EXECUTION_AUTH_SECRET, STEWARD_KDF_SALT, STEWARD_AUDIT_HMAC_KEY,
+# and STEWARD_PROXY_REQUEST_SIGNING_SECRET. Use a distinct random root for each.
+# The bundled private-network services also require deliberate choices for
+# STEWARD_ACK_LOCAL_CUSTODY, STEWARD_ALLOW_INSECURE_DB, and
+# STEWARD_ALLOW_INSECURE_REDIS; read the deployment and custody guides first.
+docker compose config  # fail fast on missing required configuration
 docker compose up -d
 curl http://127.0.0.1:3200/ready
 ```
@@ -127,20 +133,32 @@ bun run start:local
 
 Embedded mode uses PGLite, an in-process PostgreSQL-compatible database through WASM. Data persists to `~/.steward/data/`. It is intended for local development, CLI agents, and desktop apps.
 
-### Required environment variables
+To use platform routes, configure both `STEWARD_PLATFORM_KEYS` and explicit
+`STEWARD_PLATFORM_KEY_SCOPES`; an unmapped key authenticates but has no platform
+authorization.
+
+### Selected environment variables
+
+This table is not a complete production or Compose checklist. The required
+interpolation guards in `docker-compose.yml` are authoritative for the shipped
+stack, and runtime security guards may require additional explicit posture
+choices.
 
 | Variable | Description |
 |---|---|
 | `STEWARD_MASTER_PASSWORD` | Derives vault encryption keys. There is no recovery if it is lost. |
 | `DATABASE_URL` | PostgreSQL connection string, not needed in embedded mode. |
-| `STEWARD_SESSION_SECRET` | JWT signing secret, defaults to the master password. |
+| `STEWARD_JWT_SECRET` | Canonical JWT signing and verification secret. Required in production and at least 32 characters. Keep it server-side and separate from the master password. |
+| `STEWARD_SESSION_SECRET` | Deprecated compatibility fallback for existing deployments. Rename it to `STEWARD_JWT_SECRET`. |
 | `REDIS_URL` | Redis for rate limiting and the token store, optional. |
 | `RESEND_API_KEY` | Email magic-link authentication, optional. |
 | `PASSKEY_RP_ID` | WebAuthn relying-party domain, optional. |
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | Google OAuth, optional. |
+| `X_CLIENT_ID` / `X_CLIENT_SECRET` | Provider-account X OAuth connect and lifecycle recovery, optional. Distinct from human sign-in credentials. |
 | `DISCORD_CLIENT_ID` / `DISCORD_CLIENT_SECRET` | Discord OAuth, optional. |
 
-See [`.env.example`](.env.example) for the full list.
+See [`.env.example`](.env.example) and the [deployment guide](docs/deployment.md)
+for configuration details.
 
 ## Shipped capabilities
 

@@ -206,7 +206,10 @@ export function startFakeOAuthServer(port = 5555): {
   port: number;
   origin: string;
 } {
-  const server = Bun.serve({ port, fetch: handle });
+  // SEC-128: bind loopback only. Bun.serve defaults to 0.0.0.0, which would
+  // expose this accept-any-credential / mint-any-identity stub to anyone who
+  // can route to the dev/CI host.
+  const server = Bun.serve({ port, hostname: "127.0.0.1", fetch: handle });
   return {
     port: server.port,
     origin: `http://localhost:${server.port}`,

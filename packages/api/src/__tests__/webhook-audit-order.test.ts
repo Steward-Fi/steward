@@ -23,7 +23,7 @@ describe("webhook audit ordering", () => {
   });
 
   // Webhook control-plane routes manage payload-exfiltration-sensitive config,
-  // so they require a recent owner/admin MFA session (PR #79 hardening) before
+  // so they require a recent owner/admin MFA session before
   // the tenant-level check — a tenant API key or stale admin session cannot
   // create, modify, or replay persistent webhooks.
   it("requires recent owner/admin MFA for webhook control-plane routes", () => {

@@ -31,8 +31,10 @@ import {
   workspaces,
 } from "@stwd/db";
 import { getRedis, type SpendReservation, settleReservedSpend } from "@stwd/redis";
+import { isValidOAuthBearerToken, redactedThrownDiagnostics, strictParseJson } from "@stwd/shared";
 import { SecretVault } from "@stwd/vault";
 import type { Context } from "hono";
+import { boundedPositiveIntegerEnv, isProxyDevMode } from "../config";
 import { recordAudit, recordRequiredAudit } from "../middleware/audit";
 import {
   checkProxyRateLimit,
@@ -43,10 +45,17 @@ import {
   reserveProxySpendLimit,
   trackProxySpend,
 } from "../middleware/redis-enforcement";
+import { injectAwsSigV4AtFinalBoundary } from "../sigv4";
 import { resolveTarget } from "./alias";
 import { holdProxyApprovalRequest } from "./approvals";
+import {
+  __setGoogleExecutionTokenForwarderForTests,
+  mintGoogleExecutionAccessToken,
+} from "./google-execution-credential";
 import { compareRouteMatchSpecificity, matchHost, matchPath } from "./matching";
 import { applyGovernedQuery, extractRawQuery } from "./query-forwarding";
+
+export { __setGoogleExecutionTokenForwarderForTests };
 
 // ─── Secret Vault singleton ──────────────────────────────────────────────────
 
@@ -62,6 +71,11 @@ function getSecretVault(): SecretVault {
     _secretVault = new SecretVault(masterPassword);
   }
   return _secretVault;
+}
+
+/** Reset the process-local vault cache between isolated test fixtures. */
+export function __resetSecretVaultForTests(): void {
+  _secretVault = null;
 }
 
 // ─── Route matching ──────────────────────────────────────────────────────────
@@ -134,6 +148,59 @@ async function decryptSecret(tenantId: string, secretId: string): Promise<string
   return getSecretVault().decryptSecret(tenantId, secretId);
 }
 
+/**
+ * Slack's governed routes are intentionally bot-token only. Secret routes are
+ * otherwise provider-neutral, so enforce the credential kind again at the last
+ * possible boundary: after decrypt and before it can enter an outbound header.
+ * This prevents a mistakenly stored user token (xoxp-) or arbitrary plaintext
+ * secret from inheriting the bot grant's authority.
+ */
+function isSlackBotTokenCredential(value: string): boolean {
+  if (!value.startsWith("xoxb-") || value.length > 512) return false;
+  const suffix = value.slice(5);
+  return suffix.length >= 10 && !/[^A-Za-z0-9-]/.test(suffix);
+}
+
+export function extractProviderCredentialForHost(host: string, credential: string): string {
+  const parsed = safeJsonParseString<unknown>(credential);
+  const parsedEnvelope =
+    typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : null;
+  const googleHost = host === "gmail.googleapis.com" || host === "www.googleapis.com";
+  const xHost = host === "api.x.com";
+  const schemaVersion = parsedEnvelope?.schemaVersion;
+  if (schemaVersion === "steward.provider-google.credential.v1") {
+    // Bind the credential type to its intended provider. Merely transforming the
+    // envelope when the destination happens to be Google would let a misbound
+    // route forward the whole JSON value, including the server-held refresh token.
+    if (!googleHost) throw new Error("Google OAuth credential used for a non-Google host");
+  } else if (schemaVersion === "steward.provider-x.credential.v1") {
+    // X connect stores access + refresh tokens together. Only the access token
+    // may cross the proxy boundary; the refresh token remains server-side.
+    if (!xHost) throw new Error("X OAuth credential used for a non-X host");
+  } else {
+    if (googleHost) throw new Error("invalid Google OAuth credential envelope");
+    // A parseable object at the X boundary is an envelope, not a legacy raw
+    // token. Unknown/malformed envelopes must never be formatted into a header.
+    if (xHost) {
+      if (typeof parsed === "object" && parsed !== null)
+        throw new Error("invalid X OAuth credential envelope");
+      if (!isValidOAuthBearerToken(credential))
+        throw new Error("invalid X OAuth bearer credential");
+    }
+    return credential;
+  }
+  if (!parsedEnvelope) throw new Error("invalid provider OAuth credential envelope");
+  if (!isValidOAuthBearerToken(parsedEnvelope.accessToken))
+    throw new Error(
+      googleHost
+        ? "invalid Google OAuth credential envelope"
+        : "invalid X OAuth credential envelope",
+    );
+  return parsedEnvelope.accessToken;
+}
+
 // ─── Credential injection ────────────────────────────────────────────────────
 
 /**
@@ -163,18 +230,34 @@ function injectCredential(
       throw new Error("Body credential injection is not supported");
 
     default:
-      console.warn(`[proxy] Unknown inject_as: ${route.injectAs}`);
+      // SEC-176: fail closed. Forwarding with no credential in a state the
+      // operator never configured is worse than rejecting the request.
+      throw new Error(`Unknown credential injection mode: ${String(route.injectAs)}`);
   }
 
   return { headers, url, body };
 }
 
+function bytesToBody(bytes: Uint8Array): ReadableStream<Uint8Array> {
+  return new ReadableStream({
+    start(controller) {
+      controller.enqueue(bytes);
+      controller.close();
+    },
+  });
+}
+
 function stripHopByHopHeaders(headers: Headers): Set<string> {
   const blocked = new Set([
     "authorization",
+    // SEC-097: alternate client-IP headers trusted by some providers/CDNs for
+    // IP attribution or geo-gating. An authenticated agent must not be able to
+    // relay spoofed values to the credential-injected upstream.
+    "cf-connecting-ip",
     "connection",
     "content-length",
     "cookie",
+    "fastly-client-ip",
     "forwarded",
     "host",
     "idempotency-key",
@@ -184,7 +267,10 @@ function stripHopByHopHeaders(headers: Headers): Set<string> {
     "te",
     "trailer",
     "transfer-encoding",
+    "true-client-ip",
     "upgrade",
+    "x-client-ip",
+    "x-cluster-client-ip",
     "x-forwarded-for",
     "x-forwarded-host",
     "x-forwarded-port",
@@ -193,11 +279,16 @@ function stripHopByHopHeaders(headers: Headers): Set<string> {
     "x-http-method",
     "x-http-method-override",
     "x-method-override",
+    "x-original-forwarded-for",
     "x-original-url",
     "x-real-ip",
     "x-rewrite-url",
     "x-steward-key",
     "x-steward-platform-key",
+    // SEC-099: the proxy's request-signing window metadata is internal; do not
+    // disclose it to upstream providers.
+    "x-steward-request-expires-at",
+    "x-steward-request-timestamp",
     "x-steward-signature",
   ]);
   const connection = headers.get("connection");
@@ -271,25 +362,52 @@ async function releaseProxySpendReservation(
 
 let checkProxySpendLimitForHandler = checkProxySpendLimit;
 let resolveProxyHostForHandler = dnsLookup;
-const MAX_LLM_SPEND_TRACKING_BODY_BYTES = Number(
-  process.env.STEWARD_PROXY_MAX_SPEND_BODY_BYTES ?? 1024 * 1024,
+const MAX_LLM_SPEND_TRACKING_BODY_BYTES = boundedPositiveIntegerEnv(
+  "STEWARD_PROXY_MAX_SPEND_BODY_BYTES",
+  1024 * 1024,
+  100 * 1024 * 1024,
 );
-const PROXY_IDEMPOTENCY_TTL_MS = Number(
-  process.env.STEWARD_PROXY_IDEMPOTENCY_TTL_MS ?? 24 * 60 * 60 * 1000,
+const PROXY_IDEMPOTENCY_TTL_MS = boundedPositiveIntegerEnv(
+  "STEWARD_PROXY_IDEMPOTENCY_TTL_MS",
+  24 * 60 * 60 * 1000,
+  30 * 24 * 60 * 60 * 1000,
 );
-const MAX_PROXY_IDEMPOTENCY_BODY_BYTES = Number(
-  process.env.STEWARD_PROXY_IDEMPOTENCY_BODY_BYTES ?? 2 * 1024 * 1024,
+const MAX_PROXY_IDEMPOTENCY_BODY_BYTES = boundedPositiveIntegerEnv(
+  "STEWARD_PROXY_IDEMPOTENCY_BODY_BYTES",
+  2 * 1024 * 1024,
+  100 * 1024 * 1024,
 );
-const PROXY_UPSTREAM_TIMEOUT_MS = Number(process.env.STEWARD_PROXY_UPSTREAM_TIMEOUT_MS ?? 30_000);
-const MAX_PROXY_RESPONSE_BYTES = Number(
-  process.env.STEWARD_PROXY_RESPONSE_BYTES ?? 25 * 1024 * 1024,
+const PROXY_UPSTREAM_TIMEOUT_MS = boundedPositiveIntegerEnv(
+  "STEWARD_PROXY_UPSTREAM_TIMEOUT_MS",
+  30_000,
+  5 * 60_000,
 );
-const MAX_PROXY_STREAM_DURATION_MS = Number(
-  process.env.STEWARD_PROXY_STREAM_DURATION_MS ?? 5 * 60_000,
+/**
+ * Proxy resource limits cannot be disabled. Reject non-positive, non-integer,
+ * and malformed values during module initialization.
+ */
+const MAX_PROXY_RESPONSE_BYTES = boundedPositiveIntegerEnv(
+  "STEWARD_PROXY_RESPONSE_BYTES",
+  25 * 1024 * 1024,
+  100 * 1024 * 1024,
 );
-let MAX_PROXY_IN_FLIGHT_PER_AGENT = Number(process.env.STEWARD_PROXY_MAX_IN_FLIGHT_PER_AGENT ?? 50);
-let MAX_PROXY_IN_FLIGHT_PER_TENANT = Number(
-  process.env.STEWARD_PROXY_MAX_IN_FLIGHT_PER_TENANT ?? 250,
+// Credential-bearing responses are buffered for reflection inspection. Keep
+// this security boundary independent from the much larger generic proxy cap.
+const MAX_CREDENTIAL_RESPONSE_BODY_BYTES = 2 * 1024 * 1024;
+const MAX_PROXY_STREAM_DURATION_MS = boundedPositiveIntegerEnv(
+  "STEWARD_PROXY_STREAM_DURATION_MS",
+  5 * 60_000,
+  30 * 60_000,
+);
+let MAX_PROXY_IN_FLIGHT_PER_AGENT = boundedPositiveIntegerEnv(
+  "STEWARD_PROXY_MAX_IN_FLIGHT_PER_AGENT",
+  50,
+  10_000,
+);
+let MAX_PROXY_IN_FLIGHT_PER_TENANT = boundedPositiveIntegerEnv(
+  "STEWARD_PROXY_MAX_IN_FLIGHT_PER_TENANT",
+  250,
+  100_000,
 );
 const IDEMPOTENCY_KEY_RE = /^[\x21-\x7e]{8,255}$/;
 const SAFE_PROXY_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
@@ -302,8 +420,14 @@ type ProxyReplayClaim = {
   expiresAt: number;
 };
 
+export type ProxyReplayCompletionClaim = {
+  ok: true;
+  storageKey: string;
+  storage: "memory" | "redis";
+};
+
 type ProxyReplayClaimResult =
-  | { ok: true; storageKey: string; storage: "memory" | "redis" }
+  | ProxyReplayCompletionClaim
   | { ok: false; status: number; error: string };
 
 const proxyReplayClaims = new Map<string, ProxyReplayClaim>();
@@ -388,11 +512,14 @@ function releaseWhenBodyCloses(
 }
 
 function requireSharedProxyReplayStore(): boolean {
-  return (
-    process.env.REDIS_REQUIRED === "true" ||
-    (process.env.NODE_ENV === "production" &&
-      process.env.STEWARD_ALLOW_PROXY_REDIS_SOFT_FAIL !== "true")
-  );
+  if (process.env.REDIS_REQUIRED === "true") return true;
+  if (process.env.STEWARD_ALLOW_PROXY_REDIS_SOFT_FAIL === "true") return false;
+  // SEC-175: default-deny — the per-process replay store is a dev-only
+  // fallback and now needs the explicit dev-mode opt-in; an unset NODE_ENV
+  // no longer selects it silently, and a production NODE_ENV overrides a
+  // stray dev-mode flag.
+  if (process.env.NODE_ENV === "production") return true;
+  return !isProxyDevMode();
 }
 
 /** Test hook for overriding spend-limit enforcement without module mocks. */
@@ -460,6 +587,69 @@ function responseHasEncodedBody(headers: Headers): boolean {
 
 function responseTextReflectsAnyCredential(bodyText: string, credentialValues: string[]): boolean {
   return credentialValues.some((value) => bodyText.includes(value));
+}
+
+function cancelResponseBody(body: ReadableStream<Uint8Array>): void {
+  try {
+    void body.cancel().catch(() => undefined);
+  } catch {
+    // Hostile/custom streams may throw synchronously from cancel().
+  }
+}
+
+async function readResponseBodyBounded(
+  body: ReadableStream<Uint8Array>,
+  headers: Headers,
+  maxBytes: number,
+): Promise<ArrayBuffer> {
+  const declared = headers.get("content-length");
+  if (declared !== null) {
+    const length = Number(declared);
+    if (!Number.isSafeInteger(length) || length < 0 || length > maxBytes) {
+      cancelResponseBody(body);
+      throw new Error("Upstream response body inspection failed");
+    }
+  }
+
+  const reader = body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  const cancelReader = () => {
+    try {
+      void reader.cancel().catch(() => undefined);
+    } catch {
+      // See cancelResponseBody: contain custom stream diagnostics.
+    }
+  };
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > maxBytes) {
+        cancelReader();
+        throw new Error("Upstream response body inspection failed");
+      }
+      chunks.push(value);
+    }
+  } catch {
+    cancelReader();
+    throw new Error("Upstream response body inspection failed");
+  } finally {
+    try {
+      reader.releaseLock();
+    } catch {
+      // A disturbed custom stream may retain its reader; it is never reused.
+    }
+  }
+
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return bytes.buffer;
 }
 
 function credentialLeakVariants(values: string[]): string[] {
@@ -678,6 +868,28 @@ async function completeUnsafeProxyRequest(claimResult: ProxyReplayClaimResult): 
   if (claim) proxyReplayClaims.set(storageKey, { ...claim, status: "completed" });
 }
 
+export type ProxyReplayCompletion = (claimResult: ProxyReplayCompletionClaim) => Promise<void>;
+
+export type ProxyHandlerDependencies = Readonly<{
+  completeReplayClaim?: ProxyReplayCompletion;
+}>;
+
+async function persistPostForwardReplayCompletion(
+  claimResult: ProxyReplayCompletionClaim,
+  completeReplayClaim: ProxyReplayCompletion,
+): Promise<void> {
+  try {
+    await completeReplayClaim(claimResult);
+  } catch (error) {
+    // The upstream attempt has already happened. Preserve its outcome and the
+    // processing claim so a retry cannot repeat a potentially committed side effect.
+    console.error(
+      "[proxy] Failed to persist post-forward idempotency completion",
+      redactedThrownDiagnostics(error),
+    );
+  }
+}
+
 async function releaseUnsafeProxyRequest(claimResult: ProxyReplayClaimResult): Promise<void> {
   if (!claimResult.ok || !claimResult.storageKey) return;
   if (claimResult.storage === "redis") {
@@ -817,11 +1029,16 @@ function ipv4FromEmbeddedIPv6(address: string): string | null {
 
 function isUnsafeIPv6Address(address: string): boolean {
   const normalized = address.toLowerCase();
+  const words = expandIPv6Words(normalized);
+  // RFC 8215 reserves 64:ff9b:1::/48 for operator-local translation and
+  // explicitly does not fix the embedded IPv4 position. Treat the entire
+  // prefix as non-public instead of applying the /96 low-word extraction
+  // used for the well-known 64:ff9b::/96 prefix.
+  if (words?.[0] === 0x0064 && words[1] === 0xff9b && words[2] === 0x0001) return true;
   const mappedV4 = ipv4FromMappedIPv6(normalized);
   if (mappedV4) return isUnsafeIPv4Address(mappedV4);
   const embeddedV4 = ipv4FromEmbeddedIPv6(normalized);
   if (embeddedV4) return isUnsafeIPv4Address(embeddedV4);
-  const words = expandIPv6Words(normalized);
   if (!words || words.length !== 8) return true;
   if (words?.[0] === 0x2001 && (words[1] === 0 || words[1] === 0xdb8)) return true;
   const first = words[0];
@@ -1053,6 +1270,15 @@ export function __setForwardProxyRequestForTests(forwarder: ProxyForwarder): voi
   forwardProxyRequestForHandler = forwarder;
 }
 
+/** Restore every mutable proxy-handler dependency after an integration fixture. */
+export function __resetProxyHandlerTestHooksForTests(): void {
+  checkProxySpendLimitForHandler = checkProxySpendLimit;
+  checkProxyRateLimitForHandler = checkProxyRateLimit;
+  resolveProxyHostForHandler = dnsLookup;
+  forwardProxyRequestForHandler = forwardWithVettedDns;
+  __setGoogleExecutionTokenForwarderForTests(null);
+}
+
 // ─── Main proxy handler ──────────────────────────────────────────────────────
 
 /**
@@ -1061,15 +1287,20 @@ export function __setForwardProxyRequestForTests(forwarder: ProxyForwarder): voi
  * This is the catch-all handler mounted on the Hono app.
  * Auth middleware has already run, so agentId and tenantId are available.
  */
-export async function handleProxy(c: Context): Promise<Response> {
+async function handleProxyWithReplayCompletion(
+  c: Context,
+  completeReplayClaim: ProxyReplayCompletion,
+): Promise<Response> {
   setProxyContextNoStore(c);
   const startTime = Date.now();
   const agentId = c.get("agentId") as string;
   const tenantId = c.get("tenantId") as string;
   const method = c.req.method;
+  const governedExecutionClaim = c.get("governedExecutionClaim" as never) as unknown;
+  const hasGovernedExecutionClaim = Boolean(governedExecutionClaim);
 
   // 1. Resolve target URL from request path
-  const target = resolveTarget(c.req.path);
+  const target = resolveTarget(c.req.path, { governed: hasGovernedExecutionClaim });
   if (!target) {
     await recordAudit({
       agentId,
@@ -1120,7 +1351,7 @@ export async function handleProxy(c: Context): Promise<Response> {
       403,
     );
   }
-  // ── PR4 governed-route authority gate (spec §5.1, X1/X7) ──────────────────
+  // ── Governed-route authority gate (spec §5.1, X1/X7) ─────────────────────
   // The gate is on the SELECTED route row, so a governed route is unreachable
   // via direct /proxy, named aliases, or /proxy/<host>/... regardless of how it
   // was addressed. A governed route is permitted ONLY when the request arrived
@@ -1552,7 +1783,10 @@ export async function handleProxy(c: Context): Promise<Response> {
       reason: "credential-proxy-authorized",
     });
   } catch (err) {
-    console.error("[proxy] Required audit write failed before credential forwarding:", err);
+    console.error(
+      "[proxy] Required audit write failed before credential forwarding",
+      redactedThrownDiagnostics(err),
+    );
     await releaseProxySpendReservation(agentId, tenantId, target.host, spendReservation);
     await releaseUnsafeProxyRequest(replayClaim);
     proxySlot.release();
@@ -1595,6 +1829,7 @@ export async function handleProxy(c: Context): Promise<Response> {
       : c.json({ ok: false, error }, 409);
   };
 
+  let governedLiveAccountRevision: number | null = null;
   if (authorityMode === "governed_v2" && governedClaim) {
     const db = getDb();
     const [liveWorkspace] = await db
@@ -1652,6 +1887,7 @@ export async function handleProxy(c: Context): Promise<Response> {
         "governed-operation-revision-stale",
       );
     }
+    governedLiveAccountRevision = liveAccount.revision;
     const [liveSecret] = await db
       .select({ version: secrets.version })
       .from(secrets)
@@ -1668,8 +1904,34 @@ export async function handleProxy(c: Context): Promise<Response> {
   let credential: string;
   try {
     credential = await decryptSecret(tenantId, route.secretId);
+    const googleHost =
+      target.host === "gmail.googleapis.com" || target.host === "www.googleapis.com";
+    if (googleHost) {
+      if (!governedClaim || governedLiveAccountRevision === null) {
+        throw new Error("Google OAuth credentials require governed execution");
+      }
+      const clientId = process.env.GOOGLE_PROVIDER_CLIENT_ID?.trim();
+      const clientSecret = process.env.GOOGLE_PROVIDER_CLIENT_SECRET?.trim();
+      if (!clientId || !clientSecret) throw new Error("Google provider OAuth is not configured");
+      credential = await mintGoogleExecutionAccessToken({
+        tenantId,
+        workspaceId: governedClaim.workspaceId as string,
+        accountId: governedClaim.providerAccountId as string,
+        accountRevision: governedLiveAccountRevision,
+        credential,
+        vault: getSecretVault(),
+        clientId,
+        clientSecret,
+      });
+    } else {
+      credential = extractProviderCredentialForHost(target.host, credential);
+    }
   } catch (err) {
-    console.error(`[proxy] Failed to decrypt secret ${route.secretId}:`, err);
+    const classified = redactedThrownDiagnostics(err);
+    console.error("[proxy] Failed to resolve provider credential", {
+      errorClass: classified.errorClass,
+      errorCode: classified.errorCode,
+    });
     await recordAudit({
       agentId,
       tenantId,
@@ -1678,12 +1940,33 @@ export async function handleProxy(c: Context): Promise<Response> {
       method,
       statusCode: 500,
       latencyMs: Date.now() - startTime,
-      reason: "credential-decrypt-failed",
+      reason: "credential-resolution-failed",
     });
     await releaseProxySpendReservation(agentId, tenantId, target.host, spendReservation);
     await releaseUnsafeProxyRequest(replayClaim);
     proxySlot.release();
-    return c.json({ ok: false, error: "Failed to decrypt credential" }, 500);
+    return c.json({ ok: false, error: "Failed to resolve credential" }, 500);
+  }
+
+  if (target.host === "slack.com" && !isSlackBotTokenCredential(credential)) {
+    // Do not include the credential (or any derivative of it) in the response,
+    // logs, or audit reason. The agent only learns that the configured grant is
+    // not an eligible Slack bot credential.
+    credential = "";
+    await recordRequiredAudit({
+      agentId,
+      tenantId,
+      targetHost: target.host,
+      targetPath: target.path,
+      method,
+      statusCode: 403,
+      latencyMs: Date.now() - startTime,
+      reason: "slack-bot-credential-required",
+    });
+    await releaseProxySpendReservation(agentId, tenantId, target.host, spendReservation);
+    await releaseUnsafeProxyRequest(replayClaim);
+    proxySlot.release();
+    return c.json({ ok: false, error: "Slack route requires a bot credential" }, 403);
   }
 
   // 4. Build outbound request
@@ -1737,8 +2020,36 @@ export async function handleProxy(c: Context): Promise<Response> {
     injectedCredentialValue && rawCredentialValue
       ? credentialLeakVariants([injectedCredentialValue, rawCredentialValue])
       : [];
+  let outboundBody: ReadableStream<Uint8Array> | null =
+    method !== "GET" && method !== "HEAD" ? c.req.raw.body : null;
   try {
-    injectCredential(outboundHeaders, outboundUrl, null, route, credential);
+    if (route.injectionStrategy === "sigv4") {
+      const config = route.injectionConfig as { service?: unknown; region?: unknown };
+      const bodyBytes = new Uint8Array(await c.req.raw.clone().arrayBuffer());
+      if (bodyBytes.byteLength > MAX_PROXY_IDEMPOTENCY_BODY_BYTES) {
+        throw new Error("SigV4 request body exceeds the signing limit");
+      }
+      const injected = injectAwsSigV4AtFinalBoundary({
+        authorityMode,
+        routeHostPattern: route.hostPattern,
+        routePathPattern: route.pathPattern,
+        method,
+        url: outboundUrl,
+        headers: outboundHeaders,
+        body: bodyBytes,
+        service: config.service,
+        region: config.region,
+        credentialSecret: credential,
+      });
+      for (const [name, value] of injected.headers) outboundHeaders.set(name, value);
+      injectedCredentialValue = injected.headers.get("authorization");
+      sensitiveCredentialValues = credentialLeakVariants(injected.sensitiveValues);
+      outboundBody = bytesToBody(bodyBytes);
+    } else if (route.injectionStrategy === "header") {
+      injectCredential(outboundHeaders, outboundUrl, null, route, credential);
+    } else {
+      throw new Error("Unknown credential injection strategy");
+    }
   } catch {
     credential = "";
     injectedCredentialValue = null;
@@ -1766,12 +2077,14 @@ export async function handleProxy(c: Context): Promise<Response> {
       outboundUrl,
       method,
       outboundHeaders,
-      method !== "GET" && method !== "HEAD" ? c.req.raw.body : null,
+      outboundBody,
       dnsCheck.records,
     );
   } catch (err) {
     const latencyMs = Date.now() - startTime;
-    console.error(`[proxy] Upstream request failed:`, err);
+    // Fetch errors can embed the full outbound URL. Query-injected credentials
+    // must never be copied from that error into application logs.
+    console.error("[proxy] Upstream request failed", redactedThrownDiagnostics(err));
 
     // Audit the failure
     await recordAudit({
@@ -1785,7 +2098,7 @@ export async function handleProxy(c: Context): Promise<Response> {
     });
 
     await releaseProxySpendReservation(agentId, tenantId, target.host, spendReservation);
-    await completeUnsafeProxyRequest(replayClaim);
+    await persistPostForwardReplayCompletion(replayClaim, completeReplayClaim);
     proxySlot.release();
     return c.json({ ok: false, error: "Upstream request failed" }, 502);
   } finally {
@@ -1794,22 +2107,11 @@ export async function handleProxy(c: Context): Promise<Response> {
     // The credential variable goes out of scope here.
     credential = "";
   }
-  await completeUnsafeProxyRequest(replayClaim);
+  await persistPostForwardReplayCompletion(replayClaim, completeReplayClaim);
 
   const latencyMs = Date.now() - startTime;
 
-  // 7. Audit log
-  await recordAudit({
-    agentId,
-    tenantId,
-    targetHost: target.host,
-    targetPath: target.path,
-    method,
-    statusCode: response.status,
-    latencyMs,
-  });
-
-  // 7.5. Spend tracking for LLM API responses
+  // 7. Inspect provider-specific response semantics before recording an outcome.
   //
   // For known LLM hosts, we need to read the response body to extract token
   // usage for cost estimation. We buffer the response body, parse it, track
@@ -1819,17 +2121,77 @@ export async function handleProxy(c: Context): Promise<Response> {
   let responseBody: ReadableStream<Uint8Array> | ArrayBuffer | null = response.body;
   const contentType = response.headers.get("content-type") || "";
   const isJsonResponse = contentType.includes("application/json");
+  let slackSemanticFailure: string | null = null;
+  let deferSlackSuccessAudit = false;
+  let credentialResponseInspectionFailed = false;
+
+  // Every credential-bearing, non-streaming identity-encoded body is consumed
+  // exactly once through an independent 2 MiB reader. This bounds allocation
+  // even when Content-Length is absent or false, and the resulting bytes are
+  // reused by provider semantics, spend parsing, reflection scanning, and the
+  // downstream response.
+  if (
+    sensitiveCredentialValues.length > 0 &&
+    responseBody instanceof ReadableStream &&
+    responseBodyCanReflectCredential(response.headers) &&
+    !responseHasEncodedBody(response.headers)
+  ) {
+    try {
+      responseBody = await readResponseBodyBounded(
+        responseBody,
+        response.headers,
+        MAX_CREDENTIAL_RESPONSE_BODY_BYTES,
+      );
+    } catch {
+      responseBody = new ArrayBuffer(0);
+      credentialResponseInspectionFailed = true;
+    }
+  }
+
+  // Slack Web API encodes operation failures as HTTP 200 + {ok:false}. Treat
+  // that envelope as a failed dispatch, while retaining the buffered bytes for
+  // credential-reflection scanning below. A malformed/non-JSON 2xx response is
+  // also fail-closed: it cannot prove that the requested action succeeded.
+  if (target.host === "slack.com" && response.status >= 200 && response.status < 300) {
+    try {
+      if (credentialResponseInspectionFailed || !(responseBody instanceof ArrayBuffer)) {
+        throw new Error("Slack response inspection failed");
+      }
+      slackSemanticFailure = classifySlackWebApiPayload(new TextDecoder().decode(responseBody));
+      deferSlackSuccessAudit = slackSemanticFailure === null;
+    } catch {
+      // Never hand partial provider bytes to a later scanner or the client.
+      responseBody = new ArrayBuffer(0);
+      slackSemanticFailure = "invalid_response";
+    }
+  }
+
+  // Slack can report failure in an HTTP 200 envelope. Do not persist a
+  // contradictory successful audit row before the semantic failure row below.
+  if (!slackSemanticFailure && !deferSlackSuccessAudit) {
+    await recordAudit({
+      agentId,
+      tenantId,
+      targetHost: target.host,
+      targetPath: target.path,
+      method,
+      statusCode: response.status,
+      latencyMs,
+    });
+  }
+
+  // 7.5. Spend tracking for LLM API responses
   const isLLMHost =
     isProxyRedisAvailable() &&
     (target.host === "api.openai.com" || target.host === "api.anthropic.com");
 
-  if (isLLMHost && isJsonResponse && response.body) {
+  if (isLLMHost && isJsonResponse && responseBody instanceof ArrayBuffer) {
     try {
       const contentLength = Number(response.headers.get("content-length") ?? "0");
       if (Number.isFinite(contentLength) && contentLength > MAX_LLM_SPEND_TRACKING_BODY_BYTES) {
         throw new Error("LLM response too large for spend parsing");
       }
-      const bodyBuffer = await response.arrayBuffer();
+      const bodyBuffer = responseBody;
       if (bodyBuffer.byteLength > MAX_LLM_SPEND_TRACKING_BODY_BYTES) {
         responseBody = bodyBuffer;
         throw new Error("LLM response too large for spend parsing");
@@ -1968,32 +2330,23 @@ export async function handleProxy(c: Context): Promise<Response> {
     responseBodyCanReflectCredential(response.headers) &&
     responseBody instanceof ReadableStream
   ) {
-    const contentLength = Number(response.headers.get("content-length") ?? "0");
-    if (
-      MAX_PROXY_RESPONSE_BYTES <= 0 ||
-      !Number.isFinite(contentLength) ||
-      contentLength <= MAX_PROXY_RESPONSE_BYTES
-    ) {
-      const bodyBuffer = await new Response(responseBody).arrayBuffer();
-      const bodyText = new TextDecoder().decode(bodyBuffer);
-      if (responseTextReflectsAnyCredential(bodyText, sensitiveCredentialValues)) {
-        await recordAudit({
-          agentId,
-          tenantId,
-          targetHost: target.host,
-          targetPath: target.path,
-          method,
-          statusCode: 502,
-          latencyMs: Date.now() - startTime,
-          reason: "credential-reflected-in-response-body",
-        });
-        injectedCredentialValue = null;
-        sensitiveCredentialValues = [];
-        proxySlot.release();
-        return c.json({ ok: false, error: "Upstream response reflected injected credential" }, 502);
-      }
-      responseBody = bodyBuffer;
-    }
+    // Defensive invariant: every inspectable credential-bearing stream was
+    // converted to a bounded ArrayBuffer above.
+    cancelResponseBody(responseBody);
+    await recordAudit({
+      agentId,
+      tenantId,
+      targetHost: target.host,
+      targetPath: target.path,
+      method,
+      statusCode: 502,
+      latencyMs: Date.now() - startTime,
+      reason: "credential-response-inspection-failed",
+    });
+    injectedCredentialValue = null;
+    sensitiveCredentialValues = [];
+    proxySlot.release();
+    return c.json({ ok: false, error: "Upstream response could not be inspected safely" }, 502);
   } else if (
     sensitiveCredentialValues.length > 0 &&
     responseBody instanceof ArrayBuffer &&
@@ -2017,6 +2370,60 @@ export async function handleProxy(c: Context): Promise<Response> {
       return c.json({ ok: false, error: "Upstream response reflected injected credential" }, 502);
     }
   }
+  if (slackSemanticFailure) {
+    await recordAudit({
+      agentId,
+      tenantId,
+      targetHost: target.host,
+      targetPath: target.path,
+      method,
+      statusCode: 502,
+      latencyMs: Date.now() - startTime,
+      reason: `slack-api-error:${slackSemanticFailure}`,
+    });
+    injectedCredentialValue = null;
+    sensitiveCredentialValues = [];
+    proxySlot.release();
+    return c.json(
+      {
+        ok: false,
+        error: "Slack upstream operation failed",
+        data: { providerError: slackSemanticFailure },
+      },
+      502,
+    );
+  }
+  if (sensitiveCredentialValues.length > 0 && credentialResponseInspectionFailed) {
+    await recordAudit({
+      agentId,
+      tenantId,
+      targetHost: target.host,
+      targetPath: target.path,
+      method,
+      statusCode: 502,
+      latencyMs: Date.now() - startTime,
+      reason: "credential-response-inspection-failed",
+    });
+    injectedCredentialValue = null;
+    sensitiveCredentialValues = [];
+    proxySlot.release();
+    return c.json({ ok: false, error: "Upstream response could not be inspected safely" }, 502);
+  }
+  if (deferSlackSuccessAudit) {
+    // A Slack `ok:true` envelope is not a successful Steward dispatch until
+    // response headers/body have also passed the credential-reflection gates
+    // above. Persist success only at that final boundary so blocked responses
+    // cannot leave a contradictory 200 audit row.
+    await recordAudit({
+      agentId,
+      tenantId,
+      targetHost: target.host,
+      targetPath: target.path,
+      method,
+      statusCode: response.status,
+      latencyMs: Date.now() - startTime,
+    });
+  }
   injectedCredentialValue = null;
   sensitiveCredentialValues = [];
 
@@ -2024,6 +2431,10 @@ export async function handleProxy(c: Context): Promise<Response> {
   const skipResponseHeaders = new Set([
     "connection",
     "keep-alive",
+    // SEC-098: never relay upstream session cookies to the agent — a
+    // credential-derived session token would let it replay directly against
+    // the provider, bypassing proxy policy and audit.
+    "set-cookie",
     "transfer-encoding",
     "te",
     "trailer",
@@ -2057,6 +2468,32 @@ export async function handleProxy(c: Context): Promise<Response> {
     statusText: response.statusText,
     headers: responseHeaders,
   });
+}
+
+/** Create an isolated proxy handler with immutable request-lifecycle dependencies. */
+export function createProxyHandler(
+  dependencies: ProxyHandlerDependencies = {},
+): (c: Context) => Promise<Response> {
+  const completeReplayClaim = dependencies.completeReplayClaim ?? completeUnsafeProxyRequest;
+  return (c: Context) => handleProxyWithReplayCompletion(c, completeReplayClaim);
+}
+
+export const handleProxy = createProxyHandler();
+
+/** Null means Slack explicitly attested success; any string is a safe failure code. */
+export function classifySlackWebApiPayload(bodyText: string): string | null {
+  try {
+    const parsed = strictParseJson(bodyText) as { ok?: unknown; error?: unknown };
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return "invalid_response";
+    }
+    if (parsed.ok === true) return null;
+    return typeof parsed.error === "string" && /^[a-z0-9_]{1,128}$/i.test(parsed.error)
+      ? parsed.error
+      : "invalid_response";
+  } catch {
+    return "invalid_response";
+  }
 }
 
 // ─── Exports for testing ─────────────────────────────────────────────────────

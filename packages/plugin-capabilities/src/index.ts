@@ -36,6 +36,7 @@ import { createManifestRoutes } from "./manifest-routes";
 import { createAgentCapabilityRoutes, createCapabilityRoutes } from "./routes";
 
 export type { StewardAppContext } from "./context";
+export { GitHubAppInstallationTokenIssuer } from "./github-app-issuer";
 export { createInvokeRoutes } from "./invoke";
 export {
   type CapabilityAuditAction,
@@ -80,6 +81,10 @@ export type {
 export { capabilities, capabilityGrants, capabilityInvocations } from "./schema";
 export type { CapabilitySpec } from "./store";
 export { AgentNotFoundError, CapabilityStore, GrantExistsError, isExpired } from "./store";
+export {
+  type LeaseAuditedTransaction,
+  recoverAllInterruptedUpstreamCredentialLeases,
+} from "./upstream-leases";
 export {
   createCapabilitySchema,
   createGrantSchema,
@@ -148,7 +153,7 @@ export const capabilitiesPlugin: StewardApiPlugin = {
     migrationsFolder: MIGRATIONS_FOLDER,
   },
   register(app, ctx) {
-    const { tenantAuth, requireAgentJwt } = ctx;
+    const { tenantAuth, requireCapabilityAgentJwt } = ctx;
 
     // ── auth gates ────────────────────────────────────────────────────────────
     // the agent-facing invoke path (`/capabilities/:name/invoke`) is agent-token-
@@ -159,16 +164,20 @@ export const capabilitiesPlugin: StewardApiPlugin = {
     // gate is applied via a wrapper that SKIPS the invoke subpath — the invoke
     // route's own agent-jwt middleware is the only auth on that path. fail-closed:
     // anything that is not exactly the invoke subpath falls through to tenantAuth.
-    app.use("/capabilities/:name/invoke", (c, next) => requireAgentJwt(c, next));
-    app.use("/v1/capabilities/:name/invoke", (c, next) => requireAgentJwt(c, next));
-    app.use("/capabilities/:name/openai/v1/*", (c, next) => requireAgentJwt(c, next));
-    app.use("/v1/capabilities/:name/openai/v1/*", (c, next) => requireAgentJwt(c, next));
+    //
+    // the agent-facing gates use the CAPABILITY authenticator (no `trade:order`
+    // scope requirement): capability authz is the per-call grant + capability-
+    // intent policy (default-deny), never the trading scope (SEC-092).
+    app.use("/capabilities/:name/invoke", (c, next) => requireCapabilityAgentJwt(c, next));
+    app.use("/v1/capabilities/:name/invoke", (c, next) => requireCapabilityAgentJwt(c, next));
+    app.use("/capabilities/:name/openai/v1/*", (c, next) => requireCapabilityAgentJwt(c, next));
+    app.use("/v1/capabilities/:name/openai/v1/*", (c, next) => requireCapabilityAgentJwt(c, next));
     // the agent-facing manifest + issuance/renewal surface is agent-token authed
     // (like invoke), NOT tenant-gated.
-    app.use("/capabilities/manifest", (c, next) => requireAgentJwt(c, next));
-    app.use("/capabilities/manifest/*", (c, next) => requireAgentJwt(c, next));
-    app.use("/v1/capabilities/manifest", (c, next) => requireAgentJwt(c, next));
-    app.use("/v1/capabilities/manifest/*", (c, next) => requireAgentJwt(c, next));
+    app.use("/capabilities/manifest", (c, next) => requireCapabilityAgentJwt(c, next));
+    app.use("/capabilities/manifest/*", (c, next) => requireCapabilityAgentJwt(c, next));
+    app.use("/v1/capabilities/manifest", (c, next) => requireCapabilityAgentJwt(c, next));
+    app.use("/v1/capabilities/manifest/*", (c, next) => requireCapabilityAgentJwt(c, next));
     app.use("/capabilities", (c, next) => tenantAuth(c, next));
     app.use("/capabilities/*", (c, next) => tenantGateSkippingInvoke(c, next, tenantAuth));
     app.use("/v1/capabilities", (c, next) => tenantAuth(c, next));
@@ -197,8 +206,8 @@ export const capabilitiesPlugin: StewardApiPlugin = {
 };
 
 /** the invoke subpath predicate: `/capabilities/<name>/invoke` (any single name segment). */
-const INVOKE_SUBPATH =
-  /\/(?:v1\/)?capabilities\/(?:manifest(?:\/[^/]+\/(?:issue|renew))?|[^/]+\/(?:invoke|openai\/v1\/(?:chat\/completions|models)))\/?$/;
+const AGENT_CAPABILITY_SUBPATH =
+  /\/(?:v1\/)?capabilities\/(?:manifest(?:\/[^/]+\/(?:issue|renew)|\/leases\/[^/]+\/(?:ack|revoke))?|[^/]+\/(?:invoke|openai\/v1\/(?:chat\/completions|models)))\/?$/;
 
 /**
  * Apply the operator tenant gate to a `/capabilities/*` request UNLESS it is an
@@ -212,6 +221,6 @@ async function tenantGateSkippingInvoke(
   next: Next,
   tenantAuth: StewardAppContext["tenantAuth"],
 ): Promise<void | Response> {
-  if (INVOKE_SUBPATH.test(c.req.path)) return next();
+  if (AGENT_CAPABILITY_SUBPATH.test(c.req.path)) return next();
   return tenantAuth(c, next);
 }

@@ -9,26 +9,25 @@
  * Prereq: cache must be built once via `bun run e2e:wallets:cache`.
  */
 
-import { testWithSynpress } from "@synthetixio/synpress";
-import { Phantom, phantomFixtures } from "@synthetixio/synpress/playwright";
-import phantomSetup, { PHANTOM_PASSWORD } from "./phantom.setup";
+import { Phantom } from "@synthetixio/synpress/playwright";
+import { phantomTest as test } from "./phantom-fixtures";
+import { PHANTOM_PASSWORD } from "./setup/phantom/phantom.setup";
 
-const test = testWithSynpress(phantomFixtures(phantomSetup));
 const { expect } = test;
 
 const WEB = process.env.E2E_WEB_URL ?? "http://localhost:3499";
 
 test.describe("Phantom SIWS — headful end-to-end", () => {
   test("connects Phantom, signs SIWS, lands on dashboard", async ({
-    context,
-    page,
+    dappPage: page,
     phantomPage,
     extensionId,
+    walletContext,
   }) => {
-    const phantom = new Phantom(context, phantomPage, PHANTOM_PASSWORD, extensionId);
+    const phantom = new Phantom(walletContext, phantomPage, PHANTOM_PASSWORD, extensionId);
 
     await page.goto(`${WEB}/login`);
-    await page.getByRole("button", { name: /solana/i }).click();
+    await page.getByRole("button", { name: /select wallet/i }).click();
 
     // Solana wallet adapter modal — pick Phantom from the picker list.
     await page
@@ -37,6 +36,7 @@ test.describe("Phantom SIWS — headful end-to-end", () => {
       .click();
 
     await phantom.connectToDapp();
+    await page.getByRole("button", { name: /sign in with phantom/i }).click();
     await phantom.confirmSignature();
 
     await page.waitForURL(/\/dashboard/, { timeout: 30_000 });

@@ -1,5 +1,5 @@
 /**
- * PR3 approval + execute HTTP route tests (PGLite + fully composed app).
+ * approval-lifecycle approval + execute HTTP route tests (PGLite + fully composed app).
  * Proves the §9 route contract: human-session gating, MFA gating, unknown-field
  * + resume-actor-substitution rejection, and the exact happy-path status codes.
  */
@@ -116,7 +116,7 @@ function decideReq(intentId: string, token: string, body: unknown) {
   });
 }
 
-describe("PR3 approval + execute routes", () => {
+describe("approval-lifecycle approval + execute routes", () => {
   beforeAll(async () => {
     process.env.STEWARD_PGLITE_MEMORY = "true";
     process.env.STEWARD_AUDIT_HMAC_KEY ||= "0".repeat(64);
@@ -164,7 +164,7 @@ describe("PR3 approval + execute routes", () => {
     expect((await bindingRow(intentId)).status).toBe("pending_approval");
   });
 
-  test("N16: execute body supplies an actor/action field => 400 RESUME_ACTOR_SUBSTITUTION_FORBIDDEN", async () => {
+  test("N16: execute rejects every body instead of silently ignoring retry or actor fields", async () => {
     const { intentId } = await createApprovalRequired();
     const res = await app.request(`/v2/provider-actions/${intentId}/execute`, {
       method: "POST",
@@ -177,7 +177,39 @@ describe("PR3 approval + execute routes", () => {
     });
     expect(res.status).toBe(400);
     const body = (await res.json()) as { error: { code: string } };
-    expect(body.error.code).toBe("RESUME_ACTOR_SUBSTITUTION_FORBIDDEN");
+    expect(body.error.code).toBe("RESUME_BODY_NOT_ALLOWED");
+
+    const retryBody = await app.request(`/v2/provider-actions/${intentId}/execute`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${await humanToken(F.APPROVER)}`,
+        "content-type": "application/json",
+        "x-steward-tenant": F.TENANT,
+      },
+      body: JSON.stringify({ idempotencyKey: "ignored-retry-key" }),
+    });
+    expect(retryBody.status).toBe(400);
+    expect(((await retryBody.json()) as { error: { code: string } }).error.code).toBe(
+      "RESUME_BODY_NOT_ALLOWED",
+    );
+
+    const unclonable = new Request(`http://localhost/v2/provider-actions/${intentId}/execute`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${await humanToken(F.APPROVER)}`,
+        "content-type": "application/octet-stream",
+        "x-steward-tenant": F.TENANT,
+      },
+      body: new Uint8Array([0x7b]),
+    });
+    unclonable.clone = () => {
+      throw new Error("execute route must not clone or consume request bodies");
+    };
+    const unconsumed = await app.request(unclonable);
+    expect(unconsumed.status).toBe(400);
+    expect(((await unconsumed.json()) as { error: { code: string } }).error.code).toBe(
+      "RESUME_BODY_NOT_ALLOWED",
+    );
   });
 
   test("happy path: human approver approves (200), then execute resumes (200 execution_ready)", async () => {
@@ -353,6 +385,20 @@ describe("PR3 approval + execute routes", () => {
     expect(res.status).toBe(403);
     const body = (await res.json()) as { error: { code: string } };
     expect(body.error.code).toBe("APPROVAL_MFA_REQUIRED");
+  });
+
+  test("GET approval rejects a hostile future MFA timestamp before returning detail", async () => {
+    const { intentId } = await createApprovalRequired();
+    const res = await app.request(`/v2/provider-actions/${intentId}/approval`, {
+      method: "GET",
+      headers: {
+        authorization: `Bearer ${await humanToken(F.APPROVER, Date.now() + 24 * 60 * 60_000)}`,
+        "x-steward-tenant": F.TENANT,
+      },
+    });
+    expect(res.status).toBe(403);
+    const body = (await res.json()) as { error: { code: string } };
+    expect(body.error.code).toBe("APPROVAL_MFA_STALE");
   });
 
   test("GET approval returns safe summary to an eligible approver", async () => {

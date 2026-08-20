@@ -294,6 +294,13 @@ describe("chainFromCaip2", () => {
     expect(chainFromCaip2("eip155:123456789")).toBeUndefined();
   });
 
+  it("does not treat Object.prototype members as chains (SEC-116)", () => {
+    expect(chainFromCaip2("constructor")).toBeUndefined();
+    expect(fromCaip2("constructor")).toBeUndefined();
+    expect(getChainProviderByCaip2("constructor")).toBeUndefined();
+    expect(chainFromCaip2("toString")).toBeUndefined();
+  });
+
   it("finds Solana devnet by CAIP-2", () => {
     const chain = chainFromCaip2("solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1");
     expect(chain).toBeDefined();

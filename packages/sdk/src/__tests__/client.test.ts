@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import {
+  isStewardBroadcastOutcomeUnknown,
   isStewardMfaRequiredError,
   type SignTransactionInput,
   type SignUserOperationInput,
@@ -45,6 +46,7 @@ interface CapturedRequest {
   headers: Record<string, string>;
   rawBody: string | undefined;
   body: unknown;
+  redirect: RequestRedirect | undefined;
 }
 
 let lastCapture: CapturedRequest | null = null;
@@ -70,6 +72,7 @@ function installMockFetch(responseBody: object, status = 200): void {
       headers,
       rawBody: init?.body as string | undefined,
       body: init?.body ? JSON.parse(init.body as string) : undefined,
+      redirect: init?.redirect,
     };
     return new Response(JSON.stringify(responseBody), {
       status,
@@ -99,6 +102,7 @@ function installTextMockFetch(responseBody: string, status = 200): void {
       headers,
       rawBody: init?.body as string | undefined,
       body: init?.body ? JSON.parse(init.body as string) : undefined,
+      redirect: init?.redirect,
     };
     return new Response(responseBody, {
       status,
@@ -268,8 +272,23 @@ describe("StewardClient construction", () => {
       platformKey: "test-platform-key",
       bearerToken: "test-bearer-token",
       tenantId: "test-tenant",
+      requestTimeoutMs: 10_000,
+      maxResponseBodyBytes: 1024 * 1024,
     });
     expect(client).toBeInstanceOf(StewardClient);
+  });
+
+  it("rejects request limits that are unbounded or invalid", () => {
+    for (const requestTimeoutMs of [0, -1, 1.5, 300_001, Number.POSITIVE_INFINITY]) {
+      expect(
+        () => new StewardClient({ baseUrl: "https://api.example.com", requestTimeoutMs }),
+      ).toThrow(/requestTimeoutMs must be a positive integer/);
+    }
+    for (const maxResponseBodyBytes of [0, -1, 1.5, 16 * 1024 * 1024 + 1]) {
+      expect(
+        () => new StewardClient({ baseUrl: "https://api.example.com", maxResponseBodyBytes }),
+      ).toThrow(/maxResponseBodyBytes must be a positive integer/);
+    }
   });
 
   it("creates a client with apiKey only", () => {
@@ -1027,11 +1046,37 @@ describe("Request headers", () => {
     expect(lastCapture?.headers["x-steward-request-timestamp"]).toBeUndefined();
     expect(lastCapture?.headers["x-steward-signature"]).toBeUndefined();
   });
+
+  it("signs /accounts and /global-wallet mutations (SEC-049 cross-SDK alignment)", async () => {
+    // Wallet/account mutations are signed from Flutter but were sent unsigned
+    // from the other SDKs before the prefix lists were aligned in lockstep.
+    installMockFetch({ ok: true, data: { wallets: [] } });
+    const client = makeClient({
+      requestSigningSecret: "request-signing-secret-with-enough-entropy",
+    });
+
+    await client.accounts.create({ displayName: "ops" });
+    expect(lastCapture?.method).toBe("POST");
+    expect(new URL(lastCapture!.url).pathname).toBe("/accounts");
+    expect(lastCapture?.headers["x-steward-signature"]).toMatch(/^v1=[0-9a-f]{64}$/);
+
+    installMockFetch({ ok: true, data: {} });
+    await client.approveGlobalWalletConsent({ appId: "app-1" });
+    expect(lastCapture?.method).toBe("POST");
+    expect(new URL(lastCapture!.url).pathname).toBe("/global-wallet/consent/approve");
+    expect(lastCapture?.headers["x-steward-signature"]).toMatch(/^v1=[0-9a-f]{64}$/);
+  });
 });
 
 // ─── HTTP Request Building Tests ──────────────────────────────────────────
 
 describe("HTTP request building", () => {
+  it("refuses redirects so Steward credentials cannot be replayed", async () => {
+    installMockFetch({ ok: true, data: [mockAgent] });
+    await makeClient({ apiKey: "tenant-key" }).listAgents();
+    expect(lastCapture?.redirect).toBe("error");
+  });
+
   it("listAgents → GET /agents", async () => {
     installMockFetch({ ok: true, data: [mockAgent] });
     await makeClient().listAgents();
@@ -1192,6 +1237,19 @@ describe("HTTP request building", () => {
     expect(lastCapture?.body).toEqual(input);
   });
 
+  it("signSolanaTransaction forwards an explicit idempotency key", async () => {
+    installMockFetch({
+      ok: true,
+      data: { txId: "tx-sol-1", signature: "signed", broadcast: false, chainId: 101 },
+    });
+    await makeClient().signSolanaTransaction(
+      "agent-1",
+      { transaction: "dHg=", broadcast: false, chainId: 101 },
+      { idempotencyKey: "stable-solana-signing-key" },
+    );
+    expect(lastCapture?.headers["idempotency-key"]).toBe("stable-solana-signing-key");
+  });
+
   it("signTypedData → POST /vault/:agentId/sign-typed-data", async () => {
     installMockFetch({ ok: true, data: { signature: "0xsig", txId: "typed-1" } });
     const input = {
@@ -1343,6 +1401,25 @@ describe("HTTP request building", () => {
 
     expect(lastCapture?.method).toBe("GET");
     expect(lastCapture?.url).toBe("https://api.steward.example/vault/agent-1/actions/action-1");
+  });
+
+  it("preserves outcome_unknown transfer action status", async () => {
+    installMockFetch({
+      ok: true,
+      data: {
+        id: "action-unknown",
+        type: "transfer",
+        status: "outcome_unknown",
+        chainId: 8453,
+        to: "0x1234567890123456789012345678901234567890",
+        value: "1000",
+        token: "native",
+        txHash: `0x${"ab".repeat(32)}`,
+      },
+    });
+
+    const result = await makeClient().getTransferAction("agent-1", "action-unknown");
+    expect(result.status).toBe("outcome_unknown");
   });
 
   it("user linked account helpers use /user/me/accounts", async () => {
@@ -3998,6 +4075,15 @@ describe("HTTP request building", () => {
     expect(replaced.txHash).toBe("0xreplacement");
   });
 
+  it("approveVaultTransaction uses the policy-revalidating vault execution route", async () => {
+    installMockFetch({ ok: true, data: { txId: "tx/1", txHash: "0xfeed" } });
+    const result = await makeClient().approveVaultTransaction("agent/1", "tx/1");
+    expect(lastCapture?.method).toBe("POST");
+    expect(lastCapture?.url).toBe("https://api.steward.example/vault/agent%2F1/approve/tx%2F1");
+    expect(lastCapture?.body).toEqual({});
+    expect(result).toEqual({ txId: "tx/1", txHash: "0xfeed" });
+  });
+
   it("signMessage → POST /vault/:id/sign-message", async () => {
     installMockFetch({ ok: true, data: { signature: "0xsig" } });
     await makeClient().signMessage("agent-1", "hello world", {
@@ -4650,7 +4736,83 @@ describe("Error handling", () => {
     expect(caught).not.toBeNull();
     expect(caught?.name).toBe("StewardApiError");
     expect(caught?.status).toBe(0);
-    expect(caught?.message).toContain("Network error");
+    expect(caught?.message).toBe("Network request failed");
+    expect(caught?.message).not.toContain("connection refused");
+  });
+
+  it("bounds stalled response headers with an end-to-end deadline", async () => {
+    global.fetch = (_input: RequestInfo | URL, init?: RequestInit) =>
+      new Promise<Response>((_resolve, reject) => {
+        const signal = init?.signal;
+        const rejectOnAbort = () => reject(new Error("socket secret from abort rejection"));
+        if (signal?.aborted) rejectOnAbort();
+        else signal?.addEventListener("abort", rejectOnAbort, { once: true });
+      });
+
+    const startedAt = Date.now();
+    const error = await makeClient({ requestTimeoutMs: 25 })
+      .listAgents()
+      .catch((caught) => caught);
+
+    expect(error).toBeInstanceOf(StewardApiError);
+    expect(error.status).toBe(0);
+    expect(error.message).toBe("Steward API request timed out");
+    expect(error.message).not.toContain("socket secret");
+    expect(Date.now() - startedAt).toBeLessThan(1_000);
+  });
+
+  it("bounds a stalled response body and swallows body-cancel rejection details", async () => {
+    let cancelCalled = false;
+    global.fetch = async () =>
+      new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode('{"ok":true,"data":'));
+          },
+          cancel() {
+            cancelCalled = true;
+            return Promise.reject(new Error("stream cancel secret"));
+          },
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+
+    const error = await makeClient({ requestTimeoutMs: 25 })
+      .listAgents()
+      .catch((caught) => caught);
+
+    expect(error).toBeInstanceOf(StewardApiError);
+    expect(error.status).toBe(0);
+    expect(error.message).toBe("Steward API request timed out");
+    expect(error.message).not.toContain("stream cancel secret");
+    expect(cancelCalled).toBe(true);
+  });
+
+  it("rejects oversized declared and streaming response bodies without echoing content", async () => {
+    const secret = "upstream-response-secret";
+    global.fetch = async () =>
+      new Response(secret, {
+        status: 200,
+        headers: { "Content-Length": "4096", "Content-Type": "application/json" },
+      });
+    let error = await makeClient({ maxResponseBodyBytes: 32 })
+      .listAgents()
+      .catch((caught) => caught);
+    expect(error).toBeInstanceOf(StewardApiError);
+    expect(error.message).toBe("Steward API response exceeded the configured size limit");
+    expect(error.message).not.toContain(secret);
+
+    global.fetch = async () =>
+      new Response(new TextEncoder().encode(`{"ok":false,"error":"${secret}"}`), {
+        status: 502,
+        headers: { "Content-Type": "application/json" },
+      });
+    error = await makeClient({ maxResponseBodyBytes: 16 })
+      .listAgents()
+      .catch((caught) => caught);
+    expect(error).toBeInstanceOf(StewardApiError);
+    expect(error.message).toBe("Steward API response exceeded the configured size limit");
+    expect(error.message).not.toContain(secret);
   });
 
   it("throws StewardApiError on invalid JSON response", async () => {
@@ -4739,6 +4901,37 @@ describe("Response parsing", () => {
       value: "5000000000000000000",
     });
     expect((result as { status: string }).status).toBe("pending_approval");
+  });
+
+  it("signTransaction returns a typed outcome_unknown result when status is 202", async () => {
+    const txHash = `0x${"ab".repeat(32)}`;
+    installMockFetch(
+      {
+        ok: false,
+        error: "Broadcast outcome is unknown; reconcile the transaction hash before retrying",
+        data: {
+          code: "external_broadcast_outcome_unknown",
+          txId: "tx-outcome-unknown",
+          txHash,
+          reconciliationRequired: true,
+        },
+      },
+      202,
+    );
+
+    const result = await makeClient().signTransaction("agent-1", {
+      to: "0x1234567890123456789012345678901234567890",
+      value: "1",
+    });
+
+    expect(isStewardBroadcastOutcomeUnknown(result)).toBe(true);
+    if (!isStewardBroadcastOutcomeUnknown(result)) throw new Error("expected outcome_unknown");
+    expect(result).toEqual({
+      code: "external_broadcast_outcome_unknown",
+      txId: "tx-outcome-unknown",
+      txHash,
+      reconciliationRequired: true,
+    });
   });
 
   it("signMessage returns signature string", async () => {
@@ -4890,5 +5083,33 @@ describe("StewardClient proxy approvals", () => {
     installMockFetch({ ok: true, data: { id: "p1", status: "pending" } });
     await client.getPendingProxyRequest("p1");
     expect(lastCapture?.url).toEndWith("/approvals/proxy/p1");
+  });
+});
+
+describe("StewardClient tenant approvals", () => {
+  it("sends the agent filter with pagination parameters", async () => {
+    installMockFetch({ ok: true, data: [] });
+
+    await makeClient().listApprovals({
+      status: "pending",
+      agentId: "agent with spaces",
+      limit: 200,
+      cursorRequestedAt: "2026-01-01T00:00:00.000Z",
+      cursorId: "approval-200",
+    });
+
+    expect(lastCapture?.url).toBe(
+      "https://api.steward.example/approvals?status=pending&agentId=agent+with+spaces&limit=200&cursorRequestedAt=2026-01-01T00%3A00%3A00.000Z&cursorId=approval-200",
+    );
+  });
+
+  it("does not silently drop explicitly invalid filter and pagination values", async () => {
+    installMockFetch({ ok: true, data: [] });
+
+    await makeClient().listApprovals({ agentId: "", limit: 0, offset: 0 });
+
+    expect(lastCapture?.url).toBe(
+      "https://api.steward.example/approvals?agentId=&limit=0&offset=0",
+    );
   });
 });

@@ -28,6 +28,16 @@ function rootKey(): Buffer {
         "STEWARD_WEBHOOK_SECRET_ENCRYPTION_KEY or STEWARD_MASTER_PASSWORD is required to encrypt webhook secrets",
       );
     }
+    // SEC-102: the insecure dev key is reachable ONLY when NODE_ENV is
+    // explicitly a development value. A deploy that simply forgot NODE_ENV must
+    // not fall through to a publicly-known key on the strength of an env flag.
+    if (currentEnv.NODE_ENV !== "development" && currentEnv.NODE_ENV !== "test") {
+      throw new Error(
+        `Refusing the insecure webhook dev key: NODE_ENV is not an explicit development value (${
+          currentEnv.NODE_ENV === undefined ? "unset" : JSON.stringify(currentEnv.NODE_ENV)
+        }). Set NODE_ENV=development for local development, or configure STEWARD_WEBHOOK_SECRET_ENCRYPTION_KEY / STEWARD_MASTER_PASSWORD.`,
+      );
+    }
     // The insecure dev fallback must be explicitly opted into; never in production.
     // Canonical var is STEWARD_ALLOW_DEV_SECRETS; singular accepted for back-compat.
     if (

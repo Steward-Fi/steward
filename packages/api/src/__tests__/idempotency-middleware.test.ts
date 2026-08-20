@@ -38,6 +38,19 @@ function makeApp() {
       refreshToken: `refresh-${count}-${body.refreshToken}`,
     });
   });
+  app.post("/vault/:agentId/sign-solana", async (c) => {
+    count += 1;
+    const body = await c.req.json<{ transaction: string; broadcast: boolean; chainId: number }>();
+    return c.json({
+      ok: true,
+      data: {
+        txId: `solana-sign-${count}`,
+        signature: `signed-${body.transaction}`,
+        broadcast: body.broadcast,
+        chainId: body.chainId,
+      },
+    });
+  });
   app.get("/mutate", (c) => c.json({ ok: true, count }));
 
   return { app, getCount: () => count };
@@ -96,6 +109,29 @@ describe("idempotencyMiddleware", () => {
     expect(second.headers.get("Idempotency-Replayed")).toBe("true");
     expect(await first.json()).toEqual({ ok: true, count: 1, value: "first" });
     expect(await second.json()).toEqual({ ok: true, count: 1, value: "first" });
+    expect(getCount()).toBe(1);
+  });
+
+  it("replays a non-broadcast Solana signature for a stable lost-response retry", async () => {
+    const { app, getCount } = makeApp();
+    const init = {
+      method: "POST",
+      headers: {
+        Authorization: AUTHORIZATION,
+        "Content-Type": "application/json",
+        "Idempotency-Key": "steward-solana-sign-v1-deadbeef",
+      },
+      body: JSON.stringify({ transaction: "dHg=", broadcast: false, chainId: 101 }),
+    };
+
+    const first = await app.request("/vault/agent-1/sign-solana", init);
+    const retry = await app.request("/vault/agent-1/sign-solana", init);
+
+    expect(first.status).toBe(200);
+    expect(retry.status).toBe(200);
+    expect(first.headers.get("Idempotency-Replayed")).toBe("false");
+    expect(retry.headers.get("Idempotency-Replayed")).toBe("true");
+    expect(await retry.json()).toEqual(await first.json());
     expect(getCount()).toBe(1);
   });
 
@@ -196,8 +232,12 @@ describe("idempotencyMiddleware", () => {
     const store = new MemoryIdempotencyStore(100);
     let count = 0;
     let releaseRoute: (() => void) | undefined;
+    let markRouteEntered: (() => void) | undefined;
     const routeGate = new Promise<void>((resolve) => {
       releaseRoute = resolve;
+    });
+    const routeEntered = new Promise<void>((resolve) => {
+      markRouteEntered = resolve;
     });
 
     app.use("*", async (c, next) => {
@@ -207,6 +247,7 @@ describe("idempotencyMiddleware", () => {
     app.use("*", idempotencyMiddleware({ store, ttlMs: 60_000 }));
     app.post("/mutate", async (c) => {
       count += 1;
+      markRouteEntered?.();
       await routeGate;
       return c.json({ ok: true, count });
     });
@@ -221,7 +262,7 @@ describe("idempotencyMiddleware", () => {
       body: JSON.stringify({ value: "first" }),
     };
     const firstPromise = app.request("/mutate", init);
-    await Promise.resolve();
+    await routeEntered;
     const second = await app.request("/mutate", init);
     releaseRoute?.();
     const first = await firstPromise;
@@ -277,6 +318,97 @@ describe("idempotencyMiddleware", () => {
       error: "Idempotency key has already been used",
     });
     expect(getCount()).toBe(1);
+  });
+
+  it("suppresses replay of secret-bearing response bodies (SEC-070)", async () => {
+    const app = new Hono<{ Variables: AppVariables }>();
+    const store = new MemoryIdempotencyStore(100);
+    let count = 0;
+
+    app.use("*", async (c, next) => {
+      c.set("authType", "api-key");
+      await next();
+    });
+    app.use("*", idempotencyMiddleware({ store, ttlMs: 60_000 }));
+    app.post("/vault/agent-1/export", async (c) => {
+      count += 1;
+      return c.json({ ok: true, count, privateKey: `0xkeymaterial-${count}` });
+    });
+    app.post("/user/me/wallet/export", async (c) => {
+      count += 1;
+      return c.json({ ok: true, count, privateKey: `0xuserkey-${count}` });
+    });
+    app.post("/v1/kms/keys/key-1/decrypt", async (c) => {
+      count += 1;
+      return c.json({ plaintext_b64: `cGxhaW50ZXh0-${count}` });
+    });
+    app.post("/secrets", async (c) => {
+      count += 1;
+      return c.json({ ok: true, count, value: `supersecret-${count}` });
+    });
+    app.post("/user/me/wallet/recovery/setup", async (c) => {
+      count += 1;
+      return c.json({ ok: true, count, recovery: { mnemonic: `word-${count} …` } });
+    });
+    app.post("/capabilities/manifest/github/issue", async (c) => {
+      count += 1;
+      return c.json({ ok: true, data: { token: `ghs_issue_${count}` } });
+    });
+    app.post("/capabilities/manifest/github/renew", async (c) => {
+      count += 1;
+      return c.json({ ok: true, data: { token: `ghs_renew_${count}` } });
+    });
+    app.post("/v1/capabilities/manifest/github/issue", async (c) => {
+      count += 1;
+      return c.json({ ok: true, data: { token: `ghs_v1_issue_${count}` } });
+    });
+    app.post("/v1/capabilities/manifest/github/renew", async (c) => {
+      count += 1;
+      return c.json({ ok: true, data: { token: `ghs_v1_renew_${count}` } });
+    });
+    app.post("/capabilities/manifest/github/issue/", async (c) => {
+      count += 1;
+      return c.json({ ok: true, data: { token: `ghs_issue_slash_${count}` } });
+    });
+    app.post("/v1/capabilities/manifest/github/renew/", async (c) => {
+      count += 1;
+      return c.json({ ok: true, data: { token: `ghs_v1_renew_slash_${count}` } });
+    });
+
+    for (const [path, body] of [
+      ["/vault/agent-1/export", {}],
+      ["/user/me/wallet/export", {}],
+      ["/v1/kms/keys/key-1/decrypt", { ciphertext_b64: "AA==" }],
+      ["/secrets", { name: "n", value: "v" }],
+      ["/user/me/wallet/recovery/setup", {}],
+      ["/capabilities/manifest/github/issue", { resources: { repositories: ["org/repo"] } }],
+      ["/capabilities/manifest/github/renew", { resources: { repositories: ["org/repo"] } }],
+      ["/v1/capabilities/manifest/github/issue", { resources: { repositories: ["org/repo"] } }],
+      ["/v1/capabilities/manifest/github/renew", { resources: { repositories: ["org/repo"] } }],
+      ["/capabilities/manifest/github/issue/", { resources: { repositories: ["org/repo"] } }],
+      ["/v1/capabilities/manifest/github/renew/", { resources: { repositories: ["org/repo"] } }],
+    ] as const) {
+      const init = {
+        method: "POST",
+        headers: {
+          Authorization: AUTHORIZATION,
+          "Content-Type": "application/json",
+          "Idempotency-Key": `idem-key-secret-${path}`,
+        },
+        body: JSON.stringify(body),
+      };
+      const first = await app.request(path, init);
+      const second = await app.request(path, init);
+
+      expect(first.status).toBe(200);
+      // Body suppressed: the duplicate is rejected, never replayed from store.
+      expect(second.status).toBe(409);
+      expect(await second.json()).toEqual({
+        ok: false,
+        error: "Idempotency key has already been used",
+      });
+    }
+    expect(count).toBe(11);
   });
 
   it("uses a verified request signature as replay-safe auth material", async () => {

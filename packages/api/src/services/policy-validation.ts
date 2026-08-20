@@ -1,5 +1,7 @@
+import { Address, NETWORK, TEST_NETWORK } from "@scure/btc-signer";
 import { isPersistedPolicyType } from "@stwd/db";
 import type { PolicyRule } from "@stwd/shared";
+import { decodeMoneroAddress, isValidSolanaPublicKey } from "@stwd/vault";
 
 const CONDITION_FIELDS = new Set([
   "to",
@@ -32,12 +34,48 @@ function isPositiveFiniteNumber(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value) && value > 0;
 }
 
+function isNonNegativeFiniteNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0;
+}
+
 function isPositiveInteger(value: unknown): value is number {
   return Number.isSafeInteger(value) && Number(value) > 0;
 }
 
 function isEvmAddress(value: unknown): value is string {
   return typeof value === "string" && /^0x[a-fA-F0-9]{40}$/.test(value);
+}
+
+function isBitcoinAddress(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  for (const network of [NETWORK, TEST_NETWORK]) {
+    try {
+      Address(network).decode(value);
+      return true;
+    } catch {
+      // Try the other supported network.
+    }
+  }
+  return false;
+}
+
+function isMoneroAddress(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  try {
+    decodeMoneroAddress(value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function isSupportedPolicyAddress(value: unknown): value is string {
+  return (
+    isEvmAddress(value) ||
+    isValidSolanaPublicKey(value) ||
+    isBitcoinAddress(value) ||
+    isMoneroAddress(value)
+  );
 }
 
 function isEvmSelector(value: unknown): value is string {
@@ -105,26 +143,52 @@ function validatePolicyConfig(policy: PolicyRule): string | null {
       const weiFields = ["maxPerTx", "maxPerDay", "maxPerWeek"] as const;
       const usdFields = ["maxPerTxUsd", "maxPerDayUsd", "maxPerWeekUsd"] as const;
       for (const field of weiFields) {
-        if (config[field] !== undefined && !isWeiString(config[field])) {
+        if (
+          Object.hasOwn(config, field) &&
+          config[field] !== undefined &&
+          !isWeiString(config[field])
+        ) {
           return `spending-limit.${field} must be a wei string`;
         }
       }
       for (const field of usdFields) {
-        if (config[field] !== undefined && !isPositiveFiniteNumber(config[field])) {
-          return `spending-limit.${field} must be a positive number`;
+        if (
+          Object.hasOwn(config, field) &&
+          config[field] !== undefined &&
+          !isNonNegativeFiniteNumber(config[field])
+        ) {
+          return `spending-limit.${field} must be a non-negative finite number`;
         }
       }
-      const hasWeiLimit = weiFields.some((field) => isWeiString(config[field]));
-      const hasUsdLimit = usdFields.some((field) => isPositiveFiniteNumber(config[field]));
-      if (!hasWeiLimit && !hasUsdLimit) {
-        return "spending-limit requires at least one positive wei or USD limit";
+      if (Object.hasOwn(config, "maxAmount") && !isWeiString(config.maxAmount)) {
+        return "spending-limit.maxAmount must be a wei string";
+      }
+      const legacyPeriods = new Set(["tx", "transaction", "day", "daily", "week", "weekly"]);
+      if (
+        Object.hasOwn(config, "period") &&
+        (typeof config.period !== "string" || !legacyPeriods.has(config.period))
+      ) {
+        return "spending-limit.period must be tx, transaction, day, daily, week, or weekly";
+      }
+      if (Object.hasOwn(config, "period") && !isWeiString(config.maxAmount)) {
+        return "spending-limit.period requires maxAmount";
+      }
+      const hasWeiLimit = weiFields.some(
+        (field) => Object.hasOwn(config, field) && isWeiString(config[field]),
+      );
+      const hasUsdLimit = usdFields.some(
+        (field) => Object.hasOwn(config, field) && isNonNegativeFiniteNumber(config[field]),
+      );
+      const hasLegacyLimit = Object.hasOwn(config, "maxAmount") && isWeiString(config.maxAmount);
+      if (!hasWeiLimit && !hasUsdLimit && !hasLegacyLimit) {
+        return "spending-limit requires at least one wei or USD limit";
       }
       return null;
     }
 
     case "approved-addresses":
-      if (!Array.isArray(config.addresses) || !config.addresses.every(isEvmAddress)) {
-        return "approved-addresses.addresses must be an array of EVM addresses";
+      if (!Array.isArray(config.addresses) || !config.addresses.every(isSupportedPolicyAddress)) {
+        return "approved-addresses.addresses must contain valid EVM, Solana, Bitcoin, or Monero addresses";
       }
       if (config.mode !== "whitelist" && config.mode !== "blacklist") {
         return "approved-addresses.mode must be whitelist or blacklist";
@@ -154,7 +218,9 @@ function validatePolicyConfig(policy: PolicyRule): string | null {
             Number(window.start) >= 0 &&
             Number(window.start) <= 23 &&
             Number(window.end) >= 0 &&
-            Number(window.end) <= 23,
+            // End is exclusive, so 24 is the only way to represent a window
+            // that includes the 23:00-23:59 UTC hour.
+            Number(window.end) <= 24,
         )
       ) {
         return "time-window.allowedHours must contain UTC hour windows";
@@ -164,6 +230,11 @@ function validatePolicyConfig(policy: PolicyRule): string | null {
         !config.allowedDays.every((day) => Number.isInteger(day) && day >= 0 && day <= 6)
       ) {
         return "time-window.allowedDays must contain weekdays 0-6";
+      }
+      // An enabled rule with no windows at all is a fail-open no-op in the
+      // engine (SEC-180); reject it at write time.
+      if (config.allowedHours.length === 0 && config.allowedDays.length === 0) {
+        return "time-window requires at least one allowed hour window or allowed day";
       }
       return null;
 

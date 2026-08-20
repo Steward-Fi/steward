@@ -366,6 +366,7 @@ describe("vault MFA-sensitive actions", () => {
     const { vault } = await import("../services/context");
     const bitcoinWallet = await vault.createWallet({
       agentId: AGENT_ID,
+      tenantId: TENANT_ID,
       chainType: "bitcoin",
       bitcoin: { network: "testnet", addressType: "p2wpkh" },
     });

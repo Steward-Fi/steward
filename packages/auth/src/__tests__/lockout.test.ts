@@ -96,4 +96,32 @@ describe("Lockout", () => {
     await lo.recordFailure("x");
     expect(store.get("x")?.lockedUntil).toBeGreaterThan(0);
   });
+
+  test("checkAndRecord atomically consumes budget on parallel attempts (SEC-057)", async () => {
+    const clock = frozenClock();
+    const lo = new Lockout({ maxAttempts: 3, lockoutMs: 1000, now: clock.now });
+    // With check()+recordFailure(), three parallel attempts would all pass the
+    // check before any failure is recorded. checkAndRecord cannot interleave
+    // with the default synchronous store: the third call already locks.
+    const results = await Promise.all([
+      lo.checkAndRecord("u1"),
+      lo.checkAndRecord("u1"),
+      lo.checkAndRecord("u1"),
+    ]);
+    expect(results[0]).toEqual({ allowed: true, remaining: 2 });
+    expect(results[1]).toEqual({ allowed: true, remaining: 1 });
+    expect(results[2].allowed).toBe(false);
+    expect(results[2].retryAfterMs).toBe(1000);
+  });
+
+  test("checkAndRecord starts fresh after the idle window and honors locks", async () => {
+    const clock = frozenClock();
+    const lo = new Lockout({ maxAttempts: 2, lockoutMs: 1000, idleResetMs: 5000, now: clock.now });
+    await lo.checkAndRecord("u1");
+    const locked = await lo.checkAndRecord("u1");
+    expect(locked.allowed).toBe(false);
+    clock.advance(6000);
+    const fresh = await lo.checkAndRecord("u1");
+    expect(fresh).toEqual({ allowed: true, remaining: 1 });
+  });
 });

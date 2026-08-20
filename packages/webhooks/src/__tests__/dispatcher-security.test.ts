@@ -5,6 +5,7 @@ import type { AddressInfo } from "node:net";
 import type { WebhookEvent } from "@stwd/shared";
 import { WebhookDispatcher } from "../dispatcher";
 import { RetryQueue } from "../queue";
+import { verifyWebhookSignature } from "../verify";
 
 const SECRET = "super-secret-webhook-key";
 
@@ -90,12 +91,24 @@ function expectedSignature(request: CapturedRequest, secret: string): string {
   )}`;
 }
 
+// Receivers verify with the package helper (timing-safe HMAC compare plus a
+// freshness window) — never a `signature === expected` string compare, which
+// leaks the matching prefix through timing (SEC-177).
+function requestVerifies(request: CapturedRequest, secret: string): boolean {
+  return verifyWebhookSignature({
+    body: request.bodyText,
+    deliveryId: String(request.headers["x-steward-delivery-id"]),
+    eventType: String(request.headers["x-steward-event"]),
+    sentAt: String(request.headers["x-steward-sent-at"]),
+    signature: String(request.headers["x-steward-signature"]),
+    secret,
+  });
+}
+
 describe("WebhookDispatcher HMAC signing", () => {
   it("sends an HMAC-SHA256 signature that verifies against the exact request body", async () => {
     const server = await withWebhookServer((request) => {
-      const signature = String(request.headers["x-steward-signature"]);
-      const expected = expectedSignature(request, SECRET);
-      return { status: signature === expected ? 200 : 401 };
+      return { status: requestVerifies(request, SECRET) ? 200 : 401 };
     });
 
     try {
@@ -126,7 +139,7 @@ describe("WebhookDispatcher HMAC signing", () => {
         `v2=${hmac(canonicalSignedPayload(timestamp, deliveryId, "tx_signed", tamperedBody), SECRET)}`,
       );
       expect(signature).not.toBe(expectedSignature(request, "wrong-secret"));
-      return { status: signature === expectedSignature(request, SECRET) ? 200 : 401 };
+      return { status: requestVerifies(request, SECRET) ? 200 : 401 };
     });
 
     try {
@@ -155,7 +168,7 @@ describe("WebhookDispatcher HMAC signing", () => {
       expect(signature).not.toBe(
         `v2=${hmac(canonicalSignedPayload(tamperedSentAt, deliveryId, eventType, request.bodyText), SECRET)}`,
       );
-      return { status: signature === expectedSignature(request, SECRET) ? 200 : 401 };
+      return { status: requestVerifies(request, SECRET) ? 200 : 401 };
     });
 
     try {
@@ -233,6 +246,30 @@ describe("WebhookDispatcher HMAC signing", () => {
 
       expect(result).toEqual({ success: true, attempts: 0 });
       expect(server.requests).toHaveLength(0);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("treats an empty events array as subscribe-to-all and actually delivers", async () => {
+    const server = await withWebhookServer(() => ({ status: 200 }));
+
+    try {
+      const dispatcher = new WebhookDispatcher({
+        maxRetries: 0,
+        timeoutMs: 1_000,
+        allowPrivateNetwork: true,
+        allowInsecureHttp: true,
+      });
+      const result = await dispatcher.dispatch(makeEvent(), {
+        url: server.url,
+        secret: SECRET,
+        events: [],
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.attempts).toBe(1);
+      expect(server.requests).toHaveLength(1);
     } finally {
       await server.close();
     }

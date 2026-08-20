@@ -1,15 +1,15 @@
 /**
- * PR6 — end-to-end governed provider proof (fake transport).
+ * End-to-end governed provider proof using the fake transport.
  *
  * This IS the fake CI proof body (§2.5). It drives the IDENTICAL governed code
  * path the real sandbox run uses (`scripts/provider-authority-sandbox.mjs`),
  * differing ONLY in the terminal forwarder (U2): here the terminal forwarder is
  * the deterministic in-process fake (`fake-provider-transport.ts`) injected via
  * the existing `__setForwardProxyRequestForTests` seam (U1). No new authority is
- * minted (U3): every allow/approve/resume/dispatch goes through the real PR1-PR5
+ * minted: every allow, approve, resume, and dispatch goes through the real
  * service functions.
  *
- * DISPATCH TOPOLOGY (anchor drift C1, see PR6-ANCHORS.md):
+ * Dispatch topology:
  * On develop the ALLOWED READ op terminates at an in-process stub
  * (`executeProviderActionStub`), NOT the governed forwarder. Only the
  * WRITE/APPROVAL path (create → approve → resume → dispatchGovernedExecution)
@@ -22,34 +22,52 @@
  * `fake-provider-transport-inventory.test.ts` (proxy package).
  */
 
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  setDefaultTimeout,
+} from "bun:test";
+import { createHash } from "node:crypto";
 import {
   closeDb,
   executionAuthorizationNonces,
   getDb,
+  providerAccounts,
   providerActionBindings,
+  providerGrants,
+  providerOperations,
   secretRoutes,
   secrets,
 } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { buildGithubAction } from "@stwd/provider-github";
+import { buildXAction } from "@stwd/provider-x";
 import {
   FakeProviderTransport,
   GITHUB_FIXTURES,
+  X_FIXTURES,
 } from "@stwd/proxy/src/__tests__/fake-provider-transport";
 import { KeyStore } from "@stwd/vault";
 import { and, eq, sql } from "drizzle-orm";
 
-// Real PR1-PR5 services (the authority code path under proof).
+// Real authority services under proof.
 import { providerActionService } from "../services/provider-action-service";
 import { providerApprovalService } from "../services/provider-approval";
 import { getProviderCase } from "../services/provider-case";
 
-// PR4 governed dispatcher + the injectable proxy forwarder seam.
+setDefaultTimeout(120_000);
+
+// Governed dispatcher and injectable proxy forwarder seam.
 type ProxyMod = typeof import("@stwd/proxy/src/handlers/proxy");
 type DispatchMod = typeof import("@stwd/proxy/src/handlers/governed-execution");
 let proxyMod: ProxyMod;
 let dispatchGovernedExecution: DispatchMod["dispatchGovernedExecution"];
+let restoreProxyRateLimit: (() => void) | undefined;
 
 // Shared fixture (real create/decide services) — imported dynamically so the
 // PGLite override is installed before the fixture's db handle resolves.
@@ -74,8 +92,23 @@ const READ_OP_KEY = "github.issue.list";
 // the test's KeyStore matches the vault regardless of environment.
 const MASTER = process.env.STEWARD_MASTER_PASSWORD ?? "steward-api-test-suite-master-password";
 const GITHUB_TOKEN_SENTINEL = "ghp_SENTINEL_credential_never_leaks_0123456789ABCD";
+const X_TOKEN_SENTINEL = "X_SENTINEL_credential_never_leaks_0123456789ABCD";
+const X_OP = "40000000-0000-4000-8000-0000000000b0";
+const X_OP_KEY = "x.tweet.create";
 
 let fake: FakeProviderTransport;
+
+const MATRIX_EVIDENCE_PREFIX = "STEWARD_MATRIX_EVIDENCE ";
+
+function emitMatrixEvidence(evidence: Record<string, unknown>): void {
+  // The golden-path orchestrator parses these records. Never put plaintext
+  // credentials or request bodies in this machine-readable channel.
+  console.log(`${MATRIX_EVIDENCE_PREFIX}${JSON.stringify(evidence)}`);
+}
+
+function sha256Text(value: string): string {
+  return createHash("sha256").update(value).digest("hex");
+}
 
 /** Encrypt a credential with the SAME KeyStore context SecretVault uses. */
 function encryptCredential(
@@ -96,11 +129,18 @@ function encryptCredential(
  * trigger bumps authority_revision on the watched flip, then we pin it to 1 via
  * an unwatched-column UPDATE so the seeded nonce's routeRevision matches).
  */
-async function enableGovernedRoute(operationId: string): Promise<void> {
+async function enableGovernedRoute(
+  operationId: string,
+  credential = GITHUB_TOKEN_SENTINEL,
+  credentialName = "github",
+): Promise<void> {
   const db = getDb();
   await db
     .update(secrets)
-    .set(encryptCredential(F.TENANT, "github", GITHUB_TOKEN_SENTINEL))
+    .set({
+      name: credentialName,
+      ...encryptCredential(F.TENANT, credentialName, credential),
+    })
     .where(and(eq(secrets.id, F.SECRET), eq(secrets.tenantId, F.TENANT)));
   await db
     .update(secretRoutes)
@@ -114,6 +154,56 @@ async function enableGovernedRoute(operationId: string): Promise<void> {
     })
     .where(eq(secretRoutes.id, F.ROUTE));
   await db.execute(sql`UPDATE secret_routes SET authority_revision = 1 WHERE id = ${F.ROUTE}`);
+}
+
+async function configureXWrite(): Promise<void> {
+  await getDb()
+    .update(providerAccounts)
+    .set({ adapterKey: "x" })
+    .where(eq(providerAccounts.id, F.ACCOUNT));
+  await getDb()
+    .insert(providerOperations)
+    .values({
+      id: X_OP,
+      tenantId: F.TENANT,
+      workspaceId: F.WORKSPACE,
+      providerAccountId: F.ACCOUNT,
+      operationKey: X_OP_KEY,
+      riskClass: "consequential",
+      secretRouteId: F.ROUTE,
+      requestProfile: {
+        policyRules: [
+          {
+            id: "44444444-4444-4444-8444-444444444444",
+            type: "capability-intent",
+            enabled: true,
+            config: { capabilities: [X_OP_KEY], effect: "allow" },
+          },
+          {
+            id: "55555555-5555-4555-8555-555555555555",
+            type: "capability-intent",
+            enabled: true,
+            config: { capabilities: [X_OP_KEY], effect: "require-approval" },
+          },
+        ],
+      },
+    });
+  await getDb()
+    .update(providerGrants)
+    .set({ operationKeys: [F.OP_KEY, READ_OP_KEY, X_OP_KEY] })
+    .where(eq(providerGrants.id, F.GRANT));
+  await getDb()
+    .update(secretRoutes)
+    .set({
+      hostPattern: "api.x.com",
+      pathPattern: "/2/tweets",
+      method: "POST",
+      injectAs: "header",
+      injectKey: "authorization",
+      injectFormat: "Bearer {value}",
+    })
+    .where(eq(secretRoutes.id, F.ROUTE));
+  await enableGovernedRoute(X_OP, X_TOKEN_SENTINEL, "x-oauth");
 }
 
 function idem(seed: string): string {
@@ -146,6 +236,30 @@ async function createWriteAction(seed: string): Promise<{
   });
   if (out.kind !== "approval_required") {
     throw new Error(`expected approval_required, got ${out.kind}`);
+  }
+  return { intentId: out.intentId, requestHash: out.requestHash, actionDigest: out.actionDigest };
+}
+
+async function createXWriteAction(seed: string): Promise<{
+  intentId: string;
+  requestHash: string;
+  actionDigest: string;
+}> {
+  const now = new Date();
+  const out = await providerActionService.createProviderAction({
+    principal: principal(),
+    workspaceId: F.WORKSPACE,
+    providerAccountId: F.ACCOUNT,
+    operationKey: X_OP_KEY,
+    build: buildXAction(X_OP_KEY, { text: "governed tweet" }),
+    idempotencyKeyHash: idem(seed),
+    requestedAt: now.toISOString(),
+    expiresAt: new Date(now.getTime() + 300_000).toISOString(),
+    nonce: seed.padEnd(32, "N").slice(0, 32),
+    requestId: null,
+  });
+  if (out.kind !== "approval_required") {
+    throw new Error(`expected X approval_required, got ${out.kind}`);
   }
   return { intentId: out.intentId, requestHash: out.requestHash, actionDigest: out.actionDigest };
 }
@@ -213,14 +327,19 @@ beforeAll(async () => {
   const { db, client } = await createPGLiteDb("memory://");
   setPGLiteOverride(db, async () => client.close());
   proxyMod = await import("@stwd/proxy/src/handlers/proxy");
+  const redisEnforcement = await import("@stwd/proxy/src/middleware/redis-enforcement");
   ({ dispatchGovernedExecution } = await import("@stwd/proxy/src/handlers/governed-execution"));
   ({ F, principal } = await import("./provider-approval-fixture"));
   ({ seedCaseFixture, wipeCase } = await import("./provider-case-fixture"));
   // Pin DNS to a public address so the SSRF guard passes without a real lookup.
   proxyMod.__setResolveProxyHostForTests(async () => [{ address: "140.82.112.6", family: 4 }]);
+  proxyMod.__setCheckProxyRateLimitForTests(async () => ({ allowed: true, resetMs: 0 }));
+  restoreProxyRateLimit = () =>
+    proxyMod.__setCheckProxyRateLimitForTests(redisEnforcement.checkProxyRateLimit);
 });
 
 afterAll(async () => {
+  restoreProxyRateLimit?.();
   await closeDb();
 });
 
@@ -242,7 +361,7 @@ afterEach(async () => {
   fake.reset();
 });
 
-describe("PR6 governed provider E2E — fake transport, real authority (U1-U3)", () => {
+describe("governed provider E2E — fake transport, real authority", () => {
   it("M14: happy write path create→approve→resume→dispatch→succeeded via fake forwarder", async () => {
     const [op] = await getDb()
       .select({ id: sql<string>`id` })
@@ -250,9 +369,16 @@ describe("PR6 governed provider E2E — fake transport, real authority (U1-U3)",
       .where(sql`tenant_id = ${F.TENANT} AND operation_key = ${F.OP_KEY}`)
       .limit(1);
     await enableGovernedRoute(op.id);
+    fake.expectCredential("authorization", GITHUB_TOKEN_SENTINEL);
+    const outboundBody = JSON.stringify({ body: "governed comment (steward-marker)" });
+    const expectedBodyHash = sha256Text(outboundBody);
 
     fake.script(
-      { method: "POST", path: "/repos/steward-sandbox/hello/issues/1/comments" },
+      {
+        method: "POST",
+        path: "/repos/steward-sandbox/hello/issues/1/comments",
+        bodyHash: expectedBodyHash,
+      },
       { mode: "ok", status: 201, json: GITHUB_FIXTURES.prCommentCreated },
     );
 
@@ -263,10 +389,85 @@ describe("PR6 governed provider E2E — fake transport, real authority (U1-U3)",
     // dispatch succeeded (terminal succeeded).
     expect(dispatch.dispatchState).toBe("succeeded");
     expect(await dispatchStateOf(intentId)).toBe("succeeded");
+    expect(fake.calls()).toHaveLength(1);
+    expect(fake.calls()[0]).toMatchObject({
+      method: "POST",
+      host: "api.github.com",
+      path: "/repos/steward-sandbox/hello/issues/1/comments",
+      bodyHash: expectedBodyHash,
+    });
     // At the forwarder layer the injected credential header IS present...
     expect(fake.calls()[0].credentialHeaderPresent).toBe(true);
+    expect(fake.calls()[0].credentialMatchesExpected).toBe(true);
     // ...but its VALUE is never recorded (canary): no sentinel anywhere.
     expect(JSON.stringify(fake.calls())).not.toContain(GITHUB_TOKEN_SENTINEL);
+    emitMatrixEvidence({
+      leg: "M14-github-write",
+      dispatchCount: fake.dispatchCount(),
+      dispatchState: dispatch.dispatchState,
+      host: fake.calls()[0]?.host,
+      path: fake.calls()[0]?.path,
+      bodyHash: fake.calls()[0]?.bodyHash,
+      expectedBodyHash,
+      credentialValueHash: fake.calls()[0]?.credentialValueHash,
+      credentialMatchesExpected: fake.calls()[0]?.credentialMatchesExpected,
+    });
+  });
+
+  it("M19: X consequential write traverses create→approve→resume→dispatch exactly once and stays canary-clean", async () => {
+    await configureXWrite();
+    // Match the actual X route contract, not merely the raw vault plaintext:
+    // terminal I/O must receive the provider's Bearer-formatted credential.
+    fake.expectCredential("authorization", `Bearer ${X_TOKEN_SENTINEL}`);
+    const outboundBody = JSON.stringify({ text: "governed tweet" });
+    const expectedBodyHash = sha256Text(outboundBody);
+    fake.script(
+      { method: "POST", path: "/2/tweets", bodyHash: expectedBodyHash },
+      { mode: "ok", status: 201, json: X_FIXTURES.tweetCreated },
+    );
+
+    const { intentId, requestHash, actionDigest } = await createXWriteAction("x-write-happy-1");
+    await approve(intentId, requestHash, actionDigest);
+    await resume(intentId);
+    const dispatch = await dispatchGovernedExecution(intentId, F.TENANT);
+
+    expect(dispatch.dispatchState).toBe("succeeded");
+    expect(await dispatchStateOf(intentId)).toBe("succeeded");
+    expect(fake.dispatchCount()).toBe(1);
+    expect(fake.calls()).toHaveLength(1);
+    expect(fake.calls()[0]).toMatchObject({
+      method: "POST",
+      host: "api.x.com",
+      path: "/2/tweets",
+      credentialHeaderPresent: true,
+      credentialMatchesExpected: true,
+      bodyHash: expectedBodyHash,
+    });
+
+    const [account] = await getDb()
+      .select({ adapterKey: providerAccounts.adapterKey })
+      .from(providerAccounts)
+      .where(eq(providerAccounts.id, F.ACCOUNT))
+      .limit(1);
+    expect(account?.adapterKey).toBe("x");
+
+    const kase = await getProviderCase(F.TENANT, intentId, [F.WORKSPACE]);
+    expect(kase?.manifest.operation.key).toBe(X_OP_KEY);
+    const captured = JSON.stringify({ calls: fake.calls(), dispatch, kase });
+    expect(captured).not.toContain(X_TOKEN_SENTINEL);
+    expect(captured).not.toContain("Bearer ");
+    emitMatrixEvidence({
+      leg: "M19-x-write",
+      adapterKey: account?.adapterKey,
+      dispatchCount: fake.dispatchCount(),
+      dispatchState: dispatch.dispatchState,
+      host: fake.calls()[0]?.host,
+      path: fake.calls()[0]?.path,
+      bodyHash: fake.calls()[0]?.bodyHash,
+      expectedBodyHash,
+      credentialValueHash: fake.calls()[0]?.credentialValueHash,
+      credentialMatchesExpected: fake.calls()[0]?.credentialMatchesExpected,
+    });
   });
 
   it("M04: write op requires approval — create returns approval_required, no dispatch", async () => {
@@ -275,6 +476,7 @@ describe("PR6 governed provider E2E — fake transport, real authority (U1-U3)",
     // No dispatch happened (no forwarder call, no nonce).
     expect(fake.dispatchCount()).toBe(0);
     expect(await dispatchStateOf(intentId)).toBeNull();
+    emitMatrixEvidence({ leg: "M04-pending-approval", dispatchCount: 0 });
   });
 
   it("M02: read op — full access→policy→ALLOW authority path (terminates at stub, C1)", async () => {
@@ -299,6 +501,7 @@ describe("PR6 governed provider E2E — fake transport, real authority (U1-U3)",
     // access→policy authority path executed.
     expect(out.kind).toBe("allowed");
     expect(fake.dispatchCount()).toBe(0);
+    emitMatrixEvidence({ leg: "M02-read-allow", dispatchCount: 0, outcome: out.kind });
   });
 
   it("M03/PN05: cross-workspace guessed account is a non-enumerating deny, zero dispatch", async () => {
@@ -324,10 +527,15 @@ describe("PR6 governed provider E2E — fake transport, real authority (U1-U3)",
     expect(out.kind).not.toBe("allowed");
     expect(out.kind).not.toBe("approval_required");
     expect(fake.dispatchCount()).toBe(0);
+    emitMatrixEvidence({
+      leg: "M03-cross-workspace-deny",
+      dispatchCount: 0,
+      outcome: out.kind,
+    });
   });
 
   it("M05/PN17: route revision bumped after resume — claim fails STALE_ROUTE, zero forward", async () => {
-    // Drift note (see PR6-ANCHORS.md): the PR4 claim's LIVE-revision staleness
+    // The execution claim's live-revision staleness
     // checks are ROUTE-revision and SECRET-version (the approval commitment is
     // frozen at mint, so grant IDs+revisions are re-derived from the frozen
     // commitment and cannot drift at claim). Grant REVOCATION is enforced at
@@ -353,6 +561,7 @@ describe("PR6 governed provider E2E — fake transport, real authority (U1-U3)",
     // Claim must fail stale → no forward.
     expect(dispatch.ok).toBe(false);
     expect(fake.dispatchCount()).toBe(0);
+    emitMatrixEvidence({ leg: "M05-stale-route", dispatchCount: 0, dispatchOk: dispatch.ok });
   });
 
   it("M07/PK01: concurrent dispatch — exactly one forward under a race", async () => {
@@ -379,6 +588,11 @@ describe("PR6 governed provider E2E — fake transport, real authority (U1-U3)",
     // Exactly one winner dispatches; the fake was reached exactly once.
     expect(succeeded.length).toBe(1);
     expect(fake.dispatchCount()).toBe(1);
+    emitMatrixEvidence({
+      leg: "M07-concurrent-dispatch",
+      dispatchCount: 1,
+      successfulClaims: succeeded.length,
+    });
   });
 
   it("M08/PN25: post-dispatch timeout → outcome_unknown, no blind retry", async () => {
@@ -404,6 +618,12 @@ describe("PR6 governed provider E2E — fake transport, real authority (U1-U3)",
     const replay = await dispatchGovernedExecution(intentId, F.TENANT);
     expect(replay.ok).toBe(false);
     expect(fake.dispatchCount()).toBe(1); // still one
+    emitMatrixEvidence({
+      leg: "M08-outcome-unknown",
+      dispatchCount: 1,
+      dispatchState: dispatch.dispatchState,
+      replayOk: replay.ok,
+    });
   });
 
   it("failed: unambiguous 5xx → failed terminal, one forward", async () => {

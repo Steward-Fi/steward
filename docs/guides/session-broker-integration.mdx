@@ -103,7 +103,7 @@ The scoped broker token is stored encrypted. It is never returned in any respons
 
 ```bash
 curl -X POST http://localhost:3200/secrets \
-  -H "X-Steward-Key: your-tenant-key" \
+  -H "Authorization: Bearer <owner/admin-session-jwt-with-recent-mfa>" \
   -H "Content-Type: application/json" \
   -d '{
     "name": "session-broker-token",
@@ -124,7 +124,7 @@ headers are blocked).
 
 ```bash
 curl -X POST http://localhost:3200/capabilities \
-  -H "X-Steward-Key: your-tenant-key" \
+  -H "Authorization: Bearer <owner/admin-session-jwt-with-recent-mfa>" \
   -H "Content-Type: application/json" \
   -d '{
     "name": "broker.session.render",
@@ -143,8 +143,8 @@ curl -X POST http://localhost:3200/capabilities \
 | `name` | string | Dotted lowercase identifier, e.g. `broker.session.render`. |
 | `secretId` | uuid | The secret ID from Step 2. |
 | `host` | string | The broker host, lower-cased. Must be public https (see Constraints). |
-| `pathPattern` | string | v1 is **exact-path**: the forwarded path is this value verbatim. |
-| `method` | string | `POST` for a body-carrying broker call (see the GET note below). |
+| `pathPattern` | string | v1 is **exact-path** and path-only: `?` query and `#` fragment delimiters are rejected. Put selectors in the invoke `query` map. |
+| `method` | string | `GET` for list/fetch reads; `POST` for a body-carrying render call. |
 | `injectAs` | string | `header` only. Query/body injection is unsupported (reflection risk). |
 | `injectKey` | string | The header name to set, e.g. `authorization`. |
 | `injectFormat` | string | `{value}` is replaced with the decrypted secret, e.g. `Bearer {value}`. |
@@ -161,7 +161,7 @@ carry an optional expiry.
 
 ```bash
 curl -X POST http://localhost:3200/capabilities/<capabilityId>/grants \
-  -H "X-Steward-Key: your-tenant-key" \
+  -H "Authorization: Bearer <owner/admin-session-jwt-with-recent-mfa>" \
   -H "Content-Type: application/json" \
   -d '{
     "agentId": "my-agent",
@@ -181,7 +181,7 @@ whose patterns govern the capability name. Policies are set with the full-set
 
 ```bash
 curl -X PUT http://localhost:3200/agents/my-agent/policies \
-  -H "X-Steward-Key: your-tenant-key" \
+  -H "Authorization: Bearer <owner/admin-session-jwt-with-recent-mfa>" \
   -H "Content-Type: application/json" \
   -d '[
     {
@@ -203,7 +203,7 @@ curl -X PUT http://localhost:3200/agents/my-agent/policies \
 | `effect` | string | `allow`, `deny`, or `require-approval`. A matched `deny` always wins; `require-approval` routes to a `202` queued outcome. |
 | `constraints.maxCallsPerHour` | number | Cap on invokes per trailing hour for this (agent, capability). |
 | `constraints.argEquals` | object | Each key must exist in the invoke `args` and strictly equal the value. |
-| `constraints.argMatches` | object | Each key must match the (anchored) regex. |
+| `constraints.argMatches` | object | Each key must match the full value using a linear-time RE2-compatible regex. Unsupported constructs such as backreferences fail closed. |
 
 <Warning>
   `PUT /agents/:id/policies` **replaces** the entire policy set. Always send the
@@ -230,7 +230,11 @@ The envelope is `{ args?, body?, query? }`:
 - `args` drive policy constraints (`argEquals` / `argMatches`) — they are **not**
   forwarded to the broker.
 - `body` is the JSON request body forwarded to the broker (for `POST`/`PUT`/`PATCH`).
-- `query` is appended to the forwarded URL as a query string.
+- `query` is a bounded string map appended to the forwarded URL. Its exact
+  selectors are also merged into the policy `args`; if a selector is repeated in
+  `args`, both values must match. Query maps are limited to 32 entries, 128
+  characters per key, 2,048 characters per value, and 8,192 encoded characters.
+  Unknown envelope fields and non-string selector values are rejected with 400.
 
 On an allowed call the proxy returns the broker's status and body **verbatim** (the
 injected credential already scrubbed). A `403` means denied by policy or missing
@@ -252,26 +256,15 @@ Read these before integrating — they are hard limits, not tunables.
   integrated. Put the broker behind a public HTTPS hostname (the proxy forces
   `https://`).
 
-- **Use `POST`, not `GET`, for broker capabilities.** Two things make `GET`
-  capabilities unusable for a credential-injected broker call under production
-  request-signing:
-  1. a `GET` (or `HEAD`) capability does **not** forward a request body — the
-     invoke path omits the body for those verbs, so a render payload in `body`
-     never reaches the broker;
-  2. more importantly, when the proxy runs with request signing enabled
-     (`STEWARD_PROXY_REQUIRE_REQUEST_SIGNATURE=true`, the production posture), it
-     requires an `Idempotency-Key` header on **any signed request — including safe
-     `GET` methods**. The proxy client does not auto-attach an idempotency key on
-     `GET`, and the invoke path supplies none, so a **signed `GET` capability
-     invoke fails closed with a `400` before it ever forwards** (`Idempotency-Key
-     header is required for signed proxy requests`).
-
-  `POST` both carries the request body and receives an auto-attached idempotency
-  key, so a `POST` capability works end to end. Do not work around the `GET` block
-  by smuggling the payload into `query` (query strings can reflect into upstream
-  responses and are not the injection surface). Model every broker capability as
-  `POST`. This limitation is pinned by a test in
-  `session-broker-e2e.test.ts`.
+- **Match the broker's real HTTP verb.** Use `GET` for list/fetch endpoints such
+  as `/api/:plugin/items` and `/api/:plugin/items/:id`; put bounded selectors in
+  the invoke envelope's `query` object. Use `POST` for render endpoints that
+  require a request body. The invoke path deliberately omits bodies for
+  `GET`/`HEAD`. Under production request signing, the proxy client attaches a
+  fresh `Idempotency-Key` to every signed method before computing the HMAC, so
+  signed safe requests remain replay-bound and pass the proxy's fail-closed
+  replay guard. `session-broker-e2e.test.ts` pins a signed, queried `GET` through
+  the real invoke + proxy path.
 
 - **Responses are capped at 25 MiB** (`STEWARD_PROXY_RESPONSE_BYTES`). This
   comfortably fits screenshot / rendered-image payloads. Raise it only if a broker
@@ -291,12 +284,8 @@ Read these before integrating — they are hard limits, not tunables.
 
 Everything above is **configuration**: environment variables, secrets, a
 capability, a grant, and a policy rule. No Steward product code is modified to
-integrate a session broker. The one honest caveat is the **signed-`GET`
-limitation** above — a `GET` capability is not usable for a credential-injected
-broker call under production request-signing (it fails closed with a `400` for the
-missing idempotency key, and would not forward a body regardless), so a broker
-integration must be modeled as `POST`. That is a design boundary of the invoke +
-proxy request-signing path, not something the runbook works around.
+integrate a session broker. Use `GET` for bodyless broker reads and `POST` for
+body-carrying operations; both traverse the same signed, replay-bound proxy path.
 
 ## See also
 

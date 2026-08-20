@@ -19,7 +19,7 @@
 
 import { afterAll, beforeAll, describe, expect, it, setDefaultTimeout } from "bun:test";
 import { signAgentToken } from "@stwd/auth";
-import { agents, closeDb, getDb, tenants } from "@stwd/db";
+import { __resetAuditHmacKeyCacheForTests, agents, closeDb, getDb, tenants } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { PROXY_SCOPE } from "@stwd/proxy/src/config";
 import { SecretVault } from "@stwd/vault";
@@ -31,11 +31,17 @@ setDefaultTimeout(30000);
 const MASTER_PASSWORD = "proxy-client-e2e-master-password";
 const SIGNING_SECRET = "proxy-client-e2e-signing-secret-with-enough-bytes";
 const FAKE_OPENAI_KEY = "sk-test-e2e-do-not-use-0123456789abcdef";
+const FAKE_AUDIT_HMAC_KEY = "proxy-client-e2e-audit-hmac-key-with-enough-entropy";
 
 let authMiddleware: typeof import("@stwd/proxy/src/middleware/auth")["authMiddleware"];
 let handleProxy: typeof import("@stwd/proxy/src/handlers/proxy")["handleProxy"];
 let setForwardProxyRequestForTests: typeof import("@stwd/proxy/src/handlers/proxy")["__setForwardProxyRequestForTests"];
 let setResolveProxyHostForTests: typeof import("@stwd/proxy/src/handlers/proxy")["__setResolveProxyHostForTests"];
+let setCheckProxyRateLimitForTests: typeof import("@stwd/proxy/src/handlers/proxy")["__setCheckProxyRateLimitForTests"];
+let setCheckProxySpendLimitForTests: typeof import("@stwd/proxy/src/handlers/proxy")["__setCheckProxySpendLimitForTests"];
+let resetProxyHandlerTestHooks:
+  | typeof import("@stwd/proxy/src/handlers/proxy")["__resetProxyHandlerTestHooksForTests"]
+  | undefined;
 
 // Capture what the proxy tried to forward upstream.
 interface ForwardedCapture {
@@ -47,14 +53,41 @@ let lastForwarded: ForwardedCapture | null = null;
 // Controls whether the stubbed upstream reflects the secret back (leak sim).
 let reflectSecretInResponse = false;
 
+const FIXTURE_ENV_KEYS = [
+  "NODE_ENV",
+  "STEWARD_KDF_SALT",
+  "REDIS_REQUIRED",
+  "STEWARD_PGLITE_MEMORY",
+  "STEWARD_MASTER_PASSWORD",
+  "STEWARD_JWT_SECRET",
+  "STEWARD_PROXY_REQUIRE_REQUEST_SIGNATURE",
+  "STEWARD_PROXY_REQUEST_SIGNING_SECRET",
+  "STEWARD_AUDIT_HMAC_KEY",
+  "STEWARD_PROXY_DEV_MODE",
+  "STEWARD_PROXY_ALLOWED_HOSTS",
+] as const;
+const previousEnv = new Map<(typeof FIXTURE_ENV_KEYS)[number], string | undefined>();
+
 beforeAll(async () => {
+  for (const key of FIXTURE_ENV_KEYS) previousEnv.set(key, process.env[key]);
+  process.env.NODE_ENV = "test";
+  process.env.STEWARD_KDF_SALT = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+  process.env.REDIS_REQUIRED = "false";
   process.env.STEWARD_PGLITE_MEMORY = "true";
   process.env.STEWARD_MASTER_PASSWORD = MASTER_PASSWORD;
   process.env.STEWARD_JWT_SECRET = "proxy-client-e2e-jwt-secret-with-enough-bytes";
+  // This hermetic in-process fixture deliberately uses the explicit dev-only
+  // replay store. Production still requires shared Redis and fails closed.
+  process.env.STEWARD_PROXY_DEV_MODE = "true";
   // Force the production-grade request-signature requirement so the e2e also
   // exercises the client's HMAC signer against the proxy verifier.
   process.env.STEWARD_PROXY_REQUIRE_REQUEST_SIGNATURE = "true";
   process.env.STEWARD_PROXY_REQUEST_SIGNING_SECRET = SIGNING_SECRET;
+  process.env.STEWARD_AUDIT_HMAC_KEY = FAKE_AUDIT_HMAC_KEY;
+  // The audit module memoizes its parsed key. Reset after installing this
+  // fixture's non-secret key so an earlier suite cannot bleed into this one.
+  __resetAuditHmacKeyCacheForTests();
+  process.env.STEWARD_PROXY_DEV_MODE = "true";
   // api.openai.com is already in the direct-proxy + secret-route default
   // allowlists, but set it explicitly for hermeticity.
   process.env.STEWARD_PROXY_ALLOWED_HOSTS = "api.openai.com";
@@ -69,7 +102,22 @@ beforeAll(async () => {
     handleProxy,
     __setForwardProxyRequestForTests: setForwardProxyRequestForTests,
     __setResolveProxyHostForTests: setResolveProxyHostForTests,
+    __setCheckProxyRateLimitForTests: setCheckProxyRateLimitForTests,
+    __setCheckProxySpendLimitForTests: setCheckProxySpendLimitForTests,
+    __resetProxyHandlerTestHooksForTests: resetProxyHandlerTestHooks,
   } = await import("@stwd/proxy/src/handlers/proxy"));
+
+  // This suite proves client signing, credential injection, and response
+  // scrubbing without a shared Redis service. Keep the production default-deny
+  // enforcement intact outside this fixture and restore every exact handler
+  // dependency after the test.
+  setCheckProxyRateLimitForTests(async () => ({ allowed: true, resetMs: 0 }));
+  setCheckProxySpendLimitForTests(async () => ({
+    allowed: true,
+    configured: false,
+    spent: 0,
+    remaining: Number.POSITIVE_INFINITY,
+  }));
 
   // Hermeticity: the proxy resolves the target host via DNS BEFORE it calls the
   // (stubbed) forwarder, and rejects private/reserved addresses. In a
@@ -94,13 +142,16 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  resetProxyHandlerTestHooks?.();
   await closeDb().catch(() => {});
-  delete process.env.STEWARD_PGLITE_MEMORY;
-  delete process.env.STEWARD_MASTER_PASSWORD;
-  delete process.env.STEWARD_JWT_SECRET;
-  delete process.env.STEWARD_PROXY_REQUIRE_REQUEST_SIGNATURE;
-  delete process.env.STEWARD_PROXY_REQUEST_SIGNING_SECRET;
-  delete process.env.STEWARD_PROXY_ALLOWED_HOSTS;
+  for (const key of FIXTURE_ENV_KEYS) {
+    const previous = previousEnv.get(key);
+    if (previous === undefined) delete process.env[key];
+    else process.env[key] = previous;
+  }
+  previousEnv.clear();
+  // Do not leave the fixture key cached after restoring the caller's env.
+  __resetAuditHmacKeyCacheForTests();
 });
 
 function buildProxyApp() {
@@ -208,6 +259,9 @@ describe("proxy-client e2e: injection + scrub on the openai alias", () => {
     //    the OUTBOUND (upstream) request.
     expect(lastForwarded?.url).toBe("https://api.openai.com/v1/chat/completions");
     expect(lastForwarded?.headers.get("authorization")).toBe(`Bearer ${FAKE_OPENAI_KEY}`);
+    for (const [, value] of lastForwarded?.headers.entries() ?? []) {
+      expect(value).not.toContain(FAKE_AUDIT_HMAC_KEY);
+    }
 
     // 3. The AGENT-side request never carried the secret in any header or body.
     expect(agentRequests.length).toBe(1);
@@ -216,8 +270,10 @@ describe("proxy-client e2e: injection + scrub on the openai alias", () => {
     expect(agentReq.headers.get("authorization")).not.toContain(FAKE_OPENAI_KEY);
     for (const [, value] of agentReq.headers.entries()) {
       expect(value).not.toContain(FAKE_OPENAI_KEY);
+      expect(value).not.toContain(FAKE_AUDIT_HMAC_KEY);
     }
     expect(agentReq.body ?? "").not.toContain(FAKE_OPENAI_KEY);
+    expect(agentReq.body ?? "").not.toContain(FAKE_AUDIT_HMAC_KEY);
 
     // 3b. The real client attached the proof-of-possession signature +
     //     idempotency key that the proxy required.
@@ -228,6 +284,7 @@ describe("proxy-client e2e: injection + scrub on the openai alias", () => {
     // 4. The response returned to the agent never contains the secret.
     const responseText = await res.text();
     expect(responseText).not.toContain(FAKE_OPENAI_KEY);
+    expect(responseText).not.toContain(FAKE_AUDIT_HMAC_KEY);
   });
 
   it("blocks the response (502) if the upstream reflects the injected secret", async () => {
@@ -260,6 +317,7 @@ describe("proxy-client e2e: injection + scrub on the openai alias", () => {
     expect(res.status).toBe(502);
     const body = await res.text();
     expect(body).not.toContain(FAKE_OPENAI_KEY);
+    expect(body).not.toContain(FAKE_AUDIT_HMAC_KEY);
     expect(body).toContain("reflected injected credential");
   });
 

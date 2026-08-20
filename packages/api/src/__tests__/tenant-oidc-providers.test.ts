@@ -84,7 +84,7 @@ describe("tenant-admin OIDC provider config routes", () => {
             audience: ["steward-api"],
             jwksUri: "https://tenant.example.com/.well-known/jwks.json",
             clientId: "enterprise-client",
-            clientSecretEnv: "ACME_SSO_CLIENT_SECRET",
+            clientSecretEnv: "STEWARD_TENANT_OIDC_SECRET_TENANT_OIDC_PROVIDERS_ACME_SSO",
             authorizationUrl: "https://tenant.example.com/oauth2/v1/authorize",
             tokenUrl: "https://tenant.example.com/oauth2/v1/token",
             scopes: ["openid", "email", "profile"],
@@ -104,7 +104,7 @@ describe("tenant-admin OIDC provider config routes", () => {
         id: "auth0-prod",
         issuer: "https://tenant.example.com",
         clientId: "enterprise-client",
-        clientSecretEnv: "ACME_SSO_CLIENT_SECRET",
+        clientSecretEnv: "STEWARD_TENANT_OIDC_SECRET_TENANT_OIDC_PROVIDERS_ACME_SSO",
         authorizationUrl: "https://tenant.example.com/oauth2/v1/authorize",
         tokenUrl: "https://tenant.example.com/oauth2/v1/token",
         scopes: ["openid", "email", "profile"],
@@ -181,6 +181,45 @@ describe("tenant-admin OIDC provider config routes", () => {
     expect(unsafeAuthCodeResponse.status).toBe(400);
     const unsafeAuthCodeBody = (await unsafeAuthCodeResponse.json()) as { error: string };
     expect(unsafeAuthCodeBody.error).toContain("tokenUrl for provider unsafe-code-flow");
+  });
+
+  it("rejects clientSecretEnv values outside the dedicated tenant OIDC namespace", async () => {
+    const ownerToken = await tokenFor(ownerId);
+    for (const clientSecretEnv of [
+      "STEWARD_JWT_SECRET",
+      "STEWARD_MASTER_PASSWORD",
+      "ACME_SSO_CLIENT_SECRET",
+      "STEWARD_TENANT_OIDC_SECRET",
+      // SEC-005 residual: the bare namespace without the tenant binding, and a
+      // name bound to a DIFFERENT tenant, must both be rejected.
+      "STEWARD_TENANT_OIDC_SECRET_ACME_SSO",
+      "STEWARD_TENANT_OIDC_SECRET_OTHER_TENANT_ACME_SSO",
+    ]) {
+      const response = await tenantConfigRoutes.request(`/${TENANT_ID}/oidc-providers`, {
+        method: "PUT",
+        headers: {
+          Authorization: `Bearer ${ownerToken}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          providers: [
+            {
+              id: "env-exfil",
+              issuer: "https://tenant.example.com",
+              audience: ["steward-api"],
+              jwksUri: "https://tenant.example.com/.well-known/jwks.json",
+              clientId: "enterprise-client",
+              clientSecretEnv,
+              authorizationUrl: "https://tenant.example.com/oauth2/v1/authorize",
+              tokenUrl: "https://tenant.example.com/oauth2/v1/token",
+            },
+          ],
+        }),
+      });
+      expect(response.status).toBe(400);
+      const body = (await response.json()) as { error: string };
+      expect(body.error).toContain("STEWARD_TENANT_OIDC_SECRET_");
+    }
   });
 
   it("rejects tenant API keys for OIDC provider config changes", async () => {

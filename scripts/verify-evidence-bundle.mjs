@@ -3,7 +3,8 @@
 /**
  * Standalone offline verifier for a Steward audit evidence bundle.
  *
- * ZERO project imports, ZERO third-party dependencies — only Node builtins.
+ * ZERO project imports and ZERO package dependencies. Base bundle checks use
+ * only Node builtins; optional RFC 3161 trust verification invokes OpenSSL.
  * An auditor can run this on any machine with Node, holding nothing but the
  * bundle JSON (which carries its own Ed25519 public key). No Steward access, no
  * secret HMAC key.
@@ -43,11 +44,16 @@
  *     is present is internally consistent, its contents are authentic, and (when
  *     it reaches the head) it matches the signed head. A gap BELOW the first
  *     exported seq is expected for partial exports.
- *   • It does not timestamp-anchor the checkpoint externally (out of scope v1).
+ *   • RFC 3161 verification is optional and trusts only an auditor-supplied
+ *     TSA CA. Anchoring narrows the pre-anchor rewrite window; it does not make
+ *     the system tamper-proof or operator-proof.
  */
 
+import { spawnSync } from "node:child_process";
 import { createHash, createPublicKey, verify as edVerify } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 function fail(msg, seq) {
   const at = seq === undefined ? "" : ` (seq ${seq})`;
@@ -58,7 +64,7 @@ function fail(msg, seq) {
 function usage(msg) {
   console.error(`usage error: ${msg}`);
   console.error(
-    "  node scripts/verify-evidence-bundle.mjs <bundle.json> [--expected-key-fingerprint <hex>]",
+    "  node scripts/verify-evidence-bundle.mjs <bundle.json> [--expected-key-fingerprint <hex>] [--tsa-ca <pem>]",
   );
   console.error("  cat bundle.json | node scripts/verify-evidence-bundle.mjs [--fp <hex>]");
   console.error("");
@@ -67,6 +73,13 @@ function usage(msg) {
   console.error("       STEWARD_EXPECTED_AUDIT_KEY_FP (comma-separated). If absent, the verifier");
   console.error("       prints the observed fingerprint and states trust-root matching is the");
   console.error("       auditor responsibility.");
+  console.error(
+    "  --tsa-ca <pem>  Verify an included RFC 3161 token against this auditor-supplied CA.",
+  );
+  console.error("  --tsa-untrusted <pem>  Optional intermediate TSA certificate chain.");
+  console.error("  --tsa-policy <oid>  Require the signed TSTInfo policy OID.");
+  console.error("  --require-anchor  Fail unless an RFC 3161 proof is present and verifies.");
+  console.error("  --anchored-before <ISO-8601>  Require verified TSA time at/before this bound.");
   process.exit(2);
 }
 
@@ -75,6 +88,11 @@ function parseArgs() {
   const argv = process.argv.slice(2);
   let bundleArg;
   const expectedFps = [];
+  let tsaCa;
+  let tsaUntrusted;
+  let requireAnchor = false;
+  let anchoredBefore;
+  let tsaPolicy;
   const clean = (s) => s.toLowerCase().replace(/[^0-9a-f]/g, "");
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -85,8 +103,27 @@ function parseArgs() {
       i++;
     } else if (a.startsWith("--expected-key-fingerprint=") || a.startsWith("--fp=")) {
       expectedFps.push(clean(a.slice(a.indexOf("=") + 1)));
+    } else if (
+      a === "--tsa-ca" ||
+      a === "--tsa-untrusted" ||
+      a === "--anchored-before" ||
+      a === "--tsa-policy"
+    ) {
+      const v = argv[i + 1];
+      if (!v) usage(`${a} requires a value`);
+      if (a === "--tsa-ca") tsaCa = v;
+      if (a === "--tsa-untrusted") tsaUntrusted = v;
+      if (a === "--anchored-before") anchoredBefore = v;
+      if (a === "--tsa-policy") tsaPolicy = v;
+      i++;
+    } else if (a === "--require-anchor") {
+      requireAnchor = true;
+    } else if (a.startsWith("--")) {
+      usage(`unknown option ${a}`);
     } else if (!bundleArg) {
       bundleArg = a;
+    } else {
+      usage(`unexpected positional argument ${a}`);
     }
   }
   const envFp = process.env.STEWARD_EXPECTED_AUDIT_KEY_FP;
@@ -96,7 +133,150 @@ function parseArgs() {
       if (c) expectedFps.push(c);
     }
   }
-  return { bundleArg, expectedFps };
+  if (anchoredBefore && !Number.isFinite(new Date(anchoredBefore).getTime())) {
+    usage("--anchored-before must be a valid ISO-8601 timestamp");
+  }
+  if (tsaUntrusted && !tsaCa) usage("--tsa-untrusted requires --tsa-ca");
+  if ((requireAnchor || anchoredBefore) && !tsaCa) {
+    usage("--require-anchor/--anchored-before require an auditor-supplied --tsa-ca");
+  }
+  return {
+    bundleArg,
+    expectedFps,
+    tsaCa,
+    tsaUntrusted,
+    tsaPolicy,
+    requireAnchor,
+    anchoredBefore,
+  };
+}
+
+function checkpointAnchorDigest(payload) {
+  return createHash("sha256").update(canonicalCheckpointBytes(payload)).digest("hex");
+}
+
+function strictBase64(value, name) {
+  if (typeof value !== "string" || !/^[A-Za-z0-9+/]+={0,2}$/.test(value)) {
+    fail(`${name} is not canonical base64`);
+  }
+  const decoded = Buffer.from(value, "base64");
+  if (decoded.length === 0 || decoded.toString("base64") !== value) {
+    fail(`${name} is not canonical base64`);
+  }
+  return decoded;
+}
+
+function verifyRfc3161Anchor(anchor, payload, options) {
+  if (!anchor) {
+    if (options.requireAnchor || options.tsaCa || options.anchoredBefore) {
+      fail("required RFC 3161 checkpoint anchor is missing");
+    }
+    return { present: false, verified: false, time: null };
+  }
+  if (
+    anchor.v !== 1 ||
+    anchor.type !== "rfc3161" ||
+    anchor.hashAlgorithm !== "sha256" ||
+    typeof anchor.sinkId !== "string" ||
+    !/^[0-9a-f]{64}$/.test(anchor.checkpointDigest) ||
+    !/^[0-9a-f]{32}$/.test(anchor.nonce) ||
+    typeof anchor.policyOid !== "string" ||
+    typeof anchor.genTime !== "string" ||
+    !Number.isFinite(Date.parse(anchor.genTime)) ||
+    !Number.isFinite(anchor.accuracyMillis) ||
+    anchor.accuracyMillis < 0 ||
+    typeof anchor.verifiedAt !== "string" ||
+    !Number.isFinite(Date.parse(anchor.verifiedAt)) ||
+    !/^[0-9a-f]{64}$/.test(anchor.trustAnchorSha256)
+  ) {
+    fail("checkpoint RFC 3161 anchor schema is invalid");
+  }
+  const digest = checkpointAnchorDigest(payload);
+  if (anchor.checkpointDigest !== digest) {
+    fail("RFC 3161 anchor digest does not match the signed checkpoint payload");
+  }
+  const response = strictBase64(anchor.timestampResponse, "RFC 3161 timestampResponse");
+  if (response.length > 1024 * 1024) fail("RFC 3161 timestampResponse exceeds 1 MiB");
+  if (!options.tsaCa) return { present: true, verified: false, time: null };
+
+  const dir = mkdtempSync(join(tmpdir(), "steward-rfc3161-"));
+  const responsePath = join(dir, "response.tsr");
+  try {
+    writeFileSync(responsePath, response, { mode: 0o600 });
+    const inspected = spawnSync("openssl", ["ts", "-reply", "-in", responsePath, "-text"], {
+      encoding: "utf8",
+      timeout: 30_000,
+    });
+    if (inspected.error || inspected.status !== 0) {
+      fail("RFC 3161 token could not be inspected for its timestamp");
+    }
+    const match = inspected.stdout.match(/^Time stamp:\s*(.+)$/m);
+    if (!match) fail("RFC 3161 token did not contain a timestamp");
+    const time = new Date(match[1]);
+    if (!Number.isFinite(time.getTime())) fail("RFC 3161 token timestamp is not parseable");
+    const verifyArgs = [
+      "ts",
+      "-verify",
+      "-digest",
+      digest,
+      "-in",
+      responsePath,
+      "-CAfile",
+      options.tsaCa,
+      "-attime",
+      String(Math.floor(time.getTime() / 1000)),
+    ];
+    if (options.tsaUntrusted) verifyArgs.push("-untrusted", options.tsaUntrusted);
+    const verified = spawnSync("openssl", verifyArgs, {
+      encoding: "utf8",
+      timeout: 30_000,
+    });
+    if (verified.error) fail(`could not run OpenSSL RFC 3161 verifier: ${verified.error.message}`);
+    if (verified.status !== 0) {
+      fail(`RFC 3161 token verification failed: ${(verified.stderr || verified.stdout).trim()}`);
+    }
+    const policyOid = inspected.stdout.match(/^Policy OID:\s*([^\s]+)\s*$/m)?.[1];
+    const nonceText = inspected.stdout.match(/^Nonce:\s*(0x[0-9a-f]+|[0-9]+)\s*$/im)?.[1];
+    if (!policyOid || !nonceText) fail("verified RFC 3161 TSTInfo is missing policy or nonce");
+    const tokenNonce = BigInt(nonceText).toString(16).padStart(32, "0");
+    if (tokenNonce !== anchor.nonce)
+      fail("verified RFC 3161 nonce does not match the proof binding");
+    if (policyOid !== anchor.policyOid || (options.tsaPolicy && policyOid !== options.tsaPolicy)) {
+      fail("verified RFC 3161 policy OID is not allowed");
+    }
+    const accuracyLine = inspected.stdout.match(/^Accuracy:\s*(.+)$/m)?.[1];
+    if (!accuracyLine || /^\s*unspecified\s*$/i.test(accuracyLine)) {
+      fail("verified RFC 3161 TSTInfo did not contain Accuracy");
+    }
+    let foundAccuracyComponent = false;
+    const accuracyPart = (name, scale) => {
+      const found = accuracyLine.match(new RegExp(`(?:0x([0-9a-f]+)|([0-9]+))\\s+${name}`, "i"));
+      if (found) foundAccuracyComponent = true;
+      return found ? Number.parseInt(found[1] ?? found[2], found[1] ? 16 : 10) * scale : 0;
+    };
+    const accuracyMillis =
+      accuracyPart("seconds", 1000) + accuracyPart("millis", 1) + accuracyPart("micros", 0.001);
+    if (!foundAccuracyComponent || !Number.isFinite(accuracyMillis) || accuracyMillis < 0) {
+      fail("verified RFC 3161 TSTInfo contained invalid Accuracy");
+    }
+    if (accuracyMillis !== anchor.accuracyMillis || time.toISOString() !== anchor.genTime) {
+      fail("RFC 3161 proof metadata does not match the signed TSTInfo");
+    }
+    const latestTime = new Date(time.getTime() + accuracyMillis);
+    if (options.anchoredBefore && latestTime > new Date(options.anchoredBefore)) {
+      fail(
+        `RFC 3161 latest accuracy bound ${latestTime.toISOString()} is after required bound ${options.anchoredBefore}`,
+      );
+    }
+    return {
+      present: true,
+      verified: true,
+      time: time.toISOString(),
+      latestTime: latestTime.toISOString(),
+    };
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 }
 
 // SHA-256 fingerprint of a signing key SPKI DER (spec §7.1/§7.2, C6).
@@ -191,14 +371,15 @@ function eventsContentDigest(events, tenantId) {
 }
 
 function main() {
-  const { bundleArg, expectedFps } = parseArgs();
+  const options = parseArgs();
+  const { bundleArg, expectedFps } = options;
   const input = loadBundle(bundleArg);
 
   if (!input || typeof input !== "object") fail("bundle is not an object");
 
   // Two accepted shapes, both backward-compatible:
   //   1. raw /audit/bundle: { version, tenantId, events, checkpoint, ... }
-  //   2. PR5 /evidence envelope: { version, tenantId, caseId, manifest,
+  //   2. evidence /evidence envelope: { version, tenantId, caseId, manifest,
   //      bundle: { ...raw bundle... }, completeness }
   // Detect the envelope by a nested `bundle` object + a `manifest`, then verify
   // the inner bundle exactly as before and additionally cross-check the manifest
@@ -240,6 +421,10 @@ function main() {
   }
   const sigOk = edVerify(null, canonicalCheckpointBytes(payload), pubKeyObj, sigBytes);
   if (!sigOk) fail("Ed25519 checkpoint signature does not verify");
+
+  // Optional third-party time proof. Its message imprint MUST bind the exact
+  // canonical checkpoint payload. Trust comes only from an auditor-supplied CA.
+  const anchorResult = verifyRfc3161Anchor(checkpoint.anchor, payload, options);
 
   // ── Trust-root fingerprint match (spec §7.1/§7.2, C6) ────────────────────
   // The bundle is self-describing (it carries its own public key); an auditor
@@ -328,7 +513,7 @@ function main() {
     }
   }
 
-  // ── (f) Manifest cross-check (spec §7.4) — only for a PR5 evidence envelope.
+  // ── (f) Manifest cross-check (spec §7.4) — only for an evidence envelope.
   // The manifest carries NO independent trust: every fact must be checkable
   // against a signed event. If ANY manifest fact is not backed, or a claimed
   // `complete` hides a missing required role, we FAIL. A plain /audit/bundle
@@ -359,6 +544,15 @@ function main() {
   console.log(`  signature:     Ed25519 OK`);
   console.log(`  content:       SHA-256 events digest OK`);
   console.log(`  linkage:       OK`);
+  console.log(
+    `  anchor:        ${
+      anchorResult.verified
+        ? `RFC 3161 verified; checkpoint existed no later than ${anchorResult.time}`
+        : anchorResult.present
+          ? "RFC 3161 proof present but NOT trusted; supply --tsa-ca"
+          : "not present (optional)"
+    }`,
+  );
   if (manifest)
     console.log(`  manifest:      cross-check OK (every fact backed by a signed event)`);
   console.log(`  head:          ${headNote}`);
@@ -378,6 +572,9 @@ function main() {
       (trustRootChecked
         ? "the signing key matches an auditor-supplied trusted fingerprint; "
         : "") +
+      (anchorResult.verified
+        ? `a trusted TSA proves the checkpoint existed no later than ${anchorResult.time}; `
+        : "") +
       "the checkpoint is authentically Ed25519-signed and unaltered.",
   );
   console.log(
@@ -385,12 +582,14 @@ function main() {
       "operator holding BOTH the HMAC key AND the signing key could fabricate a " +
       "self-consistent history; that the export is the complete history; " +
       (trustRootChecked ? "" : "trust-root binding (no expected fingerprint supplied); ") +
-      "out-of-band time anchoring.",
+      (anchorResult.verified
+        ? "events after the anchor or TSA/operator collusion. Anchoring narrows the pre-anchor rewrite window; it is not operator-proof."
+        : "out-of-band time anchoring."),
   );
   process.exit(0);
 }
 
-// ─── PR5 manifest cross-check (spec §7.4) ────────────────────────────────
+// ─── evidence manifest cross-check (spec §7.4) ────────────────────────────────
 
 const MANIFEST_SCHEMA_VERSION = "steward.provider-case-manifest.v1";
 
@@ -528,7 +727,7 @@ function verifyManifest(manifest, events, payload) {
       );
     }
   };
-  // Genesis-backed facts (PR2 folded genesis carries action + decision hashes).
+  // Genesis-backed facts (canonical-action folded genesis carries action + decision hashes).
   if (genesis) {
     factCheck("genesis", "actionDigest", manifest.actionDigest);
     factCheck("genesis", "requestHash", manifest.requestHash);
@@ -537,7 +736,7 @@ function verifyManifest(manifest, events, payload) {
       factCheck("genesis", "policyDecisionHash", manifest.policyDecision.hash);
     }
   }
-  // Execution-backed facts (PR4 authorized/dispatched/terminal metadata).
+  // Execution-backed facts (governed-execution authorized/dispatched/terminal metadata).
   if (manifest.execution) {
     const authEv = eventByRole.get("exec_authorized");
     if (manifest.execution.authorizationId && authEv) {

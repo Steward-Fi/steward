@@ -60,6 +60,7 @@ const intentTypeSchema: JsonSchema = {
     "policy_rule_update",
     "quorum_update",
     "wallet_action",
+    "provider-action",
   ],
 };
 const intentSchema: JsonSchema = {
@@ -107,6 +108,312 @@ const intentSchema: JsonSchema = {
     updatedAt: dateTimeSchema,
   },
 };
+const providerActionInvokeSchema: JsonSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["workspaceId", "providerAccountId", "operationKey", "arguments", "idempotencyKey"],
+  properties: {
+    workspaceId: stringSchema,
+    providerAccountId: stringSchema,
+    operationKey: stringSchema,
+    arguments: metadataSchema,
+    idempotencyKey: { type: "string", minLength: 8, maxLength: 255 },
+  },
+};
+const providerActionBindingStatuses = [
+  "denied",
+  "pending_approval",
+  "allowed_stub",
+  "stub_succeeded",
+  "stub_failed",
+  "approved",
+  "execution_ready",
+  "approval_denied",
+  "approval_expired",
+  "approval_stale",
+  "executing",
+  "succeeded",
+  "failed",
+  "outcome_unknown",
+];
+const providerActionBindingStatusSchema: JsonSchema = {
+  type: "string",
+  enum: providerActionBindingStatuses,
+};
+const providerActionResultSchema: JsonSchema = {
+  type: "object",
+  required: ["id", "status", "requestHash", "actionDigest"],
+  properties: {
+    id: stringSchema,
+    status: {
+      type: "string",
+      enum: ["pending_approval", "stub_succeeded", "stub_failed"],
+    },
+    requestHash: stringSchema,
+    actionDigest: stringSchema,
+    result: metadataSchema,
+  },
+};
+const providerActionDenialSchema: JsonSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["ok", "error", "data"],
+  properties: {
+    ok: { type: "boolean", const: false },
+    error: stringSchema,
+    data: {
+      type: "object",
+      additionalProperties: false,
+      required: ["id", "status", "requestHash", "actionDigest"],
+      properties: {
+        id: stringSchema,
+        status: { type: "string", enum: ["denied_access", "denied_policy"] },
+        requestHash: stringSchema,
+        actionDigest: stringSchema,
+      },
+    },
+  },
+};
+const providerApprovalDetailSchema: JsonSchema = {
+  type: "object",
+  required: [
+    "id",
+    "status",
+    "version",
+    "requestHash",
+    "actionDigest",
+    "expiresAt",
+    "safeSummary",
+    "operationId",
+    "providerAccountId",
+    "workspaceId",
+  ],
+  properties: {
+    id: stringSchema,
+    status: providerActionBindingStatusSchema,
+    version: { type: "integer" },
+    requestHash: stringSchema,
+    actionDigest: stringSchema,
+    expiresAt: { type: ["string", "null"], format: "date-time" },
+    safeSummary: { type: ["object", "null"], additionalProperties: true },
+    operationId: stringSchema,
+    providerAccountId: stringSchema,
+    workspaceId: stringSchema,
+  },
+};
+const providerApprovalDecisionSchema: JsonSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: [
+    "decision",
+    "expectedVersion",
+    "expectedRequestHash",
+    "expectedActionDigest",
+    "idempotencyKey",
+  ],
+  properties: {
+    decision: { type: "string", enum: ["approve", "deny"] },
+    expectedVersion: { type: "integer" },
+    expectedRequestHash: stringSchema,
+    expectedActionDigest: stringSchema,
+    reasonCode: {
+      type: "string",
+      enum: [
+        "approver_manual_approve",
+        "approver_manual_deny",
+        "approver_risk_deny",
+        "approver_scope_deny",
+        "approver_duplicate_deny",
+        "approver_other",
+      ],
+    },
+    reason: { type: "string", maxLength: 1000 },
+    idempotencyKey: { type: "string", minLength: 8, maxLength: 255 },
+  },
+};
+const providerTransitionSchema: JsonSchema = {
+  type: "object",
+  required: ["id", "status", "version", "requestHash", "actionDigest"],
+  properties: {
+    id: stringSchema,
+    status: providerActionBindingStatusSchema,
+    version: { type: "integer" },
+    requestHash: stringSchema,
+    actionDigest: stringSchema,
+    replayed: { type: "boolean" },
+    resumeAttemptId: stringSchema,
+  },
+};
+const providerCaseManifestSchema: JsonSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: [
+    "schemaVersion",
+    "caseId",
+    "tenantId",
+    "workspaceId",
+    "requestActor",
+    "approvalActor",
+    "resumeActor",
+    "providerAccount",
+    "operation",
+    "actionDigest",
+    "requestHash",
+    "idempotencyKeyHash",
+    "accessDecision",
+    "policyDecision",
+    "approvalCommitmentHash",
+    "execution",
+    "dependencyRevisions",
+    "events",
+    "eventSeqRange",
+    "terminalState",
+    "completeness",
+    "missingRequiredRoles",
+    "incompletenessReasons",
+    "safeSummary",
+    "genesisAt",
+    "terminalAt",
+    "assembledAt",
+  ],
+  properties: {
+    schemaVersion: { type: "string", const: "steward.provider-case-manifest.v1" },
+    caseId: stringSchema,
+    tenantId: stringSchema,
+    workspaceId: stringSchema,
+    requestActor: {
+      type: "object",
+      additionalProperties: false,
+      required: ["type", "id", "revision"],
+      properties: {
+        type: { type: "string", const: "agent" },
+        id: stringSchema,
+        revision: { type: "integer" },
+      },
+    },
+    approvalActor: {
+      oneOf: [
+        { type: "null" },
+        {
+          type: "object",
+          additionalProperties: false,
+          required: ["type", "id"],
+          properties: { type: { type: "string", const: "user" }, id: stringSchema },
+        },
+      ],
+    },
+    resumeActor: { type: ["string", "null"], enum: ["steward-system", null] },
+    providerAccount: {
+      type: "object",
+      additionalProperties: false,
+      required: ["id", "revision"],
+      properties: { id: stringSchema, revision: { type: "integer" } },
+    },
+    operation: {
+      type: "object",
+      additionalProperties: false,
+      required: ["id", "key", "revision", "canonicalProfile", "riskClass"],
+      properties: {
+        id: stringSchema,
+        key: stringSchema,
+        revision: { type: "integer" },
+        canonicalProfile: stringSchema,
+        riskClass: stringSchema,
+      },
+    },
+    actionDigest: stringSchema,
+    requestHash: stringSchema,
+    idempotencyKeyHash: stringSchema,
+    accessDecision: {
+      type: "object",
+      additionalProperties: false,
+      required: ["id", "hash", "effect"],
+      properties: {
+        id: stringSchema,
+        hash: stringSchema,
+        effect: { type: "string", enum: ["allow", "deny"] },
+      },
+    },
+    policyDecision: {
+      type: "object",
+      additionalProperties: false,
+      required: ["id", "hash", "effect"],
+      properties: { id: nullableStringSchema, hash: nullableStringSchema, effect: stringSchema },
+    },
+    approvalCommitmentHash: nullableStringSchema,
+    execution: { type: ["object", "null"], additionalProperties: true },
+    dependencyRevisions: { type: "object", additionalProperties: true },
+    events: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["seq", "action", "role", "hmac"],
+        properties: {
+          seq: { type: "integer" },
+          action: stringSchema,
+          role: stringSchema,
+          hmac: stringSchema,
+        },
+      },
+    },
+    eventSeqRange: { type: ["object", "null"], additionalProperties: true },
+    terminalState: stringSchema,
+    completeness: { type: "string", enum: ["complete", "incomplete", "unknown"] },
+    missingRequiredRoles: { type: "array", items: stringSchema },
+    incompletenessReasons: { type: "array", items: stringSchema },
+    safeSummary: { type: ["object", "null"], additionalProperties: true },
+    genesisAt: { type: ["string", "null"], format: "date-time" },
+    terminalAt: { type: ["string", "null"], format: "date-time" },
+    assembledAt: dateTimeSchema,
+  },
+};
+const providerCaseEvidenceSchema: JsonSchema = {
+  type: "object",
+  required: ["version", "tenantId", "caseId", "manifest", "bundle", "completeness", "generatedAt"],
+  properties: {
+    version: { type: "integer", const: 1 },
+    tenantId: stringSchema,
+    caseId: stringSchema,
+    manifest: providerCaseManifestSchema,
+    bundle: metadataSchema,
+    completeness: { type: "string", enum: ["complete", "incomplete", "unknown"] },
+    generatedAt: dateTimeSchema,
+  },
+};
+
+const providerActionStatusSchema: JsonSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: [
+    "id",
+    "status",
+    "version",
+    "workspaceId",
+    "providerAccountId",
+    "operationId",
+    "operationRevision",
+    "actionDigest",
+    "requestHash",
+    "expiresAt",
+    "createdAt",
+    "updatedAt",
+  ],
+  properties: {
+    id: stringSchema,
+    status: providerActionBindingStatusSchema,
+    version: { type: "integer", minimum: 1 },
+    workspaceId: stringSchema,
+    providerAccountId: stringSchema,
+    operationId: stringSchema,
+    operationRevision: { type: "integer", minimum: 1 },
+    actionDigest: stringSchema,
+    requestHash: stringSchema,
+    expiresAt: { type: ["string", "null"], format: "date-time" },
+    createdAt: dateTimeSchema,
+    updatedAt: dateTimeSchema,
+  },
+};
 
 const paginationQueryParameters = [
   parameter("limit", "query", { type: "integer", minimum: 1, maximum: 200 }),
@@ -129,7 +436,7 @@ const stewardSignatureHeader = headerParameter(
 );
 const signingKeyIdHeader = headerParameter(
   "X-Steward-Signing-Key-Id",
-  "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+  "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
 );
 const idempotencyKeyHeader = headerParameter(
   "Idempotency-Key",
@@ -239,6 +546,27 @@ function providerAuthorityPaths(): Record<string, OpenApiPathItem> {
     additionalProperties: true,
   });
   return {
+    "/v2/provider-actions": {
+      post: {
+        tags: ["Provider Authority"],
+        summary: "Invoke a governed provider action as an agent",
+        description:
+          "Provider credentials are resolved server-side from the bound account and are never accepted in this request.",
+        security: [{ bearerAuth: [] }],
+        requestBody: jsonRequestBody(providerActionInvokeSchema),
+        responses: {
+          "200": jsonResponse(providerActionResultSchema),
+          "202": jsonResponse(providerActionResultSchema),
+          ...errorResponses(),
+          "403": jsonResponse({
+            oneOf: [
+              { ...errorResponse(), additionalProperties: false },
+              providerActionDenialSchema,
+            ],
+          }),
+        },
+      },
+    },
     "/v2/workspaces": {
       get: listing("List workspaces"),
       // create workspace -> binds to the tenant authority revision
@@ -297,6 +625,80 @@ function providerAuthorityPaths(): Record<string, OpenApiPathItem> {
           content: { "application/json": { schema: metadataSchema } },
         },
         responses: { "200": jsonResponse(apiResponse(metadataSchema)), ...errorResponses() },
+      },
+    },
+    "/v2/provider-actions/{id}": {
+      parameters: [parameter("id", "path")],
+      get: {
+        tags: ["Provider Authority"],
+        summary: "Get the authenticated agent's own provider-action status",
+        description:
+          "Requires an agent JWT. The action is scoped server-side to the verified tenant and agent; absent, malformed, cross-agent, and cross-tenant ids all return the same 404 response. This route does not grant access to the human/MFA-gated approval, case, or evidence surfaces.",
+        security: [{ bearerAuth: [] }],
+        parameters: [
+          headerParameter(
+            "X-Steward-Tenant",
+            "Tenant containing the authenticated agent. It is checked against the verified agent principal and never selects a foreign action.",
+          ),
+        ],
+        responses: {
+          "200": jsonResponse(apiResponse(providerActionStatusSchema)),
+          "401": jsonResponse(errorResponse()),
+          "403": jsonResponse(errorResponse()),
+          "404": jsonResponse(errorResponse()),
+        },
+      },
+    },
+    "/v2/provider-actions/{id}/approval": {
+      parameters: [parameter("id", "path")],
+      get: {
+        tags: ["Provider Authority"],
+        summary: "Get exact-request approval detail",
+        description: "Requires an eligible human session with recent MFA.",
+        security,
+        responses: {
+          "200": jsonResponse(apiResponse(providerApprovalDetailSchema)),
+          ...errorResponses(),
+        },
+      },
+      post: {
+        tags: ["Provider Authority"],
+        summary: "Approve or deny an exact provider request",
+        description: "Requires an eligible human session with recent MFA.",
+        security,
+        requestBody: jsonRequestBody(providerApprovalDecisionSchema),
+        responses: { "200": jsonResponse(providerTransitionSchema), ...errorResponses() },
+      },
+    },
+    "/v2/provider-actions/{id}/execute": {
+      parameters: [parameter("id", "path")],
+      post: {
+        tags: ["Provider Authority"],
+        summary: "Request safe resume of an approved provider action",
+        description:
+          "The server authorizes the caller against persisted ownership and exact approval state. Resume is state-idempotent through the binding and execution nonce; this endpoint accepts no request body.",
+        security,
+        responses: { "200": jsonResponse(providerTransitionSchema), ...errorResponses() },
+      },
+    },
+    "/v2/provider-actions/{id}/case": {
+      parameters: [parameter("id", "path")],
+      get: {
+        tags: ["Provider Authority"],
+        summary: "Get a provider-action case manifest",
+        description: "Requires an owner/admin human session with recent MFA.",
+        security,
+        responses: { "200": jsonResponse(providerCaseManifestSchema), ...errorResponses() },
+      },
+    },
+    "/v2/provider-actions/{id}/evidence": {
+      parameters: [parameter("id", "path")],
+      get: {
+        tags: ["Provider Authority"],
+        summary: "Get signed provider-action case evidence",
+        description: "Requires an owner/admin human session with recent MFA.",
+        security,
+        responses: { "200": jsonResponse(providerCaseEvidenceSchema), ...errorResponses() },
       },
     },
   };
@@ -1080,6 +1482,74 @@ const walletActionSponsorshipSchema: JsonSchema = {
   },
 };
 
+const vaultSignInputSchema: JsonSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["to", "value"],
+  properties: {
+    to: stringSchema,
+    value: stringSchema,
+    data: stringSchema,
+    chainId: { type: "integer", minimum: 1 },
+    nonce: { type: "integer", minimum: 0 },
+    gasLimit: stringSchema,
+    broadcast: { type: "boolean", default: true },
+    venue: stringSchema,
+    walletAddress: stringSchema,
+  },
+};
+
+const vaultSignSuccessSchema: JsonSchema = {
+  type: "object",
+  required: ["txId"],
+  properties: {
+    txId: stringSchema,
+    txHash: stringSchema,
+    signedTx: stringSchema,
+  },
+  oneOf: [{ required: ["txHash"] }, { required: ["signedTx"] }],
+};
+
+const vaultSignPendingSchema: JsonSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["ok", "error", "data"],
+  properties: {
+    ok: { type: "boolean", const: false },
+    error: stringSchema,
+    data: {
+      type: "object",
+      required: ["txId", "status", "results"],
+      properties: {
+        txId: stringSchema,
+        status: { type: "string", const: "pending_approval" },
+        results: { type: "array", items: metadataSchema },
+      },
+    },
+  },
+};
+
+const vaultSignOutcomeUnknownSchema: JsonSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["ok", "error", "data"],
+  properties: {
+    ok: { type: "boolean", const: false },
+    error: stringSchema,
+    data: {
+      type: "object",
+      additionalProperties: false,
+      required: ["code", "txId", "txHash", "reconciliationRequired"],
+      properties: {
+        code: { type: "string", const: "external_broadcast_outcome_unknown" },
+        txId: stringSchema,
+        txHash: stringSchema,
+        reconciliationRequired: { type: "boolean", const: true },
+      },
+    },
+  },
+};
+
 const transferActionInputSchema: JsonSchema = {
   type: "object",
   required: ["to"],
@@ -1120,7 +1590,15 @@ const transferActionSchema: JsonSchema = {
     type: { type: "string", const: "transfer" },
     status: {
       type: "string",
-      enum: ["pending_approval", "rejected", "signed", "broadcast", "confirmed", "failed"],
+      enum: [
+        "pending_approval",
+        "rejected",
+        "signed",
+        "broadcast",
+        "confirmed",
+        "failed",
+        "outcome_unknown",
+      ],
     },
     chainId: { type: "integer", minimum: 1 },
     to: stringSchema,
@@ -1513,6 +1991,8 @@ const secretRouteSchema: JsonSchema = {
     "method",
     "injectAs",
     "injectKey",
+    "injectionStrategy",
+    "injectionConfig",
     "enabled",
   ],
   properties: {
@@ -1529,6 +2009,12 @@ const secretRouteSchema: JsonSchema = {
     injectAs: { type: "string", enum: ["header"] },
     injectKey: stringSchema,
     injectFormat: nullableStringSchema,
+    injectionStrategy: { type: "string", enum: ["header", "sigv4"] },
+    injectionConfig: {
+      type: "object",
+      properties: { service: { type: "string", enum: ["ec2"] }, region: stringSchema },
+      additionalProperties: false,
+    },
     priority: { type: "integer", minimum: 0, maximum: 1000000 },
     enabled: { type: "boolean" },
     createdAt: dateTimeSchema,
@@ -1547,6 +2033,12 @@ const secretRouteMutationProperties: Record<string, JsonSchema> = {
   injectAs: { type: "string", enum: ["header"] },
   injectKey: stringSchema,
   injectFormat: stringSchema,
+  injectionStrategy: { type: "string", enum: ["header", "sigv4"] },
+  injectionConfig: {
+    type: "object",
+    properties: { service: { type: "string", enum: ["ec2"] }, region: stringSchema },
+    additionalProperties: false,
+  },
   priority: { type: "integer", minimum: 0, maximum: 1000000 },
   enabled: { type: "boolean" },
 };
@@ -2249,15 +2741,18 @@ function approvalPaths(prefix = ""): Record<string, unknown> {
       get: {
         tags: ["Approvals"],
         summary: "List manual approval queue entries",
-        description: `${approvalDescription} Supports status, limit, and offset filters.`,
+        description: `${approvalDescription} Supports status and tenant-scoped agent filters before stable (requestedAt, id) keyset pagination.`,
         security: [{ bearerAuth: [] }],
         parameters: [
           parameter("status", "query", {
             type: "string",
             enum: ["pending", "approved", "rejected", "all"],
           }),
+          parameter("agentId", "query", { type: "string", minLength: 1, maxLength: 64 }),
           parameter("limit", "query", { type: "integer", minimum: 1, maximum: 200 }),
           parameter("offset", "query", { type: "integer", minimum: 0, maximum: 10000 }),
+          parameter("cursorRequestedAt", "query", { type: "string", format: "date-time" }),
+          parameter("cursorId", "query", { type: "string", minLength: 1, maxLength: 64 }),
         ],
         responses: {
           "200": jsonResponse(apiResponse({ type: "array", items: approvalQueueEntrySchema })),
@@ -2939,6 +3434,50 @@ function auditPaths(prefix = ""): Record<string, unknown> {
         ],
         responses: {
           "200": jsonResponse(auditVerifyResponseSchema),
+          ...errorResponses(),
+        },
+      },
+    },
+    [`${prefix}/audit/integrity`]: {
+      get: {
+        tags: ["Audits"],
+        summary: "Verify audit chain and latest checkpoint at the current head",
+        description:
+          "Requires an owner/admin browser session with recent MFA. Used by steward doctor to verify the live HMAC chain and the newest persisted Ed25519 checkpoint without returning signing or HMAC key material.",
+        security: [{ bearerAuth: [] }],
+        responses: {
+          "200": jsonResponse({
+            type: "object",
+            required: [
+              "valid",
+              "chainValid",
+              "checkpointPresent",
+              "checkpointValid",
+              "checkpointAtHead",
+              "checkpointSeq",
+              "chainHeadSeq",
+              "governedRoutes",
+            ],
+            properties: {
+              valid: { type: "boolean" },
+              chainValid: { type: "boolean" },
+              checkpointPresent: { type: "boolean" },
+              checkpointValid: { type: "boolean" },
+              checkpointAtHead: { type: "boolean" },
+              checkpointSeq: { type: ["integer", "null"] },
+              chainHeadSeq: { type: ["integer", "null"] },
+              governedRoutes: {
+                type: "object",
+                required: ["governedRoutes", "nullOperationRoutes", "dualModeRoutes", "ok"],
+                properties: {
+                  governedRoutes: { type: "integer" },
+                  nullOperationRoutes: { type: "integer" },
+                  dualModeRoutes: { type: "integer" },
+                  ok: { type: "boolean" },
+                },
+              },
+            },
+          }),
           ...errorResponses(),
         },
       },
@@ -5815,15 +6354,20 @@ function addHardeningInventory(spec: OpenApiSpec): OpenApiSpec {
         sensitive: true,
         sensitivePrefix: sensitivePrefixForOpenApiPath(path),
         requestExpiry: {
-          requiredWhen:
-            "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+          // Mounted globally (app.ts): freshness headers are always validated
+          // when present; they are REQUIRED only under the explicit opt-in.
+          requiredWhen: "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
           acceptedHeaders: ["X-Steward-Request-Timestamp", "X-Steward-Request-Expires-At"],
         },
         authorizationSignature: {
-          requiredWhen: "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+          // Mounted globally (app.ts): a presented X-Steward-Signature is
+          // always verified (fail closed); it is REQUIRED only under the
+          // explicit opt-in.
+          requiredWhen: "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
           header: "X-Steward-Signature",
           schemes: ["v1=hmac-sha256", "p256=ecdsa-secp256r1"],
-          optionalSigningKeyHeader: "X-Steward-Signing-Key-Id",
+          managedTenantKeyHeader: "X-Steward-Signing-Key-Id",
+          requiredForManagedTenantKey: true,
         },
         idempotency: {
           header: "Idempotency-Key",
@@ -6196,6 +6740,27 @@ export function getOpenApiSpec() {
           requestBody: jsonRequestBody(encryptedKeyImportSubmitRequestSchema),
           responses: {
             "200": jsonResponse(apiResponse(encryptedKeyImportResultSchema)),
+            ...errorResponses(),
+          },
+        },
+      },
+      "/vault/{agentId}/sign": {
+        parameters: [parameter("agentId", "path")],
+        post: {
+          tags: ["Vault"],
+          summary: "Sign or broadcast a governed transaction",
+          description:
+            "Evaluates current agent policy and signs a transaction. Broadcast requests require an Idempotency-Key. HTTP 202 may mean either pending_approval or outcome_unknown; outcome_unknown includes the deterministic transaction hash and requires receipt reconciliation before any retry.",
+          security: [{ tenantApiKey: [] }, { bearerAuth: [] }],
+          requestBody: jsonRequestBody(vaultSignInputSchema),
+          responses: {
+            "200": jsonResponse(apiResponse(vaultSignSuccessSchema)),
+            "202": jsonResponse({
+              oneOf: [vaultSignPendingSchema, vaultSignOutcomeUnknownSchema],
+            }),
+            "428": jsonResponse(errorResponse()),
+            "500": jsonResponse(errorResponse()),
+            "502": jsonResponse(errorResponse()),
             ...errorResponses(),
           },
         },

@@ -1,5 +1,5 @@
 /**
- * PR5 case-evidence test fixture. Reuses the PR3 approval fixture's seed and adds
+ * evidence case-evidence test fixture. Reuses the approval-lifecycle approval fixture's seed and adds
  * helpers to drive a case to each terminal state (denied_access, pending,
  * approved, execution_ready, succeeded-stub) plus utilities to read the
  * correlated audit events and reset the audit chain between tests.
@@ -102,7 +102,10 @@ export async function wipeCase(): Promise<void> {
   await db.delete(tenants);
   await db.execute(sql`DELETE FROM audit_events`);
   await db.execute(sql`DELETE FROM audit_chain_heads`);
-  await db.execute(sql`DELETE FROM audit_checkpoints`);
+  // Checkpoints are append-only in production. TRUNCATE is deliberately used
+  // only by this isolated PGLite fixture to reset the shared test database
+  // without weakening the row-level UPDATE/DELETE guard.
+  await db.execute(sql`TRUNCATE TABLE audit_checkpoints RESTART IDENTITY`);
 }
 
 function idem(seed: string): string {

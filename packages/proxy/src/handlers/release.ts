@@ -8,6 +8,7 @@ import {
   sql,
   withTenantAuditedTransaction,
 } from "@stwd/db";
+import { redactedThrownDiagnostics } from "@stwd/shared";
 import type { Context } from "hono";
 import { recordRequiredAudit } from "../middleware/audit";
 import { canonicalProxyApprovalDigest, decryptPendingProxyBody } from "./approvals";
@@ -17,14 +18,9 @@ import { handleProxy } from "./proxy";
  * Atomically expire a pending|approved proxy-approval row AND append its
  * tamper-evident `proxy.approval.expired` audit-chain event in ONE transaction.
  *
- * Both the poll-time and claim-time expiry paths previously flipped the row to
- * `expired` in a bare UPDATE and then wrote ONLY a `proxy_audit_log` row via
- * `recordRequiredAudit` — that operational log is NOT the tamper-evident
- * `audit_events` chain, so a proxy-side expiry produced no chain evidence and
- * the state change + its record were not both-or-neither (invariant I14, spec
- * section 11 item #10). This mirrors the api-side `expireProxyApprovals`, using
- * the shared `@stwd/db` `withTenantAuditedTransaction` primitive so the proxy
- * package can extend the chain without importing `@stwd/api`.
+ * The state change and tamper-evident audit append share one transaction. The
+ * proxy uses the shared database primitive so it does not depend on the API
+ * package to extend the audit chain.
  *
  * The guarded `status = 'expired' WHERE status IN ('pending','approved') AND
  * expiresAt <= now()` predicate keeps a post-crash retry idempotent: only one
@@ -127,6 +123,14 @@ export async function executePendingProxyRequest(row: PendingProxyRequest): Prom
       }),
   } as unknown as Context;
   return handleProxy(context);
+}
+
+type PendingProxyExecution = typeof executePendingProxyRequest;
+let pendingProxyExecution: PendingProxyExecution = executePendingProxyRequest;
+
+/** Replaces the release executor for deterministic boundary tests. */
+export function __setPendingProxyExecutionForTests(execute: PendingProxyExecution | null): void {
+  pendingProxyExecution = execute ?? executePendingProxyRequest;
 }
 
 function publicPending(row: PendingProxyRequest) {
@@ -301,7 +305,7 @@ export async function handlePendingProxyRequest(c: Context): Promise<Response> {
   }
 
   try {
-    const response = await executePendingProxyRequest(claimed);
+    const response = await pendingProxyExecution(claimed);
     // The poll that wins the single-use claim is the only caller able to receive
     // the upstream result. Bound it so a hostile upstream cannot exhaust memory.
     const declaredLength = Number(response.headers.get("content-length") ?? "0");
@@ -378,7 +382,11 @@ export async function handlePendingProxyRequest(c: Context): Promise<Response> {
       },
     });
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Approved proxy execution failed";
+    const message = "Approved proxy execution failed";
+    console.error(
+      `[proxy-approval] execution failed request=${row.id} tenant=${tenantId}`,
+      redactedThrownDiagnostics(error),
+    );
     const [failed] = await db
       .update(pendingProxyRequests)
       .set({ status: "failed", executionError: message, updatedAt: new Date() })

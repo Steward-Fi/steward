@@ -28,6 +28,7 @@ import {
   toUpdateIsolatedMarginAction,
   toUsdSendAction,
   toWithdrawAction,
+  validateBuilderFeeEnv,
 } from "./index";
 
 const PRIVATE_KEY = "0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" as const;
@@ -145,6 +146,43 @@ describe("Hyperliquid L1 signing", () => {
       expect(() =>
         toExchangeAction({ coin: "BTC", side: "buy", size: 0.02, limitPx: "30000" }),
       ).toThrow();
+    } finally {
+      if (oldAddress === undefined) delete process.env.HL_BUILDER_ADDRESS;
+      else process.env.HL_BUILDER_ADDRESS = oldAddress;
+      if (oldFee === undefined) delete process.env.HL_BUILDER_FEE_TENTHS_BP;
+      else process.env.HL_BUILDER_FEE_TENTHS_BP = oldFee;
+    }
+  });
+
+  test("SEC-186: validateBuilderFeeEnv fails fast on malformed env, no-ops when unconfigured", () => {
+    const oldAddress = process.env.HL_BUILDER_ADDRESS;
+    const oldFee = process.env.HL_BUILDER_FEE_TENTHS_BP;
+    try {
+      delete process.env.HL_BUILDER_ADDRESS;
+      delete process.env.HL_BUILDER_FEE_TENTHS_BP;
+      expect(() => validateBuilderFeeEnv()).not.toThrow();
+
+      process.env.HL_BUILDER_ADDRESS = "0xABCDEF0123456789abcdef0123456789ABCDEF01";
+      process.env.HL_BUILDER_FEE_TENTHS_BP = "10";
+      expect(() => validateBuilderFeeEnv()).not.toThrow();
+
+      process.env.HL_BUILDER_FEE_TENTHS_BP = "101";
+      expect(() => validateBuilderFeeEnv()).toThrow(/Invalid HL builder fee configuration/);
+
+      process.env.HL_BUILDER_FEE_TENTHS_BP = "10.5";
+      expect(() => validateBuilderFeeEnv()).toThrow(/Invalid HL builder fee configuration/);
+
+      process.env.HL_BUILDER_ADDRESS = "not-an-address";
+      process.env.HL_BUILDER_FEE_TENTHS_BP = "10";
+      expect(() => validateBuilderFeeEnv()).toThrow(/Invalid HL builder fee configuration/);
+
+      process.env.HL_BUILDER_ADDRESS = "0xABCDEF0123456789abcdef0123456789ABCDEF01";
+      delete process.env.HL_BUILDER_FEE_TENTHS_BP;
+      expect(() => validateBuilderFeeEnv()).toThrow(/must be set together/);
+
+      delete process.env.HL_BUILDER_ADDRESS;
+      process.env.HL_BUILDER_FEE_TENTHS_BP = "10";
+      expect(() => validateBuilderFeeEnv()).toThrow(/must be set together/);
     } finally {
       if (oldAddress === undefined) delete process.env.HL_BUILDER_ADDRESS;
       else process.env.HL_BUILDER_ADDRESS = oldAddress;
@@ -896,6 +934,90 @@ describe("Hyperliquid withdraw (user-signed action)", () => {
       action: { type: "withdraw3", destination: "0xabcdef0123456789abcdef0123456789abcdef01" },
       nonce: NONCE,
       signature: signed.signature,
+    });
+  });
+
+  test("SEC-113: submitWithdraw applies the default fetch timeout (and respects a caller signal)", async () => {
+    const account = privateKeyToAccount(PRIVATE_KEY);
+    const adapter = new HyperliquidAdapter(
+      {
+        async signTypedData(i) {
+          return account.signTypedData({
+            domain: i.domain,
+            types: i.types,
+            primaryType: i.primaryType,
+            message: i.value,
+          });
+        },
+      },
+      "sol",
+      WALLET,
+      { transport: { fetch: async () => new Response("{}", { status: 200 }) } },
+    );
+    const signed = await adapter.signWithdraw({
+      amount: "100",
+      destination: "0xABCDEF0123456789abcdef0123456789ABCDEF01",
+      time: NONCE,
+    });
+
+    // No caller signal -> the venue default timeout is applied.
+    let seenSignal: unknown;
+    await adapter.submitWithdraw(signed, {
+      transport: {
+        async fetch(_input, init) {
+          seenSignal = init?.signal;
+          return new Response(JSON.stringify({ status: "ok" }), { status: 200 });
+        },
+      },
+    });
+    expect(seenSignal).toBeInstanceOf(AbortSignal);
+
+    // A caller-provided signal is never overridden.
+    const callerSignal = new AbortController().signal;
+    seenSignal = undefined;
+    await adapter.submitWithdraw(signed, {
+      transport: {
+        async fetch(_input, init) {
+          seenSignal = init?.signal;
+          return new Response(JSON.stringify({ status: "ok" }), { status: 200 });
+        },
+      },
+      signal: callerSignal,
+    });
+    expect(seenSignal).toBe(callerSignal);
+  });
+
+  test("rejects an HTTP-200 status err as a definite venue rejection", async () => {
+    const account = privateKeyToAccount(PRIVATE_KEY);
+    const adapter = new HyperliquidAdapter(
+      {
+        async signTypedData(i) {
+          return account.signTypedData({
+            domain: i.domain,
+            types: i.types,
+            primaryType: i.primaryType,
+            message: i.value,
+          });
+        },
+      },
+      "sol",
+      WALLET,
+      {
+        transport: {
+          fetch: async () =>
+            new Response(JSON.stringify({ status: "err", response: "insufficient balance" }), {
+              status: 200,
+            }),
+        },
+      },
+    );
+    const signed = await adapter.signWithdraw({
+      amount: "100",
+      destination: "0xABCDEF0123456789abcdef0123456789ABCDEF01",
+      time: NONCE,
+    });
+    await expect(adapter.submitWithdraw(signed)).rejects.toMatchObject({
+      name: "HyperliquidExchangeRejectedError",
     });
   });
 });

@@ -9,12 +9,16 @@ import {
   type GetHistoryResult,
   type PendingProxyRequest,
   type PolicyRule,
+  type ProviderActionInvokeInput,
+  type ProviderActionInvokeResult,
+  type ProviderActionStatus,
   type SignMessageResult,
   type SignTransactionInput,
   type SignTransactionResult,
   StewardApiError,
   StewardClient,
 } from "@stwd/sdk";
+import { redactedThrownDiagnostics } from "@stwd/shared";
 import type { StewardPluginConfig } from "../types.js";
 
 export interface HyperliquidSubmitOrderInput {
@@ -35,27 +39,39 @@ export interface HyperliquidOrderResult {
   txHash: string | null;
 }
 
+export type TrackedProviderAction =
+  | { polling: "ok"; action: ProviderActionStatus }
+  | {
+      polling: "error";
+      id: string;
+      lastKnown?: ProviderActionStatus;
+      error: { message: string; httpStatus?: number; retryable: true };
+    };
+
 /**
  * Reject plaintext `http://` API URLs for non-localhost hosts. Talking to a
  * remote Steward API over http would expose API keys / bearer tokens and signed
  * transactions to network observers. The localhost default stays usable for dev.
  */
-function assertSecureApiUrl(apiUrl: string): void {
+export function assertSecureApiUrl(apiUrl: string): void {
   let parsed: URL;
   try {
     parsed = new URL(apiUrl);
   } catch {
-    throw new Error(`[Steward] Invalid apiUrl: ${apiUrl}`);
+    throw new Error("[Steward] Invalid apiUrl");
+  }
+  if (parsed.username || parsed.password) {
+    throw new Error("[Steward] apiUrl must not contain embedded credentials");
   }
   if (parsed.protocol === "http:") {
     const host = parsed.hostname;
     const isLocal =
       host === "localhost" || host === "127.0.0.1" || host === "::1" || host === "[::1]";
     if (!isLocal) {
-      throw new Error(
-        `[Steward] Insecure apiUrl "${apiUrl}": http:// is only allowed for localhost. Use https:// for remote hosts.`,
-      );
+      throw new Error("[Steward] http:// apiUrl is only allowed for localhost");
     }
+  } else if (parsed.protocol !== "https:") {
+    throw new Error("[Steward] apiUrl must use https:// or loopback http://");
   }
 }
 
@@ -74,6 +90,8 @@ export class StewardService extends Service {
   private pluginConfig: StewardPluginConfig | null = null;
   private agentIdentity: AgentIdentity | null = null;
   private _connected = false;
+  private readonly trackedProviderActionIds = new Set<string>();
+  private readonly providerActionLastKnown = new Map<string, ProviderActionStatus>();
 
   static async start(runtime: IAgentRuntime): Promise<StewardService> {
     const service = new StewardService(runtime);
@@ -85,6 +103,8 @@ export class StewardService extends Service {
     this.client = null;
     this._connected = false;
     this.agentIdentity = null;
+    this.trackedProviderActionIds.clear();
+    this.providerActionLastKnown.clear();
   }
 
   // ── Initialization ──────────────────────────────────────────────
@@ -113,8 +133,7 @@ export class StewardService extends Service {
       if (err instanceof StewardApiError && err.status === 404 && this.pluginConfig.autoRegister) {
         await this.tryAutoRegister(runtime);
       } else {
-        const msg = err instanceof Error ? err.message : String(err);
-        console.warn(`[Steward] Could not connect: ${msg}`);
+        console.warn("[Steward] Could not connect", redactedThrownDiagnostics(err));
         if (this.pluginConfig.fallbackLocal) {
           console.info("[Steward] Falling back to local signing");
         }
@@ -129,8 +148,7 @@ export class StewardService extends Service {
       this._connected = true;
       console.info(`[Steward] Registered new wallet: ${this.agentIdentity.walletAddress}`);
     } catch (regErr) {
-      const msg = regErr instanceof Error ? regErr.message : String(regErr);
-      console.error(`[Steward] Failed to auto-register agent: ${msg}`);
+      console.error("[Steward] Failed to auto-register agent", redactedThrownDiagnostics(regErr));
     }
   }
 
@@ -232,6 +250,53 @@ export class StewardService extends Service {
     return this.getClient().getApprovalStats();
   }
 
+  async invokeProviderAction(
+    input: ProviderActionInvokeInput,
+  ): Promise<ProviderActionInvokeResult> {
+    this.assertConnected();
+    const result = await this.getClient().providerActions.invoke(input);
+    this.trackedProviderActionIds.add(result.id);
+    return result;
+  }
+
+  async getProviderAction(actionId: string): Promise<ProviderActionStatus> {
+    this.assertConnected();
+    const status = await this.getClient().providerActions.get(actionId);
+    this.trackedProviderActionIds.add(actionId);
+    this.providerActionLastKnown.set(actionId, status);
+    return status;
+  }
+
+  /**
+   * Poll only action status available to this agent JWT. Human approval detail,
+   * case manifests, and evidence remain on their existing human/MFA routes.
+   */
+  async listTrackedProviderActions(): Promise<TrackedProviderAction[]> {
+    this.assertConnected();
+    const trackedIds = [...this.trackedProviderActionIds];
+    const results = await Promise.allSettled(
+      trackedIds.map((id) => this.getClient().providerActions.get(id)),
+    );
+    return results.map((result, index) => {
+      const id = trackedIds[index]!;
+      if (result.status === "fulfilled") {
+        this.providerActionLastKnown.set(id, result.value);
+        return { polling: "ok" as const, action: result.value };
+      }
+      const cause = result.reason;
+      return {
+        polling: "error" as const,
+        id,
+        lastKnown: this.providerActionLastKnown.get(id),
+        error: {
+          message: "provider action status is temporarily unavailable",
+          httpStatus: cause instanceof StewardApiError ? cause.status : undefined,
+          retryable: true as const,
+        },
+      };
+    });
+  }
+
   async listPendingProxyRequests(): Promise<PendingProxyRequest[]> {
     return this.proxyApprovalRequest<PendingProxyRequest[]>("/approvals/proxy");
   }
@@ -320,6 +385,11 @@ export class StewardService extends Service {
     }
     assertSecureApiUrl(config.proxyUrl);
 
+    // StewardProxyClient signs whenever a signing secret is supplied; the
+    // regression suite pins that invariant even when explicit enforcement is
+    // off. This flag controls the separate fail-closed rule for deployments
+    // where a secret is mandatory but absent. Unsigned operation is reserved
+    // for local dev where no secret exists and enforcement is off.
     const signingRequired =
       process.env.NODE_ENV === "production" ||
       process.env.STEWARD_PROXY_REQUIRE_REQUEST_SIGNATURE === "true";

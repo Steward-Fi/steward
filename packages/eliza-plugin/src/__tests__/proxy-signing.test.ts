@@ -10,6 +10,14 @@ import type { StewardPluginConfig } from "../types.js";
 const SIGNING_SECRET = "eliza-plugin-proxy-signing-secret-with-enough-bytes";
 const JWT_SECRET = "eliza-plugin-proxy-jwt-secret-with-enough-bytes";
 const PROXY_URL = "https://proxy.eliza-plugin.test";
+const PROXY_TEST_ENV_KEYS = [
+  "STEWARD_PGLITE_MEMORY",
+  "STEWARD_JWT_SECRET",
+  "STEWARD_PROXY_REQUIRE_REQUEST_SIGNATURE",
+  "STEWARD_PROXY_REQUEST_SIGNING_SECRET",
+  "STEWARD_PROXY_DEV_MODE",
+] as const;
+const savedProxyTestEnv = new Map<string, string | undefined>();
 
 let tenantId: string;
 let agentId: string;
@@ -36,10 +44,12 @@ function configuredService(overrides: Partial<StewardPluginConfig> = {}): Stewar
 }
 
 beforeAll(async () => {
+  for (const key of PROXY_TEST_ENV_KEYS) savedProxyTestEnv.set(key, process.env[key]);
   process.env.STEWARD_PGLITE_MEMORY = "true";
   process.env.STEWARD_JWT_SECRET = JWT_SECRET;
   process.env.STEWARD_PROXY_REQUIRE_REQUEST_SIGNATURE = "true";
   process.env.STEWARD_PROXY_REQUEST_SIGNING_SECRET = SIGNING_SECRET;
+  delete process.env.STEWARD_PROXY_DEV_MODE;
 
   const { db, client } = await createPGLiteDb("memory://");
   setPGLiteOverride(db, async () => client.close());
@@ -71,10 +81,11 @@ beforeAll(async () => {
 afterAll(async () => {
   globalThis.fetch = realFetch;
   await closeDb().catch(() => {});
-  delete process.env.STEWARD_PGLITE_MEMORY;
-  delete process.env.STEWARD_JWT_SECRET;
-  delete process.env.STEWARD_PROXY_REQUIRE_REQUEST_SIGNATURE;
-  delete process.env.STEWARD_PROXY_REQUEST_SIGNING_SECRET;
+  for (const key of PROXY_TEST_ENV_KEYS) {
+    const value = savedProxyTestEnv.get(key);
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
 });
 
 describe("Eliza plugin proxy request signing", () => {
@@ -122,16 +133,48 @@ describe("Eliza plugin proxy request signing", () => {
     expect(lastProxyRequest).toBeNull();
   });
 
-  it("keeps unsigned local/dev proxy operation available when enforcement is disabled", async () => {
+  it("signs whenever a secret is configured, even with enforcement disabled", async () => {
     delete process.env.STEWARD_PROXY_REQUIRE_REQUEST_SIGNATURE;
     try {
       lastProxyRequest = null;
-      const result = await configuredService({
-        proxyRequestSigningSecret: undefined,
-      }).callGovernedApi({ url: "https://api.example.com/v1/items" });
+      // configuredService() includes proxyRequestSigningSecret — dev-mode must
+      // not downgrade this deployment to unsigned proxy calls (SEC-171).
+      const result = await configuredService().callGovernedApi({
+        url: "https://api.example.com/v1/items",
+      });
 
       expect(result.status).toBe(200);
-      expect(lastProxyRequest?.headers.get("x-steward-signature")).toBeNull();
+      expect(lastProxyRequest?.headers.get("x-steward-signature")).toMatch(/^v1=[0-9a-f]{64}$/);
+      expect(lastProxyRequest?.headers.get("x-steward-request-timestamp")).toMatch(/^\d+$/);
+    } finally {
+      process.env.STEWARD_PROXY_REQUIRE_REQUEST_SIGNATURE = "true";
+    }
+  });
+
+  it("allows unsigned proxy operation only with the explicit dev-mode opt-in (SEC-175)", async () => {
+    delete process.env.STEWARD_PROXY_REQUIRE_REQUEST_SIGNATURE;
+    try {
+      // Enforcement off but no dev-mode opt-in: the proxy fails closed rather
+      // than silently accepting an unsigned call.
+      lastProxyRequest = null;
+      const denied = await configuredService({
+        proxyRequestSigningSecret: undefined,
+      }).callGovernedApi({ url: "https://api.example.com/v1/items" });
+      expect(denied.status).toBe(401);
+
+      // Local/dev unsigned operation remains available via explicit opt-in.
+      process.env.STEWARD_PROXY_DEV_MODE = "true";
+      try {
+        lastProxyRequest = null;
+        const result = await configuredService({
+          proxyRequestSigningSecret: undefined,
+        }).callGovernedApi({ url: "https://api.example.com/v1/items" });
+
+        expect(result.status).toBe(200);
+        expect(lastProxyRequest?.headers.get("x-steward-signature")).toBeNull();
+      } finally {
+        delete process.env.STEWARD_PROXY_DEV_MODE;
+      }
     } finally {
       process.env.STEWARD_PROXY_REQUIRE_REQUEST_SIGNATURE = "true";
     }

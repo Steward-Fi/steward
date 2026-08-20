@@ -614,6 +614,29 @@ describe("@stwd/react-native storage", () => {
     expect(result.subscription.id).toBe("push-1");
   });
 
+  test("createStewardNativeClient maps a static token to bearerToken (SEC-124)", async () => {
+    const client = createStewardNativeClient({
+      baseUrl: "https://api.example.test",
+      token: "static-user-token",
+    });
+    installAuthFetch({ ok: true, data: { subscription: { id: "push-1" } } });
+
+    await registerNativePushToken(client, "ExponentPushToken[abc123abc123abc123]");
+
+    expect(lastRequest?.headers.authorization).toBe("Bearer static-user-token");
+  });
+
+  test("createStewardNativeClient rejects function token providers loudly (SEC-124)", () => {
+    // The provider was previously accepted and silently dropped, so requests
+    // went out unauthenticated while the type signature claimed auth was set.
+    expect(() =>
+      createStewardNativeClient({
+        baseUrl: "https://api.example.test",
+        token: () => "resolved-later",
+      }),
+    ).toThrow(/function token providers/);
+  });
+
   test("signs in with a native passkey bridge", async () => {
     const auth = await createStewardNativeAuth({
       baseUrl: "https://api.example.test",

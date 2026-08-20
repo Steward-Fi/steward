@@ -18,6 +18,13 @@ set -euo pipefail
 #                                  canonical published OSS image)
 #   RAILWAY_HEALTH_URL  (optional) the deployer's own /health URL to verify
 #   DEPLOY_TIMEOUT      (optional) max seconds to wait for deploy, default: 300
+#   RAILWAY_ALLOW_REJECTED_DEPLOY (optional, default: fail closed) when "true",
+#                       a deployment Railway rejected before any container ran
+#                       (no build/deploy logs) degrades to a non-fatal warning
+#                       instead of failing the pipeline. SEC-129: the default
+#                       is a HARD failure — a green pipeline that silently
+#                       shipped nothing is how a security fix looks deployed
+#                       when it is not.
 # =============================================================================
 
 GREEN='\033[32m'
@@ -220,6 +227,18 @@ gql_raw() {
 # crash/health failure that SHOULD fail the pipeline).
 LOGS_EMPTY=0
 
+# Redact obvious secret shapes before printing build/deploy logs to CI
+# stderr: a crash-looped container may have echoed config (DATABASE_URL,
+# STEWARD_* secrets, Bearer tokens) to its logs (SEC-129).
+redact_secrets() {
+  sed -E \
+    -e 's#(postgres(ql)?://[^:/@]+:)[^@]+@#\1…REDACTED…@#g' \
+    -e 's/(Bearer )[A-Za-z0-9._~+/-]+/\1…REDACTED…/g' \
+    -e 's/((SECRET|SECRETS|PASSWORD|PASS|SALT|TOKEN|KEY|KEYS|HMAC|PRIVATE)[A-Z_]*=)[^[:space:]]+/\1…REDACTED…/g' \
+    -e 's/(^|[^A-Za-z0-9_])stw_[A-Za-z0-9]+/\1stw_…REDACTED…/g' \
+    -e 's/(^|[^0-9a-fA-F])[0-9a-fA-F]{48,}([^0-9a-fA-F]|$)/\1…REDACTED…\2/g'
+}
+
 dump_failure() {
   LOGS_EMPTY=0
   fail "---- Railway deployment diagnostics ----"
@@ -246,7 +265,7 @@ dump_failure() {
   build_logs=$(echo "${resp:-}" | jq -r '.data.buildLogs[]?.message // empty' 2>/dev/null)
   fail "---- build logs ----"
   if [[ -n "$build_logs" ]]; then
-    echo "$build_logs" >&2
+    echo "$build_logs" | redact_secrets >&2
   else
     fail "${resp:-<empty response>}"
   fi
@@ -257,7 +276,7 @@ dump_failure() {
   deploy_logs=$(echo "${resp:-}" | jq -r '.data.deploymentLogs[]?.message // empty' 2>/dev/null)
   fail "---- deploy logs ----"
   if [[ -n "$deploy_logs" ]]; then
-    echo "$deploy_logs" >&2
+    echo "$deploy_logs" | redact_secrets >&2
   else
     fail "${resp:-<empty response>}"
   fi
@@ -266,21 +285,30 @@ dump_failure() {
   [[ -z "$build_logs" && -z "$deploy_logs" ]] && LOGS_EMPTY=1
 }
 
-# Decide exit code for a failed/timed-out deployment. A control-plane rejection
-# with no container output (LOGS_EMPTY=1) is an external-infra availability
-# problem on the deployer's own Railway service, not a repo/app regression — so
-# by default it is a loud non-fatal warning rather than a hard pipeline failure
-# (this is a sovereign, self-hostable deploy: an unconfigured external target
-# must not wedge the source repo's CI). A failure WITH container logs is a real
-# crash and always fails. Override with RAILWAY_STRICT=true to fail on anything.
+# Decide exit code for a failed/timed-out deployment. SEC-129: the default is
+# a HARD failure in every case — a control-plane rejection with no container
+# output (LOGS_EMPTY=1) means the deploy never happened, and a green pipeline
+# that silently shipped nothing is exactly how a security fix appears deployed
+# when it isn't. Operators running an intentionally-unconfigured external
+# target may opt back into the old non-fatal behavior for that specific case
+# with RAILWAY_ALLOW_REJECTED_DEPLOY=true. A failure WITH container logs is a
+# real crash and always fails.
 finish_failure() {
-  if [[ "${RAILWAY_STRICT:-false}" != "true" && "$LOGS_EMPTY" == "1" ]]; then
+  if [[ "${RAILWAY_ALLOW_REJECTED_DEPLOY:-false}" == "true" && "$LOGS_EMPTY" == "1" ]]; then
     warn "Deployment was rejected by Railway BEFORE any container started (no build/deploy logs)."
     warn "This is an external Railway service/config issue (region/source/account on"
     warn "service ${SERVICE_ID}, env ${ENV_ID}), not a repo defect — see the Railway"
-    warn "dashboard for deployment ${DEPLOY_ID:-<none>}. Treating as a non-fatal warning."
-    warn "Set RAILWAY_STRICT=true to make this a hard failure instead."
+    warn "dashboard for deployment ${DEPLOY_ID:-<none>}."
+    warn "Treating as a non-fatal warning because RAILWAY_ALLOW_REJECTED_DEPLOY=true"
+    warn "(unset it to restore the fail-closed default)."
     exit 0
+  fi
+  if [[ "$LOGS_EMPTY" == "1" ]]; then
+    fail "Deployment was rejected by Railway BEFORE any container started (no build/deploy"
+    fail "logs) — the new image is NOT live. Check the Railway dashboard for deployment"
+    fail "${DEPLOY_ID:-<none>} (service ${SERVICE_ID}, env ${ENV_ID}). Failing the pipeline"
+    fail "so a missing deploy can never look shipped; set"
+    fail "RAILWAY_ALLOW_REJECTED_DEPLOY=true to downgrade this specific case to a warning."
   fi
   exit 1
 }

@@ -11,6 +11,7 @@ import {
 } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { exportJWK, generateKeyPair, SignJWT } from "jose";
+import { assertPublicHttpsEndpoint } from "../../../auth/src/public-endpoint";
 
 const TENANT_A = `oidc-tenant-a-${Date.now()}`;
 const TENANT_B = `oidc-tenant-b-${Date.now()}`;
@@ -18,11 +19,15 @@ const TENANT_CLOSED = `oidc-tenant-closed-${Date.now()}`;
 const TENANT_MIXED_CASE_DISABLED = `oidc-tenant-disabled-${Date.now()}`;
 const TENANT_AZP = `oidc-tenant-azp-${Date.now()}`;
 const AZP_CLIENT_ID = "azp-client-id";
-const ISSUER = "https://issuer.example.test";
-const JWKS_URI = "https://issuer.example.test/.well-known/jwks.json";
+// Use a syntactically public hostname so request-time provider validation is
+// exercised consistently with production. The test-only JWKS override below
+// still intercepts the fetch, so no network request reaches example.com.
+const ISSUER = "https://issuer.example.com";
+const JWKS_URI = "https://issuer.example.com/.well-known/jwks.json";
 const PROVIDER_ID = "primary";
 const ORIGINAL_FETCH = globalThis.fetch;
 const ORIGINAL_NODE_ENV = process.env.NODE_ENV;
+const ORIGINAL_ALLOW_INSECURE_OIDC_JWKS_FETCH = process.env.STEWARD_ALLOW_INSECURE_OIDC_JWKS_FETCH;
 
 setDefaultTimeout(120_000);
 
@@ -86,6 +91,7 @@ describe("OIDC JWT auth", () => {
               audience: ["aud-a"],
               jwksUri: JWKS_URI,
               allowedAlgs: ["RS256"],
+              allowJitProvisioning: true,
             },
           ],
         },
@@ -100,6 +106,7 @@ describe("OIDC JWT auth", () => {
               audience: ["aud-b"],
               jwksUri: JWKS_URI,
               allowedAlgs: ["RS256"],
+              allowJitProvisioning: true,
             },
           ],
         },
@@ -114,6 +121,7 @@ describe("OIDC JWT auth", () => {
               audience: ["aud-closed"],
               jwksUri: JWKS_URI,
               allowedAlgs: ["RS256"],
+              allowJitProvisioning: true,
             },
           ],
         },
@@ -129,6 +137,7 @@ describe("OIDC JWT auth", () => {
               audience: ["aud-disabled"],
               jwksUri: JWKS_URI,
               allowedAlgs: ["RS256"],
+              allowJitProvisioning: true,
             },
           ],
         },
@@ -146,6 +155,7 @@ describe("OIDC JWT auth", () => {
               clientId: AZP_CLIENT_ID,
               jwksUri: JWKS_URI,
               allowedAlgs: ["RS256"],
+              allowJitProvisioning: true,
             },
           ],
         },
@@ -196,7 +206,11 @@ describe("OIDC JWT auth", () => {
     }
     delete process.env.STEWARD_MASTER_PASSWORD;
     delete process.env.STEWARD_JWT_SECRET;
-    delete process.env.STEWARD_ALLOW_INSECURE_OIDC_JWKS_FETCH;
+    if (ORIGINAL_ALLOW_INSECURE_OIDC_JWKS_FETCH === undefined) {
+      delete process.env.STEWARD_ALLOW_INSECURE_OIDC_JWKS_FETCH;
+    } else {
+      process.env.STEWARD_ALLOW_INSECURE_OIDC_JWKS_FETCH = ORIGINAL_ALLOW_INSECURE_OIDC_JWKS_FETCH;
+    }
     delete process.env.STEWARD_AUDIT_HMAC_KEY;
   }, 120_000);
 
@@ -225,6 +239,15 @@ describe("OIDC JWT auth", () => {
       .setExpirationTime("5m")
       .sign(privateKey);
   }
+
+  it("keeps production destination validation fail closed for special-use test domains", () => {
+    expect(() =>
+      assertPublicHttpsEndpoint(
+        "https://issuer.example.test/.well-known/jwks.json",
+        "OIDC jwksUri",
+      ),
+    ).toThrow("OIDC jwksUri must be a public https URL");
+  });
 
   it("exchanges a valid tenant OIDC token for a Steward session", async () => {
     const token = await oidcToken("external-user-1", "aud-a");
@@ -313,6 +336,44 @@ describe("OIDC JWT auth", () => {
     });
 
     expect(response.status).toBe(401);
+  });
+
+  it("rejects OIDC tokens missing exp or iat claims", async () => {
+    const withoutExp = await new SignJWT({
+      sub: "no-exp-user",
+      email: "no-exp-user@a.example.test",
+      email_verified: true,
+    })
+      .setProtectedHeader({ alg: "RS256", kid: "test-key" })
+      .setIssuer(ISSUER)
+      .setAudience("aud-a")
+      .setIssuedAt()
+      .sign(privateKey);
+
+    const missingExp = await authRoutes.request("/jwt/login", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ tenantId: TENANT_A, providerId: PROVIDER_ID, token: withoutExp }),
+    });
+    expect(missingExp.status).toBe(401);
+
+    const withoutIat = await new SignJWT({
+      sub: "no-iat-user",
+      email: "no-iat-user@a.example.test",
+      email_verified: true,
+    })
+      .setProtectedHeader({ alg: "RS256", kid: "test-key" })
+      .setIssuer(ISSUER)
+      .setAudience("aud-a")
+      .setExpirationTime("5m")
+      .sign(privateKey);
+
+    const missingIat = await authRoutes.request("/jwt/login", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ tenantId: TENANT_A, providerId: PROVIDER_ID, token: withoutIat }),
+    });
+    expect(missingIat.status).toBe(401);
   });
 
   it("enforces disabled OIDC login methods for mixed-case provider ids", async () => {

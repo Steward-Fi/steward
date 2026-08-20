@@ -14,7 +14,8 @@
  */
 
 import { type ChildProcess, spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { existsSync, mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { connect } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -32,8 +33,35 @@ export const E2E_PORTS = {
 const E2E_DATA_DIR = join(tmpdir(), `steward-e2e-${process.pid}`);
 const DEV_SERVER_SPECS = new Set(["intents-reviewer-mfa.spec.ts"]);
 
-function shouldUseNextDevServer(): boolean {
-  if (process.env.E2E_NEXT_DEV === "true") return true;
+type ProcessIdentity = { pid: number; startedAt: string; command: string };
+
+function captureProcessIdentity(
+  child: ChildProcess,
+  name: string,
+  inheritedEnvironment: Readonly<NodeJS.ProcessEnv>,
+): ProcessIdentity {
+  const pid = child.pid;
+  if (!Number.isSafeInteger(pid) || (pid ?? 0) <= 1) {
+    child.kill("SIGTERM");
+    throw new Error(`Could not capture ${name} process id`);
+  }
+  const startedAt = spawnSync("ps", ["-p", String(pid), "-o", "lstart="], {
+    encoding: "utf8",
+    env: inheritedEnvironment,
+  }).stdout.trim();
+  const command = spawnSync("ps", ["-p", String(pid), "-o", "command="], {
+    encoding: "utf8",
+    env: inheritedEnvironment,
+  }).stdout.trim();
+  if (!startedAt || !command) {
+    child.kill("SIGTERM");
+    throw new Error(`Could not capture ${name} process identity`);
+  }
+  return { pid: pid as number, startedAt, command };
+}
+
+function shouldUseNextDevServer(environment: Readonly<NodeJS.ProcessEnv>): boolean {
+  if (environment.E2E_NEXT_DEV === "true") return true;
   return process.argv.some((arg) =>
     [...DEV_SERVER_SPECS].some((spec) => arg.endsWith(spec) || arg.includes(`/${spec}`)),
   );
@@ -105,15 +133,23 @@ async function waitForTcp(origin: string, label: string, timeoutMs = 60_000): Pr
   throw new Error(`${label} did not open a TCP listener at ${origin}: ${String(lastErr)}`);
 }
 
+export function e2eChildProcessEnvironment(
+  inheritedEnvironment: Readonly<NodeJS.ProcessEnv>,
+  overrides: Readonly<Record<string, string>>,
+): NodeJS.ProcessEnv {
+  return { ...inheritedEnvironment, ...overrides };
+}
+
 function startProcess(
   cmd: string,
   args: string[],
   env: Record<string, string>,
+  inheritedEnvironment: Readonly<NodeJS.ProcessEnv>,
   cwd = REPO_ROOT,
 ): ChildProcess {
   const child = spawn(cmd, args, {
     cwd,
-    env: { ...process.env, ...env },
+    env: e2eChildProcessEnvironment(inheritedEnvironment, env),
     stdio: "inherit",
     detached: false,
   });
@@ -127,11 +163,12 @@ function runCommand(
   cmd: string,
   args: string[],
   env: Record<string, string>,
+  inheritedEnvironment: Readonly<NodeJS.ProcessEnv>,
   cwd = REPO_ROOT,
 ): void {
   const result = spawnSync(cmd, args, {
     cwd,
-    env: { ...process.env, ...env },
+    env: e2eChildProcessEnvironment(inheritedEnvironment, env),
     stdio: "inherit",
   });
   if (result.status !== 0) {
@@ -139,9 +176,10 @@ function runCommand(
   }
 }
 
-function listeningPids(port: number): number[] {
+function listeningPids(port: number, inheritedEnvironment: Readonly<NodeJS.ProcessEnv>): number[] {
   const result = spawnSync("lsof", [`-tiTCP:${port}`, "-sTCP:LISTEN"], {
     encoding: "utf8",
+    env: inheritedEnvironment,
   });
   return result.stdout
     .split(/\s+/)
@@ -149,8 +187,11 @@ function listeningPids(port: number): number[] {
     .filter((pid) => Number.isSafeInteger(pid) && pid > 0);
 }
 
-async function clearPort(port: number): Promise<void> {
-  const pids = listeningPids(port);
+async function clearPort(
+  port: number,
+  inheritedEnvironment: Readonly<NodeJS.ProcessEnv>,
+): Promise<void> {
+  const pids = listeningPids(port, inheritedEnvironment);
   for (const pid of pids) {
     try {
       process.kill(pid, "SIGTERM");
@@ -159,30 +200,68 @@ async function clearPort(port: number): Promise<void> {
     }
   }
   const deadline = Date.now() + 5_000;
-  while (listeningPids(port).length > 0 && Date.now() < deadline) {
+  while (listeningPids(port, inheritedEnvironment).length > 0 && Date.now() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
 }
 
-export default async function globalSetup(_config: FullConfig): Promise<void> {
+export default async function globalSetup(
+  _config: FullConfig,
+  inheritedEnvironment: Readonly<NodeJS.ProcessEnv> = process.env,
+): Promise<void> {
   if (existsSync(PID_FILE)) rmSync(PID_FILE, { force: true });
   mkdirSync(E2E_DATA_DIR, { recursive: true });
+  const processState: {
+    fakeOAuth?: ProcessIdentity;
+    api?: ProcessIdentity;
+    web?: ProcessIdentity;
+    dataDir: string;
+  } = { dataDir: E2E_DATA_DIR };
+  const persistProcessState = () => {
+    const temporary = `${PID_FILE}.tmp-${process.pid}-${randomUUID()}`;
+    try {
+      // wx maps to O_CREAT|O_EXCL, so even a pre-planted symlink cannot be
+      // followed or truncate another file before the atomic rename.
+      writeFileSync(temporary, JSON.stringify(processState), { mode: 0o600, flag: "wx" });
+      renameSync(temporary, PID_FILE);
+    } finally {
+      rmSync(temporary, { force: true });
+    }
+  };
+  const trackProcess = (name: "fakeOAuth" | "api" | "web", label: string, child: ChildProcess) => {
+    processState[name] = captureProcessIdentity(child, label, inheritedEnvironment);
+    try {
+      persistProcessState();
+    } catch (error) {
+      // This process is not yet represented by durable state. Stop it now;
+      // previously persisted siblings remain available to global teardown.
+      child.kill("SIGTERM");
+      delete processState[name];
+      throw error;
+    }
+  };
   const fakeOAuthOrigin = configuredOrigin(
-    process.env.E2E_FAKE_OAUTH_URL,
+    inheritedEnvironment.E2E_FAKE_OAUTH_URL,
     `http://localhost:${E2E_PORTS.fakeOAuth}`,
   );
-  const apiOrigin = configuredOrigin(process.env.E2E_API_URL, `http://127.0.0.1:${E2E_PORTS.api}`);
-  const webOrigin = configuredOrigin(process.env.E2E_WEB_URL, `http://localhost:${E2E_PORTS.web}`);
+  const apiOrigin = configuredOrigin(
+    inheritedEnvironment.E2E_API_URL,
+    `http://127.0.0.1:${E2E_PORTS.api}`,
+  );
+  const webOrigin = configuredOrigin(
+    inheritedEnvironment.E2E_WEB_URL,
+    `http://localhost:${E2E_PORTS.web}`,
+  );
   const ports = {
     fakeOAuth: originPort(fakeOAuthOrigin, E2E_PORTS.fakeOAuth),
     api: originPort(apiOrigin, E2E_PORTS.api),
     web: originPort(webOrigin, E2E_PORTS.web),
   };
-  await clearPort(ports.fakeOAuth);
-  await clearPort(ports.api);
-  await clearPort(ports.web);
+  await clearPort(ports.fakeOAuth, inheritedEnvironment);
+  await clearPort(ports.api, inheritedEnvironment);
+  await clearPort(ports.web, inheritedEnvironment);
 
-  const useNextDevServer = shouldUseNextDevServer();
+  const useNextDevServer = shouldUseNextDevServer(inheritedEnvironment);
 
   const apiEnv: Record<string, string> = {
     PORT: String(ports.api),
@@ -238,12 +317,22 @@ export default async function globalSetup(_config: FullConfig): Promise<void> {
     SIWE_ALLOWED_DOMAINS: `localhost:${ports.web},localhost`,
   };
 
-  const fakeOAuth = startProcess("bun", ["run", "scripts/fake-oauth-server.ts"], {
-    FAKE_OAUTH_PORT: String(ports.fakeOAuth),
-  });
+  const fakeOAuth = startProcess(
+    "bun",
+    ["run", "scripts/fake-oauth-server.ts"],
+    { FAKE_OAUTH_PORT: String(ports.fakeOAuth) },
+    inheritedEnvironment,
+  );
+  trackProcess("fakeOAuth", "fake OAuth", fakeOAuth);
   await waitForUrl(`${fakeOAuthOrigin}/`, "fake-oauth-server");
 
-  const api = startProcess("bun", ["run", "packages/api/src/embedded.ts"], apiEnv);
+  const api = startProcess(
+    "bun",
+    ["run", "packages/api/src/embedded.ts"],
+    apiEnv,
+    inheritedEnvironment,
+  );
+  trackProcess("api", "API", api);
   await waitForUrl(`${apiOrigin}/auth/providers`, "api");
 
   let web: ChildProcess;
@@ -253,8 +342,9 @@ export default async function globalSetup(_config: FullConfig): Promise<void> {
       ["next", "dev", "--port", String(ports.web)],
       {
         NEXT_PUBLIC_STEWARD_API_URL: apiOrigin,
-        STEWARD_ALLOW_INSECURE_HTTP: "true",
+        E2E_ALLOW_INSECURE_HTTP: "true",
       },
+      inheritedEnvironment,
       join(REPO_ROOT, "web"),
     );
   } else {
@@ -270,8 +360,9 @@ export default async function globalSetup(_config: FullConfig): Promise<void> {
       ["run", "build"],
       {
         NEXT_PUBLIC_STEWARD_API_URL: apiOrigin,
-        STEWARD_ALLOW_INSECURE_HTTP: "true",
+        E2E_ALLOW_INSECURE_HTTP: "true",
       },
+      inheritedEnvironment,
       join(REPO_ROOT, "web"),
     );
 
@@ -281,28 +372,19 @@ export default async function globalSetup(_config: FullConfig): Promise<void> {
       {
         PORT: String(ports.web),
         NEXT_PUBLIC_STEWARD_API_URL: apiOrigin,
-        STEWARD_ALLOW_INSECURE_HTTP: "true",
+        E2E_ALLOW_INSECURE_HTTP: "true",
       },
+      inheritedEnvironment,
       join(REPO_ROOT, "web"),
     );
   }
+  trackProcess("web", "web", web);
   if (useNextDevServer) {
     await waitForTcp(webOrigin, "web", 60_000);
     await waitForUrl(`${webOrigin}/login`, "web", 120_000);
   } else {
     await waitForUrl(`${webOrigin}/login`, "web", 120_000);
   }
-
-  writeFileSync(
-    PID_FILE,
-    JSON.stringify({
-      fakeOAuth: fakeOAuth.pid,
-      api: api.pid,
-      web: web.pid,
-      dataDir: E2E_DATA_DIR,
-    }),
-  );
-
   process.env.E2E_API_URL = apiOrigin;
   process.env.E2E_WEB_URL = webOrigin;
   process.env.E2E_FAKE_OAUTH_URL = fakeOAuthOrigin;

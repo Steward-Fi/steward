@@ -2,6 +2,7 @@ import { lookup as dnsLookup } from "node:dns";
 import { request as httpsRequest } from "node:https";
 import { isIP } from "node:net";
 import type { TenantOidcProviderConfig } from "@stwd/shared";
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 import {
   createRemoteJWKSet,
   customFetch,
@@ -9,6 +10,11 @@ import {
   type JWTPayload,
   jwtVerify,
 } from "jose";
+import { assertPublicHttpsEndpoint, assertPublicInternetAddress } from "./public-endpoint";
+import {
+  assertPinnedDnsTransportSupported,
+  createPublicInternetLookup,
+} from "./public-endpoint-node";
 
 interface CachedJwks {
   jwks: ReturnType<typeof createRemoteJWKSet>;
@@ -18,18 +24,25 @@ interface CachedJwks {
 const JWKS_CACHE = new Map<string, CachedJwks>();
 const JWKS_FETCH_TIMEOUT_MS = 5_000;
 const JWKS_MAX_BYTES = 256 * 1024;
+const JWKS_CACHE_MAX_ENTRIES = 256;
 // Hard ceiling on how long a remote JWKS set is cached before it is rebuilt.
 // jose's internal cooldown only limits how *often* it refetches on unknown-kid;
 // it never evicts known keys, so a process-lifetime cache would not pick up an
 // IdP emergency key revocation. Rebuilding the set after this TTL guarantees a
-// rotated/revoked key stops verifying within the window. Configurable via env.
-const JWKS_MAX_AGE_MS = (() => {
-  const raw = Number(process.env.STEWARD_OIDC_JWKS_MAX_AGE_MS);
+// rotated/revoked key stops verifying within the window. Resolve the binding
+// for each cache decision so a long-lived Worker observes a tightened window.
+const DEFAULT_JWKS_MAX_AGE_MS = 60 * 60 * 1000;
+function jwksMaxAgeMs(): number {
+  const raw = Number(runtimeEnvironmentValue("STEWARD_OIDC_JWKS_MAX_AGE_MS"));
   if (Number.isFinite(raw) && raw >= 60_000) return raw;
-  return 60 * 60 * 1000; // 1 hour default
-})();
-const ALLOW_TEST_JWKS_FETCH =
-  process.env.NODE_ENV === "test" && process.env.STEWARD_ALLOW_INSECURE_OIDC_JWKS_FETCH === "true";
+  return DEFAULT_JWKS_MAX_AGE_MS;
+}
+function allowTestJwksFetch(): boolean {
+  return (
+    runtimeEnvironmentValue("NODE_ENV") === "test" &&
+    runtimeEnvironmentValue("STEWARD_ALLOW_INSECURE_OIDC_JWKS_FETCH") === "true"
+  );
+}
 
 export interface VerifiedOidcToken {
   subject: string;
@@ -56,83 +69,17 @@ function claimBoolean(claims: JWTPayload, name: string | undefined): boolean | u
   return typeof value === "boolean" ? value : undefined;
 }
 
-function isPrivateIpv4(hostname: string): boolean {
-  const parts = hostname.split(".").map((part) => Number(part));
-  if (
-    parts.length !== 4 ||
-    parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)
-  ) {
-    return false;
-  }
-  const [a, b] = parts;
-  return (
-    a === 0 ||
-    a === 10 ||
-    a === 127 ||
-    (a === 169 && b === 254) ||
-    (a === 172 && b >= 16 && b <= 31) ||
-    (a === 192 && b === 168) ||
-    (a === 100 && b >= 64 && b <= 127) ||
-    (a === 192 && b === 0) ||
-    (a === 198 && (b === 18 || b === 19)) ||
-    a >= 224
-  );
-}
-
-function isPrivateIpv6(hostname: string): boolean {
-  const normalized = hostname.toLowerCase();
-  const ipv4Mapped = normalized.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
-  if (ipv4Mapped) return isPrivateIpv4(ipv4Mapped[1]);
-  const hexIpv4Mapped = normalized.match(/^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
-  if (hexIpv4Mapped) {
-    const high = Number.parseInt(hexIpv4Mapped[1], 16);
-    const low = Number.parseInt(hexIpv4Mapped[2], 16);
-    if (Number.isFinite(high) && Number.isFinite(low) && high <= 0xffff && low <= 0xffff) {
-      return isPrivateIpv4(`${(high >> 8) & 255}.${high & 255}.${(low >> 8) & 255}.${low & 255}`);
-    }
-  }
-  return (
-    normalized === "::" ||
-    normalized === "::1" ||
-    normalized.startsWith("fc") ||
-    normalized.startsWith("fd") ||
-    normalized.startsWith("fe80:") ||
-    normalized.startsWith("ff") ||
-    normalized.startsWith("2001:db8:")
-  );
-}
-
-function isBlockedJwksHost(hostname: string): boolean {
-  const host = hostname.toLowerCase().replace(/^\[|\]$/g, "");
-  const ipv4Mapped = host.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
-  if (ipv4Mapped) return isPrivateIpv4(ipv4Mapped[1]);
-  const literalVersion = isIP(host);
-  return (
-    host === "localhost" ||
-    host.endsWith(".localhost") ||
-    host.endsWith(".internal") ||
-    host.endsWith(".local") ||
-    (literalVersion === 4 && isPrivateIpv4(host)) ||
-    (literalVersion === 6 && isPrivateIpv6(host))
-  );
-}
-
 function assertSafeJwksUri(jwksUri: string): URL {
-  const url = new URL(jwksUri);
-  if (url.protocol !== "https:" || isBlockedJwksHost(url.hostname)) {
-    throw new Error("OIDC jwksUri must be a public https URL");
-  }
-  return url;
+  return assertPublicHttpsEndpoint(jwksUri, "OIDC jwksUri");
 }
 
 function assertPublicJwksAddress(address: string, family: number): void {
-  if ((family === 4 && isPrivateIpv4(address)) || (family === 6 && isPrivateIpv6(address))) {
-    throw new Error("OIDC jwksUri must resolve to a public address");
-  }
+  assertPublicInternetAddress(address, family, "OIDC jwksUri");
 }
 
 export async function assertPublicJwksDestination(jwksUri: string): Promise<void> {
   const url = assertSafeJwksUri(jwksUri);
+  assertPinnedDnsTransportSupported("OIDC jwksUri");
   const hostname = url.hostname.replace(/^\[|\]$/g, "").toLowerCase();
   const literalVersion = isIP(hostname);
   if (literalVersion !== 0) {
@@ -142,12 +89,23 @@ export async function assertPublicJwksDestination(jwksUri: string): Promise<void
 
   const addresses = await new Promise<Array<{ address: string; family: number }>>(
     (resolve, reject) => {
+      let settled = false;
+      const finish = <T>(fn: (value: T) => void, value: T) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(deadline);
+        fn(value);
+      };
+      const deadline = setTimeout(
+        () => finish(reject, new Error("OIDC jwksUri DNS lookup timed out")),
+        JWKS_FETCH_TIMEOUT_MS,
+      );
       dnsLookup(hostname, { all: true, verbatim: true }, (error, resolved) => {
         if (error) {
-          reject(error);
+          finish(reject, new Error("OIDC jwksUri host did not resolve"));
           return;
         }
-        resolve(resolved);
+        finish(resolve, resolved);
       });
     },
   );
@@ -160,7 +118,7 @@ export async function assertPublicJwksDestination(jwksUri: string): Promise<void
 /**
  * Builds (or returns a cached) remote JWKS set whose key fetches are routed
  * through the SSRF-guarded {@link fetchPublicJwks} transport. The set is
- * rebuilt once it exceeds {@link JWKS_MAX_AGE_MS} so rotated or emergency-
+ * rebuilt once it exceeds the configured maximum age so rotated or emergency-
  * revoked IdP keys stop verifying within the window.
  *
  * Reused by both the tenant OIDC path ({@link verifyOidcJwt}) and the
@@ -174,89 +132,196 @@ export async function getPublicRemoteJWKSet(
   jwksUri: string,
   cacheKey: string,
 ): Promise<ReturnType<typeof createRemoteJWKSet>> {
+  assertPinnedDnsTransportSupported("OIDC jwksUri");
   const cached = JWKS_CACHE.get(cacheKey);
-  if (cached && Date.now() - cached.createdAt <= JWKS_MAX_AGE_MS) {
+  if (cached && Date.now() - cached.createdAt <= jwksMaxAgeMs()) {
+    // Refresh insertion order so the bounded map acts as an LRU cache.
+    JWKS_CACHE.delete(cacheKey);
+    JWKS_CACHE.set(cacheKey, cached);
     return cached.jwks;
   }
   const url = assertSafeJwksUri(jwksUri);
-  if (!ALLOW_TEST_JWKS_FETCH) {
-    await assertPublicJwksDestination(url.toString());
-  }
   const jwks = createRemoteJWKSet(url, {
     [customFetch]: (fetchUrl, init) => fetchPublicJwks(fetchUrl, init),
   });
+  JWKS_CACHE.delete(cacheKey);
+  while (JWKS_CACHE.size >= JWKS_CACHE_MAX_ENTRIES) {
+    const oldestKey = JWKS_CACHE.keys().next().value;
+    if (oldestKey === undefined) break;
+    JWKS_CACHE.delete(oldestKey);
+  }
   JWKS_CACHE.set(cacheKey, { jwks, createdAt: Date.now() });
   return jwks;
 }
 
-async function fetchPublicJwks(url: string | URL, init?: RequestInit): Promise<Response> {
-  const jwksUrl = assertSafeJwksUri(url.toString());
-  if (ALLOW_TEST_JWKS_FETCH) {
-    return fetch(jwksUrl, init);
-  }
+type JwksHttpsRequest = typeof httpsRequest;
+type JwksDeadline = ReturnType<typeof setTimeout>;
 
-  const body = await new Promise<Uint8Array>((resolve, reject) => {
-    const req = httpsRequest(
-      jwksUrl,
-      {
-        headers: Object.fromEntries(new Headers(init?.headers).entries()),
-        method: init?.method ?? "GET",
-        timeout: JWKS_FETCH_TIMEOUT_MS,
-        lookup(hostname, options, callback) {
-          dnsLookup(
-            hostname,
-            { all: false, family: options.family, verbatim: true },
-            (error, address, family) => {
-              if (error) {
-                callback(error, address, family);
+export interface PublicJwksTransportDependencies {
+  readonly request: JwksHttpsRequest;
+  readonly createLookup: typeof createPublicInternetLookup;
+  readonly setDeadline: (callback: () => void, timeoutMs: number) => JwksDeadline;
+  readonly clearDeadline: (deadline: JwksDeadline) => void;
+}
+
+export interface PublicJwksTransportLimits {
+  readonly timeoutMs: number;
+  readonly maxBytes: number;
+}
+
+/**
+ * Construct the production JWKS byte transport from immutable dependencies.
+ * Callers can inject isolated request/scheduler implementations for behavioral
+ * verification without mutating the process-wide HTTPS module.
+ */
+export function createPublicJwksTransport(
+  dependencies: Readonly<PublicJwksTransportDependencies>,
+  limits: Readonly<PublicJwksTransportLimits> = {
+    timeoutMs: JWKS_FETCH_TIMEOUT_MS,
+    maxBytes: JWKS_MAX_BYTES,
+  },
+): (url: string | URL, init?: RequestInit) => Promise<Response> {
+  const { request, createLookup, setDeadline, clearDeadline } = dependencies;
+  const { timeoutMs, maxBytes } = limits;
+  const destroySafely = (stream: { destroy(): unknown } | undefined) => {
+    try {
+      stream?.destroy();
+    } catch {
+      // The fixed transport classification already settled the public promise.
+    }
+  };
+  return async (url: string | URL, init?: RequestInit): Promise<Response> => {
+    const jwksUrl = assertSafeJwksUri(url.toString());
+    assertPinnedDnsTransportSupported("OIDC jwksUri");
+    const result = await new Promise<{
+      body: Uint8Array;
+      headers: Headers;
+      status: number;
+    }>((resolve, reject) => {
+      let settled = false;
+      let req: ReturnType<JwksHttpsRequest> | undefined;
+      const finish = <T>(fn: (value: T) => void, value: T) => {
+        if (settled) return;
+        settled = true;
+        clearDeadline(deadline);
+        init?.signal?.removeEventListener("abort", abortRequest);
+        fn(value);
+      };
+      const abortRequest = () => {
+        finish(reject, new Error("OIDC JWKS request was aborted"));
+        destroySafely(req);
+      };
+      const deadline = setDeadline(() => {
+        finish(reject, new Error("OIDC JWKS request timed out"));
+        destroySafely(req);
+      }, timeoutMs);
+
+      if (init?.signal?.aborted) {
+        abortRequest();
+        return;
+      }
+      init?.signal?.addEventListener("abort", abortRequest, { once: true });
+
+      try {
+        req = request(
+          jwksUrl,
+          {
+            headers: Object.fromEntries(new Headers(init?.headers).entries()),
+            method: init?.method ?? "GET",
+            timeout: timeoutMs,
+            lookup: createLookup("OIDC jwksUri"),
+          },
+          (res) => {
+            if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400) {
+              finish(reject, new Error("OIDC jwksUri redirects are not allowed"));
+              destroySafely(res);
+              destroySafely(req);
+              return;
+            }
+            const declaredLength = Number(res.headers["content-length"]);
+            if (Number.isFinite(declaredLength) && declaredLength > maxBytes) {
+              finish(reject, new Error("OIDC JWKS response is too large"));
+              destroySafely(res);
+              destroySafely(req);
+              return;
+            }
+            const chunks: Uint8Array[] = [];
+            let size = 0;
+            res.on("data", (chunk: Uint8Array) => {
+              if (settled) return;
+              size += chunk.byteLength;
+              if (size > maxBytes) {
+                finish(reject, new Error("OIDC JWKS response is too large"));
+                destroySafely(res);
+                destroySafely(req);
                 return;
               }
-              try {
-                assertPublicJwksAddress(address, family);
-                callback(null, address, family);
-              } catch (privateAddressError) {
-                callback(privateAddressError as NodeJS.ErrnoException, address, family);
+              chunks.push(chunk);
+            });
+            res.on("end", () => {
+              if (settled) return;
+              const body = new Uint8Array(size);
+              let offset = 0;
+              for (const chunk of chunks) {
+                body.set(chunk, offset);
+                offset += chunk.byteLength;
               }
-            },
-          );
-        },
-      },
-      (res) => {
-        if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400) {
-          reject(new Error("OIDC jwksUri redirects are not allowed"));
-          res.resume();
-          return;
-        }
-        const chunks: Uint8Array[] = [];
-        let size = 0;
-        res.on("data", (chunk: Uint8Array) => {
-          size += chunk.byteLength;
-          if (size > JWKS_MAX_BYTES) {
-            req.destroy(new Error("OIDC JWKS response is too large"));
-            return;
-          }
-          chunks.push(chunk);
-        });
-        res.on("end", () => {
-          const body = new Uint8Array(size);
-          let offset = 0;
-          for (const chunk of chunks) {
-            body.set(chunk, offset);
-            offset += chunk.byteLength;
-          }
-          resolve(body);
-        });
-      },
-    );
+              const headers = new Headers();
+              for (const [name, value] of Object.entries(res.headers)) {
+                if (Array.isArray(value)) {
+                  for (const item of value) headers.append(name, item);
+                } else if (value !== undefined) {
+                  headers.set(name, value);
+                }
+              }
+              const status =
+                res.statusCode && res.statusCode >= 200 && res.statusCode <= 599
+                  ? res.statusCode
+                  : 502;
+              finish(resolve, { body, headers, status });
+            });
+            res.on("aborted", () =>
+              finish(reject, new Error("OIDC JWKS response was interrupted")),
+            );
+            res.on("error", () => finish(reject, new Error("OIDC JWKS response failed")));
+          },
+        );
 
-    req.on("timeout", () => req.destroy(new Error("OIDC JWKS request timed out")));
-    req.on("error", reject);
-    req.end();
-  });
+        req.on("timeout", () => {
+          finish(reject, new Error("OIDC JWKS request timed out"));
+          destroySafely(req);
+        });
+        req.on("error", () => finish(reject, new Error("OIDC JWKS request failed")));
+        req.end();
+      } catch {
+        finish(reject, new Error("OIDC JWKS request failed"));
+        destroySafely(req);
+      }
+    });
 
-  const responseBody = new ArrayBuffer(body.byteLength);
-  new Uint8Array(responseBody).set(body);
-  return new Response(responseBody);
+    // Fetch forbids response bodies for 204/205. Ignore an upstream's hostile
+    // or non-conforming bytes rather than letting Response construction throw
+    // a runtime TypeError after the bounded transport has otherwise settled.
+    const responseBody =
+      result.status === 204 || result.status === 205 ? null : new Uint8Array(result.body);
+    return new Response(responseBody, { headers: result.headers, status: result.status });
+  };
+}
+
+const productionPublicJwksTransport = createPublicJwksTransport(
+  Object.freeze<PublicJwksTransportDependencies>({
+    request: httpsRequest,
+    createLookup: createPublicInternetLookup,
+    setDeadline: (callback, timeoutMs) => setTimeout(callback, timeoutMs),
+    clearDeadline: (deadline) => clearTimeout(deadline),
+  }),
+);
+
+async function fetchPublicJwks(url: string | URL, init?: RequestInit): Promise<Response> {
+  if (!allowTestJwksFetch()) return productionPublicJwksTransport(url, init);
+  const jwksUrl = assertSafeJwksUri(url.toString());
+  assertPinnedDnsTransportSupported("OIDC jwksUri");
+  return fetch(jwksUrl, init);
 }
 
 export async function verifyOidcJwt(
@@ -276,6 +341,9 @@ export async function verifyOidcJwt(
     issuer: provider.issuer,
     audience: provider.audience,
     algorithms,
+    // Fail closed on non-compliant IdPs: an id_token without exp/iat never
+    // expires (jose only validates exp when present) and cannot be age-bound.
+    requiredClaims: ["exp", "iat"],
   });
 
   // OIDC Core §3.1.3.7: the `azp` (authorized party) claim, when present, MUST

@@ -19,27 +19,75 @@ const CHAIN_IDS: Record<string, number> = {
   gnosis: 100,
 };
 
+const NATIVE_SYMBOLS: Record<string, string> = {
+  ethereum: "ETH",
+  base: "ETH",
+  "base-sepolia": "ETH",
+  bsc: "BNB",
+  "bsc-testnet": "BNB",
+  gnosis: "XDAI",
+};
+const MAX_AMOUNT_TEXT_LENGTH = 128;
+const MAX_UINT256 = (1n << 256n) - 1n;
+
 /**
  * Parse a human-readable amount like "0.1 ETH" or "50 USDC" into wei.
  * For now we only handle native token amounts (ETH/BNB).
  * ERC-20 transfers would need contract interaction — future work.
  */
-function parseAmount(amountStr: string): { valueWei: string; symbol: string } {
+function parseAmount(amountStr: string): { valueWei: string; symbol: string | null } {
   const cleaned = amountStr.trim();
-  const match = cleaned.match(/^([\d.]+)\s*(\w+)?$/i);
-  if (!match) {
-    throw new Error(`Could not parse amount: "${amountStr}". Expected format like "0.1 ETH"`);
+  if (cleaned.length === 0 || cleaned.length > MAX_AMOUNT_TEXT_LENGTH) {
+    throw new Error("Amount must be a bounded positive decimal");
+  }
+  let cursor = 0;
+  let sawDigit = false;
+  let sawDot = false;
+  let dotIndex = -1;
+  while (cursor < cleaned.length) {
+    const code = cleaned.charCodeAt(cursor);
+    if (code >= 0x30 && code <= 0x39) {
+      sawDigit = true;
+      cursor += 1;
+      continue;
+    }
+    if (code === 0x2e && !sawDot) {
+      sawDot = true;
+      dotIndex = cursor;
+      cursor += 1;
+      continue;
+    }
+    break;
+  }
+  const numberText = cleaned.slice(0, cursor);
+  while (cursor < cleaned.length && cleaned[cursor].trim().length === 0) cursor += 1;
+  const symbolStart = cursor;
+  while (cursor < cleaned.length) {
+    const code = cleaned.charCodeAt(cursor);
+    if (
+      (code >= 0x30 && code <= 0x39) ||
+      (code >= 0x41 && code <= 0x5a) ||
+      (code >= 0x61 && code <= 0x7a) ||
+      code === 0x5f
+    ) {
+      cursor += 1;
+      continue;
+    }
+    break;
+  }
+  if (!sawDigit || cursor !== cleaned.length) {
+    throw new Error('Could not parse amount. Expected format like "0.1 ETH"');
   }
 
-  const numericValue = parseFloat(match[1]);
-  const symbol = (match[2] ?? "ETH").toUpperCase();
-
-  if (Number.isNaN(numericValue) || numericValue <= 0) {
-    throw new Error(`Invalid amount: ${numericValue}`);
+  const symbolText = cleaned.slice(symbolStart);
+  const symbol = symbolText.length === 0 ? null : symbolText.toUpperCase();
+  const whole = dotIndex === -1 ? numberText : numberText.slice(0, dotIndex);
+  const fraction = dotIndex === -1 ? "" : numberText.slice(dotIndex + 1);
+  if (fraction.length > 18) {
+    throw new Error("Amount supports at most 18 decimal places");
   }
-
-  // Convert to wei (18 decimals for ETH/BNB/native tokens)
-  const wei = BigInt(Math.round(numericValue * 1e18));
+  const wei = BigInt(whole || "0") * 10n ** 18n + BigInt((fraction || "0").padEnd(18, "0"));
+  if (wei <= 0n || wei > MAX_UINT256) throw new Error("Amount is outside the supported range");
   return { valueWei: wei.toString(), symbol };
 }
 
@@ -64,7 +112,7 @@ export const transferAction: Action = {
     },
     {
       name: "amount",
-      description: 'Human-readable amount (e.g. "0.1 ETH", "50 USDC")',
+      description: 'Native-token amount (e.g. "0.1 ETH", "0.5 BNB")',
       required: true,
       schema: { type: "string" },
     },
@@ -123,7 +171,6 @@ export const transferAction: Action = {
     }
 
     try {
-      const { valueWei } = parseAmount(params.amount as string);
       const chainName = (params.chain as string) ?? "base";
       const chainId = CHAIN_IDS[chainName.toLowerCase()];
 
@@ -132,6 +179,15 @@ export const transferAction: Action = {
           success: false,
           error: `Unknown chain: ${chainName}`,
           text: `I don't recognize the chain "${chainName}". Supported: ${Object.keys(CHAIN_IDS).join(", ")}`,
+        };
+      }
+      const { valueWei, symbol } = parseAmount(params.amount as string);
+      const expectedSymbol = NATIVE_SYMBOLS[chainName.toLowerCase()];
+      if (symbol !== null && symbol !== expectedSymbol) {
+        return {
+          success: false,
+          error: `Only the native ${expectedSymbol} asset is supported on ${chainName}`,
+          text: `This action only supports native ${expectedSymbol} transfers on ${chainName}; ERC-20 transfers require a governed token-transfer action.`,
         };
       }
 

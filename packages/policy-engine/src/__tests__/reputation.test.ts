@@ -139,13 +139,53 @@ describe("reputation-threshold evaluator", () => {
     expect(result.reason).toContain("fallback");
   });
 
-  it("passes on fallback when fallbackAction is approve", () => {
+  it("fails closed on fallback when fallbackAction is approve and no score is wired (SEC-040)", () => {
     const rule = makeRule("reputation-threshold", {
       ...config,
       fallbackAction: "approve",
     });
     const result = evaluateReputationThreshold(rule, {});
+    expect(result.passed).toBe(false);
+    expect(result.reason).toContain("fail closed");
+  });
+
+  it("still honors action: approve when a score IS wired but below minimum", () => {
+    const rule = makeRule("reputation-threshold", {
+      ...config,
+      action: "approve",
+    });
+    const result = evaluateReputationThreshold(rule, { reputationScore: 10 });
     expect(result.passed).toBe(true);
+  });
+
+  it("fails closed without throwing on malformed persisted configuration", () => {
+    const malformedConfigs: unknown[] = [
+      null,
+      { ...config, minScore: Number.NaN },
+      { ...config, minScore: -1 },
+      { ...config, minScore: 101 },
+      { ...config, action: "allow" },
+      { ...config, source: "caller" },
+      { ...config, fallbackAction: "allow" },
+    ];
+
+    for (const malformedConfig of malformedConfigs) {
+      const rule = makeRule("reputation-threshold", malformedConfig as Record<string, unknown>);
+      expect(() => evaluateReputationThreshold(rule, { reputationScore: 75 })).not.toThrow();
+      const result = evaluateReputationThreshold(rule, { reputationScore: 75 });
+      expect(result.passed).toBe(false);
+      expect(result.reason).toContain("Malformed");
+    }
+  });
+
+  it("fails closed on non-finite and out-of-range authority scores", () => {
+    for (const reputationScore of [Number.NaN, Number.POSITIVE_INFINITY, -1, 101]) {
+      const result = evaluateReputationThreshold(makeRule("reputation-threshold", config), {
+        reputationScore,
+      });
+      expect(result.passed).toBe(false);
+      expect(result.reason).toContain("Invalid reputation score");
+    }
   });
 
   it("integrates through evaluatePolicy switch", async () => {
@@ -251,5 +291,86 @@ describe("reputation-scaling evaluator", () => {
     const result = await evaluatePolicy(rule, ctx);
     expect(result.passed).toBe(true);
     expect(result.type).toBe("reputation-scaling");
+  });
+});
+
+describe("reputation-scaling malformed input (SEC-105)", () => {
+  const linearConfig = {
+    baseMaxPerTx: "100000000000000000", // 0.1 ETH
+    maxMaxPerTx: "10000000000000000000", // 10 ETH
+    curve: "linear",
+  };
+
+  it("denies with a structured reason on non-numeric wei limits instead of throwing", () => {
+    const rule = makeRule("reputation-scaling", {
+      baseMaxPerTx: "not-a-number",
+      maxMaxPerTx: "10000000000000000000",
+      curve: "linear",
+    });
+    const result = evaluateReputationScaling(rule, {
+      reputationScore: 50,
+      txValue: 1n,
+    });
+    expect(result.passed).toBe(false);
+    expect(result.reason).toContain("wei strings");
+  });
+
+  it("fails closed on a non-finite score instead of throwing inside BigInt(NaN)", () => {
+    const limit = computeScaledLimit(linearConfig as any, Number.NaN);
+    expect(limit).toBe(BigInt("100000000000000000")); // base limit at score 0
+    const rule = makeRule("reputation-scaling", linearConfig);
+    const result = evaluateReputationScaling(rule, {
+      reputationScore: Number.NaN,
+      txValue: BigInt("100000000000000000"),
+    });
+    expect(result.passed).toBe(false);
+    expect(result.reason).toContain("Invalid reputation score");
+  });
+
+  it("supports fractional linear scores without throwing", () => {
+    const limit = computeScaledLimit(
+      { baseMaxPerTx: "0", maxMaxPerTx: "1000000", curve: "linear" },
+      72.5,
+    );
+    expect(limit).toBe(725000n);
+  });
+
+  it("fails closed on non-finite and out-of-range scaling authority scores", () => {
+    for (const reputationScore of [Number.NaN, Number.POSITIVE_INFINITY, -1, 101]) {
+      const result = evaluateReputationScaling(makeRule("reputation-scaling", linearConfig), {
+        reputationScore,
+        txValue: 0n,
+      });
+      expect(result.passed).toBe(false);
+      expect(result.reason).toContain("Invalid reputation score");
+    }
+  });
+
+  it("rejects wei limits above uint256", () => {
+    const result = evaluateReputationScaling(
+      makeRule("reputation-scaling", {
+        ...linearConfig,
+        maxMaxPerTx:
+          "115792089237316195423570985008687907853269984665640564039457584007913129639936",
+      }),
+      { reputationScore: 50, txValue: 1n },
+    );
+    expect(result.passed).toBe(false);
+    expect(result.reason).toContain("uint256");
+  });
+
+  it("rejects the complete malformed runtime shape instead of silently choosing a curve", () => {
+    for (const config of [
+      { ...linearConfig, curve: "surprise" },
+      { ...linearConfig, baseMaxPerTx: "100", maxMaxPerTx: "10" },
+      null,
+    ]) {
+      const result = evaluateReputationScaling(makeRule("reputation-scaling", config as never), {
+        reputationScore: 50,
+        txValue: 1n,
+      });
+      expect(result.passed).toBe(false);
+      expect(result.reason).toContain("malformed");
+    }
   });
 });

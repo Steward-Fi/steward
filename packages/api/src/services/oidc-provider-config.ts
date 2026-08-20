@@ -1,5 +1,41 @@
+import { assertPublicHttpsEndpoint } from "@stwd/auth";
 import type { TenantOidcProviderConfig } from "@stwd/shared";
-import { validateWebhookUrl } from "./webhook-url";
+
+/**
+ * Tenant-configured OIDC client secrets may only be sourced from env vars in
+ * this dedicated namespace. Without the prefix, a tenant admin could point
+ * `clientSecretEnv` at any platform secret (e.g. STEWARD_JWT_SECRET) and have
+ * it POSTed to a tenant-controlled tokenUrl during code exchange (SEC-005).
+ */
+export const OIDC_CLIENT_SECRET_ENV_PREFIX = "STEWARD_TENANT_OIDC_SECRET_";
+
+/**
+ * SEC-005 residual: the bare namespace above is platform-wide, so a tenant
+ * admin could reference ANOTHER tenant's OIDC secret env var. Bind the env
+ * name to the configuring tenant: it must start with
+ * STEWARD_TENANT_OIDC_SECRET_<TENANT_KEY>_, where TENANT_KEY is the tenant id
+ * uppercased with non-env-safe characters mapped to "_".
+ *
+ * Note: distinct tenant ids whose only differences are separator characters
+ * (e.g. "acme-corp" vs "acme.corp") share a TENANT_KEY. Tenant ids are
+ * provisioned by platform admins, not tenant admins, so this collision cannot
+ * be attacker-created; operators should avoid separator-only-distinct ids.
+ */
+export function oidcClientSecretEnvPrefixForTenant(tenantId: string): string {
+  const tenantKey = tenantId.toUpperCase().replace(/[^A-Z0-9_]/g, "_");
+  return `${OIDC_CLIENT_SECRET_ENV_PREFIX}${tenantKey}_`;
+}
+
+export function isAllowedOidcClientSecretEnv(name: string): boolean {
+  return /^[A-Z_][A-Z0-9_]{0,127}$/.test(name) && name.startsWith(OIDC_CLIENT_SECRET_ENV_PREFIX);
+}
+
+export function isAllowedOidcClientSecretEnvForTenant(name: string, tenantId: string): boolean {
+  return (
+    isAllowedOidcClientSecretEnv(name) &&
+    name.startsWith(oidcClientSecretEnvPrefixForTenant(tenantId))
+  );
+}
 
 function isNonEmptyString(value: unknown): value is string {
   return typeof value === "string" && value.trim().length > 0;
@@ -9,19 +45,30 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function isHttpsUrl(value: string): boolean {
+function isPublicHttpsUrl(value: string): boolean {
   try {
-    return new URL(value).protocol === "https:";
+    assertPublicHttpsEndpoint(value, "OIDC endpoint");
+    return true;
   } catch {
     return false;
   }
 }
 
-function isPublicHttpsUrl(value: string): boolean {
-  return isHttpsUrl(value) && !validateWebhookUrl(value);
+function isPublicOidcIssuer(value: string): boolean {
+  try {
+    const url = assertPublicHttpsEndpoint(value, "OIDC issuer");
+    // OIDC Core 1.0 section 2 requires issuer identifiers to have no query or
+    // fragment component. Enforce this at write and legacy-row read time.
+    return url.search === "" && url.hash === "";
+  } catch {
+    return false;
+  }
 }
 
-export function normalizeOidcProviders(value: unknown): TenantOidcProviderConfig[] | string {
+export function normalizeOidcProviders(
+  value: unknown,
+  tenantId: string,
+): TenantOidcProviderConfig[] | string {
   if (!Array.isArray(value)) return "providers must be an array";
   if (value.length > 10) return "at most 10 OIDC providers are allowed per tenant";
   const ids = new Set<string>();
@@ -55,20 +102,23 @@ export function normalizeOidcProviders(value: unknown): TenantOidcProviderConfig
       : undefined;
     if (!/^[a-zA-Z0-9_.:-]{1,64}$/.test(id)) return "provider id is required and must be URL-safe";
     if (ids.has(id)) return `duplicate provider id: ${id}`;
-    if (issuer.length > 2048 || !isPublicHttpsUrl(issuer)) {
+    if (issuer.length > 2048 || !isPublicOidcIssuer(issuer)) {
       return `issuer for provider ${id} must be a public https URL`;
     }
     if (jwksUri.length > 2048 || !isPublicHttpsUrl(jwksUri)) {
       return `jwksUri for provider ${id} must be a public https URL`;
     }
+    // A direct-id_token provider may configure clientId solely to enforce the
+    // OIDC `azp` binding. The remaining fields opt into authorization-code
+    // exchange and must then be complete as a group.
     const hasAuthorizationCodeConfig = Boolean(
-      clientId || clientSecretEnv || authorizationUrl || tokenUrl || scopes.length > 0,
+      clientSecretEnv || authorizationUrl || tokenUrl || scopes.length > 0,
     );
     if (clientId && clientId.length > 256) {
       return `clientId for provider ${id} may be at most 256 characters`;
     }
-    if (clientSecretEnv && !/^[A-Z_][A-Z0-9_]{0,127}$/.test(clientSecretEnv)) {
-      return `clientSecretEnv for provider ${id} must be an environment variable name`;
+    if (clientSecretEnv && !isAllowedOidcClientSecretEnvForTenant(clientSecretEnv, tenantId)) {
+      return `clientSecretEnv for provider ${id} must be an environment variable name starting with ${oidcClientSecretEnvPrefixForTenant(tenantId)}`;
     }
     if (
       authorizationUrl &&
@@ -137,7 +187,10 @@ export function normalizeOidcProviders(value: unknown): TenantOidcProviderConfig
           ? entry.pictureClaim.trim()
           : "picture",
       allowedAlgs: allowedAlgs?.length ? allowedAlgs : ["RS256", "ES256"],
-      allowJitProvisioning: entry.allowJitProvisioning !== false,
+      // JIT provisioning defaults off, matching the SAML plane. Auto-creating
+      // accounts for IdP token holders requires explicit tenant opt-in. Persisted
+      // values remain authoritative when configurations are read and rewritten.
+      allowJitProvisioning: entry.allowJitProvisioning === true,
     });
   }
   return normalized;

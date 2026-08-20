@@ -1,8 +1,10 @@
 import { randomUUID } from "node:crypto";
 import {
+  type AppendRequiredAudit,
   agents,
   getDb,
   providerAccounts,
+  providerAgentBudgets,
   providerAuthorityTenantState,
   providerGrants,
   providerOperations,
@@ -10,9 +12,15 @@ import {
   secretRoutes,
   secrets,
   userTenants,
+  withTenantAuditedTransaction,
   workspaces,
 } from "@stwd/db";
+import type { GoogleOperationKey } from "@stwd/provider-google";
+import { SLACK_OPERATION_RISK, type SlackOperationKey } from "@stwd/provider-slack";
 import {
+  GENERIC_HTTP_PROVIDER_ACTION_PROFILE,
+  genericDescriptorAllowsExactPath,
+  genericDescriptorGovernedRoutePattern,
   PROVIDER_ACCESS_REASON,
   type ProviderAccessDecisionV1,
   type ProviderAccessRequestV1,
@@ -20,12 +28,52 @@ import {
   type ProviderEnvironment,
   type ProviderPrincipalType,
   type ProviderRiskClass,
+  secretRouteHostPatternsOverlap,
+  secretRouteMethodPatternsOverlap,
+  secretRoutePathPatternsOverlap,
+  validateGenericHttpDescriptor,
 } from "@stwd/shared";
 import { and, eq, inArray, sql } from "drizzle-orm";
+import {
+  assertNoOppositeAuthorityOverlap,
+  lockSecretRouteNamespaces,
+  type RouteAuthorityTx,
+  SecretRouteAuthorityConflict,
+} from "./secret-route-authority";
 
 const RECENT_MFA_MS = 5 * 60_000;
 const OPERATION_KEY = /^[a-z][a-z0-9]*(?:\.[a-z][a-z0-9_]*)+$/;
 const KEY = /^[a-z][a-z0-9_-]{0,127}$/;
+const SLACK_OPERATION_METHOD = {
+  "slack.chat.postMessage": "POST",
+  "slack.conversations.list": "GET",
+  "slack.users.info": "GET",
+} as const satisfies Readonly<Record<SlackOperationKey, "GET" | "POST" | "DELETE">>;
+const SLACK_OPERATION_EXACT_PATH = {
+  "slack.chat.postMessage": "/api/chat.postMessage",
+  "slack.conversations.list": "/api/conversations.list",
+  "slack.users.info": "/api/users.info",
+} as const satisfies Readonly<Record<SlackOperationKey, string>>;
+const GOOGLE_OPERATION_METHOD = {
+  "google.gmail.messages.send": "POST",
+  "google.calendar.events.list": "GET",
+  "google.calendar.events.insert": "POST",
+} as const satisfies Readonly<Record<GoogleOperationKey, "GET" | "POST" | "DELETE">>;
+const GOOGLE_OPERATION_MINIMUM_RISK = {
+  "google.gmail.messages.send": "consequential",
+  "google.calendar.events.list": "read",
+  "google.calendar.events.insert": "consequential",
+} as const satisfies Readonly<Record<GoogleOperationKey, ProviderRiskClass>>;
+const GOOGLE_OPERATION_EXACT_PATH = {
+  "google.gmail.messages.send": "/gmail/v1/users/me/messages/send",
+  "google.calendar.events.list": "/calendar/v3/calendars/primary/events",
+  "google.calendar.events.insert": "/calendar/v3/calendars/primary/events",
+} as const satisfies Readonly<Record<GoogleOperationKey, string>>;
+const GOOGLE_OPERATION_HOST = {
+  "google.gmail.messages.send": "gmail.googleapis.com",
+  "google.calendar.events.list": "www.googleapis.com",
+  "google.calendar.events.insert": "www.googleapis.com",
+} as const satisfies Readonly<Record<GoogleOperationKey, string>>;
 const PROVIDER_OPERATION_ALLOWLIST: Readonly<
   Record<string, Readonly<Record<string, "GET" | "POST" | "DELETE">>>
 > = {
@@ -38,11 +86,98 @@ const PROVIDER_OPERATION_ALLOWLIST: Readonly<
     "x.tweet.delete": "DELETE",
     "x.user.me.read": "GET",
   },
+  slack: SLACK_OPERATION_METHOD,
+  google: GOOGLE_OPERATION_METHOD,
+  aws: {
+    "aws.ec2.DescribeInstances": "POST",
+    "aws.ec2.StopInstances": "POST",
+  },
+};
+const PROVIDER_OPERATION_MINIMUM_RISK: Readonly<
+  Record<string, Readonly<Record<string, ProviderRiskClass>>>
+> = {
+  github: {
+    "github.issue.list": "read",
+    "github.pr.comment.create": "write",
+  },
+  x: {
+    "x.tweet.create": "write",
+    "x.tweet.delete": "write",
+    "x.user.me.read": "read",
+  },
+  slack: SLACK_OPERATION_RISK,
+  google: GOOGLE_OPERATION_MINIMUM_RISK,
+  aws: {
+    "aws.ec2.DescribeInstances": "read",
+    "aws.ec2.StopInstances": "consequential",
+  },
+};
+const PROVIDER_OPERATION_EXACT_PATH: Readonly<Record<string, Readonly<Record<string, string>>>> = {
+  slack: SLACK_OPERATION_EXACT_PATH,
+  google: GOOGLE_OPERATION_EXACT_PATH,
+  aws: {
+    "aws.ec2.DescribeInstances": "/",
+    "aws.ec2.StopInstances": "/",
+  },
+};
+const PROVIDER_RISK_RANK: Readonly<Record<ProviderRiskClass, number>> = {
+  read: 0,
+  write: 1,
+  consequential: 2,
 };
 const PROVIDER_HOST_ALLOWLIST: Readonly<Record<string, string>> = {
   github: "api.github.com",
   x: "api.x.com",
+  slack: "slack.com",
 };
+const REGISTERED_ADAPTER_KEY_LIST = [
+  "aws",
+  "github",
+  "x",
+  "slack",
+  "google",
+  "generic-http",
+] as const;
+type RegisteredAdapterKey = (typeof REGISTERED_ADAPTER_KEY_LIST)[number];
+type FixedProviderAdapterKey = Exclude<RegisteredAdapterKey, "generic-http">;
+type FixedProviderRouteInjection = {
+  readonly injectAs: "header";
+  readonly injectKey: "authorization";
+  readonly injectFormat: string;
+};
+const BEARER_ROUTE_INJECTION = {
+  injectAs: "header",
+  injectKey: "authorization",
+  injectFormat: "Bearer {value}",
+} as const;
+const AWS_ROUTE_INJECTION = {
+  injectAs: "header",
+  injectKey: "authorization",
+  injectFormat: "{value}",
+} as const;
+// Keep every fixed adapter explicit. Adding one to the registered list without
+// defining its credential injection contract is a compile-time failure.
+const FIXED_PROVIDER_ROUTE_INJECTION = {
+  aws: AWS_ROUTE_INJECTION,
+  github: BEARER_ROUTE_INJECTION,
+  x: BEARER_ROUTE_INJECTION,
+  slack: BEARER_ROUTE_INJECTION,
+  google: BEARER_ROUTE_INJECTION,
+} as const satisfies Readonly<Record<FixedProviderAdapterKey, FixedProviderRouteInjection>>;
+const REGISTERED_ADAPTER_KEYS = new Set<string>(REGISTERED_ADAPTER_KEY_LIST);
+
+function awsRouteHost(route: typeof secretRoutes.$inferSelect | undefined): string | undefined {
+  if (route?.injectionStrategy !== "sigv4") return undefined;
+  const config = route.injectionConfig as { service?: unknown; region?: unknown };
+  if (
+    config.service !== "ec2" ||
+    typeof config.region !== "string" ||
+    !/^[a-z]{2}(?:-[a-z0-9]+){1,3}-[1-9][0-9]?$/.test(config.region)
+  ) {
+    return undefined;
+  }
+  return `ec2.${config.region}.amazonaws.com`;
+}
 const ENVIRONMENTS = new Set(["development", "staging", "production"]);
 const PRINCIPAL_TYPES = new Set(["human", "agent"]);
 const ROLES = new Set([
@@ -53,6 +188,18 @@ const ROLES = new Set([
   "workspace_approver",
 ]);
 const RISK_CLASSES = new Set(["read", "write", "consequential"]);
+const BUDGET_DIMENSIONS = new Set(["count", "notional"]);
+const MAX_BUDGET_WINDOW_SECONDS = 30 * 24 * 60 * 60;
+
+function fixedProviderHost(adapterKey: string, operationKey: string): string | undefined {
+  if (adapterKey === "google") {
+    return GOOGLE_OPERATION_HOST[operationKey as GoogleOperationKey];
+  }
+  return PROVIDER_HOST_ALLOWLIST[adapterKey];
+}
+
+type DbBase = ReturnType<typeof getDb>;
+type DbExecutor = DbBase | Parameters<Parameters<DbBase["transaction"]>[0]>[0];
 
 export class ProviderAuthorityError extends Error {
   constructor(
@@ -77,9 +224,28 @@ export type AuthorityAudit = (event: {
   metadata: Record<string, unknown>;
 }) => Promise<void>;
 
-type MutationContext = ProviderAuthorityMutationContext & { audit: AuthorityAudit };
+type MutationContext = ProviderAuthorityMutationContext & {
+  audit: AuthorityAudit;
+};
 type BindingInsert = typeof providerRoleBindings.$inferInsert;
 type GrantInsert = typeof providerGrants.$inferInsert;
+
+async function appendAuthorityMutationAudit(
+  ctx: MutationContext,
+  append: AppendRequiredAudit,
+  event: Parameters<AuthorityAudit>[0],
+): Promise<void> {
+  await append({
+    tenantId: ctx.tenantId,
+    actorType: "user",
+    actorId: ctx.actorUserId,
+    action: event.action,
+    resourceType: event.resourceType,
+    resourceId: event.resourceId,
+    metadata: event.metadata,
+    requestId: ctx.requestId ?? null,
+  });
+}
 
 function assertText(value: unknown, field: string, max = 512): string {
   const normalized = typeof value === "string" ? value.trim() : "";
@@ -91,6 +257,57 @@ function assertText(value: unknown, field: string, max = 512): string {
     );
   }
   return normalized;
+}
+
+function normalizeBudgetInput(input: {
+  dimension: unknown;
+  windowSeconds: unknown;
+  max: unknown;
+  currency?: unknown;
+  autoFreeze?: unknown;
+  enabled?: unknown;
+}) {
+  if (typeof input.dimension !== "string" || !BUDGET_DIMENSIONS.has(input.dimension)) {
+    throw new ProviderAuthorityError("invalid budget dimension", "bad_request", 400);
+  }
+  if (
+    !Number.isSafeInteger(input.windowSeconds) ||
+    (input.windowSeconds as number) < 1 ||
+    (input.windowSeconds as number) > MAX_BUDGET_WINDOW_SECONDS
+  ) {
+    throw new ProviderAuthorityError("invalid budget windowSeconds", "bad_request", 400);
+  }
+  if (!Number.isSafeInteger(input.max) || (input.max as number) < 0) {
+    throw new ProviderAuthorityError("invalid budget max", "bad_request", 400);
+  }
+  const currency =
+    input.currency === undefined || input.currency === null
+      ? null
+      : assertText(input.currency, "currency", 64);
+  if (
+    (input.dimension === "count" && currency !== null) ||
+    (input.dimension === "notional" && currency === null)
+  ) {
+    throw new ProviderAuthorityError(
+      "count budgets omit currency; notional budgets require currency",
+      "bad_request",
+      400,
+    );
+  }
+  if (input.autoFreeze !== undefined && typeof input.autoFreeze !== "boolean") {
+    throw new ProviderAuthorityError("invalid budget autoFreeze", "bad_request", 400);
+  }
+  if (input.enabled !== undefined && typeof input.enabled !== "boolean") {
+    throw new ProviderAuthorityError("invalid budget enabled", "bad_request", 400);
+  }
+  return {
+    dimension: input.dimension as "count" | "notional",
+    windowSeconds: input.windowSeconds as number,
+    max: input.max as number,
+    currency,
+    autoFreeze: input.autoFreeze ?? false,
+    enabled: input.enabled ?? true,
+  };
 }
 
 function assertMutationContext(ctx: MutationContext): void {
@@ -144,22 +361,54 @@ function subset(candidate: string[], allowed: string[]): boolean {
   return candidate.every((key) => set.has(key));
 }
 
+function hasExactFixedProviderRouteInjection(
+  adapterKey: string,
+  route:
+    | {
+        injectAs?: string | null;
+        injectKey?: string | null;
+        injectFormat?: string | null;
+      }
+    | undefined,
+): boolean {
+  const expected = FIXED_PROVIDER_ROUTE_INJECTION[adapterKey as FixedProviderAdapterKey];
+  if (!expected || typeof route?.injectKey !== "string") return false;
+  // Header names are case-insensitive, but surrounding whitespace is not part
+  // of a header name and must not be normalized away at this trust boundary.
+  const injectKey = route.injectKey;
+  return (
+    route.injectAs === expected.injectAs &&
+    injectKey === injectKey.trim() &&
+    injectKey.toLowerCase() === expected.injectKey &&
+    route.injectFormat === expected.injectFormat
+  );
+}
+
 export class ProviderAuthorityStore {
+  constructor(
+    private readonly runAuditedTransaction: typeof withTenantAuditedTransaction = withTenantAuditedTransaction,
+  ) {}
+  /** Test-only race hooks. Runtime callers never set these. */
+  faultHooks: Partial<
+    Record<"afterBudgetPreflight" | "afterOperationRoutePreflight", () => void | Promise<void>>
+  > = {};
+
   private db() {
     return getDb();
   }
 
-  private async membership(tenantId: string, userId: string) {
-    const [row] = await this.db()
+  private async membership(tenantId: string, userId: string, db: DbExecutor = this.db()) {
+    const [row] = await db
       .select()
       .from(userTenants)
       .where(and(eq(userTenants.tenantId, tenantId), eq(userTenants.userId, userId)))
-      .limit(1);
+      .limit(1)
+      .for("share");
     return row;
   }
 
-  private async activeTenantAdmins(tenantId: string, at = new Date()) {
-    const rows = await this.db()
+  private async activeTenantAdmins(tenantId: string, at = new Date(), db: DbExecutor = this.db()) {
+    const rows = await db
       .select()
       .from(providerRoleBindings)
       .where(
@@ -168,7 +417,8 @@ export class ProviderAuthorityStore {
           eq(providerRoleBindings.roleKey, "tenant_authority_admin"),
           eq(providerRoleBindings.status, "active"),
         ),
-      );
+      )
+      .for("share");
     return rows.filter(
       (row) => (!row.notBefore || row.notBefore <= at) && (!row.expiresAt || row.expiresAt > at),
     );
@@ -177,20 +427,24 @@ export class ProviderAuthorityStore {
   /** Owner compatibility is bootstrap-only. Creating the first explicit tenant admin closes it permanently. */
   private async hasTenantAdmin(
     ctx: Pick<MutationContext, "tenantId" | "actorUserId" | "tenantRole">,
+    db: DbExecutor = this.db(),
   ): Promise<boolean> {
-    const membership = await this.membership(ctx.tenantId, ctx.actorUserId);
+    const membership = await this.membership(ctx.tenantId, ctx.actorUserId, db);
     if (!membership) return false;
-    const explicit = await this.activeTenantAdmins(ctx.tenantId);
+    const explicit = await this.activeTenantAdmins(ctx.tenantId, new Date(), db);
     if (
       explicit.some((row) => row.principalType === "human" && row.principalId === ctx.actorUserId)
     )
       return true;
-    await this.ensureTenantState(ctx.tenantId);
-    const [state] = await this.db()
-      .select({ bootstrapCompleted: providerAuthorityTenantState.bootstrapCompleted })
+    await this.ensureTenantState(ctx.tenantId, db);
+    const [state] = await db
+      .select({
+        bootstrapCompleted: providerAuthorityTenantState.bootstrapCompleted,
+      })
       .from(providerAuthorityTenantState)
       .where(eq(providerAuthorityTenantState.tenantId, ctx.tenantId))
-      .limit(1);
+      .limit(1)
+      .for("share");
     return !state?.bootstrapCompleted && membership.role === "owner" && ctx.tenantRole === "owner";
   }
 
@@ -199,14 +453,16 @@ export class ProviderAuthorityStore {
     workspaceId: string,
     userId: string,
     at = new Date(),
+    db: DbExecutor = this.db(),
   ) {
-    const [workspace] = await this.db()
+    const [workspace] = await db
       .select({ environment: workspaces.environment })
       .from(workspaces)
       .where(and(eq(workspaces.tenantId, tenantId), eq(workspaces.id, workspaceId)))
-      .limit(1);
+      .limit(1)
+      .for("share");
     if (!workspace) return undefined;
-    const rows = await this.db()
+    const rows = await db
       .select()
       .from(providerRoleBindings)
       .where(
@@ -218,7 +474,8 @@ export class ProviderAuthorityStore {
           eq(providerRoleBindings.roleKey, "workspace_admin"),
           eq(providerRoleBindings.status, "active"),
         ),
-      );
+      )
+      .for("share");
     return rows.find((row) => activeAt(row, at, workspace.environment));
   }
 
@@ -226,20 +483,68 @@ export class ProviderAuthorityStore {
     ctx: MutationContext,
     workspaceId: string,
     allowTenantAdmin: boolean,
+    db: DbExecutor = this.db(),
   ) {
-    if (allowTenantAdmin && (await this.hasTenantAdmin(ctx)))
+    if (allowTenantAdmin && (await this.hasTenantAdmin(ctx, db)))
       return { type: "tenant" as const, operationKeys: [] as string[] };
-    const binding = await this.workspaceAdminMandate(ctx.tenantId, workspaceId, ctx.actorUserId);
+    const binding = await this.workspaceAdminMandate(
+      ctx.tenantId,
+      workspaceId,
+      ctx.actorUserId,
+      new Date(),
+      db,
+    );
     if (!binding) throw new ProviderAuthorityError("resource not found", "not_found", 404);
     return { type: "workspace" as const, operationKeys: binding.operationKeys };
   }
 
-  private async ensureTenantState(tenantId: string): Promise<number> {
-    await this.db()
+  /** A workspace budget may only target an agent that currently has provider
+   * authority in that workspace. Agents are tenant-global, so existence in the
+   * tenant alone is not enough to establish this narrower relationship. */
+  private async hasWorkspaceAgentAuthority(
+    tenantId: string,
+    workspaceId: string,
+    agentId: string,
+    environment: string,
+    at = new Date(),
+    db: DbExecutor = this.db(),
+  ): Promise<boolean> {
+    const [grants, bindings] = await Promise.all([
+      db
+        .select()
+        .from(providerGrants)
+        .where(
+          and(
+            eq(providerGrants.tenantId, tenantId),
+            eq(providerGrants.workspaceId, workspaceId),
+            eq(providerGrants.agentId, agentId),
+            eq(providerGrants.status, "active"),
+          ),
+        )
+        .for("share"),
+      db
+        .select()
+        .from(providerRoleBindings)
+        .where(
+          and(
+            eq(providerRoleBindings.tenantId, tenantId),
+            eq(providerRoleBindings.workspaceId, workspaceId),
+            eq(providerRoleBindings.principalType, "agent"),
+            eq(providerRoleBindings.principalId, agentId),
+            eq(providerRoleBindings.status, "active"),
+          ),
+        )
+        .for("share"),
+    ]);
+    return [...grants, ...bindings].some((row) => activeAt(row, at, environment));
+  }
+
+  private async ensureTenantState(tenantId: string, db: DbExecutor = this.db()): Promise<number> {
+    await db
       .insert(providerAuthorityTenantState)
       .values({ tenantId, revision: 0 })
       .onConflictDoNothing();
-    const [row] = await this.db()
+    const [row] = await db
       .select()
       .from(providerAuthorityTenantState)
       .where(eq(providerAuthorityTenantState.tenantId, tenantId));
@@ -268,7 +573,7 @@ export class ProviderAuthorityStore {
    * initiate/complete/disconnect an X (or other provider) OAuth connection when
    * they are a tenant authority admin OR hold an active workspace_admin /
    * workspace_approver binding for the target workspace (environment + temporal
-   * validity enforced). Mirrors the admin-OR-approver gate of PR3's
+   * validity enforced). Mirrors the admin-or-approver gate of
    * hasWorkspaceRoleAuthority, scoped to the connect surface.
    */
   async canConnectProviderAccounts(
@@ -281,7 +586,10 @@ export class ProviderAuthorityStore {
     if (await this.hasTenantAdmin(ctx)) return true;
     if (!(await this.membership(tenantId, userId))) return false;
     const [workspace] = await this.db()
-      .select({ environment: workspaces.environment, status: workspaces.status })
+      .select({
+        environment: workspaces.environment,
+        status: workspaces.status,
+      })
       .from(workspaces)
       .where(and(eq(workspaces.tenantId, tenantId), eq(workspaces.id, workspaceId)))
       .limit(1);
@@ -380,7 +688,11 @@ export class ProviderAuthorityStore {
     });
     const [updated] = await this.db()
       .update(workspaces)
-      .set({ status: "disabled", revision: row.revision + 1, updatedAt: new Date() })
+      .set({
+        status: "disabled",
+        revision: row.revision + 1,
+        updatedAt: new Date(),
+      })
       .where(
         and(
           eq(workspaces.id, id),
@@ -450,6 +762,10 @@ export class ProviderAuthorityStore {
       if (!secret || (secret.expiresAt && secret.expiresAt <= new Date()))
         throw new ProviderAuthorityError("resource not found", "not_found", 404);
     }
+    const adapterKey = assertText(input.adapterKey, "adapterKey", 128);
+    if (!REGISTERED_ADAPTER_KEYS.has(adapterKey)) {
+      throw new ProviderAuthorityError("adapter is not registered", "bad_request", 400);
+    }
     const id = randomUUID();
     await ctx.audit({
       action: "provider.account.create",
@@ -481,7 +797,7 @@ export class ProviderAuthorityStore {
           id,
           tenantId: ctx.tenantId,
           workspaceId: workspace.id,
-          adapterKey: assertText(input.adapterKey, "adapterKey", 128),
+          adapterKey,
           externalRef: assertText(input.externalRef, "externalRef", 512),
           displayName: assertText(input.displayName, "displayName", 255),
           credentialSecretId: input.credentialSecretId,
@@ -527,25 +843,58 @@ export class ProviderAuthorityStore {
         reason: ctx.reason,
       },
     });
-    const [updated] = await this.db()
-      .update(providerAccounts)
-      .set({ status: "disabled", revision: row.revision + 1, updatedAt: new Date() })
-      .where(
-        and(
-          eq(providerAccounts.id, id),
-          eq(providerAccounts.tenantId, ctx.tenantId),
-          eq(providerAccounts.workspaceId, row.workspaceId),
-          eq(providerAccounts.revision, row.revision),
-        ),
-      )
-      .returning();
-    if (!updated)
-      throw new ProviderAuthorityError(
-        "provider account revision conflict",
-        "revision_conflict",
-        409,
-      );
-    return updated;
+    return this.runAuditedTransaction(ctx.tenantId, async (txRaw, appendRequiredAudit) => {
+      const tx = txRaw as DbExecutor;
+      const [lockedRow] = await tx
+        .select()
+        .from(providerAccounts)
+        .where(and(eq(providerAccounts.id, id), eq(providerAccounts.tenantId, ctx.tenantId)))
+        .limit(1)
+        .for("update");
+      if (!lockedRow) throw new ProviderAuthorityError("resource not found", "not_found", 404);
+      await this.requireWorkspaceAdmin(ctx, lockedRow.workspaceId, true, tx);
+      if (lockedRow.revision !== ctx.expectedRevision) {
+        throw new ProviderAuthorityError(
+          "provider account revision conflict",
+          "revision_conflict",
+          409,
+        );
+      }
+      const [updated] = await tx
+        .update(providerAccounts)
+        .set({
+          status: "disabled",
+          revision: lockedRow.revision + 1,
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(providerAccounts.id, id),
+            eq(providerAccounts.tenantId, ctx.tenantId),
+            eq(providerAccounts.workspaceId, lockedRow.workspaceId),
+            eq(providerAccounts.revision, lockedRow.revision),
+          ),
+        )
+        .returning();
+      if (!updated)
+        throw new ProviderAuthorityError(
+          "provider account revision conflict",
+          "revision_conflict",
+          409,
+        );
+      await appendAuthorityMutationAudit(ctx, appendRequiredAudit, {
+        action: "provider.account.disable.completed",
+        resourceType: "provider_account",
+        resourceId: id,
+        metadata: {
+          workspaceId: lockedRow.workspaceId,
+          expectedRevision: lockedRow.revision,
+          resultingRevision: updated.revision,
+          reason: ctx.reason,
+        },
+      });
+      return updated;
+    });
   }
 
   async registerOperation(
@@ -573,7 +922,7 @@ export class ProviderAuthorityStore {
       )
       .limit(1);
     if (!account) throw new ProviderAuthorityError("resource not found", "not_found", 404);
-    await this.requireWorkspaceAdmin(ctx, account.workspaceId, false);
+    await this.requireWorkspaceAdmin(ctx, account.workspaceId, true);
     if (account.revision !== ctx.expectedRevision)
       throw new ProviderAuthorityError(
         "provider account revision conflict",
@@ -583,16 +932,66 @@ export class ProviderAuthorityStore {
     const operationKey = assertText(input.operationKey, "operationKey", 128);
     if (!RISK_CLASSES.has(input.riskClass))
       throw new ProviderAuthorityError("invalid riskClass", "bad_request", 400);
-    if (!OPERATION_KEY.test(operationKey))
+    // Config-driven keys follow the operator-authored lowercase grammar. Fixed
+    // adapters are instead constrained by their exact compile-time allowlist;
+    // Slack's upstream operation names intentionally include camelCase (for
+    // example chat.postMessage), so applying the generic grammar first would
+    // make the registered adapter impossible to configure.
+    if (account.adapterKey === "generic-http" && !OPERATION_KEY.test(operationKey))
       throw new ProviderAuthorityError("invalid operationKey", "bad_request", 400);
-    const allowedMethod = PROVIDER_OPERATION_ALLOWLIST[account.adapterKey]?.[operationKey];
-    if (!allowedMethod)
+    let allowedMethods: readonly string[];
+    let genericDescriptor: ReturnType<typeof validateGenericHttpDescriptor> | undefined;
+    if (account.adapterKey === "generic-http") {
+      try {
+        if (input.requestProfile?.profile !== GENERIC_HTTP_PROVIDER_ACTION_PROFILE) {
+          throw new Error("profile mismatch");
+        }
+        genericDescriptor = validateGenericHttpDescriptor(input.requestProfile.operationDescriptor);
+        if (genericDescriptor.methods.length !== 1) {
+          throw new Error("one route can bind exactly one method");
+        }
+        allowedMethods = genericDescriptor.methods;
+      } catch {
+        throw new ProviderAuthorityError(
+          "invalid generic-http operation descriptor",
+          "bad_request",
+          400,
+        );
+      }
+    } else {
+      const fixedMethod = PROVIDER_OPERATION_ALLOWLIST[account.adapterKey]?.[operationKey];
+      if (!fixedMethod)
+        throw new ProviderAuthorityError(
+          "operation is not in the adapter allowlist",
+          "forbidden",
+          403,
+        );
+      const minimumRisk = PROVIDER_OPERATION_MINIMUM_RISK[account.adapterKey]?.[operationKey];
+      if (!minimumRisk || PROVIDER_RISK_RANK[input.riskClass] < PROVIDER_RISK_RANK[minimumRisk]) {
+        throw new ProviderAuthorityError(
+          "riskClass understates the adapter operation risk",
+          "bad_request",
+          400,
+        );
+      }
+      allowedMethods = [fixedMethod];
+    }
+    if (account.adapterKey === "generic-http" && !input.secretRouteId) {
       throw new ProviderAuthorityError(
-        "operation is not in the adapter allowlist",
+        "generic-http operations require a governed credential route binding",
         "forbidden",
         403,
       );
+    }
     if (input.secretRouteId) {
+      const credentialSecretId = account.credentialSecretId;
+      if (!credentialSecretId) {
+        throw new ProviderAuthorityError(
+          "provider account has no credential binding",
+          "forbidden",
+          403,
+        );
+      }
       const [route] = await this.db()
         .select()
         .from(secretRoutes)
@@ -604,16 +1003,66 @@ export class ProviderAuthorityStore {
           ),
         )
         .limit(1);
-      const expectedHost = PROVIDER_HOST_ALLOWLIST[account.adapterKey];
+      const expectedHost = genericDescriptor
+        ? new URL(genericDescriptor.origin).hostname
+        : account.adapterKey === "aws"
+          ? awsRouteHost(route)
+          : fixedProviderHost(account.adapterKey, operationKey);
+      const method = route?.method?.toUpperCase();
+      const pathAllowed = genericDescriptor
+        ? Boolean(
+            route?.pathPattern &&
+              genericDescriptorAllowsExactPath(genericDescriptor, route.pathPattern),
+          )
+        : PROVIDER_OPERATION_EXACT_PATH[account.adapterKey]?.[operationKey]
+          ? route?.pathPattern === PROVIDER_OPERATION_EXACT_PATH[account.adapterKey]?.[operationKey]
+          : Boolean(route?.pathPattern && !route.pathPattern.includes("*"));
       if (
         !route ||
+        route.secretId !== credentialSecretId ||
+        !route.agentId ||
+        route.authorityMode !== "legacy" ||
+        route.providerOperationId !== null ||
+        (account.adapterKey === "aws" && route.injectionStrategy !== "sigv4") ||
         route.hostPattern !== expectedHost ||
-        route.method !== allowedMethod ||
-        !route.pathPattern ||
-        route.pathPattern.includes("*")
+        !method ||
+        !allowedMethods.includes(method) ||
+        (!genericDescriptor && !hasExactFixedProviderRouteInjection(account.adapterKey, route)) ||
+        !pathAllowed
       ) {
         throw new ProviderAuthorityError(
           "route target would widen the adapter operation",
+          "forbidden",
+          403,
+        );
+      }
+      await this.faultHooks.afterOperationRoutePreflight?.();
+      const promotedPath = genericDescriptor
+        ? genericDescriptorGovernedRoutePattern(genericDescriptor)
+        : route.pathPattern;
+      // This early overlap check is only a fast rejection. The transaction below
+      // repeats it after locking the agent's route namespace.
+      const siblings = await this.db()
+        .select()
+        .from(secretRoutes)
+        .where(
+          and(
+            eq(secretRoutes.tenantId, ctx.tenantId),
+            eq(secretRoutes.agentId, route.agentId),
+            eq(secretRoutes.enabled, true),
+          ),
+        );
+      if (
+        siblings.some(
+          (candidate) =>
+            candidate.id !== route.id &&
+            secretRouteMethodPatternsOverlap(candidate.method, route.method) &&
+            secretRouteHostPatternsOverlap(candidate.hostPattern, route.hostPattern) &&
+            secretRoutePathPatternsOverlap(candidate.pathPattern ?? "/*", promotedPath ?? "/*"),
+        )
+      ) {
+        throw new ProviderAuthorityError(
+          "credential route overlaps another enabled route for this agent",
           "forbidden",
           403,
         );
@@ -632,7 +1081,91 @@ export class ProviderAuthorityStore {
         reason: ctx.reason,
       },
     });
-    return this.db().transaction(async (tx) => {
+    return this.runAuditedTransaction(ctx.tenantId, async (txRaw, appendRequiredAudit) => {
+      const tx = txRaw as RouteAuthorityTx;
+      if (input.secretRouteId) {
+        const [routeBeforeLock] = await tx
+          .select()
+          .from(secretRoutes)
+          .where(
+            and(
+              eq(secretRoutes.tenantId, ctx.tenantId),
+              eq(secretRoutes.id, input.secretRouteId),
+              eq(secretRoutes.enabled, true),
+            ),
+          )
+          .limit(1);
+        if (!routeBeforeLock?.agentId) {
+          throw new ProviderAuthorityError(
+            "credential route changed during operation registration",
+            "revision_conflict",
+            409,
+          );
+        }
+        await lockSecretRouteNamespaces(tx, ctx.tenantId, [routeBeforeLock.agentId]);
+        const [route] = await tx
+          .select()
+          .from(secretRoutes)
+          .where(
+            and(
+              eq(secretRoutes.tenantId, ctx.tenantId),
+              eq(secretRoutes.id, input.secretRouteId),
+              eq(secretRoutes.enabled, true),
+            ),
+          )
+          .limit(1);
+        const credentialSecretId = account.credentialSecretId;
+        const expectedHost = genericDescriptor
+          ? new URL(genericDescriptor.origin).hostname
+          : account.adapterKey === "aws"
+            ? awsRouteHost(route)
+            : fixedProviderHost(account.adapterKey, operationKey);
+        const method = route?.method?.toUpperCase();
+        const pathAllowed = genericDescriptor
+          ? Boolean(
+              route?.pathPattern &&
+                genericDescriptorAllowsExactPath(genericDescriptor, route.pathPattern),
+            )
+          : PROVIDER_OPERATION_EXACT_PATH[account.adapterKey]?.[operationKey]
+            ? route?.pathPattern ===
+              PROVIDER_OPERATION_EXACT_PATH[account.adapterKey]?.[operationKey]
+            : Boolean(route?.pathPattern && !route.pathPattern.includes("*"));
+        if (
+          !credentialSecretId ||
+          !route ||
+          route.agentId !== routeBeforeLock.agentId ||
+          route.secretId !== credentialSecretId ||
+          route.authorityMode !== "legacy" ||
+          route.providerOperationId !== null ||
+          (account.adapterKey === "aws" && route.injectionStrategy !== "sigv4") ||
+          route.hostPattern !== expectedHost ||
+          !method ||
+          !allowedMethods.includes(method) ||
+          (!genericDescriptor && !hasExactFixedProviderRouteInjection(account.adapterKey, route)) ||
+          !pathAllowed
+        ) {
+          throw new ProviderAuthorityError(
+            "credential route changed during operation registration",
+            "revision_conflict",
+            409,
+          );
+        }
+        try {
+          await assertNoOppositeAuthorityOverlap(tx, {
+            ...route,
+            agentId: routeBeforeLock.agentId,
+            authorityMode: "governed_v2",
+            pathPattern: genericDescriptor
+              ? genericDescriptorGovernedRoutePattern(genericDescriptor)
+              : route.pathPattern,
+          });
+        } catch (error) {
+          if (error instanceof SecretRouteAuthorityConflict) {
+            throw new ProviderAuthorityError(error.message, "forbidden", 403);
+          }
+          throw error;
+        }
+      }
       const [cas] = await tx
         .update(providerAccounts)
         .set({ revision: account.revision + 1, updatedAt: new Date() })
@@ -666,6 +1199,60 @@ export class ProviderAuthorityStore {
           responseProfile: input.responseProfile ?? {},
         })
         .returning();
+      if (input.secretRouteId) {
+        const credentialSecretId = account.credentialSecretId;
+        if (!credentialSecretId) {
+          throw new ProviderAuthorityError(
+            "provider account has no credential binding",
+            "forbidden",
+            403,
+          );
+        }
+        const [boundRoute] = await tx
+          .update(secretRoutes)
+          .set({
+            authorityMode: "governed_v2",
+            providerOperationId: row.id,
+            ...(genericDescriptor
+              ? {
+                  pathPattern: genericDescriptorGovernedRoutePattern(genericDescriptor),
+                }
+              : {}),
+          })
+          .where(
+            and(
+              eq(secretRoutes.id, input.secretRouteId),
+              eq(secretRoutes.tenantId, ctx.tenantId),
+              eq(secretRoutes.secretId, credentialSecretId),
+              eq(secretRoutes.authorityMode, "legacy"),
+              sql`${secretRoutes.providerOperationId} IS NULL`,
+            ),
+          )
+          .returning();
+        if (!boundRoute) {
+          throw new ProviderAuthorityError(
+            "credential route changed during operation registration",
+            "revision_conflict",
+            409,
+          );
+        }
+      }
+      await appendRequiredAudit({
+        tenantId: ctx.tenantId,
+        actorType: "user",
+        actorId: ctx.actorUserId,
+        action: "provider.operation.register.completed",
+        resourceType: "provider_operation",
+        resourceId: row.id,
+        metadata: {
+          workspaceId: account.workspaceId,
+          providerAccountId: account.id,
+          operationKey,
+          expectedRevision: account.revision,
+          reason: ctx.reason,
+        },
+        requestId: ctx.requestId ?? null,
+      });
       return row;
     });
   }
@@ -765,7 +1352,11 @@ export class ProviderAuthorityStore {
       return this.db().transaction(async (tx) => {
         const [cas] = await tx
           .update(providerAuthorityTenantState)
-          .set({ revision: revision + 1, bootstrapCompleted: true, updatedAt: new Date() })
+          .set({
+            revision: revision + 1,
+            bootstrapCompleted: true,
+            updatedAt: new Date(),
+          })
           .where(
             and(
               eq(providerAuthorityTenantState.tenantId, ctx.tenantId),
@@ -832,7 +1423,10 @@ export class ProviderAuthorityStore {
     }
     if (requestedOperationKeys.length > 0) {
       const scopedOperations = await this.db()
-        .select({ key: providerOperations.operationKey, riskClass: providerOperations.riskClass })
+        .select({
+          key: providerOperations.operationKey,
+          riskClass: providerOperations.riskClass,
+        })
         .from(providerOperations)
         .where(
           and(
@@ -969,7 +1563,11 @@ export class ProviderAuthorityStore {
     });
     const [updated] = await this.db()
       .update(providerRoleBindings)
-      .set({ status: "revoked", revision: binding.revision + 1, updatedAt: new Date() })
+      .set({
+        status: "revoked",
+        revision: binding.revision + 1,
+        updatedAt: new Date(),
+      })
       .where(
         and(
           eq(providerRoleBindings.id, id),
@@ -1119,6 +1717,301 @@ export class ProviderAuthorityStore {
       .where(
         and(eq(providerGrants.tenantId, tenantId), eq(providerGrants.workspaceId, workspaceId)),
       );
+  }
+
+  async listAgentBudgets(tenantId: string, agentId: string, workspaceId?: string) {
+    const [agent] = await this.db()
+      .select({ id: agents.id })
+      .from(agents)
+      .where(and(eq(agents.tenantId, tenantId), eq(agents.id, agentId)))
+      .limit(1);
+    if (!agent) throw new ProviderAuthorityError("resource not found", "not_found", 404);
+    const conditions = [
+      eq(providerAgentBudgets.tenantId, tenantId),
+      eq(providerAgentBudgets.agentId, agentId),
+    ];
+    if (workspaceId) conditions.push(eq(providerAgentBudgets.workspaceId, workspaceId));
+    return this.db()
+      .select()
+      .from(providerAgentBudgets)
+      .where(and(...conditions))
+      .orderBy(providerAgentBudgets.createdAt, providerAgentBudgets.id);
+  }
+
+  async createAgentBudget(
+    ctx: MutationContext,
+    input: {
+      agentId: string;
+      workspaceId?: string | null;
+      dimension: unknown;
+      windowSeconds: unknown;
+      max: unknown;
+      currency?: unknown;
+      autoFreeze?: unknown;
+    },
+  ) {
+    assertMutationContext(ctx);
+    if (ctx.expectedRevision !== 0) {
+      throw new ProviderAuthorityError(
+        "new budget expectedRevision must be 0",
+        "revision_conflict",
+        409,
+      );
+    }
+    const workspaceId = input.workspaceId ?? null;
+    const normalized = normalizeBudgetInput(input);
+    const tenantAuthority = await this.hasTenantAdmin(ctx);
+    if (workspaceId && !normalized.autoFreeze) {
+      await this.requireWorkspaceAdmin(ctx, workspaceId, true);
+    } else if (!tenantAuthority) {
+      throw new ProviderAuthorityError("tenant authority required", "forbidden", 403);
+    }
+    const [agent] = await this.db()
+      .select({ id: agents.id })
+      .from(agents)
+      .where(and(eq(agents.tenantId, ctx.tenantId), eq(agents.id, input.agentId)))
+      .limit(1);
+    if (!agent) throw new ProviderAuthorityError("resource not found", "not_found", 404);
+    if (workspaceId) {
+      const [workspace] = await this.db()
+        .select({ id: workspaces.id, environment: workspaces.environment })
+        .from(workspaces)
+        .where(
+          and(
+            eq(workspaces.tenantId, ctx.tenantId),
+            eq(workspaces.id, workspaceId),
+            eq(workspaces.status, "active"),
+          ),
+        )
+        .limit(1);
+      if (!workspace) throw new ProviderAuthorityError("resource not found", "not_found", 404);
+      if (
+        !(await this.hasWorkspaceAgentAuthority(
+          ctx.tenantId,
+          workspaceId,
+          input.agentId,
+          workspace.environment,
+        ))
+      ) {
+        throw new ProviderAuthorityError("resource not found", "not_found", 404);
+      }
+    }
+    const id = randomUUID();
+    await this.faultHooks.afterBudgetPreflight?.();
+    return withTenantAuditedTransaction(ctx.tenantId, async (txRaw, append) => {
+      const tx = txRaw as DbExecutor;
+      // The preflight checks above provide fast errors only. Authority is
+      // security-sensitive mutable state, so lock and revalidate it in the same
+      // transaction that creates the budget and its audit evidence.
+      const txTenantAuthority = await this.hasTenantAdmin(ctx, tx);
+      if (workspaceId && !normalized.autoFreeze) {
+        await this.requireWorkspaceAdmin(ctx, workspaceId, true, tx);
+      } else if (!txTenantAuthority) {
+        throw new ProviderAuthorityError("tenant authority required", "forbidden", 403);
+      }
+      const [txAgent] = await tx
+        .select({ id: agents.id })
+        .from(agents)
+        .where(and(eq(agents.tenantId, ctx.tenantId), eq(agents.id, input.agentId)))
+        .limit(1)
+        .for("update");
+      if (!txAgent) throw new ProviderAuthorityError("resource not found", "not_found", 404);
+      if (workspaceId) {
+        const [txWorkspace] = await tx
+          .select({ environment: workspaces.environment })
+          .from(workspaces)
+          .where(
+            and(
+              eq(workspaces.tenantId, ctx.tenantId),
+              eq(workspaces.id, workspaceId),
+              eq(workspaces.status, "active"),
+            ),
+          )
+          .limit(1)
+          .for("share");
+        if (
+          !txWorkspace ||
+          !(await this.hasWorkspaceAgentAuthority(
+            ctx.tenantId,
+            workspaceId,
+            input.agentId,
+            txWorkspace.environment,
+            new Date(),
+            tx,
+          ))
+        ) {
+          throw new ProviderAuthorityError("resource not found", "not_found", 404);
+        }
+      }
+      const [row] = await tx
+        .insert(providerAgentBudgets)
+        .values({
+          id,
+          tenantId: ctx.tenantId,
+          workspaceId,
+          agentId: input.agentId,
+          ...normalized,
+        })
+        .returning();
+      await appendAuthorityMutationAudit(ctx, append, {
+        action: "provider.agent_budget.create",
+        resourceType: "provider_agent_budget",
+        resourceId: id,
+        metadata: {
+          agentId: input.agentId,
+          workspaceId,
+          dimension: normalized.dimension,
+          windowSeconds: normalized.windowSeconds,
+          max: normalized.max,
+          currency: normalized.currency,
+          autoFreeze: normalized.autoFreeze,
+          reason: ctx.reason,
+        },
+      });
+      return row;
+    });
+  }
+
+  async updateAgentBudget(
+    ctx: MutationContext,
+    id: string,
+    input: {
+      dimension: unknown;
+      windowSeconds: unknown;
+      max: unknown;
+      currency?: unknown;
+      autoFreeze?: unknown;
+      enabled?: unknown;
+    },
+  ) {
+    assertMutationContext(ctx);
+    const [current] = await this.db()
+      .select()
+      .from(providerAgentBudgets)
+      .where(and(eq(providerAgentBudgets.tenantId, ctx.tenantId), eq(providerAgentBudgets.id, id)))
+      .limit(1);
+    if (!current) throw new ProviderAuthorityError("resource not found", "not_found", 404);
+    const normalized = normalizeBudgetInput(input);
+    const tenantAuthority = await this.hasTenantAdmin(ctx);
+    // autoFreeze materializes as a tenant-global agent signing freeze. A
+    // delegated workspace admin may manage ordinary workspace caps, but may
+    // never create, retain, alter, disable, or re-enable that global authority.
+    if (current.workspaceId && !current.autoFreeze && !normalized.autoFreeze) {
+      await this.requireWorkspaceAdmin(ctx, current.workspaceId, true);
+    } else if (!tenantAuthority) {
+      throw new ProviderAuthorityError("tenant authority required", "forbidden", 403);
+    }
+    if (current.revision !== ctx.expectedRevision) {
+      throw new ProviderAuthorityError("budget revision conflict", "revision_conflict", 409);
+    }
+    if (current.workspaceId && normalized.enabled) {
+      const [workspace] = await this.db()
+        .select({ environment: workspaces.environment })
+        .from(workspaces)
+        .where(
+          and(
+            eq(workspaces.tenantId, ctx.tenantId),
+            eq(workspaces.id, current.workspaceId),
+            eq(workspaces.status, "active"),
+          ),
+        )
+        .limit(1);
+      if (
+        !workspace ||
+        !(await this.hasWorkspaceAgentAuthority(
+          ctx.tenantId,
+          current.workspaceId,
+          current.agentId,
+          workspace.environment,
+        ))
+      ) {
+        throw new ProviderAuthorityError("resource not found", "not_found", 404);
+      }
+    }
+    await this.faultHooks.afterBudgetPreflight?.();
+    return withTenantAuditedTransaction(ctx.tenantId, async (txRaw, append) => {
+      const tx = txRaw as DbExecutor;
+      // Lock the budget and make the authority decision from this transaction's
+      // current state. A revocation racing the earlier preflight can no longer
+      // commit before an authority-dependent mutation without being observed.
+      const [txCurrent] = await tx
+        .select()
+        .from(providerAgentBudgets)
+        .where(
+          and(eq(providerAgentBudgets.tenantId, ctx.tenantId), eq(providerAgentBudgets.id, id)),
+        )
+        .limit(1)
+        .for("update");
+      if (!txCurrent) throw new ProviderAuthorityError("resource not found", "not_found", 404);
+      if (txCurrent.revision !== ctx.expectedRevision) {
+        throw new ProviderAuthorityError("budget revision conflict", "revision_conflict", 409);
+      }
+      const txTenantAuthority = await this.hasTenantAdmin(ctx, tx);
+      if (txCurrent.workspaceId && !txCurrent.autoFreeze && !normalized.autoFreeze) {
+        await this.requireWorkspaceAdmin(ctx, txCurrent.workspaceId, true, tx);
+      } else if (!txTenantAuthority) {
+        throw new ProviderAuthorityError("tenant authority required", "forbidden", 403);
+      }
+      if (txCurrent.workspaceId && normalized.enabled) {
+        const [txWorkspace] = await tx
+          .select({ environment: workspaces.environment })
+          .from(workspaces)
+          .where(
+            and(
+              eq(workspaces.tenantId, ctx.tenantId),
+              eq(workspaces.id, txCurrent.workspaceId),
+              eq(workspaces.status, "active"),
+            ),
+          )
+          .limit(1)
+          .for("share");
+        if (
+          !txWorkspace ||
+          !(await this.hasWorkspaceAgentAuthority(
+            ctx.tenantId,
+            txCurrent.workspaceId,
+            txCurrent.agentId,
+            txWorkspace.environment,
+            new Date(),
+            tx,
+          ))
+        ) {
+          throw new ProviderAuthorityError("resource not found", "not_found", 404);
+        }
+      }
+      const [updated] = await tx
+        .update(providerAgentBudgets)
+        .set(normalized)
+        .where(
+          and(
+            eq(providerAgentBudgets.tenantId, ctx.tenantId),
+            eq(providerAgentBudgets.id, id),
+            eq(providerAgentBudgets.revision, txCurrent.revision),
+          ),
+        )
+        .returning();
+      if (!updated) {
+        throw new ProviderAuthorityError("budget revision conflict", "revision_conflict", 409);
+      }
+      await appendAuthorityMutationAudit(ctx, append, {
+        action: "provider.agent_budget.update",
+        resourceType: "provider_agent_budget",
+        resourceId: id,
+        metadata: {
+          agentId: txCurrent.agentId,
+          workspaceId: txCurrent.workspaceId,
+          expectedRevision: txCurrent.revision,
+          dimension: normalized.dimension,
+          windowSeconds: normalized.windowSeconds,
+          max: normalized.max,
+          currency: normalized.currency,
+          autoFreeze: normalized.autoFreeze,
+          enabled: normalized.enabled,
+          reason: ctx.reason,
+        },
+      });
+      return updated;
+    });
   }
 
   async revokeGrant(ctx: MutationContext, id: string) {

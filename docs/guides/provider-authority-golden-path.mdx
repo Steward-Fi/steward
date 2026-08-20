@@ -5,7 +5,7 @@ description: "Single-command fake proof and the separate real GitHub sandbox run
 
 # Provider Authority: Golden Path
 
-This is the exact workflow that reproduces the six-PR governed-provider thesis:
+This is the exact workflow that reproduces the governed-provider design:
 a **single-command fake CI proof** that runs the whole matrix against a
 deterministic in-process transport, and a **separate documented real GitHub
 sandbox run** against a throwaway org. Both traverse the **identical** governed
@@ -16,20 +16,98 @@ code path; they differ **only** in the terminal forwarder.
 An enrolled provider route runs a consequential action only through:
 
 ```
-POST /v2/provider-actions          (create; PR2 canonicalization + binding)
-  -> access check                  (PR1 grants/role-bindings)
+POST /v2/provider-actions          (create; canonical-action canonicalization + binding)
+  -> access check                  (authority-grant grants/role-bindings)
   -> policy decision               (allow / approval_required)
-  -> POST /:id/approval            (human approve/deny with typed reason; PR3)
-  -> POST /:id/execute             (typed system resume; PR3 mints the PR4 nonce)
-  -> dispatchGovernedExecution     (atomic single-winner claim; PR4)
+  -> POST /:id/approval            (human approve/deny with typed reason; approval-lifecycle)
+  -> POST /:id/execute             (typed system resume; approval-lifecycle mints the governed-execution nonce)
+  -> dispatchGovernedExecution     (atomic single-winner claim; governed-execution)
   -> decrypt + inject credential   (verifier-only; agent never sees it)
   -> terminal forwarder            (real GitHub, or the fake)
-  -> GET /:id/case, /:id/evidence  (correlated manifest + signed bundle; PR5)
+  -> GET /:id/case, /:id/evidence  (correlated manifest + signed bundle; evidence)
 ```
 
-No new authority is introduced by the golden path. It exercises PR1–PR5 only.
+No new authority is introduced by the golden path. It exercises the existing
+authorization, canonical-action, approval, governed-execution, and evidence paths only.
 
-## 1. The fake CI proof (every PR, credential-free)
+## Config-driven generic HTTP operations
+
+`generic-http.provider-action.v1` lets an owner or workspace admin enroll a
+public HTTPS operation without adding a provider package. The control-plane
+caller must have recent MFA. Enrollment is deliberately two-step:
+
+1. Create a narrow, enabled legacy credential route for one tenant agent,
+   secret, DNS host, exact path, and method. The normal secret-route public-host
+   allowlist and validation still apply.
+2. Register the operation with
+   `POST /v2/provider-accounts/{accountId}/operations`. Registration validates
+   the descriptor, proves that the exact route is inside its path language, and
+   atomically promotes the route to `governed_v2` bound to the new operation.
+
+The provider account uses `adapterKey: "generic-http"`. A minimal operation
+registration body is:
+
+```json
+{
+  "operationKey": "acme.ticket.create",
+  "riskClass": "write",
+  "secretRouteId": "<exact-legacy-route-id>",
+  "requestProfile": {
+    "profile": "generic-http.provider-action.v1",
+    "operationDescriptor": {
+      "profile": "generic-http.provider-action.v1",
+      "origin": "https://api.example.com",
+      "methods": ["POST"],
+      "pathTemplate": [
+        { "literal": "v1" },
+        { "literal": "tickets" }
+      ],
+      "body": {
+        "contentType": "application/json",
+        "fields": [
+          {
+            "name": "title",
+            "type": "string",
+            "required": true,
+            "pattern": "^.{1,200}$",
+            "maxBytes": 4096
+          }
+        ]
+      },
+      "projection": {
+        "policyArgs": [],
+        "safeSummary": ["title"]
+      }
+    }
+  },
+  "expectedRevision": 1,
+  "reason": "enroll Acme ticket creation"
+}
+```
+
+Path, query, and body values are scalar and fail closed on unknown fields.
+String patterns use Steward's linear-time subset: anchored literal alternatives,
+or anchored sequences of literals, `.`, and positive character classes with
+finite `{n}` or `{min,max}` repetition. Lookaround, backreferences, optional or
+unbounded quantifiers, nested groups, negated classes, and multiple
+variable-width repetitions are rejected at authoring time.
+
+Descriptor headers are fixed public metadata only. Credential, forwarding,
+hop-by-hop, host, content-length, and Steward-internal headers cannot be placed
+in the canonical action. The selected route's encrypted secret id and version
+are bound separately into the approval and execution authorization; the proxy
+injects the plaintext only after the single-use governed claim succeeds.
+
+Agents invoke the registered operation through `POST /v2/provider-actions`,
+supplying `method` and `arguments`. Approval resume reconstructs arguments from
+the committed canonical bytes, reruns the current descriptor through the
+production builder, and requires byte-identical JCS before current-policy
+evaluation or authorization mint. Descriptor drift therefore returns
+`APPROVAL_ACTION_INTEGRITY_FAILED` and records
+`provider.resume.policy_denied`; it never dispatches the old approval against a
+new target.
+
+## 1. The fake CI proof (credential-free)
 
 ```bash
 # From the repo root, deterministic, zero network egress, zero credentials.
@@ -70,24 +148,58 @@ cp deploy/enterprise-reference/provider-github-sandbox.env.example \
 # ...fill from your secret store, then:
 set -a; . deploy/enterprise-reference/provider-github-sandbox.env; set +a
 
+# Build the trusted dispatcher and its workspace dependencies. The harness
+# checks these outputs but never installs or builds code implicitly.
+bunx turbo run build --filter=@stwd/proxy...
+
 # Validate wiring without a consequential write:
 node scripts/provider-authority-sandbox.mjs --preflight
+
+# Run only after the throwaway authority graph is provisioned. This exits 2
+# with honest Gate D STOP when a required live observation was not seen.
+node scripts/provider-authority-sandbox.mjs
 ```
 
 Requirements:
 
 - A **throwaway** GitHub org + repo (e.g. `steward-sandbox/hello`) with a
-  dedicated GitHub App scoped to that repo only (`issues:read`,
-  `pull_requests:write`).
+  dedicated GitHub App scoped to that repo only (`metadata:read`,
+  `issues:write`). GitHub pull-request comments use the Issues comments API.
 - The App private key + installation ID supplied via **env only**
   (`GITHUB_APP_ID`, `GITHUB_APP_INSTALLATION_ID`, `GITHUB_APP_PRIVATE_KEY`).
   The committed artifact is a `*.example` with placeholders and presence guards.
+- Pre-provisioned sandbox-only workspace, provider account, governed secret
+  route, provider-agent JWT, recent-MFA approver session, and the database/vault/
+  execution/audit environment used by that same Steward deployment. This
+  includes the exact `STEWARD_KDF_SALT` used to encrypt the pre-provisioned
+  secret; preflight rejects a missing or malformed salt, but operators must
+  supply the matching live value out-of-band.
+
+No real sandbox artifact is committed yet. Producing the artifact bundle still
+requires the external throwaway GitHub App/repository and pre-provisioned live
+Steward authority graph above. A naturally observed GitHub 403/429 with
+`Retry-After` also remains an external observation: the harness does not induce
+or manufacture rate limiting.
+
+`--preflight` performs no network request. The live command rotates the minted
+installation token through the MFA-gated secret API, drives create → approve →
+execute over the public API, then starts an isolated local worker that imports
+`dispatchGovernedExecution`. There is intentionally no public dispatch route.
 
 The write operation (`github.pr.comment.create`) is **not** natively idempotent
-at GitHub; on a post-dispatch timeout Steward records `outcome_unknown` and
-reconciles via the created comment's stable `id`/`node_id` marker rather than
-blindly re-posting. A rate-limit (429/403 with `Retry-After`) is classified as a
-bounded `failed` with the retry-after surfaced, never auto-retried.
+at GitHub. The harness first rotates the sandbox secret after mint to prove stale
+credentials fail before provider I/O. It then races eight isolated workers,
+pauses the single upstream winner after the response, kills it to model the
+crash window, and proves a fresh worker cannot re-post. Every minted GitHub
+installation token is explicitly revoked after reconciliation (with GitHub's
+short expiry as the failure-path backstop).
+Because Steward has no live reconciliation service, the harness then performs a
+bounded, paginated, read-only GitHub marker lookup and records that distinction
+in `provider-reconciliation.json`. A missing marker is a Gate D STOP, not a
+success. A rate-limit (429/403 with `Retry-After`) is classified with capped
+waiting and no blind write retry; when no live rate-limit occurs, M16 is recorded
+as `not_observed` and Gate D remains STOP even though the classifier is tested
+hermetically.
 
 ## 3. Offline verification
 
@@ -107,12 +219,12 @@ trust to a known root. Always supply the fingerprint.
 - `dashboard/approvals/[id]`, the approval detail: equal-weight approve/deny, a
   required typed reason, the exact action as a safe summary + digests (never
   canonical bytes), honest terminal states.
-- `dashboard/actions/[id]`, the case/evidence surface: PR5 `completeness` and
+- `dashboard/actions/[id]`, the case/evidence surface: evidence `completeness` and
   `incompletenessReasons` rendered verbatim, the operator-key trust limit
   stated, the signed bundle download + the exact offline verify command.
 
 ## Distribution note
 
 The **repo script is the authoritative proof**. The `steward provider-action …`
-CLI commands are convenience wrappers over the same PR2–PR5 routes; CLI
+CLI commands are convenience wrappers over the same governed provider-action routes; CLI
 distribution is unsettled, so they carry no independent authority.

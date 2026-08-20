@@ -87,17 +87,43 @@ multiple trackers (tekedia, phemex, piunikaweb, Feb 2026).
 
 **Modeled as:** `replyPolicy.mode`:
 - `'any'` — replies allowed (operator accepts the upstream risk).
-- `'summoned-only'` — a reply is allowed ONLY when the action is marked
-  `summoned` (the caller asserts the account was @mentioned/quoted). An
+- `'summoned-only'` — a reply is allowed ONLY when a configured provider adapter
+  signs an unexpired summon attestation proving the account was mentioned or
+  quoted by the exact source post. A caller's `summoned: true` is ignored. An
   un-summoned reply is a policy **hard_deny** (`POLICY_X_REPLY_NOT_SUMMONED`)
   BEFORE dispatch. This is the **expected upstream-denial class** made explicit:
   Steward denies locally what X would 403 at the wire.
 - `'none'` — replies forbidden entirely (`POLICY_X_REPLY_FORBIDDEN`); only
   original posts pass.
 
-`isReply` and `replyToTweetId` are already adapter-validated policy args
-(`buildXAction`). `summoned` is a new validated boolean policy arg (see
-"Summoned detection" below).
+`isReply` and `replyToTweetId` are adapter-derived from the canonical action.
+`summoned: false` remains a safe negative assertion; only verified adapter
+provenance can produce authoritative `summoned: true`.
+
+### Authenticated summon provenance
+
+The optional top-level `summonAttestation` is a strict
+`steward.x-summon-attestation.v1` document signed with Ed25519. Configure trusted
+raw public keys in `STEWARD_X_SUMMON_ATTESTATION_PUBLIC_KEYS` as a JSON object
+from key id to unpadded base64url. Set a unique deployment audience in
+`STEWARD_X_SUMMON_ATTESTATION_AUDIENCE` (and configure the adapter to sign that
+same audience); verification fails closed when it is absent or different. The
+signature is domain-separated and binds:
+
+- the deployment audience, preventing staging-to-production replay;
+- tenant, workspace, actor agent, and provider account;
+- the fixed `x.tweet.create` operation and canonical reply source post id;
+- the hash of the request's idempotency key;
+- `summoned: true`, key id, issue time, and expiry.
+
+Attestations allow at most five minutes of validity and 30 seconds of future
+clock skew. Steward verifies the signature and exact binding at proposal,
+approval resume, and proxy dispatch. Expiry, key removal/rotation, provider
+outage, or any scope/post/retry mismatch fails closed. The immutable request
+envelope stores only the attestation digest. The frozen safe summary stores the
+signed identifier-level evidence needed for later verification; it contains no
+provider credential or post body, and audit decisions contain only hashes and
+reason codes.
 
 ### 2. Content conditions (`contentPolicy`)
 
@@ -115,7 +141,7 @@ constraint and a cost lever:
 - `maxLength: number` — deny a post whose adapter-counted code-point length
   exceeds the cap (`POLICY_X_CONTENT_TOO_LONG`). This is stricter-or-equal to X's
   280 weighted limit (the adapter already bounds 1..280).
-- `blockedPatterns: string[]` — each is an anchored regex; a match on the text
+- `blockedPatterns: string[]` — each is a linear-time RE2-compatible regex; a match on the text
   denies (`POLICY_X_CONTENT_BLOCKED`). An **invalid** regex in config denies
   (`POLICY_CONFIGURATION_INVALID`) — fail closed, never throw.
 
@@ -197,10 +223,10 @@ rule type, NO new policy registry, NO new evaluator dispatch.
 - X adds `constraints.x` (an OPTIONAL, X-only sub-block). A non-X operation with
   an `x` constraint block is a config error (fail closed) — the sub-block only
   applies to `x.*` operations.
-- The composer reads adapter-validated policy args
+- The composer reads adapter-derived policy args
   (`isReply`, `replyToTweetId`, `hasUrl`, `textCodePointLength`, `summoned`) — it
-  NEVER lifts a raw body field. New args (`hasUrl`, `summoned`) are derived and
-  validated in `buildXAction`.
+  NEVER lifts a raw body field. `hasUrl` is derived in `buildXAction`; positive
+  `summoned` authority is supplied only by the verified attestation channel.
 - **Required-signal fail-closed:** a boolean signal a policy CONSUMES
   (`isReply` for replyPolicy, `summoned` for summoned-only, `hasUrl` for
   allowUrls / URL-escalation / spend pricing) that is ABSENT or non-boolean on
@@ -250,7 +276,10 @@ persisted document.
   and the fail-closed behavior; the trailing-window accumulator wiring in the
   live route is a follow-on (the same posture as `invokeCount1h` on develop,
   which is `undefined` in the service and fails closed by design).
-- **Summoned assertion is caller-supplied** — Steward cannot itself verify the
-  post @mentioned/quoted the account without a read call; `summoned-only` gates
-  on the asserted arg and the upstream 403 remains the backstop. This is
-  documented, not hidden.
+- **Adapter trust is explicit** — Steward does not perform a live X read during
+  dispatch. The authenticated provider adapter is responsible for establishing
+  mention/quote provenance, and its Ed25519 public key is an operator-managed
+  trust root. The signer MUST derive the tenant, workspace, actor, provider
+  account, source post, audience, and summon fact from its authenticated route
+  and live X result; it must never copy those authority fields from an
+  untrusted summon claimant. Missing or indeterminate provenance denies locally.

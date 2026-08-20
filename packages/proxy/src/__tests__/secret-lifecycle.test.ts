@@ -16,6 +16,9 @@ beforeAll(async () => {
   process.env.STEWARD_PGLITE_MEMORY = "true";
   process.env.STEWARD_MASTER_PASSWORD = MASTER_PASSWORD;
   process.env.STEWARD_JWT_SECRET = "proxy-secret-lifecycle-jwt-secret-with-enough-bytes";
+  // Soft development posture (unsigned requests, in-process replay store) —
+  // explicit opt-in since SEC-175.
+  process.env.STEWARD_PROXY_DEV_MODE = "true";
   process.env.STEWARD_PROXY_ALLOWED_HOSTS =
     "api.example.com,api.deleted.example.com,api.openai.com";
   // The vault's createRoute allowlist (configuredSecretRouteHosts) reads a
@@ -41,6 +44,7 @@ afterAll(async () => {
   delete process.env.STEWARD_PGLITE_MEMORY;
   delete process.env.STEWARD_MASTER_PASSWORD;
   delete process.env.STEWARD_JWT_SECRET;
+  delete process.env.STEWARD_PROXY_DEV_MODE;
   delete process.env.STEWARD_PROXY_ALLOWED_HOSTS;
   delete process.env.STEWARD_SECRET_ROUTE_ALLOWED_HOSTS;
   delete process.env.STEWARD_ALLOW_BROAD_SECRET_ROUTES;

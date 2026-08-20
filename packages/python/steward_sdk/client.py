@@ -6,11 +6,12 @@ import hmac
 import json
 import time
 import uuid
+import warnings
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode
-from urllib.request import Request, urlopen
+from urllib.parse import quote, urlencode, urlparse
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 
 JsonObject = dict[str, Any]
@@ -43,9 +44,21 @@ class StewardClientConfig:
     request_signing_secret: str | None = None
     request_signing_key_id: str | None = None
     timeout: float = 30.0
+    # WARNING: a custom transport replaces the default opener and its
+    # _StewardRedirectHandler, which strips credential headers on cross-host /
+    # HTTPS-downgrade redirects (SEC-125). A transport that follows redirects
+    # without re-applying that stripping silently re-enables credential
+    # exfiltration via open redirects — drop the Authorization / X-Steward-*
+    # headers on any host change or downgrade.
     transport: Transport | None = None
+    # Appended to preserve the positional argument order of the published
+    # config constructor. Permit plaintext non-loopback HTTP with a warning.
+    allow_insecure_base_url: bool = False
 
 
+# Keep in lockstep with the equivalent list in EVERY other SDK (sdk, go, java,
+# ruby, rust, swift, csharp, flutter): mutations under these prefixes are
+# HMAC-signed, and divergence silently downgrades integrity (SEC-049).
 SENSITIVE_SIGNED_PREFIXES = (
     "/vault",
     "/agents",
@@ -62,13 +75,44 @@ SENSITIVE_SIGNED_PREFIXES = (
     "/condition-sets",
     "/condition_sets",
     "/v1/condition_sets",
+    "/global-wallet",
+    "/accounts",
 )
 MUTATING_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 
 
+class _StewardRedirectHandler(HTTPRedirectHandler):
+    """Follow only same-origin redirects without embedded URL credentials.
+
+    Header stripping alone still lets a hostile Location turn a server-side
+    SDK caller into an SSRF primitive, so cross-origin redirects fail closed.
+    """
+
+    def redirect_request(self, req: Request, fp: Any, code: int, msg: str, headers: Any, newurl: str) -> Request | None:
+        new_req = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new_req is None:
+            return None
+        parsed = urlparse(new_req.full_url)
+        if parsed.username is not None or parsed.password is not None:
+            return None
+        if _origin(new_req.full_url) != _origin(req.full_url):
+            return None
+        return new_req
+
+
+def _origin(raw_url: str) -> tuple[str, str, int | None]:
+    parsed = urlparse(raw_url)
+    scheme = parsed.scheme.lower()
+    default_port = 443 if scheme == "https" else 80 if scheme == "http" else None
+    return (scheme, (parsed.hostname or "").lower(), parsed.port or default_port)
+
+
+_default_opener = build_opener(_StewardRedirectHandler())
+
+
 def _default_transport(request: Request, body: bytes | None, timeout: float) -> tuple[int, Mapping[str, str], bytes]:
     try:
-        with urlopen(request, data=body, timeout=timeout) as response:
+        with _default_opener.open(request, data=body, timeout=timeout) as response:
             return response.status, dict(response.headers.items()), response.read()
     except HTTPError as exc:
         return exc.code, dict(exc.headers.items()), exc.read()
@@ -92,6 +136,37 @@ def _is_sensitive_mutation(path: str, method: str) -> bool:
     return method.upper() in MUTATING_METHODS and any(path.startswith(prefix) for prefix in SENSITIVE_SIGNED_PREFIXES)
 
 
+def _is_loopback_host(hostname: str) -> bool:
+    return hostname in ("localhost", "127.0.0.1", "::1")
+
+
+# Keep in lockstep with the equivalent check in EVERY other SDK (sdk, go,
+# java, ruby, rust, swift, csharp, flutter): these clients transmit API keys,
+# bearer tokens, and HMAC-signed credentials, none of which may travel to a
+# plaintext non-loopback endpoint (SEC-200, mirroring SEC-048).
+def _assert_secure_base_url(base_url: str, allow_insecure_base_url: bool) -> None:
+    parsed = urlparse(base_url)
+    if not parsed.scheme or not parsed.hostname:
+        raise ValueError("base_url must be a valid absolute URL")
+    if parsed.scheme not in ("http", "https"):
+        raise ValueError("base_url must use HTTP or HTTPS")
+    if parsed.username is not None or parsed.password is not None:
+        raise ValueError("base_url must not embed credentials")
+    if parsed.scheme == "https" or (parsed.scheme == "http" and _is_loopback_host(parsed.hostname)):
+        return
+    if allow_insecure_base_url:
+        warnings.warn(
+            "[steward-sdk] WARNING: base_url is not HTTPS; credentials travel in "
+            "cleartext. Use allow_insecure_base_url only on trusted private networks.",
+            stacklevel=3,
+        )
+        return
+    raise ValueError(
+        "base_url must use HTTPS unless it targets loopback (http://localhost, http://127.0.0.1, "
+        "http://[::1]). Set allow_insecure_base_url=True to override on trusted private networks."
+    )
+
+
 class StewardClient:
     def __init__(self, config: StewardClientConfig | None = None, **kwargs: Any):
         if config is None:
@@ -100,6 +175,7 @@ class StewardClient:
             raise TypeError("Pass either StewardClientConfig or keyword arguments, not both")
         self.config = config
         self.base_url = config.base_url.rstrip("/")
+        _assert_secure_base_url(self.base_url, config.allow_insecure_base_url)
         self._transport = config.transport or _default_transport
 
     def request(
@@ -164,7 +240,7 @@ class StewardClient:
         )
 
     def get_user(self, user_id: str) -> JsonObject:
-        return self.get(f"/platform/users/{user_id}")
+        return self.get(f"/platform/users/{quote(user_id, safe='')}")
 
     def lookup_user(self, **query: str) -> JsonObject:
         return self.get("/platform/users/lookup", query=query)
@@ -176,7 +252,7 @@ class StewardClient:
         return self.post("/user/me/push-subscriptions", subscription)
 
     def revoke_user_push_subscription(self, subscription_id: str) -> JsonObject:
-        return self.delete(f"/user/me/push-subscriptions/{subscription_id}")
+        return self.delete(f"/user/me/push-subscriptions/{quote(subscription_id, safe='')}")
 
     def _headers(
         self,

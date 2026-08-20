@@ -4,25 +4,23 @@
  * Gathers the current on-chain + off-chain state needed by strategies:
  *   - Native balance (ETH/BNB)     ← viem publicClient
  *   - Token balance (ERC-20)       ← viem publicClient
- *   - Token price                  ← hardened price oracle, else env oracle / DEX reserve ratio
+ *   - Token price                  ← hardened price oracle, else DEX reserve ratio
  *   - Last trade age + daily vol   ← Steward history
  *
  * Token price resolution order (each tick is tagged with a confidence level):
  *   1. Hardened @stwd/shared price oracle — liquidity-weighted, multi-pair,
  *      fails to null. Tagged "high"; this is the only source that may, on its
  *      own, trigger a trade.
- *   2. priceOracleUrl env var (simple JSON API returning { price: "1234" }).
- *      Tagged "low" — an arbitrary single endpoint with no corroboration.
- *   3. DEX reserve ratio (single Uniswap-V2 pair getReserves). Tagged "low" —
+ *   2. DEX reserve ratio (single Uniswap-V2 pair getReserves). Tagged "low" —
  *      a single-pair spot ratio is trivially manipulable (flash-loan/imbalance).
- *   4. Fallback: 0n / "none" (strategies hold).
+ *   3. Fallback: 0n / "none" (strategies hold).
  *
  * Low-confidence ticks feed treasury/threshold math but are gated by the
  * strategy layer so a manipulable price cannot, by itself, trigger a swap.
  */
 
 import type { StewardClient } from "@stwd/sdk";
-import { createPriceOracle, type PriceOracle } from "@stwd/shared";
+import { createPriceOracle, type PriceOracle, redactedThrownDiagnostics } from "@stwd/shared";
 import type { PublicClient } from "viem";
 import { createPublicClient, http } from "viem";
 import { base } from "viem/chains";
@@ -131,30 +129,7 @@ async function getTokenPrice(tokenAddress: string, chainId: number): Promise<Pri
   const oracleQuote = await getHardenedOracleQuote(tokenAddress, chainId);
   if (oracleQuote) return { price: oracleQuote, confidence: "high" };
 
-  // 2. External price oracle (env: PRICE_ORACLE_URL or per-token override).
-  //    A single unauthenticated endpoint with no corroboration → LOW confidence.
-  const oracleUrl =
-    process.env[`PRICE_ORACLE_${tokenAddress.toLowerCase()}`] ?? process.env.PRICE_ORACLE_URL;
-
-  if (oracleUrl) {
-    try {
-      const url = oracleUrl.replace("{token}", tokenAddress);
-      const resp = await fetch(url, { signal: AbortSignal.timeout(5000) });
-      if (resp.ok) {
-        const json = (await resp.json()) as { price?: string };
-        if (json.price) {
-          const price = BigInt(json.price);
-          if (price > 0n) return { price, confidence: "low" };
-        }
-      }
-    } catch {
-      logWarn("Env price oracle request failed, falling back to DEX reserves", {
-        tokenAddress,
-      });
-    }
-  }
-
-  // 3. DEX pair reserve ratio — a single-pair spot price is trivially
+  // 2. DEX pair reserve ratio — a single-pair spot price is trivially
   //    manipulable (flash-loan/reserve imbalance), so it is LOW confidence and
   //    cannot, by itself, trigger a trade (gated in the strategy layer).
   const pairAddress =
@@ -190,12 +165,12 @@ async function getTokenPrice(tokenAddress: string, chainId: number): Promise<Pri
     } catch (err) {
       logWarn("DEX reserve price lookup failed", {
         tokenAddress,
-        error: err instanceof Error ? err.message : String(err),
+        ...redactedThrownDiagnostics(err),
       });
     }
   }
 
-  // 4. Fallback — strategies must handle tokenPrice === 0n
+  // 3. Fallback — strategies must handle tokenPrice === 0n
   logWarn("Could not determine token price — returning 0", { tokenAddress });
   return NO_PRICE;
 }
@@ -226,7 +201,7 @@ async function getHardenedOracleQuote(
   } catch (err) {
     logWarn("Hardened price oracle lookup failed, falling back", {
       tokenAddress,
-      error: err instanceof Error ? err.message : String(err),
+      ...redactedThrownDiagnostics(err),
     });
     return null;
   }
@@ -258,28 +233,28 @@ export async function fetchAgentState(
     getNativeBalance(walletAddress, chainId).catch((err) => {
       logWarn("Failed to fetch native balance", {
         agentId: agentConfig.agentId,
-        error: String(err),
+        ...redactedThrownDiagnostics(err),
       });
       return 0n;
     }),
     getTokenBalance(walletAddress, agentConfig.tokenAddress, chainId).catch((err) => {
       logWarn("Failed to fetch token balance", {
         agentId: agentConfig.agentId,
-        error: String(err),
+        ...redactedThrownDiagnostics(err),
       });
       return 0n;
     }),
     getTokenPrice(agentConfig.tokenAddress, chainId).catch((err): PricedQuote => {
       logWarn("Failed to fetch token price", {
         agentId: agentConfig.agentId,
-        error: String(err),
+        ...redactedThrownDiagnostics(err),
       });
       return NO_PRICE;
     }),
     steward.getHistory(agentConfig.agentId).catch((err) => {
       logWarn("Failed to fetch Steward history", {
         agentId: agentConfig.agentId,
-        error: String(err),
+        ...redactedThrownDiagnostics(err),
       });
       return [];
     }),

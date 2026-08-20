@@ -6,6 +6,18 @@ export interface SmsProvider {
   send(to: string, body: string): Promise<void>;
 }
 
+/**
+ * Typed delivery failure raised by SMS providers. Deliberately generic: the
+ * raw provider error body can carry account/phone metadata and must never
+ * propagate into thrown errors, logs, or API responses (SEC-061).
+ */
+export class SmsDeliveryError extends Error {
+  constructor(message = "SMS delivery failed") {
+    super(message);
+    this.name = "SmsDeliveryError";
+  }
+}
+
 export class ConsoleSmsProvider implements SmsProvider {
   async send(to: string, body: string): Promise<void> {
     console.log(
@@ -60,7 +72,10 @@ export class TwilioSmsProvider implements SmsProvider {
       body: params.toString(),
     });
     if (!res.ok) {
-      throw new Error(`Twilio send failed (${res.status}): ${await res.text()}`);
+      // Discard the provider error body — it can carry account/phone metadata.
+      // Only the status code is logged server-side.
+      console.warn(`[steward:auth] Twilio SMS send failed with status ${res.status}`);
+      throw new SmsDeliveryError();
     }
   }
 }

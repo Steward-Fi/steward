@@ -12,7 +12,15 @@ function shouldUseNextDevServer(): boolean {
 
 export default defineConfig({
   testDir: "./e2e",
-  testIgnore: ["**/global-setup.ts", "**/global-teardown.ts", "**/fixtures/**", "**/wallets/**"],
+  // *.test.ts under e2e/ are bun unit tests (e.g. global-teardown.test.ts),
+  // not Playwright specs — keep them out of the runner.
+  testIgnore: [
+    "**/global-setup.ts",
+    "**/global-teardown.ts",
+    "**/fixtures/**",
+    "**/wallets/**",
+    "**/*.test.ts",
+  ],
   fullyParallel: false,
   forbidOnly: !!process.env.CI,
   // One retry absorbs inherent UI-timing flakiness in the dashboard render

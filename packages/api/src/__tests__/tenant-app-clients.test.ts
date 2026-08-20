@@ -8,7 +8,7 @@ function read(path: string): string {
   return readFileSync(join(ROOT, path), "utf-8");
 }
 
-// Migrations were consolidated during the PR #79 merge, so assert DDL against
+// Assert the composed DDL contract against
 // the full set of migration files rather than a single hard-coded filename.
 function allMigrations(): string {
   const dir = join(ROOT, "packages/db/drizzle");
@@ -70,7 +70,7 @@ describe("tenant app clients hardening", () => {
     expect(source).toContain("allowedPackageNames entries must be explicit Android package names");
   });
 
-  it("audits app-client create/delete authorization before mutation and rolls back on final audit failure", () => {
+  it("audits app-client create/delete in the same transaction as mutation", () => {
     const source = read("packages/api/src/routes/tenant-config.ts");
 
     for (const [marker, authorizedAction, finalAction] of [
@@ -93,17 +93,10 @@ describe("tenant app clients hardening", () => {
       expect(route.indexOf(authorizedAction)).toBeLessThan(
         route.indexOf("persistTenantAppClientsForTenant"),
       );
-      expect(route).toContain(
-        "const previousAppClients = await snapshotTenantAppClients(tenantId)",
-      );
-      expect(route).toContain(
-        "const previousAppClientSecrets = await snapshotTenantAppClientSecretsForTenant(tenantId)",
-      );
-      expect(route).toContain("try {");
+      expect(route).toContain("withTenantAuditedTransaction(");
+      expect(route).toContain("appendRequiredAudit({");
       expect(route).toContain(finalAction);
-      expect(route).toContain(
-        "await restoreTenantAppClients(tenantId, previousAppClients, previousAppClientSecrets)",
-      );
+      expect(route).not.toContain("restoreTenantAppClients");
     }
   });
 
@@ -123,7 +116,9 @@ describe("tenant app clients hardening", () => {
     );
     expect(helper).toContain("const secretsToPreserve = existingSecrets.filter");
     expect(helper).toContain("nextClientIds.has(secret.clientId)");
-    expect(helper).toContain("await tx.insert(tenantAppClientSecrets).values(secretsToPreserve)");
+    expect(helper).toContain(
+      "await executor.insert(tenantAppClientSecrets).values(secretsToPreserve)",
+    );
   });
 
   it("folds enabled app clients into runtime CORS and OAuth redirect enforcement", () => {
@@ -166,8 +161,7 @@ describe("tenant app clients hardening", () => {
     expect(migration).toContain('"secret_hash" text NOT NULL');
     expect(tenantConfig).toContain('tenantConfigRoutes.post("/:id/app-clients/:clientId/secrets"');
     expect(tenantConfig).toContain("appSecret: generated.secret");
-    expect(tenantConfig).toContain("snapshotTenantAppClientSecrets");
-    expect(tenantConfig).toContain("restoreTenantAppClientSecrets");
+    expect(tenantConfig).toContain("withTenantAuditedTransaction");
     expect(tenantConfig).toContain("tenant.app_client_secret.rotate.authorized");
     expect(tenantConfig).toContain("tenant.app_client_secret.rotate");
     expect(tenantConfig).toContain("tenant.app_client_secret.revoke.authorized");
@@ -176,7 +170,7 @@ describe("tenant app clients hardening", () => {
     expect(context).toContain("App secret auth requires Basic auth and X-Steward-App-Id");
   });
 
-  it("rolls back app-client secret mutations when final audits fail", () => {
+  it("makes app-client secret mutations atomic with final audits", () => {
     const tenantConfig = read("packages/api/src/routes/tenant-config.ts");
 
     for (const [marker, finalAction] of [
@@ -199,12 +193,10 @@ describe("tenant app clients hardening", () => {
       expect(start).toBeGreaterThanOrEqual(0);
       const nextRoute = tenantConfig.indexOf("\ntenantConfigRoutes.", start + marker.length);
       const route = tenantConfig.slice(start, nextRoute === -1 ? undefined : nextRoute);
-      expect(route).toContain("const previousSecrets = await snapshotTenantAppClientSecrets");
-      expect(route).toContain("try {");
+      expect(route).toContain("withTenantAuditedTransaction(");
+      expect(route).toContain("appendRequiredAudit({");
       expect(route).toContain(finalAction);
-      expect(route).toContain(
-        "await restoreTenantAppClientSecrets(tenantId, clientId, previousSecrets)",
-      );
+      expect(route).not.toContain("restoreTenantAppClientSecrets");
     }
   });
 });

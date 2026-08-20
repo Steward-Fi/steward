@@ -6,10 +6,10 @@
 
 Steward runs as two **systemd services** on each Milady node, built from source using Bun. It connects to a shared Neon PostgreSQL database and an optional Redis instance for rate limiting and spend tracking.
 
-- `steward-api.service` — REST API on port 3200
+- `steward.service` — REST API on port 3200
 - `steward-proxy.service` — API proxy gateway on port 8080
 
-**Current production nodes:** milady-core-1 through milady-core-6 (all Hetzner dedicated servers).
+**Production nodes:** see your operator-local inventory (SEC-130 — node addresses are deliberately not committed to this repo; see Node Inventory below).
 
 ---
 
@@ -19,7 +19,7 @@ Steward runs as two **systemd services** on each Milady node, built from source 
 ┌──────────────────────────────────────────────────────┐
 │  Milady Core Node                                     │
 │                                                       │
-│  systemd: steward-api.service                         │
+│  systemd: steward.service                             │
 │    └─ bun run packages/api/src/index.ts               │
 │    └─ Listens: 0.0.0.0:3200                          │
 │    └─ Env: /opt/steward/.env                          │
@@ -33,7 +33,8 @@ Steward runs as two **systemd services** on each Milady node, built from source 
 │    └─ Reach proxy at:   http://172.18.0.1:8080        │
 │       (Docker bridge gateway IP)                      │
 │                                                       │
-│  External: <your-domain> → milady-core-1:3200         │
+│  External: <your-domain> → TLS terminator (nginx/deploy/nginx.conf)        │
+│            → 127.0.0.1:3200 (never plain HTTP to a node IP)                 │
 └──────────────────────────────────────────────────────┘
 ```
 
@@ -49,13 +50,16 @@ Steward runs as two **systemd services** on each Milady node, built from source 
 ### Step 1: Sync source code
 
 ```bash
-# From your workstation (where you have the steward-fi repo)
+# From your workstation (where you have the steward repo)
 NODE_IP="<node-ip>"
+# Path to your local clone of THIS repo — keep real checkout paths out of
+# committed docs.
+STEWARD_SRC="/path/to/your/local/steward-checkout"
 rsync -az --delete \
   --exclude='.git' --exclude='node_modules' --exclude='.next' \
   --exclude='web' --exclude='.turbo' \
-  -e "ssh -o StrictHostKeyChecking=no" \
-  /home/shad0w/projects/steward-fi/ root@${NODE_IP}:/opt/steward/
+  -e "ssh -o StrictHostKeyChecking=accept-new" \
+  "${STEWARD_SRC}/" root@${NODE_IP}:/opt/steward/
 ```
 
 ### Step 2: Install dependencies
@@ -74,7 +78,7 @@ API_VERSION=0.2.0
 STEWARD_BIND_HOST=0.0.0.0
 
 # Database (shared Neon Postgres — steward schema)
-DATABASE_URL=postgresql://neondb_owner:<password>@<neon-host>/neondb?sslmode=require&options=-c search_path=steward,public
+DATABASE_URL=postgresql://neondb_owner:<password>@<neon-host>/neondb?sslmode=verify-full&options=-c search_path=steward,public
 
 # Vault encryption
 STEWARD_MASTER_PASSWORD=<256-bit-hex-secret>
@@ -111,76 +115,48 @@ chmod 600 /opt/steward/.env"
 
 ### Step 4: Create systemd services
 
+Install the **shipped, hardened units** (`deploy/steward.service`,
+`deploy/steward-proxy.service`) — they run as a dedicated unprivileged
+`steward` user with `NoNewPrivileges`, `ProtectSystem=strict`, `PrivateTmp`,
+and backoff restart limits. Do NOT hand-roll units that run the services as
+root with unconditional restart loops (SEC-022).
+
 ```bash
-# API service
-ssh root@${NODE_IP} "cat > /etc/systemd/system/steward-api.service << 'EOF'
-[Unit]
-Description=Steward API
-After=network.target
-
-[Service]
-Type=simple
-User=root
-WorkingDirectory=/opt/steward
-ExecStart=/root/.bun/bin/bun run packages/api/src/index.ts
-Restart=always
-RestartSec=10
-EnvironmentFile=/opt/steward/.env
-
-[Install]
-WantedBy=multi-user.target
-EOF"
-
-# Proxy service
-ssh root@${NODE_IP} "cat > /etc/systemd/system/steward-proxy.service << 'EOF'
-[Unit]
-Description=Steward API Proxy
-After=network.target steward-api.service
-
-[Service]
-Type=simple
-User=root
-WorkingDirectory=/opt/steward
-ExecStart=/root/.bun/bin/bun run packages/proxy/src/index.ts
-Restart=always
-RestartSec=10
-EnvironmentFile=/opt/steward/.env
-
-[Install]
-WantedBy=multi-user.target
-EOF"
-
+# 1. Create the dedicated user and install Bun for it (units use
+#    /home/steward/.bun/bin/bun)
 ssh root@${NODE_IP} "
+  useradd --system --create-home --shell /usr/sbin/nologin steward 2>/dev/null || true
+  sudo -u steward bash -c 'curl -fsSL https://bun.sh/install | bash'
+"
+
+# 2. Move the env file to the path the units expect and lock it down
+ssh root@${NODE_IP} "
+  mkdir -p /etc/steward
+  cp /opt/steward/.env /etc/steward/env
+  chmod 600 /etc/steward/env
+  chown -R steward:steward /opt/steward
+"
+
+# 3. Install + start the shipped units
+ssh root@${NODE_IP} "
+  cp /opt/steward/deploy/steward.service /etc/systemd/system/steward.service
+  cp /opt/steward/deploy/steward-proxy.service /etc/systemd/system/steward-proxy.service
   systemctl daemon-reload
-  systemctl enable steward-api steward-proxy
-  systemctl start steward-api steward-proxy
+  systemctl enable steward steward-proxy
+  systemctl start steward steward-proxy
 "
 ```
 
 <details>
 <summary>Legacy single-service setup (still works)</summary>
 
-If you don't need the proxy, the original `steward.service` targeting the API only still works:
+If you don't need the proxy, install only `deploy/steward.service` (same
+hardening, API only) and skip `steward-proxy.service`:
 
 ```bash
-ssh root@${NODE_IP} "cat > /etc/systemd/system/steward.service << 'EOF'
-[Unit]
-Description=Steward Wallet Service
-After=network.target
-
-[Service]
-Type=simple
-User=root
-WorkingDirectory=/opt/steward
-ExecStart=/root/.bun/bin/bun run packages/api/src/index.ts
-Restart=always
-RestartSec=10
-EnvironmentFile=/opt/steward/.env
-
-[Install]
-WantedBy=multi-user.target
-EOF
-systemctl daemon-reload && systemctl enable steward && systemctl start steward"
+ssh root@${NODE_IP} "
+  cp /opt/steward/deploy/steward.service /etc/systemd/system/steward.service
+  systemctl daemon-reload && systemctl enable steward && systemctl start steward"
 ```
 </details>
 
@@ -202,12 +178,34 @@ ssh root@${NODE_IP} "curl -sf http://172.18.0.1:8080/health"
 
 ### Step 6: Create milady-cloud tenant (if first time)
 
+The platform key must never appear on a command line (local ps/history,
+remote process list). Read it on the node from the mode-0600 env file and
+call the API over localhost via the SSH channel; the credential header reaches
+curl through a mode-0600 temporary header file, never as an argv-expansible
+`-H "X-Steward-Platform-Key: ${PK}"` (SEC-020/SEC-022):
+
 ```bash
-PLATFORM_KEY="<your-platform-key>"
-ssh root@${NODE_IP} "curl -sf -X POST http://localhost:3200/platform/tenants \
+ssh root@${NODE_IP} "PK=\$(grep '^STEWARD_PLATFORM_KEYS=' /etc/steward/env | cut -d= -f2- | cut -d, -f1); \
+  case \"\${PK}\" in ''|*[!A-Za-z0-9._~-]*) exit 1;; esac; [ \"\${#PK}\" -le 512 ] || exit 1; \
+  AUTH_FILE=\$(mktemp); chmod 600 \"\${AUTH_FILE}\"; trap 'rm -f \"\${AUTH_FILE}\"' EXIT; \
+  printf 'X-Steward-Platform-Key: %s\\n' \"\${PK}\" > \"\${AUTH_FILE}\"; \
+  curl -sf -X POST http://localhost:3200/platform/tenants \
   -H 'Content-Type: application/json' \
-  -H 'X-Steward-Platform-Key: ${PLATFORM_KEY}' \
+  -H \"@\${AUTH_FILE}\" \
   -d '{\"id\": \"milady-cloud\", \"name\": \"Milady Cloud\"}'"
+```
+
+For any other platform-key operation, use an SSH tunnel from your workstation
+(never plain HTTP to a node IP over the internet):
+
+```bash
+ssh -L 3200:localhost:3200 root@${NODE_IP}
+# then, locally:
+case "$PLATFORM_KEY" in ''|*[!A-Za-z0-9._~-]*) echo "Invalid platform key" >&2; exit 1;; esac
+AUTH_FILE=$(mktemp); chmod 600 "$AUTH_FILE"
+printf 'X-Steward-Platform-Key: %s\n' "$PLATFORM_KEY" > "$AUTH_FILE"
+curl -sf http://localhost:3200/platform/tenants -H "@$AUTH_FILE"
+rm -f "$AUTH_FILE"
 ```
 
 ---
@@ -217,14 +215,15 @@ ssh root@${NODE_IP} "curl -sf -X POST http://localhost:3200/platform/tenants \
 ### Quick update (source sync + restart)
 
 ```bash
-NODE_IP="88.99.66.168"  # milady-core-1
+NODE_IP="<node-ip>"  # from your operator-local inventory (never committed — see Node Inventory)
+STEWARD_SRC="/path/to/your/local/steward-checkout"  # your local clone of THIS repo
 
 # 1. Sync updated source
 rsync -az --delete \
   --exclude='.git' --exclude='node_modules' --exclude='.next' \
   --exclude='web' --exclude='.turbo' \
-  -e "ssh -o StrictHostKeyChecking=no" \
-  /home/shad0w/projects/steward-fi/ root@${NODE_IP}:/opt/steward/
+  -e "ssh -o StrictHostKeyChecking=accept-new" \
+  "${STEWARD_SRC}/" root@${NODE_IP}:/opt/steward/
 
 # 2. Install any new dependencies
 ssh root@${NODE_IP} "cd /opt/steward && bun install"
@@ -239,18 +238,21 @@ ssh root@${NODE_IP} "curl -sf http://localhost:3200/health"
 ### Update all nodes at once
 
 ```bash
-NODES="88.99.66.168 178.63.251.122 138.201.80.125 85.10.193.52 136.243.47.243 195.201.57.227"
+# Node IPs come from your operator-local inventory — the same one
+# scripts/deploy-all.sh reads (STEWARD_NODES or scripts/deploy-nodes.local.conf).
+NODES="<node-ip-1> <node-ip-2> <node-ip-3>"
+STEWARD_SRC="/path/to/your/local/steward-checkout"  # your local clone of THIS repo
 
 for NODE in $NODES; do
   echo "=== Updating ${NODE} ==="
   rsync -az --delete \
     --exclude='.git' --exclude='node_modules' --exclude='.next' \
     --exclude='web' --exclude='.turbo' \
-    -e "ssh -o StrictHostKeyChecking=no" \
-    /home/shad0w/projects/steward-fi/ root@${NODE}:/opt/steward/
-  ssh -o StrictHostKeyChecking=no root@${NODE} "cd /opt/steward && bun install && systemctl restart steward"
+    -e "ssh -o StrictHostKeyChecking=accept-new" \
+    "${STEWARD_SRC}/" root@${NODE}:/opt/steward/
+  ssh -o StrictHostKeyChecking=accept-new root@${NODE} "cd /opt/steward && bun install && systemctl restart steward"
   sleep 2
-  ssh -o StrictHostKeyChecking=no root@${NODE} "curl -sf http://localhost:3200/health"
+  ssh -o StrictHostKeyChecking=accept-new root@${NODE} "curl -sf http://localhost:3200/health"
   echo ""
 done
 ```
@@ -321,50 +323,58 @@ After deploying or updating, verify:
 
 ### Full E2E smoke test
 
+Run this ON the node or through an SSH tunnel (`ssh -L 3200:localhost:3200
+root@<node-ip>`). Never point it at `http://<node-ip>:3200` over the
+internet — the platform key and tenant keys would cross the network in
+cleartext (SEC-022).
+
 ```bash
-PK="<platform-key>"
+read -rsp "Platform key: " PK; printf '\n'
+case "$PK" in ''|*[!A-Za-z0-9._~-]*) echo "Invalid platform key" >&2; exit 1;; esac
 BASE="http://localhost:3200"
+PLATFORM_HEADERS=$(mktemp); TENANT_HEADERS=$(mktemp); TOKEN_HEADERS=$(mktemp)
+chmod 600 "$PLATFORM_HEADERS" "$TENANT_HEADERS" "$TOKEN_HEADERS"
+trap 'rm -f "$PLATFORM_HEADERS" "$TENANT_HEADERS" "$TOKEN_HEADERS"' EXIT
+printf 'X-Steward-Platform-Key: %s\n' "$PK" > "$PLATFORM_HEADERS"
 
 # Create test tenant
 RESP=$(curl -sf -X POST $BASE/platform/tenants \
   -H "Content-Type: application/json" \
-  -H "X-Steward-Platform-Key: $PK" \
+  -H "@$PLATFORM_HEADERS" \
   -d '{"id":"smoke-test","name":"Smoke Test"}')
 API_KEY=$(echo $RESP | jq -r '.data.apiKey')
+printf 'X-Steward-Tenant: smoke-test\nX-Steward-Key: %s\n' "$API_KEY" > "$TENANT_HEADERS"
 
 # Create agent
 curl -sf -X POST $BASE/agents \
   -H "Content-Type: application/json" \
-  -H "X-Steward-Tenant: smoke-test" \
-  -H "X-Steward-Key: $API_KEY" \
+  -H "@$TENANT_HEADERS" \
   -d '{"id":"test-1","name":"Test Agent"}'
 
 # Set policies
 curl -sf -X PUT $BASE/agents/test-1/policies \
   -H "Content-Type: application/json" \
-  -H "X-Steward-Tenant: smoke-test" \
-  -H "X-Steward-Key: $API_KEY" \
+  -H "@$TENANT_HEADERS" \
   -d '[{"type":"spending-limit","enabled":true,"config":{"maxPerTx":"1000000000000000000","maxPerDay":"5000000000000000000"}}]'
 
 # Get JWT
 TOKEN=$(curl -sf -X POST $BASE/agents/test-1/token \
-  -H "X-Steward-Tenant: smoke-test" \
-  -H "X-Steward-Key: $API_KEY" | jq -r '.data.token')
+  -H "@$TENANT_HEADERS" | jq -r '.data.token')
+printf 'Authorization: Bearer %s\n' "$TOKEN" > "$TOKEN_HEADERS"
 
 # Check balance
 curl -sf $BASE/agents/test-1/balance \
-  -H "Authorization: Bearer $TOKEN"
+  -H "@$TOKEN_HEADERS"
 
 # Sign (no broadcast)
 curl -sf -X POST $BASE/vault/test-1/sign \
   -H "Content-Type: application/json" \
-  -H "Authorization: Bearer $TOKEN" \
+  -H "@$TOKEN_HEADERS" \
   -d '{"to":"0x0000000000000000000000000000000000000001","value":"0","data":"0x","broadcast":false}'
 
 # Clean up
 curl -sf -X DELETE $BASE/agents/test-1 \
-  -H "X-Steward-Tenant: smoke-test" \
-  -H "X-Steward-Key: $API_KEY"
+  -H "@$TENANT_HEADERS"
 ```
 
 ---
@@ -373,7 +383,7 @@ curl -sf -X DELETE $BASE/agents/test-1 \
 
 ### Steward won't start
 ```bash
-journalctl -u steward-api --no-pager -n 50
+journalctl -u steward --no-pager -n 50
 journalctl -u steward-proxy --no-pager -n 50
 # Legacy single-service:
 journalctl -u steward --no-pager -n 50
@@ -395,7 +405,9 @@ Common causes:
 - Check logs: `journalctl -u steward --since "5 minutes ago"`
 
 ### "Tenant not found" errors
-- Verify tenant exists: `curl -sf http://localhost:3200/platform/tenants -H 'X-Steward-Platform-Key: <key>'`
+- Verify the tenant through the owner-only platform header file created in the
+  smoke-test procedure above:
+  `curl -sf http://localhost:3200/platform/tenants -H "@$PLATFORM_HEADERS"`
 - Create missing tenant via platform API
 
 ### High memory usage
@@ -423,14 +435,23 @@ Note: The root `docker-compose.yml` includes a local Postgres. For Neon, use the
 
 ## Node Inventory
 
-| Node | IP | API (:3200) | Proxy (:8080) | Notes |
-|------|-----|------------|--------------|-------|
-| milady-core-1 | 88.99.66.168 | ✅ Running | ✅ Running | Primary; front with your own domain/TLS |
-| milady-core-2 | 178.63.251.122 | ✅ Running | ✅ Running | |
-| milady-core-3 | 138.201.80.125 | ✅ Running | ✅ Running | |
-| milady-core-4 | 85.10.193.52 | ✅ Running | ✅ Running | |
-| milady-core-5 | 136.243.47.243 | ✅ Running | ✅ Running | |
-| milady-core-6 | 195.201.57.227 | ✅ Running | ✅ Running | |
+Node addresses are **operator-local configuration and are intentionally not
+committed to this public repo** (SEC-130): a committed inventory of
+custodial-wallet hosts is a confirmed target list and a network-reconnaissance
+shortcut. Keep your inventory in one of:
+
+- `STEWARD_NODES="milady=<ip> core-1=<ip> ..."` (consumed by `scripts/deploy-all.sh`)
+- `scripts/deploy-nodes.local.conf` (gitignored; one `name=<ip>` per line)
+
+Track node health/notes in your own ops system, not in this document.
+
+> **Threat note — agent→API traffic on the Docker bridge:** the systemd
+> topology below has agents reaching the API as plain HTTP to
+> `http://172.18.0.1:3200` on the docker bridge. Bearer tokens are visible to
+> any process able to tap host traffic (other containers, host compromise).
+> Prefer the `deploy/docker-compose.yml` isolated-network path (agents reach
+> the API by container name on `milady-isolated`; host ports are
+> loopback-only) and front all external access with TLS.
 
 ---
 
@@ -575,7 +596,7 @@ REDIS_URL=redis://:yourpassword@localhost:6379
 ```bash
 # After restarting Steward, check logs for:
 # [redis] Connected to redis://localhost:6379
-journalctl -u steward-api --since "1 minute ago" | grep redis
+journalctl -u steward --since "1 minute ago" | grep redis
 ```
 
 Redis is used for:
@@ -585,6 +606,19 @@ Redis is used for:
 
 In **production** (`NODE_ENV=production`) the proxy treats Redis as **required** and fails **closed** without it: `checkProxyRateLimit`/`checkProxySpendLimit` reject requests (429/402/503) unless you explicitly set `STEWARD_ALLOW_PROXY_REDIS_SOFT_FAIL=true`. The compose deploy therefore ships a `redis` service and sets `REDIS_URL`. Only in non-production (or with the soft-fail override) do rate-limit/spend counters fall back to in-memory and reset on restart.
 
+### Eviction policy (SEC-021 follow-up)
+
+The shipped production compose stacks (`docker-compose.yml` and
+`deploy/docker-compose.yml`) set `--maxmemory-policy noeviction`. Under memory
+pressure, Redis therefore fails writes instead of silently evicting spend and
+rate counters; Steward's enforcement path treats those failures as closed.
+Alert on `used_memory` well below `maxmemory` so availability problems are
+handled before the fail-closed boundary is reached. The enterprise-reference
+stack and any externally managed or custom Redis must be configured and
+verified separately: use `noeviction` for enforcement counters (or document a
+deliberate financial-control risk acceptance), isolate them from cache
+workloads, and never assume an eviction policy such as `allkeys-lru` is safe.
+
 ---
 
 ## Webhook Configuration
@@ -592,13 +626,16 @@ In **production** (`NODE_ENV=production`) the proxy treats Redis as **required**
 After deploying, configure webhooks for your tenants to receive real-time event notifications:
 
 ```bash
-PK="<your-platform-key>"
-API_KEY="<tenant-api-key>"
 BASE="http://localhost:3200"
+read -rsp "Tenant API key: " API_KEY; printf '\n'
+TENANT_HEADERS=$(mktemp); WEBHOOK_RESPONSE=$(mktemp)
+chmod 600 "$TENANT_HEADERS" "$WEBHOOK_RESPONSE"
+trap 'rm -f "$TENANT_HEADERS"' EXIT
+printf 'X-Steward-Key: %s\n' "$API_KEY" > "$TENANT_HEADERS"
 
 # Register a webhook endpoint
 curl -sf -X POST $BASE/webhooks \
-  -H "X-Steward-Key: $API_KEY" \
+  -H "@$TENANT_HEADERS" \
   -H "Content-Type: application/json" \
   -d '{
     "url": "https://your-app.com/webhooks/steward",
@@ -606,11 +643,28 @@ curl -sf -X POST $BASE/webhooks \
     "description": "Production webhook",
     "maxRetries": 5,
     "retryBackoffMs": 60000
-  }'
-# → Returns webhook config including "secret" (save this!)
+  }' > "$WEBHOOK_RESPONSE"
+echo "Webhook config and one-time secret saved to $WEBHOOK_RESPONSE (mode 0600)"
 ```
 
-**Save the `secret` field** — it's only returned on creation. Use it to verify `X-Steward-Signature` on incoming events.
+**Securely move or consume `WEBHOOK_RESPONSE`, then delete it.** The `secret`
+field is only returned on creation and is used to verify
+`X-Steward-Signature` on incoming events; do not print it into terminal or CI
+logs.
+
+> **At-rest encryption and legacy plaintext rows (SEC-088):** webhook secrets
+> are encrypted at rest (AES-256-GCM; key from
+> `STEWARD_WEBHOOK_SECRET_ENCRYPTION_KEY`/`STEWARD_MASTER_PASSWORD`). Configs
+> written before encryption shipped may still hold **plaintext** secrets.
+> There is deliberately **no eager mass re-encryption at boot** — a boot-time
+> rewrite would need the encryption key during migrations and would race
+> concurrently booting replicas. Instead each config row is upgraded lazily,
+> via a compare-and-swap on the stored value, the next time that webhook
+> fires or is re-saved (see `packages/api/src/services/webhook-dispatch.ts`),
+> and new delivery rows only ever snapshot the encrypted form. Until a legacy
+> config fires or is re-saved, its plaintext secret stays recoverable by
+> anyone with DB read access (backup leak, read replica). **After upgrading,
+> rotate or re-save pre-existing webhooks to force immediate re-encryption.**
 
 ### Verify webhook delivery
 
@@ -618,7 +672,7 @@ curl -sf -X POST $BASE/webhooks \
 # List recent deliveries
 WEBHOOK_ID="wh_..."
 curl -sf "$BASE/webhooks/$WEBHOOK_ID/deliveries" \
-  -H "X-Steward-Key: $API_KEY"
+  -H "@$TENANT_HEADERS"
 ```
 
 ---
@@ -628,10 +682,9 @@ curl -sf "$BASE/webhooks/$WEBHOOK_ID/deliveries" \
 The repo includes a full E2E test script that validates the complete flow:
 
 ```bash
-# Run against a specific node
-STEWARD_URL=http://88.99.66.168:3200 bun run scripts/e2e-integration-test.ts
-
-# Run against local
+# Run against a specific node via SSH tunnel (node ports are loopback-only —
+# never point STEWARD_URL at http://<node-ip>:3200 over the internet):
+#   ssh -L 3200:localhost:3200 root@<node-ip>
 STEWARD_URL=http://localhost:3200 bun run scripts/e2e-integration-test.ts
 
 # With proxy (default: STEWARD_URL with :3200 → :8080)

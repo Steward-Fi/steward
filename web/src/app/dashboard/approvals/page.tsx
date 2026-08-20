@@ -1,12 +1,12 @@
 "use client";
 
-import type { ApprovalQueueEntry } from "@stwd/sdk";
+import { type ApprovalQueueEntry, StewardClient } from "@stwd/sdk";
 import { AnimatePresence, motion } from "framer-motion";
 import Link from "next/link";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useAuth } from "@/components/auth-provider";
 import { ChainBadge } from "@/components/chain-badge";
-import { steward } from "@/lib/api";
+import { STEWARD_API_URL } from "@/lib/steward-api-url";
 import { formatDate, formatNativeAmount, shortenAddress } from "@/lib/utils";
 
 type PendingItem = ApprovalQueueEntry;
@@ -18,16 +18,34 @@ interface Toast {
 }
 
 export default function ApprovalsPage() {
-  useAuth();
+  const auth = useAuth();
+  const activeTenantId = auth.tenant?.tenantId ?? null;
+  const sessionUserId = auth.userId ?? null;
+  const authReady =
+    auth.isAuthenticated &&
+    !auth.isLoading &&
+    activeTenantId !== null &&
+    sessionUserId !== null &&
+    auth.sessionTenantId === activeTenantId &&
+    auth.accessToken !== null;
+  const sessionEpoch = authReady ? JSON.stringify([activeTenantId, sessionUserId]) : null;
+  const client = useMemo(
+    () =>
+      authReady
+        ? new StewardClient({ baseUrl: STEWARD_API_URL, bearerToken: auth.accessToken! })
+        : null,
+    [auth.accessToken, authReady],
+  );
   const [pending, setPending] = useState<PendingItem[]>([]);
+  const [loadedSessionEpoch, setLoadedSessionEpoch] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
   const [toasts, setToasts] = useState<Toast[]>([]);
-
-  useEffect(() => {
-    loadPending();
-  }, [loadPending]);
+  const requestGeneration = useRef(0);
+  const requestedSessionEpoch = useRef<string | null>(null);
+  const currentSessionEpoch = useRef(sessionEpoch);
+  currentSessionEpoch.current = sessionEpoch;
 
   function addToast(message: string, kind: Toast["kind"]) {
     const id = `${Date.now()}-${Math.random()}`;
@@ -37,30 +55,79 @@ export default function ApprovalsPage() {
     }, 3000);
   }
 
-  async function loadPending() {
+  const loadPending = useCallback(async () => {
+    const generation = ++requestGeneration.current;
+    const requestSessionEpoch = sessionEpoch;
+    setPending([]);
+    setLoadedSessionEpoch(null);
+    setActionLoading(null);
+    if (!authReady) {
+      setLoading(true);
+      setError(null);
+      return;
+    }
     try {
       setLoading(true);
       setError(null);
       // Request the max page size so the dashboard shows all pending items in a single load.
-      // Request the max page size so the dashboard shows all pending items in a single load.
-      const items = await steward.listApprovals({ limit: 200 });
+      const items = await client!.listApprovals({ limit: 200 });
+      if (
+        requestGeneration.current !== generation ||
+        currentSessionEpoch.current !== requestSessionEpoch
+      )
+        return;
       setPending(items);
+      setLoadedSessionEpoch(requestSessionEpoch);
     } catch (e: unknown) {
+      if (
+        requestGeneration.current !== generation ||
+        currentSessionEpoch.current !== requestSessionEpoch
+      )
+        return;
       setError(e instanceof Error ? e.message : "Failed to load approvals");
+      setLoadedSessionEpoch(requestSessionEpoch);
     } finally {
-      setLoading(false);
+      if (
+        requestGeneration.current === generation &&
+        currentSessionEpoch.current === requestSessionEpoch
+      )
+        setLoading(false);
     }
-  }
+  }, [authReady, client, sessionEpoch]);
+
+  useEffect(() => {
+    if (!authReady) {
+      requestGeneration.current += 1;
+      requestedSessionEpoch.current = null;
+      setPending([]);
+      setLoadedSessionEpoch(null);
+      setActionLoading(null);
+      setError(null);
+      setLoading(true);
+      return;
+    }
+    if (requestedSessionEpoch.current === sessionEpoch) return;
+    requestedSessionEpoch.current = sessionEpoch;
+    setToasts([]);
+    void loadPending();
+  }, [authReady, loadPending, sessionEpoch]);
 
   async function handleAction(txId: string, action: "approve" | "reject") {
+    const generation = requestGeneration.current;
+    const actionSessionEpoch = sessionEpoch;
     const key = `${txId}-${action}`;
     setActionLoading(key);
     try {
       if (action === "approve") {
-        await steward.approveTransaction(txId, { comment: "Approved from dashboard" });
+        await client!.approveTransaction(txId, { comment: "Approved from dashboard" });
       } else {
-        await steward.denyTransaction(txId, "Rejected from dashboard");
+        await client!.denyTransaction(txId, "Rejected from dashboard");
       }
+      if (
+        requestGeneration.current !== generation ||
+        currentSessionEpoch.current !== actionSessionEpoch
+      )
+        return;
       setPending((prev) => prev.filter((item) => item.txId !== txId));
       addToast(
         action === "approve"
@@ -69,13 +136,27 @@ export default function ApprovalsPage() {
         "success",
       );
     } catch (e: unknown) {
+      if (
+        requestGeneration.current !== generation ||
+        currentSessionEpoch.current !== actionSessionEpoch
+      )
+        return;
       addToast(e instanceof Error ? e.message : `Failed to ${action}`, "error");
     } finally {
-      setActionLoading(null);
+      if (
+        requestGeneration.current === generation &&
+        currentSessionEpoch.current === actionSessionEpoch
+      ) {
+        setActionLoading(null);
+      }
     }
   }
 
-  if (loading) {
+  const sessionIsCurrent = loadedSessionEpoch === sessionEpoch;
+  const visiblePending = sessionIsCurrent ? pending : [];
+  const visibleError = sessionIsCurrent ? error : null;
+
+  if (loading || !sessionIsCurrent) {
     return (
       <div className="space-y-8">
         <div className="h-8 w-48 bg-bg-surface animate-pulse" />
@@ -102,9 +183,9 @@ export default function ApprovalsPage() {
             Transactions exceeding policy thresholds
           </p>
         </div>
-        {pending.length > 0 && (
+        {visiblePending.length > 0 && (
           <span className="text-xs text-amber-400 font-medium tabular-nums">
-            {pending.length} pending
+            {visiblePending.length} pending
           </span>
         )}
       </div>
@@ -130,12 +211,12 @@ export default function ApprovalsPage() {
         </AnimatePresence>
       </div>
 
-      {error && !loading && (
+      {visibleError && !loading && (
         <div className="py-16 text-center border border-red-400/20 bg-red-400/5">
           <p className="text-text-secondary text-sm mb-1">Failed to load approvals</p>
-          <p className="text-text-tertiary text-xs mb-4 font-mono">{error}</p>
+          <p className="text-text-tertiary text-xs mb-4 font-mono">{visibleError}</p>
           <button
-            onClick={loadPending}
+            onClick={() => void loadPending()}
             className="px-4 py-2 text-sm bg-accent text-bg hover:bg-accent-hover transition-colors"
           >
             Retry
@@ -143,7 +224,7 @@ export default function ApprovalsPage() {
         </div>
       )}
 
-      {pending.length === 0 && !error ? (
+      {visiblePending.length === 0 && !visibleError ? (
         <div className="py-20 text-center border border-border-subtle">
           <p className="font-display text-lg font-600 text-text-secondary">Queue is clear</p>
           <p className="text-sm text-text-tertiary mt-2 max-w-sm mx-auto">
@@ -154,7 +235,7 @@ export default function ApprovalsPage() {
       ) : (
         <div className="space-y-3">
           <AnimatePresence initial={false}>
-            {pending.map((item, i) => (
+            {visiblePending.map((item, i) => (
               <motion.div
                 key={item.id}
                 initial={{ opacity: 0, y: 8 }}

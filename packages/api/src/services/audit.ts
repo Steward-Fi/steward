@@ -23,11 +23,12 @@ import {
   appendAuditEventWithinTx,
   auditCheckpoints,
   getDb,
+  waitUntilRequestDatabaseTask,
   withTenantAuditedTransaction,
   withTenantAuditQueue,
   writeAuditEvent,
 } from "@stwd/db";
-import { observeAuditCheckpoint } from "@stwd/shared";
+import { observeAuditCheckpoint, redactedThrownDiagnostics } from "@stwd/shared";
 import { sql } from "drizzle-orm";
 import {
   type CheckpointEventContent,
@@ -35,6 +36,12 @@ import {
   eventsContentDigest,
   getCheckpointSigner,
 } from "./audit-checkpoint";
+import {
+  AuditCheckpointAnchorError,
+  type AuditCheckpointAnchorProof,
+  configuredAuditCheckpointAnchor,
+  maybeAnchorAuditCheckpoint,
+} from "./audit-checkpoint-anchor";
 import { API_VERSION } from "./version";
 
 /**
@@ -55,12 +62,25 @@ export type { AuditActorType as ActorType } from "@stwd/db";
 
 /**
  * Minimal read surface a snapshot transaction (or the db) must expose so the
- * PR5 case correlator can run `verifyAuditChain` + `readAuditBundleData` inside
+ * The case correlator can run `verifyAuditChain` + `readAuditBundleData` inside
  * ONE coherent snapshot. Both the Drizzle db and a Drizzle tx satisfy this; we
  * alias to the db's own type so the internal `.execute(sql\`...\`)` calls keep
  * their existing typing when an executor is supplied.
  */
 export type AuditReadExecutor = Pick<ReturnType<typeof getDb>, "execute">;
+
+/** Build the high-water aggregate read, bounded when doctor supplies maxRows. */
+export function auditRowAggregateQuery(tenantId: string, genesisSeq: number, maxRows?: number) {
+  return maxRows === undefined
+    ? sql`SELECT MAX(seq) AS max_seq, COUNT(*) AS cnt FROM audit_events WHERE tenant_id = ${tenantId} AND seq >= ${genesisSeq}`
+    : sql`SELECT MAX(seq) AS max_seq, COUNT(*) AS cnt
+          FROM (
+            SELECT seq FROM audit_events
+            WHERE tenant_id = ${tenantId} AND seq >= ${genesisSeq}
+            ORDER BY seq ASC
+            LIMIT ${maxRows + 1}
+          ) AS bounded_audit_events`;
+}
 // The tamper-evident audit-chain WRITE core (append/transaction primitives, the
 // HMAC key handling, and metadata redaction) now lives in `@stwd/db` so the
 // proxy package can extend the chain atomically without importing `@stwd/api`
@@ -198,10 +218,15 @@ function rowsFromExecute<T>(result: unknown): T[] {
  * failure (deny / roll back / surface), so a security event cannot occur without
  * a durable record.
  */
-export function trackAuditEvent(ev: AuditEventInput): void {
-  writeAuditEvent(ev).catch((err) => {
-    console.error(`[audit] Failed to write event ${ev.action} for tenant ${ev.tenantId}:`, err);
-  });
+export function trackAuditEvent(ev: AuditEventInput): Promise<void> {
+  return waitUntilRequestDatabaseTask(() =>
+    writeAuditEvent(ev).catch((err) => {
+      console.error(
+        `[audit] Failed to write event ${ev.action} for tenant ${ev.tenantId}`,
+        redactedThrownDiagnostics(err),
+      );
+    }),
+  );
 }
 
 /**
@@ -217,19 +242,30 @@ export async function verifyAuditChain(
     fromSeq?: number;
     toSeq?: number;
     requireHead?: boolean;
+    /** Hard cap enforced by the SQL read itself (LIMIT maxRows + 1). */
+    maxRows?: number;
     /**
      * Optional read executor (a snapshot transaction) so callers can verify a
      * chain segment WITHIN a single coherent snapshot alongside other reads
-     * (PR5 §4.1/§4.3 KC06). Defaults to `getDb()`; behavior is otherwise
+     * (§4.1/§4.3 KC06). Defaults to `getDb()`; behavior is otherwise
      * identical. Must expose `.execute(sql)` like the Drizzle db/tx.
      */
     executor?: AuditReadExecutor;
   } = {},
-): Promise<{ valid: true; count: number } | { valid: false; brokenAt: number }> {
+): Promise<
+  { valid: true; count: number } | { valid: false; brokenAt: number; limitExceeded?: boolean }
+> {
   const key = getHmacKey();
   const db = opts.executor ?? getDb();
   const requestedFromSeq = opts.fromSeq ?? 1;
   const toSeq = opts.toSeq;
+  const maxRows = opts.maxRows;
+  if (
+    maxRows !== undefined &&
+    (!Number.isSafeInteger(maxRows) || maxRows <= 0 || maxRows > 1_000_000)
+  ) {
+    throw new Error("maxRows must be a positive safe integer no greater than 1000000");
+  }
 
   // Out-of-band high-water-mark: persisted atomically with each append. Lets us
   // detect tail-truncation / whole-chain deletion that walking the surviving
@@ -266,13 +302,14 @@ export async function verifyAuditChain(
     const expectedSeqHwm = Number(head.expected_seq);
     const expectedCount = Number(head.expected_count);
     const aggRows = rowsFromExecute<{ max_seq: number | string | null; cnt: number | string }>(
-      await db.execute(
-        sql`SELECT MAX(seq) AS max_seq, COUNT(*) AS cnt FROM audit_events WHERE tenant_id = ${tenantId} AND seq >= ${genesisSeq}`,
-      ),
+      await db.execute(auditRowAggregateQuery(tenantId, genesisSeq, maxRows)),
     );
     const actualMaxSeq = aggRows[0]?.max_seq != null ? Number(aggRows[0].max_seq) : 0;
     const actualCount = aggRows[0]?.cnt != null ? Number(aggRows[0].cnt) : 0;
     const expectedLiveCount = expectedCount - (genesisSeq - 1);
+    if (maxRows !== undefined && actualCount > maxRows) {
+      return { valid: false, brokenAt: genesisSeq + maxRows, limitExceeded: true };
+    }
     // Missing newest rows (tail truncation) or whole-chain deletion: the stored
     // head outranks / outcounts what survives on disk. Point brokenAt at the
     // first missing seq.
@@ -320,10 +357,18 @@ export async function verifyAuditChain(
   }>(
     await db.execute(
       toSeq !== undefined
-        ? sql`SELECT * FROM audit_events WHERE tenant_id = ${tenantId} AND seq BETWEEN ${effectiveFromSeq} AND ${toSeq} ORDER BY seq ASC`
-        : sql`SELECT * FROM audit_events WHERE tenant_id = ${tenantId} AND seq >= ${effectiveFromSeq} ORDER BY seq ASC`,
+        ? maxRows !== undefined
+          ? sql`SELECT * FROM audit_events WHERE tenant_id = ${tenantId} AND seq BETWEEN ${effectiveFromSeq} AND ${toSeq} ORDER BY seq ASC LIMIT ${maxRows + 1}`
+          : sql`SELECT * FROM audit_events WHERE tenant_id = ${tenantId} AND seq BETWEEN ${effectiveFromSeq} AND ${toSeq} ORDER BY seq ASC`
+        : maxRows !== undefined
+          ? sql`SELECT * FROM audit_events WHERE tenant_id = ${tenantId} AND seq >= ${effectiveFromSeq} ORDER BY seq ASC LIMIT ${maxRows + 1}`
+          : sql`SELECT * FROM audit_events WHERE tenant_id = ${tenantId} AND seq >= ${effectiveFromSeq} ORDER BY seq ASC`,
     ),
   );
+
+  if (maxRows !== undefined && rows.length > maxRows) {
+    return { valid: false, brokenAt: effectiveFromSeq + maxRows, limitExceeded: true };
+  }
 
   let count = 0;
   let expectedSeq = effectiveFromSeq;
@@ -518,7 +563,7 @@ export async function readAuditBundleData(
 
 /**
  * The self-contained, offline-verifiable signed bundle envelope shared by
- * `/audit/bundle` and PR5's `/v2/provider-actions/:id/evidence`. Factored out of
+ * `/audit/bundle` and `/v2/provider-actions/:id/evidence`. Factored out of
  * the route (spec §6.2) so both surfaces sign identically — one signing path,
  * one checkpoint-persistence policy, one canonicalization contract.
  */
@@ -532,6 +577,7 @@ export interface SignedAuditBundle {
     payload: CheckpointPayload;
     signature: string;
     publicKey: string;
+    anchor?: AuditCheckpointAnchorProof;
   };
   generatedAt: string;
 }
@@ -539,7 +585,7 @@ export interface SignedAuditBundle {
 /**
  * Sign a checkpoint over the chain head + a content digest over exactly the
  * bundle's events, persist the checkpoint best-effort (provenance only; the
- * bundle is authoritative regardless, PR5 C4), and return the self-contained
+ * bundle is authoritative regardless), and return the self-contained
  * signed bundle envelope.
  *
  * `bundleData` MUST come from `readAuditBundleData(tenantId, from, to)` (ideally
@@ -590,6 +636,11 @@ export async function signAuditBundle(
     eventsToSeq: events.length > 0 ? events[events.length - 1].seq : 0,
   };
   const signed = signer.sign(checkpointPayload);
+  // Default/off mode returns synchronously without constructing a sink or
+  // touching the network. Required mode throws instead of emitting an
+  // unanchored bundle; best-effort mode logs and preserves the v1 envelope.
+  const anchorConfiguration = configuredAuditCheckpointAnchor();
+  const anchor = await maybeAnchorAuditCheckpoint(signed, anchorConfiguration);
   // Process-local operational gauge only. Durable checkpoint evidence is the
   // signed payload/table below and remains authoritative across restarts.
   try {
@@ -600,7 +651,11 @@ export async function signAuditBundle(
 
   // Persist the checkpoint (append-only provenance). Best-effort: a persistence
   // failure must not deny the auditor their signed bundle (self-contained).
-  if (head) {
+  // Unanchored empty exports retain the historical no-row behavior. Once a
+  // third-party proof exists, however, persist it even for the signed empty
+  // checkpoint: required mode must never return a proof that has no durable
+  // checkpoint binding.
+  if (head || anchor) {
     try {
       await getDb()
         .insert(auditCheckpoints)
@@ -611,9 +666,20 @@ export async function signAuditBundle(
           payload: checkpointPayload as unknown as Record<string, unknown>,
           signature: signed.signature,
           publicKey: signed.publicKey,
+          anchorProof: anchor as unknown as Record<string, unknown> | undefined,
+          anchorVerifiedAt: anchor ? new Date(anchor.verifiedAt) : undefined,
         });
     } catch (err) {
-      console.error(`[audit] checkpoint persistence failed for tenant ${tenantId}:`, err);
+      if (anchor && anchorConfiguration.mode === "required") {
+        throw new AuditCheckpointAnchorError(
+          "Required RFC 3161 checkpoint proof could not be persisted atomically",
+          { cause: err },
+        );
+      }
+      console.error(
+        `[audit] checkpoint persistence failed for tenant ${tenantId}`,
+        redactedThrownDiagnostics(err),
+      );
     }
   }
 
@@ -632,6 +698,7 @@ export async function signAuditBundle(
       payload: signed.payload,
       signature: signed.signature,
       publicKey: signed.publicKey,
+      ...(anchor ? { anchor } : {}),
     },
     generatedAt: new Date().toISOString(),
   };

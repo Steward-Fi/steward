@@ -9,6 +9,7 @@
  */
 
 import { agentRegistrations, registryIndex } from "@stwd/db";
+import { redactedThrownDiagnostics } from "@stwd/shared";
 import { and, eq, sql } from "drizzle-orm";
 import { Hono } from "hono";
 import { z } from "zod";
@@ -21,7 +22,8 @@ import {
   hasAgentTokenScope,
   requireTenantLevel,
 } from "../services/context";
-import { validateWebhookUrl } from "../services/webhook-url";
+import { isRecentMfaTimestamp } from "../services/recent-mfa";
+import { validateWebhookUrlResolved } from "../services/webhook-url";
 
 export const erc8004Routes = new Hono<{ Variables: AppVariables }>();
 type AgentRegistrationRow = typeof agentRegistrations.$inferSelect;
@@ -64,12 +66,7 @@ function requireTenantAdminSession(c: Parameters<typeof requireTenantLevel>[0]):
 }
 
 function hasRecentSessionMfa(c: Parameters<typeof requireTenantLevel>[0], maxAgeMs = 5 * 60_000) {
-  const verifiedAt = c.get("sessionMfaVerifiedAt");
-  return (
-    typeof verifiedAt === "number" &&
-    Number.isFinite(verifiedAt) &&
-    Date.now() - verifiedAt <= maxAgeMs
-  );
+  return isRecentMfaTimestamp(c.get("sessionMfaVerifiedAt"), maxAgeMs);
 }
 
 function requireRecentAdminMfa(c: Parameters<typeof requireTenantLevel>[0], reason: string) {
@@ -84,9 +81,9 @@ function signedFeedbackWritesEnabled(): boolean {
   return false;
 }
 
-function validateAgentCardApiUrl(apiUrl: string): string | null {
+async function validateAgentCardApiUrl(apiUrl: string): Promise<string | null> {
   if (!apiUrl) return null;
-  const destinationError = validateWebhookUrl(apiUrl);
+  const destinationError = await validateWebhookUrlResolved(apiUrl);
   if (destinationError) return `apiUrl ${destinationError}`;
   if (new URL(apiUrl).protocol !== "https:") return "apiUrl must use https";
   return null;
@@ -185,7 +182,7 @@ erc8004Routes.post("/:id/register-onchain", async (c) => {
   }
 
   const { chainId, apiUrl, capabilities, services } = parsed.data;
-  const apiUrlError = validateAgentCardApiUrl(apiUrl);
+  const apiUrlError = await validateAgentCardApiUrl(apiUrl);
   if (apiUrlError) {
     return c.json<ApiResponse>({ ok: false, error: apiUrlError }, 400);
   }
@@ -254,7 +251,7 @@ erc8004Routes.post("/:id/register-onchain", async (c) => {
       },
     });
   } catch (err: unknown) {
-    console.error("[erc8004] register-onchain error:", err);
+    console.error("[erc8004] register-onchain error", redactedThrownDiagnostics(err));
     return c.json<ApiResponse>({ ok: false, error: "Failed to create registration" }, 500);
   }
 });
@@ -312,7 +309,7 @@ erc8004Routes.get("/:id/onchain", async (c) => {
       },
     });
   } catch (err: unknown) {
-    console.error("[erc8004] onchain lookup error:", err);
+    console.error("[erc8004] onchain lookup error", redactedThrownDiagnostics(err));
     return c.json<ApiResponse>({ ok: false, error: "Failed to fetch on-chain data" }, 500);
   }
 });
@@ -444,7 +441,7 @@ erc8004Routes.post("/:id/feedback", async (c) => {
       },
     });
   } catch (err: unknown) {
-    console.error("[erc8004] feedback error:", err);
+    console.error("[erc8004] feedback error", redactedThrownDiagnostics(err));
     return c.json<ApiResponse>({ ok: false, error: "Failed to record feedback" }, 500);
   }
 });
@@ -454,6 +451,15 @@ erc8004Routes.post("/:id/feedback", async (c) => {
 export const discoveryRoutes = new Hono<{ Variables: AppVariables }>();
 
 // GET /discovery/agents — query registered agents across registries.
+//
+// SEC-213 (decision: intentionally public). This listing is unauthenticated
+// and cross-tenant BY DESIGN: erc8004 registrations are on-chain public
+// records, and this endpoint exists so any client can discover them without
+// scraping the chain itself. The exposed fields (token_id, chain_id,
+// registry_address, feedback_count) are all chain-public identity facts — no
+// tenant-internal data (agent names, wallets, policies, owners) is ever
+// selected. Keep it that way: any future column added here must be evaluated
+// against "is this already public on-chain?" before being exposed.
 
 discoveryRoutes.get("/agents", async (c) => {
   const rawChainId = c.req.query("chainId");
@@ -503,7 +509,7 @@ discoveryRoutes.get("/agents", async (c) => {
       data: agents,
     });
   } catch (err: unknown) {
-    console.error("[erc8004] discovery/agents error:", err);
+    console.error("[erc8004] discovery/agents error", redactedThrownDiagnostics(err));
     return c.json<ApiResponse>({ ok: false, error: "Failed to query agents" }, 500);
   }
 });
@@ -526,7 +532,7 @@ discoveryRoutes.get("/registries", async (c) => {
       data: rows.sort((a, b) => a.chain_id - b.chain_id),
     });
   } catch (err: unknown) {
-    console.error("[erc8004] discovery/registries error:", err);
+    console.error("[erc8004] discovery/registries error", redactedThrownDiagnostics(err));
     return c.json<ApiResponse>({ ok: false, error: "Failed to query registries" }, 500);
   }
 });

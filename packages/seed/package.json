@@ -14,9 +14,10 @@
     "test": "bun test --timeout 30000"
   },
   "dependencies": {
+    "@stwd/auth": "workspace:*",
     "@stwd/db": "workspace:*",
-    "@stwd/vault": "workspace:*",
-    "drizzle-orm": "^0.44.5",
+    "@stwd/shared": "workspace:*",
+    "drizzle-orm": "^0.45.2",
     "viem": "^2.30.0"
   },
   "description": "Database seed scripts for local development and demos"

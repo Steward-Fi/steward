@@ -1,8 +1,8 @@
 /**
- * provider-approval.ts — PR3 sole transition owner for approval-required
+ * provider-approval.ts — sole transition owner for approval-required
  * provider actions (spec §6). It:
  *
- *   - builds the exact approval commitment at PR2 creation (createApprovalArm),
+ *   - builds the exact approval commitment during action creation (createApprovalArm),
  *   - decides (approve/deny) with current-authority + recent-MFA + exact-request
  *     integrity checks,
  *   - expires and stales through the exact atomic state machine,
@@ -12,9 +12,9 @@
  * Every state transition and its REQUIRED audit event commit atomically through
  * `withTenantAuditedTransaction` (I14). The service NEVER decrypts a credential,
  * calls the proxy, mints execution authorization, claims a nonce, or performs
- * network I/O (I15) — that is PR4.
+ * network I/O (I15); dispatch owns those operations.
  *
- * Correlation contract (PR5 C1): every lifecycle audit event sets top-level
+ * Correlation contract: every lifecycle audit event sets top-level
  * `resource_type='provider_action'` and `resource_id=intents.id` in addition to
  * the signed `metadata.intentId`.
  */
@@ -28,6 +28,7 @@ import {
   providerAccounts,
   providerActionApprovals,
   providerActionBindings,
+  providerActionReservationGenerations,
   providerGrants,
   providerOperations,
   providerRoleBindings,
@@ -39,11 +40,14 @@ import {
 import {
   computeApprovalCommitmentHash,
   computeDecisionRequestHash,
+  isRegisteredProfile,
   jcsStringify,
   PROVIDER_APPROVAL_AUDIT_SCHEMA,
   type ProviderApprovalAuditPayloadV1,
   type ProviderApprovalCommitmentV1,
+  redactedThrownDiagnostics,
   sha256HexPrefixed,
+  verifyProviderExecutionPolicyEvidence,
 } from "@stwd/shared";
 import { and, eq, sql } from "drizzle-orm";
 import {
@@ -88,7 +92,7 @@ export interface DecideInput {
   tenantId: string;
   authenticatedUserId: string;
   sessionMfaVerifiedAt: number | undefined;
-  requiredMfaAssurance?: string; // reserved; PR1 does not yet supply assurance
+  requiredMfaAssurance?: string; // reserved for structured assurance input
   decision: "approve" | "deny";
   expectedVersion: number;
   expectedRequestHash: string;
@@ -112,15 +116,15 @@ interface LoadedCase {
   queue: QueueRow;
 }
 
-// ─── Commitment creation (called from the PR2 create tx, spec §6.3) ───────────
+// ─── Commitment creation (called from the action-creation tx, spec §6.3) ──────
 
 type DbBase = ReturnType<typeof getDb>;
 type DbExecutor = DbBase | Parameters<Parameters<DbBase["transaction"]>[0]>[0];
 
 /**
- * Build the exact approval commitment + queue row inside the PR2 create
+ * Build the exact approval commitment and queue row inside the action-creation
  * transaction (spec §6.3 steps 3-5). Returns the commitment hash + queue id so
- * the caller can set them on the binding. THROWS if a required PR1 execution
+ * the caller can set them on the binding. Throws if a required execution
  * dependency (route/credential) is missing — creation must fail closed (§5.2).
  *
  * The caller (provider-action-service) has already inserted the intent and is
@@ -157,15 +161,23 @@ export async function buildApprovalArm(args: {
    */
   canonicalProfile: ProviderApprovalCommitmentV1["operation"]["canonicalProfile"];
   /**
-   * #205 flat M-of-N quorum config (already fail-closed-validated by the caller's
+   * Flat M-of-N quorum config (already fail-closed-validated by the caller's
    * extractQuorumConfig). `undefined` => single-approver legacy path: the queue
    * row's quorum columns stay NULL/empty/0 and the commitment omits the quorum
-   * member (byte-identical commitment to pre-#205). When present it is
+   * member (byte-identical single-approver commitment). When present it is
    * re-validated here as defense in depth before it is committed/persisted.
    */
   quorum?: { threshold: number; eligibleApproverUserIds: string[] };
 }): Promise<{ queueId: string; commitmentHash: string; commitment: ProviderApprovalCommitmentV1 }> {
   const tx = args.tx;
+
+  // Fail-closed consumption site: the canonical profile bound into the
+  // approval commitment MUST be a registered profile. An unregistered value
+  // fails the approval arm (creation fails closed) rather than committing an
+  // unknown profile into the durable evidence surface.
+  if (!isRegisteredProfile(args.canonicalProfile)) {
+    throw new ApprovalArmError("APPROVAL_PROFILE_UNREGISTERED");
+  }
 
   // Route + credential dependencies MUST exist (spec §5.2). Missing => throw so
   // creation fails closed.
@@ -187,7 +199,7 @@ export async function buildApprovalArm(args: {
     throw new ApprovalArmError("APPROVAL_CREDENTIAL_UNAVAILABLE");
   }
 
-  // #205 defense-in-depth: re-validate the quorum config shape at commit time so
+  // Revalidate the quorum config shape at commit time so
   // a malformed quorum can never be persisted even if a future caller forgets
   // extractQuorumConfig (spec §7 fail-closed at store time). Distinctness of the
   // eligible set + threshold reachability are re-checked here.
@@ -206,7 +218,7 @@ export async function buildApprovalArm(args: {
       throw new ApprovalArmError("APPROVAL_QUORUM_CONFIG_INVALID");
     }
 
-    // FAIL CLOSED AT STORE TIME on an UNREACHABLE quorum (codex P2): a
+    // Fail closed at store time on an unreachable quorum: a
     // structurally-valid eligible set can still be unsatisfiable if some listed
     // ids are not real workspace_approvers, are not tenant members, or is the
     // requester (agent owner), all of whom are rejected at decide time. Compute
@@ -316,7 +328,7 @@ export async function buildApprovalArm(args: {
       maxMfaAgeSeconds: 300,
       requiredMfaAssurance: "current-session-mfa",
       // Additive: emitted ONLY when a quorum is configured, so the single-approver
-      // commitment is byte-identical to pre-#205.
+      // commitment retains the byte-identical single-approver shape.
       ...(quorum
         ? {
             quorum: {
@@ -350,7 +362,7 @@ export async function buildApprovalArm(args: {
     approvalCommitmentHash: commitmentHash,
     expectedBindingRevision: 1,
     expiresAt: new Date(args.expiresAt),
-    // #205 quorum config columns. NULL/empty/0 for the single-approver path (the
+    // Quorum config columns. NULL/empty/0 for the single-approver path (the
     // CHECK in 0083 enforces this shape). When a quorum is set, the eligible set
     // + threshold are persisted here so decide() can re-validate against the
     // frozen set even if the commitment doc were ever tampered.
@@ -428,6 +440,8 @@ class ProviderApprovalService {
       | "afterScopeLoad"
       | "afterIntegrity"
       | "afterAuthority"
+      | "afterPolicyReserve"
+      | "afterPolicyReserveCrash"
       | "afterMfa"
       | "beforeAudit"
       | "afterAudit"
@@ -508,7 +522,7 @@ class ProviderApprovalService {
     queue: QueueRow,
   ): { ok: true } | { ok: false; code: string } {
     // 2/3. Re-hash the persisted canonical action bytes → action_digest. The
-    // bytes are the UTF-8 of the JCS canonical action (PR2 stores
+    // bytes are the UTF-8 of the persisted JCS canonical action
     // `jcsStringify(action)` as bytea and digests `sha256HexPrefixed(jcs)`); a
     // raw-byte sha256 is byte-identical to the string form.
     const rawBytes = new Uint8Array(binding.canonicalActionBytes as Uint8Array);
@@ -594,9 +608,9 @@ class ProviderApprovalService {
     if (!agent) return { ok: false, code: "APPROVAL_DEPENDENCY_STALE" };
 
     // Workspace current + EXACT committed revision. The committed value lives in
-    // the persisted PR2 access decision (dependencyRevisions.workspace); a
+    // the persisted access decision (dependencyRevisions.workspace); a
     // workspace-authority revision bump while the workspace stays active must
-    // stale the action (exact dependency binding, codex P1).
+    // stale the action through the exact dependency binding.
     const [workspace] = await tx
       .select()
       .from(workspaces)
@@ -809,17 +823,17 @@ class ProviderApprovalService {
     return { grantIds, bindingIds };
   }
 
-  // ── Current-policy re-evaluation is a commitment-hash equality check for PR3.
+  // ── Approval-time policy validation is a commitment-hash equality check.
   // The persisted policy document's revision hash must still match the operation
   // (operation revision equality above already covers rule-set drift because the
   // policy revision hash binds operationRevision). A current hard deny is
   // surfaced by the operation/policy revision changing → APPROVAL_OPERATION_STALE
-  // or APPROVAL_POLICY_STALE. PR3 does not re-run the evaluator here; operation
+  // or APPROVAL_POLICY_STALE. Decision does not re-run the evaluator here; operation
   // revision + policy revision hash equality is the exact-binding rule.
 
   /**
    * Current human workspace authority, shared by approval decisions and the
-   * execute-route caller gate. This is the PR3 authority predicate: current
+   * execute-route caller gate. This is the approval authority predicate: current
    * tenant membership plus an active, in-window role binding for the exact
    * workspace and its current environment.
    */
@@ -908,7 +922,7 @@ class ProviderApprovalService {
       }
     }
 
-    // #205 quorum: the requester (agent owner) can NEVER count toward the
+    // Quorum rule: the requester (agent owner) can never count toward the
     // quorum, generalizing requester-separation to the M-of-N case regardless of
     // whether requesterSeparation was independently set. And the approver MUST be
     // a member of the frozen eligible set. Both checks fail closed if the
@@ -1015,7 +1029,7 @@ class ProviderApprovalService {
       )
       .returning({ id: approvalQueue.id });
     // Guarded CAS: if a concurrent winner already transitioned the row, do NOT
-    // update the intent or append a duplicate expired event (codex P2).
+    // update the intent or append a duplicate expired event.
     if (won.length === 0) return false;
     await tx
       .update(providerActionBindings)
@@ -1065,7 +1079,7 @@ class ProviderApprovalService {
 
   // ── Stale transition (spec §6.7). One tx moves pending/approved → stale.
   // Returns false if a concurrent winner already moved the row (guarded CAS lost)
-  // so the caller does NOT emit a duplicate transition or audit event (codex P2). ──
+  // so the caller does not emit a duplicate transition or audit event. ──
   private async staleTransition(
     tx: DbExecutor,
     append: (ev: { tenantId: string } & Record<string, unknown>) => Promise<void>,
@@ -1203,7 +1217,7 @@ class ProviderApprovalService {
         // in a DECIDED state (approved/rejected/consumed). If the row later
         // expired/staled (which clears `decision` to NULL but retains the idem
         // hash), an exact retry must NOT report a stale success — it falls through
-        // to the expiry/terminal handling below (codex P2).
+        // to the expiry or terminal handling below.
         if (
           queue.decisionIdempotencyKeyHash &&
           queue.resolvedById === input.authenticatedUserId &&
@@ -1220,7 +1234,7 @@ class ProviderApprovalService {
           return fail("APPROVAL_IDEMPOTENCY_CONFLICT", 409);
         }
 
-        // Cross-action idempotency conflict (codex P2): the same approver reusing
+        // Cross-action idempotency conflict: the same approver reusing
         // this decision key on a DIFFERENT intent would violate the partial
         // unique index (tenant_id, resolved_by_id, decision_idempotency_key_hash)
         // and surface as an opaque 503. Detect it here and return the precise
@@ -1319,7 +1333,7 @@ class ProviderApprovalService {
         const mfaVerifiedAt = new Date(input.sessionMfaVerifiedAt as number);
         const mfaAgeMs = Date.now() - (input.sessionMfaVerifiedAt as number);
 
-        // ── #205 QUORUM PATH ──────────────────────────────────────────────
+        // ── Quorum path ───────────────────────────────────────────────────
         // A configured quorum threshold flips both approve and deny into the
         // multi-approver lifecycle. Absent quorum (threshold NULL) falls through
         // to the single-approver code below, byte-for-byte unchanged.
@@ -1509,13 +1523,13 @@ class ProviderApprovalService {
     } catch (e) {
       if (e instanceof AuditUnavailableError)
         return fail("EVIDENCE_REQUIRED_AUDIT_UNAVAILABLE", 503);
-      // #205: a quorum loser that rolled back its non-counted evidence row.
+      // A quorum loser that rolled back its non-counted evidence row.
       if (e instanceof QuorumStateConflictError) return fail("APPROVAL_STATE_CONFLICT", 409);
       return fail("APPROVAL_PERSISTENCE_FAILED", 503);
     }
   }
 
-  // ── #205 QUORUM DECISION (approve collects N distinct; single deny terminates)
+  // ── Quorum decision (approve collects N distinct; one deny terminates)
   //
   // Called from decide() ONLY when queue.quorumThreshold != null, after all the
   // shared gates (idempotency, expiry, terminal-state, optimistic-lock echoes,
@@ -1900,28 +1914,326 @@ class ProviderApprovalService {
     userAgent?: string | null;
     requestId?: string | null;
   }): Promise<ApprovalResult> {
+    // Cross-store pre-commit semantics are deliberately fail-closed. A normal PG
+    // rollback/exception is compensated below by releasing these Redis handles.
+    // If the process is killed after Redis admission but before PG commit, no
+    // execution authorization exists, so dispatch is impossible; a retry derives
+    // the same (intent,generation,stream) reservation identities and therefore
+    // does not double-debit. With no retry, Redis's bounded 30-day retention ages
+    // the orphan out. This can transiently deny, never permit an overspend.
+    let executionHandlesToRelease: unknown = null;
     try {
-      return await withTenantAuditedTransaction(input.tenantId, async (txRaw, appendRaw) => {
-        const tx = txRaw as DbExecutor;
-        const append = mapRequiredAuditFailure(appendRaw as unknown as ApprovalAuditAppend);
+      const result = await withTenantAuditedTransaction(
+        input.tenantId,
+        async (txRaw, appendRaw): Promise<ApprovalResult> => {
+          const tx = txRaw as DbExecutor;
+          const append = mapRequiredAuditFailure(appendRaw as unknown as ApprovalAuditAppend);
 
-        const loaded = await this.loadCase(tx, input.tenantId, input.intentId, true);
-        await this.hook("afterScopeLoad");
-        if ("notFound" in loaded) return fail("SCOPE_RESOURCE_NOT_FOUND", 404);
-        if ("notApproval" in loaded) return fail("APPROVAL_NOT_REQUIRED", 409);
-        const { binding, queue } = loaded;
-        if (input.caller && !(await this.isExecuteCallerAuthorized(tx, binding, input.caller))) {
-          return fail("SCOPE_RESOURCE_NOT_FOUND", 404);
-        }
+          const loaded = await this.loadCase(tx, input.tenantId, input.intentId, true);
+          await this.hook("afterScopeLoad");
+          if ("notFound" in loaded) return fail("SCOPE_RESOURCE_NOT_FOUND", 404);
+          if ("notApproval" in loaded) return fail("APPROVAL_NOT_REQUIRED", 409);
+          const { binding, queue } = loaded;
+          if (input.caller && !(await this.isExecuteCallerAuthorized(tx, binding, input.caller))) {
+            return fail("SCOPE_RESOURCE_NOT_FOUND", 404);
+          }
 
-        // Idempotent: already execution_ready returns same state. BUT a row that
-        // reached execution_ready BEFORE this rollout (or via any path that did
-        // not mint) has no v2 authorization, and the governed dispatcher REQUIRES
-        // one (codex P2). So the idempotent path ALSO ensures the v2 nonce exists,
-        // minting it in this same audited tx if absent. The mint is idempotent via
-        // exec_auth_nonces_intent_uniq (K22/F01): a repeat resume that already has
-        // a nonce is a no-op insert. Fails closed if the secret is absent (X7).
-        if (binding.status === "execution_ready") {
+          // Idempotent: already execution_ready returns same state. BUT a row that
+          // is execution_ready but lacks a v2 authorization cannot dispatch.
+          // The idempotent path therefore also ensures the v2 nonce exists,
+          // minting it in this same audited tx if absent. The mint is idempotent via
+          // exec_auth_nonces_intent_uniq (K22/F01): a repeat resume that already has
+          // a nonce is a no-op insert. Fails closed if the secret is absent (X7).
+          if (binding.status === "execution_ready") {
+            // Migration 0084 terminalizes incompatible rows. Retain an application
+            // boundary for partially applied or manual schemas: never mint an
+            // authorization for a row that did not pass execute-time policy.
+            if (
+              !binding.executionPolicyDecisionId ||
+              !binding.executionPolicyRevisionHash ||
+              !binding.executionPolicyDecision ||
+              !binding.executionPolicyDecisionHash ||
+              !binding.executionPolicyEvaluatedAt
+            ) {
+              return fail("EXECUTION_POLICY_EVIDENCE_MISSING", 409);
+            }
+            if (
+              !verifyProviderExecutionPolicyEvidence(
+                binding.executionPolicyDecision,
+                binding.executionPolicyDecisionHash,
+                {
+                  decisionId: binding.executionPolicyDecisionId,
+                  intentId: binding.intentId,
+                  requestHash: binding.requestHash,
+                  actionDigest: binding.actionDigest,
+                  operationId: binding.operationId,
+                  operationKey: (
+                    queue.approvalCommitment as unknown as ProviderApprovalCommitmentV1
+                  ).operation.key,
+                  policyRevisionHash: binding.executionPolicyRevisionHash,
+                  decidedAt: binding.executionPolicyEvaluatedAt.toISOString(),
+                },
+              )
+            ) {
+              return fail("EXECUTION_POLICY_EVIDENCE_MISSING", 409);
+            }
+            await this.hook("beforeMint");
+            await mintProviderExecutionAuthorizationWithinTx(
+              tx as unknown as Parameters<typeof mintProviderExecutionAuthorizationWithinTx>[0],
+              append as unknown as Parameters<typeof mintProviderExecutionAuthorizationWithinTx>[1],
+              {
+                intentId: binding.intentId,
+                tenantId: binding.tenantId,
+                workspaceId: binding.workspaceId,
+                actorAgentId: binding.actorAgentId,
+                providerAccountId: binding.providerAccountId,
+                operationId: binding.operationId,
+                operationRevision: binding.operationRevision,
+                requestHash: binding.requestHash,
+                actionDigest: binding.actionDigest,
+                approvalId: queue.id,
+                approvalCommitmentHash: queue.approvalCommitmentHash ?? "",
+                approvalCommitment:
+                  queue.approvalCommitment as unknown as ProviderApprovalCommitmentV1,
+                canonicalActionBytes: new Uint8Array(binding.canonicalActionBytes as Uint8Array),
+                requestId: input.requestId ?? null,
+              },
+              {
+                now: new Date(),
+                ipAddress: input.ipAddress ?? null,
+                userAgent: input.userAgent ?? null,
+                requestId: input.requestId ?? null,
+                hooks: {
+                  beforeInsert: () => this.hook("beforeMintInsert"),
+                  beforeAudit: () => this.hook("beforeMintAudit"),
+                },
+              },
+            );
+            await this.hook("afterMint");
+            return {
+              ok: true,
+              httpStatus: 200,
+              id: binding.intentId,
+              status: "execution_ready",
+              version: binding.bindingRevision,
+              requestHash: binding.requestHash,
+              actionDigest: binding.actionDigest,
+              resumeAttemptId: binding.resumeAttemptId ?? undefined,
+            };
+          }
+
+          // Expire first.
+          if (queue.status === "pending" || queue.status === "approved") {
+            const expired = await this.expireIfDue(tx, append, loaded);
+            if (expired) return fail("APPROVAL_EXPIRED", 410);
+          }
+
+          if (binding.status !== "approved") {
+            if (binding.status === "pending_approval") return fail("RESUME_NOT_APPROVED", 409);
+            if (binding.status === "approval_denied") return fail("RESUME_NOT_APPROVED", 409);
+            return this.terminalOutcome(binding, queue);
+          }
+
+          // Integrity + full dependency revalidation (§6.8 step 6-8).
+          const integ = this.verifyIntegrity(binding, queue);
+          await this.hook("afterIntegrity");
+          if (!integ.ok) {
+            await this.staleTransition(tx, append, binding, queue, integ.code);
+            return fail(integ.code, 409);
+          }
+          const deps = await this.revalidateDependencies(tx, binding, queue);
+          await this.hook("afterAuthority");
+          if (!deps.ok) {
+            await this.staleTransition(tx, append, binding, queue, deps.code);
+            return fail(deps.code, 409);
+          }
+
+          // The approval-time reservation generation must be fully released before
+          // execution can reserve a new generation. This prevents a late release
+          // worker from ever touching execution budget.
+          const priorGenerations = await tx
+            .select()
+            .from(providerActionReservationGenerations)
+            .where(eq(providerActionReservationGenerations.intentId, binding.intentId))
+            .orderBy(sql`${providerActionReservationGenerations.generation} DESC`)
+            .limit(1);
+          const priorGeneration = priorGenerations[0];
+          if (priorGeneration && priorGeneration.state !== "released") {
+            return fail("APPROVAL_RESERVATION_RECONCILIATION_PENDING", 503);
+          }
+
+          // Approver still eligible at resume (I7). No MFA-age recheck (§9).
+          const approverUserId = binding.approvalActorUserId as string;
+          const approver = await this.checkApprover(
+            tx,
+            binding,
+            queue,
+            approverUserId,
+            input.tenantId,
+            undefined,
+            true,
+          );
+          if (!approver.ok) {
+            await this.staleTransition(tx, append, binding, queue, approver.code);
+            return fail(approver.code, approver.httpStatus === 403 ? 409 : approver.httpStatus);
+          }
+
+          const [currentOperation] = await tx
+            .select()
+            .from(providerOperations)
+            .where(
+              and(
+                eq(providerOperations.id, binding.operationId),
+                eq(providerOperations.tenantId, binding.tenantId),
+                eq(providerOperations.workspaceId, binding.workspaceId),
+                eq(providerOperations.providerAccountId, binding.providerAccountId),
+              ),
+            )
+            .limit(1);
+          if (!currentOperation) return fail("APPROVAL_DEPENDENCY_STALE", 409);
+
+          const { providerActionService } = await import("./provider-action-service.js");
+          const executionPolicy = await providerActionService.evaluateApprovedExecution({
+            db: tx,
+            tenantId: binding.tenantId,
+            workspaceId: binding.workspaceId,
+            actorAgentId: binding.actorAgentId,
+            operation: currentOperation,
+            intentId: binding.intentId,
+            requestHash: binding.requestHash,
+            actionDigest: binding.actionDigest,
+            canonicalActionBytes: new Uint8Array(binding.canonicalActionBytes as Uint8Array),
+            safeSummary: binding.safeSummary,
+            expectedXSummonAttestationDigest: binding.requestEnvelope.xSummonAttestationDigest,
+            matchedGrantIds: binding.matchedGrantIds,
+            priorGeneration: priorGeneration?.generation ?? 0,
+            idempotencyKeyHash: binding.idempotencyKeyHash,
+          });
+          if (!executionPolicy.ok) {
+            await append({
+              tenantId: binding.tenantId,
+              actorType: "system",
+              actorId: RESUME_ACTOR,
+              action:
+                executionPolicy.code === "PROVIDER_AGENT_BUDGET_EXHAUSTED"
+                  ? "provider.budget.exhausted"
+                  : "provider.resume.policy_denied",
+              resourceType: "provider_action",
+              resourceId: binding.intentId,
+              metadata: {
+                schemaVersion: "steward.provider-resume-policy-denial.v1",
+                intentId: binding.intentId,
+                requestHash: binding.requestHash,
+                actionDigest: binding.actionDigest,
+                reasonCode: executionPolicy.code,
+                executionPolicyDecisionId: executionPolicy.decision?.decisionId ?? null,
+                executionPolicyDecisionHash: executionPolicy.decisionHash ?? null,
+                executionPolicyRevisionHash: executionPolicy.decision?.policyRevisionHash ?? null,
+                budgetResults: executionPolicy.exhaustedBudgets ?? [],
+                autoFreeze: executionPolicy.autoFreeze ?? false,
+              },
+              ipAddress: input.ipAddress ?? null,
+              userAgent: input.userAgent ?? null,
+              requestId: input.requestId ?? null,
+            });
+            return fail(executionPolicy.code, executionPolicy.httpStatus);
+          }
+          executionHandlesToRelease = executionPolicy.handles;
+          // Test-only hard-crash simulation. Nulling the compensator models a
+          // dead process (no catch/finally runs), leaving the deterministic
+          // intent+generation member for the retry to adopt exactly once.
+          if (this.faultHooks.afterPolicyReserveCrash) {
+            executionHandlesToRelease = null;
+            await this.hook("afterPolicyReserveCrash");
+          }
+          await this.hook("afterPolicyReserve");
+
+          if (executionPolicy.handles) {
+            await tx.insert(providerActionReservationGenerations).values({
+              intentId: binding.intentId,
+              tenantId: binding.tenantId,
+              generation: executionPolicy.handles.generation,
+              phase: executionPolicy.handles.phase,
+              handles: executionPolicy.handles as unknown as Record<string, unknown>,
+            });
+          }
+
+          const before = binding.bindingRevision;
+          const after = before + 1;
+          const nowTs = new Date();
+          const resumeAttemptId = randomUUID();
+
+          const upd = await tx
+            .update(approvalQueue)
+            .set({ status: "consumed", consumedAt: nowTs, consumedBy: RESUME_ACTOR })
+            .where(and(eq(approvalQueue.id, queue.id), eq(approvalQueue.status, "approved")))
+            .returning({ id: approvalQueue.id });
+          if (upd.length === 0) throw new ApprovalResumeStateConflictError();
+
+          const bindingUpdate = await tx
+            .update(providerActionBindings)
+            .set({
+              status: "execution_ready",
+              bindingRevision: after,
+              resumeActor: RESUME_ACTOR,
+              resumeAttemptId,
+              resumeValidatedAt: nowTs,
+              executionPolicyDecisionId: executionPolicy.decision.decisionId,
+              executionPolicyRevisionHash: executionPolicy.decision.policyRevisionHash,
+              executionPolicyDecision: executionPolicy.decision as unknown as Record<
+                string,
+                unknown
+              >,
+              executionPolicyDecisionHash: executionPolicy.decisionHash,
+              executionPolicyEvaluatedAt: new Date(executionPolicy.decision.decidedAt),
+              updatedAt: nowTs,
+            })
+            .where(
+              and(
+                eq(providerActionBindings.intentId, binding.intentId),
+                eq(providerActionBindings.status, "approved"),
+                eq(providerActionBindings.bindingRevision, before),
+              ),
+            )
+            .returning({ intentId: providerActionBindings.intentId });
+          if (bindingUpdate.length === 0) throw new ApprovalResumeStateConflictError();
+          await tx
+            .update(intents)
+            .set({ executedBy: RESUME_ACTOR, updatedAt: nowTs })
+            .where(eq(intents.id, binding.intentId));
+
+          const payload = buildAuditPayload(binding, queue, {
+            approvalActorUserId: approverUserId,
+            resumeActor: RESUME_ACTOR,
+            bindingRevisionBefore: before,
+            bindingRevisionAfter: after,
+            fromStatus: "approved",
+            toStatus: "execution_ready",
+            reasonCode: "provider_resume_ready",
+            resumeAttemptId,
+          });
+          await this.hook("beforeAudit");
+          await append({
+            tenantId: binding.tenantId,
+            actorType: "system",
+            actorId: RESUME_ACTOR,
+            action: "provider.resume.ready",
+            resourceType: "provider_action",
+            resourceId: binding.intentId,
+            metadata: payload as unknown as Record<string, unknown>,
+            ipAddress: input.ipAddress ?? null,
+            userAgent: input.userAgent ?? null,
+            requestId: input.requestId ?? null,
+          });
+          await this.hook("afterAudit");
+
+          // Mint within the transaction (spec §2.3): create the v2 authorization in
+          // the SAME audited transaction as the resume, so approved→execution_ready
+          // →authorization-minted is one atomic step (removes an extra crash window,
+          // F01). Idempotent by exec_auth_nonces_intent_uniq (K22). Fails closed if
+          // STEWARD_EXECUTION_AUTH_SECRET is absent (X7, P49). The whole resume tx
+          // rolls back on mint failure, so a resume never lands execution_ready
+          // without a mintable authorization.
           await this.hook("beforeMint");
           await mintProviderExecutionAuthorizationWithinTx(
             tx as unknown as Parameters<typeof mintProviderExecutionAuthorizationWithinTx>[0],
@@ -1944,7 +2256,7 @@ class ProviderApprovalService {
               requestId: input.requestId ?? null,
             },
             {
-              now: new Date(),
+              now: nowTs,
               ipAddress: input.ipAddress ?? null,
               userAgent: input.userAgent ?? null,
               requestId: input.requestId ?? null,
@@ -1955,179 +2267,44 @@ class ProviderApprovalService {
             },
           );
           await this.hook("afterMint");
+
           return {
             ok: true,
             httpStatus: 200,
             id: binding.intentId,
             status: "execution_ready",
-            version: binding.bindingRevision,
+            version: after,
             requestHash: binding.requestHash,
             actionDigest: binding.actionDigest,
-            resumeAttemptId: binding.resumeAttemptId ?? undefined,
-          };
-        }
-
-        // Expire first.
-        if (queue.status === "pending" || queue.status === "approved") {
-          const expired = await this.expireIfDue(tx, append, loaded);
-          if (expired) return fail("APPROVAL_EXPIRED", 410);
-        }
-
-        if (binding.status !== "approved") {
-          if (binding.status === "pending_approval") return fail("RESUME_NOT_APPROVED", 409);
-          if (binding.status === "approval_denied") return fail("RESUME_NOT_APPROVED", 409);
-          return this.terminalOutcome(binding, queue);
-        }
-
-        // Integrity + full dependency revalidation (§6.8 step 6-8).
-        const integ = this.verifyIntegrity(binding, queue);
-        await this.hook("afterIntegrity");
-        if (!integ.ok) {
-          await this.staleTransition(tx, append, binding, queue, integ.code);
-          return fail(integ.code, 409);
-        }
-        const deps = await this.revalidateDependencies(tx, binding, queue);
-        await this.hook("afterAuthority");
-        if (!deps.ok) {
-          await this.staleTransition(tx, append, binding, queue, deps.code);
-          return fail(deps.code, 409);
-        }
-
-        // Approver still eligible at resume (I7). No MFA-age recheck (§9).
-        const approverUserId = binding.approvalActorUserId as string;
-        const approver = await this.checkApprover(
-          tx,
-          binding,
-          queue,
-          approverUserId,
-          input.tenantId,
-          undefined,
-          true,
-        );
-        if (!approver.ok) {
-          await this.staleTransition(tx, append, binding, queue, approver.code);
-          return fail(approver.code, approver.httpStatus === 403 ? 409 : approver.httpStatus);
-        }
-
-        const before = binding.bindingRevision;
-        const after = before + 1;
-        const nowTs = new Date();
-        const resumeAttemptId = randomUUID();
-
-        const upd = await tx
-          .update(approvalQueue)
-          .set({ status: "consumed", consumedAt: nowTs, consumedBy: RESUME_ACTOR })
-          .where(and(eq(approvalQueue.id, queue.id), eq(approvalQueue.status, "approved")))
-          .returning({ id: approvalQueue.id });
-        if (upd.length === 0) return fail("APPROVAL_STATE_CONFLICT", 409);
-
-        await tx
-          .update(providerActionBindings)
-          .set({
-            status: "execution_ready",
-            bindingRevision: after,
-            resumeActor: RESUME_ACTOR,
             resumeAttemptId,
-            resumeValidatedAt: nowTs,
-            updatedAt: nowTs,
-          })
-          .where(
-            and(
-              eq(providerActionBindings.intentId, binding.intentId),
-              eq(providerActionBindings.status, "approved"),
-              eq(providerActionBindings.bindingRevision, before),
+          };
+        },
+      );
+      executionHandlesToRelease = null;
+      return result;
+    } catch (e) {
+      if (executionHandlesToRelease !== null) {
+        const { providerActionService } = await import("./provider-action-service.js");
+        await providerActionService
+          .releasePolicyReservationHandles(executionHandlesToRelease, input.tenantId)
+          .catch((releaseError) =>
+            console.error(
+              "[provider-approval] failed to release rolled-back reservation",
+              redactedThrownDiagnostics(releaseError),
             ),
           );
-        await tx
-          .update(intents)
-          .set({ executedBy: RESUME_ACTOR, updatedAt: nowTs })
-          .where(eq(intents.id, binding.intentId));
-
-        const payload = buildAuditPayload(binding, queue, {
-          approvalActorUserId: approverUserId,
-          resumeActor: RESUME_ACTOR,
-          bindingRevisionBefore: before,
-          bindingRevisionAfter: after,
-          fromStatus: "approved",
-          toStatus: "execution_ready",
-          reasonCode: "provider_resume_ready",
-          resumeAttemptId,
-        });
-        await this.hook("beforeAudit");
-        await append({
-          tenantId: binding.tenantId,
-          actorType: "system",
-          actorId: RESUME_ACTOR,
-          action: "provider.resume.ready",
-          resourceType: "provider_action",
-          resourceId: binding.intentId,
-          metadata: payload as unknown as Record<string, unknown>,
-          ipAddress: input.ipAddress ?? null,
-          userAgent: input.userAgent ?? null,
-          requestId: input.requestId ?? null,
-        });
-        await this.hook("afterAudit");
-
-        // PR4 mint-within-tx (spec §2.3): mint the v2 execution authorization in
-        // the SAME audited transaction as the resume, so approved→execution_ready
-        // →authorization-minted is one atomic step (removes an extra crash window,
-        // F01). Idempotent by exec_auth_nonces_intent_uniq (K22). Fails closed if
-        // STEWARD_EXECUTION_AUTH_SECRET is absent (X7, P49). The whole resume tx
-        // rolls back on mint failure, so a resume never lands execution_ready
-        // without a mintable authorization.
-        await this.hook("beforeMint");
-        await mintProviderExecutionAuthorizationWithinTx(
-          tx as unknown as Parameters<typeof mintProviderExecutionAuthorizationWithinTx>[0],
-          append as unknown as Parameters<typeof mintProviderExecutionAuthorizationWithinTx>[1],
-          {
-            intentId: binding.intentId,
-            tenantId: binding.tenantId,
-            workspaceId: binding.workspaceId,
-            actorAgentId: binding.actorAgentId,
-            providerAccountId: binding.providerAccountId,
-            operationId: binding.operationId,
-            operationRevision: binding.operationRevision,
-            requestHash: binding.requestHash,
-            actionDigest: binding.actionDigest,
-            approvalId: queue.id,
-            approvalCommitmentHash: queue.approvalCommitmentHash ?? "",
-            approvalCommitment: queue.approvalCommitment as unknown as ProviderApprovalCommitmentV1,
-            canonicalActionBytes: new Uint8Array(binding.canonicalActionBytes as Uint8Array),
-            requestId: input.requestId ?? null,
-          },
-          {
-            now: nowTs,
-            ipAddress: input.ipAddress ?? null,
-            userAgent: input.userAgent ?? null,
-            requestId: input.requestId ?? null,
-            hooks: {
-              beforeInsert: () => this.hook("beforeMintInsert"),
-              beforeAudit: () => this.hook("beforeMintAudit"),
-            },
-          },
-        );
-        await this.hook("afterMint");
-
-        return {
-          ok: true,
-          httpStatus: 200,
-          id: binding.intentId,
-          status: "execution_ready",
-          version: after,
-          requestHash: binding.requestHash,
-          actionDigest: binding.actionDigest,
-          resumeAttemptId,
-        };
-      });
-    } catch (e) {
+      }
       if (e instanceof AuditUnavailableError)
         return fail("EVIDENCE_REQUIRED_AUDIT_UNAVAILABLE", 503);
+      if (e instanceof ApprovalResumeStateConflictError)
+        return fail("APPROVAL_STATE_CONFLICT", 409);
       // v2 mint fail-closed: absent HMAC key rolls back the whole resume tx so
       // no execution_ready lands without a mintable authorization (X7, P49/F06).
       if (e instanceof ProviderExecutionMintError) {
         if (e.code === "EXEC_AUTH_KEY_UNAVAILABLE") return fail("EXEC_AUTH_KEY_UNAVAILABLE", 503);
         return fail("RESUME_PREPARATION_FAILED", 503);
       }
+      console.error("[provider-approval] resume preparation failed", redactedThrownDiagnostics(e));
       return fail("RESUME_PREPARATION_FAILED", 503);
     }
   }
@@ -2196,7 +2373,7 @@ class ProviderApprovalService {
       false,
     );
     if (!approver.ok) {
-      // Non-enumeration (I16, codex P2): an ineligible tenant member must NOT be
+      // Non-enumeration (I16): an ineligible tenant member must not be
       // able to distinguish an existing approval action from an absent one on
       // this READ path. Membership/role/separation eligibility failures collapse
       // to the same 404 as an absent id. MFA failures are surfaced (they are not
@@ -2233,8 +2410,13 @@ class ProviderApprovalService {
 
 class AuditUnavailableError extends Error {}
 
+/** Throwing (instead of returning) is required after Redis admission so the
+ * approval consumption, generation insert, evidence, and mint all roll back as
+ * one unit; the outer compensation then releases the pre-commit reservation. */
+class ApprovalResumeStateConflictError extends Error {}
+
 /**
- * #205: thrown from the quorum decide path AFTER the provider_action_approvals
+ * Thrown from the quorum decide path after the provider_action_approvals
  * evidence row has been inserted, when the guarded queue transition (tally CAS /
  * pending->approved / deny) loses to a concurrent winner. Throwing (rather than
  * returning fail()) rolls back the whole transaction so the non-counted evidence

@@ -1,4 +1,13 @@
-import { and, asc, eq, evmWalletNonceInflight, evmWalletNonces, getDb, sql } from "@stwd/db";
+import {
+  and,
+  asc,
+  eq,
+  evmWalletNonceInflight,
+  evmWalletNonceOwners,
+  evmWalletNonces,
+  getDb,
+  sql,
+} from "@stwd/db";
 import type { Address } from "viem";
 
 type PendingNonceReader = (address: Address) => Promise<number>;
@@ -30,6 +39,7 @@ async function withNonceLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
 }
 
 export async function allocateEvmNonce(input: {
+  tenantId: string;
   walletAddress: Address;
   chainId: number;
   getPendingNonce: PendingNonceReader;
@@ -48,6 +58,33 @@ export async function allocateEvmNonce(input: {
         await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${`evm-nonce:${lockKey}`}))`);
       }
 
+      const [newClaim] = await tx
+        .insert(evmWalletNonceOwners)
+        .values({
+          tenantId: input.tenantId,
+          walletAddress,
+          chainId: input.chainId,
+        })
+        .onConflictDoNothing({
+          target: [evmWalletNonceOwners.walletAddress, evmWalletNonceOwners.chainId],
+        })
+        .returning({ tenantId: evmWalletNonceOwners.tenantId });
+      const [existingClaim] = newClaim
+        ? [newClaim]
+        : await tx
+            .select({ tenantId: evmWalletNonceOwners.tenantId })
+            .from(evmWalletNonceOwners)
+            .where(
+              and(
+                eq(evmWalletNonceOwners.walletAddress, walletAddress),
+                eq(evmWalletNonceOwners.chainId, input.chainId),
+              ),
+            )
+            .limit(1);
+      if (existingClaim?.tenantId !== input.tenantId) {
+        throw new Error("EVM nonce namespace is not owned by this tenant");
+      }
+
       // Gap recovery: reclaim the lowest previously-dropped nonce that is still
       // at or ahead of the chain's pending nonce. Dropped nonces below the
       // pending nonce are already consumed/replaced on-chain and must not be
@@ -57,6 +94,7 @@ export async function allocateEvmNonce(input: {
         .from(evmWalletNonceInflight)
         .where(
           and(
+            eq(evmWalletNonceInflight.tenantId, input.tenantId),
             eq(evmWalletNonceInflight.walletAddress, walletAddress),
             eq(evmWalletNonceInflight.chainId, input.chainId),
             eq(evmWalletNonceInflight.state, "dropped"),
@@ -72,6 +110,7 @@ export async function allocateEvmNonce(input: {
           .set({ state: "allocated", updatedAt: new Date() })
           .where(
             and(
+              eq(evmWalletNonceInflight.tenantId, input.tenantId),
               eq(evmWalletNonceInflight.walletAddress, walletAddress),
               eq(evmWalletNonceInflight.chainId, input.chainId),
               eq(evmWalletNonceInflight.nonce, reclaimable.nonce),
@@ -85,6 +124,7 @@ export async function allocateEvmNonce(input: {
         .from(evmWalletNonces)
         .where(
           and(
+            eq(evmWalletNonces.tenantId, input.tenantId),
             eq(evmWalletNonces.walletAddress, walletAddress),
             eq(evmWalletNonces.chainId, input.chainId),
           ),
@@ -95,19 +135,25 @@ export async function allocateEvmNonce(input: {
       await tx
         .insert(evmWalletNonces)
         .values({
+          tenantId: input.tenantId,
           walletAddress,
           chainId: input.chainId,
           nextNonce: nonce + 1,
           updatedAt: new Date(),
         })
         .onConflictDoUpdate({
-          target: [evmWalletNonces.walletAddress, evmWalletNonces.chainId],
+          target: [
+            evmWalletNonces.tenantId,
+            evmWalletNonces.walletAddress,
+            evmWalletNonces.chainId,
+          ],
           set: { nextNonce: nonce + 1, updatedAt: new Date() },
         });
 
       await tx
         .insert(evmWalletNonceInflight)
         .values({
+          tenantId: input.tenantId,
           walletAddress,
           chainId: input.chainId,
           nonce,
@@ -116,6 +162,7 @@ export async function allocateEvmNonce(input: {
         })
         .onConflictDoUpdate({
           target: [
+            evmWalletNonceInflight.tenantId,
             evmWalletNonceInflight.walletAddress,
             evmWalletNonceInflight.chainId,
             evmWalletNonceInflight.nonce,
@@ -135,6 +182,7 @@ export async function allocateEvmNonce(input: {
  * break the caller's error handling.
  */
 export async function markEvmNonceDropped(input: {
+  tenantId: string;
   walletAddress: Address;
   chainId: number;
   nonce: number;
@@ -152,6 +200,7 @@ export async function markEvmNonceDropped(input: {
         .set({ state: "dropped", updatedAt: new Date() })
         .where(
           and(
+            eq(evmWalletNonceInflight.tenantId, input.tenantId),
             eq(evmWalletNonceInflight.walletAddress, walletAddress),
             eq(evmWalletNonceInflight.chainId, input.chainId),
             eq(evmWalletNonceInflight.nonce, input.nonce),
@@ -166,6 +215,7 @@ export async function markEvmNonceDropped(input: {
  * successfully. Best-effort: a failure here must not break a successful send.
  */
 export async function confirmEvmNonce(input: {
+  tenantId: string;
   walletAddress: Address;
   chainId: number;
   nonce: number;
@@ -182,6 +232,7 @@ export async function confirmEvmNonce(input: {
         .delete(evmWalletNonceInflight)
         .where(
           and(
+            eq(evmWalletNonceInflight.tenantId, input.tenantId),
             eq(evmWalletNonceInflight.walletAddress, walletAddress),
             eq(evmWalletNonceInflight.chainId, input.chainId),
             eq(evmWalletNonceInflight.nonce, input.nonce),

@@ -88,7 +88,7 @@ mock.module("@stwd/db", () => ({
 // NOTE: bun's mock.module replaces the ENTIRE module and is sticky per-process,
 // so this mock must re-export every binding the module-under-test (and any
 // sibling test running in the same process) imports from @stwd/webhooks.
-// Omitting the secret-codec helpers previously cascaded into "export not found"
+// The secret-codec helpers are required to keep the module mock structurally complete.
 // failures across the webhook + approvals API suites. We mock only the
 // dispatcher and pass the real secret-codec functions through.
 mock.module("@stwd/webhooks", () => ({
@@ -108,6 +108,14 @@ mock.module("@stwd/webhooks", () => ({
   decryptWebhookSecret,
   encryptWebhookSecret,
   isEncryptedWebhookSecret,
+}));
+
+// SEC-017 delivery-time re-validation resolves the destination hostname via
+// node:dns/promises. Mock it to an instant public answer so the dispatch chain
+// stays microtask-only (a real DNS round-trip would outlive the tests'
+// setTimeout(0) flush) while still exercising the re-validation path.
+mock.module("node:dns/promises", () => ({
+  lookup: async () => [{ address: "93.184.216.34", family: 4 }],
 }));
 
 const { dispatchWebhook } = await import("../services/webhook-dispatch");
@@ -222,7 +230,7 @@ describe("dispatchWebhook", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     expect(insertedDeliveries).toHaveLength(1);
-    expect(dispatches).toHaveLength(2);
+    expect(dispatches).toHaveLength(1);
     expect(insertedDeliveries[0]).toMatchObject({
       tenantId: "tenant-1",
       agentId: "agent-1",
@@ -247,16 +255,8 @@ describe("dispatchWebhook", () => {
     const configuredDispatch = dispatches.find(
       (dispatch) => dispatch.event.type === "transaction.failed",
     );
-    const legacyDispatch = dispatches.find((dispatch) => dispatch.event.type === "tx_failed");
     expect(configuredDispatch?.event).toMatchObject({
       type: "transaction.failed",
-      data: {
-        error: { privateKey: "[REDACTED]" },
-        replacement: { secret: "[REDACTED]" },
-      },
-    });
-    expect(legacyDispatch?.event).toMatchObject({
-      type: "tx_failed",
       data: {
         error: { privateKey: "[REDACTED]" },
         replacement: { secret: "[REDACTED]" },
@@ -268,18 +268,17 @@ describe("dispatchWebhook", () => {
     expect(JSON.stringify(dispatches)).not.toContain("should-not-leak");
   });
 
-  it("preserves tenant config webhook dispatch when no configured webhook accepts an event", async () => {
+  it("never falls back to the process-wide legacy signing path", async () => {
     tenantConfigs.set("tenant-1", { webhookUrl: "https://tenant-config.example.com/hook" });
 
     dispatchWebhook("tenant-1", "agent-1", "tx_unknown_state", { txId: "tx-1" });
     await new Promise((resolve) => setTimeout(resolve, 0));
 
-    expect(dispatches).toHaveLength(1);
-    expect(dispatches[0]?.event.type).toBe("tx_unknown_state");
-    expect(dispatches[0]?.webhook).toBe("https://tenant-config.example.com/hook");
+    expect(dispatches).toHaveLength(0);
+    expect(insertedDeliveries).toHaveLength(0);
   });
 
-  // ── Phase 2b: plugin-declared event emission ───────────────────────────────
+  // ── Plugin-declared event emission ────────────────────────────────────────
   it("emits a PLUGIN-declared event to a config that subscribes to it", async () => {
     // a plugin registered this event name into the runtime registry at compose
     // time (host.register merges StewardPlugin.webhookEvents). The core's closed

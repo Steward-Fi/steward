@@ -1,7 +1,7 @@
-import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it, mock, spyOn } from "bun:test";
 import { createPrivateKey, sign as cryptoSign, generateKeyPairSync } from "node:crypto";
 
-import { MockSmsInbox, signTelegramLoginPayload } from "@stwd/auth";
+import { ChallengeStore, MemoryBackend, MockSmsInbox, signTelegramLoginPayload } from "@stwd/auth";
 import {
   accounts,
   agents,
@@ -21,6 +21,53 @@ import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import bs58 from "bs58";
 import { and, eq } from "drizzle-orm";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
+
+type RedisEntry = { value: string; expiresAt: number };
+const redisEntries = new Map<string, RedisEntry>();
+const redisClient = {
+  set: async (key: string, value: string, _mode: "PX", ttlMs: number, condition?: "NX") => {
+    const existing = redisEntries.get(key);
+    if (condition === "NX" && existing && existing.expiresAt > Date.now()) return null;
+    redisEntries.set(key, { value, expiresAt: Date.now() + ttlMs });
+    return "OK";
+  },
+  get: async (key: string) => {
+    const entry = redisEntries.get(key);
+    if (!entry) return null;
+    if (entry.expiresAt <= Date.now()) {
+      redisEntries.delete(key);
+      return null;
+    }
+    return entry.value;
+  },
+  getdel: async (key: string) => {
+    const entry = redisEntries.get(key);
+    redisEntries.delete(key);
+    return entry && entry.expiresAt > Date.now() ? entry.value : null;
+  },
+  del: async (...keys: string[]) => {
+    let removed = 0;
+    for (const key of keys) if (redisEntries.delete(key)) removed += 1;
+    return removed;
+  },
+};
+
+mock.module("../middleware/redis.js", () => ({
+  checkAgentRateLimit: async () => ({ allowed: true, remaining: Infinity, resetMs: 0 }),
+  checkAgentSpendLimit: async (_agentId: string, limitUsd: number) => ({
+    allowed: true,
+    spent: 0,
+    remaining: limitUsd,
+  }),
+  checkProxyRateLimit: async () => ({ allowed: true, remaining: Infinity, resetMs: 0 }),
+  estimateCost: () => 0,
+  getRedisClient: () => redisClient,
+  initRedis: async () => true,
+  isRedisAvailable: () => false,
+  isRedisConfigured: () => false,
+  recordAgentSpend: async () => undefined,
+  shutdownRedis: async () => undefined,
+}));
 
 const TENANT_ID = "user-linked-accounts";
 const SOLANA_TEST_KEYPAIR = {
@@ -87,7 +134,9 @@ function generateSolanaKeypair() {
 
 describe("user linked account routes", () => {
   let userRoutes: typeof import("../routes/user").userRoutes;
+  let initUserLinkChallengeStores: typeof import("../routes/user").initUserLinkChallengeStores;
   let createSessionToken: typeof import("../routes/auth").createSessionToken;
+  let initAuthStores: typeof import("../routes/auth").initAuthStores;
   let userId = "";
   let accountOnlyUserId = "";
   let tenantOwnerUserId = "";
@@ -283,12 +332,14 @@ describe("user linked account routes", () => {
         policyResults: [],
       });
 
-    ({ userRoutes } = await import("../routes/user"));
-    ({ createSessionToken } = await import("../routes/auth"));
+    ({ createSessionToken, initAuthStores } = await import("../routes/auth"));
+    ({ initUserLinkChallengeStores, userRoutes } = await import("../routes/user"));
+    await initAuthStores(false);
   });
 
   afterAll(async () => {
     await closeDb();
+    redisEntries.clear();
     delete process.env.STEWARD_PGLITE_MEMORY;
     delete process.env.STEWARD_MASTER_PASSWORD;
     delete process.env.STEWARD_JWT_SECRET;
@@ -519,6 +570,131 @@ describe("user linked account routes", () => {
       }),
     });
     expect(crossUser.status).toBe(409);
+  });
+
+  it("redeems an issued wallet proof after account-link stores are reconstructed", async () => {
+    const wallet = privateKeyToAccount(
+      "0x0dbbe8e4ca9a1525c35b248bb6e22cf95d86e0f0276de70cbb35289e587aa307",
+    );
+    const nonceResponse = await userRoutes.request("/me/accounts/wallet/ethereum/nonce", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${await tokenFor(userId)}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ address: wallet.address }),
+    });
+    expect(nonceResponse.status).toBe(200);
+    const nonceBody = (await nonceResponse.json()) as { data: { message: string } };
+    const signature = await wallet.signMessage({ message: nonceBody.data.message });
+    expect(
+      [...redisEntries.keys()].some((key) =>
+        key.startsWith("auth:challenge:16:user-link-wallet:wallet-link:ethereum:"),
+      ),
+    ).toBe(true);
+
+    await initAuthStores(false);
+
+    const linkResponse = await userRoutes.request("/me/accounts/wallet/ethereum", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${await tokenFor(userId)}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        address: wallet.address,
+        message: nonceBody.data.message,
+        signature,
+      }),
+    });
+    expect(linkResponse.status).toBe(200);
+
+    const replay = await userRoutes.request("/me/accounts/wallet/ethereum", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${await tokenFor(userId)}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        address: wallet.address,
+        message: nonceBody.data.message,
+        signature,
+      }),
+    });
+    expect(replay.status).toBe(401);
+  });
+
+  it("destroys only a different superseded process-local account-link backend", async () => {
+    const first = new MemoryBackend();
+    const firstDestroy = spyOn(first, "destroy");
+    initUserLinkChallengeStores(first);
+    initUserLinkChallengeStores(first);
+    expect(firstDestroy).not.toHaveBeenCalled();
+
+    const replacement = new MemoryBackend();
+    const replacementDestroy = spyOn(replacement, "destroy");
+    initUserLinkChallengeStores(replacement);
+    expect(firstDestroy).toHaveBeenCalledTimes(1);
+    expect(replacementDestroy).not.toHaveBeenCalled();
+
+    await initAuthStores(false);
+    expect(replacementDestroy).toHaveBeenCalledTimes(1);
+    firstDestroy.mockRestore();
+    replacementDestroy.mockRestore();
+  });
+
+  it("does not persist an Ethereum wallet when redeem-lock cleanup fails", async () => {
+    const wallet = privateKeyToAccount(
+      "0x8b3a350cf5c34c9194ca3a545d4f2c20d57216345d2a4460a5d4a64e3e2c2712",
+    );
+    const nonceResponse = await userRoutes.request("/me/accounts/wallet/ethereum/nonce", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${await tokenFor(accountOnlyUserId)}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ address: wallet.address }),
+    });
+    expect(nonceResponse.status).toBe(200);
+    const nonceBody = (await nonceResponse.json()) as { data: { message: string } };
+    const signature = await wallet.signMessage({ message: nonceBody.data.message });
+
+    const originalDelete = ChallengeStore.prototype.delete;
+    const deleteSpy = spyOn(ChallengeStore.prototype, "delete").mockImplementation(
+      async function (key) {
+        if (key.startsWith("wallet-link-lock:")) throw new Error("challenge backend unavailable");
+        return originalDelete.call(this, key);
+      },
+    );
+    try {
+      const response = await userRoutes.request("/me/accounts/wallet/ethereum", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${await tokenFor(accountOnlyUserId)}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          address: wallet.address,
+          message: nonceBody.data.message,
+          signature,
+        }),
+      });
+      expect(response.status).toBe(500);
+    } finally {
+      deleteSpy.mockRestore();
+    }
+
+    const linked = await getDb()
+      .select({ id: accounts.id })
+      .from(accounts)
+      .where(
+        and(
+          eq(accounts.userId, accountOnlyUserId),
+          eq(accounts.provider, "wallet:ethereum"),
+          eq(accounts.providerAccountId, wallet.address.toLowerCase()),
+        ),
+      );
+    expect(linked).toHaveLength(0);
   });
 
   it("links a Solana wallet with a one-time user proof and blocks replay/cross-user reuse", async () => {
@@ -1277,6 +1453,90 @@ describe("user linked account routes", () => {
         body: JSON.stringify({ phone, code: otherMessage?.code }),
       });
       expect(crossUser.status).toBe(409);
+    } finally {
+      MockSmsInbox.clear();
+      delete process.env.SMS_PROVIDER;
+      delete process.env.STEWARD_TEST_INBOX;
+    }
+  });
+
+  it("locks phone-link verify after 5 invalid codes, rejecting even the correct code", async () => {
+    process.env.SMS_PROVIDER = "mock";
+    process.env.STEWARD_TEST_INBOX = "true";
+    MockSmsInbox.clear();
+    try {
+      const phone = "+14155550199";
+      const sendResponse = await userRoutes.request("/me/accounts/phone/sms/send", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${await tokenFor(userId)}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ phone }),
+      });
+      expect(sendResponse.status).toBe(200);
+      const message = MockSmsInbox.last(phone);
+      expect(message?.code).toMatch(/^\d{6}$/);
+
+      for (let attempt = 0; attempt < 5; attempt++) {
+        const invalidAttempt = await userRoutes.request("/me/accounts/phone/sms/verify", {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${await tokenFor(userId)}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ phone, code: "000000" }),
+        });
+        expect(invalidAttempt.status).toBe(401);
+      }
+
+      const lockedOut = await userRoutes.request("/me/accounts/phone/sms/verify", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${await tokenFor(userId)}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ phone, code: message?.code }),
+      });
+      expect(lockedOut.status).toBe(429);
+    } finally {
+      MockSmsInbox.clear();
+      delete process.env.SMS_PROVIDER;
+      delete process.env.STEWARD_TEST_INBOX;
+    }
+  });
+
+  it("atomically admits only 5 concurrent phone-link guesses", async () => {
+    process.env.SMS_PROVIDER = "mock";
+    process.env.STEWARD_TEST_INBOX = "true";
+    MockSmsInbox.clear();
+    try {
+      const phone = "+14155550200";
+      const sendResponse = await userRoutes.request("/me/accounts/phone/sms/send", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${await tokenFor(userId)}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ phone }),
+      });
+      expect(sendResponse.status).toBe(200);
+      const token = await tokenFor(userId);
+      const responses = await Promise.all(
+        Array.from({ length: 6 }, () =>
+          userRoutes.request("/me/accounts/phone/sms/verify", {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${token}`,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({ phone, code: "000000" }),
+          }),
+        ),
+      );
+      expect(responses.map((response) => response.status).sort()).toEqual([
+        401, 401, 401, 401, 401, 429,
+      ]);
     } finally {
       MockSmsInbox.clear();
       delete process.env.SMS_PROVIDER;

@@ -10,6 +10,7 @@
  */
 
 import { StewardClient } from "@stwd/sdk";
+import { redactedThrownDiagnostics } from "@stwd/shared";
 import { loadConfig } from "./config.js";
 import { logError, logInfo, logWarn } from "./logger.js";
 import type { AgentLoop } from "./loop.js";
@@ -72,7 +73,7 @@ async function main(): Promise<void> {
     logInfo("Steward API reachable ✓");
   } catch (err) {
     logWarn("Steward API connectivity check failed — will retry on first tick", {
-      error: err instanceof Error ? err.message : String(err),
+      ...redactedThrownDiagnostics(err),
     });
   }
 
@@ -153,6 +154,6 @@ async function main(): Promise<void> {
 }
 
 main().catch((err) => {
-  console.error("Fatal startup error:", err);
+  logError("Fatal startup error", err);
   process.exit(1);
 });

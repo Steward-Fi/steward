@@ -5,7 +5,7 @@ import { StewardApiError } from "../client";
 // Captures each outbound request so assertions can verify the SDK hit the
 // right Steward endpoints with the right bodies (Privy-style email-OTP +
 // emailGrant passkey signup).
-type Captured = { url: string; body?: Record<string, unknown> };
+type Captured = { url: string; body?: Record<string, unknown>; redirect?: RequestRedirect };
 let captured: Captured[];
 let originalFetch: typeof fetch;
 let originalWindow: unknown;
@@ -43,7 +43,7 @@ function installFetch(): void {
           ? input.toString()
           : (input as Request).url;
     const body = init?.body ? JSON.parse(init.body as string) : undefined;
-    captured.push({ url, body });
+    captured.push({ url, body, redirect: init?.redirect });
     const path = url.replace("https://api.example.test", "");
     const handler = routes[path];
     if (handler) return handler();
@@ -124,6 +124,7 @@ describe("StewardAuth email magic-link companion code", () => {
       tenantId: "elizacloud",
       captchaToken: "captcha-123",
     });
+    expect(captured[0]?.redirect).toBe("error");
     expect(res).toMatchObject({
       ok: true,
       expiresAt: "2026-01-01T00:10:00Z",

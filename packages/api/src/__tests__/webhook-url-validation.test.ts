@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { validateWebhookUrl } from "../services/webhook-url";
+import { validateWebhookUrl, validateWebhookUrlResolved } from "../services/webhook-url";
 
 describe("webhook URL validation", () => {
   it("rejects IPv4-mapped IPv6 private addresses in dotted and hex forms", () => {
@@ -25,8 +25,60 @@ describe("webhook URL validation", () => {
     }
   });
 
+  it("rejects the entire NAT64 local-use range 64:ff9b:1::/48 (RFC 8215)", () => {
+    // No assumption can be made about an embedded IPv4 address or its location
+    // in the local-use range, so the whole /48 is non-public — including
+    // variants whose fourth word is non-zero (the old /96-suffix extraction
+    // both misread the suffix placement and let these through entirely).
+    for (const url of [
+      "https://[64:ff9b:1::a9fe:a9fe]/hook",
+      "https://[64:ff9b:1:1::a9fe:a9fe]/hook",
+      "https://[64:ff9b:1:ffff::]/hook",
+      "https://[64:ff9b:1::808:808]/hook",
+    ]) {
+      expect(validateWebhookUrl(url)).toBe("url host must be public");
+    }
+  });
+
+  it("still allows public IPv6 and well-known NAT64 embeddings of public IPv4", () => {
+    expect(validateWebhookUrl("https://[2001:4860:4860::8888]/hook")).toBeNull();
+    expect(validateWebhookUrl("https://[64:ff9b::808:808]/hook")).toBeNull();
+    // IPv4-translated form with a public embedding stays allowed (no over-block).
+    expect(validateWebhookUrl("https://[::ffff:0:808:808]/hook")).toBeNull();
+  });
+
   it("rejects Teredo and documentation IPv6 addresses", () => {
     for (const url of ["https://[2001::]/hook", "https://[2001:db8::1]/hook"]) {
+      expect(validateWebhookUrl(url)).toBe("url host must be public");
+    }
+  });
+
+  it("rejects complete benchmarking and discard-only IPv6 prefixes", () => {
+    for (const url of [
+      "https://[2001:2::1]/hook",
+      "https://[2001:2:0:ffff:ffff:ffff:ffff:ffff]/hook",
+      "https://[100::1]/hook",
+      "https://[100::ffff:ffff:ffff:ffff]/hook",
+    ]) {
+      expect(validateWebhookUrl(url)).toBe("url host must be public");
+    }
+    // These are outside the two narrow prefixes but are still not public:
+    // 2001:2:1:: remains in 2001::/23 and 100:0:0:1:: is outside 2000::/3.
+    expect(validateWebhookUrl("https://[2001:2:1::1]/hook")).toBe("url host must be public");
+    expect(validateWebhookUrl("https://[100:0:0:1::1]/hook")).toBe("url host must be public");
+    expect(validateWebhookUrl("https://[2001:4860:4860::8888]/hook")).toBeNull();
+  });
+
+  it("rejects the remaining special-purpose Internet address blocks", () => {
+    for (const url of [
+      "https://192.31.196.1/hook",
+      "https://192.52.193.1/hook",
+      "https://192.175.48.1/hook",
+      "https://[2001:100::1]/hook",
+      "https://[2620:4f:8000::1]/hook",
+      "https://[3fff::1]/hook",
+      "https://[4000::1]/hook",
+    ]) {
       expect(validateWebhookUrl(url)).toBe("url host must be public");
     }
   });
@@ -72,5 +124,89 @@ describe("webhook URL validation", () => {
     ]) {
       expect(validateWebhookUrl(url)).toBe("url host must be public");
     }
+  });
+
+  it("rejects IPv4-translated ::ffff:0:0/96 and deprecated ::/96 forms at registration", () => {
+    // Parity with the delivery-time dispatcher screen (SEC-178): these forms
+    // embed an IPv4 reachable via NAT64/SIIT translators and must be refused
+    // up front, not only at delivery.
+    for (const url of [
+      "https://[::ffff:0:7f00:1]/hook",
+      "https://[::ffff:0:a9fe:a9fe]/hook",
+      "https://[::7f00:1]/hook",
+      "https://[::127.0.0.1]/hook",
+    ]) {
+      expect(validateWebhookUrl(url)).toBe("url host must be public");
+    }
+  });
+});
+
+describe("validateWebhookUrlResolved (SEC-017)", () => {
+  const publicAnswer = [{ address: "93.184.216.34", family: 4 }];
+
+  it("rejects a public hostname that resolves to a private address (nip.io style)", async () => {
+    const result = await validateWebhookUrlResolved(
+      "https://169.254.169.254.nip.io/hook",
+      async () => [{ address: "169.254.169.254", family: 4 }],
+    );
+    expect(result).toBe("url host must resolve to a public address");
+  });
+
+  it("rejects when ANY DNS answer is non-public (rebinding hedge)", async () => {
+    const result = await validateWebhookUrlResolved("https://hooks.example.com/hook", async () => [
+      { address: "93.184.216.34", family: 4 },
+      { address: "10.0.0.7", family: 4 },
+    ]);
+    expect(result).toBe("url host must resolve to a public address");
+  });
+
+  it("rejects IPv6 answers that embed private IPv4 targets", async () => {
+    const result = await validateWebhookUrlResolved("https://hooks.example.com/hook", async () => [
+      { address: "::ffff:127.0.0.1", family: 6 },
+    ]);
+    expect(result).toBe("url host must resolve to a public address");
+  });
+
+  it("fails closed on malformed or family-confused DNS answers", async () => {
+    for (const answer of [
+      { address: "not-an-ip", family: 4 },
+      { address: "8.8.8.8", family: 6 },
+      { address: "2606:4700:4700::1111", family: 4 },
+    ]) {
+      expect(
+        await validateWebhookUrlResolved("https://hooks.example.com/hook", async () => [answer]),
+      ).toBe("url host must resolve to a public address");
+    }
+  });
+
+  it("fails closed when the hostname cannot be resolved", async () => {
+    const result = await validateWebhookUrlResolved("https://gone.example.com/hook", async () => {
+      throw new Error("ENOTFOUND");
+    });
+    expect(result).toBe("url host could not be resolved");
+
+    const empty = await validateWebhookUrlResolved("https://gone.example.com/hook", async () => []);
+    expect(empty).toBe("url host could not be resolved");
+  });
+
+  it("accepts a public hostname with only public answers", async () => {
+    const result = await validateWebhookUrlResolved(
+      "https://hooks.example.com/hook",
+      async () => publicAnswer,
+    );
+    expect(result).toBeNull();
+  });
+
+  it("keeps string-level rejections and skips DNS for IP literals", async () => {
+    expect(await validateWebhookUrlResolved("https://10.0.0.1/hook")).toBe(
+      "url host must be public",
+    );
+    let called = false;
+    const literal = await validateWebhookUrlResolved("https://93.184.216.34/hook", async () => {
+      called = true;
+      return [];
+    });
+    expect(literal).toBeNull();
+    expect(called).toBe(false);
   });
 });

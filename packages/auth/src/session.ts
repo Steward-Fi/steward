@@ -6,7 +6,7 @@
  */
 
 import type { JWTPayload } from "jose";
-import { getJwtSecret, signJwtPayload, verifyJwtPayload } from "./jwt";
+import { checkJwtSecretStrength, getJwtSecret, signJwtPayload, verifyJwtPayload } from "./jwt";
 import { assertTokenNotRevoked, revocationStore, TokenRevokedError } from "./revocation.js";
 
 // ─── Config ────────────────────────────────────────────────────────────────
@@ -45,6 +45,11 @@ export class SessionManager {
         "SessionManager: JWT secret must be at least 16 characters. Use STEWARD_JWT_SECRET with a long random string in production.",
       );
     }
+    // An explicit secret bypasses getJwtSecret(), so re-apply its length
+    // policy here: hard-fail below 32 chars in production, warn otherwise.
+    if (config.secret !== undefined) {
+      checkJwtSecretStrength(config.secret, "SessionManager config.secret");
+    }
     this.secret = new TextEncoder().encode(secret);
     this.issuer = config.issuer ?? "steward";
     this.expiresIn = config.expiresIn ?? "7d";
@@ -55,14 +60,18 @@ export class SessionManager {
    * claim, so every session token can be individually revoked.
    *
    * @param userId  The user's UUID or identifier — included as a top-level claim
-   * @param extra   Optional additional claims to embed in the token
+   * @param extra   Optional additional claims to embed in the token. Spread
+   *                BEFORE userId and stripped of any jti, so request-derived
+   *                claims can never override the authenticated userId or
+   *                pre-select a session jti (SEC-134).
    * @returns       A compact JWT string suitable for use as a session token
    */
   async createSession(userId: string, extra?: Record<string, unknown>): Promise<string> {
+    const { jti: _extraJti, ...safeExtra } = extra ?? {};
     return signJwtPayload(
       {
+        ...safeExtra,
         userId,
-        ...extra,
       },
       this.expiresIn,
       this.secret,
@@ -90,6 +99,12 @@ export class SessionManager {
 
     // Sanity-check our custom claims are present
     if (typeof payload.userId !== "string" || typeof payload.jti !== "string") {
+      return null;
+    }
+    // Token-type confusion guard (SEC-055): a refresh JWT shares issuer,
+    // audience and signing key with access tokens — never accept it as a
+    // session/access token.
+    if (payload.tokenType === "refresh") {
       return null;
     }
 

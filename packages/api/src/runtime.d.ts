@@ -7,7 +7,10 @@ declare const process: {
 declare const Bun: {
   serve(options: {
     port: number;
-    fetch(request: Request): Response | Promise<Response>;
+    fetch(
+      request: Request,
+      server: { requestIP(request: Request): { address: string } | null },
+    ): Response | Promise<Response>;
     idleTimeout?: number;
   }): {
     port: number;

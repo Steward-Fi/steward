@@ -23,6 +23,7 @@ import { StewardProxyClient } from "@stwd/proxy-client";
 import type { ApiResponse, AppVariables, PolicyRule, SignRequest } from "@stwd/shared";
 import { Hono } from "hono";
 import type { StewardAppContext } from "./context";
+import { enforceCapabilityRateLimit } from "./rate-limit";
 import type { Capability, InvocationDecision } from "./schema";
 import { CapabilityStore } from "./store";
 
@@ -42,8 +43,14 @@ export interface CapabilityInvokeRequest {
   name: string;
   args?: Record<string, unknown>;
   body?: unknown;
-  query?: Record<string, string>;
+  query?: unknown;
 }
+
+const INVOKE_ENVELOPE_KEYS = new Set(["args", "body", "query"]);
+const MAX_QUERY_SELECTORS = 32;
+const MAX_QUERY_SELECTOR_KEY_LENGTH = 128;
+const MAX_QUERY_SELECTOR_VALUE_LENGTH = 2_048;
+const MAX_ENCODED_QUERY_LENGTH = 8_192;
 
 /**
  * Internal marker on Steward-wrapped ({ok:...}) gate responses. The upstream
@@ -217,6 +224,54 @@ async function capabilityMapsToGovernedRoute(
   );
 }
 
+type NormalizedQuerySelectors = {
+  args: Record<string, unknown>;
+  query: Record<string, string> | undefined;
+};
+
+/**
+ * Validate the agent-controlled query surface and make the exact values that
+ * will be forwarded visible to capability-intent policy evaluation. A caller
+ * may describe a selector once in `query`, or repeat it in `args`; a repeated
+ * value must be byte-for-byte identical so authorization and dispatch cannot
+ * disagree about the selected resource.
+ */
+function normalizeQuerySelectors(
+  args: Record<string, unknown>,
+  rawQuery: unknown,
+): NormalizedQuerySelectors | null {
+  if (rawQuery === undefined) return { args, query: undefined };
+  if (rawQuery === null || typeof rawQuery !== "object" || Array.isArray(rawQuery)) return null;
+
+  const entries = Object.entries(rawQuery as Record<string, unknown>);
+  if (entries.length > MAX_QUERY_SELECTORS) return null;
+
+  // Null-prototype records keep special JavaScript property names (notably
+  // `__proto__`) as ordinary data if a provider legitimately uses them.
+  const query: Record<string, string> = Object.create(null) as Record<string, string>;
+  const effectiveArgs: Record<string, unknown> = Object.assign(
+    Object.create(null) as Record<string, unknown>,
+    args,
+  );
+  for (const [key, value] of entries) {
+    if (
+      key.length === 0 ||
+      key.length > MAX_QUERY_SELECTOR_KEY_LENGTH ||
+      typeof value !== "string" ||
+      value.length > MAX_QUERY_SELECTOR_VALUE_LENGTH
+    ) {
+      return null;
+    }
+    if (Object.hasOwn(args, key) && args[key] !== value) return null;
+    query[key] = value;
+    effectiveArgs[key] = value;
+  }
+
+  const encoded = new URLSearchParams(query).toString();
+  if (encoded.length > MAX_ENCODED_QUERY_LENGTH) return null;
+  return { args: effectiveArgs, query: entries.length > 0 ? query : undefined };
+}
+
 function buildProxyPath(cap: Capability, query: Record<string, string> | undefined): string {
   const host = cap.host.toLowerCase();
   const basePath = cap.pathPattern.startsWith("/") ? cap.pathPattern : `/${cap.pathPattern}`;
@@ -226,6 +281,16 @@ function buildProxyPath(cap: Capability, query: Record<string, string> | undefin
     if (qs) path += (path.includes("?") ? "&" : "?") + qs;
   }
   return path;
+}
+
+/**
+ * New writes reject URL query/fragment delimiters in pathPattern. Keep this
+ * runtime check for legacy or externally-written rows so an old configured
+ * query cannot disagree with the selector map evaluated by policy, and a
+ * fragment cannot swallow an appended query before fetch dispatches it.
+ */
+function hasUnboundPathSelectors(pathPattern: string): boolean {
+  return pathPattern.includes("?") || pathPattern.includes("#");
 }
 
 function syntheticSignRequest(tenantId: string, agentId: string): SignRequest {
@@ -281,7 +346,6 @@ export async function invokeCapabilityThroughProxy(
   const store = new CapabilityStore(ctx.db);
   const engine = new PolicyEngine();
   const { tenantId, agentId, name } = request;
-  const invokeArgs = request.args ?? {};
 
   const usable = await store.listUsableCapabilitiesForAgent(tenantId, agentId);
   const match = usable.find((u) => u.capability.name === name);
@@ -297,6 +361,30 @@ export async function invokeCapabilityThroughProxy(
   }
   const cap = match.capability;
 
+  if (hasUnboundPathSelectors(cap.pathPattern)) {
+    return recordAndJson(store, {
+      tenantId,
+      agentId,
+      capabilityId: cap.id,
+      decision: "deny",
+      status: 403,
+      payload: { ok: false, error: "invalid capability route" } satisfies ApiResponse,
+    });
+  }
+
+  const selectors = normalizeQuerySelectors(request.args ?? {}, request.query);
+  if (!selectors) {
+    return recordAndJson(store, {
+      tenantId,
+      agentId,
+      capabilityId: cap.id,
+      decision: "deny",
+      status: 400,
+      payload: { ok: false, error: "invalid capability query selectors" } satisfies ApiResponse,
+    });
+  }
+  const invokeArgs = selectors.args;
+
   let count1h: number;
   try {
     count1h = await store.countInvocations1h(agentId, cap.id);
@@ -311,12 +399,14 @@ export async function invokeCapabilityThroughProxy(
     });
   }
 
+  const evaluatedAt = new Date().toISOString();
   const capabilityCtx: NonNullable<EvaluatorContext["capability"]> = {
     name: cap.name,
     args: invokeArgs,
     host: cap.host,
     path: cap.pathPattern,
     method: cap.method,
+    evaluatedAt,
   };
 
   let policySet: PolicyRule[];
@@ -449,11 +539,11 @@ export async function invokeCapabilityThroughProxy(
     });
   }
 
-  // ── PR4 governed-route plugin gate (spec §5.2, X1, P03/P04) ────────────────
+  // ── Governed-route plugin gate ─────────────────────────────────────────────
   // A governed_v2 route/operation cannot be invoked through the capability alias
   // or the OpenAI-compat adapter: the plugin's URLSearchParams path (G4) cannot
   // faithfully represent a governed action's duplicate-query semantics, and
-  // governed actions must go through /v2/provider-actions (PR2), never a minted
+  // governed actions must go through /v2/provider-actions, never a minted
   // proxy token. If the resolved capability maps to a governed route, the plugin
   // must NOT mint a proxy token; it denies with GOVERNED_ROUTE_PLUGIN_DENIED.
   try {
@@ -503,7 +593,7 @@ export async function invokeCapabilityThroughProxy(
     });
 
     const method = cap.method.toUpperCase();
-    const path = buildProxyPath(cap, request.query);
+    const path = buildProxyPath(cap, selectors.query);
     const hasBody = method !== "GET" && method !== "HEAD" && request.body !== undefined;
     const init: RequestInit = { method };
     if (hasBody) {
@@ -566,10 +656,19 @@ export function createInvokeRoutes(ctx: StewardAppContext): Hono<{ Variables: Ap
       );
     }
 
+    // Per-agent throttle BEFORE any DB/upstream work (SEC-094); the 429 path
+    // deliberately writes no invocation row (that write is the vector throttled).
+    const rate = await enforceCapabilityRateLimit(ctx, "invoke", agentId);
+    if (!rate.allowed) {
+      const res = jsonResponse({ ok: false, error: "capability invoke rate limit exceeded" }, 429);
+      res.headers.set("Retry-After", String(Math.ceil(rate.resetMs / 1000)));
+      return stripGateMarker(res);
+    }
+
     type InvokeEnvelope = {
-      args?: Record<string, unknown>;
+      args?: unknown;
       body?: unknown;
-      query?: Record<string, string>;
+      query?: unknown;
     };
     let envelope: InvokeEnvelope = {};
     let rawBody = "";
@@ -586,7 +685,13 @@ export function createInvokeRoutes(ctx: StewardAppContext): Hono<{ Variables: Ap
             jsonResponse({ ok: false, error: "invoke body must be a JSON object" }, 400),
           );
         }
-        envelope = parsedBody as InvokeEnvelope;
+        const parsedEnvelope = parsedBody as Record<string, unknown>;
+        if (Object.keys(parsedEnvelope).some((key) => !INVOKE_ENVELOPE_KEYS.has(key))) {
+          return stripGateMarker(
+            jsonResponse({ ok: false, error: "unknown field in capability invoke body" }, 400),
+          );
+        }
+        envelope = parsedEnvelope as InvokeEnvelope;
       } catch {
         return stripGateMarker(
           jsonResponse({ ok: false, error: "invalid JSON in request body" }, 400),
@@ -594,14 +699,15 @@ export function createInvokeRoutes(ctx: StewardAppContext): Hono<{ Variables: Ap
       }
     }
 
-    const args =
-      envelope.args && typeof envelope.args === "object" && !Array.isArray(envelope.args)
-        ? (envelope.args as Record<string, unknown>)
-        : {};
-    const query =
-      envelope.query && typeof envelope.query === "object" && !Array.isArray(envelope.query)
-        ? (envelope.query as Record<string, string>)
-        : undefined;
+    if (
+      envelope.args !== undefined &&
+      (envelope.args === null || typeof envelope.args !== "object" || Array.isArray(envelope.args))
+    ) {
+      return stripGateMarker(
+        jsonResponse({ ok: false, error: "capability invoke args must be a JSON object" }, 400),
+      );
+    }
+    const args = (envelope.args ?? {}) as Record<string, unknown>;
 
     const res = await invokeCapabilityThroughProxy(ctx, {
       tenantId,
@@ -609,7 +715,7 @@ export function createInvokeRoutes(ctx: StewardAppContext): Hono<{ Variables: Ap
       name: c.req.param("name"),
       args,
       body: envelope.body,
-      query,
+      query: envelope.query,
     });
     return stripGateMarker(res);
   });
@@ -628,6 +734,14 @@ export function createInvokeRoutes(ctx: StewardAppContext): Hono<{ Variables: Ap
     const agentId = c.get("agentScope");
     if (!tenantId || !agentId) {
       return openAIError("agent authentication required", 401);
+    }
+
+    // Same per-agent throttle as the envelope invoke route (SEC-094).
+    const rate = await enforceCapabilityRateLimit(ctx, "invoke", agentId);
+    if (!rate.allowed) {
+      const res = openAIError("capability invoke rate limit exceeded", 429);
+      res.headers.set("Retry-After", String(Math.ceil(rate.resetMs / 1000)));
+      return res;
     }
 
     let body: unknown;

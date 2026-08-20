@@ -16,6 +16,7 @@ import {
   users,
   userTenants,
 } from "@stwd/db";
+import { redactedThrownDiagnostics } from "@stwd/shared";
 import { and, eq, inArray, isNull, sql } from "drizzle-orm";
 import { Hono } from "hono";
 import { writeAuditEvent } from "../services/audit";
@@ -26,6 +27,7 @@ import {
   isNonEmptyString,
   requireTenantLevel,
   safeJsonParse,
+  sanitizeErrorMessage,
   setNoStoreHeaders,
   vault,
 } from "../services/context";
@@ -526,7 +528,10 @@ async function writeAccountAudit(input: Parameters<typeof writeAuditEvent>[0]) {
   try {
     await writeAuditEvent(input);
   } catch (error) {
-    console.error("[accounts] Failed to write account audit event:", error);
+    console.error(
+      "[accounts] Failed to write account audit event",
+      redactedThrownDiagnostics(error),
+    );
   }
 }
 
@@ -1093,7 +1098,8 @@ accountRoutes.post("/", async (c) => {
     memberships = await buildMemberships(tenantId, accountId, body, createdWalletAgentIds);
   } catch (error) {
     await cleanupCreatedAccountWallets(tenantId, createdWalletAgentIds);
-    return c.json<ApiResponse>({ ok: false, error: (error as Error).message }, 400);
+    // SEC-210: membership building can surface vault/DB internals — sanitize.
+    return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(error) }, 400);
   }
   if (memberships === undefined) {
     return c.json<ApiResponse>(
@@ -1149,10 +1155,7 @@ accountRoutes.post("/", async (c) => {
     });
   } catch (error) {
     await cleanupCreatedAccountWallets(tenantId, createdWalletAgentIds);
-    return c.json<ApiResponse>(
-      { ok: false, error: error instanceof Error ? error.message : "Failed to create account" },
-      400,
-    );
+    return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(error) }, 400);
   }
 
   const account = await serializeAccount(tenantId, accountId);
@@ -1360,7 +1363,7 @@ accountRoutes.post("/:accountId/aggregations", async (c) => {
     return c.json<ApiResponse>(
       {
         ok: false,
-        error: error instanceof Error ? error.message : "Failed to create account aggregation",
+        error: sanitizeErrorMessage(error),
       },
       400,
     );
@@ -1453,7 +1456,8 @@ accountRoutes.patch("/:accountId", async (c) => {
     memberships = await buildMemberships(tenantId, accountId, body, createdWalletAgentIds);
   } catch (error) {
     await cleanupCreatedAccountWallets(tenantId, createdWalletAgentIds);
-    return c.json<ApiResponse>({ ok: false, error: (error as Error).message }, 400);
+    // SEC-210: membership building can surface vault/DB internals — sanitize.
+    return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(error) }, 400);
   }
   if (typeof memberships === "string") {
     await cleanupCreatedAccountWallets(tenantId, createdWalletAgentIds);
@@ -1490,10 +1494,8 @@ accountRoutes.patch("/:accountId", async (c) => {
     await applyAccountUpdates(tenantId, accountId, updates, memberships);
   } catch (error) {
     await cleanupCreatedAccountWallets(tenantId, createdWalletAgentIds);
-    return c.json<ApiResponse>(
-      { ok: false, error: error instanceof Error ? error.message : "Failed to update account" },
-      400,
-    );
+    // SEC-210: DB-write failures must not leak constraint names/internals.
+    return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(error) }, 400);
   }
   await writeAccountAudit({
     tenantId,

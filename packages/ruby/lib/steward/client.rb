@@ -21,6 +21,9 @@ module Steward
   end
 
   class Client
+    # Keep in lockstep with the equivalent list in EVERY other SDK (sdk, go,
+    # java, python, rust, swift, csharp, flutter): mutations under these
+    # prefixes are HMAC-signed; divergence silently downgrades integrity (SEC-049).
     SENSITIVE_PREFIXES = [
       "/vault",
       "/agents",
@@ -36,10 +39,37 @@ module Steward
       "/platform",
       "/condition-sets",
       "/condition_sets",
-      "/v1/condition_sets"
+      "/v1/condition_sets",
+      "/global-wallet",
+      "/accounts"
     ].freeze
 
     MUTATING_METHODS = %w[POST PUT PATCH DELETE].freeze
+
+    LOOPBACK_HOSTS = %w[localhost 127.0.0.1 ::1].freeze
+
+    # Keep in lockstep with the equivalent check in EVERY other SDK (sdk, go,
+    # java, python, rust, swift, csharp, flutter): these clients transmit API
+    # keys, bearer tokens, and HMAC-signed credentials, none of which may
+    # travel to a plaintext non-loopback endpoint (SEC-200, mirroring SEC-048).
+    def self.assert_secure_base_url!(base_url, allow_insecure_base_url)
+      uri = URI.parse(base_url)
+      raise ArgumentError, "base_url must be a valid absolute URL" if uri.scheme.to_s.empty? || uri.host.to_s.empty?
+      raise ArgumentError, "base_url must use HTTP or HTTPS" unless %w[http https].include?(uri.scheme.downcase)
+      raise ArgumentError, "base_url must not embed credentials" if uri.user || uri.password
+      return if uri.scheme == "https" || (uri.scheme == "http" && LOOPBACK_HOSTS.include?(uri.hostname))
+
+      if allow_insecure_base_url
+        warn "[steward-sdk] WARNING: base_url is not HTTPS; credentials travel in " \
+             "cleartext. Use allow_insecure_base_url only on trusted private networks."
+        return
+      end
+      raise ArgumentError,
+            "base_url must use HTTPS unless it targets loopback (http://localhost, http://127.0.0.1, " \
+            "http://[::1]). Pass allow_insecure_base_url: true to override on trusted private networks."
+    rescue URI::InvalidURIError
+      raise ArgumentError, "base_url must be a valid absolute URL"
+    end
 
     attr_reader :base_url
 
@@ -53,6 +83,7 @@ module Steward
       tenant_id: nil,
       request_signing_secret: nil,
       request_signing_key_id: nil,
+      allow_insecure_base_url: false,
       timeout: 30,
       transport: nil,
       now: nil,
@@ -60,7 +91,11 @@ module Steward
     )
       raise ArgumentError, "base_url is required" if base_url.to_s.strip.empty?
 
-      @base_url = base_url.to_s.sub(%r{/+\z}, "")
+      raw_base_url = base_url.to_s
+      base_url_end = raw_base_url.bytesize
+      base_url_end -= 1 while base_url_end.positive? && raw_base_url.getbyte(base_url_end - 1) == 47
+      @base_url = raw_base_url.byteslice(0, base_url_end)
+      self.class.assert_secure_base_url!(@base_url, allow_insecure_base_url)
       @api_key = api_key
       @bearer_token = bearer_token
       @platform_key = platform_key

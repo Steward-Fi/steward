@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { LookupAddress } from "node:dns";
 import type { RequestOptions } from "node:http";
 import { isIP, type LookupFunction } from "node:net";
-import type { WebhookEvent } from "@stwd/shared";
+import { redactedThrownDiagnostics, type WebhookEvent } from "@stwd/shared";
 
 import type { WebhookConfig, WebhookDeliveryResult, WebhookDispatcherOptions } from "./types";
 
@@ -14,7 +14,8 @@ const SIGNATURE_SCHEME = "v2";
 // bodies contain '.', and a plain `.`-join would let an attacker re-split a
 // captured signature (e.g. eventType "a.b"+body "c" vs "a"+body "b.c") to forge
 // a colliding-but-valid message. body is last/unbounded so needs no prefix.
-function canonicalSignedPayload(
+// Exported so receivers (verifyWebhookSignature) sign the identical material.
+export function canonicalSignedPayload(
   timestamp: string,
   deliveryId: string,
   eventType: string,
@@ -30,6 +31,9 @@ const MAX_RESPONSE_BYTES = 64 * 1024;
 const ALLOW_PRIVATE_WEBHOOK_NETWORKS =
   (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env
     ?.STEWARD_ALLOW_PRIVATE_WEBHOOK_NETWORKS === "true";
+
+// Once-per-process latch for the SEC-102 escape-hatch warning below.
+let warnedPrivateWebhookNetworks = false;
 
 function toHex(buffer: ArrayBuffer): string {
   return Array.from(new Uint8Array(buffer), (byte) => byte.toString(16).padStart(2, "0")).join("");
@@ -88,8 +92,11 @@ function isNonPublicIpv4(address: string): boolean {
     (a === 172 && b >= 16 && b <= 31) ||
     (a === 192 && b === 168) ||
     (a === 100 && b >= 64 && b <= 127) ||
-    (a === 192 && b === 0) ||
+    (a === 192 && b === 0 && (octets[2] === 0 || octets[2] === 2)) ||
+    (a === 192 && b === 31 && octets[2] === 196) ||
+    (a === 192 && b === 52 && octets[2] === 193) ||
     (a === 192 && b === 88 && octets[2] === 99) ||
+    (a === 192 && b === 175 && octets[2] === 48) ||
     (a === 198 && (b === 18 || b === 19)) ||
     (a === 198 && b === 51 && octets[2] === 100) ||
     (a === 203 && b === 0 && octets[2] === 113) ||
@@ -155,20 +162,54 @@ function embeddedIpv4FromIpv6(address: string): string | null {
     words[0] === 0x64 && words[1] === 0xff9b && words[2] === 1 && words[3] === 0;
   if (isNat64LocalUse) return fromWords(words[6], words[7]);
 
+  // RFC 8215 IPv4-translated ::ffff:0:0/96 — distinct from the IPv4-mapped form
+  // (handled by mappedIpv4FromIpv6, which has words[5] === 0xffff). The IPv4 is
+  // embedded in the low 32 bits and is reachable through NAT64/SIIT paths, so it
+  // must face the same non-public checks (SEC-178).
+  const isIpv4Translated =
+    words[0] === 0 &&
+    words[1] === 0 &&
+    words[2] === 0 &&
+    words[3] === 0 &&
+    words[4] === 0xffff &&
+    words[5] === 0;
+  if (isIpv4Translated) return fromWords(words[6], words[7]);
+
   if (words[0] === 0x2002) return fromWords(words[1], words[2]);
   return null;
 }
 
 function isNonPublicIpv6(address: string): boolean {
   const normalized = address.toLowerCase();
+  const words = expandIpv6Words(normalized);
+  // RFC 8215's 64:ff9b:1::/48 is explicitly a local-use translation prefix.
+  // Block the whole prefix: allowing an address merely because its embedded
+  // IPv4 happens to be public still lets a webhook traverse an operator-local
+  // translator and defeats the public-destination boundary.
+  if (words?.[0] === 0x0064 && words[1] === 0xff9b && words[2] === 0x0001) return true;
+  // Deprecated IPv4-compatible ::/96 space is special-use, not a public IPv6
+  // webhook destination. This also closes parser-dependent forms such as
+  // `[::127.0.0.1]` / `[::7f00:1]`.
+  if (words && words.slice(0, 6).every((word) => word === 0) && (words[6] !== 0 || words[7] !== 0))
+    return true;
   const ipv4Mapped = mappedIpv4FromIpv6(normalized);
   if (ipv4Mapped) return isNonPublicIpv4(ipv4Mapped);
   const ipv4Embedded = embeddedIpv4FromIpv6(normalized);
   if (ipv4Embedded) return isNonPublicIpv4(ipv4Embedded);
-  const words = expandIpv6Words(normalized);
-  if (words?.[0] === 0x2001 && (words[1] === 0 || words[1] === 0xdb8)) return true;
+  // Public IPv4 embeddings return above. Other literals must be ordinary
+  // global-unicast addresses; reserved/local/unallocated space is fail-closed.
+  if (words?.[0] !== undefined && (words[0] & 0xe000) !== 0x2000) return true;
+  if (words?.[0] === 0x2001 && words[1] <= 0x01ff) return true;
+  if (words?.[0] === 0x2001 && words[1] === 0xdb8) return true;
+  // 2001:2::/48 benchmarking (RFC 5180) — documentation/special-use, never a
+  // public webhook target (SEC-178).
+  if (words?.[0] === 0x2001 && words[1] === 0x0002 && words[2] === 0) return true;
+  // 100::/64 discard-only (RFC 6666) (SEC-178).
+  if (words?.[0] === 0x0100 && words[1] === 0 && words[2] === 0 && words[3] === 0) return true;
   if (words?.[0] !== undefined && (words[0] & 0xffc0) === 0xfe80) return true;
   if (words?.[0] !== undefined && (words[0] & 0xffc0) === 0xfec0) return true;
+  if (words?.[0] === 0x2620 && words[1] === 0x004f && words[2] === 0x8000) return true;
+  if (words?.[0] === 0x3fff && (words[1] & 0xf000) === 0) return true;
   return (
     normalized === "::" ||
     normalized === "::1" ||
@@ -178,33 +219,47 @@ function isNonPublicIpv6(address: string): boolean {
   );
 }
 
+/**
+ * Deterministic, non-transient rejection of a webhook delivery target (bad
+ * scheme, non-public host/address). Distinct from network failures so callers
+ * can classify it as non-retryable.
+ */
+export class WebhookValidationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "WebhookValidationError";
+  }
+}
+
 function assertPublicWebhookHostname(hostname: string): void {
-  if (!hostname) throw new Error("Webhook URL must include a host");
+  if (!hostname) throw new WebhookValidationError("Webhook URL must include a host");
   if (
     hostname === "localhost" ||
     hostname.endsWith(".localhost") ||
     hostname.endsWith(".local") ||
     hostname.endsWith(".internal")
   ) {
-    throw new Error("Webhook host must resolve to a public address");
+    throw new WebhookValidationError("Webhook host must resolve to a public address");
   }
 
   const literalVersion = isIP(hostname);
   if (literalVersion === 4 && isNonPublicIpv4(hostname)) {
-    throw new Error("Webhook host must resolve to a public address");
+    throw new WebhookValidationError("Webhook host must resolve to a public address");
   }
   if (literalVersion === 6 && isNonPublicIpv6(hostname)) {
-    throw new Error("Webhook host must resolve to a public address");
+    throw new WebhookValidationError("Webhook host must resolve to a public address");
   }
 }
 
 function assertPublicAddress(address: string, family?: number): void {
+  const detectedFamily = isIP(address);
   if (
-    (family === 4 && isNonPublicIpv4(address)) ||
-    (family === 6 && isNonPublicIpv6(address)) ||
-    (family !== 4 && family !== 6 && (isNonPublicIpv4(address) || isNonPublicIpv6(address)))
+    detectedFamily === 0 ||
+    (family !== undefined && family !== detectedFamily) ||
+    (detectedFamily === 4 && isNonPublicIpv4(address)) ||
+    (detectedFamily === 6 && isNonPublicIpv6(address))
   ) {
-    throw new Error("Webhook host must resolve to a public address");
+    throw new WebhookValidationError("Webhook host must resolve to a public address");
   }
 }
 
@@ -267,12 +322,18 @@ async function postWebhook(
     lookup?: LookupFunction;
   },
 ): Promise<{ status: number; ok: boolean }> {
-  const parsed = new URL(url);
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    // An unparseable URL can never succeed on retry (SEC-179).
+    throw new WebhookValidationError("Webhook URL is not a valid URL");
+  }
   if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
-    throw new Error("Webhook URL must use https");
+    throw new WebhookValidationError("Webhook URL must use https");
   }
   if (parsed.protocol === "http:" && !init.allowInsecureHttp) {
-    throw new Error("Webhook URL must use https");
+    throw new WebhookValidationError("Webhook URL must use https");
   }
 
   const transport =
@@ -289,6 +350,12 @@ async function postWebhook(
     },
   };
   if (!init.allowPrivateNetwork) {
+    // Node's http/https client skips `options.lookup` entirely when the URL
+    // host is already an IP literal, so the guarded lookup alone never runs
+    // for `http://127.0.0.1/…`-style targets (WHATWG parsing canonicalizes
+    // decimal/hex/shorthand IPv4 forms to dotted-quad first). Check the
+    // literal hostname up front, before any socket is opened.
+    assertPublicWebhookHostname(parsed.hostname.replace(/^\[|\]$/g, "").toLowerCase());
     options.lookup = createPublicLookup(init.lookup);
   } else if (init.lookup) {
     options.lookup = init.lookup;
@@ -336,20 +403,21 @@ async function postWebhook(
   });
 }
 
+/** Fail closed on the retired bare-URL form, which cannot carry a receiver-known secret. */
 function normalizeWebhook(webhook: WebhookConfig | string): WebhookConfig {
   if (typeof webhook !== "string") {
+    if (typeof webhook.secret !== "string" || !webhook.secret.trim()) {
+      throw new WebhookValidationError("Webhook secret must not be empty");
+    }
     return webhook;
   }
-
-  const secret = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process
-    ?.env?.STEWARD_WEBHOOK_SECRET;
-  if (!secret) {
-    throw new Error(
-      "Webhook secret is required. Pass a WebhookConfig or set STEWARD_WEBHOOK_SECRET.",
-    );
-  }
-
-  return { url: webhook, secret };
+  // A bare URL has no receiver-provisioned tenant secret. Server-side key
+  // derivation silently produces a key the receiver cannot know, while the old
+  // process-wide key lets one disclosure forge every tenant. Require the
+  // persisted per-endpoint configuration instead.
+  throw new WebhookValidationError(
+    "Legacy string webhook configuration is not supported; pass a WebhookConfig with a per-endpoint secret",
+  );
 }
 
 export class WebhookDispatcher {
@@ -367,6 +435,16 @@ export class WebhookDispatcher {
     this.allowPrivateNetwork = options.allowPrivateNetwork ?? ALLOW_PRIVATE_WEBHOOK_NETWORKS;
     this.allowInsecureHttp = options.allowInsecureHttp ?? false;
     this.lookup = options.lookup;
+    // SEC-102: the SSRF escape hatch disables the private-network guard for
+    // every delivery this dispatcher makes (STEWARD_ALLOW_PRIVATE_WEBHOOK_NETWORKS
+    // does it process-wide at module load). Announce it loudly once per process
+    // instead of running unguarded in silence.
+    if (this.allowPrivateNetwork && !warnedPrivateWebhookNetworks) {
+      warnedPrivateWebhookNetworks = true;
+      console.warn(
+        "[steward] WARNING: webhook SSRF guard is DISABLED (allowPrivateNetwork / STEWARD_ALLOW_PRIVATE_WEBHOOK_NETWORKS=true). Loopback, link-local, and private-range webhook targets will be fetched. Use only for local development or trusted test harnesses.",
+      );
+    }
   }
 
   async dispatch(
@@ -375,7 +453,10 @@ export class WebhookDispatcher {
   ): Promise<WebhookDeliveryResult> {
     const config = normalizeWebhook(webhook);
 
-    if (config.events && !config.events.includes(event.type)) {
+    // An empty events array means "subscribe to all" everywhere else
+    // (acceptsConfiguredWebhookEvent, persistent-queue) — a truthy [] must
+    // not silently drop every event while reporting success.
+    if (config.events?.length && !config.events.includes(event.type)) {
       return {
         success: true,
         attempts: 0,
@@ -448,8 +529,16 @@ export class WebhookDispatcher {
           break;
         }
       } catch (error) {
-        lastError = error instanceof Error ? error.message : "Unknown webhook delivery error";
-        if (attempts > this.maxRetries) {
+        lastError =
+          error instanceof WebhookValidationError
+            ? "Webhook validation failed"
+            : "Webhook delivery failed";
+        console.warn("[webhooks] delivery attempt failed", redactedThrownDiagnostics(error));
+        // SEC-179: a deterministic validation rejection (bad scheme, non-public
+        // host/address, unparseable URL) can never succeed on retry — stop
+        // immediately instead of burning maxRetries+1 attempts with backoff and
+        // repeated DNS lookups.
+        if (error instanceof WebhookValidationError || attempts > this.maxRetries) {
           break;
         }
       }

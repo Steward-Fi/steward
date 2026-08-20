@@ -370,6 +370,12 @@ export interface StewardAuthConfig {
   baseUrl: string;
   storage?: import("@stwd/sdk").SessionStorage;
   tenantId?: string;
+  /**
+   * Optional same-origin auth proxy prefix (e.g. "/api/auth") that keeps the
+   * long-lived refresh token in an HttpOnly cookie instead of JS-readable
+   * storage. Forwarded to the SDK — see `StewardAuthConfig.authProxyUrl`.
+   */
+  authProxyUrl?: string;
 }
 
 export interface StewardAuthContextValue {

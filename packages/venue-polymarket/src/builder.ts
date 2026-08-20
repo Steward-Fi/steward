@@ -17,21 +17,78 @@ import { z } from "zod";
 // enabled, so nothing reaches out at import/test time.
 // ---------------------------------------------------------------------------
 
-export const builderConfigInputSchema = z.object({
-  /** Master switch. Defaults OFF — inert until an operator enables it. */
-  enabled: z.boolean().default(false),
-  /** Builder fee-collecting Safe address (the receiver). Config, not hardcoded. */
-  receiver: z
-    .string()
-    .regex(/^0x[0-9a-fA-F]{40}$/, "builder receiver must be a 0x-address")
-    .optional(),
-  /** Builder fee in basis points. Defaults 0. */
-  feeBps: z.number().int().min(0).max(1000).default(0),
-  /** Remote signing-server URL that holds the builder key + stamps attribution. */
-  signingServerUrl: z.string().url().optional(),
-  /** Auth token for the signing server. */
-  signingServerToken: z.string().optional(),
-});
+export const builderConfigInputSchema = z
+  .object({
+    /** Master switch. Defaults OFF — inert until an operator enables it. */
+    enabled: z.boolean().default(false),
+    /** Builder fee-collecting Safe address (the receiver). Config, not hardcoded. */
+    receiver: z
+      .string()
+      .regex(/^0x[0-9a-fA-F]{40}$/, "builder receiver must be a 0x-address")
+      .optional(),
+    /** Builder fee in basis points. Defaults 0. */
+    feeBps: z.number().int().min(0).max(1000).default(0),
+    /** Remote signing-server URL that holds the builder key + stamps attribution. */
+    signingServerUrl: z.string().url().optional(),
+    /** Auth token for the signing server. */
+    signingServerToken: z.string().trim().min(1).optional(),
+  })
+  .superRefine((config, ctx) => {
+    const configuredWhileDisabled =
+      !config.enabled &&
+      (config.receiver !== undefined ||
+        config.feeBps > 0 ||
+        config.signingServerUrl !== undefined ||
+        config.signingServerToken !== undefined);
+    if (configuredWhileDisabled) {
+      ctx.addIssue({
+        code: "custom",
+        message:
+          "builder settings require enabled=true; partial disabled configuration is rejected",
+      });
+      return;
+    }
+    if (!config.enabled) return;
+    if (!config.receiver) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["receiver"],
+        message: "enabled builder requires receiver",
+      });
+    }
+    if (!config.signingServerUrl) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["signingServerUrl"],
+        message: "enabled builder requires signing server URL",
+      });
+    } else {
+      const url = new URL(config.signingServerUrl);
+      const loopback =
+        url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname === "[::1]";
+      if (url.username || url.password) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["signingServerUrl"],
+          message: "builder signing server URL must not contain credentials",
+        });
+      }
+      if (url.protocol !== "https:" && !(url.protocol === "http:" && loopback)) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["signingServerUrl"],
+          message: "builder signing server URL must use HTTPS (HTTP is allowed only on loopback)",
+        });
+      }
+    }
+    if (!config.signingServerToken) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["signingServerToken"],
+        message: "enabled builder requires signing server token",
+      });
+    }
+  });
 export type BuilderConfigInput = z.input<typeof builderConfigInputSchema>;
 export type ResolvedBuilderConfig = z.infer<typeof builderConfigInputSchema>;
 
@@ -60,9 +117,7 @@ export function resolveBuilderConfig(input?: BuilderConfigInput): ResolvedBuilde
 }
 
 export function isBuilderEnabled(config: ResolvedBuilderConfig): boolean {
-  // Enabled only when the switch is on AND a signing server is configured. A
-  // bare feeBps with no server is treated as off (can't attribute without it).
-  return config.enabled && !!config.signingServerUrl;
+  return config.enabled;
 }
 
 /**
@@ -97,12 +152,18 @@ export function signEndpointUrl(base: string | undefined): string {
   // at the PATH only (e.g. `https://h/sign?env=prod` must not become `.../sign?env=prod/sign`).
   try {
     const u = new URL(trimmed);
-    const path = u.pathname.replace(/\/+$/, "");
+    const path = stripTrailingSlashes(u.pathname);
     u.pathname = /\/sign$/.test(path) ? path : `${path}/sign`;
     return u.toString();
   } catch {
     // Not an absolute URL (relative path/host fragment) — fall back to string handling.
-    const noTrailing = trimmed.replace(/\/+$/, "");
+    const noTrailing = stripTrailingSlashes(trimmed);
     return /\/sign$/.test(noTrailing) ? noTrailing : `${noTrailing}/sign`;
   }
+}
+
+function stripTrailingSlashes(value: string): string {
+  let end = value.length;
+  while (end > 0 && value.charCodeAt(end - 1) === 0x2f) end -= 1;
+  return end === value.length ? value : value.slice(0, end);
 }

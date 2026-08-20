@@ -3,10 +3,15 @@
 import { CHAIN_PROVIDERS, type ChainProvider } from "./chains/index.js";
 import type { VenueId } from "./types/venue.js";
 
+export * from "./aws-provider-action.js";
 // ─── Chain providers (extensible registry) ───
 export * from "./chains/index.js";
 export * from "./execution-contract.js";
 export * from "./execution-payload.js";
+export * from "./generic-http-provider-action.js";
+export * from "./google-provider-action.js";
+export * from "./google-provider-action.js";
+export * from "./oauth-token.js";
 export type { PriceOracle } from "./price-oracle.js";
 export { createPriceOracle } from "./price-oracle.js";
 export * from "./provider-action.js";
@@ -14,9 +19,18 @@ export * from "./provider-approval.js";
 export * from "./provider-authority.js";
 export * from "./provider-case.js";
 export * from "./provider-execution-auth.js";
+export * from "./provider-profile-conformance.js";
+export * from "./provider-profile-registry.js";
 // ─── Non-throwing description of an arbitrary thrown value (fail-closed catches) ───
-export { describeThrown, UNPRINTABLE_THROWN_VALUE } from "./safe-error.js";
+export {
+  describeThrown,
+  redactedThrownDiagnostics,
+  UNPRINTABLE_THROWN_VALUE,
+} from "./safe-error.js";
+export * from "./secret-route-matching.js";
 export * from "./security-surface.js";
+export * from "./sensitive-keys.js";
+export * from "./slack-provider-action.js";
 // ─── Token Registry & Price Oracle ───
 export * from "./tokens.js";
 // ─── Per-request app context shape (shared so plugins can type routes) ───
@@ -35,6 +49,7 @@ export * from "./types/venue.js";
 // ─── Runtime-extensible webhook event registry (core ∪ plugin-declared) ───
 export { WebhookEventRegistry } from "./webhook-event-registry.js";
 export * from "./x-provider-action.js";
+export * from "./x-summon-attestation.js";
 
 // ─── Tenancy ───
 
@@ -285,7 +300,9 @@ export function chainFromNumeric(id: number): ChainIdentifier | undefined {
 
 /** Look up a chain by its CAIP-2 string (e.g. `"eip155:8453"`). Returns undefined if not found. */
 export function chainFromCaip2(caip2: string): ChainIdentifier | undefined {
-  return CHAINS[caip2];
+  // Own-key lookup: a bare index would return Object.prototype members (e.g.
+  // "constructor") as if they were known chains (SEC-116).
+  return Object.hasOwn(CHAINS, caip2) ? CHAINS[caip2] : undefined;
 }
 
 /**
@@ -301,7 +318,7 @@ export function toCaip2(numericId: number): string | undefined {
  * Returns undefined for unrecognised CAIP-2 strings.
  */
 export function fromCaip2(caip2: string): number | undefined {
-  return CHAINS[caip2]?.numericId;
+  return chainFromCaip2(caip2)?.numericId;
 }
 
 // ─── Policies ───
@@ -331,14 +348,19 @@ export interface PolicyRule {
 }
 
 export interface SpendingLimitConfig {
-  // Wei-based (legacy/direct)
+  // Canonical wei-based limits. Wei values are decimal strings so conversion
+  // to bigint is exact across JSON and JavaScript runtimes.
   maxPerTx?: string;
   maxPerDay?: string;
   maxPerWeek?: string;
-  // USD-based (preferred — takes precedence when price oracle is available)
+  // USD limits are conjunctive with any canonical or legacy wei limits.
   maxPerTxUsd?: number;
   maxPerDayUsd?: number;
   maxPerWeekUsd?: number;
+  // Legacy simplified representation retained for persisted-policy and API
+  // compatibility. A missing period means "day".
+  maxAmount?: string;
+  period?: "tx" | "transaction" | "day" | "daily" | "week" | "weekly";
 }
 
 export interface ApprovedAddressesConfig {
@@ -455,6 +477,14 @@ export interface AggregationConditionConfig {
   denomination?: AggregationDenomination;
 }
 
+/**
+ * SEC-183 (documented seam): `contract-allowlist` gates CONTRACT CALLS ONLY.
+ * A transaction with no calldata — a plain native-value transfer — passes
+ * this rule unconditionally regardless of the allowlist below. Operators who
+ * expect it to also constrain native sends MUST pair it with an
+ * `approved-addresses` rule (whose write validator currently restricts
+ * addresses to EVM format).
+ */
 export interface ContractAllowlistConfig {
   contracts: Array<{
     address: string;
@@ -568,7 +598,8 @@ export type TxStatus =
   | "signed"
   | "broadcast"
   | "confirmed"
-  | "failed";
+  | "failed"
+  | "outcome_unknown";
 
 export interface SignRequest {
   agentId: string;
@@ -639,6 +670,26 @@ export interface SignSolanaTransactionRequest {
   broadcast?: boolean; // default true
   expectedTo?: string; // policy-evaluated recipient for serialized transfer validation
   expectedValue?: string; // policy-evaluated lamports for serialized transfer validation
+  /**
+   * SEC-163: explicit caller attestation required when signing WITHOUT the
+   * expectedTo/expectedValue policy envelope (token/multi-instruction shapes
+   * the vault's byte-level envelope check cannot model). Callers must only set
+   * this after their own edge policy evaluation approved the transaction; the
+   * vault rejects blind requests that omit it and logs every flagged blind
+   * sign. Never forward client-controlled input into this flag.
+   */
+  allowBlindSign?: boolean;
+  /**
+   * Durable recovery checkpoint invoked after signing has produced the
+   * deterministic transaction signature, but before any broadcast I/O. API
+   * callers use this to persist the signature as outcome_unknown so a crash,
+   * lost RPC response, or confirmation failure cannot make a potentially
+   * submitted transaction indistinguishable from one that was never sent.
+   */
+  onBroadcastPrepared?: (checkpoint: {
+    signature: string;
+    recentBlockhash: string;
+  }) => Promise<void>;
 }
 
 /**

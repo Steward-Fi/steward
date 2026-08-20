@@ -15,6 +15,13 @@
       "when": 1782900000000,
       "tag": "0001_capability_invocations",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1783000000000,
+      "tag": "0002_agent_grant_lifecycle",
+      "breakpoints": true
     }
   ]
 }

@@ -1,10 +1,10 @@
 // @stwd/venue-polymarket
 //
-// Polymarket venue adapter for Steward. Pure adapter logic + types — NO routes,
-// NO DB, NO tenant wiring (that's Phase B/C). Mirrors @stwd/venue-hyperliquid's
-// shape: injected signer/credentials, zod schemas, config-driven builder fee.
+// Polymarket venue adapter for Steward. It owns venue-specific types, parsing,
+// signing, and public market-data access. Route, tenant, and persistence policy
+// remain in the API and trading packages.
 //
-// Layout (per POLYMARKET-KNOWLEDGE-DUMP §6):
+// Layout:
 //   constants    — hosts, chain id, sig types, limits
 //   types        — zod schemas (order, signed order, market, position)
 //   parsing      — Gamma JSON-string parsing (clobTokenIds/outcomes/outcomePrices)

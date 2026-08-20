@@ -16,10 +16,16 @@
  * /trade + /v1/trade.
  */
 
+import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from "node:crypto";
 import { agentPolicies, eq, getDb, proxyAuditLog } from "@stwd/db";
-import { evaluateTradeOrder } from "@stwd/policy-engine";
+import {
+  assetAllowlistEvaluator,
+  evaluateTradeOrder,
+  tradeLeverageCapEvaluator,
+  tradeVenueAllowlistEvaluator,
+} from "@stwd/policy-engine";
 import { checkRateLimit } from "@stwd/redis";
-import type { ApiResponse, AppVariables } from "@stwd/shared";
+import { type ApiResponse, type AppVariables, redactedThrownDiagnostics } from "@stwd/shared";
 import { type TradeSession, TradeSessionManager } from "@stwd/trade-sessions";
 import {
   getMarketableLimitPx,
@@ -32,6 +38,8 @@ import {
   clobApiCredentialsSchema,
   deriveApiCredentials,
   type EthersSignerLike,
+  getMarketByToken,
+  getPrices,
   isPolymarketPostNotAttempted,
   isPolymarketUnauthorized,
   POLY_EOA_SIGNATURE_TYPE,
@@ -45,6 +53,7 @@ import type { Context } from "hono";
 import { Hono } from "hono";
 import { z } from "zod";
 import type { StewardAppContext } from "../context";
+import { DurableIdempotencyStore } from "./idempotency";
 
 // Prediction-market session asset: pm:<tokenId> (a single outcome token) or
 // pm:cond:<conditionId> (a whole market). Mirrors @stwd/trade-sessions'
@@ -52,7 +61,7 @@ import type { StewardAppContext } from "../context";
 // public route (not just seeded out of band).
 const sessionPredictionMarketAssetSchema = z
   .string()
-  .regex(/^pm:(cond:0x[0-9a-fA-F]{1,64}|[0-9]{1,128})$/);
+  .regex(/^pm:(cond:0x[0-9a-fA-F]{64}|[0-9]{1,128})$/);
 
 const createSessionSchema = z
   .object({
@@ -133,7 +142,7 @@ const pmSubmitOrderSchema = z.object({
   // market (both YES/NO outcomes) without a per-token entry.
   conditionId: z
     .string()
-    .regex(/^0x[0-9a-fA-F]{1,64}$/, "conditionId must be a 0x-hex string")
+    .regex(/^0x[0-9a-fA-F]{64}$/, "conditionId must be a bytes32 hex string")
     .optional(),
   side: z.enum(["buy", "sell"]),
   // BUY: amount is USD notional to spend. SELL: amount is shares.
@@ -166,14 +175,19 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
   const tradeRoutes = new Hono<{ Variables: AppVariables }>();
 
   const memoryRateLimit = new Map<string, { count: number; resetAt: number }>();
-  const memoryIdempotency = new Map<
-    string,
-    { bodyHash: string; response: TradeIdempotencyResponse; expiresAt: number }
-  >();
-  const pmMemoryIdempotency = new Map<
-    string,
-    { bodyHash: string; response: TradeIdempotencyResponse; expiresAt: number }
-  >();
+
+  // SEC-043: idempotency records are Redis-backed when a client is available
+  // (multi-replica dedup survives restarts), with the bounded wave-2
+  // process-local map as the dev/single-replica fallback. Two namespaces so
+  // the Hyperliquid and Polymarket routes never collide on a shared key.
+  const hlIdempotencyStore = new DurableIdempotencyStore<TradeIdempotencyResponse>({
+    namespace: "trade:hl",
+    getRedisClient,
+  });
+  const pmIdempotencyStore = new DurableIdempotencyStore<TradeIdempotencyResponse>({
+    namespace: "trade:pm",
+    getRedisClient,
+  });
 
   function getSessionManager(): TradeSessionManager {
     return new TradeSessionManager({ redis: getRedisClient() });
@@ -232,6 +246,26 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
     return typeof body === "object" && body !== null && Object.hasOwn(body, key);
   }
 
+  /**
+   * Recent-MFA check for the human (session-jwt) trade-session gates. A session
+   * that completed MFA hours or days ago must NOT manage fund-moving trade
+   * sessions — presence of a historical verification is not recency. Mirrors
+   * the plugin-capabilities + core /secrets gate (5-minute default).
+   */
+  function hasRecentSessionMfa(
+    c: Context<{ Variables: AppVariables }>,
+    maxAgeMs = 5 * 60_000,
+  ): boolean {
+    const verifiedAt = c.get("sessionMfaVerifiedAt");
+    const ageMs = typeof verifiedAt === "number" ? Date.now() - verifiedAt : Number.NaN;
+    return (
+      typeof verifiedAt === "number" &&
+      Number.isFinite(verifiedAt) &&
+      ageMs >= 0 &&
+      ageMs <= maxAgeMs
+    );
+  }
+
   function policyViolation(message: string) {
     return { code: "policy-violation", message };
   }
@@ -243,6 +277,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
       | "trade.session.created"
       | "trade.session.revoked"
       | "trade.order.submitted"
+      | "trade.order.submitted-after-revoke"
       | "trade.order.submit.authorized"
       | "trade.order.leverage.set"
       | "trade.order.leverage.failed"
@@ -306,34 +341,40 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
     return { allowed: true, resetMs: current.resetAt - now };
   }
 
-  function getIdempotency(
+  type RouteIdempotency = {
+    conflict?: boolean;
+    inProgress?: boolean;
+    response?: TradeIdempotencyResponse;
+    claim?: () => Promise<RouteIdempotency>;
+    store?: (response: TradeIdempotencyResponse) => Promise<void>;
+    release?: () => Promise<void>;
+  };
+
+  function routeIdempotency(
+    check: Awaited<ReturnType<typeof hlIdempotencyStore.check>>,
+  ): RouteIdempotency {
+    return {
+      conflict: check.conflict,
+      inProgress: check.inProgress,
+      response: check.record,
+      claim: check.claim ? async () => routeIdempotency(await check.claim!()) : undefined,
+      store: check.store,
+      release: check.release,
+    };
+  }
+
+  async function getIdempotency(
     tenantId: string,
     agentId: string,
     key: string | undefined,
     body: SubmitOrderBody,
-  ): {
-    conflict?: boolean;
-    response?: TradeIdempotencyResponse;
-    store?: (response: TradeIdempotencyResponse) => void;
-  } {
-    if (!key) return {};
-    const now = Date.now();
-    const mapKey = `${tenantId}:${agentId}:${key}`;
-    const bodyHash = hashBody({ ...body, idempotencyKey: undefined });
-    const existing = memoryIdempotency.get(mapKey);
-    if (existing && existing.expiresAt > now) {
-      if (existing.bodyHash !== bodyHash) return { conflict: true };
-      return { response: existing.response };
-    }
-    return {
-      store(response: TradeIdempotencyResponse) {
-        memoryIdempotency.set(mapKey, {
-          bodyHash,
-          response,
-          expiresAt: now + 24 * 60 * 60 * 1000,
-        });
-      },
-    };
+  ): Promise<RouteIdempotency> {
+    const check = await hlIdempotencyStore.check(
+      `${tenantId}:${agentId}`,
+      key,
+      hashBody({ ...body, idempotencyKey: undefined }),
+    );
+    return routeIdempotency(check);
   }
 
   async function resolvePolicyLimitPx(
@@ -341,14 +382,9 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
     side: "buy" | "sell",
     limitPx: string | number | undefined,
   ): Promise<string | number> {
-    // Respect a caller-supplied limit price for BOTH sides. Previously the sell
-    // branch ignored `limitPx` entirely and always returned a MARKETABLE price,
-    // so a resting limit-sell ABOVE market (e.g. a breakeven take-profit) executed
-    // immediately at the bid instead of resting. A provided limitPx is the caller's
-    // intent for the ORDER price — use it; only synthesize a marketable price when
-    // none is given. NOTE: this is the ORDER price; policy NOTIONAL sizing must be
-    // computed separately via resolveSizingPx (a low sell limit must NOT understate
-    // the notional for cap enforcement).
+    // A supplied limit price is the caller's order-price intent for either side;
+    // synthesize a marketable price only when it is omitted. Policy notional uses
+    // resolveSizingPx separately so a low sell limit cannot understate exposure.
     if (limitPx !== undefined && limitPx !== null && limitPx !== "") return limitPx;
     if (side !== "sell") return getMarketableLimitPx(asset, true);
     try {
@@ -428,11 +464,11 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
   }
 
   async function completeTradeIdempotencyBestEffort(
-    idempotency: ReturnType<typeof getIdempotency>,
+    idempotency: Awaited<ReturnType<typeof getIdempotency>>,
     envelope: TradeIdempotencyResponse,
   ): Promise<void> {
     try {
-      idempotency.store?.(envelope);
+      await idempotency.store?.(envelope);
     } catch {
       // Idempotency replay is best effort for this in-memory fallback path.
     }
@@ -474,7 +510,20 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
       return c.json<ApiResponse>({ ok: false, error: "agentId is required" }, 400);
     }
 
-    const status = await getAgentTokenStatus(agentId);
+    // SEC-091: fail closed against the cross-tenant agent/token oracle. An
+    // agent-scoped token may only query ITSELF; a tenant credential may only
+    // observe agents registered to ITS tenant. A foreign agent is reported
+    // exactly like a nonexistent one ("unknown"), so agent existence and
+    // token-expiry/observation state no longer leak across tenants.
+    if (!canAccessAgent(c, agentId)) {
+      return c.json<ApiResponse>(
+        { ok: false, error: "Forbidden: agent token cannot query another agent's token status" },
+        403,
+      );
+    }
+    const tenantId = c.get("tenantId");
+    const agent = tenantId ? await ensureAgentForTenant(tenantId, agentId) : undefined;
+    const status = agent ? await getAgentTokenStatus(agentId) : null;
     if (!status) {
       return c.json(
         responseData({
@@ -522,11 +571,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
     // MFA recency is a human-session protection. The agent-self path has no human
     // session to MFA; its protection is the agent_policies cap clamp below + the
     // per-order policy evaluation on submission. Only enforce MFA on the human path.
-    if (
-      c.get("authType") === "session-jwt" &&
-      createByHumanAdmin &&
-      !c.get("sessionMfaVerifiedAt")
-    ) {
+    if (c.get("authType") === "session-jwt" && createByHumanAdmin && !hasRecentSessionMfa(c)) {
       return c.json<ApiResponse>(
         { ok: false, error: "Trade session management requires recent MFA verification" },
         403,
@@ -774,7 +819,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
         403,
       );
     }
-    if (c.get("authType") === "session-jwt" && readByHumanAdmin && !c.get("sessionMfaVerifiedAt")) {
+    if (c.get("authType") === "session-jwt" && readByHumanAdmin && !hasRecentSessionMfa(c)) {
       return c.json<ApiResponse>(
         { ok: false, error: "Trade session management requires recent MFA verification" },
         403,
@@ -812,11 +857,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
         403,
       );
     }
-    if (
-      c.get("authType") === "session-jwt" &&
-      revokeByHumanAdmin &&
-      !c.get("sessionMfaVerifiedAt")
-    ) {
+    if (c.get("authType") === "session-jwt" && revokeByHumanAdmin && !hasRecentSessionMfa(c)) {
       return c.json<ApiResponse>(
         { ok: false, error: "Trade session management requires recent MFA verification" },
         403,
@@ -884,7 +925,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
       return c.json<ApiResponse>({ ok: false, error: "Idempotency-Key is required" }, 400);
     }
 
-    const idempotency = getIdempotency(tenantId, agentId, body.idempotencyKey, body);
+    let idempotency = await getIdempotency(tenantId, agentId, body.idempotencyKey, body);
     if (idempotency.conflict) {
       return c.json<ApiResponse>(
         { ok: false, error: "Idempotency key reused with a different body" },
@@ -894,9 +935,32 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
     if (idempotency.response) {
       return tradeReplayResponse(c, idempotency.response);
     }
+    if (idempotency.inProgress) {
+      c.header("Retry-After", "1");
+      return c.json<ApiResponse>(
+        { ok: false, error: "Request with this idempotency key is in progress" },
+        409,
+      );
+    }
+    idempotency = idempotency.claim ? await idempotency.claim() : idempotency;
+    if (idempotency.conflict) {
+      return c.json<ApiResponse>(
+        { ok: false, error: "Idempotency key reused with a different body" },
+        409,
+      );
+    }
+    if (idempotency.response) return tradeReplayResponse(c, idempotency.response);
+    if (idempotency.inProgress) {
+      c.header("Retry-After", "1");
+      return c.json<ApiResponse>(
+        { ok: false, error: "Request with this idempotency key is in progress" },
+        409,
+      );
+    }
 
     const session = await getSessionManager().getActive(tenantId, body.sessionId);
     if (!session || session.agentId !== agentId || session.venue !== "hyperliquid") {
+      await idempotency.release?.();
       return c.json<ApiResponse>({ ok: false, error: "Active Hyperliquid session required" }, 403);
     }
     const coin = body.coin ?? body.asset;
@@ -914,7 +978,12 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
         asset: coin,
         reason,
       });
-      return c.json({ code: "policy-violation", reason }, 400);
+      const envelope: TradeIdempotencyResponse = {
+        status: 400,
+        body: { code: "policy-violation", reason },
+      };
+      await idempotency.store?.(envelope);
+      return c.json(envelope.body, envelope.status);
     }
 
     const builderPerp = isBuilderPerpSymbol(parsedAsset.data);
@@ -951,7 +1020,12 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
         dailySpendUsd: session.dailySpendUsd,
         reason,
       });
-      return c.json({ code: "policy-violation", reason }, 400);
+      const envelope: TradeIdempotencyResponse = {
+        status: 400,
+        body: { code: "policy-violation", reason },
+      };
+      await idempotency.store?.(envelope);
+      return c.json(envelope.body, envelope.status);
     };
 
     const limitPx = body.limitPx ?? body.limitPrice;
@@ -961,13 +1035,24 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
         ? !/^(?:0|[1-9]\d*)(?:\.\d+)?$/.test(limitPx) || Number(limitPx) <= 0
         : !Number.isFinite(limitPx) || limitPx <= 0)
     ) {
-      return c.json<ApiResponse>(
-        { ok: false, error: "limitPx must be a positive finite price" },
-        400,
-      );
+      const envelope: TradeIdempotencyResponse = {
+        status: 400,
+        body: { ok: false, error: "limitPx must be a positive finite price" },
+      };
+      await idempotency.store?.(envelope);
+      return c.json(envelope.body, envelope.status);
     }
     if (limitPx === undefined) {
-      const preliminaryPolicy = orderPolicy(0);
+      // SEC-114: marketable order without an explicit limit — the notional is
+      // unknown until resolveSizingPx floors the price below, so the USD-cap
+      // evaluators cannot run yet (they fail closed on a zero estimate and
+      // would reject every market order). Pre-check venue/asset/leverage only;
+      // caps are still enforced on the sized notional right after.
+      const preliminaryPolicy = evaluateTradeOrder(
+        sessionPolicy,
+        { venue: "hyperliquid", asset: coin, leverage: effectiveLeverage },
+        [tradeVenueAllowlistEvaluator, assetAllowlistEvaluator, tradeLeverageCapEvaluator],
+      );
       if (!preliminaryPolicy.allow) {
         return rejectPolicy(preliminaryPolicy.reason ?? "order violates trading policy", 0);
       }
@@ -993,6 +1078,27 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
       return rejectPolicy(policy.reason ?? "order violates trading policy", sizeUsd, policyLimitPx);
     }
 
+    const order: HyperliquidOrder = {
+      asset: parsedAsset.data,
+      side: body.side,
+      size: body.size,
+      limitPx: policyLimitPx,
+      leverage: effectiveLeverage,
+      reduceOnly: body.reduceOnly,
+      ...(body.orderType ? { orderType: body.orderType } : {}),
+    };
+    // Revalidate the complete adapter contract before reserving spend or signing.
+    // Any mismatch between the route inputs and adapter schema is an internal
+    // inconsistency and therefore fails closed.
+    const parsedOrder = hyperliquidOrderSchema.safeParse(order);
+    if (!parsedOrder.success) {
+      return rejectPolicy(
+        `order-schema: ${parsedOrder.error.issues[0]?.message ?? "invalid order"}`,
+        sizeUsd,
+        policyLimitPx,
+      );
+    }
+
     const walletAddress = session.walletId;
     const manager = getSessionManager();
     const fenced = await manager.withActiveSubmissionFence(
@@ -1008,7 +1114,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
               error: "Trade session was revoked before order submission",
             },
           };
-          idempotency.store?.(envelope);
+          await idempotency.store?.(envelope);
           return envelope;
         }
 
@@ -1022,7 +1128,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
             status: 400,
             body: { ok: false, error: "Trade session cap exceeded" },
           };
-          idempotency.store?.(envelope);
+          await idempotency.store?.(envelope);
           return envelope;
         }
 
@@ -1042,16 +1148,6 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
             vault.signTypedData({ ...input, tenantId, venue: "hyperliquid" }),
         };
         const adapter = new HyperliquidAdapter(vaultClient, agentId, walletAddress);
-        const order: HyperliquidOrder = {
-          asset: parsedAsset.data,
-          side: body.side,
-          size: body.size,
-          limitPx: policyLimitPx,
-          leverage: effectiveLeverage,
-          reduceOnly: body.reduceOnly,
-          ...(body.orderType ? { orderType: body.orderType } : {}),
-        };
-        hyperliquidOrderSchema.safeParse(order);
         if (builderPerp) {
           try {
             await adapter.updateLeverage({
@@ -1077,7 +1173,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
               requestedLeverage: body.leverage,
               isCross: false,
               builderPerp,
-              error: err instanceof Error ? err.message : String(err),
+              ...redactedThrownDiagnostics(err),
             });
             const envelope: TradeIdempotencyResponse = {
               status: 502,
@@ -1086,7 +1182,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
                 error: "Failed to set leverage before order; order not submitted",
               },
             };
-            idempotency.store?.(envelope);
+            await idempotency.store?.(envelope);
             return envelope;
           }
           await auditTradeEvent(tenantId, agentId, "trade.order.leverage.set", {
@@ -1099,7 +1195,32 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
             builderPerp,
           });
         }
-        const signed = await adapter.signOrder(order);
+        let signed: Awaited<ReturnType<HyperliquidAdapter["signOrder"]>>;
+        try {
+          signed = await adapter.signOrder(order);
+        } catch (err) {
+          // Signing is local and no order reached the venue. Release both the
+          // spend reservation and idempotency claim so a corrected retry can
+          // execute instead of leaving a 24h pending tombstone.
+          await getSessionManager().releaseSpend({
+            tenantId,
+            id: session.id,
+            amountUsd: sizeUsd,
+          });
+          await idempotency.release?.();
+          await auditTradeEvent(tenantId, agentId, "trade.order.canceled", {
+            sessionId: session.id,
+            venue: "hyperliquid",
+            asset: parsedAsset.data,
+            sizeUsd,
+            reason: "pre-submit-sign-failed",
+            ...redactedThrownDiagnostics(err),
+          });
+          return {
+            status: 400,
+            body: { ok: false, error: "Order could not be signed; not submitted" },
+          } satisfies TradeIdempotencyResponse;
+        }
         const activeAfterSign = await getSessionManager().getActive(tenantId, session.id);
         if (!activeAfterSign) {
           await getSessionManager().releaseSpend({
@@ -1114,7 +1235,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
               error: "Trade session was revoked before order submission",
             },
           };
-          idempotency.store?.(envelope);
+          await idempotency.store?.(envelope);
           return envelope;
         }
 
@@ -1126,7 +1247,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
             status: 502,
             body: { ok: false, error: "Trade submission status unknown" },
           };
-          idempotency.store?.(envelope);
+          await idempotency.store?.(envelope);
           return envelope;
         }
 
@@ -1156,8 +1277,25 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
             orderId: result.orderId ?? null,
             reason: result.error ?? "Trade order rejected",
           });
-          idempotency.store?.(envelope);
+          await idempotency.store?.(envelope);
           return envelope;
+        }
+
+        // SEC-044: the submission fence no longer blocks revocation across
+        // venue I/O, so a revoke may have committed while the order was in
+        // flight. The order has landed regardless — detect + audit the race so
+        // operators can flatten manually.
+        const activeAfterSubmit = await getSessionManager().getActive(tenantId, session.id);
+        if (!activeAfterSubmit) {
+          await auditTradeEvent(tenantId, agentId, "trade.order.submitted-after-revoke", {
+            sessionId: session.id,
+            venue: "hyperliquid",
+            asset: parsedAsset.data,
+            leverage: effectiveLeverage,
+            size: body.size,
+            sizeUsd,
+            orderId: result.orderId ?? null,
+          });
         }
 
         const response = {
@@ -1198,7 +1336,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
         status: 409,
         body: { ok: false, error: "Trade session was revoked before order submission" },
       };
-      idempotency.store?.(envelope);
+      await idempotency.store?.(envelope);
       return c.json(envelope.body, envelope.status);
     }
     if (fenced instanceof Response) return fenced;
@@ -1214,43 +1352,25 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
   // prediction-market policy gate (checkActiveOrder), spend reserve→release-on-
   // failure, the vault→ethers-signer bridge, the venue adapter call, audit events.
   //
-  // Phase C creds-provisioning is NOT wired yet: the L2 CLOB apiCredentials +
-  // funder Safe are resolved from the agent's polymarket venue wallet. Until
-  // provisioning writes them, resolvePolymarketAccount returns null and the route
-  // FAILS CLOSED with a typed 409 ("polymarket creds not provisioned"). We never
-  // invent credentials.
+  // L2 CLOB credentials and the funder Safe must resolve from the agent's
+  // Polymarket venue wallet. Missing provisioning fails closed with a typed 409;
+  // the route never invents or falls back to credentials.
   // ===========================================================================
 
   // Idempotency for the Polymarket body shape. Mirrors getIdempotency() but keyed
-  // for PmSubmitOrderBody so the two routes never collide on a shared map type.
-  function getPmIdempotency(
+  // for PmSubmitOrderBody so the two routes never collide on a shared namespace.
+  async function getPmIdempotency(
     tenantId: string,
     agentId: string,
     key: string | undefined,
     body: PmSubmitOrderBody,
-  ): {
-    conflict?: boolean;
-    response?: TradeIdempotencyResponse;
-    store?: (response: TradeIdempotencyResponse) => void;
-  } {
-    if (!key) return {};
-    const now = Date.now();
-    const mapKey = `${tenantId}:${agentId}:pm:${key}`;
-    const bodyHash = hashBody({ ...body, idempotencyKey: undefined });
-    const existing = pmMemoryIdempotency.get(mapKey);
-    if (existing && existing.expiresAt > now) {
-      if (existing.bodyHash !== bodyHash) return { conflict: true };
-      return { response: existing.response };
-    }
-    return {
-      store(response: TradeIdempotencyResponse) {
-        pmMemoryIdempotency.set(mapKey, {
-          bodyHash,
-          response,
-          expiresAt: now + 24 * 60 * 60 * 1000,
-        });
-      },
-    };
+  ): Promise<RouteIdempotency> {
+    const check = await pmIdempotencyStore.check(
+      `${tenantId}:${agentId}`,
+      key,
+      hashBody({ ...body, idempotencyKey: undefined }),
+    );
+    return routeIdempotency(check);
   }
 
   async function enforcePolymarketOrderRateLimit(
@@ -1278,6 +1398,32 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
     return side === "buy" ? amount : amount * price;
   }
 
+  /**
+   * Conservative notional USD for a Polymarket SELL. A FOK sell
+   * at limit 0.01 fills at the best bid (e.g. 0.90), so sizing caps on the
+   * caller's limit would understate the real notional and defeat
+   * perOrderCapUsd/dailyCapUsd. A best-bid snapshot alone is not a safe upper
+   * bound: the bid can rise after the quote and before submission. Prediction
+   * shares settle in [0, 1] USD, so one dollar per share is the only stable
+   * pre-submit upper bound. This deliberately trades some capacity for a cap
+   * that cannot be bypassed by quote-to-submit price movement.
+   */
+  async function polymarketSellNotionalUsd(
+    amount: number,
+    price: number,
+    tokenId: string,
+    clobUrl?: string,
+  ): Promise<number> {
+    // Keep the market read as a fail-closed liveness/market-existence check, but
+    // never treat its mutable price as the cap's upper bound.
+    const [best] = await getPrices([{ tokenId, side: "sell" }], clobUrl ? { clobUrl } : undefined);
+    const bestBid = Number(best?.price);
+    if (!Number.isFinite(bestBid) || bestBid <= 0 || bestBid > 1) {
+      throw new Error("unable to resolve CLOB best bid for sell notional sizing");
+    }
+    return amount;
+  }
+
   // Map a structured checkOrderAllowed reason to its HTTP status. Allowlist/cap
   // rejections are client errors (400); a non-active session is a 403 (mirrors the
   // HL "Active session required" 403).
@@ -1301,21 +1447,91 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
     | { ok: false; reason: "wallet-not-found" | "creds-not-provisioned" | "derive-failed" };
 
   // L2 CLOB creds are derived from the L1 delegate signer and cached. They are
-  // SECRET; cache them only in Redis with a TTL (never in the DB here). The same
-  // signer deterministically yields the same creds, so a cache miss safely
-  // re-derives. TTL bounds exposure + tolerates a CLOB key rotation.
-  const PM_CREDS_CACHE_TTL_SECONDS = 6 * 60 * 60; // 6h
+  // SECRET; cache them only in Redis, ENCRYPTED, with a TTL (never in the DB
+  // here). The same signer deterministically yields the same creds, so a cache
+  // miss safely re-derives. TTL bounds exposure + tolerates a CLOB key rotation.
+  const PM_CREDS_CACHE_TTL_SECONDS = 60 * 60; // 1h (SEC-108: was 6h)
+
+  // SEC-108: the cached L2 creds carry full trading authority on the venue as
+  // the agent (outside Steward's session caps and audit), so they never touch
+  // the shared Redis in plaintext. The cache value is AES-256-GCM encrypted
+  // with a key scrypt-derived from STEWARD_MASTER_PASSWORD under a
+  // domain-separated label (same idiom as the webhook secret codec + embedded
+  // JWT derivation), so a process or tenant with read access to Redis cannot
+  // lift them. If no master password is configured the cache is SKIPPED
+  // entirely (fail closed: never write plaintext; re-derive per order).
+  const PM_CREDS_CACHE_PREFIX = "stwd_pmclob_v1:";
+  let pmCredsDerivedKey: { source: string; key: Buffer } | null = null;
+
+  function pmCredsCacheEncryptionKey(): Buffer | null {
+    const masterPassword = process.env.STEWARD_MASTER_PASSWORD;
+    if (!masterPassword) return null;
+    if (pmCredsDerivedKey?.source === masterPassword) return pmCredsDerivedKey.key;
+    const key = scryptSync(masterPassword, "steward-kdf:pm-clob-l2-cache:v1", 32) as Buffer;
+    pmCredsDerivedKey = { source: masterPassword, key };
+    return key;
+  }
+
+  function encryptPmCredsCacheValue(plaintext: string, cacheKey: string): string | null {
+    const key = pmCredsCacheEncryptionKey();
+    if (!key) return null;
+    const iv = randomBytes(12);
+    const cipher = createCipheriv("aes-256-gcm", key, iv);
+    cipher.setAAD(Buffer.from(cacheKey, "utf8"));
+    let ciphertext = cipher.update(plaintext, "utf8", "hex");
+    ciphertext += cipher.final("hex");
+    return `${PM_CREDS_CACHE_PREFIX}${JSON.stringify({
+      ciphertext,
+      iv: iv.toString("hex"),
+      tag: cipher.getAuthTag().toString("hex"),
+    })}`;
+  }
+
+  // Returns null for anything that is not a valid envelope for THIS key —
+  // including legacy plaintext entries — so the caller treats it as a cache
+  // miss, re-derives, and overwrites with an encrypted value.
+  function decryptPmCredsCacheValue(stored: string, cacheKey: string): string | null {
+    if (!stored.startsWith(PM_CREDS_CACHE_PREFIX)) return null;
+    const key = pmCredsCacheEncryptionKey();
+    if (!key) return null;
+    try {
+      const payload = JSON.parse(stored.slice(PM_CREDS_CACHE_PREFIX.length)) as {
+        ciphertext: string;
+        iv: string;
+        tag: string;
+      };
+      const decipher = createDecipheriv("aes-256-gcm", key, Buffer.from(payload.iv, "hex"));
+      decipher.setAAD(Buffer.from(cacheKey, "utf8"));
+      decipher.setAuthTag(Buffer.from(payload.tag, "hex"));
+      let plaintext = decipher.update(payload.ciphertext, "hex", "utf8");
+      plaintext += decipher.final("utf8");
+      return plaintext;
+    } catch {
+      return null;
+    }
+  }
 
   // Optional endpoint override for deterministic integration environments and
   // compatible CLOB gateways. It is deployment configuration, not a test-creds
   // bypass: the real clob-client still performs L1 derivation, EIP-712 signing,
   // L2 HMAC auth, and order serialization against the configured HTTP edge.
+  // SEC-111: in production the override must use https — a stray plain-http
+  // endpoint would send L1-signed derivations + L2 HMAC headers in cleartext.
   function configuredPolymarketClobUrl(): string | undefined {
     const raw = process.env.POLYMARKET_CLOB_API_URL?.trim();
     if (!raw) return undefined;
+    if (raw.length > 2_048 || /[\u0000-\u001f\u007f]/.test(raw)) {
+      throw new Error("POLYMARKET_CLOB_API_URL is invalid");
+    }
     const url = new URL(raw);
     if (url.protocol !== "http:" && url.protocol !== "https:") {
       throw new Error("POLYMARKET_CLOB_API_URL must use http or https");
+    }
+    if (url.username || url.password || url.search || url.hash) {
+      throw new Error("POLYMARKET_CLOB_API_URL must not contain credentials, query, or fragment");
+    }
+    if (process.env.NODE_ENV === "production" && url.protocol !== "https:") {
+      throw new Error("POLYMARKET_CLOB_API_URL must use https in production");
     }
     return url.toString().replace(/\/$/, "");
   }
@@ -1378,25 +1594,35 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
     }
 
     // 2) L2 CLOB apiCredentials. Test-only deterministic seam first (inert in prod).
+    // SEC-111: hard-disabled in production (same force-off idiom as the
+    // unsigned-webhook escape hatch) so a stray env var can never swap in the
+    // hardcoded test creds on a live deployment.
     if (process.env.STEWARD_PM_TEST_CREDS === "1") {
-      return {
-        ok: true,
-        apiCredentials: { key: "test-key", secret: "test-secret", passphrase: "test-pass" },
-        funderAddress,
-        walletAddress,
-        signatureType,
-        ...(clobUrl ? { clobUrl } : {}),
-      };
+      if (process.env.NODE_ENV === "production") {
+        console.error(
+          "[trade] STEWARD_PM_TEST_CREDS is set but ignored in production; real L2 creds stay required.",
+        );
+      } else {
+        return {
+          ok: true,
+          apiCredentials: { key: "test-key", secret: "test-secret", passphrase: "test-pass" },
+          funderAddress,
+          walletAddress,
+          signatureType,
+          ...(clobUrl ? { clobUrl } : {}),
+        };
+      }
     }
 
-    // 2a) Redis cache.
+    // 2a) Redis cache (encrypted at rest — SEC-108).
     const redis = getRedisClient();
     const cacheKey = pmCredsCacheKey(tenantId, agentId, walletAddress, clobUrl);
     if (redis) {
       try {
         const cached = await redis.get(cacheKey);
-        if (cached) {
-          const parsed = clobApiCredentialsSchema.safeParse(JSON.parse(cached));
+        const cachedPlaintext = cached ? decryptPmCredsCacheValue(cached, cacheKey) : null;
+        if (cachedPlaintext) {
+          const parsed = clobApiCredentialsSchema.safeParse(JSON.parse(cachedPlaintext));
           if (parsed.success) {
             return {
               ok: true,
@@ -1422,9 +1648,12 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
       return { ok: false, reason: "derive-failed" };
     }
     if (redis) {
-      await redis
-        .setex(cacheKey, PM_CREDS_CACHE_TTL_SECONDS, JSON.stringify(apiCredentials))
-        .catch(() => undefined);
+      // Fail closed: without cache encryption key material, skip the write and
+      // re-derive per order rather than ever storing the creds in plaintext.
+      const cacheValue = encryptPmCredsCacheValue(JSON.stringify(apiCredentials), cacheKey);
+      if (cacheValue) {
+        await redis.setex(cacheKey, PM_CREDS_CACHE_TTL_SECONDS, cacheValue).catch(() => undefined);
+      }
     }
 
     return {
@@ -1525,7 +1754,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
       return c.json<ApiResponse>({ ok: false, error: "Idempotency-Key is required" }, 400);
     }
 
-    const idempotency = getPmIdempotency(tenantId, agentId, body.idempotencyKey, body);
+    let idempotency = await getPmIdempotency(tenantId, agentId, body.idempotencyKey, body);
     if (idempotency.conflict) {
       return c.json<ApiResponse>(
         { ok: false, error: "Idempotency key reused with a different body" },
@@ -1535,45 +1764,94 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
     if (idempotency.response) {
       return tradeReplayResponse(c, idempotency.response);
     }
+    if (idempotency.inProgress) {
+      c.header("Retry-After", "1");
+      return c.json<ApiResponse>(
+        { ok: false, error: "Request with this idempotency key is in progress" },
+        409,
+      );
+    }
 
     // Validate price + amount as positive finite numbers up front (the policy gate
     // needs the notional; the adapter re-validates the (0,1) price range).
     const amount = Number(body.amount);
     const price = Number(body.price);
-    if (!Number.isFinite(amount) || amount <= 0) {
+    idempotency = idempotency.claim ? await idempotency.claim() : idempotency;
+    if (idempotency.conflict) {
       return c.json<ApiResponse>(
-        { ok: false, error: "amount must be a positive finite number" },
-        400,
+        { ok: false, error: "Idempotency key reused with a different body" },
+        409,
       );
+    }
+    if (idempotency.response) return tradeReplayResponse(c, idempotency.response);
+    if (idempotency.inProgress) {
+      c.header("Retry-After", "1");
+      return c.json<ApiResponse>(
+        { ok: false, error: "Request with this idempotency key is in progress" },
+        409,
+      );
+    }
+    if (!Number.isFinite(amount) || amount <= 0) {
+      const envelope: TradeIdempotencyResponse = {
+        status: 400,
+        body: { ok: false, error: "amount must be a positive finite number" },
+      };
+      await idempotency.store?.(envelope);
+      return c.json(envelope.body, envelope.status);
     }
     if (!Number.isFinite(price) || price <= 0 || price >= 1) {
-      return c.json<ApiResponse>(
-        { ok: false, error: "price must be in the open interval (0,1)" },
-        400,
-      );
+      const envelope: TradeIdempotencyResponse = {
+        status: 400,
+        body: { ok: false, error: "price must be in the open interval (0,1)" },
+      };
+      await idempotency.store?.(envelope);
+      return c.json(envelope.body, envelope.status);
     }
-    const notionalUsd = polymarketNotionalUsd(body.side, amount, price);
+    // SEC-041: a SELL's notional must be floored at the live best bid — a FOK
+    // sell at an arbitrarily low limit fills at the bid, so sizing on the
+    // caller's price would understate notional and bypass the session caps.
+    // Fail closed (policy-violation, no spend) when the book can't be read.
+    let notionalUsd: number;
+    if (body.side === "sell") {
+      let clobUrl: string | undefined;
+      try {
+        clobUrl = configuredPolymarketClobUrl();
+      } catch {
+        clobUrl = undefined;
+      }
+      try {
+        notionalUsd = await polymarketSellNotionalUsd(amount, price, body.tokenId, clobUrl);
+      } catch (err) {
+        const reason = "unable to size sell notional";
+        await auditTradeEvent(tenantId, agentId, "trade.order.policy-rejected", {
+          venue: "polymarket",
+          tokenId: body.tokenId,
+          side: body.side,
+          amount,
+          price,
+          reason,
+          ...redactedThrownDiagnostics(err),
+        });
+        const envelope: TradeIdempotencyResponse = {
+          status: 400,
+          body: { code: "policy-violation", reason },
+        };
+        await idempotency.store?.(envelope);
+        return c.json(envelope.body, envelope.status);
+      }
+    } else {
+      notionalUsd = polymarketNotionalUsd(body.side, amount, price);
+    }
 
-    // Session fetch + ownership + venue check + the prediction-market policy gate,
-    // all in one pass. checkActiveOrder loads the session and runs checkOrderAllowed
-    // against the allowlist + per-order/daily caps.
-    //
-    // SECURITY: we deliberately do NOT forward the caller-supplied `conditionId` to
-    // the allowlist check. The order is submitted for `tokenId` only, so trusting an
-    // UNVERIFIED conditionId would let an agent pair any non-allowlisted token with
-    // an allowlisted `pm:cond:<id>` and bypass the market allowlist. Until the
-    // token->condition mapping is resolved from VERIFIED Polymarket metadata, the
-    // order route honors ONLY exact `pm:<tokenId>` entries. A `pm:cond:<id>`
-    // session grant therefore requires the per-token entry to also be present to
-    // trade (or a future Phase C resolver that derives + verifies the condition).
-    // TODO(phase-c): resolve the token's true conditionId from venue metadata and
-    // pass it here so market-wide grants can be honored safely.
-    const { session, check } = await getSessionManager().checkActiveOrder({
+    // Exact token grants without a caller-asserted condition remain network
+    // independent. If a condition is asserted, or only a market-wide grant
+    // could authorize the order, resolve the token's authoritative parent
+    // condition from the CLOB before trusting that binding.
+    let { session, check } = await getSessionManager().checkActiveOrder({
       tenantId,
       id: body.sessionId,
       order: {
         tokenId: body.tokenId,
-        // conditionId intentionally omitted — see SECURITY note above.
         notionalUsd,
       },
     });
@@ -1582,7 +1860,92 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
     // polymarket session. A mismatch is treated as "no active session" (403) — we
     // never leak another agent's session existence.
     if (session.agentId !== agentId || session.venue !== "polymarket") {
+      await idempotency.release?.();
       return c.json<ApiResponse>({ ok: false, error: "Active Polymarket session required" }, 403);
+    }
+
+    let verifiedConditionId: string | undefined;
+    const hasMarketGrant = session.allowedAssets.some((asset) => asset.startsWith("pm:cond:"));
+    const needsVerifiedConditionId =
+      (check.allowed && body.conditionId !== undefined) ||
+      (!check.allowed && check.reason === "market-not-allowed" && hasMarketGrant);
+    if (needsVerifiedConditionId) {
+      try {
+        const clobUrl = configuredPolymarketClobUrl();
+        const market = await getMarketByToken(body.tokenId, clobUrl ? { clobUrl } : undefined);
+        verifiedConditionId = market.conditionId;
+      } catch (error) {
+        // Nothing reached execution. Release before the observational audit so
+        // an audit outage cannot strand this safe retry behind a pending claim.
+        await idempotency.release?.();
+        try {
+          await auditTradeEvent(tenantId, agentId, "trade.order.policy-rejected", {
+            sessionId: session.id,
+            venue: "polymarket",
+            tokenId: body.tokenId,
+            side: body.side,
+            amount,
+            price,
+            notionalUsd,
+            reason: "market-metadata-unavailable",
+            ...redactedThrownDiagnostics(error),
+          });
+        } catch (auditError) {
+          console.error(
+            "[polymarket/order] metadata-failure audit write failed",
+            redactedThrownDiagnostics(auditError),
+          );
+        }
+        return c.json<ApiResponse>(
+          { ok: false, error: "Unable to verify Polymarket market binding" },
+          502,
+        );
+      }
+
+      if (
+        body.conditionId !== undefined &&
+        body.conditionId.toLowerCase() !== verifiedConditionId
+      ) {
+        const envelope: TradeIdempotencyResponse = {
+          status: 400,
+          body: { code: "policy-violation", reason: "condition-id-mismatch" },
+        };
+        try {
+          await auditTradeEvent(tenantId, agentId, "trade.order.policy-rejected", {
+            sessionId: session.id,
+            venue: "polymarket",
+            tokenId: body.tokenId,
+            conditionId: verifiedConditionId,
+            side: body.side,
+            amount,
+            price,
+            notionalUsd,
+            reason: "condition-id-mismatch",
+          });
+        } catch (error) {
+          // The mismatch is definite but still pre-execution. Release rather
+          // than leaving a 24-hour pending claim when its audit write fails.
+          await idempotency.release?.();
+          throw error;
+        }
+        await idempotency.store?.(envelope);
+        return c.json(envelope.body, envelope.status);
+      }
+
+      if (!check.allowed && check.reason === "market-not-allowed" && hasMarketGrant) {
+        ({ session, check } = await getSessionManager().checkActiveOrder({
+          tenantId,
+          id: body.sessionId,
+          order: { tokenId: body.tokenId, conditionId: verifiedConditionId, notionalUsd },
+        }));
+        if (session.agentId !== agentId || session.venue !== "polymarket") {
+          await idempotency.release?.();
+          return c.json<ApiResponse>(
+            { ok: false, error: "Active Polymarket session required" },
+            403,
+          );
+        }
+      }
     }
 
     if (!check.allowed) {
@@ -1591,7 +1954,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
         sessionId: session.id,
         venue: "polymarket",
         tokenId: body.tokenId,
-        conditionId: body.conditionId ?? null,
+        conditionId: verifiedConditionId ?? null,
         side: body.side,
         amount,
         price,
@@ -1601,13 +1964,14 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
       if (status === 403) {
         // 403s are not stored for idempotent replay (session state can change to
         // active and a retry should re-evaluate) — mirrors HL's session-required 403.
+        await idempotency.release?.();
         return c.json<ApiResponse>({ ok: false, error: "Active Polymarket session required" }, 403);
       }
       const envelope: TradeIdempotencyResponse = {
         status: 400,
         body: { code: "policy-violation", reason: check.reason },
       };
-      idempotency.store?.(envelope);
+      await idempotency.store?.(envelope);
       return c.json(envelope.body, envelope.status);
     }
 
@@ -1623,9 +1987,10 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
         sessionId: session.id,
         venue: "polymarket",
         tokenId: body.tokenId,
-        conditionId: body.conditionId ?? null,
+        conditionId: verifiedConditionId ?? null,
         reason: creds.reason,
       });
+      await idempotency.release?.();
       return c.json<ApiResponse>({ ok: false, error: reason }, 409);
     }
 
@@ -1638,11 +2003,12 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
         sessionId: session.id,
         venue: "polymarket",
         tokenId: body.tokenId,
-        conditionId: body.conditionId ?? null,
+        conditionId: verifiedConditionId ?? null,
         reason: "wallet-binding-mismatch",
         sessionWallet: session.walletId,
         resolvedWallet: creds.walletAddress,
       });
+      await idempotency.release?.();
       return c.json<ApiResponse>(
         {
           ok: false,
@@ -1680,9 +2046,11 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
 
     const manager = getSessionManager();
     // Fence reserve→submit against concurrent revocation (mirrors HL's
-    // withActiveSubmissionFence): the spend reservation and the venue submit run
-    // under an advisory lock that the revoke path also takes, so a revoke that
-    // commits before this block cannot interleave with an in-flight submit.
+    // withActiveSubmissionFence). After SEC-044 the fence's advisory lock covers
+    // ONLY the DB-level active check — it is released before this callback runs
+    // (never held across signing/venue I/O) — so revoke-vs-submit ordering here
+    // rests on the atomic reserveSpend re-check, the pre-submit activity
+    // re-check below, and the post-submit re-verification.
     const fenced = await manager.withActiveSubmissionFence(
       { tenantId, id: session.id },
       async () => {
@@ -1698,7 +2066,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
             status: 400,
             body: { ok: false, error: "Trade session cap exceeded" },
           };
-          idempotency.store?.(envelope);
+          await idempotency.store?.(envelope);
           return envelope;
         }
 
@@ -1706,7 +2074,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
           sessionId: session.id,
           venue: "polymarket",
           tokenId: body.tokenId,
-          conditionId: body.conditionId ?? null,
+          conditionId: verifiedConditionId ?? null,
           side: body.side,
           amount,
           price,
@@ -1739,16 +2107,38 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
             sessionId: session.id,
             venue: "polymarket",
             tokenId: body.tokenId,
-            conditionId: body.conditionId ?? null,
+            conditionId: verifiedConditionId ?? null,
             notionalUsd,
             reason: "pre-submit-build-failed",
-            error: err instanceof Error ? err.message : String(err),
+            ...redactedThrownDiagnostics(err),
           });
           const envelope: TradeIdempotencyResponse = {
             status: 400,
             body: { ok: false, error: "Order could not be built; not submitted" },
           };
-          idempotency.store?.(envelope);
+          await idempotency.store?.(envelope);
+          return envelope;
+        }
+
+        // SEC-044: re-confirm the session is still active BEFORE submitting
+        // (the fence no longer holds the advisory lock across venue I/O). A
+        // revoke that landed during the build must abort the submit; the
+        // reserved spend is released because nothing reached the venue.
+        const activeAfterBuild = await getSessionManager().getActive(tenantId, session.id);
+        if (!activeAfterBuild) {
+          await getSessionManager().releaseSpend({
+            tenantId,
+            id: session.id,
+            amountUsd: notionalUsd,
+          });
+          const envelope: TradeIdempotencyResponse = {
+            status: 409,
+            body: {
+              ok: false,
+              error: "Trade session was revoked before order submission",
+            },
+          };
+          await idempotency.store?.(envelope);
           return envelope;
         }
 
@@ -1783,16 +2173,16 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
               sessionId: session.id,
               venue: "polymarket",
               tokenId: body.tokenId,
-              conditionId: body.conditionId ?? null,
+              conditionId: verifiedConditionId ?? null,
               notionalUsd,
               reason: "pre-submit-build-failed",
-              error: err.message,
+              ...redactedThrownDiagnostics(err),
             });
             const envelope: TradeIdempotencyResponse = {
               status: 400,
               body: { ok: false, error: "Trade submission could not be built" },
             };
-            idempotency.store?.(envelope);
+            await idempotency.store?.(envelope);
             return envelope;
           }
           // Otherwise the POST was attempted and the order may have landed —
@@ -1801,16 +2191,16 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
             sessionId: session.id,
             venue: "polymarket",
             tokenId: body.tokenId,
-            conditionId: body.conditionId ?? null,
+            conditionId: verifiedConditionId ?? null,
             notionalUsd,
             reason: "submit-status-unknown",
-            error: err instanceof Error ? err.message : String(err),
+            ...redactedThrownDiagnostics(err),
           });
           const envelope: TradeIdempotencyResponse = {
             status: 502,
             body: { ok: false, error: "Trade submission status unknown" },
           };
-          idempotency.store?.(envelope);
+          await idempotency.store?.(envelope);
           return envelope;
         }
 
@@ -1843,7 +2233,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
             sessionId: session.id,
             venue: "polymarket",
             tokenId: body.tokenId,
-            conditionId: body.conditionId ?? null,
+            conditionId: verifiedConditionId ?? null,
             side: body.side,
             amount,
             price,
@@ -1859,8 +2249,27 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
               data: { status: result.status ?? "rejected" },
             },
           };
-          idempotency.store?.(envelope);
+          await idempotency.store?.(envelope);
           return envelope;
+        }
+
+        // SEC-044: the submission fence no longer blocks revocation across
+        // venue I/O, so a revoke may have committed while the order was in
+        // flight. The order has landed regardless — detect + audit the race so
+        // operators can flatten manually.
+        const activeAfterSubmit = await getSessionManager().getActive(tenantId, session.id);
+        if (!activeAfterSubmit) {
+          await auditTradeEvent(tenantId, agentId, "trade.order.submitted-after-revoke", {
+            sessionId: session.id,
+            venue: "polymarket",
+            tokenId: body.tokenId,
+            conditionId: verifiedConditionId ?? null,
+            side: body.side,
+            amount,
+            price,
+            notionalUsd,
+            orderId: result.orderId ?? null,
+          });
         }
 
         const response = {
@@ -1877,7 +2286,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
         // The order HAS landed at the venue. Persist the idempotency record BEFORE
         // the audit write so a retry after an audit failure replays this response
         // instead of re-submitting a duplicate order.
-        idempotency.store?.(envelope);
+        await idempotency.store?.(envelope);
         // The audit write is best-effort here: the order is final + the response is
         // recorded, so an audit failure must NOT turn a successful fill into an
         // error to the client (which could prompt a duplicate retry). Log + proceed.
@@ -1886,7 +2295,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
             sessionId: session.id,
             venue: "polymarket",
             tokenId: body.tokenId,
-            conditionId: body.conditionId ?? null,
+            conditionId: verifiedConditionId ?? null,
             side: body.side,
             amount,
             price,
@@ -1896,7 +2305,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
         } catch (auditErr) {
           console.error(
             "[polymarket/order] submitted-audit write failed (order already final)",
-            auditErr,
+            redactedThrownDiagnostics(auditErr),
           );
         }
         return envelope;
@@ -1910,7 +2319,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
         status: 409,
         body: { ok: false, error: "Trade session was revoked before order submission" },
       };
-      idempotency.store?.(envelope);
+      await idempotency.store?.(envelope);
       return c.json(envelope.body, envelope.status);
     }
     return c.json(fenced.body, fenced.status);

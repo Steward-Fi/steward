@@ -122,7 +122,8 @@ export interface PluginMigrationSource {
    * plugin's migration ledger is isolated from the core's and from every other
    * plugin's. MUST be stable across releases (changing it orphans the prior
    * ledger and re-applies every migration). sanitized to a safe SQL identifier
-   * by the runner; an id that sanitizes to empty is rejected (fail closed).
+   * by the runner; an id that sanitizes to empty or exceeds the PostgreSQL-safe
+   * bound is rejected. The host rejects aliases across its registered plugins.
    */
   readonly id: string;
   /**

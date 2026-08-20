@@ -16,6 +16,9 @@ dependencies:
   http: ^1.2.0
 
 dev_dependencies:
+  # Keeps example/secure_session_storage.dart analyzable without imposing a
+  # runtime dependency on applications that choose a different store.
+  flutter_secure_storage: ^9.2.2
   flutter_test:
     sdk: flutter
   lints: ^3.0.0

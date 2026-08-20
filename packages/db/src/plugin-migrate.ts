@@ -52,6 +52,9 @@ const PLUGIN_MIGRATIONS_SCHEMA = "drizzle";
 
 /** prefix for a plugin's per-plugin bookkeeping table; the sanitized id follows. */
 const PLUGIN_MIGRATIONS_TABLE_PREFIX = "__drizzle_migrations_plugin_";
+const POSTGRES_IDENTIFIER_BYTES = 63;
+const MAX_PLUGIN_MIGRATION_ID_LENGTH =
+  POSTGRES_IDENTIFIER_BYTES - PLUGIN_MIGRATIONS_TABLE_PREFIX.length;
 
 /**
  * Sanitize a plugin id into a safe SQL identifier fragment. Lowercases, replaces
@@ -65,16 +68,35 @@ const PLUGIN_MIGRATIONS_TABLE_PREFIX = "__drizzle_migrations_plugin_";
  * across ill-formed ids).
  */
 export function sanitizePluginMigrationId(id: string): string {
-  const sanitized = id
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9_]+/g, "_")
-    .replace(/_+/g, "_")
-    .replace(/^_+|_+$/g, "");
+  const normalized = id.trim().toLowerCase();
+  let sanitized = "";
+  let separatorPending = false;
+  for (let i = 0; i < normalized.length; i += 1) {
+    const code = normalized.charCodeAt(i);
+    const allowed = (code >= 0x61 && code <= 0x7a) || (code >= 0x30 && code <= 0x39);
+    if (allowed) {
+      if (separatorPending && sanitized.length > 0) sanitized += "_";
+      sanitized += normalized[i];
+      separatorPending = false;
+    } else {
+      separatorPending = true;
+    }
+  }
   if (sanitized.length === 0) {
     throw new Error(
       `plugin migration id "${id}" sanitizes to an empty identifier; ` +
         "a plugin migration source must have a non-empty alphanumeric id.",
+    );
+  }
+  return sanitized;
+}
+
+function boundedPluginMigrationId(id: string): string {
+  const sanitized = sanitizePluginMigrationId(id);
+  if (sanitized.length > MAX_PLUGIN_MIGRATION_ID_LENGTH) {
+    throw new Error(
+      `plugin migration id exceeds ${MAX_PLUGIN_MIGRATION_ID_LENGTH} characters; ` +
+        "PostgreSQL identifier truncation could alias another plugin's migration journal.",
     );
   }
   return sanitized;
@@ -86,7 +108,7 @@ export function sanitizePluginMigrationId(id: string): string {
  * core's `__drizzle_migrations`.
  */
 export function pluginMigrationsTable(id: string): string {
-  return `${PLUGIN_MIGRATIONS_TABLE_PREFIX}${sanitizePluginMigrationId(id)}`;
+  return `${PLUGIN_MIGRATIONS_TABLE_PREFIX}${boundedPluginMigrationId(id)}`;
 }
 
 /**
@@ -96,7 +118,7 @@ export function pluginMigrationsTable(id: string): string {
  * another plugin's run.
  */
 export function pluginAdvisoryLockKey(id: string): string {
-  return `steward_plugin_migrations_${sanitizePluginMigrationId(id)}`;
+  return `steward_plugin_migrations_${boundedPluginMigrationId(id)}`;
 }
 
 /**

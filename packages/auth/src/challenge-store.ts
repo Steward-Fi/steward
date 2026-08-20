@@ -68,9 +68,9 @@ export class ChallengeStore {
     return this.backend.get(key);
   }
 
-  /** Delete a challenge explicitly. */
-  delete(key: string): void {
-    void this.backend.delete(key);
+  /** Delete a challenge explicitly and surface backend failures to the caller. */
+  async delete(key: string): Promise<void> {
+    await this.backend.delete(key);
   }
 
   /**

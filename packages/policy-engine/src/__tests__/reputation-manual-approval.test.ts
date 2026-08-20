@@ -24,10 +24,9 @@ import { resultRequiresManualApproval } from "../manual-approval";
 // ─── Fixtures ───────────────────────────────────────────────────────────────
 
 /**
- * Build a reputation-threshold rule. `action` / `fallbackAction` are written
- * straight into `config` (omitted when not supplied so we can exercise the
- * missing-action fail-closed path); cast through `unknown` so we can also feed
- * deliberately-invalid action strings.
+ * Build a schema-valid reputation-threshold rule by default. Individual
+ * malformed-config tests delete or replace fields explicitly; this keeps the
+ * behavior tests aligned with the write-time and runtime policy contract.
  */
 function makeReputationRule(
   partial: {
@@ -41,9 +40,9 @@ function makeReputationRule(
   const config: Record<string, unknown> = {
     minScore: partial.minScore,
     source: partial.source ?? "internal",
+    action: partial.action ?? "block",
+    fallbackAction: partial.fallbackAction ?? "block",
   };
-  if (partial.action !== undefined) config.action = partial.action;
-  if (partial.fallbackAction !== undefined) config.fallbackAction = partial.fallbackAction;
   return { id, type: "reputation-threshold", enabled: true, config };
 }
 
@@ -102,8 +101,9 @@ describe("PolicyEngine — reputation-threshold action routing (score below minS
 
   it("missing action → hard deny (fail closed)", async () => {
     const engine = new PolicyEngine();
-    // Deliberately omit `action`.
     const rule = makeReputationRule({ minScore: 50 });
+    // Deliberately corrupt a persisted row after constructing a valid fixture.
+    delete (rule.config as Record<string, unknown>).action;
     const res = await engine.evaluate([rule], makePolicyContext({ reputationScore: 10 }));
 
     expect(res.approved).toBe(false);
@@ -151,12 +151,12 @@ describe("PolicyEngine — reputation-threshold fallbackAction (no score availab
     expect(res.requiresManualApproval).toBe(true);
   });
 
-  it("fallbackAction approve → approved", async () => {
+  it("fallbackAction approve with no score wired → hard deny (fail closed, SEC-040)", async () => {
     const engine = new PolicyEngine();
     const rule = makeReputationRule({ minScore: 50, fallbackAction: "approve" });
     const res = await engine.evaluate([rule], makePolicyContext({}));
 
-    expect(res.approved).toBe(true);
+    expect(res.approved).toBe(false);
     expect(res.requiresManualApproval).toBe(false);
   });
 });

@@ -48,4 +48,31 @@ describe("MockEmailProvider", () => {
     MockEmailInbox.clear("c@example.com");
     expect(MockEmailInbox.all("c@example.com")).toHaveLength(0);
   });
+
+  it("preserves the legacy regex's last-token extraction semantics", async () => {
+    const provider = new MockEmailProvider();
+    await provider.send(
+      "tokens@example.com",
+      "tokens",
+      "open https://steward.fi/callback?token=first&next=1&token=second&after=ignored",
+    );
+    const msg = MockEmailInbox.last("tokens@example.com");
+    expect(msg?.token).toBe("second");
+    expect(msg?.magicLink).toBe("https://steward.fi/callback?token=first&next=1&token=second");
+  });
+
+  it("handles adversarial scheme runs without regex backtracking", async () => {
+    const provider = new MockEmailProvider();
+    await provider.send("redos@example.com", "redos", `${"http://".repeat(100_000)}no-token`);
+    const msg = MockEmailInbox.last("redos@example.com");
+    expect(msg?.token).toBeUndefined();
+    expect(msg?.magicLink).toBeUndefined();
+  });
+
+  it("scans many short no-link segments in linear time", async () => {
+    const provider = new MockEmailProvider();
+    const text = "x ".repeat(100_000);
+    await provider.send("segmented@example.com", "No link", text);
+    expect(MockEmailInbox.last("segmented@example.com")?.token).toBeUndefined();
+  });
 });

@@ -14,7 +14,8 @@
  *     `X-Steward-Signature` + `X-Steward-Request-Timestamp` headers per the
  *     proxy's canonical form (see ./signature.ts)
  *   - auto-generates an `Idempotency-Key` (crypto.randomUUID) for mutating
- *     methods (POST/PUT/PATCH/DELETE) when the caller did not supply one
+ *     methods and for every signed request when the caller did not supply one;
+ *     the proxy binds signed safe requests to that key for replay protection
  *
  * It is intentionally NOT vendor-specific: there is no openaiChat() helper.
  * Callers build the path (e.g. "/openai/v1/chat/completions") and body.
@@ -123,12 +124,19 @@ export class StewardProxyClient {
 
     headers.set("authorization", `Bearer ${this.token}`);
 
-    // Auto idempotency key for mutating methods, if the caller did not set one.
-    if (MUTATING_METHODS.has(method) && !headers.has("idempotency-key")) {
+    // Mutating calls always need an idempotency key. Signed safe calls need one
+    // too: the proxy intentionally replay-binds every proof-of-possession
+    // request, including GET/HEAD. Generate it before signing so the exact key
+    // is covered by the HMAC canonical form.
+    const signingSecret = this.signingSecret;
+    const tenantId = this.tenantId;
+    const agentId = this.agentId;
+    const signed = Boolean(signingSecret && tenantId && agentId);
+    if ((MUTATING_METHODS.has(method) || signed) && !headers.has("idempotency-key")) {
       headers.set("idempotency-key", crypto.randomUUID());
     }
 
-    if (this.signingSecret && this.tenantId && this.agentId) {
+    if (signingSecret && tenantId && agentId) {
       const timestamp = String(Math.floor(Date.now() / 1000));
       headers.set("x-steward-request-timestamp", timestamp);
 
@@ -137,13 +145,13 @@ export class StewardProxyClient {
         {
           method,
           url: joinPath(this.baseUrl, path),
-          tenantId: this.tenantId,
-          agentId: this.agentId,
+          tenantId,
+          agentId,
           timestamp,
           idempotencyKey: headers.get("idempotency-key") ?? undefined,
           body: signable,
         },
-        this.signingSecret,
+        signingSecret,
       );
       headers.set("x-steward-signature", signature);
     }

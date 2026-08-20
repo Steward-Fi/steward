@@ -4,7 +4,7 @@
  * Mount: app.route("/approvals", approvalRoutes)
  */
 
-import { and, desc, eq, inArray, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, lt, or, sql } from "drizzle-orm";
 import { type Context, Hono } from "hono";
 import { withTenantAuditedTransaction, writeAuditEvent } from "../services/audit";
 import {
@@ -20,6 +20,7 @@ import {
   setNoStoreHeaders,
   transactions,
 } from "../services/context";
+import { isRecentMfaTimestamp } from "../services/recent-mfa";
 import { dispatchWebhook } from "../services/webhook-dispatch";
 
 /**
@@ -52,8 +53,15 @@ const APPROVAL_STATUS_FILTERS = new Set<ApprovalStatusFilter>([
 const MAX_APPROVAL_LIST_LIMIT = 200;
 const MAX_APPROVAL_LIST_OFFSET = 10_000;
 const MAX_APPROVAL_TEXT_LENGTH = 1_000;
+const MAX_APPROVAL_AGENT_ID_LENGTH = 64;
+const MAX_APPROVAL_CURSOR_ID_LENGTH = 64;
 
 const approvalTransactionMatchesQueue = sql`${transactions.agentId} = ${approvalQueue.agentId}`;
+// JSON/JavaScript Date values retain milliseconds while PostgreSQL timestamps
+// may retain microseconds. Use the serialized precision for both ordering and
+// cursor comparisons, with id as the deterministic tie-breaker, so sub-ms rows
+// cannot fall into a gap between pages.
+const approvalRequestedAtMs = sql<Date>`date_trunc('milliseconds', ${approvalQueue.requestedAt})`;
 
 function approvalActor(c: Context<{ Variables: AppVariables }>): string {
   return c.get("userId") ?? `${c.get("authType") ?? "tenant"}:${c.get("tenantId")}`;
@@ -81,12 +89,7 @@ function requireHumanApprover(c: Context<{ Variables: AppVariables }>): boolean 
 }
 
 function hasRecentSessionMfa(c: Context<{ Variables: AppVariables }>, maxAgeMs = 5 * 60_000) {
-  const verifiedAt = c.get("sessionMfaVerifiedAt");
-  return (
-    typeof verifiedAt === "number" &&
-    Number.isFinite(verifiedAt) &&
-    Date.now() - verifiedAt <= maxAgeMs
-  );
+  return isRecentMfaTimestamp(c.get("sessionMfaVerifiedAt"), maxAgeMs);
 }
 
 function approvalIntentActionType(actionType: string | null | undefined): string {
@@ -131,14 +134,14 @@ function isNonNegativeIntegerString(value: unknown): value is string {
 }
 
 function parseNonNegativeIntegerParam(value: string | undefined, fallback: number): number | null {
-  if (value === undefined || value === "") return fallback;
+  if (value === undefined) return fallback;
   if (!/^\d+$/.test(value)) return null;
   const parsed = Number(value);
   return Number.isSafeInteger(parsed) ? parsed : null;
 }
 
 function parseApprovalListParams(c: Context<{ Variables: AppVariables }>) {
-  const rawStatus = c.req.query("status") || "pending";
+  const rawStatus = c.req.query("status") ?? "pending";
   if (!APPROVAL_STATUS_FILTERS.has(rawStatus as ApprovalStatusFilter)) {
     return { ok: false as const, error: "status must be pending, approved, rejected, or all" };
   }
@@ -159,11 +162,67 @@ function parseApprovalListParams(c: Context<{ Variables: AppVariables }>) {
     };
   }
 
+  const rawAgentId = c.req.query("agentId");
+  const agentId = rawAgentId?.trim();
+  if (
+    rawAgentId !== undefined &&
+    (!agentId ||
+      agentId.length > MAX_APPROVAL_AGENT_ID_LENGTH ||
+      agentId !== rawAgentId ||
+      /[\u0000-\u001f\u007f]/.test(agentId))
+  ) {
+    return {
+      ok: false as const,
+      error: `agentId must be a non-empty string of at most ${MAX_APPROVAL_AGENT_ID_LENGTH} characters`,
+    };
+  }
+
+  const rawCursorRequestedAt = c.req.query("cursorRequestedAt");
+  const rawCursorId = c.req.query("cursorId");
+  if ((rawCursorRequestedAt === undefined) !== (rawCursorId === undefined)) {
+    return {
+      ok: false as const,
+      error: "cursorRequestedAt and cursorId must be supplied together",
+    };
+  }
+  if (rawCursorRequestedAt !== undefined && c.req.query("offset") !== undefined) {
+    return { ok: false as const, error: "cursor pagination cannot be combined with offset" };
+  }
+
+  let cursorRequestedAt: string | undefined;
+  if (rawCursorRequestedAt !== undefined && rawCursorId !== undefined) {
+    const parsedCursorRequestedAt = new Date(rawCursorRequestedAt);
+    if (
+      Number.isNaN(parsedCursorRequestedAt.getTime()) ||
+      parsedCursorRequestedAt.toISOString() !== rawCursorRequestedAt ||
+      !/^(?!0000-)\d{4}-/.test(rawCursorRequestedAt)
+    ) {
+      return { ok: false as const, error: "cursorRequestedAt must be an ISO 8601 timestamp" };
+    }
+    // Keep the canonical wire representation. Passing a Date as a parameter to
+    // a raw SQL expression is driver-dependent and postgres.js expects a string.
+    cursorRequestedAt = rawCursorRequestedAt;
+    if (
+      rawCursorId.length === 0 ||
+      rawCursorId.length > MAX_APPROVAL_CURSOR_ID_LENGTH ||
+      rawCursorId.trim() !== rawCursorId ||
+      /[\u0000-\u001f\u007f]/.test(rawCursorId)
+    ) {
+      return {
+        ok: false as const,
+        error: `cursorId must be a non-empty string of at most ${MAX_APPROVAL_CURSOR_ID_LENGTH} characters`,
+      };
+    }
+  }
+
   return {
     ok: true as const,
     status: rawStatus as ApprovalStatusFilter,
     limit: rawLimit,
     offset: rawOffset,
+    agentId,
+    cursorRequestedAt,
+    cursorId: rawCursorId,
   };
 }
 
@@ -234,7 +293,10 @@ approvalRoutes.get("/", async (c) => {
   if (!params.ok) {
     return c.json<ApiResponse>({ ok: false, error: params.error }, 400);
   }
-  const { status: statusFilter, limit, offset } = params;
+  const { status: statusFilter, limit, offset, agentId, cursorRequestedAt, cursorId } = params;
+  const cursorRequestedAtSql = cursorRequestedAt
+    ? sql<Date>`${cursorRequestedAt}::timestamptz`
+    : undefined;
 
   // Join approval_queue with agents to filter by tenant
   const results = await db
@@ -264,10 +326,17 @@ approvalRoutes.get("/", async (c) => {
       and(
         eq(agents.tenantId, tenantId),
         approvalTransactionMatchesQueue,
+        agentId ? eq(approvalQueue.agentId, agentId) : undefined,
         statusFilter !== "all" ? eq(approvalQueue.status, statusFilter) : undefined,
+        cursorRequestedAtSql && cursorId
+          ? or(
+              lt(approvalRequestedAtMs, cursorRequestedAtSql),
+              and(eq(approvalRequestedAtMs, cursorRequestedAtSql), lt(approvalQueue.id, cursorId)),
+            )
+          : undefined,
       ),
     )
-    .orderBy(desc(approvalQueue.requestedAt))
+    .orderBy(desc(approvalRequestedAtMs), desc(approvalQueue.id))
     .limit(limit)
     .offset(offset);
 
@@ -473,6 +542,12 @@ approvalRoutes.post("/proxy/:id/approve", async (c) => {
   // an already-approved row returns 409 without a second transition or audit.
   const row = await withTenantAuditedTransaction(tenantId, async (tx, appendRequiredAudit) => {
     const dbTx = tx as typeof db;
+    // Agent deletion takes the tenant fence before the parent agent and pending
+    // request rows. Approval is an authority reactivation, so acquire the same
+    // fence before UPDATE takes the pending-request row lock. Relying only on
+    // the row trigger would acquire the advisory lock after PostgreSQL has
+    // already locked the row, which can deadlock with deletion.
+    await dbTx.execute(sql`SELECT public.steward_lock_tenant_deletion(${tenantId})`);
     const [updated] = await dbTx
       .update(pendingProxyRequests)
       .set({

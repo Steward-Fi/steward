@@ -4,6 +4,7 @@ import 'dart:math';
 import 'package:crypto/crypto.dart';
 import 'package:http/http.dart' as http;
 
+import 'base_url.dart';
 import 'models.dart';
 
 typedef StewardIdFactory = String Function();
@@ -19,6 +20,7 @@ class StewardClientConfig {
     this.tenantId,
     this.requestSigningSecret,
     this.requestSigningKeyId,
+    this.allowInsecureBaseUrl = false,
     this.httpClient,
     this.idFactory,
   });
@@ -32,6 +34,20 @@ class StewardClientConfig {
   final String? tenantId;
   final String? requestSigningSecret;
   final String? requestSigningKeyId;
+
+  /// Permit a plaintext non-loopback baseUrl (warns at construction). HTTPS is
+  /// required by default so credentials never travel cleartext off-loopback
+  /// (SEC-200).
+  final bool allowInsecureBaseUrl;
+
+  /// Optional custom HTTP client. WARNING: requests are sent with
+  /// `followRedirects = false` because package:http forwards all headers —
+  /// including X-Steward-* credentials and signatures — to the redirect
+  /// target (SEC-126). A custom client whose `send` ignores `followRedirects`
+  /// (e.g. BrowserClient, or a wrapper that follows redirects itself)
+  /// silently bypasses that protection and can leak credentials to a redirect
+  /// target; such a client must strip the Authorization / X-Steward-* headers
+  /// on any cross-host or HTTPS-downgrade redirect.
   final http.Client? httpClient;
   final StewardIdFactory? idFactory;
 }
@@ -39,8 +55,14 @@ class StewardClientConfig {
 class StewardClient {
   StewardClient(this.config)
       : _baseUri = Uri.parse(config.baseUrl.replaceFirst(RegExp(r'/+$'), '')),
-        _client = config.httpClient ?? http.Client();
+        _client = config.httpClient ?? http.Client() {
+    assertSecureBaseUrl(config.baseUrl,
+        allowInsecureBaseUrl: config.allowInsecureBaseUrl);
+  }
 
+  // Keep in lockstep with the equivalent list in EVERY other SDK (sdk, go,
+  // java, python, ruby, rust, swift, csharp): mutations under these prefixes
+  // are HMAC-signed, and divergence silently downgrades integrity (SEC-049).
   static const _sensitivePrefixes = <String>[
     '/vault',
     '/agents',
@@ -97,8 +119,14 @@ class StewardClient {
       headers ?? const <String, String>{},
       idempotencyKey,
     );
+    // Do not follow redirects automatically: package:http forwards all headers
+    // (including X-Steward-* credentials and signatures) to the redirect
+    // target, so an open redirect or hostile proxy could exfiltrate them
+    // (SEC-126). A 3xx surfaces as a response instead — consumers configure
+    // the canonical API URL.
     final response = await _client.send(
       http.Request(method.toUpperCase(), uri)
+        ..followRedirects = false
         ..headers.addAll(requestHeaders)
         ..bodyBytes = encodedBody ?? const <int>[],
     );

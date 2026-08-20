@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it, spyOn } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it, setDefaultTimeout, spyOn } from "bun:test";
 import {
   agents,
   agentWallets,
@@ -21,7 +21,12 @@ import type {
   ExternalKeySignTransactionRequest,
   ExternalKeySignTransactionResult,
 } from "@stwd/vault";
-import { BackendBindingMismatchError, Vault } from "@stwd/vault";
+import {
+  BackendBindingMismatchError,
+  ExternalBroadcastOutcomeUnknownError,
+  externalCustodyIdentityDigest,
+  Vault,
+} from "@stwd/vault";
 import { eq } from "drizzle-orm";
 import { Hono } from "hono";
 import type { AppVariables } from "../services/context";
@@ -31,8 +36,11 @@ import { getConfiguredVault } from "../services/vault-factory";
 const TENANT_ID = `gateway-tenant-${Date.now()}`;
 const AGENT_ID = `gateway-agent-${Date.now()}`;
 const USER_ID = "00000000-0000-4000-8000-000000000123";
+const SOLANA_RECIPIENT = "11111111111111111111111111111111";
 const ORIGINAL_REDIS_URL = process.env.REDIS_URL;
 const ORIGINAL_REDIS_REQUIRED = process.env.REDIS_REQUIRED;
+const ORIGINAL_EXECUTION_AUTH_SECRET = process.env.STEWARD_EXECUTION_AUTH_SECRET;
+setDefaultTimeout(30_000);
 
 async function makeApp() {
   const { vaultRoutes } = await import("../routes/vault");
@@ -56,6 +64,7 @@ describe("vault EVM execution gateway", () => {
     process.env.STEWARD_MASTER_PASSWORD = "gateway-test-master-password";
     process.env.STEWARD_JWT_SECRET = "gateway-test-jwt-secret-with-enough-entropy-0123456789";
     process.env.STEWARD_AUDIT_HMAC_KEY = "b".repeat(64);
+    process.env.STEWARD_EXECUTION_AUTH_SECRET = `gateway-test:${"e".repeat(48)}`;
     process.env.STEWARD_ALLOW_UNSAFE_CONTRACT_CALL_SIGNING = "true";
     delete process.env.REDIS_URL;
     delete process.env.REDIS_REQUIRED;
@@ -94,7 +103,7 @@ describe("vault EVM execution gateway", () => {
         enabled: true,
         config: {
           mode: "whitelist",
-          addresses: ["0x1111111111111111111111111111111111111111"],
+          addresses: ["0x1111111111111111111111111111111111111111", SOLANA_RECIPIENT],
         },
       });
   });
@@ -105,6 +114,11 @@ describe("vault EVM execution gateway", () => {
     else process.env.REDIS_URL = ORIGINAL_REDIS_URL;
     if (ORIGINAL_REDIS_REQUIRED === undefined) delete process.env.REDIS_REQUIRED;
     else process.env.REDIS_REQUIRED = ORIGINAL_REDIS_REQUIRED;
+    if (ORIGINAL_EXECUTION_AUTH_SECRET === undefined) {
+      delete process.env.STEWARD_EXECUTION_AUTH_SECRET;
+    } else {
+      process.env.STEWARD_EXECUTION_AUTH_SECRET = ORIGINAL_EXECUTION_AUTH_SECRET;
+    }
     await closeDb();
   });
 
@@ -158,7 +172,7 @@ describe("vault EVM execution gateway", () => {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
-          to: "0x1111111111111111111111111111111111111111",
+          to: SOLANA_RECIPIENT,
           value: "1",
           data: "0x12345678",
           chainId: 101,
@@ -211,6 +225,7 @@ describe("vault EVM execution gateway", () => {
         },
         executionPayloadDigest: executionPayloadDigestForEvmSign(replayRequest),
         executionPolicyRevisionHash: "queued-policy-revision",
+        executionBackend: "local-vault",
         policyResults: [],
       });
     await getDb()
@@ -606,12 +621,15 @@ describe("vault EVM execution gateway", () => {
   const EXTERNAL_AGENT_ID = `gateway-ext-agent-${Date.now()}`;
 
   async function seedExternalCustodyAgent() {
-    await getDb().insert(agents).values({
-      id: EXTERNAL_AGENT_ID,
-      tenantId: TENANT_ID,
-      name: "External Custody Agent",
-      walletAddress: "0x00000000000000000000000000000000000000ff",
-    });
+    await getDb()
+      .insert(agents)
+      .values({
+        id: EXTERNAL_AGENT_ID,
+        tenantId: TENANT_ID,
+        name: "External Custody Agent",
+        walletAddress: "0x00000000000000000000000000000000000000ff",
+      })
+      .onConflictDoNothing();
     // Non-local-custody EVM wallet, NO encrypted_chain_keys row => the resolver
     // returns a non-local-vault backend. The custody discriminator "external" and
     // its metadata key "third-partyKey" matches the vault package,
@@ -626,12 +644,15 @@ describe("vault EVM execution gateway", () => {
         signingAvailability: "provider-signing",
       },
     };
-    await getDb().insert(agentWallets).values({
-      agentId: EXTERNAL_AGENT_ID,
-      chainFamily: "evm",
-      address: "0x00000000000000000000000000000000000000ff",
-      metadata: custodyMetadata,
-    });
+    await getDb()
+      .insert(agentWallets)
+      .values({
+        agentId: EXTERNAL_AGENT_ID,
+        chainFamily: "evm",
+        address: "0x00000000000000000000000000000000000000ff",
+        metadata: custodyMetadata,
+      })
+      .onConflictDoNothing();
     await getDb()
       .insert(policies)
       .values({
@@ -643,19 +664,24 @@ describe("vault EVM execution gateway", () => {
           mode: "whitelist",
           addresses: ["0x1111111111111111111111111111111111111111"],
         },
-      });
+      })
+      .onConflictDoNothing();
   }
 
-  it("fails closed (third-party custody) on the direct /sign path before the provider is reached", async () => {
+  it("mints and consumes an identity-bound external-custody authorization on direct /sign", async () => {
     await seedExternalCustodyAgent();
-    // Spy on the raw signer; the third-party custody provider is only ever reached
-    // THROUGH Vault.signTransaction, so proving signTransaction is never called
-    // proves the provider is never reached.
-    const signSpy = spyOn(Vault.prototype, "signTransaction").mockImplementation(async () => {
-      throw new Error(
-        "raw signer / third-party provider must not be reached for third-party custody",
-      );
+    const expectedIdentity = externalCustodyIdentityDigest({
+      providerId: "test-kms",
+      keyId: "key-ext-1",
+      address: "0x00000000000000000000000000000000000000ff",
     });
+    const signSpy = spyOn(Vault.prototype, "signTransaction").mockImplementation(
+      async (_request, options) => {
+        expect(options.expectedBackend).toBe("external-custody");
+        expect(options.expectedBackendIdentityDigest).toBe(expectedIdentity);
+        return "0xexternally-signed";
+      },
+    );
     try {
       const app = await makeApp();
       const res = await app.request(`/vault/${EXTERNAL_AGENT_ID}/sign`, {
@@ -668,35 +694,201 @@ describe("vault EVM execution gateway", () => {
           to: "0x1111111111111111111111111111111111111111",
           value: "1",
           chainId: 8453,
-          broadcast: true,
+          broadcast: false,
         }),
       });
       const body = await res.json();
-      expect(res.status).toBe(409);
-      expect(body.ok).toBe(false);
-      expect(signSpy).toHaveBeenCalledTimes(0);
-      // The direct /sign path uses a fresh random txId, so assert on the audit
-      // reason keyed by the agent instead.
-      const audits = await getDb()
-        .select({ action: auditEvents.action, metadata: auditEvents.metadata })
-        .from(auditEvents)
-        .where(eq(auditEvents.resourceId, EXTERNAL_AGENT_ID));
-      const rejection = audits.find(
-        (row) => row.action === "vault.execution_authorization.rejected",
-      );
-      expect(rejection, "third-party-custody rejection audit must exist").toBeDefined();
-      expect((rejection?.metadata as Record<string, unknown> | undefined)?.reason).toBe(
-        "third-party_custody_not_gateway_supported",
-      );
+      expect(res.status).toBe(200);
+      expect(body.ok).toBe(true);
+      expect(signSpy).toHaveBeenCalledTimes(1);
+      const [authorization] = await getDb()
+        .select({
+          backend: executionAuthorizationNonces.backend,
+          identity: executionAuthorizationNonces.backendIdentityDigest,
+          status: executionAuthorizationNonces.status,
+        })
+        .from(executionAuthorizationNonces)
+        .where(eq(executionAuthorizationNonces.agentId, EXTERNAL_AGENT_ID));
+      expect(authorization).toEqual({
+        backend: "external-custody",
+        identity: expectedIdentity,
+        status: "consumed",
+      });
     } finally {
       signSpy.mockRestore();
     }
   });
 
-  it("fails closed (third-party custody) on the approval replay path before the provider is reached", async () => {
+  it("falls back to the pre-staged direct intent after an ambiguous broadcast write failure", async () => {
+    await seedExternalCustodyAgent();
+    const txHash = `0x${"cd".repeat(32)}`;
+    const provider: ExternalKeyCustodyProvider & { signCalls: number } = {
+      id: "direct-outcome-provider",
+      contractVersion: 1,
+      signCalls: 0,
+      async registerKeyHandle(): Promise<ExternalKeyHandleRegistration> {
+        throw new Error("registerKeyHandle is not used by this test");
+      },
+      async signTransaction(): Promise<ExternalKeySignTransactionResult> {
+        this.signCalls += 1;
+        throw new ExternalBroadcastOutcomeUnknownError(txHash, {
+          cause: new Error("https://rpc.example.test/SUPER_SECRET_API_KEY timed out"),
+        });
+      },
+    };
+    const routeVault = getConfiguredVault({
+      fallbackPassword: process.env.STEWARD_MASTER_PASSWORD,
+    }) as unknown as {
+      externalKeyCustodyProvider?: ExternalKeyCustodyProvider;
+      recordSignedTransaction: (...args: unknown[]) => Promise<void>;
+    };
+    const priorProvider = routeVault.externalKeyCustodyProvider;
+    const originalRecord = routeVault.recordSignedTransaction;
+    routeVault.externalKeyCustodyProvider = provider;
+    routeVault.recordSignedTransaction = async () => {
+      throw new Error("injected direct outcome write failure");
+    };
+    try {
+      const app = await makeApp();
+      const res = await app.request(`/vault/${EXTERNAL_AGENT_ID}/sign`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "Idempotency-Key": "ext-custody-outcome-unknown-direct",
+        },
+        body: JSON.stringify({
+          to: "0x1111111111111111111111111111111111111111",
+          value: "1",
+          chainId: 8453,
+          broadcast: true,
+        }),
+      });
+      const text = await res.text();
+      const body = JSON.parse(text);
+      expect(res.status).toBe(202);
+      expect(body).toEqual({
+        ok: false,
+        error: "Broadcast outcome is unknown; reconcile the transaction hash before retrying",
+        data: {
+          code: "external_broadcast_outcome_unknown",
+          txId: expect.any(String),
+          txHash,
+          reconciliationRequired: true,
+        },
+      });
+      expect(text).not.toContain("SUPER_SECRET_API_KEY");
+      expect(text).not.toContain("rpc.example.test");
+      expect(provider.signCalls).toBe(1);
+      const audits = await getDb()
+        .select({ action: auditEvents.action, resourceId: auditEvents.resourceId })
+        .from(auditEvents)
+        .where(eq(auditEvents.resourceId, body.data.txId));
+      expect(audits).toContainEqual({
+        action: "vault.broadcast.outcome_unknown",
+        resourceId: body.data.txId,
+      });
+      const [transaction] = await getDb()
+        .select({ status: transactions.status, txHash: transactions.txHash })
+        .from(transactions)
+        .where(eq(transactions.id, body.data.txId));
+      expect(transaction).toEqual({ status: "outcome_unknown", txHash });
+
+      // A persistence failure inside Vault still surfaces the same typed error.
+      // Replaying the caller's idempotency key is rejected by the consumed
+      // authorization and cannot enter the signer a second time.
+      const retry = await app.request(`/vault/${EXTERNAL_AGENT_ID}/sign`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "Idempotency-Key": "ext-custody-outcome-unknown-direct",
+        },
+        body: JSON.stringify({
+          to: "0x1111111111111111111111111111111111111111",
+          value: "1",
+          chainId: 8453,
+          broadcast: true,
+        }),
+      });
+      expect(retry.status).not.toBe(200);
+      expect(provider.signCalls).toBe(1);
+    } finally {
+      routeVault.externalKeyCustodyProvider = priorProvider;
+      routeVault.recordSignedTransaction = originalRecord;
+    }
+  });
+
+  it("does not expose credential-bearing provider text through the generic HTTP error path", async () => {
+    const canary = "SUPER_SECRET_PROVIDER_TOKEN";
+    const signSpy = spyOn(Vault.prototype, "signTransaction").mockImplementation(async () => {
+      throw new Error(
+        `KMS key arn:aws:kms:us-east-1:123456789012:key/example not found at https://kms.example.test/${canary}`,
+      );
+    });
+    try {
+      const app = await makeApp();
+      const res = await app.request(`/vault/${AGENT_ID}/sign`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "Idempotency-Key": "provider-error-redaction-canary",
+        },
+        body: JSON.stringify({
+          to: "0x1111111111111111111111111111111111111111",
+          value: "1",
+          chainId: 8453,
+          broadcast: true,
+        }),
+      });
+      const text = await res.text();
+      expect(res.status).toBe(500);
+      expect(JSON.parse(text)).toEqual({ ok: false, error: "Internal server error" });
+      expect(text).not.toContain(canary);
+      expect(text).not.toContain("arn:aws:kms");
+      expect(text).not.toContain("kms.example.test");
+      expect(signSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      signSpy.mockRestore();
+    }
+  });
+
+  it("reports outcome_unknown truthfully through the transfer action API", async () => {
+    const txId = "tx-transfer-outcome-unknown";
+    await getDb()
+      .insert(transactions)
+      .values({
+        id: txId,
+        agentId: AGENT_ID,
+        status: "outcome_unknown",
+        toAddress: "0x1111111111111111111111111111111111111111",
+        value: "1",
+        chainId: 8453,
+        txHash: `0x${"ab".repeat(32)}`,
+        actionType: "transfer",
+        actionPayload: {
+          type: "transfer",
+          token: "native",
+          recipient: "0x1111111111111111111111111111111111111111",
+          amount: "1",
+          broadcast: true,
+        },
+      });
+
+    const app = await makeApp();
+    const res = await app.request(`/vault/${AGENT_ID}/actions/${txId}`);
+    const body = await res.json();
+    expect(res.status).toBe(200);
+    expect(body.data).toMatchObject({ id: txId, status: "outcome_unknown" });
+  });
+
+  it("replays an approval only through the queued external provider/key/address identity", async () => {
     const txId = "tx-ext-custody-approval";
     // Seed a well-formed primary EVM approval row for the EXTERNAL custody agent.
     const extCustodyReplay = { ...REPLAY_BASE, agentId: EXTERNAL_AGENT_ID };
+    const expectedIdentity = externalCustodyIdentityDigest({
+      providerId: "test-kms",
+      keyId: "key-ext-1",
+      address: "0x00000000000000000000000000000000000000ff",
+    });
     await getDb()
       .insert(transactions)
       .values({
@@ -716,6 +908,8 @@ describe("vault EVM execution gateway", () => {
         },
         executionPayloadDigest: executionPayloadDigestForEvmSign(extCustodyReplay),
         executionPolicyRevisionHash: "queued-policy-revision",
+        executionBackend: "external-custody",
+        executionBackendIdentityDigest: expectedIdentity,
         policyResults: [],
       });
     await getDb()
@@ -729,11 +923,13 @@ describe("vault EVM execution gateway", () => {
         requestedById: EXTERNAL_AGENT_ID,
       });
 
-    const signSpy = spyOn(Vault.prototype, "signTransaction").mockImplementation(async () => {
-      throw new Error(
-        "raw signer / third-party provider must not be reached for third-party custody",
-      );
-    });
+    const signSpy = spyOn(Vault.prototype, "signTransaction").mockImplementation(
+      async (_request, options) => {
+        expect(options.expectedBackend).toBe("external-custody");
+        expect(options.expectedBackendIdentityDigest).toBe(expectedIdentity);
+        return "0xexternally-approved";
+      },
+    );
     try {
       const app = await makeApp();
       const res = await app.request(`/vault/${EXTERNAL_AGENT_ID}/approve/${txId}`, {
@@ -742,32 +938,236 @@ describe("vault EVM execution gateway", () => {
         body: "{}",
       });
       const body = await res.json();
-      expect(res.status).toBe(409);
-      expect(body.ok).toBe(false);
-      expect(signSpy).toHaveBeenCalledTimes(0);
+      expect(res.status).toBe(200);
+      expect(body.ok).toBe(true);
+      expect(signSpy).toHaveBeenCalledTimes(1);
       const nonceRows = await getDb()
-        .select({ id: executionAuthorizationNonces.id })
+        .select({
+          backend: executionAuthorizationNonces.backend,
+          identity: executionAuthorizationNonces.backendIdentityDigest,
+          status: executionAuthorizationNonces.status,
+        })
         .from(executionAuthorizationNonces)
         .where(eq(executionAuthorizationNonces.requestId, txId));
-      expect(nonceRows).toHaveLength(0);
-      const audits = await getDb()
-        .select({ action: auditEvents.action, metadata: auditEvents.metadata })
-        .from(auditEvents)
-        .where(eq(auditEvents.resourceId, txId));
-      const rejection = audits.find(
-        (row) => row.action === "vault.execution_authorization.rejected",
-      );
-      expect(rejection, "third-party-custody approval rejection audit must exist").toBeDefined();
-      expect((rejection?.metadata as Record<string, unknown> | undefined)?.reason).toBe(
-        "third-party_custody_not_gateway_supported",
-      );
+      expect(nonceRows).toEqual([
+        { backend: "external-custody", identity: expectedIdentity, status: "consumed" },
+      ]);
       const [approval] = await getDb()
         .select({ status: approvalQueue.status })
         .from(approvalQueue)
         .where(eq(approvalQueue.txId, txId));
-      expect(approval?.status).toBe("pending");
+      expect(approval?.status).toBe("approved");
     } finally {
       signSpy.mockRestore();
+    }
+  });
+
+  it("keeps a successful external broadcast terminal when final bookkeeping fails and never reopens approval", async () => {
+    await seedExternalCustodyAgent();
+    const txId = "tx-ext-custody-outcome-unknown";
+    const txHash = `0x${"ef".repeat(32)}`;
+    const walletAddress = "0x00000000000000000000000000000000000000ff";
+    const replay = {
+      ...REPLAY_BASE,
+      agentId: EXTERNAL_AGENT_ID,
+      walletAddress,
+      broadcast: true,
+    };
+    const identity = externalCustodyIdentityDigest({
+      providerId: "test-kms",
+      keyId: "key-ext-1",
+      address: walletAddress,
+    });
+    await getDb()
+      .insert(transactions)
+      .values({
+        id: txId,
+        agentId: EXTERNAL_AGENT_ID,
+        status: "pending",
+        toAddress: replay.to,
+        value: replay.value,
+        data: replay.data,
+        chainId: replay.chainId,
+        actionPayload: {
+          type: "transaction",
+          broadcast: true,
+          nonce: replay.nonce,
+          gasLimit: replay.gasLimit,
+          walletAddress,
+        },
+        executionPayloadDigest: executionPayloadDigestForEvmSign(replay),
+        executionPolicyRevisionHash: "queued-policy-revision",
+        executionBackend: "external-custody",
+        executionBackendIdentityDigest: identity,
+        policyResults: [],
+      });
+    await getDb()
+      .insert(approvalQueue)
+      .values({
+        id: `aq-${txId}`,
+        txId,
+        agentId: EXTERNAL_AGENT_ID,
+        status: "pending",
+        requestedByType: "agent",
+        requestedById: EXTERNAL_AGENT_ID,
+      });
+
+    const provider: ExternalKeyCustodyProvider & { signCalls: number } = {
+      id: "approval-outcome-provider",
+      contractVersion: 1,
+      signCalls: 0,
+      async registerKeyHandle(): Promise<ExternalKeyHandleRegistration> {
+        throw new Error("registerKeyHandle is not used by this test");
+      },
+      async signTransaction(request): Promise<ExternalKeySignTransactionResult> {
+        this.signCalls += 1;
+        await request.onPreparedBroadcast?.(txHash);
+        return { result: txHash, broadcast: true };
+      },
+    };
+    const routeVault = getConfiguredVault({
+      fallbackPassword: process.env.STEWARD_MASTER_PASSWORD,
+    }) as unknown as {
+      externalKeyCustodyProvider?: ExternalKeyCustodyProvider;
+      recordSignedTransaction: (...args: unknown[]) => Promise<void>;
+    };
+    const priorProvider = routeVault.externalKeyCustodyProvider;
+    const originalRecord = routeVault.recordSignedTransaction;
+    let writes = 0;
+    routeVault.externalKeyCustodyProvider = provider;
+    routeVault.recordSignedTransaction = async (...args) => {
+      writes += 1;
+      if (writes === 2) throw new Error("injected final approval write failure");
+      await originalRecord.apply(routeVault, args);
+    };
+    try {
+      const app = await makeApp();
+      const res = await app.request(`/vault/${EXTERNAL_AGENT_ID}/approve/${txId}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{}",
+      });
+      const body = await res.json();
+      expect(res.status).toBe(202);
+      expect(body.data).toMatchObject({
+        code: "external_broadcast_outcome_unknown",
+        txHash,
+        reconciliationRequired: true,
+      });
+      const [approval] = await getDb()
+        .select({ status: approvalQueue.status })
+        .from(approvalQueue)
+        .where(eq(approvalQueue.txId, txId));
+      expect(approval?.status).toBe("approved");
+      const [transaction] = await getDb()
+        .select({ status: transactions.status, txHash: transactions.txHash })
+        .from(transactions)
+        .where(eq(transactions.id, txId));
+      expect(transaction).toEqual({ status: "outcome_unknown", txHash });
+
+      const retry = await app.request(`/vault/${EXTERNAL_AGENT_ID}/approve/${txId}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{}",
+      });
+      expect(retry.status).toBe(404);
+      expect(provider.signCalls).toBe(1);
+      expect(writes).toBe(2);
+    } finally {
+      routeVault.externalKeyCustodyProvider = priorProvider;
+      routeVault.recordSignedTransaction = originalRecord;
+    }
+  });
+
+  it("rejects approval replay when the external provider/key/address identity changed", async () => {
+    const txId = "tx-ext-custody-identity-changed";
+    const replay = { ...REPLAY_BASE, agentId: EXTERNAL_AGENT_ID };
+    const queuedIdentity = externalCustodyIdentityDigest({
+      providerId: "test-kms",
+      keyId: "key-ext-1",
+      address: "0x00000000000000000000000000000000000000ff",
+    });
+    await getDb()
+      .insert(transactions)
+      .values({
+        id: txId,
+        agentId: EXTERNAL_AGENT_ID,
+        status: "pending",
+        toAddress: replay.to,
+        value: replay.value,
+        data: replay.data,
+        chainId: replay.chainId,
+        actionPayload: {
+          type: "transaction",
+          broadcast: false,
+          nonce: replay.nonce,
+          gasLimit: replay.gasLimit,
+          walletAddress: replay.walletAddress,
+        },
+        executionPayloadDigest: executionPayloadDigestForEvmSign(replay),
+        executionPolicyRevisionHash: "queued-policy-revision",
+        executionBackend: "external-custody",
+        executionBackendIdentityDigest: queuedIdentity,
+        policyResults: [],
+      });
+    await getDb()
+      .insert(approvalQueue)
+      .values({
+        id: `aq-${txId}`,
+        txId,
+        agentId: EXTERNAL_AGENT_ID,
+        status: "pending",
+        requestedByType: "agent",
+        requestedById: EXTERNAL_AGENT_ID,
+      });
+    await getDb()
+      .update(agentWallets)
+      .set({
+        metadata: {
+          custody: "external",
+          externalKey: {
+            providerId: "test-kms",
+            keyId: "key-ext-2",
+            registeredAt: new Date().toISOString(),
+            exportablePrivateKey: false,
+            signingAvailability: "provider-signing",
+          },
+        },
+      })
+      .where(eq(agentWallets.agentId, EXTERNAL_AGENT_ID));
+    const signSpy = spyOn(Vault.prototype, "signTransaction");
+    try {
+      const res = await (await makeApp()).request(`/vault/${EXTERNAL_AGENT_ID}/approve/${txId}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{}",
+      });
+      expect(res.status).toBe(409);
+      expect(signSpy).toHaveBeenCalledTimes(0);
+      const audits = await getDb()
+        .select({ metadata: auditEvents.metadata })
+        .from(auditEvents)
+        .where(eq(auditEvents.resourceId, txId));
+      expect((audits.at(-1)?.metadata as Record<string, unknown> | undefined)?.reason).toBe(
+        "custody_identity_changed_since_approval_request",
+      );
+    } finally {
+      signSpy.mockRestore();
+      await getDb()
+        .update(agentWallets)
+        .set({
+          metadata: {
+            custody: "external",
+            externalKey: {
+              providerId: "test-kms",
+              keyId: "key-ext-1",
+              registeredAt: new Date().toISOString(),
+              exportablePrivateKey: false,
+              signingAvailability: "provider-signing",
+            },
+          },
+        })
+        .where(eq(agentWallets.agentId, EXTERNAL_AGENT_ID));
     }
   });
 
@@ -805,6 +1205,7 @@ describe("vault EVM execution gateway", () => {
 
   class ProviderSpy implements ExternalKeyCustodyProvider {
     id = "transition-provider-spy";
+    readonly contractVersion = 1 as const;
     registerCalls: ExternalKeyHandleImportRequest[] = [];
     signCalls: ExternalKeySignTransactionRequest[] = [];
     async registerKeyHandle(
@@ -883,9 +1284,9 @@ describe("vault EVM execution gateway", () => {
     // to local-vault. The raw signTransaction below is NOT mocked, so its own
     // fresh wallet lookup still observes the provider-custody DB wallet and
     // fails closed at the signing boundary.
-    const resolveSpy = spyOn(Vault.prototype, "resolveExecutionBackend").mockResolvedValue(
-      "local-vault",
-    );
+    const resolveSpy = spyOn(Vault.prototype, "resolveExecutionTarget").mockResolvedValue({
+      backend: "local-vault",
+    });
 
     try {
       const app = await makeApp();
@@ -929,11 +1330,11 @@ describe("vault EVM execution gateway", () => {
       const rejectionMeta = rejection?.metadata as Record<string, unknown> | undefined;
       expect(rejectionMeta?.reason).toBe("backend_binding_mismatch");
       expect(rejectionMeta?.expectedBackend).toBe("local-vault");
-      expect(rejectionMeta?.resolvedBackend).toBe("third-party-custody");
+      expect(rejectionMeta?.resolvedBackend).toBe("external-custody");
 
       // Sanity: the vault-layer error class is exported and matches the code the
       // API surfaced, keeping the API contract and the vault guard in lockstep.
-      expect(new BackendBindingMismatchError("local-vault", "third-party-custody").code).toBe(
+      expect(new BackendBindingMismatchError("local-vault", "external-custody").code).toBe(
         "backend_binding_mismatch",
       );
     } finally {

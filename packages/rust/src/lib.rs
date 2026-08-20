@@ -14,6 +14,9 @@ use url::form_urlencoded;
 
 type HmacSha256 = Hmac<Sha256>;
 
+// Keep in lockstep with the equivalent list in EVERY other SDK (sdk, go, java,
+// python, ruby, swift, csharp, flutter): mutations under these prefixes are
+// HMAC-signed, and divergence silently downgrades integrity (SEC-049).
 const SENSITIVE_SIGNED_PREFIXES: &[&str] = &[
     "/vault",
     "/agents",
@@ -30,6 +33,8 @@ const SENSITIVE_SIGNED_PREFIXES: &[&str] = &[
     "/condition-sets",
     "/condition_sets",
     "/v1/condition_sets",
+    "/global-wallet",
+    "/accounts",
 ];
 
 const MUTATING_METHODS: &[&str] = &["POST", "PUT", "PATCH", "DELETE"];
@@ -69,6 +74,12 @@ pub struct Client {
     transport: Arc<dyn Transport>,
     now: Arc<dyn Fn() -> SystemTime + Send + Sync>,
     new_id: Arc<dyn Fn() -> String + Send + Sync>,
+}
+
+#[derive(Clone, Copy, Default)]
+pub struct ClientOptions {
+    /// Permit plaintext non-loopback HTTP with a construction-time warning.
+    pub allow_insecure_base_url: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -175,16 +186,55 @@ struct ApiEnvelope {
 
 struct UreqTransport;
 
+fn is_loopback_host(host: &str) -> bool {
+    host == "localhost" || host == "127.0.0.1" || host == "::1" || host == "[::1]"
+}
+
+// Keep in lockstep with the equivalent check in EVERY other SDK (sdk, go,
+// java, python, ruby, swift, csharp, flutter): these clients transmit API
+// keys, bearer tokens, and HMAC-signed credentials, none of which may travel
+// to a plaintext non-loopback endpoint (SEC-200, mirroring SEC-048).
+fn assert_secure_base_url(parsed: &url::Url, allow_insecure_base_url: bool) -> Result<(), Error> {
+    if parsed.scheme() != "http" && parsed.scheme() != "https" {
+        return Err(Error::Config("base URL must use HTTP or HTTPS".to_string()));
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(Error::Config("base URL must not embed credentials".to_string()));
+    }
+    if parsed.scheme() == "https"
+        || (parsed.scheme() == "http" && parsed.host_str().is_some_and(is_loopback_host))
+    {
+        return Ok(());
+    }
+    if allow_insecure_base_url {
+        eprintln!(
+            "[steward-sdk] WARNING: base URL is not HTTPS; credentials travel in cleartext. \
+             Use allow_insecure_base_url only on trusted private networks."
+        );
+        return Ok(());
+    }
+    Err(Error::Config(
+        "base URL must use HTTPS unless it targets loopback (http://localhost, http://127.0.0.1, \
+         http://[::1]); set allow_insecure_base_url to override on trusted private networks"
+            .to_string(),
+    ))
+}
+
 impl Client {
     pub fn new(config: Config) -> Result<Self, Error> {
+        Self::new_with_options(config, ClientOptions::default())
+    }
+
+    /// Construct with explicit transport-security exceptions without adding a
+    /// required field to the public Config struct (which would break existing
+    /// external struct literals).
+    pub fn new_with_options(config: Config, options: ClientOptions) -> Result<Self, Error> {
         if config.base_url.trim().is_empty() {
             return Err(Error::Config("base URL is required".to_string()));
         }
         let parsed = url::Url::parse(&config.base_url)
             .map_err(|err| Error::Config(format!("invalid base URL: {err}")))?;
-        if parsed.scheme() != "http" && parsed.scheme() != "https" {
-            return Err(Error::Config("base URL must use http or https".to_string()));
-        }
+        assert_secure_base_url(&parsed, options.allow_insecure_base_url)?;
         let base_url = config.base_url.trim_end_matches('/').to_string();
         let transport = config
             .transport

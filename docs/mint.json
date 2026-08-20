@@ -119,6 +119,7 @@
       "pages": [
         "sdk/installation",
         "sdk/client",
+        "sdk/provider-actions",
         "sdk/react-components",
         "sdk/proxy-helpers",
         "sdk/eliza-plugin"

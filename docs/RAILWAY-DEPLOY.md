@@ -8,7 +8,7 @@
 
 - [Railway account](https://railway.app) + CLI installed (`npm i -g @railway/cli`)
 - A Neon Postgres connection string **or** use Railway's managed Postgres add-on
-- Secrets ready to generate (master password, JWT secret, platform keys)
+- Secrets ready to generate (vault, KDF, JWT, email-code, audit-chain, platform, and proxy-signing roots)
 - (Optional) [Resend](https://resend.com) API key for magic-link emails
 - (Optional) Google / Discord OAuth credentials
 
@@ -83,11 +83,20 @@ DATABASE_URL=${{Postgres.DATABASE_URL}}
 # ─── Security (generate these — do NOT reuse across environments) ─────────────
 # Generate each with: openssl rand -hex 32
 STEWARD_MASTER_PASSWORD=<openssl rand -hex 32>
-STEWARD_SESSION_SECRET=<openssl rand -hex 32>
-STEWARD_PLATFORM_KEYS=<openssl rand -hex 32>
+STEWARD_KDF_SALT=<openssl rand -hex 32>
+STEWARD_JWT_SECRET=<openssl rand -hex 32>
+STEWARD_EMAIL_CODE_SECRET=<openssl rand -hex 32>
+STEWARD_AUDIT_HMAC_KEY=<openssl rand -hex 32>
+STEWARD_EXECUTION_AUTH_SECRET=<v1: plus openssl rand -hex 32>
+STEWARD_PLATFORM_KEYS=<stw_platform_ plus 24 random bytes as hex>
+# This bootstrap operator key needs both the generic platform write gate and
+# the route-specific scopes used below. Narrow this list for ongoing operation.
+STEWARD_PLATFORM_KEY_SCOPES={"<same raw platform key>":["platform:write","platform:tenant:create","platform:tenant:read","platform:agent:create","platform:agent-token:create","platform:agent:delete"]}
 
-# Optional: separate JWT secret (defaults to MASTER_PASSWORD if unset)
-# STEWARD_JWT_SECRET=<openssl rand -hex 32>
+# This example uses Steward's built-in local custody. In production that mode
+# decrypts signing keys in application memory and requires an explicit posture
+# acknowledgement. Prefer STEWARD_KMS_PROVIDER=aws|pkcs11 where available.
+STEWARD_ACK_LOCAL_CUSTODY=true
 
 # ─── Redis ────────────────────────────────────────────────────────────────────
 # If using Railway Redis:
@@ -99,7 +108,9 @@ RPC_URL=https://mainnet.base.org
 CHAIN_ID=8453
 
 # ─── Auth — Email (Magic Links) ──────────────────────────────────────────────
-RESEND_API_KEY=<from resend.com, or leave blank for console-only mode>
+# Omit RESEND_API_KEY only if email login should remain unavailable. Production
+# deliberately fails email delivery closed; there is no console-delivery mode.
+RESEND_API_KEY=<from resend.com>
 EMAIL_FROM=login@yourdomain.com
 APP_URL=https://your-steward.up.railway.app
 
@@ -120,13 +131,22 @@ PASSKEY_ORIGIN=https://your-app.com
 SKIP_MIGRATIONS=false
 ```
 
+Review the [custody-posture guide](security/custody-posture.md) before accepting
+local custody in production.
+
 ### Generate secrets locally
 
 ```bash
 # Run these and paste the output into Railway's variable editor
 echo "STEWARD_MASTER_PASSWORD=$(openssl rand -hex 32)"
-echo "STEWARD_SESSION_SECRET=$(openssl rand -hex 32)"
-echo "STEWARD_PLATFORM_KEYS=$(openssl rand -hex 32)"
+echo "STEWARD_KDF_SALT=$(openssl rand -hex 32)"
+echo "STEWARD_JWT_SECRET=$(openssl rand -hex 32)"
+echo "STEWARD_EMAIL_CODE_SECRET=$(openssl rand -hex 32)"
+echo "STEWARD_AUDIT_HMAC_KEY=$(openssl rand -hex 32)"
+echo "STEWARD_EXECUTION_AUTH_SECRET=v1:$(openssl rand -hex 32)"
+PLATFORM_KEY="stw_platform_$(openssl rand -hex 24)"
+echo "STEWARD_PLATFORM_KEYS=$PLATFORM_KEY"
+echo "STEWARD_PLATFORM_KEY_SCOPES={\"$PLATFORM_KEY\":[\"platform:write\",\"platform:tenant:create\",\"platform:tenant:read\",\"platform:agent:create\",\"platform:agent-token:create\",\"platform:agent:delete\"]}"
 ```
 
 **Save `STEWARD_PLATFORM_KEYS` somewhere safe** — you'll need it to create tenants.
@@ -237,15 +257,17 @@ export BASE="https://steward.elizacloud.ai"  # or your Railway URL
 
 # Health check
 curl -sf "$BASE/health"
-# → {"status":"ok","version":"0.3.0","uptime":...}
+# → {"status":"ok","version":"<current API version>","uptime":...}
 
 # Deep readiness check (verifies DB + migrations + vault)
 curl -sf "$BASE/ready"
-# → {"status":"ok","db":"ok","migrations":"ok","vault":"ok"}
+# → {"status":"ready","version":"<current API version>","uptime":...,"checks":{"migrations":{"ok":true},"database":{"ok":true},...}}
+# Set STEWARD_READY_PROBE_TOKEN and send X-Steward-Probe-Token only from an
+# operator probe when the full diagnostic details are required.
 
 # List available auth providers
 curl -sf "$BASE/auth/providers"
-# → {"providers":["email","wallet","passkey",...]}
+# → {"ok":true,"passkey":true,"email":true,"siwe":true,...}
 ```
 
 ### Create the initial tenant
@@ -266,28 +288,27 @@ curl -sf -X POST "$BASE/platform/tenants" \
 ### Smoke test: create a test agent
 
 ```bash
-export TENANT_KEY="<apiKey from above>"
-
-# Create agent
-curl -sf -X POST "$BASE/agents" \
+# Create an agent through the non-interactive scoped platform boundary.
+curl -sf -X POST "$BASE/platform/tenants/eliza-cloud/agents" \
   -H "Content-Type: application/json" \
-  -H "X-Steward-Tenant: eliza-cloud" \
-  -H "X-Steward-Key: $TENANT_KEY" \
+  -H "X-Steward-Platform-Key: $PLATFORM_KEY" \
   -d '{"id": "test-agent", "name": "Railway Smoke Test"}'
 
-# Get JWT
-TOKEN=$(curl -sf -X POST "$BASE/agents/test-agent/token" \
-  -H "X-Steward-Tenant: eliza-cloud" \
-  -H "X-Steward-Key: $TENANT_KEY" | jq -r '.data.token')
+# Get an agent JWT through the scoped platform provisioning route. The sibling
+# tenant route requires an owner/admin session with recent MFA and intentionally
+# rejects a bare tenant API key by default.
+TOKEN=$(curl -sf -X POST "$BASE/platform/tenants/eliza-cloud/agents/test-agent/token" \
+  -H "Content-Type: application/json" \
+  -H "X-Steward-Platform-Key: $PLATFORM_KEY" \
+  -d '{"scopes":["agent"]}' | jq -r '.data.token')
 
 # Check balance
 curl -sf "$BASE/agents/test-agent/balance" \
   -H "Authorization: Bearer $TOKEN"
 
 # Clean up
-curl -sf -X DELETE "$BASE/agents/test-agent" \
-  -H "X-Steward-Tenant: eliza-cloud" \
-  -H "X-Steward-Key: $TENANT_KEY"
+curl -sf -X DELETE "$BASE/platform/tenants/eliza-cloud/agents/test-agent" \
+  -H "X-Steward-Platform-Key: $PLATFORM_KEY"
 ```
 
 ---
@@ -303,12 +324,15 @@ STEWARD_API_URL=https://steward.elizacloud.ai
 # Steward API URL (client-side, for browser auth flows)
 NEXT_PUBLIC_STEWARD_API_URL=https://steward.elizacloud.ai
 
-# Session secret — MUST match the value set in Railway
-STEWARD_SESSION_SECRET=<same value as Railway's STEWARD_SESSION_SECRET>
-
-# Tenant API key (from tenant creation step above)
-STEWARD_AGENT_TOKEN=<tenant apiKey from step 7>
+# Tenant API key (server-side only, from tenant creation step above)
+STEWARD_API_KEY=<tenant apiKey from step 7>
 ```
+
+The JWT signing secret belongs only to Steward's server-side API and proxy
+services. Do not add `STEWARD_JWT_SECRET` or its deprecated
+`STEWARD_SESSION_SECRET` fallback to Vercel or any browser-facing environment.
+Keep `STEWARD_API_KEY` in Vercel's server-only environment as well; never use a
+`NEXT_PUBLIC_` prefix or otherwise include it in the browser bundle.
 
 Redeploy the Vercel app after setting these.
 
@@ -367,11 +391,25 @@ If you need the credential-injection proxy (for managing API keys on behalf of a
    NODE_ENV=production
    DATABASE_URL=${{Postgres.DATABASE_URL}}
    STEWARD_MASTER_PASSWORD=<same as API service>
-   STEWARD_SESSION_SECRET=<same as API service>
+   STEWARD_KDF_SALT=<same as API service>
+   STEWARD_JWT_SECRET=<same as API service>
+   STEWARD_AUDIT_HMAC_KEY=<same as API service>
+   STEWARD_EXECUTION_AUTH_SECRET=<same as API service>
+   STEWARD_PROXY_REQUEST_SIGNING_SECRETS=<dedicated shared HMAC root>
    REDIS_URL=${{Redis.REDIS_URL}}
    ```
 5. Health check: **Path:** `/health`, **Port:** `8080`
 6. Custom domain: `proxy.elizacloud.ai` (optional)
+
+Production proxy callers must sign every request with the same dedicated HMAC
+root. A bearer token alone is insufficient. Use `@stwd/proxy-client` or the
+[signed broker integration](guides/session-broker-integration.mdx) rather than
+hand-building the canonical signature. Set the signing root on each server-side
+caller as well as the proxy; never expose it to a browser. If API readiness
+should include the proxy clock check, also set
+`STEWARD_PROXY_URL=https://proxy.elizacloud.ai` on the API service.
+The API service also needs the same dedicated root as
+`STEWARD_PROXY_REQUEST_SIGNING_SECRET` when it is a proxy caller.
 
 ---
 
@@ -429,15 +467,21 @@ curl -sf "$BASE/platform/tenants" \
 | `STEWARD_BIND_HOST` | No | `127.0.0.1` | Bind host. **Set `0.0.0.0` on Railway** |
 | `NODE_ENV` | No | — | Set `production` |
 | `DATABASE_URL` | **Yes** | — | Postgres connection string |
-| `STEWARD_MASTER_PASSWORD` | **Yes** | — | Vault encryption + fallback JWT signing |
-| `STEWARD_SESSION_SECRET` | Recommended | Falls back to master password | User session JWT signing secret |
-| `STEWARD_JWT_SECRET` | No | Falls back to master password | Agent JWT signing secret |
+| `STEWARD_MASTER_PASSWORD` | **Yes** | — | Vault encryption secret. Keep separate from JWT signing material. |
+| `STEWARD_KDF_SALT` | **Yes in production** | — | Stable deployment KDF salt, at least 16 random bytes. Back it up with the encrypted vault data. |
+| `STEWARD_JWT_SECRET` | **Yes** | — | Canonical server-side signing and verification secret for user, session, and agent JWTs. Must be at least 32 characters in production. |
+| `STEWARD_SESSION_SECRET` | No | — | Deprecated compatibility fallback. Rename existing deployments to `STEWARD_JWT_SECRET`. |
 | `STEWARD_PLATFORM_KEYS` | **Yes** | — | Platform admin key(s), comma-separated |
+| `STEWARD_PLATFORM_KEY_SCOPES` | **Yes for platform routes** | — | JSON map from a raw platform key (or its SHA-256 hex digest) to explicit scopes. Unmapped keys authenticate but have no authorization. |
+| `STEWARD_EMAIL_CODE_SECRET` | **Yes for email auth** | — | Separate secret binding email codes and polling receipts; at least 32 characters in production. |
+| `STEWARD_AUDIT_HMAC_KEY` | **Yes in production** | — | Separate HMAC root for the tenant audit chain. |
+| `STEWARD_EXECUTION_AUTH_SECRET` | **Yes for governed provider execution** | — | Versioned (`v1:<secret>`) authorization root shared by the API and proxy; keep it distinct from JWT and request-signing roots. |
+| `STEWARD_ACK_LOCAL_CUSTODY` | **Yes only for production local custody** | — | Set `true` only after accepting plaintext signing-key bytes in API memory; omit when using a supported KMS mode. |
 | `STEWARD_DEFAULT_TENANT_KEY` | No | — | Default tenant key for single-tenant mode |
 | `RPC_URL` | No | `https://sepolia.base.org` | EVM RPC endpoint |
 | `CHAIN_ID` | No | `84532` | Default chain ID |
 | `REDIS_URL` | No | — | Redis for rate limiting + spend tracking |
-| `RESEND_API_KEY` | No | — | Resend key for magic link emails |
+| `RESEND_API_KEY` | No | — | Resend key for magic-link delivery. Without a provider, production email login fails closed. |
 | `EMAIL_FROM` | No | `login@steward.fi` | Magic link sender address |
 | `APP_URL` | No | `https://steward.fi` | Base URL for magic link callbacks |
 | `PASSKEY_RP_NAME` | No | `Steward` | WebAuthn relying party display name |
@@ -452,3 +496,5 @@ curl -sf "$BASE/platform/tenants" \
 | `AGENT_TOKEN_EXPIRY` | No | `24h` | Agent JWT token lifetime |
 | `SKIP_MIGRATIONS` | No | `false` | Skip auto-migrations on startup |
 | `STEWARD_PROXY_PORT` | No | `8080` | Proxy service listen port |
+| `STEWARD_PROXY_REQUEST_SIGNING_SECRET` / `_SECRETS` | **Yes for production proxy traffic** | — | Dedicated HMAC root used by proxy clients to sign requests and by the proxy to verify them. |
+| `STEWARD_PROXY_URL` | No | — | API-side proxy URL used by `/ready` for the optional proxy clock check. |

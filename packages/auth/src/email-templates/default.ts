@@ -132,9 +132,7 @@ export function renderDefaultTemplate({
 /**
  * Default (Steward-branded) OTP sign-in-code email.
  *
- * Extracted from the previously-hardcoded HTML in `EmailAuth.sendOtp` so
- * OTP emails flow through the same per-tenant template contract as
- * magic-link emails. Visuals are unchanged for existing tenants.
+ * OTP emails use the same per-tenant template contract as magic-link emails.
  */
 export function renderDefaultOtpTemplate({
   code,

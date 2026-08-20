@@ -43,7 +43,7 @@ services:
       STEWARD_MASTER_PASSWORD: "${STEWARD_MASTER_PASSWORD:?STEWARD_MASTER_PASSWORD is required}"
       STEWARD_JWT_SECRET: "${STEWARD_JWT_SECRET:?STEWARD_JWT_SECRET is required}"
       STEWARD_EMAIL_CODE_SECRET: "${STEWARD_EMAIL_CODE_SECRET:?STEWARD_EMAIL_CODE_SECRET is required}"
-      # PR4 execution authorization v2 key (keyId:secret,... rotation list).
+      # governed-execution execution authorization v2 key (keyId:secret,... rotation list).
       # SEPARATE from STEWARD_JWT_SECRET; governed provider actions fail closed
       # if unset. Both api (mint) and proxy (claim/verify) require it.
       STEWARD_EXECUTION_AUTH_SECRET: "${STEWARD_EXECUTION_AUTH_SECRET:?STEWARD_EXECUTION_AUTH_SECRET is required - generate with: printf 'v1:%s' \"$(openssl rand -hex 32)\"}"
@@ -58,6 +58,11 @@ services:
       STEWARD_PLUGINS: "${STEWARD_PLUGINS:-}"
       WXMR_SOLANA_RPC_URL: "${WXMR_SOLANA_RPC_URL:-}"
       REDIS_URL: "redis://redis:6379"
+      # Cleartext redis:// on the private compose network requires an explicit
+      # opt-out in production (mirrors STEWARD_ALLOW_INSECURE_DB above). No
+      # default is injected here: set STEWARD_ALLOW_INSECURE_REDIS=true in .env
+      # for this stack, or point REDIS_URL at a rediss:// endpoint.
+      STEWARD_ALLOW_INSECURE_REDIS: "${STEWARD_ALLOW_INSECURE_REDIS:-}"
       # API-side invoke paths sign requests to steward-proxy with this shared
       # root. Keep it distinct from JWT/audit secrets; the proxy service below
       # verifies the same value.
@@ -71,6 +76,8 @@ services:
       PASSKEY_ORIGIN: "${PASSKEY_ORIGIN:-http://localhost:3200}"
       GOOGLE_CLIENT_ID: "${GOOGLE_CLIENT_ID:-}"
       GOOGLE_CLIENT_SECRET: "${GOOGLE_CLIENT_SECRET:-}"
+      X_CLIENT_ID: "${X_CLIENT_ID:-}"
+      X_CLIENT_SECRET: "${X_CLIENT_SECRET:-}"
       DISCORD_CLIENT_ID: "${DISCORD_CLIENT_ID:-}"
       DISCORD_CLIENT_SECRET: "${DISCORD_CLIENT_SECRET:-}"
       STEWARD_KDF_SALT: "${STEWARD_KDF_SALT:?STEWARD_KDF_SALT is required - generate with: openssl rand -hex 32}"
@@ -86,6 +93,7 @@ services:
       STEWARD_AUDIT_HMAC_KEY: "${STEWARD_AUDIT_HMAC_KEY:?STEWARD_AUDIT_HMAC_KEY is required - generate with: openssl rand -hex 32}"
       SIWE_ALLOWED_DOMAINS: "${SIWE_ALLOWED_DOMAINS:-}"
       STEWARD_ALLOW_INSECURE_DB: "${STEWARD_ALLOW_INSECURE_DB:-}"
+      STEWARD_ALLOW_UNVERIFIED_DB_TLS: "${STEWARD_ALLOW_UNVERIFIED_DB_TLS:-}"
       # ── Monero (optional; empty = Monero endpoints fail closed with 503) ──
       # Enable the monero-wallet-rpc sidecar with: COMPOSE_PROFILES=monero
       # and set STEWARD_MONERO_WALLET_RPC_URL to the sidecar's endpoint below.
@@ -124,10 +132,12 @@ services:
     image: steward:${STEWARD_IMAGE_TAG:-0.4.2}
     container_name: steward-proxy
     restart: unless-stopped
-    # Proxy only needs the API to be healthy (for JWT verification + DB access)
+    # The API's deep /ready check verifies proxy clock health, so waiting for API
+    # health here would deadlock both services. The proxy health endpoint does
+    # not require the API and can start as soon as the API container is running.
     depends_on:
       steward-api:
-        condition: service_healthy
+        condition: service_started
     command: ["bun", "run", "packages/proxy/src/index.ts"]
     environment:
       STEWARD_PROXY_PORT: "${STEWARD_PROXY_PORT:-8080}"
@@ -136,7 +146,7 @@ services:
       STEWARD_MASTER_PASSWORD: "${STEWARD_MASTER_PASSWORD:?STEWARD_MASTER_PASSWORD is required}"
       STEWARD_JWT_SECRET: "${STEWARD_JWT_SECRET:?STEWARD_JWT_SECRET is required}"
       STEWARD_EMAIL_CODE_SECRET: "${STEWARD_EMAIL_CODE_SECRET:?STEWARD_EMAIL_CODE_SECRET is required}"
-      # PR4 execution authorization v2 key (keyId:secret,... rotation list).
+      # governed-execution execution authorization v2 key (keyId:secret,... rotation list).
       # SEPARATE from STEWARD_JWT_SECRET; governed provider actions fail closed
       # if unset. Both api (mint) and proxy (claim/verify) require it.
       STEWARD_EXECUTION_AUTH_SECRET: "${STEWARD_EXECUTION_AUTH_SECRET:?STEWARD_EXECUTION_AUTH_SECRET is required - generate with: printf 'v1:%s' \"$(openssl rand -hex 32)\"}"
@@ -147,8 +157,18 @@ services:
       # fail closed with a 5xx in production.
       STEWARD_AUDIT_HMAC_KEY: "${STEWARD_AUDIT_HMAC_KEY:?STEWARD_AUDIT_HMAC_KEY is required - generate with: openssl rand -hex 32}"
       STEWARD_ALLOW_INSECURE_DB: "${STEWARD_ALLOW_INSECURE_DB:-}"
+      STEWARD_ALLOW_UNVERIFIED_DB_TLS: "${STEWARD_ALLOW_UNVERIFIED_DB_TLS:-}"
       STEWARD_PROXY_REQUEST_SIGNING_SECRET: "${STEWARD_PROXY_REQUEST_SIGNING_SECRET:?STEWARD_PROXY_REQUEST_SIGNING_SECRET is required - generate with: openssl rand -hex 32}"
+      # Explicit soft posture for functional dev/test stacks. Empty by default;
+      # NODE_ENV=production always overrides it in proxy security guards.
+      STEWARD_PROXY_DEV_MODE: "${STEWARD_PROXY_DEV_MODE:-}"
+      STEWARD_PROXY_RATE_LIMIT_MAX: "${STEWARD_PROXY_RATE_LIMIT_MAX:-60}"
+      STEWARD_PROXY_RATE_LIMIT_WINDOW_MS: "${STEWARD_PROXY_RATE_LIMIT_WINDOW_MS:-60000}"
       REDIS_URL: "redis://redis:6379"
+      # Cleartext redis:// on the private compose network requires an explicit
+      # opt-out in production (mirrors STEWARD_ALLOW_INSECURE_DB). Set
+      # STEWARD_ALLOW_INSECURE_REDIS=true in .env for this stack, or use rediss://.
+      STEWARD_ALLOW_INSECURE_REDIS: "${STEWARD_ALLOW_INSECURE_REDIS:-}"
     ports:
       - "127.0.0.1:${STEWARD_PROXY_PORT:-8080}:8080"
     healthcheck:
@@ -264,12 +284,14 @@ services:
     image: redis:7-alpine@sha256:e7723ff73d963f5cc6d9c4643ea3d989527a402a319239054e9472a7fb9219a2
     container_name: steward-redis
     restart: unless-stopped
+    # Spend/rate-limit keys are enforcement state: reject writes at the memory
+    # bound so callers fail closed instead of silently evicting them.
     command: >
       redis-server
       --appendonly yes
       --appendfsync everysec
       --maxmemory 256mb
-      --maxmemory-policy allkeys-lru
+      --maxmemory-policy noeviction
     volumes:
       - redis-data:/data
     healthcheck:

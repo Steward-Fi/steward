@@ -219,6 +219,12 @@ describe("headers", () => {
       ["if-none-match", '"abc"'],
     ]);
   });
+  it("trims adversarial OWS runs without regex backtracking", () => {
+    const ows = " \t".repeat(100_000);
+    expect(canonicalizeHeaders([["if-none-match", `${ows}"abc"${ows}`]])).toEqual([
+      ["if-none-match", '"abc"'],
+    ]);
+  });
   it("accepts weak etag", () => {
     expect(canonicalizeHeaders([["if-none-match", 'W/"7"']])).toEqual([["if-none-match", 'W/"7"']]);
   });
@@ -347,6 +353,28 @@ describe("strictParseJson", () => {
     expectCanon(() => strictParseJson('{"x":{"a":1,"a":2}}'), "CANON_JSON_DUPLICATE_KEY"));
   it("rejects duplicate key deep in array", () =>
     expectCanon(() => strictParseJson('{"x":[{"a":1,"a":2}]}'), "CANON_JSON_DUPLICATE_KEY"));
+  // SEC-045: a `__proto__` member must never silently replace the result's
+  // prototype (object value) or vanish (primitive value); reject it outright.
+  it("rejects __proto__ member with object value", () =>
+    expectCanon(
+      () => strictParseJson('{"__proto__":{"isAdmin":true}}'),
+      "CANON_JSON_FORBIDDEN_KEY",
+    ));
+  it("rejects __proto__ member with primitive value", () =>
+    expectCanon(() => strictParseJson('{"__proto__":1,"text":"hi"}'), "CANON_JSON_FORBIDDEN_KEY"));
+  it("rejects __proto__ member nested at any depth", () =>
+    expectCanon(() => strictParseJson('{"x":[{"__proto__":null}]}'), "CANON_JSON_FORBIDDEN_KEY"));
+  it("rejects constructor/prototype members", () => {
+    expectCanon(() => strictParseJson('{"constructor":{}}'), "CANON_JSON_FORBIDDEN_KEY");
+    expectCanon(() => strictParseJson('{"prototype":{}}'), "CANON_JSON_FORBIDDEN_KEY");
+  });
+  it("never returns an object with a replaced prototype", () => {
+    // Defense in depth: whatever the parser returns, property reads must not
+    // observe smuggled members through the prototype chain.
+    const parsed = strictParseJson('{"text":"hi"}') as Record<string, unknown>;
+    expect(Object.getPrototypeOf(parsed)).toBe(Object.prototype);
+    expect((parsed as { isAdmin?: unknown }).isAdmin).toBeUndefined();
+  });
   it("rejects trailing content", () =>
     expectCanon(() => strictParseJson('{"a":1} garbage'), "CANON_JSON_SYNTAX_INVALID"));
   it("rejects trailing comma", () =>
@@ -393,6 +421,18 @@ describe("jcsStringify rejects non-JSON runtime values", () => {
   });
   it("non-integer runtime number", () =>
     expectCanon(() => jcsStringify({ a: 1.5 }), "CANON_RUNTIME_VALUE_UNSUPPORTED"));
+  it("accessor property — getter is rejected, never invoked (SEC-191)", () => {
+    let getterRan = false;
+    const exotic = Object.defineProperty({}, "a", {
+      enumerable: true,
+      get() {
+        getterRan = true;
+        return 1;
+      },
+    });
+    expectCanon(() => jcsStringify(exotic), "CANON_RUNTIME_VALUE_UNSUPPORTED");
+    expect(getterRan).toBe(false);
+  });
 });
 
 describe("jcs key ordering (UTF-16 code units)", () => {

@@ -55,6 +55,11 @@ export type AuthorizationSignatureOptions = {
   required?: boolean;
   secrets?: string[];
   appSecretResolver?: (request: Request) => Promise<string[]> | string[];
+  tenantKeyStoreFactory?: (
+    masterPassword: string,
+    masterSalt: string | undefined,
+    domain: "secret-vault",
+  ) => Pick<KeyStore, "decrypt">;
 };
 
 function configuredSecrets(): string[] {
@@ -146,26 +151,40 @@ async function appClientSecretSigningCandidates(request: Request): Promise<strin
   return valid ? [basic.password] : [];
 }
 
-async function tenantRequestSigningKeyCandidates(request: Request): Promise<string[]> {
+// Tenant signing-key ids are server-generated UUIDs (tenant-config.ts uses
+// `randomUUID()`), so a non-UUID header value can be rejected without a query.
+const SIGNING_KEY_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+async function tenantRequestSigningKeyCandidates(
+  request: Request,
+  createKeyStore: NonNullable<AuthorizationSignatureOptions["tenantKeyStoreFactory"]>,
+): Promise<string[]> {
   const tenantId = request.headers.get("X-Steward-Tenant");
   if (!isValidTenantId(tenantId)) return [];
 
+  // This middleware runs before route authentication, so unauthenticated input
+  // must not trigger the signing-key KDF. Only a named, well-formed key ID can
+  // reach the indexed lookup and subsequent decrypt.
   const keyId = request.headers.get("X-Steward-Signing-Key-Id");
+  if (!keyId || !SIGNING_KEY_ID_PATTERN.test(keyId)) return [];
   const masterPassword = process.env.STEWARD_MASTER_PASSWORD;
   if (!masterPassword) return [];
 
   const now = new Date();
-  const filters = [
-    eq(tenantRequestSigningKeys.tenantId, tenantId),
-    inArray(tenantRequestSigningKeys.status, ["active", "retiring"]),
-  ];
-  if (keyId) filters.push(eq(tenantRequestSigningKeys.id, keyId));
-
   const rows = await getDb()
     .select()
     .from(tenantRequestSigningKeys)
-    .where(and(...filters));
-  const keyStore = new KeyStore(masterPassword, undefined, "secret-vault");
+    .where(
+      and(
+        eq(tenantRequestSigningKeys.tenantId, tenantId),
+        eq(tenantRequestSigningKeys.id, keyId),
+        inArray(tenantRequestSigningKeys.status, ["active", "retiring"]),
+      ),
+    );
+  // Defer KeyStore construction (itself a scrypt KDF) until a row exists, so
+  // an unknown key id costs only the cheap lookup above.
+  if (rows.length === 0) return [];
+  const keyStore = createKeyStore(masterPassword, undefined, "secret-vault");
   return rows.flatMap((row) => {
     if (row.revokedAt) return [];
     if (row.expiresAt && row.expiresAt <= now) return [];
@@ -788,6 +807,9 @@ export function authorizationSignature(options?: AuthorizationSignatureOptions) 
       process.env.NODE_ENV === "production");
   const secrets = options?.secrets ?? configuredSecrets();
   const appSecretResolver = options?.appSecretResolver ?? appClientSecretSigningCandidates;
+  const tenantKeyStoreFactory =
+    options?.tenantKeyStoreFactory ??
+    ((masterPassword, masterSalt, domain) => new KeyStore(masterPassword, masterSalt, domain));
   const maxClockSkewMs = parsePositiveInt(
     process.env.STEWARD_REQUEST_EXPIRY_MAX_SKEW_MS,
     DEFAULT_MAX_CLOCK_SKEW_MS,
@@ -886,13 +908,20 @@ export function authorizationSignature(options?: AuthorizationSignatureOptions) 
     }
 
     const signingKeyId = c.req.header("X-Steward-Signing-Key-Id");
-    const tenantKeySecrets = await tenantRequestSigningKeyCandidates(c.req.raw);
+    // Only a request that NAMES a tenant signing key id pays for the tenant-key
+    // lookup (and, for a known id, the scrypt KDF + decrypt). Key-id-less
+    // requests fall through to the static/app-secret candidates and never
+    // trigger tenant-key work — closing the unauthenticated CPU-amplification
+    // DoS the global SEC-010 mount exposed.
+    const tenantKeySecrets = signingKeyId
+      ? await tenantRequestSigningKeyCandidates(c.req.raw, tenantKeyStoreFactory)
+      : [];
     if (signingKeyId && tenantKeySecrets.length === 0) {
       return c.json<ApiResponse>({ ok: false, error: "Invalid signing key id" }, 401);
     }
     const candidateSecrets = signingKeyId
       ? tenantKeySecrets
-      : [...secrets, ...tenantKeySecrets, ...(await appSecretResolver(c.req.raw))];
+      : [...secrets, ...(await appSecretResolver(c.req.raw))];
     if (candidateSecrets.length === 0) {
       return c.json<ApiResponse>({ ok: false, error: "Request signing is not configured" }, 500);
     }

@@ -12,7 +12,7 @@
  */
 
 import { existsSync } from "node:fs";
-import { mkdir, readdir, readFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, readdir, readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { PGlite } from "@electric-sql/pglite";
@@ -120,11 +120,22 @@ export async function createPGLiteDb(dataDir?: string): Promise<{ client: PGlite
     connectionTarget = "memory://";
   } else {
     const dir = dataDir ?? getDataDir();
-    // Ensure data directory exists
+    // SEC-090: the data directory holds encrypted wallet keys, refresh-token
+    // hashes, webhook secrets, and audit chains — it must be owner-only.
+    // chmod unconditionally so directories created before this guard (or by
+    // hand with a permissive umask) are tightened on next start.
     if (!existsSync(dir)) {
-      await mkdir(dir, { recursive: true });
+      await mkdir(dir, { recursive: true, mode: 0o700 });
       console.log(`[pglite] Created data directory: ${dir}`);
     }
+    const dataDirStat = await lstat(dir);
+    if (dataDirStat.isSymbolicLink()) {
+      throw new Error(`[pglite] Refusing symbolic-link data directory: ${dir}`);
+    }
+    if (!dataDirStat.isDirectory()) {
+      throw new Error(`[pglite] Data path is not a directory: ${dir}`);
+    }
+    await chmod(dir, 0o700);
     connectionTarget = dir;
   }
 

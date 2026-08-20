@@ -9,9 +9,12 @@ import type {
   Memory,
   State,
 } from "@elizaos/core";
+import { assertSecureApiUrl } from "../services/StewardService.js";
 
 const ACTION_NAME = "SUBMIT_TRADE";
 const DEFAULT_LEVERAGE = 1;
+const STEWARD_REQUEST_TIMEOUT_MS = 10_000;
+const MAX_STEWARD_RESPONSE_BYTES = 1024 * 1024;
 
 type Coin = "BTC" | "ETH";
 type Side = "buy" | "sell";
@@ -75,7 +78,11 @@ function stewardJwt(runtime: IAgentRuntime): string | undefined {
 }
 
 function stewardApiUrl(runtime: IAgentRuntime): string | undefined {
-  return envValue(runtime, "STEWARD_API_URL")?.replace(/\/+$/, "");
+  const apiUrl = envValue(runtime, "STEWARD_API_URL")?.replace(/\/+$/, "");
+  // Reject plaintext non-localhost URLs here too: this action reads the env URL
+  // directly and would otherwise send the agent JWT in cleartext.
+  if (apiUrl) assertSecureApiUrl(apiUrl);
+  return apiUrl;
 }
 
 function configuredSessionId(runtime: IAgentRuntime): string | undefined {
@@ -181,13 +188,97 @@ export function parseSubmitTrade(
   };
 }
 
-async function parseResponseJson(response: Response): Promise<unknown> {
-  const text = await response.text();
+async function readResponseText(response: Response, signal: AbortSignal): Promise<string> {
+  const declaredLength = response.headers.get("content-length");
+  if (declaredLength !== null) {
+    const parsedLength = Number(declaredLength);
+    if (!Number.isSafeInteger(parsedLength) || parsedLength < 0) {
+      void response.body?.cancel().catch(() => undefined);
+      throw new Error("Invalid Steward response length");
+    }
+    if (parsedLength > MAX_STEWARD_RESPONSE_BYTES) {
+      void response.body?.cancel().catch(() => undefined);
+      throw new Error("Steward response exceeded size limit");
+    }
+  }
+
+  const reader = response.body?.getReader();
+  if (!reader) return "";
+  const chunks: Uint8Array[] = [];
+  let totalBytes = 0;
+  let rejectAborted: (reason: Error) => void = () => {};
+  const aborted = new Promise<never>((_, reject) => {
+    rejectAborted = reject;
+  });
+  const onAbort = () => {
+    void reader.cancel().catch(() => undefined);
+    rejectAborted(new Error("Steward request timed out"));
+  };
+  signal.addEventListener("abort", onAbort, { once: true });
+  if (signal.aborted) onAbort();
+  try {
+    while (true) {
+      const result = await Promise.race([reader.read(), aborted]);
+      if (result.done) break;
+      if (!result.value) continue;
+      totalBytes += result.value.byteLength;
+      if (totalBytes > MAX_STEWARD_RESPONSE_BYTES) {
+        void reader.cancel().catch(() => undefined);
+        throw new Error("Steward response exceeded size limit");
+      }
+      chunks.push(result.value);
+    }
+  } finally {
+    signal.removeEventListener("abort", onAbort);
+    reader.releaseLock();
+  }
+  const bytes = new Uint8Array(totalBytes);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    throw new Error("Steward response was not valid UTF-8");
+  }
+}
+
+async function parseResponseJson(response: Response, signal: AbortSignal): Promise<unknown> {
+  const text = await readResponseText(response, signal);
   if (!text) return undefined;
   try {
     return JSON.parse(text);
   } catch {
     return { error: text };
+  }
+}
+
+async function fetchStewardJson(
+  url: string,
+  init: RequestInit,
+): Promise<{ status: number; ok: boolean; data: unknown }> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), STEWARD_REQUEST_TIMEOUT_MS);
+  try {
+    const response = await fetch(url, {
+      ...init,
+      redirect: "error",
+      signal: controller.signal,
+    });
+    const data = await parseResponseJson(response, controller.signal);
+    // cancel() may resolve an outstanding reader.read() with { done: true }
+    // before the abort rejection wins Promise.race. Preserve the deadline as
+    // the outcome even in that ordering instead of accepting a partial body.
+    if (controller.signal.aborted) throw new Error("Steward request timed out");
+    return { status: response.status, ok: response.ok, data };
+  } catch {
+    throw new Error(
+      controller.signal.aborted ? "Steward request timed out" : "Steward request failed",
+    );
+  } finally {
+    clearTimeout(timeout);
   }
 }
 
@@ -221,7 +312,7 @@ async function postOrder(
   }
 
   const idempotencyKey = crypto.randomUUID();
-  const response = await fetch(`${apiUrl}/v1/trade/hyperliquid/order`, {
+  const response = await fetchStewardJson(`${apiUrl}/v1/trade/hyperliquid/order`, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${jwt}`,
@@ -240,21 +331,29 @@ async function postOrder(
       idempotencyKey,
     }),
   });
-  return { status: response.status, data: await parseResponseJson(response) };
+  return { status: response.status, data: response.data };
 }
 
 async function hasActiveSession(runtime: IAgentRuntime): Promise<boolean> {
-  const apiUrl = stewardApiUrl(runtime);
+  let apiUrl: string | undefined;
+  try {
+    apiUrl = stewardApiUrl(runtime);
+  } catch {
+    return false;
+  }
   const jwt = stewardJwt(runtime);
   const sessionId = configuredSessionId(runtime);
   if (!apiUrl || !jwt || !sessionId) return false;
 
   try {
-    const response = await fetch(`${apiUrl}/v1/trade/sessions/${encodeURIComponent(sessionId)}`, {
-      headers: { Authorization: `Bearer ${jwt}`, Accept: "application/json" },
-    });
+    const response = await fetchStewardJson(
+      `${apiUrl}/v1/trade/sessions/${encodeURIComponent(sessionId)}`,
+      {
+        headers: { Authorization: `Bearer ${jwt}`, Accept: "application/json" },
+      },
+    );
     if (!response.ok) return false;
-    const data = await parseResponseJson(response);
+    const data = response.data;
     const session =
       data && typeof data === "object" && "data" in data
         ? (data as { data?: Record<string, unknown> }).data
@@ -398,7 +497,7 @@ export const submitTradeAction: Action = {
       data = result.data;
     } catch (err) {
       const text =
-        err instanceof Error && /STEWARD_API_URL|STEWARD_JWT/.test(err.message)
+        err instanceof Error && /STEWARD_API_URL|STEWARD_JWT|apiUrl/.test(err.message)
           ? "Trading is unavailable because Steward JWT/API env is not configured."
           : "venue error, will retry later";
       await callback?.({ text, action: ACTION_NAME }, ACTION_NAME);

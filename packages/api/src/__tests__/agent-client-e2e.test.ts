@@ -1,5 +1,5 @@
 /**
- * agent-client-e2e.test.ts — Pillar A / lane A3 happy-path E2E.
+ * Agent keypair bootstrap happy-path E2E.
  *
  * Drives the REAL @stwd/sdk AgentClient against a REAL, in-process Steward API
  * surface — the actual A1 route handlers (agent-enroll + manifest/issuance +
@@ -23,8 +23,16 @@
 
 import { afterAll, beforeAll, describe, expect, it, setDefaultTimeout } from "bun:test";
 import { fileURLToPath } from "node:url";
-import { generateP256KeyPair } from "@stwd/auth";
-import { agentSigners, agents, closeDb, getDb, runPluginMigrations, tenants } from "@stwd/db";
+import { generateP256KeyPair, signAgentToken } from "@stwd/auth";
+import {
+  __resetAuditHmacKeyCacheForTests,
+  agentSigners,
+  agents,
+  closeDb,
+  getDb,
+  runPluginMigrations,
+  tenants,
+} from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { CapabilityStore } from "@stwd/plugin-capabilities";
 import { AgentClient, AgentKeypair } from "@stwd/sdk";
@@ -38,10 +46,25 @@ setDefaultTimeout(30000);
 const MASTER_PASSWORD = "a3-agent-client-e2e-master-password-32chars";
 const SIGNING_SECRET = "a3-agent-client-e2e-signing-secret-32bytes-min";
 const FAKE_PAT = "ghp_a3_e2e_do_not_use_0123456789abcdef";
+const AUDIT_HMAC_KEY = "a3-agent-client-e2e-audit-hmac-key-with-enough-bytes";
 const PROXY_URL = "https://proxy.a3-e2e.test";
 const CAP_MIGRATIONS = fileURLToPath(
   new URL("../../../plugin-capabilities/drizzle", import.meta.url),
 );
+const TEST_ENV_KEYS = [
+  "NODE_ENV",
+  "STEWARD_KDF_SALT",
+  "REDIS_REQUIRED",
+  "STEWARD_PGLITE_MEMORY",
+  "STEWARD_MASTER_PASSWORD",
+  "STEWARD_JWT_SECRET",
+  "STEWARD_AUDIT_HMAC_KEY",
+  "STEWARD_PROXY_REQUIRE_REQUEST_SIGNATURE",
+  "STEWARD_PROXY_REQUEST_SIGNING_SECRET",
+  "STEWARD_PROXY_ALLOWED_HOSTS",
+  "STEWARD_PROXY_DEV_MODE",
+  "STEWARD_PROXY_URL",
+] as const;
 
 let keypair: Awaited<ReturnType<typeof generateP256KeyPair>>;
 let tenantId: string;
@@ -49,8 +72,11 @@ let agentId: string;
 let capName: string;
 
 let forwarded: { url: string; auth: string | null; bodyText: string | null } | null = null;
+let proxyRequest: { headers: Headers; bodyText: string | null } | null = null;
 let proxyApp: Hono | null = null;
 const realFetch = globalThis.fetch;
+let originalEnv = new Map<string, string | undefined>();
+let resetProxyHandlerTestHooksForTests: (() => void) | undefined;
 
 // Real A1 route factories + agent-jwt middleware.
 let agentEnrollRoutes: Hono<{ Variables: AppVariables }>;
@@ -125,12 +151,19 @@ async function buildStewardAppContext() {
 }
 
 beforeAll(async () => {
+  originalEnv = new Map(TEST_ENV_KEYS.map((key) => [key, process.env[key]]));
+  process.env.NODE_ENV = "test";
+  process.env.STEWARD_KDF_SALT = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+  process.env.REDIS_REQUIRED = "false";
   process.env.STEWARD_PGLITE_MEMORY = "true";
   process.env.STEWARD_MASTER_PASSWORD = MASTER_PASSWORD;
   process.env.STEWARD_JWT_SECRET = "a3-agent-client-e2e-jwt-secret-with-enough-bytes-0123456789";
+  process.env.STEWARD_AUDIT_HMAC_KEY = AUDIT_HMAC_KEY;
+  __resetAuditHmacKeyCacheForTests();
   process.env.STEWARD_PROXY_REQUIRE_REQUEST_SIGNATURE = "true";
   process.env.STEWARD_PROXY_REQUEST_SIGNING_SECRET = SIGNING_SECRET;
   process.env.STEWARD_PROXY_ALLOWED_HOSTS = "api.github.com";
+  process.env.STEWARD_PROXY_DEV_MODE = "true";
   process.env.STEWARD_PROXY_URL = PROXY_URL;
 
   const { db, client } = await createPGLiteDb("memory://");
@@ -148,8 +181,12 @@ beforeAll(async () => {
     handleProxy,
     __setForwardProxyRequestForTests: setForward,
     __setResolveProxyHostForTests: setResolveHost,
+    __setCheckProxyRateLimitForTests: setCheckProxyRateLimitForTests,
+    __resetProxyHandlerTestHooksForTests: resetProxyHooks,
   } = await import("@stwd/proxy/src/handlers/proxy");
+  resetProxyHandlerTestHooksForTests = resetProxyHooks;
   setResolveHost(async () => [{ address: "93.184.216.34", family: 4 }]);
+  setCheckProxyRateLimitForTests(async () => ({ allowed: true, resetMs: 0 }));
   setForward(async (url, method, headers, body) => {
     const bodyText = body ? await new Response(body).text() : null;
     forwarded = {
@@ -230,12 +267,16 @@ beforeAll(async () => {
   globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const url =
       typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-    if (url.startsWith("http://a3-api")) {
-      const path = url.slice("http://a3-api".length) || "/";
+    if (url.startsWith("http://localhost")) {
+      const path = url.slice("http://localhost".length) || "/";
       return apiApp.request(path, init as RequestInit);
     }
     if (url.startsWith(PROXY_URL) && proxyApp) {
       const path = url.slice(PROXY_URL.length) || "/";
+      proxyRequest = {
+        headers: new Headers(init?.headers),
+        bodyText: typeof init?.body === "string" ? init.body : null,
+      };
       return proxyApp.request(path, init as RequestInit);
     }
     return realFetch(input as RequestInfo, init);
@@ -244,26 +285,39 @@ beforeAll(async () => {
 
 afterAll(async () => {
   globalThis.fetch = realFetch;
+  resetProxyHandlerTestHooksForTests?.();
   await closeDb().catch(() => {});
-  for (const k of [
-    "STEWARD_PGLITE_MEMORY",
-    "STEWARD_MASTER_PASSWORD",
-    "STEWARD_JWT_SECRET",
-    "STEWARD_PROXY_REQUIRE_REQUEST_SIGNATURE",
-    "STEWARD_PROXY_REQUEST_SIGNING_SECRET",
-    "STEWARD_PROXY_ALLOWED_HOSTS",
-    "STEWARD_PROXY_URL",
-  ]) {
-    delete process.env[k];
+  for (const key of TEST_ENV_KEYS) {
+    const original = originalEnv.get(key);
+    if (original === undefined) delete process.env[key];
+    else process.env[key] = original;
   }
+  __resetAuditHmacKeyCacheForTests();
+  originalEnv.clear();
 });
 
 describe("A3 agent-client E2E (real API, seeded p256 signer)", () => {
+  it("keeps the proxy fail-closed for unsigned agent requests", async () => {
+    const token = await signAgentToken({ agentId, tenantId, scopes: ["agent", "api:proxy"] }, "5m");
+    const response = await proxyApp!.request(
+      "/proxy/api.github.com/repos/acme/app/issues/1/comments",
+      { headers: { authorization: `Bearer ${token}` } },
+    );
+
+    expect(response.status).toBe(401);
+    expect(await response.json()).toEqual({
+      ok: false,
+      error: "X-Steward-Signature header required",
+    });
+  });
+
   it("boots keypair-only and runs enroll → manifest → issue → invoke", async () => {
+    forwarded = null;
+    proxyRequest = null;
     // The agent holds ONLY its private key (imported non-extractable).
     const kp = await AgentKeypair.fromPkcs8Base64(await exportPkcs8Base64(keypair.privateKey));
     const client = new AgentClient({
-      baseUrl: "http://a3-api",
+      baseUrl: "http://localhost",
       agentId,
       keypair: kp,
       renewJitterMs: 0,
@@ -297,9 +351,17 @@ describe("A3 agent-client E2E (real API, seeded p256 signer)", () => {
     // the credential reached the UPSTREAM (proxy→github), never the agent.
     expect(forwarded).not.toBeNull();
     expect(forwarded!.auth).toBe(`Bearer ${FAKE_PAT}`);
+    expect(forwarded!.bodyText).not.toContain(FAKE_PAT);
+    // The API→proxy leg really is signed; dev-mode test plumbing must not make
+    // this happy path vacuous by allowing an unsigned request through.
+    expect(proxyRequest).not.toBeNull();
+    expect(proxyRequest!.headers.get("x-steward-signature")).toMatch(/^v1=[0-9a-f]{64}$/);
+    expect(proxyRequest!.headers.get("x-steward-request-timestamp")).toMatch(/^\d+$/);
+    expect(proxyRequest!.bodyText).not.toContain(FAKE_PAT);
     // the agent-visible response body never contains the PAT.
     expect(JSON.stringify(res.data)).not.toContain(FAKE_PAT);
     expect(JSON.stringify(res.data)).not.toContain("ghp_");
+    expect(JSON.stringify(res.data)).not.toContain(AUDIT_HMAC_KEY);
 
     client.stopRenewalLoop();
   });

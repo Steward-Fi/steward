@@ -1,14 +1,13 @@
 /**
- * issuance.ts — the capability ISSUANCE / RENEWAL / REVOCATION core (lane A1,
- * scope items 2-5).
+ * Capability issuance, renewal, and revocation core.
  *
  * This is the token/broker issuance layer that sits ON TOP of the already-shipped
  * capability plumbing (capabilities + grants + the proxy-broker invoke path). It
  * does NOT re-implement credential injection, policy evaluation, or the grant
  * lifecycle — it maps a per-agent MANIFEST entry to an issuance decision:
  *
- *   • token mode  → mint a SHORT-LIVED, SCOPED agent token (@stwd/auth
- *                   signAgentToken, minute-scale TTL) the agent uses directly.
+ *   • token mode  → is handled by upstream-leases.ts. This module must never
+ *                   substitute a Steward JWT for a provider credential.
  *   • broker mode → return a DELEGATION descriptor telling the agent to invoke
  *                   through Steward's existing broker endpoint
  *                   (POST /capabilities/:name/invoke); the credential never
@@ -17,7 +16,7 @@
  * RENEWAL: tokens are deliberately short-lived (minutes). The agent re-requests
  * (renew == issue again); each renewal re-checks the live manifest, so a
  * revocation (policy/grant edit) takes effect at the NEXT renewal — bounded by
- * the TTL, per the Pillar-A green criterion (<5 min).
+ * the configured short TTL.
  *
  * REVOCATION: there is no token-revocation call here by design — short TTL +
  * re-check-on-renew IS the revocation mechanism (an operator disables the
@@ -27,8 +26,7 @@
  * we surface the minted jti so a caller can revoke it if needed.
  *
  * AUDIT: every enroll/issue/renew/revoke/exercise emits a structured event
- * through the injected `emitAudit` sink (interface only — lane E1 wires the full
- * evidence pipeline). This file defines the event shape and emits it; it does not
+ * through the injected `emitAudit` sink. This file defines the event shape and emits it; it does not
  * own the sink.
  */
 
@@ -52,7 +50,7 @@ export type CapabilityAuditAction =
   | "capability.exercise";
 
 /** Structured audit event. Deliberately free of secret material — identifiers,
- * mode, decision, and timing only. Lane E1 consumes this shape. */
+ * mode, decision, and timing only. Audit consumers use this shape. */
 export interface CapabilityAuditEvent {
   action: CapabilityAuditAction;
   tenantId: string;
@@ -130,7 +128,8 @@ export type IssuanceDenyCode =
   | "invalid_manifest"
   | "not_granted"
   | "ttl_out_of_range"
-  | "mint_failed";
+  | "mint_failed"
+  | "upstream_issuer_required";
 
 /** Clamp a requested TTL into the honest short-lived range. */
 export function clampTtlSeconds(requested: number | undefined): number | null {
@@ -219,66 +218,20 @@ export async function issueCapability(args: {
     };
   }
 
-  // token mode: mint a short-lived, capability-scoped token.
-  const ttl = clampTtlSeconds(args.ttlSeconds);
-  if (ttl === null) {
-    await audit({
-      tenantId: args.tenantId,
-      agentId: args.agentId,
-      manifest: args.manifest,
-      capabilityId: capability.id,
-      mode: "token",
-      decision: "deny",
-      reason: "requested ttl out of range",
-    });
-    return {
-      ok: false,
-      error: `ttl must be 1-${MAX_ISSUE_TTL_SECONDS} seconds`,
-      code: "ttl_out_of_range",
-    };
-  }
-
-  const scopes = ["agent", capabilityTokenScope(args.manifest)];
-  let minted: { token: string; jti: string };
-  try {
-    minted = await args.mintToken({
-      agentId: args.agentId,
-      tenantId: args.tenantId,
-      scopes,
-      ttlSeconds: ttl,
-    });
-  } catch {
-    await audit({
-      tenantId: args.tenantId,
-      agentId: args.agentId,
-      manifest: args.manifest,
-      capabilityId: capability.id,
-      mode: "token",
-      decision: "deny",
-      reason: "token mint failed",
-    });
-    return { ok: false, error: "token issuance failed", code: "mint_failed" };
-  }
-
+  // A Steward JWT is not a GitHub credential. The real token-mode route is the
+  // durable upstream lease path; fail closed if this generic helper is called.
   await audit({
     tenantId: args.tenantId,
     agentId: args.agentId,
     manifest: args.manifest,
     capabilityId: capability.id,
     mode: "token",
-    decision: "allow",
-    jti: minted.jti,
-    ttlSeconds: ttl,
+    decision: "deny",
+    reason: "upstream issuer required",
   });
-
   return {
-    ok: true,
-    mode: "token",
-    token: minted.token,
-    jti: minted.jti,
-    ttlSeconds: ttl,
-    scopes,
-    manifest: args.manifest,
-    capabilityId: capability.id,
+    ok: false,
+    error: "provider token mode requires a configured upstream issuer",
+    code: "upstream_issuer_required",
   };
 }

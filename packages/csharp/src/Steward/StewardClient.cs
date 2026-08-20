@@ -23,7 +23,17 @@ namespace Steward
         public string? TenantId { get; set; }
         public string? RequestSigningSecret { get; set; }
         public string? RequestSigningKeyId { get; set; }
+        /// <summary>Permit a plaintext non-loopback BaseUrl (warns at construction). HTTPS is
+        /// required by default so credentials never travel cleartext off-loopback (SEC-200).</summary>
+        public bool AllowInsecureBaseUrl { get; set; }
         public TimeSpan Timeout { get; set; } = TimeSpan.FromSeconds(30);
+        /// <summary>Optional custom transport. WARNING: the default transport disables
+        /// auto-redirect (<c>AllowAutoRedirect = false</c>) because HttpClient would copy the
+        /// X-Steward-* credential/signing headers to the redirect target (it strips only
+        /// Authorization), so an open redirect or hostile proxy could exfiltrate them
+        /// (SEC-126). A custom Transport takes over redirect handling entirely: it must not
+        /// follow a redirect to a different host (or an HTTPS→HTTP downgrade) without first
+        /// stripping the Authorization / X-Steward-* headers.</summary>
         public StewardTransport? Transport { get; set; }
         public Func<DateTimeOffset> Now { get; set; } = () => DateTimeOffset.UtcNow;
         public Func<string> NewId { get; set; } = () => Guid.NewGuid().ToString();
@@ -80,6 +90,9 @@ namespace Steward
 
     public sealed class StewardClient
     {
+        // Keep in lockstep with the equivalent list in EVERY other SDK (sdk, go,
+        // java, python, ruby, rust, swift, flutter): mutations under these
+        // prefixes are HMAC-signed; divergence silently downgrades integrity (SEC-049).
         private static readonly string[] SensitivePrefixes = new[]
         {
             "/vault",
@@ -96,7 +109,9 @@ namespace Steward
             "/platform",
             "/condition-sets",
             "/condition_sets",
-            "/v1/condition_sets"
+            "/v1/condition_sets",
+            "/global-wallet",
+            "/accounts"
         };
 
         private readonly StewardClientConfig _config;
@@ -113,7 +128,54 @@ namespace Steward
 
             _config = config;
             BaseUrl = config.BaseUrl.TrimEnd('/');
+            AssertSecureBaseUrl(BaseUrl, config.AllowInsecureBaseUrl);
             _transport = config.Transport ?? DefaultTransportAsync;
+        }
+
+        // Keep in lockstep with the equivalent check in EVERY other SDK (sdk, go,
+        // java, python, ruby, rust, swift, flutter): these clients transmit API
+        // keys, bearer tokens, and HMAC-signed credentials, none of which may
+        // travel to a plaintext non-loopback endpoint (SEC-200, mirroring SEC-048).
+        private static void AssertSecureBaseUrl(string baseUrl, bool allowInsecureBaseUrl)
+        {
+            Uri uri;
+            try
+            {
+                uri = new Uri(baseUrl, UriKind.Absolute);
+            }
+            catch (UriFormatException e)
+            {
+                throw new ArgumentException("BaseUrl must be a valid absolute URL", nameof(baseUrl), e);
+            }
+
+            if (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps)
+            {
+                throw new ArgumentException("BaseUrl must use HTTP or HTTPS", nameof(baseUrl));
+            }
+            if (!string.IsNullOrEmpty(uri.UserInfo))
+            {
+                throw new ArgumentException("BaseUrl must not embed credentials", nameof(baseUrl));
+            }
+
+            if (uri.Scheme == Uri.UriSchemeHttps
+                || (uri.Scheme == Uri.UriSchemeHttp && IsLoopbackHost(uri.Host)))
+            {
+                return;
+            }
+            if (allowInsecureBaseUrl)
+            {
+                Console.Error.WriteLine("[steward-sdk] WARNING: BaseUrl is not HTTPS; credentials travel in cleartext. Use AllowInsecureBaseUrl only on trusted private networks.");
+                return;
+            }
+            throw new ArgumentException("BaseUrl must use HTTPS unless it targets loopback (http://localhost, http://127.0.0.1, http://[::1]). Set AllowInsecureBaseUrl to override on trusted private networks.", nameof(baseUrl));
+        }
+
+        private static bool IsLoopbackHost(string host)
+        {
+            return string.Equals(host, "localhost", StringComparison.OrdinalIgnoreCase)
+                || host == "127.0.0.1"
+                || host == "::1"
+                || host == "[::1]";
         }
 
         public Task<JsonElement?> GetAsync(string path, Dictionary<string, string?>? query = null, Dictionary<string, string>? headers = null, CancellationToken cancellationToken = default)
@@ -278,7 +340,13 @@ namespace Steward
 
         private static async Task<StewardTransportResponse> DefaultTransportAsync(StewardTransportRequest request, CancellationToken cancellationToken)
         {
-            using var http = new HttpClient { Timeout = request.Timeout };
+            // Do not follow redirects automatically: HttpClient would copy the
+            // X-Steward-* credential/signing headers to the redirect target
+            // (it strips only Authorization), so an open redirect or hostile
+            // proxy could exfiltrate them (SEC-126). A 3xx surfaces as a
+            // response instead — callers configure the canonical API URL.
+            using var handler = new HttpClientHandler { AllowAutoRedirect = false };
+            using var http = new HttpClient(handler) { Timeout = request.Timeout };
             using var message = new HttpRequestMessage(new HttpMethod(request.Method), request.Url);
             foreach (var pair in request.Headers)
             {

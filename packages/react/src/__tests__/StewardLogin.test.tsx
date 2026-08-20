@@ -1,7 +1,7 @@
 /**
  * StewardLogin tests: rules-of-hooks regression coverage.
  *
- * The previously-fixed bug placed `useRef` + `useEffect` after an early
+ * Hooks must remain before the early
  * return on `!ctx`. This test locks in the correct structure by mounting
  * the component in each branch (missing auth context, signed-in, and
  * signed-out) and asserting no throw.

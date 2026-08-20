@@ -16,6 +16,31 @@ describe("policy rule validation", () => {
     ).toContain("auto-approve-threshold");
   });
 
+  it("rejects an enabled time-window rule with no windows at all (SEC-180)", () => {
+    expect(
+      getPolicyRulesValidationError([
+        {
+          id: "tw",
+          type: "time-window",
+          enabled: true,
+          config: { allowedHours: [], allowedDays: [] },
+        },
+      ]),
+    ).toBe("time-window requires at least one allowed hour window or allowed day");
+
+    // A single gated dimension is valid: the other stays unconstrained.
+    expect(
+      getPolicyRulesValidationError([
+        {
+          id: "tw",
+          type: "time-window",
+          enabled: true,
+          config: { allowedHours: [{ start: 9, end: 17 }], allowedDays: [] },
+        },
+      ]),
+    ).toBeNull();
+  });
+
   it("accepts valid persisted policy configs", () => {
     expect(
       getPolicyRulesValidationError([
@@ -305,6 +330,39 @@ describe("policy rule validation", () => {
         },
       ]),
     ).toContain("wei strings");
+  });
+
+  it("accepts canonical, mixed, and legacy spending-limit write contracts", () => {
+    for (const config of [
+      { maxPerTx: "0" },
+      { maxPerDay: "100", maxPerWeekUsd: 0 },
+      { maxPerWeek: "1000", maxPerDayUsd: 25 },
+      { maxAmount: "500", period: "day" },
+      { maxAmount: "500" },
+      { maxAmount: "500", period: "week", maxPerTxUsd: 10 },
+    ]) {
+      expect(
+        getPolicyRulesValidationError([
+          { id: "spend", type: "spending-limit", enabled: true, config },
+        ]),
+        JSON.stringify(config),
+      ).toBeNull();
+    }
+  });
+
+  it("rejects ambiguous legacy spending-limit write contracts", () => {
+    for (const config of [
+      { maxAmount: 500, period: "day" },
+      { maxAmount: "500", period: "month" },
+      { period: "day" },
+    ]) {
+      expect(
+        getPolicyRulesValidationError([
+          { id: "spend", type: "spending-limit", enabled: true, config },
+        ]),
+        JSON.stringify(config),
+      ).not.toBeNull();
+    }
   });
 
   it("rejects oversized policy lists before deep validation", () => {

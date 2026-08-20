@@ -6,7 +6,9 @@
  *   1. whether the `domain` field is one your server actually serves,
  *   2. whether `chainId` is in your allowed set,
  *   3. whether the `notBefore` / `expirationTime` window is sane (a
- *      pathologically long-lived signature is technically valid),
+ *      pathologically long-lived signature is technically valid; a missing
+ *      expirationTime falls back to bounding the message's issuedAt age, and
+ *      a future-dated issuedAt is rejected),
  *   4. whether the `statement` matches a server-side allowlist (defends
  *      against phishing sites tricking users into signing your messages),
  *   5. whether `uri` matches `domain` (some wallets fail to enforce this).
@@ -88,6 +90,8 @@ export function evaluateSiwePolicy(msg: SiweMessageLike, policy: SiwePolicy): Si
 
   const issuedAt = Date.parse(msg.issuedAt);
   if (!Number.isFinite(issuedAt)) return "not-yet-valid";
+  // A future-dated issuedAt is never acceptable beyond clock skew (SEC-065).
+  if (issuedAt - now.getTime() > clockSkewMs) return "not-yet-valid";
 
   if (msg.notBefore) {
     const nb = Date.parse(msg.notBefore);
@@ -102,6 +106,10 @@ export function evaluateSiwePolicy(msg: SiweMessageLike, policy: SiwePolicy): Si
       if (exp + clockSkewMs < now.getTime()) return "expired";
       if (exp - issuedAt > maxLifetimeMs) return "lifetime-too-long";
     }
+  } else if (now.getTime() - issuedAt > maxLifetimeMs) {
+    // No expirationTime: bound the temporal window by the message's age
+    // instead, so a signed login cannot stay valid forever (SEC-065).
+    return "lifetime-too-long";
   }
 
   return null;

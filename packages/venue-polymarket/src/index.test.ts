@@ -18,7 +18,13 @@ import {
   signEndpointUrl,
   toClobCompatibleSigner,
 } from "./index";
-import { getBatchPriceHistory, getOrderbooks, getPriceHistory, getPrices } from "./marketdata";
+import {
+  getBatchPriceHistory,
+  getMarketByToken,
+  getOrderbooks,
+  getPriceHistory,
+  getPrices,
+} from "./marketdata";
 
 // ---------------------------------------------------------------------------
 // Test fixtures — a fake signer + account. NO network.
@@ -96,7 +102,9 @@ describe("deriveActualFill", () => {
     const r = deriveActualFill(
       "buy",
       { makingAmount: "10", takingAmount: "20" },
-      { amount: 10, price: 0.5 },
+      // Order size context: a 20-share buy (10 USDC at 0.5). The fill can never
+      // exceed the signed size, so 20 reads as human units.
+      { amount: 20, price: 0.5 },
     );
     expect(r.actualAmount).toBe(20);
     expect(r.actualPrice).toBeCloseTo(0.5, 10);
@@ -112,25 +120,24 @@ describe("deriveActualFill", () => {
     expect(r.actualPrice).toBeCloseTo(0.6, 10);
   });
 
-  test("BUY base-unit (6dp) response is normalized to shares", () => {
-    // 20 shares acquired for 10 USDC, reported as 6-decimal base units.
+  test("BUY decimal response amounts retain the official CLOB human units", () => {
     const r = deriveActualFill(
       "buy",
-      { makingAmount: "10000000", takingAmount: "20000000" },
-      { amount: 20, price: 0.5 },
+      { makingAmount: "4.999999", takingAmount: "10.416665" },
+      { amount: 10.42, price: 0.48 },
     );
-    expect(r.actualAmount).toBe(20); // NOT 20000000
-    expect(r.actualPrice).toBeCloseTo(0.5, 10); // ratio unit-invariant
+    expect(r.actualAmount).toBe(10.416665);
+    expect(r.actualPrice).toBeCloseTo(4.999999 / 10.416665, 10);
   });
 
-  test("SELL base-unit (6dp) response is normalized to shares", () => {
+  test("SELL decimal response amounts retain the official CLOB human units", () => {
     const r = deriveActualFill(
       "sell",
-      { makingAmount: "20000000", takingAmount: "12000000" },
-      { amount: 20, price: 0.6 },
+      { makingAmount: "1.69", takingAmount: "0.9802" },
+      { amount: 1.69, price: 0.58 },
     );
-    expect(r.actualAmount).toBe(20);
-    expect(r.actualPrice).toBeCloseTo(0.6, 10);
+    expect(r.actualAmount).toBe(1.69);
+    expect(r.actualPrice).toBeCloseTo(0.9802 / 1.69, 10);
   });
 
   test("falls back when amounts missing", () => {
@@ -163,6 +170,16 @@ describe("deriveActualFill", () => {
       { amount: 7, price: 0.42 },
     );
     expect(r).toEqual({ actualAmount: 7, actualPrice: 0.42 });
+  });
+
+  test("SEC-187: a genuine >=1M-share response is never magnitude-scaled", () => {
+    const r = deriveActualFill(
+      "buy",
+      { makingAmount: "1000000", takingAmount: "2000000" },
+      { amount: 2_000_000, price: 0.5 },
+    );
+    expect(r.actualAmount).toBe(2_000_000); // NOT 2
+    expect(r.actualPrice).toBeCloseTo(0.5, 10);
   });
 });
 
@@ -245,6 +262,13 @@ describe("signEndpointUrl normalization", () => {
     expect(signEndpointUrl(undefined)).toBe("/sign");
     expect(signEndpointUrl("")).toBe("/sign");
   });
+  test("handles adversarial slash runs without regex backtracking", () => {
+    const slashes = "/".repeat(200_000);
+    expect(signEndpointUrl(`x${slashes}`)).toBe("x/sign");
+    expect(signEndpointUrl(`https://builder.example/path${slashes}`)).toBe(
+      "https://builder.example/path/sign",
+    );
+  });
 });
 
 describe("builder attribution defaults OFF", () => {
@@ -274,12 +298,13 @@ describe("builder attribution defaults OFF", () => {
     expect(await createPolymarketBuilderConfig(cfg)).toBeNull();
   });
 
-  test("explicit input is respected but still off without signing server", () => {
-    const cfg = resolveBuilderConfig({ enabled: true, feeBps: 10, receiver: FUNDER });
-    expect(cfg.enabled).toBe(true);
-    expect(cfg.feeBps).toBe(10);
-    // No signing server -> still treated as off (can't attribute without it).
-    expect(isBuilderEnabled(cfg)).toBe(false);
+  test("rejects enabled or disabled partial builder configuration", () => {
+    expect(() => resolveBuilderConfig({ enabled: true, feeBps: 10, receiver: FUNDER })).toThrow(
+      "enabled builder requires signing server URL",
+    );
+    expect(() => resolveBuilderConfig({ enabled: false, receiver: FUNDER })).toThrow(
+      "partial disabled configuration is rejected",
+    );
   });
 
   test("enabled WITH signing server flips on", () => {
@@ -291,6 +316,27 @@ describe("builder attribution defaults OFF", () => {
       signingServerToken: "tok",
     });
     expect(isBuilderEnabled(cfg)).toBe(true);
+  });
+
+  test("rejects signing-token transport over public HTTP and URL credentials", () => {
+    expect(() =>
+      resolveBuilderConfig({
+        enabled: true,
+        feeBps: 10,
+        receiver: FUNDER,
+        signingServerUrl: "http://signer.example.com/sign",
+        signingServerToken: "tok",
+      }),
+    ).toThrow("must use HTTPS");
+    expect(() =>
+      resolveBuilderConfig({
+        enabled: true,
+        feeBps: 10,
+        receiver: FUNDER,
+        signingServerUrl: "https://user:password@signer.example.com/sign",
+        signingServerToken: "tok",
+      }),
+    ).toThrow("must not contain credentials");
   });
 });
 
@@ -661,6 +707,156 @@ describe("credential helpers", () => {
 // ---------------------------------------------------------------------------
 
 describe("marketdata batch", () => {
+  test("getMarketByToken returns only an authoritative response containing the requested token", async () => {
+    const tokenId = "7".repeat(72);
+    const sibling = "8".repeat(72);
+    const conditionId = `0x${"a".repeat(64)}`;
+    let requestedUrl = "";
+    const fetchMock = (async (input: string | URL | Request, init?: RequestInit) => {
+      requestedUrl = String(input);
+      expect(init?.redirect).toBe("error");
+      expect(init?.signal).toBeInstanceOf(AbortSignal);
+      return new Response(
+        JSON.stringify({
+          condition_id: conditionId.toUpperCase().replace("0X", "0x"),
+          primary_token_id: tokenId,
+          secondary_token_id: sibling,
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }) as typeof fetch;
+
+    expect(
+      await getMarketByToken(tokenId, {
+        fetch: fetchMock,
+        clobUrl: "https://clob.example.test/gateway",
+      }),
+    ).toEqual({ conditionId, primaryTokenId: tokenId, secondaryTokenId: sibling });
+    expect(requestedUrl).toBe(`https://clob.example.test/gateway/markets-by-token/${tokenId}`);
+  });
+
+  test("getMarketByToken rejects a response that does not contain the requested token", async () => {
+    const tokenId = "7".repeat(72);
+    const fetchMock = (async () =>
+      new Response(
+        JSON.stringify({
+          condition_id: `0x${"a".repeat(64)}`,
+          primary_token_id: "8".repeat(72),
+          secondary_token_id: "9".repeat(72),
+        }),
+        { status: 200 },
+      )) as typeof fetch;
+    await expect(getMarketByToken(tokenId, { fetch: fetchMock })).rejects.toThrow(
+      "does not contain the requested token",
+    );
+  });
+
+  test("getMarketByToken rejects malformed and oversized responses", async () => {
+    const tokenId = "7".repeat(72);
+    const malformed = (async () =>
+      new Response(
+        JSON.stringify({
+          condition_id: "0xabc",
+          primary_token_id: tokenId,
+          secondary_token_id: "8".repeat(72),
+        }),
+        { status: 200 },
+      )) as typeof fetch;
+    await expect(getMarketByToken(tokenId, { fetch: malformed })).rejects.toThrow(
+      "response is invalid",
+    );
+
+    let canceled = false;
+    const oversized = (async () =>
+      new Response(
+        new ReadableStream({
+          cancel() {
+            canceled = true;
+          },
+        }),
+        { status: 200, headers: { "Content-Length": "20000" } },
+      )) as typeof fetch;
+    await expect(getMarketByToken(tokenId, { fetch: oversized })).rejects.toThrow(
+      "response is too large",
+    );
+    expect(canceled).toBe(true);
+
+    const duplicateKey = (async () =>
+      new Response(
+        `{"condition_id":"0x${"a".repeat(64)}","condition_id":"0x${"b".repeat(64)}","primary_token_id":"${tokenId}","secondary_token_id":"${"8".repeat(72)}"}`,
+        { status: 200 },
+      )) as typeof fetch;
+    await expect(getMarketByToken(tokenId, { fetch: duplicateKey })).rejects.toThrow(
+      "not valid JSON",
+    );
+
+    for (const clobUrl of [
+      "not-a-url-MARKET_URL_SECRET_CANARY",
+      "https://user:MARKET_URL_SECRET_CANARY@clob.example.test",
+      "https://clob.example.test/?token=MARKET_URL_SECRET_CANARY",
+    ]) {
+      const error = await getMarketByToken(tokenId, { clobUrl }).catch((cause) => cause);
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).toBe("Polymarket market metadata URL is invalid");
+      expect((error as Error).message).not.toContain("MARKET_URL_SECRET_CANARY");
+    }
+  });
+
+  test("getMarketByToken bounds stalled bodies and never awaits hostile cancellation", async () => {
+    const tokenId = "7".repeat(72);
+    const stalled = (async () =>
+      new Response(
+        new ReadableStream({
+          start() {
+            // Intentionally never enqueue or close.
+          },
+        }),
+        { status: 200 },
+      )) as typeof fetch;
+    await expect(
+      getMarketByToken(tokenId, { fetch: stalled, signal: AbortSignal.timeout(20) }),
+    ).rejects.toThrow("request was aborted");
+
+    const hostileDeclaredOverflow = (async () =>
+      new Response(
+        new ReadableStream({
+          cancel() {
+            return new Promise<void>(() => {});
+          },
+        }),
+        { status: 200, headers: { "Content-Length": "20000" } },
+      )) as typeof fetch;
+    await expect(
+      Promise.race([
+        getMarketByToken(tokenId, { fetch: hostileDeclaredOverflow }),
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error("hostile cancel blocked rejection")), 500),
+        ),
+      ]),
+    ).rejects.toThrow("response is too large");
+
+    const hostileStreamOverflow = (async () =>
+      new Response(
+        new ReadableStream({
+          start(controller) {
+            controller.enqueue(new Uint8Array(17 * 1024));
+          },
+          cancel() {
+            return new Promise<void>(() => {});
+          },
+        }),
+        { status: 200 },
+      )) as typeof fetch;
+    await expect(
+      Promise.race([
+        getMarketByToken(tokenId, { fetch: hostileStreamOverflow }),
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error("hostile reader cancel blocked rejection")), 500),
+        ),
+      ]),
+    ).rejects.toThrow("response is too large");
+  });
+
   test("getOrderbooks maps by asset_id, keeps empties for misses", async () => {
     const t1 = "1".repeat(72);
     const t2 = "2".repeat(72);

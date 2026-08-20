@@ -23,8 +23,10 @@
  * BOTH the HMAC key and the signing key from constructing a self-consistent but
  * fabricated history and then signing it. The Ed25519 signature raises the bar
  * from "trust the operator's secret HMAC" to "trust the operator's published,
- * append-only, third-partyly-witnessable checkpoints"; anchoring beyond that
- * (third-party timestamping / transparency log) is explicitly out of scope for v1.
+ * append-only, third-party-witnessable checkpoints"; anchoring beyond that
+ * (third-party timestamping / transparency log) requires a separately trusted
+ * witness. The optional RFC 3161 hook anchors the canonical payload digest and
+ * keeps that narrower claim explicit.
  *
  * Zero new dependencies: uses node:crypto Ed25519 primitives.
  */

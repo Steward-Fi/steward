@@ -6,8 +6,11 @@
  */
 
 import { afterEach, describe, expect, setDefaultTimeout, test } from "bun:test";
-import { pluginMigrationsTable } from "@stwd/db";
-import { type Harness, makeHarness } from "./_harness";
+import { readFile } from "node:fs/promises";
+import { pluginMigrationsTable, secretRoutes } from "@stwd/db";
+import { eq } from "drizzle-orm";
+import { capabilities, capabilityGrants } from "../schema";
+import { ensureTenant, type Harness, makeHarness } from "./_harness";
 
 setDefaultTimeout(30000);
 
@@ -22,7 +25,7 @@ describe("capability plugin migrations: namespaced-journal isolation", () => {
     expect(pluginMigrationsTable("capabilities")).toBe("__drizzle_migrations_plugin_capabilities");
   });
 
-  test("creates both tables and records them in the plugin's OWN ledger", async () => {
+  test("creates grant tables and the agent lifecycle fence in the plugin's OWN ledger", async () => {
     harness = await makeHarness();
     const { client } = harness;
 
@@ -62,6 +65,19 @@ describe("capability plugin migrations: namespaced-journal isolation", () => {
       `SELECT count(*)::int AS n FROM pg_constraint WHERE conname = 'capability_grants_status_check'`,
     );
     expect(chk.rows[0].n).toBe(1);
+
+    const fence = await client.query(
+      `SELECT count(*)::int AS n FROM pg_trigger
+       WHERE tgname = 'capability_grants_agent_fence' AND NOT tgisinternal`,
+    );
+    expect(fence.rows[0].n).toBe(1);
+    const fenceDefinition = await client.query(
+      `SELECT pg_get_triggerdef(oid) AS definition FROM pg_trigger
+       WHERE tgname = 'capability_grants_agent_fence' AND NOT tgisinternal`,
+    );
+    expect(fenceDefinition.rows[0].definition).toContain(
+      "UPDATE OF tenant_id, agent_id, status, secret_route_id",
+    );
   });
 
   test("migration 0001 lands capability_invocations in the plugin's OWN ledger, core untouched", async () => {
@@ -72,12 +88,12 @@ describe("capability plugin migrations: namespaced-journal isolation", () => {
     const invTbl = await client.query("SELECT to_regclass('public.capability_invocations') AS t");
     expect(invTbl.rows[0].t).toBe("capability_invocations");
 
-    // (b) BOTH plugin migrations (0000 + 0001) are recorded in the plugin's OWN
-    //     namespaced ledger (>=2 rows).
+    // (b) all plugin migrations are recorded in the plugin's OWN namespaced
+    //     ledger, including the agent lifecycle fence in 0002.
     const pluginLedger = await client.query(
       `SELECT count(*)::int AS n FROM drizzle."__drizzle_migrations_plugin_capabilities"`,
     );
-    expect(pluginLedger.rows[0].n).toBeGreaterThanOrEqual(2);
+    expect(pluginLedger.rows[0].n).toBeGreaterThanOrEqual(3);
 
     // (c) the core journal carries NO capability-invocations migration row.
     const coreLedger = await client.query(
@@ -101,5 +117,75 @@ describe("capability plugin migrations: namespaced-journal isolation", () => {
       `SELECT count(*)::int AS n FROM pg_indexes WHERE indexname = 'capability_invocations_rate_idx'`,
     );
     expect(idx.rows[0].n).toBe(1);
+  });
+
+  test("0002 revokes orphan grants without disabling a different tenant's route", async () => {
+    harness = await makeHarness();
+    const { client, db } = harness;
+    const grantTenant = `grant-${crypto.randomUUID()}`;
+    const routeTenant = `route-${crypto.randomUUID()}`;
+    await ensureTenant(db, grantTenant);
+    await ensureTenant(db, routeTenant);
+
+    // Recreate the pre-0002 state, including a corrupt historical cross-tenant
+    // route reference. The migration must retire the orphaned authority without
+    // mutating another tenant's route.
+    await client.exec(
+      "DROP TRIGGER IF EXISTS capability_grants_agent_fence ON public.capability_grants",
+    );
+    const capabilityId = crypto.randomUUID();
+    const routeId = crypto.randomUUID();
+    const grantId = crypto.randomUUID();
+    await db.insert(capabilities).values({
+      id: capabilityId,
+      tenantId: grantTenant,
+      name: `migration-${capabilityId}`,
+      secretId: crypto.randomUUID(),
+      host: "api.example.test",
+      pathPattern: "/v1/*",
+      method: "POST",
+      injectKey: "Authorization",
+    });
+    await db.insert(secretRoutes).values({
+      id: routeId,
+      tenantId: routeTenant,
+      agentId: null,
+      secretId: crypto.randomUUID(),
+      hostPattern: "api.example.test",
+      pathPattern: "/v1/*",
+      method: "POST",
+      injectAs: "header",
+      injectKey: "Authorization",
+      enabled: true,
+    });
+    await db.insert(capabilityGrants).values({
+      id: grantId,
+      tenantId: grantTenant,
+      agentId: "deleted-agent",
+      capabilityId,
+      secretRouteId: routeId,
+      status: "active",
+    });
+
+    const migration = await readFile(
+      new URL("../../drizzle/0002_agent_grant_lifecycle.sql", import.meta.url),
+      "utf8",
+    );
+    for (const statement of migration.split("--> statement-breakpoint")) {
+      if (statement.trim()) await client.exec(statement);
+    }
+
+    expect(
+      await db
+        .select({ status: capabilityGrants.status })
+        .from(capabilityGrants)
+        .where(eq(capabilityGrants.id, grantId)),
+    ).toEqual([{ status: "revoked" }]);
+    expect(
+      await db
+        .select({ enabled: secretRoutes.enabled })
+        .from(secretRoutes)
+        .where(eq(secretRoutes.id, routeId)),
+    ).toEqual([{ enabled: true }]);
   });
 });

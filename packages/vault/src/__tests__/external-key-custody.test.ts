@@ -1,6 +1,8 @@
 import { afterAll, beforeEach, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { agentWallets, encryptedChainKeys, eq, getDb, tenants, transactions } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
+import { and } from "drizzle-orm";
+import { generatePrivateKey } from "viem/accounts";
 import type {
   ExternalKeyCustodyProvider,
   ExternalKeyHandleImportRequest,
@@ -9,6 +11,7 @@ import type {
   ExternalKeySignTransactionRequest,
   ExternalKeySignTransactionResult,
 } from "../external-key-custody";
+import { ExternalBroadcastOutcomeUnknownError } from "../external-key-custody";
 import { BackendBindingMismatchError, Vault } from "../vault";
 
 const MASTER_PASSWORD = "test-vault-external-key-custody";
@@ -20,6 +23,7 @@ const openClients: Array<{ close: () => Promise<void> }> = [];
 
 class TestExternalKeyProvider implements ExternalKeyCustodyProvider {
   id = "test-external-key-provider";
+  readonly contractVersion = 1 as const;
   registerCalls: ExternalKeyHandleImportRequest[] = [];
   signCalls: ExternalKeySignTransactionRequest[] = [];
 
@@ -178,9 +182,98 @@ describe("external key custody seam", () => {
     expect(fetched.metadata).toMatchObject({ custody: "external" });
   });
 
+  test("rejects default-scope external registration over a legacy server-managed key", async () => {
+    const provider = new TestExternalKeyProvider();
+    vault = await freshVault(provider);
+    await vault.createAgent(TENANT_ID, "agent-external", "External Agent");
+    // Reproduce a pre-multiwallet agent: the legacy encrypted_keys row remains,
+    // while the newer scoped key/wallet rows do not exist.
+    await getDb()
+      .delete(encryptedChainKeys)
+      .where(eq(encryptedChainKeys.agentId, "agent-external"));
+    await getDb().delete(agentWallets).where(eq(agentWallets.agentId, "agent-external"));
+
+    await expect(
+      vault.importExternalKeyHandle(externalHandleRequest({ venue: undefined })),
+    ).rejects.toThrow("legacy server-managed key");
+    expect(provider.registerCalls).toHaveLength(0);
+  });
+
+  test("all unsupported default-scope signers fail closed on external custody before legacy fallback", async () => {
+    const provider = new TestExternalKeyProvider("provider-signing", async () => ({
+      result: "0xunused",
+      broadcast: false,
+    }));
+    vault = await freshVault(provider);
+    await vault.createAgent(TENANT_ID, "agent-external", "External Agent");
+    await getDb()
+      .delete(encryptedChainKeys)
+      .where(
+        and(
+          eq(encryptedChainKeys.agentId, "agent-external"),
+          eq(encryptedChainKeys.chainFamily, "evm"),
+        ),
+      );
+    await getDb()
+      .update(agentWallets)
+      .set({
+        metadata: {
+          custody: "external",
+          externalKey: {
+            providerId: "test-hsm",
+            keyId: "key-1",
+            version: "1",
+            region: "us-east-1",
+            exportablePrivateKey: false,
+            signingAvailability: "provider-signing",
+          },
+        },
+      })
+      .where(and(eq(agentWallets.agentId, "agent-external"), eq(agentWallets.chainFamily, "evm")));
+
+    const unsupported =
+      "This wallet uses external custody; this signing operation is not supported for external keys";
+    await expect(vault.signMessage(TENANT_ID, "agent-external", "message")).rejects.toThrow(
+      unsupported,
+    );
+    await expect(
+      vault.signRawHash(TENANT_ID, "agent-external", `0x${"11".repeat(32)}` as `0x${string}`),
+    ).rejects.toThrow(unsupported);
+    await expect(
+      vault.signRawDigest(TENANT_ID, "agent-external", "secp256k1", `0x${"22".repeat(32)}`),
+    ).rejects.toThrow(unsupported);
+    await expect(
+      vault.signAuthorization(TENANT_ID, "agent-external", {
+        contractAddress: "0x2222222222222222222222222222222222222222",
+        chainId: 8453,
+        nonce: 0,
+      }),
+    ).rejects.toThrow(unsupported);
+    await expect(
+      vault.signTypedData({
+        tenantId: TENANT_ID,
+        agentId: "agent-external",
+        domain: { name: "test", chainId: 8453 },
+        types: { Message: [{ name: "value", type: "uint256" }] },
+        primaryType: "Message",
+        value: { value: 1 },
+      }),
+    ).rejects.toThrow(unsupported);
+    await expect(
+      vault.signUserOperation({
+        tenantId: TENANT_ID,
+        agentId: "agent-external",
+        chainId: 8453,
+        userOperation: {} as never,
+      }),
+    ).rejects.toThrow(unsupported);
+    expect(provider.signCalls).toHaveLength(0);
+  });
+
   test("external-only wallets refuse signing when provider signing is unavailable", async () => {
     const provider = {
       id: "unsupported-signing-provider",
+      contractVersion: 1 as const,
       async registerKeyHandle(
         request: ExternalKeyHandleImportRequest,
       ): Promise<ExternalKeyHandleRegistration> {
@@ -204,16 +297,28 @@ describe("external key custody seam", () => {
     await vault.createAgent(TENANT_ID, "agent-external", "External Agent");
     await vault.importExternalKeyHandle(externalHandleRequest());
 
+    const target = await vault.resolveExecutionTarget({
+      tenantId: TENANT_ID,
+      agentId: "agent-external",
+      chainId: 8453,
+      venue: "hsm-primary",
+    });
     await expect(
-      vault.signTransaction({
-        tenantId: TENANT_ID,
-        agentId: "agent-external",
-        chainId: 8453,
-        to: "0x2222222222222222222222222222222222222222",
-        value: "1",
-        venue: "hsm-primary",
-        broadcast: false,
-      }),
+      vault.signTransaction(
+        {
+          tenantId: TENANT_ID,
+          agentId: "agent-external",
+          chainId: 8453,
+          to: "0x2222222222222222222222222222222222222222",
+          value: "1",
+          venue: "hsm-primary",
+          broadcast: false,
+        },
+        {
+          expectedBackend: target.backend,
+          expectedBackendIdentityDigest: target.backendIdentityDigest,
+        },
+      ),
     ).rejects.toThrow("External key custody signing provider is not configured for this wallet");
   });
 
@@ -223,16 +328,28 @@ describe("external key custody seam", () => {
     await vault.createAgent(TENANT_ID, "agent-external", "External Agent");
     await vault.importExternalKeyHandle(externalHandleRequest());
 
+    const target = await vault.resolveExecutionTarget({
+      tenantId: TENANT_ID,
+      agentId: "agent-external",
+      chainId: 8453,
+      venue: "hsm-primary",
+    });
     await expect(
-      vault.signTransaction({
-        tenantId: TENANT_ID,
-        agentId: "agent-external",
-        chainId: 8453,
-        to: "0x2222222222222222222222222222222222222222",
-        value: "1",
-        venue: "hsm-primary",
-        broadcast: false,
-      }),
+      vault.signTransaction(
+        {
+          tenantId: TENANT_ID,
+          agentId: "agent-external",
+          chainId: 8453,
+          to: "0x2222222222222222222222222222222222222222",
+          value: "1",
+          venue: "hsm-primary",
+          broadcast: false,
+        },
+        {
+          expectedBackend: target.backend,
+          expectedBackendIdentityDigest: target.backendIdentityDigest,
+        },
+      ),
     ).rejects.toThrow("External key custody signing provider is not configured for this wallet");
   });
 
@@ -251,6 +368,12 @@ describe("external key custody seam", () => {
     vault = await freshVault(provider);
     await vault.createAgent(TENANT_ID, "agent-external", "External Agent");
     await vault.importExternalKeyHandle(externalHandleRequest());
+    const target = await vault.resolveExecutionTarget({
+      tenantId: TENANT_ID,
+      agentId: "agent-external",
+      chainId: 8453,
+      venue: "hsm-primary",
+    });
 
     const signed = await vault.signTransaction(
       {
@@ -263,7 +386,11 @@ describe("external key custody seam", () => {
         venue: "hsm-primary",
         broadcast: false,
       },
-      { txId: "external-tx-1" },
+      {
+        txId: "external-tx-1",
+        expectedBackend: target.backend,
+        expectedBackendIdentityDigest: target.backendIdentityDigest,
+      },
     );
 
     expect(signed).toBe("0xsigned-by-external-provider");
@@ -277,6 +404,233 @@ describe("external key custody seam", () => {
     expect(tx?.status).toBe("signed");
     expect(tx?.txHash).toBeNull();
   });
+
+  test("persists deterministic outcome_unknown before surfacing an ambiguous provider broadcast", async () => {
+    const txHash = `0x${"ab".repeat(32)}`;
+    let checkpointObserved = false;
+    const provider = new TestExternalKeyProvider("provider-signing", async (request) => {
+      expect(request.onPreparedBroadcast).toBeFunction();
+      await request.onPreparedBroadcast?.(txHash);
+      const [checkpoint] = await getDb()
+        .select({ status: transactions.status, txHash: transactions.txHash })
+        .from(transactions)
+        .where(eq(transactions.id, "external-outcome-unknown"));
+      expect(checkpoint).toEqual({ status: "outcome_unknown", txHash });
+      checkpointObserved = true;
+      throw new ExternalBroadcastOutcomeUnknownError(txHash);
+    });
+    vault = await freshVault(provider);
+    await vault.createAgent(TENANT_ID, "agent-external", "External Agent");
+    await vault.importExternalKeyHandle(externalHandleRequest());
+    const target = await vault.resolveExecutionTarget({
+      tenantId: TENANT_ID,
+      agentId: "agent-external",
+      chainId: 8453,
+      venue: "hsm-primary",
+    });
+
+    await expect(
+      vault.signTransaction(
+        {
+          tenantId: TENANT_ID,
+          agentId: "agent-external",
+          chainId: 8453,
+          to: "0x2222222222222222222222222222222222222222",
+          value: "1",
+          venue: "hsm-primary",
+          broadcast: true,
+        },
+        {
+          txId: "external-outcome-unknown",
+          expectedBackend: target.backend,
+          expectedBackendIdentityDigest: target.backendIdentityDigest,
+        },
+      ),
+    ).rejects.toBeInstanceOf(ExternalBroadcastOutcomeUnknownError);
+
+    const [tx] = await getDb()
+      .select({
+        status: transactions.status,
+        txHash: transactions.txHash,
+        backend: transactions.executionBackend,
+        identity: transactions.executionBackendIdentityDigest,
+      })
+      .from(transactions)
+      .where(eq(transactions.id, "external-outcome-unknown"));
+    expect(tx).toEqual({
+      status: "outcome_unknown",
+      txHash,
+      backend: "external-custody",
+      identity: target.backendIdentityDigest,
+    });
+    expect(provider.signCalls).toHaveLength(1);
+    expect(checkpointObserved).toBe(true);
+  });
+
+  test("preserves typed outcome_unknown when its first durable write fails", async () => {
+    const txHash = `0x${"bc".repeat(32)}`;
+    const provider = new TestExternalKeyProvider("provider-signing", async () => {
+      throw new ExternalBroadcastOutcomeUnknownError(txHash);
+    });
+    vault = await freshVault(provider);
+    await vault.createAgent(TENANT_ID, "agent-external", "External Agent");
+    await vault.importExternalKeyHandle(externalHandleRequest());
+    const target = await vault.resolveExecutionTarget({
+      tenantId: TENANT_ID,
+      agentId: "agent-external",
+      chainId: 8453,
+      venue: "hsm-primary",
+    });
+    const writableVault = vault as unknown as {
+      recordSignedTransaction: (...args: unknown[]) => Promise<void>;
+    };
+    writableVault.recordSignedTransaction = async () => {
+      throw new Error("injected transaction write failure");
+    };
+
+    let thrown: unknown;
+    try {
+      await vault.signTransaction(
+        {
+          tenantId: TENANT_ID,
+          agentId: "agent-external",
+          chainId: 8453,
+          to: "0x2222222222222222222222222222222222222222",
+          value: "1",
+          venue: "hsm-primary",
+          broadcast: true,
+        },
+        {
+          txId: "external-outcome-write-failure",
+          expectedBackend: target.backend,
+          expectedBackendIdentityDigest: target.backendIdentityDigest,
+        },
+      );
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeInstanceOf(ExternalBroadcastOutcomeUnknownError);
+    expect((thrown as ExternalBroadcastOutcomeUnknownError).transactionHash).toBe(txHash);
+    expect(provider.signCalls).toHaveLength(1);
+  });
+
+  test("keeps a successful external broadcast unknown when final bookkeeping fails", async () => {
+    const txHash = `0x${"cd".repeat(32)}`;
+    const provider = new TestExternalKeyProvider("provider-signing", async (request) => {
+      expect(request.onPreparedBroadcast).toBeFunction();
+      await request.onPreparedBroadcast?.(txHash);
+      return { result: txHash, broadcast: true };
+    });
+    vault = await freshVault(provider);
+    await vault.createAgent(TENANT_ID, "agent-external", "External Agent");
+    await vault.importExternalKeyHandle(externalHandleRequest());
+    const target = await vault.resolveExecutionTarget({
+      tenantId: TENANT_ID,
+      agentId: "agent-external",
+      chainId: 8453,
+      venue: "hsm-primary",
+    });
+    const writableVault = vault as unknown as {
+      recordSignedTransaction: (...args: unknown[]) => Promise<void>;
+    };
+    const originalRecord = writableVault.recordSignedTransaction.bind(vault);
+    let writes = 0;
+    writableVault.recordSignedTransaction = async (...args) => {
+      writes += 1;
+      if (writes === 2) throw new Error("injected final transaction write failure");
+      await originalRecord(...args);
+    };
+
+    let thrown: unknown;
+    try {
+      await vault.signTransaction(
+        {
+          tenantId: TENANT_ID,
+          agentId: "agent-external",
+          chainId: 8453,
+          to: "0x2222222222222222222222222222222222222222",
+          value: "1",
+          venue: "hsm-primary",
+          broadcast: true,
+        },
+        {
+          txId: "external-final-write-failure",
+          expectedBackend: target.backend,
+          expectedBackendIdentityDigest: target.backendIdentityDigest,
+        },
+      );
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeInstanceOf(ExternalBroadcastOutcomeUnknownError);
+    expect((thrown as ExternalBroadcastOutcomeUnknownError).transactionHash).toBe(txHash);
+    expect(provider.signCalls).toHaveLength(1);
+    expect(writes).toBe(2);
+    const [tx] = await getDb()
+      .select({ status: transactions.status, txHash: transactions.txHash })
+      .from(transactions)
+      .where(eq(transactions.id, "external-final-write-failure"));
+    expect(tx).toEqual({ status: "outcome_unknown", txHash });
+  });
+
+  for (const scenario of [
+    {
+      name: "provider fails after the durable checkpoint",
+      complete: async () => {
+        throw new Error("provider failed after preparing the broadcast");
+      },
+    },
+    {
+      name: "provider substitutes the returned transaction hash",
+      complete: async () => ({ result: `0x${"ef".repeat(32)}`, broadcast: true as const }),
+    },
+  ]) {
+    test(`preserves the prepared hash when the ${scenario.name}`, async () => {
+      const preparedHash = `0x${"de".repeat(32)}`;
+      const provider = new TestExternalKeyProvider("provider-signing", async (request) => {
+        expect(request.onPreparedBroadcast).toBeFunction();
+        await request.onPreparedBroadcast?.(preparedHash);
+        return scenario.complete();
+      });
+      vault = await freshVault(provider);
+      await vault.createAgent(TENANT_ID, "agent-external", "External Agent");
+      await vault.importExternalKeyHandle(externalHandleRequest());
+      const target = await vault.resolveExecutionTarget({
+        tenantId: TENANT_ID,
+        agentId: "agent-external",
+        chainId: 8453,
+        venue: "hsm-primary",
+      });
+
+      let thrown: unknown;
+      try {
+        await vault.signTransaction(
+          {
+            tenantId: TENANT_ID,
+            agentId: "agent-external",
+            chainId: 8453,
+            to: "0x2222222222222222222222222222222222222222",
+            value: "1",
+            venue: "hsm-primary",
+            broadcast: true,
+          },
+          {
+            txId: `external-${scenario.name.replaceAll(" ", "-")}`,
+            expectedBackend: target.backend,
+            expectedBackendIdentityDigest: target.backendIdentityDigest,
+          },
+        );
+      } catch (error) {
+        thrown = error;
+      }
+
+      expect(thrown).toBeInstanceOf(ExternalBroadcastOutcomeUnknownError);
+      expect((thrown as ExternalBroadcastOutcomeUnknownError).transactionHash).toBe(preparedHash);
+      expect(provider.signCalls).toHaveLength(1);
+    });
+  }
 
   // ── ROUND 3 / ITEM 3: backend-resolution TOCTOU (fail closed at sign) ────
   // resolveExecutionBackend is a separate, stale-able DB read. Between the
@@ -336,10 +690,99 @@ describe("external key custody seam", () => {
     expect(rows).toHaveLength(0);
   });
 
-  test("still routes to the provider when the sign is NOT backend-bound (precheck path unchanged)", async () => {
-    // Belt-and-suspenders: an external-custody wallet signed WITHOUT a bound
-    // backend (a non-gateway caller) still reaches the provider exactly as
-    // before. The TOCTOU guard only engages when options.expectedBackend is set.
+  test("fails closed when an external-custody-bound sign re-resolves to the legacy encrypted_keys fallback", async () => {
+    const provider = new TestExternalKeyProvider("provider-signing", async () => {
+      // If this ever runs, the guard failed: an external-custody-bound
+      // authorization fell through to local key material.
+      throw new Error("provider must not be reached for a legacy-fallback sign");
+    });
+    vault = await freshVault(provider);
+    const legacyPrivateKey = generatePrivateKey();
+    await vault.importKey(TENANT_ID, "agent-legacy", legacyPrivateKey, "evm");
+    // Simulate a pre-multi-chain legacy agent: the EVM key lives ONLY in the
+    // legacy encrypted_keys table (no encrypted_chain_keys / agent_wallets).
+    await getDb()
+      .delete(encryptedChainKeys)
+      .where(
+        and(
+          eq(encryptedChainKeys.agentId, "agent-legacy"),
+          eq(encryptedChainKeys.chainFamily, "evm"),
+        ),
+      );
+    await getDb()
+      .delete(agentWallets)
+      .where(and(eq(agentWallets.agentId, "agent-legacy"), eq(agentWallets.chainFamily, "evm")));
+
+    let error: unknown;
+    try {
+      await vault.signTransaction(
+        {
+          tenantId: TENANT_ID,
+          agentId: "agent-legacy",
+          chainId: 8453,
+          to: "0x2222222222222222222222222222222222222222",
+          value: "1",
+          data: "0x",
+          broadcast: false,
+        },
+        { txId: "toctou-legacy-fallback-1", expectedBackend: "external-custody" },
+      );
+    } catch (err) {
+      error = err;
+    }
+
+    expect(error).toBeInstanceOf(BackendBindingMismatchError);
+    expect((error as BackendBindingMismatchError).code).toBe("backend_binding_mismatch");
+    expect((error as BackendBindingMismatchError).expectedBackend).toBe("external-custody");
+    expect((error as BackendBindingMismatchError).resolvedBackend).toBe("local-vault");
+    // The provider signer was NEVER invoked.
+    expect(provider.signCalls).toHaveLength(0);
+
+    // No transaction row was written for the refused sign.
+    const rows = await getDb()
+      .select()
+      .from(transactions)
+      .where(eq(transactions.id, "toctou-legacy-fallback-1"));
+    expect(rows).toHaveLength(0);
+  });
+
+  test("a local-vault-bound sign still reaches the legacy encrypted_keys fallback", async () => {
+    vault = await freshVault();
+    const legacyPrivateKey = generatePrivateKey();
+    await vault.importKey(TENANT_ID, "agent-legacy", legacyPrivateKey, "evm");
+    await getDb()
+      .delete(encryptedChainKeys)
+      .where(
+        and(
+          eq(encryptedChainKeys.agentId, "agent-legacy"),
+          eq(encryptedChainKeys.chainFamily, "evm"),
+        ),
+      );
+    await getDb()
+      .delete(agentWallets)
+      .where(and(eq(agentWallets.agentId, "agent-legacy"), eq(agentWallets.chainFamily, "evm")));
+
+    // The new guard must let local-vault-bound callers through: the request
+    // gets past custody resolution, decrypts the legacy key, and fails only at
+    // the deterministic address check (deliberately mismatched, so no RPC).
+    await expect(
+      vault.signTransaction(
+        {
+          tenantId: TENANT_ID,
+          agentId: "agent-legacy",
+          chainId: 8453,
+          to: "0x2222222222222222222222222222222222222222",
+          value: "1",
+          data: "0x",
+          walletAddress: "0x3333333333333333333333333333333333333333",
+          broadcast: false,
+        },
+        { txId: "toctou-legacy-fallback-2", expectedBackend: "local-vault" },
+      ),
+    ).rejects.toThrow(/Wallet address mismatch/);
+  });
+
+  test("blocks external custody before the provider when the caller has no backend binding", async () => {
     const provider = new TestExternalKeyProvider("provider-signing", async () => ({
       result: "0xsigned-by-external-provider",
       broadcast: false,
@@ -348,22 +791,22 @@ describe("external key custody seam", () => {
     await vault.createAgent(TENANT_ID, "agent-external", "External Agent");
     await vault.importExternalKeyHandle(externalHandleRequest());
 
-    const signed = await vault.signTransaction(
-      {
-        tenantId: TENANT_ID,
-        agentId: "agent-external",
-        chainId: 8453,
-        to: "0x2222222222222222222222222222222222222222",
-        value: "1",
-        data: "0x",
-        venue: "hsm-primary",
-        broadcast: false,
-      },
-      { txId: "toctou-unbound-1" },
-    );
-
-    expect(signed).toBe("0xsigned-by-external-provider");
-    expect(provider.signCalls).toHaveLength(1);
+    await expect(
+      vault.signTransaction(
+        {
+          tenantId: TENANT_ID,
+          agentId: "agent-external",
+          chainId: 8453,
+          to: "0x2222222222222222222222222222222222222222",
+          value: "1",
+          data: "0x",
+          venue: "hsm-primary",
+          broadcast: false,
+        },
+        { txId: "toctou-unbound-1" },
+      ),
+    ).rejects.toThrow("Execution backend binding mismatch");
+    expect(provider.signCalls).toHaveLength(0);
   });
 
   test("break-glass private key export refuses agents with external custody wallets", async () => {

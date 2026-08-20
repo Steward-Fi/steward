@@ -184,7 +184,9 @@ export interface OtpauthUriParams {
 export function buildOtpauthUri(params: OtpauthUriParams): string {
   const issuer = encodeURIComponent(params.issuer);
   const account = encodeURIComponent(params.accountName);
-  const secret = params.secret.replace(/=+$/, "");
+  const decodedSecret = base32Decode(params.secret);
+  if (decodedSecret.length === 0) throw new Error("TOTP secret must contain base32 key material");
+  const secret = base32Encode(decodedSecret);
   return (
     `otpauth://totp/${issuer}:${account}` +
     `?secret=${secret}&issuer=${issuer}&algorithm=SHA1&digits=${DIGITS}&period=${STEP_SEC}`

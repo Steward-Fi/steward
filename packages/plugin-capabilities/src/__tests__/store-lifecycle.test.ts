@@ -8,11 +8,12 @@
  */
 
 import { afterEach, beforeEach, describe, expect, setDefaultTimeout, test } from "bun:test";
-import { CapabilityStore } from "../store";
+import { CapabilityStore, SecretRouteAuthorityConflict } from "../store";
 import { validateCapabilitySpec } from "../validate";
 import {
   enabledRouteCount,
   ensureAgent,
+  ensureGovernedRoute,
   ensureSecret,
   ensureTenant,
   getRoute,
@@ -247,6 +248,155 @@ describe("grant create -> paired route exists + enabled", () => {
   });
 });
 
+describe("governed route authority exclusivity", () => {
+  test("an overlapping capability grant rolls back both its legacy route and grant", async () => {
+    const agentId = "agent-governed-create";
+    await ensureAgent(harness!.db, tenantId, agentId);
+    await ensureGovernedRoute(harness!.db, tenantId, agentId, secretId, {
+      hostPattern: GH_SPEC.host,
+      pathPattern: GH_SPEC.pathPattern,
+      method: GH_SPEC.method,
+    });
+    const cap = await createGithubCapability("github.governed.create");
+
+    await expect(
+      store.createGrant({ tenantId, capabilityId: cap.id, agentId, expiresAt: null }),
+    ).rejects.toBeInstanceOf(SecretRouteAuthorityConflict);
+
+    expect(await store.listGrantsForCapability(tenantId, cap.id)).toHaveLength(0);
+    expect(await totalRouteCount(harness!.db, tenantId)).toBe(1);
+  });
+
+  test("an overlapping capability rewrite rolls back the capability and paired route", async () => {
+    const agentId = "agent-governed-update";
+    await ensureAgent(harness!.db, tenantId, agentId);
+    const originalPath = "/repos/acme/widgets/issues/2/comments";
+    const initial = validateCapabilitySpec({
+      secretId,
+      ...GH_SPEC,
+      pathPattern: originalPath,
+    });
+    if (!initial.ok) throw new Error(initial.error);
+    const cap = await store.createCapability({
+      tenantId,
+      name: "github.governed.update",
+      spec: initial.spec,
+      constraints: {},
+      enabled: true,
+    });
+    const granted = await store.createGrant({
+      tenantId,
+      capabilityId: cap.id,
+      agentId,
+      expiresAt: null,
+    });
+    await ensureGovernedRoute(harness!.db, tenantId, agentId, secretId, {
+      hostPattern: GH_SPEC.host,
+      pathPattern: GH_SPEC.pathPattern,
+      method: GH_SPEC.method,
+    });
+    const overlapping = validateCapabilitySpec({ secretId, ...GH_SPEC });
+    if (!overlapping.ok) throw new Error(overlapping.error);
+
+    await expect(
+      store.updateCapability(tenantId, cap.id, { spec: overlapping.spec }),
+    ).rejects.toBeInstanceOf(SecretRouteAuthorityConflict);
+
+    expect((await store.getCapabilityById(tenantId, cap.id))?.pathPattern).toBe(originalPath);
+    expect((await getRoute(harness!.db, granted!.route!.id))?.pathPattern).toBe(originalPath);
+  });
+
+  test("a capability rewrite cannot mutate its paired route after governed promotion", async () => {
+    const agentId = "agent-promoted-capability";
+    await ensureAgent(harness!.db, tenantId, agentId);
+    const cap = await createGithubCapability("github.promoted.capability");
+    const granted = await store.createGrant({
+      tenantId,
+      capabilityId: cap.id,
+      agentId,
+      expiresAt: null,
+    });
+    await ensureGovernedRoute(harness!.db, tenantId, agentId, secretId, {
+      hostPattern: GH_SPEC.host,
+      pathPattern: GH_SPEC.pathPattern,
+      method: GH_SPEC.method,
+      existingRouteId: granted!.route!.id,
+    });
+    const changedPath = "/repos/acme/widgets/issues/3/comments";
+    const changed = validateCapabilitySpec({
+      secretId,
+      ...GH_SPEC,
+      pathPattern: changedPath,
+    });
+    if (!changed.ok) throw new Error(changed.error);
+
+    await expect(
+      store.updateCapability(tenantId, cap.id, { spec: changed.spec }),
+    ).rejects.toBeInstanceOf(SecretRouteAuthorityConflict);
+
+    expect((await store.getCapabilityById(tenantId, cap.id))?.pathPattern).toBe(
+      GH_SPEC.pathPattern,
+    );
+    expect((await getRoute(harness!.db, granted!.route!.id))?.pathPattern).toBe(
+      GH_SPEC.pathPattern,
+    );
+  });
+});
+
+describe("audited capability mutations", () => {
+  test("required audit failure rolls back grant creation and route rewrites", async () => {
+    const agentId = "agent-audit-rollback";
+    await ensureAgent(harness!.db, tenantId, agentId);
+    const cap = await createGithubCapability("github.audit.rollback");
+    const failingStore = new CapabilityStore(harness!.db, async (_tenantId, fn) =>
+      harness!.db.transaction((tx: unknown) =>
+        fn(tx, async () => {
+          throw new Error("required audit unavailable");
+        }),
+      ),
+    );
+
+    await expect(
+      failingStore.createGrant({
+        tenantId,
+        capabilityId: cap.id,
+        agentId,
+        expiresAt: null,
+        audit: () => ({
+          tenantId,
+          actorType: "user",
+          action: "capability.grant.create",
+        }),
+      }),
+    ).rejects.toThrow("required audit unavailable");
+    expect(await store.listGrantsForCapability(tenantId, cap.id)).toHaveLength(0);
+    expect(await totalRouteCount(harness!.db, tenantId)).toBe(0);
+
+    const granted = await store.createGrant({
+      tenantId,
+      capabilityId: cap.id,
+      agentId,
+      expiresAt: null,
+    });
+    const changedPath = "/repos/acme/widgets/issues/9/comments";
+    const changed = validateCapabilitySpec({ secretId, ...GH_SPEC, pathPattern: changedPath });
+    if (!changed.ok) throw new Error(changed.error);
+    await expect(
+      failingStore.updateCapability(tenantId, cap.id, { spec: changed.spec }, undefined, () => ({
+        tenantId,
+        actorType: "user",
+        action: "capability.update",
+      })),
+    ).rejects.toThrow("required audit unavailable");
+    expect((await store.getCapabilityById(tenantId, cap.id))?.pathPattern).toBe(
+      GH_SPEC.pathPattern,
+    );
+    expect((await getRoute(harness!.db, granted!.route!.id))?.pathPattern).toBe(
+      GH_SPEC.pathPattern,
+    );
+  });
+});
+
 describe("capability disable/enable -> paired routes track fail-closed", () => {
   test("disable disables every paired route; enable re-enables active grants", async () => {
     const cap = await createGithubCapability();
@@ -405,6 +555,21 @@ describe("capability delete -> all paired routes gone (no orphans)", () => {
   test("delete of a nonexistent capability returns false", async () => {
     const removed = await store.deleteCapability(tenantId, crypto.randomUUID());
     expect(removed).toBe(false);
+  });
+
+  test("concurrent grant creation and capability deletion cannot leave an orphan route", async () => {
+    const cap = await createGithubCapability("github.concurrent.delete");
+    const agentId = "agent-concurrent-delete";
+    await ensureAgent(harness!.db, tenantId, agentId);
+
+    await Promise.all([
+      store.createGrant({ tenantId, capabilityId: cap.id, agentId, expiresAt: null }),
+      store.deleteCapability(tenantId, cap.id),
+    ]);
+
+    expect(await store.getCapabilityById(tenantId, cap.id)).toBeNull();
+    expect(await store.listGrantsForCapability(tenantId, cap.id)).toHaveLength(0);
+    expect(await totalRouteCount(harness!.db, tenantId)).toBe(0);
   });
 });
 

@@ -1,4 +1,6 @@
+import { redactedThrownDiagnostics } from "@stwd/shared";
 import { PersistentQueue } from "@stwd/webhooks";
+import { runInternalJobForEachTenant } from "./tenant-job";
 
 const DEFAULT_WEBHOOK_RETRY_INTERVAL_MS = 30_000;
 const DEFAULT_WEBHOOK_RETRY_BATCH_SIZE = 50;
@@ -29,9 +31,9 @@ export function startWebhookRetryScheduler(): () => void {
   const tick = () => {
     if (running) return;
     running = true;
-    void queue
-      .processQueue()
-      .then((results) => {
+    void runInternalJobForEachTenant("webhook-delivery-retry", () => queue.processQueue())
+      .then((tenantResults) => {
+        const results = tenantResults.flatMap(({ value }) => value);
         const failures = results.filter((result) => !result.success).length;
         if (results.length > 0) {
           console.log(
@@ -40,7 +42,7 @@ export function startWebhookRetryScheduler(): () => void {
         }
       })
       .catch((error) => {
-        console.error("[webhooks] Retry scheduler tick failed:", error);
+        console.error("[webhooks] Retry scheduler tick failed", redactedThrownDiagnostics(error));
       })
       .finally(() => {
         running = false;

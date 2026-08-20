@@ -67,6 +67,17 @@ describe("resolveTarget", () => {
     expect(result).toBeNull();
   });
 
+  test("governed internal resolution admits a configured public DNS host without env widening", () => {
+    expect(resolveTarget("/proxy/api.customer.example/v1/items", { governed: true })).toEqual({
+      url: "https://api.customer.example/v1/items",
+      host: "api.customer.example",
+      path: "/v1/items",
+    });
+    for (const host of ["127.0.0.1", "169.254.169.254", "localhost", "bad_host.example"]) {
+      expect(resolveTarget(`/proxy/${host}/path`, { governed: true })).toBeNull();
+    }
+  });
+
   test("rejects direct proxy with IP literal", () => {
     expect(resolveTarget("/proxy/127.0.0.1/admin")).toBeNull();
     expect(resolveTarget("/proxy/169.254.169.254/latest/meta-data")).toBeNull();

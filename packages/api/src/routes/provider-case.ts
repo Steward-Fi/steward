@@ -1,5 +1,5 @@
 /**
- * PR5 correlated case-evidence routes.
+ * Correlated provider case-evidence routes.
  *
  *   GET /v2/provider-actions/:id/case      → ProviderCaseManifestV1 (manifest only)
  *   GET /v2/provider-actions/:id/evidence  → ProviderCaseEvidenceV1 (manifest + signed bundle)
@@ -14,17 +14,17 @@
  *
  * Scoping note (spec §5.2): the shared gate admits tenant `owner`/`admin`
  * sessions; those callers may read ANY workspace in their tenant, so we
- * authorize all tenant workspace ids. Workspace-scoped `workspace_admin` /
- * `workspace_auditor` session access is deferred ("if later added", §5.2) since
- * the session gate carries a tenant role, not a workspace role. Reported as a
- * design note in the PR body.
+ * authorize all tenant workspace ids. The session gate carries tenant roles,
+ * so workspace-scoped roles do not authorize these routes.
  */
 
 import { getDb, workspaces } from "@stwd/db";
+import { redactedThrownDiagnostics } from "@stwd/shared";
 import { eq } from "drizzle-orm";
 import { Hono } from "hono";
 import { auditOwnerAdminMfaGate } from "../middleware/audit-gate";
 import { AuditSigningKeyError, isCheckpointSigningConfigured } from "../services/audit-checkpoint";
+import { AuditCheckpointAnchorError } from "../services/audit-checkpoint-anchor";
 import {
   type ApiResponse,
   type AppVariables,
@@ -78,7 +78,10 @@ providerCaseRoutes.get("/provider-actions/:id/case", async (c) => {
     const assembly = await getProviderCase(tenantId, caseId, authorized);
     manifestOrNull = assembly?.manifest ?? null;
   } catch (err) {
-    console.error(`[provider-case] /case read failed for ${tenantId}/${caseId}:`, err);
+    console.error(
+      `[provider-case] /case read failed for ${tenantId}/${caseId}`,
+      redactedThrownDiagnostics(err),
+    );
     return c.json<ApiResponse>({ ok: false, error: "CASE_CHAIN_UNAVAILABLE" }, 500);
   }
 
@@ -108,12 +111,18 @@ providerCaseRoutes.get("/provider-actions/:id/evidence", async (c) => {
     if (err instanceof AuditSigningKeyError) {
       return c.json<ApiResponse>({ ok: false, error: "CASE_EVIDENCE_SIGNING_DISABLED" }, 503);
     }
+    if (err instanceof AuditCheckpointAnchorError) {
+      return c.json<ApiResponse>({ ok: false, error: "CASE_EVIDENCE_ANCHOR_UNAVAILABLE" }, 503);
+    }
     if (err instanceof CaseRangeTooLargeError) {
       // Pathological same-tenant interleave (KC15): the case segment is too
       // large to export as one signed bundle. /case still serves the manifest.
       return c.json<ApiResponse>({ ok: false, error: "CASE_RANGE_TOO_LARGE" }, 400);
     }
-    console.error(`[provider-case] /evidence read failed for ${tenantId}/${caseId}:`, err);
+    console.error(
+      `[provider-case] /evidence read failed for ${tenantId}/${caseId}`,
+      redactedThrownDiagnostics(err),
+    );
     return c.json<ApiResponse>({ ok: false, error: "CASE_CHAIN_UNAVAILABLE" }, 500);
   }
 

@@ -7,7 +7,7 @@ const authSource = readFileSync(join(apiRoot, "routes", "auth.ts"), "utf8");
 const userSource = readFileSync(join(apiRoot, "routes", "user.ts"), "utf8");
 const auditRouteSource = readFileSync(join(apiRoot, "routes", "audit.ts"), "utf8");
 // The owner/admin + recent-MFA gate was factored out of routes/audit.ts into a
-// shared middleware (middleware/audit-gate.ts) so /audit/* and the PR5
+// shared middleware (middleware/audit-gate.ts) so /audit/* and the evidence
 // /v2/provider-actions/:id/{case,evidence} routes enforce an IDENTICAL gate.
 // The gate literals now live there; audit.ts wires it via `.use("*", ...)`.
 const auditGateSource = readFileSync(join(apiRoot, "middleware", "audit-gate.ts"), "utf8");
@@ -260,6 +260,21 @@ describe("auth and audit hardening", () => {
     }
   });
 
+  it("genericizes passkey register/verify failures instead of echoing internal error messages", () => {
+    const routeStart = authSource.indexOf('auth.post("/passkey/register/verify"');
+    expect(routeStart).toBeGreaterThanOrEqual(0);
+    const routeEnd = authSource.indexOf("\nauth.", routeStart + 1);
+    const routeSource = authSource.slice(routeStart, routeEnd === -1 ? undefined : routeEnd);
+    const catchStart = routeSource.indexOf("} catch (err) {");
+    expect(catchStart).toBeGreaterThanOrEqual(0);
+    const catchSource = routeSource.slice(catchStart, routeSource.indexOf("}", catchStart + 1));
+    expect(catchSource).not.toContain("err.message");
+    expect(catchSource).toContain(
+      'console.warn("[PasskeyAuth] Registration failed", redactedThrownDiagnostics(err))',
+    );
+    expect(catchSource).toContain('error: "Registration verification failed"');
+  });
+
   it("validates tenant access before storing OAuth tokens or passkey authenticators", () => {
     const passkeyVerifyStart = authSource.indexOf('auth.post("/passkey/register/verify"');
     expect(passkeyVerifyStart).toBeGreaterThanOrEqual(0);
@@ -357,8 +372,13 @@ describe("auth and audit hardening", () => {
       smsVerifyStart,
       authSource.indexOf('auth.post("/mfa/sms/send"', smsVerifyStart),
     );
-    expect(smsVerify).toContain("getSmsVerifyFailedAttempts(pending.phone, pendingPurpose)");
-    expect(smsVerify).toContain("recordSmsVerifyFailure(pending.phone, pendingPurpose)");
+    // Claim-first boundary: the attempt slot is consumed atomically BEFORE
+    // verifyOtp runs; check-then-record must not come back.
+    expect(smsVerify).toContain("claimSmsVerifyAttempt(pending.phone, pendingPurpose)");
+    expect(smsVerify.indexOf("claimSmsVerifyAttempt(pending.phone, pendingPurpose)")).toBeLessThan(
+      smsVerify.indexOf("getPhoneAuth().verifyOtp(pending.phone, body.code, pendingPurpose)"),
+    );
+    expect(smsVerify).not.toContain("recordSmsVerifyFailure(pending.phone, pendingPurpose)");
     expect(smsVerify).toContain("clearSmsVerifyFailures(pending.phone, pendingPurpose)");
   });
 

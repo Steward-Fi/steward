@@ -11,13 +11,14 @@
  * network I/O occurs. The vault never signs because the adapter is replaced.
  */
 
-import { afterAll, beforeAll, describe, expect, it, mock } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it, mock, setDefaultTimeout } from "bun:test";
 import { agents, agentWallets, closeDb, getDb, policies as policiesTable, tenants } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { Hono } from "hono";
 import { z } from "zod";
 
 const PLATFORM_KEY = "stw_platform_test_operator_key";
+setDefaultTimeout(30_000);
 
 // ── Mock the Hyperliquid adapter (no signing / no network) ─────────────────────
 const closeAllCalls: number[] = [];
@@ -27,6 +28,7 @@ const updateLeverageCalls: Array<{ coin: string; leverage: number; isCross?: boo
 const addIsolatedMarginCalls: Array<{ coin: string; amountUsdc: string | number }> = [];
 const approveBuilderFeeCalls: Array<{ builder: string; maxFeeRate: string }> = [];
 const usdSendCalls: Array<{ destination: string; amount: string }> = [];
+let closeAllPause: Promise<void> | null = null;
 
 class MockHyperliquidAdapter {
   constructor(
@@ -37,6 +39,7 @@ class MockHyperliquidAdapter {
 
   async closeAllPositions() {
     closeAllCalls.push(Date.now());
+    await closeAllPause;
     return [
       { coin: "BTC", result: { status: "filled", orderId: "1001" } },
       { coin: "ETH", result: { status: "filled", orderId: "1002" } },
@@ -72,7 +75,11 @@ class MockHyperliquidAdapter {
     return { status: "ok", raw: { response: { type: "default" } } };
   }
 
-  async usdSend(params: { destination: string; amount: string }) {
+  async signUsdSend(params: { destination: string; amount: string }) {
+    return params;
+  }
+
+  async submitUsdSend(params: { destination: string; amount: string }) {
     usdSendCalls.push(params);
     return { status: "ok", raw: { response: { type: "default" } } };
   }
@@ -109,7 +116,7 @@ async function seedAgent(opts: {
   agentId: string;
   approvedAddresses?: string[];
 }) {
-  // api_key_hash and owner_address are unique per tenant (PR #79 constraints),
+  // api_key_hash and owner_address are unique per tenant,
   // so derive them from the tenant id rather than reusing fixed values.
   await getDb()
     .insert(tenants)
@@ -225,6 +232,7 @@ describe("operator recovery leverage", () => {
         "Content-Type": "application/json",
         "X-Steward-Platform-Key": PLATFORM_KEY,
         "X-Steward-Tenant": tenantId,
+        "Idempotency-Key": crypto.randomUUID(),
       },
       body: JSON.stringify({ agentId, coin: "xyz:SPCX", leverage: 10, isCross: true }),
     });
@@ -259,7 +267,10 @@ describe("operator recovery usd-send", () => {
   it("submits usdSend through the platform-gated adapter path", async () => {
     const tenantId = `tenant-usdsend-ok-${Date.now()}`;
     const agentId = `agent-usdsend-ok-${Date.now()}`;
-    await seedAgent({ tenantId, agentId });
+    // SEC-004: usd-send is a withdrawal rail and now runs the same policy gate
+    // as /withdraw — the destination must be on the agent's approved list.
+    const destination = "0xABCDEF0123456789abcdef0123456789ABCDEF01";
+    await seedAgent({ tenantId, agentId, approvedAddresses: [destination] });
     usdSendCalls.length = 0;
 
     const app = await buildApp();
@@ -371,6 +382,48 @@ describe("operator recovery approve-builder", () => {
 });
 
 describe("operator recovery add-margin", () => {
+  it("requires idempotency keys for every operator fund movement", async () => {
+    const tenantId = `tenant-required-idempotency-${Date.now()}`;
+    const app = await buildApp();
+    const cases = [
+      {
+        path: "/v1/trade/hyperliquid/deposit",
+        body: { agentId: "missing-agent", amount: "5" },
+      },
+      {
+        path: "/v1/trade/hyperliquid/add-margin",
+        body: { agentId: "missing-agent", coin: "xyz:SPCX", amountUsdc: "1" },
+      },
+      {
+        path: "/v1/trade/hyperliquid/transfer",
+        body: {
+          agentId: "missing-agent",
+          sourceDex: "xyz",
+          destinationDex: "",
+          amountUsdc: "1",
+        },
+      },
+    ] as const;
+
+    for (const testCase of cases) {
+      const res = await app.request(testCase.path, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Steward-Platform-Key": PLATFORM_KEY,
+          "X-Steward-Tenant": tenantId,
+        },
+        body: JSON.stringify(testCase.body),
+      });
+
+      expect(res.status).toBe(400);
+      expect(await res.json()).toEqual({
+        ok: false,
+        error: "Idempotency-Key is required and must be at most 256 characters",
+      });
+    }
+  });
+
   it("rejects add-margin without a valid platform key", async () => {
     const app = await buildApp();
     const res = await app.request("/v1/trade/hyperliquid/add-margin", {
@@ -392,6 +445,7 @@ describe("operator recovery add-margin", () => {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
+        "Idempotency-Key": `margin-${agentId}`,
         "X-Steward-Platform-Key": PLATFORM_KEY,
         "X-Steward-Tenant": tenantId,
       },
@@ -435,6 +489,45 @@ describe("operator recovery close-all", () => {
     expect(body.data.closed).toHaveLength(2);
     expect(closeAllCalls.length).toBe(1);
   });
+
+  it("admits only one concurrent request for the same idempotency key", async () => {
+    const tenantId = `tenant-close-concurrent-${crypto.randomUUID()}`;
+    const agentId = `agent-close-concurrent-${crypto.randomUUID()}`;
+    await seedAgent({ tenantId, agentId });
+    const app = await buildApp();
+    closeAllCalls.length = 0;
+
+    let releaseFirst!: () => void;
+    closeAllPause = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const request = () =>
+      app.request("/v1/trade/hyperliquid/close-all", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "X-Steward-Platform-Key": PLATFORM_KEY,
+          "X-Steward-Tenant": tenantId,
+          "Idempotency-Key": "same-concurrent-key",
+        },
+        body: JSON.stringify({ agentId }),
+      });
+
+    const first = request();
+    while (closeAllCalls.length === 0) await Bun.sleep(1);
+    const second = await request();
+    expect(second.status).toBe(409);
+    expect(second.headers.get("Retry-After")).toBe("1");
+    expect(await second.json()).toEqual({
+      ok: false,
+      error: "Request with this idempotency key is in progress",
+    });
+    expect(closeAllCalls).toHaveLength(1);
+
+    releaseFirst();
+    expect((await first).status).toBe(200);
+    closeAllPause = null;
+  });
 });
 
 describe("operator recovery withdraw", () => {
@@ -453,6 +546,7 @@ describe("operator recovery withdraw", () => {
         "Content-Type": "application/json",
         "X-Steward-Platform-Key": PLATFORM_KEY,
         "X-Steward-Tenant": tenantId,
+        "Idempotency-Key": crypto.randomUUID(),
       },
       body: JSON.stringify({ agentId, amount: "100", destination: badDest }),
     });
@@ -479,6 +573,7 @@ describe("operator recovery withdraw", () => {
         "Content-Type": "application/json",
         "X-Steward-Platform-Key": PLATFORM_KEY,
         "X-Steward-Tenant": tenantId,
+        "Idempotency-Key": crypto.randomUUID(),
       },
       body: JSON.stringify({ agentId, amount: "100", destination: approved }),
     });

@@ -3,20 +3,26 @@ import {
   agents,
   closeDb,
   getDb,
+  auditEvents as persistedAuditEvents,
   providerAccounts,
+  providerAgentBudgets,
   providerGrants,
   providerOperations,
   providerRoleBindings,
   tenants,
   users,
   userTenants,
+  withTenantAuditedTransaction,
   workspaces,
+  writeAuditEvent,
 } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
-import { eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { type AuthorityAudit, ProviderAuthorityStore } from "../services/provider-authority-store";
 
 setDefaultTimeout(120_000);
+process.env.STEWARD_AUDIT_HMAC_KEY ??=
+  "provider-authority-test-audit-hmac-key-with-adequate-entropy";
 
 const OWNER = "10000000-0000-4000-8000-000000000001";
 const ADMIN = "10000000-0000-4000-8000-000000000002";
@@ -32,6 +38,18 @@ const store = new ProviderAuthorityStore();
 const auditEvents: Array<{ action: string; resourceType: string }> = [];
 const audit: AuthorityAudit = async (event) => {
   auditEvents.push(event);
+};
+
+const persistedAuthorityAudit: AuthorityAudit = async (event) => {
+  await writeAuditEvent({
+    tenantId: "tenant-main",
+    actorType: "user",
+    actorId: ADMIN,
+    action: event.action,
+    resourceType: event.resourceType,
+    resourceId: event.resourceId,
+    metadata: event.metadata,
+  });
 };
 
 function mutation(
@@ -78,7 +96,12 @@ async function seedCore() {
   await db.insert(agents).values([
     { id: "agent-x", tenantId: "tenant-main", name: "X", walletAddress: "0x1" },
     { id: "agent-y", tenantId: "tenant-main", name: "Y", walletAddress: "0x2" },
-    { id: "foreign-agent", tenantId: "tenant-foreign", name: "F", walletAddress: "0x3" },
+    {
+      id: "foreign-agent",
+      tenantId: "tenant-foreign",
+      name: "F",
+      walletAddress: "0x3",
+    },
   ]);
   await db.insert(workspaces).values([
     {
@@ -144,6 +167,22 @@ async function seedCore() {
   ]);
 }
 
+async function grantWorkspaceAdminForTest(): Promise<string> {
+  const id = crypto.randomUUID();
+  await getDb().insert(providerRoleBindings).values({
+    id,
+    tenantId: "tenant-main",
+    workspaceId: WORKSPACE_A,
+    principalType: "human",
+    principalId: ADMIN,
+    roleKey: "workspace_admin",
+    status: "active",
+    grantedByUserId: OWNER,
+    reason: "scoped provider-account mutation test authority",
+  });
+  return id;
+}
+
 describe("provider authority foundation", () => {
   beforeAll(async () => {
     process.env.STEWARD_PGLITE_MEMORY = "true";
@@ -173,14 +212,22 @@ describe("provider authority foundation", () => {
       }),
     ).rejects.toMatchObject({ code: "forbidden" });
     const created = await store.createWorkspace(
-      mutation({ actorUserId: ADMIN, tenantRole: "admin", expectedRevision: 1 }),
+      mutation({
+        actorUserId: ADMIN,
+        tenantRole: "admin",
+        expectedRevision: 1,
+      }),
       { key: "explicit-admin", name: "Allowed", environment: "production" },
     );
     expect(created.key).toBe("explicit-admin");
   });
 
   test("every mutation requires authority, recent MFA, idempotency, revision, and successful pre-commit audit", async () => {
-    const base = mutation({ actorUserId: ADMIN, tenantRole: "admin", expectedRevision: 2 });
+    const base = mutation({
+      actorUserId: ADMIN,
+      tenantRole: "admin",
+      expectedRevision: 2,
+    });
     await expect(
       store.createWorkspace(base, {
         key: 123 as unknown as string,
@@ -227,6 +274,272 @@ describe("provider authority foundation", () => {
     expect((await getDb().select().from(workspaces)).length).toBe(before);
   });
 
+  test("couples provider-account disable state to its authoritative completion audit", async () => {
+    const accountId = crypto.randomUUID();
+    const authorityBindingId = await grantWorkspaceAdminForTest();
+    await getDb()
+      .insert(providerAccounts)
+      .values({
+        id: accountId,
+        tenantId: "tenant-main",
+        workspaceId: WORKSPACE_A,
+        adapterKey: "github",
+        externalRef: `disable-success-${accountId}`,
+        displayName: "Disable success",
+      });
+    const [before] = await getDb()
+      .select()
+      .from(providerAccounts)
+      .where(eq(providerAccounts.id, accountId));
+    try {
+      const disabled = await store.disableProviderAccount(
+        mutation({
+          actorUserId: ADMIN,
+          tenantRole: "admin",
+          expectedRevision: before.revision,
+          audit: persistedAuthorityAudit,
+        }),
+        accountId,
+      );
+      expect(disabled).toMatchObject({ status: "disabled", revision: before.revision + 1 });
+      const events = await getDb()
+        .select({ action: persistedAuditEvents.action })
+        .from(persistedAuditEvents)
+        .where(eq(persistedAuditEvents.resourceId, accountId));
+      expect(events.map(({ action }) => action)).toEqual([
+        "provider.account.disable",
+        "provider.account.disable.completed",
+      ]);
+    } finally {
+      await getDb().delete(providerAccounts).where(eq(providerAccounts.id, accountId));
+      await getDb()
+        .delete(providerRoleBindings)
+        .where(eq(providerRoleBindings.id, authorityBindingId));
+    }
+  });
+
+  test("does not publish disable completion when the update fails after intent audit", async () => {
+    const accountId = crypto.randomUUID();
+    const authorityBindingId = await grantWorkspaceAdminForTest();
+    await getDb()
+      .insert(providerAccounts)
+      .values({
+        id: accountId,
+        tenantId: "tenant-main",
+        workspaceId: WORKSPACE_A,
+        adapterKey: "github",
+        externalRef: `disable-update-failure-${accountId}`,
+        displayName: "Disable update failure",
+      });
+    const [before] = await getDb()
+      .select()
+      .from(providerAccounts)
+      .where(eq(providerAccounts.id, accountId));
+    const failingUpdateStore = new ProviderAuthorityStore(async () => {
+      throw new Error("simulated provider-account disable update failure");
+    });
+    try {
+      await expect(
+        failingUpdateStore.disableProviderAccount(
+          mutation({
+            actorUserId: ADMIN,
+            tenantRole: "admin",
+            expectedRevision: before.revision,
+            audit: persistedAuthorityAudit,
+          }),
+          accountId,
+        ),
+      ).rejects.toThrow("simulated provider-account disable update failure");
+      const [after] = await getDb()
+        .select()
+        .from(providerAccounts)
+        .where(eq(providerAccounts.id, accountId));
+      expect(after).toEqual(before);
+      const events = await getDb()
+        .select({ action: persistedAuditEvents.action })
+        .from(persistedAuditEvents)
+        .where(eq(persistedAuditEvents.resourceId, accountId));
+      expect(events.map(({ action }) => action)).toEqual(["provider.account.disable"]);
+    } finally {
+      await getDb().delete(providerAccounts).where(eq(providerAccounts.id, accountId));
+      await getDb()
+        .delete(providerRoleBindings)
+        .where(eq(providerRoleBindings.id, authorityBindingId));
+    }
+  });
+
+  test("rolls back the disable state when its completion audit cannot commit", async () => {
+    const accountId = crypto.randomUUID();
+    const authorityBindingId = await grantWorkspaceAdminForTest();
+    await getDb()
+      .insert(providerAccounts)
+      .values({
+        id: accountId,
+        tenantId: "tenant-main",
+        workspaceId: WORKSPACE_A,
+        adapterKey: "github",
+        externalRef: `disable-audit-failure-${accountId}`,
+        displayName: "Disable completion audit failure",
+      });
+    const [before] = await getDb()
+      .select()
+      .from(providerAccounts)
+      .where(eq(providerAccounts.id, accountId));
+    const failingCompletionStore = new ProviderAuthorityStore((tenantId, fn) =>
+      withTenantAuditedTransaction(tenantId, (txRaw, appendRequiredAudit) =>
+        fn(txRaw, async (event) => {
+          if (event.action === "provider.account.disable.completed") {
+            throw new Error("simulated disable completion audit failure");
+          }
+          await appendRequiredAudit(event);
+        }),
+      ),
+    );
+    try {
+      await expect(
+        failingCompletionStore.disableProviderAccount(
+          mutation({
+            actorUserId: ADMIN,
+            tenantRole: "admin",
+            expectedRevision: before.revision,
+            audit: persistedAuthorityAudit,
+          }),
+          accountId,
+        ),
+      ).rejects.toThrow("simulated disable completion audit failure");
+      const [after] = await getDb()
+        .select()
+        .from(providerAccounts)
+        .where(eq(providerAccounts.id, accountId));
+      expect(after).toEqual(before);
+      const events = await getDb()
+        .select({ action: persistedAuditEvents.action })
+        .from(persistedAuditEvents)
+        .where(eq(persistedAuditEvents.resourceId, accountId));
+      expect(events.map(({ action }) => action)).toEqual(["provider.account.disable"]);
+    } finally {
+      await getDb().delete(providerAccounts).where(eq(providerAccounts.id, accountId));
+      await getDb()
+        .delete(providerRoleBindings)
+        .where(eq(providerRoleBindings.id, authorityBindingId));
+    }
+  });
+
+  test("does not publish disable completion when the account CAS loses after intent audit", async () => {
+    const accountId = crypto.randomUUID();
+    const authorityBindingId = await grantWorkspaceAdminForTest();
+    await getDb()
+      .insert(providerAccounts)
+      .values({
+        id: accountId,
+        tenantId: "tenant-main",
+        workspaceId: WORKSPACE_A,
+        adapterKey: "github",
+        externalRef: `disable-cas-loss-${accountId}`,
+        displayName: "Disable CAS loss",
+      });
+    const [before] = await getDb()
+      .select()
+      .from(providerAccounts)
+      .where(eq(providerAccounts.id, accountId));
+    try {
+      await expect(
+        store.disableProviderAccount(
+          mutation({
+            actorUserId: ADMIN,
+            tenantRole: "admin",
+            expectedRevision: before.revision,
+            audit: async (event) => {
+              await persistedAuthorityAudit(event);
+              await getDb()
+                .update(providerAccounts)
+                .set({ revision: sql`${providerAccounts.revision} + 1` })
+                .where(eq(providerAccounts.id, accountId));
+            },
+          }),
+          accountId,
+        ),
+      ).rejects.toMatchObject({ code: "revision_conflict", status: 409 });
+      const [after] = await getDb()
+        .select()
+        .from(providerAccounts)
+        .where(eq(providerAccounts.id, accountId));
+      expect(after).toMatchObject({ status: "active", revision: before.revision + 1 });
+      const events = await getDb()
+        .select({ action: persistedAuditEvents.action })
+        .from(persistedAuditEvents)
+        .where(eq(persistedAuditEvents.resourceId, accountId));
+      expect(events.map(({ action }) => action)).toEqual(["provider.account.disable"]);
+    } finally {
+      await getDb().delete(providerAccounts).where(eq(providerAccounts.id, accountId));
+      await getDb()
+        .delete(providerRoleBindings)
+        .where(eq(providerRoleBindings.id, authorityBindingId));
+    }
+  });
+
+  test("revalidates workspace authority under the disable transaction lock", async () => {
+    const accountId = crypto.randomUUID();
+    const bindingId = crypto.randomUUID();
+    await getDb()
+      .insert(providerAccounts)
+      .values({
+        id: accountId,
+        tenantId: "tenant-main",
+        workspaceId: WORKSPACE_A,
+        adapterKey: "github",
+        externalRef: `disable-authority-race-${accountId}`,
+        displayName: "Disable authority race",
+      });
+    await getDb().insert(providerRoleBindings).values({
+      id: bindingId,
+      tenantId: "tenant-main",
+      workspaceId: WORKSPACE_A,
+      principalType: "human",
+      principalId: OTHER,
+      roleKey: "workspace_admin",
+      status: "active",
+      grantedByUserId: ADMIN,
+      reason: "disable authority race fixture",
+    });
+    const [before] = await getDb()
+      .select()
+      .from(providerAccounts)
+      .where(eq(providerAccounts.id, accountId));
+    try {
+      await expect(
+        store.disableProviderAccount(
+          mutation({
+            actorUserId: OTHER,
+            tenantRole: "member",
+            expectedRevision: before.revision,
+            audit: async (event) => {
+              await persistedAuthorityAudit(event);
+              await getDb()
+                .update(providerRoleBindings)
+                .set({ status: "revoked" })
+                .where(eq(providerRoleBindings.id, bindingId));
+            },
+          }),
+          accountId,
+        ),
+      ).rejects.toMatchObject({ code: "not_found", status: 404 });
+      const [after] = await getDb()
+        .select()
+        .from(providerAccounts)
+        .where(eq(providerAccounts.id, accountId));
+      expect(after).toEqual(before);
+      const events = await getDb()
+        .select({ action: persistedAuditEvents.action })
+        .from(persistedAuditEvents)
+        .where(eq(persistedAuditEvents.resourceId, accountId));
+      expect(events.map(({ action }) => action)).toEqual(["provider.account.disable"]);
+    } finally {
+      await getDb().delete(providerAccounts).where(eq(providerAccounts.id, accountId));
+      await getDb().delete(providerRoleBindings).where(eq(providerRoleBindings.id, bindingId));
+    }
+  });
+
   test("enforces matrix scope and non-enumerating cross-workspace/tenant behavior", async () => {
     await getDb()
       .insert(providerRoleBindings)
@@ -255,7 +568,11 @@ describe("provider authority foundation", () => {
       ]);
     await expect(
       store.createProviderAccount(
-        mutation({ actorUserId: OTHER, tenantRole: "member", expectedRevision: 1 }),
+        mutation({
+          actorUserId: OTHER,
+          tenantRole: "member",
+          expectedRevision: 1,
+        }),
         {
           workspaceId: WORKSPACE_B,
           adapterKey: "github",
@@ -266,7 +583,11 @@ describe("provider authority foundation", () => {
     ).rejects.toMatchObject({ code: "not_found", status: 404 });
     await expect(
       store.createProviderAccount(
-        mutation({ actorUserId: OWNER, tenantRole: "owner", expectedRevision: 1 }),
+        mutation({
+          actorUserId: OWNER,
+          tenantRole: "owner",
+          expectedRevision: 1,
+        }),
         {
           workspaceId: WORKSPACE_B,
           adapterKey: "github",
@@ -293,7 +614,11 @@ describe("provider authority foundation", () => {
     ).rejects.toMatchObject({ code: "not_found", status: 404 });
     await expect(
       store.issueRoleBinding(
-        mutation({ actorUserId: ADMIN, tenantRole: "admin", expectedRevision: 1 }),
+        mutation({
+          actorUserId: ADMIN,
+          tenantRole: "admin",
+          expectedRevision: 1,
+        }),
         {
           workspaceId: WORKSPACE_B,
           principalType: "human",
@@ -349,7 +674,11 @@ describe("provider authority foundation", () => {
       ),
     ).rejects.toMatchObject({ code: "forbidden" });
     const grant = await store.issueGrant(
-      mutation({ actorUserId: OTHER, tenantRole: "member", expectedRevision: workspace.revision }),
+      mutation({
+        actorUserId: OTHER,
+        tenantRole: "member",
+        expectedRevision: workspace.revision,
+      }),
       {
         workspaceId: WORKSPACE_A,
         providerAccountId: ACCOUNT_A,
@@ -374,7 +703,12 @@ describe("provider authority foundation", () => {
       environment: "production" as const,
     };
     expect(
-      (await store.checkAccess({ ...common, evaluatedAt: new Date().toISOString() })).effect,
+      (
+        await store.checkAccess({
+          ...common,
+          evaluatedAt: new Date().toISOString(),
+        })
+      ).effect,
     ).toBe("allow");
     await getDb()
       .insert(providerGrants)
@@ -478,7 +812,11 @@ describe("provider authority foundation", () => {
       .where(eq(providerRoleBindings.id, adminBinding.id));
     await expect(
       store.createWorkspace(
-        mutation({ actorUserId: ADMIN, tenantRole: "admin", expectedRevision: 2 }),
+        mutation({
+          actorUserId: ADMIN,
+          tenantRole: "admin",
+          expectedRevision: 2,
+        }),
         { key: "expired-admin", name: "Denied", environment: "production" },
       ),
     ).rejects.toMatchObject({ code: "forbidden" });
@@ -495,5 +833,328 @@ describe("provider authority foundation", () => {
     expect(auditEvents.some((event) => event.action === "provider.role_binding.issue")).toBe(true);
     expect(auditEvents.some((event) => event.action === "provider.workspace.create")).toBe(true);
     expect(auditEvents.some((event) => event.action === "provider.grant.issue")).toBe(true);
+  });
+
+  test("operators can create, list, revise, and disable first-class agent budgets", async () => {
+    await getDb()
+      .update(providerRoleBindings)
+      .set({ expiresAt: null })
+      .where(eq(providerRoleBindings.roleKey, "tenant_authority_admin"));
+    const admin = mutation({
+      actorUserId: ADMIN,
+      tenantRole: "admin",
+      expectedRevision: 0,
+    });
+    const count = await store.createAgentBudget(admin, {
+      agentId: "agent-x",
+      dimension: "count",
+      windowSeconds: 86_400,
+      max: 500,
+      autoFreeze: true,
+    });
+    expect(count).toMatchObject({
+      agentId: "agent-x",
+      workspaceId: null,
+      dimension: "count",
+      max: 500,
+      revision: 1,
+    });
+    const notional = await store.createAgentBudget(
+      mutation({
+        actorUserId: ADMIN,
+        tenantRole: "admin",
+        expectedRevision: 0,
+      }),
+      {
+        agentId: "agent-x",
+        workspaceId: WORKSPACE_A,
+        dimension: "notional",
+        windowSeconds: 604_800,
+        max: 10_000,
+        currency: "USD",
+      },
+    );
+    expect(await store.listAgentBudgets("tenant-main", "agent-x")).toHaveLength(2);
+
+    const disabled = await store.updateAgentBudget(
+      mutation({
+        actorUserId: ADMIN,
+        tenantRole: "admin",
+        expectedRevision: notional.revision,
+      }),
+      notional.id,
+      {
+        dimension: "notional",
+        windowSeconds: 604_800,
+        max: 9_000,
+        currency: "USD",
+        enabled: false,
+      },
+    );
+    expect(disabled).toMatchObject({ max: 9_000, enabled: false, revision: 2 });
+    await expect(
+      store.updateAgentBudget(
+        mutation({
+          actorUserId: ADMIN,
+          tenantRole: "admin",
+          expectedRevision: 1,
+        }),
+        notional.id,
+        {
+          dimension: "notional",
+          windowSeconds: 604_800,
+          max: 8_000,
+          currency: "USD",
+        },
+      ),
+    ).rejects.toMatchObject({ code: "revision_conflict" });
+    expect(
+      (
+        await getDb()
+          .select()
+          .from(providerAgentBudgets)
+          .where(eq(providerAgentBudgets.id, count.id))
+      )[0]?.autoFreeze,
+    ).toBe(true);
+    const budgetAuditRows = await getDb()
+      .select({
+        action: persistedAuditEvents.action,
+        resourceId: persistedAuditEvents.resourceId,
+      })
+      .from(persistedAuditEvents);
+    expect(
+      budgetAuditRows.some(
+        (event) => event.action === "provider.agent_budget.create" && event.resourceId === count.id,
+      ),
+    ).toBe(true);
+    expect(
+      budgetAuditRows.some(
+        (event) =>
+          event.action === "provider.agent_budget.update" && event.resourceId === notional.id,
+      ),
+    ).toBe(true);
+  });
+
+  test("workspace admins cannot turn a workspace budget into a tenant-global freeze", async () => {
+    await getDb()
+      .insert(providerGrants)
+      .values({
+        tenantId: "tenant-main",
+        workspaceId: WORKSPACE_A,
+        providerAccountId: ACCOUNT_A,
+        agentId: "agent-x",
+        operationKeys: ["github.issue.list"],
+        expiresAt: new Date(Date.now() + 60 * 60_000),
+        status: "active",
+        grantedByUserId: ADMIN,
+        reason: "budget authority fixture",
+      });
+    const workspaceAdmin = mutation({
+      actorUserId: OTHER,
+      tenantRole: "member",
+      expectedRevision: 0,
+    });
+
+    const ordinary = await store.createAgentBudget(workspaceAdmin, {
+      agentId: "agent-x",
+      workspaceId: WORKSPACE_A,
+      dimension: "count",
+      windowSeconds: 12_345,
+      max: 5,
+    });
+    expect(ordinary).toMatchObject({ workspaceId: WORKSPACE_A, autoFreeze: false });
+
+    await expect(
+      store.createAgentBudget(
+        mutation({
+          actorUserId: OTHER,
+          tenantRole: "member",
+          expectedRevision: 0,
+        }),
+        {
+          agentId: "agent-x",
+          workspaceId: WORKSPACE_A,
+          dimension: "count",
+          windowSeconds: 12_346,
+          max: 0,
+          autoFreeze: true,
+        },
+      ),
+    ).rejects.toMatchObject({ code: "forbidden" });
+
+    const freezing = await store.createAgentBudget(
+      mutation({
+        actorUserId: ADMIN,
+        tenantRole: "admin",
+        expectedRevision: 0,
+      }),
+      {
+        agentId: "agent-x",
+        workspaceId: WORKSPACE_A,
+        dimension: "count",
+        windowSeconds: 12_346,
+        max: 0,
+        autoFreeze: true,
+      },
+    );
+    await expect(
+      store.updateAgentBudget(
+        mutation({
+          actorUserId: OTHER,
+          tenantRole: "member",
+          expectedRevision: freezing.revision,
+        }),
+        freezing.id,
+        {
+          dimension: "count",
+          windowSeconds: 12_346,
+          max: 1,
+          autoFreeze: false,
+        },
+      ),
+    ).rejects.toMatchObject({ code: "forbidden" });
+
+    await expect(
+      store.createAgentBudget(
+        mutation({
+          actorUserId: OTHER,
+          tenantRole: "member",
+          expectedRevision: 0,
+        }),
+        {
+          agentId: "agent-y",
+          workspaceId: WORKSPACE_A,
+          dimension: "count",
+          windowSeconds: 12_347,
+          max: 5,
+        },
+      ),
+    ).rejects.toMatchObject({ code: "not_found", status: 404 });
+  });
+
+  test("budget insert failure rolls back its required audit event", async () => {
+    const context = mutation({
+      actorUserId: ADMIN,
+      tenantRole: "admin",
+      expectedRevision: 0,
+    });
+    const definition = {
+      agentId: "agent-x",
+      dimension: "count" as const,
+      windowSeconds: 3_600,
+      max: 10,
+    };
+    await store.createAgentBudget(context, definition);
+    const before = await getDb()
+      .select({ id: persistedAuditEvents.id })
+      .from(persistedAuditEvents)
+      .where(eq(persistedAuditEvents.action, "provider.agent_budget.create"));
+
+    await expect(
+      store.createAgentBudget(
+        mutation({
+          actorUserId: ADMIN,
+          tenantRole: "admin",
+          expectedRevision: 0,
+        }),
+        definition,
+      ),
+    ).rejects.toThrow();
+
+    const after = await getDb()
+      .select({ id: persistedAuditEvents.id })
+      .from(persistedAuditEvents)
+      .where(eq(persistedAuditEvents.action, "provider.agent_budget.create"));
+    expect(after).toHaveLength(before.length);
+  });
+
+  test("a budget mutation revalidates locked authority after its optimistic preflight", async () => {
+    const [workspaceAdmin] = await getDb()
+      .select()
+      .from(providerRoleBindings)
+      .where(
+        and(
+          eq(providerRoleBindings.workspaceId, WORKSPACE_A),
+          eq(providerRoleBindings.principalId, OTHER),
+          eq(providerRoleBindings.roleKey, "workspace_admin"),
+        ),
+      );
+    if (!workspaceAdmin) throw new Error("expected workspace-admin fixture");
+    await getDb()
+      .update(providerRoleBindings)
+      .set({ status: "active", expiresAt: null })
+      .where(eq(providerRoleBindings.id, workspaceAdmin.id));
+    const before = await getDb().select().from(providerAgentBudgets);
+    store.faultHooks.afterBudgetPreflight = async () => {
+      await getDb()
+        .update(providerRoleBindings)
+        .set({ status: "revoked" })
+        .where(eq(providerRoleBindings.id, workspaceAdmin.id));
+    };
+    try {
+      await expect(
+        store.createAgentBudget(
+          mutation({ actorUserId: OTHER, tenantRole: "member", expectedRevision: 0 }),
+          {
+            agentId: "agent-x",
+            workspaceId: WORKSPACE_A,
+            dimension: "count",
+            windowSeconds: 43_210,
+            max: 3,
+          },
+        ),
+      ).rejects.toMatchObject({ code: "not_found", status: 404 });
+      expect(await getDb().select().from(providerAgentBudgets)).toHaveLength(before.length);
+    } finally {
+      store.faultHooks = {};
+      await getDb()
+        .update(providerRoleBindings)
+        .set({ status: "active" })
+        .where(eq(providerRoleBindings.id, workspaceAdmin.id));
+    }
+  });
+
+  test("a concurrent budget revision race commits exactly one mutation and one audit", async () => {
+    const created = await store.createAgentBudget(
+      mutation({
+        actorUserId: ADMIN,
+        tenantRole: "admin",
+        expectedRevision: 0,
+      }),
+      {
+        agentId: "agent-y",
+        dimension: "count",
+        windowSeconds: 7_200,
+        max: 20,
+      },
+    );
+    const update = (max: number) =>
+      store.updateAgentBudget(
+        mutation({
+          actorUserId: ADMIN,
+          tenantRole: "admin",
+          expectedRevision: created.revision,
+        }),
+        created.id,
+        {
+          dimension: "count",
+          windowSeconds: 7_200,
+          max,
+        },
+      );
+
+    const outcomes = await Promise.allSettled([update(21), update(22)]);
+    expect(outcomes.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    expect(outcomes.filter((result) => result.status === "rejected")).toHaveLength(1);
+    const rows = await getDb()
+      .select({ id: persistedAuditEvents.id })
+      .from(persistedAuditEvents)
+      .where(
+        and(
+          eq(persistedAuditEvents.action, "provider.agent_budget.update"),
+          eq(persistedAuditEvents.resourceId, created.id),
+        ),
+      );
+    expect(rows).toHaveLength(1);
   });
 });

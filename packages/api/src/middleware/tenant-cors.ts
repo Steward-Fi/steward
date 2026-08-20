@@ -19,6 +19,7 @@ import {
   tenantAppClients as tenantAppClientsTable,
   tenantConfigs as tenantConfigsTable,
 } from "@stwd/db";
+import { redactedThrownDiagnostics } from "@stwd/shared";
 import { and, eq } from "drizzle-orm";
 import type { Context, Next } from "hono";
 
@@ -30,9 +31,20 @@ interface CacheEntry {
 }
 
 const CACHE_TTL_MS = 60_000; // 60 seconds
+// Unknown/bogus tenant ids are negative-cached briefly so repeated requests
+// carrying a random X-Steward-Tenant header don't each cost two DB queries.
+const NEGATIVE_CACHE_TTL_MS = 10_000; // 10 seconds
 const MAX_CORS_CACHE_ENTRIES = 1_000;
 const TENANT_ID_RE = /^[A-Za-z0-9_.:-]{1,128}$/;
 const originsCache = new Map<string, CacheEntry>();
+
+function cacheTenantOrigins(tenantId: string, origins: string[], ttlMs: number, now: number): void {
+  if (originsCache.size >= MAX_CORS_CACHE_ENTRIES) {
+    const oldest = originsCache.keys().next().value;
+    if (oldest) originsCache.delete(oldest);
+  }
+  originsCache.set(tenantId, { origins, expiresAt: now + ttlMs });
+}
 
 async function getTenantOrigins(tenantId: string): Promise<string[]> {
   if (!TENANT_ID_RE.test(tenantId)) return [];
@@ -54,18 +66,17 @@ async function getTenantOrigins(tenantId: string): Promise<string[]> {
       and(eq(tenantAppClientsTable.tenantId, tenantId), eq(tenantAppClientsTable.enabled, true)),
     );
 
-  if (!row && clientRows.length === 0) return [];
+  if (!row && clientRows.length === 0) {
+    cacheTenantOrigins(tenantId, [], NEGATIVE_CACHE_TTL_MS, now);
+    return [];
+  }
 
   const origins = new Set<string>(row?.allowedOrigins ?? []);
   for (const client of clientRows) {
     for (const origin of client.allowedOrigins ?? []) origins.add(origin);
   }
   const originList = [...origins];
-  if (originsCache.size >= MAX_CORS_CACHE_ENTRIES) {
-    const oldest = originsCache.keys().next().value;
-    if (oldest) originsCache.delete(oldest);
-  }
-  originsCache.set(tenantId, { origins: originList, expiresAt: now + CACHE_TTL_MS });
+  cacheTenantOrigins(tenantId, originList, CACHE_TTL_MS, now);
   return originList;
 }
 
@@ -122,7 +133,7 @@ async function getAllAllowedOrigins(): Promise<Set<string>> {
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-const ALLOW_METHODS = "GET, POST, PUT, DELETE, OPTIONS";
+const ALLOW_METHODS = "GET, POST, PUT, PATCH, DELETE, OPTIONS";
 const ALLOW_HEADERS =
   "Content-Type, X-Steward-Tenant, X-Steward-Key, X-Steward-Platform-Key, X-Steward-Signature, X-Steward-Signer-Id, X-Steward-Signer-Secret, X-Steward-Key-Quorum-Id, X-Steward-Key-Quorum-Credentials, X-Steward-Timestamp, X-Steward-Expires, X-Steward-Request-Timestamp, X-Steward-Request-Expires-At, Idempotency-Key, Authorization";
 const EXPOSE_HEADERS = "Content-Length, X-Request-Id";
@@ -130,13 +141,30 @@ const MAX_AGE = "86400";
 
 // ─── Middleware ───────────────────────────────────────────────────────────────
 
+/**
+ * The wildcard CORS fallback is a development-only convenience and requires an
+ * explicit "development" or "test" environment. Unset, unknown, and production
+ * environments all fail closed.
+ */
+function devWildcardAllowed(): boolean {
+  const env = process.env.NODE_ENV;
+  return env === "development" || env === "test";
+}
+
 export async function tenantCors(c: Context, next: Next): Promise<Response | undefined> {
   const origin = c.req.header("origin") ?? "";
   const tenantId = c.req.header("X-Steward-Tenant");
+  const allowDevelopmentWildcard = devWildcardAllowed();
 
-  let allowOrigin = process.env.NODE_ENV === "production" ? "" : "*";
+  // Set this before any lookup or early deny. A shared cache must never reuse
+  // a 403/error produced for one origin or tenant hint for another request.
+  // This is harmless for the explicit development wildcard and keeps every
+  // exit path (including DB failures) on the same cache contract.
+  c.header("Vary", "Origin, X-Steward-Tenant");
 
-  if (!tenantId && origin) {
+  let allowOrigin = allowDevelopmentWildcard ? "*" : "";
+
+  if (!allowDevelopmentWildcard && !tenantId && origin) {
     // No tenant header (true for ALL browser preflights and any SDK call that
     // carries the tenant in the body). Allow the request iff the Origin is in
     // any tenant's allowlist.
@@ -144,23 +172,25 @@ export async function tenantCors(c: Context, next: Next): Promise<Response | und
       const allOrigins = await getAllAllowedOrigins();
       if (allOrigins.has(origin)) {
         allowOrigin = origin;
-      } else if (process.env.NODE_ENV === "production") {
+      } else {
         if (c.req.method === "OPTIONS") {
           return c.newResponse(null, 403);
         }
         await next();
         return;
       }
-      // unknown origin outside production → wildcard fallback below (dev mode)
     } catch (err) {
-      console.warn("[tenant-cors] Failed to load global origins, denying CORS:", err);
+      console.warn(
+        "[tenant-cors] Failed to load global origins, denying CORS",
+        redactedThrownDiagnostics(err),
+      );
       if (c.req.method === "OPTIONS") {
         return c.newResponse(null, 403);
       }
       await next();
       return;
     }
-  } else if (tenantId && origin) {
+  } else if (!allowDevelopmentWildcard && tenantId && origin) {
     try {
       const origins = await getTenantOrigins(tenantId);
       if (origins.length > 0) {
@@ -176,16 +206,18 @@ export async function tenantCors(c: Context, next: Next): Promise<Response | und
           await next();
           return;
         }
-      } else if (process.env.NODE_ENV === "production") {
+      } else {
         if (c.req.method === "OPTIONS") {
           return c.newResponse(null, 403);
         }
         await next();
         return;
       }
-      // origins.length === 0 → no config yet → fall through to wildcard outside production
     } catch (err) {
-      console.warn("[tenant-cors] Failed to load origins for tenant, denying CORS:", err);
+      console.warn(
+        "[tenant-cors] Failed to load origins for tenant, denying CORS",
+        redactedThrownDiagnostics(err),
+      );
       if (c.req.method === "OPTIONS") {
         return c.newResponse(null, 403);
       }
@@ -201,11 +233,6 @@ export async function tenantCors(c: Context, next: Next): Promise<Response | und
     c.header("Access-Control-Allow-Headers", ALLOW_HEADERS);
     c.header("Access-Control-Expose-Headers", EXPOSE_HEADERS);
     c.header("Access-Control-Max-Age", MAX_AGE);
-  }
-
-  if (allowOrigin !== "*") {
-    // Let caches vary on Origin when we're doing selective allow
-    c.header("Vary", "Origin");
   }
 
   if (c.req.method === "OPTIONS") {

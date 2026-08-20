@@ -46,6 +46,9 @@ beforeAll(async () => {
   process.env.STEWARD_PGLITE_MEMORY = "true";
   process.env.STEWARD_MASTER_PASSWORD = MASTER_PASSWORD;
   process.env.STEWARD_JWT_SECRET = "proxy-x-route-jwt-secret-with-enough-bytes-here-ok";
+  // Soft development posture (unsigned requests, in-process replay store) —
+  // explicit opt-in since SEC-175.
+  process.env.STEWARD_PROXY_DEV_MODE = "true";
   // api.x.com ships in the default allowlists (secret-route + proxy alias) as of
   // workstream C, so no STEWARD_*_ALLOWED_HOSTS env is needed for the happy path.
 
@@ -92,6 +95,7 @@ afterAll(async () => {
   delete process.env.STEWARD_PGLITE_MEMORY;
   delete process.env.STEWARD_MASTER_PASSWORD;
   delete process.env.STEWARD_JWT_SECRET;
+  delete process.env.STEWARD_PROXY_DEV_MODE;
 });
 
 function buildApp() {
@@ -164,6 +168,89 @@ describe("x narrow credential route (integration)", () => {
     // The raw token is never returned to the agent in the response body.
     const text = await res.text();
     expect(text).not.toContain(X_ACCESS_TOKEN);
+  });
+
+  it("unwraps an OAuth-connect envelope without forwarding its refresh token", async () => {
+    captured = null;
+    const tenantId = `tenant-x-envelope-${crypto.randomUUID()}`;
+    const agentId = `agent-x-envelope-${crypto.randomUUID()}`;
+    await ensureTenant(tenantId);
+    await ensureAgent(tenantId, agentId);
+
+    const refreshCanary = "x-refresh-token-MUST-NOT-CROSS-PROXY";
+    const envelope = JSON.stringify({
+      schemaVersion: "steward.provider-x.credential.v1",
+      accessToken: X_ACCESS_TOKEN,
+      refreshToken: refreshCanary,
+      scopesGranted: ["tweet.read", "tweet.write", "offline.access"],
+      xUserId: "12345",
+      xUsername: "steward",
+      obtainedAt: new Date().toISOString(),
+      expiresAt: null,
+    });
+    const vault = new SecretVault(MASTER_PASSWORD);
+    const secret = await vault.createSecret(tenantId, "x-oauth-envelope", envelope);
+    await vault.createRoute(tenantId, secret.id, {
+      agentId,
+      hostPattern: "api.x.com",
+      pathPattern: "/2/tweets",
+      method: "POST",
+      injectAs: "header",
+      injectKey: "authorization",
+      injectFormat: "Bearer {value}",
+    });
+
+    const token = await signAgentToken({ agentId, tenantId, scopes: ["agent", PROXY_SCOPE] }, "1h");
+    const res = await buildApp().request("/x/2/tweets", {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${token}`,
+        "content-type": "application/json",
+        "idempotency-key": crypto.randomUUID(),
+      },
+      body: JSON.stringify({ text: "safe envelope extraction" }),
+    });
+
+    expect(res.status).toBe(201);
+    expect(captured?.headers.authorization).toBe(`Bearer ${X_ACCESS_TOKEN}`);
+    expect(JSON.stringify(captured)).not.toContain(refreshCanary);
+    expect(await res.text()).not.toContain(refreshCanary);
+  });
+
+  it("rejects a JSON-quoted legacy token before constructing an outbound request", async () => {
+    captured = null;
+    const tenantId = `tenant-x-invalid-bearer-${crypto.randomUUID()}`;
+    const agentId = `agent-x-invalid-bearer-${crypto.randomUUID()}`;
+    await ensureTenant(tenantId);
+    await ensureAgent(tenantId, agentId);
+
+    const invalidToken = '"quoted-legacy-token"';
+    const vault = new SecretVault(MASTER_PASSWORD);
+    const secret = await vault.createSecret(tenantId, "x-invalid-bearer", invalidToken);
+    await vault.createRoute(tenantId, secret.id, {
+      agentId,
+      hostPattern: "api.x.com",
+      pathPattern: "/2/tweets",
+      method: "POST",
+      injectAs: "header",
+      injectKey: "authorization",
+      injectFormat: "Bearer {value}",
+    });
+
+    const token = await signAgentToken({ agentId, tenantId, scopes: ["agent", PROXY_SCOPE] }, "1h");
+    const res = await buildApp().request("/x/2/tweets", {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${token}`,
+        "content-type": "application/json",
+        "idempotency-key": crypto.randomUUID(),
+      },
+      body: JSON.stringify({ text: "must not reach the wire" }),
+    });
+
+    expect(res.status).toBeGreaterThanOrEqual(400);
+    expect(captured).toBeNull();
+    expect(await res.text()).not.toContain(invalidToken);
   });
 
   it("MUTATION: a route/endpoint mismatch fails closed; the Bearer is NEVER injected or leaked", async () => {

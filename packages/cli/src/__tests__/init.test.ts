@@ -2,6 +2,8 @@ import { describe, expect, test } from "bun:test";
 import { createPublicKey, sign, verify } from "node:crypto";
 import {
   chmodSync,
+  existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -186,7 +188,6 @@ describe("steward init", () => {
         "STEWARD_MASTER_PASSWORD",
         "STEWARD_JWT_SECRET",
         "STEWARD_EXECUTION_AUTH_SECRET",
-        "STEWARD_SESSION_SECRET",
         "STEWARD_KDF_SALT",
         "STEWARD_AUDIT_HMAC_KEY",
         "STEWARD_AUDIT_SIGNING_KEY",
@@ -200,6 +201,9 @@ describe("steward init", () => {
         expect(vb).toBeTruthy();
         expect(va).not.toBe(vb);
       }
+
+      expect(ea).not.toContain("STEWARD_SESSION_SECRET=");
+      expect(eb).not.toContain("STEWARD_SESSION_SECRET=");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -262,7 +266,6 @@ describe("steward init", () => {
         "STEWARD_MASTER_PASSWORD",
         "STEWARD_JWT_SECRET",
         "STEWARD_EXECUTION_AUTH_SECRET",
-        "STEWARD_SESSION_SECRET",
         "STEWARD_KDF_SALT",
         "STEWARD_AUDIT_HMAC_KEY",
         "STEWARD_AUDIT_SIGNING_KEY",
@@ -270,6 +273,7 @@ describe("steward init", () => {
         "STEWARD_PROXY_REQUEST_SIGNING_SECRETS",
       ];
       const combined = stdout + stderr;
+      expect(env).not.toContain("STEWARD_SESSION_SECRET=");
       for (const key of secretKeys) {
         const value = envValue(env, key);
         expect(value).toBeTruthy();
@@ -280,6 +284,93 @@ describe("steward init", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   }, 15_000);
+
+  test("--migrate never executes a CWD-relative decoy migrate.ts", () => {
+    const dir = mkdtempSync(join(tmpdir(), "steward-cli-migrate-"));
+    const previousCwd = process.cwd();
+    try {
+      // Decoy at <cwd>/packages/db/src/migrate.ts: exits 0 and drops a marker.
+      // `steward init --migrate` executes exactly this path.
+      const decoyDir = join(dir, "packages", "db", "src");
+      mkdirSync(decoyDir, { recursive: true });
+      const marker = join(dir, "decoy-executed");
+      writeFileSync(
+        join(decoyDir, "migrate.ts"),
+        `import { writeFileSync } from "node:fs";\nwriteFileSync(${JSON.stringify(marker)}, "pwned");\n`,
+      );
+      process.chdir(dir);
+      // The SHIPPED migrator runs instead: against a refused port it exits
+      // non-zero, so runInit throws — and the decoy never ran.
+      expect(() =>
+        runInit({
+          envPath: join(dir, ".env"),
+          runMigrations: true,
+          databaseUrl: "postgresql://u:p@127.0.0.1:1/steward",
+        }),
+      ).toThrow(/migrations failed/i);
+      expect(existsSync(marker)).toBe(false);
+    } finally {
+      process.chdir(previousCwd);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 15_000);
+
+  test("--migrate does not default STEWARD_ALLOW_INSECURE_DB on for the child", async () => {
+    // With NODE_ENV=production and a non-loopback DATABASE_URL lacking a
+    // verifying sslmode, the shipped migrator must hit the db package's TLS
+    // gate. The CLI must not force STEWARD_ALLOW_INSECURE_DB=true into the
+    // child env, silently disabling that gate. The child must receive the value.
+    const dir = mkdtempSync(join(tmpdir(), "steward-cli-migrate-tls-"));
+    try {
+      const envPath = join(dir, ".env");
+      const childEnv: Record<string, string | undefined> = {
+        ...process.env,
+        NODE_ENV: "production",
+      };
+      delete childEnv.STEWARD_ALLOW_INSECURE_DB;
+      const proc = Bun.spawn(
+        [
+          "bun",
+          "run",
+          CLI_ENTRY,
+          "init",
+          "--env",
+          envPath,
+          "--migrate",
+          "--database-url",
+          "postgresql://u:p@192.0.2.1:5432/steward",
+        ],
+        { env: childEnv, stdout: "pipe", stderr: "pipe" },
+      );
+      const [stderr, exitCode] = await Promise.all([new Response(proc.stderr).text(), proc.exited]);
+      expect(exitCode).toBe(1);
+      // SEC-087: the child reached the TLS gate rather than attempting a
+      // network connection. The migrator exposes only this fixed diagnostic
+      // code; raw exception text and the connection URL remain redacted.
+      expect(stderr).toContain('errorCode: "DB_TLS_REQUIRED"');
+      expect(stderr).not.toContain("192.0.2.1");
+      expect(stderr).not.toContain("sslmode=verify-full");
+      expect(stderr).not.toContain("STEWARD_ALLOW_INSECURE_DB=true —");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 15_000);
+
+  test("generated env does not pre-acknowledge local plaintext key custody", () => {
+    const dir = mkdtempSync(join(tmpdir(), "steward-cli-"));
+    try {
+      const envPath = join(dir, ".env");
+      runInit({ envPath });
+      const env = readFileSync(envPath, "utf8");
+      // The production custody gate must require a deliberate operator ack:
+      // the line ships commented out (guidance retained), never active.
+      expect(envValue(env, "STEWARD_ACK_LOCAL_CUSTODY")).toBeUndefined();
+      expect(env).toContain("# STEWARD_ACK_LOCAL_CUSTODY=true");
+      expect(env).toContain("docs/security/custody-posture.md");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 
   test("emitted env contains no secret material outside its assigned values", () => {
     // Guard against accidentally echoing a generated secret into a comment or a
@@ -294,7 +385,6 @@ describe("steward init", () => {
         "STEWARD_MASTER_PASSWORD",
         "STEWARD_JWT_SECRET",
         "STEWARD_EXECUTION_AUTH_SECRET",
-        "STEWARD_SESSION_SECRET",
         "STEWARD_KDF_SALT",
         "STEWARD_AUDIT_HMAC_KEY",
         "STEWARD_AUDIT_SIGNING_KEY",

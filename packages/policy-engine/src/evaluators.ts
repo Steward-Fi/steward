@@ -1,9 +1,13 @@
+import { ed25519 } from "@noble/curves/ed25519";
+import { keccak_256 } from "@noble/hashes/sha3";
+import { sha256 } from "@noble/hashes/sha256";
 import {
   type AllowedChainsConfig,
   type ApprovedAddressesConfig,
   type AutoApproveConfig,
   type ConditionSetConfig,
   type ContractAllowlistConfig,
+  chainFromNumeric,
   type PolicyResult,
   type PolicyRule,
   type PriceOracle,
@@ -31,12 +35,261 @@ const MAX_UINT256_DECIMAL =
   "115792089237316195423570985008687907853269984665640564039457584007913129639935";
 const MAX_UINT256_DECIMAL_DIGITS = 78;
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function usdMicrosToConservativeNumber(value: bigint): number {
+  if (value < 0n) return Number.NaN;
+  // Number conversion above MAX_SAFE_INTEGER may round down. A finite policy
+  // limit cannot safely admit such a balance, so reject it via Infinity.
+  if (value > BigInt(Number.MAX_SAFE_INTEGER)) return Number.POSITIVE_INFINITY;
+  const converted = Number(value) / 1_000_000;
+  if (converted === 0) return 0;
+
+  // Division can round a safe integer micros value downward (for example,
+  // 9007199254740983n). Compare the exact IEEE-754 rational against the source
+  // integer and advance one ULP only when needed; always advancing would deny
+  // an exact cap boundary that converted without loss.
+  const bits = new DataView(new ArrayBuffer(8));
+  bits.setFloat64(0, converted, false);
+  const encoded = bits.getBigUint64(0, false);
+  const exponentBits = Number((encoded >> 52n) & 0x7ffn);
+  const fraction = encoded & ((1n << 52n) - 1n);
+  const significand = exponentBits === 0 ? fraction : (1n << 52n) | fraction;
+  const exponent = (exponentBits === 0 ? -1022 : exponentBits - 1023) - 52;
+  const scaledSignificand = significand * 1_000_000n;
+  const roundedDown =
+    exponent >= 0
+      ? scaledSignificand << BigInt(exponent) < value
+      : scaledSignificand < value << BigInt(-exponent);
+  if (!roundedDown) return converted;
+
+  bits.setBigUint64(0, encoded + 1n, false);
+  return bits.getFloat64(0, false);
+}
+
+function isEvmAddress(value: unknown): value is string {
+  return typeof value === "string" && /^0x[a-f0-9]{40}$/i.test(value);
+}
+
+type PolicyAddressFamily = "evm" | "solana" | "bitcoin" | "monero";
+
+const BASE58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+const MONERO_BLOCK_BYTES = [0, 2, 3, 5, 6, 7, 9, 10, 11] as const;
+
+function decodeBase58(value: string): Uint8Array | null {
+  if (!value) return null;
+  let leadingZeroes = 0;
+  while (value[leadingZeroes] === "1") leadingZeroes += 1;
+  let number = 0n;
+  for (const character of value) {
+    const digit = BASE58_ALPHABET.indexOf(character);
+    if (digit < 0) return null;
+    number = number * 58n + BigInt(digit);
+  }
+  const bytes: number[] = [];
+  while (number > 0n) {
+    bytes.unshift(Number(number & 0xffn));
+    number >>= 8n;
+  }
+  return Uint8Array.from([...new Array(leadingZeroes).fill(0), ...bytes]);
+}
+
+function isSolanaAddress(value: string): boolean {
+  return /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(value) && decodeBase58(value)?.length === 32;
+}
+
+function bech32Polymod(values: number[]): number {
+  const generators = [0x3b6a57b2, 0x26508e6d, 0x1ea119fa, 0x3d4233dd, 0x2a1462b3];
+  let checksum = 1;
+  for (const value of values) {
+    const top = checksum >>> 25;
+    checksum = ((checksum & 0x1ffffff) << 5) ^ value;
+    for (let bit = 0; bit < 5; bit += 1) {
+      if ((top >>> bit) & 1) checksum ^= generators[bit] as number;
+    }
+  }
+  return checksum >>> 0;
+}
+
+function decodeBech32Address(
+  value: string,
+): { hrp: string; version: number; program: Uint8Array } | null {
+  if (
+    value.length < 8 ||
+    value.length > 90 ||
+    (value !== value.toLowerCase() && value !== value.toUpperCase())
+  ) {
+    return null;
+  }
+  const normalized = value.toLowerCase();
+  const separator = normalized.lastIndexOf("1");
+  if (separator < 1 || separator + 7 > normalized.length) return null;
+  const hrp = normalized.slice(0, separator);
+  const alphabet = "qpzry9x8gf2tvdw0s3jn54khce6mua7l";
+  const words: number[] = [];
+  for (const character of normalized.slice(separator + 1)) {
+    const word = alphabet.indexOf(character);
+    if (word < 0) return null;
+    words.push(word);
+  }
+  const expanded = [
+    ...[...hrp].map((character) => character.charCodeAt(0) >>> 5),
+    0,
+    ...[...hrp].map((character) => character.charCodeAt(0) & 31),
+  ];
+  const encoding = bech32Polymod([...expanded, ...words]);
+  if (encoding !== 1 && encoding !== 0x2bc830a3) return null;
+  const payload = words.slice(0, -6);
+  const version = payload[0];
+  if (version === undefined || version > 16) return null;
+  let accumulator = 0;
+  let bits = 0;
+  const program: number[] = [];
+  for (const word of payload.slice(1)) {
+    accumulator = (accumulator << 5) | word;
+    bits += 5;
+    while (bits >= 8) {
+      bits -= 8;
+      program.push((accumulator >>> bits) & 0xff);
+    }
+  }
+  if (bits >= 5 || ((accumulator << (8 - bits)) & 0xff) !== 0) return null;
+  if (program.length < 2 || program.length > 40) return null;
+  if (version === 0 && (encoding !== 1 || (program.length !== 20 && program.length !== 32)))
+    return null;
+  if (version > 0 && encoding !== 0x2bc830a3) return null;
+  return { hrp, version, program: Uint8Array.from(program) };
+}
+
+function isBitcoinAddress(value: string, testnet: boolean): boolean {
+  const bech32 = decodeBech32Address(value);
+  if (bech32) return testnet ? bech32.hrp === "tb" : bech32.hrp === "bc";
+  if (!/^[123mn2][1-9A-HJ-NP-Za-km-z]{25,34}$/.test(value)) return false;
+  const decoded = decodeBase58(value);
+  if (!decoded || decoded.length !== 25) return false;
+  const expected = sha256(sha256(decoded.subarray(0, 21))).subarray(0, 4);
+  if (!expected.every((byte, index) => byte === decoded[21 + index])) return false;
+  return testnet ? decoded[0] === 111 || decoded[0] === 196 : decoded[0] === 0 || decoded[0] === 5;
+}
+
+function decodeMoneroBlock(value: string, byteLength: number): Uint8Array | null {
+  let number = 0n;
+  for (const character of value) {
+    const digit = BASE58_ALPHABET.indexOf(character);
+    if (digit < 0) return null;
+    number = number * 58n + BigInt(digit);
+  }
+  const result = new Uint8Array(byteLength);
+  for (let index = byteLength - 1; index >= 0; index -= 1) {
+    result[index] = Number(number & 0xffn);
+    number >>= 8n;
+  }
+  return number === 0n ? result : null;
+}
+
+function decodeMoneroAddress(value: string): Uint8Array | null {
+  if (value.length !== 95 && value.length !== 106) return null;
+  const fullBlocks = Math.floor(value.length / 11);
+  const trailingCharacters = value.length % 11;
+  const trailingBytes = MONERO_BLOCK_BYTES.indexOf(
+    trailingCharacters as (typeof MONERO_BLOCK_BYTES)[number],
+  );
+  if (trailingBytes < 0) return null;
+  const decoded = new Uint8Array(fullBlocks * 8 + trailingBytes);
+  for (let index = 0; index < fullBlocks; index += 1) {
+    const block = decodeMoneroBlock(value.slice(index * 11, (index + 1) * 11), 8);
+    if (!block) return null;
+    decoded.set(block, index * 8);
+  }
+  if (trailingBytes > 0) {
+    const block = decodeMoneroBlock(value.slice(fullBlocks * 11), trailingBytes);
+    if (!block) return null;
+    decoded.set(block, fullBlocks * 8);
+  }
+  return decoded;
+}
+
+function isMoneroAddress(value: string, stagenet: boolean): boolean {
+  const decoded = decodeMoneroAddress(value);
+  if (!decoded || (decoded.length !== 69 && decoded.length !== 77)) return false;
+  const body = decoded.subarray(0, -4);
+  const checksum = keccak_256(body).subarray(0, 4);
+  if (!checksum.every((byte, index) => byte === decoded[decoded.length - 4 + index])) return false;
+  const standardPrefixes = stagenet ? [24, 25, 36] : [18, 19, 42];
+  const prefix = decoded[0] as number;
+  if (!standardPrefixes.includes(prefix)) return false;
+  const integrated = prefix === (stagenet ? 25 : 19);
+  if (decoded.length !== (integrated ? 77 : 69)) return false;
+  try {
+    for (const encodedPoint of [decoded.subarray(1, 33), decoded.subarray(33, 65)]) {
+      const point = ed25519.ExtendedPoint.fromHex(encodedPoint);
+      if (point.is0() || point.isSmallOrder() || !point.isTorsionFree()) return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function isPolicyAddressForChain(value: unknown, chainId: number): value is string {
+  if (typeof value !== "string") return false;
+  const chain = chainFromNumeric(chainId);
+  switch (chain?.family) {
+    case "evm":
+      return isEvmAddress(value);
+    case "solana":
+      return isSolanaAddress(value);
+    case "bitcoin":
+      return isBitcoinAddress(value, chain.testnet);
+    case "monero":
+      return isMoneroAddress(value, chain.testnet);
+    default:
+      return false;
+  }
+}
+
+function isRecognizedPolicyAddress(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    (isEvmAddress(value) ||
+      isSolanaAddress(value) ||
+      isBitcoinAddress(value, false) ||
+      isBitcoinAddress(value, true) ||
+      isMoneroAddress(value, false) ||
+      isMoneroAddress(value, true))
+  );
+}
+
+function normalizePolicyAddress(value: string, family: PolicyAddressFamily): string {
+  return family === "evm" || (family === "bitcoin" && /^(?:bc1|tb1|bcrt1)/i.test(value))
+    ? value.toLowerCase()
+    : value;
+}
+
 export interface EvaluatorContext {
   request: SignRequest;
   recentTxCount24h: number;
   recentTxCount1h: number;
+  /**
+   * Rolling spend sums in the base unit of `request.chainId` ONLY (wei for
+   * EVM, lamports for Solana, piconero for Monero...). Callers MUST scope
+   * these counters to the request's chain: a cross-chain sum mixes
+   * incomparable units, and the USD path re-prices it at this request's chain
+   * price — silently under- or over-enforcing the cap (SEC-039).
+   */
   spentToday: bigint;
   spentThisWeek: bigint;
+  /**
+   * Additional committed or conservatively-pending spend denominated in USD
+   * micros. This is kept separate from the chain-native counters above: adding
+   * USDC base units (or a quoted native equivalent) to wei/lamports would
+   * corrupt raw-denominated limits. USD limits apply these amounts
+   * conjunctively after pricing the chain-native counters.
+   */
+  additionalUsdSpentTodayMicros?: bigint;
+  additionalUsdSpentThisWeekMicros?: bigint;
   /** Optional price oracle for USD-based policy evaluation */
   priceOracle?: PriceOracle;
   /** Optional reputation score for reputation-based policies */
@@ -95,6 +348,8 @@ export interface EvaluatorContext {
     host: string;
     path: string;
     method: string;
+    /** Immutable server-supplied instant for time-window constraints. */
+    evaluatedAt?: string;
   };
   /**
    * Rolling count of capability INVOKES in the trailing hour (distinct from
@@ -131,6 +386,16 @@ export async function evaluatePolicy(
   rule: PolicyRule,
   ctx: EvaluatorContext,
 ): Promise<PolicyResult & ManualApprovalSignal> {
+  // A non-boolean `enabled` is malformed config, not "disabled": fail closed
+  // rather than let a hand-authored rule silently pass as disabled (SEC-103).
+  if (typeof rule.enabled !== "boolean") {
+    return {
+      policyId: rule.id,
+      type: rule.type,
+      passed: false,
+      reason: "Policy enabled flag must be a boolean",
+    };
+  }
   if (!rule.enabled) {
     return {
       policyId: rule.id,
@@ -275,65 +540,119 @@ function evaluateRawSigningChain(rule: PolicyRule, ctx: EvaluatorContext): Polic
  * Normalize spending-limit config to the canonical format (maxPerTx/maxPerDay/maxPerWeek).
  * Accepts both the canonical format and the simplified maxAmount/period format.
  */
-function normalizeSpendingLimitConfig(config: Record<string, unknown>): SpendingLimitConfig {
-  // If already in canonical format (has any of the standard fields), fill in missing with MAX_UINT
-  if (config.maxPerTx !== undefined || config.maxPerTxUsd !== undefined) {
-    return {
-      maxPerTx: config.maxPerTx !== undefined ? String(config.maxPerTx) : MAX_UINT256_DECIMAL,
-      maxPerDay: config.maxPerDay !== undefined ? String(config.maxPerDay) : MAX_UINT256_DECIMAL,
-      maxPerWeek: config.maxPerWeek !== undefined ? String(config.maxPerWeek) : MAX_UINT256_DECIMAL,
-      maxPerTxUsd: config.maxPerTxUsd as number | undefined,
-      maxPerDayUsd: config.maxPerDayUsd as number | undefined,
-      maxPerWeekUsd: config.maxPerWeekUsd as number | undefined,
-    };
-  }
+function hasOwnDefined(record: Record<string, unknown>, key: string): boolean {
+  return Object.hasOwn(record, key) && record[key] !== undefined;
+}
 
-  // Also check if any USD field is present
-  if (config.maxPerDayUsd !== undefined || config.maxPerWeekUsd !== undefined) {
+function normalizeSpendingLimitConfig(config: Record<string, unknown>): SpendingLimitConfig {
+  const simplifiedWeiCaps = (): Pick<
+    SpendingLimitConfig,
+    "maxPerTx" | "maxPerDay" | "maxPerWeek"
+  > => {
+    // Wei values are an exact-integer contract. Never coerce JSON numbers:
+    // values above Number.MAX_SAFE_INTEGER have already lost precision before
+    // BigInt sees them. Malformed legacy fields flow to the common uint256
+    // parser below and fail closed.
+    const maxAmount = typeof config.maxAmount === "string" ? config.maxAmount : "";
+    const period =
+      config.period === undefined
+        ? "day"
+        : typeof config.period === "string"
+          ? config.period.toLowerCase()
+          : "";
+
+    switch (period) {
+      case "tx":
+      case "transaction":
+        return {
+          maxPerTx: maxAmount,
+          maxPerDay: MAX_UINT256_DECIMAL,
+          maxPerWeek: MAX_UINT256_DECIMAL,
+        };
+      case "day":
+      case "daily":
+        return {
+          maxPerTx: maxAmount,
+          maxPerDay: maxAmount,
+          maxPerWeek: MAX_UINT256_DECIMAL,
+        };
+      case "week":
+      case "weekly":
+        return {
+          maxPerTx: maxAmount,
+          maxPerDay: MAX_UINT256_DECIMAL,
+          maxPerWeek: maxAmount,
+        };
+      default:
+        // Preserve the historical fail-safe fallback: an unknown period is
+        // treated as a per-transaction cap rather than as unbounded spend.
+        return {
+          maxPerTx: maxAmount,
+          maxPerDay: MAX_UINT256_DECIMAL,
+          maxPerWeek: MAX_UINT256_DECIMAL,
+        };
+    }
+  };
+
+  const hasCanonicalWeiCap =
+    hasOwnDefined(config, "maxPerTx") ||
+    hasOwnDefined(config, "maxPerDay") ||
+    hasOwnDefined(config, "maxPerWeek");
+  const hasUsdCap =
+    hasOwnDefined(config, "maxPerTxUsd") ||
+    hasOwnDefined(config, "maxPerDayUsd") ||
+    hasOwnDefined(config, "maxPerWeekUsd");
+
+  // Any canonical wei or USD field selects the canonical format. Missing wei
+  // caps are unbounded, but every explicitly declared cap must survive
+  // normalization. Checking only the per-tx fields caused a mixed config such
+  // as { maxPerDay, maxPerDayUsd } to take the USD-only branch and silently
+  // discard maxPerDay.
+  if (hasCanonicalWeiCap || hasUsdCap) {
+    // Legacy policies can legitimately gain canonical or USD fields one at a
+    // time. Preserve the legacy limits for every dimension that was not
+    // explicitly replaced; treating the first canonical wei field as a switch
+    // for the whole representation could silently erase the other legacy caps.
+    const inheritedWeiCaps = hasOwnDefined(config, "maxAmount")
+      ? simplifiedWeiCaps()
+      : {
+          maxPerTx: MAX_UINT256_DECIMAL,
+          maxPerDay: MAX_UINT256_DECIMAL,
+          maxPerWeek: MAX_UINT256_DECIMAL,
+        };
+    const weiCaps = {
+      maxPerTx: hasOwnDefined(config, "maxPerTx")
+        ? typeof config.maxPerTx === "string"
+          ? config.maxPerTx
+          : ""
+        : inheritedWeiCaps.maxPerTx,
+      maxPerDay: hasOwnDefined(config, "maxPerDay")
+        ? typeof config.maxPerDay === "string"
+          ? config.maxPerDay
+          : ""
+        : inheritedWeiCaps.maxPerDay,
+      maxPerWeek: hasOwnDefined(config, "maxPerWeek")
+        ? typeof config.maxPerWeek === "string"
+          ? config.maxPerWeek
+          : ""
+        : inheritedWeiCaps.maxPerWeek,
+    };
     return {
-      maxPerTx: MAX_UINT256_DECIMAL,
-      maxPerDay: MAX_UINT256_DECIMAL,
-      maxPerWeek: MAX_UINT256_DECIMAL,
-      maxPerTxUsd: config.maxPerTxUsd as number | undefined,
-      maxPerDayUsd: config.maxPerDayUsd as number | undefined,
-      maxPerWeekUsd: config.maxPerWeekUsd as number | undefined,
+      ...weiCaps,
+      maxPerTxUsd: hasOwnDefined(config, "maxPerTxUsd")
+        ? (config.maxPerTxUsd as number)
+        : undefined,
+      maxPerDayUsd: hasOwnDefined(config, "maxPerDayUsd")
+        ? (config.maxPerDayUsd as number)
+        : undefined,
+      maxPerWeekUsd: hasOwnDefined(config, "maxPerWeekUsd")
+        ? (config.maxPerWeekUsd as number)
+        : undefined,
     };
   }
 
   // Convert from maxAmount/period format
-  const maxAmount = String(config.maxAmount ?? "0");
-  const period = String(config.period ?? "day").toLowerCase();
-
-  switch (period) {
-    case "tx":
-    case "transaction":
-      return {
-        maxPerTx: maxAmount,
-        maxPerDay: MAX_UINT256_DECIMAL,
-        maxPerWeek: MAX_UINT256_DECIMAL,
-      };
-    case "day":
-    case "daily":
-      return {
-        maxPerTx: maxAmount,
-        maxPerDay: maxAmount,
-        maxPerWeek: MAX_UINT256_DECIMAL,
-      };
-    case "week":
-    case "weekly":
-      return {
-        maxPerTx: maxAmount,
-        maxPerDay: MAX_UINT256_DECIMAL,
-        maxPerWeek: maxAmount,
-      };
-    default:
-      // Fallback: treat as per-tx limit
-      return {
-        maxPerTx: maxAmount,
-        maxPerDay: MAX_UINT256_DECIMAL,
-        maxPerWeek: MAX_UINT256_DECIMAL,
-      };
-  }
+  return simplifiedWeiCaps();
 }
 
 /**
@@ -364,8 +683,34 @@ async function evaluateSpendingLimit(
   rule: PolicyRule,
   ctx: EvaluatorContext,
 ): Promise<PolicyResult> {
-  const config = normalizeSpendingLimitConfig(rule.config);
   const base = { policyId: rule.id, type: rule.type } as const;
+  const rawConfig: unknown = rule.config;
+  if (typeof rawConfig !== "object" || rawConfig === null || Array.isArray(rawConfig)) {
+    return {
+      ...base,
+      passed: false,
+      reason: "Spending limit requires a non-empty canonical or legacy limit config",
+    };
+  }
+  const configRecord = rawConfig as Record<string, unknown>;
+  if (
+    ![
+      "maxPerTx",
+      "maxPerDay",
+      "maxPerWeek",
+      "maxPerTxUsd",
+      "maxPerDayUsd",
+      "maxPerWeekUsd",
+      "maxAmount",
+    ].some((field) => hasOwnDefined(configRecord, field))
+  ) {
+    return {
+      ...base,
+      passed: false,
+      reason: "Spending limit requires a non-empty canonical or legacy limit config",
+    };
+  }
+  const config = normalizeSpendingLimitConfig(configRecord);
   const txValue = parseUint256Decimal(ctx.request.value);
   if (txValue === null) {
     return {
@@ -414,7 +759,13 @@ async function evaluateSpendingLimit(
 
     // Daily USD limit - convert spentToday from wei to USD
     if (config.maxPerDayUsd !== undefined) {
-      const spentTodayUsd = await ctx.priceOracle.weiToUsd(ctx.spentToday.toString(), chainId);
+      const nativeSpentTodayUsd = await ctx.priceOracle.weiToUsd(
+        ctx.spentToday.toString(),
+        chainId,
+      );
+      const additionalUsd = usdMicrosToConservativeNumber(ctx.additionalUsdSpentTodayMicros ?? 0n);
+      const spentTodayUsd =
+        nativeSpentTodayUsd === null ? null : nativeSpentTodayUsd + additionalUsd;
       if (spentTodayUsd === null || !Number.isFinite(spentTodayUsd) || spentTodayUsd < 0) {
         return {
           ...base,
@@ -433,7 +784,14 @@ async function evaluateSpendingLimit(
 
     // Weekly USD limit - convert spentThisWeek from wei to USD
     if (config.maxPerWeekUsd !== undefined) {
-      const spentWeekUsd = await ctx.priceOracle.weiToUsd(ctx.spentThisWeek.toString(), chainId);
+      const nativeSpentWeekUsd = await ctx.priceOracle.weiToUsd(
+        ctx.spentThisWeek.toString(),
+        chainId,
+      );
+      const additionalUsd = usdMicrosToConservativeNumber(
+        ctx.additionalUsdSpentThisWeekMicros ?? 0n,
+      );
+      const spentWeekUsd = nativeSpentWeekUsd === null ? null : nativeSpentWeekUsd + additionalUsd;
       if (spentWeekUsd === null || !Number.isFinite(spentWeekUsd) || spentWeekUsd < 0) {
         return {
           ...base,
@@ -450,10 +808,19 @@ async function evaluateSpendingLimit(
       }
     }
 
-    return { ...base, passed: true };
+    // USD and wei-denominated caps in the same config are conjunctive. Continue
+    // into wei evaluation; undeclared wei fields normalize to MAX_UINT256.
+    if (
+      !hasOwnDefined(configRecord, "maxPerTx") &&
+      !hasOwnDefined(configRecord, "maxPerDay") &&
+      !hasOwnDefined(configRecord, "maxPerWeek") &&
+      !hasOwnDefined(configRecord, "maxAmount")
+    ) {
+      return { ...base, passed: true };
+    }
   }
 
-  // ── Wei-based evaluation (legacy / fallback) ────────────────────────────────
+  // ── Wei-based evaluation (legacy / fallback, and conjunctive with USD) ──────
   // ATOMICITY CONTRACT: this evaluator is pure — it compares the caller-supplied
   // spentToday/spentThisWeek counters and reserves/commits nothing. Concurrency
   // safety for the daily/weekly caps is the CALLER's responsibility: the spend
@@ -501,8 +868,26 @@ async function evaluateSpendingLimit(
 }
 
 function evaluateApprovedAddresses(rule: PolicyRule, ctx: EvaluatorContext): PolicyResult {
-  const config = rule.config as unknown as ApprovedAddressesConfig;
+  const rawConfig: unknown = rule.config;
   const base = { policyId: rule.id, type: rule.type } as const;
+
+  // Validate the complete runtime shape, not just the outer array: a hand-edited
+  // row containing `null`/numbers used to throw during normalization, while an
+  // unknown mode silently fell into blacklist semantics and could pass.
+  if (
+    !isRecord(rawConfig) ||
+    !Array.isArray(rawConfig.addresses) ||
+    !rawConfig.addresses.every((address) => typeof address === "string") ||
+    (rawConfig.mode !== "whitelist" && rawConfig.mode !== "blacklist")
+  ) {
+    return {
+      ...base,
+      passed: false,
+      reason: "Approved addresses must be an array of strings with a valid mode",
+    };
+  }
+  const config = rawConfig as unknown as ApprovedAddressesConfig;
+
   const targetAddress = getApprovedAddressTarget(ctx.request);
   if (!targetAddress) {
     return {
@@ -512,9 +897,23 @@ function evaluateApprovedAddresses(rule: PolicyRule, ctx: EvaluatorContext): Pol
     };
   }
 
-  const target = targetAddress.toLowerCase();
-  const listed = config.addresses.map((a) => a.toLowerCase());
-  const mode = config.mode ?? "whitelist";
+  const family = chainFromNumeric(ctx.request.chainId)?.family;
+  if (!family || !isPolicyAddressForChain(targetAddress, ctx.request.chainId)) {
+    return {
+      ...base,
+      passed: false,
+      reason: "Approved addresses must match the destination address family",
+    };
+  }
+  if (!config.addresses.every(isRecognizedPolicyAddress)) {
+    return { ...base, passed: false, reason: "Approved addresses contain an invalid address" };
+  }
+
+  const target = normalizePolicyAddress(targetAddress, family);
+  const listed = config.addresses
+    .filter((address) => isPolicyAddressForChain(address, ctx.request.chainId))
+    .map((address) => normalizePolicyAddress(address, family));
+  const mode = config.mode;
 
   if (mode === "whitelist") {
     if (!listed.includes(target)) {
@@ -538,20 +937,12 @@ function evaluateApprovedAddresses(rule: PolicyRule, ctx: EvaluatorContext): Pol
 }
 
 function getApprovedAddressTarget(request: SignRequest): string | undefined {
-  const withdrawalRequest = request as SignRequest & {
-    destination?: unknown;
-    action?: { destination?: unknown };
-    withdraw?: { destination?: unknown };
-  };
-
-  if (typeof withdrawalRequest.destination === "string") return withdrawalRequest.destination;
-  if (typeof withdrawalRequest.action?.destination === "string") {
-    return withdrawalRequest.action.destination;
-  }
-  if (typeof withdrawalRequest.withdraw?.destination === "string") {
-    return withdrawalRequest.withdraw.destination;
-  }
-
+  // ONLY `request.to` is authoritative: it is the address the vault actually
+  // signs for. Envelope shadow fields (`destination`, `action.destination`,
+  // `withdraw.destination`) were once honored for a server-built withdraw flow
+  // that now passes `to` explicitly — keeping them lets a caller smuggle a
+  // whitelisted `destination` past the whitelist while signing to an arbitrary
+  // `to` (SEC-001).
   return request.to;
 }
 
@@ -664,8 +1055,52 @@ function evaluateRateLimit(rule: PolicyRule, ctx: EvaluatorContext): PolicyResul
 }
 
 function evaluateTimeWindow(rule: PolicyRule, _ctx: EvaluatorContext): PolicyResult {
-  const config = rule.config as unknown as TimeWindowConfig;
+  const rawConfig: unknown = rule.config;
   const base = { policyId: rule.id, type: rule.type } as const;
+
+  // Validate the nested runtime shape as well as the arrays. Otherwise a
+  // hand-edited `allowedHours: [null]` throws inside `.some()` and bypasses the
+  // structured-deny contract.
+  if (
+    !isRecord(rawConfig) ||
+    !Array.isArray(rawConfig.allowedDays) ||
+    !rawConfig.allowedDays.every(
+      (day) => typeof day === "number" && Number.isInteger(day) && day >= 0 && day <= 6,
+    ) ||
+    !Array.isArray(rawConfig.allowedHours) ||
+    !rawConfig.allowedHours.every(
+      (window) =>
+        isRecord(window) &&
+        typeof window.start === "number" &&
+        Number.isInteger(window.start) &&
+        window.start >= 0 &&
+        window.start <= 23 &&
+        typeof window.end === "number" &&
+        Number.isInteger(window.end) &&
+        window.end >= 0 &&
+        window.end <= 24,
+    )
+  ) {
+    return {
+      ...base,
+      passed: false,
+      reason: "Time-window allowedDays and allowedHours must be arrays of valid windows",
+    };
+  }
+  const config = rawConfig as unknown as TimeWindowConfig;
+
+  // An enabled time-window rule with NO windows at all is a misconfigured
+  // no-op that would pass everything — fail closed instead (SEC-180),
+  // consistent with venue-allowlist's empty-config deny. An empty array on
+  // exactly ONE dimension still means "unconstrained on that dimension".
+  if (config.allowedDays.length === 0 && config.allowedHours.length === 0) {
+    return {
+      ...base,
+      passed: false,
+      reason: "Time-window rule has no allowed days or hours configured",
+    };
+  }
+
   const now = new Date();
   const hour = now.getUTCHours();
   const day = now.getUTCDay();
@@ -696,9 +1131,22 @@ function evaluateTimeWindow(rule: PolicyRule, _ctx: EvaluatorContext): PolicyRes
  * Allowed-chains policy: restricts transactions to a set of permitted CAIP-2 chain identifiers.
  */
 function evaluateAllowedChains(rule: PolicyRule, ctx: EvaluatorContext): PolicyResult {
-  const config = rule.config as unknown as AllowedChainsConfig;
+  const rawConfig: unknown = rule.config;
   const base = { policyId: rule.id, type: rule.type } as const;
   const chainId = ctx.request.chainId;
+
+  if (
+    !isRecord(rawConfig) ||
+    !Array.isArray(rawConfig.chains) ||
+    !rawConfig.chains.every((chain) => typeof chain === "string" && chain.length > 0)
+  ) {
+    return {
+      ...base,
+      passed: false,
+      reason: "Allowed chains must be an array of CAIP-2 identifiers",
+    };
+  }
+  const config = rawConfig as unknown as AllowedChainsConfig;
 
   if (!Number.isSafeInteger(chainId) || chainId <= 0) {
     return {
@@ -820,8 +1268,22 @@ function evaluateContractAllowlist(rule: PolicyRule, ctx: EvaluatorContext): Pol
   const base = { policyId: rule.id, type: rule.type } as const;
   const data = ctx.request.data;
 
+  // SEC-183 (documented seam): a request with NO calldata is a plain native
+  // transfer, and this rule does NOT gate it — it passes unconditionally,
+  // regardless of the allowlist. This is intentional (the rule's job is
+  // contract/selector gating) but a common misconfiguration seam: operators
+  // who expect contract-allowlist to also constrain native sends MUST pair it
+  // with an approved-addresses rule (note: the write validator restricts
+  // approved-addresses to known chain address families and evaluates against
+  // the request's chain family). Flipping this branch to deny would silently
+  // break existing tenants that rely on the documented behavior, so the
+  // decision to gate native transfers explicitly is deferred (see SEC-183).
   if (!data || data === "0x") {
-    return { ...base, passed: true, reason: "No contract calldata" };
+    return {
+      ...base,
+      passed: true,
+      reason: "No contract calldata: native transfer is not gated by contract-allowlist",
+    };
   }
 
   if (!/^0x(?:[a-fA-F0-9]{2})+$/.test(data) || data.length < 10) {
@@ -1247,8 +1709,26 @@ function evaluateEvmSelectorConstraint(
 
       return { ...base, passed: true };
     }
-    default:
+    default: {
+      // `maxNativeValueWei` is selector-agnostic and was already enforced
+      // above. Any OTHER declared constraint requires decoding calldata for a
+      // selector this engine does not know — fail closed rather than let the
+      // operator believe a recipient/amount/tokenId gate is enforced when it
+      // is a silent no-op (SEC-038). Empty arrays are no-ops, matching the
+      // known-selector arms.
+      const hasUnenforceableConstraint = Object.entries(constraint).some(([key, value]) => {
+        if (key === "maxNativeValueWei" || value === undefined) return false;
+        return !(Array.isArray(value) && value.length === 0);
+      });
+      if (hasUnenforceableConstraint) {
+        return {
+          ...base,
+          passed: false,
+          reason: `Selector constraints cannot be enforced for unrecognized selector ${selector}`,
+        };
+      }
       return { ...base, passed: true };
+    }
   }
 }
 

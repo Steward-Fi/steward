@@ -19,7 +19,7 @@ import type { Tenant, TenantConfig } from "../index.js";
  * meaning): `scopes` are evidence only and MUST NOT be read as provider
  * authority — provider access is decided by bindings/grants, never token scope.
  *
- * PR2 (§7.1): the provider-action route resolves `tenantId`/`actorAgentId` from
+ * The provider-action route resolves `tenantId`/`actorAgentId` from
  * this value, never from request data. Mirrors `ProviderPrincipalV1` in
  * `provider-principal.ts`; kept here (in @stwd/shared) so plugins can type the
  * context without importing @stwd/api.

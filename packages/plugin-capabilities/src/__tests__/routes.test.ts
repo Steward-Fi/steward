@@ -11,7 +11,14 @@
  */
 
 import { afterEach, beforeEach, describe, expect, setDefaultTimeout, test } from "bun:test";
+import {
+  __resetAuditHmacKeyCacheForTests,
+  type AppendRequiredAudit,
+  appendAuditEventWithinTx,
+  auditEvents,
+} from "@stwd/db";
 import type { AppVariables } from "@stwd/shared";
+import { eq } from "drizzle-orm";
 import { Hono } from "hono";
 import type { StewardAppContext } from "../context";
 import { createAgentCapabilityRoutes, createCapabilityRoutes } from "../routes";
@@ -22,6 +29,7 @@ import {
   ensureTenant,
   type Harness,
   makeHarness,
+  type TestDb,
   totalRouteCount,
 } from "./_harness";
 
@@ -30,9 +38,10 @@ setDefaultTimeout(30000);
 let harness: Harness | null = null;
 let tenantId: string;
 let secretId: string;
+const originalAuditHmacKey = process.env.STEWARD_AUDIT_HMAC_KEY;
 
 /** a minimal injected context: the routes use db + safeJsonParse + writeAuditEvent. */
-function buildCtx(db: unknown): StewardAppContext {
+function buildCtx(db: TestDb): StewardAppContext {
   return {
     db,
     // note (any is intentional): unused-by-routes ctx members are stubbed.
@@ -60,6 +69,21 @@ function buildCtx(db: unknown): StewardAppContext {
     async writeAuditEvent() {
       /* no-op audit sink for tests */
     },
+    withTenantAuditedTransaction<T>(
+      transactionTenantId: string,
+      fn: (tx: unknown, appendRequiredAudit: AppendRequiredAudit) => Promise<T>,
+    ) {
+      return (
+        db as { transaction<R>(callback: (tx: unknown) => Promise<R>): Promise<R> }
+      ).transaction((tx) =>
+        fn(tx, (event) => {
+          if (event.tenantId !== transactionTenantId) {
+            throw new Error("audit event tenant does not match transaction tenant");
+          }
+          return appendAuditEventWithinTx(tx as never, event);
+        }),
+      );
+    },
     async getAgentTokenStatus() {
       return null;
     },
@@ -67,6 +91,7 @@ function buildCtx(db: unknown): StewardAppContext {
       return null;
     },
     async requireAgentJwt() {},
+    async requireCapabilityAgentJwt() {},
     async operatorAuth() {},
     async tenantAuth() {},
     // note (any is intentional): the test ctx satisfies the used subset.
@@ -80,7 +105,7 @@ type AuthOpts = {
 };
 
 /** build an app whose test middleware stamps the auth variables per request. */
-function buildApp(db: unknown, auth: AuthOpts): Hono<{ Variables: AppVariables }> {
+function buildApp(db: TestDb, auth: AuthOpts): Hono<{ Variables: AppVariables }> {
   const app = new Hono<{ Variables: AppVariables }>();
   app.use("*", async (c, next) => {
     c.set("tenantId", tenantId);
@@ -96,7 +121,7 @@ function buildApp(db: unknown, auth: AuthOpts): Hono<{ Variables: AppVariables }
 }
 
 /** an authorized (owner + recent MFA) app. */
-function authedApp(db: unknown) {
+function authedApp(db: TestDb) {
   return buildApp(db, { authType: "session-jwt", role: "owner", mfa: true });
 }
 
@@ -110,6 +135,8 @@ const GH_BODY = {
 };
 
 beforeEach(async () => {
+  process.env.STEWARD_AUDIT_HMAC_KEY = "capability-routes-test-audit-key-with-enough-entropy";
+  __resetAuditHmacKeyCacheForTests();
   harness = await makeHarness();
   tenantId = `tenant-${crypto.randomUUID()}`;
   await ensureTenant(harness.db, tenantId);
@@ -119,6 +146,12 @@ beforeEach(async () => {
 afterEach(async () => {
   await harness?.close();
   harness = null;
+  if (originalAuditHmacKey === undefined) {
+    delete process.env.STEWARD_AUDIT_HMAC_KEY;
+  } else {
+    process.env.STEWARD_AUDIT_HMAC_KEY = originalAuditHmacKey;
+  }
+  __resetAuditHmacKeyCacheForTests();
 });
 
 async function createCap(
@@ -204,12 +237,29 @@ describe("capability CRUD happy path (authorized)", () => {
     const del = await app.request(`/capabilities/${capId}`, { method: "DELETE" });
     expect(del.status).toBe(200);
     expect(await app.request(`/capabilities/${capId}`).then((r) => r.status)).toBe(404);
+
+    const persistedAudit = await harness!.db
+      .select({ action: auditEvents.action })
+      .from(auditEvents)
+      .where(eq(auditEvents.tenantId, tenantId))
+      .orderBy(auditEvents.seq);
+    expect(persistedAudit.map(({ action }: { action: string }) => action)).toEqual([
+      "capability.create",
+      "capability.grant.create",
+      "capability.grant.revoke",
+      "capability.delete",
+    ]);
   });
 
-  test("duplicate name -> 409", async () => {
+  test("duplicate name -> 409 and rolls back its audit event", async () => {
     const app = authedApp(harness!.db);
     expect((await createCap(app)).status).toBe(201);
     expect((await createCap(app)).status).toBe(409);
+    const persistedAudit = await harness!.db
+      .select({ action: auditEvents.action })
+      .from(auditEvents)
+      .where(eq(auditEvents.tenantId, tenantId));
+    expect(persistedAudit).toEqual([{ action: "capability.create" }]);
   });
 
   test("invalid github spec -> 400 (strict host)", async () => {
@@ -222,6 +272,16 @@ describe("capability CRUD happy path (authorized)", () => {
     const app = authedApp(harness!.db);
     const res = await createCap(app, { host: "evil.example.com", pathPattern: "/v1/x" });
     expect(res.status).toBe(400);
+  });
+
+  test.each([
+    "/repos/acme/widgets?account=secondary",
+    "/repos/acme/widgets#fragment",
+  ])("create rejects query/fragment-bearing pathPattern: %s", async (pathPattern) => {
+    const app = authedApp(harness!.db);
+    const res = await createCap(app, { pathPattern });
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toContain("query or fragment delimiters");
   });
 
   test("bad capability name -> 400", async () => {
@@ -305,6 +365,21 @@ describe("grant + patch route behaviors (authorized)", () => {
       body: JSON.stringify({ pathPattern: "/repos/acme/*" }),
     });
     expect(patch.status).toBe(400);
+  });
+
+  test.each([
+    "/repos/acme/widgets?account=secondary",
+    "/repos/acme/widgets#fragment",
+  ])("PATCH rejects query/fragment-bearing pathPattern: %s", async (pathPattern) => {
+    const app = authedApp(harness!.db);
+    const capId = (await (await createCap(app)).json()).data.id as string;
+    const patch = await app.request(`/capabilities/${capId}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ pathPattern }),
+    });
+    expect(patch.status).toBe(400);
+    expect((await patch.json()).error).toContain("query or fragment delimiters");
   });
 
   test("grant with a past expiresAt -> 400", async () => {

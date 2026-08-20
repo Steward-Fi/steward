@@ -17,9 +17,9 @@ Steward deployment:
 | Env | Purpose |
 |---|---|
 | `STEWARD_JWT_SECRET` | session/agent auth |
-| `STEWARD_EXECUTION_AUTH_SECRET` | PR4 execution-authorization v2 (mint + claim) |
+| `STEWARD_EXECUTION_AUTH_SECRET` | governed-execution execution-authorization v2 (mint + claim) |
 | `STEWARD_AUDIT_HMAC_KEY` | audit chain HMAC |
-| `STEWARD_AUDIT_SIGNING_KEY` | PR5 evidence bundle signing |
+| `STEWARD_AUDIT_SIGNING_KEY` | evidence bundle signing |
 
 Verify readiness:
 
@@ -39,6 +39,22 @@ provider operation, scoped to a single tenant. In this slice enrollment is done
 via the same mutation matrix the golden path uses, scoped to the test/sandbox
 tenant. **Do not enroll a production route from this runbook**, production
 enrollment tooling is a later step.
+
+For a config-driven generic HTTP operation, start with a legacy secret route
+that is exact on agent, secret, public DNS host, path, and method. Registering
+the operation through
+`POST /v2/provider-accounts/{accountId}/operations` promotes and binds that
+route atomically. A failure leaves the route legacy and creates no operation.
+Do not preconfigure a wildcard credential route: dynamic descriptor paths are
+derived into the narrowest governed prefix only during successful registration,
+and registration denies any overlap with another enabled route for the agent.
+
+If resume returns `APPROVAL_ACTION_INTEGRITY_FAILED`, do not retry by editing the
+approved record. The stored descriptor no longer rebuilds the exact approved
+canonical bytes. Disable the stale operation, register a new revision/operation,
+and obtain a fresh approval. Confirm the required
+`provider.resume.policy_denied` audit event carries the same reason code and
+that no execution-authorization nonce exists for the denied intent.
 
 ## Rollback to legacy
 

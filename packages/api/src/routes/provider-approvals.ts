@@ -1,5 +1,5 @@
 /**
- * provider-approvals.ts — PR3 human approval + safe-resume HTTP surface (spec §9).
+ * provider-approvals.ts — human approval and safe-resume HTTP surface (spec §9).
  *
  *   GET  /v2/provider-actions/:id/approval  — eligible workspace approver + MFA
  *   POST /v2/provider-actions/:id/approval  — approve/deny decision
@@ -18,6 +18,7 @@ import { decodeUtf8Strict, isApprovalReasonCode, strictParseJson } from "@stwd/s
 import type { Context, Hono } from "hono";
 import { type AppVariables, setNoStoreHeaders, tenantAuth } from "../services/context";
 import { providerApprovalService } from "../services/provider-approval";
+import { isRecentMfaTimestamp } from "../services/recent-mfa";
 
 type RouteContext = Context<{ Variables: AppVariables }>;
 
@@ -92,7 +93,7 @@ async function handleGetApproval(c: RouteContext) {
   if (typeof mfa !== "number" || !Number.isFinite(mfa)) {
     return err(c, "APPROVAL_MFA_REQUIRED", 403);
   }
-  if (Date.now() - mfa > 300_000) return err(c, "APPROVAL_MFA_STALE", 403);
+  if (!isRecentMfaTimestamp(mfa, 300_000)) return err(c, "APPROVAL_MFA_STALE", 403);
 
   // Eligibility (exact workspace approver) is enforced by the service via a
   // detail-load that first checks the caller is an eligible approver. For the
@@ -227,24 +228,14 @@ async function handlePostExecute(c: RouteContext) {
     return err(c, callerAuthorization.code, callerAuthorization.httpStatus);
   }
 
-  // Reject any body that supplies actor/action fields (I4 / RESUME_ACTOR_SUBSTITUTION).
-  const contentType = (c.req.header("content-type") ?? "").trim().toLowerCase();
-  if (contentType && ALLOWED_MEDIA.has(contentType)) {
-    try {
-      const buf = await c.req.raw.clone().arrayBuffer();
-      if (buf.byteLength > 0) {
-        const parsed = strictParseJson(decodeUtf8Strict(new Uint8Array(buf)));
-        if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
-          for (const key of Object.keys(parsed as Record<string, unknown>)) {
-            if (key !== "idempotencyKey") {
-              return err(c, "RESUME_ACTOR_SUBSTITUTION_FORBIDDEN", 400);
-            }
-          }
-        }
-      }
-    } catch {
-      return err(c, "RESUME_ACTOR_SUBSTITUTION_FORBIDDEN", 400);
-    }
+  // Resume is state-idempotent: the persisted binding/nonce permits one claim.
+  // There is deliberately no request-key contract. Reject every body instead of
+  // accepting and silently ignoring a caller-supplied idempotency key.
+  // Do not clone or consume a body that is forbidden in the first place. Aside
+  // from being unnecessary, buffering here would let an authenticated caller
+  // force an allocation before receiving the rejection.
+  if (c.req.raw.body !== null) {
+    return err(c, "RESUME_BODY_NOT_ALLOWED", 400);
   }
 
   const result = await providerApprovalService.resume({
@@ -271,7 +262,7 @@ async function handlePostExecute(c: RouteContext) {
 }
 
 /**
- * Register the PR3 approval + execute routes directly on the composed app.
+ * Register the provider approval and execute routes directly on the composed app.
  * `tenantAuth` populates authType/userId/tenantId/sessionMfaVerifiedAt for both
  * human sessions and agent tokens; the handlers enforce the human-session
  * requirement where the spec demands it.

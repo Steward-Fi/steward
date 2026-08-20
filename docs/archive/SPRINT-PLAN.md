@@ -63,7 +63,7 @@
 - Waifu bridge: `packages/api/src/services/waifu-bridge.ts` (148 lines)
 
 ## Deployment
-- API: milady VPS (89.167.63.246), systemd `steward-api.service`, port 3200
+- API: milady VPS (<NODE_IP>), systemd `steward-api.service`, port 3200
 - Web: Vercel, deploy from `web/` directory
 - Tunnel: cloudflared `api.steward.fi` → localhost:3200
 - Auth: `X-Steward-Tenant` + `X-Steward-Key` headers

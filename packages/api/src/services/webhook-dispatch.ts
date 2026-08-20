@@ -1,13 +1,13 @@
 import { randomUUID } from "node:crypto";
-import { and, eq, webhookConfigs, webhookDeliveries } from "@stwd/db";
-import type { WebhookEvent } from "@stwd/shared";
+import { and, eq, waitUntilRequestDatabaseTask, webhookConfigs, webhookDeliveries } from "@stwd/db";
+import { redactedThrownDiagnostics, type WebhookEvent } from "@stwd/shared";
 import {
   decryptWebhookSecret,
   encryptWebhookSecret,
   isEncryptedWebhookSecret,
   WebhookDispatcher,
 } from "@stwd/webhooks";
-import { db, tenantConfigs } from "./context";
+import { db } from "./context";
 import {
   acceptsConfiguredWebhookEvent,
   type ConfiguredWebhookEventType,
@@ -16,6 +16,7 @@ import {
   webhookEventRegistry,
 } from "./webhook-events";
 import { redactWebhookSecrets } from "./webhook-redaction";
+import { validateWebhookUrlResolved } from "./webhook-url";
 
 const INLINE_DELIVERY_VISIBILITY_TIMEOUT_MS = 5 * 60 * 1000;
 
@@ -33,12 +34,9 @@ export function dispatchWebhook(
   // WebhookEventRegistry (core ∪ plugin-declared) because the plugin host merged
   // it in. We thread the raw plugin event name into the configured fan-out so a
   // tenant can subscribe to a plugin event specifically (events: ["plugin.evt"]).
-  // We do NOT drop unregistered types here: the legacy tenant-config webhook is a
-  // deliberate catch-all escape hatch that fires for EVERY event type (it has
-  // always done so), so dropping would change long-standing behavior. The
-  // configured fan-out only ever matches a plugin event when it is registry-valid
-  // AND a config explicitly lists it, so an arbitrary unregistered string can
-  // never masquerade as a configured event.
+  // The configured fan-out only ever matches a plugin event when it is
+  // registry-valid AND a config explicitly lists it, so an arbitrary
+  // unregistered string can never masquerade as a configured event.
   const isPluginEvent = configuredType === null && webhookEventRegistry.has(type);
   const redactedData = redactWebhookSecrets(data) as Record<string, unknown>;
   // `type` has passed the emission gate above (it is a configured/aliasable core
@@ -53,31 +51,26 @@ export function dispatchWebhook(
     data: redactedData,
     timestamp: new Date(),
   };
-  void dispatchConfiguredWebhooks(event, configuredType, isPluginEvent ? type : null).catch(
-    (error) => {
-      console.error("[webhooks] Failed to dispatch configured webhooks:", error);
-    },
+  // Route callers intentionally do not await webhook delivery. In a Worker,
+  // register that detached promise with the request-owned database lease so
+  // its reads/writes finish before the WebSocket pool is closed. Bun keeps its
+  // existing process-owned fire-and-forget behavior when no request lease is
+  // active.
+  void waitUntilRequestDatabaseTask(() =>
+    dispatchConfiguredWebhooks(event, configuredType, isPluginEvent ? type : null).catch(
+      (error) => {
+        console.error(
+          "[webhooks] Failed to dispatch configured webhooks",
+          redactedThrownDiagnostics(error),
+        );
+      },
+    ),
   );
 
-  // Legacy tenant-config single webhook URL. Tenants can still set a webhookUrl
-  // via the tenants route (tenants.ts), so this fan-out must remain until that
-  // path is fully migrated to persisted webhook configs. It fires for every
-  // event regardless of configured-type mapping, using the raw event type.
-  // Payload is redacted on the same terms as configured webhooks.
-  const tenantConfigWebhookUrl = tenantConfigs.get(tenantId)?.webhookUrl;
-  if (tenantConfigWebhookUrl) {
-    const tenantConfigEvent: WebhookEvent = {
-      type: type as WebhookEvent["type"],
-      tenantId,
-      agentId,
-      data: redactedData,
-      timestamp: new Date(),
-    };
-    const dispatcher = new WebhookDispatcher();
-    dispatcher.dispatch(tenantConfigEvent, tenantConfigWebhookUrl).catch((error) => {
-      console.error("[webhooks] Failed to dispatch tenant config webhook:", error);
-    });
-  }
+  // SEC-101: the unverifiable tenant-route webhookUrl field is retired. The
+  // former second fan-out through a bare URL both duplicate-delivered each
+  // event and could only sign with a process-wide key. Persisted /webhooks
+  // endpoints with receiver-known per-endpoint secrets are now the sole path.
 }
 
 export async function dispatchTestWebhook(config: {
@@ -199,6 +192,10 @@ async function dispatchConfiguredWebhook(
   },
 ): Promise<typeof webhookDeliveries.$inferSelect> {
   const signingSecret = decryptWebhookSecret(config.secret);
+  // Plaintext compatibility rows are upgraded lazily with a compare-and-set.
+  // This avoids requiring the encryption key during migrations or racing
+  // concurrently booting replicas; delivery rows snapshot only ciphertext.
+  // A dormant compatibility row remains plaintext until delivery or rotation.
   const encryptedSecret = isEncryptedWebhookSecret(config.secret)
     ? config.secret
     : encryptWebhookSecret(signingSecret);
@@ -250,6 +247,24 @@ async function dispatchConfiguredWebhook(
 
   if (!delivery) {
     throw new Error("Failed to create webhook delivery record");
+  }
+
+  // SEC-017: re-validate the destination at delivery time with FRESH DNS
+  // answers — registration-time validation cannot see DNS rebinding (public A
+  // record at config time, private at fetch time). Fail closed: no fetch.
+  const deliveryUrlError = await validateWebhookUrlResolved(config.url);
+  if (deliveryUrlError) {
+    const [rejected] = await db
+      .update(webhookDeliveries)
+      .set({
+        status: "failed",
+        attempts: 0,
+        lastError: `delivery blocked: ${deliveryUrlError}`,
+        payload: eventWithDelivery as unknown as Record<string, unknown>,
+      })
+      .where(eq(webhookDeliveries.id, delivery.id))
+      .returning();
+    return rejected ?? delivery;
   }
 
   const dispatcher = new WebhookDispatcher({

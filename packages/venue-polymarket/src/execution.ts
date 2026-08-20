@@ -120,29 +120,16 @@ function isAmbiguousPostError(raw: RawPostOrderResult): boolean {
   );
 }
 
-// USDC + outcome-token base-unit scale (6 decimals). The CLOB can report the
-// post-order making/taking amounts either as human-readable units (what matchr
-// observed live and consumed directly) or as 6-decimal base-unit strings
-// (matching the signed makerAmount/takerAmount). We detect + normalize so a
-// filled 20-share order is never reported as 20_000_000.
-const BASE_UNIT_SCALE = 1e6;
-// Above this magnitude an "amount of shares/USD" is implausibly large for a
-// human unit and is almost certainly a 6-decimal base-unit value.
-const BASE_UNIT_DETECT_THRESHOLD = 1e6;
-
-function normalizeFillUnit(value: number): number {
-  // The price ratio is unit-invariant; only absolute amounts need scaling. If a
-  // value is in base-unit magnitude, scale it down to human units.
-  return value >= BASE_UNIT_DETECT_THRESHOLD ? value / BASE_UNIT_SCALE : value;
-}
-
 /**
  * Derive the actual fill amount/price from a post-order response's
  * making/taking amounts (the protocol's source of truth), mirroring matchr.
  *
- * actualPrice = making/taking is unit-invariant (the 1e6 scale cancels), so it
- * is computed on the RAW amounts. actualAmount is normalized to human units
- * (shares) so callers never record base-unit-inflated sizes.
+ * Official CLOB clients return `makingAmount` and `takingAmount` as decimal
+ * human-unit strings (for example 4.999999 USDC and 10.416665 shares). Only the
+ * signed order fields `makerAmount` / `takerAmount` use 6-decimal integers.
+ * Response values are therefore consumed directly: magnitude-based scaling
+ * corrupts legitimate large fills and invents a unit distinction absent from
+ * the response contract (SEC-187).
  *
  * Cases:
  *  - amounts MISSING/unparsable -> use fallback (accepted-no-amounts case).
@@ -170,22 +157,22 @@ export function deriveActualFill(
   if (side === "buy") {
     // BUY: taking = shares acquired, making = USD spent. price = making/taking.
     return {
-      actualAmount: normalizeFillUnit(takingAmount),
+      actualAmount: takingAmount,
       actualPrice: makingAmount / takingAmount,
     };
   }
   // SELL: making = shares sold, taking = USD received. price = taking/making.
   // (Zero amounts already handled above as the resting/unfilled case.)
   return {
-    actualAmount: normalizeFillUnit(makingAmount),
+    actualAmount: makingAmount,
     actualPrice: takingAmount / makingAmount,
   };
 }
 
 // ---------------------------------------------------------------------------
 // clob-client construction — sigType 2 + funder Safe + builder attribution.
-// The clob-client is typed against ethers v5 Wallet; we cast the injected
-// (v6-shaped) signer. Known wart — see KNOWLEDGE-DUMP §5/§8.
+// The clob-client expects the ethers v5 signer surface; the adapter below
+// exposes that surface over the injected signer without exporting custody.
 // ---------------------------------------------------------------------------
 
 /**

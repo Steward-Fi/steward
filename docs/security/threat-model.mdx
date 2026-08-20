@@ -31,7 +31,7 @@ right and this document is wrong. Please file an issue.
   typically one tenant. In a multi-tenant self-hosted deployment, many tenants share
   infrastructure.
 - **Operator:** the human/team running Steward. Owns
-  `STEWARD_MASTER_PASSWORD`, `STEWARD_SESSION_SECRET`,
+  `STEWARD_MASTER_PASSWORD`, `STEWARD_JWT_SECRET`,
   `STEWARD_KDF_SALT`.
 - **Vault:** the encrypted key store (`packages/vault`). Holds encrypted
   private keys.
@@ -45,7 +45,7 @@ If any of these fails, the threat model below does not hold.
 1. **`STEWARD_MASTER_PASSWORD` is kept secret.** It has entropy equivalent
    to at least 256 bits of random data and is not shared across
    deployments.
-2. **`STEWARD_SESSION_SECRET` is kept secret.** Treated with the same
+2. **`STEWARD_JWT_SECRET` is kept secret.** Treated with the same
    care as the master password. Leak = arbitrary JWT forgery.
 3. **`STEWARD_KDF_SALT` is set to a unique per-deployment random value**
    (operator action — the fallback default is documented as weak;
@@ -394,6 +394,11 @@ adversary defeats the entire architecture.
   Ed25519 checkpoints, and offline verifier detect modification relative to the public key carried in the bundle. Operators must separately
   match that key to an out-of-band trusted signing key or fingerprint. An operator controlling all
   relevant keys can still fabricate a self-consistent history.
+- **Optional checkpoint anchoring narrows, but does not remove, that limit.**
+  An RFC 3161 proof verified against an auditor-supplied TSA CA shows a signed
+  checkpoint existed no later than the TSA time. It does not make Steward
+  tamper-proof or operator-proof, cover post-anchor events, or prove export
+  completeness.
 - **No rate limiting on read endpoints.** Rate limits apply to
   signing and auth; general read traffic is not rate-capped beyond
   whatever the reverse proxy enforces.

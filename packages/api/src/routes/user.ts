@@ -35,8 +35,11 @@ import {
   hashSha256Hex,
   isBuiltInProvider,
   isValidE164,
+  MemoryBackend,
+  NamespacedStoreBackend,
   OAuthClient,
   revocationStore,
+  type StoreBackend,
   type TelegramLoginPayload,
   uint8ArrayToBase64url,
   verifyFarcasterLogin,
@@ -65,14 +68,15 @@ import {
   userWalletAppConsents,
 } from "@stwd/db";
 import { PolicyEngine } from "@stwd/policy-engine";
-import type {
-  AgentBalance,
-  AgentIdentity,
-  ApiResponse,
-  ChainFamily,
-  PolicyRule,
-  SignRequest,
-  TenantAuthAbuseConfig,
+import {
+  type AgentBalance,
+  type AgentIdentity,
+  type ApiResponse,
+  type ChainFamily,
+  type PolicyRule,
+  redactedThrownDiagnostics,
+  type SignRequest,
+  type TenantAuthAbuseConfig,
 } from "@stwd/shared";
 import {
   applyUserWalletDefaults,
@@ -91,12 +95,19 @@ import { and, desc, eq, gte, ilike, inArray, isNull, ne, or, sql } from "drizzle
 import { type Context, Hono, type Next } from "hono";
 import { getAddress, verifyMessage as viemVerifyMessage } from "viem";
 import { writeAuditEvent } from "../services/audit";
-import { priceOracle, setNoStoreHeaders, verifySessionToken } from "../services/context";
+import {
+  continueWithTenantDatabase,
+  priceOracle,
+  sanitizeErrorMessage,
+  setNoStoreHeaders,
+  verifySessionToken,
+} from "../services/context";
 import {
   publicGasSponsorshipState,
   readTenantGasSponsorshipConfig,
 } from "../services/gas-sponsorship";
 import { plaintextKeyExportResponseGateError } from "../services/key-export-plaintext-gate";
+import { isRecentMfaTimestamp } from "../services/recent-mfa";
 import { lockUserSession } from "../services/session-lock";
 import { createSignerCredentialHash, verifySignerCredential } from "../services/signer-credentials";
 import { getConfiguredVault } from "../services/vault-factory";
@@ -104,6 +115,8 @@ import { redactWalletMetadataSecrets } from "../services/wallet-metadata";
 import { dispatchWebhook } from "../services/webhook-dispatch";
 import {
   assertAllowedOAuthRedirectUri,
+  claimSmsVerifyAttempt,
+  clearSmsVerifyFailures,
   createSessionToken,
   decryptImportSessionJson,
   encryptImportSessionJson,
@@ -185,11 +198,38 @@ const USER_ACCOUNT_CAPABILITIES = [
 const USD_SCALE_DECIMALS = 18;
 const WALLET_LINK_CHALLENGE_TTL_MS = 5 * 60_000;
 const WALLET_LINK_REDEEM_LOCK_TTL_MS = 10_000;
-const walletLinkChallenges = new ChallengeStore({ ttlMs: WALLET_LINK_CHALLENGE_TTL_MS });
 const SOCIAL_LINK_CHALLENGE_TTL_MS = 5 * 60_000;
-const socialLinkChallenges = new ChallengeStore({ ttlMs: SOCIAL_LINK_CHALLENGE_TTL_MS });
 const OAUTH_LINK_CHALLENGE_TTL_MS = 5 * 60_000;
-const oauthLinkChallenges = new ChallengeStore({ ttlMs: OAUTH_LINK_CHALLENGE_TTL_MS });
+const initialUserLinkBackend = new MemoryBackend();
+let currentUserLinkBackend: StoreBackend | null = null;
+let walletLinkChallenges: ChallengeStore;
+let socialLinkChallenges: ChallengeStore;
+let oauthLinkChallenges: ChallengeStore;
+
+/** Bind account-link challenges to auth startup's selected durable backend. */
+export function initUserLinkChallengeStores(backend: StoreBackend): void {
+  const supersededBackend = currentUserLinkBackend;
+  currentUserLinkBackend = backend;
+  walletLinkChallenges = new ChallengeStore({
+    backend: new NamespacedStoreBackend(backend, "user-link-wallet"),
+    ttlMs: WALLET_LINK_CHALLENGE_TTL_MS,
+  });
+  socialLinkChallenges = new ChallengeStore({
+    backend: new NamespacedStoreBackend(backend, "user-link-social"),
+    ttlMs: SOCIAL_LINK_CHALLENGE_TTL_MS,
+  });
+  oauthLinkChallenges = new ChallengeStore({
+    backend: new NamespacedStoreBackend(backend, "user-link-oauth"),
+    ttlMs: OAUTH_LINK_CHALLENGE_TTL_MS,
+  });
+  if (supersededBackend instanceof MemoryBackend && supersededBackend !== backend) {
+    supersededBackend.destroy();
+  }
+}
+
+// Development and tests remain process-local until auth startup selects the
+// shared backend. Every entry is still bounded by the flow-specific TTL.
+initUserLinkChallengeStores(initialUserLinkBackend);
 const TELEGRAM_LINK_MAX_AGE_SEC = 24 * 60 * 60;
 const TENANT_ROLES = ["owner", "admin", "developer", "billing", "viewer", "member"] as const;
 type TenantRole = (typeof TENANT_ROLES)[number];
@@ -940,7 +980,10 @@ async function writeInvalidUserWalletIndexAudit(
       },
     });
   } catch (error) {
-    console.warn("[UserWallet] Failed to audit invalid wallet index selector:", error);
+    console.warn(
+      "[UserWallet] Failed to audit invalid wallet index selector",
+      redactedThrownDiagnostics(error),
+    );
   }
 }
 
@@ -962,11 +1005,7 @@ async function restoreUserAccountUnlinkMutation(
 }
 
 function hasRecentMfaStepUp(session: UserSessionPayload, maxAgeMs = 5 * 60_000): boolean {
-  return (
-    typeof session.mfaVerifiedAt === "number" &&
-    Number.isFinite(session.mfaVerifiedAt) &&
-    Date.now() - session.mfaVerifiedAt <= maxAgeMs
-  );
+  return isRecentMfaTimestamp(session.mfaVerifiedAt, maxAgeMs);
 }
 
 async function readPersonalTenantMfaPolicy(tenantId: string): Promise<TenantMfaPolicyConfig> {
@@ -1092,6 +1131,13 @@ function parseBoundedOffset(value: string | null): number {
   const parsed = value ? Number(value) : 0;
   if (!Number.isFinite(parsed) || parsed < 0) return 0;
   return Math.min(Math.floor(parsed), 100_000);
+}
+
+function escapeLikePattern(value: string): string {
+  // PostgreSQL LIKE uses backslash as its default escape character. Escape it
+  // before '%' and '_' so a caller cannot turn our escaping back into a
+  // wildcard by supplying a preceding backslash.
+  return value.replace(/[\\%_]/g, "\\$&");
 }
 
 function isUuid(value: string): boolean {
@@ -1316,7 +1362,7 @@ async function getTransactionStats(agentId: string) {
   };
 }
 
-async function getUserWalletTransactionStats(userId: string) {
+async function getUserWalletTransactionStats(userId: string, chainId?: number) {
   const db = getDb();
   const now = new Date();
   const oneHourAgo = new Date(now.getTime() - 3_600_000);
@@ -1331,6 +1377,12 @@ async function getUserWalletTransactionStats(userId: string) {
     ...Array.from({ length: 255 }, (_, index) => `${baseAgentId}-${index + 1}`),
   ];
 
+  // Same cross-chain unit discipline as getTransactionStats (SEC-039): the
+  // value column holds raw per-chain base units, so spend sums used for
+  // policy enforcement must be scoped to the request's chain.
+  const chainFilter =
+    chainId === undefined ? sql`` : sql` and ${transactions.chainId} = ${chainId}`;
+
   const [stats] = await db
     .select({
       recentTxCount1h: sql<number>`count(*) filter (where ${transactions.createdAt} >= ${oneHourAgoStr}::timestamptz)`,
@@ -1339,14 +1391,14 @@ async function getUserWalletTransactionStats(userId: string) {
         coalesce(
           sum(
             case
-              when ${transactions.createdAt} >= ${oneDayAgoStr}::timestamptz then (${transactions.value})::numeric
+              when ${transactions.createdAt} >= ${oneDayAgoStr}::timestamptz${chainFilter} then (${transactions.value})::numeric
               else 0
             end
           ),
           0
         )::text
       `,
-      spentThisWeek: sql<string>`coalesce(sum((${transactions.value})::numeric), 0)::text`,
+      spentThisWeek: sql<string>`coalesce(sum((${transactions.value})::numeric) filter (where true${chainFilter}), 0)::text`,
     })
     .from(transactions)
     .where(
@@ -1510,7 +1562,7 @@ async function withAgentSpendLock<T>(agentId: string, fn: () => Promise<T>): Pro
   }
   const db = getDb();
   return db.transaction(async (tx) => {
-    await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${agentId}))`);
+    await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${agentId}, 0))`);
     return fn();
   });
 }
@@ -1682,7 +1734,10 @@ export async function userSessionAuth(
     c.set("sessionMfaMethod", payload.mfaMethod);
   }
 
-  await next();
+  if (!payload.tenantId) {
+    return c.json<ApiResponse>({ ok: false, error: "Session token missing tenantId claim" }, 401);
+  }
+  await continueWithTenantDatabase(payload.tenantId, "user-session-jwt", userId, next, userId);
 }
 
 // ─── Route group ──────────────────────────────────────────────────────────────
@@ -2169,7 +2224,10 @@ user.get("/me", async (c) => {
           createOnLogin: embeddedWalletConfig.createOnLogin,
         },
       }).catch((error) => {
-        console.error("[user] Failed to audit create-on-login wallet success:", error);
+        console.error(
+          "[user] Failed to audit create-on-login wallet success",
+          redactedThrownDiagnostics(error),
+        );
       });
     }
     if (wallet) {
@@ -2510,7 +2568,7 @@ user.post("/me/accounts/wallet/ethereum", async (c) => {
       return c.json<ApiResponse>({ ok: false, error: "Invalid or expired wallet link nonce" }, 401);
     }
   } finally {
-    walletLinkChallenges.delete(lockKey);
+    await walletLinkChallenges.delete(lockKey);
   }
 
   const normalized = address.toLowerCase();
@@ -2699,7 +2757,7 @@ user.post("/me/accounts/wallet/solana", async (c) => {
       return c.json<ApiResponse>({ ok: false, error: "Invalid or expired wallet link nonce" }, 401);
     }
   } finally {
-    walletLinkChallenges.delete(lockKey);
+    await walletLinkChallenges.delete(lockKey);
   }
 
   const [userRow] = await getDb()
@@ -2927,30 +2985,21 @@ user.post("/me/accounts/oauth/:provider/token", async (c) => {
   try {
     oauthClient = new OAuthClient(getProviderConfig(providerName));
   } catch (err) {
-    return c.json<ApiResponse>(
-      { ok: false, error: err instanceof Error ? err.message : "Provider not configured" },
-      503,
-    );
+    return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(err) }, 503);
   }
 
   let tokenResponse: Awaited<ReturnType<OAuthClient["exchangeCode"]>>;
   try {
     tokenResponse = await oauthClient.exchangeCode(code, redirectUri, codeVerifier || undefined);
   } catch (err) {
-    return c.json<ApiResponse>(
-      { ok: false, error: err instanceof Error ? err.message : "Token exchange failed" },
-      502,
-    );
+    return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(err) }, 502);
   }
 
   let providerUser: Awaited<ReturnType<OAuthClient["getUserInfo"]>>;
   try {
     providerUser = await oauthClient.getUserInfo(tokenResponse.access_token);
   } catch (err) {
-    return c.json<ApiResponse>(
-      { ok: false, error: err instanceof Error ? err.message : "Failed to fetch user info" },
-      502,
-    );
+    return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(err) }, 502);
   }
 
   if (!providerUser.id) {
@@ -3120,14 +3169,22 @@ for (const channel of ["sms", "whatsapp"] as const) {
     }
 
     const userId = c.get("userId");
-    const verified = await getPhoneAuth().verifyOtp(
-      body.phone,
-      body.code,
-      phoneLinkPurpose(channel, userId),
-    );
+    const linkPurpose = phoneLinkPurpose(channel, userId);
+    if (!(await claimSmsVerifyAttempt(body.phone, linkPurpose))) {
+      return c.json<ApiResponse>(
+        {
+          ok: false,
+          error: "Too many invalid codes. Request a new code and try again later.",
+        },
+        429,
+      );
+    }
+
+    const verified = await getPhoneAuth().verifyOtp(body.phone, body.code, linkPurpose);
     if (!verified.valid) {
       return c.json<ApiResponse>({ ok: false, error: "Invalid or expired code" }, 401);
     }
+    await clearSmsVerifyFailures(body.phone, linkPurpose);
 
     const provider = channel === "whatsapp" ? "whatsapp" : "phone";
     const providerAccountId = phoneProviderAccountId(body.phone);
@@ -3611,7 +3668,15 @@ user.delete("/me/accounts/:provider/:providerAccountId", async (c) => {
               : error.message === "Linked account changed during unlink"
                 ? 409
                 : 500;
-      return c.json<ApiResponse>({ ok: false, error: error.message }, status);
+      // SEC-210: known client-facing messages keep their detail; anything else
+      // is an internal failure and must not leak internals to the client.
+      return c.json<ApiResponse>(
+        {
+          ok: false,
+          error: status === 500 ? sanitizeErrorMessage(error) : error.message,
+        },
+        status,
+      );
     }
     throw error;
   }
@@ -3967,8 +4032,7 @@ user.get("/me/wallet", async (c) => {
       },
     });
   } catch (e) {
-    const msg = e instanceof Error ? e.message : "Unknown error";
-    return c.json<ApiResponse>({ ok: false, error: msg }, 500);
+    return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(e) }, 500);
   }
 });
 
@@ -4017,8 +4081,10 @@ user.post("/me/wallet", async (c) => {
         walletIndex.value,
       );
     } catch (e) {
-      const msg = e instanceof Error ? e.message : "Unknown error";
-      return c.json<ApiResponse>({ ok: false, error: `Failed to provision wallet: ${msg}` }, 500);
+      return c.json<ApiResponse>(
+        { ok: false, error: `Failed to provision wallet: ${sanitizeErrorMessage(e)}` },
+        500,
+      );
     }
   }
 
@@ -4255,8 +4321,10 @@ user.post("/me/wallet/claim-pregenerated", async (c) => {
       201,
     );
   } catch (e) {
-    const msg = e instanceof Error ? e.message : "Unknown error";
-    return c.json<ApiResponse>({ ok: false, error: `Failed to claim wallet: ${msg}` }, 500);
+    return c.json<ApiResponse>(
+      { ok: false, error: `Failed to claim wallet: ${sanitizeErrorMessage(e)}` },
+      500,
+    );
   }
 });
 
@@ -4390,9 +4458,14 @@ user.post("/me/wallet/recovery/setup", async (c) => {
       201,
     );
   } catch (e) {
-    const msg = e instanceof Error ? e.message : "Unknown error";
-    console.error(`[UserWallet] recovery setup failed for user "${userId}":`, e);
-    return c.json<ApiResponse>({ ok: false, error: `Failed to set up recovery: ${msg}` }, 500);
+    console.error(
+      `[UserWallet] recovery setup failed for user "${userId}"`,
+      redactedThrownDiagnostics(e),
+    );
+    return c.json<ApiResponse>(
+      { ok: false, error: `Failed to set up recovery: ${sanitizeErrorMessage(e)}` },
+      500,
+    );
   }
 });
 
@@ -4525,8 +4598,10 @@ user.post("/me/wallet/recovery/restore", async (c) => {
       wallet.restoredExisting ? 200 : 201,
     );
   } catch (e) {
-    const msg = e instanceof Error ? e.message : "Unknown error";
-    return c.json<ApiResponse>({ ok: false, error: `Failed to restore wallet: ${msg}` }, 409);
+    return c.json<ApiResponse>(
+      { ok: false, error: `Failed to restore wallet: ${sanitizeErrorMessage(e)}` },
+      409,
+    );
   }
 });
 
@@ -5071,7 +5146,17 @@ user.post("/me/wallet/sign", async (c) => {
       403,
     );
   }
-  const signRequest: SignRequest = { ...signBody, tenantId, agentId, chainId };
+  // Build the SignRequest from declared fields only. Extra body fields must not
+  // reach the policy engine or shadow the destination that the vault signs.
+  const signRequest: SignRequest = {
+    tenantId,
+    agentId,
+    to: signBody.to,
+    value: signBody.value,
+    data: typeof signBody.data === "string" ? signBody.data : undefined,
+    chainId,
+    broadcast: shouldBroadcast,
+  };
 
   // Fetch active policies
   const db = getDb();
@@ -5086,7 +5171,7 @@ user.post("/me/wallet/sign", async (c) => {
     const result: UserWalletSignResult = await withAgentSpendLock(
       `user-wallet-${userId}`,
       async () => {
-        const stats = await getUserWalletTransactionStats(userId);
+        const stats = await getUserWalletTransactionStats(userId, chainId);
         const engine = new PolicyEngine();
         const evaluation = await engine.evaluate(policySet, {
           request: signRequest,
@@ -5180,16 +5265,15 @@ user.post("/me/wallet/sign", async (c) => {
   } catch (e) {
     if (completedResult) {
       console.error(
-        `[UserWallet] Post-sign bookkeeping failed for user "${userId}" after transaction "${completedResult.txId}" completed:`,
-        e,
+        `[UserWallet] Post-sign bookkeeping failed for user "${userId}" after transaction "${completedResult.txId}" completed`,
+        redactedThrownDiagnostics(e),
       );
       return c.json<ApiResponse<{ txId: string; txHash: string }>>({
         ok: true,
         data: completedResult,
       });
     }
-    const msg = e instanceof Error ? e.message : "Unknown error";
-    console.error(`[UserWallet] Sign failed for user "${userId}":`, e);
+    console.error(`[UserWallet] Sign failed for user "${userId}"`, redactedThrownDiagnostics(e));
     try {
       await writeUserAudit(c, {
         tenantId: `personal-${userId}`,
@@ -5198,12 +5282,17 @@ user.post("/me/wallet/sign", async (c) => {
         action: "user.wallet.sign.failed",
         resourceType: "wallet",
         resourceId: wallet.id,
-        metadata: { error: msg, walletIndex: walletIndex.value },
+        metadata: { ...redactedThrownDiagnostics(e), walletIndex: walletIndex.value },
       });
     } catch (auditErr) {
-      console.error(`[UserWallet] Failed to audit signing failure for user "${userId}":`, auditErr);
+      console.error(
+        `[UserWallet] Failed to audit signing failure for user "${userId}"`,
+        redactedThrownDiagnostics(auditErr),
+      );
     }
-    return c.json<ApiResponse>({ ok: false, error: msg }, 500);
+    // SEC-210: the raw message stays in server-side logs/audit metadata only;
+    // the client gets the sanitized form.
+    return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(e) }, 500);
   }
 });
 
@@ -5419,9 +5508,11 @@ user.post("/me/wallet/sign-message", async (c) => {
       data: { signature, address: wallet.walletAddress },
     });
   } catch (e) {
-    const msg = e instanceof Error ? e.message : "Unknown error";
-    console.error(`[UserWallet] sign-message failed for user "${userId}":`, e);
-    return c.json<ApiResponse>({ ok: false, error: msg }, 500);
+    console.error(
+      `[UserWallet] sign-message failed for user "${userId}"`,
+      redactedThrownDiagnostics(e),
+    );
+    return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(e) }, 500);
   }
 });
 
@@ -5705,9 +5796,11 @@ user.post("/me/wallet/import/submit", async (c) => {
       },
     });
   } catch (e) {
-    const msg = e instanceof Error ? e.message : "Unknown error";
-    console.error(`[UserWallet] encrypted import failed for user "${userId}":`, e);
-    return c.json<ApiResponse>({ ok: false, error: msg }, 500);
+    console.error(
+      `[UserWallet] encrypted import failed for user "${userId}"`,
+      redactedThrownDiagnostics(e),
+    );
+    return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(e) }, 500);
   }
 });
 
@@ -5822,9 +5915,8 @@ user.post("/me/wallet/export", async (c) => {
       },
     });
   } catch (e) {
-    const msg = e instanceof Error ? e.message : "Unknown error";
-    console.error(`[UserWallet] export failed for user "${userId}":`, e);
-    return c.json<ApiResponse>({ ok: false, error: msg }, 500);
+    console.error(`[UserWallet] export failed for user "${userId}"`, redactedThrownDiagnostics(e));
+    return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(e) }, 500);
   }
 });
 
@@ -6576,7 +6668,7 @@ user.post("/me/tenants/:tenantId/invitations", async (c) => {
       await emailAuth.sendTenantInvitation(email, { tenantId, token, expiresAt });
       emailSent = true;
     } catch (error) {
-      console.error("[TenantInvitation] Email delivery failed:", error);
+      console.error("[TenantInvitation] Email delivery failed", redactedThrownDiagnostics(error));
     }
   }
 
@@ -6704,7 +6796,7 @@ user.get("/me/tenants/:tenantId/users", async (c) => {
   const whereConditions = [eq(userTenants.tenantId, tenantId)];
   if (email) whereConditions.push(eq(users.email, email));
   if (q) {
-    const like = `%${q.replace(/[%_]/g, "\\$&")}%`;
+    const like = `%${escapeLikePattern(q)}%`;
     whereConditions.push(
       or(ilike(users.email, like), ilike(users.name, like), sql`${users.id}::text ilike ${like}`)!,
     );
@@ -6982,7 +7074,7 @@ user.get("/me/tenants/:tenantId/users/export", async (c) => {
   const whereConditions = [eq(userTenants.tenantId, tenantId)];
   if (email) whereConditions.push(eq(users.email, email));
   if (q) {
-    const like = `%${q.replace(/[%_]/g, "\\$&")}%`;
+    const like = `%${escapeLikePattern(q)}%`;
     whereConditions.push(
       or(ilike(users.email, like), ilike(users.name, like), sql`${users.id}::text ilike ${like}`)!,
     );

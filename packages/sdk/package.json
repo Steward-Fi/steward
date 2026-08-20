@@ -47,6 +47,7 @@
     "bs58": "^6.0.0"
   },
   "devDependencies": {
-    "@simplewebauthn/browser": "^13.0.0"
+    "@simplewebauthn/browser": "^13.0.0",
+    "jose": "^6.2.1"
   }
 }

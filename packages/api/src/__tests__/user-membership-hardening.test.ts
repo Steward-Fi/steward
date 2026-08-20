@@ -17,7 +17,7 @@ const joinMigrationSource = readFileSync(
   join(import.meta.dir, "..", "..", "..", "db", "drizzle", "0048_harden_tenant_join_default.sql"),
   "utf8",
 );
-// tenant_invitations DDL was consolidated into the PR #79 migrations.
+// tenant_invitations is part of the composed migration contract.
 const inviteMigrationSource = ["0046_pr79_union_hardening.sql", "0047_pr79_security_invariants.sql"]
   .map((f) => readFileSync(join(import.meta.dir, "..", "..", "..", "db", "drizzle", f), "utf8"))
   .join("\n");
@@ -173,6 +173,10 @@ describe("user membership hardening", () => {
     expect(acceptRoute).toContain("emailVerified");
     expect(acceptRoute).toContain("/^[a-f0-9]{64}$/i.test(body.token)");
     expect(acceptRoute).toContain("hashSha256Hex(body.token)");
+    // SEC-075: the invitation must be bound server-side to the accepting
+    // account's verified email — in BOTH the candidate lookup and the atomic
+    // accept update — so a leaked link cannot add a different signed-in user.
+    expect(acceptRoute).toContain("eq(tenantInvitations.email, email)");
     expect(acceptRoute).toContain('eq(tenantInvitations.status, "pending")');
     expect(acceptRoute).toContain("gte(tenantInvitations.expiresAt, new Date())");
     expect(acceptRoute.indexOf('action: "tenant.invitation.accept.authorized"')).toBeLessThan(

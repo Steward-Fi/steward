@@ -6,12 +6,18 @@ account_id = "REPLACE_ME"
 workers_dev = true
 minify = true
 
+[triggers]
+# Cloudflare's minimum cron cadence is one minute. This recovers pre-existing
+# leases and provider OAuth lifecycle journals.
+crons = ["* * * * *"]
+
 [observability]
 enabled = true
 
 [vars]
+NODE_ENV = "production"
 SKIP_MIGRATIONS = "1"
-DATABASE_DRIVER = "neon-http"
+DATABASE_DRIVER = "neon-websocket"
 REDIS_DRIVER = "upstash"
 # Non-secret config goes here. Anything sensitive must be set via
 # `wrangler secret put` instead so it doesn't end up in this file.
@@ -26,20 +32,27 @@ REDIS_DRIVER = "upstash"
 #   KV_REST_API_TOKEN                Upstash REST token
 #
 # Auth / vault
-#   STEWARD_SESSION_SECRET           HS256 JWT signing secret (canonical)
+#   STEWARD_JWT_SECRET               Canonical HS256 JWT signing secret
 #   STEWARD_MASTER_PASSWORD          Vault keystore master
 #   STEWARD_KDF_SALT                 Per-deployment hex salt for the KeyStore KDF
+#   STEWARD_AUDIT_HMAC_KEY            Tamper-evident audit-chain HMAC root
+#   STEWARD_IDENTITY_JWT_PRIVATE_KEY  optional PKCS#8 RS256/ES256 identity key
+#                                      (configure its alg/kid/issuer/audience in vars)
 #
 # Email
 #   RESEND_API_KEY                   Magic-link email provider
 #   EMAIL_FROM                       optional: from address (default login@steward.fi)
-#   APP_URL                          optional: base URL for magic links
+#   APP_URL                          canonical HTTPS public base (required unless
+#                                    STEWARD_IDENTITY_JWT_ISSUER is configured)
+#   STEWARD_IDENTITY_JWT_ISSUER      optional dedicated canonical HTTPS identity base
 #
 # OAuth providers
 #   GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET
 #   DISCORD_CLIENT_ID, DISCORD_CLIENT_SECRET
 #   GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET
 #   TWITTER_CLIENT_ID, TWITTER_CLIENT_SECRET
+#   X_CLIENT_ID, X_CLIENT_SECRET     provider-account X connect and lifecycle
+#                                     recovery; distinct from Twitter sign-in
 #
 # Passkeys (WebAuthn)
 #   PASSKEY_RP_ID, PASSKEY_ORIGIN, PASSKEY_RP_NAME
@@ -61,14 +74,16 @@ REDIS_DRIVER = "upstash"
 name = "steward-api-staging"
 
 [env.staging.vars]
+NODE_ENV = "production"
 SKIP_MIGRATIONS = "1"
-DATABASE_DRIVER = "neon-http"
+DATABASE_DRIVER = "neon-websocket"
 REDIS_DRIVER = "upstash"
 
 [env.production]
 name = "steward-api-prod"
 
 [env.production.vars]
+NODE_ENV = "production"
 SKIP_MIGRATIONS = "1"
-DATABASE_DRIVER = "neon-http"
+DATABASE_DRIVER = "neon-websocket"
 REDIS_DRIVER = "upstash"

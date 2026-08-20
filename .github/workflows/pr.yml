@@ -29,6 +29,9 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
+      - name: Check CI unit-test inventory
+        run: bun scripts/check-ci-test-inventory.ts
+
       - name: Lint
         run: bun run lint
 
@@ -58,27 +61,20 @@ jobs:
 
       - name: Check public package version bumps
         env:
-          BASE_REF: ${{ github.base_ref }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
-          # Checkout above is intentionally unshallow. Keep it that way: a
-          # depth-1 fetch can rewrite origin/${BASE_REF} as a shallow tip and
-          # remove the merge base needed by the three-dot diff below.
-          git fetch --no-tags origin "${BASE_REF}"
-          changed_files=$(git diff --name-only "origin/${BASE_REF}...HEAD")
-
-          status=0
-          for pkg in sdk react eliza-plugin; do
-            pkg_dir="packages/${pkg}"
-            if echo "$changed_files" | grep -qE "^${pkg_dir}/"; then
-              if ! echo "$changed_files" | grep -qE "^${pkg_dir}/(package.json|CHANGELOG.md|CHANGELOG|changelog.md)$"; then
-                echo "::error::${pkg_dir} changed without a package.json version bump or changelog update"
-                status=1
-              fi
-            fi
-          done
-
-          exit "$status"
+          # Compare the immutable commits captured by the pull_request event.
+          # The base branch can advance while this job runs; diffing its live
+          # remote tip would then attribute unrelated merged changes to the PR.
+          # checkout uses fetch-depth: 0 and the pull_request merge ref, so both
+          # immutable parent commits are already present. The helper validates
+          # the object IDs and commit types without refetching fork objects, then
+          # consumes NUL-delimited filenames so hostile names cannot bypass the
+          # package check.
+          bun test scripts/__tests__/check-public-package-metadata.test.ts
+          bun scripts/check-public-package-metadata.ts "$BASE_SHA" "$HEAD_SHA"
 
       - name: Check PR title
         # PR title is attacker-controlled. Pass it through env (never inline into
@@ -138,11 +134,40 @@ jobs:
         env:
           NEXT_TELEMETRY_DISABLED: "1"
           NEXT_PUBLIC_STEWARD_API_URL: "https://eliza.steward.fi"
+          NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID: ${{ secrets.NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID || 'ci-build-check-placeholder' }}
         run: bun run cf:build
 
       - name: Validate Worker bundle (dry-run deploy)
         working-directory: web
         run: bunx wrangler deploy --dry-run --outdir /tmp/wrangler-dryrun
+
+  web-trust-ux-a11y:
+    name: Trust UX Accessibility (axe WCAG 2.1 AA)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: "1.3"
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Build workspace dependencies
+        run: bunx turbo run build --filter=@stwd/react --filter=@stwd/sdk --filter=@stwd/shared
+
+      - name: Install Chromium
+        working-directory: web
+        run: bunx playwright install --with-deps chromium
+
+      - name: Axe scan and keyboard-only approval flows
+        working-directory: web
+        run: bun run e2e:trust-ux
 
   unit:
     name: Unit Tests (${{ matrix.package }})
@@ -160,14 +185,33 @@ jobs:
           - packages/webhooks
           - packages/db
           - packages/shared
+          - packages/attestation
           - packages/plugin-wxmr
           - packages/plugin-trading
           - packages/plugin-capabilities
+          - packages/plugin-example
+          - packages/plugin-sdk
+          - packages/provider-aws
+          - packages/provider-github
+          - packages/provider-google
+          - packages/provider-slack
+          - packages/provider-x
+          - packages/solana-signer
           - packages/trade-sessions
-          # packages/signer-frost is intentionally absent: its test harness
-          # builds the Rust sidecar via `cargo build --release` and this job
-          # has no Rust toolchain (and a release build would strain the
-          # 10-minute timeout). Add it alongside a rust-toolchain step.
+          - packages/cli
+          - packages/react
+          - packages/react-native
+          - packages/mcp
+          - packages/erc8004
+          - packages/erc8183
+          - packages/adapters
+          - packages/proxy-client
+          - packages/seed
+          - packages/venue-hyperliquid
+          - packages/venue-polymarket
+          - scripts/__tests__
+          # packages/eliza-plugin is intentionally absent: its test script is
+          # `vitest run`, not `bun test` — see the unit-eliza-plugin job.
 
     steps:
       - name: Checkout
@@ -183,8 +227,17 @@ jobs:
 
       - name: Build workspace dependencies
         run: |
-          PKG_NAME="@stwd/$(basename ${{ matrix.package }})"
-          bunx turbo run build --filter="${PKG_NAME}..."
+          if [ "${{ matrix.package }}" = "scripts/__tests__" ]; then
+            # scripts/ has no workspace package name to filter on, and its
+            # tests import package *sources* directly. The one dist-resolving
+            # imports currently resolved through package exports are
+            # @stwd/shared and @stwd/attestation (the latter is exercised by
+            # the check-attestation subprocess tests).
+            bunx turbo run build --filter=@stwd/shared --filter=@stwd/attestation
+          else
+            PKG_NAME="@stwd/$(basename ${{ matrix.package }})"
+            bunx turbo run build --filter="${PKG_NAME}..."
+          fi
 
       - name: Test ${{ matrix.package }}
         # --isolate gives each test file a fresh global object so module
@@ -196,16 +249,260 @@ jobs:
           if [ "${{ matrix.package }}" = "packages/sdk" ]; then
             mapfile -t sdk_tests < <(find packages/sdk/src -type f \( -name '*.test.ts' -o -name '*.spec.ts' \) | sort)
             bun test --isolate "${sdk_tests[@]}"
+          elif [ "${{ matrix.package }}" = "packages/plugin-sdk" ] || [ "${{ matrix.package }}" = "packages/plugin-example" ] || [ "${{ matrix.package }}" = "packages/plugin-capabilities" ]; then
+            # These packages own their test-process isolation or package-local
+            # preload. Running them from the repository root bypasses that
+            # contract and can leak mutable fixtures between files.
+            (cd "${{ matrix.package }}" && bun run test)
+          elif [ "${{ matrix.package }}" = "packages/trade-sessions" ]; then
+            # PGLite migrations can exceed Bun's 5s default on hosted runners.
+            # Keep file isolation while honoring the package's 30s test budget.
+            bun test --isolate --timeout 30000 packages/trade-sessions
           else
             bun test --isolate ${{ matrix.package }}
           fi
         env:
           STEWARD_MASTER_PASSWORD: "ci-test-secret"
+          # Unit tests intentionally exercise local proxy transports without a
+          # shared replay/rate-limit service. Production-posture tests set
+          # NODE_ENV=production, which overrides this explicit test posture.
+          STEWARD_PROXY_DEV_MODE: "true"
           # bunfig.toml [test] preloads only load from bun's cwd, and this job
           # runs `bun test` from the repo root — so per-package preloads (e.g.
           # plugin-trading's, which supplies this key) never run. 64-char dummy
           # matching the preload's "a".repeat(64).
           STEWARD_AUDIT_HMAC_KEY: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+  unit-eliza-plugin:
+    # packages/eliza-plugin's own test script is `vitest run`, not
+    # `bun test`, so it gets a dedicated job rather than a unit matrix entry.
+    name: Unit Tests (packages/eliza-plugin)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: "1.3"
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Build workspace dependencies
+        run: bunx turbo run build --filter=@stwd/eliza-plugin...
+
+      - name: Test packages/eliza-plugin
+        working-directory: packages/eliza-plugin
+        run: bun run test
+
+  unit-agent-trader:
+    # packages/agent-trader ships real src/__tests__ coverage but no root-level
+    # `scripts.test`, so run it explicitly from the package directory where its
+    # workspace links resolve correctly.
+    name: Unit Tests (packages/agent-trader)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: "1.3"
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Build workspace dependencies
+        run: bunx turbo run build --filter=@stwd/agent-trader...
+
+      - name: Test packages/agent-trader
+        working-directory: packages/agent-trader
+        run: bun test src/__tests__
+
+  unit-android:
+    name: Unit Tests (packages/android)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Install Java SDK dependency
+        run: mvn -B -f packages/java/pom.xml install -DskipTests
+      - name: Test Android SDK
+        run: mvn -B -f packages/android/pom.xml test
+
+  unit-csharp:
+    name: Unit Tests (packages/csharp)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Test C# SDK
+        # Steward.Tests is a dependency-free executable harness, not a VSTest
+        # project. `dotnet test` only built it and reported success with zero
+        # tests; run the harness so assertion failures reach the job status.
+        run: dotnet run --project packages/csharp/tests/Steward.Tests/Steward.Tests.csproj
+
+  unit-go:
+    name: Unit Tests (packages/go)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Test Go SDK
+        working-directory: packages/go
+        run: go test ./...
+
+  unit-java:
+    name: Unit Tests (packages/java)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Test Java SDK
+        run: mvn -B -f packages/java/pom.xml test
+
+  unit-python:
+    name: Unit Tests (packages/python)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Test Python SDK
+        run: PYTHONPATH=packages/python python3 -m unittest discover -s packages/python/tests
+
+  unit-ruby:
+    name: Unit Tests (packages/ruby)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Test Ruby SDK
+        run: ruby -Ipackages/ruby/lib -e 'Dir["packages/ruby/test/**/*_test.rb"].sort.each { |file| require File.expand_path(file) }'
+
+  unit-rust:
+    name: Unit Tests (packages/rust)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Test Rust SDK
+        run: cargo test --locked --manifest-path packages/rust/Cargo.toml
+
+  unit-swift:
+    name: Unit Tests (packages/swift)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Test Swift SDK
+        run: swift test --package-path packages/swift
+
+  unit-signer-frost:
+    # The FROST tests build and exercise the real Rust threshold-signing
+    # sidecar. GitHub's Ubuntu image includes stable Rust; a dedicated job
+    # avoids both silently skipping the suite and constraining it to the Bun
+    # matrix's shorter timeout.
+    name: Unit Tests (packages/signer-frost)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: "1.3"
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
+        with:
+          toolchain: "1.85.0"
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Build workspace dependencies
+        run: bunx turbo run build --filter=@stwd/signer-frost...
+
+      - name: Build FROST sidecar
+        run: cargo build --locked --release --manifest-path packages/signer-frost/sidecar/Cargo.toml
+
+      - name: Test packages/signer-frost
+        working-directory: packages/signer-frost
+        run: bun run test
+
+  unit-flutter:
+    # The Bun validator checks repository shape and required strings; only the
+    # Dart toolchain can prove the SDK and its security contract tests compile.
+    name: Unit Tests (packages/flutter)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@1c5eb12d812966ca84680edc38353a0851c8fd56 # v2.14.0
+        with:
+          flutter-version: "3.19.6"
+          channel: stable
+
+      - name: Install Flutter dependencies
+        working-directory: packages/flutter
+        run: flutter pub get
+
+      - name: Analyze Flutter SDK
+        working-directory: packages/flutter
+        run: flutter analyze --fatal-infos
+
+      - name: Test Flutter SDK
+        working-directory: packages/flutter
+        run: flutter test
+
+  unit-web:
+    # web/src contains Bun-driven unit suites that are distinct from the Worker
+    # build and the Playwright trust-ux checks above. Keep them explicit so
+    # adding a source-level test cannot silently bypass CI.
+    name: Unit Tests (web)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: "1.3"
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Build workspace dependencies
+        run: bunx turbo run build --filter=@stwd/react --filter=@stwd/sdk --filter=@stwd/shared
+
+      - name: Test web/src
+        working-directory: web
+        run: bun test src e2e/wallets/wallet-e2e-contract.test.ts
 
   unit-redis:
     name: Unit Tests (packages/redis)
@@ -287,6 +584,39 @@ jobs:
         env:
           DATABASE_URL: "postgres://steward:steward_ci@localhost:5432/steward_test"
 
+      - name: Builder perps migration reconciliation proof (real Postgres)
+        run: bun test ./packages/db/src/__tests__/agent-policy-builder-perps-reconcile-migration.test.ts
+        env:
+          DATABASE_URL: "postgres://steward:steward_ci@localhost:5432/steward_test"
+
+      - name: RLS pool isolation proof (real Postgres)
+        run: bun test ./packages/db/src/__tests__/tenant-rls-postgres.test.ts
+        env:
+          DATABASE_URL: "postgres://steward:steward_ci@localhost:5432/steward_test"
+
+      - name: Email challenge publication race proof (real Postgres)
+        run: bun test ./packages/auth/src/__tests__/email-postgres-publish.integration.test.ts
+        env:
+          DATABASE_URL: "postgres://steward:steward_ci@localhost:5432/steward_test"
+
+      - name: Email challenge publication deadline proof (real Redis)
+        run: bun test ./packages/auth/src/__tests__/email-redis-publish.integration.test.ts
+
+      - name: Vault custody transition race proof (real Postgres)
+        run: bun test ./packages/vault/src/__tests__/custody-transition-race.real-pg.test.ts ./packages/vault/src/__tests__/transaction-id-race.real-pg.test.ts
+        env:
+          DATABASE_URL: "postgres://steward:steward_ci@localhost:5432/steward_test"
+
+      - name: X disable and recovery lineage concurrency (real Postgres)
+        run: >-
+          bun test ./packages/api/src/__tests__/provider-x-connect.test.ts
+          --test-name-pattern "concurrent recovery wins"
+        env:
+          DATABASE_URL: "postgres://steward:steward_ci@localhost:5432/steward_test"
+          STEWARD_X_CONNECT_REAL_PG: "true"
+          STEWARD_MASTER_PASSWORD: "ci-test-secret"
+          STEWARD_AUDIT_HMAC_KEY: "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+
       - name: Start API test server
         env:
           DATABASE_URL: "postgres://steward:steward_ci@localhost:5432/steward_test"
@@ -302,6 +632,9 @@ jobs:
           STEWARD_EMAIL_CODE_SECRET: "ci-email-code-secret-must-be-at-least-32-chars-long"
           STEWARD_EXECUTION_AUTH_SECRET: "v2-ci-1:ci-execution-auth-secret-must-be-at-least-32-bytes-long"
           STEWARD_AUDIT_HMAC_KEY: "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+          # Exercise the API's real Redis-backed reservation/crash-recovery E2Es;
+          # this job already provisions a healthy Redis service above.
+          STEWARD_REDIS_TESTS: "1"
           SIWE_ALLOWED_DOMAINS: "steward.fi,localhost,127.0.0.1:3200"
           # The whole api suite drives this one server from a single IP; the
           # default 100-req/60s per-IP gate 429s the sharded test flood.
@@ -345,6 +678,13 @@ jobs:
           STEWARD_EMAIL_CODE_SECRET: "ci-email-code-secret-must-be-at-least-32-chars-long"
           STEWARD_EXECUTION_AUTH_SECRET: "v2-ci-1:ci-execution-auth-secret-must-be-at-least-32-bytes-long"
           STEWARD_AUDIT_HMAC_KEY: "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+          STEWARD_REDIS_TESTS: "1"
+          # Isolated files share one Redis service and reuse deterministic
+          # agent/host fixtures, so retain enforcement with a high bounded
+          # ceiling for this test-only flood. The dev flag permits in-process
+          # proxy fixtures that do not sign; strict tests set production mode.
+          STEWARD_PROXY_RATE_LIMIT_MAX: "1000000"
+          STEWARD_PROXY_DEV_MODE: "true"
           SIWE_ALLOWED_DOMAINS: "steward.fi,localhost,127.0.0.1:3200"
 
       - name: Stop API test server
@@ -381,6 +721,9 @@ jobs:
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
+
+      - name: Verify Redis revocation monotonicity
+        run: bun test ./packages/auth/src/__tests__/redis-revocation.integration.test.ts
 
       - name: Start embedded API
         env:
@@ -463,6 +806,8 @@ jobs:
           # Dummy HMAC root so the required compose var interpolates; production
           # supplies a real value. Does not weaken fail-closed behavior.
           STEWARD_PROXY_REQUEST_SIGNING_SECRET: "ci-proxy-signing-secret-must-be-at-least-32-bytes"
+          STEWARD_PROXY_DEV_MODE: "true"
+          STEWARD_PROXY_RATE_LIMIT_MAX: "1000000"
           STEWARD_KDF_SALT: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
           STEWARD_ALLOW_INSECURE_DB: "true"
           # Run the stack in non-prod mode for the functional e2e flow: the e2e

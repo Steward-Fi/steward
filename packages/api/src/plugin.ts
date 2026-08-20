@@ -43,10 +43,34 @@
  *
  * that way `@stwd/api` itself stays trading-free for anyone importing it, while a
  * deploy that wants trading opts in by registering the plugin.
+ *
+ * PLUGIN TRUST MODEL (SEC-170)
+ * ----------------------------
+ * plugins run IN-PROCESS with FULL trust — there is no sandbox. the injected
+ * ctx hands a plugin the live `vault` (it can sign arbitrary transactions for
+ * any agent/tenant, bypassing the policy engine) and the raw drizzle `db`
+ * handle (it can rewrite `agent_policies`, insert `secret_routes`, read
+ * ciphertext). the host's fail-closed guarantees cover CONTRIBUTION COLLISIONS
+ * (duplicate plugin names, missing deps, cycles, migration conflicts), NOT
+ * privilege: a malicious or compromised plugin package is full RCE with
+ * signing authority. therefore:
+ *   - only register first-party plugins or third-party plugins you would
+ *     trust with root on the host AND the master signing keys;
+ *   - pin + audit plugin dependencies exactly as you would the core itself;
+ *   - never register a plugin supplied at runtime by an untrusted party.
+ * a policy-gated signing facade in place of the raw vault handle is a
+ * considered future hardening, not currently implemented (SEC-170).
  */
 
 import { type AdapterCategory, AdapterRegistry, adapterRegistry } from "@stwd/adapters";
-import { pluginMigrationsTable, runPluginMigrations } from "@stwd/db";
+import {
+  getDb,
+  pluginMigrationsTable,
+  runPluginMigrations,
+  withDatabaseDeadline,
+  withTenantAuditedTransaction,
+  withTenantAuditedTransactionOnDb,
+} from "@stwd/db";
 import {
   type EvaluatorContext,
   type PolicyRuleRegistry,
@@ -55,8 +79,13 @@ import {
 } from "@stwd/policy-engine";
 import type { PluginMigrationSource, StewardPlugin } from "@stwd/shared";
 import { WebhookEventRegistry } from "@stwd/shared";
+import { KeyStore, SecretVault } from "@stwd/vault";
 import type { Hono } from "hono";
-import { requireAgentJwt, requireProviderAgentJwt } from "./middleware/agent-jwt";
+import {
+  requireAgentJwt,
+  requireCapabilityAgentJwt,
+  requireProviderAgentJwt,
+} from "./middleware/agent-jwt";
 import { operatorAuth } from "./middleware/operator-auth";
 import { getRedisClient } from "./middleware/redis";
 import { getAgentTokenStatus } from "./services/agent-token-status";
@@ -67,6 +96,7 @@ import {
   ensureAgentForTenant,
   getPolicySet,
   isValidAnyAddress,
+  MASTER_PASSWORD,
   policyEngine,
   priceOracle,
   safeJsonParse,
@@ -161,11 +191,43 @@ export interface StewardAppContext {
   safeJsonParse: typeof safeJsonParse;
   isValidAnyAddress: typeof isValidAnyAddress;
   writeAuditEvent: typeof writeAuditEvent;
+  withTenantAuditedTransaction: typeof withTenantAuditedTransaction;
+  withCredentialLeaseDatabaseDeadline<T>(
+    deadlineAt: number,
+    use: (
+      db: ReturnType<typeof getDb>,
+      auditedTransaction: typeof withTenantAuditedTransaction,
+    ) => Promise<T>,
+  ): Promise<T>;
   getAgentTokenStatus: typeof getAgentTokenStatus;
   getRedisClient: typeof getRedisClient;
+  exerciseCredentialSecret<T>(
+    tenantId: string,
+    secretId: string,
+    use: (plaintext: string) => Promise<T>,
+  ): Promise<T>;
+  sealCredentialLeaseToken(
+    tenantId: string,
+    leaseId: string,
+    token: string,
+  ): Promise<{ ciphertext: string; iv: string; tag: string; salt: string }>;
+  exerciseCredentialLeaseToken<T>(
+    tenantId: string,
+    leaseId: string,
+    sealed: { ciphertext: string; iv: string; tag: string; salt: string },
+    use: (token: string) => Promise<T>,
+  ): Promise<T>;
   requireAgentJwt: typeof requireAgentJwt;
   /**
-   * PR2 provider-action authenticator: verifies the agent JWT and installs the
+   * Capability-surface authenticator: verifies the agent JWT and installs the
+   * context WITHOUT the legacy `trade:order` scope gate. Capability invoke /
+   * manifest / issuance routes use this — their authorization is the
+   * capability grant + capability-intent policy (default-deny), not the
+   * trading scope. It is a NEW field and does NOT replace `requireAgentJwt`.
+   */
+  requireCapabilityAgentJwt: typeof requireCapabilityAgentJwt;
+  /**
+   * Provider-action authenticator: verifies the agent JWT and installs the
    * runtime-neutral principal WITHOUT a trading/proxy scope check. Provider-action
    * routes use this; it is a NEW field and does NOT replace `requireAgentJwt`.
    */
@@ -174,7 +236,7 @@ export interface StewardAppContext {
   tenantAuth: typeof tenantAuth;
   /**
    * the core's adapter registry — the seam a plugin's `adapters` contributions
-   * register a real provider integration into (Phase 2d). defaults to the
+   * register a real provider integration into. Defaults to the
    * process-wide {@link adapterRegistry} routes consult; tests inject a fresh
    * {@link AdapterRegistry} (with a controlled env) so adapter resolution is
    * hermetic. the host only CALLS `register(category, provider, adapter)` on it;
@@ -199,6 +261,8 @@ export type StewardApiPlugin = StewardPlugin<StewardApp, StewardAppContext, Eval
  * root and passed to {@link registerPlugin}.
  */
 export function buildPluginContext(): StewardAppContext {
+  const credentialVault = new SecretVault(MASTER_PASSWORD);
+  const leaseKeyStore = new KeyStore(MASTER_PASSWORD, undefined, "credential-lease");
   return {
     db,
     vault,
@@ -209,9 +273,29 @@ export function buildPluginContext(): StewardAppContext {
     safeJsonParse,
     isValidAnyAddress,
     writeAuditEvent,
+    withTenantAuditedTransaction,
+    withCredentialLeaseDatabaseDeadline: (deadlineAt, use) =>
+      withDatabaseDeadline(deadlineAt, (deadlineDb) =>
+        use(deadlineDb, (tenantId, fn) =>
+          withTenantAuditedTransactionOnDb(deadlineDb, tenantId, fn, deadlineAt),
+        ),
+      ),
     getAgentTokenStatus,
     getRedisClient,
+    exerciseCredentialSecret: (tenantId, secretId, use) =>
+      credentialVault.exerciseSecret(tenantId, secretId, use),
+    sealCredentialLeaseToken: async (tenantId, leaseId, token) =>
+      leaseKeyStore.encrypt(token, { tenantId, name: `upstream-lease:${leaseId}`, version: 1 }),
+    exerciseCredentialLeaseToken: async (tenantId, leaseId, sealed, use) => {
+      const token = leaseKeyStore.decrypt(sealed, {
+        tenantId,
+        name: `upstream-lease:${leaseId}`,
+        version: 1,
+      });
+      return use(token);
+    },
     requireAgentJwt,
+    requireCapabilityAgentJwt,
     requireProviderAgentJwt,
     operatorAuth,
     tenantAuth,
@@ -251,18 +335,18 @@ export interface PluginHostDiagnostics {
   webhookEvents: string[];
   /** which plugin contributed which webhook event names (core events excluded). */
   webhookEventContributions: Record<string, string[]>;
-  /** which plugin contributed which policy rule types (Phase 2b). */
+  /** which plugin contributed which policy rule types. */
   policyRuleContributions: Record<string, string[]>;
   /**
    * which plugin contributed which adapters, as `"<category>::<provider>"` keys
-   * (Phase 2d). reflects what the host REGISTERED into the adapter registry.
+   * Reflects what the host registered into the adapter registry.
    */
   adapterContributions: Record<string, string[]>;
   /**
    * which plugin declared a migration source, and the namespaced bookkeeping
    * table its ledger is (or will be) recorded in —
    * `drizzle.__drizzle_migrations_plugin_<id>`, isolated from the core journal
-   * (Phase 2c). Present whether or not {@link PluginHost.runMigrations} has run
+   * Present whether or not {@link PluginHost.runMigrations} has run
    * yet (it reflects the declared sources, not applied state).
    */
   migrationSources: Record<string, { id: string; migrationsTable: string }>;
@@ -339,25 +423,25 @@ function orderByDependencies<Ctx>(
 /**
  * The plugin host: composes one or more plugins onto a steward app.
  *
- * RESPONSIBILITIES (Phase 2a + 2b + 2c + 2d)
- * ------------------------------------------
+ * Responsibilities
+ * ----------------
  *  1. validate unique plugin names + a valid (acyclic, fully-satisfied)
  *     `dependsOn` graph, FAILING CLOSED on any violation.
  *  2. order plugins so each registers AFTER its dependencies.
  *  3. collect each plugin's declared `webhookEvents` into a runtime-extensible
  *     {@link WebhookEventRegistry} (core events ∪ plugin-declared), so the
- *     webhook config/dispatch path accepts a plugin's event type. (Phase 2a)
+ *     webhook config/dispatch path accepts a plugin's event type.
  *  4. register each plugin's declared `policyRules` into the policy engine's
  *     runtime evaluator {@link PolicyRuleRegistry}, FAILING CLOSED on a rule
  *     `type` that collides with a core rule type or another plugin's, so the
  *     policy engine evaluates a contributed rule type via the plugin's
- *     evaluator (core rule evaluation is untouched). (Phase 2b)
+ *     evaluator (core rule evaluation is untouched).
  *  5. call each plugin's `register(app, ctx)` (if present) in dependency order.
  *  6. collect each plugin's declared `migrations` source (in dependency order)
  *     and apply them — via {@link runMigrations}, called by the boot/migrate path
  *     AFTER the core migrator — into a per-plugin NAMESPACED bookkeeping table,
  *     totally isolated from the core's `drizzle.__drizzle_migrations` journal
- *     (Phase 2c). Migrations are NOT run during `register` (route registration
+ *     Migrations are NOT run during `register` (route registration
  *     must not block on a schema migration) and NEVER per request.
  *  7. register each plugin's declared `adapters` into the core adapter registry
  *     (from `ctx.adapterRegistry`) via its existing `register(category, provider,
@@ -366,7 +450,7 @@ function orderByDependencies<Ctx>(
  *     silently overwrites a real money-route adapter) or an invalid contribution
  *     (unknown category, empty provider, missing adapter). The registry's
  *     fail-closed-in-production RESOLUTION is untouched — the host only CALLS
- *     register(). (Phase 2d)
+ *     register().
  *  8. expose {@link describe} so ops can see what loaded + what was contributed.
  */
 export class PluginHost<Ctx> {
@@ -377,9 +461,17 @@ export class PluginHost<Ctx> {
   private readonly policyContributions = new Map<string, string[]>();
   /**
    * which plugin contributed which adapters, as `"<category>::<provider>"` keys
-   * (diagnostics). Phase 2d.
+   * (diagnostics).
    */
   private readonly adapterContributions = new Map<string, string[]>();
+  /**
+   * EVERY `(category, provider)` pair this host has registered, durable across
+   * `register()` calls. The collision guard must outlive a single host pass:
+   * the registry's own `register` silently `Map.set`-overwrites, so a plugin
+   * registered in a LATER pass (or core code registering directly) would
+   * otherwise clobber a live money-route adapter without an error.
+   */
+  private readonly registeredAdapterKeys = new Set<string>();
   /**
    * declared plugin migration sources, in dependency (registration) order. The
    * host does NOT run these during `register` (route registration must not block
@@ -405,6 +497,38 @@ export class PluginHost<Ctx> {
     this.policyRegistry = policyRegistry ?? policyRuleRegistry;
   }
 
+  private prepareMigrationSources(
+    plugins: ReadonlyArray<StewardPlugin<StewardApp, Ctx>>,
+  ): Array<{ pluginName: string; source: PluginMigrationSource }> {
+    const owners = new Map(
+      this.migrationSources.map(({ pluginName, source }) => [
+        pluginMigrationsTable(source.id),
+        pluginName,
+      ]),
+    );
+    const additions: Array<{ pluginName: string; source: PluginMigrationSource }> = [];
+    for (const plugin of plugins) {
+      if (!plugin.migrations) continue;
+      let table: string;
+      try {
+        table = pluginMigrationsTable(plugin.migrations.id);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        throw new PluginHostError(`plugin "${plugin.name}" migration id is invalid: ${message}`);
+      }
+      const owner = owners.get(table);
+      if (owner) {
+        throw new PluginHostError(
+          `plugin "${plugin.name}" migration id aliases the journal already owned by ` +
+            `plugin "${owner}" (${table}); refusing cross-plugin migration state.`,
+        );
+      }
+      owners.set(table, plugin.name);
+      additions.push({ pluginName: plugin.name, source: plugin.migrations });
+    }
+    return additions;
+  }
+
   /** the webhook event registry this host merges plugin events into. */
   get webhookEventRegistry(): WebhookEventRegistry {
     return this.eventRegistry;
@@ -428,8 +552,9 @@ export class PluginHost<Ctx> {
     ...plugins: Array<StewardPlugin<StewardApp, Ctx>>
   ): Promise<void> {
     const ordered = orderByDependencies(plugins);
+    const migrationSources = this.prepareMigrationSources(ordered);
 
-    // Phase 1: merge declared webhook events FIRST, so a plugin's `register`
+    // Merge declared webhook events first so a plugin's `register`
     // (and any concurrent dispatch) sees its own events as already valid.
     for (const plugin of ordered) {
       if (plugin.webhookEvents && plugin.webhookEvents.length > 0) {
@@ -437,8 +562,8 @@ export class PluginHost<Ctx> {
       }
     }
 
-    // Phase 1b: register declared policy rules into the policy-engine evaluator
-    // registry (Phase 2b). Done BEFORE any `register` hook runs, so a plugin's
+    // Register declared policy rules into the policy-engine evaluator registry
+    // before any `register` hook runs, so a plugin's
     // rule type is evaluable as soon as it (or anything) calls into the engine.
     // FAILS CLOSED: a `type` colliding with a core rule type or another plugin's
     // throws PolicyRuleRegistryError from the registry — the host never composes
@@ -464,8 +589,8 @@ export class PluginHost<Ctx> {
       }
     }
 
-    // Phase 1b2: register declared adapter contributions into the core's adapter
-    // registry (Phase 2d), BEFORE any `register` hook runs (so a plugin route
+    // Register declared adapter contributions into the core's adapter registry
+    // before any `register` hook runs (so a plugin route
     // that resolves an adapter during its own registration sees the contributed
     // provider). The registry is taken from `ctx.adapterRegistry`; a plugin that
     // declares `adapters` REQUIRES it. The registry's own fail-closed-in-prod
@@ -476,12 +601,13 @@ export class PluginHost<Ctx> {
     // `register` would silently OVERWRITE by (category, provider); to prevent a
     // plugin (or two plugins) from silently clobbering a real money-route
     // adapter, the host tracks every (category, provider) it has registered
-    // across the plugin loop and throws PluginHostError BEFORE calling
-    // `registry.register` on a duplicate. Each contribution is also validated
-    // fail-closed: a known category, a non-empty provider, and a present adapter.
+    // DURABLY (across `register()` passes, not just within one) AND consults the
+    // registry itself, so a pair already registered outside this host (core
+    // code, or a previous host sharing the registry) also fails closed. Each
+    // contribution is also validated fail-closed: a known category, a non-empty
+    // provider, and a present adapter.
     {
       const hostRegistry = ctxAdapterRegistry(ctx);
-      const seenAdapters = new Set<string>();
       for (const plugin of ordered) {
         if (!plugin.adapters || plugin.adapters.length === 0) continue;
         if (!hostRegistry) {
@@ -512,7 +638,7 @@ export class PluginHost<Ctx> {
             );
           }
           const key = `${category}::${provider}`;
-          if (seenAdapters.has(key)) {
+          if (this.registeredAdapterKeys.has(key)) {
             throw new PluginHostError(
               `duplicate adapter contribution for (category="${category}", ` +
                 `provider="${provider}") — plugin "${plugin.name}" collides with an ` +
@@ -520,7 +646,15 @@ export class PluginHost<Ctx> {
                 "adapter.",
             );
           }
-          seenAdapters.add(key);
+          if (hostRegistry.has(category, provider)) {
+            throw new PluginHostError(
+              `adapter contribution for (category="${category}", ` +
+                `provider="${provider}") from plugin "${plugin.name}" collides with ` +
+                "an adapter already registered outside the plugin host; refusing " +
+                "to overwrite a live adapter.",
+            );
+          }
+          this.registeredAdapterKeys.add(key);
           // category is narrowed to AdapterCategory; adapter is `unknown` at the
           // shared boundary — cast to the registry's per-category type here, at
           // the api boundary where @stwd/adapters is a legitimate dependency. The
@@ -538,19 +672,15 @@ export class PluginHost<Ctx> {
       }
     }
 
-    // Phase 1c: collect declared migration sources in dependency order (Phase
-    // 2c). NOT applied here — route registration must not block on a schema
+    // Collect declared migration sources in dependency order. They are not
+    // applied here because route registration must not block on a schema
     // migration, and migrations must run AFTER the CORE migrator. They are
     // applied by runMigrations(), called from the boot/migrate path after core
     // migrations. Stored in dependency order so a dependent plugin's migrations
     // apply after the plugins it depends on (it may FK their tables).
-    for (const plugin of ordered) {
-      if (plugin.migrations) {
-        this.migrationSources.push({ pluginName: plugin.name, source: plugin.migrations });
-      }
-    }
+    this.migrationSources.push(...migrationSources);
 
-    // Phase 2: run each plugin's imperative register hook in dependency order.
+    // Run each plugin's imperative register hook in dependency order.
     for (const plugin of ordered) {
       this.loaded.push({ name: plugin.name, version: plugin.version });
       if (plugin.register) {
@@ -571,11 +701,7 @@ export class PluginHost<Ctx> {
    */
   collectMigrations(...plugins: Array<StewardPlugin<StewardApp, Ctx>>): this {
     const ordered = orderByDependencies(plugins);
-    for (const plugin of ordered) {
-      if (plugin.migrations) {
-        this.migrationSources.push({ pluginName: plugin.name, source: plugin.migrations });
-      }
-    }
+    this.migrationSources.push(...this.prepareMigrationSources(ordered));
     return this;
   }
 

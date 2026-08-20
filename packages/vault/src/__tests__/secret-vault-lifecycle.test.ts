@@ -1,5 +1,16 @@
 import { afterAll, beforeAll, describe, expect, it, setDefaultTimeout } from "bun:test";
-import { agents, closeDb, getDb, secretRoutes, secrets, tenants } from "@stwd/db";
+import {
+  agents,
+  closeDb,
+  getDb,
+  providerAccounts,
+  providerOperations,
+  secretRoutes,
+  secrets,
+  tenants,
+  users,
+  workspaces,
+} from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { and, eq } from "drizzle-orm";
 import { SecretVault } from "../secret-vault";
@@ -41,6 +52,48 @@ async function ensureAgent(tenantId: string, agentId: string) {
     .onConflictDoNothing();
 }
 
+async function promoteRoute(tenantId: string, routeId: string): Promise<void> {
+  const [user] = await getDb()
+    .insert(users)
+    .values({ email: `vault-route-${crypto.randomUUID()}@example.test` })
+    .returning();
+  const [workspace] = await getDb()
+    .insert(workspaces)
+    .values({
+      tenantId,
+      key: `vault-${crypto.randomUUID()}`,
+      name: "vault route",
+      environment: "production",
+      createdBy: user.id,
+    })
+    .returning();
+  const [account] = await getDb()
+    .insert(providerAccounts)
+    .values({
+      tenantId,
+      workspaceId: workspace.id,
+      adapterKey: "github",
+      externalRef: crypto.randomUUID(),
+      displayName: "vault route",
+    })
+    .returning();
+  const [operation] = await getDb()
+    .insert(providerOperations)
+    .values({
+      tenantId,
+      workspaceId: workspace.id,
+      providerAccountId: account.id,
+      operationKey: `vault.route.${crypto.randomUUID()}`,
+      riskClass: "write",
+      secretRouteId: routeId,
+    })
+    .returning();
+  await getDb()
+    .update(secretRoutes)
+    .set({ authorityMode: "governed_v2", providerOperationId: operation.id })
+    .where(eq(secretRoutes.id, routeId));
+}
+
 describe("SecretVault lifecycle semantics", () => {
   it("moves existing routes to the new secret version on rotation", async () => {
     const tenantId = `tenant-rotate-${crypto.randomUUID()}`;
@@ -67,6 +120,37 @@ describe("SecretVault lifecycle semantics", () => {
       .from(secrets)
       .where(and(eq(secrets.id, secret.id), eq(secrets.tenantId, tenantId)));
     expect(oldVersion?.deletedAt).toBeInstanceOf(Date);
+  });
+
+  it("requires explicit recovery opt-in to append to a deleted lineage", async () => {
+    const tenantId = `tenant-restore-${crypto.randomUUID()}`;
+    await ensureTenant(tenantId);
+    await ensureAgent(tenantId, "agent-restore");
+    const original = await vault.createSecret(tenantId, "provider", "old-token");
+    const route = await vault.createRoute(tenantId, original.id, {
+      agentId: "agent-restore",
+      hostPattern: "api.openai.com",
+      injectAs: "header",
+      injectKey: "authorization",
+    });
+    await getDb()
+      .update(secrets)
+      .set({ deletedAt: new Date() })
+      .where(and(eq(secrets.tenantId, tenantId), eq(secrets.id, original.id)));
+
+    await expect(
+      getDb().transaction((tx) =>
+        vault.rotateSecretWithinTx(tx, tenantId, "provider", "new-token"),
+      ),
+    ).rejects.toThrow('Secret "provider" not found');
+    const replacement = await getDb().transaction((tx) =>
+      vault.rotateSecretWithinTx(tx, tenantId, "provider", "new-token", {
+        allowDeletedCurrent: true,
+      }),
+    );
+    expect(replacement.version).toBe(2);
+    expect(await vault.decryptSecret(tenantId, replacement.id)).toBe("new-token");
+    expect((await vault.getRoute(tenantId, route.id))?.secretId).toBe(replacement.id);
   });
 
   it("deletes all dependent routes when deleting a secret family", async () => {
@@ -205,5 +289,45 @@ describe("SecretVault lifecycle semantics", () => {
         injectKey: "authorization",
       }),
     ).rejects.toThrow(/Agent missing-agent not found/);
+  });
+
+  it("enforces governed authority at the public create/update boundary", async () => {
+    const tenantId = `tenant-vault-authority-${crypto.randomUUID()}`;
+    const agentId = "agent-vault-authority";
+    await ensureTenant(tenantId);
+    await ensureAgent(tenantId, agentId);
+    const secret = await vault.createSecret(tenantId, "authority", "secret");
+    const governed = await vault.createRoute(tenantId, secret.id, {
+      agentId,
+      hostPattern: "api.openai.com",
+      pathPattern: "/v1/chat/completions",
+      method: "POST",
+      injectAs: "header",
+      injectKey: "authorization",
+    });
+    await promoteRoute(tenantId, governed.id);
+
+    await expect(
+      vault.createRoute(tenantId, secret.id, {
+        agentId,
+        hostPattern: "api.openai.com",
+        pathPattern: "/v1/chat/completions",
+        method: "POST",
+        injectAs: "header",
+        injectKey: "authorization",
+      }),
+    ).rejects.toThrow(/different authority model/);
+    await expect(
+      vault.updateRoute(tenantId, governed.id, { pathPattern: "/v1/responses" }),
+    ).rejects.toThrow(/provider operation authoring/);
+    await expect(
+      vault.updateRoute(tenantId, governed.id, { injectionStrategy: "sigv4" }),
+    ).rejects.toThrow(/provider operation authoring/);
+    await expect(
+      vault.updateRoute(tenantId, governed.id, {
+        injectionConfig: { service: "ec2", region: "us-west-2" },
+      }),
+    ).rejects.toThrow(/provider operation authoring/);
+    expect((await vault.getRoute(tenantId, governed.id))?.pathPattern).toBe("/v1/chat/completions");
   });
 });

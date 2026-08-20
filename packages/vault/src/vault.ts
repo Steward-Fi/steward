@@ -24,7 +24,8 @@ import type {
   TxStatus,
   WalletAddressMetadata,
 } from "@stwd/shared";
-import { toCaip2 } from "@stwd/shared";
+import { canonicalJsonStringify, toCaip2 } from "@stwd/shared";
+import bs58 from "bs58";
 import { and, eq, inArray, isNull, sql } from "drizzle-orm";
 import {
   type Chain,
@@ -54,7 +55,9 @@ import {
 } from "./bitcoin-psbt";
 import { allocateEvmNonce, confirmEvmNonce, markEvmNonceDropped } from "./evm-nonce-manager";
 import {
+  assertExternalKeyCustodyProviderV1,
   assertNoExternalPrivateKeyMaterial,
+  ExternalBroadcastOutcomeUnknownError,
   type ExternalKeyCustodyProvider,
   type ExternalKeyHandleImportRequest,
   type ExternalKeyHandleRegistration,
@@ -63,10 +66,12 @@ import {
   externalKeyPrivateExportUnavailableError,
   externalKeySigningUnavailableError,
   normalizeExternalKeyHandleRegistration,
+  SolanaBroadcastNotSubmittedError,
 } from "./external-key-custody";
 import { deriveBitcoinKey, deriveEvmKey, deriveSolanaKey, generateMnemonic } from "./hd-wallet";
 import { type EncryptedKey, KeyStore } from "./keystore";
 import { backendFromKeyStore, type KeystoreBackend } from "./keystore-backend";
+import { executeLocalEvmBroadcast } from "./local-evm-broadcast";
 import {
   createMoneroBackendFromEnv,
   generateMoneroWallet,
@@ -167,6 +172,14 @@ export interface SignBitcoinPsbtRequest {
   walletScope: string;
   psbtBase64: string;
   finalize?: boolean;
+  /**
+   * SEC-163: explicit caller attestation that edge policy (inspectBitcoinPsbt
+   * + spend/fee evaluation) approved this PSBT. The vault layer performs no
+   * fee/output policy of its own — it signs any PSBT with ≥1 input spendable
+   * by the wallet key — so signing REQUIRES this flag. Never forward
+   * client-controlled input into it.
+   */
+  allowBlindSign?: boolean;
 }
 
 export interface InspectBitcoinPsbtResult {
@@ -258,6 +271,130 @@ const SOLANA_RPCS: Record<number, string> = {
   102: "https://api.devnet.solana.com",
 };
 
+/**
+ * SEC-082: default read-only method inventory for rpcPassthrough. Anything not
+ * listed here is rejected — signing, state-modifying, and operator-namespace
+ * methods (eth_sendTransaction, eth_sign*, personal_*, Solana sendTransaction/
+ * signMessage/signTransaction/requestAirdrop, eth_accounts, admin_/debug_/
+ * trace_/txpool_/miner_*) can never be proxied, regardless of the upstream.
+ * STEWARD_VAULT_RPC_ALLOWLIST may only tighten this inventory (fail closed).
+ */
+const DEFAULT_RPC_PASSTHROUGH_ALLOWLIST = [
+  // EVM read-only
+  "eth_chainId",
+  "eth_blockNumber",
+  "eth_getBalance",
+  "eth_getCode",
+  "eth_getStorageAt",
+  "eth_getTransactionCount",
+  "eth_getTransactionByHash",
+  "eth_getTransactionReceipt",
+  "eth_getBlockByNumber",
+  "eth_getBlockByHash",
+  "eth_getBlockTransactionCountByNumber",
+  "eth_getBlockTransactionCountByHash",
+  "eth_getBlockReceipts",
+  "eth_getLogs",
+  "eth_getProof",
+  "eth_call",
+  "eth_estimateGas",
+  "eth_gasPrice",
+  "eth_maxPriorityFeePerGas",
+  "eth_feeHistory",
+  "eth_syncing",
+  "net_version",
+  "net_listening",
+  "net_peerCount",
+  "web3_clientVersion",
+  // Solana read-only
+  "getBalance",
+  "getAccountInfo",
+  "getMultipleAccounts",
+  "getBlock",
+  "getBlocks",
+  "getBlocksWithLimit",
+  "getBlockHeight",
+  "getBlockTime",
+  "getLatestBlockhash",
+  "isBlockhashValid",
+  "getFeeForMessage",
+  "getTransaction",
+  "getSignaturesForAddress",
+  "getSignatureStatuses",
+  "getTokenAccountsByOwner",
+  "getTokenAccountBalance",
+  "getTokenSupply",
+  "getProgramAccounts",
+  "getSupply",
+  "getSlot",
+  "getVersion",
+  "getHealth",
+  "getEpochInfo",
+  "getEpochSchedule",
+  "getGenesisHash",
+  "getRecentPrioritizationFees",
+  "getMinimumBalanceForRentExemption",
+  "getStakeMinimumDelegation",
+  "minimumLedgerSlot",
+  "simulateTransaction",
+];
+const DEFAULT_RPC_PASSTHROUGH_METHODS = new Set(DEFAULT_RPC_PASSTHROUGH_ALLOWLIST);
+const RPC_PASSTHROUGH_TIMEOUT_MS = 10_000;
+const RPC_PASSTHROUGH_MAX_RESPONSE_BYTES = 1024 * 1024;
+
+async function readBoundedRpcResponse(response: Response): Promise<RpcResponse> {
+  if (!response.ok) {
+    void response.body?.cancel().catch(() => {});
+    throw new Error(`RPC request failed with status ${response.status}`);
+  }
+  const declared = response.headers.get("content-length");
+  if (declared !== null) {
+    const length = Number(declared);
+    if (
+      !Number.isSafeInteger(length) ||
+      length < 0 ||
+      length > RPC_PASSTHROUGH_MAX_RESPONSE_BYTES
+    ) {
+      void response.body?.cancel().catch(() => {});
+      throw new Error("RPC response exceeded maximum size");
+    }
+  }
+  if (!response.body) throw new Error("RPC response was empty");
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > RPC_PASSTHROUGH_MAX_RESPONSE_BYTES) {
+        void reader.cancel().catch(() => {});
+        throw new Error("RPC response exceeded maximum size");
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(new TextDecoder().decode(bytes));
+  } catch {
+    throw new Error("RPC response was malformed");
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("RPC response was malformed");
+  }
+  return parsed as RpcResponse;
+}
+
 export function resolveSignVenueSelector(request: Pick<SignRequest, "venue">): string | null {
   return request.venue ?? null;
 }
@@ -316,10 +453,37 @@ export interface SignTransactionOptions {
    * resolveExecutionBackend -> sign TOCTOU: if the wallet's backend flips (a
    * local key is removed and an third-party-custody key inserted) between the
    * gateway's precheck and the raw sign, a local-vault-bound authorization can
-   * no longer reach the third-party provider. Absent (undefined) preserves the
-   * legacy, un-gateway-bound behavior for non-gateway callers.
+   * no longer reach the third-party provider. External custody always
+   * requires this binding; absent (undefined) remains valid only for legacy
+   * local-vault callers.
    */
-  expectedBackend?: "local-vault";
+  expectedBackend?: "local-vault" | "external-custody";
+  expectedBackendIdentityDigest?: string;
+}
+
+export interface ResolvedExecutionTarget {
+  backend: "local-vault" | "external-custody";
+  backendIdentityDigest?: string;
+}
+
+export function externalCustodyIdentityDigest(input: {
+  providerId: string;
+  keyId: string;
+  version?: string;
+  region?: string;
+  address: string;
+}): string {
+  return createHash("sha256")
+    .update(
+      canonicalJsonStringify({
+        providerId: input.providerId,
+        keyId: input.keyId,
+        version: input.version ?? null,
+        region: input.region ?? null,
+        address: input.address.toLowerCase(),
+      }),
+    )
+    .digest("hex");
 }
 
 /**
@@ -330,19 +494,50 @@ export interface SignTransactionOptions {
  * any third-party provider is reached (audited, fund-loss-safe).
  */
 export class BackendBindingMismatchError extends Error {
-  readonly code = "backend_binding_mismatch";
+  readonly code: "backend_binding_mismatch" | "backend_identity_mismatch";
   constructor(
-    readonly expectedBackend: "local-vault",
-    readonly resolvedBackend: "third-party-custody",
+    readonly expectedBackend: "local-vault" | "external-custody",
+    readonly resolvedBackend: "local-vault" | "external-custody",
+    readonly identityChanged = false,
   ) {
     super(
-      `Execution backend binding mismatch: authorization is bound to ` +
-        `"${expectedBackend}" but the wallet re-resolved to "${resolvedBackend}" ` +
-        `at signing time. Refusing to route a ${expectedBackend}-bound ` +
-        `authorization to the third-party custody provider.`,
+      identityChanged
+        ? "External custody provider/key/address identity changed after authorization"
+        : `Execution backend binding mismatch: authorization is bound to ` +
+            `"${expectedBackend}" but the wallet re-resolved to "${resolvedBackend}" ` +
+            `at signing time. Refusing to route a ${expectedBackend}-bound ` +
+            `authorization across custody backends.`,
     );
+    this.code = identityChanged ? "backend_identity_mismatch" : "backend_binding_mismatch";
     this.name = "BackendBindingMismatchError";
   }
+}
+
+/**
+ * Lock scope for custody-affecting writes (importKey / importExternalKeyHandle):
+ * one (agent, chain family, venue) tuple. importKey always operates on the
+ * venue-less scope, matching the legacy/unscoped key rows it writes.
+ */
+function custodyTransitionLockKey(
+  tenantId: string,
+  agentId: string,
+  chainFamily: string,
+  venue: string | null,
+): string {
+  // JSON array encoding preserves tuple boundaries even when operator-defined
+  // ids/venues contain colons. Include tenant identity explicitly rather than
+  // relying on the current globally-unique agent-id schema forever.
+  return JSON.stringify(["vault-custody-v1", tenantId, agentId, chainFamily, venue]);
+}
+
+/**
+ * PGlite (tests, desktop mode) is a single-connection harness where
+ * transactions already serialize; the repo convention is to skip advisory
+ * locks there. Production Postgres takes the xact lock so concurrent custody
+ * transitions across replicas/connections cannot interleave check-then-act.
+ */
+function usesCustodyAdvisoryLock(): boolean {
+  return process.env.STEWARD_DB_MODE !== "pglite" && process.env.STEWARD_PGLITE_MEMORY !== "true";
 }
 
 interface MnemonicWalletMaterial {
@@ -441,6 +636,9 @@ export class Vault {
   private moneroBackend?: MoneroWalletBackend;
 
   constructor(config: VaultConfig) {
+    if (config.externalKeyCustodyProvider) {
+      assertExternalKeyCustodyProviderV1(config.externalKeyCustodyProvider);
+    }
     this.config = config;
     this.externalKeyCustodyProvider = config.externalKeyCustodyProvider;
     this.moneroBackend = config.moneroBackend;
@@ -572,19 +770,17 @@ export class Vault {
    *   2. Otherwise an third-party-custody wallet             -> "third-party-custody"
    *   3. Otherwise a legacy local encrypted key / none     -> "local-vault"
    *
-   * The execution gateway (PR #182) mints ExecutionAuthorizations bound to
-   * backend "local-vault". External custody is NOT a gateway-supported backend
-   * in this PR: an authorization bound to "local-vault" must never be able to
-   * authorize an third-party-custody execution. Callers use this to fail closed
-   * BEFORE minting/consuming when the resolved backend is third-party-custody.
+   * ExecutionAuthorizations are bound to a custody backend. An authorization
+   * bound to "local-vault" must never authorize third-party custody, so callers
+   * resolve this target before minting or consuming authorization.
    */
-  async resolveExecutionBackend(request: {
+  async resolveExecutionTarget(request: {
     tenantId: string;
     agentId: string;
     chainId?: number;
     venue?: string | null;
     walletAddress?: string;
-  }): Promise<"local-vault" | "third-party-custody"> {
+  }): Promise<ResolvedExecutionTarget> {
     const db = getDb();
     const chainId = request.chainId || this.config.chainId || 8453;
     const isSolana = chainId === 101 || chainId === 102;
@@ -602,7 +798,7 @@ export class Vault {
           venue ? eq(encryptedChainKeys.venue, venue) : isNull(encryptedChainKeys.venue),
         ),
       );
-    if (chainKey) return "local-vault";
+    if (chainKey) return { backend: "local-vault" };
 
     // 2. No local chain key: an third-party-custody wallet takes precedence in
     //    signTransaction's resolution, so the request would route to the
@@ -612,12 +808,29 @@ export class Vault {
       chainFamily: chainFamilyToUse,
       venue,
     });
-    if (resolvedWallet) return "third-party-custody";
+    if (resolvedWallet) {
+      return {
+        backend: "external-custody",
+        backendIdentityDigest: externalCustodyIdentityDigest({
+          providerId: resolvedWallet.metadata.externalKey.providerId,
+          keyId: resolvedWallet.metadata.externalKey.keyId,
+          version: resolvedWallet.metadata.externalKey.version,
+          region: resolvedWallet.metadata.externalKey.region,
+          address: resolvedWallet.address,
+        }),
+      };
+    }
 
     // 3. No third-party wallet: signTransaction falls back to the legacy local
     //    encrypted_keys table (or throws missing-key). Either way this is a
     //    local-vault backend from the gateway's perspective.
-    return "local-vault";
+    return { backend: "local-vault" };
+  }
+
+  async resolveExecutionBackend(
+    request: Parameters<Vault["resolveExecutionTarget"]>[0],
+  ): Promise<"local-vault" | "external-custody"> {
+    return (await this.resolveExecutionTarget(request)).backend;
   }
 
   private async assertNoExternalKeyWalletsForExport(agentId: string): Promise<void> {
@@ -631,6 +844,19 @@ export class Vault {
     }
   }
 
+  private async assertLocalSigningScopeIsNotExternal(
+    agentId: string,
+    chainFamily: ChainFamily,
+    venue: string | null = null,
+  ): Promise<void> {
+    const externalWallet = await this.getExternalKeyWallet({ agentId, chainFamily, venue });
+    if (externalWallet) {
+      throw new Error(
+        "This wallet uses external custody; this signing operation is not supported for external keys",
+      );
+    }
+  }
+
   private async recordSignedTransaction(
     request: SignRequest,
     chainId: number,
@@ -641,15 +867,7 @@ export class Vault {
     const db = getDb();
     const txId = options.txId ?? crypto.randomUUID();
     const signedAt = new Date();
-    const [existingTransaction] = await db
-      .select({ agentId: transactions.agentId })
-      .from(transactions)
-      .where(eq(transactions.id, txId));
-    if (existingTransaction && existingTransaction.agentId !== request.agentId) {
-      throw new Error("Transaction id already belongs to a different agent");
-    }
-
-    await db
+    const recordedTransactions = await db
       .insert(transactions)
       .values({
         id: txId,
@@ -660,6 +878,8 @@ export class Vault {
         data: request.data,
         chainId,
         txHash: shouldBroadcast ? hash : undefined,
+        executionBackend: options.expectedBackend,
+        executionBackendIdentityDigest: options.expectedBackendIdentityDigest,
         policyResults: options.policyResults ?? [],
         signedAt,
         createdAt: signedAt,
@@ -667,17 +887,23 @@ export class Vault {
       .onConflictDoUpdate({
         target: transactions.id,
         set: {
-          agentId: request.agentId,
           status: shouldBroadcast ? (options.status ?? "signed") : "signed",
           toAddress: request.to,
           value: request.value,
           data: request.data,
           chainId,
           txHash: shouldBroadcast ? hash : undefined,
+          executionBackend: options.expectedBackend,
+          executionBackendIdentityDigest: options.expectedBackendIdentityDigest,
           policyResults: options.policyResults ?? [],
           signedAt,
         },
-      });
+        setWhere: eq(transactions.agentId, request.agentId),
+      })
+      .returning({ agentId: transactions.agentId });
+    if (recordedTransactions.length !== 1) {
+      throw new Error("Transaction id already belongs to a different agent");
+    }
   }
 
   /**
@@ -1012,6 +1238,16 @@ export class Vault {
       (wallet) => wallet.chainFamily === "solana" && wallet.venue === null,
     );
 
+    // A recovery phrase proves the local key identity, but it does not grant
+    // permission to silently switch a wallet that is explicitly routed to an
+    // external custodian back to server-managed custody.
+    if (
+      (evmWallet && isExternalKeyWalletMetadata(evmWallet.metadata)) ||
+      (solanaWallet && isExternalKeyWalletMetadata(solanaWallet.metadata))
+    ) {
+      throw new Error("Cannot restore local mnemonic keys over an external-custody wallet");
+    }
+
     if (existingAgent.walletAddress.toLowerCase() !== material.evmAddress.toLowerCase()) {
       throw new Error("Mnemonic does not match the existing wallet identity");
     }
@@ -1037,6 +1273,31 @@ export class Vault {
     const now = new Date();
 
     await db.transaction(async (tx) => {
+      // Restore writes both venue-less key families. Join the same
+      // custody-transition fence as importKey/importExternalKeyHandle in a
+      // deterministic order, then repeat the guard under the locks so a
+      // concurrent handle import cannot commit between the check and writes.
+      if (usesCustodyAdvisoryLock()) {
+        for (const family of ["evm", "solana"] as const) {
+          await tx.execute(
+            sql`select pg_advisory_xact_lock(hashtextextended(${custodyTransitionLockKey(tenantId, agentId, family, null)}, 0))`,
+          );
+        }
+      }
+      const lockedWallets = await tx
+        .select({ metadata: agentWallets.metadata })
+        .from(agentWallets)
+        .where(
+          and(
+            eq(agentWallets.agentId, agentId),
+            inArray(agentWallets.chainFamily, ["evm", "solana"]),
+            isNull(agentWallets.venue),
+          ),
+        );
+      if (lockedWallets.some((wallet) => isExternalKeyWalletMetadata(wallet.metadata))) {
+        throw new Error("Cannot restore local mnemonic keys over an external-custody wallet");
+      }
+
       await tx
         .update(agents)
         .set({
@@ -1306,6 +1567,9 @@ export class Vault {
       );
 
     if (chainKey) {
+      if (options.expectedBackend === "external-custody") {
+        throw new BackendBindingMismatchError("external-custody", "local-vault");
+      }
       secretKey = await this.keyStore.decrypt(
         {
           ciphertext: chainKey.ciphertext,
@@ -1330,16 +1594,29 @@ export class Vault {
         venue,
       });
       if (externalWallet) {
+        if (options.expectedBackend !== "external-custody") {
+          throw new BackendBindingMismatchError(
+            options.expectedBackend ?? "local-vault",
+            "external-custody",
+          );
+        }
         // Backend-binding re-resolution (TOCTOU close).
-        // This branch means the request re-resolved to external custody using
-        // the SAME fresh wallet lookup that will actually sign (no second racy
-        // read). If the caller's authorization was bound to "local-vault" (the
-        // only gateway-supported backend), the wallet's backend has FLIPPED
-        // since the gateway's resolveExecutionBackend precheck. Fail closed
-        // BEFORE any provider routing so a local-vault-bound authorization can
-        // never reach the external custody provider.
-        if (options.expectedBackend === "local-vault") {
-          throw new BackendBindingMismatchError("local-vault", "third-party-custody");
+        // This branch uses the SAME fresh wallet lookup that will actually sign
+        // (no second racy read). External custody is reachable only through an
+        // exact backend + identity binding; legacy raw callers fail closed
+        // before any provider routing.
+        const resolvedIdentityDigest = externalCustodyIdentityDigest({
+          providerId: externalWallet.metadata.externalKey.providerId,
+          keyId: externalWallet.metadata.externalKey.keyId,
+          version: externalWallet.metadata.externalKey.version,
+          region: externalWallet.metadata.externalKey.region,
+          address: externalWallet.address,
+        });
+        if (
+          options.expectedBackend === "external-custody" &&
+          options.expectedBackendIdentityDigest !== resolvedIdentityDigest
+        ) {
+          throw new BackendBindingMismatchError("external-custody", "external-custody", true);
         }
         if (request.walletAddress && externalWallet.address) {
           if (externalWallet.address.toLowerCase() !== request.walletAddress.toLowerCase()) {
@@ -1357,44 +1634,138 @@ export class Vault {
         const rpcUrl = isSolana
           ? (this.config.rpcUrl ?? resolveSolanaRpc(chainId))
           : (CHAIN_RPCS[chainId] ?? this.config.rpcUrl);
-        const signed = await this.externalKeyCustodyProvider.signTransaction({
-          tenantId: request.tenantId,
-          agentId: request.agentId,
-          chainFamily: chainFamilyToUse,
-          address: externalWallet.address,
-          handle: {
-            providerId: externalWallet.metadata.externalKey.providerId,
-            keyId: externalWallet.metadata.externalKey.keyId,
-            version: externalWallet.metadata.externalKey.version,
-            region: externalWallet.metadata.externalKey.region,
-          },
-          venue,
-          chainId,
-          to: request.to,
-          value: request.value,
-          data: request.data,
-          gasLimit: request.gasLimit,
-          nonce: request.nonce,
-          broadcast: shouldBroadcast,
-          rpcUrl,
-        });
-        assertNoExternalPrivateKeyMaterial(signed, "externalSignTransactionResult");
-        if (signed.broadcast !== shouldBroadcast) {
-          throw new Error("External key custody signer returned an unexpected broadcast mode");
+        let signed;
+        let preparedBroadcastHash: string | undefined;
+        try {
+          signed = await this.externalKeyCustodyProvider.signTransaction({
+            tenantId: request.tenantId,
+            agentId: request.agentId,
+            chainFamily: chainFamilyToUse,
+            address: externalWallet.address,
+            handle: {
+              providerId: externalWallet.metadata.externalKey.providerId,
+              keyId: externalWallet.metadata.externalKey.keyId,
+              version: externalWallet.metadata.externalKey.version,
+              region: externalWallet.metadata.externalKey.region,
+            },
+            venue,
+            chainId,
+            to: request.to,
+            value: request.value,
+            data: request.data,
+            gasLimit: request.gasLimit,
+            nonce: request.nonce,
+            broadcast: shouldBroadcast,
+            rpcUrl,
+            ...(shouldBroadcast
+              ? {
+                  onPreparedBroadcast: async (transactionHash: string) => {
+                    if (
+                      preparedBroadcastHash &&
+                      preparedBroadcastHash.toLowerCase() !== transactionHash.toLowerCase()
+                    ) {
+                      throw new Error(
+                        "External custody signer changed the prepared transaction hash",
+                      );
+                    }
+                    await this.recordSignedTransaction(request, chainId, true, transactionHash, {
+                      ...options,
+                      status: "outcome_unknown",
+                    });
+                    preparedBroadcastHash = transactionHash;
+                  },
+                }
+              : {}),
+          });
+        } catch (error) {
+          const outcomeError =
+            error instanceof ExternalBroadcastOutcomeUnknownError
+              ? preparedBroadcastHash &&
+                preparedBroadcastHash.toLowerCase() !== error.transactionHash.toLowerCase()
+                ? new ExternalBroadcastOutcomeUnknownError(preparedBroadcastHash, { cause: error })
+                : error
+              : shouldBroadcast && preparedBroadcastHash
+                ? new ExternalBroadcastOutcomeUnknownError(preparedBroadcastHash, { cause: error })
+                : null;
+          if (outcomeError) {
+            // The provider has already produced a deterministic local hash and
+            // may have handed the signed bytes to the RPC.  A database failure
+            // must never replace this irreversible outcome with a generic
+            // error: approval callers would otherwise reopen the queue and a
+            // retry could broadcast the same intent again.  The gateway
+            // pre-stages direct executions (and approval executions already
+            // have a transaction row), so it can durably recover the exact
+            // hash even when this first write fails.
+            try {
+              await this.recordSignedTransaction(
+                request,
+                chainId,
+                true,
+                outcomeError.transactionHash,
+                {
+                  ...options,
+                  status: "outcome_unknown",
+                },
+              );
+            } catch {
+              // Deliberately preserve the typed error and its hash. Do not log
+              // the persistence exception: provider/RPC errors may contain
+              // credential-bearing URLs, and the gateway owns the bounded
+              // fallback persistence/audit path.
+            }
+            throw outcomeError;
+          }
+          throw error;
         }
-        await this.recordSignedTransaction(
-          request,
-          chainId,
-          shouldBroadcast,
-          signed.result,
-          options,
-        );
+        try {
+          assertNoExternalPrivateKeyMaterial(signed, "externalSignTransactionResult");
+          if (signed.broadcast !== shouldBroadcast) {
+            throw new Error("External key custody signer returned an unexpected broadcast mode");
+          }
+          if (
+            shouldBroadcast &&
+            preparedBroadcastHash &&
+            signed.result.toLowerCase() !== preparedBroadcastHash.toLowerCase()
+          ) {
+            throw new ExternalBroadcastOutcomeUnknownError(preparedBroadcastHash, {
+              cause: new Error("External custody signer returned a mismatched transaction hash"),
+            });
+          }
+          await this.recordSignedTransaction(
+            request,
+            chainId,
+            shouldBroadcast,
+            signed.result,
+            options,
+          );
+        } catch (error) {
+          // Once the durable checkpoint has completed, every later failure is
+          // post-irreversibility: the provider may already have submitted the
+          // signed bytes. Preserve the exact prepared hash and never let the
+          // approval gateway classify this as retryable.
+          if (
+            shouldBroadcast &&
+            preparedBroadcastHash &&
+            !(error instanceof ExternalBroadcastOutcomeUnknownError)
+          ) {
+            throw new ExternalBroadcastOutcomeUnknownError(preparedBroadcastHash, { cause: error });
+          }
+          throw error;
+        }
         return signed.result;
       }
       if (venue) {
         throw missingSigningKeyError(request.agentId, chainFamilyToUse, venue);
       }
-      // Fallback: legacy encrypted_keys table (EVM only)
+      // Fallback: legacy encrypted_keys table (EVM only).
+      // Same backend-binding guard as the encryptedChainKeys branch above:
+      // an external-custody-bound authorization must never fall through to
+      // local key material — if the wallet flipped custody after the gateway
+      // precheck, signing with a stale legacy key would bypass the bound
+      // provider. Fail closed before reading any key material.
+      if (options.expectedBackend === "external-custody") {
+        throw new BackendBindingMismatchError("external-custody", "local-vault");
+      }
       const [legacyKey] = await db
         .select()
         .from(encryptedKeys)
@@ -1470,13 +1841,17 @@ export class Vault {
         });
         const publicClient = createPublicClient({
           chain,
-          transport: http(rpcUrl),
+          // The signed bytes are submitted exactly once at the application and
+          // transport layers. A lost response is reconciled by hash, never by
+          // replaying eth_sendRawTransaction.
+          transport: http(rpcUrl, { retryCount: 0 }),
         });
         // Track only allocator-issued nonces for in-flight reclaim; a
         // caller-supplied `request.nonce` is the caller's responsibility.
         const allocatedNonce =
           request.nonce === undefined
             ? await allocateEvmNonce({
+                tenantId: request.tenantId,
                 walletAddress: account.address,
                 chainId,
                 getPendingNonce: (address) =>
@@ -1485,34 +1860,65 @@ export class Vault {
             : undefined;
         const nonce = request.nonce ?? (allocatedNonce as number);
 
-        try {
-          hash = await client.sendTransaction({
-            to: request.to as `0x${string}`,
-            value: BigInt(request.value),
-            data: request.data as `0x${string}` | undefined,
-            gas: request.gasLimit ? BigInt(request.gasLimit) : undefined,
-            nonce,
-          });
-          if (allocatedNonce !== undefined) {
-            // Best-effort: confirmation bookkeeping must not fail a good send.
-            await confirmEvmNonce({
-              walletAddress: account.address,
-              chainId,
-              nonce: allocatedNonce,
-            }).catch(() => {});
-          }
-        } catch (err) {
-          if (allocatedNonce !== undefined) {
-            // Best-effort: mark the dropped nonce reclaimable so the wallet
-            // doesn't wedge behind a permanent hole.
+        // Keep the pre-broadcast checkpoint and accepted update on one durable
+        // transaction id even for legacy callers that did not supply one.
+        const localRecordOptions: SignTransactionOptions = {
+          ...options,
+          txId: options.txId ?? randomUUID(),
+        };
+
+        return executeLocalEvmBroadcast({
+          prepare: async () => {
+            const prepared = await client.prepareTransactionRequest({
+              to: request.to as `0x${string}`,
+              value: BigInt(request.value),
+              data: request.data as `0x${string}` | undefined,
+              gas: request.gasLimit ? BigInt(request.gasLimit) : undefined,
+              nonce,
+            });
+            return client.signTransaction(prepared);
+          },
+          checkpoint: (transactionHash) =>
+            this.recordSignedTransaction(request, chainId, true, transactionHash, {
+              ...localRecordOptions,
+              status: "outcome_unknown",
+            }),
+          broadcast: (serializedTransaction) =>
+            publicClient.sendRawTransaction({ serializedTransaction }),
+          reconcile: async (transactionHash) => {
+            try {
+              const transaction = await publicClient.getTransaction({ hash: transactionHash });
+              return transaction.hash.toLowerCase() === transactionHash.toLowerCase();
+            } catch {
+              return false;
+            }
+          },
+          releaseBeforeBroadcast: async () => {
+            if (allocatedNonce === undefined) return;
             await markEvmNonceDropped({
+              tenantId: request.tenantId,
               walletAddress: account.address,
               chainId,
               nonce: allocatedNonce,
-            }).catch(() => {});
-          }
-          throw err;
-        }
+            });
+          },
+          finalizeAccepted: async (transactionHash) => {
+            if (allocatedNonce !== undefined) {
+              // Best-effort: allocator bookkeeping cannot invalidate an
+              // accepted, deterministically identified transaction.
+              await confirmEvmNonce({
+                tenantId: request.tenantId,
+                walletAddress: account.address,
+                chainId,
+                nonce: allocatedNonce,
+              }).catch(() => {});
+            }
+            await this.recordSignedTransaction(request, chainId, true, transactionHash, {
+              ...localRecordOptions,
+              status: localRecordOptions.status ?? "broadcast",
+            });
+          },
+        });
       } else {
         // Sign without broadcasting - return the serialized signed transaction
         const rpcUrl = CHAIN_RPCS[chainId] ?? this.config.rpcUrl;
@@ -1523,6 +1929,7 @@ export class Vault {
         const nonce =
           request.nonce ??
           (await allocateEvmNonce({
+            tenantId: request.tenantId,
             walletAddress: account.address,
             chainId,
             getPendingNonce: (address) =>
@@ -1761,6 +2168,40 @@ export class Vault {
 
     // Wrap all writes atomically - roll back on any failure
     await db.transaction(async (tx) => {
+      // The SEC-024 custody guard below runs inside this transaction after the
+      // per-scope advisory lock. A concurrent
+      // importExternalKeyHandle for the same (agent, chain family) could
+      // interleave between the check and these writes, leaving both a
+      // server-managed key and an external-custody wallet row. Serialize
+      // custody transitions per scope and run the guard INSIDE the lock so
+      // the interleave fails closed. Skipped on single-connection PGlite,
+      // where transactions already serialize.
+      if (usesCustodyAdvisoryLock()) {
+        await tx.execute(
+          sql`select pg_advisory_xact_lock(hashtextextended(${custodyTransitionLockKey(tenantId, agentId, chainType, null)}, 0))`,
+        );
+      }
+
+      // SEC-024: refuse to silently convert an external-custody wallet back to
+      // server custody — the reverse guard of importExternalKeyHandle. A local
+      // chain key here would shadow the HSM on every future sign while the DB
+      // still claims external custody.
+      const [externalWallet] = await tx
+        .select({ metadata: agentWallets.metadata })
+        .from(agentWallets)
+        .where(
+          and(
+            eq(agentWallets.agentId, agentId),
+            eq(agentWallets.chainFamily, chainType),
+            isNull(agentWallets.venue),
+          ),
+        );
+      if (externalWallet && isExternalKeyWalletMetadata(externalWallet.metadata)) {
+        throw new Error(
+          `Cannot import a server-managed key over the external-custody ${chainType} wallet of agent ${agentId}`,
+        );
+      }
+
       if (existingAgent) {
         // Update wallet address and replace encrypted key
         await tx
@@ -1768,15 +2209,20 @@ export class Vault {
           .set({ walletAddress, updatedAt: now })
           .where(and(eq(agents.id, agentId), eq(agents.tenantId, tenantId)));
 
-        await tx.delete(encryptedKeys).where(eq(encryptedKeys.agentId, agentId));
+        // SEC-023: the legacy encrypted_keys table holds the EVM key only.
+        // Only replace the legacy row for EVM imports — deleting it for a
+        // Solana import would brick a legacy agent's existing EVM key.
+        if (chainType === "evm") {
+          await tx.delete(encryptedKeys).where(eq(encryptedKeys.agentId, agentId));
 
-        await tx.insert(encryptedKeys).values({
-          agentId,
-          ciphertext: encryptedKey.ciphertext,
-          iv: encryptedKey.iv,
-          tag: encryptedKey.tag,
-          salt: encryptedKey.salt,
-        });
+          await tx.insert(encryptedKeys).values({
+            agentId,
+            ciphertext: encryptedKey.ciphertext,
+            iv: encryptedKey.iv,
+            tag: encryptedKey.tag,
+            salt: encryptedKey.salt,
+          });
+        }
       } else {
         // Create new agent record
         await tx.insert(agents).values({
@@ -1788,18 +2234,20 @@ export class Vault {
           updatedAt: now,
         });
 
-        await tx.insert(encryptedKeys).values({
-          agentId,
-          ciphertext: encryptedKey.ciphertext,
-          iv: encryptedKey.iv,
-          tag: encryptedKey.tag,
-          salt: encryptedKey.salt,
-        });
+        if (chainType === "evm") {
+          await tx.insert(encryptedKeys).values({
+            agentId,
+            ciphertext: encryptedKey.ciphertext,
+            iv: encryptedKey.iv,
+            tag: encryptedKey.tag,
+            salt: encryptedKey.salt,
+          });
+        }
       }
 
       // ── Also write to multi-wallet tables so new signing paths find the key ─
       // Upsert into encrypted_chain_keys (replace if key already imported).
-      // Sprint 4: target the partial unique index on (agent_id, chain_family)
+      // Target the partial unique index on (agent_id, chain_family)
       // WHERE venue IS NULL so this only conflicts with the legacy row, not
       // with venue-scoped wallets that share the same chain family.
       await tx
@@ -1847,9 +2295,8 @@ export class Vault {
   /**
    * Register an external hardware/HSM key handle for an agent.
    *
-   * This is intentionally a custody seam only. It accepts provider-neutral
-   * handle metadata and returns the registered public identity, but signing
-   * through external handles is not wired into Vault signing paths yet and
+   * It accepts provider-neutral handle metadata and returns the registered
+   * public identity. A v1 provider may also opt into transaction signing, but
    * plaintext private key export is never available for external custody.
    */
   async importExternalKeyHandle(
@@ -1875,37 +2322,47 @@ export class Vault {
 
     const db = getDb();
     const [agentRow] = await db
-      .select({ id: agents.id })
+      .select({ id: agents.id, walletAddress: agents.walletAddress })
       .from(agents)
       .where(and(eq(agents.id, request.agentId), eq(agents.tenantId, request.tenantId)));
     if (!agentRow) {
       throw new Error(`Agent ${request.agentId} not found for tenant ${request.tenantId}`);
     }
 
-    const registration = normalizeExternalKeyHandleRegistration(
-      request,
-      await this.externalKeyCustodyProvider.registerKeyHandle(request),
-    );
-    const metadata = toExternalKeyWalletMetadata(registration) as Record<string, unknown>;
-    const venue = request.venue ?? null;
-    const now = new Date();
-
-    const [existingEncryptedKey] = await db
-      .select({ id: encryptedChainKeys.id })
-      .from(encryptedChainKeys)
-      .where(
-        and(
-          eq(encryptedChainKeys.agentId, request.agentId),
-          eq(encryptedChainKeys.chainFamily, request.chainFamily),
-          venue ? eq(encryptedChainKeys.venue, venue) : isNull(encryptedChainKeys.venue),
-        ),
-      );
-    if (existingEncryptedKey) {
-      throw new Error("Cannot register external key handle over a server-managed signing key");
+    // Fast-fail before the provider round-trip on the common rejection; the
+    // authoritative re-check happens inside the locked transaction below.
+    // `encrypted_keys` is always the legacy EVM store. Do not infer its
+    // relevance from agents.walletAddress: importing a Solana key updates that
+    // primary address while deliberately preserving the legacy EVM row.
+    if (!request.venue && request.chainFamily === "evm") {
+      const [legacyKey] = await db
+        .select({ agentId: encryptedKeys.agentId })
+        .from(encryptedKeys)
+        .where(eq(encryptedKeys.agentId, request.agentId));
+      if (legacyKey) {
+        throw new Error("Cannot register external key handle over a legacy server-managed key");
+      }
     }
 
-    const [existingWallet] = await db
-      .select({ id: agentWallets.id, metadata: agentWallets.metadata })
+    // Non-authoritative fast-fail checks keep a request that is already known
+    // to conflict with local custody from reaching the external provider. All
+    // checks are repeated under the transaction-scoped lock below because a
+    // concurrent writer can change them after this read.
+    const venue = request.venue ?? null;
+    const scope = and(
+      eq(encryptedChainKeys.agentId, request.agentId),
+      eq(encryptedChainKeys.chainFamily, request.chainFamily),
+      venue ? eq(encryptedChainKeys.venue, venue) : isNull(encryptedChainKeys.venue),
+    );
+    const [preexistingEncryptedKey] = await db
+      .select({ id: encryptedChainKeys.id })
+      .from(encryptedChainKeys)
+      .where(scope);
+    if (preexistingEncryptedKey) {
+      throw new Error("Cannot register external key handle over a server-managed signing key");
+    }
+    const [preexistingWallet] = await db
+      .select({ metadata: agentWallets.metadata })
       .from(agentWallets)
       .where(
         and(
@@ -1914,30 +2371,94 @@ export class Vault {
           venue ? eq(agentWallets.venue, venue) : isNull(agentWallets.venue),
         ),
       );
-    if (existingWallet && !isExternalKeyWalletMetadata(existingWallet.metadata)) {
+    if (preexistingWallet && !isExternalKeyWalletMetadata(preexistingWallet.metadata)) {
       throw new Error("Cannot register external key handle over a server-managed wallet");
     }
 
-    if (existingWallet) {
-      await db
-        .update(agentWallets)
-        .set({
-          address: registration.address,
+    // Provider registration is read-only public-handle validation (no custody
+    // state changes) and stays OUTSIDE the lock: network I/O must never hold
+    // a transaction-scoped advisory lock.
+    const registration = normalizeExternalKeyHandleRegistration(
+      request,
+      await this.externalKeyCustodyProvider.registerKeyHandle(request),
+    );
+    const metadata = toExternalKeyWalletMetadata(registration) as Record<string, unknown>;
+    const now = new Date();
+
+    await db.transaction(async (tx) => {
+      // The custody guards below run under DB serialization — a concurrent
+      // importKey (or a second handle import)
+      // for the same (agent, chain family, venue) scope could interleave
+      // between the checks and the wallet write, leaving both a
+      // server-managed key and an external-custody wallet row. Serialize
+      // custody transitions per scope and run every guard INSIDE the lock so
+      // the interleave fails closed. Skipped on single-connection PGlite,
+      // where transactions already serialize.
+      if (usesCustodyAdvisoryLock()) {
+        await tx.execute(
+          sql`select pg_advisory_xact_lock(hashtextextended(${custodyTransitionLockKey(request.tenantId, request.agentId, request.chainFamily, venue)}, 0))`,
+        );
+      }
+
+      if (!venue && request.chainFamily === "evm") {
+        const [legacyKey] = await tx
+          .select({ agentId: encryptedKeys.agentId })
+          .from(encryptedKeys)
+          .where(eq(encryptedKeys.agentId, request.agentId));
+        if (legacyKey) {
+          throw new Error("Cannot register external key handle over a legacy server-managed key");
+        }
+      }
+
+      const [existingEncryptedKey] = await tx
+        .select({ id: encryptedChainKeys.id })
+        .from(encryptedChainKeys)
+        .where(
+          and(
+            eq(encryptedChainKeys.agentId, request.agentId),
+            eq(encryptedChainKeys.chainFamily, request.chainFamily),
+            venue ? eq(encryptedChainKeys.venue, venue) : isNull(encryptedChainKeys.venue),
+          ),
+        );
+      if (existingEncryptedKey) {
+        throw new Error("Cannot register external key handle over a server-managed signing key");
+      }
+
+      const [existingWallet] = await tx
+        .select({ id: agentWallets.id, metadata: agentWallets.metadata })
+        .from(agentWallets)
+        .where(
+          and(
+            eq(agentWallets.agentId, request.agentId),
+            eq(agentWallets.chainFamily, request.chainFamily),
+            venue ? eq(agentWallets.venue, venue) : isNull(agentWallets.venue),
+          ),
+        );
+      if (existingWallet && !isExternalKeyWalletMetadata(existingWallet.metadata)) {
+        throw new Error("Cannot register external key handle over a server-managed wallet");
+      }
+
+      if (existingWallet) {
+        await tx
+          .update(agentWallets)
+          .set({
+            address: registration.address,
+            purpose: registration.purpose,
+            metadata,
+          })
+          .where(eq(agentWallets.id, existingWallet.id));
+      } else {
+        await tx.insert(agentWallets).values({
+          agentId: registration.agentId,
+          chainFamily: registration.chainFamily,
+          venue,
           purpose: registration.purpose,
+          address: registration.address,
           metadata,
-        })
-        .where(eq(agentWallets.id, existingWallet.id));
-    } else {
-      await db.insert(agentWallets).values({
-        agentId: registration.agentId,
-        chainFamily: registration.chainFamily,
-        venue,
-        purpose: registration.purpose,
-        address: registration.address,
-        metadata,
-        createdAt: now,
-      });
-    }
+          createdAt: now,
+        });
+      }
+    });
 
     return registration;
   }
@@ -1968,6 +2489,7 @@ export class Vault {
     const isSolana = detectChainType(agentRow.walletAddress) === "solana";
     const chainFamilyToUse = isSolana ? "solana" : "evm";
     await assertVaultSigningActive({ tenantId, agentId, chainFamily: chainFamilyToUse });
+    await this.assertLocalSigningScopeIsNotExternal(agentId, chainFamilyToUse);
 
     // Resolve signing key: prefer encryptedChainKeys (multi-wallet), fall back to legacy encryptedKeys
     let secretKey: string;
@@ -1978,7 +2500,7 @@ export class Vault {
         and(
           eq(encryptedChainKeys.agentId, agentId),
           eq(encryptedChainKeys.chainFamily, chainFamilyToUse),
-          // Sprint 4: legacy lookup, NULL-venue only.
+          // Legacy lookup, NULL-venue only.
           isNull(encryptedChainKeys.venue),
         ),
       );
@@ -2046,6 +2568,7 @@ export class Vault {
       throw new Error("Raw secp256k1 signing requires an EVM agent");
     }
     await assertVaultSigningActive({ tenantId, agentId, chainFamily: "evm" });
+    await this.assertLocalSigningScopeIsNotExternal(agentId, "evm");
 
     let secretKey: string;
     const [chainKey] = await db
@@ -2149,6 +2672,7 @@ export class Vault {
     // authorization boundary (the encrypted-key tables are keyed by agentId).
     const chainFamily = curve === "secp256k1" ? "evm" : "solana";
     await assertVaultSigningActive({ tenantId, agentId, chainFamily });
+    await this.assertLocalSigningScopeIsNotExternal(agentId, chainFamily);
 
     let secretKey: string;
     const [chainKey] = await db
@@ -2254,6 +2778,7 @@ export class Vault {
       throw new Error("signAuthorization requires an EVM agent");
     }
     await assertVaultSigningActive({ tenantId, agentId, chainFamily: "evm" });
+    await this.assertLocalSigningScopeIsNotExternal(agentId, "evm");
 
     let secretKey: string;
     const [chainKey] = await db
@@ -2332,6 +2857,7 @@ export class Vault {
       chainFamily: "evm",
       venue: request.venue ?? null,
     });
+    await this.assertLocalSigningScopeIsNotExternal(request.agentId, "evm", request.venue ?? null);
 
     // Resolve signing key: prefer encryptedChainKeys (multi-wallet), scoped by
     // venue when requested, then fall back to legacy encryptedKeys only for
@@ -2435,6 +2961,14 @@ export class Vault {
     if (detectChainType(agentRow.walletAddress) === "solana") {
       throw new Error("ERC-4337 user operation signing is not supported for Solana wallets");
     }
+    await this.assertLocalSigningScopeIsNotExternal(request.agentId, "evm");
+
+    await assertVaultSigningActive({
+      tenantId: request.tenantId,
+      agentId: request.agentId,
+      chainFamily: "evm",
+      venue: null,
+    });
 
     const [chainKey] = await db
       .select()
@@ -2512,6 +3046,31 @@ export class Vault {
     if (!agentRow) {
       throw new Error(`Agent ${request.agentId} not found for tenant ${request.tenantId}`);
     }
+    await this.assertLocalSigningScopeIsNotExternal(request.agentId, "solana");
+
+    await assertVaultSigningActive({
+      tenantId: request.tenantId,
+      agentId: request.agentId,
+      chainFamily: "solana",
+      venue: null,
+    });
+
+    // SEC-163: fail closed on blind signing. Without the expectedTo/
+    // expectedValue envelope the vault applies no recipient/amount assertion,
+    // so the caller must explicitly attest that its own edge policy evaluation
+    // approved the transaction. Checked after the signing freeze (a freeze
+    // must still report as a freeze) and before any key material is touched.
+    if (request.expectedTo === undefined && request.expectedValue === undefined) {
+      if (request.allowBlindSign !== true) {
+        throw new Error(
+          "Solana transaction signing without a policy envelope requires allowBlindSign: true " +
+            "(caller attestation that edge policy approved the transaction)",
+        );
+      }
+      console.warn(
+        `[Vault] BLIND Solana sign (no policy envelope, caller-attested): tenant=${request.tenantId} agent=${request.agentId} chainId=${request.chainId ?? 101} broadcast=${request.broadcast !== false}`,
+      );
+    }
 
     // Resolve Solana key: prefer encryptedChainKeys (multi-wallet), fall back to
     // legacy encryptedKeys when the agent has a Solana walletAddress.
@@ -2579,6 +3138,7 @@ export class Vault {
       Transaction: SolTransaction,
       VersionedTransaction,
       Connection,
+      SendTransactionError,
     } = await import("@solana/web3.js");
     const txBytes = Uint8Array.from(atob(request.transaction), (c) => c.charCodeAt(0));
 
@@ -2595,6 +3155,8 @@ export class Vault {
     };
 
     let signedBytes: Uint8Array;
+    let preparedSignature: string;
+    let recentBlockhash: string;
     if (isVersionedTransactionBytes(txBytes)) {
       const vtx = VersionedTransaction.deserialize(txBytes);
       assertSolanaPriorityFeeWithinCap(parseSolanaTransaction(request.transaction));
@@ -2606,6 +3168,12 @@ export class Vault {
       }
       vtx.sign([keypair]);
       signedBytes = vtx.serialize();
+      const signature = vtx.signatures[0];
+      if (!signature?.some((byte) => byte !== 0)) {
+        throw new Error("Solana versioned transaction did not produce a signer signature");
+      }
+      preparedSignature = bs58.encode(signature);
+      recentBlockhash = vtx.message.recentBlockhash;
     } else {
       const tx = SolTransaction.from(txBytes);
       assertSolanaPriorityFeeWithinCap(parseSolanaTransaction(request.transaction));
@@ -2619,23 +3187,47 @@ export class Vault {
       }
       tx.partialSign(keypair);
       signedBytes = tx.serialize();
+      if (!tx.signature) {
+        throw new Error("Solana transaction did not produce a signer signature");
+      }
+      preparedSignature = bs58.encode(tx.signature);
+      if (!tx.recentBlockhash) {
+        throw new Error("Solana transaction is missing a recent blockhash");
+      }
+      recentBlockhash = tx.recentBlockhash;
     }
 
     if (shouldBroadcast) {
+      // Persist the deterministic signature before the first external write.
+      // A checkpoint failure aborts safely before sendRawTransaction.
+      await request.onBroadcastPrepared?.({ signature: preparedSignature, recentBlockhash });
       const connection = new Connection(rpcUrl, "confirmed");
-      const sig = await connection.sendRawTransaction(signedBytes, {
-        skipPreflight: false,
-        preflightCommitment: "confirmed",
-      });
-
-      const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash("confirmed");
-      await connection.confirmTransaction(
-        { signature: sig, blockhash, lastValidBlockHeight },
-        "confirmed",
-      );
+      try {
+        const sig = await connection.sendRawTransaction(signedBytes, {
+          skipPreflight: false,
+          preflightCommitment: "confirmed",
+        });
+        if (sig !== preparedSignature) {
+          throw new Error("Solana RPC returned a signature that does not match the signed bytes");
+        }
+        await connection.confirmTransaction(sig, "confirmed");
+      } catch (error) {
+        // The signed bytes and their deterministic signature were durably
+        // checkpointed before sendRawTransaction. Its rejection may represent
+        // a preflight denial, an accepted submission with a lost response, or
+        // a later confirmation failure, so every case is conservatively
+        // non-retryable until the signature is reconciled.
+        if (
+          error instanceof SendTransactionError &&
+          error.message.startsWith("Simulation failed.")
+        ) {
+          throw new SolanaBroadcastNotSubmittedError(preparedSignature, { cause: error });
+        }
+        throw new ExternalBroadcastOutcomeUnknownError(preparedSignature, { cause: error });
+      }
 
       return {
-        signature: sig,
+        signature: preparedSignature,
         broadcast: true,
         chainId,
         caip2: toCaip2(chainId),
@@ -2650,6 +3242,31 @@ export class Vault {
       chainId,
       caip2: toCaip2(chainId),
     };
+  }
+
+  async reconcileSolanaBroadcast(input: {
+    signature: string;
+    recentBlockhash: string;
+    chainId?: number;
+  }): Promise<"confirmed" | "broadcast" | "failed" | "outcome_unknown"> {
+    const { Connection } = await import("@solana/web3.js");
+    const rpcUrl = this.config.rpcUrl ?? resolveSolanaRpc(input.chainId ?? 101);
+    const connection = new Connection(rpcUrl, "confirmed");
+    const response = await connection.getSignatureStatuses([input.signature], {
+      searchTransactionHistory: true,
+    });
+    const status = response.value[0];
+    if (status) {
+      if (status.err !== null) return "failed";
+      if (status.confirmationStatus === "confirmed" || status.confirmationStatus === "finalized") {
+        return "confirmed";
+      }
+      return "broadcast";
+    }
+    const validity = await connection.isBlockhashValid(input.recentBlockhash, {
+      commitment: "confirmed",
+    });
+    return validity.value ? "outcome_unknown" : "failed";
   }
 
   /**
@@ -2978,6 +3595,18 @@ export class Vault {
       venue: walletScope,
     });
 
+    // SEC-163: the vault layer applies no fee/output policy to PSBTs — it
+    // signs any PSBT with ≥1 input spendable by the wallet key. Signing is
+    // therefore only permitted when the caller explicitly attests that edge
+    // policy (inspectBitcoinPsbt + spend/fee evaluation) already approved
+    // this exact payload. Checked after the freeze gate, before key access.
+    if (request.allowBlindSign !== true) {
+      throw new Error(
+        "Bitcoin PSBT signing requires allowBlindSign: true " +
+          "(caller attestation that edge policy approved the PSBT)",
+      );
+    }
+
     const [wallet] = await db
       .select({
         address: agentWallets.address,
@@ -3145,6 +3774,16 @@ export class Vault {
   /**
    * Proxy a read-only RPC call to the appropriate chain provider.
    * Supports both EVM and Solana RPC methods.
+   *
+   * SEC-082: enforced as an ALLOWLIST, not a blocklist. A blocklist can never
+   * enumerate every signing/admin method on every upstream (`eth_signTypedData_v3`,
+   * Solana `signMessage`/`signTransaction`, or `admin_`/`debug_`/`trace_`
+   * namespaces when an operator points `config.rpcUrl` at a node with unlocked
+   * accounts), so only known read-only methods pass. Operators tighten or
+   * tighten the inventory via STEWARD_VAULT_RPC_ALLOWLIST (comma-separated) —
+   * the same knob the API edge uses. Note the vault's own guards proxy
+   * `eth_getCode` through here, so an override that omits it fails closed
+   * (native-transfer code checks are denied, never bypassed).
    */
   async rpcPassthrough(request: RpcRequest): Promise<RpcResponse> {
     const chainId = request.chainId;
@@ -3161,19 +3800,20 @@ export class Vault {
       throw new Error(`No RPC URL configured for chainId ${chainId}`);
     }
 
-    // Block signing/state-modifying methods - this is read-only passthrough
-    const blockedMethods = [
-      "eth_sendTransaction",
-      "eth_sendRawTransaction",
-      "eth_sign",
-      "personal_sign",
-      "eth_signTypedData",
-      "eth_signTypedData_v4",
-      "sendTransaction",
-    ];
-    if (blockedMethods.includes(request.method)) {
+    const configured = process.env.STEWARD_VAULT_RPC_ALLOWLIST;
+    const configuredMethods = configured
+      ?.split(",")
+      .map((method) => method.trim())
+      .filter(Boolean);
+    if (configuredMethods?.some((method) => !DEFAULT_RPC_PASSTHROUGH_METHODS.has(method))) {
+      throw new Error("STEWARD_VAULT_RPC_ALLOWLIST contains an unsupported method");
+    }
+    const allowlist = configuredMethods
+      ? new Set(configuredMethods)
+      : DEFAULT_RPC_PASSTHROUGH_METHODS;
+    if (!allowlist.has(request.method)) {
       throw new Error(
-        `Method ${request.method} is not allowed via RPC passthrough - use the signing endpoints`,
+        `Method ${request.method} is not allowed via RPC passthrough - read-only methods only`,
       );
     }
 
@@ -3186,17 +3826,14 @@ export class Vault {
         method: request.method,
         params: request.params ?? [],
       }),
+      redirect: "error",
+      signal: AbortSignal.timeout(RPC_PASSTHROUGH_TIMEOUT_MS),
     });
-
-    if (!response.ok) {
-      throw new Error(`RPC request failed: ${response.status} ${response.statusText}`);
-    }
-
-    return (await response.json()) as RpcResponse;
+    return readBoundedRpcResponse(response);
   }
 
   // ──────────────────────────────────────────────────────────────────────
-  // Sprint 4 Phase 1 Day 1: venue-scoped wallet API
+  // Venue-scoped wallet API.
   // ──────────────────────────────────────────────────────────────────────
   //
   // Wallets used to be keyed by (agentId, chainFamily). Trade-sessions now
@@ -3414,6 +4051,17 @@ export class Vault {
    */
   async createWallet(args: {
     agentId: string;
+    /**
+     * SEC-162: required caller-asserted tenant, verified against the agent's
+     * real tenant before any wallet row is written. The AAD on the encrypted
+     * key material was always bound to `agentRow.tenantId` (so cross-tenant
+     * key theft was never possible); this check closes the residual DoS —
+     * a caller reaching this method with another tenant's agentId can no
+     * longer squat venue wallet slots for that agent. Routes that know the
+     * tenant must pass it. Keeping this optional would preserve the original
+     * in-process cross-tenant venue-slot-squatting path.
+     */
+    tenantId: string;
     venue?: string;
     scope?: string;
     chainType: WalletChainFamily;
@@ -3441,6 +4089,12 @@ export class Vault {
       .where(eq(agents.id, agentId));
     if (!agentRow) {
       throw new Error(`Agent ${agentId} not found`);
+    }
+    // Defense-in-depth tenant binding (SEC-162). Same "not found" phrasing as
+    // the other tenant-scoped lookups so a mismatch does not confirm the
+    // agent's existence under another tenant.
+    if (agentRow.tenantId !== args.tenantId) {
+      throw new Error(`Agent ${agentId} not found for tenant ${args.tenantId}`);
     }
 
     let address: string;

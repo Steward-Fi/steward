@@ -5,7 +5,7 @@ use std::time::{Duration, UNIX_EPOCH};
 use serde_json::{json, Value};
 use steward_sdk::{
     ApiError, Client, Config, CreateUserInput, Error, PushSubscriptionInput,
-    PushSubscriptionResult, Request, Response, Transport,
+    PushSubscriptionResult, Request, RequestOptions, Response, Transport,
 };
 
 #[derive(Clone)]
@@ -213,4 +213,88 @@ fn api_errors_include_status_and_payload() {
         }
         other => panic!("expected API error, got {other:?}"),
     }
+}
+
+// SEC-049: every SDK's signing-prefix list must cover wallet/account mutations
+// in lockstep (Flutter already signed these).
+#[test]
+fn accounts_and_global_wallet_mutations_are_signed() {
+    let transport = CaptureTransport::new(json!({"ok": true, "data": {"id": "ok"}}));
+    let client = Client::new(Config {
+        base_url: "https://api.example.test".to_string(),
+        app_id: Some("app-1".to_string()),
+        app_secret: Some("secret-1".to_string()),
+        request_signing_secret: Some("signing-secret".to_string()),
+        transport: Some(Arc::new(transport.clone())),
+        ..Config::default()
+    })
+    .unwrap();
+
+    for path in ["/accounts", "/global-wallet/consent/approve"] {
+        client
+            .post(path, &json!({}), RequestOptions::default())
+            .unwrap();
+        let request = transport.last_request();
+        let signature = request
+            .headers
+            .get("X-Steward-Signature")
+            .unwrap_or_else(|| panic!("unsigned mutation: {path}"));
+        assert!(signature.starts_with("v1="));
+        assert_eq!(signature.len(), 67);
+    }
+}
+
+// SEC-200: the client must refuse to send credentials to a plaintext
+// non-loopback endpoint unless the operator explicitly opts out.
+#[test]
+fn plaintext_non_loopback_base_url_rejected() {
+    for base_url in [
+        "http://api.example.test",
+        "http://192.168.1.10:3200",
+        "ftp://api.example.test",
+        "https://user:secret@api.example.test",
+    ] {
+        match Client::new(Config {
+            base_url: base_url.to_string(),
+            api_key: Some("tenant-key".to_string()),
+            ..Config::default()
+        }) {
+            Err(Error::Config(message)) => {
+                assert!(
+                    message.contains("HTTPS") || message.contains("credentials"),
+                    "unexpected: {message}"
+                )
+            }
+            _ => panic!("expected config error for {base_url}"),
+        }
+    }
+
+    for base_url in [
+        "https://api.example.test",
+        "http://localhost:3200",
+        "http://127.0.0.1:3200",
+        "http://[::1]:3200",
+    ] {
+        Client::new(Config {
+            base_url: base_url.to_string(),
+            api_key: Some("tenant-key".to_string()),
+            ..Config::default()
+        })
+        .unwrap_or_else(|err| panic!("unexpected error for {base_url}: {err:?}"));
+    }
+}
+
+#[test]
+fn allow_insecure_base_url_opts_out() {
+    Client::new_with_options(
+        Config {
+            base_url: "http://api.example.test".to_string(),
+            api_key: Some("tenant-key".to_string()),
+            ..Config::default()
+        },
+        steward_sdk::ClientOptions {
+            allow_insecure_base_url: true,
+        },
+    )
+    .expect("allow_insecure_base_url should permit plaintext non-loopback");
 }

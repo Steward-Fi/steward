@@ -333,6 +333,23 @@ export interface StewardAuthConfig {
    * When set, all sign-in methods include this tenantId in requests.
    */
   tenantId?: string;
+  /**
+   * Optional same-origin auth proxy prefix (e.g. "/api/auth") that holds the
+   * long-lived refresh token in an HttpOnly, SameSite=Strict cookie the page's
+   * JavaScript cannot read. When set:
+   *   - sign-in deposits the refresh token with the proxy instead of `storage`;
+   *   - refresh / revoke / tenant-switch calls go to the proxy, which injects
+   *     the cookie-held token before forwarding to the Steward API;
+   *   - only the short-lived access token is kept in `storage`.
+   * Leave unset to keep refresh tokens in `storage` (default, unchanged).
+   */
+  authProxyUrl?: string;
+  /**
+   * Permit a plaintext non-loopback baseUrl (warns at construction). HTTPS is
+   * required by default so session credentials never travel cleartext
+   * off-loopback.
+   */
+  allowInsecureBaseUrl?: boolean;
 }
 
 /** Response shape from POST /auth/refresh */

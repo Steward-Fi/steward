@@ -31,6 +31,34 @@ describe("assertSecureBaseUrl", () => {
   test("rejects malformed URLs", () => {
     expect(() => assertSecureBaseUrl("not a url")).toThrow(/not a valid URL/);
   });
+
+  test("rejects credential-bearing URLs without reflecting credentials", () => {
+    const credential = "mcp-super-secret";
+    let message = "";
+    try {
+      assertSecureBaseUrl(`https://operator:${credential}@steward.example.com`);
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error);
+    }
+    expect(message).toContain("embedded credentials are not allowed");
+    expect(message).not.toContain(credential);
+  });
+
+  test("does not reflect malformed or insecure URL values", () => {
+    const credential = "mcp-query-secret";
+    for (const value of [
+      `not-a-url-${credential}`,
+      `http://steward.example.com/?token=${credential}`,
+    ]) {
+      let message = "";
+      try {
+        assertSecureBaseUrl(value);
+      } catch (error) {
+        message = error instanceof Error ? error.message : String(error);
+      }
+      expect(message).not.toContain(credential);
+    }
+  });
 });
 
 describe("loadConfig", () => {

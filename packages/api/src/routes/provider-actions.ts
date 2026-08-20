@@ -1,5 +1,5 @@
 /**
- * provider-actions.ts — POST /v2/provider-actions (PR2 spec §2).
+ * provider-actions.ts — POST /v2/provider-actions (provider-action spec §2).
  *
  * The public provider-action ingress. It:
  *   1. Reads BOUNDED raw UTF-8 bytes (never `request.json()` first — JSON.parse
@@ -16,14 +16,16 @@
  */
 
 import { createHash, randomBytes } from "node:crypto";
-import { buildGithubAction, isGithubOperationKey } from "@stwd/provider-github";
-import { buildXAction, isXOperationKey } from "@stwd/provider-x";
+import { getDb, intents, providerActionBindings } from "@stwd/db";
 import { CanonError, decodeUtf8Strict, isCanonError, strictParseJson } from "@stwd/shared";
+import { and, eq } from "drizzle-orm";
 import type { Context } from "hono";
 import { Hono } from "hono";
 import { requireProviderAgentJwt } from "../middleware/agent-jwt";
 import { resolveProviderPrincipal } from "../middleware/provider-principal";
 import { type ApiResponse, type AppVariables, setNoStoreHeaders } from "../services/context";
+import { toProviderActionStatusResponse } from "../services/intent-response";
+import { buildAdapterFixedProviderAction } from "../services/provider-action-profile-specs";
 import {
   type ProviderActionOutcome,
   providerActionService,
@@ -56,6 +58,16 @@ export function registerProviderActionRoutes(app: Hono<{ Variables: AppVariables
   });
   app.use("/v2/provider-actions", requireProviderAgentJwt);
   app.post("/v2/provider-actions", handleCreateProviderAction);
+
+  // Read-only status view for the authenticated agent's own actions.
+  // Keep this path exact (no wildcard suffix) so the sibling approval, execute,
+  // case, and evidence routes retain their distinct human/MFA gates.
+  app.use("/v2/provider-actions/:id", async (c, next) => {
+    setNoStoreHeaders(c);
+    await next();
+  });
+  app.use("/v2/provider-actions/:id", requireProviderAgentJwt);
+  app.get("/v2/provider-actions/:id", handleGetProviderActionStatus);
 }
 
 const MAX_REQUEST_BYTES = 256 * 1024; // 256 KiB bound
@@ -69,10 +81,69 @@ const TOP_LEVEL_KEYS = new Set([
   "operationKey",
   "arguments",
   "idempotencyKey",
+  "summonAttestation",
+  // For config-driven (generic-http) operations the caller supplies the
+  // HTTP method explicitly (the descriptor may allow several); adapter-fixed
+  // github/x operations ignore it (their method is fixed by the operation key).
+  "method",
 ]);
 
 function deny(c: RouteContext, code: string, status: number) {
   return c.json<ApiResponse>({ ok: false, error: code }, status as never);
+}
+
+function providerActionNotFound(c: RouteContext) {
+  return c.json<ApiResponse>({ ok: false, error: "PROVIDER_ACTION_NOT_FOUND" }, 404);
+}
+
+async function handleGetProviderActionStatus(c: RouteContext) {
+  const principal = resolveProviderPrincipal(c);
+  const intentId = c.req.param("id") ?? "";
+
+  // Provider action ids are currently `pa_` + UUID. Treat malformed ids exactly
+  // like absent/foreign ids so this read surface is non-enumerating.
+  if (!/^pa_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(intentId)) {
+    return providerActionNotFound(c);
+  }
+
+  const [owned] = await getDb()
+    .select({ binding: providerActionBindings, intent: intents })
+    .from(providerActionBindings)
+    .innerJoin(
+      intents,
+      and(
+        eq(intents.id, providerActionBindings.intentId),
+        eq(intents.tenantId, providerActionBindings.tenantId),
+      ),
+    )
+    .where(
+      and(
+        eq(providerActionBindings.intentId, intentId),
+        eq(providerActionBindings.tenantId, principal.tenantId),
+        eq(providerActionBindings.actorAgentId, principal.agentId),
+        eq(intents.intentType, "provider-action"),
+      ),
+    )
+    .limit(1);
+
+  if (!owned) return providerActionNotFound(c);
+  return c.json<ApiResponse>({
+    ok: true,
+    data: toProviderActionStatusResponse({
+      id: owned.binding.intentId,
+      status: owned.binding.status,
+      version: owned.binding.bindingRevision,
+      workspaceId: owned.binding.workspaceId,
+      providerAccountId: owned.binding.providerAccountId,
+      operationId: owned.binding.operationId,
+      operationRevision: owned.binding.operationRevision,
+      actionDigest: owned.binding.actionDigest,
+      requestHash: owned.binding.requestHash,
+      expiresAt: owned.intent.expiresAt,
+      createdAt: owned.binding.createdAt,
+      updatedAt: owned.binding.updatedAt,
+    }),
+  });
 }
 
 function outcomeToResponse(c: RouteContext, outcome: ProviderActionOutcome) {
@@ -87,6 +158,7 @@ function outcomeToResponse(c: RouteContext, outcome: ProviderActionOutcome) {
           error: outcome.code,
           data: {
             id: outcome.intentId,
+            status: outcome.kind === "access_denied" ? "denied_access" : "denied_policy",
             requestHash: outcome.requestHash,
             actionDigest: outcome.actionDigest,
           },
@@ -169,6 +241,8 @@ async function handleCreateProviderAction(c: RouteContext) {
   const operationKey = body.operationKey;
   const idempotencyKey = body.idempotencyKey;
   const args = body.arguments;
+  const method = body.method;
+  const summonAttestation = body.summonAttestation;
 
   if (
     workspaceId === undefined ||
@@ -199,12 +273,24 @@ async function handleCreateProviderAction(c: RouteContext) {
   // key belonging to no registered adapter is an unsupported profile. ──
   let build: import("../services/provider-action-service").ProviderActionBuild;
   try {
-    if (isGithubOperationKey(operationKey)) {
-      build = buildGithubAction(operationKey, args);
-    } else if (isXOperationKey(operationKey)) {
-      build = buildXAction(operationKey, args);
+    const adapterBuild = buildAdapterFixedProviderAction(operationKey, args, method);
+    if (adapterBuild) {
+      build = adapterBuild;
     } else {
-      return deny(c, "CANON_PROFILE_UNSUPPORTED", 400);
+      // Any operation key not owned by an adapter-fixed profile is a
+      // candidate config-driven (generic-http) operation. We cannot build it
+      // here because the operator-authored descriptor lives on the resolved
+      // provider_operations row; defer the build to the service, which loads +
+      // validates the descriptor after scope resolution and fails closed on an
+      // unregistered/invalid profile. Method is caller-supplied for generic-http.
+      if (method !== undefined && typeof method !== "string")
+        return deny(c, "CANON_METHOD_INVALID", 400);
+      build = {
+        kind: "deferred-generic",
+        operationKey,
+        method: method as string | undefined,
+        args,
+      };
     }
   } catch (e) {
     if (isCanonError(e)) return deny(c, e.code, e.httpStatus);
@@ -233,6 +319,7 @@ async function handleCreateProviderAction(c: RouteContext) {
       expiresAt: toRfc3339Millis(expiresAt),
       nonce,
       requestId: c.get("requestId") ?? null,
+      summonAttestation,
     });
   } catch (e) {
     if (isCanonError(e)) return deny(c, e.code, e.httpStatus);
@@ -254,6 +341,7 @@ async function handleCreateProviderAction(c: RouteContext) {
 // Also register on the standalone sub-app so it can be unit-tested in isolation
 // (and remains a valid mount target if the router behavior changes).
 providerActionRoutes.post("/provider-actions", handleCreateProviderAction);
+providerActionRoutes.get("/provider-actions/:id", handleGetProviderActionStatus);
 
 /** RFC 3339 UTC with exactly three fractional digits and trailing Z. */
 function toRfc3339Millis(d: Date): string {

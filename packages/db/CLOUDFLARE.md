@@ -23,7 +23,7 @@ TCP using `DATABASE_URL` and applies any pending files in
 # 1. Get a TCP-capable Postgres URL for your Neon database.
 #    (Neon's pooler URL works; the HTTP-only URL does not — drizzle-kit needs
 #     a real connection.)
-export DATABASE_URL="postgres://USER:PASS@ep-XYZ.us-east-2.aws.neon.tech/dbname?sslmode=require"
+export DATABASE_URL="postgres://USER:PASS@ep-XYZ.us-east-2.aws.neon.tech/dbname?sslmode=verify-full"
 
 # 2. Apply all pending migrations.
 cd packages/db
@@ -57,15 +57,63 @@ migrations are forward-only.
 
 ## Schema compatibility with neon-http
 
-The neon-http driver uses Neon's serverless HTTP transport. It supports the
-full Postgres SQL surface that Steward uses (DDL, prepared statements,
-transactions). The constructs Steward does NOT use, and which would not work
-over HTTP, are:
+The neon-http driver uses Neon's serverless HTTP transport. The constructs
+that would not work over HTTP, and Steward's actual posture on each, are:
 
-- `LISTEN` / `NOTIFY` — pubsub
-- Advisory locks (`pg_advisory_lock`)
-- `COPY` streaming
-- Long-running transactions across multiple statements
+- `LISTEN` / `NOTIFY` — not used anywhere.
+- `COPY` streaming — not used anywhere.
+- Advisory locks — **used, contrary to an earlier version of this note**
+  (SEC-166):
+  - `pg_advisory_lock` is taken by the TCP migrator (`src/migrate.ts`,
+    `src/plugin-migrate.ts`). That runs pre-deploy over a real TCP connection
+    (see above), never from the Worker, so neon-http is unaffected.
+  - `pg_advisory_xact_lock` is taken by the audit chain on EVERY non-PGLite
+    append (`src/audit-chain.ts`), to serialize per-tenant chain extensions.
+    On Workers it never executes: drizzle's neon-http driver throws
+    `No transactions support in neon-http driver` from `db.transaction()`,
+    so `writeAuditEvent` / `withTenantAuditedTransaction` reject before the
+    lock — or the INSERT — runs. Audited writes on Workers therefore FAIL
+    CLOSED (the audited action is denied); the chain is never silently
+    skipped. This contract is pinned by
+    `src/__tests__/audit-chain-workers.test.ts`. A drizzle upgrade that adds
+    neon-http transaction support breaks that test on purpose: the Workers
+    audit posture (including whether the advisory lock still serializes
+    correctly over the HTTP transport) must be re-reviewed before adopting it.
+- Long-running multi-statement transactions — the audit chain relies on them
+  on postgres-js; on neon-http they fail closed as described above.
 
-Verified against `packages/db/src/schema.ts` and `schema-auth.ts`: none of
-these are used.
+## Transaction-capable RLS transport checkpoint
+
+`createNeonTransactionDbForRequest()` provides a request-scoped Neon WebSocket
+pool with exactly one connection. It supports Drizzle callback transactions and
+is therefore eligible for `withTenantRlsTransaction(..., "neon-websocket", ...)`.
+The handle exposes an idempotent `close()` which callers must await before a
+Worker request finishes. Connection acquisition is capped at 10 seconds; query,
+statement, lock, idle-connection, and idle-in-transaction phases are capped at
+30 seconds (with PostgreSQL cancellation scheduled slightly earlier). Production
+TLS policy is evaluated from the Worker bindings passed to the handle, not from
+a Node compatibility shim's `process.env`; because Cloudflare does not provide
+`NODE_ENV` automatically, missing `NODE_ENV` defaults to production enforcement.
+
+Both `neon-http` and `neon-websocket` are bound through request-local async
+context. The context is revoked as soon as the owning callback settles, so any
+detached async task fails before reusing a database handle after cleanup.
+Before enabling the WebSocket driver, every database-backed fire-and-forget
+task must be made part of the owning callback (or an explicitly owned Worker
+lifetime); revocation prevents stale-handle use but cannot preserve unawaited
+work.
+
+`withRequestDatabase()` propagates that explicit handle through the async
+request so existing services calling `getDb()` resolve the request-owned
+Drizzle database rather than an isolate-global singleton. Concurrent contexts
+are isolated, nested replacement and raw `getSql()` bypass are rejected, and
+the Worker fetch/cron entrypoints await handle cleanup on success or failure.
+
+This is a transport primitive, not RLS activation. The shipped Worker remains
+on `DATABASE_DRIVER=neon-http` until authenticated request middleware can mint
+a trusted tenant capability and propagate the transaction-bound database to
+every downstream query. To prevent partial adoption, `getDb()` and the legacy
+`createDbForRequest()` reject `neon-websocket`; callers must use the explicit
+request-scoped handle. FORCE RLS remains blocked until bootstrap credential
+functions, request-wide propagation, background-job scoping, schema backfills,
+and all-table policies are complete (SEC-169).

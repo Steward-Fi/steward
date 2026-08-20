@@ -1,4 +1,4 @@
-# Threshold Signing (Pillar D / D2 prototype)
+# Threshold Signing prototype
 
 **Status:** PROTOTYPE. Dev/dummy keys only. Not for production custody yet.
 **Scheme:** FROST-secp256k1 (Schnorr), 2-of-3, via the Zcash Foundation `frost-secp256k1` Rust crate.
@@ -51,14 +51,14 @@ ECDSA (CGGMP21-class) for the first prototype. The short version:
   serialized signing package, public signature shares, and the final signature.
 - Each share is a **separate process** — a stand-in for a separate enclave. In
   production each share host should be its own TEE (dstack CVM / Nitro), ideally
-  across independent operators / clouds / jurisdictions (see Pillar B/C and
+  across independent operators, clouds, and jurisdictions (see
   "Share storage" below).
 - **Why a Rust sidecar and not a WASM/npm lib:** verified on 2026-07-30, the
   mature, audited threshold libraries are Rust (ZF, Lockness) and Go (Taurus,
   Circle). `frost-secp256k1` has a maintained WASM target in principle, but there
   is no *audited, maintained* pure-JS FROST/threshold-ECDSA library worth
-  trusting on a custody critical path. The sidecar shape also aligns with Pillar
-  B: each share can live in its own enclave. This is a deliberate D1 call.
+  trusting on a custody-critical path. The sidecar shape lets each share live in
+  its own enclave.
 
 ### Sidecar HTTP API (localhost only)
 
@@ -70,6 +70,16 @@ ECDSA (CGGMP21-class) for the first prototype. The short version:
 | POST | `/sign` | round2: returns this share's signature share | uses in-process share |
 | POST | `/aggregate` | combine signature shares → group signature (verifies) | public op |
 | POST | `/verify` | verify a provided signature against the group key | public op |
+
+Every endpoint except `GET /health` requires `Authorization: Bearer <token>`.
+Encode at least 32 random bytes (for example, as 64 hex characters) through
+`FROST_SHARE_AUTH_TOKEN`; the service refuses to start with a token shorter than
+32 bytes. Command-line tokens are intentionally not supported because process
+arguments are commonly visible to other local users.
+Use a distinct token per share. The coordinator never trusts the
+aggregating share: after `/aggregate` it re-verifies the signature over the
+original message via a different share, so a single-share (1-of-1) group —
+where no independent verifier exists — is rejected at construction.
 
 The share (`KeyPackage`) never leaves the sidecar process. There is no export
 endpoint by construction.
@@ -97,7 +107,7 @@ trusted-dealer.
 
 - **Prototype:** shares are plain JSON files on local disk, dev keys only. Do not
   put real value behind this.
-- **Production (ties to Pillar B/C):** each share lives sealed inside its own
+- **Production:** each share lives sealed inside its own
   enclave (dstack CVM / AWS Nitro), released only to the attested sidecar at
   boot. Enclave compromise of one host yields at most ONE share → below threshold
   → no signature, no key. TEE + threshold compose: TEE protects each share
@@ -187,9 +197,11 @@ cargo build --release --manifest-path sidecar/Cargo.toml
 sidecar/target/release/frost-signer keygen --threshold 2 --participants 3 --out ./shares
 
 # 3. start three share services (each = one enclave stand-in)
-frost-signer share --share-file ./shares/share-0000...0001.json --port 7401 &
-frost-signer share --share-file ./shares/share-0000...0002.json --port 7402 &
-frost-signer share --share-file ./shares/share-0000...0003.json --port 7403 &
+#    each requires its own strong FROST_SHARE_AUTH_TOKEN;
+#    the service refuses to start unauthenticated
+FROST_SHARE_AUTH_TOKEN="$FROST_TOKEN_1" frost-signer share --share-file ./shares/share-0000...0001.json --port 7401 &
+FROST_SHARE_AUTH_TOKEN="$FROST_TOKEN_2" frost-signer share --share-file ./shares/share-0000...0002.json --port 7402 &
+FROST_SHARE_AUTH_TOKEN="$FROST_TOKEN_3" frost-signer share --share-file ./shares/share-0000...0003.json --port 7403 &
 
 # 4. use FrostSignerBackend from TS (see @stwd/vault KEYSTORE-BACKENDS.md)
 

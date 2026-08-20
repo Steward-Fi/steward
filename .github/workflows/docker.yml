@@ -45,7 +45,7 @@ jobs:
       # Authenticate with GHCR when publishing images from push events.
       - name: Login to GHCR
         if: github.event_name == 'push'
-        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -53,7 +53,7 @@ jobs:
 
       # Enable BuildKit for layer caching and multi-platform builds
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
       # Generate image tags and labels from git metadata
       # - branch pushes get the branch name as tag (e.g. develop)
@@ -61,7 +61,7 @@ jobs:
       # - version tags also get "latest"
       - name: Docker metadata
         id: meta
-        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: ghcr.io/steward-fi/steward
           tags: |
@@ -75,14 +75,17 @@ jobs:
       # Build pull requests to validate the Dockerfile; publish images for pushes
       # to develop and version tags so deploys can pull the expected tags.
       - name: Build and optionally push
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
           push: ${{ github.event_name == 'push' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # Write cache entries only from trusted push builds. PR builds still
+          # read the cache (cache-from) but cannot populate mode=max entries,
+          # closing the residual cross-branch cache-pollution risk class.
+          cache-to: ${{ github.event_name == 'push' && 'type=gha,mode=max' || '' }}
           # Attach verifiable build metadata and an SPDX software bill of
           # materials to published images. Both remain local on PR dry-runs.
           provenance: mode=max

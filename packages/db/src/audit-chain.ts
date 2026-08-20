@@ -25,7 +25,7 @@
 import { createHmac } from "node:crypto";
 import { observeSecurityAuditEvent } from "@stwd/shared";
 import { sql } from "drizzle-orm";
-import { getDb } from "./client";
+import { DatabaseDeadlineExceededError, getDb } from "./client";
 
 const ZERO_HASH = new Uint8Array(32);
 
@@ -229,13 +229,23 @@ function computeHmac(key: Uint8Array, prevHash: Uint8Array, canonical: string): 
 function isAuditSequenceConflict(err: unknown): boolean {
   if (!err || typeof err !== "object") return false;
   const code = "code" in err ? (err as { code?: unknown }).code : undefined;
-  if (code === "23505" || code === "40001") return true;
   const message = err instanceof Error ? err.message : String(err);
-  return (
-    message.includes("audit_events_tenant_seq_idx") ||
-    message.includes("duplicate key value violates unique constraint") ||
-    message.includes("could not serialize access")
-  );
+  // Serialization failures (SQLSTATE 40001) are always transient — retry.
+  if (code === "40001" || message.includes("could not serialize access")) return true;
+  // Unique violations (23505) are retried ONLY when they name the per-tenant
+  // seq index — i.e. an actual audit-chain seq race. SEC-167: matching the
+  // bare 23505 code / generic duplicate-key text retried ANY unique violation
+  // raised inside withTenantAuditedTransaction's fn (e.g. a genuine conflict
+  // in the caller's own mutations) 5 times — wasted work, and it leaned on
+  // every caller's retry-idempotency contract for no reason.
+  const constraint =
+    "constraint_name" in err
+      ? (err as { constraint_name?: unknown }).constraint_name
+      : "constraint" in err
+        ? (err as { constraint?: unknown }).constraint
+        : undefined;
+  if (constraint === "audit_events_tenant_seq_idx") return true;
+  return message.includes("audit_events_tenant_seq_idx");
 }
 
 function rowsFromExecute<T>(result: unknown): T[] {
@@ -253,21 +263,55 @@ const tenantAuditQueues = new Map<string, Promise<void>>();
  * guarantee and also gates the real-Postgres advisory-lock acquisition so
  * concurrent appends within one process cannot interleave the seq read/insert.
  */
-export async function withTenantAuditQueue<T>(tenantId: string, fn: () => Promise<T>): Promise<T> {
+export async function withTenantAuditQueue<T>(
+  tenantId: string,
+  fn: () => Promise<T>,
+  deadlineAt?: number,
+): Promise<T> {
   const prior = tenantAuditQueues.get(tenantId) ?? Promise.resolve();
-  const run = prior.catch(() => undefined).then(fn);
+  let cancelled = false;
+  let started = false;
+  const run = prior
+    .catch(() => undefined)
+    .then(() => {
+      if (cancelled || (deadlineAt !== undefined && Date.now() >= deadlineAt)) {
+        throw new DatabaseDeadlineExceededError();
+      }
+      started = true;
+      return fn();
+    });
   const tail = run.then(
     () => undefined,
     () => undefined,
   );
   tenantAuditQueues.set(tenantId, tail);
-
-  try {
-    return await run;
-  } finally {
+  void tail.then(() => {
     if (tenantAuditQueues.get(tenantId) === tail) {
       tenantAuditQueues.delete(tenantId);
     }
+  });
+  if (deadlineAt === undefined) return run;
+
+  const remainingMs = deadlineAt - Date.now();
+  if (remainingMs <= 0) {
+    cancelled = true;
+    throw new DatabaseDeadlineExceededError();
+  }
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const waitingDeadline = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      // Once fn has begun, its driver owns cancellation and rollback. Rejecting
+      // here would abandon an in-flight mutation and let it complete after the
+      // caller regained control.
+      if (started) return;
+      cancelled = true;
+      reject(new DatabaseDeadlineExceededError());
+    }, remainingMs);
+  });
+  try {
+    return await Promise.race([run, waitingDeadline]);
+  } finally {
+    if (timer) clearTimeout(timer);
   }
 }
 
@@ -310,7 +354,17 @@ export async function appendAuditEventWithinTx(
   // postgres-js does not auto-stringify Date objects in raw sql template
   // params. Convert to ISO and cast on the SQL side instead. See dcf772e.
   const createdAtIso = createdAt.toISOString();
-  const metadata = redactWebhookSecrets(ev.metadata ?? {});
+  // SEC-089: normalize metadata through the SAME canonicalization that feeds
+  // the HMAC preimage. canonicalJsonValue maps undefined → null (key kept)
+  // while JSON.stringify drops undefined-valued keys, so persisting the
+  // un-normalized form stored a row that could never re-canonicalize to its
+  // written HMAC — verification failed from that seq onward, indistinguishable
+  // from tampering. Persisting the canonicalized form makes HMAC and INSERT
+  // commit to identical bytes.
+  const metadata = canonicalJsonValue(redactWebhookSecrets(ev.metadata ?? {})) as Record<
+    string,
+    unknown
+  >;
   const canonical = canonicalize({
     tenant_id: ev.tenantId,
     seq,
@@ -442,12 +496,39 @@ export async function withTenantAuditedTransaction<T>(
 ): Promise<T> {
   const db = getDb();
 
-  return withTenantAuditQueue(tenantId, async () => {
+  return withTenantAuditedTransactionOnDb(db, tenantId, fn);
+}
+
+/** Deadline-aware form used by bounded credential-lease lifecycles. The
+ * supplied handle is dedicated to that lifecycle, so all reads and audited
+ * mutations share one driver cancellation boundary. */
+export async function withTenantAuditedTransactionOnDb<T>(
+  db: ReturnType<typeof getDb>,
+  tenantId: string,
+  fn: (tx: unknown, appendRequiredAudit: AppendRequiredAudit) => Promise<T>,
+  deadlineAt?: number,
+): Promise<T> {
+  const assertRemaining = () => {
+    if (deadlineAt !== undefined && deadlineAt - Date.now() < 1_000) {
+      throw new Error("database operation deadline exceeded");
+    }
+  };
+
+  const execute = async () => {
     for (let attempt = 0; attempt < 5; attempt++) {
       try {
+        assertRemaining();
         const committedEvents: AuditEventInput[] = [];
         const result = await db.transaction(async (tx) => {
           if (!isPGLiteRuntime()) {
+            if (deadlineAt !== undefined) {
+              const remaining = Math.max(1, deadlineAt - Date.now());
+              await tx.execute(sql.raw(`SET LOCAL statement_timeout = '${remaining}ms'`));
+              await tx.execute(sql.raw(`SET LOCAL lock_timeout = '${remaining}ms'`));
+              await tx.execute(
+                sql.raw(`SET LOCAL idle_in_transaction_session_timeout = '${remaining}ms'`),
+              );
+            }
             await tx.execute(
               sql`SELECT pg_advisory_xact_lock(hashtextextended(${`steward_audit_${tenantId}`}, 0))`,
             );
@@ -473,6 +554,7 @@ export async function withTenantAuditedTransaction<T>(
         return result;
       } catch (err) {
         if (attempt < 4 && isAuditSequenceConflict(err)) {
+          assertRemaining();
           await new Promise((resolve) => setTimeout(resolve, 5 * (attempt + 1)));
           continue;
         }
@@ -481,5 +563,7 @@ export async function withTenantAuditedTransaction<T>(
     }
     // Unreachable: the loop either returns or throws.
     throw new Error("withTenantAuditedTransaction: exhausted retries");
-  });
+  };
+
+  return withTenantAuditQueue(tenantId, execute, deadlineAt);
 }

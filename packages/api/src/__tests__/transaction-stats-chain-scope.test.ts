@@ -20,7 +20,16 @@
  * total (display behaviour preserved).
  */
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
-import { agents, closeDb, getDb, tenants, transactions } from "@stwd/db";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import {
+  agents,
+  closeDb,
+  getDb,
+  operatorTransferReservations,
+  tenants,
+  transactions,
+} from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 
 // context.ts reads required env and touches the DB at module import time, so
@@ -79,6 +88,39 @@ describe("getTransactionStats chain scoping (issue #110)", () => {
     // One committed spend on each chain, both inside the rolling day/week window.
     await seedTx("eth", ETH_MAINNET, ETH_SPEND);
     await seedTx("sol", SOLANA, SOL_SPEND);
+    await getDb()
+      .insert(operatorTransferReservations)
+      .values([
+        {
+          tenantId: TENANT_ID,
+          agentId: AGENT_ID,
+          rail: "withdraw",
+          idempotencyKey: "pending-operator-spend",
+          destination: RECIPIENT,
+          amountBaseUnits: "25000000",
+          status: "pending",
+        },
+        {
+          tenantId: TENANT_ID,
+          agentId: AGENT_ID,
+          rail: "usd-send",
+          idempotencyKey: "final-operator-spend",
+          destination: RECIPIENT,
+          amountBaseUnits: "35000000",
+          status: "final",
+          finalizedAt: new Date(),
+        },
+        {
+          tenantId: TENANT_ID,
+          agentId: AGENT_ID,
+          rail: "withdraw",
+          idempotencyKey: "released-operator-spend",
+          destination: RECIPIENT,
+          amountBaseUnits: "900000000",
+          status: "released",
+          finalizedAt: new Date(),
+        },
+      ]);
   });
 
   afterAll(async () => {
@@ -110,7 +152,43 @@ describe("getTransactionStats chain scoping (issue #110)", () => {
     const combined = (BigInt(ETH_SPEND) + BigInt(SOL_SPEND)).toString();
     expect(stats.spentToday.toString()).toBe(combined);
     expect(stats.spentThisWeek.toString()).toBe(combined);
-    // Counts remain agent-wide (chain-agnostic) regardless of chain scoping.
-    expect(stats.recentTxCount24h).toBe(2);
+    // Counts remain agent-wide (chain-agnostic) regardless of chain scoping and
+    // include the two active operator transfers seeded above.
+    expect(stats.recentTxCount24h).toBe(4);
+  });
+
+  it("returns pending and final operator USDC separately from native-chain spend", async () => {
+    const stats = await getTransactionStats(AGENT_ID, ETH_MAINNET);
+    expect(stats.additionalUsdSpentTodayMicros).toBe(60_000_000n);
+    expect(stats.additionalUsdSpentThisWeekMicros).toBe(60_000_000n);
+    // Released reservations are reusable and therefore no longer consume cap.
+    expect(stats.additionalUsdSpentTodayMicros).not.toBe(960_000_000n);
+    expect(stats.spentToday.toString()).toBe(ETH_SPEND);
+  });
+
+  it("counts pending and final operator transfers in core rate limits", async () => {
+    const stats = await getTransactionStats(AGENT_ID, ETH_MAINNET);
+    expect(stats.recentTxCount1h).toBe(4);
+    expect(stats.recentTxCount24h).toBe(4);
+    // The released reservation is excluded from both counters.
+    expect(stats.recentTxCount24h).not.toBe(5);
+  });
+});
+
+// SEC-039: the chain-scoping argument above is only effective if the
+// policy-enforcement call sites actually pass it. Guard the wiring: every
+// getTransactionStats call in the vault routes (all enforcement paths) must
+// pass a chainId, and the user-wallet sign route must scope its stats helper
+// too. Display-only callers (dashboard/agents) intentionally stay unscoped.
+describe("spend-cap enforcement call sites pass chainId (SEC-039)", () => {
+  const vaultRoutesSource = readFileSync(join(import.meta.dir, "..", "routes", "vault.ts"), "utf8");
+  const userRoutesSource = readFileSync(join(import.meta.dir, "..", "routes", "user.ts"), "utf8");
+
+  it("leaves no unscoped getTransactionStats call in the vault routes", () => {
+    expect(vaultRoutesSource).not.toMatch(/getTransactionStats\(agentId\)/);
+  });
+
+  it("scopes the user-wallet sign stats to the request chain", () => {
+    expect(userRoutesSource).toContain("getUserWalletTransactionStats(userId, chainId)");
   });
 });

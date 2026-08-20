@@ -449,6 +449,202 @@
       "when": 1784313600000,
       "tag": "0083_provider_approval_quorum",
       "breakpoints": true
+    },
+    {
+      "idx": 84,
+      "version": "7",
+      "when": 1784399999000,
+      "tag": "0084_provider_action_reservation_reconciliation",
+      "breakpoints": true
+    },
+    {
+      "idx": 85,
+      "version": "7",
+      "when": 1784486400000,
+      "tag": "0085_generic_http_profile",
+      "breakpoints": true
+    },
+    {
+      "idx": 86,
+      "version": "7",
+      "when": 1784572800000,
+      "tag": "0086_audit_retention_archives",
+      "breakpoints": true
+    },
+    {
+      "idx": 87,
+      "version": "7",
+      "when": 1784659200000,
+      "tag": "0087_external_custody_execution_binding",
+      "breakpoints": true
+    },
+    {
+      "idx": 88,
+      "version": "7",
+      "when": 1784745600000,
+      "tag": "0088_provider_agent_budgets",
+      "breakpoints": true
+    },
+    {
+      "idx": 89,
+      "version": "7",
+      "when": 1784832000000,
+      "tag": "0089_rfc3161_checkpoint_proofs",
+      "breakpoints": true
+    },
+    {
+      "idx": 90,
+      "version": "7",
+      "when": 1784918400000,
+      "tag": "0090_provider_action_approval_evidence_write_once",
+      "breakpoints": true
+    },
+    {
+      "idx": 91,
+      "version": "7",
+      "when": 1785004800000,
+      "tag": "0091_external_custody_outcome_reconciliation",
+      "breakpoints": true
+    },
+    {
+      "idx": 92,
+      "version": "7",
+      "when": 1785091200000,
+      "tag": "0092_provider_budget_tenant_reservation_handles",
+      "breakpoints": true
+    },
+    {
+      "idx": 93,
+      "version": "7",
+      "when": 1785177600000,
+      "tag": "0093_upstream_credential_leases",
+      "breakpoints": true
+    },
+    {
+      "idx": 94,
+      "version": "7",
+      "when": 1785264000000,
+      "tag": "0094_operator_transfer_reservations",
+      "breakpoints": true
+    },
+    {
+      "idx": 95,
+      "version": "7",
+      "when": 1787020069000,
+      "tag": "0095_approval_queue_agent_pagination",
+      "breakpoints": true
+    },
+    {
+      "idx": 96,
+      "version": "7",
+      "when": 1787020070000,
+      "tag": "0096_slack_provider_profile",
+      "breakpoints": true
+    },
+    {
+      "idx": 97,
+      "version": "7",
+      "when": 1787020071000,
+      "tag": "0097_google_provider_profile",
+      "breakpoints": true
+    },
+    {
+      "idx": 98,
+      "version": "7",
+      "when": 1787020072000,
+      "tag": "0098_google_credential_lifecycles",
+      "breakpoints": true
+    },
+    {
+      "idx": 99,
+      "version": "7",
+      "when": 1787020073000,
+      "tag": "0099_google_disconnect_lifecycle_kind",
+      "breakpoints": true
+    },
+    {
+      "idx": 100,
+      "version": "7",
+      "when": 1787031495000,
+      "tag": "0100_sigv4_injection",
+      "breakpoints": true
+    },
+    {
+      "idx": 101,
+      "version": "7",
+      "when": 1787106472000,
+      "tag": "0101_operator_transfer_integrity",
+      "breakpoints": true
+    },
+    {
+      "idx": 102,
+      "version": "7",
+      "when": 1787106473000,
+      "tag": "0102_google_consequential_write_risk",
+      "breakpoints": true
+    },
+    {
+      "idx": 103,
+      "version": "7",
+      "when": 1787107600000,
+      "tag": "0103_google_refresh_reconnect_recovery",
+      "breakpoints": true
+    },
+    {
+      "idx": 104,
+      "version": "7",
+      "when": 1787107601000,
+      "tag": "0104_x_refresh_rotation_recovery",
+      "breakpoints": true
+    },
+    {
+      "idx": 105,
+      "version": "7",
+      "when": 1787107602000,
+      "tag": "0105_x_connect_exchange_recovery",
+      "breakpoints": true
+    },
+    {
+      "idx": 106,
+      "version": "7",
+      "when": 1787111200000,
+      "tag": "0106_x_disconnect_recovery_bounds",
+      "breakpoints": true
+    },
+    {
+      "idx": 107,
+      "version": "7",
+      "when": 1787111201000,
+      "tag": "0107_x_disconnect_route_recovery",
+      "breakpoints": true
+    },
+    {
+      "idx": 108,
+      "version": "7",
+      "when": 1787111202000,
+      "tag": "0108_evm_nonce_tenant_ownership",
+      "breakpoints": true
+    },
+    {
+      "idx": 109,
+      "version": "7",
+      "when": 1787165200000,
+      "tag": "0109_agent_policy_builder_perps_reconcile",
+      "breakpoints": true
+    },
+    {
+      "idx": 110,
+      "version": "7",
+      "when": 1787168800000,
+      "tag": "0110_agent_delete_lease_lifecycle",
+      "breakpoints": true
+    },
+    {
+      "idx": 111,
+      "version": "7",
+      "when": 1787168801000,
+      "tag": "0111_tenant_rls_policy_install",
+      "breakpoints": true
     }
   ]
 }

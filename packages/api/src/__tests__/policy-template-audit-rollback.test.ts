@@ -70,23 +70,18 @@ describe("policy template audit rollback hardening", () => {
     expect(assignRoute).toContain("restoreAgentPolicies(uniqueAgentIds, previousPolicies)");
   });
 
-  it("restores prior agent policies if tenant config template apply final audit fails", () => {
-    expect(tenantConfigSource).toContain("type AgentPolicyRow = typeof policies.$inferSelect");
-    expect(tenantConfigSource).toContain("async function snapshotAgentPolicies");
-    expect(tenantConfigSource).toContain("async function restoreAgentPolicies");
-
+  it("applies tenant config template policies and final audit atomically", () => {
     const applyStart = tenantConfigSource.indexOf(
       'tenantConfigRoutes.post("/:id/config/templates/:name/apply"',
     );
     expect(applyStart).toBeGreaterThanOrEqual(0);
     const applyRoute = tenantConfigSource.slice(applyStart);
-    const snapshot = applyRoute.indexOf("const previousPolicies = await snapshotAgentPolicies");
-    const mutation = applyRoute.indexOf("const insertedPolicies = await db.transaction");
+    const mutation = applyRoute.indexOf("withTenantAuditedTransaction(");
     const finalAudit = applyRoute.indexOf('action: "policy.template.apply"', mutation);
-    const rollback = applyRoute.indexOf("restoreAgentPolicies(body.agentId, previousPolicies)");
-    expect(snapshot).toBeGreaterThanOrEqual(0);
-    expect(snapshot).toBeLessThan(mutation);
+    const append = applyRoute.indexOf("appendRequiredAudit({", mutation);
+    expect(mutation).toBeGreaterThanOrEqual(0);
+    expect(append).toBeGreaterThan(mutation);
     expect(finalAudit).toBeGreaterThan(mutation);
-    expect(rollback).toBeGreaterThan(finalAudit);
+    expect(applyRoute).not.toContain("restoreAgentPolicies");
   });
 });

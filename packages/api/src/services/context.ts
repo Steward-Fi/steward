@@ -9,25 +9,29 @@
 import {
   ACCESS_TOKEN_EXPIRY,
   assertTokenNotRevoked,
+  getAgentTokenExpiry,
   signAccessToken,
   signAgentToken,
   validateApiKey,
   verifyToken,
 } from "@stwd/auth";
 import {
+  agents,
   conditionSetItems,
   conditionSets,
+  getDatabaseDriver,
   getDb,
+  hasTenantTransactionDatabase,
   inArray,
+  operatorTransferReservations,
   policies,
   sessionSigners,
-  tenantAppClientSecrets,
-  tenantAppClients,
-  tenants,
+  tenantContextFromAuthenticatedPrincipal,
   toPolicyRule,
   transactions,
   users,
-  userTenants,
+  withTenantRlsTransaction,
+  withTenantTransactionDatabase,
 } from "@stwd/db";
 import {
   type AggregationLookup,
@@ -43,6 +47,7 @@ import {
   createPriceOracle,
   type PolicyRule,
   type PriceOracle,
+  redactedThrownDiagnostics,
   type SignRequest,
   type Tenant,
   type TenantConfig,
@@ -51,6 +56,7 @@ import type { Vault } from "@stwd/vault";
 import { WebhookDispatcher } from "@stwd/webhooks";
 import { and, eq, gte, sql } from "drizzle-orm";
 import type { Context, Next } from "hono";
+import { sanitizePublicError } from "./public-error";
 import { getConfiguredVault } from "./vault-factory";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -80,7 +86,6 @@ function positiveIntEnv(name: string, fallback: number): number {
 // falls back to that default, so this can never weaken the guard unintentionally.
 export const RATE_LIMIT_WINDOW_MS = positiveIntEnv("STEWARD_RATE_LIMIT_WINDOW_MS", 60_000);
 export const RATE_LIMIT_MAX_REQUESTS = positiveIntEnv("STEWARD_RATE_LIMIT_MAX_REQUESTS", 100);
-export const AGENT_TOKEN_EXPIRY = process.env.AGENT_TOKEN_EXPIRY || "30d";
 export const isWorkersRuntime =
   process.env.STEWARD_RUNTIME === "workers" ||
   (typeof navigator !== "undefined" && navigator.userAgent === "Cloudflare-Workers");
@@ -93,6 +98,12 @@ export const isWorkersRuntime =
 export const JWT_EXPIRY = ACCESS_TOKEN_EXPIRY;
 export const AGENT_SCOPE = "agent";
 export const PROXY_SCOPE = "api:proxy";
+/** Scope prefix on tokens minted by the capability issuance layer
+ * (`cap:<manifest>`, see @stwd/plugin-capabilities — the core never imports
+ * plugin packages, so the prefix is mirrored here). These are least-privilege
+ * credentials for the capability surface ONLY; the tenant gate below refuses
+ * them so they can never act as general agent credentials. */
+export const CAPABILITY_TOKEN_SCOPE_PREFIX = "cap:";
 
 export function normalizeAgentTokenScopes(scopes?: string[]): string[] {
   if (!scopes || scopes.length === 0) return [AGENT_SCOPE];
@@ -148,8 +159,26 @@ export async function createAgentToken(
   const tokenScopes = normalizeAgentTokenScopes(scopes);
   return signAgentToken(
     { agentId, tenantId, scopes: tokenScopes },
-    expiresIn || AGENT_TOKEN_EXPIRY,
+    expiresIn || getAgentTokenExpiry(),
   );
+}
+
+/** Mint while holding the same agent-row lock used by deletion. */
+export async function createAgentTokenForExistingAgent(
+  agentId: string,
+  tenantId: string,
+  expiresIn?: string,
+  scopes?: string[],
+): Promise<string | null> {
+  return getDb().transaction(async (tx) => {
+    const [agent] = await tx
+      .select({ id: agents.id })
+      .from(agents)
+      .where(and(eq(agents.id, agentId), eq(agents.tenantId, tenantId)))
+      .for("update");
+    if (!agent) return null;
+    return createAgentToken(agentId, tenantId, expiresIn, scopes);
+  });
 }
 
 export async function verifySessionToken(token: string) {
@@ -161,6 +190,7 @@ export async function verifySessionToken(token: string) {
       scope?: string;
       scopes?: string[];
       typ?: string;
+      tokenType?: string;
       userId?: string;
       email?: string;
       mfaVerifiedAt?: number;
@@ -169,33 +199,43 @@ export async function verifySessionToken(token: string) {
       exp?: number;
     };
     if (payload.typ === "identity") return null;
+    // Never accept a refresh JWT as an access token (SEC-055).
+    if (payload.tokenType === "refresh") return null;
     await assertTokenNotRevoked(payload);
     if (payload.userId) {
-      const [user] = await getDb()
-        .select({
-          deactivatedAt: users.deactivatedAt,
-          isGuest: users.isGuest,
-          guestExpiresAt: users.guestExpiresAt,
-        })
-        .from(users)
-        .where(eq(users.id, payload.userId));
-      if (!user || user.deactivatedAt) return null;
+      const [user] = payload.tenantId
+        ? rowsFromDbResult<{
+            deactivated_at: Date | string | null;
+            is_guest: boolean;
+            guest_expires_at: Date | string | null;
+            membership_role: string | null;
+          }>(
+            await getDb().execute(sql`
+              SELECT * FROM steward_bootstrap.session_subject(
+                ${payload.userId}::uuid,
+                ${payload.tenantId}
+              )
+            `),
+          )
+        : await getDb()
+            .select({
+              deactivated_at: users.deactivatedAt,
+              is_guest: users.isGuest,
+              guest_expires_at: users.guestExpiresAt,
+              membership_role: sql<string | null>`NULL`,
+            })
+            .from(users)
+            .where(eq(users.id, payload.userId));
+      if (!user || user.deactivated_at) return null;
       // Fail-closed guest expiry: enforce the guest's hard expiry against the
       // authoritative DB column, not just the access-token `exp`. A refreshed
       // access token (or one minted with a longer TTL) is still rejected once
       // the guest window has elapsed. Full accounts have guestExpiresAt = null.
-      if (user.isGuest && user.guestExpiresAt && user.guestExpiresAt.getTime() <= Date.now()) {
+      const guestExpiresAt = user.guest_expires_at ? new Date(user.guest_expires_at) : null;
+      if (user.is_guest && guestExpiresAt && guestExpiresAt.getTime() <= Date.now()) {
         return null;
       }
-      if (payload.tenantId) {
-        const [membership] = await getDb()
-          .select({ role: userTenants.role })
-          .from(userTenants)
-          .where(
-            and(eq(userTenants.userId, payload.userId), eq(userTenants.tenantId, payload.tenantId)),
-          );
-        if (!membership) return null;
-      }
+      if (payload.tenantId && !user.membership_role) return null;
     }
     return payload;
   } catch {
@@ -258,51 +298,11 @@ export async function safeJsonParse<T>(c: Context): Promise<T | null> {
 }
 
 export function sanitizeErrorMessage(error: unknown): string {
-  if (error instanceof Error) {
-    const safe = ["already exists", "not found", "Unsupported chain"];
-    if (safe.some((s) => error.message.includes(s))) return error.message;
-  }
-  return "Internal server error";
+  return sanitizePublicError(error);
 }
 
-export function isRpcError(error: unknown): boolean {
-  if (!(error instanceof Error)) return false;
-  const msg = error.message.toLowerCase();
-  const rpcIndicators = [
-    "insufficient funds",
-    "insufficient balance",
-    "nonce too low",
-    "nonce too high",
-    "gas too low",
-    "gas limit",
-    "underpriced",
-    "replacement transaction",
-    "exceeds block gas limit",
-    "execution reverted",
-    "out of gas",
-    "invalid sender",
-    "invalid signature",
-    "account not found",
-    "blockhash not found",
-    "transaction simulation failed",
-    "instruction error",
-    "custom program error",
-    "rpc error",
-    "failed to send transaction",
-    "transaction failed",
-    "0x",
-  ];
-  return rpcIndicators.some((indicator) => msg.includes(indicator));
-}
-
-export function extractRpcErrorMessage(error: unknown): string {
-  if (error instanceof Error) {
-    const innerMatch = error.message.match(/message["\s:]+([^"]+)/i);
-    if (innerMatch) return innerMatch[1].trim();
-    return error.message;
-  }
-  return "RPC error";
-}
+export { PublicApiError } from "./public-error";
+export { extractRpcErrorMessage, isRpcError } from "./rpc-error";
 
 // ─── Environment ──────────────────────────────────────────────────────────────
 
@@ -404,14 +404,9 @@ export const tenantConfigs = new Map<string, TenantConfig>([
   [defaultTenantConfig.id, defaultTenantConfig],
 ]);
 
-export const defaultTenantReady = db
-  .insert(tenants)
-  .values({
-    id: DEFAULT_TENANT_ID,
-    name: "Default Tenant",
-    apiKeyHash: process.env.STEWARD_DEFAULT_TENANT_KEY || "",
-  })
-  .onConflictDoNothing();
+export const defaultTenantReady = db.execute(sql`
+  SELECT steward_bootstrap.ensure_default_tenant(${process.env.STEWARD_DEFAULT_TENANT_KEY || ""})
+`);
 
 // ─── App variable types ───────────────────────────────────────────────────────
 
@@ -419,6 +414,10 @@ export type AuthenticatedPrincipal = {
   type: "tenant" | "user" | "agent";
   id: string;
 };
+
+function rowsFromDbResult<T>(result: unknown): T[] {
+  return (Array.isArray(result) ? result : ((result as { rows?: unknown[] })?.rows ?? [])) as T[];
+}
 
 // AppVariables now lives in @stwd/shared so opt-in plugins can type their own
 // hono routes against the same per-request context WITHOUT importing @stwd/api
@@ -473,16 +472,49 @@ function parseBasicAuth(
 }
 
 export async function findTenant(tenantId: string): Promise<Tenant | undefined> {
-  const [tenant] = await db.select().from(tenants).where(eq(tenants.id, tenantId));
-  return tenant;
+  const [row] = rowsFromDbResult<{
+    id: string;
+    name: string;
+    api_key_hash: string;
+    owner_address: string | null;
+    created_at: Date | string;
+    updated_at: Date | string;
+  }>(
+    await getDb().execute(sql`SELECT * FROM steward_bootstrap.tenant_api_key_subject(${tenantId})`),
+  );
+  if (!row) return undefined;
+  return {
+    id: row.id,
+    name: row.name,
+    apiKeyHash: row.api_key_hash,
+    createdAt: new Date(row.created_at),
+  };
 }
 
 async function findUserTenantMembership(userId: string, tenantId: string) {
-  const [membership] = await db
-    .select({ role: userTenants.role })
-    .from(userTenants)
-    .where(and(eq(userTenants.userId, userId), eq(userTenants.tenantId, tenantId)));
-  return membership ?? null;
+  const [subject] = rowsFromDbResult<{ membership_role: string | null }>(
+    await getDb().execute(
+      sql`SELECT membership_role FROM steward_bootstrap.session_subject(${userId}::uuid, ${tenantId})`,
+    ),
+  );
+  return subject?.membership_role ? { role: subject.membership_role } : null;
+}
+
+async function findAgentBootstrapSubject(tenantId: string, agentId: string, jti?: string) {
+  const [row] = rowsFromDbResult<{
+    agent_id: string;
+    agent_name: string;
+    wallet_address: string;
+    signer_id: string | null;
+    signer_policy_ids: string[] | null;
+    signer_expires_at: Date | string | null;
+    signer_revoked_at: Date | string | null;
+  }>(
+    await getDb().execute(sql`
+      SELECT * FROM steward_bootstrap.agent_subject(${agentId}, ${tenantId}, ${jti ?? null})
+    `),
+  );
+  return row ?? null;
 }
 
 export async function ensureAgentForTenant(
@@ -649,6 +681,20 @@ export async function getTransactionStats(agentId: string, chainId?: number) {
     .select({
       recentTxCount1h: sql<number>`count(*) filter (where ${transactions.createdAt} >= ${oneHourAgoStr}::timestamptz)`,
       recentTxCount24h: sql<number>`count(*) filter (where ${transactions.createdAt} >= ${oneDayAgoStr}::timestamptz)`,
+      operatorTxCount1h: sql<number>`
+        (select count(*)
+         from ${operatorTransferReservations}
+         where ${operatorTransferReservations.agentId} = ${agentId}
+           and ${operatorTransferReservations.createdAt} >= ${oneHourAgoStr}::timestamptz
+           and ${operatorTransferReservations.status} in ('pending', 'final'))
+      `,
+      operatorTxCount24h: sql<number>`
+        (select count(*)
+         from ${operatorTransferReservations}
+         where ${operatorTransferReservations.agentId} = ${agentId}
+           and ${operatorTransferReservations.createdAt} >= ${oneDayAgoStr}::timestamptz
+           and ${operatorTransferReservations.status} in ('pending', 'final'))
+      `,
       spentToday: sql<string>`
         coalesce(
           sum(
@@ -661,25 +707,72 @@ export async function getTransactionStats(agentId: string, chainId?: number) {
         )::text
       `,
       spentThisWeek: sql<string>`coalesce(sum((${transactions.value})::numeric) filter (where true${chainFilter}), 0)::text`,
+      additionalUsdSpentTodayMicros: sql<string>`
+        coalesce((
+          select sum((${operatorTransferReservations.amountBaseUnits})::numeric)
+          from ${operatorTransferReservations}
+          where ${operatorTransferReservations.agentId} = ${agentId}
+            and ${operatorTransferReservations.createdAt} >= ${oneDayAgoStr}::timestamptz
+            and ${operatorTransferReservations.status} in ('pending', 'final')
+        ), 0)::text
+      `,
+      additionalUsdSpentThisWeekMicros: sql<string>`
+        coalesce((
+          select sum((${operatorTransferReservations.amountBaseUnits})::numeric)
+          from ${operatorTransferReservations}
+          where ${operatorTransferReservations.agentId} = ${agentId}
+            and ${operatorTransferReservations.createdAt} >= ${oneWeekAgo.toISOString()}::timestamptz
+            and ${operatorTransferReservations.status} in ('pending', 'final')
+        ), 0)::text
+      `,
     })
     .from(transactions)
     .where(
       and(
         eq(transactions.agentId, agentId),
         gte(transactions.createdAt, oneWeekAgo),
-        sql`${transactions.status} in ('signed', 'broadcast', 'confirmed')`,
+        // An ambiguous broadcast may already have spent funds. Count it until
+        // receipt reconciliation proves the final chain outcome.
+        sql`${transactions.status} in ('signed', 'broadcast', 'confirmed', 'outcome_unknown')`,
       ),
     );
 
   return {
-    recentTxCount1h: Number(stats?.recentTxCount1h ?? 0),
-    recentTxCount24h: Number(stats?.recentTxCount24h ?? 0),
+    recentTxCount1h: Number(stats?.recentTxCount1h ?? 0) + Number(stats?.operatorTxCount1h ?? 0),
+    recentTxCount24h: Number(stats?.recentTxCount24h ?? 0) + Number(stats?.operatorTxCount24h ?? 0),
     spentToday: BigInt(stats?.spentToday ?? "0"),
     spentThisWeek: BigInt(stats?.spentThisWeek ?? "0"),
+    additionalUsdSpentTodayMicros: BigInt(stats?.additionalUsdSpentTodayMicros ?? "0"),
+    additionalUsdSpentThisWeekMicros: BigInt(stats?.additionalUsdSpentThisWeekMicros ?? "0"),
   };
 }
 
 // ─── Auth middleware ──────────────────────────────────────────────────────────
+
+export async function withAuthenticatedTenantDatabase<T>(
+  tenantId: string,
+  method: string,
+  subject: string,
+  callback: () => Promise<T>,
+  userId?: string,
+): Promise<T> {
+  if (hasTenantTransactionDatabase({ tenantId, userId })) return callback();
+  const context = tenantContextFromAuthenticatedPrincipal({ tenantId, method, subject, userId });
+  const driver = isPGLiteRuntime ? "pglite" : getDatabaseDriver();
+  return withTenantRlsTransaction(getDb() as never, driver, context, async (tx) =>
+    withTenantTransactionDatabase(tx as never, { tenantId, userId }, callback),
+  );
+}
+
+export async function continueWithTenantDatabase(
+  tenantId: string,
+  method: string,
+  subject: string,
+  next: Next,
+  userId?: string,
+) {
+  return withAuthenticatedTenantDatabase(tenantId, method, subject, next, userId);
+}
 
 export async function tenantAuth(
   c: Context<{ Variables: AppVariables }>,
@@ -704,52 +797,57 @@ export async function tenantAuth(
         }
 
         const isAgentToken = payload.scope === "agent" && typeof payload.agentId === "string";
+        const agentTokenScopes = normalizeAgentTokenScopes(payload.scopes);
         if (isAgentToken) {
-          const agent = await ensureAgentForTenant(payload.tenantId, payload.agentId as string);
-          if (!agent) {
+          // Fail closed: a capability-scoped token (`cap:<manifest>`) is a
+          // least-privilege credential for the capability surface only. Refuse
+          // it on the general tenant surface even if a minter stamped the
+          // broad `agent` scope alongside it.
+          if (agentTokenScopes.some((scope) => scope.startsWith(CAPABILITY_TOKEN_SCOPE_PREFIX))) {
+            return c.json<ApiResponse>({ ok: false, error: "Forbidden" }, 403);
+          }
+          const agentSubject = await findAgentBootstrapSubject(
+            payload.tenantId,
+            payload.agentId as string,
+            typeof payload.jti === "string" ? payload.jti : undefined,
+          );
+          if (!agentSubject) {
             return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 403);
           }
           if (typeof payload.jti === "string" && payload.jti) {
-            const [sessionSigner] = await db
-              .select({
-                id: sessionSigners.id,
-                tenantId: sessionSigners.tenantId,
-                agentId: sessionSigners.agentId,
-                policyIds: sessionSigners.policyIds,
-                expiresAt: sessionSigners.expiresAt,
-                revokedAt: sessionSigners.revokedAt,
-              })
-              .from(sessionSigners)
-              .where(eq(sessionSigners.jti, payload.jti));
-
-            if (sessionSigner) {
+            if (agentSubject.signer_id) {
+              const signerExpiresAt = agentSubject.signer_expires_at
+                ? new Date(agentSubject.signer_expires_at)
+                : null;
               if (
-                sessionSigner.tenantId !== payload.tenantId ||
-                sessionSigner.agentId !== payload.agentId
+                agentSubject.signer_revoked_at ||
+                !signerExpiresAt ||
+                signerExpiresAt.getTime() <= Date.now()
               ) {
-                return c.json<ApiResponse>(
-                  { ok: false, error: "Session signer does not match token subject" },
-                  403,
-                );
-              }
-              if (sessionSigner.revokedAt || sessionSigner.expiresAt.getTime() <= Date.now()) {
                 return c.json<ApiResponse>(
                   { ok: false, error: "Session signer is revoked or expired" },
                   401,
                 );
               }
-              if (sessionSigner.policyIds.length > 0) {
-                c.set("agentPolicyIds", sessionSigner.policyIds);
+              if ((agentSubject.signer_policy_ids?.length ?? 0) > 0) {
+                c.set("agentPolicyIds", agentSubject.signer_policy_ids ?? []);
               }
               try {
-                await db
-                  .update(sessionSigners)
-                  .set({ lastUsedAt: new Date() })
-                  .where(eq(sessionSigners.id, sessionSigner.id));
+                await continueWithTenantDatabase(
+                  payload.tenantId,
+                  "agent-jwt-signer-use",
+                  String(payload.agentId),
+                  async () => {
+                    await db
+                      .update(sessionSigners)
+                      .set({ lastUsedAt: new Date() })
+                      .where(eq(sessionSigners.id, agentSubject.signer_id as string));
+                  },
+                );
               } catch (err) {
                 console.error(
-                  `[session-signer] failed to update lastUsedAt for ${sessionSigner.id}:`,
-                  err,
+                  `[session-signer] failed to update lastUsedAt for ${agentSubject.signer_id}`,
+                  redactedThrownDiagnostics(err),
                 );
               }
             }
@@ -793,7 +891,7 @@ export async function tenantAuth(
             "agentSubject",
             typeof tokenSubject === "string" ? tokenSubject : `agent:${payload.agentId}`,
           );
-          c.set("agentScopes", normalizeAgentTokenScopes(payload.scopes));
+          c.set("agentScopes", agentTokenScopes);
           c.set("authType", "agent-token");
         } else {
           if (typeof payload.mfaVerifiedAt === "number") {
@@ -804,7 +902,13 @@ export async function tenantAuth(
           }
           c.set("authType", "session-jwt");
         }
-        return next();
+        return continueWithTenantDatabase(
+          payload.tenantId,
+          isAgentToken ? "agent-jwt" : "session-jwt",
+          isAgentToken ? String(payload.agentId) : String(payload.userId),
+          next,
+          isAgentToken ? undefined : payload.userId,
+        );
       }
     }
   }
@@ -832,35 +936,25 @@ export async function tenantAuth(
     const appTenant = await findTenant(parsedAppId.tenantId);
     if (!appTenant) return c.json<ApiResponse>({ ok: false, error: "Forbidden" }, 403);
     const now = new Date();
-    const rows = await getDb()
-      .select({
-        secretHash: tenantAppClientSecrets.secretHash,
-        status: tenantAppClientSecrets.status,
-        expiresAt: tenantAppClientSecrets.expiresAt,
-        revokedAt: tenantAppClientSecrets.revokedAt,
-        clientEnabled: tenantAppClients.enabled,
-      })
-      .from(tenantAppClientSecrets)
-      .innerJoin(
-        tenantAppClients,
-        and(
-          eq(tenantAppClients.tenantId, tenantAppClientSecrets.tenantId),
-          eq(tenantAppClients.id, tenantAppClientSecrets.clientId),
-        ),
-      )
-      .where(
-        and(
-          eq(tenantAppClientSecrets.tenantId, parsedAppId.tenantId),
-          eq(tenantAppClientSecrets.clientId, parsedAppId.clientId),
-          inArray(tenantAppClientSecrets.status, ["active", "retiring"]),
-          eq(tenantAppClients.enabled, true),
-        ),
-      );
+    const rows = rowsFromDbResult<{
+      secret_hash: string;
+      secret_status: string;
+      expires_at: Date | string | null;
+      revoked_at: Date | string | null;
+      client_enabled: boolean;
+    }>(
+      await getDb().execute(sql`
+        SELECT * FROM steward_bootstrap.app_client_subject(
+          ${parsedAppId.tenantId},
+          ${parsedAppId.clientId}
+        )
+      `),
+    );
 
     const match = rows.some((row) => {
-      if (!row.clientEnabled || row.revokedAt) return false;
-      if (row.expiresAt && row.expiresAt <= now) return false;
-      return validateApiKey(basic.password, row.secretHash);
+      if (!row.client_enabled || row.revoked_at) return false;
+      if (row.expires_at && new Date(row.expires_at) <= now) return false;
+      return validateApiKey(basic.password, row.secret_hash);
     });
     if (!match) return c.json<ApiResponse>({ ok: false, error: "Forbidden" }, 403);
 
@@ -871,7 +965,12 @@ export async function tenantAuth(
       tenantConfigs.get(parsedAppId.tenantId) || { id: appTenant.id, name: appTenant.name },
     );
     c.set("authType", "app-secret");
-    await next();
+    await continueWithTenantDatabase(
+      parsedAppId.tenantId,
+      "app-secret",
+      parsedAppId.clientId,
+      next,
+    );
     return;
   }
 
@@ -894,7 +993,7 @@ export async function tenantAuth(
   c.set("tenantConfig", tenantConfigs.get(tenantId) || { id: tenant.id, name: tenant.name });
   c.set("authType", "api-key");
 
-  await next();
+  await continueWithTenantDatabase(tenantId, "api-key", tenantId, next);
 }
 
 export async function sessionAuth(c: Context<{ Variables: AppVariables }>, next: Next) {
@@ -922,7 +1021,13 @@ export async function sessionAuth(c: Context<{ Variables: AppVariables }>, next:
     c.set("sessionMfaVerifiedAt", (payload as unknown as { mfaVerifiedAt: number }).mfaVerifiedAt);
   }
 
-  await next();
+  await continueWithTenantDatabase(
+    payload.tenantId,
+    "session-jwt",
+    String(payload.userId ?? payload.address),
+    next,
+    payload.userId,
+  );
 }
 
 export function getAuthenticatedPrincipal(
@@ -962,6 +1067,10 @@ export function requireAgentAccess(c: Context<{ Variables: AppVariables }>): boo
 
 export function requireTenantLevel(c: Context<{ Variables: AppVariables }>): boolean {
   const authType = c.get("authType");
+  // SEC-153: the legacy tenant-wide X-Steward-Key ("api-key") is unscoped
+  // full-tenant authority — a standing single point of compromise. It remains
+  // for backwards compatibility only; new integrations should use app-client
+  // secrets ("app-secret", per-client revocation) or owner/admin sessions.
   if (authType === "api-key") return true;
   if (authType === "agent-token") return false;
 
@@ -1035,7 +1144,13 @@ export async function dashboardAuthMiddleware(c: Context<{ Variables: AppVariabl
     c.set("sessionMfaMethod", payload.mfaMethod);
   }
 
-  return next();
+  return continueWithTenantDatabase(
+    payload.tenantId,
+    "dashboard-jwt",
+    payload.userId,
+    next,
+    payload.userId,
+  );
 }
 
 // Re-export drizzle schemas used in route modules

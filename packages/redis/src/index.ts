@@ -9,6 +9,8 @@ export {
   recordAggregationEvent,
 } from "./aggregation-tracker.js";
 export {
+  assertRedisUrlTls,
+  assertUpstashRestUrlTls,
   disconnectRedis,
   getRedis,
   getRedisDriver,
@@ -21,6 +23,8 @@ export {
   isKnownHost,
 } from "./cost-estimator.js";
 export {
+  type CumulativeSpendBatchGroup,
+  type CumulativeSpendBatchResult,
   type CumulativeSpendCap,
   type CumulativeSpendScope,
   type CumulativeSpendSnapshot,
@@ -30,8 +34,11 @@ export {
   type ReserveCumulativeSpendInput,
   type ReserveCumulativeSpendResult,
   releaseCumulativeSpend,
+  releaseLegacyCumulativeSpendAfterCutover,
+  releaseLegacyWindowedInvokeAfterCutover,
   releaseWindowedInvoke,
   reserveCumulativeSpend,
+  reserveCumulativeSpendBatch,
   reserveWindowedInvoke,
   settleCumulativeSpend,
 } from "./cumulative-spend-tracker.js";
