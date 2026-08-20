@@ -95,6 +95,26 @@ describeRedis("Spend Tracker", () => {
     expect(byHost["api.anthropic.com"]).toBeCloseTo(0.05, 4);
   });
 
+  test("records a recovery event id exactly once across retries", async () => {
+    const eventId = `solana-recovery-${Date.now()}`;
+    await recordSpend(TEST_AGENT, TEST_TENANT, 0.25, "chain:101", { eventId });
+    await recordSpend(TEST_AGENT, TEST_TENANT, 0.25, "chain:101", { eventId });
+
+    expect(await getSpend(TEST_AGENT, "day")).toBeCloseTo(0.25, 4);
+    expect((await getSpendByHost(TEST_AGENT, "day"))["chain:101"]).toBeCloseTo(0.25, 4);
+  });
+
+  test("keeps a delayed recovery event in its authoritative spend bucket", async () => {
+    const occurredAt = new Date(Date.now() - 2 * 86400_000);
+    await recordSpend(TEST_AGENT, TEST_TENANT, 0.25, "chain:101", {
+      eventId: `solana-delayed-recovery-${Date.now()}`,
+      occurredAt,
+    });
+
+    expect(await getSpend(TEST_AGENT, "day", occurredAt)).toBeCloseTo(0.25, 4);
+    expect(await getSpend(TEST_AGENT, "day")).toBe(0);
+  });
+
   test("checks spend limit — under limit", async () => {
     await recordSpend(TEST_AGENT, TEST_TENANT, 10.0, "api.openai.com");
 

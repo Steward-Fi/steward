@@ -6,7 +6,7 @@
  * for policy definitions; Redis provides fast, sliding-window enforcement.
  */
 
-import { createPriceOracle, type PolicyRule } from "@stwd/shared";
+import { createPriceOracle, getNativeDecimalsStrict, type PolicyRule } from "@stwd/shared";
 import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 import {
   checkAgentRateLimit,
@@ -213,24 +213,39 @@ export async function recordVaultSpend(
   tenantId: string,
   valueWei: string,
   chainId: number,
+  options: {
+    eventId?: string;
+    occurredAt?: Date | number;
+    throwOnError?: boolean;
+  } = {},
 ): Promise<void> {
-  if (!isRedisAvailable()) return;
+  if (!isRedisAvailable()) {
+    if (options.throwOnError && isRedisConfigured()) {
+      throw new Error("Configured Redis spend backend is unavailable");
+    }
+    return;
+  }
 
   // Skip zero/empty values without touching the oracle.
   let wei: bigint;
   try {
     wei = BigInt(valueWei);
-  } catch {
+  } catch (error) {
+    if (options.throwOnError) throw error;
     return;
   }
-  if (wei <= 0n) return;
+  if (wei < 0n) {
+    if (options.throwOnError) throw new Error("invalid negative vault spend amount");
+    return;
+  }
+  if (wei === 0n) return;
 
   // Convert native wei → USD using the oracle. weiToUsd does bigint-safe scaling
   // (no Number(BigInt) precision loss) and applies the per-chain native price.
   const usdValue = await priceOracle.weiToUsd(valueWei, chainId);
 
   if (usdValue !== null && usdValue > 0) {
-    await recordAgentSpend(agentId, tenantId, usdValue, `chain:${chainId}`);
+    await recordAgentSpend(agentId, tenantId, usdValue, `chain:${chainId}`, options);
     return;
   }
 
@@ -240,10 +255,14 @@ export async function recordVaultSpend(
   // the spend with a deliberately HIGH conservative native-price floor so the spend still
   // counts against the same `chain:${chainId}` USD cap and can trip it. Over-counting during
   // an oracle outage is the safe direction; the priced path above is unaffected.
-  const decimals = 18; // EVM native tokens use 18 decimals
+  const decimals = getNativeDecimalsStrict(chainId);
+  if (decimals === null) {
+    if (options.throwOnError) throw new Error(`unknown native decimals for chain ${chainId}`);
+    return;
+  }
   const divisor = 10n ** BigInt(decimals);
   const tokenAmount = Number(wei / divisor) + Number(wei % divisor) / Number(divisor);
   const fallbackNativePriceUsd = nativePriceFallbackUsd();
   const conservativeUsd = tokenAmount * fallbackNativePriceUsd;
-  await recordAgentSpend(agentId, tenantId, conservativeUsd, `chain:${chainId}`);
+  await recordAgentSpend(agentId, tenantId, conservativeUsd, `chain:${chainId}`, options);
 }

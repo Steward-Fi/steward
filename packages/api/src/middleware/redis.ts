@@ -16,6 +16,7 @@ import {
   type RateLimitResult,
   recordSpend,
   type SpendPeriod,
+  type SpendRecordOptions,
 } from "@stwd/redis";
 import { redactedThrownDiagnostics } from "@stwd/shared";
 
@@ -205,12 +206,20 @@ export async function recordAgentSpend(
   tenantId: string,
   costUsd: number,
   host: string,
+  options: SpendRecordOptions & { throwOnError?: boolean } = {},
 ): Promise<void> {
-  if (!redisAvailable || costUsd <= 0) return;
+  if (!redisAvailable) {
+    if (options.throwOnError && isRedisConfigured()) {
+      throw new Error("Configured Redis spend backend is unavailable");
+    }
+    return;
+  }
+  if (costUsd <= 0) return;
 
   try {
-    await recordSpend(agentId, tenantId, costUsd, host);
+    await recordSpend(agentId, tenantId, costUsd, host, options);
   } catch (err) {
+    if (options.throwOnError) throw err;
     console.error("[steward:redis] Failed to record spend", redactedThrownDiagnostics(err));
   }
 }

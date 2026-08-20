@@ -37,6 +37,9 @@ const updatedDeliveries: Record<string, unknown>[] = [];
 const dispatches: DispatchRecord[] = [];
 const dispatcherOptions: DispatcherOptions[] = [];
 const tenantConfigs = new Map<string, { webhookUrl?: string }>();
+const persistedDeliveries = new Map<string, Record<string, unknown>>();
+const webhookConfigsTable = { tenantId: "tenantId", enabled: "enabled" };
+const webhookDeliveriesTable = { id: "id" };
 let nextDispatchResult: DispatchResult = {
   success: true,
   attempts: 1,
@@ -47,14 +50,31 @@ process.env.STEWARD_MASTER_PASSWORD = "webhook-dispatch-test-master-password";
 
 const db = {
   select: () => ({
-    from: () => ({
-      where: () => Promise.resolve(webhookRows.filter((row) => row.enabled)),
-    }),
+    from: (table: unknown) =>
+      table === webhookDeliveriesTable
+        ? {
+            where: () => ({
+              limit: () => Promise.resolve([...persistedDeliveries.values()].slice(0, 1)),
+            }),
+          }
+        : {
+            where: () => Promise.resolve(webhookRows.filter((row) => row.enabled)),
+          },
   }),
   insert: () => ({
     values: (value: Record<string, unknown>) => {
-      insertedDeliveries.push(value);
-      return { returning: () => Promise.resolve([{ id: "delivery-1" }]) };
+      const insert = () => {
+        insertedDeliveries.push(value);
+        persistedDeliveries.set(String(value.id), value);
+        return [{ id: value.id ?? "delivery-1" }];
+      };
+      return {
+        returning: () => Promise.resolve(insert()),
+        onConflictDoNothing: () => ({
+          returning: () =>
+            Promise.resolve(persistedDeliveries.has(String(value.id)) ? [] : insert()),
+        }),
+      };
     },
   }),
   update: () => ({
@@ -82,8 +102,8 @@ mock.module("../services/context", () => ({ db, tenantConfigs }));
 mock.module("@stwd/db", () => ({
   and: () => true,
   eq: () => true,
-  webhookConfigs: { tenantId: "tenantId", enabled: "enabled" },
-  webhookDeliveries: { id: "id" },
+  webhookConfigs: webhookConfigsTable,
+  webhookDeliveries: webhookDeliveriesTable,
 }));
 // NOTE: bun's mock.module replaces the ENTIRE module and is sticky per-process,
 // so this mock must re-export every binding the module-under-test (and any
@@ -118,7 +138,7 @@ mock.module("node:dns/promises", () => ({
   lookup: async () => [{ address: "93.184.216.34", family: 4 }],
 }));
 
-const { dispatchWebhook } = await import("../services/webhook-dispatch");
+const { dispatchWebhook, dispatchWebhookDurably } = await import("../services/webhook-dispatch");
 const { webhookEventRegistry } = await import("../services/webhook-events");
 
 beforeEach(() => {
@@ -127,6 +147,7 @@ beforeEach(() => {
   updatedDeliveries.length = 0;
   dispatches.length = 0;
   dispatcherOptions.length = 0;
+  persistedDeliveries.clear();
   tenantConfigs.clear();
   nextDispatchResult = {
     success: true,
@@ -140,6 +161,36 @@ afterAll(() => {
 });
 
 describe("dispatchWebhook", () => {
+  it("creates a stable durable delivery only once across recovery retries", async () => {
+    webhookRows.push({
+      tenantId: "tenant-1",
+      url: "https://example.com/signed",
+      secret: "whsec_signed",
+      events: ["tx.signed"],
+      enabled: true,
+      maxRetries: 2,
+      retryBackoffMs: 1000,
+    });
+
+    await dispatchWebhookDurably(
+      "tenant-1",
+      "agent-1",
+      "tx_signed",
+      { txId: "tx-1" },
+      "solana:tx-1:signature-1",
+    );
+    await dispatchWebhookDurably(
+      "tenant-1",
+      "agent-1",
+      "tx_signed",
+      { txId: "tx-1" },
+      "solana:tx-1:signature-1",
+    );
+
+    expect(insertedDeliveries).toHaveLength(1);
+    expect(dispatches).toHaveLength(1);
+  });
+
   it("dispatches subscribed persisted webhook configs with their own secret", async () => {
     webhookRows.push(
       {

@@ -236,6 +236,7 @@ export type {
 export {
   BackendBindingMismatchError,
   externalCustodyIdentityDigest,
+  SolanaRecoveryOwnershipLostError,
   Vault,
   Vault as VaultClient,
 } from "./vault";

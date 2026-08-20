@@ -29,6 +29,13 @@ export interface SpendReservation {
   buckets: Array<{ period: SpendPeriod; dateKey: string; key: string }>;
 }
 
+export interface SpendRecordOptions {
+  /** Stable identity used by recovery writers to make the increment idempotent. */
+  eventId?: string;
+  /** Authoritative event time; retries must not move spend into a later bucket. */
+  occurredAt?: Date | number;
+}
+
 const TTL_SECONDS: Record<SpendPeriod, number> = {
   day: 172800, // 2 days
   week: 691200, // 8 days
@@ -65,6 +72,21 @@ local current = tonumber(redis.call('HGET', KEYS[1], 'reserved') or '0')
 local after = math.max(0, current - release)
 redis.call('HSET', KEYS[1], 'reserved', after)
 return after
+`;
+
+// KEYS[1]=idempotency marker, KEYS[2..4]=day/week/month buckets.
+// ARGV[1]=units ARGV[2]=host ARGV[3]=tenantId ARGV[4..6]=bucket TTLs.
+const RECORD_IDEMPOTENT_SPEND_LUA = `
+if redis.call('SET', KEYS[1], '1', 'NX', 'EX', tonumber(ARGV[6])) == false then
+  return 0
+end
+for i = 2, 4 do
+  redis.call('HINCRBY', KEYS[i], 'total', tonumber(ARGV[1]))
+  redis.call('HINCRBY', KEYS[i], 'host:' .. ARGV[2], tonumber(ARGV[1]))
+  redis.call('HSET', KEYS[i], 'tenantId', ARGV[3])
+  redis.call('EXPIRE', KEYS[i], tonumber(ARGV[i + 2]))
+end
+return 1
 `;
 
 /**
@@ -158,12 +180,36 @@ export async function recordSpend(
   tenantId: string,
   costUsd: number,
   host: string,
+  options: SpendRecordOptions = {},
 ): Promise<void> {
   const costCents = toSpendUnits(costUsd); // throws on negative/NaN; 0 → no-op below
   if (costCents <= 0) return;
 
   const redis = getRedis();
-  const now = new Date();
+  const now =
+    options.occurredAt instanceof Date
+      ? new Date(options.occurredAt.getTime())
+      : new Date(options.occurredAt ?? Date.now());
+  if (Number.isNaN(now.getTime())) throw new Error("invalid spend event timestamp");
+
+  if (options.eventId) {
+    const bucketKeys = (["day", "week", "month"] as SpendPeriod[]).map((period) =>
+      spendKey(agentId, period, getDateKey(period, now)),
+    );
+    await redis.eval(
+      RECORD_IDEMPOTENT_SPEND_LUA,
+      4,
+      `spend:${agentId}:event:${options.eventId}`,
+      ...bucketKeys,
+      String(costCents),
+      host,
+      tenantId,
+      String(TTL_SECONDS.day),
+      String(TTL_SECONDS.week),
+      String(TTL_SECONDS.month),
+    );
+    return;
+  }
 
   const pipeline = redis.multi();
 
