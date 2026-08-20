@@ -3,7 +3,7 @@
 import type { AgentIdentity, TxRecord } from "@stwd/sdk";
 import { AnimatePresence, motion } from "framer-motion";
 import Link from "next/link";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { ChainBadge } from "@/components/chain-badge";
 import { StatusBadge } from "@/components/status-badge";
 import { steward } from "@/lib/api";
@@ -15,6 +15,7 @@ interface DashboardData {
   agents: AgentIdentity[];
   recentTx: (TxRecord & { agentName?: string })[];
   pendingCount: number;
+  failedHistoryCount: number;
 }
 
 export default function DashboardOverview() {
@@ -22,16 +23,13 @@ export default function DashboardOverview() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    loadDashboard();
-  }, [loadDashboard]);
-
-  async function loadDashboard() {
+  const loadDashboard = useCallback(async () => {
     try {
       setLoading(true);
       setError(null);
       const agentsList = await steward.listAgents();
       const allTx: (TxRecord & { agentName?: string })[] = [];
+      let failedHistoryCount = 0;
 
       for (const agent of agentsList.slice(0, 20)) {
         try {
@@ -44,7 +42,7 @@ export default function DashboardOverview() {
             })),
           );
         } catch {
-          /* agent may not have history */
+          failedHistoryCount += 1;
         }
       }
 
@@ -56,13 +54,18 @@ export default function DashboardOverview() {
         agents: agentsList,
         recentTx: allTx.slice(0, 12),
         pendingCount: allTx.filter((tx) => tx.status === "pending").length,
+        failedHistoryCount,
       });
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : "Failed to connect");
     } finally {
       setLoading(false);
     }
-  }
+  }, []);
+
+  useEffect(() => {
+    void loadDashboard();
+  }, [loadDashboard]);
 
   if (loading) {
     return (
@@ -93,7 +96,7 @@ export default function DashboardOverview() {
     );
   }
 
-  const { agents, recentTx, pendingCount } = data!;
+  const { agents, recentTx, pendingCount, failedHistoryCount } = data!;
 
   return (
     <motion.div
@@ -113,7 +116,7 @@ export default function DashboardOverview() {
         {[
           { label: "Agents", value: agents.length },
           {
-            label: "Pending Approvals",
+            label: failedHistoryCount > 0 ? "Known Pending Approvals" : "Pending Approvals",
             value: pendingCount,
             accent: pendingCount > 0,
           },
@@ -137,6 +140,22 @@ export default function DashboardOverview() {
           </motion.div>
         ))}
       </div>
+
+      {failedHistoryCount > 0 && (
+        <div role="alert" className="border border-amber-400/30 bg-amber-400/5 p-4">
+          <p className="text-sm text-amber-300">Transaction history is incomplete</p>
+          <p className="mt-1 text-xs text-text-tertiary">
+            {failedHistoryCount} agent {failedHistoryCount === 1 ? "history" : "histories"} failed
+            to load. Counts and recent activity include only the available histories.
+          </p>
+          <button
+            onClick={loadDashboard}
+            className="mt-3 text-xs text-amber-300 hover:text-amber-200 transition-colors"
+          >
+            Retry histories
+          </button>
+        </div>
+      )}
 
       {/* Pending banner */}
       <AnimatePresence>
@@ -178,7 +197,11 @@ export default function DashboardOverview() {
 
         {recentTx.length === 0 ? (
           <div className="py-16 text-center border border-border-subtle">
-            <p className="text-text-tertiary text-sm">No transactions yet</p>
+            <p className="text-text-tertiary text-sm">
+              {failedHistoryCount > 0
+                ? "No transactions returned by the available histories"
+                : "No transactions yet"}
+            </p>
             <p className="text-text-tertiary text-xs mt-1">Create an agent to get started</p>
             <Link
               href="/dashboard/agents"
