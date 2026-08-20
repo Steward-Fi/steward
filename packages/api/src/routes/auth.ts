@@ -71,6 +71,7 @@ import {
   getIdentityJwtIssuer,
   getProviderConfig,
   hashSha256Hex,
+  IdentityJwtConfigurationError,
   InMemoryRecoveryCodeStore,
   isBuiltInProvider,
   isDevSecretAllowed,
@@ -6537,12 +6538,13 @@ auth.get("/identity-token", async (c) => {
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Identity token generation failed";
-    const status =
-      message === "Not a member of this tenant"
-        ? 403
-        : message === "Identity JWT private key is not configured"
-          ? 503
-          : 404;
+    if (
+      err instanceof IdentityJwtConfigurationError ||
+      message === "Identity JWT private key is not configured"
+    ) {
+      return c.json<ApiResponse>({ ok: false, error: "Identity token unavailable" }, 503);
+    }
+    const status = message === "Not a member of this tenant" ? 403 : 404;
     return c.json<ApiResponse>({ ok: false, error: message }, status);
   }
 });

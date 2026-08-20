@@ -9,6 +9,7 @@
 import {
   ACCESS_TOKEN_EXPIRY,
   assertTokenNotRevoked,
+  getAgentTokenExpiry,
   signAccessToken,
   signAgentToken,
   validateApiKey,
@@ -84,7 +85,6 @@ function positiveIntEnv(name: string, fallback: number): number {
 // falls back to that default, so this can never weaken the guard unintentionally.
 export const RATE_LIMIT_WINDOW_MS = positiveIntEnv("STEWARD_RATE_LIMIT_WINDOW_MS", 60_000);
 export const RATE_LIMIT_MAX_REQUESTS = positiveIntEnv("STEWARD_RATE_LIMIT_MAX_REQUESTS", 100);
-export const AGENT_TOKEN_EXPIRY = process.env.AGENT_TOKEN_EXPIRY || "30d";
 export const isWorkersRuntime =
   process.env.STEWARD_RUNTIME === "workers" ||
   (typeof navigator !== "undefined" && navigator.userAgent === "Cloudflare-Workers");
@@ -158,7 +158,7 @@ export async function createAgentToken(
   const tokenScopes = normalizeAgentTokenScopes(scopes);
   return signAgentToken(
     { agentId, tenantId, scopes: tokenScopes },
-    expiresIn || AGENT_TOKEN_EXPIRY,
+    expiresIn || getAgentTokenExpiry(),
   );
 }
 

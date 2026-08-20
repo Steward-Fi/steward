@@ -68,17 +68,37 @@ correct on Workers because the neon-http client is cheap to construct.)
 Set these via `wrangler secret put <NAME>` from the `packages/api`
 directory. Do NOT put them in `wrangler.toml`.
 
-| Secret                          | Why                                                                    |
+Wrangler secrets are scoped per environment. Configure the unqualified,
+staging, and production Workers separately; setting one does not populate the
+others:
+
+```bash
+bunx wrangler secret put STEWARD_JWT_SECRET
+bunx wrangler secret put STEWARD_JWT_SECRET --env staging
+bunx wrangler secret put STEWARD_JWT_SECRET --env production
+```
+
+Repeat those three commands for every sensitive binding below. Put non-secret
+bindings such as `APP_URL` and `STEWARD_IDENTITY_JWT_ISSUER` in the matching
+Wrangler `[vars]` table for each environment. The committed default, staging,
+and production variable sets all declare
+`NODE_ENV=production`, so a missing or shorter-than-32-character JWT secret is
+rejected before any database handle is selected.
+
+| Binding                         | Why                                                                    |
 | ------------------------------- | ---------------------------------------------------------------------- |
 | `DATABASE_URL`                  | Neon connection string. Workers use HTTP; migrations need TCP.         |
 | `KV_REST_API_URL`               | Upstash REST endpoint.                                                 |
 | `KV_REST_API_TOKEN`             | Upstash REST token.                                                    |
 | `STEWARD_JWT_SECRET`            | Canonical HS256 JWT signing and verification secret. Minimum 32 characters in production. |
 | `STEWARD_MASTER_PASSWORD`       | Vault keystore master password. Used by `KeyStore` (AES-256-GCM).      |
-| `STEWARD_KDF_SALT`              | Per-deployment hex salt for the KeyStore KDF. Recommended for prod.    |
+| `STEWARD_KDF_SALT`              | Per-deployment hex salt for the KeyStore KDF. Required in production.  |
+| `STEWARD_AUDIT_HMAC_KEY`        | Separate high-entropy root for the tamper-evident audit chain. Required in production. |
+| `STEWARD_IDENTITY_JWT_PRIVATE_KEY` | Optional PKCS#8 RS256/ES256 identity-token key. Set separately in each environment that serves identity tokens. |
 | `RESEND_API_KEY`                | Magic-link email delivery.                                             |
 | `EMAIL_FROM`                    | Optional: from address for magic links.                                |
-| `APP_URL`                       | Optional: base URL for magic-link callbacks.                           |
+| `APP_URL`                       | Canonical HTTPS public base for identity discovery/tokens and magic links. Required unless `STEWARD_IDENTITY_JWT_ISSUER` is set. |
+| `STEWARD_IDENTITY_JWT_ISSUER`   | Optional dedicated canonical HTTPS identity base. Required when `APP_URL` is absent. |
 | `EMAIL_AUTH_REDIRECT_BASE_URL`  | Optional: where to redirect after email auth (defaults elizacloud.ai). |
 | `GOOGLE_CLIENT_ID`/`_SECRET`    | Google OAuth.                                                          |
 | `DISCORD_CLIENT_ID`/`_SECRET`   | Discord OAuth.                                                         |
@@ -88,6 +108,13 @@ directory. Do NOT put them in `wrangler.toml`.
 | `PASSKEY_ORIGIN`                | WebAuthn origin (https://...).                                         |
 | `PASSKEY_RP_NAME`               | Display name for the WebAuthn UI.                                      |
 | `PASSKEY_ALLOWED_ORIGINS`       | Optional comma-separated additional origins for multi-tenant passkeys. |
+
+When asymmetric identity tokens are enabled, put the private key in the
+environment-scoped secret above and configure the matching non-secret
+`STEWARD_IDENTITY_JWT_ALG`, `STEWARD_IDENTITY_JWT_KID`,
+`STEWARD_IDENTITY_JWT_ISSUER`, and `STEWARD_IDENTITY_JWT_AUDIENCE` variables in
+each Wrangler environment. Do not reuse one environment's issuer or private
+key in another environment.
 
 `SKIP_MIGRATIONS=1`, `DATABASE_DRIVER=neon-http`, and `REDIS_DRIVER=upstash`
 are already in `wrangler.toml` `[vars]` so they ship with every deploy.
@@ -125,6 +152,8 @@ example.
 cd packages/api
 
 # Local smoke test (boots a workerd instance against your local secrets):
+cp .dev.vars.example .dev.vars
+# Replace the database and Upstash placeholders in .dev.vars first.
 bunx wrangler dev
 
 # Real deploy to staging or prod:
@@ -133,14 +162,24 @@ bunx wrangler deploy --env production
 ```
 
 `wrangler deploy --dry-run --outdir=dist` (or `bun run wrangler:dry-run`)
-builds the worker bundle without uploading. Current bundle size:
-**3.3 MiB raw / 949 KiB gzipped** — comfortably under the 10 MiB compressed
-Workers limit.
+builds the worker bundle without uploading. The lockfile's Wrangler 4.105.0
+currently reports **6.88 MiB raw / 1.85 MiB gzipped** — comfortably under the
+10 MiB compressed Workers limit.
 
 ## Testing locally
 
-`wrangler dev` boots a local workerd instance with full nodejs_compat. It
-will read `.dev.vars` for secrets — do NOT commit it. Example shape:
+`wrangler dev` boots a local workerd instance with full nodejs_compat. The
+committed deployment vars intentionally enforce production validation, so
+local development must copy `.dev.vars.example` to the ignored `.dev.vars`.
+That file explicitly selects `NODE_ENV=development` and opts into development
+secret fallbacks; never use it for a shared preview or deployment. Replace its
+database and Upstash placeholders before starting workerd. To exercise the
+production posture locally instead, remove the development override and set
+complete high-entropy roots, including `STEWARD_JWT_SECRET`,
+`STEWARD_MASTER_PASSWORD`, `STEWARD_KDF_SALT`, and
+`STEWARD_AUDIT_HMAC_KEY`.
+
+Example production-like `.dev.vars` shape:
 
 ```
 DATABASE_URL=postgres://USER:PASS@ep-XYZ.us-east-2.aws.neon.tech/db?sslmode=require
@@ -148,6 +187,8 @@ KV_REST_API_URL=https://YOUR-DB.upstash.io
 KV_REST_API_TOKEN=YOUR_TOKEN
 STEWARD_JWT_SECRET=...
 STEWARD_MASTER_PASSWORD=...
+STEWARD_KDF_SALT=...
+STEWARD_AUDIT_HMAC_KEY=...
 RESEND_API_KEY=...
 ```
 

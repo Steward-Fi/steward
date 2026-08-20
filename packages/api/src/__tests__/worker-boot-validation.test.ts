@@ -6,8 +6,10 @@
  */
 
 import { afterEach, describe, expect, it } from "bun:test";
+import { signAgentToken, signIdentityJwtPayload } from "@stwd/auth/jwt";
 import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
-import worker from "../worker";
+import { decodeJwt, decodeProtectedHeader, exportPKCS8, generateKeyPair, jwtVerify } from "jose";
+import worker, { hydrateProcessEnv, withWorkerJwtAuthority } from "../worker";
 
 /**
  * Keys this file mutates: bindings hydrateProcessEnv copies onto the global
@@ -25,6 +27,12 @@ const MANAGED_KEYS = [
   "STEWARD_PGLITE_MEMORY",
   "AGENT_TOKEN_EXPIRY",
   "STEWARD_OIDC_JWKS_MAX_AGE_MS",
+  "STEWARD_IDENTITY_JWT_ALG",
+  "STEWARD_IDENTITY_JWT_PRIVATE_KEY",
+  "STEWARD_IDENTITY_JWT_KID",
+  "STEWARD_IDENTITY_JWT_ISSUER",
+  "STEWARD_IDENTITY_JWT_AUDIENCE",
+  "APP_URL",
 ] as const;
 
 describe("workers boot JWT env validation (SEC-134)", () => {
@@ -74,6 +82,37 @@ describe("workers boot JWT env validation (SEC-134)", () => {
         {},
       ),
     ).rejects.toThrow("STEWARD_JWT_SECRET is required in production");
+  });
+
+  it("rejects missing and short canonical deployment JWT roots before database selection", async () => {
+    snapshotEnv();
+    delete process.env.STEWARD_JWT_SECRET;
+    delete process.env.STEWARD_SESSION_SECRET;
+    delete process.env.STEWARD_MASTER_PASSWORD;
+    delete process.env.STEWARD_DB_MODE;
+    delete process.env.STEWARD_PGLITE_MEMORY;
+    const canonicalBindings = {
+      NODE_ENV: "production",
+      SKIP_MIGRATIONS: "1",
+      DATABASE_DRIVER: "canonical-database-must-not-be-selected",
+      REDIS_DRIVER: "upstash",
+    };
+    const missing = expect(
+      worker.fetch(
+        new Request("https://workers.test/canonical-missing-jwt"),
+        canonicalBindings,
+        {},
+      ),
+    ).rejects.toThrow("STEWARD_JWT_SECRET is required in production");
+    const short = expect(
+      worker.fetch(
+        new Request("https://workers.test/canonical-short-jwt"),
+        { ...canonicalBindings, STEWARD_JWT_SECRET: "short" },
+        {},
+      ),
+    ).rejects.toThrow("at least 32 characters in production");
+
+    await Promise.all([missing, short]);
   });
 
   it("rejects a malformed AGENT_TOKEN_EXPIRY at cold start", async () => {
@@ -162,6 +201,177 @@ describe("workers boot JWT env validation (SEC-134)", () => {
     await firstRejection;
     if (!nestedRejection) throw new Error("nested Worker request did not run");
     await nestedRejection;
+  });
+
+  it("uses the current Worker expiry binding when minting after module initialization", async () => {
+    snapshotEnv();
+    const firstSecret = "workers-first-rotated-secret-at-least-32-chars";
+    const rotatedSecret = "workers-second-rotated-secret-at-least-32-chars";
+    hydrateProcessEnv({
+      STEWARD_JWT_SECRET: firstSecret,
+      AGENT_TOKEN_EXPIRY: "1h",
+      DATABASE_URL: "unused",
+    });
+    const firstToken = await signAgentToken({ agentId: "worker-agent", tenantId: "worker-tenant" });
+    const first = decodeJwt(firstToken);
+    hydrateProcessEnv({
+      STEWARD_JWT_SECRET: rotatedSecret,
+      AGENT_TOKEN_EXPIRY: "5m",
+      DATABASE_URL: "unused",
+    });
+    const rotatedToken = await signAgentToken({
+      agentId: "worker-agent",
+      tenantId: "worker-tenant",
+    });
+    const rotated = decodeJwt(rotatedToken);
+
+    expect((first.exp ?? 0) - (first.iat ?? 0)).toBe(3600);
+    expect((rotated.exp ?? 0) - (rotated.iat ?? 0)).toBe(300);
+    await expect(
+      jwtVerify(firstToken, new TextEncoder().encode(firstSecret)),
+    ).resolves.toBeDefined();
+    await expect(
+      jwtVerify(rotatedToken, new TextEncoder().encode(rotatedSecret)),
+    ).resolves.toBeDefined();
+    await expect(jwtVerify(rotatedToken, new TextEncoder().encode(firstSecret))).rejects.toThrow();
+  });
+
+  it("isolates JWT secret and default TTL across overlapping Worker invocations", async () => {
+    snapshotEnv();
+    const firstEnv = {
+      NODE_ENV: "production",
+      STEWARD_JWT_SECRET: "workers-overlap-first-secret-at-least-32-chars",
+      AGENT_TOKEN_EXPIRY: "1h",
+      DATABASE_URL: "unused-first",
+    };
+    const secondEnv = {
+      NODE_ENV: "production",
+      STEWARD_JWT_SECRET: "workers-overlap-second-secret-at-least-32-chars",
+      AGENT_TOKEN_EXPIRY: "5m",
+      DATABASE_URL: "unused-second",
+    };
+    let markFirstReady!: () => void;
+    let releaseFirst!: () => void;
+    const firstReady = new Promise<void>((resolve) => {
+      markFirstReady = resolve;
+    });
+    const firstBarrier = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+
+    const firstMint = withWorkerJwtAuthority(firstEnv, async () => {
+      hydrateProcessEnv(firstEnv);
+      markFirstReady();
+      await firstBarrier;
+      return signAgentToken({ agentId: "worker-first", tenantId: "worker-tenant" });
+    });
+    await firstReady;
+
+    let secondToken: string;
+    try {
+      secondToken = await withWorkerJwtAuthority(secondEnv, async () => {
+        // This is the hostile interleaving: overwrite the isolate-wide mirror
+        // while the first invocation is suspended before it mints.
+        hydrateProcessEnv(secondEnv);
+        return signAgentToken({ agentId: "worker-second", tenantId: "worker-tenant" });
+      });
+    } finally {
+      releaseFirst();
+    }
+    const firstToken = await firstMint;
+    const first = decodeJwt(firstToken);
+    const second = decodeJwt(secondToken);
+
+    expect((first.exp ?? 0) - (first.iat ?? 0)).toBe(3600);
+    expect((second.exp ?? 0) - (second.iat ?? 0)).toBe(300);
+    await expect(
+      jwtVerify(firstToken, new TextEncoder().encode(firstEnv.STEWARD_JWT_SECRET)),
+    ).resolves.toBeDefined();
+    await expect(
+      jwtVerify(secondToken, new TextEncoder().encode(secondEnv.STEWARD_JWT_SECRET)),
+    ).resolves.toBeDefined();
+    await expect(
+      jwtVerify(firstToken, new TextEncoder().encode(secondEnv.STEWARD_JWT_SECRET)),
+    ).rejects.toThrow();
+    await expect(
+      jwtVerify(secondToken, new TextEncoder().encode(firstEnv.STEWARD_JWT_SECRET)),
+    ).rejects.toThrow();
+  });
+
+  it("isolates asymmetric identity signing authority across overlapping Worker invocations", async () => {
+    snapshotEnv();
+    const firstKeys = await generateKeyPair("RS256", { extractable: true });
+    const secondKeys = await generateKeyPair("RS256", { extractable: true });
+    const firstEnv = {
+      NODE_ENV: "production",
+      STEWARD_JWT_SECRET: "workers-identity-first-hmac-secret-at-least-32-chars",
+      STEWARD_IDENTITY_JWT_ALG: "RS256",
+      STEWARD_IDENTITY_JWT_PRIVATE_KEY: await exportPKCS8(firstKeys.privateKey),
+      STEWARD_IDENTITY_JWT_KID: "worker-identity-first",
+      STEWARD_IDENTITY_JWT_ISSUER: "https://first.identity.test",
+      STEWARD_IDENTITY_JWT_AUDIENCE: "first-audience",
+      DATABASE_URL: "unused-first",
+    };
+    const secondEnv = {
+      NODE_ENV: "production",
+      STEWARD_JWT_SECRET: "workers-identity-second-hmac-secret-at-least-32-chars",
+      STEWARD_IDENTITY_JWT_ALG: "RS256",
+      STEWARD_IDENTITY_JWT_PRIVATE_KEY: await exportPKCS8(secondKeys.privateKey),
+      STEWARD_IDENTITY_JWT_KID: "worker-identity-second",
+      STEWARD_IDENTITY_JWT_ISSUER: "https://second.identity.test",
+      STEWARD_IDENTITY_JWT_AUDIENCE: "second-audience",
+      DATABASE_URL: "unused-second",
+    };
+    let markFirstReady!: () => void;
+    let releaseFirst!: () => void;
+    const firstReady = new Promise<void>((resolve) => {
+      markFirstReady = resolve;
+    });
+    const firstBarrier = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+
+    const firstMint = withWorkerJwtAuthority(firstEnv, async () => {
+      hydrateProcessEnv(firstEnv);
+      markFirstReady();
+      await firstBarrier;
+      return signIdentityJwtPayload({ sub: "worker-first" });
+    });
+    await firstReady;
+
+    let secondToken: string;
+    try {
+      secondToken = await withWorkerJwtAuthority(secondEnv, async () => {
+        hydrateProcessEnv(secondEnv);
+        return signIdentityJwtPayload({ sub: "worker-second" });
+      });
+    } finally {
+      releaseFirst();
+    }
+    const firstToken = await firstMint;
+
+    expect(decodeProtectedHeader(firstToken)).toMatchObject({
+      alg: "RS256",
+      kid: firstEnv.STEWARD_IDENTITY_JWT_KID,
+    });
+    expect(decodeProtectedHeader(secondToken)).toMatchObject({
+      alg: "RS256",
+      kid: secondEnv.STEWARD_IDENTITY_JWT_KID,
+    });
+    await expect(
+      jwtVerify(firstToken, firstKeys.publicKey, {
+        issuer: firstEnv.STEWARD_IDENTITY_JWT_ISSUER,
+        audience: firstEnv.STEWARD_IDENTITY_JWT_AUDIENCE,
+      }),
+    ).resolves.toBeDefined();
+    await expect(
+      jwtVerify(secondToken, secondKeys.publicKey, {
+        issuer: secondEnv.STEWARD_IDENTITY_JWT_ISSUER,
+        audience: secondEnv.STEWARD_IDENTITY_JWT_AUDIENCE,
+      }),
+    ).resolves.toBeDefined();
+    await expect(jwtVerify(firstToken, secondKeys.publicKey)).rejects.toThrow();
+    await expect(jwtVerify(secondToken, firstKeys.publicKey)).rejects.toThrow();
   });
 
   it("validates scheduled security bindings before opening any database handle", async () => {

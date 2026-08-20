@@ -1,0 +1,10 @@
+# Local workerd only. Copy to .dev.vars, which is ignored, and replace every
+# external-service placeholder before running `bun run wrangler:dev`.
+NODE_ENV=development
+STEWARD_ALLOW_DEV_SECRETS=true
+DATABASE_URL=postgres://USER:PASS@HOST/DB?sslmode=verify-full
+KV_REST_API_URL=https://YOUR-DB.upstash.io
+KV_REST_API_TOKEN=REPLACE_WITH_LOCAL_UPSTASH_TOKEN
+STEWARD_MASTER_PASSWORD=local-worker-only-master-password
+APP_URL=http://localhost:8787
+STEWARD_IDENTITY_JWT_ISSUER=http://localhost:8787
