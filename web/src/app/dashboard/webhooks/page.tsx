@@ -82,52 +82,61 @@ export default function WebhooksPage() {
     [selectedId, webhooks],
   );
 
-  const loadDeliveries = useCallback(
-    async (webhookId: string) => {
-      setDeliveryLoading(true);
-      try {
-        const rows = await steward.getWebhookDeliveries(webhookId, deliveryQuery);
-        setDeliveries(rows);
-      } finally {
-        setDeliveryLoading(false);
-      }
-    },
-    [deliveryQuery],
-  );
-
-  const loadData = useCallback(async () => {
+  const loadWebhooks = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
       const configs = await steward.listWebhooks();
       setWebhooks(configs);
-      const nextSelectedId = selectedId || configs[0]?.id || "";
-      setSelectedId(nextSelectedId);
-      if (nextSelectedId) {
-        await loadDeliveries(nextSelectedId);
-      } else {
-        setDeliveries([]);
-      }
+      setSelectedId((current) =>
+        current && configs.some((webhook) => webhook.id === current)
+          ? current
+          : (configs[0]?.id ?? ""),
+      );
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : "Failed to load webhooks");
     } finally {
       setLoading(false);
     }
-  }, [loadDeliveries, selectedId]);
+  }, []);
 
   useEffect(() => {
-    loadData();
-  }, [loadData]);
+    void loadWebhooks();
+  }, [loadWebhooks]);
 
-  async function selectWebhook(webhookId: string) {
+  useEffect(() => {
+    if (!selectedId) {
+      setDeliveries([]);
+      setDeliveryLoading(false);
+      return;
+    }
+
+    let active = true;
+    setDeliveryLoading(true);
+    setError(null);
+    void steward
+      .getWebhookDeliveries(selectedId, deliveryQuery)
+      .then((rows) => {
+        if (active) setDeliveries(rows);
+      })
+      .catch((e: unknown) => {
+        if (active) {
+          setError(e instanceof Error ? e.message : "Failed to load webhook deliveries");
+        }
+      })
+      .finally(() => {
+        if (active) setDeliveryLoading(false);
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [deliveryQuery, selectedId]);
+
+  function selectWebhook(webhookId: string) {
     setSelectedId(webhookId);
     setExpanded(null);
     setError(null);
-    try {
-      await loadDeliveries(webhookId);
-    } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : "Failed to load webhook deliveries");
-    }
   }
 
   async function retryDelivery(deliveryId: string) {
@@ -270,7 +279,6 @@ export default function WebhooksPage() {
       const nextSelected = remaining[0]?.id ?? "";
       setSelectedId(nextSelected);
       setDeliveries([]);
-      if (nextSelected) await loadDeliveries(nextSelected);
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : "Failed to delete webhook endpoint");
     } finally {
@@ -300,7 +308,7 @@ export default function WebhooksPage() {
         </div>
         <button
           type="button"
-          onClick={loadData}
+          onClick={loadWebhooks}
           className="px-4 py-2 text-sm border border-border text-text-tertiary hover:text-text hover:border-accent transition-colors"
         >
           Refresh

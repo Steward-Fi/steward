@@ -78,6 +78,8 @@ test.describe("Dashboard webhook delivery history", () => {
       },
     ];
     let lastDeliveryQuery = "";
+    let webhookListRequestCount = 0;
+    const deliveryRequestCounts = new Map<string, number>();
     let createPayload: { url: string; events: string[]; description?: string } | null = null;
     let deletedEndpointId = "";
 
@@ -106,6 +108,7 @@ test.describe("Dashboard webhook delivery history", () => {
         await route.fulfill({ json: { ok: true, data: created } });
         return;
       }
+      if (route.request().method() === "GET") webhookListRequestCount += 1;
       await route.fulfill({
         json: {
           ok: true,
@@ -142,6 +145,9 @@ test.describe("Dashboard webhook delivery history", () => {
         });
         return;
       }
+      if (route.request().method() === "GET") {
+        deliveryRequestCounts.set("webhook-1", (deliveryRequestCounts.get("webhook-1") ?? 0) + 1);
+      }
       lastDeliveryQuery = params.toString();
       const status = params.get("status");
       const eventType = params.get("eventType");
@@ -156,6 +162,12 @@ test.describe("Dashboard webhook delivery history", () => {
       await route.fulfill({ json: { ok: true, data: filtered } });
     });
     await page.route(`${API}/webhooks/webhook-created/deliveries**`, async (route) => {
+      if (route.request().method() === "GET") {
+        deliveryRequestCounts.set(
+          "webhook-created",
+          (deliveryRequestCounts.get("webhook-created") ?? 0) + 1,
+        );
+      }
       await route.fulfill({ json: { ok: true, data: [] } });
     });
 
@@ -212,6 +224,8 @@ test.describe("Dashboard webhook delivery history", () => {
     await expect(page.getByText("https://example.test/steward-webhooks").first()).toBeVisible();
     await expect(page.getByText("user.created").first()).toBeVisible();
     await expect(page.getByText("transaction.confirmed").first()).toBeVisible();
+    expect(webhookListRequestCount).toBe(1);
+    expect(deliveryRequestCounts.get("webhook-1")).toBe(1);
 
     await page
       .getByPlaceholder("https://api.example.com/webhooks/steward")
@@ -227,16 +241,24 @@ test.describe("Dashboard webhook delivery history", () => {
     await expect(page.getByText("whsec_created_once")).toBeVisible();
     await expect(page.getByText("https://hooks.example.test/steward").first()).toBeVisible();
     await expect(page.getByText("wallet.recovery_setup, mfa.enabled")).toBeVisible();
+    await expect.poll(() => deliveryRequestCounts.get("webhook-created")).toBe(1);
+    expect(webhookListRequestCount).toBe(1);
     await page.getByRole("button", { name: "Disable" }).first().click();
     await expect(page.getByText("disabled").first()).toBeVisible();
     await page.getByText("https://example.test/steward-webhooks").first().click();
+    await expect.poll(() => deliveryRequestCounts.get("webhook-1")).toBe(2);
+    expect(webhookListRequestCount).toBe(1);
 
     await page.getByLabel("Delivery status").selectOption("failed");
+    await expect.poll(() => deliveryRequestCounts.get("webhook-1") ?? 0).toBe(3);
     await expect.poll(() => lastDeliveryQuery).toContain("status=failed");
     await page.getByLabel("Delivery event type").fill("user.created");
+    await expect.poll(() => deliveryRequestCounts.get("webhook-1") ?? 0).toBe(4);
     await expect.poll(() => lastDeliveryQuery).toContain("eventType=user.created");
     await page.getByLabel("Delivery error state").selectOption("with_error");
+    await expect.poll(() => deliveryRequestCounts.get("webhook-1") ?? 0).toBe(5);
     await expect.poll(() => lastDeliveryQuery).toContain("hasError=true");
+    expect(webhookListRequestCount).toBe(1);
     await expect(page.getByRole("button", { name: /user\.created failed/ })).toBeVisible();
     await expect(page.getByRole("button", { name: /transaction\.confirmed/ })).toHaveCount(0);
 
@@ -274,10 +296,19 @@ test.describe("Dashboard webhook delivery history", () => {
       expect(dialog.message()).toContain("Delete webhook endpoint");
       await dialog.accept();
     });
+    const createdRequestsBeforeDelete = deliveryRequestCounts.get("webhook-created") ?? 0;
     await page.getByText("https://hooks.example.test/steward").first().click();
+    await expect
+      .poll(() => deliveryRequestCounts.get("webhook-created") ?? 0)
+      .toBe(createdRequestsBeforeDelete + 1);
+    const firstWebhookRequestsBeforeDelete = deliveryRequestCounts.get("webhook-1") ?? 0;
     await page.getByRole("button", { name: "Delete" }).first().click();
     expect(deletedEndpointId).toBe("webhook-created");
     await expect(page.getByText("https://hooks.example.test/steward")).toHaveCount(0);
+    await expect
+      .poll(() => deliveryRequestCounts.get("webhook-1") ?? 0)
+      .toBe(firstWebhookRequestsBeforeDelete + 1);
+    expect(webhookListRequestCount).toBe(1);
 
     await page.screenshot({
       path: testInfo.outputPath("dashboard-webhook-delivery-history.png"),
