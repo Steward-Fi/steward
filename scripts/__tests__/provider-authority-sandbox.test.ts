@@ -111,11 +111,15 @@ describe("provider authority sandbox operator primitives", () => {
 
     const short = envFixture();
     short.STEWARD_KDF_SALT = "abcd";
-    expect(() => validateEnvironment(short)).toThrow("at least 32 hex characters");
+    expect(() => validateEnvironment(short)).toThrow("at least 32 characters");
 
     const nonHex = envFixture();
-    nonHex.STEWARD_KDF_SALT = "z".repeat(64);
-    expect(() => validateEnvironment(nonHex)).toThrow("decode to at least 16 bytes");
+    nonHex.STEWARD_KDF_SALT = `${"a".repeat(32)}zz`;
+    expect(() => validateEnvironment(nonHex)).toThrow("even-length hexadecimal string");
+
+    const oddLength = envFixture();
+    oddLength.STEWARD_KDF_SALT = "a".repeat(33);
+    expect(() => validateEnvironment(oddLength)).toThrow("even-length hexadecimal string");
   });
 
   it("rejects credential-bearing and public plaintext service URLs", async () => {

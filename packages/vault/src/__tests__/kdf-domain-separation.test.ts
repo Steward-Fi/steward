@@ -15,6 +15,13 @@ const altDomainRoot = new KeyStore(MASTER, SALT, "signing-vault");
 const TIMEOUT = 30_000;
 
 describe("KDF domain separation (#11)", () => {
+  test("rejects odd-length or partially decoded KDF salts", () => {
+    expect(() => new KeyStore(MASTER, "a".repeat(33))).toThrow("even-length hexadecimal string");
+    expect(() => new KeyStore(MASTER, `${"a".repeat(32)}zz`)).toThrow(
+      "even-length hexadecimal string",
+    );
+  });
+
   test(
     "secret-vault and signing-vault roots are cryptographically distinct",
     () => {

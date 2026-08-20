@@ -145,9 +145,9 @@ export function validateEnvironment(env) {
   // credential; accepting a missing, short, or non-hex salt would make a
   // successful preflight meaningless and defer the failure until dispatch.
   const kdfSalt = env.STEWARD_KDF_SALT;
-  if (kdfSalt.length < 32) {
+  if (kdfSalt.length < 32 || kdfSalt.length % 2 !== 0 || !/^[0-9a-fA-F]+$/.test(kdfSalt)) {
     throw new Error(
-      "STEWARD_KDF_SALT must be at least 32 hex characters (16 bytes). Generate with: openssl rand -hex 32",
+      "STEWARD_KDF_SALT must be an even-length hexadecimal string of at least 32 characters (16 bytes). Generate with: openssl rand -hex 32",
     );
   }
   const decodedKdfSalt = Buffer.from(kdfSalt, "hex");

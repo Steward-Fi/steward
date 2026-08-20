@@ -64,9 +64,9 @@ export class KeyStore {
     const envSalt = masterSalt ?? process.env.STEWARD_KDF_SALT;
     let salt: Buffer;
     if (envSalt) {
-      if (envSalt.length < 32) {
+      if (envSalt.length < 32 || envSalt.length % 2 !== 0 || !/^[0-9a-fA-F]+$/.test(envSalt)) {
         throw new Error(
-          "STEWARD_KDF_SALT must be at least 32 hex characters (16 bytes). Generate with: openssl rand -hex 32",
+          "STEWARD_KDF_SALT must be an even-length hexadecimal string of at least 32 characters (16 bytes). Generate with: openssl rand -hex 32",
         );
       }
       salt = Buffer.from(envSalt, "hex");
