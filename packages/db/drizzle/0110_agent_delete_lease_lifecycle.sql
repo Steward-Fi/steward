@@ -10,12 +10,29 @@ ALTER TABLE "upstream_credential_leases"
 ALTER TABLE "provider_action_bindings"
   DROP CONSTRAINT IF EXISTS "provider_action_bindings_actor_fk";
 --> statement-breakpoint
+CREATE OR REPLACE FUNCTION steward_lock_tenant_deletion(target_tenant text)
+RETURNS void
+LANGUAGE plpgsql
+SET search_path = pg_catalog, public
+AS $$
+BEGIN
+  PERFORM pg_advisory_xact_lock(
+    hashtextextended('steward_tenant_delete_' || target_tenant, 0)
+  );
+EXCEPTION
+  -- PGLite does not implement advisory locks. Its single-process tests remain
+  -- serialized; production PostgreSQL always executes the lock above.
+  WHEN undefined_function THEN NULL;
+END;
+$$;
+--> statement-breakpoint
 CREATE OR REPLACE FUNCTION steward_fence_agent_authority_creation()
 RETURNS trigger
 LANGUAGE plpgsql
 SET search_path = pg_catalog, public
 AS $$
 BEGIN
+  PERFORM public.steward_lock_tenant_deletion(NEW.tenant_id);
   PERFORM 1
   FROM public.agents
   WHERE tenant_id = NEW.tenant_id AND id = NEW.agent_id
@@ -57,6 +74,7 @@ RETURNS trigger LANGUAGE plpgsql
 SET search_path = pg_catalog, public
 AS $$
 BEGIN
+  PERFORM public.steward_lock_tenant_deletion(NEW.tenant_id);
   PERFORM 1
   FROM public.workspaces
   WHERE tenant_id = NEW.tenant_id AND id = NEW.workspace_id
@@ -78,6 +96,7 @@ RETURNS trigger LANGUAGE plpgsql
 SET search_path = pg_catalog, public
 AS $$
 BEGIN
+  PERFORM public.steward_lock_tenant_deletion(NEW.tenant_id);
   IF TG_OP = 'UPDATE' AND NEW.status NOT IN (
     'pending_approval', 'approved', 'allowed_stub',
     'execution_ready', 'executing', 'outcome_unknown'

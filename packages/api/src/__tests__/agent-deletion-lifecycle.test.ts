@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it, setDefaultTimeout } from "bun:test";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
+import { revocationStore } from "@stwd/auth";
 import {
   __resetAuditHmacKeyCacheForTests,
   agents,
@@ -240,8 +241,8 @@ async function platformDelete(agentId: string): Promise<Response> {
   });
 }
 
-async function platformTenantDelete(): Promise<Response> {
-  return platformRoutes.request(`/tenants/${TENANT_ID}`, {
+async function platformTenantDelete(tenantId = TENANT_ID): Promise<Response> {
+  return platformRoutes.request(`/tenants/${tenantId}`, {
     method: "DELETE",
     headers: { "X-Steward-Platform-Key": PLATFORM_KEY },
   });
@@ -633,6 +634,140 @@ describe("agent deletion upstream credential boundary", () => {
       .where(eq(providerActionBindings.intentId, intentId));
     expect((await tenantDelete(agentId)).status).toBe(200);
   });
+
+  it.skipIf(!USING_REAL_POSTGRES)(
+    "serializes provider and lease writers before tenant-deletion revocation",
+    async () => {
+      const agentId = `tenant-delete-race-${crypto.randomUUID()}`;
+      await createAgent(agentId);
+      const { intentId, binding } = await createProviderBinding(agentId, "denied", agentId, false);
+      const holder = postgres(process.env.DATABASE_URL as string, { max: 1 });
+      const writer = postgres(process.env.DATABASE_URL as string, { max: 1 });
+      const observer = postgres(process.env.DATABASE_URL as string, { max: 1 });
+
+      const holdTenantFence = async (): Promise<{
+        release: () => void;
+        transaction: Promise<void>;
+      }> => {
+        let release!: () => void;
+        const released = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        let ready!: () => void;
+        const acquired = new Promise<void>((resolve) => {
+          ready = resolve;
+        });
+        const transaction = holder.begin(async (tx) => {
+          await tx`select public.steward_lock_tenant_deletion(${TENANT_ID})`;
+          ready();
+          await released;
+        });
+        await acquired;
+        return { release, transaction };
+      };
+
+      const waitForBlockedFenceCalls = async (minimum: number): Promise<void> => {
+        for (let attempt = 0; attempt < 400; attempt += 1) {
+          const [row] = await observer<{ count: number }[]>`
+            select count(*)::int as count
+            from pg_stat_activity
+            where datname = current_database()
+              and wait_event_type = 'Lock'
+              and wait_event = 'advisory'
+          `;
+          if ((row?.count ?? 0) >= minimum) return;
+          await Bun.sleep(10);
+        }
+        throw new Error(`expected ${minimum} blocked tenant deletion fence calls`);
+      };
+
+      try {
+        const providerFence = await holdTenantFence();
+        const providerWriter = Promise.resolve(writer`
+          insert into provider_action_bindings (
+            intent_id, tenant_id, workspace_id, actor_agent_id,
+            provider_account_id, operation_id, operation_revision,
+            canonical_profile, canonical_action_bytes, action_digest,
+            request_envelope, request_hash, idempotency_key_hash, safe_summary,
+            access_decision_id, access_effect, access_reason_code,
+            dependency_revisions, access_decision, access_decision_hash,
+            policy_effect, policy_decision_id, policy_revision_hash,
+            policy_decision, policy_decision_hash, status
+          ) values (
+            ${binding.intentId}, ${binding.tenantId}, ${binding.workspaceId},
+            ${binding.actorAgentId}, ${binding.providerAccountId}, ${binding.operationId},
+            ${binding.operationRevision}, ${binding.canonicalProfile},
+            ${binding.canonicalActionBytes}, ${binding.actionDigest},
+            ${JSON.stringify(binding.requestEnvelope)}::jsonb, ${binding.requestHash},
+            ${binding.idempotencyKeyHash}, ${JSON.stringify(binding.safeSummary)}::jsonb,
+            ${binding.accessDecisionId}, ${binding.accessEffect}, ${binding.accessReasonCode},
+            ${JSON.stringify(binding.dependencyRevisions)}::jsonb,
+            ${JSON.stringify(binding.accessDecision)}::jsonb, ${binding.accessDecisionHash},
+            ${binding.policyEffect}, ${binding.policyDecisionId}, ${binding.policyRevisionHash},
+            ${binding.policyDecision === null ? null : JSON.stringify(binding.policyDecision)}::jsonb,
+            ${binding.policyDecisionHash}, ${binding.status}
+          )
+        `);
+        await waitForBlockedFenceCalls(1);
+        providerFence.release();
+        await providerFence.transaction;
+        await providerWriter;
+        expect((await platformTenantDelete()).status).toBe(409);
+        expect(await revocationStore.getAgentRevokedBefore(agentId)).toBeNull();
+
+        await getDb()
+          .delete(providerActionBindings)
+          .where(eq(providerActionBindings.intentId, intentId));
+        await getDb().delete(intents).where(eq(intents.id, intentId));
+
+        const leaseFence = await holdTenantFence();
+        const leaseId = crypto.randomUUID();
+        const leaseWriter = Promise.resolve(writer`
+          insert into upstream_credential_leases (
+            id, tenant_id, workspace_id, agent_id, grant_id, capability_id,
+            issuer, resource, resource_hash, authority_digest,
+            idempotency_key_hash, token_hash, token_ciphertext, token_iv,
+            token_auth_tag, token_salt, status
+          ) values (
+            ${leaseId}, ${TENANT_ID}, ${WORKSPACE_ID}, ${agentId},
+            ${crypto.randomUUID()}, ${crypto.randomUUID()}, 'github-app-installation',
+            '{}'::jsonb, ${"a".repeat(64)}, ${"b".repeat(64)}, ${"c".repeat(64)},
+            ${"d".repeat(64)}, 'sealed-token', 'sealed-iv', 'sealed-tag', 'sealed-salt', 'active'
+          )
+        `);
+        await waitForBlockedFenceCalls(1);
+        leaseFence.release();
+        await leaseFence.transaction;
+        await leaseWriter;
+        expect((await platformTenantDelete()).status).toBe(409);
+        expect(await revocationStore.getAgentRevokedBefore(agentId)).toBeNull();
+
+        await getDb()
+          .update(upstreamCredentialLeases)
+          .set({
+            status: "revoked",
+            tokenHash: null,
+            tokenCiphertext: null,
+            tokenIv: null,
+            tokenAuthTag: null,
+            tokenSalt: null,
+            revokedAt: new Date(),
+          })
+          .where(eq(upstreamCredentialLeases.id, leaseId));
+        await getDb()
+          .insert(upstreamCredentialLeaseEvents)
+          .values({
+            leaseId,
+            tenantId: TENANT_ID,
+            action: "lease.revoked",
+            decision: "allow",
+            metadata: { fixture: true },
+          });
+      } finally {
+        await Promise.all([holder.end(), writer.end(), observer.end()]);
+      }
+    },
+  );
 
   it.skipIf(!USING_REAL_POSTGRES)(
     "prevents lease publication from racing past the locked deletion decision",

@@ -8,6 +8,7 @@ LANGUAGE plpgsql
 SET search_path = pg_catalog, public
 AS $$
 BEGIN
+	PERFORM public.steward_lock_tenant_deletion(NEW.tenant_id);
 	PERFORM 1
 	FROM public.agents
 	WHERE id = NEW.agent_id
