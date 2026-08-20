@@ -23,12 +23,12 @@
  *      showing the audit row persists while the approval is rolled back to
  *      pending (fail-closed: a sign failure never leaves the tx approved/signed).
  *
- * The only mocked seam (test 4) is `Vault.prototype.signTransaction`, stubbed to
- * throw so the post-audit / pre-sign ordering is observable without real key
- * material. Everything else — auth gates, policy re-evaluation, the audit HMAC
- * chain write, and the rollback — runs for real.
+ * The only mocked seam (test 4) is the factory-cached route Vault's
+ * `signTransaction`, stubbed to throw so the post-audit / pre-sign ordering is
+ * observable without real key material. Everything else — auth gates, policy
+ * re-evaluation, the audit HMAC chain write, and the rollback — runs for real.
  */
-import { afterAll, beforeAll, describe, expect, it, spyOn } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import {
   agents,
   approvalQueue,
@@ -42,7 +42,6 @@ import {
   userTenants,
 } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
-import { Vault } from "@stwd/vault";
 import { and, eq } from "drizzle-orm";
 import { Hono } from "hono";
 import type { AppVariables } from "../services/context";
@@ -50,6 +49,7 @@ import {
   executionPayloadDigestForEvmSign,
   policyRevisionHashForPolicySet,
 } from "../services/execution-authorization";
+import { getConfiguredVault } from "../services/vault-factory";
 
 const TENANT_ID = `approval-gate-tenant-${Date.now()}`;
 const ACTOR_ID = "00000000-0000-4000-8000-000000000001";
@@ -178,6 +178,8 @@ describe("vault approval gates (real /approve path)", () => {
     process.env.STEWARD_PGLITE_MEMORY = "true";
     process.env.STEWARD_MASTER_PASSWORD = "approval-gate-master-password";
     process.env.STEWARD_JWT_SECRET = "approval-gate-jwt-secret-with-enough-entropy-0123456789";
+    process.env.STEWARD_EXECUTION_AUTH_SECRET =
+      "approval-gate-execution-auth-secret-0123456789abcdef";
     process.env.STEWARD_AUDIT_HMAC_KEY ??=
       "approval-gate-test-audit-hmac-key-0123456789abcdef0123456789";
     const { db, client } = await createPGLiteDb("memory://");
@@ -258,6 +260,7 @@ describe("vault approval gates (real /approve path)", () => {
     await closeDb();
     delete process.env.STEWARD_PGLITE_MEMORY;
     delete process.env.STEWARD_MASTER_PASSWORD;
+    delete process.env.STEWARD_EXECUTION_AUTH_SECRET;
   });
 
   it("refuses approval from an api-key principal (no owner/admin session)", async () => {
@@ -408,10 +411,17 @@ describe("vault approval gates (real /approve path)", () => {
   });
 
   it("writes the authorized audit row BEFORE the irreversible sign, and rolls back on sign failure", async () => {
-    // Fault-inject the sign so the route reaches it (policy approves) then throws.
-    const spy = spyOn(Vault.prototype, "signTransaction").mockRejectedValue(
-      new Error("hsm offline"),
-    );
+    // Fault-inject the exact password-keyed Vault instance used by the route.
+    // Spying on the imported class prototype is not a reachable seam now that
+    // context.ts resolves its Vault late through the configured-vault factory.
+    const routeVault = getConfiguredVault({
+      fallbackPassword: process.env.STEWARD_MASTER_PASSWORD,
+    });
+    let signAttempts = 0;
+    routeVault.signTransaction = async () => {
+      signAttempts += 1;
+      throw new Error("hsm offline");
+    };
     try {
       const app = await makeApp({ authType: "session-jwt", role: "owner", mfa: true });
       const res = await approve(app, AGENT_AUDIT, "tx-audit-order");
@@ -422,7 +432,7 @@ describe("vault approval gates (real /approve path)", () => {
       expect(body.signedTx).toBeUndefined();
       expect(body.txHash).toBeUndefined();
       // The sign was actually attempted (proves we got past policy re-eval).
-      expect(spy).toHaveBeenCalled();
+      expect(signAttempts).toBe(1);
 
       // CRITICAL ordering invariant: the authorized-intent audit row was written
       // BEFORE the sign call, so it survives even though the sign threw.
@@ -463,7 +473,7 @@ describe("vault approval gates (real /approve path)", () => {
         );
       expect(successRows.length).toBe(0);
     } finally {
-      spy.mockRestore();
+      Reflect.deleteProperty(routeVault, "signTransaction");
     }
   });
 });
