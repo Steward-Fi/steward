@@ -3,7 +3,7 @@
 import type { TxRecord } from "@stwd/sdk";
 import { motion } from "framer-motion";
 import Link from "next/link";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { ChainBadge } from "@/components/chain-badge";
 import { StatusBadge } from "@/components/status-badge";
 import { steward } from "@/lib/api";
@@ -18,18 +18,17 @@ export default function TransactionsPage() {
   const [transactions, setTransactions] = useState<TxWithAgent[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [failedHistoryCount, setFailedHistoryCount] = useState(0);
   const [filter, setFilter] = useState<string>("all");
 
-  useEffect(() => {
-    loadTransactions();
-  }, [loadTransactions]);
-
-  async function loadTransactions() {
+  const loadTransactions = useCallback(async () => {
     try {
       setLoading(true);
       setError(null);
+      setFailedHistoryCount(0);
       const agents = await steward.listAgents();
       const allTx: TxWithAgent[] = [];
+      let failedCount = 0;
 
       for (const agent of agents) {
         try {
@@ -42,7 +41,7 @@ export default function TransactionsPage() {
             })),
           );
         } catch {
-          /* skip individual agent */
+          failedCount += 1;
         }
       }
 
@@ -50,12 +49,17 @@ export default function TransactionsPage() {
         (a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime(),
       );
       setTransactions(allTx);
+      setFailedHistoryCount(failedCount);
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : "Failed to load transactions");
     } finally {
       setLoading(false);
     }
-  }
+  }, []);
+
+  useEffect(() => {
+    void loadTransactions();
+  }, [loadTransactions]);
 
   const filtered =
     filter === "all" ? transactions : transactions.filter((tx) => tx.status === filter);
@@ -104,6 +108,22 @@ export default function TransactionsPage() {
         </div>
       )}
 
+      {!error && failedHistoryCount > 0 && (
+        <div role="alert" className="border border-amber-400/30 bg-amber-400/5 p-4">
+          <p className="text-sm text-amber-300">Transaction history is incomplete</p>
+          <p className="mt-1 text-xs text-text-tertiary">
+            {failedHistoryCount} agent {failedHistoryCount === 1 ? "history" : "histories"} failed
+            to load. The list and counts include only the available histories.
+          </p>
+          <button
+            onClick={loadTransactions}
+            className="mt-3 text-xs text-amber-300 hover:text-amber-200 transition-colors"
+          >
+            Retry histories
+          </button>
+        </div>
+      )}
+
       {/* Filters */}
       <div className="flex gap-1 flex-wrap">
         {FILTERS.map((status) => (
@@ -128,7 +148,11 @@ export default function TransactionsPage() {
       {error ? null : filtered.length === 0 ? (
         <div className="py-16 text-center border border-border-subtle">
           <p className="text-text-tertiary text-sm">
-            {filter === "all" ? "No transactions yet" : `No ${filter} transactions`}
+            {filter === "all"
+              ? failedHistoryCount > 0
+                ? "No transactions returned by the available histories"
+                : "No transactions yet"
+              : `No ${filter} transactions`}
           </p>
           {filter === "all" && (
             <p className="text-text-tertiary text-xs mt-1">
