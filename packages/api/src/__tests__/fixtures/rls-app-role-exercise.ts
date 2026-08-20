@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { generateApiKey, signAccessToken } from "@stwd/auth";
 import {
+  assertRlsDeploymentSafety,
   auditEvents,
   closeDb,
   getDb,
@@ -48,6 +49,9 @@ async function requestJson(
 try {
   assert(platformKey.length > 0, "STEWARD_PLATFORM_KEYS is required");
   assert(tenantId.length > 0, "STEWARD_RLS_TEST_TENANT is required");
+  const expectedAppRole = process.env.STEWARD_APP_DATABASE_ROLE ?? "";
+  assert(expectedAppRole.length > 0, "STEWARD_APP_DATABASE_ROLE is required");
+  await assertRlsDeploymentSafety(getDb(), { expectedRole: expectedAppRole });
 
   const email = `rls-app-role-${suffix}@example.test`;
   const created = await requestJson(

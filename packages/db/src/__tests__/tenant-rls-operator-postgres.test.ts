@@ -383,6 +383,7 @@ describeWithPostgres("SEC-169 operator lifecycle on the real Steward schema", ()
         {
           DATABASE_URL: appDatabaseUrl(),
           DATABASE_DRIVER: "postgres-js",
+          STEWARD_APP_DATABASE_ROLE: appRole,
           STEWARD_PLATFORM_DATABASE_URL: platformDatabaseUrl(),
           STEWARD_PLATFORM_DATABASE_ROLE: platformRole,
           NODE_ENV: "test",

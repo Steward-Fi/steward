@@ -26,6 +26,9 @@ export async function assertRlsDeploymentSafety(
   if (!/^[A-Za-z_][A-Za-z0-9_$-]{0,62}$/.test(options.expectedRole)) {
     throw new Error("RLS_DEPLOYMENT_ROLE_EXPECTATION_INVALID");
   }
+  const protectedRelationNames = [
+    ...new Set(EXPECTED_RLS_POLICY_DEFINITIONS.map((policy) => policy.relation_name)),
+  ];
   const [role] = rowsOf<{
     current_user: string;
     session_user: string;
@@ -39,7 +42,12 @@ export async function assertRlsDeploymentSafety(
           SELECT 1 FROM pg_class relation
           JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
           WHERE namespace.nspname = 'public'
-            AND relation.relname = ANY(${[...new Set(EXPECTED_RLS_POLICY_DEFINITIONS.map((p) => p.relation_name))]})
+            AND relation.relname IN (
+              ${sql.join(
+                protectedRelationNames.map((name) => sql`${name}`),
+                sql`, `,
+              )}
+            )
             AND relation.relowner = role.oid
         ) AS owns_rls_relation
       FROM pg_roles role WHERE role.rolname = current_user
