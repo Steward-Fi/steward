@@ -684,13 +684,14 @@ describe("wallet transfer actions", () => {
       expect(tx.value).toBe("123");
       expect(tx.data).toBeNull();
       expect(tx.chainId).toBe(101);
-      expect(tx.actionPayload).toEqual({
+      expect(tx.actionPayload).toMatchObject({
         type: "transfer",
         token: "native",
         recipient: ALLOWED_SOLANA,
         amount: "123",
         broadcast: false,
         referenceId: "native-solana-transfer-success",
+        requestDigest: expect.any(String),
       });
     } finally {
       context.vault.signTransaction = originalSignTransaction;
@@ -826,6 +827,7 @@ describe("wallet transfer actions", () => {
         amount: "123",
         broadcast: false,
         referenceId: "spl-transfer-success",
+        requestDigest: expect.any(String),
       });
     } finally {
       context.vault.buildSolanaSplTransferTransaction = originalBuildSplTransfer;
