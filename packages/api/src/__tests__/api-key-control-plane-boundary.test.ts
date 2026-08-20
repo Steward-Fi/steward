@@ -1,120 +1,148 @@
-import { describe, expect, it } from "bun:test";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { Hono } from "hono";
+import type { AppVariables } from "../services/context";
 
-const routesDir = join(import.meta.dir, "..", "routes");
-const secretsSource = readFileSync(join(routesDir, "secrets.ts"), "utf8");
-const policiesSource = readFileSync(join(routesDir, "policies-standalone.ts"), "utf8");
-const conditionSetsSource = readFileSync(join(routesDir, "condition-sets.ts"), "utf8");
-const agentsSource = readFileSync(join(routesDir, "agents.ts"), "utf8");
+type RouteRequest = {
+  method: "DELETE" | "GET" | "PATCH" | "POST" | "PUT";
+  path: string;
+};
 
-function routeStart(source: string, marker: string): number {
-  const direct = source.indexOf(marker);
-  if (direct >= 0) return direct;
-  const inlineAsync = source.indexOf(marker.replace('")', '", async'));
-  if (inlineAsync >= 0) return inlineAsync;
-  return source.indexOf(marker.replace('")', '",'));
+const previousApiKeyAdminMutationOptIn = process.env.STEWARD_ALLOW_API_KEY_ADMIN_MUTATIONS;
+const previousMasterPassword = process.env.STEWARD_MASTER_PASSWORD;
+const previousPgliteMemory = process.env.STEWARD_PGLITE_MEMORY;
+
+async function makeApp() {
+  const [{ agentRoutes }, { conditionSetRoutes }, { policiesStandaloneRoutes }, { secretsRoutes }] =
+    await Promise.all([
+      import("../routes/agents"),
+      import("../routes/condition-sets"),
+      import("../routes/policies-standalone"),
+      import("../routes/secrets"),
+    ]);
+  const app = new Hono<{ Variables: AppVariables }>();
+  app.use("*", async (c, next) => {
+    c.set("tenantId", "api-key-boundary-tenant");
+    c.set(
+      "authType",
+      c.req.header("x-test-auth-type") === "agent-token" ? "agent-token" : "api-key",
+    );
+    await next();
+  });
+  app.route("/secrets", secretsRoutes);
+  app.route("/policies", policiesStandaloneRoutes);
+  app.route("/condition-sets", conditionSetRoutes);
+  app.route("/agents", agentRoutes);
+  return app;
 }
 
-function expectAdminBeforeTenantLevel(source: string, marker: string) {
-  const start = routeStart(source, marker);
-  expect(start).toBeGreaterThanOrEqual(0);
-  const adminCheck = source.indexOf("requireTenantAdminSession(c)", start);
-  const adminOrApiKeyCheck = source.indexOf("requireTenantAdminOrApiKey(c)", start);
-  const mfaAdminCheck = source.indexOf("requireRecentTenantAdminMfa(c", start);
-  const boundaryCheck =
-    [adminCheck, adminOrApiKeyCheck, mfaAdminCheck]
-      .filter((index) => index >= 0)
-      .sort((a, b) => a - b)[0] ?? -1;
-  const tenantLevelCheck = source.indexOf("requireTenantLevel(c)", start);
-  expect(boundaryCheck).toBeGreaterThan(start);
-  expect(tenantLevelCheck === -1 || boundaryCheck < tenantLevelCheck).toBe(true);
+async function expectMachinePrincipalRejected(
+  app: Awaited<ReturnType<typeof makeApp>>,
+  requests: RouteRequest[],
+  authType: "agent-token" | "api-key" = "api-key",
+): Promise<void> {
+  for (const request of requests) {
+    const response = await app.request(request.path, {
+      method: request.method,
+      headers: {
+        "content-type": "application/json",
+        "x-test-auth-type": authType,
+      },
+      body: request.method === "GET" ? undefined : JSON.stringify({}),
+    });
+    expect(response.status, `${request.method} ${request.path}`).toBe(403);
+    await expect(response.json(), `${request.method} ${request.path}`).resolves.toMatchObject({
+      ok: false,
+      error: expect.stringMatching(/admin|MFA|owner|session/i),
+    });
+  }
 }
 
 describe("API key control-plane boundary", () => {
-  it("requires recent MFA for secret vault and injection route reads and mutations", () => {
-    expect(secretsSource).toContain("function requireRecentTenantAdminMfa");
-    for (const [marker, reason] of [
-      ['secretsRoutes.get("/")', "Secret management"],
-      ['secretsRoutes.post("/")', "Secret management"],
-      ['secretsRoutes.get("/routes")', "Route management"],
-      ['secretsRoutes.post("/routes")', "Route management"],
-      ['secretsRoutes.put("/routes/:id")', "Route management"],
-      ['secretsRoutes.delete("/routes/:id")', "Route management"],
-      ['secretsRoutes.get("/:id")', "Secret management"],
-      ['secretsRoutes.put("/:id")', "Secret management"],
-      ['secretsRoutes.delete("/:id")', "Secret management"],
-      ['secretsRoutes.post("/:id/rotate")', "Secret management"],
-    ] as const) {
-      const start = routeStart(secretsSource, marker);
-      expect(start).toBeGreaterThanOrEqual(0);
-      expect(
-        secretsSource.indexOf(`requireRecentTenantAdminMfa(c, "${reason}")`, start),
-      ).toBeGreaterThan(start);
-    }
+  let app: Awaited<ReturnType<typeof makeApp>>;
+  let closeTestDb: () => Promise<void>;
+
+  beforeAll(async () => {
+    delete process.env.STEWARD_ALLOW_API_KEY_ADMIN_MUTATIONS;
+    process.env.STEWARD_PGLITE_MEMORY = "true";
+    process.env.STEWARD_MASTER_PASSWORD = "api-key-boundary-master-password";
+    const [{ closeDb }, { createPGLiteDb, setPGLiteOverride }] = await Promise.all([
+      import("@stwd/db"),
+      import("@stwd/db/pglite"),
+    ]);
+    const { db, client } = await createPGLiteDb("memory://");
+    setPGLiteOverride(db, async () => {
+      await client.close();
+    });
+    closeTestDb = closeDb;
+    app = await makeApp();
   });
 
-  it("does not allow tenant API keys to mutate secret vault or injection routes", () => {
-    for (const marker of [
-      'secretsRoutes.post("/")',
-      'secretsRoutes.post("/routes")',
-      'secretsRoutes.put("/routes/:id")',
-      'secretsRoutes.delete("/routes/:id")',
-      'secretsRoutes.put("/:id")',
-      'secretsRoutes.delete("/:id")',
-      'secretsRoutes.post("/:id/rotate")',
-    ]) {
-      expectAdminBeforeTenantLevel(secretsSource, marker);
+  afterAll(async () => {
+    await closeTestDb();
+    if (previousApiKeyAdminMutationOptIn === undefined) {
+      delete process.env.STEWARD_ALLOW_API_KEY_ADMIN_MUTATIONS;
+    } else {
+      process.env.STEWARD_ALLOW_API_KEY_ADMIN_MUTATIONS = previousApiKeyAdminMutationOptIn;
     }
+    if (previousPgliteMemory === undefined) delete process.env.STEWARD_PGLITE_MEMORY;
+    else process.env.STEWARD_PGLITE_MEMORY = previousPgliteMemory;
+    if (previousMasterPassword === undefined) delete process.env.STEWARD_MASTER_PASSWORD;
+    else process.env.STEWARD_MASTER_PASSWORD = previousMasterPassword;
   });
 
-  it("does not allow tenant API keys to enumerate secret vault metadata or injection routes", () => {
-    for (const marker of [
-      'secretsRoutes.get("/")',
-      'secretsRoutes.get("/routes")',
-      'secretsRoutes.get("/:id")',
-    ]) {
-      expectAdminBeforeTenantLevel(secretsSource, marker);
-    }
+  it("rejects API keys at every secret vault and injection route", async () => {
+    await expectMachinePrincipalRejected(app, [
+      { method: "GET", path: "/secrets" },
+      { method: "POST", path: "/secrets" },
+      { method: "GET", path: "/secrets/routes" },
+      { method: "POST", path: "/secrets/routes" },
+      { method: "PUT", path: "/secrets/routes/route-id" },
+      { method: "DELETE", path: "/secrets/routes/route-id" },
+      { method: "GET", path: "/secrets/secret-id" },
+      { method: "PUT", path: "/secrets/secret-id" },
+      { method: "DELETE", path: "/secrets/secret-id" },
+      { method: "POST", path: "/secrets/secret-id/rotate" },
+    ]);
   });
 
-  it("does not allow tenant API keys to read or mutate policy templates or condition sets", () => {
-    for (const marker of [
-      'policiesStandaloneRoutes.get("/")',
-      'policiesStandaloneRoutes.post("/")',
-      'policiesStandaloneRoutes.get("/:id")',
-      'policiesStandaloneRoutes.put("/:id")',
-      'policiesStandaloneRoutes.delete("/:id")',
-      'policiesStandaloneRoutes.post("/:id/assign")',
-    ]) {
-      expectAdminBeforeTenantLevel(policiesSource, marker);
-    }
-
-    for (const marker of [
-      'conditionSetRoutes.get("/")',
-      'conditionSetRoutes.post("/")',
-      'conditionSetRoutes.get("/:id")',
-      'conditionSetRoutes.patch("/:id")',
-      'conditionSetRoutes.delete("/:id")',
-      'conditionSetRoutes.get("/:id/items")',
-      'conditionSetRoutes.post("/:id/items")',
-      'conditionSetRoutes.put("/:id/items")',
-      'conditionSetRoutes.delete("/:id/items/:itemId")',
-    ]) {
-      expectAdminBeforeTenantLevel(conditionSetsSource, marker);
-    }
+  it("rejects API keys at every policy-template route", async () => {
+    const policyId = "00000000-0000-4000-8000-000000000001";
+    await expectMachinePrincipalRejected(app, [
+      { method: "GET", path: "/policies" },
+      { method: "POST", path: "/policies" },
+      { method: "GET", path: `/policies/${policyId}` },
+      { method: "PUT", path: `/policies/${policyId}` },
+      { method: "DELETE", path: `/policies/${policyId}` },
+      { method: "POST", path: `/policies/${policyId}/assign` },
+    ]);
   });
 
-  it("keeps agent admin routes behind the tenant-admin gate before tenant-level fallback", () => {
-    for (const marker of [
-      'agentRoutes.post("/")',
-      'agentRoutes.post("/:agentId/token")',
-      'agentRoutes.post("/:agentId/wallets")',
-      'agentRoutes.delete("/:agentId")',
-      'agentRoutes.post("/batch")',
-      'agentRoutes.put("/:agentId/policies")',
-    ]) {
-      expectAdminBeforeTenantLevel(agentsSource, marker);
-    }
+  it("rejects API keys at every condition-set route", async () => {
+    await expectMachinePrincipalRejected(app, [
+      { method: "GET", path: "/condition-sets" },
+      { method: "POST", path: "/condition-sets" },
+      { method: "GET", path: "/condition-sets/set-id" },
+      { method: "PATCH", path: "/condition-sets/set-id" },
+      { method: "DELETE", path: "/condition-sets/set-id" },
+      { method: "GET", path: "/condition-sets/set-id/items" },
+      { method: "POST", path: "/condition-sets/set-id/items" },
+      { method: "PUT", path: "/condition-sets/set-id/items" },
+      { method: "DELETE", path: "/condition-sets/set-id/items/item-id" },
+    ]);
+  });
+
+  it("rejects agent tokens at every agent-administration route", async () => {
+    await expectMachinePrincipalRejected(
+      app,
+      [
+        { method: "POST", path: "/agents" },
+        { method: "POST", path: "/agents/agent-id/token" },
+        { method: "POST", path: "/agents/agent-id/wallets" },
+        { method: "DELETE", path: "/agents/agent-id" },
+        { method: "POST", path: "/agents/batch" },
+        { method: "PUT", path: "/agents/agent-id/policies" },
+      ],
+      "agent-token",
+    );
   });
 });
