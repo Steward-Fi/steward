@@ -1,17 +1,22 @@
 import { afterAll, beforeAll, describe, expect, it, setDefaultTimeout } from "bun:test";
 import { createRequire } from "node:module";
+import { fileURLToPath } from "node:url";
 import {
   __resetAuditHmacKeyCacheForTests,
   agents,
   closeDb,
   getDb,
+  runPluginMigrations,
+  secretRoutes,
   tenants,
   upstreamCredentialLeaseEvents,
   upstreamCredentialLeases,
   users,
   workspaces,
 } from "@stwd/db";
+import { capabilities, capabilityGrants } from "@stwd/plugin-capabilities";
 import { and, eq } from "drizzle-orm";
+import { migrate as pgliteMigrate } from "drizzle-orm/pglite/migrator";
 import { Hono } from "hono";
 import type { AppVariables } from "../services/context";
 import {
@@ -37,6 +42,9 @@ const TENANT_ID = `agent-deletion-lifecycle-${crypto.randomUUID()}`;
 const PLATFORM_KEY = `agent-deletion-platform-${crypto.randomUUID()}`;
 const WORKSPACE_ID = crypto.randomUUID();
 const WORKSPACE_CREATOR_ID = crypto.randomUUID();
+const CAPABILITY_MIGRATIONS = fileURLToPath(
+  new URL("../../../plugin-capabilities/drizzle", import.meta.url),
+);
 const MUTATED_ENV = [
   "STEWARD_PGLITE_MEMORY",
   "STEWARD_MASTER_PASSWORD",
@@ -99,6 +107,50 @@ async function createLease(
       metadata: { fixture: true },
     });
   return id;
+}
+
+async function createCapability(agentId?: string): Promise<{
+  capabilityId: string;
+  grantId?: string;
+  routeId?: string;
+}> {
+  const capabilityId = crypto.randomUUID();
+  await getDb()
+    .insert(capabilities)
+    .values({
+      id: capabilityId,
+      tenantId: TENANT_ID,
+      name: `capability-${capabilityId}`,
+      secretId: crypto.randomUUID(),
+      host: "api.example.test",
+      pathPattern: "/v1/*",
+      method: "POST",
+      injectKey: "Authorization",
+    });
+  if (!agentId) return { capabilityId };
+
+  const routeId = crypto.randomUUID();
+  const grantId = crypto.randomUUID();
+  await getDb().insert(secretRoutes).values({
+    id: routeId,
+    tenantId: TENANT_ID,
+    agentId,
+    secretId: crypto.randomUUID(),
+    hostPattern: "api.example.test",
+    pathPattern: "/v1/*",
+    method: "POST",
+    injectAs: "header",
+    injectKey: "Authorization",
+  });
+  await getDb().insert(capabilityGrants).values({
+    id: grantId,
+    tenantId: TENANT_ID,
+    agentId,
+    capabilityId,
+    secretRouteId: routeId,
+    status: "active",
+  });
+  return { capabilityId, grantId, routeId };
 }
 
 async function tenantDelete(agentId: string): Promise<Response> {
@@ -188,7 +240,18 @@ beforeAll(async () => {
   process.env.STEWARD_PLATFORM_KEYS = PLATFORM_KEY;
   process.env.STEWARD_PLATFORM_KEY_SCOPES = JSON.stringify({ [PLATFORM_KEY]: ["platform:*"] });
   __resetAuditHmacKeyCacheForTests();
-  await setupAgentBehaviorTestDatabase();
+  const pglite = await setupAgentBehaviorTestDatabase();
+  await runPluginMigrations(
+    { id: "capabilities", migrationsFolder: CAPABILITY_MIGRATIONS },
+    pglite
+      ? {
+          db: pglite.db,
+          client: pglite.client,
+          useAdvisoryLock: false,
+          migrateFn: pgliteMigrate as never,
+        }
+      : undefined,
+  );
   await getDb()
     .insert(tenants)
     .values({
@@ -261,6 +324,26 @@ describe("agent deletion upstream credential boundary", () => {
 
   it("deletes platform agents only after expired lease evidence is terminal", async () => {
     await expectTerminalDeletion("platform", "expired");
+  });
+
+  it("revokes an existing capability grant and disables its route atomically", async () => {
+    const agentId = `capability-existing-${crypto.randomUUID()}`;
+    await createAgent(agentId);
+    const { grantId, routeId } = await createCapability(agentId);
+
+    expect((await tenantDelete(agentId)).status).toBe(200);
+    expect(
+      await getDb()
+        .select()
+        .from(capabilityGrants)
+        .where(eq(capabilityGrants.id, grantId as string)),
+    ).toMatchObject([{ status: "revoked", secretRouteId: routeId }]);
+    expect(
+      await getDb()
+        .select()
+        .from(secretRoutes)
+        .where(eq(secretRoutes.id, routeId as string)),
+    ).toMatchObject([{ enabled: false }]);
   });
 
   it.skipIf(!USING_REAL_POSTGRES)(
@@ -360,6 +443,108 @@ describe("agent deletion upstream credential boundary", () => {
                 eq(upstreamCredentialLeases.agentId, agentId),
                 eq(upstreamCredentialLeases.status, "active"),
               ),
+            ),
+        ).toHaveLength(0);
+      } finally {
+        releaseHolder();
+        await Promise.allSettled([
+          holderTransaction,
+          deletion ?? Promise.resolve(new Response()),
+          writerOutcome ?? Promise.resolve({ ok: false }),
+        ]);
+        await Promise.all([holder.end(), writer.end(), observer.end()]);
+      }
+    },
+  );
+
+  it.skipIf(!USING_REAL_POSTGRES)(
+    "prevents capability grant creation from racing past the locked deletion decision",
+    async () => {
+      const agentId = `capability-race-${crypto.randomUUID()}`;
+      await createAgent(agentId);
+      const blockerLeaseId = await createLease(agentId, "revoked");
+      const { capabilityId } = await createCapability();
+      const holder = postgres(process.env.DATABASE_URL as string, { max: 1 });
+      const writer = postgres(process.env.DATABASE_URL as string, { max: 1 });
+      const observer = postgres(process.env.DATABASE_URL as string, { max: 1 });
+      const [writerBackend] = await writer<{ pid: number }[]>`
+        select pg_backend_pid()::int as pid
+      `;
+      const writerPid = writerBackend?.pid ?? 0;
+      let releaseHolder!: () => void;
+      const release = new Promise<void>((resolve) => {
+        releaseHolder = resolve;
+      });
+      let holderPid = 0;
+      let holderReady!: () => void;
+      const ready = new Promise<void>((resolve) => {
+        holderReady = resolve;
+      });
+      const holderTransaction = holder.begin(async (tx) => {
+        const [backend] = await tx<{ pid: number }[]>`select pg_backend_pid()::int as pid`;
+        holderPid = backend?.pid ?? 0;
+        await tx`select id from upstream_credential_leases where id = ${blockerLeaseId} for update`;
+        holderReady();
+        await release;
+      });
+      await ready;
+
+      let deletion: Promise<Response> | undefined;
+      let writerOutcome: Promise<{ ok: boolean; error?: unknown }> | undefined;
+      try {
+        deletion = tenantDelete(agentId);
+        let deletionBlocked = false;
+        for (let attempt = 0; attempt < 400 && !deletionBlocked; attempt += 1) {
+          const [row] = await observer<{ blocked: boolean }[]>`
+            select exists (
+              select 1 from pg_stat_activity activity
+              where ${holderPid} = any(pg_blocking_pids(activity.pid))
+                and activity.query ilike '%upstream_credential_leases%'
+            ) as blocked
+          `;
+          deletionBlocked = row?.blocked === true;
+          if (!deletionBlocked) await Bun.sleep(10);
+        }
+        expect(deletionBlocked).toBe(true);
+
+        writerOutcome = writer`
+          insert into capability_grants (
+            id, tenant_id, agent_id, capability_id, status
+          ) values (
+            ${crypto.randomUUID()}, ${TENANT_ID}, ${agentId}, ${capabilityId}, 'active'
+          )
+        `.then(
+          () => ({ ok: true }),
+          (error) => ({ ok: false, error }),
+        );
+
+        let writerBlocked = false;
+        for (let attempt = 0; attempt < 400 && !writerBlocked; attempt += 1) {
+          const [row] = await observer<{ blocked: boolean }[]>`
+            select exists (
+              select 1 from pg_stat_activity activity
+              where activity.pid = ${writerPid}
+                and activity.wait_event_type = 'Lock'
+            ) as blocked
+          `;
+          writerBlocked = row?.blocked === true;
+          if (!writerBlocked) await Bun.sleep(10);
+        }
+        expect(writerBlocked).toBe(true);
+
+        releaseHolder();
+        await holderTransaction;
+        expect((await deletion).status).toBe(200);
+        expect(await writerOutcome).toMatchObject({
+          ok: false,
+          error: expect.objectContaining({ code: "23503" }),
+        });
+        expect(
+          await getDb()
+            .select()
+            .from(capabilityGrants)
+            .where(
+              and(eq(capabilityGrants.agentId, agentId), eq(capabilityGrants.status, "active")),
             ),
         ).toHaveLength(0);
       } finally {

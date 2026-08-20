@@ -22,7 +22,7 @@ describe("capability plugin migrations: namespaced-journal isolation", () => {
     expect(pluginMigrationsTable("capabilities")).toBe("__drizzle_migrations_plugin_capabilities");
   });
 
-  test("creates both tables and records them in the plugin's OWN ledger", async () => {
+  test("creates grant tables and the agent lifecycle fence in the plugin's OWN ledger", async () => {
     harness = await makeHarness();
     const { client } = harness;
 
@@ -62,6 +62,12 @@ describe("capability plugin migrations: namespaced-journal isolation", () => {
       `SELECT count(*)::int AS n FROM pg_constraint WHERE conname = 'capability_grants_status_check'`,
     );
     expect(chk.rows[0].n).toBe(1);
+
+    const fence = await client.query(
+      `SELECT count(*)::int AS n FROM pg_trigger
+       WHERE tgname = 'capability_grants_agent_fence' AND NOT tgisinternal`,
+    );
+    expect(fence.rows[0].n).toBe(1);
   });
 
   test("migration 0001 lands capability_invocations in the plugin's OWN ledger, core untouched", async () => {
@@ -72,12 +78,12 @@ describe("capability plugin migrations: namespaced-journal isolation", () => {
     const invTbl = await client.query("SELECT to_regclass('public.capability_invocations') AS t");
     expect(invTbl.rows[0].t).toBe("capability_invocations");
 
-    // (b) BOTH plugin migrations (0000 + 0001) are recorded in the plugin's OWN
-    //     namespaced ledger (>=2 rows).
+    // (b) all plugin migrations are recorded in the plugin's OWN namespaced
+    //     ledger, including the agent lifecycle fence in 0002.
     const pluginLedger = await client.query(
       `SELECT count(*)::int AS n FROM drizzle."__drizzle_migrations_plugin_capabilities"`,
     );
-    expect(pluginLedger.rows[0].n).toBeGreaterThanOrEqual(2);
+    expect(pluginLedger.rows[0].n).toBeGreaterThanOrEqual(3);
 
     // (c) the core journal carries NO capability-invocations migration row.
     const coreLedger = await client.query(

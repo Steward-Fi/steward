@@ -12,7 +12,7 @@ import {
   upstreamCredentialLeaseEvents,
   upstreamCredentialLeases,
 } from "@stwd/db";
-import { and, eq, inArray } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import { type AuditEventInput, withTenantAuditedTransaction } from "./audit";
 
 // The lease owner scrubs these states only after confirmed provider revocation
@@ -48,6 +48,10 @@ function leaseIsTerminalAndScrubbed(row: {
     row.tokenAuthTag === null &&
     row.tokenSalt === null
   );
+}
+
+function resultRows<T>(result: unknown): T[] {
+  return (Array.isArray(result) ? result : ((result as { rows?: T[] } | null)?.rows ?? [])) as T[];
 }
 
 /**
@@ -115,6 +119,24 @@ export async function deleteAgentAuthority(
           metadata: { terminalStatus: lease.status },
         })),
       );
+    }
+
+    // The capability plugin is optional, but its tables can remain after the
+    // plugin is disabled. Revoke any surviving grant inside the same agent-row
+    // lock used by plugin migration 0002's writer fence. This prevents an old
+    // active grant from surviving deletion or becoming live again if an agent
+    // identifier is later reused.
+    const capabilityTable = resultRows<{ relation: string | null }>(
+      await tx.execute(sql`SELECT to_regclass('public.capability_grants')::text AS relation`),
+    )[0]?.relation;
+    if (capabilityTable) {
+      await tx.execute(sql`
+        UPDATE public.capability_grants
+        SET status = 'revoked'
+        WHERE tenant_id = ${tenantId}
+          AND agent_id = ${agentId}
+          AND status = 'active'
+      `);
     }
 
     await tx

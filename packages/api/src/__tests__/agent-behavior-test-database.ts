@@ -9,10 +9,16 @@ import { eq, sql } from "drizzle-orm";
  */
 export const USING_REAL_POSTGRES = Boolean(process.env.DATABASE_URL);
 
-export async function setupAgentBehaviorTestDatabase(): Promise<void> {
+export async function setupAgentBehaviorTestDatabase(): Promise<
+  | {
+      db: Awaited<ReturnType<typeof createPGLiteDb>>["db"];
+      client: Awaited<ReturnType<typeof createPGLiteDb>>["client"];
+    }
+  | undefined
+> {
   if (USING_REAL_POSTGRES) {
     delete process.env.STEWARD_PGLITE_MEMORY;
-    return;
+    return undefined;
   }
 
   process.env.STEWARD_PGLITE_MEMORY = "true";
@@ -20,6 +26,7 @@ export async function setupAgentBehaviorTestDatabase(): Promise<void> {
   setPGLiteOverride(db, async () => {
     await client.close();
   });
+  return { db, client };
 }
 
 export async function cleanupAgentBehaviorTestDatabase(tenantId: string): Promise<void> {
