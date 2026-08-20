@@ -33,8 +33,10 @@ import type { AppVariables } from "../services/context";
 
 const dispatchWebhookMock = mock(() => {});
 
+const dispatchWebhookDurablyMock = mock(async () => {});
 mock.module("../services/webhook-dispatch", () => ({
   dispatchWebhook: dispatchWebhookMock,
+  dispatchWebhookDurably: dispatchWebhookDurablyMock,
 }));
 
 const TENANT_ID = `vault-mfa-tenant-${Date.now()}`;

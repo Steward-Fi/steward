@@ -18,8 +18,10 @@ import type { AppVariables, RpcRequest } from "../services/context";
 
 const dispatchWebhookMock = mock(() => {});
 
+const dispatchWebhookDurablyMock = mock(async () => {});
 mock.module("../services/webhook-dispatch", () => ({
   dispatchWebhook: dispatchWebhookMock,
+  dispatchWebhookDurably: dispatchWebhookDurablyMock,
 }));
 
 const TENANT_ID = `userop-tenant-${Date.now()}`;
