@@ -48,6 +48,7 @@ import {
   users,
   userTenants,
   vaultSigningFreezes,
+  withTenantAuditedTransactionOnDb,
 } from "@stwd/db";
 import {
   type AgentIdentity,
@@ -87,6 +88,10 @@ import {
 } from "../services/context";
 import { normalizeGasSpendQuery, querySponsoredGasSpend } from "../services/gas-sponsorship";
 import { normalizeOidcProviders } from "../services/oidc-provider-config";
+import {
+  withPlatformAuthorityDatabase,
+  withPlatformAuthorityTransaction,
+} from "../services/platform-authority-database";
 import { getPolicyRulesValidationError } from "../services/policy-validation";
 import { lockUserSession, lockUserSessions } from "../services/session-lock";
 import {
@@ -2138,6 +2143,15 @@ platform.delete("/tenants/:id", async (c) => {
       const capabilityCleanup = await cleanupOptionalTenantCapabilities(tx, tenantId);
       if (!capabilityCleanup) return { status: "blocked_by_capability_integrity" as const };
 
+      // Establish every externally enforced cutoff while the deletion fence is
+      // held and before any destructive database mutation. A revoker failure
+      // aborts the transaction; a later database rollback can only leave a
+      // conservatively revoked token, never a deleted tenant with live tokens.
+      const [agentRevocationCutoffs, userRevocationCutoffs] = await Promise.all([
+        Promise.all(tenantAgents.map((agent) => revocationStore.revokeAgentTokens(agent.id))),
+        Promise.all(tenantMembers.map((member) => revocationStore.revokeUserTokens(member.userId))),
+      ]);
+
       await appendRequiredAudit({
         tenantId,
         actorType: "platform",
@@ -2148,6 +2162,18 @@ platform.delete("/tenants/:id", async (c) => {
           agentTokenRevocationTargets: tenantAgents.length,
           userTokenRevocationTargets: tenantMembers.length,
           capabilityCleanup,
+        },
+        ...auditCtx(c),
+      });
+      await appendRequiredAudit({
+        tenantId,
+        actorType: "platform",
+        action: "tenant.delete.token_revocation_completed",
+        resourceType: "tenant",
+        resourceId: tenantId,
+        metadata: {
+          agentRevocationCutoffsEstablished: agentRevocationCutoffs.length,
+          userRevocationCutoffsEstablished: userRevocationCutoffs.length,
         },
         ...auditCtx(c),
       });
@@ -2172,8 +2198,6 @@ platform.delete("/tenants/:id", async (c) => {
       await tx.delete(tenants).where(eq(tenants.id, tenantId));
       return {
         status: "deleted" as const,
-        agentIds: tenantAgents.map((agent) => agent.id),
-        userIds: tenantMembers.map((member) => member.userId),
       };
     },
   );
@@ -2199,23 +2223,6 @@ platform.delete("/tenants/:id", async (c) => {
       409,
     );
   }
-
-  const [agentRevocationCutoffs, userRevocationCutoffs] = await Promise.all([
-    Promise.all(result.agentIds.map((agentId) => revocationStore.revokeAgentTokens(agentId))),
-    Promise.all(result.userIds.map((userId) => revocationStore.revokeUserTokens(userId))),
-  ]);
-  await writeAuditEvent({
-    tenantId,
-    actorType: "platform",
-    action: "tenant.delete.token_revocation_completed",
-    resourceType: "tenant",
-    resourceId: tenantId,
-    metadata: {
-      agentRevocationCutoffsEstablished: agentRevocationCutoffs.length,
-      userRevocationCutoffsEstablished: userRevocationCutoffs.length,
-    },
-    ...auditCtx(c),
-  });
 
   return c.json<ApiResponse>({ ok: true });
 });
@@ -3730,7 +3737,6 @@ platform.patch("/users/:userId/deactivate", async (c) => {
   const scopeResponse = requirePlatformRouteScope(c, "platform:user-lifecycle:write");
   if (scopeResponse) return scopeResponse;
 
-  const db = getDb();
   const userId = c.req.param("userId");
   if (!isValidUserId(userId)) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid user id format" }, 400);
@@ -3739,56 +3745,66 @@ platform.patch("/users/:userId/deactivate", async (c) => {
   if (!body) return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
   const deactivated = body.deactivated !== false;
 
-  await writeAuditEvent({
-    tenantId: PLATFORM_AUDIT_TENANT_ID,
-    actorType: "platform",
-    action: deactivated ? "user.deactivate.authorized" : "user.reactivate.authorized",
-    resourceType: "user",
-    resourceId: userId,
-    ...auditCtx(c),
+  const result = await withPlatformAuthorityDatabase((platformDb) =>
+    withTenantAuditedTransactionOnDb(
+      platformDb,
+      PLATFORM_AUDIT_TENANT_ID,
+      async (txRaw, appendRequiredAudit) => {
+        const tx = txRaw as typeof platformDb;
+        await tx.execute(
+          sql`SELECT set_config('steward.tenant_id', ${PLATFORM_AUDIT_TENANT_ID}, true)`,
+        );
+        await tx.execute(
+          sql`SELECT pg_advisory_xact_lock(hashtextextended(${"platform_user_account_" + userId}, 0))`,
+        );
+        await appendRequiredAudit({
+          tenantId: PLATFORM_AUDIT_TENANT_ID,
+          actorType: "platform",
+          action: deactivated ? "user.deactivate.authorized" : "user.reactivate.authorized",
+          resourceType: "user",
+          resourceId: userId,
+          ...auditCtx(c),
+        });
+        const issuedBefore = await revocationStore.revokeUserTokens(userId);
+        const [updated] = rowsFromExecute<{
+          user_id: string;
+          previous_deactivated_at: Date | null;
+          previous_updated_at: Date;
+          deactivated_at: Date | null;
+        }>(
+          await tx.execute(sql`
+            SELECT * FROM steward_bootstrap.platform_set_user_deactivation(
+              ${userId}::uuid,
+              ${deactivated}
+            )
+          `),
+        );
+        if (!updated) throw new Error("User not found");
+        await appendRequiredAudit({
+          tenantId: PLATFORM_AUDIT_TENANT_ID,
+          actorType: "platform",
+          action: deactivated ? "user.deactivate" : "user.reactivate",
+          resourceType: "user",
+          resourceId: userId,
+          metadata: { issuedBefore },
+          ...auditCtx(c),
+        });
+        return { issuedBefore, updated };
+      },
+    ),
+  ).catch((err: unknown) => {
+    if (errorChainHasExactMessage(err, "User not found")) return null;
+    if (errorChainHasExactMessage(err, "Cannot deactivate the sole active tenant owner")) {
+      return "Cannot deactivate the sole active tenant owner";
+    }
+    throw err;
   });
-
-  const result = await Promise.resolve()
-    .then(async () => {
-      const [updated] = rowsFromExecute<{
-        user_id: string;
-        previous_deactivated_at: Date | null;
-        previous_updated_at: Date;
-        deactivated_at: Date | null;
-      }>(
-        await db.execute(sql`
-          SELECT * FROM steward_bootstrap.platform_set_user_deactivation(
-            ${userId}::uuid,
-            ${deactivated}
-          )
-        `),
-      );
-      if (!updated) throw new Error("User not found");
-      const issuedBefore = await revocationStore.revokeUserTokens(userId);
-      return { issuedBefore, updated };
-    })
-    .catch((err: unknown) => {
-      if (errorChainHasExactMessage(err, "User not found")) return null;
-      if (errorChainHasExactMessage(err, "Cannot deactivate the sole active tenant owner")) {
-        return "Cannot deactivate the sole active tenant owner";
-      }
-      throw err;
-    });
   if (result === null) {
     return c.json<ApiResponse>({ ok: false, error: "User not found" }, 404);
   }
   if (result === "Cannot deactivate the sole active tenant owner") {
     return c.json<ApiResponse>({ ok: false, error: result }, 409);
   }
-  await writeAuditEvent({
-    tenantId: PLATFORM_AUDIT_TENANT_ID,
-    actorType: "platform",
-    action: deactivated ? "user.deactivate" : "user.reactivate",
-    resourceType: "user",
-    resourceId: userId,
-    metadata: { issuedBefore: result.issuedBefore },
-    ...auditCtx(c),
-  });
   return c.json<ApiResponse<{ userId: string; deactivatedAt: Date | null }>>({
     ok: true,
     data: { userId, deactivatedAt: result.updated.deactivated_at },
@@ -3804,38 +3820,57 @@ platform.delete("/users/:userId", async (c) => {
   const scopeResponse = requirePlatformRouteScope(c, "platform:user:delete");
   if (scopeResponse) return scopeResponse;
 
-  const db = getDb();
   const userId = c.req.param("userId");
   if (!isValidUserId(userId)) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid user id format" }, 400);
   }
 
-  await writeAuditEvent({
-    tenantId: PLATFORM_AUDIT_TENANT_ID,
-    actorType: "platform",
-    action: "user.delete.authorized",
-    resourceType: "user",
-    resourceId: userId,
-    ...auditCtx(c),
+  const issuedBefore = await withPlatformAuthorityDatabase((platformDb) =>
+    withTenantAuditedTransactionOnDb(
+      platformDb,
+      PLATFORM_AUDIT_TENANT_ID,
+      async (txRaw, appendRequiredAudit) => {
+        const tx = txRaw as typeof platformDb;
+        await tx.execute(
+          sql`SELECT set_config('steward.tenant_id', ${PLATFORM_AUDIT_TENANT_ID}, true)`,
+        );
+        await tx.execute(
+          sql`SELECT pg_advisory_xact_lock(hashtextextended(${"platform_user_account_" + userId}, 0))`,
+        );
+        await appendRequiredAudit({
+          tenantId: PLATFORM_AUDIT_TENANT_ID,
+          actorType: "platform",
+          action: "user.delete.authorized",
+          resourceType: "user",
+          resourceId: userId,
+          ...auditCtx(c),
+        });
+        const cutoff = await revocationStore.revokeUserTokens(userId);
+        const [deleted] = rowsFromExecute<{ user_id: string }>(
+          await tx.execute(sql`
+            SELECT * FROM steward_bootstrap.platform_delete_user(${userId}::uuid)
+          `),
+        );
+        if (!deleted) throw new Error("User not found");
+        await appendRequiredAudit({
+          tenantId: PLATFORM_AUDIT_TENANT_ID,
+          actorType: "platform",
+          action: "user.delete",
+          resourceType: "user",
+          resourceId: userId,
+          metadata: { issuedBefore: cutoff },
+          ...auditCtx(c),
+        });
+        return cutoff;
+      },
+    ),
+  ).catch((error: unknown) => {
+    if (errorChainHasExactMessage(error, "User not found")) return null;
+    if (errorChainHasExactMessage(error, "Cannot delete the sole active tenant owner")) {
+      return "Cannot delete the sole active tenant owner";
+    }
+    throw error;
   });
-
-  const issuedBefore = await Promise.resolve()
-    .then(async () => {
-      const [deleted] = rowsFromExecute<{ user_id: string }>(
-        await db.execute(sql`
-          SELECT * FROM steward_bootstrap.platform_delete_user(${userId}::uuid)
-        `),
-      );
-      if (!deleted) throw new Error("User not found");
-      return revocationStore.revokeUserTokens(userId);
-    })
-    .catch((error: unknown) => {
-      if (errorChainHasExactMessage(error, "User not found")) return null;
-      if (errorChainHasExactMessage(error, "Cannot delete the sole active tenant owner")) {
-        return "Cannot delete the sole active tenant owner";
-      }
-      throw error;
-    });
   if (issuedBefore === null) {
     return c.json<ApiResponse>({ ok: false, error: "User not found" }, 404);
   }
@@ -3843,15 +3878,6 @@ platform.delete("/users/:userId", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: issuedBefore }, 409);
   }
 
-  await writeAuditEvent({
-    tenantId: PLATFORM_AUDIT_TENANT_ID,
-    actorType: "platform",
-    action: "user.delete",
-    resourceType: "user",
-    resourceId: userId,
-    metadata: { issuedBefore },
-    ...auditCtx(c),
-  });
   return c.json<ApiResponse<{ userId: string; deleted: boolean }>>({
     ok: true,
     data: { userId, deleted: true },
@@ -4102,8 +4128,10 @@ platform.delete("/users/:userId/accounts/:provider/:providerAccountId", async (c
         )
         .returning({ id: accounts.id });
       if (!deleted) throw new Error("Linked account changed during unlink");
-      await tx.execute(
-        sql`SELECT steward_bootstrap.platform_revoke_user_refresh_tokens(${userId}::uuid)`,
+      await withPlatformAuthorityTransaction((platformTx) =>
+        platformTx.execute(
+          sql`SELECT steward_bootstrap.platform_revoke_user_refresh_tokens(${userId}::uuid)`,
+        ),
       );
       return revokedBefore;
     });
@@ -4240,12 +4268,14 @@ platform.post("/users/:userId/accounts/:provider/:providerAccountId/transfer", a
         )
         .returning();
       if (!updated) throw new Error("Linked account changed during transfer");
-      await tx.execute(
-        sql`SELECT steward_bootstrap.platform_revoke_user_refresh_tokens(${fromUserId}::uuid)`,
-      );
-      await tx.execute(
-        sql`SELECT steward_bootstrap.platform_revoke_user_refresh_tokens(${toUserId}::uuid)`,
-      );
+      await withPlatformAuthorityTransaction(async (platformTx) => {
+        await platformTx.execute(
+          sql`SELECT steward_bootstrap.platform_revoke_user_refresh_tokens(${fromUserId}::uuid)`,
+        );
+        await platformTx.execute(
+          sql`SELECT steward_bootstrap.platform_revoke_user_refresh_tokens(${toUserId}::uuid)`,
+        );
+      });
       return { fromIssuedBefore: fromRevokedBefore, toIssuedBefore: toRevokedBefore, updated };
     });
     fromIssuedBefore = revocation.fromIssuedBefore;

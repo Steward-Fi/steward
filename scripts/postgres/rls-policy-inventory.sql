@@ -1,72 +1,94 @@
--- Canonical SEC-169 activation inventory. Keep this in sync with
--- packages/db/src/rls-inventory.ts and migration 0111. The second column is
--- the exact number of tenant policies installed before the maintenance policy.
-CREATE TEMP TABLE steward_expected_rls_policies (
-  relation_name text PRIMARY KEY,
-  expected_policy_count integer NOT NULL CHECK (expected_policy_count > 0)
-) ON COMMIT DROP;
+-- Canonical SEC-169 activation inventory. The generated manifest is derived
+-- from a clean migration replay and pins every public relation, partition edge,
+-- policy identity, command, role, permissiveness, USING, and WITH CHECK body.
+\ir rls-policy-manifest.sql
 
-INSERT INTO steward_expected_rls_policies(relation_name, expected_policy_count) VALUES
-  ('agent_key_quorums',1),('agent_policies',1),('agent_registrations',1),
-  ('agent_signers',1),('agent_wallets',1),('agents',1),('approval_queue',2),
-  ('audit_archive_chunks',1),('audit_archives',1),('audit_chain_heads',1),
-  ('audit_checkpoints',1),('audit_events',1),('audit_retention_policies',1),
-  ('auto_approval_rules',1),('condition_set_items',1),('condition_sets',1),
-  ('digital_asset_account_aggregations',1),('digital_asset_account_wallets',1),
-  ('digital_asset_accounts',1),('encrypted_chain_keys',1),('encrypted_keys',1),
-  ('evm_wallet_nonce_inflight',1),('evm_wallet_nonce_owners',1),
-  ('evm_wallet_nonces',1),('execution_authorization_nonces',1),
-  ('global_wallet_action_confirmations',1),('intents',1),
-  ('operator_transfer_reservations',1),('pending_proxy_requests',1),('policies',1),
-  ('policy_templates',1),('provider_accounts',1),('provider_action_approvals',1),
-  ('provider_action_audit_outbox',1),('provider_action_bindings',1),
-  ('provider_action_reservation_generations',1),('provider_agent_budgets',1),
-  ('provider_authority_tenant_state',1),('provider_google_credential_lifecycles',1),
-  ('provider_grants',1),('provider_operations',1),('provider_role_bindings',1),
-  ('provider_x_credential_lifecycles',1),('proxy_audit_log',1),('refresh_tokens',1),
-  ('reputation_cache',1),('secret_routes',1),('secrets',1),('session_signers',1),
-  ('sponsored_gas_events',1),('tenant_app_client_secrets',1),('tenant_app_clients',1),
-  ('tenant_configs',1),('tenant_invitations',1),('tenant_request_signing_keys',1),
-  ('tenant_saml_assertion_replays',1),('tenant_saml_authn_requests',1),
-  ('tenant_saml_sso_configs',1),('tenant_sso_domains',1),('tenants',1),
-  ('trade_sessions',1),('transactions',1),('upstream_credential_lease_events',1),
-  ('upstream_credential_leases',1),('user_push_subscriptions',2),('user_tenants',1),
-  ('user_wallet_app_consents',1),('vault_signing_freezes',1),('webhook_configs',1),
-  ('webhook_deliveries',1),('workspaces',1);
+-- Core is mandatory. Optional plugin groups become mandatory as a complete
+-- unit when any relation in that group exists in the live schema.
+DELETE FROM steward_expected_public_relations expected
+WHERE expected.policy_group <> 'core'
+  AND NOT EXISTS (
+    SELECT 1 FROM pg_class relation
+    JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+    WHERE namespace.nspname = 'public'
+      AND relation.relname IN (
+        SELECT candidate.relation_name FROM steward_expected_public_relations candidate
+        WHERE candidate.policy_group = expected.policy_group
+      )
+  );
+DELETE FROM steward_expected_rls_policy_definitions expected
+WHERE NOT EXISTS (
+  SELECT 1 FROM steward_expected_public_relations relation
+  WHERE relation.policy_group = expected.policy_group
+);
+
+CREATE TEMP TABLE steward_expected_rls_policies AS
+SELECT relation_name, count(*)::integer AS expected_policy_count
+FROM steward_expected_rls_policy_definitions
+GROUP BY relation_name;
 
 DO $$
 DECLARE
   mismatch text;
 BEGIN
-  IF (SELECT count(*) FROM steward_expected_rls_policies) <> 71
-     OR (SELECT sum(expected_policy_count) FROM steward_expected_rls_policies) <> 73 THEN
-    RAISE EXCEPTION 'SEC-169 policy inventory must contain exactly 71 relations and 73 policies';
-  END IF;
-
-  SELECT string_agg(i.relation_name, ', ' ORDER BY i.relation_name) INTO mismatch
-  FROM steward_expected_rls_policies i
-  LEFT JOIN pg_class c ON c.relname = i.relation_name
-  LEFT JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = 'public'
-  WHERE n.oid IS NULL OR c.relkind NOT IN ('r', 'p');
-  IF mismatch IS NOT NULL THEN
-    RAISE EXCEPTION 'SEC-169 inventory relations missing from public schema: %', mismatch;
+  IF (SELECT count(*) FROM steward_expected_rls_policies WHERE relation_name NOT LIKE 'capabilit%') <> 71
+     OR (SELECT sum(expected_policy_count) FROM steward_expected_rls_policies WHERE relation_name NOT LIKE 'capabilit%') <> 73
+     OR (SELECT count(*) FROM steward_expected_rls_policies WHERE relation_name LIKE 'capabilit%') NOT IN (0, 3)
+     OR (SELECT COALESCE(sum(expected_policy_count), 0) FROM steward_expected_rls_policies WHERE relation_name LIKE 'capabilit%') NOT IN (0, 3) THEN
+    RAISE EXCEPTION 'SEC-169 policy inventory must contain core 71/73 and optional capabilities 0/0 or 3/3';
   END IF;
 
   WITH actual AS (
-    SELECT c.relname, count(*)::integer AS policy_count
+    SELECT c.relname AS relation_name, c.relkind::text AS relation_kind,
+           COALESCE(string_agg(parent.relname, ',' ORDER BY parent.relname), '') AS partition_parents
+    FROM pg_class c
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    LEFT JOIN pg_inherits inherit ON inherit.inhrelid = c.oid
+    LEFT JOIN pg_class parent ON parent.oid = inherit.inhparent
+    LEFT JOIN pg_namespace parent_ns ON parent_ns.oid = parent.relnamespace
+    WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p')
+      AND (parent.oid IS NULL OR parent_ns.nspname = 'public')
+    GROUP BY c.relname, c.relkind
+  ), differences AS (
+    SELECT COALESCE(expected.relation_name, actual.relation_name) AS relation_name
+    FROM steward_expected_public_relations expected
+    FULL JOIN actual USING (relation_name)
+    WHERE expected.relation_kind IS DISTINCT FROM actual.relation_kind
+       OR expected.partition_parents IS DISTINCT FROM actual.partition_parents
+  )
+  SELECT string_agg(relation_name, ', ' ORDER BY relation_name) INTO mismatch FROM differences;
+  IF mismatch IS NOT NULL THEN
+    RAISE EXCEPTION 'SEC-169 public relation or partition inventory drift: %', mismatch;
+  END IF;
+
+  WITH actual AS (
+    SELECT c.relname AS relation_name, p.polname AS policy_name,
+           p.polcmd::text AS command, p.polpermissive AS permissive,
+           CASE WHEN p.polroles = ARRAY[0::oid] THEN 'PUBLIC'
+                ELSE array_to_string(ARRAY(
+                  SELECT role.rolname FROM pg_roles role
+                  WHERE role.oid = ANY(p.polroles) ORDER BY role.rolname
+                ), ',') END AS roles,
+           pg_get_expr(p.polqual, p.polrelid) AS using_expression,
+           pg_get_expr(p.polwithcheck, p.polrelid) AS check_expression
     FROM pg_policy p
     JOIN pg_class c ON c.oid = p.polrelid
     JOIN pg_namespace n ON n.oid = c.relnamespace
     WHERE n.nspname = 'public'
       AND p.polname <> 'steward_migration_maintenance'
-    GROUP BY c.relname
   ), differences AS (
-    SELECT coalesce(i.relation_name, a.relname) AS relation_name
-    FROM steward_expected_rls_policies i
-    FULL JOIN actual a ON a.relname = i.relation_name
-    WHERE i.expected_policy_count IS DISTINCT FROM a.policy_count
+    SELECT COALESCE(expected.relation_name, actual.relation_name) AS relation_name,
+           COALESCE(expected.policy_name, actual.policy_name) AS policy_name
+    FROM steward_expected_rls_policy_definitions expected
+    FULL JOIN actual USING (relation_name, policy_name)
+    WHERE expected.command IS DISTINCT FROM actual.command
+       OR expected.permissive IS DISTINCT FROM actual.permissive
+       OR expected.roles IS DISTINCT FROM actual.roles
+       OR expected.using_expression IS DISTINCT FROM actual.using_expression
+       OR expected.check_expression IS DISTINCT FROM actual.check_expression
   )
-  SELECT string_agg(relation_name, ', ' ORDER BY relation_name) INTO mismatch FROM differences;
+  SELECT string_agg(relation_name || '.' || policy_name, ', ' ORDER BY relation_name, policy_name)
+  INTO mismatch FROM differences;
   IF mismatch IS NOT NULL THEN
     RAISE EXCEPTION 'SEC-169 installed policies drift from inventory: %', mismatch;
   END IF;

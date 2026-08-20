@@ -10,7 +10,9 @@ const databaseName = `steward_rls_${suffix}`;
 const appRole = `steward_app_${suffix}`;
 const migrationRole = `steward_migrator_${suffix}`;
 const definerRole = `steward_definer_${suffix}`;
+const platformRole = `steward_platform_${suffix}`;
 const appRolePassword = randomUUID().replaceAll("-", "");
+const platformRolePassword = randomUUID().replaceAll("-", "");
 
 function databaseUrl(database: string): string {
   const url = new URL(process.env.DATABASE_URL as string);
@@ -22,6 +24,13 @@ function appDatabaseUrl(): string {
   const url = new URL(databaseUrl(databaseName));
   url.username = appRole;
   url.password = appRolePassword;
+  return url.toString();
+}
+
+function platformDatabaseUrl(): string {
+  const url = new URL(databaseUrl(databaseName));
+  url.username = platformRole;
+  url.password = platformRolePassword;
   return url.toString();
 }
 
@@ -53,6 +62,8 @@ async function runOperatorScript(name: string, includeRoles = false) {
       `steward_migration_role=${migrationRole}`,
       "-v",
       `steward_bootstrap_role=${definerRole}`,
+      "-v",
+      `steward_platform_role=${platformRole}`,
     );
   } else if (name === "rls-activate.sql") {
     command.push("-v", `steward_migration_role=${migrationRole}`);
@@ -69,6 +80,7 @@ describeWithPostgres("SEC-169 operator lifecycle on the real Steward schema", ()
     await admin.unsafe(`DROP ROLE IF EXISTS ${appRole}`);
     await admin.unsafe(`DROP ROLE IF EXISTS ${migrationRole}`);
     await admin.unsafe(`DROP ROLE IF EXISTS ${definerRole}`);
+    await admin.unsafe(`DROP ROLE IF EXISTS ${platformRole}`);
     await admin.end();
   });
 
@@ -82,7 +94,7 @@ describeWithPostgres("SEC-169 operator lifecycle on the real Steward schema", ()
     const firstMigration = await runCommand(["bun", "run", "packages/db/src/migrate.ts"], {
       DATABASE_URL: databaseUrl(databaseName),
     });
-    expect(firstMigration).toContain("0112_personal_tenant_account_lifecycle");
+    expect(firstMigration).toContain("0113_personal_tenant_account_lifecycle");
 
     const db = postgres(databaseUrl(databaseName), { max: 1 });
     try {
@@ -97,6 +109,7 @@ describeWithPostgres("SEC-169 operator lifecycle on the real Steward schema", ()
 
       await runOperatorScript("rls-bootstrap.sql", true);
       await admin.unsafe(`ALTER ROLE ${appRole} PASSWORD '${appRolePassword}'`);
+      await admin.unsafe(`ALTER ROLE ${platformRole} PASSWORD '${platformRolePassword}'`);
       const roleRows = await db<
         {
           rolname: string;
@@ -106,10 +119,10 @@ describeWithPostgres("SEC-169 operator lifecycle on the real Steward schema", ()
         }[]
       >`
         SELECT rolname, rolcanlogin, rolbypassrls, rolsuper
-        FROM pg_roles WHERE rolname IN (${appRole}, ${migrationRole}, ${definerRole})
+        FROM pg_roles WHERE rolname IN (${appRole}, ${migrationRole}, ${definerRole}, ${platformRole})
         ORDER BY rolname
       `;
-      expect(roleRows).toHaveLength(3);
+      expect(roleRows).toHaveLength(4);
       expect(roleRows.find((row) => row.rolname === appRole)).toMatchObject({
         rolcanlogin: true,
         rolbypassrls: false,
@@ -124,6 +137,43 @@ describeWithPostgres("SEC-169 operator lifecycle on the real Steward schema", ()
         rolcanlogin: false,
         rolbypassrls: true,
         rolsuper: false,
+      });
+      expect(roleRows.find((row) => row.rolname === platformRole)).toMatchObject({
+        rolcanlogin: true,
+        rolbypassrls: false,
+        rolsuper: false,
+      });
+      const [platformRlsPrivileges] = await db<
+        {
+          schema_usage: boolean;
+          tenant_id_execute: boolean;
+          user_id_execute: boolean;
+          audit_sequence_usage: boolean;
+          other_sequence_usage: boolean;
+          default_sequence_grant: boolean;
+        }[]
+      >`
+        SELECT
+          has_schema_privilege(${platformRole}, 'steward_rls', 'USAGE') AS schema_usage,
+          has_function_privilege(${platformRole}, 'steward_rls.tenant_id()', 'EXECUTE') AS tenant_id_execute,
+          has_function_privilege(${platformRole}, 'steward_rls.user_id()', 'EXECUTE') AS user_id_execute,
+          has_sequence_privilege(${platformRole}, 'public.audit_events_id_seq', 'USAGE,SELECT') AS audit_sequence_usage,
+          has_sequence_privilege(${platformRole}, 'public.audit_checkpoints_id_seq', 'USAGE') AS other_sequence_usage,
+          EXISTS (
+            SELECT 1
+            FROM pg_default_acl defaults
+            CROSS JOIN LATERAL aclexplode(COALESCE(defaults.defaclacl, '{}'::aclitem[])) privilege
+            JOIN pg_roles granted_role ON granted_role.oid = privilege.grantee
+            WHERE defaults.defaclobjtype = 'S' AND granted_role.rolname = ${platformRole}
+          ) AS default_sequence_grant
+      `;
+      expect(platformRlsPrivileges).toEqual({
+        schema_usage: true,
+        tenant_id_execute: true,
+        user_id_execute: false,
+        audit_sequence_usage: true,
+        other_sequence_usage: false,
+        default_sequence_grant: false,
       });
 
       await runOperatorScript("rls-activate.sql");
@@ -210,6 +260,18 @@ describeWithPostgres("SEC-169 operator lifecycle on the real Steward schema", ()
             )
           `;
         }),
+      ).rejects.toThrow(/permission denied/i);
+      await expect(
+        db.begin(async (tx) => {
+          await tx.unsafe(`SET LOCAL ROLE ${platformRole}`);
+          await tx`SELECT set_config('steward.tenant_id', 'platform', true)`;
+          await tx`
+            SELECT * FROM steward_bootstrap.platform_set_user_deactivation(
+              ${soleOwnerId}::uuid,
+              true
+            )
+          `;
+        }),
       ).rejects.toThrow("Cannot deactivate the sole active tenant owner");
 
       const personalOwnerId = randomUUID();
@@ -247,6 +309,8 @@ describeWithPostgres("SEC-169 operator lifecycle on the real Steward schema", ()
         {
           DATABASE_URL: appDatabaseUrl(),
           DATABASE_DRIVER: "postgres-js",
+          STEWARD_PLATFORM_DATABASE_URL: platformDatabaseUrl(),
+          STEWARD_PLATFORM_DATABASE_ROLE: platformRole,
           NODE_ENV: "test",
           APP_URL: "https://steward.test",
           JWT_SECRET: `rls-jwt-secret-${suffix}-0123456789abcdef`,
@@ -264,8 +328,20 @@ describeWithPostgres("SEC-169 operator lifecycle on the real Steward schema", ()
           STEWARD_RETENTION_DEACTIVATED_USERS_DELETE_CONFIRMED: undefined,
         },
       );
-      expect(appRoleEvidence).toContain('"ok":true');
-      expect(appRoleEvidence).toContain('"platformAuditActions"');
+      const evidenceLine = appRoleEvidence
+        .trim()
+        .split("\n")
+        .findLast((line) => line.startsWith('{"ok":true'));
+      expect(evidenceLine).toBeDefined();
+      const evidence = JSON.parse(evidenceLine as string) as {
+        ok: boolean;
+        platformAuditActions: string[];
+      };
+      expect(evidence.ok).toBe(true);
+      expect(evidence.platformAuditActions).toEqual([
+        "user.deactivate",
+        "user.deactivate.authorized",
+      ]);
 
       await runOperatorScript("rls-rollback.sql");
       const [rolledBack] = await db<{ enabled: number; forced: number }[]>`

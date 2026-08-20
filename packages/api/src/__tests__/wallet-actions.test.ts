@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { agents, closeDb, getDb, policies, tenants, transactions } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
+import { ExternalBroadcastOutcomeUnknownError } from "@stwd/vault";
 import { eq } from "drizzle-orm";
 import { Hono } from "hono";
 import type { AppVariables } from "../services/context";
@@ -718,6 +719,123 @@ describe("wallet transfer actions", () => {
     } finally {
       context.vault.buildSolanaSplTransferTransaction = originalBuildSplTransfer;
       context.vault.signSolanaTransaction = originalSignSolanaTransaction;
+    }
+  });
+
+  it("anchors and durably replays an ambiguous SPL broadcast without resending", async () => {
+    const context = await import("../services/context");
+    const originalBuild = context.vault.buildSolanaSplTransferTransaction.bind(context.vault);
+    const originalSign = context.vault.signSolanaTransaction.bind(context.vault);
+    const signature =
+      "4oL4p7QvN3UH7V5wMGZgW5PuzEk4A9LXLHk9RxAoKjDKuLbQBsfXN8kEvKfj5K1oEJa8wFF6RVp2h7pP9w2f51ZV";
+    let signCalls = 0;
+    context.vault.buildSolanaSplTransferTransaction = async () => ({
+      transaction: "base64-durable-spl-transfer",
+      sourceTokenAccount: "source-token-account",
+      destinationTokenAccount: "destination-token-account",
+      mint: SOLANA_MINT,
+      tokenProgram: "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+      decimals: 9,
+    });
+    context.vault.signSolanaTransaction = async (request) => {
+      signCalls += 1;
+      await request.onBroadcastPrepared?.({
+        signature,
+        recentBlockhash: "11111111111111111111111111111111",
+      });
+      throw new ExternalBroadcastOutcomeUnknownError(signature);
+    };
+    const request = (value = "123") =>
+      app.request(`/vault/${SOLANA_AGENT_ID}/actions/transfer`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "Idempotency-Key": "durable-spl" },
+        body: JSON.stringify({
+          to: ALLOWED_SOLANA,
+          token: SOLANA_MINT,
+          value,
+          chainId: 101,
+          broadcast: true,
+        }),
+      });
+
+    try {
+      const first = await request();
+      const firstBody = await first.json();
+      expect(first.status, JSON.stringify(firstBody)).toBe(202);
+      expect(firstBody).toMatchObject({
+        ok: false,
+        data: { txHash: signature, reconciliationRequired: true },
+      });
+      const replay = await request();
+      expect(replay.status).toBe(202);
+      expect(signCalls).toBe(1);
+      const mismatch = await request("124");
+      expect(mismatch.status).toBe(409);
+      expect(signCalls).toBe(1);
+
+      const [row] = await getDb()
+        .select()
+        .from(transactions)
+        .where(eq(transactions.txHash, signature));
+      expect(row.status).toBe("outcome_unknown");
+      expect(row.actionType).toBe("transfer");
+      expect(row.actionPayload).toMatchObject({
+        type: "transfer",
+        recoveryType: "solana_transaction",
+        recoveryActionType: "transfer",
+        token: SOLANA_MINT,
+        recentBlockhash: "11111111111111111111111111111111",
+      });
+    } finally {
+      context.vault.buildSolanaSplTransferTransaction = originalBuild;
+      context.vault.signSolanaTransaction = originalSign;
+    }
+  });
+
+  it("checkpoints native SOL before its lower-level broadcast and preserves the route payload", async () => {
+    const context = await import("../services/context");
+    const originalSign = context.vault.signTransaction.bind(context.vault);
+    const signature =
+      "5oL4p7QvN3UH7V5wMGZgW5PuzEk4A9LXLHk9RxAoKjDKuLbQBsfXN8kEvKfj5K1oEJa8wFF6RVp2h7pP9w2f51ZV";
+    let signCalls = 0;
+    context.vault.signTransaction = async (_request, metadata) => {
+      signCalls += 1;
+      await metadata.onSolanaBroadcastPrepared?.({
+        signature,
+        recentBlockhash: "11111111111111111111111111111111",
+      });
+      throw new ExternalBroadcastOutcomeUnknownError(signature);
+    };
+    const request = () =>
+      app.request(`/vault/${SOLANA_AGENT_ID}/actions/transfer`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "Idempotency-Key": "durable-native-sol" },
+        body: JSON.stringify({
+          to: ALLOWED_SOLANA,
+          value: "321",
+          chainId: 101,
+          broadcast: true,
+        }),
+      });
+
+    try {
+      expect((await request()).status).toBe(202);
+      expect((await request()).status).toBe(202);
+      expect(signCalls).toBe(1);
+      const [row] = await getDb()
+        .select()
+        .from(transactions)
+        .where(eq(transactions.txHash, signature));
+      expect(row).toMatchObject({ status: "outcome_unknown", actionType: "transfer" });
+      expect(row.actionPayload).toMatchObject({
+        type: "transfer",
+        token: "native",
+        amount: "321",
+        recoveryActionType: "transfer",
+        recentBlockhash: "11111111111111111111111111111111",
+      });
+    } finally {
+      context.vault.signTransaction = originalSign;
     }
   });
 

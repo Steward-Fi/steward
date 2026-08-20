@@ -499,6 +499,44 @@ afterAll(async () => {
 });
 
 describe("agent deletion upstream credential boundary", () => {
+  it("keeps the tenant intact when precommit external revocation fails", async () => {
+    const tenantId = `revocation-failure-${crypto.randomUUID()}`;
+    const agentId = `revocation-failure-agent-${crypto.randomUUID()}`;
+    await getDb()
+      .insert(tenants)
+      .values({
+        id: tenantId,
+        name: tenantId,
+        apiKeyHash: `hash-${tenantId}`,
+      });
+    await getDb().insert(agents).values({
+      id: agentId,
+      tenantId,
+      name: agentId,
+      walletAddress: "0x1234567890123456789012345678901234567890",
+    });
+    const originalRevokeAgentTokens = revocationStore.revokeAgentTokens.bind(revocationStore);
+    revocationStore.revokeAgentTokens = async () => {
+      throw new Error("injected shared revocation failure");
+    };
+    try {
+      const response = await platformTenantDelete(tenantId);
+      expect(response.status).toBeGreaterThanOrEqual(500);
+      expect(await getDb().select().from(tenants).where(eq(tenants.id, tenantId))).toHaveLength(1);
+      expect(await getDb().select().from(agents).where(eq(agents.id, agentId))).toHaveLength(1);
+      expect(
+        await getDb()
+          .select()
+          .from(auditEvents)
+          .where(and(eq(auditEvents.tenantId, tenantId), eq(auditEvents.action, "tenant.delete"))),
+      ).toHaveLength(0);
+    } finally {
+      revocationStore.revokeAgentTokens = originalRevokeAgentTokens;
+      await getDb().delete(agents).where(eq(agents.id, agentId));
+      await getDb().delete(tenants).where(eq(tenants.id, tenantId));
+    }
+  });
+
   it("refuses tenant-admin deletion while an active sealed lease remains", async () => {
     await expectBlockedDeletion("tenant", "active");
   });

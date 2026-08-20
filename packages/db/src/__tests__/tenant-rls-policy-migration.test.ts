@@ -84,6 +84,29 @@ describe("0111 tenant RLS policy installation", () => {
     );
   });
 
+  test("default bootstrap tolerates an occupied empty placeholder without aliasing it", async () => {
+    await client.query(`
+      INSERT INTO tenants(id, name, api_key_hash)
+      VALUES ('fixture-empty-key', 'Fixture', '')
+    `);
+    await client.query(`SELECT steward_bootstrap.ensure_default_tenant('')`);
+    const absent = await client.query<{ id: string }>(
+      `SELECT id FROM tenants WHERE id = 'default'`,
+    );
+    expect(absent.rows).toEqual([]);
+
+    await client.query(`SELECT steward_bootstrap.ensure_default_tenant('configured-default-key')`);
+    const [created] = (
+      await client.query<{ id: string; api_key_hash: string }>(
+        `SELECT id, api_key_hash FROM tenants WHERE id = 'default'`,
+      )
+    ).rows;
+    expect(created).toEqual({ id: "default", api_key_hash: "configured-default-key" });
+    await expect(
+      client.query(`SELECT steward_bootstrap.ensure_default_tenant('wrong-key')`),
+    ).rejects.toThrow("DEFAULT_TENANT_API_KEY_MISMATCH");
+  });
+
   test("operator scripts require no-bypass app/migration roles and atomic activation/rollback", async () => {
     const scripts = new URL("../../../../scripts/postgres/", import.meta.url);
     const bootstrap = await readFile(new URL("rls-bootstrap.sql", scripts), "utf8");
@@ -91,11 +114,18 @@ describe("0111 tenant RLS policy installation", () => {
     const rollback = await readFile(new URL("rls-rollback.sql", scripts), "utf8");
     const inventory = await readFile(new URL("rls-policy-inventory.sql", scripts), "utf8");
     expect(bootstrap).toContain("NOINHERIT NOBYPASSRLS");
-    expect(bootstrap).toContain("app, migration-maintenance, and definer roles must be distinct");
+    expect(bootstrap).toContain(
+      "app, platform, migration-maintenance, and definer roles must be distinct",
+    );
     expect(bootstrap).toContain("app role must not inherit or assume migration role");
+    expect(bootstrap).toContain("app role must not inherit or assume platform role");
+    expect(bootstrap).toContain("REVOKE EXECUTE ON FUNCTION");
+    expect(bootstrap).toContain("platform_set_user_deactivation(uuid,boolean)");
     expect(bootstrap).toContain("BEGIN;");
     expect(bootstrap).toContain("COMMIT;");
-    expect(inventory).toContain("exactly 71 relations and 73 policies");
+    expect(inventory).toContain("core 71/73 and optional capabilities 0/0 or 3/3");
+    expect(inventory).toContain("rls-policy-manifest.sql");
+    expect(inventory).toContain("pg_get_expr");
     expect(activate).toContain("\\ir rls-policy-inventory.sql");
     expect(rollback).toContain("\\ir rls-policy-inventory.sql");
     expect(activate).toContain("ENABLE ROW LEVEL SECURITY");

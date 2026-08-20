@@ -7,6 +7,7 @@
  */
 
 import { createPriceOracle, type PolicyRule } from "@stwd/shared";
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 import {
   checkAgentRateLimit,
   isRedisAvailable,
@@ -112,6 +113,12 @@ export function formatRateLimitHeaders(input: RateLimitHeaderInput): Record<stri
     headers["Retry-After"] = String(Math.max(1, Math.ceil(input.retryAfterMs / 1000)));
   }
   return headers;
+}
+
+/** Resolve the conservative oracle-outage valuation from the active request binding. */
+export function nativePriceFallbackUsd(): number {
+  const parsed = Number(runtimeEnvironmentValue("STEWARD_NATIVE_PRICE_FALLBACK_USD"));
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 10_000;
 }
 
 /**
@@ -236,10 +243,7 @@ export async function recordVaultSpend(
   const decimals = 18; // EVM native tokens use 18 decimals
   const divisor = 10n ** BigInt(decimals);
   const tokenAmount = Number(wei / divisor) + Number(wei % divisor) / Number(divisor);
-  const fallbackNativePriceUsd = (() => {
-    const parsed = Number(process.env.STEWARD_NATIVE_PRICE_FALLBACK_USD);
-    return Number.isFinite(parsed) && parsed > 0 ? parsed : 10_000;
-  })();
+  const fallbackNativePriceUsd = nativePriceFallbackUsd();
   const conservativeUsd = tokenAmount * fallbackNativePriceUsd;
   await recordAgentSpend(agentId, tenantId, conservativeUsd, `chain:${chainId}`);
 }

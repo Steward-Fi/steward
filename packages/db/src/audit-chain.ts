@@ -25,7 +25,7 @@
 import { createHmac } from "node:crypto";
 import { observeSecurityAuditEvent } from "@stwd/shared";
 import { sql } from "drizzle-orm";
-import { DatabaseDeadlineExceededError, getDb } from "./client";
+import { DatabaseDeadlineExceededError, getDb, hasTenantTransactionDatabase } from "./client";
 
 const ZERO_HASH = new Uint8Array(32);
 
@@ -514,44 +514,64 @@ export async function withTenantAuditedTransactionOnDb<T>(
     }
   };
 
+  const runOnTransaction = async (tx: AuditTxLike, auditTx: AuditTxLike = tx) => {
+    if (!isPGLiteRuntime()) {
+      if (deadlineAt !== undefined) {
+        const remaining = Math.max(1, deadlineAt - Date.now());
+        await tx.execute(sql.raw(`SET LOCAL statement_timeout = '${remaining}ms'`));
+        await tx.execute(sql.raw(`SET LOCAL lock_timeout = '${remaining}ms'`));
+        await tx.execute(
+          sql.raw(`SET LOCAL idle_in_transaction_session_timeout = '${remaining}ms'`),
+        );
+      }
+      await tx.execute(
+        sql`SELECT pg_advisory_xact_lock(hashtextextended(${`steward_audit_${tenantId}`}, 0))`,
+      );
+    }
+    const committedEvents: AuditEventInput[] = [];
+    const appendRequiredAudit: AppendRequiredAudit = async (event) => {
+      if (event.tenantId !== tenantId) {
+        throw new Error(
+          "withTenantAuditedTransaction: audit event tenant does not match transaction tenant",
+        );
+      }
+      await appendAuditEventWithinTx(auditTx, event);
+      committedEvents.push(event);
+    };
+    const result = await fn(tx, appendRequiredAudit);
+    return { committedEvents, result };
+  };
+
+  const observeCommittedEvents = (events: AuditEventInput[]) => {
+    for (const event of events) {
+      try {
+        observeSecurityAuditEvent(event.action, event.metadata);
+      } catch {
+        // Monitoring must never become part of the security decision path.
+      }
+    }
+  };
+
   const execute = async () => {
+    if (hasTenantTransactionDatabase({ tenantId, db })) {
+      assertRemaining();
+      // The authenticated middleware owns the outer tenant transaction. Keep
+      // mutations in a savepoint so a Hono error response cannot accidentally
+      // commit partial route state, while routing raw audit statements through
+      // the request-bound outer executor so deterministic DB fault wrappers
+      // remain reachable. Both handles share the same connection/GUC/socket.
+      const outcome = await db.transaction((tx) =>
+        runOnTransaction(tx as AuditTxLike, db as unknown as AuditTxLike),
+      );
+      observeCommittedEvents(outcome.committedEvents);
+      return outcome.result;
+    }
     for (let attempt = 0; attempt < 5; attempt++) {
       try {
         assertRemaining();
-        const committedEvents: AuditEventInput[] = [];
-        const result = await db.transaction(async (tx) => {
-          if (!isPGLiteRuntime()) {
-            if (deadlineAt !== undefined) {
-              const remaining = Math.max(1, deadlineAt - Date.now());
-              await tx.execute(sql.raw(`SET LOCAL statement_timeout = '${remaining}ms'`));
-              await tx.execute(sql.raw(`SET LOCAL lock_timeout = '${remaining}ms'`));
-              await tx.execute(
-                sql.raw(`SET LOCAL idle_in_transaction_session_timeout = '${remaining}ms'`),
-              );
-            }
-            await tx.execute(
-              sql`SELECT pg_advisory_xact_lock(hashtextextended(${`steward_audit_${tenantId}`}, 0))`,
-            );
-          }
-          const appendRequiredAudit: AppendRequiredAudit = async (event) => {
-            if (event.tenantId !== tenantId) {
-              throw new Error(
-                "withTenantAuditedTransaction: audit event tenant does not match transaction tenant",
-              );
-            }
-            await appendAuditEventWithinTx(tx as AuditTxLike, event);
-            committedEvents.push(event);
-          };
-          return await fn(tx, appendRequiredAudit);
-        });
-        for (const event of committedEvents) {
-          try {
-            observeSecurityAuditEvent(event.action, event.metadata);
-          } catch {
-            // Monitoring must never become part of the security decision path.
-          }
-        }
-        return result;
+        const outcome = await db.transaction((tx) => runOnTransaction(tx as AuditTxLike));
+        observeCommittedEvents(outcome.committedEvents);
+        return outcome.result;
       } catch (err) {
         if (attempt < 4 && isAuditSequenceConflict(err)) {
           assertRemaining();

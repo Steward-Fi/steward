@@ -18,7 +18,7 @@ const rlsMigrationSource = readFileSync(
   "utf8",
 );
 const personalLifecycleMigrationSource = readFileSync(
-  join(apiRoot, "..", "..", "db", "drizzle", "0112_personal_tenant_account_lifecycle.sql"),
+  join(apiRoot, "..", "..", "db", "drizzle", "0113_personal_tenant_account_lifecycle.sql"),
   "utf8",
 );
 
@@ -467,13 +467,16 @@ describe("platform security hardening", () => {
       tenantDeleteStart,
       platformSource.indexOf('platform.put("/tenants/:id/policies"', tenantDeleteStart),
     );
-    expect(tenantDeleteRoute.indexOf("tx.delete(tenants)")).toBeLessThan(
-      tenantDeleteRoute.indexOf("revocationStore.revokeAgentTokens(agentId)"),
+    expect(tenantDeleteRoute.indexOf("revocationStore.revokeAgentTokens(agent.id)")).toBeLessThan(
+      tenantDeleteRoute.indexOf("tx.delete(tenants)"),
     );
-    expect(tenantDeleteRoute.indexOf("tx.delete(tenants)")).toBeLessThan(
-      tenantDeleteRoute.indexOf("revocationStore.revokeUserTokens(userId)"),
-    );
+    expect(
+      tenantDeleteRoute.indexOf("revocationStore.revokeUserTokens(member.userId)"),
+    ).toBeLessThan(tenantDeleteRoute.indexOf("tx.delete(tenants)"));
     expect(tenantDeleteRoute).toContain('action: "tenant.delete.token_revocation_completed"');
+    expect(
+      tenantDeleteRoute.indexOf('action: "tenant.delete.token_revocation_completed"'),
+    ).toBeLessThan(tenantDeleteRoute.indexOf("tx.delete(tenants)"));
   });
 
   it("removes non-cascading tenant credential state during tenant deletion", () => {

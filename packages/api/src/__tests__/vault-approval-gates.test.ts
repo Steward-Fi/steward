@@ -23,12 +23,13 @@
  *      showing the audit row persists while the approval is rolled back to
  *      pending (fail-closed: a sign failure never leaves the tx approved/signed).
  *
- * The only mocked seam (test 4) is `Vault.prototype.signTransaction`, stubbed to
- * throw so the post-audit / pre-sign ordering is observable without real key
- * material. Everything else — auth gates, policy re-evaluation, the audit HMAC
- * chain write, and the rollback — runs for real.
+ * The only mocked seam (test 4) is the factory-cached route Vault's
+ * `signTransaction`, stubbed to throw so the post-audit / pre-sign ordering is
+ * observable without real key material. Everything else — auth gates, policy
+ * re-evaluation, the audit HMAC chain write, and the rollback — runs for real.
  */
 import { afterAll, beforeAll, describe, expect, it, spyOn } from "bun:test";
+import { createHash } from "node:crypto";
 import {
   agents,
   approvalQueue,
@@ -42,7 +43,8 @@ import {
   userTenants,
 } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
-import { Vault } from "@stwd/vault";
+import { canonicalJsonStringify } from "@stwd/shared";
+import { ExternalBroadcastOutcomeUnknownError, Vault } from "@stwd/vault";
 import { and, eq } from "drizzle-orm";
 import { Hono } from "hono";
 import type { AppVariables } from "../services/context";
@@ -50,6 +52,7 @@ import {
   executionPayloadDigestForEvmSign,
   policyRevisionHashForPolicySet,
 } from "../services/execution-authorization";
+import { getConfiguredVault } from "../services/vault-factory";
 
 const TENANT_ID = `approval-gate-tenant-${Date.now()}`;
 const ACTOR_ID = "00000000-0000-4000-8000-000000000001";
@@ -64,6 +67,10 @@ const AGENT_AUDIT = `approval-audit-${Date.now()}`;
 const AGENT_LIFECYCLE = `approval-lifecycle-${Date.now()}`;
 const AGENT_SEPARATION = `approval-separation-${Date.now()}`;
 const AGENT_REMOVED_REVIEWER = `approval-removed-reviewer-${Date.now()}`;
+const AGENT_SOLANA = `approval-solana-${Date.now()}`;
+const SOLANA_RECIPIENT = "7J9kqM5kV8Fh1Q3b6N2pR4tYwLcXzAaBbCcDdEeFfGg";
+const SOLANA_SIGNATURE =
+  "4oL4p7QvN3UH7V5wMGZgW5PuzEk4A9LXLHk9RxAoKjDKuLbQBsfXN8kEvKfj5K1oEJa8wFF6RVp2h7pP9w2f51ZV";
 
 // One app per auth posture. The approve route reads auth purely from context
 // variables, so a per-test middleware that sets exactly the desired posture is
@@ -165,6 +172,89 @@ async function seedPendingTx(
     });
 }
 
+async function seedPendingSolanaApproval() {
+  await getDb().insert(agents).values({
+    id: AGENT_SOLANA,
+    tenantId: TENANT_ID,
+    name: "Approval Gate Solana Agent",
+    walletAddress: "9J9kqM5kV8Fh1Q3b6N2pR4tYwLcXzAaBbCcDdEeFfGg",
+  });
+  await seedWhitelist(AGENT_SOLANA, [SOLANA_RECIPIENT]);
+  await getDb()
+    .insert(transactions)
+    .values({
+      id: "tx-approved-solana-recovery",
+      agentId: AGENT_SOLANA,
+      status: "pending",
+      toAddress: SOLANA_RECIPIENT,
+      value: "100",
+      data: "serialized-approved-solana",
+      chainId: 101,
+      actionType: "transaction",
+      actionPayload: { type: "transaction", broadcast: true },
+      policyResults: [],
+    });
+  await getDb().insert(approvalQueue).values({
+    id: "aq-tx-approved-solana-recovery",
+    txId: "tx-approved-solana-recovery",
+    agentId: AGENT_SOLANA,
+    status: "pending",
+  });
+}
+
+async function seedCrashedApprovedSolanaExecution() {
+  const txId = "tx-crashed-approved-solana";
+  const basePayload = { type: "transaction", broadcast: true };
+  const requestDigest = createHash("sha256")
+    .update(
+      canonicalJsonStringify({
+        actionPayload: basePayload,
+        actionType: "transaction",
+        agentId: AGENT_SOLANA,
+        chainId: 101,
+        data: "serialized-crashed-approved-solana",
+        id: txId,
+        toAddress: SOLANA_RECIPIENT,
+        value: "200",
+      }),
+    )
+    .digest("hex");
+  await getDb()
+    .insert(transactions)
+    .values({
+      id: txId,
+      agentId: AGENT_SOLANA,
+      status: "pending",
+      toAddress: SOLANA_RECIPIENT,
+      value: "200",
+      data: "serialized-crashed-approved-solana",
+      chainId: 101,
+      actionType: "transaction",
+      actionPayload: {
+        ...basePayload,
+        recoveryType: "solana_transaction",
+        recoveryActionType: "transaction",
+        recoveryAnchor: true,
+        requestDigest,
+        executionToken: "crashed-owner",
+        attemptLeaseUntil: new Date(Date.now() + 60_000).toISOString(),
+      },
+      policyResults: [],
+    });
+  await getDb()
+    .insert(approvalQueue)
+    .values({
+      id: "aq-tx-crashed-approved-solana",
+      txId,
+      agentId: AGENT_SOLANA,
+      status: "approved",
+      resolvedAt: new Date(),
+      resolvedBy: `user:${ACTOR_ID}`,
+      resolvedByType: "user",
+      resolvedById: ACTOR_ID,
+    });
+}
+
 function approve(app: Awaited<ReturnType<typeof makeApp>>, agentId: string, txId: string) {
   return app.request(`/vault/${agentId}/approve/${txId}`, {
     method: "POST",
@@ -178,6 +268,8 @@ describe("vault approval gates (real /approve path)", () => {
     process.env.STEWARD_PGLITE_MEMORY = "true";
     process.env.STEWARD_MASTER_PASSWORD = "approval-gate-master-password";
     process.env.STEWARD_JWT_SECRET = "approval-gate-jwt-secret-with-enough-entropy-0123456789";
+    process.env.STEWARD_EXECUTION_AUTH_SECRET =
+      "approval-gate-execution-auth-secret-0123456789abcdef";
     process.env.STEWARD_AUDIT_HMAC_KEY ??=
       "approval-gate-test-audit-hmac-key-0123456789abcdef0123456789";
     const { db, client } = await createPGLiteDb("memory://");
@@ -227,6 +319,8 @@ describe("vault approval gates (real /approve path)", () => {
     await seedAgent(AGENT_REMOVED_REVIEWER, "5");
     await seedWhitelist(AGENT_REMOVED_REVIEWER, [RECIPIENT]);
     await seedPendingTx(AGENT_REMOVED_REVIEWER, "tx-removed-reviewer", RECIPIENT);
+    await seedPendingSolanaApproval();
+    await seedCrashedApprovedSolanaExecution();
 
     // Lifecycle scenario: a tx that reached "broadcast" but whose approval-queue
     // row is somehow still pending. The lifecycle route must refuse to promote it
@@ -258,6 +352,7 @@ describe("vault approval gates (real /approve path)", () => {
     await closeDb();
     delete process.env.STEWARD_PGLITE_MEMORY;
     delete process.env.STEWARD_MASTER_PASSWORD;
+    delete process.env.STEWARD_EXECUTION_AUTH_SECRET;
   });
 
   it("refuses approval from an api-key principal (no owner/admin session)", async () => {
@@ -268,6 +363,131 @@ describe("vault approval gates (real /approve path)", () => {
     const body = (await res.json()) as { ok: boolean; error?: string };
     expect(body.ok).toBe(false);
     expect(body.error).toBe("Transaction approval requires owner or admin session");
+  });
+
+  it("checkpoints an approved Solana broadcast before I/O and keeps ambiguous execution terminal", async () => {
+    const app = await makeApp({ authType: "session-jwt", role: "owner", mfa: true });
+    const sign = spyOn(Vault.prototype, "signSolanaTransaction").mockImplementation(
+      async (request) => {
+        const [before] = await getDb()
+          .select()
+          .from(transactions)
+          .where(eq(transactions.id, "tx-approved-solana-recovery"));
+        expect(before.status).toBe("pending");
+        expect(before.actionPayload).toMatchObject({
+          type: "transaction",
+          recoveryActionType: "transaction",
+          recoveryAnchor: true,
+        });
+        await request.onBroadcastPrepared?.({
+          signature: SOLANA_SIGNATURE,
+          recentBlockhash: "11111111111111111111111111111111",
+        });
+        throw new ExternalBroadcastOutcomeUnknownError(SOLANA_SIGNATURE);
+      },
+    );
+    try {
+      const response = await approve(app, AGENT_SOLANA, "tx-approved-solana-recovery");
+      expect(response.status).toBe(202);
+      expect(await response.json()).toMatchObject({
+        ok: false,
+        data: { txHash: SOLANA_SIGNATURE, reconciliationRequired: true },
+      });
+      const [row] = await getDb()
+        .select()
+        .from(transactions)
+        .where(eq(transactions.id, "tx-approved-solana-recovery"));
+      expect(row.status).toBe("outcome_unknown");
+      expect(row.txHash).toBe(SOLANA_SIGNATURE);
+      expect(row.actionPayload).toMatchObject({
+        type: "transaction",
+        recoveryActionType: "transaction",
+        recentBlockhash: "11111111111111111111111111111111",
+      });
+      const [approval] = await getDb()
+        .select()
+        .from(approvalQueue)
+        .where(eq(approvalQueue.txId, "tx-approved-solana-recovery"));
+      expect(approval.status).toBe("approved");
+    } finally {
+      sign.mockRestore();
+    }
+  });
+
+  it("blocks a live approved owner then CAS-takes over its expired pre-checkpoint lease once", async () => {
+    const app = await makeApp({ authType: "session-jwt", role: "owner", mfa: true });
+    const live = await approve(app, AGENT_SOLANA, "tx-crashed-approved-solana");
+    expect(live.status).toBe(409);
+    expect(await live.json()).toMatchObject({
+      ok: false,
+      error: "Approved Solana execution is already in progress",
+    });
+
+    const [crashed] = await getDb()
+      .select()
+      .from(transactions)
+      .where(eq(transactions.id, "tx-crashed-approved-solana"));
+    await getDb()
+      .update(transactions)
+      .set({
+        actionPayload: {
+          ...(crashed.actionPayload as Record<string, unknown>),
+          attemptLeaseUntil: new Date(Date.now() - 1_000).toISOString(),
+        },
+      })
+      .where(eq(transactions.id, crashed.id));
+
+    let signCalls = 0;
+    let submitted = 0;
+    let signalWinner!: () => void;
+    const winnerStarted = new Promise<void>((resolve) => {
+      signalWinner = resolve;
+    });
+    let releaseWinner!: () => void;
+    const winnerBarrier = new Promise<void>((resolve) => {
+      releaseWinner = resolve;
+    });
+    const sign = spyOn(Vault.prototype, "signSolanaTransaction").mockImplementation(
+      async (request) => {
+        signCalls += 1;
+        signalWinner();
+        await winnerBarrier;
+        await request.onBroadcastPrepared?.({
+          signature: SOLANA_SIGNATURE,
+          recentBlockhash: "11111111111111111111111111111111",
+        });
+        submitted += 1;
+        return { signature: SOLANA_SIGNATURE, broadcast: true, chainId: 101 };
+      },
+    );
+    try {
+      const winnerPromise = approve(app, AGENT_SOLANA, "tx-crashed-approved-solana");
+      await winnerStarted;
+      const concurrentPromise = approve(app, AGENT_SOLANA, "tx-crashed-approved-solana");
+      await Bun.sleep(10);
+      expect(signCalls).toBe(1);
+      expect(submitted).toBe(0);
+      releaseWinner();
+
+      const [winner, concurrent] = await Promise.all([winnerPromise, concurrentPromise]);
+      expect(winner.status).toBe(200);
+      expect([404, 409]).toContain(concurrent.status);
+      expect(signCalls).toBe(1);
+      expect(submitted).toBe(1);
+      const [row] = await getDb()
+        .select()
+        .from(transactions)
+        .where(eq(transactions.id, "tx-crashed-approved-solana"));
+      expect(row.status).toBe("broadcast");
+      expect(row.txHash).toBe(SOLANA_SIGNATURE);
+      expect(row.actionPayload).toMatchObject({
+        executionToken: expect.not.stringMatching(/^crashed-owner$/),
+        recentBlockhash: "11111111111111111111111111111111",
+      });
+    } finally {
+      releaseWinner();
+      sign.mockRestore();
+    }
   });
 
   it("refuses approval from an owner session WITHOUT recent MFA", async () => {
@@ -408,10 +628,17 @@ describe("vault approval gates (real /approve path)", () => {
   });
 
   it("writes the authorized audit row BEFORE the irreversible sign, and rolls back on sign failure", async () => {
-    // Fault-inject the sign so the route reaches it (policy approves) then throws.
-    const spy = spyOn(Vault.prototype, "signTransaction").mockRejectedValue(
-      new Error("hsm offline"),
-    );
+    // Fault-inject the exact password-keyed Vault instance used by the route.
+    // Spying on the imported class prototype is not a reachable seam now that
+    // context.ts resolves its Vault late through the configured-vault factory.
+    const routeVault = getConfiguredVault({
+      fallbackPassword: process.env.STEWARD_MASTER_PASSWORD,
+    });
+    let signAttempts = 0;
+    routeVault.signTransaction = async () => {
+      signAttempts += 1;
+      throw new Error("hsm offline");
+    };
     try {
       const app = await makeApp({ authType: "session-jwt", role: "owner", mfa: true });
       const res = await approve(app, AGENT_AUDIT, "tx-audit-order");
@@ -422,7 +649,7 @@ describe("vault approval gates (real /approve path)", () => {
       expect(body.signedTx).toBeUndefined();
       expect(body.txHash).toBeUndefined();
       // The sign was actually attempted (proves we got past policy re-eval).
-      expect(spy).toHaveBeenCalled();
+      expect(signAttempts).toBe(1);
 
       // CRITICAL ordering invariant: the authorized-intent audit row was written
       // BEFORE the sign call, so it survives even though the sign threw.
@@ -463,7 +690,7 @@ describe("vault approval gates (real /approve path)", () => {
         );
       expect(successRows.length).toBe(0);
     } finally {
-      spy.mockRestore();
+      Reflect.deleteProperty(routeVault, "signTransaction");
     }
   });
 });

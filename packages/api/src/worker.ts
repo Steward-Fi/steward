@@ -52,6 +52,7 @@ import {
   withJwtRuntimeAuthority,
 } from "@stwd/auth/jwt";
 import {
+  assertRlsDeploymentSafety,
   createDbForRequest,
   createNeonTransactionDbForRequest,
   getDb,
@@ -65,6 +66,9 @@ export interface Env {
   DATABASE_URL: string;
   DATABASE_DRIVER?: string;
   NODE_ENV?: string;
+  STEWARD_APP_DATABASE_ROLE?: string;
+  STEWARD_PLATFORM_DATABASE_URL?: string;
+  STEWARD_PLATFORM_DATABASE_ROLE?: string;
   STEWARD_ALLOW_INSECURE_DB?: string;
   STEWARD_ALLOW_UNVERIFIED_DB_TLS?: string;
   REDIS_DRIVER?: string;
@@ -373,6 +377,11 @@ async function ensureWorkerInit(env: Env): Promise<void> {
     // secret or malformed AGENT_TOKEN_EXPIRY fails closed at cold start instead
     // of surfacing at first token sign/verify.
     validateWorkerSecurityEnv();
+    const expectedRole = env.STEWARD_APP_DATABASE_ROLE?.trim();
+    if (!expectedRole) {
+      throw new Error("STEWARD_APP_DATABASE_ROLE is required on Workers");
+    }
+    await assertRlsDeploymentSafety(getDb(), { expectedRole });
     const redisOk = await initRedis(env);
     // Auth stores (passkey challenges, magic-link tokens, SIWE/SIWS nonces)
     // must be initialized too — without this they stay on the lazy memory
@@ -430,6 +439,10 @@ async function ensureWorkerInit(env: Env): Promise<void> {
 // never statically references the trading stack.
 let composedApp: Awaited<ReturnType<typeof import("./compose").composeApp>> | null = null;
 
+export function __setWorkerInitForTests(value: Promise<void> | null): void {
+  workerInit = value;
+}
+
 async function getComposedApp() {
   if (composedApp) return composedApp;
   const { composeApp } = await import("./compose");
@@ -472,13 +485,14 @@ export default {
       return withWorkerJwtAuthority(env, () => {
         hydrateProcessEnv(env);
         validateWorkerSecurityEnv();
-        ctx.waitUntil(
+        const scheduledWork = withWorkerRequestDatabase(env, () => ensureWorkerInit(env)).then(() =>
           Promise.all([
             withWorkerRequestDatabase(env, () => runWorkerUpstreamCredentialLeaseSweep(env)),
             withWorkerRequestDatabase(env, () => runWorkerGoogleCredentialLifecycleSweep(env)),
             withWorkerRequestDatabase(env, () => runWorkerXCredentialLifecycleSweep(env)),
           ]),
         );
+        ctx.waitUntil(scheduledWork);
       });
     });
   },

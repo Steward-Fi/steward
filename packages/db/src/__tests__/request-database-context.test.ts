@@ -11,6 +11,7 @@ import {
   waitUntilRequestDatabaseTask,
   withRequestDatabase,
   withTenantTransactionDatabase,
+  withTenantTransactionDatabaseDeadline,
 } from "../client";
 import { createPGLiteDb } from "../pglite";
 import { tenants } from "../schema";
@@ -63,8 +64,15 @@ describe("request-scoped database context", () => {
           hasTenantTransactionDatabase({
             tenantId: "tenant-a",
             userId: "11111111-1111-4111-8111-111111111111",
+            db: getDb(),
           }),
         ).toBe(true);
+        expect(
+          hasTenantTransactionDatabase({
+            tenantId: "tenant-a",
+            db: { marker: "separate-handle" } as unknown as ReturnType<typeof getDb>,
+          }),
+        ).toBe(false);
         expect(() => hasTenantTransactionDatabase({ tenantId: "tenant-b" })).toThrow(
           "RLS_TENANT_DATABASE_CONTEXT_MISMATCH",
         );
@@ -76,6 +84,42 @@ describe("request-scoped database context", () => {
         ).toThrow("RLS_TENANT_DATABASE_CONTEXT_MISMATCH");
       },
     );
+  });
+
+  test("deadline phases preserve the exact tenant transaction capability", async () => {
+    const executed: unknown[] = [];
+    const transactionDb = {
+      marker: "tenant-transaction",
+      execute: async (query: unknown) => {
+        executed.push(query);
+        return [];
+      },
+    } as unknown as ReturnType<typeof getDb>;
+
+    await expect(
+      withTenantTransactionDatabaseDeadline(Date.now() + 5_000, async () => undefined),
+    ).rejects.toThrow("RLS_TENANT_DATABASE_CONTEXT_REQUIRED");
+
+    await withTenantTransactionDatabase(
+      transactionDb,
+      {
+        tenantId: "tenant-a",
+        userId: "11111111-1111-4111-8111-111111111111",
+      },
+      async () => {
+        await withTenantTransactionDatabaseDeadline(Date.now() + 5_000, async (deadlineDb) => {
+          expect(deadlineDb).toBe(getDb());
+          expect((deadlineDb as unknown as { marker: string }).marker).toBe("tenant-transaction");
+          expect(
+            hasTenantTransactionDatabase({
+              tenantId: "tenant-a",
+              userId: "11111111-1111-4111-8111-111111111111",
+            }),
+          ).toBe(true);
+        });
+      },
+    );
+    expect(executed).toHaveLength(3);
   });
 
   test("tenant transaction drains registered work and revokes retained capabilities", async () => {
