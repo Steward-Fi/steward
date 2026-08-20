@@ -191,8 +191,9 @@ beforeAll(async () => {
   globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const url =
       typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-    if (url.startsWith(PROXY_URL) && proxyApp) {
-      const path = url.slice(PROXY_URL.length) || "/";
+    const parsedUrl = new URL(url);
+    if (parsedUrl.origin === PROXY_URL && proxyApp) {
+      const path = `${parsedUrl.pathname}${parsedUrl.search}`;
       lastProxyRequestHeaders = new Headers(init?.headers);
       lastProxyRequest = {
         path,
