@@ -7588,22 +7588,36 @@ vaultRoutes.post("/:agentId/monero/transfer", async (c) => {
       priority: priority ?? 0,
     }),
   );
-  const findExistingMoneroAction = () =>
-    referenceId
-      ? findActionByReferenceId(agentId, "monero_transfer", referenceId)
-      : findMoneroActionByIdempotency(agentId, idempotencyKeyDigest);
-  const existingAction = await findExistingMoneroAction();
-  if (existingAction) {
-    if (
-      !referenceId &&
-      (existingAction.actionPayload as Record<string, unknown> | null)?.requestDigest !==
-        requestDigest
-    ) {
-      return c.json<ApiResponse>(
-        { ok: false, error: "Idempotency-Key was already used for a different request" },
-        409,
-      );
+  const findExistingMoneroAction = async () => {
+    const [byIdempotencyKey, byReferenceId] = await Promise.all([
+      findMoneroActionByIdempotency(agentId, idempotencyKeyDigest),
+      findActionByReferenceId(agentId, "monero_transfer", referenceId),
+    ]);
+    if (byIdempotencyKey && byReferenceId && byIdempotencyKey.id !== byReferenceId.id) {
+      return { conflict: "Idempotency-Key and referenceId identify different requests" } as const;
     }
+
+    const existing = byIdempotencyKey ?? byReferenceId;
+    if (!existing) return { existing: null } as const;
+    const payload = existing.actionPayload as Record<string, unknown> | null;
+    if (payload?.requestDigest !== requestDigest) {
+      return {
+        conflict: byIdempotencyKey
+          ? "Idempotency-Key was already used for a different request"
+          : "referenceId was already used for a different request",
+      } as const;
+    }
+    if (byIdempotencyKey && actionReferenceId(payload) !== (referenceId ?? null)) {
+      return { conflict: "Idempotency-Key was already used with a different referenceId" } as const;
+    }
+    return { existing } as const;
+  };
+  const existingLookup = await findExistingMoneroAction();
+  if ("conflict" in existingLookup) {
+    return c.json<ApiResponse>({ ok: false, error: existingLookup.conflict }, 409);
+  }
+  const existingAction = existingLookup.existing;
+  if (existingAction) {
     if (
       (existingAction.status === "broadcast" ||
         existingAction.status === "confirmed" ||
@@ -7640,18 +7654,12 @@ vaultRoutes.post("/:agentId/monero/transfer", async (c) => {
   const moneroChainId = scopeNetwork === "mainnet" ? 301 : 302;
 
   return withAgentSpendLock(agentId, async () => {
-    const lockedExistingAction = await findExistingMoneroAction();
+    const lockedLookup = await findExistingMoneroAction();
+    if ("conflict" in lockedLookup) {
+      return c.json<ApiResponse>({ ok: false, error: lockedLookup.conflict }, 409);
+    }
+    const lockedExistingAction = lockedLookup.existing;
     if (lockedExistingAction) {
-      if (
-        !referenceId &&
-        (lockedExistingAction.actionPayload as Record<string, unknown> | null)?.requestDigest !==
-          requestDigest
-      ) {
-        return c.json<ApiResponse>(
-          { ok: false, error: "Idempotency-Key was already used for a different request" },
-          409,
-        );
-      }
       if (
         (lockedExistingAction.status === "broadcast" ||
           lockedExistingAction.status === "confirmed" ||

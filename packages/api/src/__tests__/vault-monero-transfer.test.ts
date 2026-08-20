@@ -540,6 +540,7 @@ describe("vault Monero transfer + balance routes", () => {
         {
           walletScope: SCOPE,
           destinations: [{ address: allowedRecipient, amountPiconero: "2000000000000" }],
+          priority: 1,
           referenceId,
         },
         { "Idempotency-Key": crypto.randomUUID() },
@@ -611,6 +612,61 @@ describe("vault Monero transfer + balance routes", () => {
       expect(complete?.actionPayload).toMatchObject({ recoveryEffectsState: "complete" });
       expect((complete?.actionPayload as Record<string, unknown>).recoveryEffectsOccurredAt).toBe(
         occurredAt,
+      );
+    } finally {
+      if (ORIGINAL_REDIS_URL === undefined) delete process.env.REDIS_URL;
+      else process.env.REDIS_URL = ORIGINAL_REDIS_URL;
+    }
+  });
+
+  it("binds an accounting-pending relay to both its idempotency key and referenceId", async () => {
+    const key = `monero-accounting-reference-${crypto.randomUUID()}`;
+    const referenceId = `monero-accounting-reference-${crypto.randomUUID()}`;
+    const request = (
+      overrides: { referenceId?: string; amountPiconero?: string } = {},
+      keyOverride = key,
+    ) =>
+      transferRequest(
+        {
+          walletScope: SCOPE,
+          destinations: [
+            {
+              address: allowedRecipient,
+              amountPiconero: overrides.amountPiconero ?? "4000000000",
+            },
+          ],
+          referenceId: overrides.referenceId ?? referenceId,
+        },
+        { "Idempotency-Key": keyOverride },
+      );
+    const relaysBefore = scripted.rpcCalls.filter((call) => call.method === "relay_tx").length;
+    process.env.REDIS_URL = "redis://127.0.0.1:1";
+    try {
+      const first = await app.request(request());
+      expect(first.status).toBe(503);
+      expect(scripted.rpcCalls.filter((call) => call.method === "relay_tx")).toHaveLength(
+        relaysBefore + 1,
+      );
+
+      const changedReference = await app.request(
+        request({ referenceId: `${referenceId}-changed` }),
+      );
+      expect(changedReference.status).toBe(409);
+      expect(await changedReference.json()).toMatchObject({
+        ok: false,
+        error: expect.stringContaining("Idempotency-Key"),
+      });
+
+      const changedRequestForReference = await app.request(
+        request({ amountPiconero: "4000000002" }, `${key}-changed`),
+      );
+      expect(changedRequestForReference.status).toBe(409);
+      expect(await changedRequestForReference.json()).toMatchObject({
+        ok: false,
+        error: expect.stringContaining("referenceId"),
+      });
+      expect(scripted.rpcCalls.filter((call) => call.method === "relay_tx")).toHaveLength(
+        relaysBefore + 1,
       );
     } finally {
       if (ORIGINAL_REDIS_URL === undefined) delete process.env.REDIS_URL;
