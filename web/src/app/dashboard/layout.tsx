@@ -170,7 +170,7 @@ function DashboardNav() {
           </div>
 
           {/* User button */}
-          <StewardUserButton onSignOut={() => router.push("/login")} />
+          <StewardUserButton showTenantSwitcher onSignOut={() => router.push("/login")} />
         </div>
       </div>
     </header>
