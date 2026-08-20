@@ -2515,11 +2515,8 @@ export const providerActionBindings = pgTable(
       foreignColumns: [intents.tenantId, intents.id],
       name: "provider_action_bindings_intent_fk",
     }).onDelete("cascade"),
-    actorFk: foreignKey({
-      columns: [table.tenantId, table.actorAgentId],
-      foreignColumns: [agents.tenantId, agents.id],
-      name: "provider_action_bindings_actor_fk",
-    }).onDelete("restrict"),
+    // Provider-action evidence outlives deleted agent authority. Migration
+    // 0110 replaces the actor FK with a writer/transition fence.
     workspaceFk: foreignKey({
       columns: [table.tenantId, table.workspaceId],
       foreignColumns: [workspaces.tenantId, workspaces.id],

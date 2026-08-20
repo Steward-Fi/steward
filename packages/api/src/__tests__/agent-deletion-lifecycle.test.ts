@@ -19,7 +19,7 @@ import {
   workspaces,
 } from "@stwd/db";
 import { capabilities, capabilityGrants } from "@stwd/plugin-capabilities";
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { migrate as pgliteMigrate } from "drizzle-orm/pglite/migrator";
 import { Hono } from "hono";
 import type { AppVariables } from "../services/context";
@@ -162,7 +162,11 @@ async function createProviderBinding(
   agentId: string,
   status: "denied" | "allowed_stub",
   intentAgentId = agentId,
-): Promise<{ intentId: string }> {
+  insertBinding = true,
+): Promise<{
+  intentId: string;
+  binding: typeof providerActionBindings.$inferInsert;
+}> {
   const accountId = crypto.randomUUID();
   const operationId = crypto.randomUUID();
   const intentId = `pa_${crypto.randomUUID()}`;
@@ -174,14 +178,16 @@ async function createProviderBinding(
     externalRef: accountId,
     displayName: accountId,
   });
-  await getDb().insert(providerOperations).values({
-    id: operationId,
-    tenantId: TENANT_ID,
-    workspaceId: WORKSPACE_ID,
-    providerAccountId: accountId,
-    operationKey: `github.test.${operationId}`,
-    riskClass: "read",
-  });
+  await getDb()
+    .insert(providerOperations)
+    .values({
+      id: operationId,
+      tenantId: TENANT_ID,
+      workspaceId: WORKSPACE_ID,
+      providerAccountId: accountId,
+      operationKey: `github.test.${operationId}`,
+      riskClass: "read",
+    });
   await getDb().insert(intents).values({
     id: intentId,
     tenantId: TENANT_ID,
@@ -191,7 +197,8 @@ async function createProviderBinding(
     createdByType: "agent",
     createdById: intentAgentId,
   });
-  await getDb().insert(providerActionBindings).values({
+  const uniqueHash = () => `sha256:${crypto.randomUUID().replaceAll("-", "").padEnd(64, "0")}`;
+  const binding: typeof providerActionBindings.$inferInsert = {
     intentId,
     tenantId: TENANT_ID,
     workspaceId: WORKSPACE_ID,
@@ -201,10 +208,10 @@ async function createProviderBinding(
     operationRevision: 1,
     canonicalProfile: "github.provider-action.v1",
     canonicalActionBytes: Buffer.from("{}"),
-    actionDigest: `sha256:${"1".repeat(64)}`,
+    actionDigest: uniqueHash(),
     requestEnvelope: {},
-    requestHash: `sha256:${"2".repeat(64)}`,
-    idempotencyKeyHash: `sha256:${crypto.randomUUID().replaceAll("-", "").padEnd(64, "0")}`,
+    requestHash: uniqueHash(),
+    idempotencyKeyHash: uniqueHash(),
     safeSummary: {},
     accessDecisionId: crypto.randomUUID(),
     accessEffect: status === "denied" ? "deny" : "allow",
@@ -218,8 +225,9 @@ async function createProviderBinding(
     policyDecision: status === "allowed_stub" ? {} : null,
     policyDecisionHash: status === "allowed_stub" ? `sha256:${"5".repeat(64)}` : null,
     status,
-  });
-  return { intentId };
+  };
+  if (insertBinding) await getDb().insert(providerActionBindings).values(binding);
+  return { intentId, binding };
 }
 
 async function tenantDelete(agentId: string): Promise<Response> {
@@ -392,24 +400,26 @@ describe("agent deletion upstream credential boundary", () => {
   it("retains terminal lease evidence across workspace deletion but blocks unresolved authority", async () => {
     const terminalWorkspaceId = crypto.randomUUID();
     const activeWorkspaceId = crypto.randomUUID();
-    await getDb().insert(workspaces).values([
-      {
-        id: terminalWorkspaceId,
-        tenantId: TENANT_ID,
-        key: `terminal-${terminalWorkspaceId}`,
-        name: "terminal lease evidence",
-        environment: "production",
-        createdBy: WORKSPACE_CREATOR_ID,
-      },
-      {
-        id: activeWorkspaceId,
-        tenantId: TENANT_ID,
-        key: `active-${activeWorkspaceId}`,
-        name: "active lease authority",
-        environment: "production",
-        createdBy: WORKSPACE_CREATOR_ID,
-      },
-    ]);
+    await getDb()
+      .insert(workspaces)
+      .values([
+        {
+          id: terminalWorkspaceId,
+          tenantId: TENANT_ID,
+          key: `terminal-${terminalWorkspaceId}`,
+          name: "terminal lease evidence",
+          environment: "production",
+          createdBy: WORKSPACE_CREATOR_ID,
+        },
+        {
+          id: activeWorkspaceId,
+          tenantId: TENANT_ID,
+          key: `active-${activeWorkspaceId}`,
+          name: "active lease authority",
+          environment: "production",
+          createdBy: WORKSPACE_CREATOR_ID,
+        },
+      ]);
     const terminalAgentId = `terminal-workspace-${crypto.randomUUID()}`;
     const activeAgentId = `active-workspace-${crypto.randomUUID()}`;
     await createAgent(terminalAgentId);
@@ -434,10 +444,13 @@ describe("agent deletion upstream credential boundary", () => {
     expect(unresolvedDeleteError).toBeInstanceOf(Error);
     expect((unresolvedDeleteError as { cause?: { code?: string } }).cause?.code).toBe("55000");
 
-    await getDb()
-      .delete(upstreamCredentialLeaseEvents)
-      .where(eq(upstreamCredentialLeaseEvents.leaseId, activeLeaseId));
-    await getDb().delete(upstreamCredentialLeases).where(eq(upstreamCredentialLeases.id, activeLeaseId));
+    await getDb().transaction(async (tx) => {
+      await tx.execute(sql`SET LOCAL session_replication_role = replica`);
+      await tx.execute(
+        sql`DELETE FROM upstream_credential_lease_events WHERE lease_id = ${activeLeaseId}`,
+      );
+      await tx.execute(sql`DELETE FROM upstream_credential_leases WHERE id = ${activeLeaseId}`);
+    });
     await getDb().delete(workspaces).where(eq(workspaces.id, activeWorkspaceId));
   });
 
@@ -513,6 +526,67 @@ describe("agent deletion upstream credential boundary", () => {
     await getDb().delete(transactions).where(eq(transactions.id, transactionId));
     expect((await tenantDelete(agentId)).status).toBe(200);
   });
+
+  it.skipIf(!USING_REAL_POSTGRES)(
+    "retains resolved provider evidence and fences post-delete publication or resurrection",
+    async () => {
+      const agentId = `provider-terminal-${crypto.randomUUID()}`;
+      const survivorId = `provider-survivor-${crypto.randomUUID()}`;
+      await createAgent(agentId);
+      await createAgent(survivorId);
+      const { intentId } = await createProviderBinding(agentId, "denied");
+
+      expect((await tenantDelete(agentId)).status).toBe(200);
+      expect(
+        await getDb()
+          .select({ status: providerActionBindings.status })
+          .from(providerActionBindings)
+          .where(eq(providerActionBindings.intentId, intentId)),
+      ).toEqual([{ status: "denied" }]);
+      expect(
+        await getDb()
+          .select({ agentId: intents.agentId })
+          .from(intents)
+          .where(eq(intents.id, intentId)),
+      ).toEqual([{ agentId: null }]);
+
+      let resurrectionError: unknown;
+      try {
+        await getDb()
+          .update(providerActionBindings)
+          .set({ status: "allowed_stub" })
+          .where(eq(providerActionBindings.intentId, intentId));
+      } catch (error) {
+        resurrectionError = error;
+      }
+      expect((resurrectionError as { cause?: { code?: string } }).cause?.code).toBe("23503");
+
+      const { binding } = await createProviderBinding(agentId, "allowed_stub", survivorId, false);
+      let publicationError: unknown;
+      try {
+        await getDb().insert(providerActionBindings).values(binding);
+      } catch (error) {
+        publicationError = error;
+      }
+      expect((publicationError as { cause?: { code?: string } }).cause?.code).toBe("23503");
+    },
+  );
+
+  it.skipIf(!USING_REAL_POSTGRES)(
+    "returns 409 while provider dispatch remains unresolved",
+    async () => {
+      const agentId = `provider-live-${crypto.randomUUID()}`;
+      await createAgent(agentId);
+      await createProviderBinding(agentId, "allowed_stub");
+      const response = await tenantDelete(agentId);
+      expect(response.status).toBe(409);
+      await expect(response.json()).resolves.toEqual({
+        ok: false,
+        error: "Agent has unresolved execution evidence; reconcile it first",
+      });
+      expect(await getDb().select().from(agents).where(eq(agents.id, agentId))).toHaveLength(1);
+    },
+  );
 
   it.skipIf(!USING_REAL_POSTGRES)(
     "prevents lease publication from racing past the locked deletion decision",

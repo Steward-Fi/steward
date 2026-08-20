@@ -109,14 +109,14 @@ export async function deleteAgentAuthority(
           eq(providerActionBindings.tenantId, tenantId),
           eq(providerActionBindings.actorAgentId, agentId),
           inArray(providerActionBindings.status, [
+            "allowed_stub",
             "execution_ready",
             "executing",
             "outcome_unknown",
           ]),
         ),
       )
-      .limit(1)
-      .for("update");
+      .limit(1);
     if (unresolvedTransaction || unresolvedProviderAction) {
       return "blocked_by_unresolved_execution";
     }

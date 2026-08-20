@@ -1,11 +1,4 @@
-import {
-  auditEvents,
-  closeDb,
-  getDb,
-  tenants,
-  upstreamCredentialLeaseEvents,
-  upstreamCredentialLeases,
-} from "@stwd/db";
+import { auditEvents, closeDb, getDb, tenants } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { eq, sql } from "drizzle-orm";
 
@@ -43,40 +36,56 @@ export async function cleanupAgentBehaviorTestDatabase(tenantId: string): Promis
   }
 
   const db = getDb();
-  // Lease evidence intentionally has no tenant cascade: production retains it
-  // after agent deletion. Test teardown must remove it explicitly before the
-  // workspace graph or later real-PG files observe this fixture tenant.
-  await db
-    .delete(upstreamCredentialLeaseEvents)
-    .where(eq(upstreamCredentialLeaseEvents.tenantId, tenantId));
-  await db.delete(upstreamCredentialLeases).where(eq(upstreamCredentialLeases.tenantId, tenantId));
-
-  // Capability plugin tables are optional and likewise do not reference the
-  // core tenant. Delete the tenant's plugin graph when the migration is loaded.
-  const capabilityTables = await db.execute(
-    sql`SELECT
+  await db.transaction(async (tx) => {
+    const capabilityTables = await tx.execute<{
+      capabilities: string | null;
+      grants: string | null;
+      invocations: string | null;
+    }>(sql`SELECT
       to_regclass('public.capabilities')::text AS capabilities,
-      to_regclass('public.capability_invocations')::text AS invocations`,
-  );
-  const capabilityRows = Array.isArray(capabilityTables)
-    ? capabilityTables
-    : ((capabilityTables as {
-        rows?: Array<{ capabilities: string | null; invocations: string | null }>;
-      }).rows ?? []);
-  const pluginTables = capabilityRows[0] as
-    | { capabilities?: string | null; invocations?: string | null }
-    | undefined;
-  if (pluginTables?.invocations) {
-    await db.execute(sql`DELETE FROM public.capability_invocations WHERE tenant_id = ${tenantId}`);
-  }
-  if (pluginTables?.capabilities) {
-    await db.execute(sql`DELETE FROM public.capabilities WHERE tenant_id = ${tenantId}`);
-  }
+      to_regclass('public.capability_grants')::text AS grants,
+      to_regclass('public.capability_invocations')::text AS invocations`);
+    const capabilityRows = Array.isArray(capabilityTables)
+      ? capabilityTables
+      : (capabilityTables.rows ?? []);
+    const pluginTables = capabilityRows[0];
+    if (pluginTables?.invocations) {
+      await tx.execute(
+        sql`DELETE FROM public.capability_invocations WHERE tenant_id = ${tenantId}`,
+      );
+    }
+    if (pluginTables?.grants) {
+      await tx.execute(sql`DELETE FROM public.capability_grants WHERE tenant_id = ${tenantId}`);
+    }
+    if (pluginTables?.capabilities) {
+      await tx.execute(sql`DELETE FROM public.capabilities WHERE tenant_id = ${tenantId}`);
+    }
 
-  // Audit rows and their deliberately FK-free high-water mark are not removed
-  // by tenant cascades. Remove them explicitly, then let the tenant FK graph
-  // clean every agent, wallet, key, signer, quorum, policy, and transaction row.
-  await db.delete(auditEvents).where(eq(auditEvents.tenantId, tenantId));
-  await db.execute(sql`DELETE FROM audit_chain_heads WHERE tenant_id = ${tenantId}`);
-  await db.delete(tenants).where(eq(tenants.id, tenantId));
+    // Lease evidence is append-only in production. Remove only this unique
+    // fixture tenant while bypassing its immutability triggers transactionally.
+    await tx.execute(sql`SET LOCAL session_replication_role = replica`);
+    await tx.execute(
+      sql`DELETE FROM upstream_credential_lease_events WHERE tenant_id = ${tenantId}`,
+    );
+    await tx.execute(sql`DELETE FROM upstream_credential_leases WHERE tenant_id = ${tenantId}`);
+    await tx.execute(sql`SET LOCAL session_replication_role = origin`);
+
+    // Production agent deletion rejects unresolved execution. Clear only this
+    // fixture's blockers before the tenant cascade reaches its agent rows.
+    await tx.execute(sql`DELETE FROM provider_action_bindings WHERE tenant_id = ${tenantId}`);
+    await tx.execute(sql`
+      DELETE FROM transactions
+      WHERE agent_id IN (SELECT id FROM agents WHERE tenant_id = ${tenantId})
+    `);
+    await tx.execute(sql`DELETE FROM pending_proxy_requests WHERE tenant_id = ${tenantId}`);
+    await tx.execute(sql`
+      UPDATE secret_routes SET enabled = false
+      WHERE tenant_id = ${tenantId} AND enabled
+    `);
+
+    await tx.delete(auditEvents).where(eq(auditEvents.tenantId, tenantId));
+    await tx.execute(sql`DELETE FROM audit_chain_heads WHERE tenant_id = ${tenantId}`);
+    await tx.delete(tenants).where(eq(tenants.id, tenantId));
+  });
+  await closeDb();
 }

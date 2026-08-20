@@ -7,6 +7,9 @@ ALTER TABLE "upstream_credential_leases"
 ALTER TABLE "upstream_credential_leases"
   DROP CONSTRAINT IF EXISTS "upstream_credential_leases_workspace_fk";
 --> statement-breakpoint
+ALTER TABLE "provider_action_bindings"
+  DROP CONSTRAINT IF EXISTS "provider_action_bindings_actor_fk";
+--> statement-breakpoint
 CREATE OR REPLACE FUNCTION steward_fence_agent_authority_creation()
 RETURNS trigger LANGUAGE plpgsql
 SET search_path = pg_catalog, public
@@ -60,6 +63,35 @@ CREATE TRIGGER upstream_credential_leases_workspace_fence
 BEFORE INSERT OR UPDATE OF tenant_id, workspace_id, status ON upstream_credential_leases
 FOR EACH ROW EXECUTE FUNCTION steward_fence_upstream_lease_workspace();
 --> statement-breakpoint
+CREATE OR REPLACE FUNCTION steward_fence_provider_action_agent()
+RETURNS trigger LANGUAGE plpgsql
+SET search_path = pg_catalog, public
+AS $$
+BEGIN
+  -- Existing terminal evidence may receive unrelated maintenance updates, but
+  -- every new binding and every transition into a live state needs an agent.
+  IF TG_OP = 'UPDATE' AND NEW.status NOT IN (
+    'pending_approval', 'approved', 'allowed_stub',
+    'execution_ready', 'executing', 'outcome_unknown'
+  ) THEN
+    RETURN NEW;
+  END IF;
+  PERFORM 1
+  FROM public.agents
+  WHERE tenant_id = NEW.tenant_id AND id = NEW.actor_agent_id
+  FOR KEY SHARE;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'provider action agent does not exist'
+      USING ERRCODE = '23503';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+--> statement-breakpoint
+CREATE TRIGGER provider_action_bindings_agent_fence
+BEFORE INSERT OR UPDATE OF tenant_id, actor_agent_id, status ON provider_action_bindings
+FOR EACH ROW EXECUTE FUNCTION steward_fence_provider_action_agent();
+--> statement-breakpoint
 CREATE OR REPLACE FUNCTION steward_guard_agent_delete()
 RETURNS trigger LANGUAGE plpgsql
 SET search_path = pg_catalog, public
@@ -101,7 +133,7 @@ BEGIN
   IF EXISTS (
     SELECT 1 FROM public.provider_action_bindings
     WHERE tenant_id = OLD.tenant_id AND actor_agent_id = OLD.id
-      AND status IN ('execution_ready', 'executing', 'outcome_unknown')
+      AND status IN ('allowed_stub', 'execution_ready', 'executing', 'outcome_unknown')
   ) THEN
     RAISE EXCEPTION 'agent has unresolved provider execution' USING ERRCODE = '55000';
   END IF;
@@ -117,6 +149,18 @@ BEGIN
       RAISE EXCEPTION 'agent has active capability grants' USING ERRCODE = '55000';
     END IF;
   END IF;
+  -- Both historical intents FKs cascade through agents. Detach only resolved
+  -- provider-action intents so their binding evidence survives this deletion.
+  UPDATE public.intents AS intent
+  SET agent_id = NULL
+  WHERE intent.tenant_id = OLD.tenant_id
+    AND intent.agent_id = OLD.id
+    AND EXISTS (
+      SELECT 1 FROM public.provider_action_bindings AS binding
+      WHERE binding.tenant_id = OLD.tenant_id
+        AND binding.actor_agent_id = OLD.id
+        AND binding.intent_id = intent.id
+    );
   RETURN OLD;
 END;
 $$;
