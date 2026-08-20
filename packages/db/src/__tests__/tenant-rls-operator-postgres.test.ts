@@ -183,6 +183,90 @@ describeWithPostgres("SEC-169 operator lifecycle on the real Steward schema", ()
         default_sequence_grant: false,
       });
 
+      const expectedPlatformAcls = [
+        "function:steward_bootstrap.platform_delete_user(p_user_id uuid):EXECUTE:false",
+        "function:steward_bootstrap.platform_revoke_user_refresh_tokens(p_user_id uuid):EXECUTE:false",
+        "function:steward_bootstrap.platform_set_user_deactivation(p_user_id uuid, p_deactivated boolean):EXECUTE:false",
+        "function:steward_bootstrap.retention_delete_deactivated_users(p_days integer):EXECUTE:false",
+        "function:steward_rls.tenant_id():EXECUTE:false",
+        "relation:public.audit_chain_heads:INSERT:false",
+        "relation:public.audit_chain_heads:SELECT:false",
+        "relation:public.audit_chain_heads:UPDATE:false",
+        "relation:public.audit_events:INSERT:false",
+        "relation:public.audit_events:SELECT:false",
+        "relation:public.audit_events_id_seq:SELECT:false",
+        "relation:public.audit_events_id_seq:USAGE:false",
+        "schema:steward_bootstrap:USAGE:false",
+        "schema:steward_rls:USAGE:false",
+      ];
+      const platformNamedAcls = async () => {
+        const rows = await db<{ acl: string }[]>`
+          SELECT 'schema:' || namespace.nspname || ':' || privilege.privilege_type || ':' ||
+            privilege.is_grantable AS acl
+          FROM pg_namespace namespace
+          CROSS JOIN LATERAL aclexplode(COALESCE(namespace.nspacl, acldefault('n', namespace.nspowner))) privilege
+          JOIN pg_roles granted_role ON granted_role.oid = privilege.grantee
+          WHERE granted_role.rolname = ${platformRole}
+          UNION ALL
+          SELECT 'relation:' || namespace.nspname || '.' || relation.relname || ':' ||
+            privilege.privilege_type || ':' || privilege.is_grantable AS acl
+          FROM pg_class relation
+          JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+          CROSS JOIN LATERAL aclexplode(COALESCE(
+            relation.relacl,
+            acldefault(CASE WHEN relation.relkind = 'S' THEN 'S'::"char" ELSE 'r'::"char" END, relation.relowner)
+          )) privilege
+          JOIN pg_roles granted_role ON granted_role.oid = privilege.grantee
+          WHERE relation.relkind IN ('r', 'p', 'v', 'm', 'f', 'S')
+            AND granted_role.rolname = ${platformRole}
+          UNION ALL
+          SELECT 'function:' || namespace.nspname || '.' || function_object.proname || '(' ||
+            pg_get_function_identity_arguments(function_object.oid) || '):' ||
+            privilege.privilege_type || ':' || privilege.is_grantable AS acl
+          FROM pg_proc function_object
+          JOIN pg_namespace namespace ON namespace.oid = function_object.pronamespace
+          CROSS JOIN LATERAL aclexplode(COALESCE(function_object.proacl, acldefault('f', function_object.proowner))) privilege
+          JOIN pg_roles granted_role ON granted_role.oid = privilege.grantee
+          WHERE granted_role.rolname = ${platformRole}
+          ORDER BY acl
+        `;
+        return rows.map((row) => row.acl);
+      };
+      expect(await platformNamedAcls()).toEqual(expectedPlatformAcls);
+
+      await db.unsafe(`GRANT USAGE ON SCHEMA public TO ${platformRole}`);
+      await db.unsafe(`GRANT UPDATE ON public.audit_events TO ${platformRole} WITH GRANT OPTION`);
+      await db.unsafe(`GRANT USAGE ON SEQUENCE public.audit_checkpoints_id_seq TO ${platformRole}`);
+      await db.unsafe(
+        `GRANT EXECUTE ON FUNCTION steward_bootstrap.platform_stats() TO ${platformRole} WITH GRANT OPTION`,
+      );
+      await runOperatorScript("rls-bootstrap.sql", true);
+      expect(await platformNamedAcls()).toEqual(expectedPlatformAcls);
+
+      await admin.unsafe(`GRANT ${definerRole} TO ${platformRole}`);
+      try {
+        await expect(runOperatorScript("rls-bootstrap.sql", true)).rejects.toThrow(
+          "platform role must not inherit, assume, or be assumable by another role",
+        );
+      } finally {
+        await admin.unsafe(`REVOKE ${definerRole} FROM ${platformRole}`);
+      }
+
+      await db.unsafe("CREATE SCHEMA platform_authority_probe");
+      await db.unsafe("CREATE SEQUENCE platform_authority_probe.platform_owned_authority_probe");
+      await db.unsafe(
+        `ALTER SEQUENCE platform_authority_probe.platform_owned_authority_probe OWNER TO ${platformRole}`,
+      );
+      try {
+        await expect(runOperatorScript("rls-bootstrap.sql", true)).rejects.toThrow(
+          "platform role must not own database objects",
+        );
+      } finally {
+        await db.unsafe("DROP SCHEMA IF EXISTS platform_authority_probe CASCADE");
+      }
+      await runOperatorScript("rls-bootstrap.sql", true);
+      expect(await platformNamedAcls()).toEqual(expectedPlatformAcls);
+
       await runOperatorScript("rls-activate.sql");
       const [activated] = await db<{ enabled: number; forced: number; maintenance: number }[]>`
         SELECT

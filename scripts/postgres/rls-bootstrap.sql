@@ -105,13 +105,60 @@ SELECT format(
   'steward_bootstrap.retention_delete_deactivated_users(integer) FROM %I',
   :'steward_app_role'
 ) \gexec
+
+-- The platform login is a narrow, separately credentialed authority. Reset
+-- every named ACL it could have retained from an earlier bootstrap before
+-- rebuilding the allowlist below. PUBLIC privileges remain governed by the
+-- schema-wide revocations above.
+SELECT format('REVOKE ALL PRIVILEGES ON DATABASE %I FROM %I', current_database(), :'steward_platform_role') \gexec
+SELECT format('REVOKE ALL PRIVILEGES ON SCHEMA %I FROM %I', namespace.nspname, :'steward_platform_role')
+FROM pg_namespace namespace
+CROSS JOIN LATERAL aclexplode(COALESCE(namespace.nspacl, acldefault('n', namespace.nspowner))) privilege
+JOIN pg_roles granted_role ON granted_role.oid = privilege.grantee
+WHERE granted_role.rolname = :'steward_platform_role'
+GROUP BY namespace.nspname
+\gexec
+SELECT format(
+  'REVOKE ALL PRIVILEGES ON %s %I.%I FROM %I',
+  CASE WHEN relation.relkind = 'S' THEN 'SEQUENCE' ELSE 'TABLE' END,
+  namespace.nspname,
+  relation.relname,
+  :'steward_platform_role'
+)
+FROM pg_class relation
+JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+CROSS JOIN LATERAL aclexplode(COALESCE(
+  relation.relacl,
+  acldefault(CASE WHEN relation.relkind = 'S' THEN 'S'::"char" ELSE 'r'::"char" END, relation.relowner)
+)) privilege
+JOIN pg_roles granted_role ON granted_role.oid = privilege.grantee
+WHERE relation.relkind IN ('r', 'p', 'v', 'm', 'f', 'S')
+  AND granted_role.rolname = :'steward_platform_role'
+GROUP BY relation.relkind, namespace.nspname, relation.relname
+\gexec
+SELECT format(
+  'REVOKE ALL PRIVILEGES ON FUNCTION %s FROM %I',
+  function_object.oid::regprocedure,
+  :'steward_platform_role'
+)
+FROM pg_proc function_object
+CROSS JOIN LATERAL aclexplode(COALESCE(function_object.proacl, acldefault('f', function_object.proowner))) privilege
+JOIN pg_roles granted_role ON granted_role.oid = privilege.grantee
+WHERE granted_role.rolname = :'steward_platform_role'
+GROUP BY function_object.oid
+\gexec
+
 SELECT format('GRANT USAGE ON SCHEMA steward_bootstrap, steward_rls TO %I', :'steward_platform_role') \gexec
 SELECT format(
   'GRANT EXECUTE ON FUNCTION steward_rls.tenant_id() TO %I',
   :'steward_platform_role'
 ) \gexec
 SELECT format(
-  'GRANT SELECT, INSERT, UPDATE ON public.audit_events, public.audit_chain_heads TO %I',
+  'GRANT SELECT, INSERT ON public.audit_events TO %I',
+  :'steward_platform_role'
+) \gexec
+SELECT format(
+  'GRANT SELECT, INSERT, UPDATE ON public.audit_chain_heads TO %I',
   :'steward_platform_role'
 ) \gexec
 SELECT format(
@@ -212,6 +259,16 @@ BEGIN
   ) THEN
     RAISE EXCEPTION 'SEC-169 app role must not inherit or assume platform role';
   END IF;
+  IF EXISTS (
+    SELECT 1
+    FROM pg_auth_members membership
+    JOIN pg_roles member_role ON member_role.oid = membership.member
+    JOIN pg_roles granted_role ON granted_role.oid = membership.roleid
+    WHERE member_role.rolname = current_setting('steward.bootstrap.platform_role')
+       OR granted_role.rolname = current_setting('steward.bootstrap.platform_role')
+  ) THEN
+    RAISE EXCEPTION 'SEC-169 platform role must not inherit, assume, or be assumable by another role';
+  END IF;
   IF pg_has_role(
     current_setting('steward.bootstrap.app_role'),
     current_setting('steward.bootstrap.definer_role'),
@@ -230,6 +287,31 @@ BEGIN
   ) THEN
     RAISE EXCEPTION 'SEC-169 definer role must be NOLOGIN NOSUPERUSER BYPASSRLS';
   END IF;
+  IF EXISTS (
+    SELECT 1 FROM pg_shdepend ownership
+    JOIN pg_roles owner_role ON owner_role.oid = ownership.refobjid
+    WHERE ownership.refclassid = 'pg_authid'::regclass
+      AND ownership.deptype = 'o'
+      AND owner_role.rolname = current_setting('steward.bootstrap.platform_role')
+  ) OR EXISTS (
+    SELECT 1 FROM pg_database database_object
+    JOIN pg_roles owner_role ON owner_role.oid = database_object.datdba
+    WHERE owner_role.rolname = current_setting('steward.bootstrap.platform_role')
+  ) OR EXISTS (
+    SELECT 1 FROM pg_namespace schema_object
+    JOIN pg_roles owner_role ON owner_role.oid = schema_object.nspowner
+    WHERE owner_role.rolname = current_setting('steward.bootstrap.platform_role')
+  ) OR EXISTS (
+    SELECT 1 FROM pg_class relation_object
+    JOIN pg_roles owner_role ON owner_role.oid = relation_object.relowner
+    WHERE owner_role.rolname = current_setting('steward.bootstrap.platform_role')
+  ) OR EXISTS (
+    SELECT 1 FROM pg_proc function_object
+    JOIN pg_roles owner_role ON owner_role.oid = function_object.proowner
+    WHERE owner_role.rolname = current_setting('steward.bootstrap.platform_role')
+  ) THEN
+    RAISE EXCEPTION 'SEC-169 platform role must not own database objects';
+  END IF;
   IF has_schema_privilege(current_setting('steward.bootstrap.app_role'), 'public', 'CREATE')
      OR has_schema_privilege(current_setting('steward.bootstrap.app_role'), 'steward_bootstrap', 'CREATE')
      OR has_schema_privilege(current_setting('steward.bootstrap.app_role'), 'steward_rls', 'CREATE') THEN
@@ -243,8 +325,80 @@ BEGIN
      )
      OR has_function_privilege(
        current_setting('steward.bootstrap.platform_role'), 'steward_rls.user_id()', 'EXECUTE'
-     ) THEN
+  ) THEN
     RAISE EXCEPTION 'SEC-169 platform role must receive only tenant RLS context access';
+  END IF;
+  IF (
+    SELECT array_agg(
+      namespace.nspname || ':' || privilege.privilege_type || ':' || privilege.is_grantable
+      ORDER BY namespace.nspname, privilege.privilege_type, privilege.is_grantable
+    )
+    FROM pg_namespace namespace
+    CROSS JOIN LATERAL aclexplode(COALESCE(namespace.nspacl, acldefault('n', namespace.nspowner))) privilege
+    JOIN pg_roles granted_role ON granted_role.oid = privilege.grantee
+    WHERE granted_role.rolname = current_setting('steward.bootstrap.platform_role')
+  ) IS DISTINCT FROM ARRAY[
+    'steward_bootstrap:USAGE:false',
+    'steward_rls:USAGE:false'
+  ] THEN
+    RAISE EXCEPTION 'SEC-169 platform schema ACL drift';
+  END IF;
+  IF (
+    SELECT array_agg(
+      namespace.nspname || '.' || relation.relname || ':' || privilege.privilege_type || ':' || privilege.is_grantable
+      ORDER BY namespace.nspname, relation.relname, privilege.privilege_type, privilege.is_grantable
+    )
+    FROM pg_class relation
+    JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+    CROSS JOIN LATERAL aclexplode(COALESCE(
+      relation.relacl,
+      acldefault(CASE WHEN relation.relkind = 'S' THEN 'S'::"char" ELSE 'r'::"char" END, relation.relowner)
+    )) privilege
+    JOIN pg_roles granted_role ON granted_role.oid = privilege.grantee
+    WHERE relation.relkind IN ('r', 'p', 'v', 'm', 'f', 'S')
+      AND granted_role.rolname = current_setting('steward.bootstrap.platform_role')
+  ) IS DISTINCT FROM ARRAY[
+    'public.audit_chain_heads:INSERT:false',
+    'public.audit_chain_heads:SELECT:false',
+    'public.audit_chain_heads:UPDATE:false',
+    'public.audit_events:INSERT:false',
+    'public.audit_events:SELECT:false',
+    'public.audit_events_id_seq:SELECT:false',
+    'public.audit_events_id_seq:USAGE:false'
+  ] THEN
+    RAISE EXCEPTION 'SEC-169 platform relation ACL drift';
+  END IF;
+  IF (
+    SELECT array_agg(
+      namespace.nspname || '.' || function_object.proname || '(' ||
+      pg_get_function_identity_arguments(function_object.oid) || '):' ||
+      privilege.privilege_type || ':' || privilege.is_grantable
+      ORDER BY namespace.nspname, function_object.proname,
+        pg_get_function_identity_arguments(function_object.oid),
+        privilege.privilege_type, privilege.is_grantable
+    )
+    FROM pg_proc function_object
+    JOIN pg_namespace namespace ON namespace.oid = function_object.pronamespace
+    CROSS JOIN LATERAL aclexplode(COALESCE(function_object.proacl, acldefault('f', function_object.proowner))) privilege
+    JOIN pg_roles granted_role ON granted_role.oid = privilege.grantee
+    WHERE granted_role.rolname = current_setting('steward.bootstrap.platform_role')
+  ) IS DISTINCT FROM ARRAY[
+    'steward_bootstrap.platform_delete_user(p_user_id uuid):EXECUTE:false',
+    'steward_bootstrap.platform_revoke_user_refresh_tokens(p_user_id uuid):EXECUTE:false',
+    'steward_bootstrap.platform_set_user_deactivation(p_user_id uuid, p_deactivated boolean):EXECUTE:false',
+    'steward_bootstrap.retention_delete_deactivated_users(p_days integer):EXECUTE:false',
+    'steward_rls.tenant_id():EXECUTE:false'
+  ] THEN
+    RAISE EXCEPTION 'SEC-169 platform function ACL drift';
+  END IF;
+  IF EXISTS (
+    SELECT 1
+    FROM pg_default_acl defaults
+    CROSS JOIN LATERAL aclexplode(defaults.defaclacl) privilege
+    JOIN pg_roles granted_role ON granted_role.oid = privilege.grantee
+    WHERE granted_role.rolname = current_setting('steward.bootstrap.platform_role')
+  ) THEN
+    RAISE EXCEPTION 'SEC-169 platform role must not receive default privileges';
   END IF;
   IF NOT has_sequence_privilege(
        current_setting('steward.bootstrap.platform_role'),

@@ -182,6 +182,82 @@ describe("platform global identity graph routes", () => {
     ).toHaveLength(1);
   }
 
+  async function createLifecycleFaultUser(label: string) {
+    const [user] = await getDb()
+      .insert(users)
+      .values({ email: `${label}@example.test`, emailVerified: true })
+      .returning({ id: users.id });
+    await getDb().insert(userTenants).values({
+      userId: user.id,
+      tenantId: TENANT_ID,
+      role: "member",
+    });
+    await getDb()
+      .insert(refreshTokens)
+      .values({
+        id: `${label}-refresh-token`,
+        userId: user.id,
+        tenantId: TENANT_ID,
+        tokenHash: `${label}-refresh-hash`,
+        expiresAt: new Date(Date.now() + 60_000),
+      });
+    return user.id;
+  }
+
+  async function lifecycleDatabaseState(faultUserId: string) {
+    const [user] = await getDb()
+      .select({ deactivatedAt: users.deactivatedAt })
+      .from(users)
+      .where(eq(users.id, faultUserId));
+    const tokens = await getDb()
+      .select({ id: refreshTokens.id })
+      .from(refreshTokens)
+      .where(eq(refreshTokens.userId, faultUserId));
+    const audits = await getDb()
+      .select({ action: auditEvents.action })
+      .from(auditEvents)
+      .where(eq(auditEvents.resourceId, faultUserId))
+      .orderBy(asc(auditEvents.seq));
+    return { audits: audits.map((row) => row.action), tokens, user };
+  }
+
+  async function deactivateUser(faultUserId: string) {
+    return platformRoutes.request(`/users/${faultUserId}/deactivate`, {
+      method: "PATCH",
+      headers: headers(),
+      body: JSON.stringify({ deactivated: true }),
+    });
+  }
+
+  async function installOneShotCompletionAuditFailure(name: string, deferred: boolean) {
+    await getDb().execute(sql.raw(`CREATE SEQUENCE ${name}_seq`));
+    await getDb().execute(
+      sql.raw(`
+      CREATE FUNCTION ${name}_fn() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN
+        IF NEW.action = 'user.deactivate' AND nextval('${name}_seq') = 1 THEN
+          RAISE EXCEPTION '${name}';
+        END IF;
+        RETURN NEW;
+      END
+      $$
+    `),
+    );
+    await getDb().execute(
+      sql.raw(
+        deferred
+          ? `CREATE CONSTRAINT TRIGGER ${name}_trigger AFTER INSERT ON audit_events DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION ${name}_fn()`
+          : `CREATE TRIGGER ${name}_trigger AFTER INSERT ON audit_events FOR EACH ROW EXECUTE FUNCTION ${name}_fn()`,
+      ),
+    );
+  }
+
+  async function removeCompletionAuditFailure(name: string) {
+    await getDb().execute(sql.raw(`DROP TRIGGER IF EXISTS ${name}_trigger ON audit_events`));
+    await getDb().execute(sql.raw(`DROP FUNCTION IF EXISTS ${name}_fn()`));
+    await getDb().execute(sql.raw(`DROP SEQUENCE IF EXISTS ${name}_seq`));
+  }
+
   it("gets a global user identity with tenant ids and linked accounts", async () => {
     const response = await platformRoutes.request(`/users/${userId}`, { headers: headers() });
 
