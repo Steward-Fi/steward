@@ -91,7 +91,7 @@ try {
       .onConflictDoNothing();
     await getDb()
       .insert(userTenants)
-      .values({ userId, tenantId: personalTenantId, role: "member" })
+      .values({ userId, tenantId: personalTenantId, role: "owner" })
       .onConflictDoNothing();
   });
   const userToken = await signAccessToken({ address: "", tenantId: personalTenantId, userId });

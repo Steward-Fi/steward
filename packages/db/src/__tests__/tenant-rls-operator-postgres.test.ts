@@ -94,7 +94,7 @@ describeWithPostgres("SEC-169 operator lifecycle on the real Steward schema", ()
     const firstMigration = await runCommand(["bun", "run", "packages/db/src/migrate.ts"], {
       DATABASE_URL: databaseUrl(databaseName),
     });
-    expect(firstMigration).toContain("0111_tenant_rls_policy_install");
+    expect(firstMigration).toContain("0113_personal_tenant_account_lifecycle");
 
     const db = postgres(databaseUrl(databaseName), { max: 1 });
     try {
@@ -273,6 +273,109 @@ describeWithPostgres("SEC-169 operator lifecycle on the real Steward schema", ()
           `;
         }),
       ).rejects.toThrow("Cannot deactivate the sole active tenant owner");
+
+      const personalOwnerId = randomUUID();
+      const personalTenant = `personal-${personalOwnerId}`;
+      await db`
+        INSERT INTO public.tenants(id, name, api_key_hash)
+        VALUES (${personalTenant}, 'Personal lifecycle owner', ${`personal-key-${suffix}`})
+      `;
+      await db`
+        INSERT INTO public.users(id, email)
+        VALUES (${personalOwnerId}::uuid, ${`personal-owner-${suffix}@example.test`})
+      `;
+      await db`
+        INSERT INTO public.user_tenants(user_id, tenant_id, role)
+        VALUES (${personalOwnerId}::uuid, ${personalTenant}, 'owner')
+      `;
+      const personalDeactivation = await db.begin(async (tx) => {
+        await tx.unsafe(`SET LOCAL ROLE ${platformRole}`);
+        await tx`SELECT set_config('steward.tenant_id', 'platform', true)`;
+        return tx`
+          SELECT user_id, deactivated_at
+          FROM steward_bootstrap.platform_set_user_deactivation(
+            ${personalOwnerId}::uuid,
+            true
+          )
+        `;
+      });
+      expect(personalDeactivation).toHaveLength(1);
+      expect(personalDeactivation[0]?.user_id).toBe(personalOwnerId);
+      expect(personalDeactivation[0]?.deactivated_at).toBeInstanceOf(Date);
+
+      for (const extraRole of ["member", "owner"] as const) {
+        const malformedOwnerId = randomUUID();
+        const malformedExtraId = randomUUID();
+        const malformedTenant = `personal-${malformedOwnerId}`;
+        await db`
+          INSERT INTO public.tenants(id, name, api_key_hash)
+          VALUES (
+            ${malformedTenant},
+            ${`Malformed personal ${extraRole}`},
+            ${`malformed-personal-${extraRole}-${suffix}`}
+          )
+        `;
+        await db`
+          INSERT INTO public.users(id, email)
+          VALUES
+            (${malformedOwnerId}::uuid, ${`malformed-${extraRole}-owner-${suffix}@example.test`}),
+            (${malformedExtraId}::uuid, ${`malformed-${extraRole}-extra-${suffix}@example.test`})
+        `;
+        await db`
+          INSERT INTO public.user_tenants(user_id, tenant_id, role)
+          VALUES
+            (${malformedOwnerId}::uuid, ${malformedTenant}, 'owner'),
+            (${malformedExtraId}::uuid, ${malformedTenant}, ${extraRole})
+        `;
+        await db`
+          INSERT INTO public.refresh_tokens(id, user_id, tenant_id, token_hash, expires_at)
+          VALUES (
+            ${`malformed-personal-${extraRole}-${suffix}`},
+            ${malformedOwnerId},
+            ${malformedTenant},
+            ${`malformed-personal-${extraRole}-refresh-${suffix}`},
+            now() + interval '1 hour'
+          )
+        `;
+
+        await expect(
+          db.begin(async (tx) => {
+            await tx.unsafe(`SET LOCAL ROLE ${platformRole}`);
+            await tx`SELECT set_config('steward.tenant_id', 'platform', true)`;
+            await tx`
+              SELECT *
+              FROM steward_bootstrap.platform_set_user_deactivation(
+                ${malformedOwnerId}::uuid,
+                true
+              )
+            `;
+          }),
+        ).rejects.toThrow("Personal tenant membership invariant violated");
+
+        await expect(
+          db.begin(async (tx) => {
+            await tx.unsafe(`SET LOCAL ROLE ${platformRole}`);
+            await tx`SELECT set_config('steward.tenant_id', 'platform', true)`;
+            await tx`
+              SELECT *
+              FROM steward_bootstrap.platform_delete_user(${malformedOwnerId}::uuid)
+            `;
+          }),
+        ).rejects.toThrow("Personal tenant membership invariant violated");
+
+        const [unchangedUser] = await db<{ deactivated_at: Date | null }[]>`
+          SELECT deactivated_at
+          FROM public.users
+          WHERE id = ${malformedOwnerId}::uuid
+        `;
+        expect(unchangedUser?.deactivated_at).toBeNull();
+        const [refreshEvidence] = await db<{ count: number }[]>`
+          SELECT count(*)::int AS count
+          FROM public.refresh_tokens
+          WHERE user_id = ${malformedOwnerId}
+        `;
+        expect(refreshEvidence?.count).toBe(1);
+      }
 
       const platformKey = `rls-platform-key-${suffix}`;
       const appRoleEvidence = await runCommand(

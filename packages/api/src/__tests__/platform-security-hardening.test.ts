@@ -17,6 +17,10 @@ const rlsMigrationSource = readFileSync(
   join(apiRoot, "..", "..", "db", "drizzle", "0111_tenant_rls_policy_install.sql"),
   "utf8",
 );
+const personalLifecycleMigrationSource = readFileSync(
+  join(apiRoot, "..", "..", "db", "drizzle", "0113_personal_tenant_account_lifecycle.sql"),
+  "utf8",
+);
 
 function expectBefore(first: string, second: string) {
   const firstIndex = platformSource.indexOf(first);
@@ -521,6 +525,19 @@ describe("platform security hardening", () => {
     expect(rlsMigrationSource).toContain("u.deactivated_at IS NULL");
     expect(rlsMigrationSource).toContain("Cannot deactivate the sole active tenant owner");
     expect(rlsMigrationSource).toContain("Cannot delete the sole active tenant owner");
+    expect(personalLifecycleMigrationSource).toContain(
+      "personal_tenant_id text := 'personal-' || p_user_id::text",
+    );
+    expect(personalLifecycleMigrationSource).toContain(
+      "count(*) FILTER (WHERE ut.user_id = p_user_id AND ut.role = 'owner')",
+    );
+    expect(personalLifecycleMigrationSource).toContain(
+      "Personal tenant membership invariant violated",
+    );
+    expect(personalLifecycleMigrationSource).toContain(
+      "owner_tenant.tenant_id = personal_tenant_id",
+    );
+    expect(personalLifecycleMigrationSource).toContain("CONTINUE;");
     expect(platformSource).not.toContain("platform_member_${tenantId}");
 
     for (const marker of [

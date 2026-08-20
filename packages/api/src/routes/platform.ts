@@ -727,6 +727,30 @@ function rowsFromExecute<T>(result: unknown): T[] {
   return (Array.isArray(result) ? result : ((result as { rows?: unknown[] })?.rows ?? [])) as T[];
 }
 
+function errorChainHasExactMessage(error: unknown, expected: string): boolean {
+  const seen = new Set<unknown>();
+  let current = error;
+  for (let depth = 0; depth < 8 && current && !seen.has(current); depth += 1) {
+    seen.add(current);
+    if (current instanceof Error && current.message === expected) return true;
+    current =
+      typeof current === "object" && "cause" in current
+        ? (current as { cause?: unknown }).cause
+        : undefined;
+  }
+  return false;
+}
+
+function isPersonalTenantId(tenantId: string): boolean {
+  return tenantId.startsWith("personal-");
+}
+
+function canonicalPersonalTenantOwnerId(tenantId: string): string | null {
+  if (!isPersonalTenantId(tenantId)) return null;
+  const ownerId = tenantId.slice("personal-".length);
+  return isValidUserId(ownerId) && tenantId === `personal-${ownerId}` ? ownerId : null;
+}
+
 // ─── Route group ─────────────────────────────────────────────────────────────
 
 const platform = new Hono<{ Variables: AppVariables }>();
@@ -2082,6 +2106,39 @@ platform.delete("/tenants/:id", async (c) => {
         .for("update");
       if (!existing) return { status: "missing" as const };
 
+      const personalOwnerId = canonicalPersonalTenantOwnerId(tenantId);
+      if (isPersonalTenantId(tenantId)) {
+        if (!personalOwnerId) return { status: "blocked_by_personal_membership" as const };
+        await tx.execute(
+          sql`SELECT pg_advisory_xact_lock(hashtextextended(${
+            "platform_user_account_" + personalOwnerId
+          }, 0))`,
+        );
+        await tx.execute(
+          sql`SELECT pg_advisory_xact_lock(hashtextextended(${
+            "tenant_owner_lifecycle_" + tenantId
+          }, 0))`,
+        );
+        const [owner] = await tx
+          .select({ id: users.id })
+          .from(users)
+          .where(eq(users.id, personalOwnerId))
+          .for("update");
+        const personalMemberships = await tx
+          .select({ userId: userTenants.userId, role: userTenants.role })
+          .from(userTenants)
+          .where(eq(userTenants.tenantId, tenantId))
+          .orderBy(userTenants.userId);
+        if (
+          !owner ||
+          personalMemberships.length !== 1 ||
+          personalMemberships[0]?.userId !== personalOwnerId ||
+          personalMemberships[0]?.role !== "owner"
+        ) {
+          return { status: "blocked_by_personal_membership" as const };
+        }
+      }
+
       const tenantAgents = await tx
         .select({ id: agents.id })
         .from(agents)
@@ -2206,6 +2263,12 @@ platform.delete("/tenants/:id", async (c) => {
   if (result.status === "blocked_by_capability_integrity") {
     return c.json<ApiResponse>(
       { ok: false, error: "Tenant capability authority has cross-tenant references" },
+      409,
+    );
+  }
+  if (result.status === "blocked_by_personal_membership") {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Personal tenant membership invariant violated" },
       409,
     );
   }
@@ -3751,7 +3814,6 @@ platform.patch("/users/:userId/deactivate", async (c) => {
           resourceId: userId,
           ...auditCtx(c),
         });
-        const issuedBefore = await revocationStore.revokeUserTokens(userId);
         const [updated] = rowsFromExecute<{
           user_id: string;
           previous_deactivated_at: Date | null;
@@ -3766,6 +3828,7 @@ platform.patch("/users/:userId/deactivate", async (c) => {
           `),
         );
         if (!updated) throw new Error("User not found");
+        const issuedBefore = await revocationStore.revokeUserTokens(userId);
         await appendRequiredAudit({
           tenantId: PLATFORM_AUDIT_TENANT_ID,
           actorType: "platform",
@@ -3779,9 +3842,12 @@ platform.patch("/users/:userId/deactivate", async (c) => {
       },
     ),
   ).catch((err: unknown) => {
-    if (err instanceof Error && err.message === "User not found") return null;
-    if (err instanceof Error && err.message === "Cannot deactivate the sole active tenant owner") {
-      return err.message;
+    if (errorChainHasExactMessage(err, "User not found")) return null;
+    if (errorChainHasExactMessage(err, "Cannot deactivate the sole active tenant owner")) {
+      return "Cannot deactivate the sole active tenant owner";
+    }
+    if (errorChainHasExactMessage(err, "Personal tenant membership invariant violated")) {
+      return "Personal tenant membership invariant violated";
     }
     throw err;
   });
@@ -3789,6 +3855,9 @@ platform.patch("/users/:userId/deactivate", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: "User not found" }, 404);
   }
   if (result === "Cannot deactivate the sole active tenant owner") {
+    return c.json<ApiResponse>({ ok: false, error: result }, 409);
+  }
+  if (result === "Personal tenant membership invariant violated") {
     return c.json<ApiResponse>({ ok: false, error: result }, 409);
   }
   return c.json<ApiResponse<{ userId: string; deactivatedAt: Date | null }>>({
@@ -3831,13 +3900,13 @@ platform.delete("/users/:userId", async (c) => {
           resourceId: userId,
           ...auditCtx(c),
         });
-        const cutoff = await revocationStore.revokeUserTokens(userId);
         const [deleted] = rowsFromExecute<{ user_id: string }>(
           await tx.execute(sql`
             SELECT * FROM steward_bootstrap.platform_delete_user(${userId}::uuid)
           `),
         );
         if (!deleted) throw new Error("User not found");
+        const cutoff = await revocationStore.revokeUserTokens(userId);
         await appendRequiredAudit({
           tenantId: PLATFORM_AUDIT_TENANT_ID,
           actorType: "platform",
@@ -3851,9 +3920,12 @@ platform.delete("/users/:userId", async (c) => {
       },
     ),
   ).catch((error: unknown) => {
-    if (error instanceof Error && error.message === "User not found") return null;
-    if (error instanceof Error && error.message === "Cannot delete the sole active tenant owner") {
-      return error.message;
+    if (errorChainHasExactMessage(error, "User not found")) return null;
+    if (errorChainHasExactMessage(error, "Cannot delete the sole active tenant owner")) {
+      return "Cannot delete the sole active tenant owner";
+    }
+    if (errorChainHasExactMessage(error, "Personal tenant membership invariant violated")) {
+      return "Personal tenant membership invariant violated";
     }
     throw error;
   });
@@ -3861,6 +3933,9 @@ platform.delete("/users/:userId", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: "User not found" }, 404);
   }
   if (issuedBefore === "Cannot delete the sole active tenant owner") {
+    return c.json<ApiResponse>({ ok: false, error: issuedBefore }, 409);
+  }
+  if (issuedBefore === "Personal tenant membership invariant violated") {
     return c.json<ApiResponse>({ ok: false, error: issuedBefore }, 409);
   }
 
@@ -4678,6 +4753,12 @@ platform.post("/tenants/:id/invitations", async (c) => {
   if (!isValidTenantId(tenantId)) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid tenant id format" }, 400);
   }
+  if (isPersonalTenantId(tenantId)) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Personal tenant membership is immutable" },
+      409,
+    );
+  }
 
   const body = await safeJsonParse<{
     email: string;
@@ -4844,6 +4925,12 @@ platform.delete("/tenants/:id/invitations/:invitationId", async (c) => {
   if (!isValidTenantId(tenantId)) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid tenant id format" }, 400);
   }
+  if (isPersonalTenantId(tenantId)) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Personal tenant membership is immutable" },
+      409,
+    );
+  }
   if (!isValidUserId(invitationId)) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid invitation id format" }, 400);
   }
@@ -4933,6 +5020,12 @@ platform.post("/tenants/:id/members", async (c) => {
   if (!isValidTenantId(tenantId)) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid tenant id format" }, 400);
   }
+  if (isPersonalTenantId(tenantId)) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Personal tenant membership is immutable" },
+      409,
+    );
+  }
 
   const body = await safeJsonParse<{ email: string; role?: string }>(c);
   if (!body || !isNonEmptyString(body.email)) {
@@ -5021,6 +5114,12 @@ platform.delete("/tenants/:id/members/:userId", async (c) => {
 
   if (!isValidTenantId(tenantId)) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid tenant id format" }, 400);
+  }
+  if (isPersonalTenantId(tenantId)) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Personal tenant membership is immutable" },
+      409,
+    );
   }
   if (!isValidUserId(userId)) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid user id format" }, 400);
@@ -5117,6 +5216,12 @@ platform.patch("/tenants/:id/members/:userId", async (c) => {
 
   if (!isValidTenantId(tenantId)) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid tenant id format" }, 400);
+  }
+  if (isPersonalTenantId(tenantId)) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Personal tenant membership is immutable" },
+      409,
+    );
   }
   if (!isValidUserId(userId)) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid user id format" }, 400);
