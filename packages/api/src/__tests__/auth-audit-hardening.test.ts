@@ -51,9 +51,9 @@ describe("auth and audit hardening", () => {
   it("revokes already minted access tokens when refresh-token reuse is detected", () => {
     const reusedBranch = authSource.indexOf('rotatedRefresh.status === "reused"');
     expect(reusedBranch).toBeGreaterThanOrEqual(0);
-    expect(
-      authSource.indexOf("revokeUserRefreshSessions(rotatedRefresh.userId)", reusedBranch),
-    ).toBeGreaterThan(reusedBranch);
+    expect(authSource.indexOf("await revokeUserRefreshSessions(", reusedBranch)).toBeGreaterThan(
+      reusedBranch,
+    );
     expect(authSource.indexOf("auth.refresh.reuse_detected", reusedBranch)).toBeGreaterThan(
       reusedBranch,
     );
@@ -73,7 +73,7 @@ describe("auth and audit hardening", () => {
     ).toBeGreaterThan(rotationStart);
     expect(
       authSource.indexOf("revocationStore.getUserRevokedBefore(record.userId)", rotationStart),
-    ).toBeLessThan(authSource.indexOf(".insert(refreshTokens)", rotationStart));
+    ).toBeLessThan(authSource.indexOf("auth_rotate_refresh_token(", rotationStart));
     expect(
       authSource.indexOf("Session was revoked. Please sign in again.", routeStart),
     ).toBeGreaterThan(routeStart);

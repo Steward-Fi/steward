@@ -63,7 +63,7 @@ describe("external agent JWT hardening", () => {
       "agentTokenScopes.some((scope) => scope.startsWith(CAPABILITY_TOKEN_SCOPE_PREFIX))",
     );
     const agentLookup = contextSource.indexOf(
-      "const agent = await ensureAgentForTenant(payload.tenantId, payload.agentId as string);",
+      "const agentSubject = await findAgentBootstrapSubject(",
     );
     expect(refusal).toBeGreaterThanOrEqual(0);
     expect(agentLookup).toBeGreaterThan(refusal);
