@@ -257,8 +257,14 @@ async function assertUserIsNotSoleActiveOwner(
   userId: string,
   message: string,
 ): Promise<void> {
+  const personalTenantId = `personal-${userId}`;
   const tenantIds = await lockUserOwnerLifecycleTenants(tx, userId);
   for (const tenantId of tenantIds) {
+    // A personal tenant is owned by exactly one user by construction. Account
+    // deactivation must be able to suspend that identity, and hard deletion
+    // removes this exact tenant in the same transaction below. Shared tenants
+    // retain the strict active-owner invariant.
+    if (tenantId === personalTenantId) continue;
     if ((await activeTenantOwnerCount(tx, tenantId, userId)) < 1) {
       throw new Error(message);
     }
@@ -3551,6 +3557,7 @@ platform.delete("/users/:userId", async (c) => {
       );
       const revokedBefore = await revocationStore.revokeUserTokens(userId);
       await tx.delete(refreshTokens).where(eq(refreshTokens.userId, userId));
+      await tx.delete(tenants).where(eq(tenants.id, `personal-${userId}`));
       await tx.delete(users).where(eq(users.id, userId));
       return revokedBefore;
     })

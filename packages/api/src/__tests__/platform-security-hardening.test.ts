@@ -497,6 +497,8 @@ describe("platform security hardening", () => {
     expect(platformSource).toContain("tenant_owner_lifecycle_${tenantId}");
     expect(platformSource).toContain("function lockUserOwnerLifecycleTenants");
     expect(platformSource).toContain("function assertUserIsNotSoleActiveOwner");
+    expect(platformSource).toContain("const personalTenantId = `personal-${userId}`");
+    expect(platformSource).toContain("if (tenantId === personalTenantId) continue");
     expect(platformSource).toContain("Cannot deactivate the sole active tenant owner");
     expect(platformSource).toContain("Cannot delete the sole active tenant owner");
     expect(platformSource).not.toContain("platform_member_${tenantId}");
