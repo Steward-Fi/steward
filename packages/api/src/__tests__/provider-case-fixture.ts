@@ -6,6 +6,7 @@
  */
 
 import {
+  agents,
   approvalQueue,
   getDb,
   intents,
@@ -17,12 +18,13 @@ import {
   secretRoutes,
   secrets,
   tenants,
+  transactions,
   users,
   userTenants,
   workspaces,
 } from "@stwd/db";
 import { buildGithubAction } from "@stwd/provider-github";
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import type { ProviderPrincipalV1 } from "../middleware/provider-principal";
 import { providerActionService } from "../services/provider-action-service";
 import { providerApprovalService } from "../services/provider-approval";
@@ -82,30 +84,55 @@ export async function seedCaseFixture(): Promise<void> {
   ]);
 }
 
-/** Wipe all provider + audit state between tests (audit chain included). */
+/** Wipe only this fixture's provider + audit state between tests. */
 export async function wipeCase(): Promise<void> {
   const db = getDb();
-  await db.execute(sql`DELETE FROM provider_action_audit_outbox`);
-  await db.execute(sql`DELETE FROM execution_authorization_nonces`);
-  await db.delete(approvalQueue);
-  await db.delete(providerActionBindings);
-  await db.delete(intents);
-  await db.delete(providerGrants);
-  await db.delete(providerRoleBindings);
-  await db.delete(providerOperations);
-  await db.delete(providerAccounts);
-  await db.delete(secretRoutes);
-  await db.delete(secrets);
-  await db.delete(workspaces);
-  await db.delete(userTenants);
-  await db.delete(users);
-  await db.delete(tenants);
-  await db.execute(sql`DELETE FROM audit_events`);
-  await db.execute(sql`DELETE FROM audit_chain_heads`);
-  // Checkpoints are append-only in production. TRUNCATE is deliberately used
-  // only by this isolated PGLite fixture to reset the shared test database
-  // without weakening the row-level UPDATE/DELETE guard.
-  await db.execute(sql`TRUNCATE TABLE audit_checkpoints RESTART IDENTITY`);
+  const fixtureTenantIds = [F.TENANT, F.TENANT_B];
+  await db.execute(
+    sql`DELETE FROM provider_action_audit_outbox WHERE tenant_id IN (${sql.join(
+      fixtureTenantIds.map((tenantId) => sql`${tenantId}`),
+      sql`, `,
+    )})`,
+  );
+  await db.execute(
+    sql`DELETE FROM execution_authorization_nonces WHERE tenant_id IN (${sql.join(
+      fixtureTenantIds.map((tenantId) => sql`${tenantId}`),
+      sql`, `,
+    )})`,
+  );
+  await db.delete(approvalQueue).where(eq(approvalQueue.agentId, F.AGENT));
+  await db
+    .delete(providerActionBindings)
+    .where(inArray(providerActionBindings.tenantId, fixtureTenantIds));
+  await db.delete(intents).where(inArray(intents.tenantId, fixtureTenantIds));
+  await db.delete(providerGrants).where(inArray(providerGrants.tenantId, fixtureTenantIds));
+  await db
+    .delete(providerRoleBindings)
+    .where(inArray(providerRoleBindings.tenantId, fixtureTenantIds));
+  await db.delete(providerOperations).where(inArray(providerOperations.tenantId, fixtureTenantIds));
+  await db.delete(providerAccounts).where(inArray(providerAccounts.tenantId, fixtureTenantIds));
+  await db.delete(secretRoutes).where(inArray(secretRoutes.tenantId, fixtureTenantIds));
+  await db.delete(secrets).where(inArray(secrets.tenantId, fixtureTenantIds));
+  await db.delete(workspaces).where(inArray(workspaces.tenantId, fixtureTenantIds));
+  await db.delete(transactions).where(eq(transactions.agentId, F.AGENT));
+  await db.delete(agents).where(eq(agents.id, F.AGENT));
+  await db.delete(userTenants).where(inArray(userTenants.tenantId, fixtureTenantIds));
+  await db
+    .delete(users)
+    .where(inArray(users.id, [F.GRANTOR, F.APPROVER, F.APPROVER_2, F.APPROVER_3, F.AGENT_OWNER]));
+  await db.delete(tenants).where(inArray(tenants.id, fixtureTenantIds));
+  await db.execute(
+    sql`DELETE FROM audit_events WHERE tenant_id IN (${sql.join(
+      fixtureTenantIds.map((tenantId) => sql`${tenantId}`),
+      sql`, `,
+    )})`,
+  );
+  await db.execute(
+    sql`DELETE FROM audit_chain_heads WHERE tenant_id IN (${sql.join(
+      fixtureTenantIds.map((tenantId) => sql`${tenantId}`),
+      sql`, `,
+    )})`,
+  );
 }
 
 function idem(seed: string): string {
