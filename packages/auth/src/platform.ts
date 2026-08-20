@@ -35,20 +35,40 @@ function getValidPlatformKeys(): string[] {
     .filter(Boolean);
 }
 
+const PLATFORM_SCOPE_CONFIG_ERROR = "Platform key scope configuration is invalid";
+
+class PlatformKeyScopesConfigurationError extends Error {
+  constructor() {
+    super(PLATFORM_SCOPE_CONFIG_ERROR);
+    this.name = "PlatformKeyScopesConfigurationError";
+  }
+}
+
 function parsePlatformKeyScopes(): Record<string, string[]> {
   const raw = process.env.STEWARD_PLATFORM_KEY_SCOPES;
   if (!raw?.trim()) return {};
+
+  let parsed: unknown;
   try {
-    const parsed = JSON.parse(raw) as Record<string, unknown>;
-    const scopes: Record<string, string[]> = {};
-    for (const [keyOrHash, value] of Object.entries(parsed)) {
-      if (!Array.isArray(value)) continue;
-      scopes[keyOrHash] = value.filter((scope): scope is string => typeof scope === "string");
-    }
-    return scopes;
+    parsed = JSON.parse(raw);
   } catch {
-    return {};
+    throw new PlatformKeyScopesConfigurationError();
   }
+
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new PlatformKeyScopesConfigurationError();
+  }
+
+  const entries = Object.entries(parsed);
+  if (
+    entries.some(
+      ([, value]) => !Array.isArray(value) || value.some((scope) => typeof scope !== "string"),
+    )
+  ) {
+    throw new PlatformKeyScopesConfigurationError();
+  }
+
+  return Object.fromEntries(entries) as Record<string, string[]>;
 }
 
 /**
@@ -143,8 +163,18 @@ export function platformAuthMiddleware() {
       return c.json<ApiResponse>({ ok: false, error: "Invalid platform key" }, 403);
     }
 
+    let scopes: string[];
+    try {
+      scopes = getPlatformKeyScopes(key);
+    } catch (error) {
+      if (error instanceof PlatformKeyScopesConfigurationError) {
+        return c.json<ApiResponse>({ ok: false, error: PLATFORM_SCOPE_CONFIG_ERROR }, 500);
+      }
+      throw error;
+    }
+
     c.set("platformKeyHash", hashKey(key).toString("hex"));
-    c.set("platformScopes", getPlatformKeyScopes(key));
+    c.set("platformScopes", scopes);
 
     await next();
   });
