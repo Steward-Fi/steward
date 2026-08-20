@@ -1,6 +1,6 @@
 # @stwd/signer-frost
 
-**PROTOTYPE (Pillar D / D2).** Dev keys only — not production custody yet.
+**PROTOTYPE.** Dev keys only — not production custody yet.
 
 FROST-secp256k1 (Schnorr) 2-of-3 threshold `SignerBackend` for `@stwd/vault`,
 using the Zcash Foundation `frost-secp256k1` Rust crate behind a thin TS client.
@@ -34,7 +34,7 @@ Implements the D1 decision (`projects/steward/D1-MPC-DECISION-2026-07-30.md`).
 
 No audited, maintained pure-JS threshold library exists worth trusting on a
 custody critical path (verified 2026-07-30). The mature audited libs are Rust
-(ZF, Lockness) / Go (Taurus, Circle). The sidecar also aligns with Pillar B:
+(ZF, Lockness) / Go (Taurus, Circle). The sidecar also supports the TEE model:
 each share can live in its own enclave.
 
 ## Build & run

@@ -62,7 +62,7 @@ export type { AuditActorType as ActorType } from "@stwd/db";
 
 /**
  * Minimal read surface a snapshot transaction (or the db) must expose so the
- * PR5 case correlator can run `verifyAuditChain` + `readAuditBundleData` inside
+ * The case correlator can run `verifyAuditChain` + `readAuditBundleData` inside
  * ONE coherent snapshot. Both the Drizzle db and a Drizzle tx satisfy this; we
  * alias to the db's own type so the internal `.execute(sql\`...\`)` calls keep
  * their existing typing when an executor is supplied.
@@ -247,7 +247,7 @@ export async function verifyAuditChain(
     /**
      * Optional read executor (a snapshot transaction) so callers can verify a
      * chain segment WITHIN a single coherent snapshot alongside other reads
-     * (PR5 §4.1/§4.3 KC06). Defaults to `getDb()`; behavior is otherwise
+     * (§4.1/§4.3 KC06). Defaults to `getDb()`; behavior is otherwise
      * identical. Must expose `.execute(sql)` like the Drizzle db/tx.
      */
     executor?: AuditReadExecutor;
@@ -563,7 +563,7 @@ export async function readAuditBundleData(
 
 /**
  * The self-contained, offline-verifiable signed bundle envelope shared by
- * `/audit/bundle` and PR5's `/v2/provider-actions/:id/evidence`. Factored out of
+ * `/audit/bundle` and `/v2/provider-actions/:id/evidence`. Factored out of
  * the route (spec §6.2) so both surfaces sign identically — one signing path,
  * one checkpoint-persistence policy, one canonicalization contract.
  */
@@ -585,7 +585,7 @@ export interface SignedAuditBundle {
 /**
  * Sign a checkpoint over the chain head + a content digest over exactly the
  * bundle's events, persist the checkpoint best-effort (provenance only; the
- * bundle is authoritative regardless, PR5 C4), and return the self-contained
+ * bundle is authoritative regardless), and return the self-contained
  * signed bundle envelope.
  *
  * `bundleData` MUST come from `readAuditBundleData(tenantId, from, to)` (ideally

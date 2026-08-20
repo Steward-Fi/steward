@@ -20,6 +20,7 @@ import {
   setNoStoreHeaders,
   transactions,
 } from "../services/context";
+import { isRecentMfaTimestamp } from "../services/recent-mfa";
 import { dispatchWebhook } from "../services/webhook-dispatch";
 
 /**
@@ -88,13 +89,7 @@ function requireHumanApprover(c: Context<{ Variables: AppVariables }>): boolean 
 }
 
 function hasRecentSessionMfa(c: Context<{ Variables: AppVariables }>, maxAgeMs = 5 * 60_000) {
-  const verifiedAt = c.get("sessionMfaVerifiedAt");
-  return (
-    typeof verifiedAt === "number" &&
-    Number.isFinite(verifiedAt) &&
-    Date.now() - verifiedAt >= 0 &&
-    Date.now() - verifiedAt <= maxAgeMs
-  );
+  return isRecentMfaTimestamp(c.get("sessionMfaVerifiedAt"), maxAgeMs);
 }
 
 function approvalIntentActionType(actionType: string | null | undefined): string {
@@ -547,6 +542,12 @@ approvalRoutes.post("/proxy/:id/approve", async (c) => {
   // an already-approved row returns 409 without a second transition or audit.
   const row = await withTenantAuditedTransaction(tenantId, async (tx, appendRequiredAudit) => {
     const dbTx = tx as typeof db;
+    // Agent deletion takes the tenant fence before the parent agent and pending
+    // request rows. Approval is an authority reactivation, so acquire the same
+    // fence before UPDATE takes the pending-request row lock. Relying only on
+    // the row trigger would acquire the advisory lock after PostgreSQL has
+    // already locked the row, which can deadlock with deletion.
+    await dbTx.execute(sql`SELECT public.steward_lock_tenant_deletion(${tenantId})`);
     const [updated] = await dbTx
       .update(pendingProxyRequests)
       .set({

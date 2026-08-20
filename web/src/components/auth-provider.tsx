@@ -27,6 +27,8 @@ export interface AuthContextType {
   tenant: TenantInfo | null;
   isAuthenticated: boolean;
   isLoading: boolean;
+  accessToken: string | null;
+  sessionTenantId: string | null;
   signIn: () => Promise<void>;
   signInWithPasskey: (email: string) => Promise<void>;
   signInWithEmail: (email: string) => Promise<{ ok: boolean; expiresAt?: string }>;
@@ -51,10 +53,12 @@ export function useAuth(): AuthContextType {
     return {
       address: (user as unknown as Record<string, unknown>)?.address as string | undefined,
       email: user?.email ?? undefined,
-      userId: user?.id ?? undefined,
+      userId: user?.id ?? auth.session?.userId ?? undefined,
       tenant,
       isAuthenticated: auth.isAuthenticated,
       isLoading: auth.isLoading,
+      accessToken: auth.session?.token ?? auth.getToken(),
+      sessionTenantId: auth.session?.tenantId ?? null,
       signIn: async () => {},
       signInWithPasskey: async (email: string) => {
         await auth.signInWithPasskey(email);
@@ -75,7 +79,9 @@ export function useAuth(): AuthContextType {
     auth.isAuthenticated,
     auth.isLoading,
     auth.user,
+    auth.session,
     auth.activeTenantId,
+    auth.getToken,
     auth.signOut,
     auth.signInWithPasskey,
     auth.signInWithEmail,

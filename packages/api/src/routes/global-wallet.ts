@@ -14,11 +14,13 @@ import type { Context, Next } from "hono";
 import { Hono } from "hono";
 import { writeAuditEvent } from "../services/audit";
 import {
+  continueWithTenantDatabase,
   safeJsonParse,
   sanitizeErrorMessage,
   setNoStoreHeaders,
   verifySessionToken,
 } from "../services/context";
+import { isRecentMfaTimestamp } from "../services/recent-mfa";
 import { getConfiguredVault } from "../services/vault-factory";
 
 type UserSessionPayload = {
@@ -95,7 +97,16 @@ async function userSessionAuth(
   if (typeof payload.mfaVerifiedAt === "number")
     c.set("sessionMfaVerifiedAt", payload.mfaVerifiedAt);
   if (typeof payload.mfaMethod === "string") c.set("sessionMfaMethod", payload.mfaMethod);
-  await next();
+  if (!payload.tenantId) {
+    return c.json<ApiResponse>({ ok: false, error: "Session token missing tenantId claim" }, 401);
+  }
+  await continueWithTenantDatabase(
+    payload.tenantId,
+    "global-wallet-jwt",
+    payload.userId,
+    next,
+    payload.userId,
+  );
   return undefined;
 }
 
@@ -431,13 +442,7 @@ function parseSendTransactionParams(value: unknown):
 }
 
 function hasRecentMfa(c: Context<{ Variables: GlobalWalletVariables }>): boolean {
-  const verifiedAt = c.get("sessionMfaVerifiedAt");
-  return (
-    typeof verifiedAt === "number" &&
-    Number.isFinite(verifiedAt) &&
-    Date.now() - verifiedAt >= 0 &&
-    Date.now() - verifiedAt <= MFA_MAX_AGE_MS
-  );
+  return isRecentMfaTimestamp(c.get("sessionMfaVerifiedAt"), MFA_MAX_AGE_MS);
 }
 
 async function getEnabledAppClient(

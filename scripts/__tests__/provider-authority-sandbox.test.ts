@@ -58,6 +58,7 @@ function envFixture() {
       "STEWARD_AUDIT_SIGNING_KEY_FINGERPRINT",
       "DATABASE_URL",
       "STEWARD_MASTER_PASSWORD",
+      "STEWARD_KDF_SALT",
       "STEWARD_EXECUTION_AUTH_SECRET",
       "STEWARD_AUDIT_HMAC_KEY",
     ]
@@ -71,6 +72,7 @@ function envFixture() {
       ]),
   );
   env.STEWARD_API_URL = "https://steward.sandbox.test";
+  env.STEWARD_KDF_SALT = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
   return env;
 }
 
@@ -100,6 +102,32 @@ describe("provider authority sandbox operator primitives", () => {
       globalThis.fetch = original;
     }
     expect(calls).toBe(0);
+  });
+
+  it("fails closed when the live vault KDF salt is missing or malformed", () => {
+    // RSA fixture generation is intentionally expensive. Generate it once so
+    // this validation table stays within Bun's default per-test timeout (the
+    // official scripts/__tests__ CI command does not raise that timeout).
+    const valid = envFixture();
+
+    const missing = { ...valid };
+    delete missing.STEWARD_KDF_SALT;
+    expect(() => validateEnvironment(missing)).toThrow("STEWARD_KDF_SALT");
+
+    const short = { ...valid, STEWARD_KDF_SALT: "abcd" };
+    expect(() => validateEnvironment(short)).toThrow("at least 32 characters");
+
+    const nonHex = { ...valid, STEWARD_KDF_SALT: `${"a".repeat(32)}zz` };
+    expect(() => validateEnvironment(nonHex)).toThrow("even-length hexadecimal string");
+
+    const oddLength = { ...valid, STEWARD_KDF_SALT: "a".repeat(33) };
+    expect(() => validateEnvironment(oddLength)).toThrow("even-length hexadecimal string");
+
+    const trailingSpace = { ...valid, STEWARD_KDF_SALT: `${"a".repeat(32)} ` };
+    expect(() => validateEnvironment(trailingSpace)).toThrow("even-length hexadecimal string");
+
+    const uppercase = { ...valid, STEWARD_KDF_SALT: "AB".repeat(16) };
+    expect(() => validateEnvironment(uppercase)).not.toThrow();
   });
 
   it("rejects credential-bearing and public plaintext service URLs", async () => {

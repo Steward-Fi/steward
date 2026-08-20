@@ -48,6 +48,7 @@ import {
   safeJsonParse,
   setNoStoreHeaders,
 } from "../services/context";
+import { isRecentMfaTimestamp } from "../services/recent-mfa";
 
 const MAX_LIFETIME_MS = 30 * 24 * 3600 * 1000;
 const DEFAULT_LIFETIME_MS = 24 * 3600 * 1000;
@@ -77,13 +78,7 @@ function requireTenantAdminSession(c: Parameters<typeof requireTenantLevel>[0]):
 }
 
 function hasRecentSessionMfa(c: Parameters<typeof requireTenantLevel>[0], maxAgeMs = 5 * 60_000) {
-  const verifiedAt = c.get("sessionMfaVerifiedAt");
-  return (
-    typeof verifiedAt === "number" &&
-    Number.isFinite(verifiedAt) &&
-    Date.now() - verifiedAt >= 0 &&
-    Date.now() - verifiedAt <= maxAgeMs
-  );
+  return isRecentMfaTimestamp(c.get("sessionMfaVerifiedAt"), maxAgeMs);
 }
 
 function requireRecentAdminMfa(c: Parameters<typeof requireTenantLevel>[0], reason: string) {

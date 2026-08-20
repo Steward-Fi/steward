@@ -487,10 +487,29 @@ interface RequestDatabaseContext {
   sourceDb: RequestDatabase;
   db: RequestDatabase | undefined;
   active: boolean;
+  tenantId?: string;
+  userId?: string;
   pendingTasks: Set<Promise<unknown>>;
   guardedObjects: WeakMap<object, object>;
 }
 const requestDatabaseStorage = new AsyncLocalStorage<RequestDatabaseContext>();
+const tenantTransactionDatabaseStorage = new AsyncLocalStorage<RequestDatabaseContext>();
+
+export function hasTenantTransactionDatabase(expected?: {
+  tenantId: string;
+  userId?: string;
+}): boolean {
+  const context = tenantTransactionDatabaseStorage.getStore();
+  if (!context?.active || !context.db) return false;
+  if (
+    expected &&
+    (context.tenantId !== expected.tenantId ||
+      (expected.userId !== undefined && context.userId !== expected.userId))
+  ) {
+    throw new Error("RLS_TENANT_DATABASE_CONTEXT_MISMATCH");
+  }
+  return true;
+}
 
 function assertRequestDatabaseContextActive(
   context: RequestDatabaseContext,
@@ -511,6 +530,60 @@ function trackRequestDatabaseTask<T>(
     () => context.pendingTasks.delete(tracked),
   );
   return task;
+}
+
+const REQUEST_DATABASE_CAPABILITY_METHODS = [
+  "batch",
+  "close",
+  "connect",
+  "copyFrom",
+  "copyTo",
+  "cursor",
+  "end",
+  "execute",
+  "listen",
+  "prepare",
+  "query",
+  "release",
+  "stream",
+  "transaction",
+  "unlisten",
+  "unsubscribe",
+] as const;
+
+/**
+ * Promise results are normally inert query data and must remain usable after
+ * the request closes. A driver can also resolve a live transport capability,
+ * though: PGLite `listen()` resolves an unsubscribe callable and pool
+ * `connect()` methods resolve clients. Identify those callable/client-like
+ * results without turning ordinary row arrays and objects into revoked
+ * proxies.
+ */
+function isRequestDatabaseCapabilityResult(value: unknown): value is object {
+  if (typeof value === "function") return true;
+  if (typeof value !== "object" || value === null) return false;
+
+  try {
+    let cursor: object | null = value;
+    while (cursor) {
+      for (const property of REQUEST_DATABASE_CAPABILITY_METHODS) {
+        const descriptor = Reflect.getOwnPropertyDescriptor(cursor, property);
+        if (!descriptor) continue;
+        if ("value" in descriptor) {
+          if (typeof descriptor.value === "function") return true;
+        } else if (descriptor.get || descriptor.set) {
+          // Do not invoke an unknown transport accessor merely to classify it.
+          return true;
+        }
+      }
+      cursor = Reflect.getPrototypeOf(cursor);
+    }
+  } catch {
+    // Driver objects are trusted, but reflection failure must not turn an
+    // opaque result into an unguarded request-owned capability.
+    return true;
+  }
+  return false;
 }
 
 /**
@@ -537,12 +610,51 @@ export function waitUntilRequestDatabaseTask<T>(task: () => Promise<T>): Promise
   backgroundContext.db = guardRequestDatabaseValue(backgroundContext.sourceDb, backgroundContext);
   const promise = requestDatabaseStorage.run(backgroundContext, task);
   const tracked = trackRequestDatabaseTask(context, promise);
+  const tenantContext = tenantTransactionDatabaseStorage.getStore();
+  if (tenantContext) trackRequestDatabaseTask(tenantContext, promise);
   const revokeBackgroundContext = () => {
     backgroundContext.active = false;
     backgroundContext.db = undefined;
   };
   void promise.then(revokeBackgroundContext, revokeBackgroundContext);
   return tracked;
+}
+
+/**
+ * Bind a transaction as the only database capability visible to downstream
+ * services. Existing route code can continue resolving `getDb()`, but every
+ * query is pinned to the same transaction carrying the tenant-local GUC.
+ * Detached registered work is drained before the transaction callback returns;
+ * retained handles are revoked at the boundary.
+ */
+export async function withTenantTransactionDatabase<T>(
+  transactionDb: RequestDatabase,
+  identity: { tenantId: string; userId?: string },
+  callback: () => Promise<T>,
+): Promise<T> {
+  if (tenantTransactionDatabaseStorage.getStore()) {
+    throw new Error("RLS_TENANT_DATABASE_CONTEXT_NESTED");
+  }
+  const context: RequestDatabaseContext = {
+    sourceDb: transactionDb,
+    db: undefined,
+    active: true,
+    tenantId: identity.tenantId,
+    userId: identity.userId,
+    pendingTasks: new Set(),
+    guardedObjects: new WeakMap(),
+  };
+  context.db = guardRequestDatabaseValue(transactionDb, context);
+  try {
+    return await tenantTransactionDatabaseStorage.run(context, async () => {
+      const result = await callback();
+      await drainRequestDatabaseTasks(context);
+      return result;
+    });
+  } finally {
+    context.active = false;
+    context.db = undefined;
+  }
 }
 
 /**
@@ -558,33 +670,175 @@ export function waitUntilRequestDatabaseTask<T>(task: () => Promise<T>): Promise
  */
 function guardRequestDatabaseValue<T>(value: T, context: RequestDatabaseContext): T {
   if ((typeof value !== "object" || value === null) && typeof value !== "function") return value;
-  if (value instanceof Promise) {
-    return trackRequestDatabaseTask(context, value) as T;
-  }
+
+  const guardPromiseFulfillment = <R>(result: R): R =>
+    isRequestDatabaseCapabilityResult(result) ? guardRequestDatabaseValue(result, context) : result;
 
   const objectValue = value as object;
   const existing = context.guardedObjects.get(objectValue);
   if (existing) return existing as T;
+  if (value instanceof Promise) {
+    const guardedPromise = value.then(
+      (result) => guardPromiseFulfillment(result),
+      (error) => {
+        throw guardPromiseFulfillment(error);
+      },
+    );
+    context.guardedObjects.set(objectValue, guardedPromise);
+    context.guardedObjects.set(guardedPromise, guardedPromise);
+    return trackRequestDatabaseTask(context, guardedPromise) as T;
+  }
+
+  const guardCallback = (callback: (...args: unknown[]) => unknown) => {
+    return function guardedDatabaseCallback(this: unknown, ...args: unknown[]): unknown {
+      assertRequestDatabaseContextActive(context);
+      const guardedThis = guardRequestDatabaseValue(this, context);
+      const guardedArgs = args.map((argument) => guardRequestDatabaseValue(argument, context));
+      const result = Reflect.apply(callback, guardedThis, guardedArgs);
+      return guardRequestDatabaseValue(result, context);
+    };
+  };
+
+  const guardCallbackArguments = (args: unknown[]): unknown[] =>
+    args.map((argument) =>
+      typeof argument === "function"
+        ? guardCallback(argument as (...callbackArgs: unknown[]) => unknown)
+        : argument,
+    );
+
+  const guardPromiseContinuation = (callback: (...args: unknown[]) => unknown) => {
+    return function guardedDatabasePromiseContinuation(this: unknown, ...args: unknown[]): unknown {
+      const guardedThis = guardPromiseFulfillment(this);
+      const guardedArgs = args.map(guardPromiseFulfillment);
+      return Reflect.apply(callback, guardedThis, guardedArgs);
+    };
+  };
+
+  const guardMember = (target: object, member: unknown, property?: PropertyKey): unknown => {
+    if (typeof member === "function") {
+      // Drizzle's cross-bundle entity check walks
+      // Object.getPrototypeOf(value).constructor and then the constructor's
+      // prototype chain. Preserve that identity-bearing shape inside the same
+      // membrane instead of turning `constructor` into a bound method facade.
+      // The callable proxy still checks this request lease on every reflection
+      // and invocation, so the raw constructor never escapes.
+      if (property === "constructor") {
+        return guardRequestDatabaseValue(member, context);
+      }
+      return (...args: unknown[]) => {
+        assertRequestDatabaseContextActive(context);
+        // Drizzle query builders are PromiseLike. Preserve ordinary result
+        // rows, but membrane callable/client-like fulfillment values supplied
+        // by either a driver thenable or a native assimilation continuation.
+        const guardedArgs =
+          property === "then"
+            ? args.map((argument) =>
+                typeof argument === "function"
+                  ? guardPromiseContinuation(argument as (...callbackArgs: unknown[]) => unknown)
+                  : argument,
+              )
+            : guardCallbackArguments(args);
+        const result = Reflect.apply(member, target, guardedArgs);
+        return guardRequestDatabaseValue(result, context);
+      };
+    }
+    return guardRequestDatabaseValue(member, context);
+  };
 
   const guarded = new Proxy(objectValue, {
     get(target, property) {
       assertRequestDatabaseContextActive(context);
       const member = Reflect.get(target, property, target);
-      if (typeof member === "function") {
-        return (...args: unknown[]) => {
-          assertRequestDatabaseContextActive(context);
-          const result = Reflect.apply(member, target, args);
-          return guardRequestDatabaseValue(result, context);
-        };
-      }
-      return guardRequestDatabaseValue(member, context);
+      return guardMember(target, member, property);
     },
-    set(target, property, nextValue) {
+    set() {
       assertRequestDatabaseContextActive(context);
-      return Reflect.set(target, property, nextValue, target);
+      throw new Error("REQUEST_DATABASE_REFLECTION_UNAVAILABLE");
+    },
+    has(target, property) {
+      assertRequestDatabaseContextActive(context);
+      return Reflect.has(target, property);
+    },
+    defineProperty() {
+      assertRequestDatabaseContextActive(context);
+      throw new Error("REQUEST_DATABASE_REFLECTION_UNAVAILABLE");
+    },
+    deleteProperty() {
+      assertRequestDatabaseContextActive(context);
+      throw new Error("REQUEST_DATABASE_REFLECTION_UNAVAILABLE");
+    },
+    getOwnPropertyDescriptor(target, property) {
+      assertRequestDatabaseContextActive(context);
+      const descriptor = Reflect.getOwnPropertyDescriptor(target, property);
+      if (!descriptor) return undefined;
+      if (!descriptor.configurable) {
+        throw new Error("REQUEST_DATABASE_REFLECTION_UNAVAILABLE");
+      }
+      if ("value" in descriptor) {
+        return { ...descriptor, value: guardMember(target, descriptor.value, property) };
+      }
+      return {
+        ...descriptor,
+        get: descriptor.get
+          ? () => {
+              assertRequestDatabaseContextActive(context);
+              return guardRequestDatabaseValue(Reflect.apply(descriptor.get!, target, []), context);
+            }
+          : undefined,
+        set: descriptor.set
+          ? () => {
+              assertRequestDatabaseContextActive(context);
+              throw new Error("REQUEST_DATABASE_REFLECTION_UNAVAILABLE");
+            }
+          : undefined,
+      };
+    },
+    getPrototypeOf(target) {
+      assertRequestDatabaseContextActive(context);
+      // Drizzle uses prototype inspection to recognize aliased subqueries and
+      // columns during composition. Return a recursively guarded prototype so
+      // those checks keep working without exposing a raw object or callable.
+      // Proxy invariants require the exact raw prototype for non-extensible
+      // targets; refusing that uncommon case is safer than leaking it.
+      if (!Reflect.isExtensible(target)) {
+        throw new Error("REQUEST_DATABASE_REFLECTION_UNAVAILABLE");
+      }
+      const prototype = Reflect.getPrototypeOf(target);
+      return prototype === null ? null : guardRequestDatabaseValue(prototype, context);
+    },
+    setPrototypeOf() {
+      assertRequestDatabaseContextActive(context);
+      throw new Error("REQUEST_DATABASE_REFLECTION_UNAVAILABLE");
+    },
+    isExtensible(target) {
+      assertRequestDatabaseContextActive(context);
+      return Reflect.isExtensible(target);
+    },
+    preventExtensions() {
+      assertRequestDatabaseContextActive(context);
+      throw new Error("REQUEST_DATABASE_REFLECTION_UNAVAILABLE");
+    },
+    ownKeys(target) {
+      assertRequestDatabaseContextActive(context);
+      return Reflect.ownKeys(target);
+    },
+    apply(target, thisArg, args) {
+      assertRequestDatabaseContextActive(context);
+      const result = Reflect.apply(
+        target as unknown as (...callArgs: unknown[]) => unknown,
+        thisArg,
+        guardCallbackArguments(args),
+      );
+      return guardRequestDatabaseValue(result, context);
+    },
+    construct(target, args) {
+      assertRequestDatabaseContextActive(context);
+      const result = Reflect.construct(target as unknown as Function, guardCallbackArguments(args));
+      return guardRequestDatabaseValue(result, context);
     },
   });
   context.guardedObjects.set(objectValue, guarded);
+  context.guardedObjects.set(guarded, guarded);
   return guarded as T;
 }
 
@@ -689,6 +943,11 @@ function buildGlobalDb(): GlobalDbHandle {
 }
 
 export function getDb() {
+  const tenantContext = tenantTransactionDatabaseStorage.getStore();
+  if (tenantContext) {
+    assertRequestDatabaseContextActive(tenantContext);
+    return tenantContext.db;
+  }
   const requestContext = requestDatabaseStorage.getStore();
   if (requestContext) {
     assertRequestDatabaseContextActive(requestContext);
@@ -714,6 +973,11 @@ export function getDb() {
  * template, which is portable across both.
  */
 export function getSql() {
+  const tenantContext = tenantTransactionDatabaseStorage.getStore();
+  if (tenantContext) {
+    if (!tenantContext.active) throw new Error("REQUEST_DATABASE_CONTEXT_CLOSED");
+    throw new Error("RLS_TENANT_RAW_SQL_UNAVAILABLE: use the tenant transaction database");
+  }
   const requestContext = requestDatabaseStorage.getStore();
   if (requestContext) {
     if (!requestContext.active) throw new Error("REQUEST_DATABASE_CONTEXT_CLOSED");

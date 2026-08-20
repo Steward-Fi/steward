@@ -34,6 +34,7 @@ import {
 } from "../services/context";
 import { redactSignedTransactions, toIntentResponse } from "../services/intent-response";
 import { getPolicyRulesValidationError } from "../services/policy-validation";
+import { isRecentMfaTimestamp } from "../services/recent-mfa";
 import { dispatchWebhook } from "../services/webhook-dispatch";
 
 export const intentRoutes = new Hono<{ Variables: AppVariables }>();
@@ -138,13 +139,7 @@ async function hasCurrentTenantReviewerMembership(
 }
 
 function hasRecentSessionMfa(c: Context<{ Variables: AppVariables }>, maxAgeMs = 5 * 60_000) {
-  const verifiedAt = c.get("sessionMfaVerifiedAt");
-  return (
-    typeof verifiedAt === "number" &&
-    Number.isFinite(verifiedAt) &&
-    Date.now() - verifiedAt >= 0 &&
-    Date.now() - verifiedAt <= maxAgeMs
-  );
+  return isRecentMfaTimestamp(c.get("sessionMfaVerifiedAt"), maxAgeMs);
 }
 
 function parseListLimit(value: string | undefined): number | null {
@@ -1610,7 +1605,7 @@ async function updateIntentStatus(
     .where(and(eq(intents.id, intentId), eq(intents.tenantId, tenantId)));
   if (!existing) return c.json<ApiResponse>({ ok: false, error: "Intent not found" }, 404);
 
-  // PR3 (N50, I1/I4/I12): a governed provider-action intent's lifecycle is owned
+  // N50/I1/I4/I12: a governed provider-action intent's lifecycle is owned
   // exclusively by the provider approval service + its companion binding/queue.
   // The generic intent status endpoint MUST NOT set authorized/executed/etc on a
   // provider action (that would bypass the exact approval + safe-resume state

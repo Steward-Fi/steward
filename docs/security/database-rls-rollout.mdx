@@ -5,10 +5,51 @@ description: "SEC-169 activation design, bootstrap boundary, runtime requirement
 
 # PostgreSQL tenant RLS rollout
 
-SEC-169 is not active yet. Application predicates remain the production tenant
-boundary until every activation gate below is complete. The executable
-`withTenantRlsTransaction` helper and schema inventory are groundwork; they do
-not justify enabling a partial policy set.
+Migration `0111_tenant_rls_policy_install` installs the complete current policy
+and bootstrap-function surface, but intentionally leaves RLS disabled. Routine
+production enforcement is not active until an operator completes every gate in
+this runbook and runs the atomic activation script. Application predicates
+remain the production boundary before that point.
+
+Landing order is strict: merge the database-capability membrane repair in PR
+#590, then the agent-deletion migrations through `0110` in PR #595, then
+restack this RLS series and land `0111`. Do not copy the membrane delta into
+this series. The aggregate tree must pass the real-Postgres gate below after
+that final restack.
+
+Authenticated tenant, dashboard, user-wallet, and global-wallet middleware now
+own one `withTenantRlsTransaction` and bind its transaction into downstream
+`getDb()` resolution. Production Workers use request-owned Neon WebSockets;
+production `neon-http` is rejected. The Google, X, and upstream-credential
+lifecycle sweeps enumerate tenants through a fixed bootstrap function and run
+one transaction per tenant.
+
+The standalone proxy now verifies its agent through the fixed bootstrap API and
+binds the full handler chain to one tenant transaction. Tenant-addressed
+platform operations bind the operator-selected tenant after platform key and
+scope verification; cross-tenant platform stats and tenant listing use two
+fixed-shape bootstrap functions. Webhook retry, provider reservation,
+transaction receipt, and tenant retention sweeps now run once per tenant.
+
+Pure global platform identity operations bind a reserved `platform` tenant
+context after platform-key and scope verification. Fixed-shape bootstrap
+functions provide cross-tenant membership projection, owner-safe lifecycle
+mutation, and refresh-token revocation; platform audit records are written in
+that same reserved transaction context.
+
+The disposable-schema operator test connects a separate process as the exact
+`NOBYPASSRLS` application role. It exercises the propagated production context
+classes through real routes and schedulers: platform global identity, tenant
+API-key, user JWT, pre-auth SAML, per-tenant background enumeration, lifecycle
+revocation and audit, plus global auth-KV retention.
+
+Pre-context auth discovery, tenant configuration, cross-tenant refresh
+rotation, system-tenant creation, and deactivated-user retention now use
+fixed-shape bootstrap functions.
+
+Do not run `rls-activate.sql` in production until the prerequisite stack has
+landed, this branch has been restacked on the final exact base, and the full
+aggregate validation has passed again.
 
 ## Non-forgeable context boundary
 
@@ -107,8 +148,9 @@ table in future migrations.
 
 ## Roles and activation order
 
-1. Create a NOLOGIN migration owner and a distinct LOGIN application role with
-   `rolsuper = false`, `rolbypassrls = false`, and no membership in the owner.
+1. Create distinct LOGIN application and migration-maintenance roles plus a
+   NOLOGIN bootstrap-definer role. The login roles have `rolsuper = false`,
+   `rolbypassrls = false`, and no membership in either privileged role.
 2. Deploy transaction-capable Bun and Workers paths. Convert request handlers
    and background jobs to use only the transaction object inside a trusted
    tenant context.
@@ -120,6 +162,38 @@ table in future migrations.
 6. Run real-Postgres cross-tenant read/write/upsert/delete/join tests plus
    concurrent pool-reuse and background-job tests against the deployment role.
 
+Create/finalize roles after migration `0111` (the invoking operator needs
+`CREATEROLE` and schema ownership):
+
+```bash
+psql "$DATABASE_URL" \
+  -v steward_app_role=steward_app \
+  -v steward_migration_role=steward_migrator \
+  -v steward_bootstrap_role=steward_bootstrap_owner \
+  -f scripts/postgres/rls-bootstrap.sql
+```
+
+The app and migration roles are separate login identities asserted
+`NOSUPERUSER NOBYPASSRLS`; the migration role owns the application relations,
+while the app cannot inherit or assume it. Supply their credentials through the
+database provider or `ALTER ROLE` outside source control. The bootstrap function owner is a
+non-login role with `BYPASSRLS` and only the narrow table privileges required by
+the fixed-shape functions. The app receives `EXECUTE`, never membership.
+
+After all residual code paths and exact deployment-role tests pass, activate in
+one maintenance transaction:
+
+```bash
+psql "$DATABASE_URL" \
+  -v steward_migration_role=steward_migrator \
+  -f scripts/postgres/rls-activate.sql
+```
+
+The script enables and forces every relation carrying a checked-in Steward
+policy and adds an explicit all-row policy only for the named `NOBYPASSRLS`
+migration role. It aborts if any current `tenant_id` table is not both enabled
+and forced.
+
 ## Rollback
 
 Rollback is an operator action using the migration role, never a permission
@@ -129,3 +203,9 @@ maintenance transaction, roll back the application to pre-RLS transaction
 plumbing, and restart. Do not selectively disable one policy while routine
 traffic continues. Preserve the catalog snapshot, migration id, actor, time,
 and incident reason in the audit record.
+
+The atomic database step is:
+
+```bash
+psql "$DATABASE_URL" -f scripts/postgres/rls-rollback.sql
+```

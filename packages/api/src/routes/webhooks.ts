@@ -22,6 +22,7 @@ import {
   webhookConfigs,
   webhookDeliveries,
 } from "../services/context";
+import { isRecentMfaTimestamp } from "../services/recent-mfa";
 import { dispatchReplayWebhook, dispatchTestWebhook } from "../services/webhook-dispatch";
 import {
   acceptsConfiguredWebhookEvent,
@@ -80,13 +81,7 @@ function requireTenantAdminSession(c: Parameters<typeof requireTenantLevel>[0]):
 }
 
 function hasRecentSessionMfa(c: Parameters<typeof requireTenantLevel>[0], maxAgeMs = 5 * 60_000) {
-  const verifiedAt = c.get("sessionMfaVerifiedAt");
-  return (
-    typeof verifiedAt === "number" &&
-    Number.isFinite(verifiedAt) &&
-    Date.now() - verifiedAt >= 0 &&
-    Date.now() - verifiedAt <= maxAgeMs
-  );
+  return isRecentMfaTimestamp(c.get("sessionMfaVerifiedAt"), maxAgeMs);
 }
 
 type TenantMfaPolicyConfig = {

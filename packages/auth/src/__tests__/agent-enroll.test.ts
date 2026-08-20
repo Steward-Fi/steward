@@ -1,5 +1,5 @@
 /**
- * Tests for keypair-only agent enrollment (Pillar A / lane A1, scope item 1).
+ * Tests for keypair-only agent enrollment.
  *
  * Bidirectional proof: these exercise the enrollment challenge–response using the
  * SHIPPED P-256 verifier + ChallengeStore. The full happy path proves an agent

@@ -79,6 +79,7 @@ test("Worker HTTP mode binds an exact request database without a persistent hand
     {
       DATABASE_URL: "postgresql://worker.invalid/steward",
       DATABASE_DRIVER: "neon-http",
+      NODE_ENV: "test",
     },
     async () => {
       await Promise.resolve();
@@ -105,6 +106,7 @@ test("Worker request membrane preserves real Drizzle query execution", async () 
       {
         DATABASE_URL: "postgresql://worker.invalid/steward",
         DATABASE_DRIVER: "neon-http",
+        NODE_ENV: "test",
       },
       () => getDb().select({ id: tenants.id }).from(tenants).limit(1),
       { createHttpDb: () => pgliteDb },
@@ -123,6 +125,22 @@ test("Worker database selection rejects missing or unsupported drivers", async (
         async () => "unreachable",
       ),
     ).rejects.toThrow("WORKER_DATABASE_DRIVER_UNSUPPORTED");
+  }
+});
+
+test("Worker HTTP mode fails closed unless non-production is explicit", async () => {
+  for (const NODE_ENV of [undefined, "", "production", "staging"]) {
+    await expect(
+      withWorkerRequestDatabase(
+        {
+          DATABASE_URL: "postgresql://worker.invalid/steward",
+          DATABASE_DRIVER: "neon-http",
+          NODE_ENV,
+        },
+        async () => "unreachable",
+        { createHttpDb: () => ({}) as never },
+      ),
+    ).rejects.toThrow("WORKER_DATABASE_DRIVER_NOT_TRANSACTIONAL");
   }
 });
 
@@ -163,6 +181,7 @@ test("Worker cron gives every autonomous sweep its own request database", async 
   const env = {
     DATABASE_URL: "postgresql://worker.invalid/steward",
     DATABASE_DRIVER: "neon-http",
+    NODE_ENV: "test",
     STEWARD_JWT_SECRET: "worker-cron-test-secret-at-least-32-chars",
     STEWARD_PLUGINS: "capabilities",
     GOOGLE_PROVIDER_CLIENT_ID: "google-client",

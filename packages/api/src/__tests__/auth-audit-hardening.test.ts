@@ -7,7 +7,7 @@ const authSource = readFileSync(join(apiRoot, "routes", "auth.ts"), "utf8");
 const userSource = readFileSync(join(apiRoot, "routes", "user.ts"), "utf8");
 const auditRouteSource = readFileSync(join(apiRoot, "routes", "audit.ts"), "utf8");
 // The owner/admin + recent-MFA gate was factored out of routes/audit.ts into a
-// shared middleware (middleware/audit-gate.ts) so /audit/* and the PR5
+// shared middleware (middleware/audit-gate.ts) so /audit/* and the evidence
 // /v2/provider-actions/:id/{case,evidence} routes enforce an IDENTICAL gate.
 // The gate literals now live there; audit.ts wires it via `.use("*", ...)`.
 const auditGateSource = readFileSync(join(apiRoot, "middleware", "audit-gate.ts"), "utf8");

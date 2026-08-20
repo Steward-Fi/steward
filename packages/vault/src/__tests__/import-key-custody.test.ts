@@ -226,7 +226,7 @@ describe("Vault.importKey custody hardening", () => {
     );
   });
 
-  // Re-audit: the importKey / importExternalKeyHandle custody guards were
+  // The importKey / importExternalKeyHandle custody guards are
   // check-then-act with no DB-level serialization — two concurrent admin
   // custody ops for the same scope could interleave and BOTH commit, leaving
   // a server-managed key shadowing an external-custody wallet. The guards now

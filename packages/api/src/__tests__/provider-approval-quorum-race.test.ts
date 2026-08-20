@@ -40,6 +40,7 @@ import {
   userTenants,
   workspaces,
 } from "@stwd/db";
+import { inArray } from "drizzle-orm";
 import { providerApprovalService } from "../services/provider-approval";
 import {
   approvalRowCount,
@@ -59,21 +60,30 @@ const SKIP = !process.env.DATABASE_URL;
 
 async function wipe() {
   const db = getDb();
-  await db.delete(providerActionApprovals);
-  await db.delete(providerActionAuditOutbox);
-  await db.delete(approvalQueue);
-  await db.delete(providerActionBindings);
-  await db.delete(intents);
-  await db.delete(providerGrants);
-  await db.delete(providerRoleBindings);
-  await db.delete(providerOperations);
-  await db.delete(providerAccounts);
-  await db.delete(secretRoutes);
-  await db.delete(secrets);
-  await db.delete(workspaces);
-  await db.delete(userTenants);
-  await db.delete(users);
-  await db.delete(tenants);
+  const tenantIds = [F.TENANT, F.TENANT_B];
+  await db
+    .delete(providerActionApprovals)
+    .where(inArray(providerActionApprovals.tenantId, tenantIds));
+  await db
+    .delete(providerActionAuditOutbox)
+    .where(inArray(providerActionAuditOutbox.tenantId, tenantIds));
+  await db.delete(approvalQueue).where(inArray(approvalQueue.tenantId, tenantIds));
+  await db
+    .delete(providerActionBindings)
+    .where(inArray(providerActionBindings.tenantId, tenantIds));
+  await db.delete(intents).where(inArray(intents.tenantId, tenantIds));
+  await db.delete(providerGrants).where(inArray(providerGrants.tenantId, tenantIds));
+  await db.delete(providerRoleBindings).where(inArray(providerRoleBindings.tenantId, tenantIds));
+  await db.delete(providerOperations).where(inArray(providerOperations.tenantId, tenantIds));
+  await db.delete(providerAccounts).where(inArray(providerAccounts.tenantId, tenantIds));
+  await db.delete(secretRoutes).where(inArray(secretRoutes.tenantId, tenantIds));
+  await db.delete(secrets).where(inArray(secrets.tenantId, tenantIds));
+  await db.delete(workspaces).where(inArray(workspaces.tenantId, tenantIds));
+  await db.delete(userTenants).where(inArray(userTenants.tenantId, tenantIds));
+  await db
+    .delete(users)
+    .where(inArray(users.id, [F.GRANTOR, F.AGENT_OWNER, F.APPROVER, F.APPROVER_2, F.APPROVER_3]));
+  await db.delete(tenants).where(inArray(tenants.id, tenantIds));
 }
 
 function decide(

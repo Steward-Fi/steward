@@ -1,5 +1,5 @@
 /**
- * provider-principal.ts — the runtime-neutral provider principal seam (PR2 §7.1).
+ * provider-principal.ts — the runtime-neutral provider principal seam (spec §7.1).
  *
  * A provider-action route MUST derive its immutable request actor (tenant +
  * agent) ONLY from the verified agent principal that the agent-jwt authenticator
@@ -18,7 +18,7 @@ import type { AppVariables, VerifiedAgentPrincipal } from "@stwd/shared";
 import type { Context } from "hono";
 
 /**
- * The provider principal shape PR2 §7.1 specifies. It is structurally the
+ * The provider principal shape specified by §7.1. It is structurally the
  * `VerifiedAgentPrincipal` context value; kept as its own exported name so the
  * provider service/route type against the seam rather than the raw context.
  */

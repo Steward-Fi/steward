@@ -58,7 +58,7 @@ class CapturingBackend implements StoreBackend {
     if (states.some((state) => !state.expected)) return false;
     for (const entry of entries) {
       if (entry.value === null) this.values.delete(entry.key);
-      else this.values.set(entry.key, { value: entry.value, expiresAt: now + entry.ttlMs });
+      else this.values.set(entry.key, { value: entry.value, expiresAt: entry.expiresAt });
     }
     return true;
   }

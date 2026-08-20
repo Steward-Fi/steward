@@ -1100,7 +1100,7 @@ async function persistConnectedAccount(input: PersistInput): Promise<CompleteCon
         "staged X connect lineage cannot be established",
       );
     }
-    const [newerConnectAdoption] =
+    const [latestConnectAdoption] =
       account && connectIntentAudit
         ? await tx
             .select({ id: auditEvents.id })
@@ -1114,18 +1114,188 @@ async function persistConnectedAccount(input: PersistInput): Promise<CompleteCon
                   "provider.x.connect.completed",
                   "provider.x.connect.reconnected",
                 ]),
-                sql`${auditEvents.seq} > ${connectIntentAudit.seq}`,
               ),
             )
             .orderBy(desc(auditEvents.seq))
             .limit(1)
         : [];
-    if (newerConnectAdoption) {
+    const [latestCredentialAdoption] =
+      account && connectIntentAudit
+        ? await tx
+            .select({
+              action: auditEvents.action,
+              metadata: auditEvents.metadata,
+              seq: auditEvents.seq,
+            })
+            .from(auditEvents)
+            .where(
+              and(
+                eq(auditEvents.tenantId, input.tenantId),
+                eq(auditEvents.resourceType, "provider_account"),
+                eq(auditEvents.resourceId, account.id),
+                inArray(auditEvents.action, [
+                  "provider.x.connect.completed",
+                  "provider.x.connect.reconnected",
+                  "provider.x.refresh.completed",
+                ]),
+              ),
+            )
+            .orderBy(desc(auditEvents.seq))
+            .limit(1)
+        : [];
+    const [latestAccountMutation] =
+      account && connectIntentAudit
+        ? await tx
+            .select({
+              action: auditEvents.action,
+              metadata: auditEvents.metadata,
+              seq: auditEvents.seq,
+            })
+            .from(auditEvents)
+            .where(
+              and(
+                eq(auditEvents.tenantId, input.tenantId),
+                eq(auditEvents.resourceType, "provider_account"),
+                eq(auditEvents.resourceId, account.id),
+                inArray(auditEvents.action, [
+                  "provider.x.connect.completed",
+                  "provider.x.connect.reconnected",
+                  "provider.x.refresh.completed",
+                  "provider.x.refresh.needs_attention",
+                  "provider.x.refresh.revoked",
+                  "provider.x.disconnect.completed",
+                  "provider.account.disable",
+                  "provider.account.disable.completed",
+                ]),
+                sql`(
+                  ${auditEvents.action} <> 'provider.account.disable'
+                  OR (
+                    ${account.status === "disabled"}
+                    AND ${auditEvents.metadata}->>'expectedRevision' = ${String(account.revision - 1)}
+                  )
+                )`,
+              ),
+            )
+            .orderBy(desc(auditEvents.seq))
+            .limit(1)
+        : [];
+    // Before provider.account.disable.completed existed, a successful generic
+    // disable left only its authorization event. Treat that legacy event as
+    // authoritative only when the currently locked row proves the exact CAS
+    // landed. A newer orphan intent from an update failure/CAS loss is skipped
+    // so it cannot manufacture durable recovery lineage.
+    // An existing account is only safe to rotate when its current credential
+    // has an authoritative X-connect adoption before this intent. A generic
+    // provider-account insert (or a selectively missing adoption record) gives
+    // us no total-order proof that the staged response is newer, so fail closed
+    // and let the outer reconciler revoke the staged grant.
+    if (account && !latestConnectAdoption) {
       throw new XConnectError(
         "X_CREDENTIAL_NEEDS_ATTENTION",
         409,
-        "a newer X credential already superseded this staged connect response",
+        "current X account adoption lineage cannot be established",
       );
+    }
+    // A refresh, disconnect, disable, or second connect can all replace the
+    // credential/status lineage without leaving an unresolved lifecycle. The
+    // staged grant is safe only when no such account mutation follows its
+    // exchange intent on the serialized tenant audit chain.
+    if (
+      latestAccountMutation &&
+      connectIntentAudit &&
+      latestAccountMutation.seq >= connectIntentAudit.seq
+    ) {
+      throw new XConnectError(
+        "X_CREDENTIAL_NEEDS_ATTENTION",
+        409,
+        "a newer X account mutation already superseded this staged connect response",
+      );
+    }
+
+    if (account && latestAccountMutation && latestCredentialAdoption) {
+      const adoptionVersion = latestCredentialAdoption.metadata.credentialVersion;
+      const accountHasCredential =
+        typeof account.credentialSecretId === "string" &&
+        account.credentialSecretId.length > 0 &&
+        Number.isSafeInteger(account.credentialVersion) &&
+        (account.credentialVersion as number) > 0;
+      const disconnected = latestAccountMutation.action === "provider.x.disconnect.completed";
+      if (disconnected) {
+        if (
+          account.status !== "revoked" ||
+          account.credentialSecretId !== null ||
+          account.credentialVersion !== null
+        ) {
+          throw new XConnectError(
+            "X_CREDENTIAL_NEEDS_ATTENTION",
+            409,
+            "current X account state does not match its disconnect lineage",
+          );
+        }
+      } else {
+        const expectedStatus =
+          latestAccountMutation.action === "provider.x.refresh.revoked"
+            ? "revoked"
+            : latestAccountMutation.action === "provider.account.disable" ||
+                latestAccountMutation.action === "provider.account.disable.completed" ||
+                (latestAccountMutation.action === "provider.x.refresh.needs_attention" &&
+                  latestAccountMutation.metadata.accountDisabled === true)
+              ? "disabled"
+              : "active";
+        const [currentCredential] = accountHasCredential
+          ? await tx
+              .select({
+                id: secrets.id,
+                name: secrets.name,
+                version: secrets.version,
+              })
+              .from(secrets)
+              .where(
+                and(
+                  eq(secrets.tenantId, input.tenantId),
+                  eq(secrets.id, account.credentialSecretId as string),
+                  eq(secrets.version, account.credentialVersion as number),
+                  sql`${secrets.deletedAt} IS NULL`,
+                ),
+              )
+              .limit(1)
+              .for("update")
+          : [];
+        if (
+          account.status !== expectedStatus ||
+          !currentCredential ||
+          currentCredential.name !== secretName ||
+          typeof adoptionVersion !== "number" ||
+          !Number.isSafeInteger(adoptionVersion) ||
+          adoptionVersion !== account.credentialVersion ||
+          ((latestCredentialAdoption.action === "provider.x.connect.completed" ||
+            latestCredentialAdoption.action === "provider.x.connect.reconnected") &&
+            latestCredentialAdoption.metadata.credentialSecretId !== account.credentialSecretId)
+        ) {
+          throw new XConnectError(
+            "X_CREDENTIAL_NEEDS_ATTENTION",
+            409,
+            "current X account credential lineage cannot be established",
+          );
+        }
+        if (
+          latestAccountMutation.action === "provider.account.disable" ||
+          latestAccountMutation.action === "provider.account.disable.completed"
+        ) {
+          const disabledRevision = latestAccountMutation.metadata.expectedRevision;
+          if (
+            typeof disabledRevision !== "number" ||
+            !Number.isSafeInteger(disabledRevision) ||
+            account.revision < disabledRevision + 1
+          ) {
+            throw new XConnectError(
+              "X_CREDENTIAL_NEEDS_ATTENTION",
+              409,
+              "current X account disable lineage cannot be established",
+            );
+          }
+        }
+      }
     }
 
     const unresolvedLifecycles = account

@@ -17,6 +17,8 @@ test.describe("Dashboard agent account aggregation", () => {
     const agentId = "agent-account-e2e";
     const walletAddress = "0x1111111111111111111111111111111111111111";
     const p256PublicKey = "BASE64_SPKI_P256_PUBLIC_KEY";
+    let accountRequestCount = 0;
+    let legacyBalanceRequestCount = 0;
     let latestSignerUpdate: Record<string, unknown> | null = null;
     let signers: MockSigner[] = [
       {
@@ -158,6 +160,7 @@ test.describe("Dashboard agent account aggregation", () => {
     await page.route(
       (url) => url.href.startsWith(API) && url.pathname === `/agents/${agentId}/balance`,
       async (route) => {
+        legacyBalanceRequestCount += 1;
         await route.fulfill({
           json: {
             ok: true,
@@ -179,6 +182,7 @@ test.describe("Dashboard agent account aggregation", () => {
     await page.route(
       (url) => url.href.startsWith(API) && url.pathname === `/agents/${agentId}/account`,
       async (route) => {
+        accountRequestCount += 1;
         await route.fulfill({
           json: {
             ok: true,
@@ -268,6 +272,8 @@ test.describe("Dashboard agent account aggregation", () => {
     await expect(page.getByText("USDC", { exact: true })).toBeVisible();
     await expect(page.getByText("sign_transaction")).toBeVisible();
     await expect(page.getByText("send_calls")).toBeVisible();
+    expect(accountRequestCount).toBeGreaterThan(0);
+    expect(legacyBalanceRequestCount).toBe(0);
 
     await page.getByRole("button", { name: /Signers/ }).click();
     await expect(page.getByText("Ops P-256")).toBeVisible();
@@ -296,5 +302,96 @@ test.describe("Dashboard agent account aggregation", () => {
       path: testInfo.outputPath("dashboard-agent-account.png"),
       fullPage: true,
     });
+  });
+
+  test("agent detail page surfaces an account aggregation failure", async ({ page, request }) => {
+    const email = `agent-account-failure-${Date.now()}@example.test`;
+    const agentId = "agent-account-failure-e2e";
+    const walletAddress = "0x3333333333333333333333333333333333333333";
+    let accountRequestCount = 0;
+    let legacyBalanceRequestCount = 0;
+
+    await page.route(
+      (url) => url.href.startsWith(API) && url.pathname === `/agents/${agentId}`,
+      async (route) => {
+        await route.fulfill({
+          json: {
+            ok: true,
+            data: {
+              id: agentId,
+              tenantId: "personal-test",
+              name: "Unavailable Portfolio Agent",
+              walletAddress,
+              walletAddresses: { evm: walletAddress },
+              platformId: "portfolio-failure-platform",
+              createdAt: "2026-05-29T12:00:00.000Z",
+            },
+          },
+        });
+      },
+    );
+    await page.route(
+      (url) => url.href.startsWith(API) && url.pathname === `/agents/${agentId}/policies`,
+      async (route) => {
+        await route.fulfill({ json: { ok: true, data: [] } });
+      },
+    );
+    await page.route(
+      (url) => url.href.startsWith(API) && url.pathname === `/vault/${agentId}/history`,
+      async (route) => {
+        await route.fulfill({ json: { ok: true, data: [] } });
+      },
+    );
+    await page.route(
+      (url) => url.href.startsWith(API) && url.pathname === `/agents/${agentId}/signers`,
+      async (route) => {
+        await route.fulfill({ json: { ok: true, data: { signers: [] } } });
+      },
+    );
+    await page.route(
+      (url) => url.href.startsWith(API) && url.pathname === `/agents/${agentId}/account`,
+      async (route) => {
+        accountRequestCount += 1;
+        await route.fulfill({
+          status: 503,
+          json: { ok: false, error: "portfolio service temporarily unavailable" },
+        });
+      },
+    );
+    await page.route(
+      (url) => url.href.startsWith(API) && url.pathname === `/agents/${agentId}/balance`,
+      async (route) => {
+        legacyBalanceRequestCount += 1;
+        await route.fulfill({
+          json: {
+            ok: true,
+            data: {
+              agentId,
+              walletAddress,
+              balances: {
+                native: "1250000000000000000",
+                nativeFormatted: "1.25",
+                chainId: 8453,
+                symbol: "ETH",
+              },
+            },
+          },
+        });
+      },
+    );
+
+    await loginWithMagicLink(page, request, email);
+    await page.goto(`${WEB}/dashboard/agents/${agentId}`);
+
+    await expect(page.getByRole("heading", { name: "Unavailable Portfolio Agent" })).toBeVisible();
+    const alert = page.getByRole("alert");
+    await expect(alert.getByText("Couldn't load account portfolio")).toBeVisible();
+    await expect(alert.getByText("portfolio service temporarily unavailable")).toBeVisible();
+    await expect(alert.getByText(/Legacy native balance is shown above/)).toBeVisible();
+    await expect(page.getByText("1.25 ETH").first()).toBeVisible();
+    await expect(page.getByText("Account data unavailable")).toBeVisible();
+    await expect(page.getByText("Gas sponsorship off")).toHaveCount(0);
+    expect(accountRequestCount).toBeGreaterThan(0);
+    expect(legacyBalanceRequestCount).toBe(accountRequestCount);
   });
 });

@@ -238,7 +238,7 @@ describe("TradeSessionManager", () => {
     // what the order routes do: reserveSpend, releaseSpend, audit writes)
     // deadlocks against the fence's open transaction under a single-connection
     // database. After SEC-044 the advisory lock + active check COMMIT before
-    // the callback runs, so these complete. Pre-fix this test would hang; the
+    // the callback runs, so these complete. The callback must not wait on itself;
     // race turns the deadlock into a failure instead of a stuck suite.
     const result = await Promise.race([
       manager.withActiveSubmissionFence(

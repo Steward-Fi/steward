@@ -1,7 +1,7 @@
 /**
  * provider-action-service integration tests (PGLite).
  *
- * Exercises the full PR2 authority pipeline through the real service against a
+ * Exercises the full canonical-action authority pipeline through the real service against a
  * migrated PGLite database: scope resolution, access + policy separation,
  * transactional persistence, the required-audit outbox, idempotent replay,
  * client-B isolation, and the in-process stub boundary. Proves the spec §9
@@ -123,7 +123,7 @@ async function seedCore() {
       createdBy: GRANTOR,
     },
   ]);
-  // A secret + route so the PR3 approval commitment can bind route/credential
+  // A secret + route so the approval-lifecycle approval commitment can bind route/credential
   // revisions (spec §5.2: missing route/credential fails approval creation).
   await db.insert(secrets).values([
     {

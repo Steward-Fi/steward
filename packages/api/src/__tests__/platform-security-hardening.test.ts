@@ -13,6 +13,14 @@ const revocationSource = readFileSync(
   join(apiRoot, "..", "..", "auth", "src", "revocation.ts"),
   "utf8",
 );
+const rlsMigrationSource = readFileSync(
+  join(apiRoot, "..", "..", "db", "drizzle", "0111_tenant_rls_policy_install.sql"),
+  "utf8",
+);
+const personalLifecycleMigrationSource = readFileSync(
+  join(apiRoot, "..", "..", "db", "drizzle", "0112_personal_tenant_account_lifecycle.sql"),
+  "utf8",
+);
 
 function expectBefore(first: string, second: string) {
   const firstIndex = platformSource.indexOf(first);
@@ -131,11 +139,11 @@ describe("platform security hardening", () => {
     expect(platformSource).toContain("function requirePlatformRouteScope");
     expectBefore(
       'requirePlatformRouteScope(c, "platform:stats:read")',
-      "db.select({ total: count() }).from(tenants)",
+      "steward_bootstrap.platform_stats()",
     );
     expectBefore(
       'requirePlatformRouteScope(c, "platform:tenant:read")',
-      ".select({\n      id: tenants.id",
+      "steward_bootstrap.platform_tenants",
     );
     expectBefore(
       'requirePlatformRouteScope(c, "platform:agent:read")',
@@ -157,12 +165,14 @@ describe("platform security hardening", () => {
     );
     expectBefore(
       'requirePlatformRouteScope(c, "platform:agent-token:create")',
-      "createAgentToken(agentId, tenantId",
+      "createAgentTokenForExistingAgent(",
     );
     expectBefore(
       'requirePlatformRouteScope(c, "platform:agent-token:revoke")',
       "revocationStore.revokeAgentTokens(agentId)",
     );
+    expect(platformSource).toContain("steward_bootstrap.agent_tenant_subject");
+    expect(platformSource).toContain('"platform-agent-token-revocation"');
     expectBefore('requirePlatformRouteScope(c, "platform:agent:create")', "vault().createAgent");
     expectBefore(
       'requirePlatformRouteScope(c, "platform:tenant-member:write")',
@@ -324,10 +334,6 @@ describe("platform security hardening", () => {
     for (const [marker, rollback] of [
       ['platform.patch("/users/:userId/metadata"', "customMetadata: existing.customMetadata"],
       [
-        'platform.patch("/users/:userId/deactivate"',
-        "deactivatedAt: result.previous.deactivatedAt",
-      ],
-      [
         'platform.post("/users/:userId/accounts/:provider/:providerAccountId/transfer"',
         "set({ userId: fromUserId })",
       ],
@@ -340,6 +346,13 @@ describe("platform security hardening", () => {
       expect(route).toContain("try {");
       expect(route).toContain(rollback);
     }
+    const deactivateStart = platformSource.indexOf('platform.patch("/users/:userId/deactivate"');
+    const deactivateRoute = platformSource.slice(
+      deactivateStart,
+      platformSource.indexOf("\nplatform.", deactivateStart + 1),
+    );
+    expect(deactivateRoute).toContain("platform_set_user_deactivation");
+    expect(platformSource).toContain("continueWithTenantDatabase");
   });
 
   it("repairs invitation state when final invitation audit events fail", () => {
@@ -450,9 +463,17 @@ describe("platform security hardening", () => {
     expect(platformSource.indexOf("tenantMembers", tenantDeleteStart)).toBeGreaterThan(
       tenantDeleteStart,
     );
-    expect(
-      platformSource.indexOf("revocationStore.revokeUserTokens(member.userId)", tenantDeleteStart),
-    ).toBeLessThan(platformSource.indexOf("tx.delete(refreshTokens)", tenantDeleteStart));
+    const tenantDeleteRoute = platformSource.slice(
+      tenantDeleteStart,
+      platformSource.indexOf('platform.put("/tenants/:id/policies"', tenantDeleteStart),
+    );
+    expect(tenantDeleteRoute.indexOf("tx.delete(tenants)")).toBeLessThan(
+      tenantDeleteRoute.indexOf("revocationStore.revokeAgentTokens(agentId)"),
+    );
+    expect(tenantDeleteRoute.indexOf("tx.delete(tenants)")).toBeLessThan(
+      tenantDeleteRoute.indexOf("revocationStore.revokeUserTokens(userId)"),
+    );
+    expect(tenantDeleteRoute).toContain('action: "tenant.delete.token_revocation_completed"');
   });
 
   it("removes non-cascading tenant credential state during tenant deletion", () => {
@@ -465,6 +486,7 @@ describe("platform security hardening", () => {
     expect(tenantDeleteRoute).toContain("tx.delete(secretRoutes)");
     expect(tenantDeleteRoute).toContain("tx.delete(secrets)");
     expect(tenantDeleteRoute).toContain("tx.delete(proxyAuditLog)");
+    expect(tenantDeleteRoute).toContain("cleanupOptionalTenantCapabilities(tx, tenantId)");
     expect(tenantDeleteRoute.indexOf("tx.delete(secretRoutes)")).toBeLessThan(
       tenantDeleteRoute.indexOf("tx.delete(secrets)"),
     );
@@ -495,17 +517,18 @@ describe("platform security hardening", () => {
     expect(platformSource).toContain("innerJoin(users, eq(users.id, userTenants.userId))");
     expect(platformSource).toContain("function tenantOwnerLifecycleLockKey");
     expect(platformSource).toContain("tenant_owner_lifecycle_${tenantId}");
-    expect(platformSource).toContain("function lockUserOwnerLifecycleTenants");
-    expect(platformSource).toContain("function assertUserIsNotSoleActiveOwner");
-    expect(platformSource).toContain("const personalTenantId = `personal-${userId}`");
-    expect(platformSource).toContain("if (tenantId === personalTenantId) continue");
-    expect(platformSource).toContain("Cannot deactivate the sole active tenant owner");
-    expect(platformSource).toContain("Cannot delete the sole active tenant owner");
+    expect(rlsMigrationSource).toContain("platform_set_user_deactivation");
+    expect(rlsMigrationSource).toContain("platform_delete_user");
+    expect(rlsMigrationSource).toContain("u.deactivated_at IS NULL");
+    expect(rlsMigrationSource).toContain("Cannot deactivate the sole active tenant owner");
+    expect(rlsMigrationSource).toContain("Cannot delete the sole active tenant owner");
+    expect(personalLifecycleMigrationSource).toContain(
+      "owner_tenant.tenant_id = 'personal-' || p_user_id::text",
+    );
+    expect(personalLifecycleMigrationSource).toContain("CONTINUE;");
     expect(platformSource).not.toContain("platform_member_${tenantId}");
 
     for (const marker of [
-      'platform.patch("/users/:userId/deactivate"',
-      'platform.delete("/users/:userId"',
       'platform.delete("/tenants/:id/members/:userId"',
       'platform.patch("/tenants/:id/members/:userId"',
     ]) {
@@ -516,7 +539,7 @@ describe("platform security hardening", () => {
         routeStart,
         nextRoute === -1 ? platformSource.length : nextRoute,
       );
-      expect(routeSource).toMatch(/lockTenantOwnerLifecycle|assertUserIsNotSoleActiveOwner/);
+      expect(routeSource).toContain("lockTenantOwnerLifecycle");
     }
   });
 });

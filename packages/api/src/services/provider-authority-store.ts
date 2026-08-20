@@ -573,7 +573,7 @@ export class ProviderAuthorityStore {
    * initiate/complete/disconnect an X (or other provider) OAuth connection when
    * they are a tenant authority admin OR hold an active workspace_admin /
    * workspace_approver binding for the target workspace (environment + temporal
-   * validity enforced). Mirrors the admin-OR-approver gate of PR3's
+   * validity enforced). Mirrors the admin-or-approver gate of
    * hasWorkspaceRoleAuthority, scoped to the connect surface.
    */
   async canConnectProviderAccounts(
@@ -843,29 +843,58 @@ export class ProviderAuthorityStore {
         reason: ctx.reason,
       },
     });
-    const [updated] = await this.db()
-      .update(providerAccounts)
-      .set({
-        status: "disabled",
-        revision: row.revision + 1,
-        updatedAt: new Date(),
-      })
-      .where(
-        and(
-          eq(providerAccounts.id, id),
-          eq(providerAccounts.tenantId, ctx.tenantId),
-          eq(providerAccounts.workspaceId, row.workspaceId),
-          eq(providerAccounts.revision, row.revision),
-        ),
-      )
-      .returning();
-    if (!updated)
-      throw new ProviderAuthorityError(
-        "provider account revision conflict",
-        "revision_conflict",
-        409,
-      );
-    return updated;
+    return this.runAuditedTransaction(ctx.tenantId, async (txRaw, appendRequiredAudit) => {
+      const tx = txRaw as DbExecutor;
+      const [lockedRow] = await tx
+        .select()
+        .from(providerAccounts)
+        .where(and(eq(providerAccounts.id, id), eq(providerAccounts.tenantId, ctx.tenantId)))
+        .limit(1)
+        .for("update");
+      if (!lockedRow) throw new ProviderAuthorityError("resource not found", "not_found", 404);
+      await this.requireWorkspaceAdmin(ctx, lockedRow.workspaceId, true, tx);
+      if (lockedRow.revision !== ctx.expectedRevision) {
+        throw new ProviderAuthorityError(
+          "provider account revision conflict",
+          "revision_conflict",
+          409,
+        );
+      }
+      const [updated] = await tx
+        .update(providerAccounts)
+        .set({
+          status: "disabled",
+          revision: lockedRow.revision + 1,
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(providerAccounts.id, id),
+            eq(providerAccounts.tenantId, ctx.tenantId),
+            eq(providerAccounts.workspaceId, lockedRow.workspaceId),
+            eq(providerAccounts.revision, lockedRow.revision),
+          ),
+        )
+        .returning();
+      if (!updated)
+        throw new ProviderAuthorityError(
+          "provider account revision conflict",
+          "revision_conflict",
+          409,
+        );
+      await appendAuthorityMutationAudit(ctx, appendRequiredAudit, {
+        action: "provider.account.disable.completed",
+        resourceType: "provider_account",
+        resourceId: id,
+        metadata: {
+          workspaceId: lockedRow.workspaceId,
+          expectedRevision: lockedRow.revision,
+          resultingRevision: updated.revision,
+          reason: ctx.reason,
+        },
+      });
+      return updated;
+    });
   }
 
   async registerOperation(

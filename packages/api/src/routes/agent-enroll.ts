@@ -1,6 +1,6 @@
 /**
- * agent-enroll.ts — the PUBLIC keypair-only agent enrollment surface (lane A1,
- * scope 1). Mounted BEFORE the tenant gate: an enrolling agent holds only its
+ * agent-enroll.ts — the public keypair-only agent enrollment surface. Mounted
+ * before the tenant gate: an enrolling agent holds only its
  * identity keypair, not a token or an API key.
  *
  *   POST /agent-enroll/challenge  { agentId }
@@ -30,7 +30,6 @@ import {
   issueEnrollChallenge,
   parseDurationSeconds,
   type ResolvedAgentSigner,
-  signAgentToken,
   verifyEnrollResponse,
 } from "@stwd/auth";
 import { agentSigners, eq } from "@stwd/db";
@@ -40,6 +39,7 @@ import { writeAuditEvent } from "../services/audit";
 import {
   type ApiResponse,
   type AppVariables,
+  createAgentTokenForExistingAgent,
   db,
   isValidAgentId,
   safeJsonParse,
@@ -231,10 +231,16 @@ agentEnrollRoutes.post("/verify", async (c) => {
 
   let token: string;
   try {
-    token = await signAgentToken(
-      { agentId, tenantId: resolvedTenant, scopes: ["agent"] },
+    const minted = await createAgentTokenForExistingAgent(
+      agentId,
+      resolvedTenant,
       ENROLL_TOKEN_TTL,
+      ["agent"],
     );
+    if (!minted) {
+      return c.json<ApiResponse>({ ok: false, error: "enrollment denied" }, 401);
+    }
+    token = minted;
   } catch (error) {
     reportEnrollmentFailure("token signing failed", error);
     return c.json<ApiResponse>({ ok: false, error: "enrollment unavailable" }, 503);

@@ -37,6 +37,7 @@ describe("platform global identity graph routes", () => {
         "platform:user:write",
         "platform:user-lifecycle:write",
         "platform:user:delete",
+        "platform:tenant:delete",
         "platform:tenant-user:read",
         "platform:tenant-user:write",
         "platform:gas-spend:read",
@@ -887,7 +888,7 @@ describe("platform global identity graph routes", () => {
     expect(deletedRefresh).toHaveLength(0);
   });
 
-  it("deactivates and hard-deletes a sole owner of only their personal tenant", async () => {
+  it("deactivates a personal owner and deletes the tenant before its identity", async () => {
     const [personalUser] = await getDb()
       .insert(users)
       .values({ email: "delete-personal-owner@example.test", emailVerified: true })
@@ -915,6 +916,18 @@ describe("platform global identity graph routes", () => {
       .from(users)
       .where(eq(users.id, personalUser.id));
     expect(deactivated?.deactivatedAt).toBeInstanceOf(Date);
+
+    const prematureRemove = await platformRoutes.request(`/users/${personalUser.id}`, {
+      method: "DELETE",
+      headers: headers(),
+    });
+    expect(prematureRemove.status).toBe(409);
+
+    const removeTenant = await platformRoutes.request(`/tenants/${personalTenantId}`, {
+      method: "DELETE",
+      headers: headers(),
+    });
+    expect(removeTenant.status).toBe(200);
 
     const remove = await platformRoutes.request(`/users/${personalUser.id}`, {
       method: "DELETE",

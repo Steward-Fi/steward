@@ -2,7 +2,7 @@
  * operator-recovery-policy-gates.test.ts — regression coverage for the operator
  * TRANSFER rail guardrails:
  *
- *   SEC-004 — /usd-send previously moved arbitrary USDC to any address with no
+ *   USD send must enforce an explicit destination policy before moving USDC.
  *     policy gate, no per-call cap, and no rate limit. It now runs the same
  *     policy evaluation as /withdraw (approved-addresses + spend/rate caps),
  *     enforces the per-call 2000 USDC ceiling, and is rate limited.
@@ -375,7 +375,7 @@ describe("SEC-004: usd-send policy gate + caps", () => {
 
 describe("SEC-042: withdraw policy evaluation is real", () => {
   it("enforces a per-tx USD spending limit against the REAL notional (not USDC-as-wei)", async () => {
-    // maxPerTxUsd 50 with a 100 USDC withdraw. Pre-fix the evaluator priced the
+    // maxPerTxUsd 50 with a 100 USDC withdraw. The evaluator must price the
     // 6-decimal USDC base units (100000000) as wei (~$0.0000004) and approved;
     // the fixed gate converts to wei first, so the engine sees ~$100 and denies.
     const { tenantId, agentId } = await seedAgent({
@@ -453,7 +453,7 @@ describe("SEC-042: withdraw policy evaluation is real", () => {
   });
 
   it("enforces a rate-limit policy using the agent's REAL recent tx count", async () => {
-    // maxTxPerHour 1 with one confirmed tx in the trailing hour. Pre-fix the
+    // maxTxPerHour 1 with one confirmed tx in the trailing hour. The
     // route hardcoded recentTxCount1h: 0 and the rule could never fire.
     const { tenantId, agentId } = await seedAgent({
       policies: [

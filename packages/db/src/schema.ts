@@ -61,8 +61,8 @@ import {
 //      tenant context exists);
 //   4. PGLite/Workers parity: the embedded and neon-http runtimes must honor
 //      the same GUC discipline, or dev/prod behavior diverges.
-// Until that lands as one coherent migration, the app-layer predicates ARE
-// the isolation boundary — treat any change that relaxes a `tenant_id`
+// App-layer predicates are the current isolation boundary while RLS is disabled;
+// treat any change that relaxes a `tenant_id`
 // predicate as a security review trigger.
 
 // Postgres BYTEA column. Typed as Uint8Array to avoid the Node `Buffer` vs
@@ -120,7 +120,7 @@ export interface TenantEmailConfig {
 
 export const chainFamilyEnum = pgEnum("chain_family", ["evm", "solana", "bitcoin", "monero"]);
 
-// PR4 (0082): governed provider route authority mode. `legacy` = the historical
+// Migration 0082 governed provider route authority mode. `legacy` is the direct
 // direct-proxy credential path; `governed_v2` = decrypt/inject only reachable via
 // a claimed v2 execution authorization (dispatchGovernedExecution). A route is
 // never both. Default `legacy` => migration 0082 changes nothing at deploy (X9).
@@ -162,7 +162,7 @@ export const approvalQueueStatusEnum = pgEnum("approval_queue_status", [
   "pending",
   "approved",
   "rejected",
-  // PR3 provider-action arm lifecycle statuses (0081). The legacy transaction
+  // Migration 0081 provider-action arm lifecycle statuses. The transaction
   // arm only ever uses pending/approved/rejected.
   "expired",
   "stale",
@@ -489,7 +489,7 @@ export const agentWallets = pgTable(
     chainFamily: chainFamilyEnum("chain_family").notNull(),
     address: varchar("address", { length: 128 }).notNull(),
     /**
-     * Sprint 4: trading venue this wallet is scoped to (e.g. "hyperliquid").
+     * Trading venue this wallet is scoped to (e.g. "hyperliquid").
      * NULL on legacy rows; vault lookups fall back to chainFamily when
      * venue isn't provided. See VenueId in @stwd/shared.
      */
@@ -507,7 +507,7 @@ export const agentWallets = pgTable(
       sql`COALESCE(${table.venue}, '')`,
     ),
     /**
-     * Sprint 4: partial unique index on the legacy NULL-venue subset.
+     * Partial unique index on the legacy NULL-venue subset.
      * Targeted by importKey()'s upsert (drizzle's onConflictDoUpdate
      * needs a named unique index, not an expression index).
      */
@@ -933,7 +933,7 @@ export const encryptedChainKeys = pgTable(
   "encrypted_chain_keys",
   {
     /**
-     * Sprint 4: surrogate PK so a single (agentId, chainFamily) can have
+     * Surrogate PK so a single (agentId, chainFamily) can have
      * multiple rows, one per venue. The uniqueness invariant moves to
      * `agent_chain_venue_idx` below.
      */
@@ -943,7 +943,7 @@ export const encryptedChainKeys = pgTable(
       .references(() => agents.id, { onDelete: "cascade" }),
     chainFamily: chainFamilyEnum("chain_family").notNull(),
     /**
-     * Sprint 4: trading venue this key is scoped to (e.g. "hyperliquid").
+     * Trading venue this key is scoped to (e.g. "hyperliquid").
      * NULL on legacy rows; vault lookups fall back to chainFamily when
      * venue isn't provided.
      */
@@ -1089,7 +1089,7 @@ export const executionAuthorizationNonces = pgTable(
     expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
     consumedAt: timestamp("consumed_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-    // ─── PR4 (0082): provider execution authorization v2 extension ───────────
+    // ─── Migration 0082: provider execution authorization v2 extension ──────
     // version=1 rows are the legacy wallet/EVM nonce (all v2 fields null).
     // version=2 rows carry the full provider commitment binding + dispatch
     // state machine. Enforced by exec_auth_nonces_v2_arm_chk (raw SQL, 0082).
@@ -1191,10 +1191,10 @@ export const sponsoredGasEvents = pgTable(
   }),
 );
 
-// PR3 (0081): approval_queue is a discriminated union. The legacy transaction
-// arm (approval_kind='transaction') keeps tx_id + the original columns; the new
+// Migration 0081 makes approval_queue a discriminated union. The transaction
+// arm (approval_kind='transaction') keeps tx_id and its original columns; the
 // provider_action arm carries the exact-binding tuple. `tx_id` is now nullable
-// (arm CHECK re-requires it for transaction rows). Several PR3 invariants (the
+// (arm CHECK re-requires it for transaction rows). Several invariants (the
 // arm CHECK, the decision-shape CHECK, and the partial unique indexes) live in
 // 0081 raw SQL and are NOT visible to drizzle-kit.
 export const approvalQueue = pgTable(
@@ -1215,7 +1215,7 @@ export const approvalQueue = pgTable(
     resolvedBy: varchar("resolved_by", { length: 255 }),
     resolvedByType: varchar("resolved_by_type", { length: 32 }),
     resolvedById: varchar("resolved_by_id", { length: 255 }),
-    // ── PR3 provider-action arm (0081) ──
+    // ── Migration 0081 provider-action arm ──
     approvalKind: varchar("approval_kind", { length: 32 }).notNull().default("transaction"),
     intentId: varchar("intent_id", { length: 64 }),
     tenantId: varchar("tenant_id", { length: 64 }),
@@ -1235,8 +1235,8 @@ export const approvalQueue = pgTable(
     decisionRequestHash: varchar("decision_request_hash", { length: 71 }),
     consumedAt: timestamp("consumed_at", { withTimezone: true }),
     consumedBy: varchar("consumed_by", { length: 64 }),
-    // ── #205 M-of-N quorum arm (0083) ──
-    // NULL threshold => single-approver legacy path (byte-for-byte unchanged).
+    // ── Migration 0083 M-of-N quorum arm ──
+    // NULL threshold selects the byte-compatible single-approver path.
     // A non-NULL threshold flips the provider-action approval into flat N-of-M
     // quorum: `quorum_threshold` DISTINCT eligible approvals are required before
     // the queue can transition pending -> approved (execute-reachable). Nested
@@ -1262,8 +1262,8 @@ export const approvalQueue = pgTable(
 );
 
 /**
- * #205 M-of-N quorum: one row per DISTINCT approver decision on a provider-action
- * approval. The single-approver legacy path never inserts here (it records its
+ * Migration 0083 M-of-N quorum: one row per distinct approver decision on a
+ * provider-action approval. The single-approver path never inserts here (it records its
  * lone decision on `approval_queue` directly). Every row binds the EXACT
  * request_hash / action_digest / approval_commitment_hash and the
  * `binding_revision_at_decision` the approval was cast against, so a dependency
@@ -1937,15 +1937,15 @@ export const secretRoutes = pgTable(
     enabled: boolean("enabled").notNull().default(true),
     requiresApproval: boolean("requires_approval").notNull().default(false),
     approvalConfig: jsonb("approval_config").$type<Record<string, unknown>>().notNull().default({}),
-    // PR3 (0081, G1 adjudication): a route revision that a route/secret rotation
-    // increments. Bound by PR3's approval commitment so resume can detect route
+    // Migration 0081 route revision incremented by route or secret rotation.
+    // Bound by the approval commitment so resume can detect route
     // rotation. Maintained by the `secret_routes_bump_authority_revision`
-    // BEFORE UPDATE trigger (raw SQL only, not visible to drizzle-kit). PR4's
-    // 0082 adds authority_mode + provider_operation_id and extends the trigger.
+    // BEFORE UPDATE trigger (raw SQL only, not visible to drizzle-kit). Migration
+    // 0082 adds authority_mode and provider_operation_id and extends the trigger.
     authorityRevision: integer("authority_revision").notNull().default(1),
-    // PR4 (0082): governed cutover columns. authority_mode default 'legacy' means
-    // every existing route behaves exactly as today until explicitly enrolled
-    // (PR8). A governed route MUST name its provider_operation_id (raw-SQL CHECK
+    // Migration 0082 governed cutover columns. authority_mode defaults to
+    // 'legacy', so a route must be explicitly enrolled. A governed route must
+    // name its provider_operation_id (raw-SQL CHECK
     // secret_routes_governed_operation_chk); a legacy route MUST NOT.
     authorityMode: secretRouteAuthorityModeEnum("authority_mode").notNull().default("legacy"),
     providerOperationId: uuid("provider_operation_id"),
@@ -1960,7 +1960,7 @@ export const secretRoutes = pgTable(
   }),
 );
 
-// ─── Workspace-scoped provider authority (governed-provider plan PR1) ─────────
+// ─── Workspace-scoped provider authority (migration 0079) ────────────────────
 //
 // ⚠️ RAW-SQL-ONLY INVARIANTS (drift risk — NOT expressible in Drizzle, see
 //    drizzle/0079_workspace_provider_authority.sql):
@@ -2423,7 +2423,7 @@ export type ProviderOperation = typeof providerOperations.$inferSelect;
 export type ProviderRoleBinding = typeof providerRoleBindings.$inferSelect;
 export type ProviderGrant = typeof providerGrants.$inferSelect;
 
-// ─── Provider action bindings (PR2) ──────────────────────────────────────────
+// ─── Provider action bindings (migration 0080) ───────────────────────────────
 // The 1:1 typed companion to `intents` that carries the canonical provider
 // action, request envelope, and the two separate (access + policy) decision
 // documents with distinct IDs/hashes. `intents` stays the sole lifecycle root.
@@ -2434,7 +2434,7 @@ export type ProviderGrant = typeof providerGrants.$inferSelect;
 // access/policy/status state machine, byte-size bounds), and (c) the
 // `provider_action_bindings_immutable` BEFORE UPDATE trigger that freezes every
 // column except status/updated_at and allows only the
-// allowed_stub -> stub_succeeded|stub_failed transition in PR2.
+// allowed_stub -> stub_succeeded|stub_failed transition.
 export const providerActionBindings = pgTable(
   "provider_action_bindings",
   {
@@ -2474,7 +2474,7 @@ export const providerActionBindings = pgTable(
     policyDecision: jsonb("policy_decision").$type<Record<string, unknown>>(),
     policyDecisionHash: varchar("policy_decision_hash", { length: 71 }),
 
-    // #239: authoritative execute-time policy evidence. Unlike the approval-time
+    // Authoritative execute-time policy evidence. Unlike the approval-time
     // decision above, this snapshot is derived from current rules immediately
     // before approval consumption and authorization mint.
     executionPolicyDecisionId: uuid("execution_policy_decision_id"),
@@ -2486,11 +2486,11 @@ export const providerActionBindings = pgTable(
     // provider_action_bindings_execution_policy_ready_chk. It is intentionally
     // not modeled here because Drizzle cannot express NOT VALID: PostgreSQL
     // enforces it for every new execution_ready/executing row while tolerating
-    // historical in-flight executions whose outcome may already be unknown.
+    // existing in-flight executions whose outcome may already be unknown.
 
     status: varchar("status", { length: 32 }).notNull(),
-    // ── PR3 approval lifecycle columns (0081) ──
-    // Mutable only via the PR3 transition trigger; binding_revision increments by
+    // ── Migration 0081 approval lifecycle columns ──
+    // Mutable only via the transition trigger; binding_revision increments by
     // exactly one per state-changing transition. Several invariants (transition
     // graph, per-state field-shape CHECK, frozen-column freeze) live in 0081 raw
     // SQL and are not visible to drizzle-kit.
@@ -2515,11 +2515,8 @@ export const providerActionBindings = pgTable(
       foreignColumns: [intents.tenantId, intents.id],
       name: "provider_action_bindings_intent_fk",
     }).onDelete("cascade"),
-    actorFk: foreignKey({
-      columns: [table.tenantId, table.actorAgentId],
-      foreignColumns: [agents.tenantId, agents.id],
-      name: "provider_action_bindings_actor_fk",
-    }).onDelete("restrict"),
+    // Provider-action evidence outlives deleted agent authority. Migration
+    // 0110 replaces the actor FK with a writer/transition fence.
     workspaceFk: foreignKey({
       columns: [table.tenantId, table.workspaceId],
       foreignColumns: [workspaces.tenantId, workspaces.id],
@@ -2659,16 +2656,11 @@ export const upstreamCredentialLeases = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
-    agentFk: foreignKey({
-      columns: [table.tenantId, table.agentId],
-      foreignColumns: [agents.tenantId, agents.id],
-      name: "upstream_credential_leases_agent_fk",
-    }).onDelete("restrict"),
-    workspaceFk: foreignKey({
-      columns: [table.tenantId, table.workspaceId],
-      foreignColumns: [workspaces.tenantId, workspaces.id],
-      name: "upstream_credential_leases_workspace_fk",
-    }).onDelete("restrict"),
+    // Lease evidence intentionally outlives deleted agent authority. A database
+    // trigger serializes new lease publication with agent deletion because an
+    // ordinary retention-blocking agent FK is deliberately absent.
+    // Lease evidence intentionally outlives deleted workspace authority. The
+    // 0110 workspace-row fence serializes publication with workspace deletion.
     replayUnique: uniqueIndex("upstream_credential_leases_replay_uniq").on(
       table.tenantId,
       table.agentId,

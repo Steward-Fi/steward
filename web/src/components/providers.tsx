@@ -1,7 +1,16 @@
 "use client";
 
 import { StewardProvider, useAuth } from "@stwd/react";
-import { createElement, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import { usePathname } from "next/navigation";
+import {
+  createElement,
+  type ReactNode,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { clearAuthToken, setAuthToken, steward } from "@/lib/api";
 import { STEWARD_API_URL } from "@/lib/steward-api-url";
 
@@ -9,6 +18,53 @@ import { STEWARD_API_URL } from "@/lib/steward-api-url";
 import "@simplewebauthn/browser";
 
 const API_URL = STEWARD_API_URL;
+
+interface WalletRuntime {
+  EVMWalletProvider: React.ComponentType<{ config: unknown; children: ReactNode }>;
+  SolanaWalletProvider: React.ComponentType<{ endpoint: string; children: ReactNode }>;
+  config: unknown;
+  rpc: string;
+}
+
+type WalletRuntimeState =
+  | { status: "loading" }
+  | { status: "ready"; runtime: WalletRuntime }
+  | { status: "failed" };
+
+type WalletRuntimeLoader = () => Promise<
+  readonly [typeof import("@stwd/react/wallet"), typeof import("@/lib/wagmi")]
+>;
+
+export async function resolveWalletRuntime(
+  load: WalletRuntimeLoader = () =>
+    Promise.all([import("@stwd/react/wallet"), import("@/lib/wagmi")]),
+  timeoutMs = 10_000,
+): Promise<WalletRuntimeState> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const [wallet, wagmi] = await Promise.race([
+      load(),
+      new Promise<never>((_, reject) => {
+        timeout = setTimeout(() => reject(new Error("Wallet runtime load timed out")), timeoutMs);
+      }),
+    ]);
+    return {
+      status: "ready",
+      runtime: {
+        EVMWalletProvider: wallet.EVMWalletProvider as never,
+        SolanaWalletProvider: wallet.SolanaWalletProvider as never,
+        config: wagmi.getWagmiConfig(),
+        rpc: wagmi.SOLANA_RPC_URL,
+      },
+    };
+  } catch {
+    // Wallet UI is optional for non-wallet pages such as the approval queue.
+    // A chunk/config failure must not leave those pages permanently blocked.
+    return { status: "failed" };
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+}
 
 /**
  * SECURITY (SEC-018): the long-lived Steward REFRESH token is no longer kept
@@ -55,15 +111,17 @@ function removeLegacyRefreshToken(): void {
 }
 
 /**
- * Syncs the Steward auth JWT into the legacy API client once.
- * Uses a ref to avoid re-creating the client on every render.
+ * Syncs each new Steward auth JWT into the legacy API client.
+ * Uses a ref to avoid reconfiguring the client on unrelated renders.
  */
 function AuthTokenSync({ children }: { children: ReactNode }) {
   const auth = useAuth();
   const lastToken = useRef<string | null>(null);
   const sessionToken = auth.session?.token ?? null;
 
-  useEffect(() => {
+  // Install the rotated token before descendant passive effects can issue
+  // tenant-scoped requests through the compatibility client.
+  useLayoutEffect(() => {
     if (!auth.isAuthenticated) {
       lastToken.current = null;
       clearAuthToken();
@@ -93,35 +151,42 @@ function AuthTokenSync({ children }: { children: ReactNode }) {
  * page until the wallet bundle loaded.
  */
 function WalletProviderTree({ children }: { children: ReactNode }) {
-  const [Mounted, setMounted] = useState<{
-    EVMWalletProvider: React.ComponentType<{ config: unknown; children: ReactNode }>;
-    SolanaWalletProvider: React.ComponentType<{ endpoint: string; children: ReactNode }>;
-    config: unknown;
-    rpc: string;
-  } | null>(null);
+  const pathname = usePathname();
+  const [walletRuntime, setWalletRuntime] = useState<WalletRuntimeState>({ status: "loading" });
 
   useEffect(() => {
     let cancelled = false;
-    Promise.all([import("@stwd/react/wallet"), import("@/lib/wagmi")]).then(([wallet, wagmi]) => {
+    void resolveWalletRuntime().then((runtime) => {
       if (cancelled) return;
-      setMounted({
-        EVMWalletProvider: wallet.EVMWalletProvider as never,
-        SolanaWalletProvider: wallet.SolanaWalletProvider as never,
-        config: wagmi.getWagmiConfig(),
-        rpc: wagmi.SOLANA_RPC_URL,
-      });
+      if (runtime.status === "failed") {
+        console.error("Wallet runtime unavailable; wallet features are disabled");
+      }
+      setWalletRuntime(runtime);
     });
     return () => {
       cancelled = true;
     };
   }, []);
 
-  if (!Mounted) {
+  if (
+    pathname?.startsWith("/dashboard/approvals") ||
+    pathname === "/dashboard/webhooks" ||
+    pathname?.startsWith("/dashboard/webhooks/")
+  ) {
+    // Approval review and webhook administration do not use wallet capabilities.
+    // Keep them outside the optional wallet wrapper so a late load cannot remount
+    // either tenant-bound interface and duplicate requests.
+    return children;
+  }
+
+  if (walletRuntime.status !== "ready") {
     // Server render and pre-hydration client render: pass children
     // through unchanged. Wallet UI just won't be available until the
     // dynamic chunks land. Pages without wallets render normally.
-    return <>{children}</>;
+    return children;
   }
+
+  const Mounted = walletRuntime.runtime;
 
   return (
     <Mounted.EVMWalletProvider config={Mounted.config}>

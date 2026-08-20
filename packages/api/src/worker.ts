@@ -19,13 +19,16 @@
  *
  * Required bindings (set via `wrangler secret put` or `vars` in wrangler.toml):
  *   - DATABASE_URL                  Neon HTTP connection string
- *   - DATABASE_DRIVER=neon-http     Selects the HTTP-based postgres driver
+ *   - DATABASE_DRIVER=neon-websocket Selects the request-owned transaction-capable driver
  *   - REDIS_DRIVER=upstash          Selects the Upstash REST adapter
  *   - KV_REST_API_URL               Upstash REST endpoint
  *   - KV_REST_API_TOKEN             Upstash REST token
  *   - SKIP_MIGRATIONS=1             Migrations run via wrangler-driven CI script
+ *   - NODE_ENV=production           Enables production validation in every deploy environment
  *   - STEWARD_JWT_SECRET            Canonical HS256 JWT signing secret
  *   - STEWARD_MASTER_PASSWORD       Vault keystore master password
+ *   - STEWARD_KDF_SALT              Per-deployment vault KDF salt
+ *   - STEWARD_AUDIT_HMAC_KEY        Tamper-evident audit-chain HMAC root
  *   - RESEND_API_KEY                Magic-link email provider
  *   - GOOGLE/DISCORD/GITHUB/TWITTER OAuth client IDs + secrets
  *   - PASSKEY_RP_ID, PASSKEY_ORIGIN, PASSKEY_RP_NAME
@@ -39,7 +42,15 @@
  *                                   configured Redis is unreachable
  */
 
-import { validateJwtSecretEnv } from "@stwd/auth";
+// Import the dependency-light JWT module directly. Importing the auth barrel
+// here would evaluate Worker-sensitive auth modules before bindings are
+// hydrated into process.env.
+import {
+  createJwtRuntimeAuthority,
+  type JwtRuntimeEnvironment,
+  validateJwtSecretEnv,
+  withJwtRuntimeAuthority,
+} from "@stwd/auth/jwt";
 import {
   createDbForRequest,
   createNeonTransactionDbForRequest,
@@ -47,6 +58,7 @@ import {
   type NeonTransactionDbHandle,
   withRequestDatabase,
 } from "@stwd/db";
+import { withRuntimeEnvironment } from "@stwd/shared/runtime-env";
 import { initRedis } from "./middleware/redis";
 
 export interface Env {
@@ -63,6 +75,17 @@ export interface Env {
   /** Deprecated compatibility fallback for existing Worker deployments. */
   STEWARD_SESSION_SECRET?: string;
   STEWARD_MASTER_PASSWORD?: string;
+  STEWARD_EMBEDDED?: string;
+  STEWARD_EMBEDDED_MODE?: string;
+  STEWARD_DB_MODE?: string;
+  STEWARD_ALLOW_DEV_SECRETS?: string;
+  STEWARD_ALLOW_DEV_SECRET?: string;
+  AGENT_TOKEN_EXPIRY?: string;
+  STEWARD_IDENTITY_JWT_ALG?: string;
+  STEWARD_IDENTITY_JWT_PRIVATE_KEY?: string;
+  STEWARD_IDENTITY_JWT_KID?: string;
+  STEWARD_IDENTITY_JWT_ISSUER?: string;
+  STEWARD_IDENTITY_JWT_AUDIENCE?: string;
   RESEND_API_KEY?: string;
   EMAIL_FROM?: string;
   APP_URL?: string;
@@ -103,8 +126,7 @@ type WorkerHttpDatabaseFactory = (env: {
 /**
  * Run one Worker unit of work with its request-owned database handle.
  *
- * neon-http remains the shipped default and needs no persistent cleanup. The
- * transaction-capable WebSocket driver is explicit: its handle is bound to the
+ * neon-websocket is the shipped driver: its handle is bound to the
  * async request so every legacy getDb() call resolves the same Drizzle object,
  * then close() is awaited on success and failure. No handle is cached on the
  * isolate.
@@ -125,6 +147,11 @@ export async function withWorkerRequestDatabase<T>(
     );
   }
   if (driver === "neon-http") {
+    if (env.NODE_ENV !== "development" && env.NODE_ENV !== "test") {
+      throw new Error(
+        "WORKER_DATABASE_DRIVER_NOT_TRANSACTIONAL: Workers require neon-websocket unless NODE_ENV is explicitly development or test",
+      );
+    }
     const db = (options?.createHttpDb ?? createDbForRequest)(env);
     return withRequestDatabase(
       db as unknown as ReturnType<typeof getDb>,
@@ -293,11 +320,45 @@ export function hydrateProcessEnv(env: Env): void {
 
 let workerInit: Promise<void> | null = null;
 
+function workerJwtEnvironment(env: Env): Readonly<JwtRuntimeEnvironment> {
+  return Object.freeze({
+    // Workers are internet-facing deployments even when operators omit the
+    // conventional Node-only NODE_ENV binding. Never inherit development
+    // fallbacks from that omission.
+    NODE_ENV: env.NODE_ENV?.trim() || "production",
+    STEWARD_JWT_SECRET: env.STEWARD_JWT_SECRET,
+    STEWARD_SESSION_SECRET: env.STEWARD_SESSION_SECRET,
+    STEWARD_MASTER_PASSWORD: env.STEWARD_MASTER_PASSWORD,
+    STEWARD_EMBEDDED: env.STEWARD_EMBEDDED,
+    STEWARD_EMBEDDED_MODE: env.STEWARD_EMBEDDED_MODE,
+    STEWARD_DB_MODE: env.STEWARD_DB_MODE,
+    DATABASE_URL: env.DATABASE_URL,
+    STEWARD_ALLOW_DEV_SECRETS: env.STEWARD_ALLOW_DEV_SECRETS,
+    STEWARD_ALLOW_DEV_SECRET: env.STEWARD_ALLOW_DEV_SECRET,
+    AGENT_TOKEN_EXPIRY: env.AGENT_TOKEN_EXPIRY,
+    STEWARD_IDENTITY_JWT_ALG: env.STEWARD_IDENTITY_JWT_ALG,
+    STEWARD_IDENTITY_JWT_PRIVATE_KEY: env.STEWARD_IDENTITY_JWT_PRIVATE_KEY,
+    STEWARD_IDENTITY_JWT_KID: env.STEWARD_IDENTITY_JWT_KID,
+    STEWARD_IDENTITY_JWT_ISSUER: env.STEWARD_IDENTITY_JWT_ISSUER,
+    STEWARD_IDENTITY_JWT_AUDIENCE: env.STEWARD_IDENTITY_JWT_AUDIENCE,
+    APP_URL: env.APP_URL,
+  });
+}
+
+/**
+ * Bind authentication-critical Worker configuration before any request code
+ * can yield. Downstream JWT signing and verification resolve this immutable
+ * authority rather than the isolate-wide process.env compatibility mirror.
+ */
+export function withWorkerJwtAuthority<T>(env: Env, callback: () => T): T {
+  const authority = createJwtRuntimeAuthority(workerJwtEnvironment(env));
+  return withJwtRuntimeAuthority(authority, callback);
+}
+
 function validateWorkerSecurityEnv(): void {
-  // Validate authentication-critical bindings before opening a database
-  // connection. This must stay synchronous with hydrateProcessEnv(): yielding
-  // between them would let another request replace the isolate-wide env before
-  // this request's bindings are checked.
+  // The request authority was resolved synchronously from this invocation's
+  // bindings. This validation never consults the process.env compatibility
+  // mirror, even after another request hydrates a different binding set.
   validateJwtSecretEnv();
 }
 
@@ -378,39 +439,47 @@ async function getComposedApp() {
 
 export default {
   async fetch(request: Request, env: Env, ctx: unknown): Promise<Response> {
-    // SEC-148: refresh process.env from the CURRENT request's bindings on every
-    // request (not once per isolate) so rotated bindings take effect promptly;
-    // the once-per-isolate init below only bootstraps stores/imports.
-    hydrateProcessEnv(env);
-    validateWorkerSecurityEnv();
-    const executionCtx = ctx as { waitUntil?: (promise: Promise<unknown>) => void };
-    const waitUntil =
-      typeof executionCtx?.waitUntil === "function"
-        ? executionCtx.waitUntil.bind(executionCtx)
-        : undefined;
-    return withWorkerRequestDatabase(
-      env,
-      async () => {
-        await ensureWorkerInit(env);
-        const app = await getComposedApp();
-        return app.fetch(request, env, ctx as never);
-      },
-      waitUntil ? { waitUntil } : undefined,
-    );
+    return withRuntimeEnvironment({ ...env, STEWARD_RUNTIME: "workers" }, async () => {
+      // Keep the legacy bridge for modules not yet migrated to request-local
+      // configuration. Security-sensitive OIDC settings use the immutable
+      // snapshot above and cannot be replaced by an overlapping request.
+      return withWorkerJwtAuthority(env, async () => {
+        hydrateProcessEnv(env);
+        validateWorkerSecurityEnv();
+        const executionCtx = ctx as { waitUntil?: (promise: Promise<unknown>) => void };
+        const waitUntil =
+          typeof executionCtx?.waitUntil === "function"
+            ? executionCtx.waitUntil.bind(executionCtx)
+            : undefined;
+        return withWorkerRequestDatabase(
+          env,
+          async () => {
+            await ensureWorkerInit(env);
+            const app = await getComposedApp();
+            return app.fetch(request, env, ctx as never);
+          },
+          waitUntil ? { waitUntil } : undefined,
+        );
+      });
+    });
   },
   async scheduled(
     _controller: unknown,
     env: Env,
     ctx: { waitUntil(promise: Promise<unknown>): void },
   ) {
-    hydrateProcessEnv(env);
-    validateWorkerSecurityEnv();
-    ctx.waitUntil(
-      Promise.all([
-        withWorkerRequestDatabase(env, () => runWorkerUpstreamCredentialLeaseSweep(env)),
-        withWorkerRequestDatabase(env, () => runWorkerGoogleCredentialLifecycleSweep(env)),
-        withWorkerRequestDatabase(env, () => runWorkerXCredentialLifecycleSweep(env)),
-      ]),
-    );
+    withRuntimeEnvironment({ ...env, STEWARD_RUNTIME: "workers" }, () => {
+      return withWorkerJwtAuthority(env, () => {
+        hydrateProcessEnv(env);
+        validateWorkerSecurityEnv();
+        ctx.waitUntil(
+          Promise.all([
+            withWorkerRequestDatabase(env, () => runWorkerUpstreamCredentialLeaseSweep(env)),
+            withWorkerRequestDatabase(env, () => runWorkerGoogleCredentialLifecycleSweep(env)),
+            withWorkerRequestDatabase(env, () => runWorkerXCredentialLifecycleSweep(env)),
+          ]),
+        );
+      });
+    });
   },
 };

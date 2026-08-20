@@ -10,7 +10,7 @@ import { isAgentOrderPath, isOperatorRecoveryPath, tradingPlugin } from "../inde
  * tenant-admin) ONLY if their path is in isOperatorRecoveryPath; otherwise they
  * silently fall through to tenantAuth and 403 the platform key.
  *
- * /deposit shipped in PR #92 but was never added here, so it was unreachable via
+ * Every operator route, including /deposit, must be reachable through
  * the platform key from day one. Every operator-recovery route MUST be listed.
  */
 const OPERATOR_ROUTES = [

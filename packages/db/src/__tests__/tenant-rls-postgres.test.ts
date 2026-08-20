@@ -4,7 +4,11 @@ import { sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 import { createDb } from "../client";
-import { tenantContextForInternalJob, withTenantRlsTransaction } from "../tenant-rls-context";
+import {
+  tenantContextForInternalJob,
+  tenantContextFromAuthenticatedPrincipal,
+  withTenantRlsTransaction,
+} from "../tenant-rls-context";
 
 const describeWithPostgres = process.env.DATABASE_URL ? describe : describe.skip;
 setDefaultTimeout(30_000);
@@ -141,6 +145,32 @@ describeWithPostgres("SEC-169 transaction context on a real Postgres pool", () =
       Array.from({ length: 12 }, () => handle.client.unsafe(`SELECT * FROM ${tableName}`)),
     );
     expect(resetChecks.every((rows) => rows.length === 0)).toBe(true);
+  });
+
+  test("authenticated user identity is transaction-local and cleared after release", async () => {
+    const userId = randomUUID();
+    const context = tenantContextFromAuthenticatedPrincipal({
+      tenantId: "tenant-a",
+      method: "postgres-user-test",
+      subject: userId,
+      userId,
+    });
+    await withTenantRlsTransaction(handle.db as never, "postgres-js", context, async (tx) => {
+      const settings = rowsOf(
+        await tx.execute(sql`
+          SELECT
+            NULLIF(current_setting('steward.tenant_id', true), '') AS tenant_id,
+            NULLIF(current_setting('steward.user_id', true), '') AS user_id
+        `),
+      );
+      expect(settings[0]).toMatchObject({ tenant_id: "tenant-a", user_id: userId });
+    });
+    const [cleared] = await handle.client`
+      SELECT
+        NULLIF(current_setting('steward.tenant_id', true), '') AS tenant_id,
+        NULLIF(current_setting('steward.user_id', true), '') AS user_id
+    `;
+    expect(cleared).toMatchObject({ tenant_id: null, user_id: null });
   });
 
   test("WITH CHECK rejects a cross-tenant write", async () => {

@@ -5,6 +5,7 @@ import {
   resolveGoogleConnectConfig,
   runGoogleCredentialLifecycleSweep,
 } from "./provider-google-connect";
+import { runInternalJobForEachTenant } from "./tenant-job";
 
 const DEFAULT_INTERVAL_MS = 60_000;
 const MIN_INTERVAL_MS = 5_000;
@@ -24,10 +25,22 @@ function configuredInterval(): number {
 export async function runGoogleCredentialLifecycleRecoverySweep(): Promise<GoogleCredentialLifecycleSweepResult> {
   const password = process.env.STEWARD_MASTER_PASSWORD?.trim();
   if (!password) throw new Error("STEWARD_MASTER_PASSWORD is required for Google OAuth recovery");
-  return runGoogleCredentialLifecycleSweep({
-    vault: new SecretVault(password),
-    config: resolveGoogleConnectConfig(),
-  });
+  const results = await runInternalJobForEachTenant("google-credential-lifecycle-sweep", () =>
+    runGoogleCredentialLifecycleSweep({
+      vault: new SecretVault(password),
+      config: resolveGoogleConnectConfig(),
+    }),
+  );
+  return results.reduce<GoogleCredentialLifecycleSweepResult>(
+    (total, { value }) => ({
+      processed: total.processed + value.processed,
+      adopted: total.adopted + value.adopted,
+      revoked: total.revoked + value.revoked,
+      attention: total.attention + value.attention,
+      remaining: total.remaining || value.remaining,
+    }),
+    { processed: 0, adopted: 0, revoked: 0, attention: 0, remaining: false },
+  );
 }
 
 export function startGoogleCredentialLifecycleScheduler(options?: {

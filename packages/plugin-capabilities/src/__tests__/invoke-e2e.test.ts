@@ -45,11 +45,27 @@ const FAKE_OPENAI_KEY = "sk-test-openai-e2e-do-not-use-0123456789abcdef";
 const STEWARD_TOKEN_SENTINEL = "steward-agent-token-sentinel-never-upstream";
 const PROXY_URL = "https://proxy.cap-e2e.test";
 const MIGRATIONS_FOLDER = fileURLToPath(new URL("../../drizzle", import.meta.url));
+const TEST_ENV_KEYS = [
+  "NODE_ENV",
+  "STEWARD_KDF_SALT",
+  "REDIS_REQUIRED",
+  "STEWARD_PGLITE_MEMORY",
+  "STEWARD_MASTER_PASSWORD",
+  "STEWARD_JWT_SECRET",
+  "STEWARD_PROXY_REQUIRE_REQUEST_SIGNATURE",
+  "STEWARD_PROXY_REQUEST_SIGNING_SECRET",
+  "STEWARD_PROXY_ALLOWED_HOSTS",
+  "STEWARD_PROXY_DEV_MODE",
+  "STEWARD_PROXY_URL",
+] as const;
+const originalEnv = new Map<(typeof TEST_ENV_KEYS)[number], string | undefined>();
 
 let authMiddleware: typeof import("@stwd/proxy/src/middleware/auth")["authMiddleware"];
 let handleProxy: typeof import("@stwd/proxy/src/handlers/proxy")["handleProxy"];
 let setForwardProxyRequestForTests: typeof import("@stwd/proxy/src/handlers/proxy")["__setForwardProxyRequestForTests"];
 let setResolveProxyHostForTests: typeof import("@stwd/proxy/src/handlers/proxy")["__setResolveProxyHostForTests"];
+let setCheckProxyRateLimitForTests: typeof import("@stwd/proxy/src/handlers/proxy")["__setCheckProxyRateLimitForTests"];
+let resetProxyHandlerTestHooksForTests: typeof import("@stwd/proxy/src/handlers/proxy")["__resetProxyHandlerTestHooksForTests"];
 
 interface ForwardedCapture {
   url: string;
@@ -59,6 +75,7 @@ interface ForwardedCapture {
 }
 let lastForwarded: ForwardedCapture | null = null;
 let proxyApp: Hono | null = null;
+let proxyRateLimitChecks = 0;
 const realFetch = globalThis.fetch;
 
 // the policy set the injected getPolicySet returns for the current test.
@@ -83,12 +100,20 @@ function capRule(
 }
 
 beforeAll(async () => {
+  for (const key of TEST_ENV_KEYS) originalEnv.set(key, process.env[key]);
+  process.env.NODE_ENV = "test";
+  process.env.STEWARD_KDF_SALT = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+  process.env.REDIS_REQUIRED = "false";
   process.env.STEWARD_PGLITE_MEMORY = "true";
   process.env.STEWARD_MASTER_PASSWORD = MASTER_PASSWORD;
   process.env.STEWARD_JWT_SECRET = "cap-invoke-e2e-jwt-secret-with-enough-bytes-0123456789";
+  // This hermetic in-process fixture deliberately uses the explicit dev-only
+  // replay/rate stores. Production still requires shared Redis and fails closed.
+  process.env.STEWARD_PROXY_DEV_MODE = "true";
   process.env.STEWARD_PROXY_REQUIRE_REQUEST_SIGNATURE = "true";
   process.env.STEWARD_PROXY_REQUEST_SIGNING_SECRET = SIGNING_SECRET;
   process.env.STEWARD_PROXY_ALLOWED_HOSTS = "api.github.com,api.openai.com";
+  process.env.STEWARD_PROXY_DEV_MODE = "true";
   // the invoke route reads these to build its proxy client (fail-closed if absent).
   process.env.STEWARD_PROXY_URL = PROXY_URL;
 
@@ -107,11 +132,17 @@ beforeAll(async () => {
     handleProxy,
     __setForwardProxyRequestForTests: setForwardProxyRequestForTests,
     __setResolveProxyHostForTests: setResolveProxyHostForTests,
+    __setCheckProxyRateLimitForTests: setCheckProxyRateLimitForTests,
+    __resetProxyHandlerTestHooksForTests: resetProxyHandlerTestHooksForTests,
   } = await import("@stwd/proxy/src/handlers/proxy"));
 
   // deterministic public ip so route-match -> decrypt -> inject -> forward runs
   // with no external network (mirrors the #149 e2e).
   setResolveProxyHostForTests(async () => [{ address: "93.184.216.34", family: 4 }]);
+  setCheckProxyRateLimitForTests(async () => {
+    proxyRateLimitChecks += 1;
+    return { allowed: true, resetMs: 0 };
+  });
   setForwardProxyRequestForTests(async (url, method, headers, body) => {
     const bodyText = body ? await new Response(body).text() : null;
     lastForwarded = { url: url.toString(), method, headers, bodyText };
@@ -153,14 +184,20 @@ beforeAll(async () => {
 
 afterAll(async () => {
   globalThis.fetch = realFetch;
-  await closeDb().catch(() => {});
-  delete process.env.STEWARD_PGLITE_MEMORY;
-  delete process.env.STEWARD_MASTER_PASSWORD;
-  delete process.env.STEWARD_JWT_SECRET;
-  delete process.env.STEWARD_PROXY_REQUIRE_REQUEST_SIGNATURE;
-  delete process.env.STEWARD_PROXY_REQUEST_SIGNING_SECRET;
-  delete process.env.STEWARD_PROXY_ALLOWED_HOSTS;
-  delete process.env.STEWARD_PROXY_URL;
+  try {
+    resetProxyHandlerTestHooksForTests?.();
+  } finally {
+    try {
+      await closeDb().catch(() => {});
+    } finally {
+      for (const key of TEST_ENV_KEYS) {
+        const original = originalEnv.get(key);
+        if (original === undefined) delete process.env[key];
+        else process.env[key] = original;
+      }
+      originalEnv.clear();
+    }
+  }
 });
 
 let tenantId: string;
@@ -289,6 +326,7 @@ beforeEach(async () => {
   await seedTenantAgent();
   currentPolicySet = [];
   lastForwarded = null;
+  proxyRateLimitChecks = 0;
 });
 
 describe("invoke e2e: full arc through the real proxy", () => {
@@ -448,6 +486,7 @@ describe("invoke e2e: full arc through the real proxy", () => {
     });
     // first invoke: count 0 < 1 => forwards (upstream 201).
     expect(first.status).toBe(201);
+    expect(proxyRateLimitChecks).toBe(1);
 
     const second = await app.request("/capabilities/github.pr.comment/invoke", {
       method: "POST",
@@ -456,6 +495,7 @@ describe("invoke e2e: full arc through the real proxy", () => {
     });
     // second invoke: count 1 >= 1 => rate constraint denies the allow => 403.
     expect(second.status).toBe(403);
+    expect(proxyRateLimitChecks).toBe(1);
 
     const rows = await agentInvocations(capId);
     expect(rows.filter((r) => r.decision === "allow").length).toBe(1);
@@ -642,6 +682,7 @@ describe("OpenAI-compatible capability adapter", () => {
       body: JSON.stringify({ model: "gpt-test", messages: [{ role: "user", content: "one" }] }),
     });
     expect(first.status).toBe(200);
+    expect(proxyRateLimitChecks).toBe(1);
 
     const second = await app.request("/capabilities/openai.chat/openai/v1/chat/completions", {
       method: "POST",
@@ -649,6 +690,7 @@ describe("OpenAI-compatible capability adapter", () => {
       body: JSON.stringify({ model: "gpt-test", messages: [{ role: "user", content: "two" }] }),
     });
     expect(second.status).toBe(403);
+    expect(proxyRateLimitChecks).toBe(1);
 
     const rows = await agentInvocations(capId);
     expect(rows.filter((r) => r.decision === "allow").length).toBe(1);

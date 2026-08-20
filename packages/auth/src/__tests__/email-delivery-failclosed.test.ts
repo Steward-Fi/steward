@@ -31,6 +31,10 @@ class CapturingBackend implements StoreBackend {
   failActiveWritesAfterCommit = false;
   failReadsAfterActiveCommit = false;
   activeTransitionFailuresAfterCommit = 0;
+  failFirstActivationPublishAfterMs = 0;
+  delaySuccessfulActivationPublishMs = 0;
+  activationPublishExpiresAt: number[] = [];
+  afterActivationCommitBeforeLostAck?: () => Promise<void>;
   failDeletes = false;
   replaceGuardBeforeTransition = false;
 
@@ -116,7 +120,19 @@ class CapturingBackend implements StoreBackend {
 
   async publish(entries: readonly StorePublishEntry[]): Promise<boolean> {
     if (this.failWrites) throw new Error("durable store unavailable");
+    const activationEntry = entries.find((entry) => this.isActivation(entry.key, entry.value));
+    if (activationEntry) {
+      this.activationPublishExpiresAt.push(activationEntry.expiresAt);
+      if (
+        this.failFirstActivationPublishAfterMs > 0 &&
+        this.activationPublishExpiresAt.length === 1
+      ) {
+        await Bun.sleep(this.failFirstActivationPublishAfterMs);
+        throw new Error("delayed durable activation failure");
+      }
+    }
     const now = Date.now();
+    if (entries.some((entry) => entry.value !== null && entry.expiresAt <= now)) return false;
     if (this.replaceGuardBeforeTransition) {
       const guardedTarget = entries.find(
         (entry) => entry.expected !== undefined && entry.key.startsWith("email-login:active:"),
@@ -137,6 +153,11 @@ class CapturingBackend implements StoreBackend {
     });
     if (states.length > 0 && states.every((state) => state.desired)) return true;
     if (states.some((state) => !state.expected)) return false;
+    if (activationEntry && this.delaySuccessfulActivationPublishMs > 0) {
+      await Bun.sleep(this.delaySuccessfulActivationPublishMs);
+    }
+    if (entries.some((entry) => entry.value !== null && entry.expiresAt <= Date.now()))
+      return false;
     if (
       this.failActiveWrites &&
       entries.some((entry) => this.isActivation(entry.key, entry.value))
@@ -145,13 +166,14 @@ class CapturingBackend implements StoreBackend {
     }
     for (const entry of entries) {
       if (entry.value === null) this.values.delete(entry.key);
-      else this.values.set(entry.key, { value: entry.value, expiresAt: now + entry.ttlMs });
+      else this.values.set(entry.key, { value: entry.value, expiresAt: entry.expiresAt });
     }
     if (
       this.failActiveWritesAfterCommit &&
       entries.some((entry) => this.isActivation(entry.key, entry.value)) &&
       this.activeTransitionFailuresAfterCommit++ === 0
     ) {
+      await this.afterActivationCommitBeforeLostAck?.();
       throw new Error("durable activation response lost");
     }
     return true;
@@ -160,6 +182,17 @@ class CapturingBackend implements StoreBackend {
   async delete(key: string): Promise<void> {
     if (this.failDeletes) throw new Error("durable delete unavailable");
     this.values.delete(key);
+  }
+}
+
+class DelayedMemoryPublishBackend extends MemoryBackend {
+  delayNextPublishMs = 0;
+
+  override async publish(entries: readonly StorePublishEntry[]): Promise<boolean> {
+    const delayMs = this.delayNextPublishMs;
+    this.delayNextPublishMs = 0;
+    if (delayMs > 0) await Bun.sleep(delayMs);
+    return super.publish(entries);
   }
 }
 
@@ -179,14 +212,38 @@ function restoreEnv(): void {
   else process.env.STEWARD_ALLOW_DEV_SECRET = ORIGINAL_ALLOW_DEV_SECRET;
 }
 
-function buildAuth(provider: EmailProvider | undefined, backend: CapturingBackend): EmailAuth {
+function buildAuth(
+  provider: EmailProvider | undefined,
+  backend: CapturingBackend,
+  options: { tokenTtlMs?: number } = {},
+): EmailAuth {
   return new EmailAuth({
     from: "login@steward.fi",
     baseUrl: "https://steward.fi",
     ...(provider ? { provider } : {}),
     tokenStore: new TokenStore({ backend }),
     codeVerifierSecret: "fail-closed-test-secret-at-least-32-characters",
+    ...options,
   });
+}
+
+function expectOpaqueBoundedPublicationReceipt(
+  backend: CapturingBackend,
+  canaries: readonly string[],
+): void {
+  const receipts = [...backend.values.entries()].filter(([key]) =>
+    key.startsWith("email-issuance:published:"),
+  );
+  expect(receipts).toHaveLength(1);
+  const [key, receipt] = receipts[0]!;
+  expect(key).toMatch(/^email-issuance:published:[0-9a-f]{64}$/);
+  expect(receipt.value).toMatch(/^published:[0-9a-f]{64}$/);
+  expect(key.slice("email-issuance:published:".length)).toBe(
+    receipt.value.slice("published:".length),
+  );
+  expect(receipt.expiresAt).toBeGreaterThan(Date.now());
+  expect(receipt.expiresAt).toBeLessThanOrEqual(Date.now() + 10 * 60_000);
+  for (const canary of canaries) expect(`${key}:${receipt.value}`).not.toContain(canary);
 }
 
 async function legacyVerifyMagicLink(backend: StoreBackend, token: string): Promise<boolean> {
@@ -825,6 +882,276 @@ describe("fail-closed magic-link delivery", () => {
     const code = text.match(/\b(\d{6})\b/)?.[1] ?? "";
     expect(await auth.verifyOtp("otp-ack-loss@example.com", code, "tenant-a")).toBe(true);
     auth.destroy();
+  });
+
+  it("preserves the absolute expiry when a delayed publish failure is retried successfully", async () => {
+    const backend = new CapturingBackend();
+    backend.failFirstActivationPublishAfterMs = 120;
+    let text = "";
+    const auth = buildAuth(
+      {
+        send: async (_to, _subject, body) => {
+          text = body;
+          return { provider: "test", id: "accepted-before-delayed-publish" };
+        },
+      },
+      backend,
+      { tokenTtlMs: 500 },
+    );
+
+    const { expiresAt } = await auth.sendOtp("otp-delayed-retry@example.com", {
+      tenantId: "tenant-a",
+    });
+
+    expect(backend.activationPublishExpiresAt).toHaveLength(2);
+    expect(backend.activationPublishExpiresAt[1]).toBe(backend.activationPublishExpiresAt[0]);
+    for (const entry of backend.values.values()) {
+      expect(entry.expiresAt).toBeLessThanOrEqual(expiresAt.getTime());
+    }
+    const code = text.match(/\b(\d{6})\b/)?.[1] ?? "";
+    expect(await auth.verifyOtp("otp-delayed-retry@example.com", code, "tenant-a")).toBe(true);
+    auth.destroy();
+  });
+
+  it("fails OTP activation when publication is delayed past its advertised expiry", async () => {
+    const backend = new CapturingBackend();
+    backend.delaySuccessfulActivationPublishMs = 80;
+    let text = "";
+    const auth = buildAuth(
+      {
+        send: async (_to, _subject, body) => {
+          text = body;
+          return { provider: "test", id: "accepted-before-expired-publish" };
+        },
+      },
+      backend,
+      { tokenTtlMs: 40 },
+    );
+
+    await expect(
+      auth.sendOtp("otp-expired-publish@example.com", { tenantId: "tenant-a" }),
+    ).rejects.toThrow("Email challenge activation failed");
+    expect(backend.activationPublishExpiresAt).toHaveLength(1);
+    const code = text.match(/\b(\d{6})\b/)?.[1] ?? "";
+    expect(await auth.verifyOtp("otp-expired-publish@example.com", code, "tenant-a")).toBe(false);
+    auth.destroy();
+  });
+
+  it("fails magic-link activation when publication is delayed past its advertised expiry", async () => {
+    const backend = new CapturingBackend();
+    backend.delaySuccessfulActivationPublishMs = 80;
+    let text = "";
+    const auth = buildAuth(
+      {
+        send: async (_to, _subject, body) => {
+          text = body;
+          return { provider: "test", id: "accepted-before-expired-magic-publish" };
+        },
+      },
+      backend,
+      { tokenTtlMs: 40 },
+    );
+
+    await expect(
+      auth.sendMagicLink("magic-expired-publish@example.com", { tenantId: "tenant-a" }),
+    ).rejects.toThrow("Email challenge activation failed");
+    const token = text.match(/[?&]token=([a-f0-9]{64})/)?.[1] ?? "";
+    const code = text.match(/\b(\d{6})\b/)?.[1] ?? "";
+    expect(
+      await auth.verifyMagicLink(token, "magic-expired-publish@example.com", "tenant-a"),
+    ).toMatchObject({ valid: false });
+    expect(
+      await auth.verifyEmailLoginCode("magic-expired-publish@example.com", code, "tenant-a"),
+    ).toMatchObject({ valid: false });
+    auth.destroy();
+  });
+
+  it("preserves the prior memory OTP when a delayed replacement passes its deadline", async () => {
+    const backend = new DelayedMemoryPublishBackend();
+    let priorText = "";
+    const prior = new EmailAuth({
+      from: "login@steward.fi",
+      baseUrl: "https://steward.fi",
+      provider: {
+        send: async (_to, _subject, body) => {
+          priorText = body;
+          return { provider: "test", id: "prior-memory-otp" };
+        },
+      },
+      tokenStore: new TokenStore({ backend }),
+      tokenTtlMs: 60_000,
+      codeVerifierSecret: "fail-closed-test-secret-at-least-32-characters",
+    });
+    const delayed = new EmailAuth({
+      from: "login@steward.fi",
+      baseUrl: "https://steward.fi",
+      provider: {
+        send: async () => {
+          backend.delayNextPublishMs = 80;
+          return { provider: "test", id: "expired-memory-otp" };
+        },
+      },
+      tokenStore: new TokenStore({ backend }),
+      tokenTtlMs: 40,
+      codeVerifierSecret: "fail-closed-test-secret-at-least-32-characters",
+    });
+
+    await prior.sendOtp("memory-prior-otp@example.com", { tenantId: "tenant-a" });
+    const priorCode = priorText.match(/\b(\d{6})\b/)?.[1] ?? "";
+    await expect(
+      delayed.sendOtp("memory-prior-otp@example.com", { tenantId: "tenant-a" }),
+    ).rejects.toThrow(EmailDeliveryError);
+    expect(await prior.verifyOtp("memory-prior-otp@example.com", priorCode, "tenant-a")).toBe(true);
+    backend.destroy();
+  });
+
+  it("preserves the prior memory magic link when a delayed replacement passes its deadline", async () => {
+    const backend = new DelayedMemoryPublishBackend();
+    let priorText = "";
+    const prior = new EmailAuth({
+      from: "login@steward.fi",
+      baseUrl: "https://steward.fi",
+      provider: {
+        send: async (_to, _subject, body) => {
+          priorText = body;
+          return { provider: "test", id: "prior-memory-magic" };
+        },
+      },
+      tokenStore: new TokenStore({ backend }),
+      tokenTtlMs: 60_000,
+      codeVerifierSecret: "fail-closed-test-secret-at-least-32-characters",
+    });
+    const delayed = new EmailAuth({
+      from: "login@steward.fi",
+      baseUrl: "https://steward.fi",
+      provider: {
+        send: async () => {
+          backend.delayNextPublishMs = 80;
+          return { provider: "test", id: "expired-memory-magic" };
+        },
+      },
+      tokenStore: new TokenStore({ backend }),
+      tokenTtlMs: 40,
+      codeVerifierSecret: "fail-closed-test-secret-at-least-32-characters",
+    });
+
+    await prior.sendMagicLink("memory-prior-magic@example.com", { tenantId: "tenant-a" });
+    const priorToken = priorText.match(/[?&]token=([a-f0-9]{64})/)?.[1] ?? "";
+    await expect(
+      delayed.sendMagicLink("memory-prior-magic@example.com", { tenantId: "tenant-a" }),
+    ).rejects.toThrow(EmailDeliveryError);
+    expect(
+      await prior.verifyMagicLink(priorToken, "memory-prior-magic@example.com", "tenant-a"),
+    ).toMatchObject({ valid: true });
+    backend.destroy();
+  });
+
+  it("confirms a magic-link commit after lost acknowledgement and a newer failed reservation", async () => {
+    const backend = new CapturingBackend();
+    let firstText = "";
+    let secondProviderStarted!: () => void;
+    const secondProviderEntered = new Promise<void>((resolve) => {
+      secondProviderStarted = resolve;
+    });
+    let rejectSecond!: (reason: unknown) => void;
+    const secondProviderResult = new Promise<never>((_resolve, reject) => {
+      rejectSecond = reject;
+    });
+    const first = buildAuth(
+      {
+        send: async (_to, _subject, body) => {
+          firstText = body;
+          backend.failActiveWritesAfterCommit = true;
+          return { provider: "test", id: "first-committed-before-ack-loss" };
+        },
+      },
+      backend,
+    );
+    const second = buildAuth(
+      {
+        send: async () => {
+          secondProviderStarted();
+          return secondProviderResult;
+        },
+      },
+      backend,
+    );
+    let secondSend: Promise<unknown> | undefined;
+    backend.afterActivationCommitBeforeLostAck = async () => {
+      secondSend = second.sendMagicLink("ack-reservation@example.com", {
+        tenantId: "tenant-a",
+      });
+      await secondProviderEntered;
+    };
+
+    await first.sendMagicLink("ack-reservation@example.com", { tenantId: "tenant-a" });
+    rejectSecond(new Error("SECOND_PROVIDER_SECRET_CANARY"));
+    if (!secondSend) throw new Error("newer issuance did not start");
+    await expect(secondSend).rejects.toThrow(EmailDeliveryError);
+
+    const token = firstText.match(/[?&]token=([a-f0-9]{64})/)?.[1] ?? "";
+    expectOpaqueBoundedPublicationReceipt(backend, [
+      "ack-reservation@example.com",
+      "tenant-a",
+      token,
+    ]);
+    expect(
+      await first.verifyMagicLink(token, "ack-reservation@example.com", "tenant-a"),
+    ).toMatchObject({ valid: true });
+    first.destroy();
+    second.destroy();
+  });
+
+  it("confirms an OTP commit after lost acknowledgement and a newer failed reservation", async () => {
+    const backend = new CapturingBackend();
+    let firstText = "";
+    let secondProviderStarted!: () => void;
+    const secondProviderEntered = new Promise<void>((resolve) => {
+      secondProviderStarted = resolve;
+    });
+    let rejectSecond!: (reason: unknown) => void;
+    const secondProviderResult = new Promise<never>((_resolve, reject) => {
+      rejectSecond = reject;
+    });
+    const first = buildAuth(
+      {
+        send: async (_to, _subject, body) => {
+          firstText = body;
+          backend.failActiveWritesAfterCommit = true;
+          return { provider: "test", id: "first-otp-committed-before-ack-loss" };
+        },
+      },
+      backend,
+    );
+    const second = buildAuth(
+      {
+        send: async () => {
+          secondProviderStarted();
+          return secondProviderResult;
+        },
+      },
+      backend,
+    );
+    let secondSend: Promise<unknown> | undefined;
+    backend.afterActivationCommitBeforeLostAck = async () => {
+      secondSend = second.sendOtp("otp-ack-reservation@example.com", { tenantId: "tenant-a" });
+      await secondProviderEntered;
+    };
+
+    await first.sendOtp("otp-ack-reservation@example.com", { tenantId: "tenant-a" });
+    rejectSecond(new Error("SECOND_PROVIDER_SECRET_CANARY"));
+    if (!secondSend) throw new Error("newer OTP issuance did not start");
+    await expect(secondSend).rejects.toThrow(EmailDeliveryError);
+
+    const code = firstText.match(/\b(\d{6})\b/)?.[1] ?? "";
+    expectOpaqueBoundedPublicationReceipt(backend, [
+      "otp-ack-reservation@example.com",
+      "tenant-a",
+      code,
+    ]);
+    expect(await first.verifyOtp("otp-ack-reservation@example.com", code, "tenant-a")).toBe(true);
+    first.destroy();
+    second.destroy();
   });
 
   it("keeps only the newest concurrently published challenge across independent instances", async () => {

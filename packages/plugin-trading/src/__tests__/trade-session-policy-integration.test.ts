@@ -85,7 +85,7 @@ beforeAll(async () => {
   app.use("*", async (c, next) => {
     c.set("tenantId", tenantId);
     // Trade-session management is owner/admin-session + recent-MFA gated
-    // (PR #79 hardening); authenticate as an owner session with fresh MFA.
+    // Authenticate as an owner session with fresh MFA.
     c.set("authType", "session-jwt");
     c.set("tenantRole", "owner");
     c.set("sessionMfaVerifiedAt", Date.now());

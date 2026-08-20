@@ -229,7 +229,7 @@ describe("trade session control-plane gates (real routes)", () => {
   });
 
   it("SEC-034: a STALE MFA verification (10 min ago) no longer manages trade sessions", async () => {
-    // Presence-only MFA previously passed these gates for a session that
+    // Presence-only MFA must not pass these gates for a session that
     // completed MFA hours/days ago. The gates now require recency (5-minute
     // window), so a 10-minute-old verification is refused exactly like no MFA.
     const createRes = await post(await makeApp("session-stale-mfa"), "/sessions", CREATE_BODY);

@@ -1,4 +1,5 @@
 import { redactedThrownDiagnostics } from "@stwd/shared";
+import { runInternalJobForEachTenant } from "./tenant-job";
 
 const DEFAULT_INTERVAL_MS = 15_000;
 const MAX_INTERVAL_MS = 15_000;
@@ -49,13 +50,27 @@ export async function runUpstreamCredentialLeaseSweep() {
   if (!ctx.exerciseCredentialLeaseToken) {
     throw new Error("credential lease recovery is not configured");
   }
-  return recoverAllInterruptedUpstreamCredentialLeases({
-    db: ctx.db,
-    issuer: new GitHubAppInstallationTokenIssuer(),
-    exerciseToken: ctx.exerciseCredentialLeaseToken,
-    auditedTransaction: ctx.withTenantAuditedTransaction,
-    withDatabaseDeadline: ctx.withCredentialLeaseDatabaseDeadline,
-  });
+  const results = await runInternalJobForEachTenant("upstream-credential-lease-sweep", () =>
+    recoverAllInterruptedUpstreamCredentialLeases({
+      db: ctx.db,
+      issuer: new GitHubAppInstallationTokenIssuer(),
+      exerciseToken: ctx.exerciseCredentialLeaseToken as NonNullable<
+        typeof ctx.exerciseCredentialLeaseToken
+      >,
+      auditedTransaction: ctx.withTenantAuditedTransaction,
+      withDatabaseDeadline: ctx.withCredentialLeaseDatabaseDeadline,
+    }),
+  );
+  return results.reduce(
+    (total, { value }) => ({
+      unknown: total.unknown + value.unknown,
+      revoked: total.revoked + value.revoked,
+      attention: total.attention + value.attention,
+      expired: total.expired + value.expired,
+      remaining: total.remaining || value.remaining === true,
+    }),
+    { unknown: 0, revoked: 0, attention: 0, expired: 0, remaining: false },
+  );
 }
 
 function configuredInterval(): number {

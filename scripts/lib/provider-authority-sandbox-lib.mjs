@@ -1,6 +1,7 @@
 import { createSign } from "node:crypto";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
+import { decodeKdfSalt } from "../../packages/vault/src/kdf-salt.mjs";
 
 export const REQUIRED_ENV = [
   "GITHUB_APP_ID",
@@ -19,6 +20,7 @@ export const REQUIRED_ENV = [
   "STEWARD_AUDIT_SIGNING_KEY_FINGERPRINT",
   "DATABASE_URL",
   "STEWARD_MASTER_PASSWORD",
+  "STEWARD_KDF_SALT",
   "STEWARD_EXECUTION_AUTH_SECRET",
   "STEWARD_AUDIT_HMAC_KEY",
   "STEWARD_AUDIT_SIGNING_KEY",
@@ -139,6 +141,11 @@ export function validateEnvironment(env) {
     if (placeholders.length) parts.push(`placeholder value(s): ${placeholders.join(", ")}`);
     throw new Error(parts.join("; "));
   }
+  // Match the production vault's KeyStore contract. The live dispatch child
+  // must derive the same root key as the deployment that encrypted the seeded
+  // credential; accepting a missing, short, or non-hex salt would make a
+  // successful preflight meaningless and defer the failure until dispatch.
+  decodeKdfSalt(env.STEWARD_KDF_SALT);
   const stewardBase = validateServiceUrl("STEWARD_API_URL", env.STEWARD_API_URL);
   const stewardUrl = new URL(stewardBase);
   if (stewardUrl.search || stewardUrl.hash) {

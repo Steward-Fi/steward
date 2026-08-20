@@ -74,13 +74,13 @@ docker compose up -d
 
 ## Documentation
 
-- [**Quickstart**](./quickstart.md) — Up and running in 5 minutes
-- [**Architecture**](./architecture.md) — How the pieces fit together
-- [**Authentication**](./auth.md) — Passkeys, magic links, SIWE, JWT, API keys
-- [**Policy Engine**](./policies.md) — Spending limits, whitelists, rate limits, and more
+- [**Quickstart**](./quickstart.mdx) — Up and running in 5 minutes
+- [**Architecture**](./concepts/architecture.mdx) — How the pieces fit together
+- [**Authentication**](./auth/overview.mdx) — Passkeys, magic links, SIWE, JWT, API keys
+- [**Policy Engine**](./concepts/policy-engine.mdx) — Spending limits, whitelists, rate limits, and more
 - [**Monero on Solana**](./guides/monero-on-solana.mdx) — Configure and use the bidirectional wxmr.io bridge handoff
-- [**SDK Reference**](./sdk.md) — `@stwd/sdk` TypeScript client
-- [**React Components**](./react.md) — `@stwd/react` embeddable UI
+- [**SDK Reference**](./sdk/client.mdx) — `@stwd/sdk` TypeScript client
+- [**React Components**](./sdk/react-components.mdx) — `@stwd/react` embeddable UI
 - [**Deployment Guide**](./deployment.md) — Docker, environment variables, database setup
 
 ## Who Uses Steward

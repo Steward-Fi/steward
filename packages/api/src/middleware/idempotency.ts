@@ -1,6 +1,7 @@
 import { redactedThrownDiagnostics } from "@stwd/shared";
 import { createMiddleware } from "hono/factory";
 import type { ApiResponse, AppVariables } from "../services/context";
+import { isRecentMfaTimestamp } from "../services/recent-mfa";
 import { getRedisClient } from "./redis";
 
 type IdempotencyStatus = "processing" | "completed";
@@ -611,13 +612,7 @@ function hasReplaySafeAuthenticatedContext(c: { get: (key: keyof AppVariables) =
     return true;
   }
   if (authType !== "session-jwt") return false;
-  const verifiedAt = c.get("sessionMfaVerifiedAt");
-  return (
-    typeof verifiedAt === "number" &&
-    Number.isFinite(verifiedAt) &&
-    Date.now() - verifiedAt >= 0 &&
-    Date.now() - verifiedAt <= 5 * 60_000
-  );
+  return isRecentMfaTimestamp(c.get("sessionMfaVerifiedAt"), 5 * 60_000);
 }
 
 function hasReplaySafePublicContext(c: { req: { path: string } }) {
@@ -652,6 +647,22 @@ export function idempotencyMiddleware(options?: { store?: IdempotencyStore; ttlM
     if (!IDEMPOTENCY_KEY_RE.test(key)) {
       recordIdempotencyMetric(metricsTenantId, "invalidKeys");
       return c.json<ApiResponse>({ ok: false, error: "Invalid Idempotency-Key header" }, 400);
+    }
+    // Solana broadcast requests bind this key to their durable transaction row.
+    // Let that database state machine serve every auth mode consistently,
+    // including recovery after a process dies while this cache says processing.
+    if (/^\/vault\/[^/]+\/sign-solana$/.test(c.req.path)) {
+      const body = await c.req.raw
+        .clone()
+        .json()
+        .catch(() => null);
+      if (
+        body &&
+        typeof body === "object" &&
+        (body as { broadcast?: unknown }).broadcast !== false
+      ) {
+        return next();
+      }
     }
 
     const [fingerprint, storageKey] = await Promise.all([

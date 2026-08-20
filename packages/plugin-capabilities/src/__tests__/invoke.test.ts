@@ -522,7 +522,7 @@ describe("invoke: default-deny + effects", () => {
     const app = buildApp(harness!.db, { agent: true });
     const res = await app.request("/capabilities/github.pr.comment/invoke", invokeReq({}));
     expect(res.status).toBe(403);
-    // Must NOT be a 500 (the pre-fix escape).
+    // Validation failures must remain client errors, never 500s.
     expect(res.status).not.toBe(500);
   });
 
@@ -597,6 +597,74 @@ describe("invoke: body parsing", () => {
     });
     expect(res.status).toBe(400);
   });
+
+  test("unknown invoke envelope field => 400 (not silently ignored)", async () => {
+    await seedCapabilityWithGrant();
+    currentPolicySet = [capRule("r1", "allow")];
+    const app = buildApp(harness!.db, { agent: true });
+    const res = await app.request(
+      "/capabilities/github.pr.comment/invoke",
+      invokeReq({ queries: { account: "primary" } }),
+    );
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toContain("unknown field");
+  });
+
+  for (const [label, query] of [
+    ["array", [["account", "primary"]]],
+    ["scalar", "account=primary"],
+    ["non-string selector value", { account: 7 }],
+  ] as const) {
+    test(`query ${label} => 400 (never coerced through URLSearchParams)`, async () => {
+      await seedCapabilityWithGrant();
+      currentPolicySet = [capRule("r1", "allow")];
+      const app = buildApp(harness!.db, { agent: true });
+      const res = await app.request("/capabilities/github.pr.comment/invoke", invokeReq({ query }));
+      expect(res.status).toBe(400);
+      expect(((await res.json()) as { error: string }).error).toContain("query selectors");
+    });
+  }
+
+  for (const [label, query] of [
+    ["overlong key", { ["k".repeat(129)]: "value" }],
+    ["overlong value", { cursor: "x".repeat(2_049) }],
+    [
+      "too many selectors",
+      Object.fromEntries(Array.from({ length: 33 }, (_, index) => [`selector_${index}`, "x"])),
+    ],
+  ] as const) {
+    test(`${label} => 400 before delegation`, async () => {
+      await seedCapabilityWithGrant();
+      currentPolicySet = [capRule("r1", "allow")];
+      const app = buildApp(harness!.db, { agent: true });
+      const res = await app.request("/capabilities/github.pr.comment/invoke", invokeReq({ query }));
+      expect(res.status).toBe(400);
+    });
+  }
+
+  test("args/query selector mismatch => 400 instead of authorizing one resource and forwarding another", async () => {
+    await seedCapabilityWithGrant();
+    currentPolicySet = [capRule("r1", "allow", { argEquals: { account: "primary" } })];
+    const app = buildApp(harness!.db, { agent: true });
+    const res = await app.request(
+      "/capabilities/github.pr.comment/invoke",
+      invokeReq({ args: { account: "primary" }, query: { account: "secondary" } }),
+    );
+    expect(res.status).toBe(400);
+  });
+
+  test("query-only selector is bound into capability-intent args", async () => {
+    await seedCapabilityWithGrant();
+    currentPolicySet = [capRule("r1", "allow", { argEquals: { account: "primary" } })];
+    const app = buildApp(harness!.db, { agent: true });
+    const res = await app.request(
+      "/capabilities/github.pr.comment/invoke",
+      invokeReq({ query: { account: "primary" } }),
+    );
+    // The selector satisfied argEquals, so authorization reached the expected
+    // missing-proxy-env boundary instead of default-denying with 403.
+    expect(res.status).toBe(503);
+  });
 });
 
 describe("invoke: allow-rule constraints", () => {
@@ -652,16 +720,16 @@ describe("invoke: rate limit (count from invocations table)", () => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// PR4 governed-route plugin gate (spec §5.2, X1, P03/P04). A governed_v2 route/
+// Governed-route plugin gate. A governed_v2 route/
 // operation must NOT be invokable through the capability alias or the OpenAI-
 // compat adapter: the plugin's URLSearchParams path (G4) cannot faithfully
 // represent a governed action's duplicate-query semantics, and governed actions
-// must go through /v2/provider-actions (PR2), never a minted proxy token. When
+// must go through /v2/provider-actions, never a minted proxy token. When
 // the resolved capability maps to a governed route, the plugin denies with
 // GOVERNED_ROUTE_PLUGIN_DENIED (403) and never mints a proxy token — even when
 // the policy ALLOWS and the proxy env is present.
 // ─────────────────────────────────────────────────────────────────────────────
-describe("invoke: PR4 governed-route plugin gate (§5.2, X1)", () => {
+describe("invoke: governed-route plugin gate", () => {
   // The gate fires AFTER authorization (so we prove it blocks an otherwise-
   // allowed forward) but BEFORE any proxy mint. Set the proxy env so, absent the
   // gate, an allowed rule would have proceeded to a mint/forward (=> not 403).

@@ -71,6 +71,7 @@ import {
   getIdentityJwtIssuer,
   getProviderConfig,
   hashSha256Hex,
+  IdentityJwtConfigurationError,
   InMemoryRecoveryCodeStore,
   isBuiltInProvider,
   isDevSecretAllowed,
@@ -111,18 +112,20 @@ import {
 import {
   accounts,
   authenticators,
+  getDatabaseDriver,
   getDb,
+  hasTenantTransactionDatabase,
   refreshTokens,
   type TenantEmailConfig,
-  tenantAppClients,
-  tenantConfigs,
+  tenantContextFromAuthenticatedPrincipal,
   tenantSamlAssertionReplays,
   tenantSamlAuthnRequests,
   tenantSamlSsoConfigs,
-  tenantSsoDomains,
   tenants,
   users,
   userTenants,
+  withTenantRlsTransaction,
+  withTenantTransactionDatabase,
 } from "@stwd/db";
 import {
   type ApiResponse,
@@ -163,6 +166,47 @@ import { dispatchWebhook } from "../services/webhook-dispatch";
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 const _DEFAULT_TENANT_ID = process.env.STEWARD_DEFAULT_TENANT_ID || "default";
+
+async function withVerifiedAuthTenant<T>(
+  tenantId: string,
+  subject: string,
+  callback: () => Promise<T>,
+): Promise<T> {
+  if (hasTenantTransactionDatabase({ tenantId, userId: subject })) return callback();
+  const context = tenantContextFromAuthenticatedPrincipal({
+    tenantId,
+    method: "verified-auth-flow",
+    subject,
+    userId: subject,
+  });
+  const driver =
+    process.env.STEWARD_DB_MODE === "pglite" || process.env.STEWARD_PGLITE_MEMORY === "true"
+      ? "pglite"
+      : getDatabaseDriver();
+  return withTenantRlsTransaction(getDb() as never, driver, context, async (tx) =>
+    withTenantTransactionDatabase(tx as never, { tenantId, userId: subject }, callback),
+  );
+}
+
+async function withPreAuthTenant<T>(
+  tenantId: string,
+  method: string,
+  callback: () => Promise<T>,
+): Promise<T> {
+  if (hasTenantTransactionDatabase({ tenantId })) return callback();
+  const context = tenantContextFromAuthenticatedPrincipal({
+    tenantId,
+    method,
+    subject: "public-auth-flow",
+  });
+  const driver =
+    process.env.STEWARD_DB_MODE === "pglite" || process.env.STEWARD_PGLITE_MEMORY === "true"
+      ? "pglite"
+      : getDatabaseDriver();
+  return withTenantRlsTransaction(getDb() as never, driver, context, async (tx) =>
+    withTenantTransactionDatabase(tx as never, { tenantId }, callback),
+  );
+}
 
 function isValidTenantId(value: unknown): value is string {
   return typeof value === "string" && /^[a-zA-Z0-9_\-.:]{1,64}$/.test(value);
@@ -604,11 +648,7 @@ async function clearTotpVerifyFailures(scope: string): Promise<void> {
 }
 
 async function getTenantAuthAbuseConfig(tenantId: string) {
-  const [row] = await getDb()
-    .select({ authAbuseConfig: tenantConfigs.authAbuseConfig })
-    .from(tenantConfigs)
-    .where(eq(tenantConfigs.tenantId, tenantId));
-  return row?.authAbuseConfig ?? {};
+  return (await authTenantConfigSubject(tenantId))?.auth_abuse_config ?? {};
 }
 
 function validateUserAuthAbusePolicy(
@@ -632,17 +672,10 @@ async function getTenantAppClientLoginMethods(
 ): Promise<TenantAuthAbuseConfig["loginMethods"] | undefined> {
   const normalizedClientId = normalizePublicClientId(clientId);
   if (!normalizedClientId) return undefined;
-  const [row] = await getDb()
-    .select({ loginMethods: tenantAppClients.loginMethods })
-    .from(tenantAppClients)
-    .where(
-      and(
-        eq(tenantAppClients.tenantId, tenantId),
-        eq(tenantAppClients.id, normalizedClientId),
-        eq(tenantAppClients.enabled, true),
-      ),
-    );
-  return (row?.loginMethods as TenantAuthAbuseConfig["loginMethods"] | undefined) ?? undefined;
+  const row = (await authAppClientSubjects(tenantId)).find(
+    (client) => client.id === normalizedClientId,
+  );
+  return (row?.login_methods as TenantAuthAbuseConfig["loginMethods"] | undefined) ?? undefined;
 }
 
 type LoginMethodName =
@@ -696,18 +729,11 @@ async function requireTenantLoginMethodAllowed(
 async function isSsoRequiredForEmailDomain(tenantId: string, email: string): Promise<boolean> {
   const domain = normalizeEmailDomain(email);
   if (!domain) return false;
-  const [row] = await getDb()
-    .select({ ssoRequired: tenantSsoDomains.ssoRequired })
-    .from(tenantSsoDomains)
-    .where(
-      and(
-        eq(tenantSsoDomains.tenantId, tenantId),
-        eq(tenantSsoDomains.domain, domain),
-        eq(tenantSsoDomains.status, "verified"),
-      ),
-    )
-    .limit(1);
-  return row?.ssoRequired === true;
+  const result = await getDb().execute(
+    sql`SELECT * FROM steward_bootstrap.auth_sso_domain_subject(${tenantId}, ${domain})`,
+  );
+  const [row] = bootstrapRows<{ sso_required: boolean }>(result);
+  return row?.sso_required === true;
 }
 
 async function requireNonSsoEmailLoginAllowed(
@@ -729,26 +755,68 @@ async function isVerifiedSsoEmailDomainForTenant(
 ): Promise<boolean> {
   const domain = normalizeEmailDomain(email);
   if (!domain) return false;
-  const [row] = await getDb()
-    .select({ tenantId: tenantSsoDomains.tenantId })
-    .from(tenantSsoDomains)
-    .where(
-      and(
-        eq(tenantSsoDomains.tenantId, tenantId),
-        eq(tenantSsoDomains.domain, domain),
-        eq(tenantSsoDomains.status, "verified"),
-      ),
-    )
-    .limit(1);
+  const result = await getDb().execute(
+    sql`SELECT * FROM steward_bootstrap.auth_sso_domain_subject(${tenantId}, ${domain})`,
+  );
+  const [row] = bootstrapRows<{ tenant_id: string }>(result);
   return Boolean(row);
 }
 
+function bootstrapRows<T>(result: unknown): T[] {
+  return (
+    Array.isArray(result) ? result : ((result as { rows?: unknown[] } | null)?.rows ?? [])
+  ) as T[];
+}
+
+type AuthTenantSubject = {
+  tenant_id: string;
+  membership_role: string | null;
+  join_mode: string | null;
+};
+
+type AuthTenantConfigSubject = {
+  auth_abuse_config: TenantAuthAbuseConfig;
+  allowed_origins: string[];
+  email_config: TenantEmailConfig | null;
+  oidc_providers: unknown;
+  test_account: TenantTestAccountConfig;
+  allowed_redirect_urls: string[];
+};
+
+type AuthAppClientSubject = {
+  id: string;
+  allowed_redirect_urls: string[];
+  login_methods: TenantAuthAbuseConfig["loginMethods"] | null;
+  allowed_bundle_ids: string[];
+  allowed_package_names: string[];
+};
+
+async function authTenantConfigSubject(tenantId: string): Promise<AuthTenantConfigSubject | null> {
+  const result = await getDb().execute(
+    sql`SELECT * FROM steward_bootstrap.auth_tenant_config_subject(${tenantId})`,
+  );
+  return bootstrapRows<AuthTenantConfigSubject>(result)[0] ?? null;
+}
+
+async function authAppClientSubjects(tenantId: string): Promise<AuthAppClientSubject[]> {
+  const result = await getDb().execute(
+    sql`SELECT * FROM steward_bootstrap.auth_app_clients_subject(${tenantId})`,
+  );
+  return bootstrapRows<AuthAppClientSubject>(result);
+}
+
+async function authTenantSubject(
+  tenantId: string,
+  userId?: string | null,
+): Promise<AuthTenantSubject | null> {
+  const result = await getDb().execute(
+    sql`SELECT * FROM steward_bootstrap.auth_tenant_subject(${tenantId}, ${userId ?? null}::uuid)`,
+  );
+  return bootstrapRows<AuthTenantSubject>(result)[0] ?? null;
+}
+
 async function tenantExists(tenantId: string): Promise<boolean> {
-  const [row] = await getDb()
-    .select({ id: tenants.id })
-    .from(tenants)
-    .where(eq(tenants.id, tenantId));
-  return Boolean(row);
+  return Boolean(await authTenantSubject(tenantId));
 }
 
 async function validateExplicitAuthTenantHint(
@@ -787,15 +855,17 @@ export async function createSessionToken(
 }
 
 async function isActiveTenantMember(userId: string, tenantId: string): Promise<boolean> {
-  const [row] = await getDb()
-    .select({ userId: users.id })
-    .from(users)
-    .innerJoin(
-      userTenants,
-      and(eq(userTenants.userId, users.id), eq(userTenants.tenantId, tenantId)),
-    )
-    .where(and(eq(users.id, userId), sql`${users.deactivatedAt} is null`));
-  return Boolean(row);
+  return withVerifiedAuthTenant(tenantId, userId, async () => {
+    const [row] = await getDb()
+      .select({ userId: users.id })
+      .from(users)
+      .innerJoin(
+        userTenants,
+        and(eq(userTenants.userId, users.id), eq(userTenants.tenantId, tenantId)),
+      )
+      .where(and(eq(users.id, userId), sql`${users.deactivatedAt} is null`));
+    return Boolean(row);
+  });
 }
 
 async function buildIdentityClaims(
@@ -813,30 +883,30 @@ async function buildIdentityClaims(
   walletChain: string | null;
   customMetadata: Record<string, unknown>;
 }> {
-  const db = getDb();
-  const [user] = await db.select().from(users).where(eq(users.id, userId));
-  if (!user) throw new Error("User not found");
+  return withVerifiedAuthTenant(tenantId, userId, async () => {
+    const db = getDb();
+    const [user] = await db.select().from(users).where(eq(users.id, userId));
+    if (!user) throw new Error("User not found");
 
-  const [tenantMembership] = await db
-    .select({ customMetadata: userTenants.customMetadata })
-    .from(userTenants)
-    .where(and(eq(userTenants.userId, userId), eq(userTenants.tenantId, tenantId)));
-  if (!tenantMembership) {
-    throw new Error("Not a member of this tenant");
-  }
+    const [tenantMembership] = await db
+      .select({ customMetadata: userTenants.customMetadata })
+      .from(userTenants)
+      .where(and(eq(userTenants.userId, userId), eq(userTenants.tenantId, tenantId)));
+    if (!tenantMembership) throw new Error("Not a member of this tenant");
 
-  return {
-    sub: user.id,
-    userId: user.id,
-    tenantId,
-    email: user.email,
-    emailVerified: user.emailVerified,
-    name: user.name,
-    image: user.image,
-    walletAddress: user.walletAddress,
-    walletChain: user.walletChain,
-    customMetadata: tenantMembership.customMetadata ?? {},
-  };
+    return {
+      sub: user.id,
+      userId: user.id,
+      tenantId,
+      email: user.email,
+      emailVerified: user.emailVerified,
+      name: user.name,
+      image: user.image,
+      walletAddress: user.walletAddress,
+      walletChain: user.walletChain,
+      customMetadata: tenantMembership.customMetadata ?? {},
+    };
+  });
 }
 
 function tenantIdentityJwtIssuer(tenantId: string): string {
@@ -881,20 +951,22 @@ async function createRefreshToken(
   tenantId: string,
   sessionClaims?: Record<string, unknown>,
 ): Promise<string> {
-  const db = getDb();
-  const raw = randomBytes(40).toString("hex");
-  const id = randomBytes(16).toString("hex");
-  const tokenHash = hashToken(raw);
-  const expiresAt = new Date(Date.now() + REFRESH_TOKEN_EXPIRY_DAYS * 86400 * 1000);
-  await db.insert(refreshTokens).values({ id, userId, tenantId, tokenHash, expiresAt });
-  if (sessionClaims && Object.keys(sessionClaims).length > 0) {
-    await writeMfaJson(
-      `refresh:claims:${tokenHash}`,
-      sessionClaims,
-      REFRESH_TOKEN_EXPIRY_DAYS * 86400 * 1000,
-    );
-  }
-  return raw;
+  return withVerifiedAuthTenant(tenantId, userId, async () => {
+    const db = getDb();
+    const raw = randomBytes(40).toString("hex");
+    const id = randomBytes(16).toString("hex");
+    const tokenHash = hashToken(raw);
+    const expiresAt = new Date(Date.now() + REFRESH_TOKEN_EXPIRY_DAYS * 86400 * 1000);
+    await db.insert(refreshTokens).values({ id, userId, tenantId, tokenHash, expiresAt });
+    if (sessionClaims && Object.keys(sessionClaims).length > 0) {
+      await writeMfaJson(
+        `refresh:claims:${tokenHash}`,
+        sessionClaims,
+        REFRESH_TOKEN_EXPIRY_DAYS * 86400 * 1000,
+      );
+    }
+    return raw;
+  });
 }
 
 type RefreshRotationResult =
@@ -936,6 +1008,29 @@ async function rotateRefreshTokenForUserSession(
   raw: string,
   requestedTenantId?: string,
 ): Promise<RefreshRotationResult> {
+  const tokenHash = hashToken(raw);
+  const result = await getDb().execute(sql`
+    SELECT user_id, tenant_id
+    FROM steward_bootstrap.auth_refresh_subject(${tokenHash})
+  `);
+  const [subject] = (
+    Array.isArray(result) ? result : ((result as { rows?: unknown[] }).rows ?? [])
+  ) as Array<{ user_id: string; tenant_id: string }> | [];
+  const used = subject
+    ? null
+    : await readMfaJson<UsedRefreshTokenRecord>(`refresh:used:${tokenHash}`);
+  const tenantId = subject?.tenant_id ?? used?.tenantId;
+  const userId = subject?.user_id ?? used?.userId;
+  if (!tenantId || !userId) return { status: "invalid" };
+  return withVerifiedAuthTenant(tenantId, userId, () =>
+    rotateRefreshTokenInsideTenant(raw, requestedTenantId),
+  );
+}
+
+async function rotateRefreshTokenInsideTenant(
+  raw: string,
+  requestedTenantId?: string,
+): Promise<RefreshRotationResult> {
   const db = getDb();
   const now = new Date();
   const tokenHash = hashToken(raw);
@@ -969,7 +1064,8 @@ async function rotateRefreshTokenForUserSession(
       sql`select pg_advisory_xact_lock(hashtextextended(${`refresh_token_${tokenHash}`}, 0))`,
     );
     const [record] = await tx
-      .delete(refreshTokens)
+      .select()
+      .from(refreshTokens)
       .where(
         and(
           eq(refreshTokens.tokenHash, tokenHash),
@@ -977,7 +1073,7 @@ async function rotateRefreshTokenForUserSession(
           gte(refreshTokens.expiresAt, now),
         ),
       )
-      .returning();
+      .for("update");
 
     if (!record) {
       const used = await readMfaJson<UsedRefreshTokenRecord>(`refresh:used:${tokenHash}`);
@@ -995,12 +1091,6 @@ async function rotateRefreshTokenForUserSession(
       return { status: "invalid" };
     }
 
-    await writeMfaJson(
-      `refresh:used:${tokenHash}`,
-      { userId: record.userId, tenantId: record.tenantId },
-      REFRESH_TOKEN_EXPIRY_DAYS * 86400 * 1000,
-    );
-
     const [user] = await tx.select().from(users).where(eq(users.id, record.userId)).for("update");
     if (user?.deactivatedAt) {
       await tx.delete(refreshTokens).where(eq(refreshTokens.userId, record.userId));
@@ -1008,12 +1098,8 @@ async function rotateRefreshTokenForUserSession(
     }
 
     const targetTenantId = requestedTenantId ?? record.tenantId;
-    const [membership] = await tx
-      .select({ id: userTenants.id })
-      .from(userTenants)
-      .where(and(eq(userTenants.userId, record.userId), eq(userTenants.tenantId, targetTenantId)))
-      .for("update");
-    if (!membership) {
+    const membership = await authTenantSubject(targetTenantId, record.userId);
+    if (!membership?.membership_role) {
       await tx
         .delete(refreshTokens)
         .where(
@@ -1042,13 +1128,17 @@ async function rotateRefreshTokenForUserSession(
 
     const newRefreshToken = randomBytes(40).toString("hex");
     const newRefreshTokenHash = hashToken(newRefreshToken);
-    await tx.insert(refreshTokens).values({
-      id: randomBytes(16).toString("hex"),
-      userId: record.userId,
-      tenantId: targetTenantId,
-      tokenHash: newRefreshTokenHash,
-      expiresAt: new Date(Date.now() + REFRESH_TOKEN_EXPIRY_DAYS * 86400 * 1000),
-    });
+    const successorId = randomBytes(16).toString("hex");
+    const successorExpiresAt = new Date(Date.now() + REFRESH_TOKEN_EXPIRY_DAYS * 86400 * 1000);
+    const rotated = bootstrapRows<{ id: string }>(
+      await tx.execute(sql`
+        SELECT * FROM steward_bootstrap.auth_rotate_refresh_token(
+          ${tokenHash}, ${targetTenantId}, ${successorId},
+          ${newRefreshTokenHash}, ${successorExpiresAt}
+        )
+      `),
+    );
+    if (rotated.length !== 1) return { status: "invalid" };
     // Keep a bounded predecessor link so a concurrent single-session revoke
     // that started with the just-spent token can delete its rotated successor
     // after acquiring the same user/advisory locks. Otherwise refresh can win
@@ -1925,13 +2015,7 @@ function parseEncryptedEmailApiKey(value: string): {
 }
 
 async function loadTenantEmailConfig(tenantId: string): Promise<TenantEmailConfig | null> {
-  const db = getDb();
-  const [row] = await db
-    .select({ emailConfig: tenantConfigs.emailConfig })
-    .from(tenantConfigs)
-    .where(eq(tenantConfigs.tenantId, tenantId));
-
-  return row?.emailConfig ?? null;
+  return (await authTenantConfigSubject(tenantId))?.email_config ?? null;
 }
 
 async function createEmailAuthForTenant(tenantId: string): Promise<EmailAuth> {
@@ -2105,34 +2189,18 @@ async function resolveAndValidateTenant(
     return { ok: false, status: 403, error: "Personal tenants cannot be self-joined" };
   }
 
-  const db = getDb();
-
-  // 1. Verify the tenant exists
-  const [tenant] = await db
-    .select({ id: tenants.id })
-    .from(tenants)
-    .where(eq(tenants.id, requested));
-  if (!tenant) {
+  const subject = await authTenantSubject(requested, userId);
+  if (!subject) {
     return { ok: false, status: 404, error: `Tenant '${requested}' not found` };
   }
 
   // 2. Check if user already has a link (always allowed regardless of join_mode)
-  const [existingLink] = await db
-    .select({ id: userTenants.id })
-    .from(userTenants)
-    .where(and(eq(userTenants.userId, userId), eq(userTenants.tenantId, requested)));
-
-  if (existingLink) {
+  if (subject.membership_role) {
     return { ok: true, tenantId: requested, isPersonal: false };
   }
 
   // 3. No existing link; check join_mode from tenant_configs
-  const [config] = await db
-    .select({ joinMode: tenantConfigs.joinMode })
-    .from(tenantConfigs)
-    .where(eq(tenantConfigs.tenantId, requested));
-
-  const joinMode = config?.joinMode;
+  const joinMode = subject.join_mode;
 
   if (joinMode === "open") {
     return { ok: true, tenantId: requested, isPersonal: false };
@@ -2196,28 +2264,20 @@ async function resolveEmailTenantBeforeMutation(
     return { ok: false, status: 403, error: "Personal tenants cannot be self-joined" };
   }
 
-  const db = getDb();
-  const [tenant] = await db
-    .select({ id: tenants.id })
-    .from(tenants)
-    .where(eq(tenants.id, requestedTenantId));
-  if (!tenant) {
+  const subject = await authTenantSubject(requestedTenantId);
+  if (!subject) {
     return { ok: false, status: 404, error: `Tenant '${requestedTenantId}' not found` };
   }
-  const [config] = await db
-    .select({ joinMode: tenantConfigs.joinMode })
-    .from(tenantConfigs)
-    .where(eq(tenantConfigs.tenantId, requestedTenantId));
-  if (config?.joinMode === "open") {
+  if (subject.join_mode === "open") {
     return { ok: true, tenantId: requestedTenantId, isPersonal: false };
   }
   return {
     ok: false,
     status: 403,
     error:
-      config?.joinMode === "closed"
+      subject.join_mode === "closed"
         ? `Tenant '${requestedTenantId}' is not accepting new members`
-        : config?.joinMode === "invite"
+        : subject.join_mode === "invite"
           ? `Tenant '${requestedTenantId}' requires an invitation to join`
           : `Tenant '${requestedTenantId}' is not configured for self-join`,
   };
@@ -2575,14 +2635,15 @@ function verifySolanaMessageSignature(
  * the user's provisioned wallet agent (wallet always lives under personal tenant).
  */
 async function ensurePersonalTenant(userId: string, displayName: string): Promise<string> {
-  const db = getDb();
   const tenantId = `personal-${userId}`;
-  const { hash } = generateApiKey();
-  await db
-    .insert(tenants)
-    .values({ id: tenantId, name: displayName, apiKeyHash: hash })
-    .onConflictDoNothing();
-  return tenantId;
+  return withVerifiedAuthTenant(tenantId, userId, async () => {
+    const { hash } = generateApiKey();
+    await getDb()
+      .insert(tenants)
+      .values({ id: tenantId, name: displayName, apiKeyHash: hash })
+      .onConflictDoNothing();
+    return tenantId;
+  });
 }
 
 /**
@@ -2595,8 +2656,9 @@ async function ensureUserTenantLink(
   tenantId: string,
   role: string = "member",
 ): Promise<void> {
-  const db = getDb();
-  await db.insert(userTenants).values({ userId, tenantId, role }).onConflictDoNothing();
+  await withVerifiedAuthTenant(tenantId, userId, async () => {
+    await getDb().insert(userTenants).values({ userId, tenantId, role }).onConflictDoNothing();
+  });
 }
 
 /**
@@ -2609,20 +2671,21 @@ async function provisionWalletForUser(
   userId: string,
   email: string,
 ): Promise<{ walletAddress: string; personalTenantId: string }> {
-  const personalTenantId = await ensurePersonalTenant(userId, email);
-  const vault = getVault();
-  const result = await provisionUserWallet(vault, userId, email, personalTenantId);
-  const db = getDb();
-  await db
-    .update(users)
-    .set({
-      walletAddress: result.walletAddress,
-      stewardWalletId: result.agentId,
-    })
-    .where(eq(users.id, userId));
-  // Also link user to their personal tenant
-  await ensureUserTenantLink(userId, personalTenantId, "owner");
-  return { walletAddress: result.walletAddress, personalTenantId };
+  const personalTenantId = `personal-${userId}`;
+  return withVerifiedAuthTenant(personalTenantId, userId, async () => {
+    await ensurePersonalTenant(userId, email);
+    const vault = getVault();
+    const result = await provisionUserWallet(vault, userId, email, personalTenantId);
+    await getDb()
+      .update(users)
+      .set({
+        walletAddress: result.walletAddress,
+        stewardWalletId: result.agentId,
+      })
+      .where(eq(users.id, userId));
+    await ensureUserTenantLink(userId, personalTenantId, "owner");
+    return { walletAddress: result.walletAddress, personalTenantId };
+  });
 }
 
 // ─── Request body helper ──────────────────────────────────────────────────────
@@ -2784,12 +2847,8 @@ async function requiredTelegramOriginHostFromRequest(
     return getAllowedSiweDomains().includes(originHost) ? originHost : null;
   }
 
-  const [row] = await getDb()
-    .select({ allowedOrigins: tenantConfigs.allowedOrigins })
-    .from(tenantConfigs)
-    .where(eq(tenantConfigs.tenantId, tenantId));
-
-  for (const allowedOrigin of row?.allowedOrigins ?? []) {
+  const config = await authTenantConfigSubject(tenantId);
+  for (const allowedOrigin of config?.allowed_origins ?? []) {
     if (allowedOrigin.trim() === "*") continue;
     try {
       if (new URL(allowedOrigin).host.toLowerCase() === originHost) return originHost;
@@ -3258,22 +3317,14 @@ function deviceUserCodeKey(userCode: string): string {
 }
 
 async function getEnabledTenantAppClient(tenantId: string, clientId: string) {
-  const [client] = await getDb()
-    .select({
-      id: tenantAppClients.id,
-      allowedBundleIds: tenantAppClients.allowedBundleIds,
-      allowedPackageNames: tenantAppClients.allowedPackageNames,
-    })
-    .from(tenantAppClients)
-    .where(
-      and(
-        eq(tenantAppClients.tenantId, tenantId),
-        eq(tenantAppClients.id, clientId),
-        eq(tenantAppClients.enabled, true),
-      ),
-    )
-    .limit(1);
-  return client ?? null;
+  const client = (await authAppClientSubjects(tenantId)).find((row) => row.id === clientId);
+  return client
+    ? {
+        id: client.id,
+        allowedBundleIds: client.allowed_bundle_ids,
+        allowedPackageNames: client.allowed_package_names,
+      }
+    : null;
 }
 
 function normalizeNativeBundleId(value: unknown): string | null {
@@ -3450,15 +3501,11 @@ async function readDeviceAuthorizationRecordByUserCode(
 }
 
 async function getTenantOidcProviders(tenantId: string): Promise<TenantOidcProviderConfig[]> {
-  const db = getDb();
-  const [row] = await db
-    .select({ oidcProviders: tenantConfigs.oidcProviders })
-    .from(tenantConfigs)
-    .where(eq(tenantConfigs.tenantId, tenantId));
+  const config = await authTenantConfigSubject(tenantId);
   // Revalidate persisted JSON on every trust-boundary read. Older rows can
   // predate write-time validation; treating their TypeScript cast as trusted
   // would re-enable unsafe algorithms or malformed endpoint configuration.
-  const normalized = normalizeOidcProviders(row?.oidcProviders ?? [], tenantId);
+  const normalized = normalizeOidcProviders(config?.oidc_providers ?? [], tenantId);
   return typeof normalized === "string" ? [] : normalized;
 }
 
@@ -3483,26 +3530,17 @@ async function validateOidcJitTenant(tenantId: string): Promise<
   if (isReservedTenantId(tenantId)) {
     return { ok: false, status: 403, error: "Personal tenants cannot be self-joined" };
   }
-  const db = getDb();
-  const [tenant] = await db
-    .select({ id: tenants.id })
-    .from(tenants)
-    .where(eq(tenants.id, tenantId));
-  if (!tenant) return { ok: false, status: 404, error: `Tenant '${tenantId}' not found` };
-
-  const [config] = await db
-    .select({ joinMode: tenantConfigs.joinMode })
-    .from(tenantConfigs)
-    .where(eq(tenantConfigs.tenantId, tenantId));
-  if (config?.joinMode === "open") return { ok: true };
-  if (!config?.joinMode) {
+  const subject = await authTenantSubject(tenantId);
+  if (!subject) return { ok: false, status: 404, error: `Tenant '${tenantId}' not found` };
+  if (subject.join_mode === "open") return { ok: true };
+  if (!subject.join_mode) {
     return {
       ok: false,
       status: 403,
       error: `Tenant '${tenantId}' is not configured for self-join`,
     };
   }
-  if (config.joinMode === "invite") {
+  if (subject.join_mode === "invite") {
     return {
       ok: false,
       status: 403,
@@ -3623,12 +3661,6 @@ async function provisionOidcUser(opts: {
       return { ok: false, status: 500, error: "Wallet provisioning failed" };
     }
     const verifiedEmail = emailVerified === true ? email : undefined;
-    if (createdUser) {
-      dispatchUserCreated(tenantResult.tenantId, user.id, "auth.oidc", {
-        provider: provider.id,
-        hasEmail: Boolean(verifiedEmail),
-      });
-    }
     const claims: Record<string, unknown> = {
       userId: user.id,
       oidcProviderId: provider.id,
@@ -3638,20 +3670,28 @@ async function provisionOidcUser(opts: {
     };
     if (verifiedEmail) claims.email = verifiedEmail;
 
-    await writeAuditEvent({
-      tenantId: tenantResult.tenantId,
-      actorType: "user",
-      actorId: user.id,
-      action: "auth.oidc.login",
-      resourceType: "user",
-      metadata: {
-        providerId: provider.id,
-        issuer: provider.issuer,
-        oidcSubject: subject,
-      },
-      ipAddress: c.req.header("x-forwarded-for") ?? null,
-      userAgent: c.req.header("user-agent") ?? null,
-      requestId: c.get("requestId") ?? null,
+    await withVerifiedAuthTenant(tenantResult.tenantId, user.id, async () => {
+      if (createdUser) {
+        dispatchUserCreated(tenantResult.tenantId, user.id, "auth.oidc", {
+          provider: provider.id,
+          hasEmail: Boolean(verifiedEmail),
+        });
+      }
+      await writeAuditEvent({
+        tenantId: tenantResult.tenantId,
+        actorType: "user",
+        actorId: user.id,
+        action: "auth.oidc.login",
+        resourceType: "user",
+        metadata: {
+          providerId: provider.id,
+          issuer: provider.issuer,
+          oidcSubject: subject,
+        },
+        ipAddress: c.req.header("x-forwarded-for") ?? null,
+        userAgent: c.req.header("user-agent") ?? null,
+        requestId: c.get("requestId") ?? null,
+      });
     });
 
     return {
@@ -3769,21 +3809,23 @@ async function provisionSamlUser(opts: {
       return { ok: false, status: 500, error: "Wallet provisioning failed" };
     }
 
-    if (createdUser) {
-      dispatchUserCreated(tenantResult.tenantId, user.id, "auth.saml", {
-        idpEntityId: config.idpEntityId,
+    await withVerifiedAuthTenant(tenantResult.tenantId, user.id, async () => {
+      if (createdUser) {
+        dispatchUserCreated(tenantResult.tenantId, user.id, "auth.saml", {
+          idpEntityId: config.idpEntityId,
+        });
+      }
+      await writeAuditEvent({
+        tenantId: tenantResult.tenantId,
+        actorType: "user",
+        actorId: user.id,
+        action: "auth.saml.login",
+        resourceType: "user",
+        metadata: { idpEntityId: config.idpEntityId },
+        ipAddress: c.req.header("x-forwarded-for") ?? null,
+        userAgent: c.req.header("user-agent") ?? null,
+        requestId: c.get("requestId") ?? null,
       });
-    }
-    await writeAuditEvent({
-      tenantId: tenantResult.tenantId,
-      actorType: "user",
-      actorId: user.id,
-      action: "auth.saml.login",
-      resourceType: "user",
-      metadata: { idpEntityId: config.idpEntityId },
-      ipAddress: c.req.header("x-forwarded-for") ?? null,
-      userAgent: c.req.header("user-agent") ?? null,
-      requestId: c.get("requestId") ?? null,
     });
 
     return {
@@ -4021,19 +4063,23 @@ auth.post("/sso/discover", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: "Valid email is required" }, 400);
   }
 
-  const rows = await getDb()
-    .select({
-      tenantId: tenantSsoDomains.tenantId,
-      domain: tenantSsoDomains.domain,
-      ssoRequired: tenantSsoDomains.ssoRequired,
-    })
-    .from(tenantSsoDomains)
-    .where(and(eq(tenantSsoDomains.domain, domain), eq(tenantSsoDomains.status, "verified")))
-    .limit(2);
+  const result = await getDb().execute(
+    sql`SELECT * FROM steward_bootstrap.auth_sso_discovery_subject(${domain})`,
+  );
+  const rows = bootstrapRows<{
+    tenant_id: string;
+    domain: string;
+    sso_required: boolean;
+  }>(result);
 
   const data: SsoDiscoveryResult =
     rows.length === 1
-      ? { domain, tenantId: rows[0].tenantId, ssoRequired: rows[0].ssoRequired, available: true }
+      ? {
+          domain,
+          tenantId: rows[0].tenant_id,
+          ssoRequired: rows[0].sso_required,
+          available: true,
+        }
       : { domain, tenantId: null, ssoRequired: false, available: false };
   return c.json<ApiResponse<SsoDiscoveryResult>>({ ok: true, data });
 });
@@ -4063,16 +4109,19 @@ function samlMetadataXml(config: TenantSamlSsoConfig): string {
 }
 
 async function getActiveSamlSsoConfig(tenantId: string): Promise<TenantSamlSsoConfig | null> {
-  const [row] = await getDb()
-    .select()
-    .from(tenantSamlSsoConfigs)
-    .where(
-      and(
-        eq(tenantSamlSsoConfigs.tenantId, tenantId),
-        eq(tenantSamlSsoConfigs.enabled, true),
-        eq(tenantSamlSsoConfigs.status, "active"),
-      ),
-    );
+  const row = await withPreAuthTenant(tenantId, "saml-config-read", async () => {
+    const [candidate] = await getDb()
+      .select()
+      .from(tenantSamlSsoConfigs)
+      .where(
+        and(
+          eq(tenantSamlSsoConfigs.tenantId, tenantId),
+          eq(tenantSamlSsoConfigs.enabled, true),
+          eq(tenantSamlSsoConfigs.status, "active"),
+        ),
+      );
+    return candidate;
+  });
   if (!row) return null;
   const urls = buildSamlServiceProviderUrls(tenantId);
   if (row.spEntityId !== urls.spEntityId || row.acsUrl !== urls.acsUrl) return null;
@@ -4098,35 +4147,40 @@ async function getActiveSamlSsoConfig(tenantId: string): Promise<TenantSamlSsoCo
 }
 
 async function loadSamlAuthnRequest(tenantId: string, relayState: string) {
-  const [request] = await getDb()
-    .select()
-    .from(tenantSamlAuthnRequests)
-    .where(
-      and(
-        eq(tenantSamlAuthnRequests.tenantId, tenantId),
-        eq(tenantSamlAuthnRequests.relayState, relayState),
-        isNull(tenantSamlAuthnRequests.consumedAt),
-        gte(tenantSamlAuthnRequests.expiresAt, new Date()),
-      ),
-    );
+  const request = await withPreAuthTenant(tenantId, "saml-request-read", async () => {
+    const [candidate] = await getDb()
+      .select()
+      .from(tenantSamlAuthnRequests)
+      .where(
+        and(
+          eq(tenantSamlAuthnRequests.tenantId, tenantId),
+          eq(tenantSamlAuthnRequests.relayState, relayState),
+          isNull(tenantSamlAuthnRequests.consumedAt),
+          gte(tenantSamlAuthnRequests.expiresAt, new Date()),
+        ),
+      );
+    return candidate;
+  });
   if (!request) throw new Error("Invalid or expired SAML RelayState");
   return request;
 }
 
 async function consumeSamlAuthnRequest(tenantId: string, relayState: string) {
-  const db = getDb();
-  const [request] = await db
-    .update(tenantSamlAuthnRequests)
-    .set({ consumedAt: new Date(), updatedAt: new Date() })
-    .where(
-      and(
-        eq(tenantSamlAuthnRequests.tenantId, tenantId),
-        eq(tenantSamlAuthnRequests.relayState, relayState),
-        isNull(tenantSamlAuthnRequests.consumedAt),
-        gte(tenantSamlAuthnRequests.expiresAt, new Date()),
-      ),
-    )
-    .returning();
+  const request = await withPreAuthTenant(tenantId, "saml-request-consume", async () => {
+    const [candidate] = await getDb()
+      .update(tenantSamlAuthnRequests)
+      .set({ consumedAt: new Date(), updatedAt: new Date() })
+      .where(
+        and(
+          eq(tenantSamlAuthnRequests.tenantId, tenantId),
+          eq(tenantSamlAuthnRequests.relayState, relayState),
+          isNull(tenantSamlAuthnRequests.consumedAt),
+          gte(tenantSamlAuthnRequests.expiresAt, new Date()),
+        ),
+      )
+      .returning();
+    return candidate;
+  });
   if (!request) throw new Error("Invalid or expired SAML RelayState");
   return request;
 }
@@ -4136,14 +4190,16 @@ async function recordSamlAssertionReplay(
   assertionId: string,
   responseId: string | undefined,
 ): Promise<void> {
-  await getDb()
-    .insert(tenantSamlAssertionReplays)
-    .values({
-      tenantId,
-      assertionId,
-      responseId,
-      expiresAt: new Date(Date.now() + 10 * 60_000),
-    });
+  await withPreAuthTenant(tenantId, "saml-replay-record", async () => {
+    await getDb()
+      .insert(tenantSamlAssertionReplays)
+      .values({
+        tenantId,
+        assertionId,
+        responseId,
+        expiresAt: new Date(Date.now() + 10 * 60_000),
+      });
+  });
 }
 
 /**
@@ -4205,18 +4261,20 @@ auth.get("/saml/:tenantId/login", async (c) => {
     spEntityId: config.spEntityId,
     acsUrl: config.acsUrl,
   });
-  await getDb()
-    .insert(tenantSamlAuthnRequests)
-    .values({
-      tenantId,
-      requestId: built.requestId,
-      relayState,
-      redirectUri,
-      appClientId: clientId,
-      codeChallenge,
-      codeChallengeMethod: "S256",
-      expiresAt: new Date(Date.now() + 5 * 60_000),
-    });
+  await withPreAuthTenant(tenantId, "saml-request-create", async () => {
+    await getDb()
+      .insert(tenantSamlAuthnRequests)
+      .values({
+        tenantId,
+        requestId: built.requestId,
+        relayState,
+        redirectUri,
+        appClientId: clientId,
+        codeChallenge,
+        codeChallengeMethod: "S256",
+        expiresAt: new Date(Date.now() + 5 * 60_000),
+      });
+  });
 
   if (appState) {
     await getChallengeStore().set(`saml-app-state:${relayState}`, appState);
@@ -4828,21 +4886,23 @@ auth.post("/jwt/login", async (c) => {
             : "OIDC id_token is expired";
       return c.json<ApiResponse>({ ok: false, error }, 401);
     }
-    await writeAuditEvent({
-      tenantId,
-      actorType: "user",
-      actorId: null,
-      action: "auth.oidc.login.authorized",
-      resourceType: "session",
-      metadata: {
-        providerId: provider.id,
-        issuer: provider.issuer,
-        oidcSubject: verified.subject,
-      },
-      ipAddress: c.req.header("x-forwarded-for") ?? null,
-      userAgent: c.req.header("user-agent") ?? null,
-      requestId: c.get("requestId") ?? null,
-    });
+    await withPreAuthTenant(tenantId, "oidc-login-authorization-audit", () =>
+      writeAuditEvent({
+        tenantId,
+        actorType: "user",
+        actorId: null,
+        action: "auth.oidc.login.authorized",
+        resourceType: "session",
+        metadata: {
+          providerId: provider.id,
+          issuer: provider.issuer,
+          oidcSubject: verified.subject,
+        },
+        ipAddress: c.req.header("x-forwarded-for") ?? null,
+        userAgent: c.req.header("user-agent") ?? null,
+        requestId: c.get("requestId") ?? null,
+      }),
+    );
     if (!verified.email || verified.emailVerified !== true) {
       return c.json<ApiResponse>(
         { ok: false, error: "Enterprise OIDC SSO requires a verified email claim" },
@@ -5116,22 +5176,24 @@ auth.get("/oidc/:provider/callback", async (c) => {
     if (consumedPayload !== rawPayload) {
       return c.json<ApiResponse>({ ok: false, error: "Invalid or already-used OIDC state" }, 401);
     }
-    await writeAuditEvent({
-      tenantId: stateData.tenantId,
-      actorType: "user",
-      actorId: null,
-      action: "auth.oidc.login.authorized",
-      resourceType: "session",
-      metadata: {
-        providerId: provider.id,
-        issuer: provider.issuer,
-        oidcSubject: verified.subject,
-        flow: "authorization_code",
-      },
-      ipAddress: c.req.header("x-forwarded-for") ?? null,
-      userAgent: c.req.header("user-agent") ?? null,
-      requestId: c.get("requestId") ?? null,
-    });
+    await withPreAuthTenant(stateData.tenantId, "oidc-callback-authorization-audit", () =>
+      writeAuditEvent({
+        tenantId: stateData.tenantId,
+        actorType: "user",
+        actorId: null,
+        action: "auth.oidc.login.authorized",
+        resourceType: "session",
+        metadata: {
+          providerId: provider.id,
+          issuer: provider.issuer,
+          oidcSubject: verified.subject,
+          flow: "authorization_code",
+        },
+        ipAddress: c.req.header("x-forwarded-for") ?? null,
+        userAgent: c.req.header("user-agent") ?? null,
+        requestId: c.get("requestId") ?? null,
+      }),
+    );
     const result = await provisionOidcUser({
       c,
       tenantId: stateData.tenantId,
@@ -5281,11 +5343,7 @@ auth.post("/test/token", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: "tenantId is required" }, 400);
   }
 
-  const [row] = await getDb()
-    .select({ testAccount: tenantConfigs.testAccount })
-    .from(tenantConfigs)
-    .where(eq(tenantConfigs.tenantId, tenantId));
-  const testAccount = row?.testAccount;
+  const testAccount = (await authTenantConfigSubject(tenantId))?.test_account;
   if (!isEnabledTestAccount(testAccount)) {
     return c.json<ApiResponse>(invalidTestAccountCredentials(), 401);
   }
@@ -6537,12 +6595,13 @@ auth.get("/identity-token", async (c) => {
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Identity token generation failed";
-    const status =
-      message === "Not a member of this tenant"
-        ? 403
-        : message === "Identity JWT private key is not configured"
-          ? 503
-          : 404;
+    if (
+      err instanceof IdentityJwtConfigurationError ||
+      message === "Identity JWT private key is not configured"
+    ) {
+      return c.json<ApiResponse>({ ok: false, error: "Identity token unavailable" }, 503);
+    }
+    const status = message === "Not a member of this tenant" ? 403 : 404;
     return c.json<ApiResponse>({ ok: false, error: message }, status);
   }
 });
@@ -7714,17 +7773,21 @@ auth.post("/refresh", async (c) => {
 
   const rotatedRefresh = await rotateRefreshTokenForUserSession(body.refreshToken, body.tenantId);
   if (rotatedRefresh.status === "reused") {
-    const { issuedBefore: revokedBefore } = await revokeUserRefreshSessions(rotatedRefresh.userId);
-    await writeAuditEvent({
-      tenantId: rotatedRefresh.tenantId,
-      actorType: "user",
-      actorId: rotatedRefresh.userId,
-      action: "auth.refresh.reuse_detected",
-      resourceType: "session",
-      metadata: { revokedRefreshTokens: true, revokedAccessTokensIssuedBefore: revokedBefore },
-      ipAddress: c.req.header("x-forwarded-for") ?? null,
-      userAgent: c.req.header("user-agent") ?? null,
-      requestId: c.get("requestId") ?? null,
+    await withVerifiedAuthTenant(rotatedRefresh.tenantId, rotatedRefresh.userId, async () => {
+      const { issuedBefore: revokedBefore } = await revokeUserRefreshSessions(
+        rotatedRefresh.userId,
+      );
+      await writeAuditEvent({
+        tenantId: rotatedRefresh.tenantId,
+        actorType: "user",
+        actorId: rotatedRefresh.userId,
+        action: "auth.refresh.reuse_detected",
+        resourceType: "session",
+        metadata: { revokedRefreshTokens: true, revokedAccessTokensIssuedBefore: revokedBefore },
+        ipAddress: c.req.header("x-forwarded-for") ?? null,
+        userAgent: c.req.header("user-agent") ?? null,
+        requestId: c.get("requestId") ?? null,
+      });
     });
     return c.json<ApiResponse>(
       { ok: false, error: "Refresh token reuse detected. Please sign in again." },
@@ -7748,23 +7811,25 @@ auth.post("/refresh", async (c) => {
   }
 
   const { record, newAccessToken, newRefreshToken } = rotatedRefresh;
-  const db = getDb();
-  try {
-    await writeAuditEvent({
-      tenantId: record.tenantId,
-      actorType: "user",
-      actorId: record.userId,
-      action: "auth.refresh",
-      resourceType: "session",
-      metadata: { rotated: true },
-      ipAddress: c.req.header("x-forwarded-for") ?? null,
-      userAgent: c.req.header("user-agent") ?? null,
-      requestId: c.get("requestId") ?? null,
-    });
-  } catch (err) {
-    await db.delete(refreshTokens).where(eq(refreshTokens.tokenHash, hashToken(newRefreshToken)));
-    throw err;
-  }
+  await withVerifiedAuthTenant(record.tenantId, record.userId, async () => {
+    const db = getDb();
+    try {
+      await writeAuditEvent({
+        tenantId: record.tenantId,
+        actorType: "user",
+        actorId: record.userId,
+        action: "auth.refresh",
+        resourceType: "session",
+        metadata: { rotated: true },
+        ipAddress: c.req.header("x-forwarded-for") ?? null,
+        userAgent: c.req.header("user-agent") ?? null,
+        requestId: c.get("requestId") ?? null,
+      });
+    } catch (err) {
+      await db.delete(refreshTokens).where(eq(refreshTokens.tokenHash, hashToken(newRefreshToken)));
+      throw err;
+    }
+  });
   dispatchUserAuthenticated(record.tenantId, record.userId, "refresh");
 
   return c.json({
@@ -8194,7 +8259,9 @@ auth.post("/passkey/register/verify", async (c) => {
 /**
  * POST /passkey/login/options
  * Body: { email }
- * Returns WebAuthn authentication options with allowed credentials.
+ * Returns privacy-preserving discoverable-credential options. `allowCredentials`
+ * is intentionally empty for every email so this pre-auth route cannot reveal
+ * whether an account or passkey exists.
  */
 auth.post("/passkey/login/options", async (c) => {
   const rl = await checkAuthRateLimit(c, "passkey-options", 60_000, 20);
@@ -8935,17 +9002,14 @@ async function resolveGuestTenant(
   if (isReservedTenantId(requested)) {
     return { ok: false, status: 403, error: "Guests cannot be created in a personal tenant" };
   }
-  if (!(await tenantExists(requested))) {
+  const subject = await authTenantSubject(requested);
+  if (!subject) {
     return { ok: false, status: 404, error: `Tenant '${requested}' not found` };
   }
   if (requested === _DEFAULT_TENANT_ID) {
     return { ok: true, tenantId: requested, isPersonal: false };
   }
-  const [config] = await getDb()
-    .select({ joinMode: tenantConfigs.joinMode })
-    .from(tenantConfigs)
-    .where(eq(tenantConfigs.tenantId, requested));
-  if (config?.joinMode === "open") {
+  if (subject.join_mode === "open") {
     return { ok: true, tenantId: requested, isPersonal: false };
   }
   return {
@@ -9001,10 +9065,12 @@ auth.post("/guest", async (c) => {
   // Link the guest to the requesting tenant with the LIMITED "guest" role so the
   // session cannot satisfy requireTenantLevel(). onConflictDoNothing keeps this
   // idempotent against a racing insert on the (userId, tenantId) unique index.
-  await db
-    .insert(userTenants)
-    .values({ userId: guest.id, tenantId, role: GUEST_TENANT_ROLE })
-    .onConflictDoNothing();
+  await withVerifiedAuthTenant(tenantId, guest.id, async () => {
+    await getDb()
+      .insert(userTenants)
+      .values({ userId: guest.id, tenantId, role: GUEST_TENANT_ROLE })
+      .onConflictDoNothing();
+  });
 
   // Provision the guest's wallet under its own personal namespace so it has a
   // wallet/agents immediately AND those rows survive a later upgrade unchanged.
@@ -10565,20 +10631,12 @@ async function getAllowedOAuthRedirectEntries(
   const entries = new Set<string>();
 
   const normalizedClientId = normalizePublicClientId(clientId);
-  const appClientRows = await getDb()
-    .select({
-      id: tenantAppClients.id,
-      allowedRedirectUrls: tenantAppClients.allowedRedirectUrls,
-    })
-    .from(tenantAppClients)
-    .where(
-      and(eq(tenantAppClients.tenantId, resolvedTenantId), eq(tenantAppClients.enabled, true)),
-    );
+  const appClientRows = await authAppClientSubjects(resolvedTenantId);
 
   if (normalizedClientId) {
     const client = appClientRows.find((candidate) => candidate.id === normalizedClientId);
     if (client) {
-      for (const entry of client.allowedRedirectUrls ?? []) {
+      for (const entry of client.allowed_redirect_urls ?? []) {
         const trimmed = entry.trim();
         if (trimmed && trimmed !== "*") entries.add(trimmed);
       }
@@ -10586,14 +10644,8 @@ async function getAllowedOAuthRedirectEntries(
     return [...entries];
   }
 
-  const [row] = await getDb()
-    .select({
-      allowedRedirectUrls: tenantConfigs.allowedRedirectUrls,
-    })
-    .from(tenantConfigs)
-    .where(eq(tenantConfigs.tenantId, resolvedTenantId));
-
-  for (const entry of row?.allowedRedirectUrls ?? []) {
+  const config = await authTenantConfigSubject(resolvedTenantId);
+  for (const entry of config?.allowed_redirect_urls ?? []) {
     const trimmed = entry.trim();
     if (trimmed && trimmed !== "*") {
       entries.add(trimmed);
@@ -10601,7 +10653,7 @@ async function getAllowedOAuthRedirectEntries(
   }
 
   for (const client of appClientRows) {
-    for (const entry of client.allowedRedirectUrls ?? []) {
+    for (const entry of client.allowed_redirect_urls ?? []) {
       const trimmed = entry.trim();
       if (trimmed && trimmed !== "*") entries.add(trimmed);
     }

@@ -9,7 +9,7 @@ import {
 const read = async (path: string) => Bun.file(new URL(path, import.meta.url)).text();
 
 /**
- * CI guard for the PR4 execution gateway.
+ * CI guard for the governed-execution gateway.
  *
  * The migrated primary EVM `/vault/:agentId/sign` route and its compatible
  * approval replay must never reach the raw `Vault.signTransaction` signer
@@ -64,7 +64,7 @@ describe("execution gateway guard", () => {
     // LEGACY_EVM_SIGN_CALL_SITES and RAW_EVM_SIGN_INVENTORY are two lenses on the
     // same raw-sign surface:
     //  - LEGACY enumerates non-primary EVM sign SURFACES (route-local policy
-    //    only; PR5b convergence), including the vault.ts transfer + approval-
+    //    only; pending gateway convergence), including the vault.ts transfer + approval-
     //    transfer branches.
     //  - The inventory classifies each raw call by REACHABILITY: the two vault.ts
     //    primary/approval fallbacks are "migrated-invariant-guarded" (an

@@ -1,8 +1,8 @@
 /**
- * PR4 governed proxy cutover — proxy-side claim/dispatch + authority gate.
+ * Governed proxy execution — proxy-side claim, dispatch, and authority gate.
  *
  * Covers the security-critical proxy invariants against PGLite with the existing
- * forwarder stub (the "test transport seam"; PR6 owns the real sandbox):
+ * forwarder stub (the test transport seam):
  *   - X1 governed routes unreachable via direct /proxy / forged header (P01/P05)
  *   - §6.3 unknown authority_mode default-deny (P53)
  *   - X3 single-winner claim under concurrency (K01), double-claim (P43)
@@ -80,7 +80,7 @@ let captured: { url: string; method: string } | null = null;
 let capturedBody: string | null = null;
 let capturedHeaders: Record<string, string> | null = null;
 // Set true when the forwarder's streaming response body is cancelled/drained.
-// Proves the governed dispatcher releases the proxy in-flight slot (codex P2).
+// Proves the governed dispatcher releases the proxy in-flight slot.
 let streamingBodyCancelled = false;
 let forwarderMode: "ok" | "throw" | "500" | "stream" = "ok";
 
@@ -527,7 +527,7 @@ beforeAll(async () => {
     captured = { url: url.toString(), method };
     capturedHeaders = Object.fromEntries(headers.entries());
     // Capture the exact outbound body bytes (JCS-serialized by the dispatcher) so
-    // tests can assert byte-fidelity of the forwarded request (codex P2).
+    // tests can assert byte fidelity of the forwarded request.
     capturedBody = null;
     if (body) {
       const reader = (body as ReadableStream<Uint8Array>).getReader();
@@ -663,7 +663,7 @@ function fakeDirectContext(path: string, forgedClaim?: unknown) {
   } as unknown as import("hono").Context;
 }
 
-describe("PR4 governed proxy authority gate (X1, §5.1)", () => {
+describe("governed proxy authority gate (X1, §5.1)", () => {
   it("P01: direct /proxy to a governed route is denied 403, zero forward", async () => {
     await seedExecutionReady();
     const res = await handleProxy(
@@ -734,7 +734,7 @@ describe("PR4 governed proxy authority gate (X1, §5.1)", () => {
   });
 });
 
-describe("PR4 dispatchGovernedExecution claim + dispatch", () => {
+describe("dispatchGovernedExecution claim and dispatch", () => {
   it("EXEC_AUTH_NOT_READY when the intent has no active v2 nonce (P25)", async () => {
     const res = await dispatchGovernedExecution("pa_missing", IDS.tenant);
     expect(res.ok).toBe(false);
@@ -742,7 +742,7 @@ describe("PR4 dispatchGovernedExecution claim + dispatch", () => {
     expect(res.httpStatus).toBe(409);
   });
 
-  it("#239 rollout: a signed legacy nonce cannot dispatch without execute-time policy evidence", async () => {
+  it("does not dispatch a signed nonce without execute-time policy evidence", async () => {
     const { intentId, authorizationId } = await seedExecutionReady();
     const db = getDb();
     // Simulate a pre-0084 row. The live schema prevents creating this shape, so
@@ -789,7 +789,7 @@ describe("PR4 dispatchGovernedExecution claim + dispatch", () => {
     expect(nonce.status).toBe("active");
   });
 
-  it("#239 rollout: corrupt execute-time policy evidence never claims or dispatches", async () => {
+  it("never claims or dispatches corrupt execute-time policy evidence", async () => {
     const { intentId, authorizationId } = await seedExecutionReady();
     const db = getDb();
     await db.execute(
@@ -837,7 +837,7 @@ describe("PR4 dispatchGovernedExecution claim + dispatch", () => {
     expect(res.intentId).toBe(intentId);
   });
 
-  it("#201 generic-http dispatches through the governed route without env host widening and records evidence", async () => {
+  it("dispatches generic HTTP without environment host widening and records evidence", async () => {
     const genericAction: GenericHttpCanonicalActionV1 = {
       profile: "generic-http.provider-action.v1",
       method: "POST",
@@ -1090,7 +1090,7 @@ describe("PR4 dispatchGovernedExecution claim + dispatch", () => {
     expect(captured).toBeNull();
   });
 
-  it("P2 (codex): a live route bound to a DIFFERENT operation than the nonce fails closed (route↔operation mismatch), no decrypt", async () => {
+  it("fails closed without decrypt when the live route is bound to a different operation", async () => {
     const { intentId } = await seedExecutionReady();
     // Repoint the LIVE governed route's provider_operation_id at a DIFFERENT
     // operation than the one the nonce was minted for, WITHOUT bumping
@@ -1200,7 +1200,7 @@ describe("PR4 dispatchGovernedExecution claim + dispatch", () => {
   it("P12c: substituted nonce route revision cannot escape the signed approval tuple", async () => {
     const { intentId, authorizationId } = await seedExecutionReady();
     // Move both the live route and the denormalized nonce column to revision 2,
-    // while leaving the signed PR3 approval commitment at revision 1. Comparing
+    // while leaving the signed approval commitment at revision 1. Comparing
     // only nonce-to-live would accept this substitution; signed-to-loaded tuple
     // equality must reject it before claim.
     await getDb()
@@ -1310,7 +1310,7 @@ describe("PR4 dispatchGovernedExecution claim + dispatch", () => {
     }
   });
 
-  // ── §9 fault matrix + more §8 negatives (added lane pr4-13452) ─────────────
+  // ── §9 fault matrix and additional §8 negative cases ──────────────────────
 
   it("K13/K14: upstream throw AFTER dispatch => outcome_unknown, exactly one forward, NO blind retry (X8)", async () => {
     const { intentId, authorizationId } = await seedExecutionReady();
@@ -1386,7 +1386,7 @@ describe("PR4 dispatchGovernedExecution claim + dispatch", () => {
     expect(b.status).toBe("failed");
   });
 
-  it("P19: a disabled workspace fails at the boundary (post-claim), no dispatch (codex P1b)", async () => {
+  it("fails at the post-claim boundary without dispatch when the workspace is disabled", async () => {
     const { intentId } = await seedExecutionReady();
     await getDb()
       .update(workspaces)
@@ -1398,7 +1398,7 @@ describe("PR4 dispatchGovernedExecution claim + dispatch", () => {
     expect(captured).toBeNull();
   });
 
-  it("P18b: a disabled provider operation fails at the boundary (codex P1b), no dispatch", async () => {
+  it("fails at the boundary without dispatch when the provider operation is disabled", async () => {
     const { intentId } = await seedExecutionReady();
     await getDb()
       .update(providerOperations)
@@ -1500,7 +1500,7 @@ describe("PR4 dispatchGovernedExecution claim + dispatch", () => {
     expect(captured).toBeNull();
   });
 
-  it("P30: a MUTATING (POST) governed action dispatches without an Idempotency-Key 400 (codex P1: the single-use v2 nonce is the replay guard)", async () => {
+  it("uses the single-use authorization nonce as the replay guard for mutating actions", async () => {
     // Point the seeded action + route at a POST so handleProxy's unsafe-method
     // idempotency guard would fire for a legacy request. A governed dispatch must
     // bypass that guard (it carries its own single-use nonce), so the forward is
@@ -1570,7 +1570,7 @@ describe("PR4 dispatchGovernedExecution claim + dispatch", () => {
     expect(captured).toBeNull();
   });
 
-  it("P31: a secret VERSION rotated AFTER the claim but before decrypt fails closed (409 stale) with no forward (codex P1 stale-credential race)", async () => {
+  it("returns stale without forwarding when the secret version rotates after claim", async () => {
     // The claim succeeds (route + secret bound), then between claim and decrypt the
     // backing secret is rotated to a new version via the beforeForward hook. The
     // decrypt-time recheck must refuse to decrypt the freshly-rotated credential.
@@ -1607,7 +1607,7 @@ describe("PR4 dispatchGovernedExecution claim + dispatch", () => {
     expect(captured).toBeNull();
   });
 
-  it("P32: a forged direct claim with the right routeId + secretId but a WRONG routeRevision is denied at the gate (codex P1 stale-route)", async () => {
+  it("denies a direct claim whose route revision does not match", async () => {
     await seedExecutionReady();
     // Correct routeId + secretId (so ONLY the routeRevision guard can deny it),
     // stale/forged routeRevision. The gate must fail closed before any decrypt.
@@ -1631,7 +1631,7 @@ describe("PR4 dispatchGovernedExecution claim + dispatch", () => {
     expect(captured).toBeNull();
   });
 
-  it("P33: a governed claim that OMITS secretVersion is not verified at the gate (codex P2: missing = stale, fail closed)", async () => {
+  it("fails closed when a governed claim omits the secret version", async () => {
     await seedExecutionReady();
     // Correct routeId + routeRevision + secretId, but NO secretVersion. Without
     // it the decrypt-time version recheck could be skipped, so the gate must
@@ -1672,7 +1672,7 @@ describe("PR4 dispatchGovernedExecution claim + dispatch", () => {
     expect(streamingBodyCancelled).toBe(true);
   });
 
-  it("P35: the forwarded body is JCS-serialized (byte-identical to the committed canonical action), NOT JSON.stringify insertion order (codex P2)", async () => {
+  it("forwards the JCS bytes committed by the authorization", async () => {
     // Keys deliberately in NON-lexicographic insertion order so JSON.stringify
     // (insertion order) and JCS (sorted) produce DIFFERENT bytes.
     const body = { zeta: 1, name: "safe", alpha: 2 } as Record<string, unknown>;
@@ -1708,7 +1708,7 @@ describe("PR4 dispatchGovernedExecution claim + dispatch", () => {
     }
   });
 
-  it("P34: a governed route that ALSO has requiresApproval does NOT re-enter the legacy proxy-approval hold; it forwards (codex P1)", async () => {
+  it("does not re-enter the proxy-approval hold after governed approval", async () => {
     const { intentId, authorizationId } = await seedExecutionReady();
     // The route carries the legacy requiresApproval flag too. A verified governed
     // dispatch already had its approval adjudicated by the v2 flow, so it must NOT

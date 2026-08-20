@@ -379,7 +379,7 @@ function main() {
 
   // Two accepted shapes, both backward-compatible:
   //   1. raw /audit/bundle: { version, tenantId, events, checkpoint, ... }
-  //   2. PR5 /evidence envelope: { version, tenantId, caseId, manifest,
+  //   2. evidence /evidence envelope: { version, tenantId, caseId, manifest,
   //      bundle: { ...raw bundle... }, completeness }
   // Detect the envelope by a nested `bundle` object + a `manifest`, then verify
   // the inner bundle exactly as before and additionally cross-check the manifest
@@ -513,7 +513,7 @@ function main() {
     }
   }
 
-  // ── (f) Manifest cross-check (spec §7.4) — only for a PR5 evidence envelope.
+  // ── (f) Manifest cross-check (spec §7.4) — only for an evidence envelope.
   // The manifest carries NO independent trust: every fact must be checkable
   // against a signed event. If ANY manifest fact is not backed, or a claimed
   // `complete` hides a missing required role, we FAIL. A plain /audit/bundle
@@ -589,7 +589,7 @@ function main() {
   process.exit(0);
 }
 
-// ─── PR5 manifest cross-check (spec §7.4) ────────────────────────────────
+// ─── evidence manifest cross-check (spec §7.4) ────────────────────────────────
 
 const MANIFEST_SCHEMA_VERSION = "steward.provider-case-manifest.v1";
 
@@ -727,7 +727,7 @@ function verifyManifest(manifest, events, payload) {
       );
     }
   };
-  // Genesis-backed facts (PR2 folded genesis carries action + decision hashes).
+  // Genesis-backed facts (canonical-action folded genesis carries action + decision hashes).
   if (genesis) {
     factCheck("genesis", "actionDigest", manifest.actionDigest);
     factCheck("genesis", "requestHash", manifest.requestHash);
@@ -736,7 +736,7 @@ function verifyManifest(manifest, events, payload) {
       factCheck("genesis", "policyDecisionHash", manifest.policyDecision.hash);
     }
   }
-  // Execution-backed facts (PR4 authorized/dispatched/terminal metadata).
+  // Execution-backed facts (governed-execution authorized/dispatched/terminal metadata).
   if (manifest.execution) {
     const authEv = eventByRole.get("exec_authorized");
     if (manifest.execution.authorizationId && authEv) {

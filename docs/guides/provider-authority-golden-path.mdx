@@ -5,7 +5,7 @@ description: "Single-command fake proof and the separate real GitHub sandbox run
 
 # Provider Authority: Golden Path
 
-This is the exact workflow that reproduces the six-PR governed-provider thesis:
+This is the exact workflow that reproduces the governed-provider design:
 a **single-command fake CI proof** that runs the whole matrix against a
 deterministic in-process transport, and a **separate documented real GitHub
 sandbox run** against a throwaway org. Both traverse the **identical** governed
@@ -16,18 +16,19 @@ code path; they differ **only** in the terminal forwarder.
 An enrolled provider route runs a consequential action only through:
 
 ```
-POST /v2/provider-actions          (create; PR2 canonicalization + binding)
-  -> access check                  (PR1 grants/role-bindings)
+POST /v2/provider-actions          (create; canonical-action canonicalization + binding)
+  -> access check                  (authority-grant grants/role-bindings)
   -> policy decision               (allow / approval_required)
-  -> POST /:id/approval            (human approve/deny with typed reason; PR3)
-  -> POST /:id/execute             (typed system resume; PR3 mints the PR4 nonce)
-  -> dispatchGovernedExecution     (atomic single-winner claim; PR4)
+  -> POST /:id/approval            (human approve/deny with typed reason; approval-lifecycle)
+  -> POST /:id/execute             (typed system resume; approval-lifecycle mints the governed-execution nonce)
+  -> dispatchGovernedExecution     (atomic single-winner claim; governed-execution)
   -> decrypt + inject credential   (verifier-only; agent never sees it)
   -> terminal forwarder            (real GitHub, or the fake)
-  -> GET /:id/case, /:id/evidence  (correlated manifest + signed bundle; PR5)
+  -> GET /:id/case, /:id/evidence  (correlated manifest + signed bundle; evidence)
 ```
 
-No new authority is introduced by the golden path. It exercises PR1–PR5 only.
+No new authority is introduced by the golden path. It exercises the existing
+authorization, canonical-action, approval, governed-execution, and evidence paths only.
 
 ## Config-driven generic HTTP operations
 
@@ -106,7 +107,7 @@ evaluation or authorization mint. Descriptor drift therefore returns
 `provider.resume.policy_denied`; it never dispatches the old approval against a
 new target.
 
-## 1. The fake CI proof (every PR, credential-free)
+## 1. The fake CI proof (credential-free)
 
 ```bash
 # From the repo root, deterministic, zero network egress, zero credentials.
@@ -169,7 +170,16 @@ Requirements:
   The committed artifact is a `*.example` with placeholders and presence guards.
 - Pre-provisioned sandbox-only workspace, provider account, governed secret
   route, provider-agent JWT, recent-MFA approver session, and the database/vault/
-  execution/audit environment used by that same Steward deployment.
+  execution/audit environment used by that same Steward deployment. This
+  includes the exact `STEWARD_KDF_SALT` used to encrypt the pre-provisioned
+  secret; preflight rejects a missing or malformed salt, but operators must
+  supply the matching live value out-of-band.
+
+No real sandbox artifact is committed yet. Producing the artifact bundle still
+requires the external throwaway GitHub App/repository and pre-provisioned live
+Steward authority graph above. A naturally observed GitHub 403/429 with
+`Retry-After` also remains an external observation: the harness does not induce
+or manufacture rate limiting.
 
 `--preflight` performs no network request. The live command rotates the minted
 installation token through the MFA-gated secret API, drives create → approve →
@@ -209,12 +219,12 @@ trust to a known root. Always supply the fingerprint.
 - `dashboard/approvals/[id]`, the approval detail: equal-weight approve/deny, a
   required typed reason, the exact action as a safe summary + digests (never
   canonical bytes), honest terminal states.
-- `dashboard/actions/[id]`, the case/evidence surface: PR5 `completeness` and
+- `dashboard/actions/[id]`, the case/evidence surface: evidence `completeness` and
   `incompletenessReasons` rendered verbatim, the operator-key trust limit
   stated, the signed bundle download + the exact offline verify command.
 
 ## Distribution note
 
 The **repo script is the authoritative proof**. The `steward provider-action …`
-CLI commands are convenience wrappers over the same PR2–PR5 routes; CLI
+CLI commands are convenience wrappers over the same governed provider-action routes; CLI
 distribution is unsettled, so they carry no independent authority.

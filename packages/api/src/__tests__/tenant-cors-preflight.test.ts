@@ -27,6 +27,15 @@ describe("tenant CORS preflight", () => {
         tenantId: "cors-patch-tenant",
         allowedOrigins: [ALLOWED_ORIGIN],
       });
+    await getDb().insert(tenants).values({
+      id: "cors-empty-tenant",
+      name: "CORS empty tenant",
+      apiKeyHash: "cors-empty-tenant-hash",
+    });
+    await getDb().insert(tenantConfigs).values({
+      tenantId: "cors-empty-tenant",
+      allowedOrigins: [],
+    });
   });
 
   afterAll(async () => {
@@ -69,6 +78,25 @@ describe("tenant CORS preflight", () => {
       method: "OPTIONS",
       headers: {
         Origin: "https://attacker.example",
+        "Access-Control-Request-Method": "PATCH",
+      },
+    });
+
+    expect(response.status).toBe(403);
+    expect(response.headers.get("access-control-allow-origin")).toBeNull();
+    expect(response.headers.get("access-control-allow-credentials")).toBeNull();
+    expect(response.headers.get("vary")).toBe("Origin, X-Steward-Tenant");
+  });
+
+  test("keeps an explicitly empty tenant allowlist fail closed", async () => {
+    const app = new Hono();
+    app.use("*", tenantCors);
+
+    const response = await app.request("/resource", {
+      method: "OPTIONS",
+      headers: {
+        Origin: ALLOWED_ORIGIN,
+        "X-Steward-Tenant": "cors-empty-tenant",
         "Access-Control-Request-Method": "PATCH",
       },
     });

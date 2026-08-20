@@ -96,6 +96,7 @@ import { type Context, Hono, type Next } from "hono";
 import { getAddress, verifyMessage as viemVerifyMessage } from "viem";
 import { writeAuditEvent } from "../services/audit";
 import {
+  continueWithTenantDatabase,
   priceOracle,
   sanitizeErrorMessage,
   setNoStoreHeaders,
@@ -106,6 +107,7 @@ import {
   readTenantGasSponsorshipConfig,
 } from "../services/gas-sponsorship";
 import { plaintextKeyExportResponseGateError } from "../services/key-export-plaintext-gate";
+import { isRecentMfaTimestamp } from "../services/recent-mfa";
 import { lockUserSession } from "../services/session-lock";
 import { createSignerCredentialHash, verifySignerCredential } from "../services/signer-credentials";
 import { getConfiguredVault } from "../services/vault-factory";
@@ -1003,12 +1005,7 @@ async function restoreUserAccountUnlinkMutation(
 }
 
 function hasRecentMfaStepUp(session: UserSessionPayload, maxAgeMs = 5 * 60_000): boolean {
-  return (
-    typeof session.mfaVerifiedAt === "number" &&
-    Number.isFinite(session.mfaVerifiedAt) &&
-    Date.now() - session.mfaVerifiedAt >= 0 &&
-    Date.now() - session.mfaVerifiedAt <= maxAgeMs
-  );
+  return isRecentMfaTimestamp(session.mfaVerifiedAt, maxAgeMs);
 }
 
 async function readPersonalTenantMfaPolicy(tenantId: string): Promise<TenantMfaPolicyConfig> {
@@ -1737,7 +1734,10 @@ export async function userSessionAuth(
     c.set("sessionMfaMethod", payload.mfaMethod);
   }
 
-  await next();
+  if (!payload.tenantId) {
+    return c.json<ApiResponse>({ ok: false, error: "Session token missing tenantId claim" }, 401);
+  }
+  await continueWithTenantDatabase(payload.tenantId, "user-session-jwt", userId, next, userId);
 }
 
 // ─── Route group ──────────────────────────────────────────────────────────────

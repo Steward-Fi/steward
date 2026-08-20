@@ -1,5 +1,5 @@
 /**
- * Shared PGLite fixture for the PR3 provider-approval test suite. Seeds a full
+ * Shared PGLite fixture for the approval-lifecycle provider-approval test suite. Seeds a full
  * tenant with a workspace, provider account (+credential), a governed operation
  * (+route), an active agent grant, and an eligible human workspace_approver so
  * an approval-required provider action can be created and decided end-to-end.
@@ -361,7 +361,7 @@ export async function auditCount(tenantId = F.TENANT, action?: string): Promise<
   return Number((arr[0] as { n: number }).n);
 }
 
-/** Distinct audit rows correlated to a case by top-level resource_id (PR5 C1). */
+/** Distinct audit rows correlated to a case by top-level resource_id (evidence C1). */
 export async function correlatedAudit(
   intentId: string,
   tenantId = F.TENANT,

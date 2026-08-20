@@ -1,15 +1,15 @@
 "use client";
 
 /**
- * PR6 provider-action APPROVAL DETAIL surface (U4).
+ * Provider-action approval detail surface.
  *
- * Consumes the PR3 GET/POST /v2/provider-actions/:id/approval routes (NOT the
+ * Consumes the governed GET/POST /v2/provider-actions/:id/approval routes, not the
  * legacy transaction-approval endpoints, G4). Invariants enforced here:
  *   - Approve and Deny are EQUAL-WEIGHT controls (same size, same emphasis).
  *   - A typed reason is REQUIRED for BOTH decisions (client-side block; the
  *     server also enforces APPROVAL_REASON_REQUIRED).
  *   - Shows the exact action via the SAFE SUMMARY + operation/account labels +
- *     digests. NEVER canonical bytes or comment body text (PR3 §5.3).
+ *     digests. Never canonical bytes or comment body text.
  *   - There is NO one-click bulk approval; a decision requires opening this
  *     detail and entering a reason.
  *   - A terminal/expired/denied case renders its state honestly and DISABLES
@@ -63,7 +63,7 @@ export default function ProviderApprovalDetailPage() {
   }, [id, load]);
 
   async function decide(decision: "approve" | "deny") {
-    // Client-side reason gate (the server ALSO enforces this, U4/PR3 §9.2).
+    // Client-side reason gate; the server enforces the same requirement.
     if (reason.trim().length === 0) {
       setReasonError("A typed reason is required for both approve and deny.");
       return;

@@ -35,6 +35,7 @@ import {
   sanitizeErrorMessage,
   setNoStoreHeaders,
 } from "../services/context";
+import { isRecentMfaTimestamp } from "../services/recent-mfa";
 import {
   assertGovernedRouteUpdateIsSafe,
   assertNoOppositeAuthorityOverlap,
@@ -312,13 +313,7 @@ function requireTenantAdminSession(c: Context<{ Variables: AppVariables }>): boo
 }
 
 function hasRecentSessionMfa(c: Context<{ Variables: AppVariables }>, maxAgeMs = 5 * 60_000) {
-  const verifiedAt = c.get("sessionMfaVerifiedAt");
-  return (
-    typeof verifiedAt === "number" &&
-    Number.isFinite(verifiedAt) &&
-    Date.now() - verifiedAt >= 0 &&
-    Date.now() - verifiedAt <= maxAgeMs
-  );
+  return isRecentMfaTimestamp(c.get("sessionMfaVerifiedAt"), maxAgeMs);
 }
 
 type TenantMfaPolicyConfig = {

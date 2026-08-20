@@ -130,7 +130,8 @@
     "@solana/wallet-adapter-solflare": "^0.6.33",
     "@solana/wallet-adapter-coinbase": "^0.1.23",
     "@solana/wallet-adapter-trust": "^0.1.17",
-    "@solana/wallet-adapter-coin98": "^0.5.24"
+    "@solana/wallet-adapter-coin98": "^0.5.24",
+    "happy-dom": "^20.11.6"
   },
   "keywords": [
     "steward",

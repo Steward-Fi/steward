@@ -1,7 +1,7 @@
 /**
- * PR5 real-app route-wiring regression (review-gate hardening).
+ * evidence real-app route-wiring regression (review-gate hardening).
  *
- * The existing PR5 integration tests mount `providerCaseRoutes` on a MOCK Hono
+ * The existing evidence integration tests mount `providerCaseRoutes` on a MOCK Hono
  * app that manually injects `authType`/`tenantRole`/`tenantId`/`sessionMfaVerifiedAt`.
  * That bypasses the real middleware chain, so it cannot catch a missing
  * `tenantAuth` registration on `/v2/provider-actions/:id/{case,evidence}` in the
@@ -12,7 +12,7 @@
  *   - the negative-auth matrix (unauth, member role, stale MFA, agent token)
  *     is rejected with 403 through the real chain.
  *
- * Regression guard for: PR5 originally forgot to wire `tenantAuth` on the case
+ * Regression guard for: evidence originally forgot to wire `tenantAuth` on the case
  * subpaths (the global app.ts only wires it for /v2/workspaces|provider-accounts
  * |...), so every request 403'd and the feature was unreachable in production.
  */
@@ -21,13 +21,14 @@ import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 process.env.STEWARD_PGLITE_MEMORY = "true";
 process.env.STEWARD_AUDIT_HMAC_KEY = process.env.STEWARD_AUDIT_HMAC_KEY || "0".repeat(64);
 process.env.STEWARD_MASTER_PASSWORD =
-  process.env.STEWARD_MASTER_PASSWORD || "pr5-route-wiring-master-password";
+  process.env.STEWARD_MASTER_PASSWORD || "provider-case-route-wiring-master-password";
 // @stwd/auth resolves the JWT secret from STEWARD_JWT_SECRET (canonical), not
 // JWT_SECRET; without it a clean CI env (no ambient secret, PGLite mode is NOT
 // enough to enable the master-password fallback) throws "No JWT secret
 // configured". Set the canonical var explicitly so this suite is self-contained.
 process.env.STEWARD_JWT_SECRET =
-  process.env.STEWARD_JWT_SECRET || "pr5-route-wiring-jwt-secret-0123456789abcdef0123456789";
+  process.env.STEWARD_JWT_SECRET ||
+  "provider-case-route-wiring-jwt-secret-0123456789abcdef0123456789";
 
 import { signAccessToken, signAgentToken } from "@stwd/auth";
 import { closeDb, getDb, tenants, users, userTenants } from "@stwd/db";
@@ -36,7 +37,7 @@ import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 const TENANT = "default";
 const CASE_ID = "pa_0123abcd-0123-0123-0123-0123456789ab".slice(0, 39);
 
-describe("PR5 case routes: real composed-app auth wiring", () => {
+describe("evidence case routes: real composed-app auth wiring", () => {
   let app: any;
   let ownerToken: string;
   let memberToken: string;
@@ -49,15 +50,15 @@ describe("PR5 case routes: real composed-app auth wiring", () => {
 
     await getDb()
       .insert(tenants)
-      .values({ id: TENANT, name: "PR5 Wiring", apiKeyHash: "pr5-wiring" })
+      .values({ id: TENANT, name: "Evidence Wiring", apiKeyHash: "provider-case-wiring" })
       .onConflictDoNothing();
     const [owner] = await getDb()
       .insert(users)
-      .values({ email: "owner@pr5.io", name: "Owner" })
+      .values({ email: "owner@provider-case.invalid", name: "Owner" })
       .returning();
     const [member] = await getDb()
       .insert(users)
-      .values({ email: "member@pr5.io", name: "Member" })
+      .values({ email: "member@provider-case.invalid", name: "Member" })
       .returning();
     await getDb()
       .insert(userTenants)
@@ -88,7 +89,7 @@ describe("PR5 case routes: real composed-app auth wiring", () => {
       mfaMethod: "totp",
     } as any);
     agentToken = await signAgentToken({
-      agentId: "agent-pr5",
+      agentId: "agent-provider-case",
       tenantId: TENANT,
     } as any);
 

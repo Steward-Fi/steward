@@ -1,11 +1,30 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
-import { agentSigners, agents, closeDb, getDb, tenants } from "@stwd/db";
-import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
+import {
+  __resetAuditHmacKeyCacheForTests,
+  agentKeyQuorums,
+  agentSigners,
+  agents,
+  auditEvents,
+  getDb,
+  tenants,
+} from "@stwd/db";
+import { and, asc, eq, inArray, sql } from "drizzle-orm";
 import { Hono } from "hono";
 import type { AppVariables } from "../services/context";
+import {
+  cleanupAgentBehaviorTestDatabase,
+  setupAgentBehaviorTestDatabase,
+} from "./agent-behavior-test-database";
 
 const TENANT_ID = `agent-quorums-tenant-${Date.now()}`;
 const AGENT_ID = `agent-quorums-agent-${Date.now()}`;
+const AUDIT_TRIGGER_SUFFIX = `${process.pid}_${Math.random().toString(36).slice(2, 8)}`;
+const MUTATED_ENV = [
+  "STEWARD_PGLITE_MEMORY",
+  "STEWARD_MASTER_PASSWORD",
+  "STEWARD_AUDIT_HMAC_KEY",
+] as const;
+const originalEnv = new Map(MUTATED_ENV.map((name) => [name, process.env[name]]));
 
 async function makeApp(authMode: "admin" | "admin-no-mfa" | "api-key" = "admin") {
   const { agentRoutes } = await import("../routes/agents");
@@ -23,6 +42,7 @@ async function makeApp(authMode: "admin" | "admin-no-mfa" | "api-key" = "admin")
     await next();
   });
   app.route("/agents", agentRoutes);
+  app.onError((_error, c) => c.json({ ok: false, error: "Internal server error" }, 500));
   return app;
 }
 
@@ -34,18 +54,17 @@ describe("agent key quorum API", () => {
   let quorumId = "";
 
   beforeAll(async () => {
-    process.env.STEWARD_PGLITE_MEMORY = "true";
     process.env.STEWARD_MASTER_PASSWORD = "agent-quorums-master-password";
     process.env.STEWARD_AUDIT_HMAC_KEY = "agent-quorums-audit-hmac-key-with-enough-entropy";
-    const { db, client } = await createPGLiteDb("memory://");
-    setPGLiteOverride(db, async () => {
-      await client.close();
-    });
-    await getDb().insert(tenants).values({
-      id: TENANT_ID,
-      name: "Agent Quorums Tenant",
-      apiKeyHash: "hash",
-    });
+    __resetAuditHmacKeyCacheForTests();
+    await setupAgentBehaviorTestDatabase();
+    await getDb()
+      .insert(tenants)
+      .values({
+        id: TENANT_ID,
+        name: "Agent Quorums Tenant",
+        apiKeyHash: `api-key-hash-${TENANT_ID}`,
+      });
     await getDb().insert(agents).values({
       id: AGENT_ID,
       tenantId: TENANT_ID,
@@ -100,10 +119,15 @@ describe("agent key quorum API", () => {
   });
 
   afterAll(async () => {
-    await closeDb();
-    delete process.env.STEWARD_PGLITE_MEMORY;
-    delete process.env.STEWARD_MASTER_PASSWORD;
-    delete process.env.STEWARD_AUDIT_HMAC_KEY;
+    try {
+      await cleanupAgentBehaviorTestDatabase(TENANT_ID);
+    } finally {
+      for (const [name, value] of originalEnv) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+      __resetAuditHmacKeyCacheForTests();
+    }
   });
 
   it("creates, lists, updates, and revokes key quorums", async () => {
@@ -169,6 +193,35 @@ describe("agent key quorum API", () => {
     expect(revokeResponse.status).toBe(200);
     const revoked = (await revokeResponse.json()) as { data: { status: string } };
     expect(revoked.data.status).toBe("revoked");
+
+    const auditRows = await getDb()
+      .select({ action: auditEvents.action, seq: auditEvents.seq })
+      .from(auditEvents)
+      .where(
+        and(
+          eq(auditEvents.tenantId, TENANT_ID),
+          inArray(auditEvents.action, [
+            "agent.key_quorum.create.authorized",
+            "agent.key_quorum.create",
+            "agent.key_quorum.update.authorized",
+            "agent.key_quorum.update",
+            "agent.key_quorum.revoke.authorized",
+            "agent.key_quorum.revoke",
+          ]),
+        ),
+      )
+      .orderBy(asc(auditEvents.seq));
+    expect(auditRows.map(({ action }) => action)).toEqual([
+      "agent.key_quorum.create.authorized",
+      "agent.key_quorum.create",
+      "agent.key_quorum.update.authorized",
+      "agent.key_quorum.update",
+      "agent.key_quorum.revoke.authorized",
+      "agent.key_quorum.revoke",
+    ]);
+    for (let index = 1; index < auditRows.length; index++) {
+      expect(auditRows[index]?.seq).toBe(auditRows[index - 1]!.seq + 1);
+    }
   });
 
   it("rejects invalid thresholds and inactive members", async () => {
@@ -246,6 +299,14 @@ describe("agent key quorum API", () => {
 
   it("requires recent MFA for key quorum creation and privilege changes", async () => {
     const noMfaApp = await makeApp("admin-no-mfa");
+    const beforeQuorum = await getDb()
+      .select()
+      .from(agentKeyQuorums)
+      .where(eq(agentKeyQuorums.id, quorumId));
+    const beforeAudits = await getDb()
+      .select({ id: auditEvents.id })
+      .from(auditEvents)
+      .where(eq(auditEvents.tenantId, TENANT_ID));
     const createResponse = await noMfaApp.request(`/agents/${AGENT_ID}/key-quorums`, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -272,5 +333,132 @@ describe("agent key quorum API", () => {
       ok: false,
       error: expect.stringContaining("recent MFA"),
     });
+
+    const statusResponse = await noMfaApp.request(`/agents/${AGENT_ID}/key-quorums/${quorumId}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ status: "paused" }),
+    });
+    expect(statusResponse.status).toBe(403);
+    await expect(statusResponse.json()).resolves.toMatchObject({
+      ok: false,
+      error: expect.stringContaining("recent MFA"),
+    });
+
+    const deleteResponse = await noMfaApp.request(`/agents/${AGENT_ID}/key-quorums/${quorumId}`, {
+      method: "DELETE",
+    });
+    expect(deleteResponse.status).toBe(403);
+    await expect(deleteResponse.json()).resolves.toMatchObject({
+      ok: false,
+      error: expect.stringContaining("recent MFA"),
+    });
+
+    expect(
+      await getDb().select().from(agentKeyQuorums).where(eq(agentKeyQuorums.id, quorumId)),
+    ).toEqual(beforeQuorum);
+    expect(
+      await getDb()
+        .select({ id: auditEvents.id })
+        .from(auditEvents)
+        .where(eq(auditEvents.tenantId, TENANT_ID)),
+    ).toEqual(beforeAudits);
+  });
+
+  it("rolls back quorum creation, update, and revocation when completion audits fail", async () => {
+    const [seeded] = await getDb()
+      .insert(agentKeyQuorums)
+      .values({
+        tenantId: TENANT_ID,
+        agentId: AGENT_ID,
+        name: "Audit rollback quorum",
+        threshold: 1,
+        memberSignerIds: [signerA],
+        permissions: ["sign_transaction"],
+        status: "active",
+        createdBy: "seed",
+      })
+      .returning();
+
+    try {
+      await getDb().execute(
+        sql.raw(`
+        CREATE OR REPLACE FUNCTION fail_agent_quorum_completion_audit_${AUDIT_TRIGGER_SUFFIX}()
+        RETURNS trigger AS $$
+        BEGIN
+          IF NEW.tenant_id = '${TENANT_ID}' AND NEW.action IN (
+            'agent.key_quorum.create',
+            'agent.key_quorum.update',
+            'agent.key_quorum.revoke'
+          ) THEN
+            RAISE EXCEPTION 'required agent quorum audit failed';
+          END IF;
+          RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql
+        `),
+      );
+      await getDb().execute(
+        sql.raw(`
+        CREATE TRIGGER agent_quorum_completion_audit_failure_${AUDIT_TRIGGER_SUFFIX}
+        BEFORE INSERT ON audit_events
+        FOR EACH ROW EXECUTE FUNCTION fail_agent_quorum_completion_audit_${AUDIT_TRIGGER_SUFFIX}()
+        `),
+      );
+      const create = await app.request(`/agents/${AGENT_ID}/key-quorums`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          name: "Must not persist",
+          threshold: 1,
+          memberSignerIds: [signerB],
+          permissions: ["sign_transaction"],
+        }),
+      });
+      expect(create.status).toBe(500);
+      expect(
+        await getDb()
+          .select()
+          .from(agentKeyQuorums)
+          .where(
+            and(
+              eq(agentKeyQuorums.agentId, AGENT_ID),
+              eq(agentKeyQuorums.name, "Must not persist"),
+            ),
+          ),
+      ).toHaveLength(0);
+
+      const update = await app.request(`/agents/${AGENT_ID}/key-quorums/${seeded.id}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: "must roll back" }),
+      });
+      expect(update.status).toBe(500);
+      expect(
+        await getDb().select().from(agentKeyQuorums).where(eq(agentKeyQuorums.id, seeded.id)),
+      ).toEqual([seeded]);
+
+      const revoke = await app.request(`/agents/${AGENT_ID}/key-quorums/${seeded.id}`, {
+        method: "DELETE",
+      });
+      expect(revoke.status).toBe(500);
+      expect(
+        await getDb().select().from(agentKeyQuorums).where(eq(agentKeyQuorums.id, seeded.id)),
+      ).toEqual([seeded]);
+    } finally {
+      try {
+        await getDb().execute(
+          sql.raw(
+            `DROP TRIGGER IF EXISTS agent_quorum_completion_audit_failure_${AUDIT_TRIGGER_SUFFIX} ON audit_events`,
+          ),
+        );
+      } finally {
+        await getDb().execute(
+          sql.raw(
+            `DROP FUNCTION IF EXISTS fail_agent_quorum_completion_audit_${AUDIT_TRIGGER_SUFFIX}()`,
+          ),
+        );
+      }
+    }
   });
 });

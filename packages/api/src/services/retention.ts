@@ -17,6 +17,7 @@ import { redactedThrownDiagnostics } from "@stwd/shared";
 import { sql } from "drizzle-orm";
 import { writeAuditEvent } from "./audit";
 import { runTenantAuditRetention } from "./audit-archive";
+import { runInternalJobForEachTenant, runInternalJobForTenant } from "./tenant-job";
 
 const SYSTEM_TENANT_ID = "system";
 
@@ -51,6 +52,7 @@ export interface RetentionSweepOptions {
 interface RetentionSweepContext {
   auditWriter: typeof writeAuditEvent;
   auditRetentionRunner: typeof runTenantAuditRetention;
+  tenantId: string;
 }
 
 class RetentionAuthorizationAuditError extends Error {
@@ -109,7 +111,7 @@ async function writeRetentionAuthorization(
   const ttlDays = ttlForTable(table);
   try {
     await ctx.auditWriter({
-      tenantId: SYSTEM_TENANT_ID,
+      tenantId: ctx.tenantId,
       actorType: "system",
       action: "system.retention.sweep.authorized",
       resourceType: "table",
@@ -217,37 +219,12 @@ async function sweepDeactivatedUsers(ctx: RetentionSweepContext): Promise<SweepR
   }
   await writeRetentionAuthorization("users.deactivated", ctx);
 
-  const db = getDb();
-  let deleted = 0;
-  await db.transaction(async (tx) => {
-    await tx.execute(sql`
-      DELETE FROM refresh_tokens
-      WHERE user_id IN (
-        SELECT id FROM users
-        WHERE deactivated_at IS NOT NULL
-          AND deactivated_at < now() - make_interval(days => ${days})
-          AND NOT EXISTS (
-            SELECT 1 FROM user_tenants
-            WHERE user_tenants.user_id = users.id
-              AND user_tenants.role = 'owner'
-          )
-      )
-    `);
-    const removed = rowsFromExecute<{ id: string }>(
-      await tx.execute(sql`
-      DELETE FROM users
-      WHERE deactivated_at IS NOT NULL
-        AND deactivated_at < now() - make_interval(days => ${days})
-        AND NOT EXISTS (
-          SELECT 1 FROM user_tenants
-          WHERE user_tenants.user_id = users.id
-            AND user_tenants.role = 'owner'
-        )
-      RETURNING id
-    `),
-    );
-    deleted = removed.length;
-  });
+  const [row] = rowsFromExecute<{ deleted: number }>(
+    await getDb().execute(
+      sql`SELECT steward_bootstrap.retention_delete_deactivated_users(${days}) AS deleted`,
+    ),
+  );
+  const deleted = Number(row?.deleted ?? 0);
 
   return { table: "users.deactivated", deleted };
 }
@@ -283,70 +260,101 @@ export async function runRetentionSweep(
   options: RetentionSweepOptions = {},
 ): Promise<SweepResult[]> {
   const results: SweepResult[] = [];
-  const ctx: RetentionSweepContext = {
+  const shared = {
     auditWriter: options.auditWriter ?? writeAuditEvent,
     auditRetentionRunner: options.auditRetentionRunner ?? runTenantAuditRetention,
   };
 
-  const sweepers: Array<(context: RetentionSweepContext) => Promise<SweepResult | null>> = [
+  const tenantSweepers: Array<(context: RetentionSweepContext) => Promise<SweepResult | null>> = [
     sweepProxyAuditLog,
     sweepRefreshTokens,
     sweepFailedTransactions,
     sweepAuditEvents,
+  ];
+  const globalSweepers: Array<(context: RetentionSweepContext) => Promise<SweepResult | null>> = [
     sweepAuthKvStore,
     sweepDeactivatedUsers,
   ];
 
-  for (const sweeper of sweepers) {
-    try {
-      const r = await sweeper(ctx);
-      if (!r) continue;
-      results.push(r);
-      if (r.deleted > 0) {
-        const ttlDays = ttlForTable(r.table);
-        // A retention deletion is a SOC2 data-lifecycle control event; its audit
-        // record must be durable. Write it BLOCKING so a failure surfaces rather
-        // than becoming a fire-and-forget console line. The deletion is already
-        // committed and irreversible (no rollback), so on audit failure we flag
-        // the result and log at error level instead of swallowing it. Other
-        // sweepers still run — a background sweep should not abort wholesale on
-        // one audit failure.
-        try {
-          await ctx.auditWriter({
-            tenantId: SYSTEM_TENANT_ID,
-            actorType: "system",
-            action: "system.retention.sweep",
-            resourceType: "table",
-            resourceId: r.table,
-            metadata: {
-              table: r.table,
-              deleted: r.deleted,
-              ttlDays: ttlDays ?? null,
-              ageThreshold: ttlDays !== undefined ? `${ttlDays}d` : "per-row expires_at",
-            },
-          });
-        } catch (auditErr) {
-          r.auditFailed = true;
-          console.error(
-            `[retention] audit record for sweep of ${r.table} (${r.deleted} rows deleted) FAILED to persist`,
-            redactedThrownDiagnostics(auditErr),
-          );
-        }
+  const tenantRuns = await runInternalJobForEachTenant("data-retention", async (tenantId) => {
+    const tenantResults: SweepResult[] = [];
+    const ctx: RetentionSweepContext = { ...shared, tenantId };
+    for (const sweeper of tenantSweepers) {
+      const result = await runRetentionSweeper(sweeper, ctx);
+      if (result) tenantResults.push(result);
+    }
+    return tenantResults;
+  });
+  results.push(...tenantRuns.flatMap(({ value }) => value));
+
+  await getDb().execute(sql`SELECT steward_bootstrap.ensure_system_tenant()`);
+  const globalResults = await runInternalJobForTenant(
+    SYSTEM_TENANT_ID,
+    "global-data-retention",
+    async () => {
+      const values: SweepResult[] = [];
+      const globalContext: RetentionSweepContext = { ...shared, tenantId: SYSTEM_TENANT_ID };
+      for (const sweeper of globalSweepers) {
+        const result = await runRetentionSweeper(sweeper, globalContext);
+        if (result) values.push(result);
       }
-    } catch (err) {
-      if (err instanceof RetentionAuthorizationAuditError) {
-        results.push({ table: err.table, deleted: 0, auditFailed: true });
+      return values;
+    },
+  );
+  results.push(...globalResults);
+  return results;
+}
+
+async function runRetentionSweeper(
+  sweeper: (context: RetentionSweepContext) => Promise<SweepResult | null>,
+  ctx: RetentionSweepContext,
+): Promise<SweepResult | null> {
+  try {
+    const r = await sweeper(ctx);
+    if (!r) return null;
+    if (r.deleted > 0) {
+      const ttlDays = ttlForTable(r.table);
+      // A retention deletion is a SOC2 data-lifecycle control event; its audit
+      // record must be durable. Write it BLOCKING so a failure surfaces rather
+      // than becoming a fire-and-forget console line. The deletion is already
+      // committed and irreversible (no rollback), so on audit failure we flag
+      // the result and log at error level instead of swallowing it. Other
+      // sweepers still run — a background sweep should not abort wholesale on
+      // one audit failure.
+      try {
+        await ctx.auditWriter({
+          tenantId: ctx.tenantId,
+          actorType: "system",
+          action: "system.retention.sweep",
+          resourceType: "table",
+          resourceId: r.table,
+          metadata: {
+            table: r.table,
+            deleted: r.deleted,
+            ttlDays: ttlDays ?? null,
+            ageThreshold: ttlDays !== undefined ? `${ttlDays}d` : "per-row expires_at",
+          },
+        });
+      } catch (auditErr) {
+        r.auditFailed = true;
         console.error(
-          "[retention] authorization audit record failed; delete skipped",
-          redactedThrownDiagnostics(err.cause ?? err),
+          `[retention] audit record for sweep of ${r.table} (${r.deleted} rows deleted) FAILED to persist`,
+          redactedThrownDiagnostics(auditErr),
         );
-      } else {
-        console.error("[retention] sweep failed", redactedThrownDiagnostics(err));
       }
     }
+    return r;
+  } catch (err) {
+    if (err instanceof RetentionAuthorizationAuditError) {
+      console.error(
+        "[retention] authorization audit record failed; delete skipped",
+        redactedThrownDiagnostics(err.cause ?? err),
+      );
+      return { table: err.table, deleted: 0, auditFailed: true };
+    }
+    console.error("[retention] sweep failed", redactedThrownDiagnostics(err));
+    return null;
   }
-
-  return results;
 }
 
 /**

@@ -44,7 +44,7 @@ describe("golden-path.sh secrecy", () => {
     expect(raw).toContain(
       "STEWARD_GOLDEN_TENANT_KEY looks like a placeholder; generate a real tenant key.",
     );
-    // And the pre-fix leaky form must be gone.
+    // The credential-bearing form must be absent.
     expect(raw).not.toContain("looks like a placeholder ('$TENANT_KEY')");
   });
 });

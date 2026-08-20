@@ -144,7 +144,7 @@ jobs:
   web-trust-ux-a11y:
     name: Trust UX Accessibility (axe WCAG 2.1 AA)
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
 
     steps:
       - name: Checkout
@@ -249,10 +249,10 @@ jobs:
           if [ "${{ matrix.package }}" = "packages/sdk" ]; then
             mapfile -t sdk_tests < <(find packages/sdk/src -type f \( -name '*.test.ts' -o -name '*.spec.ts' \) | sort)
             bun test --isolate "${sdk_tests[@]}"
-          elif [ "${{ matrix.package }}" = "packages/plugin-sdk" ] || [ "${{ matrix.package }}" = "packages/plugin-example" ]; then
-            # These facade suites intentionally preload a hermetic PGLite
-            # context from their package-local bunfig.toml. Running them from
-            # the repository root skips that preload and fails at module init.
+          elif [ "${{ matrix.package }}" = "packages/plugin-sdk" ] || [ "${{ matrix.package }}" = "packages/plugin-example" ] || [ "${{ matrix.package }}" = "packages/plugin-capabilities" ]; then
+            # These packages own their test-process isolation or package-local
+            # preload. Running them from the repository root bypasses that
+            # contract and can leak mutable fixtures between files.
             (cd "${{ matrix.package }}" && bun run test)
           elif [ "${{ matrix.package }}" = "packages/trade-sessions" ]; then
             # PGLite migrations can exceed Bun's 5s default on hosted runners.
@@ -502,7 +502,7 @@ jobs:
 
       - name: Test web/src
         working-directory: web
-        run: bun test src
+        run: bun test src e2e/wallets/wallet-e2e-contract.test.ts
 
   unit-redis:
     name: Unit Tests (packages/redis)
@@ -584,6 +584,11 @@ jobs:
         env:
           DATABASE_URL: "postgres://steward:steward_ci@localhost:5432/steward_test"
 
+      - name: Builder perps migration reconciliation proof (real Postgres)
+        run: bun test ./packages/db/src/__tests__/agent-policy-builder-perps-reconcile-migration.test.ts
+        env:
+          DATABASE_URL: "postgres://steward:steward_ci@localhost:5432/steward_test"
+
       - name: RLS pool isolation proof (real Postgres)
         run: bun test ./packages/db/src/__tests__/tenant-rls-postgres.test.ts
         env:
@@ -594,10 +599,23 @@ jobs:
         env:
           DATABASE_URL: "postgres://steward:steward_ci@localhost:5432/steward_test"
 
+      - name: Email challenge publication deadline proof (real Redis)
+        run: bun test ./packages/auth/src/__tests__/email-redis-publish.integration.test.ts
+
       - name: Vault custody transition race proof (real Postgres)
-        run: bun test ./packages/vault/src/__tests__/custody-transition-race.real-pg.test.ts
+        run: bun test ./packages/vault/src/__tests__/custody-transition-race.real-pg.test.ts ./packages/vault/src/__tests__/transaction-id-race.real-pg.test.ts
         env:
           DATABASE_URL: "postgres://steward:steward_ci@localhost:5432/steward_test"
+
+      - name: X disable and recovery lineage concurrency (real Postgres)
+        run: >-
+          bun test ./packages/api/src/__tests__/provider-x-connect.test.ts
+          --test-name-pattern "concurrent recovery wins"
+        env:
+          DATABASE_URL: "postgres://steward:steward_ci@localhost:5432/steward_test"
+          STEWARD_X_CONNECT_REAL_PG: "true"
+          STEWARD_MASTER_PASSWORD: "ci-test-secret"
+          STEWARD_AUDIT_HMAC_KEY: "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
 
       - name: Start API test server
         env:
