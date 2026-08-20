@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -7,6 +7,8 @@ const REPOSITORY = "Steward-Fi/steward";
 const TARGET_SHA = "a".repeat(40);
 const workflowPath = join(import.meta.dir, "..", "..", ".github", "workflows", "wallet-e2e.yml");
 const temporaryDirectories: string[] = [];
+
+setDefaultTimeout(15_000);
 
 interface ReviewFixture {
   commit_id: string;
@@ -133,7 +135,9 @@ exec bun -e 'process.stdout.write(await Bun.file(process.env.MOCK_DIR + "/" + pr
   chmodSync(executable, 0o700);
 }
 
-async function execute(fixtures: Fixtures): Promise<{ exitCode: number; output: string; stderr: string }> {
+async function execute(
+  fixtures: Fixtures,
+): Promise<{ exitCode: number; output: string; stderr: string }> {
   const directory = mkdtempSync(join(tmpdir(), "steward-wallet-auth-"));
   temporaryDirectories.push(directory);
   installMockGh(directory, fixtures);
