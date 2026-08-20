@@ -3367,6 +3367,21 @@ vaultRoutes.post("/:agentId/actions/transfer", async (c) => {
     "Broadcast transfer actions",
   );
   if (idempotencyResponse) return idempotencyResponse;
+  const transferIdempotencyKey = c.req.header("Idempotency-Key");
+  const transferIdempotencyKeyDigest =
+    transfer.broadcast && transferIdempotencyKey
+      ? sha256(`${tenantId}\0${agentId}\0${transferIdempotencyKey}`)
+      : undefined;
+  const transferRequestDigest = sha256(
+    canonicalJsonStringify({
+      to: transfer.to,
+      token: transfer.token,
+      value: transfer.value,
+      chainId: transfer.chainId,
+      broadcast: transfer.broadcast,
+      sponsor: transfer.sponsor === true,
+    }),
+  );
   const solanaRecoveryBinding =
     isSolanaActionChain(transfer.chainId) && transfer.broadcast
       ? createSolanaTransferRecoveryBinding(c, {
@@ -3395,13 +3410,16 @@ vaultRoutes.post("/:agentId/actions/transfer", async (c) => {
             )
             .limit(1)
             .then((rows) => rows[0] ?? null)
-        : Promise.resolve(null),
+        : transferIdempotencyKeyDigest
+          ? findActionByIdempotency(agentId, "transfer", transferIdempotencyKeyDigest)
+          : Promise.resolve(null),
       findActionByReferenceId(agentId, "transfer", transfer.referenceId),
     ]);
     if (byIdempotencyKey && byReferenceId && byIdempotencyKey.id !== byReferenceId.id) {
-      return { conflict: true as const };
+      return { conflict: "Idempotency-Key and referenceId identify different requests" } as const;
     }
     const existing = byIdempotencyKey ?? byReferenceId;
+    if (!existing) return { existing: null } as const;
     if (existing && solanaRecoveryBinding) {
       const metadata = readSolanaRecoveryMetadata(existing.actionPayload);
       if (
@@ -3409,17 +3427,29 @@ vaultRoutes.post("/:agentId/actions/transfer", async (c) => {
         metadata.idempotencyKeyDigest !== solanaRecoveryBinding.idempotencyKeyDigest ||
         metadata.requestDigest !== solanaRecoveryBinding.requestDigest
       ) {
-        return { conflict: true as const };
+        return { conflict: "Idempotency-Key was already used for a different request" } as const;
       }
+      return { existing } as const;
     }
-    return { existing };
+    const payload = existing.actionPayload as Record<string, unknown> | null;
+    if (payload?.requestDigest !== transferRequestDigest) {
+      return {
+        conflict:
+          typeof payload?.requestDigest !== "string"
+            ? "Stored transfer replay binding is incomplete"
+            : byIdempotencyKey
+              ? "Idempotency-Key was already used for a different request"
+              : "referenceId was already used for a different request",
+      } as const;
+    }
+    if (byIdempotencyKey && actionReferenceId(payload) !== (transfer.referenceId ?? null)) {
+      return { conflict: "Idempotency-Key was already used with a different referenceId" } as const;
+    }
+    return { existing } as const;
   };
   const existingLookup = await findExistingTransferAction();
   if ("conflict" in existingLookup) {
-    return c.json<ApiResponse>(
-      { ok: false, error: "Idempotency-Key and referenceId identify different requests" },
-      409,
-    );
+    return c.json<ApiResponse>({ ok: false, error: existingLookup.conflict }, 409);
   }
   const existingAction = existingLookup.existing;
   if (existingAction) {
@@ -3453,10 +3483,7 @@ vaultRoutes.post("/:agentId/actions/transfer", async (c) => {
   return withAgentTransferSpendLock(agentId, async () => {
     const lockedLookup = await findExistingTransferAction();
     if ("conflict" in lockedLookup) {
-      return c.json<ApiResponse>(
-        { ok: false, error: "Idempotency-Key and referenceId identify different requests" },
-        409,
-      );
+      return c.json<ApiResponse>({ ok: false, error: lockedLookup.conflict }, 409);
     }
     const lockedExistingAction = lockedLookup.existing;
     if (lockedExistingAction) {
@@ -3601,6 +3628,9 @@ vaultRoutes.post("/:agentId/actions/transfer", async (c) => {
         broadcast: transfer.broadcast,
         referenceId: transfer.referenceId,
         sponsorship: sponsorshipPayload,
+        idempotencyKeyDigest: transferIdempotencyKeyDigest,
+        requestDigest:
+          transferIdempotencyKeyDigest || transfer.referenceId ? transferRequestDigest : undefined,
       }),
       ...(parsedSolanaTransferApproval ?? {}),
       ...(solanaRecoveryBinding
