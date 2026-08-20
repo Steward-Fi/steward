@@ -537,6 +537,8 @@ export async function pollBroadcastTransactionReceipts(
       txHash: transactions.txHash,
       actionType: transactions.actionType,
       actionPayload: transactions.actionPayload,
+      signedArtifactEvidence: transactions.signedArtifactEvidence,
+      signedArtifactEvidenceDigest: transactions.signedArtifactEvidenceDigest,
       executionPayloadDigest: transactions.executionPayloadDigest,
       executionPolicyRevisionHash: transactions.executionPolicyRevisionHash,
       executionBackend: transactions.executionBackend,

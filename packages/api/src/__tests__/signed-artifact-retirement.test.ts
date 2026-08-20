@@ -1,20 +1,29 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, spyOn } from "bun:test";
+import { createHash } from "node:crypto";
+import { createRequire } from "node:module";
 import {
   __resetAuditHmacKeyCacheForTests,
   agents,
   auditEvents,
   closeDb,
   getDb,
+  policies,
   tenants,
   transactions,
 } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
+import { canonicalJsonStringify } from "@stwd/shared";
 import { and, eq } from "drizzle-orm";
 import { Hono } from "hono";
 import type { AppVariables } from "../services/context";
 
 const TENANT_ID = `signed-retirement-${crypto.randomUUID()}`;
 const AGENT_ID = `signed-retirement-agent-${crypto.randomUUID()}`;
+const NATIVE_SOL_AGENT_ID = `retire-sol-${crypto.randomUUID()}`;
+const EVM_AGENT_ID = `retire-evm-${crypto.randomUUID()}`;
+const NATIVE_SOL_RECIPIENT = "6TcyBfPdBt1kjsvDZLzmBFnuMaLWiTaAt4RjUr9VA5YD";
+const NATIVE_SOL_BLOCKHASH = "7gyGAp71YXQRoxmFBaHxofQXAipvgHyBKPyxmdSJxyvz";
+const EVM_RECIPIENT = "0x9876543210987654321098765432109876543210";
 const SIGNATURE =
   "4oL4p7QvN3UH7V5wMGZgW5PuzEk4A9LXLHk9RxAoKjDKuLbQBsfXN8kEvKfj5K1oEJa8wFF6RVp2h7pP9w2f51ZV";
 const BLOCKHASH = "11111111111111111111111111111111";
@@ -24,6 +33,26 @@ let app: Hono<{ Variables: AppVariables }>;
 
 async function insertSigned(input?: { chainId?: number; actionType?: string }): Promise<string> {
   const id = crypto.randomUUID();
+  const signedArtifactEvidence =
+    input?.chainId === 1
+      ? {
+          version: 1 as const,
+          chainFamily: "evm" as const,
+          artifactHash: `0x${"ab".repeat(32)}`,
+          signer: "0x1234567890123456789012345678901234567890",
+          nonce: "7",
+          rawIntentDigest: "c".repeat(64),
+        }
+      : {
+          version: 1 as const,
+          chainFamily: "solana" as const,
+          artifactSignature: SIGNATURE,
+          signer: "11111111111111111111111111111111",
+          recentBlockhash: BLOCKHASH,
+          blockhashKind: "recent" as const,
+          lastValidBlockHeight: 123,
+          rawIntentDigest: "d".repeat(64),
+        };
   await getDb()
     .insert(transactions)
     .values({
@@ -40,6 +69,10 @@ async function insertSigned(input?: { chainId?: number; actionType?: string }): 
         recentBlockhash: BLOCKHASH,
         blockhashKind: "recent",
       },
+      signedArtifactEvidence,
+      signedArtifactEvidenceDigest: createHash("sha256")
+        .update(canonicalJsonStringify(signedArtifactEvidence))
+        .digest("hex"),
       signedAt: new Date(),
     });
   return id;
@@ -58,6 +91,7 @@ describe("mounted signed-artifact retirement", () => {
     process.env.STEWARD_PGLITE_MEMORY = "true";
     process.env.STEWARD_MASTER_PASSWORD = "signed-artifact-retirement-master-password";
     process.env.STEWARD_AUDIT_HMAC_KEY = AUDIT_KEY;
+    process.env.STEWARD_EXECUTION_AUTH_SECRET = "signed-artifact-retirement-execution-auth-secret";
     process.env.STEWARD_ALLOW_DEV_SECRETS = "true";
     const { db, client } = await createPGLiteDb("memory://");
     setPGLiteOverride(db, async () => client.close());
@@ -75,6 +109,31 @@ describe("mounted signed-artifact retirement", () => {
       walletAddress: "0x1234567890123456789012345678901234567890",
     });
     const { vaultRoutes } = await import("../routes/vault");
+    const context = await import("../services/context");
+    await context.vault.createAgent(
+      TENANT_ID,
+      NATIVE_SOL_AGENT_ID,
+      "Signed retirement native SOL agent",
+    );
+    await context.vault.createAgent(TENANT_ID, EVM_AGENT_ID, "Signed retirement EVM agent");
+    await getDb()
+      .insert(policies)
+      .values({
+        id: `signed-retirement-recipient-${crypto.randomUUID()}`,
+        agentId: NATIVE_SOL_AGENT_ID,
+        type: "approved-addresses",
+        enabled: true,
+        config: { addresses: [NATIVE_SOL_RECIPIENT], mode: "whitelist" },
+      });
+    await getDb()
+      .insert(policies)
+      .values({
+        id: `retire-evm-policy-${crypto.randomUUID()}`,
+        agentId: EVM_AGENT_ID,
+        type: "approved-addresses",
+        enabled: true,
+        config: { addresses: [EVM_RECIPIENT], mode: "whitelist" },
+      });
     app = new Hono<{ Variables: AppVariables }>();
     app.use("*", async (c, next) => {
       c.set("tenantId", TENANT_ID);
@@ -100,11 +159,12 @@ describe("mounted signed-artifact retirement", () => {
     delete process.env.STEWARD_PGLITE_MEMORY;
     delete process.env.STEWARD_MASTER_PASSWORD;
     delete process.env.STEWARD_AUDIT_HMAC_KEY;
+    delete process.env.STEWARD_EXECUTION_AUTH_SECRET;
     delete process.env.STEWARD_ALLOW_DEV_SECRETS;
     __resetAuditHmacKeyCacheForTests();
   });
 
-  it("rejects generic failure relabeling and unsupported EVM abandonment", async () => {
+  it("rejects generic failure relabeling and live EVM abandonment", async () => {
     const solanaId = await insertSigned();
     const failure = await app.request(`/vault/${AGENT_ID}/transactions/${solanaId}/lifecycle`, {
       method: "POST",
@@ -143,12 +203,19 @@ describe("mounted signed-artifact retirement", () => {
 
     await getDb().delete(transactions).where(eq(transactions.id, solanaId));
     const evmId = await insertSigned({ chainId: 1, actionType: "transaction" });
-    const evm = await retire(evmId);
-    expect(evm.status).toBe(409);
-    expect(await evm.json()).toMatchObject({
-      ok: false,
-      error: expect.stringContaining("finalized nonce replacement or consumption"),
-    });
+    const context = await import("../services/context");
+    const original = context.vault.inspectEvmSignedArtifact.bind(context.vault);
+    context.vault.inspectEvmSignedArtifact = async () => ({ result: "absent_live" });
+    try {
+      const evm = await retire(evmId);
+      expect(evm.status).toBe(409);
+      expect(await evm.json()).toMatchObject({
+        ok: false,
+        error: expect.stringContaining("still broadcastable"),
+      });
+    } finally {
+      context.vault.inspectEvmSignedArtifact = original;
+    }
   });
 
   it("fails closed while live, then retires absent expired evidence without signed bytes", async () => {
@@ -172,8 +239,8 @@ describe("mounted signed-artifact retirement", () => {
       expect(events).toContainEqual({
         action: "vault.signed_artifact.retired",
         metadata: expect.objectContaining({
-          artifactSignature: SIGNATURE,
-          recentBlockhash: BLOCKHASH,
+          artifactId: SIGNATURE,
+          chainFamily: "solana",
           inspectionResult: "absent_expired",
         }),
       });
@@ -183,35 +250,189 @@ describe("mounted signed-artifact retirement", () => {
     }
   });
 
-  it("never treats durable-nonce or unclassified artifacts as ordinary expired blockhashes", async () => {
-    const context = await import("../services/context");
-    const original = context.vault.inspectSolanaSignedArtifact.bind(context.vault);
-    let inspected = false;
-    context.vault.inspectSolanaSignedArtifact = async () => {
-      inspected = true;
-      return { result: "absent_expired" };
+  it("creates native-SOL evidence through the mounted offline signing path", async () => {
+    process.env.STEWARD_SOLANA_PRIORITY_FEES = "0";
+    const requireFromVault = createRequire(new URL("../../../vault/package.json", import.meta.url));
+    const { Connection } = requireFromVault("@solana/web3.js") as {
+      Connection: { prototype: { getLatestBlockhash: () => Promise<unknown> } };
     };
+    const getBlockhash = spyOn(Connection.prototype, "getLatestBlockhash").mockResolvedValue({
+      blockhash: NATIVE_SOL_BLOCKHASH,
+      lastValidBlockHeight: 4321,
+    });
     try {
-      for (const blockhashKind of ["durable_nonce", "unknown"] as const) {
-        const id = await insertSigned();
-        const [row] = await getDb().select().from(transactions).where(eq(transactions.id, id));
-        await getDb()
-          .update(transactions)
-          .set({ actionPayload: { ...(row?.actionPayload ?? {}), blockhashKind } })
-          .where(eq(transactions.id, id));
-        const response = await retire(id);
-        expect(response.status).toBe(409);
-        expect(
-          await getDb()
-            .select({ status: transactions.status })
-            .from(transactions)
-            .where(eq(transactions.id, id)),
-        ).toEqual([{ status: "signed" }]);
-        await getDb().delete(transactions).where(eq(transactions.id, id));
-      }
-      expect(inspected).toBe(false);
+      const response = await app.request(`/vault/${NATIVE_SOL_AGENT_ID}/actions/transfer`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          to: NATIVE_SOL_RECIPIENT,
+          value: "1234",
+          chainId: 101,
+          broadcast: false,
+        }),
+      });
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as { data: { id: string; signedTx: string } };
+      expect(body.data.signedTx.length).toBeGreaterThan(100);
+      const [row] = await getDb()
+        .select()
+        .from(transactions)
+        .where(eq(transactions.id, body.data.id));
+      expect(row?.status).toBe("signed");
+      expect(row?.signedArtifactEvidence).toMatchObject({
+        chainFamily: "solana",
+        signer: expect.any(String),
+        recentBlockhash: NATIVE_SOL_BLOCKHASH,
+        lastValidBlockHeight: 4321,
+        rawIntentDigest: expect.stringMatching(/^[0-9a-f]{64}$/),
+      });
+      expect(row?.signedArtifactEvidenceDigest).toMatch(/^[0-9a-f]{64}$/);
+      expect(JSON.stringify(row?.signedArtifactEvidence)).not.toContain(body.data.signedTx);
+      await getDb().delete(transactions).where(eq(transactions.id, body.data.id));
     } finally {
-      context.vault.inspectSolanaSignedArtifact = original;
+      getBlockhash.mockRestore();
+      delete process.env.STEWARD_SOLANA_PRIORITY_FEES;
+    }
+  });
+
+  it("creates EVM evidence through the mounted offline signing path", async () => {
+    const calls: unknown[] = [];
+    const rpc = spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
+      const request = JSON.parse(String(init?.body)) as { id: number; method: string };
+      calls.push(request);
+      const result =
+        request.method === "eth_getCode"
+          ? "0x"
+          : request.method === "eth_getTransactionCount"
+            ? "0x0"
+            : request.method === "eth_gasPrice"
+              ? "0x3b9aca00"
+              : request.method === "eth_chainId"
+                ? "0x2105"
+                : null;
+      return new Response(JSON.stringify({ jsonrpc: "2.0", id: request.id, result }));
+    });
+    try {
+      const response = await app.request(`/vault/${EVM_AGENT_ID}/sign`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          to: EVM_RECIPIENT,
+          value: "1234",
+          chainId: 8453,
+          nonce: 0,
+          broadcast: false,
+        }),
+      });
+      const body = (await response.json()) as {
+        data: { txId: string; signedTx: string };
+        error?: string;
+      };
+      expect(response.status, `${body.error}: ${JSON.stringify(calls)}`).toBe(200);
+      expect(body.data.signedTx).toMatch(/^0x[0-9a-f]+$/);
+      const [row] = await getDb()
+        .select()
+        .from(transactions)
+        .where(eq(transactions.id, body.data.txId));
+      expect(row?.status).toBe("signed");
+      expect(row?.signedArtifactEvidence).toMatchObject({
+        chainFamily: "evm",
+        artifactHash: expect.stringMatching(/^0x[0-9a-f]{64}$/),
+        signer: expect.stringMatching(/^0x[0-9a-fA-F]{40}$/),
+        nonce: "0",
+        rawIntentDigest: expect.stringMatching(/^[0-9a-f]{64}$/),
+      });
+      expect(row?.signedArtifactEvidenceDigest).toMatch(/^[0-9a-f]{64}$/);
+      expect(JSON.stringify(row?.signedArtifactEvidence)).not.toContain(body.data.signedTx);
+      await expect(
+        getDb()
+          .update(transactions)
+          .set({
+            signedArtifactEvidence: {
+              version: 1,
+              chainFamily: "evm",
+              artifactHash: `0x${"11".repeat(32)}`,
+              signer: "0x1111111111111111111111111111111111111111",
+              nonce: "1",
+              rawIntentDigest: "11".repeat(32),
+            },
+          })
+          .where(eq(transactions.id, body.data.txId))
+          .execute(),
+      ).rejects.toThrow();
+      const [preserved] = await getDb()
+        .select({
+          evidence: transactions.signedArtifactEvidence,
+          digest: transactions.signedArtifactEvidenceDigest,
+        })
+        .from(transactions)
+        .where(eq(transactions.id, body.data.txId));
+      expect(preserved).toEqual({
+        evidence: row?.signedArtifactEvidence,
+        digest: row?.signedArtifactEvidenceDigest,
+      });
+      await getDb().delete(transactions).where(eq(transactions.id, body.data.txId));
+    } finally {
+      rpc.mockRestore();
+    }
+  });
+
+  it("rejects missing or tampered digest-bound evidence before RPC", async () => {
+    const id = crypto.randomUUID();
+    await getDb()
+      .insert(transactions)
+      .values({
+        id,
+        agentId: AGENT_ID,
+        status: "signed",
+        toAddress: "11111111111111111111111111111111",
+        value: "0",
+        chainId: 101,
+        txHash: SIGNATURE,
+        signedArtifactEvidenceDigest: "0".repeat(64),
+      });
+    expect((await retire(id)).status).toBe(409);
+    expect(
+      await getDb()
+        .select({ status: transactions.status })
+        .from(transactions)
+        .where(eq(transactions.id, id)),
+    ).toEqual([{ status: "signed" }]);
+  });
+
+  it("rejects a matching digest over malformed lifetime evidence before RPC", async () => {
+    const id = crypto.randomUUID();
+    const malformedEvidence = {
+      version: 1,
+      chainFamily: "solana",
+      artifactSignature: SIGNATURE,
+      signer: "11111111111111111111111111111111",
+      recentBlockhash: BLOCKHASH,
+      blockhashKind: "recent",
+      rawIntentDigest: "d".repeat(64),
+    };
+    await getDb()
+      .insert(transactions)
+      .values({
+        id,
+        agentId: AGENT_ID,
+        status: "signed",
+        toAddress: "11111111111111111111111111111111",
+        value: "0",
+        chainId: 101,
+        txHash: SIGNATURE,
+        signedArtifactEvidence: malformedEvidence as never,
+        signedArtifactEvidenceDigest: createHash("sha256")
+          .update(canonicalJsonStringify(malformedEvidence))
+          .digest("hex"),
+      });
+    const context = await import("../services/context");
+    const inspection = spyOn(context.vault, "inspectSolanaSignedArtifact");
+    try {
+      expect((await retire(id)).status).toBe(409);
+      expect(inspection).not.toHaveBeenCalled();
+    } finally {
+      inspection.mockRestore();
     }
   });
 

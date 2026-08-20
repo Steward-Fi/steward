@@ -2,7 +2,7 @@ import { afterAll, beforeEach, describe, expect, setDefaultTimeout, test } from 
 import { agentWallets, encryptedChainKeys, eq, getDb, tenants, transactions } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { and } from "drizzle-orm";
-import { generatePrivateKey } from "viem/accounts";
+import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import type {
   ExternalKeyCustodyProvider,
   ExternalKeyHandleImportRequest,
@@ -354,6 +354,7 @@ describe("external key custody seam", () => {
   });
 
   test("delegates transaction signing to a provider without private key material", async () => {
+    const providerAccount = privateKeyToAccount(generatePrivateKey());
     const provider = new TestExternalKeyProvider("provider-signing", async (request) => {
       expect(request.handle).toEqual({
         providerId: "test-hsm",
@@ -361,13 +362,26 @@ describe("external key custody seam", () => {
         version: "1",
         region: "us-east-1",
       });
-      expect(request.address).toBe("0x1111111111111111111111111111111111111111");
+      expect(request.address).toBe(providerAccount.address);
       expect(JSON.stringify(request).toLowerCase()).not.toContain("privatekey");
-      return { result: "0xsigned-by-external-provider", broadcast: false };
+      return {
+        result: await providerAccount.signTransaction({
+          chainId: request.chainId,
+          to: request.to as `0x${string}`,
+          value: BigInt(request.value),
+          data: request.data as `0x${string}`,
+          gas: 21_000n,
+          gasPrice: 1_000_000_000n,
+          nonce: request.nonce ?? 0,
+        }),
+        broadcast: false,
+      };
     });
     vault = await freshVault(provider);
     await vault.createAgent(TENANT_ID, "agent-external", "External Agent");
-    await vault.importExternalKeyHandle(externalHandleRequest());
+    await vault.importExternalKeyHandle(
+      externalHandleRequest({ address: providerAccount.address }),
+    );
     const target = await vault.resolveExecutionTarget({
       tenantId: TENANT_ID,
       agentId: "agent-external",
@@ -383,6 +397,7 @@ describe("external key custody seam", () => {
         to: "0x2222222222222222222222222222222222222222",
         value: "1",
         data: "0x",
+        nonce: 0,
         venue: "hsm-primary",
         broadcast: false,
       },
@@ -393,7 +408,7 @@ describe("external key custody seam", () => {
       },
     );
 
-    expect(signed).toBe("0xsigned-by-external-provider");
+    expect(signed).toMatch(/^0x[0-9a-f]+$/);
     expect(provider.signCalls).toHaveLength(1);
 
     const [tx] = await getDb()
@@ -403,6 +418,56 @@ describe("external key custody seam", () => {
     expect(tx?.agentId).toBe("agent-external");
     expect(tx?.status).toBe("signed");
     expect(tx?.txHash).toBeNull();
+    expect(tx?.signedArtifactEvidence).toMatchObject({
+      chainFamily: "evm",
+      signer: providerAccount.address,
+      nonce: "0",
+    });
+    expect(tx?.signedArtifactEvidenceDigest).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  test("fails closed before external Solana offline signing without retirement evidence", async () => {
+    const provider = new TestExternalKeyProvider("provider-signing", async () => ({
+      result: "provider-opaque-signed-solana-artifact",
+      broadcast: false,
+    }));
+    vault = await freshVault(provider);
+    await vault.createAgent(TENANT_ID, "agent-external", "External Agent");
+    await vault.importExternalKeyHandle(
+      externalHandleRequest({
+        chainFamily: "solana",
+        address: "11111111111111111111111111111111",
+        venue: "solana-hsm",
+      }),
+    );
+    const target = await vault.resolveExecutionTarget({
+      tenantId: TENANT_ID,
+      agentId: "agent-external",
+      chainId: 101,
+      venue: "solana-hsm",
+    });
+
+    await expect(
+      vault.signTransaction(
+        {
+          tenantId: TENANT_ID,
+          agentId: "agent-external",
+          chainId: 101,
+          to: "11111111111111111111111111111111",
+          value: "1",
+          venue: "solana-hsm",
+          broadcast: false,
+        },
+        {
+          txId: "external-solana-no-retirement-evidence",
+          expectedBackend: target.backend,
+          expectedBackendIdentityDigest: target.backendIdentityDigest,
+        },
+      ),
+    ).rejects.toThrow(
+      "External custody Solana offline signing requires durable artifact evidence support",
+    );
+    expect(provider.signCalls).toHaveLength(0);
   });
 
   test("persists deterministic outcome_unknown before surfacing an ambiguous provider broadcast", async () => {

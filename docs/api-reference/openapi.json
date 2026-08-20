@@ -100721,7 +100721,7 @@
                       "required": [
                         "txId",
                         "status",
-                        "artifactSignature",
+                        "artifactId",
                         "retiredAt"
                       ],
                       "properties": {
@@ -100732,7 +100732,7 @@
                           "type": "string",
                           "const": "retired"
                         },
-                        "artifactSignature": {
+                        "artifactId": {
                           "type": "string"
                         },
                         "retiredAt": {

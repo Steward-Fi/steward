@@ -46167,7 +46167,7 @@ export interface paths {
                                 txId: string;
                                 /** @constant */
                                 status: "retired";
-                                artifactSignature: string;
+                                artifactId: string;
                                 retiredAt: string;
                             };
                         };

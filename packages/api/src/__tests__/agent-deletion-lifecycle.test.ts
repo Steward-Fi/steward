@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it, setDefaultTimeout } from "bun:test";
+import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { revocationStore } from "@stwd/auth";
@@ -22,6 +23,7 @@ import {
   workspaces,
 } from "@stwd/db";
 import { capabilities, capabilityGrants, capabilityInvocations } from "@stwd/plugin-capabilities";
+import { canonicalJsonStringify } from "@stwd/shared";
 import { and, eq } from "drizzle-orm";
 import { migrate as pgliteMigrate } from "drizzle-orm/pglite/migrator";
 import { Hono } from "hono";
@@ -825,6 +827,17 @@ describe("agent deletion upstream credential boundary", () => {
   it("retires an authoritatively expired signed Solana artifact before mounted deletion", async () => {
     const agentId = `signed-execution-${crypto.randomUUID()}`;
     const transactionId = crypto.randomUUID();
+    const signedArtifactEvidence = {
+      version: 1 as const,
+      chainFamily: "solana" as const,
+      artifactSignature:
+        "4oL4p7QvN3UH7V5wMGZgW5PuzEk4A9LXLHk9RxAoKjDKuLbQBsfXN8kEvKfj5K1oEJa8wFF6RVp2h7pP9w2f51ZV",
+      signer: "11111111111111111111111111111111",
+      recentBlockhash: "11111111111111111111111111111111",
+      blockhashKind: "recent" as const,
+      lastValidBlockHeight: 100,
+      rawIntentDigest: "a".repeat(64),
+    };
     await createAgent(agentId);
     await getDb()
       .insert(transactions)
@@ -844,6 +857,10 @@ describe("agent deletion upstream credential boundary", () => {
           recentBlockhash: "11111111111111111111111111111111",
           blockhashKind: "recent",
         },
+        signedArtifactEvidence,
+        signedArtifactEvidenceDigest: createHash("sha256")
+          .update(canonicalJsonStringify(signedArtifactEvidence))
+          .digest("hex"),
       });
 
     const response = await tenantDelete(agentId);
@@ -882,6 +899,16 @@ describe("agent deletion upstream credential boundary", () => {
         data: { txId: transactionId, status: "retired" },
       });
       expect((await tenantDelete(agentId)).status).toBe(200);
+      const [retirementAudit] = await getDb()
+        .select({ metadata: auditEvents.metadata })
+        .from(auditEvents)
+        .where(
+          and(
+            eq(auditEvents.resourceId, transactionId),
+            eq(auditEvents.action, "vault.signed_artifact.retired"),
+          ),
+        );
+      expect(retirementAudit?.metadata).toMatchObject({ signedArtifactEvidence });
     } finally {
       context.vault.inspectSolanaSignedArtifact = originalInspect;
     }

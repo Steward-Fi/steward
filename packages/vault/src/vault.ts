@@ -18,6 +18,7 @@ import type {
   PolicyResult,
   RpcRequest,
   RpcResponse,
+  SignedArtifactEvidence,
   SignRequest,
   SignSolanaTransactionRequest,
   SignTypedDataRequest,
@@ -32,7 +33,11 @@ import {
   createPublicClient,
   createWalletClient,
   formatEther,
+  type Hex,
   http,
+  keccak256,
+  parseTransaction,
+  recoverTransactionAddress,
   type TransactionSerializable,
 } from "viem";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
@@ -103,7 +108,7 @@ import {
 import {
   assertParsedSolanaTransferMatches,
   assertSolanaPriorityFeeWithinCap,
-  classifySolanaBlockhashKind,
+  extractSolanaLifetimeEvidence,
   isVersionedTransactionBytes,
   parseSolanaTransaction,
 } from "./solana-instructions";
@@ -464,6 +469,9 @@ export interface SignTransactionOptions {
     signature: string;
     recentBlockhash: string;
     blockhashKind: "recent" | "durable_nonce" | "unknown";
+    lastValidBlockHeight?: number;
+    durableNonceAccount?: string;
+    durableNonceAuthority?: string;
   }) => Promise<void>;
   /**
    * Ownership token for a gateway-staged Solana recovery anchor. When set,
@@ -478,6 +486,66 @@ export class SolanaRecoveryOwnershipLostError extends Error {
     super("Solana recovery execution ownership changed");
     this.name = "SolanaRecoveryOwnershipLostError";
   }
+}
+
+function signedArtifactEvidenceDigest(evidence: SignedArtifactEvidence): string {
+  return createHash("sha256").update(canonicalJsonStringify(evidence)).digest("hex");
+}
+
+async function deriveEvmSignedArtifactEvidence(
+  serialized: string,
+  request: SignRequest,
+  chainId: number,
+  expectedSigner?: string,
+): Promise<Extract<SignedArtifactEvidence, { chainFamily: "evm" }>> {
+  if (!/^0x[0-9a-fA-F]+$/.test(serialized)) {
+    throw new Error("Offline EVM signer did not return a serialized transaction");
+  }
+  const parsed = parseTransaction(serialized as Hex);
+  if (parsed.nonce === undefined) throw new Error("Signed EVM artifact is missing its nonce");
+  const normalizedData = parsed.data ?? "0x";
+  if (
+    parsed.chainId !== chainId ||
+    parsed.to?.toLowerCase() !== request.to.toLowerCase() ||
+    (parsed.value ?? 0n) !== BigInt(request.value) ||
+    normalizedData.toLowerCase() !== (request.data ?? "0x").toLowerCase() ||
+    (request.nonce !== undefined && parsed.nonce !== request.nonce) ||
+    (request.gasLimit !== undefined && parsed.gas !== BigInt(request.gasLimit))
+  ) {
+    throw new Error("Signed EVM artifact does not match the authorized request");
+  }
+  const signer = await recoverTransactionAddress({
+    serializedTransaction: serialized as Parameters<
+      typeof recoverTransactionAddress
+    >[0]["serializedTransaction"],
+  });
+  if (expectedSigner && signer.toLowerCase() !== expectedSigner.toLowerCase()) {
+    throw new Error("Signed EVM artifact signer does not match the authorized wallet");
+  }
+  return {
+    version: 1,
+    chainFamily: "evm",
+    artifactHash: keccak256(serialized as Hex),
+    signer,
+    nonce: parsed.nonce.toString(),
+    rawIntentDigest: createHash("sha256")
+      .update(
+        canonicalJsonStringify({
+          type: parsed.type,
+          chainId: parsed.chainId,
+          to: parsed.to?.toLowerCase() ?? null,
+          value: (parsed.value ?? 0n).toString(),
+          data: normalizedData.toLowerCase(),
+          nonce: parsed.nonce.toString(),
+          gas: parsed.gas?.toString() ?? null,
+          gasPrice: parsed.gasPrice?.toString() ?? null,
+          maxFeePerGas: parsed.maxFeePerGas?.toString() ?? null,
+          maxPriorityFeePerGas: parsed.maxPriorityFeePerGas?.toString() ?? null,
+          accessList: parsed.accessList ?? null,
+        }),
+      )
+      .digest("hex"),
+  };
 }
 
 export interface ResolvedExecutionTarget {
@@ -882,6 +950,7 @@ export class Vault {
     shouldBroadcast: boolean,
     hash: string,
     options: SignTransactionOptions,
+    signedArtifactEvidence?: SignedArtifactEvidence,
   ): Promise<void> {
     const db = getDb();
     const txId = options.txId ?? crypto.randomUUID();
@@ -929,6 +998,10 @@ export class Vault {
         executionBackendIdentityDigest: options.expectedBackendIdentityDigest,
         policyResults: options.policyResults ?? [],
         signedAt,
+        signedArtifactEvidence,
+        signedArtifactEvidenceDigest: signedArtifactEvidence
+          ? signedArtifactEvidenceDigest(signedArtifactEvidence)
+          : undefined,
         createdAt: signedAt,
       })
       .onConflictDoUpdate({
@@ -944,6 +1017,10 @@ export class Vault {
           executionBackendIdentityDigest: options.expectedBackendIdentityDigest,
           policyResults: options.policyResults ?? [],
           signedAt,
+          signedArtifactEvidence,
+          signedArtifactEvidenceDigest: signedArtifactEvidence
+            ? signedArtifactEvidenceDigest(signedArtifactEvidence)
+            : undefined,
         },
         setWhere: eq(transactions.agentId, request.agentId),
       })
@@ -1679,6 +1756,18 @@ export class Vault {
         ) {
           throw externalKeySigningUnavailableError();
         }
+        if (isSolana && !shouldBroadcast) {
+          // The current external-custody contract returns only the provider's
+          // opaque result. It does not return the exact signed message,
+          // last-valid block height, or durable-nonce account/authority needed
+          // to prove that an offline Solana artifact can no longer land. Never
+          // hand client-held signed bytes back without durable retirement
+          // evidence; providers must use the dedicated serialized-Solana path
+          // once that evidence is part of the custody contract.
+          throw new Error(
+            "External custody Solana offline signing requires durable artifact evidence support",
+          );
+        }
         const rpcUrl = isSolana
           ? (this.config.rpcUrl ?? resolveSolanaRpc(chainId))
           : (CHAIN_RPCS[chainId] ?? this.config.rpcUrl);
@@ -1779,12 +1868,22 @@ export class Vault {
               cause: new Error("External custody signer returned a mismatched transaction hash"),
             });
           }
+          const offlineEvidence =
+            !shouldBroadcast && !isSolana
+              ? await deriveEvmSignedArtifactEvidence(
+                  signed.result,
+                  request,
+                  chainId,
+                  externalWallet.address,
+                )
+              : undefined;
           await this.recordSignedTransaction(
             request,
             chainId,
             shouldBroadcast,
             signed.result,
             options,
+            offlineEvidence,
           );
         } catch (error) {
           // Once the durable checkpoint has completed, every later failure is
@@ -1849,6 +1948,7 @@ export class Vault {
     }
 
     let hash: string;
+    let signedArtifactEvidence: SignedArtifactEvidence | undefined;
 
     if (isSolana) {
       if (request.walletAddress && _walletAddress) {
@@ -1859,15 +1959,27 @@ export class Vault {
         }
       }
       const rpcUrl = this.config.rpcUrl ?? resolveSolanaRpc(chainId);
-      hash = await signSolanaTransaction(secretKey, request.to, BigInt(request.value), rpcUrl, {
-        broadcast: shouldBroadcast,
-        onBroadcastPrepared: options.onSolanaBroadcastPrepared,
-        // Attach adaptive priority fees (simulated CU limit + recent-fee-derived
-        // price, bounded by COMPUTE_BUDGET_BOUNDS). Estimation never throws and
-        // falls back to safe defaults on RPC error. Set STEWARD_SOLANA_PRIORITY_FEES=0
-        // to revert to the legacy no-compute-budget transfer.
-        computeBudget: process.env.STEWARD_SOLANA_PRIORITY_FEES === "0" ? false : {},
-      });
+      const signed = await signSolanaTransaction(
+        secretKey,
+        request.to,
+        BigInt(request.value),
+        rpcUrl,
+        {
+          broadcast: shouldBroadcast,
+          onBroadcastPrepared: options.onSolanaBroadcastPrepared,
+          // Attach adaptive priority fees (simulated CU limit + recent-fee-derived
+          // price, bounded by COMPUTE_BUDGET_BOUNDS). Estimation never throws and
+          // falls back to safe defaults on RPC error. Set STEWARD_SOLANA_PRIORITY_FEES=0
+          // to revert to the legacy no-compute-budget transfer.
+          computeBudget: process.env.STEWARD_SOLANA_PRIORITY_FEES === "0" ? false : {},
+        },
+      );
+      hash = signed.result;
+      signedArtifactEvidence = {
+        version: 1,
+        chainFamily: "solana",
+        ...signed.evidence,
+      };
     } else {
       assertEvmWalletAddressMatches(secretKey, request.walletAddress);
       const account = privateKeyToAccount(secretKey as `0x${string}`);
@@ -2000,7 +2112,24 @@ export class Vault {
       }
     }
 
-    await this.recordSignedTransaction(request, chainId, shouldBroadcast, hash, options);
+    if (!shouldBroadcast && !isSolana) {
+      const serialized = hash as Hex;
+      signedArtifactEvidence = await deriveEvmSignedArtifactEvidence(
+        serialized,
+        request,
+        chainId,
+        privateKeyToAccount(secretKey as `0x${string}`).address,
+      );
+    }
+
+    await this.recordSignedTransaction(
+      request,
+      chainId,
+      shouldBroadcast,
+      hash,
+      options,
+      shouldBroadcast ? undefined : signedArtifactEvidence,
+    );
 
     return hash;
   }
@@ -3089,6 +3218,11 @@ export class Vault {
     recentBlockhash?: string;
     /** Byte-derived lifetime contract for the embedded blockhash. */
     blockhashKind?: "recent" | "durable_nonce" | "unknown";
+    lastValidBlockHeight?: number;
+    durableNonceAccount?: string;
+    durableNonceAuthority?: string;
+    signer?: string;
+    rawIntentDigest?: string;
   }> {
     const db = getDb();
 
@@ -3196,7 +3330,11 @@ export class Vault {
       SendTransactionError,
     } = await import("@solana/web3.js");
     const txBytes = Uint8Array.from(atob(request.transaction), (c) => c.charCodeAt(0));
-    const blockhashKind = classifySolanaBlockhashKind(request.transaction);
+    const lifetime = extractSolanaLifetimeEvidence(request.transaction);
+    const blockhashKind = lifetime.blockhashKind;
+    if (blockhashKind === "unknown") {
+      throw new Error("Solana transaction lifetime could not be determined");
+    }
 
     const requireEnvelope = (): { from: string; to: string; lamports: bigint } | null => {
       if (request.expectedTo === undefined && request.expectedValue === undefined) return null;
@@ -3253,6 +3391,33 @@ export class Vault {
       recentBlockhash = tx.recentBlockhash;
     }
 
+    let lastValidBlockHeight: number | undefined;
+    if (blockhashKind === "recent") {
+      if (
+        !Number.isSafeInteger(request.lastValidBlockHeight) ||
+        (request.lastValidBlockHeight ?? -1) < 0
+      ) {
+        throw new Error("Recent-blockhash Solana signing requires lastValidBlockHeight evidence");
+      }
+      lastValidBlockHeight = request.lastValidBlockHeight;
+    } else {
+      const { NonceAccount, PublicKey } = await import("@solana/web3.js");
+      const connection = new Connection(rpcUrl, "confirmed");
+      const nonceInfo = await connection.getAccountInfo(
+        new PublicKey(lifetime.durableNonceAccount),
+        { commitment: "finalized" },
+      );
+      if (!nonceInfo) throw new Error("Durable nonce account is unavailable");
+      const nonceAccount = NonceAccount.fromAccountData(nonceInfo.data);
+      if (
+        nonceAccount.nonce !== recentBlockhash ||
+        nonceAccount.authorizedPubkey.toBase58() !== lifetime.durableNonceAuthority
+      ) {
+        throw new Error("Durable nonce account does not match the signed message lifetime");
+      }
+    }
+    const rawIntentDigest = createHash("sha256").update(request.transaction).digest("hex");
+
     if (shouldBroadcast) {
       // Persist the deterministic signature before the first external write.
       // A checkpoint failure aborts safely before sendRawTransaction.
@@ -3260,6 +3425,13 @@ export class Vault {
         signature: preparedSignature,
         recentBlockhash,
         blockhashKind,
+        lastValidBlockHeight,
+        ...(lifetime.blockhashKind === "durable_nonce"
+          ? {
+              durableNonceAccount: lifetime.durableNonceAccount,
+              durableNonceAuthority: lifetime.durableNonceAuthority,
+            }
+          : {}),
       });
       const connection = new Connection(rpcUrl, "confirmed");
       try {
@@ -3307,6 +3479,15 @@ export class Vault {
       artifactSignature: preparedSignature,
       recentBlockhash,
       blockhashKind,
+      lastValidBlockHeight,
+      ...(lifetime.blockhashKind === "durable_nonce"
+        ? {
+            durableNonceAccount: lifetime.durableNonceAccount,
+            durableNonceAuthority: lifetime.durableNonceAuthority,
+          }
+        : {}),
+      signer: keypair.publicKey.toBase58(),
+      rawIntentDigest,
     };
   }
 
@@ -3314,6 +3495,10 @@ export class Vault {
     signature: string;
     recentBlockhash: string;
     chainId?: number;
+    blockhashKind?: "recent" | "durable_nonce";
+    lastValidBlockHeight?: number;
+    durableNonceAccount?: string;
+    durableNonceAuthority?: string;
   }): Promise<
     | { result: "landed_confirmed" | "landed_broadcast" | "landed_failed" }
     | { result: "absent_live" | "absent_expired" }
@@ -3321,21 +3506,208 @@ export class Vault {
     const { Connection } = await import("@solana/web3.js");
     const rpcUrl = this.config.rpcUrl ?? resolveSolanaRpc(input.chainId ?? 101);
     const connection = new Connection(rpcUrl, "confirmed");
+    const call = async (method: string, params: unknown[]): Promise<unknown> => {
+      const response = await fetch(rpcUrl, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
+      });
+      if (!response.ok) throw new Error("Solana RPC request failed");
+      const json: unknown = await response.json();
+      if (!json || typeof json !== "object" || Array.isArray(json)) {
+        throw new Error("Malformed Solana RPC response");
+      }
+      const record = json as Record<string, unknown>;
+      if (
+        record.jsonrpc !== "2.0" ||
+        record.id !== 1 ||
+        "error" in record ||
+        !("result" in record)
+      ) {
+        throw new Error("Malformed Solana RPC response");
+      }
+      return record.result;
+    };
     const response = await connection.getSignatureStatuses([input.signature], {
       searchTransactionHistory: true,
     });
+    if (
+      !response ||
+      !response.context ||
+      !Number.isSafeInteger(response.context.slot) ||
+      response.context.slot < 0 ||
+      !Array.isArray(response.value) ||
+      response.value.length !== 1
+    ) {
+      throw new Error("Malformed Solana signature-status response");
+    }
     const status = response.value[0];
     if (status) {
-      if (status.err !== null) return { result: "landed_failed" };
-      if (status.confirmationStatus === "confirmed" || status.confirmationStatus === "finalized") {
-        return { result: "landed_confirmed" };
+      if (
+        typeof status !== "object" ||
+        Array.isArray(status) ||
+        !("err" in status) ||
+        !("confirmationStatus" in status) ||
+        !Number.isSafeInteger(status.slot) ||
+        status.slot < 0 ||
+        (status.confirmations !== null &&
+          (!Number.isSafeInteger(status.confirmations) || status.confirmations < 0)) ||
+        (status.err !== null &&
+          typeof status.err !== "string" &&
+          (typeof status.err !== "object" ||
+            Array.isArray(status.err) ||
+            Object.keys(status.err).length === 0))
+      ) {
+        throw new Error("Malformed Solana signature status");
       }
-      return { result: "landed_broadcast" };
+      if (status.confirmationStatus === "confirmed" || status.confirmationStatus === "finalized") {
+        return { result: status.err === null ? "landed_confirmed" : "landed_failed" };
+      }
+      if (status.confirmationStatus === "processed" || status.confirmationStatus === null) {
+        return { result: "landed_broadcast" };
+      }
+      throw new Error("Malformed Solana confirmation status");
     }
-    const validity = await connection.isBlockhashValid(input.recentBlockhash, {
-      commitment: "confirmed",
-    });
-    return { result: validity.value ? "absent_live" : "absent_expired" };
+    if (input.blockhashKind === "durable_nonce") {
+      if (!input.durableNonceAccount || !input.durableNonceAuthority) {
+        throw new Error("Durable-nonce evidence is incomplete");
+      }
+      const { NonceAccount, PublicKey } = await import("@solana/web3.js");
+      const account = await connection.getAccountInfo(new PublicKey(input.durableNonceAccount), {
+        commitment: "finalized",
+      });
+      if (!account) throw new Error("Durable nonce account status is unavailable");
+      const nonce = NonceAccount.fromAccountData(account.data);
+      if (nonce.authorizedPubkey.toBase58() !== input.durableNonceAuthority) {
+        throw new Error("Durable nonce authority changed; retirement evidence is ambiguous");
+      }
+      return nonce.nonce === input.recentBlockhash
+        ? { result: "absent_live" }
+        : { result: "absent_expired" };
+    }
+    if (input.lastValidBlockHeight !== undefined) {
+      if (!Number.isSafeInteger(input.lastValidBlockHeight) || input.lastValidBlockHeight < 0) {
+        throw new Error("Malformed Solana last-valid block height");
+      }
+      const height = await call("getBlockHeight", [{ commitment: "finalized" }]);
+      if (typeof height !== "number" || !Number.isSafeInteger(height) || height < 0) {
+        throw new Error("Malformed Solana block-height response");
+      }
+      if (height <= input.lastValidBlockHeight) return { result: "absent_live" };
+      const validity = await call("isBlockhashValid", [
+        input.recentBlockhash,
+        { commitment: "finalized" },
+      ]);
+      if (!validity || typeof validity !== "object" || Array.isArray(validity)) {
+        throw new Error("Malformed Solana blockhash-validity response");
+      }
+      const validityRecord = validity as Record<string, unknown>;
+      if (
+        !validityRecord.context ||
+        typeof validityRecord.context !== "object" ||
+        typeof validityRecord.value !== "boolean"
+      ) {
+        throw new Error("Malformed Solana blockhash-validity response");
+      }
+      return { result: validityRecord.value ? "absent_live" : "absent_expired" };
+    }
+    const validity = await call("isBlockhashValid", [
+      input.recentBlockhash,
+      { commitment: "confirmed" },
+    ]);
+    if (!validity || typeof validity !== "object" || Array.isArray(validity)) {
+      throw new Error("Malformed Solana blockhash-validity response");
+    }
+    const validityRecord = validity as Record<string, unknown>;
+    if (
+      !validityRecord.context ||
+      typeof validityRecord.context !== "object" ||
+      typeof validityRecord.value !== "boolean"
+    ) {
+      throw new Error("Malformed Solana blockhash-validity response");
+    }
+    return { result: validityRecord.value ? "absent_live" : "absent_expired" };
+  }
+
+  async inspectEvmSignedArtifact(input: {
+    artifactHash: string;
+    signer: string;
+    nonce: string;
+    chainId: number;
+  }): Promise<
+    | { result: "landed_confirmed" | "landed_broadcast" | "landed_failed" }
+    | { result: "absent_live" | "absent_nonce_consumed" }
+  > {
+    if (!/^0x[0-9a-fA-F]{64}$/.test(input.artifactHash)) {
+      throw new Error("Malformed EVM artifact hash");
+    }
+    if (!/^0x[0-9a-fA-F]{40}$/.test(input.signer) || !/^\d+$/.test(input.nonce)) {
+      throw new Error("Malformed EVM signed-artifact evidence");
+    }
+    const rpcUrl = CHAIN_RPCS[input.chainId] ?? this.config.rpcUrl;
+    if (!rpcUrl) throw new Error("No RPC configured for EVM artifact inspection");
+    const call = async (method: string, params: unknown[]): Promise<unknown> => {
+      const response = await fetch(rpcUrl, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
+      });
+      if (!response.ok) throw new Error("EVM RPC request failed");
+      const json: unknown = await response.json();
+      if (!json || typeof json !== "object" || Array.isArray(json)) {
+        throw new Error("Malformed EVM RPC response");
+      }
+      const record = json as Record<string, unknown>;
+      if (
+        record.jsonrpc !== "2.0" ||
+        record.id !== 1 ||
+        "error" in record ||
+        !("result" in record)
+      ) {
+        throw new Error("Malformed EVM RPC response");
+      }
+      return record.result;
+    };
+    const receipt = await call("eth_getTransactionReceipt", [input.artifactHash]);
+    if (receipt !== null) {
+      if (!receipt || typeof receipt !== "object" || Array.isArray(receipt)) {
+        throw new Error("Malformed EVM receipt response");
+      }
+      const value = receipt as Record<string, unknown>;
+      if (
+        typeof value.transactionHash !== "string" ||
+        value.transactionHash.toLowerCase() !== input.artifactHash.toLowerCase() ||
+        !/^0x[0-9a-fA-F]+$/.test(String(value.blockNumber)) ||
+        (value.status !== "0x0" && value.status !== "0x1")
+      ) {
+        throw new Error("Malformed EVM receipt response");
+      }
+      const finalizedBlock = await call("eth_getBlockByNumber", ["finalized", false]);
+      if (!finalizedBlock || typeof finalizedBlock !== "object" || Array.isArray(finalizedBlock)) {
+        throw new Error("Malformed finalized EVM block response");
+      }
+      const finalizedNumber = (finalizedBlock as Record<string, unknown>).number;
+      if (
+        typeof finalizedNumber !== "string" ||
+        !/^0x(?:0|[1-9a-fA-F][0-9a-fA-F]*)$/.test(finalizedNumber)
+      ) {
+        throw new Error("Malformed finalized EVM block response");
+      }
+      if (BigInt(String(value.blockNumber)) > BigInt(finalizedNumber)) {
+        return { result: "landed_broadcast" };
+      }
+      return { result: value.status === "0x1" ? "landed_confirmed" : "landed_failed" };
+    }
+    const finalizedNonce = await call("eth_getTransactionCount", [input.signer, "finalized"]);
+    if (
+      typeof finalizedNonce !== "string" ||
+      !/^0x(?:0|[1-9a-fA-F][0-9a-fA-F]*)$/.test(finalizedNonce)
+    ) {
+      throw new Error("Malformed finalized EVM nonce response");
+    }
+    return BigInt(finalizedNonce) > BigInt(input.nonce)
+      ? { result: "absent_nonce_consumed" }
+      : { result: "absent_live" };
   }
 
   async reconcileSolanaBroadcast(input: {

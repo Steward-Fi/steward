@@ -1,5 +1,5 @@
 import { Buffer } from "node:buffer";
-import { createPrivateKey, sign as cryptoSign } from "node:crypto";
+import { createHash, createPrivateKey, sign as cryptoSign } from "node:crypto";
 import {
   ComputeBudgetProgram,
   Connection,
@@ -397,20 +397,34 @@ export async function signSolanaTransaction(
       signature: string;
       recentBlockhash: string;
       blockhashKind: "recent";
+      lastValidBlockHeight: number;
     }) => Promise<void>;
   } = {},
-): Promise<string> {
+): Promise<{
+  result: string;
+  evidence: {
+    artifactSignature: string;
+    signer: string;
+    recentBlockhash: string;
+    blockhashKind: "recent";
+    lastValidBlockHeight: number;
+    rawIntentDigest: string;
+  };
+}> {
   const keypair = restoreSolanaKeypair(secretKeyHex);
   const connection = new Connection(rpcUrl, "confirmed");
   const shouldBroadcast = options.broadcast !== false;
   const toPubkey = new PublicKey(to);
+  if (lamports < 0n || lamports > 18_446_744_073_709_551_615n) {
+    throw new Error("SOL transfer amount must fit in uint64 lamports");
+  }
 
   const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash("confirmed");
 
   const transferIx = SystemProgram.transfer({
     fromPubkey: keypair.publicKey,
     toPubkey,
-    lamports: Number(lamports),
+    lamports,
   });
 
   const instructions: TransactionInstruction[] = [];
@@ -442,15 +456,25 @@ export async function signSolanaTransaction(
     feePayer: keypair.publicKey,
   }).add(...instructions);
 
-  if (!shouldBroadcast) {
-    tx.sign(keypair);
-    return btoa(Array.from(tx.serialize(), (b) => String.fromCharCode(b)).join(""));
-  }
-
   tx.sign(keypair);
   if (!tx.signature) throw new Error("Solana transfer did not produce a signer signature");
   const preparedSignature = bs58.encode(tx.signature);
   const signedBytes = tx.serialize();
+  const evidence = {
+    artifactSignature: preparedSignature,
+    signer: keypair.publicKey.toBase58(),
+    recentBlockhash: blockhash,
+    blockhashKind: "recent" as const,
+    lastValidBlockHeight,
+    rawIntentDigest: createHash("sha256").update(tx.serializeMessage()).digest("hex"),
+  };
+
+  if (!shouldBroadcast) {
+    return {
+      result: btoa(Array.from(signedBytes, (b) => String.fromCharCode(b)).join("")),
+      evidence,
+    };
+  }
 
   // The caller must make the deterministic signature durable before the first
   // RPC write. A failed checkpoint is therefore a safe, definitely-not-sent
@@ -462,6 +486,7 @@ export async function signSolanaTransaction(
     signature: preparedSignature,
     recentBlockhash: blockhash,
     blockhashKind: "recent",
+    lastValidBlockHeight,
   });
   try {
     const signature = await connection.sendRawTransaction(signedBytes, {
@@ -483,7 +508,7 @@ export async function signSolanaTransaction(
     throw new ExternalBroadcastOutcomeUnknownError(preparedSignature, { cause: error });
   }
 
-  return preparedSignature;
+  return { result: preparedSignature, evidence };
 }
 
 export interface SolanaSplTransferTransaction {
