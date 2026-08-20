@@ -27,6 +27,7 @@
 
 ### Docs
 - Point example `baseUrl` values at a self-hosted instance (`http://localhost:3200`) instead of a hosted `api.steward.fi` URL. Steward is self-host-first today; there is no shared hosted API. JSDoc/README/test-fixture only, no runtime or API change (the SDK `baseUrl` remains a required field with no default).
+- Describe agent bootstrap and custody invariants without repository-internal lane, pillar, or review-history labels. Documentation and comments only; no runtime or API change.
 
 ## 0.10.1
 
