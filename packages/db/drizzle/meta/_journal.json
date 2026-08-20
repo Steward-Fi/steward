@@ -624,6 +624,20 @@
       "when": 1787111202000,
       "tag": "0108_evm_nonce_tenant_ownership",
       "breakpoints": true
+    },
+    {
+      "idx": 109,
+      "version": "7",
+      "when": 1787165200000,
+      "tag": "0109_agent_policy_builder_perps_reconcile",
+      "breakpoints": true
+    },
+    {
+      "idx": 110,
+      "version": "7",
+      "when": 1787168800000,
+      "tag": "0110_agent_delete_lease_lifecycle",
+      "breakpoints": true
     }
   ]
 }

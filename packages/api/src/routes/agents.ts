@@ -11,7 +11,12 @@ import { redactedThrownDiagnostics } from "@stwd/shared";
 import { and, eq, gte, inArray, isNull, sql } from "drizzle-orm";
 import { type Context, Hono } from "hono";
 import { isRedisAvailable } from "../middleware/redis";
-import { withTenantAuditedTransaction, writeAuditEvent } from "../services/audit";
+import { deleteAgentAuthority } from "../services/agent-deletion";
+import {
+  type AuditEventInput,
+  withTenantAuditedTransaction,
+  writeAuditEvent,
+} from "../services/audit";
 import {
   AGENT_TOKEN_EXPIRY,
   type AgentIdentity,
@@ -22,7 +27,7 @@ import {
   agents,
   agentWallets,
   approvalQueue,
-  createAgentToken,
+  createAgentTokenForExistingAgent,
   db,
   encryptedChainKeys,
   encryptedKeys,
@@ -214,7 +219,7 @@ function agentWalletRowsToAccountWallets(
   ];
 }
 
-async function writeAgentAudit(
+function agentAuditEvent(
   c: Parameters<typeof requireTenantLevel>[0],
   event: {
     tenantId: string;
@@ -223,9 +228,9 @@ async function writeAgentAudit(
     resourceId: string;
     metadata?: Record<string, unknown>;
   },
-): Promise<void> {
+): AuditEventInput {
   const authType = c.get("authType");
-  await writeAuditEvent({
+  return {
     tenantId: event.tenantId,
     actorType: authType === "api-key" ? "api-key" : "user",
     actorId:
@@ -237,7 +242,14 @@ async function writeAgentAudit(
     ipAddress: c.req.header("x-forwarded-for") ?? null,
     userAgent: c.req.header("user-agent") ?? null,
     requestId: c.get("requestId") ?? null,
-  });
+  };
+}
+
+async function writeAgentAudit(
+  c: Parameters<typeof requireTenantLevel>[0],
+  event: Parameters<typeof agentAuditEvent>[1],
+): Promise<void> {
+  await writeAuditEvent(agentAuditEvent(c, event));
 }
 
 function parseDurationSeconds(value: string): number | null {
@@ -1459,7 +1471,10 @@ agentRoutes.post("/:agentId/token", async (c) => {
       resourceId: agentId,
       metadata: { scopes, expiresIn },
     });
-    const token = await createAgentToken(agentId, tenantId, expiresIn, scopes);
+    const token = await createAgentTokenForExistingAgent(agentId, tenantId, expiresIn, scopes);
+    if (!token) {
+      return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
+    }
     await writeAgentAudit(c, {
       tenantId,
       action: "agent.token.create",
@@ -1953,31 +1968,6 @@ agentRoutes.delete("/:agentId", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
   }
 
-  const deleteSnapshot = await db.transaction(async (tx) => {
-    const [agentRow] = await tx
-      .select()
-      .from(agents)
-      .where(and(eq(agents.id, agentId), eq(agents.tenantId, tenantId)));
-    return {
-      agent: agentRow ?? null,
-      approvalQueue: await tx
-        .select()
-        .from(approvalQueue)
-        .where(eq(approvalQueue.agentId, agentId)),
-      transactions: await tx.select().from(transactions).where(eq(transactions.agentId, agentId)),
-      policies: await tx.select().from(policies).where(eq(policies.agentId, agentId)),
-      encryptedChainKeys: await tx
-        .select()
-        .from(encryptedChainKeys)
-        .where(eq(encryptedChainKeys.agentId, agentId)),
-      encryptedKeys: await tx
-        .select()
-        .from(encryptedKeys)
-        .where(eq(encryptedKeys.agentId, agentId)),
-      agentWallets: await tx.select().from(agentWallets).where(eq(agentWallets.agentId, agentId)),
-    };
-  });
-  let agentRowsDeleted = false;
   try {
     await writeAgentAudit(c, {
       tenantId,
@@ -1986,58 +1976,52 @@ agentRoutes.delete("/:agentId", async (c) => {
       resourceId: agentId,
       metadata: { walletAddress: agent.walletAddress },
     });
-    const issuedBefore = Math.floor(Date.now() / 1000);
-    await revocationStore.revokeAgentTokens(agentId, issuedBefore);
-    await db.transaction(async (tx) => {
-      // Cascade delete in dependency order
-      await tx.delete(approvalQueue).where(eq(approvalQueue.agentId, agentId));
-      await tx.delete(transactions).where(eq(transactions.agentId, agentId));
-      await tx.delete(policies).where(eq(policies.agentId, agentId));
-      await tx.delete(encryptedChainKeys).where(eq(encryptedChainKeys.agentId, agentId));
-      await tx.delete(encryptedKeys).where(eq(encryptedKeys.agentId, agentId));
-      await tx.delete(agentWallets).where(eq(agentWallets.agentId, agentId));
-      await tx.delete(agents).where(and(eq(agents.id, agentId), eq(agents.tenantId, tenantId)));
-    });
-    agentRowsDeleted = true;
-    await writeAgentAudit(c, {
+    let issuedBefore = 0;
+    const completionAudit = agentAuditEvent(c, {
       tenantId,
       action: "agent.delete",
       resourceType: "agent",
       resourceId: agentId,
-      metadata: { revokedAgentTokensIssuedBefore: issuedBefore },
+      metadata: {},
     });
+    const deletion = await deleteAgentAuthority({
+      tenantId,
+      agentId,
+      completionAudit,
+      beforeDelete: async () => {
+        issuedBefore = Math.floor(Date.now() / 1000);
+        await revocationStore.revokeAgentTokens(agentId, issuedBefore);
+        completionAudit.metadata = { revokedAgentTokensIssuedBefore: issuedBefore };
+      },
+    });
+
+    if (deletion === "blocked_by_upstream_lease") {
+      return c.json<ApiResponse>(
+        { ok: false, error: "Agent has unresolved upstream credential leases" },
+        409,
+      );
+    }
+    if (deletion === "blocked_by_executing_proxy") {
+      return c.json<ApiResponse>(
+        { ok: false, error: "Agent has an executing proxy request; retry deletion later" },
+        409,
+      );
+    }
+    if (deletion === "blocked_by_unresolved_execution") {
+      return c.json<ApiResponse>(
+        { ok: false, error: "Agent has unresolved execution evidence; reconcile it first" },
+        409,
+      );
+    }
+    if (deletion === "missing") {
+      return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
+    }
 
     return c.json<ApiResponse<{ deleted: string }>>({
       ok: true,
       data: { deleted: agentId },
     });
   } catch (e: unknown) {
-    if (agentRowsDeleted && deleteSnapshot.agent) {
-      await db.transaction(async (tx) => {
-        await tx.insert(agents).values(deleteSnapshot.agent).onConflictDoNothing();
-        if (deleteSnapshot.agentWallets.length > 0) {
-          await tx.insert(agentWallets).values(deleteSnapshot.agentWallets).onConflictDoNothing();
-        }
-        if (deleteSnapshot.encryptedKeys.length > 0) {
-          await tx.insert(encryptedKeys).values(deleteSnapshot.encryptedKeys).onConflictDoNothing();
-        }
-        if (deleteSnapshot.encryptedChainKeys.length > 0) {
-          await tx
-            .insert(encryptedChainKeys)
-            .values(deleteSnapshot.encryptedChainKeys)
-            .onConflictDoNothing();
-        }
-        if (deleteSnapshot.policies.length > 0) {
-          await tx.insert(policies).values(deleteSnapshot.policies).onConflictDoNothing();
-        }
-        if (deleteSnapshot.transactions.length > 0) {
-          await tx.insert(transactions).values(deleteSnapshot.transactions).onConflictDoNothing();
-        }
-        if (deleteSnapshot.approvalQueue.length > 0) {
-          await tx.insert(approvalQueue).values(deleteSnapshot.approvalQueue).onConflictDoNothing();
-        }
-      });
-    }
     const requestId = c.get("requestId") || "unknown";
     console.error(`[${requestId}] Failed to delete agent ${agentId}`, redactedThrownDiagnostics(e));
     return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(e) }, 500);

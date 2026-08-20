@@ -27,10 +27,21 @@ describe("0108 EVM nonce tenant ownership", () => {
     const journal = JSON.parse(
       await readFile(join(migrations, "meta", "_journal.json"), "utf8"),
     ) as { entries: Array<{ idx: number; tag: string }> };
-    expect(journal.entries.slice(-2).map(({ idx, tag }) => ({ idx, tag }))).toEqual([
-      { idx: 107, tag: "0107_x_disconnect_route_recovery" },
-      { idx: 108, tag: "0108_evm_nonce_tenant_ownership" },
-    ]);
+    const disconnectIndex = journal.entries.findIndex(
+      ({ tag }) => tag === "0107_x_disconnect_route_recovery",
+    );
+    const nonceIndex = journal.entries.findIndex(
+      ({ tag }) => tag === "0108_evm_nonce_tenant_ownership",
+    );
+    expect(journal.entries[disconnectIndex]).toMatchObject({
+      idx: 107,
+      tag: "0107_x_disconnect_route_recovery",
+    });
+    expect(journal.entries[nonceIndex]).toMatchObject({
+      idx: 108,
+      tag: "0108_evm_nonce_tenant_ownership",
+    });
+    expect(nonceIndex).toBe(disconnectIndex + 1);
   });
 
   test("backfills an unambiguous owner and enforces the cross-tenant claim", async () => {

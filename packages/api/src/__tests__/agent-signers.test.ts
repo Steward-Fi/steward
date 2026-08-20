@@ -1,15 +1,33 @@
 import { afterAll, beforeAll, describe, expect, it, setDefaultTimeout } from "bun:test";
 import { createHash } from "node:crypto";
 import { generateP256KeyPair } from "@stwd/auth";
-import { agentSigners, agents, closeDb, getDb, policies, tenants } from "@stwd/db";
-import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
-import { eq } from "drizzle-orm";
+import {
+  __resetAuditHmacKeyCacheForTests,
+  agentSigners,
+  agents,
+  auditEvents,
+  getDb,
+  policies,
+  tenants,
+} from "@stwd/db";
+import { and, asc, eq, inArray, sql } from "drizzle-orm";
 import { Hono } from "hono";
 import type { AppVariables } from "../services/context";
+import {
+  cleanupAgentBehaviorTestDatabase,
+  setupAgentBehaviorTestDatabase,
+} from "./agent-behavior-test-database";
 
 const TENANT_ID = `agent-signers-tenant-${Date.now()}`;
 const AGENT_ID = `agent-signers-agent-${Date.now()}`;
+const AUDIT_TRIGGER_SUFFIX = `${process.pid}_${Math.random().toString(36).slice(2, 8)}`;
 const savedSignerCredentialPepper = process.env.STEWARD_SIGNER_CREDENTIAL_PEPPER;
+const MUTATED_ENV = [
+  "STEWARD_PGLITE_MEMORY",
+  "STEWARD_MASTER_PASSWORD",
+  "STEWARD_AUDIT_HMAC_KEY",
+] as const;
+const originalEnv = new Map(MUTATED_ENV.map((name) => [name, process.env[name]]));
 
 setDefaultTimeout(30000);
 
@@ -29,6 +47,7 @@ async function makeApp(authMode: "admin" | "admin-no-mfa" | "api-key" = "admin")
     await next();
   });
   app.route("/agents", agentRoutes);
+  app.onError((_error, c) => c.json({ ok: false, error: "Internal server error" }, 500));
   return app;
 }
 
@@ -37,20 +56,19 @@ describe("agent signer API", () => {
   let signerId = "";
 
   beforeAll(async () => {
-    process.env.STEWARD_PGLITE_MEMORY = "true";
     process.env.STEWARD_MASTER_PASSWORD = "agent-signers-master-password";
     process.env.STEWARD_AUDIT_HMAC_KEY = "agent-signers-audit-hmac-key-with-enough-entropy";
     process.env.STEWARD_SIGNER_CREDENTIAL_PEPPER =
       "agent-signers-credential-pepper-with-enough-entropy";
-    const { db, client } = await createPGLiteDb("memory://");
-    setPGLiteOverride(db, async () => {
-      await client.close();
-    });
-    await getDb().insert(tenants).values({
-      id: TENANT_ID,
-      name: "Agent Signers Tenant",
-      apiKeyHash: "hash",
-    });
+    __resetAuditHmacKeyCacheForTests();
+    await setupAgentBehaviorTestDatabase();
+    await getDb()
+      .insert(tenants)
+      .values({
+        id: TENANT_ID,
+        name: "Agent Signers Tenant",
+        apiKeyHash: `api-key-hash-${TENANT_ID}`,
+      });
     await getDb().insert(agents).values({
       id: AGENT_ID,
       tenantId: TENANT_ID,
@@ -79,14 +97,19 @@ describe("agent signer API", () => {
   });
 
   afterAll(async () => {
-    await closeDb();
-    delete process.env.STEWARD_PGLITE_MEMORY;
-    delete process.env.STEWARD_MASTER_PASSWORD;
-    delete process.env.STEWARD_AUDIT_HMAC_KEY;
-    if (savedSignerCredentialPepper === undefined) {
-      delete process.env.STEWARD_SIGNER_CREDENTIAL_PEPPER;
-    } else {
-      process.env.STEWARD_SIGNER_CREDENTIAL_PEPPER = savedSignerCredentialPepper;
+    try {
+      await cleanupAgentBehaviorTestDatabase(TENANT_ID);
+    } finally {
+      for (const [name, value] of originalEnv) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+      __resetAuditHmacKeyCacheForTests();
+      if (savedSignerCredentialPepper === undefined) {
+        delete process.env.STEWARD_SIGNER_CREDENTIAL_PEPPER;
+      } else {
+        process.env.STEWARD_SIGNER_CREDENTIAL_PEPPER = savedSignerCredentialPepper;
+      }
     }
   });
 
@@ -196,6 +219,35 @@ describe("agent signer API", () => {
     expect(revokeResponse.status).toBe(200);
     const revoked = (await revokeResponse.json()) as { data: { status: string } };
     expect(revoked.data.status).toBe("revoked");
+
+    const auditRows = await getDb()
+      .select({ action: auditEvents.action, seq: auditEvents.seq })
+      .from(auditEvents)
+      .where(
+        and(
+          eq(auditEvents.tenantId, TENANT_ID),
+          inArray(auditEvents.action, [
+            "agent.signer.create.authorized",
+            "agent.signer.create",
+            "agent.signer.update.authorized",
+            "agent.signer.update",
+            "agent.signer.revoke.authorized",
+            "agent.signer.revoke",
+          ]),
+        ),
+      )
+      .orderBy(asc(auditEvents.seq));
+    expect(auditRows.map(({ action }) => action)).toEqual([
+      "agent.signer.create.authorized",
+      "agent.signer.create",
+      "agent.signer.update.authorized",
+      "agent.signer.update",
+      "agent.signer.revoke.authorized",
+      "agent.signer.revoke",
+    ]);
+    for (let index = 1; index < auditRows.length; index++) {
+      expect(auditRows[index]?.seq).toBe(auditRows[index - 1]!.seq + 1);
+    }
   });
 
   it("rejects duplicate signer subjects and invalid permissions", async () => {
@@ -246,6 +298,26 @@ describe("agent signer API", () => {
 
   it("requires recent MFA before changing signer policy scope", async () => {
     const noMfaApp = await makeApp("admin-no-mfa");
+    const beforeAudits = await getDb()
+      .select({ id: auditEvents.id })
+      .from(auditEvents)
+      .where(eq(auditEvents.tenantId, TENANT_ID));
+    const createResponse = await noMfaApp.request(`/agents/${AGENT_ID}/signers`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        signerType: "delegated",
+        subjectType: "external",
+        subjectId: "no-mfa-basic-create",
+        permissions: ["sign_message"],
+      }),
+    });
+    expect(createResponse.status).toBe(403);
+    await expect(createResponse.json()).resolves.toMatchObject({
+      ok: false,
+      error: expect.stringContaining("recent MFA"),
+    });
+
     const response = await noMfaApp.request(`/agents/${AGENT_ID}/signers/${signerId}`, {
       method: "PATCH",
       headers: { "content-type": "application/json" },
@@ -255,6 +327,18 @@ describe("agent signer API", () => {
     expect(response.status).toBe(403);
     expect(body.ok).toBe(false);
     expect(body.error).toContain("Signer updates requires recent MFA verification");
+    expect(
+      await getDb()
+        .select({ id: agentSigners.id })
+        .from(agentSigners)
+        .where(eq(agentSigners.subjectId, "no-mfa-basic-create")),
+    ).toHaveLength(0);
+    expect(
+      await getDb()
+        .select({ id: auditEvents.id })
+        .from(auditEvents)
+        .where(eq(auditEvents.tenantId, TENANT_ID)),
+    ).toEqual(beforeAudits);
   });
 
   it("rejects caller-chosen delegated signer credential secrets", async () => {
@@ -366,6 +450,14 @@ describe("agent signer API", () => {
     });
     expect(createResponse.status).toBe(201);
     const created = (await createResponse.json()) as { data: { id: string } };
+    const beforeSigner = await getDb()
+      .select()
+      .from(agentSigners)
+      .where(eq(agentSigners.id, created.data.id));
+    const beforeAudits = await getDb()
+      .select({ id: auditEvents.id })
+      .from(auditEvents)
+      .where(eq(auditEvents.tenantId, TENANT_ID));
 
     const pauseResponse = await noMfaApp.request(`/agents/${AGENT_ID}/signers/${created.data.id}`, {
       method: "PATCH",
@@ -385,6 +477,112 @@ describe("agent signer API", () => {
     expect(revokeResponse.status).toBe(403);
     expect(revoke.ok).toBe(false);
     expect(revoke.error).toContain("recent MFA");
+    expect(
+      await getDb().select().from(agentSigners).where(eq(agentSigners.id, created.data.id)),
+    ).toEqual(beforeSigner);
+    expect(
+      await getDb()
+        .select({ id: auditEvents.id })
+        .from(auditEvents)
+        .where(eq(auditEvents.tenantId, TENANT_ID)),
+    ).toEqual(beforeAudits);
+  });
+
+  it("rolls back signer creation, update, and revocation when completion audits fail", async () => {
+    const [seeded] = await getDb()
+      .insert(agentSigners)
+      .values({
+        tenantId: TENANT_ID,
+        agentId: AGENT_ID,
+        signerType: "delegated",
+        subjectType: "external",
+        subjectId: "audit-rollback-existing",
+        permissions: ["sign_message"],
+        status: "active",
+        createdBy: "seed",
+      })
+      .returning();
+
+    try {
+      await getDb().execute(
+        sql.raw(`
+        CREATE OR REPLACE FUNCTION fail_agent_signer_completion_audit_${AUDIT_TRIGGER_SUFFIX}()
+        RETURNS trigger AS $$
+        BEGIN
+          IF NEW.tenant_id = '${TENANT_ID}' AND NEW.action IN (
+            'agent.signer.create',
+            'agent.signer.update',
+            'agent.signer.revoke'
+          ) THEN
+            RAISE EXCEPTION 'required agent signer audit failed';
+          END IF;
+          RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql
+        `),
+      );
+      await getDb().execute(
+        sql.raw(`
+        CREATE TRIGGER agent_signer_completion_audit_failure_${AUDIT_TRIGGER_SUFFIX}
+        BEFORE INSERT ON audit_events
+        FOR EACH ROW EXECUTE FUNCTION fail_agent_signer_completion_audit_${AUDIT_TRIGGER_SUFFIX}()
+        `),
+      );
+      const create = await app.request(`/agents/${AGENT_ID}/signers`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          signerType: "delegated",
+          subjectType: "external",
+          subjectId: "audit-rollback-create",
+          permissions: ["sign_message"],
+        }),
+      });
+      expect(create.status).toBe(500);
+      expect(
+        await getDb()
+          .select()
+          .from(agentSigners)
+          .where(
+            and(
+              eq(agentSigners.agentId, AGENT_ID),
+              eq(agentSigners.subjectId, "audit-rollback-create"),
+            ),
+          ),
+      ).toHaveLength(0);
+
+      const update = await app.request(`/agents/${AGENT_ID}/signers/${seeded.id}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ label: "must roll back" }),
+      });
+      expect(update.status).toBe(500);
+      expect(
+        await getDb().select().from(agentSigners).where(eq(agentSigners.id, seeded.id)),
+      ).toEqual([seeded]);
+
+      const revoke = await app.request(`/agents/${AGENT_ID}/signers/${seeded.id}`, {
+        method: "DELETE",
+      });
+      expect(revoke.status).toBe(500);
+      expect(
+        await getDb().select().from(agentSigners).where(eq(agentSigners.id, seeded.id)),
+      ).toEqual([seeded]);
+    } finally {
+      try {
+        await getDb().execute(
+          sql.raw(
+            `DROP TRIGGER IF EXISTS agent_signer_completion_audit_failure_${AUDIT_TRIGGER_SUFFIX} ON audit_events`,
+          ),
+        );
+      } finally {
+        await getDb().execute(
+          sql.raw(
+            `DROP FUNCTION IF EXISTS fail_agent_signer_completion_audit_${AUDIT_TRIGGER_SUFFIX}()`,
+          ),
+        );
+      }
+    }
   });
 
   it("does not expose signer inventory to non-admin tenant credentials", async () => {

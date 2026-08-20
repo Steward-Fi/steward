@@ -1,15 +1,32 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
-import { agents, closeDb, getDb, policies, tenants } from "@stwd/db";
-import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
-import { eq } from "drizzle-orm";
+import {
+  __resetAuditHmacKeyCacheForTests,
+  agents,
+  auditEvents,
+  getDb,
+  policies,
+  tenants,
+} from "@stwd/db";
+import { and, asc, eq, inArray, sql } from "drizzle-orm";
 import { Hono } from "hono";
 import type { AppVariables } from "../services/context";
+import {
+  cleanupAgentBehaviorTestDatabase,
+  setupAgentBehaviorTestDatabase,
+} from "./agent-behavior-test-database";
 
 const TENANT_ID = `policy-rules-tenant-${Date.now()}`;
 const AGENT_ID = `policy-rules-agent-${Date.now()}`;
+const AUDIT_TRIGGER_SUFFIX = `${process.pid}_${Math.random().toString(36).slice(2, 8)}`;
 const TYPED_DATA_AGENT_ID = `typed-data-policy-agent-${Date.now()}`;
+const MUTATED_ENV = [
+  "STEWARD_PGLITE_MEMORY",
+  "STEWARD_MASTER_PASSWORD",
+  "STEWARD_AUDIT_HMAC_KEY",
+] as const;
+const originalEnv = new Map(MUTATED_ENV.map((name) => [name, process.env[name]]));
 
-async function makeApp() {
+async function makeApp(authMode: "admin" | "admin-no-mfa" = "admin") {
   const { agentRoutes } = await import("../routes/agents");
   const app = new Hono<{ Variables: AppVariables }>();
   app.use("*", async (c, next) => {
@@ -17,10 +34,11 @@ async function makeApp() {
     c.set("authType", "session-jwt");
     c.set("tenantRole", "owner");
     c.set("userId", "00000000-0000-4000-8000-000000000001");
-    c.set("sessionMfaVerifiedAt", Date.now());
+    if (authMode === "admin") c.set("sessionMfaVerifiedAt", Date.now());
     await next();
   });
   app.route("/agents", agentRoutes);
+  app.onError((_error, c) => c.json({ ok: false, error: "Internal server error" }, 500));
   return app;
 }
 
@@ -28,19 +46,18 @@ describe("agent policy rule CRUD", () => {
   let app: Awaited<ReturnType<typeof makeApp>>;
 
   beforeAll(async () => {
-    process.env.STEWARD_PGLITE_MEMORY = "true";
     process.env.STEWARD_MASTER_PASSWORD = "agent-policy-rules-master-password";
     process.env.STEWARD_AUDIT_HMAC_KEY =
       "agent-policy-rules-test-audit-hmac-key-0123456789abcdef0123456789";
-    const { db, client } = await createPGLiteDb("memory://");
-    setPGLiteOverride(db, async () => {
-      await client.close();
-    });
-    await getDb().insert(tenants).values({
-      id: TENANT_ID,
-      name: "Policy Rules Tenant",
-      apiKeyHash: "hash",
-    });
+    __resetAuditHmacKeyCacheForTests();
+    await setupAgentBehaviorTestDatabase();
+    await getDb()
+      .insert(tenants)
+      .values({
+        id: TENANT_ID,
+        name: "Policy Rules Tenant",
+        apiKeyHash: `api-key-hash-${TENANT_ID}`,
+      });
     await getDb()
       .insert(agents)
       .values([
@@ -70,10 +87,15 @@ describe("agent policy rule CRUD", () => {
   });
 
   afterAll(async () => {
-    await closeDb();
-    delete process.env.STEWARD_PGLITE_MEMORY;
-    delete process.env.STEWARD_MASTER_PASSWORD;
-    delete process.env.STEWARD_AUDIT_HMAC_KEY;
+    try {
+      await cleanupAgentBehaviorTestDatabase(TENANT_ID);
+    } finally {
+      for (const [name, value] of originalEnv) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+      __resetAuditHmacKeyCacheForTests();
+    }
   });
 
   it("creates, lists, gets, updates, and deletes nested policy rules", async () => {
@@ -141,6 +163,36 @@ describe("agent policy rule CRUD", () => {
     expect(deleteResponse.status).toBe(200);
     expect(deleted.data.id).toBe(createdRuleId);
 
+    const auditRows = await getDb()
+      .select({ action: auditEvents.action, seq: auditEvents.seq })
+      .from(auditEvents)
+      .where(
+        and(
+          eq(auditEvents.tenantId, TENANT_ID),
+          eq(auditEvents.resourceId, createdRuleId),
+          inArray(auditEvents.action, [
+            "agent.policy_rule.create.authorized",
+            "agent.policy_rule.create",
+            "agent.policy_rule.update.authorized",
+            "agent.policy_rule.update",
+            "agent.policy_rule.delete.authorized",
+            "agent.policy_rule.delete",
+          ]),
+        ),
+      )
+      .orderBy(asc(auditEvents.seq));
+    expect(auditRows.map(({ action }) => action)).toEqual([
+      "agent.policy_rule.create.authorized",
+      "agent.policy_rule.create",
+      "agent.policy_rule.update.authorized",
+      "agent.policy_rule.update",
+      "agent.policy_rule.delete.authorized",
+      "agent.policy_rule.delete",
+    ]);
+    for (let index = 1; index < auditRows.length; index++) {
+      expect(auditRows[index]?.seq).toBe(auditRows[index - 1]!.seq + 1);
+    }
+
     const missingResponse = await app.request(
       `/agents/${AGENT_ID}/policies/rules/${createdRuleId}`,
     );
@@ -177,6 +229,158 @@ describe("agent policy rule CRUD", () => {
     expect(response.status).toBe(201);
     expect(body.ok).toBe(true);
     expect(body.data.id).not.toBe("existing-spend");
+  });
+
+  it("rejects policy replacement and rule mutations without recent MFA and changes nothing", async () => {
+    const noMfaApp = await makeApp("admin-no-mfa");
+    const beforePolicies = await getDb()
+      .select()
+      .from(policies)
+      .where(eq(policies.agentId, AGENT_ID));
+    const beforeAudits = await getDb()
+      .select({ id: auditEvents.id })
+      .from(auditEvents)
+      .where(eq(auditEvents.tenantId, TENANT_ID));
+
+    const requests = [
+      noMfaApp.request(`/agents/${AGENT_ID}/policies`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify([]),
+      }),
+      noMfaApp.request(`/agents/${AGENT_ID}/policies/rules`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ type: "rate-limit", config: { maxTxPerHour: 1 } }),
+      }),
+      noMfaApp.request(`/agents/${AGENT_ID}/policies/rules/existing-spend`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ enabled: false }),
+      }),
+      noMfaApp.request(`/agents/${AGENT_ID}/policies/rules/existing-spend`, {
+        method: "DELETE",
+      }),
+    ];
+
+    for (const response of await Promise.all(requests)) {
+      expect(response.status).toBe(403);
+      await expect(response.json()).resolves.toMatchObject({
+        ok: false,
+        error: expect.stringContaining("recent MFA"),
+      });
+    }
+    expect(await getDb().select().from(policies).where(eq(policies.agentId, AGENT_ID))).toEqual(
+      beforePolicies,
+    );
+    expect(
+      await getDb()
+        .select({ id: auditEvents.id })
+        .from(auditEvents)
+        .where(eq(auditEvents.tenantId, TENANT_ID)),
+    ).toEqual(beforeAudits);
+  });
+
+  it("restores policy replacement and rule mutations when completion audits fail", async () => {
+    const [seeded] = await getDb()
+      .insert(policies)
+      .values({
+        id: "audit-rollback-policy",
+        agentId: AGENT_ID,
+        type: "rate-limit",
+        enabled: true,
+        config: { maxTxPerHour: 3, maxTxPerDay: 10 },
+      })
+      .returning();
+    const before = await getDb().select().from(policies).where(eq(policies.agentId, AGENT_ID));
+
+    try {
+      await getDb().execute(
+        sql.raw(`
+        CREATE OR REPLACE FUNCTION fail_agent_policy_rule_completion_audit_${AUDIT_TRIGGER_SUFFIX}()
+        RETURNS trigger AS $$
+        BEGIN
+          IF NEW.tenant_id = '${TENANT_ID}' AND NEW.action IN (
+            'agent.policies.update',
+            'agent.policy_rule.create',
+            'agent.policy_rule.update',
+            'agent.policy_rule.delete'
+          ) THEN
+            RAISE EXCEPTION 'required agent policy rule audit failed';
+          END IF;
+          RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql
+        `),
+      );
+      await getDb().execute(
+        sql.raw(`
+        CREATE TRIGGER agent_policy_rule_completion_audit_failure_${AUDIT_TRIGGER_SUFFIX}
+        BEFORE INSERT ON audit_events
+        FOR EACH ROW EXECUTE FUNCTION fail_agent_policy_rule_completion_audit_${AUDIT_TRIGGER_SUFFIX}()
+        `),
+      );
+      const replace = await app.request(`/agents/${AGENT_ID}/policies`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify([
+          { type: "spending-limit", enabled: true, config: { maxPerTx: "9" } },
+        ]),
+      });
+      expect(replace.status).toBe(500);
+      expect(await getDb().select().from(policies).where(eq(policies.agentId, AGENT_ID))).toEqual(
+        before,
+      );
+
+      const create = await app.request(`/agents/${AGENT_ID}/policies/rules`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          id: "caller-ignored-audit-rollback",
+          type: "approved-addresses",
+          config: {
+            addresses: ["0x1234567890123456789012345678901234567890"],
+            mode: "whitelist",
+          },
+        }),
+      });
+      expect(create.status).toBe(500);
+      expect(await getDb().select().from(policies).where(eq(policies.agentId, AGENT_ID))).toEqual(
+        before,
+      );
+
+      const update = await app.request(`/agents/${AGENT_ID}/policies/rules/${seeded.id}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ enabled: false }),
+      });
+      expect(update.status).toBe(500);
+      expect(await getDb().select().from(policies).where(eq(policies.id, seeded.id))).toEqual([
+        seeded,
+      ]);
+
+      const remove = await app.request(`/agents/${AGENT_ID}/policies/rules/${seeded.id}`, {
+        method: "DELETE",
+      });
+      expect(remove.status).toBe(500);
+      expect(await getDb().select().from(policies).where(eq(policies.id, seeded.id))).toEqual([
+        seeded,
+      ]);
+    } finally {
+      try {
+        await getDb().execute(
+          sql.raw(
+            `DROP TRIGGER IF EXISTS agent_policy_rule_completion_audit_failure_${AUDIT_TRIGGER_SUFFIX} ON audit_events`,
+          ),
+        );
+      } finally {
+        await getDb().execute(
+          sql.raw(
+            `DROP FUNCTION IF EXISTS fail_agent_policy_rule_completion_audit_${AUDIT_TRIGGER_SUFFIX}()`,
+          ),
+        );
+      }
+    }
   });
 
   it("stores a valid typed-data policy, rejects malformed replacement, and gates the public sign route", async () => {
@@ -220,6 +424,25 @@ describe("agent policy rule CRUD", () => {
       ]),
     });
     expect(storeResponse.status).toBe(200);
+    const replacementAudits = await getDb()
+      .select({ action: auditEvents.action, seq: auditEvents.seq })
+      .from(auditEvents)
+      .where(
+        and(
+          eq(auditEvents.tenantId, TENANT_ID),
+          eq(auditEvents.resourceId, TYPED_DATA_AGENT_ID),
+          inArray(auditEvents.action, [
+            "agent.policies.update.authorized",
+            "agent.policies.update",
+          ]),
+        ),
+      )
+      .orderBy(asc(auditEvents.seq));
+    expect(replacementAudits.map(({ action }) => action)).toEqual([
+      "agent.policies.update.authorized",
+      "agent.policies.update",
+    ]);
+    expect(replacementAudits[1]?.seq).toBe(replacementAudits[0]!.seq + 1);
     const stored = await getDb()
       .select()
       .from(policies)

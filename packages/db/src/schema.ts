@@ -2515,11 +2515,8 @@ export const providerActionBindings = pgTable(
       foreignColumns: [intents.tenantId, intents.id],
       name: "provider_action_bindings_intent_fk",
     }).onDelete("cascade"),
-    actorFk: foreignKey({
-      columns: [table.tenantId, table.actorAgentId],
-      foreignColumns: [agents.tenantId, agents.id],
-      name: "provider_action_bindings_actor_fk",
-    }).onDelete("restrict"),
+    // Provider-action evidence outlives deleted agent authority. Migration
+    // 0110 replaces the actor FK with a writer/transition fence.
     workspaceFk: foreignKey({
       columns: [table.tenantId, table.workspaceId],
       foreignColumns: [workspaces.tenantId, workspaces.id],
@@ -2659,16 +2656,11 @@ export const upstreamCredentialLeases = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
-    agentFk: foreignKey({
-      columns: [table.tenantId, table.agentId],
-      foreignColumns: [agents.tenantId, agents.id],
-      name: "upstream_credential_leases_agent_fk",
-    }).onDelete("restrict"),
-    workspaceFk: foreignKey({
-      columns: [table.tenantId, table.workspaceId],
-      foreignColumns: [workspaces.tenantId, workspaces.id],
-      name: "upstream_credential_leases_workspace_fk",
-    }).onDelete("restrict"),
+    // Lease evidence intentionally outlives deleted agent authority. A database
+    // trigger serializes new lease publication with agent deletion because an
+    // ordinary retention-blocking agent FK is deliberately absent.
+    // Lease evidence intentionally outlives deleted workspace authority. The
+    // 0110 workspace-row fence serializes publication with workspace deletion.
     replayUnique: uniqueIndex("upstream_credential_leases_replay_uniq").on(
       table.tenantId,
       table.agentId,

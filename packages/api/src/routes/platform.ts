@@ -30,8 +30,10 @@ import {
   encryptedChainKeys,
   encryptedKeys,
   getDb,
+  intents,
   isPersistedPolicyType,
   policies,
+  providerActionBindings,
   proxyAuditLog,
   refreshTokens,
   secretRoutes,
@@ -42,6 +44,7 @@ import {
   tenants,
   toPersistedPolicyRule,
   transactions,
+  upstreamCredentialLeases,
   users,
   userTenants,
   vaultSigningFreezes,
@@ -57,12 +60,26 @@ import {
   type TenantTestAccountConfig,
 } from "@stwd/shared";
 import { KeyStore, Vault } from "@stwd/vault";
-import { and, count, eq, ilike, inArray, isNull, ne, or, type SQL, sql } from "drizzle-orm";
+import {
+  and,
+  count,
+  eq,
+  ilike,
+  inArray,
+  isNotNull,
+  isNull,
+  ne,
+  notInArray,
+  or,
+  type SQL,
+  sql,
+} from "drizzle-orm";
 import { type Context, Hono } from "hono";
-import { writeAuditEvent } from "../services/audit";
+import { deleteAgentAuthority } from "../services/agent-deletion";
+import { withTenantAuditedTransaction, writeAuditEvent } from "../services/audit";
 import {
   type AppVariables,
-  createAgentToken,
+  createAgentTokenForExistingAgent,
   getConditionSetReferenceValidationError,
   parseAgentTokenScopes,
   setNoStoreHeaders,
@@ -1895,59 +1912,116 @@ platform.delete("/tenants/:id", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: "Invalid tenant id format" }, 400);
   }
 
-  const [existing] = await db
-    .select({ id: tenants.id })
-    .from(tenants)
-    .where(eq(tenants.id, tenantId));
+  const result = await withTenantAuditedTransaction(
+    tenantId,
+    async (txRaw, appendRequiredAudit) => {
+      const tx = txRaw as typeof db;
+      // This advisory fence is also acquired by every lease/provider/route/
+      // capability writer installed by migration 0110. Whichever side wins is
+      // authoritative: a prior writer becomes visible to the preflight; a late
+      // writer waits until the tenant and its parents are gone, then fails.
+      await tx.execute(sql`SELECT public.steward_lock_tenant_deletion(${tenantId})`);
+      const [existing] = await tx
+        .select({ id: tenants.id })
+        .from(tenants)
+        .where(eq(tenants.id, tenantId))
+        .for("update");
+      if (!existing) return { status: "missing" as const };
 
-  if (!existing) {
+      const tenantAgents = await tx
+        .select({ id: agents.id })
+        .from(agents)
+        .where(eq(agents.tenantId, tenantId))
+        .for("update");
+      const tenantMembers = await tx
+        .select({ userId: userTenants.userId })
+        .from(userTenants)
+        .where(eq(userTenants.tenantId, tenantId));
+      const [[unresolvedLease], [retainedProviderIntent], [retainedProviderBinding]] =
+        await Promise.all([
+          tx
+            .select({ id: upstreamCredentialLeases.id })
+            .from(upstreamCredentialLeases)
+            .where(
+              and(
+                eq(upstreamCredentialLeases.tenantId, tenantId),
+                or(
+                  notInArray(upstreamCredentialLeases.status, ["revoked", "expired", "failed"]),
+                  isNotNull(upstreamCredentialLeases.tokenHash),
+                  isNotNull(upstreamCredentialLeases.tokenCiphertext),
+                  isNotNull(upstreamCredentialLeases.tokenIv),
+                  isNotNull(upstreamCredentialLeases.tokenAuthTag),
+                  isNotNull(upstreamCredentialLeases.tokenSalt),
+                ),
+              ),
+            )
+            .limit(1),
+          tx
+            .select({ id: intents.id })
+            .from(intents)
+            .where(and(eq(intents.tenantId, tenantId), eq(intents.intentType, "provider-action")))
+            .limit(1),
+          tx
+            .select({ intentId: providerActionBindings.intentId })
+            .from(providerActionBindings)
+            .where(eq(providerActionBindings.tenantId, tenantId))
+            .limit(1),
+        ]);
+      if (unresolvedLease) return { status: "blocked_by_lease" as const };
+      if (retainedProviderIntent || retainedProviderBinding) {
+        return { status: "blocked_by_provider" as const };
+      }
+
+      await appendRequiredAudit({
+        tenantId,
+        actorType: "platform",
+        action: "tenant.delete.authorized",
+        resourceType: "tenant",
+        resourceId: tenantId,
+        metadata: { agentTokenCount: tenantAgents.length, userTokenCount: tenantMembers.length },
+        ...auditCtx(c),
+      });
+      await Promise.all([
+        ...tenantAgents.map((agent) => revocationStore.revokeAgentTokens(agent.id)),
+        ...tenantMembers.map((member) => revocationStore.revokeUserTokens(member.userId)),
+      ]);
+      await appendRequiredAudit({
+        tenantId,
+        actorType: "platform",
+        action: "tenant.delete",
+        resourceType: "tenant",
+        resourceId: tenantId,
+        metadata: {
+          revokedAgentTokenCount: tenantAgents.length,
+          revokedUserTokenCount: tenantMembers.length,
+        },
+        ...auditCtx(c),
+      });
+
+      await tx.delete(refreshTokens).where(eq(refreshTokens.tenantId, tenantId));
+      await tx.delete(secretRoutes).where(eq(secretRoutes.tenantId, tenantId));
+      await tx.delete(secrets).where(eq(secrets.tenantId, tenantId));
+      await tx.delete(proxyAuditLog).where(eq(proxyAuditLog.tenantId, tenantId));
+      await tx.delete(tenants).where(eq(tenants.id, tenantId));
+      return { status: "deleted" as const };
+    },
+  );
+
+  if (result.status === "missing") {
     return c.json<ApiResponse>({ ok: false, error: "Tenant not found" }, 404);
   }
-
-  const tenantAgents = await db
-    .select({ id: agents.id })
-    .from(agents)
-    .where(eq(agents.tenantId, tenantId));
-  const tenantMembers = await db
-    .select({ userId: userTenants.userId })
-    .from(userTenants)
-    .where(eq(userTenants.tenantId, tenantId));
-
-  await writeAuditEvent({
-    tenantId,
-    actorType: "platform",
-    action: "tenant.delete.authorized",
-    resourceType: "tenant",
-    resourceId: tenantId,
-    metadata: { agentTokenCount: tenantAgents.length, userTokenCount: tenantMembers.length },
-    ...auditCtx(c),
-  });
-
-  await Promise.all([
-    ...tenantAgents.map((agent) => revocationStore.revokeAgentTokens(agent.id)),
-    ...tenantMembers.map((member) => revocationStore.revokeUserTokens(member.userId)),
-  ]);
-
-  await writeAuditEvent({
-    tenantId,
-    actorType: "platform",
-    action: "tenant.delete",
-    resourceType: "tenant",
-    resourceId: tenantId,
-    metadata: {
-      revokedAgentTokenCount: tenantAgents.length,
-      revokedUserTokenCount: tenantMembers.length,
-    },
-    ...auditCtx(c),
-  });
-
-  await db.transaction(async (tx) => {
-    await tx.delete(refreshTokens).where(eq(refreshTokens.tenantId, tenantId));
-    await tx.delete(secretRoutes).where(eq(secretRoutes.tenantId, tenantId));
-    await tx.delete(secrets).where(eq(secrets.tenantId, tenantId));
-    await tx.delete(proxyAuditLog).where(eq(proxyAuditLog.tenantId, tenantId));
-    await tx.delete(tenants).where(eq(tenants.id, tenantId));
-  });
+  if (result.status === "blocked_by_lease") {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Tenant has unresolved upstream credential leases" },
+      409,
+    );
+  }
+  if (result.status === "blocked_by_provider") {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Tenant has retained provider action evidence" },
+      409,
+    );
+  }
 
   return c.json<ApiResponse>({ ok: true });
 });
@@ -2401,19 +2475,46 @@ platform.delete("/tenants/:id/agents/:agentId", async (c) => {
     ...auditCtx(c),
   });
 
-  // Revoke outstanding agent tokens before tearing down the agent's rows.
-  const issuedBefore = await revocationStore.revokeAgentTokens(agentId);
-  await deletePlatformCreatedAgent(agentId, tenantId);
-
-  await writeAuditEvent({
+  let issuedBefore = 0;
+  const completionAudit = {
     tenantId,
-    actorType: "platform",
+    actorType: "platform" as const,
     action: "agent.delete",
     resourceType: "agent",
     resourceId: agentId,
-    metadata: { revokedAgentTokensIssuedBefore: issuedBefore },
+    metadata: {},
     ...auditCtx(c),
+  };
+  const deletion = await deleteAgentAuthority({
+    tenantId,
+    agentId,
+    completionAudit,
+    beforeDelete: async () => {
+      issuedBefore = await revocationStore.revokeAgentTokens(agentId);
+      completionAudit.metadata = { revokedAgentTokensIssuedBefore: issuedBefore };
+    },
   });
+  if (deletion === "blocked_by_upstream_lease") {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Agent has unresolved upstream credential leases" },
+      409,
+    );
+  }
+  if (deletion === "blocked_by_executing_proxy") {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Agent has an executing proxy request; retry deletion later" },
+      409,
+    );
+  }
+  if (deletion === "blocked_by_unresolved_execution") {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Agent has unresolved execution evidence; reconcile it first" },
+      409,
+    );
+  }
+  if (deletion === "missing") {
+    return c.json<ApiResponse>({ ok: false, error: "Agent not found in tenant" }, 404);
+  }
 
   return c.json<ApiResponse<{ deleted: string }>>({ ok: true, data: { deleted: agentId } });
 });
@@ -2473,7 +2574,10 @@ platform.post("/tenants/:id/agents/:agentId/token", async (c) => {
   }
 
   try {
-    const token = await createAgentToken(agentId, tenantId, expiresIn, scopes);
+    const token = await createAgentTokenForExistingAgent(agentId, tenantId, expiresIn, scopes);
+    if (!token) {
+      return c.json<ApiResponse>({ ok: false, error: "Agent not found in tenant" }, 404);
+    }
     await writeAuditEvent({
       tenantId,
       actorType: "platform",

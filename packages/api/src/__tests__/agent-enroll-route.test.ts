@@ -194,7 +194,10 @@ describe("agent enrollment route (keypair-only boot)", () => {
     const diagnostics: unknown[][] = [];
     console.error = (...args: unknown[]) => diagnostics.push(args);
     auditTransactionFailure = new Error(diagnosticCanary);
-    successfulAuditTransactionsBeforeFailure = 1;
+    // Authorization audit, then the agent-row lock/signing transaction, then
+    // the required issuance audit. Fail the third transaction so this remains
+    // an issuance-audit failure rather than a signing/lock failure.
+    successfulAuditTransactionsBeforeFailure = 2;
     const before = await enrollmentAuditMetadata();
     try {
       const res = await verifyEnrollment(app);
