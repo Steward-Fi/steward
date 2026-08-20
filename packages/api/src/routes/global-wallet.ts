@@ -20,6 +20,7 @@ import {
   setNoStoreHeaders,
   verifySessionToken,
 } from "../services/context";
+import { globalWalletFeatureFlags } from "../services/global-wallet-runtime";
 import { isRecentMfaTimestamp } from "../services/recent-mfa";
 import { getConfiguredVault } from "../services/vault-factory";
 
@@ -62,13 +63,6 @@ const SIGNING_RPC_METHODS = new Set([
   "wallet_signCalls",
 ]);
 const MFA_MAX_AGE_MS = 10 * 60_000;
-const ALLOW_UNSAFE_MESSAGE_SIGNING = process.env.STEWARD_ALLOW_UNSAFE_MESSAGE_SIGNING === "true";
-const ALLOW_GLOBAL_WALLET_PERSONAL_SIGN =
-  process.env.STEWARD_ALLOW_GLOBAL_WALLET_PERSONAL_SIGN === "true";
-const ALLOW_GLOBAL_WALLET_TYPED_DATA_SIGNING =
-  process.env.STEWARD_ALLOW_GLOBAL_WALLET_TYPED_DATA_SIGNING === "true";
-const ALLOW_GLOBAL_WALLET_SEND_TRANSACTION =
-  process.env.STEWARD_ALLOW_GLOBAL_WALLET_SEND_TRANSACTION === "true";
 const ACTION_CONFIRMATION_TTL_MS = 5 * 60_000;
 const MAX_TRANSACTION_DATA_BYTES = 16_384;
 
@@ -1179,6 +1173,7 @@ globalWalletRoutes.post("/rpc/scan", async (c) => {
     },
   ];
   const blocked = hasCalldata;
+  const { sendTransaction } = globalWalletFeatureFlags();
   await writeGlobalWalletAudit(c, {
     tenantId: parsed.tenantId,
     action: "global_wallet.rpc.transaction_scanned",
@@ -1208,9 +1203,9 @@ globalWalletRoutes.post("/rpc/scan", async (c) => {
       riskLevel: blocked ? "blocked" : parsedTx.valueWei === "0" ? "low" : "medium",
       warnings,
       confirmationRequired: true,
-      executionSupported: ALLOW_GLOBAL_WALLET_SEND_TRANSACTION && !blocked,
+      executionSupported: sendTransaction && !blocked,
       unsupportedReason:
-        ALLOW_GLOBAL_WALLET_SEND_TRANSACTION && !blocked
+        sendTransaction && !blocked
           ? null
           : blocked
             ? "Global wallet transaction execution is disabled for contract calldata until selector-aware scanning is configured."
@@ -1301,7 +1296,8 @@ globalWalletRoutes.post("/rpc", async (c) => {
   }
 
   if (method === "personal_sign") {
-    if (!ALLOW_UNSAFE_MESSAGE_SIGNING || !ALLOW_GLOBAL_WALLET_PERSONAL_SIGN) {
+    const { unsafeMessageSigning, personalSign } = globalWalletFeatureFlags();
+    if (!unsafeMessageSigning || !personalSign) {
       return c.json<ApiResponse>(
         {
           ok: false,
@@ -1400,7 +1396,7 @@ globalWalletRoutes.post("/rpc", async (c) => {
   }
 
   if (method === "eth_signTypedData_v4") {
-    if (!ALLOW_GLOBAL_WALLET_TYPED_DATA_SIGNING) {
+    if (!globalWalletFeatureFlags().typedDataSigning) {
       return c.json<ApiResponse>(
         {
           ok: false,
@@ -1503,7 +1499,7 @@ globalWalletRoutes.post("/rpc", async (c) => {
   }
 
   if (method === "eth_sendTransaction") {
-    if (!ALLOW_GLOBAL_WALLET_SEND_TRANSACTION) {
+    if (!globalWalletFeatureFlags().sendTransaction) {
       return c.json<ApiResponse>(
         {
           ok: false,
