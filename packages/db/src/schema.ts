@@ -156,6 +156,10 @@ export const transactionStatusEnum = pgEnum("transaction_status", [
   "confirmed",
   "failed",
   "outcome_unknown",
+  // A signed artifact may only enter this state through the dedicated,
+  // chain-authoritative retirement lifecycle. Generic provider failures must
+  // never use it.
+  "retired",
 ]);
 
 export const approvalQueueStatusEnum = pgEnum("approval_queue_status", [

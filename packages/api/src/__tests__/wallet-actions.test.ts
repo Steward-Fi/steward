@@ -766,6 +766,7 @@ describe("wallet transfer actions", () => {
       await request.onBroadcastPrepared?.({
         signature,
         recentBlockhash: "11111111111111111111111111111111",
+        blockhashKind: "recent",
       });
       throw new ExternalBroadcastOutcomeUnknownError(signature);
     };
@@ -927,6 +928,7 @@ describe("wallet transfer actions", () => {
       await metadata.onSolanaBroadcastPrepared?.({
         signature,
         recentBlockhash: "11111111111111111111111111111111",
+        blockhashKind: "recent",
       });
       throw new ExternalBroadcastOutcomeUnknownError(signature);
     };

@@ -170,7 +170,21 @@ GET /vault/:agentId/actions/:actionId
 
 **Auth:** Agent JWT plus owner/admin browser session with recent MFA
 
-This status endpoint is transfer-only and returns status `pending_approval`, `rejected`, `signed`, `broadcast`, or `failed`. Send-calls status is available through transaction and intent history until a dedicated status route is added.
+This status endpoint is transfer-only and returns status `pending_approval`, `rejected`, `signed`, `broadcast`, `confirmed`, `failed`, `outcome_unknown`, or `retired`. Send-calls status is available through transaction and intent history until a dedicated status route is added.
+
+### Retire a Signed Artifact
+
+```
+POST /vault/:agentId/transactions/:txId/retire-signed
+```
+
+**Auth:** Owner/admin browser session with recent MFA
+
+Request body: `{ "reason": "operator explanation" }`.
+
+This endpoint is intentionally narrower than the generic transaction lifecycle. A signed artifact remains independently broadcastable, so provider errors and local failures cannot relabel it as failed. Steward currently supports authoritative retirement only for Solana artifacts whose deterministic public signature, recent blockhash, and byte-derived ordinary-blockhash classification were durably captured at signing time. It queries exact-chain signature history and retires only when that signature is absent and the ordinary blockhash is expired. Durable-nonce and unclassified artifacts remain blocked until an authoritative nonce-account advancement lifecycle is implemented. A landed artifact is reconciled to its chain state instead; a live blockhash or RPC uncertainty leaves the transaction signed and blocks deletion.
+
+EVM signed-artifact retirement remains unsupported until Steward can verify an absent exact transaction together with finalized nonce consumption or replacement. Signed transaction bytes are never stored in retirement evidence.
 
 ---
 
@@ -629,7 +643,7 @@ GET /vault/:agentId/transactions
 
 ```typescript
 {
-  status?: "pending" | "approved" | "rejected" | "signed" | "broadcast" | "confirmed" | "failed";
+  status?: "pending" | "approved" | "rejected" | "signed" | "broadcast" | "confirmed" | "failed" | "outcome_unknown" | "retired";
   actionType?: string;
   txHash?: string;
   referenceId?: string; // also accepts reference_id

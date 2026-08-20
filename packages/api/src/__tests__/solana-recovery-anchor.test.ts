@@ -175,10 +175,16 @@ describe("Solana durable recovery anchors", () => {
       await request.onBroadcastPrepared?.({
         signature: SIGNATURE,
         recentBlockhash: RECENT_BLOCKHASH,
+        blockhashKind: "recent",
       });
       const checkpoint = await onlyRecoveryRow();
       expect(checkpoint.status).toBe("outcome_unknown");
       expect(checkpoint.txHash).toBe(SIGNATURE);
+      expect(checkpoint.actionPayload).toMatchObject({
+        artifactSignature: SIGNATURE,
+        recentBlockhash: RECENT_BLOCKHASH,
+        blockhashKind: "recent",
+      });
       return {
         signature: SIGNATURE,
         broadcast: true,
@@ -233,10 +239,16 @@ describe("Solana durable recovery anchors", () => {
       await request.onBroadcastPrepared?.({
         signature: SIGNATURE,
         recentBlockhash: RECENT_BLOCKHASH,
+        blockhashKind: "recent",
       });
       const checkpoint = await onlyRecoveryRow();
       expect(checkpoint.status).toBe("outcome_unknown");
       expect(checkpoint.txHash).toBe(SIGNATURE);
+      expect(checkpoint.actionPayload).toMatchObject({
+        artifactSignature: SIGNATURE,
+        recentBlockhash: RECENT_BLOCKHASH,
+        blockhashKind: "recent",
+      });
 
       process.env.STEWARD_AUDIT_HMAC_KEY = "too-weak";
       __resetAuditHmacKeyCacheForTests();
@@ -319,6 +331,7 @@ describe("Solana durable recovery anchors", () => {
       await request.onBroadcastPrepared?.({
         signature: SIGNATURE,
         recentBlockhash: RECENT_BLOCKHASH,
+        blockhashKind: "recent",
       });
       throw new ExternalBroadcastOutcomeUnknownError(SIGNATURE, {
         cause: new Error("injected confirmation timeout"),
@@ -507,6 +520,7 @@ describe("Solana durable recovery anchors", () => {
       await request.onBroadcastPrepared?.({
         signature: SIGNATURE,
         recentBlockhash: RECENT_BLOCKHASH,
+        blockhashKind: "recent",
       });
       return {
         signature: SIGNATURE,
@@ -568,6 +582,8 @@ describe("Solana durable recovery anchors", () => {
           ),
         );
       expect(completionAudits).toHaveLength(1);
+      expect(readPayload(row.actionPayload).artifactSignature).toBe(SIGNATURE);
+      expect(readPayload(row.actionPayload).blockhashKind).toBe("recent");
       expect((await context.getTransactionStats(AGENT_ID, 101)).recentTxCount24h).toBe(1);
 
       const mismatch = await app.request(`/vault/${AGENT_ID}/sign-solana`, {
@@ -609,6 +625,7 @@ describe("Solana durable recovery anchors", () => {
       await request.onBroadcastPrepared?.({
         signature: SIGNATURE,
         recentBlockhash: RECENT_BLOCKHASH,
+        blockhashKind: "recent",
       });
       submittedCalls += 1;
       return {
