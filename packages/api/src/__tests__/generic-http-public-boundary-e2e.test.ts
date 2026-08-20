@@ -12,7 +12,16 @@ import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "
 import { generateKeyPairSync } from "node:crypto";
 import { createServer, type Server } from "node:http";
 import { signAccessToken } from "@stwd/auth";
-import { agents, closeDb, getDb, secrets, tenants, users, userTenants } from "@stwd/db";
+import {
+  agents,
+  closeDb,
+  getDb,
+  secretRoutes,
+  secrets,
+  tenants,
+  users,
+  userTenants,
+} from "@stwd/db";
 import { GENERIC_HTTP_PROVIDER_ACTION_PROFILE } from "@stwd/shared";
 import { KeyStore } from "@stwd/vault";
 import { eq, inArray } from "drizzle-orm";
@@ -171,7 +180,16 @@ describe.skipIf(!process.env.DATABASE_URL)("#201 generic-http true public-bounda
   });
 
   afterAll(async () => {
+    // Agent deletion is deliberately guarded while an enabled route can still
+    // resolve its secret. Disable first, let the tenant cascade remove all
+    // governed authority rows, then remove the non-FK route/secret records.
+    await getDb()
+      .update(secretRoutes)
+      .set({ enabled: false, authorityMode: "legacy", providerOperationId: null })
+      .where(eq(secretRoutes.tenantId, F.tenant));
     await getDb().delete(tenants).where(eq(tenants.id, F.tenant));
+    await getDb().delete(secretRoutes).where(eq(secretRoutes.tenantId, F.tenant));
+    await getDb().delete(secrets).where(eq(secrets.tenantId, F.tenant));
     await getDb()
       .delete(users)
       .where(inArray(users.id, [F.owner, F.approver]));

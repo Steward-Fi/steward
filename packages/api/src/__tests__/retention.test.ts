@@ -164,7 +164,7 @@ describe.skipIf(SKIP)("retention sweep", () => {
     expect(results.find((r) => r.table === "audit_events")).toBeUndefined();
 
     const rows = (await db.execute(
-      sql`SELECT seq FROM audit_events WHERE tenant_id = ${TENANT}`,
+      sql`SELECT seq FROM audit_events WHERE tenant_id = ${TENANT} AND action = 'test.old'`,
     )) as Array<{ seq: number | string }>;
     expect(rows.length).toBe(1);
   });

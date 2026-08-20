@@ -23,6 +23,7 @@ import {
   approvalQueue,
   executionAuthorizationNonces,
   getDb,
+  hasTenantTransactionDatabase,
   providerAccounts,
   providerActionBindings,
   providerOperations,
@@ -843,6 +844,12 @@ async function loadAccount(
  */
 async function runInSnapshot<T>(fn: (sdb: SnapshotDb) => Promise<T>): Promise<T> {
   const db = getDb();
+  // Authenticated routes already run inside the tenant-bound transaction. A
+  // nested Drizzle transaction is only a savepoint: SET TRANSACTION is invalid
+  // there (and aborts the savepoint on Postgres), while PGLite can deadlock its
+  // single connection. Reuse the outer transaction; it is already one coherent
+  // request snapshot and carries the required RLS context.
+  if (hasTenantTransactionDatabase()) return fn(db as SnapshotDb);
   try {
     return await db.transaction(async (tx) => {
       if (!isPGLiteRuntime()) {
