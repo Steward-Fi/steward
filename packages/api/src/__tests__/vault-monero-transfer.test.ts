@@ -19,7 +19,7 @@ import {
   type PreparedMoneroTransfer,
   Vault,
 } from "@stwd/vault";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { Hono } from "hono";
 import { idempotencyMiddleware, MemoryIdempotencyStore } from "../middleware/idempotency";
 import type { AppVariables } from "../services/context";
@@ -66,8 +66,12 @@ class SetupMoneroBackend implements MoneroWalletBackend {
     _payload: MoneroKeyPayloadV1,
     _context: unknown,
     _txMetadata: string,
+    _expectedTxHash: string,
   ): Promise<{ txHash: string }> {
     throw new Error("not used in setup");
+  }
+  async getTransactionStatus(): Promise<"not_found"> {
+    return "not_found";
   }
   async discardPreparedTransfer(): Promise<void> {}
 }
@@ -77,9 +81,40 @@ function installScriptedMoneroRpc() {
   const realFetch = globalThis.fetch;
   const rpcCalls: Array<{ method: string; params: Record<string, unknown> }> = [];
   const walletFiles = new Map<string, { address: string }>();
+  let relayMode: "success" | "reject" | "lost-ack" = "success";
+  let daemonStatus: "not_found" | "broadcast" | "confirmed" | "malformed" = "not_found";
+  let beforeRelay: (() => void | Promise<void>) | undefined;
 
   const stub = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
+    if (url === `${FAKE_DAEMON_URL}/get_transactions`) {
+      const request = JSON.parse(String(init?.body)) as { txs_hashes?: unknown };
+      const requestedHash = Array.isArray(request.txs_hashes) ? request.txs_hashes[0] : null;
+      if (daemonStatus === "malformed") {
+        return new Response(JSON.stringify({ status: "OK", txs: [], missed_tx: [] }), {
+          status: 200,
+        });
+      }
+      if (daemonStatus === "not_found") {
+        return new Response(JSON.stringify({ status: "OK", txs: [], missed_tx: [requestedHash] }), {
+          status: 200,
+        });
+      }
+      return new Response(
+        JSON.stringify({
+          status: "OK",
+          txs: [
+            {
+              tx_hash: requestedHash,
+              in_pool: daemonStatus === "broadcast",
+              ...(daemonStatus === "confirmed" ? { block_height: 3_400_001 } : {}),
+            },
+          ],
+          missed_tx: [],
+        }),
+        { status: 200 },
+      );
+    }
     if (url.startsWith(FAKE_DAEMON_URL)) {
       return new Response(JSON.stringify({ status: "OK", height: 3_400_000 }), { status: 200 });
     }
@@ -139,8 +174,16 @@ function installScriptedMoneroRpc() {
           tx_metadata: "scripted-tx-metadata",
         });
       }
-      case "relay_tx":
+      case "relay_tx": {
+        await beforeRelay?.();
+        if (relayMode === "reject") {
+          return rpc(undefined, { code: -4, message: "transaction rejected" });
+        }
+        if (relayMode === "lost-ack") {
+          throw new TypeError("connection closed after relay submission");
+        }
         return rpc({ tx_hash: SCRIPTED_TX_HASH });
+      }
       case "rescan_spent":
       case "close_wallet":
         return rpc({});
@@ -152,6 +195,15 @@ function installScriptedMoneroRpc() {
   globalThis.fetch = stub;
   return {
     rpcCalls,
+    setRelayMode: (value: typeof relayMode) => {
+      relayMode = value;
+    },
+    setDaemonStatus: (value: typeof daemonStatus) => {
+      daemonStatus = value;
+    },
+    setBeforeRelay: (value: typeof beforeRelay) => {
+      beforeRelay = value;
+    },
     restore: () => {
       globalThis.fetch = realFetch;
     },
@@ -476,6 +528,52 @@ describe("vault Monero transfer + balance routes", () => {
     }
   });
 
+  it("rolls back the recovery anchor and never relays when its required audit fails", async () => {
+    const suffix = Date.now().toString(36);
+    const functionName = `fail_monero_anchor_audit_${suffix}`;
+    const triggerName = `fail_monero_anchor_audit_${suffix}`;
+    const rowCountBefore = (await getDb().select().from(transactions)).length;
+    const relayCountBefore = scripted.rpcCalls.filter((call) => call.method === "relay_tx").length;
+    try {
+      await getDb().execute(
+        sql.raw(`
+        CREATE FUNCTION ${functionName}() RETURNS trigger AS $$
+        BEGIN
+          IF NEW.action = 'vault.monero_transfer.authorized' THEN
+            RAISE EXCEPTION 'forced monero anchor audit failure';
+          END IF;
+          RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql
+      `),
+      );
+      await getDb().execute(
+        sql.raw(`
+        CREATE TRIGGER ${triggerName}
+        BEFORE INSERT ON audit_events
+        FOR EACH ROW EXECUTE FUNCTION ${functionName}()
+      `),
+      );
+      const response = await app.request(
+        transferRequest(
+          {
+            walletScope: SCOPE,
+            destinations: [{ address: allowedRecipient, amountPiconero: "1900000000" }],
+          },
+          { "Idempotency-Key": `monero-audit-failure-${suffix}` },
+        ),
+      );
+      expect(response.status).toBe(500);
+      expect((await getDb().select().from(transactions)).length).toBe(rowCountBefore);
+      expect(scripted.rpcCalls.filter((call) => call.method === "relay_tx").length).toBe(
+        relayCountBefore,
+      );
+    } finally {
+      await getDb().execute(sql.raw(`DROP TRIGGER IF EXISTS ${triggerName} ON audit_events`));
+      await getDb().execute(sql.raw(`DROP FUNCTION IF EXISTS ${functionName}()`));
+    }
+  });
+
   it("transfers happy-path: two-phase flow, transactions row, un-prefixed tx hash", async () => {
     const referenceId = `monero-ref-${Date.now()}`;
     const res = await app.request(
@@ -555,134 +653,167 @@ describe("vault Monero transfer + balance routes", () => {
     expect(dedupeBody.data.deduplicated).toBe(true);
   });
 
-  it("recovers accounting with the same idempotency key without a referenceId", async () => {
-    const key = `monero-accounting-${crypto.randomUUID()}`;
-    const request = () =>
+  it("anchors before relay, survives a lost acknowledgement, and never relays the same key twice", async () => {
+    const idempotencyKey = `monero-lost-ack-${Date.now()}`;
+    const requestBody = {
+      walletScope: SCOPE,
+      destinations: [{ address: allowedRecipient, amountPiconero: "3000000000" }],
+      priority: 2,
+    };
+    let anchoredTransactionId = "";
+    scripted.setBeforeRelay(async () => {
+      const [anchor] = await getDb()
+        .select()
+        .from(transactions)
+        .where(eq(transactions.status, "approved"));
+      expect(anchor).toBeDefined();
+      expect(anchor.status).toBe("approved");
+      expect(JSON.stringify(anchor.actionPayload)).not.toContain("scripted-tx-metadata");
+      anchoredTransactionId = anchor.id;
+    });
+    scripted.setRelayMode("lost-ack");
+    const relayCountBefore = scripted.rpcCalls.filter((call) => call.method === "relay_tx").length;
+    const first = await app.request(
+      transferRequest(requestBody, { "Idempotency-Key": idempotencyKey }),
+    );
+    expect(first.status).toBe(202);
+    const firstBody = (await first.json()) as {
+      data: { transactionId: string; txHash: string; status: string };
+    };
+    expect(firstBody.data.transactionId).toBe(anchoredTransactionId);
+    expect(firstBody.data.txHash).toBe(SCRIPTED_TX_HASH);
+    expect(firstBody.data.status).toBe("outcome_unknown");
+
+    scripted.setBeforeRelay(undefined);
+    scripted.setRelayMode("success");
+    const restartedApp = await makeApp();
+    const replay = await restartedApp.request(
+      transferRequest(requestBody, { "Idempotency-Key": idempotencyKey }),
+    );
+    expect(replay.status).toBe(202);
+    const replayBody = (await replay.json()) as { data: { transactionId: string } };
+    expect(replayBody.data.transactionId).toBe(anchoredTransactionId);
+    expect(scripted.rpcCalls.filter((call) => call.method === "relay_tx").length).toBe(
+      relayCountBefore + 1,
+    );
+
+    const mismatch = await restartedApp.request(
       transferRequest(
         {
-          walletScope: SCOPE,
-          destinations: [{ address: allowedRecipient, amountPiconero: "3000000000" }],
+          ...requestBody,
+          destinations: [{ address: allowedRecipient, amountPiconero: "3000000001" }],
         },
-        { "Idempotency-Key": key },
-      );
-    const relaysBefore = scripted.rpcCalls.filter((call) => call.method === "relay_tx").length;
-    process.env.REDIS_URL = "redis://127.0.0.1:1";
+        { "Idempotency-Key": idempotencyKey },
+      ),
+    );
+    expect(mismatch.status).toBe(409);
+  });
+
+  it("retries post-terminal effects by the same key without a second relay", async () => {
+    const idempotencyKey = `monero-effects-${Date.now()}`;
+    const requestBody = {
+      walletScope: SCOPE,
+      destinations: [{ address: allowedRecipient, amountPiconero: "3500000000" }],
+    };
+    const relayCountBefore = scripted.rpcCalls.filter((call) => call.method === "relay_tx").length;
+    scripted.setBeforeRelay(() => {
+      process.env.REDIS_URL = "redis://configured-but-unavailable.invalid:6379";
+    });
     try {
-      const first = await app.request(request());
-      expect(first.status).toBe(503);
+      const first = await app.request(
+        transferRequest(requestBody, { "Idempotency-Key": idempotencyKey }),
+      );
+      expect(first.status).toBe(202);
       const firstBody = (await first.json()) as {
-        data: { txId: string; status: string; accounting: string };
+        data: { transactionId: string; status: string };
       };
-      expect(firstBody.data).toMatchObject({ status: "broadcast", accounting: "pending" });
-      const [pending] = await getDb()
-        .select({ actionPayload: transactions.actionPayload })
-        .from(transactions)
-        .where(eq(transactions.id, firstBody.data.txId));
-      const occurredAt = (pending?.actionPayload as Record<string, unknown>)
-        .recoveryEffectsOccurredAt;
-
-      // Recovery is bound to the already-relayed request and must precede the
-      // mutable raw-signing policy gate. A new transfer is denied while the
-      // same-key terminal still drains without a second relay.
-      await getDb()
-        .update(policies)
-        .set({ enabled: false })
-        .where(eq(policies.id, `${AGENT_ID}-monero-raw-signing`));
-      const mismatch = await app.request(
-        transferRequest(
-          {
-            walletScope: SCOPE,
-            destinations: [{ address: allowedRecipient, amountPiconero: "3000000001" }],
-          },
-          { "Idempotency-Key": key },
-        ),
-      );
-      expect(mismatch.status).toBe(409);
-      expect(scripted.rpcCalls.filter((call) => call.method === "relay_tx")).toHaveLength(
-        relaysBefore + 1,
-      );
-
+      expect(firstBody.data.status).toBe("broadcast");
       delete process.env.REDIS_URL;
-      const replay = await app.request(request());
-      expect(replay.status).toBe(200);
-      expect(await replay.json()).toMatchObject({
-        ok: true,
-        data: { transactionId: firstBody.data.txId, deduplicated: true },
-      });
-      expect(scripted.rpcCalls.filter((call) => call.method === "relay_tx")).toHaveLength(
-        relaysBefore + 1,
+      scripted.setBeforeRelay(undefined);
+
+      const retry = await app.request(
+        transferRequest(requestBody, { "Idempotency-Key": idempotencyKey }),
       );
-      const [complete] = await getDb()
-        .select({ actionPayload: transactions.actionPayload })
+      expect(retry.status).toBe(200);
+      const [row] = await getDb()
+        .select()
         .from(transactions)
-        .where(eq(transactions.id, firstBody.data.txId));
-      expect(complete?.actionPayload).toMatchObject({ recoveryEffectsState: "complete" });
-      expect((complete?.actionPayload as Record<string, unknown>).recoveryEffectsOccurredAt).toBe(
-        occurredAt,
+        .where(eq(transactions.id, firstBody.data.transactionId));
+      expect(row.actionPayload).toMatchObject({ recoveryEffectsState: "complete" });
+      expect(scripted.rpcCalls.filter((call) => call.method === "relay_tx").length).toBe(
+        relayCountBefore + 1,
       );
     } finally {
-      await getDb()
-        .update(policies)
-        .set({ enabled: true })
-        .where(eq(policies.id, `${AGENT_ID}-monero-raw-signing`));
-      if (ORIGINAL_REDIS_URL === undefined) delete process.env.REDIS_URL;
-      else process.env.REDIS_URL = ORIGINAL_REDIS_URL;
+      delete process.env.REDIS_URL;
+      scripted.setBeforeRelay(undefined);
     }
   });
 
-  it("binds an accounting-pending relay to both its idempotency key and referenceId", async () => {
-    const key = `monero-accounting-reference-${crypto.randomUUID()}`;
-    const referenceId = `monero-accounting-reference-${crypto.randomUUID()}`;
-    const request = (
-      overrides: { referenceId?: string; amountPiconero?: string } = {},
-      keyOverride = key,
-    ) =>
-      transferRequest(
-        {
-          walletScope: SCOPE,
-          destinations: [
-            {
-              address: allowedRecipient,
-              amountPiconero: overrides.amountPiconero ?? "4000000000",
-            },
-          ],
-          referenceId: overrides.referenceId ?? referenceId,
-        },
-        { "Idempotency-Key": keyOverride },
-      );
-    const relaysBefore = scripted.rpcCalls.filter((call) => call.method === "relay_tx").length;
-    process.env.REDIS_URL = "redis://127.0.0.1:1";
-    try {
-      const first = await app.request(request());
-      expect(first.status).toBe(503);
-      expect(scripted.rpcCalls.filter((call) => call.method === "relay_tx")).toHaveLength(
-        relaysBefore + 1,
-      );
+  it("reconciles by exact daemon evidence without a second relay or duplicate terminal transition", async () => {
+    const [unknown] = await getDb()
+      .select()
+      .from(transactions)
+      .where(eq(transactions.status, "outcome_unknown"));
+    expect(unknown).toBeDefined();
+    const relayCountBefore = scripted.rpcCalls.filter((call) => call.method === "relay_tx").length;
 
-      const changedReference = await app.request(
-        request({ referenceId: `${referenceId}-changed` }),
-      );
-      expect(changedReference.status).toBe(409);
-      expect(await changedReference.json()).toMatchObject({
-        ok: false,
-        error: expect.stringContaining("Idempotency-Key"),
-      });
+    scripted.setDaemonStatus("malformed");
+    const malformed = await app.request(
+      `http://localhost/vault/${AGENT_ID}/monero/transactions/${unknown.id}/reconcile`,
+      { method: "POST" },
+    );
+    expect(malformed.status).toBe(503);
 
-      const changedRequestForReference = await app.request(
-        request({ amountPiconero: "4000000002" }, `${key}-changed`),
-      );
-      expect(changedRequestForReference.status).toBe(409);
-      expect(await changedRequestForReference.json()).toMatchObject({
-        ok: false,
-        error: expect.stringContaining("referenceId"),
-      });
-      expect(scripted.rpcCalls.filter((call) => call.method === "relay_tx")).toHaveLength(
-        relaysBefore + 1,
-      );
-    } finally {
-      if (ORIGINAL_REDIS_URL === undefined) delete process.env.REDIS_URL;
-      else process.env.REDIS_URL = ORIGINAL_REDIS_URL;
-    }
+    scripted.setDaemonStatus("not_found");
+    const absent = await app.request(
+      `http://localhost/vault/${AGENT_ID}/monero/transactions/${unknown.id}/reconcile`,
+      { method: "POST" },
+    );
+    expect(absent.status).toBe(202);
+
+    scripted.setDaemonStatus("confirmed");
+    const confirmed = await app.request(
+      `http://localhost/vault/${AGENT_ID}/monero/transactions/${unknown.id}/reconcile`,
+      { method: "POST" },
+    );
+    expect(confirmed.status).toBe(200);
+    const confirmedBody = (await confirmed.json()) as { data: { status: string } };
+    expect(confirmedBody.data.status).toBe("confirmed");
+    const replay = await app.request(
+      `http://localhost/vault/${AGENT_ID}/monero/transactions/${unknown.id}/reconcile`,
+      { method: "POST" },
+    );
+    expect(replay.status).toBe(200);
+    expect(scripted.rpcCalls.filter((call) => call.method === "relay_tx").length).toBe(
+      relayCountBefore,
+    );
+    const [persisted] = await getDb()
+      .select()
+      .from(transactions)
+      .where(eq(transactions.id, unknown.id));
+    expect(persisted.status).toBe("confirmed");
+  });
+
+  it("persists an explicit relay rejection and does not retry it", async () => {
+    const idempotencyKey = `monero-rejected-${Date.now()}`;
+    const requestBody = {
+      walletScope: SCOPE,
+      destinations: [{ address: allowedRecipient, amountPiconero: "4000000000" }],
+    };
+    scripted.setRelayMode("reject");
+    const relayCountBefore = scripted.rpcCalls.filter((call) => call.method === "relay_tx").length;
+    const rejected = await app.request(
+      transferRequest(requestBody, { "Idempotency-Key": idempotencyKey }),
+    );
+    expect(rejected.status).toBe(502);
+    scripted.setRelayMode("success");
+    const replay = await app.request(
+      transferRequest(requestBody, { "Idempotency-Key": idempotencyKey }),
+    );
+    expect(replay.status).toBe(409);
+    expect(scripted.rpcCalls.filter((call) => call.method === "relay_tx").length).toBe(
+      relayCountBefore + 1,
+    );
   });
 
   it("rejects raw-digest signing for monero (transfer-intent capability)", async () => {

@@ -87,6 +87,7 @@ import {
   type MoneroBalanceResult,
   type MoneroKeyPayloadV1,
   MoneroNotConfiguredError,
+  type MoneroTransactionStatus,
   type MoneroWalletBackend,
   moneroPublicMetadataFromPayload,
   moneroWalletScope,
@@ -260,6 +261,7 @@ export interface RelayMoneroTransferRequest {
   agentId: string;
   walletScope: string;
   txMetadata: string;
+  expectedTxHash: string;
 }
 
 const CHAINS: Record<number, Chain> = {
@@ -4227,7 +4229,7 @@ export class Vault {
    * stops the funds from moving.
    */
   async relayMoneroTransfer(request: RelayMoneroTransferRequest): Promise<{ txHash: string }> {
-    const { tenantId, agentId, walletScope, txMetadata } = request;
+    const { tenantId, agentId, walletScope, txMetadata, expectedTxHash } = request;
     const backend = this.getMoneroBackend();
     await assertVaultSigningActive({
       tenantId,
@@ -4243,7 +4245,20 @@ export class Vault {
       payload,
       { cacheId: this.moneroCacheId(tenantId, agentId, walletScope) },
       txMetadata,
+      expectedTxHash,
     );
+  }
+
+  /** Reconcile an anchored relay by public hash only; no secret wallet material is required. */
+  async reconcileMoneroTransfer(
+    txHash: string,
+    network: "mainnet" | "stagenet",
+  ): Promise<MoneroTransactionStatus> {
+    const backend = this.getMoneroBackend();
+    if (backend.network !== network) {
+      throw new Error("Configured Monero daemon network does not match the recovery anchor");
+    }
+    return backend.getTransactionStatus(txHash);
   }
 
   /**
