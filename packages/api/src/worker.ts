@@ -47,6 +47,7 @@ import {
   type NeonTransactionDbHandle,
   withRequestDatabase,
 } from "@stwd/db";
+import { withRuntimeEnvironment } from "@stwd/shared/runtime-env";
 import { initRedis } from "./middleware/redis";
 
 export interface Env {
@@ -378,39 +379,43 @@ async function getComposedApp() {
 
 export default {
   async fetch(request: Request, env: Env, ctx: unknown): Promise<Response> {
-    // SEC-148: refresh process.env from the CURRENT request's bindings on every
-    // request (not once per isolate) so rotated bindings take effect promptly;
-    // the once-per-isolate init below only bootstraps stores/imports.
-    hydrateProcessEnv(env);
-    validateWorkerSecurityEnv();
-    const executionCtx = ctx as { waitUntil?: (promise: Promise<unknown>) => void };
-    const waitUntil =
-      typeof executionCtx?.waitUntil === "function"
-        ? executionCtx.waitUntil.bind(executionCtx)
-        : undefined;
-    return withWorkerRequestDatabase(
-      env,
-      async () => {
-        await ensureWorkerInit(env);
-        const app = await getComposedApp();
-        return app.fetch(request, env, ctx as never);
-      },
-      waitUntil ? { waitUntil } : undefined,
-    );
+    return withRuntimeEnvironment({ ...env, STEWARD_RUNTIME: "workers" }, async () => {
+      // Keep the legacy bridge for modules not yet migrated to request-local
+      // configuration. Security-sensitive OIDC settings use the immutable
+      // snapshot above and cannot be replaced by an overlapping request.
+      hydrateProcessEnv(env);
+      validateWorkerSecurityEnv();
+      const executionCtx = ctx as { waitUntil?: (promise: Promise<unknown>) => void };
+      const waitUntil =
+        typeof executionCtx?.waitUntil === "function"
+          ? executionCtx.waitUntil.bind(executionCtx)
+          : undefined;
+      return withWorkerRequestDatabase(
+        env,
+        async () => {
+          await ensureWorkerInit(env);
+          const app = await getComposedApp();
+          return app.fetch(request, env, ctx as never);
+        },
+        waitUntil ? { waitUntil } : undefined,
+      );
+    });
   },
   async scheduled(
     _controller: unknown,
     env: Env,
     ctx: { waitUntil(promise: Promise<unknown>): void },
   ) {
-    hydrateProcessEnv(env);
-    validateWorkerSecurityEnv();
-    ctx.waitUntil(
-      Promise.all([
-        withWorkerRequestDatabase(env, () => runWorkerUpstreamCredentialLeaseSweep(env)),
-        withWorkerRequestDatabase(env, () => runWorkerGoogleCredentialLifecycleSweep(env)),
-        withWorkerRequestDatabase(env, () => runWorkerXCredentialLifecycleSweep(env)),
-      ]),
-    );
+    withRuntimeEnvironment({ ...env, STEWARD_RUNTIME: "workers" }, () => {
+      hydrateProcessEnv(env);
+      validateWorkerSecurityEnv();
+      ctx.waitUntil(
+        Promise.all([
+          withWorkerRequestDatabase(env, () => runWorkerUpstreamCredentialLeaseSweep(env)),
+          withWorkerRequestDatabase(env, () => runWorkerGoogleCredentialLifecycleSweep(env)),
+          withWorkerRequestDatabase(env, () => runWorkerXCredentialLifecycleSweep(env)),
+        ]),
+      );
+    });
   },
 };

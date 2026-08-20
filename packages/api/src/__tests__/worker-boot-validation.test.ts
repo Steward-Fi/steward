@@ -6,6 +6,7 @@
  */
 
 import { afterEach, describe, expect, it } from "bun:test";
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 import worker from "../worker";
 
 /**
@@ -23,6 +24,7 @@ const MANAGED_KEYS = [
   "STEWARD_DB_MODE",
   "STEWARD_PGLITE_MEMORY",
   "AGENT_TOKEN_EXPIRY",
+  "STEWARD_OIDC_JWKS_MAX_AGE_MS",
 ] as const;
 
 describe("workers boot JWT env validation (SEC-134)", () => {
@@ -91,25 +93,75 @@ describe("workers boot JWT env validation (SEC-134)", () => {
 
   it("validates concurrent request bindings before either database selection", async () => {
     snapshotEnv();
-    const shortSecret = worker.fetch(
-      new Request("https://workers.test/short-secret"),
-      { NODE_ENV: "production", STEWARD_JWT_SECRET: "short", DATABASE_DRIVER: "bogus" },
-      {},
-    );
-    const malformedExpiry = worker.fetch(
-      new Request("https://workers.test/malformed-expiry"),
-      {
-        STEWARD_JWT_SECRET: "workers-boot-test-secret-32-chars-long!!",
-        AGENT_TOKEN_EXPIRY: "not-a-duration",
-        DATABASE_DRIVER: "bogus",
-      },
-      {},
-    );
+    const shortSecret = expect(
+      worker.fetch(
+        new Request("https://workers.test/short-secret"),
+        { NODE_ENV: "production", STEWARD_JWT_SECRET: "short", DATABASE_DRIVER: "bogus" },
+        {},
+      ),
+    ).rejects.toThrow("at least 32 characters in production");
+    const malformedExpiry = expect(
+      worker.fetch(
+        new Request("https://workers.test/malformed-expiry"),
+        {
+          STEWARD_JWT_SECRET: "workers-boot-test-secret-32-chars-long!!",
+          AGENT_TOKEN_EXPIRY: "not-a-duration",
+          DATABASE_DRIVER: "bogus",
+        },
+        {},
+      ),
+    ).rejects.toThrow('AGENT_TOKEN_EXPIRY "not-a-duration" is not a valid positive duration');
 
-    await expect(shortSecret).rejects.toThrow("at least 32 characters in production");
-    await expect(malformedExpiry).rejects.toThrow(
-      'AGENT_TOKEN_EXPIRY "not-a-duration" is not a valid positive duration',
-    );
+    await Promise.all([shortSecret, malformedExpiry]);
+  });
+
+  it("keeps nested Worker request snapshots isolated from missing global values", async () => {
+    snapshotEnv();
+    process.env.STEWARD_OIDC_JWKS_MAX_AGE_MS = "global-poison";
+    const secret = "workers-runtime-snapshot-secret-at-least-32-chars";
+    let nestedRejection: Promise<void> | undefined;
+    const nestedContext = Object.defineProperty({}, "waitUntil", {
+      get() {
+        throw new Error(
+          `nested snapshot: ${String(runtimeEnvironmentValue("STEWARD_OIDC_JWKS_MAX_AGE_MS"))}`,
+        );
+      },
+    });
+    const firstContext = Object.defineProperty({}, "waitUntil", {
+      get() {
+        const nestedRequest = worker.fetch(
+          new Request("https://workers.test/runtime-snapshot-missing"),
+          { STEWARD_JWT_SECRET: secret, DATABASE_DRIVER: "bogus" },
+          nestedContext,
+        );
+        nestedRejection = nestedRequest.then(
+          () => {
+            throw new Error("nested Worker request unexpectedly succeeded");
+          },
+          (error) => {
+            expect(String(error)).toContain("nested snapshot: undefined");
+          },
+        );
+        throw new Error(
+          `first snapshot: ${String(runtimeEnvironmentValue("STEWARD_OIDC_JWKS_MAX_AGE_MS"))}`,
+        );
+      },
+    });
+
+    const firstRejection = expect(
+      worker.fetch(
+        new Request("https://workers.test/runtime-snapshot-first"),
+        {
+          STEWARD_JWT_SECRET: secret,
+          STEWARD_OIDC_JWKS_MAX_AGE_MS: "60000",
+          DATABASE_DRIVER: "bogus",
+        },
+        firstContext,
+      ),
+    ).rejects.toThrow("first snapshot: 60000");
+    await firstRejection;
+    if (!nestedRejection) throw new Error("nested Worker request did not run");
+    await nestedRejection;
   });
 
   it("validates scheduled security bindings before opening any database handle", async () => {

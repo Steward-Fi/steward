@@ -10,7 +10,13 @@ export * from "./farcaster";
 export * from "./jwt";
 export * from "./middleware";
 export * from "./oauth";
-export * from "./oidc";
+export {
+  assertPublicJwksDestination,
+  clearOidcJwksCacheForTests,
+  getPublicRemoteJWKSet,
+  type VerifiedOidcToken,
+  verifyOidcJwt,
+} from "./oidc";
 export * from "./passkey";
 export * from "./phone";
 export * from "./platform";
