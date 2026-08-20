@@ -105,6 +105,13 @@ async function userSessionAuth(
 }
 
 globalWalletRoutes.use("*", userSessionAuth);
+globalWalletRoutes.use("*", async (c, next) => {
+  // Authenticated global-wallet responses can contain signatures, confirmation
+  // handles, or wallet authority metadata. Apply the contract before any RPC
+  // validation so post-auth failures are non-cacheable too.
+  setNoStoreHeaders(c);
+  await next();
+});
 
 function getVault(): Vault {
   return getConfiguredVault();

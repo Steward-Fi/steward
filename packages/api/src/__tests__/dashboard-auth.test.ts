@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it, setDefaultTimeout } from "bun:test";
 import { signAccessToken, signAgentToken } from "@stwd/auth";
-import { getDb, tenants, users, userTenants } from "@stwd/db";
+import { agents, getDb, tenants, users, userTenants } from "@stwd/db";
 import { eq } from "drizzle-orm";
 
 setDefaultTimeout(30000);
@@ -19,6 +19,7 @@ setDefaultTimeout(30000);
 const TENANT_ID = "test-dashboard-auth";
 const OWNER_USER_ID = crypto.randomUUID();
 const MEMBER_USER_ID = crypto.randomUUID();
+const AGENT_ID = `dashboard-cache-${crypto.randomUUID()}`;
 const hasDatabaseUrl = Boolean(process.env.DATABASE_URL);
 const describeWithDatabase = hasDatabaseUrl ? describe : describe.skip;
 
@@ -51,10 +52,20 @@ beforeAll(async () => {
       { userId: MEMBER_USER_ID, tenantId: TENANT_ID, role: "member" },
     ])
     .onConflictDoNothing();
+  await getDb().insert(agents).values({
+    id: AGENT_ID,
+    tenantId: TENANT_ID,
+    name: "Dashboard cache contract",
+    walletAddress: "0x1234567890123456789012345678901234567890",
+  });
 });
 
 afterAll(async () => {
   if (!hasDatabaseUrl) return;
+  await getDb()
+    .delete(agents)
+    .where(eq(agents.id, AGENT_ID))
+    .catch(() => {});
   await getDb()
     .delete(userTenants)
     .where(eq(userTenants.tenantId, TENANT_ID))
@@ -135,6 +146,28 @@ describeWithDatabase("dashboardAuthMiddleware", () => {
     const body = (await res.json()) as { ok: boolean; error: string };
     expect(body.ok).toBe(false);
     expect(body.error).toContain("Agent not found");
+  });
+
+  it("returns dashboard data with the complete non-cacheable response contract", async () => {
+    const token = await signAccessToken(
+      {
+        address: `0x${"1".repeat(40)}`,
+        tenantId: TENANT_ID,
+        userId: OWNER_USER_ID,
+        mfaVerifiedAt: Date.now(),
+      },
+      "1h",
+    );
+
+    const res = await app.request(`/dashboard/${AGENT_ID}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("Cache-Control")).toBe("no-store, max-age=0");
+    expect(res.headers.get("Pragma")).toBe("no-cache");
+    expect(res.headers.get("Expires")).toBe("0");
+    expect((await res.json()) as object).toHaveProperty("data.agent.id", AGENT_ID);
   });
 
   it("rejects member sessions before returning dashboard data", async () => {

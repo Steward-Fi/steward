@@ -62,13 +62,17 @@ function makeApp(): Hono {
 async function postExchange(
   app: Hono,
   body: Record<string, unknown>,
-): Promise<{ status: number; json: Record<string, unknown> }> {
+): Promise<{ status: number; json: Record<string, unknown>; headers: Headers }> {
   const res = await app.request("/auth/oauth/exchange", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
-  return { status: res.status, json: (await res.json()) as Record<string, unknown> };
+  return {
+    status: res.status,
+    json: (await res.json()) as Record<string, unknown>,
+    headers: res.headers,
+  };
 }
 
 describe("POST /auth/oauth/exchange", () => {
@@ -143,13 +147,16 @@ describe("POST /auth/oauth/exchange", () => {
       tenantId: TENANT_ID,
     });
 
-    const { status, json } = await postExchange(app, {
+    const { status, json, headers } = await postExchange(app, {
       code: "nonce-happy-path",
       redirect_uri: REDIRECT_URI,
       tenant_id: TENANT_ID,
     });
 
     expect(status).toBe(200);
+    expect(headers.get("Cache-Control")).toBe("no-store, max-age=0");
+    expect(headers.get("Pragma")).toBe("no-cache");
+    expect(headers.get("Expires")).toBe("0");
     expect(json.ok).toBe(true);
     expect(json.token).toBe("access-jwt");
     expect(json.refreshToken).toBe("refresh-raw");
