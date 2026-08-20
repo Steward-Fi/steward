@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { describe, expect, it } from "bun:test";
 import { Hono } from "hono";
 import type { AppVariables } from "../services/context";
 
@@ -6,10 +6,6 @@ type RouteRequest = {
   method: "DELETE" | "GET" | "PATCH" | "POST" | "PUT";
   path: string;
 };
-
-const previousApiKeyAdminMutationOptIn = process.env.STEWARD_ALLOW_API_KEY_ADMIN_MUTATIONS;
-const previousMasterPassword = process.env.STEWARD_MASTER_PASSWORD;
-const previousPgliteMemory = process.env.STEWARD_PGLITE_MEMORY;
 
 async function makeApp() {
   const [{ agentRoutes }, { conditionSetRoutes }, { policiesStandaloneRoutes }, { secretsRoutes }] =
@@ -35,6 +31,11 @@ async function makeApp() {
   return app;
 }
 
+// The package preload owns the process-wide test database. These requests
+// reject at the mounted route guards before any database access, so this file
+// must not replace or close that shared override and break later files.
+const app = await makeApp();
+
 async function expectMachinePrincipalRejected(
   app: Awaited<ReturnType<typeof makeApp>>,
   requests: RouteRequest[],
@@ -58,38 +59,6 @@ async function expectMachinePrincipalRejected(
 }
 
 describe("API key control-plane boundary", () => {
-  let app: Awaited<ReturnType<typeof makeApp>>;
-  let closeTestDb: () => Promise<void>;
-
-  beforeAll(async () => {
-    delete process.env.STEWARD_ALLOW_API_KEY_ADMIN_MUTATIONS;
-    process.env.STEWARD_PGLITE_MEMORY = "true";
-    process.env.STEWARD_MASTER_PASSWORD = "api-key-boundary-master-password";
-    const [{ closeDb }, { createPGLiteDb, setPGLiteOverride }] = await Promise.all([
-      import("@stwd/db"),
-      import("@stwd/db/pglite"),
-    ]);
-    const { db, client } = await createPGLiteDb("memory://");
-    setPGLiteOverride(db, async () => {
-      await client.close();
-    });
-    closeTestDb = closeDb;
-    app = await makeApp();
-  });
-
-  afterAll(async () => {
-    await closeTestDb();
-    if (previousApiKeyAdminMutationOptIn === undefined) {
-      delete process.env.STEWARD_ALLOW_API_KEY_ADMIN_MUTATIONS;
-    } else {
-      process.env.STEWARD_ALLOW_API_KEY_ADMIN_MUTATIONS = previousApiKeyAdminMutationOptIn;
-    }
-    if (previousPgliteMemory === undefined) delete process.env.STEWARD_PGLITE_MEMORY;
-    else process.env.STEWARD_PGLITE_MEMORY = previousPgliteMemory;
-    if (previousMasterPassword === undefined) delete process.env.STEWARD_MASTER_PASSWORD;
-    else process.env.STEWARD_MASTER_PASSWORD = previousMasterPassword;
-  });
-
   it("rejects API keys at every secret vault and injection route", async () => {
     await expectMachinePrincipalRejected(app, [
       { method: "GET", path: "/secrets" },
