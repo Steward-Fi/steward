@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, spyOn } from "bun:test";
 
 import {
   buildBackend,
@@ -92,12 +92,104 @@ describe("buildBackend Redis smoke test", () => {
 });
 
 describe("NamespacedStoreBackend", () => {
+  it("keeps the exact absolute publication deadline in memory", async () => {
+    const backend = new MemoryBackend();
+    const expiresAt = Date.now() + 30;
+    expect(await backend.publish([{ key: "credential", value: "active", expiresAt }])).toBe(true);
+    await Bun.sleep(40);
+    expect(await backend.get("credential")).toBeNull();
+    backend.destroy();
+  });
+
+  it("rejects an expired memory publication before deleting prior credentials", async () => {
+    const backend = new MemoryBackend();
+    await backend.set("generation", "reservation", 60_000);
+    await backend.set("prior-credential", "still-active", 60_000);
+    const expired = Date.now() - 1;
+
+    expect(
+      await backend.publish([
+        { key: "prior-credential", value: null, expiresAt: expired },
+        { key: "replacement", value: "already-expired", expiresAt: expired },
+        {
+          key: "generation",
+          value: "published",
+          expiresAt: expired,
+          expected: "reservation",
+        },
+      ]),
+    ).toBe(false);
+    expect(await backend.get("prior-credential")).toBe("still-active");
+    expect(await backend.get("replacement")).toBeNull();
+    expect(await backend.get("generation")).toBe("reservation");
+    backend.destroy();
+  });
+
+  it("treats an existing memory guard as expired at its exact deadline", async () => {
+    const now = spyOn(Date, "now").mockReturnValue(1_000);
+    const backend = new MemoryBackend();
+    try {
+      await backend.set("guard", "reserved", 1_000);
+      now.mockReturnValue(2_000);
+      expect(
+        await backend.publish([
+          {
+            key: "guard",
+            value: "published",
+            expiresAt: 3_000,
+            expected: "reserved",
+          },
+          { key: "credential", value: "active", expiresAt: 3_000 },
+        ]),
+      ).toBe(false);
+      expect(await backend.get("guard")).toBeNull();
+      expect(await backend.get("credential")).toBeNull();
+    } finally {
+      backend.destroy();
+      now.mockRestore();
+    }
+  });
+
+  it("replaces a memory set-if-absent entry at its exact deadline", async () => {
+    const now = spyOn(Date, "now").mockReturnValue(1_000);
+    const backend = new MemoryBackend();
+    try {
+      expect(await backend.setIfNotExists("reservation", "old", 1_000)).toBe(true);
+      now.mockReturnValue(2_000);
+      expect(await backend.setIfNotExists("reservation", "replacement", 1_000)).toBe(true);
+      expect(await backend.get("reservation")).toBe("replacement");
+    } finally {
+      backend.destroy();
+      now.mockRestore();
+    }
+  });
+
+  it("passes absolute deadlines to an atomic Redis server-time publication", async () => {
+    let observedScript = "";
+    let observedArgs: Array<string | number> = [];
+    const backend = new RedisBackend(
+      redisLike({
+        eval: async (script, _numberOfKeys, ...args) => {
+          observedScript = script;
+          observedArgs = args;
+          return -1;
+        },
+      }),
+      "test:",
+    );
+    const expiresAt = Date.now() + 60_000;
+    expect(await backend.publish([{ key: "credential", value: "active", expiresAt }])).toBe(false);
+    expect(observedScript).toContain("redis.call('TIME')");
+    expect(observedScript).toContain("if ttl<=0 then return -1 end");
+    expect(observedArgs).toContain(expiresAt);
+  });
+
   it("rejects duplicate publish keys without applying either value", async () => {
     for (const backend of [new MemoryBackend(), new RedisBackend(redisLike(), "test:")]) {
       await expect(
         backend.publish([
-          { key: "credential", value: "first", ttlMs: 60_000 },
-          { key: "credential", value: "second", ttlMs: 60_000 },
+          { key: "credential", value: "first", expiresAt: Date.now() + 60_000 },
+          { key: "credential", value: "second", expiresAt: Date.now() + 60_000 },
         ]),
       ).rejects.toThrow("Store publication contains duplicate keys");
       expect(await backend.get("credential")).toBeNull();
@@ -113,11 +205,11 @@ describe("NamespacedStoreBackend", () => {
         {
           key: "generation",
           value: "published-a",
-          ttlMs: 60_000,
+          expiresAt: Date.now() + 60_000,
           expected: "reservation-a",
         },
-        { key: "credential", value: "active", ttlMs: 60_000 },
-        { key: "prior-credential", value: null, ttlMs: 60_000 },
+        { key: "credential", value: "active", expiresAt: Date.now() + 60_000 },
+        { key: "prior-credential", value: null, expiresAt: Date.now() + 60_000 },
       ] as const;
       expect(await backend.publish(entries)).toBe(true);
       expect(await backend.consume("credential")).toBe("active");
@@ -130,7 +222,7 @@ describe("NamespacedStoreBackend", () => {
       expect(
         await backend.publish([
           ...entries,
-          { key: "should-not-publish", value: "unsafe", ttlMs: 60_000 },
+          { key: "should-not-publish", value: "unsafe", expiresAt: Date.now() + 60_000 },
         ]),
       ).toBe(false);
       expect(await backend.get("generation")).toBe("reservation-newer");

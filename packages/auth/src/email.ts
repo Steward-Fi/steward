@@ -251,6 +251,10 @@ function issuancePublicationMarker(reservation: string): string {
   return `published:${hashSha256Hex(reservation)}`;
 }
 
+function issuancePublicationReceiptKey(reservation: string): string {
+  return `email-issuance:published:${hashSha256Hex(reservation)}`;
+}
+
 function parseIssuanceReservation(value: string | null): IssuanceReservation | null {
   if (!value?.startsWith("{")) return null;
   try {
@@ -562,13 +566,25 @@ export class EmailAuth {
     );
   }
 
-  private async publishChallenge(entries: readonly StorePublishEntry[]): Promise<boolean> {
+  private async publishChallenge(
+    entries: readonly StorePublishEntry[],
+    confirmOwnPublication?: () => Promise<boolean>,
+  ): Promise<boolean> {
     let lastError: unknown;
     for (let attempt = 0; attempt < 3; attempt += 1) {
       try {
-        return await this.tokenStore.publish(entries);
+        const published = await this.tokenStore.publish(entries);
+        if (published || !lastError || !confirmOwnPublication) return published;
+        return await confirmOwnPublication();
       } catch (error) {
         lastError = error;
+        if (confirmOwnPublication) {
+          try {
+            if (await confirmOwnPublication()) return true;
+          } catch {
+            // The durable outcome remains ambiguous; retry the atomic publish.
+          }
+        }
       }
     }
     throw lastError;
@@ -587,7 +603,12 @@ export class EmailAuth {
       const reservation = encodeIssuanceReservation(reservationId, prior);
       if (
         await this.publishChallenge([
-          { key: reservationKey, value: reservation, ttlMs, expected: current },
+          {
+            key: reservationKey,
+            value: reservation,
+            expiresAt: Date.now() + ttlMs,
+            expected: current,
+          },
         ])
       ) {
         return { reservationKey, reservation, prior };
@@ -603,7 +624,7 @@ export class EmailAuth {
   ): Promise<void> {
     try {
       await this.publishChallenge([
-        { key: reservationKey, value: null, ttlMs, expected: reservation },
+        { key: reservationKey, value: null, expiresAt: Date.now() + ttlMs, expected: reservation },
       ]);
     } catch {
       // A newer issuance may own the target. Never overwrite its reservation.
@@ -641,6 +662,8 @@ export class EmailAuth {
       reservation,
       prior: priorChallengeId,
     } = await this.reserveIssuance(targetKey, challengeId, ttlMs);
+    const publicationReceiptKey = issuancePublicationReceiptKey(reservation);
+    const publicationReceipt = issuancePublicationMarker(reservation);
 
     const codeVerifier = this.codeVerifier(email, context.tenantId, code);
     const challenge: EmailLoginChallengeRecord = {
@@ -714,53 +737,72 @@ export class EmailAuth {
     try {
       // Publish only legacy-readable records. Until this atomic operation
       // commits, neither old nor new pods can discover the staged credential.
-      const published = await this.publishChallenge([
-        { key: stagingKey, value: null, ttlMs: remainingTtlMs },
-        ...(priorChallengeId
-          ? [
-              {
-                key: emailLoginChallengeKey(priorChallengeId),
-                value: null,
-                ttlMs: remainingTtlMs,
-              },
-              {
-                key: emailLoginStatusKey(priorChallengeId),
-                value: null,
-                ttlMs: remainingTtlMs,
-              },
-            ]
-          : []),
-        {
-          key: emailLoginChallengeKey(challengeId),
-          value: JSON.stringify({
-            ...challenge,
-            status: "pending",
-          } satisfies EmailLoginChallengeRecord),
-          ttlMs: remainingTtlMs,
-        },
-        {
-          key: emailLoginStatusKey(challengeId),
-          value: JSON.stringify({
-            ...stagedStatus,
-            status: "pending",
-          } satisfies EmailLoginStatusRecord),
-          ttlMs: remainingTtlMs,
-        },
-        { key: emailLoginLinkAliasKey(tokenHash), value: challengeId, ttlMs: remainingTtlMs },
-        { key: emailLoginCodeAliasKey(codeVerifier), value: challengeId, ttlMs: remainingTtlMs },
-        {
-          key: targetKey,
-          value: challengeId,
-          ttlMs: remainingTtlMs,
-          expected: priorChallengeId,
-        },
-        {
-          key: reservationKey,
-          value: issuancePublicationMarker(reservation),
-          ttlMs: remainingTtlMs,
-          expected: reservation,
-        },
-      ]);
+      const published = await this.publishChallenge(
+        [
+          { key: stagingKey, value: null, expiresAt: expiresAt.getTime() },
+          ...(priorChallengeId
+            ? [
+                {
+                  key: emailLoginChallengeKey(priorChallengeId),
+                  value: null,
+                  expiresAt: expiresAt.getTime(),
+                },
+                {
+                  key: emailLoginStatusKey(priorChallengeId),
+                  value: null,
+                  expiresAt: expiresAt.getTime(),
+                },
+              ]
+            : []),
+          {
+            key: emailLoginChallengeKey(challengeId),
+            value: JSON.stringify({
+              ...challenge,
+              status: "pending",
+            } satisfies EmailLoginChallengeRecord),
+            expiresAt: expiresAt.getTime(),
+          },
+          {
+            key: emailLoginStatusKey(challengeId),
+            value: JSON.stringify({
+              ...stagedStatus,
+              status: "pending",
+            } satisfies EmailLoginStatusRecord),
+            expiresAt: expiresAt.getTime(),
+          },
+          {
+            key: emailLoginLinkAliasKey(tokenHash),
+            value: challengeId,
+            expiresAt: expiresAt.getTime(),
+          },
+          {
+            key: emailLoginCodeAliasKey(codeVerifier),
+            value: challengeId,
+            expiresAt: expiresAt.getTime(),
+          },
+          {
+            key: targetKey,
+            value: challengeId,
+            expiresAt: expiresAt.getTime(),
+            expected: priorChallengeId,
+          },
+          {
+            key: reservationKey,
+            value: publicationReceipt,
+            expiresAt: expiresAt.getTime(),
+            expected: reservation,
+          },
+          {
+            key: publicationReceiptKey,
+            value: publicationReceipt,
+            expiresAt: expiresAt.getTime(),
+            expected: null,
+          },
+        ],
+        async () =>
+          (await this.tokenStore.verify(publicationReceiptKey)) === publicationReceipt &&
+          (await this.tokenStore.verify(targetKey)) === challengeId,
+      );
       if (!published) throw new Error("email issuance was superseded");
     } catch (err) {
       await Promise.all([
@@ -798,6 +840,8 @@ export class EmailAuth {
       reservation,
       prior: priorStoreKey,
     } = await this.reserveIssuance(targetKey, stagingId, this.tokenTtlMs);
+    const publicationReceiptKey = issuancePublicationReceiptKey(reservation);
+    const publicationReceipt = issuancePublicationMarker(reservation);
     let storeKey = otpStoreKey(email, context.tenantId, code);
     // A repeated six-digit code would derive the prior issuance's exact key
     // and make an old email valid again. Regenerate before superseding it.
@@ -862,28 +906,41 @@ export class EmailAuth {
       throw new EmailDeliveryError("Email challenge activation failed");
     }
     try {
-      const published = await this.publishChallenge([
-        { key: stagingKey, value: null, ttlMs: remainingTtlMs },
-        ...(priorStoreKey ? [{ key: priorStoreKey, value: null, ttlMs: remainingTtlMs }] : []),
-        {
-          key: storeKey,
-          // Deployed pre-staging readers accept only the raw two-field payload.
-          value: JSON.stringify(payload),
-          ttlMs: remainingTtlMs,
-        },
-        {
-          key: targetKey,
-          value: storeKey,
-          ttlMs: remainingTtlMs,
-          expected: priorStoreKey,
-        },
-        {
-          key: reservationKey,
-          value: issuancePublicationMarker(reservation),
-          ttlMs: remainingTtlMs,
-          expected: reservation,
-        },
-      ]);
+      const published = await this.publishChallenge(
+        [
+          { key: stagingKey, value: null, expiresAt: expiresAt.getTime() },
+          ...(priorStoreKey
+            ? [{ key: priorStoreKey, value: null, expiresAt: expiresAt.getTime() }]
+            : []),
+          {
+            key: storeKey,
+            // Deployed pre-staging readers accept only the raw two-field payload.
+            value: JSON.stringify(payload),
+            expiresAt: expiresAt.getTime(),
+          },
+          {
+            key: targetKey,
+            value: storeKey,
+            expiresAt: expiresAt.getTime(),
+            expected: priorStoreKey,
+          },
+          {
+            key: reservationKey,
+            value: publicationReceipt,
+            expiresAt: expiresAt.getTime(),
+            expected: reservation,
+          },
+          {
+            key: publicationReceiptKey,
+            value: publicationReceipt,
+            expiresAt: expiresAt.getTime(),
+            expected: null,
+          },
+        ],
+        async () =>
+          (await this.tokenStore.verify(publicationReceiptKey)) === publicationReceipt &&
+          (await this.tokenStore.verify(targetKey)) === storeKey,
+      );
       if (!published) throw new Error("email issuance was superseded");
     } catch (err) {
       await Promise.all([
