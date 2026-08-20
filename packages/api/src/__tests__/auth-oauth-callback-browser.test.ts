@@ -156,6 +156,33 @@ describe("OAuth browser callback failures", () => {
     expect(await response.json()).toMatchObject({ ok: false, code: "oauth_state_expired" });
   });
 
+  it("prefers explicitly higher-quality JSON over acceptable HTML", async () => {
+    const response = await authRoutes.request(
+      "/oauth/github/callback?code=provider-code&state=expired-quality-state",
+      {
+        headers: {
+          accept: "application/json, text/html;q=0.1",
+          "sec-fetch-mode": "navigate",
+        },
+      },
+    );
+
+    expect(response.status).toBe(401);
+    expect(response.headers.get("content-type")).toContain("application/json");
+    expect(await response.json()).toMatchObject({ ok: false, code: "oauth_state_expired" });
+  });
+
+  it("keeps bare wildcard requests on JSON unless they are browser navigations", async () => {
+    const response = await authRoutes.request(
+      "/oauth/github/callback?code=provider-code&state=expired-wildcard-client-state",
+      { headers: { accept: "*/*" } },
+    );
+
+    expect(response.status).toBe(401);
+    expect(response.headers.get("content-type")).toContain("application/json");
+    expect(await response.json()).toMatchObject({ ok: false, code: "oauth_state_expired" });
+  });
+
   it("renders a sanitized provision-policy error with a validated recovery link", async () => {
     process.env.APP_URL = "https://api.example.test";
     process.env.GOOGLE_CLIENT_ID = "google-client";

@@ -4065,21 +4065,39 @@ function escapeOAuthCallbackHtml(value: string): string {
 
 function oauthCallbackPrefersHtml(c: Context): boolean {
   const accept = c.req.header("accept")?.toLowerCase() ?? "";
-  let htmlMatch: { specificity: number; quality: number } | undefined;
-  for (const range of accept.split(",")) {
-    const [mediaType, ...parameters] = range.split(";").map((part) => part.trim());
-    const qualityParameter = parameters.find((parameter) => parameter.startsWith("q="));
-    const quality = qualityParameter ? Number(qualityParameter.slice(2)) : 1;
-    const normalizedQuality =
-      Number.isFinite(quality) && quality >= 0 && quality <= 1 ? quality : 0;
-    const htmlSpecificity =
-      mediaType === "text/html" ? 2 : mediaType === "text/*" ? 1 : mediaType === "*/*" ? 0 : -1;
-    if (htmlSpecificity >= 0 && (!htmlMatch || htmlSpecificity > htmlMatch.specificity)) {
-      htmlMatch = { specificity: htmlSpecificity, quality: normalizedQuality };
+  const qualityFor = (target: "application/json" | "text/html"): number | undefined => {
+    const [targetType] = target.split("/");
+    let bestMatch: { specificity: number; quality: number } | undefined;
+    for (const range of accept.split(",")) {
+      const [mediaType, ...parameters] = range.split(";").map((part) => part.trim());
+      const qualityParameter = parameters.find((parameter) => parameter.startsWith("q="));
+      const quality = qualityParameter ? Number(qualityParameter.slice(2)) : 1;
+      const normalizedQuality =
+        Number.isFinite(quality) && quality >= 0 && quality <= 1 ? quality : 0;
+      const specificity =
+        mediaType === target
+          ? 2
+          : mediaType === `${targetType}/*`
+            ? 1
+            : mediaType === "*/*"
+              ? 0
+              : -1;
+      if (
+        specificity >= 0 &&
+        (!bestMatch ||
+          specificity > bestMatch.specificity ||
+          (specificity === bestMatch.specificity && normalizedQuality > bestMatch.quality))
+      ) {
+        bestMatch = { specificity, quality: normalizedQuality };
+      }
     }
-  }
-  if (htmlMatch) return htmlMatch.quality > 0;
-  if (accept.trim()) return false;
+    return bestMatch?.quality;
+  };
+
+  const htmlQuality = qualityFor("text/html") ?? 0;
+  const jsonQuality = qualityFor("application/json") ?? 0;
+  if (htmlQuality <= 0) return false;
+  if (htmlQuality !== jsonQuality) return htmlQuality > jsonQuality;
   return c.req.header("sec-fetch-mode")?.toLowerCase() === "navigate";
 }
 
