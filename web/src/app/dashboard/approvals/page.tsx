@@ -6,7 +6,6 @@ import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useAuth } from "@/components/auth-provider";
 import { ChainBadge } from "@/components/chain-badge";
-import { useWalletRuntimeReady } from "@/components/providers";
 import { STEWARD_API_URL } from "@/lib/steward-api-url";
 import { formatDate, formatNativeAmount, shortenAddress } from "@/lib/utils";
 
@@ -20,7 +19,6 @@ interface Toast {
 
 export default function ApprovalsPage() {
   const auth = useAuth();
-  const walletRuntimeReady = useWalletRuntimeReady();
   const activeTenantId = auth.tenant?.tenantId ?? null;
   const sessionUserId = auth.userId ?? null;
   const authReady =
@@ -29,8 +27,7 @@ export default function ApprovalsPage() {
     activeTenantId !== null &&
     sessionUserId !== null &&
     auth.sessionTenantId === activeTenantId &&
-    auth.accessToken !== null &&
-    walletRuntimeReady;
+    auth.accessToken !== null;
   const sessionEpoch = authReady ? JSON.stringify([activeTenantId, sessionUserId]) : null;
   const client = useMemo(
     () =>

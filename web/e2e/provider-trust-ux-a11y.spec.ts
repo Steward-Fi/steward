@@ -1,3 +1,5 @@
+import { readdirSync, readFileSync } from "node:fs";
+import { join, relative, sep } from "node:path";
 import AxeBuilder from "@axe-core/playwright";
 import { expect, type Locator, type Page, type Route, test } from "@playwright/test";
 
@@ -405,6 +407,57 @@ test("the approval queue loads once and exposes per-item decisions", async ({ pa
   expect(installedToken).not.toBeNull();
   expect(approvalRequestCredentials).toEqual([`Bearer ${installedToken}`]);
   expect(approvalRequests).toBe(1);
+});
+
+test("the approval queue remains actionable while optional wallet chunks never settle", async ({
+  page,
+}) => {
+  const chunkRoot = join(process.cwd(), ".next", "static", "chunks");
+  const walletChunkPaths = new Set<string>();
+  const inspectChunks = (directory: string) => {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const path = join(directory, entry.name);
+      if (entry.isDirectory()) {
+        inspectChunks(path);
+        continue;
+      }
+      if (!entry.name.endsWith(".js")) continue;
+      const chunkPath = relative(chunkRoot, path).split(sep).join("/");
+      // App-router entry chunks bootstrap the page and may also contain the
+      // loader callsite. Only stall the asynchronously loaded wallet chunks.
+      if (chunkPath.startsWith("app/")) continue;
+      const source = readFileSync(path, "utf8");
+      if (source.includes("EVMWalletProvider") || source.includes("getWagmiConfig")) {
+        walletChunkPaths.add(`/_next/static/chunks/${chunkPath}`);
+      }
+    }
+  };
+  inspectChunks(chunkRoot);
+  expect(walletChunkPaths.size).toBeGreaterThan(0);
+
+  let stalledOptionalChunks = 0;
+  await page.route("**/_next/static/chunks/*.js", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (!walletChunkPaths.has(path)) {
+      await route.continue();
+      return;
+    }
+    stalledOptionalChunks += 1;
+    // Keep the optional dynamic imports unresolved beyond the assertion
+    // window. Abort afterward so Playwright can tear the route down cleanly.
+    await new Promise((resolve) => setTimeout(resolve, 15_000));
+    await route.abort("timedout");
+  });
+
+  await seedSession(page);
+  await mockAccessibilityApis(page);
+  await page.goto("/dashboard/approvals", { waitUntil: "domcontentloaded" });
+  await expect(page.getByRole("heading", { name: "Approval Queue" })).toBeVisible({
+    timeout: 5_000,
+  });
+  await expect(page.getByRole("button", { name: "Approve", exact: true })).toBeEnabled();
+  await expect(page.getByRole("button", { name: "Reject", exact: true })).toBeEnabled();
+  expect(stalledOptionalChunks).toBeGreaterThan(0);
 });
 
 test("a later same-session remount refreshes the approval queue", async ({ page }) => {

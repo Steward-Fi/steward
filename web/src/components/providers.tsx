@@ -3,10 +3,8 @@
 import { StewardProvider, useAuth } from "@stwd/react";
 import { usePathname } from "next/navigation";
 import {
-  createContext,
   createElement,
   type ReactNode,
-  useContext,
   useEffect,
   useLayoutEffect,
   useMemo,
@@ -20,7 +18,6 @@ import { STEWARD_API_URL } from "@/lib/steward-api-url";
 import "@simplewebauthn/browser";
 
 const API_URL = STEWARD_API_URL;
-const WalletRuntimeReadyContext = createContext(true);
 
 interface WalletRuntime {
   EVMWalletProvider: React.ComponentType<{ config: unknown; children: ReactNode }>;
@@ -67,10 +64,6 @@ export async function resolveWalletRuntime(
   } finally {
     if (timeout) clearTimeout(timeout);
   }
-}
-
-export function useWalletRuntimeReady(): boolean {
-  return useContext(WalletRuntimeReadyContext);
 }
 
 /**
@@ -175,10 +168,14 @@ function WalletProviderTree({ children }: { children: ReactNode }) {
     };
   }, []);
 
-  if (pathname === "/dashboard/webhooks" || pathname?.startsWith("/dashboard/webhooks/")) {
-    // Webhook administration does not use wallet capabilities. Keep it outside
-    // the optional wallet wrappers so their late load cannot remount the page
-    // and repeat configuration or delivery requests.
+  if (
+    pathname?.startsWith("/dashboard/approvals") ||
+    pathname === "/dashboard/webhooks" ||
+    pathname?.startsWith("/dashboard/webhooks/")
+  ) {
+    // Approval review and webhook administration do not use wallet capabilities.
+    // Keep them outside the optional wallet wrapper so a late load cannot remount
+    // either tenant-bound interface and duplicate requests.
     return children;
   }
 
@@ -186,22 +183,16 @@ function WalletProviderTree({ children }: { children: ReactNode }) {
     // Server render and pre-hydration client render: pass children
     // through unchanged. Wallet UI just won't be available until the
     // dynamic chunks land. Pages without wallets render normally.
-    return createElement(
-      WalletRuntimeReadyContext.Provider as any,
-      { value: walletRuntime.status === "failed" },
-      children,
-    ) as any;
+    return children;
   }
 
   const Mounted = walletRuntime.runtime;
 
-  return createElement(
-    WalletRuntimeReadyContext.Provider as any,
-    { value: true },
+  return (
     <Mounted.EVMWalletProvider config={Mounted.config}>
       <Mounted.SolanaWalletProvider endpoint={Mounted.rpc}>{children}</Mounted.SolanaWalletProvider>
-    </Mounted.EVMWalletProvider>,
-  ) as any;
+    </Mounted.EVMWalletProvider>
+  );
 }
 
 export function Providers({ children }: { children: ReactNode }) {
