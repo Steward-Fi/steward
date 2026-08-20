@@ -54,6 +54,7 @@ export {
   FailClosedExternalKeyCustodyProvider,
   InMemoryExternalKeyCustodyProvider,
   normalizeExternalKeyHandleRegistration,
+  SolanaBroadcastNotSubmittedError,
 } from "./external-key-custody";
 export type {
   ExternalKeyCustodyV1ConformanceResult,

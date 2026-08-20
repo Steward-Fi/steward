@@ -653,6 +653,22 @@ export function idempotencyMiddleware(options?: { store?: IdempotencyStore; ttlM
       recordIdempotencyMetric(metricsTenantId, "invalidKeys");
       return c.json<ApiResponse>({ ok: false, error: "Invalid Idempotency-Key header" }, 400);
     }
+    // Solana broadcast requests bind this key to their durable transaction row.
+    // Let that database state machine serve every auth mode consistently,
+    // including recovery after a process dies while this cache says processing.
+    if (/^\/vault\/[^/]+\/sign-solana$/.test(c.req.path)) {
+      const body = await c.req.raw
+        .clone()
+        .json()
+        .catch(() => null);
+      if (
+        body &&
+        typeof body === "object" &&
+        (body as { broadcast?: unknown }).broadcast !== false
+      ) {
+        return next();
+      }
+    }
 
     const [fingerprint, storageKey] = await Promise.all([
       buildFingerprint(c.req.raw),

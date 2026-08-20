@@ -25,6 +25,7 @@ import type {
   WalletAddressMetadata,
 } from "@stwd/shared";
 import { canonicalJsonStringify, toCaip2 } from "@stwd/shared";
+import bs58 from "bs58";
 import { and, eq, inArray, isNull, sql } from "drizzle-orm";
 import {
   type Chain,
@@ -65,6 +66,7 @@ import {
   externalKeyPrivateExportUnavailableError,
   externalKeySigningUnavailableError,
   normalizeExternalKeyHandleRegistration,
+  SolanaBroadcastNotSubmittedError,
 } from "./external-key-custody";
 import { deriveBitcoinKey, deriveEvmKey, deriveSolanaKey, generateMnemonic } from "./hd-wallet";
 import { type EncryptedKey, KeyStore } from "./keystore";
@@ -3136,6 +3138,7 @@ export class Vault {
       Transaction: SolTransaction,
       VersionedTransaction,
       Connection,
+      SendTransactionError,
     } = await import("@solana/web3.js");
     const txBytes = Uint8Array.from(atob(request.transaction), (c) => c.charCodeAt(0));
 
@@ -3152,6 +3155,8 @@ export class Vault {
     };
 
     let signedBytes: Uint8Array;
+    let preparedSignature: string;
+    let recentBlockhash: string;
     if (isVersionedTransactionBytes(txBytes)) {
       const vtx = VersionedTransaction.deserialize(txBytes);
       assertSolanaPriorityFeeWithinCap(parseSolanaTransaction(request.transaction));
@@ -3163,6 +3168,12 @@ export class Vault {
       }
       vtx.sign([keypair]);
       signedBytes = vtx.serialize();
+      const signature = vtx.signatures[0];
+      if (!signature?.some((byte) => byte !== 0)) {
+        throw new Error("Solana versioned transaction did not produce a signer signature");
+      }
+      preparedSignature = bs58.encode(signature);
+      recentBlockhash = vtx.message.recentBlockhash;
     } else {
       const tx = SolTransaction.from(txBytes);
       assertSolanaPriorityFeeWithinCap(parseSolanaTransaction(request.transaction));
@@ -3176,23 +3187,47 @@ export class Vault {
       }
       tx.partialSign(keypair);
       signedBytes = tx.serialize();
+      if (!tx.signature) {
+        throw new Error("Solana transaction did not produce a signer signature");
+      }
+      preparedSignature = bs58.encode(tx.signature);
+      if (!tx.recentBlockhash) {
+        throw new Error("Solana transaction is missing a recent blockhash");
+      }
+      recentBlockhash = tx.recentBlockhash;
     }
 
     if (shouldBroadcast) {
+      // Persist the deterministic signature before the first external write.
+      // A checkpoint failure aborts safely before sendRawTransaction.
+      await request.onBroadcastPrepared?.({ signature: preparedSignature, recentBlockhash });
       const connection = new Connection(rpcUrl, "confirmed");
-      const sig = await connection.sendRawTransaction(signedBytes, {
-        skipPreflight: false,
-        preflightCommitment: "confirmed",
-      });
-
-      const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash("confirmed");
-      await connection.confirmTransaction(
-        { signature: sig, blockhash, lastValidBlockHeight },
-        "confirmed",
-      );
+      try {
+        const sig = await connection.sendRawTransaction(signedBytes, {
+          skipPreflight: false,
+          preflightCommitment: "confirmed",
+        });
+        if (sig !== preparedSignature) {
+          throw new Error("Solana RPC returned a signature that does not match the signed bytes");
+        }
+        await connection.confirmTransaction(sig, "confirmed");
+      } catch (error) {
+        // The signed bytes and their deterministic signature were durably
+        // checkpointed before sendRawTransaction. Its rejection may represent
+        // a preflight denial, an accepted submission with a lost response, or
+        // a later confirmation failure, so every case is conservatively
+        // non-retryable until the signature is reconciled.
+        if (
+          error instanceof SendTransactionError &&
+          error.message.startsWith("Simulation failed.")
+        ) {
+          throw new SolanaBroadcastNotSubmittedError(preparedSignature, { cause: error });
+        }
+        throw new ExternalBroadcastOutcomeUnknownError(preparedSignature, { cause: error });
+      }
 
       return {
-        signature: sig,
+        signature: preparedSignature,
         broadcast: true,
         chainId,
         caip2: toCaip2(chainId),
@@ -3207,6 +3242,31 @@ export class Vault {
       chainId,
       caip2: toCaip2(chainId),
     };
+  }
+
+  async reconcileSolanaBroadcast(input: {
+    signature: string;
+    recentBlockhash: string;
+    chainId?: number;
+  }): Promise<"confirmed" | "broadcast" | "failed" | "outcome_unknown"> {
+    const { Connection } = await import("@solana/web3.js");
+    const rpcUrl = this.config.rpcUrl ?? resolveSolanaRpc(input.chainId ?? 101);
+    const connection = new Connection(rpcUrl, "confirmed");
+    const response = await connection.getSignatureStatuses([input.signature], {
+      searchTransactionHistory: true,
+    });
+    const status = response.value[0];
+    if (status) {
+      if (status.err !== null) return "failed";
+      if (status.confirmationStatus === "confirmed" || status.confirmationStatus === "finalized") {
+        return "confirmed";
+      }
+      return "broadcast";
+    }
+    const validity = await connection.isBlockhashValid(input.recentBlockhash, {
+      commitment: "confirmed",
+    });
+    return validity.value ? "outcome_unknown" : "failed";
   }
 
   /**
