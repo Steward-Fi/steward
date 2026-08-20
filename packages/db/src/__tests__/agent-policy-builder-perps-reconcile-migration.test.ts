@@ -172,22 +172,6 @@ describe("0109 agent policy builder-perps reconciliation", () => {
             ) AS exists
           `;
           expect(leaseAgentFence).toEqual([{ exists: true }]);
-          const capabilityAgentFence = await verified<{ exists: boolean }[]>`
-            SELECT EXISTS (
-              SELECT 1 FROM pg_trigger
-              WHERE tgname='capability_grants_agent_fence' AND NOT tgisinternal
-            ) AS exists
-          `;
-          expect(capabilityAgentFence).toEqual([{ exists: true }]);
-          const orphanGrantId = crypto.randomUUID();
-          await verified`
-            INSERT INTO capability_grants (id, tenant_id, agent_id, status)
-            VALUES (${orphanGrantId}, 'orphan-tenant', 'deleted-agent', 'revoked')
-          `;
-          const reactivation = verified`
-            UPDATE capability_grants SET status='active' WHERE id=${orphanGrantId}
-          `;
-          await expect(reactivation).rejects.toMatchObject({ code: "23503" });
           const fenceFunction = await verified<
             {
               definition: string;
@@ -215,6 +199,22 @@ describe("0109 agent policy builder-perps reconciliation", () => {
           expect(
             fenceDefinitions.find(({ name }) => name === "secret_routes_agent_fence")?.definition,
           ).toContain("UPDATE OF tenant_id, agent_id, enabled");
+          const capabilityAgentFence = await verified<{ exists: boolean }[]>`
+            SELECT EXISTS (
+              SELECT 1 FROM pg_trigger
+              WHERE tgname='capability_grants_agent_fence' AND NOT tgisinternal
+            ) AS exists
+          `;
+          expect(capabilityAgentFence).toEqual([{ exists: true }]);
+          const orphanGrantId = crypto.randomUUID();
+          await verified`
+            INSERT INTO capability_grants (id, tenant_id, agent_id, status)
+            VALUES (${orphanGrantId}, 'orphan-tenant', 'deleted-agent', 'revoked')
+          `;
+          const reactivation = verified`
+            UPDATE capability_grants SET status='active' WHERE id=${orphanGrantId}
+          `;
+          await expect(reactivation).rejects.toMatchObject({ code: "23503" });
           const applied = await verified<{ count: number }[]>`
           SELECT count(*)::int AS count FROM drizzle.__drizzle_migrations
         `;

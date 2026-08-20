@@ -19,7 +19,7 @@ import {
   workspaces,
 } from "@stwd/db";
 import { capabilities, capabilityGrants } from "@stwd/plugin-capabilities";
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { migrate as pgliteMigrate } from "drizzle-orm/pglite/migrator";
 import { Hono } from "hono";
 import type { AppVariables } from "../services/context";
@@ -197,7 +197,6 @@ async function createProviderBinding(
     createdByType: "agent",
     createdById: intentAgentId,
   });
-  const uniqueHash = () => `sha256:${crypto.randomUUID().replaceAll("-", "").padEnd(64, "0")}`;
   const binding: typeof providerActionBindings.$inferInsert = {
     intentId,
     tenantId: TENANT_ID,
@@ -208,10 +207,10 @@ async function createProviderBinding(
     operationRevision: 1,
     canonicalProfile: "github.provider-action.v1",
     canonicalActionBytes: Buffer.from("{}"),
-    actionDigest: uniqueHash(),
+    actionDigest: `sha256:${"1".repeat(64)}`,
     requestEnvelope: {},
-    requestHash: uniqueHash(),
-    idempotencyKeyHash: uniqueHash(),
+    requestHash: `sha256:${crypto.randomUUID().replaceAll("-", "").repeat(2)}`,
+    idempotencyKeyHash: `sha256:${crypto.randomUUID().replaceAll("-", "").padEnd(64, "0")}`,
     safeSummary: {},
     accessDecisionId: crypto.randomUUID(),
     accessEffect: status === "denied" ? "deny" : "allow",
@@ -236,6 +235,13 @@ async function tenantDelete(agentId: string): Promise<Response> {
 
 async function platformDelete(agentId: string): Promise<Response> {
   return platformRoutes.request(`/tenants/${TENANT_ID}/agents/${agentId}`, {
+    method: "DELETE",
+    headers: { "X-Steward-Platform-Key": PLATFORM_KEY },
+  });
+}
+
+async function platformTenantDelete(): Promise<Response> {
+  return platformRoutes.request(`/tenants/${TENANT_ID}`, {
     method: "DELETE",
     headers: { "X-Steward-Platform-Key": PLATFORM_KEY },
   });
@@ -272,6 +278,32 @@ async function expectBlockedDeletion(
       .from(upstreamCredentialLeaseEvents)
       .where(eq(upstreamCredentialLeaseEvents.leaseId, leaseId)),
   ).toEqual([{ action: "lease.issue" }]);
+
+  // Reconcile through the production lifecycle instead of deleting immutable
+  // evidence so shared real-Postgres teardown can remove the parent tenant.
+  await getDb()
+    .update(upstreamCredentialLeases)
+    .set({
+      status: "revoked",
+      tokenHash: null,
+      tokenCiphertext: null,
+      tokenIv: null,
+      tokenAuthTag: null,
+      tokenSalt: null,
+      revokedAt: new Date(),
+    })
+    .where(eq(upstreamCredentialLeases.id, leaseId));
+  await getDb()
+    .insert(upstreamCredentialLeaseEvents)
+    .values({
+      leaseId,
+      tenantId: TENANT_ID,
+      action: "lease.revoked",
+      decision: "allow",
+      metadata: { fixture: true },
+    });
+  const reconciled = await (actor === "tenant" ? tenantDelete(agentId) : platformDelete(agentId));
+  expect(reconciled.status).toBe(200);
 }
 
 async function expectTerminalDeletion(
@@ -444,13 +476,27 @@ describe("agent deletion upstream credential boundary", () => {
     expect(unresolvedDeleteError).toBeInstanceOf(Error);
     expect((unresolvedDeleteError as { cause?: { code?: string } }).cause?.code).toBe("55000");
 
-    await getDb().transaction(async (tx) => {
-      await tx.execute(sql`SET LOCAL session_replication_role = replica`);
-      await tx.execute(
-        sql`DELETE FROM upstream_credential_lease_events WHERE lease_id = ${activeLeaseId}`,
-      );
-      await tx.execute(sql`DELETE FROM upstream_credential_leases WHERE id = ${activeLeaseId}`);
-    });
+    await getDb()
+      .update(upstreamCredentialLeases)
+      .set({
+        status: "revoked",
+        tokenHash: null,
+        tokenCiphertext: null,
+        tokenIv: null,
+        tokenAuthTag: null,
+        tokenSalt: null,
+        revokedAt: new Date(),
+      })
+      .where(eq(upstreamCredentialLeases.id, activeLeaseId));
+    await getDb()
+      .insert(upstreamCredentialLeaseEvents)
+      .values({
+        leaseId: activeLeaseId,
+        tenantId: TENANT_ID,
+        action: "lease.revoked",
+        decision: "allow",
+        metadata: { fixture: true },
+      });
     await getDb().delete(workspaces).where(eq(workspaces.id, activeWorkspaceId));
   });
 
@@ -527,66 +573,66 @@ describe("agent deletion upstream credential boundary", () => {
     expect((await tenantDelete(agentId)).status).toBe(200);
   });
 
-  it.skipIf(!USING_REAL_POSTGRES)(
-    "retains resolved provider evidence and fences post-delete publication or resurrection",
-    async () => {
-      const agentId = `provider-terminal-${crypto.randomUUID()}`;
-      const survivorId = `provider-survivor-${crypto.randomUUID()}`;
-      await createAgent(agentId);
-      await createAgent(survivorId);
-      const { intentId } = await createProviderBinding(agentId, "denied");
+  it("retains resolved provider evidence and rejects new bindings after deletion", async () => {
+    const agentId = `provider-evidence-${crypto.randomUUID()}`;
+    await createAgent(agentId);
+    const { intentId } = await createProviderBinding(agentId, "denied");
 
-      expect((await tenantDelete(agentId)).status).toBe(200);
-      expect(
-        await getDb()
-          .select({ status: providerActionBindings.status })
-          .from(providerActionBindings)
-          .where(eq(providerActionBindings.intentId, intentId)),
-      ).toEqual([{ status: "denied" }]);
-      expect(
-        await getDb()
-          .select({ agentId: intents.agentId })
-          .from(intents)
-          .where(eq(intents.id, intentId)),
-      ).toEqual([{ agentId: null }]);
+    expect((await tenantDelete(agentId)).status).toBe(200);
+    expect(
+      await getDb()
+        .select({ status: providerActionBindings.status })
+        .from(providerActionBindings)
+        .where(eq(providerActionBindings.intentId, intentId)),
+    ).toEqual([{ status: "denied" }]);
+    expect(
+      await getDb()
+        .select({ agentId: intents.agentId })
+        .from(intents)
+        .where(eq(intents.id, intentId)),
+    ).toEqual([{ agentId: null }]);
 
-      let resurrectionError: unknown;
-      try {
-        await getDb()
-          .update(providerActionBindings)
-          .set({ status: "allowed_stub" })
-          .where(eq(providerActionBindings.intentId, intentId));
-      } catch (error) {
-        resurrectionError = error;
-      }
-      expect((resurrectionError as { cause?: { code?: string } }).cause?.code).toBe("23503");
+    const tenantDeletion = await platformTenantDelete();
+    expect(tenantDeletion.status).toBe(409);
+    await expect(tenantDeletion.json()).resolves.toEqual({
+      ok: false,
+      error: "Tenant has retained provider action evidence",
+    });
+    expect(await getDb().select().from(tenants).where(eq(tenants.id, TENANT_ID))).toHaveLength(1);
 
-      const { binding } = await createProviderBinding(agentId, "allowed_stub", survivorId, false);
-      let publicationError: unknown;
-      try {
-        await getDb().insert(providerActionBindings).values(binding);
-      } catch (error) {
-        publicationError = error;
-      }
-      expect((publicationError as { cause?: { code?: string } }).cause?.code).toBe("23503");
-    },
-  );
+    const lateAgentId = `provider-late-${crypto.randomUUID()}`;
+    const anchorAgentId = `provider-anchor-${crypto.randomUUID()}`;
+    await createAgent(lateAgentId);
+    await createAgent(anchorAgentId);
+    const { binding } = await createProviderBinding(lateAgentId, "denied", anchorAgentId, false);
+    await getDb().delete(agents).where(eq(agents.id, lateAgentId));
+    let lateBindingError: unknown;
+    try {
+      await getDb().insert(providerActionBindings).values(binding);
+    } catch (error) {
+      lateBindingError = error;
+    }
+    expect(lateBindingError).toBeInstanceOf(Error);
+    expect((lateBindingError as { cause?: { code?: string } }).cause?.code).toBe("23503");
+  });
 
-  it.skipIf(!USING_REAL_POSTGRES)(
-    "returns 409 while provider dispatch remains unresolved",
-    async () => {
-      const agentId = `provider-live-${crypto.randomUUID()}`;
-      await createAgent(agentId);
-      await createProviderBinding(agentId, "allowed_stub");
-      const response = await tenantDelete(agentId);
-      expect(response.status).toBe(409);
-      await expect(response.json()).resolves.toEqual({
-        ok: false,
-        error: "Agent has unresolved execution evidence; reconcile it first",
-      });
-      expect(await getDb().select().from(agents).where(eq(agents.id, agentId))).toHaveLength(1);
-    },
-  );
+  it("blocks deletion while provider execution is still reachable", async () => {
+    const agentId = `provider-live-${crypto.randomUUID()}`;
+    await createAgent(agentId);
+    const { intentId } = await createProviderBinding(agentId, "allowed_stub");
+
+    const response = await tenantDelete(agentId);
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toEqual({
+      ok: false,
+      error: "Agent has unresolved execution evidence; reconcile it first",
+    });
+    await getDb()
+      .update(providerActionBindings)
+      .set({ status: "stub_failed" })
+      .where(eq(providerActionBindings.intentId, intentId));
+    expect((await tenantDelete(agentId)).status).toBe(200);
+  });
 
   it.skipIf(!USING_REAL_POSTGRES)(
     "prevents lease publication from racing past the locked deletion decision",
@@ -695,6 +741,83 @@ describe("agent deletion upstream credential boundary", () => {
           writerOutcome ?? Promise.resolve({ ok: false }),
         ]);
         await Promise.all([holder.end(), writer.end(), observer.end()]);
+      }
+    },
+  );
+
+  it.skipIf(!USING_REAL_POSTGRES)(
+    "prevents token minting after the deletion revocation cutoff",
+    async () => {
+      const agentId = `token-race-${crypto.randomUUID()}`;
+      await createAgent(agentId);
+      const blockerLeaseId = await createLease(agentId, "revoked");
+      const holder = postgres(process.env.DATABASE_URL as string, { max: 1 });
+      const observer = postgres(process.env.DATABASE_URL as string, { max: 1 });
+      let releaseHolder!: () => void;
+      const release = new Promise<void>((resolve) => {
+        releaseHolder = resolve;
+      });
+      let holderPid = 0;
+      let holderReady!: () => void;
+      const ready = new Promise<void>((resolve) => {
+        holderReady = resolve;
+      });
+      const holderTransaction = holder.begin(async (tx) => {
+        const [backend] = await tx<{ pid: number }[]>`select pg_backend_pid()::int as pid`;
+        holderPid = backend?.pid ?? 0;
+        await tx`select id from upstream_credential_leases where id = ${blockerLeaseId} for update`;
+        holderReady();
+        await release;
+      });
+      await ready;
+
+      let deletion: Promise<Response> | undefined;
+      let tokenRequest: Promise<Response> | undefined;
+      try {
+        deletion = tenantDelete(agentId);
+        let deletionBlocked = false;
+        for (let attempt = 0; attempt < 400 && !deletionBlocked; attempt += 1) {
+          const [row] = await observer<{ blocked: boolean }[]>`
+            select exists (
+              select 1 from pg_stat_activity activity
+              where ${holderPid} = any(pg_blocking_pids(activity.pid))
+                and activity.query ilike '%upstream_credential_leases%'
+            ) as blocked
+          `;
+          deletionBlocked = row?.blocked === true;
+          if (!deletionBlocked) await Bun.sleep(10);
+        }
+        expect(deletionBlocked).toBe(true);
+
+        let tokenSettled = false;
+        tokenRequest = platformRoutes
+          .request(`/tenants/${TENANT_ID}/agents/${agentId}/token`, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "X-Steward-Platform-Key": PLATFORM_KEY,
+            },
+            body: JSON.stringify({ expiresIn: "5m", scopes: ["agent"] }),
+          })
+          .then((response) => {
+            tokenSettled = true;
+            return response;
+          });
+        await Bun.sleep(100);
+        expect(tokenSettled).toBe(false);
+
+        releaseHolder();
+        await holderTransaction;
+        expect((await deletion).status).toBe(200);
+        expect((await tokenRequest).status).toBe(404);
+      } finally {
+        releaseHolder();
+        await Promise.allSettled([
+          holderTransaction,
+          deletion ?? Promise.resolve(new Response()),
+          tokenRequest ?? Promise.resolve(new Response()),
+        ]);
+        await Promise.all([holder.end(), observer.end()]);
       }
     },
   );

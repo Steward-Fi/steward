@@ -32,6 +32,7 @@ import {
   getDb,
   isPersistedPolicyType,
   policies,
+  providerActionBindings,
   proxyAuditLog,
   refreshTokens,
   secretRoutes,
@@ -42,6 +43,7 @@ import {
   tenants,
   toPersistedPolicyRule,
   transactions,
+  upstreamCredentialLeases,
   users,
   userTenants,
   vaultSigningFreezes,
@@ -57,7 +59,20 @@ import {
   type TenantTestAccountConfig,
 } from "@stwd/shared";
 import { KeyStore, Vault } from "@stwd/vault";
-import { and, count, eq, ilike, inArray, isNull, ne, or, type SQL, sql } from "drizzle-orm";
+import {
+  and,
+  count,
+  eq,
+  ilike,
+  inArray,
+  isNotNull,
+  isNull,
+  ne,
+  notInArray,
+  or,
+  type SQL,
+  sql,
+} from "drizzle-orm";
 import { type Context, Hono } from "hono";
 import { deleteAgentAuthority } from "../services/agent-deletion";
 import { writeAuditEvent } from "../services/audit";
@@ -1903,6 +1918,47 @@ platform.delete("/tenants/:id", async (c) => {
 
   if (!existing) {
     return c.json<ApiResponse>({ ok: false, error: "Tenant not found" }, 404);
+  }
+
+  // Refuse before audit/revocation side effects when deletion would destroy or
+  // strand retained authority evidence. Agent deletion terminalizes leases;
+  // tenant deletion requires an explicit archival lifecycle for provider
+  // actions before their workspace/account/operation anchors may be removed.
+  const [[unresolvedLease], [retainedProviderEvidence]] = await Promise.all([
+    db
+      .select({ id: upstreamCredentialLeases.id })
+      .from(upstreamCredentialLeases)
+      .where(
+        and(
+          eq(upstreamCredentialLeases.tenantId, tenantId),
+          or(
+            notInArray(upstreamCredentialLeases.status, ["revoked", "expired", "failed"]),
+            isNotNull(upstreamCredentialLeases.tokenHash),
+            isNotNull(upstreamCredentialLeases.tokenCiphertext),
+            isNotNull(upstreamCredentialLeases.tokenIv),
+            isNotNull(upstreamCredentialLeases.tokenAuthTag),
+            isNotNull(upstreamCredentialLeases.tokenSalt),
+          ),
+        ),
+      )
+      .limit(1),
+    db
+      .select({ intentId: providerActionBindings.intentId })
+      .from(providerActionBindings)
+      .where(eq(providerActionBindings.tenantId, tenantId))
+      .limit(1),
+  ]);
+  if (unresolvedLease) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Tenant has unresolved upstream credential leases" },
+      409,
+    );
+  }
+  if (retainedProviderEvidence) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Tenant has retained provider action evidence" },
+      409,
+    );
   }
 
   const tenantAgents = await db

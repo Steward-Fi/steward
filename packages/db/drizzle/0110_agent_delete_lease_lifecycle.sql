@@ -38,7 +38,7 @@ BEFORE INSERT OR UPDATE OF
   token_iv,
   token_auth_tag,
   token_salt
- ON public.upstream_credential_leases
+ON public.upstream_credential_leases
 FOR EACH ROW EXECUTE FUNCTION steward_fence_agent_authority_creation();
 --> statement-breakpoint
 CREATE TRIGGER pending_proxy_requests_agent_fence
@@ -78,8 +78,6 @@ RETURNS trigger LANGUAGE plpgsql
 SET search_path = pg_catalog, public
 AS $$
 BEGIN
-  -- Existing terminal evidence may receive unrelated maintenance updates, but
-  -- every new binding and every transition into a live state needs an agent.
   IF TG_OP = 'UPDATE' AND NEW.status NOT IN (
     'pending_approval', 'approved', 'allowed_stub',
     'execution_ready', 'executing', 'outcome_unknown'
@@ -159,8 +157,8 @@ BEGIN
       RAISE EXCEPTION 'agent has active capability grants' USING ERRCODE = '55000';
     END IF;
   END IF;
-  -- Both historical intents FKs cascade through agents. Detach only resolved
-  -- provider-action intents so their binding evidence survives this deletion.
+  -- Detach resolved provider intents before the agent cascade so their binding
+  -- evidence remains durable after authority removal.
   UPDATE public.intents AS intent
   SET agent_id = NULL
   WHERE intent.tenant_id = OLD.tenant_id

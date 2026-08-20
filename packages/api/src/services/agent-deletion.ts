@@ -116,7 +116,8 @@ export async function deleteAgentAuthority(
           ]),
         ),
       )
-      .limit(1);
+      .limit(1)
+      .for("update");
     if (unresolvedTransaction || unresolvedProviderAction) {
       return "blocked_by_unresolved_execution";
     }
