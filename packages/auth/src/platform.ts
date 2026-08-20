@@ -38,17 +38,30 @@ function getValidPlatformKeys(): string[] {
 function parsePlatformKeyScopes(): Record<string, string[]> {
   const raw = process.env.STEWARD_PLATFORM_KEY_SCOPES;
   if (!raw?.trim()) return {};
+
+  let parsed: unknown;
   try {
-    const parsed = JSON.parse(raw) as Record<string, unknown>;
-    const scopes: Record<string, string[]> = {};
-    for (const [keyOrHash, value] of Object.entries(parsed)) {
-      if (!Array.isArray(value)) continue;
-      scopes[keyOrHash] = value.filter((scope): scope is string => typeof scope === "string");
-    }
-    return scopes;
+    parsed = JSON.parse(raw);
   } catch {
-    return {};
+    throw new Error("STEWARD_PLATFORM_KEY_SCOPES must be valid JSON");
   }
+
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error(
+      "STEWARD_PLATFORM_KEY_SCOPES must be a JSON object mapping keys or key hashes to string arrays",
+    );
+  }
+
+  const scopes: Record<string, string[]> = {};
+  for (const [keyOrHash, value] of Object.entries(parsed)) {
+    if (!Array.isArray(value) || value.some((scope) => typeof scope !== "string")) {
+      throw new Error(
+        "STEWARD_PLATFORM_KEY_SCOPES must be a JSON object mapping keys or key hashes to string arrays",
+      );
+    }
+    scopes[keyOrHash] = value;
+  }
+  return scopes;
 }
 
 /**

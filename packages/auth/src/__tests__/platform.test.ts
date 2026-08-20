@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { getPlatformKeyScopes, isValidPlatformKey } from "../platform";
+import { Hono } from "hono";
+import { getPlatformKeyScopes, isValidPlatformKey, platformAuthMiddleware } from "../platform";
 
 const ORIGINAL_PLATFORM_KEY = process.env.STEWARD_PLATFORM_KEY;
 const ORIGINAL_PLATFORM_KEYS = process.env.STEWARD_PLATFORM_KEYS;
@@ -55,5 +56,49 @@ describe("platform key validation", () => {
       "platform:write",
       "platform:tenant:create",
     ]);
+  });
+
+  it("rejects malformed platform scope JSON instead of hiding the configuration failure", () => {
+    resetPlatformKeyEnv();
+    process.env.STEWARD_PLATFORM_KEY_SCOPES = "{";
+
+    expect(() => getPlatformKeyScopes("platform-key")).toThrow(
+      "STEWARD_PLATFORM_KEY_SCOPES must be valid JSON",
+    );
+  });
+
+  it("fails a mounted platform request when scope configuration is malformed", async () => {
+    resetPlatformKeyEnv();
+    process.env.STEWARD_PLATFORM_KEY = "mounted-platform-key";
+    process.env.STEWARD_PLATFORM_KEY_SCOPES = "{";
+    const app = new Hono();
+    let reachedRoute = false;
+    app.onError((_error, c) => c.json({ ok: false, error: "Internal Server Error" }, 500));
+    app.use("*", platformAuthMiddleware());
+    app.get("/", (c) => {
+      reachedRoute = true;
+      return c.json({ ok: true });
+    });
+
+    const response = await app.request("/", {
+      headers: { "X-Steward-Platform-Key": "mounted-platform-key" },
+    });
+
+    expect(response.status).toBe(500);
+    expect(reachedRoute).toBe(false);
+  });
+
+  it.each([
+    ["an array", ["platform:read"]],
+    ["a scalar", "platform:read"],
+    ["a non-array mapping value", { "platform-key": "platform:read" }],
+    ["a mixed-type scope array", { "platform-key": ["platform:read", 1] }],
+  ])("rejects %s platform scope configuration", (_label, configuredScopes) => {
+    resetPlatformKeyEnv();
+    process.env.STEWARD_PLATFORM_KEY_SCOPES = JSON.stringify(configuredScopes);
+
+    expect(() => getPlatformKeyScopes("platform-key")).toThrow(
+      "STEWARD_PLATFORM_KEY_SCOPES must be a JSON object mapping keys or key hashes to string arrays",
+    );
   });
 });
