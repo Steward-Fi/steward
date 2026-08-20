@@ -170,9 +170,7 @@ describe("aggregation cap enforcement (vault.ts wiring)", () => {
  * `await recordAggregationEvent({ … })`, and that record is AWAITED (not
  * fire-and-forget) so the next in-lock snapshot includes this contribution.
  *
- * EVM signing uses the gateway-authorized form
- * `signTransactionAuthorized(signRequest, …)` while the non-EVM (Solana)
- * fallback still uses the raw `vault.signTransaction(signRequest, …)`. A brittle
+ * EVM and Solana native signing use their gateway-authorized forms. A brittle
  * anchor on one literal spelling (or on `await` vs `return`) drifts the moment
  * either branch is reshaped. Instead we recognize BOTH signing call shapes
  * structurally, require at least one to be present (fail helpfully if a refactor
@@ -183,16 +181,18 @@ describe("aggregation cap enforcement (vault.ts wiring)", () => {
  * in-memory fixture in this file's proof tests below.
  */
 function signingCallIndices(route: string): number[] {
-  // Both recognized signing forms on the primary sign money path. Decoupled
+  // Recognized signing forms on the primary sign money path. Decoupled
   // from `await` vs `return` and from the surrounding call chain: we anchor on
   // the signing method name immediately applied to `signRequest`.
   //   • EVM (gateway-authorized): `…signTransactionAuthorized(signRequest, …)`
-  //   • non-EVM (raw fallback):   `…vault.signTransaction(signRequest, …)`
+  //   • Solana gateway: `…signSolanaNativeTransferAuthorized(signRequest, …)`
+  //   • legacy raw fallback (kept in the helper proof): `…vault.signTransaction(signRequest, …)`
   // `signTransactionAuthorized(signRequest` is matched exclusively so it is not
   // also double-counted by the `signTransaction(signRequest` substring.
   const indices: number[] = [];
   const patterns = [
     /signTransactionAuthorized\(\s*signRequest\b/g,
+    /signSolanaNativeTransferAuthorized\(\s*signRequest\b/g,
     /(?<!Authorized\()\bvault\.signTransaction\(\s*signRequest\b/g,
   ];
   for (const pattern of patterns) {
@@ -217,8 +217,7 @@ function assertRecordAfterSigning(route: string): void {
   // rather than silently passing an ordering check over zero signing sites.
   expect(
     signingIndices.length,
-    "expected at least one recognized signing call (signTransactionAuthorized(signRequest …) " +
-      "or vault.signTransaction(signRequest …)) on the sign money path",
+    "expected at least one recognized governed or raw signing call on the sign money path",
   ).toBeGreaterThan(0);
 
   // EVERY present signing form must precede the awaited record. Moving the
@@ -243,6 +242,7 @@ function assertRecordAfterSigning(route: string): void {
 describe("aggregation source-contract assertion (self-proof)", () => {
   const RECORD = "await recordAggregationEvent({\n  valueRaw: signRequest.value,\n});";
   const EVM_SIGN = "await gv.signTransactionAuthorized(signRequest, { txId });";
+  const SOLANA_SIGN = "await gv.signSolanaNativeTransferAuthorized(signRequest, { txId });";
   const RAW_SIGN = "return vault.signTransaction(signRequest, { txId });";
 
   it("PASSES when both EVM-authorized and raw signing precede the awaited record", () => {
@@ -258,6 +258,10 @@ describe("aggregation source-contract assertion (self-proof)", () => {
   it("PASSES for a non-EVM-only route (raw fallback precedes the record)", () => {
     const route = `${RAW_SIGN}\n${RECORD}`;
     expect(() => assertRecordAfterSigning(route)).not.toThrow();
+  });
+
+  it("PASSES for a governed Solana-only route", () => {
+    expect(() => assertRecordAfterSigning(`${SOLANA_SIGN}\n${RECORD}`)).not.toThrow();
   });
 
   it("FAILS when NO recognized signing form is present", () => {

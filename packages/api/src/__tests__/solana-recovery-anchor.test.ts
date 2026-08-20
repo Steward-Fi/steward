@@ -30,6 +30,40 @@ const RECENT_BLOCKHASH = "11111111111111111111111111111111";
 const WITHIN_CAP_V0_TRANSFER =
   "AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAAQACBGa+fjMsekUzMr2dCn99sFX1xe8aBq2mbZizn7aBDEc6URw0oaLLUh3xa7JGuN6OeZfOI1x+drIqPXUDokgZ3YoDBkZv5SEXMv/srbpyw5vnvIzlu8X3EmssQ5s6QAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcDAgAFAkANAwACAAkD6AMAAAAAAAADAgABDAIAAAB7AAAAAAAAAAA=";
 
+function withRecentBlockhash(transaction: string, blockhash: string): string {
+  const bytes = Buffer.from(transaction, "base64");
+  const readShortVec = (offset: number): [number, number] => {
+    let value = 0;
+    let shift = 0;
+    let cursor = offset;
+    while (true) {
+      const byte = bytes[cursor++];
+      value |= (byte & 0x7f) << shift;
+      if ((byte & 0x80) === 0) return [value, cursor];
+      shift += 7;
+    }
+  };
+  const [signatureCount, messageOffset] = readShortVec(0);
+  let cursor = messageOffset + signatureCount * 64;
+  if ((bytes[cursor] & 0x80) !== 0) cursor += 1;
+  cursor += 3;
+  const [accountCount, accountsOffset] = readShortVec(cursor);
+  cursor = accountsOffset + accountCount * 32;
+  const replacement = Buffer.alloc(32);
+  Buffer.from(blockhash).copy(replacement, 0, 0, 32);
+  replacement.copy(bytes, cursor);
+  return bytes.toString("base64");
+}
+
+function withComputeUnitLimit(transaction: string, units: number): string {
+  const bytes = Buffer.from(transaction, "base64");
+  const marker = Buffer.from([2, 0x40, 0x0d, 0x03, 0]);
+  const offset = bytes.indexOf(marker);
+  if (offset < 0) throw new Error("compute-unit-limit instruction not found");
+  bytes.writeUInt32LE(units, offset + 1);
+  return bytes.toString("base64");
+}
+
 setDefaultTimeout(30_000);
 
 async function makeApp() {
@@ -225,7 +259,11 @@ describe("Solana durable recovery anchors", () => {
         }),
       });
 
-      expect(response.status).toBe(500);
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({
+        ok: true,
+        data: { txId: expect.any(String), signature: SIGNATURE, broadcast: true },
+      });
       const surviving = await onlyRecoveryRow();
       expect(surviving.status).toBe("broadcast");
       expect(surviving.txHash).toBe(SIGNATURE);
@@ -261,7 +299,11 @@ describe("Solana durable recovery anchors", () => {
         body: JSON.stringify({ transaction: WITHIN_CAP_V0_TRANSFER, broadcast: true }),
       });
 
-      expect(response.status).toBe(500);
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({
+        ok: true,
+        data: { txId: expect.any(String), signature: SIGNATURE, broadcast: true },
+      });
       const surviving = await onlyRecoveryRow();
       expect(surviving.status).toBe("broadcast");
       expect(surviving.txHash).toBe(SIGNATURE);
@@ -386,7 +428,7 @@ describe("Solana durable recovery anchors", () => {
         caip2: "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
       };
     };
-    const request = (recentMfa = false) =>
+    const request = (recentMfa = false, transaction = WITHIN_CAP_V0_TRANSFER) =>
       app.request(`/vault/${AGENT_ID}/sign-solana`, {
         method: "POST",
         headers: {
@@ -394,7 +436,7 @@ describe("Solana durable recovery anchors", () => {
           "Idempotency-Key": "session-admin-durable-solana-replay",
           ...(recentMfa ? { "x-test-recent-mfa": "true" } : {}),
         },
-        body: JSON.stringify({ transaction: WITHIN_CAP_V0_TRANSFER, broadcast: true }),
+        body: JSON.stringify({ transaction, broadcast: true }),
       });
 
     try {
@@ -410,7 +452,16 @@ describe("Solana durable recovery anchors", () => {
 
       releaseAttempt();
       const first = await firstPromise;
-      const replay = await request(true);
+      const changedComputeBudget = await request(
+        true,
+        withComputeUnitLimit(WITHIN_CAP_V0_TRANSFER, 210_000),
+      );
+      expect(changedComputeBudget.status).toBe(409);
+      expect(await changedComputeBudget.json()).toMatchObject({
+        ok: false,
+        error: "Idempotency-Key was already used for a different Solana transaction",
+      });
+      const replay = await request(true, withRecentBlockhash(WITHIN_CAP_V0_TRANSFER, RECIPIENT));
       expect(first.status).toBe(200);
       expect(replay.status).toBe(200);
       expect(replay.headers.get("Idempotency-Replayed")).toBeNull();

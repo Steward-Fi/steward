@@ -55,7 +55,8 @@ describe("token helpers", () => {
 
   it("exposes wrapped native addresses only for configured chains", () => {
     expect(getWrappedNativeAddress(8453)).toBe("0x4200000000000000000000000000000000000006");
-    expect(getWrappedNativeAddress(101)).toBeUndefined();
+    expect(getWrappedNativeAddress(101)).toBe("So11111111111111111111111111111111111111112");
+    expect(getWrappedNativeAddress(102)).toBe("So11111111111111111111111111111111111111112");
   });
 });
 
@@ -143,6 +144,24 @@ describe("createPriceOracle", () => {
     await expect(oracle.weiToUsd("2000000000000", 101, MONERO_ON_SOLANA.address)).resolves.toBe(
       651,
     );
+  });
+
+  it("values native SOL on both convention chains through the canonical wrapped mint", async () => {
+    const fetchMock = mock(async (input: RequestInfo | URL) => {
+      expect(String(input)).toEndWith("/So11111111111111111111111111111111111111112");
+      return new Response(
+        JSON.stringify({
+          pairs: [{ chainId: "solana", priceUsd: "200", liquidity: { usd: 50_000 } }],
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    });
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const oracle = createPriceOracle({ cacheTtlMs: 0 });
+    await expect(oracle.weiToUsd("1000000000", 101)).resolves.toBe(200);
+    await expect(oracle.weiToUsd("500000000", 102)).resolves.toBe(100);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
   it("keeps case-distinct Solana mint prices isolated in the cache", async () => {
