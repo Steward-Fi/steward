@@ -9,8 +9,12 @@
  * unearned reliance on the caller's retry-idempotency contract.
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { withTenantAuditedTransaction } from "../audit-chain";
-import { closeDb, setPGLiteOverride } from "../client";
+import {
+  __resetAuditHmacKeyCacheForTests,
+  withTenantAuditedTransaction,
+  withTenantAuditedTransactionOnDb,
+} from "../audit-chain";
+import { closeDb, getDb, setPGLiteOverride, withTenantTransactionDatabase } from "../client";
 import { createPGLiteDb } from "../pglite";
 
 function uniqueViolation(constraint: string): Error {
@@ -93,5 +97,48 @@ describe("audit-chain retry classification (SEC-167)", () => {
     });
     expect(result).toBe("committed");
     expect(calls).toBe(2);
+  });
+
+  test("a distinct handle inside tenant ALS keeps audit writes on its own transaction", async () => {
+    const previousAuditKey = process.env.STEWARD_AUDIT_HMAC_KEY;
+    process.env.STEWARD_AUDIT_HMAC_KEY = "ab".repeat(32);
+    __resetAuditHmacKeyCacheForTests();
+    const outerDb = { marker: "outer-app-transaction" } as unknown as ReturnType<typeof getDb>;
+    let topLevelAuditCalls = 0;
+    let transactionAuditCalls = 0;
+    const separateDb = {
+      async execute() {
+        topLevelAuditCalls += 1;
+        throw new Error("CROSS_HANDLE_TOP_LEVEL_AUDIT");
+      },
+      async transaction(callback: (tx: unknown) => Promise<unknown>) {
+        return callback({
+          async execute() {
+            transactionAuditCalls += 1;
+            throw new Error("CROSS_HANDLE_TRANSACTION_AUDIT");
+          },
+        });
+      },
+    } as unknown as ReturnType<typeof getDb>;
+
+    try {
+      await withTenantTransactionDatabase(outerDb, { tenantId: "platform" }, async () => {
+        await expect(
+          withTenantAuditedTransactionOnDb(separateDb, "platform", async (_tx, append) => {
+            await append({
+              tenantId: "platform",
+              actorType: "platform",
+              action: "user.deactivate.authorized",
+            });
+          }),
+        ).rejects.toThrow("CROSS_HANDLE_TRANSACTION_AUDIT");
+      });
+      expect(topLevelAuditCalls).toBe(0);
+      expect(transactionAuditCalls).toBe(1);
+    } finally {
+      if (previousAuditKey === undefined) delete process.env.STEWARD_AUDIT_HMAC_KEY;
+      else process.env.STEWARD_AUDIT_HMAC_KEY = previousAuditKey;
+      __resetAuditHmacKeyCacheForTests();
+    }
   });
 });
