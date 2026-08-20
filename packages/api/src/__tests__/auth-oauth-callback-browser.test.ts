@@ -87,7 +87,8 @@ describe("OAuth browser callback failures", () => {
       "/oauth/github/callback?code=provider-code&state=expired-state",
       { headers: browserHeaders() },
     );
-    await expectBrowserError(response, { status: 401, code: "oauth_state_expired" });
+    const body = await expectBrowserError(response, { status: 401, code: "oauth_state_expired" });
+    expect(body).not.toContain("Return and try again");
   });
 
   it("keeps JSON for an explicitly programmatic callback client", async () => {
@@ -120,6 +121,24 @@ describe("OAuth browser callback failures", () => {
     expect(response.headers.get("content-type")).toContain("application/json");
     expect(await response.json()).toMatchObject({ ok: false, code: "oauth_state_expired" });
   });
+
+  for (const excludedHtmlRange of ["text/*;q=0", "*/*;q=0"]) {
+    it(`honors ${excludedHtmlRange} when navigation fallback would otherwise select HTML`, async () => {
+      const response = await authRoutes.request(
+        "/oauth/github/callback?code=provider-code&state=expired-wildcard-state",
+        {
+          headers: {
+            accept: `application/json, ${excludedHtmlRange}`,
+            "sec-fetch-mode": "navigate",
+          },
+        },
+      );
+
+      expect(response.status).toBe(401);
+      expect(response.headers.get("content-type")).toContain("application/json");
+      expect(await response.json()).toMatchObject({ ok: false, code: "oauth_state_expired" });
+    });
+  }
 
   it("renders a sanitized provision-policy error with a validated recovery link", async () => {
     process.env.APP_URL = "https://api.example.test";
@@ -184,11 +203,36 @@ describe("OIDC browser callback failures", () => {
     expect(body).not.toContain("onload");
   });
 
+  it("offers a validated recovery link for a provider error with live OIDC state", async () => {
+    process.env.STEWARD_OAUTH_ALLOWED_REDIRECTS = REDIRECT_URI;
+    const state = "oidc-provider-denial-state";
+    await getAuthChallengeStore().set(
+      `oidc:${state}`,
+      JSON.stringify({
+        providerId: "acme",
+        redirectUri: REDIRECT_URI,
+        appState: "oidc-client-state",
+      }),
+    );
+    const response = await authRoutes.request(
+      `/oidc/acme/callback?error=access_denied&state=${state}`,
+      { headers: browserHeaders() },
+    );
+    const body = await expectBrowserError(response, {
+      status: 400,
+      code: "oidc_authorization_failed",
+    });
+    expect(body).toContain("Return and try again");
+    expect(body).toContain("error=oidc_authorization_failed");
+    expect(body).toContain("state=oidc-client-state");
+  });
+
   it("renders an HTML recovery page for expired OIDC state", async () => {
     const response = await authRoutes.request(
       "/oidc/acme/callback?code=provider-code&state=expired-state",
       { headers: browserHeaders() },
     );
-    await expectBrowserError(response, { status: 401, code: "oidc_state_expired" });
+    const body = await expectBrowserError(response, { status: 401, code: "oidc_state_expired" });
+    expect(body).not.toContain("Return and try again");
   });
 });

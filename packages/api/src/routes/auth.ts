@@ -4065,17 +4065,34 @@ function escapeOAuthCallbackHtml(value: string): string {
 
 function oauthCallbackPrefersHtml(c: Context): boolean {
   const accept = c.req.header("accept")?.toLowerCase() ?? "";
-  let htmlWasExplicitlyListed = false;
-  let htmlIsAcceptable = false;
+  let htmlMatch: { specificity: number; quality: number } | undefined;
+  let xhtmlMatch: { specificity: number; quality: number } | undefined;
   for (const range of accept.split(",")) {
     const [mediaType, ...parameters] = range.split(";").map((part) => part.trim());
-    if (mediaType !== "text/html" && mediaType !== "application/xhtml+xml") continue;
-    htmlWasExplicitlyListed = true;
     const qualityParameter = parameters.find((parameter) => parameter.startsWith("q="));
     const quality = qualityParameter ? Number(qualityParameter.slice(2)) : 1;
-    if (Number.isFinite(quality) && quality > 0) htmlIsAcceptable = true;
+    const normalizedQuality =
+      Number.isFinite(quality) && quality >= 0 && quality <= 1 ? quality : 0;
+    const htmlSpecificity =
+      mediaType === "text/html" ? 2 : mediaType === "text/*" ? 1 : mediaType === "*/*" ? 0 : -1;
+    const xhtmlSpecificity =
+      mediaType === "application/xhtml+xml"
+        ? 2
+        : mediaType === "application/*"
+          ? 1
+          : mediaType === "*/*"
+            ? 0
+            : -1;
+    if (htmlSpecificity >= 0 && (!htmlMatch || htmlSpecificity > htmlMatch.specificity)) {
+      htmlMatch = { specificity: htmlSpecificity, quality: normalizedQuality };
+    }
+    if (xhtmlSpecificity >= 0 && (!xhtmlMatch || xhtmlSpecificity > xhtmlMatch.specificity)) {
+      xhtmlMatch = { specificity: xhtmlSpecificity, quality: normalizedQuality };
+    }
   }
-  if (htmlWasExplicitlyListed) return htmlIsAcceptable;
+  if (htmlMatch || xhtmlMatch) {
+    return (htmlMatch?.quality ?? 0) > 0 || (xhtmlMatch?.quality ?? 0) > 0;
+  }
   return c.req.header("sec-fetch-mode")?.toLowerCase() === "navigate";
 }
 
