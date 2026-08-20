@@ -71,6 +71,13 @@ describe("capability plugin migrations: namespaced-journal isolation", () => {
        WHERE tgname = 'capability_grants_agent_fence' AND NOT tgisinternal`,
     );
     expect(fence.rows[0].n).toBe(1);
+    const fenceDefinition = await client.query(
+      `SELECT pg_get_triggerdef(oid) AS definition FROM pg_trigger
+       WHERE tgname = 'capability_grants_agent_fence' AND NOT tgisinternal`,
+    );
+    expect(fenceDefinition.rows[0].definition).toContain(
+      "UPDATE OF tenant_id, agent_id, status, secret_route_id",
+    );
   });
 
   test("migration 0001 lands capability_invocations in the plugin's OWN ledger, core untouched", async () => {
