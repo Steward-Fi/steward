@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { useApprovals } from "../hooks/useApprovals.js";
 import { useStewardContext } from "../provider.js";
 import type { ApprovalQueueProps } from "../types.js";
@@ -22,6 +22,65 @@ export function ApprovalQueue({
   const [confirmAction, setConfirmAction] = useState<ConfirmAction | null>(null);
   const confirmActionRef = useRef<ConfirmAction | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  const dialogRef = useRef<HTMLDivElement | null>(null);
+  const cancelButtonRef = useRef<HTMLButtonElement | null>(null);
+  const confirmationOpenerRef = useRef<HTMLButtonElement | null>(null);
+  const dialogTitleId = useId();
+  const dialogDescriptionId = useId();
+  const dialogErrorId = useId();
+
+  useEffect(() => {
+    if (!confirmAction) return;
+    cancelButtonRef.current?.focus();
+    return () => {
+      const opener = confirmationOpenerRef.current;
+      confirmationOpenerRef.current = null;
+      if (opener?.isConnected) opener.focus();
+    };
+  }, [confirmAction]);
+
+  useEffect(() => {
+    if (!confirmAction) return;
+    const handleDialogKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        event.stopPropagation();
+        if (isResolving) return;
+        closeConfirmation();
+        return;
+      }
+      if (event.key !== "Tab") return;
+
+      const dialog = dialogRef.current;
+      if (!dialog) return;
+      const focusable = [
+        ...dialog.querySelectorAll<HTMLElement>(
+          'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+        ),
+      ].filter(
+        (element) =>
+          element.getAttribute("aria-hidden") !== "true" &&
+          element.getAttribute("aria-disabled") !== "true",
+      );
+      if (focusable.length === 0) {
+        event.preventDefault();
+        dialog.focus();
+        return;
+      }
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      const active = document.activeElement;
+      if (event.shiftKey && (active === first || !dialog.contains(active))) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && (active === last || !dialog.contains(active))) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener("keydown", handleDialogKeyDown, true);
+    return () => document.removeEventListener("keydown", handleDialogKeyDown, true);
+  }, [confirmAction, isResolving]);
 
   if (!features.showApprovalQueue) return null;
 
@@ -59,8 +118,13 @@ export function ApprovalQueue({
     setConfirmAction(null);
   };
 
-  const openConfirmation = (txId: string, action: "approve" | "reject") => {
+  const openConfirmation = (
+    txId: string,
+    action: "approve" | "reject",
+    opener: HTMLButtonElement,
+  ) => {
     const nextAction = { txId, action };
+    confirmationOpenerRef.current = opener;
     confirmActionRef.current = nextAction;
     setActionError(null);
     setConfirmAction(nextAction);
@@ -128,14 +192,14 @@ export function ApprovalQueue({
                 <button
                   className="stwd-btn stwd-btn-error"
                   disabled={isResolving}
-                  onClick={() => openConfirmation(entry.txId, "reject")}
+                  onClick={(event) => openConfirmation(entry.txId, "reject", event.currentTarget)}
                 >
                   Deny
                 </button>
                 <button
                   className="stwd-btn stwd-btn-success"
                   disabled={isResolving}
-                  onClick={() => openConfirmation(entry.txId, "approve")}
+                  onClick={(event) => openConfirmation(entry.txId, "approve", event.currentTarget)}
                 >
                   Approve
                 </button>
@@ -147,23 +211,44 @@ export function ApprovalQueue({
 
       {/* Confirmation Dialog */}
       {confirmAction && (
-        <div className="stwd-modal-overlay" onClick={closeConfirmation}>
-          <div className="stwd-modal" onClick={(e) => e.stopPropagation()}>
-            <h3 className="stwd-heading">
+        <div
+          className="stwd-modal-overlay"
+          onClick={() => {
+            if (!isResolving) closeConfirmation();
+          }}
+        >
+          <div
+            ref={dialogRef}
+            className="stwd-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby={dialogTitleId}
+            aria-describedby={
+              actionError ? `${dialogDescriptionId} ${dialogErrorId}` : dialogDescriptionId
+            }
+            tabIndex={-1}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3 id={dialogTitleId} className="stwd-heading">
               {confirmAction.action === "approve" ? "Approve Transaction?" : "Deny Transaction?"}
             </h3>
-            <p className="stwd-muted-text">
+            <p id={dialogDescriptionId} className="stwd-muted-text">
               {confirmAction.action === "approve"
                 ? "This transaction will be signed and broadcast."
                 : "This transaction will be rejected and will not be executed."}
             </p>
             {actionError && (
-              <div className="stwd-error-text" role="alert">
+              <div id={dialogErrorId} className="stwd-error-text" role="alert">
                 {actionError}
               </div>
             )}
             <div className="stwd-modal-actions">
-              <button className="stwd-btn stwd-btn-secondary" onClick={closeConfirmation}>
+              <button
+                ref={cancelButtonRef}
+                className="stwd-btn stwd-btn-secondary"
+                onClick={closeConfirmation}
+                disabled={isResolving}
+              >
                 Cancel
               </button>
               <button

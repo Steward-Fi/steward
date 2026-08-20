@@ -9,6 +9,7 @@ Object.assign(globalThis, {
   document: window.document,
   navigator: window.navigator,
   HTMLElement: window.HTMLElement,
+  KeyboardEvent: window.KeyboardEvent,
   MouseEvent: window.MouseEvent,
   IS_REACT_ACT_ENVIRONMENT: true,
 });
@@ -16,6 +17,7 @@ Object.assign(globalThis, {
 const approve = mock(async (_txId: string) => {});
 const reject = mock(async (_txId: string) => {});
 const onResolve = mock((_txId: string, _status: "approved" | "rejected") => {});
+let isResolving = false;
 
 mock.module("../provider.js", () => ({
   useStewardContext: () => ({ features: { showApprovalQueue: true } }),
@@ -50,7 +52,7 @@ mock.module("../hooks/useApprovals.js", () => ({
     error: null,
     approve,
     reject,
-    isResolving: false,
+    isResolving,
   }),
 }));
 
@@ -81,6 +83,20 @@ async function click(target: HTMLButtonElement): Promise<void> {
   });
 }
 
+async function pressKey(key: string, shiftKey = false): Promise<void> {
+  await React.act(async () => {
+    window.document.dispatchEvent(
+      new window.KeyboardEvent("keydown", { key, shiftKey, bubbles: true, cancelable: true }),
+    );
+  });
+}
+
+async function rerenderQueue(): Promise<void> {
+  await React.act(async () => {
+    root?.render(<ApprovalQueue onResolve={onResolve} />);
+  });
+}
+
 async function renderQueue(): Promise<void> {
   container = window.document.createElement("div") as unknown as HTMLDivElement;
   window.document.body.replaceChildren(container);
@@ -100,6 +116,7 @@ beforeEach(async () => {
   reject.mockReset();
   reject.mockImplementation(async () => {});
   onResolve.mockClear();
+  isResolving = false;
   await renderQueue();
 });
 
@@ -111,6 +128,58 @@ afterAll(async () => {
 });
 
 describe("<ApprovalQueue /> mutation failures", () => {
+  test("provides a named modal dialog with bounded keyboard focus and returns focus", async () => {
+    const opener = button("Approve", approvalItem(0));
+    opener.focus();
+    await click(opener);
+
+    const dialog = container.querySelector('[role="dialog"]');
+    if (!(dialog instanceof window.HTMLDivElement)) throw new Error("dialog not found");
+    expect(dialog.getAttribute("aria-modal")).toBe("true");
+    const title = window.document.getElementById(dialog.getAttribute("aria-labelledby") ?? "");
+    const descriptionIds = (dialog.getAttribute("aria-describedby") ?? "").split(" ");
+    expect(title?.textContent).toContain("Approve Transaction?");
+    expect(descriptionIds).toHaveLength(1);
+    expect(window.document.getElementById(descriptionIds[0])?.textContent).toContain(
+      "signed and broadcast",
+    );
+
+    const cancel = button("Cancel", dialog);
+    const confirm = button("Approve", dialog);
+    expect(window.document.activeElement).toBe(cancel);
+
+    await pressKey("Tab", true);
+    expect(window.document.activeElement).toBe(confirm);
+    await pressKey("Tab");
+    expect(window.document.activeElement).toBe(cancel);
+
+    opener.focus();
+    await pressKey("Tab");
+    expect(window.document.activeElement).toBe(cancel);
+
+    await pressKey("Escape");
+    expect(container.querySelector('[role="dialog"]')).toBeNull();
+    expect(window.document.activeElement).toBe(opener);
+  });
+
+  test("does not dismiss on Escape while a resolution is in progress", async () => {
+    const opener = button("Deny", approvalItem(0));
+    await click(opener);
+    isResolving = true;
+    await rerenderQueue();
+
+    await pressKey("Escape");
+    expect(container.querySelector('[role="dialog"]')).not.toBeNull();
+    expect(button("Cancel").disabled).toBe(true);
+    expect(button("Processing...").disabled).toBe(true);
+
+    isResolving = false;
+    await rerenderQueue();
+    await pressKey("Escape");
+    expect(container.querySelector('[role="dialog"]')).toBeNull();
+    expect(window.document.activeElement).toBe(opener);
+  });
+
   test("keeps an approve confirmation open, reports a safe error, and succeeds on retry", async () => {
     let finishRetry: (() => void) | undefined;
     approve.mockImplementationOnce(async () => {
@@ -132,6 +201,10 @@ describe("<ApprovalQueue /> mutation failures", () => {
     );
     expect(container.textContent).not.toContain("provider secret");
     expect(onResolve).not.toHaveBeenCalled();
+    const dialog = container.querySelector('[role="dialog"]');
+    const alert = container.querySelector('[role="alert"]');
+    expect(alert?.id).not.toBe("");
+    expect((dialog?.getAttribute("aria-describedby") ?? "").split(" ")).toContain(alert?.id);
 
     await click(button("Approve", container.querySelector(".stwd-modal")!));
 
