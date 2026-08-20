@@ -5241,7 +5241,7 @@ vaultRoutes.get("/:agentId/history", async (c) => {
     .select()
     .from(transactions)
     .where(eq(transactions.agentId, agentId))
-    .orderBy(desc(transactions.createdAt))
+    .orderBy(desc(transactions.createdAt), desc(transactions.id))
     .limit(limit)
     .offset(offset);
 
