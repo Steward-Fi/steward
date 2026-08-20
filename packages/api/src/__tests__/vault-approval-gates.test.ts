@@ -45,7 +45,10 @@ import {
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { canonicalJsonStringify } from "@stwd/shared";
 import {
+  deriveSolanaPolicyFields,
   ExternalBroadcastOutcomeUnknownError,
+  normalizedSolanaMessageDigest,
+  parseSolanaTransaction,
   SolanaBroadcastNotSubmittedError,
   Vault,
 } from "@stwd/vault";
@@ -80,6 +83,8 @@ const AGENT_SOLANA = `approval-solana-${Date.now()}`;
 const SOLANA_RECIPIENT = "7J9kqM5kV8Fh1Q3b6N2pR4tYwLcXzAaBbCcDdEeFfGg";
 const SOLANA_SIGNATURE =
   "4oL4p7QvN3UH7V5wMGZgW5PuzEk4A9LXLHk9RxAoKjDKuLbQBsfXN8kEvKfj5K1oEJa8wFF6RVp2h7pP9w2f51ZV";
+const PARSED_SOLANA_APPROVAL =
+  "AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAAEDE2JOpI+vbFRBKrMBRo65Mmbpvxu+OB3jAD7OG1gkRxwBnOCkX3JAiColqvYSlWPsVuUlI49mXDMD4GFd2CRJhQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAgIAAQwCAAAALQEAAAAAAAA=";
 
 // One app per auth posture. The approve route reads auth purely from context
 // variables, so a per-test middleware that sets exactly the desired posture is
@@ -433,6 +438,32 @@ describe("vault approval gates (real /approve path)", () => {
 
   it("replays parsed and blind Solana approvals with their durably bound signing modes", async () => {
     const app = await makeApp({ authType: "session-jwt", role: "owner", mfa: true });
+    const parsed = deriveSolanaPolicyFields(parseSolanaTransaction(PARSED_SOLANA_APPROVAL));
+    const parsedEffects = {
+      movesNativeSol: parsed.movesNativeSol,
+      programIds: parsed.programIds,
+      tokenTransfers: parsed.summary.tokenTransfers.map((transfer) => ({
+        mint: transfer.mint,
+        destination: transfer.destination,
+        amount: transfer.amount,
+      })),
+    };
+    const parsedRequestDigest = createHash("sha256")
+      .update(
+        canonicalJsonStringify({
+          route: "sign-solana",
+          tenantId: TENANT_ID,
+          agentId: AGENT_SOLANA,
+          chainId: 101,
+          broadcast: true,
+          signingMode: "parsed",
+          to: SOLANA_RECIPIENT,
+          value: "301",
+          messageDigest: normalizedSolanaMessageDigest(PARSED_SOLANA_APPROVAL),
+          parsedEffects,
+        }),
+      )
+      .digest("hex");
     for (const mode of ["parsed", "blind"] as const) {
       const txId = `tx-solana-${mode}-approval`;
       await getDb()
@@ -443,7 +474,7 @@ describe("vault approval gates (real /approve path)", () => {
           status: "pending",
           toAddress: SOLANA_RECIPIENT,
           value: mode === "parsed" ? "301" : "302",
-          data: `serialized-${mode}-solana-approval`,
+          data: mode === "parsed" ? PARSED_SOLANA_APPROVAL : "serialized-blind-solana-approval",
           chainId: 101,
           actionType: "solana_transaction",
           actionPayload: {
@@ -453,11 +484,8 @@ describe("vault approval gates (real /approve path)", () => {
             broadcast: true,
             signingMode: mode,
             blindSigned: mode === "blind",
-            parsedEffects:
-              mode === "parsed"
-                ? { movesNativeSol: false, programIds: ["memo-program"], tokenTransfers: [] }
-                : undefined,
-            requestDigest: `${mode}-request-digest`,
+            parsedEffects: mode === "parsed" ? parsedEffects : undefined,
+            requestDigest: mode === "parsed" ? parsedRequestDigest : "blind-request-digest",
           },
           policyResults: [],
         });
@@ -470,11 +498,48 @@ describe("vault approval gates (real /approve path)", () => {
           status: "pending",
         });
     }
+    await getDb()
+      .insert(transactions)
+      .values({
+        id: "tx-solana-parsed-tampered-approval",
+        agentId: AGENT_SOLANA,
+        status: "pending",
+        toAddress: SOLANA_RECIPIENT,
+        value: "301",
+        data: PARSED_SOLANA_APPROVAL,
+        chainId: 101,
+        actionType: "solana_transaction",
+        actionPayload: {
+          type: "solana_transaction",
+          recoveryType: "solana_transaction",
+          recoveryActionType: "solana_transaction",
+          broadcast: true,
+          signingMode: "parsed",
+          blindSigned: false,
+          parsedEffects: { ...parsedEffects, movesNativeSol: false },
+          requestDigest: parsedRequestDigest,
+        },
+        policyResults: [],
+      });
+    await getDb().insert(approvalQueue).values({
+      id: "aq-tx-solana-parsed-tampered-approval",
+      txId: "tx-solana-parsed-tampered-approval",
+      agentId: AGENT_SOLANA,
+      status: "pending",
+    });
 
-    const seen: Array<{ transaction: string; allowBlindSign?: boolean }> = [];
+    const seen: Array<{
+      transaction: string;
+      allowBlindSign?: boolean;
+      allowParsedSign?: boolean;
+    }> = [];
     const sign = spyOn(Vault.prototype, "signSolanaTransaction").mockImplementation(
       async (request) => {
-        seen.push({ transaction: request.transaction, allowBlindSign: request.allowBlindSign });
+        seen.push({
+          transaction: request.transaction,
+          allowBlindSign: request.allowBlindSign,
+          allowParsedSign: request.allowParsedSign,
+        });
         const signature =
           "4oL4p7QvN3UH7V5wMGZgW5PuzEk4A9LXLHk9RxAoKjDKuLbQBsfXN8kEvKfj5K1oEJa8wFF6RVp2h7pP9w2f51ZV";
         await request.onBroadcastPrepared?.({
@@ -487,8 +552,11 @@ describe("vault approval gates (real /approve path)", () => {
     try {
       expect((await approve(app, AGENT_SOLANA, "tx-solana-parsed-approval")).status).toBe(200);
       expect((await approve(app, AGENT_SOLANA, "tx-solana-blind-approval")).status).toBe(200);
+      expect((await approve(app, AGENT_SOLANA, "tx-solana-parsed-tampered-approval")).status).toBe(
+        409,
+      );
       expect(seen).toEqual([
-        { transaction: "serialized-parsed-solana-approval", allowBlindSign: true },
+        { transaction: PARSED_SOLANA_APPROVAL, allowParsedSign: true },
         { transaction: "serialized-blind-solana-approval", allowBlindSign: true },
       ]);
       const rows = await getDb()
@@ -503,7 +571,9 @@ describe("vault approval gates (real /approve path)", () => {
             id: "tx-solana-parsed-approval",
             actionPayload: expect.objectContaining({
               signingMode: "parsed",
-              parsedEffects: expect.objectContaining({ programIds: ["memo-program"] }),
+              parsedEffects: expect.objectContaining({
+                programIds: ["11111111111111111111111111111111"],
+              }),
             }),
           }),
           expect.objectContaining({
