@@ -9,6 +9,7 @@ import {
   getDb,
   pendingProxyRequests,
   proxyAuditLog,
+  sql,
   tenants,
 } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
@@ -30,10 +31,10 @@ import { PROXY_SCOPE } from "../config";
 // shared `@stwd/db` `withTenantAuditedTransaction` primitive to commit the
 // `expired` transition AND a `proxy.approval.expired` chain event in ONE
 // transaction. This suite drives the real release handler against a PGLite DB
-// whose transaction layer is instrumented to throw at the audit-chain INSERT and
-// proves:
+// with a database trigger that rejects the required audit INSERT inside that
+// same transaction. It proves:
 //   1. audit-chain event present on the happy path (both poll-time & claim-time);
-//   2. both-or-neither: when the chain INSERT faults, the `expired` transition
+//   2. both-or-neither: when the chain append faults, the `expired` transition
 //      rolls back too (I14) and no chain event exists;
 //   3. mutation proof (revert): if the transition is not wrapped with the chain
 //      append, the fault would leave `expired` with no chain event — asserted by
@@ -55,52 +56,6 @@ let resetReleaseClaimBarrier: typeof import("../handlers/release")["__resetRelea
 let setForwardProxyRequest: typeof import("../handlers/proxy")["__setForwardProxyRequestForTests"];
 let proxyMod: typeof import("../handlers/proxy");
 
-// ─── Audit-chain-insert fault injection ───────────────────────────────────────
-//
-// When `faultAuditInsert` is true, the FIRST `insert into audit_events`
-// executed inside any transaction throws. This simulates the exact crash point:
-// the row was just flipped to `expired` in the same transaction and the required
-// chain append fails.
-
-let faultAuditInsert = false;
-
-type TxLike = { execute: (query: unknown) => Promise<unknown> };
-
-function isAuditInsert(dialect: unknown, query: unknown): boolean {
-  try {
-    const built = (dialect as { sqlToQuery: (q: unknown) => { sql?: string } }).sqlToQuery(query);
-    const text = String(built?.sql ?? "").toLowerCase();
-    return text.includes("insert into audit_events");
-  } catch {
-    return false;
-  }
-}
-
-function installFaultInjectingDb(db: unknown): void {
-  const anyDb = db as {
-    dialect: unknown;
-    transaction: (cb: (tx: TxLike) => Promise<unknown>, ...rest: unknown[]) => Promise<unknown>;
-  };
-  const dialect = anyDb.dialect;
-  const originalTransaction = anyDb.transaction.bind(anyDb);
-  anyDb.transaction = (cb: (tx: TxLike) => Promise<unknown>, ...rest: unknown[]) => {
-    return originalTransaction(
-      async (tx: TxLike) => {
-        const originalExecute = tx.execute.bind(tx);
-        tx.execute = async (query: unknown) => {
-          if (faultAuditInsert && isAuditInsert(dialect, query)) {
-            faultAuditInsert = false; // fault the first audit insert only
-            throw new Error("injected audit-chain fault");
-          }
-          return originalExecute(query);
-        };
-        return cb(tx);
-      },
-      ...rest,
-    );
-  };
-}
-
 beforeAll(async () => {
   process.env.STEWARD_PGLITE_MEMORY = "true";
   process.env.STEWARD_MASTER_PASSWORD = MASTER_PASSWORD;
@@ -109,9 +64,9 @@ beforeAll(async () => {
   process.env.STEWARD_PROXY_ALLOWED_HOSTS = "api.example.com";
   process.env.STEWARD_SECRET_ROUTE_ALLOWED_HOSTS = "api.example.com";
   process.env.STEWARD_ALLOW_BROAD_SECRET_ROUTES = "true";
+  process.env.STEWARD_PROXY_DEV_MODE = "true";
 
   const { db, client } = await createPGLiteDb("memory://");
-  installFaultInjectingDb(db);
   setPGLiteOverride(db, async () => {
     await client.close();
   });
@@ -130,7 +85,6 @@ beforeAll(async () => {
 });
 
 afterEach(() => {
-  faultAuditInsert = false;
   resetReleaseClaimBarrier();
 });
 
@@ -143,7 +97,39 @@ afterAll(async () => {
   delete process.env.STEWARD_PROXY_ALLOWED_HOSTS;
   delete process.env.STEWARD_SECRET_ROUTE_ALLOWED_HOSTS;
   delete process.env.STEWARD_ALLOW_BROAD_SECRET_ROUTES;
+  delete process.env.STEWARD_PROXY_DEV_MODE;
 });
+
+async function withExpiryAuditFailure<T>(operation: () => Promise<T>): Promise<T> {
+  await getDb().execute(
+    sql.raw(`
+    CREATE OR REPLACE FUNCTION fail_proxy_expiry_audit_for_test()
+    RETURNS trigger AS $$
+    BEGIN
+      IF NEW.action = 'proxy.approval.expired' THEN
+        RAISE EXCEPTION 'injected audit-chain fault';
+      END IF;
+      RETURN NEW;
+    END;
+    $$ LANGUAGE plpgsql
+  `),
+  );
+  await getDb().execute(
+    sql.raw(`
+    CREATE TRIGGER proxy_expiry_audit_failure_for_test
+    BEFORE INSERT ON audit_events
+    FOR EACH ROW EXECUTE FUNCTION fail_proxy_expiry_audit_for_test()
+  `),
+  );
+  try {
+    return await operation();
+  } finally {
+    await getDb().execute(
+      sql.raw("DROP TRIGGER IF EXISTS proxy_expiry_audit_failure_for_test ON audit_events"),
+    );
+    await getDb().execute(sql.raw("DROP FUNCTION IF EXISTS fail_proxy_expiry_audit_for_test()"));
+  }
+}
 
 function buildApp() {
   const app = new Hono();
@@ -289,8 +275,9 @@ describe("proxy approval-expiry audit atomicity (fault injection)", () => {
       .set({ expiresAt: new Date(Date.now() - 60_000), updatedAt: new Date() })
       .where(eq(pendingProxyRequests.id, held.id));
 
-    faultAuditInsert = true;
-    const res = await poll(held.id, await tokenFor(agentId, tenantId));
+    const res = await withExpiryAuditFailure(async () =>
+      poll(held.id, await tokenFor(agentId, tenantId)),
+    );
     // The injected fault propagates out of the release handler as a 5xx.
     expect(res.status).toBeGreaterThanOrEqual(500);
 
@@ -367,8 +354,9 @@ describe("proxy approval-expiry audit atomicity (fault injection)", () => {
     });
     installCountedForwarder();
 
-    faultAuditInsert = true;
-    const res = await poll(held.id, await tokenFor(agentId, tenantId));
+    const res = await withExpiryAuditFailure(async () =>
+      poll(held.id, await tokenFor(agentId, tenantId)),
+    );
     expect(res.status).toBeGreaterThanOrEqual(500);
 
     // ATOMICITY: the approved -> expired transition rolls back with the faulted
