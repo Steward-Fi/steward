@@ -133,6 +133,7 @@ export type {
   TransferMoneroInput,
   TransferMoneroResult,
   UserAccountsResult,
+  UserAccountUnlinkFailureEvidence,
   UserAccountUnlinkResult,
   UserEthereumWalletLinkNonce,
   UserEthereumWalletLinkResult,

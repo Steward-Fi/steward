@@ -19,7 +19,7 @@ import {
 } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import bs58 from "bs58";
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 
 type RedisEntry = { value: string; expiresAt: number };
@@ -1799,6 +1799,117 @@ describe("user linked account routes", () => {
       .from(refreshTokens)
       .where(eq(refreshTokens.userId, userId));
     expect(remainingRefreshTokens).toHaveLength(0);
+  });
+
+  it("keeps account credentials committed when the completion audit fails after cutoff", async () => {
+    const auditFailureUserId = crypto.randomUUID();
+    const personalTenantId = `personal-${auditFailureUserId}`;
+    const providerAccountId = "audit-failure-linked";
+    const refreshTokenId = `audit-failure-refresh-${auditFailureUserId}`;
+    await getDb()
+      .insert(tenants)
+      .values({
+        id: personalTenantId,
+        name: "Audit Failure Personal Tenant",
+        apiKeyHash: `audit-failure-${auditFailureUserId}`,
+      });
+    await getDb().insert(users).values({
+      id: auditFailureUserId,
+      email: "audit-failure@example.test",
+      emailVerified: true,
+    });
+    await getDb()
+      .insert(userTenants)
+      .values({ userId: auditFailureUserId, tenantId: personalTenantId, role: "owner" });
+    const [linkedAccount] = await getDb()
+      .insert(accounts)
+      .values({ userId: auditFailureUserId, provider: "google", providerAccountId })
+      .returning({ id: accounts.id });
+    await getDb()
+      .insert(refreshTokens)
+      .values({
+        id: refreshTokenId,
+        userId: auditFailureUserId,
+        tenantId: personalTenantId,
+        tokenHash: `audit-failure-hash-${auditFailureUserId}`,
+        expiresAt: new Date(Date.now() + 60_000),
+      });
+    await getDb().execute(
+      sql.raw(`
+        CREATE OR REPLACE FUNCTION fail_user_account_unlink_completion_audit()
+        RETURNS trigger AS $$
+        BEGIN
+          IF NEW.tenant_id = '${personalTenantId}' AND NEW.action = 'user.account.unlink' THEN
+            RAISE EXCEPTION 'forced unlink completion audit failure';
+          END IF;
+          RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql
+      `),
+    );
+    await getDb().execute(
+      sql.raw(`
+        CREATE TRIGGER user_account_unlink_completion_audit_failure
+        BEFORE INSERT ON audit_events
+        FOR EACH ROW EXECUTE FUNCTION fail_user_account_unlink_completion_audit()
+      `),
+    );
+
+    const token = await tokenFor(auditFailureUserId);
+    try {
+      const response = await userRoutes.request(`/me/accounts/google/${providerAccountId}`, {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      expect(response.status).toBe(500);
+      await expect(response.json()).resolves.toEqual({
+        ok: false,
+        error: "Internal server error",
+        data: {
+          accountUnlinked: false,
+          sessionsRevoked: true,
+          issuedBefore: expect.any(Number),
+        },
+      });
+
+      expect(
+        await getDb()
+          .select({ id: accounts.id })
+          .from(accounts)
+          .where(eq(accounts.id, linkedAccount.id)),
+      ).toEqual([{ id: linkedAccount.id }]);
+      expect(
+        await getDb()
+          .select({ id: refreshTokens.id })
+          .from(refreshTokens)
+          .where(eq(refreshTokens.id, refreshTokenId)),
+      ).toEqual([{ id: refreshTokenId }]);
+      expect(
+        await getDb()
+          .select({ id: auditEvents.id })
+          .from(auditEvents)
+          .where(
+            and(
+              eq(auditEvents.tenantId, personalTenantId),
+              eq(auditEvents.action, "user.account.unlink"),
+            ),
+          ),
+      ).toHaveLength(0);
+
+      const revokedSession = await userRoutes.request("/me/accounts", {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      expect(revokedSession.status).toBe(401);
+    } finally {
+      await getDb().execute(
+        sql.raw(
+          "DROP TRIGGER IF EXISTS user_account_unlink_completion_audit_failure ON audit_events",
+        ),
+      );
+      await getDb().execute(
+        sql.raw("DROP FUNCTION IF EXISTS fail_user_account_unlink_completion_audit()"),
+      );
+    }
   });
 
   it("does not unlink a user's last login method", async () => {
