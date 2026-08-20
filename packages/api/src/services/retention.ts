@@ -17,6 +17,7 @@ import { redactedThrownDiagnostics } from "@stwd/shared";
 import { sql } from "drizzle-orm";
 import { writeAuditEvent } from "./audit";
 import { runTenantAuditRetention } from "./audit-archive";
+import { withPlatformAuthorityTransaction } from "./platform-authority-database";
 import { runInternalJobForEachTenant, runInternalJobForTenant } from "./tenant-job";
 
 const SYSTEM_TENANT_ID = "system";
@@ -220,8 +221,10 @@ async function sweepDeactivatedUsers(ctx: RetentionSweepContext): Promise<SweepR
   await writeRetentionAuthorization("users.deactivated", ctx);
 
   const [row] = rowsFromExecute<{ deleted: number }>(
-    await getDb().execute(
-      sql`SELECT steward_bootstrap.retention_delete_deactivated_users(${days}) AS deleted`,
+    await withPlatformAuthorityTransaction((tx) =>
+      tx.execute(
+        sql`SELECT steward_bootstrap.retention_delete_deactivated_users(${days}) AS deleted`,
+      ),
     ),
   );
   const deleted = Number(row?.deleted ?? 0);

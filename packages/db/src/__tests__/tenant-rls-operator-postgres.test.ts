@@ -10,7 +10,9 @@ const databaseName = `steward_rls_${suffix}`;
 const appRole = `steward_app_${suffix}`;
 const migrationRole = `steward_migrator_${suffix}`;
 const definerRole = `steward_definer_${suffix}`;
+const platformRole = `steward_platform_${suffix}`;
 const appRolePassword = randomUUID().replaceAll("-", "");
+const platformRolePassword = randomUUID().replaceAll("-", "");
 
 function databaseUrl(database: string): string {
   const url = new URL(process.env.DATABASE_URL as string);
@@ -22,6 +24,13 @@ function appDatabaseUrl(): string {
   const url = new URL(databaseUrl(databaseName));
   url.username = appRole;
   url.password = appRolePassword;
+  return url.toString();
+}
+
+function platformDatabaseUrl(): string {
+  const url = new URL(databaseUrl(databaseName));
+  url.username = platformRole;
+  url.password = platformRolePassword;
   return url.toString();
 }
 
@@ -53,6 +62,8 @@ async function runOperatorScript(name: string, includeRoles = false) {
       `steward_migration_role=${migrationRole}`,
       "-v",
       `steward_bootstrap_role=${definerRole}`,
+      "-v",
+      `steward_platform_role=${platformRole}`,
     );
   } else if (name === "rls-activate.sql") {
     command.push("-v", `steward_migration_role=${migrationRole}`);
@@ -69,6 +80,7 @@ describeWithPostgres("SEC-169 operator lifecycle on the real Steward schema", ()
     await admin.unsafe(`DROP ROLE IF EXISTS ${appRole}`);
     await admin.unsafe(`DROP ROLE IF EXISTS ${migrationRole}`);
     await admin.unsafe(`DROP ROLE IF EXISTS ${definerRole}`);
+    await admin.unsafe(`DROP ROLE IF EXISTS ${platformRole}`);
     await admin.end();
   });
 
@@ -97,6 +109,7 @@ describeWithPostgres("SEC-169 operator lifecycle on the real Steward schema", ()
 
       await runOperatorScript("rls-bootstrap.sql", true);
       await admin.unsafe(`ALTER ROLE ${appRole} PASSWORD '${appRolePassword}'`);
+      await admin.unsafe(`ALTER ROLE ${platformRole} PASSWORD '${platformRolePassword}'`);
       const roleRows = await db<
         {
           rolname: string;
@@ -106,10 +119,10 @@ describeWithPostgres("SEC-169 operator lifecycle on the real Steward schema", ()
         }[]
       >`
         SELECT rolname, rolcanlogin, rolbypassrls, rolsuper
-        FROM pg_roles WHERE rolname IN (${appRole}, ${migrationRole}, ${definerRole})
+        FROM pg_roles WHERE rolname IN (${appRole}, ${migrationRole}, ${definerRole}, ${platformRole})
         ORDER BY rolname
       `;
-      expect(roleRows).toHaveLength(3);
+      expect(roleRows).toHaveLength(4);
       expect(roleRows.find((row) => row.rolname === appRole)).toMatchObject({
         rolcanlogin: true,
         rolbypassrls: false,
@@ -123,6 +136,11 @@ describeWithPostgres("SEC-169 operator lifecycle on the real Steward schema", ()
       expect(roleRows.find((row) => row.rolname === definerRole)).toMatchObject({
         rolcanlogin: false,
         rolbypassrls: true,
+        rolsuper: false,
+      });
+      expect(roleRows.find((row) => row.rolname === platformRole)).toMatchObject({
+        rolcanlogin: true,
+        rolbypassrls: false,
         rolsuper: false,
       });
 
@@ -210,6 +228,18 @@ describeWithPostgres("SEC-169 operator lifecycle on the real Steward schema", ()
             )
           `;
         }),
+      ).rejects.toThrow(/permission denied/i);
+      await expect(
+        db.begin(async (tx) => {
+          await tx.unsafe(`SET LOCAL ROLE ${platformRole}`);
+          await tx`SELECT set_config('steward.tenant_id', 'platform', true)`;
+          await tx`
+            SELECT * FROM steward_bootstrap.platform_set_user_deactivation(
+              ${soleOwnerId}::uuid,
+              true
+            )
+          `;
+        }),
       ).rejects.toThrow("Cannot deactivate the sole active tenant owner");
 
       const platformKey = `rls-platform-key-${suffix}`;
@@ -218,6 +248,8 @@ describeWithPostgres("SEC-169 operator lifecycle on the real Steward schema", ()
         {
           DATABASE_URL: appDatabaseUrl(),
           DATABASE_DRIVER: "postgres-js",
+          STEWARD_PLATFORM_DATABASE_URL: platformDatabaseUrl(),
+          STEWARD_PLATFORM_DATABASE_ROLE: platformRole,
           NODE_ENV: "test",
           APP_URL: "https://steward.test",
           JWT_SECRET: `rls-jwt-secret-${suffix}-0123456789abcdef`,

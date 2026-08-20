@@ -8,6 +8,7 @@ import {
 } from "@stwd/db";
 import { createPGLiteDb } from "@stwd/db/pglite";
 import {
+  __setWorkerInitForTests,
   hydrateProcessEnv,
   runWorkerGoogleCredentialLifecycleSweep,
   runWorkerUpstreamCredentialLeaseSweep,
@@ -144,6 +145,53 @@ test("Worker HTTP mode fails closed unless non-production is explicit", async ()
   }
 });
 
+test("cold Worker cron rejects a hostile database role before starting sweeps", async () => {
+  const hostileDb = {
+    async execute() {
+      return [
+        {
+          current_user: "hostile_owner",
+          session_user: "hostile_owner",
+          rolsuper: true,
+          rolbypassrls: true,
+          owns_rls_relation: true,
+        },
+      ];
+    },
+  } as unknown as ReturnType<typeof getDb>;
+  let databases = 0;
+  const createDbSpy = spyOn(databaseModule, "createDbForRequest").mockImplementation(() => {
+    databases += 1;
+    return hostileDb;
+  });
+  let scheduledWork!: Promise<unknown>;
+  const env = {
+    DATABASE_URL: "postgresql://worker.invalid/steward",
+    DATABASE_DRIVER: "neon-http",
+    NODE_ENV: "test",
+    STEWARD_APP_DATABASE_ROLE: "steward_app",
+    STEWARD_JWT_SECRET: "worker-hostile-role-secret-at-least-32-chars",
+  };
+  const previousEnv = new Map(Object.keys(env).map((key) => [key, process.env[key]] as const));
+  __setWorkerInitForTests(null);
+  try {
+    await worker.scheduled({}, env, {
+      waitUntil(promise) {
+        scheduledWork = promise;
+      },
+    });
+    await expect(scheduledWork).rejects.toThrow("RLS_DEPLOYMENT_ROLE_UNSAFE");
+    expect(databases).toBe(1);
+  } finally {
+    __setWorkerInitForTests(null);
+    createDbSpy.mockRestore();
+    for (const [key, value] of previousEnv) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});
+
 test("Worker cron gives every autonomous sweep its own request database", async () => {
   const upstreamScheduler = await import("../services/upstream-credential-lease-scheduler");
   const googleScheduler = await import("../services/provider-google-lifecycle-scheduler");
@@ -193,6 +241,7 @@ test("Worker cron gives every autonomous sweep its own request database", async 
   const previousEnv = new Map(Object.keys(env).map((key) => [key, process.env[key]] as const));
 
   try {
+    __setWorkerInitForTests(Promise.resolve());
     await worker.scheduled({}, env, {
       waitUntil(promise) {
         scheduledWork = promise;
@@ -200,6 +249,7 @@ test("Worker cron gives every autonomous sweep its own request database", async 
     });
     await scheduledWork;
   } finally {
+    __setWorkerInitForTests(null);
     createDbSpy.mockRestore();
     upstreamSpy.mockRestore();
     googleSpy.mockRestore();
@@ -210,8 +260,8 @@ test("Worker cron gives every autonomous sweep its own request database", async 
     }
   }
 
-  expect(databaseCount).toBe(3);
-  expect(seen.sort()).toEqual(["cron-db-1", "cron-db-2", "cron-db-3"]);
+  expect(databaseCount).toBe(4);
+  expect(seen.sort()).toEqual(["cron-db-2", "cron-db-3", "cron-db-4"]);
 });
 
 test("configured webhook work retains its request database until Worker cleanup", async () => {

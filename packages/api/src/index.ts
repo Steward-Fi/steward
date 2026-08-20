@@ -14,7 +14,13 @@
 
 import { createHash, timingSafeEqual } from "node:crypto";
 import { validateJwtSecretEnv } from "@stwd/auth";
-import { closeDb, getDb, getMigrationExpectation, runMigrations } from "@stwd/db";
+import {
+  assertRlsDeploymentSafety,
+  closeDb,
+  getDb,
+  getMigrationExpectation,
+  runMigrations,
+} from "@stwd/db";
 import { shouldUsePGLite } from "@stwd/db/pglite";
 import { redactedThrownDiagnostics } from "@stwd/shared";
 import { sql } from "drizzle-orm";
@@ -190,6 +196,12 @@ app.get("/ready", async (c) => {
           : { actualCreatedAt: Number.isFinite(migrationCreatedAt) ? migrationCreatedAt : null }),
       },
     };
+    if (process.env.NODE_ENV === "production") {
+      const expectedRole = process.env.STEWARD_APP_DATABASE_ROLE;
+      if (!expectedRole) throw new Error("STEWARD_APP_DATABASE_ROLE is required in production");
+      await assertRlsDeploymentSafety(db, { expectedRole });
+      checks.rlsDeployment = { ok: true };
+    }
   } catch {
     checks.database = { ok: false, error: "Database health check failed" };
   }
@@ -337,6 +349,20 @@ if (shouldUsePGLite()) {
     }
   } catch (err) {
     console.error("[steward] Migration failed — cannot start", redactedThrownDiagnostics(err));
+    process.exit(1);
+  }
+}
+
+if (process.env.NODE_ENV === "production" && !shouldUsePGLite()) {
+  const expectedRole = process.env.STEWARD_APP_DATABASE_ROLE;
+  if (!expectedRole) throw new Error("STEWARD_APP_DATABASE_ROLE is required in production");
+  try {
+    await assertRlsDeploymentSafety(getDb(), { expectedRole });
+  } catch (error) {
+    console.error(
+      "[steward] RLS deployment safety assertion failed — cannot start",
+      redactedThrownDiagnostics(error),
+    );
     process.exit(1);
   }
 }

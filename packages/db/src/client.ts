@@ -25,6 +25,7 @@
  */
 
 import { AsyncLocalStorage } from "node:async_hooks";
+import { sql } from "drizzle-orm";
 import { drizzle as drizzleNeon, type NeonHttpDatabase } from "drizzle-orm/neon-http";
 import { drizzle as drizzleNeonWebSocket, type NeonDatabase } from "drizzle-orm/neon-serverless";
 import { drizzle as drizzlePostgres, type PostgresJsDatabase } from "drizzle-orm/postgres-js";
@@ -509,6 +510,27 @@ export function hasTenantTransactionDatabase(expected?: {
     throw new Error("RLS_TENANT_DATABASE_CONTEXT_MISMATCH");
   }
   return true;
+}
+
+/**
+ * Apply a bounded database phase without replacing the active tenant
+ * transaction or its request-owned transport. PostgreSQL timeouts are scoped
+ * to the existing transaction, so the trusted tenant/user GUCs and a Worker's
+ * single WebSocket connection remain authoritative for the whole phase.
+ */
+export async function withTenantTransactionDatabaseDeadline<T>(
+  deadlineAt: number,
+  use: (db: RequestDatabase) => Promise<T>,
+): Promise<T> {
+  const context = tenantTransactionDatabaseStorage.getStore();
+  if (!context) throw new Error("RLS_TENANT_DATABASE_CONTEXT_REQUIRED");
+  assertRequestDatabaseContextActive(context);
+  const remainingMs = deadlineMilliseconds(deadlineAt);
+  const db = context.db;
+  await db.execute(sql.raw(`SET LOCAL statement_timeout = '${remainingMs}ms'`));
+  await db.execute(sql.raw(`SET LOCAL lock_timeout = '${remainingMs}ms'`));
+  await db.execute(sql.raw(`SET LOCAL idle_in_transaction_session_timeout = '${remainingMs}ms'`));
+  return use(db);
 }
 
 function assertRequestDatabaseContextActive(
