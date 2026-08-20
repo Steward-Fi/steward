@@ -79,6 +79,33 @@ export interface Env {
   /** Deprecated compatibility fallback for existing Worker deployments. */
   STEWARD_SESSION_SECRET?: string;
   STEWARD_MASTER_PASSWORD?: string;
+  STEWARD_KDF_SALT?: string;
+  STEWARD_KMS_PROVIDER?: string;
+  STEWARD_KMS_KEY_ID?: string;
+  STEWARD_AWS_KMS_KEY_ARN?: string;
+  STEWARD_AWS_REGION?: string;
+  AWS_REGION?: string;
+  STEWARD_PKCS11_MODULE?: string;
+  STEWARD_PKCS11_PIN?: string;
+  STEWARD_PKCS11_KEY_LABEL?: string;
+  STEWARD_EXTERNAL_CUSTODY_PROVIDER?: string;
+  STEWARD_EXTERNAL_CUSTODY_AWS_REGION?: string;
+  STEWARD_EXTERNAL_CUSTODY_AWS_MAX_GAS_LIMIT?: string;
+  STEWARD_EXTERNAL_CUSTODY_AWS_MAX_GAS_PRICE_WEI?: string;
+  STEWARD_EXTERNAL_CUSTODY_AWS_MAX_TOTAL_FEE_WEI?: string;
+  STEWARD_ACK_LOCAL_CUSTODY?: string;
+  RPC_URL?: string;
+  CHAIN_ID?: string;
+  STEWARD_SOLANA_PRIORITY_FEES?: string;
+  STEWARD_VAULT_RPC_ALLOWLIST?: string;
+  STEWARD_ALLOW_LEGACY_KEYSTORE_DECRYPT_FALLBACK?: string;
+  STEWARD_SECRET_VAULT_LEGACY_ROOT_FALLBACK?: string;
+  STEWARD_MONERO_WALLET_RPC_URL?: string;
+  STEWARD_MONERO_WALLET_RPC_LOGIN?: string;
+  STEWARD_MONERO_DAEMON_URL?: string;
+  STEWARD_MONERO_NETWORK?: string;
+  STEWARD_WEBHOOK_SECRET_ENCRYPTION_KEY?: string;
+  STEWARD_WEBHOOK_SECRET_KDF_SALT?: string;
   STEWARD_EMBEDDED?: string;
   STEWARD_EMBEDDED_MODE?: string;
   STEWARD_DB_MODE?: string;
@@ -247,8 +274,8 @@ export async function runWorkerGoogleCredentialLifecycleSweep(
   hydrateProcessEnv(env);
   if (
     process.env.STEWARD_GOOGLE_LIFECYCLE_SWEEPER === "false" ||
-    !process.env.GOOGLE_PROVIDER_CLIENT_ID ||
-    !process.env.GOOGLE_PROVIDER_CLIENT_SECRET
+    !env.GOOGLE_PROVIDER_CLIENT_ID ||
+    !env.GOOGLE_PROVIDER_CLIENT_SECRET
   ) {
     return null;
   }
@@ -266,9 +293,9 @@ export async function runWorkerXCredentialLifecycleSweep(
   hydrateProcessEnv(env);
   if (
     process.env.STEWARD_X_LIFECYCLE_SWEEPER === "false" ||
-    !process.env.X_CLIENT_ID ||
-    !process.env.X_CLIENT_SECRET ||
-    !process.env.STEWARD_MASTER_PASSWORD
+    !env.X_CLIENT_ID ||
+    !env.X_CLIENT_SECRET ||
+    !env.STEWARD_MASTER_PASSWORD
   ) {
     return null;
   }
@@ -357,6 +384,11 @@ function workerJwtEnvironment(env: Env): Readonly<JwtRuntimeEnvironment> {
 export function withWorkerJwtAuthority<T>(env: Env, callback: () => T): T {
   const authority = createJwtRuntimeAuthority(workerJwtEnvironment(env));
   return withJwtRuntimeAuthority(authority, callback);
+}
+
+/** Bind the complete immutable Worker environment before custody resolution. */
+export function withWorkerRuntimeAuthority<T>(env: Env, callback: () => T): T {
+  return withRuntimeEnvironment({ ...env, STEWARD_RUNTIME: "workers" }, callback);
 }
 
 function validateWorkerSecurityEnv(): void {
@@ -452,7 +484,7 @@ async function getComposedApp() {
 
 export default {
   async fetch(request: Request, env: Env, ctx: unknown): Promise<Response> {
-    return withRuntimeEnvironment({ ...env, STEWARD_RUNTIME: "workers" }, async () => {
+    return withWorkerRuntimeAuthority(env, async () => {
       // Keep the legacy bridge for modules not yet migrated to request-local
       // configuration. Security-sensitive OIDC settings use the immutable
       // snapshot above and cannot be replaced by an overlapping request.
@@ -481,7 +513,7 @@ export default {
     env: Env,
     ctx: { waitUntil(promise: Promise<unknown>): void },
   ) {
-    withRuntimeEnvironment({ ...env, STEWARD_RUNTIME: "workers" }, () => {
+    withWorkerRuntimeAuthority(env, () => {
       return withWorkerJwtAuthority(env, () => {
         hydrateProcessEnv(env);
         validateWorkerSecurityEnv();

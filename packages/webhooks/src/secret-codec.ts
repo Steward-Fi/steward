@@ -1,4 +1,5 @@
-import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from "node:crypto";
+import { createCipheriv, createDecipheriv, createHash, randomBytes, scryptSync } from "node:crypto";
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 
 const PREFIX = "stwd_whsec_v1:";
 const DEFAULT_KDF_SALT = "steward-webhook-secret-v1";
@@ -10,39 +11,49 @@ type EncryptedWebhookSecret = {
   salt: string;
 };
 
-function env(): Record<string, string | undefined> {
-  return (
-    (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env ?? {}
-  );
+let warnedDevSecret = false;
+const rootKeysByAuthority = new Map<string, Buffer>();
+const MAX_CACHED_WEBHOOK_AUTHORITIES = 8;
+
+export interface WebhookSecretAuthority {
+  readonly fingerprint: string;
+  readonly nodeEnvironment?: string;
+  readonly encryptionKey: string;
+  readonly kdfSalt: string;
+  readonly kdfSaltIsHex: boolean;
 }
 
-let warnedDevSecret = false;
+function runtimeValue(name: string): string | undefined {
+  const value = runtimeEnvironmentValue(name);
+  return value ? value : undefined;
+}
 
-function rootKey(): Buffer {
-  const currentEnv = env();
-  const masterPassword =
-    currentEnv.STEWARD_WEBHOOK_SECRET_ENCRYPTION_KEY ?? currentEnv.STEWARD_MASTER_PASSWORD;
-  if (!masterPassword) {
-    if (currentEnv.NODE_ENV === "production") {
+/** Resolve one immutable webhook encryption root from the current runtime. */
+export function resolveWebhookSecretAuthority(): WebhookSecretAuthority {
+  const nodeEnvironment =
+    runtimeValue("NODE_ENV") ??
+    (runtimeValue("STEWARD_RUNTIME") === "workers" ? "production" : undefined);
+  let encryptionKey =
+    runtimeValue("STEWARD_WEBHOOK_SECRET_ENCRYPTION_KEY") ??
+    runtimeValue("STEWARD_MASTER_PASSWORD");
+  let kdfSalt = runtimeValue("STEWARD_WEBHOOK_SECRET_KDF_SALT") ?? runtimeValue("STEWARD_KDF_SALT");
+  let kdfSaltIsHex = kdfSalt !== undefined;
+  if (!encryptionKey) {
+    if (nodeEnvironment === "production") {
       throw new Error(
         "STEWARD_WEBHOOK_SECRET_ENCRYPTION_KEY or STEWARD_MASTER_PASSWORD is required to encrypt webhook secrets",
       );
     }
-    // SEC-102: the insecure dev key is reachable ONLY when NODE_ENV is
-    // explicitly a development value. A deploy that simply forgot NODE_ENV must
-    // not fall through to a publicly-known key on the strength of an env flag.
-    if (currentEnv.NODE_ENV !== "development" && currentEnv.NODE_ENV !== "test") {
+    if (nodeEnvironment !== "development" && nodeEnvironment !== "test") {
       throw new Error(
         `Refusing the insecure webhook dev key: NODE_ENV is not an explicit development value (${
-          currentEnv.NODE_ENV === undefined ? "unset" : JSON.stringify(currentEnv.NODE_ENV)
+          nodeEnvironment === undefined ? "unset" : JSON.stringify(nodeEnvironment)
         }). Set NODE_ENV=development for local development, or configure STEWARD_WEBHOOK_SECRET_ENCRYPTION_KEY / STEWARD_MASTER_PASSWORD.`,
       );
     }
-    // The insecure dev fallback must be explicitly opted into; never in production.
-    // Canonical var is STEWARD_ALLOW_DEV_SECRETS; singular accepted for back-compat.
     if (
-      currentEnv.STEWARD_ALLOW_DEV_SECRETS !== "true" &&
-      currentEnv.STEWARD_ALLOW_DEV_SECRET !== "true"
+      runtimeValue("STEWARD_ALLOW_DEV_SECRETS") !== "true" &&
+      runtimeValue("STEWARD_ALLOW_DEV_SECRET") !== "true"
     ) {
       throw new Error(
         "No webhook secret encryption key set. Set STEWARD_WEBHOOK_SECRET_ENCRYPTION_KEY / STEWARD_MASTER_PASSWORD, or set STEWARD_ALLOW_DEV_SECRETS=true to use the insecure dev key (local development only).",
@@ -54,20 +65,49 @@ function rootKey(): Buffer {
         "[steward] WARNING: using the insecure hardcoded dev key to encrypt webhook secrets (STEWARD_ALLOW_DEV_SECRET=true). Secrets are trivially decryptable. Never use this outside local development.",
       );
     }
-    return scryptSync("dev-secret", DEFAULT_KDF_SALT, 32) as Buffer;
-  }
-
-  const configuredSalt = currentEnv.STEWARD_WEBHOOK_SECRET_KDF_SALT ?? currentEnv.STEWARD_KDF_SALT;
-  if (!configuredSalt && currentEnv.NODE_ENV === "production") {
+    encryptionKey = "dev-secret";
+    kdfSalt = DEFAULT_KDF_SALT;
+    kdfSaltIsHex = false;
+  } else if (!kdfSalt && nodeEnvironment === "production") {
     throw new Error(
       "STEWARD_WEBHOOK_SECRET_KDF_SALT or STEWARD_KDF_SALT is required in production",
     );
   }
-  const salt = configuredSalt ? Buffer.from(configuredSalt, "hex") : Buffer.from(DEFAULT_KDF_SALT);
-  if (configuredSalt && salt.length < 16) {
+  if (!kdfSalt) {
+    kdfSalt = DEFAULT_KDF_SALT;
+    kdfSaltIsHex = false;
+  }
+  const salt = Buffer.from(kdfSalt, kdfSaltIsHex ? "hex" : "utf8");
+  if (kdfSaltIsHex && salt.length < 16) {
     throw new Error("Webhook secret KDF salt must decode to at least 16 bytes");
   }
-  return scryptSync(masterPassword, salt, 32) as Buffer;
+  const fingerprint = createHash("sha256")
+    .update(JSON.stringify({ nodeEnvironment, encryptionKey, kdfSalt, kdfSaltIsHex }))
+    .digest("hex");
+  return Object.freeze({
+    fingerprint,
+    nodeEnvironment,
+    encryptionKey,
+    kdfSalt,
+    kdfSaltIsHex,
+  });
+}
+
+function rootKey(): Buffer {
+  const authority = resolveWebhookSecretAuthority();
+  let key = rootKeysByAuthority.get(authority.fingerprint);
+  if (key) return key;
+  const salt = Buffer.from(authority.kdfSalt, authority.kdfSaltIsHex ? "hex" : "utf8");
+  key = scryptSync(authority.encryptionKey, salt, 32) as Buffer;
+  if (rootKeysByAuthority.size >= MAX_CACHED_WEBHOOK_AUTHORITIES) {
+    const oldest = rootKeysByAuthority.keys().next().value as string | undefined;
+    if (oldest) {
+      rootKeysByAuthority.get(oldest)?.fill(0);
+      rootKeysByAuthority.delete(oldest);
+    }
+  }
+  rootKeysByAuthority.set(authority.fingerprint, key);
+  return key;
 }
 
 function deriveRecordKey(recordSalt: Buffer): Buffer {
