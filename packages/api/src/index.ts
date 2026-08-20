@@ -357,9 +357,10 @@ if (migrationsRan) {
     cancelXCredentialLifecycleScheduler = startXCredentialLifecycleScheduler();
   }
   cancelRetention = startRetentionScheduler();
-  if (redisOk) {
-    cancelProviderReservationReconciliation = startProviderReservationReconciliationScheduler();
-  }
+  // Required-audit outbox delivery is Postgres-backed and must recover even
+  // when Redis initialization failed. Reservation recovery is an independent
+  // domain inside the same per-tenant sweep and will retry when Redis returns.
+  cancelProviderReservationReconciliation = startProviderReservationReconciliationScheduler();
   cancelTransactionReceiptPolling = startTransactionReceiptPollingScheduler();
   cancelWebhookRetryScheduler = startWebhookRetryScheduler();
   if (capabilitiesEnabled) {

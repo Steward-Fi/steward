@@ -59,7 +59,7 @@ import {
   type NeonTransactionDbHandle,
   withRequestDatabase,
 } from "@stwd/db";
-import { withRuntimeEnvironment } from "@stwd/shared/runtime-env";
+import { runtimeEnvironmentValue, withRuntimeEnvironment } from "@stwd/shared/runtime-env";
 import { initRedis } from "./middleware/redis";
 
 export interface Env {
@@ -337,6 +337,31 @@ export async function runWorkerXCredentialLifecycleSweep(
   return sweep();
 }
 
+export async function runWorkerProviderActionRecoverySweep(
+  env: Env,
+  options?: {
+    sweep?: () => Promise<{
+      auditsDelivered: number;
+      reservationsReconciled: number;
+      failures: Array<{ error: unknown }>;
+    }>;
+  },
+): Promise<unknown | null> {
+  hydrateProcessEnv(env);
+  if (runtimeEnvironmentValue("STEWARD_PROVIDER_RESERVATION_SWEEPER") === "false") return null;
+  const sweep =
+    options?.sweep ??
+    (await import("./services/provider-reservation-reconciliation-scheduler"))
+      .runProviderActionRecoverySweep;
+  const result = await sweep();
+  if (result.failures.length > 0) {
+    throw new Error(
+      `provider action recovery completed with ${result.failures.length} failed tenant domain(s)`,
+    );
+  }
+  return result;
+}
+
 /**
  * Pull Worker `env` bindings into `globalThis.process.env` so any code that
  * reads `process.env.X` at request time (e.g. JWT secret, RPC URL) can find it.
@@ -550,6 +575,7 @@ export default {
         validateWorkerSecurityEnv();
         const scheduledWork = withWorkerRequestDatabase(env, () => ensureWorkerInit(env)).then(() =>
           Promise.all([
+            withWorkerRequestDatabase(env, () => runWorkerProviderActionRecoverySweep(env)),
             withWorkerRequestDatabase(env, () => runWorkerUpstreamCredentialLeaseSweep(env)),
             withWorkerRequestDatabase(env, () => runWorkerGoogleCredentialLifecycleSweep(env)),
             withWorkerRequestDatabase(env, () => runWorkerXCredentialLifecycleSweep(env)),
