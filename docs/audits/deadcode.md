@@ -1,5 +1,8 @@
 # Dead Code Audit
 
+This is a historical audit snapshot, not a current dead-code inventory. Files
+removed by the audited branch may have been restored later with new callers.
+
 ## Summary
 - Knip version + command used: `knip 6.4.1` via `DATABASE_URL=postgres://user:pass@localhost:5432/db bunx knip@latest --production --no-progress`
 - Total findings: 107
@@ -28,9 +31,9 @@
 - Evidence: knip flagged it as an unused file, and repo-wide grep found no imports of `signInWithPasskey`, `sendMagicLink`, `verifyMagicLink`, or the file path.
 - Risk: low, superseded auth helper layer.
 
-### 6. `web/src/lib/wagmi.ts`
-- Evidence: knip flagged it as an unused file, and repo-wide grep found no imports of the exported config or the file path.
-- Risk: low, unused wallet config leftover after auth/provider migration.
+### 6. `web/src/lib/wagmi.ts` (later restored)
+- Historical result: the audited branch removed this file after finding no callers.
+- Current status: `web/src/components/providers.tsx` dynamically imports it and consumes `getWagmiConfig()` and `SOLANA_RPC_URL`, so it is no longer dead code.
 
 ## Kept (knip false positives)
 ### A. `packages/api/src/embedded.ts`
@@ -65,4 +68,4 @@
 - deleted `web/src/components/dashboard-nav.tsx`
 - deleted `web/src/components/wallet-provider.tsx`
 - deleted `web/src/lib/auth-api.ts`
-- deleted `web/src/lib/wagmi.ts`
+- deleted `web/src/lib/wagmi.ts` in the audited branch; a later change restored it with live callers
