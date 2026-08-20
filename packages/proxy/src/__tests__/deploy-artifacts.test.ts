@@ -400,6 +400,9 @@ describe("SEC-169 production Compose uses the restricted RLS runtime role", () =
     readFileSync(join(DEPLOY_DIR, "docker-compose.yml"), "utf8"),
     readFileSync(join(DEPLOY_DIR, "enterprise-reference", "docker-compose.yml"), "utf8"),
   ];
+  const workflowFiles = ["pr.yml", "ci.yml"].map((name) =>
+    readFileSync(join(DEPLOY_DIR, "..", ".github", "workflows", name), "utf8"),
+  );
 
   const serviceBlock = (compose: string, name: string): string => {
     const match = compose.match(
@@ -446,6 +449,36 @@ describe("SEC-169 production Compose uses the restricted RLS runtime role", () =
       expect(serviceBlock(compose, "steward-rls-bootstrap")).toContain(
         'STEWARD_BOOTSTRAP_SET_ROLE_PASSWORDS: "${STEWARD_BOOTSTRAP_SET_ROLE_PASSWORDS:-false}"',
       );
+    }
+  });
+
+  test("Compose CI provisions the same three database authorities it validates", () => {
+    for (const workflow of workflowFiles) {
+      expect(
+        workflow.match(/STEWARD_ADMIN_DATABASE_URL: "postgres:\/\/steward:steward_ci@postgres:/g),
+      ).toHaveLength(2);
+      expect(
+        workflow.match(
+          /MIGRATION_DATABASE_URL: "postgres:\/\/steward_migrator:ci-migration-password@postgres:/g,
+        ),
+      ).toHaveLength(2);
+      expect(
+        workflow.match(/^\s+DATABASE_URL: "postgres:\/\/steward_app:ci-app-password@postgres:/gm),
+      ).toHaveLength(2);
+      expect(workflow.match(/STEWARD_BOOTSTRAP_SET_ROLE_PASSWORDS: "true"/g)).toHaveLength(2);
+    }
+
+    const moneroContract = readFileSync(
+      join(DEPLOY_DIR, "..", "scripts", "test-compose-monero.sh"),
+      "utf8",
+    );
+    for (const variable of [
+      "STEWARD_ADMIN_DATABASE_URL",
+      "MIGRATION_DATABASE_URL",
+      "DATABASE_URL",
+      "STEWARD_BOOTSTRAP_SET_ROLE_PASSWORDS",
+    ]) {
+      expect(moneroContract).toContain(`export ${variable}=`);
     }
   });
 });
