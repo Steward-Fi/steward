@@ -1,3 +1,5 @@
+import { appendFileSync } from "node:fs";
+
 interface WorkflowRun {
   id: number;
   event: string;
@@ -9,32 +11,37 @@ interface WorkflowRun {
   created_at: string;
 }
 
+interface Deployment {
+  id: number;
+  creator?: { login?: string } | null;
+  description?: string | null;
+  environment?: string | null;
+  sha?: string | null;
+}
+
+interface DeploymentStatus {
+  state?: string | null;
+}
+
 export type StagingReadiness =
-  | { kind: "ready"; runId: number }
+  | { kind: "ready"; ciRunId: number; dockerRunId: number }
   | { kind: "pending"; reason: string }
   | { kind: "rejected"; reason: string };
 
-export function evaluateStagingReadiness(input: {
+function evaluateWorkflowRuns(input: {
+  workflowName: string;
   targetSha: string;
   targetBranch: string;
-  ciConclusion: string;
-  liveBranchSha: string;
-  dockerRuns: WorkflowRun[];
-}): StagingReadiness {
-  if (input.ciConclusion !== "success") {
-    return { kind: "rejected", reason: `exact CI concluded ${input.ciConclusion}` };
-  }
-  if (input.liveBranchSha !== input.targetSha) {
-    return { kind: "rejected", reason: "candidate is no longer the live branch tip" };
-  }
-  const matches = input.dockerRuns.filter(
+  runs: WorkflowRun[];
+}): StagingReadiness | { kind: "workflow-ready"; runId: number } {
+  const matches = input.runs.filter(
     (run) =>
       run.event === "push" &&
       run.head_branch === input.targetBranch &&
       run.head_sha === input.targetSha,
   );
   if (matches.length === 0) {
-    return { kind: "pending", reason: "exact Docker run has not appeared" };
+    return { kind: "pending", reason: `exact ${input.workflowName} run has not appeared` };
   }
   const timestamps = matches.map((run) => run.run_started_at ?? run.created_at);
   const latestTimestamp = timestamps.sort().at(-1);
@@ -42,19 +49,49 @@ export function evaluateStagingReadiness(input: {
     (run) => (run.run_started_at ?? run.created_at) === latestTimestamp,
   );
   if (latest.length !== 1) {
-    return { kind: "rejected", reason: "exact Docker retry ordering is ambiguous" };
+    return {
+      kind: "rejected",
+      reason: `exact ${input.workflowName} retry ordering is ambiguous`,
+    };
   }
   const run = latest[0];
   if (run.status !== "completed") {
-    return { kind: "pending", reason: "exact Docker run is not complete" };
+    return { kind: "pending", reason: `exact ${input.workflowName} run is not complete` };
   }
   if (run.conclusion !== "success") {
     return {
       kind: "rejected",
-      reason: `exact Docker run concluded ${run.conclusion ?? "unknown"}`,
+      reason: `exact ${input.workflowName} run concluded ${run.conclusion ?? "unknown"}`,
     };
   }
-  return { kind: "ready", runId: run.id };
+  return { kind: "workflow-ready", runId: run.id };
+}
+
+export function evaluateStagingReadiness(input: {
+  targetSha: string;
+  targetBranch: string;
+  liveBranchSha: string;
+  ciRuns: WorkflowRun[];
+  dockerRuns: WorkflowRun[];
+}): StagingReadiness {
+  if (input.liveBranchSha !== input.targetSha) {
+    return { kind: "rejected", reason: "candidate is no longer the live branch tip" };
+  }
+  const ci = evaluateWorkflowRuns({
+    workflowName: "CI",
+    targetSha: input.targetSha,
+    targetBranch: input.targetBranch,
+    runs: input.ciRuns,
+  });
+  if (ci.kind !== "workflow-ready") return ci;
+  const docker = evaluateWorkflowRuns({
+    workflowName: "Docker",
+    targetSha: input.targetSha,
+    targetBranch: input.targetBranch,
+    runs: input.dockerRuns,
+  });
+  if (docker.kind !== "workflow-ready") return docker;
+  return { kind: "ready", ciRunId: ci.runId, dockerRunId: docker.runId };
 }
 
 async function githubJson(path: string, token: string): Promise<unknown> {
@@ -74,13 +111,33 @@ function workflowEnvironmentValue(name: string): string | undefined {
   return process.env[name];
 }
 
+export function isSuccessfulAutomaticStagingDeployment(input: {
+  deployment: Deployment;
+  latestStatus: DeploymentStatus | undefined;
+  targetSha: string;
+}): boolean {
+  return (
+    input.deployment.sha === input.targetSha &&
+    input.deployment.environment === "staging" &&
+    input.deployment.creator?.login === "github-actions[bot]" &&
+    input.deployment.description ===
+      `Deploy ghcr.io/steward-fi/steward:sha-${input.targetSha} to Railway staging` &&
+    input.latestStatus?.state === "success"
+  );
+}
+
+function writeDeployOutput(deploy: boolean): void {
+  const outputPath = workflowEnvironmentValue("GITHUB_OUTPUT");
+  if (!outputPath) throw new Error("GITHUB_OUTPUT is unavailable");
+  appendFileSync(outputPath, `deploy=${deploy ? "true" : "false"}\n`, { encoding: "utf8" });
+}
+
 async function main(): Promise<void> {
   const token = workflowEnvironmentValue("GH_TOKEN");
   const repository = workflowEnvironmentValue("TARGET_REPOSITORY");
   const targetSha = workflowEnvironmentValue("TARGET_SHA");
   const targetBranch = workflowEnvironmentValue("TARGET_BRANCH");
-  const ciConclusion = workflowEnvironmentValue("TARGET_CI_CONCLUSION");
-  if (!token || !repository || !targetSha || !targetBranch || !ciConclusion) {
+  if (!token || !repository || !targetSha || !targetBranch) {
     throw new Error("staging readiness environment is incomplete");
   }
 
@@ -89,19 +146,50 @@ async function main(): Promise<void> {
       `/repos/${repository}/git/ref/heads/${encodeURIComponent(targetBranch)}`,
       token,
     )) as { object?: { sha?: string } };
-    const runs = (await githubJson(
-      `/repos/${repository}/actions/workflows/docker.yml/runs?branch=${encodeURIComponent(targetBranch)}&event=push&per_page=100`,
-      token,
-    )) as { workflow_runs?: WorkflowRun[] };
+    const [ciRuns, dockerRuns] = (await Promise.all([
+      githubJson(
+        `/repos/${repository}/actions/workflows/ci.yml/runs?branch=${encodeURIComponent(targetBranch)}&event=push&per_page=100`,
+        token,
+      ),
+      githubJson(
+        `/repos/${repository}/actions/workflows/docker.yml/runs?branch=${encodeURIComponent(targetBranch)}&event=push&per_page=100`,
+        token,
+      ),
+    ])) as [{ workflow_runs?: WorkflowRun[] }, { workflow_runs?: WorkflowRun[] }];
     const result = evaluateStagingReadiness({
       targetSha,
       targetBranch,
-      ciConclusion,
       liveBranchSha: branch.object?.sha ?? "",
-      dockerRuns: runs.workflow_runs ?? [],
+      ciRuns: ciRuns.workflow_runs ?? [],
+      dockerRuns: dockerRuns.workflow_runs ?? [],
     });
     if (result.kind === "ready") {
-      console.log(`Exact Docker run ${result.runId} is complete and successful.`);
+      console.log(
+        `Exact CI run ${result.ciRunId} and Docker run ${result.dockerRunId} are complete and successful.`,
+      );
+      const deployments = (await githubJson(
+        `/repos/${repository}/deployments?environment=staging&per_page=1`,
+        token,
+      )) as Deployment[];
+      const deployment = deployments[0];
+      if (deployment) {
+        const statuses = (await githubJson(
+          `/repos/${repository}/deployments/${deployment.id}/statuses?per_page=1`,
+          token,
+        )) as DeploymentStatus[];
+        if (
+          isSuccessfulAutomaticStagingDeployment({
+            deployment,
+            latestStatus: statuses[0],
+            targetSha,
+          })
+        ) {
+          console.log(`Exact SHA ${targetSha} already has a successful staging deployment.`);
+          writeDeployOutput(false);
+          return;
+        }
+      }
+      writeDeployOutput(true);
       return;
     }
     if (result.kind === "rejected") throw new Error(result.reason);

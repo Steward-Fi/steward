@@ -4,9 +4,9 @@
 #   develop  ──(this workflow, auto)──▶  STAGING
 #   main     ──(deploy-railway.yml, manual/gated)──▶  PRODUCTION
 #
-# This runs automatically after the full CI workflow for `develop` succeeds,
-# then verifies the exact Docker image also built successfully before pointing
-# Railway staging at that immutable image. Staging therefore tracks accepted
+# This reconciles after either the full CI or Docker workflow for `develop`
+# succeeds, then verifies that both exact-SHA runs completed successfully before
+# pointing Railway staging at that immutable image. Staging therefore tracks accepted
 # develop commits, so it can never
 # silently drift behind (the failure mode that stranded staging on a stale
 # pre-#129 build and broke the cloud→Steward auth-gate).
@@ -16,10 +16,10 @@
 name: Deploy Staging
 
 on:
-  # Run only after the complete CI workflow finishes on develop. The job then
-  # waits for and verifies the independent exact-SHA Docker build.
+  # Either completion retriggers reconciliation. This avoids missing a deploy
+  # when one workflow finishes (or is successfully rerun) after the other.
   workflow_run:
-    workflows: ["CI"]
+    workflows: ["CI", "Docker"]
     types: [completed]
     branches: [develop]
 
@@ -46,9 +46,9 @@ concurrency:
 jobs:
   deploy-staging:
     runs-on: ubuntu-latest
-    # On workflow_run, deploy only after the complete CI workflow succeeds.
-    # The verification step below independently binds the SHA to live develop
-    # and to a completed successful Docker build.
+    # On workflow_run, start only for a successful upstream completion whose SHA
+    # is still live. The verifier independently requires successful exact-SHA
+    # CI and Docker runs, regardless of which workflow triggered this run.
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (github.event.workflow_run.conclusion == 'success' &&
@@ -65,17 +65,20 @@ jobs:
           bun-version: "1.3"
 
       - name: Verify exact CI candidate and Docker image
+        id: verify
         if: github.event_name == 'workflow_run'
         env:
           GH_TOKEN: ${{ github.token }}
           TARGET_REPOSITORY: ${{ github.repository }}
           TARGET_SHA: ${{ github.event.workflow_run.head_sha }}
           TARGET_BRANCH: develop
-          TARGET_CI_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
         run: bun scripts/verify-staging-deploy-readiness.ts
 
       - name: Resolve image tag
         id: resolve
+        if: >-
+          github.event_name == 'workflow_dispatch' ||
+          steps.verify.outputs.deploy == 'true'
         env:
           DISPATCH_TAG: ${{ inputs.image_tag }}
           EVENT_NAME: ${{ github.event_name }}
@@ -93,6 +96,9 @@ jobs:
 
       - name: Create GitHub deployment (staging)
         id: deployment
+        if: >-
+          github.event_name == 'workflow_dispatch' ||
+          steps.verify.outputs.deploy == 'true'
         uses: chrnorm/deployment-action@500aa6a23c81ffa1acf71072aee3cfa2cc2e556a # v2
         with:
           token: ${{ github.token }}
@@ -102,6 +108,9 @@ jobs:
 
       - name: Deploy to Railway staging
         id: deploy
+        if: >-
+          github.event_name == 'workflow_dispatch' ||
+          steps.verify.outputs.deploy == 'true'
         # Instance-specific targets come from the DEPLOYER's repo config, never
         # hardcoded in this sovereign OSS repo. A self-hoster sets their own
         # STAGING_RAILWAY_* repo variables (or this job no-ops via the guard in
@@ -117,7 +126,9 @@ jobs:
           ./scripts/railway-deploy.sh "$RESOLVED_TAG"
 
       - name: Update deployment status (success)
-        if: success()
+        if: >-
+          (github.event_name == 'workflow_dispatch' ||
+          steps.verify.outputs.deploy == 'true') && success()
         uses: chrnorm/deployment-status@6df8d036fd2fee9eb82936733953da1f8382b41e # v2
         with:
           token: ${{ github.token }}
@@ -126,7 +137,9 @@ jobs:
           environment-url: ${{ vars.STAGING_RAILWAY_HEALTH_URL }}
 
       - name: Update deployment status (failure)
-        if: failure()
+        if: >-
+          (github.event_name == 'workflow_dispatch' ||
+          steps.verify.outputs.deploy == 'true') && failure()
         uses: chrnorm/deployment-status@6df8d036fd2fee9eb82936733953da1f8382b41e # v2
         with:
           token: ${{ github.token }}
