@@ -143,7 +143,7 @@ curl -X POST http://localhost:3200/capabilities \
 | `name` | string | Dotted lowercase identifier, e.g. `broker.session.render`. |
 | `secretId` | uuid | The secret ID from Step 2. |
 | `host` | string | The broker host, lower-cased. Must be public https (see Constraints). |
-| `pathPattern` | string | v1 is **exact-path**: the forwarded path is this value verbatim. |
+| `pathPattern` | string | v1 is **exact-path** and path-only: `?` query and `#` fragment delimiters are rejected. Put selectors in the invoke `query` map. |
 | `method` | string | `GET` for list/fetch reads; `POST` for a body-carrying render call. |
 | `injectAs` | string | `header` only. Query/body injection is unsupported (reflection risk). |
 | `injectKey` | string | The header name to set, e.g. `authorization`. |

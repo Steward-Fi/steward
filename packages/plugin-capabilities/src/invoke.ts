@@ -283,6 +283,16 @@ function buildProxyPath(cap: Capability, query: Record<string, string> | undefin
   return path;
 }
 
+/**
+ * New writes reject URL query/fragment delimiters in pathPattern. Keep this
+ * runtime check for legacy or externally-written rows so an old configured
+ * query cannot disagree with the selector map evaluated by policy, and a
+ * fragment cannot swallow an appended query before fetch dispatches it.
+ */
+function hasUnboundPathSelectors(pathPattern: string): boolean {
+  return pathPattern.includes("?") || pathPattern.includes("#");
+}
+
 function syntheticSignRequest(tenantId: string, agentId: string): SignRequest {
   return {
     agentId,
@@ -350,6 +360,17 @@ export async function invokeCapabilityThroughProxy(
     });
   }
   const cap = match.capability;
+
+  if (hasUnboundPathSelectors(cap.pathPattern)) {
+    return recordAndJson(store, {
+      tenantId,
+      agentId,
+      capabilityId: cap.id,
+      decision: "deny",
+      status: 403,
+      payload: { ok: false, error: "invalid capability route" } satisfies ApiResponse,
+    });
+  }
 
   const selectors = normalizeQuerySelectors(request.args ?? {}, request.query);
   if (!selectors) {

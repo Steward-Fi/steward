@@ -38,7 +38,7 @@ import { migrate as pgliteMigrate } from "drizzle-orm/pglite/migrator";
 import { Hono } from "hono";
 import type { StewardAppContext } from "../context";
 import { createInvokeRoutes } from "../invoke";
-import { capabilityInvocations } from "../schema";
+import { capabilities, capabilityInvocations } from "../schema";
 import { CapabilityStore } from "../store";
 
 setDefaultTimeout(30000);
@@ -481,6 +481,40 @@ describe("session-broker e2e: full arc through the real proxy", () => {
 
     const rows = await agentInvocations(capId);
     expect(rows.length).toBe(1);
+    expect(rows[0].decision).toBe("deny");
+  });
+
+  it.each([
+    [`${BROKER_READ_PATH}?account=secondary`, "duplicate configured query"],
+    [`${BROKER_READ_PATH}#fragment`, "fragment-swallowed query"],
+  ])("legacy unsafe path fails closed before proxy dispatch: %s (%s)", async (legacyPath) => {
+    const capId = await seedBrokerCapability("GET", BROKER_READ_PATH);
+    // Simulate a row written before path-only validation existed (or by an
+    // out-of-band writer). The runtime boundary must remain authoritative.
+    await getDb()
+      .update(capabilities)
+      .set({ pathPattern: legacyPath })
+      .where(eq(capabilities.id, capId));
+    currentPolicySet = [capRule("r1", "allow", { argEquals: { account: "primary" } })];
+    const app = buildInvokeApp();
+
+    const res = await app.request(`/capabilities/${CAP_NAME}/invoke`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ query: { account: "primary" } }),
+    });
+
+    expect(res.status).toBe(403);
+    expect((await res.json()) as { error: string }).toEqual({
+      ok: false,
+      error: "invalid capability route",
+    });
+    expect(lastProxyRequest).toBeNull();
+    expect(proxyRateLimitChecks).toBe(0);
+    expect(lastForwarded).toBeNull();
+    expect(forwardCount).toBe(0);
+    const rows = await agentInvocations(capId);
+    expect(rows).toHaveLength(1);
     expect(rows[0].decision).toBe("deny");
   });
 

@@ -325,6 +325,13 @@ export function validateSecretRouteConfig(
       return "broad pathPattern requires STEWARD_ALLOW_BROAD_SECRET_ROUTES=true";
     }
     if (/[\u0000-\u001f\u007f\\]/.test(pathPattern)) return "pathPattern is invalid";
+    // Route paths are matched independently from the request query, and URL
+    // fragments are never transmitted. Keeping both delimiters out of stored
+    // route specs prevents policy-visible selectors from diverging from the
+    // exact URL the proxy dispatches.
+    if (pathPattern.includes("?") || pathPattern.includes("#")) {
+      return "pathPattern must not contain query or fragment delimiters";
+    }
     if (
       lowered.includes("%2e") ||
       lowered.includes("%2f") ||

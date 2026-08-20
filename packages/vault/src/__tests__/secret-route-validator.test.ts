@@ -24,6 +24,15 @@ describe("validateSecretRouteConfig — core rules", () => {
     expect(validateSecretRouteConfig(okBase)).toBeNull();
   });
 
+  it.each([
+    "/v1/items?account=secondary",
+    "/v1/items#account=secondary",
+  ])("rejects query and fragment delimiters in pathPattern: %s", (pathPattern) => {
+    expect(validateSecretRouteConfig({ ...okBase, pathPattern })).toContain(
+      "must not contain query or fragment delimiters",
+    );
+  });
+
   it("accepts only an exact EC2 SigV4 endpoint binding", () => {
     const sigv4 = {
       ...okBase,
