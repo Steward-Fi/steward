@@ -6,13 +6,18 @@ import {
   Keypair,
   LAMPORTS_PER_SOL,
   PublicKey,
+  SendTransactionError,
   type Signer,
   SystemProgram,
   Transaction,
   type TransactionInstruction,
 } from "@solana/web3.js";
-
 import { getKnownToken } from "@stwd/shared";
+import bs58 from "bs58";
+import {
+  ExternalBroadcastOutcomeUnknownError,
+  SolanaBroadcastNotSubmittedError,
+} from "./external-key-custody";
 import {
   ASSOCIATED_TOKEN_PROGRAM_ID,
   TOKEN_2022_PROGRAM_ID,
@@ -385,7 +390,14 @@ export async function signSolanaTransaction(
   to: string,
   lamports: bigint,
   rpcUrl: string,
-  options: { broadcast?: boolean; computeBudget?: ComputeBudgetOptions | boolean } = {},
+  options: {
+    broadcast?: boolean;
+    computeBudget?: ComputeBudgetOptions | boolean;
+    onBroadcastPrepared?: (checkpoint: {
+      signature: string;
+      recentBlockhash: string;
+    }) => Promise<void>;
+  } = {},
 ): Promise<string> {
   const keypair = restoreSolanaKeypair(secretKeyHex);
   const connection = new Connection(rpcUrl, "confirmed");
@@ -434,14 +446,39 @@ export async function signSolanaTransaction(
     return btoa(Array.from(tx.serialize(), (b) => String.fromCharCode(b)).join(""));
   }
 
-  const signature = await connection.sendTransaction(tx, [keypair], {
-    skipPreflight: false,
-    preflightCommitment: "confirmed",
-  });
+  tx.sign(keypair);
+  if (!tx.signature) throw new Error("Solana transfer did not produce a signer signature");
+  const preparedSignature = bs58.encode(tx.signature);
+  const signedBytes = tx.serialize();
 
-  await connection.confirmTransaction({ signature, blockhash, lastValidBlockHeight }, "confirmed");
+  // The caller must make the deterministic signature durable before the first
+  // RPC write. A failed checkpoint is therefore a safe, definitely-not-sent
+  // failure and aborts before sendRawTransaction.
+  if (!options.onBroadcastPrepared) {
+    throw new Error("Solana broadcast requires a durable onBroadcastPrepared checkpoint");
+  }
+  await options.onBroadcastPrepared({ signature: preparedSignature, recentBlockhash: blockhash });
+  try {
+    const signature = await connection.sendRawTransaction(signedBytes, {
+      skipPreflight: false,
+      preflightCommitment: "confirmed",
+      maxRetries: 0,
+    });
+    if (signature !== preparedSignature) {
+      throw new Error("Solana RPC returned a signature that does not match the signed bytes");
+    }
+    await connection.confirmTransaction(
+      { signature, blockhash, lastValidBlockHeight },
+      "confirmed",
+    );
+  } catch (error) {
+    if (error instanceof SendTransactionError && error.message.startsWith("Simulation failed.")) {
+      throw new SolanaBroadcastNotSubmittedError(preparedSignature, { cause: error });
+    }
+    throw new ExternalBroadcastOutcomeUnknownError(preparedSignature, { cause: error });
+  }
 
-  return signature;
+  return preparedSignature;
 }
 
 export interface SolanaSplTransferTransaction {
