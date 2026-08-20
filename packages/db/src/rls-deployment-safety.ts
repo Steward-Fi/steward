@@ -250,6 +250,7 @@ export async function assertRlsDeploymentSafety(
     migration_role_safe: boolean;
     bootstrap_role_safe: boolean;
     migration_assumable_authority: boolean;
+    app_membership_drift: boolean;
     bootstrap_membership_drift: boolean;
   }>(
     await db.execute(sql`
@@ -346,6 +347,10 @@ export async function assertRlsDeploymentSafety(
         ) AS migration_assumable_authority,
         EXISTS (
           SELECT 1 FROM pg_auth_members membership
+          WHERE membership.member = role.oid OR membership.roleid = role.oid
+        ) AS app_membership_drift,
+        EXISTS (
+          SELECT 1 FROM pg_auth_members membership
           JOIN pg_roles bootstrap ON bootstrap.rolname = ${options.expectedBootstrapRole}
           WHERE membership.member = bootstrap.oid OR membership.roleid = bootstrap.oid
         ) AS bootstrap_membership_drift
@@ -371,6 +376,7 @@ export async function assertRlsDeploymentSafety(
     !role.migration_role_safe ||
     !role.bootstrap_role_safe ||
     role.migration_assumable_authority ||
+    role.app_membership_drift ||
     role.bootstrap_membership_drift
   ) {
     throw new Error("RLS_DEPLOYMENT_ROLE_UNSAFE");

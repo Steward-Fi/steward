@@ -63,6 +63,14 @@ BEGIN
   ) THEN
     RAISE EXCEPTION 'SEC-169 activation requires restricted app and migration roles';
   END IF;
+  IF EXISTS (
+    SELECT 1 FROM pg_auth_members membership
+    JOIN pg_roles app
+      ON app.rolname = current_setting('steward.activation.app_role')
+    WHERE membership.member = app.oid OR membership.roleid = app.oid
+  ) THEN
+    RAISE EXCEPTION 'SEC-169 app role membership graph must be empty';
+  END IF;
   IF pg_has_role(
     current_setting('steward.activation.app_role'),
     current_setting('steward.activation.migration_role'),

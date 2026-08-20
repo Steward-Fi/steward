@@ -19,6 +19,7 @@ function database(options?: {
   appDatabaseAclDrift?: boolean;
   platformAclDrift?: boolean;
   publicDefiner?: boolean;
+  appMembershipDrift?: boolean;
 }) {
   let query = 0;
   return {
@@ -44,6 +45,7 @@ function database(options?: {
             migration_role_safe: true,
             bootstrap_role_safe: true,
             migration_assumable_authority: false,
+            app_membership_drift: options?.appMembershipDrift === true,
             bootstrap_membership_drift: false,
           },
         ];
@@ -287,5 +289,8 @@ describe("RLS deployment safety gate", () => {
     await expect(
       assertRlsDeploymentSafety(database({ publicDefiner: true }), roles),
     ).rejects.toThrow("RLS_DEPLOYMENT_UNKNOWN_EXECUTABLE_SECURITY_DEFINER");
+    await expect(
+      assertRlsDeploymentSafety(database({ appMembershipDrift: true }), roles),
+    ).rejects.toThrow("RLS_DEPLOYMENT_ROLE_UNSAFE");
   });
 });

@@ -463,6 +463,41 @@ describeWithPostgres("SEC-169 operator lifecycle on the real Steward schema", ()
 
       await admin.unsafe(`CREATE ROLE ${hostileRole} NOLOGIN`);
 
+      // NOINHERIT does not make role membership harmless: SET ROLE can still
+      // assume an ordinary ACL-carrier role. Reject the app's entire membership
+      // graph so indirect TRUNCATE/function/cross-database grants cannot evade
+      // the direct ACL manifests.
+      const carrierTable = `steward_app_acl_carrier_${suffix}`;
+      await db.unsafe(`CREATE TABLE public.${carrierTable} (id integer)`);
+      await db.unsafe(`INSERT INTO public.${carrierTable} VALUES (1)`);
+      await db.unsafe(`GRANT TRUNCATE ON public.${carrierTable} TO ${hostileRole}`);
+      await admin.unsafe(`GRANT ${hostileRole} TO ${appRole}`);
+      const appCarrierDrift = createDb(appDatabaseUrl());
+      try {
+        await appCarrierDrift.client.unsafe(`SET ROLE ${hostileRole}`);
+        await appCarrierDrift.client.unsafe(`TRUNCATE public.${carrierTable}`);
+        await appCarrierDrift.client.unsafe("RESET ROLE");
+        const [{ count: carrierRows }] = await db.unsafe<{ count: number }[]>(
+          `SELECT count(*)::int AS count FROM public.${carrierTable}`,
+        );
+        expect(carrierRows).toBe(0);
+        await expect(
+          assertRlsDeploymentSafety(appCarrierDrift.db, {
+            expectedRole: appRole,
+            expectedPlatformRole: platformRole,
+            expectedBootstrapRole: definerRole,
+            expectedMigrationRole: migrationRole,
+          }),
+        ).rejects.toThrow("RLS_DEPLOYMENT_ROLE_UNSAFE");
+        await expect(runOperatorScript("rls-activate.sql")).rejects.toThrow(
+          "app role membership graph must be empty",
+        );
+      } finally {
+        await appCarrierDrift.client.end({ timeout: 5 });
+        await admin.unsafe(`REVOKE ${hostileRole} FROM ${appRole}`);
+        await db.unsafe(`DROP TABLE public.${carrierTable}`);
+      }
+
       // A stale TRUNCATE grant bypasses RLS. Both pre-traffic gates must reject
       // it, and a bootstrap rerun must remove it rather than merely adding the
       // expected DML privileges alongside it.
