@@ -725,7 +725,13 @@ export function StewardLogin({
               }
             }}
             disabled={isLoading}
-            autoComplete="email webauthn"
+            // No "webauthn" autofill token here: it arms browser conditional
+            // mediation, which surfaces ANY discoverable passkey for this RP
+            // regardless of the email being typed. That hijacked new-account
+            // signup (typing a brand-new email prompted an existing account's
+            // passkey). Passkey login stays available via the explicit passkey
+            // button, which scopes the ceremony to the typed email.
+            autoComplete="email"
             aria-label="email"
           />
         </div>
