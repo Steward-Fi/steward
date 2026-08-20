@@ -1,9 +1,10 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { copyFile, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const runner = join(import.meta.dir, "../../scripts/run-tests-isolated.ts");
+const fixture = join(import.meta.dir, "fixtures/isolated-runner-fixture.ts");
 const temporaryDirectories: string[] = [];
 
 afterEach(async () => {
@@ -16,12 +17,17 @@ async function fixtureRoot(): Promise<string> {
   return path;
 }
 
+async function installFixture(root: string, name: string): Promise<void> {
+  await copyFile(fixture, join(root, name));
+}
+
 function spawnRunner(root: string, filters: string[] = [], overrides: Record<string, string> = {}) {
   const child = Bun.spawn(["bun", runner, ...filters], {
     cwd: join(import.meta.dir, "../.."),
     env: {
       ...process.env,
       ISOLATED_TEST_ROOT: root,
+      ISOLATED_FIXTURE_ROOT: root,
       TEST_TIMEOUT: "5000",
       TEST_WALL_TIMEOUT_MS: "10000",
       TEST_KILL_GRACE_MS: "100",
@@ -71,10 +77,7 @@ describe("isolated test runner", () => {
   test("discovers canonical test/spec TypeScript and TSX names", async () => {
     const root = await fixtureRoot();
     for (const name of ["a.test.ts", "b.spec.ts", "c.test.tsx", "d.spec.tsx"]) {
-      await writeFile(
-        join(root, name),
-        'import { test, expect } from "bun:test"; test("ok",()=>expect(1).toBe(1));',
-      );
+      await installFixture(root, name);
     }
     await writeFile(join(root, "ignored.ts"), 'throw new Error("must not run")');
     const result = await run(root);
@@ -84,7 +87,7 @@ describe("isolated test runner", () => {
 
   test("bounds top-level module hangs with an external wall deadline", async () => {
     const root = await fixtureRoot();
-    await writeFile(join(root, "hang.test.ts"), "await new Promise(() => {});");
+    await installFixture(root, "hang.test.ts");
     const started = Date.now();
     const result = await run(root, [], { TEST_WALL_TIMEOUT_MS: "300" });
     expect(result.code).not.toBe(0);
@@ -98,11 +101,7 @@ describe("isolated test runner", () => {
     const descendantPidFile = join(root, "descendant-pid");
     const childTermFile = join(root, "child-term");
     const descendantTermFile = join(root, "descendant-term");
-    const descendantSource = `import { writeFileSync } from "node:fs"; process.on("SIGTERM",()=>writeFileSync(${JSON.stringify(descendantTermFile)},"term")); writeFileSync(${JSON.stringify(descendantPidFile)},String(process.pid)); await new Promise(()=>{});`;
-    await writeFile(
-      join(root, "kill.spec.ts"),
-      `import { writeFileSync } from "node:fs"; process.on("SIGTERM",()=>{writeFileSync(${JSON.stringify(childTermFile)},"term");setTimeout(()=>process.exit(0),50)}); Bun.spawn(["bun","-e",${JSON.stringify(descendantSource)}],{stdout:"ignore",stderr:"ignore"}); writeFileSync(${JSON.stringify(childPidFile)},String(process.pid)); await new Promise(()=>{});`,
-    );
+    await installFixture(root, "kill.spec.ts");
 
     const execution = spawnRunner(root, [], {
       TEST_WALL_TIMEOUT_MS: "10000",
@@ -132,11 +131,7 @@ describe("isolated test runner", () => {
   test("bounds a clean leader whose live descendant keeps inherited pipes open", async () => {
     const root = await fixtureRoot();
     const descendantPidFile = join(root, "clean-leader-descendant-pid");
-    const descendantSource = `import { writeFileSync } from "node:fs"; writeFileSync(${JSON.stringify(descendantPidFile)},String(process.pid)); await new Promise(()=>{});`;
-    await writeFile(
-      join(root, "clean-leader.test.ts"),
-      `import { test, expect } from "bun:test"; import { readFile } from "node:fs/promises"; test("clean leader",async()=>{const child=Bun.spawn(["bun","-e",${JSON.stringify(descendantSource)}],{stdout:"inherit",stderr:"inherit"}); child.unref(); for(let i=0;i<400;i+=1){if(await readFile(${JSON.stringify(descendantPidFile)}).then(value=>value.length>0).catch(()=>false)) break; await Bun.sleep(20);} expect(await readFile(${JSON.stringify(descendantPidFile)},"utf8")).not.toBe("");});`,
-    );
+    await installFixture(root, "clean-leader.test.ts");
 
     const started = Date.now();
     const result = await run(root, [], {
@@ -158,10 +153,7 @@ describe("isolated test runner", () => {
     const root = await fixtureRoot();
     const ready = join(root, "term-handler-ready");
     const marker = join(root, "term-marker");
-    await writeFile(
-      join(root, "signal.test.ts"),
-      `import { writeFileSync } from "node:fs"; process.on("SIGTERM",()=>{writeFileSync(${JSON.stringify(marker)},"term");process.exit(143)}); writeFileSync(${JSON.stringify(ready)},"ready"); await new Promise(()=>{});`,
-    );
+    await installFixture(root, "signal.test.ts");
     const execution = spawnRunner(root, [], {
       TEST_WALL_TIMEOUT_MS: "10000",
       TEST_KILL_GRACE_MS: "2000",
@@ -177,11 +169,8 @@ describe("isolated test runner", () => {
     }
     expect((await run(root, ["does-not-match"])).code).not.toBe(0);
 
-    await writeFile(
-      join(root, "fail.spec.ts"),
-      'import { test } from "bun:test"; test("no",()=>{throw new Error("FAIL_SENTINEL")});',
-    );
-    const failed = await run(root, ["fail.spec"]);
+    await installFixture(root, "explicit-failure.spec.ts");
+    const failed = await run(root, ["explicit-failure.spec"]);
     expect(failed.code).not.toBe(0);
     expect(failed.output).toContain("FAIL_SENTINEL");
   });
@@ -189,15 +178,13 @@ describe("isolated test runner", () => {
   test("forwards parent SIGTERM and leaves no orphan child", async () => {
     const root = await fixtureRoot();
     const pidFile = join(root, "child-pid");
-    await writeFile(
-      join(root, "orphan.test.ts"),
-      `import { writeFileSync } from "node:fs"; writeFileSync(${JSON.stringify(pidFile)},String(process.pid)); await new Promise(()=>{});`,
-    );
+    await installFixture(root, "orphan.test.ts");
     const parent = Bun.spawn(["bun", runner], {
       cwd: join(import.meta.dir, "../.."),
       env: {
         ...process.env,
         ISOLATED_TEST_ROOT: root,
+        ISOLATED_FIXTURE_ROOT: root,
         TEST_WALL_TIMEOUT_MS: "10000",
         TEST_KILL_GRACE_MS: "100",
       },
@@ -217,10 +204,7 @@ describe("isolated test runner", () => {
     const pidFile = join(root, "drain-failure-pid");
     const readyFile = join(root, "drain-failure-ready");
     const triggerFile = join(root, "drain-failure-trigger");
-    await writeFile(
-      join(root, "drain-failure.test.ts"),
-      `import { existsSync, writeFileSync } from "node:fs"; writeFileSync(${JSON.stringify(pidFile)},String(process.pid)); writeFileSync(${JSON.stringify(readyFile)},"ready"); while(!existsSync(${JSON.stringify(triggerFile)})) await Bun.sleep(10); process.stdout.write("DRAIN_FAILURE_SENTINEL\\n"); process.on("SIGTERM",()=>{}); await new Promise(()=>{});`,
-    );
+    await installFixture(root, "drain-failure.test.ts");
     const execution = spawnRunner(root, [], {
       ISOLATED_RUNNER_TEST_DRAIN_FAILURE_AFTER: "DRAIN_FAILURE_SENTINEL",
       TEST_WALL_TIMEOUT_MS: "10000",
@@ -241,18 +225,12 @@ describe("isolated test runner", () => {
 
   test("discards success output and retains only a bounded failure tail", async () => {
     const root = await fixtureRoot();
-    await writeFile(
-      join(root, "success.test.ts"),
-      'import { test } from "bun:test"; test("ok",()=>console.log("SUCCESS_SECRET"));',
-    );
+    await installFixture(root, "success.test.ts");
     const success = await run(root, ["success"]);
     expect(success.code).toBe(0);
     expect(success.output).not.toContain("SUCCESS_SECRET");
 
-    await writeFile(
-      join(root, "failure.test.ts"),
-      'import { test } from "bun:test"; test("bad",()=>{console.error("A".repeat(200000));throw new Error("TAIL_SENTINEL")});',
-    );
+    await installFixture(root, "failure.test.ts");
     const failure = await run(root, ["failure"], { TEST_FAILURE_TAIL_BYTES: "4096" });
     expect(failure.code).not.toBe(0);
     expect(failure.output.length).toBeLessThan(10_000);
