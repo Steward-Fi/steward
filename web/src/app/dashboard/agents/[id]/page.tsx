@@ -11,7 +11,7 @@ import type {
 import { motion } from "framer-motion";
 import Link from "next/link";
 import { useParams } from "next/navigation";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { ChainBadge } from "@/components/chain-badge";
 import { CopyButton } from "@/components/copy-button";
 import { StatusBadge } from "@/components/status-badge";
@@ -192,6 +192,7 @@ export default function AgentDetailPage() {
   const [signers, setSigners] = useState<DashboardAgentSigner[]>([]);
   const [balance, setBalance] = useState<BalanceInfo | null>(null);
   const [account, setAccount] = useState<AgentAccountSummary | null>(null);
+  const [accountError, setAccountError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [policiesError, setPoliciesError] = useState<string | null>(null);
@@ -209,8 +210,11 @@ export default function AgentDetailPage() {
     credentialSecret: string;
   } | null>(null);
   const [savingSignerId, setSavingSignerId] = useState<string | null>(null);
+  const loadGeneration = useRef(0);
 
   const loadAgent = useCallback(async () => {
+    const generation = ++loadGeneration.current;
+    const isCurrentLoad = () => loadGeneration.current === generation;
     try {
       setLoading(true);
       setError(null);
@@ -221,6 +225,9 @@ export default function AgentDetailPage() {
       setPoliciesError(null);
       setTransactionsError(null);
       setSignersError(null);
+      setAccountError(null);
+      setAccount(null);
+      setBalance(null);
       const [agentData, policyResult, txResult, signerResult] = await Promise.all([
         steward.getAgent(agentId),
         steward
@@ -251,6 +258,7 @@ export default function AgentDetailPage() {
               }) as const,
           ),
       ]);
+      if (!isCurrentLoad()) return;
       setAgent(agentData);
 
       if ("error" in policyResult) {
@@ -280,23 +288,29 @@ export default function AgentDetailPage() {
       // if portfolio providers are unavailable.
       try {
         const accountData = await steward.getAgentAccount(agentId);
+        if (!isCurrentLoad()) return;
         setAccount(accountData);
-      } catch {
+      } catch (err: unknown) {
+        if (!isCurrentLoad()) return;
         setAccount(null);
-      }
+        setAccountError(err instanceof Error ? err.message : "Failed to load account portfolio");
 
-      // Keep the older balance endpoint as a fallback for deployments that have
-      // not enabled the richer account aggregation route yet.
-      try {
-        const balanceData = await steward.getBalance(agentId);
-        setBalance(balanceData as BalanceInfo);
-      } catch {
-        /* balance endpoint may not be available */
+        // Compatibility fallback for deployments that do not expose the account
+        // aggregation route yet. A successful aggregate already includes native
+        // balance data, so do not issue this duplicate vault request in that case.
+        try {
+          const balanceData = await steward.getBalance(agentId);
+          if (!isCurrentLoad()) return;
+          setBalance(balanceData as BalanceInfo);
+        } catch {
+          /* the explicit account error remains the authoritative UI state */
+        }
       }
     } catch (e: unknown) {
+      if (!isCurrentLoad()) return;
       setError(e instanceof Error ? e.message : "Failed to load agent");
     } finally {
-      setLoading(false);
+      if (isCurrentLoad()) setLoading(false);
     }
   }, [agentId]);
 
@@ -390,6 +404,9 @@ export default function AgentDetailPage() {
 
   useEffect(() => {
     void loadAgent();
+    return () => {
+      loadGeneration.current += 1;
+    };
   }, [loadAgent]);
 
   if (loading) {
@@ -459,15 +476,18 @@ export default function AgentDetailPage() {
     .map((policy) => policy.id);
   const activeSigners = signers.filter((signer) => signer.status === "active").length;
   const portfolio = account?.portfolio;
+  const aggregateNativeBalance = account?.balances.evm;
   const nativeAsset = portfolio?.native;
   const tokenAssets = portfolio?.tokens ?? [];
   const wallets = account?.wallets ?? [];
   const capabilities = account?.capabilities ?? [];
   const nativeBalanceLabel = nativeAsset
     ? `${nativeAsset.formatted} ${nativeAsset.symbol}`
-    : balance
-      ? `${balance.balances.nativeFormatted || formatWei(balance.balances.native || "0")} ${balance.balances.symbol || "ETH"}`
-      : "—";
+    : aggregateNativeBalance
+      ? `${aggregateNativeBalance.nativeFormatted || formatWei(aggregateNativeBalance.native || "0")} ${aggregateNativeBalance.symbol || "ETH"}`
+      : balance
+        ? `${balance.balances.nativeFormatted || formatWei(balance.balances.native || "0")} ${balance.balances.symbol || "ETH"}`
+        : "—";
 
   return (
     <motion.div
@@ -580,95 +600,129 @@ export default function AgentDetailPage() {
             </p>
           </div>
           <span className="text-xs text-text-tertiary">
-            {account?.sponsorship.enabled ? "Gas sponsorship enabled" : "Gas sponsorship off"}
+            {accountError
+              ? "Account data unavailable"
+              : account?.sponsorship.enabled
+                ? "Gas sponsorship enabled"
+                : "Gas sponsorship off"}
           </span>
         </div>
 
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-px bg-border">
-          <div className="bg-bg p-5">
-            <div className="text-xs text-text-tertiary tracking-wider uppercase">Wallets</div>
-            <div className="font-display text-2xl font-700 mt-2 tabular-nums">{wallets.length}</div>
-            <div className="text-xs text-text-tertiary mt-1">
-              {portfolio?.walletAddress
-                ? shortenAddress(portfolio.walletAddress, 6)
-                : agent.walletAddress}
-            </div>
+        {accountError ? (
+          <div role="alert" className="py-10 px-6 border border-red-400/20 bg-red-400/5">
+            <p className="text-text-secondary text-sm mb-1">Couldn&apos;t load account portfolio</p>
+            <p className="text-text-tertiary text-xs mb-2 font-mono">{accountError}</p>
+            <p className="text-text-tertiary text-xs mb-4">
+              {balance
+                ? "Legacy native balance is shown above, but aggregate portfolio, wallet, sponsorship, and capability state are unavailable."
+                : "Aggregate portfolio, balance, wallet, sponsorship, and capability state are unavailable."}
+            </p>
+            <button
+              onClick={loadAgent}
+              className="px-4 py-2 text-sm bg-accent text-bg hover:bg-accent-hover transition-colors"
+            >
+              Retry
+            </button>
           </div>
-          <div className="bg-bg p-5">
-            <div className="text-xs text-text-tertiary tracking-wider uppercase">Native Asset</div>
-            <div className="font-display text-2xl font-700 mt-2 tabular-nums">
-              {nativeBalanceLabel}
+        ) : (
+          <>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-px bg-border">
+              <div className="bg-bg p-5">
+                <div className="text-xs text-text-tertiary tracking-wider uppercase">Wallets</div>
+                <div className="font-display text-2xl font-700 mt-2 tabular-nums">
+                  {wallets.length}
+                </div>
+                <div className="text-xs text-text-tertiary mt-1">
+                  {portfolio?.walletAddress
+                    ? shortenAddress(portfolio.walletAddress, 6)
+                    : agent.walletAddress}
+                </div>
+              </div>
+              <div className="bg-bg p-5">
+                <div className="text-xs text-text-tertiary tracking-wider uppercase">
+                  Native Asset
+                </div>
+                <div className="font-display text-2xl font-700 mt-2 tabular-nums">
+                  {nativeBalanceLabel}
+                </div>
+                <div className="text-xs text-text-tertiary mt-1">
+                  {nativeAsset
+                    ? formatPortfolioAssetValue(nativeAsset)
+                    : portfolio?.unavailableReason}
+                </div>
+              </div>
+              <div className="bg-bg p-5">
+                <div className="text-xs text-text-tertiary tracking-wider uppercase">
+                  Token Assets
+                </div>
+                <div className="font-display text-2xl font-700 mt-2 tabular-nums">
+                  {tokenAssets.length}
+                </div>
+                <div className="text-xs text-text-tertiary mt-1">
+                  {portfolio?.chainId ? `Chain ${portfolio.chainId}` : "Best effort"}
+                </div>
+              </div>
             </div>
-            <div className="text-xs text-text-tertiary mt-1">
-              {nativeAsset ? formatPortfolioAssetValue(nativeAsset) : portfolio?.unavailableReason}
-            </div>
-          </div>
-          <div className="bg-bg p-5">
-            <div className="text-xs text-text-tertiary tracking-wider uppercase">Token Assets</div>
-            <div className="font-display text-2xl font-700 mt-2 tabular-nums">
-              {tokenAssets.length}
-            </div>
-            <div className="text-xs text-text-tertiary mt-1">
-              {portfolio?.chainId ? `Chain ${portfolio.chainId}` : "Best effort"}
-            </div>
-          </div>
-        </div>
 
-        <div className="border-t border-border-subtle">
-          {nativeAsset && <PortfolioAssetRow asset={nativeAsset} />}
-          {tokenAssets.map((asset) => (
-            <PortfolioAssetRow key={`${asset.token}:${asset.symbol}`} asset={asset} />
-          ))}
-          {!nativeAsset && tokenAssets.length === 0 && (
-            <div className="py-10 text-sm text-text-tertiary">
-              {portfolio?.unavailableReason ?? "No portfolio assets returned"}
-            </div>
-          )}
-        </div>
-
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-          <div>
-            <h3 className="text-xs text-text-tertiary tracking-wider uppercase mb-3">
-              Wallet Rows
-            </h3>
             <div className="border-t border-border-subtle">
-              {wallets.length === 0 ? (
-                <div className="py-6 text-sm text-text-tertiary">No wallet rows returned</div>
-              ) : (
-                wallets.map((wallet) => (
-                  <div
-                    key={wallet.id}
-                    className="py-4 border-b border-border-subtle last:border-b-0"
-                  >
-                    <div className="font-mono text-sm text-text break-all">{wallet.address}</div>
-                    <div className="text-xs text-text-tertiary mt-1">
-                      {wallet.chainFamily} · {wallet.purpose ?? "agent wallet"}
-                    </div>
-                  </div>
-                ))
+              {nativeAsset && <PortfolioAssetRow asset={nativeAsset} />}
+              {tokenAssets.map((asset) => (
+                <PortfolioAssetRow key={`${asset.token}:${asset.symbol}`} asset={asset} />
+              ))}
+              {!nativeAsset && tokenAssets.length === 0 && (
+                <div className="py-10 text-sm text-text-tertiary">
+                  {portfolio?.unavailableReason ?? "No portfolio assets returned"}
+                </div>
               )}
             </div>
-          </div>
-          <div>
-            <h3 className="text-xs text-text-tertiary tracking-wider uppercase mb-3">
-              Capabilities
-            </h3>
-            <div className="flex flex-wrap gap-2">
-              {capabilities.length === 0 ? (
-                <span className="text-sm text-text-tertiary">No capabilities returned</span>
-              ) : (
-                capabilities.map((capability) => (
-                  <span
-                    key={capability}
-                    className="border border-border-subtle px-2.5 py-1 text-xs text-text-secondary font-mono"
-                  >
-                    {capability}
-                  </span>
-                ))
-              )}
+
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+              <div>
+                <h3 className="text-xs text-text-tertiary tracking-wider uppercase mb-3">
+                  Wallet Rows
+                </h3>
+                <div className="border-t border-border-subtle">
+                  {wallets.length === 0 ? (
+                    <div className="py-6 text-sm text-text-tertiary">No wallet rows returned</div>
+                  ) : (
+                    wallets.map((wallet) => (
+                      <div
+                        key={wallet.id}
+                        className="py-4 border-b border-border-subtle last:border-b-0"
+                      >
+                        <div className="font-mono text-sm text-text break-all">
+                          {wallet.address}
+                        </div>
+                        <div className="text-xs text-text-tertiary mt-1">
+                          {wallet.chainFamily} · {wallet.purpose ?? "agent wallet"}
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
+              <div>
+                <h3 className="text-xs text-text-tertiary tracking-wider uppercase mb-3">
+                  Capabilities
+                </h3>
+                <div className="flex flex-wrap gap-2">
+                  {capabilities.length === 0 ? (
+                    <span className="text-sm text-text-tertiary">No capabilities returned</span>
+                  ) : (
+                    capabilities.map((capability) => (
+                      <span
+                        key={capability}
+                        className="border border-border-subtle px-2.5 py-1 text-xs text-text-secondary font-mono"
+                      >
+                        {capability}
+                      </span>
+                    ))
+                  )}
+                </div>
+              </div>
             </div>
-          </div>
-        </div>
+          </>
+        )}
       </section>
 
       {/* Tabs */}
