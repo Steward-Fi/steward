@@ -248,6 +248,75 @@ async function platformTenantDelete(tenantId = TENANT_ID): Promise<Response> {
   });
 }
 
+interface ProviderIntentRaceScope {
+  tenantId: string;
+  agentId: string;
+  intentId: string;
+}
+
+async function createProviderIntentRaceScope(prefix: string): Promise<ProviderIntentRaceScope> {
+  const scope = {
+    tenantId: `${prefix.slice(0, 16)}-${crypto.randomUUID()}`,
+    agentId: `${prefix.slice(0, 12)}-${crypto.randomUUID()}`,
+    intentId: `pa_${crypto.randomUUID()}`,
+  };
+  await getDb()
+    .insert(tenants)
+    .values({
+      id: scope.tenantId,
+      name: scope.tenantId,
+      apiKeyHash: `hash-${scope.tenantId}`,
+    });
+  await getDb().insert(agents).values({
+    id: scope.agentId,
+    tenantId: scope.tenantId,
+    name: scope.agentId,
+    walletAddress: "0x1234567890123456789012345678901234567890",
+  });
+  return scope;
+}
+
+async function insertProviderIntent(tx: Sql, scope: ProviderIntentRaceScope): Promise<void> {
+  await tx`
+    INSERT INTO intents (
+      id, tenant_id, agent_id, intent_type, status, created_by_type, created_by_id
+    ) VALUES (
+      ${scope.intentId}, ${scope.tenantId}, ${scope.agentId},
+      'provider-action', 'authorized', 'agent', ${scope.agentId}
+    )
+  `;
+}
+
+async function waitUntilBackendBlockedBy(observer: Sql, blockerPid: number): Promise<boolean> {
+  for (let attempt = 0; attempt < 400; attempt += 1) {
+    const [row] = await observer<{ blocked: boolean }[]>`
+      SELECT EXISTS (
+        SELECT 1 FROM pg_stat_activity
+        WHERE ${blockerPid} = ANY(pg_blocking_pids(pid))
+      ) AS blocked
+    `;
+    if (row?.blocked === true) return true;
+    await Bun.sleep(10);
+  }
+  return false;
+}
+
+async function waitUntilAdvisoryBlocked(observer: Sql, backendPid: number): Promise<boolean> {
+  for (let attempt = 0; attempt < 400; attempt += 1) {
+    const [row] = await observer<{ blocked: boolean }[]>`
+      SELECT EXISTS (
+        SELECT 1 FROM pg_stat_activity
+        WHERE pid = ${backendPid}
+          AND wait_event_type = 'Lock'
+          AND wait_event = 'advisory'
+      ) AS blocked
+    `;
+    if (row?.blocked === true) return true;
+    await Bun.sleep(10);
+  }
+  return false;
+}
+
 async function expectBlockedDeletion(
   actor: "tenant" | "platform",
   status: "active" | "needs_attention",
@@ -764,6 +833,153 @@ describe("agent deletion upstream credential boundary", () => {
             metadata: { fixture: true },
           });
       } finally {
+        await Promise.all([holder.end(), writer.end(), observer.end()]);
+      }
+    },
+  );
+
+  it.skipIf(!USING_REAL_POSTGRES)(
+    "retains an intent-only provider action that commits before tenant deletion",
+    async () => {
+      const scope = await createProviderIntentRaceScope("provider-intent-writer-first");
+      const writer = postgres(process.env.DATABASE_URL as string, { max: 1 });
+      const observer = postgres(process.env.DATABASE_URL as string, { max: 1 });
+      let releaseWriter!: () => void;
+      const release = new Promise<void>((resolve) => {
+        releaseWriter = resolve;
+      });
+      let writerPid = 0;
+      let writerReady!: () => void;
+      const ready = new Promise<void>((resolve) => {
+        writerReady = resolve;
+      });
+      const writerTransaction = writer.begin(async (tx) => {
+        const [backend] = await tx<{ pid: number }[]>`SELECT pg_backend_pid()::int AS pid`;
+        writerPid = backend?.pid ?? 0;
+        await insertProviderIntent(tx, scope);
+        writerReady();
+        await release;
+      });
+      await ready;
+
+      let deletion: Promise<Response> | undefined;
+      try {
+        deletion = platformTenantDelete(scope.tenantId);
+        expect(await waitUntilBackendBlockedBy(observer, writerPid)).toBe(true);
+
+        releaseWriter();
+        await writerTransaction;
+        const response = await deletion;
+        expect(response.status).toBe(409);
+        await expect(response.json()).resolves.toEqual({
+          ok: false,
+          error: "Tenant has retained provider action evidence",
+        });
+        expect(
+          await getDb().select().from(intents).where(eq(intents.id, scope.intentId)),
+        ).toHaveLength(1);
+        expect(
+          await getDb().select().from(tenants).where(eq(tenants.id, scope.tenantId)),
+        ).toHaveLength(1);
+      } finally {
+        releaseWriter();
+        await Promise.allSettled([writerTransaction, deletion ?? Promise.resolve(new Response())]);
+        await getDb().delete(intents).where(eq(intents.id, scope.intentId));
+        if (
+          (await getDb().select().from(tenants).where(eq(tenants.id, scope.tenantId))).length > 0
+        ) {
+          await platformTenantDelete(scope.tenantId);
+        }
+        await Promise.all([writer.end(), observer.end()]);
+      }
+    },
+  );
+
+  it.skipIf(!USING_REAL_POSTGRES)(
+    "rejects an intent-only provider action that starts after tenant deletion",
+    async () => {
+      const scope = await createProviderIntentRaceScope("provider-intent-delete-first");
+      const routeId = crypto.randomUUID();
+      await getDb().insert(secretRoutes).values({
+        id: routeId,
+        tenantId: scope.tenantId,
+        agentId: scope.agentId,
+        secretId: crypto.randomUUID(),
+        hostPattern: "api.example.test",
+        pathPattern: "/v1/*",
+        method: "POST",
+        injectAs: "header",
+        injectKey: "Authorization",
+        enabled: false,
+      });
+      const holder = postgres(process.env.DATABASE_URL as string, { max: 1 });
+      const writer = postgres(process.env.DATABASE_URL as string, { max: 1 });
+      const observer = postgres(process.env.DATABASE_URL as string, { max: 1 });
+      let releaseHolder!: () => void;
+      const release = new Promise<void>((resolve) => {
+        releaseHolder = resolve;
+      });
+      let holderPid = 0;
+      let holderReady!: () => void;
+      const ready = new Promise<void>((resolve) => {
+        holderReady = resolve;
+      });
+      const holderTransaction = holder.begin(async (tx) => {
+        const [backend] = await tx<{ pid: number }[]>`SELECT pg_backend_pid()::int AS pid`;
+        holderPid = backend?.pid ?? 0;
+        await tx`SELECT id FROM secret_routes WHERE id = ${routeId} FOR UPDATE`;
+        holderReady();
+        await release;
+      });
+      await ready;
+
+      let deletion: Promise<Response> | undefined;
+      let writerTransaction: Promise<void> | undefined;
+      try {
+        deletion = platformTenantDelete(scope.tenantId);
+        expect(await waitUntilBackendBlockedBy(observer, holderPid)).toBe(true);
+
+        let writerPid = 0;
+        let writerReady!: () => void;
+        const writerStarted = new Promise<void>((resolve) => {
+          writerReady = resolve;
+        });
+        let writerError: unknown;
+        writerTransaction = writer
+          .begin(async (tx) => {
+            const [backend] = await tx<{ pid: number }[]>`SELECT pg_backend_pid()::int AS pid`;
+            writerPid = backend?.pid ?? 0;
+            writerReady();
+            await insertProviderIntent(tx, scope);
+          })
+          .catch((error) => {
+            writerError = error;
+          });
+        await writerStarted;
+        expect(await waitUntilAdvisoryBlocked(observer, writerPid)).toBe(true);
+
+        releaseHolder();
+        await holderTransaction;
+        expect((await deletion).status).toBe(200);
+        await writerTransaction;
+        expect(writerError).toBeInstanceOf(Error);
+        expect(
+          (writerError as { code?: string; cause?: { code?: string } }).code ??
+            (writerError as { cause?: { code?: string } }).cause?.code,
+        ).toBe("23503");
+        expect(
+          await getDb().select().from(intents).where(eq(intents.id, scope.intentId)),
+        ).toHaveLength(0);
+        expect(
+          await getDb().select().from(tenants).where(eq(tenants.id, scope.tenantId)),
+        ).toHaveLength(0);
+      } finally {
+        releaseHolder();
+        await Promise.allSettled([
+          holderTransaction,
+          deletion ?? Promise.resolve(new Response()),
+          writerTransaction ?? Promise.resolve(),
+        ]);
         await Promise.all([holder.end(), writer.end(), observer.end()]);
       }
     },

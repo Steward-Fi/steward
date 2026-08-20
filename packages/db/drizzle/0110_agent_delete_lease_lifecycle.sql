@@ -91,6 +91,39 @@ CREATE TRIGGER upstream_credential_leases_workspace_fence
 BEFORE INSERT OR UPDATE OF tenant_id, workspace_id, status ON public.upstream_credential_leases
 FOR EACH ROW EXECUTE FUNCTION steward_fence_upstream_lease_workspace();
 --> statement-breakpoint
+CREATE OR REPLACE FUNCTION steward_fence_provider_action_intent_tenant()
+RETURNS trigger LANGUAGE plpgsql
+SET search_path = pg_catalog, public
+AS $$
+BEGIN
+  IF TG_OP = 'INSERT' THEN
+    IF NEW.intent_type = 'provider-action' THEN
+      PERFORM public.steward_lock_tenant_deletion(NEW.tenant_id);
+    END IF;
+    RETURN NEW;
+  END IF;
+
+  IF OLD.intent_type <> 'provider-action' AND NEW.intent_type <> 'provider-action' THEN
+    RETURN NEW;
+  END IF;
+  -- Cross-tenant updates fence both lifetimes in a stable order.
+  IF OLD.tenant_id <= NEW.tenant_id THEN
+    PERFORM public.steward_lock_tenant_deletion(OLD.tenant_id);
+    IF OLD.tenant_id <> NEW.tenant_id THEN
+      PERFORM public.steward_lock_tenant_deletion(NEW.tenant_id);
+    END IF;
+  ELSE
+    PERFORM public.steward_lock_tenant_deletion(NEW.tenant_id);
+    PERFORM public.steward_lock_tenant_deletion(OLD.tenant_id);
+  END IF;
+  RETURN NEW;
+END;
+$$;
+--> statement-breakpoint
+CREATE TRIGGER provider_action_intents_tenant_fence
+BEFORE INSERT OR UPDATE OF tenant_id, intent_type ON public.intents
+FOR EACH ROW EXECUTE FUNCTION steward_fence_provider_action_intent_tenant();
+--> statement-breakpoint
 CREATE OR REPLACE FUNCTION steward_fence_provider_action_agent()
 RETURNS trigger LANGUAGE plpgsql
 SET search_path = pg_catalog, public

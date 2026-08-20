@@ -30,6 +30,7 @@ import {
   encryptedChainKeys,
   encryptedKeys,
   getDb,
+  intents,
   isPersistedPolicyType,
   policies,
   providerActionBindings,
@@ -1936,32 +1937,40 @@ platform.delete("/tenants/:id", async (c) => {
         .select({ userId: userTenants.userId })
         .from(userTenants)
         .where(eq(userTenants.tenantId, tenantId));
-      const [[unresolvedLease], [retainedProviderEvidence]] = await Promise.all([
-        tx
-          .select({ id: upstreamCredentialLeases.id })
-          .from(upstreamCredentialLeases)
-          .where(
-            and(
-              eq(upstreamCredentialLeases.tenantId, tenantId),
-              or(
-                notInArray(upstreamCredentialLeases.status, ["revoked", "expired", "failed"]),
-                isNotNull(upstreamCredentialLeases.tokenHash),
-                isNotNull(upstreamCredentialLeases.tokenCiphertext),
-                isNotNull(upstreamCredentialLeases.tokenIv),
-                isNotNull(upstreamCredentialLeases.tokenAuthTag),
-                isNotNull(upstreamCredentialLeases.tokenSalt),
+      const [[unresolvedLease], [retainedProviderIntent], [retainedProviderBinding]] =
+        await Promise.all([
+          tx
+            .select({ id: upstreamCredentialLeases.id })
+            .from(upstreamCredentialLeases)
+            .where(
+              and(
+                eq(upstreamCredentialLeases.tenantId, tenantId),
+                or(
+                  notInArray(upstreamCredentialLeases.status, ["revoked", "expired", "failed"]),
+                  isNotNull(upstreamCredentialLeases.tokenHash),
+                  isNotNull(upstreamCredentialLeases.tokenCiphertext),
+                  isNotNull(upstreamCredentialLeases.tokenIv),
+                  isNotNull(upstreamCredentialLeases.tokenAuthTag),
+                  isNotNull(upstreamCredentialLeases.tokenSalt),
+                ),
               ),
-            ),
-          )
-          .limit(1),
-        tx
-          .select({ intentId: providerActionBindings.intentId })
-          .from(providerActionBindings)
-          .where(eq(providerActionBindings.tenantId, tenantId))
-          .limit(1),
-      ]);
+            )
+            .limit(1),
+          tx
+            .select({ id: intents.id })
+            .from(intents)
+            .where(and(eq(intents.tenantId, tenantId), eq(intents.intentType, "provider-action")))
+            .limit(1),
+          tx
+            .select({ intentId: providerActionBindings.intentId })
+            .from(providerActionBindings)
+            .where(eq(providerActionBindings.tenantId, tenantId))
+            .limit(1),
+        ]);
       if (unresolvedLease) return { status: "blocked_by_lease" as const };
-      if (retainedProviderEvidence) return { status: "blocked_by_provider" as const };
+      if (retainedProviderIntent || retainedProviderBinding) {
+        return { status: "blocked_by_provider" as const };
+      }
 
       await appendRequiredAudit({
         tenantId,
