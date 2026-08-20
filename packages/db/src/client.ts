@@ -347,7 +347,7 @@ interface NeonTransactionRequestEnv extends DatabaseSecurityEnv {
 
 interface NeonTransactionPoolConfig {
   connectionString: string;
-  max: 1;
+  max: 2;
   connectionTimeoutMillis: number;
   idleTimeoutMillis: number;
   query_timeout: number;
@@ -383,7 +383,10 @@ export function __buildNeonTransactionPoolConfigForTests(
   const serverMs = NEON_TRANSACTION_DEADLINE_MS - DATABASE_DEADLINE_CLEANUP_GRACE_MS;
   return {
     connectionString: withServerDeadlineInUrl(connectionString, NEON_TRANSACTION_DEADLINE_MS),
-    max: 1,
+    // One connection remains pinned to tenantAuth's request transaction. A
+    // second bounded connection is required for durable pre-I/O checkpoints
+    // that must commit before the request transaction can return.
+    max: 2,
     connectionTimeoutMillis: NEON_TRANSACTION_CONNECT_TIMEOUT_MS,
     idleTimeoutMillis: NEON_TRANSACTION_DEADLINE_MS,
     query_timeout: NEON_TRANSACTION_DEADLINE_MS,
@@ -524,6 +527,30 @@ export function hasTenantTransactionDatabase(expected?: {
   }
   if (expected?.db !== undefined && expected.db !== context.db) return false;
   return true;
+}
+
+/**
+ * Run a bounded database operation outside the active tenant transaction while
+ * retaining the request-owned database capability. This is intentionally
+ * narrow: callers still receive only the request/global Drizzle handle and
+ * must open and bind their own explicit transaction before accessing RLS data.
+ *
+ * postgres-js uses another pooled connection. The shipped neon-websocket
+ * request pool reserves a second connection for this exact purpose. PGLite has
+ * no independent connection/commit boundary, so an attempted escape from an
+ * active tenant transaction fails closed instead of masquerading a savepoint
+ * as durable state.
+ */
+export async function withIndependentDatabase<T>(
+  callback: (db: RequestDatabase) => Promise<T>,
+): Promise<T> {
+  const tenantContext = tenantTransactionDatabaseStorage.getStore();
+  if (!tenantContext) return callback(getDb());
+  assertRequestDatabaseContextActive(tenantContext);
+  if (pgliteOverride) {
+    throw new Error("RLS_INDEPENDENT_TRANSACTION_UNSUPPORTED_PGLITE");
+  }
+  return tenantTransactionDatabaseStorage.exit(() => callback(getDb()));
 }
 
 /**

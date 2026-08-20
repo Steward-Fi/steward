@@ -824,6 +824,43 @@ describe("agent deletion upstream credential boundary", () => {
     await getDb().delete(capabilityInvocations).where(eq(capabilityInvocations.id, invocationId));
   });
 
+  for (const unresolvedStatus of ["approved", "signed"] as const) {
+    it(`refuses both routed and direct deletion while ${unresolvedStatus} execution is unresolved`, async () => {
+      const agentId = `${unresolvedStatus}-execution-${crypto.randomUUID()}`;
+      const transactionId = crypto.randomUUID();
+      await createAgent(agentId);
+      await getDb().insert(transactions).values({
+        id: transactionId,
+        agentId,
+        status: unresolvedStatus,
+        toAddress: "0x1234567890123456789012345678901234567890",
+        value: "0",
+        chainId: 1,
+      });
+
+      const response = await tenantDelete(agentId);
+      expect(response.status).toBe(409);
+      await expect(response.json()).resolves.toEqual({
+        ok: false,
+        error: "Agent has unresolved execution evidence; reconcile it first",
+      });
+
+      if (USING_REAL_POSTGRES) {
+        let directDeleteError: unknown;
+        try {
+          await getDb().delete(agents).where(eq(agents.id, agentId));
+        } catch (error) {
+          directDeleteError = error;
+        }
+        expect(directDeleteError).toBeInstanceOf(Error);
+        expect((directDeleteError as { cause?: { code?: string } }).cause?.code).toBe("55000");
+        expect(await getDb().select().from(agents).where(eq(agents.id, agentId))).toHaveLength(1);
+      }
+      await getDb().delete(transactions).where(eq(transactions.id, transactionId));
+      expect((await tenantDelete(agentId)).status).toBe(200);
+    });
+  }
+
   it("retires an authoritatively expired signed Solana artifact before mounted deletion", async () => {
     const agentId = `signed-execution-${crypto.randomUUID()}`;
     const transactionId = crypto.randomUUID();

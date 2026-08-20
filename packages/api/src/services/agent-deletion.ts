@@ -102,7 +102,7 @@ export async function deleteAgentAuthority(
       .where(
         and(
           eq(transactions.agentId, agentId),
-          inArray(transactions.status, ["signed", "broadcast", "outcome_unknown"]),
+          inArray(transactions.status, ["approved", "signed", "broadcast", "outcome_unknown"]),
         ),
       )
       .limit(1)
