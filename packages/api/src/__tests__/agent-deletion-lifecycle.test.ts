@@ -5,6 +5,10 @@ import {
   __resetAuditHmacKeyCacheForTests,
   agents,
   getDb,
+  intents,
+  providerAccounts,
+  providerActionBindings,
+  providerOperations,
   runPluginMigrations,
   secretRoutes,
   tenants,
@@ -72,6 +76,7 @@ async function createAgent(agentId: string): Promise<void> {
 async function createLease(
   agentId: string,
   status: "active" | "needs_attention" | "revoked" | "expired",
+  workspaceId = WORKSPACE_ID,
 ): Promise<string> {
   const id = crypto.randomUUID();
   const terminal = status === "revoked" || status === "expired";
@@ -80,7 +85,7 @@ async function createLease(
     .values({
       id,
       tenantId: TENANT_ID,
-      workspaceId: WORKSPACE_ID,
+      workspaceId,
       agentId,
       grantId: crypto.randomUUID(),
       capabilityId: crypto.randomUUID(),
@@ -151,6 +156,70 @@ async function createCapability(agentId?: string): Promise<{
     status: "active",
   });
   return { capabilityId, grantId, routeId };
+}
+
+async function createProviderBinding(
+  agentId: string,
+  status: "denied" | "allowed_stub",
+  intentAgentId = agentId,
+): Promise<{ intentId: string }> {
+  const accountId = crypto.randomUUID();
+  const operationId = crypto.randomUUID();
+  const intentId = `pa_${crypto.randomUUID()}`;
+  await getDb().insert(providerAccounts).values({
+    id: accountId,
+    tenantId: TENANT_ID,
+    workspaceId: WORKSPACE_ID,
+    adapterKey: "github",
+    externalRef: accountId,
+    displayName: accountId,
+  });
+  await getDb().insert(providerOperations).values({
+    id: operationId,
+    tenantId: TENANT_ID,
+    workspaceId: WORKSPACE_ID,
+    providerAccountId: accountId,
+    operationKey: `github.test.${operationId}`,
+    riskClass: "read",
+  });
+  await getDb().insert(intents).values({
+    id: intentId,
+    tenantId: TENANT_ID,
+    agentId: intentAgentId,
+    intentType: "provider-action",
+    status: "authorized",
+    createdByType: "agent",
+    createdById: intentAgentId,
+  });
+  await getDb().insert(providerActionBindings).values({
+    intentId,
+    tenantId: TENANT_ID,
+    workspaceId: WORKSPACE_ID,
+    actorAgentId: agentId,
+    providerAccountId: accountId,
+    operationId,
+    operationRevision: 1,
+    canonicalProfile: "github.provider-action.v1",
+    canonicalActionBytes: Buffer.from("{}"),
+    actionDigest: `sha256:${"1".repeat(64)}`,
+    requestEnvelope: {},
+    requestHash: `sha256:${"2".repeat(64)}`,
+    idempotencyKeyHash: `sha256:${crypto.randomUUID().replaceAll("-", "").padEnd(64, "0")}`,
+    safeSummary: {},
+    accessDecisionId: crypto.randomUUID(),
+    accessEffect: status === "denied" ? "deny" : "allow",
+    accessReasonCode: status === "denied" ? "access_denied" : "access_allowed",
+    dependencyRevisions: {},
+    accessDecision: {},
+    accessDecisionHash: `sha256:${"3".repeat(64)}`,
+    policyEffect: status === "denied" ? "not_evaluated" : "allow",
+    policyDecisionId: status === "allowed_stub" ? crypto.randomUUID() : null,
+    policyRevisionHash: status === "allowed_stub" ? `sha256:${"4".repeat(64)}` : null,
+    policyDecision: status === "allowed_stub" ? {} : null,
+    policyDecisionHash: status === "allowed_stub" ? `sha256:${"5".repeat(64)}` : null,
+    status,
+  });
+  return { intentId };
 }
 
 async function tenantDelete(agentId: string): Promise<Response> {
@@ -318,6 +387,58 @@ describe("agent deletion upstream credential boundary", () => {
 
   it("deletes platform agents only after expired lease evidence is terminal", async () => {
     await expectTerminalDeletion("platform", "expired");
+  });
+
+  it("retains terminal lease evidence across workspace deletion but blocks unresolved authority", async () => {
+    const terminalWorkspaceId = crypto.randomUUID();
+    const activeWorkspaceId = crypto.randomUUID();
+    await getDb().insert(workspaces).values([
+      {
+        id: terminalWorkspaceId,
+        tenantId: TENANT_ID,
+        key: `terminal-${terminalWorkspaceId}`,
+        name: "terminal lease evidence",
+        environment: "production",
+        createdBy: WORKSPACE_CREATOR_ID,
+      },
+      {
+        id: activeWorkspaceId,
+        tenantId: TENANT_ID,
+        key: `active-${activeWorkspaceId}`,
+        name: "active lease authority",
+        environment: "production",
+        createdBy: WORKSPACE_CREATOR_ID,
+      },
+    ]);
+    const terminalAgentId = `terminal-workspace-${crypto.randomUUID()}`;
+    const activeAgentId = `active-workspace-${crypto.randomUUID()}`;
+    await createAgent(terminalAgentId);
+    await createAgent(activeAgentId);
+    const terminalLeaseId = await createLease(terminalAgentId, "revoked", terminalWorkspaceId);
+    const activeLeaseId = await createLease(activeAgentId, "active", activeWorkspaceId);
+
+    await getDb().delete(workspaces).where(eq(workspaces.id, terminalWorkspaceId));
+    expect(
+      await getDb()
+        .select({ id: upstreamCredentialLeases.id })
+        .from(upstreamCredentialLeases)
+        .where(eq(upstreamCredentialLeases.id, terminalLeaseId)),
+    ).toEqual([{ id: terminalLeaseId }]);
+
+    let unresolvedDeleteError: unknown;
+    try {
+      await getDb().delete(workspaces).where(eq(workspaces.id, activeWorkspaceId));
+    } catch (error) {
+      unresolvedDeleteError = error;
+    }
+    expect(unresolvedDeleteError).toBeInstanceOf(Error);
+    expect((unresolvedDeleteError as { cause?: { code?: string } }).cause?.code).toBe("55000");
+
+    await getDb()
+      .delete(upstreamCredentialLeaseEvents)
+      .where(eq(upstreamCredentialLeaseEvents.leaseId, activeLeaseId));
+    await getDb().delete(upstreamCredentialLeases).where(eq(upstreamCredentialLeases.id, activeLeaseId));
+    await getDb().delete(workspaces).where(eq(workspaces.id, activeWorkspaceId));
   });
 
   it("revokes an existing capability grant and disables its route atomically", async () => {
