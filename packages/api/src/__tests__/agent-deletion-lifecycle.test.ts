@@ -4,11 +4,11 @@ import { fileURLToPath } from "node:url";
 import {
   __resetAuditHmacKeyCacheForTests,
   agents,
-  closeDb,
   getDb,
   runPluginMigrations,
   secretRoutes,
   tenants,
+  transactions,
   upstreamCredentialLeaseEvents,
   upstreamCredentialLeases,
   users,
@@ -293,13 +293,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   try {
-    if (USING_REAL_POSTGRES) {
-      // The real-Postgres job owns an ephemeral database. Its append-only lease
-      // evidence cannot be deleted without weakening the production trigger.
-      await closeDb();
-    } else {
-      await cleanupAgentBehaviorTestDatabase(TENANT_ID);
-    }
+    await cleanupAgentBehaviorTestDatabase(TENANT_ID);
   } finally {
     for (const [name, value] of originalEnv) {
       if (value === undefined) delete process.env[name];
@@ -344,6 +338,59 @@ describe("agent deletion upstream credential boundary", () => {
         .from(secretRoutes)
         .where(eq(secretRoutes.id, routeId as string)),
     ).toMatchObject([{ enabled: false }]);
+
+    let reactivationError: unknown;
+    try {
+      await getDb()
+        .update(capabilityGrants)
+        .set({ status: "active" })
+        .where(eq(capabilityGrants.id, grantId as string));
+    } catch (error) {
+      reactivationError = error;
+    }
+    expect(reactivationError).toBeInstanceOf(Error);
+    expect((reactivationError as { cause?: { code?: string } }).cause?.code).toBe("23503");
+    expect(
+      await getDb()
+        .select({ status: capabilityGrants.status })
+        .from(capabilityGrants)
+        .where(eq(capabilityGrants.id, grantId as string)),
+    ).toEqual([{ status: "revoked" }]);
+  });
+
+  it("refuses both routed and direct deletion while signed execution is unresolved", async () => {
+    const agentId = `signed-execution-${crypto.randomUUID()}`;
+    const transactionId = crypto.randomUUID();
+    await createAgent(agentId);
+    await getDb().insert(transactions).values({
+      id: transactionId,
+      agentId,
+      status: "signed",
+      toAddress: "0x1234567890123456789012345678901234567890",
+      value: "0",
+      chainId: 1,
+    });
+
+    const response = await tenantDelete(agentId);
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toEqual({
+      ok: false,
+      error: "Agent has unresolved execution evidence; reconcile it first",
+    });
+
+    if (USING_REAL_POSTGRES) {
+      let directDeleteError: unknown;
+      try {
+        await getDb().delete(agents).where(eq(agents.id, agentId));
+      } catch (error) {
+        directDeleteError = error;
+      }
+      expect(directDeleteError).toBeInstanceOf(Error);
+      expect((directDeleteError as { cause?: { code?: string } }).cause?.code).toBe("55000");
+      expect(await getDb().select().from(agents).where(eq(agents.id, agentId))).toHaveLength(1);
+    }
+    await getDb().delete(transactions).where(eq(transactions.id, transactionId));
+    expect((await tenantDelete(agentId)).status).toBe(200);
   });
 
   it.skipIf(!USING_REAL_POSTGRES)(

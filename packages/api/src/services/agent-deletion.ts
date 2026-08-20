@@ -7,6 +7,7 @@ import {
   getDb,
   pendingProxyRequests,
   policies,
+  providerActionBindings,
   secretRoutes,
   transactions,
   upstreamCredentialLeaseEvents,
@@ -24,12 +25,14 @@ export type AgentDeletionResult =
   | "deleted"
   | "missing"
   | "blocked_by_upstream_lease"
-  | "blocked_by_executing_proxy";
+  | "blocked_by_executing_proxy"
+  | "blocked_by_unresolved_execution";
 
 interface DeleteAgentAuthorityInput {
   tenantId: string;
   agentId: string;
   completionAudit: AuditEventInput;
+  beforeDelete?: () => Promise<void>;
 }
 
 function leaseIsTerminalAndScrubbed(row: {
@@ -87,6 +90,37 @@ export async function deleteAgentAuthority(
       .for("update");
     if (executingProxyRequest) return "blocked_by_executing_proxy";
 
+    const [unresolvedTransaction] = await tx
+      .select({ id: transactions.id })
+      .from(transactions)
+      .where(
+        and(
+          eq(transactions.agentId, agentId),
+          inArray(transactions.status, ["signed", "broadcast", "outcome_unknown"]),
+        ),
+      )
+      .limit(1)
+      .for("update");
+    const [unresolvedProviderAction] = await tx
+      .select({ intentId: providerActionBindings.intentId })
+      .from(providerActionBindings)
+      .where(
+        and(
+          eq(providerActionBindings.tenantId, tenantId),
+          eq(providerActionBindings.actorAgentId, agentId),
+          inArray(providerActionBindings.status, [
+            "execution_ready",
+            "executing",
+            "outcome_unknown",
+          ]),
+        ),
+      )
+      .limit(1)
+      .for("update");
+    if (unresolvedTransaction || unresolvedProviderAction) {
+      return "blocked_by_unresolved_execution";
+    }
+
     const leases = await tx
       .select({
         id: upstreamCredentialLeases.id,
@@ -138,6 +172,8 @@ export async function deleteAgentAuthority(
           AND status = 'active'
       `);
     }
+
+    await input.beforeDelete?.();
 
     await tx
       .update(secretRoutes)

@@ -119,6 +119,18 @@ describe("0109 agent policy builder-perps reconciliation", () => {
         const target = postgres(databaseUrl.toString(), { max: 1 });
         try {
           await migrate(drizzle(target), { migrationsFolder: migrationsAt0108 });
+          // Model a capability plugin installed before the core 0110 upgrade.
+          // Core cannot assume the plugin is currently enabled, but it must
+          // still fence authority in tables left by that earlier installation.
+          await target`
+            CREATE TABLE capability_grants (
+              id uuid PRIMARY KEY,
+              tenant_id text NOT NULL,
+              agent_id varchar(64) NOT NULL,
+              secret_route_id uuid,
+              status text NOT NULL
+            )
+          `;
           const before = await target<{ exists: boolean }[]>`
           SELECT EXISTS (
             SELECT 1 FROM information_schema.columns
@@ -160,6 +172,22 @@ describe("0109 agent policy builder-perps reconciliation", () => {
             ) AS exists
           `;
           expect(leaseAgentFence).toEqual([{ exists: true }]);
+          const capabilityAgentFence = await verified<{ exists: boolean }[]>`
+            SELECT EXISTS (
+              SELECT 1 FROM pg_trigger
+              WHERE tgname='capability_grants_agent_fence' AND NOT tgisinternal
+            ) AS exists
+          `;
+          expect(capabilityAgentFence).toEqual([{ exists: true }]);
+          const orphanGrantId = crypto.randomUUID();
+          await verified`
+            INSERT INTO capability_grants (id, tenant_id, agent_id, status)
+            VALUES (${orphanGrantId}, 'orphan-tenant', 'deleted-agent', 'revoked')
+          `;
+          const reactivation = verified`
+            UPDATE capability_grants SET status='active' WHERE id=${orphanGrantId}
+          `;
+          await expect(reactivation).rejects.toMatchObject({ code: "23503" });
           const applied = await verified<{ count: number }[]>`
           SELECT count(*)::int AS count FROM drizzle.__drizzle_migrations
         `;

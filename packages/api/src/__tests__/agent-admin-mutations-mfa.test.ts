@@ -9,7 +9,6 @@ import {
   agentWallets,
   approvalQueue,
   auditEvents,
-  closeDb,
   encryptedChainKeys,
   encryptedKeys,
   getDb,
@@ -101,11 +100,7 @@ describe("agent admin mutations require human session + MFA (SEC-209)", () => {
 
   afterAll(async () => {
     try {
-      // Real-Postgres coverage retains append-only lease evidence whose
-      // workspace intentionally prevents tenant teardown. The CI database is
-      // job-scoped; PGLite remains fully hermetic and closes normally.
-      if (USING_REAL_POSTGRES) await closeDb();
-      else await cleanupAgentBehaviorTestDatabase(TENANT_ID);
+      await cleanupAgentBehaviorTestDatabase(TENANT_ID);
     } finally {
       for (const [name, value] of originalEnv) {
         if (value === undefined) delete process.env[name];

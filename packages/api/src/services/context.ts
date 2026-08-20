@@ -15,6 +15,7 @@ import {
   verifyToken,
 } from "@stwd/auth";
 import {
+  agents,
   conditionSetItems,
   conditionSets,
   getDb,
@@ -159,6 +160,24 @@ export async function createAgentToken(
     { agentId, tenantId, scopes: tokenScopes },
     expiresIn || AGENT_TOKEN_EXPIRY,
   );
+}
+
+/** Mint while holding the same agent-row lock used by deletion. */
+export async function createAgentTokenForExistingAgent(
+  agentId: string,
+  tenantId: string,
+  expiresIn?: string,
+  scopes?: string[],
+): Promise<string | null> {
+  return getDb().transaction(async (tx) => {
+    const [agent] = await tx
+      .select({ id: agents.id })
+      .from(agents)
+      .where(and(eq(agents.id, agentId), eq(agents.tenantId, tenantId)))
+      .for("update");
+    if (!agent) return null;
+    return createAgentToken(agentId, tenantId, expiresIn, scopes);
+  });
 }
 
 export async function verifySessionToken(token: string) {

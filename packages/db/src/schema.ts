@@ -2662,11 +2662,8 @@ export const upstreamCredentialLeases = pgTable(
     // Lease evidence intentionally outlives deleted agent authority. A database
     // trigger serializes new lease publication with agent deletion because an
     // ordinary retention-blocking agent FK is deliberately absent.
-    workspaceFk: foreignKey({
-      columns: [table.tenantId, table.workspaceId],
-      foreignColumns: [workspaces.tenantId, workspaces.id],
-      name: "upstream_credential_leases_workspace_fk",
-    }).onDelete("restrict"),
+    // Lease evidence intentionally outlives deleted workspace authority. The
+    // 0110 workspace-row fence serializes publication with workspace deletion.
     replayUnique: uniqueIndex("upstream_credential_leases_replay_uniq").on(
       table.tenantId,
       table.agentId,

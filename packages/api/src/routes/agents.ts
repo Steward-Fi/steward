@@ -27,7 +27,7 @@ import {
   agents,
   agentWallets,
   approvalQueue,
-  createAgentToken,
+  createAgentTokenForExistingAgent,
   db,
   encryptedChainKeys,
   encryptedKeys,
@@ -1471,7 +1471,10 @@ agentRoutes.post("/:agentId/token", async (c) => {
       resourceId: agentId,
       metadata: { scopes, expiresIn },
     });
-    const token = await createAgentToken(agentId, tenantId, expiresIn, scopes);
+    const token = await createAgentTokenForExistingAgent(agentId, tenantId, expiresIn, scopes);
+    if (!token) {
+      return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
+    }
     await writeAgentAudit(c, {
       tenantId,
       action: "agent.token.create",
@@ -1973,18 +1976,23 @@ agentRoutes.delete("/:agentId", async (c) => {
       resourceId: agentId,
       metadata: { walletAddress: agent.walletAddress },
     });
-    const issuedBefore = Math.floor(Date.now() / 1000);
-    await revocationStore.revokeAgentTokens(agentId, issuedBefore);
+    let issuedBefore = 0;
+    const completionAudit = agentAuditEvent(c, {
+      tenantId,
+      action: "agent.delete",
+      resourceType: "agent",
+      resourceId: agentId,
+      metadata: {},
+    });
     const deletion = await deleteAgentAuthority({
       tenantId,
       agentId,
-      completionAudit: agentAuditEvent(c, {
-        tenantId,
-        action: "agent.delete",
-        resourceType: "agent",
-        resourceId: agentId,
-        metadata: { revokedAgentTokensIssuedBefore: issuedBefore },
-      }),
+      completionAudit,
+      beforeDelete: async () => {
+        issuedBefore = Math.floor(Date.now() / 1000);
+        await revocationStore.revokeAgentTokens(agentId, issuedBefore);
+        completionAudit.metadata = { revokedAgentTokensIssuedBefore: issuedBefore };
+      },
     });
 
     if (deletion === "blocked_by_upstream_lease") {
@@ -1996,6 +2004,12 @@ agentRoutes.delete("/:agentId", async (c) => {
     if (deletion === "blocked_by_executing_proxy") {
       return c.json<ApiResponse>(
         { ok: false, error: "Agent has an executing proxy request; retry deletion later" },
+        409,
+      );
+    }
+    if (deletion === "blocked_by_unresolved_execution") {
+      return c.json<ApiResponse>(
+        { ok: false, error: "Agent has unresolved execution evidence; reconcile it first" },
         409,
       );
     }

@@ -63,7 +63,7 @@ import { deleteAgentAuthority } from "../services/agent-deletion";
 import { writeAuditEvent } from "../services/audit";
 import {
   type AppVariables,
-  createAgentToken,
+  createAgentTokenForExistingAgent,
   getConditionSetReferenceValidationError,
   parseAgentTokenScopes,
   setNoStoreHeaders,
@@ -2402,19 +2402,23 @@ platform.delete("/tenants/:id/agents/:agentId", async (c) => {
     ...auditCtx(c),
   });
 
-  // Revoke outstanding agent tokens before tearing down the agent's rows.
-  const issuedBefore = await revocationStore.revokeAgentTokens(agentId);
+  let issuedBefore = 0;
+  const completionAudit = {
+    tenantId,
+    actorType: "platform" as const,
+    action: "agent.delete",
+    resourceType: "agent",
+    resourceId: agentId,
+    metadata: {},
+    ...auditCtx(c),
+  };
   const deletion = await deleteAgentAuthority({
     tenantId,
     agentId,
-    completionAudit: {
-      tenantId,
-      actorType: "platform",
-      action: "agent.delete",
-      resourceType: "agent",
-      resourceId: agentId,
-      metadata: { revokedAgentTokensIssuedBefore: issuedBefore },
-      ...auditCtx(c),
+    completionAudit,
+    beforeDelete: async () => {
+      issuedBefore = await revocationStore.revokeAgentTokens(agentId);
+      completionAudit.metadata = { revokedAgentTokensIssuedBefore: issuedBefore };
     },
   });
   if (deletion === "blocked_by_upstream_lease") {
@@ -2426,6 +2430,12 @@ platform.delete("/tenants/:id/agents/:agentId", async (c) => {
   if (deletion === "blocked_by_executing_proxy") {
     return c.json<ApiResponse>(
       { ok: false, error: "Agent has an executing proxy request; retry deletion later" },
+      409,
+    );
+  }
+  if (deletion === "blocked_by_unresolved_execution") {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Agent has unresolved execution evidence; reconcile it first" },
       409,
     );
   }
@@ -2491,7 +2501,10 @@ platform.post("/tenants/:id/agents/:agentId/token", async (c) => {
   }
 
   try {
-    const token = await createAgentToken(agentId, tenantId, expiresIn, scopes);
+    const token = await createAgentTokenForExistingAgent(agentId, tenantId, expiresIn, scopes);
+    if (!token) {
+      return c.json<ApiResponse>({ ok: false, error: "Agent not found in tenant" }, 404);
+    }
     await writeAuditEvent({
       tenantId,
       actorType: "platform",
