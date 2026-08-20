@@ -53,7 +53,14 @@ describeRealPostgres("condition set real-PostgreSQL atomicity", () => {
     await Promise.all(
       [...childProcesses].map(async (childProcess) => {
         childProcess.kill("SIGTERM");
-        await childProcess.exited;
+        const exited = await Promise.race([
+          childProcess.exited.then(() => true),
+          Bun.sleep(1_000).then(() => false),
+        ]);
+        if (!exited) {
+          childProcess.kill("SIGKILL");
+          await childProcess.exited;
+        }
       }),
     );
     childProcesses.clear();
@@ -182,11 +189,18 @@ describeRealPostgres("condition set real-PostgreSQL atomicity", () => {
           and locks.objsubid = 1
           and locks.classid = ((expected.key >> 32) & 4294967295)::oid
           and locks.objid = (expected.key & 4294967295)::oid
-          and (${expectedPid ?? null}::integer is null or locks.pid = ${expectedPid ?? null})
       `;
-      if (rows.length === 1) return rows[0].pid;
       if (rows.length > 1) {
         throw new Error(`ambiguous advisory waiters for key ${lockKey}: ${rows.length}`);
+      }
+      if (rows.length === 1) {
+        const waiterPid = rows[0].pid;
+        if (expectedPid !== undefined && waiterPid !== expectedPid) {
+          throw new Error(
+            `advisory waiter for key ${lockKey} was backend ${waiterPid}, expected ${expectedPid}`,
+          );
+        }
+        return waiterPid;
       }
       if (attempt === 199) throw new Error(`missing advisory waiter for key ${lockKey}`);
       await Bun.sleep(10);
