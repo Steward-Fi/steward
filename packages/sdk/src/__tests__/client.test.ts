@@ -4869,6 +4869,37 @@ describe("Response parsing", () => {
     expect(agents[0].createdAt).toBeInstanceOf(Date);
   });
 
+  it("listAgents exhausts every canonical page", async () => {
+    let calls = 0;
+    global.fetch = async (input) => {
+      const url = String(input);
+      calls += 1;
+      const page =
+        calls === 1
+          ? Array.from({ length: 100 }, (_, index) => ({
+              ...mockAgent,
+              id: `agent-${index}`,
+            }))
+          : [{ ...mockAgent, id: "agent-100" }];
+      expect(url).toBe(
+        calls === 1
+          ? "https://api.steward.example/agents"
+          : "https://api.steward.example/agents?limit=100&offset=100",
+      );
+      return new Response(
+        JSON.stringify({
+          ok: true,
+          data: { agents: page, limit: 100, offset: calls === 1 ? 0 : 100 },
+        }),
+        { headers: { "content-type": "application/json" } },
+      );
+    };
+
+    const agents = await makeClient().listAgents();
+    expect(agents).toHaveLength(101);
+    expect(calls).toBe(2);
+  });
+
   it("getAgent returns single agent", async () => {
     installMockFetch({ ok: true, data: mockAgent });
     const agent = await makeClient().getAgent("agent-1");
