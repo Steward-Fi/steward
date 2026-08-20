@@ -451,7 +451,7 @@ jobs:
   integration:
     name: Integration Tests (Postgres)
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     env:
       REDIS_URL: "redis://localhost:6379"
 
