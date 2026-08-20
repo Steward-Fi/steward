@@ -93,6 +93,10 @@ SELECT format(
   :'steward_platform_role'
 ) \gexec
 SELECT format(
+  'GRANT USAGE, SELECT ON SEQUENCE public.audit_events_id_seq TO %I',
+  :'steward_platform_role'
+) \gexec
+SELECT format(
   'GRANT EXECUTE ON FUNCTION '
   'steward_bootstrap.platform_set_user_deactivation(uuid,boolean), '
   'steward_bootstrap.platform_delete_user(uuid), '
@@ -219,6 +223,26 @@ BEGIN
        current_setting('steward.bootstrap.platform_role'), 'steward_rls.user_id()', 'EXECUTE'
      ) THEN
     RAISE EXCEPTION 'SEC-169 platform role must receive only tenant RLS context access';
+  END IF;
+  IF NOT has_sequence_privilege(
+       current_setting('steward.bootstrap.platform_role'),
+       'public.audit_events_id_seq',
+       'USAGE,SELECT'
+     )
+     OR has_sequence_privilege(
+       current_setting('steward.bootstrap.platform_role'),
+       'public.audit_checkpoints_id_seq',
+       'USAGE'
+     )
+     OR EXISTS (
+       SELECT 1
+       FROM pg_default_acl defaults
+       CROSS JOIN LATERAL aclexplode(COALESCE(defaults.defaclacl, '{}'::aclitem[])) privilege
+       JOIN pg_roles granted_role ON granted_role.oid = privilege.grantee
+       WHERE defaults.defaclobjtype = 'S'
+         AND granted_role.rolname = current_setting('steward.bootstrap.platform_role')
+     ) THEN
+    RAISE EXCEPTION 'SEC-169 platform role must receive only the audit event sequence grant';
   END IF;
   IF EXISTS (
     SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace

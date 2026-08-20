@@ -148,17 +148,32 @@ describeWithPostgres("SEC-169 operator lifecycle on the real Steward schema", ()
           schema_usage: boolean;
           tenant_id_execute: boolean;
           user_id_execute: boolean;
+          audit_sequence_usage: boolean;
+          other_sequence_usage: boolean;
+          default_sequence_grant: boolean;
         }[]
       >`
         SELECT
           has_schema_privilege(${platformRole}, 'steward_rls', 'USAGE') AS schema_usage,
           has_function_privilege(${platformRole}, 'steward_rls.tenant_id()', 'EXECUTE') AS tenant_id_execute,
-          has_function_privilege(${platformRole}, 'steward_rls.user_id()', 'EXECUTE') AS user_id_execute
+          has_function_privilege(${platformRole}, 'steward_rls.user_id()', 'EXECUTE') AS user_id_execute,
+          has_sequence_privilege(${platformRole}, 'public.audit_events_id_seq', 'USAGE,SELECT') AS audit_sequence_usage,
+          has_sequence_privilege(${platformRole}, 'public.audit_checkpoints_id_seq', 'USAGE') AS other_sequence_usage,
+          EXISTS (
+            SELECT 1
+            FROM pg_default_acl defaults
+            CROSS JOIN LATERAL aclexplode(COALESCE(defaults.defaclacl, '{}'::aclitem[])) privilege
+            JOIN pg_roles granted_role ON granted_role.oid = privilege.grantee
+            WHERE defaults.defaclobjtype = 'S' AND granted_role.rolname = ${platformRole}
+          ) AS default_sequence_grant
       `;
       expect(platformRlsPrivileges).toEqual({
         schema_usage: true,
         tenant_id_execute: true,
         user_id_execute: false,
+        audit_sequence_usage: true,
+        other_sequence_usage: false,
+        default_sequence_grant: false,
       });
 
       await runOperatorScript("rls-activate.sql");
