@@ -8,11 +8,13 @@
 
 import { describe, expect, it } from "bun:test";
 import type { PolicyRule } from "@stwd/shared";
+import { withRuntimeEnvironment } from "@stwd/shared/runtime-env";
 import {
   enforceRateLimit,
   extractRateLimitPolicy,
   extractSpendLimitPolicy,
   formatRateLimitHeaders,
+  nativePriceFallbackUsd,
   recordVaultSpend,
 } from "../middleware/redis-enforcement";
 
@@ -209,6 +211,54 @@ describe("formatRateLimitHeaders", () => {
     const headers = formatRateLimitHeaders({ limit: 5, remaining: 4, resetMs: 1_000 });
     expect(headers["Retry-After"]).toBeUndefined();
     expect(headers["RateLimit-Remaining"]).toBe("4");
+  });
+});
+
+describe("nativePriceFallbackUsd", () => {
+  it("isolates hostile overlapping Worker request bindings", async () => {
+    let releaseHigh!: () => void;
+    const highCanFinish = new Promise<void>((resolve) => {
+      releaseHigh = resolve;
+    });
+    let highStarted!: () => void;
+    const highDidStart = new Promise<void>((resolve) => {
+      highStarted = resolve;
+    });
+
+    const high = withRuntimeEnvironment(
+      { STEWARD_NATIVE_PRICE_FALLBACK_USD: "25000" },
+      async () => {
+        highStarted();
+        await highCanFinish;
+        return nativePriceFallbackUsd();
+      },
+    );
+    await highDidStart;
+
+    const hostileLow = withRuntimeEnvironment(
+      { STEWARD_NATIVE_PRICE_FALLBACK_USD: "1" },
+      async () => {
+        expect(nativePriceFallbackUsd()).toBe(1);
+        releaseHigh();
+        return nativePriceFallbackUsd();
+      },
+    );
+
+    expect(await Promise.all([high, hostileLow])).toEqual([25_000, 1]);
+  });
+
+  it("uses the conservative default for absent or invalid request bindings", () => {
+    expect(withRuntimeEnvironment({}, () => nativePriceFallbackUsd())).toBe(10_000);
+    expect(
+      withRuntimeEnvironment({ STEWARD_NATIVE_PRICE_FALLBACK_USD: "Infinity" }, () =>
+        nativePriceFallbackUsd(),
+      ),
+    ).toBe(10_000);
+    expect(
+      withRuntimeEnvironment({ STEWARD_NATIVE_PRICE_FALLBACK_USD: "0" }, () =>
+        nativePriceFallbackUsd(),
+      ),
+    ).toBe(10_000);
   });
 });
 
