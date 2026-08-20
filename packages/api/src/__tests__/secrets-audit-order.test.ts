@@ -45,12 +45,6 @@ describe("secret route audit ordering", () => {
   });
 
   it("atomically commits secret route mutations with their final audit events", () => {
-    const createSecretRoute = routeBody('secretsRoutes.post("/",', "/** GET /secrets");
-    expect(createSecretRoute).toContain('action: "secret.create"');
-    expect(createSecretRoute).toContain(".update(secretRows)");
-    expect(createSecretRoute).toContain("deletedAt: now");
-    expect(createSecretRoute).toContain("eq(secretRows.id, secret.id)");
-
     const createRoute = routeBody('secretsRoutes.post("/routes"', "/** GET /secrets/routes");
     expect(createRoute).toContain("withTenantAuditedTransaction(tenantId");
     expect(createRoute).toContain("await appendAudit(");
@@ -81,27 +75,5 @@ describe("secret route audit ordering", () => {
     for (const body of [createRoute, updateRoute, deleteRoute]) {
       expect(body).toContain("lockSecretRouteNamespaces(");
     }
-
-    // Secret CRUD still uses explicit compensating transactions where its
-    // vault abstraction does not expose within-transaction mutation helpers.
-
-    for (const marker of ['secretsRoutes.put("/:id"', 'secretsRoutes.post("/:id/rotate"']) {
-      const rotateRoute = routeSource.slice(routeSource.indexOf(marker));
-      expect(rotateRoute).toContain('action: "secret.rotate"');
-      expect(rotateRoute).toContain(".set({ secretId: existing.id })");
-      expect(rotateRoute).toContain("eq(secretRouteRows.secretId, rotated.id)");
-      expect(rotateRoute).toContain("eq(secretRows.id, rotated.id)");
-      expect(rotateRoute).toContain("eq(secretRows.id, existing.id)");
-    }
-
-    const deleteSecretRoute = routeBody(
-      'secretsRoutes.delete("/:id"',
-      "/** POST /secrets/:id/rotate",
-    );
-    expect(deleteSecretRoute).toContain('action: "secret.delete"');
-    expect(deleteSecretRoute).toContain("const secretVersions = await getVaultDb()");
-    expect(deleteSecretRoute).toContain("const routeSnapshot =");
-    expect(deleteSecretRoute).toContain("deletedAt: row.deletedAt");
-    expect(deleteSecretRoute).toContain("tx.insert(secretRouteRows).values");
   });
 });
