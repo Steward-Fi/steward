@@ -602,8 +602,9 @@ export default function AgentDetailPage() {
             <p className="text-text-secondary text-sm mb-1">Couldn&apos;t load account portfolio</p>
             <p className="text-text-tertiary text-xs mb-2 font-mono">{accountError}</p>
             <p className="text-text-tertiary text-xs mb-4">
-              Wallets, balances, sponsorship, and capabilities are unavailable. This does not mean
-              the account is empty or sponsorship is off.
+              {balance
+                ? "Legacy native balance is shown above, but aggregate portfolio, wallet, sponsorship, and capability state are unavailable."
+                : "Aggregate portfolio, balance, wallet, sponsorship, and capability state are unavailable."}
             </p>
             <button
               onClick={loadAgent}

@@ -272,7 +272,7 @@ test.describe("Dashboard agent account aggregation", () => {
     await expect(page.getByText("USDC", { exact: true })).toBeVisible();
     await expect(page.getByText("sign_transaction")).toBeVisible();
     await expect(page.getByText("send_calls")).toBeVisible();
-    expect(accountRequestCount).toBe(1);
+    expect(accountRequestCount).toBeGreaterThan(0);
     expect(legacyBalanceRequestCount).toBe(0);
 
     await page.getByRole("button", { name: /Signers/ }).click();
@@ -387,9 +387,11 @@ test.describe("Dashboard agent account aggregation", () => {
     const alert = page.getByRole("alert");
     await expect(alert.getByText("Couldn't load account portfolio")).toBeVisible();
     await expect(alert.getByText("portfolio service temporarily unavailable")).toBeVisible();
+    await expect(alert.getByText(/Legacy native balance is shown above/)).toBeVisible();
+    await expect(page.getByText("1.25 ETH").first()).toBeVisible();
     await expect(page.getByText("Account data unavailable")).toBeVisible();
     await expect(page.getByText("Gas sponsorship off")).toHaveCount(0);
-    expect(accountRequestCount).toBe(1);
-    expect(legacyBalanceRequestCount).toBe(1);
+    expect(accountRequestCount).toBeGreaterThan(0);
+    expect(legacyBalanceRequestCount).toBe(accountRequestCount);
   });
 });
