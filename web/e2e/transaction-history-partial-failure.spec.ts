@@ -159,43 +159,90 @@ test("dashboard surfaces partial transaction history without discarding availabl
   await expect(page.getByRole("button", { name: "All1" })).toBeVisible();
 });
 
-test("overview pending counts include agents beyond the former twenty-agent sample", async ({
-  page,
-  request,
-}) => {
-  const agents = Array.from({ length: 21 }, (_, index) => ({
-    id: `agent-${index + 1}`,
-    name: `Agent ${index + 1}`,
-  }));
-
-  await page.route(
-    (url) => url.href.startsWith(API) && url.pathname === "/agents",
-    (route) => route.fulfill({ json: { ok: true, data: agents } }),
-  );
-  await page.route(
-    (url) => url.href.startsWith(API) && /^\/vault\/agent-\d+\/history$/.test(url.pathname),
-    async (route) => {
-      const agentId = new URL(route.request().url()).pathname.split("/")[2];
-      await route.fulfill({
-        json: {
-          ok: true,
-          data: agentId === "agent-21" ? [transaction("tx-agent-21", agentId)] : [],
-        },
-      });
-    },
-  );
-
-  await loginWithMagicLink(page, request, `complete-history-${Date.now()}@example.test`);
-  await page.goto(`${WEB}/dashboard`);
-  const pendingStat = page.getByText("Pending Approvals").locator("..");
-  await expect(pendingStat).toContainText("1");
-  await expect(page.getByRole("link", { name: "Agent 21" })).toBeVisible();
-});
-
 for (const surface of [
   { name: "overview", path: "/dashboard" },
   { name: "transactions", path: "/dashboard/transactions" },
 ] as const) {
+  test(`${surface.name} includes agent and history page-two sentinels in pending counts`, async ({
+    page,
+    request,
+  }) => {
+    const agents = Array.from({ length: 201 }, (_, index) => ({
+      id: `agent-${index + 1}`,
+      name: `Agent ${index + 1}`,
+    }));
+    const agentOffsets: number[] = [];
+    const sentinelHistoryOffsets: number[] = [];
+
+    await page.route(
+      (url) => url.href.startsWith(API) && url.pathname === "/agents",
+      async (route) => {
+        const offset = Number(new URL(route.request().url()).searchParams.get("offset"));
+        agentOffsets.push(offset);
+        await route.fulfill({
+          json: {
+            ok: true,
+            data: { agents: agents.slice(offset, offset + 200), limit: 200, offset },
+          },
+        });
+      },
+    );
+    await page.route(
+      (url) => url.href.startsWith(API) && /^\/vault\/agent-\d+\/history$/.test(url.pathname),
+      async (route) => {
+        const url = new URL(route.request().url());
+        const agentId = url.pathname.split("/")[2];
+        const offset = Number(url.searchParams.get("offset"));
+        if (agentId !== "agent-201") {
+          await route.fulfill({
+            json: { ok: true, data: { transactions: [], limit: 200, offset } },
+          });
+          return;
+        }
+        sentinelHistoryOffsets.push(offset);
+        const transactions =
+          offset === 0
+            ? Array.from({ length: 200 }, (_, index) => ({
+                ...transaction(`sentinel-confirmed-${index}`, agentId),
+                status: "confirmed",
+              }))
+            : [
+                {
+                  ...transaction("sentinel-pending", agentId),
+                  createdAt: "2026-08-21T12:00:00.000Z",
+                },
+              ];
+        await route.fulfill({
+          json: { ok: true, data: { transactions, limit: 200, offset } },
+        });
+      },
+    );
+
+    await loginWithMagicLink(
+      page,
+      request,
+      `complete-history-${surface.name}-${Date.now()}@example.test`,
+    );
+    await page.goto(`${WEB}${surface.path}`);
+    await expect(page.getByRole("link", { name: "Agent 201" }).first()).toBeVisible();
+    if (surface.name === "overview") {
+      await expect(page.getByText("Pending Approvals").locator("..")).toContainText("1");
+    } else {
+      await expect(page.getByRole("button", { name: "All201" })).toBeVisible();
+      await expect(page.getByRole("button", { name: "Pending1" })).toBeVisible();
+    }
+    // Optional wallet-provider remounts can repeat a complete load. Every load
+    // must still request exactly one first page and one page-two continuation.
+    expect([...new Set(agentOffsets)]).toEqual([0, 200]);
+    expect(agentOffsets.filter((offset) => offset === 0)).toHaveLength(
+      agentOffsets.filter((offset) => offset === 200).length,
+    );
+    expect([...new Set(sentinelHistoryOffsets)]).toEqual([0, 200]);
+    expect(sentinelHistoryOffsets.filter((offset) => offset === 0)).toHaveLength(
+      sentinelHistoryOffsets.filter((offset) => offset === 200).length,
+    );
+  });
+
   test(`${surface.name} ignores a delayed tenant-A completion after switching to tenant B`, async ({
     page,
     request,
@@ -210,23 +257,41 @@ for (const surface of [
       async (route) => {
         const authorization = route.request().headers().authorization ?? null;
         const tenant = authorization === `Bearer ${tenantBToken}` ? "b" : "a";
+        const offset = Number(new URL(route.request().url()).searchParams.get("offset"));
+        if (tenant === "a" && offset === 200) {
+          delayedTenantA.current = route;
+          return;
+        }
+        const agents =
+          tenant === "a"
+            ? Array.from({ length: 200 }, (_, index) => ({
+                id: `agent-a-${index}`,
+                name: `Tenant A Page One Agent ${index}`,
+              }))
+            : [{ id: "agent-b", name: "Tenant B Agent" }];
         await route.fulfill({
           json: {
             ok: true,
-            data: [{ id: `agent-${tenant}`, name: `Tenant ${tenant.toUpperCase()} Agent` }],
+            data: {
+              agents,
+              limit: 200,
+              offset,
+            },
           },
         });
       },
     );
     await page.route(
-      (url) => url.href.startsWith(API) && url.pathname === "/vault/agent-a/history",
-      (route) => {
-        delayedTenantA.current = route;
+      (url) => url.href.startsWith(API) && /\/vault\/[^/]+\/history$/.test(url.pathname),
+      async (route) => {
+        const agentId = new URL(route.request().url()).pathname.split("/")[2];
+        await route.fulfill({
+          json: {
+            ok: true,
+            data: agentId === "agent-b" ? [transaction("tx-b", "agent-b")] : [],
+          },
+        });
       },
-    );
-    await page.route(
-      (url) => url.href.startsWith(API) && url.pathname === "/vault/agent-b/history",
-      (route) => route.fulfill({ json: { ok: true, data: [transaction("tx-b", "agent-b")] } }),
     );
 
     await loginWithMagicLink(page, request, email);
@@ -236,7 +301,14 @@ for (const surface of [
     await expect(page.getByRole("link", { name: "Tenant B Agent" })).toBeVisible();
 
     await delayedTenantA.current?.fulfill({
-      json: { ok: true, data: [transaction("tx-a", "agent-a")] },
+      json: {
+        ok: true,
+        data: {
+          agents: [{ id: "agent-a", name: "Tenant A Agent" }],
+          limit: 200,
+          offset: 200,
+        },
+      },
     });
     await page.waitForTimeout(250);
     await expect(page.getByRole("link", { name: "Tenant B Agent" })).toBeVisible();
@@ -268,10 +340,14 @@ for (const surface of [
         await route.fulfill({
           json: {
             ok: true,
-            data: [
-              { id: "agent-available", name: availableName },
-              { id: "agent-unavailable", name: "Unavailable Agent" },
-            ],
+            data: {
+              agents: [
+                { id: "agent-available", name: availableName },
+                { id: "agent-unavailable", name: "Unavailable Agent" },
+              ],
+              limit: 100,
+              offset: 0,
+            },
           },
         });
       },
