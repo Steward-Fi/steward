@@ -237,11 +237,12 @@ export interface StewardAppContext {
   tenantAuth: typeof tenantAuth;
   /**
    * the core's adapter registry — the seam a plugin's `adapters` contributions
-   * register a real provider integration into. Defaults to the
-   * process-wide {@link adapterRegistry} routes consult; tests inject a fresh
-   * {@link AdapterRegistry} (with a controlled env) so adapter resolution is
-   * hermetic. the host only CALLS `register(category, provider, adapter)` on it;
-   * the registry's fail-closed-in-production resolution is untouched.
+   * register a durable provider integration into. Defaults to the process-wide
+   * {@link adapterRegistry} routes consult; its provider implementations persist
+   * while authority selection comes from the current request environment. Tests
+   * can inject a fresh {@link AdapterRegistry} for hermetic resolution. The host
+   * only CALLS `register(category, provider, adapter)` on it; the registry's
+   * fail-closed-in-production resolution is untouched.
    */
   adapterRegistry: AdapterRegistry;
   evmSimulator: EvmSimulator | null;

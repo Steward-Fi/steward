@@ -1,21 +1,22 @@
 /**
- * AdapterRegistry — resolves the configured adapter per category, with a
- * fail-closed default in production.
+ * AdapterRegistry — keeps durable provider implementations while resolving
+ * selection policy from the current request's immutable runtime environment.
  *
  * Resolution order per category (e.g. "swap"):
- *   1. A real adapter explicitly registered via {@link AdapterRegistry.register}
- *      (this is where a real provider integration plugs in later).
- *   2. The env var STEWARD_<CATEGORY>_ADAPTER selects a registered named provider.
- *   3. Fallback:
+ *   1. The env var STEWARD_<CATEGORY>_ADAPTER selects a durable provider
+ *      registered via {@link AdapterRegistry.register}, or the built-in mock.
+ *   2. Fallback:
  *        - DEV / test (NODE_ENV !== "production"): the built-in MOCK.
  *        - PRODUCTION (NODE_ENV === "production"): a DISABLED adapter whose
  *          operations throw {@link AdapterNotConfiguredError}. This guarantees a
  *          production deploy never silently uses mocks for real money.
  *
- * The only way to use mocks in production is to opt in explicitly via
- * STEWARD_ALLOW_MOCK_ADAPTERS=true (intended for staging/load tests only).
+ * The only way to use mocks in production is to select `mock` for the current
+ * category AND opt in via STEWARD_ALLOW_MOCK_ADAPTERS=true (intended for
+ * staging/load tests only).
  */
 
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 import { type BridgeAdapter, MockBridgeAdapter } from "./adapters/bridge.js";
 import { type CustodialWalletAdapter, MockCustodialWalletAdapter } from "./adapters/custodial.js";
 import { type EarnAdapter, MockEarnAdapter } from "./adapters/earn.js";
@@ -30,7 +31,10 @@ import { MockTosAdapter, type TosAdapter } from "./adapters/tos.js";
 import { type AdapterCategory, AdapterNotConfiguredError, type BaseAdapter } from "./types.js";
 
 export interface AdapterRegistryOptions {
-  /** Defaults to process.env. Injectable for tests. */
+  /**
+   * Fixed environment for isolated registries. The shared singleton resolves
+   * from @stwd/shared's request snapshot and falls back to process.env on Bun.
+   */
   env?: Record<string, string | undefined>;
 }
 
@@ -109,21 +113,53 @@ function makeMockAdapter<C extends AdapterCategory>(category: C): CategoryToAdap
 }
 
 export class AdapterRegistry {
-  private readonly env: Record<string, string | undefined>;
+  private readonly env: Readonly<Record<string, string | undefined>> | null;
   // category -> (providerName -> adapter) for explicitly registered real adapters
   private readonly registered = new Map<AdapterCategory, Map<string, BaseAdapter>>();
-  private readonly resolved = new Map<AdapterCategory, BaseAdapter>();
+  // Implementations are durable; only selection/policy is request-scoped. Stable
+  // mock instances preserve their in-memory development behavior without ever
+  // caching the authority decision that made one reachable.
+  private readonly mockAdapters = new Map<AdapterCategory, BaseAdapter>();
+  private readonly disabledAdapters = new Map<AdapterCategory, BaseAdapter>();
 
   constructor(options?: AdapterRegistryOptions) {
-    this.env = options?.env ?? process.env;
+    this.env = options?.env ? Object.freeze({ ...options.env }) : null;
+  }
+
+  private environmentValue(name: string): string | undefined {
+    return this.env ? this.env[name] : runtimeEnvironmentValue(name);
   }
 
   private isProduction(): boolean {
-    return this.env.NODE_ENV === "production";
+    const nodeEnvironment = this.environmentValue("NODE_ENV")?.trim();
+    if (nodeEnvironment === "production") return true;
+    // Workers are internet-facing by default. An omitted NODE_ENV binding must
+    // never activate Bun's development mocks; only explicit dev/test modes do.
+    return (
+      this.environmentValue("STEWARD_RUNTIME") === "workers" &&
+      nodeEnvironment !== "development" &&
+      nodeEnvironment !== "test"
+    );
   }
 
   private allowMocksInProd(): boolean {
-    return this.env.STEWARD_ALLOW_MOCK_ADAPTERS === "true";
+    return this.environmentValue("STEWARD_ALLOW_MOCK_ADAPTERS") === "true";
+  }
+
+  private mock<C extends AdapterCategory>(category: C): CategoryToAdapter[C] {
+    const existing = this.mockAdapters.get(category);
+    if (existing) return existing as CategoryToAdapter[C];
+    const created = makeMockAdapter(category);
+    this.mockAdapters.set(category, created);
+    return created;
+  }
+
+  private disabled<C extends AdapterCategory>(category: C): CategoryToAdapter[C] {
+    const existing = this.disabledAdapters.get(category);
+    if (existing) return existing as CategoryToAdapter[C];
+    const created = makeDisabledAdapter(category);
+    this.disabledAdapters.set(category, created);
+    return created;
   }
 
   /**
@@ -141,8 +177,6 @@ export class AdapterRegistry {
       this.registered.set(category, byName);
     }
     byName.set(providerName, adapter);
-    // Invalidate any previously-resolved instance for this category.
-    this.resolved.delete(category);
   }
 
   /**
@@ -156,55 +190,43 @@ export class AdapterRegistry {
   }
 
   private resolve<C extends AdapterCategory>(category: C): CategoryToAdapter[C] {
-    const cached = this.resolved.get(category);
-    if (cached) return cached as CategoryToAdapter[C];
-
-    const configured = this.env[envKey(category)]?.trim();
+    // Never cache this authority decision: the same Worker isolate can serve a
+    // rotated binding set, and overlapping requests retain distinct ALS-backed
+    // snapshots. Provider implementations themselves remain durable above.
+    const configured = this.environmentValue(envKey(category))?.trim();
     const byName = this.registered.get(category);
 
     // 1. Explicit env selection of a registered provider.
     if (configured && configured !== "mock" && byName?.has(configured)) {
-      const adapter = byName.get(configured) as CategoryToAdapter[C];
-      this.resolved.set(category, adapter);
-      return adapter;
+      return byName.get(configured) as CategoryToAdapter[C];
     }
 
     // 2. Env explicitly asks for "mock".
     if (configured === "mock") {
       if (this.isProduction() && !this.allowMocksInProd()) {
-        const disabled = makeDisabledAdapter(category);
-        this.resolved.set(category, disabled);
-        return disabled;
+        return this.disabled(category);
       }
-      const mock = makeMockAdapter(category);
-      this.resolved.set(category, mock);
-      return mock;
+      return this.mock(category);
     }
 
-    // 3. A single real adapter registered without env disambiguation: use it.
-    if (!configured && byName && byName.size === 1) {
+    // 3. Bun development convenience: a sole registered provider needs no env
+    // disambiguation. Production requires a current, explicit binding.
+    if (!configured && !this.isProduction() && byName && byName.size === 1) {
       const [adapter] = byName.values();
-      this.resolved.set(category, adapter as CategoryToAdapter[C]);
       return adapter as CategoryToAdapter[C];
     }
 
     // 4. Env names an unknown provider -> fail closed everywhere (never silently
     //    fall back to a mock when an operator asked for a specific provider).
     if (configured && configured !== "mock") {
-      const disabled = makeDisabledAdapter(category);
-      this.resolved.set(category, disabled);
-      return disabled;
+      return this.disabled(category);
     }
 
-    // 5. Nothing configured. DEV -> mock; PROD -> disabled (fail closed).
-    if (this.isProduction() && !this.allowMocksInProd()) {
-      const disabled = makeDisabledAdapter(category);
-      this.resolved.set(category, disabled);
-      return disabled;
-    }
-    const mock = makeMockAdapter(category);
-    this.resolved.set(category, mock);
-    return mock;
+    // 5. Nothing configured. DEV -> mock; PROD -> disabled (fail closed). The
+    // production mock acknowledgement above is valid only with an exact current
+    // `mock` selection; the allow flag alone cannot authorize every category.
+    if (this.isProduction()) return this.disabled(category);
+    return this.mock(category);
   }
 
   swap(): SwapAdapter {
@@ -253,7 +275,8 @@ export class AdapterRegistry {
 }
 
 /**
- * Default process-wide registry, resolved from process.env. Routes import this.
- * Tests construct their own {@link AdapterRegistry} with an injected env.
+ * Process-wide implementation registry. Selection is request-local under
+ * Workers and falls back to process.env under Bun. Tests can still construct an
+ * isolated registry with a fixed injected environment.
  */
 export const adapterRegistry = new AdapterRegistry();
