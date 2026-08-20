@@ -3,7 +3,7 @@
 import { WEBHOOK_EVENT_TYPES, type WebhookConfig, type WebhookDelivery } from "@stwd/sdk";
 import { AnimatePresence, motion } from "framer-motion";
 import type { FormEvent } from "react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { steward } from "@/lib/api";
 import { formatDate } from "@/lib/utils";
 
@@ -60,6 +60,15 @@ export default function WebhooksPage() {
   const [deliveryStatusFilter, setDeliveryStatusFilter] = useState<string>("all");
   const [deliveryEventFilter, setDeliveryEventFilter] = useState("");
   const [deliveryErrorFilter, setDeliveryErrorFilter] = useState<string>("all");
+  const webhooksRef = useRef(webhooks);
+  const selectedIdRef = useRef(selectedId);
+  const selectionEpochRef = useRef(0);
+  const deliveryQueryKeyRef = useRef("");
+  const retryOperationRef = useRef<object | null>(null);
+  const replayOperationRef = useRef<object | null>(null);
+  const testOperationRef = useRef<object | null>(null);
+  const deleteOperationRef = useRef<object | null>(null);
+  const webhookListEpochRef = useRef(0);
   const [newWebhook, setNewWebhook] = useState({
     url: "",
     description: "",
@@ -81,6 +90,9 @@ export default function WebhooksPage() {
     () => JSON.stringify([selectedId, deliveryQuery]),
     [deliveryQuery, selectedId],
   );
+  webhooksRef.current = webhooks;
+  selectedIdRef.current = selectedId;
+  deliveryQueryKeyRef.current = deliveryQueryKey;
   const visibleDeliveries =
     deliveryOwnerKey === deliveryQueryKey ? deliveries : ([] as WebhookDelivery[]);
   const deliveryQueryLoading =
@@ -92,20 +104,31 @@ export default function WebhooksPage() {
   );
 
   const loadWebhooks = useCallback(async () => {
+    const epoch = ++webhookListEpochRef.current;
     setLoading(true);
     setError(null);
     try {
       const configs = await steward.listWebhooks();
+      if (webhookListEpochRef.current !== epoch) return;
+      webhooksRef.current = configs;
       setWebhooks(configs);
-      setSelectedId((current) =>
-        current && configs.some((webhook) => webhook.id === current)
-          ? current
-          : (configs[0]?.id ?? ""),
-      );
+      const currentSelectedId = selectedIdRef.current;
+      const nextSelectedId =
+        currentSelectedId && configs.some((webhook) => webhook.id === currentSelectedId)
+          ? currentSelectedId
+          : (configs[0]?.id ?? "");
+      if (nextSelectedId !== currentSelectedId) {
+        selectionEpochRef.current += 1;
+        selectedIdRef.current = nextSelectedId;
+        setExpanded(null);
+      }
+      setSelectedId(nextSelectedId);
     } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : "Failed to load webhooks");
+      if (webhookListEpochRef.current === epoch) {
+        setError(e instanceof Error ? e.message : "Failed to load webhooks");
+      }
     } finally {
-      setLoading(false);
+      if (webhookListEpochRef.current === epoch) setLoading(false);
     }
   }, []);
 
@@ -147,6 +170,8 @@ export default function WebhooksPage() {
   }, [deliveryQuery, deliveryQueryKey, selectedId]);
 
   function selectWebhook(webhookId: string) {
+    selectionEpochRef.current += 1;
+    selectedIdRef.current = webhookId;
     setSelectedId(webhookId);
     setExpanded(null);
     setError(null);
@@ -154,24 +179,41 @@ export default function WebhooksPage() {
 
   async function retryDelivery(deliveryId: string) {
     if (!selectedId) return;
+    const operation = {};
+    const ownerKey = deliveryQueryKey;
+    retryOperationRef.current = operation;
     setRetryingId(deliveryId);
     setError(null);
     try {
       const updated = await steward.retryDelivery(deliveryId);
+      if (retryOperationRef.current !== operation || deliveryQueryKeyRef.current !== ownerKey) {
+        return;
+      }
       setDeliveries((rows) => rows.map((row) => (row.id === updated.id ? updated : row)));
     } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : "Failed to retry webhook delivery");
+      if (retryOperationRef.current === operation && deliveryQueryKeyRef.current === ownerKey) {
+        setError(e instanceof Error ? e.message : "Failed to retry webhook delivery");
+      }
     } finally {
-      setRetryingId(null);
+      if (retryOperationRef.current === operation) {
+        retryOperationRef.current = null;
+        setRetryingId(null);
+      }
     }
   }
 
   async function replayDelivery(delivery: WebhookDelivery) {
     if (!window.confirm("Replay this event as a new signed webhook delivery?")) return;
+    const operation = {};
+    const ownerKey = deliveryQueryKey;
+    replayOperationRef.current = operation;
     setReplayingId(delivery.id);
     setError(null);
     try {
       const replayed = await steward.replayDelivery(delivery.id);
+      if (replayOperationRef.current !== operation || deliveryQueryKeyRef.current !== ownerKey) {
+        return;
+      }
       const matchesFilters =
         (deliveryStatusFilter === "all" || replayed.status === deliveryStatusFilter) &&
         (!deliveryEventFilter.trim() || replayed.eventType === deliveryEventFilter.trim()) &&
@@ -184,19 +226,41 @@ export default function WebhooksPage() {
       );
       setExpanded(matchesFilters ? replayed.id : null);
     } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : "Failed to replay webhook delivery");
+      if (replayOperationRef.current === operation && deliveryQueryKeyRef.current === ownerKey) {
+        setError(e instanceof Error ? e.message : "Failed to replay webhook delivery");
+      }
     } finally {
-      setReplayingId(null);
+      if (replayOperationRef.current === operation) {
+        replayOperationRef.current = null;
+        setReplayingId(null);
+      }
     }
   }
 
   async function sendTest(webhook: WebhookConfig) {
+    const operation = {};
+    const ownerKey = deliveryQueryKey;
+    const selectionAtStart = selectedId;
+    const selectionEpochAtStart = selectionEpochRef.current;
+    testOperationRef.current = operation;
     setTestingId(webhook.id);
     setError(null);
     try {
       const delivery = await steward.testWebhook(webhook.id);
-      if (selectedId !== webhook.id) {
+      if (
+        testOperationRef.current !== operation ||
+        deliveryQueryKeyRef.current !== ownerKey ||
+        selectedIdRef.current !== selectionAtStart ||
+        selectionEpochRef.current !== selectionEpochAtStart
+      ) {
+        return;
+      }
+      if (selectionAtStart !== webhook.id) {
+        selectionEpochRef.current += 1;
+        selectedIdRef.current = webhook.id;
         setSelectedId(webhook.id);
+        setExpanded(null);
+        return;
       }
       const matchesFilters =
         (deliveryStatusFilter === "all" || delivery.status === deliveryStatusFilter) &&
@@ -210,9 +274,14 @@ export default function WebhooksPage() {
       );
       setExpanded(matchesFilters ? delivery.id : null);
     } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : "Failed to send test webhook");
+      if (testOperationRef.current === operation && deliveryQueryKeyRef.current === ownerKey) {
+        setError(e instanceof Error ? e.message : "Failed to send test webhook");
+      }
     } finally {
-      setTestingId(null);
+      if (testOperationRef.current === operation) {
+        testOperationRef.current = null;
+        setTestingId(null);
+      }
     }
   }
 
@@ -252,7 +321,13 @@ export default function WebhooksPage() {
         description: newWebhook.description.trim() || undefined,
         events: parseEventList(newWebhook.events),
       });
-      setWebhooks((rows) => [created, ...rows.filter((row) => row.id !== created.id)]);
+      webhookListEpochRef.current += 1;
+      setLoading(false);
+      const nextWebhooks = [created, ...webhooksRef.current.filter((row) => row.id !== created.id)];
+      webhooksRef.current = nextWebhooks;
+      setWebhooks(nextWebhooks);
+      selectionEpochRef.current += 1;
+      selectedIdRef.current = created.id;
       setSelectedId(created.id);
       setDeliveries([]);
       setNewWebhook({
@@ -273,7 +348,13 @@ export default function WebhooksPage() {
     setError(null);
     try {
       const updated = await steward.updateWebhook(webhook.id, { enabled });
-      setWebhooks((rows) => rows.map((row) => (row.id === updated.id ? updated : row)));
+      webhookListEpochRef.current += 1;
+      setLoading(false);
+      const nextWebhooks = webhooksRef.current.map((row) =>
+        row.id === updated.id ? updated : row,
+      );
+      webhooksRef.current = nextWebhooks;
+      setWebhooks(nextWebhooks);
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : "Failed to update webhook endpoint");
     } finally {
@@ -283,20 +364,34 @@ export default function WebhooksPage() {
 
   async function deleteEndpoint(webhook: WebhookConfig) {
     if (!window.confirm(`Delete webhook endpoint ${webhook.url}?`)) return;
+    const operation = {};
+    deleteOperationRef.current = operation;
     setDeletingId(webhook.id);
     setError(null);
     try {
       await steward.deleteWebhook(webhook.id);
-      const remaining = webhooks.filter((row) => row.id !== webhook.id);
+      webhookListEpochRef.current += 1;
+      setLoading(false);
+      const remaining = webhooksRef.current.filter((row) => row.id !== webhook.id);
+      webhooksRef.current = remaining;
       setWebhooks(remaining);
-      if (selectedId === webhook.id) {
-        setSelectedId(remaining[0]?.id ?? "");
+      if (selectedIdRef.current === webhook.id) {
+        const nextSelectedId = remaining[0]?.id ?? "";
+        selectionEpochRef.current += 1;
+        selectedIdRef.current = nextSelectedId;
+        setSelectedId(nextSelectedId);
         setDeliveries([]);
+        setExpanded(null);
       }
     } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : "Failed to delete webhook endpoint");
+      if (deleteOperationRef.current === operation) {
+        setError(e instanceof Error ? e.message : "Failed to delete webhook endpoint");
+      }
     } finally {
-      setDeletingId(null);
+      if (deleteOperationRef.current === operation) {
+        deleteOperationRef.current = null;
+        setDeletingId(null);
+      }
     }
   }
 
