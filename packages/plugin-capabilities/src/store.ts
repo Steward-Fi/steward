@@ -128,12 +128,20 @@ export class CapabilityStore {
     audit: AuditFactory<T> | undefined,
     mutate: (tx: Db) => Promise<T>,
   ): Promise<T> {
-    if (!audit) return this.db.transaction(mutate);
+    const mutateBehindTenantFence = async (tx: Db): Promise<T> => {
+      // Core deletion takes this fence before parent-agent and capability row
+      // locks. Every capability mutation must use the same order so a
+      // capability update cannot hold its row while waiting on a deletion that
+      // is itself waiting to inventory or remove that capability.
+      await tx.execute(sql`SELECT public.steward_lock_tenant_deletion(${tenantId})`);
+      return mutate(tx);
+    };
+    if (!audit) return this.db.transaction(mutateBehindTenantFence);
     if (!this.auditedTransaction) {
       throw new Error("audited transaction runner is required for capability mutations");
     }
     return this.auditedTransaction(tenantId, async (tx, appendRequiredAudit) => {
-      const result = await mutate(tx as Db);
+      const result = await mutateBehindTenantFence(tx as Db);
       const event = audit(result);
       if (event) await appendRequiredAudit(event);
       return result;
