@@ -52,7 +52,7 @@ describe("loadConfig (SEC-188)", () => {
 
     const config = loadConfig();
     expect(config.agents).toEqual([]);
-    expect(config.steward.apiUrl).toBe("http://localhost:3000");
+    expect(config.steward.apiUrl).toBe("http://localhost:3200");
   });
 
   it("loads a valid config file", () => {
@@ -64,4 +64,85 @@ describe("loadConfig (SEC-188)", () => {
     expect(config.webhookSecret).toBe("s");
     expect(config.dryRun).toBe(true);
   });
+
+  it("permits a blank API key in webhook-only mode", () => {
+    const path = join(dir, "agent-trader.config.json");
+    writeFileSync(
+      path,
+      JSON.stringify({
+        webhookSecret: "s",
+        steward: { apiKey: "   " },
+        agents: [validAgent({ enabled: false })],
+      }),
+    );
+    process.env.CONFIG_PATH = path;
+
+    expect(loadConfig().steward.apiKey).toBe("   ");
+  });
+
+  it.each([
+    undefined,
+    "",
+    "   ",
+  ])("fails fast when an enabled agent has a missing or blank API key (%p)", (apiKey) => {
+    const path = join(dir, "agent-trader.config.json");
+    writeFileSync(
+      path,
+      JSON.stringify({
+        webhookSecret: "s",
+        steward: apiKey === undefined ? {} : { apiKey },
+        agents: [validAgent()],
+      }),
+    );
+    process.env.CONFIG_PATH = path;
+
+    expect(() => loadConfig()).toThrow(
+      "Config error: steward.apiKey is required when any agent is enabled",
+    );
+  });
+
+  it("accepts an enabled agent with a nonblank API key", () => {
+    const path = join(dir, "agent-trader.config.json");
+    writeFileSync(
+      path,
+      JSON.stringify({
+        webhookSecret: "s",
+        steward: { apiKey: "test-key" },
+        agents: [validAgent()],
+      }),
+    );
+    process.env.CONFIG_PATH = path;
+
+    expect(loadConfig().steward.apiKey).toBe("test-key");
+  });
+
+  it("rejects a blank environment override for an enabled agent", () => {
+    const path = join(dir, "agent-trader.config.json");
+    writeFileSync(
+      path,
+      JSON.stringify({
+        webhookSecret: "s",
+        steward: { apiKey: "file-key" },
+        agents: [validAgent()],
+      }),
+    );
+    process.env.CONFIG_PATH = path;
+    process.env.STEWARD_API_KEY = "   ";
+
+    expect(() => loadConfig()).toThrow(
+      "Config error: steward.apiKey is required when any agent is enabled",
+    );
+  });
 });
+
+function validAgent(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    agentId: "agent-1",
+    tokenAddress: "0x0000000000000000000000000000000000000001",
+    strategy: "manual",
+    intervalSeconds: 60,
+    enabled: true,
+    params: {},
+    ...overrides,
+  };
+}
