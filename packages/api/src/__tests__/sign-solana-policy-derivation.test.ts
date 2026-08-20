@@ -109,11 +109,10 @@ describe("sign-solana — parser-derived policy wiring", () => {
     expect(guard).toBeGreaterThanOrEqual(0);
     // Whitespace-normalized so formatter rewrapping does not break the wiring
     // assertion: the envelope stays conditioned on the guard, and (SEC-163)
-    // every other parsed shape must carry the parsed-sign attestation. Only
-    // the separately audited unsafe-blind route may opt into blind signing.
+    // every other shape must carry the explicit blind-sign attestation.
     const normalized = route.replace(/\s+/g, " ");
     const envelopeSpread = normalized.indexOf(
-      "isSingleNativeTransfer ? { expectedTo: toAddress, expectedValue: txValue } : { allowParsedSign: true }",
+      "isSingleNativeTransfer ? { expectedTo: toAddress, expectedValue: txValue } : { allowBlindSign: true }",
     );
     expect(envelopeSpread).toBeGreaterThanOrEqual(0);
     expect(route).toContain('instructionType === "system:Transfer"');
