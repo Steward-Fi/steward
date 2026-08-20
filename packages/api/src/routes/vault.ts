@@ -2382,11 +2382,22 @@ function accountingEffectsPendingResponse(
  * irreversible Monero relay. Agent deletion takes FOR UPDATE on the same row,
  * so it cannot cascade the anchor while wallet-rpc may still submit it.
  */
-async function withMoneroRelayLock<T>(agentId: string, fn: () => Promise<T>): Promise<T> {
+async function withMoneroRelayLock<T>(
+  agentId: string,
+  fn: () => Promise<T>,
+  onBackendForTests?: (pid: number) => void,
+): Promise<T> {
   if (process.env.STEWARD_DB_MODE === "pglite" || process.env.STEWARD_PGLITE_MEMORY === "true") {
     return fn();
   }
   return db.transaction(async (tx) => {
+    if (onBackendForTests) {
+      const [backend] = await tx.execute(sql<{ pid: number }>`select pg_backend_pid()::int as pid`);
+      if (!backend) throw new Error("Monero relay lock backend is unavailable");
+      const backendPid = Number(backend.pid);
+      if (!Number.isInteger(backendPid)) throw new Error("Monero relay lock backend is invalid");
+      onBackendForTests(backendPid);
+    }
     await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${agentId}, 0))`);
     const locked = await tx
       .select({ id: agents.id })
