@@ -378,10 +378,11 @@ async function ensureWorkerInit(env: Env): Promise<void> {
     // of surfacing at first token sign/verify.
     validateWorkerSecurityEnv();
     const expectedRole = env.STEWARD_APP_DATABASE_ROLE?.trim();
-    if (!expectedRole) {
-      throw new Error("STEWARD_APP_DATABASE_ROLE is required on Workers");
+    const expectedPlatformRole = env.STEWARD_PLATFORM_DATABASE_ROLE?.trim();
+    if (!expectedRole || !expectedPlatformRole) {
+      throw new Error("STEWARD database role expectations are required on Workers");
     }
-    await assertRlsDeploymentSafety(getDb(), { expectedRole });
+    await assertRlsDeploymentSafety(getDb(), { expectedRole, expectedPlatformRole });
     const redisOk = await initRedis(env);
     // Auth stores (passkey challenges, magic-link tokens, SIWE/SIWS nonces)
     // must be initialized too — without this they stay on the lazy memory

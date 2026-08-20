@@ -30,7 +30,8 @@ import { initProxyRedis, shutdownProxyRedis } from "./middleware/redis-enforceme
 
 // ─── Ensure DB is initialised ────────────────────────────────────────────────
 
-import { createDb, getDatabaseUrl } from "@stwd/db";
+import { createDb, getDatabaseUrl, getDb } from "@stwd/db";
+import { assertProxyRlsReady } from "./startup-rls";
 
 validateJwtSecretEnv();
 
@@ -40,6 +41,12 @@ if (!dbUrl) {
   process.exit(1);
 }
 createDb(dbUrl);
+try {
+  await assertProxyRlsReady(getDb());
+} catch (error) {
+  console.error("⛔ Tenant RLS readiness failed", redactedThrownDiagnostics(error));
+  process.exit(1);
+}
 
 // ─── App ─────────────────────────────────────────────────────────────────────
 
