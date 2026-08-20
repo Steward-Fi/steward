@@ -3224,6 +3224,82 @@ vaultRoutes.post("/:agentId/actions/transfer", async (c) => {
       400,
     );
   }
+  const idempotencyResponse = requireBroadcastActionIdempotency(
+    c,
+    transfer.broadcast,
+    "Broadcast transfer actions",
+  );
+  if (idempotencyResponse) return idempotencyResponse;
+  const solanaRecoveryBinding =
+    isSolanaActionChain(transfer.chainId) && transfer.broadcast
+      ? createSolanaTransferRecoveryBinding(c, {
+          tenantId,
+          agentId,
+          chainId: transfer.chainId,
+          to: transfer.to,
+          token: transfer.token,
+          value: transfer.value,
+          referenceId: transfer.referenceId,
+        })
+      : null;
+  const findExistingTransferAction = async () => {
+    const [byIdempotencyKey, byReferenceId] = await Promise.all([
+      solanaRecoveryBinding
+        ? db
+            .select()
+            .from(transactions)
+            .where(
+              and(
+                eq(transactions.id, solanaRecoveryBinding.txId),
+                eq(transactions.agentId, agentId),
+                eq(transactions.actionType, "transfer"),
+              ),
+            )
+            .limit(1)
+            .then((rows) => rows[0] ?? null)
+        : Promise.resolve(null),
+      findActionByReferenceId(agentId, "transfer", transfer.referenceId),
+    ]);
+    if (byIdempotencyKey && byReferenceId && byIdempotencyKey.id !== byReferenceId.id) {
+      return { conflict: true as const };
+    }
+    const existing = byIdempotencyKey ?? byReferenceId;
+    if (existing && solanaRecoveryBinding) {
+      const metadata = readSolanaRecoveryMetadata(existing.actionPayload);
+      if (
+        existing.id !== solanaRecoveryBinding.txId ||
+        metadata.idempotencyKeyDigest !== solanaRecoveryBinding.idempotencyKeyDigest ||
+        metadata.requestDigest !== solanaRecoveryBinding.requestDigest
+      ) {
+        return { conflict: true as const };
+      }
+    }
+    return { existing };
+  };
+  const existingLookup = await findExistingTransferAction();
+  if ("conflict" in existingLookup) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Idempotency-Key and referenceId identify different requests" },
+      409,
+    );
+  }
+  const existingAction = existingLookup.existing;
+  if (existingAction) {
+    if (solanaRecoveryBinding) {
+      return solanaLostOwnershipResponse(c, existingAction.id, agentId, "transfer");
+    }
+    return c.json<ApiResponse>({
+      ok: existingAction.status !== "rejected" && existingAction.status !== "failed",
+      error:
+        existingAction.status === "rejected"
+          ? "Transfer rejected by policy"
+          : existingAction.status === "failed"
+            ? "Transfer failed"
+            : undefined,
+      data: transferActionResponseFromTransaction(existingAction),
+    });
+  }
+
   const sponsorship = await resolveGasSponsorshipRequest({
     tenantId,
     agentId,
@@ -3248,53 +3324,6 @@ vaultRoutes.post("/:agentId/actions/transfer", async (c) => {
       : transfer.sponsor
         ? { requested: true, sponsored: false }
         : undefined;
-  const idempotencyResponse = requireBroadcastActionIdempotency(
-    c,
-    transfer.broadcast,
-    "Broadcast transfer actions",
-  );
-  if (idempotencyResponse) return idempotencyResponse;
-  const solanaRecoveryBinding =
-    isSolanaActionChain(transfer.chainId) && transfer.broadcast
-      ? createSolanaTransferRecoveryBinding(c, {
-          tenantId,
-          agentId,
-          chainId: transfer.chainId,
-          to: transfer.to,
-          token: transfer.token,
-          value: transfer.value,
-          referenceId: transfer.referenceId,
-        })
-      : null;
-  const existingAction = await findActionByReferenceId(agentId, "transfer", transfer.referenceId);
-  if (existingAction) {
-    if (solanaRecoveryBinding) {
-      const metadata = readSolanaRecoveryMetadata(existingAction.actionPayload);
-      if (
-        metadata.idempotencyKeyDigest !== solanaRecoveryBinding.idempotencyKeyDigest ||
-        metadata.requestDigest !== solanaRecoveryBinding.requestDigest
-      ) {
-        return c.json<ApiResponse>(
-          {
-            ok: false,
-            error: "Idempotency-Key was already used for a different Solana transaction",
-          },
-          409,
-        );
-      }
-      return solanaLostOwnershipResponse(c, existingAction.id, agentId, "transfer");
-    }
-    return c.json<ApiResponse>({
-      ok: existingAction.status !== "rejected" && existingAction.status !== "failed",
-      error:
-        existingAction.status === "rejected"
-          ? "Transfer rejected by policy"
-          : existingAction.status === "failed"
-            ? "Transfer failed"
-            : undefined,
-      data: transferActionResponseFromTransaction(existingAction),
-    });
-  }
 
   const isTokenTransfer = transfer.token !== "native";
   const isSolanaTransfer = isSolanaActionChain(transfer.chainId);
@@ -3371,26 +3400,16 @@ vaultRoutes.post("/:agentId/actions/transfer", async (c) => {
   }
 
   return withAgentSpendLock(agentId, async () => {
-    const lockedExistingAction = await findActionByReferenceId(
-      agentId,
-      "transfer",
-      transfer.referenceId,
-    );
+    const lockedLookup = await findExistingTransferAction();
+    if ("conflict" in lockedLookup) {
+      return c.json<ApiResponse>(
+        { ok: false, error: "Idempotency-Key and referenceId identify different requests" },
+        409,
+      );
+    }
+    const lockedExistingAction = lockedLookup.existing;
     if (lockedExistingAction) {
       if (solanaRecoveryBinding) {
-        const metadata = readSolanaRecoveryMetadata(lockedExistingAction.actionPayload);
-        if (
-          metadata.idempotencyKeyDigest !== solanaRecoveryBinding.idempotencyKeyDigest ||
-          metadata.requestDigest !== solanaRecoveryBinding.requestDigest
-        ) {
-          return c.json<ApiResponse>(
-            {
-              ok: false,
-              error: "Idempotency-Key was already used for a different Solana transaction",
-            },
-            409,
-          );
-        }
         return solanaLostOwnershipResponse(c, lockedExistingAction.id, agentId, "transfer");
       }
       return c.json<ApiResponse>({
@@ -4094,6 +4113,36 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
       409,
     );
   }
+  if (isSolana && queuedSolanaSigningMode === "parsed") {
+    if (!transactionRow.data) {
+      return c.json<ApiResponse>(
+        { ok: false, error: "Approved parsed Solana transaction blob is unavailable" },
+        409,
+      );
+    }
+    try {
+      assertQueuedParsedSolanaIntent({
+        tenantId,
+        agentId,
+        transaction: transactionRow.data,
+        chainId: transactionRow.chainId,
+        toAddress: transactionRow.toAddress,
+        value: transactionRow.value,
+        metadata: approvalRecoveryMetadata,
+      });
+    } catch (error) {
+      return c.json<ApiResponse>(
+        {
+          ok: false,
+          error:
+            error instanceof Error
+              ? error.message
+              : "Approved parsed Solana transaction failed policy revalidation",
+        },
+        409,
+      );
+    }
+  }
   if (
     isSolana &&
     pendingApproval.status === "approved" &&
@@ -4637,9 +4686,11 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
             transaction: transactionRow.data,
             chainId: transactionRow.chainId,
             broadcast: shouldBroadcast,
-            ...(isSolanaTokenTransfer || queuedSolanaSigningMode !== null
-              ? { allowBlindSign: true }
-              : { expectedTo: transactionRow.toAddress, expectedValue: transactionRow.value }),
+            ...(isSolanaTokenTransfer || queuedSolanaSigningMode === "parsed"
+              ? { allowParsedSign: true }
+              : queuedSolanaSigningMode === "blind"
+                ? { allowBlindSign: true }
+                : { expectedTo: transactionRow.toAddress, expectedValue: transactionRow.value }),
             onBroadcastPrepared: checkpoint,
           });
           txHash = result.signature;
@@ -8663,6 +8714,48 @@ function solanaParsedEffects(
       amount: transfer.amount,
     })),
   };
+}
+
+function assertQueuedParsedSolanaIntent(input: {
+  tenantId: string;
+  agentId: string;
+  transaction: string;
+  chainId: number;
+  toAddress: string | null;
+  value: string | null;
+  metadata: Record<string, unknown>;
+}): void {
+  const summary = parseSolanaTransaction(input.transaction);
+  assertSolanaPriorityFeeWithinCap(summary);
+  const derived = deriveSolanaPolicyFields(summary);
+  if (!derived.fullyParsed || !input.toAddress || input.value === null) {
+    throw new SolanaExecutionLeaseConflictError(
+      "Approved parsed Solana transaction is no longer fully policy-verifiable",
+    );
+  }
+  const parsedEffects = solanaParsedEffects(derived);
+  const expectedDigest = solanaCallerIntentDigest({
+    route: "sign-solana",
+    tenantId: input.tenantId,
+    agentId: input.agentId,
+    chainId: input.chainId,
+    broadcast: input.metadata.broadcast !== false,
+    signingMode: "parsed",
+    to: input.toAddress,
+    value: input.value,
+    messageDigest: normalizedSolanaMessageDigest(input.transaction),
+    parsedEffects,
+  });
+  if (
+    input.metadata.blindSigned !== false ||
+    canonicalJsonStringify(input.metadata.parsedEffects) !==
+      canonicalJsonStringify(parsedEffects) ||
+    input.metadata.requestDigest !== expectedDigest
+  ) {
+    throw new SolanaExecutionLeaseConflictError(
+      "Approved parsed Solana transaction no longer matches its reviewed policy effects",
+    );
+  }
 }
 
 function createSolanaTransferRecoveryBinding(

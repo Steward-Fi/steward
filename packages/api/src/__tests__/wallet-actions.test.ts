@@ -753,7 +753,7 @@ describe("wallet transfer actions", () => {
       });
       throw new ExternalBroadcastOutcomeUnknownError(signature);
     };
-    const request = (value = "123", referenceId = "durable-spl-reference") =>
+    const request = (value = "123", referenceId?: string) =>
       app.request(`/vault/${SOLANA_AGENT_ID}/actions/transfer`, {
         method: "POST",
         headers: { "content-type": "application/json", "Idempotency-Key": "durable-spl" },
@@ -775,6 +775,10 @@ describe("wallet transfer actions", () => {
         ok: false,
         data: { txHash: signature, reconciliationRequired: true },
       });
+      await getDb()
+        .update(policies)
+        .set({ enabled: false })
+        .where(eq(policies.agentId, SOLANA_AGENT_ID));
       const replay = await request();
       expect(replay.status).toBe(202);
       expect(signCalls).toBe(1);
@@ -798,6 +802,10 @@ describe("wallet transfer actions", () => {
         recentBlockhash: "11111111111111111111111111111111",
       });
     } finally {
+      await getDb()
+        .update(policies)
+        .set({ enabled: true })
+        .where(eq(policies.agentId, SOLANA_AGENT_ID));
       context.vault.buildSolanaSplTransferTransaction = originalBuild;
       context.vault.signSolanaTransaction = originalSign;
     }

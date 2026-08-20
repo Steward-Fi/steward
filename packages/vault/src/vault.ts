@@ -3095,7 +3095,9 @@ export class Vault {
    *
    * Works for both multi-wallet agents (new) and legacy Solana-only agents.
    */
-  async signSolanaTransaction(request: SignSolanaTransactionRequest): Promise<{
+  async signSolanaTransaction(
+    request: SignSolanaTransactionRequest & { allowParsedSign?: boolean },
+  ): Promise<{
     signature: string;
     broadcast: boolean;
     chainId: number;
@@ -3127,15 +3129,17 @@ export class Vault {
     // approved the transaction. Checked after the signing freeze (a freeze
     // must still report as a freeze) and before any key material is touched.
     if (request.expectedTo === undefined && request.expectedValue === undefined) {
-      if (request.allowBlindSign !== true) {
+      if (request.allowBlindSign !== true && request.allowParsedSign !== true) {
         throw new Error(
-          "Solana transaction signing without a policy envelope requires allowBlindSign: true " +
-            "(caller attestation that edge policy approved the transaction)",
+          "Solana transaction signing without a policy envelope requires allowParsedSign: true " +
+            "or allowBlindSign: true from the caller",
         );
       }
-      console.warn(
-        `[Vault] BLIND Solana sign (no policy envelope, caller-attested): tenant=${request.tenantId} agent=${request.agentId} chainId=${request.chainId ?? 101} broadcast=${request.broadcast !== false}`,
-      );
+      if (request.allowBlindSign === true) {
+        console.warn(
+          `[Vault] BLIND Solana sign (no policy envelope, caller-attested): tenant=${request.tenantId} agent=${request.agentId} chainId=${request.chainId ?? 101} broadcast=${request.broadcast !== false}`,
+        );
+      }
     }
 
     // Resolve Solana key: prefer encryptedChainKeys (multi-wallet), fall back to
