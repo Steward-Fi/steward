@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import walletConfig from "../../playwright.wallets.config";
@@ -18,7 +18,11 @@ import {
 import { METAMASK_CACHE_ID } from "./setup/metamask/metamask.setup";
 import { PHANTOM_CACHE_ID } from "./setup/phantom/phantom.setup";
 import { withWalletBrowserProfile } from "./wallet-browser-profile";
-import { writeWalletCacheManifest } from "./wallet-cache-provenance";
+import {
+  assertWalletCacheIdentity,
+  walletCacheContentSha256,
+  writeWalletCacheManifest,
+} from "./wallet-cache-provenance";
 
 const temporaryDirectories: string[] = [];
 
@@ -222,12 +226,11 @@ describe("wallet extension E2E contract", () => {
         process.execPath,
         fixture,
         "harness",
+        "term-tree",
         cwd,
-        "linger",
-        "200",
         childPidFile,
-        childTermFile,
         descendantPidFile,
+        childTermFile,
         descendantTermFile,
       ],
       { cwd, stderr: "pipe", stdout: "pipe" },
@@ -258,12 +261,11 @@ describe("wallet extension E2E contract", () => {
         process.execPath,
         fixture,
         "harness",
+        "clean-tree",
         cwd,
-        "success",
-        "200",
-        join(cwd, "child-pid"),
-        join(cwd, "child-term"),
+        join(cwd, "unused-child-pid"),
         descendantPidFile,
+        join(cwd, "unused-child-term"),
         descendantTermFile,
       ],
       { cwd, stderr: "pipe", stdout: "pipe" },
@@ -286,14 +288,12 @@ describe("wallet extension E2E contract", () => {
     try {
       for (const name of WALLET_E2E_CREDENTIAL_NAMES) process.env[name] = `${name}-cache-secret`;
       const childValues = await withWalletCredentialsRemoved(async () => {
-        const child = Bun.spawn(
-          [
-            "bun",
-            "-e",
-            `console.log(JSON.stringify(${JSON.stringify(WALLET_E2E_CREDENTIAL_NAMES)}.map((name) => process.env[name])))`,
-          ],
-          { env: process.env, stderr: "pipe", stdout: "pipe" },
-        );
+        const fixture = join(import.meta.dir, "process-group-fixture.ts");
+        const child = Bun.spawn([process.execPath, fixture, "wallet-environment"], {
+          env: process.env,
+          stderr: "pipe",
+          stdout: "pipe",
+        });
         const [stdout, stderr, exitCode] = await Promise.all([
           new Response(child.stdout).text(),
           new Response(child.stderr).text(),
@@ -457,6 +457,33 @@ describe("wallet extension E2E contract", () => {
     await symlink(external, join(requirements[0].path, "cache-ready"));
     await expect(assertWalletCaches(cwd)).rejects.toThrow("Missing Synpress cache for MetaMask");
   }, 20_000);
+
+  test("rejects symlinked cache files and manifests without following them", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "steward-wallet-cache-links-"));
+    temporaryDirectories.push(cwd);
+    const cache = join(cwd, "cache");
+    const outside = join(cwd, "outside");
+    await mkdir(cache);
+    await mkdir(outside);
+    const outsideFile = join(outside, "credential-bearing-state");
+    await writeFile(outsideFile, "must not be read through a cache link");
+    await symlink(outsideFile, join(cache, "linked-state"));
+    await expect(walletCacheContentSha256(cache)).rejects.toThrow();
+
+    await rm(join(cache, "linked-state"));
+    await writeFile(join(cache, "cache-ready"), "ready");
+    const identity = {
+      wallet: "metamask" as const,
+      cacheId: "cache-id",
+      extensionVersion: "1.0.0",
+      extensionSha256: "0".repeat(64),
+    };
+    await writeWalletCacheManifest(cache, identity);
+    const realManifest = join(outside, "manifest");
+    await rename(join(cache, ".steward-wallet-cache.json"), realManifest);
+    await symlink(realManifest, join(cache, ".steward-wallet-cache.json"));
+    await expect(assertWalletCacheIdentity(cache, identity)).rejects.toThrow();
+  });
 
   test("collects only the two wallet specs and excludes them from the default suite", async () => {
     const walletList = Bun.spawnSync(

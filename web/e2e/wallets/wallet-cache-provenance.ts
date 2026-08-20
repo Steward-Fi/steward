@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { constants } from "node:fs";
+import { type BigIntStats, constants } from "node:fs";
 import { lstat, open, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { join, relative } from "node:path";
 
@@ -17,14 +17,41 @@ interface WalletCacheManifest extends WalletCacheIdentity {
   contentSha256: string;
 }
 
-async function readRegularFile(path: string, label: string): Promise<Buffer> {
-  const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+function sameFile(left: BigIntStats, right: BigIntStats): boolean {
+  return left.dev === right.dev && left.ino === right.ino;
+}
+
+function sameFileVersion(left: BigIntStats, right: BigIntStats): boolean {
+  return (
+    sameFile(left, right) &&
+    left.size === right.size &&
+    left.mtimeNs === right.mtimeNs &&
+    left.ctimeNs === right.ctimeNs
+  );
+}
+
+async function readStableRegularFile(
+  path: string,
+  label: string,
+  expected?: BigIntStats,
+): Promise<Buffer> {
+  if (!Number.isSafeInteger(constants.O_NOFOLLOW) || constants.O_NOFOLLOW <= 0) {
+    throw new Error("Wallet cache verification requires O_NOFOLLOW support");
+  }
+
+  // O_NONBLOCK prevents a path swap to a FIFO from blocking the verifier in open().
+  const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
-    const metadata = await handle.stat();
-    if (!metadata.isFile()) {
-      throw new Error("Wallet cache entry is not a regular file: " + label);
+    const before = (await handle.stat({ bigint: true })) as BigIntStats;
+    if (!before.isFile() || (expected && !sameFile(expected, before))) {
+      throw new Error("Wallet cache entry is not a stable regular file: " + label);
     }
-    return await handle.readFile();
+    const content = await handle.readFile();
+    const after = (await handle.stat({ bigint: true })) as BigIntStats;
+    if (!sameFileVersion(before, after) || BigInt(content.byteLength) !== before.size) {
+      throw new Error("Wallet cache entry changed while it was being verified: " + label);
+    }
+    return content;
   } finally {
     await handle.close();
   }
@@ -38,14 +65,14 @@ async function updateTreeHash(root: string, path: string, hash: ReturnType<typeo
     if (path === root && entry.name === WALLET_CACHE_MANIFEST) continue;
     const absolute = join(path, entry.name);
     const name = relative(root, absolute);
-    const metadata = await lstat(absolute);
+    const metadata = (await lstat(absolute, { bigint: true })) as BigIntStats;
     if (metadata.isDirectory()) {
       hash.update("d\0" + name + "\0");
       await updateTreeHash(root, absolute, hash);
     } else if (metadata.isFile()) {
-      const contents = await readRegularFile(absolute, name);
-      hash.update("f\0" + name + "\0" + contents.byteLength + "\0");
-      hash.update(contents);
+      const content = await readStableRegularFile(absolute, name, metadata);
+      hash.update("f\0" + name + "\0" + metadata.size.toString() + "\0");
+      hash.update(content);
     } else {
       throw new Error("Unsupported wallet cache entry: " + name);
     }
@@ -79,7 +106,7 @@ export async function assertWalletCacheIdentity(
 ): Promise<void> {
   const manifestPath = join(root, WALLET_CACHE_MANIFEST);
   const manifest = JSON.parse(
-    (await readRegularFile(manifestPath, WALLET_CACHE_MANIFEST)).toString("utf8"),
+    (await readStableRegularFile(manifestPath, WALLET_CACHE_MANIFEST)).toString("utf8"),
   ) as Partial<WalletCacheManifest>;
   if (
     manifest.schemaVersion !== 1 ||
