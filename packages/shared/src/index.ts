@@ -599,7 +599,8 @@ export type TxStatus =
   | "broadcast"
   | "confirmed"
   | "failed"
-  | "outcome_unknown";
+  | "outcome_unknown"
+  | "retired";
 
 export interface SignRequest {
   agentId: string;
@@ -689,6 +690,7 @@ export interface SignSolanaTransactionRequest {
   onBroadcastPrepared?: (checkpoint: {
     signature: string;
     recentBlockhash: string;
+    blockhashKind: "recent" | "durable_nonce" | "unknown";
   }) => Promise<void>;
 }
 

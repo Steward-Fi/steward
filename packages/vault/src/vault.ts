@@ -103,6 +103,7 @@ import {
 import {
   assertParsedSolanaTransferMatches,
   assertSolanaPriorityFeeWithinCap,
+  classifySolanaBlockhashKind,
   isVersionedTransactionBytes,
   parseSolanaTransaction,
 } from "./solana-instructions";
@@ -462,6 +463,7 @@ export interface SignTransactionOptions {
   onSolanaBroadcastPrepared?: (checkpoint: {
     signature: string;
     recentBlockhash: string;
+    blockhashKind: "recent" | "durable_nonce" | "unknown";
   }) => Promise<void>;
   /**
    * Ownership token for a gateway-staged Solana recovery anchor. When set,
@@ -3081,6 +3083,12 @@ export class Vault {
     broadcast: boolean;
     chainId: number;
     caip2?: string;
+    /** Public deterministic signature of the exact signed artifact. */
+    artifactSignature?: string;
+    /** Blockhash embedded in the exact signed artifact. */
+    recentBlockhash?: string;
+    /** Byte-derived lifetime contract for the embedded blockhash. */
+    blockhashKind?: "recent" | "durable_nonce" | "unknown";
   }> {
     const db = getDb();
 
@@ -3188,6 +3196,7 @@ export class Vault {
       SendTransactionError,
     } = await import("@solana/web3.js");
     const txBytes = Uint8Array.from(atob(request.transaction), (c) => c.charCodeAt(0));
+    const blockhashKind = classifySolanaBlockhashKind(request.transaction);
 
     const requireEnvelope = (): { from: string; to: string; lamports: bigint } | null => {
       if (request.expectedTo === undefined && request.expectedValue === undefined) return null;
@@ -3247,7 +3256,11 @@ export class Vault {
     if (shouldBroadcast) {
       // Persist the deterministic signature before the first external write.
       // A checkpoint failure aborts safely before sendRawTransaction.
-      await request.onBroadcastPrepared?.({ signature: preparedSignature, recentBlockhash });
+      await request.onBroadcastPrepared?.({
+        signature: preparedSignature,
+        recentBlockhash,
+        blockhashKind,
+      });
       const connection = new Connection(rpcUrl, "confirmed");
       try {
         const sig = await connection.sendRawTransaction(signedBytes, {
@@ -3278,6 +3291,9 @@ export class Vault {
         broadcast: true,
         chainId,
         caip2: toCaip2(chainId),
+        artifactSignature: preparedSignature,
+        recentBlockhash,
+        blockhashKind,
       };
     }
 
@@ -3288,14 +3304,20 @@ export class Vault {
       broadcast: false,
       chainId,
       caip2: toCaip2(chainId),
+      artifactSignature: preparedSignature,
+      recentBlockhash,
+      blockhashKind,
     };
   }
 
-  async reconcileSolanaBroadcast(input: {
+  async inspectSolanaSignedArtifact(input: {
     signature: string;
     recentBlockhash: string;
     chainId?: number;
-  }): Promise<"confirmed" | "broadcast" | "failed" | "outcome_unknown"> {
+  }): Promise<
+    | { result: "landed_confirmed" | "landed_broadcast" | "landed_failed" }
+    | { result: "absent_live" | "absent_expired" }
+  > {
     const { Connection } = await import("@solana/web3.js");
     const rpcUrl = this.config.rpcUrl ?? resolveSolanaRpc(input.chainId ?? 101);
     const connection = new Connection(rpcUrl, "confirmed");
@@ -3304,16 +3326,35 @@ export class Vault {
     });
     const status = response.value[0];
     if (status) {
-      if (status.err !== null) return "failed";
+      if (status.err !== null) return { result: "landed_failed" };
       if (status.confirmationStatus === "confirmed" || status.confirmationStatus === "finalized") {
-        return "confirmed";
+        return { result: "landed_confirmed" };
       }
-      return "broadcast";
+      return { result: "landed_broadcast" };
     }
     const validity = await connection.isBlockhashValid(input.recentBlockhash, {
       commitment: "confirmed",
     });
-    return validity.value ? "outcome_unknown" : "failed";
+    return { result: validity.value ? "absent_live" : "absent_expired" };
+  }
+
+  async reconcileSolanaBroadcast(input: {
+    signature: string;
+    recentBlockhash: string;
+    chainId?: number;
+  }): Promise<"confirmed" | "broadcast" | "failed" | "outcome_unknown"> {
+    const inspection = await this.inspectSolanaSignedArtifact(input);
+    switch (inspection.result) {
+      case "landed_confirmed":
+        return "confirmed";
+      case "landed_broadcast":
+        return "broadcast";
+      case "landed_failed":
+      case "absent_expired":
+        return "failed";
+      case "absent_live":
+        return "outcome_unknown";
+    }
   }
 
   /**

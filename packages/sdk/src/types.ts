@@ -667,7 +667,8 @@ export type TxStatus =
   | "broadcast"
   | "confirmed"
   | "failed"
-  | "outcome_unknown";
+  | "outcome_unknown"
+  | "retired";
 
 export interface SignRequest {
   agentId: string;

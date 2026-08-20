@@ -396,6 +396,7 @@ export async function signSolanaTransaction(
     onBroadcastPrepared?: (checkpoint: {
       signature: string;
       recentBlockhash: string;
+      blockhashKind: "recent";
     }) => Promise<void>;
   } = {},
 ): Promise<string> {
@@ -457,7 +458,11 @@ export async function signSolanaTransaction(
   if (!options.onBroadcastPrepared) {
     throw new Error("Solana broadcast requires a durable onBroadcastPrepared checkpoint");
   }
-  await options.onBroadcastPrepared({ signature: preparedSignature, recentBlockhash: blockhash });
+  await options.onBroadcastPrepared({
+    signature: preparedSignature,
+    recentBlockhash: blockhash,
+    blockhashKind: "recent",
+  });
   try {
     const signature = await connection.sendRawTransaction(signedBytes, {
       skipPreflight: false,

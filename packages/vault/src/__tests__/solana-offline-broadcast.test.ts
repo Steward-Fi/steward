@@ -109,7 +109,9 @@ describe("signSolanaTransaction broadcast gate", () => {
     const sender = generateSolanaKeypair();
     const recipient = generateSolanaKeypair().publicKey;
 
-    let checkpoint: { signature: string; recentBlockhash: string } | undefined;
+    let checkpoint:
+      | { signature: string; recentBlockhash: string; blockhashKind: "recent" }
+      | undefined;
     const result = await signSolanaTransaction(sender.secretKey, recipient, 50_000n, RPC_URL, {
       broadcast: true,
       onBroadcastPrepared: async (prepared) => {
@@ -124,7 +126,11 @@ describe("signSolanaTransaction broadcast gate", () => {
     const submitted = Transaction.from(send.mock.calls[0][0] as Uint8Array);
     // The caller gets the deterministic signature of the submitted bytes.
     expect(result).toBe(bs58.encode(submitted.signature as Uint8Array));
-    expect(checkpoint).toEqual({ signature: result, recentBlockhash: BLOCKHASH });
+    expect(checkpoint).toEqual({
+      signature: result,
+      recentBlockhash: BLOCKHASH,
+      blockhashKind: "recent",
+    });
     expect(send.mock.calls[0][1]).toMatchObject({ maxRetries: 0 });
     assertSolanaTransferTransactionMatches(submitted, {
       from: restoreSolanaKeypair(sender.secretKey).publicKey,

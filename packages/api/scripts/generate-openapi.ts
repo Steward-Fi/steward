@@ -39,16 +39,28 @@ const docsDocument = {
     },
   ],
 };
-const json = `${JSON.stringify(docsDocument, null, 2)}\n`;
+const runtimeJson = `${JSON.stringify(document, null, 2)}\n`;
+const docsJson = `${JSON.stringify(docsDocument, null, 2)}\n`;
 
-// The route definitions in packages/api are the source of truth for the schema.
-// This emitted spec is the docs-site copy consumed by Mintlify (and the SDK type
-// generator); it is identical to the runtime spec except for the `servers` block
-// above, which is overridden for the docs-playground use case.
-const specPath = join(import.meta.dir, "..", "..", "..", "docs", "api-reference", "openapi.json");
-mkdirSync(dirname(specPath), { recursive: true });
-writeFileSync(specPath, json);
-console.log(`[openapi] wrote ${specPath}`);
+// The route definitions in packages/api are the source of truth. Emit both the
+// runtime document and the Mintlify copy in one operation so neither committed
+// artifact can drift; only the docs copy overrides the `servers` block.
+const runtimeSpecPath = join(import.meta.dir, "..", "..", "..", "docs", "openapi.json");
+const docsSpecPath = join(
+  import.meta.dir,
+  "..",
+  "..",
+  "..",
+  "docs",
+  "api-reference",
+  "openapi.json",
+);
+mkdirSync(dirname(runtimeSpecPath), { recursive: true });
+mkdirSync(dirname(docsSpecPath), { recursive: true });
+writeFileSync(runtimeSpecPath, runtimeJson);
+writeFileSync(docsSpecPath, docsJson);
+console.log(`[openapi] wrote ${runtimeSpecPath}`);
+console.log(`[openapi] wrote ${docsSpecPath}`);
 
 const pathCount = Object.keys(document.paths ?? {}).length;
 console.log(`[openapi] ${pathCount} documented path(s)`);

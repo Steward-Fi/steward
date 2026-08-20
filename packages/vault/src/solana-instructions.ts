@@ -321,6 +321,26 @@ function readU32LE(data: Uint8Array, offset: number): number {
   );
 }
 
+/**
+ * Classify the message lifetime contract without trusting caller metadata.
+ * Solana durable-nonce transactions are identified by an AdvanceNonceAccount
+ * System Program instruction (u32 discriminator 4) in the first instruction
+ * slot. Anything we cannot resolve is `unknown` and must not use ordinary
+ * recent-blockhash expiry as retirement evidence.
+ */
+export function classifySolanaBlockhashKind(
+  serialized: string,
+): "recent" | "durable_nonce" | "unknown" {
+  const { message } = deserializeSolanaMessage(serialized);
+  const first = normalizeInstructions(message)[0];
+  if (!first) return "unknown";
+  const accountKeys = getStaticAccountKeys(message);
+  if (first.programIdIndex < 0 || first.programIdIndex >= accountKeys.length) return "unknown";
+  if (accountKeys[first.programIdIndex].toBase58() !== SYSTEM_PROGRAM_ID) return "recent";
+  if (first.data.length < 4) return "unknown";
+  return readU32LE(first.data, 0) === 4 ? "durable_nonce" : "recent";
+}
+
 function readU64LE(data: Uint8Array, offset: number): bigint {
   let result = 0n;
   for (let i = 0; i < 8; i++) {

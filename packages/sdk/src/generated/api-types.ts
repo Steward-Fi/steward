@@ -44938,7 +44938,7 @@ export interface paths {
                                 /** @constant */
                                 type: "transfer";
                                 /** @enum {string} */
-                                status: "pending_approval" | "rejected" | "signed" | "broadcast" | "confirmed" | "failed" | "outcome_unknown";
+                                status: "pending_approval" | "rejected" | "signed" | "broadcast" | "confirmed" | "failed" | "outcome_unknown" | "retired";
                                 chainId: number;
                                 to: string;
                                 value: string;
@@ -44979,7 +44979,7 @@ export interface paths {
                                 /** @constant */
                                 type: "transfer";
                                 /** @enum {string} */
-                                status: "pending_approval" | "rejected" | "signed" | "broadcast" | "confirmed" | "failed" | "outcome_unknown";
+                                status: "pending_approval" | "rejected" | "signed" | "broadcast" | "confirmed" | "failed" | "outcome_unknown" | "retired";
                                 chainId: number;
                                 to: string;
                                 value: string;
@@ -45435,7 +45435,7 @@ export interface paths {
                                 /** @constant */
                                 type: "transfer";
                                 /** @enum {string} */
-                                status: "pending_approval" | "rejected" | "signed" | "broadcast" | "confirmed" | "failed" | "outcome_unknown";
+                                status: "pending_approval" | "rejected" | "signed" | "broadcast" | "confirmed" | "failed" | "outcome_unknown" | "retired";
                                 chainId: number;
                                 to: string;
                                 value: string;
@@ -46103,6 +46103,169 @@ export interface paths {
         };
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/vault/{agentId}/transactions/{txId}/retire-signed": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                agentId: string;
+                txId: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Authoritatively retire a signed transaction artifact
+         * @description Requires an owner/admin browser session with recent MFA. Solana retirement succeeds only when the exact deterministic signature is absent from chain history and its byte-classified ordinary blockhash is expired. Durable-nonce and unclassified artifacts remain blocked. Landed artifacts are reconciled instead. Provider uncertainty and unsupported EVM artifacts remain non-terminal.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: {
+                    /** @description Unix seconds, Unix milliseconds, or HTTP/ISO timestamp. Sensitive mutating routes require this or X-Steward-Request-Expires-At when request-expiry or request signatures are enforced. */
+                    "X-Steward-Request-Timestamp"?: string;
+                    /** @description Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced. */
+                    "X-Steward-Request-Expires-At"?: string;
+                    /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
+                    "X-Steward-Signature"?: string;
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
+                    "X-Steward-Signing-Key-Id"?: string;
+                    /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
+                    "Idempotency-Key"?: string;
+                };
+                path: {
+                    agentId: string;
+                    txId: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        reason: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description JSON response */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @constant */
+                            ok: true;
+                            data: {
+                                txId: string;
+                                /** @constant */
+                                status: "retired";
+                                artifactSignature: string;
+                                retiredAt: string;
+                            };
+                        };
+                    };
+                };
+                /** @description JSON response */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @constant */
+                            ok: false;
+                            error: string;
+                        };
+                    };
+                };
+                /** @description JSON response */
+                401: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @constant */
+                            ok: false;
+                            error: string;
+                        };
+                    };
+                };
+                /** @description JSON response */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @constant */
+                            ok: false;
+                            error: string;
+                        };
+                    };
+                };
+                /** @description JSON response */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @constant */
+                            ok: false;
+                            error: string;
+                        };
+                    };
+                };
+                /** @description JSON response */
+                408: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @constant */
+                            ok: false;
+                            error: string;
+                        };
+                    };
+                };
+                /** @description JSON response */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @constant */
+                            ok: false;
+                            error: string;
+                        };
+                    };
+                };
+                /** @description JSON response */
+                502: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @constant */
+                            ok: false;
+                            error: string;
+                        };
+                    };
+                };
+            };
+        };
         delete?: never;
         options?: never;
         head?: never;

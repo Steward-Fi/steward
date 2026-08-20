@@ -396,6 +396,7 @@ describe("vault approval gates (real /approve path)", () => {
         await request.onBroadcastPrepared?.({
           signature: SOLANA_SIGNATURE,
           recentBlockhash: "11111111111111111111111111111111",
+          blockhashKind: "recent",
         });
         throw new ExternalBroadcastOutcomeUnknownError(SOLANA_SIGNATURE);
       },
@@ -416,7 +417,9 @@ describe("vault approval gates (real /approve path)", () => {
       expect(row.actionPayload).toMatchObject({
         type: "transaction",
         recoveryActionType: "transaction",
+        artifactSignature: SOLANA_SIGNATURE,
         recentBlockhash: "11111111111111111111111111111111",
+        blockhashKind: "recent",
       });
       const [approval] = await getDb()
         .select()
@@ -544,6 +547,7 @@ describe("vault approval gates (real /approve path)", () => {
         await request.onBroadcastPrepared?.({
           signature: SOLANA_SIGNATURE,
           recentBlockhash: "11111111111111111111111111111111",
+          blockhashKind: "recent",
         });
         submitted += 1;
         return { signature: SOLANA_SIGNATURE, broadcast: true, chainId: 101 };

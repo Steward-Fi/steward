@@ -472,6 +472,7 @@ beforeAll(async () => {
     });
 
   const { agentRoutes } = await import("../routes/agents");
+  const { vaultRoutes } = await import("../routes/vault");
   tenantApp = new Hono<{ Variables: AppVariables }>();
   tenantApp.use("*", async (c, next) => {
     c.set("tenantId", TENANT_ID);
@@ -482,6 +483,7 @@ beforeAll(async () => {
     await next();
   });
   tenantApp.route("/agents", agentRoutes);
+  tenantApp.route("/vault", vaultRoutes);
   tenantApp.onError((_error, c) => c.json({ ok: false, error: "Internal server error" }, 500));
   ({ platformRoutes } = await import("../routes/platform"));
 });
@@ -820,18 +822,29 @@ describe("agent deletion upstream credential boundary", () => {
     await getDb().delete(capabilityInvocations).where(eq(capabilityInvocations.id, invocationId));
   });
 
-  it("refuses both routed and direct deletion while signed execution is unresolved", async () => {
+  it("retires an authoritatively expired signed Solana artifact before mounted deletion", async () => {
     const agentId = `signed-execution-${crypto.randomUUID()}`;
     const transactionId = crypto.randomUUID();
     await createAgent(agentId);
-    await getDb().insert(transactions).values({
-      id: transactionId,
-      agentId,
-      status: "signed",
-      toAddress: "0x1234567890123456789012345678901234567890",
-      value: "0",
-      chainId: 1,
-    });
+    await getDb()
+      .insert(transactions)
+      .values({
+        id: transactionId,
+        agentId,
+        status: "signed",
+        toAddress: "0x1234567890123456789012345678901234567890",
+        value: "0",
+        chainId: 101,
+        txHash:
+          "4oL4p7QvN3UH7V5wMGZgW5PuzEk4A9LXLHk9RxAoKjDKuLbQBsfXN8kEvKfj5K1oEJa8wFF6RVp2h7pP9w2f51ZV",
+        actionType: "solana_transaction",
+        actionPayload: {
+          artifactSignature:
+            "4oL4p7QvN3UH7V5wMGZgW5PuzEk4A9LXLHk9RxAoKjDKuLbQBsfXN8kEvKfj5K1oEJa8wFF6RVp2h7pP9w2f51ZV",
+          recentBlockhash: "11111111111111111111111111111111",
+          blockhashKind: "recent",
+        },
+      });
 
     const response = await tenantDelete(agentId);
     expect(response.status).toBe(409);
@@ -851,8 +864,27 @@ describe("agent deletion upstream credential boundary", () => {
       expect((directDeleteError as { cause?: { code?: string } }).cause?.code).toBe("55000");
       expect(await getDb().select().from(agents).where(eq(agents.id, agentId))).toHaveLength(1);
     }
-    await getDb().delete(transactions).where(eq(transactions.id, transactionId));
-    expect((await tenantDelete(agentId)).status).toBe(200);
+    const context = await import("../services/context");
+    const originalInspect = context.vault.inspectSolanaSignedArtifact.bind(context.vault);
+    context.vault.inspectSolanaSignedArtifact = async () => ({ result: "absent_expired" });
+    try {
+      const retirement = await tenantApp.request(
+        `/vault/${agentId}/transactions/${transactionId}/retire-signed`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ reason: "retire test-only expired artifact before deletion" }),
+        },
+      );
+      expect(retirement.status).toBe(200);
+      expect(await retirement.json()).toMatchObject({
+        ok: true,
+        data: { txId: transactionId, status: "retired" },
+      });
+      expect((await tenantDelete(agentId)).status).toBe(200);
+    } finally {
+      context.vault.inspectSolanaSignedArtifact = originalInspect;
+    }
   });
 
   it("retains resolved provider evidence and rejects new bindings after deletion", async () => {
