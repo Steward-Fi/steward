@@ -131,9 +131,10 @@ describe("sign-solana — parser-derived policy wiring", () => {
   it("records the spend using the authoritative parsed value", () => {
     const route = routeSlice();
     const evalCall = route.indexOf("await policyEngine.evaluate(policySet");
-    const recordSpend = route.indexOf("recordVaultSpend(agentId, tenantId, txValue, chainId)");
+    const recordSpend = route.indexOf("await tryCompleteSolanaRecoveryEffects({", evalCall);
     expect(evalCall).toBeGreaterThanOrEqual(0);
     expect(recordSpend).toBeGreaterThan(evalCall);
+    expect(route.slice(recordSpend, recordSpend + 180)).toContain("signature: result.signature");
   });
 
   it("requires idempotency for broadcast requests before signing", () => {

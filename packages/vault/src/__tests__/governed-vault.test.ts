@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import type { ExecutionAuthorization, SignRequest } from "@stwd/shared";
 import {
   executionPayloadDigestForGovernedEvmSign,
+  executionPayloadDigestForGovernedSolanaNativeSign,
   GovernedVault,
   GovernedVaultError,
 } from "../governed-vault";
@@ -34,6 +35,92 @@ const authorization: ExecutionAuthorization = {
 };
 
 describe("GovernedVault", () => {
+  it("consumes a durable Solana claim immediately before native raw signing", async () => {
+    const calls: string[] = [];
+    const solanaRequest: SignRequest = {
+      tenantId: "tenant-1",
+      agentId: "agent-1",
+      to: "7J9kqM5kV8Fh1Q3b6N2pR4tYwLcXzAaBbCcDdEeFfGg",
+      value: "1000000000",
+      chainId: 101,
+      broadcast: true,
+    };
+    const rawVault = {
+      async signTransaction() {
+        calls.push("raw-sign");
+        return "solana-signature";
+      },
+    } as unknown as Vault;
+    const governed = new GovernedVault(rawVault, async () => {
+      throw new Error("EVM callback must not be used");
+    });
+    const digest = executionPayloadDigestForGovernedSolanaNativeSign(solanaRequest);
+
+    const result = await governed.signSolanaNativeTransferAuthorized(solanaRequest, {
+      txId: "solana-tx-1",
+      executionToken: "claim-token",
+      executionClaimDigest: "claim-digest",
+      executionPayloadDigest: digest,
+      consumeExecutionClaim: async (expected) => {
+        expect(expected).toMatchObject({
+          txId: "solana-tx-1",
+          executionToken: "claim-token",
+          executionClaimDigest: "claim-digest",
+          payloadDigest: digest,
+        });
+        calls.push("consume-claim");
+      },
+    });
+
+    expect(result).toBe("solana-signature");
+    expect(calls).toEqual(["consume-claim", "raw-sign"]);
+  });
+
+  it("never raw-signs Solana when the durable claim rejects or intent changes", async () => {
+    let rawCalls = 0;
+    const solanaRequest: SignRequest = {
+      tenantId: "tenant-1",
+      agentId: "agent-1",
+      to: "7J9kqM5kV8Fh1Q3b6N2pR4tYwLcXzAaBbCcDdEeFfGg",
+      value: "1",
+      chainId: 101,
+      broadcast: true,
+    };
+    const rawVault = {
+      async signTransaction() {
+        rawCalls += 1;
+        return "never";
+      },
+    } as unknown as Vault;
+    const governed = new GovernedVault(rawVault, async () => {});
+    const digest = executionPayloadDigestForGovernedSolanaNativeSign(solanaRequest);
+
+    await expect(
+      governed.signSolanaNativeTransferAuthorized(
+        { ...solanaRequest, value: "2" },
+        {
+          txId: "solana-tx-2",
+          executionToken: "claim-token",
+          executionClaimDigest: "claim-digest",
+          executionPayloadDigest: digest,
+          consumeExecutionClaim: async () => {},
+        },
+      ),
+    ).rejects.toThrow("does not match");
+    await expect(
+      governed.signSolanaNativeTransferAuthorized(solanaRequest, {
+        txId: "solana-tx-2",
+        executionToken: "claim-token",
+        executionClaimDigest: "claim-digest",
+        executionPayloadDigest: digest,
+        consumeExecutionClaim: async () => {
+          throw new Error("stale claim");
+        },
+      }),
+    ).rejects.toThrow("stale claim");
+    expect(rawCalls).toBe(0);
+  });
+
   it("consumes execution authorization immediately before raw signTransaction", async () => {
     const calls: string[] = [];
     const rawVault = {

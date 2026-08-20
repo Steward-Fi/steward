@@ -65,6 +65,7 @@ import { getConfiguredVault } from "../services/vault-factory";
 const TENANT_ID = `approval-gate-tenant-${Date.now()}`;
 const ACTOR_ID = "00000000-0000-4000-8000-000000000001";
 const REMOVED_ACTOR_ID = "00000000-0000-4000-8000-000000000002";
+const TAKEOVER_ACTOR_ID = "00000000-0000-4000-8000-000000000003";
 // Recipient the pending transactions pay; "code" is irrelevant here because the
 // approve path re-evaluates POLICY (not the native-transfer eth_getCode guard).
 const RECIPIENT = "0x1234567890123456789012345678901234567890";
@@ -298,12 +299,14 @@ describe("vault approval gates (real /approve path)", () => {
       .values([
         { id: ACTOR_ID, email: "approval-gate-owner@example.test" },
         { id: REMOVED_ACTOR_ID, email: "approval-gate-removed@example.test" },
+        { id: TAKEOVER_ACTOR_ID, email: "approval-gate-takeover@example.test" },
       ]);
     await getDb()
       .insert(userTenants)
       .values([
         { userId: ACTOR_ID, tenantId: TENANT_ID, role: "owner" },
         { userId: REMOVED_ACTOR_ID, tenantId: TENANT_ID, role: "owner" },
+        { userId: TAKEOVER_ACTOR_ID, tenantId: TENANT_ID, role: "admin" },
       ]);
 
     // Reject scenario: the agent's ONLY allowlisted address is some OTHER address,
@@ -503,9 +506,60 @@ describe("vault approval gates (real /approve path)", () => {
     }
   });
 
-  it("blocks a live approved owner then CAS-takes over its expired pre-checkpoint lease once", async () => {
+  it("consumes a durable claim before the primary raw Solana signer", async () => {
     const app = await makeApp({ authType: "session-jwt", role: "owner", mfa: true });
-    const live = await approve(app, AGENT_SOLANA, "tx-crashed-approved-solana");
+    let rawSignCalls = 0;
+    const sign = spyOn(Vault.prototype, "signTransaction").mockImplementation(async () => {
+      rawSignCalls += 1;
+      const [claimed] = await getDb()
+        .select()
+        .from(transactions)
+        .where(and(eq(transactions.agentId, AGENT_SOLANA), eq(transactions.status, "approved")))
+        .limit(1);
+      expect(claimed?.actionPayload).toMatchObject({
+        recoveryType: "solana_transaction",
+        executionToken: expect.any(String),
+        executionDigest: expect.any(String),
+      });
+      await getDb()
+        .update(transactions)
+        .set({ status: "signed", signedAt: new Date() })
+        .where(eq(transactions.id, claimed.id));
+      return "signed-solana-primary-route";
+    });
+    try {
+      const response = await app.request(`/vault/${AGENT_SOLANA}/sign`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          to: SOLANA_RECIPIENT,
+          value: "100",
+          chainId: 101,
+          broadcast: false,
+        }),
+      });
+      const responseBody = await response.json();
+      expect({ status: response.status, body: responseBody }).toMatchObject({
+        status: 200,
+        body: {
+          ok: true,
+          data: { signedTx: "signed-solana-primary-route" },
+        },
+      });
+      expect(rawSignCalls).toBe(1);
+    } finally {
+      sign.mockRestore();
+    }
+  });
+
+  it("blocks a live approved owner then CAS-takes over its expired pre-checkpoint lease once", async () => {
+    const takeoverAdmin = await makeApp({
+      authType: "session-jwt",
+      role: "admin",
+      mfa: true,
+      userId: TAKEOVER_ACTOR_ID,
+    });
+    const live = await approve(takeoverAdmin, AGENT_SOLANA, "tx-crashed-approved-solana");
     expect(live.status).toBe(409);
     expect(await live.json()).toMatchObject({
       ok: false,
@@ -550,9 +604,9 @@ describe("vault approval gates (real /approve path)", () => {
       },
     );
     try {
-      const winnerPromise = approve(app, AGENT_SOLANA, "tx-crashed-approved-solana");
+      const winnerPromise = approve(takeoverAdmin, AGENT_SOLANA, "tx-crashed-approved-solana");
       await winnerStarted;
-      const concurrentPromise = approve(app, AGENT_SOLANA, "tx-crashed-approved-solana");
+      const concurrentPromise = approve(takeoverAdmin, AGENT_SOLANA, "tx-crashed-approved-solana");
       await Bun.sleep(10);
       expect(signCalls).toBe(1);
       expect(submitted).toBe(0);
@@ -572,6 +626,14 @@ describe("vault approval gates (real /approve path)", () => {
       expect(row.actionPayload).toMatchObject({
         executionToken: expect.not.stringMatching(/^crashed-owner$/),
         recentBlockhash: "11111111111111111111111111111111",
+      });
+      const [approval] = await getDb()
+        .select()
+        .from(approvalQueue)
+        .where(eq(approvalQueue.txId, "tx-crashed-approved-solana"));
+      expect(approval).toMatchObject({
+        resolvedByType: "user",
+        resolvedById: TAKEOVER_ACTOR_ID,
       });
     } finally {
       releaseWinner();

@@ -39,6 +39,43 @@ export interface GovernedSignTransactionOptions extends SignTransactionOptions {
   executionPayloadDigest?: string;
 }
 
+export interface GovernedSolanaNativeSignOptions extends SignTransactionOptions {
+  executionToken: string;
+  executionClaimDigest: string;
+  executionPayloadDigest: string;
+  consumeExecutionClaim: (expected: {
+    tenantId: string;
+    agentId: string;
+    txId: string;
+    executionToken: string;
+    executionClaimDigest: string;
+    payloadDigest: string;
+  }) => Promise<void>;
+}
+
+export function executionPayloadDigestForGovernedSolanaNativeSign(request: SignRequest): string {
+  const chainId = request.chainId ?? 101;
+  if (chainId !== 101 && chainId !== 102) {
+    throw new GovernedVaultError(
+      "Governed Solana native signing requires a Solana chain",
+      "unsupported_chain_family",
+    );
+  }
+  return createHash("sha256")
+    .update(
+      canonicalJsonStringify({
+        agentId: request.agentId,
+        broadcast: request.broadcast !== false,
+        chainId,
+        data: request.data ?? null,
+        tenantId: request.tenantId,
+        to: request.to,
+        value: request.value,
+      }),
+    )
+    .digest("hex");
+}
+
 /**
  * Digest binds the normalized transaction INTENT (caller-controlled,
  * policy-relevant fields) via the SINGLE shared canonicalizer/normalizer in
@@ -127,5 +164,49 @@ export class GovernedVault {
       expectedBackend: options.executionAuthorization.backend as "local-vault" | "external-custody",
       expectedBackendIdentityDigest: options.executionAuthorization.backendIdentityDigest,
     });
+  }
+
+  async signSolanaNativeTransferAuthorized(
+    request: SignRequest,
+    options: GovernedSolanaNativeSignOptions,
+  ): Promise<string> {
+    if (!options.txId || !options.executionToken || !options.executionClaimDigest) {
+      throw new GovernedVaultError(
+        "A durable Solana execution claim is required",
+        "missing_authorization",
+      );
+    }
+    const payloadDigest = executionPayloadDigestForGovernedSolanaNativeSign(request);
+    if (!options.executionPayloadDigest || options.executionPayloadDigest !== payloadDigest) {
+      throw new GovernedVaultError(
+        "Solana execution payload digest does not match the governed request",
+        "payload_digest_mismatch",
+      );
+    }
+    try {
+      await options.consumeExecutionClaim({
+        tenantId: request.tenantId,
+        agentId: request.agentId,
+        txId: options.txId,
+        executionToken: options.executionToken,
+        executionClaimDigest: options.executionClaimDigest,
+        payloadDigest,
+      });
+    } catch (error) {
+      if (error instanceof GovernedVaultError) throw error;
+      throw new GovernedVaultError(
+        error instanceof Error ? error.message : "Solana execution claim was rejected",
+        "authorization_rejected",
+      );
+    }
+
+    const {
+      consumeExecutionClaim: _consume,
+      executionClaimDigest: _claimDigest,
+      executionPayloadDigest: _payloadDigest,
+      executionToken: _token,
+      ...rawOptions
+    } = options;
+    return this.rawVault.signTransaction(request, rawOptions);
   }
 }

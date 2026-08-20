@@ -1,5 +1,5 @@
 import { Buffer } from "node:buffer";
-import { createPrivateKey, sign as cryptoSign } from "node:crypto";
+import { createHash, createPrivateKey, sign as cryptoSign } from "node:crypto";
 import {
   ComputeBudgetProgram,
   Connection,
@@ -70,6 +70,63 @@ function transactionToBase64(tx: Transaction): string {
       String.fromCharCode(b),
     ).join(""),
   );
+}
+
+function readSolanaShortVec(bytes: Uint8Array, offset: number): [number, number] {
+  let value = 0;
+  let shift = 0;
+  let cursor = offset;
+  for (let index = 0; index < 5; index += 1) {
+    const byte = bytes[cursor];
+    if (byte === undefined) throw new Error("Solana transaction has a truncated shortvec");
+    cursor += 1;
+    value |= (byte & 0x7f) << shift;
+    if ((byte & 0x80) === 0) return [value, cursor];
+    shift += 7;
+  }
+  throw new Error("Solana transaction has an oversized shortvec");
+}
+
+/**
+ * Hash the complete caller-controlled Solana message while deliberately
+ * excluding only transaction signatures and the recent blockhash. A refreshed
+ * blockhash therefore preserves idempotency, but changing a memo, compute-budget
+ * instruction, account, program, or instruction byte produces a new digest.
+ */
+export function normalizedSolanaMessageDigest(transaction: string): string {
+  let bytes: Uint8Array;
+  try {
+    const decoded = atob(transaction);
+    bytes = Uint8Array.from(decoded, (character) => character.charCodeAt(0));
+  } catch {
+    return createHash("sha256").update("opaque-solana-text\0").update(transaction).digest("hex");
+  }
+  try {
+    const [signatureCount, messageOffset] = readSolanaShortVec(bytes, 0);
+    const messageStart = messageOffset + signatureCount * 64;
+    if (messageStart >= bytes.length) throw new Error("Solana transaction message is missing");
+
+    let cursor = messageStart;
+    if ((bytes[cursor] & 0x80) !== 0) cursor += 1;
+    cursor += 3; // message header
+    const [accountCount, accountsOffset] = readSolanaShortVec(bytes, cursor);
+    const recentBlockhashOffset = accountsOffset + accountCount * 32;
+    if (recentBlockhashOffset + 32 > bytes.length) {
+      throw new Error("Solana transaction recent blockhash is missing");
+    }
+
+    const normalizedMessage = bytes.slice(messageStart);
+    normalizedMessage.fill(
+      0,
+      recentBlockhashOffset - messageStart,
+      recentBlockhashOffset - messageStart + 32,
+    );
+    return createHash("sha256").update(normalizedMessage).digest("hex");
+  } catch {
+    // Unsafe blind-sign mode can deliberately carry bytes the parser cannot
+    // interpret. Bind those bytes exactly rather than weakening idempotency.
+    return createHash("sha256").update("opaque-solana-bytes\0").update(bytes).digest("hex");
+  }
 }
 
 // ─── Key Generation ────────────────────────────────────────────────────────

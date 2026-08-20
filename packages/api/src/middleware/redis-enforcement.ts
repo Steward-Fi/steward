@@ -121,6 +121,17 @@ export function nativePriceFallbackUsd(): number {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : 10_000;
 }
 
+export function conservativeNativeSpendUsd(valueBaseUnits: bigint, chainId: number): number {
+  const decimals = getNativeDecimalsStrict(chainId);
+  if (decimals === null) {
+    throw new Error(`Native-token decimals are not configured for chain ${chainId}`);
+  }
+  const divisor = 10n ** BigInt(decimals);
+  const tokenAmount =
+    Number(valueBaseUnits / divisor) + Number(valueBaseUnits % divisor) / Number(divisor);
+  return tokenAmount * nativePriceFallbackUsd();
+}
+
 /**
  * Run Redis-backed rate limit checks before signing.
  *
@@ -255,14 +266,12 @@ export async function recordVaultSpend(
   // the spend with a deliberately HIGH conservative native-price floor so the spend still
   // counts against the same `chain:${chainId}` USD cap and can trip it. Over-counting during
   // an oracle outage is the safe direction; the priced path above is unaffected.
-  const decimals = getNativeDecimalsStrict(chainId);
-  if (decimals === null) {
-    if (options.throwOnError) throw new Error(`unknown native decimals for chain ${chainId}`);
+  let conservativeUsd: number;
+  try {
+    conservativeUsd = conservativeNativeSpendUsd(wei, chainId);
+  } catch (error) {
+    if (options.throwOnError) throw error;
     return;
   }
-  const divisor = 10n ** BigInt(decimals);
-  const tokenAmount = Number(wei / divisor) + Number(wei % divisor) / Number(divisor);
-  const fallbackNativePriceUsd = nativePriceFallbackUsd();
-  const conservativeUsd = tokenAmount * fallbackNativePriceUsd;
   await recordAgentSpend(agentId, tenantId, conservativeUsd, `chain:${chainId}`, options);
 }
