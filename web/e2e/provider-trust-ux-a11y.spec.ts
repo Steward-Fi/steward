@@ -436,7 +436,7 @@ test("tenant switching clears the queue and ignores a delayed prior-tenant respo
   page,
 }) => {
   let tenantARequests = 0;
-  let delayedTenantA: Route | null = null;
+  const delayedTenantA: { current: Route | null } = { current: null };
   const tenantBToken = sessionToken("tenant-b");
 
   await page.route("**/api/auth/refresh", async (route) => {
@@ -472,19 +472,19 @@ test("tenant switching clears the queue and ignores a delayed prior-tenant respo
     }
     // Deliberately leave the retried tenant-A request pending. Returning from
     // the handler lets tenant-list, refresh, and tenant-B requests continue.
-    delayedTenantA = route;
+    delayedTenantA.current = route;
   });
 
   await page.goto("/dashboard/approvals");
   await expect(page.getByText("Failed to load approvals")).toBeVisible();
   await page.getByRole("button", { name: "Retry" }).click();
-  await expect.poll(() => delayedTenantA !== null).toBe(true);
+  await expect.poll(() => delayedTenantA.current !== null).toBe(true);
   await page.getByRole("button", { name: "trust-reviewer@example.test" }).click();
   await page.getByRole("menuitem", { name: "Tenant B" }).click();
   await expect(page.getByText("Tenant B agent")).toBeVisible();
   await expect(page.getByText("Tenant A agent")).toHaveCount(0);
 
-  await delayedTenantA?.fulfill({ json: { ok: true, data: [approvalQueueItem("a")] } });
+  await delayedTenantA.current?.fulfill({ json: { ok: true, data: [approvalQueueItem("a")] } });
   await page.waitForTimeout(250);
   await expect(page.getByText("Tenant B agent")).toBeVisible();
   await expect(page.getByText("Tenant A agent")).toHaveCount(0);
@@ -583,7 +583,7 @@ test("same-tenant user rotation clears the prior queue and reloads once", async 
 
 test("a prior-tenant approval completion cannot alter the rotated queue", async ({ page }) => {
   const tenantBToken = sessionToken("tenant-b");
-  let delayedApproval: Route | null = null;
+  const delayedApproval: { current: Route | null } = { current: null };
 
   await page.route("**/api/auth/refresh", async (route) => {
     await route.fulfill({ json: { ok: true, token: tenantBToken, expiresIn: 3600 } });
@@ -605,18 +605,18 @@ test("a prior-tenant approval completion cannot alter the rotated queue", async 
   });
   await page.route(`${API}/approvals/transaction-a/approve`, (route) => {
     if (route.request().method() !== "POST") return route.fallback();
-    delayedApproval = route;
+    delayedApproval.current = route;
   });
 
   await page.goto("/dashboard/approvals");
   await expect(page.getByText("Tenant A agent")).toBeVisible();
   await page.getByRole("button", { name: "Approve", exact: true }).click();
-  await expect.poll(() => delayedApproval !== null).toBe(true);
+  await expect.poll(() => delayedApproval.current !== null).toBe(true);
   await page.getByRole("button", { name: "trust-reviewer@example.test" }).click();
   await page.getByRole("menuitem", { name: "Tenant B" }).click();
   await expect(page.getByText("Tenant B agent")).toBeVisible();
 
-  await delayedApproval?.fulfill({ json: { ok: true, data: approvalQueueItem("a") } });
+  await delayedApproval.current?.fulfill({ json: { ok: true, data: approvalQueueItem("a") } });
   await page.waitForTimeout(100);
   await expect(page.getByText("Tenant B agent")).toBeVisible();
   await expect(page.getByText("Tenant A agent")).toHaveCount(0);
