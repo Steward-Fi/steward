@@ -133,6 +133,15 @@ realPostgresIt(
       await runOrderedRace("operator");
       await runOrderedRace("vault");
     } finally {
+      // The agent deletion guard deliberately refuses to discard unresolved
+      // signed/broadcast/outcome-unknown execution evidence. This fixture owns
+      // the synthetic signed rows, so terminalize its scoped evidence before
+      // deleting the tenant instead of weakening the production guard.
+      await admin`
+        update transactions
+        set status = 'failed'
+        where agent_id in (select id from agents where tenant_id = ${tenantId})
+      `;
       await admin`delete from tenants where id = ${tenantId}`;
       await Promise.all([admin.end(), first.end(), second.end()]);
     }
@@ -188,6 +197,11 @@ realPostgresIt(
       expect(reconciled.spentToday).toBe(0n);
       expect(reconciled.additionalUsdSpentTodayMicros).toBe(10_000_000n);
     } finally {
+      await admin`
+        update transactions
+        set status = 'failed'
+        where agent_id in (select id from agents where tenant_id = ${tenantId})
+      `;
       await admin`delete from tenants where id = ${tenantId}`;
       await admin.end();
     }

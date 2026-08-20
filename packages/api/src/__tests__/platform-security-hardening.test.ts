@@ -157,7 +157,7 @@ describe("platform security hardening", () => {
     );
     expectBefore(
       'requirePlatformRouteScope(c, "platform:agent-token:create")',
-      "createAgentToken(agentId, tenantId",
+      "createAgentTokenForExistingAgent(",
     );
     expectBefore(
       'requirePlatformRouteScope(c, "platform:agent-token:revoke")',
