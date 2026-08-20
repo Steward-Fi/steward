@@ -71,9 +71,7 @@ const skipMigrations =
 const productionPostgresRuntime =
   !shouldUsePGLite() && process.env.NODE_ENV !== "development" && process.env.NODE_ENV !== "test";
 if (productionPostgresRuntime && !skipMigrations) {
-  throw new Error(
-    "PRODUCTION_RLS_REQUIRES_OUT_OF_BAND_MIGRATIONS: set SKIP_MIGRATIONS=1",
-  );
+  throw new Error("PRODUCTION_RLS_REQUIRES_OUT_OF_BAND_MIGRATIONS: set SKIP_MIGRATIONS=1");
 }
 
 // Compose the deployable app: lean core + this repo's opt-in plugins (trading).
@@ -387,7 +385,10 @@ if (productionPostgresRuntime) {
 try {
   await ensureDefaultTenantReady();
 } catch (error) {
-  console.error("[steward] Default tenant bootstrap failed — cannot start", redactedThrownDiagnostics(error));
+  console.error(
+    "[steward] Default tenant bootstrap failed — cannot start",
+    redactedThrownDiagnostics(error),
+  );
   process.exit(1);
 }
 
