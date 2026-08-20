@@ -83,7 +83,11 @@ SELECT format(
   'steward_bootstrap.retention_delete_deactivated_users(integer) FROM %I',
   :'steward_app_role'
 ) \gexec
-SELECT format('GRANT USAGE ON SCHEMA steward_bootstrap TO %I', :'steward_platform_role') \gexec
+SELECT format('GRANT USAGE ON SCHEMA steward_bootstrap, steward_rls TO %I', :'steward_platform_role') \gexec
+SELECT format(
+  'GRANT EXECUTE ON FUNCTION steward_rls.tenant_id() TO %I',
+  :'steward_platform_role'
+) \gexec
 SELECT format(
   'GRANT SELECT, INSERT, UPDATE ON public.audit_events, public.audit_chain_heads TO %I',
   :'steward_platform_role'
@@ -204,6 +208,17 @@ BEGIN
      OR has_schema_privilege(current_setting('steward.bootstrap.app_role'), 'steward_bootstrap', 'CREATE')
      OR has_schema_privilege(current_setting('steward.bootstrap.app_role'), 'steward_rls', 'CREATE') THEN
     RAISE EXCEPTION 'SEC-169 app role must not create schema objects';
+  END IF;
+  IF NOT has_schema_privilege(
+       current_setting('steward.bootstrap.platform_role'), 'steward_rls', 'USAGE'
+     )
+     OR NOT has_function_privilege(
+       current_setting('steward.bootstrap.platform_role'), 'steward_rls.tenant_id()', 'EXECUTE'
+     )
+     OR has_function_privilege(
+       current_setting('steward.bootstrap.platform_role'), 'steward_rls.user_id()', 'EXECUTE'
+     ) THEN
+    RAISE EXCEPTION 'SEC-169 platform role must receive only tenant RLS context access';
   END IF;
   IF EXISTS (
     SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace

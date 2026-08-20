@@ -143,6 +143,23 @@ describeWithPostgres("SEC-169 operator lifecycle on the real Steward schema", ()
         rolbypassrls: false,
         rolsuper: false,
       });
+      const [platformRlsPrivileges] = await db<
+        {
+          schema_usage: boolean;
+          tenant_id_execute: boolean;
+          user_id_execute: boolean;
+        }[]
+      >`
+        SELECT
+          has_schema_privilege(${platformRole}, 'steward_rls', 'USAGE') AS schema_usage,
+          has_function_privilege(${platformRole}, 'steward_rls.tenant_id()', 'EXECUTE') AS tenant_id_execute,
+          has_function_privilege(${platformRole}, 'steward_rls.user_id()', 'EXECUTE') AS user_id_execute
+      `;
+      expect(platformRlsPrivileges).toEqual({
+        schema_usage: true,
+        tenant_id_execute: true,
+        user_id_execute: false,
+      });
 
       await runOperatorScript("rls-activate.sql");
       const [activated] = await db<{ enabled: number; forced: number; maintenance: number }[]>`
