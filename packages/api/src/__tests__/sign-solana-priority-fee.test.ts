@@ -146,7 +146,18 @@ describe("sign-solana priority-fee cap", () => {
       expect(request.broadcast).toBe(false);
       expect(request.expectedTo).toBeUndefined();
       expect(request.expectedValue).toBeUndefined();
-      return { signature: "signed-v0-transfer", broadcast: false, chainId: request.chainId };
+      return {
+        signature: "signed-v0-transfer",
+        broadcast: false,
+        chainId: request.chainId,
+        artifactSignature:
+          "4oL4p7QvN3UH7V5wMGZgW5PuzEk4A9LXLHk9RxAoKjDKuLbQBsfXN8kEvKfj5K1oEJa8wFF6RVp2h7pP9w2f51ZV",
+        signer: "11111111111111111111111111111111",
+        recentBlockhash: "11111111111111111111111111111111",
+        blockhashKind: "recent",
+        lastValidBlockHeight: 1_000,
+        rawIntentDigest: "a".repeat(64),
+      };
     };
 
     try {

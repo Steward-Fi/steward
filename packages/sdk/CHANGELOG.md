@@ -20,6 +20,7 @@
   agent/transaction identities; transaction-history ordering is stabilized by
   `createdAt` then `id` for deterministic offset traversal.
 - Expose typed linked-account unlink and transfer failure evidence when the irreversible session-revocation cutoff succeeds but the following database/audit transaction fails, so clients can require reauthentication without claiming the account mutation committed.
+- Add the typed signed-artifact retirement endpoint and evidence-bound transaction fields for audited EVM and Solana offline-signature lifecycle handling.
 - Expose the SigV4 secret-route strategy/config fields in generated API types for governed, region-bound AWS EC2 operations.
 - Add `approveVaultTransaction()` and its typed result so SDK consumers can execute an approved vault transaction through the policy-revalidating vault route.
 - `StewardAuthConfig.authProxyUrl`: optional same-origin auth proxy prefix (e.g. `/api/auth`) that keeps the long-lived refresh token in an HttpOnly, SameSite=Strict cookie instead of JS-readable storage (SEC-018). When set, sign-in deposits the refresh token with the proxy (failing closed if the deposit cannot be completed), and refresh / revoke / tenant-switch calls go through the proxy — only the short-lived access token is kept in `storage`. Unset keeps the previous behavior unchanged.

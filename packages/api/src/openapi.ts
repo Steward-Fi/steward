@@ -7045,11 +7045,11 @@ export function getOpenApiSpec() {
             "200": jsonResponse(
               apiResponse({
                 type: "object",
-                required: ["txId", "status", "artifactSignature", "retiredAt"],
+                required: ["txId", "status", "artifactId", "retiredAt"],
                 properties: {
                   txId: stringSchema,
                   status: { type: "string", const: "retired" },
-                  artifactSignature: stringSchema,
+                  artifactId: stringSchema,
                   retiredAt: stringSchema,
                 },
               }),
