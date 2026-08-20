@@ -194,8 +194,10 @@ The app, platform-authority, and migration roles are separate login identities
 asserted `NOSUPERUSER NOBYPASSRLS`; the migration role owns the application
 relations, while the app cannot inherit or assume either privileged login.
 Supply their credentials through the database provider or `ALTER ROLE` outside
-source control. Set `DATABASE_URL`/`STEWARD_APP_DATABASE_ROLE` to the app login
-and `STEWARD_PLATFORM_DATABASE_URL`/`STEWARD_PLATFORM_DATABASE_ROLE` to the
+source control. Set `DATABASE_URL`/`STEWARD_APP_DATABASE_ROLE` to the app login,
+`STEWARD_BOOTSTRAP_DATABASE_ROLE` to the exact non-login definer owner, and
+`STEWARD_MIGRATION_DATABASE_ROLE` to the exact protected-relation owner. Set
+`STEWARD_PLATFORM_DATABASE_URL`/`STEWARD_PLATFORM_DATABASE_ROLE` to the
 platform login. The bootstrap function owner is a non-login `BYPASSRLS` role
 with only narrow table privileges. The app loses EXECUTE on destructive global
 functions; only the platform login receives those named grants.
@@ -204,7 +206,9 @@ functions; only the platform login receives those named grants.
 and the capabilities plugin migrations, then refreshes the committed exact relation/partition and policy-definition
 manifest. Run it for every schema or policy change and commit both generated
 outputs. Production startup and `/ready` compare the live role, ownership,
-relation/partition graph, and policy definitions to this manifest before
+relation/partition graph, policy definitions, and checked-in privileged
+function semantics (identity, result, language, volatility, parallelism, body
+digest, settings, owner, and exact app/platform/PUBLIC ACL) before
 serving. Core is always required at exactly 71 protected relations and 73
 policies. If any capabilities relation is installed, all three capabilities
 relations and all three exact policies are required and activated as one group.
@@ -214,7 +218,10 @@ one maintenance transaction:
 
 ```bash
 psql "$DATABASE_URL" \
+  -v steward_app_role=steward_app \
   -v steward_migration_role=steward_migrator \
+  -v steward_bootstrap_role=steward_bootstrap_owner \
+  -v steward_platform_role=steward_platform \
   -f scripts/postgres/rls-activate.sql
 ```
 
@@ -222,6 +229,15 @@ The script enables and forces every inventoried Steward relation and adds an
 explicit all-row policy only for the named `NOBYPASSRLS` migration role. It
 aborts on any missing/extra public relation or partition edge, or any drift in
 policy name, command, roles, permissiveness, `USING`, or `WITH CHECK`.
+
+The two migration authorities are intentionally different. Core migrations
+run through `STEWARD_ADMIN_DATABASE_URL`: later core releases may replace
+functions owned by the non-login bootstrap role and therefore require the
+database owner/operator authority. Plugin migrations run only through
+`MIGRATION_DATABASE_URL` as the restricted `steward_migrator`; that login owns
+protected relations for maintenance but cannot replace bootstrap-definer
+functions or assume the bootstrap owner. Never point the core runner at the
+restricted plugin URL, and never give the plugin runner the admin URL.
 
 ## Rollback
 

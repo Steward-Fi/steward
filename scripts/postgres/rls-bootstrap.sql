@@ -107,6 +107,48 @@ REVOKE ALL ON ALL FUNCTIONS IN SCHEMA steward_rls FROM PUBLIC;
 REVOKE ALL ON ALL PROCEDURES IN SCHEMA steward_bootstrap FROM PUBLIC;
 REVOKE ALL ON ALL PROCEDURES IN SCHEMA steward_rls FROM PUBLIC;
 
+-- The bootstrap schema is a privileged ABI, not an extension point. Refuse to
+-- bless a newly introduced SECURITY DEFINER function merely because it landed
+-- in the trusted schema or inherited the trusted owner.
+DO $$
+DECLARE
+  actual text[];
+  expected constant text[] := ARRAY[
+    'steward_bootstrap.agent_subject(text,text,text)',
+    'steward_bootstrap.agent_tenant_subject(text)',
+    'steward_bootstrap.app_client_subject(text,text)',
+    'steward_bootstrap.auth_app_clients_subject(text)',
+    'steward_bootstrap.auth_refresh_subject(text)',
+    'steward_bootstrap.auth_rotate_refresh_token(text,text,text,text,timestamp with time zone)',
+    'steward_bootstrap.auth_sso_discovery_subject(text)',
+    'steward_bootstrap.auth_sso_domain_subject(text,text)',
+    'steward_bootstrap.auth_tenant_config_subject(text)',
+    'steward_bootstrap.auth_tenant_subject(text,uuid)',
+    'steward_bootstrap.ensure_default_tenant(text)',
+    'steward_bootstrap.ensure_platform_tenant()',
+    'steward_bootstrap.ensure_system_tenant()',
+    'steward_bootstrap.platform_delete_user(uuid)',
+    'steward_bootstrap.platform_revoke_user_refresh_tokens(uuid)',
+    'steward_bootstrap.platform_set_user_deactivation(uuid,boolean)',
+    'steward_bootstrap.platform_stats()',
+    'steward_bootstrap.platform_tenants(integer,integer)',
+    'steward_bootstrap.platform_user_tenant_ids(uuid)',
+    'steward_bootstrap.retention_delete_deactivated_users(integer)',
+    'steward_bootstrap.session_subject(uuid,text)',
+    'steward_bootstrap.tenant_api_key_subject(text)',
+    'steward_bootstrap.tenant_ids_for_internal_job()'
+  ];
+BEGIN
+  SELECT array_agg(p.oid::regprocedure::text ORDER BY p.oid::regprocedure::text)
+    INTO actual
+  FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+  WHERE n.nspname = 'steward_bootstrap' AND p.prosecdef;
+  IF actual IS DISTINCT FROM expected THEN
+    RAISE EXCEPTION 'SEC-169 bootstrap SECURITY DEFINER inventory drift';
+  END IF;
+END
+$$;
+
 -- Remove stale named-role grants before installing the exact application ACL.
 -- PUBLIC-only revocation is insufficient: a previously granted login could
 -- otherwise retain direct access to BYPASSRLS SECURITY DEFINER functions.
@@ -129,20 +171,38 @@ GROUP BY p.oid, grantee.rolname
 \gexec
 
 SELECT format('GRANT %I TO %I', :'steward_migration_role', current_user) \gexec
+SELECT format('REVOKE CONNECT ON DATABASE %I FROM PUBLIC', current_database()) \gexec
+SELECT format(
+  'GRANT CONNECT ON DATABASE %I TO %I, %I',
+  current_database(), :'steward_app_role', :'steward_migration_role'
+) \gexec
 SELECT format('GRANT CREATE ON DATABASE %I TO %I', current_database(), :'steward_migration_role') \gexec
 SELECT format('GRANT USAGE, CREATE ON SCHEMA public TO %I', :'steward_migration_role') \gexec
 SELECT format('GRANT USAGE ON SCHEMA public, steward_bootstrap, steward_rls TO %I', :'steward_app_role') \gexec
-SELECT format('GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA steward_bootstrap, steward_rls TO %I', :'steward_app_role') \gexec
 SELECT format(
-  'GRANT EXECUTE ON FUNCTION public.steward_lock_tenant_deletion(text) TO %I',
+  'GRANT EXECUTE ON FUNCTION '
+  'steward_rls.tenant_id(), steward_rls.user_id(), '
+  'steward_bootstrap.agent_subject(text,text,text), '
+  'steward_bootstrap.agent_tenant_subject(text), '
+  'steward_bootstrap.app_client_subject(text,text), '
+  'steward_bootstrap.auth_app_clients_subject(text), '
+  'steward_bootstrap.auth_refresh_subject(text), '
+  'steward_bootstrap.auth_rotate_refresh_token(text,text,text,text,timestamptz), '
+  'steward_bootstrap.auth_sso_discovery_subject(text), '
+  'steward_bootstrap.auth_sso_domain_subject(text,text), '
+  'steward_bootstrap.auth_tenant_config_subject(text), '
+  'steward_bootstrap.auth_tenant_subject(text,uuid), '
+  'steward_bootstrap.ensure_default_tenant(text), '
+  'steward_bootstrap.ensure_platform_tenant(), '
+  'steward_bootstrap.ensure_system_tenant(), '
+  'steward_bootstrap.platform_user_tenant_ids(uuid), '
+  'steward_bootstrap.session_subject(uuid,text), '
+  'steward_bootstrap.tenant_api_key_subject(text), '
+  'steward_bootstrap.tenant_ids_for_internal_job() TO %I',
   :'steward_app_role'
 ) \gexec
 SELECT format(
-  'REVOKE EXECUTE ON FUNCTION '
-  'steward_bootstrap.platform_set_user_deactivation(uuid,boolean), '
-  'steward_bootstrap.platform_delete_user(uuid), '
-  'steward_bootstrap.platform_revoke_user_refresh_tokens(uuid), '
-  'steward_bootstrap.retention_delete_deactivated_users(integer) FROM %I',
+  'GRANT EXECUTE ON FUNCTION public.steward_lock_tenant_deletion(text) TO %I',
   :'steward_app_role'
 ) \gexec
 
@@ -151,6 +211,7 @@ SELECT format(
 -- rebuilding the allowlist below. PUBLIC privileges remain governed by the
 -- schema-wide revocations above.
 SELECT format('REVOKE ALL PRIVILEGES ON DATABASE %I FROM %I', current_database(), :'steward_platform_role') \gexec
+SELECT format('GRANT CONNECT ON DATABASE %I TO %I', current_database(), :'steward_platform_role') \gexec
 SELECT format('REVOKE ALL PRIVILEGES ON SCHEMA %I FROM %I', namespace.nspname, :'steward_platform_role')
 FROM pg_namespace namespace
 CROSS JOIN LATERAL aclexplode(namespace.nspacl) privilege
@@ -208,7 +269,9 @@ SELECT format(
   'steward_bootstrap.platform_set_user_deactivation(uuid,boolean), '
   'steward_bootstrap.platform_delete_user(uuid), '
   'steward_bootstrap.platform_revoke_user_refresh_tokens(uuid), '
-  'steward_bootstrap.retention_delete_deactivated_users(integer) TO %I',
+  'steward_bootstrap.retention_delete_deactivated_users(integer), '
+  'steward_bootstrap.platform_stats(), '
+  'steward_bootstrap.platform_tenants(integer,integer) TO %I',
   :'steward_platform_role'
 ) \gexec
 SELECT format(
@@ -359,12 +422,24 @@ BEGIN
   ) THEN
     RAISE EXCEPTION 'SEC-169 definer role must be NOLOGIN NOSUPERUSER NOREPLICATION BYPASSRLS';
   END IF;
-  IF EXISTS (
+  IF NOT has_database_privilege(
+       current_setting('steward.bootstrap.platform_role'), current_database(), 'CONNECT'
+     ) OR EXISTS (
+    SELECT 1
+    FROM pg_database database_object
+    CROSS JOIN LATERAL aclexplode(
+      COALESCE(database_object.datacl, acldefault('d', database_object.datdba))
+    ) privilege
+    WHERE database_object.datname = current_database()
+      AND privilege.grantee = 0 AND privilege.privilege_type = 'CONNECT'
+  ) OR EXISTS (
     SELECT 1
     FROM pg_database database_object
     CROSS JOIN LATERAL aclexplode(database_object.datacl) privilege
     JOIN pg_roles granted_role ON granted_role.oid = privilege.grantee
     WHERE granted_role.rolname = current_setting('steward.bootstrap.platform_role')
+      AND (database_object.datname <> current_database()
+        OR privilege.privilege_type <> 'CONNECT' OR privilege.is_grantable)
   ) THEN
     RAISE EXCEPTION 'SEC-169 platform database ACL drift';
   END IF;
@@ -396,6 +471,8 @@ BEGIN
            'steward_bootstrap.platform_delete_user(uuid)'::regprocedure,
            'steward_bootstrap.platform_revoke_user_refresh_tokens(uuid)'::regprocedure,
            'steward_bootstrap.platform_set_user_deactivation(uuid,boolean)'::regprocedure,
+           'steward_bootstrap.platform_stats()'::regprocedure,
+           'steward_bootstrap.platform_tenants(integer,integer)'::regprocedure,
            'steward_bootstrap.retention_delete_deactivated_users(integer)'::regprocedure,
            'steward_rls.tenant_id()'::regprocedure
          ])
@@ -457,6 +534,8 @@ BEGIN
     'steward_bootstrap.platform_delete_user(p_user_id uuid):EXECUTE:false',
     'steward_bootstrap.platform_revoke_user_refresh_tokens(p_user_id uuid):EXECUTE:false',
     'steward_bootstrap.platform_set_user_deactivation(p_user_id uuid, p_deactivated boolean):EXECUTE:false',
+    'steward_bootstrap.platform_stats():EXECUTE:false',
+    'steward_bootstrap.platform_tenants(p_limit integer, p_offset integer):EXECUTE:false',
     'steward_bootstrap.retention_delete_deactivated_users(p_days integer):EXECUTE:false',
     'steward_rls.tenant_id():EXECUTE:false'
   ] THEN

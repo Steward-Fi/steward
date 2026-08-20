@@ -120,7 +120,14 @@ describe("0111 tenant RLS policy installation", () => {
     );
     expect(bootstrap).toContain("app role must not inherit or assume migration role");
     expect(bootstrap).toContain("app role must not inherit or assume platform role");
-    expect(bootstrap).toContain("REVOKE EXECUTE ON FUNCTION");
+    expect(bootstrap).toContain(
+      "REVOKE ALL ON ALL FUNCTIONS IN SCHEMA steward_bootstrap FROM PUBLIC",
+    );
+    expect(bootstrap).toContain("REVOKE ALL ON FUNCTION %s FROM %I");
+    expect(bootstrap).toContain("SEC-169 bootstrap SECURITY DEFINER inventory drift");
+    expect(bootstrap).toContain("steward_bootstrap.agent_subject(text,text,text), ");
+    expect(bootstrap).toContain("steward_bootstrap.platform_user_tenant_ids(uuid), ");
+    expect(bootstrap).not.toContain("GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA steward_bootstrap");
     expect(bootstrap).toContain("platform_set_user_deactivation(uuid,boolean)");
     expect(bootstrap).toContain("BEGIN;");
     expect(bootstrap).toContain("COMMIT;");

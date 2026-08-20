@@ -12,15 +12,21 @@
 \else
   \set steward_platform_role steward_platform
 \endif
+\if :{?steward_bootstrap_role}
+\else
+  \set steward_bootstrap_role steward_bootstrap_owner
+\endif
 
 SELECT set_config('steward.activation.migration_role', :'steward_migration_role', false);
 SELECT set_config('steward.activation.app_role', :'steward_app_role', false);
 SELECT set_config('steward.activation.platform_role', :'steward_platform_role', false);
+SELECT set_config('steward.activation.bootstrap_role', :'steward_bootstrap_role', false);
 
 BEGIN;
 SET LOCAL lock_timeout = '10s';
 
 \ir rls-policy-inventory.sql
+\ir rls-function-manifest.sql
 
 DO $$
 BEGIN
@@ -32,6 +38,10 @@ BEGIN
      OR current_setting('steward.activation.platform_role') IN (
         current_setting('steward.activation.app_role'),
         current_setting('steward.activation.migration_role')
+     ) OR current_setting('steward.activation.bootstrap_role') IN (
+        current_setting('steward.activation.app_role'),
+        current_setting('steward.activation.migration_role'),
+        current_setting('steward.activation.platform_role')
      ) THEN
     RAISE EXCEPTION 'SEC-169 activation roles must be distinct concrete roles';
   END IF;
@@ -116,6 +126,71 @@ BEGIN
     RAISE EXCEPTION 'SEC-169 migration role must own every protected relation';
   END IF;
   IF EXISTS (
+    WITH actual AS (
+      SELECT p.oid::regprocedure::text AS identity,
+        pg_get_function_result(p.oid) AS result,
+        l.lanname::text AS language,
+        p.provolatile AS volatility,
+        p.proparallel AS parallelism,
+        p.prosecdef AS security_definer,
+        COALESCE(array_to_string(p.proconfig, E'\n'), '') AS settings,
+        pg_get_userbyid(p.proowner) AS owner,
+        md5(btrim(p.prosrc, E' \t\n\r')) AS body_md5,
+        EXISTS (
+          SELECT 1 FROM aclexplode(COALESCE(p.proacl, acldefault('f', p.proowner))) acl
+          WHERE acl.grantee = 0 AND acl.privilege_type = 'EXECUTE'
+        ) AS public_execute,
+        has_function_privilege(
+          current_setting('steward.activation.app_role'), p.oid, 'EXECUTE'
+        ) AS app_execute,
+        has_function_privilege(
+          current_setting('steward.activation.platform_role'), p.oid, 'EXECUTE'
+        ) AS platform_execute
+      FROM pg_proc p
+      JOIN pg_namespace n ON n.oid = p.pronamespace
+      JOIN pg_language l ON l.oid = p.prolang
+      WHERE n.nspname IN ('steward_bootstrap', 'steward_rls')
+    )
+    SELECT 1
+    FROM steward_expected_rls_functions expected
+    FULL JOIN actual USING (identity)
+    WHERE expected.identity IS NULL OR actual.identity IS NULL
+      OR actual.result IS DISTINCT FROM expected.result
+      OR actual.language IS DISTINCT FROM expected.language
+      OR actual.volatility IS DISTINCT FROM expected.volatility
+      OR actual.parallelism IS DISTINCT FROM expected.parallelism
+      OR actual.security_definer IS DISTINCT FROM expected.security_definer
+      OR actual.settings IS DISTINCT FROM expected.settings
+      OR actual.owner IS DISTINCT FROM CASE expected.owner_kind
+        WHEN 'migration' THEN current_setting('steward.activation.migration_role')
+        ELSE current_setting('steward.activation.bootstrap_role')
+      END
+      OR actual.body_md5 IS DISTINCT FROM expected.body_md5
+      OR actual.public_execute
+      OR actual.app_execute IS DISTINCT FROM expected.app_execute
+      OR actual.platform_execute IS DISTINCT FROM expected.platform_execute
+  ) THEN
+    RAISE EXCEPTION 'SEC-169 privileged function semantic manifest drift';
+  END IF;
+  IF EXISTS (
+    SELECT 1
+    FROM pg_proc p
+    JOIN pg_namespace n ON n.oid = p.pronamespace
+    WHERE n.nspname = 'public' AND p.prosecdef
+      AND (
+        has_function_privilege(
+          current_setting('steward.activation.app_role'), p.oid, 'EXECUTE'
+        ) OR has_function_privilege(
+          current_setting('steward.activation.platform_role'), p.oid, 'EXECUTE'
+        ) OR EXISTS (
+          SELECT 1 FROM aclexplode(COALESCE(p.proacl, acldefault('f', p.proowner))) acl
+          WHERE acl.grantee = 0 AND acl.privilege_type = 'EXECUTE'
+        )
+      )
+  ) THEN
+    RAISE EXCEPTION 'SEC-169 unknown executable public SECURITY DEFINER function';
+  END IF;
+  IF EXISTS (
     SELECT 1
     FROM pg_proc p
     JOIN pg_namespace n ON n.oid = p.pronamespace
@@ -159,11 +234,61 @@ BEGIN
     SELECT 1
     FROM pg_proc p
     JOIN pg_namespace n ON n.oid = p.pronamespace
-    WHERE n.nspname IN ('public', 'steward_rls')
-      AND p.prosecdef
+    WHERE (
+      n.nspname IN ('public', 'steward_rls') AND p.prosecdef
       AND has_function_privilege(
         current_setting('steward.activation.app_role'), p.oid, 'EXECUTE'
       )
+    ) OR (
+      n.nspname = 'steward_bootstrap' AND p.prosecdef AND (
+        p.oid::regprocedure::text <> ALL (ARRAY[
+          'steward_bootstrap.agent_subject(text,text,text)',
+          'steward_bootstrap.agent_tenant_subject(text)',
+          'steward_bootstrap.app_client_subject(text,text)',
+          'steward_bootstrap.auth_app_clients_subject(text)',
+          'steward_bootstrap.auth_refresh_subject(text)',
+          'steward_bootstrap.auth_rotate_refresh_token(text,text,text,text,timestamp with time zone)',
+          'steward_bootstrap.auth_sso_discovery_subject(text)',
+          'steward_bootstrap.auth_sso_domain_subject(text,text)',
+          'steward_bootstrap.auth_tenant_config_subject(text)',
+          'steward_bootstrap.auth_tenant_subject(text,uuid)',
+          'steward_bootstrap.ensure_default_tenant(text)',
+          'steward_bootstrap.ensure_platform_tenant()',
+          'steward_bootstrap.ensure_system_tenant()',
+          'steward_bootstrap.platform_delete_user(uuid)',
+          'steward_bootstrap.platform_revoke_user_refresh_tokens(uuid)',
+          'steward_bootstrap.platform_set_user_deactivation(uuid,boolean)',
+          'steward_bootstrap.platform_stats()',
+          'steward_bootstrap.platform_tenants(integer,integer)',
+          'steward_bootstrap.platform_user_tenant_ids(uuid)',
+          'steward_bootstrap.retention_delete_deactivated_users(integer)',
+          'steward_bootstrap.session_subject(uuid,text)',
+          'steward_bootstrap.tenant_api_key_subject(text)',
+          'steward_bootstrap.tenant_ids_for_internal_job()'
+        ])
+        OR has_function_privilege(
+          current_setting('steward.activation.app_role'), p.oid, 'EXECUTE'
+        ) <> (p.oid::regprocedure::text = ANY (ARRAY[
+          'steward_bootstrap.agent_subject(text,text,text)',
+          'steward_bootstrap.agent_tenant_subject(text)',
+          'steward_bootstrap.app_client_subject(text,text)',
+          'steward_bootstrap.auth_app_clients_subject(text)',
+          'steward_bootstrap.auth_refresh_subject(text)',
+          'steward_bootstrap.auth_rotate_refresh_token(text,text,text,text,timestamp with time zone)',
+          'steward_bootstrap.auth_sso_discovery_subject(text)',
+          'steward_bootstrap.auth_sso_domain_subject(text,text)',
+          'steward_bootstrap.auth_tenant_config_subject(text)',
+          'steward_bootstrap.auth_tenant_subject(text,uuid)',
+          'steward_bootstrap.ensure_default_tenant(text)',
+          'steward_bootstrap.ensure_platform_tenant()',
+          'steward_bootstrap.ensure_system_tenant()',
+          'steward_bootstrap.platform_user_tenant_ids(uuid)',
+          'steward_bootstrap.session_subject(uuid,text)',
+          'steward_bootstrap.tenant_api_key_subject(text)',
+          'steward_bootstrap.tenant_ids_for_internal_job()'
+        ]))
+      )
+    )
   ) THEN
     RAISE EXCEPTION 'SEC-169 unexpected executable SECURITY DEFINER function';
   END IF;

@@ -96,6 +96,8 @@ describe("steward init", () => {
         `postgresql://steward_platform:${platformPassword}@postgres:5432/steward`,
       );
       expect(envValue(env, "STEWARD_APP_DATABASE_ROLE")).toBe("steward_app");
+      expect(envValue(env, "STEWARD_BOOTSTRAP_DATABASE_ROLE")).toBe("steward_bootstrap_owner");
+      expect(envValue(env, "STEWARD_MIGRATION_DATABASE_ROLE")).toBe("steward_migrator");
       expect(envValue(env, "STEWARD_PLATFORM_DATABASE_ROLE")).toBe("steward_platform");
       expect(envValue(env, "STEWARD_BOOTSTRAP_SET_ROLE_PASSWORDS")).toBe("true");
       expect(env).not.toContain("steward-change-me");

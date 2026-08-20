@@ -76,6 +76,8 @@ services:
       - "steward_migration_role=steward_migrator"
       - "-v"
       - "steward_platform_role=steward_platform"
+      - "-v"
+      - "steward_bootstrap_role=steward_bootstrap_owner"
       - "-f"
       - "/scripts/postgres/rls-activate.sql"
     restart: "no"
@@ -111,9 +113,15 @@ services:
       NODE_ENV: production
       DATABASE_URL: "${DATABASE_URL:?DATABASE_URL must be set}"
       STEWARD_APP_DATABASE_ROLE: "${STEWARD_APP_DATABASE_ROLE:-steward_app}"
+      STEWARD_BOOTSTRAP_DATABASE_ROLE: "${STEWARD_BOOTSTRAP_DATABASE_ROLE:-steward_bootstrap_owner}"
+      STEWARD_MIGRATION_DATABASE_ROLE: "${STEWARD_MIGRATION_DATABASE_ROLE:-steward_migrator}"
       STEWARD_PLATFORM_DATABASE_URL: "${STEWARD_PLATFORM_DATABASE_URL:?STEWARD_PLATFORM_DATABASE_URL must be set}"
       STEWARD_PLATFORM_DATABASE_ROLE: "${STEWARD_PLATFORM_DATABASE_ROLE:-steward_platform}"
       SKIP_MIGRATIONS: "true"
+      # The bundled PostgreSQL endpoint is intentionally plaintext on the
+      # isolated Compose network. External database URLs must omit this opt-out
+      # and provide verified TLS instead.
+      STEWARD_ALLOW_INSECURE_DB: "${STEWARD_ALLOW_INSECURE_DB:-}"
       STEWARD_ALLOW_UNVERIFIED_DB_TLS: "${STEWARD_ALLOW_UNVERIFIED_DB_TLS:-}"
       STEWARD_MASTER_PASSWORD: "${STEWARD_MASTER_PASSWORD:?Set STEWARD_MASTER_PASSWORD in .env}"
       STEWARD_JWT_SECRET: "${STEWARD_JWT_SECRET:?Set STEWARD_JWT_SECRET in .env}"
@@ -168,7 +176,10 @@ services:
       STEWARD_PROXY_PORT: "8080"
       DATABASE_URL: "${DATABASE_URL:?DATABASE_URL must be set}"
       STEWARD_APP_DATABASE_ROLE: "${STEWARD_APP_DATABASE_ROLE:-steward_app}"
+      STEWARD_BOOTSTRAP_DATABASE_ROLE: "${STEWARD_BOOTSTRAP_DATABASE_ROLE:-steward_bootstrap_owner}"
+      STEWARD_MIGRATION_DATABASE_ROLE: "${STEWARD_MIGRATION_DATABASE_ROLE:-steward_migrator}"
       STEWARD_PLATFORM_DATABASE_ROLE: "${STEWARD_PLATFORM_DATABASE_ROLE:-steward_platform}"
+      STEWARD_ALLOW_INSECURE_DB: "${STEWARD_ALLOW_INSECURE_DB:-}"
       STEWARD_ALLOW_UNVERIFIED_DB_TLS: "${STEWARD_ALLOW_UNVERIFIED_DB_TLS:-}"
       STEWARD_MASTER_PASSWORD: "${STEWARD_MASTER_PASSWORD:?Set STEWARD_MASTER_PASSWORD in .env}"
       # JWT secret is required in production (auth verifyToken refuses dev fallback).

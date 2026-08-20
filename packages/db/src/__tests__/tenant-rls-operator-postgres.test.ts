@@ -1,6 +1,11 @@
 import { afterAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { randomUUID } from "node:crypto";
 import postgres from "postgres";
+import { createDb } from "../client";
+import {
+  assertPlatformDatabaseAuthority,
+  assertRlsDeploymentSafety,
+} from "../rls-deployment-safety";
 
 const describeWithPostgres = process.env.DATABASE_URL ? describe : describe.skip;
 setDefaultTimeout(180_000);
@@ -12,6 +17,7 @@ const migrationRole = `steward_migrator_${suffix}`;
 const definerRole = `steward_definer_${suffix}`;
 const platformRole = `steward_platform_${suffix}`;
 const appRolePassword = randomUUID().replaceAll("-", "");
+const migrationRolePassword = randomUUID().replaceAll("-", "");
 const platformRolePassword = randomUUID().replaceAll("-", "");
 
 function databaseUrl(database: string): string {
@@ -31,6 +37,13 @@ function platformDatabaseUrl(): string {
   const url = new URL(databaseUrl(databaseName));
   url.username = platformRole;
   url.password = platformRolePassword;
+  return url.toString();
+}
+
+function migrationDatabaseUrl(): string {
+  const url = new URL(databaseUrl(databaseName));
+  url.username = migrationRole;
+  url.password = migrationRolePassword;
   return url.toString();
 }
 
@@ -73,6 +86,8 @@ async function runOperatorScript(name: string, includeRoles = false) {
       `steward_migration_role=${migrationRole}`,
       "-v",
       `steward_platform_role=${platformRole}`,
+      "-v",
+      `steward_bootstrap_role=${definerRole}`,
     );
   }
   command.push("-f", `scripts/postgres/${name}`);
@@ -117,7 +132,57 @@ describeWithPostgres("SEC-169 operator lifecycle on the real Steward schema", ()
       await runOperatorScript("rls-bootstrap.sql", true);
       await runOperatorScript("rls-upgrade-personal-lifecycle.sql", true);
       await admin.unsafe(`ALTER ROLE ${appRole} PASSWORD '${appRolePassword}'`);
+      await admin.unsafe(`ALTER ROLE ${migrationRole} PASSWORD '${migrationRolePassword}'`);
       await admin.unsafe(`ALTER ROLE ${platformRole} PASSWORD '${platformRolePassword}'`);
+
+      // Core upgrades intentionally retain the database-owner/operator URL:
+      // core migrations can replace the non-login definer's ABI, while the
+      // restricted plugin migrator cannot mutate that privileged schema.
+      const postSplitCore = await runCommand(
+        ["bun", "run", "packages/api/scripts/migrate-production.ts", "core"],
+        {
+          DATABASE_URL: databaseUrl(databaseName),
+          MIGRATION_DATABASE_URL: databaseUrl(databaseName),
+        },
+      );
+      expect(postSplitCore).toContain('"phase":"core"');
+      const restricted = postgres(migrationDatabaseUrl(), { max: 1 });
+      try {
+        let restrictedUpgradeError: unknown;
+        try {
+          await restricted.unsafe(`
+            CREATE OR REPLACE FUNCTION steward_bootstrap.platform_stats()
+            RETURNS TABLE (tenant_count bigint, agent_count bigint, transaction_count bigint)
+            LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog AS $$
+              SELECT
+                (SELECT count(*) FROM public.tenants),
+                (SELECT count(*) FROM public.agents),
+                (SELECT count(*) FROM public.transactions)
+            $$
+          `);
+        } catch (error) {
+          restrictedUpgradeError = error;
+        }
+        expect(restrictedUpgradeError).toMatchObject({ code: "42501" });
+      } finally {
+        await restricted.end();
+      }
+
+      // This is a real post-split schema upgrade through the restricted
+      // plugin migrator login—not an owner connection that merely reports up to date.
+      const pluginMigration = await runCommand(
+        ["bun", "run", "packages/api/scripts/migrate-production.ts", "plugins"],
+        {
+          DATABASE_URL: migrationDatabaseUrl(),
+          MIGRATION_DATABASE_URL: migrationDatabaseUrl(),
+          STEWARD_PLUGINS: "capabilities",
+          STEWARD_MASTER_PASSWORD: "test-restricted-migrator-master-password",
+          STEWARD_AUDIT_HMAC_KEY:
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+          STEWARD_KDF_SALT: "0123456789abcdef0123456789abcdef",
+        },
+      );
+      expect(pluginMigration).toContain('"pluginName":"capabilities"');
       const roleRows = await db<
         {
           rolname: string;
@@ -196,6 +261,8 @@ describeWithPostgres("SEC-169 operator lifecycle on the real Steward schema", ()
         "function:steward_bootstrap.platform_delete_user(p_user_id uuid):EXECUTE:false",
         "function:steward_bootstrap.platform_revoke_user_refresh_tokens(p_user_id uuid):EXECUTE:false",
         "function:steward_bootstrap.platform_set_user_deactivation(p_user_id uuid, p_deactivated boolean):EXECUTE:false",
+        "function:steward_bootstrap.platform_stats():EXECUTE:false",
+        "function:steward_bootstrap.platform_tenants(p_limit integer, p_offset integer):EXECUTE:false",
         "function:steward_bootstrap.retention_delete_deactivated_users(p_days integer):EXECUTE:false",
         "function:steward_rls.tenant_id():EXECUTE:false",
         "relation:public.audit_chain_heads:INSERT:false",
@@ -239,6 +306,60 @@ describeWithPostgres("SEC-169 operator lifecycle on the real Steward schema", ()
         return rows.map((row) => row.acl);
       };
       expect(await platformNamedAcls()).toEqual(expectedPlatformAcls);
+
+      const [connectPosture] = await db<
+        {
+          app_connect: boolean;
+          migration_connect: boolean;
+          platform_connect: boolean;
+          public_connect: boolean;
+        }[]
+      >`
+        SELECT
+          has_database_privilege(${appRole}, current_database(), 'CONNECT') AS app_connect,
+          has_database_privilege(${migrationRole}, current_database(), 'CONNECT') AS migration_connect,
+          has_database_privilege(${platformRole}, current_database(), 'CONNECT') AS platform_connect,
+          EXISTS (
+            SELECT 1 FROM pg_database database_object
+            CROSS JOIN LATERAL aclexplode(
+              COALESCE(database_object.datacl, acldefault('d', database_object.datdba))
+            ) privilege
+            WHERE database_object.datname = current_database()
+              AND privilege.grantee = 0 AND privilege.privilege_type = 'CONNECT'
+          ) AS public_connect
+      `;
+      expect(connectPosture).toEqual({
+        app_connect: true,
+        migration_connect: true,
+        platform_connect: true,
+        public_connect: false,
+      });
+
+      await expect(
+        db.begin(async (tx) => {
+          await tx.unsafe(`SET LOCAL ROLE ${appRole}`);
+          return tx.unsafe("SELECT * FROM steward_bootstrap.platform_stats()");
+        }),
+      ).rejects.toMatchObject({ code: "42501" });
+      const [platformStats] = await db.begin(async (tx) => {
+        await tx.unsafe(`SET LOCAL ROLE ${platformRole}`);
+        return tx<{ tenant_count: number }[]>`
+          SELECT tenant_count::int FROM steward_bootstrap.platform_stats()
+        `;
+      });
+      expect(platformStats?.tenant_count).toBeGreaterThanOrEqual(0);
+
+      await db.unsafe(`
+        CREATE FUNCTION steward_bootstrap.unknown_authority_probe()
+        RETURNS integer LANGUAGE sql SECURITY DEFINER AS 'SELECT 1'
+      `);
+      try {
+        await expect(runOperatorScript("rls-bootstrap.sql", true)).rejects.toThrow(
+          "bootstrap SECURITY DEFINER inventory drift",
+        );
+      } finally {
+        await db.unsafe("DROP FUNCTION steward_bootstrap.unknown_authority_probe()");
+      }
 
       await db.unsafe(`GRANT USAGE ON SCHEMA public TO ${platformRole}`);
       await db.unsafe(`GRANT UPDATE ON public.audit_events TO ${platformRole} WITH GRANT OPTION`);
@@ -315,6 +436,75 @@ describeWithPostgres("SEC-169 operator lifecycle on the real Steward schema", ()
       // Retained provider evidence is permanently forced with no app policy,
       // so it is intentionally absent from the 71 policy-bearing relations.
       expect(activated).toEqual({ enabled: 71, forced: 71, maintenance: 71 });
+
+      // Exercise the same load-bearing runtime gates used by the API and proxy
+      // through their real restricted login connections. This catches query
+      // binding errors that source assertions and mocked executors cannot.
+      const appHandle = createDb(appDatabaseUrl());
+      try {
+        await assertRlsDeploymentSafety(appHandle.db, {
+          expectedRole: appRole,
+          expectedPlatformRole: platformRole,
+          expectedBootstrapRole: definerRole,
+          expectedMigrationRole: migrationRole,
+        });
+      } finally {
+        await appHandle.client.end({ timeout: 5 });
+      }
+      const platformHandle = createDb(platformDatabaseUrl());
+      try {
+        await assertPlatformDatabaseAuthority(platformHandle.db, platformRole);
+      } finally {
+        await platformHandle.client.end({ timeout: 5 });
+      }
+
+      await db`ALTER FUNCTION steward_bootstrap.platform_stats() VOLATILE`;
+      const driftedApp = createDb(appDatabaseUrl());
+      try {
+        await expect(
+          assertRlsDeploymentSafety(driftedApp.db, {
+            expectedRole: appRole,
+            expectedPlatformRole: platformRole,
+            expectedBootstrapRole: definerRole,
+            expectedMigrationRole: migrationRole,
+          }),
+        ).rejects.toThrow("RLS_DEPLOYMENT_FUNCTION_DEFINITION_DRIFT");
+        await expect(runOperatorScript("rls-activate.sql")).rejects.toThrow(
+          "privileged function semantic manifest drift",
+        );
+      } finally {
+        await driftedApp.client.end({ timeout: 5 });
+        await db`ALTER FUNCTION steward_bootstrap.platform_stats() STABLE`;
+      }
+
+      await db.unsafe(`
+        CREATE FUNCTION public.steward_test_unknown_definer_${suffix}()
+        RETURNS integer LANGUAGE sql SECURITY DEFINER SET search_path = pg_catalog
+        AS 'SELECT 1'
+      `);
+      await db.unsafe(
+        `REVOKE ALL ON FUNCTION public.steward_test_unknown_definer_${suffix}() FROM PUBLIC`,
+      );
+      await db.unsafe(
+        `GRANT EXECUTE ON FUNCTION public.steward_test_unknown_definer_${suffix}() TO ${appRole}`,
+      );
+      const hostileDefinerApp = createDb(appDatabaseUrl());
+      try {
+        await expect(
+          assertRlsDeploymentSafety(hostileDefinerApp.db, {
+            expectedRole: appRole,
+            expectedPlatformRole: platformRole,
+            expectedBootstrapRole: definerRole,
+            expectedMigrationRole: migrationRole,
+          }),
+        ).rejects.toThrow("RLS_DEPLOYMENT_UNKNOWN_EXECUTABLE_SECURITY_DEFINER");
+        await expect(runOperatorScript("rls-activate.sql")).rejects.toThrow(
+          "unknown executable public SECURITY DEFINER function",
+        );
+      } finally {
+        await hostileDefinerApp.client.end({ timeout: 5 });
+        await db.unsafe(`DROP FUNCTION public.steward_test_unknown_definer_${suffix}()`);
+      }
 
       const refreshUserId = randomUUID();
       const sourceTenant = `source-${suffix}`;
@@ -517,6 +707,7 @@ describeWithPostgres("SEC-169 operator lifecycle on the real Steward schema", ()
           DATABASE_DRIVER: "postgres-js",
           STEWARD_PLATFORM_DATABASE_URL: platformDatabaseUrl(),
           STEWARD_PLATFORM_DATABASE_ROLE: platformRole,
+          STEWARD_BOOTSTRAP_DATABASE_ROLE: definerRole,
           NODE_ENV: "test",
           APP_URL: "https://steward.test",
           JWT_SECRET: `rls-jwt-secret-${suffix}-0123456789abcdef`,
@@ -563,10 +754,19 @@ describeWithPostgres("SEC-169 operator lifecycle on the real Steward schema", ()
       expect(rolledBack).toEqual({ enabled: 0, forced: 0 });
 
       await runOperatorScript("rls-activate.sql");
-      const rerun = await runCommand(["bun", "run", "packages/db/src/migrate.ts"], {
-        DATABASE_URL: databaseUrl(databaseName),
-      });
-      expect(rerun).toContain("Already up to date");
+      const rerun = await runCommand(
+        ["bun", "run", "packages/api/scripts/migrate-production.ts", "plugins"],
+        {
+          DATABASE_URL: migrationDatabaseUrl(),
+          MIGRATION_DATABASE_URL: migrationDatabaseUrl(),
+          STEWARD_PLUGINS: "capabilities",
+          STEWARD_MASTER_PASSWORD: "test-restricted-migrator-master-password",
+          STEWARD_AUDIT_HMAC_KEY:
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+          STEWARD_KDF_SALT: "0123456789abcdef0123456789abcdef",
+        },
+      );
+      expect(rerun).toContain('"pluginName":"capabilities"');
     } finally {
       await db.end();
     }

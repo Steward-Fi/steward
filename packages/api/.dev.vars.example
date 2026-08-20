@@ -4,6 +4,8 @@ NODE_ENV=development
 STEWARD_ALLOW_DEV_SECRETS=true
 DATABASE_URL=postgres://USER:PASS@HOST/DB?sslmode=verify-full
 STEWARD_APP_DATABASE_ROLE=steward_app
+STEWARD_BOOTSTRAP_DATABASE_ROLE=steward_bootstrap_owner
+STEWARD_MIGRATION_DATABASE_ROLE=steward_migrator
 STEWARD_PLATFORM_DATABASE_URL=postgres://PLATFORM_USER:PASS@HOST/DB?sslmode=verify-full
 STEWARD_PLATFORM_DATABASE_ROLE=steward_platform
 KV_REST_API_URL=https://YOUR-DB.upstash.io

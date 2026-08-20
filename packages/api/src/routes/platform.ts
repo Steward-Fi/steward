@@ -927,7 +927,9 @@ platform.get("/stats", async (c) => {
   const scopeResponse = requirePlatformRouteScope(c, "platform:stats:read");
   if (scopeResponse) return scopeResponse;
 
-  const result = await getDb().execute(sql`SELECT * FROM steward_bootstrap.platform_stats()`);
+  const result = await withPlatformAuthorityDatabase((platformDb) =>
+    platformDb.execute(sql`SELECT * FROM steward_bootstrap.platform_stats()`),
+  );
   const [stats] = (
     Array.isArray(result) ? result : ((result as { rows?: unknown[] }).rows ?? [])
   ) as Array<{ tenant_count: number; agent_count: number; transaction_count: number }> | [];
@@ -1165,8 +1167,8 @@ platform.get("/tenants", async (c) => {
 
   const limit = parseListLimit(c.req.query("limit"));
   const offset = parseListOffset(c.req.query("offset"));
-  const result = await getDb().execute(
-    sql`SELECT * FROM steward_bootstrap.platform_tenants(${limit}, ${offset})`,
+  const result = await withPlatformAuthorityDatabase((platformDb) =>
+    platformDb.execute(sql`SELECT * FROM steward_bootstrap.platform_tenants(${limit}, ${offset})`),
   );
   const rawRows = (
     Array.isArray(result) ? result : ((result as { rows?: unknown[] }).rows ?? [])

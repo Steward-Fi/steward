@@ -93,6 +93,8 @@ function renderEnv(options: InitOptions): string {
     "MIGRATION_DATABASE_URL=" + migrationDatabaseUrl,
     "STEWARD_PLATFORM_DATABASE_URL=" + platformDatabaseUrl,
     "STEWARD_APP_DATABASE_ROLE=steward_app",
+    "STEWARD_BOOTSTRAP_DATABASE_ROLE=steward_bootstrap_owner",
+    "STEWARD_MIGRATION_DATABASE_ROLE=steward_migrator",
     "STEWARD_PLATFORM_DATABASE_ROLE=steward_platform",
     "POSTGRES_DB=steward",
     "POSTGRES_USER=steward",

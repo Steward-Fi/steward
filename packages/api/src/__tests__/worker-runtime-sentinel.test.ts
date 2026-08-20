@@ -28,6 +28,8 @@ test("Worker RLS readiness is authority-keyed, retryable, and gates work", async
     DATABASE_DRIVER: "neon-websocket",
     NODE_ENV: "production",
     STEWARD_APP_DATABASE_ROLE: "steward_app",
+    STEWARD_BOOTSTRAP_DATABASE_ROLE: "steward_bootstrap_owner",
+    STEWARD_MIGRATION_DATABASE_ROLE: "steward_migrator",
     STEWARD_PLATFORM_DATABASE_ROLE: "steward_platform",
   };
   let assertions = 0;
@@ -42,6 +44,8 @@ test("Worker RLS readiness is authority-keyed, retryable, and gates work", async
     expect(options).toEqual({
       expectedRole: "steward_app",
       expectedPlatformRole: "steward_platform",
+      expectedBootstrapRole: "steward_bootstrap_owner",
+      expectedMigrationRole: "steward_migrator",
     });
     if (rejectOnce) {
       rejectOnce = false;
@@ -250,6 +254,8 @@ test("cold Worker cron rejects a hostile database role before starting sweeps", 
     DATABASE_DRIVER: "neon-websocket",
     NODE_ENV: "production",
     STEWARD_APP_DATABASE_ROLE: "steward_app",
+    STEWARD_BOOTSTRAP_DATABASE_ROLE: "steward_bootstrap_owner",
+    STEWARD_MIGRATION_DATABASE_ROLE: "steward_migrator",
     STEWARD_PLATFORM_DATABASE_ROLE: "steward_platform",
     STEWARD_JWT_SECRET: "worker-hostile-role-secret-at-least-32-chars",
   };

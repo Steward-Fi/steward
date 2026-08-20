@@ -208,10 +208,22 @@ app.get("/ready", async (c) => {
     if (process.env.NODE_ENV === "production") {
       const expectedRole = process.env.STEWARD_APP_DATABASE_ROLE;
       const expectedPlatformRole = process.env.STEWARD_PLATFORM_DATABASE_ROLE;
-      if (!expectedRole || !expectedPlatformRole) {
+      const expectedBootstrapRole = process.env.STEWARD_BOOTSTRAP_DATABASE_ROLE;
+      const expectedMigrationRole = process.env.STEWARD_MIGRATION_DATABASE_ROLE;
+      if (
+        !expectedRole ||
+        !expectedPlatformRole ||
+        !expectedBootstrapRole ||
+        !expectedMigrationRole
+      ) {
         throw new Error("STEWARD database role expectations are required in production");
       }
-      await assertRlsDeploymentSafety(db, { expectedRole, expectedPlatformRole });
+      await assertRlsDeploymentSafety(db, {
+        expectedRole,
+        expectedPlatformRole,
+        expectedBootstrapRole,
+        expectedMigrationRole,
+      });
       checks.rlsDeployment = { ok: true };
     }
   } catch {
@@ -368,11 +380,18 @@ if (shouldUsePGLite()) {
 if (productionPostgresRuntime) {
   const expectedRole = process.env.STEWARD_APP_DATABASE_ROLE;
   const expectedPlatformRole = process.env.STEWARD_PLATFORM_DATABASE_ROLE;
-  if (!expectedRole || !expectedPlatformRole) {
+  const expectedBootstrapRole = process.env.STEWARD_BOOTSTRAP_DATABASE_ROLE;
+  const expectedMigrationRole = process.env.STEWARD_MIGRATION_DATABASE_ROLE;
+  if (!expectedRole || !expectedPlatformRole || !expectedBootstrapRole || !expectedMigrationRole) {
     throw new Error("STEWARD database role expectations are required in production");
   }
   try {
-    await assertRlsDeploymentSafety(getDb(), { expectedRole, expectedPlatformRole });
+    await assertRlsDeploymentSafety(getDb(), {
+      expectedRole,
+      expectedPlatformRole,
+      expectedBootstrapRole,
+      expectedMigrationRole,
+    });
   } catch (error) {
     console.error(
       "[steward] RLS deployment safety assertion failed — cannot start",

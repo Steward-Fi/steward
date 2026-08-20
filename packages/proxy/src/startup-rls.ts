@@ -10,8 +10,15 @@ export async function assertProxyRlsReady(
   if (environment.NODE_ENV === "development" || environment.NODE_ENV === "test") return;
   const expectedRole = environment.STEWARD_APP_DATABASE_ROLE?.trim();
   const expectedPlatformRole = environment.STEWARD_PLATFORM_DATABASE_ROLE?.trim();
-  if (!expectedRole || !expectedPlatformRole) {
+  const expectedBootstrapRole = environment.STEWARD_BOOTSTRAP_DATABASE_ROLE?.trim();
+  const expectedMigrationRole = environment.STEWARD_MIGRATION_DATABASE_ROLE?.trim();
+  if (!expectedRole || !expectedPlatformRole || !expectedBootstrapRole || !expectedMigrationRole) {
     throw new Error("PROXY_RLS_DATABASE_ROLES_REQUIRED");
   }
-  await assertSafety(db, { expectedRole, expectedPlatformRole });
+  await assertSafety(db, {
+    expectedRole,
+    expectedPlatformRole,
+    expectedBootstrapRole,
+    expectedMigrationRole,
+  });
 }

@@ -53,7 +53,10 @@ export {
   runPluginMigrations,
   sanitizePluginMigrationId,
 } from "./plugin-migrate";
-export { assertRlsDeploymentSafety } from "./rls-deployment-safety";
+export {
+  assertPlatformDatabaseAuthority,
+  assertRlsDeploymentSafety,
+} from "./rls-deployment-safety";
 export {
   ALL_INVENTORIED_TABLES,
   BOOTSTRAP_ROOT_TABLES,

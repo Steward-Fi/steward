@@ -67,6 +67,8 @@ export interface Env {
   DATABASE_DRIVER?: string;
   NODE_ENV?: string;
   STEWARD_APP_DATABASE_ROLE?: string;
+  STEWARD_BOOTSTRAP_DATABASE_ROLE?: string;
+  STEWARD_MIGRATION_DATABASE_ROLE?: string;
   STEWARD_PLATFORM_DATABASE_URL?: string;
   STEWARD_PLATFORM_DATABASE_ROLE?: string;
   STEWARD_ALLOW_INSECURE_DB?: string;
@@ -338,16 +340,29 @@ export async function ensureWorkerRlsReady(
   const databaseUrl = env.DATABASE_URL?.trim();
   const expectedRole = env.STEWARD_APP_DATABASE_ROLE?.trim();
   const expectedPlatformRole = env.STEWARD_PLATFORM_DATABASE_ROLE?.trim();
-  if (!databaseUrl || !expectedRole || !expectedPlatformRole) {
+  const expectedBootstrapRole = env.STEWARD_BOOTSTRAP_DATABASE_ROLE?.trim();
+  const expectedMigrationRole = env.STEWARD_MIGRATION_DATABASE_ROLE?.trim();
+  if (
+    !databaseUrl ||
+    !expectedRole ||
+    !expectedPlatformRole ||
+    !expectedBootstrapRole ||
+    !expectedMigrationRole
+  ) {
     throw new Error("WORKER_RLS_DATABASE_AUTHORITY_REQUIRED");
   }
-  const key = `${env.DATABASE_DRIVER?.trim().toLowerCase() ?? ""}\n${databaseUrl}\n${expectedRole}\n${expectedPlatformRole}`;
+  const key = `${env.DATABASE_DRIVER?.trim().toLowerCase() ?? ""}\n${databaseUrl}\n${expectedRole}\n${expectedPlatformRole}\n${expectedBootstrapRole}\n${expectedMigrationRole}`;
   let ready = workerRlsReadyByDatabase.get(key);
   if (!ready) {
     if (workerRlsReadyByDatabase.size >= MAX_WORKER_RLS_AUTHORITIES) {
       throw new Error("WORKER_RLS_AUTHORITY_CACHE_EXHAUSTED");
     }
-    ready = assertReady(getDb(), { expectedRole, expectedPlatformRole }).catch((error) => {
+    ready = assertReady(getDb(), {
+      expectedRole,
+      expectedPlatformRole,
+      expectedBootstrapRole,
+      expectedMigrationRole,
+    }).catch((error) => {
       workerRlsReadyByDatabase.delete(key);
       throw error;
     });
