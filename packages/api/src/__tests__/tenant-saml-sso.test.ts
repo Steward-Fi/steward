@@ -93,7 +93,7 @@ describe("tenant SAML SSO config foundation", () => {
     ).toBe("groupRoleMappings role must be admin, developer, billing, viewer, or member");
   });
 
-  it("adds MFA-gated tenant routes, audit rollback, metadata, login, and ACS guardrails", () => {
+  it("adds MFA-gated tenant routes, atomic audit, metadata, login, and ACS guardrails", () => {
     const tenantConfigSource = read("packages/api/src/routes/tenant-config.ts");
     const authSource = read("packages/api/src/routes/auth.ts");
     const migration = allMigrations();
@@ -103,7 +103,8 @@ describe("tenant SAML SSO config foundation", () => {
     expect(tenantConfigSource).toContain('tenantConfigRoutes.delete("/:id/saml-sso"');
     expect(tenantConfigSource).toContain('requireRecentTenantAdminMfa(c, "SAML SSO config');
     expect(tenantConfigSource).toContain("tenant.saml_sso.update.authorized");
-    expect(tenantConfigSource).toContain("restoreTenantSamlSsoConfig");
+    expect(tenantConfigSource).toContain("withTenantAuditedTransaction");
+    expect(tenantConfigSource).not.toContain("restoreTenantSamlSsoConfig");
 
     expect(authSource).toContain('auth.get("/saml/:tenantId/metadata"');
     expect(authSource).toContain('auth.get("/saml/:tenantId/login"');
