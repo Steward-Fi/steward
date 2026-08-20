@@ -64,18 +64,13 @@ let proxyMod: typeof import("../handlers/proxy");
 
 let faultAuditInsert = false;
 
-type TxLike = {
-  execute: (query: unknown) => Promise<unknown>;
-  transaction?: (cb: (tx: TxLike) => Promise<unknown>, ...rest: unknown[]) => Promise<unknown>;
-};
+type TxLike = { execute: (query: unknown) => Promise<unknown> };
 
 function isAuditInsert(dialect: unknown, query: unknown): boolean {
   try {
     const built = (dialect as { sqlToQuery: (q: unknown) => { sql?: string } }).sqlToQuery(query);
-    const text = String(built?.sql ?? "")
-      .toLowerCase()
-      .replaceAll('"', "");
-    return /\binsert\s+into\s+(?:[a-z0-9_]+\.)?audit_events\b/.test(text);
+    const text = String(built?.sql ?? "").toLowerCase();
+    return text.includes("insert into audit_events");
   } catch {
     return false;
   }
@@ -88,32 +83,17 @@ function installFaultInjectingDb(db: unknown): void {
   };
   const dialect = anyDb.dialect;
   const originalTransaction = anyDb.transaction.bind(anyDb);
-  const instrumentTransaction = (tx: TxLike): void => {
-    const originalExecute = tx.execute.bind(tx);
-    tx.execute = async (query: unknown) => {
-      if (faultAuditInsert && isAuditInsert(dialect, query)) {
-        faultAuditInsert = false; // fault the first audit insert only
-        throw new Error("injected audit-chain fault");
-      }
-      return originalExecute(query);
-    };
-
-    if (tx.transaction) {
-      const originalNestedTransaction = tx.transaction.bind(tx);
-      tx.transaction = (cb: (nestedTx: TxLike) => Promise<unknown>, ...rest: unknown[]) =>
-        originalNestedTransaction(
-          async (nestedTx: TxLike) => {
-            instrumentTransaction(nestedTx);
-            return cb(nestedTx);
-          },
-          ...rest,
-        );
-    }
-  };
   anyDb.transaction = (cb: (tx: TxLike) => Promise<unknown>, ...rest: unknown[]) => {
     return originalTransaction(
       async (tx: TxLike) => {
-        instrumentTransaction(tx);
+        const originalExecute = tx.execute.bind(tx);
+        tx.execute = async (query: unknown) => {
+          if (faultAuditInsert && isAuditInsert(dialect, query)) {
+            faultAuditInsert = false; // fault the first audit insert only
+            throw new Error("injected audit-chain fault");
+          }
+          return originalExecute(query);
+        };
         return cb(tx);
       },
       ...rest,
