@@ -9,7 +9,9 @@ import {
   getDb,
   getSql,
   hasTenantTransactionDatabase,
+  setPGLiteOverride,
   waitUntilRequestDatabaseTask,
+  withIndependentDatabase,
   withRequestDatabase,
   withTenantTransactionDatabase,
   withTenantTransactionDatabaseDeadline,
@@ -79,6 +81,34 @@ describe("request-scoped database context", () => {
 
   test("declines commit deferral when no outer owner is present", () => {
     expect(afterTenantTransactionCommit(() => undefined)).toBe(false);
+  });
+
+  test("an independent phase uses the request pool and restores the tenant transaction", async () => {
+    const requestDb = { marker: "request" } as unknown as ReturnType<typeof getDb>;
+    const transactionDb = { marker: "tenant-transaction" } as unknown as ReturnType<typeof getDb>;
+    await withRequestDatabase(requestDb, async () => {
+      await withTenantTransactionDatabase(transactionDb, { tenantId: "tenant-a" }, async () => {
+        expect((getDb() as unknown as { marker: string }).marker).toBe("tenant-transaction");
+        const marker = await withIndependentDatabase(async (independentDb) => {
+          expect(hasTenantTransactionDatabase()).toBe(false);
+          expect(independentDb).toBe(getDb());
+          await Promise.resolve();
+          return (independentDb as unknown as { marker: string }).marker;
+        });
+        expect(marker).toBe("request");
+        expect((getDb() as unknown as { marker: string }).marker).toBe("tenant-transaction");
+      });
+    });
+  });
+
+  test("fails closed when an active PGLite transaction cannot provide an independent commit", async () => {
+    const pgliteDb = { marker: "pglite" } as unknown as ReturnType<typeof getDb>;
+    setPGLiteOverride(pgliteDb, async () => undefined);
+    await withTenantTransactionDatabase(pgliteDb, { tenantId: "tenant-a" }, async () => {
+      await expect(withIndependentDatabase(async () => undefined)).rejects.toThrow(
+        "RLS_INDEPENDENT_TRANSACTION_UNSUPPORTED_PGLITE",
+      );
+    });
   });
 
   test("rejects reuse of an active tenant transaction for another tenant or user", async () => {

@@ -732,7 +732,7 @@ export async function getTransactionStats(agentId: string, chainId?: number) {
         gte(transactions.createdAt, oneWeekAgo),
         // An ambiguous broadcast may already have spent funds. Count it until
         // receipt reconciliation proves the final chain outcome.
-        sql`${transactions.status} in ('signed', 'broadcast', 'confirmed', 'outcome_unknown')`,
+        sql`${transactions.status} in ('approved', 'signed', 'broadcast', 'confirmed', 'outcome_unknown')`,
       ),
     );
 
@@ -780,8 +780,9 @@ export async function withAuthenticatedTenantDatabase<T>(
 
 /**
  * Commit an autonomous tenant-RLS unit while tenantAuth's request transaction
- * remains open. Pre-I/O reservations use this boundary so a later request
- * rollback cannot erase the non-replayable execution fence.
+ * remains open. Security-sensitive pre-I/O checkpoints use this boundary so a
+ * later request rollback cannot erase a non-replayable execution fence or
+ * evidence after an external side effect.
  */
 export async function withIndependentAuthenticatedTenantDatabase<T>(
   tenantId: string,

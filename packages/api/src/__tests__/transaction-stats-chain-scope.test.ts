@@ -10,8 +10,8 @@
  * over- or under-counting multi-chain spend caps.
  *
  * This drives the REAL getTransactionStats against an in-memory PGLite DB. It
- * seeds two committed (signed) transactions for one agent on two different
- * chains, then asserts the spend counters are scoped to the requested chain.
+ * seeds committed transactions across chains, including an approved pre-relay
+ * reservation, then asserts the spend counters are scoped to the request chain.
  *
  * WITHOUT the fix `getTransactionStats(agentId, chainId)` ignores chainId and
  * returns the cross-chain sum, so `spentToday`/`spentThisWeek` come back as the
@@ -54,18 +54,25 @@ const RECIPIENT = "0x1234567890123456789012345678901234567890";
 //   chain SOLANA:      5 SOL worth of lamports (5e9)
 const ETH_MAINNET = 1;
 const SOLANA = 1399811149; // Steward's Solana chain id sentinel; any distinct id works
+const MONERO = 301;
 const UNRELATED_CHAIN = 137;
 
 const ETH_SPEND = "3000000000000000000"; // 3e18 wei
 const SOL_SPEND = "5000000000"; // 5e9 lamports
+const APPROVED_MONERO_SPEND = "17";
 
-async function seedTx(idSuffix: string, chainId: number, value: string) {
+async function seedTx(
+  idSuffix: string,
+  chainId: number,
+  value: string,
+  status: "approved" | "signed" = "signed",
+) {
   await getDb()
     .insert(transactions)
     .values({
       id: `${AGENT_ID}-${idSuffix}`,
       agentId: AGENT_ID,
-      status: "signed",
+      status,
       toAddress: RECIPIENT,
       value,
       chainId,
@@ -86,9 +93,10 @@ describe("getTransactionStats chain scoping (issue #110)", () => {
       walletAddress: RECIPIENT,
     });
 
-    // One committed spend on each chain, both inside the rolling day/week window.
+    // Committed and pre-relay reserved spend inside the rolling day/week window.
     await seedTx("eth", ETH_MAINNET, ETH_SPEND);
     await seedTx("sol", SOLANA, SOL_SPEND);
+    await seedTx("monero-approved", MONERO, APPROVED_MONERO_SPEND, "approved");
     await getDb()
       .insert(operatorTransferReservations)
       .values([
@@ -178,14 +186,24 @@ describe("getTransactionStats chain scoping (issue #110)", () => {
     expect(stats.spentThisWeek.toString()).toBe("0");
   });
 
+  it("reserves approved pre-relay spend before external I/O completes", async () => {
+    const stats = await getTransactionStats(AGENT_ID, MONERO);
+    expect(stats.spentToday.toString()).toBe(APPROVED_MONERO_SPEND);
+    expect(stats.spentThisWeek.toString()).toBe(APPROVED_MONERO_SPEND);
+  });
+
   it("preserves the cross-chain total when no chainId is supplied (display path)", async () => {
     const stats = await getTransactionStats(AGENT_ID);
-    const combined = (BigInt(ETH_SPEND) + BigInt(SOL_SPEND)).toString();
+    const combined = (
+      BigInt(ETH_SPEND) +
+      BigInt(SOL_SPEND) +
+      BigInt(APPROVED_MONERO_SPEND)
+    ).toString();
     expect(stats.spentToday.toString()).toBe(combined);
     expect(stats.spentThisWeek.toString()).toBe(combined);
     // Counts remain agent-wide (chain-agnostic) regardless of chain scoping and
     // include the two active operator transfers seeded above.
-    expect(stats.recentTxCount24h).toBe(4);
+    expect(stats.recentTxCount24h).toBe(5);
   });
 
   it("returns pending and final operator USDC separately from native-chain spend", async () => {
@@ -199,10 +217,10 @@ describe("getTransactionStats chain scoping (issue #110)", () => {
 
   it("counts pending and final operator transfers in core rate limits", async () => {
     const stats = await getTransactionStats(AGENT_ID, ETH_MAINNET);
-    expect(stats.recentTxCount1h).toBe(4);
-    expect(stats.recentTxCount24h).toBe(4);
+    expect(stats.recentTxCount1h).toBe(5);
+    expect(stats.recentTxCount24h).toBe(5);
     // The released reservation is excluded from both counters.
-    expect(stats.recentTxCount24h).not.toBe(5);
+    expect(stats.recentTxCount24h).not.toBe(6);
   });
 });
 

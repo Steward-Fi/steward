@@ -1,7 +1,27 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { createRequire } from "node:module";
-import { agents, getDb, tenants, transactions } from "@stwd/db";
+import {
+  agents,
+  auditEvents,
+  getDb,
+  policies,
+  tenants,
+  transactions,
+  users,
+  userTenants,
+} from "@stwd/db";
+import {
+  generateMoneroWallet,
+  type MoneroBalanceResult,
+  type MoneroKeyPayloadV1,
+  type MoneroTransferDestination,
+  type MoneroWalletBackend,
+  type PreparedMoneroTransfer,
+  Vault,
+} from "@stwd/vault";
 import { eq } from "drizzle-orm";
+import { Hono } from "hono";
+import type { AppVariables } from "../services/context";
 
 type Sql = {
   <T extends unknown[]>(strings: TemplateStringsArray, ...values: unknown[]): Promise<T>;
@@ -21,6 +41,17 @@ const databaseUrl = process.env.DATABASE_URL;
 const describePostgres =
   databaseUrl && !process.env.STEWARD_PGLITE_MEMORY ? describe : describe.skip;
 setDefaultTimeout(120_000);
+const originalRouteEnv = {
+  jwt: process.env.STEWARD_JWT_SECRET,
+  master: process.env.STEWARD_MASTER_PASSWORD,
+  audit: process.env.STEWARD_AUDIT_HMAC_KEY,
+  wallet: process.env.STEWARD_MONERO_WALLET_RPC_URL,
+  daemon: process.env.STEWARD_MONERO_DAEMON_URL,
+  network: process.env.STEWARD_MONERO_NETWORK,
+};
+process.env.STEWARD_JWT_SECRET ??= "monero-real-pg-jwt";
+process.env.STEWARD_MASTER_PASSWORD ??= "monero-real-pg-master";
+process.env.STEWARD_AUDIT_HMAC_KEY ??= "monero-real-pg-audit";
 
 function deferred<T>() {
   let resolve!: (value: T | PromiseLike<T>) => void;
@@ -28,6 +59,111 @@ function deferred<T>() {
     resolve = settle;
   });
   return { promise, resolve };
+}
+
+class SetupMoneroBackend implements MoneroWalletBackend {
+  readonly network = "mainnet" as const;
+  async getDaemonHeight() {
+    return 3_400_000;
+  }
+  async verifyWalletKeys() {}
+  async getBalance(): Promise<MoneroBalanceResult> {
+    throw new Error("not used");
+  }
+  async prepareTransfer(
+    _payload: MoneroKeyPayloadV1,
+    _context: unknown,
+    _request: { destinations: MoneroTransferDestination[] },
+  ): Promise<PreparedMoneroTransfer> {
+    throw new Error("not used");
+  }
+  async relayTransfer(): Promise<{ txHash: string }> {
+    throw new Error("not used");
+  }
+  async getTransactionStatus(): Promise<"not_found"> {
+    return "not_found";
+  }
+  async discardPreparedTransfer() {}
+}
+
+function installRouteMoneroRpc() {
+  const realFetch = globalThis.fetch;
+  const walletFiles = new Map<string, string>();
+  const txHash = "cd".repeat(32);
+  let relayCount = 0;
+  let beforeRelay: (() => void | Promise<void>) | undefined;
+  let relayMode: "success" | "lost-ack" = "success";
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    if (url === "http://monero-route-daemon:18089/get_info") {
+      return Response.json({ status: "OK", nettype: "mainnet", mainnet: true, height: 3_400_000 });
+    }
+    if (url === "http://monero-route-daemon:18089/get_transactions") {
+      const body = JSON.parse(String(init?.body)) as { txs_hashes: string[] };
+      return Response.json({ status: "OK", txs: [], missed_tx: body.txs_hashes });
+    }
+    if (!url.startsWith("http://monero-route-wallet:18083")) {
+      return realFetch(input as RequestInfo, init);
+    }
+    const request = JSON.parse(String(init?.body)) as {
+      method: string;
+      params?: Record<string, unknown>;
+    };
+    const params = request.params ?? {};
+    const rpc = (result: unknown) => Response.json({ jsonrpc: "2.0", id: "0", result });
+    switch (request.method) {
+      case "open_wallet":
+        if (!walletFiles.has(String(params.filename))) {
+          return Response.json({
+            jsonrpc: "2.0",
+            id: "0",
+            error: { code: -1, message: "Failed to open wallet" },
+          });
+        }
+        return rpc({});
+      case "generate_from_keys":
+        walletFiles.set(String(params.filename), String(params.address));
+        return rpc({ address: params.address });
+      case "get_address":
+        return rpc({ address: [...walletFiles.values()].at(-1), addresses: [] });
+      case "refresh":
+        return rpc({ blocks_fetched: 0 });
+      case "transfer":
+        return rpc({
+          amount: 1_000_000_000,
+          fee: 25_000_000,
+          tx_hash: txHash,
+          tx_metadata: "route-real-pg-metadata",
+        });
+      case "relay_tx":
+        relayCount += 1;
+        await beforeRelay?.();
+        if (relayMode === "lost-ack") throw new TypeError("lost relay acknowledgement");
+        return rpc({ tx_hash: txHash });
+      case "close_wallet":
+      case "rescan_spent":
+        return rpc({});
+      default:
+        return Response.json({
+          jsonrpc: "2.0",
+          id: "0",
+          error: { code: -32601, message: `unexpected ${request.method}` },
+        });
+    }
+  }) as typeof fetch;
+  return {
+    txHash,
+    relayCount: () => relayCount,
+    setBeforeRelay: (callback?: () => void | Promise<void>) => {
+      beforeRelay = callback;
+    },
+    setRelayMode: (mode: typeof relayMode) => {
+      relayMode = mode;
+    },
+    restore: () => {
+      globalThis.fetch = realFetch;
+    },
+  };
 }
 
 async function waitForOwnedSignal<T>(
@@ -153,7 +289,12 @@ describePostgres("Monero relay parent/idempotency locks (real Postgres)", () => 
   test("same-key contenders use distinct lock backends and checkpoint exactly one relay", async () => {
     const agentId = `monero-same-key-${suffix}`;
     const keyDigest = `key-${suffix}`;
-    await getDb().insert(agents).values({ id: agentId, tenantId, name: agentId });
+    await getDb().insert(agents).values({
+      id: agentId,
+      tenantId,
+      name: agentId,
+      walletAddress: "0x0000000000000000000000000000000000000001",
+    });
     const releaseFirst = deferred<void>();
     const firstEntered = deferred<void>();
     const firstBackend = deferred<number>();
@@ -177,6 +318,7 @@ describePostgres("Monero relay parent/idempotency locks (real Postgres)", () => 
               id: `monero-checkpoint-${keyDigest}`,
               agentId,
               status: "approved",
+              toAddress: "monero-recovery-destination",
               value: "1",
               chainId: 301,
               actionType: "monero_transfer",
@@ -219,7 +361,12 @@ describePostgres("Monero relay parent/idempotency locks (real Postgres)", () => 
 
   test("relay-first holds the exact agent parent tuple until the anchor exists", async () => {
     const agentId = `monero-relay-first-${suffix}`;
-    await getDb().insert(agents).values({ id: agentId, tenantId, name: agentId });
+    await getDb().insert(agents).values({
+      id: agentId,
+      tenantId,
+      name: agentId,
+      walletAddress: "0x0000000000000000000000000000000000000002",
+    });
     const tuple = await agentTuple(agentId);
     const deletionClient = postgres(databaseUrl!, { max: 1 });
     const releaseRelay = deferred<void>();
@@ -242,6 +389,7 @@ describePostgres("Monero relay parent/idempotency locks (real Postgres)", () => 
               id: `relay-first-anchor-${suffix}`,
               agentId,
               status: "approved",
+              toAddress: "monero-recovery-destination",
               value: "1",
               chainId: 301,
               actionType: "monero_transfer",
@@ -277,7 +425,12 @@ describePostgres("Monero relay parent/idempotency locks (real Postgres)", () => 
 
   test("delete-first blocks the exact relay backend and prevents relay execution", async () => {
     const agentId = `monero-delete-first-${suffix}`;
-    await getDb().insert(agents).values({ id: agentId, tenantId, name: agentId });
+    await getDb().insert(agents).values({
+      id: agentId,
+      tenantId,
+      name: agentId,
+      walletAddress: "0x0000000000000000000000000000000000000003",
+    });
     const tuple = await agentTuple(agentId);
     const deletionClient = postgres(databaseUrl!, { max: 1 });
     const releaseDelete = deferred<void>();
@@ -319,5 +472,198 @@ describePostgres("Monero relay parent/idempotency locks (real Postgres)", () => 
       await Promise.allSettled([deletion ?? Promise.resolve(), relay ?? Promise.resolve()]);
       await deletionClient.end();
     }
+  });
+});
+
+describePostgres("mounted Monero recovery boundary (real Postgres)", () => {
+  const suffix = crypto.randomUUID().replaceAll("-", "");
+  const tenantId = `monero-route-tenant-${suffix}`;
+  const agentId = `monero-route-agent-${suffix}`;
+  const userId = crypto.randomUUID();
+  const recipient = generateMoneroWallet("mainnet").address;
+  const walletScope = "monero:mainnet:0";
+  const requestBody = {
+    walletScope,
+    destinations: [{ address: recipient, amountPiconero: "1000000000" }],
+  };
+  let app: Hono<{ Variables: AppVariables }>;
+  let token = "";
+  let admin: Sql;
+  let rpc: ReturnType<typeof installRouteMoneroRpc>;
+
+  function transfer(key: string, body: typeof requestBody = requestBody) {
+    return app.request(`/vault/${agentId}/monero/transfer`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+        "Idempotency-Key": key,
+      },
+      body: JSON.stringify(body),
+    });
+  }
+
+  beforeAll(async () => {
+    process.env.STEWARD_JWT_SECRET = `monero-route-jwt-${suffix}`;
+    process.env.STEWARD_MASTER_PASSWORD = `monero-route-master-${suffix}`;
+    process.env.STEWARD_AUDIT_HMAC_KEY = `monero-route-audit-${suffix}`;
+    process.env.STEWARD_MONERO_WALLET_RPC_URL = "http://monero-route-wallet:18083/json_rpc";
+    process.env.STEWARD_MONERO_DAEMON_URL = "http://monero-route-daemon:18089";
+    process.env.STEWARD_MONERO_NETWORK = "mainnet";
+    rpc = installRouteMoneroRpc();
+    admin = postgres(databaseUrl!, { max: 1 });
+
+    await getDb().insert(tenants).values({ id: tenantId, name: tenantId, apiKeyHash: tenantId });
+    await getDb()
+      .insert(users)
+      .values({ id: userId, email: `${suffix}@example.test` });
+    await getDb().insert(userTenants).values({ userId, tenantId, role: "owner" });
+    const setupVault = new Vault({
+      masterPassword: process.env.STEWARD_MASTER_PASSWORD,
+      moneroBackend: new SetupMoneroBackend(),
+    });
+    await setupVault.createAgent(tenantId, agentId, agentId);
+    await setupVault.createWallet({ tenantId, agentId, chainType: "monero" });
+    await getDb()
+      .insert(policies)
+      .values([
+        {
+          id: `${agentId}-raw`,
+          agentId,
+          type: "raw-signing-chain",
+          enabled: true,
+          config: { allowedChains: ["monero"], allowedCurves: ["ed25519"] },
+        },
+        {
+          id: `${agentId}-address`,
+          agentId,
+          type: "approved-addresses",
+          enabled: true,
+          config: { addresses: [recipient], mode: "whitelist" },
+        },
+        {
+          id: `${agentId}-spend`,
+          agentId,
+          type: "spending-limit",
+          enabled: true,
+          config: { maxPerTx: "1500000000", maxPerDay: "1500000000" },
+        },
+      ]);
+
+    const { createSessionToken } = await import("../routes/auth");
+    const { agentRoutes } = await import("../routes/agents");
+    const { vaultRoutes } = await import("../routes/vault");
+    const { tenantAuth } = await import("../services/context");
+    token = await createSessionToken("0x0000000000000000000000000000000000000000", tenantId, {
+      userId,
+      tenantId,
+      mfaVerifiedAt: Date.now(),
+      mfaMethod: "totp",
+    });
+    app = new Hono<{ Variables: AppVariables }>();
+    app.use("/vault/*", (c, next) => tenantAuth(c, next));
+    app.use("/agents/*", (c, next) => tenantAuth(c, next));
+    app.route("/vault", vaultRoutes);
+    app.route("/agents", agentRoutes);
+    app.onError((error, c) => c.json({ ok: false, error: error.message }, 500));
+  }, 120_000);
+
+  afterAll(async () => {
+    rpc.restore();
+    await getDb().delete(transactions).where(eq(transactions.agentId, agentId));
+    await getDb().delete(auditEvents).where(eq(auditEvents.tenantId, tenantId));
+    await getDb().delete(agents).where(eq(agents.id, agentId));
+    await getDb().delete(userTenants).where(eq(userTenants.tenantId, tenantId));
+    await getDb().delete(users).where(eq(users.id, userId));
+    await getDb().delete(tenants).where(eq(tenants.id, tenantId));
+    await admin.end();
+    const restore = (key: string, value: string | undefined) => {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    };
+    restore("STEWARD_JWT_SECRET", originalRouteEnv.jwt);
+    restore("STEWARD_MASTER_PASSWORD", originalRouteEnv.master);
+    restore("STEWARD_AUDIT_HMAC_KEY", originalRouteEnv.audit);
+    restore("STEWARD_MONERO_WALLET_RPC_URL", originalRouteEnv.wallet);
+    restore("STEWARD_MONERO_DAEMON_URL", originalRouteEnv.daemon);
+    restore("STEWARD_MONERO_NETWORK", originalRouteEnv.network);
+  });
+
+  test("commits the anchor before relay and recovers it before mutable gates", async () => {
+    const key = `lost-ack-${suffix}`;
+    let visibleTransactionId = "";
+    rpc.setRelayMode("lost-ack");
+    rpc.setBeforeRelay(async () => {
+      const [row] = await admin<{ id: string; status: string; audit_count: string }[]>`
+        select t.id, t.status,
+          (select count(*)::text from audit_events a
+           where a.resource_id = t.id and a.action = 'vault.monero_transfer.authorized') as audit_count
+        from transactions t
+        where t.agent_id = ${agentId} and t.status = 'approved'
+      `;
+      expect(row?.status).toBe("approved");
+      expect(row?.audit_count).toBe("1");
+      visibleTransactionId = row?.id ?? "";
+    });
+    const first = await transfer(key);
+    expect(first.status).toBe(202);
+    expect(visibleTransactionId).not.toBe("");
+    expect(rpc.relayCount()).toBe(1);
+
+    const deletion = await app.request(`/agents/${agentId}`, {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    expect(deletion.status).toBe(409);
+
+    await getDb()
+      .update(policies)
+      .set({ config: { maxPerTx: "1", maxPerDay: "1" } })
+      .where(eq(policies.id, `${agentId}-spend`));
+    rpc.setBeforeRelay(undefined);
+    rpc.setRelayMode("success");
+    const replay = await transfer(key);
+    expect(replay.status).toBe(202);
+    expect(((await replay.json()) as { data: { transactionId: string } }).data.transactionId).toBe(
+      visibleTransactionId,
+    );
+    expect(rpc.relayCount()).toBe(1);
+
+    const differentKey = await transfer(`different-${suffix}`);
+    expect(differentKey.status).toBe(403);
+    expect(rpc.relayCount()).toBe(1);
+  });
+
+  test("serializes concurrent same-key mounted requests to one relay", async () => {
+    await getDb()
+      .update(policies)
+      // Existing lost-ack reservation + one new transfer fit. Re-evaluating
+      // the concurrent duplicate after the first commit would exceed this cap,
+      // so both successful responses prove locked exact-key recovery happens
+      // before the mutable spend gate.
+      .set({ config: { maxPerTx: "1500000000", maxPerDay: "2100000000" } })
+      .where(eq(policies.id, `${agentId}-spend`));
+    const key = `concurrent-${suffix}`;
+    const entered = deferred<void>();
+    const release = deferred<void>();
+    const baseline = rpc.relayCount();
+    rpc.setRelayMode("success");
+    rpc.setBeforeRelay(async () => {
+      entered.resolve();
+      await release.promise;
+    });
+    const first = transfer(key);
+    await waitForOwnedSignal(entered.promise, first, "mounted first relay");
+    const second = transfer(key);
+    await Bun.sleep(50);
+    release.resolve();
+    const [firstResponse, secondResponse] = await Promise.all([first, second]);
+    expect(firstResponse.status).toBe(200);
+    expect([200, 202]).toContain(secondResponse.status);
+    const firstBody = (await firstResponse.json()) as { data: { transactionId: string } };
+    const secondBody = (await secondResponse.json()) as { data: { transactionId: string } };
+    expect(secondBody.data.transactionId).toBe(firstBody.data.transactionId);
+    expect(rpc.relayCount()).toBe(baseline + 1);
+    rpc.setBeforeRelay(undefined);
   });
 });
