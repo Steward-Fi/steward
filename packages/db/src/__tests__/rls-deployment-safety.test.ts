@@ -21,9 +21,17 @@ function database(options?: {
           {
             current_user: "steward_app",
             session_user: "steward_app",
+            rolcanlogin: true,
+            rolinherit: false,
             rolsuper: options?.unsafeRole === true,
             rolbypassrls: false,
+            rolcreatedb: false,
+            rolcreaterole: false,
+            rolreplication: false,
             owns_rls_relation: false,
+            has_assumable_privilege: false,
+            can_create_protected_schema: false,
+            platform_role_safe: true,
           },
         ];
       }
@@ -62,6 +70,7 @@ function database(options?: {
         }
         return relations;
       }
+      if (query > 3) return [];
       const policies = EXPECTED_RLS_POLICY_DEFINITIONS.filter(
         (policy) => policy.policy_group === "core" || options?.capabilities,
       ).map(({ policy_group: _group, ...policy }) => ({ ...policy }));
@@ -72,21 +81,26 @@ function database(options?: {
 }
 
 describe("RLS deployment safety gate", () => {
+  const roles = {
+    expectedRole: "steward_app",
+    expectedPlatformRole: "steward_platform",
+  };
+
   test("accepts only the exact safe role, relation/partition shape, and policies", async () => {
     await expect(
-      assertRlsDeploymentSafety(database(), { expectedRole: "steward_app" }),
+      assertRlsDeploymentSafety(database(), roles),
     ).resolves.toBeUndefined();
   });
 
   test("accepts an installed capabilities group even when the plugin is disabled", async () => {
     await expect(
       assertRlsDeploymentSafety(database({ capabilities: true }), {
-        expectedRole: "steward_app",
+        ...roles,
       }),
     ).resolves.toBeUndefined();
     await expect(
       assertRlsDeploymentSafety(database({ partialCapabilities: true }), {
-        expectedRole: "steward_app",
+        ...roles,
       }),
     ).rejects.toThrow("RLS_DEPLOYMENT_RELATION_INVENTORY_DRIFT");
   });
@@ -94,17 +108,17 @@ describe("RLS deployment safety gate", () => {
   test("rejects unsafe roles, same-count policy replacement, and extra relations", async () => {
     await expect(
       assertRlsDeploymentSafety(database({ unsafeRole: true }), {
-        expectedRole: "steward_app",
+        ...roles,
       }),
     ).rejects.toThrow("RLS_DEPLOYMENT_ROLE_UNSAFE");
     await expect(
       assertRlsDeploymentSafety(database({ policyDrift: true }), {
-        expectedRole: "steward_app",
+        ...roles,
       }),
     ).rejects.toThrow("RLS_DEPLOYMENT_POLICY_DEFINITION_DRIFT");
     await expect(
       assertRlsDeploymentSafety(database({ relationDrift: true }), {
-        expectedRole: "steward_app",
+        ...roles,
       }),
     ).rejects.toThrow("RLS_DEPLOYMENT_RELATION_INVENTORY_DRIFT");
   });
