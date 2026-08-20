@@ -3853,6 +3853,7 @@ async function provisionSamlUser(opts: {
 type CompletedEmailAuthResult =
   | {
       ok: true;
+      userId: string;
       response: Record<string, unknown>;
     }
   | { ok: false; status: 400 | 403 | 404; error: string };
@@ -3957,23 +3958,24 @@ async function completeEmailAuth(
       error: "Email login is disabled because this email domain requires SSO",
     };
   }
-  await ensureUserTenantLink(user.id, resolvedTenantId);
-  if (isNew) {
-    dispatchUserCreated(resolvedTenantId, user.id, "auth.email", { hasEmail: true });
-  }
-
-  const response = await buildAuthOrMfaResponse(
-    user.id,
-    resolvedTenantId,
-    walletAddress ?? "",
-    {
-      userId: user.id,
-      email,
-      authMethod: "email",
-    },
-    { id: user.id, email, walletAddress },
-    c,
-  );
+  const response = await withVerifiedAuthTenant(resolvedTenantId, user.id, async () => {
+    await ensureUserTenantLink(user.id, resolvedTenantId);
+    if (isNew) {
+      dispatchUserCreated(resolvedTenantId, user.id, "auth.email", { hasEmail: true });
+    }
+    return buildAuthOrMfaResponse(
+      user.id,
+      resolvedTenantId,
+      walletAddress ?? "",
+      {
+        userId: user.id,
+        email,
+        authMethod: "email",
+      },
+      { id: user.id, email, walletAddress },
+      c,
+    );
+  });
   if (response.ok === false) {
     return {
       ok: false,
@@ -3984,6 +3986,7 @@ async function completeEmailAuth(
 
   return {
     ok: true,
+    userId: user.id,
     response,
   };
 }
@@ -5627,22 +5630,19 @@ auth.post("/test/token", async (c) => {
     if (!authResult.ok) {
       return c.json<ApiResponse>({ ok: false, error: authResult.error }, authResult.status);
     }
-    await writeAuditEvent({
-      tenantId,
-      actorType: "user",
-      actorId:
-        typeof authResult.response.user === "object" &&
-        authResult.response.user !== null &&
-        "id" in authResult.response.user
-          ? String(authResult.response.user.id)
-          : null,
-      action: "auth.test_account.login",
-      resourceType: "session",
-      metadata: { method: "email" },
-      ipAddress: c.req.header("x-forwarded-for") ?? null,
-      userAgent: c.req.header("user-agent") ?? null,
-      requestId: null,
-    });
+    await withVerifiedAuthTenant(tenantId, authResult.userId, () =>
+      writeAuditEvent({
+        tenantId,
+        actorType: "user",
+        actorId: authResult.userId,
+        action: "auth.test_account.login",
+        resourceType: "session",
+        metadata: { method: "email" },
+        ipAddress: c.req.header("x-forwarded-for") ?? null,
+        userAgent: c.req.header("user-agent") ?? null,
+        requestId: null,
+      }),
+    );
     return authExchangeJson(c, authResult.response);
   }
 

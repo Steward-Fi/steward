@@ -110,6 +110,26 @@ describe("auth and audit hardening", () => {
     );
   });
 
+  it("keeps email and test-account session writes inside verified tenant RLS transactions", () => {
+    const emailStart = authSource.indexOf("async function completeEmailAuth");
+    const emailEnd = authSource.indexOf("function resolveSamlMappedRole", emailStart);
+    const emailFlow = authSource.slice(emailStart, emailEnd);
+    const verifiedStart = emailFlow.indexOf(
+      "withVerifiedAuthTenant(resolvedTenantId, user.id, async () =>",
+    );
+    expect(verifiedStart).toBeGreaterThanOrEqual(0);
+    expect(emailFlow.indexOf("ensureUserTenantLink(user.id, resolvedTenantId)")).toBeGreaterThan(
+      verifiedStart,
+    );
+    expect(emailFlow.indexOf("buildAuthOrMfaResponse(")).toBeGreaterThan(verifiedStart);
+
+    const testAccountStart = authSource.indexOf('auth.post("/test/token"');
+    const testAccountEnd = authSource.indexOf('auth.post("/sms/send"', testAccountStart);
+    const testAccountFlow = authSource.slice(testAccountStart, testAccountEnd);
+    expect(testAccountFlow).toContain("withVerifiedAuthTenant(tenantId, authResult.userId, () =>");
+    expect(testAccountFlow).toContain('action: "auth.test_account.login"');
+  });
+
   it("audits completed MFA logins before minting session tokens", () => {
     for (const marker of ['auth.post("/mfa/totp/complete"', 'auth.post("/mfa/sms/complete"']) {
       const routeStart = authSource.indexOf(marker);
