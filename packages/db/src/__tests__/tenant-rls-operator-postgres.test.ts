@@ -66,7 +66,14 @@ async function runOperatorScript(name: string, includeRoles = false) {
       `steward_platform_role=${platformRole}`,
     );
   } else if (name === "rls-activate.sql") {
-    command.push("-v", `steward_migration_role=${migrationRole}`);
+    command.push(
+      "-v",
+      `steward_app_role=${appRole}`,
+      "-v",
+      `steward_migration_role=${migrationRole}`,
+      "-v",
+      `steward_platform_role=${platformRole}`,
+    );
   }
   command.push("-f", `scripts/postgres/${name}`);
   return runCommand(command);

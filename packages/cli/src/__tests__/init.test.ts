@@ -82,9 +82,9 @@ describe("steward init", () => {
       expect(appPassword).toMatch(/^[0-9a-f]{48}$/);
       expect(migrationPassword).toMatch(/^[0-9a-f]{48}$/);
       expect(platformPassword).toMatch(/^[0-9a-f]{48}$/);
-      expect(new Set([postgresPassword, appPassword, migrationPassword, platformPassword]).size).toBe(
-        4,
-      );
+      expect(
+        new Set([postgresPassword, appPassword, migrationPassword, platformPassword]).size,
+      ).toBe(4);
       expect(databaseUrl).toBe(`postgresql://steward_app:${appPassword}@postgres:5432/steward`);
       expect(envValue(env, "MIGRATION_DATABASE_URL")).toBe(
         `postgresql://steward_migrator:${migrationPassword}@postgres:5432/steward`,
@@ -348,6 +348,7 @@ describe("steward init", () => {
           databaseUrl: "postgresql://app:p@127.0.0.1:1/steward",
           adminDatabaseUrl: "postgresql://admin:p@127.0.0.1:1/steward",
           migrationDatabaseUrl: "postgresql://migrator:p@127.0.0.1:1/steward",
+          platformDatabaseUrl: "postgresql://platform:p@127.0.0.1:1/steward",
         }),
       ).toThrow(/migrations failed/i);
       expect(existsSync(marker)).toBe(false);
@@ -385,6 +386,8 @@ describe("steward init", () => {
           "postgresql://admin:p@192.0.2.1:5432/steward",
           "--migration-database-url",
           "postgresql://migrator:p@192.0.2.1:5432/steward",
+          "--platform-database-url",
+          "postgresql://platform:p@192.0.2.1:5432/steward",
         ],
         { env: childEnv, stdout: "pipe", stderr: "pipe" },
       );

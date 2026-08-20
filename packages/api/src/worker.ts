@@ -323,6 +323,47 @@ export function hydrateProcessEnv(env: Env): void {
 }
 
 let workerInit: Promise<void> | null = null;
+const workerRlsReadyByDatabase = new Map<string, Promise<void>>();
+const MAX_WORKER_RLS_AUTHORITIES = 8;
+
+export function __resetWorkerRlsReadinessForTests(): void {
+  workerRlsReadyByDatabase.clear();
+}
+
+export async function ensureWorkerRlsReady(
+  env: Env,
+  assertReady: typeof assertRlsDeploymentSafety = assertRlsDeploymentSafety,
+): Promise<void> {
+  if (env.NODE_ENV === "development" || env.NODE_ENV === "test") return;
+  const databaseUrl = env.DATABASE_URL?.trim();
+  const expectedRole = env.STEWARD_APP_DATABASE_ROLE?.trim();
+  const expectedPlatformRole = env.STEWARD_PLATFORM_DATABASE_ROLE?.trim();
+  if (!databaseUrl || !expectedRole || !expectedPlatformRole) {
+    throw new Error("WORKER_RLS_DATABASE_AUTHORITY_REQUIRED");
+  }
+  const key = `${env.DATABASE_DRIVER?.trim().toLowerCase() ?? ""}\n${databaseUrl}\n${expectedRole}\n${expectedPlatformRole}`;
+  let ready = workerRlsReadyByDatabase.get(key);
+  if (!ready) {
+    if (workerRlsReadyByDatabase.size >= MAX_WORKER_RLS_AUTHORITIES) {
+      throw new Error("WORKER_RLS_AUTHORITY_CACHE_EXHAUSTED");
+    }
+    ready = assertReady(getDb(), { expectedRole, expectedPlatformRole }).catch((error) => {
+      workerRlsReadyByDatabase.delete(key);
+      throw error;
+    });
+    workerRlsReadyByDatabase.set(key, ready);
+  }
+  await ready;
+}
+
+export async function runWorkerRlsGuardedTask<T>(
+  env: Env,
+  task: () => Promise<T>,
+  assertReady: typeof assertRlsDeploymentSafety = assertRlsDeploymentSafety,
+): Promise<T> {
+  await ensureWorkerRlsReady(env, assertReady);
+  return task();
+}
 
 function workerJwtEnvironment(env: Env): Readonly<JwtRuntimeEnvironment> {
   return Object.freeze({
@@ -377,12 +418,6 @@ async function ensureWorkerInit(env: Env): Promise<void> {
     // secret or malformed AGENT_TOKEN_EXPIRY fails closed at cold start instead
     // of surfacing at first token sign/verify.
     validateWorkerSecurityEnv();
-    const expectedRole = env.STEWARD_APP_DATABASE_ROLE?.trim();
-    const expectedPlatformRole = env.STEWARD_PLATFORM_DATABASE_ROLE?.trim();
-    if (!expectedRole || !expectedPlatformRole) {
-      throw new Error("STEWARD database role expectations are required on Workers");
-    }
-    await assertRlsDeploymentSafety(getDb(), { expectedRole, expectedPlatformRole });
     const redisOk = await initRedis(env);
     // Auth stores (passkey challenges, magic-link tokens, SIWE/SIWS nonces)
     // must be initialized too — without this they stay on the lazy memory
@@ -468,9 +503,11 @@ export default {
         return withWorkerRequestDatabase(
           env,
           async () => {
-            await ensureWorkerInit(env);
-            const app = await getComposedApp();
-            return app.fetch(request, env, ctx as never);
+            return runWorkerRlsGuardedTask(env, async () => {
+              await ensureWorkerInit(env);
+              const app = await getComposedApp();
+              return app.fetch(request, env, ctx as never);
+            });
           },
           waitUntil ? { waitUntil } : undefined,
         );
@@ -486,13 +523,19 @@ export default {
       return withWorkerJwtAuthority(env, () => {
         hydrateProcessEnv(env);
         validateWorkerSecurityEnv();
-        const scheduledWork = withWorkerRequestDatabase(env, () => ensureWorkerInit(env)).then(() =>
-          Promise.all([
+        const scheduledWork = withWorkerRequestDatabase(env, () =>
+          runWorkerRlsGuardedTask(env, () => ensureWorkerInit(env)),
+        ).then(async () => {
+          const sweepResults = await Promise.allSettled([
             withWorkerRequestDatabase(env, () => runWorkerUpstreamCredentialLeaseSweep(env)),
             withWorkerRequestDatabase(env, () => runWorkerGoogleCredentialLifecycleSweep(env)),
             withWorkerRequestDatabase(env, () => runWorkerXCredentialLifecycleSweep(env)),
-          ]),
-        );
+          ]);
+          const failedSweep = sweepResults.find(
+            (result): result is PromiseRejectedResult => result.status === "rejected",
+          );
+          if (failedSweep) throw failedSweep.reason;
+        });
         ctx.waitUntil(scheduledWork);
       });
     });
