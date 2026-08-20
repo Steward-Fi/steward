@@ -73,7 +73,14 @@ REVOKE ALL ON ALL FUNCTIONS IN SCHEMA steward_rls FROM PUBLIC;
 
 SELECT format('GRANT %I TO %I', :'steward_migration_role', current_user) \gexec
 SELECT format('GRANT USAGE, CREATE ON SCHEMA public TO %I', :'steward_migration_role') \gexec
-SELECT format('GRANT USAGE ON SCHEMA public, steward_bootstrap, steward_rls TO %I', :'steward_app_role') \gexec
+SELECT format(
+  'GRANT USAGE ON SCHEMA public, drizzle, steward_bootstrap, steward_rls TO %I',
+  :'steward_app_role'
+) \gexec
+SELECT format(
+  'GRANT SELECT ON drizzle.__drizzle_migrations TO %I',
+  :'steward_app_role'
+) \gexec
 SELECT format('GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA steward_bootstrap, steward_rls TO %I', :'steward_app_role') \gexec
 SELECT format(
   'REVOKE EXECUTE ON FUNCTION '

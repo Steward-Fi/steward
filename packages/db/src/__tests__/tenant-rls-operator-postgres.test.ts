@@ -143,6 +143,37 @@ describeWithPostgres("SEC-169 operator lifecycle on the real Steward schema", ()
         rolbypassrls: false,
         rolsuper: false,
       });
+      const [appReadinessPrivileges] = await db<
+        {
+          schemaUsage: boolean;
+          canSelect: boolean;
+          canInsert: boolean;
+          canUpdate: boolean;
+          canDelete: boolean;
+        }[]
+      >`
+        SELECT
+          has_schema_privilege(${appRole}, 'drizzle', 'USAGE') AS "schemaUsage",
+          has_table_privilege(
+            ${appRole}, 'drizzle.__drizzle_migrations', 'SELECT'
+          ) AS "canSelect",
+          has_table_privilege(
+            ${appRole}, 'drizzle.__drizzle_migrations', 'INSERT'
+          ) AS "canInsert",
+          has_table_privilege(
+            ${appRole}, 'drizzle.__drizzle_migrations', 'UPDATE'
+          ) AS "canUpdate",
+          has_table_privilege(
+            ${appRole}, 'drizzle.__drizzle_migrations', 'DELETE'
+          ) AS "canDelete"
+      `;
+      expect(appReadinessPrivileges).toEqual({
+        schemaUsage: true,
+        canSelect: true,
+        canInsert: false,
+        canUpdate: false,
+        canDelete: false,
+      });
       const [platformRlsPrivileges] = await db<
         {
           schema_usage: boolean;
