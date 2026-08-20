@@ -21,10 +21,21 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const DEPLOY_DIR = join(import.meta.dir, "..", "..", "..", "..", "deploy");
+const ROOT_DIR = join(DEPLOY_DIR, "..");
 
 function read(name: string): string {
   return readFileSync(join(DEPLOY_DIR, name), "utf8");
 }
+
+describe("published Docker runtime network contract", () => {
+  test("binds the API to the container network instead of loopback", () => {
+    const dockerfile = readFileSync(join(ROOT_DIR, "Dockerfile"), "utf8");
+    const runtime = dockerfile.slice(dockerfile.indexOf(" AS runtime"));
+
+    expect(runtime).toContain("ENV STEWARD_BIND_HOST=0.0.0.0");
+    expect(runtime).toContain('CMD ["bun", "packages/api/src/index.ts"]');
+  });
+});
 
 /**
  * Extract the `steward-proxy:` service block from the compose file (everything
