@@ -140,6 +140,22 @@ describe("OAuth browser callback failures", () => {
     });
   }
 
+  it("keeps an explicit text/html rejection over a more permissive wildcard", async () => {
+    const response = await authRoutes.request(
+      "/oauth/github/callback?code=provider-code&state=expired-specificity-state",
+      {
+        headers: {
+          accept: "application/json, text/html;q=0, */*;q=1",
+          "sec-fetch-mode": "navigate",
+        },
+      },
+    );
+
+    expect(response.status).toBe(401);
+    expect(response.headers.get("content-type")).toContain("application/json");
+    expect(await response.json()).toMatchObject({ ok: false, code: "oauth_state_expired" });
+  });
+
   it("renders a sanitized provision-policy error with a validated recovery link", async () => {
     process.env.APP_URL = "https://api.example.test";
     process.env.GOOGLE_CLIENT_ID = "google-client";
