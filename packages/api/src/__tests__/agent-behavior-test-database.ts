@@ -60,9 +60,11 @@ export async function cleanupAgentBehaviorTestDatabase(tenantId: string): Promis
   );
   const capabilityRows = Array.isArray(capabilityTables)
     ? capabilityTables
-    : ((capabilityTables as {
-        rows?: Array<{ capabilities: string | null; invocations: string | null }>;
-      }).rows ?? []);
+    : ((
+        capabilityTables as {
+          rows?: Array<{ capabilities: string | null; invocations: string | null }>;
+        }
+      ).rows ?? []);
   const pluginTables = capabilityRows[0] as
     | { capabilities?: string | null; invocations?: string | null }
     | undefined;

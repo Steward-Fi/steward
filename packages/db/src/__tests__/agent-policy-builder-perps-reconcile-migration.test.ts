@@ -160,10 +160,12 @@ describe("0109 agent policy builder-perps reconciliation", () => {
             ) AS exists
           `;
           expect(leaseAgentFence).toEqual([{ exists: true }]);
-          const fenceFunction = await verified<{
-            definition: string;
-            settings: string[] | null;
-          }[]>`
+          const fenceFunction = await verified<
+            {
+              definition: string;
+              settings: string[] | null;
+            }[]
+          >`
             SELECT pg_get_functiondef(proc.oid) AS definition, proc.proconfig AS settings
             FROM pg_proc proc
             WHERE proc.oid = 'public.steward_fence_agent_authority_creation()'::regprocedure

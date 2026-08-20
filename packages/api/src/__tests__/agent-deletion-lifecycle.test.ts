@@ -656,7 +656,10 @@ describe("agent deletion upstream credential boundary", () => {
             .where(eq(upstreamCredentialLeases.id, leaseId)),
         ).toMatchObject([{ status: "revoked", tokenCiphertext: null }]);
         expect(
-          await getDb().select().from(secretRoutes).where(eq(secretRoutes.id, routeId as string)),
+          await getDb()
+            .select()
+            .from(secretRoutes)
+            .where(eq(secretRoutes.id, routeId as string)),
         ).toMatchObject([{ enabled: false }]);
         expect(
           await getDb()
