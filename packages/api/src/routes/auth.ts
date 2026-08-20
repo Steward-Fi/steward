@@ -8194,7 +8194,9 @@ auth.post("/passkey/register/verify", async (c) => {
 /**
  * POST /passkey/login/options
  * Body: { email }
- * Returns WebAuthn authentication options with allowed credentials.
+ * Returns privacy-preserving discoverable-credential options. `allowCredentials`
+ * is intentionally empty for every email so this pre-auth route cannot reveal
+ * whether an account or passkey exists.
  */
 auth.post("/passkey/login/options", async (c) => {
   const rl = await checkAuthRateLimit(c, "passkey-options", 60_000, 20);
