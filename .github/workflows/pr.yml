@@ -607,6 +607,16 @@ jobs:
         env:
           DATABASE_URL: "postgres://steward:steward_ci@localhost:5432/steward_test"
 
+      - name: X disable and recovery lineage concurrency (real Postgres)
+        run: >-
+          bun test ./packages/api/src/__tests__/provider-x-connect.test.ts
+          --test-name-pattern "concurrent recovery wins"
+        env:
+          DATABASE_URL: "postgres://steward:steward_ci@localhost:5432/steward_test"
+          STEWARD_X_CONNECT_REAL_PG: "true"
+          STEWARD_MASTER_PASSWORD: "ci-test-secret"
+          STEWARD_AUDIT_HMAC_KEY: "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+
       - name: Start API test server
         env:
           DATABASE_URL: "postgres://steward:steward_ci@localhost:5432/steward_test"
