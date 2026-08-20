@@ -727,6 +727,20 @@ function rowsFromExecute<T>(result: unknown): T[] {
   return (Array.isArray(result) ? result : ((result as { rows?: unknown[] })?.rows ?? [])) as T[];
 }
 
+function errorChainHasExactMessage(error: unknown, expected: string): boolean {
+  const seen = new Set<unknown>();
+  let current = error;
+  for (let depth = 0; depth < 8 && current && !seen.has(current); depth += 1) {
+    seen.add(current);
+    if (current instanceof Error && current.message === expected) return true;
+    current =
+      typeof current === "object" && "cause" in current
+        ? (current as { cause?: unknown }).cause
+        : undefined;
+  }
+  return false;
+}
+
 // ─── Route group ─────────────────────────────────────────────────────────────
 
 const platform = new Hono<{ Variables: AppVariables }>();
@@ -3779,9 +3793,9 @@ platform.patch("/users/:userId/deactivate", async (c) => {
       },
     ),
   ).catch((err: unknown) => {
-    if (err instanceof Error && err.message === "User not found") return null;
-    if (err instanceof Error && err.message === "Cannot deactivate the sole active tenant owner") {
-      return err.message;
+    if (errorChainHasExactMessage(err, "User not found")) return null;
+    if (errorChainHasExactMessage(err, "Cannot deactivate the sole active tenant owner")) {
+      return "Cannot deactivate the sole active tenant owner";
     }
     throw err;
   });
@@ -3851,9 +3865,9 @@ platform.delete("/users/:userId", async (c) => {
       },
     ),
   ).catch((error: unknown) => {
-    if (error instanceof Error && error.message === "User not found") return null;
-    if (error instanceof Error && error.message === "Cannot delete the sole active tenant owner") {
-      return error.message;
+    if (errorChainHasExactMessage(error, "User not found")) return null;
+    if (errorChainHasExactMessage(error, "Cannot delete the sole active tenant owner")) {
+      return "Cannot delete the sole active tenant owner";
     }
     throw error;
   });

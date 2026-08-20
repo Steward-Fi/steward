@@ -37,6 +37,7 @@ describe("platform global identity graph routes", () => {
         "platform:user:write",
         "platform:user-lifecycle:write",
         "platform:user:delete",
+        "platform:tenant:delete",
         "platform:tenant-user:read",
         "platform:tenant-user:write",
         "platform:gas-spend:read",
@@ -885,5 +886,92 @@ describe("platform global identity graph routes", () => {
       .from(refreshTokens)
       .where(eq(refreshTokens.userId, deleteUser.id));
     expect(deletedRefresh).toHaveLength(0);
+  });
+
+  it("deactivates a personal owner and deletes the tenant before its identity", async () => {
+    const [personalUser] = await getDb()
+      .insert(users)
+      .values({ email: "delete-personal-owner@example.test", emailVerified: true })
+      .returning({ id: users.id });
+    const personalTenantId = `personal-${personalUser.id}`;
+    await getDb().insert(tenants).values({
+      id: personalTenantId,
+      name: "Personal deletion owner",
+      apiKeyHash: "personal-delete-owner-hash",
+    });
+    await getDb().insert(userTenants).values({
+      userId: personalUser.id,
+      tenantId: personalTenantId,
+      role: "owner",
+    });
+
+    const deactivate = await platformRoutes.request(`/users/${personalUser.id}/deactivate`, {
+      method: "PATCH",
+      headers: headers(),
+      body: JSON.stringify({ deactivated: true }),
+    });
+    expect(deactivate.status).toBe(200);
+    const [deactivated] = await getDb()
+      .select({ deactivatedAt: users.deactivatedAt })
+      .from(users)
+      .where(eq(users.id, personalUser.id));
+    expect(deactivated?.deactivatedAt).toBeInstanceOf(Date);
+
+    const prematureRemove = await platformRoutes.request(`/users/${personalUser.id}`, {
+      method: "DELETE",
+      headers: headers(),
+    });
+    expect(prematureRemove.status).toBe(409);
+
+    const removeTenant = await platformRoutes.request(`/tenants/${personalTenantId}`, {
+      method: "DELETE",
+      headers: headers(),
+    });
+    expect(removeTenant.status).toBe(200);
+
+    const remove = await platformRoutes.request(`/users/${personalUser.id}`, {
+      method: "DELETE",
+      headers: headers(),
+    });
+    expect(remove.status).toBe(200);
+    expect(await getDb().select().from(users).where(eq(users.id, personalUser.id))).toHaveLength(0);
+    expect(
+      await getDb().select().from(tenants).where(eq(tenants.id, personalTenantId)),
+    ).toHaveLength(0);
+  });
+
+  it("still refuses lifecycle removal for a sole owner of a shared tenant", async () => {
+    const sharedTenantId = "platform-identity-delete-shared";
+    const [sharedOwner] = await getDb()
+      .insert(users)
+      .values({ email: "delete-shared-owner@example.test", emailVerified: true })
+      .returning({ id: users.id });
+    await getDb().insert(tenants).values({
+      id: sharedTenantId,
+      name: "Shared deletion control",
+      apiKeyHash: "shared-delete-control-hash",
+    });
+    await getDb().insert(userTenants).values({
+      userId: sharedOwner.id,
+      tenantId: sharedTenantId,
+      role: "owner",
+    });
+
+    const deactivate = await platformRoutes.request(`/users/${sharedOwner.id}/deactivate`, {
+      method: "PATCH",
+      headers: headers(),
+      body: JSON.stringify({ deactivated: true }),
+    });
+    expect(deactivate.status).toBe(409);
+
+    const remove = await platformRoutes.request(`/users/${sharedOwner.id}`, {
+      method: "DELETE",
+      headers: headers(),
+    });
+    expect(remove.status).toBe(409);
+    expect(await getDb().select().from(users).where(eq(users.id, sharedOwner.id))).toHaveLength(1);
+    expect(await getDb().select().from(tenants).where(eq(tenants.id, sharedTenantId))).toHaveLength(
+      1,
+    );
   });
 });

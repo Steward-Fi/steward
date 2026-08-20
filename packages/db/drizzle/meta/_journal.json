@@ -652,6 +652,13 @@
       "when": 1787203600000,
       "tag": "0112_rls_activation_release_gates",
       "breakpoints": true
+    },
+    {
+      "idx": 113,
+      "version": "7",
+      "when": 1787220000000,
+      "tag": "0113_personal_tenant_account_lifecycle",
+      "breakpoints": true
     }
   ]
 }
