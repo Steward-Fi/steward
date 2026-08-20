@@ -10,6 +10,7 @@ function database(options?: {
   policyDrift?: boolean;
   relationDrift?: boolean;
   capabilities?: boolean;
+  partialCapabilities?: boolean;
 }) {
   let query = 0;
   return {
@@ -27,7 +28,7 @@ function database(options?: {
         ];
       }
       if (query === 2) {
-        const relations = EXPECTED_PUBLIC_RELATIONS.filter(
+        let relations = EXPECTED_PUBLIC_RELATIONS.filter(
           (relation) => relation.policy_group === "core" || options?.capabilities,
         ).map(({ policy_group: _group, ...relation }) => ({
           ...relation,
@@ -38,6 +39,18 @@ function database(options?: {
             (policy) => policy.relation_name === relation.relation_name,
           ),
         }));
+        if (options?.partialCapabilities) {
+          const capability = EXPECTED_PUBLIC_RELATIONS.find(
+            (relation) => relation.policy_group === "capabilities",
+          );
+          if (capability) {
+            const { policy_group: _group, ...relation } = capability;
+            relations = [
+              ...relations,
+              { ...relation, relrowsecurity: true, relforcerowsecurity: true },
+            ];
+          }
+        }
         if (options?.relationDrift) {
           relations.push({
             relation_name: "unexpected_tenant_table",
@@ -65,15 +78,14 @@ describe("RLS deployment safety gate", () => {
     ).resolves.toBeUndefined();
   });
 
-  test("requires the complete exact capabilities policy group when enabled", async () => {
+  test("accepts an installed capabilities group even when the plugin is disabled", async () => {
     await expect(
       assertRlsDeploymentSafety(database({ capabilities: true }), {
         expectedRole: "steward_app",
-        enabledPolicyGroups: ["capabilities"],
       }),
     ).resolves.toBeUndefined();
     await expect(
-      assertRlsDeploymentSafety(database({ capabilities: true }), {
+      assertRlsDeploymentSafety(database({ partialCapabilities: true }), {
         expectedRole: "steward_app",
       }),
     ).rejects.toThrow("RLS_DEPLOYMENT_RELATION_INVENTORY_DRIFT");

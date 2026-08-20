@@ -21,7 +21,7 @@ function stable(value: unknown): string {
  */
 export async function assertRlsDeploymentSafety(
   db: SqlDatabase,
-  options: { expectedRole: string; requireActivated?: boolean; enabledPolicyGroups?: string[] },
+  options: { expectedRole: string; requireActivated?: boolean },
 ): Promise<void> {
   if (!/^[A-Za-z_][A-Za-z0-9_$-]{0,62}$/.test(options.expectedRole)) {
     throw new Error("RLS_DEPLOYMENT_ROLE_EXPECTATION_INVALID");
@@ -79,7 +79,14 @@ export async function assertRlsDeploymentSafety(
       ORDER BY relation.relname
     `),
   );
-  const enabledGroups = new Set(["core", ...(options.enabledPolicyGroups ?? [])]);
+  const optionalGroupsPresent = new Set(
+    EXPECTED_PUBLIC_RELATIONS.filter(
+      (expected) =>
+        expected.policy_group !== "core" &&
+        relations.some((actual) => actual.relation_name === expected.relation_name),
+    ).map((expected) => expected.policy_group),
+  );
+  const enabledGroups = new Set(["core", ...optionalGroupsPresent]);
   const expectedRelations = EXPECTED_PUBLIC_RELATIONS.filter((row) =>
     enabledGroups.has(row.policy_group),
   );

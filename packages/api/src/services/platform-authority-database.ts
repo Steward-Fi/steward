@@ -1,7 +1,18 @@
 import { createDb, createNeonTransactionDbForRequest, getDatabaseDriver, getDb } from "@stwd/db";
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 import { sql } from "drizzle-orm";
 
 type PlatformDb = ReturnType<typeof getDb>;
+
+export function __platformAuthorityEnvironmentForTests() {
+  return {
+    databaseMode: runtimeEnvironmentValue("STEWARD_DB_MODE"),
+    pgliteMemory: runtimeEnvironmentValue("STEWARD_PGLITE_MEMORY"),
+    connectionString: runtimeEnvironmentValue("STEWARD_PLATFORM_DATABASE_URL"),
+    expectedRole: runtimeEnvironmentValue("STEWARD_PLATFORM_DATABASE_ROLE"),
+    driver: runtimeEnvironmentValue("DATABASE_DRIVER") ?? getDatabaseDriver(),
+  };
+}
 
 function rowsOf<T>(result: unknown): T[] {
   return (Array.isArray(result) ? result : ((result as { rows?: T[] })?.rows ?? [])) as T[];
@@ -39,16 +50,17 @@ async function assertPlatformRole(db: PlatformDb, expectedRole: string): Promise
 export async function withPlatformAuthorityDatabase<T>(
   callback: (db: PlatformDb) => Promise<T>,
 ): Promise<T> {
-  if (process.env.STEWARD_DB_MODE === "pglite" || process.env.STEWARD_PGLITE_MEMORY === "true") {
+  const authority = __platformAuthorityEnvironmentForTests();
+  if (authority.databaseMode === "pglite" || authority.pgliteMemory === "true") {
     return callback(getDb());
   }
-  const connectionString = process.env.STEWARD_PLATFORM_DATABASE_URL;
-  const expectedRole = process.env.STEWARD_PLATFORM_DATABASE_ROLE;
+  const connectionString = authority.connectionString;
+  const expectedRole = authority.expectedRole;
   if (!connectionString || !expectedRole) {
     throw new Error("PLATFORM_DATABASE_AUTHORITY_NOT_CONFIGURED");
   }
 
-  if (getDatabaseDriver() === "neon-websocket") {
+  if (authority.driver === "neon-websocket") {
     const handle = createNeonTransactionDbForRequest({
       DATABASE_URL: connectionString,
       DATABASE_DRIVER: "neon-websocket",

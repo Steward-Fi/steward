@@ -199,10 +199,7 @@ app.get("/ready", async (c) => {
     if (process.env.NODE_ENV === "production") {
       const expectedRole = process.env.STEWARD_APP_DATABASE_ROLE;
       if (!expectedRole) throw new Error("STEWARD_APP_DATABASE_ROLE is required in production");
-      await assertRlsDeploymentSafety(db, {
-        expectedRole,
-        enabledPolicyGroups: capabilitiesEnabled ? ["capabilities"] : [],
-      });
+      await assertRlsDeploymentSafety(db, { expectedRole });
       checks.rlsDeployment = { ok: true };
     }
   } catch {
@@ -360,10 +357,7 @@ if (process.env.NODE_ENV === "production" && !shouldUsePGLite()) {
   const expectedRole = process.env.STEWARD_APP_DATABASE_ROLE;
   if (!expectedRole) throw new Error("STEWARD_APP_DATABASE_ROLE is required in production");
   try {
-    await assertRlsDeploymentSafety(getDb(), {
-      expectedRole,
-      enabledPolicyGroups: capabilitiesEnabled ? ["capabilities"] : [],
-    });
+    await assertRlsDeploymentSafety(getDb(), { expectedRole });
   } catch (error) {
     console.error(
       "[steward] RLS deployment safety assertion failed — cannot start",
