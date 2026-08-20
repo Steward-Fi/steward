@@ -3376,18 +3376,15 @@ vaultRoutes.post("/:agentId/actions/transfer", async (c) => {
     const existing = byIdempotencyKey ?? byReferenceId;
     if (!existing) return { existing: null } as const;
     const payload = existing.actionPayload as Record<string, unknown> | null;
-    if (
-      typeof payload?.requestDigest === "string" &&
-      payload.requestDigest !== transferRequestDigest
-    ) {
+    if (payload?.requestDigest !== transferRequestDigest) {
       return {
-        conflict: byIdempotencyKey
-          ? "Idempotency-Key was already used for a different request"
-          : "referenceId was already used for a different request",
+        conflict:
+          typeof payload?.requestDigest !== "string"
+            ? "Stored transfer replay binding is incomplete"
+            : byIdempotencyKey
+              ? "Idempotency-Key was already used for a different request"
+              : "referenceId was already used for a different request",
       } as const;
-    }
-    if (byIdempotencyKey && payload?.requestDigest !== transferRequestDigest) {
-      return { conflict: "Stored transfer replay binding is incomplete" } as const;
     }
     if (byIdempotencyKey && actionReferenceId(payload) !== (transfer.referenceId ?? null)) {
       return { conflict: "Idempotency-Key was already used with a different referenceId" } as const;
@@ -3502,7 +3499,8 @@ vaultRoutes.post("/:agentId/actions/transfer", async (c) => {
     referenceId: transfer.referenceId,
     sponsorship: sponsorshipPayload,
     idempotencyKeyDigest: transferIdempotencyKeyDigest,
-    requestDigest: transferIdempotencyKeyDigest ? transferRequestDigest : undefined,
+    requestDigest:
+      transferIdempotencyKeyDigest || transfer.referenceId ? transferRequestDigest : undefined,
   });
   const solanaRecoveryBinding =
     isSolanaTransfer && transfer.broadcast
@@ -3617,7 +3615,10 @@ vaultRoutes.post("/:agentId/actions/transfer", async (c) => {
           referenceId: transfer.referenceId,
           sponsorship: sponsorshipPayload,
           idempotencyKeyDigest: transferIdempotencyKeyDigest,
-          requestDigest: transferIdempotencyKeyDigest ? transferRequestDigest : undefined,
+          requestDigest:
+            transferIdempotencyKeyDigest || transfer.referenceId
+              ? transferRequestDigest
+              : undefined,
         }),
         policyResults: evaluation.results,
       });
