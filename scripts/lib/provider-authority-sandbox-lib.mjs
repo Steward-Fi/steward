@@ -19,6 +19,7 @@ export const REQUIRED_ENV = [
   "STEWARD_AUDIT_SIGNING_KEY_FINGERPRINT",
   "DATABASE_URL",
   "STEWARD_MASTER_PASSWORD",
+  "STEWARD_KDF_SALT",
   "STEWARD_EXECUTION_AUTH_SECRET",
   "STEWARD_AUDIT_HMAC_KEY",
   "STEWARD_AUDIT_SIGNING_KEY",
@@ -138,6 +139,20 @@ export function validateEnvironment(env) {
     if (missing.length) parts.push(`missing required env: ${missing.join(", ")}`);
     if (placeholders.length) parts.push(`placeholder value(s): ${placeholders.join(", ")}`);
     throw new Error(parts.join("; "));
+  }
+  // Match the production vault's KeyStore contract. The live dispatch child
+  // must derive the same root key as the deployment that encrypted the seeded
+  // credential; accepting a missing, short, or non-hex salt would make a
+  // successful preflight meaningless and defer the failure until dispatch.
+  const kdfSalt = env.STEWARD_KDF_SALT;
+  if (kdfSalt.length < 32) {
+    throw new Error(
+      "STEWARD_KDF_SALT must be at least 32 hex characters (16 bytes). Generate with: openssl rand -hex 32",
+    );
+  }
+  const decodedKdfSalt = Buffer.from(kdfSalt, "hex");
+  if (decodedKdfSalt.length < 16) {
+    throw new Error("STEWARD_KDF_SALT must decode to at least 16 bytes of randomness.");
   }
   const stewardBase = validateServiceUrl("STEWARD_API_URL", env.STEWARD_API_URL);
   const stewardUrl = new URL(stewardBase);

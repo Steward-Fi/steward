@@ -58,6 +58,7 @@ function envFixture() {
       "STEWARD_AUDIT_SIGNING_KEY_FINGERPRINT",
       "DATABASE_URL",
       "STEWARD_MASTER_PASSWORD",
+      "STEWARD_KDF_SALT",
       "STEWARD_EXECUTION_AUTH_SECRET",
       "STEWARD_AUDIT_HMAC_KEY",
     ]
@@ -71,6 +72,7 @@ function envFixture() {
       ]),
   );
   env.STEWARD_API_URL = "https://steward.sandbox.test";
+  env.STEWARD_KDF_SALT = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
   return env;
 }
 
@@ -100,6 +102,20 @@ describe("provider authority sandbox operator primitives", () => {
       globalThis.fetch = original;
     }
     expect(calls).toBe(0);
+  });
+
+  it("fails closed when the live vault KDF salt is missing or malformed", () => {
+    const missing = envFixture();
+    delete missing.STEWARD_KDF_SALT;
+    expect(() => validateEnvironment(missing)).toThrow("STEWARD_KDF_SALT");
+
+    const short = envFixture();
+    short.STEWARD_KDF_SALT = "abcd";
+    expect(() => validateEnvironment(short)).toThrow("at least 32 hex characters");
+
+    const nonHex = envFixture();
+    nonHex.STEWARD_KDF_SALT = "z".repeat(64);
+    expect(() => validateEnvironment(nonHex)).toThrow("decode to at least 16 bytes");
   });
 
   it("rejects credential-bearing and public plaintext service URLs", async () => {

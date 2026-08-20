@@ -169,7 +169,16 @@ Requirements:
   The committed artifact is a `*.example` with placeholders and presence guards.
 - Pre-provisioned sandbox-only workspace, provider account, governed secret
   route, provider-agent JWT, recent-MFA approver session, and the database/vault/
-  execution/audit environment used by that same Steward deployment.
+  execution/audit environment used by that same Steward deployment. This
+  includes the exact `STEWARD_KDF_SALT` used to encrypt the pre-provisioned
+  secret; preflight rejects a missing or malformed salt, but operators must
+  supply the matching live value out-of-band.
+
+No real sandbox artifact is committed yet. Producing the artifact bundle still
+requires the external throwaway GitHub App/repository and pre-provisioned live
+Steward authority graph above. A naturally observed GitHub 403/429 with
+`Retry-After` also remains an external observation: the harness does not induce
+or manufacture rate limiting.
 
 `--preflight` performs no network request. The live command rotates the minted
 installation token through the MFA-gated secret API, drives create → approve →
