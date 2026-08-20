@@ -1,4 +1,4 @@
-import { closeDb } from "@stwd/db";
+import { createDb, sql, withTenantTransactionDatabase } from "@stwd/db";
 import { Hono } from "hono";
 import { conditionSetRoutes } from "../../routes/condition-sets";
 import type { AppVariables } from "../../services/context";
@@ -20,17 +20,46 @@ app.use("*", async (c, next) => {
 });
 app.route("/condition-sets", conditionSetRoutes);
 
-const response = await app.request(path, {
-  method,
-  headers: process.env.TEST_BODY ? { "Content-Type": "application/json" } : undefined,
-  body: process.env.TEST_BODY,
-});
-const body = await response.json();
-await closeDb();
+async function writeFrame(frame: unknown) {
+  await new Promise<void>((resolve, reject) => {
+    globalThis.process.stdout.write(`${JSON.stringify(frame)}\n`, (error) => {
+      if (error) reject(error);
+      else resolve();
+    });
+  });
+}
+
+const database = createDb();
+let result: { body: unknown; status: number } | undefined;
+try {
+  await database.db.transaction(async (tx) => {
+    const rows = (await tx.execute(sql`select pg_backend_pid()::integer as pid`)) as unknown as {
+      pid: number;
+    }[];
+    const backend = rows[0];
+    if (!backend) throw new Error("condition-set writer could not resolve its backend PID");
+    await writeFrame({ type: "backend", pid: backend.pid });
+
+    const response = await withTenantTransactionDatabase(tx as never, { tenantId }, () =>
+      app.request(path, {
+        method,
+        headers: globalThis.process.env.TEST_BODY
+          ? { "Content-Type": "application/json" }
+          : undefined,
+        body: globalThis.process.env.TEST_BODY,
+      }),
+    );
+    result = { body: await response.json(), status: response.status };
+  });
+} finally {
+  await database.client.end();
+}
+if (!result) throw new Error("condition-set writer produced no route result");
+await writeFrame({ type: "result", ...result });
 await new Promise<void>((resolve, reject) => {
-  process.stdout.write(`${JSON.stringify({ body, status: response.status })}\n`, (error) => {
+  globalThis.process.stdout.write("", (error) => {
     if (error) reject(error);
     else resolve();
   });
 });
-process.exit(0);
+globalThis.process.exit(0);

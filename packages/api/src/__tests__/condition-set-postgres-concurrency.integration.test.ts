@@ -20,7 +20,7 @@ describeRealPostgres("condition set real-PostgreSQL atomicity", () => {
   let admin: ReturnType<typeof createDb>;
   let app: Hono<{ Variables: AppVariables }>;
   const tenantIds: string[] = [];
-  const childProcesses = new Set<ReturnType<typeof spawnRoute>>();
+  const childProcesses = new Set<ReturnType<typeof Bun.spawn>>();
 
   beforeAll(async () => {
     admin = createDb(databaseUrl!);
@@ -51,9 +51,9 @@ describeRealPostgres("condition set real-PostgreSQL atomicity", () => {
 
   afterEach(async () => {
     await Promise.all(
-      [...childProcesses].map(async (process) => {
-        process.kill("SIGTERM");
-        await process.exited;
+      [...childProcesses].map(async (childProcess) => {
+        childProcess.kill("SIGTERM");
+        await childProcess.exited;
       }),
     );
     childProcesses.clear();
@@ -81,15 +81,15 @@ describeRealPostgres("condition set real-PostgreSQL atomicity", () => {
     body?: unknown;
     requestId?: string;
   }) {
-    const process = Bun.spawn(
+    const childProcess = Bun.spawn(
       [
-        process.execPath,
+        globalThis.process.execPath,
         new URL("./fixtures/condition-set-route-writer.ts", import.meta.url).pathname,
       ],
       {
         cwd: new URL("../../../..", import.meta.url).pathname,
         env: {
-          ...process.env,
+          ...globalThis.process.env,
           DATABASE_URL: databaseUrl!,
           STEWARD_AUDIT_HMAC_KEY: process.env.STEWARD_AUDIT_HMAC_KEY!,
           TEST_TENANT_ID: input.tenantId,
@@ -102,21 +102,63 @@ describeRealPostgres("condition set real-PostgreSQL atomicity", () => {
         stderr: "pipe",
       },
     );
-    childProcesses.add(process);
-    return process;
+    childProcesses.add(childProcess);
+
+    let resolveBackendPid!: (pid: number) => void;
+    let rejectBackendPid!: (error: unknown) => void;
+    const backendPid = new Promise<number>((resolve, reject) => {
+      resolveBackendPid = resolve;
+      rejectBackendPid = reject;
+    });
+    const output = (async () => {
+      const reader = childProcess.stdout.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let result: { status: number; body: unknown } | undefined;
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          buffer += decoder.decode(value, { stream: !done });
+          const lines = buffer.split("\n");
+          buffer = lines.pop() ?? "";
+          for (const line of lines) {
+            if (!line) continue;
+            const frame = JSON.parse(line) as
+              | { type: "backend"; pid: number }
+              | { type: "result"; status: number; body: unknown };
+            if (frame.type === "backend") resolveBackendPid(frame.pid);
+            else result = { status: frame.status, body: frame.body };
+          }
+          if (done) break;
+        }
+        if (!result) throw new Error("condition-set writer emitted no result frame");
+        return result;
+      } catch (error) {
+        rejectBackendPid(error);
+        throw error;
+      }
+    })();
+    return {
+      backendPid,
+      childProcess,
+      output,
+      stderr: new Response(childProcess.stderr).text(),
+    };
   }
 
-  async function routeResult(process: ReturnType<typeof spawnRoute>) {
-    const stdout = new Response(process.stdout).text();
-    const stderr = new Response(process.stderr).text();
+  async function routeResult(routeProcess: ReturnType<typeof spawnRoute>) {
     try {
-      const [exit, output, errorOutput] = await Promise.all([process.exited, stdout, stderr]);
+      const [exit, output, errorOutput] = await Promise.all([
+        routeProcess.childProcess.exited,
+        routeProcess.output,
+        routeProcess.stderr,
+      ]);
       if (exit !== 0) {
         throw new Error(`condition-set writer failed: ${errorOutput}`);
       }
-      return JSON.parse(output) as { status: number; body: unknown };
+      return output;
     } finally {
-      childProcesses.delete(process);
+      childProcesses.delete(routeProcess.childProcess);
     }
   }
 
@@ -128,7 +170,7 @@ describeRealPostgres("condition set real-PostgreSQL atomicity", () => {
     return row.key;
   }
 
-  async function waitForAdvisoryWaiter(lockKey: string, excludedPid?: number) {
+  async function waitForAdvisoryWaiter(lockKey: string, expectedPid?: number) {
     for (let attempt = 0; attempt < 200; attempt++) {
       const rows = await admin.client<{ pid: number }[]>`
         with expected as (select ${lockKey}::bigint as key)
@@ -140,7 +182,7 @@ describeRealPostgres("condition set real-PostgreSQL atomicity", () => {
           and locks.objsubid = 1
           and locks.classid = ((expected.key >> 32) & 4294967295)::oid
           and locks.objid = (expected.key & 4294967295)::oid
-          and (${excludedPid ?? null}::integer is null or locks.pid <> ${excludedPid ?? null})
+          and (${expectedPid ?? null}::integer is null or locks.pid = ${expectedPid ?? null})
       `;
       if (rows.length === 1) return rows[0].pid;
       if (rows.length > 1) {
@@ -291,10 +333,12 @@ describeRealPostgres("condition set real-PostgreSQL atomicity", () => {
         requestId: winnerRequestId,
         body: { label: "winner-label" },
       });
+      const expectedWinnerPid = await winner.backendPid;
       const winnerPid = await waitForAdvisoryWaiter(
         await advisoryKey(`steward_audit_${tenantId}`),
-        failedPid,
+        expectedWinnerPid,
       );
+      expect(winnerPid).toBe(expectedWinnerPid);
       expect(winnerPid).not.toBe(failedPid);
       await gate.release();
       const [failedResponse, winnerResponse] = await Promise.all([failed, routeResult(winner)]);
@@ -353,10 +397,12 @@ describeRealPostgres("condition set real-PostgreSQL atomicity", () => {
         requestId: upsertRequestId,
         body: { value: "concurrent-upsert" },
       });
+      const expectedUpsertPid = await upsert.backendPid;
       const upsertPid = await waitForAdvisoryWaiter(
         await advisoryKey(`steward_audit_${tenantId}`),
-        replacePid,
+        expectedUpsertPid,
       );
+      expect(upsertPid).toBe(expectedUpsertPid);
       expect(upsertPid).not.toBe(replacePid);
       await gate.release();
       const [replaceResponse, upsertResponse] = await Promise.all([replace, routeResult(upsert)]);
