@@ -75,6 +75,8 @@ const AGENT_SOLANA = `approval-solana-${Date.now()}`;
 const SOLANA_RECIPIENT = "7J9kqM5kV8Fh1Q3b6N2pR4tYwLcXzAaBbCcDdEeFfGg";
 const SOLANA_SIGNATURE =
   "4oL4p7QvN3UH7V5wMGZgW5PuzEk4A9LXLHk9RxAoKjDKuLbQBsfXN8kEvKfj5K1oEJa8wFF6RVp2h7pP9w2f51ZV";
+const ORIGINAL_REDIS_URL = process.env.REDIS_URL;
+const ORIGINAL_REDIS_REQUIRED = process.env.REDIS_REQUIRED;
 
 // One app per auth posture. The approve route reads auth purely from context
 // variables, so a per-test middleware that sets exactly the desired posture is
@@ -269,6 +271,8 @@ function approve(app: Awaited<ReturnType<typeof makeApp>>, agentId: string, txId
 
 describe("vault approval gates (real /approve path)", () => {
   beforeAll(async () => {
+    delete process.env.REDIS_URL;
+    delete process.env.REDIS_REQUIRED;
     process.env.STEWARD_PGLITE_MEMORY = "true";
     process.env.STEWARD_MASTER_PASSWORD = "approval-gate-master-password";
     process.env.STEWARD_JWT_SECRET = "approval-gate-jwt-secret-with-enough-entropy-0123456789";
@@ -354,6 +358,10 @@ describe("vault approval gates (real /approve path)", () => {
 
   afterAll(async () => {
     await closeDb();
+    if (ORIGINAL_REDIS_URL === undefined) delete process.env.REDIS_URL;
+    else process.env.REDIS_URL = ORIGINAL_REDIS_URL;
+    if (ORIGINAL_REDIS_REQUIRED === undefined) delete process.env.REDIS_REQUIRED;
+    else process.env.REDIS_REQUIRED = ORIGINAL_REDIS_REQUIRED;
     delete process.env.STEWARD_PGLITE_MEMORY;
     delete process.env.STEWARD_MASTER_PASSWORD;
     delete process.env.STEWARD_EXECUTION_AUTH_SECRET;

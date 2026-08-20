@@ -18,6 +18,8 @@ const TOKEN = "0x4200000000000000000000000000000000000006";
 const ALLOWED_SOLANA = "7J9kqM5kV8Fh1Q3b6N2pR4tYwLcXzAaBbCcDdEeFfGg";
 const BLOCKED_SOLANA = "8J9kqM5kV8Fh1Q3b6N2pR4tYwLcXzAaBbCcDdEeFfGg";
 const SOLANA_MINT = "So11111111111111111111111111111111111111112";
+const ORIGINAL_REDIS_URL = process.env.REDIS_URL;
+const ORIGINAL_REDIS_REQUIRED = process.env.REDIS_REQUIRED;
 
 function expectedErc20TransferCalldata(recipient: string, amount: string) {
   return `0xa9059cbb${recipient.toLowerCase().replace(/^0x/, "").padStart(64, "0")}${BigInt(amount).toString(16).padStart(64, "0")}`;
@@ -42,6 +44,8 @@ describe("wallet transfer actions", () => {
   let app: Awaited<ReturnType<typeof makeApp>>;
 
   beforeAll(async () => {
+    delete process.env.REDIS_URL;
+    delete process.env.REDIS_REQUIRED;
     process.env.STEWARD_PGLITE_MEMORY = "true";
     process.env.STEWARD_MASTER_PASSWORD = "wallet-actions-master-password";
     process.env.STEWARD_ALLOW_DEV_SECRETS = "true";
@@ -168,6 +172,10 @@ describe("wallet transfer actions", () => {
 
   afterAll(async () => {
     await closeDb();
+    if (ORIGINAL_REDIS_URL === undefined) delete process.env.REDIS_URL;
+    else process.env.REDIS_URL = ORIGINAL_REDIS_URL;
+    if (ORIGINAL_REDIS_REQUIRED === undefined) delete process.env.REDIS_REQUIRED;
+    else process.env.REDIS_REQUIRED = ORIGINAL_REDIS_REQUIRED;
     delete process.env.STEWARD_MASTER_PASSWORD;
     delete process.env.STEWARD_ALLOW_DEV_SECRETS;
   });

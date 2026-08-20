@@ -529,6 +529,7 @@ export const LEGACY_EVM_SIGN_CALL_SITES = [
  *    unreachable for EVM flows because a nearby invariant guard throws before
  *    it (the Solana primary-sign fallback and the transfer approval-replay
  *    fallback). These are inside the two gateway-migrated routes.
+ *  - "non-evm": a raw signer that is reachable only for a non-EVM chain.
  *  - "legacy": a not-yet-gateway-migrated EVM sign surface, one-for-one with an
  *    entry in LEGACY_EVM_SIGN_CALL_SITES.
  */
@@ -537,7 +538,7 @@ export interface RawEvmSignCallSite {
   /** Stable nearby source marker (route/function/guard string) unique enough to
    *  anchor the call site without brittle line numbers. */
   marker: string;
-  classification: "migrated-invariant-guarded" | "legacy";
+  classification: "migrated-invariant-guarded" | "non-evm" | "legacy";
   reason: string;
 }
 
@@ -552,7 +553,7 @@ export interface RawEvmSignCallSite {
  * entry without removing the call also fails.
  */
 export const RAW_EVM_SIGN_INVENTORY = [
-  // ── packages/api/src/routes/vault.ts (3 raw calls) ──
+  // ── packages/api/src/routes/vault.ts (4 raw calls) ──
   {
     file: "packages/api/src/routes/vault.ts",
     marker: "invariant: primary EVM sign reached raw signer without gateway authorization",
@@ -566,6 +567,13 @@ export const RAW_EVM_SIGN_INVENTORY = [
     classification: "legacy",
     reason:
       "Transfer action EVM sign; separate non-migrated surface. One-for-one with LEGACY_EVM_SIGN_CALL_SITES.",
+  },
+  {
+    file: "packages/api/src/routes/vault.ts",
+    marker: 'transferPayload?.token === "native" && !transactionRow.data',
+    classification: "non-evm",
+    reason:
+      "Native SOL approval recovery path inside the isSolana branch; no EVM request can reach this raw signer.",
   },
   {
     file: "packages/api/src/routes/vault.ts",
