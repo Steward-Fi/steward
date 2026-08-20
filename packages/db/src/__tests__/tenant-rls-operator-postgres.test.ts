@@ -289,7 +289,7 @@ describeWithPostgres("SEC-169 operator lifecycle on the real Steward schema", ()
         VALUES (${personalOwnerId}::uuid, ${personalTenant}, 'owner')
       `;
       const personalDeactivation = await db.begin(async (tx) => {
-        await tx.unsafe(`SET LOCAL ROLE ${appRole}`);
+        await tx.unsafe(`SET LOCAL ROLE ${platformRole}`);
         await tx`SELECT set_config('steward.tenant_id', 'platform', true)`;
         return tx`
           SELECT user_id, deactivated_at
