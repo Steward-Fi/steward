@@ -7,7 +7,7 @@
  * the REAL MoneroWalletRpcBackend code path runs with zero network. Key and
  * address crypto is covered by the vault package's official-vector tests.
  */
-import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import { closeDb, getDb, policies, tenants, transactions, vaultSigningFreezes } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import {
@@ -83,10 +83,24 @@ function installScriptedMoneroRpc() {
   const walletFiles = new Map<string, { address: string }>();
   let relayMode: "success" | "reject" | "lost-ack" = "success";
   let daemonStatus: "not_found" | "broadcast" | "confirmed" | "malformed" = "not_found";
+  let daemonNetwork: "mainnet" | "stagenet" = "mainnet";
   let beforeRelay: (() => void | Promise<void>) | undefined;
 
   const stub = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
+    if (url === `${FAKE_DAEMON_URL}/get_info`) {
+      return new Response(
+        JSON.stringify({
+          status: "OK",
+          nettype: daemonNetwork,
+          mainnet: daemonNetwork === "mainnet",
+          stagenet: daemonNetwork === "stagenet",
+          testnet: false,
+          height: 3_400_000,
+        }),
+        { status: 200 },
+      );
+    }
     if (url === `${FAKE_DAEMON_URL}/get_transactions`) {
       const request = JSON.parse(String(init?.body)) as { txs_hashes?: unknown };
       const requestedHash = Array.isArray(request.txs_hashes) ? request.txs_hashes[0] : null;
@@ -177,7 +191,7 @@ function installScriptedMoneroRpc() {
       case "relay_tx": {
         await beforeRelay?.();
         if (relayMode === "reject") {
-          return rpc(undefined, { code: -4, message: "transaction rejected" });
+          return rpc(undefined, { code: -13, message: "no wallet file" });
         }
         if (relayMode === "lost-ack") {
           throw new TypeError("connection closed after relay submission");
@@ -200,6 +214,9 @@ function installScriptedMoneroRpc() {
     },
     setDaemonStatus: (value: typeof daemonStatus) => {
       daemonStatus = value;
+    },
+    setDaemonNetwork: (value: typeof daemonNetwork) => {
+      daemonNetwork = value;
     },
     setBeforeRelay: (value: typeof beforeRelay) => {
       beforeRelay = value;
@@ -336,6 +353,13 @@ describe("vault Monero transfer + balance routes", () => {
 
     app = await makeApp();
   }, 120_000);
+
+  beforeEach(() => {
+    scripted.setRelayMode("success");
+    scripted.setDaemonStatus("not_found");
+    scripted.setDaemonNetwork("mainnet");
+    scripted.setBeforeRelay(undefined);
+  });
 
   afterAll(async () => {
     scripted.restore();
@@ -750,48 +774,67 @@ describe("vault Monero transfer + balance routes", () => {
   });
 
   it("reconciles by exact daemon evidence without a second relay or duplicate terminal transition", async () => {
-    const [unknown] = await getDb()
-      .select()
-      .from(transactions)
-      .where(eq(transactions.status, "outcome_unknown"));
-    expect(unknown).toBeDefined();
+    const idempotencyKey = `monero-reconcile-${crypto.randomUUID()}`;
+    scripted.setRelayMode("lost-ack");
     const relayCountBefore = scripted.rpcCalls.filter((call) => call.method === "relay_tx").length;
+    const relayed = await app.request(
+      transferRequest(
+        {
+          walletScope: SCOPE,
+          destinations: [{ address: allowedRecipient, amountPiconero: "3750000000" }],
+        },
+        { "Idempotency-Key": idempotencyKey },
+      ),
+    );
+    expect(relayed.status).toBe(202);
+    const relayedBody = (await relayed.json()) as { data: { transactionId: string } };
+    const transactionId = relayedBody.data.transactionId;
+    scripted.setRelayMode("success");
 
+    scripted.setDaemonNetwork("stagenet");
+    const wrongNetwork = await app.request(
+      `http://localhost/vault/${AGENT_ID}/monero/transactions/${transactionId}/reconcile`,
+      { method: "POST" },
+    );
+    expect(wrongNetwork.status).toBe(503);
+    scripted.setDaemonNetwork("mainnet");
     scripted.setDaemonStatus("malformed");
     const malformed = await app.request(
-      `http://localhost/vault/${AGENT_ID}/monero/transactions/${unknown.id}/reconcile`,
+      `http://localhost/vault/${AGENT_ID}/monero/transactions/${transactionId}/reconcile`,
       { method: "POST" },
     );
     expect(malformed.status).toBe(503);
 
     scripted.setDaemonStatus("not_found");
     const absent = await app.request(
-      `http://localhost/vault/${AGENT_ID}/monero/transactions/${unknown.id}/reconcile`,
+      `http://localhost/vault/${AGENT_ID}/monero/transactions/${transactionId}/reconcile`,
       { method: "POST" },
     );
     expect(absent.status).toBe(202);
 
     scripted.setDaemonStatus("confirmed");
     const confirmed = await app.request(
-      `http://localhost/vault/${AGENT_ID}/monero/transactions/${unknown.id}/reconcile`,
+      `http://localhost/vault/${AGENT_ID}/monero/transactions/${transactionId}/reconcile`,
       { method: "POST" },
     );
     expect(confirmed.status).toBe(200);
     const confirmedBody = (await confirmed.json()) as { data: { status: string } };
     expect(confirmedBody.data.status).toBe("confirmed");
     const replay = await app.request(
-      `http://localhost/vault/${AGENT_ID}/monero/transactions/${unknown.id}/reconcile`,
+      `http://localhost/vault/${AGENT_ID}/monero/transactions/${transactionId}/reconcile`,
       { method: "POST" },
     );
     expect(replay.status).toBe(200);
     expect(scripted.rpcCalls.filter((call) => call.method === "relay_tx").length).toBe(
-      relayCountBefore,
+      relayCountBefore + 1,
     );
     const [persisted] = await getDb()
       .select()
       .from(transactions)
-      .where(eq(transactions.id, unknown.id));
+      .where(eq(transactions.id, transactionId));
     expect(persisted.status).toBe("confirmed");
+    scripted.setDaemonStatus("not_found");
+    scripted.setDaemonNetwork("mainnet");
   });
 
   it("persists an explicit relay rejection and does not retry it", async () => {

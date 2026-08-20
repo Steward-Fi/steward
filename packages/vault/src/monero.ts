@@ -106,6 +106,11 @@ export class MoneroRelayOutcomeUnknownError extends Error {
   }
 }
 
+// Only wallet-rpc failures that are provably raised before relay_tx can submit
+// bytes may become terminal rejections. Generic wallet/daemon failures can be
+// returned after submission and therefore remain outcome_unknown.
+const MONERO_RELAY_PRE_SUBMIT_REJECTION_CODES = new Set([-13, -32602]);
+
 export type MoneroTransactionStatus = "not_found" | "broadcast" | "confirmed";
 
 // ─── Hex helpers ──────────────────────────────────────────────────────────────
@@ -965,7 +970,11 @@ export class MoneroWalletRpcBackend implements MoneroWalletBackend {
             unknown
           >;
         } catch (error) {
-          if (error instanceof MoneroRpcError && error.code !== undefined) {
+          if (
+            error instanceof MoneroRpcError &&
+            error.code !== undefined &&
+            MONERO_RELAY_PRE_SUBMIT_REJECTION_CODES.has(error.code)
+          ) {
             throw new MoneroRelayRejectedError(expectedTxHash, error.message);
           }
           throw new MoneroRelayOutcomeUnknownError(
@@ -995,6 +1004,37 @@ export class MoneroWalletRpcBackend implements MoneroWalletBackend {
     if (!/^[0-9a-f]{64}$/.test(txHash)) {
       throw new Error("Monero transaction hash is malformed");
     }
+    let networkResponse: Response;
+    try {
+      networkResponse = await this.fetchFn(`${this.daemonUrl}/get_info`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
+        signal: AbortSignal.timeout(this.timeoutMs),
+      });
+    } catch (error) {
+      throw new MoneroRpcError("get_info", errorMessage(error));
+    }
+    if (!networkResponse.ok) {
+      throw new MoneroRpcError("get_info", `daemon returned HTTP ${networkResponse.status}`);
+    }
+    const networkBody = parseWithBigIntegers(
+      await readBoundedResponseText(networkResponse, MONERO_RPC_RESPONSE_MAX_BYTES),
+    ) as Record<string, unknown>;
+    const expectedFlags =
+      this.network === "mainnet"
+        ? { mainnet: true, stagenet: false, testnet: false }
+        : { mainnet: false, stagenet: true, testnet: false };
+    if (
+      networkBody.status !== "OK" ||
+      networkBody.nettype !== this.network ||
+      networkBody.mainnet !== expectedFlags.mainnet ||
+      networkBody.stagenet !== expectedFlags.stagenet ||
+      networkBody.testnet !== expectedFlags.testnet
+    ) {
+      throw new MoneroRpcError("get_info", "daemon network identity is malformed or mismatched");
+    }
+
     let response: Response;
     try {
       response = await this.fetchFn(`${this.daemonUrl}/get_transactions`, {
