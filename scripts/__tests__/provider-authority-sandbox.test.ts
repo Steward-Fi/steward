@@ -105,28 +105,28 @@ describe("provider authority sandbox operator primitives", () => {
   });
 
   it("fails closed when the live vault KDF salt is missing or malformed", () => {
-    const missing = envFixture();
+    // RSA fixture generation is intentionally expensive. Generate it once so
+    // this validation table stays within Bun's default per-test timeout (the
+    // official scripts/__tests__ CI command does not raise that timeout).
+    const valid = envFixture();
+
+    const missing = { ...valid };
     delete missing.STEWARD_KDF_SALT;
     expect(() => validateEnvironment(missing)).toThrow("STEWARD_KDF_SALT");
 
-    const short = envFixture();
-    short.STEWARD_KDF_SALT = "abcd";
+    const short = { ...valid, STEWARD_KDF_SALT: "abcd" };
     expect(() => validateEnvironment(short)).toThrow("at least 32 characters");
 
-    const nonHex = envFixture();
-    nonHex.STEWARD_KDF_SALT = `${"a".repeat(32)}zz`;
+    const nonHex = { ...valid, STEWARD_KDF_SALT: `${"a".repeat(32)}zz` };
     expect(() => validateEnvironment(nonHex)).toThrow("even-length hexadecimal string");
 
-    const oddLength = envFixture();
-    oddLength.STEWARD_KDF_SALT = "a".repeat(33);
+    const oddLength = { ...valid, STEWARD_KDF_SALT: "a".repeat(33) };
     expect(() => validateEnvironment(oddLength)).toThrow("even-length hexadecimal string");
 
-    const trailingSpace = envFixture();
-    trailingSpace.STEWARD_KDF_SALT = `${"a".repeat(32)} `;
+    const trailingSpace = { ...valid, STEWARD_KDF_SALT: `${"a".repeat(32)} ` };
     expect(() => validateEnvironment(trailingSpace)).toThrow("even-length hexadecimal string");
 
-    const uppercase = envFixture();
-    uppercase.STEWARD_KDF_SALT = "AB".repeat(16);
+    const uppercase = { ...valid, STEWARD_KDF_SALT: "AB".repeat(16) };
     expect(() => validateEnvironment(uppercase)).not.toThrow();
   });
 
