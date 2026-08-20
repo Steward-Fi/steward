@@ -1,8 +1,17 @@
 import { afterAll, beforeAll, describe, expect, it, spyOn } from "bun:test";
-import { agentSigners, agents, closeDb, getDb, tenants, users, userTenants } from "@stwd/db";
+import {
+  agentSigners,
+  agents,
+  auditEvents,
+  closeDb,
+  getDb,
+  tenants,
+  users,
+  userTenants,
+} from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { Vault } from "@stwd/vault";
-import { eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 
 const USER_ID = crypto.randomUUID();
 const USER_ADDRESS = "0x1234567890123456789012345678901234567890";
@@ -20,6 +29,7 @@ describe("user wallet additional signers API", () => {
     process.env.STEWARD_MASTER_PASSWORD = "user-wallet-signers-master-password";
     process.env.STEWARD_JWT_SECRET = "user-wallet-signers-jwt-secret-32chars";
     process.env.STEWARD_AUDIT_HMAC_KEY = "user-wallet-signers-audit-hmac-key-32chars";
+    process.env.STEWARD_SIGNER_CREDENTIAL_PEPPER = "user-wallet-signers-credential-pepper";
     process.env.STEWARD_ALLOW_UNSAFE_MESSAGE_SIGNING = "true";
     process.env.STEWARD_ALLOW_USER_UNSAFE_MESSAGE_SIGNING = "true";
 
@@ -66,6 +76,7 @@ describe("user wallet additional signers API", () => {
     delete process.env.STEWARD_MASTER_PASSWORD;
     delete process.env.STEWARD_JWT_SECRET;
     delete process.env.STEWARD_AUDIT_HMAC_KEY;
+    delete process.env.STEWARD_SIGNER_CREDENTIAL_PEPPER;
     delete process.env.STEWARD_ALLOW_UNSAFE_MESSAGE_SIGNING;
     delete process.env.STEWARD_ALLOW_USER_UNSAFE_MESSAGE_SIGNING;
   });
@@ -199,6 +210,95 @@ describe("user wallet additional signers API", () => {
     const revoked = (await revokeResponse.json()) as { data: { status: string } };
     expect(revokeResponse.status).toBe(200);
     expect(revoked.data.status).toBe("revoked");
+  });
+
+  it("rolls back user-wallet signer creation and revocation when completion audits fail", async () => {
+    const suffix = crypto.randomUUID().replaceAll("-", "");
+    const functionName = `fail_user_wallet_signer_audit_${suffix}`;
+    const triggerName = `user_wallet_signer_audit_failure_${suffix}`;
+    const seededId = crypto.randomUUID();
+    await getDb()
+      .insert(agentSigners)
+      .values({
+        id: seededId,
+        tenantId: PERSONAL_TENANT_ID,
+        agentId: WALLET_AGENT_ID,
+        signerType: "delegated",
+        subjectType: "external",
+        subjectId: `audit-rollback-existing-${suffix}`,
+        permissions: ["sign_message"],
+        status: "active",
+        createdBy: USER_ID,
+      });
+    try {
+      await getDb().execute(
+        sql.raw(`
+          CREATE FUNCTION ${functionName}() RETURNS trigger AS $$
+          BEGIN
+            IF NEW.tenant_id = '${PERSONAL_TENANT_ID}' AND NEW.action IN (
+              'user.wallet.signer.create', 'user.wallet.signer.revoke'
+            ) THEN
+              RAISE EXCEPTION 'required user wallet signer audit failed';
+            END IF;
+            RETURN NEW;
+          END;
+          $$ LANGUAGE plpgsql
+        `),
+      );
+      await getDb().execute(
+        sql.raw(`
+          CREATE TRIGGER ${triggerName} BEFORE INSERT ON audit_events
+          FOR EACH ROW EXECUTE FUNCTION ${functionName}()
+        `),
+      );
+      const auth = {
+        Authorization: `Bearer ${await token({ mfa: true })}`,
+        "Content-Type": "application/json",
+      };
+      const subjectId = `audit-rollback-create-${suffix}`;
+      const create = await userRoutes.request("/me/wallet/signers", {
+        method: "POST",
+        headers: auth,
+        body: JSON.stringify({ walletIndex: 2, subjectId }),
+      });
+      expect(create.status).toBe(500);
+      expect(
+        await getDb()
+          .select()
+          .from(agentSigners)
+          .where(
+            and(eq(agentSigners.agentId, WALLET_AGENT_ID), eq(agentSigners.subjectId, subjectId)),
+          ),
+      ).toHaveLength(0);
+
+      const revoke = await userRoutes.request(`/me/wallet/signers/${seededId}?walletIndex=2`, {
+        method: "DELETE",
+        headers: auth,
+      });
+      expect(revoke.status).toBe(500);
+      expect(
+        await getDb()
+          .select({ status: agentSigners.status })
+          .from(agentSigners)
+          .where(eq(agentSigners.id, seededId)),
+      ).toEqual([{ status: "active" }]);
+      expect(
+        await getDb()
+          .select()
+          .from(auditEvents)
+          .where(
+            and(
+              eq(auditEvents.tenantId, PERSONAL_TENANT_ID),
+              eq(auditEvents.resourceId, seededId),
+              eq(auditEvents.action, "user.wallet.signer.revoke"),
+            ),
+          ),
+      ).toHaveLength(0);
+    } finally {
+      await getDb().execute(sql.raw(`DROP TRIGGER IF EXISTS ${triggerName} ON audit_events`));
+      await getDb().execute(sql.raw(`DROP FUNCTION IF EXISTS ${functionName}()`));
+      await getDb().delete(agentSigners).where(eq(agentSigners.id, seededId));
+    }
   });
 
   it("rejects forbidden non-signing capabilities and caller supplied secrets", async () => {

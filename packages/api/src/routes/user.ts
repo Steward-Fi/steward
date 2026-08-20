@@ -94,7 +94,11 @@ import bs58 from "bs58";
 import { and, desc, eq, gte, ilike, inArray, isNull, ne, or, sql } from "drizzle-orm";
 import { type Context, Hono, type Next } from "hono";
 import { getAddress, verifyMessage as viemVerifyMessage } from "viem";
-import { writeAuditEvent } from "../services/audit";
+import {
+  type AuditEventInput,
+  withTenantAuditedTransaction,
+  writeAuditEvent,
+} from "../services/audit";
 import {
   continueWithTenantDatabase,
   priceOracle,
@@ -945,12 +949,45 @@ async function writeUserAudit(
     metadata?: Record<string, unknown>;
   },
 ): Promise<void> {
-  await writeAuditEvent({
+  await writeAuditEvent(userAuditEvent(c, event));
+}
+
+function userAuditEvent(
+  c: Context<{ Variables: UserVariables }>,
+  event: {
+    tenantId: string;
+    actorType: "user";
+    actorId?: string | null;
+    action: string;
+    resourceType?: string | null;
+    resourceId?: string | null;
+    metadata?: Record<string, unknown>;
+  },
+): AuditEventInput {
+  return {
     ...event,
     ipAddress: c.req.header("x-forwarded-for") ?? null,
     userAgent: c.req.header("user-agent") ?? null,
     requestId: c.get("requestId") ?? null,
-  });
+  };
+}
+
+async function lockUserWalletSignerAuthority(
+  tx: ReturnType<typeof getDb>,
+  tenantId: string,
+  agentId: string,
+): Promise<boolean> {
+  if (process.env.STEWARD_PGLITE_MEMORY !== "true") {
+    await tx.execute(
+      sql`SELECT pg_advisory_xact_lock(hashtextextended(${`steward_agent_authority_${tenantId}:${agentId}`}, 0))`,
+    );
+  }
+  const [agent] = await tx
+    .select({ id: agents.id })
+    .from(agents)
+    .where(and(eq(agents.id, agentId), eq(agents.tenantId, tenantId)))
+    .for("update");
+  return Boolean(agent);
 }
 
 async function writeInvalidUserWalletIndexAudit(
@@ -4806,45 +4843,80 @@ user.post("/me/wallet/signers", async (c) => {
 
   const credentialSecret = createUserWalletSignerSecret();
   try {
-    const [row] = await getDb()
-      .insert(agentSigners)
-      .values({
-        tenantId,
-        agentId: wallet.id,
-        signerType: "delegated",
-        subjectType,
-        subjectId,
-        keyType: "hmac",
-        publicKey: null,
-        address,
-        chainFamily,
-        label,
-        permissions,
-        policyIds: [],
-        metadata: {
-          ...metadata,
-          credentialHash: await createSignerCredentialHash(credentialSecret),
-          credentialCreatedAt: new Date().toISOString(),
-        },
-        status: "active",
-        createdBy: userId,
-      })
-      .returning();
-
-    try {
-      await writeUserAudit(c, {
-        tenantId,
-        actorType: "user",
-        actorId: userId,
-        action: "user.wallet.signer.create",
-        resourceType: "agent_signer",
-        resourceId: row.id,
-        metadata: { agentId: wallet.id, subjectType, subjectId, walletIndex: walletIndex.value },
-      });
-    } catch (error) {
-      await getDb().delete(agentSigners).where(eq(agentSigners.id, row.id));
-      throw error;
+    const credentialHash = await createSignerCredentialHash(credentialSecret);
+    const mutation = await withTenantAuditedTransaction(
+      tenantId,
+      async (txRaw, appendRequiredAudit) => {
+        const tx = txRaw as ReturnType<typeof getDb>;
+        if (!(await lockUserWalletSignerAuthority(tx, tenantId, wallet.id))) {
+          return { kind: "missing-wallet" as const };
+        }
+        const [duplicate] = await tx
+          .select({ id: agentSigners.id })
+          .from(agentSigners)
+          .where(
+            and(
+              eq(agentSigners.tenantId, tenantId),
+              eq(agentSigners.agentId, wallet.id),
+              eq(agentSigners.subjectType, subjectType),
+              eq(agentSigners.subjectId, subjectId),
+            ),
+          )
+          .for("update");
+        if (duplicate) return { kind: "duplicate" as const };
+        const [row] = await tx
+          .insert(agentSigners)
+          .values({
+            tenantId,
+            agentId: wallet.id,
+            signerType: "delegated",
+            subjectType,
+            subjectId,
+            keyType: "hmac",
+            publicKey: null,
+            address,
+            chainFamily,
+            label,
+            permissions,
+            policyIds: [],
+            metadata: {
+              ...metadata,
+              credentialHash,
+              credentialCreatedAt: new Date().toISOString(),
+            },
+            status: "active",
+            createdBy: userId,
+          })
+          .returning();
+        await appendRequiredAudit(
+          userAuditEvent(c, {
+            tenantId,
+            actorType: "user",
+            actorId: userId,
+            action: "user.wallet.signer.create",
+            resourceType: "agent_signer",
+            resourceId: row.id,
+            metadata: {
+              agentId: wallet.id,
+              subjectType,
+              subjectId,
+              walletIndex: walletIndex.value,
+            },
+          }),
+        );
+        return { kind: "created" as const, row };
+      },
+    );
+    if (mutation.kind === "missing-wallet") {
+      return c.json<ApiResponse>({ ok: false, error: "Wallet authority no longer exists" }, 404);
     }
+    if (mutation.kind === "duplicate") {
+      return c.json<ApiResponse>(
+        { ok: false, error: "Signer already exists for this wallet and subject" },
+        409,
+      );
+    }
+    const { row } = mutation;
 
     return c.json<
       ApiResponse<ReturnType<typeof toUserWalletSignerResponse> & { credentialSecret: string }>
@@ -4947,29 +5019,60 @@ user.delete("/me/wallet/signers/:signerId", async (c) => {
     metadata: { agentId: wallet.id, walletIndex: walletIndex.value },
   });
 
-  const [row] = await getDb()
-    .update(agentSigners)
-    .set({ status: "revoked" })
-    .where(
-      and(
-        eq(agentSigners.id, signerId),
-        eq(agentSigners.tenantId, tenantId),
-        eq(agentSigners.agentId, wallet.id),
-      ),
-    )
-    .returning();
-
-  if (!row) return c.json<ApiResponse>({ ok: false, error: "Signer not found" }, 404);
-
-  await writeUserAudit(c, {
+  const mutation = await withTenantAuditedTransaction(
     tenantId,
-    actorType: "user",
-    actorId: userId,
-    action: "user.wallet.signer.revoke",
-    resourceType: "agent_signer",
-    resourceId: row.id,
-    metadata: { agentId: wallet.id, walletIndex: walletIndex.value },
-  });
+    async (txRaw, appendRequiredAudit) => {
+      const tx = txRaw as ReturnType<typeof getDb>;
+      if (!(await lockUserWalletSignerAuthority(tx, tenantId, wallet.id))) {
+        return { kind: "missing-wallet" as const };
+      }
+      const [locked] = await tx
+        .select()
+        .from(agentSigners)
+        .where(
+          and(
+            eq(agentSigners.id, signerId),
+            eq(agentSigners.tenantId, tenantId),
+            eq(agentSigners.agentId, wallet.id),
+          ),
+        )
+        .for("update");
+      if (!locked) return { kind: "missing" as const };
+      if (JSON.stringify(locked) !== JSON.stringify(existingSigner)) {
+        return { kind: "conflict" as const };
+      }
+      const [row] = await tx
+        .update(agentSigners)
+        .set({ status: "revoked" })
+        .where(eq(agentSigners.id, signerId))
+        .returning();
+      await appendRequiredAudit(
+        userAuditEvent(c, {
+          tenantId,
+          actorType: "user",
+          actorId: userId,
+          action: "user.wallet.signer.revoke",
+          resourceType: "agent_signer",
+          resourceId: row.id,
+          metadata: { agentId: wallet.id, walletIndex: walletIndex.value },
+        }),
+      );
+      return { kind: "revoked" as const, row };
+    },
+  );
+  if (mutation.kind === "missing-wallet") {
+    return c.json<ApiResponse>({ ok: false, error: "Wallet authority no longer exists" }, 404);
+  }
+  if (mutation.kind === "missing") {
+    return c.json<ApiResponse>({ ok: false, error: "Signer not found" }, 404);
+  }
+  if (mutation.kind === "conflict") {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Signer changed concurrently; retry against the latest signer" },
+      409,
+    );
+  }
+  const { row } = mutation;
 
   return c.json<ApiResponse<ReturnType<typeof toUserWalletSignerResponse>>>({
     ok: true,
