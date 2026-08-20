@@ -6,7 +6,9 @@ description: "SEC-169 activation design, bootstrap boundary, runtime requirement
 # PostgreSQL tenant RLS rollout
 
 Migration `0111_tenant_rls_policy_install` installs the complete current policy
-and bootstrap-function surface, but intentionally leaves RLS disabled. Routine
+and bootstrap-function surface. Migration `0112_tenant_rls_policy_manifest`
+then verifies it against a checked-in, catalog-independent semantic manifest;
+both intentionally leave RLS disabled. Routine
 production enforcement is not active until an operator completes every gate in
 this runbook and runs the atomic activation script. Application predicates
 remain the production boundary before that point.
@@ -194,7 +196,7 @@ complete policy catalog before bootstrap or traffic.
 
 The fresh-database order is executable and strict:
 
-1. Apply core migrations through `0111` with the initial schema-owning admin.
+1. Apply core migrations through `0112` with the initial schema-owning admin.
 2. Run `rls-bootstrap.sql` as that admin to create roles and transfer ownership.
 3. Apply enabled-plugin migrations with the new migration-role credential.
 4. Activate as the admin, naming both the app and migration roles.

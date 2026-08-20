@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
 import { createPGLiteDb } from "../pglite";
 
-describe("0111 tenant RLS policy installation", () => {
+describe("0111/0112 tenant RLS policy installation and manifest", () => {
   let client: Awaited<ReturnType<typeof createPGLiteDb>>["client"];
 
   beforeAll(async () => {
@@ -39,6 +39,23 @@ describe("0111 tenant RLS policy installation", () => {
         .filter((row) => row.relname === "user_push_subscriptions")
         .map((row) => row.polname),
     ).toEqual(["steward_global_user_subscription", "steward_tenant_subscription"]);
+    const manifest = await client.query<{ required: boolean }>(`
+      SELECT required FROM steward_rls.policy_manifest
+    `);
+    expect(manifest.rows.filter((row) => row.required)).toHaveLength(73);
+    expect(manifest.rows.filter((row) => !row.required)).toHaveLength(3);
+  });
+
+  test("keeps the semantic manifest independent from the live policy catalog", async () => {
+    const source = await readFile(
+      new URL("../../drizzle/0112_tenant_rls_policy_manifest.sql", import.meta.url),
+      "utf8",
+    );
+    expect(source).toContain("WITH direct(relation_name, text_tenant_id, required) AS");
+    expect(source).toContain("installed policies drift from checked-in manifest");
+    expect(source).not.toMatch(
+      /INSERT INTO\s+"steward_rls"\."policy_manifest"[\s\S]{0,200}\bFROM\s+pg_policy/i,
+    );
   });
 
   test("bootstrap functions are fixed-shape SECURITY DEFINER functions with safe search paths", async () => {

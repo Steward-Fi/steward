@@ -144,6 +144,7 @@ describeWithPostgres("SEC-169 operator lifecycle on the real Steward schema", ()
       { DATABASE_URL: undefined, MIGRATION_DATABASE_URL: databaseUrl(databaseName) },
     );
     expect(firstMigration).toContain("0111_tenant_rls_policy_install");
+    expect(firstMigration).toContain("0112_tenant_rls_policy_manifest");
 
     const db = postgres(databaseUrl(databaseName), { max: 1 });
     try {
