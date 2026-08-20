@@ -87,7 +87,7 @@ describe("request-local adapter environment integration", () => {
         STEWARD_ALLOW_MOCK_ADAPTERS: "true",
         ...mockBindings(),
       },
-      () => app.request("/adapters/"),
+      () => app.request("/adapters"),
     );
     expect(allowed.status).toBe(200);
     const allowedBody = (await allowed.json()) as {
@@ -97,7 +97,7 @@ describe("request-local adapter environment integration", () => {
 
     const removed = await withRuntimeEnvironment(
       { STEWARD_RUNTIME: "workers", NODE_ENV: "production" },
-      () => app.request("/adapters/"),
+      () => app.request("/adapters"),
     );
     expect(removed.status).toBe(200);
     const removedBody = (await removed.json()) as {
