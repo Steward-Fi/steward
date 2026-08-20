@@ -13,6 +13,7 @@ import { describe, expect, test } from "bun:test";
 // `../index.ts` (it validates the JWT secret and requires a database URL at
 // module load), matching the isolation posture of metrics-exposure.test.ts.
 process.env.STEWARD_ALLOW_DEV_SECRETS = "true";
+process.env.NODE_ENV = "test";
 process.env.STEWARD_JWT_SECRET ||= "test-proxy-health-jwt-secret-32-characters-min";
 process.env.STEWARD_PGLITE_MEMORY = "true";
 process.env.DATABASE_URL ||= "postgres://steward:steward@127.0.0.1:5432/steward_test";

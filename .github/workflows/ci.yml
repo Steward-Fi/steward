@@ -456,6 +456,7 @@ jobs:
     # 25-minute bound below; 15 minutes cancels healthy hosted runs mid-suite.
     timeout-minutes: 25
     env:
+      NODE_ENV: "test"
       REDIS_URL: "redis://localhost:6379"
 
     services:
@@ -705,14 +706,14 @@ jobs:
           POSTGRES_USER: "steward"
           POSTGRES_PASSWORD: "steward_ci"
           STEWARD_ADMIN_DATABASE_URL: "postgres://steward:steward_ci@postgres:5432/steward_test"
-          MIGRATION_DATABASE_URL: "postgres://steward_migrator:ci-migration-password@postgres:5432/steward_test"
-          DATABASE_URL: "postgres://steward_app:ci-app-password@postgres:5432/steward_test"
-          STEWARD_PLATFORM_DATABASE_URL: "postgres://steward_platform:ci-platform-db-password@postgres:5432/steward_test"
+          MIGRATION_DATABASE_URL: "postgres://steward_migrator:ci-migration-database-password-32@postgres:5432/steward_test"
+          DATABASE_URL: "postgres://steward_app:ci-app-database-password-32@postgres:5432/steward_test"
+          STEWARD_PLATFORM_DATABASE_URL: "postgres://steward_platform:ci-platform-database-password-32@postgres:5432/steward_test"
           STEWARD_APP_DATABASE_ROLE: "steward_app"
           STEWARD_PLATFORM_DATABASE_ROLE: "steward_platform"
-          STEWARD_DB_APP_PASSWORD: "ci-app-password"
-          STEWARD_DB_MIGRATION_PASSWORD: "ci-migration-password"
-          STEWARD_DB_PLATFORM_PASSWORD: "ci-platform-db-password"
+          STEWARD_DB_APP_PASSWORD: "ci-app-database-password-32"
+          STEWARD_DB_MIGRATION_PASSWORD: "ci-migration-database-password-32"
+          STEWARD_DB_PLATFORM_PASSWORD: "ci-platform-database-password-32"
           STEWARD_BOOTSTRAP_SET_ROLE_PASSWORDS: "true"
           STEWARD_MASTER_PASSWORD: "ci-test-secret"
           STEWARD_PLATFORM_KEY: "ci-platform-key"
@@ -776,15 +777,15 @@ jobs:
           POSTGRES_USER: "steward"
           POSTGRES_PASSWORD: "steward_ci"
           STEWARD_ADMIN_DATABASE_URL: "postgres://steward:steward_ci@postgres:5432/steward_test"
-          MIGRATION_DATABASE_URL: "postgres://steward_migrator:ci-migration-password@postgres:5432/steward_test"
-          DATABASE_URL: "postgres://steward_app:ci-app-password@postgres:5432/steward_test"
-          STEWARD_PLATFORM_DATABASE_URL: "postgres://steward_platform:ci-platform-db-password@postgres:5432/steward_test"
+          MIGRATION_DATABASE_URL: "postgres://steward_migrator:ci-migration-database-password-32@postgres:5432/steward_test"
+          DATABASE_URL: "postgres://steward_app:ci-app-database-password-32@postgres:5432/steward_test"
+          STEWARD_PLATFORM_DATABASE_URL: "postgres://steward_platform:ci-platform-database-password-32@postgres:5432/steward_test"
           STEWARD_APP_DATABASE_ROLE: "steward_app"
           STEWARD_PLATFORM_DATABASE_ROLE: "steward_platform"
-          STEWARD_DB_APP_PASSWORD: "ci-app-password"
-          STEWARD_DB_MIGRATION_PASSWORD: "ci-migration-password"
-          STEWARD_DB_PLATFORM_PASSWORD: "ci-platform-db-password"
+          STEWARD_DB_APP_PASSWORD: "ci-app-database-password-32"
+          STEWARD_DB_MIGRATION_PASSWORD: "ci-migration-database-password-32"
+          STEWARD_DB_PLATFORM_PASSWORD: "ci-platform-database-password-32"
           STEWARD_BOOTSTRAP_SET_ROLE_PASSWORDS: "true"
         run: |
-          docker compose logs steward-api steward-proxy redis postgres || true
+          docker compose logs steward-core-migrate steward-rls-bootstrap steward-plugin-migrate steward-rls-activate steward-api steward-proxy redis postgres || true
           docker compose down -v
