@@ -1,8 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import {
+  closeSync,
+  constants as fsConstants,
+  fstatSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
+  openSync,
   readdirSync,
   readFileSync,
   realpathSync,
@@ -24,6 +28,17 @@ function tempRoot(prefix: string): string {
   return realpathSync(mkdtempSync(join(tmpdir(), prefix)));
 }
 
+function readRegularFile(path: string): { contents: string; mode: number } {
+  const fd = openSync(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
+  try {
+    const stat = fstatSync(fd);
+    if (!stat.isFile()) throw new Error("Expected a regular test fixture file");
+    return { contents: readFileSync(fd, "utf8"), mode: stat.mode };
+  } finally {
+    closeSync(fd);
+  }
+}
+
 describe("demo API key", () => {
   test("is fresh, high-entropy, and verifies only against its own hash", () => {
     const first = generateDemoApiKey();
@@ -43,10 +58,11 @@ describe("demo API key", () => {
       promoteDemoCredentials(stageDemoCredentials("waifu.fun", oldKey, path));
       const nextKey = generateDemoApiKey().key;
       const pending = stageDemoCredentials("waifu.fun", nextKey, path);
+      const pendingFile = readRegularFile(pending.pendingPath);
       expect(lstatSync(dirname(path)).mode & 0o777).toBe(0o700);
-      expect(lstatSync(pending.pendingPath).mode & 0o777).toBe(0o600);
-      expect(readFileSync(path, "utf8")).toContain(`STEWARD_API_KEY=${oldKey}`);
-      expect(readFileSync(pending.pendingPath, "utf8")).toBe(
+      expect(pendingFile.mode & 0o777).toBe(0o600);
+      expect(readRegularFile(path).contents).toContain(`STEWARD_API_KEY=${oldKey}`);
+      expect(pendingFile.contents).toBe(
         `STEWARD_TENANT_ID=waifu.fun\nSTEWARD_API_KEY=${nextKey}\n`,
       );
     } finally {
@@ -89,10 +105,12 @@ describe("demo API key", () => {
       await expect(operation).rejects.toThrow("rotation outcome is uncertain");
       const error = await operation.catch((caught) => (caught as Error).message);
       expect(error).not.toContain("database canary");
-      expect(readFileSync(path, "utf8")).toContain(`STEWARD_API_KEY=${oldKey}`);
+      expect(readRegularFile(path).contents).toContain(`STEWARD_API_KEY=${oldKey}`);
       const pending = readdirSync(root).find((name) => name.includes(".pending-"));
       expect(pending).toBeTruthy();
-      expect(readFileSync(join(root, pending!), "utf8")).toContain(`STEWARD_API_KEY=${nextKey}`);
+      expect(readRegularFile(join(root, pending!)).contents).toContain(
+        `STEWARD_API_KEY=${nextKey}`,
+      );
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -121,9 +139,11 @@ describe("demo API key", () => {
       const error = await operation.catch((caught) => (caught as Error).message);
       expect(committed).toBe(true);
       expect(error).not.toContain("rename canary");
-      expect(readFileSync(path, "utf8")).toContain(`STEWARD_API_KEY=${oldKey}`);
+      expect(readRegularFile(path).contents).toContain(`STEWARD_API_KEY=${oldKey}`);
       const pending = readdirSync(root).find((name) => name.includes(".pending-"));
-      expect(readFileSync(join(root, pending!), "utf8")).toContain(`STEWARD_API_KEY=${nextKey}`);
+      expect(readRegularFile(join(root, pending!)).contents).toContain(
+        `STEWARD_API_KEY=${nextKey}`,
+      );
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -146,7 +166,7 @@ describe("demo API key", () => {
         ),
       ).toBe(path);
       expect(committed).toBe(true);
-      expect(readFileSync(path, "utf8")).toContain(`STEWARD_API_KEY=${nextKey}`);
+      expect(readRegularFile(path).contents).toContain(`STEWARD_API_KEY=${nextKey}`);
       expect(readdirSync(root).some((name) => name.includes(".pending-"))).toBe(false);
       expect(readdirSync(root).some((name) => name.includes(".promote-"))).toBe(false);
     } finally {
@@ -172,8 +192,7 @@ describe("demo API key", () => {
       symlinkSync(canonical, linkedFile);
       const pending = stageDemoCredentials("waifu.fun", generateDemoApiKey().key, linkedFile);
       promoteDemoCredentials(pending);
-      expect(lstatSync(linkedFile).isSymbolicLink()).toBe(false);
-      expect(readFileSync(canonical, "utf8")).not.toBe(readFileSync(linkedFile, "utf8"));
+      expect(readRegularFile(canonical).contents).not.toBe(readRegularFile(linkedFile).contents);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -189,7 +208,7 @@ describe("demo API key", () => {
 
       expect(() => promoteDemoCredentials(pending)).toThrow();
       expect(lstatSync(pending.pendingPath).isFile()).toBe(true);
-      expect(readFileSync(join(path, "occupied"), "utf8")).toBe("keep");
+      expect(readRegularFile(join(path, "occupied")).contents).toBe("keep");
       expect(readdirSync(root).some((name) => name.includes(".promote-"))).toBe(false);
     } finally {
       rmSync(root, { recursive: true, force: true });

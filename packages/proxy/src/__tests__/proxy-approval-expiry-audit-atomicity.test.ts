@@ -1,5 +1,4 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, setDefaultTimeout } from "bun:test";
-import { signAgentToken } from "@stwd/auth";
 import {
   agents,
   and,
@@ -9,6 +8,7 @@ import {
   getDb,
   pendingProxyRequests,
   proxyAuditLog,
+  sql,
   tenants,
 } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
@@ -47,6 +47,7 @@ setDefaultTimeout(30000);
 
 const MASTER_PASSWORD = "proxy-expiry-audit-master-password";
 
+let signAgentToken: typeof import("@stwd/auth")["signAgentToken"];
 let authMiddleware: typeof import("../middleware/auth")["authMiddleware"];
 let handlePendingProxyRequest: typeof import("../handlers/release")["handlePendingProxyRequest"];
 let holdProxyApprovalRequest: typeof import("../handlers/approvals")["holdProxyApprovalRequest"];
@@ -57,48 +58,39 @@ let proxyMod: typeof import("../handlers/proxy");
 
 // ─── Audit-chain-insert fault injection ───────────────────────────────────────
 //
-// When `faultAuditInsert` is true, the FIRST `insert into audit_events`
-// executed inside any transaction throws. This simulates the exact crash point:
-// the row was just flipped to `expired` in the same transaction and the required
-// chain append fails.
+// A real database trigger rejects the targeted audit-chain INSERT. This
+// simulates the exact crash point after the row is flipped to `expired` in the
+// same transaction, without depending on Drizzle's internal execution methods.
 
-let faultAuditInsert = false;
+const AUDIT_FAULT_TRIGGER = "proxy_expiry_audit_failure";
+const AUDIT_FAULT_FUNCTION = "fail_proxy_expiry_audit";
 
-type TxLike = { execute: (query: unknown) => Promise<unknown> };
-
-function isAuditInsert(dialect: unknown, query: unknown): boolean {
-  try {
-    const built = (dialect as { sqlToQuery: (q: unknown) => { sql?: string } }).sqlToQuery(query);
-    const text = String(built?.sql ?? "").toLowerCase();
-    return text.includes("insert into audit_events");
-  } catch {
-    return false;
-  }
+async function installAuditInsertFault(): Promise<void> {
+  await getDb().execute(
+    sql.raw(`
+      CREATE OR REPLACE FUNCTION ${AUDIT_FAULT_FUNCTION}()
+      RETURNS trigger AS $$
+      BEGIN
+        IF NEW.action = 'proxy.approval.expired' THEN
+          RAISE EXCEPTION 'injected audit-chain fault';
+        END IF;
+        RETURN NEW;
+      END;
+      $$ LANGUAGE plpgsql
+    `),
+  );
+  await getDb().execute(
+    sql.raw(`
+      CREATE TRIGGER ${AUDIT_FAULT_TRIGGER}
+      BEFORE INSERT ON audit_events
+      FOR EACH ROW EXECUTE FUNCTION ${AUDIT_FAULT_FUNCTION}()
+    `),
+  );
 }
 
-function installFaultInjectingDb(db: unknown): void {
-  const anyDb = db as {
-    dialect: unknown;
-    transaction: (cb: (tx: TxLike) => Promise<unknown>, ...rest: unknown[]) => Promise<unknown>;
-  };
-  const dialect = anyDb.dialect;
-  const originalTransaction = anyDb.transaction.bind(anyDb);
-  anyDb.transaction = (cb: (tx: TxLike) => Promise<unknown>, ...rest: unknown[]) => {
-    return originalTransaction(
-      async (tx: TxLike) => {
-        const originalExecute = tx.execute.bind(tx);
-        tx.execute = async (query: unknown) => {
-          if (faultAuditInsert && isAuditInsert(dialect, query)) {
-            faultAuditInsert = false; // fault the first audit insert only
-            throw new Error("injected audit-chain fault");
-          }
-          return originalExecute(query);
-        };
-        return cb(tx);
-      },
-      ...rest,
-    );
-  };
+async function removeAuditInsertFault(): Promise<void> {
+  await getDb().execute(sql.raw(`DROP TRIGGER IF EXISTS ${AUDIT_FAULT_TRIGGER} ON audit_events`));
+  await getDb().execute(sql.raw(`DROP FUNCTION IF EXISTS ${AUDIT_FAULT_FUNCTION}()`));
 }
 
 beforeAll(async () => {
@@ -109,13 +101,15 @@ beforeAll(async () => {
   process.env.STEWARD_PROXY_ALLOWED_HOSTS = "api.example.com";
   process.env.STEWARD_SECRET_ROUTE_ALLOWED_HOSTS = "api.example.com";
   process.env.STEWARD_ALLOW_BROAD_SECRET_ROUTES = "true";
+  process.env.NODE_ENV = "test";
+  process.env.STEWARD_PROXY_DEV_MODE = "true";
 
   const { db, client } = await createPGLiteDb("memory://");
-  installFaultInjectingDb(db);
   setPGLiteOverride(db, async () => {
     await client.close();
   });
 
+  ({ signAgentToken } = await import("@stwd/auth"));
   ({ authMiddleware } = await import("../middleware/auth"));
   ({
     handlePendingProxyRequest,
@@ -130,7 +124,6 @@ beforeAll(async () => {
 });
 
 afterEach(() => {
-  faultAuditInsert = false;
   resetReleaseClaimBarrier();
 });
 
@@ -143,6 +136,8 @@ afterAll(async () => {
   delete process.env.STEWARD_PROXY_ALLOWED_HOSTS;
   delete process.env.STEWARD_SECRET_ROUTE_ALLOWED_HOSTS;
   delete process.env.STEWARD_ALLOW_BROAD_SECRET_ROUTES;
+  delete process.env.NODE_ENV;
+  delete process.env.STEWARD_PROXY_DEV_MODE;
 });
 
 function buildApp() {
@@ -207,6 +202,15 @@ async function poll(id: string, token: string): Promise<Response> {
   return buildApp().request(`/approvals/proxy/${id}`, {
     headers: { authorization: `Bearer ${token}` },
   });
+}
+
+async function pollWithAuditInsertFault(id: string, token: string): Promise<Response> {
+  await installAuditInsertFault();
+  try {
+    return await poll(id, token);
+  } finally {
+    await removeAuditInsertFault();
+  }
 }
 
 async function fetchRow(id: string) {
@@ -289,8 +293,7 @@ describe("proxy approval-expiry audit atomicity (fault injection)", () => {
       .set({ expiresAt: new Date(Date.now() - 60_000), updatedAt: new Date() })
       .where(eq(pendingProxyRequests.id, held.id));
 
-    faultAuditInsert = true;
-    const res = await poll(held.id, await tokenFor(agentId, tenantId));
+    const res = await pollWithAuditInsertFault(held.id, await tokenFor(agentId, tenantId));
     // The injected fault propagates out of the release handler as a 5xx.
     expect(res.status).toBeGreaterThanOrEqual(500);
 
@@ -367,8 +370,7 @@ describe("proxy approval-expiry audit atomicity (fault injection)", () => {
     });
     installCountedForwarder();
 
-    faultAuditInsert = true;
-    const res = await poll(held.id, await tokenFor(agentId, tenantId));
+    const res = await pollWithAuditInsertFault(held.id, await tokenFor(agentId, tenantId));
     expect(res.status).toBeGreaterThanOrEqual(500);
 
     // ATOMICITY: the approved -> expired transition rolls back with the faulted

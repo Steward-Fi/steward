@@ -88,7 +88,10 @@ beforeAll(async () => {
       {
         id: TENANT_NO_KEY_ID,
         name: "Agent Token Expiry No Key Tenant",
-        apiKeyHash: "",
+        // The bootstrap tenant owns the legacy empty-hash sentinel. This
+        // fixture still omits the request key and exercises the same 403 path
+        // without colliding with that unique database value.
+        apiKeyHash: "not-a-real-key-hash-no-key-tenant",
       },
       {
         id: OTHER_TENANT_ID,

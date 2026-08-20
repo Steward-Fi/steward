@@ -43,21 +43,26 @@ function assertApiKey(apiKey: string): void {
 function credentialParent(path: string): { device: number; inode: number } {
   const parentPath = dirname(path);
   mkdirSync(parentPath, { recursive: true, mode: 0o700 });
-  const parent = lstatSync(parentPath);
-  if (!parent.isDirectory() || parent.isSymbolicLink() || realpathSync(parentPath) !== parentPath) {
-    throw new Error("Demo credentials parent must not contain redirected directories");
+  let fd: number;
+  try {
+    fd = openSync(
+      parentPath,
+      fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW,
+    );
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ELOOP" || code === "ENOTDIR") {
+      throw new Error("Demo credentials parent must not contain redirected directories");
+    }
+    throw error;
   }
-  if (typeof process.geteuid === "function" && parent.uid !== process.geteuid()) {
-    throw new Error("Demo credentials parent must be owned by the current user");
-  }
-  const fd = openSync(
-    parentPath,
-    fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW,
-  );
   try {
     const opened = fstatSync(fd);
-    if (!opened.isDirectory() || opened.dev !== parent.dev || opened.ino !== parent.ino) {
-      throw new Error("Demo credentials parent changed during validation");
+    if (!opened.isDirectory() || realpathSync(parentPath) !== parentPath) {
+      throw new Error("Demo credentials parent must not contain redirected directories");
+    }
+    if (typeof process.geteuid === "function" && opened.uid !== process.geteuid()) {
+      throw new Error("Demo credentials parent must be owned by the current user");
     }
     fchmodSync(fd, 0o700);
     return { device: opened.dev, inode: opened.ino };
@@ -181,21 +186,13 @@ export function promoteDemoCredentials(pending: PendingDemoCredentials): string 
         throw new Error(`Could not allocate promotion link; recover ${pending.pendingPath}`);
       }
 
-      const linkedPath = lstatSync(promotionPath);
       const promotionFd = openSync(
         promotionPath,
         fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK,
       );
       try {
         const linkedFd = fstatSync(promotionFd);
-        if (
-          !linkedPath.isFile() ||
-          !linkedFd.isFile() ||
-          linkedPath.dev !== staged.dev ||
-          linkedPath.ino !== staged.ino ||
-          linkedFd.dev !== staged.dev ||
-          linkedFd.ino !== staged.ino
-        ) {
+        if (!linkedFd.isFile() || linkedFd.dev !== staged.dev || linkedFd.ino !== staged.ino) {
           throw new Error(
             `Pending credential changed during promotion; recover ${pending.pendingPath}`,
           );
