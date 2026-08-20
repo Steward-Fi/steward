@@ -832,6 +832,74 @@ describe("vault EVM execution gateway", () => {
     }
   });
 
+  it("keeps a broadcast terminal across an accounting outage and drains it on same-key replay", async () => {
+    await seedExternalCustodyAgent();
+    const txHash = `0x${"ac".repeat(32)}`;
+    const provider: ExternalKeyCustodyProvider & { signCalls: number } = {
+      id: "accounting-recovery-provider",
+      contractVersion: 1,
+      signCalls: 0,
+      async registerKeyHandle(): Promise<ExternalKeyHandleRegistration> {
+        throw new Error("registerKeyHandle is not used by this test");
+      },
+      async signTransaction(request): Promise<ExternalKeySignTransactionResult> {
+        this.signCalls += 1;
+        await request.onPreparedBroadcast?.(txHash);
+        return { result: txHash, broadcast: true };
+      },
+    };
+    const routeVault = getConfiguredVault({
+      fallbackPassword: process.env.STEWARD_MASTER_PASSWORD,
+    }) as unknown as { externalKeyCustodyProvider?: ExternalKeyCustodyProvider };
+    const priorProvider = routeVault.externalKeyCustodyProvider;
+    routeVault.externalKeyCustodyProvider = provider;
+    process.env.REDIS_URL = "redis://127.0.0.1:1";
+    const request = {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "Idempotency-Key": "direct-accounting-recovery",
+      },
+      body: JSON.stringify({
+        to: "0x1111111111111111111111111111111111111111",
+        value: "1",
+        chainId: 8453,
+        broadcast: true,
+      }),
+    };
+    try {
+      const app = await makeApp();
+      const first = await app.request(`/vault/${EXTERNAL_AGENT_ID}/sign`, request);
+      expect(first.status).toBe(409);
+      const firstBody = await first.json();
+      expect(firstBody).toMatchObject({
+        data: { status: "broadcast", accounting: "pending" },
+      });
+      const txId = firstBody.data.txId as string;
+      const [pending] = await getDb()
+        .select({ status: transactions.status, actionPayload: transactions.actionPayload })
+        .from(transactions)
+        .where(eq(transactions.id, txId));
+      expect(pending?.status).toBe("broadcast");
+      expect(pending?.actionPayload).toMatchObject({ recoveryEffectsState: "pending" });
+
+      delete process.env.REDIS_URL;
+      const replay = await app.request(`/vault/${EXTERNAL_AGENT_ID}/sign`, request);
+      expect(replay.status).toBe(200);
+      expect(await replay.json()).toMatchObject({ ok: true, data: { txId, txHash } });
+      expect(provider.signCalls).toBe(1);
+      const [complete] = await getDb()
+        .select({ actionPayload: transactions.actionPayload })
+        .from(transactions)
+        .where(eq(transactions.id, txId));
+      expect(complete?.actionPayload).toMatchObject({ recoveryEffectsState: "complete" });
+    } finally {
+      routeVault.externalKeyCustodyProvider = priorProvider;
+      if (ORIGINAL_REDIS_URL === undefined) delete process.env.REDIS_URL;
+      else process.env.REDIS_URL = ORIGINAL_REDIS_URL;
+    }
+  });
+
   it("does not expose credential-bearing provider text through the generic HTTP error path", async () => {
     const canary = "SUPER_SECRET_PROVIDER_TOKEN";
     const signSpy = spyOn(Vault.prototype, "signTransaction").mockImplementation(async () => {
@@ -1085,10 +1153,11 @@ describe("vault EVM execution gateway", () => {
         headers: { "content-type": "application/json" },
         body: "{}",
       });
-      expect(retry.status).toBe(409);
+      // Same-key replay now drains durable accounting before returning the
+      // already-recorded ambiguous outcome; it must never resend externally.
+      expect(retry.status).toBe(202);
       expect(await retry.json()).toMatchObject({
-        ok: false,
-        error: "Transaction already processed or not found",
+        data: { code: "external_broadcast_outcome_unknown", txHash },
       });
       expect(provider.signCalls).toBe(1);
       expect(writes).toBe(2);
