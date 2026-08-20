@@ -87,6 +87,7 @@ STEWARD_KDF_SALT=<openssl rand -hex 32>
 STEWARD_JWT_SECRET=<openssl rand -hex 32>
 STEWARD_EMAIL_CODE_SECRET=<openssl rand -hex 32>
 STEWARD_AUDIT_HMAC_KEY=<openssl rand -hex 32>
+STEWARD_EXECUTION_AUTH_SECRET=<v1: plus openssl rand -hex 32>
 STEWARD_PLATFORM_KEYS=<stw_platform_ plus 24 random bytes as hex>
 # This bootstrap operator key needs both the generic platform write gate and
 # the route-specific scopes used below. Narrow this list for ongoing operation.
@@ -142,6 +143,7 @@ echo "STEWARD_KDF_SALT=$(openssl rand -hex 32)"
 echo "STEWARD_JWT_SECRET=$(openssl rand -hex 32)"
 echo "STEWARD_EMAIL_CODE_SECRET=$(openssl rand -hex 32)"
 echo "STEWARD_AUDIT_HMAC_KEY=$(openssl rand -hex 32)"
+echo "STEWARD_EXECUTION_AUTH_SECRET=v1:$(openssl rand -hex 32)"
 PLATFORM_KEY="stw_platform_$(openssl rand -hex 24)"
 echo "STEWARD_PLATFORM_KEYS=$PLATFORM_KEY"
 echo "STEWARD_PLATFORM_KEY_SCOPES={\"$PLATFORM_KEY\":[\"platform:write\",\"platform:tenant:create\",\"platform:tenant:read\",\"platform:agent:create\",\"platform:agent-token:create\",\"platform:agent:delete\"]}"
@@ -392,6 +394,7 @@ If you need the credential-injection proxy (for managing API keys on behalf of a
    STEWARD_KDF_SALT=<same as API service>
    STEWARD_JWT_SECRET=<same as API service>
    STEWARD_AUDIT_HMAC_KEY=<same as API service>
+   STEWARD_EXECUTION_AUTH_SECRET=<same as API service>
    STEWARD_PROXY_REQUEST_SIGNING_SECRETS=<dedicated shared HMAC root>
    REDIS_URL=${{Redis.REDIS_URL}}
    ```
@@ -405,6 +408,8 @@ hand-building the canonical signature. Set the signing root on each server-side
 caller as well as the proxy; never expose it to a browser. If API readiness
 should include the proxy clock check, also set
 `STEWARD_PROXY_URL=https://proxy.elizacloud.ai` on the API service.
+The API service also needs the same dedicated root as
+`STEWARD_PROXY_REQUEST_SIGNING_SECRET` when it is a proxy caller.
 
 ---
 
@@ -470,6 +475,7 @@ curl -sf "$BASE/platform/tenants" \
 | `STEWARD_PLATFORM_KEY_SCOPES` | **Yes for platform routes** | — | JSON map from a raw platform key (or its SHA-256 hex digest) to explicit scopes. Unmapped keys authenticate but have no authorization. |
 | `STEWARD_EMAIL_CODE_SECRET` | **Yes for email auth** | — | Separate secret binding email codes and polling receipts; at least 32 characters in production. |
 | `STEWARD_AUDIT_HMAC_KEY` | **Yes in production** | — | Separate HMAC root for the tenant audit chain. |
+| `STEWARD_EXECUTION_AUTH_SECRET` | **Yes for governed provider execution** | — | Versioned (`v1:<secret>`) authorization root shared by the API and proxy; keep it distinct from JWT and request-signing roots. |
 | `STEWARD_ACK_LOCAL_CUSTODY` | **Yes only for production local custody** | — | Set `true` only after accepting plaintext signing-key bytes in API memory; omit when using a supported KMS mode. |
 | `STEWARD_DEFAULT_TENANT_KEY` | No | — | Default tenant key for single-tenant mode |
 | `RPC_URL` | No | `https://sepolia.base.org` | EVM RPC endpoint |
