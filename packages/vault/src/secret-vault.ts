@@ -4,7 +4,7 @@
  * Reuses the KeyStore's AES-256-GCM encryption. Secrets are encrypted per-tenant
  * using the same master key hierarchy as wallet keys.
  *
- * NO READ-BACK is a property of THIS plane (sovereign-custody Pillar A / A2):
+ * NO READ-BACK is a property of this sovereign-custody plane:
  *
  *   - No HTTP route returns a plaintext secret value. The /secrets routes
  *     return {@link SecretMetadata} only (enforced by the static route scan in
@@ -19,7 +19,7 @@
  *
  * Custody strength is orthogonal and inherited: the master-password root can be
  * wrapped by KMS-envelope (aws|pkcs11) via vault-factory custody modes, and the
- * TEE path (Pillar B) swaps the master-key source for an attestation-gated
+ * The TEE path swaps the master-key source for an attestation-gated
  * release WITHOUT changing this API. There is deliberately NO parallel
  * file-based secret store — one custody plane, one audit surface.
  */

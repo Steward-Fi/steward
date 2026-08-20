@@ -91,7 +91,7 @@ function fail(c: RouteContext, error: unknown): Response {
  * Require a human session + workspace connect authority. Returns the userId, or
  * a Response to short-circuit. Mirrors provider-authority.ts's 404 parity: an
  * unauthorized caller gets 404 (resource not found) so authority state does not
- * leak, matching PR3 conventions.
+ * leak, matching the approval-lifecycle conventions.
  */
 async function requireConnectAuthority(
   c: RouteContext,

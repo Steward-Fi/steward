@@ -1,58 +1,35 @@
 /**
- * X governed provider-action E2E (#195 workstream C, authority plane).
+ * X governed provider-action authority-plane E2E.
  *
- * ── State of this suite (READ THIS) ─────────────────────────────────────────
- * This file has THREE kinds of coverage:
+ * This file has three kinds of coverage:
  *
- *   1. ACTIVE profile-CHECK widening regression (`describe("0082 profile-CHECK
- *      widening …")`): PR4's 0082 migration widens the (previously github-only)
+ *   1. Profile-CHECK allowlist coverage (`describe("0082 profile-CHECK
+ *      widening …")`): migration 0082 widens the provider discriminator
  *      `provider_action_bindings_profile_chk` to admit 'x.provider-action.v1'.
  *      These tests prove BOTH profiles now persist AND that an unknown profile is
- *      still rejected by the SAME named CHECK (exact allowlist extension, not a
- *      blanket relaxation). This REPLACES the obsolete #198 "blocker isolation"
- *      tests that asserted X was rejected — that block no longer exists.
+ *      still rejected by the same named CHECK.
  *
- *   2. ACTIVE pure policy-composition unit (`describe("X policy composition …")`):
+ *   2. Pure policy-composition unit (`describe("X policy composition …")`):
  *      no DB. Proves the X operation's capability-intent rules compose to
  *      `approval_required` (write) / `allow` (read) via the same
  *      `composeProviderActionPolicyDecision` the service calls, with mutation
  *      proof that dropping the require-approval rule flips the write path to
  *      `allow` (i.e. the approval is genuinely load-bearing, not incidental).
  *
- *   3. ACTIVE full-chain E2E (`describe("X governed provider-action E2E …")`):
- *      the five end-to-end tests that require a `provider_action_bindings` row to
- *      PERSIST with `canonical_profile = 'x.provider-action.v1'`. UN-SKIPPED by
- *      PR4 (see below).
+ *   3. Full-chain E2E (`describe("X governed provider-action E2E …")`):
+ *      the end-to-end tests require a persisted `provider_action_bindings` row
+ *      with `canonical_profile = 'x.provider-action.v1'`.
  *
- * ── The blocker, and how PR4 resolved it ────────────────────────────────────
- * `packages/db/drizzle/0080_provider_action_bindings.sql` line 69 originally:
- *
- *     CONSTRAINT "provider_action_bindings_profile_chk"
- *       CHECK ("canonical_profile" = 'github.provider-action.v1')
- *
- * The CHECK hardcoded the github profile literal, so NO X binding
- * (`canonical_profile = 'x.provider-action.v1'`) could persist, and #198 shipped
- * the five E2Es as `describe.skip` awaiting a widening migration.
- *
- * PR4 (feat/execution-authorization-v2, migration 0082) owns the next journal
- * slot AND already rewrites several provider_action_bindings CHECKs (status /
- * state / approval-shape) for the new execution lifecycle. Widening the profile
- * CHECK to an IN-list ('github.provider-action.v1', 'x.provider-action.v1') is a
- * pure additive relaxation in the same family, so 0082 does it inline rather than
- * deferring a trivial change to 0083. The five E2Es are un-skipped here with NO
- * test-body change — they already assert the full X chain end to end.
- *
- * ── What the five (now active) tests prove ──────────────────────────────────
  * The FULL X governed chain over the real provider-action service + approval
- * state machine against PGLite, exactly as the github wiring is proven:
+ * state machine runs against PGLite:
  *
- *   connect (seed X vault secret + provider_accounts row directly — we do NOT
- *   re-test #197's OAuth dance) -> agent proposes x.tweet.create via the service
+ *   connect (seed X vault secret + provider_accounts row directly) -> agent proposes
+ *   x.tweet.create via the service
  *   -> access allows -> policy composes to approval_required -> human approves
  *   (binding) -> safe resume -> execution_ready, with a full audit chain.
  *
  * Read-path: x.user.me.read defaults to allow (no approval) and reaches the
- * in-process stub (the legacy pre-PR4 executor; the real byte-level Bearer
+ * in-process stub. The real byte-level Bearer
  * injection is proven separately on the proxy plane in
  * packages/proxy/src/__tests__/x-credential-route.test.ts).
  *
@@ -62,7 +39,7 @@
  *   - credential VERSION DRIFT: a refresh bumps provider_accounts.credential_version
  *     between approval and resume => APPROVAL_CREDENTIAL_STALE (fail-closed). The
  *     stale token is NEVER silently used. This is the documented drift behavior;
- *     it reuses the PR3 commitment executionDependencies.secretVersion binding
+ *     it reuses the approval commitment executionDependencies.secretVersion binding
  *     (packages/api/src/services/provider-approval.ts revalidateDependencies).
  */
 
@@ -469,15 +446,9 @@ describe("X policy composition (authority plane, no DB)", () => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// ACTIVE — 0082 profile-CHECK widening regression. #198 shipped this suite with a
-// two-test "blocker isolation" describe that asserted an X binding was REJECTED by
-// the (github-only) 0080 profile CHECK. PR4's 0082 widens that CHECK to admit
-// 'x.provider-action.v1', so the block is gone; the obsolete rejection tests were
-// removed and replaced with the inverse invariant: BOTH profiles now persist, and
-// a third unknown profile is still rejected by the SAME constraint (proving the
-// widening is an exact allowlist extension, not a blanket relaxation). The full
-// governed E2E chain (previously describe.skip, now unblocked below) is the
-// end-to-end proof that superseded the old "up to the persist" scaffolding.
+// Migration 0082 admits the X profile alongside GitHub while keeping the named
+// profile CHECK fail-closed for unknown values. The full governed E2E chain below
+// proves the complete authority path.
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe("0082 profile-CHECK widening: X admitted, unknown profiles still rejected", () => {
@@ -584,13 +555,11 @@ describe("0082 profile-CHECK widening: X admitted, unknown profiles still reject
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// UNBLOCKED (PR4) — full X governed E2E. 0082 widens provider_action_bindings_profile_chk
-// to admit 'x.provider-action.v1' (previously 0080 hardcoded the github literal, gating
-// these). No test change was needed to un-skip: they assert the full PR3 approval chain
-// end to end and pass now that the X binding persists.
+// Full X governed E2E. Migration 0082 admits 'x.provider-action.v1' alongside
+// the fixed provider profiles. These cases assert the approval chain end to end.
 // ─────────────────────────────────────────────────────────────────────────────
 
-describe("X governed provider-action E2E (unblocked by 0082 CHECK widening, PR4)", () => {
+describe("X governed provider-action E2E under the 0082 profile CHECK", () => {
   let priorExecutionAuthSecret: string | undefined;
 
   beforeAll(async () => {
@@ -686,7 +655,7 @@ describe("X governed provider-action E2E (unblocked by 0082 CHECK widening, PR4)
         .replace("original text", "attacker text"),
       "utf8",
     );
-    // PR4's immutability trigger (steward_provider_action_binding_guard) freezes
+    // governed-execution's immutability trigger (steward_provider_action_binding_guard) freezes
     // canonical_action_bytes at the DB layer, so an attacker's raw column write is
     // already rejected there. That trigger is defense-in-depth; the AUTHORITY check
     // under test is the service's integrity re-hash at resume. Disable the trigger

@@ -1,5 +1,5 @@
 /**
- * agent-client-e2e.test.ts — Pillar A / lane A3 happy-path E2E.
+ * Agent keypair bootstrap happy-path E2E.
  *
  * Drives the REAL @stwd/sdk AgentClient against a REAL, in-process Steward API
  * surface — the actual A1 route handlers (agent-enroll + manifest/issuance +

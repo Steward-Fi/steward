@@ -1,14 +1,14 @@
 "use client";
 
 /**
- * PR6 provider-action CASE / EVIDENCE surface (U5).
+ * Provider-action case and evidence surface.
  *
- * Consumes the PR5 GET /v2/provider-actions/:id/case + /evidence routes.
+ * Consumes the governed GET /v2/provider-actions/:id/case and /evidence routes.
  * Invariants enforced here:
- *   - Renders PR5 `completeness` (complete/incomplete/unknown) VERBATIM and
+ *   - Renders `completeness` (complete/incomplete/unknown) verbatim and
  *     surfaces `incompletenessReasons`. NEVER renders "verified/complete" when
- *     PR5 says otherwise (honest completeness).
- *   - States the operator-key trust limit (PR5 E7): a signed bundle proves the
+ *     never claims completeness when the manifest says otherwise.
+ *   - States the operator-key trust limit: a signed bundle proves the
  *     audit chain is internally consistent under the OPERATOR's signing key; it
  *     is NOT an operator-integrity proof.
  *   - Offers the signed bundle download + the EXACT offline verify command with

@@ -1,5 +1,5 @@
 /**
- * PR4 v2 commitment signing/verification unit tests (spec §3.2). Pure crypto, no
+ * governed-execution v2 commitment signing/verification unit tests (spec §3.2). Pure crypto, no
  * DB. Proves:
  *   - HKDF domain separation: a v2 signature NEVER validates under v1 machinery
  *     and vice versa (P12).

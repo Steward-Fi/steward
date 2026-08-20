@@ -103,7 +103,7 @@ export async function getRoute(db: TestDb, id: string) {
 }
 
 /**
- * PR4: seed a `governed_v2` secret route for the plugin governed-gate tests
+ * Seed a `governed_v2` secret route for the plugin governed-gate tests
  * (spec §5.2, P03/P04). Builds the minimal provider-authority chain the governed
  * CHECK requires: a user (workspace.created_by), a workspace, a provider account,
  * a legacy secret_route, a provider_operation pointing at that route, then flips

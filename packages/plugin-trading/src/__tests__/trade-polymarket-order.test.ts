@@ -51,7 +51,7 @@ let fenceSpy: ReturnType<typeof spyOn> | undefined;
 let createTradeRoutesForTest: typeof import("../routes/trade").createTradeRoutes;
 
 // Inject a polymarket venue wallet WITH funder metadata so the creds resolver
-// gets past the wallet step. Whether the L2 creds resolve (Phase C) is toggled
+// gets past the wallet step. Whether the L2 credentials resolve is toggled
 // separately per test by mutating the metadata.
 function stubWallet(withFunder: boolean) {
   getWalletSpy = spyOn(Vault.prototype, "getWallet").mockImplementation((async (args: {
@@ -514,7 +514,7 @@ describe("POST /v1/trade/polymarket/order", () => {
   it("SEC-041: SELL notional is floored at the CLOB best bid (low-limit cap bypass fails)", async () => {
     // perOrderCap 50. A FOK sell of 100 shares at limit 0.01 would fill at the
     // best bid (0.90): real notional ~$90 must be capped, not the caller-stated
-    // $1. Pre-fix the route sized on the caller's price and passed the gate.
+    // $1. The route must not size on the caller's price and pass the gate.
     const { tenantId, agentId, sessionId } = await seedSession({
       perOrderCapUsd: "50",
     });
@@ -708,7 +708,7 @@ describe("POST /v1/trade/polymarket/order", () => {
     const { tenantId, agentId, sessionId } = await seedSession({});
     stubWallet(true);
     // Mock the adapter edge so the ONLY thing that can fail the order is creds
-    // resolution: pre-fix the http override + test creds would reach submit.
+    // resolution: the HTTP override and test credentials must not bypass it.
     buildSpy = spyOn(PolymarketExecutionAdapter.prototype, "buildSignedOrder").mockResolvedValue(
       {} as never,
     );
@@ -782,7 +782,7 @@ describe("POST /v1/trade/polymarket/order", () => {
     const app = makeApp(tenantId, agentId, tradeRoutes);
 
     // Provision funder metadata on the venue wallet + flip the route's test-only
-    // L2-creds seam so resolvePolymarketCreds resolves (Phase C wires the real
+    // L2 credential seam so resolvePolymarketCreds resolves (production uses the real
     // secret-vault read here). The adapter network edge is stubbed so no real
     // clob-client / signing runs.
     process.env.STEWARD_PM_TEST_CREDS = "1";

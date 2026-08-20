@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# PR3 mutation-strength proofs (spec §14). Each mutation weakens ONE security
+# Approval mutation-strength proofs. Each mutation weakens one security
 # predicate; a proof is valid iff the named test PASSES clean AND FAILS after the
 # mutation. The file is restored after each proof. Run from packages/api:
 #
-#   bash scripts/pr3-mutation-proofs.sh
+#   bash scripts/approval-mutation-proofs.sh
 #
 set -uo pipefail
 cd "$(dirname "$0")/.."
@@ -14,6 +14,13 @@ CONC="src/__tests__/provider-approval-concurrency.test.ts"
 
 pass_count=0
 fail_count=0
+active_target=""
+cleanup() {
+  if [ -n "$active_target" ] && [ -f "$active_target.bak" ]; then
+    mv "$active_target.bak" "$active_target"
+  fi
+}
+trap cleanup EXIT INT TERM
 
 # run_test <file> <filter> -> 0 if all pass (0 fail), 1 otherwise
 run_test() {
@@ -22,9 +29,9 @@ run_test() {
   echo "$out" | grep -qE "^ *0 fail$"
 }
 
-# proof <name> <file> <filter> <target> <sed-expr>
+# proof <name> <file> <filter> <target> <perl-expr>
 proof() {
-  local name="$1" file="$2" filter="$3" target="$4" sedexpr="$5"
+  local name="$1" file="$2" filter="$3" target="$4" perlexpr="$5"
   echo "=== PROOF: $name ==="
   if run_test "$file" "$filter"; then
     echo "  baseline PASS ✓"
@@ -32,13 +39,22 @@ proof() {
     echo "  baseline UNEXPECTED FAIL ✗ (proof invalid)"; fail_count=$((fail_count+1)); return
   fi
   cp "$target" "$target.bak"
-  sed -i "$sedexpr" "$target"
+  active_target="$target"
+  perl -0pi -e "$perlexpr" "$target"
+  if cmp -s "$target" "$target.bak"; then
+    echo "  mutation target did not match production source ✗"
+    fail_count=$((fail_count+1))
+    mv "$target.bak" "$target"
+    active_target=""
+    return
+  fi
   if run_test "$file" "$filter"; then
     echo "  post-mutation still PASSES ✗ (mutation did not kill the test)"; fail_count=$((fail_count+1))
   else
     echo "  post-mutation FAILS ✓ (predicate killed)"; pass_count=$((pass_count+1))
   fi
   mv "$target.bak" "$target"
+  active_target=""
 }
 
 # M1: loosen MFA window (<=5m -> <=6m) → N12 (5m+1ms) must fail.
@@ -47,11 +63,11 @@ proof "M1 loosen MFA window (N12)" "$NEG" "N12" "$SVC" \
 
 # M2: accept ambient role (skip approver-binding requirement) → N04 must fail.
 proof "M2 accept ambient role (N04)" "$NEG" "N04" "$SVC" \
-  's/const eligible = approverRows.some(/const eligible = true || approverRows.some(/'
+  's/const eligible = authorityRows\.some\(/const eligible = true || authorityRows.some(/'
 
 # M3: skip queue/binding request-hash + digest agreement → N26 must fail.
 proof "M3 skip queue/binding hash agreement (N26)" "$NEG" "N26" "$SVC" \
-  's/if (queue.requestHash !== binding.requestHash || queue.actionDigest !== binding.actionDigest) {/if (false) {/'
+  's/if \(queue\.requestHash !== binding\.requestHash \|\| queue\.actionDigest !== binding\.actionDigest\) \{/if (false) {/'
 
 # M4: ignore secret version at resume → N39 must fail.
 proof "M4 ignore secret version (N39)" "$NEG" "N39" "$SVC" \
@@ -60,11 +76,11 @@ proof "M4 ignore secret version (N39)" "$NEG" "N39" "$SVC" \
 # M5: skip the canonical-byte digest recomputation (accept any stored digest) →
 #     N24 (tampered canonical bytes) must fail. Weaken the digest equality guard.
 proof "M5 skip canonical-byte digest recompute (N24)" "$NEG" "N24" "$SVC" \
-  's/if (recomputedDigest !== binding.actionDigest) {/if (false) {/'
+  's/if \(recomputedDigest !== binding\.actionDigest\) \{/if (false) {/'
 
 # M6: mint a fresh resumeAttemptId on the idempotent return path → C05 must fail.
 proof "M6 non-idempotent resumeAttemptId (C05)" "$CONC" "C05" "$SVC" \
-  's/resumeAttemptId: binding.resumeAttemptId ?? undefined,/resumeAttemptId: randomUUID(),/'
+  's/(await this\.hook\("afterMint"\);.*?resumeAttemptId:) binding\.resumeAttemptId \?\? undefined,/$1 randomUUID(),/s'
 
 echo ""
 echo "==================================================="

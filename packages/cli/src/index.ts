@@ -229,7 +229,7 @@ Usage:
   steward provider-action execute --id ID [--idempotency-key KEY]
   steward provider-action evidence --id ID [--out bundle.json] [--verify --fp HEX]
 
-provider-action commands are thin wrappers over the PR2-PR5 governed routes
+provider-action commands are thin wrappers over the governed routes
 (convenience only; the authoritative proof is
 scripts/provider-authority-golden-path.mjs). No new authority is introduced.
 
@@ -332,7 +332,7 @@ async function agentCommand(action: string | undefined, ctx: CommandContext) {
  * Read a secret value for onboarding/rotation. Preferred sources are --file or
  * stdin so the plaintext never lands in shell history or `ps` output. --value
  * remains for backward compatibility but warns loudly (salvaged from the
- * sovereign-custody A2 lane: zero-plaintext-transit onboarding).
+ * sovereign-custody path: zero-plaintext-transit onboarding).
  */
 export function readSecretValue(flags: Record<string, string | boolean>): string {
   const file = stringFlag(flags, "file");
@@ -656,16 +656,15 @@ async function auditCommand(action: string | undefined, ctx: CommandContext) {
 }
 
 /**
- * PR6 provider-action command group — thin convenience wrappers over the
- * pre-existing PR2-PR5 governed-provider routes. Distribution is unsettled
- * (§5.4), so these are convenience only: the AUTHORITATIVE proof is
+ * Provider-action command group: thin convenience wrappers over the
+ * governed-provider routes. These are convenience only; the authoritative proof is
  * `scripts/provider-authority-golden-path.mjs`. No new route or authority is
  * introduced; each subcommand maps 1:1 to an existing route. Consequential
  * writes are gated by the SAME approval/execute lifecycle regardless of caller.
  */
 async function providerActionCommand(action: string | undefined, ctx: CommandContext) {
   if (action === "create") {
-    // Create a provider action (PR2). The route's strict top-level schema accepts
+    // Create a provider action. The route's strict top-level schema accepts
     // exactly {workspaceId, providerAccountId, operationKey, arguments,
     // idempotencyKey}; the API canonicalizes + digests the arguments and hashes
     // the idempotency key server-side. `--arguments` is the adapter argument JSON
@@ -683,11 +682,11 @@ async function providerActionCommand(action: string | undefined, ctx: CommandCon
     return ctx.api.request("GET", `/v2/provider-actions/${id()}`);
   }
   if (action === "approval") {
-    // The approval DETAIL (PR3) — requires a human session + recent MFA.
+    // Approval detail requires a human session and recent MFA.
     return ctx.api.request("GET", `/v2/provider-actions/${id()}/approval`);
   }
   if (action === "approve" || action === "deny") {
-    // A typed reason is REQUIRED for BOTH decisions (equal-weight, U4/PR3 §9.2).
+    // A typed reason is required for both decisions.
     // The route ALSO requires an idempotencyKey (rejects with
     // APPROVAL_FIELD_INVALID otherwise) so a retried decision cannot double-apply.
     const reason = required(stringFlag(ctx.flags, "reason"), "reason");
@@ -712,7 +711,7 @@ async function providerActionCommand(action: string | undefined, ctx: CommandCon
     return ctx.api.request("POST", `/v2/provider-actions/${id()}/approval`, decideBody);
   }
   if (action === "execute") {
-    // Typed system resume (PR3). Body carries ONLY idempotencyKey; actor/action
+    // Typed system resume. The body carries only idempotencyKey; actor/action
     // substitution is rejected server-side (RESUME_ACTOR_SUBSTITUTION_FORBIDDEN).
     const idempotencyKey = stringFlag(ctx.flags, "idempotency-key");
     return ctx.api.request(
@@ -722,11 +721,11 @@ async function providerActionCommand(action: string | undefined, ctx: CommandCon
     );
   }
   if (action === "case") {
-    // The case manifest (PR5) — owner/admin + recent MFA.
+    // The case manifest requires owner or admin authorization and recent MFA.
     return ctx.api.request("GET", `/v2/provider-actions/${id()}/case`);
   }
   if (action === "evidence") {
-    // The signed evidence bundle (PR5). Optionally write + offline-verify with a
+    // The signed evidence bundle can be written and verified offline with a
     // trusted key fingerprint (E7): --out bundle.json [--verify --fp <hex>].
     const bundle = await ctx.api.request("GET", `/v2/provider-actions/${id()}/evidence`);
     const out = stringFlag(ctx.flags, "out");
@@ -741,7 +740,7 @@ async function providerActionCommand(action: string | undefined, ctx: CommandCon
       else
         console.error(
           "WARNING: no --fp supplied; verifying against the EMBEDDED key proves " +
-            "self-consistency only, NOT trust to a known signing root (PR5 E7).",
+            "self-consistency only, NOT trust to a known signing root.",
         );
       const result = spawnSync(process.execPath, args, { stdio: "inherit" });
       if (result.status !== 0) throw new Error("Offline evidence bundle verification failed");

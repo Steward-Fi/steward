@@ -1,5 +1,5 @@
 /**
- * provider-approvals.ts — PR3 human approval + safe-resume HTTP surface (spec §9).
+ * provider-approvals.ts — human approval and safe-resume HTTP surface (spec §9).
  *
  *   GET  /v2/provider-actions/:id/approval  — eligible workspace approver + MFA
  *   POST /v2/provider-actions/:id/approval  — approve/deny decision
@@ -261,7 +261,7 @@ async function handlePostExecute(c: RouteContext) {
 }
 
 /**
- * Register the PR3 approval + execute routes directly on the composed app.
+ * Register the provider approval and execute routes directly on the composed app.
  * `tenantAuth` populates authType/userId/tenantId/sessionMfaVerifiedAt for both
  * human sessions and agent tokens; the handlers enforce the human-session
  * requirement where the spec demands it.

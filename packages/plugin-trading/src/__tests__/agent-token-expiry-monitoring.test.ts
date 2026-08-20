@@ -100,7 +100,7 @@ beforeAll(async () => {
     ])
     .onConflictDoNothing();
 
-  // PR #79 hardening: requireAgentJwt rejects tokens for agents that are not
+  // requireAgentJwt rejects tokens for agents that are not
   // registered for the tenant, so provision the agent (and its signing key).
   await contextModule.vault.createAgent(TENANT_ID, AGENT_ID, "Token Watch Agent");
   // SEC-091: a second tenant with its own agent, used to prove the token-status
@@ -181,7 +181,7 @@ async function latestTokenAudit(
 
 async function signTradeToken(expiresAt: number): Promise<string> {
   const now = Math.floor(Date.now() / 1000);
-  // PR #79 hardening: requireAgentJwt now enforces the trade:order scope and a
+  // requireAgentJwt enforces the trade:order scope and a
   // tenant_id claim that matches the X-Steward-Tenant header.
   return new SignJWT({
     agent_id: AGENT_ID,
@@ -280,8 +280,7 @@ describe("agent trade token expiry monitoring", () => {
       `/v1/trade/token-status?agentId=${encodeURIComponent(AGENT_ID)}`,
       { headers: { "X-Steward-Tenant": TENANT_NO_KEY_ID } },
     );
-    // PR #79 hardening: tenantAuth rejects a tenant with no/invalid API key with
-    // 403 Forbidden (previously 401).
+    // tenantAuth rejects a tenant with no or invalid API key with 403 Forbidden.
     expect(unauthenticated.status).toBe(403);
 
     const unknown = await app.request("/v1/trade/token-status?agentId=missing-agent", {

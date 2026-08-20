@@ -13,7 +13,7 @@
  * WHY IT LIVES HERE (policy-engine) BUT LOOKS LIKE A PLUGIN CONTRIBUTION
  * ---------------------------------------------------------------------
  * it is authored AS a {@link PolicyRuleContribution} — the exact shape a plugin
- * registers via the Phase-2b registry — so W-1a's capability plugin can register
+ * registers via the provider-mode registry — so the capability plugin can register
  * it through the plugin host with ZERO rework. but the evaluator + config schema
  * + tests are a library export of `@stwd/policy-engine` (not a route, not a
  * package): W-1b ships the decision logic; the plugin package (W-1a) owns
@@ -1278,7 +1278,7 @@ export function evaluateCapabilityIntent(
  * The composed decision over a set of `capability-intent` rules that GOVERN a
  * single invoked capability, in the canonical precedence order.
  *
- * CANONICAL COMPOSITION (master-plan §5.3 / PR2 canonicalization spec §6.3):
+ * Canonical provider-action composition:
  *   1. a malformed/unknown rule config that GOVERNS this capability, or whose
  *      SELECTOR is unrecoverable (ambiguous scope), or an unavailable policy
  *      input => HARD DENY
@@ -1462,7 +1462,7 @@ export const capabilityIntentContribution: PolicyRuleContribution<EvaluatorConte
   evaluate: evaluateCapabilityIntent,
 };
 
-// ─── Provider-action policy composition (PR2, Conflict 9 fix) ──────────────────
+// ─── Provider-action policy composition ───────────────────────────────────────
 //
 // The legacy invoke.ts loop lets a passing allow win even when another rule
 // simultaneously requires approval (origin/develop invoke.ts:288-311). That is
@@ -1673,7 +1673,7 @@ export interface ProviderPolicyRule {
  * allow-over-approval precedence bug for the LEGACY invoke.ts plane, reusing
  * `ContributedPolicyRule`/`EvaluatorContext` and returning a
  * `CapabilityIntentCompositionResult`. This function is the AUTHORITY-plane analog
- * required by PR2 spec §6.2/§6.3: it returns the full `ProviderPolicyEvaluationV1`
+ * required by the provider-action contract: it returns the full `ProviderPolicyEvaluationV1`
  * document (per-rule results with configured effect / outcome / reason code) that
  * the provider-action service persists as an immutable policy decision. The two
  * are deliberately distinct exports; both enforce identical precedence

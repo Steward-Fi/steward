@@ -1,5 +1,5 @@
 /**
- * PR5 case-evidence test fixture. Reuses the PR3 approval fixture's seed and adds
+ * evidence case-evidence test fixture. Reuses the approval-lifecycle approval fixture's seed and adds
  * helpers to drive a case to each terminal state (denied_access, pending,
  * approved, execution_ready, succeeded-stub) plus utilities to read the
  * correlated audit events and reset the audit chain between tests.

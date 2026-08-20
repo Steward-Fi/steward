@@ -1,5 +1,5 @@
 /**
- * PR5 §3.4 / C3 data-minimization guard (review-gate): the RAW provider
+ * evidence §3.4 / C3 data-minimization guard (review-gate): the RAW provider
  * idempotency key must NEVER enter the manifest — only its sha256 hash. The
  * existing service test only checks the allowed-stub path where `execution` is
  * null (no nonce), so it never exercises the hashing branch. This seeds a v2
@@ -11,7 +11,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "bun:test"
 
 process.env.STEWARD_PGLITE_MEMORY = "true";
 process.env.STEWARD_AUDIT_HMAC_KEY ||= "0".repeat(64);
-process.env.STEWARD_MASTER_PASSWORD ||= "pr5-idem-hash-master";
+process.env.STEWARD_MASTER_PASSWORD ||= "provider-case-idem-hash-master";
 
 import { closeDb, executionAuthorizationNonces, getDb } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
@@ -21,7 +21,7 @@ import { createAllowedCase, F, seedCaseFixture, wipeCase } from "./provider-case
 
 const CANARY_RAW_KEY = "prov-idem-CANARY-6f1b9d3a2c8e4f5a-do-not-leak";
 
-describe("PR5 §3.4 provider idempotency key is hashed, never raw", () => {
+describe("evidence §3.4 provider idempotency key is hashed, never raw", () => {
   beforeAll(async () => {
     const { db, client } = await createPGLiteDb("memory://");
     setPGLiteOverride(db, async () => client.close());

@@ -1,7 +1,7 @@
 /**
  * SEC-012 regression tests — default-tenant API key provisioning.
  *
- * Pre-fix, scripts/provision-agent.ts inserted the `default` tenant with
+ * scripts/provision-agent.ts must not insert the `default` tenant with
  * apiKeyHash = sha256("provision-agent:default"). That literal string —
  * published in this repo — was a working X-Steward-Key credential (tenant
  * auth is timingSafeEqual(sha256(presentedKey), apiKeyHash)). These tests
@@ -84,7 +84,7 @@ describe("SEC-012 ensureDefaultTenant", () => {
     expect(store.rotations).toHaveLength(1);
     const newHash = store.rotations[0].apiKeyHash;
     expect(newHash).not.toBe(LEGACY_DEFAULT_TENANT_API_KEY_HASH);
-    // The pre-fix published credential must no longer validate.
+    // The superseded credential must no longer validate.
     expect(validateApiKey(LEGACY_DEFAULT_TENANT_API_KEY, newHash)).toBe(false);
     // The freshly returned key does.
     expect(validateApiKey((result as { apiKey: string }).apiKey, newHash)).toBe(true);
@@ -107,9 +107,9 @@ describe("SEC-012 ensureDefaultTenant", () => {
     expect("apiKey" in result).toBe(false);
   });
 
-  test("legacy hash constant matches the pre-fix derivation", () => {
+  test("legacy hash constant matches the retired derivation", () => {
     // Guards the remediation trigger itself: the constant must equal
-    // sha256("provision-agent:default") — the exact value pre-fix script
+    // sha256("provision-agent:default") — the exact value the retired script
     // versions wrote — or already-provisioned instances would not rotate.
     expect(LEGACY_DEFAULT_TENANT_API_KEY_HASH).toBe(
       "93a3e57073bf915e403c48b44518efca07086ec8ada1b4b73e4a5278677d57cc",

@@ -1,10 +1,10 @@
 /**
  * Shared owner/admin + recent-MFA gate for evidence surfaces.
  *
- * Both `/audit/*` and PR5's `/v2/provider-actions/:id/{case,evidence}` require
+ * Both `/audit/*` and `/v2/provider-actions/:id/{case,evidence}` require
  * the SAME authorization posture (spec §5.2): a `session-jwt` caller with
  * tenant role `owner` or `admin`, recent MFA (≤5 min), and `no-store` headers.
- * Agent tokens are rejected. Factoring the gate here guarantees the PR5 routes
+ * Agent tokens are rejected. Factoring the gate here guarantees the case routes
  * inherit an IDENTICAL (never weaker) gate rather than re-implementing it (spec
  * §6.3: "Do not create a new router with a weaker gate").
  */

@@ -1,5 +1,5 @@
 /**
- * agent-client.ts — @stwd/sdk agent-side capability client (lane A3).
+ * @stwd/sdk agent-side capability client.
  *
  * The sovereign-custody client: an Eliza/agent process boots holding NOTHING but
  * its P-256 identity keypair (+ the Steward base URL) and obtains everything else

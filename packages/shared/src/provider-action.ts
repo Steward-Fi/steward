@@ -1,7 +1,7 @@
 /**
  * provider-action.ts — the `github.provider-action.v1` canonicalization profile.
  *
- * This module owns, for PR2 of the governed-provider-authority plan:
+ * This module owns the governed-provider canonicalization contract:
  *   - a strict, in-house RFC 8785 (JCS) serializer (Conflict 13, RATIFIED: no new
  *     runtime dependency, reject non-JSON runtime values, never coerce);
  *   - the canonical action object + digest (`actionDigest`);
@@ -795,7 +795,7 @@ function toEnvelopeObject(e: ProviderRequestEnvelopeV1): Record<string, unknown>
     expiresAt: e.expiresAt,
     nonce: e.nonce,
   };
-  // Preserve the byte-for-byte hash of legacy envelopes that predate #229.
+  // Preserve the byte-for-byte hash of version-1 envelopes without policy inputs.
   if (e.policyInputDigest !== undefined) envelope.policyInputDigest = e.policyInputDigest;
   if (e.xSummonAttestationDigest !== undefined)
     envelope.xSummonAttestationDigest = e.xSummonAttestationDigest;
@@ -808,11 +808,11 @@ export function computeRequestHash(e: ProviderRequestEnvelopeV1): string {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// PR4: provider execution authorization v2 commitment (spec §3)
+// Provider execution authorization v2 commitment (spec §3)
 //
 // The v2 authorization is bound by an HMAC over a canonical commitment document
 // serialized with the SAME strict RFC 8785 JCS used above (adjudication conflict
-// 13 in-house JCS). The commitment binds the EXACT outbound bytes, the EXACT PR3
+// 13 in-house JCS). The commitment binds the exact outbound bytes, the exact
 // approval, rotation revisions, and the pinned request line so a claimed
 // authorization cannot be replayed against a different route/method/path/header
 // profile/secret. `commitmentHash` is a content hash; the HMAC signature is
@@ -988,11 +988,11 @@ export function providerExecutionSignatureInput(c: ProviderExecutionCommitmentV2
 }
 
 /**
- * sha256: hex of JCS of the sorted selected-header NAME set from a PR2 canonical
+ * sha256: hex of JCS of the sorted selected-header name set from a canonical
  * action. Binds the outbound header profile into the commitment so a claimed
  * authorization cannot be replayed with a different header set (P31/P32/P33).
  * Only header NAMES are committed (values are already in the actionDigest); the
- * injected credential header is never among selectedHeaders (PR2 rule).
+ * injected credential header is never among selectedHeaders.
  */
 export function computeHeaderAllowlistDigest(action: GithubCanonicalActionV1): string {
   const names = action.selectedHeaders
@@ -1002,14 +1002,14 @@ export function computeHeaderAllowlistDigest(action: GithubCanonicalActionV1): s
   return sha256HexPrefixed(jcsStringify(names));
 }
 
-// PR4 deterministic v2 commitment builder + grant-dependency hash + outbound
+// Deterministic v2 commitment builder, grant-dependency hash, and outbound
 // query serialization. These are PURE (no DB, no crypto key) so the API minter
 // and the separate-process proxy verifier reconstruct the SAME commitment bytes
-// from the SAME persisted PR3 approval commitment + PR2 canonical action.
+// from the same persisted approval commitment and canonical action.
 
 /**
  * Deterministic grant/binding dependency hash. Binds the EXACT matched
- * grant/binding ids+revisions the PR3 access decision committed, so a revoked or
+ * grant/binding ids and revisions the access decision committed, so a revoked or
  * re-revised grant fails the claim (X5, P15). Arrays are sorted by uuid bytes
  * (same rule as the approval commitment) then JCS-serialized.
  */
@@ -1032,7 +1032,7 @@ export function computeGrantDependencyHash(access: {
 
 /**
  * Serialize canonical `orderedQueryPairs` into an outbound query string (WITHOUT
- * the leading `?`) using the PR2 RFC3986 encoding rule (uppercase percent hex,
+ * the leading `?`) using the canonical RFC 3986 encoding rule (uppercase percent hex,
  * `%20` not `+`). Duplicate keys and order are preserved exactly. Empty list ->
  * "". This is the ONLY governed query source (spec section 5.4): the proxy
  * rebuilds the outbound query from these canonical pairs, never from a raw stored
@@ -1046,7 +1046,7 @@ export function serializeCanonicalOutboundQuery(
     .join("&");
 }
 
-/** Inputs to reconstruct a v2 commitment from the PR3 approval commitment. */
+/** Inputs to reconstruct a v2 commitment from the persisted approval commitment. */
 export interface ProviderExecutionCommitmentBuildInput {
   approval: {
     intentId: string;
@@ -1085,8 +1085,8 @@ export interface ProviderExecutionCommitmentBuildInput {
 }
 
 /**
- * Reconstruct the exact v2 commitment document from a PR3 approval commitment +
- * PR2 canonical action + mint params. Both the API mint and the proxy claim call
+ * Reconstruct the exact v2 commitment document from an approval commitment,
+ * canonical action, and mint parameters. Both the API mint and proxy claim call
  * this so the commitment bytes (and thus `commitmentHash` and the HMAC) are
  * byte-identical on both sides. `target` and `headerAllowlistDigest` come from
  * the canonical action (pinned origin host, normalized path, method, sorted
@@ -1588,7 +1588,7 @@ export function canonicalizeContentType(raw: string): string {
 /**
  * A raw, INTERNAL HTTP representation of a provider action. This is NOT the
  * public API shape — it is what the GitHub adapter constructs from validated
- * operation arguments, and what the PR4 proxy recomputation + the offline
+ * operation arguments, and what proxy recomputation and the offline
  * verifier feed in. Because ALL of these consumers call
  * {@link canonicalizeRawInternalAction}, there is exactly ONE canonicalization
  * path and the golden corpus proves it byte-for-byte.
@@ -1658,7 +1658,7 @@ export function canonicalizeRawInternalAction(raw: RawInternalAction): GithubCan
       fail("CANON_JSON_SHAPE_INVALID", "body must be a JSON object");
     canonicalBody = raw.body;
   } else {
-    // DELETE: bodyless only in PR2 (no operation declares a DELETE body).
+    // DELETE is bodyless in the current profile; no operation declares a DELETE body.
     if (hasBody || hasContentType) fail("CANON_BODY_FORBIDDEN", `${method} must not carry a body`);
   }
 

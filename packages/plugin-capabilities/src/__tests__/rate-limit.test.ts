@@ -1,7 +1,7 @@
 /**
  * Tests for the per-agent capability rate limiter (SEC-094).
  *
- * Before the fix the invoke / OpenAI-adapter / manifest-issuance routes had no
+ * The invoke / OpenAI-adapter / manifest-issuance routes require a
  * throttle at all (the only limit was an optional operator-configured
  * `maxCallsPerHour` policy rule), so an agent could spam invocations — a DB
  * write per attempt plus upstream calls with credential injection. These tests

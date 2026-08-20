@@ -1,6 +1,6 @@
 /**
  * SEC-092 regression: the agent-facing capability surface must not be gated by
- * the TRADING scope. Before the fix, capability invoke/manifest/issuance routes
+ * the TRADING scope. Capability invoke/manifest/issuance routes
  * mounted the legacy `requireAgentJwt`, which hard-requires `trade:order` — so
  * capability-only agents were locked out and every trading agent implicitly
  * carried capability access (scope conflation). The dedicated

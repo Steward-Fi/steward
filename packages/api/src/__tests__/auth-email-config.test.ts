@@ -188,7 +188,7 @@ describe("getEmailAuthForTenant", () => {
     await dbHandle.delete(tenantConfigs).where(eq(tenantConfigs.tenantId, TEST_TENANT_ID));
     // Template-only tenant config: shared platform Resend account, but the
     // tenant wants its own branded email. This is the shared-provider branding shape —
-    // before the fix this silently fell back to the Steward default template.
+    // This must not silently fall back to the Steward default template.
     await dbHandle.insert(tenantConfigs).values({
       tenantId: TEST_TENANT_ID,
       emailConfig: {

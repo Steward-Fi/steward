@@ -1,6 +1,6 @@
 /**
  * No-read-back property of the SecretVault custody plane (sovereign-custody
- * Pillar A / A2, converged from PR #245's sibling age store onto the EXISTING
+ * Sovereign-custody no-read-back enforcement uses the existing
  * plane).
  *
  * Bidirectional proof:

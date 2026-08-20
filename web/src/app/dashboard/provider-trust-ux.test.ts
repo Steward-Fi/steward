@@ -1,14 +1,8 @@
-// @ts-nocheck
 /**
- * PR6 minimal trust-UX invariants (U4/U5), enforced as a source-scan CI guard
- * (mirrors the existing providers.test.ts technique — the web package has no
- * axe-core/component-render harness on develop, G7, and PR6 does NOT retrofit
- * one across the dashboard). These structural assertions pin the security-
- * relevant UX properties the acceptance gate demands (M11/M12/M13, PN34/PN35).
- *
- * A render-based a11y scan (axe) of these two surfaces is the follow-up when the
- * web package adopts a component-test harness; the honest gap is documented in
- * the PR body (U8 discipline).
+ * Provider trust-UX source invariants complement the rendered browser suite.
+ * Browser tests prove interaction and accessibility; these source-level checks
+ * pin absence properties, equal-weight decisions, terminal-state behavior, and
+ * operator trust-limit copy that mocked rendered responses cannot prove.
  */
 
 import { describe, expect, test } from "bun:test";
@@ -21,7 +15,7 @@ const caseDetail = readFileSync(join(HERE, "actions", "[id]", "page.tsx"), "utf8
 const approvalsList = readFileSync(join(HERE, "approvals", "page.tsx"), "utf8");
 const clientLib = readFileSync(join(HERE, "..", "..", "lib", "provider-actions.ts"), "utf8");
 
-describe("PR6 approval-detail UX (U4)", () => {
+describe("provider approval-detail trust UX", () => {
   test("M11: approve and deny are equal-weight (identical button classes + flex-1)", () => {
     // Both decision buttons share the SAME class list and flex-1 (equal width).
     const buttonClass =
@@ -61,8 +55,7 @@ describe("PR6 approval-detail UX (U4)", () => {
     expect(approvalsList).not.toMatch(/bulk[- ]?approve|approve[- ]?all|select[- ]?all/i);
   });
 });
-
-describe("PR6 case/evidence UX (U5)", () => {
+describe("provider case/evidence trust UX", () => {
   test("PN34: completeness is rendered VERBATIM and never upgraded", () => {
     expect(caseDetail).toContain("manifest.completeness");
     expect(caseDetail).toContain("manifest.incompletenessReasons");
@@ -85,8 +78,7 @@ describe("PR6 case/evidence UX (U5)", () => {
     expect(caseDetail).toContain("providerIdempotencyKeyHash");
   });
 });
-
-describe("PR6 provider-actions client (safe surface)", () => {
+describe("provider-actions client safe surface", () => {
   test("non-enumerating errors collapse to a uniform not-found/not-authorized", () => {
     expect(clientLib).toContain("ProviderActionError");
     expect(clientLib).toContain("not found / not authorized");

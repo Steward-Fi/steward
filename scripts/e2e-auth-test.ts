@@ -380,7 +380,7 @@ async function testOAuthAuthorize(provider: "google" | "discord") {
  */
 async function testSiweNonce() {
   try {
-    // SIWE nonce requests are bound to an allowed Origin (PR #79 hardening).
+    // SIWE nonce requests are bound to an allowed Origin.
     const { status, data } = await api("GET", "/auth/nonce", {
       // Exercise the configured deployment origin instead of hard-coding the
       // hosted domain, which makes local TLS-safe smoke tests fail spuriously.

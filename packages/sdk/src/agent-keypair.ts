@@ -1,6 +1,6 @@
 /**
  * agent-keypair.ts — the agent's identity keypair, the ONLY long-lived secret an
- * agent process holds (Pillar A, sovereign-custody premise). Everything else
+ * agent process holds under the sovereign-custody premise. Everything else
  * (agent token, capability tokens) is short-lived and obtained at runtime via
  * enrollment + issuance.
  *

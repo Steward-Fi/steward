@@ -1,5 +1,5 @@
 /**
- * PR5 static purity + determinism (spec §9.2 acceptance gate).
+ * evidence static purity + determinism (spec §9.2 acceptance gate).
  *
  *  - The case assemblers are PURE READS: provider-case.ts contains no
  *    INSERT/UPDATE/DELETE against audit_events (or any mutating write). The only
@@ -18,7 +18,7 @@ import { createAllowedCase, F, seedCaseFixture, wipeCase } from "./provider-case
 
 const SERVICE_SRC = join(import.meta.dir, "..", "services", "provider-case.ts");
 
-describe("PR5 case assembler purity + determinism", () => {
+describe("evidence case assembler purity + determinism", () => {
   test("provider-case.ts contains no mutating write to audit_events (pure read)", () => {
     const src = readFileSync(SERVICE_SRC, "utf8");
     // No INSERT/UPDATE/DELETE against audit_events anywhere in the assembler.

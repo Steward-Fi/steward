@@ -1,6 +1,6 @@
 /**
  * agent-enroll-route.test.ts — E2E route test for keypair-only agent enrollment
- * (lane A1, scope 1). Boots the enrollment routes on an in-memory pglite app and
+ * Boots the enrollment routes on an in-memory PGLite app and
  * proves an agent holding ONLY its keypair can obtain a short-lived agent token,
  * and that every failure path denies.
  */
