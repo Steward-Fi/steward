@@ -45,10 +45,19 @@ const agent = await client.createWallet("my-agent", "My Agent");
 
 ### listAgents
 
-Lists all agents for the authenticated tenant.
+Lists all agents for the authenticated tenant. The SDK walks stable API pages
+at the maximum page size and fails closed on duplicate or non-progressing pages,
+while retaining the historical array return type.
 
 ```typescript
 const agents = await client.listAgents(): Promise<AgentIdentity[]>;
+```
+
+Use the canonical paginated result when the metadata is needed:
+
+```typescript
+const page = await client.listAgentsPage({ limit: 25, offset: 0 });
+// { agents: AgentIdentity[], limit: 25, offset: 0 }
 ```
 
 ### getAgent
@@ -304,7 +313,8 @@ const addresses = await client.getAddresses(
 
 ### getHistory
 
-Gets the transaction history for an agent.
+Gets the complete transaction history for an agent. The SDK walks every bounded
+API page before returning the historical array result.
 
 ```typescript
 const history = await client.getHistory(

@@ -70,8 +70,6 @@ test.describe("Dashboard audit log", () => {
       },
     ];
 
-    await loginWithMagicLink(page, request, email);
-
     await page.route(
       (url) => isApiRequest(url.href) && url.pathname === "/agents",
       async (route) => {
@@ -158,6 +156,8 @@ test.describe("Dashboard audit log", () => {
         });
       },
     );
+
+    await loginWithMagicLink(page, request, email);
 
     await page.goto(`${WEB}/dashboard/audit`);
 

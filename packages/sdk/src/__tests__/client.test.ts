@@ -193,11 +193,6 @@ const mockAgent = {
   createdAt: new Date("2024-01-01T00:00:00Z").toISOString(),
 };
 
-const mockAgentListResponse = {
-  ok: true,
-  data: { agents: [mockAgent], limit: 100, offset: 0 },
-};
-
 const mockPolicy: PolicyRule = {
   id: "rule-1",
   type: "spending-limit",
@@ -263,11 +258,11 @@ describe("StewardClient construction", () => {
   });
 
   it("strips trailing slash from baseUrl", async () => {
-    installMockFetch(mockAgentListResponse);
+    installMockFetch({ ok: true, data: [mockAgent] });
     const client = new StewardClient({ baseUrl: "https://api.example.com///" });
     await client.listAgents();
     expect(lastCapture?.url).not.toContain("///agents");
-    expect(lastCapture?.url).toMatch(/\/agents$/);
+    expect(new URL(lastCapture!.url).pathname).toBe("/agents");
   });
 
   it("creates a client with all config options", () => {
@@ -885,26 +880,26 @@ describe("StewardClient webhooks", () => {
 
 describe("Request headers", () => {
   it("always sends Content-Type: application/json", async () => {
-    installMockFetch(mockAgentListResponse);
+    installMockFetch({ ok: true, data: [mockAgent] });
     await makeClient().listAgents();
     expect(lastCapture?.headers["content-type"]).toBe("application/json");
   });
 
   it("always sends Accept: application/json", async () => {
-    installMockFetch(mockAgentListResponse);
+    installMockFetch({ ok: true, data: [mockAgent] });
     await makeClient().listAgents();
     expect(lastCapture?.headers.accept).toBe("application/json");
   });
 
   it("sends X-Steward-Key header when apiKey is set", async () => {
-    installMockFetch(mockAgentListResponse);
+    installMockFetch({ ok: true, data: [mockAgent] });
     const client = makeClient({ apiKey: "my-secret-key" });
     await client.listAgents();
     expect(lastCapture?.headers["x-steward-key"]).toBe("my-secret-key");
   });
 
   it("sends Privy-style app secret Basic auth when app credentials are set", async () => {
-    installMockFetch(mockAgentListResponse);
+    installMockFetch({ ok: true, data: [mockAgent] });
     const client = makeClient({ appId: "tenant-1/web-prod", appSecret: "stw_app_secret" });
     await client.listAgents();
     expect(lastCapture?.headers["x-steward-app-id"]).toBe("tenant-1/web-prod");
@@ -914,14 +909,14 @@ describe("Request headers", () => {
   });
 
   it("sends Authorization: Bearer header when bearerToken is set", async () => {
-    installMockFetch(mockAgentListResponse);
+    installMockFetch({ ok: true, data: [mockAgent] });
     const client = makeClient({ bearerToken: "my-jwt-token" });
     await client.listAgents();
     expect(lastCapture?.headers.authorization).toBe("Bearer my-jwt-token");
   });
 
   it("bearerToken takes priority over apiKey when both are set", async () => {
-    installMockFetch(mockAgentListResponse);
+    installMockFetch({ ok: true, data: [mockAgent] });
     const client = makeClient({
       apiKey: "my-api-key",
       bearerToken: "my-bearer",
@@ -933,7 +928,7 @@ describe("Request headers", () => {
   });
 
   it("sends X-Steward-Tenant header when tenantId is set", async () => {
-    installMockFetch(mockAgentListResponse);
+    installMockFetch({ ok: true, data: [mockAgent] });
     const client = makeClient({ tenantId: "my-tenant-123" });
     await client.listAgents();
     expect(lastCapture?.headers["x-steward-tenant"]).toBe("my-tenant-123");
@@ -949,7 +944,7 @@ describe("Request headers", () => {
   });
 
   it("does not send auth header when neither apiKey nor bearerToken is set", async () => {
-    installMockFetch(mockAgentListResponse);
+    installMockFetch({ ok: true, data: [mockAgent] });
     await makeClient().listAgents();
     expect(lastCapture?.headers.authorization).toBeUndefined();
     expect(lastCapture?.headers["x-steward-key"]).toBeUndefined();
@@ -1041,7 +1036,7 @@ describe("Request headers", () => {
   });
 
   it("does not sign non-sensitive requests", async () => {
-    installMockFetch(mockAgentListResponse);
+    installMockFetch({ ok: true, data: [mockAgent] });
     const client = makeClient({
       requestSigningSecret: "request-signing-secret",
     });
@@ -1077,16 +1072,16 @@ describe("Request headers", () => {
 
 describe("HTTP request building", () => {
   it("refuses redirects so Steward credentials cannot be replayed", async () => {
-    installMockFetch(mockAgentListResponse);
+    installMockFetch({ ok: true, data: [mockAgent] });
     await makeClient({ apiKey: "tenant-key" }).listAgents();
     expect(lastCapture?.redirect).toBe("error");
   });
 
   it("listAgents → GET /agents", async () => {
-    installMockFetch(mockAgentListResponse);
+    installMockFetch({ ok: true, data: [mockAgent] });
     await makeClient().listAgents();
     expect(lastCapture?.method).toBe("GET");
-    expect(lastCapture?.url).toBe("https://api.steward.example/agents");
+    expect(lastCapture?.url).toBe("https://api.steward.example/agents?limit=200&offset=0");
   });
 
   it("getAgent → GET /agents/:id", async () => {
@@ -3981,7 +3976,9 @@ describe("HTTP request building", () => {
     installMockFetch({ ok: true, data: [] });
     await makeClient().getHistory("agent-1");
     expect(lastCapture?.method).toBe("GET");
-    expect(lastCapture?.url).toBe("https://api.steward.example/vault/agent-1/history");
+    expect(lastCapture?.url).toBe(
+      "https://api.steward.example/vault/agent-1/history?limit=200&offset=0",
+    );
   });
 
   it("listTransactions and getTransaction use first-class transaction endpoints", async () => {
@@ -4849,55 +4846,136 @@ describe("Error handling", () => {
 // ─── Response Parsing Tests ───────────────────────────────────────────────
 
 describe("Response parsing", () => {
-  it("listAgents returns parsed agent array", async () => {
-    installMockFetch({ ok: true, data: { agents: [mockAgent], limit: 100, offset: 0 } });
+  it("listAgents consumes the canonical paginated response and returns parsed agents", async () => {
+    installMockFetch({
+      ok: true,
+      data: { agents: [mockAgent], limit: 25, offset: 0 },
+    });
     const agents = await makeClient().listAgents();
     expect(agents).toHaveLength(1);
     expect(agents[0].id).toBe("agent-1");
     expect(agents[0].name).toBe("Test Agent");
   });
 
-  it("listAgents rejects the obsolete array envelope", async () => {
-    installMockFetch({ ok: true, data: [mockAgent] });
-    await expect(makeClient().listAgents()).rejects.toThrow();
-  });
-
   it("listAgents parses createdAt as Date object", async () => {
-    installMockFetch({ ok: true, data: { agents: [mockAgent], limit: 100, offset: 0 } });
+    installMockFetch({
+      ok: true,
+      data: { agents: [mockAgent], limit: 100, offset: 0 },
+    });
     const agents = await makeClient().listAgents();
     // parseAgentIdentity converts createdAt string to Date
     expect(agents[0].createdAt).toBeInstanceOf(Date);
   });
 
-  it("listAgents exhausts every canonical page", async () => {
-    let calls = 0;
-    global.fetch = async (input) => {
-      const url = String(input);
-      calls += 1;
-      const page =
-        calls === 1
-          ? Array.from({ length: 100 }, (_, index) => ({
-              ...mockAgent,
-              id: `agent-${index}`,
-            }))
-          : [{ ...mockAgent, id: "agent-100" }];
-      expect(url).toBe(
-        calls === 1
-          ? "https://api.steward.example/agents"
-          : "https://api.steward.example/agents?limit=100&offset=100",
-      );
+  it("listAgentsPage preserves canonical pagination metadata and sends page parameters", async () => {
+    installMockFetch({
+      ok: true,
+      data: { agents: [mockAgent], limit: 10, offset: 20 },
+    });
+
+    const page = await makeClient().listAgentsPage({ limit: 10, offset: 20 });
+
+    expect(lastCapture?.url).toBe("https://api.steward.example/agents?limit=10&offset=20");
+    expect(page.limit).toBe(10);
+    expect(page.offset).toBe(20);
+    expect(page.agents[0]?.createdAt).toBeInstanceOf(Date);
+  });
+
+  it("listAgents walks every canonical page before returning the historical array shape", async () => {
+    const requestedUrls: string[] = [];
+    global.fetch = async (input: RequestInfo | URL) => {
+      const url =
+        typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      requestedUrls.push(url);
+      const offset = Number(new URL(url).searchParams.get("offset") ?? "0");
+      const pageAgents =
+        offset === 0
+          ? [mockAgent, { ...mockAgent, id: "agent-2" }]
+          : [{ ...mockAgent, id: "agent-3" }];
       return new Response(
         JSON.stringify({
           ok: true,
-          data: { agents: page, limit: 100, offset: calls === 1 ? 0 : 100 },
+          data: { agents: pageAgents, limit: 2, offset },
         }),
-        { headers: { "content-type": "application/json" } },
+        { status: 200, headers: { "Content-Type": "application/json" } },
       );
     };
 
     const agents = await makeClient().listAgents();
-    expect(agents).toHaveLength(101);
-    expect(calls).toBe(2);
+
+    expect(requestedUrls).toEqual([
+      "https://api.steward.example/agents?limit=200&offset=0",
+      "https://api.steward.example/agents?limit=200&offset=2",
+    ]);
+    expect(agents.map((agent) => agent.id)).toEqual(["agent-1", "agent-2", "agent-3"]);
+  });
+
+  it("listAgents fails closed on repeated agents across pages", async () => {
+    global.fetch = async (input: RequestInfo | URL) => {
+      const url = new URL(
+        typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url,
+      );
+      const offset = Number(url.searchParams.get("offset"));
+      return new Response(
+        JSON.stringify({
+          ok: true,
+          data: {
+            agents: offset === 0 ? [mockAgent, { ...mockAgent, id: "agent-2" }] : [mockAgent],
+            limit: 2,
+            offset,
+          },
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    };
+
+    await expect(makeClient().listAgents()).rejects.toThrow("Duplicate agent");
+  });
+
+  it("getTransactionHistory walks every canonical page", async () => {
+    const requestedUrls: string[] = [];
+    const tx = (id: string) => ({
+      id,
+      agentId: "agent-1",
+      status: "pending",
+      request: {
+        agentId: "agent-1",
+        tenantId: "tenant-1",
+        to: "0x1111111111111111111111111111111111111111",
+        value: "1",
+        chainId: 8453,
+      },
+      policyResults: [],
+      createdAt: "2026-08-20T00:00:00.000Z",
+    });
+    global.fetch = async (input: RequestInfo | URL) => {
+      const url = new URL(
+        typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url,
+      );
+      requestedUrls.push(url.toString());
+      const offset = Number(url.searchParams.get("offset"));
+      const transactions = offset === 0 ? [tx("tx-1"), tx("tx-2")] : [tx("tx-3")];
+      return new Response(JSON.stringify({ ok: true, data: { transactions, limit: 2, offset } }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    };
+
+    const transactions = await makeClient().getTransactionHistory("agent-1");
+    expect(requestedUrls).toEqual([
+      "https://api.steward.example/vault/agent-1/history?limit=200&offset=0",
+      "https://api.steward.example/vault/agent-1/history?limit=200&offset=2",
+    ]);
+    expect(transactions.map((transaction) => transaction.id)).toEqual(["tx-1", "tx-2", "tx-3"]);
+  });
+
+  it("listAgents retains compatibility with legacy bare-array responses", async () => {
+    installMockFetch({ ok: true, data: [mockAgent] });
+
+    const page = await makeClient().listAgentsPage();
+
+    expect(page).toMatchObject({ limit: 1, offset: 0 });
+    expect(page.agents[0]?.id).toBe("agent-1");
   });
 
   it("getAgent returns single agent", async () => {
