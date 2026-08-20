@@ -1,8 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { scryptSync } from "node:crypto";
-import { decodeProtectedHeader } from "jose";
+import { decodeJwt, decodeProtectedHeader } from "jose";
 
 import { getJwtSecret, signAccessToken, verifyToken } from "../jwt";
+import { SessionManager } from "../session";
 
 const ENV_KEYS = [
   "STEWARD_JWT_SECRET",
@@ -64,6 +65,20 @@ describe("getJwtSecret embedded-mode master password fallback (SEC-013)", () => 
   it("prefers an explicit STEWARD_JWT_SECRET over the derivation", () => {
     process.env.STEWARD_JWT_SECRET = "explicit-jwt-secret-with-32-characters!!";
     expect(getJwtSecret({ warn: null })).toBe("explicit-jwt-secret-with-32-characters!!");
+  });
+});
+
+describe("session identity claims", () => {
+  it("binds the standard subject claim to the authenticated user", async () => {
+    const session = new SessionManager({ secret: "test-secret-at-least-32-characters" });
+    const token = await session.createSession("user_123", {
+      sub: "caller-controlled",
+      userId: "caller-controlled",
+      jti: "caller-controlled",
+    });
+
+    expect(decodeJwt(token)).toMatchObject({ sub: "user_123", userId: "user_123" });
+    expect(decodeJwt(token).jti).not.toBe("caller-controlled");
   });
 });
 
