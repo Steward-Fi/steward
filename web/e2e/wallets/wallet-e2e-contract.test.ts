@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import walletConfig from "../../playwright.wallets.config";
@@ -433,6 +433,14 @@ describe("wallet extension E2E contract", () => {
     await expect(assertWalletCaches(cwd)).resolves.toBeUndefined();
 
     await writeFile(join(requirements[0].path, "cache-ready"), "tampered cache marker");
+    await expect(assertWalletCaches(cwd)).rejects.toThrow("Missing Synpress cache for MetaMask");
+
+    await writeFile(join(requirements[0].path, "cache-ready"), "test cache marker");
+    await writeWalletCacheManifest(requirements[0].path, requirements[0].identity);
+    const external = join(cwd, "external-cache-entry");
+    await writeFile(external, "external wallet state");
+    await rm(join(requirements[0].path, "cache-ready"));
+    await symlink(external, join(requirements[0].path, "cache-ready"));
     await expect(assertWalletCaches(cwd)).rejects.toThrow("Missing Synpress cache for MetaMask");
   }, 20_000);
 

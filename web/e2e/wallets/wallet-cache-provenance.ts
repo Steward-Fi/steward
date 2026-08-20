@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
-import { lstat, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { constants } from "node:fs";
+import { lstat, open, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { join, relative } from "node:path";
 
 export const WALLET_CACHE_MANIFEST = ".steward-wallet-cache.json";
@@ -16,6 +17,19 @@ interface WalletCacheManifest extends WalletCacheIdentity {
   contentSha256: string;
 }
 
+async function readRegularFile(path: string, label: string): Promise<Buffer> {
+  const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    const metadata = await handle.stat();
+    if (!metadata.isFile()) {
+      throw new Error("Wallet cache entry is not a regular file: " + label);
+    }
+    return await handle.readFile();
+  } finally {
+    await handle.close();
+  }
+}
+
 async function updateTreeHash(root: string, path: string, hash: ReturnType<typeof createHash>) {
   const entries = (await readdir(path, { withFileTypes: true })).sort((a, b) =>
     a.name.localeCompare(b.name),
@@ -29,8 +43,9 @@ async function updateTreeHash(root: string, path: string, hash: ReturnType<typeo
       hash.update("d\0" + name + "\0");
       await updateTreeHash(root, absolute, hash);
     } else if (metadata.isFile()) {
-      hash.update("f\0" + name + "\0" + metadata.size + "\0");
-      hash.update(await readFile(absolute));
+      const contents = await readRegularFile(absolute, name);
+      hash.update("f\0" + name + "\0" + contents.byteLength + "\0");
+      hash.update(contents);
     } else {
       throw new Error("Unsupported wallet cache entry: " + name);
     }
@@ -63,10 +78,9 @@ export async function assertWalletCacheIdentity(
   expected: WalletCacheIdentity,
 ): Promise<void> {
   const manifestPath = join(root, WALLET_CACHE_MANIFEST);
-  if (!(await lstat(manifestPath)).isFile()) {
-    throw new Error("Wallet cache manifest is not a regular file: " + expected.wallet);
-  }
-  const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as Partial<WalletCacheManifest>;
+  const manifest = JSON.parse(
+    (await readRegularFile(manifestPath, WALLET_CACHE_MANIFEST)).toString("utf8"),
+  ) as Partial<WalletCacheManifest>;
   if (
     manifest.schemaVersion !== 1 ||
     manifest.wallet !== expected.wallet ||
