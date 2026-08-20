@@ -71,6 +71,27 @@ REVOKE ALL ON SCHEMA steward_rls FROM PUBLIC;
 REVOKE ALL ON ALL FUNCTIONS IN SCHEMA steward_bootstrap FROM PUBLIC;
 REVOKE ALL ON ALL FUNCTIONS IN SCHEMA steward_rls FROM PUBLIC;
 
+-- Remove stale named-role grants before installing the exact application ACL.
+-- PUBLIC-only revocation is insufficient: a previously granted login could
+-- otherwise retain direct access to BYPASSRLS SECURITY DEFINER functions.
+SELECT format('REVOKE ALL ON SCHEMA %I FROM %I', n.nspname, grantee.rolname)
+FROM pg_namespace n
+CROSS JOIN LATERAL aclexplode(COALESCE(n.nspacl, acldefault('n', n.nspowner))) acl
+JOIN pg_roles grantee ON grantee.oid = acl.grantee
+WHERE n.nspname IN ('steward_bootstrap', 'steward_rls')
+  AND acl.grantee <> n.nspowner
+GROUP BY n.nspname, grantee.rolname
+\gexec
+SELECT format('REVOKE ALL ON FUNCTION %s FROM %I', p.oid::regprocedure, grantee.rolname)
+FROM pg_proc p
+JOIN pg_namespace n ON n.oid = p.pronamespace
+CROSS JOIN LATERAL aclexplode(COALESCE(p.proacl, acldefault('f', p.proowner))) acl
+JOIN pg_roles grantee ON grantee.oid = acl.grantee
+WHERE n.nspname IN ('steward_bootstrap', 'steward_rls')
+  AND acl.grantee <> p.proowner
+GROUP BY p.oid, grantee.rolname
+\gexec
+
 SELECT format('GRANT %I TO %I', :'steward_migration_role', current_user) \gexec
 SELECT format('GRANT USAGE, CREATE ON SCHEMA public TO %I', :'steward_migration_role') \gexec
 SELECT format('GRANT USAGE ON SCHEMA public, steward_bootstrap, steward_rls TO %I', :'steward_app_role') \gexec
