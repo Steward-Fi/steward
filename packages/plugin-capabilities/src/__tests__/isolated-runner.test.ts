@@ -215,16 +215,21 @@ describe("isolated test runner", () => {
   test("clears the wall deadline and terminates the child when stream draining rejects", async () => {
     const root = await fixtureRoot();
     const pidFile = join(root, "drain-failure-pid");
+    const readyFile = join(root, "drain-failure-ready");
+    const triggerFile = join(root, "drain-failure-trigger");
     await writeFile(
       join(root, "drain-failure.test.ts"),
-      `import { writeFileSync } from "node:fs"; writeFileSync(${JSON.stringify(pidFile)},String(process.pid)); console.log("DRAIN_FAILURE_SENTINEL"); process.on("SIGTERM",()=>{}); await new Promise(()=>{});`,
+      `import { existsSync, writeFileSync } from "node:fs"; writeFileSync(${JSON.stringify(pidFile)},String(process.pid)); writeFileSync(${JSON.stringify(readyFile)},"ready"); while(!existsSync(${JSON.stringify(triggerFile)})) await Bun.sleep(10); process.stdout.write("DRAIN_FAILURE_SENTINEL\\n"); process.on("SIGTERM",()=>{}); await new Promise(()=>{});`,
     );
-    const started = Date.now();
-    const result = await run(root, [], {
+    const execution = spawnRunner(root, [], {
       ISOLATED_RUNNER_TEST_DRAIN_FAILURE_AFTER: "DRAIN_FAILURE_SENTINEL",
-      TEST_WALL_TIMEOUT_MS: "5000",
+      TEST_WALL_TIMEOUT_MS: "10000",
       TEST_KILL_GRACE_MS: "100",
     });
+    expect(await waitForFile(readyFile)).toBe(true);
+    const started = Date.now();
+    await writeFile(triggerFile, "trigger");
+    const result = await execution.result;
     const elapsed = Date.now() - started;
     const childPid = Number(await readFile(pidFile, "utf8"));
 
