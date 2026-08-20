@@ -255,34 +255,6 @@ async function lockTenantOwnerLifecycle(
   );
 }
 
-async function lockUserOwnerLifecycleTenants(
-  tx: Pick<ReturnType<typeof getDb>, "select" | "execute">,
-  userId: string,
-): Promise<string[]> {
-  const ownerMemberships = await tx
-    .select({ tenantId: userTenants.tenantId })
-    .from(userTenants)
-    .where(and(eq(userTenants.userId, userId), eq(userTenants.role, "owner")));
-  const tenantIds = [...new Set(ownerMemberships.map((membership) => membership.tenantId))].sort();
-  for (const tenantId of tenantIds) {
-    await lockTenantOwnerLifecycle(tx, tenantId);
-  }
-  return tenantIds;
-}
-
-async function assertUserIsNotSoleActiveOwner(
-  tx: Pick<ReturnType<typeof getDb>, "select" | "execute">,
-  userId: string,
-  message: string,
-): Promise<void> {
-  const tenantIds = await lockUserOwnerLifecycleTenants(tx, userId);
-  for (const tenantId of tenantIds) {
-    if ((await activeTenantOwnerCount(tx, tenantId, userId)) < 1) {
-      throw new Error(message);
-    }
-  }
-}
-
 function parseListLimit(value: string | undefined, fallback = 100): number {
   const parsed = value ? Number(value) : fallback;
   if (!Number.isSafeInteger(parsed) || parsed < 1) return fallback;
@@ -416,18 +388,13 @@ async function userHasLinkedThirdPartyWallet(userId: string): Promise<boolean> {
 }
 
 async function tenantIdsForWalletPolicy(userId: string, tenantId?: string): Promise<string[]> {
-  if (tenantId) {
-    const [membership] = await getDb()
-      .select({ tenantId: userTenants.tenantId })
-      .from(userTenants)
-      .where(and(eq(userTenants.userId, userId), eq(userTenants.tenantId, tenantId)));
-    return membership ? [membership.tenantId] : [];
-  }
-  const memberships = await getDb()
-    .select({ tenantId: userTenants.tenantId })
-    .from(userTenants)
-    .where(eq(userTenants.userId, userId));
-  return memberships.map((membership) => membership.tenantId);
+  const memberships = rowsFromExecute<{ tenant_id: string }>(
+    await getDb().execute(
+      sql`SELECT * FROM steward_bootstrap.platform_user_tenant_ids(${userId}::uuid)`,
+    ),
+  );
+  const tenantIds = memberships.map((membership) => membership.tenant_id);
+  return tenantId ? tenantIds.filter((candidate) => candidate === tenantId) : tenantIds;
 }
 
 async function restrictedWalletPolicyTenantIds(
@@ -657,6 +624,10 @@ async function safeJsonParse<T>(c: { req: { json: <X>() => Promise<X> } }): Prom
   }
 }
 
+function rowsFromExecute<T>(result: unknown): T[] {
+  return (Array.isArray(result) ? result : ((result as { rows?: unknown[] })?.rows ?? [])) as T[];
+}
+
 // ─── Route group ─────────────────────────────────────────────────────────────
 
 const platform = new Hono<{ Variables: AppVariables }>();
@@ -747,7 +718,7 @@ platform.use("*", async (c, next) => {
     );
   }
   if (pathname.startsWith("/tenants/")) return next();
-  let tenantId = "";
+  let tenantId = c.req.query("tenantId")?.trim() || c.req.query("tenant_id")?.trim() || "";
   if (["POST", "PUT", "PATCH"].includes(c.req.method)) {
     try {
       const body = (await c.req.raw.clone().json()) as { tenantId?: unknown };
@@ -755,6 +726,10 @@ platform.use("*", async (c, next) => {
     } catch {
       // The route owns malformed-body reporting; do not mint an RLS context.
     }
+  }
+  if ((!tenantId || !isValidTenantId(tenantId)) && /^\/users(?:\/|$)/.test(pathname)) {
+    await getDb().execute(sql`SELECT steward_bootstrap.ensure_platform_tenant()`);
+    tenantId = PLATFORM_AUDIT_TENANT_ID;
   }
   if (!tenantId || !isValidTenantId(tenantId)) return next();
   return continueWithTenantDatabase(tenantId, "platform-tenant-operation", "platform", next);
@@ -3188,9 +3163,8 @@ async function serializePlatformUserIdentity(userId: string): Promise<PlatformUs
   if (!user) return null;
   const [tenantRows, accountRows] = await Promise.all([
     db
-      .select({ tenantId: userTenants.tenantId })
-      .from(userTenants)
-      .where(eq(userTenants.userId, userId)),
+      .execute(sql`SELECT * FROM steward_bootstrap.platform_user_tenant_ids(${userId}::uuid)`)
+      .then((result) => rowsFromExecute<{ tenant_id: string }>(result)),
     db
       .select({
         id: accounts.id,
@@ -3201,7 +3175,7 @@ async function serializePlatformUserIdentity(userId: string): Promise<PlatformUs
       .from(accounts)
       .where(eq(accounts.userId, userId)),
   ]);
-  const tenantIds = tenantRows.map((row) => row.tenantId);
+  const tenantIds = tenantRows.map((row) => row.tenant_id);
   const walletExternalIds = accountRows
     .filter((row) => row.provider === WALLET_EXTERNAL_ID_PROVIDER)
     .map((row) => parseWalletExternalProviderAccountId(row.providerAccountId, tenantIds))
@@ -3635,31 +3609,24 @@ platform.patch("/users/:userId/deactivate", async (c) => {
     ...auditCtx(c),
   });
 
-  const result = await db
-    .transaction(async (tx) => {
-      await tx.execute(
-        sql`select pg_advisory_xact_lock(hashtextextended(${`platform_user_account_${userId}`}, 0))`,
+  const result = await Promise.resolve()
+    .then(async () => {
+      const [updated] = rowsFromExecute<{
+        user_id: string;
+        previous_deactivated_at: Date | null;
+        previous_updated_at: Date;
+        deactivated_at: Date | null;
+      }>(
+        await db.execute(sql`
+          SELECT * FROM steward_bootstrap.platform_set_user_deactivation(
+            ${userId}::uuid,
+            ${deactivated}
+          )
+        `),
       );
-      const [existing] = await tx
-        .select({ id: users.id, deactivatedAt: users.deactivatedAt, updatedAt: users.updatedAt })
-        .from(users)
-        .where(eq(users.id, userId));
-      if (!existing) throw new Error("User not found");
-      if (deactivated) {
-        await assertUserIsNotSoleActiveOwner(
-          tx,
-          userId,
-          "Cannot deactivate the sole active tenant owner",
-        );
-      }
+      if (!updated) throw new Error("User not found");
       const issuedBefore = await revocationStore.revokeUserTokens(userId);
-      const [updated] = await tx
-        .update(users)
-        .set({ deactivatedAt: deactivated ? new Date() : null, updatedAt: new Date() })
-        .where(eq(users.id, userId))
-        .returning({ id: users.id, deactivatedAt: users.deactivatedAt });
-      await tx.delete(refreshTokens).where(eq(refreshTokens.userId, userId));
-      return { issuedBefore, updated, previous: existing };
+      return { issuedBefore, updated };
     })
     .catch((err: unknown) => {
       if (err instanceof Error && err.message === "User not found") return null;
@@ -3677,26 +3644,18 @@ platform.patch("/users/:userId/deactivate", async (c) => {
   if (result === "Cannot deactivate the sole active tenant owner") {
     return c.json<ApiResponse>({ ok: false, error: result }, 409);
   }
-  try {
-    await writeAuditEvent({
-      tenantId: PLATFORM_AUDIT_TENANT_ID,
-      actorType: "platform",
-      action: deactivated ? "user.deactivate" : "user.reactivate",
-      resourceType: "user",
-      resourceId: userId,
-      metadata: { issuedBefore: result.issuedBefore },
-      ...auditCtx(c),
-    });
-  } catch (error) {
-    await db
-      .update(users)
-      .set({ deactivatedAt: result.previous.deactivatedAt, updatedAt: result.previous.updatedAt })
-      .where(eq(users.id, userId));
-    throw error;
-  }
+  await writeAuditEvent({
+    tenantId: PLATFORM_AUDIT_TENANT_ID,
+    actorType: "platform",
+    action: deactivated ? "user.deactivate" : "user.reactivate",
+    resourceType: "user",
+    resourceId: userId,
+    metadata: { issuedBefore: result.issuedBefore },
+    ...auditCtx(c),
+  });
   return c.json<ApiResponse<{ userId: string; deactivatedAt: Date | null }>>({
     ok: true,
-    data: { userId, deactivatedAt: result.updated.deactivatedAt },
+    data: { userId, deactivatedAt: result.updated.deactivated_at },
   });
 });
 
@@ -3724,22 +3683,15 @@ platform.delete("/users/:userId", async (c) => {
     ...auditCtx(c),
   });
 
-  const issuedBefore = await db
-    .transaction(async (tx) => {
-      await tx.execute(
-        sql`select pg_advisory_xact_lock(hashtextextended(${`platform_user_account_${userId}`}, 0))`,
+  const issuedBefore = await Promise.resolve()
+    .then(async () => {
+      const [deleted] = rowsFromExecute<{ user_id: string }>(
+        await db.execute(sql`
+          SELECT * FROM steward_bootstrap.platform_delete_user(${userId}::uuid)
+        `),
       );
-      const [user] = await tx.select({ id: users.id }).from(users).where(eq(users.id, userId));
-      if (!user) throw new Error("User not found");
-      await assertUserIsNotSoleActiveOwner(
-        tx,
-        userId,
-        "Cannot delete the sole active tenant owner",
-      );
-      const revokedBefore = await revocationStore.revokeUserTokens(userId);
-      await tx.delete(refreshTokens).where(eq(refreshTokens.userId, userId));
-      await tx.delete(users).where(eq(users.id, userId));
-      return revokedBefore;
+      if (!deleted) throw new Error("User not found");
+      return revocationStore.revokeUserTokens(userId);
     })
     .catch((error: unknown) => {
       if (error instanceof Error && error.message === "User not found") return null;
@@ -4017,7 +3969,9 @@ platform.delete("/users/:userId/accounts/:provider/:providerAccountId", async (c
         )
         .returning({ id: accounts.id });
       if (!deleted) throw new Error("Linked account changed during unlink");
-      await tx.delete(refreshTokens).where(eq(refreshTokens.userId, userId));
+      await tx.execute(
+        sql`SELECT steward_bootstrap.platform_revoke_user_refresh_tokens(${userId}::uuid)`,
+      );
       return revokedBefore;
     });
   } catch (error) {
@@ -4153,8 +4107,12 @@ platform.post("/users/:userId/accounts/:provider/:providerAccountId/transfer", a
         )
         .returning();
       if (!updated) throw new Error("Linked account changed during transfer");
-      await tx.delete(refreshTokens).where(eq(refreshTokens.userId, fromUserId));
-      await tx.delete(refreshTokens).where(eq(refreshTokens.userId, toUserId));
+      await tx.execute(
+        sql`SELECT steward_bootstrap.platform_revoke_user_refresh_tokens(${fromUserId}::uuid)`,
+      );
+      await tx.execute(
+        sql`SELECT steward_bootstrap.platform_revoke_user_refresh_tokens(${toUserId}::uuid)`,
+      );
       return { fromIssuedBefore: fromRevokedBefore, toIssuedBefore: toRevokedBefore, updated };
     });
     fromIssuedBefore = revocation.fromIssuedBefore;

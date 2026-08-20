@@ -13,6 +13,10 @@ const revocationSource = readFileSync(
   join(apiRoot, "..", "..", "auth", "src", "revocation.ts"),
   "utf8",
 );
+const rlsMigrationSource = readFileSync(
+  join(apiRoot, "..", "..", "db", "drizzle", "0111_tenant_rls_policy_install.sql"),
+  "utf8",
+);
 
 function expectBefore(first: string, second: string) {
   const firstIndex = platformSource.indexOf(first);
@@ -326,10 +330,6 @@ describe("platform security hardening", () => {
     for (const [marker, rollback] of [
       ['platform.patch("/users/:userId/metadata"', "customMetadata: existing.customMetadata"],
       [
-        'platform.patch("/users/:userId/deactivate"',
-        "deactivatedAt: result.previous.deactivatedAt",
-      ],
-      [
         'platform.post("/users/:userId/accounts/:provider/:providerAccountId/transfer"',
         "set({ userId: fromUserId })",
       ],
@@ -342,6 +342,13 @@ describe("platform security hardening", () => {
       expect(route).toContain("try {");
       expect(route).toContain(rollback);
     }
+    const deactivateStart = platformSource.indexOf('platform.patch("/users/:userId/deactivate"');
+    const deactivateRoute = platformSource.slice(
+      deactivateStart,
+      platformSource.indexOf("\nplatform.", deactivateStart + 1),
+    );
+    expect(deactivateRoute).toContain("platform_set_user_deactivation");
+    expect(platformSource).toContain("continueWithTenantDatabase");
   });
 
   it("repairs invitation state when final invitation audit events fail", () => {
@@ -497,15 +504,14 @@ describe("platform security hardening", () => {
     expect(platformSource).toContain("innerJoin(users, eq(users.id, userTenants.userId))");
     expect(platformSource).toContain("function tenantOwnerLifecycleLockKey");
     expect(platformSource).toContain("tenant_owner_lifecycle_${tenantId}");
-    expect(platformSource).toContain("function lockUserOwnerLifecycleTenants");
-    expect(platformSource).toContain("function assertUserIsNotSoleActiveOwner");
-    expect(platformSource).toContain("Cannot deactivate the sole active tenant owner");
-    expect(platformSource).toContain("Cannot delete the sole active tenant owner");
+    expect(rlsMigrationSource).toContain("platform_set_user_deactivation");
+    expect(rlsMigrationSource).toContain("platform_delete_user");
+    expect(rlsMigrationSource).toContain("u.deactivated_at IS NULL");
+    expect(rlsMigrationSource).toContain("Cannot deactivate the sole active tenant owner");
+    expect(rlsMigrationSource).toContain("Cannot delete the sole active tenant owner");
     expect(platformSource).not.toContain("platform_member_${tenantId}");
 
     for (const marker of [
-      'platform.patch("/users/:userId/deactivate"',
-      'platform.delete("/users/:userId"',
       'platform.delete("/tenants/:id/members/:userId"',
       'platform.patch("/tenants/:id/members/:userId"',
     ]) {
@@ -516,7 +522,7 @@ describe("platform security hardening", () => {
         routeStart,
         nextRoute === -1 ? platformSource.length : nextRoute,
       );
-      expect(routeSource).toMatch(/lockTenantOwnerLifecycle|assertUserIsNotSoleActiveOwner/);
+      expect(routeSource).toContain("lockTenantOwnerLifecycle");
     }
   });
 });

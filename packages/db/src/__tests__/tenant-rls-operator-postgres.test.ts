@@ -10,10 +10,18 @@ const databaseName = `steward_rls_${suffix}`;
 const appRole = `steward_app_${suffix}`;
 const migrationRole = `steward_migrator_${suffix}`;
 const definerRole = `steward_definer_${suffix}`;
+const appRolePassword = randomUUID().replaceAll("-", "");
 
 function databaseUrl(database: string): string {
   const url = new URL(process.env.DATABASE_URL as string);
   url.pathname = `/${database}`;
+  return url.toString();
+}
+
+function appDatabaseUrl(): string {
+  const url = new URL(databaseUrl(databaseName));
+  url.username = appRole;
+  url.password = appRolePassword;
   return url.toString();
 }
 
@@ -88,6 +96,7 @@ describeWithPostgres("SEC-169 operator lifecycle on the real Steward schema", ()
       expect(installed).toEqual({ relations: 71, policies: 73 });
 
       await runOperatorScript("rls-bootstrap.sql", true);
+      await admin.unsafe(`ALTER ROLE ${appRole} PASSWORD '${appRolePassword}'`);
       const roleRows = await db<
         {
           rolname: string;
@@ -180,6 +189,54 @@ describeWithPostgres("SEC-169 operator lifecycle on the real Steward schema", ()
         user_id: refreshUserId,
         tenant_id: targetTenant,
       });
+
+      const soleOwnerId = randomUUID();
+      await db`
+        INSERT INTO public.users(id, email) VALUES
+          (${soleOwnerId}::uuid, ${`sole-owner-${suffix}@example.test`})
+      `;
+      await db`
+        INSERT INTO public.user_tenants(user_id, tenant_id, role)
+        VALUES (${soleOwnerId}::uuid, ${sourceTenant}, 'owner')
+      `;
+      await expect(
+        db.begin(async (tx) => {
+          await tx.unsafe(`SET LOCAL ROLE ${appRole}`);
+          await tx`SELECT set_config('steward.tenant_id', 'platform', true)`;
+          await tx`
+            SELECT * FROM steward_bootstrap.platform_set_user_deactivation(
+              ${soleOwnerId}::uuid,
+              true
+            )
+          `;
+        }),
+      ).rejects.toThrow("Cannot deactivate the sole active tenant owner");
+
+      const platformKey = `rls-platform-key-${suffix}`;
+      const appRoleEvidence = await runCommand(
+        ["bun", "run", "packages/api/src/__tests__/fixtures/rls-app-role-exercise.ts"],
+        {
+          DATABASE_URL: appDatabaseUrl(),
+          DATABASE_DRIVER: "postgres-js",
+          NODE_ENV: "test",
+          APP_URL: "https://steward.test",
+          JWT_SECRET: `rls-jwt-secret-${suffix}-0123456789abcdef`,
+          STEWARD_JWT_SECRET: `rls-jwt-secret-${suffix}-0123456789abcdef`,
+          STEWARD_AUDIT_HMAC_KEY: "ab".repeat(32),
+          STEWARD_DEFAULT_TENANT_KEY: `default-key-${suffix}`,
+          STEWARD_MASTER_PASSWORD: `rls-master-password-${suffix}`,
+          STEWARD_PLATFORM_KEYS: platformKey,
+          STEWARD_PLATFORM_KEY_SCOPES: JSON.stringify({ [platformKey]: ["platform:*"] }),
+          STEWARD_RLS_TEST_TENANT: targetTenant,
+          STEWARD_RLS_TEST_SUFFIX: suffix,
+          STEWARD_REDIS_REQUIRED: "false",
+          STEWARD_ALLOW_INSECURE_AUTH_STORES: "true",
+          STEWARD_RETENTION_DEACTIVATED_USERS_DAYS: undefined,
+          STEWARD_RETENTION_DEACTIVATED_USERS_DELETE_CONFIRMED: undefined,
+        },
+      );
+      expect(appRoleEvidence).toContain('"ok":true');
+      expect(appRoleEvidence).toContain('"platformAuditActions"');
 
       await runOperatorScript("rls-rollback.sql");
       const [rolledBack] = await db<{ enabled: number; forced: number }[]>`

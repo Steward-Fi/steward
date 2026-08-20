@@ -171,6 +171,163 @@ AS $$
   RETURNING id
 $$;
 
+CREATE OR REPLACE FUNCTION "steward_bootstrap"."ensure_platform_tenant"()
+RETURNS text
+LANGUAGE sql
+VOLATILE
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $$
+  INSERT INTO public.tenants(id, name, api_key_hash)
+  VALUES ('platform', 'Steward Platform Operations', 'disabled-platform-tenant')
+  ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name
+  RETURNING id
+$$;
+
+CREATE OR REPLACE FUNCTION "steward_bootstrap"."platform_user_tenant_ids"(p_user_id uuid)
+RETURNS TABLE (tenant_id varchar(64))
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $$
+  SELECT ut.tenant_id
+  FROM public.user_tenants ut
+  WHERE ut.user_id = p_user_id
+    AND NULLIF(current_setting('steward.tenant_id', true), '') IS NOT NULL
+    AND (
+      NULLIF(current_setting('steward.tenant_id', true), '') = 'platform'
+      OR ut.tenant_id = NULLIF(current_setting('steward.tenant_id', true), '')
+    )
+  ORDER BY ut.tenant_id
+$$;
+
+CREATE OR REPLACE FUNCTION "steward_bootstrap"."platform_set_user_deactivation"(
+  p_user_id uuid,
+  p_deactivated boolean
+)
+RETURNS TABLE (
+  user_id uuid, previous_deactivated_at timestamptz,
+  previous_updated_at timestamptz, deactivated_at timestamptz
+)
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $$
+DECLARE
+  existing public.users%ROWTYPE;
+  owner_tenant record;
+  updated_deactivated_at timestamptz;
+BEGIN
+  IF NULLIF(current_setting('steward.tenant_id', true), '') IS DISTINCT FROM 'platform' THEN
+    RAISE EXCEPTION 'platform lifecycle operation requires reserved platform context';
+  END IF;
+  PERFORM pg_advisory_xact_lock(hashtextextended('platform_user_account_' || p_user_id::text, 0));
+  SELECT u.* INTO existing FROM public.users u WHERE u.id = p_user_id FOR UPDATE;
+  IF NOT FOUND THEN RAISE EXCEPTION 'User not found'; END IF;
+
+  IF p_deactivated THEN
+    FOR owner_tenant IN
+      SELECT ut.tenant_id
+      FROM public.user_tenants ut
+      WHERE ut.user_id = p_user_id AND ut.role = 'owner'
+      ORDER BY ut.tenant_id
+    LOOP
+      PERFORM pg_advisory_xact_lock(
+        hashtextextended('tenant_owner_lifecycle_' || owner_tenant.tenant_id, 0)
+      );
+      IF NOT EXISTS (
+        SELECT 1
+        FROM public.user_tenants other
+        JOIN public.users u ON u.id = other.user_id
+        WHERE other.tenant_id = owner_tenant.tenant_id
+          AND other.role = 'owner'
+          AND other.user_id <> p_user_id
+          AND u.deactivated_at IS NULL
+      ) THEN
+        RAISE EXCEPTION 'Cannot deactivate the sole active tenant owner';
+      END IF;
+    END LOOP;
+  END IF;
+
+  UPDATE public.users u
+  SET deactivated_at = CASE WHEN p_deactivated THEN now() ELSE NULL END,
+      updated_at = now()
+  WHERE u.id = p_user_id
+  RETURNING u.deactivated_at INTO updated_deactivated_at;
+  DELETE FROM public.refresh_tokens r WHERE r.user_id = p_user_id;
+  RETURN QUERY SELECT
+    existing.id, existing.deactivated_at, existing.updated_at, updated_deactivated_at;
+END
+$$;
+
+CREATE OR REPLACE FUNCTION "steward_bootstrap"."platform_delete_user"(p_user_id uuid)
+RETURNS TABLE (user_id uuid)
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $$
+DECLARE
+  owner_tenant record;
+BEGIN
+  IF NULLIF(current_setting('steward.tenant_id', true), '') IS DISTINCT FROM 'platform' THEN
+    RAISE EXCEPTION 'platform lifecycle operation requires reserved platform context';
+  END IF;
+  PERFORM pg_advisory_xact_lock(hashtextextended('platform_user_account_' || p_user_id::text, 0));
+  PERFORM 1 FROM public.users u WHERE u.id = p_user_id FOR UPDATE;
+  IF NOT FOUND THEN RAISE EXCEPTION 'User not found'; END IF;
+
+  FOR owner_tenant IN
+    SELECT ut.tenant_id
+    FROM public.user_tenants ut
+    WHERE ut.user_id = p_user_id AND ut.role = 'owner'
+    ORDER BY ut.tenant_id
+  LOOP
+    PERFORM pg_advisory_xact_lock(
+      hashtextextended('tenant_owner_lifecycle_' || owner_tenant.tenant_id, 0)
+    );
+    IF NOT EXISTS (
+      SELECT 1
+      FROM public.user_tenants other
+      JOIN public.users u ON u.id = other.user_id
+      WHERE other.tenant_id = owner_tenant.tenant_id
+        AND other.role = 'owner'
+        AND other.user_id <> p_user_id
+        AND u.deactivated_at IS NULL
+    ) THEN
+      RAISE EXCEPTION 'Cannot delete the sole active tenant owner';
+    END IF;
+  END LOOP;
+
+  DELETE FROM public.refresh_tokens r WHERE r.user_id = p_user_id;
+  DELETE FROM public.users u WHERE u.id = p_user_id;
+  RETURN QUERY SELECT p_user_id;
+END
+$$;
+
+CREATE OR REPLACE FUNCTION "steward_bootstrap"."platform_revoke_user_refresh_tokens"(
+  p_user_id uuid
+)
+RETURNS bigint
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $$
+DECLARE
+  deleted_count bigint;
+BEGIN
+  IF NULLIF(current_setting('steward.tenant_id', true), '') IS DISTINCT FROM 'platform' THEN
+    RAISE EXCEPTION 'platform lifecycle operation requires reserved platform context';
+  END IF;
+  DELETE FROM public.refresh_tokens r WHERE r.user_id = p_user_id;
+  GET DIAGNOSTICS deleted_count = ROW_COUNT;
+  RETURN deleted_count;
+END
+$$;
+
 CREATE OR REPLACE FUNCTION "steward_bootstrap"."retention_delete_deactivated_users"(p_days integer)
 RETURNS bigint
 LANGUAGE plpgsql
@@ -534,4 +691,4 @@ CREATE POLICY "steward_global_user_subscription" ON "user_push_subscriptions"
   WITH CHECK ("tenant_id" IS NULL AND "user_id" = "steward_rls"."user_id"());
 
 COMMENT ON SCHEMA "steward_rls" IS
-  'SEC-169 policy helpers. Policies are installed by 0110 but activation remains an explicit gated operator action.';
+  'SEC-169 policy helpers. Policies are installed by 0111 but activation remains an explicit gated operator action.';

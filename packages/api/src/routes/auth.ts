@@ -188,6 +188,26 @@ async function withVerifiedAuthTenant<T>(
   );
 }
 
+async function withPreAuthTenant<T>(
+  tenantId: string,
+  method: string,
+  callback: () => Promise<T>,
+): Promise<T> {
+  if (hasTenantTransactionDatabase({ tenantId })) return callback();
+  const context = tenantContextFromAuthenticatedPrincipal({
+    tenantId,
+    method,
+    subject: "public-auth-flow",
+  });
+  const driver =
+    process.env.STEWARD_DB_MODE === "pglite" || process.env.STEWARD_PGLITE_MEMORY === "true"
+      ? "pglite"
+      : getDatabaseDriver();
+  return withTenantRlsTransaction(getDb() as never, driver, context, async (tx) =>
+    withTenantTransactionDatabase(tx as never, { tenantId }, callback),
+  );
+}
+
 function isValidTenantId(value: unknown): value is string {
   return typeof value === "string" && /^[a-zA-Z0-9_\-.:]{1,64}$/.test(value);
 }
@@ -3641,12 +3661,6 @@ async function provisionOidcUser(opts: {
       return { ok: false, status: 500, error: "Wallet provisioning failed" };
     }
     const verifiedEmail = emailVerified === true ? email : undefined;
-    if (createdUser) {
-      dispatchUserCreated(tenantResult.tenantId, user.id, "auth.oidc", {
-        provider: provider.id,
-        hasEmail: Boolean(verifiedEmail),
-      });
-    }
     const claims: Record<string, unknown> = {
       userId: user.id,
       oidcProviderId: provider.id,
@@ -3656,20 +3670,28 @@ async function provisionOidcUser(opts: {
     };
     if (verifiedEmail) claims.email = verifiedEmail;
 
-    await writeAuditEvent({
-      tenantId: tenantResult.tenantId,
-      actorType: "user",
-      actorId: user.id,
-      action: "auth.oidc.login",
-      resourceType: "user",
-      metadata: {
-        providerId: provider.id,
-        issuer: provider.issuer,
-        oidcSubject: subject,
-      },
-      ipAddress: c.req.header("x-forwarded-for") ?? null,
-      userAgent: c.req.header("user-agent") ?? null,
-      requestId: c.get("requestId") ?? null,
+    await withVerifiedAuthTenant(tenantResult.tenantId, user.id, async () => {
+      if (createdUser) {
+        dispatchUserCreated(tenantResult.tenantId, user.id, "auth.oidc", {
+          provider: provider.id,
+          hasEmail: Boolean(verifiedEmail),
+        });
+      }
+      await writeAuditEvent({
+        tenantId: tenantResult.tenantId,
+        actorType: "user",
+        actorId: user.id,
+        action: "auth.oidc.login",
+        resourceType: "user",
+        metadata: {
+          providerId: provider.id,
+          issuer: provider.issuer,
+          oidcSubject: subject,
+        },
+        ipAddress: c.req.header("x-forwarded-for") ?? null,
+        userAgent: c.req.header("user-agent") ?? null,
+        requestId: c.get("requestId") ?? null,
+      });
     });
 
     return {
@@ -3787,21 +3809,23 @@ async function provisionSamlUser(opts: {
       return { ok: false, status: 500, error: "Wallet provisioning failed" };
     }
 
-    if (createdUser) {
-      dispatchUserCreated(tenantResult.tenantId, user.id, "auth.saml", {
-        idpEntityId: config.idpEntityId,
+    await withVerifiedAuthTenant(tenantResult.tenantId, user.id, async () => {
+      if (createdUser) {
+        dispatchUserCreated(tenantResult.tenantId, user.id, "auth.saml", {
+          idpEntityId: config.idpEntityId,
+        });
+      }
+      await writeAuditEvent({
+        tenantId: tenantResult.tenantId,
+        actorType: "user",
+        actorId: user.id,
+        action: "auth.saml.login",
+        resourceType: "user",
+        metadata: { idpEntityId: config.idpEntityId },
+        ipAddress: c.req.header("x-forwarded-for") ?? null,
+        userAgent: c.req.header("user-agent") ?? null,
+        requestId: c.get("requestId") ?? null,
       });
-    }
-    await writeAuditEvent({
-      tenantId: tenantResult.tenantId,
-      actorType: "user",
-      actorId: user.id,
-      action: "auth.saml.login",
-      resourceType: "user",
-      metadata: { idpEntityId: config.idpEntityId },
-      ipAddress: c.req.header("x-forwarded-for") ?? null,
-      userAgent: c.req.header("user-agent") ?? null,
-      requestId: c.get("requestId") ?? null,
     });
 
     return {
@@ -4085,16 +4109,19 @@ function samlMetadataXml(config: TenantSamlSsoConfig): string {
 }
 
 async function getActiveSamlSsoConfig(tenantId: string): Promise<TenantSamlSsoConfig | null> {
-  const [row] = await getDb()
-    .select()
-    .from(tenantSamlSsoConfigs)
-    .where(
-      and(
-        eq(tenantSamlSsoConfigs.tenantId, tenantId),
-        eq(tenantSamlSsoConfigs.enabled, true),
-        eq(tenantSamlSsoConfigs.status, "active"),
-      ),
-    );
+  const row = await withPreAuthTenant(tenantId, "saml-config-read", async () => {
+    const [candidate] = await getDb()
+      .select()
+      .from(tenantSamlSsoConfigs)
+      .where(
+        and(
+          eq(tenantSamlSsoConfigs.tenantId, tenantId),
+          eq(tenantSamlSsoConfigs.enabled, true),
+          eq(tenantSamlSsoConfigs.status, "active"),
+        ),
+      );
+    return candidate;
+  });
   if (!row) return null;
   const urls = buildSamlServiceProviderUrls(tenantId);
   if (row.spEntityId !== urls.spEntityId || row.acsUrl !== urls.acsUrl) return null;
@@ -4120,35 +4147,40 @@ async function getActiveSamlSsoConfig(tenantId: string): Promise<TenantSamlSsoCo
 }
 
 async function loadSamlAuthnRequest(tenantId: string, relayState: string) {
-  const [request] = await getDb()
-    .select()
-    .from(tenantSamlAuthnRequests)
-    .where(
-      and(
-        eq(tenantSamlAuthnRequests.tenantId, tenantId),
-        eq(tenantSamlAuthnRequests.relayState, relayState),
-        isNull(tenantSamlAuthnRequests.consumedAt),
-        gte(tenantSamlAuthnRequests.expiresAt, new Date()),
-      ),
-    );
+  const request = await withPreAuthTenant(tenantId, "saml-request-read", async () => {
+    const [candidate] = await getDb()
+      .select()
+      .from(tenantSamlAuthnRequests)
+      .where(
+        and(
+          eq(tenantSamlAuthnRequests.tenantId, tenantId),
+          eq(tenantSamlAuthnRequests.relayState, relayState),
+          isNull(tenantSamlAuthnRequests.consumedAt),
+          gte(tenantSamlAuthnRequests.expiresAt, new Date()),
+        ),
+      );
+    return candidate;
+  });
   if (!request) throw new Error("Invalid or expired SAML RelayState");
   return request;
 }
 
 async function consumeSamlAuthnRequest(tenantId: string, relayState: string) {
-  const db = getDb();
-  const [request] = await db
-    .update(tenantSamlAuthnRequests)
-    .set({ consumedAt: new Date(), updatedAt: new Date() })
-    .where(
-      and(
-        eq(tenantSamlAuthnRequests.tenantId, tenantId),
-        eq(tenantSamlAuthnRequests.relayState, relayState),
-        isNull(tenantSamlAuthnRequests.consumedAt),
-        gte(tenantSamlAuthnRequests.expiresAt, new Date()),
-      ),
-    )
-    .returning();
+  const request = await withPreAuthTenant(tenantId, "saml-request-consume", async () => {
+    const [candidate] = await getDb()
+      .update(tenantSamlAuthnRequests)
+      .set({ consumedAt: new Date(), updatedAt: new Date() })
+      .where(
+        and(
+          eq(tenantSamlAuthnRequests.tenantId, tenantId),
+          eq(tenantSamlAuthnRequests.relayState, relayState),
+          isNull(tenantSamlAuthnRequests.consumedAt),
+          gte(tenantSamlAuthnRequests.expiresAt, new Date()),
+        ),
+      )
+      .returning();
+    return candidate;
+  });
   if (!request) throw new Error("Invalid or expired SAML RelayState");
   return request;
 }
@@ -4158,14 +4190,16 @@ async function recordSamlAssertionReplay(
   assertionId: string,
   responseId: string | undefined,
 ): Promise<void> {
-  await getDb()
-    .insert(tenantSamlAssertionReplays)
-    .values({
-      tenantId,
-      assertionId,
-      responseId,
-      expiresAt: new Date(Date.now() + 10 * 60_000),
-    });
+  await withPreAuthTenant(tenantId, "saml-replay-record", async () => {
+    await getDb()
+      .insert(tenantSamlAssertionReplays)
+      .values({
+        tenantId,
+        assertionId,
+        responseId,
+        expiresAt: new Date(Date.now() + 10 * 60_000),
+      });
+  });
 }
 
 /**
@@ -4227,18 +4261,20 @@ auth.get("/saml/:tenantId/login", async (c) => {
     spEntityId: config.spEntityId,
     acsUrl: config.acsUrl,
   });
-  await getDb()
-    .insert(tenantSamlAuthnRequests)
-    .values({
-      tenantId,
-      requestId: built.requestId,
-      relayState,
-      redirectUri,
-      appClientId: clientId,
-      codeChallenge,
-      codeChallengeMethod: "S256",
-      expiresAt: new Date(Date.now() + 5 * 60_000),
-    });
+  await withPreAuthTenant(tenantId, "saml-request-create", async () => {
+    await getDb()
+      .insert(tenantSamlAuthnRequests)
+      .values({
+        tenantId,
+        requestId: built.requestId,
+        relayState,
+        redirectUri,
+        appClientId: clientId,
+        codeChallenge,
+        codeChallengeMethod: "S256",
+        expiresAt: new Date(Date.now() + 5 * 60_000),
+      });
+  });
 
   if (appState) {
     await getChallengeStore().set(`saml-app-state:${relayState}`, appState);
@@ -4850,21 +4886,23 @@ auth.post("/jwt/login", async (c) => {
             : "OIDC id_token is expired";
       return c.json<ApiResponse>({ ok: false, error }, 401);
     }
-    await writeAuditEvent({
-      tenantId,
-      actorType: "user",
-      actorId: null,
-      action: "auth.oidc.login.authorized",
-      resourceType: "session",
-      metadata: {
-        providerId: provider.id,
-        issuer: provider.issuer,
-        oidcSubject: verified.subject,
-      },
-      ipAddress: c.req.header("x-forwarded-for") ?? null,
-      userAgent: c.req.header("user-agent") ?? null,
-      requestId: c.get("requestId") ?? null,
-    });
+    await withPreAuthTenant(tenantId, "oidc-login-authorization-audit", () =>
+      writeAuditEvent({
+        tenantId,
+        actorType: "user",
+        actorId: null,
+        action: "auth.oidc.login.authorized",
+        resourceType: "session",
+        metadata: {
+          providerId: provider.id,
+          issuer: provider.issuer,
+          oidcSubject: verified.subject,
+        },
+        ipAddress: c.req.header("x-forwarded-for") ?? null,
+        userAgent: c.req.header("user-agent") ?? null,
+        requestId: c.get("requestId") ?? null,
+      }),
+    );
     if (!verified.email || verified.emailVerified !== true) {
       return c.json<ApiResponse>(
         { ok: false, error: "Enterprise OIDC SSO requires a verified email claim" },
@@ -5138,22 +5176,24 @@ auth.get("/oidc/:provider/callback", async (c) => {
     if (consumedPayload !== rawPayload) {
       return c.json<ApiResponse>({ ok: false, error: "Invalid or already-used OIDC state" }, 401);
     }
-    await writeAuditEvent({
-      tenantId: stateData.tenantId,
-      actorType: "user",
-      actorId: null,
-      action: "auth.oidc.login.authorized",
-      resourceType: "session",
-      metadata: {
-        providerId: provider.id,
-        issuer: provider.issuer,
-        oidcSubject: verified.subject,
-        flow: "authorization_code",
-      },
-      ipAddress: c.req.header("x-forwarded-for") ?? null,
-      userAgent: c.req.header("user-agent") ?? null,
-      requestId: c.get("requestId") ?? null,
-    });
+    await withPreAuthTenant(stateData.tenantId, "oidc-callback-authorization-audit", () =>
+      writeAuditEvent({
+        tenantId: stateData.tenantId,
+        actorType: "user",
+        actorId: null,
+        action: "auth.oidc.login.authorized",
+        resourceType: "session",
+        metadata: {
+          providerId: provider.id,
+          issuer: provider.issuer,
+          oidcSubject: verified.subject,
+          flow: "authorization_code",
+        },
+        ipAddress: c.req.header("x-forwarded-for") ?? null,
+        userAgent: c.req.header("user-agent") ?? null,
+        requestId: c.get("requestId") ?? null,
+      }),
+    );
     const result = await provisionOidcUser({
       c,
       tenantId: stateData.tenantId,

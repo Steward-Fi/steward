@@ -31,20 +31,25 @@ scope verification; cross-tenant platform stats and tenant listing use two
 fixed-shape bootstrap functions. Webhook retry, provider reservation,
 transaction receipt, and tenant retention sweeps now run once per tenant.
 
-The remaining activation blockers are explicit and must not be waived:
+Pure global platform identity operations bind a reserved `platform` tenant
+context after platform-key and scope verification. Fixed-shape bootstrap
+functions provide cross-tenant membership projection, owner-safe lifecycle
+mutation, and refresh-token revocation; platform audit records are written in
+that same reserved transaction context.
 
-- pure global platform identity operations still need a truthful reserved audit
-  tenant/context strategy; tenant-addressed operations and agent-id token
-  revocation are now derived and bound before their protected handlers;
-- the newly propagated platform/proxy/background paths still need final
-  deployment-role real-Postgres route/job proofs covering every production path.
+The disposable-schema operator test connects a separate process as the exact
+`NOBYPASSRLS` application role. It exercises the propagated production context
+classes through real routes and schedulers: platform global identity, tenant
+API-key, user JWT, pre-auth SAML, per-tenant background enumeration, lifecycle
+revocation and audit, plus global auth-KV retention.
 
 Pre-context auth discovery, tenant configuration, cross-tenant refresh
 rotation, system-tenant creation, and deactivated-user retention now use
-fixed-shape bootstrap functions. Those functions reduce the remaining surface;
-they do not waive either activation blocker above.
+fixed-shape bootstrap functions.
 
-Until those paths are complete, do not run `rls-activate.sql` in production.
+Do not run `rls-activate.sql` in production until the prerequisite stack has
+landed, this branch has been restacked on the final exact base, and the full
+aggregate validation has passed again.
 
 ## Non-forgeable context boundary
 
