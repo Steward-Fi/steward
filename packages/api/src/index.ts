@@ -31,7 +31,6 @@ import { assertAuthStoresAreSafe, getAuthStoreSources, initAuthStores } from "./
 import {
   API_VERSION,
   type ApiResponse,
-  nonceCleanupTimer,
   RATE_LIMIT_MAX_REQUESTS,
   RATE_LIMIT_WINDOW_MS,
 } from "./services/context";
@@ -439,7 +438,6 @@ const shutdown = async (signal: string) => {
 
   server.stop(true);
   clearInterval(requestLogCleanupTimer);
-  if (nonceCleanupTimer) clearInterval(nonceCleanupTimer);
   if (cancelRetention) cancelRetention();
   if (cancelProviderReservationReconciliation) cancelProviderReservationReconciliation();
   if (cancelTransactionReceiptPolling) cancelTransactionReceiptPolling();
