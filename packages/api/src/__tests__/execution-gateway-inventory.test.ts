@@ -79,6 +79,17 @@ function repoRelative(absPath: string): string {
   return REPO_PREFIX + relative(API_ROOT, absPath).split("\\").join("/");
 }
 
+function rawCallAfterMarker(source: string, marker: string) {
+  const markerIndex = source.indexOf(marker);
+  expect(markerIndex, `inventory marker "${marker}" must exist`).toBeGreaterThanOrEqual(0);
+  const match = new RegExp(RAW_SIGN_RE.source).exec(source.slice(markerIndex));
+  expect(match, `inventory marker "${marker}" must anchor a following raw signer`).not.toBeNull();
+  return {
+    markerIndex,
+    rawCallIndex: markerIndex + (match?.index ?? 0),
+  };
+}
+
 /**
  * Classify a single `signTransaction` token occurrence in a production source
  * file into exactly one bucket. Returns a category plus a human-facing note so
@@ -230,17 +241,35 @@ describe("execution gateway raw-signer inventory (repository-wide)", () => {
     for (const site of RAW_EVM_SIGN_INVENTORY) {
       if (site.classification !== "migrated-invariant-guarded") continue;
       if (site.file !== "packages/api/src/routes/vault.ts") continue;
-      // The marker for the guarded sites IS the invariant throw string, which
-      // must appear before the corresponding raw call. Presence is asserted
-      // above; here we assert the invariant strings the runtime relies on exist.
-      expect(vaultSource.includes(site.marker)).toBe(true);
+      const { markerIndex, rawCallIndex } = rawCallAfterMarker(vaultSource, site.marker);
+      const throwIndex = vaultSource.lastIndexOf("throw new Error(", markerIndex);
+      expect(
+        throwIndex,
+        `guard marker "${site.marker}" must be inside the throw immediately before its raw signer`,
+      ).toBeGreaterThanOrEqual(0);
+      const guardToCall = vaultSource.slice(throwIndex, rawCallIndex);
+      expect(guardToCall).toContain(site.marker);
+      expect(guardToCall.length).toBeLessThan(600);
     }
-    // Both primary + approval invariant guards must exist.
-    expect(vaultSource).toContain(
-      "invariant: primary EVM sign reached raw signer without gateway authorization",
+  });
+
+  test("non-EVM raw signers are tied to their explicit Solana branch", () => {
+    const vaultSource = readFileSync(join(SRC_DIR, "routes", "vault.ts"), "utf8");
+    const sites = RAW_EVM_SIGN_INVENTORY.filter(
+      (site) => site.classification === "non-evm-branch-guarded",
     );
-    expect(vaultSource).toContain(
-      "invariant: primary EVM approval reached raw signer without gateway authorization",
-    );
+    expect(sites).toHaveLength(1);
+    for (const site of sites) {
+      expect(site.file).toBe("packages/api/src/routes/vault.ts");
+      const { markerIndex, rawCallIndex } = rawCallAfterMarker(vaultSource, site.marker);
+      const branchIndex = vaultSource.lastIndexOf("if (isSolana) {", markerIndex);
+      expect(
+        branchIndex,
+        `marker "${site.marker}" must be inside the Solana branch`,
+      ).toBeGreaterThanOrEqual(0);
+      const branchToCall = vaultSource.slice(branchIndex, rawCallIndex);
+      expect(branchToCall).toContain(site.marker);
+      expect(branchToCall.length).toBeLessThan(1_200);
+    }
   });
 });
