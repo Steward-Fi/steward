@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   assertCompleteCoverage,
+  assertWalletE2EInventory,
   checkCiTestInventory,
   extractJob,
   extractUnitMatrix,
@@ -22,6 +23,43 @@ describe("CI test inventory", () => {
       expect(
         source.match(/\bbun test packages\/[^\s]+\.(?:test|spec)\.[cm]?[jt]sx?/g) ?? [],
       ).toEqual([]);
+    }
+  });
+
+  test("wallet E2E inventory requires its contract, both specs, and explicit workflow execution", () => {
+    const root = mkdtempSync(join(tmpdir(), "steward-wallet-ci-inventory-"));
+    try {
+      for (const directory of [".github/workflows", "web/e2e/wallets"]) {
+        mkdirSync(join(root, directory), { recursive: true });
+      }
+      for (const workflow of ["pr.yml", "ci.yml"]) {
+        writeFileSync(
+          join(root, ".github/workflows", workflow),
+          "run: bun test src e2e/wallets/wallet-e2e-contract.test.ts\n",
+        );
+      }
+      writeFileSync(
+        join(root, ".github/workflows/wallet-e2e.yml"),
+        [
+          "run: bun test e2e/wallets/wallet-e2e-contract.test.ts",
+          "run: bun run test:e2e:wallets:list",
+          "run: bun run test:e2e:wallets",
+        ].join("\n"),
+      );
+      for (const path of [
+        "wallet-e2e-contract.test.ts",
+        "metamask-siwe.spec.ts",
+        "phantom-siws.spec.ts",
+      ]) {
+        writeFileSync(join(root, "web/e2e/wallets", path), "");
+      }
+      expect(() => assertWalletE2EInventory(root)).not.toThrow();
+      rmSync(join(root, "web/e2e/wallets/phantom-siws.spec.ts"));
+      expect(() => assertWalletE2EInventory(root)).toThrow(
+        "wallet E2E inventory is missing web/e2e/wallets/phantom-siws.spec.ts",
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
     }
   });
 
