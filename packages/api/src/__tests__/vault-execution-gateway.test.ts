@@ -888,6 +888,13 @@ describe("vault EVM execution gateway", () => {
       const occurredAt = (pending?.actionPayload as Record<string, unknown>)
         .recoveryEffectsOccurredAt;
 
+      // A durable terminal must recover independently of mutable policy. This
+      // policy would reject a new request to the same destination; the replay
+      // is not a new signing decision and must not call the provider again.
+      await getDb()
+        .update(policies)
+        .set({ config: { mode: "whitelist", addresses: [] } })
+        .where(eq(policies.id, `${EXTERNAL_AGENT_ID}-approved-addresses`));
       delete process.env.REDIS_URL;
       const replay = await app.request(`/vault/${EXTERNAL_AGENT_ID}/sign`, request);
       expect(replay.status).toBe(200);
@@ -902,6 +909,15 @@ describe("vault EVM execution gateway", () => {
         occurredAt,
       );
     } finally {
+      await getDb()
+        .update(policies)
+        .set({
+          config: {
+            mode: "whitelist",
+            addresses: ["0x1111111111111111111111111111111111111111"],
+          },
+        })
+        .where(eq(policies.id, `${EXTERNAL_AGENT_ID}-approved-addresses`));
       routeVault.externalKeyCustodyProvider = priorProvider;
       if (ORIGINAL_REDIS_URL === undefined) delete process.env.REDIS_URL;
       else process.env.REDIS_URL = ORIGINAL_REDIS_URL;
