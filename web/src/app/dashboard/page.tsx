@@ -1,9 +1,10 @@
 "use client";
 
+import { useAuth } from "@stwd/react";
 import type { AgentIdentity, TxRecord } from "@stwd/sdk";
 import { AnimatePresence, motion } from "framer-motion";
 import Link from "next/link";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ChainBadge } from "@/components/chain-badge";
 import { StatusBadge } from "@/components/status-badge";
 import { steward } from "@/lib/api";
@@ -12,28 +13,60 @@ import { formatDate, formatNativeAmount, shortenAddress } from "@/lib/utils";
 const easeOutQuart: [number, number, number, number] = [0.25, 1, 0.5, 1];
 
 interface DashboardData {
+  identity: object;
   agents: AgentIdentity[];
   recentTx: (TxRecord & { agentName?: string })[];
   pendingCount: number;
   failedHistoryCount: number;
 }
 
+interface DashboardError {
+  identity: object;
+  message: string;
+}
+
 export default function DashboardOverview() {
+  const auth = useAuth();
   const [data, setData] = useState<DashboardData | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [loadingIdentity, setLoadingIdentity] = useState<object | null>(null);
+  const [error, setError] = useState<DashboardError | null>(null);
+  const requestGeneration = useRef(0);
+  const authIdentity = useMemo(
+    () => ({}),
+    [
+      auth.activeTenantId,
+      auth.isAuthenticated,
+      auth.session?.tenantId,
+      auth.session?.token,
+      auth.session?.userId,
+      auth.user?.id,
+    ],
+  );
+  const latestAuthIdentity = useRef(authIdentity);
+  latestAuthIdentity.current = authIdentity;
 
   const loadDashboard = useCallback(async () => {
+    const generation = ++requestGeneration.current;
+    const identity = authIdentity;
+    // Capture methods once so every request in this aggregation uses the same
+    // credential-bound client even if the global compatibility client rotates.
+    const listAgents = steward.listAgents;
+    const getTransactionHistory = steward.getTransactionHistory;
+    const isCurrent = () =>
+      requestGeneration.current === generation && latestAuthIdentity.current === identity;
+
     try {
-      setLoading(true);
-      setError(null);
-      const agentsList = await steward.listAgents();
+      setLoadingIdentity(identity);
+      setError((current) => (current?.identity === identity ? null : current));
+      const agentsList = await listAgents();
       const allTx: (TxRecord & { agentName?: string })[] = [];
       let failedHistoryCount = 0;
 
-      for (const agent of agentsList.slice(0, 20)) {
+      // Pending approvals are an operator-facing count, so sampling only the
+      // first 20 agents would still present an incomplete value as complete.
+      for (const agent of agentsList) {
         try {
-          const history = await steward.getTransactionHistory(agent.id);
+          const history = await getTransactionHistory(agent.id);
           allTx.push(
             ...history.map((tx) => ({
               ...tx,
@@ -50,24 +83,40 @@ export default function DashboardOverview() {
         (a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime(),
       );
 
-      setData({
-        agents: agentsList,
-        recentTx: allTx.slice(0, 12),
-        pendingCount: allTx.filter((tx) => tx.status === "pending").length,
-        failedHistoryCount,
-      });
+      if (isCurrent()) {
+        setData({
+          identity,
+          agents: agentsList,
+          recentTx: allTx.slice(0, 12),
+          pendingCount: allTx.filter((tx) => tx.status === "pending").length,
+          failedHistoryCount,
+        });
+        setError(null);
+      }
     } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : "Failed to connect");
+      if (isCurrent()) {
+        setError({
+          identity,
+          message: e instanceof Error ? e.message : "Failed to connect",
+        });
+      }
     } finally {
-      setLoading(false);
+      if (isCurrent()) setLoadingIdentity(null);
     }
-  }, []);
+  }, [authIdentity]);
 
   useEffect(() => {
     void loadDashboard();
+    return () => {
+      requestGeneration.current += 1;
+    };
   }, [loadDashboard]);
 
-  if (loading) {
+  const currentData = data?.identity === authIdentity ? data : null;
+  const currentError = error?.identity === authIdentity ? error.message : null;
+  const loading = loadingIdentity === authIdentity;
+
+  if (!currentData && !currentError) {
     return (
       <div className="space-y-8">
         <div className="h-8 w-48 bg-bg-surface animate-pulse" />
@@ -81,13 +130,13 @@ export default function DashboardOverview() {
     );
   }
 
-  if (error) {
+  if (!currentData && currentError) {
     return (
       <div className="py-20 text-center">
         <p className="text-text-tertiary text-sm mb-2">Connection failed</p>
-        <p className="text-text-secondary text-xs mb-6 font-mono">{error}</p>
+        <p className="text-text-secondary text-xs mb-6 font-mono">{currentError}</p>
         <button
-          onClick={loadDashboard}
+          onClick={() => void loadDashboard()}
           className="px-4 py-2 text-sm bg-accent text-bg hover:bg-accent-hover transition-colors"
         >
           Retry
@@ -96,7 +145,7 @@ export default function DashboardOverview() {
     );
   }
 
-  const { agents, recentTx, pendingCount, failedHistoryCount } = data!;
+  const { agents, recentTx, pendingCount, failedHistoryCount } = currentData!;
 
   return (
     <motion.div
@@ -141,6 +190,19 @@ export default function DashboardOverview() {
         ))}
       </div>
 
+      {currentError && (
+        <div role="alert" className="border border-red-400/20 bg-red-400/5 p-4">
+          <p className="text-sm text-text-secondary">Transaction history refresh failed</p>
+          <p className="mt-1 text-xs text-text-tertiary font-mono">{currentError}</p>
+          <button
+            onClick={() => void loadDashboard()}
+            className="mt-3 text-xs text-red-300 hover:text-red-200 transition-colors"
+          >
+            Retry refresh
+          </button>
+        </div>
+      )}
+
       {failedHistoryCount > 0 && (
         <div role="alert" className="border border-amber-400/30 bg-amber-400/5 p-4">
           <p className="text-sm text-amber-300">Transaction history is incomplete</p>
@@ -149,10 +211,11 @@ export default function DashboardOverview() {
             to load. Counts and recent activity include only the available histories.
           </p>
           <button
-            onClick={loadDashboard}
+            onClick={() => void loadDashboard()}
+            aria-busy={loading}
             className="mt-3 text-xs text-amber-300 hover:text-amber-200 transition-colors"
           >
-            Retry histories
+            {loading ? "Retrying histories" : "Retry histories"}
           </button>
         </div>
       )}
