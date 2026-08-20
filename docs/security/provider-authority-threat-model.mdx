@@ -60,6 +60,9 @@ recorded, the following are explicitly **not** claimed:
 
 - The real GitHub sandbox run is documented but not yet recorded here; the
   golden-path manifest keeps the pre-real-proof wording until it is.
+- A live GitHub 403/429 with `Retry-After` has not been recorded. The harness
+  leaves that matrix row `not_observed` and Gate D at STOP rather than inducing
+  rate limiting or substituting the hermetic classifier proof.
 - A render-based accessibility (axe) scan of the two trust surfaces is deferred
   until the web package adopts a component-render test harness; the current
   guard is a structural source scan.
