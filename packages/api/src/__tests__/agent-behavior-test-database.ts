@@ -53,13 +53,23 @@ export async function cleanupAgentBehaviorTestDatabase(tenantId: string): Promis
 
   // Capability plugin tables are optional and likewise do not reference the
   // core tenant. Delete the tenant's plugin graph when the migration is loaded.
-  const capabilityTable = await db.execute(
-    sql`SELECT to_regclass('public.capabilities')::text AS relation`,
+  const capabilityTables = await db.execute(
+    sql`SELECT
+      to_regclass('public.capabilities')::text AS capabilities,
+      to_regclass('public.capability_invocations')::text AS invocations`,
   );
-  const capabilityRows = Array.isArray(capabilityTable)
-    ? capabilityTable
-    : ((capabilityTable as { rows?: Array<{ relation: string | null }> }).rows ?? []);
-  if ((capabilityRows[0] as { relation?: string | null } | undefined)?.relation) {
+  const capabilityRows = Array.isArray(capabilityTables)
+    ? capabilityTables
+    : ((capabilityTables as {
+        rows?: Array<{ capabilities: string | null; invocations: string | null }>;
+      }).rows ?? []);
+  const pluginTables = capabilityRows[0] as
+    | { capabilities?: string | null; invocations?: string | null }
+    | undefined;
+  if (pluginTables?.invocations) {
+    await db.execute(sql`DELETE FROM public.capability_invocations WHERE tenant_id = ${tenantId}`);
+  }
+  if (pluginTables?.capabilities) {
     await db.execute(sql`DELETE FROM public.capabilities WHERE tenant_id = ${tenantId}`);
   }
 
