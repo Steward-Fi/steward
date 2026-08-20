@@ -9,5 +9,8 @@ STEWARD_PLATFORM_DATABASE_ROLE=steward_platform
 KV_REST_API_URL=https://YOUR-DB.upstash.io
 KV_REST_API_TOKEN=REPLACE_WITH_LOCAL_UPSTASH_TOKEN
 STEWARD_MASTER_PASSWORD=local-worker-only-master-password
+# Optional request-local bindings; defaults shown here match runtime defaults.
+STEWARD_DEFAULT_TENANT_ID=default
+STEWARD_NATIVE_PRICE_FALLBACK_USD=10000
 APP_URL=http://localhost:8787
 STEWARD_IDENTITY_JWT_ISSUER=http://localhost:8787
