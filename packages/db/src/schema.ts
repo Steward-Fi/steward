@@ -2892,6 +2892,8 @@ export const providerActionAuditOutbox = pgTable(
     resourceId: varchar("resource_id", { length: 255 }).notNull(),
     metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
     deliveredAt: timestamp("delivered_at", { withTimezone: true }),
+    claimToken: uuid("claim_token"),
+    claimedAt: timestamp("claimed_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
@@ -2900,10 +2902,12 @@ export const providerActionAuditOutbox = pgTable(
       foreignColumns: [intents.tenantId, intents.id],
       name: "provider_action_audit_outbox_intent_fk",
     }).onDelete("cascade"),
-    undeliveredIdx: index("provider_action_audit_outbox_undelivered_idx").on(
-      table.tenantId,
-      table.createdAt,
-    ),
+    undeliveredIdx: index("provider_action_audit_outbox_undelivered_idx")
+      .on(table.tenantId, table.createdAt)
+      .where(sql`${table.deliveredAt} IS NULL`),
+    claimDueIdx: index("provider_action_audit_outbox_claim_due_idx")
+      .on(table.claimedAt, table.tenantId, table.createdAt, table.id)
+      .where(sql`${table.deliveredAt} IS NULL`),
   }),
 );
 
@@ -3113,6 +3117,9 @@ export const auditEvents = pgTable(
     tenantCreatedIdx: index("audit_events_tenant_created_idx").on(table.tenantId, table.createdAt),
     actionIdx: index("audit_events_action_idx").on(table.action),
     actorIdx: index("audit_events_actor_idx").on(table.actorType, table.actorId),
+    requiredOutboxIdentityIdx: uniqueIndex("audit_events_required_outbox_identity_uidx")
+      .on(table.tenantId, sql`(${table.metadata}->>'requiredOutboxId')`)
+      .where(sql`${table.metadata} ? 'requiredOutboxId'`),
   }),
 );
 
