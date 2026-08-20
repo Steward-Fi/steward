@@ -44,6 +44,7 @@ export default function WebhooksPage() {
   const [webhooks, setWebhooks] = useState<WebhookConfig[]>([]);
   const [selectedId, setSelectedId] = useState<string>("");
   const [deliveries, setDeliveries] = useState<WebhookDelivery[]>([]);
+  const [deliveryOwnerKey, setDeliveryOwnerKey] = useState("");
   const [loading, setLoading] = useState(true);
   const [deliveryLoading, setDeliveryLoading] = useState(false);
   const [creating, setCreating] = useState(false);
@@ -76,6 +77,14 @@ export default function WebhooksPage() {
     }),
     [deliveryErrorFilter, deliveryEventFilter, deliveryStatusFilter],
   );
+  const deliveryQueryKey = useMemo(
+    () => JSON.stringify([selectedId, deliveryQuery]),
+    [deliveryQuery, selectedId],
+  );
+  const visibleDeliveries =
+    deliveryOwnerKey === deliveryQueryKey ? deliveries : ([] as WebhookDelivery[]);
+  const deliveryQueryLoading =
+    Boolean(selectedId) && (deliveryLoading || deliveryOwnerKey !== deliveryQueryKey);
 
   const selectedWebhook = useMemo(
     () => webhooks.find((webhook) => webhook.id === selectedId),
@@ -107,6 +116,7 @@ export default function WebhooksPage() {
   useEffect(() => {
     if (!selectedId) {
       setDeliveries([]);
+      setDeliveryOwnerKey(deliveryQueryKey);
       setDeliveryLoading(false);
       return;
     }
@@ -117,7 +127,10 @@ export default function WebhooksPage() {
     void steward
       .getWebhookDeliveries(selectedId, deliveryQuery)
       .then((rows) => {
-        if (active) setDeliveries(rows);
+        if (active) {
+          setDeliveries(rows);
+          setDeliveryOwnerKey(deliveryQueryKey);
+        }
       })
       .catch((e: unknown) => {
         if (active) {
@@ -131,7 +144,7 @@ export default function WebhooksPage() {
     return () => {
       active = false;
     };
-  }, [deliveryQuery, selectedId]);
+  }, [deliveryQuery, deliveryQueryKey, selectedId]);
 
   function selectWebhook(webhookId: string) {
     setSelectedId(webhookId);
@@ -287,11 +300,13 @@ export default function WebhooksPage() {
     }
   }
 
-  const deliveredCount = deliveries.filter((delivery) => delivery.status === "delivered").length;
-  const failedCount = deliveries.filter(
+  const deliveredCount = visibleDeliveries.filter(
+    (delivery) => delivery.status === "delivered",
+  ).length;
+  const failedCount = visibleDeliveries.filter(
     (delivery) => delivery.status === "failed" || delivery.status === "dead",
   ).length;
-  const retryableCount = deliveries.filter(canRetry).length;
+  const retryableCount = visibleDeliveries.filter(canRetry).length;
 
   return (
     <motion.div
@@ -477,7 +492,10 @@ export default function WebhooksPage() {
               ].map((item) => (
                 <div key={item.label} className="border border-border bg-bg-elevated p-4">
                   <div className="text-xs text-text-tertiary">{item.label}</div>
-                  <div className={`font-display text-xl font-700 ${item.className}`}>
+                  <div
+                    data-testid={`webhook-delivery-summary-${item.label.toLowerCase()}`}
+                    className={`font-display text-xl font-700 ${item.className}`}
+                  >
                     {item.value.toLocaleString()}
                   </div>
                 </div>
@@ -555,13 +573,13 @@ export default function WebhooksPage() {
                   </select>
                 </div>
               </div>
-              {deliveryLoading ? (
+              {deliveryQueryLoading ? (
                 <div className="space-y-px bg-border">
                   {[...Array(4)].map((_, i) => (
                     <div key={i} className="bg-bg h-14 animate-pulse" />
                   ))}
                 </div>
-              ) : deliveries.length === 0 ? (
+              ) : visibleDeliveries.length === 0 ? (
                 <div className="py-16 text-center border border-border-subtle">
                   <p className="text-sm text-text-secondary">No deliveries yet</p>
                   <p className="text-xs text-text-tertiary mt-1">
@@ -577,7 +595,7 @@ export default function WebhooksPage() {
                     <span>Time</span>
                   </div>
                   <AnimatePresence initial={false}>
-                    {deliveries.map((delivery, i) => (
+                    {visibleDeliveries.map((delivery, i) => (
                       <motion.div
                         key={delivery.id}
                         initial={{ opacity: 0, y: 4 }}
