@@ -9,7 +9,15 @@
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { signAccessToken } from "@stwd/auth";
-import { closeDb, createPostgresClient, getDb, providerOperations } from "@stwd/db";
+import {
+  agents,
+  closeDb,
+  createPostgresClient,
+  getDb,
+  providerOperations,
+  tenants,
+  transactions,
+} from "@stwd/db";
 import { eq } from "drizzle-orm";
 import { F } from "./provider-approval-fixture";
 import { createPendingCase, seedCaseFixture, wipeCase } from "./provider-case-fixture";
@@ -18,6 +26,9 @@ const DATABASE_URL = process.env.DATABASE_URL;
 const SKIP = !DATABASE_URL;
 const ORIGINAL_RISK_CLASS = "write";
 const CONCURRENT_RISK_CLASS = "read";
+const SENTINEL_TENANT = "tenant-provider-case-snapshot-sentinel";
+const SENTINEL_AGENT = "agent-provider-case-snapshot-sentinel";
+const SENTINEL_TRANSACTION = "tx-provider-case-snapshot-sentinel";
 
 describe.skipIf(SKIP)("provider-case mounted repeatable-read snapshot (Postgres)", () => {
   let admin: ReturnType<typeof createPostgresClient>;
@@ -35,7 +46,36 @@ describe.skipIf(SKIP)("provider-case mounted repeatable-read snapshot (Postgres)
     process.env.STEWARD_MASTER_PASSWORD ??= "provider-case-snapshot-master-password";
     process.env.STEWARD_JWT_SECRET ??=
       "provider-case-snapshot-jwt-secret-0123456789abcdef0123456789";
+    await getDb()
+      .update(transactions)
+      .set({ status: "failed" })
+      .where(eq(transactions.id, SENTINEL_TRANSACTION));
+    await getDb().delete(tenants).where(eq(tenants.id, SENTINEL_TENANT));
+    await getDb().insert(tenants).values({
+      id: SENTINEL_TENANT,
+      name: "Provider case snapshot cleanup sentinel",
+      apiKeyHash: "provider-case-snapshot-sentinel-hash",
+    });
+    await getDb().insert(agents).values({
+      id: SENTINEL_AGENT,
+      tenantId: SENTINEL_TENANT,
+      name: "Provider case snapshot cleanup sentinel",
+      walletAddress: "0x0000000000000000000000000000000000000001",
+    });
+    await getDb().insert(transactions).values({
+      id: SENTINEL_TRANSACTION,
+      agentId: SENTINEL_AGENT,
+      status: "signed",
+      toAddress: "0x0000000000000000000000000000000000000002",
+      value: "1",
+      chainId: 1,
+    });
     await wipeCase();
+    expect(
+      await getDb().query.transactions.findFirst({
+        where: eq(transactions.id, SENTINEL_TRANSACTION),
+      }),
+    ).toMatchObject({ id: SENTINEL_TRANSACTION, agentId: SENTINEL_AGENT, status: "signed" });
     await seedCaseFixture();
     ({ intentId: caseId } = await createPendingCase("pgsnap01"));
     await getDb()
@@ -55,6 +95,11 @@ describe.skipIf(SKIP)("provider-case mounted repeatable-read snapshot (Postgres)
 
   afterAll(async () => {
     await wipeCase();
+    await getDb()
+      .update(transactions)
+      .set({ status: "failed" })
+      .where(eq(transactions.id, SENTINEL_TRANSACTION));
+    await getDb().delete(tenants).where(eq(tenants.id, SENTINEL_TENANT));
     await Promise.all([admin.end(), locker.end(), writer.end()]);
     await closeDb();
   });
