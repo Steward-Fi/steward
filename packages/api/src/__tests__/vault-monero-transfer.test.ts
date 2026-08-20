@@ -21,6 +21,7 @@ import {
 } from "@stwd/vault";
 import { eq } from "drizzle-orm";
 import { Hono } from "hono";
+import { idempotencyMiddleware, MemoryIdempotencyStore } from "../middleware/idempotency";
 import type { AppVariables } from "../services/context";
 
 const TENANT_ID = `monero-tenant-${Date.now()}`;
@@ -35,6 +36,7 @@ const FAKE_WALLET_RPC_URL = "http://monero-wallet-rpc:18083/json_rpc";
 const FAKE_DAEMON_URL = "http://monero-daemon:18089";
 const SCRIPTED_TX_HASH = "ab".repeat(32);
 const SCRIPTED_FEE_PICONERO = 25_000_000n;
+const ORIGINAL_REDIS_URL = process.env.REDIS_URL;
 
 const allowedRecipient = generateMoneroWallet("mainnet").address;
 const deniedRecipient = generateMoneroWallet("mainnet").address;
@@ -167,6 +169,7 @@ async function makeApp() {
     c.set("userId", "monero-admin");
     await next();
   });
+  app.use("*", idempotencyMiddleware({ store: new MemoryIdempotencyStore(100), ttlMs: 60_000 }));
   app.route("/vault", vaultRoutes);
   return app;
 }
@@ -290,6 +293,8 @@ describe("vault Monero transfer + balance routes", () => {
     delete process.env.STEWARD_MONERO_WALLET_RPC_URL;
     delete process.env.STEWARD_MONERO_DAEMON_URL;
     delete process.env.STEWARD_MONERO_NETWORK;
+    if (ORIGINAL_REDIS_URL === undefined) delete process.env.REDIS_URL;
+    else process.env.REDIS_URL = ORIGINAL_REDIS_URL;
   });
 
   it("returns the wallet balance with piconero string amounts", async () => {
@@ -547,6 +552,70 @@ describe("vault Monero transfer + balance routes", () => {
     };
     expect(dedupeBody.data.transactionId).toBe(body.data.transactionId);
     expect(dedupeBody.data.deduplicated).toBe(true);
+  });
+
+  it("recovers accounting with the same idempotency key without a referenceId", async () => {
+    const key = `monero-accounting-${crypto.randomUUID()}`;
+    const request = () =>
+      transferRequest(
+        {
+          walletScope: SCOPE,
+          destinations: [{ address: allowedRecipient, amountPiconero: "3000000000" }],
+        },
+        { "Idempotency-Key": key },
+      );
+    const relaysBefore = scripted.rpcCalls.filter((call) => call.method === "relay_tx").length;
+    process.env.REDIS_URL = "redis://127.0.0.1:1";
+    try {
+      const first = await app.request(request());
+      expect(first.status).toBe(503);
+      const firstBody = (await first.json()) as {
+        data: { txId: string; status: string; accounting: string };
+      };
+      expect(firstBody.data).toMatchObject({ status: "broadcast", accounting: "pending" });
+      const [pending] = await getDb()
+        .select({ actionPayload: transactions.actionPayload })
+        .from(transactions)
+        .where(eq(transactions.id, firstBody.data.txId));
+      const occurredAt = (pending?.actionPayload as Record<string, unknown>)
+        .recoveryEffectsOccurredAt;
+
+      const mismatch = await app.request(
+        transferRequest(
+          {
+            walletScope: SCOPE,
+            destinations: [{ address: allowedRecipient, amountPiconero: "3000000001" }],
+          },
+          { "Idempotency-Key": key },
+        ),
+      );
+      expect(mismatch.status).toBe(409);
+      expect(scripted.rpcCalls.filter((call) => call.method === "relay_tx")).toHaveLength(
+        relaysBefore + 1,
+      );
+
+      delete process.env.REDIS_URL;
+      const replay = await app.request(request());
+      expect(replay.status).toBe(200);
+      expect(await replay.json()).toMatchObject({
+        ok: true,
+        data: { transactionId: firstBody.data.txId, deduplicated: true },
+      });
+      expect(scripted.rpcCalls.filter((call) => call.method === "relay_tx")).toHaveLength(
+        relaysBefore + 1,
+      );
+      const [complete] = await getDb()
+        .select({ actionPayload: transactions.actionPayload })
+        .from(transactions)
+        .where(eq(transactions.id, firstBody.data.txId));
+      expect(complete?.actionPayload).toMatchObject({ recoveryEffectsState: "complete" });
+      expect((complete?.actionPayload as Record<string, unknown>).recoveryEffectsOccurredAt).toBe(
+        occurredAt,
+      );
+    } finally {
+      if (ORIGINAL_REDIS_URL === undefined) delete process.env.REDIS_URL;
+      else process.env.REDIS_URL = ORIGINAL_REDIS_URL;
+    }
   });
 
   it("rejects raw-digest signing for monero (transfer-intent capability)", async () => {

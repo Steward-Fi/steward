@@ -29,6 +29,7 @@ import {
 } from "@stwd/vault";
 import { and, eq } from "drizzle-orm";
 import { Hono } from "hono";
+import { idempotencyMiddleware, MemoryIdempotencyStore } from "../middleware/idempotency";
 import type { AppVariables } from "../services/context";
 import { executionPayloadDigestForEvmSign } from "../services/execution-authorization";
 import { getConfiguredVault } from "../services/vault-factory";
@@ -53,6 +54,7 @@ async function makeApp() {
     c.set("sessionMfaVerifiedAt", Date.now());
     await next();
   });
+  app.use("*", idempotencyMiddleware({ store: new MemoryIdempotencyStore(100), ttlMs: 60_000 }));
   app.route("/vault", vaultRoutes);
   return app;
 }
@@ -871,7 +873,7 @@ describe("vault EVM execution gateway", () => {
     try {
       const app = await makeApp();
       const first = await app.request(`/vault/${EXTERNAL_AGENT_ID}/sign`, request);
-      expect(first.status).toBe(409);
+      expect(first.status).toBe(503);
       const firstBody = await first.json();
       expect(firstBody).toMatchObject({
         data: { status: "broadcast", accounting: "pending" },
@@ -883,6 +885,8 @@ describe("vault EVM execution gateway", () => {
         .where(eq(transactions.id, txId));
       expect(pending?.status).toBe("broadcast");
       expect(pending?.actionPayload).toMatchObject({ recoveryEffectsState: "pending" });
+      const occurredAt = (pending?.actionPayload as Record<string, unknown>)
+        .recoveryEffectsOccurredAt;
 
       delete process.env.REDIS_URL;
       const replay = await app.request(`/vault/${EXTERNAL_AGENT_ID}/sign`, request);
@@ -894,6 +898,9 @@ describe("vault EVM execution gateway", () => {
         .from(transactions)
         .where(eq(transactions.id, txId));
       expect(complete?.actionPayload).toMatchObject({ recoveryEffectsState: "complete" });
+      expect((complete?.actionPayload as Record<string, unknown>).recoveryEffectsOccurredAt).toBe(
+        occurredAt,
+      );
     } finally {
       routeVault.externalKeyCustodyProvider = priorProvider;
       if (ORIGINAL_REDIS_URL === undefined) delete process.env.REDIS_URL;

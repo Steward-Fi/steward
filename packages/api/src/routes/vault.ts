@@ -876,6 +876,21 @@ async function findActionByReferenceId(
   return existing ?? null;
 }
 
+async function findMoneroActionByIdempotency(agentId: string, idempotencyKeyDigest: string) {
+  const [existing] = await db
+    .select()
+    .from(transactions)
+    .where(
+      and(
+        eq(transactions.agentId, agentId),
+        eq(transactions.actionType, "monero_transfer"),
+        sql`${transactions.actionPayload}->>'idempotencyKeyDigest' = ${idempotencyKeyDigest}`,
+      ),
+    )
+    .limit(1);
+  return existing ?? null;
+}
+
 function requireBroadcastActionIdempotency(
   c: Context<{ Variables: AppVariables }>,
   broadcast: boolean,
@@ -2035,7 +2050,12 @@ function accountingEffectsPendingResponse(
         "Transaction completed, but durable accounting is still pending; retry the same request",
       data: { txId, status, accounting: "pending" },
     },
-    409,
+    // A terminal chain result exists, but the request is not settled until its
+    // durable accounting effects complete. A 5xx is intentional here: the
+    // global idempotency middleware releases (rather than caches) 5xx
+    // reservations, so the same key can re-enter the recovery path without
+    // ever resubmitting the external transaction.
+    503,
   );
 }
 
@@ -7559,8 +7579,31 @@ vaultRoutes.post("/:agentId/monero/transfer", async (c) => {
   // This route broadcasts: require idempotency and honor referenceId dedupe.
   const idempotencyResponse = requireBroadcastActionIdempotency(c, true, "Monero transfers");
   if (idempotencyResponse) return idempotencyResponse;
-  const existingAction = await findActionByReferenceId(agentId, "monero_transfer", referenceId);
+  const idempotencyKey = c.req.header("Idempotency-Key")!;
+  const idempotencyKeyDigest = sha256(`${tenantId}\0${agentId}\0${idempotencyKey}`);
+  const requestDigest = sha256(
+    canonicalJsonStringify({
+      walletScope,
+      destinations,
+      priority: priority ?? 0,
+    }),
+  );
+  const findExistingMoneroAction = () =>
+    referenceId
+      ? findActionByReferenceId(agentId, "monero_transfer", referenceId)
+      : findMoneroActionByIdempotency(agentId, idempotencyKeyDigest);
+  const existingAction = await findExistingMoneroAction();
   if (existingAction) {
+    if (
+      !referenceId &&
+      (existingAction.actionPayload as Record<string, unknown> | null)?.requestDigest !==
+        requestDigest
+    ) {
+      return c.json<ApiResponse>(
+        { ok: false, error: "Idempotency-Key was already used for a different request" },
+        409,
+      );
+    }
     if (
       (existingAction.status === "broadcast" ||
         existingAction.status === "confirmed" ||
@@ -7597,12 +7640,18 @@ vaultRoutes.post("/:agentId/monero/transfer", async (c) => {
   const moneroChainId = scopeNetwork === "mainnet" ? 301 : 302;
 
   return withAgentSpendLock(agentId, async () => {
-    const lockedExistingAction = await findActionByReferenceId(
-      agentId,
-      "monero_transfer",
-      referenceId,
-    );
+    const lockedExistingAction = await findExistingMoneroAction();
     if (lockedExistingAction) {
+      if (
+        !referenceId &&
+        (lockedExistingAction.actionPayload as Record<string, unknown> | null)?.requestDigest !==
+          requestDigest
+      ) {
+        return c.json<ApiResponse>(
+          { ok: false, error: "Idempotency-Key was already used for a different request" },
+          409,
+        );
+      }
       if (
         (lockedExistingAction.status === "broadcast" ||
           lockedExistingAction.status === "confirmed" ||
@@ -7828,6 +7877,8 @@ vaultRoutes.post("/:agentId/monero/transfer", async (c) => {
             totalPiconero: totalPiconero.toString(),
             priority: priority ?? 0,
             referenceId: referenceId ?? null,
+            idempotencyKeyDigest,
+            requestDigest,
           },
           {
             txId: transactionId,
