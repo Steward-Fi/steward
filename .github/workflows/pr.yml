@@ -603,7 +603,7 @@ jobs:
         run: bun test ./packages/auth/src/__tests__/email-redis-publish.integration.test.ts
 
       - name: Vault custody transition race proof (real Postgres)
-        run: bun test ./packages/vault/src/__tests__/custody-transition-race.real-pg.test.ts
+        run: bun test ./packages/vault/src/__tests__/custody-transition-race.real-pg.test.ts ./packages/vault/src/__tests__/transaction-id-race.real-pg.test.ts
         env:
           DATABASE_URL: "postgres://steward:steward_ci@localhost:5432/steward_test"
 
