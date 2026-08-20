@@ -4,7 +4,7 @@
 
 ## Overview
 
-Steward runs as two **systemd services** on each Milady node, built from source using Bun. It connects to a shared Neon PostgreSQL database and an optional Redis instance for rate limiting and spend tracking.
+Steward runs as two **systemd services** on each Milady node, built from source using Bun. It connects to a shared Neon PostgreSQL database and Redis for production proxy rate limiting and spend tracking.
 
 - `steward.service` — REST API on port 3200
 - `steward-proxy.service` — API proxy gateway on port 8080
@@ -86,14 +86,19 @@ STEWARD_MASTER_PASSWORD=<256-bit-hex-secret>
 # Auth
 STEWARD_JWT_SECRET=<separate-jwt-secret>
 STEWARD_PLATFORM_KEYS=<platform-admin-key>
+# Optional; defaults to "default" when tenant-less auth requests omit a hint.
+STEWARD_DEFAULT_TENANT_ID=default
 
 # RPC
 RPC_URL=https://mainnet.base.org
 CHAIN_ID=8453
 SOLANA_RPC_URL=https://api.mainnet-beta.solana.com
+# Conservative spend valuation during native-token oracle outages.
+STEWARD_NATIVE_PRICE_FALLBACK_USD=10000
 
-# Redis (optional — enables rate limiting + spend tracking)
-# REDIS_URL=redis://localhost:6379
+# Redis (required by the production proxy unless its explicit soft-fail
+# override is enabled)
+REDIS_URL=redis://localhost:6379
 
 # Proxy port (if running proxy on same machine)
 # PROXY_PORT=8080
@@ -108,10 +113,12 @@ chmod 600 /opt/steward/.env"
 | `STEWARD_MASTER_PASSWORD` | AES-256 vault encryption key (256-bit hex) | Yes |
 | `STEWARD_JWT_SECRET` | JWT signing secret (separate from master password!) | Yes |
 | `STEWARD_PLATFORM_KEYS` | Platform admin API key for tenant management | Yes |
+| `STEWARD_DEFAULT_TENANT_ID` | Tenant used by auth routes when a request supplies no tenant hint | No (`default`) |
 | `STEWARD_BIND_HOST` | Must be `0.0.0.0` for Docker containers to reach it | Yes |
 | `REDIS_URL` | Redis connection string for rate limiting + spend tracking | Yes (production) |
 | `STEWARD_PROXY_REQUEST_SIGNING_SECRETS` | Shared secret(s) the proxy uses to verify every request signature | Yes (production) |
 | `RPC_URL` | EVM RPC endpoint (default: Base mainnet) | No |
+| `STEWARD_NATIVE_PRICE_FALLBACK_USD` | Native-token USD valuation during price-oracle outages | No (`10000`) |
 
 ### Step 4: Create systemd services
 

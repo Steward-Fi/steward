@@ -344,4 +344,4 @@ curl -s -X POST http://localhost:3200/vault/trading-bot/sign \
 - [Policy Engine](./policies.md) — All 6 policy types with examples
 - [React Components](./react.md) — Component API reference
 - [SDK Reference](./sdk.md) — Full TypeScript SDK docs
-- [Deployment](./deployment.md) — Production setup, TLS, monitoring
+- [Deployment](../deployment.md) — Production setup, TLS, monitoring
