@@ -339,8 +339,10 @@ describe("wallet transfer actions", () => {
     const context = await import("../services/context");
     const originalSignTransaction = context.vault.signTransaction.bind(context.vault);
     const calldata = expectedErc20TransferCalldata(ALLOWED, "42");
+    let signCalls = 0;
 
     context.vault.signTransaction = async (request, metadata) => {
+      signCalls += 1;
       expect(request.agentId).toBe(AGENT_ID);
       expect(request.to).toBe(TOKEN);
       expect(request.value).toBe("0");
@@ -408,15 +410,40 @@ describe("wallet transfer actions", () => {
         amount: string;
         broadcast: boolean;
         referenceId?: string;
+        requestDigest?: string;
       };
-      expect(actionPayload).toEqual({
+      expect(actionPayload).toMatchObject({
         type: "transfer",
         token: TOKEN,
         recipient: ALLOWED,
         amount: "42",
         broadcast: false,
         referenceId: "erc20-transfer-success",
+        requestDigest: expect.any(String),
       });
+
+      for (const changed of [
+        { value: "43" },
+        { to: BLOCKED },
+        { token: "native" },
+        { chainId: 1 },
+      ]) {
+        const conflict = await app.request(`/vault/${AGENT_ID}/actions/transfer`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            to: ALLOWED,
+            token: TOKEN,
+            value: "42",
+            chainId: 8453,
+            broadcast: false,
+            referenceId: "erc20-transfer-success",
+            ...changed,
+          }),
+        });
+        expect(conflict.status).toBe(409);
+      }
+      expect(signCalls).toBe(1);
 
       const statusResponse = await app.request(`/vault/${AGENT_ID}/actions/${body.data.id}`);
       expect(statusResponse.status).toBe(200);
