@@ -34,6 +34,7 @@ import {
   tenants,
 } from "../services/context";
 import { getPolicyRulesValidationError } from "../services/policy-validation";
+import { isRecentMfaTimestamp } from "../services/recent-mfa";
 
 export const tenantRoutes = new Hono<{ Variables: AppVariables }>();
 const LEGACY_WEBHOOK_DEPRECATION_ERROR =
@@ -93,13 +94,7 @@ function requireTenantAdminSession(c: Parameters<typeof requireTenantLevel>[0]):
 }
 
 function hasRecentSessionMfa(c: Parameters<typeof requireTenantLevel>[0], maxAgeMs = 5 * 60_000) {
-  const verifiedAt = c.get("sessionMfaVerifiedAt");
-  return (
-    typeof verifiedAt === "number" &&
-    Number.isFinite(verifiedAt) &&
-    Date.now() - verifiedAt >= 0 &&
-    Date.now() - verifiedAt <= maxAgeMs
-  );
+  return isRecentMfaTimestamp(c.get("sessionMfaVerifiedAt"), maxAgeMs);
 }
 
 function requireRecentTenantAdminMfa(

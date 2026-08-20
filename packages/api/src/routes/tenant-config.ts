@@ -64,6 +64,7 @@ import {
 import { normalizeGasSponsorshipConfig } from "../services/gas-sponsorship";
 import { normalizeOidcProviders } from "../services/oidc-provider-config";
 import { getPolicyRulesValidationError } from "../services/policy-validation";
+import { isRecentMfaTimestamp } from "../services/recent-mfa";
 import { buildSamlServiceProviderUrls, normalizeSamlSsoUpdate } from "../services/saml-sso-config";
 import {
   createTenantTestAccountConfig,
@@ -515,13 +516,7 @@ function requireTenantAdminSession(c: Parameters<typeof requireTenantLevel>[0]):
 }
 
 function hasRecentSessionMfa(c: Parameters<typeof requireTenantLevel>[0], maxAgeMs = 5 * 60_000) {
-  const verifiedAt = c.get("sessionMfaVerifiedAt");
-  return (
-    typeof verifiedAt === "number" &&
-    Number.isFinite(verifiedAt) &&
-    Date.now() - verifiedAt >= 0 &&
-    Date.now() - verifiedAt <= maxAgeMs
-  );
+  return isRecentMfaTimestamp(c.get("sessionMfaVerifiedAt"), maxAgeMs);
 }
 
 type TenantMfaPolicyConfig = {

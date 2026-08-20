@@ -1,6 +1,7 @@
 import { redactedThrownDiagnostics } from "@stwd/shared";
 import { createMiddleware } from "hono/factory";
 import type { ApiResponse, AppVariables } from "../services/context";
+import { isRecentMfaTimestamp } from "../services/recent-mfa";
 import { getRedisClient } from "./redis";
 
 type IdempotencyStatus = "processing" | "completed";
@@ -611,13 +612,7 @@ function hasReplaySafeAuthenticatedContext(c: { get: (key: keyof AppVariables) =
     return true;
   }
   if (authType !== "session-jwt") return false;
-  const verifiedAt = c.get("sessionMfaVerifiedAt");
-  return (
-    typeof verifiedAt === "number" &&
-    Number.isFinite(verifiedAt) &&
-    Date.now() - verifiedAt >= 0 &&
-    Date.now() - verifiedAt <= 5 * 60_000
-  );
+  return isRecentMfaTimestamp(c.get("sessionMfaVerifiedAt"), 5 * 60_000);
 }
 
 function hasReplaySafePublicContext(c: { req: { path: string } }) {

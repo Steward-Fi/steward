@@ -20,6 +20,7 @@ import {
   setNoStoreHeaders,
   transactions,
 } from "../services/context";
+import { isRecentMfaTimestamp } from "../services/recent-mfa";
 import { dispatchWebhook } from "../services/webhook-dispatch";
 
 /**
@@ -88,13 +89,7 @@ function requireHumanApprover(c: Context<{ Variables: AppVariables }>): boolean 
 }
 
 function hasRecentSessionMfa(c: Context<{ Variables: AppVariables }>, maxAgeMs = 5 * 60_000) {
-  const verifiedAt = c.get("sessionMfaVerifiedAt");
-  return (
-    typeof verifiedAt === "number" &&
-    Number.isFinite(verifiedAt) &&
-    Date.now() - verifiedAt >= 0 &&
-    Date.now() - verifiedAt <= maxAgeMs
-  );
+  return isRecentMfaTimestamp(c.get("sessionMfaVerifiedAt"), maxAgeMs);
 }
 
 function approvalIntentActionType(actionType: string | null | undefined): string {

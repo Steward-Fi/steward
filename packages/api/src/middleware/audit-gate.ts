@@ -11,6 +11,7 @@
 
 import type { Context, Next } from "hono";
 import { type ApiResponse, type AppVariables, setNoStoreHeaders } from "../services/context";
+import { isRecentMfaTimestamp } from "../services/recent-mfa";
 
 /** Recent-MFA window for evidence reads (spec §5.2 / audit.ts). */
 export const AUDIT_READ_MFA_MAX_AGE_MS = 5 * 60_000;
@@ -19,13 +20,7 @@ export function hasRecentSessionMfa(
   c: Context<{ Variables: AppVariables }>,
   maxAgeMs = AUDIT_READ_MFA_MAX_AGE_MS,
 ): boolean {
-  const verifiedAt = c.get("sessionMfaVerifiedAt");
-  return (
-    typeof verifiedAt === "number" &&
-    Number.isFinite(verifiedAt) &&
-    Date.now() - verifiedAt >= 0 &&
-    Date.now() - verifiedAt <= maxAgeMs
-  );
+  return isRecentMfaTimestamp(c.get("sessionMfaVerifiedAt"), maxAgeMs);
 }
 
 /**
