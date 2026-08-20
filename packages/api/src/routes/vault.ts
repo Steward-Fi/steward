@@ -1964,28 +1964,48 @@ async function requireSignerPermission(
 }
 
 const pgliteAgentSpendQueues = new Map<string, Promise<void>>();
+let solanaRecoveryEffectsClaimHookForTests:
+  | ((input: { txId: string; status: string; claimToken: string }) => Promise<void>)
+  | null = null;
+
+export function __setSolanaRecoveryEffectsClaimHookForTests(
+  hook: typeof solanaRecoveryEffectsClaimHookForTests,
+): () => void {
+  const previous = solanaRecoveryEffectsClaimHookForTests;
+  solanaRecoveryEffectsClaimHookForTests = hook;
+  return () => {
+    solanaRecoveryEffectsClaimHookForTests = previous;
+  };
+}
 
 async function withAgentSpendLock<T>(agentId: string, fn: () => Promise<T>): Promise<T> {
   if (process.env.STEWARD_DB_MODE === "pglite" || process.env.STEWARD_PGLITE_MEMORY === "true") {
-    const predecessor = pgliteAgentSpendQueues.get(agentId) ?? Promise.resolve();
-    let release!: () => void;
-    const owned = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    const tail = predecessor.catch(() => undefined).then(() => owned);
-    pgliteAgentSpendQueues.set(agentId, tail);
-    await predecessor.catch(() => undefined);
-    try {
-      return await fn();
-    } finally {
-      release();
-      if (pgliteAgentSpendQueues.get(agentId) === tail) pgliteAgentSpendQueues.delete(agentId);
-    }
+    return fn();
   }
   return db.transaction(async (tx) => {
     await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${agentId}, 0))`);
     return fn();
   });
+}
+
+async function withAgentTransferSpendLock<T>(agentId: string, fn: () => Promise<T>): Promise<T> {
+  if (process.env.STEWARD_DB_MODE !== "pglite" && process.env.STEWARD_PGLITE_MEMORY !== "true") {
+    return withAgentSpendLock(agentId, fn);
+  }
+  const predecessor = pgliteAgentSpendQueues.get(agentId) ?? Promise.resolve();
+  let release!: () => void;
+  const owned = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const tail = predecessor.catch(() => undefined).then(() => owned);
+  pgliteAgentSpendQueues.set(agentId, tail);
+  await predecessor.catch(() => undefined);
+  try {
+    return await fn();
+  } finally {
+    release();
+    if (pgliteAgentSpendQueues.get(agentId) === tail) pgliteAgentSpendQueues.delete(agentId);
+  }
 }
 
 async function nativeTransferGasAccountingGuard(
@@ -3316,7 +3336,7 @@ vaultRoutes.post("/:agentId/actions/transfer", async (c) => {
     });
   }
 
-  return withAgentSpendLock(agentId, async () => {
+  return withAgentTransferSpendLock(agentId, async () => {
     const lockedLookup = await findExistingTransferAction();
     if ("conflict" in lockedLookup) {
       return c.json<ApiResponse>(
@@ -9800,6 +9820,10 @@ async function completeSolanaRecoveryEffects(input: {
         sql`(
           coalesce(${transactions.actionPayload}->>'recoveryEffectsState', 'pending') = 'pending'
           or (
+            ${transactions.actionPayload}->>'recoveryEffectsState' = 'accounted_unknown'
+            and ${row.status} in ('broadcast', 'confirmed')
+          )
+          or (
             ${transactions.actionPayload}->>'recoveryEffectsState' = 'processing'
             and coalesce(${transactions.actionPayload}->>'recoveryEffectsLeaseUntil', '') <= ${claimableBefore}
           )
@@ -9810,6 +9834,11 @@ async function completeSolanaRecoveryEffects(input: {
   if (!claimed) return false;
 
   try {
+    await solanaRecoveryEffectsClaimHookForTests?.({
+      txId: input.txId,
+      status: row.status,
+      claimToken,
+    });
     if (isRedisConfigured() && !isRedisAvailable()) {
       throw new Error("Configured Redis accounting backend is unavailable");
     }
@@ -9828,6 +9857,40 @@ async function completeSolanaRecoveryEffects(input: {
         chainId: row.chainId,
         timestamp: occurredAt.getTime(),
       });
+    }
+    if (row.status === "outcome_unknown") {
+      return await withTenantAuditedTransaction(
+        input.tenantId,
+        async (rawTx, appendRequiredAudit) => {
+          const tx = rawTx as typeof db;
+          const [accounted] = await tx
+            .update(transactions)
+            .set({
+              actionPayload: sql`jsonb_set(jsonb_set(coalesce(${transactions.actionPayload}, '{}'::jsonb), '{recoveryEffectsState}', '"accounted_unknown"'::jsonb), '{recoveryAmbiguousAccountingAt}', ${JSON.stringify(new Date().toISOString())}::jsonb) - 'recoveryEffectsToken' - 'recoveryEffectsLeaseUntil'`,
+            })
+            .where(
+              and(
+                eq(transactions.id, input.txId),
+                eq(transactions.agentId, input.agentId),
+                eq(transactions.txHash, input.signature),
+                eq(transactions.status, "outcome_unknown"),
+                sql`${transactions.actionPayload}->>'recoveryEffectsToken' = ${claimToken}`,
+              ),
+            )
+            .returning({ id: transactions.id });
+          if (!accounted) return false;
+          await appendRequiredAudit({
+            tenantId: input.tenantId,
+            actorType: "system",
+            actorId: "solana-recovery",
+            action: "vault.sign.solana.outcome_unknown_accounted",
+            resourceType: "transaction",
+            resourceId: input.txId,
+            metadata: { signature: input.signature, status: row.status },
+          });
+          return true;
+        },
+      );
     }
     const transferPayload = getTransferActionPayload(row.actionPayload);
     if (transferPayload) {
@@ -9875,6 +9938,7 @@ async function completeSolanaRecoveryEffects(input: {
               eq(transactions.id, input.txId),
               eq(transactions.agentId, input.agentId),
               eq(transactions.txHash, input.signature),
+              eq(transactions.status, row.status),
               sql`${transactions.actionPayload}->>'recoveryEffectsToken' = ${claimToken}`,
             ),
           )
@@ -9903,6 +9967,7 @@ async function completeSolanaRecoveryEffects(input: {
       .where(
         and(
           eq(transactions.id, input.txId),
+          eq(transactions.status, row.status),
           sql`${transactions.actionPayload}->>'recoveryEffectsToken' = ${claimToken}`,
         ),
       );
@@ -10580,11 +10645,7 @@ vaultRoutes.post("/:agentId/transactions/:txId/reconcile-solana", async (c) => {
         .set({
           status: nextStatus,
           confirmedAt: nextStatus === "confirmed" ? new Date() : row.confirmedAt,
-          actionPayload: {
-            ...metadata,
-            reconciledAt: new Date().toISOString(),
-            reconciliationResult: nextStatus,
-          },
+          actionPayload: sql`jsonb_set(jsonb_set(coalesce(${transactions.actionPayload}, '{}'::jsonb), '{reconciledAt}', ${JSON.stringify(new Date().toISOString())}::jsonb), '{reconciliationResult}', ${JSON.stringify(nextStatus)}::jsonb)`,
         })
         .where(
           and(
@@ -10592,6 +10653,10 @@ vaultRoutes.post("/:agentId/transactions/:txId/reconcile-solana", async (c) => {
             eq(transactions.agentId, agentId),
             eq(transactions.status, "outcome_unknown"),
             eq(transactions.txHash, signature),
+            sql`(
+              coalesce(${transactions.actionPayload}->>'recoveryEffectsState', 'pending') <> 'processing'
+              or coalesce(${transactions.actionPayload}->>'recoveryEffectsLeaseUntil', '') <= ${new Date().toISOString()}
+            )`,
           ),
         )
         .returning({ id: transactions.id });

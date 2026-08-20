@@ -350,8 +350,100 @@ describe("Solana durable recovery anchors", () => {
       const surviving = await onlyRecoveryRow();
       expect(surviving.status).toBe("outcome_unknown");
       expect(surviving.txHash).toBe(SIGNATURE);
+      expect(readPayload(surviving.actionPayload).recoveryEffectsState).toBe("accounted_unknown");
+      expect(
+        await getDb()
+          .select()
+          .from(auditEvents)
+          .where(
+            and(
+              eq(auditEvents.resourceId, surviving.id),
+              eq(auditEvents.action, "vault.sign.solana.effects_completed"),
+            ),
+          ),
+      ).toHaveLength(0);
     } finally {
       context.vault.signSolanaTransaction = originalSign;
+    }
+  });
+
+  it("serializes ambiguous accounting against a failed reconciliation without success evidence", async () => {
+    const context = await import("../services/context");
+    const routes = await import("../routes/vault");
+    const originalSign = context.vault.signSolanaTransaction.bind(context.vault);
+    const originalReconcile = context.vault.reconcileSolanaBroadcast.bind(context.vault);
+    let releaseClaim!: () => void;
+    const claimRelease = new Promise<void>((resolve) => {
+      releaseClaim = resolve;
+    });
+    let reportClaim!: () => void;
+    const claimEntered = new Promise<void>((resolve) => {
+      reportClaim = resolve;
+    });
+    const restoreClaimHook = routes.__setSolanaRecoveryEffectsClaimHookForTests(async (input) => {
+      if (input.status !== "outcome_unknown") return;
+      reportClaim();
+      await claimRelease;
+    });
+    context.vault.signSolanaTransaction = async (request) => {
+      await request.onBroadcastPrepared?.({
+        signature: SIGNATURE,
+        recentBlockhash: RECENT_BLOCKHASH,
+      });
+      throw new ExternalBroadcastOutcomeUnknownError(SIGNATURE);
+    };
+    context.vault.reconcileSolanaBroadcast = async () => "failed";
+
+    try {
+      const first = app.request(`/vault/${AGENT_ID}/sign-solana`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "Idempotency-Key": "solana-recovery-effects-reconcile-race",
+        },
+        body: JSON.stringify({ transaction: WITHIN_CAP_V0_TRANSFER, broadcast: true }),
+      });
+      await claimEntered;
+      const staged = await onlyRecoveryRow();
+      expect(readPayload(staged.actionPayload).recoveryEffectsState).toBe("processing");
+
+      const blocked = await app.request(
+        `/vault/${AGENT_ID}/transactions/${staged.id}/reconcile-solana`,
+        { method: "POST" },
+      );
+      expect(blocked.status).toBe(409);
+      expect((await onlyRecoveryRow()).status).toBe("outcome_unknown");
+
+      releaseClaim();
+      expect((await first).status).toBe(202);
+      expect(readPayload((await onlyRecoveryRow()).actionPayload).recoveryEffectsState).toBe(
+        "accounted_unknown",
+      );
+
+      const reconciled = await app.request(
+        `/vault/${AGENT_ID}/transactions/${staged.id}/reconcile-solana`,
+        { method: "POST" },
+      );
+      expect(reconciled.status).toBe(200);
+      const final = await onlyRecoveryRow();
+      expect(final.status).toBe("failed");
+      expect(readPayload(final.actionPayload).recoveryEffectsState).toBe("accounted_unknown");
+      expect(
+        await getDb()
+          .select()
+          .from(auditEvents)
+          .where(
+            and(
+              eq(auditEvents.resourceId, staged.id),
+              eq(auditEvents.action, "vault.sign.solana.effects_completed"),
+            ),
+          ),
+      ).toHaveLength(0);
+    } finally {
+      releaseClaim();
+      restoreClaimHook();
+      context.vault.signSolanaTransaction = originalSign;
+      context.vault.reconcileSolanaBroadcast = originalReconcile;
     }
   });
 
