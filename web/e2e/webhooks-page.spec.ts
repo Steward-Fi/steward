@@ -441,4 +441,165 @@ test.describe("Dashboard webhook delivery history", () => {
     await expect(failedSummary).toHaveText("1");
     await expect(retryableSummary).toHaveText("1");
   });
+
+  test("delayed delivery mutations cannot overwrite a newer endpoint selection", async ({
+    page,
+    request,
+  }) => {
+    const email = `webhook-mutation-ownership-${Date.now()}@example.test`;
+    const now = "2026-05-28T12:00:00.000Z";
+    const webhooks: WebhookConfig[] = ["a", "b", "c"].map((suffix) => ({
+      id: `webhook-${suffix}`,
+      tenantId: "e2e-tenant",
+      url: `https://${suffix}.example.test/webhooks`,
+      events: ["user.created"],
+      enabled: true,
+      maxRetries: 5,
+      retryBackoffMs: 60000,
+      description: `Endpoint ${suffix.toUpperCase()}`,
+      createdAt: now,
+      updatedAt: now,
+    }));
+    const delivery = (
+      id: string,
+      status: WebhookDelivery["status"] = "delivered",
+      eventType = "user.created",
+    ): WebhookDelivery => ({
+      id,
+      eventType,
+      status,
+      attempts: 1,
+      maxAttempts: 6,
+      nextRetryAt: status === "failed" ? now : null,
+      hasError: status === "failed",
+      createdAt: now,
+      deliveredAt: status === "delivered" ? now : null,
+    });
+    const rows = new Map<string, WebhookDelivery[]>([
+      ["webhook-a", [delivery("a-failed", "failed")]],
+      ["webhook-b", [delivery("b-delivered", "delivered", "transaction.confirmed")]],
+      ["webhook-c", [delivery("c-delivered", "delivered", "wallet.created")]],
+    ]);
+
+    let releaseReplay: (() => void) | undefined;
+    const replayGate = new Promise<void>((resolve) => {
+      releaseReplay = resolve;
+    });
+    let markReplayStarted: (() => void) | undefined;
+    const replayStarted = new Promise<void>((resolve) => {
+      markReplayStarted = resolve;
+    });
+    let releaseTest: (() => void) | undefined;
+    const testGate = new Promise<void>((resolve) => {
+      releaseTest = resolve;
+    });
+    let markTestStarted: (() => void) | undefined;
+    const testStarted = new Promise<void>((resolve) => {
+      markTestStarted = resolve;
+    });
+    let releaseDelete: (() => void) | undefined;
+    const deleteGate = new Promise<void>((resolve) => {
+      releaseDelete = resolve;
+    });
+    let markDeleteStarted: (() => void) | undefined;
+    const deleteStarted = new Promise<void>((resolve) => {
+      markDeleteStarted = resolve;
+    });
+    let markDeleteResponded: (() => void) | undefined;
+    const deleteResponded = new Promise<void>((resolve) => {
+      markDeleteResponded = resolve;
+    });
+    let releaseStaleList: (() => void) | undefined;
+    const staleListGate = new Promise<void>((resolve) => {
+      releaseStaleList = resolve;
+    });
+    let markStaleListStarted: (() => void) | undefined;
+    const staleListStarted = new Promise<void>((resolve) => {
+      markStaleListStarted = resolve;
+    });
+    let listRequestCount = 0;
+
+    await page.route(`${API}/webhooks`, async (route) => {
+      listRequestCount += 1;
+      if (listRequestCount === 2) {
+        const staleSnapshot = [...webhooks];
+        markStaleListStarted?.();
+        await staleListGate;
+        await route.fulfill({ json: { ok: true, data: staleSnapshot } });
+        return;
+      }
+      await route.fulfill({ json: { ok: true, data: webhooks } });
+    });
+    for (const webhookId of ["webhook-a", "webhook-b", "webhook-c"]) {
+      await page.route(`${API}/webhooks/${webhookId}/deliveries**`, async (route) => {
+        await route.fulfill({ json: { ok: true, data: rows.get(webhookId) ?? [] } });
+      });
+    }
+    await page.route(`${API}/webhooks/deliveries/a-failed/replay`, async (route) => {
+      markReplayStarted?.();
+      await replayGate;
+      const replayed = delivery("a-replayed");
+      rows.set("webhook-a", [replayed, ...(rows.get("webhook-a") ?? [])]);
+      await route.fulfill({ status: 202, json: { ok: true, data: replayed } });
+    });
+    await page.route(`${API}/webhooks/webhook-a/test`, async (route) => {
+      markTestStarted?.();
+      await testGate;
+      const tested = { ...delivery("a-test"), eventType: "webhook.test" };
+      rows.set("webhook-a", [tested, ...(rows.get("webhook-a") ?? [])]);
+      await route.fulfill({ status: 202, json: { ok: true, data: tested } });
+    });
+    await page.route(`${API}/webhooks/webhook-a`, async (route) => {
+      markDeleteStarted?.();
+      await deleteGate;
+      const index = webhooks.findIndex((webhook) => webhook.id === "webhook-a");
+      if (index >= 0) webhooks.splice(index, 1);
+      await route.fulfill({ json: { ok: true } });
+      markDeleteResponded?.();
+    });
+
+    await loginWithMagicLink(page, request, email);
+    await page.goto(`${WEB}/dashboard/webhooks`);
+    await expect(page.getByRole("button", { name: /user\.created failed/ })).toBeVisible();
+    await page.getByRole("button", { name: /user\.created failed/ }).click();
+    page.once("dialog", async (dialog) => dialog.accept());
+    await page.getByRole("button", { name: "Replay Delivery" }).click();
+    await replayStarted;
+
+    await page.getByText("https://b.example.test/webhooks").first().click();
+    await expect(
+      page.getByRole("button", { name: /transaction\.confirmed delivered/ }),
+    ).toBeVisible();
+    releaseReplay?.();
+    await expect(page.getByText("a-replayed")).toHaveCount(0);
+    await expect(page.getByTestId("webhook-delivery-summary-delivered")).toHaveText("1");
+
+    await page.getByRole("button", { name: "Send Test" }).first().click();
+    await testStarted;
+    await page.getByText("https://c.example.test/webhooks").first().click();
+    await expect(page.getByRole("button", { name: /wallet\.created delivered/ })).toBeVisible();
+    releaseTest?.();
+    await expect(page.getByText("a-test")).toHaveCount(0);
+    await expect(page.getByRole("button", { name: /wallet\.created delivered/ })).toBeVisible();
+
+    await page.getByText("https://a.example.test/webhooks").first().click();
+    await expect(page.getByRole("button", { name: /user\.created failed/ })).toBeVisible();
+    page.once("dialog", async (dialog) => dialog.accept());
+    await page.getByRole("button", { name: "Delete" }).first().click();
+    await deleteStarted;
+    await page.getByText("https://c.example.test/webhooks").first().click();
+    await expect(page.getByRole("button", { name: /wallet\.created delivered/ })).toBeVisible();
+    await page.getByRole("button", { name: "Refresh" }).click();
+    await staleListStarted;
+    releaseDelete?.();
+    await deleteResponded;
+    await expect(page.getByText("https://a.example.test/webhooks")).toHaveCount(0);
+    await expect(page.getByRole("button", { name: /wallet\.created delivered/ })).toBeVisible();
+    releaseStaleList?.();
+    await expect(page.getByText("https://a.example.test/webhooks")).toHaveCount(0);
+    await expect(page.getByRole("button", { name: /wallet\.created delivered/ })).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: /transaction\.confirmed delivered/ }),
+    ).toHaveCount(0);
+  });
 });
