@@ -80,6 +80,32 @@ describeRedis("aggregation tracker", () => {
     expect(count).toBe(4n);
   });
 
+  test("stable recovery event ids are idempotent across retries", async () => {
+    const agent = agentId("recovery-idempotency");
+    const now = Date.now();
+    const event = {
+      eventId: "solana:tx-123:signature-123",
+      agentId: agent,
+      to: "0xabc",
+      chainId: 101,
+      valueRaw: "123",
+      timestamp: now - 100,
+    };
+    await recordAggregationEvent(event);
+    await recordAggregationEvent({ ...event, valueRaw: "999", timestamp: now });
+
+    const count = await getAggregationSnapshot(
+      { agentId: agent, metric: "tx_count", windowSeconds: 3600, scope: "agent", scopeKey: "" },
+      now,
+    );
+    const sum = await getAggregationSnapshot(
+      { agentId: agent, metric: "value_sum", windowSeconds: 3600, scope: "agent", scopeKey: "" },
+      now,
+    );
+    expect(count).toBe(1n);
+    expect(sum).toBe(123n);
+  });
+
   test("window boundary is half-open (now - S*1000, now]: event exactly at edge excluded", async () => {
     const agent = agentId("boundary");
     const now = Date.now();

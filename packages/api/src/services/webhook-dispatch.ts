@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { and, eq, waitUntilRequestDatabaseTask, webhookConfigs, webhookDeliveries } from "@stwd/db";
 import { redactedThrownDiagnostics, type WebhookEvent } from "@stwd/shared";
 import {
@@ -71,6 +71,30 @@ export function dispatchWebhook(
   // former second fan-out through a bare URL both duplicate-delivered each
   // event and could only sign with a process-wide key. Persisted /webhooks
   // endpoints with receiver-known per-endpoint secrets are now the sole path.
+}
+
+/** Await durable delivery creation for recovery paths before acknowledging replay success. */
+export async function dispatchWebhookDurably(
+  tenantId: string,
+  agentId: string,
+  type: DispatchableWebhookEventType,
+  data: Record<string, unknown>,
+  idempotencyKey: string,
+): Promise<void> {
+  const configuredType = toConfiguredWebhookEventType(type);
+  const isPluginEvent = configuredType === null && webhookEventRegistry.has(type);
+  await dispatchConfiguredWebhooks(
+    {
+      type: (configuredType ?? type) as WebhookEvent["type"],
+      tenantId,
+      agentId,
+      data: redactWebhookSecrets(data) as Record<string, unknown>,
+      timestamp: new Date(),
+    },
+    configuredType,
+    isPluginEvent ? type : null,
+    idempotencyKey,
+  );
 }
 
 export async function dispatchTestWebhook(config: {
@@ -146,6 +170,7 @@ async function dispatchConfiguredWebhooks(
   event: WebhookEvent,
   configuredType: ConfiguredWebhookEventType | null,
   pluginEventType: string | null = null,
+  idempotencyKey?: string,
 ): Promise<void> {
   const configs = await db
     .select()
@@ -173,6 +198,7 @@ async function dispatchConfiguredWebhooks(
           events: config.events,
           maxRetries: config.maxRetries,
           retryBackoffMs: config.retryBackoffMs,
+          idempotencyKey,
         }),
       ),
   );
@@ -189,6 +215,7 @@ async function dispatchConfiguredWebhook(
     retryBackoffMs: number;
     visibilityTimeoutMs?: number;
     replayedFromDeliveryId?: string | null;
+    idempotencyKey?: string;
   },
 ): Promise<typeof webhookDeliveries.$inferSelect> {
   const signingSecret = decryptWebhookSecret(config.secret);
@@ -205,7 +232,9 @@ async function dispatchConfiguredWebhook(
       .set({ secret: encryptedSecret, updatedAt: new Date() })
       .where(and(eq(webhookConfigs.id, config.id), eq(webhookConfigs.secret, config.secret)));
   }
-  const deliveryId = randomUUID();
+  const deliveryId = config.idempotencyKey
+    ? deterministicDeliveryId(config.id, event.type, config.idempotencyKey)
+    : randomUUID();
   const signedAt = Math.floor(Date.now() / 1000);
   const eventWithDelivery: WebhookEvent & {
     deliveryId: string;
@@ -220,32 +249,38 @@ async function dispatchConfiguredWebhook(
       ? { replayedFromDeliveryId: config.replayedFromDeliveryId }
       : {}),
   };
-  const [delivery] = await db
-    .insert(webhookDeliveries)
-    .values({
-      id: deliveryId,
-      tenantId: event.tenantId,
-      webhookConfigId: config.id,
-      agentId: event.agentId,
-      eventType: event.type,
-      replayedFromDeliveryId: config.replayedFromDeliveryId ?? null,
-      payload: eventWithDelivery as unknown as Record<string, unknown>,
-      url: config.url,
-      secret: encryptedSecret,
-      events: config.events,
-      status: "processing",
-      attempts: 0,
-      maxAttempts: config.maxRetries + 1,
-      nextRetryAt:
-        config.visibilityTimeoutMs === 0
-          ? null
-          : new Date(
-              Date.now() + (config.visibilityTimeoutMs ?? INLINE_DELIVERY_VISIBILITY_TIMEOUT_MS),
-            ),
-    })
-    .returning();
+  const deliveryInsert = db.insert(webhookDeliveries).values({
+    id: deliveryId,
+    tenantId: event.tenantId,
+    webhookConfigId: config.id,
+    agentId: event.agentId,
+    eventType: event.type,
+    replayedFromDeliveryId: config.replayedFromDeliveryId ?? null,
+    payload: eventWithDelivery as unknown as Record<string, unknown>,
+    url: config.url,
+    secret: encryptedSecret,
+    events: config.events,
+    status: "processing",
+    attempts: 0,
+    maxAttempts: config.maxRetries + 1,
+    nextRetryAt:
+      config.visibilityTimeoutMs === 0
+        ? null
+        : new Date(
+            Date.now() + (config.visibilityTimeoutMs ?? INLINE_DELIVERY_VISIBILITY_TIMEOUT_MS),
+          ),
+  });
+  const [delivery] = config.idempotencyKey
+    ? await deliveryInsert.onConflictDoNothing().returning()
+    : await deliveryInsert.returning();
 
   if (!delivery) {
+    const [existing] = await db
+      .select()
+      .from(webhookDeliveries)
+      .where(eq(webhookDeliveries.id, deliveryId))
+      .limit(1);
+    if (existing) return existing;
     throw new Error("Failed to create webhook delivery record");
   }
 
@@ -288,4 +323,9 @@ async function dispatchConfiguredWebhook(
     .returning();
 
   return updated ?? delivery;
+}
+
+function deterministicDeliveryId(configId: string, eventType: string, key: string): string {
+  const hex = createHash("sha256").update(`${configId}\0${eventType}\0${key}`).digest("hex");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-8${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
 }

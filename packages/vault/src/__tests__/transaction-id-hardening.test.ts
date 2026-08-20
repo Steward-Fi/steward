@@ -3,7 +3,7 @@ import { agents, closeDb, getDb, tenants, transactions } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import type { SignRequest } from "@stwd/shared";
 import { eq } from "drizzle-orm";
-import { Vault } from "../vault";
+import { SolanaRecoveryOwnershipLostError, Vault } from "../vault";
 
 const tenantId = `transaction-owner-${crypto.randomUUID()}`;
 const firstAgentId = `transaction-owner-first-${crypto.randomUUID()}`;
@@ -16,7 +16,11 @@ type TransactionRecorder = {
     chainId: number,
     shouldBroadcast: boolean,
     hash: string,
-    options: { txId: string; status?: "signed" | "broadcast" | "outcome_unknown" },
+    options: {
+      txId: string;
+      status?: "signed" | "broadcast" | "outcome_unknown";
+      solanaRecoveryExecutionToken?: string;
+    },
   ): Promise<void>;
 };
 
@@ -91,5 +95,45 @@ describe("transaction id hardening", () => {
     expect(recorded?.value).toBe("2");
     expect(recorded?.txHash).toBe("0xupdated");
     expect(recorded?.status).toBe("broadcast");
+  });
+
+  test("never regresses a reconciled Solana row after losing the exact recovery CAS", async () => {
+    const recoveryTxId = `solana-recovery-cas-${crypto.randomUUID()}`;
+    const executionToken = crypto.randomUUID();
+    const signature = "solana-recovery-signature";
+    await getDb()
+      .insert(transactions)
+      .values({
+        id: recoveryTxId,
+        agentId: firstAgentId,
+        status: "confirmed",
+        toAddress: requestFor(firstAgentId, "7").to,
+        value: "7",
+        chainId: 101,
+        txHash: signature,
+        actionPayload: { executionToken, recoveryType: "solana_transaction" },
+        confirmedAt: new Date(),
+      });
+    const recorder = new Vault({
+      masterPassword: "transaction-owner-test",
+    }) as unknown as TransactionRecorder;
+
+    await expect(
+      recorder.recordSignedTransaction(requestFor(firstAgentId, "8"), 101, true, signature, {
+        txId: recoveryTxId,
+        status: "broadcast",
+        solanaRecoveryExecutionToken: executionToken,
+      }),
+    ).rejects.toBeInstanceOf(SolanaRecoveryOwnershipLostError);
+
+    const [recorded] = await getDb()
+      .select()
+      .from(transactions)
+      .where(eq(transactions.id, recoveryTxId));
+    expect(recorded).toMatchObject({
+      status: "confirmed",
+      txHash: signature,
+      value: "7",
+    });
   });
 });

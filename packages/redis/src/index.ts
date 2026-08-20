@@ -62,6 +62,7 @@ export {
   reserveSpend,
   type SpendLimitSnapshot,
   type SpendPeriod,
+  type SpendRecordOptions,
   type SpendReservation,
   settleReservedSpend,
 } from "./spend-tracker.js";
