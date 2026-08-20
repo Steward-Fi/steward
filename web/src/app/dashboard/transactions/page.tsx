@@ -1,9 +1,10 @@
 "use client";
 
+import { useAuth } from "@stwd/react";
 import type { TxRecord } from "@stwd/sdk";
 import { motion } from "framer-motion";
 import Link from "next/link";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ChainBadge } from "@/components/chain-badge";
 import { StatusBadge } from "@/components/status-badge";
 import { steward } from "@/lib/api";
@@ -14,25 +15,56 @@ type TxWithAgent = TxRecord & { agentName?: string };
 
 const FILTERS = ["all", "signed", "confirmed", "pending", "rejected", "failed"] as const;
 
+interface TransactionsData {
+  identity: object;
+  transactions: TxWithAgent[];
+  failedHistoryCount: number;
+}
+
+interface TransactionsError {
+  identity: object;
+  message: string;
+}
+
 export default function TransactionsPage() {
-  const [transactions, setTransactions] = useState<TxWithAgent[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [failedHistoryCount, setFailedHistoryCount] = useState(0);
+  const auth = useAuth();
+  const [data, setData] = useState<TransactionsData | null>(null);
+  const [loadingIdentity, setLoadingIdentity] = useState<object | null>(null);
+  const [error, setError] = useState<TransactionsError | null>(null);
   const [filter, setFilter] = useState<string>("all");
+  const requestGeneration = useRef(0);
+  const authIdentity = useMemo(
+    () => ({}),
+    [
+      auth.activeTenantId,
+      auth.isAuthenticated,
+      auth.session?.tenantId,
+      auth.session?.token,
+      auth.session?.userId,
+      auth.user?.id,
+    ],
+  );
+  const latestAuthIdentity = useRef(authIdentity);
+  latestAuthIdentity.current = authIdentity;
 
   const loadTransactions = useCallback(async () => {
+    const generation = ++requestGeneration.current;
+    const identity = authIdentity;
+    const listAgents = steward.listAgents;
+    const getTransactionHistory = steward.getTransactionHistory;
+    const isCurrent = () =>
+      requestGeneration.current === generation && latestAuthIdentity.current === identity;
+
     try {
-      setLoading(true);
-      setError(null);
-      setFailedHistoryCount(0);
-      const agents = await steward.listAgents();
+      setLoadingIdentity(identity);
+      setError((current) => (current?.identity === identity ? null : current));
+      const agents = await listAgents();
       const allTx: TxWithAgent[] = [];
       let failedCount = 0;
 
       for (const agent of agents) {
         try {
-          const history = await steward.getTransactionHistory(agent.id);
+          const history = await getTransactionHistory(agent.id);
           allTx.push(
             ...history.map((tx) => ({
               ...tx,
@@ -48,18 +80,34 @@ export default function TransactionsPage() {
       allTx.sort(
         (a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime(),
       );
-      setTransactions(allTx);
-      setFailedHistoryCount(failedCount);
+      if (isCurrent()) {
+        setData({ identity, transactions: allTx, failedHistoryCount: failedCount });
+        setError(null);
+      }
     } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : "Failed to load transactions");
+      if (isCurrent()) {
+        setError({
+          identity,
+          message: e instanceof Error ? e.message : "Failed to load transactions",
+        });
+      }
     } finally {
-      setLoading(false);
+      if (isCurrent()) setLoadingIdentity(null);
     }
-  }, []);
+  }, [authIdentity]);
 
   useEffect(() => {
     void loadTransactions();
+    return () => {
+      requestGeneration.current += 1;
+    };
   }, [loadTransactions]);
+
+  const currentData = data?.identity === authIdentity ? data : null;
+  const currentError = error?.identity === authIdentity ? error.message : null;
+  const loading = loadingIdentity === authIdentity;
+  const transactions = currentData?.transactions ?? [];
+  const failedHistoryCount = currentData?.failedHistoryCount ?? 0;
 
   const filtered =
     filter === "all" ? transactions : transactions.filter((tx) => tx.status === filter);
@@ -72,7 +120,7 @@ export default function TransactionsPage() {
     {} as Record<string, number>,
   );
 
-  if (loading) {
+  if (!currentData && !currentError) {
     return (
       <div className="space-y-8">
         <div className="h-8 w-48 bg-bg-surface animate-pulse" />
@@ -95,12 +143,12 @@ export default function TransactionsPage() {
       </div>
 
       {/* Error state */}
-      {error && !loading && (
+      {currentError && (
         <div className="py-16 text-center border border-red-400/20 bg-red-400/5">
           <p className="text-text-secondary text-sm mb-1">Failed to load transactions</p>
-          <p className="text-text-tertiary text-xs mb-4 font-mono">{error}</p>
+          <p className="text-text-tertiary text-xs mb-4 font-mono">{currentError}</p>
           <button
-            onClick={loadTransactions}
+            onClick={() => void loadTransactions()}
             className="px-4 py-2 text-sm bg-accent text-bg hover:bg-accent-hover transition-colors"
           >
             Retry
@@ -108,7 +156,7 @@ export default function TransactionsPage() {
         </div>
       )}
 
-      {!error && failedHistoryCount > 0 && (
+      {failedHistoryCount > 0 && (
         <div role="alert" className="border border-amber-400/30 bg-amber-400/5 p-4">
           <p className="text-sm text-amber-300">Transaction history is incomplete</p>
           <p className="mt-1 text-xs text-text-tertiary">
@@ -116,10 +164,11 @@ export default function TransactionsPage() {
             to load. The list and counts include only the available histories.
           </p>
           <button
-            onClick={loadTransactions}
+            onClick={() => void loadTransactions()}
+            aria-busy={loading}
             className="mt-3 text-xs text-amber-300 hover:text-amber-200 transition-colors"
           >
-            Retry histories
+            {loading ? "Retrying histories" : "Retry histories"}
           </button>
         </div>
       )}
@@ -145,7 +194,7 @@ export default function TransactionsPage() {
       </div>
 
       {/* List */}
-      {error ? null : filtered.length === 0 ? (
+      {!currentData ? null : filtered.length === 0 ? (
         <div className="py-16 text-center border border-border-subtle">
           <p className="text-text-tertiary text-sm">
             {filter === "all"
