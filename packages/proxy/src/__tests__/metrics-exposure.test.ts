@@ -20,6 +20,7 @@ import { beforeEach, describe, expect, test } from "bun:test";
 // the in-memory PGLite posture keeps the test fully self-contained with no
 // third-party Postgres/JWT config, matching the other proxy suites' isolation.
 process.env.STEWARD_ALLOW_DEV_SECRETS = "true";
+process.env.NODE_ENV = "test";
 process.env.STEWARD_JWT_SECRET ||= "test-proxy-metrics-jwt-secret-32-characters-min";
 process.env.STEWARD_PGLITE_MEMORY = "true";
 process.env.DATABASE_URL ||= "postgres://steward:steward@127.0.0.1:5432/steward_test";

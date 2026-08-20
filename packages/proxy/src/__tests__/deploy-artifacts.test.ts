@@ -459,15 +459,15 @@ describe("SEC-169 production Compose uses the restricted RLS runtime role", () =
       ).toHaveLength(2);
       expect(
         workflow.match(
-          /MIGRATION_DATABASE_URL: "postgres:\/\/steward_migrator:ci-migration-password@postgres:/g,
+          /MIGRATION_DATABASE_URL: "postgres:\/\/steward_migrator:[^@"\s]{24,}@postgres:/g,
         ),
       ).toHaveLength(2);
       expect(
-        workflow.match(/^\s+DATABASE_URL: "postgres:\/\/steward_app:ci-app-password@postgres:/gm),
+        workflow.match(/^\s+DATABASE_URL: "postgres:\/\/steward_app:[^@"\s]{24,}@postgres:/gm),
       ).toHaveLength(2);
       expect(
         workflow.match(
-          /STEWARD_PLATFORM_DATABASE_URL: "postgres:\/\/steward_platform:ci-platform-db-password@postgres:/g,
+          /STEWARD_PLATFORM_DATABASE_URL: "postgres:\/\/steward_platform:[^@"\s]{24,}@postgres:/g,
         ),
       ).toHaveLength(2);
       expect(workflow.match(/STEWARD_BOOTSTRAP_SET_ROLE_PASSWORDS: "true"/g)).toHaveLength(2);
