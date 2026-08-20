@@ -12,8 +12,7 @@
  * by environment: `composeApp()` consults `resolveEnabledPlugins()`
  * (`plugin-config.ts`, reading `STEWARD_PLUGINS` / legacy `STEWARD_ENABLE_TRADING`)
  * and only registers the trading plugin when it is enabled. that keeps the library
- * core lean, the deploy configurable, and — in FULL mode — behavior-identical to
- * the historical hardcoded composition.
+ * core lean while keeping the deploy configurable.
  *
  * ORDERING (load-bearing — money rail)
  * ------------------------------------
@@ -128,9 +127,8 @@ export async function composeApp(): Promise<Hono<{ Variables: AppVariables }>> {
     return app;
   }
 
-  // FULL MODE: register this deploy's enabled opt-in plugins. behavior-identical
-  // to the historical hardcoded path for trading — same registration, same
-  // ordering, same migrations — plus any other enabled plugin (capabilities).
+  // FULL MODE: register this deploy's enabled opt-in plugins with the same
+  // middleware, route, and migration ordering contract for every plugin.
   //
   // 2) plugin auth-middleware phase + buffered routes. each plugin's auth mw lands
   //    now, before idempotency; its routes are buffered for after.
@@ -199,7 +197,7 @@ export async function composeApp(): Promise<Hono<{ Variables: AppVariables }>> {
 }
 
 /**
- * Apply this deploy's opt-in plugins' OWN migrations (Phase 2c), into per-plugin
+ * Apply this deploy's opt-in plugins' OWN migrations into per-plugin
  * NAMESPACED bookkeeping tables (`drizzle.__drizzle_migrations_plugin_<id>`),
  * totally isolated from the core's `drizzle.__drizzle_migrations` journal.
  *

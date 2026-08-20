@@ -422,7 +422,7 @@ let coarseSubjectWarnedAt = 0;
  * that edge invariant, so deployments should prefer STEWARD_TRUSTED_PROXY_HOPS
  * or a socket-bearing entry. checkAuthRateLimit widens the coarse budget by
  * AUTH_RATE_LIMIT_FALLBACK_HEADROOM because many clients share each bucket.
- * No configuration yields the old literal "global" chokepoint (#268), and no
+ * No configuration yields the literal "global" chokepoint, and no
  * client-controlled free text ever reaches Redis unhashed.
  */
 function authRateLimitSubject(c: Context): { subject: string; coarse: boolean } {
@@ -1901,7 +1901,7 @@ function invalidTestAccountCredentials() {
 
 /**
  * Map typed email-delivery failures to fail-closed HTTP responses
- * (elizaOS/eliza#18452): 503 when no delivery-capable provider is configured
+ * Returns 503 when no delivery-capable provider is configured
  * (challenge never issued), 502 when the provider rejected the send (the
  * challenge was already invalidated by EmailAuth). Returns null for any other
  * error so it propagates unchanged. Response bodies are generic — no

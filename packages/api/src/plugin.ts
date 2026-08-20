@@ -1,19 +1,13 @@
 /**
  * plugin.ts — the lean-core + opt-in-plugin seam for the Steward app.
  *
- * WHY THIS EXISTS
- * ---------------
+ * OWNERSHIP CONTRACT
+ * ------------------
  * steward serves two audiences from one codebase: teams that want only the auth +
  * embedded-wallet + policy core, and teams that ALSO want agent trading (venue
- * execution + trade sessions). historically these were coupled: `@stwd/api`
- * hard-depended on the trading stack (`@stwd/trade-sessions`, `@stwd/venue-*`) and
- * the trade routes imported the venue adapters directly, so an auth-only install
- * still compiled + shipped the entire trading stack (the venue SDKs, ethers, clob
- * clients) — an unnecessary install-size, supply-chain, and audit-surface cost for
- * the majority of installs that never trade.
- *
- * the architecture here is a LEAN OPEN CORE (auth + vault + policy + proxy +
- * webhooks) plus OPT-IN PLUGINS that a host registers. trading is the first such
+ * execution + trade sessions). The architecture is a LEAN OPEN CORE (auth +
+ * vault + policy + proxy + webhooks) plus OPT-IN PLUGINS that a host registers.
+ * trading is the first such
  * plugin (`@stwd/plugin-trading`). this mirrors the plugin model of mature
  * frameworks (fastify/vite/hono-style `app.register(plugin)`): take only what you
  * need, and anyone can write + register their own plugin.

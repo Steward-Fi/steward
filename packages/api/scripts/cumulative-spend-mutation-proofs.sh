@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# #206 cumulativeSpend + configurable-window mutation-strength proofs. Each
+# cumulativeSpend + configurable-window mutation-strength proofs. Each
 # mutation weakens ONE load-bearing guard; a proof is valid iff the named test
 # PASSES clean AND FAILS after the mutation. The target file is restored after
 # each proof.

@@ -1,7 +1,7 @@
 /**
  * Cumulative (aggregate) spend tracker with CONFIGURABLE trailing windows and
  * ATOMIC single-winner reservations - backs the policy-engine `cumulativeSpend`
- * capability-intent constraint (#206, Privy aggregate-limit parity).
+ * capability-intent aggregate-limit constraint.
  *
  * WHY A NEW TRACKER (vs spend-tracker.ts / aggregation-tracker.ts)
  * ---------------------------------------------------------------
@@ -11,7 +11,7 @@
  *   - `aggregation-tracker.ts` supports rolling windows but is READ-THEN-CHECK
  *     (record AFTER settle; the evaluator reads a snapshot). Two concurrent
  *     invokes can both read the same prior sum and both pass - unacceptable for a
- *     hard money cap (#206 req 4).
+ *     hard money cap.
  * This tracker combines both: a sorted-set rolling window (any windowSeconds) +
  * a single Lua script that prunes, sums, checks EACH cap's `sum + amount <= max`
  * over its own window, and only then appends the reservation - so concurrent
@@ -67,7 +67,7 @@ import { getRedis } from "./client.js";
 
 export type CumulativeSpendScope = "operation" | "agent" | "grant";
 
-/** Reserved currency tag for the #206 windowed invoke-count stream (never a real
+/** Reserved currency tag for the windowed invoke-count stream (never a real
  *  asset), so a count stream can never collide with a spend stream. */
 const WINDOWED_INVOKE_CURRENCY = "__calls__";
 
@@ -925,7 +925,7 @@ export async function getCumulativeSpendSum(
 }
 
 /**
- * #206 configurable count cap (maxCalls + callWindow): ATOMICALLY reserve ONE
+ * Configurable count cap (maxCalls + callWindow): ATOMICALLY reserve ONE
  * invoke against EVERY count window governing the operation. The invoke is added
  * to the operation-level `__calls__` stream EXACTLY ONCE (amount=1), and each
  * cap's window is checked atomically - so combining an hourly AND a daily cap

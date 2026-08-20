@@ -1,5 +1,5 @@
 /**
- * Provider-account X (Twitter) OAuth connect routes (issue #195 workstream A).
+ * Provider-account X (Twitter) OAuth connect routes.
  *
  * Mounted under `/v2/provider-accounts/connect/x`. Every route requires a human
  * session (session-jwt) AND workspace admin/approver authority (or tenant

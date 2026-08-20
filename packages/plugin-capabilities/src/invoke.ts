@@ -1,5 +1,5 @@
 /**
- * invoke.ts - the AGENT-FACING capability invoke path (W-1c).
+ * invoke.ts - the agent-facing capability invoke path.
  *
  * POST /capabilities/:name/invoke  { args?, body?, query? }
  * POST /capabilities/:name/openai/v1/chat/completions  <OpenAI chat body>
@@ -333,7 +333,7 @@ async function recordAndJson(
 }
 
 /**
- * Shared capability invoke core. This preserves the W-1c invariants for both the
+ * Shared capability invoke core. This preserves the invoke invariants for both the
  * envelope invoke route and the OpenAI-compatible adapter: resolve enabled
  * capability + active grant, count invocations, default-deny capability-intent
  * policy, approval 202, proxy env 503, server-side proxy signing, and exactly one

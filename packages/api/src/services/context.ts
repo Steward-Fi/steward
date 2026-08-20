@@ -671,7 +671,7 @@ export async function getTransactionStats(agentId: string, chainId?: number) {
   // Spend caps for native value are denominated in a single chain's base unit
   // (wei for EVM, lamports/SPL base units for Solana). The `value` column holds
   // raw per-chain base units, so summing across chains and re-pricing the total
-  // at one chain's native price corrupts the cap (issue #110). When a chainId is
+  // at one chain's native price corrupts the cap. When a chainId is
   // supplied, scope the spend aggregates to that chain so the counters stay in a
   // single consistent unit. When omitted, the fragment is empty and the result
   // is byte-for-byte the prior cross-chain sum (used by display-only callers).

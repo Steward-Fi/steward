@@ -1,16 +1,16 @@
-// Sprint 4 Phase 1 Day 3: default policy for the Sol agent.
+// Default policy for the Sol agent.
 //
 // Idempotent. Safe to call on every Steward dev-mode boot. In production
 // this should be invoked once by an operator runbook and then frozen;
 // the audit trail then captures any subsequent changes.
 //
-// The Phase 1 default is intentionally tight:
+// The default is intentionally tight:
 //   - spending-limit:   $100 / day in USD (price oracle does the math)
 //   - venue-allowlist:  ["hyperliquid"]   (no Polymarket / Drift yet)
 //   - leverage-cap:     2x                (Sol blows up small)
 //
-// Worker C wires policy reads into the `/v1/trade/*` route; the policy
-// engine then evaluates these rules against every order.
+// The `/v1/trade/*` routes load these policies and the policy engine evaluates
+// them against every order.
 //
 // Usage:
 //

@@ -569,7 +569,7 @@ export class ProviderAuthorityStore {
   }
 
   /**
-   * Provider-account CONNECT authority (issue #195 workstream A): a caller may
+   * Provider-account connect authority: a caller may
    * initiate/complete/disconnect an X (or other provider) OAuth connection when
    * they are a tenant authority admin OR hold an active workspace_admin /
    * workspace_approver binding for the target workspace (environment + temporal

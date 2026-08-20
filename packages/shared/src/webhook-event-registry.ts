@@ -11,8 +11,8 @@
  * cannot have that event accepted: the closed union rejects it at the type
  * level, and the config validator rejects it at runtime.
  *
- * Phase 2 of the plugin SDK lets a plugin DECLARE the event-type names it emits
- * (`StewardPlugin.webhookEvents`). the plugin host registers those names here at
+ * A plugin declares the event-type names it emits through
+ * `StewardPlugin.webhookEvents`. the plugin host registers those names here at
  * composition time, so the runtime set of valid event types becomes:
  *
  *     core event types  ∪  every enabled plugin's declared event types

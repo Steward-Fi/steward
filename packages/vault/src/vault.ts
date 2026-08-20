@@ -4279,7 +4279,7 @@ export class Vault {
 
   /**
    * List every wallet an agent owns, across venues and chain families.
-   * Used by the agent dashboard and by Worker A's trade-sessions package
+   * Used by the agent dashboard and the trade-sessions package
    * to enumerate available trading surfaces.
    *
    * Legacy NULL-venue rows are included. Order: legacy first, then
