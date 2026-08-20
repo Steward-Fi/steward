@@ -44,6 +44,7 @@ export default function WebhooksPage() {
   const [webhooks, setWebhooks] = useState<WebhookConfig[]>([]);
   const [selectedId, setSelectedId] = useState<string>("");
   const [deliveries, setDeliveries] = useState<WebhookDelivery[]>([]);
+  const [deliveryOwnerKey, setDeliveryOwnerKey] = useState("");
   const [loading, setLoading] = useState(true);
   const [deliveryLoading, setDeliveryLoading] = useState(false);
   const [creating, setCreating] = useState(false);
@@ -76,58 +77,79 @@ export default function WebhooksPage() {
     }),
     [deliveryErrorFilter, deliveryEventFilter, deliveryStatusFilter],
   );
+  const deliveryQueryKey = useMemo(
+    () => JSON.stringify([selectedId, deliveryQuery]),
+    [deliveryQuery, selectedId],
+  );
+  const visibleDeliveries =
+    deliveryOwnerKey === deliveryQueryKey ? deliveries : ([] as WebhookDelivery[]);
+  const deliveryQueryLoading =
+    Boolean(selectedId) && (deliveryLoading || deliveryOwnerKey !== deliveryQueryKey);
 
   const selectedWebhook = useMemo(
     () => webhooks.find((webhook) => webhook.id === selectedId),
     [selectedId, webhooks],
   );
 
-  const loadDeliveries = useCallback(
-    async (webhookId: string) => {
-      setDeliveryLoading(true);
-      try {
-        const rows = await steward.getWebhookDeliveries(webhookId, deliveryQuery);
-        setDeliveries(rows);
-      } finally {
-        setDeliveryLoading(false);
-      }
-    },
-    [deliveryQuery],
-  );
-
-  const loadData = useCallback(async () => {
+  const loadWebhooks = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
       const configs = await steward.listWebhooks();
       setWebhooks(configs);
-      const nextSelectedId = selectedId || configs[0]?.id || "";
-      setSelectedId(nextSelectedId);
-      if (nextSelectedId) {
-        await loadDeliveries(nextSelectedId);
-      } else {
-        setDeliveries([]);
-      }
+      setSelectedId((current) =>
+        current && configs.some((webhook) => webhook.id === current)
+          ? current
+          : (configs[0]?.id ?? ""),
+      );
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : "Failed to load webhooks");
     } finally {
       setLoading(false);
     }
-  }, [loadDeliveries, selectedId]);
+  }, []);
 
   useEffect(() => {
-    loadData();
-  }, [loadData]);
+    void loadWebhooks();
+  }, [loadWebhooks]);
 
-  async function selectWebhook(webhookId: string) {
+  useEffect(() => {
+    if (!selectedId) {
+      setDeliveries([]);
+      setDeliveryOwnerKey(deliveryQueryKey);
+      setDeliveryLoading(false);
+      return;
+    }
+
+    let active = true;
+    setDeliveryLoading(true);
+    setError(null);
+    void steward
+      .getWebhookDeliveries(selectedId, deliveryQuery)
+      .then((rows) => {
+        if (active) {
+          setDeliveries(rows);
+          setDeliveryOwnerKey(deliveryQueryKey);
+        }
+      })
+      .catch((e: unknown) => {
+        if (active) {
+          setError(e instanceof Error ? e.message : "Failed to load webhook deliveries");
+        }
+      })
+      .finally(() => {
+        if (active) setDeliveryLoading(false);
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [deliveryQuery, deliveryQueryKey, selectedId]);
+
+  function selectWebhook(webhookId: string) {
     setSelectedId(webhookId);
     setExpanded(null);
     setError(null);
-    try {
-      await loadDeliveries(webhookId);
-    } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : "Failed to load webhook deliveries");
-    }
   }
 
   async function retryDelivery(deliveryId: string) {
@@ -267,10 +289,10 @@ export default function WebhooksPage() {
       await steward.deleteWebhook(webhook.id);
       const remaining = webhooks.filter((row) => row.id !== webhook.id);
       setWebhooks(remaining);
-      const nextSelected = remaining[0]?.id ?? "";
-      setSelectedId(nextSelected);
-      setDeliveries([]);
-      if (nextSelected) await loadDeliveries(nextSelected);
+      if (selectedId === webhook.id) {
+        setSelectedId(remaining[0]?.id ?? "");
+        setDeliveries([]);
+      }
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : "Failed to delete webhook endpoint");
     } finally {
@@ -278,11 +300,13 @@ export default function WebhooksPage() {
     }
   }
 
-  const deliveredCount = deliveries.filter((delivery) => delivery.status === "delivered").length;
-  const failedCount = deliveries.filter(
+  const deliveredCount = visibleDeliveries.filter(
+    (delivery) => delivery.status === "delivered",
+  ).length;
+  const failedCount = visibleDeliveries.filter(
     (delivery) => delivery.status === "failed" || delivery.status === "dead",
   ).length;
-  const retryableCount = deliveries.filter(canRetry).length;
+  const retryableCount = visibleDeliveries.filter(canRetry).length;
 
   return (
     <motion.div
@@ -300,7 +324,7 @@ export default function WebhooksPage() {
         </div>
         <button
           type="button"
-          onClick={loadData}
+          onClick={loadWebhooks}
           className="px-4 py-2 text-sm border border-border text-text-tertiary hover:text-text hover:border-accent transition-colors"
         >
           Refresh
@@ -468,7 +492,10 @@ export default function WebhooksPage() {
               ].map((item) => (
                 <div key={item.label} className="border border-border bg-bg-elevated p-4">
                   <div className="text-xs text-text-tertiary">{item.label}</div>
-                  <div className={`font-display text-xl font-700 ${item.className}`}>
+                  <div
+                    data-testid={`webhook-delivery-summary-${item.label.toLowerCase()}`}
+                    className={`font-display text-xl font-700 ${item.className}`}
+                  >
                     {item.value.toLocaleString()}
                   </div>
                 </div>
@@ -546,13 +573,13 @@ export default function WebhooksPage() {
                   </select>
                 </div>
               </div>
-              {deliveryLoading ? (
+              {deliveryQueryLoading ? (
                 <div className="space-y-px bg-border">
                   {[...Array(4)].map((_, i) => (
                     <div key={i} className="bg-bg h-14 animate-pulse" />
                   ))}
                 </div>
-              ) : deliveries.length === 0 ? (
+              ) : visibleDeliveries.length === 0 ? (
                 <div className="py-16 text-center border border-border-subtle">
                   <p className="text-sm text-text-secondary">No deliveries yet</p>
                   <p className="text-xs text-text-tertiary mt-1">
@@ -568,7 +595,7 @@ export default function WebhooksPage() {
                     <span>Time</span>
                   </div>
                   <AnimatePresence initial={false}>
-                    {deliveries.map((delivery, i) => (
+                    {visibleDeliveries.map((delivery, i) => (
                       <motion.div
                         key={delivery.id}
                         initial={{ opacity: 0, y: 4 }}
