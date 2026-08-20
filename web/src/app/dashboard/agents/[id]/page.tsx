@@ -11,7 +11,7 @@ import type {
 import { motion } from "framer-motion";
 import Link from "next/link";
 import { useParams } from "next/navigation";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { ChainBadge } from "@/components/chain-badge";
 import { CopyButton } from "@/components/copy-button";
 import { StatusBadge } from "@/components/status-badge";
@@ -210,8 +210,11 @@ export default function AgentDetailPage() {
     credentialSecret: string;
   } | null>(null);
   const [savingSignerId, setSavingSignerId] = useState<string | null>(null);
+  const loadGeneration = useRef(0);
 
   const loadAgent = useCallback(async () => {
+    const generation = ++loadGeneration.current;
+    const isCurrentLoad = () => loadGeneration.current === generation;
     try {
       setLoading(true);
       setError(null);
@@ -255,6 +258,7 @@ export default function AgentDetailPage() {
               }) as const,
           ),
       ]);
+      if (!isCurrentLoad()) return;
       setAgent(agentData);
 
       if ("error" in policyResult) {
@@ -284,8 +288,10 @@ export default function AgentDetailPage() {
       // if portfolio providers are unavailable.
       try {
         const accountData = await steward.getAgentAccount(agentId);
+        if (!isCurrentLoad()) return;
         setAccount(accountData);
       } catch (err: unknown) {
+        if (!isCurrentLoad()) return;
         setAccount(null);
         setAccountError(err instanceof Error ? err.message : "Failed to load account portfolio");
 
@@ -294,15 +300,17 @@ export default function AgentDetailPage() {
         // balance data, so do not issue this duplicate vault request in that case.
         try {
           const balanceData = await steward.getBalance(agentId);
+          if (!isCurrentLoad()) return;
           setBalance(balanceData as BalanceInfo);
         } catch {
           /* the explicit account error remains the authoritative UI state */
         }
       }
     } catch (e: unknown) {
+      if (!isCurrentLoad()) return;
       setError(e instanceof Error ? e.message : "Failed to load agent");
     } finally {
-      setLoading(false);
+      if (isCurrentLoad()) setLoading(false);
     }
   }, [agentId]);
 
@@ -396,6 +404,9 @@ export default function AgentDetailPage() {
 
   useEffect(() => {
     void loadAgent();
+    return () => {
+      loadGeneration.current += 1;
+    };
   }, [loadAgent]);
 
   if (loading) {
