@@ -20,6 +20,84 @@
 
 services:
 
+  # Production schema/role activation is an ordered, one-shot dependency
+  # chain. Core migrations run as the bundled admin, ownership is transferred
+  # to a distinct migration role, enabled plugin migrations run as that role,
+  # and RLS is activated before either runtime receives traffic.
+  steward-core-migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: steward:${STEWARD_IMAGE_TAG:-0.4.2}
+    command: ["bun", "packages/api/scripts/migrate-production.ts", "core"]
+    restart: "no"
+    environment:
+      MIGRATION_DATABASE_URL: "${STEWARD_ADMIN_DATABASE_URL:-postgresql://${POSTGRES_USER:-steward}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@postgres:5432/${POSTGRES_DB:-steward}}"
+      STEWARD_ALLOW_INSECURE_DB: "${STEWARD_ALLOW_INSECURE_DB:-}"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [backend]
+
+  steward-rls-bootstrap:
+    image: postgres:16-alpine@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685
+    entrypoint: ["psql"]
+    command:
+      - "--no-psqlrc"
+      - "-v"
+      - "steward_app_role=steward_app"
+      - "-v"
+      - "steward_migration_role=steward_migrator"
+      - "-v"
+      - "steward_bootstrap_role=steward_bootstrap_owner"
+      - "-f"
+      - "/scripts/postgres/rls-compose-bootstrap.sql"
+    restart: "no"
+    environment:
+      PGDATABASE: "${STEWARD_ADMIN_DATABASE_URL:-postgresql://${POSTGRES_USER:-steward}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@postgres:5432/${POSTGRES_DB:-steward}}"
+      STEWARD_DB_APP_PASSWORD: "${STEWARD_DB_APP_PASSWORD:?STEWARD_DB_APP_PASSWORD must be set}"
+      STEWARD_DB_MIGRATION_PASSWORD: "${STEWARD_DB_MIGRATION_PASSWORD:?STEWARD_DB_MIGRATION_PASSWORD must be set}"
+    volumes:
+      - ./scripts/postgres:/scripts/postgres:ro
+    depends_on:
+      steward-core-migrate:
+        condition: service_completed_successfully
+    networks: [backend]
+
+  steward-plugin-migrate:
+    image: steward:${STEWARD_IMAGE_TAG:-0.4.2}
+    command: ["bun", "packages/api/scripts/migrate-production.ts", "plugins"]
+    restart: "no"
+    environment:
+      MIGRATION_DATABASE_URL: "${MIGRATION_DATABASE_URL:-postgresql://steward_migrator:${STEWARD_DB_MIGRATION_PASSWORD:?STEWARD_DB_MIGRATION_PASSWORD must be set}@postgres:5432/${POSTGRES_DB:-steward}}"
+      STEWARD_PLUGINS: "${STEWARD_PLUGINS:-}"
+      STEWARD_ALLOW_INSECURE_DB: "${STEWARD_ALLOW_INSECURE_DB:-}"
+    depends_on:
+      steward-rls-bootstrap:
+        condition: service_completed_successfully
+    networks: [backend]
+
+  steward-rls-activate:
+    image: postgres:16-alpine@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685
+    entrypoint: ["psql"]
+    command:
+      - "--no-psqlrc"
+      - "-v"
+      - "steward_app_role=steward_app"
+      - "-v"
+      - "steward_migration_role=steward_migrator"
+      - "-f"
+      - "/scripts/postgres/rls-activate.sql"
+    restart: "no"
+    environment:
+      PGDATABASE: "${STEWARD_ADMIN_DATABASE_URL:-postgresql://${POSTGRES_USER:-steward}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@postgres:5432/${POSTGRES_DB:-steward}}"
+    volumes:
+      - ./scripts/postgres:/scripts/postgres:ro
+    depends_on:
+      steward-plugin-migrate:
+        condition: service_completed_successfully
+    networks: [backend]
+
   # ── Steward API ──────────────────────────────────────────────────────────────
   steward-api:
     build:
@@ -33,13 +111,16 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      steward-rls-activate:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
     environment:
       PORT: "${PORT:-3200}"
       STEWARD_BIND_HOST: "0.0.0.0"
       NODE_ENV: "${NODE_ENV:-production}"
-      DATABASE_URL: "${DATABASE_URL:-postgresql://${POSTGRES_USER:-steward}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@postgres:5432/${POSTGRES_DB:-steward}}"
+      DATABASE_URL: "${DATABASE_URL:-postgresql://steward_app:${STEWARD_DB_APP_PASSWORD:?STEWARD_DB_APP_PASSWORD must be set}@postgres:5432/${POSTGRES_DB:-steward}}"
+      SKIP_MIGRATIONS: "true"
       STEWARD_MASTER_PASSWORD: "${STEWARD_MASTER_PASSWORD:?STEWARD_MASTER_PASSWORD is required}"
       STEWARD_JWT_SECRET: "${STEWARD_JWT_SECRET:?STEWARD_JWT_SECRET is required}"
       STEWARD_EMAIL_CODE_SECRET: "${STEWARD_EMAIL_CODE_SECRET:?STEWARD_EMAIL_CODE_SECRET is required}"
@@ -142,7 +223,7 @@ services:
     environment:
       STEWARD_PROXY_PORT: "${STEWARD_PROXY_PORT:-8080}"
       NODE_ENV: "${NODE_ENV:-production}"
-      DATABASE_URL: "${DATABASE_URL:-postgresql://${POSTGRES_USER:-steward}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@postgres:5432/${POSTGRES_DB:-steward}}"
+      DATABASE_URL: "${DATABASE_URL:-postgresql://steward_app:${STEWARD_DB_APP_PASSWORD:?STEWARD_DB_APP_PASSWORD must be set}@postgres:5432/${POSTGRES_DB:-steward}}"
       STEWARD_MASTER_PASSWORD: "${STEWARD_MASTER_PASSWORD:?STEWARD_MASTER_PASSWORD is required}"
       STEWARD_JWT_SECRET: "${STEWARD_JWT_SECRET:?STEWARD_JWT_SECRET is required}"
       STEWARD_EMAIL_CODE_SECRET: "${STEWARD_EMAIL_CODE_SECRET:?STEWARD_EMAIL_CODE_SECRET is required}"

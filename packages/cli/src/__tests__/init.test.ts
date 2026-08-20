@@ -66,7 +66,7 @@ describe("steward init", () => {
     }
   });
 
-  test("default DATABASE_URL password matches generated POSTGRES_PASSWORD", () => {
+  test("generates distinct admin, migration, and runtime database authorities", () => {
     const dir = mkdtempSync(join(tmpdir(), "steward-cli-"));
     try {
       const envPath = join(dir, ".env");
@@ -74,17 +74,20 @@ describe("steward init", () => {
       const env = readFileSync(envPath, "utf8");
 
       const postgresPassword = envValue(env, "POSTGRES_PASSWORD");
+      const appPassword = envValue(env, "STEWARD_DB_APP_PASSWORD");
+      const migrationPassword = envValue(env, "STEWARD_DB_MIGRATION_PASSWORD");
       const databaseUrl = envValue(env, "DATABASE_URL");
       expect(postgresPassword).toMatch(/^[0-9a-f]{48}$/);
-      expect(databaseUrl).toBeDefined();
-      const urlPassword = databaseUrl?.match(
-        /^postgresql:\/\/steward:([^@]+)@postgres:5432\/steward$/,
-      )?.[1];
-      expect(urlPassword).toBeDefined();
-      // The single generated password must be interpolated into BOTH values so
-      // postgres and api/proxy/migrations agree on a fresh install (no
-      // split-brain steward-change-me default).
-      expect(urlPassword).toBe(postgresPassword);
+      expect(appPassword).toMatch(/^[0-9a-f]{48}$/);
+      expect(migrationPassword).toMatch(/^[0-9a-f]{48}$/);
+      expect(new Set([postgresPassword, appPassword, migrationPassword]).size).toBe(3);
+      expect(databaseUrl).toBe(`postgresql://steward_app:${appPassword}@postgres:5432/steward`);
+      expect(envValue(env, "MIGRATION_DATABASE_URL")).toBe(
+        `postgresql://steward_migrator:${migrationPassword}@postgres:5432/steward`,
+      );
+      expect(envValue(env, "STEWARD_ADMIN_DATABASE_URL")).toBe(
+        `postgresql://steward:${postgresPassword}@postgres:5432/steward`,
+      );
       expect(env).not.toContain("steward-change-me");
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -102,6 +105,8 @@ describe("steward init", () => {
       });
       const env = readFileSync(envPath, "utf8");
       expect(env).toContain("DATABASE_URL=postgresql://u:p@db.internal:5432/steward");
+      expect(env).toContain("STEWARD_ADMIN_DATABASE_URL=\n");
+      expect(env).toContain("MIGRATION_DATABASE_URL=\n");
       expect(env).toContain("STEWARD_API_URL=http://127.0.0.1:3200");
       // Explicit override wins; the generated POSTGRES_PASSWORD is left as its
       // own random value (operator supplies matching credentials in the URL).
@@ -185,6 +190,8 @@ describe("steward init", () => {
       const eb = readFileSync(b, "utf8");
       const keys = [
         "POSTGRES_PASSWORD",
+        "STEWARD_DB_APP_PASSWORD",
+        "STEWARD_DB_MIGRATION_PASSWORD",
         "STEWARD_MASTER_PASSWORD",
         "STEWARD_JWT_SECRET",
         "STEWARD_EXECUTION_AUTH_SECRET",
@@ -263,6 +270,8 @@ describe("steward init", () => {
       const env = readFileSync(envPath, "utf8");
       const secretKeys = [
         "POSTGRES_PASSWORD",
+        "STEWARD_DB_APP_PASSWORD",
+        "STEWARD_DB_MIGRATION_PASSWORD",
         "STEWARD_MASTER_PASSWORD",
         "STEWARD_JWT_SECRET",
         "STEWARD_EXECUTION_AUTH_SECRET",
@@ -394,9 +403,8 @@ describe("steward init", () => {
         const value = envValue(env, key) as string;
         expect(value).toBeTruthy();
         const occurrences = env.split(value).length - 1;
-        // POSTGRES_PASSWORD legitimately appears twice (assignment + DATABASE_URL);
-        // every other secret must appear exactly once.
-        const expected = key === "POSTGRES_PASSWORD" ? 2 : 1;
+        // Each database secret appears in its assignment and exactly one URL.
+        const expected = key.startsWith("STEWARD_DB_") || key === "POSTGRES_PASSWORD" ? 2 : 1;
         expect(occurrences).toBe(expected);
       }
     } finally {

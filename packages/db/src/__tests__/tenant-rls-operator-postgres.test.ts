@@ -63,7 +63,11 @@ async function runCommand(command: string[], env: Record<string, string | undefi
   return stdout;
 }
 
-async function runOperatorScript(name: string, includeRoles = false) {
+async function runOperatorScript(
+  name: string,
+  includeRoles = false,
+  env: Record<string, string | undefined> = {},
+) {
   const command = ["psql", "--no-psqlrc", "--dbname", databaseUrl(databaseName)];
   if (includeRoles) {
     command.push(
@@ -83,7 +87,7 @@ async function runOperatorScript(name: string, includeRoles = false) {
     );
   }
   command.push("-f", `scripts/postgres/${name}`);
-  return runCommand(command);
+  return runCommand(command, env);
 }
 
 describeWithPostgres("SEC-169 operator lifecycle on the real Steward schema", () => {
@@ -152,9 +156,10 @@ describeWithPostgres("SEC-169 operator lifecycle on the real Steward schema", ()
       `;
       expect(installed).toEqual({ relations: 71, policies: 73 });
 
-      await runOperatorScript("rls-bootstrap.sql", true);
-      await admin.unsafe(`ALTER ROLE ${appRole} PASSWORD '${appRolePassword}'`);
-      await admin.unsafe(`ALTER ROLE ${migrationRole} PASSWORD '${migrationRolePassword}'`);
+      await runOperatorScript("rls-compose-bootstrap.sql", true, {
+        STEWARD_DB_APP_PASSWORD: appRolePassword,
+        STEWARD_DB_MIGRATION_PASSWORD: migrationRolePassword,
+      });
       const roleRows = await db<
         {
           rolname: string;

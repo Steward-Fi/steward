@@ -17,6 +17,8 @@ fi
 export POSTGRES_DB=steward_test
 export POSTGRES_USER=steward
 export POSTGRES_PASSWORD=steward_ci
+export STEWARD_DB_APP_PASSWORD=compose-contract-app-password
+export STEWARD_DB_MIGRATION_PASSWORD=compose-contract-migration-password
 export STEWARD_MASTER_PASSWORD=compose-contract-master-password
 export STEWARD_JWT_SECRET=compose-contract-jwt-secret-32-chars
 export STEWARD_EMAIL_CODE_SECRET=compose-contract-email-code-secret-32-chars
