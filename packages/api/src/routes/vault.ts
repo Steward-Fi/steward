@@ -1963,9 +1963,24 @@ async function requireSignerPermission(
   return { ok: true, auth: { authMode: "signer", signerId: signer.id } };
 }
 
+const pgliteAgentSpendQueues = new Map<string, Promise<void>>();
+
 async function withAgentSpendLock<T>(agentId: string, fn: () => Promise<T>): Promise<T> {
   if (process.env.STEWARD_DB_MODE === "pglite" || process.env.STEWARD_PGLITE_MEMORY === "true") {
-    return fn();
+    const predecessor = pgliteAgentSpendQueues.get(agentId) ?? Promise.resolve();
+    let release!: () => void;
+    const owned = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const tail = predecessor.catch(() => undefined).then(() => owned);
+    pgliteAgentSpendQueues.set(agentId, tail);
+    await predecessor.catch(() => undefined);
+    try {
+      return await fn();
+    } finally {
+      release();
+      if (pgliteAgentSpendQueues.get(agentId) === tail) pgliteAgentSpendQueues.delete(agentId);
+    }
   }
   return db.transaction(async (tx) => {
     await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${agentId}, 0))`);
@@ -3240,6 +3255,7 @@ vaultRoutes.post("/:agentId/actions/transfer", async (c) => {
           token: transfer.token,
           value: transfer.value,
           referenceId: transfer.referenceId,
+          sponsor: transfer.sponsor,
         })
       : null;
   const findExistingTransferAction = async () => {
@@ -3300,105 +3316,6 @@ vaultRoutes.post("/:agentId/actions/transfer", async (c) => {
     });
   }
 
-  const sponsorship = await resolveGasSponsorshipRequest({
-    tenantId,
-    agentId,
-    chainId: transfer.chainId,
-    caip2: toCaip2(transfer.chainId),
-    sponsor: transfer.sponsor,
-  });
-  if (sponsorship.requested && !sponsorship.sponsored) {
-    const status: 403 | 501 | 503 =
-      sponsorship.status === 501 ? 501 : sponsorship.status === 503 ? 503 : 403;
-    return c.json<ApiResponse>({ ok: false, error: sponsorship.error }, status);
-  }
-  const sponsorshipPayload =
-    sponsorship.requested && sponsorship.sponsored
-      ? {
-          requested: true,
-          sponsored: true,
-          provider: sponsorship.provider,
-          mode: sponsorship.mode,
-          estimatedUsd: sponsorship.estimatedUsd,
-        }
-      : transfer.sponsor
-        ? { requested: true, sponsored: false }
-        : undefined;
-
-  const isTokenTransfer = transfer.token !== "native";
-  const isSolanaTransfer = isSolanaActionChain(transfer.chainId);
-  const isSolanaTokenTransfer = isSolanaTransfer && isTokenTransfer;
-  let solanaTokenTransaction:
-    | Awaited<ReturnType<typeof vault.buildSolanaSplTransferTransaction>>
-    | undefined;
-  if (!isTokenTransfer) {
-    const gasGuard = await nativeTransferGasAccountingGuard(
-      c,
-      transfer.to,
-      transfer.chainId,
-      undefined,
-    );
-    if (gasGuard) return gasGuard;
-  } else if (isSolanaTokenTransfer) {
-    try {
-      solanaTokenTransaction = await vault.buildSolanaSplTransferTransaction({
-        tenantId,
-        agentId,
-        to: transfer.to,
-        token: transfer.token,
-        value: transfer.value,
-        chainId: transfer.chainId,
-      });
-    } catch (error) {
-      return c.json<ApiResponse>(
-        { ok: false, error: sanitizeErrorMessage(error) || "Failed to build SPL transfer" },
-        422,
-      );
-    }
-  }
-  const signRequest: SignRequest = {
-    tenantId,
-    agentId,
-    to: isTokenTransfer && !isSolanaTokenTransfer ? transfer.token : transfer.to,
-    value: isTokenTransfer && !isSolanaTokenTransfer ? "0" : transfer.value,
-    data: isTokenTransfer
-      ? isSolanaTokenTransfer
-        ? solanaTokenTransaction?.transaction
-        : encodeErc20TransferCalldata(transfer.to, transfer.value)
-      : undefined,
-    chainId: transfer.chainId,
-    gasLimit: isTokenTransfer && !isSolanaTokenTransfer ? "65000" : undefined,
-    broadcast: transfer.broadcast,
-  };
-  const baseTransferActionPayload = transferActionPayload({
-    token: transfer.token,
-    recipient: transfer.to,
-    amount: transfer.value,
-    broadcast: transfer.broadcast,
-    referenceId: transfer.referenceId,
-    sponsorship: sponsorshipPayload,
-  });
-  const policySet = await getScopedPolicySet(tenantId, agentId, c.get("agentPolicyIds"));
-  const conditionSets = await loadConditionSetsForPolicies(tenantId, policySet);
-
-  const rateLimitResult = await enforceRateLimit(agentId, policySet);
-  if (!rateLimitResult.allowed) {
-    if (rateLimitResult.headers) {
-      for (const [key, value] of Object.entries(rateLimitResult.headers)) {
-        c.header(key, value);
-      }
-    }
-    return c.json<ApiResponse>(
-      { ok: false, error: rateLimitResult.reason || "Rate limit exceeded" },
-      429,
-    );
-  }
-  if (rateLimitResult.headers) {
-    for (const [key, value] of Object.entries(rateLimitResult.headers)) {
-      c.header(key, value);
-    }
-  }
-
   return withAgentSpendLock(agentId, async () => {
     const lockedLookup = await findExistingTransferAction();
     if ("conflict" in lockedLookup) {
@@ -3422,6 +3339,140 @@ vaultRoutes.post("/:agentId/actions/transfer", async (c) => {
               : undefined,
         data: transferActionResponseFromTransaction(lockedExistingAction),
       });
+    }
+
+    const sponsorship = await resolveGasSponsorshipRequest({
+      tenantId,
+      agentId,
+      chainId: transfer.chainId,
+      caip2: toCaip2(transfer.chainId),
+      sponsor: transfer.sponsor,
+    });
+    if (sponsorship.requested && !sponsorship.sponsored) {
+      const status: 403 | 501 | 503 =
+        sponsorship.status === 501 ? 501 : sponsorship.status === 503 ? 503 : 403;
+      return c.json<ApiResponse>({ ok: false, error: sponsorship.error }, status);
+    }
+    const sponsorshipPayload =
+      sponsorship.requested && sponsorship.sponsored
+        ? {
+            requested: true,
+            sponsored: true,
+            provider: sponsorship.provider,
+            mode: sponsorship.mode,
+            estimatedUsd: sponsorship.estimatedUsd,
+          }
+        : transfer.sponsor
+          ? { requested: true, sponsored: false }
+          : undefined;
+
+    const isTokenTransfer = transfer.token !== "native";
+    const isSolanaTransfer = isSolanaActionChain(transfer.chainId);
+    const isSolanaTokenTransfer = isSolanaTransfer && isTokenTransfer;
+    let solanaTokenTransaction:
+      | Awaited<ReturnType<typeof vault.buildSolanaSplTransferTransaction>>
+      | undefined;
+    if (!isTokenTransfer) {
+      const gasGuard = await nativeTransferGasAccountingGuard(
+        c,
+        transfer.to,
+        transfer.chainId,
+        undefined,
+      );
+      if (gasGuard) return gasGuard;
+    } else if (isSolanaTokenTransfer) {
+      try {
+        solanaTokenTransaction = await vault.buildSolanaSplTransferTransaction({
+          tenantId,
+          agentId,
+          to: transfer.to,
+          token: transfer.token,
+          value: transfer.value,
+          chainId: transfer.chainId,
+        });
+      } catch (error) {
+        return c.json<ApiResponse>(
+          { ok: false, error: sanitizeErrorMessage(error) || "Failed to build SPL transfer" },
+          422,
+        );
+      }
+    }
+    const signRequest: SignRequest = {
+      tenantId,
+      agentId,
+      to: isTokenTransfer && !isSolanaTokenTransfer ? transfer.token : transfer.to,
+      value: isTokenTransfer && !isSolanaTokenTransfer ? "0" : transfer.value,
+      data: isTokenTransfer
+        ? isSolanaTokenTransfer
+          ? solanaTokenTransaction?.transaction
+          : encodeErc20TransferCalldata(transfer.to, transfer.value)
+        : undefined,
+      chainId: transfer.chainId,
+      gasLimit: isTokenTransfer && !isSolanaTokenTransfer ? "65000" : undefined,
+      broadcast: transfer.broadcast,
+    };
+    const parsedSolanaTransferApproval =
+      isSolanaTokenTransfer && signRequest.data
+        ? (() => {
+            const derived = deriveSolanaPolicyFields(parseSolanaTransaction(signRequest.data!));
+            if (!derived.fullyParsed) {
+              throw new SolanaExecutionLeaseConflictError(
+                "Built SPL transfer is not fully policy-verifiable",
+              );
+            }
+            const parsedEffects = solanaParsedEffects(derived);
+            return {
+              signingMode: "parsed" as const,
+              blindSigned: false,
+              parsedEffects,
+              reviewedRequestDigest: solanaCallerIntentDigest({
+                route: "transfer",
+                tenantId,
+                agentId,
+                chainId: transfer.chainId,
+                broadcast: transfer.broadcast,
+                signingMode: "spl",
+                to: transfer.to,
+                value: transfer.value,
+                token: transfer.token,
+                referenceId: transfer.referenceId,
+                sponsor: transfer.sponsor,
+                messageDigest: normalizedSolanaMessageDigest(signRequest.data),
+                parsedEffects,
+              }),
+            };
+          })()
+        : null;
+    const baseTransferActionPayload = {
+      ...transferActionPayload({
+        token: transfer.token,
+        recipient: transfer.to,
+        amount: transfer.value,
+        broadcast: transfer.broadcast,
+        referenceId: transfer.referenceId,
+        sponsorship: sponsorshipPayload,
+      }),
+      ...(parsedSolanaTransferApproval ?? {}),
+    };
+    const policySet = await getScopedPolicySet(tenantId, agentId, c.get("agentPolicyIds"));
+    const conditionSets = await loadConditionSetsForPolicies(tenantId, policySet);
+
+    const rateLimitResult = await enforceRateLimit(agentId, policySet);
+    if (!rateLimitResult.allowed) {
+      if (rateLimitResult.headers) {
+        for (const [key, value] of Object.entries(rateLimitResult.headers)) {
+          c.header(key, value);
+        }
+      }
+      return c.json<ApiResponse>(
+        { ok: false, error: rateLimitResult.reason || "Rate limit exceeded" },
+        429,
+      );
+    }
+    if (rateLimitResult.headers) {
+      for (const [key, value] of Object.entries(rateLimitResult.headers)) {
+        c.header(key, value);
+      }
     }
 
     const stats = await getTransactionStats(agentId, signRequest.chainId);
@@ -3460,14 +3511,7 @@ vaultRoutes.post("/:agentId/actions/transfer", async (c) => {
         data: signRequest.data,
         chainId: signRequest.chainId,
         actionType: "transfer",
-        actionPayload: transferActionPayload({
-          token: transfer.token,
-          recipient: transfer.to,
-          amount: transfer.value,
-          broadcast: signRequest.broadcast !== false,
-          referenceId: transfer.referenceId,
-          sponsorship: sponsorshipPayload,
-        }),
+        actionPayload: baseTransferActionPayload,
         policyResults: evaluation.results,
       });
       if (evaluation.requiresManualApproval) {
@@ -3576,7 +3620,7 @@ vaultRoutes.post("/:agentId/actions/transfer", async (c) => {
           toAddress: transfer.to,
           value: transfer.value,
           broadcastRequested: true,
-          blindSigned: isSolanaTokenTransfer,
+          blindSigned: false,
           policyResults: evaluation.results,
           binding: solanaRecoveryBinding,
           actionType: "transfer",
@@ -4099,9 +4143,14 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
     approvalRecoveryMetadata.signingMode === "blind"
       ? approvalRecoveryMetadata.signingMode
       : null;
+  const isQueuedSolanaSplTransfer =
+    isSolana &&
+    transactionRow.actionType === "transfer" &&
+    typeof approvalRecoveryMetadata.token === "string" &&
+    approvalRecoveryMetadata.token !== "native";
   if (
     isSolana &&
-    transactionRow.actionType === "solana_transaction" &&
+    (transactionRow.actionType === "solana_transaction" || isQueuedSolanaSplTransfer) &&
     queuedSolanaSigningMode === null
   ) {
     return c.json<ApiResponse>(
@@ -4128,6 +4177,7 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
         chainId: transactionRow.chainId,
         toAddress: transactionRow.toAddress,
         value: transactionRow.value,
+        actionType: transactionRow.actionType,
         metadata: approvalRecoveryMetadata,
       });
     } catch (error) {
@@ -8687,6 +8737,7 @@ type SolanaCallerIntent = {
   value: string;
   token?: string;
   referenceId?: string;
+  sponsor?: boolean;
   messageDigest?: string;
   parsedEffects?: {
     movesNativeSol: boolean;
@@ -8723,6 +8774,7 @@ function assertQueuedParsedSolanaIntent(input: {
   chainId: number;
   toAddress: string | null;
   value: string | null;
+  actionType: string | null;
   metadata: Record<string, unknown>;
 }): void {
   const summary = parseSolanaTransaction(input.transaction);
@@ -8734,15 +8786,34 @@ function assertQueuedParsedSolanaIntent(input: {
     );
   }
   const parsedEffects = solanaParsedEffects(derived);
+  const isTransfer = input.actionType === "transfer";
+  const token =
+    isTransfer && typeof input.metadata.token === "string" ? input.metadata.token : null;
+  if (isTransfer && (!token || token === "native")) {
+    throw new SolanaExecutionLeaseConflictError(
+      "Approved parsed Solana transfer has no reviewed token binding",
+    );
+  }
   const expectedDigest = solanaCallerIntentDigest({
-    route: "sign-solana",
+    route: isTransfer ? "transfer" : "sign-solana",
     tenantId: input.tenantId,
     agentId: input.agentId,
     chainId: input.chainId,
     broadcast: input.metadata.broadcast !== false,
-    signingMode: "parsed",
+    signingMode: isTransfer ? "spl" : "parsed",
     to: input.toAddress,
     value: input.value,
+    ...(isTransfer
+      ? {
+          token: token!,
+          referenceId:
+            typeof input.metadata.referenceId === "string" ? input.metadata.referenceId : undefined,
+          sponsor:
+            input.metadata.sponsorship !== null &&
+            typeof input.metadata.sponsorship === "object" &&
+            (input.metadata.sponsorship as Record<string, unknown>).requested === true,
+        }
+      : {}),
     messageDigest: normalizedSolanaMessageDigest(input.transaction),
     parsedEffects,
   });
@@ -8750,7 +8821,8 @@ function assertQueuedParsedSolanaIntent(input: {
     input.metadata.blindSigned !== false ||
     canonicalJsonStringify(input.metadata.parsedEffects) !==
       canonicalJsonStringify(parsedEffects) ||
-    input.metadata.requestDigest !== expectedDigest
+    (isTransfer ? input.metadata.reviewedRequestDigest : input.metadata.requestDigest) !==
+      expectedDigest
   ) {
     throw new SolanaExecutionLeaseConflictError(
       "Approved parsed Solana transaction no longer matches its reviewed policy effects",
@@ -8768,6 +8840,7 @@ function createSolanaTransferRecoveryBinding(
     token: string;
     value: string;
     referenceId?: string;
+    sponsor?: boolean;
   },
 ): SolanaRecoveryBinding {
   const key = c.req.header("Idempotency-Key");
@@ -8782,6 +8855,7 @@ function createSolanaTransferRecoveryBinding(
       broadcast: true,
       chainId: input.chainId,
       referenceId: input.referenceId,
+      sponsor: input.sponsor,
       signingMode: input.token === "native" ? "native" : "spl",
       tenantId: input.tenantId,
       to: input.to,
@@ -10207,7 +10281,8 @@ vaultRoutes.post("/:agentId/sign-solana", async (c) => {
       // authoritative policy check for ALL transaction shapes, so we only pass the
       // legacy envelope for the single-SystemProgram-transfer case (where it adds a
       // redundant byte-level assertion). For token / multi-instruction transactions
-      // the parser already verified the effects against policy above.
+      // the parser already verified the effects against policy above and the
+      // parsed-mode flag keeps that authority distinct from unsafe blind signing.
       const isSingleNativeTransfer =
         derived.movesNativeSol &&
         derived.summary.tokenTransfers.length === 0 &&
@@ -10242,7 +10317,7 @@ vaultRoutes.post("/:agentId/sign-solana", async (c) => {
         // the caller attests via allowBlindSign instead.
         ...(isSingleNativeTransfer
           ? { expectedTo: toAddress, expectedValue: txValue }
-          : { allowBlindSign: true }),
+          : { allowParsedSign: true }),
         onBroadcastPrepared: (checkpoint) =>
           checkpointSolanaBroadcastSubmission(txId, agentId, ownerToken, checkpoint),
       });

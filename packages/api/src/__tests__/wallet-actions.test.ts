@@ -20,6 +20,8 @@ const BLOCKED_SOLANA = "8J9kqM5kV8Fh1Q3b6N2pR4tYwLcXzAaBbCcDdEeFfGg";
 const SOLANA_MINT = "So11111111111111111111111111111111111111112";
 const ORIGINAL_REDIS_URL = process.env.REDIS_URL;
 const ORIGINAL_REDIS_REQUIRED = process.env.REDIS_REQUIRED;
+const SERIALIZED_SPL_TRANSFER =
+  "AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAAIF6UPMZDHYTBaZ84s4PYnN/eY1HN26Qb0JbdXSFq+/tZZh2lmTgEh2HN5KGa6apfFlq4jJQUkI4Gb/A5au2FTWSwR4o/Pr5Ke0sw7ZpMZJP/G4jcxjJ16HXZc5252A2hpABpuIV/6rgYT7aH9jRhjANdrEOdwa6ztVmKDwAAAAAAEG3fbh12Whk9nL4UbO63msHLSF7V9bN5E6jPWFfv8AqQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQQEAgMBAAoMewAAAAAAAAAJ";
 
 function expectedErc20TransferCalldata(recipient: string, amount: string) {
   return `0xa9059cbb${recipient.toLowerCase().replace(/^0x/, "").padStart(64, "0")}${BigInt(amount).toString(16).padStart(64, "0")}`;
@@ -650,7 +652,7 @@ describe("wallet transfer actions", () => {
       expect(request.value).toBe("123");
       expect(request.chainId).toBe(101);
       return {
-        transaction: "base64-spl-transfer-transaction",
+        transaction: SERIALIZED_SPL_TRANSFER,
         sourceTokenAccount: "source-token-account",
         destinationTokenAccount: "destination-token-account",
         mint: SOLANA_MINT,
@@ -661,7 +663,7 @@ describe("wallet transfer actions", () => {
     context.vault.signSolanaTransaction = async (request) => {
       expect(request.agentId).toBe(SOLANA_AGENT_ID);
       expect(request.tenantId).toBe(TENANT_ID);
-      expect(request.transaction).toBe("base64-spl-transfer-transaction");
+      expect(request.transaction).toBe(SERIALIZED_SPL_TRANSFER);
       expect(request.chainId).toBe(101);
       expect(request.broadcast).toBe(false);
       expect(request.expectedTo).toBeUndefined();
@@ -714,9 +716,9 @@ describe("wallet transfer actions", () => {
       expect(tx.status).toBe("signed");
       expect(tx.toAddress).toBe(ALLOWED_SOLANA);
       expect(tx.value).toBe("123");
-      expect(tx.data).toBe("base64-spl-transfer-transaction");
+      expect(tx.data).toBe(SERIALIZED_SPL_TRANSFER);
       expect(tx.chainId).toBe(101);
-      expect(tx.actionPayload).toEqual({
+      expect(tx.actionPayload).toMatchObject({
         type: "transfer",
         token: SOLANA_MINT,
         recipient: ALLOWED_SOLANA,
@@ -737,14 +739,28 @@ describe("wallet transfer actions", () => {
     const signature =
       "4oL4p7QvN3UH7V5wMGZgW5PuzEk4A9LXLHk9RxAoKjDKuLbQBsfXN8kEvKfj5K1oEJa8wFF6RVp2h7pP9w2f51ZV";
     let signCalls = 0;
-    context.vault.buildSolanaSplTransferTransaction = async () => ({
-      transaction: "base64-durable-spl-transfer",
-      sourceTokenAccount: "source-token-account",
-      destinationTokenAccount: "destination-token-account",
-      mint: SOLANA_MINT,
-      tokenProgram: "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
-      decimals: 9,
+    let buildCalls = 0;
+    let signalBuildStarted!: () => void;
+    let releaseBuild!: () => void;
+    const buildStarted = new Promise<void>((resolve) => {
+      signalBuildStarted = resolve;
     });
+    const buildRelease = new Promise<void>((resolve) => {
+      releaseBuild = resolve;
+    });
+    context.vault.buildSolanaSplTransferTransaction = async () => {
+      buildCalls += 1;
+      signalBuildStarted();
+      await buildRelease;
+      return {
+        transaction: SERIALIZED_SPL_TRANSFER,
+        sourceTokenAccount: "source-token-account",
+        destinationTokenAccount: "destination-token-account",
+        mint: SOLANA_MINT,
+        tokenProgram: "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+        decimals: 9,
+      };
+    };
     context.vault.signSolanaTransaction = async (request) => {
       signCalls += 1;
       await request.onBroadcastPrepared?.({
@@ -753,7 +769,7 @@ describe("wallet transfer actions", () => {
       });
       throw new ExternalBroadcastOutcomeUnknownError(signature);
     };
-    const request = (value = "123", referenceId?: string) =>
+    const request = (value = "123", referenceId?: string, sponsor = false) =>
       app.request(`/vault/${SOLANA_AGENT_ID}/actions/transfer`, {
         method: "POST",
         headers: { "content-type": "application/json", "Idempotency-Key": "durable-spl" },
@@ -764,13 +780,21 @@ describe("wallet transfer actions", () => {
           chainId: 101,
           broadcast: true,
           referenceId,
+          sponsor,
         }),
       });
 
     try {
-      const first = await request();
+      const firstPromise = request();
+      await buildStarted;
+      const concurrentReplayPromise = request();
+      await Bun.sleep(25);
+      expect(buildCalls).toBe(1);
+      releaseBuild();
+      const [first, concurrentReplay] = await Promise.all([firstPromise, concurrentReplayPromise]);
       const firstBody = await first.json();
       expect(first.status, JSON.stringify(firstBody)).toBe(202);
+      expect(concurrentReplay.status).toBe(202);
       expect(firstBody).toMatchObject({
         ok: false,
         data: { txHash: signature, reconciliationRequired: true },
@@ -782,11 +806,15 @@ describe("wallet transfer actions", () => {
       const replay = await request();
       expect(replay.status).toBe(202);
       expect(signCalls).toBe(1);
+      expect(buildCalls).toBe(1);
       const mismatch = await request("124");
       expect(mismatch.status).toBe(409);
       const referenceMismatch = await request("123", "durable-spl-other-reference");
       expect(referenceMismatch.status).toBe(409);
+      const sponsorshipMismatch = await request("123", undefined, true);
+      expect(sponsorshipMismatch.status).toBe(409);
       expect(signCalls).toBe(1);
+      expect(buildCalls).toBe(1);
 
       const [row] = await getDb()
         .select()
@@ -866,7 +894,7 @@ describe("wallet transfer actions", () => {
     const originalSignSolanaTransaction = context.vault.signSolanaTransaction.bind(context.vault);
 
     context.vault.buildSolanaSplTransferTransaction = async () => ({
-      transaction: "base64-spl-transfer-transaction-without-mint-policy",
+      transaction: SERIALIZED_SPL_TRANSFER,
       sourceTokenAccount: "source-token-account",
       destinationTokenAccount: "destination-token-account",
       mint: SOLANA_MINT,

@@ -81,10 +81,13 @@ const AGENT_SEPARATION = `approval-separation-${Date.now()}`;
 const AGENT_REMOVED_REVIEWER = `approval-removed-reviewer-${Date.now()}`;
 const AGENT_SOLANA = `approval-solana-${Date.now()}`;
 const SOLANA_RECIPIENT = "7J9kqM5kV8Fh1Q3b6N2pR4tYwLcXzAaBbCcDdEeFfGg";
+const SOLANA_MINT = "So11111111111111111111111111111111111111112";
 const SOLANA_SIGNATURE =
   "4oL4p7QvN3UH7V5wMGZgW5PuzEk4A9LXLHk9RxAoKjDKuLbQBsfXN8kEvKfj5K1oEJa8wFF6RVp2h7pP9w2f51ZV";
 const PARSED_SOLANA_APPROVAL =
   "AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAAEDE2JOpI+vbFRBKrMBRo65Mmbpvxu+OB3jAD7OG1gkRxwBnOCkX3JAiColqvYSlWPsVuUlI49mXDMD4GFd2CRJhQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAgIAAQwCAAAALQEAAAAAAAA=";
+const PARSED_SPL_APPROVAL =
+  "AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAAIF6UPMZDHYTBaZ84s4PYnN/eY1HN26Qb0JbdXSFq+/tZZh2lmTgEh2HN5KGa6apfFlq4jJQUkI4Gb/A5au2FTWSwR4o/Pr5Ke0sw7ZpMZJP/G4jcxjJ16HXZc5252A2hpABpuIV/6rgYT7aH9jRhjANdrEOdwa6ztVmKDwAAAAAAEG3fbh12Whk9nL4UbO63msHLSF7V9bN5E6jPWFfv8AqQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQQEAgMBAAoMewAAAAAAAAAJ";
 
 // One app per auth posture. The approve route reads auth purely from context
 // variables, so a per-test middleware that sets exactly the desired posture is
@@ -193,7 +196,7 @@ async function seedPendingSolanaApproval() {
     name: "Approval Gate Solana Agent",
     walletAddress: "9J9kqM5kV8Fh1Q3b6N2pR4tYwLcXzAaBbCcDdEeFfGg",
   });
-  await seedWhitelist(AGENT_SOLANA, [SOLANA_RECIPIENT]);
+  await seedWhitelist(AGENT_SOLANA, [SOLANA_RECIPIENT, SOLANA_MINT]);
   await getDb()
     .insert(transactions)
     .values({
@@ -464,6 +467,34 @@ describe("vault approval gates (real /approve path)", () => {
         }),
       )
       .digest("hex");
+    const parsedSpl = deriveSolanaPolicyFields(parseSolanaTransaction(PARSED_SPL_APPROVAL));
+    const parsedSplEffects = {
+      movesNativeSol: parsedSpl.movesNativeSol,
+      programIds: parsedSpl.programIds,
+      tokenTransfers: parsedSpl.summary.tokenTransfers.map((transfer) => ({
+        mint: transfer.mint,
+        destination: transfer.destination,
+        amount: transfer.amount,
+      })),
+    };
+    const parsedSplRequestDigest = createHash("sha256")
+      .update(
+        canonicalJsonStringify({
+          route: "transfer",
+          tenantId: TENANT_ID,
+          agentId: AGENT_SOLANA,
+          chainId: 101,
+          broadcast: true,
+          signingMode: "spl",
+          to: SOLANA_RECIPIENT,
+          value: "123",
+          token: SOLANA_MINT,
+          sponsor: false,
+          messageDigest: normalizedSolanaMessageDigest(PARSED_SPL_APPROVAL),
+          parsedEffects: parsedSplEffects,
+        }),
+      )
+      .digest("hex");
     for (const mode of ["parsed", "blind"] as const) {
       const txId = `tx-solana-${mode}-approval`;
       await getDb()
@@ -527,6 +558,66 @@ describe("vault approval gates (real /approve path)", () => {
       agentId: AGENT_SOLANA,
       status: "pending",
     });
+    await getDb()
+      .insert(transactions)
+      .values({
+        id: "tx-solana-spl-transfer-approval",
+        agentId: AGENT_SOLANA,
+        status: "pending",
+        toAddress: SOLANA_RECIPIENT,
+        value: "123",
+        data: PARSED_SPL_APPROVAL,
+        chainId: 101,
+        actionType: "transfer",
+        actionPayload: {
+          type: "transfer",
+          token: SOLANA_MINT,
+          recipient: SOLANA_RECIPIENT,
+          amount: "123",
+          broadcast: true,
+          signingMode: "parsed",
+          blindSigned: false,
+          parsedEffects: parsedSplEffects,
+          reviewedRequestDigest: parsedSplRequestDigest,
+        },
+        policyResults: [],
+      });
+    await getDb().insert(approvalQueue).values({
+      id: "aq-tx-solana-spl-transfer-approval",
+      txId: "tx-solana-spl-transfer-approval",
+      agentId: AGENT_SOLANA,
+      status: "pending",
+    });
+    await getDb()
+      .insert(transactions)
+      .values({
+        id: "tx-solana-spl-transfer-tampered",
+        agentId: AGENT_SOLANA,
+        status: "pending",
+        toAddress: SOLANA_RECIPIENT,
+        value: "123",
+        data: PARSED_SOLANA_APPROVAL,
+        chainId: 101,
+        actionType: "transfer",
+        actionPayload: {
+          type: "transfer",
+          token: SOLANA_MINT,
+          recipient: SOLANA_RECIPIENT,
+          amount: "123",
+          broadcast: true,
+          signingMode: "parsed",
+          blindSigned: false,
+          parsedEffects: parsedSplEffects,
+          reviewedRequestDigest: parsedSplRequestDigest,
+        },
+        policyResults: [],
+      });
+    await getDb().insert(approvalQueue).values({
+      id: "aq-tx-solana-spl-transfer-tampered",
+      txId: "tx-solana-spl-transfer-tampered",
+      agentId: AGENT_SOLANA,
+      status: "pending",
+    });
 
     const seen: Array<{
       transaction: string;
@@ -552,12 +643,19 @@ describe("vault approval gates (real /approve path)", () => {
     try {
       expect((await approve(app, AGENT_SOLANA, "tx-solana-parsed-approval")).status).toBe(200);
       expect((await approve(app, AGENT_SOLANA, "tx-solana-blind-approval")).status).toBe(200);
+      expect((await approve(app, AGENT_SOLANA, "tx-solana-spl-transfer-approval")).status).toBe(
+        200,
+      );
+      expect((await approve(app, AGENT_SOLANA, "tx-solana-spl-transfer-tampered")).status).toBe(
+        409,
+      );
       expect((await approve(app, AGENT_SOLANA, "tx-solana-parsed-tampered-approval")).status).toBe(
         409,
       );
       expect(seen).toEqual([
         { transaction: PARSED_SOLANA_APPROVAL, allowParsedSign: true },
         { transaction: "serialized-blind-solana-approval", allowBlindSign: true },
+        { transaction: PARSED_SPL_APPROVAL, allowParsedSign: true },
       ]);
       const rows = await getDb()
         .select({ id: transactions.id, actionPayload: transactions.actionPayload })
