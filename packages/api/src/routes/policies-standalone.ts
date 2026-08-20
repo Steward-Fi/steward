@@ -5,12 +5,16 @@
  */
 
 import { toPersistedPolicyRule } from "@stwd/db";
-import { eq, inArray, sql } from "drizzle-orm";
+import { invalidateCache } from "@stwd/redis";
+import { redactedThrownDiagnostics } from "@stwd/shared";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import { Hono } from "hono";
-import { writeAuditEvent } from "../services/audit";
+import { isRedisAvailable } from "../middleware/redis";
+import { withTenantAuditedTransaction, writeAuditEvent } from "../services/audit";
 import {
   type ApiResponse,
   type AppVariables,
+  agents,
   db,
   ensureAgentForTenant,
   getConditionSetReferenceValidationError,
@@ -93,17 +97,38 @@ interface SimulateBody {
 
 async function snapshotAgentPolicies(agentIds: string[]): Promise<PolicyRow[]> {
   if (agentIds.length === 0) return [];
-  return db.select().from(policies).where(inArray(policies.agentId, agentIds));
+  return db
+    .select()
+    .from(policies)
+    .where(inArray(policies.agentId, agentIds))
+    .orderBy(policies.agentId, policies.id);
 }
 
-async function restoreAgentPolicies(agentIds: string[], snapshot: PolicyRow[]): Promise<void> {
-  if (agentIds.length === 0) return;
-  await db.transaction(async (tx) => {
-    await tx.delete(policies).where(inArray(policies.agentId, agentIds));
-    if (snapshot.length > 0) {
-      await tx.insert(policies).values(snapshot);
+function authoritySnapshot(value: unknown): string {
+  return JSON.stringify(value, (_key, item) => (item instanceof Date ? item.toISOString() : item));
+}
+
+function policySetSnapshot(rows: PolicyRow[]): string {
+  return authoritySnapshot(
+    [...rows].sort(
+      (left, right) => left.agentId.localeCompare(right.agentId) || left.id.localeCompare(right.id),
+    ),
+  );
+}
+
+function templateRevisionSnapshot(template: PolicyTemplate): string {
+  return authoritySnapshot(template);
+}
+
+async function invalidateAgentPolicyCaches(agentIds: string[], tenantId: string): Promise<void> {
+  if (!isRedisAvailable()) return;
+  for (const agentId of agentIds) {
+    try {
+      await invalidateCache(agentId, tenantId);
+    } catch (error) {
+      console.error("[policy] Failed to invalidate policy cache", redactedThrownDiagnostics(error));
     }
-  });
+  }
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -135,6 +160,10 @@ function rowToTemplate(row: any): PolicyTemplate {
   };
 }
 
+function resultRows<T>(result: unknown): T[] {
+  return (Array.isArray(result) ? result : ((result as { rows?: T[] })?.rows ?? [])) as T[];
+}
+
 async function listTemplatesPage(
   tenantId: string,
   limit: number,
@@ -148,16 +177,22 @@ async function listTemplatesPage(
         LIMIT ${limit}
         OFFSET ${offset}`,
   );
-  return (rows as any[]).map(rowToTemplate);
+  return resultRows(rows).map(rowToTemplate);
 }
 
-async function getTemplate(tenantId: string, id: string): Promise<PolicyTemplate | null> {
-  const rows = await db.execute(
+async function getTemplate(
+  tenantId: string,
+  id: string,
+  executor: typeof db = db,
+  lock = false,
+): Promise<PolicyTemplate | null> {
+  const rows = await executor.execute(
     sql`SELECT id, tenant_id, name, description, rules, is_default, created_at, updated_at
         FROM policy_templates
-        WHERE id = ${id}::uuid AND tenant_id = ${tenantId}`,
+        WHERE id = ${id}::uuid AND tenant_id = ${tenantId}
+        ${lock ? sql`FOR UPDATE` : sql``}`,
   );
-  const row = (rows as any[])[0];
+  const row = resultRows(rows)[0];
   return row ? rowToTemplate(row) : null;
 }
 
@@ -171,46 +206,46 @@ async function _insertTemplate(
         VALUES (${id}::uuid, ${tenantId}, ${body.name}, ${body.description ?? null}, ${JSON.stringify(body.rules ?? [])}::jsonb, ${body.isDefault ?? false})
         RETURNING id, tenant_id, name, description, rules, is_default, created_at, updated_at`,
   );
-  return rowToTemplate((rows as any[])[0]);
+  return rowToTemplate(resultRows(rows)[0]);
 }
 
 async function insertTemplateWithQuota(
   tenantId: string,
   body: CreateTemplateBody,
   id: string,
+  tx: typeof db,
 ): Promise<PolicyTemplate> {
-  return db.transaction(async (tx) => {
-    if (process.env.STEWARD_DB_MODE !== "pglite" && process.env.STEWARD_PGLITE_MEMORY !== "true") {
-      await tx.execute(
-        sql`select pg_advisory_xact_lock(hashtext(${`policy_templates:${tenantId}`}))`,
-      );
-    }
+  if (process.env.STEWARD_DB_MODE !== "pglite" && process.env.STEWARD_PGLITE_MEMORY !== "true") {
+    await tx.execute(
+      sql`select pg_advisory_xact_lock(hashtext(${`policy_templates:${tenantId}`}))`,
+    );
+  }
 
-    const countRows = await tx.execute(
-      sql`SELECT count(*)::integer AS count
+  const countRows = await tx.execute(
+    sql`SELECT count(*)::integer AS count
           FROM policy_templates
           WHERE tenant_id = ${tenantId}`,
+  );
+  const currentCount = Number(resultRows<{ count?: number | string }>(countRows)[0]?.count ?? 0);
+  if (currentCount >= MAX_POLICY_TEMPLATES_PER_TENANT) {
+    throw new Error(
+      `Tenant cannot have more than ${MAX_POLICY_TEMPLATES_PER_TENANT} policy templates`,
     );
-    const currentCount = Number((countRows as Array<{ count?: number | string }>)[0]?.count ?? 0);
-    if (currentCount >= MAX_POLICY_TEMPLATES_PER_TENANT) {
-      throw new Error(
-        `Tenant cannot have more than ${MAX_POLICY_TEMPLATES_PER_TENANT} policy templates`,
-      );
-    }
+  }
 
-    const rows = await tx.execute(
-      sql`INSERT INTO policy_templates (id, tenant_id, name, description, rules, is_default)
+  const rows = await tx.execute(
+    sql`INSERT INTO policy_templates (id, tenant_id, name, description, rules, is_default)
           VALUES (${id}::uuid, ${tenantId}, ${body.name}, ${body.description ?? null}, ${JSON.stringify(body.rules ?? [])}::jsonb, ${body.isDefault ?? false})
           RETURNING id, tenant_id, name, description, rules, is_default, created_at, updated_at`,
-    );
-    return rowToTemplate((rows as any[])[0]);
-  });
+  );
+  return rowToTemplate(resultRows(rows)[0]);
 }
 
 async function updateTemplate(
   tenantId: string,
   id: string,
   body: Partial<CreateTemplateBody>,
+  executor: typeof db = db,
 ): Promise<PolicyTemplate | null> {
   // Build parameterized update using drizzle sql template literals.
   // Each field is set conditionally via CASE/COALESCE to avoid raw SQL injection.
@@ -219,9 +254,11 @@ async function updateTemplate(
   const hasRules = body.rules !== undefined;
   const hasDefault = body.isDefault !== undefined;
 
-  if (!hasName && !hasDesc && !hasRules && !hasDefault) return getTemplate(tenantId, id);
+  if (!hasName && !hasDesc && !hasRules && !hasDefault) {
+    return getTemplate(tenantId, id, executor);
+  }
 
-  const rows = await db.execute(
+  const rows = await executor.execute(
     sql`UPDATE policy_templates SET
       name = CASE WHEN ${hasName} THEN ${body.name ?? ""} ELSE name END,
       description = CASE WHEN ${hasDesc} THEN ${body.description ?? null} ELSE description END,
@@ -231,37 +268,19 @@ async function updateTemplate(
     WHERE id = ${id}::uuid AND tenant_id = ${tenantId}
     RETURNING id, tenant_id, name, description, rules, is_default, created_at, updated_at`,
   );
-  const row = (rows as any[])[0];
+  const row = resultRows(rows)[0];
   return row ? rowToTemplate(row) : null;
 }
 
-async function deleteTemplate(tenantId: string, id: string): Promise<boolean> {
-  const result = await db.execute(
+async function deleteTemplate(
+  tenantId: string,
+  id: string,
+  executor: typeof db = db,
+): Promise<boolean> {
+  const result = await executor.execute(
     sql`DELETE FROM policy_templates WHERE id = ${id}::uuid AND tenant_id = ${tenantId} RETURNING id`,
   );
-  return (result as any[]).length > 0;
-}
-
-async function restoreTemplateSnapshot(snapshot: PolicyTemplate): Promise<void> {
-  await db.transaction(async (tx) => {
-    await tx.execute(
-      sql`DELETE FROM policy_templates WHERE id = ${snapshot.id}::uuid AND tenant_id = ${snapshot.tenantId}`,
-    );
-    await tx.execute(
-      sql`INSERT INTO policy_templates
-          (id, tenant_id, name, description, rules, is_default, created_at, updated_at)
-          VALUES (
-            ${snapshot.id}::uuid,
-            ${snapshot.tenantId},
-            ${snapshot.name},
-            ${snapshot.description},
-            ${JSON.stringify(snapshot.rules)}::jsonb,
-            ${snapshot.isDefault},
-            ${new Date(snapshot.createdAt)},
-            ${new Date(snapshot.updatedAt)}
-          )`,
-    );
-  });
+  return resultRows(result).length > 0;
 }
 
 function isWeiSimulationValue(value: unknown): value is string {
@@ -502,27 +521,29 @@ policiesStandaloneRoutes.post("/", async (c) => {
       userAgent: c.req.header("user-agent") ?? null,
       requestId: c.get("requestId") ?? null,
     });
-    const template = await insertTemplateWithQuota(tenantId, body, templateId);
-    try {
-      await writeAuditEvent({
-        tenantId,
-        ...actor,
-        action: "policy.template.create",
-        resourceType: "policy_template",
-        resourceId: template.id,
-        metadata: {
-          name: template.name,
-          ruleCount: template.rules.length,
-          isDefault: template.isDefault,
-        },
-        ipAddress: c.req.header("x-forwarded-for") ?? null,
-        userAgent: c.req.header("user-agent") ?? null,
-        requestId: c.get("requestId") ?? null,
-      });
-    } catch (error) {
-      await deleteTemplate(tenantId, template.id);
-      throw error;
-    }
+    const template = await withTenantAuditedTransaction(
+      tenantId,
+      async (txRaw, appendRequiredAudit) => {
+        const tx = txRaw as typeof db;
+        const created = await insertTemplateWithQuota(tenantId, body, templateId, tx);
+        await appendRequiredAudit({
+          tenantId,
+          ...actor,
+          action: "policy.template.create",
+          resourceType: "policy_template",
+          resourceId: created.id,
+          metadata: {
+            name: created.name,
+            ruleCount: created.rules.length,
+            isDefault: created.isDefault,
+          },
+          ipAddress: c.req.header("x-forwarded-for") ?? null,
+          userAgent: c.req.header("user-agent") ?? null,
+          requestId: c.get("requestId") ?? null,
+        });
+        return created;
+      },
+    );
     return c.json<ApiResponse<PolicyTemplate>>({ ok: true, data: template }, 201);
   } catch (e: unknown) {
     const message = e instanceof Error ? e.message : "Unknown error";
@@ -635,32 +656,46 @@ policiesStandaloneRoutes.put("/:id", async (c) => {
       userAgent: c.req.header("user-agent") ?? null,
       requestId: c.get("requestId") ?? null,
     });
-    const template = await updateTemplate(tenantId, id, body);
-    if (!template) {
+    const mutation = await withTenantAuditedTransaction(
+      tenantId,
+      async (txRaw, appendRequiredAudit) => {
+        const tx = txRaw as typeof db;
+        const locked = await getTemplate(tenantId, id, tx, true);
+        if (!locked) return { kind: "missing" as const };
+        if (templateRevisionSnapshot(locked) !== templateRevisionSnapshot(before)) {
+          return { kind: "conflict" as const };
+        }
+        const updated = await updateTemplate(tenantId, id, body, tx);
+        if (!updated) return { kind: "missing" as const };
+        await appendRequiredAudit({
+          tenantId,
+          ...actor,
+          action: "policy.template.update",
+          resourceType: "policy_template",
+          resourceId: updated.id,
+          metadata: {
+            name: updated.name,
+            ruleCount: updated.rules.length,
+            isDefault: updated.isDefault,
+            fields: Object.keys(body),
+          },
+          ipAddress: c.req.header("x-forwarded-for") ?? null,
+          userAgent: c.req.header("user-agent") ?? null,
+          requestId: c.get("requestId") ?? null,
+        });
+        return { kind: "updated" as const, template: updated };
+      },
+    );
+    if (mutation.kind === "missing") {
       return c.json<ApiResponse>({ ok: false, error: "Policy template not found" }, 404);
     }
-    try {
-      await writeAuditEvent({
-        tenantId,
-        ...actor,
-        action: "policy.template.update",
-        resourceType: "policy_template",
-        resourceId: template.id,
-        metadata: {
-          name: template.name,
-          ruleCount: template.rules.length,
-          isDefault: template.isDefault,
-          fields: Object.keys(body),
-        },
-        ipAddress: c.req.header("x-forwarded-for") ?? null,
-        userAgent: c.req.header("user-agent") ?? null,
-        requestId: c.get("requestId") ?? null,
-      });
-    } catch (error) {
-      await restoreTemplateSnapshot(before);
-      throw error;
+    if (mutation.kind === "conflict") {
+      return c.json<ApiResponse>(
+        { ok: false, error: "Policy template changed concurrently; retry against latest revision" },
+        409,
+      );
     }
-    return c.json<ApiResponse<PolicyTemplate>>({ ok: true, data: template });
+    return c.json<ApiResponse<PolicyTemplate>>({ ok: true, data: mutation.template });
   } catch (e: unknown) {
     const message = e instanceof Error ? e.message : "Unknown error";
     return c.json<ApiResponse>({ ok: false, error: message }, 400);
@@ -699,25 +734,39 @@ policiesStandaloneRoutes.delete("/:id", async (c) => {
     userAgent: c.req.header("user-agent") ?? null,
     requestId: c.get("requestId") ?? null,
   });
-  const deleted = await deleteTemplate(tenantId, id);
-  if (!deleted) {
+  const mutation = await withTenantAuditedTransaction(
+    tenantId,
+    async (txRaw, appendRequiredAudit) => {
+      const tx = txRaw as typeof db;
+      const locked = await getTemplate(tenantId, id, tx, true);
+      if (!locked) return { kind: "missing" as const };
+      if (templateRevisionSnapshot(locked) !== templateRevisionSnapshot(existing)) {
+        return { kind: "conflict" as const };
+      }
+      const deleted = await deleteTemplate(tenantId, id, tx);
+      if (!deleted) return { kind: "missing" as const };
+      await appendRequiredAudit({
+        tenantId,
+        ...actor,
+        action: "policy.template.delete",
+        resourceType: "policy_template",
+        resourceId: id,
+        metadata: { name: locked.name, ruleCount: locked.rules.length },
+        ipAddress: c.req.header("x-forwarded-for") ?? null,
+        userAgent: c.req.header("user-agent") ?? null,
+        requestId: c.get("requestId") ?? null,
+      });
+      return { kind: "deleted" as const };
+    },
+  );
+  if (mutation.kind === "missing") {
     return c.json<ApiResponse>({ ok: false, error: "Policy template not found" }, 404);
   }
-  try {
-    await writeAuditEvent({
-      tenantId,
-      ...actor,
-      action: "policy.template.delete",
-      resourceType: "policy_template",
-      resourceId: id,
-      metadata: { name: existing.name, ruleCount: existing.rules.length },
-      ipAddress: c.req.header("x-forwarded-for") ?? null,
-      userAgent: c.req.header("user-agent") ?? null,
-      requestId: c.get("requestId") ?? null,
-    });
-  } catch (error) {
-    await restoreTemplateSnapshot(existing);
-    throw error;
+  if (mutation.kind === "conflict") {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Policy template changed concurrently; retry against latest revision" },
+      409,
+    );
   }
 
   return c.json<ApiResponse>({ ok: true, data: { deleted: true } });
@@ -744,7 +793,7 @@ policiesStandaloneRoutes.post("/:id/assign", async (c) => {
   if (!body || !Array.isArray(body.agentIds) || body.agentIds.length === 0) {
     return c.json<ApiResponse>({ ok: false, error: "agentIds must be a non-empty array" }, 400);
   }
-  const uniqueAgentIds = Array.from(new Set(body.agentIds));
+  const uniqueAgentIds = Array.from(new Set(body.agentIds)).sort();
   if (
     uniqueAgentIds.length > MAX_POLICY_ASSIGN_AGENTS ||
     uniqueAgentIds.some((agentId) => !isValidAgentId(agentId))
@@ -789,6 +838,7 @@ policiesStandaloneRoutes.post("/:id/assign", async (c) => {
     );
   }
 
+  const previousPolicies = await snapshotAgentPolicies(uniqueAgentIds);
   const actor = policyAuditActor(c, tenantId);
   await writeAuditEvent({
     tenantId,
@@ -802,49 +852,91 @@ policiesStandaloneRoutes.post("/:id/assign", async (c) => {
     requestId: c.get("requestId") ?? null,
   });
 
-  // Copy template rules to each agent's policies (replace existing)
-  const assigned: string[] = [];
-  const previousPolicies = await snapshotAgentPolicies(uniqueAgentIds);
-  await db.transaction(async (tx) => {
-    for (const agentId of uniqueAgentIds) {
-      await tx.delete(policies).where(eq(policies.agentId, agentId));
-
-      if (persistedRules.length > 0) {
-        await tx.insert(policies).values(
-          persistedRules.map((rule) => ({
-            id: crypto.randomUUID(),
-            agentId,
-            type: rule.type,
-            enabled: rule.enabled,
-            config: rule.config,
-          })),
-        );
+  const mutation = await withTenantAuditedTransaction(
+    tenantId,
+    async (txRaw, appendRequiredAudit) => {
+      const tx = txRaw as typeof db;
+      const lockedTemplate = await getTemplate(tenantId, id, tx, true);
+      if (!lockedTemplate) return { kind: "missing-template" as const };
+      if (templateRevisionSnapshot(lockedTemplate) !== templateRevisionSnapshot(template)) {
+        return { kind: "template-conflict" as const };
       }
-      assigned.push(agentId);
-    }
-  });
-  try {
-    await writeAuditEvent({
-      tenantId,
-      ...actor,
-      action: "policy.template.assign",
-      resourceType: "policy_template",
-      resourceId: id,
-      metadata: { assignedAgents: assigned, rulesApplied: template.rules.length },
-      ipAddress: c.req.header("x-forwarded-for") ?? null,
-      userAgent: c.req.header("user-agent") ?? null,
-      requestId: c.get("requestId") ?? null,
-    });
-  } catch (error) {
-    await restoreAgentPolicies(uniqueAgentIds, previousPolicies);
-    throw error;
+
+      for (const agentId of uniqueAgentIds) {
+        // Match the canonical authority lock used by direct agent-policy
+        // mutations (#715), in sorted agent order for multi-agent assignment.
+        if (process.env.STEWARD_PGLITE_MEMORY !== "true") {
+          await tx.execute(
+            sql`SELECT pg_advisory_xact_lock(hashtextextended(${`steward_agent_authority_${tenantId}:${agentId}`}, 0))`,
+          );
+        }
+        const [lockedAgent] = await tx
+          .select({ id: agents.id })
+          .from(agents)
+          .where(and(eq(agents.id, agentId), eq(agents.tenantId, tenantId)))
+          .for("update");
+        if (!lockedAgent) return { kind: "missing-agents" as const, agentIds: [agentId] };
+      }
+      const lockedPolicies = await tx
+        .select()
+        .from(policies)
+        .where(inArray(policies.agentId, uniqueAgentIds))
+        .orderBy(policies.agentId, policies.id)
+        .for("update");
+      if (policySetSnapshot(lockedPolicies) !== policySetSnapshot(previousPolicies)) {
+        return { kind: "policy-conflict" as const };
+      }
+
+      for (const agentId of uniqueAgentIds) {
+        await tx.delete(policies).where(eq(policies.agentId, agentId));
+        if (persistedRules.length > 0) {
+          await tx.insert(policies).values(
+            persistedRules.map((rule) => ({
+              id: crypto.randomUUID(),
+              agentId,
+              type: rule.type,
+              enabled: rule.enabled,
+              config: rule.config,
+            })),
+          );
+        }
+      }
+      await appendRequiredAudit({
+        tenantId,
+        ...actor,
+        action: "policy.template.assign",
+        resourceType: "policy_template",
+        resourceId: id,
+        metadata: { assignedAgents: uniqueAgentIds, rulesApplied: lockedTemplate.rules.length },
+        ipAddress: c.req.header("x-forwarded-for") ?? null,
+        userAgent: c.req.header("user-agent") ?? null,
+        requestId: c.get("requestId") ?? null,
+      });
+      return { kind: "assigned" as const };
+    },
+  );
+  if (mutation.kind === "missing-template") {
+    return c.json<ApiResponse>({ ok: false, error: "Policy template not found" }, 404);
   }
+  if (mutation.kind === "missing-agents") {
+    return c.json<ApiResponse>(
+      { ok: false, error: `Agents not found: ${mutation.agentIds.join(", ")}` },
+      404,
+    );
+  }
+  if (mutation.kind === "template-conflict" || mutation.kind === "policy-conflict") {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Policy authority changed concurrently; retry against latest state" },
+      409,
+    );
+  }
+  await invalidateAgentPolicyCaches(uniqueAgentIds, tenantId);
 
   return c.json<ApiResponse>({
     ok: true,
     data: {
       templateId: id,
-      assignedAgents: assigned,
+      assignedAgents: uniqueAgentIds,
       rulesApplied: template.rules.length,
     },
   });
