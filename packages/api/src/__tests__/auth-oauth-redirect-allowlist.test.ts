@@ -229,7 +229,11 @@ describeWithDatabase("OAuth redirect_uri allowlist", () => {
     expect(callbackRes.status).toBe(400);
     const body = (await callbackRes.json()) as { ok: boolean; error: string };
     expect(body.ok).toBe(false);
-    expect(body.error).toContain("redirect_uri is not allowed");
+    // #691 sanitized the browser /callback rejection copy to a non-reflective,
+    // user-facing string (was the reflected internal "redirect_uri is not
+    // allowed for this tenant" error message). The /token path below still
+    // returns the original copy, which is why only this assertion changed.
+    expect(body.error).toContain("The application return address is not allowed.");
   });
 
   it("rejects /token when redirectUri is outside the tenant allowlist", async () => {
