@@ -1,6 +1,7 @@
 "use client";
 
 import { StewardProvider, useAuth } from "@stwd/react";
+import { usePathname } from "next/navigation";
 import { createElement, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { clearAuthToken, setAuthToken, steward } from "@/lib/api";
 import { STEWARD_API_URL } from "@/lib/steward-api-url";
@@ -93,6 +94,7 @@ function AuthTokenSync({ children }: { children: ReactNode }) {
  * page until the wallet bundle loaded.
  */
 function WalletProviderTree({ children }: { children: ReactNode }) {
+  const pathname = usePathname();
   const [Mounted, setMounted] = useState<{
     EVMWalletProvider: React.ComponentType<{ config: unknown; children: ReactNode }>;
     SolanaWalletProvider: React.ComponentType<{ endpoint: string; children: ReactNode }>;
@@ -115,6 +117,13 @@ function WalletProviderTree({ children }: { children: ReactNode }) {
       cancelled = true;
     };
   }, []);
+
+  if (pathname === "/dashboard/webhooks" || pathname?.startsWith("/dashboard/webhooks/")) {
+    // Webhook administration does not use wallet capabilities. Keep it outside
+    // the optional wallet wrappers so their late load cannot remount the page
+    // and repeat configuration or delivery requests.
+    return children;
+  }
 
   if (!Mounted) {
     // Server render and pre-hydration client render: pass children

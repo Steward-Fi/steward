@@ -276,9 +276,10 @@ export default function WebhooksPage() {
       await steward.deleteWebhook(webhook.id);
       const remaining = webhooks.filter((row) => row.id !== webhook.id);
       setWebhooks(remaining);
-      const nextSelected = remaining[0]?.id ?? "";
-      setSelectedId(nextSelected);
-      setDeliveries([]);
+      if (selectedId === webhook.id) {
+        setSelectedId(remaining[0]?.id ?? "");
+        setDeliveries([]);
+      }
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : "Failed to delete webhook endpoint");
     } finally {

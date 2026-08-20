@@ -296,18 +296,13 @@ test.describe("Dashboard webhook delivery history", () => {
       expect(dialog.message()).toContain("Delete webhook endpoint");
       await dialog.accept();
     });
-    const createdRequestsBeforeDelete = deliveryRequestCounts.get("webhook-created") ?? 0;
-    await page.getByText("https://hooks.example.test/steward").first().click();
-    await expect
-      .poll(() => deliveryRequestCounts.get("webhook-created") ?? 0)
-      .toBe(createdRequestsBeforeDelete + 1);
     const firstWebhookRequestsBeforeDelete = deliveryRequestCounts.get("webhook-1") ?? 0;
     await page.getByRole("button", { name: "Delete" }).first().click();
     expect(deletedEndpointId).toBe("webhook-created");
     await expect(page.getByText("https://hooks.example.test/steward")).toHaveCount(0);
-    await expect
-      .poll(() => deliveryRequestCounts.get("webhook-1") ?? 0)
-      .toBe(firstWebhookRequestsBeforeDelete + 1);
+    await expect(page.getByText("https://example.test/steward-webhooks").first()).toBeVisible();
+    await expect(page.getByRole("button", { name: /user\.created pending/ })).toBeVisible();
+    expect(deliveryRequestCounts.get("webhook-1") ?? 0).toBe(firstWebhookRequestsBeforeDelete);
     expect(webhookListRequestCount).toBe(1);
 
     await page.screenshot({
