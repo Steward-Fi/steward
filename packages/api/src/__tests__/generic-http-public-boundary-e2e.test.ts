@@ -165,6 +165,11 @@ describe.skipIf(!process.env.DATABASE_URL)("#201 generic-http true public-bounda
     const proxy = await import("@stwd/proxy/src/handlers/proxy");
     ({ dispatchGovernedExecution } = await import("@stwd/proxy/src/handlers/governed-execution"));
     proxy.__setResolveProxyHostForTests(async () => [{ address: "93.184.216.34", family: 4 }]);
+    proxy.__setCheckProxyRateLimitForTests(async () => ({
+      allowed: true,
+      remaining: Number.POSITIVE_INFINITY,
+      resetMs: 0,
+    }));
     proxy.__setForwardProxyRequestForTests(async (url, method, headers, body) => {
       const bytes = body
         ? new Uint8Array(await new Response(body).arrayBuffer())
@@ -180,6 +185,8 @@ describe.skipIf(!process.env.DATABASE_URL)("#201 generic-http true public-bounda
   });
 
   afterAll(async () => {
+    const proxy = await import("@stwd/proxy/src/handlers/proxy");
+    proxy.__resetProxyHandlerTestHooksForTests();
     // Agent deletion is deliberately guarded while an enabled route can still
     // resolve its secret. Disable first, let the tenant cascade remove all
     // governed authority rows, then remove the non-FK route/secret records.
