@@ -143,6 +143,38 @@ describeWithPostgres("SEC-169 operator lifecycle on the real Steward schema", ()
         rolbypassrls: false,
         rolsuper: false,
       });
+      const [platformRlsPrivileges] = await db<
+        {
+          schema_usage: boolean;
+          tenant_id_execute: boolean;
+          user_id_execute: boolean;
+          audit_sequence_usage: boolean;
+          other_sequence_usage: boolean;
+          default_sequence_grant: boolean;
+        }[]
+      >`
+        SELECT
+          has_schema_privilege(${platformRole}, 'steward_rls', 'USAGE') AS schema_usage,
+          has_function_privilege(${platformRole}, 'steward_rls.tenant_id()', 'EXECUTE') AS tenant_id_execute,
+          has_function_privilege(${platformRole}, 'steward_rls.user_id()', 'EXECUTE') AS user_id_execute,
+          has_sequence_privilege(${platformRole}, 'public.audit_events_id_seq', 'USAGE,SELECT') AS audit_sequence_usage,
+          has_sequence_privilege(${platformRole}, 'public.audit_checkpoints_id_seq', 'USAGE') AS other_sequence_usage,
+          EXISTS (
+            SELECT 1
+            FROM pg_default_acl defaults
+            CROSS JOIN LATERAL aclexplode(COALESCE(defaults.defaclacl, '{}'::aclitem[])) privilege
+            JOIN pg_roles granted_role ON granted_role.oid = privilege.grantee
+            WHERE defaults.defaclobjtype = 'S' AND granted_role.rolname = ${platformRole}
+          ) AS default_sequence_grant
+      `;
+      expect(platformRlsPrivileges).toEqual({
+        schema_usage: true,
+        tenant_id_execute: true,
+        user_id_execute: false,
+        audit_sequence_usage: true,
+        other_sequence_usage: false,
+        default_sequence_grant: false,
+      });
 
       await runOperatorScript("rls-activate.sql");
       const [activated] = await db<{ enabled: number; forced: number; maintenance: number }[]>`
@@ -267,8 +299,20 @@ describeWithPostgres("SEC-169 operator lifecycle on the real Steward schema", ()
           STEWARD_RETENTION_DEACTIVATED_USERS_DELETE_CONFIRMED: undefined,
         },
       );
-      expect(appRoleEvidence).toContain('"ok":true');
-      expect(appRoleEvidence).toContain('"platformAuditActions"');
+      const evidenceLine = appRoleEvidence
+        .trim()
+        .split("\n")
+        .findLast((line) => line.startsWith('{"ok":true'));
+      expect(evidenceLine).toBeDefined();
+      const evidence = JSON.parse(evidenceLine as string) as {
+        ok: boolean;
+        platformAuditActions: string[];
+      };
+      expect(evidence.ok).toBe(true);
+      expect(evidence.platformAuditActions).toEqual([
+        "user.deactivate",
+        "user.deactivate.authorized",
+      ]);
 
       await runOperatorScript("rls-rollback.sql");
       const [rolledBack] = await db<{ enabled: number; forced: number }[]>`

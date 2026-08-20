@@ -553,7 +553,7 @@ export async function withTenantAuditedTransactionOnDb<T>(
   };
 
   const execute = async () => {
-    if (hasTenantTransactionDatabase({ tenantId })) {
+    if (hasTenantTransactionDatabase({ tenantId, db })) {
       assertRemaining();
       // The authenticated middleware owns the outer tenant transaction. Keep
       // mutations in a savepoint so a Hono error response cannot accidentally

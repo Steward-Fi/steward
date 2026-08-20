@@ -499,6 +499,7 @@ const tenantTransactionDatabaseStorage = new AsyncLocalStorage<RequestDatabaseCo
 export function hasTenantTransactionDatabase(expected?: {
   tenantId: string;
   userId?: string;
+  db?: RequestDatabase;
 }): boolean {
   const context = tenantTransactionDatabaseStorage.getStore();
   if (!context?.active || !context.db) return false;
@@ -509,6 +510,7 @@ export function hasTenantTransactionDatabase(expected?: {
   ) {
     throw new Error("RLS_TENANT_DATABASE_CONTEXT_MISMATCH");
   }
+  if (expected?.db !== undefined && expected.db !== context.db) return false;
   return true;
 }
 

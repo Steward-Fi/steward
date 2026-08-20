@@ -3731,15 +3731,6 @@ platform.patch("/users/:userId/deactivate", async (c) => {
   if (!body) return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
   const deactivated = body.deactivated !== false;
 
-  await writeAuditEvent({
-    tenantId: PLATFORM_AUDIT_TENANT_ID,
-    actorType: "platform",
-    action: deactivated ? "user.deactivate.authorized" : "user.reactivate.authorized",
-    resourceType: "user",
-    resourceId: userId,
-    ...auditCtx(c),
-  });
-
   const result = await withPlatformAuthorityDatabase((platformDb) =>
     withTenantAuditedTransactionOnDb(
       platformDb,
@@ -3752,6 +3743,14 @@ platform.patch("/users/:userId/deactivate", async (c) => {
         await tx.execute(
           sql`SELECT pg_advisory_xact_lock(hashtextextended(${"platform_user_account_" + userId}, 0))`,
         );
+        await appendRequiredAudit({
+          tenantId: PLATFORM_AUDIT_TENANT_ID,
+          actorType: "platform",
+          action: deactivated ? "user.deactivate.authorized" : "user.reactivate.authorized",
+          resourceType: "user",
+          resourceId: userId,
+          ...auditCtx(c),
+        });
         const issuedBefore = await revocationStore.revokeUserTokens(userId);
         const [updated] = rowsFromExecute<{
           user_id: string;
@@ -3812,15 +3811,6 @@ platform.delete("/users/:userId", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: "Invalid user id format" }, 400);
   }
 
-  await writeAuditEvent({
-    tenantId: PLATFORM_AUDIT_TENANT_ID,
-    actorType: "platform",
-    action: "user.delete.authorized",
-    resourceType: "user",
-    resourceId: userId,
-    ...auditCtx(c),
-  });
-
   const issuedBefore = await withPlatformAuthorityDatabase((platformDb) =>
     withTenantAuditedTransactionOnDb(
       platformDb,
@@ -3833,6 +3823,14 @@ platform.delete("/users/:userId", async (c) => {
         await tx.execute(
           sql`SELECT pg_advisory_xact_lock(hashtextextended(${"platform_user_account_" + userId}, 0))`,
         );
+        await appendRequiredAudit({
+          tenantId: PLATFORM_AUDIT_TENANT_ID,
+          actorType: "platform",
+          action: "user.delete.authorized",
+          resourceType: "user",
+          resourceId: userId,
+          ...auditCtx(c),
+        });
         const cutoff = await revocationStore.revokeUserTokens(userId);
         const [deleted] = rowsFromExecute<{ user_id: string }>(
           await tx.execute(sql`

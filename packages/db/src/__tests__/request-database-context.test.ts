@@ -64,8 +64,15 @@ describe("request-scoped database context", () => {
           hasTenantTransactionDatabase({
             tenantId: "tenant-a",
             userId: "11111111-1111-4111-8111-111111111111",
+            db: getDb(),
           }),
         ).toBe(true);
+        expect(
+          hasTenantTransactionDatabase({
+            tenantId: "tenant-a",
+            db: { marker: "separate-handle" } as unknown as ReturnType<typeof getDb>,
+          }),
+        ).toBe(false);
         expect(() => hasTenantTransactionDatabase({ tenantId: "tenant-b" })).toThrow(
           "RLS_TENANT_DATABASE_CONTEXT_MISMATCH",
         );
