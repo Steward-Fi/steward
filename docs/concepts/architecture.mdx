@@ -165,17 +165,21 @@ flowchart LR
         W2["Wallets"]
     end
 
-    MK["Master key"] --> TK1["Tenant key 1"]
-    MK --> TK2["Tenant key 2"]
-    TK1 --> S1
-    TK1 --> W1
-    TK2 --> S2
-    TK2 --> W2
+    MP["Master password + deployment KDF salt"] --> SK["Signing-vault KDF root"]
+    MP --> SV["Secret-vault KDF root"]
+    SK --> WK["Random per-record wallet keys"]
+    SV --> CK["Random per-record secret keys"]
+    TC["Tenant + record context"] -->|"AES-GCM AAD"| WK
+    TC -->|"AES-GCM AAD"| CK
+    WK --> W1
+    WK --> W2
+    CK --> S1
+    CK --> S2
 ```
 
-- **Tenants** are isolated at the service layer: every tenant-scoped query filters on `tenantId` and rows carry a composite foreign key to their tenant. This is not database row-level security (RLS is not implemented).
+- **Tenants** are isolated in the service layer through tenant-scoped authorization, filtered queries, and composite foreign keys. PostgreSQL production deployments add installed RLS policies, separate application/platform roles, explicit `ENABLE` + `FORCE ROW LEVEL SECURITY` activation, and a startup/readiness catalog check that fails closed on role or policy drift. Embedded PGLite/local mode does not provide that PostgreSQL RLS boundary. See the [database RLS rollout](../security/database-rls-rollout.mdx).
 - **Agents** authenticate with JWTs scoped to their tenant and agent ID
-- **Secrets** are encrypted with per-tenant encryption keys (key hierarchy: master → tenant → secret)
+- **Secrets and wallet keys** use domain-separated roots derived from the master password and deployment KDF salt. Each ciphertext derives a fresh per-record key from a random salt and authenticates its tenant/agent/name/version context as AES-GCM AAD; Steward does not create a separate stored key per tenant. See the [key-rotation runbook](../runbooks/key-rotation.md) for legacy-root migration and rotation requirements.
 - **Policies** are evaluated per-agent within their tenant context
 
 ## Tech Stack
