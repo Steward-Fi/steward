@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useApprovals } from "../hooks/useApprovals.js";
 import { useStewardContext } from "../provider.js";
 import type { ApprovalQueueProps } from "../types.js";
@@ -15,41 +15,55 @@ export function ApprovalQueue({
 }: ApprovalQueueProps) {
   const { features } = useStewardContext();
   const { pending, isLoading, error, approve, reject, isResolving } = useApprovals(refreshInterval);
-  const [confirmAction, setConfirmAction] = useState<{
+  type ConfirmAction = {
     txId: string;
     action: "approve" | "reject";
-  } | null>(null);
+  };
+  const [confirmAction, setConfirmAction] = useState<ConfirmAction | null>(null);
+  const confirmActionRef = useRef<ConfirmAction | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
 
   if (!features.showApprovalQueue) return null;
 
   const handleConfirm = async () => {
     if (!confirmAction) return;
+    const submittedAction = confirmAction;
     setActionError(null);
     try {
-      if (confirmAction.action === "approve") {
-        await approve(confirmAction.txId);
+      if (submittedAction.action === "approve") {
+        await approve(submittedAction.txId);
       } else {
-        await reject(confirmAction.txId);
+        await reject(submittedAction.txId);
       }
     } catch {
-      setActionError(
-        `We couldn't ${confirmAction.action} this transaction. Check your connection and try again.`,
-      );
+      if (confirmActionRef.current === submittedAction) {
+        setActionError(
+          `We couldn't ${submittedAction.action} this transaction. Check your connection and try again.`,
+        );
+      }
       return;
     }
-    setConfirmAction(null);
-    onResolve?.(confirmAction.txId, confirmAction.action === "approve" ? "approved" : "rejected");
+    if (confirmActionRef.current === submittedAction) {
+      confirmActionRef.current = null;
+      setConfirmAction(null);
+    }
+    onResolve?.(
+      submittedAction.txId,
+      submittedAction.action === "approve" ? "approved" : "rejected",
+    );
   };
 
   const closeConfirmation = () => {
+    confirmActionRef.current = null;
     setActionError(null);
     setConfirmAction(null);
   };
 
   const openConfirmation = (txId: string, action: "approve" | "reject") => {
+    const nextAction = { txId, action };
+    confirmActionRef.current = nextAction;
     setActionError(null);
-    setConfirmAction({ txId, action });
+    setConfirmAction(nextAction);
   };
 
   if (isLoading) {

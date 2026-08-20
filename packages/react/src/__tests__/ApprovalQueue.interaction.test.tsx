@@ -36,6 +36,15 @@ mock.module("../hooks/useApprovals.js", () => ({
         createdAt: new Date().toISOString(),
         policyResults: [],
       },
+      {
+        id: "approval-2",
+        txId: "tx-2",
+        to: "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd",
+        value: "2000000000000000000",
+        chainId: 8453,
+        createdAt: new Date().toISOString(),
+        policyResults: [],
+      },
     ],
     isLoading: false,
     error: null,
@@ -58,6 +67,12 @@ function button(name: string, within: ParentNode = container): HTMLButtonElement
     throw new Error(`button not found: ${name}`);
   }
   return match as unknown as HTMLButtonElement;
+}
+
+function approvalItem(index: number): Element {
+  const item = container.querySelectorAll(".stwd-approval-item").item(index);
+  if (!item) throw new Error(`approval item not found: ${index}`);
+  return item;
 }
 
 async function click(target: HTMLButtonElement): Promise<void> {
@@ -171,5 +186,53 @@ describe("<ApprovalQueue /> mutation failures", () => {
 
     expect(container.textContent).toContain("Approve Transaction?");
     expect(container.textContent).not.toContain("We couldn't approve");
+  });
+
+  test("a delayed success cannot close a different confirmation opened after cancellation", async () => {
+    let finishApprove: (() => void) | undefined;
+    approve.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          finishApprove = resolve;
+        }),
+    );
+
+    await click(button("Approve", approvalItem(0)));
+    await click(button("Approve", container.querySelector(".stwd-modal")!));
+    await click(button("Cancel"));
+    await click(button("Deny", approvalItem(1)));
+
+    await React.act(async () => {
+      finishApprove?.();
+      await Promise.resolve();
+    });
+
+    expect(container.textContent).toContain("Deny Transaction?");
+    expect(container.textContent).not.toContain("Approve Transaction?");
+    expect(onResolve).toHaveBeenCalledWith("tx-1", "approved");
+  });
+
+  test("a delayed failure cannot leak into a different confirmation opened after cancellation", async () => {
+    let failApprove: ((error: Error) => void) | undefined;
+    approve.mockImplementationOnce(
+      () =>
+        new Promise<void>((_resolve, rejectPromise) => {
+          failApprove = rejectPromise;
+        }),
+    );
+
+    await click(button("Approve", approvalItem(0)));
+    await click(button("Approve", container.querySelector(".stwd-modal")!));
+    await click(button("Cancel"));
+    await click(button("Deny", approvalItem(1)));
+
+    await React.act(async () => {
+      failApprove?.(new Error("stale provider failure"));
+      await Promise.resolve();
+    });
+
+    expect(container.textContent).toContain("Deny Transaction?");
+    expect(container.textContent).not.toContain("We couldn't approve");
+    expect(onResolve).not.toHaveBeenCalled();
   });
 });
