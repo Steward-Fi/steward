@@ -163,9 +163,24 @@ describe("vault EVM execution gateway", () => {
 
   it("preserves the legacy Solana sign path without minting an EVM authorization", async () => {
     const beforeRows = await getDb().select().from(executionAuthorizationNonces);
-    const signSpy = spyOn(Vault.prototype, "signTransaction").mockImplementation(async () => {
-      return "solana-signed";
-    });
+    const signSpy = spyOn(Vault.prototype, "signTransaction").mockImplementation(
+      async (request, options) => {
+        await getDb()
+          .insert(transactions)
+          .values({
+            id: options.txId,
+            agentId: request.agentId,
+            status: "signed",
+            toAddress: request.to,
+            value: request.value,
+            data: request.data,
+            chainId: request.chainId,
+            actionPayload: { type: "transaction", broadcast: false },
+            policyResults: options.policyResults ?? [],
+          });
+        return "solana-signed";
+      },
+    );
     try {
       const app = await makeApp();
       const res = await app.request(`/vault/${AGENT_ID}/sign`, {
@@ -1070,7 +1085,11 @@ describe("vault EVM execution gateway", () => {
         headers: { "content-type": "application/json" },
         body: "{}",
       });
-      expect(retry.status).toBe(404);
+      expect(retry.status).toBe(409);
+      expect(await retry.json()).toMatchObject({
+        ok: false,
+        error: "Transaction already processed or not found",
+      });
       expect(provider.signCalls).toBe(1);
       expect(writes).toBe(2);
     } finally {

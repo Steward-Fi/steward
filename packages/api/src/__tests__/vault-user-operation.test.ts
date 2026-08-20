@@ -20,6 +20,7 @@ const dispatchWebhookMock = mock(() => {});
 
 mock.module("../services/webhook-dispatch", () => ({
   dispatchWebhook: dispatchWebhookMock,
+  dispatchWebhookDurably: mock(async () => {}),
 }));
 
 const TENANT_ID = `userop-tenant-${Date.now()}`;

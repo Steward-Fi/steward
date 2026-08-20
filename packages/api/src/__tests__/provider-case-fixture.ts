@@ -17,6 +17,7 @@ import {
   secretRoutes,
   secrets,
   tenants,
+  transactions,
   users,
   userTenants,
   workspaces,
@@ -88,6 +89,7 @@ export async function wipeCase(): Promise<void> {
   await db.execute(sql`DELETE FROM provider_action_audit_outbox`);
   await db.execute(sql`DELETE FROM execution_authorization_nonces`);
   await db.delete(approvalQueue);
+  await db.delete(transactions).where(eq(transactions.agentId, F.AGENT));
   await db.delete(providerActionBindings);
   await db.delete(intents);
   await db.delete(providerGrants);
