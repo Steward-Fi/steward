@@ -21,11 +21,10 @@ import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 
 import { buildBackend, ChallengeStore } from "@stwd/auth";
 import type { AppVariables } from "@stwd/shared";
-import { SecretVault } from "@stwd/vault";
+import type { SecretVault } from "@stwd/vault";
 import type { Context, Hono } from "hono";
 import {
   type ApiResponse,
-  MASTER_PASSWORD,
   safeJsonParse,
   setNoStoreHeaders,
   tenantAuth,
@@ -41,6 +40,7 @@ import {
   X_CONNECT_STATE_TTL_MS,
   XConnectError,
 } from "../services/provider-x-connect";
+import { getConfiguredSecretVault } from "../services/vault-factory";
 import { assertAllowedOAuthRedirectUri } from "./auth";
 
 type RouteContext = Context<{ Variables: AppVariables }>;
@@ -71,10 +71,8 @@ export function __setProviderXConnectStoreForTests(store: PendingConnectStore | 
   _connectStore = store;
 }
 
-let _vault: SecretVault | null = null;
 function getVault(): SecretVault {
-  _vault ??= new SecretVault(MASTER_PASSWORD);
-  return _vault;
+  return getConfiguredSecretVault();
 }
 
 function fail(c: RouteContext, error: unknown): Response {

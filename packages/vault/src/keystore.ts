@@ -1,4 +1,3 @@
-import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 // node:crypto under Cloudflare nodejs_compat:
 //   - createCipheriv / createDecipheriv (AES-256-GCM) - supported.
 //   - randomBytes                                      - supported.
@@ -44,8 +43,16 @@ export interface EncryptedKey {
  */
 export type KeyStoreDomain = "signing-vault" | "secret-vault" | "credential-lease";
 
+export interface KeyStoreRuntimeOptions {
+  /** Immutable runtime classification captured with the custody authority. */
+  nodeEnvironment?: string;
+  /** Immutable legacy-AAD compatibility decision for this keystore instance. */
+  allowLegacyDecryptFallback?: boolean;
+}
+
 export class KeyStore {
   private masterKey: Buffer;
+  private readonly legacyDecryptFallback?: boolean;
 
   /**
    * @param masterPassword  The master password to derive the root encryption key from.
@@ -58,17 +65,22 @@ export class KeyStore {
    *                        roots derived from the same master password. Omit for the legacy
    *                        (undifferentiated) root used before domain separation.
    */
-  constructor(masterPassword: string, masterSalt?: string, domain?: KeyStoreDomain) {
+  constructor(
+    masterPassword: string,
+    masterSalt?: string,
+    domain?: KeyStoreDomain,
+    runtimeOptions: KeyStoreRuntimeOptions = {},
+  ) {
     // Derive a 256-bit root key from master password via scrypt.
     // Each encrypt() call further derives a unique key with a random per-record salt,
     // so the master key salt does not need to be per-record, but SHOULD be unique
     // per deployment to resist precomputed/rainbow-table attacks on the password.
-    const envSalt = masterSalt ?? runtimeEnvironmentValue("STEWARD_KDF_SALT");
+    const envSalt = masterSalt ?? process.env.STEWARD_KDF_SALT;
     let salt: Buffer;
     if (envSalt) {
       salt = decodeKdfSalt(envSalt);
     } else {
-      if (runtimeEnvironmentValue("NODE_ENV") === "production") {
+      if ((runtimeOptions.nodeEnvironment ?? process.env.NODE_ENV) === "production") {
         throw new Error(
           "STEWARD_KDF_SALT is required in production. Generate with: openssl rand -hex 32",
         );
@@ -80,6 +92,7 @@ export class KeyStore {
     // (domain undefined) keep the exact pre-separation derivation for backward compat.
     const domainSalt = domain ? Buffer.from(`steward-kdf:${domain}:${salt.toString("hex")}`) : salt;
     this.masterKey = scryptSync(masterPassword, domainSalt, 32) as Buffer;
+    this.legacyDecryptFallback = runtimeOptions.allowLegacyDecryptFallback;
   }
 
   /**
@@ -119,7 +132,7 @@ export class KeyStore {
         // Keep them readable outside production so operators can migrate by
         // re-encrypting rows. Production fallback must be an explicit break-glass
         // setting; otherwise copied legacy ciphertext can defeat tenant/agent AAD.
-        if (!allowLegacyDecryptFallback()) throw error;
+        if (!(this.legacyDecryptFallback ?? allowLegacyDecryptFallback())) throw error;
       }
     }
     return this.decryptWithContext(encrypted);
@@ -161,6 +174,6 @@ function allowLegacyDecryptFallback(): boolean {
   // ciphertext row would decrypt across contexts). It is ONLY for migrating
   // pre-context-binding ciphertext outside production. Production NEVER takes
   // this path, regardless of the env flag — the flag cannot enable it in prod.
-  if (runtimeEnvironmentValue("NODE_ENV") === "production") return false;
-  return runtimeEnvironmentValue("STEWARD_ALLOW_LEGACY_KEYSTORE_DECRYPT_FALLBACK") === "true";
+  if (process.env.NODE_ENV === "production") return false;
+  return process.env.STEWARD_ALLOW_LEGACY_KEYSTORE_DECRYPT_FALLBACK === "true";
 }

@@ -1,4 +1,3 @@
-import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 /**
  * Platform-level management routes.
  *
@@ -17,7 +16,6 @@ import {
   generateApiKey,
   hashSha256Hex,
   hasPlatformScope,
-  isDevSecretAllowed,
   isValidE164,
   platformAuthMiddleware,
   revocationStore,
@@ -61,7 +59,7 @@ import {
   type TenantOidcProviderConfig,
   type TenantTestAccountConfig,
 } from "@stwd/shared";
-import { KeyStore, Vault } from "@stwd/vault";
+import { type KeyStore, Vault } from "@stwd/vault";
 import {
   and,
   count,
@@ -100,7 +98,7 @@ import {
   publicTestAccount,
   redactedTestAccount,
 } from "../services/test-account-credentials";
-import { getConfiguredVault } from "../services/vault-factory";
+import { getConfiguredKeyStore, getConfiguredVault } from "../services/vault-factory";
 import { dispatchWebhook } from "../services/webhook-dispatch";
 import { getEmailAuthForTenant, invalidateEmailAuthForTenant } from "./auth";
 
@@ -383,7 +381,7 @@ function auditCtx(c: {
 }
 
 function platformIdentityMigrationAllowed(): boolean {
-  return runtimeEnvironmentValue("STEWARD_ALLOW_PLATFORM_IDENTITY_MIGRATION") === "true";
+  return process.env.STEWARD_ALLOW_PLATFORM_IDENTITY_MIGRATION === "true";
 }
 
 function platformIdentityMigrationDisabledResponse(c: Context) {
@@ -408,25 +406,8 @@ function vault(): Vault {
   return getVault();
 }
 
-let _platformKeyStore: KeyStore | undefined;
 function platformKeyStore(): KeyStore {
-  if (_platformKeyStore) return _platformKeyStore;
-
-  const masterPassword = runtimeEnvironmentValue("STEWARD_MASTER_PASSWORD");
-  if (!masterPassword) {
-    if (!isDevSecretAllowed()) {
-      throw new Error(
-        "⛔ STEWARD_MASTER_PASSWORD must be set. For local development only, opt in to the " +
-          "insecure dev fallback with STEWARD_ALLOW_DEV_SECRETS=true.",
-      );
-    }
-    console.warn(
-      "⚠️  [DEV ONLY] Using insecure 'dev-secret' as vault master password. Set STEWARD_MASTER_PASSWORD before going to production!",
-    );
-  }
-
-  _platformKeyStore = new KeyStore(masterPassword || "dev-secret");
-  return _platformKeyStore;
+  return getConfiguredKeyStore(undefined, { allowDevSecretFallback: true });
 }
 
 // ─── Validation helpers ───────────────────────────────────────────────────────

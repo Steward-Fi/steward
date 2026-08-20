@@ -1,4 +1,3 @@
-import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 import { createHash, randomUUID } from "node:crypto";
 import {
   agents,
@@ -117,8 +116,18 @@ import {
 
 export interface VaultConfig {
   masterPassword: string;
+  /** Explicit deployment KDF salt; request-scoped runtimes must never read it globally. */
+  masterSalt?: string;
+  /** Immutable compatibility decision captured with the custody authority. */
+  allowLegacyKeystoreDecryptFallback?: boolean;
+  /** Immutable runtime classification captured with the custody authority. */
+  nodeEnvironment?: string;
   rpcUrl?: string;
   chainId?: number;
+  /** Immutable request-local priority-fee gate; undefined preserves legacy env lookup. */
+  solanaPriorityFees?: boolean;
+  /** Immutable request-local RPC allowlist; null selects the built-in default. */
+  rpcPassthroughAllowlist?: string | null;
   keystoreBackend?: KeystoreBackend;
   externalKeyCustodyProvider?: ExternalKeyCustodyProvider;
   /**
@@ -555,7 +564,7 @@ function custodyTransitionLockKey(
  * transitions across replicas/connections cannot interleave check-then-act.
  */
 function usesCustodyAdvisoryLock(): boolean {
-  return runtimeEnvironmentValue("STEWARD_DB_MODE") !== "pglite" && runtimeEnvironmentValue("STEWARD_PGLITE_MEMORY") !== "true";
+  return process.env.STEWARD_DB_MODE !== "pglite" && process.env.STEWARD_PGLITE_MEMORY !== "true";
 }
 
 interface MnemonicWalletMaterial {
@@ -664,7 +673,13 @@ export class Vault {
     // stays decryptable; the SecretVault uses a distinct domain-separated root, so
     // the two roots are cryptographically independent despite sharing masterPassword.
     this.keyStore =
-      config.keystoreBackend ?? backendFromKeyStore(new KeyStore(config.masterPassword));
+      config.keystoreBackend ??
+      backendFromKeyStore(
+        new KeyStore(config.masterPassword, config.masterSalt, undefined, {
+          nodeEnvironment: config.nodeEnvironment,
+          allowLegacyDecryptFallback: config.allowLegacyKeystoreDecryptFallback,
+        }),
+      );
   }
 
   /** Resolve the Monero backend, or fail closed when Monero is unconfigured. */
@@ -1866,7 +1881,9 @@ export class Vault {
         // falls back to safe defaults on RPC error. Set STEWARD_SOLANA_PRIORITY_FEES=0
         // to revert to the legacy no-compute-budget transfer.
         computeBudget:
-          runtimeEnvironmentValue("STEWARD_SOLANA_PRIORITY_FEES") === "0" ? false : {},
+          (this.config.solanaPriorityFees ?? process.env.STEWARD_SOLANA_PRIORITY_FEES !== "0")
+            ? {}
+            : false,
       });
     } else {
       assertEvmWalletAddressMatches(secretKey, request.walletAddress);
@@ -3849,7 +3866,10 @@ export class Vault {
       throw new Error(`No RPC URL configured for chainId ${chainId}`);
     }
 
-    const configured = runtimeEnvironmentValue("STEWARD_VAULT_RPC_ALLOWLIST");
+    const configured =
+      this.config.rpcPassthroughAllowlist === undefined
+        ? process.env.STEWARD_VAULT_RPC_ALLOWLIST
+        : (this.config.rpcPassthroughAllowlist ?? undefined);
     const configuredMethods = configured
       ?.split(",")
       .map((method) => method.trim())

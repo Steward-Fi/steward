@@ -39,7 +39,7 @@ import type {
   TenantTestAccountConfig,
   TenantTheme,
 } from "@stwd/shared";
-import { type EncryptedKey, KeyStore } from "@stwd/vault";
+import type { EncryptedKey, KeyStore } from "@stwd/vault";
 import { and, eq } from "drizzle-orm";
 import { Hono } from "hono";
 import { DEFAULT_TENANT_CONFIGS } from "../defaults/tenant-configs";
@@ -57,7 +57,6 @@ import {
   db,
   ensureAgentForTenant,
   getConditionSetReferenceValidationError,
-  MASTER_PASSWORD,
   requireTenantLevel,
   safeJsonParse,
   setNoStoreHeaders,
@@ -71,6 +70,7 @@ import {
   createTenantTestAccountConfig,
   publicTestAccount,
 } from "../services/test-account-credentials";
+import { getConfiguredKeyStore } from "../services/vault-factory";
 import { requireTenantId } from "./tenants";
 
 export const tenantConfigRoutes = new Hono<{ Variables: AppVariables }>();
@@ -886,7 +886,7 @@ function serializeTenantAppClientSecret(
 }
 
 function requestSigningKeyStore(): KeyStore {
-  return new KeyStore(MASTER_PASSWORD, undefined, "secret-vault");
+  return getConfiguredKeyStore("secret-vault");
 }
 
 function generateRequestSigningSecret(): { secret: string; prefix: string } {

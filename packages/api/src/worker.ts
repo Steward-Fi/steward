@@ -59,7 +59,7 @@ import {
   type NeonTransactionDbHandle,
   withRequestDatabase,
 } from "@stwd/db";
-import { runtimeEnvironmentValue, withRuntimeEnvironment } from "@stwd/shared/runtime-env";
+import { withRuntimeEnvironment } from "@stwd/shared/runtime-env";
 import { initRedis } from "./middleware/redis";
 
 export interface Env {
@@ -79,6 +79,33 @@ export interface Env {
   /** Deprecated compatibility fallback for existing Worker deployments. */
   STEWARD_SESSION_SECRET?: string;
   STEWARD_MASTER_PASSWORD?: string;
+  STEWARD_KDF_SALT?: string;
+  STEWARD_KMS_PROVIDER?: string;
+  STEWARD_KMS_KEY_ID?: string;
+  STEWARD_AWS_KMS_KEY_ARN?: string;
+  STEWARD_AWS_REGION?: string;
+  AWS_REGION?: string;
+  STEWARD_PKCS11_MODULE?: string;
+  STEWARD_PKCS11_PIN?: string;
+  STEWARD_PKCS11_KEY_LABEL?: string;
+  STEWARD_EXTERNAL_CUSTODY_PROVIDER?: string;
+  STEWARD_EXTERNAL_CUSTODY_AWS_REGION?: string;
+  STEWARD_EXTERNAL_CUSTODY_AWS_MAX_GAS_LIMIT?: string;
+  STEWARD_EXTERNAL_CUSTODY_AWS_MAX_GAS_PRICE_WEI?: string;
+  STEWARD_EXTERNAL_CUSTODY_AWS_MAX_TOTAL_FEE_WEI?: string;
+  STEWARD_ACK_LOCAL_CUSTODY?: string;
+  RPC_URL?: string;
+  CHAIN_ID?: string;
+  STEWARD_SOLANA_PRIORITY_FEES?: string;
+  STEWARD_VAULT_RPC_ALLOWLIST?: string;
+  STEWARD_ALLOW_LEGACY_KEYSTORE_DECRYPT_FALLBACK?: string;
+  STEWARD_SECRET_VAULT_LEGACY_ROOT_FALLBACK?: string;
+  STEWARD_MONERO_WALLET_RPC_URL?: string;
+  STEWARD_MONERO_WALLET_RPC_LOGIN?: string;
+  STEWARD_MONERO_DAEMON_URL?: string;
+  STEWARD_MONERO_NETWORK?: string;
+  STEWARD_WEBHOOK_SECRET_ENCRYPTION_KEY?: string;
+  STEWARD_WEBHOOK_SECRET_KDF_SALT?: string;
   STEWARD_EMBEDDED?: string;
   STEWARD_EMBEDDED_MODE?: string;
   STEWARD_DB_MODE?: string;
@@ -232,7 +259,7 @@ export async function runWorkerUpstreamCredentialLeaseSweep(
   const capabilitiesEnabled =
     options?.capabilitiesEnabled ??
     (await import("./plugin-config")).resolveEnabledPlugins().has("capabilities");
-  if (!capabilitiesEnabled || runtimeEnvironmentValue("STEWARD_UPSTREAM_LEASE_SWEEPER") === "false") return null;
+  if (!capabilitiesEnabled || process.env.STEWARD_UPSTREAM_LEASE_SWEEPER === "false") return null;
   const sweep =
     options?.sweep ??
     (await import("./services/upstream-credential-lease-scheduler"))
@@ -246,9 +273,9 @@ export async function runWorkerGoogleCredentialLifecycleSweep(
 ): Promise<unknown | null> {
   hydrateProcessEnv(env);
   if (
-    runtimeEnvironmentValue("STEWARD_GOOGLE_LIFECYCLE_SWEEPER") === "false" ||
-    !runtimeEnvironmentValue("GOOGLE_PROVIDER_CLIENT_ID") ||
-    !runtimeEnvironmentValue("GOOGLE_PROVIDER_CLIENT_SECRET")
+    process.env.STEWARD_GOOGLE_LIFECYCLE_SWEEPER === "false" ||
+    !env.GOOGLE_PROVIDER_CLIENT_ID ||
+    !env.GOOGLE_PROVIDER_CLIENT_SECRET
   ) {
     return null;
   }
@@ -265,10 +292,10 @@ export async function runWorkerXCredentialLifecycleSweep(
 ): Promise<unknown | null> {
   hydrateProcessEnv(env);
   if (
-    runtimeEnvironmentValue("STEWARD_X_LIFECYCLE_SWEEPER") === "false" ||
-    !runtimeEnvironmentValue("X_CLIENT_ID") ||
-    !runtimeEnvironmentValue("X_CLIENT_SECRET") ||
-    !runtimeEnvironmentValue("STEWARD_MASTER_PASSWORD")
+    process.env.STEWARD_X_LIFECYCLE_SWEEPER === "false" ||
+    !env.X_CLIENT_ID ||
+    !env.X_CLIENT_SECRET ||
+    !env.STEWARD_MASTER_PASSWORD
   ) {
     return null;
   }
@@ -281,7 +308,7 @@ export async function runWorkerXCredentialLifecycleSweep(
 
 /**
  * Pull Worker `env` bindings into `globalThis.process.env` so any code that
- * reads `runtimeEnvironmentValue("X")` at request time (e.g. JWT secret, RPC URL) can find it.
+ * reads `process.env.X` at request time (e.g. JWT secret, RPC URL) can find it.
  *
  * Workers expose `nodejs_compat`'s `process.env` as an empty object on cold
  * boot — bindings come in via the `fetch` handler's `env` argument instead.
@@ -359,6 +386,11 @@ export function withWorkerJwtAuthority<T>(env: Env, callback: () => T): T {
   return withJwtRuntimeAuthority(authority, callback);
 }
 
+/** Bind the complete immutable Worker environment before custody resolution. */
+export function withWorkerRuntimeAuthority<T>(env: Env, callback: () => T): T {
+  return withRuntimeEnvironment({ ...env, STEWARD_RUNTIME: "workers" }, callback);
+}
+
 function validateWorkerSecurityEnv(): void {
   // The request authority was resolved synchronously from this invocation's
   // bindings. This validation never consults the process.env compatibility
@@ -407,7 +439,7 @@ async function ensureWorkerInit(env: Env): Promise<void> {
           dbUrl.includes("sslmode=verify-ca") ||
           dbUrl.includes("sslmode=verify-full"),
         hstsEnabled: isHstsEnabled(),
-        insecureDbAllowed: runtimeEnvironmentValue("STEWARD_ALLOW_INSECURE_DB") === "true",
+        insecureDbAllowed: process.env.STEWARD_ALLOW_INSECURE_DB === "true",
         runtime: "workers",
       },
     });
@@ -452,7 +484,7 @@ async function getComposedApp() {
 
 export default {
   async fetch(request: Request, env: Env, ctx: unknown): Promise<Response> {
-    return withRuntimeEnvironment({ ...env, STEWARD_RUNTIME: "workers" }, async () => {
+    return withWorkerRuntimeAuthority(env, async () => {
       // Keep the legacy bridge for modules not yet migrated to request-local
       // configuration. Security-sensitive OIDC settings use the immutable
       // snapshot above and cannot be replaced by an overlapping request.
@@ -481,7 +513,7 @@ export default {
     env: Env,
     ctx: { waitUntil(promise: Promise<unknown>): void },
   ) {
-    withRuntimeEnvironment({ ...env, STEWARD_RUNTIME: "workers" }, () => {
+    withWorkerRuntimeAuthority(env, () => {
       return withWorkerJwtAuthority(env, () => {
         hydrateProcessEnv(env);
         validateWorkerSecurityEnv();

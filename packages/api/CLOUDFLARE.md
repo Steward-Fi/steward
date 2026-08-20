@@ -99,6 +99,8 @@ rejected before any database handle is selected.
 | `STEWARD_JWT_SECRET`            | Canonical HS256 JWT signing and verification secret. Minimum 32 characters in production. |
 | `STEWARD_MASTER_PASSWORD`       | Vault keystore master password. Used by `KeyStore` (AES-256-GCM).      |
 | `STEWARD_KDF_SALT`              | Per-deployment hex salt for the KeyStore KDF. Required in production.  |
+| `STEWARD_WEBHOOK_SECRET_ENCRYPTION_KEY` | Optional dedicated webhook-secret root. Falls back to `STEWARD_MASTER_PASSWORD`. |
+| `STEWARD_WEBHOOK_SECRET_KDF_SALT` | Optional dedicated webhook KDF salt. Falls back to `STEWARD_KDF_SALT`. |
 | `STEWARD_AUDIT_HMAC_KEY`        | Separate high-entropy root for the tamper-evident audit chain. Required in production. |
 | `STEWARD_IDENTITY_JWT_PRIVATE_KEY` | Optional PKCS#8 RS256/ES256 identity-token key. Set separately in each environment that serves identity tokens. |
 | `RESEND_API_KEY`                | Magic-link email delivery.                                             |
@@ -184,6 +186,23 @@ production posture locally instead, remove the development override and set
 complete high-entropy roots, including `STEWARD_JWT_SECRET`,
 `STEWARD_MASTER_PASSWORD`, `STEWARD_KDF_SALT`, and
 `STEWARD_AUDIT_HMAC_KEY`.
+
+### Custody binding rotation
+
+Workers resolve the complete custody authority from an immutable request-local
+binding snapshot. Vault, secret, provider-token, plugin-credential, tenant
+signing-key, and webhook-secret accessors are keyed by a fingerprint of the
+effective password, KDF salt, custody provider/key/region, chain/RPC settings,
+and compatibility gates. A binding-only deployment may therefore reuse an
+existing isolate without selecting the previous deployment's custody root, and
+removing a required current binding fails closed rather than falling back to a
+captured value.
+
+Changing a password or KDF salt does not migrate existing ciphertext. Complete
+the repository's decrypt-and-re-encrypt rotation workflow before switching the
+binding set, and rotate each password/salt pair atomically. The same rule applies
+to the optional webhook-specific root and salt; omitting either dedicated value
+selects its documented global fallback for that request.
 
 Example production-like `.dev.vars` shape:
 
