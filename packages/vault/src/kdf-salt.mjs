@@ -23,12 +23,5 @@ export function decodeKdfSalt(value, variableName = "STEWARD_KDF_SALT") {
     throw new Error(`${variableName} ${KDF_SALT_REQUIREMENT}`);
   }
 
-  const decoded = Buffer.from(value, "hex");
-  // Defensive parity check: the full-string/even-length validation above should
-  // make these conditions impossible, but never trust a decoder to consume less
-  // input than expected at a cryptographic configuration boundary.
-  if (decoded.length < KDF_SALT_MIN_BYTES || decoded.length * 2 !== value.length) {
-    throw new Error(`${variableName} ${KDF_SALT_REQUIREMENT}`);
-  }
-  return decoded;
+  return Buffer.from(value, "hex");
 }
