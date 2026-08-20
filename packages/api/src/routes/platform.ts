@@ -111,6 +111,100 @@ const WALLET_EXTERNAL_ID_PROVIDER = "wallet_external_id";
 const MAX_WALLET_EXTERNAL_ID_LENGTH = 180;
 type PlatformTenantConfigRow = typeof tenantConfigs.$inferSelect;
 
+interface TenantCapabilityCleanup {
+  activeGrantsRetired: number;
+  terminalGrantsRemoved: number;
+  capabilitiesRemoved: number;
+  invocationEvidenceRetained: number;
+}
+
+function resultRows<T>(result: unknown): T[] {
+  return (Array.isArray(result) ? result : ((result as { rows?: T[] } | null)?.rows ?? [])) as T[];
+}
+
+async function cleanupOptionalTenantCapabilities(
+  tx: ReturnType<typeof getDb>,
+  tenantId: string,
+): Promise<TenantCapabilityCleanup | null> {
+  const [relations] = resultRows<{
+    capabilities: string | null;
+    grants: string | null;
+    invocations: string | null;
+  }>(
+    await tx.execute(sql`
+      SELECT
+        to_regclass('public.capabilities')::text AS capabilities,
+        to_regclass('public.capability_grants')::text AS grants,
+        to_regclass('public.capability_invocations')::text AS invocations
+    `),
+  );
+  const cleanup: TenantCapabilityCleanup = {
+    activeGrantsRetired: 0,
+    terminalGrantsRemoved: 0,
+    capabilitiesRemoved: 0,
+    invocationEvidenceRetained: 0,
+  };
+
+  let tenantCapabilityIds: string[] = [];
+  if (relations?.capabilities) {
+    tenantCapabilityIds = resultRows<{ id: string }>(
+      await tx.execute(sql`
+        SELECT id::text AS id
+        FROM public.capabilities
+        WHERE tenant_id = ${tenantId}
+        FOR UPDATE
+      `),
+    ).map((row) => row.id);
+  }
+  if (relations?.grants) {
+    const grants = resultRows<{ status: string }>(
+      await tx.execute(sql`
+        SELECT status
+        FROM public.capability_grants
+        WHERE tenant_id = ${tenantId}
+        FOR UPDATE
+      `),
+    );
+    cleanup.activeGrantsRetired = grants.filter((grant) => grant.status === "active").length;
+    cleanup.terminalGrantsRemoved = grants.length - cleanup.activeGrantsRetired;
+    if (relations.capabilities) {
+      const crossTenantGrants = resultRows<{ id: string }>(
+        await tx.execute(sql`
+          SELECT capability_grant.id::text AS id
+          FROM public.capability_grants AS capability_grant
+          INNER JOIN public.capabilities AS capability
+            ON capability.id = capability_grant.capability_id
+          WHERE capability.tenant_id = ${tenantId}
+            AND capability_grant.tenant_id <> ${tenantId}
+          FOR UPDATE OF capability_grant
+        `),
+      );
+      if (crossTenantGrants.length > 0) return null;
+    }
+    await tx.execute(sql`
+      UPDATE public.capability_grants
+      SET status = 'revoked'
+      WHERE tenant_id = ${tenantId} AND status = 'active'
+    `);
+    await tx.execute(sql`DELETE FROM public.capability_grants WHERE tenant_id = ${tenantId}`);
+  }
+  if (relations?.capabilities) {
+    await tx.execute(sql`DELETE FROM public.capabilities WHERE tenant_id = ${tenantId}`);
+    cleanup.capabilitiesRemoved = tenantCapabilityIds.length;
+  }
+  if (relations?.invocations) {
+    const [countRow] = resultRows<{ count: number }>(
+      await tx.execute(sql`
+        SELECT count(*)::int AS count
+        FROM public.capability_invocations
+        WHERE tenant_id = ${tenantId}
+      `),
+    );
+    cleanup.invocationEvidenceRetained = countRow?.count ?? 0;
+  }
+  return cleanup;
+}
+
 function parseDurationSeconds(value: string): number | null {
   const match = value.trim().match(/^(\d+)([smhd])$/i);
   if (!match) return null;
@@ -2027,19 +2121,22 @@ platform.delete("/tenants/:id", async (c) => {
         return { status: "blocked_by_provider" as const };
       }
 
+      const capabilityCleanup = await cleanupOptionalTenantCapabilities(tx, tenantId);
+      if (!capabilityCleanup) return { status: "blocked_by_capability_integrity" as const };
+
       await appendRequiredAudit({
         tenantId,
         actorType: "platform",
         action: "tenant.delete.authorized",
         resourceType: "tenant",
         resourceId: tenantId,
-        metadata: { agentTokenCount: tenantAgents.length, userTokenCount: tenantMembers.length },
+        metadata: {
+          agentTokenRevocationTargets: tenantAgents.length,
+          userTokenRevocationTargets: tenantMembers.length,
+          capabilityCleanup,
+        },
         ...auditCtx(c),
       });
-      await Promise.all([
-        ...tenantAgents.map((agent) => revocationStore.revokeAgentTokens(agent.id)),
-        ...tenantMembers.map((member) => revocationStore.revokeUserTokens(member.userId)),
-      ]);
       await appendRequiredAudit({
         tenantId,
         actorType: "platform",
@@ -2047,8 +2144,9 @@ platform.delete("/tenants/:id", async (c) => {
         resourceType: "tenant",
         resourceId: tenantId,
         metadata: {
-          revokedAgentTokenCount: tenantAgents.length,
-          revokedUserTokenCount: tenantMembers.length,
+          agentTokenRevocationTargets: tenantAgents.length,
+          userTokenRevocationTargets: tenantMembers.length,
+          capabilityCleanup,
         },
         ...auditCtx(c),
       });
@@ -2058,7 +2156,11 @@ platform.delete("/tenants/:id", async (c) => {
       await tx.delete(secrets).where(eq(secrets.tenantId, tenantId));
       await tx.delete(proxyAuditLog).where(eq(proxyAuditLog.tenantId, tenantId));
       await tx.delete(tenants).where(eq(tenants.id, tenantId));
-      return { status: "deleted" as const };
+      return {
+        status: "deleted" as const,
+        agentIds: tenantAgents.map((agent) => agent.id),
+        userIds: tenantMembers.map((member) => member.userId),
+      };
     },
   );
 
@@ -2077,6 +2179,29 @@ platform.delete("/tenants/:id", async (c) => {
       409,
     );
   }
+  if (result.status === "blocked_by_capability_integrity") {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Tenant capability authority has cross-tenant references" },
+      409,
+    );
+  }
+
+  const [agentRevocationCutoffs, userRevocationCutoffs] = await Promise.all([
+    Promise.all(result.agentIds.map((agentId) => revocationStore.revokeAgentTokens(agentId))),
+    Promise.all(result.userIds.map((userId) => revocationStore.revokeUserTokens(userId))),
+  ]);
+  await writeAuditEvent({
+    tenantId,
+    actorType: "platform",
+    action: "tenant.delete.token_revocation_completed",
+    resourceType: "tenant",
+    resourceId: tenantId,
+    metadata: {
+      agentRevocationCutoffsEstablished: agentRevocationCutoffs.length,
+      userRevocationCutoffsEstablished: userRevocationCutoffs.length,
+    },
+    ...auditCtx(c),
+  });
 
   return c.json<ApiResponse>({ ok: true });
 });

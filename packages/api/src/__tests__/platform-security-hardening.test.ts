@@ -459,9 +459,17 @@ describe("platform security hardening", () => {
     expect(platformSource.indexOf("tenantMembers", tenantDeleteStart)).toBeGreaterThan(
       tenantDeleteStart,
     );
-    expect(
-      platformSource.indexOf("revocationStore.revokeUserTokens(member.userId)", tenantDeleteStart),
-    ).toBeLessThan(platformSource.indexOf("tx.delete(refreshTokens)", tenantDeleteStart));
+    const tenantDeleteRoute = platformSource.slice(
+      tenantDeleteStart,
+      platformSource.indexOf('platform.put("/tenants/:id/policies"', tenantDeleteStart),
+    );
+    expect(tenantDeleteRoute.indexOf("tx.delete(tenants)")).toBeLessThan(
+      tenantDeleteRoute.indexOf("revocationStore.revokeAgentTokens(agentId)"),
+    );
+    expect(tenantDeleteRoute.indexOf("tx.delete(tenants)")).toBeLessThan(
+      tenantDeleteRoute.indexOf("revocationStore.revokeUserTokens(userId)"),
+    );
+    expect(tenantDeleteRoute).toContain('action: "tenant.delete.token_revocation_completed"');
   });
 
   it("removes non-cascading tenant credential state during tenant deletion", () => {
@@ -474,6 +482,7 @@ describe("platform security hardening", () => {
     expect(tenantDeleteRoute).toContain("tx.delete(secretRoutes)");
     expect(tenantDeleteRoute).toContain("tx.delete(secrets)");
     expect(tenantDeleteRoute).toContain("tx.delete(proxyAuditLog)");
+    expect(tenantDeleteRoute).toContain("cleanupOptionalTenantCapabilities(tx, tenantId)");
     expect(tenantDeleteRoute.indexOf("tx.delete(secretRoutes)")).toBeLessThan(
       tenantDeleteRoute.indexOf("tx.delete(secrets)"),
     );

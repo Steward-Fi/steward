@@ -70,6 +70,11 @@ export async function deleteAgentAuthority(
   const { tenantId, agentId } = input;
   return withTenantAuditedTransaction(tenantId, async (txRaw, appendRequiredAudit) => {
     const tx = txRaw as ReturnType<typeof getDb>;
+    // Every authority writer takes this tenant-scoped advisory fence before it
+    // takes a parent-agent key-share lock. Deletion must use the same order:
+    // taking the agent row first can deadlock with a writer that already owns
+    // the advisory lock and is waiting to validate the agent parent.
+    await tx.execute(sql`SELECT public.steward_lock_tenant_deletion(${tenantId})`);
     const [lockedAgent] = await tx
       .select({ id: agents.id })
       .from(agents)

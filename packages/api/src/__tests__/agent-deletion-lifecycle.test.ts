@@ -5,8 +5,10 @@ import { revocationStore } from "@stwd/auth";
 import {
   __resetAuditHmacKeyCacheForTests,
   agents,
+  auditEvents,
   getDb,
   intents,
+  pendingProxyRequests,
   providerAccounts,
   providerActionBindings,
   providerOperations,
@@ -19,7 +21,7 @@ import {
   users,
   workspaces,
 } from "@stwd/db";
-import { capabilities, capabilityGrants } from "@stwd/plugin-capabilities";
+import { capabilities, capabilityGrants, capabilityInvocations } from "@stwd/plugin-capabilities";
 import { and, eq } from "drizzle-orm";
 import { migrate as pgliteMigrate } from "drizzle-orm/pglite/migrator";
 import { Hono } from "hono";
@@ -622,6 +624,164 @@ describe("agent deletion upstream credential boundary", () => {
     ).toEqual([{ status: "revoked" }]);
   });
 
+  it("deletes active and terminal tenant capability authority while retaining invocation evidence", async () => {
+    const tenantId = `tenant-capability-delete-${crypto.randomUUID()}`;
+    const activeAgentId = `active-${crypto.randomUUID()}`;
+    const terminalAgentId = `terminal-${crypto.randomUUID()}`;
+    await getDb()
+      .insert(tenants)
+      .values({
+        id: tenantId,
+        name: tenantId,
+        apiKeyHash: `hash-${tenantId}`,
+      });
+    await getDb()
+      .insert(agents)
+      .values([
+        {
+          id: activeAgentId,
+          tenantId,
+          name: activeAgentId,
+          walletAddress: "0x1234567890123456789012345678901234567890",
+        },
+        {
+          id: terminalAgentId,
+          tenantId,
+          name: terminalAgentId,
+          walletAddress: "0x2234567890123456789012345678901234567890",
+        },
+      ]);
+    const activeCapabilityId = crypto.randomUUID();
+    const terminalCapabilityId = crypto.randomUUID();
+    const activeGrantId = crypto.randomUUID();
+    const terminalGrantId = crypto.randomUUID();
+    const activeRouteId = crypto.randomUUID();
+    const terminalRouteId = crypto.randomUUID();
+    const invocationId = crypto.randomUUID();
+    await getDb()
+      .insert(capabilities)
+      .values([
+        {
+          id: activeCapabilityId,
+          tenantId,
+          name: `active-${activeCapabilityId}`,
+          secretId: crypto.randomUUID(),
+          host: "active.example.test",
+          pathPattern: "/v1/*",
+          method: "POST",
+          injectKey: "Authorization",
+        },
+        {
+          id: terminalCapabilityId,
+          tenantId,
+          name: `terminal-${terminalCapabilityId}`,
+          secretId: crypto.randomUUID(),
+          host: "terminal.example.test",
+          pathPattern: "/v1/*",
+          method: "POST",
+          injectKey: "Authorization",
+        },
+      ]);
+    await getDb()
+      .insert(secretRoutes)
+      .values([
+        {
+          id: activeRouteId,
+          tenantId,
+          agentId: activeAgentId,
+          secretId: crypto.randomUUID(),
+          hostPattern: "active.example.test",
+          pathPattern: "/v1/*",
+          method: "POST",
+          injectAs: "header",
+          injectKey: "Authorization",
+        },
+        {
+          id: terminalRouteId,
+          tenantId,
+          agentId: terminalAgentId,
+          secretId: crypto.randomUUID(),
+          hostPattern: "terminal.example.test",
+          pathPattern: "/v1/*",
+          method: "POST",
+          injectAs: "header",
+          injectKey: "Authorization",
+          enabled: false,
+        },
+      ]);
+    await getDb()
+      .insert(capabilityGrants)
+      .values([
+        {
+          id: activeGrantId,
+          tenantId,
+          agentId: activeAgentId,
+          capabilityId: activeCapabilityId,
+          secretRouteId: activeRouteId,
+          status: "active",
+        },
+        {
+          id: terminalGrantId,
+          tenantId,
+          agentId: terminalAgentId,
+          capabilityId: terminalCapabilityId,
+          secretRouteId: terminalRouteId,
+          status: "revoked",
+        },
+      ]);
+    await getDb().insert(capabilityInvocations).values({
+      id: invocationId,
+      tenantId,
+      agentId: activeAgentId,
+      capabilityId: activeCapabilityId,
+      decision: "allow",
+    });
+
+    const response = await platformTenantDelete(tenantId);
+    expect(response.status).toBe(200);
+    expect(await getDb().select().from(tenants).where(eq(tenants.id, tenantId))).toHaveLength(0);
+    expect(
+      await getDb().select().from(capabilityGrants).where(eq(capabilityGrants.tenantId, tenantId)),
+    ).toHaveLength(0);
+    expect(
+      await getDb().select().from(capabilities).where(eq(capabilities.tenantId, tenantId)),
+    ).toHaveLength(0);
+    expect(
+      await getDb().select().from(secretRoutes).where(eq(secretRoutes.tenantId, tenantId)),
+    ).toHaveLength(0);
+    expect(
+      await getDb()
+        .select({ id: capabilityInvocations.id })
+        .from(capabilityInvocations)
+        .where(eq(capabilityInvocations.id, invocationId)),
+    ).toEqual([{ id: invocationId }]);
+    const deletionEvents = await getDb()
+      .select({ action: auditEvents.action, metadata: auditEvents.metadata })
+      .from(auditEvents)
+      .where(eq(auditEvents.tenantId, tenantId));
+    expect(deletionEvents).toContainEqual({
+      action: "tenant.delete",
+      metadata: {
+        agentTokenRevocationTargets: 2,
+        userTokenRevocationTargets: 0,
+        capabilityCleanup: {
+          activeGrantsRetired: 1,
+          terminalGrantsRemoved: 1,
+          capabilitiesRemoved: 2,
+          invocationEvidenceRetained: 1,
+        },
+      },
+    });
+    expect(deletionEvents).toContainEqual({
+      action: "tenant.delete.token_revocation_completed",
+      metadata: {
+        agentRevocationCutoffsEstablished: 2,
+        userRevocationCutoffsEstablished: 0,
+      },
+    });
+    await getDb().delete(capabilityInvocations).where(eq(capabilityInvocations.id, invocationId));
+  });
+
   it("refuses both routed and direct deletion while signed execution is unresolved", async () => {
     const agentId = `signed-execution-${crypto.randomUUID()}`;
     const transactionId = crypto.randomUUID();
@@ -746,6 +906,95 @@ describe("agent deletion upstream credential boundary", () => {
         .where(eq(intents.id, intentId)),
     ).toEqual([{ agentId: null }]);
   });
+
+  it.skipIf(!USING_REAL_POSTGRES)(
+    "orders agent deletion before a pending proxy authority writer without deadlock",
+    async () => {
+      const agentId = `proxy-authority-race-${crypto.randomUUID()}`;
+      const routeId = crypto.randomUUID();
+      const requestId = crypto.randomUUID();
+      await createAgent(agentId);
+      await getDb().insert(secretRoutes).values({
+        id: routeId,
+        tenantId: TENANT_ID,
+        agentId,
+        secretId: crypto.randomUUID(),
+        hostPattern: "pending-race.example.test",
+        pathPattern: "/mutation",
+        method: "POST",
+        injectAs: "header",
+        injectKey: "Authorization",
+      });
+      await getDb()
+        .insert(pendingProxyRequests)
+        .values({
+          id: requestId,
+          tenantId: TENANT_ID,
+          agentId,
+          routeId,
+          method: "POST",
+          targetHost: "pending-race.example.test",
+          targetPath: "/mutation",
+          requestDigest: "d".repeat(64),
+          bodyCiphertext: "body",
+          bodyIv: "iv",
+          bodyAuthTag: "tag",
+          bodySalt: "salt",
+          status: "pending",
+          expiresAt: new Date(Date.now() + 60_000),
+        });
+
+      const writer = postgres(process.env.DATABASE_URL as string, { max: 1 });
+      const observer = postgres(process.env.DATABASE_URL as string, { max: 1 });
+      const [writerBackend] = await writer<{ pid: number }[]>`
+        SELECT pg_backend_pid()::int AS pid
+      `;
+      const writerPid = writerBackend?.pid ?? 0;
+      let beginWriterUpdate!: () => void;
+      const updateRequested = new Promise<void>((resolve) => {
+        beginWriterUpdate = resolve;
+      });
+      let writerReady!: () => void;
+      const ready = new Promise<void>((resolve) => {
+        writerReady = resolve;
+      });
+      const writerTransaction = writer.begin(async (tx) => {
+        await tx`SELECT public.steward_lock_tenant_deletion(${TENANT_ID})`;
+        writerReady();
+        await updateRequested;
+        await tx`
+          UPDATE pending_proxy_requests
+          SET status = 'approved', approved_at = now(), approved_by = 'race-writer'
+          WHERE id = ${requestId}
+        `;
+      });
+      await ready;
+
+      let deletion: Promise<Response> | undefined;
+      try {
+        deletion = tenantDelete(agentId);
+        expect(await waitUntilBackendBlockedBy(observer, writerPid)).toBe(true);
+        beginWriterUpdate();
+        await writerTransaction;
+
+        expect((await deletion).status).toBe(200);
+        expect(await getDb().select().from(agents).where(eq(agents.id, agentId))).toHaveLength(0);
+        expect(
+          await getDb()
+            .select({
+              status: pendingProxyRequests.status,
+              deniedBy: pendingProxyRequests.deniedBy,
+            })
+            .from(pendingProxyRequests)
+            .where(eq(pendingProxyRequests.id, requestId)),
+        ).toEqual([{ status: "denied", deniedBy: "system:agent-delete" }]);
+      } finally {
+        beginWriterUpdate();
+        await Promise.allSettled([writerTransaction, deletion ?? Promise.resolve(new Response())]);
+        await Promise.all([writer.end(), observer.end()]);
+      }
+    },
+  );
 
   it.skipIf(!USING_REAL_POSTGRES)(
     "blocks agent deletion when intent-only provider evidence commits first",
