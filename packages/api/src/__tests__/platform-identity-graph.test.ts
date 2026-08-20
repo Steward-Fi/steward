@@ -1,9 +1,10 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 
-import { hashSha256Hex } from "@stwd/auth";
+import { hashSha256Hex, revocationStore } from "@stwd/auth";
 import {
   accounts,
   agents,
+  auditEvents,
   closeDb,
   getDb,
   refreshTokens,
@@ -14,7 +15,7 @@ import {
   userTenants,
 } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
-import { and, eq } from "drizzle-orm";
+import { and, asc, eq, sql } from "drizzle-orm";
 
 const PLATFORM_KEY = "platform-identity-graph-key";
 const TENANT_ID = "platform-identity-graph-tenant";
@@ -105,6 +106,82 @@ describe("platform global identity graph routes", () => {
       "Content-Type": "application/json",
       "X-Steward-Platform-Key": PLATFORM_KEY,
     };
+  }
+
+  async function createLifecycleFaultUser(label: string) {
+    const [user] = await getDb()
+      .insert(users)
+      .values({ email: `${label}@example.test`, emailVerified: true })
+      .returning({ id: users.id });
+    await getDb().insert(userTenants).values({
+      userId: user.id,
+      tenantId: TENANT_ID,
+      role: "member",
+    });
+    await getDb()
+      .insert(refreshTokens)
+      .values({
+        id: `${label}-refresh-token`,
+        userId: user.id,
+        tenantId: TENANT_ID,
+        tokenHash: `${label}-refresh-hash`,
+        expiresAt: new Date(Date.now() + 60_000),
+      });
+    return user.id;
+  }
+
+  async function lifecycleDatabaseState(faultUserId: string) {
+    const [user] = await getDb()
+      .select({ deactivatedAt: users.deactivatedAt })
+      .from(users)
+      .where(eq(users.id, faultUserId));
+    const tokens = await getDb()
+      .select({ id: refreshTokens.id })
+      .from(refreshTokens)
+      .where(eq(refreshTokens.userId, faultUserId));
+    const audits = await getDb()
+      .select({ action: auditEvents.action })
+      .from(auditEvents)
+      .where(eq(auditEvents.resourceId, faultUserId))
+      .orderBy(asc(auditEvents.seq));
+    return { audits: audits.map((row) => row.action), tokens, user };
+  }
+
+  async function deactivateUser(faultUserId: string) {
+    return platformRoutes.request(`/users/${faultUserId}/deactivate`, {
+      method: "PATCH",
+      headers: headers(),
+      body: JSON.stringify({ deactivated: true }),
+    });
+  }
+
+  async function installOneShotCompletionAuditFailure(name: string, deferred: boolean) {
+    await getDb().execute(sql.raw(`CREATE SEQUENCE ${name}_seq`));
+    await getDb().execute(
+      sql.raw(`
+      CREATE FUNCTION ${name}_fn() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN
+        IF NEW.action = 'user.deactivate' AND nextval('${name}_seq') = 1 THEN
+          RAISE EXCEPTION '${name}';
+        END IF;
+        RETURN NEW;
+      END
+      $$
+    `),
+    );
+    await getDb().execute(
+      sql.raw(
+        deferred
+          ? `CREATE CONSTRAINT TRIGGER ${name}_trigger AFTER INSERT ON audit_events DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION ${name}_fn()`
+          : `CREATE TRIGGER ${name}_trigger AFTER INSERT ON audit_events FOR EACH ROW EXECUTE FUNCTION ${name}_fn()`,
+      ),
+    );
+  }
+
+  async function removeCompletionAuditFailure(name: string) {
+    await getDb().execute(sql.raw(`DROP TRIGGER IF EXISTS ${name}_trigger ON audit_events`));
+    await getDb().execute(sql.raw(`DROP FUNCTION IF EXISTS ${name}_fn()`));
+    await getDb().execute(sql.raw(`DROP SEQUENCE IF EXISTS ${name}_seq`));
   }
 
   it("gets a global user identity with tenant ids and linked accounts", async () => {
@@ -839,6 +916,73 @@ describe("platform global identity graph routes", () => {
     const reactivateBody = (await reactivate.json()) as { data: { deactivatedAt: string | null } };
     expect(reactivateBody.data.deactivatedAt).toBeNull();
   });
+
+  it("rolls back authorization and mutation when the mounted revoker fails, then retries", async () => {
+    const faultUserId = await createLifecycleFaultUser("platform-revoker-fault");
+    const originalRevoke = revocationStore.revokeUserTokens.bind(revocationStore);
+    let attempts = 0;
+    revocationStore.revokeUserTokens = async (id, issuedBefore, expiresAt) => {
+      attempts += 1;
+      if (attempts === 1) throw new Error("simulated platform revoker failure");
+      return originalRevoke(id, issuedBefore, expiresAt);
+    };
+
+    try {
+      const failed = await deactivateUser(faultUserId);
+      expect(failed.status).toBe(500);
+      expect(await lifecycleDatabaseState(faultUserId)).toEqual({
+        audits: [],
+        tokens: [{ id: "platform-revoker-fault-refresh-token" }],
+        user: { deactivatedAt: null },
+      });
+      expect(await revocationStore.getUserRevokedBefore(faultUserId)).toBeNull();
+
+      const retried = await deactivateUser(faultUserId);
+      expect(retried.status).toBe(200);
+      expect(await lifecycleDatabaseState(faultUserId)).toEqual({
+        audits: ["user.deactivate.authorized", "user.deactivate"],
+        tokens: [],
+        user: { deactivatedAt: expect.any(Date) },
+      });
+      expect(await revocationStore.getUserRevokedBefore(faultUserId)).not.toBeNull();
+    } finally {
+      revocationStore.revokeUserTokens = originalRevoke;
+    }
+  });
+
+  for (const fault of [
+    { deferred: false, label: "completion audit", name: "platform_completion_audit_fault" },
+    { deferred: true, label: "commit", name: "platform_commit_fault" },
+  ]) {
+    it(`rolls back database state on ${fault.label} failure, preserves safe revocation, and retries`, async () => {
+      const faultUserId = await createLifecycleFaultUser(fault.name);
+      await installOneShotCompletionAuditFailure(fault.name, fault.deferred);
+      try {
+        const failed = await deactivateUser(faultUserId);
+        expect(failed.status).toBe(500);
+        expect(await lifecycleDatabaseState(faultUserId)).toEqual({
+          audits: [],
+          tokens: [{ id: `${fault.name}-refresh-token` }],
+          user: { deactivatedAt: null },
+        });
+        const firstCutoff = await revocationStore.getUserRevokedBefore(faultUserId);
+        expect(firstCutoff).not.toBeNull();
+
+        const retried = await deactivateUser(faultUserId);
+        expect(retried.status).toBe(200);
+        expect(await lifecycleDatabaseState(faultUserId)).toEqual({
+          audits: ["user.deactivate.authorized", "user.deactivate"],
+          tokens: [],
+          user: { deactivatedAt: expect.any(Date) },
+        });
+        const retryCutoff = await revocationStore.getUserRevokedBefore(faultUserId);
+        expect(retryCutoff).not.toBeNull();
+        expect(retryCutoff as number).toBeGreaterThanOrEqual(firstCutoff as number);
+      } finally {
+        await removeCompletionAuditFailure(fault.name);
+      }
+    });
+  }
 
   it("hard-deletes users and cascades linked identity rows", async () => {
     const [deleteUser] = await getDb()
