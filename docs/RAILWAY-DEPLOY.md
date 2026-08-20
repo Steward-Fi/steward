@@ -478,9 +478,11 @@ curl -sf "$BASE/platform/tenants" \
 | `STEWARD_EXECUTION_AUTH_SECRET` | **Yes for governed provider execution** | — | Versioned (`v1:<secret>`) authorization root shared by the API and proxy; keep it distinct from JWT and request-signing roots. |
 | `STEWARD_ACK_LOCAL_CUSTODY` | **Yes only for production local custody** | — | Set `true` only after accepting plaintext signing-key bytes in API memory; omit when using a supported KMS mode. |
 | `STEWARD_DEFAULT_TENANT_KEY` | No | — | Default tenant key for single-tenant mode |
+| `STEWARD_DEFAULT_TENANT_ID` | No | `default` | Tenant used by auth routes when a request supplies no tenant hint; the tenant must already exist. |
 | `RPC_URL` | No | `https://sepolia.base.org` | EVM RPC endpoint |
 | `CHAIN_ID` | No | `84532` | Default chain ID |
-| `REDIS_URL` | No | — | Redis for rate limiting + spend tracking |
+| `STEWARD_NATIVE_PRICE_FALLBACK_USD` | No | `10000` | Positive finite native-token USD valuation used to record spend when the price oracle is unavailable. |
+| `REDIS_URL` | **Yes for the production proxy** | — | Redis for rate limiting + spend tracking; the proxy fails closed without it unless its explicit soft-fail override is enabled. |
 | `RESEND_API_KEY` | No | — | Resend key for magic-link delivery. Without a provider, production email login fails closed. |
 | `EMAIL_FROM` | No | `login@steward.fi` | Magic link sender address |
 | `APP_URL` | No | `https://steward.fi` | Base URL for magic link callbacks |

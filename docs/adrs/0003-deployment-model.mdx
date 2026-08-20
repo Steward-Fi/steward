@@ -76,10 +76,11 @@ They share an image because:
 - **Redis** is the ephemeral store: rate-limit counters, JWT token store
   (denylist + rotation tracking), short-lived session data.
 
-Redis is not load-bearing for correctness — if Redis is down, rate limits
-degrade gracefully (per the middleware) and token rotation falls back to
-database-backed lookup. Postgres is load-bearing; losing Postgres means
-the API is down.
+This ADR originally treated Redis as non-load-bearing. The current production
+proxy instead fails closed without Redis-backed rate-limit and spend enforcement
+unless an operator enables the explicit soft-fail override. API auth state can
+use Postgres where supported. Postgres remains load-bearing; losing Postgres
+means the API is down.
 
 ### Embedded PGLite mode for local dev
 
