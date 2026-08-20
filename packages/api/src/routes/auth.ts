@@ -74,7 +74,6 @@ import {
   IdentityJwtConfigurationError,
   InMemoryRecoveryCodeStore,
   isBuiltInProvider,
-  isDevSecretAllowed,
   isValidE164,
   type MagicLinkTemplateData,
   MockEmailInbox,
@@ -136,7 +135,7 @@ import {
   type TenantSamlSsoConfig,
   type TenantTestAccountConfig,
 } from "@stwd/shared";
-import { KeyStore, provisionUserWallet, Vault } from "@stwd/vault";
+import { type KeyStore, provisionUserWallet, Vault } from "@stwd/vault";
 import bs58 from "bs58";
 import { and, eq, gte, inArray, isNull, lt, sql } from "drizzle-orm";
 import { type Context, Hono } from "hono";
@@ -161,7 +160,12 @@ import { socketPeerFromEnv } from "../services/runtime-gate";
 import { buildSamlServiceProviderUrls } from "../services/saml-sso-config";
 import { lockUserSession } from "../services/session-lock";
 import { testAccountOtpMatches } from "../services/test-account-credentials";
-import { getConfiguredVault } from "../services/vault-factory";
+import {
+  _clearConfiguredVaultsForTests,
+  getConfiguredKeyStore,
+  getConfiguredVault,
+  resolveCustodyAuthority,
+} from "../services/vault-factory";
 import { dispatchWebhook } from "../services/webhook-dispatch";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -1762,44 +1766,14 @@ function getPasskeyAuth(requestOrigin?: string): PasskeyAuth {
 
 // ─── EmailAuth cache ──────────────────────────────────────────────────────────
 
-const _emailAuthByTenant = new Map<string, Promise<EmailAuth>>();
-let _emailKeyStore: KeyStore | null = null;
-let _oauthKeyStore: KeyStore | null = null;
+const _emailAuthByTenant = new Map<string, Map<string, Promise<EmailAuth>>>();
 
 function getEmailKeyStore(): KeyStore {
-  if (_emailKeyStore) return _emailKeyStore;
-
-  const masterPassword = process.env.STEWARD_MASTER_PASSWORD;
-  if (!masterPassword) {
-    if (!isDevSecretAllowed()) {
-      throw new Error(
-        "STEWARD_MASTER_PASSWORD is required. For local development only, set STEWARD_ALLOW_DEV_SECRETS=true to use the insecure dev key.",
-      );
-    }
-    _emailKeyStore = new KeyStore("dev-secret");
-    return _emailKeyStore;
-  }
-
-  _emailKeyStore = new KeyStore(masterPassword);
-  return _emailKeyStore;
+  return getConfiguredKeyStore(undefined, { allowDevSecretFallback: true });
 }
 
 function getOAuthKeyStore(): KeyStore {
-  if (_oauthKeyStore) return _oauthKeyStore;
-
-  const masterPassword = process.env.STEWARD_MASTER_PASSWORD;
-  if (!masterPassword) {
-    if (!isDevSecretAllowed()) {
-      throw new Error(
-        "STEWARD_MASTER_PASSWORD is required to encrypt OAuth provider tokens. For local development only, set STEWARD_ALLOW_DEV_SECRETS=true to use the insecure dev key.",
-      );
-    }
-    _oauthKeyStore = new KeyStore("dev-secret");
-    return _oauthKeyStore;
-  }
-
-  _oauthKeyStore = new KeyStore(masterPassword);
-  return _oauthKeyStore;
+  return getConfiguredKeyStore(undefined, { allowDevSecretFallback: true });
 }
 
 type OAuthEncryptedTokenFields = Pick<
@@ -2078,14 +2052,23 @@ async function createEmailAuthForTenant(tenantId: string): Promise<EmailAuth> {
 }
 
 export async function getEmailAuthForTenant(tenantId: string): Promise<EmailAuth> {
-  const cached = _emailAuthByTenant.get(tenantId);
+  const authorityFingerprint = resolveCustodyAuthority({
+    allowDevSecretFallback: true,
+  }).fingerprint;
+  let authorities = _emailAuthByTenant.get(tenantId);
+  const cached = authorities?.get(authorityFingerprint);
   if (cached) return cached;
 
   const pending = createEmailAuthForTenant(tenantId).catch((error) => {
-    _emailAuthByTenant.delete(tenantId);
+    authorities?.delete(authorityFingerprint);
+    if (authorities?.size === 0) _emailAuthByTenant.delete(tenantId);
     throw error;
   });
-  _emailAuthByTenant.set(tenantId, pending);
+  if (!authorities) {
+    authorities = new Map();
+    _emailAuthByTenant.set(tenantId, authorities);
+  }
+  authorities.set(authorityFingerprint, pending);
   return pending;
 }
 
@@ -2098,7 +2081,7 @@ export function clearEmailAuthTenantCacheForTests(): void {
 }
 
 export function clearOAuthTokenKeyStoreForTests(): void {
-  _oauthKeyStore = null;
+  _clearConfiguredVaultsForTests();
 }
 
 /**

@@ -81,7 +81,6 @@ import {
 } from "@stwd/policy-engine";
 import type { PluginMigrationSource, StewardPlugin } from "@stwd/shared";
 import { WebhookEventRegistry } from "@stwd/shared";
-import { KeyStore, SecretVault } from "@stwd/vault";
 import type { Hono } from "hono";
 import {
   requireAgentJwt,
@@ -98,7 +97,6 @@ import {
   ensureAgentForTenant,
   getPolicySet,
   isValidAnyAddress,
-  MASTER_PASSWORD,
   policyEngine,
   priceOracle,
   safeJsonParse,
@@ -106,6 +104,7 @@ import {
   vault,
 } from "./services/context";
 import { createEnvEvmSimulator, type EvmSimulator } from "./services/evm-simulator";
+import { getConfiguredKeyStore, getConfiguredSecretVault } from "./services/vault-factory";
 import { CONFIGURED_WEBHOOK_EVENT_TYPES } from "./services/webhook-events";
 
 /** the steward app a plugin mounts onto: a hono app with the shared variables. */
@@ -263,8 +262,6 @@ export type StewardApiPlugin = StewardPlugin<StewardApp, StewardAppContext, Eval
  * root and passed to {@link registerPlugin}.
  */
 export function buildPluginContext(): StewardAppContext {
-  const credentialVault = new SecretVault(MASTER_PASSWORD);
-  const leaseKeyStore = new KeyStore(MASTER_PASSWORD, undefined, "credential-lease");
   return {
     db,
     vault,
@@ -291,11 +288,15 @@ export function buildPluginContext(): StewardAppContext {
     getAgentTokenStatus,
     getRedisClient,
     exerciseCredentialSecret: (tenantId, secretId, use) =>
-      credentialVault.exerciseSecret(tenantId, secretId, use),
+      getConfiguredSecretVault().exerciseSecret(tenantId, secretId, use),
     sealCredentialLeaseToken: async (tenantId, leaseId, token) =>
-      leaseKeyStore.encrypt(token, { tenantId, name: `upstream-lease:${leaseId}`, version: 1 }),
+      getConfiguredKeyStore("credential-lease").encrypt(token, {
+        tenantId,
+        name: `upstream-lease:${leaseId}`,
+        version: 1,
+      }),
     exerciseCredentialLeaseToken: async (tenantId, leaseId, sealed, use) => {
-      const token = leaseKeyStore.decrypt(sealed, {
+      const token = getConfiguredKeyStore("credential-lease").decrypt(sealed, {
         tenantId,
         name: `upstream-lease:${leaseId}`,
         version: 1,
