@@ -387,6 +387,20 @@ describe("approval-lifecycle approval + execute routes", () => {
     expect(body.error.code).toBe("APPROVAL_MFA_REQUIRED");
   });
 
+  test("GET approval rejects a hostile future MFA timestamp before returning detail", async () => {
+    const { intentId } = await createApprovalRequired();
+    const res = await app.request(`/v2/provider-actions/${intentId}/approval`, {
+      method: "GET",
+      headers: {
+        authorization: `Bearer ${await humanToken(F.APPROVER, Date.now() + 24 * 60 * 60_000)}`,
+        "x-steward-tenant": F.TENANT,
+      },
+    });
+    expect(res.status).toBe(403);
+    const body = (await res.json()) as { error: { code: string } };
+    expect(body.error.code).toBe("APPROVAL_MFA_STALE");
+  });
+
   test("GET approval returns safe summary to an eligible approver", async () => {
     const { intentId } = await createApprovalRequired();
     const res = await app.request(`/v2/provider-actions/${intentId}/approval`, {
