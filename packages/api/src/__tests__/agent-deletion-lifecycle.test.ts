@@ -317,6 +317,20 @@ async function waitUntilAdvisoryBlocked(observer: Sql, backendPid: number): Prom
   return false;
 }
 
+async function waitUntilLockBlocked(observer: Sql, backendPid: number): Promise<boolean> {
+  for (let attempt = 0; attempt < 400; attempt += 1) {
+    const [row] = await observer<{ blocked: boolean }[]>`
+      SELECT EXISTS (
+        SELECT 1 FROM pg_stat_activity
+        WHERE pid = ${backendPid} AND wait_event_type = 'Lock'
+      ) AS blocked
+    `;
+    if (row?.blocked === true) return true;
+    await Bun.sleep(10);
+  }
+  return false;
+}
+
 async function expectBlockedDeletion(
   actor: "tenant" | "platform",
   status: "active" | "needs_attention",
@@ -674,7 +688,12 @@ describe("agent deletion upstream credential boundary", () => {
     const anchorAgentId = `provider-anchor-${crypto.randomUUID()}`;
     await createAgent(lateAgentId);
     await createAgent(anchorAgentId);
-    const { binding } = await createProviderBinding(lateAgentId, "denied", anchorAgentId, false);
+    const { intentId: lateIntentId, binding } = await createProviderBinding(
+      lateAgentId,
+      "denied",
+      anchorAgentId,
+      false,
+    );
     await getDb().delete(agents).where(eq(agents.id, lateAgentId));
     let lateBindingError: unknown;
     try {
@@ -684,6 +703,7 @@ describe("agent deletion upstream credential boundary", () => {
     }
     expect(lateBindingError).toBeInstanceOf(Error);
     expect((lateBindingError as { cause?: { code?: string } }).cause?.code).toBe("23503");
+    await getDb().delete(intents).where(eq(intents.id, lateIntentId));
   });
 
   it("blocks deletion while provider execution is still reachable", async () => {
@@ -703,6 +723,177 @@ describe("agent deletion upstream credential boundary", () => {
       .where(eq(providerActionBindings.intentId, intentId));
     expect((await tenantDelete(agentId)).status).toBe(200);
   });
+
+  it("retains resolved intent-only provider evidence after agent deletion", async () => {
+    const agentId = `pi-resolved-${crypto.randomUUID()}`;
+    const intentId = `pa_${crypto.randomUUID()}`;
+    await createAgent(agentId);
+    await getDb().insert(intents).values({
+      id: intentId,
+      tenantId: TENANT_ID,
+      agentId,
+      intentType: "provider-action",
+      status: "failed",
+      createdByType: "agent",
+      createdById: agentId,
+    });
+
+    expect((await tenantDelete(agentId)).status).toBe(200);
+    expect(
+      await getDb()
+        .select({ agentId: intents.agentId })
+        .from(intents)
+        .where(eq(intents.id, intentId)),
+    ).toEqual([{ agentId: null }]);
+  });
+
+  it.skipIf(!USING_REAL_POSTGRES)(
+    "blocks agent deletion when intent-only provider evidence commits first",
+    async () => {
+      const agentId = `pi-writer-first-${crypto.randomUUID()}`;
+      const scope = {
+        tenantId: TENANT_ID,
+        agentId,
+        intentId: `pa_${crypto.randomUUID()}`,
+      };
+      await createAgent(agentId);
+      const writer = postgres(process.env.DATABASE_URL as string, { max: 1 });
+      const observer = postgres(process.env.DATABASE_URL as string, { max: 1 });
+      let releaseWriter!: () => void;
+      const release = new Promise<void>((resolve) => {
+        releaseWriter = resolve;
+      });
+      let writerPid = 0;
+      let writerReady!: () => void;
+      const ready = new Promise<void>((resolve) => {
+        writerReady = resolve;
+      });
+      const writerTransaction = writer.begin(async (tx) => {
+        const [backend] = await tx<{ pid: number }[]>`SELECT pg_backend_pid()::int AS pid`;
+        writerPid = backend?.pid ?? 0;
+        await insertProviderIntent(tx, scope);
+        writerReady();
+        await release;
+      });
+      await ready;
+
+      let deletion: Promise<Response> | undefined;
+      try {
+        deletion = tenantDelete(agentId);
+        expect(await waitUntilBackendBlockedBy(observer, writerPid)).toBe(true);
+        releaseWriter();
+        await writerTransaction;
+
+        const response = await deletion;
+        expect(response.status).toBe(409);
+        await expect(response.json()).resolves.toEqual({
+          ok: false,
+          error: "Agent has unresolved execution evidence; reconcile it first",
+        });
+        expect(
+          await getDb().select().from(intents).where(eq(intents.id, scope.intentId)),
+        ).toHaveLength(1);
+        expect(await revocationStore.getAgentRevokedBefore(agentId)).toBeNull();
+
+        await getDb()
+          .update(intents)
+          .set({ status: "failed" })
+          .where(eq(intents.id, scope.intentId));
+        expect((await tenantDelete(agentId)).status).toBe(200);
+        expect(
+          await getDb()
+            .select({ agentId: intents.agentId })
+            .from(intents)
+            .where(eq(intents.id, scope.intentId)),
+        ).toEqual([{ agentId: null }]);
+      } finally {
+        releaseWriter();
+        await Promise.allSettled([writerTransaction, deletion ?? Promise.resolve(new Response())]);
+        await Promise.all([writer.end(), observer.end()]);
+      }
+    },
+  );
+
+  it.skipIf(!USING_REAL_POSTGRES)(
+    "rejects intent-only provider evidence that starts after agent deletion",
+    async () => {
+      const agentId = `pi-delete-first-${crypto.randomUUID()}`;
+      const scope = {
+        tenantId: TENANT_ID,
+        agentId,
+        intentId: `pa_${crypto.randomUUID()}`,
+      };
+      await createAgent(agentId);
+      const blockerLeaseId = await createLease(agentId, "revoked");
+      const holder = postgres(process.env.DATABASE_URL as string, { max: 1 });
+      const writer = postgres(process.env.DATABASE_URL as string, { max: 1 });
+      const observer = postgres(process.env.DATABASE_URL as string, { max: 1 });
+      let releaseHolder!: () => void;
+      const release = new Promise<void>((resolve) => {
+        releaseHolder = resolve;
+      });
+      let holderPid = 0;
+      let holderReady!: () => void;
+      const ready = new Promise<void>((resolve) => {
+        holderReady = resolve;
+      });
+      const holderTransaction = holder.begin(async (tx) => {
+        const [backend] = await tx<{ pid: number }[]>`SELECT pg_backend_pid()::int AS pid`;
+        holderPid = backend?.pid ?? 0;
+        await tx`SELECT id FROM upstream_credential_leases WHERE id = ${blockerLeaseId} FOR UPDATE`;
+        holderReady();
+        await release;
+      });
+      await ready;
+
+      let deletion: Promise<Response> | undefined;
+      let writerTransaction: Promise<void> | undefined;
+      try {
+        deletion = tenantDelete(agentId);
+        expect(await waitUntilBackendBlockedBy(observer, holderPid)).toBe(true);
+
+        let writerPid = 0;
+        let writerReady!: () => void;
+        const writerStarted = new Promise<void>((resolve) => {
+          writerReady = resolve;
+        });
+        let writerError: unknown;
+        writerTransaction = writer
+          .begin(async (tx) => {
+            const [backend] = await tx<{ pid: number }[]>`SELECT pg_backend_pid()::int AS pid`;
+            writerPid = backend?.pid ?? 0;
+            writerReady();
+            await insertProviderIntent(tx, scope);
+          })
+          .catch((error) => {
+            writerError = error;
+          });
+        await writerStarted;
+        expect(await waitUntilLockBlocked(observer, writerPid)).toBe(true);
+
+        releaseHolder();
+        await holderTransaction;
+        expect((await deletion).status).toBe(200);
+        await writerTransaction;
+        expect(writerError).toBeInstanceOf(Error);
+        expect(
+          (writerError as { code?: string; cause?: { code?: string } }).code ??
+            (writerError as { cause?: { code?: string } }).cause?.code,
+        ).toBe("23503");
+        expect(
+          await getDb().select().from(intents).where(eq(intents.id, scope.intentId)),
+        ).toHaveLength(0);
+      } finally {
+        releaseHolder();
+        await Promise.allSettled([
+          holderTransaction,
+          deletion ?? Promise.resolve(new Response()),
+          writerTransaction ?? Promise.resolve(),
+        ]);
+        await Promise.all([holder.end(), writer.end(), observer.end()]);
+      }
+    },
+  );
 
   it.skipIf(!USING_REAL_POSTGRES)(
     "serializes provider and lease writers before tenant-deletion revocation",

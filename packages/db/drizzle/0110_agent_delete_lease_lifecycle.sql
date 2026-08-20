@@ -197,6 +197,21 @@ BEGIN
   ) THEN
     RAISE EXCEPTION 'agent has unresolved provider execution' USING ERRCODE = '55000';
   END IF;
+  IF EXISTS (
+    SELECT 1 FROM public.intents AS intent
+    WHERE intent.tenant_id = OLD.tenant_id
+      AND intent.agent_id = OLD.id
+      AND intent.intent_type = 'provider-action'
+      AND intent.status IN ('pending', 'authorized', 'executing')
+      AND NOT EXISTS (
+        SELECT 1 FROM public.provider_action_bindings AS binding
+        WHERE binding.tenant_id = intent.tenant_id
+          AND binding.intent_id = intent.id
+      )
+  ) THEN
+    RAISE EXCEPTION 'agent has unresolved intent-only provider execution'
+      USING ERRCODE = '55000';
+  END IF;
   IF to_regclass('public.capability_grants') IS NOT NULL THEN
     EXECUTE
       'SELECT EXISTS (
@@ -209,18 +224,14 @@ BEGIN
       RAISE EXCEPTION 'agent has active capability grants' USING ERRCODE = '55000';
     END IF;
   END IF;
-  -- Detach resolved provider intents before the agent cascade so their binding
-  -- evidence remains durable after authority removal.
+  -- Detach all remaining provider intents before the agent cascade so both
+  -- binding-backed and legacy/recovery intent-only evidence remain durable.
+  -- Unresolved intent-only rows were rejected above.
   UPDATE public.intents AS intent
   SET agent_id = NULL
   WHERE intent.tenant_id = OLD.tenant_id
     AND intent.agent_id = OLD.id
-    AND EXISTS (
-      SELECT 1 FROM public.provider_action_bindings AS binding
-      WHERE binding.tenant_id = OLD.tenant_id
-        AND binding.actor_agent_id = OLD.id
-        AND binding.intent_id = intent.id
-    );
+    AND intent.intent_type = 'provider-action';
   RETURN OLD;
 END;
 $$;

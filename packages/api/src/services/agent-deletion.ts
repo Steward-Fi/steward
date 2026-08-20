@@ -5,6 +5,7 @@ import {
   encryptedChainKeys,
   encryptedKeys,
   getDb,
+  intents,
   pendingProxyRequests,
   policies,
   providerActionBindings,
@@ -118,7 +119,25 @@ export async function deleteAgentAuthority(
       )
       .limit(1)
       .for("update");
-    if (unresolvedTransaction || unresolvedProviderAction) {
+    const [unresolvedIntentOnlyProviderAction] = await tx
+      .select({ id: intents.id })
+      .from(intents)
+      .where(
+        and(
+          eq(intents.tenantId, tenantId),
+          eq(intents.agentId, agentId),
+          eq(intents.intentType, "provider-action"),
+          inArray(intents.status, ["pending", "authorized", "executing"]),
+          sql`NOT EXISTS (
+            SELECT 1 FROM public.provider_action_bindings AS binding
+            WHERE binding.tenant_id = ${intents.tenantId}
+              AND binding.intent_id = ${intents.id}
+          )`,
+        ),
+      )
+      .limit(1)
+      .for("update");
+    if (unresolvedTransaction || unresolvedProviderAction || unresolvedIntentOnlyProviderAction) {
       return "blocked_by_unresolved_execution";
     }
 
@@ -175,6 +194,20 @@ export async function deleteAgentAuthority(
     }
 
     await input.beforeDelete?.();
+
+    // Provider bindings and legacy/recovery intent-only rows are durable
+    // evidence. Live intent-only rows are rejected above; detach every
+    // remaining provider intent before the agent FK cascade.
+    await tx
+      .update(intents)
+      .set({ agentId: null })
+      .where(
+        and(
+          eq(intents.tenantId, tenantId),
+          eq(intents.agentId, agentId),
+          eq(intents.intentType, "provider-action"),
+        ),
+      );
 
     await tx
       .update(secretRoutes)
