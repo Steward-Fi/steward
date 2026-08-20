@@ -293,9 +293,9 @@ await runStartupPhase("schedulers", async () => {
       cancelXCredentialLifecycleScheduler = startXCredentialLifecycleScheduler();
     }
     cancelRetention = startRetentionScheduler();
-    if (redisOk) {
-      cancelProviderReservationReconciliation = startProviderReservationReconciliationScheduler();
-    }
+    // Required-audit outbox delivery is Postgres-backed and must recover even
+    // when Redis initialization failed. Reservation recovery retries separately.
+    cancelProviderReservationReconciliation = startProviderReservationReconciliationScheduler();
     cancelTransactionReceiptPolling = startTransactionReceiptPollingScheduler();
     cancelWebhookRetryScheduler = startWebhookRetryScheduler();
     if (capabilitiesEnabled) {

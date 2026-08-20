@@ -41,6 +41,10 @@ import {
   __setProviderAuditOutboxFaultForTests,
   providerActionService,
 } from "../services/provider-action-service";
+import {
+  recoverProviderActionTenant,
+  startProviderReservationReconciliationScheduler,
+} from "../services/provider-reservation-reconciliation-scheduler";
 import { AuditUnavailableError, providerApprovalService } from "../services/provider-approval";
 import {
   auditCount,
@@ -376,7 +380,7 @@ describe("approval-lifecycle concurrency + fault matrix", () => {
     expect(await auditCount()).toBe(auditsBefore);
   });
 
-  test("C2 crash recovery: a crash between commit and drain leaves an undelivered outbox row; the sweeper signs it exactly once", async () => {
+  test("C2 scheduler startup and tick deliver orphaned outbox rows exactly once", async () => {
     // Create an approval-required action but SIMULATE a crash before the drain by
     // marking the just-created outbox row undelivered again (createApprovalRequired
     // already drains). Instead: create a fresh action and null delivered_at to
@@ -386,24 +390,90 @@ describe("approval-lifecycle concurrency + fault matrix", () => {
       .update(providerActionAuditOutbox)
       .set({ deliveredAt: null })
       .where(eq(providerActionAuditOutbox.intentId, intentId));
-    // Delete any signed event that was produced so we can prove the sweeper
-    // produces exactly one.
+    // Delete the signed event that was produced so startup and the next timer
+    // tick can each prove delivery for one immutable outbox identity.
     await getDb().execute(
       sql`DELETE FROM audit_events WHERE tenant_id = ${F.TENANT} AND resource_id = ${intentId}`,
     );
-    // First sweep signs it; second sweep is a no-op (exactly once).
-    const first = await providerActionService.recoverUnsignedIntents(F.TENANT, intentId);
-    const second = await providerActionService.recoverUnsignedIntents(F.TENANT, intentId);
-    expect(first).toBe(1);
-    expect(second).toBe(0);
-    const events = await correlatedAudit(intentId);
-    expect(events.filter((e) => e.action === "provider.action.approval_required").length).toBe(1);
-    // The outbox row is delivered.
-    const [row] = await getDb()
+    const [original] = await getDb()
       .select()
       .from(providerActionAuditOutbox)
       .where(eq(providerActionAuditOutbox.intentId, intentId));
-    expect(row.deliveredAt).not.toBeNull();
+    let sweeps = 0;
+    let reservationCalls = 0;
+    let firstDelivered!: () => void;
+    const startupPass = new Promise<void>((resolve) => {
+      firstDelivered = resolve;
+    });
+    let releaseStartup!: () => void;
+    const startupGate = new Promise<void>((resolve) => {
+      releaseStartup = resolve;
+    });
+    let secondDelivered!: () => void;
+    const tickPass = new Promise<void>((resolve) => {
+      secondDelivered = resolve;
+    });
+    const stop = startProviderReservationReconciliationScheduler({
+      intervalMs: 5,
+      sweep: async () => {
+        sweeps += 1;
+        const result = await recoverProviderActionTenant(F.TENANT);
+        reservationCalls += 1;
+        if (sweeps === 1) {
+          firstDelivered();
+          await startupGate;
+        } else if (sweeps === 2) {
+          secondDelivered();
+        }
+        return result;
+      },
+    });
+    await startupPass;
+
+    // Create a second immutable outbox identity while the startup pass is held;
+    // the next real timer tick must discover and sign it.
+    const [second] = await getDb()
+      .insert(providerActionAuditOutbox)
+      .values({
+        tenantId: original.tenantId,
+        intentId: original.intentId,
+        action: original.action,
+        resourceType: original.resourceType,
+        resourceId: original.resourceId,
+        metadata: original.metadata,
+      })
+      .returning();
+    releaseStartup();
+    await tickPass;
+    stop();
+
+    expect(sweeps).toBe(2);
+    expect(reservationCalls).toBe(2);
+    const events = await correlatedAudit(intentId);
+    expect(events.filter((e) => e.action === "provider.action.approval_required").length).toBe(2);
+    const rows = await getDb()
+      .select()
+      .from(providerActionAuditOutbox)
+      .where(eq(providerActionAuditOutbox.intentId, intentId));
+    expect(rows).toHaveLength(2);
+    expect(rows.every((row) => row.deliveredAt !== null)).toBe(true);
+    const evidence = await getDb().execute(sql`
+      SELECT metadata->>'requiredOutboxId' AS outbox_id
+      FROM audit_events
+      WHERE tenant_id = ${F.TENANT}
+        AND resource_type = ${original.resourceType}
+        AND resource_id = ${original.resourceId}
+        AND action = ${original.action}
+      ORDER BY metadata->>'requiredOutboxId'
+    `);
+    const evidenceRows = Array.isArray(evidence)
+      ? evidence
+      : ((evidence as { rows?: unknown[] }).rows ?? []);
+    expect(evidenceRows).toEqual(
+      [original.id, second.id]
+        .sort()
+        .map((outbox_id) => ({ outbox_id })),
+    );
   });
 
   test("C2 recovery is idempotent under concurrency: two parallel sweeps sign exactly once", async () => {

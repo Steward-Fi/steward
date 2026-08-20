@@ -2932,7 +2932,7 @@ class ProviderActionService {
    *
    * Returns the number of newly signed rows in this pass.
    */
-  async recoverUnsignedIntents(tenantId: string, intentId?: string): Promise<number> {
+  async recoverRequiredAuditOutbox(tenantId: string, intentId?: string): Promise<number> {
     const claimToken = randomUUID();
     const intentFilter = intentId ? sql`AND intent_id = ${intentId}` : sql``;
     const claimed = await this.db().transaction(async (tx) =>
@@ -2996,9 +2996,24 @@ class ProviderActionService {
       `);
     }
 
-    // Reservation recovery is deliberately a separate retry domain. An audit
-    // signer outage must not couple Redis reservation liveness to the outbox
-    // transaction, and a Redis outage cannot roll back signed evidence.
+    if (auditFailure !== undefined) throw auditFailure;
+    return signed;
+  }
+
+  /**
+   * Backwards-compatible C2 recovery entry point for an intent. Required audit
+   * delivery and reservation reconciliation are separate retry domains: either
+   * still runs when the other fails, and the original audit failure remains the
+   * primary error when both fail.
+   */
+  async recoverUnsignedIntents(tenantId: string, intentId?: string): Promise<number> {
+    let signed = 0;
+    let auditFailure: unknown;
+    try {
+      signed = await this.recoverRequiredAuditOutbox(tenantId, intentId);
+    } catch (error) {
+      auditFailure = error;
+    }
     try {
       await this.reconcilePolicyReservations(tenantId, intentId);
     } catch (error) {
@@ -3146,7 +3161,7 @@ class ProviderActionService {
         // recordReservationFailure transactionally enqueues REQUIRED evidence.
         // Draining is best effort here; a signer outage cannot erase the durable
         // attention row or outbox event and normal C2 recovery will retry it.
-        await this.recoverUnsignedIntents(row.tenantId, row.intentId).catch((error) =>
+        await this.recoverRequiredAuditOutbox(row.tenantId, row.intentId).catch((error) =>
           console.error(
             "[provider-reservations] malformed-generation audit drain failed",
             redactedThrownDiagnostics(error),
