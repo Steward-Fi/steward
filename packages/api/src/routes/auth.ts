@@ -4065,6 +4065,9 @@ function escapeOAuthCallbackHtml(value: string): string {
 
 function oauthCallbackPrefersHtml(c: Context): boolean {
   const accept = c.req.header("accept")?.toLowerCase() ?? "";
+  if (!accept.trim()) {
+    return c.req.header("sec-fetch-mode")?.toLowerCase() === "navigate";
+  }
   const qualityFor = (target: "application/json" | "text/html"): number | undefined => {
     const [targetType] = target.split("/");
     let bestMatch: { specificity: number; quality: number } | undefined;
