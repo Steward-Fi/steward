@@ -459,6 +459,10 @@ export interface SignTransactionOptions {
    */
   expectedBackend?: "local-vault" | "external-custody";
   expectedBackendIdentityDigest?: string;
+  onSolanaBroadcastPrepared?: (checkpoint: {
+    signature: string;
+    recentBlockhash: string;
+  }) => Promise<void>;
 }
 
 export interface ResolvedExecutionTarget {
@@ -1813,6 +1817,7 @@ export class Vault {
       const rpcUrl = this.config.rpcUrl ?? resolveSolanaRpc(chainId);
       hash = await signSolanaTransaction(secretKey, request.to, BigInt(request.value), rpcUrl, {
         broadcast: shouldBroadcast,
+        onBroadcastPrepared: options.onSolanaBroadcastPrepared,
         // Attach adaptive priority fees (simulated CU limit + recent-fee-derived
         // price, bounded by COMPUTE_BUDGET_BOUNDS). Estimation never throws and
         // falls back to safe defaults on RPC error. Set STEWARD_SOLANA_PRIORITY_FEES=0

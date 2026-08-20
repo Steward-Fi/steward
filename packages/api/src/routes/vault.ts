@@ -3188,6 +3188,27 @@ vaultRoutes.post("/:agentId/actions/transfer", async (c) => {
     gasLimit: isTokenTransfer && !isSolanaTokenTransfer ? "65000" : undefined,
     broadcast: transfer.broadcast,
   };
+  const baseTransferActionPayload = transferActionPayload({
+    token: transfer.token,
+    recipient: transfer.to,
+    amount: transfer.value,
+    broadcast: transfer.broadcast,
+    referenceId: transfer.referenceId,
+    sponsorship: sponsorshipPayload,
+  });
+  const solanaRecoveryBinding =
+    isSolanaTransfer && transfer.broadcast
+      ? createSolanaTransferRecoveryBinding(c, {
+          tenantId,
+          agentId,
+          chainId: transfer.chainId,
+          to: transfer.to,
+          token: transfer.token,
+          value: transfer.value,
+          transaction: signRequest.data,
+          referenceId: transfer.referenceId,
+        })
+      : null;
   const policySet = await getScopedPolicySet(tenantId, agentId, c.get("agentPolicyIds"));
   const conditionSets = await loadConditionSetsForPolicies(tenantId, policySet);
 
@@ -3252,7 +3273,7 @@ vaultRoutes.post("/:agentId/actions/transfer", async (c) => {
           conditionSets,
         });
 
-    const actionId = crypto.randomUUID();
+    const actionId = solanaRecoveryBinding?.txId ?? crypto.randomUUID();
     if (!evaluation.approved) {
       const status = evaluation.requiresManualApproval ? "pending" : "rejected";
       await db.insert(transactions).values({
@@ -3369,6 +3390,34 @@ vaultRoutes.post("/:agentId/actions/transfer", async (c) => {
       );
     }
 
+    let solanaExecutionToken: string | null = null;
+    let storedTransferActionPayload: Record<string, unknown> = baseTransferActionPayload;
+    if (solanaRecoveryBinding) {
+      try {
+        const staged = await stageSolanaRecoveryAnchor({
+          agentId,
+          transaction: signRequest.data ?? "",
+          chainId: transfer.chainId,
+          toAddress: transfer.to,
+          value: transfer.value,
+          broadcastRequested: true,
+          blindSigned: isSolanaTokenTransfer,
+          policyResults: evaluation.results,
+          binding: solanaRecoveryBinding,
+          actionType: "transfer",
+          actionPayload: baseTransferActionPayload,
+        });
+        if (!staged.executionToken) return solanaTransferReplayResponse(c, staged.row);
+        solanaExecutionToken = staged.executionToken;
+        storedTransferActionPayload = readSolanaRecoveryMetadata(staged.row.actionPayload);
+      } catch (error) {
+        if (error instanceof SolanaIdempotencyConflictError) {
+          return c.json<ApiResponse>({ ok: false, error: error.message }, 409);
+        }
+        throw error;
+      }
+    }
+
     let completedResult: string | null = null;
     let completedStatus: "broadcast" | "signed" | null = null;
     try {
@@ -3407,25 +3456,19 @@ vaultRoutes.post("/:agentId/actions/transfer", async (c) => {
         if (!signRequest.data) {
           throw new Error("SPL transfer transaction was not built");
         }
-        await db.insert(transactions).values({
-          id: actionId,
-          agentId,
-          status: "pending",
-          toAddress: transfer.to,
-          value: transfer.value,
-          data: signRequest.data,
-          chainId: transfer.chainId,
-          actionType: "transfer",
-          actionPayload: transferActionPayload({
-            token: transfer.token,
-            recipient: transfer.to,
-            amount: transfer.value,
-            broadcast: transfer.broadcast,
-            referenceId: transfer.referenceId,
-            sponsorship: sponsorshipPayload,
-          }),
-          policyResults: evaluation.results,
-        });
+        if (!solanaRecoveryBinding)
+          await db.insert(transactions).values({
+            id: actionId,
+            agentId,
+            status: "pending",
+            toAddress: transfer.to,
+            value: transfer.value,
+            data: signRequest.data,
+            chainId: transfer.chainId,
+            actionType: "transfer",
+            actionPayload: storedTransferActionPayload,
+            policyResults: evaluation.results,
+          });
         const signed = await vault.signSolanaTransaction({
           agentId,
           tenantId,
@@ -3436,6 +3479,17 @@ vaultRoutes.post("/:agentId/actions/transfer", async (c) => {
           // byte-level check only models native SOL transfers); the edge
           // policy evaluation above approved this transfer.
           allowBlindSign: true,
+          ...(solanaExecutionToken
+            ? {
+                onBroadcastPrepared: (checkpoint) =>
+                  checkpointSolanaBroadcastSubmission(
+                    actionId,
+                    agentId,
+                    solanaExecutionToken,
+                    checkpoint,
+                  ),
+              }
+            : {}),
         });
         result = signed.signature;
       } else {
@@ -3443,6 +3497,17 @@ vaultRoutes.post("/:agentId/actions/transfer", async (c) => {
           txId: actionId,
           policyResults: evaluation.results,
           status: transfer.broadcast ? "broadcast" : "signed",
+          ...(solanaExecutionToken
+            ? {
+                onSolanaBroadcastPrepared: (checkpoint) =>
+                  checkpointSolanaBroadcastSubmission(
+                    actionId,
+                    agentId,
+                    solanaExecutionToken,
+                    checkpoint,
+                  ),
+              }
+            : {}),
         });
       }
       const txStatus = transfer.broadcast ? "broadcast" : "signed";
@@ -3455,14 +3520,7 @@ vaultRoutes.post("/:agentId/actions/transfer", async (c) => {
           status: txStatus,
           txHash: transfer.broadcast ? result : undefined,
           actionType: "transfer",
-          actionPayload: transferActionPayload({
-            token: transfer.token,
-            recipient: transfer.to,
-            amount: transfer.value,
-            broadcast: transfer.broadcast,
-            referenceId: transfer.referenceId,
-            sponsorship: sponsorshipPayload,
-          }),
+          ...(solanaRecoveryBinding ? {} : { actionPayload: storedTransferActionPayload }),
           policyResults: evaluation.results,
           signedAt: new Date(),
         })
@@ -3534,6 +3592,32 @@ vaultRoutes.post("/:agentId/actions/transfer", async (c) => {
         }),
       });
     } catch (e: unknown) {
+      if (solanaRecoveryBinding && e instanceof ExternalBroadcastOutcomeUnknownError) {
+        await preserveUnknownSolanaOutcome(
+          actionId,
+          agentId,
+          solanaExecutionToken,
+          e.transactionHash,
+        );
+        return externalBroadcastOutcomeUnknownResponse(c, e, actionId) as Response;
+      }
+      if (solanaRecoveryBinding && e instanceof SolanaBroadcastNotSubmittedError) {
+        await markSolanaBroadcastNotSubmitted(
+          tenantId,
+          actionId,
+          agentId,
+          solanaExecutionToken,
+          e.transactionHash,
+        );
+        return c.json<ApiResponse>(
+          {
+            ok: false,
+            error: "Solana RPC preflight rejected the transfer",
+            data: { actionId },
+          },
+          502,
+        );
+      }
       const frozen = frozenSigningResponse(c, e);
       if (frozen) return frozen;
       if (completedResult && completedStatus) {
@@ -3543,14 +3627,7 @@ vaultRoutes.post("/:agentId/actions/transfer", async (c) => {
             status: completedStatus,
             txHash: transfer.broadcast ? completedResult : undefined,
             actionType: "transfer",
-            actionPayload: transferActionPayload({
-              token: transfer.token,
-              recipient: transfer.to,
-              amount: transfer.value,
-              broadcast: transfer.broadcast,
-              referenceId: transfer.referenceId,
-              sponsorship: sponsorshipPayload,
-            }),
+            ...(solanaRecoveryBinding ? {} : { actionPayload: storedTransferActionPayload }),
             policyResults: evaluation.results,
             signedAt: new Date(),
           })
@@ -3573,25 +3650,22 @@ vaultRoutes.post("/:agentId/actions/transfer", async (c) => {
           }),
         });
       }
-      await db.insert(transactions).values({
-        id: actionId,
-        agentId,
-        status: "failed",
-        toAddress: signRequest.to,
-        value: signRequest.value,
-        data: signRequest.data,
-        chainId: signRequest.chainId,
-        actionType: "transfer",
-        actionPayload: transferActionPayload({
-          token: transfer.token,
-          recipient: transfer.to,
-          amount: transfer.value,
-          broadcast: signRequest.broadcast !== false,
-          referenceId: transfer.referenceId,
-          sponsorship: sponsorshipPayload,
-        }),
-        policyResults: evaluation.results,
-      });
+      if (solanaRecoveryBinding) {
+        await markSolanaRecoveryAnchorFailed(actionId, agentId, solanaExecutionToken);
+      } else {
+        await db.insert(transactions).values({
+          id: actionId,
+          agentId,
+          status: "failed",
+          toAddress: signRequest.to,
+          value: signRequest.value,
+          data: signRequest.data,
+          chainId: signRequest.chainId,
+          actionType: "transfer",
+          actionPayload: baseTransferActionPayload,
+          policyResults: evaluation.results,
+        });
+      }
       await recordSponsoredActionIfNeeded({
         sponsorship: sponsorshipPayload,
         tenantId,
@@ -3734,18 +3808,17 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
     .select({
       transaction: transactions,
       approval: {
+        status: approvalQueue.status,
         requestedByType: approvalQueue.requestedByType,
         requestedById: approvalQueue.requestedById,
+        resolvedByType: approvalQueue.resolvedByType,
+        resolvedById: approvalQueue.resolvedById,
       },
     })
     .from(transactions)
     .innerJoin(
       approvalQueue,
-      and(
-        eq(approvalQueue.txId, transactions.id),
-        eq(approvalQueue.agentId, transactions.agentId),
-        eq(approvalQueue.status, "pending"),
-      ),
+      and(eq(approvalQueue.txId, transactions.id), eq(approvalQueue.agentId, transactions.agentId)),
     )
     .where(
       and(
@@ -3771,6 +3844,34 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
   }
 
   const isSolana = transactionRow.chainId === 101 || transactionRow.chainId === 102;
+  const approvalRecoveryMetadata = readSolanaRecoveryMetadata(transactionRow.actionPayload);
+  const isApprovedSolanaResume = pendingApproval.status === "approved" && isSolana;
+  if (pendingApproval.status !== "pending") {
+    const sameResolver =
+      pendingApproval.resolvedByType === approverPrincipal.type &&
+      pendingApproval.resolvedById === approverPrincipal.id;
+    const leaseUntil =
+      typeof approvalRecoveryMetadata.attemptLeaseUntil === "string"
+        ? Date.parse(approvalRecoveryMetadata.attemptLeaseUntil)
+        : Number.NaN;
+    if (
+      !isApprovedSolanaResume ||
+      !sameResolver ||
+      approvalRecoveryMetadata.recoveryType !== "solana_transaction" ||
+      approvalRecoveryMetadata.recoveryActionType !== (transactionRow.actionType ?? "transaction")
+    ) {
+      return c.json<ApiResponse>(
+        { ok: false, error: "Transaction already processed or not found" },
+        409,
+      );
+    }
+    if (!Number.isFinite(leaseUntil) || leaseUntil > Date.now()) {
+      return c.json<ApiResponse>(
+        { ok: false, error: "Approved Solana execution is already in progress" },
+        409,
+      );
+    }
+  }
   const transferPayload =
     transactionRow.actionType === "transfer"
       ? getTransferActionPayload(transactionRow.actionPayload)
@@ -3858,6 +3959,8 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
     const resolvedAt = new Date();
     let irreversibleResult = false;
     let completedTxHash: string | null = null;
+    let approvedSolanaExecutionToken: string | null = null;
+    let approvedSolanaActionPayload: Record<string, unknown> | null = null;
     try {
       const requestedBroadcast = transferPayload
         ? transferPayload.broadcast
@@ -4112,23 +4215,37 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
         );
       }
 
-      const claimResult = await db
-        .update(approvalQueue)
-        .set({
-          status: "approved",
-          resolvedAt,
-          resolvedBy: `${approverPrincipal.type}:${approverPrincipal.id}`,
-          resolvedByType: approverPrincipal.type,
-          resolvedById: approverPrincipal.id,
-        })
-        .where(
-          and(
-            eq(approvalQueue.txId, txId),
-            eq(approvalQueue.agentId, agentId),
-            eq(approvalQueue.status, "pending"),
-          ),
-        )
-        .returning();
+      const claimResult = isApprovedSolanaResume
+        ? await db
+            .select({ id: approvalQueue.id })
+            .from(approvalQueue)
+            .where(
+              and(
+                eq(approvalQueue.txId, txId),
+                eq(approvalQueue.agentId, agentId),
+                eq(approvalQueue.status, "approved"),
+                eq(approvalQueue.resolvedByType, approverPrincipal.type),
+                eq(approvalQueue.resolvedById, approverPrincipal.id),
+              ),
+            )
+            .limit(1)
+        : await db
+            .update(approvalQueue)
+            .set({
+              status: "approved",
+              resolvedAt,
+              resolvedBy: `${approverPrincipal.type}:${approverPrincipal.id}`,
+              resolvedByType: approverPrincipal.type,
+              resolvedById: approverPrincipal.id,
+            })
+            .where(
+              and(
+                eq(approvalQueue.txId, txId),
+                eq(approvalQueue.agentId, agentId),
+                eq(approvalQueue.status, "pending"),
+              ),
+            )
+            .returning();
 
       if (claimResult.length === 0) {
         return c.json<ApiResponse>(
@@ -4181,6 +4298,13 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
           return c.json<ApiResponse>({ ok: false, error: reservationError }, 403);
         }
       }
+      if (isSolana && shouldBroadcast) {
+        const claimed = await claimApprovedSolanaExecution(transactionRow, {
+          takeover: isApprovedSolanaResume,
+        });
+        approvedSolanaExecutionToken = claimed.executionToken;
+        approvedSolanaActionPayload = claimed.actionPayload;
+      }
       dispatchIntentWebhook(tenantId, agentId, "intent.authorized", {
         intentId: txId,
         actionType: transactionRow.actionType,
@@ -4209,6 +4333,17 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
           ...(isSolanaTokenTransfer
             ? { allowBlindSign: true }
             : { expectedTo: transactionRow.toAddress, expectedValue: transactionRow.value }),
+          ...(approvedSolanaExecutionToken
+            ? {
+                onBroadcastPrepared: (checkpoint) =>
+                  checkpointSolanaBroadcastSubmission(
+                    txId,
+                    agentId,
+                    approvedSolanaExecutionToken!,
+                    checkpoint,
+                  ),
+              }
+            : {}),
         });
         txHash = result.signature;
         irreversibleResult = shouldBroadcast;
@@ -4319,7 +4454,7 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
           : transactionPayload?.broadcast === false
             ? "signed"
             : "broadcast";
-      await db
+      const updatedApprovedTransactions = await db
         .update(transactions)
         .set({
           status: nextStatus,
@@ -4330,28 +4465,48 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
             ? currentExecutionPolicyRevisionHash
             : transactionRow.executionPolicyRevisionHash,
           policyResults: currentEvaluation.results,
-          actionPayload: transferPayload
-            ? transferActionPayload({
-                token: transferPayload.token,
-                recipient: transferPayload.recipient ?? transactionRow.toAddress,
-                amount: transferPayload.amount ?? transactionRow.value,
-                broadcast: transferPayload.broadcast,
-                referenceId: transferPayload.referenceId,
-                sponsorship: transferPayload.sponsorship,
-              })
-            : transactionPayload
-              ? transactionActionPayload({
-                  broadcast: transactionPayload.broadcast,
-                  referenceId: transactionPayload.referenceId,
-                  nonce: transactionPayload.nonce,
-                  gasLimit: transactionPayload.gasLimit,
-                  venue: transactionPayload.venue,
-                  walletAddress: transactionPayload.walletAddress,
-                })
-              : transactionRow.actionPayload,
+          ...(approvedSolanaActionPayload
+            ? {}
+            : {
+                actionPayload: transferPayload
+                  ? transferActionPayload({
+                      token: transferPayload.token,
+                      recipient: transferPayload.recipient ?? transactionRow.toAddress,
+                      amount: transferPayload.amount ?? transactionRow.value,
+                      broadcast: transferPayload.broadcast,
+                      referenceId: transferPayload.referenceId,
+                      sponsorship: transferPayload.sponsorship,
+                    })
+                  : transactionPayload
+                    ? transactionActionPayload({
+                        broadcast: transactionPayload.broadcast,
+                        referenceId: transactionPayload.referenceId,
+                        nonce: transactionPayload.nonce,
+                        gasLimit: transactionPayload.gasLimit,
+                        venue: transactionPayload.venue,
+                        walletAddress: transactionPayload.walletAddress,
+                      })
+                    : transactionRow.actionPayload,
+              }),
           signedAt: resolvedAt,
         })
-        .where(eq(transactions.id, txId));
+        .where(
+          and(
+            eq(transactions.id, txId),
+            eq(transactions.agentId, agentId),
+            approvedSolanaExecutionToken
+              ? and(
+                  eq(transactions.status, "outcome_unknown"),
+                  eq(transactions.txHash, txHash),
+                  sql`${transactions.actionPayload}->>'executionToken' = ${approvedSolanaExecutionToken}`,
+                )
+              : undefined,
+          ),
+        )
+        .returning({ id: transactions.id });
+      if (updatedApprovedTransactions.length !== 1) {
+        throw new Error("Approved transaction execution owner changed before finalization");
+      }
 
       if (!isSolana && shouldBroadcast) {
         recordVaultSpend(agentId, tenantId, transactionRow.value, transactionRow.chainId).catch(
@@ -4438,9 +4593,29 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
         data: !shouldBroadcast ? { txId, signedTx: txHash } : { txId, txHash },
       });
     } catch (e: unknown) {
+      if (e instanceof SolanaExecutionLeaseConflictError) {
+        return c.json<ApiResponse>({ ok: false, error: e.message }, 409);
+      }
       if (e instanceof ExternalBroadcastOutcomeUnknownError) {
         irreversibleResult = true;
         completedTxHash = e.transactionHash;
+      }
+      if (e instanceof SolanaBroadcastNotSubmittedError && approvedSolanaExecutionToken) {
+        await markSolanaBroadcastNotSubmitted(
+          tenantId,
+          txId,
+          agentId,
+          approvedSolanaExecutionToken,
+          e.transactionHash,
+        );
+        return c.json<ApiResponse>(
+          {
+            ok: false,
+            error: "Solana RPC preflight rejected the approved transaction",
+            data: { txId },
+          },
+          502,
+        );
       }
       const frozen = frozenSigningResponse(c, e);
       if (frozen) return frozen;
@@ -4452,16 +4627,29 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
         chainId: transactionRow.chainId,
       });
       if (!irreversibleResult) {
-        await db
-          .update(approvalQueue)
-          .set({
-            status: "pending",
-            resolvedAt: null,
-            resolvedBy: null,
-            resolvedByType: null,
-            resolvedById: null,
-          })
-          .where(and(eq(approvalQueue.txId, txId), eq(approvalQueue.agentId, agentId)));
+        const mayReopenApproval = approvedSolanaExecutionToken
+          ? await releaseApprovedSolanaExecution(txId, agentId, approvedSolanaExecutionToken)
+          : !isApprovedSolanaResume;
+        if (mayReopenApproval) {
+          await db
+            .update(approvalQueue)
+            .set({
+              status: "pending",
+              resolvedAt: null,
+              resolvedBy: null,
+              resolvedByType: null,
+              resolvedById: null,
+            })
+            .where(
+              and(
+                eq(approvalQueue.txId, txId),
+                eq(approvalQueue.agentId, agentId),
+                eq(approvalQueue.status, "approved"),
+                eq(approvalQueue.resolvedByType, approverPrincipal.type),
+                eq(approvalQueue.resolvedById, approverPrincipal.id),
+              ),
+            );
+        }
         if (transferPayload) {
           await recordSponsoredActionIfNeeded({
             sponsorship: transferPayload.sponsorship,
@@ -4484,7 +4672,19 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
               txHash: completedTxHash ?? transactionRow.txHash ?? null,
               signedAt: resolvedAt,
             })
-            .where(and(eq(transactions.id, txId), eq(transactions.agentId, agentId)));
+            .where(
+              and(
+                eq(transactions.id, txId),
+                eq(transactions.agentId, agentId),
+                approvedSolanaExecutionToken
+                  ? and(
+                      sql`${transactions.status} in ('outcome_unknown', 'broadcast')`,
+                      sql`${transactions.actionPayload}->>'executionToken' = ${approvedSolanaExecutionToken}`,
+                      completedTxHash ? eq(transactions.txHash, completedTxHash) : undefined,
+                    )
+                  : undefined,
+              ),
+            );
         } catch {
           // Approval execution already crossed the durable checkpoint. Keep
           // the approval terminal and preserve the typed response; reopening
@@ -8012,12 +8212,54 @@ type SolanaRecoveryBinding = {
   requestDigest?: string;
 };
 
+function createSolanaTransferRecoveryBinding(
+  c: Context<{ Variables: AppVariables }>,
+  input: {
+    tenantId: string;
+    agentId: string;
+    chainId: number;
+    to: string;
+    token: string;
+    value: string;
+    transaction?: string;
+    referenceId?: string;
+  },
+): SolanaRecoveryBinding {
+  const key = c.req.header("Idempotency-Key");
+  if (!key) throw new Error("Idempotency-Key is required for Solana broadcast");
+  const scope = `${input.tenantId}\0${input.agentId}\0actions/transfer\0${key}`;
+  return {
+    txId: `solana_transfer_${sha256(scope).slice(0, 47)}`,
+    idempotencyKeyDigest: sha256(scope),
+    requestDigest: sha256(
+      canonicalJsonStringify({
+        agentId: input.agentId,
+        broadcast: true,
+        chainId: input.chainId,
+        referenceId: input.referenceId,
+        tenantId: input.tenantId,
+        to: input.to,
+        token: input.token,
+        transaction: input.transaction,
+        value: input.value,
+      }),
+    ),
+  };
+}
+
 const SOLANA_SIGNING_ATTEMPT_LEASE_MS = 2 * 60 * 1000;
 
 class SolanaIdempotencyConflictError extends Error {
   constructor() {
     super("Idempotency-Key was already used for a different Solana transaction");
     this.name = "SolanaIdempotencyConflictError";
+  }
+}
+
+class SolanaExecutionLeaseConflictError extends Error {
+  constructor(message = "Approved Solana execution is already owned by another attempt") {
+    super(message);
+    this.name = "SolanaExecutionLeaseConflictError";
   }
 }
 
@@ -8067,6 +8309,7 @@ type SolanaRecoveryRow = {
   txHash: string | null;
   chainId: number;
   actionPayload: unknown;
+  actionType?: string | null;
 };
 
 function readSolanaRecoveryMetadata(payload: unknown): Record<string, unknown> {
@@ -8116,6 +8359,45 @@ function solanaReplayResponse(
   );
 }
 
+function solanaTransferReplayResponse(
+  c: Context<{ Variables: AppVariables }>,
+  row: SolanaRecoveryRow,
+): Response {
+  if (row.status === "approved") {
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error: "A matching Solana transfer is already in progress",
+        data: { actionId: row.id, status: "processing" },
+      },
+      409,
+    );
+  }
+  if (row.status === "outcome_unknown" && row.txHash) {
+    return externalBroadcastOutcomeUnknownResponse(
+      c,
+      new ExternalBroadcastOutcomeUnknownError(row.txHash),
+      row.id,
+    ) as Response;
+  }
+  if ((row.status === "broadcast" || row.status === "confirmed") && row.txHash) {
+    return c.json<ApiResponse>({
+      ok: true,
+      data: transferActionResponseFromTransaction(
+        row as unknown as typeof transactions.$inferSelect,
+      ),
+    });
+  }
+  return c.json<ApiResponse>(
+    {
+      ok: false,
+      error: "The prior Solana transfer did not complete; use a new Idempotency-Key",
+      data: { actionId: row.id, status: row.status },
+    },
+    409,
+  );
+}
+
 async function stageSolanaRecoveryAnchor(input: {
   agentId: string;
   transaction: string;
@@ -8126,6 +8408,8 @@ async function stageSolanaRecoveryAnchor(input: {
   blindSigned: boolean;
   policyResults: PolicyResult[];
   binding: SolanaRecoveryBinding;
+  actionType?: string;
+  actionPayload?: Record<string, unknown>;
 }): Promise<{ row: SolanaRecoveryRow; executionToken: string | null }> {
   const executionToken = crypto.randomUUID();
   const attemptLeaseUntil = new Date(Date.now() + SOLANA_SIGNING_ATTEMPT_LEASE_MS).toISOString();
@@ -8139,9 +8423,12 @@ async function stageSolanaRecoveryAnchor(input: {
       value: input.value,
       data: input.transaction,
       chainId: input.chainId,
-      actionType: "solana_transaction",
+      actionType: input.actionType ?? "solana_transaction",
       actionPayload: {
-        type: "solana_transaction",
+        ...input.actionPayload,
+        type: input.actionPayload?.type ?? "solana_transaction",
+        recoveryType: "solana_transaction",
+        recoveryActionType: input.actionType ?? "solana_transaction",
         broadcast: input.broadcastRequested,
         blindSigned: input.blindSigned,
         recoveryAnchor: true,
@@ -8165,7 +8452,10 @@ async function stageSolanaRecoveryAnchor(input: {
   if (
     !existing ||
     existing.agentId !== input.agentId ||
-    metadata.type !== "solana_transaction" ||
+    (metadata.recoveryType ?? metadata.type) !== "solana_transaction" ||
+    (metadata.recoveryActionType ??
+      (metadata.type === "solana_transaction" ? "solana_transaction" : null)) !==
+      (input.actionType ?? "solana_transaction") ||
     metadata.idempotencyKeyDigest !== input.binding.idempotencyKeyDigest ||
     metadata.requestDigest !== input.binding.requestDigest
   ) {
@@ -8237,7 +8527,7 @@ async function checkpointSolanaBroadcastSubmission(
       and(
         eq(transactions.id, txId),
         eq(transactions.agentId, agentId),
-        eq(transactions.status, "approved"),
+        sql`${transactions.status} in ('approved', 'pending')`,
         sql`${transactions.actionPayload}->>'executionToken' = ${executionToken}`,
       ),
     )
@@ -8245,6 +8535,112 @@ async function checkpointSolanaBroadcastSubmission(
   if (rows.length !== 1) {
     throw new Error("Solana recovery anchor was not available for broadcast checkpoint");
   }
+}
+
+async function claimApprovedSolanaExecution(
+  row: typeof transactions.$inferSelect,
+  options: { takeover: boolean },
+): Promise<{ executionToken: string; actionPayload: Record<string, unknown> }> {
+  const prior = readSolanaRecoveryMetadata(row.actionPayload);
+  const requestDigest = sha256(
+    canonicalJsonStringify({
+      actionPayload: options.takeover
+        ? Object.fromEntries(
+            Object.entries(prior).filter(
+              ([key]) =>
+                ![
+                  "attemptLeaseUntil",
+                  "executionToken",
+                  "recoveryAnchor",
+                  "recoveryActionType",
+                  "recoveryType",
+                  "requestDigest",
+                ].includes(key),
+            ),
+          )
+        : row.actionPayload,
+      actionType: row.actionType,
+      agentId: row.agentId,
+      chainId: row.chainId,
+      data: row.data,
+      id: row.id,
+      toAddress: row.toAddress,
+      value: row.value,
+    }),
+  );
+  const priorToken = typeof prior.executionToken === "string" ? prior.executionToken : null;
+  const priorLeaseUntil =
+    typeof prior.attemptLeaseUntil === "string" ? Date.parse(prior.attemptLeaseUntil) : Number.NaN;
+  if (options.takeover) {
+    if (
+      prior.recoveryType !== "solana_transaction" ||
+      prior.recoveryActionType !== (row.actionType ?? "transaction") ||
+      prior.requestDigest !== requestDigest ||
+      !priorToken ||
+      !Number.isFinite(priorLeaseUntil) ||
+      priorLeaseUntil > Date.now()
+    ) {
+      throw new SolanaExecutionLeaseConflictError();
+    }
+  } else if (priorToken) {
+    throw new SolanaExecutionLeaseConflictError();
+  }
+  const executionToken = crypto.randomUUID();
+  const actionPayload = {
+    ...prior,
+    recoveryType: "solana_transaction",
+    recoveryActionType: row.actionType ?? "transaction",
+    recoveryAnchor: true,
+    requestDigest,
+    executionToken,
+    attemptLeaseUntil: new Date(Date.now() + SOLANA_SIGNING_ATTEMPT_LEASE_MS).toISOString(),
+  };
+  const [claimed] = await db
+    .update(transactions)
+    .set({ actionPayload })
+    .where(
+      and(
+        eq(transactions.id, row.id),
+        eq(transactions.agentId, row.agentId),
+        eq(transactions.status, "pending"),
+        options.takeover
+          ? sql`${transactions.actionPayload}->>'executionToken' = ${priorToken}`
+          : sql`${transactions.actionPayload}->>'executionToken' is null`,
+      ),
+    )
+    .returning({ id: transactions.id });
+  if (!claimed) throw new SolanaExecutionLeaseConflictError();
+  return { executionToken, actionPayload };
+}
+
+async function releaseApprovedSolanaExecution(
+  txId: string,
+  agentId: string,
+  executionToken: string,
+): Promise<boolean> {
+  const [row] = await db
+    .select({ actionPayload: transactions.actionPayload })
+    .from(transactions)
+    .where(and(eq(transactions.id, txId), eq(transactions.agentId, agentId)))
+    .limit(1);
+  const {
+    executionToken: _executionToken,
+    attemptLeaseUntil: _attemptLeaseUntil,
+    ...releasedPayload
+  } = readSolanaRecoveryMetadata(row?.actionPayload);
+  const released = await db
+    .update(transactions)
+    .set({ actionPayload: releasedPayload })
+    .where(
+      and(
+        eq(transactions.id, txId),
+        eq(transactions.agentId, agentId),
+        eq(transactions.status, "pending"),
+        sql`${transactions.actionPayload}->>'executionToken' = ${executionToken}`,
+      ),
+    )
+    .returning({ id: transactions.id });
+  return released.length === 1;
 }
 
 async function finalizeSolanaRecoveryAnchor(
@@ -8953,7 +9349,13 @@ vaultRoutes.post("/:agentId/transactions/:txId/reconcile-solana", async (c) => {
     .where(and(eq(transactions.id, txId), eq(transactions.agentId, agentId)))
     .limit(1);
   const metadata = readSolanaRecoveryMetadata(row?.actionPayload);
-  if (!row || row.actionType !== "solana_transaction") {
+  if (
+    !row ||
+    (metadata.recoveryType ?? metadata.type) !== "solana_transaction" ||
+    (metadata.recoveryActionType ??
+      (row.actionType === "solana_transaction" ? "solana_transaction" : null)) !==
+      (row.actionType ?? "transaction")
+  ) {
     return c.json<ApiResponse>({ ok: false, error: "Solana transaction not found" }, 404);
   }
   if (row.status !== "outcome_unknown") {

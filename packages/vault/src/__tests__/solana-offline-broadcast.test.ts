@@ -25,6 +25,7 @@
  */
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import { Connection, PublicKey, Transaction } from "@solana/web3.js";
+import bs58 from "bs58";
 import {
   assertSolanaTransferTransactionMatches,
   generateSolanaKeypair,
@@ -36,7 +37,6 @@ import {
 const BLOCKHASH = new PublicKey(new Uint8Array(32).fill(7)).toBase58();
 // Opaque on-chain signature; the real one would come from the RPC. Used to prove
 // the broadcast path returns the RPC signature (not the offline serialized tx).
-const ON_CHAIN_SIGNATURE = "z".repeat(88);
 // Never contacted: every Connection method is stubbed at the prototype.
 const RPC_URL = "https://rpc.invalid/never-contacted";
 
@@ -57,7 +57,13 @@ describe("signSolanaTransaction broadcast gate", () => {
       blockhash: BLOCKHASH,
       lastValidBlockHeight: 1000,
     });
-    send = spyOn(Connection.prototype, "sendTransaction").mockResolvedValue(ON_CHAIN_SIGNATURE);
+    send = spyOn(Connection.prototype, "sendRawTransaction").mockImplementation(
+      async (bytes: Uint8Array) => {
+        const submitted = Transaction.from(bytes);
+        if (!submitted.signature) throw new Error("expected a signed transaction");
+        return bs58.encode(submitted.signature);
+      },
+    );
     confirm = spyOn(Connection.prototype, "confirmTransaction").mockResolvedValue({
       context: { slot: 1 },
       value: { err: null },
@@ -87,7 +93,6 @@ describe("signSolanaTransaction broadcast gate", () => {
     expect(confirm).not.toHaveBeenCalled();
 
     // The returned bytes are a genuinely, fully-signed transfer — NOT a signature.
-    expect(result).not.toBe(ON_CHAIN_SIGNATURE);
     const decoded = decodeSignedTx(result);
     expect(decoded.verifySignatures()).toBe(true);
     expect(decoded.feePayer?.toBase58()).toBe(sender.publicKey);
@@ -104,17 +109,23 @@ describe("signSolanaTransaction broadcast gate", () => {
     const sender = generateSolanaKeypair();
     const recipient = generateSolanaKeypair().publicKey;
 
+    let checkpoint: { signature: string; recentBlockhash: string } | undefined;
     const result = await signSolanaTransaction(sender.secretKey, recipient, 50_000n, RPC_URL, {
       broadcast: true,
+      onBroadcastPrepared: async (prepared) => {
+        expect(send).not.toHaveBeenCalled();
+        checkpoint = prepared;
+      },
     });
 
     expect(send).toHaveBeenCalledTimes(1);
     expect(confirm).toHaveBeenCalledTimes(1);
-    // The caller gets the RPC signature, not the serialized tx.
-    expect(result).toBe(ON_CHAIN_SIGNATURE);
-
     // The transaction handed to the network was the transfer for THIS request.
-    const submitted = send.mock.calls[0][0] as Transaction;
+    const submitted = Transaction.from(send.mock.calls[0][0] as Uint8Array);
+    // The caller gets the deterministic signature of the submitted bytes.
+    expect(result).toBe(bs58.encode(submitted.signature as Uint8Array));
+    expect(checkpoint).toEqual({ signature: result, recentBlockhash: BLOCKHASH });
+    expect(send.mock.calls[0][1]).toMatchObject({ maxRetries: 0 });
     assertSolanaTransferTransactionMatches(submitted, {
       from: restoreSolanaKeypair(sender.secretKey).publicKey,
       to: recipient,
@@ -123,7 +134,7 @@ describe("signSolanaTransaction broadcast gate", () => {
 
     // confirmTransaction was bound to the blockhash we fetched (replay-window guard).
     const confirmArg = confirm.mock.calls[0][0] as { signature: string; blockhash: string };
-    expect(confirmArg.signature).toBe(ON_CHAIN_SIGNATURE);
+    expect(confirmArg.signature).toBe(result);
     expect(confirmArg.blockhash).toBe(BLOCKHASH);
   });
 
@@ -132,9 +143,12 @@ describe("signSolanaTransaction broadcast gate", () => {
     const sender = generateSolanaKeypair();
     const recipient = generateSolanaKeypair().publicKey;
 
-    const result = await signSolanaTransaction(sender.secretKey, recipient, 1n, RPC_URL);
+    const result = await signSolanaTransaction(sender.secretKey, recipient, 1n, RPC_URL, {
+      onBroadcastPrepared: async () => {},
+    });
 
     expect(send).toHaveBeenCalledTimes(1);
-    expect(result).toBe(ON_CHAIN_SIGNATURE);
+    const submitted = Transaction.from(send.mock.calls[0][0] as Uint8Array);
+    expect(result).toBe(bs58.encode(submitted.signature as Uint8Array));
   });
 });
