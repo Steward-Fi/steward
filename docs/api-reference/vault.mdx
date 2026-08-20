@@ -150,6 +150,8 @@ Native and selector-gated ERC20 transfer actions return:
 
 Broadcasting actions require idempotency. Set a stable `referenceId` for caller-side dedupe and transaction lookup.
 
+Signed-only artifacts do not consume spend because no on-chain submission has occurred. A transaction that reaches `broadcast`, `confirmed`, or `outcome_unknown` does consume spend: Steward durably records a stable accounting event identity and original occurrence time on the transaction, then completes spend and aggregation idempotently. If that accounting backend is temporarily unavailable after submission, the route returns `409` with `accounting_effects_pending`; retry the same idempotency key or `referenceId` so Steward can finish accounting without resubmitting or moving the event into a later spend window. Monero transfers use the same durable aggregation protocol, but do not enter EVM-denominated USD spend until a vetted XMR valuation model is configured.
+
 ERC20 transfers require an enabled `contract-allowlist` policy for the token contract and `transfer(address,uint256)` selector (`0xa9059cbb`) with recipient allow/block constraints plus `maxAmount`. Approved ERC20 actions sign or broadcast against the token contract with zero native value, persist token/recipient/amount action metadata, and reject missing allowlists or over-limit amounts before signing. Settled token balance/spend accounting and confirmation polling remain follow-up work.
 
 ### Create Send-Calls Intent

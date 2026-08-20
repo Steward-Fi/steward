@@ -129,7 +129,7 @@ describe("aggregation cap enforcement (vault.ts wiring)", () => {
 
   it("imports the read-side bridge and the authoritative recorder", () => {
     expect(vaultSource).toContain("loadAggregationsForPolicies");
-    expect(vaultSource).toContain('import { recordAggregationEvent } from "@stwd/redis"');
+    expect(vaultSource).toContain("completeNonSolanaAccountingEffects");
   });
 
   it("loads the aggregate in-lock and before evaluation, and passes it to the engine", () => {
@@ -153,12 +153,16 @@ describe("aggregation cap enforcement (vault.ts wiring)", () => {
     expect(ctxField).toBeGreaterThan(evaluate);
   });
 
-  it("records the authoritative aggregation event (awaited) on commit, AFTER signing, in-lock", () => {
+  it("awaits durable accounting completion on commit, AFTER signing, in-lock", () => {
     const routeStart = vaultSource.indexOf('vaultRoutes.post("/:agentId/sign"');
     const routeEnd = vaultSource.indexOf('vaultRoutes.post("/:agentId/actions/transfer/quote"');
     const route = vaultSource.slice(routeStart, routeEnd);
 
-    assertRecordAfterSigning(route);
+    const completion = route.lastIndexOf("await completeNonSolanaAccountingEffects(");
+    expect(completion).toBeGreaterThanOrEqual(0);
+    for (const signing of signingCallIndices(route)) {
+      expect(completion).toBeGreaterThan(signing);
+    }
   });
 });
 
