@@ -26,7 +26,7 @@ const fixturePath = new URL("./fixtures/webhook-concurrent-request.ts", import.m
 type WriterResult = { status: number; body: { ok: boolean; data?: Record<string, unknown> } };
 
 realPostgres("webhook mutation audit atomicity (mounted Postgres)", () => {
-  const admin = createDb(databaseUrl!);
+  let admin: ReturnType<typeof createDb>;
   let app: Hono<{ Variables: AppVariables }>;
   let token: string;
   let previousJwtSecret: string | undefined;
@@ -34,6 +34,7 @@ realPostgres("webhook mutation audit atomicity (mounted Postgres)", () => {
   let previousAuditKey: string | undefined;
 
   beforeAll(async () => {
+    admin = createDb(databaseUrl!);
     previousJwtSecret = process.env.STEWARD_JWT_SECRET;
     previousMasterPassword = process.env.STEWARD_MASTER_PASSWORD;
     previousAuditKey = process.env.STEWARD_AUDIT_HMAC_KEY;
@@ -152,40 +153,74 @@ realPostgres("webhook mutation audit atomicity (mounted Postgres)", () => {
     return JSON.parse(stdout) as WriterResult;
   }
 
-  async function waitForGate(gateKey: number) {
+  async function backendPid(client: Awaited<ReturnType<typeof admin.client.reserve>>) {
+    const [row] = await client<{ pid: number }[]>`select pg_backend_pid()::int as pid`;
+    if (!row) throw new Error("expected a PostgreSQL backend PID");
+    return row.pid;
+  }
+
+  async function waitForGate(gateKey: number, holderPid: number) {
     const classId = Math.floor(gateKey / 4_294_967_296);
     const objectId = gateKey % 4_294_967_296;
     for (let attempt = 0; attempt < 600; attempt++) {
-      const [row] = await admin.client<{ count: string }[]>`
-        select count(*)::text as count from pg_locks
+      const [row] = await admin.client<{ pid: number; blockers: number[] }[]>`
+        select pid::int as pid, pg_blocking_pids(pid)::int[] as blockers
+        from pg_locks
         where locktype = 'advisory'
           and classid::bigint = ${classId}
           and objid::bigint = ${objectId}
+          and objsubid = 1
           and granted = false
       `;
-      if (Number(row?.count ?? "0") >= 1) return;
+      if (row?.blockers.map(Number).includes(holderPid)) return row.pid;
       if (attempt === 599)
-        throw new Error(`expected a request blocked on advisory gate ${gateKey}`);
+        throw new Error(
+          `expected a request blocked by backend ${holderPid} on advisory gate ${gateKey}`,
+        );
       await Bun.sleep(10);
     }
+    throw new Error("unreachable advisory-gate wait");
   }
 
-  async function waitForBlockedApplication(applicationName: string) {
+  async function waitForTenantAuditBlockedBy(applicationName: string, blockerPid: number) {
     for (let attempt = 0; attempt < 600; attempt++) {
       const [row] = await admin.client<
-        { state: string; wait_event_type: string | null; wait_event: string | null }[]
+        { pid: number; blockers: number[]; waits_on_tenant_audit: boolean }[]
       >`
-        select state, wait_event_type, wait_event from pg_stat_activity
-        where datname = current_database() and application_name = ${applicationName}
+        select
+          activity.pid::int as pid,
+          pg_blocking_pids(activity.pid)::int[] as blockers,
+          exists (
+            select 1
+            from pg_locks waiting
+            where waiting.pid = activity.pid
+              and waiting.locktype = 'advisory'
+              and waiting.classid::bigint =
+                ((hashtextextended(${`steward_audit_${tenantId}`}, 0) >> 32) & 4294967295)
+              and waiting.objid::bigint =
+                (hashtextextended(${`steward_audit_${tenantId}`}, 0) & 4294967295)
+              and waiting.objsubid = 1
+              and waiting.granted = false
+          ) as waits_on_tenant_audit
+        from pg_stat_activity activity
+        where activity.datname = current_database()
+          and activity.application_name = ${applicationName}
       `;
-      if (row?.wait_event_type === "Lock") return;
+      if (
+        row?.waits_on_tenant_audit &&
+        row.blockers.map(Number).includes(blockerPid) &&
+        row.pid !== blockerPid
+      ) {
+        return row.pid;
+      }
       if (attempt === 599) {
         throw new Error(
-          `expected ${applicationName} to block on the delivery row; observed ${JSON.stringify(row)}`,
+          `expected ${applicationName} to wait on tenant audit backend ${blockerPid}; observed ${JSON.stringify(row)}`,
         );
       }
       await Bun.sleep(10);
     }
+    throw new Error("unreachable tenant-audit wait");
   }
 
   async function installAuditGate(input: {
@@ -266,15 +301,17 @@ realPostgres("webhook mutation audit atomicity (mounted Postgres)", () => {
     let locked = false;
     try {
       await installAuditGate({ requestId: firstId, action: "webhook.create", gateKey, name });
+      const lockerPid = await backendPid(locker);
       await locker`select pg_advisory_lock(${gateKey})`;
       locked = true;
       const first = request("POST", "/webhooks", { url }, firstId);
-      await waitForGate(gateKey);
+      const firstPid = await waitForGate(gateKey, lockerPid);
       expect(
         await admin.db.select().from(webhookConfigs).where(eq(webhookConfigs.tenantId, tenantId)),
       ).toHaveLength(0);
       const second = spawnWriter("POST", "/webhooks", { url }, secondId);
-      await waitForBlockedApplication(writerApplication(secondId));
+      const secondPid = await waitForTenantAuditBlockedBy(writerApplication(secondId), firstPid);
+      expect(new Set([lockerPid, firstPid, secondPid]).size).toBe(3);
       await locker`select pg_advisory_unlock(${gateKey})`;
       locked = false;
       const [firstResponse, secondResponse] = await Promise.all([first, writerResult(second)]);
@@ -314,17 +351,19 @@ realPostgres("webhook mutation audit atomicity (mounted Postgres)", () => {
         name,
         fail: true,
       });
+      const lockerPid = await backendPid(locker);
       await locker`select pg_advisory_lock(${gateKey})`;
       locked = true;
       const failed = request("PUT", `/webhooks/${webhook.id}`, { description: "stale" }, failedId);
-      await waitForGate(gateKey);
+      const failedPid = await waitForGate(gateKey, lockerPid);
       const winner = spawnWriter(
         "PUT",
         `/webhooks/${webhook.id}`,
         { description: "winner" },
         winnerId,
       );
-      await waitForBlockedApplication(writerApplication(winnerId));
+      const winnerPid = await waitForTenantAuditBlockedBy(writerApplication(winnerId), failedPid);
+      expect(new Set([lockerPid, failedPid, winnerPid]).size).toBe(3);
       await locker`select pg_advisory_unlock(${gateKey})`;
       locked = false;
       const [failedResponse, winnerResponse] = await Promise.all([failed, writerResult(winner)]);
@@ -335,6 +374,104 @@ realPostgres("webhook mutation audit atomicity (mounted Postgres)", () => {
         .from(webhookConfigs)
         .where(eq(webhookConfigs.id, webhook.id));
       expect(stored?.description).toBe("winner");
+    } finally {
+      if (locked) await locker`select pg_advisory_unlock(${gateKey})`;
+      locker.release();
+      await removeGate(name);
+    }
+  }, 120_000);
+
+  test("update-first serializes delete after the committed update and its audits", async () => {
+    const webhook = await seedWebhook(`https://example.com/${suffix}/update-delete-update-first`);
+    const updateId = `update-delete-first-${suffix}`;
+    const deleteId = `update-delete-second-${suffix}`;
+    const gateKey = Number.parseInt(suffix.slice(2, 14), 16);
+    const name = `webhook_update_delete_first_${suffix}`;
+    const locker = await admin.client.reserve();
+    let locked = false;
+    try {
+      await installAuditGate({ requestId: updateId, action: "webhook.update", gateKey, name });
+      const lockerPid = await backendPid(locker);
+      await locker`select pg_advisory_lock(${gateKey})`;
+      locked = true;
+      const update = request(
+        "PUT",
+        `/webhooks/${webhook.id}`,
+        { description: "committed-before-delete" },
+        updateId,
+      );
+      const updatePid = await waitForGate(gateKey, lockerPid);
+      const deletion = spawnWriter("DELETE", `/webhooks/${webhook.id}`, undefined, deleteId);
+      const deletePid = await waitForTenantAuditBlockedBy(writerApplication(deleteId), updatePid);
+      expect(new Set([lockerPid, updatePid, deletePid]).size).toBe(3);
+      await locker`select pg_advisory_unlock(${gateKey})`;
+      locked = false;
+
+      const [updateResponse, deleteResponse] = await Promise.all([update, writerResult(deletion)]);
+      expect(updateResponse.status).toBe(200);
+      expect(deleteResponse.status).toBe(200);
+      expect(
+        await admin.db.select().from(webhookConfigs).where(eq(webhookConfigs.id, webhook.id)),
+      ).toHaveLength(0);
+      const events = await admin.db
+        .select({ action: auditEvents.action, requestId: auditEvents.requestId })
+        .from(auditEvents)
+        .where(eq(auditEvents.tenantId, tenantId))
+        .orderBy(asc(auditEvents.seq));
+      expect(events).toEqual([
+        { action: "webhook.update.authorized", requestId: updateId },
+        { action: "webhook.update", requestId: updateId },
+        { action: "webhook.delete.authorized", requestId: deleteId },
+        { action: "webhook.delete", requestId: deleteId },
+      ]);
+    } finally {
+      if (locked) await locker`select pg_advisory_unlock(${gateKey})`;
+      locker.release();
+      await removeGate(name);
+    }
+  }, 120_000);
+
+  test("delete-first makes the waiting update re-read the committed absence", async () => {
+    const webhook = await seedWebhook(`https://example.com/${suffix}/update-delete-delete-first`);
+    const deleteId = `delete-update-first-${suffix}`;
+    const updateId = `delete-update-second-${suffix}`;
+    const gateKey = Number.parseInt(suffix.slice(6, 18), 16);
+    const name = `webhook_delete_update_first_${suffix}`;
+    const locker = await admin.client.reserve();
+    let locked = false;
+    try {
+      await installAuditGate({ requestId: deleteId, action: "webhook.delete", gateKey, name });
+      const lockerPid = await backendPid(locker);
+      await locker`select pg_advisory_lock(${gateKey})`;
+      locked = true;
+      const deletion = request("DELETE", `/webhooks/${webhook.id}`, undefined, deleteId);
+      const deletePid = await waitForGate(gateKey, lockerPid);
+      const update = spawnWriter(
+        "PUT",
+        `/webhooks/${webhook.id}`,
+        { description: "must-not-resurrect" },
+        updateId,
+      );
+      const updatePid = await waitForTenantAuditBlockedBy(writerApplication(updateId), deletePid);
+      expect(new Set([lockerPid, deletePid, updatePid]).size).toBe(3);
+      await locker`select pg_advisory_unlock(${gateKey})`;
+      locked = false;
+
+      const [deleteResponse, updateResponse] = await Promise.all([deletion, writerResult(update)]);
+      expect(deleteResponse.status).toBe(200);
+      expect(updateResponse.status).toBe(404);
+      expect(
+        await admin.db.select().from(webhookConfigs).where(eq(webhookConfigs.id, webhook.id)),
+      ).toHaveLength(0);
+      const events = await admin.db
+        .select({ action: auditEvents.action, requestId: auditEvents.requestId })
+        .from(auditEvents)
+        .where(eq(auditEvents.tenantId, tenantId))
+        .orderBy(asc(auditEvents.seq));
+      expect(events).toEqual([
+        { action: "webhook.delete.authorized", requestId: deleteId },
+        { action: "webhook.delete", requestId: deleteId },
+      ]);
     } finally {
       if (locked) await locker`select pg_advisory_unlock(${gateKey})`;
       locker.release();
@@ -360,12 +497,17 @@ realPostgres("webhook mutation audit atomicity (mounted Postgres)", () => {
         name,
         fail: true,
       });
+      const lockerPid = await backendPid(locker);
       await locker`select pg_advisory_lock(${gateKey})`;
       locked = true;
       const failedDelete = request("DELETE", `/webhooks/${webhook.id}`, undefined, deleteId);
-      await waitForGate(gateKey);
+      const failedDeletePid = await waitForGate(gateKey, lockerPid);
       const recreate = spawnWriter("POST", "/webhooks", { url }, createId);
-      await waitForBlockedApplication(writerApplication(createId));
+      const recreatePid = await waitForTenantAuditBlockedBy(
+        writerApplication(createId),
+        failedDeletePid,
+      );
+      expect(new Set([lockerPid, failedDeletePid, recreatePid]).size).toBe(3);
       await locker`select pg_advisory_unlock(${gateKey})`;
       locked = false;
       const [deleteResponse, recreateResponse] = await Promise.all([
@@ -419,19 +561,40 @@ realPostgres("webhook mutation audit atomicity (mounted Postgres)", () => {
         name,
         fail: true,
       });
+      const lockerPid = await backendPid(locker);
       await locker`select pg_advisory_lock(${gateKey})`;
       locked = true;
       const retry = request("POST", `/webhooks/deliveries/${delivery.id}/retry`, {}, requestId);
-      await waitForGate(gateKey);
+      const retryPid = await waitForGate(gateKey, lockerPid);
       const workerApplication = `webhook_719_worker_${suffix}`;
       await workerClient`select set_config('application_name', ${workerApplication}, false)`;
+      const workerPid = await backendPid(workerClient);
       const worker = workerClient<{ status: string }[]>`
         update webhook_deliveries
         set status = 'delivered', delivered_at = now(), last_error = null
         where id = ${delivery.id}
         returning status
       `.then((rows) => rows);
-      await waitForBlockedApplication(workerApplication);
+      for (let attempt = 0; attempt < 600; attempt++) {
+        const [row] = await admin.client<{ blockers: number[]; waits_on_tuple: boolean }[]>`
+          select
+            pg_blocking_pids(${workerPid})::int[] as blockers,
+            exists (
+              select 1 from pg_locks
+              where pid = ${workerPid}
+                and locktype in ('transactionid', 'tuple')
+                and granted = false
+            ) as waits_on_tuple
+        `;
+        if (row?.waits_on_tuple && row.blockers.map(Number).includes(retryPid)) break;
+        if (attempt === 599) {
+          throw new Error(
+            `expected worker backend ${workerPid} to wait on retry backend ${retryPid}; observed ${JSON.stringify(row)}`,
+          );
+        }
+        await Bun.sleep(10);
+      }
+      expect(new Set([lockerPid, retryPid, workerPid]).size).toBe(3);
       await locker`select pg_advisory_unlock(${gateKey})`;
       locked = false;
       const [retryResponse, workerRows] = await Promise.all([retry, worker]);

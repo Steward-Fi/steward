@@ -26,20 +26,22 @@ describe("webhook audit ordering", () => {
   // so they require a recent owner/admin MFA session before
   // the tenant-level check — a tenant API key or stale admin session cannot
   // create, modify, or replay persistent webhooks.
-  it("requires recent owner/admin MFA for webhook control-plane routes", () => {
+  it("requires recent owner/admin MFA for webhook mutation and delivery-control routes", () => {
     for (const marker of [
       'webhookRoutes.post("/",',
-      'webhookRoutes.get("/",',
       'webhookRoutes.put("/:id",',
       'webhookRoutes.delete("/:id",',
+      'webhookRoutes.post("/:id/test",',
       'webhookRoutes.get("/:id/deliveries",',
+      'webhookRoutes.get("/:id/deliveries/export",',
+      'webhookRoutes.post("/deliveries/:id/replay",',
       'webhookRoutes.post("/deliveries/:id/retry",',
     ] as const) {
       const start = routeSource.indexOf(marker);
       expect(start).toBeGreaterThanOrEqual(0);
-      // Each control-plane route gates on a recent owner/admin MFA session.
-      const mfaCheck = routeSource.indexOf("requireRecentTenantAdminMfa(c", start);
-      expect(mfaCheck).toBeGreaterThan(start);
+      const nextRoute = routeSource.indexOf("\nwebhookRoutes.", start + marker.length);
+      const route = routeSource.slice(start, nextRoute === -1 ? undefined : nextRoute);
+      expect(route).toContain("requireRecentTenantAdminMfa(c");
     }
   });
 
