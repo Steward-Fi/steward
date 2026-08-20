@@ -95,6 +95,16 @@ export interface StewardAppContext {
 
   // ── redis (from @stwd/api middleware/redis) ───────────────────────────────
   getRedisClient(): IoredisLike | null;
+  /** True when a Redis backend was configured even if startup connectivity
+   * failed. Capability throttles use this to fail closed rather than silently
+   * switching a configured deployment to another backend. */
+  isRedisConfigured?(): boolean;
+  /** Run durable capability state through an RLS-bound tenant transaction.
+   * Hosts must not pass an unscoped application-role database handle. */
+  withCapabilityTenantDatabase?<T>(
+    tenantId: string,
+    use: (tenantDb: DbHandle) => Promise<T>,
+  ): Promise<T>;
 
   /** Use-only access to an encrypted provider bootstrap credential. The
    * plaintext exists only inside the callback and is never returned by an API. */

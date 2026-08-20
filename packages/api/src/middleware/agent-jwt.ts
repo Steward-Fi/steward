@@ -9,7 +9,9 @@ import {
   DEFAULT_TENANT_ID,
   ensureAgentForTenant,
   findTenant,
+  isValidTenantId,
   tenantConfigs,
+  withAuthenticatedTenantDatabase,
 } from "../services/context";
 
 type JwksKey = JsonWebKey & { kid?: string; alg?: string; use?: string };
@@ -283,6 +285,18 @@ export interface AgentJwtAuthenticationFailure {
   reason: string;
 }
 
+interface VerifiedAgentJwtClaims {
+  agentId: string;
+  scopes: string[];
+  tokenTenantId: string | null;
+  tokenPlatformId: string | null;
+  issuer: string;
+  subject: string;
+  tokenId: string | null;
+  exp: number | null;
+  iat: number | null;
+}
+
 export function isAgentJwtFailure(
   v: AgentJwtAuthenticationResult | AgentJwtAuthenticationFailure,
 ): v is AgentJwtAuthenticationFailure {
@@ -298,10 +312,10 @@ export function isAgentJwtFailure(
  * This is the single Eliza-Cloud RS256 authenticator (iss=eliza-cloud,
  * aud=steward). Multi-issuer discovery is deliberately outside this boundary.
  */
-export async function authenticateAgentJwt(
+async function verifyAgentJwtClaims(
   c: Context<{ Variables: AppVariables }>,
   options: { rejectCapabilityScopes?: boolean } = {},
-): Promise<AgentJwtAuthenticationResult | AgentJwtAuthenticationFailure> {
+): Promise<VerifiedAgentJwtClaims | AgentJwtAuthenticationFailure> {
   const token = getBearer(c);
   if (!token) return { kind: "invalid-token", reason: "missing bearer token" };
 
@@ -342,45 +356,14 @@ export async function authenticateAgentJwt(
       return { kind: "invalid-token", reason: "token issued in the future" };
     }
 
-    const tenantId = c.req.header("X-Steward-Tenant") || DEFAULT_TENANT_ID;
-    // Tenant binding: when the token DOES carry a tenant claim it MUST match the
-    // requested tenant (prevents a token minted for tenant A from acting on
-    // tenant B). When the trusted issuer omits the claim (the eliza-cloud
-    // single-tenant minter does not embed tenant_id), we do NOT reject — the
-    // agent→tenant binding is still enforced below by ensureAgentForTenant, which
-    // 403s if this agent is not registered for the requested tenant. The token is
-    // already JWKS-verified (iss=eliza-cloud, aud=steward, RS256) at this point.
-    const tokenTenantId = stringClaim(payload, "tenant_id", "tenantId");
-    if (tokenTenantId && tokenTenantId !== tenantId) {
-      return { kind: "principal-scope-invalid", reason: "invalid tenant claims" };
-    }
-    const tenant = await findTenant(tenantId);
-    if (!tenant) return { kind: "tenant-not-found", reason: "Tenant not found" };
-    const agent = await ensureAgentForTenant(tenantId, agentId);
-    if (!agent) {
-      return { kind: "agent-not-registered", reason: "agent is not registered for tenant" };
-    }
-    // Platform binding: when the token carries a platform_id it MUST match the
-    // agent's registered platform (prevents a token scoped to platform A from
-    // acting as the agent on platform B). When the trusted issuer omits the claim
-    // (the eliza-cloud minter does not embed platform_id), we do NOT reject — the
-    // agent identity is already established via the JWKS-verified sub + the
-    // tenant→agent registration check above. Symmetric with the tenant_id handling.
-    const tokenPlatformId = stringClaim(payload, "platform_id", "platformId");
-    if (agent.platformId && tokenPlatformId && tokenPlatformId !== agent.platformId) {
-      return { kind: "principal-scope-invalid", reason: "invalid platform claims" };
-    }
-
-    const jti = stringClaim(payload, "jti");
     return {
-      tenant,
-      tenantId,
       agentId,
       scopes,
+      tokenTenantId: stringClaim(payload, "tenant_id", "tenantId"),
+      tokenPlatformId: stringClaim(payload, "platform_id", "platformId"),
       issuer: typeof payload.iss === "string" ? payload.iss : "eliza-cloud",
       subject: typeof payload.sub === "string" ? payload.sub : `agent:${agentId}`,
-      tokenId: jti,
-      platformId: agent.platformId ?? tokenPlatformId ?? null,
+      tokenId: stringClaim(payload, "jti"),
       exp: typeof payload.exp === "number" ? payload.exp : null,
       iat: typeof payload.iat === "number" ? payload.iat : null,
     };
@@ -395,6 +378,55 @@ export async function authenticateAgentJwt(
       if (error.claim === "nbf") return { kind: "invalid-token", reason: "token not active" };
       return { kind: "invalid-token", reason: "invalid token claims" };
     }
+    const reason = error instanceof Error ? error.message : "verification failed";
+    return { kind: "invalid-token", reason };
+  }
+}
+
+async function resolveVerifiedAgentJwt(
+  c: Context<{ Variables: AppVariables }>,
+  verified: VerifiedAgentJwtClaims,
+): Promise<AgentJwtAuthenticationResult | AgentJwtAuthenticationFailure> {
+  const tenantId = c.req.header("X-Steward-Tenant") || DEFAULT_TENANT_ID;
+  if (verified.tokenTenantId && verified.tokenTenantId !== tenantId) {
+    return { kind: "principal-scope-invalid", reason: "invalid tenant claims" };
+  }
+  const tenant = await findTenant(tenantId);
+  if (!tenant) return { kind: "tenant-not-found", reason: "Tenant not found" };
+  const agent = await ensureAgentForTenant(tenantId, verified.agentId);
+  if (!agent) {
+    return { kind: "agent-not-registered", reason: "agent is not registered for tenant" };
+  }
+  if (
+    agent.platformId &&
+    verified.tokenPlatformId &&
+    verified.tokenPlatformId !== agent.platformId
+  ) {
+    return { kind: "principal-scope-invalid", reason: "invalid platform claims" };
+  }
+  return {
+    tenant,
+    tenantId,
+    agentId: verified.agentId,
+    scopes: verified.scopes,
+    issuer: verified.issuer,
+    subject: verified.subject,
+    tokenId: verified.tokenId,
+    platformId: agent.platformId ?? verified.tokenPlatformId,
+    exp: verified.exp,
+    iat: verified.iat,
+  };
+}
+
+export async function authenticateAgentJwt(
+  c: Context<{ Variables: AppVariables }>,
+  options: { rejectCapabilityScopes?: boolean } = {},
+): Promise<AgentJwtAuthenticationResult | AgentJwtAuthenticationFailure> {
+  const verified = await verifyAgentJwtClaims(c, options);
+  if ("kind" in verified) return verified;
+  try {
+    return await resolveVerifiedAgentJwt(c, verified);
+  } catch (error) {
     const reason = error instanceof Error ? error.message : "verification failed";
     return { kind: "invalid-token", reason };
   }
@@ -482,7 +514,26 @@ export async function requireCapabilityAgentJwt(
   c: Context<{ Variables: AppVariables }>,
   next: Next,
 ) {
-  const auth = await authenticateAgentJwt(c);
+  const requestedTenantId = c.req.header("X-Steward-Tenant") || DEFAULT_TENANT_ID;
+  if (!isValidTenantId(requestedTenantId)) {
+    return c.json<ApiResponse>({ ok: false, error: "Tenant not found" }, 404);
+  }
+  const verified = await verifyAgentJwtClaims(c);
+  if ("kind" in verified) return invalid(c, verified.reason, 401);
+  if (verified.tokenTenantId && verified.tokenTenantId !== requestedTenantId) {
+    return invalid(c, "invalid tenant claims", 401);
+  }
+  let auth: AgentJwtAuthenticationResult | AgentJwtAuthenticationFailure;
+  try {
+    auth = await withAuthenticatedTenantDatabase(
+      requestedTenantId,
+      "capability-agent-jwt",
+      verified.subject,
+      () => resolveVerifiedAgentJwt(c, verified),
+    );
+  } catch {
+    return invalid(c, "verification failed", 401);
+  }
   if (isAgentJwtFailure(auth)) {
     if (auth.kind === "tenant-not-found") {
       return c.json<ApiResponse>({ ok: false, error: "Tenant not found" }, 404);
@@ -497,6 +548,8 @@ export async function requireCapabilityAgentJwt(
   }
 
   await installAgentJwtContext(c, auth);
+  // Durable operations, including rate reservation, open and commit their own
+  // tenant transaction before downstream/provider I/O.
   return next();
 }
 

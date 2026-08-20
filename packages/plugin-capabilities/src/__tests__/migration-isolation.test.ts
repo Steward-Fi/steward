@@ -117,6 +117,47 @@ describe("capability plugin migrations: namespaced-journal isolation", () => {
       `SELECT count(*)::int AS n FROM pg_indexes WHERE indexname = 'capability_invocations_rate_idx'`,
     );
     expect(idx.rows[0].n).toBe(1);
+
+    const bucketTable = await client.query(
+      "SELECT to_regclass('public.capability_rate_limit_buckets') AS t",
+    );
+    expect(bucketTable.rows[0].t).toBe("capability_rate_limit_buckets");
+    const bucketRls = await client.query(
+      `SELECT relrowsecurity AS enabled, relforcerowsecurity AS forced
+       FROM pg_class
+       WHERE oid = 'public.capability_rate_limit_buckets'::regclass`,
+    );
+    expect(bucketRls.rows[0]).toEqual({ enabled: true, forced: true });
+    const pluginRls = await client.query(
+      `SELECT count(*)::int AS n
+       FROM pg_class
+       WHERE relname IN (
+         'capabilities',
+         'capability_grants',
+         'capability_invocations',
+         'capability_rate_limit_buckets'
+       )
+         AND relrowsecurity
+         AND relforcerowsecurity`,
+    );
+    expect(pluginRls.rows[0].n).toBe(4);
+    const bucketConstraint = await client.query(
+      `SELECT count(*)::int AS n FROM pg_constraint
+       WHERE conname = 'capability_rate_limit_buckets_surface_check'`,
+    );
+    expect(bucketConstraint.rows[0].n).toBe(1);
+    const bucketIndex = await client.query(
+      `SELECT count(*)::int AS n FROM pg_indexes
+       WHERE indexname = 'capability_rate_limit_buckets_identity_uniq'`,
+    );
+    expect(bucketIndex.rows[0].n).toBe(1);
+    const bucketFence = await client.query(
+      `SELECT count(*)::int AS n
+       FROM pg_trigger
+       WHERE tgname = 'capability_rate_limit_bucket_agent_fence'
+         AND NOT tgisinternal`,
+    );
+    expect(bucketFence.rows[0].n).toBe(1);
   });
 
   test("0002 revokes orphan grants without disabling a different tenant's route", async () => {

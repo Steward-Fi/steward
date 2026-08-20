@@ -110,6 +110,28 @@ webhookEvents: ["example.pinged"],
 
 point at your plugin's OWN drizzle migrations folder (with its own `meta/_journal.json`). the host applies it after the core migrator, into a per-plugin namespaced bookkeeping table - never the core journal.
 
+### Capability rate-limit backend
+
+The capabilities plugin enforces invoke/OpenAI-adapter requests at 60 per agent
+per rolling minute and manifest issue/renew requests at 30 per agent per rolling
+minute. Redis is used when configured and healthy. A configured Redis backend
+that is unavailable fails closed; it never silently changes backend.
+
+When Redis is not configured, production uses the plugin-owned
+`capability_rate_limit_buckets` PostgreSQL table. Its per-tenant/agent/surface
+row lock is the reservation boundary shared by every API replica, and the
+bounded timestamp array survives process restarts. Agent requests and bucket
+reservations run inside the same authenticated tenant/RLS transaction. A writer
+trigger takes the tenant-deletion lock before a parent-agent key-share lock, so
+an in-flight reservation cannot recreate state after agent or tenant cleanup.
+The plugin migration must be applied before traffic. `/ready` reports
+`capabilityRateLimit` with source
+`redis`, `postgres`, or (only under explicit `NODE_ENV=development|test`)
+`memory`, and returns not-ready unless the selected durable backend can be
+exercised through its production authority boundary.
+Rejected reservations return before capability invocation/audit dispatch and do
+not create `capability_invocations` rows.
+
 ```ts
 import { fileURLToPath } from "node:url";
 

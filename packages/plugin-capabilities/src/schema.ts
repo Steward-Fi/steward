@@ -137,6 +137,38 @@ export const capabilityInvocations = pgTable(
   }),
 );
 
+/**
+ * Durable, bounded sliding-window reservations for the agent-facing capability
+ * throttles. One row exists per tenant/agent/surface and carries at most the
+ * configured limit's live timestamps. Writers lock the row before pruning and
+ * appending, so separate API processes share one authoritative boundary.
+ */
+export const capabilityRateLimitBuckets = pgTable(
+  "capability_rate_limit_buckets",
+  {
+    tenantId: text("tenant_id").notNull(),
+    agentId: varchar("agent_id", { length: 64 }).notNull(),
+    surface: text("surface").notNull(),
+    reservations: timestamp("reservations", { withTimezone: true })
+      .array()
+      .notNull()
+      .default(sql`ARRAY[]::timestamptz[]`),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    surfaceCheck: check(
+      "capability_rate_limit_buckets_surface_check",
+      sql`${table.surface} IN ('invoke','issue')`,
+    ),
+    tenantAgentSurfaceUniq: uniqueIndex("capability_rate_limit_buckets_identity_uniq").on(
+      table.tenantId,
+      table.agentId,
+      table.surface,
+    ),
+    updatedIdx: index("capability_rate_limit_buckets_updated_idx").on(table.updatedAt),
+  }),
+);
+
 export const capabilityRelations = relations(capabilities, ({ many }) => ({
   grants: many(capabilityGrants),
 }));
@@ -154,6 +186,8 @@ export type CapabilityGrant = typeof capabilityGrants.$inferSelect;
 export type NewCapabilityGrant = typeof capabilityGrants.$inferInsert;
 export type CapabilityInvocation = typeof capabilityInvocations.$inferSelect;
 export type NewCapabilityInvocation = typeof capabilityInvocations.$inferInsert;
+export type CapabilityRateLimitBucket = typeof capabilityRateLimitBuckets.$inferSelect;
+export type NewCapabilityRateLimitBucket = typeof capabilityRateLimitBuckets.$inferInsert;
 
 /** the terminal decision recorded for an invoke attempt. */
 export type InvocationDecision = "allow" | "deny" | "approval" | "error";

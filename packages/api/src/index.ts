@@ -36,6 +36,7 @@ import { resolveEnabledPlugins } from "./plugin-config";
 import { createReadinessHandler, type ReadinessCheck } from "./readiness";
 import { assertAuthStoresAreSafe, getAuthStoreSources, initAuthStores } from "./routes/auth";
 import { startAccountWalletLifecycleRecoveryScheduler } from "./services/account-wallet-lifecycle";
+import { checkCapabilityRateLimitReadiness } from "./services/capability-rate-limit-readiness";
 import { API_VERSION, type ApiResponse } from "./services/context";
 import { startGoogleCredentialLifecycleScheduler } from "./services/provider-google-lifecycle-scheduler";
 import { startProviderReservationReconciliationScheduler } from "./services/provider-reservation-reconciliation-scheduler";
@@ -223,9 +224,10 @@ app.get(
     getAuthStoreSources,
     isVaultConfigured: () => Boolean(process.env.STEWARD_MASTER_PASSWORD),
     getAdditionalChecks: capabilitiesEnabled
-      ? () => {
+      ? async () => {
           const health = getUpstreamCredentialLeaseSchedulerHealth();
           return {
+            capabilityRateLimit: await checkCapabilityRateLimitReadiness(),
             upstreamCredentialLeases: {
               ok: health.ok,
               detail: {
