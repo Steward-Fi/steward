@@ -692,6 +692,8 @@ function transferActionPayload(input: {
   broadcast: boolean;
   referenceId?: string | null;
   sponsorship?: Record<string, unknown>;
+  idempotencyKeyDigest?: string;
+  requestDigest?: string;
 }) {
   return {
     type: "transfer",
@@ -701,6 +703,8 @@ function transferActionPayload(input: {
     broadcast: input.broadcast,
     ...(input.referenceId ? { referenceId: input.referenceId } : {}),
     ...(input.sponsorship ? { sponsorship: input.sponsorship } : {}),
+    ...(input.idempotencyKeyDigest ? { idempotencyKeyDigest: input.idempotencyKeyDigest } : {}),
+    ...(input.requestDigest ? { requestDigest: input.requestDigest } : {}),
   };
 }
 
@@ -748,6 +752,8 @@ function getTransferActionPayload(payload: unknown): {
   broadcast: boolean;
   referenceId?: string;
   sponsorship?: Record<string, unknown>;
+  idempotencyKeyDigest?: string;
+  requestDigest?: string;
 } | null {
   if (!payload || typeof payload !== "object") return null;
   const value = payload as Record<string, unknown>;
@@ -763,6 +769,9 @@ function getTransferActionPayload(payload: unknown): {
       value.sponsorship && typeof value.sponsorship === "object"
         ? (value.sponsorship as Record<string, unknown>)
         : undefined,
+    idempotencyKeyDigest:
+      typeof value.idempotencyKeyDigest === "string" ? value.idempotencyKeyDigest : undefined,
+    requestDigest: typeof value.requestDigest === "string" ? value.requestDigest : undefined,
   };
 }
 
@@ -874,14 +883,18 @@ async function findActionByReferenceId(
   return existing ?? null;
 }
 
-async function findMoneroActionByIdempotency(agentId: string, idempotencyKeyDigest: string) {
+async function findActionByIdempotency(
+  agentId: string,
+  actionType: string,
+  idempotencyKeyDigest: string,
+) {
   const [existing] = await db
     .select()
     .from(transactions)
     .where(
       and(
         eq(transactions.agentId, agentId),
-        eq(transactions.actionType, "monero_transfer"),
+        eq(transactions.actionType, actionType),
         sql`${transactions.actionPayload}->>'idempotencyKeyDigest' = ${idempotencyKeyDigest}`,
       ),
     )
@@ -2143,15 +2156,6 @@ vaultRoutes.post("/:agentId/sign", async (c) => {
   }
 
   const resolvedChainId = request.chainId || parseInt(process.env.CHAIN_ID || "8453", 10);
-  if (!hasCalldata(request.data)) {
-    const gasGuard = await nativeTransferGasAccountingGuard(
-      c,
-      request.to,
-      resolvedChainId,
-      request.gasLimit,
-    );
-    if (gasGuard) return gasGuard;
-  }
   const signRequest: SignRequest = {
     tenantId,
     agentId,
@@ -2173,12 +2177,112 @@ vaultRoutes.post("/:agentId/sign", async (c) => {
     );
   }
 
-  const policySet = await getScopedPolicySet(tenantId, agentId, c.get("agentPolicyIds"));
-  const conditionSets = await loadConditionSetsForPolicies(tenantId, policySet);
   const isEvmSignRequest = resolvedChainId !== 101 && resolvedChainId !== 102;
   const executionPayloadDigest = isEvmSignRequest
     ? executionPayloadDigestForEvmSign(signRequest)
     : null;
+  const idempotencyKey = c.req.header("Idempotency-Key");
+  const recoverExistingEvmSign = async (): Promise<Response | null> => {
+    if (!isEvmSignRequest || !idempotencyKey || !executionPayloadDigest) return null;
+    const [priorAuthorization] = await db
+      .select({
+        requestId: executionAuthorizationNonces.requestId,
+        payloadDigest: executionAuthorizationNonces.payloadDigest,
+      })
+      .from(executionAuthorizationNonces)
+      .where(
+        and(
+          eq(executionAuthorizationNonces.tenantId, tenantId),
+          eq(executionAuthorizationNonces.agentId, agentId),
+          eq(executionAuthorizationNonces.idempotencyKey, idempotencyKey),
+        ),
+      )
+      .orderBy(desc(executionAuthorizationNonces.issuedAt))
+      .limit(1);
+    if (!priorAuthorization) return null;
+    if (priorAuthorization.payloadDigest !== executionPayloadDigest) {
+      return c.json<ApiResponse>(
+        { ok: false, error: "Idempotency-Key was already used for a different transaction" },
+        409,
+      );
+    }
+    const [priorTransaction] = await db
+      .select({ status: transactions.status, txHash: transactions.txHash })
+      .from(transactions)
+      .where(
+        and(eq(transactions.id, priorAuthorization.requestId), eq(transactions.agentId, agentId)),
+      );
+    if (priorTransaction?.status === "outcome_unknown" && priorTransaction.txHash) {
+      if (
+        !(await completeNonSolanaAccountingEffects({
+          tenantId,
+          agentId,
+          txId: priorAuthorization.requestId,
+        }))
+      ) {
+        return accountingEffectsPendingResponse(
+          c,
+          priorAuthorization.requestId,
+          priorTransaction.status,
+        );
+      }
+      const response = externalBroadcastOutcomeUnknownResponse(
+        c,
+        new ExternalBroadcastOutcomeUnknownError(priorTransaction.txHash),
+        priorAuthorization.requestId,
+      );
+      if (!response) throw new Error("invariant: outcome_unknown response was not constructed");
+      return response;
+    }
+    if (
+      priorTransaction?.txHash &&
+      (priorTransaction.status === "broadcast" || priorTransaction.status === "confirmed")
+    ) {
+      if (
+        !(await completeNonSolanaAccountingEffects({
+          tenantId,
+          agentId,
+          txId: priorAuthorization.requestId,
+        }))
+      ) {
+        return accountingEffectsPendingResponse(
+          c,
+          priorAuthorization.requestId,
+          priorTransaction.status,
+        );
+      }
+      return c.json<ApiResponse<{ txId: string; txHash: string }>>({
+        ok: true,
+        data: { txId: priorAuthorization.requestId, txHash: priorTransaction.txHash },
+      });
+    }
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error: "Transaction execution is already recorded; inspect its status before retrying",
+        data: { txId: priorAuthorization.requestId, status: priorTransaction?.status },
+      },
+      409,
+    );
+  };
+
+  // A terminal external action is authoritative for this request. Drain its
+  // durable effects before consulting mutable policy or consuming rate budget.
+  const existingEvmSignResponse = await recoverExistingEvmSign();
+  if (existingEvmSignResponse) return existingEvmSignResponse;
+
+  if (!hasCalldata(request.data)) {
+    const gasGuard = await nativeTransferGasAccountingGuard(
+      c,
+      request.to,
+      resolvedChainId,
+      request.gasLimit,
+    );
+    if (gasGuard) return gasGuard;
+  }
+
+  const policySet = await getScopedPolicySet(tenantId, agentId, c.get("agentPolicyIds"));
+  const conditionSets = await loadConditionSetsForPolicies(tenantId, policySet);
   const executionPolicyRevisionHash = isEvmSignRequest
     ? policyRevisionHashForPolicySet(policySet)
     : null;
@@ -2357,93 +2461,11 @@ vaultRoutes.post("/:agentId/sign", async (c) => {
       );
     }
 
-    const idempotencyKey = c.req.header("Idempotency-Key");
-    if (isEvmSignRequest && idempotencyKey && executionPayloadDigest) {
-      const [priorAuthorization] = await db
-        .select({
-          requestId: executionAuthorizationNonces.requestId,
-          payloadDigest: executionAuthorizationNonces.payloadDigest,
-        })
-        .from(executionAuthorizationNonces)
-        .where(
-          and(
-            eq(executionAuthorizationNonces.tenantId, tenantId),
-            eq(executionAuthorizationNonces.agentId, agentId),
-            eq(executionAuthorizationNonces.idempotencyKey, idempotencyKey),
-          ),
-        )
-        .orderBy(desc(executionAuthorizationNonces.issuedAt))
-        .limit(1);
-      if (priorAuthorization) {
-        if (priorAuthorization.payloadDigest !== executionPayloadDigest) {
-          return c.json<ApiResponse>(
-            { ok: false, error: "Idempotency-Key was already used for a different transaction" },
-            409,
-          );
-        }
-        const [priorTransaction] = await db
-          .select({ status: transactions.status, txHash: transactions.txHash })
-          .from(transactions)
-          .where(
-            and(
-              eq(transactions.id, priorAuthorization.requestId),
-              eq(transactions.agentId, agentId),
-            ),
-          );
-        if (priorTransaction?.status === "outcome_unknown" && priorTransaction.txHash) {
-          if (
-            !(await completeNonSolanaAccountingEffects({
-              tenantId,
-              agentId,
-              txId: priorAuthorization.requestId,
-            }))
-          ) {
-            return accountingEffectsPendingResponse(
-              c,
-              priorAuthorization.requestId,
-              priorTransaction.status,
-            );
-          }
-          const response = externalBroadcastOutcomeUnknownResponse(
-            c,
-            new ExternalBroadcastOutcomeUnknownError(priorTransaction.txHash),
-            priorAuthorization.requestId,
-          );
-          if (!response) throw new Error("invariant: outcome_unknown response was not constructed");
-          return response;
-        }
-        if (
-          priorTransaction?.txHash &&
-          (priorTransaction.status === "broadcast" || priorTransaction.status === "confirmed")
-        ) {
-          if (
-            !(await completeNonSolanaAccountingEffects({
-              tenantId,
-              agentId,
-              txId: priorAuthorization.requestId,
-            }))
-          ) {
-            return accountingEffectsPendingResponse(
-              c,
-              priorAuthorization.requestId,
-              priorTransaction.status,
-            );
-          }
-          return c.json<ApiResponse<{ txId: string; txHash: string }>>({
-            ok: true,
-            data: { txId: priorAuthorization.requestId, txHash: priorTransaction.txHash },
-          });
-        }
-        return c.json<ApiResponse>(
-          {
-            ok: false,
-            error: "Transaction execution is already recorded; inspect its status before retrying",
-            data: { txId: priorAuthorization.requestId, status: priorTransaction?.status },
-          },
-          409,
-        );
-      }
-    }
+    // Close the concurrent first-use race under the per-agent spend lock. This
+    // second lookup is normally empty; retries with durable state returned
+    // above without consuming rate or policy budget.
+    const lockedExistingEvmSignResponse = await recoverExistingEvmSign();
+    if (lockedExistingEvmSignResponse) return lockedExistingEvmSignResponse;
 
     const solanaNativeBinding =
       !isEvmSignRequest && shouldBroadcast
@@ -3320,37 +3342,63 @@ vaultRoutes.post("/:agentId/actions/transfer", async (c) => {
       400,
     );
   }
-  const sponsorship = await resolveGasSponsorshipRequest({
-    tenantId,
-    agentId,
-    chainId: transfer.chainId,
-    caip2: toCaip2(transfer.chainId),
-    sponsor: transfer.sponsor,
-  });
-  if (sponsorship.requested && !sponsorship.sponsored) {
-    const status: 403 | 501 | 503 =
-      sponsorship.status === 501 ? 501 : sponsorship.status === 503 ? 503 : 403;
-    return c.json<ApiResponse>({ ok: false, error: sponsorship.error }, status);
-  }
-  const sponsorshipPayload =
-    sponsorship.requested && sponsorship.sponsored
-      ? {
-          requested: true,
-          sponsored: true,
-          provider: sponsorship.provider,
-          mode: sponsorship.mode,
-          estimatedUsd: sponsorship.estimatedUsd,
-        }
-      : transfer.sponsor
-        ? { requested: true, sponsored: false }
-        : undefined;
   const idempotencyResponse = requireBroadcastActionIdempotency(
     c,
     transfer.broadcast,
     "Broadcast transfer actions",
   );
   if (idempotencyResponse) return idempotencyResponse;
-  const existingAction = await findActionByReferenceId(agentId, "transfer", transfer.referenceId);
+  const transferIdempotencyKey = c.req.header("Idempotency-Key");
+  const transferIdempotencyKeyDigest =
+    transfer.broadcast && transferIdempotencyKey
+      ? sha256(`${tenantId}\0${agentId}\0${transferIdempotencyKey}`)
+      : undefined;
+  const transferRequestDigest = sha256(
+    canonicalJsonStringify({
+      to: transfer.to,
+      token: transfer.token,
+      value: transfer.value,
+      chainId: transfer.chainId,
+      broadcast: transfer.broadcast,
+      sponsor: transfer.sponsor === true,
+    }),
+  );
+  const findExistingTransferAction = async () => {
+    const [byIdempotencyKey, byReferenceId] = await Promise.all([
+      transferIdempotencyKeyDigest
+        ? findActionByIdempotency(agentId, "transfer", transferIdempotencyKeyDigest)
+        : null,
+      findActionByReferenceId(agentId, "transfer", transfer.referenceId),
+    ]);
+    if (byIdempotencyKey && byReferenceId && byIdempotencyKey.id !== byReferenceId.id) {
+      return { conflict: "Idempotency-Key and referenceId identify different requests" } as const;
+    }
+    const existing = byIdempotencyKey ?? byReferenceId;
+    if (!existing) return { existing: null } as const;
+    const payload = existing.actionPayload as Record<string, unknown> | null;
+    if (
+      typeof payload?.requestDigest === "string" &&
+      payload.requestDigest !== transferRequestDigest
+    ) {
+      return {
+        conflict: byIdempotencyKey
+          ? "Idempotency-Key was already used for a different request"
+          : "referenceId was already used for a different request",
+      } as const;
+    }
+    if (byIdempotencyKey && payload?.requestDigest !== transferRequestDigest) {
+      return { conflict: "Stored transfer replay binding is incomplete" } as const;
+    }
+    if (byIdempotencyKey && actionReferenceId(payload) !== (transfer.referenceId ?? null)) {
+      return { conflict: "Idempotency-Key was already used with a different referenceId" } as const;
+    }
+    return { existing } as const;
+  };
+  const existingLookup = await findExistingTransferAction();
+  if ("conflict" in existingLookup) {
+    return c.json<ApiResponse>({ ok: false, error: existingLookup.conflict }, 409);
+  }
+  const existingAction = existingLookup.existing;
   if (existingAction) {
     if (
       (existingAction.status === "broadcast" ||
@@ -3375,6 +3423,31 @@ vaultRoutes.post("/:agentId/actions/transfer", async (c) => {
       data: transferActionResponseFromTransaction(existingAction),
     });
   }
+
+  const sponsorship = await resolveGasSponsorshipRequest({
+    tenantId,
+    agentId,
+    chainId: transfer.chainId,
+    caip2: toCaip2(transfer.chainId),
+    sponsor: transfer.sponsor,
+  });
+  if (sponsorship.requested && !sponsorship.sponsored) {
+    const status: 403 | 501 | 503 =
+      sponsorship.status === 501 ? 501 : sponsorship.status === 503 ? 503 : 403;
+    return c.json<ApiResponse>({ ok: false, error: sponsorship.error }, status);
+  }
+  const sponsorshipPayload =
+    sponsorship.requested && sponsorship.sponsored
+      ? {
+          requested: true,
+          sponsored: true,
+          provider: sponsorship.provider,
+          mode: sponsorship.mode,
+          estimatedUsd: sponsorship.estimatedUsd,
+        }
+      : transfer.sponsor
+        ? { requested: true, sponsored: false }
+        : undefined;
 
   const isTokenTransfer = transfer.token !== "native";
   const isSolanaTransfer = isSolanaActionChain(transfer.chainId);
@@ -3428,6 +3501,8 @@ vaultRoutes.post("/:agentId/actions/transfer", async (c) => {
     broadcast: transfer.broadcast,
     referenceId: transfer.referenceId,
     sponsorship: sponsorshipPayload,
+    idempotencyKeyDigest: transferIdempotencyKeyDigest,
+    requestDigest: transferIdempotencyKeyDigest ? transferRequestDigest : undefined,
   });
   const solanaRecoveryBinding =
     isSolanaTransfer && transfer.broadcast
@@ -3464,11 +3539,11 @@ vaultRoutes.post("/:agentId/actions/transfer", async (c) => {
   }
 
   return withAgentSpendLock(agentId, async () => {
-    const lockedExistingAction = await findActionByReferenceId(
-      agentId,
-      "transfer",
-      transfer.referenceId,
-    );
+    const lockedLookup = await findExistingTransferAction();
+    if ("conflict" in lockedLookup) {
+      return c.json<ApiResponse>({ ok: false, error: lockedLookup.conflict }, 409);
+    }
+    const lockedExistingAction = lockedLookup.existing;
     if (lockedExistingAction) {
       if (
         (lockedExistingAction.status === "broadcast" ||
@@ -3541,6 +3616,8 @@ vaultRoutes.post("/:agentId/actions/transfer", async (c) => {
           broadcast: signRequest.broadcast !== false,
           referenceId: transfer.referenceId,
           sponsorship: sponsorshipPayload,
+          idempotencyKeyDigest: transferIdempotencyKeyDigest,
+          requestDigest: transferIdempotencyKeyDigest ? transferRequestDigest : undefined,
         }),
         policyResults: evaluation.results,
       });
@@ -4913,6 +4990,8 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
             broadcast: transferPayload.broadcast,
             referenceId: transferPayload.referenceId,
             sponsorship: transferPayload.sponsorship,
+            idempotencyKeyDigest: transferPayload.idempotencyKeyDigest,
+            requestDigest: transferPayload.requestDigest,
           })
         : transactionPayload
           ? transactionActionPayload({
@@ -7185,33 +7264,6 @@ vaultRoutes.post("/:agentId/monero/transfer", async (c) => {
   );
   if (!signerAuthorization.ok) return signerAuthorization.response;
 
-  const policySet = await getScopedPolicySet(tenantId, agentId, c.get("agentPolicyIds"));
-  const hasMoneroSigningPolicy = policySet.some((p) => p.enabled && p.type === "raw-signing-chain");
-  if (!hasMoneroSigningPolicy) {
-    return c.json<ApiResponse>(
-      {
-        ok: false,
-        error:
-          "Monero transfers require a `raw-signing-chain` policy for this agent. Add one that explicitly allows monero and ed25519.",
-      },
-      403,
-    );
-  }
-  const conditionSets = await loadConditionSetsForPolicies(tenantId, policySet);
-  const rateLimitResult = await enforceRateLimit(agentId, policySet);
-  if (!rateLimitResult.allowed) {
-    if (rateLimitResult.headers) {
-      for (const [key, value] of Object.entries(rateLimitResult.headers)) c.header(key, value);
-    }
-    return c.json<ApiResponse>(
-      { ok: false, error: rateLimitResult.reason || "Rate limit exceeded" },
-      429,
-    );
-  }
-  if (rateLimitResult.headers) {
-    for (const [key, value] of Object.entries(rateLimitResult.headers)) c.header(key, value);
-  }
-
   // This route broadcasts: require idempotency and honor referenceId dedupe.
   const idempotencyResponse = requireBroadcastActionIdempotency(c, true, "Monero transfers");
   if (idempotencyResponse) return idempotencyResponse;
@@ -7226,7 +7278,7 @@ vaultRoutes.post("/:agentId/monero/transfer", async (c) => {
   );
   const findExistingMoneroAction = async () => {
     const [byIdempotencyKey, byReferenceId] = await Promise.all([
-      findMoneroActionByIdempotency(agentId, idempotencyKeyDigest),
+      findActionByIdempotency(agentId, "monero_transfer", idempotencyKeyDigest),
       findActionByReferenceId(agentId, "monero_transfer", referenceId),
     ]);
     if (byIdempotencyKey && byReferenceId && byIdempotencyKey.id !== byReferenceId.id) {
@@ -7281,6 +7333,33 @@ vaultRoutes.post("/:agentId/monero/transfer", async (c) => {
         deduplicated: true,
       },
     });
+  }
+
+  const policySet = await getScopedPolicySet(tenantId, agentId, c.get("agentPolicyIds"));
+  const hasMoneroSigningPolicy = policySet.some((p) => p.enabled && p.type === "raw-signing-chain");
+  if (!hasMoneroSigningPolicy) {
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error:
+          "Monero transfers require a `raw-signing-chain` policy for this agent. Add one that explicitly allows monero and ed25519.",
+      },
+      403,
+    );
+  }
+  const conditionSets = await loadConditionSetsForPolicies(tenantId, policySet);
+  const rateLimitResult = await enforceRateLimit(agentId, policySet);
+  if (!rateLimitResult.allowed) {
+    if (rateLimitResult.headers) {
+      for (const [key, value] of Object.entries(rateLimitResult.headers)) c.header(key, value);
+    }
+    return c.json<ApiResponse>(
+      { ok: false, error: rateLimitResult.reason || "Rate limit exceeded" },
+      429,
+    );
+  }
+  if (rateLimitResult.headers) {
+    for (const [key, value] of Object.entries(rateLimitResult.headers)) c.header(key, value);
   }
 
   const destinationTotalPiconero = destinations.reduce(

@@ -581,6 +581,13 @@ describe("vault Monero transfer + balance routes", () => {
       const occurredAt = (pending?.actionPayload as Record<string, unknown>)
         .recoveryEffectsOccurredAt;
 
+      // Recovery is bound to the already-relayed request and must precede the
+      // mutable raw-signing policy gate. A new transfer is denied while the
+      // same-key terminal still drains without a second relay.
+      await getDb()
+        .update(policies)
+        .set({ enabled: false })
+        .where(eq(policies.id, `${AGENT_ID}-monero-raw-signing`));
       const mismatch = await app.request(
         transferRequest(
           {
@@ -614,6 +621,10 @@ describe("vault Monero transfer + balance routes", () => {
         occurredAt,
       );
     } finally {
+      await getDb()
+        .update(policies)
+        .set({ enabled: true })
+        .where(eq(policies.id, `${AGENT_ID}-monero-raw-signing`));
       if (ORIGINAL_REDIS_URL === undefined) delete process.env.REDIS_URL;
       else process.env.REDIS_URL = ORIGINAL_REDIS_URL;
     }

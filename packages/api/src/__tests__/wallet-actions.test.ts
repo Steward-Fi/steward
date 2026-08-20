@@ -178,6 +178,8 @@ describe("wallet transfer actions", () => {
     else process.env.REDIS_REQUIRED = ORIGINAL_REDIS_REQUIRED;
     delete process.env.STEWARD_MASTER_PASSWORD;
     delete process.env.STEWARD_ALLOW_DEV_SECRETS;
+    if (ORIGINAL_REDIS_URL === undefined) delete process.env.REDIS_URL;
+    else process.env.REDIS_URL = ORIGINAL_REDIS_URL;
   });
 
   it("quotes native transfers and records rejected transfer actions for status polling", async () => {
@@ -479,6 +481,78 @@ describe("wallet transfer actions", () => {
       expect(tx.data).toBe(expectedErc20TransferCalldata(ALLOWED, "1"));
     } finally {
       context.vault.signTransaction = originalSignTransaction;
+    }
+  });
+
+  it("recovers a broadcast transfer by idempotency key before changed policy gates", async () => {
+    const context = await import("../services/context");
+    const originalSignTransaction = context.vault.signTransaction.bind(context.vault);
+    const txHash = `0x${"ab".repeat(32)}`;
+    let signCalls = 0;
+    context.vault.signTransaction = async () => {
+      signCalls += 1;
+      return txHash;
+    };
+    const key = `transfer-accounting-${crypto.randomUUID()}`;
+    const request = (value = "42") =>
+      new Request(`http://localhost/vault/${AGENT_ID}/actions/transfer`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "Idempotency-Key": key },
+        body: JSON.stringify({
+          to: ALLOWED,
+          token: TOKEN,
+          value,
+          chainId: 8453,
+          broadcast: true,
+        }),
+      });
+    process.env.REDIS_URL = "redis://127.0.0.1:1";
+    try {
+      const first = await app.request(request());
+      expect(first.status).toBe(503);
+      const firstBody = (await first.json()) as {
+        data: { txId: string; status: string; accounting: string };
+      };
+      expect(firstBody.data).toMatchObject({ status: "broadcast", accounting: "pending" });
+      const [pending] = await getDb()
+        .select({ actionPayload: transactions.actionPayload })
+        .from(transactions)
+        .where(eq(transactions.id, firstBody.data.txId));
+      const occurredAt = (pending?.actionPayload as Record<string, unknown>)
+        .recoveryEffectsOccurredAt;
+
+      await getDb()
+        .update(policies)
+        .set({ config: { addresses: [], mode: "whitelist" } })
+        .where(eq(policies.id, "approved-recipients"));
+      const mismatch = await app.request(request("43"));
+      expect(mismatch.status).toBe(409);
+      expect(signCalls).toBe(1);
+
+      delete process.env.REDIS_URL;
+      const replay = await app.request(request());
+      expect(replay.status).toBe(200);
+      expect(await replay.json()).toMatchObject({
+        ok: true,
+        data: { id: firstBody.data.txId, txHash, status: "broadcast" },
+      });
+      expect(signCalls).toBe(1);
+      const [complete] = await getDb()
+        .select({ actionPayload: transactions.actionPayload })
+        .from(transactions)
+        .where(eq(transactions.id, firstBody.data.txId));
+      expect(complete?.actionPayload).toMatchObject({ recoveryEffectsState: "complete" });
+      expect((complete?.actionPayload as Record<string, unknown>).recoveryEffectsOccurredAt).toBe(
+        occurredAt,
+      );
+    } finally {
+      await getDb()
+        .update(policies)
+        .set({ config: { addresses: [ALLOWED, TOKEN], mode: "whitelist" } })
+        .where(eq(policies.id, "approved-recipients"));
+      context.vault.signTransaction = originalSignTransaction;
+      if (ORIGINAL_REDIS_URL === undefined) delete process.env.REDIS_URL;
+      else process.env.REDIS_URL = ORIGINAL_REDIS_URL;
     }
   });
 
