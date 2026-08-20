@@ -44,32 +44,68 @@ $$;
 -- Run as a PostgreSQL role with CREATEROLE and ownership of the migrated
 -- Steward schema. Role names are identifiers and are quoted through format().
 SELECT format(
-  'CREATE ROLE %I LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS',
+  'CREATE ROLE %I LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS',
   :'steward_app_role'
 ) WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = :'steward_app_role') \gexec
 SELECT format(
-  'CREATE ROLE %I LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS',
+  'CREATE ROLE %I LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS',
   :'steward_migration_role'
 ) WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = :'steward_migration_role') \gexec
 SELECT format(
-  'CREATE ROLE %I NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT BYPASSRLS',
+  'CREATE ROLE %I NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION BYPASSRLS',
   :'steward_bootstrap_role'
 ) WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = :'steward_bootstrap_role') \gexec
 SELECT format(
-  'CREATE ROLE %I LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS',
+  'CREATE ROLE %I LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS',
   :'steward_platform_role'
 ) WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = :'steward_platform_role') \gexec
 
-SELECT format('ALTER ROLE %I LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS', :'steward_app_role') \gexec
-SELECT format('ALTER ROLE %I LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS', :'steward_migration_role') \gexec
-SELECT format('ALTER ROLE %I NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT BYPASSRLS', :'steward_bootstrap_role') \gexec
-SELECT format('ALTER ROLE %I LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS', :'steward_platform_role') \gexec
+SELECT format('ALTER ROLE %I LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS', :'steward_app_role') \gexec
+SELECT format('ALTER ROLE %I LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS', :'steward_migration_role') \gexec
+SELECT format('ALTER ROLE %I NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION BYPASSRLS', :'steward_bootstrap_role') \gexec
+SELECT format('ALTER ROLE %I LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS', :'steward_platform_role') \gexec
+
+-- Reject ownership before the normalization below can silently reassign a
+-- platform-owned object and erase evidence of the authority drift.
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM pg_shdepend ownership
+    JOIN pg_roles owner_role ON owner_role.oid = ownership.refobjid
+    WHERE ownership.refclassid = 'pg_authid'::regclass
+      AND ownership.deptype = 'o'
+      AND owner_role.rolname = current_setting('steward.bootstrap.platform_role')
+  ) OR EXISTS (
+    SELECT 1 FROM pg_database database_object
+    JOIN pg_roles owner_role ON owner_role.oid = database_object.datdba
+    WHERE owner_role.rolname = current_setting('steward.bootstrap.platform_role')
+  ) OR EXISTS (
+    SELECT 1 FROM pg_namespace schema_object
+    JOIN pg_roles owner_role ON owner_role.oid = schema_object.nspowner
+    WHERE owner_role.rolname = current_setting('steward.bootstrap.platform_role')
+  ) OR EXISTS (
+    SELECT 1 FROM pg_class relation_object
+    JOIN pg_roles owner_role ON owner_role.oid = relation_object.relowner
+    WHERE owner_role.rolname = current_setting('steward.bootstrap.platform_role')
+  ) OR EXISTS (
+    SELECT 1 FROM pg_proc function_object
+    JOIN pg_roles owner_role ON owner_role.oid = function_object.proowner
+    WHERE owner_role.rolname = current_setting('steward.bootstrap.platform_role')
+  ) THEN
+    RAISE EXCEPTION 'SEC-169 platform role must not own database objects';
+  END IF;
+END
+$$;
 
 REVOKE CREATE ON SCHEMA public FROM PUBLIC;
+REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA public FROM PUBLIC;
+REVOKE EXECUTE ON ALL PROCEDURES IN SCHEMA public FROM PUBLIC;
 REVOKE ALL ON SCHEMA steward_bootstrap FROM PUBLIC;
 REVOKE ALL ON SCHEMA steward_rls FROM PUBLIC;
 REVOKE ALL ON ALL FUNCTIONS IN SCHEMA steward_bootstrap FROM PUBLIC;
 REVOKE ALL ON ALL FUNCTIONS IN SCHEMA steward_rls FROM PUBLIC;
+REVOKE ALL ON ALL PROCEDURES IN SCHEMA steward_bootstrap FROM PUBLIC;
+REVOKE ALL ON ALL PROCEDURES IN SCHEMA steward_rls FROM PUBLIC;
 
 -- Remove stale named-role grants before installing the exact application ACL.
 -- PUBLIC-only revocation is insufficient: a previously granted login could
@@ -98,6 +134,10 @@ SELECT format('GRANT USAGE, CREATE ON SCHEMA public TO %I', :'steward_migration_
 SELECT format('GRANT USAGE ON SCHEMA public, steward_bootstrap, steward_rls TO %I', :'steward_app_role') \gexec
 SELECT format('GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA steward_bootstrap, steward_rls TO %I', :'steward_app_role') \gexec
 SELECT format(
+  'GRANT EXECUTE ON FUNCTION public.steward_lock_tenant_deletion(text) TO %I',
+  :'steward_app_role'
+) \gexec
+SELECT format(
   'REVOKE EXECUTE ON FUNCTION '
   'steward_bootstrap.platform_set_user_deactivation(uuid,boolean), '
   'steward_bootstrap.platform_delete_user(uuid), '
@@ -113,7 +153,7 @@ SELECT format(
 SELECT format('REVOKE ALL PRIVILEGES ON DATABASE %I FROM %I', current_database(), :'steward_platform_role') \gexec
 SELECT format('REVOKE ALL PRIVILEGES ON SCHEMA %I FROM %I', namespace.nspname, :'steward_platform_role')
 FROM pg_namespace namespace
-CROSS JOIN LATERAL aclexplode(COALESCE(namespace.nspacl, acldefault('n', namespace.nspowner))) privilege
+CROSS JOIN LATERAL aclexplode(namespace.nspacl) privilege
 JOIN pg_roles granted_role ON granted_role.oid = privilege.grantee
 WHERE granted_role.rolname = :'steward_platform_role'
 GROUP BY namespace.nspname
@@ -127,25 +167,23 @@ SELECT format(
 )
 FROM pg_class relation
 JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
-CROSS JOIN LATERAL aclexplode(COALESCE(
-  relation.relacl,
-  acldefault(CASE WHEN relation.relkind = 'S' THEN 'S'::"char" ELSE 'r'::"char" END, relation.relowner)
-)) privilege
+CROSS JOIN LATERAL aclexplode(relation.relacl) privilege
 JOIN pg_roles granted_role ON granted_role.oid = privilege.grantee
 WHERE relation.relkind IN ('r', 'p', 'v', 'm', 'f', 'S')
   AND granted_role.rolname = :'steward_platform_role'
 GROUP BY relation.relkind, namespace.nspname, relation.relname
 \gexec
 SELECT format(
-  'REVOKE ALL PRIVILEGES ON FUNCTION %s FROM %I',
+  'REVOKE ALL PRIVILEGES ON %s %s FROM %I',
+  CASE WHEN function_object.prokind = 'p' THEN 'PROCEDURE' ELSE 'FUNCTION' END,
   function_object.oid::regprocedure,
   :'steward_platform_role'
 )
 FROM pg_proc function_object
-CROSS JOIN LATERAL aclexplode(COALESCE(function_object.proacl, acldefault('f', function_object.proowner))) privilege
+CROSS JOIN LATERAL aclexplode(function_object.proacl) privilege
 JOIN pg_roles granted_role ON granted_role.oid = privilege.grantee
 WHERE granted_role.rolname = :'steward_platform_role'
-GROUP BY function_object.oid
+GROUP BY function_object.oid, function_object.prokind
 \gexec
 
 SELECT format('GRANT USAGE ON SCHEMA steward_bootstrap, steward_rls TO %I', :'steward_platform_role') \gexec
@@ -264,6 +302,7 @@ WHERE EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'drizzle') \gexec
 -- Future objects inherit the same split when migrations run as the migration role.
 SELECT format('ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO %I', :'steward_migration_role', :'steward_app_role') \gexec
 SELECT format('ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO %I', :'steward_migration_role', :'steward_app_role') \gexec
+SELECT format('ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA public REVOKE EXECUTE ON ROUTINES FROM PUBLIC', :'steward_migration_role') \gexec
 
 DO $$
 BEGIN
@@ -274,9 +313,9 @@ BEGIN
       current_setting('steward.bootstrap.migration_role'),
       current_setting('steward.bootstrap.platform_role')
     )
-      AND (rolsuper OR rolbypassrls)
+      AND (rolsuper OR rolbypassrls OR rolreplication)
   ) THEN
-    RAISE EXCEPTION 'SEC-169 app and migration roles must be NOSUPERUSER NOBYPASSRLS';
+    RAISE EXCEPTION 'SEC-169 app, migration, and platform roles must be NOSUPERUSER NOREPLICATION NOBYPASSRLS';
   END IF;
   IF pg_has_role(
     current_setting('steward.bootstrap.app_role'),
@@ -316,34 +355,18 @@ BEGIN
   IF EXISTS (
     SELECT 1 FROM pg_roles
     WHERE rolname = current_setting('steward.bootstrap.definer_role')
-      AND (rolcanlogin OR rolsuper OR NOT rolbypassrls)
+      AND (rolcanlogin OR rolsuper OR rolreplication OR NOT rolbypassrls)
   ) THEN
-    RAISE EXCEPTION 'SEC-169 definer role must be NOLOGIN NOSUPERUSER BYPASSRLS';
+    RAISE EXCEPTION 'SEC-169 definer role must be NOLOGIN NOSUPERUSER NOREPLICATION BYPASSRLS';
   END IF;
   IF EXISTS (
-    SELECT 1 FROM pg_shdepend ownership
-    JOIN pg_roles owner_role ON owner_role.oid = ownership.refobjid
-    WHERE ownership.refclassid = 'pg_authid'::regclass
-      AND ownership.deptype = 'o'
-      AND owner_role.rolname = current_setting('steward.bootstrap.platform_role')
-  ) OR EXISTS (
-    SELECT 1 FROM pg_database database_object
-    JOIN pg_roles owner_role ON owner_role.oid = database_object.datdba
-    WHERE owner_role.rolname = current_setting('steward.bootstrap.platform_role')
-  ) OR EXISTS (
-    SELECT 1 FROM pg_namespace schema_object
-    JOIN pg_roles owner_role ON owner_role.oid = schema_object.nspowner
-    WHERE owner_role.rolname = current_setting('steward.bootstrap.platform_role')
-  ) OR EXISTS (
-    SELECT 1 FROM pg_class relation_object
-    JOIN pg_roles owner_role ON owner_role.oid = relation_object.relowner
-    WHERE owner_role.rolname = current_setting('steward.bootstrap.platform_role')
-  ) OR EXISTS (
-    SELECT 1 FROM pg_proc function_object
-    JOIN pg_roles owner_role ON owner_role.oid = function_object.proowner
-    WHERE owner_role.rolname = current_setting('steward.bootstrap.platform_role')
+    SELECT 1
+    FROM pg_database database_object
+    CROSS JOIN LATERAL aclexplode(database_object.datacl) privilege
+    JOIN pg_roles granted_role ON granted_role.oid = privilege.grantee
+    WHERE granted_role.rolname = current_setting('steward.bootstrap.platform_role')
   ) THEN
-    RAISE EXCEPTION 'SEC-169 platform role must not own database objects';
+    RAISE EXCEPTION 'SEC-169 platform database ACL drift';
   END IF;
   IF has_schema_privilege(current_setting('steward.bootstrap.app_role'), 'public', 'CREATE')
      OR has_schema_privilege(current_setting('steward.bootstrap.app_role'), 'steward_bootstrap', 'CREATE')
@@ -358,7 +381,25 @@ BEGIN
      )
      OR has_function_privilege(
        current_setting('steward.bootstrap.platform_role'), 'steward_rls.user_id()', 'EXECUTE'
-  ) THEN
+     )
+     OR EXISTS (
+       SELECT 1
+       FROM pg_proc function_object
+       JOIN pg_namespace namespace ON namespace.oid = function_object.pronamespace
+       WHERE namespace.nspname IN ('public', 'steward_bootstrap', 'steward_rls')
+         AND has_function_privilege(
+           current_setting('steward.bootstrap.platform_role'),
+           function_object.oid,
+           'EXECUTE'
+         )
+         AND function_object.oid <> ALL (ARRAY[
+           'steward_bootstrap.platform_delete_user(uuid)'::regprocedure,
+           'steward_bootstrap.platform_revoke_user_refresh_tokens(uuid)'::regprocedure,
+           'steward_bootstrap.platform_set_user_deactivation(uuid,boolean)'::regprocedure,
+           'steward_bootstrap.retention_delete_deactivated_users(integer)'::regprocedure,
+           'steward_rls.tenant_id()'::regprocedure
+         ])
+     ) THEN
     RAISE EXCEPTION 'SEC-169 platform role must receive only tenant RLS context access';
   END IF;
   IF (
@@ -367,7 +408,7 @@ BEGIN
       ORDER BY namespace.nspname, privilege.privilege_type, privilege.is_grantable
     )
     FROM pg_namespace namespace
-    CROSS JOIN LATERAL aclexplode(COALESCE(namespace.nspacl, acldefault('n', namespace.nspowner))) privilege
+    CROSS JOIN LATERAL aclexplode(namespace.nspacl) privilege
     JOIN pg_roles granted_role ON granted_role.oid = privilege.grantee
     WHERE granted_role.rolname = current_setting('steward.bootstrap.platform_role')
   ) IS DISTINCT FROM ARRAY[
@@ -383,10 +424,7 @@ BEGIN
     )
     FROM pg_class relation
     JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
-    CROSS JOIN LATERAL aclexplode(COALESCE(
-      relation.relacl,
-      acldefault(CASE WHEN relation.relkind = 'S' THEN 'S'::"char" ELSE 'r'::"char" END, relation.relowner)
-    )) privilege
+    CROSS JOIN LATERAL aclexplode(relation.relacl) privilege
     JOIN pg_roles granted_role ON granted_role.oid = privilege.grantee
     WHERE relation.relkind IN ('r', 'p', 'v', 'm', 'f', 'S')
       AND granted_role.rolname = current_setting('steward.bootstrap.platform_role')
@@ -412,7 +450,7 @@ BEGIN
     )
     FROM pg_proc function_object
     JOIN pg_namespace namespace ON namespace.oid = function_object.pronamespace
-    CROSS JOIN LATERAL aclexplode(COALESCE(function_object.proacl, acldefault('f', function_object.proowner))) privilege
+    CROSS JOIN LATERAL aclexplode(function_object.proacl) privilege
     JOIN pg_roles granted_role ON granted_role.oid = privilege.grantee
     WHERE granted_role.rolname = current_setting('steward.bootstrap.platform_role')
   ) IS DISTINCT FROM ARRAY[
@@ -446,7 +484,7 @@ BEGIN
      OR EXISTS (
        SELECT 1
        FROM pg_default_acl defaults
-       CROSS JOIN LATERAL aclexplode(COALESCE(defaults.defaclacl, '{}'::aclitem[])) privilege
+       CROSS JOIN LATERAL aclexplode(defaults.defaclacl) privilege
        JOIN pg_roles granted_role ON granted_role.oid = privilege.grantee
        WHERE defaults.defaclobjtype = 'S'
          AND granted_role.rolname = current_setting('steward.bootstrap.platform_role')
