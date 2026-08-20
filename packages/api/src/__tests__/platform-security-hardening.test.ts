@@ -526,7 +526,16 @@ describe("platform security hardening", () => {
     expect(rlsMigrationSource).toContain("Cannot deactivate the sole active tenant owner");
     expect(rlsMigrationSource).toContain("Cannot delete the sole active tenant owner");
     expect(personalLifecycleMigrationSource).toContain(
-      "owner_tenant.tenant_id = 'personal-' || p_user_id::text",
+      "personal_tenant_id text := 'personal-' || p_user_id::text",
+    );
+    expect(personalLifecycleMigrationSource).toContain(
+      "count(*) FILTER (WHERE ut.user_id = p_user_id AND ut.role = 'owner')",
+    );
+    expect(personalLifecycleMigrationSource).toContain(
+      "Personal tenant membership invariant violated",
+    );
+    expect(personalLifecycleMigrationSource).toContain(
+      "owner_tenant.tenant_id = personal_tenant_id",
     );
     expect(personalLifecycleMigrationSource).toContain("CONTINUE;");
     expect(platformSource).not.toContain("platform_member_${tenantId}");

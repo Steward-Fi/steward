@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 
-import { hashSha256Hex } from "@stwd/auth";
+import { hashSha256Hex, revocationStore } from "@stwd/auth";
 import {
   accounts,
   agents,
@@ -38,6 +38,7 @@ describe("platform global identity graph routes", () => {
         "platform:user-lifecycle:write",
         "platform:user:delete",
         "platform:tenant:delete",
+        "platform:tenant-member:write",
         "platform:tenant-user:read",
         "platform:tenant-user:write",
         "platform:gas-spend:read",
@@ -106,6 +107,79 @@ describe("platform global identity graph routes", () => {
       "Content-Type": "application/json",
       "X-Steward-Platform-Key": PLATFORM_KEY,
     };
+  }
+
+  async function assertMalformedPersonalTenantRejected(extraRole: "member" | "owner") {
+    const [owner, extraUser] = await getDb()
+      .insert(users)
+      .values([
+        {
+          email: `personal-${extraRole}-owner@example.test`,
+          emailVerified: true,
+        },
+        {
+          email: `personal-${extraRole}-extra@example.test`,
+          emailVerified: true,
+        },
+      ])
+      .returning({ id: users.id });
+    const tenantId = `personal-${owner.id}`;
+    await getDb()
+      .insert(tenants)
+      .values({
+        id: tenantId,
+        name: `Malformed personal ${extraRole}`,
+        apiKeyHash: `malformed-personal-${extraRole}-hash`,
+      });
+    await getDb()
+      .insert(userTenants)
+      .values([
+        { userId: owner.id, tenantId, role: "owner" },
+        { userId: extraUser.id, tenantId, role: extraRole },
+      ]);
+    await getDb()
+      .insert(refreshTokens)
+      .values({
+        id: `malformed-personal-${extraRole}-refresh`,
+        userId: owner.id,
+        tenantId,
+        tokenHash: `malformed-personal-${extraRole}-refresh-hash`,
+        expiresAt: new Date(Date.now() + 60_000),
+      });
+    const revokedBefore = await revocationStore.getUserRevokedBefore(owner.id);
+
+    const deactivate = await platformRoutes.request(`/users/${owner.id}/deactivate`, {
+      method: "PATCH",
+      headers: headers(),
+      body: JSON.stringify({ deactivated: true }),
+    });
+    expect(deactivate.status).toBe(409);
+    expect(((await deactivate.json()) as { error: string }).error).toBe(
+      "Personal tenant membership invariant violated",
+    );
+
+    const removeTenant = await platformRoutes.request(`/tenants/${tenantId}`, {
+      method: "DELETE",
+      headers: headers(),
+    });
+    expect(removeTenant.status).toBe(409);
+    expect(((await removeTenant.json()) as { error: string }).error).toBe(
+      "Personal tenant membership invariant violated",
+    );
+
+    const [storedOwner] = await getDb()
+      .select({ deactivatedAt: users.deactivatedAt })
+      .from(users)
+      .where(eq(users.id, owner.id));
+    expect(storedOwner?.deactivatedAt).toBeNull();
+    expect(await revocationStore.getUserRevokedBefore(owner.id)).toBe(revokedBefore);
+    expect(await getDb().select().from(tenants).where(eq(tenants.id, tenantId))).toHaveLength(1);
+    expect(
+      await getDb().select().from(userTenants).where(eq(userTenants.tenantId, tenantId)),
+    ).toHaveLength(2);
+    expect(
+      await getDb().select().from(refreshTokens).where(eq(refreshTokens.userId, owner.id)),
+    ).toHaveLength(1);
   }
 
   it("gets a global user identity with tenant ids and linked accounts", async () => {
@@ -904,6 +978,52 @@ describe("platform global identity graph routes", () => {
       tenantId: personalTenantId,
       role: "owner",
     });
+    await getDb().insert(accounts).values({
+      userId: personalUser.id,
+      provider: "google",
+      providerAccountId: "google-personal-delete-owner",
+    });
+
+    const immutableMembershipRequests = [
+      platformRoutes.request(`/tenants/${personalTenantId}/members`, {
+        method: "POST",
+        headers: headers(),
+        body: JSON.stringify({ email: "personal-extra-member@example.test", role: "member" }),
+      }),
+      platformRoutes.request(`/tenants/${personalTenantId}/members/${personalUser.id}`, {
+        method: "PATCH",
+        headers: headers(),
+        body: JSON.stringify({ role: "member" }),
+      }),
+      platformRoutes.request(`/tenants/${personalTenantId}/members/${personalUser.id}`, {
+        method: "DELETE",
+        headers: headers(),
+      }),
+      platformRoutes.request(`/tenants/${personalTenantId}/invitations`, {
+        method: "POST",
+        headers: headers(),
+        body: JSON.stringify({ email: "personal-invite@example.test" }),
+      }),
+      platformRoutes.request(`/tenants/${personalTenantId}/invitations/${crypto.randomUUID()}`, {
+        method: "DELETE",
+        headers: headers(),
+      }),
+    ];
+    for (const response of await Promise.all(immutableMembershipRequests)) {
+      expect(response.status).toBe(409);
+      expect(((await response.json()) as { error: string }).error).toBe(
+        "Personal tenant membership is immutable",
+      );
+    }
+    expect(
+      await getDb().select().from(userTenants).where(eq(userTenants.tenantId, personalTenantId)),
+    ).toHaveLength(1);
+    expect(
+      await getDb()
+        .select()
+        .from(users)
+        .where(eq(users.email, "personal-extra-member@example.test")),
+    ).toHaveLength(0);
 
     const deactivate = await platformRoutes.request(`/users/${personalUser.id}/deactivate`, {
       method: "PATCH",
@@ -936,8 +1056,22 @@ describe("platform global identity graph routes", () => {
     expect(remove.status).toBe(200);
     expect(await getDb().select().from(users).where(eq(users.id, personalUser.id))).toHaveLength(0);
     expect(
+      await getDb()
+        .select()
+        .from(accounts)
+        .where(eq(accounts.providerAccountId, "google-personal-delete-owner")),
+    ).toHaveLength(0);
+    expect(
       await getDb().select().from(tenants).where(eq(tenants.id, personalTenantId)),
     ).toHaveLength(0);
+  });
+
+  it("rejects a personal tenant with an extra member before lifecycle mutation", async () => {
+    await assertMalformedPersonalTenantRejected("member");
+  });
+
+  it("rejects a personal tenant with an extra owner before lifecycle mutation", async () => {
+    await assertMalformedPersonalTenantRejected("owner");
   });
 
   it("still refuses lifecycle removal for a sole owner of a shared tenant", async () => {
