@@ -7,6 +7,7 @@
 
 import {
   createDecipheriv,
+  createHash,
   createPrivateKey,
   createPublicKey,
   diffieHellman,
@@ -20,9 +21,11 @@ import {
   tenantConfigs as tenantConfigsTable,
   users,
   userTenants,
+  withTenantAuditedTransaction,
 } from "@stwd/db";
 import { recordAggregationEvent } from "@stwd/redis";
 import {
+  canonicalJsonStringify,
   ExecutionPayloadNormalizationError,
   type PolicyResult,
   rawSigningChainSupport,
@@ -49,6 +52,7 @@ import {
   parseMoneroWalletScope,
   parseSolanaTransaction,
   readEip7702Delegation,
+  SolanaBroadcastNotSubmittedError,
   type UnpackedUserOperationFields,
 } from "@stwd/vault";
 import { and, desc, eq, type SQL, sql } from "drizzle-orm";
@@ -863,9 +867,16 @@ function requireBroadcastActionIdempotency(
   broadcast: boolean,
   actionLabel: string,
 ): Response | null {
-  if (!broadcast || isNonEmptyString(c.req.header("Idempotency-Key"))) return null;
+  if (!broadcast) return null;
+  const key = c.req.header("Idempotency-Key");
+  if (isNonEmptyString(key) && /^[\x21-\x7e]{8,255}$/.test(key)) return null;
   return c.json<ApiResponse>(
-    { ok: false, error: `${actionLabel} require an Idempotency-Key header` },
+    {
+      ok: false,
+      error: key
+        ? "Invalid Idempotency-Key header"
+        : `${actionLabel} require an Idempotency-Key header`,
+    },
     400,
   );
 }
@@ -7834,7 +7845,18 @@ async function signSolanaBlind(
       );
     }
 
-    const txId = crypto.randomUUID();
+    const binding = createSolanaRecoveryBinding(c, {
+      tenantId,
+      agentId,
+      transaction: args.transaction,
+      chainId,
+      toAddress,
+      value: txValue,
+      broadcastRequested: shouldBroadcast,
+      blindSigned: true,
+    });
+    const { txId } = binding;
+    let executionToken: string | null = null;
     let completedResult: {
       txId: string;
       signature: string;
@@ -7843,8 +7865,7 @@ async function signSolanaBlind(
       caip2?: string;
     } | null = null;
     try {
-      await stageSolanaRecoveryAnchor({
-        txId,
+      const staged = await stageSolanaRecoveryAnchor({
         agentId,
         transaction: args.transaction,
         chainId,
@@ -7853,7 +7874,11 @@ async function signSolanaBlind(
         broadcastRequested: shouldBroadcast,
         blindSigned: true,
         policyResults: evaluation.results,
+        binding,
       });
+      if (!staged.executionToken) return solanaReplayResponse(c, staged.row);
+      const ownerToken = staged.executionToken;
+      executionToken = ownerToken;
       const result = await vault.signSolanaTransaction({
         agentId,
         tenantId,
@@ -7862,11 +7887,11 @@ async function signSolanaBlind(
         broadcast: args.broadcast,
         expectedTo: toAddress,
         expectedValue: txValue,
-        onBroadcastPrepared: (signature) =>
-          checkpointSolanaBroadcastSubmission(txId, agentId, signature),
+        onBroadcastPrepared: (checkpoint) =>
+          checkpointSolanaBroadcastSubmission(txId, agentId, ownerToken, checkpoint),
       });
       completedResult = { txId, ...result };
-      await finalizeSolanaRecoveryAnchor(txId, agentId, result);
+      await finalizeSolanaRecoveryAnchor(txId, agentId, ownerToken, result);
       recordVaultSpend(agentId, tenantId, txValue, chainId).catch((err) =>
         console.error("[vault] Failed to record Solana spend", redactedThrownDiagnostics(err)),
       );
@@ -7922,8 +7947,24 @@ async function signSolanaBlind(
           }>
         >({ ok: true, data: completedResult });
       }
+      if (e instanceof SolanaIdempotencyConflictError) {
+        return c.json<ApiResponse>({ ok: false, error: e.message }, 409);
+      }
+      if (e instanceof SolanaBroadcastNotSubmittedError) {
+        await markSolanaBroadcastNotSubmitted(
+          tenantId,
+          txId,
+          agentId,
+          executionToken,
+          e.transactionHash,
+        );
+        return c.json<ApiResponse>(
+          { ok: false, error: "Solana RPC preflight rejected the transaction", data: { txId } },
+          502,
+        );
+      }
       if (e instanceof ExternalBroadcastOutcomeUnknownError) {
-        await preserveUnknownSolanaOutcome(txId, agentId, e.transactionHash);
+        await preserveUnknownSolanaOutcome(txId, agentId, executionToken, e.transactionHash);
         recordVaultSpend(agentId, tenantId, txValue, chainId).catch((err) =>
           console.error(
             "[vault] Failed to record ambiguous Solana spend",
@@ -7947,7 +7988,7 @@ async function signSolanaBlind(
         });
         return externalBroadcastOutcomeUnknownResponse(c, e, txId) as Response;
       }
-      await markSolanaRecoveryAnchorFailed(txId, agentId);
+      await markSolanaRecoveryAnchorFailed(txId, agentId, executionToken);
       const frozen = frozenSigningResponse(c, e);
       if (frozen) return frozen;
       dispatchWebhook(tenantId, agentId, "tx_failed", {
@@ -7970,8 +8011,117 @@ type SolanaSigningResult = {
   caip2?: string;
 };
 
-async function stageSolanaRecoveryAnchor(input: {
+type SolanaRecoveryBinding = {
   txId: string;
+  idempotencyKeyDigest?: string;
+  requestDigest?: string;
+};
+
+const SOLANA_SIGNING_ATTEMPT_LEASE_MS = 2 * 60 * 1000;
+
+class SolanaIdempotencyConflictError extends Error {
+  constructor() {
+    super("Idempotency-Key was already used for a different Solana transaction");
+    this.name = "SolanaIdempotencyConflictError";
+  }
+}
+
+function sha256(value: string): string {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+function createSolanaRecoveryBinding(
+  c: Context<{ Variables: AppVariables }>,
+  input: {
+    tenantId: string;
+    agentId: string;
+    transaction: string;
+    chainId: number;
+    toAddress: string;
+    value: string;
+    broadcastRequested: boolean;
+    blindSigned: boolean;
+  },
+): SolanaRecoveryBinding {
+  if (!input.broadcastRequested) return { txId: crypto.randomUUID() };
+  const key = c.req.header("Idempotency-Key");
+  if (!key) throw new Error("Idempotency-Key is required for Solana broadcast");
+  const scope = `${input.tenantId}\0${input.agentId}\0${key}`;
+  return {
+    txId: `solana_${sha256(scope).slice(0, 56)}`,
+    idempotencyKeyDigest: sha256(scope),
+    requestDigest: sha256(
+      canonicalJsonStringify({
+        agentId: input.agentId,
+        blindSigned: input.blindSigned,
+        broadcast: true,
+        chainId: input.chainId,
+        tenantId: input.tenantId,
+        toAddress: input.toAddress,
+        transaction: input.transaction,
+        value: input.value,
+      }),
+    ),
+  };
+}
+
+type SolanaRecoveryRow = {
+  id: string;
+  agentId: string;
+  status: string;
+  txHash: string | null;
+  chainId: number;
+  actionPayload: unknown;
+};
+
+function readSolanaRecoveryMetadata(payload: unknown): Record<string, unknown> {
+  return payload && typeof payload === "object" ? (payload as Record<string, unknown>) : {};
+}
+
+function solanaReplayResponse(
+  c: Context<{ Variables: AppVariables }>,
+  row: SolanaRecoveryRow,
+): Response {
+  if (row.status === "approved") {
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error: "A matching Solana signing attempt is already in progress",
+        data: { txId: row.id, status: "processing" },
+      },
+      409,
+    );
+  }
+  if (row.status === "outcome_unknown" && row.txHash) {
+    return externalBroadcastOutcomeUnknownResponse(
+      c,
+      new ExternalBroadcastOutcomeUnknownError(row.txHash),
+      row.id,
+    ) as Response;
+  }
+  if ((row.status === "broadcast" || row.status === "confirmed") && row.txHash) {
+    return c.json<ApiResponse<SolanaSigningResult & { txId: string }>>({
+      ok: true,
+      data: {
+        txId: row.id,
+        signature: row.txHash,
+        broadcast: true,
+        chainId: row.chainId,
+        caip2: toCaip2(row.chainId),
+      },
+    });
+  }
+  return c.json<ApiResponse>(
+    {
+      ok: false,
+      error: "The prior Solana request did not complete; use a new Idempotency-Key",
+      data: { txId: row.id, status: row.status },
+    },
+    409,
+  );
+}
+
+async function stageSolanaRecoveryAnchor(input: {
   agentId: string;
   transaction: string;
   chainId: number;
@@ -7980,39 +8130,120 @@ async function stageSolanaRecoveryAnchor(input: {
   broadcastRequested: boolean;
   blindSigned: boolean;
   policyResults: PolicyResult[];
-}): Promise<void> {
-  await db.insert(transactions).values({
-    id: input.txId,
-    agentId: input.agentId,
-    status: "approved",
-    toAddress: input.toAddress,
-    value: input.value,
-    data: input.transaction,
-    chainId: input.chainId,
-    actionType: "solana_transaction",
-    actionPayload: {
-      type: "solana_transaction",
-      broadcast: input.broadcastRequested,
-      blindSigned: input.blindSigned,
-      recoveryAnchor: true,
-    },
-    policyResults: input.policyResults,
-  });
+  binding: SolanaRecoveryBinding;
+}): Promise<{ row: SolanaRecoveryRow; executionToken: string | null }> {
+  const executionToken = crypto.randomUUID();
+  const attemptLeaseUntil = new Date(Date.now() + SOLANA_SIGNING_ATTEMPT_LEASE_MS).toISOString();
+  const inserted = await db
+    .insert(transactions)
+    .values({
+      id: input.binding.txId,
+      agentId: input.agentId,
+      status: "approved",
+      toAddress: input.toAddress,
+      value: input.value,
+      data: input.transaction,
+      chainId: input.chainId,
+      actionType: "solana_transaction",
+      actionPayload: {
+        type: "solana_transaction",
+        broadcast: input.broadcastRequested,
+        blindSigned: input.blindSigned,
+        recoveryAnchor: true,
+        idempotencyKeyDigest: input.binding.idempotencyKeyDigest,
+        requestDigest: input.binding.requestDigest,
+        executionToken,
+        attemptLeaseUntil,
+      },
+      policyResults: input.policyResults,
+    })
+    .onConflictDoNothing()
+    .returning();
+  if (inserted[0]) return { row: inserted[0] as SolanaRecoveryRow, executionToken };
+
+  const [existing] = await db
+    .select()
+    .from(transactions)
+    .where(eq(transactions.id, input.binding.txId))
+    .limit(1);
+  const metadata = readSolanaRecoveryMetadata(existing?.actionPayload);
+  if (
+    !existing ||
+    existing.agentId !== input.agentId ||
+    metadata.type !== "solana_transaction" ||
+    metadata.idempotencyKeyDigest !== input.binding.idempotencyKeyDigest ||
+    metadata.requestDigest !== input.binding.requestDigest
+  ) {
+    throw new SolanaIdempotencyConflictError();
+  }
+  if (existing.status !== "approved") {
+    return { row: existing as SolanaRecoveryRow, executionToken: null };
+  }
+
+  const priorLeaseUntil =
+    typeof metadata.attemptLeaseUntil === "string"
+      ? Date.parse(metadata.attemptLeaseUntil)
+      : Number.NaN;
+  if (Number.isFinite(priorLeaseUntil) && priorLeaseUntil > Date.now()) {
+    return { row: existing as SolanaRecoveryRow, executionToken: null };
+  }
+
+  const priorToken = typeof metadata.executionToken === "string" ? metadata.executionToken : null;
+  const tokenPredicate = priorToken
+    ? sql`${transactions.actionPayload}->>'executionToken' = ${priorToken}`
+    : sql`${transactions.actionPayload}->>'executionToken' is null`;
+  const [takenOver] = await db
+    .update(transactions)
+    .set({
+      actionPayload: { ...metadata, executionToken, attemptLeaseUntil },
+    })
+    .where(
+      and(
+        eq(transactions.id, input.binding.txId),
+        eq(transactions.agentId, input.agentId),
+        eq(transactions.status, "approved"),
+        tokenPredicate,
+      ),
+    )
+    .returning();
+  if (takenOver) return { row: takenOver as SolanaRecoveryRow, executionToken };
+
+  const [winner] = await db
+    .select()
+    .from(transactions)
+    .where(eq(transactions.id, input.binding.txId))
+    .limit(1);
+  return { row: (winner ?? existing) as SolanaRecoveryRow, executionToken: null };
 }
 
 async function checkpointSolanaBroadcastSubmission(
   txId: string,
   agentId: string,
-  signature: string,
+  executionToken: string,
+  checkpoint: { signature: string; recentBlockhash: string },
 ): Promise<void> {
+  const [existing] = await db
+    .select({ actionPayload: transactions.actionPayload })
+    .from(transactions)
+    .where(and(eq(transactions.id, txId), eq(transactions.agentId, agentId)))
+    .limit(1);
   const rows = await db
     .update(transactions)
-    .set({ status: "outcome_unknown", txHash: signature, signedAt: new Date() })
+    .set({
+      status: "outcome_unknown",
+      txHash: checkpoint.signature,
+      signedAt: new Date(),
+      actionPayload: {
+        ...readSolanaRecoveryMetadata(existing?.actionPayload),
+        recentBlockhash: checkpoint.recentBlockhash,
+      },
+    })
     .where(
       and(
         eq(transactions.id, txId),
         eq(transactions.agentId, agentId),
         eq(transactions.status, "approved"),
+        sql`${transactions.actionPayload}->>'executionToken' = ${executionToken}`,
       ),
     )
     .returning({ id: transactions.id });
@@ -8024,6 +8255,7 @@ async function checkpointSolanaBroadcastSubmission(
 async function finalizeSolanaRecoveryAnchor(
   txId: string,
   agentId: string,
+  executionToken: string,
   result: SolanaSigningResult,
 ): Promise<void> {
   const rows = await db
@@ -8037,7 +8269,13 @@ async function finalizeSolanaRecoveryAnchor(
       and(
         eq(transactions.id, txId),
         eq(transactions.agentId, agentId),
-        sql`${transactions.status} in ('approved', 'outcome_unknown')`,
+        result.broadcast
+          ? and(
+              eq(transactions.status, "outcome_unknown"),
+              eq(transactions.txHash, result.signature),
+            )
+          : eq(transactions.status, "approved"),
+        sql`${transactions.actionPayload}->>'executionToken' = ${executionToken}`,
       ),
     )
     .returning({ id: transactions.id });
@@ -8049,13 +8287,22 @@ async function finalizeSolanaRecoveryAnchor(
 async function preserveUnknownSolanaOutcome(
   txId: string,
   agentId: string,
+  executionToken: string | null,
   signature: string,
 ): Promise<void> {
+  if (!executionToken) return;
   try {
     await db
       .update(transactions)
       .set({ status: "outcome_unknown", txHash: signature, signedAt: new Date() })
-      .where(and(eq(transactions.id, txId), eq(transactions.agentId, agentId)));
+      .where(
+        and(
+          eq(transactions.id, txId),
+          eq(transactions.agentId, agentId),
+          sql`${transactions.status} in ('approved', 'outcome_unknown')`,
+          sql`${transactions.actionPayload}->>'executionToken' = ${executionToken}`,
+        ),
+      );
   } catch (error) {
     // The pre-sign approved row is already durable. Preserve the typed 202
     // response even when the database cannot enrich it with the known hash.
@@ -8066,7 +8313,12 @@ async function preserveUnknownSolanaOutcome(
   }
 }
 
-async function markSolanaRecoveryAnchorFailed(txId: string, agentId: string): Promise<void> {
+async function markSolanaRecoveryAnchorFailed(
+  txId: string,
+  agentId: string,
+  executionToken: string | null,
+): Promise<void> {
+  if (!executionToken) return;
   try {
     await db
       .update(transactions)
@@ -8076,6 +8328,7 @@ async function markSolanaRecoveryAnchorFailed(txId: string, agentId: string): Pr
           eq(transactions.id, txId),
           eq(transactions.agentId, agentId),
           eq(transactions.status, "approved"),
+          sql`${transactions.actionPayload}->>'executionToken' = ${executionToken}`,
         ),
       );
   } catch (error) {
@@ -8084,6 +8337,42 @@ async function markSolanaRecoveryAnchorFailed(txId: string, agentId: string): Pr
       redactedThrownDiagnostics(error),
     );
   }
+}
+
+async function markSolanaBroadcastNotSubmitted(
+  tenantId: string,
+  txId: string,
+  agentId: string,
+  executionToken: string | null,
+  signature: string,
+): Promise<void> {
+  if (!executionToken) return;
+  await withTenantAuditedTransaction(tenantId, async (rawTx, appendRequiredAudit) => {
+    const tx = rawTx as typeof db;
+    const [updated] = await tx
+      .update(transactions)
+      .set({ status: "failed" })
+      .where(
+        and(
+          eq(transactions.id, txId),
+          eq(transactions.agentId, agentId),
+          eq(transactions.status, "outcome_unknown"),
+          eq(transactions.txHash, signature),
+          sql`${transactions.actionPayload}->>'executionToken' = ${executionToken}`,
+        ),
+      )
+      .returning({ id: transactions.id });
+    if (!updated) return;
+    await appendRequiredAudit({
+      tenantId,
+      actorType: "system",
+      actorId: "solana-rpc-preflight",
+      action: "vault.sign.solana.not_submitted",
+      resourceType: "transaction",
+      resourceId: txId,
+      metadata: { previousStatus: "outcome_unknown", status: "failed", signature },
+    });
+  });
 }
 
 vaultRoutes.post("/:agentId/sign-solana", async (c) => {
@@ -8446,7 +8735,18 @@ vaultRoutes.post("/:agentId/sign-solana", async (c) => {
       );
     }
 
-    const txId = crypto.randomUUID();
+    const binding = createSolanaRecoveryBinding(c, {
+      tenantId,
+      agentId,
+      transaction: body.transaction,
+      chainId,
+      toAddress,
+      value: txValue,
+      broadcastRequested: shouldBroadcast,
+      blindSigned: false,
+    });
+    const { txId } = binding;
+    let executionToken: string | null = null;
     let completedResult: {
       txId: string;
       signature: string;
@@ -8468,8 +8768,7 @@ vaultRoutes.post("/:agentId/sign-solana", async (c) => {
         derived.summary.instructions[0].instructionType === "system:Transfer" &&
         derived.to !== undefined;
 
-      await stageSolanaRecoveryAnchor({
-        txId,
+      const staged = await stageSolanaRecoveryAnchor({
         agentId,
         transaction: body.transaction,
         chainId,
@@ -8478,7 +8777,11 @@ vaultRoutes.post("/:agentId/sign-solana", async (c) => {
         broadcastRequested: shouldBroadcast,
         blindSigned: false,
         policyResults: evaluation.results,
+        binding,
       });
+      if (!staged.executionToken) return solanaReplayResponse(c, staged.row);
+      const ownerToken = staged.executionToken;
+      executionToken = ownerToken;
       const result = await vault.signSolanaTransaction({
         agentId,
         tenantId,
@@ -8491,12 +8794,12 @@ vaultRoutes.post("/:agentId/sign-solana", async (c) => {
         ...(isSingleNativeTransfer
           ? { expectedTo: toAddress, expectedValue: txValue }
           : { allowBlindSign: true }),
-        onBroadcastPrepared: (signature) =>
-          checkpointSolanaBroadcastSubmission(txId, agentId, signature),
+        onBroadcastPrepared: (checkpoint) =>
+          checkpointSolanaBroadcastSubmission(txId, agentId, ownerToken, checkpoint),
       });
       completedResult = { txId, ...result };
 
-      await finalizeSolanaRecoveryAnchor(txId, agentId, result);
+      await finalizeSolanaRecoveryAnchor(txId, agentId, ownerToken, result);
 
       // ── Record spend in Redis (fire-and-forget) ──────────────────────────────
       recordVaultSpend(agentId, tenantId, txValue, chainId).catch((err) =>
@@ -8569,8 +8872,24 @@ vaultRoutes.post("/:agentId/sign-solana", async (c) => {
         >({ ok: true, data: completedResult });
       }
 
+      if (e instanceof SolanaIdempotencyConflictError) {
+        return c.json<ApiResponse>({ ok: false, error: e.message }, 409);
+      }
+      if (e instanceof SolanaBroadcastNotSubmittedError) {
+        await markSolanaBroadcastNotSubmitted(
+          tenantId,
+          txId,
+          agentId,
+          executionToken,
+          e.transactionHash,
+        );
+        return c.json<ApiResponse>(
+          { ok: false, error: "Solana RPC preflight rejected the transaction", data: { txId } },
+          502,
+        );
+      }
       if (e instanceof ExternalBroadcastOutcomeUnknownError) {
-        await preserveUnknownSolanaOutcome(txId, agentId, e.transactionHash);
+        await preserveUnknownSolanaOutcome(txId, agentId, executionToken, e.transactionHash);
         recordVaultSpend(agentId, tenantId, txValue, chainId).catch((err) =>
           console.error(
             "[vault] Failed to record ambiguous Solana spend",
@@ -8594,7 +8913,7 @@ vaultRoutes.post("/:agentId/sign-solana", async (c) => {
         });
         return externalBroadcastOutcomeUnknownResponse(c, e, txId) as Response;
       }
-      await markSolanaRecoveryAnchorFailed(txId, agentId);
+      await markSolanaRecoveryAnchorFailed(txId, agentId, executionToken);
       const frozen = frozenSigningResponse(c, e);
       if (frozen) return frozen;
 
@@ -8609,6 +8928,119 @@ vaultRoutes.post("/:agentId/sign-solana", async (c) => {
       }
       return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(e) }, 500);
     }
+  });
+});
+
+vaultRoutes.post("/:agentId/transactions/:txId/reconcile-solana", async (c) => {
+  if (!requireAgentAccess(c)) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Forbidden: token scope does not match agent" },
+      403,
+    );
+  }
+  const tenantId = c.get("tenantId");
+  const agentId = c.req.param("agentId");
+  const txId = c.req.param("txId");
+  if (!(await ensureAgentForTenant(tenantId, agentId))) {
+    return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
+  }
+  const signerAuthorization = await requireSignerPermission(
+    c,
+    tenantId,
+    agentId,
+    "sign_transaction",
+  );
+  if (!signerAuthorization.ok) return signerAuthorization.response;
+
+  const [row] = await db
+    .select()
+    .from(transactions)
+    .where(and(eq(transactions.id, txId), eq(transactions.agentId, agentId)))
+    .limit(1);
+  const metadata = readSolanaRecoveryMetadata(row?.actionPayload);
+  if (!row || row.actionType !== "solana_transaction") {
+    return c.json<ApiResponse>({ ok: false, error: "Solana transaction not found" }, 404);
+  }
+  if (row.status !== "outcome_unknown") {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Only outcome_unknown Solana transactions can be reconciled" },
+      409,
+    );
+  }
+  if (!isNonEmptyString(row.txHash) || !isNonEmptyString(metadata.recentBlockhash)) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Solana recovery checkpoint is incomplete" },
+      409,
+    );
+  }
+  const signature = row.txHash;
+  const recentBlockhash = metadata.recentBlockhash;
+
+  const nextStatus = await vault.reconcileSolanaBroadcast({
+    signature,
+    recentBlockhash,
+    chainId: row.chainId,
+  });
+  if (nextStatus === "outcome_unknown") {
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error: "Solana broadcast outcome is still unknown",
+        data: { txId, signature: row.txHash, status: nextStatus },
+      },
+      202,
+    );
+  }
+
+  const transitioned = await withTenantAuditedTransaction(
+    tenantId,
+    async (rawTx, appendRequiredAudit) => {
+      const tx = rawTx as typeof db;
+      const [updated] = await tx
+        .update(transactions)
+        .set({
+          status: nextStatus,
+          confirmedAt: nextStatus === "confirmed" ? new Date() : row.confirmedAt,
+          actionPayload: {
+            ...metadata,
+            reconciledAt: new Date().toISOString(),
+            reconciliationResult: nextStatus,
+          },
+        })
+        .where(
+          and(
+            eq(transactions.id, txId),
+            eq(transactions.agentId, agentId),
+            eq(transactions.status, "outcome_unknown"),
+            eq(transactions.txHash, signature),
+          ),
+        )
+        .returning({ id: transactions.id });
+      if (!updated) return false;
+      await appendRequiredAudit({
+        tenantId,
+        actorType: "agent",
+        actorId: agentId,
+        action: "vault.sign.solana.reconciled",
+        resourceType: "transaction",
+        resourceId: txId,
+        metadata: {
+          previousStatus: "outcome_unknown",
+          status: nextStatus,
+          signature: row.txHash,
+          evidence: "solana_signature_status",
+          ...signerAuthAuditMetadata(signerAuthorization.auth),
+        },
+      });
+      return true;
+    },
+  );
+  if (!transitioned) {
+    return c.json<ApiResponse>({ ok: false, error: "Transaction state changed; retry" }, 409);
+  }
+  return c.json<ApiResponse>({
+    ok: true,
+    data: { txId, signature: row.txHash, status: nextStatus },
   });
 });
 

@@ -3,6 +3,7 @@ import {
   ComputeBudgetProgram,
   Connection,
   PublicKey,
+  SendTransactionError,
   SystemProgram,
   Transaction,
   TransactionMessage,
@@ -10,7 +11,10 @@ import {
 } from "@solana/web3.js";
 import { getDb, tenants } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
-import { ExternalBroadcastOutcomeUnknownError } from "../external-key-custody";
+import {
+  ExternalBroadcastOutcomeUnknownError,
+  SolanaBroadcastNotSubmittedError,
+} from "../external-key-custody";
 import { Vault } from "../vault";
 
 const MASTER_PASSWORD = "test-vault-solana-priority-fee";
@@ -181,8 +185,9 @@ describe("Vault.signSolanaTransaction priority fee cap", () => {
         transaction: legacyTransferWithPriorityFee(feePayer, 1_000),
         broadcast: true,
         allowBlindSign: true,
-        onBroadcastPrepared: async (signature) => {
-          expect(signature).toBeString();
+        onBroadcastPrepared: async (checkpoint) => {
+          expect(checkpoint.signature).toBeString();
+          expect(checkpoint.recentBlockhash).toBe(RECENT_BLOCKHASH);
           throw new Error("injected durable checkpoint failure");
         },
       });
@@ -228,8 +233,9 @@ describe("Vault.signSolanaTransaction priority fee cap", () => {
         transaction: legacyTransferWithPriorityFee(feePayer, 1_000),
         broadcast: true,
         allowBlindSign: true,
-        onBroadcastPrepared: async (signature) => {
-          preparedSignature = signature;
+        onBroadcastPrepared: async (checkpoint) => {
+          preparedSignature = checkpoint.signature;
+          expect(checkpoint.recentBlockhash).toBe(RECENT_BLOCKHASH);
           order.push("checkpoint");
         },
       });
@@ -271,8 +277,9 @@ describe("Vault.signSolanaTransaction priority fee cap", () => {
         transaction: legacyTransferWithPriorityFee(feePayer, 1_000),
         broadcast: true,
         allowBlindSign: true,
-        onBroadcastPrepared: async (signature) => {
-          preparedSignature = signature;
+        onBroadcastPrepared: async (checkpoint) => {
+          preparedSignature = checkpoint.signature;
+          expect(checkpoint.recentBlockhash).toBe(RECENT_BLOCKHASH);
         },
       });
     } catch (caught) {
@@ -287,5 +294,110 @@ describe("Vault.signSolanaTransaction priority fee cap", () => {
     expect(preparedSignature).not.toBe("");
     expect(error).toBeInstanceOf(ExternalBroadcastOutcomeUnknownError);
     expect((error as ExternalBroadcastOutcomeUnknownError).transactionHash).toBe(preparedSignature);
+  });
+
+  for (const version of ["legacy", "v0"] as const) {
+    test(`checkpoints the deterministic ${version} signature and original blockhash`, async () => {
+      const feePayer = await createSolanaAgent(vault);
+      let checkpoint: { signature: string; recentBlockhash: string } | undefined;
+      const send = spyOn(Connection.prototype, "sendRawTransaction").mockImplementation(
+        async () => {
+          if (!checkpoint) throw new Error("checkpoint did not run before send");
+          return checkpoint.signature;
+        },
+      );
+      const confirm = spyOn(Connection.prototype, "confirmTransaction").mockResolvedValue({
+        context: { slot: 1 },
+        value: { err: null },
+      });
+      try {
+        const result = await vault.signSolanaTransaction({
+          tenantId: TENANT_ID,
+          agentId: AGENT_ID,
+          transaction:
+            version === "legacy"
+              ? legacyTransferWithPriorityFee(feePayer, 1_000)
+              : v0TransferWithPriorityFee(feePayer, 1_000),
+          broadcast: true,
+          allowBlindSign: true,
+          onBroadcastPrepared: async (value) => {
+            checkpoint = value;
+          },
+        });
+        expect(checkpoint?.recentBlockhash).toBe(RECENT_BLOCKHASH);
+        expect(result.signature).toBe(checkpoint?.signature);
+      } finally {
+        send.mockRestore();
+        confirm.mockRestore();
+      }
+    });
+  }
+
+  test("classifies an SDK simulation rejection as definitively not submitted", async () => {
+    const feePayer = await createSolanaAgent(vault);
+    let preparedSignature = "";
+    const send = spyOn(Connection.prototype, "sendRawTransaction").mockRejectedValue(
+      new SendTransactionError({
+        action: "simulate",
+        signature: "",
+        transactionMessage: "custom program error",
+      }),
+    );
+    try {
+      await vault.signSolanaTransaction({
+        tenantId: TENANT_ID,
+        agentId: AGENT_ID,
+        transaction: legacyTransferWithPriorityFee(feePayer, 1_000),
+        broadcast: true,
+        allowBlindSign: true,
+        onBroadcastPrepared: async (checkpoint) => {
+          preparedSignature = checkpoint.signature;
+        },
+      });
+      throw new Error("expected preflight rejection");
+    } catch (error) {
+      expect(error).toBeInstanceOf(SolanaBroadcastNotSubmittedError);
+      expect((error as SolanaBroadcastNotSubmittedError).transactionHash).toBe(preparedSignature);
+    } finally {
+      send.mockRestore();
+    }
+  });
+
+  test("distinguishes signature evidence, live blockhash ambiguity, and expiry", async () => {
+    const statuses = spyOn(Connection.prototype, "getSignatureStatuses");
+    const validity = spyOn(Connection.prototype, "isBlockhashValid");
+    try {
+      statuses.mockResolvedValueOnce({
+        context: { slot: 1 },
+        value: [{ slot: 1, confirmations: 1, err: null, confirmationStatus: "confirmed" }],
+      });
+      expect(
+        await vault.reconcileSolanaBroadcast({
+          signature: SUBMITTED_SIGNATURE,
+          recentBlockhash: RECENT_BLOCKHASH,
+        }),
+      ).toBe("confirmed");
+
+      statuses.mockResolvedValueOnce({ context: { slot: 1 }, value: [null] });
+      validity.mockResolvedValueOnce({ context: { slot: 1 }, value: true });
+      expect(
+        await vault.reconcileSolanaBroadcast({
+          signature: SUBMITTED_SIGNATURE,
+          recentBlockhash: RECENT_BLOCKHASH,
+        }),
+      ).toBe("outcome_unknown");
+
+      statuses.mockResolvedValueOnce({ context: { slot: 1 }, value: [null] });
+      validity.mockResolvedValueOnce({ context: { slot: 1 }, value: false });
+      expect(
+        await vault.reconcileSolanaBroadcast({
+          signature: SUBMITTED_SIGNATURE,
+          recentBlockhash: RECENT_BLOCKHASH,
+        }),
+      ).toBe("failed");
+    } finally {
+      statuses.mockRestore();
+      validity.mockRestore();
+    }
   });
 });

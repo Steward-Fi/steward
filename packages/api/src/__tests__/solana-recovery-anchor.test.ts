@@ -1,10 +1,11 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, setDefaultTimeout } from "bun:test";
 import {
   __resetAuditHmacKeyCacheForTests,
   agents,
   closeDb,
   getDb,
   policies,
+  tenantConfigs,
   tenants,
   transactions,
 } from "@stwd/db";
@@ -12,6 +13,7 @@ import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { ExternalBroadcastOutcomeUnknownError } from "@stwd/vault";
 import { eq, sql } from "drizzle-orm";
 import { Hono } from "hono";
+import { idempotencyMiddleware, MemoryIdempotencyStore } from "../middleware/idempotency";
 import type { AppVariables } from "../services/context";
 
 const TENANT_ID = `solana-recovery-tenant-${Date.now()}`;
@@ -20,8 +22,11 @@ const FROM = "7v54NWdBtkjuAFJrLGsS2SXnuk8nKam81mZJeeYxVFi9";
 const RECIPIENT = "6TcyBfPdBt1kjsvDZLzmBFnuMaLWiTaAt4RjUr9VA5YD";
 const SIGNATURE =
   "4oL4p7QvN3UH7V5wMGZgW5PuzEk4A9LXLHk9RxAoKjDKuLbQBsfXN8kEvKfj5K1oEJa8wFF6RVp2h7pP9w2f51ZV";
+const RECENT_BLOCKHASH = "11111111111111111111111111111111";
 const WITHIN_CAP_V0_TRANSFER =
   "AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAAQACBGa+fjMsekUzMr2dCn99sFX1xe8aBq2mbZizn7aBDEc6URw0oaLLUh3xa7JGuN6OeZfOI1x+drIqPXUDokgZ3YoDBkZv5SEXMv/srbpyw5vnvIzlu8X3EmssQ5s6QAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcDAgAFAkANAwACAAkD6AMAAAAAAAADAgABDAIAAAB7AAAAAAAAAAA=";
+
+setDefaultTimeout(30_000);
 
 async function makeApp() {
   const { vaultRoutes } = await import("../routes/vault");
@@ -31,10 +36,13 @@ async function makeApp() {
     c.set("authType", "session-jwt");
     c.set("tenantRole", "admin");
     c.set("userId", "solana-recovery-admin");
-    c.set("sessionMfaVerifiedAt", Date.now());
+    if (c.req.header("x-test-recent-mfa") === "true") {
+      c.set("sessionMfaVerifiedAt", Date.now());
+    }
     c.set("requestId", crypto.randomUUID());
     await next();
   });
+  app.use("*", idempotencyMiddleware({ store: new MemoryIdempotencyStore(), ttlMs: 60_000 }));
   app.route("/vault", vaultRoutes);
   return app;
 }
@@ -71,6 +79,12 @@ describe("Solana durable recovery anchors", () => {
       name: "Solana Recovery Agent",
       walletAddress: FROM,
     });
+    await getDb()
+      .insert(tenantConfigs)
+      .values({
+        tenantId: TENANT_ID,
+        authAbuseConfig: { mfa: { requireFor: { vaultSigning: false } } },
+      });
     await getDb()
       .insert(policies)
       .values([
@@ -118,11 +132,19 @@ describe("Solana durable recovery anchors", () => {
       expect(staged.data).toBe(WITHIN_CAP_V0_TRANSFER);
       expect(staged.txHash).toBeNull();
 
-      await request.onBroadcastPrepared?.(SIGNATURE);
+      await request.onBroadcastPrepared?.({
+        signature: SIGNATURE,
+        recentBlockhash: RECENT_BLOCKHASH,
+      });
       const checkpoint = await onlyRecoveryRow();
       expect(checkpoint.status).toBe("outcome_unknown");
       expect(checkpoint.txHash).toBe(SIGNATURE);
-      return { signature: SIGNATURE, broadcast: true, chainId: request.chainId ?? 101 };
+      return {
+        signature: SIGNATURE,
+        broadcast: true,
+        chainId: request.chainId ?? 101,
+        caip2: "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+      };
     };
 
     await getDb().execute(
@@ -169,7 +191,10 @@ describe("Solana durable recovery anchors", () => {
       expect(staged.data).toBe("not-a-solana-transaction");
       expect(staged.actionPayload).toMatchObject({ blindSigned: true, recoveryAnchor: true });
 
-      await request.onBroadcastPrepared?.(SIGNATURE);
+      await request.onBroadcastPrepared?.({
+        signature: SIGNATURE,
+        recentBlockhash: RECENT_BLOCKHASH,
+      });
       const checkpoint = await onlyRecoveryRow();
       expect(checkpoint.status).toBe("outcome_unknown");
       expect(checkpoint.txHash).toBe(SIGNATURE);
@@ -216,7 +241,10 @@ describe("Solana durable recovery anchors", () => {
     const originalSign = context.vault.signSolanaTransaction.bind(context.vault);
     context.vault.signSolanaTransaction = async (request) => {
       expect((await onlyRecoveryRow()).status).toBe("approved");
-      await request.onBroadcastPrepared?.(SIGNATURE);
+      await request.onBroadcastPrepared?.({
+        signature: SIGNATURE,
+        recentBlockhash: RECENT_BLOCKHASH,
+      });
       throw new ExternalBroadcastOutcomeUnknownError(SIGNATURE, {
         cause: new Error("injected confirmation timeout"),
       });
@@ -248,4 +276,227 @@ describe("Solana durable recovery anchors", () => {
       context.vault.signSolanaTransaction = originalSign;
     }
   });
+
+  it("durably replays across both cache-unsafe and cache-safe session auth", async () => {
+    const context = await import("../services/context");
+    const originalSign = context.vault.signSolanaTransaction.bind(context.vault);
+    let signCalls = 0;
+    let releaseAttempt!: () => void;
+    const attemptBarrier = new Promise<void>((resolve) => {
+      releaseAttempt = resolve;
+    });
+    let signalAttemptStarted!: () => void;
+    const attemptStarted = new Promise<void>((resolve) => {
+      signalAttemptStarted = resolve;
+    });
+    context.vault.signSolanaTransaction = async (request) => {
+      signCalls += 1;
+      signalAttemptStarted();
+      await attemptBarrier;
+      await request.onBroadcastPrepared?.({
+        signature: SIGNATURE,
+        recentBlockhash: RECENT_BLOCKHASH,
+      });
+      return {
+        signature: SIGNATURE,
+        broadcast: true,
+        chainId: request.chainId ?? 101,
+        caip2: "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+      };
+    };
+    const request = (recentMfa = false) =>
+      app.request(`/vault/${AGENT_ID}/sign-solana`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "Idempotency-Key": "session-admin-durable-solana-replay",
+          ...(recentMfa ? { "x-test-recent-mfa": "true" } : {}),
+        },
+        body: JSON.stringify({ transaction: WITHIN_CAP_V0_TRANSFER, broadcast: true }),
+      });
+
+    try {
+      const firstPromise = request();
+      await attemptStarted;
+      const concurrent = await request(true);
+      expect(concurrent.status).toBe(409);
+      expect(await concurrent.json()).toMatchObject({
+        ok: false,
+        data: { status: "processing" },
+      });
+      expect(signCalls).toBe(1);
+
+      releaseAttempt();
+      const first = await firstPromise;
+      const replay = await request(true);
+      expect(first.status).toBe(200);
+      expect(replay.status).toBe(200);
+      expect(replay.headers.get("Idempotency-Replayed")).toBeNull();
+      expect(await replay.json()).toEqual(await first.json());
+      expect(signCalls).toBe(1);
+      const row = await onlyRecoveryRow();
+      expect(row.status).toBe("broadcast");
+      expect(readPayload(row.actionPayload).recentBlockhash).toBe(RECENT_BLOCKHASH);
+      expect((await context.getTransactionStats(AGENT_ID, 101)).recentTxCount24h).toBe(1);
+
+      const mismatch = await app.request(`/vault/${AGENT_ID}/sign-solana`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "Idempotency-Key": "session-admin-durable-solana-replay",
+        },
+        body: JSON.stringify({
+          transaction: WITHIN_CAP_V0_TRANSFER,
+          broadcast: true,
+          chainId: 102,
+        }),
+      });
+      expect(mismatch.status).toBe(409);
+      expect(signCalls).toBe(1);
+    } finally {
+      context.vault.signSolanaTransaction = originalSign;
+    }
+  });
+
+  it("fences a stale callback after an expired signing lease is taken over", async () => {
+    const context = await import("../services/context");
+    const originalSign = context.vault.signSolanaTransaction.bind(context.vault);
+    let signCalls = 0;
+    let submittedCalls = 0;
+    let releaseStale!: () => void;
+    const staleBarrier = new Promise<void>((resolve) => {
+      releaseStale = resolve;
+    });
+    let signalStaleStarted!: () => void;
+    const staleStarted = new Promise<void>((resolve) => {
+      signalStaleStarted = resolve;
+    });
+    let releaseWinner!: () => void;
+    const winnerBarrier = new Promise<void>((resolve) => {
+      releaseWinner = resolve;
+    });
+    let signalWinnerStarted!: () => void;
+    const winnerStarted = new Promise<void>((resolve) => {
+      signalWinnerStarted = resolve;
+    });
+    context.vault.signSolanaTransaction = async (request) => {
+      signCalls += 1;
+      if (signCalls === 1) {
+        signalStaleStarted();
+        await staleBarrier;
+      } else {
+        signalWinnerStarted();
+        await winnerBarrier;
+      }
+      await request.onBroadcastPrepared?.({
+        signature: SIGNATURE,
+        recentBlockhash: RECENT_BLOCKHASH,
+      });
+      submittedCalls += 1;
+      return {
+        signature: SIGNATURE,
+        broadcast: true,
+        chainId: request.chainId ?? 101,
+        caip2: "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+      };
+    };
+    const request = () =>
+      app.request(`/vault/${AGENT_ID}/sign-solana`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "Idempotency-Key": "expired-solana-attempt-takeover",
+        },
+        body: JSON.stringify({ transaction: WITHIN_CAP_V0_TRANSFER, broadcast: true }),
+      });
+
+    try {
+      const staleResponse = request();
+      await staleStarted;
+      const staged = await onlyRecoveryRow();
+      await getDb()
+        .update(transactions)
+        .set({
+          actionPayload: {
+            ...readPayload(staged.actionPayload),
+            attemptLeaseUntil: new Date(Date.now() - 1_000).toISOString(),
+          },
+        })
+        .where(eq(transactions.id, staged.id));
+
+      const takeoverResponse = request();
+      await winnerStarted;
+      expect(signCalls).toBe(2);
+      expect(submittedCalls).toBe(0);
+
+      releaseStale();
+      expect((await staleResponse).status).toBe(500);
+      expect((await onlyRecoveryRow()).status).toBe("approved");
+      expect(submittedCalls).toBe(0);
+
+      releaseWinner();
+      expect((await takeoverResponse).status).toBe(200);
+      expect(submittedCalls).toBe(1);
+      expect((await onlyRecoveryRow()).status).toBe("broadcast");
+    } finally {
+      releaseStale();
+      releaseWinner();
+      context.vault.signSolanaTransaction = originalSign;
+    }
+  });
+
+  it("reconciles only the stored signature and blockhash through guarded transitions", async () => {
+    const context = await import("../services/context");
+    const originalReconcile = context.vault.reconcileSolanaBroadcast.bind(context.vault);
+    const cases = [
+      { outcome: "confirmed" as const, status: 200 },
+      { outcome: "broadcast" as const, status: 200 },
+      { outcome: "failed" as const, status: 200 },
+      { outcome: "outcome_unknown" as const, status: 202 },
+    ];
+    try {
+      for (const [index, testCase] of cases.entries()) {
+        await getDb().delete(transactions).where(eq(transactions.agentId, AGENT_ID));
+        const txId = `solana-reconcile-${index}`;
+        await getDb()
+          .insert(transactions)
+          .values({
+            id: txId,
+            agentId: AGENT_ID,
+            status: "outcome_unknown",
+            toAddress: RECIPIENT,
+            value: "123",
+            chainId: 101,
+            txHash: SIGNATURE,
+            actionType: "solana_transaction",
+            actionPayload: {
+              type: "solana_transaction",
+              recoveryAnchor: true,
+              recentBlockhash: RECENT_BLOCKHASH,
+            },
+          });
+        context.vault.reconcileSolanaBroadcast = async (input) => {
+          expect(input).toEqual({
+            signature: SIGNATURE,
+            recentBlockhash: RECENT_BLOCKHASH,
+            chainId: 101,
+          });
+          return testCase.outcome;
+        };
+        const response = await app.request(
+          `/vault/${AGENT_ID}/transactions/${txId}/reconcile-solana`,
+          { method: "POST" },
+        );
+        expect(response.status).toBe(testCase.status);
+        const [row] = await getDb().select().from(transactions).where(eq(transactions.id, txId));
+        expect(row?.status).toBe(testCase.outcome);
+      }
+    } finally {
+      context.vault.reconcileSolanaBroadcast = originalReconcile;
+    }
+  });
 });
+
+function readPayload(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" ? (value as Record<string, unknown>) : {};
+}

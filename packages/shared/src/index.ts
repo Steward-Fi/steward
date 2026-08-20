@@ -686,7 +686,10 @@ export interface SignSolanaTransactionRequest {
    * lost RPC response, or confirmation failure cannot make a potentially
    * submitted transaction indistinguishable from one that was never sent.
    */
-  onBroadcastPrepared?: (signature: string) => Promise<void>;
+  onBroadcastPrepared?: (checkpoint: {
+    signature: string;
+    recentBlockhash: string;
+  }) => Promise<void>;
 }
 
 /**

@@ -79,6 +79,17 @@ export class ExternalBroadcastOutcomeUnknownError extends Error {
   }
 }
 
+/** A Solana RPC preflight rejection proves the signed bytes were not submitted. */
+export class SolanaBroadcastNotSubmittedError extends Error {
+  readonly transactionHash: string;
+
+  constructor(transactionHash: string, options?: { cause?: unknown }) {
+    super("Solana transaction was rejected before submission", options);
+    this.name = "SolanaBroadcastNotSubmittedError";
+    this.transactionHash = transactionHash;
+  }
+}
+
 export interface ExternalKeyHandleRegistration {
   custody: "external";
   tenantId: string;
