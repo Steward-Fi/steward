@@ -32,7 +32,7 @@ services:
     command: ["bun", "packages/api/scripts/migrate-production.ts", "core"]
     restart: "no"
     environment:
-      MIGRATION_DATABASE_URL: "${STEWARD_ADMIN_DATABASE_URL:-postgresql://${POSTGRES_USER:-steward}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@postgres:5432/${POSTGRES_DB:-steward}}"
+      MIGRATION_DATABASE_URL: "${STEWARD_ADMIN_DATABASE_URL:?STEWARD_ADMIN_DATABASE_URL must be set}"
       STEWARD_ALLOW_INSECURE_DB: "${STEWARD_ALLOW_INSECURE_DB:-}"
     depends_on:
       postgres:
@@ -54,9 +54,10 @@ services:
       - "/scripts/postgres/rls-compose-bootstrap.sql"
     restart: "no"
     environment:
-      PGDATABASE: "${STEWARD_ADMIN_DATABASE_URL:-postgresql://${POSTGRES_USER:-steward}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@postgres:5432/${POSTGRES_DB:-steward}}"
-      STEWARD_DB_APP_PASSWORD: "${STEWARD_DB_APP_PASSWORD:?STEWARD_DB_APP_PASSWORD must be set}"
-      STEWARD_DB_MIGRATION_PASSWORD: "${STEWARD_DB_MIGRATION_PASSWORD:?STEWARD_DB_MIGRATION_PASSWORD must be set}"
+      PGDATABASE: "${STEWARD_ADMIN_DATABASE_URL:?STEWARD_ADMIN_DATABASE_URL must be set}"
+      STEWARD_DB_APP_PASSWORD: "${STEWARD_DB_APP_PASSWORD:-}"
+      STEWARD_DB_MIGRATION_PASSWORD: "${STEWARD_DB_MIGRATION_PASSWORD:-}"
+      STEWARD_BOOTSTRAP_SET_ROLE_PASSWORDS: "${STEWARD_BOOTSTRAP_SET_ROLE_PASSWORDS:-false}"
     volumes:
       - ./scripts/postgres:/scripts/postgres:ro
     depends_on:
@@ -69,7 +70,7 @@ services:
     command: ["bun", "packages/api/scripts/migrate-production.ts", "plugins"]
     restart: "no"
     environment:
-      MIGRATION_DATABASE_URL: "${MIGRATION_DATABASE_URL:-postgresql://steward_migrator:${STEWARD_DB_MIGRATION_PASSWORD:?STEWARD_DB_MIGRATION_PASSWORD must be set}@postgres:5432/${POSTGRES_DB:-steward}}"
+      MIGRATION_DATABASE_URL: "${MIGRATION_DATABASE_URL:?MIGRATION_DATABASE_URL must be set}"
       STEWARD_PLUGINS: "${STEWARD_PLUGINS:-}"
       STEWARD_ALLOW_INSECURE_DB: "${STEWARD_ALLOW_INSECURE_DB:-}"
     depends_on:
@@ -90,7 +91,7 @@ services:
       - "/scripts/postgres/rls-activate.sql"
     restart: "no"
     environment:
-      PGDATABASE: "${STEWARD_ADMIN_DATABASE_URL:-postgresql://${POSTGRES_USER:-steward}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@postgres:5432/${POSTGRES_DB:-steward}}"
+      PGDATABASE: "${STEWARD_ADMIN_DATABASE_URL:?STEWARD_ADMIN_DATABASE_URL must be set}"
     volumes:
       - ./scripts/postgres:/scripts/postgres:ro
     depends_on:
@@ -119,7 +120,7 @@ services:
       PORT: "${PORT:-3200}"
       STEWARD_BIND_HOST: "0.0.0.0"
       NODE_ENV: "${NODE_ENV:-production}"
-      DATABASE_URL: "${DATABASE_URL:-postgresql://steward_app:${STEWARD_DB_APP_PASSWORD:?STEWARD_DB_APP_PASSWORD must be set}@postgres:5432/${POSTGRES_DB:-steward}}"
+      DATABASE_URL: "${DATABASE_URL:?DATABASE_URL must be set}"
       SKIP_MIGRATIONS: "true"
       STEWARD_MASTER_PASSWORD: "${STEWARD_MASTER_PASSWORD:?STEWARD_MASTER_PASSWORD is required}"
       STEWARD_JWT_SECRET: "${STEWARD_JWT_SECRET:?STEWARD_JWT_SECRET is required}"
@@ -223,7 +224,7 @@ services:
     environment:
       STEWARD_PROXY_PORT: "${STEWARD_PROXY_PORT:-8080}"
       NODE_ENV: "${NODE_ENV:-production}"
-      DATABASE_URL: "${DATABASE_URL:-postgresql://steward_app:${STEWARD_DB_APP_PASSWORD:?STEWARD_DB_APP_PASSWORD must be set}@postgres:5432/${POSTGRES_DB:-steward}}"
+      DATABASE_URL: "${DATABASE_URL:?DATABASE_URL must be set}"
       STEWARD_MASTER_PASSWORD: "${STEWARD_MASTER_PASSWORD:?STEWARD_MASTER_PASSWORD is required}"
       STEWARD_JWT_SECRET: "${STEWARD_JWT_SECRET:?STEWARD_JWT_SECRET is required}"
       STEWARD_EMAIL_CODE_SECRET: "${STEWARD_EMAIL_CODE_SECRET:?STEWARD_EMAIL_CODE_SECRET is required}"

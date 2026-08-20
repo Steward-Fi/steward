@@ -19,12 +19,12 @@ services:
     image: steward:${STEWARD_IMAGE_TAG:-enterprise-reference}
     command: ["bun", "packages/api/scripts/migrate-production.ts", "core"]
     environment:
-      MIGRATION_DATABASE_URL: "${STEWARD_ADMIN_DATABASE_URL:-postgresql://steward:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD required}@postgres:5432/steward}"
+      MIGRATION_DATABASE_URL: "${STEWARD_ADMIN_DATABASE_URL:?STEWARD_ADMIN_DATABASE_URL required}"
       # Explicit acknowledgement is required because this allows plaintext DB
       # transport. The bundled Postgres is isolated on the internal steward-data
       # network, but an operator-supplied external DATABASE_URL must never
       # inherit this silently.
-      STEWARD_ALLOW_INSECURE_DB: "${STEWARD_ALLOW_INSECURE_DB:?required for the internal plaintext Postgres profile}"
+      STEWARD_ALLOW_INSECURE_DB: "${STEWARD_ALLOW_INSECURE_DB:-}"
       STEWARD_ALLOW_UNVERIFIED_DB_TLS: "${STEWARD_ALLOW_UNVERIFIED_DB_TLS:-}"
     depends_on:
       postgres:
@@ -54,9 +54,10 @@ services:
       - "-f"
       - "/scripts/postgres/rls-compose-bootstrap.sql"
     environment:
-      PGDATABASE: "${STEWARD_ADMIN_DATABASE_URL:-postgresql://steward:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD required}@postgres:5432/steward}"
-      STEWARD_DB_APP_PASSWORD: "${STEWARD_DB_APP_PASSWORD:?required}"
-      STEWARD_DB_MIGRATION_PASSWORD: "${STEWARD_DB_MIGRATION_PASSWORD:?required}"
+      PGDATABASE: "${STEWARD_ADMIN_DATABASE_URL:?STEWARD_ADMIN_DATABASE_URL required}"
+      STEWARD_DB_APP_PASSWORD: "${STEWARD_DB_APP_PASSWORD:-}"
+      STEWARD_DB_MIGRATION_PASSWORD: "${STEWARD_DB_MIGRATION_PASSWORD:-}"
+      STEWARD_BOOTSTRAP_SET_ROLE_PASSWORDS: "${STEWARD_BOOTSTRAP_SET_ROLE_PASSWORDS:-false}"
     volumes:
       - ../../scripts/postgres:/scripts/postgres:ro
     depends_on:
@@ -73,9 +74,9 @@ services:
     image: steward:${STEWARD_IMAGE_TAG:-enterprise-reference}
     command: ["bun", "packages/api/scripts/migrate-production.ts", "plugins"]
     environment:
-      MIGRATION_DATABASE_URL: "${MIGRATION_DATABASE_URL:-postgresql://steward_migrator:${STEWARD_DB_MIGRATION_PASSWORD:?required}@postgres:5432/steward}"
+      MIGRATION_DATABASE_URL: "${MIGRATION_DATABASE_URL:?MIGRATION_DATABASE_URL required}"
       STEWARD_PLUGINS: "${STEWARD_PLUGINS:-}"
-      STEWARD_ALLOW_INSECURE_DB: "${STEWARD_ALLOW_INSECURE_DB:?required for the internal plaintext Postgres profile}"
+      STEWARD_ALLOW_INSECURE_DB: "${STEWARD_ALLOW_INSECURE_DB:-}"
       STEWARD_ALLOW_UNVERIFIED_DB_TLS: "${STEWARD_ALLOW_UNVERIFIED_DB_TLS:-}"
     depends_on:
       steward-rls-bootstrap:
@@ -99,7 +100,7 @@ services:
       - "-f"
       - "/scripts/postgres/rls-activate.sql"
     environment:
-      PGDATABASE: "${STEWARD_ADMIN_DATABASE_URL:-postgresql://steward:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD required}@postgres:5432/steward}"
+      PGDATABASE: "${STEWARD_ADMIN_DATABASE_URL:?STEWARD_ADMIN_DATABASE_URL required}"
     volumes:
       - ../../scripts/postgres:/scripts/postgres:ro
     depends_on:
@@ -121,7 +122,7 @@ services:
       PORT: "3200"
       STEWARD_BIND_HOST: "0.0.0.0"
       NODE_ENV: production
-      DATABASE_URL: "${DATABASE_URL:-postgresql://steward_app:${STEWARD_DB_APP_PASSWORD:?required}@postgres:5432/steward}"
+      DATABASE_URL: "${DATABASE_URL:?DATABASE_URL required}"
       REDIS_URL: "redis://redis:6379"
       STEWARD_MASTER_PASSWORD: "${STEWARD_MASTER_PASSWORD:?required}"
       STEWARD_JWT_SECRET: "${STEWARD_JWT_SECRET:?required}"
@@ -152,7 +153,7 @@ services:
       X_CLIENT_ID: "${X_CLIENT_ID:-}"
       X_CLIENT_SECRET: "${X_CLIENT_SECRET:-}"
       SKIP_MIGRATIONS: "true"
-      STEWARD_ALLOW_INSECURE_DB: "${STEWARD_ALLOW_INSECURE_DB:?required for the internal plaintext Postgres profile}"
+      STEWARD_ALLOW_INSECURE_DB: "${STEWARD_ALLOW_INSECURE_DB:-}"
       STEWARD_ALLOW_UNVERIFIED_DB_TLS: "${STEWARD_ALLOW_UNVERIFIED_DB_TLS:-}"
     depends_on:
       steward-rls-activate:
@@ -177,7 +178,7 @@ services:
     environment:
       STEWARD_PROXY_PORT: "8080"
       NODE_ENV: production
-      DATABASE_URL: "${DATABASE_URL:-postgresql://steward_app:${STEWARD_DB_APP_PASSWORD:?required}@postgres:5432/steward}"
+      DATABASE_URL: "${DATABASE_URL:?DATABASE_URL required}"
       REDIS_URL: "redis://redis:6379"
       # Fail CLOSED on spend-limit / rate-limit enforcement if Redis is
       # unreachable. Without this the proxy fails OPEN (enforcement silently
@@ -192,7 +193,7 @@ services:
       # polls fail closed in production.
       STEWARD_AUDIT_HMAC_KEY: "${STEWARD_AUDIT_HMAC_KEY:?required}"
       STEWARD_PROXY_REQUEST_SIGNING_SECRETS: "${STEWARD_PROXY_REQUEST_SIGNING_SECRETS:?required}"
-      STEWARD_ALLOW_INSECURE_DB: "${STEWARD_ALLOW_INSECURE_DB:?required for the internal plaintext Postgres profile}"
+      STEWARD_ALLOW_INSECURE_DB: "${STEWARD_ALLOW_INSECURE_DB:-}"
       STEWARD_ALLOW_UNVERIFIED_DB_TLS: "${STEWARD_ALLOW_UNVERIFIED_DB_TLS:-}"
     depends_on:
       steward-api:
@@ -300,7 +301,7 @@ services:
         # Never inherit a separately supplied password into pg_dump. The only
         # credential allowed below is one decoded from MIGRATION_DATABASE_URL itself.
         unset PGPASSWORD
-        dsn="$${MIGRATION_DATABASE_URL:-postgresql://steward_migrator:$${STEWARD_DB_MIGRATION_PASSWORD:?}@postgres:5432/steward}"
+        dsn="$${MIGRATION_DATABASE_URL:?MIGRATION_DATABASE_URL required}"
         # libpq accepts a raw '?' inside userinfo even though RFC 3986 normally
         # requires it to be percent-encoded. A fragment, however, is never a
         # supported connection target and makes delimiter parsing ambiguous.

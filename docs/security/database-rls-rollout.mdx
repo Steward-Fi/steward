@@ -170,6 +170,22 @@ export STEWARD_ADMIN_DATABASE_URL='postgresql://bootstrap-admin:...@host/steward
 export DATABASE_URL='postgresql://steward_app:...@host/steward?sslmode=verify-full' # runtime only
 ```
 
+For a generated external-database environment, `steward init` requires the
+three authorities together and never derives one from another:
+
+```bash
+steward init --database-url "$DATABASE_URL" \
+  --admin-database-url "$STEWARD_ADMIN_DATABASE_URL" \
+  --migration-database-url "$MIGRATION_DATABASE_URL"
+```
+
+The shipped Compose files likewise reject a missing member of this set instead
+of falling back to their bundled Postgres service. For external PostgreSQL,
+create the `steward_app` and `steward_migrator` login credentials in the
+provider before starting Compose; bootstrap preserves those passwords
+(`STEWARD_BOOTSTRAP_SET_ROLE_PASSWORDS=false`). The generated bundled profile
+sets that switch to `true` because it owns and creates both credentials.
+
 All URLs must be host-bearing TCP URLs; socket/hostless URLs do not reliably
 preserve substituted login credentials in operator tooling. The API
 now refuses production startup before composing the app when

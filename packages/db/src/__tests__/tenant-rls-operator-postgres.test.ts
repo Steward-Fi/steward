@@ -159,6 +159,7 @@ describeWithPostgres("SEC-169 operator lifecycle on the real Steward schema", ()
       await runOperatorScript("rls-compose-bootstrap.sql", true, {
         STEWARD_DB_APP_PASSWORD: appRolePassword,
         STEWARD_DB_MIGRATION_PASSWORD: migrationRolePassword,
+        STEWARD_BOOTSTRAP_SET_ROLE_PASSWORDS: "true",
       });
       const roleRows = await db<
         {
@@ -177,6 +178,14 @@ describeWithPostgres("SEC-169 operator lifecycle on the real Steward schema", ()
         rolcanlogin: true,
         rolbypassrls: false,
         rolsuper: false,
+      });
+      // External providers pre-provision login credentials. Re-running the
+      // Compose wrapper in preserve mode must accept empty password env and
+      // leave both existing credentials usable.
+      await runOperatorScript("rls-compose-bootstrap.sql", true, {
+        STEWARD_DB_APP_PASSWORD: "",
+        STEWARD_DB_MIGRATION_PASSWORD: "",
+        STEWARD_BOOTSTRAP_SET_ROLE_PASSWORDS: "false",
       });
       expect(roleRows.find((row) => row.rolname === migrationRole)).toMatchObject({
         rolcanlogin: true,
@@ -276,6 +285,28 @@ describeWithPostgres("SEC-169 operator lifecycle on the real Steward schema", ()
       await db.unsafe(`
         DELETE FROM public.tenants
         WHERE id IN ('leak-a-${suffix}', 'leak-b-${suffix}')
+      `);
+
+      await db.unsafe(`
+        CREATE ROLE rls_function_grantee_${suffix} LOGIN NOSUPERUSER NOBYPASSRLS NOINHERIT;
+        GRANT USAGE ON SCHEMA steward_bootstrap TO rls_function_grantee_${suffix};
+        GRANT EXECUTE ON FUNCTION steward_bootstrap.platform_tenants(integer, integer)
+          TO rls_function_grantee_${suffix};
+      `);
+      await expect(
+        runCommand(
+          ["bun", "run", "packages/db/src/__tests__/fixtures/assert-rls-ready.ts"],
+          appRuntimeEnvironment(),
+        ),
+      ).rejects.toThrow("RLS_BOOTSTRAP_ACL_DRIFT");
+      await expect(runOperatorScript("rls-activate.sql")).rejects.toThrow(
+        "bootstrap/helper ACL inventory is unsafe",
+      );
+      await db.unsafe(`
+        REVOKE EXECUTE ON FUNCTION steward_bootstrap.platform_tenants(integer, integer)
+          FROM rls_function_grantee_${suffix};
+        REVOKE USAGE ON SCHEMA steward_bootstrap FROM rls_function_grantee_${suffix};
+        DROP ROLE rls_function_grantee_${suffix};
       `);
 
       await db.unsafe(`

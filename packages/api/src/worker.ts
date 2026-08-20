@@ -518,11 +518,15 @@ export default {
             // role/catalog therefore starts zero background mutations, and the
             // preflight handle is fully closed before concurrent work begins.
             await withWorkerRequestDatabase(env, () => ensureWorkerTenantRlsReady(env));
-            await Promise.all([
+            const sweepResults = await Promise.allSettled([
               withWorkerRequestDatabase(env, () => runWorkerUpstreamCredentialLeaseSweep(env)),
               withWorkerRequestDatabase(env, () => runWorkerGoogleCredentialLifecycleSweep(env)),
               withWorkerRequestDatabase(env, () => runWorkerXCredentialLifecycleSweep(env)),
             ]);
+            const failedSweep = sweepResults.find(
+              (result): result is PromiseRejectedResult => result.status === "rejected",
+            );
+            if (failedSweep) throw failedSweep.reason;
           })(),
         );
       });

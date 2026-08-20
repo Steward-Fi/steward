@@ -713,6 +713,62 @@ export async function assertTenantRlsDatabaseReady(db: ReadinessDatabase): Promi
     }
   }
 
+  const aclDrift = resultRows<{ object_name: string }>(
+    await db.execute(sql`
+      WITH app AS (SELECT oid FROM pg_roles WHERE rolname = current_user),
+      schema_drift AS (
+        SELECT n.nspname::text AS object_name
+        FROM pg_namespace n, app
+        WHERE n.nspname IN ('steward_bootstrap', 'steward_rls')
+          AND (
+            NOT EXISTS (
+              SELECT 1
+              FROM aclexplode(COALESCE(n.nspacl, acldefault('n', n.nspowner))) acl
+              WHERE acl.grantee = app.oid AND acl.privilege_type = 'USAGE'
+                AND NOT acl.is_grantable
+            ) OR EXISTS (
+              SELECT 1
+              FROM aclexplode(COALESCE(n.nspacl, acldefault('n', n.nspowner))) acl
+              WHERE acl.grantee <> n.nspowner
+                AND (
+                  acl.grantee <> app.oid OR acl.privilege_type <> 'USAGE' OR acl.is_grantable
+                )
+            )
+          )
+      ),
+      function_drift AS (
+        SELECT format('%I.%I(%s)', n.nspname, p.proname,
+          pg_get_function_identity_arguments(p.oid)) AS object_name
+        FROM pg_proc p
+        JOIN pg_namespace n ON n.oid = p.pronamespace
+        CROSS JOIN app
+        WHERE n.nspname IN ('steward_bootstrap', 'steward_rls')
+          AND (
+            NOT EXISTS (
+              SELECT 1
+              FROM aclexplode(COALESCE(p.proacl, acldefault('f', p.proowner))) acl
+              WHERE acl.grantee = app.oid AND acl.privilege_type = 'EXECUTE'
+                AND NOT acl.is_grantable
+            ) OR EXISTS (
+              SELECT 1
+              FROM aclexplode(COALESCE(p.proacl, acldefault('f', p.proowner))) acl
+              WHERE acl.grantee <> p.proowner
+                AND (
+                  acl.grantee <> app.oid OR acl.privilege_type <> 'EXECUTE' OR acl.is_grantable
+                )
+            )
+          )
+      )
+      SELECT object_name FROM schema_drift
+      UNION ALL
+      SELECT object_name FROM function_drift
+      ORDER BY object_name
+    `),
+  );
+  if (aclDrift.length > 0) {
+    throw new Error(`RLS_BOOTSTRAP_ACL_DRIFT:${aclDrift.map((row) => row.object_name).join(",")}`);
+  }
+
   const unsafeDefiners = resultRows<{ function_name: string }>(
     await db.execute(sql`
       SELECT format('%I.%I(%s)', n.nspname, p.proname, pg_get_function_identity_arguments(p.oid))

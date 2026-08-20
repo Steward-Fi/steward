@@ -24,7 +24,7 @@ set -euo pipefail
 NODE_IP="${1:?Usage: $0 <node-ip> [ssh-key]}"
 SSH_KEY="${2:-${SSH_KEY:-$HOME/.ssh/id_ed25519}}"
 
-[[ "${NODE_IP}" =~ ^[A-Za-z0-9._:\[\]-]+$ ]] || { echo "❌ Invalid node address"; exit 1; }
+[[ "${NODE_IP}" =~ ^[][A-Za-z0-9._:-]+$ ]] || { echo "❌ Invalid node address"; exit 1; }
 [[ "${SSH_KEY}" =~ ^[A-Za-z0-9._/~/-]+$ ]] || { echo "❌ Invalid SSH key path"; exit 1; }
 
 # ── Validation ───────────────────────────────────────────────────────────────
@@ -112,6 +112,54 @@ STEWARD_PROXY_REQUEST_SIGNING_SECRETS="${STEWARD_PROXY_REQUEST_SIGNING_SECRETS:-
 [[ -n "${STEWARD_PROXY_REQUEST_SIGNING_SECRETS}" ]] || STEWARD_PROXY_REQUEST_SIGNING_SECRETS="$(openssl rand -hex 32)"
 PLATFORM_KEY="${STEWARD_PLATFORM_KEY:-$(env_get STEWARD_PLATFORM_KEY)}"
 [[ -n "${PLATFORM_KEY}" ]] || PLATFORM_KEY="$(openssl rand -hex 32)"
+EXPLICIT_STEWARD_ALLOW_INSECURE_DB="${STEWARD_ALLOW_INSECURE_DB-}"
+EXPLICIT_DATABASE_URL="${DATABASE_URL-}"
+EXPLICIT_ADMIN_DATABASE_URL="${STEWARD_ADMIN_DATABASE_URL-}"
+EXPLICIT_MIGRATION_DATABASE_URL="${MIGRATION_DATABASE_URL-}"
+PERSISTED_BOOTSTRAP_MODE="$(env_get STEWARD_BOOTSTRAP_SET_ROLE_PASSWORDS)"
+DATABASE_URL="${EXPLICIT_DATABASE_URL:-$(env_get DATABASE_URL)}"
+STEWARD_ADMIN_DATABASE_URL="${EXPLICIT_ADMIN_DATABASE_URL:-$(env_get STEWARD_ADMIN_DATABASE_URL)}"
+MIGRATION_DATABASE_URL="${EXPLICIT_MIGRATION_DATABASE_URL:-$(env_get MIGRATION_DATABASE_URL)}"
+
+# Database authorities are one inseparable target. An external runtime URL
+# without matching admin and migration URLs would start the API against one
+# database while the one-shot migration chain silently initializes another.
+# For the bundled database, materialize all three URLs explicitly so Compose
+# never needs credential/host fallbacks.
+if [[ -n "${EXPLICIT_DATABASE_URL}" || -n "${EXPLICIT_ADMIN_DATABASE_URL}" || -n "${EXPLICIT_MIGRATION_DATABASE_URL}" ]]; then
+  if [[ -z "${EXPLICIT_DATABASE_URL}" || -z "${EXPLICIT_ADMIN_DATABASE_URL}" || -z "${EXPLICIT_MIGRATION_DATABASE_URL}" ]]; then
+    echo "❌ External PostgreSQL requires DATABASE_URL, STEWARD_ADMIN_DATABASE_URL, and MIGRATION_DATABASE_URL together"
+    exit 1
+  fi
+  # Never inherit the bundled profile's plaintext acknowledgement when an
+  # operator switches an existing node to external PostgreSQL. Only a value
+  # explicitly supplied to this invocation may relax the production TLS gate.
+  STEWARD_ALLOW_INSECURE_DB="${EXPLICIT_STEWARD_ALLOW_INSECURE_DB}"
+  STEWARD_BOOTSTRAP_SET_ROLE_PASSWORDS=false
+elif [[ "${PERSISTED_BOOTSTRAP_MODE}" == "true" ]]; then
+  # Idempotent rerun of a previously generated bundled profile. Its explicit
+  # URLs are persisted by this script, so classify by the stored mode marker
+  # rather than mistaking those URLs for an operator-supplied external target.
+  if [[ -z "${DATABASE_URL}" || -z "${STEWARD_ADMIN_DATABASE_URL}" || -z "${MIGRATION_DATABASE_URL}" ]]; then
+    echo "❌ Persisted bundled PostgreSQL configuration is incomplete"
+    exit 1
+  fi
+  STEWARD_ALLOW_INSECURE_DB=true
+  STEWARD_BOOTSTRAP_SET_ROLE_PASSWORDS=true
+elif [[ -n "${DATABASE_URL}" || -n "${STEWARD_ADMIN_DATABASE_URL}" || -n "${MIGRATION_DATABASE_URL}" ]]; then
+  if [[ -z "${DATABASE_URL}" || -z "${STEWARD_ADMIN_DATABASE_URL}" || -z "${MIGRATION_DATABASE_URL}" ]]; then
+    echo "❌ Persisted external PostgreSQL configuration is incomplete"
+    exit 1
+  fi
+  STEWARD_ALLOW_INSECURE_DB="${EXPLICIT_STEWARD_ALLOW_INSECURE_DB}"
+  STEWARD_BOOTSTRAP_SET_ROLE_PASSWORDS=false
+else
+  DATABASE_URL="postgresql://steward_app:${STEWARD_DB_APP_PASSWORD}@steward-db:5432/steward"
+  STEWARD_ADMIN_DATABASE_URL="postgresql://steward:${POSTGRES_PASSWORD}@steward-db:5432/steward"
+  MIGRATION_DATABASE_URL="postgresql://steward_migrator:${STEWARD_DB_MIGRATION_PASSWORD}@steward-db:5432/steward"
+  STEWARD_ALLOW_INSECURE_DB=true
+  STEWARD_BOOTSTRAP_SET_ROLE_PASSWORDS=true
+fi
 
 # Values are serialized as one dotenv assignment per line. Reject control-line
 # injection without ever echoing the value itself. Platform keys additionally
@@ -126,7 +174,7 @@ for env_name in STEWARD_MASTER_PASSWORD STEWARD_JWT_SECRET STEWARD_KDF_SALT \
     exit 1
   fi
 done
-[[ "${PLATFORM_KEY}" =~ ^[A-Za-z0-9._~-]{1,512}$ ]] || {
+[[ ${#PLATFORM_KEY} -ge 1 && ${#PLATFORM_KEY} -le 512 && "${PLATFORM_KEY}" =~ ^[A-Za-z0-9._~-]+$ ]] || {
   echo "❌ STEWARD_PLATFORM_KEY contains unsupported characters"
   exit 1
 }
@@ -145,10 +193,11 @@ STEWARD_PROXY_REQUEST_SIGNING_SECRETS=${STEWARD_PROXY_REQUEST_SIGNING_SECRETS}
 POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
 STEWARD_DB_APP_PASSWORD=${STEWARD_DB_APP_PASSWORD}
 STEWARD_DB_MIGRATION_PASSWORD=${STEWARD_DB_MIGRATION_PASSWORD}
+STEWARD_BOOTSTRAP_SET_ROLE_PASSWORDS=${STEWARD_BOOTSTRAP_SET_ROLE_PASSWORDS}
 DATABASE_URL=${DATABASE_URL:-}
 STEWARD_ADMIN_DATABASE_URL=${STEWARD_ADMIN_DATABASE_URL:-}
 MIGRATION_DATABASE_URL=${MIGRATION_DATABASE_URL:-}
-STEWARD_ALLOW_INSECURE_DB=true
+STEWARD_ALLOW_INSECURE_DB=${STEWARD_ALLOW_INSECURE_DB:-}
 REDIS_URL=${REDIS_URL:-redis://redis:6379}
 RPC_URL=${RPC_URL:-https://mainnet.base.org}
 CHAIN_ID=${CHAIN_ID:-8453}

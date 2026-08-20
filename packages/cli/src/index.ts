@@ -206,6 +206,8 @@ const HELP = `steward CLI
 
 Usage:
   steward init [--env .env] [--force] [--migrate]
+               [--database-url APP_URL --admin-database-url ADMIN_URL
+                --migration-database-url MIGRATOR_URL]
   steward doctor [--strict] [--json]
   steward tenant create --id ID --name NAME [--api-key-file F] [--api-key-env VAR]
                         (key via stdin/--api-key-file/--api-key-env preferred; --api-key warns)
@@ -768,6 +770,8 @@ async function main(argv: string[]) {
         force: boolFlag(parsed.flags, "force"),
         runMigrations: boolFlag(parsed.flags, "migrate"),
         databaseUrl: stringFlag(parsed.flags, "database-url"),
+        adminDatabaseUrl: stringFlag(parsed.flags, "admin-database-url"),
+        migrationDatabaseUrl: stringFlag(parsed.flags, "migration-database-url"),
         apiUrl: stringFlag(parsed.flags, "api-url"),
       }),
       ctx.format,

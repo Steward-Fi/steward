@@ -156,6 +156,7 @@ function fakeDatabase(
     relations?: ReturnType<typeof exactRelations>;
     helpers?: ReturnType<typeof exactHelpers>;
     bootstrapFunctions?: ReturnType<typeof exactBootstrapFunctions>;
+    aclDrift?: Array<{ object_name: string }>;
     unsafeDefiners?: Array<{ function_name: string }>;
   } = {},
 ) {
@@ -187,6 +188,7 @@ function fakeDatabase(
       if (calls === 2) return options.relations ?? exactRelations();
       if (calls === 3) return options.helpers ?? exactHelpers();
       if (calls === 4) return options.bootstrapFunctions ?? exactBootstrapFunctions();
+      if (calls === 5) return options.aclDrift ?? [];
       return options.unsafeDefiners ?? [];
     },
   };
@@ -313,6 +315,12 @@ describe("tenant RLS runtime readiness", () => {
     await expect(
       assertTenantRlsDatabaseReady(fakeDatabase({ bootstrapFunctions })),
     ).rejects.toThrow("RLS_BOOTSTRAP_FUNCTION_DRIFT");
+
+    await expect(
+      assertTenantRlsDatabaseReady(
+        fakeDatabase({ aclDrift: [{ object_name: "steward_bootstrap.platform_tenants" }] }),
+      ),
+    ).rejects.toThrow("RLS_BOOTSTRAP_ACL_DRIFT:steward_bootstrap.platform_tenants");
 
     await expect(
       assertTenantRlsDatabaseReady(

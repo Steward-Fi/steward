@@ -177,6 +177,45 @@ BEGIN
     RAISE EXCEPTION 'SEC-169 bootstrap function inventory is unsafe';
   END IF;
   IF EXISTS (
+    WITH app AS (
+      SELECT oid FROM pg_roles
+      WHERE rolname = current_setting('steward.activation.app_role')
+    )
+    SELECT 1
+    FROM pg_namespace n, app
+    WHERE n.nspname IN ('steward_bootstrap', 'steward_rls')
+      AND (
+        NOT EXISTS (
+          SELECT 1 FROM aclexplode(COALESCE(n.nspacl, acldefault('n', n.nspowner))) acl
+          WHERE acl.grantee = app.oid AND acl.privilege_type = 'USAGE'
+            AND NOT acl.is_grantable
+        ) OR EXISTS (
+          SELECT 1 FROM aclexplode(COALESCE(n.nspacl, acldefault('n', n.nspowner))) acl
+          WHERE acl.grantee <> n.nspowner
+            AND (acl.grantee <> app.oid OR acl.privilege_type <> 'USAGE' OR acl.is_grantable)
+        )
+      )
+    UNION ALL
+    SELECT 1
+    FROM pg_proc p
+    JOIN pg_namespace n ON n.oid = p.pronamespace
+    CROSS JOIN app
+    WHERE n.nspname IN ('steward_bootstrap', 'steward_rls')
+      AND (
+        NOT EXISTS (
+          SELECT 1 FROM aclexplode(COALESCE(p.proacl, acldefault('f', p.proowner))) acl
+          WHERE acl.grantee = app.oid AND acl.privilege_type = 'EXECUTE'
+            AND NOT acl.is_grantable
+        ) OR EXISTS (
+          SELECT 1 FROM aclexplode(COALESCE(p.proacl, acldefault('f', p.proowner))) acl
+          WHERE acl.grantee <> p.proowner
+            AND (acl.grantee <> app.oid OR acl.privilege_type <> 'EXECUTE' OR acl.is_grantable)
+        )
+      )
+  ) THEN
+    RAISE EXCEPTION 'SEC-169 bootstrap/helper ACL inventory is unsafe';
+  END IF;
+  IF EXISTS (
     SELECT 1
     FROM pg_proc p
     JOIN pg_namespace n ON n.oid = p.pronamespace

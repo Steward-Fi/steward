@@ -16,7 +16,15 @@
  *        platform admin key to stdout.
  */
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -417,13 +425,27 @@ describe("SEC-169 production Compose uses the restricted RLS runtime role", () =
       const apiName = compose.includes("  steward-api:\n") ? "steward-api" : "steward";
       const api = serviceBlock(compose, apiName);
       const proxy = serviceBlock(compose, "steward-proxy");
-      expect(api).toContain("postgresql://steward_app:");
+      expect(api).toContain('DATABASE_URL: "${DATABASE_URL:?');
       expect(api).toContain('SKIP_MIGRATIONS: "true"');
-      expect(proxy).toContain("postgresql://steward_app:");
+      expect(proxy).toContain('DATABASE_URL: "${DATABASE_URL:?');
       expect(api).not.toContain("STEWARD_ADMIN_DATABASE_URL");
       expect(api).not.toContain("MIGRATION_DATABASE_URL");
       expect(proxy).not.toContain("STEWARD_ADMIN_DATABASE_URL");
       expect(proxy).not.toContain("MIGRATION_DATABASE_URL");
+    }
+  });
+
+  test("requires explicit runtime, admin, and migration URLs without target fallbacks", () => {
+    for (const compose of composeFiles) {
+      expect(compose).toContain("${DATABASE_URL:?DATABASE_URL");
+      expect(compose).toContain("${STEWARD_ADMIN_DATABASE_URL:?STEWARD_ADMIN_DATABASE_URL");
+      expect(compose).toContain("${MIGRATION_DATABASE_URL:?MIGRATION_DATABASE_URL");
+      expect(compose).not.toMatch(/STEWARD_ADMIN_DATABASE_URL:-postgresql/);
+      expect(compose).not.toMatch(/MIGRATION_DATABASE_URL:-postgresql/);
+      expect(compose).not.toMatch(/DATABASE_URL:-postgresql:\/\/steward_app/);
+      expect(serviceBlock(compose, "steward-rls-bootstrap")).toContain(
+        'STEWARD_BOOTSTRAP_SET_ROLE_PASSWORDS: "${STEWARD_BOOTSTRAP_SET_ROLE_PASSWORDS:-false}"',
+      );
     }
   });
 });
@@ -558,6 +580,13 @@ describe("SEC-020 deploy scripts keep the platform key off every argv", () => {
     expect(provision).toContain('"${SSH_CMD[@]}"');
     expect(provision).not.toMatch(/\$\{SSH_CMD\}\s+"/);
     expect(provision).toContain("must be a single-line value");
+    expect(provision).toContain(
+      "External PostgreSQL requires DATABASE_URL, STEWARD_ADMIN_DATABASE_URL, and MIGRATION_DATABASE_URL together",
+    );
+    expect(provision).toContain(
+      'DATABASE_URL="postgresql://steward_app:${STEWARD_DB_APP_PASSWORD}@steward-db:5432/steward"',
+    );
+    expect(provision).not.toContain("STEWARD_ALLOW_INSECURE_DB=true\nREDIS_URL");
     expect(doc).not.toContain("X-Steward-Platform-Key: \\${PK}");
     expect(doc).toContain('-H \\"@\\${AUTH_FILE}\\"');
     expect(doc).toContain("*[!A-Za-z0-9._~-]*");
@@ -575,6 +604,57 @@ describe("SEC-020 deploy scripts keep the platform key off every argv", () => {
     expect(script).not.toMatch(/echo\s+"\$\{NEW_ENV_VARS\}"/);
     expect(script).toContain("mktemp");
     expect(script).toContain("not printed here");
+  });
+
+  test("bundled provisioning remains bundled and TLS-acknowledged on rerun", () => {
+    const dir = mkdtempSync(join(tmpdir(), "steward-provision-rerun-"));
+    const bin = join(dir, "bin");
+    const remoteEnv = join(dir, "remote.env");
+    mkdirSync(bin);
+    const ssh = join(bin, "ssh");
+    writeFileSync(
+      ssh,
+      `#!/usr/bin/env bash
+set -euo pipefail
+command_line="\${*: -1}"
+if [[ "\${command_line}" == cat\\ /opt/steward/deploy/.env* ]]; then
+  [[ ! -f "\${FAKE_REMOTE_ENV}" ]] || cat "\${FAKE_REMOTE_ENV}"
+elif [[ "\${command_line}" == *"cat > /opt/steward/deploy/.env"* ]]; then
+  cat > "\${FAKE_REMOTE_ENV}"
+elif [[ "\${command_line}" == *"POST http://localhost:3200/platform/tenants"* ]]; then
+  printf '{"ok":true}'
+fi
+`,
+    );
+    chmodSync(ssh, 0o755);
+    const rsync = join(bin, "rsync");
+    writeFileSync(rsync, "#!/usr/bin/env bash\nexit 0\n");
+    chmodSync(rsync, 0o755);
+    const env = {
+      ...process.env,
+      PATH: `${bin}:${process.env.PATH ?? ""}`,
+      FAKE_REMOTE_ENV: remoteEnv,
+      STEWARD_MASTER_PASSWORD: "provision-test-master-password",
+      STEWARD_PLATFORM_KEY: "provision-test-platform-key",
+    };
+    try {
+      for (let pass = 0; pass < 2; pass += 1) {
+        const result = Bun.spawnSync(["bash", join(DEPLOY_DIR, "provision-steward-node.sh"), "a"], {
+          env,
+          stdout: "pipe",
+          stderr: "pipe",
+        });
+        expect(result.exitCode).toBe(0);
+        expect(result.stderr.toString()).toBe("");
+      }
+      const persisted = readFileSync(remoteEnv, "utf8");
+      expect(persisted).toContain("STEWARD_BOOTSTRAP_SET_ROLE_PASSWORDS=true");
+      expect(persisted).toContain("STEWARD_ALLOW_INSECURE_DB=true");
+      expect(persisted).toContain("DATABASE_URL=postgresql://steward_app:");
+      expect(persisted).toContain("@steward-db:5432/steward");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 
