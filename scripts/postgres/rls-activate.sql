@@ -71,6 +71,13 @@ BEGIN
     RAISE EXCEPTION 'SEC-169 app role must not assume migration role';
   END IF;
   IF pg_has_role(
+    current_setting('steward.activation.migration_role'),
+    current_setting('steward.activation.bootstrap_role'),
+    'MEMBER'
+  ) THEN
+    RAISE EXCEPTION 'SEC-169 migration role must not assume bootstrap role';
+  END IF;
+  IF pg_has_role(
     current_setting('steward.activation.app_role'),
     current_setting('steward.activation.platform_role'),
     'MEMBER'
@@ -173,19 +180,92 @@ BEGIN
     RAISE EXCEPTION 'SEC-169 privileged function semantic manifest drift';
   END IF;
   IF EXISTS (
+    WITH actual AS (
+      SELECT p.oid::regprocedure::text AS identity,
+        CASE acl.grantee WHEN 0 THEN 'PUBLIC' ELSE pg_get_userbyid(acl.grantee) END AS grantee,
+        acl.privilege_type::text AS privilege, acl.is_grantable AS grantable
+      FROM pg_proc p
+      JOIN pg_namespace n ON n.oid = p.pronamespace
+      CROSS JOIN LATERAL aclexplode(COALESCE(p.proacl, acldefault('f', p.proowner))) acl
+      WHERE n.nspname IN ('steward_bootstrap', 'steward_rls')
+    ), expected AS (
+      SELECT manifest.identity,
+        CASE manifest.owner_kind WHEN 'migration'
+          THEN current_setting('steward.activation.migration_role')
+          ELSE current_setting('steward.activation.bootstrap_role') END AS grantee,
+        'EXECUTE'::text AS privilege, false AS grantable
+      FROM steward_expected_rls_functions manifest
+      UNION ALL
+      SELECT manifest.identity, current_setting('steward.activation.app_role'),
+        'EXECUTE'::text, false
+      FROM steward_expected_rls_functions manifest WHERE manifest.app_execute
+      UNION ALL
+      SELECT manifest.identity, current_setting('steward.activation.platform_role'),
+        'EXECUTE'::text, false
+      FROM steward_expected_rls_functions manifest WHERE manifest.platform_execute
+    )
+    SELECT 1 FROM actual FULL JOIN expected
+      USING (identity, grantee, privilege, grantable)
+    WHERE actual.identity IS NULL OR expected.identity IS NULL
+  ) THEN
+    RAISE EXCEPTION 'SEC-169 privileged function ACL manifest drift';
+  END IF;
+  IF EXISTS (
+    WITH actual AS (
+      SELECT 'schema:' || n.nspname || ':' || acl.privilege_type || ':' ||
+        acl.is_grantable AS acl
+      FROM pg_namespace n
+      CROSS JOIN LATERAL aclexplode(n.nspacl) acl
+      JOIN pg_roles granted ON granted.oid = acl.grantee
+      WHERE granted.rolname = current_setting('steward.activation.platform_role')
+      UNION ALL
+      SELECT 'relation:' || n.nspname || '.' || c.relname || ':' ||
+        acl.privilege_type || ':' || acl.is_grantable
+      FROM pg_class c
+      JOIN pg_namespace n ON n.oid = c.relnamespace
+      CROSS JOIN LATERAL aclexplode(c.relacl) acl
+      JOIN pg_roles granted ON granted.oid = acl.grantee
+      WHERE c.relkind IN ('r', 'p', 'v', 'm', 'f', 'S')
+        AND granted.rolname = current_setting('steward.activation.platform_role')
+      UNION ALL
+      SELECT 'function:' || p.oid::regprocedure::text || ':' || acl.privilege_type || ':' ||
+        acl.is_grantable
+      FROM pg_proc p
+      JOIN pg_namespace n ON n.oid = p.pronamespace
+      CROSS JOIN LATERAL aclexplode(p.proacl) acl
+      JOIN pg_roles granted ON granted.oid = acl.grantee
+      WHERE granted.rolname = current_setting('steward.activation.platform_role')
+    ), expected(acl) AS (VALUES
+      ('function:steward_bootstrap.platform_delete_user(uuid):EXECUTE:false'),
+      ('function:steward_bootstrap.platform_revoke_user_refresh_tokens(uuid):EXECUTE:false'),
+      ('function:steward_bootstrap.platform_set_user_deactivation(uuid,boolean):EXECUTE:false'),
+      ('function:steward_bootstrap.platform_stats():EXECUTE:false'),
+      ('function:steward_bootstrap.platform_tenants(integer,integer):EXECUTE:false'),
+      ('function:steward_bootstrap.retention_delete_deactivated_users(integer):EXECUTE:false'),
+      ('function:steward_rls.tenant_id():EXECUTE:false'),
+      ('relation:public.audit_chain_heads:INSERT:false'),
+      ('relation:public.audit_chain_heads:SELECT:false'),
+      ('relation:public.audit_chain_heads:UPDATE:false'),
+      ('relation:public.audit_events:INSERT:false'),
+      ('relation:public.audit_events:SELECT:false'),
+      ('relation:public.audit_events_id_seq:SELECT:false'),
+      ('relation:public.audit_events_id_seq:USAGE:false'),
+      ('schema:steward_bootstrap:USAGE:false'),
+      ('schema:steward_rls:USAGE:false')
+    )
+    SELECT 1 FROM actual FULL JOIN expected USING (acl)
+    WHERE actual.acl IS NULL OR expected.acl IS NULL
+  ) THEN
+    RAISE EXCEPTION 'SEC-169 platform authority ACL drift';
+  END IF;
+  IF EXISTS (
     SELECT 1
     FROM pg_proc p
     JOIN pg_namespace n ON n.oid = p.pronamespace
     WHERE n.nspname = 'public' AND p.prosecdef
-      AND (
-        has_function_privilege(
-          current_setting('steward.activation.app_role'), p.oid, 'EXECUTE'
-        ) OR has_function_privilege(
-          current_setting('steward.activation.platform_role'), p.oid, 'EXECUTE'
-        ) OR EXISTS (
-          SELECT 1 FROM aclexplode(COALESCE(p.proacl, acldefault('f', p.proowner))) acl
-          WHERE acl.grantee = 0 AND acl.privilege_type = 'EXECUTE'
-        )
+      AND EXISTS (
+        SELECT 1 FROM aclexplode(COALESCE(p.proacl, acldefault('f', p.proowner))) acl
+        WHERE acl.privilege_type = 'EXECUTE' AND acl.grantee <> p.proowner
       )
   ) THEN
     RAISE EXCEPTION 'SEC-169 unknown executable public SECURITY DEFINER function';

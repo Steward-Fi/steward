@@ -14,6 +14,8 @@ function database(options?: {
   partialCapabilities?: boolean;
   aclDrift?: boolean;
   functionDrift?: boolean;
+  functionAclDrift?: boolean;
+  platformAclDrift?: boolean;
   publicDefiner?: boolean;
 }) {
   let query = 0;
@@ -32,6 +34,7 @@ function database(options?: {
             rolcreatedb: false,
             rolcreaterole: false,
             rolreplication: false,
+            owns_database: false,
             owns_rls_relation: false,
             has_assumable_privilege: false,
             can_create_protected_schema: false,
@@ -96,12 +99,81 @@ function database(options?: {
           definitions[0] = { ...definitions[0], body_md5: "0".repeat(32) };
         return definitions;
       }
-      if (query === 6) return options?.publicDefiner ? [{ identity: "public.hostile()" }] : [];
-      if (query === 7) return [];
-      if (query === 8) {
+      if (query === 6) {
+        const rows = EXPECTED_RLS_FUNCTION_DEFINITIONS.flatMap((definition) => {
+          const owner =
+            definition.owner === "bootstrap" ? "steward_bootstrap_owner" : "steward_migrator";
+          return [
+            {
+              identity: definition.identity,
+              grantee: owner,
+              privilege: "EXECUTE",
+              grantable: false,
+            },
+            ...(definition.appExecute
+              ? [
+                  {
+                    identity: definition.identity,
+                    grantee: "steward_app",
+                    privilege: "EXECUTE",
+                    grantable: false,
+                  },
+                ]
+              : []),
+            ...(definition.platformExecute
+              ? [
+                  {
+                    identity: definition.identity,
+                    grantee: "steward_platform",
+                    privilege: "EXECUTE",
+                    grantable: false,
+                  },
+                ]
+              : []),
+          ];
+        });
+        if (options?.functionAclDrift) {
+          rows.push({
+            identity: EXPECTED_RLS_FUNCTION_DEFINITIONS[0].identity,
+            grantee: "hostile_role",
+            privilege: "EXECUTE",
+            grantable: false,
+          });
+        }
+        return rows.sort(
+          (left, right) =>
+            left.identity.localeCompare(right.identity) ||
+            left.grantee.localeCompare(right.grantee),
+        );
+      }
+      if (query === 7) return options?.publicDefiner ? [{ identity: "public.hostile()" }] : [];
+      if (query === 8) return [];
+      if (query === 9) {
         return options?.aclDrift ? [{ object_name: "steward_bootstrap.unknown_authority" }] : [];
       }
-      if (query > 8) return [];
+      if (query === 10) {
+        const acls = [
+          "function:steward_bootstrap.platform_delete_user(uuid):EXECUTE:false",
+          "function:steward_bootstrap.platform_revoke_user_refresh_tokens(uuid):EXECUTE:false",
+          "function:steward_bootstrap.platform_set_user_deactivation(uuid,boolean):EXECUTE:false",
+          "function:steward_bootstrap.platform_stats():EXECUTE:false",
+          "function:steward_bootstrap.platform_tenants(integer,integer):EXECUTE:false",
+          "function:steward_bootstrap.retention_delete_deactivated_users(integer):EXECUTE:false",
+          "function:steward_rls.tenant_id():EXECUTE:false",
+          "relation:public.audit_chain_heads:INSERT:false",
+          "relation:public.audit_chain_heads:SELECT:false",
+          "relation:public.audit_chain_heads:UPDATE:false",
+          "relation:public.audit_events:INSERT:false",
+          "relation:public.audit_events:SELECT:false",
+          "relation:public.audit_events_id_seq:SELECT:false",
+          "relation:public.audit_events_id_seq:USAGE:false",
+          "schema:steward_bootstrap:USAGE:false",
+          "schema:steward_rls:USAGE:false",
+        ];
+        if (options?.platformAclDrift) acls.push("relation:public.users:DELETE:false");
+        return acls.map((acl) => ({ acl }));
+      }
+      if (query > 10) return [];
       const policies = EXPECTED_RLS_POLICY_DEFINITIONS.filter(
         (policy) => policy.policy_group === "core" || options?.capabilities,
       ).map(({ policy_group: _group, ...policy }) => ({ ...policy }));
@@ -158,6 +230,12 @@ describe("RLS deployment safety gate", () => {
     await expect(
       assertRlsDeploymentSafety(database({ functionDrift: true }), roles),
     ).rejects.toThrow("RLS_DEPLOYMENT_FUNCTION_DEFINITION_DRIFT");
+    await expect(
+      assertRlsDeploymentSafety(database({ functionAclDrift: true }), roles),
+    ).rejects.toThrow("RLS_DEPLOYMENT_FUNCTION_ACL_DRIFT");
+    await expect(
+      assertRlsDeploymentSafety(database({ platformAclDrift: true }), roles),
+    ).rejects.toThrow("RLS_DEPLOYMENT_PLATFORM_ACL_DRIFT");
     await expect(
       assertRlsDeploymentSafety(database({ publicDefiner: true }), roles),
     ).rejects.toThrow("RLS_DEPLOYMENT_UNKNOWN_EXECUTABLE_SECURITY_DEFINER");

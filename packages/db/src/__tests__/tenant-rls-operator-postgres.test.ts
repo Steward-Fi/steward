@@ -16,6 +16,7 @@ const appRole = `steward_app_${suffix}`;
 const migrationRole = `steward_migrator_${suffix}`;
 const definerRole = `steward_definer_${suffix}`;
 const platformRole = `steward_platform_${suffix}`;
+const hostileRole = `steward_hostile_${suffix}`;
 const appRolePassword = randomUUID().replaceAll("-", "");
 const migrationRolePassword = randomUUID().replaceAll("-", "");
 const platformRolePassword = randomUUID().replaceAll("-", "");
@@ -103,12 +104,14 @@ describeWithPostgres("SEC-169 operator lifecycle on the real Steward schema", ()
     await admin.unsafe(`DROP ROLE IF EXISTS ${migrationRole}`);
     await admin.unsafe(`DROP ROLE IF EXISTS ${definerRole}`);
     await admin.unsafe(`DROP ROLE IF EXISTS ${platformRole}`);
+    await admin.unsafe(`DROP ROLE IF EXISTS ${hostileRole}`);
     await admin.end();
   });
 
   test("bootstraps, activates, rolls back, reactivates, and reruns the migrator", async () => {
-    const [adminRole] = await admin<{ rolsuper: boolean }[]>`
-      SELECT rolsuper FROM pg_roles WHERE rolname = current_user
+    const [adminRole] = await admin<{ role_name: string; rolsuper: boolean }[]>`
+      SELECT current_user::text AS role_name, rolsuper
+      FROM pg_roles WHERE rolname = current_user
     `;
     expect(adminRole?.rolsuper).toBe(true);
     await admin.unsafe(`CREATE DATABASE ${databaseName}`);
@@ -458,6 +461,93 @@ describeWithPostgres("SEC-169 operator lifecycle on the real Steward schema", ()
         await platformHandle.client.end({ timeout: 5 });
       }
 
+      await admin.unsafe(`CREATE ROLE ${hostileRole} NOLOGIN`);
+      await db.unsafe(
+        `GRANT EXECUTE ON FUNCTION steward_bootstrap.platform_stats() TO ${hostileRole}`,
+      );
+      const namedGrantDrift = createDb(appDatabaseUrl());
+      try {
+        await expect(
+          assertRlsDeploymentSafety(namedGrantDrift.db, {
+            expectedRole: appRole,
+            expectedPlatformRole: platformRole,
+            expectedBootstrapRole: definerRole,
+            expectedMigrationRole: migrationRole,
+          }),
+        ).rejects.toThrow("RLS_DEPLOYMENT_FUNCTION_ACL_DRIFT");
+        await expect(runOperatorScript("rls-activate.sql")).rejects.toThrow(
+          "privileged function ACL manifest drift",
+        );
+      } finally {
+        await namedGrantDrift.client.end({ timeout: 5 });
+        await db.unsafe(
+          `REVOKE EXECUTE ON FUNCTION steward_bootstrap.platform_stats() FROM ${hostileRole}`,
+        );
+      }
+
+      await db.unsafe(`GRANT DELETE ON public.users TO ${platformRole}`);
+      const platformAclDrift = createDb(platformDatabaseUrl());
+      const appPlatformAclDrift = createDb(appDatabaseUrl());
+      try {
+        await expect(
+          assertPlatformDatabaseAuthority(platformAclDrift.db, platformRole),
+        ).rejects.toThrow("PLATFORM_DATABASE_ACL_UNSAFE");
+        await expect(
+          assertRlsDeploymentSafety(appPlatformAclDrift.db, {
+            expectedRole: appRole,
+            expectedPlatformRole: platformRole,
+            expectedBootstrapRole: definerRole,
+            expectedMigrationRole: migrationRole,
+          }),
+        ).rejects.toThrow("RLS_DEPLOYMENT_PLATFORM_ACL_DRIFT");
+        await expect(runOperatorScript("rls-activate.sql")).rejects.toThrow(
+          "platform authority ACL drift",
+        );
+      } finally {
+        await platformAclDrift.client.end({ timeout: 5 });
+        await appPlatformAclDrift.client.end({ timeout: 5 });
+        await db.unsafe(`REVOKE DELETE ON public.users FROM ${platformRole}`);
+      }
+
+      await admin.unsafe(`GRANT ${definerRole} TO ${migrationRole}`);
+      const migrationMembershipDrift = createDb(appDatabaseUrl());
+      try {
+        await expect(
+          assertRlsDeploymentSafety(migrationMembershipDrift.db, {
+            expectedRole: appRole,
+            expectedPlatformRole: platformRole,
+            expectedBootstrapRole: definerRole,
+            expectedMigrationRole: migrationRole,
+          }),
+        ).rejects.toThrow("RLS_DEPLOYMENT_ROLE_UNSAFE");
+        await expect(runOperatorScript("rls-activate.sql")).rejects.toThrow(
+          "migration role must not assume bootstrap role",
+        );
+      } finally {
+        await migrationMembershipDrift.client.end({ timeout: 5 });
+        await admin.unsafe(`REVOKE ${definerRole} FROM ${migrationRole}`);
+      }
+
+      await admin`ALTER DATABASE ${admin(databaseName)} OWNER TO ${admin(appRole)}`;
+      const appDatabaseOwnerDrift = createDb(appDatabaseUrl());
+      try {
+        await expect(
+          assertRlsDeploymentSafety(appDatabaseOwnerDrift.db, {
+            expectedRole: appRole,
+            expectedPlatformRole: platformRole,
+            expectedBootstrapRole: definerRole,
+            expectedMigrationRole: migrationRole,
+          }),
+        ).rejects.toThrow("RLS_DEPLOYMENT_ROLE_UNSAFE");
+        await expect(runOperatorScript("rls-activate.sql")).rejects.toThrow(
+          "app role has assumable bypass or schema-owner authority",
+        );
+      } finally {
+        await appDatabaseOwnerDrift.client.end({ timeout: 5 });
+        await admin`ALTER DATABASE ${admin(databaseName)} OWNER TO ${admin(adminRole.role_name)}`;
+        await admin`GRANT CONNECT ON DATABASE ${admin(databaseName)} TO ${admin(appRole)}`;
+      }
+
       await db`ALTER FUNCTION steward_bootstrap.platform_stats() VOLATILE`;
       const driftedApp = createDb(appDatabaseUrl());
       try {
@@ -486,7 +576,7 @@ describeWithPostgres("SEC-169 operator lifecycle on the real Steward schema", ()
         `REVOKE ALL ON FUNCTION public.steward_test_unknown_definer_${suffix}() FROM PUBLIC`,
       );
       await db.unsafe(
-        `GRANT EXECUTE ON FUNCTION public.steward_test_unknown_definer_${suffix}() TO ${appRole}`,
+        `GRANT EXECUTE ON FUNCTION public.steward_test_unknown_definer_${suffix}() TO ${hostileRole}`,
       );
       const hostileDefinerApp = createDb(appDatabaseUrl());
       try {

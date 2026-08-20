@@ -39,6 +39,25 @@ const PLATFORM_EXECUTABLE_FUNCTIONS = [
   "steward_bootstrap.retention_delete_deactivated_users(integer)",
 ] as const;
 
+const EXPECTED_PLATFORM_NAMED_ACLS = [
+  "function:steward_bootstrap.platform_delete_user(uuid):EXECUTE:false",
+  "function:steward_bootstrap.platform_revoke_user_refresh_tokens(uuid):EXECUTE:false",
+  "function:steward_bootstrap.platform_set_user_deactivation(uuid,boolean):EXECUTE:false",
+  "function:steward_bootstrap.platform_stats():EXECUTE:false",
+  "function:steward_bootstrap.platform_tenants(integer,integer):EXECUTE:false",
+  "function:steward_bootstrap.retention_delete_deactivated_users(integer):EXECUTE:false",
+  "function:steward_rls.tenant_id():EXECUTE:false",
+  "relation:public.audit_chain_heads:INSERT:false",
+  "relation:public.audit_chain_heads:SELECT:false",
+  "relation:public.audit_chain_heads:UPDATE:false",
+  "relation:public.audit_events:INSERT:false",
+  "relation:public.audit_events:SELECT:false",
+  "relation:public.audit_events_id_seq:SELECT:false",
+  "relation:public.audit_events_id_seq:USAGE:false",
+  "schema:steward_bootstrap:USAGE:false",
+  "schema:steward_rls:USAGE:false",
+] as const;
+
 const KNOWN_BOOTSTRAP_FUNCTIONS = [
   ...APP_EXECUTABLE_FUNCTIONS.filter((name) => name.startsWith("steward_bootstrap.")),
   ...PLATFORM_EXECUTABLE_FUNCTIONS.filter((name) => name.startsWith("steward_bootstrap.")),
@@ -127,6 +146,38 @@ export async function assertPlatformDatabaseAuthority(
   ) {
     throw new Error("PLATFORM_DATABASE_ROLE_UNSAFE");
   }
+
+  const namedAcls = rowsOf<{ acl: string }>(
+    await db.execute(sql`
+      SELECT 'schema:' || namespace.nspname || ':' || privilege.privilege_type || ':' ||
+        privilege.is_grantable AS acl
+      FROM pg_namespace namespace
+      CROSS JOIN LATERAL aclexplode(namespace.nspacl) privilege
+      JOIN pg_roles granted_role ON granted_role.oid = privilege.grantee
+      WHERE granted_role.rolname = ${expectedRole}
+      UNION ALL
+      SELECT 'relation:' || namespace.nspname || '.' || relation.relname || ':' ||
+        privilege.privilege_type || ':' || privilege.is_grantable AS acl
+      FROM pg_class relation
+      JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+      CROSS JOIN LATERAL aclexplode(relation.relacl) privilege
+      JOIN pg_roles granted_role ON granted_role.oid = privilege.grantee
+      WHERE relation.relkind IN ('r', 'p', 'v', 'm', 'f', 'S')
+        AND granted_role.rolname = ${expectedRole}
+      UNION ALL
+      SELECT 'function:' || function_object.oid::regprocedure::text || ':' ||
+        privilege.privilege_type || ':' || privilege.is_grantable AS acl
+      FROM pg_proc function_object
+      JOIN pg_namespace namespace ON namespace.oid = function_object.pronamespace
+      CROSS JOIN LATERAL aclexplode(function_object.proacl) privilege
+      JOIN pg_roles granted_role ON granted_role.oid = privilege.grantee
+      WHERE granted_role.rolname = ${expectedRole}
+      ORDER BY acl
+    `),
+  );
+  if (stable(namedAcls.map((row) => row.acl)) !== stable(EXPECTED_PLATFORM_NAMED_ACLS)) {
+    throw new Error("PLATFORM_DATABASE_ACL_UNSAFE");
+  }
 }
 
 /**
@@ -163,6 +214,7 @@ export async function assertRlsDeploymentSafety(
     rolcreatedb: boolean;
     rolcreaterole: boolean;
     rolreplication: boolean;
+    owns_database: boolean;
     owns_rls_relation: boolean;
     has_assumable_privilege: boolean;
     can_create_protected_schema: boolean;
@@ -174,6 +226,11 @@ export async function assertRlsDeploymentSafety(
       SELECT current_user::text, session_user::text, role.rolcanlogin, role.rolinherit,
         role.rolsuper, role.rolbypassrls, role.rolcreatedb, role.rolcreaterole,
         role.rolreplication,
+        EXISTS (
+          SELECT 1 FROM pg_database database_object
+          WHERE database_object.datname = current_database()
+            AND database_object.datdba = role.oid
+        ) AS owns_database,
         EXISTS (
           SELECT 1 FROM pg_class relation
           JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
@@ -222,6 +279,9 @@ export async function assertRlsDeploymentSafety(
             AND NOT migration.rolcreatedb AND NOT migration.rolcreaterole
             AND NOT migration.rolreplication
             AND NOT pg_has_role(${options.expectedRole}, migration.oid, 'MEMBER')
+            AND NOT pg_has_role(
+              migration.oid, ${options.expectedBootstrapRole}, 'MEMBER'
+            )
         ) AS migration_role_safe,
         EXISTS (
           SELECT 1 FROM pg_roles bootstrap
@@ -247,6 +307,7 @@ export async function assertRlsDeploymentSafety(
     role.rolcreatedb ||
     role.rolcreaterole ||
     role.rolreplication ||
+    role.owns_database ||
     role.owns_rls_relation ||
     role.has_assumable_privilege ||
     role.can_create_protected_schema ||
@@ -425,20 +486,84 @@ export async function assertRlsDeploymentSafety(
     throw new Error("RLS_DEPLOYMENT_FUNCTION_DEFINITION_DRIFT");
   }
 
+  const functionAcls = rowsOf<{
+    identity: string;
+    grantee: string;
+    privilege: string;
+    grantable: boolean;
+  }>(
+    await db.execute(sql`
+      SELECT function.oid::regprocedure::text AS identity,
+        CASE privilege.grantee WHEN 0 THEN 'PUBLIC'
+          ELSE pg_get_userbyid(privilege.grantee) END AS grantee,
+        privilege.privilege_type::text AS privilege,
+        privilege.is_grantable AS grantable
+      FROM pg_proc function
+      JOIN pg_namespace namespace ON namespace.oid = function.pronamespace
+      CROSS JOIN LATERAL aclexplode(
+        COALESCE(function.proacl, acldefault('f', function.proowner))
+      ) privilege
+      WHERE namespace.nspname IN ('steward_bootstrap', 'steward_rls')
+      ORDER BY identity, grantee, privilege, grantable
+    `),
+  );
+  const expectedFunctionAcls = EXPECTED_RLS_FUNCTION_DEFINITIONS.flatMap((definition) => {
+    const owner =
+      definition.owner === "bootstrap"
+        ? options.expectedBootstrapRole
+        : options.expectedMigrationRole;
+    return [
+      { identity: definition.identity, grantee: owner, privilege: "EXECUTE", grantable: false },
+      ...(definition.appExecute
+        ? [
+            {
+              identity: definition.identity,
+              grantee: options.expectedRole,
+              privilege: "EXECUTE",
+              grantable: false,
+            },
+          ]
+        : []),
+      ...(definition.platformExecute
+        ? [
+            {
+              identity: definition.identity,
+              grantee: options.expectedPlatformRole,
+              privilege: "EXECUTE",
+              grantable: false,
+            },
+          ]
+        : []),
+    ];
+  });
+  functionAcls.sort(
+    (left, right) =>
+      left.identity.localeCompare(right.identity) ||
+      left.grantee.localeCompare(right.grantee) ||
+      left.privilege.localeCompare(right.privilege) ||
+      Number(left.grantable) - Number(right.grantable),
+  );
+  expectedFunctionAcls.sort(
+    (left, right) =>
+      left.identity.localeCompare(right.identity) ||
+      left.grantee.localeCompare(right.grantee) ||
+      left.privilege.localeCompare(right.privilege) ||
+      Number(left.grantable) - Number(right.grantable),
+  );
+  if (stable(functionAcls) !== stable(expectedFunctionAcls)) {
+    throw new Error("RLS_DEPLOYMENT_FUNCTION_ACL_DRIFT");
+  }
+
   const unknownExecutableDefiners = rowsOf<{ identity: string }>(
     await db.execute(sql`
       SELECT function.oid::regprocedure::text AS identity
       FROM pg_proc function
       JOIN pg_namespace namespace ON namespace.oid = function.pronamespace
       WHERE namespace.nspname = 'public' AND function.prosecdef
-        AND (
-          has_function_privilege(${options.expectedRole}, function.oid, 'EXECUTE')
-          OR has_function_privilege(${options.expectedPlatformRole}, function.oid, 'EXECUTE')
-          OR EXISTS (
-            SELECT 1
-            FROM aclexplode(COALESCE(function.proacl, acldefault('f', function.proowner))) acl
-            WHERE acl.grantee = 0 AND acl.privilege_type = 'EXECUTE'
-          )
+        AND EXISTS (
+          SELECT 1
+          FROM aclexplode(COALESCE(function.proacl, acldefault('f', function.proowner))) acl
+          WHERE acl.privilege_type = 'EXECUTE' AND acl.grantee <> function.proowner
         )
       ORDER BY function.oid::regprocedure::text
     `),
@@ -517,4 +642,36 @@ export async function assertRlsDeploymentSafety(
     `),
   );
   if (aclDrift.length > 0) throw new Error("RLS_DEPLOYMENT_ACL_DRIFT");
+
+  const platformNamedAcls = rowsOf<{ acl: string }>(
+    await db.execute(sql`
+      SELECT 'schema:' || namespace.nspname || ':' || privilege.privilege_type || ':' ||
+        privilege.is_grantable AS acl
+      FROM pg_namespace namespace
+      CROSS JOIN LATERAL aclexplode(namespace.nspacl) privilege
+      JOIN pg_roles granted_role ON granted_role.oid = privilege.grantee
+      WHERE granted_role.rolname = ${options.expectedPlatformRole}
+      UNION ALL
+      SELECT 'relation:' || namespace.nspname || '.' || relation.relname || ':' ||
+        privilege.privilege_type || ':' || privilege.is_grantable AS acl
+      FROM pg_class relation
+      JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+      CROSS JOIN LATERAL aclexplode(relation.relacl) privilege
+      JOIN pg_roles granted_role ON granted_role.oid = privilege.grantee
+      WHERE relation.relkind IN ('r', 'p', 'v', 'm', 'f', 'S')
+        AND granted_role.rolname = ${options.expectedPlatformRole}
+      UNION ALL
+      SELECT 'function:' || function_object.oid::regprocedure::text || ':' ||
+        privilege.privilege_type || ':' || privilege.is_grantable AS acl
+      FROM pg_proc function_object
+      JOIN pg_namespace namespace ON namespace.oid = function_object.pronamespace
+      CROSS JOIN LATERAL aclexplode(function_object.proacl) privilege
+      JOIN pg_roles granted_role ON granted_role.oid = privilege.grantee
+      WHERE granted_role.rolname = ${options.expectedPlatformRole}
+      ORDER BY acl
+    `),
+  );
+  if (stable(platformNamedAcls.map((row) => row.acl)) !== stable(EXPECTED_PLATFORM_NAMED_ACLS)) {
+    throw new Error("RLS_DEPLOYMENT_PLATFORM_ACL_DRIFT");
+  }
 }
