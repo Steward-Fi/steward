@@ -58,5 +58,6 @@ docker-compose.override.yml
 *.tgz
 *.tar.gz
 web/test-results/
+/test-results/
 .claude/
 artifacts/
