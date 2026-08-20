@@ -113,7 +113,7 @@ describe("0111 tenant RLS policy installation", () => {
     const activate = await readFile(new URL("rls-activate.sql", scripts), "utf8");
     const rollback = await readFile(new URL("rls-rollback.sql", scripts), "utf8");
     const inventory = await readFile(new URL("rls-policy-inventory.sql", scripts), "utf8");
-    expect(bootstrap).toContain("NOINHERIT NOBYPASSRLS");
+    expect(bootstrap).toContain("NOINHERIT NOREPLICATION NOBYPASSRLS");
     expect(bootstrap).toContain(
       "app, platform, migration-maintenance, and definer roles must be distinct",
     );

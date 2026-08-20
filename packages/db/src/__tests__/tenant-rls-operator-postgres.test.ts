@@ -122,10 +122,11 @@ describeWithPostgres("SEC-169 operator lifecycle on the real Steward schema", ()
           rolname: string;
           rolcanlogin: boolean;
           rolbypassrls: boolean;
+          rolreplication: boolean;
           rolsuper: boolean;
         }[]
       >`
-        SELECT rolname, rolcanlogin, rolbypassrls, rolsuper
+        SELECT rolname, rolcanlogin, rolbypassrls, rolreplication, rolsuper
         FROM pg_roles WHERE rolname IN (${appRole}, ${migrationRole}, ${definerRole}, ${platformRole})
         ORDER BY rolname
       `;
@@ -133,21 +134,25 @@ describeWithPostgres("SEC-169 operator lifecycle on the real Steward schema", ()
       expect(roleRows.find((row) => row.rolname === appRole)).toMatchObject({
         rolcanlogin: true,
         rolbypassrls: false,
+        rolreplication: false,
         rolsuper: false,
       });
       expect(roleRows.find((row) => row.rolname === migrationRole)).toMatchObject({
         rolcanlogin: true,
         rolbypassrls: false,
+        rolreplication: false,
         rolsuper: false,
       });
       expect(roleRows.find((row) => row.rolname === definerRole)).toMatchObject({
         rolcanlogin: false,
         rolbypassrls: true,
+        rolreplication: false,
         rolsuper: false,
       });
       expect(roleRows.find((row) => row.rolname === platformRole)).toMatchObject({
         rolcanlogin: true,
         rolbypassrls: false,
+        rolreplication: false,
         rolsuper: false,
       });
       const [platformRlsPrivileges] = await db<
@@ -155,6 +160,7 @@ describeWithPostgres("SEC-169 operator lifecycle on the real Steward schema", ()
           schema_usage: boolean;
           tenant_id_execute: boolean;
           user_id_execute: boolean;
+          public_lock_execute: boolean;
           audit_sequence_usage: boolean;
           other_sequence_usage: boolean;
           default_sequence_grant: boolean;
@@ -164,12 +170,13 @@ describeWithPostgres("SEC-169 operator lifecycle on the real Steward schema", ()
           has_schema_privilege(${platformRole}, 'steward_rls', 'USAGE') AS schema_usage,
           has_function_privilege(${platformRole}, 'steward_rls.tenant_id()', 'EXECUTE') AS tenant_id_execute,
           has_function_privilege(${platformRole}, 'steward_rls.user_id()', 'EXECUTE') AS user_id_execute,
+          has_function_privilege(${platformRole}, 'public.steward_lock_tenant_deletion(text)', 'EXECUTE') AS public_lock_execute,
           has_sequence_privilege(${platformRole}, 'public.audit_events_id_seq', 'USAGE,SELECT') AS audit_sequence_usage,
           has_sequence_privilege(${platformRole}, 'public.audit_checkpoints_id_seq', 'USAGE') AS other_sequence_usage,
           EXISTS (
             SELECT 1
             FROM pg_default_acl defaults
-            CROSS JOIN LATERAL aclexplode(COALESCE(defaults.defaclacl, '{}'::aclitem[])) privilege
+            CROSS JOIN LATERAL aclexplode(defaults.defaclacl) privilege
             JOIN pg_roles granted_role ON granted_role.oid = privilege.grantee
             WHERE defaults.defaclobjtype = 'S' AND granted_role.rolname = ${platformRole}
           ) AS default_sequence_grant
@@ -178,6 +185,7 @@ describeWithPostgres("SEC-169 operator lifecycle on the real Steward schema", ()
         schema_usage: true,
         tenant_id_execute: true,
         user_id_execute: false,
+        public_lock_execute: false,
         audit_sequence_usage: true,
         other_sequence_usage: false,
         default_sequence_grant: false,
@@ -204,7 +212,7 @@ describeWithPostgres("SEC-169 operator lifecycle on the real Steward schema", ()
           SELECT 'schema:' || namespace.nspname || ':' || privilege.privilege_type || ':' ||
             privilege.is_grantable AS acl
           FROM pg_namespace namespace
-          CROSS JOIN LATERAL aclexplode(COALESCE(namespace.nspacl, acldefault('n', namespace.nspowner))) privilege
+          CROSS JOIN LATERAL aclexplode(namespace.nspacl) privilege
           JOIN pg_roles granted_role ON granted_role.oid = privilege.grantee
           WHERE granted_role.rolname = ${platformRole}
           UNION ALL
@@ -212,10 +220,7 @@ describeWithPostgres("SEC-169 operator lifecycle on the real Steward schema", ()
             privilege.privilege_type || ':' || privilege.is_grantable AS acl
           FROM pg_class relation
           JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
-          CROSS JOIN LATERAL aclexplode(COALESCE(
-            relation.relacl,
-            acldefault(CASE WHEN relation.relkind = 'S' THEN 'S'::"char" ELSE 'r'::"char" END, relation.relowner)
-          )) privilege
+          CROSS JOIN LATERAL aclexplode(relation.relacl) privilege
           JOIN pg_roles granted_role ON granted_role.oid = privilege.grantee
           WHERE relation.relkind IN ('r', 'p', 'v', 'm', 'f', 'S')
             AND granted_role.rolname = ${platformRole}
@@ -225,7 +230,7 @@ describeWithPostgres("SEC-169 operator lifecycle on the real Steward schema", ()
             privilege.privilege_type || ':' || privilege.is_grantable AS acl
           FROM pg_proc function_object
           JOIN pg_namespace namespace ON namespace.oid = function_object.pronamespace
-          CROSS JOIN LATERAL aclexplode(COALESCE(function_object.proacl, acldefault('f', function_object.proowner))) privilege
+          CROSS JOIN LATERAL aclexplode(function_object.proacl) privilege
           JOIN pg_roles granted_role ON granted_role.oid = privilege.grantee
           WHERE granted_role.rolname = ${platformRole}
           ORDER BY acl
@@ -240,8 +245,37 @@ describeWithPostgres("SEC-169 operator lifecycle on the real Steward schema", ()
       await db.unsafe(
         `GRANT EXECUTE ON FUNCTION steward_bootstrap.platform_stats() TO ${platformRole} WITH GRANT OPTION`,
       );
+      await admin.unsafe(`ALTER ROLE ${platformRole} WITH REPLICATION`);
       await runOperatorScript("rls-bootstrap.sql", true);
       expect(await platformNamedAcls()).toEqual(expectedPlatformAcls);
+      const [resetPlatformRole] = await db<{ rolreplication: boolean }[]>`
+        SELECT rolreplication FROM pg_roles WHERE rolname = ${platformRole}
+      `;
+      expect(resetPlatformRole).toEqual({ rolreplication: false });
+
+      await db.unsafe(
+        "CREATE PROCEDURE public.platform_authority_probe() LANGUAGE SQL AS 'SELECT 1'",
+      );
+      await db.unsafe(
+        `GRANT EXECUTE ON PROCEDURE public.platform_authority_probe() TO ${platformRole}`,
+      );
+      await runOperatorScript("rls-bootstrap.sql", true);
+      const [procedureAccess] = await db<{ can_execute: boolean }[]>`
+        SELECT has_function_privilege(
+          ${platformRole}, 'public.platform_authority_probe()'::regprocedure, 'EXECUTE'
+        ) AS can_execute
+      `;
+      expect(procedureAccess).toEqual({ can_execute: false });
+      await db.unsafe("DROP PROCEDURE public.platform_authority_probe()");
+
+      await admin.unsafe(`GRANT CONNECT ON DATABASE postgres TO ${platformRole}`);
+      try {
+        await expect(runOperatorScript("rls-bootstrap.sql", true)).rejects.toThrow(
+          "platform database ACL drift",
+        );
+      } finally {
+        await admin.unsafe(`REVOKE CONNECT ON DATABASE postgres FROM ${platformRole}`);
+      }
 
       await admin.unsafe(`GRANT ${definerRole} TO ${platformRole}`);
       try {
@@ -252,17 +286,16 @@ describeWithPostgres("SEC-169 operator lifecycle on the real Steward schema", ()
         await admin.unsafe(`REVOKE ${definerRole} FROM ${platformRole}`);
       }
 
-      await db.unsafe("CREATE SCHEMA platform_authority_probe");
-      await db.unsafe("CREATE SEQUENCE platform_authority_probe.platform_owned_authority_probe");
+      await db.unsafe("CREATE SEQUENCE public.platform_owned_authority_probe");
       await db.unsafe(
-        `ALTER SEQUENCE platform_authority_probe.platform_owned_authority_probe OWNER TO ${platformRole}`,
+        `ALTER SEQUENCE public.platform_owned_authority_probe OWNER TO ${platformRole}`,
       );
       try {
         await expect(runOperatorScript("rls-bootstrap.sql", true)).rejects.toThrow(
           "platform role must not own database objects",
         );
       } finally {
-        await db.unsafe("DROP SCHEMA IF EXISTS platform_authority_probe CASCADE");
+        await db.unsafe("DROP SEQUENCE public.platform_owned_authority_probe");
       }
       await runOperatorScript("rls-bootstrap.sql", true);
       expect(await platformNamedAcls()).toEqual(expectedPlatformAcls);
