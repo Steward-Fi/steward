@@ -30,11 +30,13 @@ import {
   type AppVariables,
   setNoStoreHeaders,
   tenantAuth,
+  withAuthenticatedTenantDatabase,
 } from "../services/context";
 import {
   CaseRangeTooLargeError,
   getProviderCase,
-  getProviderCaseEvidence,
+  readProviderCaseEvidenceSnapshot,
+  signProviderCaseEvidenceSnapshot,
 } from "../services/provider-case";
 
 export const providerCaseRoutes = new Hono<{ Variables: AppVariables }>();
@@ -50,6 +52,10 @@ providerCaseRoutes.use("/provider-actions/:id/evidence", auditOwnerAdminMfaGate)
 // path-traversal / null-byte / control-char id (N37/N38/N39) is rejected before
 // any DB access and returns the SAME uniform 404 as a genuine miss.
 const CASE_ID_PATTERN = /^pa_[0-9a-fA-F-]{36}$/;
+const SNAPSHOT_CHARACTERISTICS = {
+  isolationLevel: "repeatable read" as const,
+  readOnly: true,
+};
 
 function isValidCaseId(id: string): boolean {
   return CASE_ID_PATTERN.test(id);
@@ -74,8 +80,19 @@ providerCaseRoutes.get("/provider-actions/:id/case", async (c) => {
 
   let manifestOrNull;
   try {
-    const authorized = await tenantWorkspaceIds(tenantId);
-    const assembly = await getProviderCase(tenantId, caseId, authorized);
+    const userId = c.get("userId");
+    if (!userId) return c.json<ApiResponse>({ ok: false, error: "Forbidden" }, 403);
+    const assembly = await withAuthenticatedTenantDatabase(
+      tenantId,
+      "provider-case-snapshot",
+      userId,
+      async () => {
+        const authorized = await tenantWorkspaceIds(tenantId);
+        return getProviderCase(tenantId, caseId, authorized);
+      },
+      userId,
+      SNAPSHOT_CHARACTERISTICS,
+    );
     manifestOrNull = assembly?.manifest ?? null;
   } catch (err) {
     console.error(
@@ -105,8 +122,20 @@ providerCaseRoutes.get("/provider-actions/:id/evidence", async (c) => {
 
   let evidence;
   try {
-    const authorized = await tenantWorkspaceIds(tenantId);
-    evidence = await getProviderCaseEvidence(tenantId, caseId, authorized);
+    const userId = c.get("userId");
+    if (!userId) return c.json<ApiResponse>({ ok: false, error: "Forbidden" }, 403);
+    const snapshot = await withAuthenticatedTenantDatabase(
+      tenantId,
+      "provider-case-snapshot",
+      userId,
+      async () => {
+        const authorized = await tenantWorkspaceIds(tenantId);
+        return readProviderCaseEvidenceSnapshot(tenantId, caseId, authorized);
+      },
+      userId,
+      SNAPSHOT_CHARACTERISTICS,
+    );
+    evidence = snapshot ? await signProviderCaseEvidenceSnapshot(snapshot) : null;
   } catch (err) {
     if (err instanceof AuditSigningKeyError) {
       return c.json<ApiResponse>({ ok: false, error: "CASE_EVIDENCE_SIGNING_DISABLED" }, 503);
@@ -155,7 +184,7 @@ export function registerProviderCaseRoutes(app: Hono<{ Variables: AppVariables }
       setNoStoreHeaders(c);
       await next();
     });
-    app.use(p, (c, next) => tenantAuth(c, next));
+    app.use(p, (c, next) => tenantAuth(c, next, { bindTenantDatabase: false }));
   }
   app.route("/v2", providerCaseRoutes);
 }

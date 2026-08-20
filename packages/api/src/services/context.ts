@@ -26,6 +26,7 @@ import {
   operatorTransferReservations,
   policies,
   sessionSigners,
+  type TenantTransactionCharacteristics,
   tenantContextFromAuthenticatedPrincipal,
   toPolicyRule,
   transactions,
@@ -755,12 +756,18 @@ export async function withAuthenticatedTenantDatabase<T>(
   subject: string,
   callback: () => Promise<T>,
   userId?: string,
+  characteristics?: TenantTransactionCharacteristics,
 ): Promise<T> {
-  if (hasTenantTransactionDatabase({ tenantId, userId })) return callback();
+  if (hasTenantTransactionDatabase({ tenantId, userId, ...characteristics })) return callback();
   const context = tenantContextFromAuthenticatedPrincipal({ tenantId, method, subject, userId });
   const driver = isPGLiteRuntime ? "pglite" : getDatabaseDriver();
-  return withTenantRlsTransaction(getDb() as never, driver, context, async (tx) =>
-    withTenantTransactionDatabase(tx as never, { tenantId, userId }, callback),
+  return withTenantRlsTransaction(
+    getDb() as never,
+    driver,
+    context,
+    async (tx) =>
+      withTenantTransactionDatabase(tx as never, { tenantId, userId }, callback, characteristics),
+    characteristics,
   );
 }
 
@@ -777,7 +784,7 @@ export async function continueWithTenantDatabase(
 export async function tenantAuth(
   c: Context<{ Variables: AppVariables }>,
   next: Next,
-  options?: { requireTenantMatch?: string },
+  options?: { requireTenantMatch?: string; bindTenantDatabase?: boolean },
 ) {
   await defaultTenantReady;
 
@@ -902,6 +909,7 @@ export async function tenantAuth(
           }
           c.set("authType", "session-jwt");
         }
+        if (options?.bindTenantDatabase === false) return next();
         return continueWithTenantDatabase(
           payload.tenantId,
           isAgentToken ? "agent-jwt" : "session-jwt",
@@ -965,6 +973,7 @@ export async function tenantAuth(
       tenantConfigs.get(parsedAppId.tenantId) || { id: appTenant.id, name: appTenant.name },
     );
     c.set("authType", "app-secret");
+    if (options?.bindTenantDatabase === false) return next();
     await continueWithTenantDatabase(
       parsedAppId.tenantId,
       "app-secret",
@@ -993,6 +1002,7 @@ export async function tenantAuth(
   c.set("tenantConfig", tenantConfigs.get(tenantId) || { id: tenant.id, name: tenant.name });
   c.set("authType", "api-key");
 
+  if (options?.bindTenantDatabase === false) return next();
   await continueWithTenantDatabase(tenantId, "api-key", tenantId, next);
 }
 

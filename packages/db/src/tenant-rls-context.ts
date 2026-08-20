@@ -97,6 +97,11 @@ interface TenantTransactionalDatabase<Tx extends TenantTransactionExecutor> {
   transaction<T>(callback: (tx: Tx) => Promise<T>): Promise<T>;
 }
 
+export interface TenantTransactionCharacteristics {
+  isolationLevel?: "repeatable read";
+  readOnly?: boolean;
+}
+
 function hasTrustedBrand(context: unknown): context is TrustedTenantContext {
   return typeof context === "object" && context !== null && trustedTenantContexts.has(context);
 }
@@ -120,6 +125,7 @@ export async function withTenantRlsTransaction<Tx extends TenantTransactionExecu
   driver: TenantRlsDriver,
   context: TrustedTenantContext,
   callback: (tx: Tx) => Promise<T>,
+  characteristics?: TenantTransactionCharacteristics,
 ): Promise<T> {
   assertTenantRlsDriver(driver);
   if (!hasTrustedBrand(context)) throw new Error("RLS_TENANT_CONTEXT_UNTRUSTED");
@@ -130,6 +136,13 @@ export async function withTenantRlsTransaction<Tx extends TenantTransactionExecu
   if (is(db, PgTransaction)) throw new Error("RLS_TENANT_TRANSACTION_NESTED");
 
   const outcome = await db.transaction(async (tx) => {
+    if (driver !== "pglite" && characteristics?.isolationLevel === "repeatable read") {
+      await tx.execute(
+        characteristics.readOnly
+          ? sql`SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY`
+          : sql`SET TRANSACTION ISOLATION LEVEL REPEATABLE READ`,
+      );
+    }
     // A non-empty value here means this connection carries a session-level
     // setting or the helper was nested inside another tenant transaction.
     // Overwriting either would conceal a lifecycle bug and could restore the

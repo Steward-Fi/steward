@@ -490,6 +490,8 @@ interface RequestDatabaseContext {
   active: boolean;
   tenantId?: string;
   userId?: string;
+  isolationLevel?: "repeatable read";
+  readOnly?: boolean;
   pendingTasks: Set<Promise<unknown>>;
   guardedObjects: WeakMap<object, object>;
 }
@@ -500,6 +502,8 @@ export function hasTenantTransactionDatabase(expected?: {
   tenantId: string;
   userId?: string;
   db?: RequestDatabase;
+  isolationLevel?: "repeatable read";
+  readOnly?: boolean;
 }): boolean {
   const context = tenantTransactionDatabaseStorage.getStore();
   if (!context?.active || !context.db) return false;
@@ -509,6 +513,14 @@ export function hasTenantTransactionDatabase(expected?: {
       (expected.userId !== undefined && context.userId !== expected.userId))
   ) {
     throw new Error("RLS_TENANT_DATABASE_CONTEXT_MISMATCH");
+  }
+  if (
+    expected &&
+    ((expected.isolationLevel !== undefined &&
+      context.isolationLevel !== expected.isolationLevel) ||
+      (expected.readOnly !== undefined && context.readOnly !== expected.readOnly))
+  ) {
+    throw new Error("RLS_TENANT_DATABASE_CHARACTERISTICS_MISMATCH");
   }
   if (expected?.db !== undefined && expected.db !== context.db) return false;
   return true;
@@ -655,6 +667,7 @@ export async function withTenantTransactionDatabase<T>(
   transactionDb: RequestDatabase,
   identity: { tenantId: string; userId?: string },
   callback: () => Promise<T>,
+  characteristics?: { isolationLevel?: "repeatable read"; readOnly?: boolean },
 ): Promise<T> {
   if (tenantTransactionDatabaseStorage.getStore()) {
     throw new Error("RLS_TENANT_DATABASE_CONTEXT_NESTED");
@@ -665,6 +678,8 @@ export async function withTenantTransactionDatabase<T>(
     active: true,
     tenantId: identity.tenantId,
     userId: identity.userId,
+    isolationLevel: characteristics?.isolationLevel,
+    readOnly: characteristics?.readOnly,
     pendingTasks: new Set(),
     guardedObjects: new WeakMap(),
   };

@@ -301,7 +301,8 @@ describe("agent signer API", () => {
     const beforeAudits = await getDb()
       .select({ id: auditEvents.id })
       .from(auditEvents)
-      .where(eq(auditEvents.tenantId, TENANT_ID));
+      .where(eq(auditEvents.tenantId, TENANT_ID))
+      .orderBy(asc(auditEvents.id));
     const createResponse = await noMfaApp.request(`/agents/${AGENT_ID}/signers`, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -337,7 +338,8 @@ describe("agent signer API", () => {
       await getDb()
         .select({ id: auditEvents.id })
         .from(auditEvents)
-        .where(eq(auditEvents.tenantId, TENANT_ID)),
+        .where(eq(auditEvents.tenantId, TENANT_ID))
+        .orderBy(asc(auditEvents.id)),
     ).toEqual(beforeAudits);
   });
 
@@ -457,7 +459,8 @@ describe("agent signer API", () => {
     const beforeAudits = await getDb()
       .select({ id: auditEvents.id })
       .from(auditEvents)
-      .where(eq(auditEvents.tenantId, TENANT_ID));
+      .where(eq(auditEvents.tenantId, TENANT_ID))
+      .orderBy(asc(auditEvents.id));
 
     const pauseResponse = await noMfaApp.request(`/agents/${AGENT_ID}/signers/${created.data.id}`, {
       method: "PATCH",
@@ -484,7 +487,8 @@ describe("agent signer API", () => {
       await getDb()
         .select({ id: auditEvents.id })
         .from(auditEvents)
-        .where(eq(auditEvents.tenantId, TENANT_ID)),
+        .where(eq(auditEvents.tenantId, TENANT_ID))
+        .orderBy(asc(auditEvents.id)),
     ).toEqual(beforeAudits);
   });
 

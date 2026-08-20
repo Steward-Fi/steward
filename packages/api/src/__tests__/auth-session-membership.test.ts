@@ -7,11 +7,17 @@ const authSource = readFileSync(join(import.meta.dir, "..", "routes", "auth.ts")
 
 describe("session membership hardening", () => {
   it("rejects missing users and rechecks tenant membership during session verification", () => {
-    for (const source of [contextSource, authSource]) {
-      expect(source).toContain("!user || user.deactivatedAt");
-      expect(source).toContain("from(userTenants)");
-      expect(source).toContain("eq(userTenants.tenantId, payload.tenantId)");
-      expect(source).toContain("if (!membership) return null");
-    }
+    // The shared context uses the SECURITY DEFINER bootstrap function so the
+    // lookup remains available before a tenant RLS transaction is installed.
+    expect(contextSource).toContain("steward_bootstrap.session_subject(");
+    expect(contextSource).toContain("if (!user || user.deactivated_at) return null");
+    expect(contextSource).toContain("if (payload.tenantId && !user.membership_role) return null");
+
+    // The auth router performs the equivalent checks through tenant-scoped
+    // Drizzle queries once its verified auth transaction is active.
+    expect(authSource).toContain("if (!user || user.deactivatedAt) return null");
+    expect(authSource).toContain(".from(userTenants)");
+    expect(authSource).toContain("eq(userTenants.tenantId, payload.tenantId)");
+    expect(authSource).toContain("if (!membership) return null");
   });
 });
