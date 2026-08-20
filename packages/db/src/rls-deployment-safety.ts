@@ -39,7 +39,23 @@ const PLATFORM_EXECUTABLE_FUNCTIONS = [
   "steward_bootstrap.retention_delete_deactivated_users(integer)",
 ] as const;
 
-const APP_PUBLIC_EXECUTABLE_FUNCTIONS = ["steward_lock_tenant_deletion(text)"] as const;
+const PERSONAL_LIFECYCLE_LOCK_FUNCTION = "steward_lock_personal_lifecycle(uuid,text,boolean)";
+const APP_PUBLIC_EXECUTABLE_FUNCTIONS = [
+  "steward_lock_tenant_deletion(text)",
+  PERSONAL_LIFECYCLE_LOCK_FUNCTION,
+] as const;
+
+export const EXPECTED_PERSONAL_LIFECYCLE_LOCK_DEFINITION = {
+  identity: PERSONAL_LIFECYCLE_LOCK_FUNCTION,
+  result: "TABLE(user_exists boolean, tenant_exists boolean)",
+  language: "plpgsql",
+  volatility: "v",
+  parallelism: "u",
+  securityDefiner: false,
+  settings: "",
+  argumentDefaults: "false",
+  bodyMd5: "fa9e1a06071746fd3b29dbc4db3706ad",
+} as const;
 
 const EXPECTED_PLATFORM_NAMED_ACLS = [
   "function:steward_bootstrap.platform_delete_user(uuid):EXECUTE:false",
@@ -657,6 +673,80 @@ export async function assertRlsDeploymentSafety(
   );
   if (stable(functionAcls) !== stable(expectedFunctionAcls)) {
     throw new Error("RLS_DEPLOYMENT_FUNCTION_ACL_DRIFT");
+  }
+
+  const [personalLifecycleLock] = rowsOf<{
+    identity: string;
+    result: string;
+    language: string;
+    volatility: string;
+    parallelism: string;
+    security_definer: boolean;
+    settings: string;
+    argument_defaults: string;
+    owner: string;
+    body_md5: string;
+  }>(
+    await db.execute(sql`
+      SELECT function.oid::regprocedure::text AS identity,
+        pg_get_function_result(function.oid) AS result,
+        language.lanname::text AS language,
+        function.provolatile AS volatility,
+        function.proparallel AS parallelism,
+        function.prosecdef AS security_definer,
+        COALESCE(array_to_string(function.proconfig, E'\n'), '') AS settings,
+        COALESCE(pg_get_expr(function.proargdefaults, 0), '') AS argument_defaults,
+        pg_get_userbyid(function.proowner) AS owner,
+        md5(btrim(function.prosrc, E' \t\n\r')) AS body_md5
+      FROM pg_proc function
+      JOIN pg_language language ON language.oid = function.prolang
+      WHERE function.oid =
+        to_regprocedure('public.steward_lock_personal_lifecycle(uuid,text,boolean)')
+    `),
+  );
+  if (
+    !personalLifecycleLock ||
+    stable(personalLifecycleLock) !==
+      stable({
+        identity: EXPECTED_PERSONAL_LIFECYCLE_LOCK_DEFINITION.identity,
+        result: EXPECTED_PERSONAL_LIFECYCLE_LOCK_DEFINITION.result,
+        language: EXPECTED_PERSONAL_LIFECYCLE_LOCK_DEFINITION.language,
+        volatility: EXPECTED_PERSONAL_LIFECYCLE_LOCK_DEFINITION.volatility,
+        parallelism: EXPECTED_PERSONAL_LIFECYCLE_LOCK_DEFINITION.parallelism,
+        security_definer: EXPECTED_PERSONAL_LIFECYCLE_LOCK_DEFINITION.securityDefiner,
+        settings: EXPECTED_PERSONAL_LIFECYCLE_LOCK_DEFINITION.settings,
+        argument_defaults: EXPECTED_PERSONAL_LIFECYCLE_LOCK_DEFINITION.argumentDefaults,
+        owner: options.expectedMigrationRole,
+        body_md5: EXPECTED_PERSONAL_LIFECYCLE_LOCK_DEFINITION.bodyMd5,
+      })
+  ) {
+    throw new Error("RLS_DEPLOYMENT_PERSONAL_LIFECYCLE_LOCK_DEFINITION_DRIFT");
+  }
+
+  const personalLifecycleLockAcls = rowsOf<{
+    grantee: string;
+    privilege: string;
+    grantable: boolean;
+  }>(
+    await db.execute(sql`
+      SELECT CASE acl.grantee WHEN 0 THEN 'PUBLIC' ELSE pg_get_userbyid(acl.grantee) END AS grantee,
+        acl.privilege_type::text AS privilege, acl.is_grantable AS grantable
+      FROM pg_proc function
+      CROSS JOIN LATERAL aclexplode(
+        COALESCE(function.proacl, acldefault('f', function.proowner))
+      ) acl
+      WHERE function.oid =
+        to_regprocedure('public.steward_lock_personal_lifecycle(uuid,text,boolean)')
+      ORDER BY grantee, privilege
+    `),
+  );
+  const expectedPersonalLifecycleLockAcls = [
+    { grantee: options.expectedRole, privilege: "EXECUTE", grantable: false },
+    { grantee: options.expectedBootstrapRole, privilege: "EXECUTE", grantable: false },
+    { grantee: options.expectedMigrationRole, privilege: "EXECUTE", grantable: false },
+  ].sort((left, right) => left.grantee.localeCompare(right.grantee));
+  if (stable(personalLifecycleLockAcls) !== stable(expectedPersonalLifecycleLockAcls)) {
+    throw new Error("RLS_DEPLOYMENT_PERSONAL_LIFECYCLE_LOCK_ACL_DRIFT");
   }
 
   const appNamedAcls = rowsOf<{ acl: string }>(

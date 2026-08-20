@@ -250,6 +250,45 @@ BEGIN
   ) THEN
     RAISE EXCEPTION 'SEC-169 privileged function ACL manifest drift';
   END IF;
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_proc p
+    JOIN pg_language l ON l.oid = p.prolang
+    WHERE p.oid = to_regprocedure(
+        'public.steward_lock_personal_lifecycle(uuid,text,boolean)'
+      )
+      AND p.oid::regprocedure::text = 'steward_lock_personal_lifecycle(uuid,text,boolean)'
+      AND pg_get_function_result(p.oid) =
+        'TABLE(user_exists boolean, tenant_exists boolean)'
+      AND l.lanname = 'plpgsql'
+      AND p.provolatile = 'v' AND p.proparallel = 'u' AND NOT p.prosecdef
+      AND COALESCE(array_to_string(p.proconfig, E'\n'), '') = ''
+      AND COALESCE(pg_get_expr(p.proargdefaults, 0), '') = 'false'
+      AND pg_get_userbyid(p.proowner) =
+        current_setting('steward.activation.migration_role')
+      AND md5(btrim(p.prosrc, E' \t\n\r')) = 'fa9e1a06071746fd3b29dbc4db3706ad'
+  ) THEN
+    RAISE EXCEPTION 'SEC-169 personal lifecycle lock semantic manifest drift';
+  END IF;
+  IF EXISTS (
+    WITH actual AS (
+      SELECT CASE acl.grantee WHEN 0 THEN 'PUBLIC' ELSE pg_get_userbyid(acl.grantee) END AS grantee,
+        acl.privilege_type::text AS privilege, acl.is_grantable AS grantable
+      FROM pg_proc p
+      CROSS JOIN LATERAL aclexplode(COALESCE(p.proacl, acldefault('f', p.proowner))) acl
+      WHERE p.oid = to_regprocedure(
+        'public.steward_lock_personal_lifecycle(uuid,text,boolean)'
+      )
+    ), expected(grantee, privilege, grantable) AS (VALUES
+      (current_setting('steward.activation.app_role'), 'EXECUTE'::text, false),
+      (current_setting('steward.activation.bootstrap_role'), 'EXECUTE'::text, false),
+      (current_setting('steward.activation.migration_role'), 'EXECUTE'::text, false)
+    )
+    SELECT 1 FROM actual FULL JOIN expected USING (grantee, privilege, grantable)
+    WHERE actual.grantee IS NULL OR expected.grantee IS NULL
+  ) THEN
+    RAISE EXCEPTION 'SEC-169 personal lifecycle lock ACL manifest drift';
+  END IF;
   IF EXISTS (
     WITH actual AS (
       SELECT 'database:' || database_object.datname || ':' || acl.privilege_type || ':' ||
@@ -310,7 +349,8 @@ BEGIN
         ('schema:public:USAGE:false'),
         ('schema:steward_bootstrap:USAGE:false'),
         ('schema:steward_rls:USAGE:false'),
-        ('function:steward_lock_tenant_deletion(text):EXECUTE:false')
+        ('function:steward_lock_tenant_deletion(text):EXECUTE:false'),
+        ('function:steward_lock_personal_lifecycle(uuid,text,boolean):EXECUTE:false')
       ) fixed(acl)
       UNION ALL
       SELECT 'relation:public.' || relation.relation_name || ':' || privilege || ':false'

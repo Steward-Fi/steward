@@ -21,6 +21,56 @@ const appRolePassword = randomUUID().replaceAll("-", "");
 const migrationRolePassword = randomUUID().replaceAll("-", "");
 const platformRolePassword = randomUUID().replaceAll("-", "");
 
+// Exact #696/0114 helper body. This lane intentionally does not duplicate the
+// numbered migration; the fixture composes its contract so the RLS bootstrap,
+// activation, and runtime gates execute against the post-0114 topology.
+const personalLifecycleLockDefinition = `
+CREATE OR REPLACE FUNCTION public.steward_lock_personal_lifecycle(
+  p_user_id uuid,
+  p_tenant_id text,
+  p_tenant_delete boolean DEFAULT false
+)
+RETURNS TABLE (user_exists boolean, tenant_exists boolean)
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  owner_tenant record;
+BEGIN
+  IF p_tenant_id IS DISTINCT FROM 'personal-' || p_user_id::text THEN
+    RAISE EXCEPTION 'Personal tenant id does not match canonical owner' USING ERRCODE = '23514';
+  END IF;
+  PERFORM pg_advisory_xact_lock(hashtextextended('platform_user_account_' || p_user_id::text, 0));
+  SELECT true INTO user_exists FROM public.users u WHERE u.id = p_user_id FOR UPDATE;
+  user_exists := COALESCE(user_exists, false);
+
+  -- Take every owner-lifecycle lock before any tenant row. Membership writers
+  -- use the same advisory locks, so the ordered set cannot change underneath
+  -- the subsequent sole-owner checks.
+  FOR owner_tenant IN
+    SELECT tenant_id
+    FROM (
+      SELECT p_tenant_id AS tenant_id
+      UNION
+      SELECT ut.tenant_id
+      FROM public.user_tenants ut
+      WHERE ut.user_id = p_user_id AND ut.role = 'owner'
+    ) owned
+    ORDER BY tenant_id
+  LOOP
+    PERFORM pg_advisory_xact_lock(
+      hashtextextended('tenant_owner_lifecycle_' || owner_tenant.tenant_id, 0)
+    );
+  END LOOP;
+  IF p_tenant_delete THEN
+    PERFORM public.steward_lock_tenant_deletion(p_tenant_id);
+  END IF;
+  SELECT true INTO tenant_exists FROM public.tenants t WHERE t.id = p_tenant_id FOR UPDATE;
+  tenant_exists := COALESCE(tenant_exists, false);
+  RETURN NEXT;
+END
+$$;
+`;
+
 function databaseUrl(database: string): string {
   const url = new URL(process.env.DATABASE_URL as string);
   url.pathname = `/${database}`;
@@ -133,6 +183,14 @@ describeWithPostgres("SEC-169 operator lifecycle on the real Steward schema", ()
       expect(installed).toEqual({ relations: 71, policies: 73 });
 
       await runOperatorScript("rls-bootstrap.sql", true);
+      await db.unsafe(personalLifecycleLockDefinition);
+      await db.unsafe(
+        "REVOKE ALL ON FUNCTION public.steward_lock_personal_lifecycle(uuid,text,boolean) FROM PUBLIC",
+      );
+      await db.unsafe(
+        `ALTER FUNCTION public.steward_lock_personal_lifecycle(uuid,text,boolean) OWNER TO ${migrationRole}`,
+      );
+      await runOperatorScript("rls-bootstrap.sql", true);
       await runOperatorScript("rls-upgrade-personal-lifecycle.sql", true);
       await admin.unsafe(`ALTER ROLE ${appRole} PASSWORD '${appRolePassword}'`);
       await admin.unsafe(`ALTER ROLE ${migrationRole} PASSWORD '${migrationRolePassword}'`);
@@ -230,6 +288,7 @@ describeWithPostgres("SEC-169 operator lifecycle on the real Steward schema", ()
           tenant_id_execute: boolean;
           user_id_execute: boolean;
           public_lock_execute: boolean;
+          personal_lock_execute: boolean;
           audit_sequence_usage: boolean;
           other_sequence_usage: boolean;
           default_sequence_grant: boolean;
@@ -240,6 +299,7 @@ describeWithPostgres("SEC-169 operator lifecycle on the real Steward schema", ()
           has_function_privilege(${platformRole}, 'steward_rls.tenant_id()', 'EXECUTE') AS tenant_id_execute,
           has_function_privilege(${platformRole}, 'steward_rls.user_id()', 'EXECUTE') AS user_id_execute,
           has_function_privilege(${platformRole}, 'public.steward_lock_tenant_deletion(text)', 'EXECUTE') AS public_lock_execute,
+          has_function_privilege(${platformRole}, 'public.steward_lock_personal_lifecycle(uuid,text,boolean)', 'EXECUTE') AS personal_lock_execute,
           has_sequence_privilege(${platformRole}, 'public.audit_events_id_seq', 'USAGE,SELECT') AS audit_sequence_usage,
           has_sequence_privilege(${platformRole}, 'public.audit_checkpoints_id_seq', 'USAGE') AS other_sequence_usage,
           EXISTS (
@@ -255,6 +315,7 @@ describeWithPostgres("SEC-169 operator lifecycle on the real Steward schema", ()
         tenant_id_execute: true,
         user_id_execute: false,
         public_lock_execute: false,
+        personal_lock_execute: false,
         audit_sequence_usage: true,
         other_sequence_usage: false,
         default_sequence_grant: false,
@@ -463,22 +524,121 @@ describeWithPostgres("SEC-169 operator lifecycle on the real Steward schema", ()
 
       await admin.unsafe(`CREATE ROLE ${hostileRole} NOLOGIN`);
 
+      // The migration-owned INVOKER helper is deliberately executable by the
+      // app and bootstrap roles only. Reject both an unexpected grantee and a
+      // grant option, then prove bootstrap resets the complete named ACL.
+      await db.unsafe(
+        `GRANT EXECUTE ON FUNCTION public.steward_lock_personal_lifecycle(uuid,text,boolean) TO ${hostileRole} WITH GRANT OPTION`,
+      );
+      await db.unsafe(
+        `GRANT EXECUTE ON FUNCTION public.steward_lock_personal_lifecycle(uuid,text,boolean) TO ${platformRole}`,
+      );
+      await db.unsafe(
+        "GRANT EXECUTE ON FUNCTION public.steward_lock_personal_lifecycle(uuid,text,boolean) TO PUBLIC",
+      );
+      const personalLockAclDrift = createDb(appDatabaseUrl());
+      try {
+        await expect(
+          assertRlsDeploymentSafety(personalLockAclDrift.db, {
+            expectedRole: appRole,
+            expectedPlatformRole: platformRole,
+            expectedBootstrapRole: definerRole,
+            expectedMigrationRole: migrationRole,
+          }),
+        ).rejects.toThrow("RLS_DEPLOYMENT_PERSONAL_LIFECYCLE_LOCK_ACL_DRIFT");
+        await expect(runOperatorScript("rls-activate.sql")).rejects.toThrow(
+          "personal lifecycle lock ACL manifest drift",
+        );
+      } finally {
+        await personalLockAclDrift.client.end({ timeout: 5 });
+      }
+      await runOperatorScript("rls-bootstrap.sql", true);
+      const [personalLockPrivileges] = await db<
+        {
+          app: boolean;
+          bootstrap: boolean;
+          platform: boolean;
+          hostile: boolean;
+          public: boolean;
+          grantable: boolean;
+        }[]
+      >`
+        SELECT
+          has_function_privilege(${appRole}, 'public.steward_lock_personal_lifecycle(uuid,text,boolean)', 'EXECUTE') AS app,
+          has_function_privilege(${definerRole}, 'public.steward_lock_personal_lifecycle(uuid,text,boolean)', 'EXECUTE') AS bootstrap,
+          has_function_privilege(${platformRole}, 'public.steward_lock_personal_lifecycle(uuid,text,boolean)', 'EXECUTE') AS platform,
+          has_function_privilege(${hostileRole}, 'public.steward_lock_personal_lifecycle(uuid,text,boolean)', 'EXECUTE') AS hostile,
+          EXISTS (
+            SELECT 1 FROM pg_proc function_object
+            CROSS JOIN LATERAL aclexplode(function_object.proacl) privilege
+            WHERE function_object.oid =
+                'public.steward_lock_personal_lifecycle(uuid,text,boolean)'::regprocedure
+              AND privilege.grantee = 0 AND privilege.privilege_type = 'EXECUTE'
+          ) AS public,
+          EXISTS (
+            SELECT 1 FROM pg_proc function_object
+            CROSS JOIN LATERAL aclexplode(function_object.proacl) privilege
+            WHERE function_object.oid =
+                'public.steward_lock_personal_lifecycle(uuid,text,boolean)'::regprocedure
+              AND privilege.is_grantable
+          ) AS grantable
+      `;
+      expect(personalLockPrivileges).toEqual({
+        app: true,
+        bootstrap: true,
+        platform: false,
+        hostile: false,
+        public: false,
+        grantable: false,
+      });
+
+      await db.unsafe(`
+        CREATE OR REPLACE FUNCTION public.steward_lock_personal_lifecycle(
+          p_user_id uuid, p_tenant_id text, p_tenant_delete boolean DEFAULT false
+        ) RETURNS TABLE (user_exists boolean, tenant_exists boolean)
+        LANGUAGE plpgsql AS $$ BEGIN user_exists := false; tenant_exists := false; RETURN NEXT; END $$
+      `);
+      const personalLockDefinitionDrift = createDb(appDatabaseUrl());
+      try {
+        await expect(
+          assertRlsDeploymentSafety(personalLockDefinitionDrift.db, {
+            expectedRole: appRole,
+            expectedPlatformRole: platformRole,
+            expectedBootstrapRole: definerRole,
+            expectedMigrationRole: migrationRole,
+          }),
+        ).rejects.toThrow("RLS_DEPLOYMENT_PERSONAL_LIFECYCLE_LOCK_DEFINITION_DRIFT");
+        await expect(runOperatorScript("rls-activate.sql")).rejects.toThrow(
+          "personal lifecycle lock semantic manifest drift",
+        );
+      } finally {
+        await personalLockDefinitionDrift.client.end({ timeout: 5 });
+        await db.unsafe(personalLifecycleLockDefinition);
+        await db.unsafe(
+          `ALTER FUNCTION public.steward_lock_personal_lifecycle(uuid,text,boolean) OWNER TO ${migrationRole}`,
+        );
+        await runOperatorScript("rls-bootstrap.sql", true);
+      }
+
       // NOINHERIT does not make role membership harmless: SET ROLE can still
       // assume an ordinary ACL-carrier role. Reject the app's entire membership
       // graph so indirect TRUNCATE/function/cross-database grants cannot evade
       // the direct ACL manifests.
+      const carrierSchema = `steward_acl_carrier_${suffix}`;
       const carrierTable = `steward_app_acl_carrier_${suffix}`;
-      await db.unsafe(`CREATE TABLE public.${carrierTable} (id integer)`);
-      await db.unsafe(`INSERT INTO public.${carrierTable} VALUES (1)`);
-      await db.unsafe(`GRANT TRUNCATE ON public.${carrierTable} TO ${hostileRole}`);
+      await db.unsafe(`CREATE SCHEMA ${carrierSchema}`);
+      await db.unsafe(`CREATE TABLE ${carrierSchema}.${carrierTable} (id integer)`);
+      await db.unsafe(`INSERT INTO ${carrierSchema}.${carrierTable} VALUES (1)`);
+      await db.unsafe(`GRANT USAGE ON SCHEMA ${carrierSchema} TO ${hostileRole}`);
+      await db.unsafe(`GRANT TRUNCATE ON ${carrierSchema}.${carrierTable} TO ${hostileRole}`);
       await admin.unsafe(`GRANT ${hostileRole} TO ${appRole}`);
       const appCarrierDrift = createDb(appDatabaseUrl());
       try {
         await appCarrierDrift.client.unsafe(`SET ROLE ${hostileRole}`);
-        await appCarrierDrift.client.unsafe(`TRUNCATE public.${carrierTable}`);
+        await appCarrierDrift.client.unsafe(`TRUNCATE ${carrierSchema}.${carrierTable}`);
         await appCarrierDrift.client.unsafe("RESET ROLE");
         const [{ count: carrierRows }] = await db.unsafe<{ count: number }[]>(
-          `SELECT count(*)::int AS count FROM public.${carrierTable}`,
+          `SELECT count(*)::int AS count FROM ${carrierSchema}.${carrierTable}`,
         );
         expect(carrierRows).toBe(0);
         await expect(
@@ -495,7 +655,7 @@ describeWithPostgres("SEC-169 operator lifecycle on the real Steward schema", ()
       } finally {
         await appCarrierDrift.client.end({ timeout: 5 });
         await admin.unsafe(`REVOKE ${hostileRole} FROM ${appRole}`);
-        await db.unsafe(`DROP TABLE public.${carrierTable}`);
+        await db.unsafe(`DROP SCHEMA ${carrierSchema} CASCADE`);
       }
 
       // A stale TRUNCATE grant bypasses RLS. Both pre-traffic gates must reject

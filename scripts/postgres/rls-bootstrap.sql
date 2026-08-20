@@ -251,6 +251,34 @@ SELECT format(
   'GRANT EXECUTE ON FUNCTION public.steward_lock_tenant_deletion(text) TO %I',
   :'steward_app_role'
 ) \gexec
+-- The personal lifecycle helper is migration-owned public INVOKER code used by
+-- both the application route and bootstrap-owned platform wrappers. Reset its
+-- complete named ACL so stale roles or grant options cannot survive a rerun.
+SELECT 'REVOKE ALL PRIVILEGES ON FUNCTION public.steward_lock_personal_lifecycle(uuid,text,boolean) FROM PUBLIC'
+WHERE to_regprocedure(
+  'public.steward_lock_personal_lifecycle(uuid,text,boolean)'
+) IS NOT NULL \gexec
+SELECT format(
+  'REVOKE ALL PRIVILEGES ON FUNCTION %s FROM %I',
+  function_object.oid::regprocedure,
+  granted_role.rolname
+)
+FROM pg_proc function_object
+CROSS JOIN LATERAL aclexplode(
+  COALESCE(function_object.proacl, acldefault('f', function_object.proowner))
+) privilege
+JOIN pg_roles granted_role ON granted_role.oid = privilege.grantee
+WHERE function_object.oid =
+    to_regprocedure('public.steward_lock_personal_lifecycle(uuid,text,boolean)')
+  AND privilege.grantee <> function_object.proowner
+GROUP BY function_object.oid, granted_role.rolname
+\gexec
+SELECT format(
+  'GRANT EXECUTE ON FUNCTION public.steward_lock_personal_lifecycle(uuid,text,boolean) TO %I, %I',
+  :'steward_app_role', :'steward_bootstrap_role'
+) WHERE to_regprocedure(
+  'public.steward_lock_personal_lifecycle(uuid,text,boolean)'
+) IS NOT NULL \gexec
 
 -- The platform login is a narrow, separately credentialed authority. Reset
 -- every named ACL it could have retained from an earlier bootstrap before

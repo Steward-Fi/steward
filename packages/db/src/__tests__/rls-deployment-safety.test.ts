@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { assertRlsDeploymentSafety } from "../rls-deployment-safety";
+import {
+  assertRlsDeploymentSafety,
+  EXPECTED_PERSONAL_LIFECYCLE_LOCK_DEFINITION,
+} from "../rls-deployment-safety";
 import { EXPECTED_RLS_FUNCTION_DEFINITIONS } from "../rls-function-manifest";
 import {
   EXPECTED_PUBLIC_RELATIONS,
@@ -20,6 +23,8 @@ function database(options?: {
   platformAclDrift?: boolean;
   publicDefiner?: boolean;
   appMembershipDrift?: boolean;
+  personalLockDefinitionDrift?: boolean;
+  personalLockAclDrift?: boolean;
 }) {
   let query = 0;
   return {
@@ -169,11 +174,41 @@ function database(options?: {
         );
       }
       if (query === 9) {
+        return [
+          {
+            identity: EXPECTED_PERSONAL_LIFECYCLE_LOCK_DEFINITION.identity,
+            result: EXPECTED_PERSONAL_LIFECYCLE_LOCK_DEFINITION.result,
+            language: EXPECTED_PERSONAL_LIFECYCLE_LOCK_DEFINITION.language,
+            volatility: EXPECTED_PERSONAL_LIFECYCLE_LOCK_DEFINITION.volatility,
+            parallelism: EXPECTED_PERSONAL_LIFECYCLE_LOCK_DEFINITION.parallelism,
+            security_definer: EXPECTED_PERSONAL_LIFECYCLE_LOCK_DEFINITION.securityDefiner,
+            settings: EXPECTED_PERSONAL_LIFECYCLE_LOCK_DEFINITION.settings,
+            argument_defaults: EXPECTED_PERSONAL_LIFECYCLE_LOCK_DEFINITION.argumentDefaults,
+            owner: "steward_migrator",
+            body_md5: options?.personalLockDefinitionDrift
+              ? "0".repeat(32)
+              : EXPECTED_PERSONAL_LIFECYCLE_LOCK_DEFINITION.bodyMd5,
+          },
+        ];
+      }
+      if (query === 10) {
+        const rows = [
+          { grantee: "steward_app", privilege: "EXECUTE", grantable: false },
+          { grantee: "steward_bootstrap_owner", privilege: "EXECUTE", grantable: false },
+          { grantee: "steward_migrator", privilege: "EXECUTE", grantable: false },
+        ];
+        if (options?.personalLockAclDrift) {
+          rows.push({ grantee: "steward_platform", privilege: "EXECUTE", grantable: false });
+        }
+        return rows.sort((left, right) => left.grantee.localeCompare(right.grantee));
+      }
+      if (query === 11) {
         const appAcls = [
           "schema:public:USAGE:false",
           "schema:steward_bootstrap:USAGE:false",
           "schema:steward_rls:USAGE:false",
           "function:steward_lock_tenant_deletion(text):EXECUTE:false",
+          "function:steward_lock_personal_lifecycle(uuid,text,boolean):EXECUTE:false",
           ...EXPECTED_RLS_FUNCTION_DEFINITIONS.filter((definition) => definition.appExecute).map(
             (definition) => `function:${definition.identity}:EXECUTE:false`,
           ),
@@ -188,14 +223,14 @@ function database(options?: {
         if (options?.appAclDrift) appAcls.push("relation:public.users:TRUNCATE:false");
         return appAcls.sort().map((acl) => ({ acl }));
       }
-      if (query === 10) return [];
-      if (query === 11) return options?.publicDefiner ? [{ identity: "public.hostile()" }] : [];
       if (query === 12) return [];
-      if (query === 13) {
-        return options?.aclDrift ? [{ object_name: "steward_bootstrap.unknown_authority" }] : [];
-      }
+      if (query === 13) return options?.publicDefiner ? [{ identity: "public.hostile()" }] : [];
       if (query === 14) return [];
       if (query === 15) {
+        return options?.aclDrift ? [{ object_name: "steward_bootstrap.unknown_authority" }] : [];
+      }
+      if (query === 16) return [];
+      if (query === 17) {
         const acls = [
           "function:steward_bootstrap.platform_delete_user(uuid):EXECUTE:false",
           "function:steward_bootstrap.platform_revoke_user_refresh_tokens(uuid):EXECUTE:false",
@@ -217,7 +252,7 @@ function database(options?: {
         if (options?.platformAclDrift) acls.push("relation:public.users:DELETE:false");
         return acls.map((acl) => ({ acl }));
       }
-      if (query > 15) return [];
+      if (query > 17) return [];
       const policies = EXPECTED_RLS_POLICY_DEFINITIONS.filter(
         (policy) => policy.policy_group === "core" || options?.capabilities,
       ).map(({ policy_group: _group, ...policy }) => ({ ...policy }));
@@ -277,6 +312,12 @@ describe("RLS deployment safety gate", () => {
     await expect(
       assertRlsDeploymentSafety(database({ functionAclDrift: true }), roles),
     ).rejects.toThrow("RLS_DEPLOYMENT_FUNCTION_ACL_DRIFT");
+    await expect(
+      assertRlsDeploymentSafety(database({ personalLockDefinitionDrift: true }), roles),
+    ).rejects.toThrow("RLS_DEPLOYMENT_PERSONAL_LIFECYCLE_LOCK_DEFINITION_DRIFT");
+    await expect(
+      assertRlsDeploymentSafety(database({ personalLockAclDrift: true }), roles),
+    ).rejects.toThrow("RLS_DEPLOYMENT_PERSONAL_LIFECYCLE_LOCK_ACL_DRIFT");
     await expect(
       assertRlsDeploymentSafety(database({ appDatabaseAclDrift: true }), roles),
     ).rejects.toThrow("RLS_DEPLOYMENT_APP_DATABASE_ACL_DRIFT");

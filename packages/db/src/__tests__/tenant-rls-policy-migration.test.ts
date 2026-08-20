@@ -128,6 +128,12 @@ describe("0111 tenant RLS policy installation", () => {
     expect(bootstrap).toContain("steward_bootstrap.agent_subject(text,text,text), ");
     expect(bootstrap).toContain("steward_bootstrap.platform_user_tenant_ids(uuid), ");
     expect(bootstrap).not.toContain("GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA steward_bootstrap");
+    expect(bootstrap).toContain(
+      "to_regprocedure('public.steward_lock_personal_lifecycle(uuid,text,boolean)')",
+    );
+    expect(bootstrap).toContain(
+      "GRANT EXECUTE ON FUNCTION public.steward_lock_personal_lifecycle(uuid,text,boolean) TO %I, %I",
+    );
     expect(bootstrap).toContain("platform_set_user_deactivation(uuid,boolean)");
     expect(bootstrap).toContain("BEGIN;");
     expect(bootstrap).toContain("COMMIT;");
@@ -139,6 +145,9 @@ describe("0111 tenant RLS policy installation", () => {
     expect(activate).toContain("ENABLE ROW LEVEL SECURITY");
     expect(activate).toContain("FORCE ROW LEVEL SECURITY");
     expect(activate).toContain("steward_migration_maintenance");
+    expect(activate).toContain("SEC-169 personal lifecycle lock semantic manifest drift");
+    expect(activate).toContain("SEC-169 personal lifecycle lock ACL manifest drift");
+    expect(activate).toContain("fa9e1a06071746fd3b29dbc4db3706ad");
     expect(rollback).toContain("NO FORCE ROW LEVEL SECURITY");
     expect(rollback).toContain("DISABLE ROW LEVEL SECURITY");
   });
