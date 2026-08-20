@@ -534,8 +534,10 @@ export function hasTenantTransactionDatabase(expected?: {
  * retaining the request-owned database capability. Callers must bind their own
  * explicit tenant-RLS transaction before accessing tenant data.
  *
- * PGLite cannot provide an autonomous commit boundary, so escaping an active
- * PGLite tenant transaction fails closed rather than masquerading a savepoint
+ * postgres-js uses another pooled connection. The shipped neon-websocket
+ * request pool reserves a second connection for this exact purpose. PGLite has
+ * no independent connection/commit boundary, so an attempted escape from an
+ * active tenant transaction fails closed instead of masquerading a savepoint
  * as durable state.
  */
 export async function withIndependentDatabase<T>(

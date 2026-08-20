@@ -100,6 +100,7 @@ import {
   toTxRecord,
   transactions,
   vault,
+  withIndependentAuthenticatedTenantDatabase,
 } from "../services/context";
 import {
   isRuntimeVaultRpcMethodAllowed,
@@ -7646,34 +7647,9 @@ vaultRoutes.post("/:agentId/monero/transfer", async (c) => {
   );
   if (!signerAuthorization.ok) return signerAuthorization.response;
 
-  const policySet = await getScopedPolicySet(tenantId, agentId, c.get("agentPolicyIds"));
-  const hasMoneroSigningPolicy = policySet.some((p) => p.enabled && p.type === "raw-signing-chain");
-  if (!hasMoneroSigningPolicy) {
-    return c.json<ApiResponse>(
-      {
-        ok: false,
-        error:
-          "Monero transfers require a `raw-signing-chain` policy for this agent. Add one that explicitly allows monero and ed25519.",
-      },
-      403,
-    );
-  }
-  const conditionSets = await loadConditionSetsForPolicies(tenantId, policySet);
-  const rateLimitResult = await enforceRateLimit(agentId, policySet);
-  if (!rateLimitResult.allowed) {
-    if (rateLimitResult.headers) {
-      for (const [key, value] of Object.entries(rateLimitResult.headers)) c.header(key, value);
-    }
-    return c.json<ApiResponse>(
-      { ok: false, error: rateLimitResult.reason || "Rate limit exceeded" },
-      429,
-    );
-  }
-  if (rateLimitResult.headers) {
-    for (const [key, value] of Object.entries(rateLimitResult.headers)) c.header(key, value);
-  }
-
-  // This route broadcasts: require idempotency and honor referenceId dedupe.
+  // Recover an already-durable request before reading mutable policy/rate
+  // state. A retry after an acknowledgement loss must return the anchored
+  // outcome even when limits or policy configuration changed meanwhile.
   const idempotencyResponse = requireBroadcastActionIdempotency(c, true, "Monero transfers");
   if (idempotencyResponse) return idempotencyResponse;
   const idempotencyKey = c.req.header("Idempotency-Key") as string;
@@ -7716,10 +7692,6 @@ vaultRoutes.post("/:agentId/monero/transfer", async (c) => {
     });
   }
 
-  const destinationTotalPiconero = destinations.reduce(
-    (total, destination) => total + BigInt(destination.amountPiconero),
-    0n,
-  );
   const moneroChainId = scopeNetwork === "mainnet" ? 301 : 302;
 
   return withMoneroRelayLock(agentId, async () => {
@@ -7753,6 +7725,39 @@ vaultRoutes.post("/:agentId/monero/transfer", async (c) => {
         },
       });
     }
+
+    const policySet = await getScopedPolicySet(tenantId, agentId, c.get("agentPolicyIds"));
+    const hasMoneroSigningPolicy = policySet.some(
+      (policy) => policy.enabled && policy.type === "raw-signing-chain",
+    );
+    if (!hasMoneroSigningPolicy) {
+      return c.json<ApiResponse>(
+        {
+          ok: false,
+          error:
+            "Monero transfers require a `raw-signing-chain` policy for this agent. Add one that explicitly allows monero and ed25519.",
+        },
+        403,
+      );
+    }
+    const conditionSets = await loadConditionSetsForPolicies(tenantId, policySet);
+    const rateLimitResult = await enforceRateLimit(agentId, policySet);
+    if (!rateLimitResult.allowed) {
+      if (rateLimitResult.headers) {
+        for (const [key, value] of Object.entries(rateLimitResult.headers)) c.header(key, value);
+      }
+      return c.json<ApiResponse>(
+        { ok: false, error: rateLimitResult.reason || "Rate limit exceeded" },
+        429,
+      );
+    }
+    if (rateLimitResult.headers) {
+      for (const [key, value] of Object.entries(rateLimitResult.headers)) c.header(key, value);
+    }
+    const destinationTotalPiconero = destinations.reduce(
+      (total, destination) => total + BigInt(destination.amountPiconero),
+      0n,
+    );
 
     const stats = await getTransactionStats(agentId, moneroChainId);
     const policyResults: PolicyResult[] = [];
@@ -7916,49 +7921,69 @@ vaultRoutes.post("/:agentId/monero/transfer", async (c) => {
       referenceId: referenceId ?? null,
       recoveryEffectsState: "pending",
     };
-    await withTenantAuditedTransaction(tenantId, async (rawTx, appendRequiredAudit) => {
-      const tx = rawTx as typeof db;
-      await tx.insert(transactions).values({
-        id: transactionId,
-        agentId,
-        status: "approved",
-        toAddress: destinations[0].address,
-        value: totalPiconero.toString(),
-        data: null,
-        chainId: moneroChainId,
-        txHash: prepared.txHash,
-        actionType: "monero_transfer",
-        actionPayload: recoveryPayload,
-        policyResults,
-        signedAt: new Date(),
-      });
-      await appendRequiredAudit({
+    try {
+      const authenticatedUserId = c.get("userId");
+      const tenantTransactionUserId =
+        authenticatedUserId &&
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+          authenticatedUserId,
+        )
+          ? authenticatedUserId
+          : undefined;
+      await withIndependentAuthenticatedTenantDatabase(
         tenantId,
-        actorType: "user",
-        actorId: c.get("userId") ?? c.get("authType") ?? null,
-        action: "vault.monero_transfer.authorized",
-        resourceType: "transaction",
-        resourceId: transactionId,
-        metadata: {
-          walletScope,
-          network: prepared.network,
-          txHash: prepared.txHash,
-          txMetadataDigest: recoveryPayload.txMetadataDigest,
-          requestFingerprint,
-          destinations,
-          destinationTotalPiconero: destinationTotalPiconero.toString(),
-          feePiconero: feePiconero.toString(),
-          totalPiconero: totalPiconero.toString(),
-          priority: priority ?? 0,
-          referenceId: referenceId ?? null,
-          policyResults,
-          ...signerAuthAuditMetadata(signerAuthorization.auth),
-        },
-        ipAddress: c.req.header("x-forwarded-for") ?? null,
-        userAgent: c.req.header("user-agent") ?? null,
-        requestId: c.get("requestId") ?? null,
-      });
-    });
+        c.get("authType") ?? "monero-transfer",
+        c.get("agentSubject") ?? c.get("userId") ?? agentId,
+        () =>
+          withTenantAuditedTransaction(tenantId, async (rawTx, appendRequiredAudit) => {
+            const tx = rawTx as typeof db;
+            await tx.insert(transactions).values({
+              id: transactionId,
+              agentId,
+              status: "approved",
+              toAddress: destinations[0].address,
+              value: totalPiconero.toString(),
+              data: null,
+              chainId: moneroChainId,
+              txHash: prepared.txHash,
+              actionType: "monero_transfer",
+              actionPayload: recoveryPayload,
+              policyResults,
+              signedAt: new Date(),
+            });
+            await appendRequiredAudit({
+              tenantId,
+              actorType: "user",
+              actorId: c.get("userId") ?? c.get("authType") ?? null,
+              action: "vault.monero_transfer.authorized",
+              resourceType: "transaction",
+              resourceId: transactionId,
+              metadata: {
+                walletScope,
+                network: prepared.network,
+                txHash: prepared.txHash,
+                txMetadataDigest: recoveryPayload.txMetadataDigest,
+                requestFingerprint,
+                destinations,
+                destinationTotalPiconero: destinationTotalPiconero.toString(),
+                feePiconero: feePiconero.toString(),
+                totalPiconero: totalPiconero.toString(),
+                priority: priority ?? 0,
+                referenceId: referenceId ?? null,
+                policyResults,
+                ...signerAuthAuditMetadata(signerAuthorization.auth),
+              },
+              ipAddress: c.req.header("x-forwarded-for") ?? null,
+              userAgent: c.req.header("user-agent") ?? null,
+              requestId: c.get("requestId") ?? null,
+            });
+          }),
+        tenantTransactionUserId,
+      );
+    } catch (checkpointError) {
+      await discardPrepared();
+      throw checkpointError;
+    }
 
     let relayAccepted = false;
     try {
