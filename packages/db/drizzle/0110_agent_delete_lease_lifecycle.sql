@@ -70,7 +70,7 @@ END;
 $$;
 --> statement-breakpoint
 CREATE TRIGGER upstream_credential_leases_workspace_fence
-BEFORE INSERT OR UPDATE OF tenant_id, workspace_id, status ON upstream_credential_leases
+BEFORE INSERT OR UPDATE OF tenant_id, workspace_id, status ON public.upstream_credential_leases
 FOR EACH ROW EXECUTE FUNCTION steward_fence_upstream_lease_workspace();
 --> statement-breakpoint
 CREATE OR REPLACE FUNCTION steward_fence_provider_action_agent()
@@ -97,7 +97,7 @@ END;
 $$;
 --> statement-breakpoint
 CREATE TRIGGER provider_action_bindings_agent_fence
-BEFORE INSERT OR UPDATE OF tenant_id, actor_agent_id, status ON provider_action_bindings
+BEFORE INSERT OR UPDATE OF tenant_id, actor_agent_id, status ON public.provider_action_bindings
 FOR EACH ROW EXECUTE FUNCTION steward_fence_provider_action_agent();
 --> statement-breakpoint
 CREATE OR REPLACE FUNCTION steward_guard_agent_delete()
@@ -174,7 +174,7 @@ END;
 $$;
 --> statement-breakpoint
 CREATE TRIGGER agents_delete_authority_guard
-BEFORE DELETE ON agents
+BEFORE DELETE ON public.agents
 FOR EACH ROW EXECUTE FUNCTION steward_guard_agent_delete();
 --> statement-breakpoint
 CREATE OR REPLACE FUNCTION steward_guard_workspace_delete()
@@ -199,7 +199,7 @@ END;
 $$;
 --> statement-breakpoint
 CREATE TRIGGER workspaces_delete_authority_guard
-BEFORE DELETE ON workspaces
+BEFORE DELETE ON public.workspaces
 FOR EACH ROW EXECUTE FUNCTION steward_guard_workspace_delete();
 --> statement-breakpoint
 -- Capability tables are optional, but an earlier plugin installation can leave
@@ -212,7 +212,8 @@ BEGIN
     EXECUTE 'DROP TRIGGER IF EXISTS capability_grants_agent_fence ON public.capability_grants';
     EXECUTE $trigger$
       CREATE TRIGGER capability_grants_agent_fence
-      BEFORE INSERT OR UPDATE OF tenant_id, agent_id, status ON public.capability_grants
+      BEFORE INSERT OR UPDATE OF tenant_id, agent_id, status, secret_route_id
+      ON public.capability_grants
       FOR EACH ROW
       WHEN (NEW.status = 'active')
       EXECUTE FUNCTION steward_fence_agent_authority_creation()

@@ -189,7 +189,8 @@ describe("0109 agent policy builder-perps reconciliation", () => {
             FROM pg_trigger trigger
             WHERE trigger.tgname IN (
               'upstream_credential_leases_agent_fence',
-              'secret_routes_agent_fence'
+              'secret_routes_agent_fence',
+              'capability_grants_agent_fence'
             )
           `;
           expect(
@@ -199,6 +200,10 @@ describe("0109 agent policy builder-perps reconciliation", () => {
           expect(
             fenceDefinitions.find(({ name }) => name === "secret_routes_agent_fence")?.definition,
           ).toContain("UPDATE OF tenant_id, agent_id, enabled");
+          expect(
+            fenceDefinitions.find(({ name }) => name === "capability_grants_agent_fence")
+              ?.definition,
+          ).toContain("UPDATE OF tenant_id, agent_id, status, secret_route_id");
           const capabilityAgentFence = await verified<{ exists: boolean }[]>`
             SELECT EXISTS (
               SELECT 1 FROM pg_trigger
@@ -211,9 +216,11 @@ describe("0109 agent policy builder-perps reconciliation", () => {
             INSERT INTO capability_grants (id, tenant_id, agent_id, status)
             VALUES (${orphanGrantId}, 'orphan-tenant', 'deleted-agent', 'revoked')
           `;
-          const reactivation = verified`
-            UPDATE capability_grants SET status='active' WHERE id=${orphanGrantId}
-          `;
+          const reactivation = (async () => {
+            await verified`
+              UPDATE capability_grants SET status='active' WHERE id=${orphanGrantId}
+            `;
+          })();
           await expect(reactivation).rejects.toMatchObject({ code: "23503" });
           const applied = await verified<{ count: number }[]>`
           SELECT count(*)::int AS count FROM drizzle.__drizzle_migrations
