@@ -48,7 +48,7 @@ import {
 } from "../middleware/idempotency";
 import { isHstsEnabled } from "../middleware/security-headers";
 import { invalidateTenantCorsCache } from "../middleware/tenant-cors";
-import { writeAuditEvent } from "../services/audit";
+import { withTenantAuditedTransaction, writeAuditEvent } from "../services/audit";
 import { normalizeAuthAbuseConfig } from "../services/auth-abuse";
 import {
   type ApiResponse,
@@ -78,8 +78,6 @@ tenantConfigRoutes.use("*", async (c, next) => {
   await next();
 });
 
-type TenantConfigRow = typeof tenantConfigsTable.$inferSelect;
-type AgentPolicyRow = typeof policies.$inferSelect;
 type TenantAppClientSecretRow = typeof tenantAppClientSecrets.$inferSelect;
 type TenantSsoDomainRow = typeof tenantSsoDomains.$inferSelect;
 type TenantSamlSsoConfigRow = typeof tenantSamlSsoConfigs.$inferSelect;
@@ -237,52 +235,7 @@ function normalizeTenantAppClientEmbeddedWallets(
   return { ...value } as TenantAppClient["embeddedWallets"];
 }
 
-async function snapshotTenantConfigRow(tenantId: string): Promise<TenantConfigRow | null> {
-  const [row] = await db
-    .select()
-    .from(tenantConfigsTable)
-    .where(eq(tenantConfigsTable.tenantId, tenantId));
-  return row ?? null;
-}
-
-async function snapshotTenantAppClients(tenantId: string): Promise<TenantAppClient[]> {
-  return readTenantAppClientsForTenant(tenantId);
-}
-
-async function restoreTenantAppClients(
-  tenantId: string,
-  snapshot: TenantAppClient[],
-  secretSnapshot?: TenantAppClientSecretRow[],
-): Promise<void> {
-  await persistTenantAppClientsForTenant(tenantId, snapshot);
-  if (!secretSnapshot) return;
-
-  const clientIds = new Set(snapshot.map((client) => client.id));
-  const secretsToRestore = secretSnapshot.filter((secret) => clientIds.has(secret.clientId));
-  await db.transaction(async (tx) => {
-    await tx.delete(tenantAppClientSecrets).where(eq(tenantAppClientSecrets.tenantId, tenantId));
-    if (secretsToRestore.length > 0) {
-      await tx.insert(tenantAppClientSecrets).values(secretsToRestore);
-    }
-  });
-}
-
-async function snapshotTenantAppClientSecrets(
-  tenantId: string,
-  clientId: string,
-): Promise<TenantAppClientSecretRow[]> {
-  return db
-    .select()
-    .from(tenantAppClientSecrets)
-    .where(
-      and(
-        eq(tenantAppClientSecrets.tenantId, tenantId),
-        eq(tenantAppClientSecrets.clientId, clientId),
-      ),
-    );
-}
-
-async function snapshotTenantAppClientSecretsForTenant(
+async function readTenantAppClientSecretsForTenant(
   tenantId: string,
 ): Promise<TenantAppClientSecretRow[]> {
   return db
@@ -291,48 +244,14 @@ async function snapshotTenantAppClientSecretsForTenant(
     .where(eq(tenantAppClientSecrets.tenantId, tenantId));
 }
 
-async function restoreTenantAppClientSecrets(
-  tenantId: string,
-  clientId: string,
-  snapshot: TenantAppClientSecretRow[],
-): Promise<void> {
-  await db.transaction(async (tx) => {
-    await tx
-      .delete(tenantAppClientSecrets)
-      .where(
-        and(
-          eq(tenantAppClientSecrets.tenantId, tenantId),
-          eq(tenantAppClientSecrets.clientId, clientId),
-        ),
-      );
-    if (snapshot.length > 0) {
-      await tx.insert(tenantAppClientSecrets).values(snapshot);
-    }
-  });
-}
-
-async function snapshotTenantRequestSigningKeys(tenantId: string) {
+async function readTenantRequestSigningKeys(tenantId: string) {
   return db
     .select()
     .from(tenantRequestSigningKeys)
     .where(eq(tenantRequestSigningKeys.tenantId, tenantId));
 }
 
-async function restoreTenantRequestSigningKeys(
-  tenantId: string,
-  snapshot: Array<typeof tenantRequestSigningKeys.$inferSelect>,
-): Promise<void> {
-  await db.transaction(async (tx) => {
-    await tx
-      .delete(tenantRequestSigningKeys)
-      .where(eq(tenantRequestSigningKeys.tenantId, tenantId));
-    if (snapshot.length > 0) {
-      await tx.insert(tenantRequestSigningKeys).values(snapshot);
-    }
-  });
-}
-
-async function snapshotTenantSsoDomain(
+async function readTenantSsoDomain(
   tenantId: string,
   domain: string,
 ): Promise<TenantSsoDomainRow | null> {
@@ -343,67 +262,12 @@ async function snapshotTenantSsoDomain(
   return row ?? null;
 }
 
-async function restoreTenantSsoDomain(
-  tenantId: string,
-  domain: string,
-  snapshot: TenantSsoDomainRow | null,
-): Promise<void> {
-  await db.transaction(async (tx) => {
-    await tx
-      .delete(tenantSsoDomains)
-      .where(and(eq(tenantSsoDomains.tenantId, tenantId), eq(tenantSsoDomains.domain, domain)));
-    if (snapshot) {
-      await tx.insert(tenantSsoDomains).values(snapshot);
-    }
-  });
-}
-
-async function snapshotTenantSamlSsoConfig(
-  tenantId: string,
-): Promise<TenantSamlSsoConfigRow | null> {
+async function readTenantSamlSsoConfig(tenantId: string): Promise<TenantSamlSsoConfigRow | null> {
   const [row] = await db
     .select()
     .from(tenantSamlSsoConfigs)
     .where(eq(tenantSamlSsoConfigs.tenantId, tenantId));
   return row ?? null;
-}
-
-async function restoreTenantSamlSsoConfig(
-  tenantId: string,
-  snapshot: TenantSamlSsoConfigRow | null,
-): Promise<void> {
-  await db.transaction(async (tx) => {
-    await tx.delete(tenantSamlSsoConfigs).where(eq(tenantSamlSsoConfigs.tenantId, tenantId));
-    if (snapshot) {
-      await tx.insert(tenantSamlSsoConfigs).values(snapshot);
-    }
-  });
-}
-
-async function restoreTenantConfigRow(
-  tenantId: string,
-  snapshot: TenantConfigRow | null,
-): Promise<void> {
-  await db.transaction(async (tx) => {
-    await tx.delete(tenantConfigsTable).where(eq(tenantConfigsTable.tenantId, tenantId));
-    if (snapshot) {
-      await tx.insert(tenantConfigsTable).values(snapshot);
-    }
-  });
-  invalidateTenantCorsCache(tenantId);
-}
-
-async function snapshotAgentPolicies(agentId: string): Promise<AgentPolicyRow[]> {
-  return db.select().from(policies).where(eq(policies.agentId, agentId));
-}
-
-async function restoreAgentPolicies(agentId: string, snapshot: AgentPolicyRow[]): Promise<void> {
-  await db.transaction(async (tx) => {
-    await tx.delete(policies).where(eq(policies.agentId, agentId));
-    if (snapshot.length > 0) {
-      await tx.insert(policies).values(snapshot);
-    }
-  });
 }
 
 function parseDecimalToWei(value: unknown): string | null {
@@ -1486,8 +1350,11 @@ function removeAccessAllowlistEntriesFromConfig(
   return next;
 }
 
-async function readAuthAbuseConfigForTenant(tenantId: string): Promise<TenantAuthAbuseConfig> {
-  const [row] = await db
+async function readAuthAbuseConfigForTenant(
+  tenantId: string,
+  executor: typeof db = db,
+): Promise<TenantAuthAbuseConfig> {
+  const [row] = await executor
     .select({ authAbuseConfig: tenantConfigsTable.authAbuseConfig })
     .from(tenantConfigsTable)
     .where(eq(tenantConfigsTable.tenantId, tenantId));
@@ -1501,8 +1368,9 @@ async function readAuthAbuseConfigForTenant(tenantId: string): Promise<TenantAut
 async function persistAuthAbuseConfigForTenant(
   tenantId: string,
   authAbuseConfig: TenantAuthAbuseConfig,
+  executor: typeof db = db,
 ): Promise<TenantAuthAbuseConfig> {
-  const [row] = await db
+  const [row] = await executor
     .insert(tenantConfigsTable)
     .values({ tenantId, authAbuseConfig })
     .onConflictDoUpdate({
@@ -1513,8 +1381,11 @@ async function persistAuthAbuseConfigForTenant(
   return (row?.authAbuseConfig as TenantAuthAbuseConfig | undefined) ?? authAbuseConfig;
 }
 
-async function readAllowedRedirectUrlsForTenant(tenantId: string): Promise<string[]> {
-  const [row] = await db
+async function readAllowedRedirectUrlsForTenant(
+  tenantId: string,
+  executor: typeof db = db,
+): Promise<string[]> {
+  const [row] = await executor
     .select({ allowedRedirectUrls: tenantConfigsTable.allowedRedirectUrls })
     .from(tenantConfigsTable)
     .where(eq(tenantConfigsTable.tenantId, tenantId));
@@ -1524,8 +1395,9 @@ async function readAllowedRedirectUrlsForTenant(tenantId: string): Promise<strin
 async function persistAllowedRedirectUrlsForTenant(
   tenantId: string,
   allowedRedirectUrls: string[],
+  executor: typeof db = db,
 ): Promise<string[]> {
-  const [row] = await db
+  const [row] = await executor
     .insert(tenantConfigsTable)
     .values({ tenantId, allowedRedirectUrls })
     .onConflictDoUpdate({
@@ -1536,8 +1408,11 @@ async function persistAllowedRedirectUrlsForTenant(
   return row.allowedRedirectUrls ?? [];
 }
 
-async function readAllowedOriginsForTenant(tenantId: string): Promise<string[]> {
-  const [row] = await db
+async function readAllowedOriginsForTenant(
+  tenantId: string,
+  executor: typeof db = db,
+): Promise<string[]> {
+  const [row] = await executor
     .select({ allowedOrigins: tenantConfigsTable.allowedOrigins })
     .from(tenantConfigsTable)
     .where(eq(tenantConfigsTable.tenantId, tenantId));
@@ -1547,8 +1422,9 @@ async function readAllowedOriginsForTenant(tenantId: string): Promise<string[]> 
 async function persistAllowedOriginsForTenant(
   tenantId: string,
   allowedOrigins: string[],
+  executor: typeof db = db,
 ): Promise<string[]> {
-  const [row] = await db
+  const [row] = await executor
     .insert(tenantConfigsTable)
     .values({ tenantId, allowedOrigins })
     .onConflictDoUpdate({
@@ -1556,12 +1432,14 @@ async function persistAllowedOriginsForTenant(
       set: { allowedOrigins, updatedAt: new Date() },
     })
     .returning({ allowedOrigins: tenantConfigsTable.allowedOrigins });
-  invalidateTenantCorsCache(tenantId);
   return row.allowedOrigins ?? [];
 }
 
-async function readTenantAppClientsForTenant(tenantId: string): Promise<TenantAppClient[]> {
-  const rows = await db
+async function readTenantAppClientsForTenant(
+  tenantId: string,
+  executor: typeof db = db,
+): Promise<TenantAppClient[]> {
+  const rows = await executor
     .select()
     .from(tenantAppClientsTable)
     .where(eq(tenantAppClientsTable.tenantId, tenantId));
@@ -1576,52 +1454,48 @@ async function readTenantAppClientsForTenant(tenantId: string): Promise<TenantAp
 async function persistTenantAppClientsForTenant(
   tenantId: string,
   appClients: TenantAppClient[],
+  executor: typeof db = db,
 ): Promise<TenantAppClient[]> {
   const normalized = normalizeTenantAppClients(appClients);
   if (typeof normalized === "string") {
     throw new Error(normalized);
   }
 
-  await db.transaction(async (tx) => {
-    const existingSecrets = await tx
-      .select()
-      .from(tenantAppClientSecrets)
-      .where(eq(tenantAppClientSecrets.tenantId, tenantId));
-    const nextClientIds = new Set(normalized.map((client) => client.id));
-    const secretsToPreserve = existingSecrets.filter((secret) =>
-      nextClientIds.has(secret.clientId),
-    );
+  const existingSecrets = await executor
+    .select()
+    .from(tenantAppClientSecrets)
+    .where(eq(tenantAppClientSecrets.tenantId, tenantId));
+  const nextClientIds = new Set(normalized.map((client) => client.id));
+  const secretsToPreserve = existingSecrets.filter((secret) => nextClientIds.has(secret.clientId));
 
-    await tx.delete(tenantAppClientsTable).where(eq(tenantAppClientsTable.tenantId, tenantId));
-    if (normalized.length > 0) {
-      await tx.insert(tenantAppClientsTable).values(
-        normalized.map((client) => ({
-          id: client.id,
-          tenantId,
-          name: client.name,
-          environment: client.environment,
-          enabled: client.enabled !== false,
-          isDefault: client.isDefault === true,
-          allowedOrigins: client.allowedOrigins ?? [],
-          allowedRedirectUrls: client.allowedRedirectUrls ?? [],
-          allowedBundleIds: client.allowedBundleIds ?? [],
-          allowedPackageNames: client.allowedPackageNames ?? [],
-          loginMethods: client.loginMethods ?? null,
-          embeddedWallets: client.embeddedWallets ?? null,
-          globalWalletEnabled: client.globalWalletEnabled === true,
-          globalWalletAllowedScopes: client.globalWalletAllowedScopes ?? [
-            "eth_accounts",
-            "personal_sign",
-          ],
-        })),
-      );
-    }
-    if (secretsToPreserve.length > 0) {
-      await tx.insert(tenantAppClientSecrets).values(secretsToPreserve);
-    }
-  });
-  invalidateTenantCorsCache(tenantId);
-  return readTenantAppClientsForTenant(tenantId);
+  await executor.delete(tenantAppClientsTable).where(eq(tenantAppClientsTable.tenantId, tenantId));
+  if (normalized.length > 0) {
+    await executor.insert(tenantAppClientsTable).values(
+      normalized.map((client) => ({
+        id: client.id,
+        tenantId,
+        name: client.name,
+        environment: client.environment,
+        enabled: client.enabled !== false,
+        isDefault: client.isDefault === true,
+        allowedOrigins: client.allowedOrigins ?? [],
+        allowedRedirectUrls: client.allowedRedirectUrls ?? [],
+        allowedBundleIds: client.allowedBundleIds ?? [],
+        allowedPackageNames: client.allowedPackageNames ?? [],
+        loginMethods: client.loginMethods ?? null,
+        embeddedWallets: client.embeddedWallets ?? null,
+        globalWalletEnabled: client.globalWalletEnabled === true,
+        globalWalletAllowedScopes: client.globalWalletAllowedScopes ?? [
+          "eth_accounts",
+          "personal_sign",
+        ],
+      })),
+    );
+  }
+  if (secretsToPreserve.length > 0) {
+    await executor.insert(tenantAppClientSecrets).values(secretsToPreserve);
+  }
+  return readTenantAppClientsForTenant(tenantId, executor);
 }
 
 async function validatePolicyTemplatesForTenant(
@@ -1684,7 +1558,7 @@ tenantConfigRoutes.get("/:id/config", requireTenantId, async (c) => {
 
   if (row) {
     const appClients = await readTenantAppClientsForTenant(tenantId);
-    const samlSso = await snapshotTenantSamlSsoConfig(tenantId);
+    const samlSso = await readTenantSamlSsoConfig(tenantId);
     const config: TenantControlPlaneConfig = {
       tenantId: row.tenantId,
       displayName: row.displayName ?? undefined,
@@ -1766,18 +1640,17 @@ tenantConfigRoutes.put("/:id/oidc-providers", requireTenantId, async (c) => {
     requestId: c.req.header("x-request-id") ?? null,
   });
 
-  const previousConfigRow = await snapshotTenantConfigRow(tenantId);
-  const [row] = await db
-    .insert(tenantConfigsTable)
-    .values({ tenantId, oidcProviders: providers })
-    .onConflictDoUpdate({
-      target: tenantConfigsTable.tenantId,
-      set: { oidcProviders: providers, updatedAt: new Date() },
-    })
-    .returning({ oidcProviders: tenantConfigsTable.oidcProviders });
-
-  try {
-    await writeAuditEvent({
+  const row = await withTenantAuditedTransaction(tenantId, async (txRaw, appendRequiredAudit) => {
+    const tx = txRaw as typeof db;
+    const [updated] = await tx
+      .insert(tenantConfigsTable)
+      .values({ tenantId, oidcProviders: providers })
+      .onConflictDoUpdate({
+        target: tenantConfigsTable.tenantId,
+        set: { oidcProviders: providers, updatedAt: new Date() },
+      })
+      .returning({ oidcProviders: tenantConfigsTable.oidcProviders });
+    await appendRequiredAudit({
       tenantId,
       actorType: "user",
       actorId: c.get("userId") ?? null,
@@ -1789,10 +1662,8 @@ tenantConfigRoutes.put("/:id/oidc-providers", requireTenantId, async (c) => {
       userAgent: c.req.header("user-agent") ?? null,
       requestId: c.req.header("x-request-id") ?? null,
     });
-  } catch (error) {
-    await restoreTenantConfigRow(tenantId, previousConfigRow);
-    throw error;
-  }
+    return updated;
+  });
 
   return c.json<ApiResponse<{ providers: TenantOidcProviderConfig[] }>>({
     ok: true,
@@ -1807,7 +1678,7 @@ tenantConfigRoutes.get("/:id/saml-sso", requireTenantId, async (c) => {
   if (mfaResponse) return mfaResponse;
 
   const tenantId = c.req.param("id") as string;
-  const row = await snapshotTenantSamlSsoConfig(tenantId);
+  const row = await readTenantSamlSsoConfig(tenantId);
   const serviceProvider = buildSamlServiceProviderUrls(tenantId);
   return c.json<
     ApiResponse<{ config: TenantSamlSsoConfig | null; serviceProvider: typeof serviceProvider }>
@@ -1848,28 +1719,12 @@ tenantConfigRoutes.put("/:id/saml-sso", requireTenantId, async (c) => {
     requestId: c.req.header("x-request-id") ?? null,
   });
 
-  const previousConfig = await snapshotTenantSamlSsoConfig(tenantId);
-  const [row] = await db
-    .insert(tenantSamlSsoConfigs)
-    .values({
-      tenantId,
-      enabled: config.enabled,
-      status: config.status,
-      idpEntityId: config.idpEntityId,
-      idpSsoUrl: config.idpSsoUrl,
-      idpCertPems: config.idpCertPems,
-      spEntityId: config.spEntityId,
-      acsUrl: config.acsUrl,
-      nameIdFormat: config.nameIdFormat,
-      emailAttribute: config.emailAttribute,
-      groupsAttribute: config.groupsAttribute,
-      groupRoleMappings: config.groupRoleMappings,
-      allowJitProvisioning: config.allowJitProvisioning,
-      jitDefaultRole: "viewer",
-    })
-    .onConflictDoUpdate({
-      target: tenantSamlSsoConfigs.tenantId,
-      set: {
+  const row = await withTenantAuditedTransaction(tenantId, async (txRaw, appendRequiredAudit) => {
+    const tx = txRaw as typeof db;
+    const [updated] = await tx
+      .insert(tenantSamlSsoConfigs)
+      .values({
+        tenantId,
         enabled: config.enabled,
         status: config.status,
         idpEntityId: config.idpEntityId,
@@ -1883,13 +1738,29 @@ tenantConfigRoutes.put("/:id/saml-sso", requireTenantId, async (c) => {
         groupRoleMappings: config.groupRoleMappings,
         allowJitProvisioning: config.allowJitProvisioning,
         jitDefaultRole: "viewer",
-        updatedAt: new Date(),
-      },
-    })
-    .returning();
+      })
+      .onConflictDoUpdate({
+        target: tenantSamlSsoConfigs.tenantId,
+        set: {
+          enabled: config.enabled,
+          status: config.status,
+          idpEntityId: config.idpEntityId,
+          idpSsoUrl: config.idpSsoUrl,
+          idpCertPems: config.idpCertPems,
+          spEntityId: config.spEntityId,
+          acsUrl: config.acsUrl,
+          nameIdFormat: config.nameIdFormat,
+          emailAttribute: config.emailAttribute,
+          groupsAttribute: config.groupsAttribute,
+          groupRoleMappings: config.groupRoleMappings,
+          allowJitProvisioning: config.allowJitProvisioning,
+          jitDefaultRole: "viewer",
+          updatedAt: new Date(),
+        },
+      })
+      .returning();
 
-  try {
-    await writeAuditEvent({
+    await appendRequiredAudit({
       tenantId,
       actorType: "user",
       actorId: c.get("userId") ?? null,
@@ -1906,10 +1777,8 @@ tenantConfigRoutes.put("/:id/saml-sso", requireTenantId, async (c) => {
       userAgent: c.req.header("user-agent") ?? null,
       requestId: c.req.header("x-request-id") ?? null,
     });
-  } catch (error) {
-    await restoreTenantSamlSsoConfig(tenantId, previousConfig);
-    throw error;
-  }
+    return updated;
+  });
 
   return c.json<ApiResponse<{ config: TenantSamlSsoConfig }>>({
     ok: true,
@@ -1935,14 +1804,13 @@ tenantConfigRoutes.delete("/:id/saml-sso", requireTenantId, async (c) => {
     requestId: c.req.header("x-request-id") ?? null,
   });
 
-  const previousConfig = await snapshotTenantSamlSsoConfig(tenantId);
-  const [row] = await db
-    .delete(tenantSamlSsoConfigs)
-    .where(eq(tenantSamlSsoConfigs.tenantId, tenantId))
-    .returning();
-
-  try {
-    await writeAuditEvent({
+  const row = await withTenantAuditedTransaction(tenantId, async (txRaw, appendRequiredAudit) => {
+    const tx = txRaw as typeof db;
+    const [deleted] = await tx
+      .delete(tenantSamlSsoConfigs)
+      .where(eq(tenantSamlSsoConfigs.tenantId, tenantId))
+      .returning();
+    await appendRequiredAudit({
       tenantId,
       actorType: "user",
       actorId: c.get("userId") ?? null,
@@ -1954,10 +1822,8 @@ tenantConfigRoutes.delete("/:id/saml-sso", requireTenantId, async (c) => {
       userAgent: c.req.header("user-agent") ?? null,
       requestId: c.req.header("x-request-id") ?? null,
     });
-  } catch (error) {
-    await restoreTenantSamlSsoConfig(tenantId, previousConfig);
-    throw error;
-  }
+    return deleted;
+  });
 
   return c.json<ApiResponse<{ deleted: boolean }>>({ ok: true, data: { deleted: Boolean(row) } });
 });
@@ -2003,44 +1869,42 @@ tenantConfigRoutes.post("/:id/sso-domains", requireTenantId, async (c) => {
     requestId: c.get("requestId") ?? null,
   });
 
-  const previousDomain = await snapshotTenantSsoDomain(tenantId, domain);
-  const [row] = await db
-    .insert(tenantSsoDomains)
-    .values({
-      tenantId,
-      domain,
-      verificationToken,
-      ssoRequired: body.ssoRequired === true,
-    })
-    .onConflictDoUpdate({
-      target: [tenantSsoDomains.tenantId, tenantSsoDomains.domain],
-      set: {
+  const row = await withTenantAuditedTransaction(tenantId, async (txRaw, appendRequiredAudit) => {
+    const tx = txRaw as typeof db;
+    const [updated] = await tx
+      .insert(tenantSsoDomains)
+      .values({
+        tenantId,
+        domain,
         verificationToken,
-        status: "pending",
         ssoRequired: body.ssoRequired === true,
-        verifiedAt: null,
-        updatedAt: new Date(),
-      },
-    })
-    .returning();
+      })
+      .onConflictDoUpdate({
+        target: [tenantSsoDomains.tenantId, tenantSsoDomains.domain],
+        set: {
+          verificationToken,
+          status: "pending",
+          ssoRequired: body.ssoRequired === true,
+          verifiedAt: null,
+          updatedAt: new Date(),
+        },
+      })
+      .returning();
 
-  try {
-    await writeAuditEvent({
+    await appendRequiredAudit({
       tenantId,
       actorType: "user",
       actorId: c.get("userId") ?? tenantId,
       action: "tenant.sso_domain.upsert",
       resourceType: "tenant_sso_domain",
-      resourceId: row.id,
-      metadata: { domain, ssoRequired: row.ssoRequired },
+      resourceId: updated.id,
+      metadata: { domain, ssoRequired: updated.ssoRequired },
       ipAddress: c.req.header("x-forwarded-for") ?? null,
       userAgent: c.req.header("user-agent") ?? null,
       requestId: c.get("requestId") ?? null,
     });
-  } catch (error) {
-    await restoreTenantSsoDomain(tenantId, domain, previousDomain);
-    throw error;
-  }
+    return updated;
+  });
 
   return c.json<ApiResponse<{ domain: TenantSsoDomain }>>(
     { ok: true, data: { domain: serializeTenantSsoDomain(row) } },
@@ -2069,7 +1933,7 @@ tenantConfigRoutes.post("/:id/sso-domains/:domain/verify", requireTenantId, asyn
     requestId: c.get("requestId") ?? null,
   });
 
-  const previousDomain = await snapshotTenantSsoDomain(tenantId, domain);
+  const previousDomain = await readTenantSsoDomain(tenantId, domain);
   if (!previousDomain) {
     return c.json<ApiResponse>({ ok: false, error: "SSO domain not found" }, 404);
   }
@@ -2090,29 +1954,36 @@ tenantConfigRoutes.post("/:id/sso-domains/:domain/verify", requireTenantId, asyn
       409,
     );
   }
-  const [row] = await db
-    .update(tenantSsoDomains)
-    .set({ status: "verified", verifiedAt: new Date(), updatedAt: new Date() })
-    .where(and(eq(tenantSsoDomains.tenantId, tenantId), eq(tenantSsoDomains.domain, domain)))
-    .returning();
-  if (!row) return c.json<ApiResponse>({ ok: false, error: "SSO domain not found" }, 404);
-
-  try {
-    await writeAuditEvent({
+  const row = await withTenantAuditedTransaction(tenantId, async (txRaw, appendRequiredAudit) => {
+    const tx = txRaw as typeof db;
+    const [updated] = await tx
+      .update(tenantSsoDomains)
+      .set({ status: "verified", verifiedAt: new Date(), updatedAt: new Date() })
+      .where(
+        and(
+          eq(tenantSsoDomains.tenantId, tenantId),
+          eq(tenantSsoDomains.domain, domain),
+          eq(tenantSsoDomains.verificationToken, previousDomain.verificationToken),
+        ),
+      )
+      .returning();
+    if (!updated) return null;
+    await appendRequiredAudit({
       tenantId,
       actorType: "user",
       actorId: c.get("userId") ?? tenantId,
       action: "tenant.sso_domain.verify",
       resourceType: "tenant_sso_domain",
-      resourceId: row.id,
+      resourceId: updated.id,
       metadata: { domain },
       ipAddress: c.req.header("x-forwarded-for") ?? null,
       userAgent: c.req.header("user-agent") ?? null,
       requestId: c.get("requestId") ?? null,
     });
-  } catch (error) {
-    await restoreTenantSsoDomain(tenantId, domain, previousDomain);
-    throw error;
+    return updated;
+  });
+  if (!row) {
+    return c.json<ApiResponse>({ ok: false, error: "SSO domain changed during verification" }, 409);
   }
 
   return c.json<ApiResponse<{ domain: TenantSsoDomain }>>({
@@ -2141,30 +2012,28 @@ tenantConfigRoutes.delete("/:id/sso-domains/:domain", requireTenantId, async (c)
     userAgent: c.req.header("user-agent") ?? null,
     requestId: c.get("requestId") ?? null,
   });
-  const previousDomain = await snapshotTenantSsoDomain(tenantId, domain);
-  const [row] = await db
-    .delete(tenantSsoDomains)
-    .where(and(eq(tenantSsoDomains.tenantId, tenantId), eq(tenantSsoDomains.domain, domain)))
-    .returning();
-  if (!row) return c.json<ApiResponse>({ ok: false, error: "SSO domain not found" }, 404);
-
-  try {
-    await writeAuditEvent({
+  const row = await withTenantAuditedTransaction(tenantId, async (txRaw, appendRequiredAudit) => {
+    const tx = txRaw as typeof db;
+    const [deleted] = await tx
+      .delete(tenantSsoDomains)
+      .where(and(eq(tenantSsoDomains.tenantId, tenantId), eq(tenantSsoDomains.domain, domain)))
+      .returning();
+    if (!deleted) return null;
+    await appendRequiredAudit({
       tenantId,
       actorType: "user",
       actorId: c.get("userId") ?? tenantId,
       action: "tenant.sso_domain.delete",
       resourceType: "tenant_sso_domain",
-      resourceId: row.id,
+      resourceId: deleted.id,
       metadata: { domain },
       ipAddress: c.req.header("x-forwarded-for") ?? null,
       userAgent: c.req.header("user-agent") ?? null,
       requestId: c.get("requestId") ?? null,
     });
-  } catch (error) {
-    await restoreTenantSsoDomain(tenantId, domain, previousDomain);
-    throw error;
-  }
+    return deleted;
+  });
+  if (!row) return c.json<ApiResponse>({ ok: false, error: "SSO domain not found" }, 404);
 
   return c.json<ApiResponse<{ deleted: boolean }>>({ ok: true, data: { deleted: true } });
 });
@@ -2218,18 +2087,17 @@ tenantConfigRoutes.put("/:id/auth-abuse-config", requireTenantId, async (c) => {
     requestId: c.get("requestId") ?? null,
   });
 
-  const previousConfigRow = await snapshotTenantConfigRow(tenantId);
-  const [row] = await db
-    .insert(tenantConfigsTable)
-    .values({ tenantId, authAbuseConfig })
-    .onConflictDoUpdate({
-      target: tenantConfigsTable.tenantId,
-      set: { authAbuseConfig, updatedAt: new Date() },
-    })
-    .returning({ authAbuseConfig: tenantConfigsTable.authAbuseConfig });
-
-  try {
-    await writeAuditEvent({
+  const row = await withTenantAuditedTransaction(tenantId, async (txRaw, appendRequiredAudit) => {
+    const tx = txRaw as typeof db;
+    const [updated] = await tx
+      .insert(tenantConfigsTable)
+      .values({ tenantId, authAbuseConfig })
+      .onConflictDoUpdate({
+        target: tenantConfigsTable.tenantId,
+        set: { authAbuseConfig, updatedAt: new Date() },
+      })
+      .returning({ authAbuseConfig: tenantConfigsTable.authAbuseConfig });
+    await appendRequiredAudit({
       tenantId,
       actorType: "user",
       actorId: c.get("userId") ?? null,
@@ -2246,10 +2114,8 @@ tenantConfigRoutes.put("/:id/auth-abuse-config", requireTenantId, async (c) => {
       userAgent: c.req.header("user-agent") ?? null,
       requestId: c.get("requestId") ?? null,
     });
-  } catch (error) {
-    await restoreTenantConfigRow(tenantId, previousConfigRow);
-    throw error;
-  }
+    return updated;
+  });
 
   return c.json<ApiResponse<{ authAbuseConfig: TenantAuthAbuseConfig }>>({
     ok: true,
@@ -2272,8 +2138,8 @@ tenantConfigRoutes.get("/:id/security-checklist", requireTenantId, async (c) => 
     .from(tenantConfigsTable)
     .where(eq(tenantConfigsTable.tenantId, tenantId));
   const appClients = await readTenantAppClientsForTenant(tenantId);
-  const appClientSecretRows = await snapshotTenantAppClientSecretsForTenant(tenantId);
-  const requestSigningKeyRows = await snapshotTenantRequestSigningKeys(tenantId);
+  const appClientSecretRows = await readTenantAppClientSecretsForTenant(tenantId);
+  const requestSigningKeyRows = await readTenantRequestSigningKeys(tenantId);
 
   return c.json<ApiResponse<TenantSecurityChecklist>>({
     ok: true,
@@ -2398,50 +2264,48 @@ tenantConfigRoutes.post("/:id/request-signing-keys", requireTenantId, async (c) 
     requestId: c.get("requestId") ?? null,
   });
 
-  const previousKeys = await snapshotTenantRequestSigningKeys(tenantId);
-  const [inserted] = await db.transaction(async (tx) => {
-    await tx
-      .update(tenantRequestSigningKeys)
-      .set({ status: "retiring", expiresAt: retiringExpiresAt, updatedAt: new Date() })
-      .where(
-        and(
-          eq(tenantRequestSigningKeys.tenantId, tenantId),
-          eq(tenantRequestSigningKeys.status, "active"),
-        ),
-      );
-    return tx
-      .insert(tenantRequestSigningKeys)
-      .values({
-        id: keyId,
+  const inserted = await withTenantAuditedTransaction(
+    tenantId,
+    async (txRaw, appendRequiredAudit) => {
+      const tx = txRaw as typeof db;
+      await tx
+        .update(tenantRequestSigningKeys)
+        .set({ status: "retiring", expiresAt: retiringExpiresAt, updatedAt: new Date() })
+        .where(
+          and(
+            eq(tenantRequestSigningKeys.tenantId, tenantId),
+            eq(tenantRequestSigningKeys.status, "active"),
+          ),
+        );
+      const [created] = await tx
+        .insert(tenantRequestSigningKeys)
+        .values({
+          id: keyId,
+          tenantId,
+          name: normalizeRequestSigningKeyName(body.name),
+          secretCiphertext: encrypted.ciphertext,
+          secretIv: encrypted.iv,
+          secretAuthTag: encrypted.tag,
+          secretSalt: encrypted.salt,
+          secretPrefix: generated.prefix,
+          status: "active",
+        })
+        .returning();
+      await appendRequiredAudit({
         tenantId,
-        name: normalizeRequestSigningKeyName(body.name),
-        secretCiphertext: encrypted.ciphertext,
-        secretIv: encrypted.iv,
-        secretAuthTag: encrypted.tag,
-        secretSalt: encrypted.salt,
-        secretPrefix: generated.prefix,
-        status: "active",
-      })
-      .returning();
-  });
-
-  try {
-    await writeAuditEvent({
-      tenantId,
-      actorType: "user",
-      actorId: c.get("userId") ?? tenantId,
-      action: "tenant.request_signing_key.rotate",
-      resourceType: "tenant_request_signing_key",
-      resourceId: inserted.id,
-      metadata: { previousKeysRetireAt: retiringExpiresAt },
-      ipAddress: c.req.header("x-forwarded-for") ?? null,
-      userAgent: c.req.header("user-agent") ?? null,
-      requestId: c.get("requestId") ?? null,
-    });
-  } catch (error) {
-    await restoreTenantRequestSigningKeys(tenantId, previousKeys);
-    throw error;
-  }
+        actorType: "user",
+        actorId: c.get("userId") ?? tenantId,
+        action: "tenant.request_signing_key.rotate",
+        resourceType: "tenant_request_signing_key",
+        resourceId: created.id,
+        metadata: { previousKeysRetireAt: retiringExpiresAt },
+        ipAddress: c.req.header("x-forwarded-for") ?? null,
+        userAgent: c.req.header("user-agent") ?? null,
+        requestId: c.get("requestId") ?? null,
+      });
+      return created;
+    },
+  );
 
   return c.json<ApiResponse<TenantRequestSigningKeyCreateResult>>(
     {
@@ -2476,33 +2340,34 @@ tenantConfigRoutes.delete("/:id/request-signing-keys/:keyId", requireTenantId, a
     requestId: c.get("requestId") ?? null,
   });
 
-  const previousKeys = await snapshotTenantRequestSigningKeys(tenantId);
-  const [row] = await db
-    .update(tenantRequestSigningKeys)
-    .set({ status: "revoked", revokedAt: new Date(), updatedAt: new Date() })
-    .where(
-      and(eq(tenantRequestSigningKeys.tenantId, tenantId), eq(tenantRequestSigningKeys.id, keyId)),
-    )
-    .returning();
-  if (!row) return c.json<ApiResponse>({ ok: false, error: "request signing key not found" }, 404);
-
-  try {
-    await writeAuditEvent({
+  const row = await withTenantAuditedTransaction(tenantId, async (txRaw, appendRequiredAudit) => {
+    const tx = txRaw as typeof db;
+    const [updated] = await tx
+      .update(tenantRequestSigningKeys)
+      .set({ status: "revoked", revokedAt: new Date(), updatedAt: new Date() })
+      .where(
+        and(
+          eq(tenantRequestSigningKeys.tenantId, tenantId),
+          eq(tenantRequestSigningKeys.id, keyId),
+        ),
+      )
+      .returning();
+    if (!updated) return null;
+    await appendRequiredAudit({
       tenantId,
       actorType: "user",
       actorId: c.get("userId") ?? tenantId,
       action: "tenant.request_signing_key.revoke",
       resourceType: "tenant_request_signing_key",
-      resourceId: row.id,
+      resourceId: updated.id,
       metadata: {},
       ipAddress: c.req.header("x-forwarded-for") ?? null,
       userAgent: c.req.header("user-agent") ?? null,
       requestId: c.get("requestId") ?? null,
     });
-  } catch (error) {
-    await restoreTenantRequestSigningKeys(tenantId, previousKeys);
-    throw error;
-  }
+    return updated;
+  });
+  if (!row) return c.json<ApiResponse>({ ok: false, error: "request signing key not found" }, 404);
 
   return c.json<ApiResponse<{ key: TenantRequestSigningKey }>>({
     ok: true,
@@ -2586,18 +2451,17 @@ tenantConfigRoutes.patch("/:id/gas-sponsorship", requireTenantId, async (c) => {
     requestId: c.get("requestId") ?? null,
   });
 
-  const previousConfigRow = await snapshotTenantConfigRow(tenantId);
-  const [row] = await db
-    .insert(tenantConfigsTable)
-    .values({ tenantId, gasSponsorshipConfig })
-    .onConflictDoUpdate({
-      target: tenantConfigsTable.tenantId,
-      set: { gasSponsorshipConfig, updatedAt: new Date() },
-    })
-    .returning({ gasSponsorshipConfig: tenantConfigsTable.gasSponsorshipConfig });
-
-  try {
-    await writeAuditEvent({
+  const row = await withTenantAuditedTransaction(tenantId, async (txRaw, appendRequiredAudit) => {
+    const tx = txRaw as typeof db;
+    const [updated] = await tx
+      .insert(tenantConfigsTable)
+      .values({ tenantId, gasSponsorshipConfig })
+      .onConflictDoUpdate({
+        target: tenantConfigsTable.tenantId,
+        set: { gasSponsorshipConfig, updatedAt: new Date() },
+      })
+      .returning({ gasSponsorshipConfig: tenantConfigsTable.gasSponsorshipConfig });
+    await appendRequiredAudit({
       tenantId,
       actorType: "user",
       actorId: c.get("userId") ?? null,
@@ -2614,10 +2478,8 @@ tenantConfigRoutes.patch("/:id/gas-sponsorship", requireTenantId, async (c) => {
       userAgent: c.req.header("user-agent") ?? null,
       requestId: c.get("requestId") ?? null,
     });
-  } catch (error) {
-    await restoreTenantConfigRow(tenantId, previousConfigRow);
-    throw error;
-  }
+    return updated;
+  });
 
   return c.json<ApiResponse<{ gasSponsorshipConfig: TenantGasSponsorshipConfig }>>({
     ok: true,
@@ -2691,29 +2553,33 @@ tenantConfigRoutes.post("/:id/access-allowlist", requireTenantId, async (c) => {
     requestId: c.get("requestId") ?? null,
   });
 
-  const previousConfigRow = await snapshotTenantConfigRow(tenantId);
-  const persisted = await persistAuthAbuseConfigForTenant(tenantId, next);
-  const entries = toAccessAllowlistEntries(tenantId, persisted);
-  try {
-    await writeAuditEvent({
-      tenantId,
-      actorType: "user",
-      actorId: c.get("userId") ?? null,
-      action: "tenant.access_allowlist.add",
-      resourceType: "tenant_config",
-      resourceId: tenantId,
-      metadata: {
-        added: additions.map(({ type, value }) => ({ type, value })),
-        count: entries.length,
-      },
-      ipAddress: c.req.header("x-forwarded-for") ?? null,
-      userAgent: c.req.header("user-agent") ?? null,
-      requestId: c.get("requestId") ?? null,
-    });
-  } catch (error) {
-    await restoreTenantConfigRow(tenantId, previousConfigRow);
-    throw error;
-  }
+  const entries = await withTenantAuditedTransaction(
+    tenantId,
+    async (txRaw, appendRequiredAudit) => {
+      const tx = txRaw as typeof db;
+      const latest = await readAuthAbuseConfigForTenant(tenantId, tx);
+      const transactionNext = addAccessAllowlistEntriesToConfig(latest, additions);
+      if (typeof transactionNext === "string") throw new Error(transactionNext);
+      const persisted = await persistAuthAbuseConfigForTenant(tenantId, transactionNext, tx);
+      const updatedEntries = toAccessAllowlistEntries(tenantId, persisted);
+      await appendRequiredAudit({
+        tenantId,
+        actorType: "user",
+        actorId: c.get("userId") ?? null,
+        action: "tenant.access_allowlist.add",
+        resourceType: "tenant_config",
+        resourceId: tenantId,
+        metadata: {
+          added: additions.map(({ type, value }) => ({ type, value })),
+          count: updatedEntries.length,
+        },
+        ipAddress: c.req.header("x-forwarded-for") ?? null,
+        userAgent: c.req.header("user-agent") ?? null,
+        requestId: c.get("requestId") ?? null,
+      });
+      return updatedEntries;
+    },
+  );
 
   return c.json<ApiResponse<{ entries: AccessAllowlistEntry[] }>>({
     ok: true,
@@ -2784,30 +2650,37 @@ tenantConfigRoutes.delete("/:id/access-allowlist", requireTenantId, async (c) =>
     requestId: c.get("requestId") ?? null,
   });
 
-  const previousConfigRow = await snapshotTenantConfigRow(tenantId);
-  const persisted = await persistAuthAbuseConfigForTenant(tenantId, next);
-  const entries = toAccessAllowlistEntries(tenantId, persisted);
-  try {
-    await writeAuditEvent({
-      tenantId,
-      actorType: "user",
-      actorId: c.get("userId") ?? null,
-      action: "tenant.access_allowlist.remove",
-      resourceType: "tenant_config",
-      resourceId: tenantId,
-      metadata: {
-        ids,
-        removed: removals.map(({ type, value }) => ({ type, value })),
-        count: entries.length,
-      },
-      ipAddress: c.req.header("x-forwarded-for") ?? null,
-      userAgent: c.req.header("user-agent") ?? null,
-      requestId: c.get("requestId") ?? null,
-    });
-  } catch (error) {
-    await restoreTenantConfigRow(tenantId, previousConfigRow);
-    throw error;
-  }
+  const entries = await withTenantAuditedTransaction(
+    tenantId,
+    async (txRaw, appendRequiredAudit) => {
+      const tx = txRaw as typeof db;
+      const latest = await readAuthAbuseConfigForTenant(tenantId, tx);
+      const transactionNext = removeAccessAllowlistEntriesFromConfig(tenantId, latest, {
+        ids: new Set(ids),
+        entries: removals,
+      });
+      if (typeof transactionNext === "string") throw new Error(transactionNext);
+      const persisted = await persistAuthAbuseConfigForTenant(tenantId, transactionNext, tx);
+      const updatedEntries = toAccessAllowlistEntries(tenantId, persisted);
+      await appendRequiredAudit({
+        tenantId,
+        actorType: "user",
+        actorId: c.get("userId") ?? null,
+        action: "tenant.access_allowlist.remove",
+        resourceType: "tenant_config",
+        resourceId: tenantId,
+        metadata: {
+          ids,
+          removed: removals.map(({ type, value }) => ({ type, value })),
+          count: updatedEntries.length,
+        },
+        ipAddress: c.req.header("x-forwarded-for") ?? null,
+        userAgent: c.req.header("user-agent") ?? null,
+        requestId: c.get("requestId") ?? null,
+      });
+      return updatedEntries;
+    },
+  );
 
   return c.json<ApiResponse<{ entries: AccessAllowlistEntry[] }>>({
     ok: true,
@@ -2861,25 +2734,29 @@ tenantConfigRoutes.post("/:id/redirect-urls", requireTenantId, async (c) => {
     userAgent: c.req.header("user-agent") ?? null,
     requestId: c.get("requestId") ?? null,
   });
-  const previousConfigRow = await snapshotTenantConfigRow(tenantId);
-  const entries = await persistAllowedRedirectUrlsForTenant(tenantId, next);
-  try {
-    await writeAuditEvent({
-      tenantId,
-      actorType: "user",
-      actorId: c.get("userId") ?? tenantId,
-      action: "tenant.redirect_url.add",
-      resourceType: "tenant_config",
-      resourceId: tenantId,
-      metadata: { added: normalizedAdditions, allowedRedirectUrlsCount: entries.length },
-      ipAddress: c.req.header("x-forwarded-for") ?? null,
-      userAgent: c.req.header("user-agent") ?? null,
-      requestId: c.get("requestId") ?? null,
-    });
-  } catch (error) {
-    await restoreTenantConfigRow(tenantId, previousConfigRow);
-    throw error;
-  }
+  const entries = await withTenantAuditedTransaction(
+    tenantId,
+    async (txRaw, appendRequiredAudit) => {
+      const tx = txRaw as typeof db;
+      const latest = await readAllowedRedirectUrlsForTenant(tenantId, tx);
+      const transactionNext = normalizeAllowedRedirectUrls([...latest, ...normalizedAdditions]);
+      if (typeof transactionNext === "string") throw new Error(transactionNext);
+      const updated = await persistAllowedRedirectUrlsForTenant(tenantId, transactionNext, tx);
+      await appendRequiredAudit({
+        tenantId,
+        actorType: "user",
+        actorId: c.get("userId") ?? tenantId,
+        action: "tenant.redirect_url.add",
+        resourceType: "tenant_config",
+        resourceId: tenantId,
+        metadata: { added: normalizedAdditions, allowedRedirectUrlsCount: updated.length },
+        ipAddress: c.req.header("x-forwarded-for") ?? null,
+        userAgent: c.req.header("user-agent") ?? null,
+        requestId: c.get("requestId") ?? null,
+      });
+      return updated;
+    },
+  );
 
   return c.json<ApiResponse<{ entries: string[] }>>({ ok: true, data: { entries } });
 });
@@ -2903,8 +2780,6 @@ tenantConfigRoutes.delete("/:id/redirect-urls", requireTenantId, async (c) => {
     return c.json<ApiResponse>({ ok: false, error: normalizedRemovals }, 400);
   }
   const removalSet = new Set(normalizedRemovals);
-  const current = await readAllowedRedirectUrlsForTenant(tenantId);
-  const next = current.filter((url) => !removalSet.has(url));
   await writeAuditEvent({
     tenantId,
     actorType: "user",
@@ -2917,25 +2792,28 @@ tenantConfigRoutes.delete("/:id/redirect-urls", requireTenantId, async (c) => {
     userAgent: c.req.header("user-agent") ?? null,
     requestId: c.get("requestId") ?? null,
   });
-  const previousConfigRow = await snapshotTenantConfigRow(tenantId);
-  const entries = await persistAllowedRedirectUrlsForTenant(tenantId, next);
-  try {
-    await writeAuditEvent({
-      tenantId,
-      actorType: "user",
-      actorId: c.get("userId") ?? tenantId,
-      action: "tenant.redirect_url.remove",
-      resourceType: "tenant_config",
-      resourceId: tenantId,
-      metadata: { removed: normalizedRemovals, allowedRedirectUrlsCount: entries.length },
-      ipAddress: c.req.header("x-forwarded-for") ?? null,
-      userAgent: c.req.header("user-agent") ?? null,
-      requestId: c.get("requestId") ?? null,
-    });
-  } catch (error) {
-    await restoreTenantConfigRow(tenantId, previousConfigRow);
-    throw error;
-  }
+  const entries = await withTenantAuditedTransaction(
+    tenantId,
+    async (txRaw, appendRequiredAudit) => {
+      const tx = txRaw as typeof db;
+      const latest = await readAllowedRedirectUrlsForTenant(tenantId, tx);
+      const transactionNext = latest.filter((url) => !removalSet.has(url));
+      const updated = await persistAllowedRedirectUrlsForTenant(tenantId, transactionNext, tx);
+      await appendRequiredAudit({
+        tenantId,
+        actorType: "user",
+        actorId: c.get("userId") ?? tenantId,
+        action: "tenant.redirect_url.remove",
+        resourceType: "tenant_config",
+        resourceId: tenantId,
+        metadata: { removed: normalizedRemovals, allowedRedirectUrlsCount: updated.length },
+        ipAddress: c.req.header("x-forwarded-for") ?? null,
+        userAgent: c.req.header("user-agent") ?? null,
+        requestId: c.get("requestId") ?? null,
+      });
+      return updated;
+    },
+  );
 
   return c.json<ApiResponse<{ entries: string[] }>>({ ok: true, data: { entries } });
 });
@@ -2990,25 +2868,30 @@ tenantConfigRoutes.post("/:id/app-origins", requireTenantId, async (c) => {
     userAgent: c.req.header("user-agent") ?? null,
     requestId: c.get("requestId") ?? null,
   });
-  const previousConfigRow = await snapshotTenantConfigRow(tenantId);
-  const entries = await persistAllowedOriginsForTenant(tenantId, next);
-  try {
-    await writeAuditEvent({
-      tenantId,
-      actorType: "user",
-      actorId: c.get("userId") ?? tenantId,
-      action: "tenant.app_origin.add",
-      resourceType: "tenant_config",
-      resourceId: tenantId,
-      metadata: { added: normalizedAdditions, allowedOriginsCount: entries.length },
-      ipAddress: c.req.header("x-forwarded-for") ?? null,
-      userAgent: c.req.header("user-agent") ?? null,
-      requestId: c.get("requestId") ?? null,
-    });
-  } catch (error) {
-    await restoreTenantConfigRow(tenantId, previousConfigRow);
-    throw error;
-  }
+  const entries = await withTenantAuditedTransaction(
+    tenantId,
+    async (txRaw, appendRequiredAudit) => {
+      const tx = txRaw as typeof db;
+      const latest = await readAllowedOriginsForTenant(tenantId, tx);
+      const transactionNext = normalizeAllowedOrigins([...latest, ...normalizedAdditions]);
+      if (typeof transactionNext === "string") throw new Error(transactionNext);
+      const updated = await persistAllowedOriginsForTenant(tenantId, transactionNext, tx);
+      await appendRequiredAudit({
+        tenantId,
+        actorType: "user",
+        actorId: c.get("userId") ?? tenantId,
+        action: "tenant.app_origin.add",
+        resourceType: "tenant_config",
+        resourceId: tenantId,
+        metadata: { added: normalizedAdditions, allowedOriginsCount: updated.length },
+        ipAddress: c.req.header("x-forwarded-for") ?? null,
+        userAgent: c.req.header("user-agent") ?? null,
+        requestId: c.get("requestId") ?? null,
+      });
+      return updated;
+    },
+  );
+  invalidateTenantCorsCache(tenantId);
 
   return c.json<ApiResponse<{ entries: string[] }>>({ ok: true, data: { entries } });
 });
@@ -3036,8 +2919,6 @@ tenantConfigRoutes.delete("/:id/app-origins", requireTenantId, async (c) => {
     return c.json<ApiResponse>({ ok: false, error: normalizedRemovals }, 400);
   }
   const removalSet = new Set(normalizedRemovals);
-  const current = await readAllowedOriginsForTenant(tenantId);
-  const next = current.filter((origin) => !removalSet.has(origin));
   await writeAuditEvent({
     tenantId,
     actorType: "user",
@@ -3050,25 +2931,29 @@ tenantConfigRoutes.delete("/:id/app-origins", requireTenantId, async (c) => {
     userAgent: c.req.header("user-agent") ?? null,
     requestId: c.get("requestId") ?? null,
   });
-  const previousConfigRow = await snapshotTenantConfigRow(tenantId);
-  const entries = await persistAllowedOriginsForTenant(tenantId, next);
-  try {
-    await writeAuditEvent({
-      tenantId,
-      actorType: "user",
-      actorId: c.get("userId") ?? tenantId,
-      action: "tenant.app_origin.remove",
-      resourceType: "tenant_config",
-      resourceId: tenantId,
-      metadata: { removed: normalizedRemovals, allowedOriginsCount: entries.length },
-      ipAddress: c.req.header("x-forwarded-for") ?? null,
-      userAgent: c.req.header("user-agent") ?? null,
-      requestId: c.get("requestId") ?? null,
-    });
-  } catch (error) {
-    await restoreTenantConfigRow(tenantId, previousConfigRow);
-    throw error;
-  }
+  const entries = await withTenantAuditedTransaction(
+    tenantId,
+    async (txRaw, appendRequiredAudit) => {
+      const tx = txRaw as typeof db;
+      const latest = await readAllowedOriginsForTenant(tenantId, tx);
+      const transactionNext = latest.filter((origin) => !removalSet.has(origin));
+      const updated = await persistAllowedOriginsForTenant(tenantId, transactionNext, tx);
+      await appendRequiredAudit({
+        tenantId,
+        actorType: "user",
+        actorId: c.get("userId") ?? tenantId,
+        action: "tenant.app_origin.remove",
+        resourceType: "tenant_config",
+        resourceId: tenantId,
+        metadata: { removed: normalizedRemovals, allowedOriginsCount: updated.length },
+        ipAddress: c.req.header("x-forwarded-for") ?? null,
+        userAgent: c.req.header("user-agent") ?? null,
+        requestId: c.get("requestId") ?? null,
+      });
+      return updated;
+    },
+  );
+  invalidateTenantCorsCache(tenantId);
 
   return c.json<ApiResponse<{ entries: string[] }>>({ ok: true, data: { entries } });
 });
@@ -3111,26 +2996,27 @@ tenantConfigRoutes.put("/:id/app-clients", requireTenantId, async (c) => {
     requestId: c.get("requestId") ?? null,
   });
 
-  const previousAppClients = await snapshotTenantAppClients(tenantId);
-  const previousAppClientSecrets = await snapshotTenantAppClientSecretsForTenant(tenantId);
-  const clients = await persistTenantAppClientsForTenant(tenantId, normalized);
-  try {
-    await writeAuditEvent({
-      tenantId,
-      actorType: "user",
-      actorId: c.get("userId") ?? tenantId,
-      action: "tenant.app_client.replace",
-      resourceType: "tenant_app_client",
-      resourceId: tenantId,
-      metadata: { appClientsCount: clients.length },
-      ipAddress: c.req.header("x-forwarded-for") ?? null,
-      userAgent: c.req.header("user-agent") ?? null,
-      requestId: c.get("requestId") ?? null,
-    });
-  } catch (error) {
-    await restoreTenantAppClients(tenantId, previousAppClients, previousAppClientSecrets);
-    throw error;
-  }
+  const clients = await withTenantAuditedTransaction(
+    tenantId,
+    async (txRaw, appendRequiredAudit) => {
+      const tx = txRaw as typeof db;
+      const persisted = await persistTenantAppClientsForTenant(tenantId, normalized, tx);
+      await appendRequiredAudit({
+        tenantId,
+        actorType: "user",
+        actorId: c.get("userId") ?? tenantId,
+        action: "tenant.app_client.replace",
+        resourceType: "tenant_app_client",
+        resourceId: tenantId,
+        metadata: { appClientsCount: persisted.length },
+        ipAddress: c.req.header("x-forwarded-for") ?? null,
+        userAgent: c.req.header("user-agent") ?? null,
+        requestId: c.get("requestId") ?? null,
+      });
+      return persisted;
+    },
+  );
+  invalidateTenantCorsCache(tenantId);
 
   return c.json<ApiResponse<{ clients: TenantAppClient[] }>>({ ok: true, data: { clients } });
 });
@@ -3183,26 +3069,44 @@ tenantConfigRoutes.post("/:id/app-clients", requireTenantId, async (c) => {
     userAgent: c.req.header("user-agent") ?? null,
     requestId: c.get("requestId") ?? null,
   });
-  const previousAppClients = await snapshotTenantAppClients(tenantId);
-  const previousAppClientSecrets = await snapshotTenantAppClientSecretsForTenant(tenantId);
-  const persisted = await persistTenantAppClientsForTenant(tenantId, clients);
-  try {
-    await writeAuditEvent({
-      tenantId,
-      actorType: "user",
-      actorId: c.get("userId") ?? tenantId,
-      action: "tenant.app_client.create",
-      resourceType: "tenant_app_client",
-      resourceId: normalized[0].id,
-      metadata: { appClientsCount: persisted.length },
-      ipAddress: c.req.header("x-forwarded-for") ?? null,
-      userAgent: c.req.header("user-agent") ?? null,
-      requestId: c.get("requestId") ?? null,
-    });
-  } catch (error) {
-    await restoreTenantAppClients(tenantId, previousAppClients, previousAppClientSecrets);
-    throw error;
+  const persisted = await withTenantAuditedTransaction(
+    tenantId,
+    async (txRaw, appendRequiredAudit) => {
+      const tx = txRaw as typeof db;
+      const latest = await readTenantAppClientsForTenant(tenantId, tx);
+      if (latest.some((client) => client.id === normalized[0].id)) return null;
+      const latestForInsert = requestedDefault
+        ? latest.map((client) => ({ ...client, isDefault: false }))
+        : latest;
+      const latestClientForInsert =
+        latest.some((client) => client.isDefault === true) && !requestedDefault
+          ? { ...normalized[0], isDefault: false }
+          : normalized[0];
+      const transactionClients = normalizeTenantAppClients([
+        ...latestForInsert,
+        latestClientForInsert,
+      ]);
+      if (typeof transactionClients === "string") throw new Error(transactionClients);
+      const updated = await persistTenantAppClientsForTenant(tenantId, transactionClients, tx);
+      await appendRequiredAudit({
+        tenantId,
+        actorType: "user",
+        actorId: c.get("userId") ?? tenantId,
+        action: "tenant.app_client.create",
+        resourceType: "tenant_app_client",
+        resourceId: normalized[0].id,
+        metadata: { appClientsCount: updated.length },
+        ipAddress: c.req.header("x-forwarded-for") ?? null,
+        userAgent: c.req.header("user-agent") ?? null,
+        requestId: c.get("requestId") ?? null,
+      });
+      return updated;
+    },
+  );
+  if (!persisted) {
+    return c.json<ApiResponse>({ ok: false, error: "app client already exists" }, 409);
   }
+  invalidateTenantCorsCache(tenantId);
 
   return c.json<ApiResponse<{ clients: TenantAppClient[]; client: TenantAppClient }>>(
     {
@@ -3273,47 +3177,48 @@ tenantConfigRoutes.post("/:id/app-clients/:clientId/secrets", requireTenantId, a
     requestId: c.get("requestId") ?? null,
   });
 
-  const previousSecrets = await snapshotTenantAppClientSecrets(tenantId, clientId);
-  const [inserted] = await db.transaction(async (tx) => {
-    await tx
-      .update(tenantAppClientSecrets)
-      .set({ status: "retiring", expiresAt: retiringExpiresAt, updatedAt: new Date() })
-      .where(
-        and(
-          eq(tenantAppClientSecrets.tenantId, tenantId),
-          eq(tenantAppClientSecrets.clientId, clientId),
-          eq(tenantAppClientSecrets.status, "active"),
-        ),
-      );
-    return tx
-      .insert(tenantAppClientSecrets)
-      .values({
+  const inserted = await withTenantAuditedTransaction(
+    tenantId,
+    async (txRaw, appendRequiredAudit) => {
+      const tx = txRaw as typeof db;
+      await tx
+        .update(tenantAppClientSecrets)
+        .set({ status: "retiring", expiresAt: retiringExpiresAt, updatedAt: new Date() })
+        .where(
+          and(
+            eq(tenantAppClientSecrets.tenantId, tenantId),
+            eq(tenantAppClientSecrets.clientId, clientId),
+            eq(tenantAppClientSecrets.status, "active"),
+          ),
+        );
+      const [created] = await tx
+        .insert(tenantAppClientSecrets)
+        .values({
+          tenantId,
+          clientId,
+          secretHash: generated.hash,
+          secretPrefix: generated.prefix,
+          status: "active",
+        })
+        .returning();
+      await appendRequiredAudit({
         tenantId,
-        clientId,
-        secretHash: generated.hash,
-        secretPrefix: generated.prefix,
-        status: "active",
-      })
-      .returning();
-  });
-
-  try {
-    await writeAuditEvent({
-      tenantId,
-      actorType: "user",
-      actorId: c.get("userId") ?? tenantId,
-      action: "tenant.app_client_secret.rotate",
-      resourceType: "tenant_app_client_secret",
-      resourceId: inserted.id,
-      metadata: { appId: appIdFor(tenantId, clientId), previousSecretsRetireAt: retiringExpiresAt },
-      ipAddress: c.req.header("x-forwarded-for") ?? null,
-      userAgent: c.req.header("user-agent") ?? null,
-      requestId: c.get("requestId") ?? null,
-    });
-  } catch (error) {
-    await restoreTenantAppClientSecrets(tenantId, clientId, previousSecrets);
-    throw error;
-  }
+        actorType: "user",
+        actorId: c.get("userId") ?? tenantId,
+        action: "tenant.app_client_secret.rotate",
+        resourceType: "tenant_app_client_secret",
+        resourceId: created.id,
+        metadata: {
+          appId: appIdFor(tenantId, clientId),
+          previousSecretsRetireAt: retiringExpiresAt,
+        },
+        ipAddress: c.req.header("x-forwarded-for") ?? null,
+        userAgent: c.req.header("user-agent") ?? null,
+        requestId: c.get("requestId") ?? null,
+      });
+      return created;
+    },
+  );
 
   setNoStoreHeaders(c);
   return c.json<ApiResponse<TenantAppClientSecretCreateResult>>(
@@ -3356,37 +3261,35 @@ tenantConfigRoutes.delete(
       requestId: c.get("requestId") ?? null,
     });
 
-    const previousSecrets = await snapshotTenantAppClientSecrets(tenantId, clientId);
-    const [row] = await db
-      .update(tenantAppClientSecrets)
-      .set({ status: "revoked", revokedAt: new Date(), updatedAt: new Date() })
-      .where(
-        and(
-          eq(tenantAppClientSecrets.tenantId, tenantId),
-          eq(tenantAppClientSecrets.clientId, clientId),
-          eq(tenantAppClientSecrets.id, secretId),
-        ),
-      )
-      .returning();
-    if (!row) return c.json<ApiResponse>({ ok: false, error: "app client secret not found" }, 404);
-
-    try {
-      await writeAuditEvent({
+    const row = await withTenantAuditedTransaction(tenantId, async (txRaw, appendRequiredAudit) => {
+      const tx = txRaw as typeof db;
+      const [updated] = await tx
+        .update(tenantAppClientSecrets)
+        .set({ status: "revoked", revokedAt: new Date(), updatedAt: new Date() })
+        .where(
+          and(
+            eq(tenantAppClientSecrets.tenantId, tenantId),
+            eq(tenantAppClientSecrets.clientId, clientId),
+            eq(tenantAppClientSecrets.id, secretId),
+          ),
+        )
+        .returning();
+      if (!updated) return null;
+      await appendRequiredAudit({
         tenantId,
         actorType: "user",
         actorId: c.get("userId") ?? tenantId,
         action: "tenant.app_client_secret.revoke",
         resourceType: "tenant_app_client_secret",
-        resourceId: row.id,
+        resourceId: updated.id,
         metadata: { appId: appIdFor(tenantId, clientId) },
         ipAddress: c.req.header("x-forwarded-for") ?? null,
         userAgent: c.req.header("user-agent") ?? null,
         requestId: c.get("requestId") ?? null,
       });
-    } catch (error) {
-      await restoreTenantAppClientSecrets(tenantId, clientId, previousSecrets);
-      throw error;
-    }
+      return updated;
+    });
+    if (!row) return c.json<ApiResponse>({ ok: false, error: "app client secret not found" }, 404);
 
     return c.json<ApiResponse<{ secret: TenantAppClientSecret }>>({
       ok: true,
@@ -3421,26 +3324,31 @@ tenantConfigRoutes.delete("/:id/app-clients/:clientId", requireTenantId, async (
     userAgent: c.req.header("user-agent") ?? null,
     requestId: c.get("requestId") ?? null,
   });
-  const previousAppClients = await snapshotTenantAppClients(tenantId);
-  const previousAppClientSecrets = await snapshotTenantAppClientSecretsForTenant(tenantId);
-  const clients = await persistTenantAppClientsForTenant(tenantId, next);
-  try {
-    await writeAuditEvent({
-      tenantId,
-      actorType: "user",
-      actorId: c.get("userId") ?? tenantId,
-      action: "tenant.app_client.delete",
-      resourceType: "tenant_app_client",
-      resourceId: clientId,
-      metadata: { appClientsCount: clients.length },
-      ipAddress: c.req.header("x-forwarded-for") ?? null,
-      userAgent: c.req.header("user-agent") ?? null,
-      requestId: c.get("requestId") ?? null,
-    });
-  } catch (error) {
-    await restoreTenantAppClients(tenantId, previousAppClients, previousAppClientSecrets);
-    throw error;
-  }
+  const clients = await withTenantAuditedTransaction(
+    tenantId,
+    async (txRaw, appendRequiredAudit) => {
+      const tx = txRaw as typeof db;
+      const latest = await readTenantAppClientsForTenant(tenantId, tx);
+      const transactionNext = latest.filter((client) => client.id !== clientId);
+      if (transactionNext.length === latest.length) return null;
+      const updated = await persistTenantAppClientsForTenant(tenantId, transactionNext, tx);
+      await appendRequiredAudit({
+        tenantId,
+        actorType: "user",
+        actorId: c.get("userId") ?? tenantId,
+        action: "tenant.app_client.delete",
+        resourceType: "tenant_app_client",
+        resourceId: clientId,
+        metadata: { appClientsCount: updated.length },
+        ipAddress: c.req.header("x-forwarded-for") ?? null,
+        userAgent: c.req.header("user-agent") ?? null,
+        requestId: c.get("requestId") ?? null,
+      });
+      return updated;
+    },
+  );
+  if (!clients) return c.json<ApiResponse>({ ok: false, error: "app client not found" }, 404);
+  invalidateTenantCorsCache(tenantId);
 
   return c.json<ApiResponse<{ clients: TenantAppClient[] }>>({ ok: true, data: { clients } });
 });
@@ -3481,18 +3389,17 @@ tenantConfigRoutes.post("/:id/test-account", requireTenantId, async (c) => {
     userAgent: c.req.header("user-agent") ?? null,
     requestId: c.get("requestId") ?? null,
   });
-  const previousConfigRow = await snapshotTenantConfigRow(tenantId);
-  const [row] = await db
-    .insert(tenantConfigsTable)
-    .values({ tenantId, testAccount })
-    .onConflictDoUpdate({
-      target: tenantConfigsTable.tenantId,
-      set: { testAccount, updatedAt: new Date() },
-    })
-    .returning({ testAccount: tenantConfigsTable.testAccount });
-
-  try {
-    await writeAuditEvent({
+  const row = await withTenantAuditedTransaction(tenantId, async (txRaw, appendRequiredAudit) => {
+    const tx = txRaw as typeof db;
+    const [updated] = await tx
+      .insert(tenantConfigsTable)
+      .values({ tenantId, testAccount })
+      .onConflictDoUpdate({
+        target: tenantConfigsTable.tenantId,
+        set: { testAccount, updatedAt: new Date() },
+      })
+      .returning({ testAccount: tenantConfigsTable.testAccount });
+    await appendRequiredAudit({
       tenantId,
       actorType: "user",
       actorId: c.get("userId") ?? null,
@@ -3504,10 +3411,8 @@ tenantConfigRoutes.post("/:id/test-account", requireTenantId, async (c) => {
       userAgent: c.req.header("user-agent") ?? null,
       requestId: c.get("requestId") ?? null,
     });
-  } catch (error) {
-    await restoreTenantConfigRow(tenantId, previousConfigRow);
-    throw error;
-  }
+    return updated;
+  });
 
   return c.json<ApiResponse<{ testAccount: TenantTestAccountConfig }>>({
     ok: true,
@@ -3533,17 +3438,16 @@ tenantConfigRoutes.delete("/:id/test-account", requireTenantId, async (c) => {
     userAgent: c.req.header("user-agent") ?? null,
     requestId: c.get("requestId") ?? null,
   });
-  const previousConfigRow = await snapshotTenantConfigRow(tenantId);
-  await db
-    .insert(tenantConfigsTable)
-    .values({ tenantId, testAccount: disabled })
-    .onConflictDoUpdate({
-      target: tenantConfigsTable.tenantId,
-      set: { testAccount: disabled, updatedAt: new Date() },
-    });
-
-  try {
-    await writeAuditEvent({
+  await withTenantAuditedTransaction(tenantId, async (txRaw, appendRequiredAudit) => {
+    const tx = txRaw as typeof db;
+    await tx
+      .insert(tenantConfigsTable)
+      .values({ tenantId, testAccount: disabled })
+      .onConflictDoUpdate({
+        target: tenantConfigsTable.tenantId,
+        set: { testAccount: disabled, updatedAt: new Date() },
+      });
+    await appendRequiredAudit({
       tenantId,
       actorType: "user",
       actorId: c.get("userId") ?? null,
@@ -3555,10 +3459,7 @@ tenantConfigRoutes.delete("/:id/test-account", requireTenantId, async (c) => {
       userAgent: c.req.header("user-agent") ?? null,
       requestId: c.get("requestId") ?? null,
     });
-  } catch (error) {
-    await restoreTenantConfigRow(tenantId, previousConfigRow);
-    throw error;
-  }
+  });
 
   return c.json<ApiResponse<{ testAccount: TenantTestAccountConfig }>>({
     ok: true,
@@ -3731,70 +3632,134 @@ tenantConfigRoutes.put("/:id/config", requireTenantId, async (c) => {
     requestId: c.get("requestId") ?? null,
   });
 
-  const previousConfigRow = await snapshotTenantConfigRow(tenantId);
-  const previousAppClients = await snapshotTenantAppClients(tenantId);
-  const previousAppClientSecrets = await snapshotTenantAppClientSecretsForTenant(tenantId);
-  let row: TenantConfigRow;
-  let persistedAppClients: TenantAppClient[];
-  try {
-    [row] = await db
-      .insert(tenantConfigsTable)
-      .values(values)
-      .onConflictDoUpdate({
-        target: tenantConfigsTable.tenantId,
-        set: {
-          displayName: values.displayName,
-          policyExposure: values.policyExposure,
-          policyTemplates: values.policyTemplates,
-          secretRoutePresets: values.secretRoutePresets,
-          approvalConfig: values.approvalConfig,
-          featureFlags: values.featureFlags,
-          theme: values.theme,
-          allowedOrigins: values.allowedOrigins,
-          allowedRedirectUrls: values.allowedRedirectUrls,
-          authAbuseConfig: values.authAbuseConfig,
-          gasSponsorshipConfig: values.gasSponsorshipConfig,
-          updatedAt: new Date(),
+  const mutation = await withTenantAuditedTransaction(
+    tenantId,
+    async (txRaw, appendRequiredAudit) => {
+      const tx = txRaw as typeof db;
+      const [latest] = await tx
+        .select({
+          displayName: tenantConfigsTable.displayName,
+          policyExposure: tenantConfigsTable.policyExposure,
+          policyTemplates: tenantConfigsTable.policyTemplates,
+          secretRoutePresets: tenantConfigsTable.secretRoutePresets,
+          approvalConfig: tenantConfigsTable.approvalConfig,
+          featureFlags: tenantConfigsTable.featureFlags,
+          theme: tenantConfigsTable.theme,
+          allowedOrigins: tenantConfigsTable.allowedOrigins,
+          allowedRedirectUrls: tenantConfigsTable.allowedRedirectUrls,
+          authAbuseConfig: tenantConfigsTable.authAbuseConfig,
+          gasSponsorshipConfig: tenantConfigsTable.gasSponsorshipConfig,
+        })
+        .from(tenantConfigsTable)
+        .where(eq(tenantConfigsTable.tenantId, tenantId));
+      const transactionFeatureFlags =
+        body.featureFlags !== undefined
+          ? featureFlags
+          : ((latest?.featureFlags as TenantFeatureFlags | undefined) ??
+            defaultConfig.featureFlags ??
+            {});
+      const transactionValues = {
+        ...values,
+        displayName:
+          body.displayName !== undefined
+            ? values.displayName
+            : (latest?.displayName ?? defaultConfig.displayName ?? null),
+        policyExposure:
+          body.policyExposure !== undefined
+            ? values.policyExposure
+            : ((latest?.policyExposure as PolicyExposureConfig | undefined) ??
+              defaultConfig.policyExposure ??
+              {}),
+        policyTemplates:
+          body.policyTemplates !== undefined
+            ? values.policyTemplates
+            : ((latest?.policyTemplates as PolicyTemplate[] | undefined) ??
+              defaultConfig.policyTemplates ??
+              []),
+        secretRoutePresets:
+          body.secretRoutePresets !== undefined
+            ? values.secretRoutePresets
+            : ((latest?.secretRoutePresets as SecretRoutePreset[] | undefined) ??
+              defaultConfig.secretRoutePresets ??
+              []),
+        approvalConfig:
+          body.approvalConfig !== undefined
+            ? values.approvalConfig
+            : ((latest?.approvalConfig as ApprovalConfig | undefined) ??
+              defaultConfig.approvalConfig ??
+              {}),
+        featureFlags: transactionFeatureFlags,
+        theme:
+          body.theme !== undefined
+            ? values.theme
+            : ((latest?.theme as TenantTheme | undefined) ?? defaultConfig.theme ?? null),
+        allowedOrigins:
+          body.allowedOrigins !== undefined ? allowedOrigins : (latest?.allowedOrigins ?? []),
+        allowedRedirectUrls:
+          body.allowedRedirectUrls !== undefined
+            ? allowedRedirectUrls
+            : (latest?.allowedRedirectUrls ?? defaultConfig.allowedRedirectUrls ?? []),
+        authAbuseConfig:
+          body.authAbuseConfig !== undefined ? authAbuseConfig : (latest?.authAbuseConfig ?? {}),
+        gasSponsorshipConfig:
+          body.gasSponsorshipConfig !== undefined
+            ? gasSponsorshipConfig
+            : (latest?.gasSponsorshipConfig ?? defaultConfig.gasSponsorshipConfig ?? {}),
+      };
+      const [row] = await tx
+        .insert(tenantConfigsTable)
+        .values(transactionValues)
+        .onConflictDoUpdate({
+          target: tenantConfigsTable.tenantId,
+          set: {
+            displayName: transactionValues.displayName,
+            policyExposure: transactionValues.policyExposure,
+            policyTemplates: transactionValues.policyTemplates,
+            secretRoutePresets: transactionValues.secretRoutePresets,
+            approvalConfig: transactionValues.approvalConfig,
+            featureFlags: transactionValues.featureFlags,
+            theme: transactionValues.theme,
+            allowedOrigins: transactionValues.allowedOrigins,
+            allowedRedirectUrls: transactionValues.allowedRedirectUrls,
+            authAbuseConfig: transactionValues.authAbuseConfig,
+            gasSponsorshipConfig: transactionValues.gasSponsorshipConfig,
+            updatedAt: new Date(),
+          },
+        })
+        .returning();
+
+      const persistedAppClients =
+        body.appClients !== undefined
+          ? await persistTenantAppClientsForTenant(tenantId, appClients, tx)
+          : await readTenantAppClientsForTenant(tenantId, tx);
+      await appendRequiredAudit({
+        tenantId,
+        actorType: "user",
+        actorId: c.get("userId") ?? tenantId,
+        action: "tenant.config.update",
+        resourceType: "tenant_config",
+        resourceId: tenantId,
+        metadata: {
+          templatesCount: transactionValues.policyTemplates.length,
+          presetsCount: transactionValues.secretRoutePresets.length,
+          allowedOriginsCount: transactionValues.allowedOrigins.length,
+          allowedRedirectUrlsCount: transactionValues.allowedRedirectUrls.length,
+          appClientsCount: persistedAppClients.length,
+          hasAuthAbuseConfig: Object.keys(transactionValues.authAbuseConfig).length > 0,
+          gasSponsorshipEnabled: transactionValues.gasSponsorshipConfig.enabled === true,
+          embeddedWalletCreateOnLogin:
+            transactionValues.featureFlags.embeddedWallets?.createOnLogin,
+          hasTheme: !!transactionValues.theme,
         },
-      })
-      .returning();
-
-    persistedAppClients =
-      body.appClients !== undefined
-        ? await persistTenantAppClientsForTenant(tenantId, appClients)
-        : await readTenantAppClientsForTenant(tenantId);
-
-    // Evict the cached origins so the next request picks up the new config.
-    invalidateTenantCorsCache(tenantId);
-
-    await writeAuditEvent({
-      tenantId,
-      actorType: "user",
-      actorId: c.get("userId") ?? tenantId,
-      action: "tenant.config.update",
-      resourceType: "tenant_config",
-      resourceId: tenantId,
-      metadata: {
-        templatesCount: values.policyTemplates.length,
-        presetsCount: values.secretRoutePresets.length,
-        allowedOriginsCount: values.allowedOrigins.length,
-        allowedRedirectUrlsCount: values.allowedRedirectUrls.length,
-        appClientsCount: persistedAppClients.length,
-        hasAuthAbuseConfig: Object.keys(values.authAbuseConfig).length > 0,
-        gasSponsorshipEnabled: values.gasSponsorshipConfig.enabled === true,
-        embeddedWalletCreateOnLogin: values.featureFlags.embeddedWallets?.createOnLogin,
-        hasTheme: !!values.theme,
-      },
-      ipAddress: c.req.header("x-forwarded-for") ?? null,
-      userAgent: c.req.header("user-agent") ?? null,
-      requestId: c.get("requestId") ?? null,
-    });
-  } catch (error) {
-    await restoreTenantConfigRow(tenantId, previousConfigRow);
-    await restoreTenantAppClients(tenantId, previousAppClients, previousAppClientSecrets);
-    invalidateTenantCorsCache(tenantId);
-    throw error;
-  }
+        ipAddress: c.req.header("x-forwarded-for") ?? null,
+        userAgent: c.req.header("user-agent") ?? null,
+        requestId: c.get("requestId") ?? null,
+      });
+      return { row, persistedAppClients };
+    },
+  );
+  const { row, persistedAppClients } = mutation;
+  invalidateTenantCorsCache(tenantId);
 
   const config: TenantControlPlaneConfig = {
     tenantId: row.tenantId,
@@ -3954,8 +3919,6 @@ tenantConfigRoutes.post("/:id/config/templates/:name/apply", requireTenantId, as
   }
 
   const persistedPolicies = policiesToApply.map(toPersistedPolicyRule);
-  const previousPolicies = await snapshotAgentPolicies(body.agentId);
-
   await writeAuditEvent({
     tenantId,
     actorType: "user",
@@ -3974,51 +3937,49 @@ tenantConfigRoutes.post("/:id/config/templates/:name/apply", requireTenantId, as
     requestId: c.get("requestId") ?? null,
   });
 
-  const insertedPolicies = await db.transaction(async (tx) => {
-    await tx.delete(policies).where(eq(policies.agentId, body.agentId));
+  const insertedPolicies = await withTenantAuditedTransaction(
+    tenantId,
+    async (txRaw, appendRequiredAudit) => {
+      const tx = txRaw as typeof db;
+      await tx.delete(policies).where(eq(policies.agentId, body.agentId));
 
-    const insertedRows = [];
-    for (const p of persistedPolicies) {
-      const [inserted] = await tx
-        .insert(policies)
-        .values({
-          id: crypto.randomUUID(),
-          agentId: body.agentId,
-          type: p.type,
-          enabled: p.enabled,
-          config: p.config,
-        })
-        .returning();
-      if (inserted) insertedRows.push(inserted);
-    }
-    if (insertedRows.length !== persistedPolicies.length) {
-      throw new Error("Failed to apply all policy template rules");
-    }
-    return insertedRows;
-  });
-
-  try {
-    await writeAuditEvent({
-      tenantId,
-      actorType: "user",
-      actorId: c.get("userId") ?? tenantId,
-      action: "policy.template.apply",
-      resourceType: "agent",
-      resourceId: body.agentId,
-      metadata: {
-        templateId: template.id,
-        templateName: template.name,
-        policiesApplied: insertedPolicies.length,
-        hasOverrides: !!body.overrides,
-      },
-      ipAddress: c.req.header("x-forwarded-for") ?? null,
-      userAgent: c.req.header("user-agent") ?? null,
-      requestId: c.get("requestId") ?? null,
-    });
-  } catch (err) {
-    await restoreAgentPolicies(body.agentId, previousPolicies);
-    throw err;
-  }
+      const insertedRows = [];
+      for (const p of persistedPolicies) {
+        const [inserted] = await tx
+          .insert(policies)
+          .values({
+            id: crypto.randomUUID(),
+            agentId: body.agentId,
+            type: p.type,
+            enabled: p.enabled,
+            config: p.config,
+          })
+          .returning();
+        if (inserted) insertedRows.push(inserted);
+      }
+      if (insertedRows.length !== persistedPolicies.length) {
+        throw new Error("Failed to apply all policy template rules");
+      }
+      await appendRequiredAudit({
+        tenantId,
+        actorType: "user",
+        actorId: c.get("userId") ?? tenantId,
+        action: "policy.template.apply",
+        resourceType: "agent",
+        resourceId: body.agentId,
+        metadata: {
+          templateId: template.id,
+          templateName: template.name,
+          policiesApplied: insertedPolicies.length,
+          hasOverrides: !!body.overrides,
+        },
+        ipAddress: c.req.header("x-forwarded-for") ?? null,
+        userAgent: c.req.header("user-agent") ?? null,
+        requestId: c.get("requestId") ?? null,
+      });
+      return insertedRows;
+    },
+  );
 
   return c.json<ApiResponse>({
     ok: true,

@@ -29,10 +29,8 @@ describe("tenant SSO domain hardening", () => {
     );
   });
 
-  it("rolls back SSO domain control-plane mutations when final audits fail", () => {
+  it("makes SSO domain control-plane mutations atomic with final audits", () => {
     const source = read("packages/api/src/routes/tenant-config.ts");
-    expect(source).toContain("async function snapshotTenantSsoDomain");
-    expect(source).toContain("async function restoreTenantSsoDomain");
 
     for (const [marker, authorizedAction, finalAction] of [
       [
@@ -56,10 +54,10 @@ describe("tenant SSO domain hardening", () => {
       const nextRoute = source.indexOf("\ntenantConfigRoutes.", start + marker.length);
       const route = source.slice(start, nextRoute === -1 ? undefined : nextRoute);
       expect(route).toContain(authorizedAction);
-      expect(route).toContain("const previousDomain = await snapshotTenantSsoDomain");
-      expect(route).toContain("try {");
+      expect(route).toContain("withTenantAuditedTransaction(tenantId");
+      expect(route).toContain("appendRequiredAudit({");
       expect(route).toContain(finalAction);
-      expect(route).toContain("await restoreTenantSsoDomain(tenantId, domain, previousDomain)");
+      expect(route).not.toContain("restoreTenantSsoDomain");
     }
   });
 
