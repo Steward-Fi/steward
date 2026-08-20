@@ -2398,6 +2398,9 @@ async function withMoneroRelayLock<T>(agentId: string, fn: () => Promise<T>): Pr
   });
 }
 
+/** Real-Postgres lock contract seam; production callers use withMoneroRelayLock directly. */
+export const __withMoneroRelayLockForTests = withMoneroRelayLock;
+
 async function nativeTransferGasAccountingGuard(
   c: Context<{ Variables: AppVariables }>,
   to: string,
