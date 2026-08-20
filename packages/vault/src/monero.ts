@@ -86,6 +86,28 @@ export class MoneroRpcError extends Error {
   }
 }
 
+/** The wallet RPC definitively rejected relay_tx before returning success. */
+export class MoneroRelayRejectedError extends Error {
+  readonly txHash: string;
+  constructor(txHash: string, message: string) {
+    super(`monero relay rejected: ${message}`);
+    this.name = "MoneroRelayRejectedError";
+    this.txHash = txHash;
+  }
+}
+
+/** relay_tx may have reached the daemon, but no trustworthy acknowledgement arrived. */
+export class MoneroRelayOutcomeUnknownError extends Error {
+  readonly txHash: string;
+  constructor(txHash: string, message: string) {
+    super(`monero relay outcome is unknown: ${message}`);
+    this.name = "MoneroRelayOutcomeUnknownError";
+    this.txHash = txHash;
+  }
+}
+
+export type MoneroTransactionStatus = "not_found" | "broadcast" | "confirmed";
+
 // ─── Hex helpers ──────────────────────────────────────────────────────────────
 
 /** Monero key material is UNPREFIXED 64-char hex (wallet-rpc convention). */
@@ -558,7 +580,10 @@ export interface MoneroWalletBackend {
     payload: MoneroKeyPayloadV1,
     context: MoneroWalletBackendContext,
     txMetadata: string,
+    expectedTxHash: string,
   ): Promise<{ txHash: string }>;
+  /** Query the configured daemon for one exact transaction hash. */
+  getTransactionStatus(txHash: string): Promise<MoneroTransactionStatus>;
   /** Best-effort cache repair after a prepared transfer is discarded. */
   discardPreparedTransfer(
     payload: MoneroKeyPayloadV1,
@@ -713,6 +738,39 @@ export interface MoneroWalletRpcBackendConfig {
 }
 
 const DEFAULT_RPC_TIMEOUT_MS = 120_000;
+const MONERO_RPC_RESPONSE_MAX_BYTES = 1_048_576;
+
+async function readBoundedResponseText(response: Response, maxBytes: number): Promise<string> {
+  const declaredLength = response.headers.get("content-length");
+  if (declaredLength && /^\d+$/.test(declaredLength) && Number(declaredLength) > maxBytes) {
+    throw new Error("Monero daemon response exceeds the configured size limit");
+  }
+  if (!response.body) return "";
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > maxBytes) {
+        await reader.cancel();
+        throw new Error("Monero daemon response exceeds the configured size limit");
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const body = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    body.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new TextDecoder("utf-8", { fatal: true }).decode(body);
+}
 
 function isPrivateHttpHost(hostname: string): boolean {
   const host = hostname.toLowerCase().replace(/^\[|\]$/g, "");
@@ -786,7 +844,9 @@ export class MoneroWalletRpcBackend implements MoneroWalletBackend {
     if (!response.ok) {
       throw new MoneroRpcError("get_height", `daemon returned HTTP ${response.status}`);
     }
-    const body = parseWithBigIntegers(await response.text()) as Record<string, unknown>;
+    const body = parseWithBigIntegers(
+      await readBoundedResponseText(response, MONERO_RPC_RESPONSE_MAX_BYTES),
+    ) as Record<string, unknown>;
     if (body.status !== "OK") {
       throw new MoneroRpcError("get_height", `daemon status ${String(body.status)}`);
     }
@@ -888,6 +948,7 @@ export class MoneroWalletRpcBackend implements MoneroWalletBackend {
     payload: MoneroKeyPayloadV1,
     context: MoneroWalletBackendContext,
     txMetadata: string,
+    expectedTxHash: string,
   ): Promise<{ txHash: string }> {
     if (typeof txMetadata !== "string" || txMetadata.length === 0) {
       throw new Error("Monero relay requires the prepared transaction metadata");
@@ -897,19 +958,91 @@ export class MoneroWalletRpcBackend implements MoneroWalletBackend {
         // relay_tx needs the signing wallet open (verified against
         // monero-wallet-rpc v0.18.5.0: -13 "No wallet file" otherwise).
         await this.ensureWalletLoaded(payload, context);
-        const result = (await this.walletRpc("relay_tx", { hex: txMetadata })) as Record<
-          string,
-          unknown
-        >;
+        let result: Record<string, unknown>;
+        try {
+          result = (await this.walletRpc("relay_tx", { hex: txMetadata })) as Record<
+            string,
+            unknown
+          >;
+        } catch (error) {
+          if (error instanceof MoneroRpcError && error.code !== undefined) {
+            throw new MoneroRelayRejectedError(expectedTxHash, error.message);
+          }
+          throw new MoneroRelayOutcomeUnknownError(
+            expectedTxHash,
+            error instanceof Error ? error.message : "relay acknowledgement was lost",
+          );
+        }
         const txHash = result.tx_hash;
-        if (typeof txHash !== "string" || !/^[0-9a-f]{64}$/.test(txHash)) {
-          throw new MoneroRpcError("relay_tx", "response tx_hash is malformed");
+        if (
+          typeof txHash !== "string" ||
+          !/^[0-9a-f]{64}$/.test(txHash) ||
+          txHash !== expectedTxHash
+        ) {
+          throw new MoneroRelayOutcomeUnknownError(
+            expectedTxHash,
+            "relay acknowledgement did not contain the prepared transaction hash",
+          );
         }
         return { txHash };
       } finally {
         await this.closeWalletQuietly();
       }
     });
+  }
+
+  async getTransactionStatus(txHash: string): Promise<MoneroTransactionStatus> {
+    if (!/^[0-9a-f]{64}$/.test(txHash)) {
+      throw new Error("Monero transaction hash is malformed");
+    }
+    let response: Response;
+    try {
+      response = await this.fetchFn(`${this.daemonUrl}/get_transactions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ txs_hashes: [txHash], decode_as_json: false }),
+        signal: AbortSignal.timeout(this.timeoutMs),
+      });
+    } catch (error) {
+      throw new MoneroRpcError("get_transactions", errorMessage(error));
+    }
+    if (!response.ok) {
+      throw new MoneroRpcError("get_transactions", `daemon returned HTTP ${response.status}`);
+    }
+    const body = parseWithBigIntegers(
+      await readBoundedResponseText(response, MONERO_RPC_RESPONSE_MAX_BYTES),
+    ) as Record<string, unknown>;
+    if (body.status !== "OK" || !Array.isArray(body.txs) || !Array.isArray(body.missed_tx)) {
+      throw new MoneroRpcError("get_transactions", "daemon response shape is malformed");
+    }
+    const txs = body.txs as unknown[];
+    const missed = body.missed_tx as unknown[];
+    if (txs.length === 0) {
+      if (missed.length === 1 && missed[0] === txHash) return "not_found";
+      throw new MoneroRpcError("get_transactions", "daemon absence proof is malformed");
+    }
+    if (txs.length !== 1 || missed.length !== 0) {
+      throw new MoneroRpcError("get_transactions", "daemon returned ambiguous transaction rows");
+    }
+    const row = txs[0];
+    if (!row || typeof row !== "object" || Array.isArray(row)) {
+      throw new MoneroRpcError("get_transactions", "daemon transaction row is malformed");
+    }
+    const value = row as Record<string, unknown>;
+    if (value.tx_hash !== txHash || typeof value.in_pool !== "boolean") {
+      throw new MoneroRpcError("get_transactions", "daemon transaction identity is malformed");
+    }
+    if (value.in_pool) return "broadcast";
+    const blockHeight = value.block_height;
+    if (
+      !(
+        (typeof blockHeight === "bigint" && blockHeight > 0n) ||
+        (typeof blockHeight === "number" && Number.isSafeInteger(blockHeight) && blockHeight > 0)
+      )
+    ) {
+      throw new MoneroRpcError("get_transactions", "daemon confirmation height is malformed");
+    }
+    return "confirmed";
   }
 
   async discardPreparedTransfer(
