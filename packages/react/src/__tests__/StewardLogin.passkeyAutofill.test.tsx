@@ -178,9 +178,7 @@ describe("passkey conditional-mediation autofill regression", () => {
     );
     if (!btn) throw new Error("passkey button not found");
     await React.act(async () => {
-      (btn as unknown as Element).dispatchEvent(
-        new window.MouseEvent("click", { bubbles: true }),
-      );
+      (btn as unknown as Element).dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
     });
     expect(signInWithPasskey).toHaveBeenCalledTimes(1);
     expect(signInWithPasskey).toHaveBeenCalledWith("brand-new-user@example.com");
