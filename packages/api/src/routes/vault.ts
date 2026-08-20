@@ -4414,6 +4414,8 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
         );
       }
 
+      const requiresSolanaExecutionClaim =
+        isSolana && (shouldBroadcast || transferPayload?.token === "native");
       const claimResult = isApprovedSolanaResume
         ? await db
             .select({ id: approvalQueue.id })
@@ -4426,23 +4428,35 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
               ),
             )
             .limit(1)
-        : await db
-            .update(approvalQueue)
-            .set({
-              status: "approved",
-              resolvedAt,
-              resolvedBy: `${approverPrincipal.type}:${approverPrincipal.id}`,
-              resolvedByType: approverPrincipal.type,
-              resolvedById: approverPrincipal.id,
-            })
-            .where(
-              and(
-                eq(approvalQueue.txId, txId),
-                eq(approvalQueue.agentId, agentId),
-                eq(approvalQueue.status, "pending"),
-              ),
-            )
-            .returning();
+        : requiresSolanaExecutionClaim
+          ? await db
+              .select({ id: approvalQueue.id })
+              .from(approvalQueue)
+              .where(
+                and(
+                  eq(approvalQueue.txId, txId),
+                  eq(approvalQueue.agentId, agentId),
+                  eq(approvalQueue.status, "pending"),
+                ),
+              )
+              .limit(1)
+          : await db
+              .update(approvalQueue)
+              .set({
+                status: "approved",
+                resolvedAt,
+                resolvedBy: `${approverPrincipal.type}:${approverPrincipal.id}`,
+                resolvedByType: approverPrincipal.type,
+                resolvedById: approverPrincipal.id,
+              })
+              .where(
+                and(
+                  eq(approvalQueue.txId, txId),
+                  eq(approvalQueue.agentId, agentId),
+                  eq(approvalQueue.status, "pending"),
+                ),
+              )
+              .returning();
 
       if (claimResult.length === 0) {
         return c.json<ApiResponse>(
@@ -4495,10 +4509,11 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
           return c.json<ApiResponse>({ ok: false, error: reservationError }, 403);
         }
       }
-      if (isSolana && (shouldBroadcast || transferPayload?.token === "native")) {
+      if (requiresSolanaExecutionClaim) {
         const claimed = await claimApprovedSolanaExecution(transactionRow, {
           takeover: isApprovedSolanaResume,
           resolver: approverPrincipal,
+          approvePendingQueue: isFreshApproval ? { resolvedAt } : undefined,
         });
         approvedSolanaExecutionToken = claimed.executionToken;
         approvedSolanaActionPayload = claimed.actionPayload;
@@ -9032,7 +9047,11 @@ async function assertApprovedSolanaExecutionClaim(expected: {
 
 export async function claimApprovedSolanaExecution(
   row: typeof transactions.$inferSelect,
-  options: { takeover: boolean; resolver: ApprovalPrincipal },
+  options: {
+    takeover: boolean;
+    resolver: ApprovalPrincipal;
+    approvePendingQueue?: { resolvedAt: Date };
+  },
 ): Promise<{ executionToken: string; actionPayload: Record<string, unknown> }> {
   const prior = readSolanaRecoveryMetadata(row.actionPayload);
   const stableActionPayload = Object.fromEntries(
@@ -9148,6 +9167,25 @@ export async function claimApprovedSolanaExecution(
         )
         .returning({ id: approvalQueue.id });
       if (!transferred) throw new SolanaExecutionLeaseConflictError();
+    } else if (options.approvePendingQueue) {
+      const [approved] = await tx
+        .update(approvalQueue)
+        .set({
+          status: "approved",
+          resolvedAt: options.approvePendingQueue.resolvedAt,
+          resolvedBy: `${options.resolver.type}:${options.resolver.id}`,
+          resolvedByType: options.resolver.type,
+          resolvedById: options.resolver.id,
+        })
+        .where(
+          and(
+            eq(approvalQueue.txId, row.id),
+            eq(approvalQueue.agentId, row.agentId),
+            eq(approvalQueue.status, "pending"),
+          ),
+        )
+        .returning({ id: approvalQueue.id });
+      if (!approved) throw new SolanaExecutionLeaseConflictError();
     }
 
     return { executionToken, actionPayload };

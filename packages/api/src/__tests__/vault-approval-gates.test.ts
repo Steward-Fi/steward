@@ -49,7 +49,7 @@ import {
   SolanaBroadcastNotSubmittedError,
   Vault,
 } from "@stwd/vault";
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { Hono } from "hono";
 import type { AppVariables } from "../services/context";
 
@@ -428,6 +428,105 @@ describe("vault approval gates (real /approve path)", () => {
       expect(approval.status).toBe("approved");
     } finally {
       sign.mockRestore();
+    }
+  });
+
+  it("atomically rolls back fresh queue approval when the Solana claim faults and a new app can retry", async () => {
+    const txId = "tx-fresh-solana-claim-rollback";
+    const queueId = `aq-${txId}`;
+    const triggerFunction = "fail_fresh_solana_claim";
+    const triggerName = "fail_fresh_solana_claim";
+    await getDb()
+      .insert(transactions)
+      .values({
+        id: txId,
+        agentId: AGENT_SOLANA,
+        status: "pending",
+        toAddress: SOLANA_RECIPIENT,
+        value: "125",
+        data: "serialized-fresh-solana-claim",
+        chainId: 101,
+        actionType: "transaction",
+        actionPayload: { type: "transaction", broadcast: true },
+        policyResults: [],
+      });
+    await getDb().insert(approvalQueue).values({
+      id: queueId,
+      txId,
+      agentId: AGENT_SOLANA,
+      status: "pending",
+    });
+    await getDb().execute(
+      sql.raw(`
+      create function ${triggerFunction}() returns trigger language plpgsql as $$
+      begin
+        if new.id = '${queueId}' and new.status = 'approved' then
+          raise exception 'forced fresh Solana approval claim failure';
+        end if;
+        return new;
+      end
+      $$
+    `),
+    );
+    await getDb().execute(
+      sql.raw(`
+      create trigger ${triggerName}
+      after update on approval_queue
+      for each row execute function ${triggerFunction}()
+    `),
+    );
+
+    const firstApp = await makeApp({ authType: "session-jwt", role: "owner", mfa: true });
+    let signCalls = 0;
+    const sign = spyOn(Vault.prototype, "signSolanaTransaction").mockImplementation(
+      async (request) => {
+        signCalls += 1;
+        await request.onBroadcastPrepared?.({
+          signature: SOLANA_SIGNATURE,
+          recentBlockhash: "11111111111111111111111111111111",
+        });
+        return { signature: SOLANA_SIGNATURE, broadcast: true, chainId: 101 };
+      },
+    );
+    try {
+      const failed = await approve(firstApp, AGENT_SOLANA, txId);
+      expect(failed.status).toBe(500);
+      expect(signCalls).toBe(0);
+      const [failedTransaction] = await getDb()
+        .select()
+        .from(transactions)
+        .where(eq(transactions.id, txId));
+      const [failedQueue] = await getDb()
+        .select()
+        .from(approvalQueue)
+        .where(eq(approvalQueue.id, queueId));
+      expect(failedTransaction).toMatchObject({ status: "pending" });
+      expect(failedTransaction.actionPayload).toEqual({ type: "transaction", broadcast: true });
+      expect(failedQueue).toMatchObject({ status: "pending", resolvedById: null });
+
+      await getDb().execute(sql.raw(`drop trigger ${triggerName} on approval_queue`));
+      await getDb().execute(sql.raw(`drop function ${triggerFunction}()`));
+      const restartedApp = await makeApp({ authType: "session-jwt", role: "owner", mfa: true });
+      const retried = await approve(restartedApp, AGENT_SOLANA, txId);
+      expect(retried.status).toBe(200);
+      expect(signCalls).toBe(1);
+      const [completedTransaction] = await getDb()
+        .select()
+        .from(transactions)
+        .where(eq(transactions.id, txId));
+      const [completedQueue] = await getDb()
+        .select()
+        .from(approvalQueue)
+        .where(eq(approvalQueue.id, queueId));
+      expect(completedTransaction).toMatchObject({
+        status: "broadcast",
+        txHash: SOLANA_SIGNATURE,
+      });
+      expect(completedQueue).toMatchObject({ status: "approved", resolvedById: ACTOR_ID });
+    } finally {
+      sign.mockRestore();
+      await getDb().execute(sql.raw(`drop trigger if exists ${triggerName} on approval_queue`));
+      await getDb().execute(sql.raw(`drop function if exists ${triggerFunction}()`));
     }
   });
 
