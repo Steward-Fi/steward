@@ -839,6 +839,83 @@ describe("wallet transfer actions", () => {
     }
   });
 
+  it("replays pending and rejected Solana transfers before mutable gates", async () => {
+    const context = await import("../services/context");
+    const originalBuild = context.vault.buildSolanaSplTransferTransaction.bind(context.vault);
+    const originalSign = context.vault.signSolanaTransaction.bind(context.vault);
+    let buildCalls = 0;
+    context.vault.buildSolanaSplTransferTransaction = async () => {
+      buildCalls += 1;
+      return {
+        transaction: SERIALIZED_SPL_TRANSFER,
+        sourceTokenAccount: "source-token-account",
+        destinationTokenAccount: "destination-token-account",
+        mint: SOLANA_MINT,
+        tokenProgram: "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+        decimals: 9,
+      };
+    };
+    context.vault.signSolanaTransaction = async () => {
+      throw new Error("pending/rejected Solana transfer must not reach signing");
+    };
+    const request = (agentId: string, key: string, value = "123") =>
+      app.request(`/vault/${agentId}/actions/transfer`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "Idempotency-Key": key },
+        body: JSON.stringify({
+          to: ALLOWED_SOLANA,
+          token: SOLANA_MINT,
+          value,
+          chainId: 101,
+          broadcast: true,
+        }),
+      });
+
+    try {
+      await getDb()
+        .update(policies)
+        .set({ config: { threshold: "1" } })
+        .where(eq(policies.id, "solana-auto-approve-threshold"));
+      expect((await request(SOLANA_AGENT_ID, "pending-solana-transfer")).status).toBe(202);
+      await getDb()
+        .update(policies)
+        .set({ enabled: false })
+        .where(eq(policies.agentId, SOLANA_AGENT_ID));
+      expect((await request(SOLANA_AGENT_ID, "pending-solana-transfer")).status).toBe(202);
+      expect((await request(SOLANA_AGENT_ID, "pending-solana-transfer", "124")).status).toBe(409);
+
+      expect((await request(SOLANA_AGENT_WITHOUT_MINT_ID, "rejected-solana-transfer")).status).toBe(
+        403,
+      );
+      await getDb()
+        .update(policies)
+        .set({ enabled: false })
+        .where(eq(policies.agentId, SOLANA_AGENT_WITHOUT_MINT_ID));
+      expect((await request(SOLANA_AGENT_WITHOUT_MINT_ID, "rejected-solana-transfer")).status).toBe(
+        403,
+      );
+      expect(
+        (await request(SOLANA_AGENT_WITHOUT_MINT_ID, "rejected-solana-transfer", "124")).status,
+      ).toBe(409);
+      expect(buildCalls).toBe(2);
+    } finally {
+      await getDb()
+        .update(policies)
+        .set({ enabled: true })
+        .where(eq(policies.agentId, SOLANA_AGENT_ID));
+      await getDb()
+        .update(policies)
+        .set({ config: { threshold: "999" } })
+        .where(eq(policies.id, "solana-auto-approve-threshold"));
+      await getDb()
+        .update(policies)
+        .set({ enabled: true })
+        .where(eq(policies.agentId, SOLANA_AGENT_WITHOUT_MINT_ID));
+      context.vault.buildSolanaSplTransferTransaction = originalBuild;
+      context.vault.signSolanaTransaction = originalSign;
+    }
+  });
+
   it("checkpoints native SOL before its lower-level broadcast and preserves the route payload", async () => {
     const context = await import("../services/context");
     const originalSign = context.vault.signTransaction.bind(context.vault);

@@ -3458,6 +3458,14 @@ vaultRoutes.post("/:agentId/actions/transfer", async (c) => {
         sponsorship: sponsorshipPayload,
       }),
       ...(parsedSolanaTransferApproval ?? {}),
+      ...(solanaRecoveryBinding
+        ? {
+            recoveryType: "solana_transaction",
+            recoveryActionType: "transfer",
+            idempotencyKeyDigest: solanaRecoveryBinding.idempotencyKeyDigest,
+            requestDigest: solanaRecoveryBinding.requestDigest,
+          }
+        : {}),
     };
     const policySet = await getScopedPolicySet(tenantId, agentId, c.get("agentPolicyIds"));
     const conditionSets = await loadConditionSetsForPolicies(tenantId, policySet);
@@ -3704,7 +3712,7 @@ vaultRoutes.post("/:agentId/actions/transfer", async (c) => {
           // SEC-163: SPL token transfers carry no vault-layer envelope (the
           // byte-level check only models native SOL transfers); the edge
           // policy evaluation above approved this transfer.
-          allowBlindSign: true,
+          allowParsedSign: true,
           ...(solanaExecutionToken
             ? {
                 onBroadcastPrepared: (checkpoint) =>
@@ -4138,6 +4146,15 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
         ok: false,
         error:
           "This pending Solana approval predates signing-mode binding and cannot be replayed. Resubmit the transaction.",
+      },
+      409,
+    );
+  }
+  if (isQueuedSolanaSplTransfer && queuedSolanaSigningMode !== "parsed") {
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error: "Approved SPL transfers require a parsed signing-mode binding",
       },
       409,
     );
@@ -9071,6 +9088,29 @@ function solanaTransferReplayResponse(
   c: Context<{ Variables: AppVariables }>,
   row: SolanaRecoveryRow,
 ): Response {
+  if (row.status === "pending") {
+    return c.json<ApiResponse>(
+      {
+        ok: true,
+        data: transferActionResponseFromTransaction(
+          row as unknown as typeof transactions.$inferSelect,
+        ),
+      },
+      202,
+    );
+  }
+  if (row.status === "rejected") {
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error: "Transfer rejected by policy",
+        data: transferActionResponseFromTransaction(
+          row as unknown as typeof transactions.$inferSelect,
+        ),
+      },
+      403,
+    );
+  }
   if (row.status === "approved") {
     return c.json<ApiResponse>(
       {

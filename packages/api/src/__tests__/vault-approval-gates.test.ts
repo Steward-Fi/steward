@@ -618,6 +618,36 @@ describe("vault approval gates (real /approve path)", () => {
       agentId: AGENT_SOLANA,
       status: "pending",
     });
+    await getDb()
+      .insert(transactions)
+      .values({
+        id: "tx-solana-spl-transfer-blind-mode",
+        agentId: AGENT_SOLANA,
+        status: "pending",
+        toAddress: SOLANA_RECIPIENT,
+        value: "123",
+        data: PARSED_SPL_APPROVAL,
+        chainId: 101,
+        actionType: "transfer",
+        actionPayload: {
+          type: "transfer",
+          token: SOLANA_MINT,
+          recipient: SOLANA_RECIPIENT,
+          amount: "123",
+          broadcast: true,
+          signingMode: "blind",
+          blindSigned: true,
+          parsedEffects: parsedSplEffects,
+          reviewedRequestDigest: parsedSplRequestDigest,
+        },
+        policyResults: [],
+      });
+    await getDb().insert(approvalQueue).values({
+      id: "aq-tx-solana-spl-transfer-blind-mode",
+      txId: "tx-solana-spl-transfer-blind-mode",
+      agentId: AGENT_SOLANA,
+      status: "pending",
+    });
 
     const seen: Array<{
       transaction: string;
@@ -647,6 +677,9 @@ describe("vault approval gates (real /approve path)", () => {
         200,
       );
       expect((await approve(app, AGENT_SOLANA, "tx-solana-spl-transfer-tampered")).status).toBe(
+        409,
+      );
+      expect((await approve(app, AGENT_SOLANA, "tx-solana-spl-transfer-blind-mode")).status).toBe(
         409,
       );
       expect((await approve(app, AGENT_SOLANA, "tx-solana-parsed-tampered-approval")).status).toBe(
