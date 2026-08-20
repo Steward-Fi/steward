@@ -18,7 +18,7 @@ const rlsMigrationSource = readFileSync(
   "utf8",
 );
 const personalLifecycleMigrationSource = readFileSync(
-  join(apiRoot, "..", "..", "db", "drizzle", "0113_personal_tenant_account_lifecycle.sql"),
+  join(apiRoot, "..", "..", "db", "drizzle", "0114_personal_lifecycle_invariants.sql"),
   "utf8",
 );
 
@@ -528,8 +528,9 @@ describe("platform security hardening", () => {
     expect(personalLifecycleMigrationSource).toContain(
       "personal_tenant_id text := 'personal-' || p_user_id::text",
     );
+    expect(personalLifecycleMigrationSource).toContain("count(*) FILTER (");
     expect(personalLifecycleMigrationSource).toContain(
-      "count(*) FILTER (WHERE ut.user_id = p_user_id AND ut.role = 'owner')",
+      "WHERE ut.user_id = p_user_id AND ut.role = 'owner'",
     );
     expect(personalLifecycleMigrationSource).toContain(
       "Personal tenant membership invariant violated",

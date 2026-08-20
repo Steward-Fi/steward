@@ -104,6 +104,14 @@ SELECT format(
   'steward_bootstrap.retention_delete_deactivated_users(integer) TO %I',
   :'steward_platform_role'
 ) \gexec
+SELECT format(
+  'REVOKE ALL ON FUNCTION steward_bootstrap.platform_personal_tenant_delete(text,boolean) FROM PUBLIC, %I',
+  :'steward_app_role'
+) WHERE to_regprocedure('steward_bootstrap.platform_personal_tenant_delete(text,boolean)') IS NOT NULL \gexec
+SELECT format(
+  'GRANT EXECUTE ON FUNCTION steward_bootstrap.platform_personal_tenant_delete(text,boolean) TO %I',
+  :'steward_platform_role'
+) WHERE to_regprocedure('steward_bootstrap.platform_personal_tenant_delete(text,boolean)') IS NOT NULL \gexec
 SELECT format('GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO %I', :'steward_app_role') \gexec
 SELECT format('GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO %I', :'steward_app_role') \gexec
 
@@ -111,13 +119,34 @@ SELECT format('GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO %I', :'s
 SELECT format(
   'GRANT SELECT ON public.tenants, public.users, public.user_tenants, public.agents, '
   'public.session_signers, public.tenant_app_clients, public.tenant_app_client_secrets, '
-  'public.transactions, public.refresh_tokens, public.tenant_configs, public.tenant_sso_domains TO %I',
+  'public.transactions, public.refresh_tokens, public.tenant_configs, public.tenant_sso_domains, '
+  'public.tenant_invitations, public.accounts TO %I',
   :'steward_bootstrap_role'
 ) \gexec
 SELECT format('GRANT INSERT ON public.tenants TO %I', :'steward_bootstrap_role') \gexec
 SELECT format('GRANT UPDATE ON public.tenants TO %I', :'steward_bootstrap_role') \gexec
 SELECT format('GRANT INSERT, UPDATE, DELETE ON public.refresh_tokens TO %I', :'steward_bootstrap_role') \gexec
 SELECT format('GRANT UPDATE, DELETE ON public.users TO %I', :'steward_bootstrap_role') \gexec
+SELECT format(
+  'GRANT SELECT, INSERT ON public.retained_user_provider_evidence TO %I',
+  :'steward_bootstrap_role'
+) WHERE to_regclass('public.retained_user_provider_evidence') IS NOT NULL \gexec
+SELECT format(
+  'GRANT EXECUTE ON FUNCTION public.steward_platform_set_user_deactivation_v2(uuid, boolean) TO %I',
+  :'steward_bootstrap_role'
+) WHERE to_regprocedure('public.steward_platform_set_user_deactivation_v2(uuid,boolean)') IS NOT NULL \gexec
+SELECT format(
+  'GRANT EXECUTE ON FUNCTION public.steward_lock_personal_lifecycle(uuid, text, boolean) TO %I',
+  :'steward_bootstrap_role'
+) WHERE to_regprocedure('public.steward_lock_personal_lifecycle(uuid,text,boolean)') IS NOT NULL \gexec
+SELECT format(
+  'GRANT EXECUTE ON FUNCTION public.steward_platform_delete_user_v2(uuid) TO %I',
+  :'steward_bootstrap_role'
+) WHERE to_regprocedure('public.steward_platform_delete_user_v2(uuid)') IS NOT NULL \gexec
+SELECT format(
+  'GRANT EXECUTE ON FUNCTION public.steward_platform_personal_tenant_delete_v2(text, boolean) TO %I',
+  :'steward_bootstrap_role'
+) WHERE to_regprocedure('public.steward_platform_personal_tenant_delete_v2(text,boolean)') IS NOT NULL \gexec
 SELECT format('ALTER SCHEMA steward_rls OWNER TO %I', :'steward_migration_role') \gexec
 SELECT format('ALTER FUNCTION steward_rls.tenant_id() OWNER TO %I', :'steward_migration_role') \gexec
 SELECT format('ALTER FUNCTION steward_rls.user_id() OWNER TO %I', :'steward_migration_role') \gexec
@@ -134,6 +163,10 @@ SELECT format('ALTER FUNCTION steward_bootstrap.ensure_platform_tenant() OWNER T
 SELECT format('ALTER FUNCTION steward_bootstrap.platform_user_tenant_ids(uuid) OWNER TO %I', :'steward_bootstrap_role') \gexec
 SELECT format('ALTER FUNCTION steward_bootstrap.platform_set_user_deactivation(uuid,boolean) OWNER TO %I', :'steward_bootstrap_role') \gexec
 SELECT format('ALTER FUNCTION steward_bootstrap.platform_delete_user(uuid) OWNER TO %I', :'steward_bootstrap_role') \gexec
+SELECT format(
+  'ALTER FUNCTION steward_bootstrap.platform_personal_tenant_delete(text,boolean) OWNER TO %I',
+  :'steward_bootstrap_role'
+) WHERE to_regprocedure('steward_bootstrap.platform_personal_tenant_delete(text,boolean)') IS NOT NULL \gexec
 SELECT format('ALTER FUNCTION steward_bootstrap.platform_revoke_user_refresh_tokens(uuid) OWNER TO %I', :'steward_bootstrap_role') \gexec
 SELECT format('ALTER FUNCTION steward_bootstrap.retention_delete_deactivated_users(integer) OWNER TO %I', :'steward_bootstrap_role') \gexec
 SELECT format('ALTER FUNCTION steward_bootstrap.platform_stats() OWNER TO %I', :'steward_bootstrap_role') \gexec

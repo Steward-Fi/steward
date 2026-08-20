@@ -321,6 +321,12 @@ export const EXPECTED_PUBLIC_RELATIONS = [
   },
   {
     "policy_group": "core",
+    "relation_name": "retained_user_provider_evidence",
+    "relation_kind": "r",
+    "partition_parents": ""
+  },
+  {
+    "policy_group": "core",
     "relation_name": "secret_routes",
     "relation_kind": "r",
     "partition_parents": ""

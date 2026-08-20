@@ -6593,6 +6593,12 @@ user.post("/me/tenants/:tenantId/invitations", async (c) => {
   if (!isValidTenantId(tenantId)) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid tenant id format" }, 400);
   }
+  if (isReservedTenantId(tenantId)) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Personal tenant membership is immutable" },
+      409,
+    );
+  }
   const admin = await requireTenantAdminMfa(
     c,
     tenantId,
@@ -7500,7 +7506,27 @@ user.patch("/me/tenants/:tenantId/users/:targetUserId/deactivate", async (c) => 
 
   const result = await db
     .transaction(async (tx) => {
+      // Match the platform lifecycle order exactly: user account, every
+      // tenant-owner lifecycle lock, then the tenant row. The user advisory
+      // lock closes the gap before the row exists/is observed.
+      await tx.execute(
+        sql`select pg_advisory_xact_lock(hashtextextended(${`platform_user_account_${targetUserId}`}, 0))`,
+      );
+      const [previous] = await tx
+        .select({ deactivatedAt: users.deactivatedAt, updatedAt: users.updatedAt })
+        .from(users)
+        .where(eq(users.id, targetUserId))
+        .for("update")
+        .limit(1);
+      if (!previous) return null;
       await lockTenantOwnerLifecycle(tx, tenantId);
+      const [lockedTenant] = await tx
+        .select({ id: tenants.id })
+        .from(tenants)
+        .where(eq(tenants.id, tenantId))
+        .for("update")
+        .limit(1);
+      if (!lockedTenant) return null;
       const [membership] = await tx
         .select({ role: userTenants.role })
         .from(userTenants)
@@ -7528,13 +7554,6 @@ user.patch("/me/tenants/:tenantId/users/:targetUserId/deactivate", async (c) => 
           "Tenant dashboard lifecycle changes are limited to users without other tenant memberships",
         );
       }
-
-      const [previous] = await tx
-        .select({ deactivatedAt: users.deactivatedAt, updatedAt: users.updatedAt })
-        .from(users)
-        .where(eq(users.id, targetUserId))
-        .limit(1);
-      if (!previous) return null;
 
       const issuedBefore = await revocationStore.revokeUserTokens(targetUserId);
       await tx

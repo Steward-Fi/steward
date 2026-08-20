@@ -94,7 +94,7 @@ describeWithPostgres("SEC-169 operator lifecycle on the real Steward schema", ()
     const firstMigration = await runCommand(["bun", "run", "packages/db/src/migrate.ts"], {
       DATABASE_URL: databaseUrl(databaseName),
     });
-    expect(firstMigration).toContain("0113_personal_tenant_account_lifecycle");
+    expect(firstMigration).toContain("0114_personal_lifecycle_invariants");
 
     const db = postgres(databaseUrl(databaseName), { max: 1 });
     try {
@@ -108,6 +108,7 @@ describeWithPostgres("SEC-169 operator lifecycle on the real Steward schema", ()
       expect(installed).toEqual({ relations: 71, policies: 73 });
 
       await runOperatorScript("rls-bootstrap.sql", true);
+      await runOperatorScript("rls-upgrade-personal-lifecycle.sql", true);
       await admin.unsafe(`ALTER ROLE ${appRole} PASSWORD '${appRolePassword}'`);
       await admin.unsafe(`ALTER ROLE ${platformRole} PASSWORD '${platformRolePassword}'`);
       const roleRows = await db<
@@ -187,6 +188,8 @@ describeWithPostgres("SEC-169 operator lifecycle on the real Steward schema", ()
         JOIN pg_namespace n ON n.oid = c.relnamespace
         WHERE n.nspname = 'public' AND p.polname LIKE 'steward_%'
       `;
+      // Retained provider evidence is permanently forced with no app policy,
+      // so it is intentionally absent from the 71 policy-bearing relations.
       expect(activated).toEqual({ enabled: 71, forced: 71, maintenance: 71 });
 
       const refreshUserId = randomUUID();
@@ -321,12 +324,17 @@ describeWithPostgres("SEC-169 operator lifecycle on the real Steward schema", ()
             (${malformedOwnerId}::uuid, ${`malformed-${extraRole}-owner-${suffix}@example.test`}),
             (${malformedExtraId}::uuid, ${`malformed-${extraRole}-extra-${suffix}@example.test`})
         `;
-        await db`
-          INSERT INTO public.user_tenants(user_id, tenant_id, role)
-          VALUES
-            (${malformedOwnerId}::uuid, ${malformedTenant}, 'owner'),
-            (${malformedExtraId}::uuid, ${malformedTenant}, ${extraRole})
-        `;
+        await db`ALTER TABLE public.user_tenants DISABLE TRIGGER user_tenants_personal_authority_guard`;
+        try {
+          await db`
+            INSERT INTO public.user_tenants(user_id, tenant_id, role)
+            VALUES
+              (${malformedOwnerId}::uuid, ${malformedTenant}, 'owner'),
+              (${malformedExtraId}::uuid, ${malformedTenant}, ${extraRole})
+          `;
+        } finally {
+          await db`ALTER TABLE public.user_tenants ENABLE TRIGGER user_tenants_personal_authority_guard`;
+        }
         await db`
           INSERT INTO public.refresh_tokens(id, user_id, tenant_id, token_hash, expires_at)
           VALUES (

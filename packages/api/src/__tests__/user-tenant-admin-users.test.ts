@@ -1,11 +1,10 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 
-import { closeDb, getDb, tenants, users, userTenants } from "@stwd/db";
+import { closeDb, getDb, tenantInvitations, tenants, users, userTenants } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 
 const TENANT_ID = "user-tenant-admin-users";
 const OTHER_TENANT_ID = "user-tenant-admin-users-other";
-const OWNER_PERSONAL_TENANT_ID = "personal-user-tenant-admin-owner";
 
 describe("user tenant-admin user directory routes", () => {
   let userRoutes: typeof import("../routes/user").userRoutes;
@@ -18,19 +17,14 @@ describe("user tenant-admin user directory routes", () => {
     process.env.STEWARD_PGLITE_MEMORY = "true";
     process.env.STEWARD_MASTER_PASSWORD = "user-tenant-admin-users-master-password";
     process.env.STEWARD_JWT_SECRET = "user-tenant-admin-users-jwt-secret";
+    process.env.STEWARD_AUDIT_HMAC_KEY =
+      "user-tenant-admin-users-audit-hmac-key-with-enough-entropy";
 
     const { db, client } = await createPGLiteDb("memory://");
     setPGLiteOverride(db, async () => {
       await client.close();
     });
 
-    await getDb()
-      .insert(tenants)
-      .values({
-        id: OWNER_PERSONAL_TENANT_ID,
-        name: "Owner Personal Tenant",
-        apiKeyHash: `${OWNER_PERSONAL_TENANT_ID}-hash`,
-      });
     await getDb()
       .insert(tenants)
       .values({
@@ -67,7 +61,6 @@ describe("user tenant-admin user directory routes", () => {
       .insert(userTenants)
       .values([
         { userId: ownerId, tenantId: `personal-${ownerId}`, role: "owner" },
-        { userId: ownerId, tenantId: OWNER_PERSONAL_TENANT_ID, role: "owner" },
         { userId: ownerId, tenantId: TENANT_ID, role: "owner" },
         { userId: ownerId, tenantId: OTHER_TENANT_ID, role: "owner" },
         {
@@ -87,6 +80,7 @@ describe("user tenant-admin user directory routes", () => {
     delete process.env.STEWARD_PGLITE_MEMORY;
     delete process.env.STEWARD_MASTER_PASSWORD;
     delete process.env.STEWARD_JWT_SECRET;
+    delete process.env.STEWARD_AUDIT_HMAC_KEY;
   });
 
   async function tokenFor(userId: string): Promise<string> {
@@ -217,6 +211,26 @@ describe("user tenant-admin user directory routes", () => {
       headers: { Authorization: `Bearer ${tenantBToken}` },
     });
     expect(matchingTenant.status).toBe(200);
+  });
+
+  it("rejects the mounted user invitation writer for a personal tenant", async () => {
+    const personalTenantId = `personal-${ownerId}`;
+    const token = await personalTokenFor(ownerId);
+    const response = await userRoutes.request(`/me/tenants/${personalTenantId}/invitations`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ email: "blocked-personal-invite@example.test", role: "member" }),
+    });
+
+    expect(response.status).toBe(409);
+    expect((await response.json()) as { error?: string }).toEqual({
+      ok: false,
+      error: "Personal tenant membership is immutable",
+    });
+    expect(await getDb().select().from(tenantInvitations)).toEqual([]);
   });
 
   it("does not carry MFA freshness across tenant switches", async () => {

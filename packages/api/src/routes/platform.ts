@@ -745,12 +745,6 @@ function isPersonalTenantId(tenantId: string): boolean {
   return tenantId.startsWith("personal-");
 }
 
-function canonicalPersonalTenantOwnerId(tenantId: string): string | null {
-  if (!isPersonalTenantId(tenantId)) return null;
-  const ownerId = tenantId.slice("personal-".length);
-  return isValidUserId(ownerId) && tenantId === `personal-${ownerId}` ? ownerId : null;
-}
-
 // ─── Route group ─────────────────────────────────────────────────────────────
 
 const platform = new Hono<{ Variables: AppVariables }>();
@@ -865,7 +859,8 @@ export async function bindPlatformTenantDatabase(
   c: Context<{ Variables: AppVariables }>,
   next: () => Promise<void>,
 ) {
-  const match = new URL(c.req.url).pathname.match(/(?:^|\/platform)\/tenants\/([^/]+)(?:\/|$)/);
+  const pathname = new URL(c.req.url).pathname;
+  const match = pathname.match(/(?:^|\/platform)\/tenants\/([^/]+)(?:\/|$)/);
   let tenantId = "";
   try {
     tenantId = match ? decodeURIComponent(match[1]) : "";
@@ -873,6 +868,19 @@ export async function bindPlatformTenantDatabase(
     return next();
   }
   if (!tenantId || !isValidTenantId(tenantId)) return next();
+  // Personal deletion is implemented entirely through the distinct platform
+  // authority connection and records its required evidence in the platform
+  // audit chain. Bind the outer request to that same identity so the app-role
+  // request capability cannot be mistaken for personal-tenant authority.
+  const isRootTenantDelete = /(?:^|\/platform)\/tenants\/[^/]+\/?$/.test(pathname);
+  if (c.req.method === "DELETE" && isRootTenantDelete && isPersonalTenantId(tenantId)) {
+    return continueWithTenantDatabase(
+      PLATFORM_AUDIT_TENANT_ID,
+      "platform-personal-tenant-deletion",
+      "platform",
+      next,
+    );
+  }
   return continueWithTenantDatabase(tenantId, "platform-tenant-operation", "platform", next);
 }
 
@@ -2083,21 +2091,157 @@ platform.delete("/tenants/:id", async (c) => {
   const scopeResponse = requirePlatformRouteScope(c, "platform:tenant:delete");
   if (scopeResponse) return scopeResponse;
 
-  const db = getDb();
   const tenantId = c.req.param("id");
 
   if (!isValidTenantId(tenantId)) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid tenant id format" }, 400);
   }
 
+  if (isPersonalTenantId(tenantId)) {
+    type PersonalDeleteResult = {
+      status:
+        | "prepared"
+        | "deleted"
+        | "missing"
+        | "blocked_by_lease"
+        | "blocked_by_provider"
+        | "blocked_by_capability_integrity"
+        | "blocked_by_personal_membership";
+      agent_ids: string[];
+      member_ids: string[];
+      active_grants_retired: number;
+      terminal_grants_removed: number;
+      capabilities_removed: number;
+      invocation_evidence_retained: number;
+    };
+    const personalResult = await withPlatformAuthorityDatabase((platformDb) =>
+      withTenantAuditedTransactionOnDb(
+        platformDb,
+        PLATFORM_AUDIT_TENANT_ID,
+        async (txRaw, appendRequiredAudit) => {
+          const tx = txRaw as typeof platformDb;
+          await tx.execute(
+            sql`SELECT set_config('steward.tenant_id', ${PLATFORM_AUDIT_TENANT_ID}, true)`,
+          );
+          const [prepared] = rowsFromExecute<PersonalDeleteResult>(
+            await tx.execute(sql`
+              SELECT * FROM steward_bootstrap.platform_personal_tenant_delete(
+                ${tenantId}, false
+              )
+            `),
+          );
+          if (!prepared || prepared.status !== "prepared") {
+            return { status: prepared?.status ?? ("missing" as const) };
+          }
+
+          const [agentRevocationCutoffs, userRevocationCutoffs] = await Promise.all([
+            Promise.all(
+              prepared.agent_ids.map((agentId) => revocationStore.revokeAgentTokens(agentId)),
+            ),
+            Promise.all(
+              prepared.member_ids.map((userId) => revocationStore.revokeUserTokens(userId)),
+            ),
+          ]);
+          const capabilityCleanup = {
+            activeGrantsRetired: prepared.active_grants_retired,
+            terminalGrantsRemoved: prepared.terminal_grants_removed,
+            capabilitiesRemoved: prepared.capabilities_removed,
+            invocationEvidenceRetained: prepared.invocation_evidence_retained,
+          };
+          await appendRequiredAudit({
+            tenantId: PLATFORM_AUDIT_TENANT_ID,
+            actorType: "platform",
+            action: "tenant.delete.authorized",
+            resourceType: "tenant",
+            resourceId: tenantId,
+            metadata: {
+              targetTenantId: tenantId,
+              agentTokenRevocationTargets: prepared.agent_ids.length,
+              userTokenRevocationTargets: prepared.member_ids.length,
+              capabilityCleanup,
+            },
+            ...auditCtx(c),
+          });
+          await appendRequiredAudit({
+            tenantId: PLATFORM_AUDIT_TENANT_ID,
+            actorType: "platform",
+            action: "tenant.delete.token_revocation_completed",
+            resourceType: "tenant",
+            resourceId: tenantId,
+            metadata: {
+              targetTenantId: tenantId,
+              agentRevocationCutoffsEstablished: agentRevocationCutoffs.length,
+              userRevocationCutoffsEstablished: userRevocationCutoffs.length,
+            },
+            ...auditCtx(c),
+          });
+          await appendRequiredAudit({
+            tenantId: PLATFORM_AUDIT_TENANT_ID,
+            actorType: "platform",
+            action: "tenant.delete",
+            resourceType: "tenant",
+            resourceId: tenantId,
+            metadata: {
+              targetTenantId: tenantId,
+              agentTokenRevocationTargets: prepared.agent_ids.length,
+              userTokenRevocationTargets: prepared.member_ids.length,
+              capabilityCleanup,
+            },
+            ...auditCtx(c),
+          });
+          const [deleted] = rowsFromExecute<PersonalDeleteResult>(
+            await tx.execute(sql`
+              SELECT * FROM steward_bootstrap.platform_personal_tenant_delete(
+                ${tenantId}, true
+              )
+            `),
+          );
+          if (deleted?.status !== "deleted") {
+            throw new Error("Personal tenant lifecycle changed while deletion lock was held");
+          }
+          return { status: "deleted" as const };
+        },
+      ),
+    );
+
+    if (personalResult.status === "missing") {
+      return c.json<ApiResponse>({ ok: false, error: "Tenant not found" }, 404);
+    }
+    if (personalResult.status === "blocked_by_lease") {
+      return c.json<ApiResponse>(
+        { ok: false, error: "Tenant has unresolved upstream credential leases" },
+        409,
+      );
+    }
+    if (personalResult.status === "blocked_by_provider") {
+      return c.json<ApiResponse>(
+        { ok: false, error: "Tenant has retained provider action evidence" },
+        409,
+      );
+    }
+    if (personalResult.status === "blocked_by_capability_integrity") {
+      return c.json<ApiResponse>(
+        { ok: false, error: "Tenant capability authority has cross-tenant references" },
+        409,
+      );
+    }
+    if (personalResult.status === "blocked_by_personal_membership") {
+      return c.json<ApiResponse>(
+        { ok: false, error: "Personal tenant membership invariant violated" },
+        409,
+      );
+    }
+    return c.json<ApiResponse>({ ok: true });
+  }
+
+  const db = getDb();
+
   const result = await withTenantAuditedTransaction(
     tenantId,
     async (txRaw, appendRequiredAudit) => {
       const tx = txRaw as typeof db;
-      // This advisory fence is also acquired by every lease/provider/route/
-      // capability writer installed by migration 0110. Whichever side wins is
-      // authoritative: a prior writer becomes visible to the preflight; a late
-      // writer waits until the tenant and its parents are gone, then fails.
+      // This fence is shared with lease/provider/capability writers. A prior
+      // writer is visible to preflight; a late writer waits and then fails.
       await tx.execute(sql`SELECT public.steward_lock_tenant_deletion(${tenantId})`);
       const [existing] = await tx
         .select({ id: tenants.id })
@@ -2105,39 +2249,6 @@ platform.delete("/tenants/:id", async (c) => {
         .where(eq(tenants.id, tenantId))
         .for("update");
       if (!existing) return { status: "missing" as const };
-
-      const personalOwnerId = canonicalPersonalTenantOwnerId(tenantId);
-      if (isPersonalTenantId(tenantId)) {
-        if (!personalOwnerId) return { status: "blocked_by_personal_membership" as const };
-        await tx.execute(
-          sql`SELECT pg_advisory_xact_lock(hashtextextended(${
-            "platform_user_account_" + personalOwnerId
-          }, 0))`,
-        );
-        await tx.execute(
-          sql`SELECT pg_advisory_xact_lock(hashtextextended(${
-            "tenant_owner_lifecycle_" + tenantId
-          }, 0))`,
-        );
-        const [owner] = await tx
-          .select({ id: users.id })
-          .from(users)
-          .where(eq(users.id, personalOwnerId))
-          .for("update");
-        const personalMemberships = await tx
-          .select({ userId: userTenants.userId, role: userTenants.role })
-          .from(userTenants)
-          .where(eq(userTenants.tenantId, tenantId))
-          .orderBy(userTenants.userId);
-        if (
-          !owner ||
-          personalMemberships.length !== 1 ||
-          personalMemberships[0]?.userId !== personalOwnerId ||
-          personalMemberships[0]?.role !== "owner"
-        ) {
-          return { status: "blocked_by_personal_membership" as const };
-        }
-      }
 
       const tenantAgents = await tx
         .select({ id: agents.id })
@@ -2266,13 +2377,6 @@ platform.delete("/tenants/:id", async (c) => {
       409,
     );
   }
-  if (result.status === "blocked_by_personal_membership") {
-    return c.json<ApiResponse>(
-      { ok: false, error: "Personal tenant membership invariant violated" },
-      409,
-    );
-  }
-
   return c.json<ApiResponse>({ ok: true });
 });
 
@@ -3880,7 +3984,7 @@ platform.delete("/users/:userId", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: "Invalid user id format" }, 400);
   }
 
-  const issuedBefore = await withPlatformAuthorityDatabase((platformDb) =>
+  const deletionResult = await withPlatformAuthorityDatabase((platformDb) =>
     withTenantAuditedTransactionOnDb(
       platformDb,
       PLATFORM_AUDIT_TENANT_ID,
@@ -3906,7 +4010,7 @@ platform.delete("/users/:userId", async (c) => {
           `),
         );
         if (!deleted) throw new Error("User not found");
-        const cutoff = await revocationStore.revokeUserTokens(userId);
+        const cutoff = Math.floor(Date.now() / 1000);
         await appendRequiredAudit({
           tenantId: PLATFORM_AUDIT_TENANT_ID,
           actorType: "platform",
@@ -3927,17 +4031,35 @@ platform.delete("/users/:userId", async (c) => {
     if (errorChainHasExactMessage(error, "Personal tenant membership invariant violated")) {
       return "Personal tenant membership invariant violated";
     }
+    if (
+      errorChainHasExactMessage(error, "Personal tenant must be deleted before its user identity")
+    ) {
+      return "Personal tenant must be deleted before its user identity";
+    }
     throw error;
   });
-  if (issuedBefore === null) {
+  if (deletionResult === null) {
     return c.json<ApiResponse>({ ok: false, error: "User not found" }, 404);
   }
-  if (issuedBefore === "Cannot delete the sole active tenant owner") {
-    return c.json<ApiResponse>({ ok: false, error: issuedBefore }, 409);
+  if (deletionResult === "Cannot delete the sole active tenant owner") {
+    return c.json<ApiResponse>({ ok: false, error: deletionResult }, 409);
   }
-  if (issuedBefore === "Personal tenant membership invariant violated") {
-    return c.json<ApiResponse>({ ok: false, error: issuedBefore }, 409);
+  if (deletionResult === "Personal tenant membership invariant violated") {
+    return c.json<ApiResponse>({ ok: false, error: deletionResult }, 409);
   }
+  if (deletionResult === "Personal tenant must be deleted before its user identity") {
+    return c.json<ApiResponse>({ ok: false, error: deletionResult }, 409);
+  }
+
+  // The committed user deletion is the authoritative revocation boundary:
+  // request authentication rejects a missing user. Refresh the distributed
+  // revocation cache afterward as defense in depth, but never turn an already
+  // committed deletion into a misleading 500. Retrying the DELETE is safe.
+  await revocationStore.revokeUserTokens(userId, deletionResult).catch((error: unknown) => {
+    console.error("[Platform] Post-delete token cache refresh failed", {
+      errorClass: error instanceof Error ? error.name : typeof error,
+    });
+  });
 
   return c.json<ApiResponse<{ userId: string; deleted: boolean }>>({
     ok: true,

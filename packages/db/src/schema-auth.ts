@@ -232,6 +232,25 @@ export const accounts = pgTable(
   }),
 );
 
+/** Permanent, credential-free evidence retained after a user identity is deleted. */
+export const retainedUserProviderEvidence = pgTable(
+  "retained_user_provider_evidence",
+  {
+    accountId: uuid("account_id").primaryKey(),
+    deletedUserId: uuid("deleted_user_id").notNull(),
+    provider: varchar("provider", { length: 64 }).notNull(),
+    providerAccountId: varchar("provider_account_id", { length: 255 }).notNull(),
+    retainedAt: timestamp("retained_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    deletedProviderUnique: uniqueIndex("retained_user_provider_evidence_identity_idx").on(
+      table.deletedUserId,
+      table.provider,
+      table.providerAccountId,
+    ),
+  }),
+);
+
 // ─── Refresh Tokens ─────────────────────────────────────────────────────────
 // Long-lived tokens (30 days) that can be exchanged for new access tokens.
 // One-time use: each refresh rotates both tokens and deletes the old refresh token.

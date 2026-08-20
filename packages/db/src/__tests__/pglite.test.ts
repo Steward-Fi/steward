@@ -682,4 +682,66 @@ AQIDAQAB
 
     await client.close();
   });
+
+  test("personal tenant authority rejects every non-canonical membership writer", async () => {
+    const { client } = await freshDb();
+    const ownerId = "00000000-0000-4000-8000-000000000061";
+    const otherId = "00000000-0000-4000-8000-000000000062";
+    const tenantId = `personal-${ownerId}`;
+
+    await client.query(`
+      INSERT INTO users (id, email, email_verified) VALUES
+        ('${ownerId}', 'personal-owner@example.test', true),
+        ('${otherId}', 'personal-other@example.test', true)
+    `);
+    await client.query(`
+      INSERT INTO tenants (id, name, api_key_hash)
+      VALUES ('${tenantId}', 'Canonical personal', 'personal-authority-hash')
+    `);
+    await client.query(`
+      INSERT INTO user_tenants (user_id, tenant_id, role)
+      VALUES ('${ownerId}', '${tenantId}', 'owner')
+    `);
+
+    await expect(
+      client.query(`
+        INSERT INTO user_tenants (user_id, tenant_id, role)
+        VALUES ('${otherId}', '${tenantId}', 'member')
+      `),
+    ).rejects.toThrow("Personal tenant membership is immutable");
+    await expect(
+      client.query(`
+        UPDATE user_tenants SET role = 'member'
+        WHERE user_id = '${ownerId}' AND tenant_id = '${tenantId}'
+      `),
+    ).rejects.toThrow("Personal tenant membership is immutable");
+    await expect(
+      client.query(`
+        INSERT INTO tenant_invitations (
+          tenant_id, email, role, token_hash, status, expires_at
+        ) VALUES (
+          '${tenantId}', 'blocked@example.test', 'member',
+          'personal-invitation-hash', 'pending', now() + interval '1 day'
+        )
+      `),
+    ).rejects.toThrow("Personal tenant invitations are forbidden");
+    await expect(
+      client.query(`
+        DELETE FROM user_tenants
+        WHERE user_id = '${ownerId}' AND tenant_id = '${tenantId}'
+      `),
+    ).rejects.toThrow("Personal tenant membership is immutable");
+
+    await client.query(`DELETE FROM tenants WHERE id = '${tenantId}'`);
+    expect(
+      readCountRow(
+        (
+          await client.query(
+            `SELECT COUNT(*)::int AS cnt FROM user_tenants WHERE tenant_id = '${tenantId}'`,
+          )
+        ).rows,
+      ),
+    ).toBe(0);
+    await client.close();
+  });
 });

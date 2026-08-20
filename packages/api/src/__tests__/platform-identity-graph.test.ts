@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it, spyOn } from "bun:test";
 
 import { hashSha256Hex, revocationStore } from "@stwd/auth";
 import {
@@ -7,6 +7,7 @@ import {
   closeDb,
   getDb,
   refreshTokens,
+  retainedUserProviderEvidence,
   sponsoredGasEvents,
   tenantConfigs,
   tenants,
@@ -14,7 +15,7 @@ import {
   userTenants,
 } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 
 const PLATFORM_KEY = "platform-identity-graph-key";
 const TENANT_ID = "platform-identity-graph-tenant";
@@ -131,12 +132,23 @@ describe("platform global identity graph routes", () => {
         name: `Malformed personal ${extraRole}`,
         apiKeyHash: `malformed-personal-${extraRole}-hash`,
       });
-    await getDb()
-      .insert(userTenants)
-      .values([
-        { userId: owner.id, tenantId, role: "owner" },
-        { userId: extraUser.id, tenantId, role: extraRole },
-      ]);
+    // Reproduce a row shape that could predate 0114. New writes are covered by
+    // a separate invariant test and cannot create this state.
+    await getDb().execute(
+      sql.raw("ALTER TABLE user_tenants DISABLE TRIGGER user_tenants_personal_authority_guard"),
+    );
+    try {
+      await getDb()
+        .insert(userTenants)
+        .values([
+          { userId: owner.id, tenantId, role: "owner" },
+          { userId: extraUser.id, tenantId, role: extraRole },
+        ]);
+    } finally {
+      await getDb().execute(
+        sql.raw("ALTER TABLE user_tenants ENABLE TRIGGER user_tenants_personal_authority_guard"),
+      );
+    }
     await getDb()
       .insert(refreshTokens)
       .values({
@@ -962,6 +974,38 @@ describe("platform global identity graph routes", () => {
     expect(deletedRefresh).toHaveLength(0);
   });
 
+  it("keeps a committed deletion successful when token-cache refresh fails", async () => {
+    const [deleteUser] = await getDb()
+      .insert(users)
+      .values({ email: "delete-revocation-retry@example.test", emailVerified: true })
+      .returning({ id: users.id });
+    await getDb().insert(accounts).values({
+      userId: deleteUser.id,
+      provider: "github",
+      providerAccountId: "delete-revocation-retry-github",
+    });
+
+    const revoke = spyOn(revocationStore, "revokeUserTokens").mockRejectedValueOnce(
+      new Error("redis provider unavailable"),
+    );
+    try {
+      const response = await platformRoutes.request(`/users/${deleteUser.id}`, {
+        method: "DELETE",
+        headers: headers(),
+      });
+      expect(response.status).toBe(200);
+      expect(await getDb().select().from(users).where(eq(users.id, deleteUser.id))).toHaveLength(0);
+      expect(
+        await getDb()
+          .select()
+          .from(retainedUserProviderEvidence)
+          .where(eq(retainedUserProviderEvidence.deletedUserId, deleteUser.id)),
+      ).toHaveLength(1);
+    } finally {
+      revoke.mockRestore();
+    }
+  });
+
   it("deactivates a personal owner and deletes the tenant before its identity", async () => {
     const [personalUser] = await getDb()
       .insert(users)
@@ -1061,6 +1105,22 @@ describe("platform global identity graph routes", () => {
         .from(accounts)
         .where(eq(accounts.providerAccountId, "google-personal-delete-owner")),
     ).toHaveLength(0);
+    expect(
+      await getDb()
+        .select({
+          deletedUserId: retainedUserProviderEvidence.deletedUserId,
+          provider: retainedUserProviderEvidence.provider,
+          providerAccountId: retainedUserProviderEvidence.providerAccountId,
+        })
+        .from(retainedUserProviderEvidence)
+        .where(eq(retainedUserProviderEvidence.deletedUserId, personalUser.id)),
+    ).toEqual([
+      {
+        deletedUserId: personalUser.id,
+        provider: "google",
+        providerAccountId: "google-personal-delete-owner",
+      },
+    ]);
     expect(
       await getDb().select().from(tenants).where(eq(tenants.id, personalTenantId)),
     ).toHaveLength(0);

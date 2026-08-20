@@ -56,6 +56,7 @@ INSERT INTO steward_expected_public_relations VALUES
   ('core','refresh_tokens','r',''),
   ('core','registry_index','r',''),
   ('core','reputation_cache','r',''),
+  ('core','retained_user_provider_evidence','r',''),
   ('core','secret_routes','r',''),
   ('core','secrets','r',''),
   ('core','session_signers','r',''),

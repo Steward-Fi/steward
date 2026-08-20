@@ -68,6 +68,7 @@ describe("0111 tenant RLS policy installation", () => {
       "ensure_platform_tenant",
       "ensure_system_tenant",
       "platform_delete_user",
+      "platform_personal_tenant_delete",
       "platform_revoke_user_refresh_tokens",
       "platform_set_user_deactivation",
       "platform_stats",
