@@ -16,9 +16,9 @@
  *      intact and under the 25 MiB response cap.
  *   3. deny-by-default: an ungranted capability => 403, never forwards.
  *   4. an explicit `effect: "deny"` policy rule => 403, never forwards.
- *   5. the GET-signed limitation: a GET capability does NOT forward a request
- *      body (the invoke path omits it for GET/HEAD), which is why the runbook
- *      says "use POST for body-carrying broker calls".
+ *   5. an ALLOWED signed GET reaches a real broker-shaped list endpoint with
+ *      query parameters, replay-bound idempotency, bearer injection, no body,
+ *      no credential reflection, and a durable allow audit.
  *
  * The SSRF guard is prod defense with NO disable flag, so the broker cannot be a
  * localhost mock. We use the shipped in-process test hooks
@@ -53,6 +53,7 @@ const PROXY_URL = "https://proxy.broker-e2e.test";
 // short-circuited by __setResolveProxyHostForTests to a fixed public IP.
 const BROKER_HOST = "broker.cap-e2e.test";
 const CAP_NAME = "broker.session.render";
+const BROKER_READ_PATH = "/api/otter/items";
 const MIGRATIONS_FOLDER = fileURLToPath(new URL("../../drizzle", import.meta.url));
 const TEST_KDF_SALT = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 const TEST_ENV_KEYS = [
@@ -122,6 +123,9 @@ beforeAll(async () => {
   process.env.STEWARD_PGLITE_MEMORY = "true";
   process.env.STEWARD_MASTER_PASSWORD = MASTER_PASSWORD;
   process.env.STEWARD_JWT_SECRET = "broker-e2e-jwt-secret-with-enough-bytes-0123456789ab";
+  // The in-process proxy intentionally uses its explicit dev-only replay/rate
+  // stores. Production remains fail-closed on shared Redis.
+  process.env.STEWARD_PROXY_DEV_MODE = "true";
   process.env.STEWARD_PROXY_REQUIRE_REQUEST_SIGNATURE = "true";
   process.env.STEWARD_PROXY_REQUEST_SIGNING_SECRET = SIGNING_SECRET;
   // the broker host must be in the proxy allowlist (SSRF layer 1) AND the
@@ -220,10 +224,13 @@ async function seedTenantAgent(): Promise<void> {
 }
 
 /**
- * Seed the broker capability + a grant for the agent. `method` defaults to POST
- * (the runbook's recommended verb); the GET-limitation test overrides it.
+ * Seed the broker capability + a grant for the agent. POST render calls use the
+ * default `/render`; GET read calls can select a broker-native list path.
  */
-async function seedBrokerCapability(method: "POST" | "GET" = "POST"): Promise<string> {
+async function seedBrokerCapability(
+  method: "POST" | "GET" = "POST",
+  pathPattern = "/render",
+): Promise<string> {
   const vault = new SecretVault(MASTER_PASSWORD);
   const secret = await vault.createSecret(tenantId, "session-broker-token", BROKER_TOKEN);
   const store = new CapabilityStore(getDb());
@@ -233,7 +240,7 @@ async function seedBrokerCapability(method: "POST" | "GET" = "POST"): Promise<st
     spec: {
       secretId: secret.id,
       host: BROKER_HOST,
-      pathPattern: "/render",
+      pathPattern,
       method,
       injectAs: "header",
       injectKey: "authorization",
@@ -460,44 +467,36 @@ describe("session-broker e2e: full arc through the real proxy", () => {
     expect(rows[0].decision).toBe("deny");
   });
 
-  it("documents the GET-signed limitation: a signed GET capability invoke is BLOCKED (400) under production request-signing", async () => {
-    // The runbook's honest caveat, proven. TWO things conspire against a GET
-    // capability when the proxy runs with request signing enabled (production,
-    // STEWARD_PROXY_REQUIRE_REQUEST_SIGNATURE=true, set in beforeAll):
-    //
-    //   1. the invoke path computes
-    //        hasBody = method !== "GET" && method !== "HEAD" && body !== undefined,
-    //      so a GET capability NEVER forwards a request body -- a broker needing a
-    //      render payload in the body could not receive it via GET anyway.
-    //   2. MORE IMPORTANTLY: the proxy requires an `Idempotency-Key` header for
-    //      ANY *signed* request -- including safe/GET methods (proxy.ts
-    //      claimUnsafeProxyRequest: `signedRequest` forces the key even for
-    //      SAFE_PROXY_METHODS). But StewardProxyClient does NOT auto-attach an
-    //      idempotency key on GET, and the invoke path supplies none. So a signed
-    //      GET capability invoke fails CLOSED with a 400 before it ever forwards.
-    //
-    // Net: under production request-signing, a GET capability is not usable for a
-    // credential-injected broker call. USE POST (which carries the body AND gets
-    // an auto-attached idempotency key). This test pins that behavior so a future
-    // change that silently "fixes" GET must update the runbook.
-    await seedBrokerCapability("GET");
+  it("signed GET reaches a broker-native read endpoint with query, bearer injection, replay binding, and no body", async () => {
+    const capId = await seedBrokerCapability("GET", BROKER_READ_PATH);
     currentPolicySet = [capRule("r1", "allow")];
+    brokerResponseBody = JSON.stringify({ items: [{ id: "otter-note-1" }] });
     const app = buildInvokeApp();
 
     const res = await app.request(`/capabilities/${CAP_NAME}/invoke`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ body: { url: "https://example.com/dashboard", format: "png" } }),
+      body: JSON.stringify({
+        args: { account: "primary" },
+        query: { limit: "10", cursor: "next-page" },
+      }),
     });
 
-    // policy authorized the invoke, but the proxy rejected the signed GET for the
-    // missing idempotency key. The invoke path forwards the upstream/proxy status
-    // verbatim. The request NEVER reached the broker.
-    expect(res.status).toBe(400);
-    expect(proxyRateLimitChecks).toBe(1);
-    const bodyText = await res.text();
-    expect(bodyText).toContain("Idempotency-Key");
-    // the broker was never called: no credential was ever attached/forwarded.
-    expect(lastForwarded).toBeNull();
+    expect(res.status).toBe(200);
+    const passthrough = await res.text();
+    expect(JSON.parse(passthrough)).toEqual({ items: [{ id: "otter-note-1" }] });
+    expect(passthrough).not.toContain(BROKER_TOKEN);
+
+    expect(lastForwarded).not.toBeNull();
+    expect(lastForwarded?.method).toBe("GET");
+    expect(lastForwarded?.url).toBe(
+      `https://${BROKER_HOST}${BROKER_READ_PATH}?limit=10&cursor=next-page`,
+    );
+    expect(lastForwarded?.headers.get("authorization")).toBe(`Bearer ${BROKER_TOKEN}`);
+    expect(lastForwarded?.body).toBeNull();
+
+    const rows = await agentInvocations(capId);
+    expect(rows.length).toBe(1);
+    expect(rows[0].decision).toBe("allow");
   });
 });
