@@ -128,7 +128,7 @@ PASSKEY_ORIGIN=https://your-app.com
 # TWITTER_CLIENT_SECRET=
 
 # ─── Migrations ──────────────────────────────────────────────────────────────
-SKIP_MIGRATIONS=false
+SKIP_MIGRATIONS=true
 ```
 
 Review the [custody-posture guide](security/custody-posture.md) before accepting
@@ -203,7 +203,8 @@ railway up
 The first deploy will:
 1. Build the multi-stage Docker image (~2-3 min)
 2. Start the API server on port 3200
-3. Run database migrations automatically (unless `SKIP_MIGRATIONS=true`)
+3. Verify migrations were applied out of band with the restricted migration
+   role; production startup refuses to auto-migrate with the application role
 4. Pass the health check at `/health`
 
 Watch logs:
@@ -494,7 +495,7 @@ curl -sf "$BASE/platform/tenants" \
 | `TWITTER_CLIENT_ID` | No | — | Twitter/X OAuth client ID |
 | `TWITTER_CLIENT_SECRET` | No | — | Twitter/X OAuth client secret |
 | `AGENT_TOKEN_EXPIRY` | No | `24h` | Agent JWT token lifetime |
-| `SKIP_MIGRATIONS` | No | `false` | Skip auto-migrations on startup |
+| `SKIP_MIGRATIONS` | Production: **Yes** | `true` | Production requires out-of-band migrations and a restricted app-role `DATABASE_URL` |
 | `STEWARD_PROXY_PORT` | No | `8080` | Proxy service listen port |
 | `STEWARD_PROXY_REQUEST_SIGNING_SECRET` / `_SECRETS` | **Yes for production proxy traffic** | — | Dedicated HMAC root used by proxy clients to sign requests and by the proxy to verify them. |
 | `STEWARD_PROXY_URL` | No | — | API-side proxy URL used by `/ready` for the optional proxy clock check. |

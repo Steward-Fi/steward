@@ -2,11 +2,14 @@ import { describe, expect, test } from "bun:test";
 import { getTableName } from "drizzle-orm";
 import {
   ALL_INVENTORIED_TABLES,
+  ALL_OPTIONAL_INVENTORIED_TABLES,
   BOOTSTRAP_ROOT_TABLES,
   DIRECT_TENANT_TABLES,
   HYBRID_SCOPE_TABLES,
   INDIRECT_TENANT_TABLES,
   INTENTIONALLY_GLOBAL_TABLES,
+  OPTIONAL_DIRECT_TENANT_TABLES,
+  OPTIONAL_INTENTIONALLY_GLOBAL_TABLES,
   TENANT_COLUMN_BACKFILL_TABLES,
 } from "../rls-inventory";
 import * as schema from "../schema";
@@ -29,7 +32,13 @@ describe("SEC-169 RLS inventory", () => {
   test("classifies every schema table exactly once", () => {
     const inventory = [...ALL_INVENTORIED_TABLES].sort();
     expect(inventory).toEqual([...new Set(inventory)]);
-    expect(inventory).toEqual(schemaTableNames());
+    expect(inventory).toEqual([...schemaTableNames(), "auth_kv_store"].sort());
+    expect([...ALL_OPTIONAL_INVENTORIED_TABLES].sort()).toEqual(
+      [
+        ...OPTIONAL_DIRECT_TENANT_TABLES,
+        ...Object.keys(OPTIONAL_INTENTIONALLY_GLOBAL_TABLES),
+      ].sort(),
+    );
   });
 
   test("direct tables really expose tenantId and exclusions are justified", () => {
@@ -56,6 +65,7 @@ describe("SEC-169 RLS inventory", () => {
       ...Object.values(HYBRID_SCOPE_TABLES),
       ...Object.values(BOOTSTRAP_ROOT_TABLES),
       ...Object.values(INTENTIONALLY_GLOBAL_TABLES),
+      ...Object.values(OPTIONAL_INTENTIONALLY_GLOBAL_TABLES),
     ]) {
       expect(rationale.length).toBeGreaterThan(20);
     }

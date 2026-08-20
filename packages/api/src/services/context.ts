@@ -404,9 +404,40 @@ export const tenantConfigs = new Map<string, TenantConfig>([
   [defaultTenantConfig.id, defaultTenantConfig],
 ]);
 
-export const defaultTenantReady = db.execute(sql`
-  SELECT steward_bootstrap.ensure_default_tenant(${process.env.STEWARD_DEFAULT_TENANT_KEY || ""})
-`);
+let defaultTenantDb: ReturnType<typeof getDb> | null = null;
+let defaultTenantReady: Promise<void> | null = null;
+
+/**
+ * Ensure the bootstrap tenant only after the caller has completed migrations.
+ *
+ * `context.ts` is imported while the Bun app is composed, before the blocking
+ * migrator runs. Starting database I/O at module evaluation races a fresh
+ * schema where `steward_bootstrap.ensure_default_tenant` does not exist yet.
+ * Keep the operation lazy and memoize it per live DB handle so production runs
+ * once while single-process PGLite tests can safely replace their override.
+ */
+export function ensureDefaultTenantReady(): Promise<void> {
+  const activeDb = getDb();
+  if (activeDb !== defaultTenantDb) {
+    defaultTenantDb = activeDb;
+    defaultTenantReady = null;
+  }
+  if (!defaultTenantReady) {
+    const pending = activeDb
+      .execute(sql`
+        SELECT steward_bootstrap.ensure_default_tenant(${process.env.STEWARD_DEFAULT_TENANT_KEY || ""})
+      `)
+      .then(() => undefined)
+      .catch((error) => {
+        if (defaultTenantDb === activeDb && defaultTenantReady === pending) {
+          defaultTenantReady = null;
+        }
+        throw error;
+      });
+    defaultTenantReady = pending;
+  }
+  return defaultTenantReady;
+}
 
 // ─── App variable types ───────────────────────────────────────────────────────
 
@@ -779,7 +810,7 @@ export async function tenantAuth(
   next: Next,
   options?: { requireTenantMatch?: string },
 ) {
-  await defaultTenantReady;
+  await ensureDefaultTenantReady();
 
   const authHeader = c.req.header("Authorization");
   if (authHeader?.startsWith("Bearer ")) {

@@ -92,10 +92,28 @@ export const BOOTSTRAP_ROOT_TABLES = {
 
 export const INTENTIONALLY_GLOBAL_TABLES = {
   accounts: "global user OAuth identities; tenant access derives through user_tenants",
+  auth_kv_store:
+    "global one-time authentication state keyed by opaque digests; raw migration table without tenant ownership",
   authenticators: "global user WebAuthn identities; tenant access derives through user_tenants",
   registry_index: "public chain registry cache, not tenant-owned",
   sessions: "global user sessions; tenant membership is checked separately",
   users: "global user identity; tenant access derives through user_tenants",
+} as const;
+
+/**
+ * Plugin-owned relations are optional at core migration time. If present, the
+ * activation/readiness gates treat them exactly like core relations; an
+ * enabled plugin must never create an unclassified public table.
+ */
+export const OPTIONAL_DIRECT_TENANT_TABLES = [
+  "capabilities",
+  "capability_grants",
+  "capability_invocations",
+] as const;
+
+export const OPTIONAL_INTENTIONALLY_GLOBAL_TABLES = {
+  example_log:
+    "example plugin demonstration log contains no tenant or authority data and is intentionally global",
 } as const;
 
 export const ALL_INVENTORIED_TABLES = [
@@ -105,4 +123,9 @@ export const ALL_INVENTORIED_TABLES = [
   ...Object.keys(HYBRID_SCOPE_TABLES),
   ...Object.keys(BOOTSTRAP_ROOT_TABLES),
   ...Object.keys(INTENTIONALLY_GLOBAL_TABLES),
+] as const;
+
+export const ALL_OPTIONAL_INVENTORIED_TABLES = [
+  ...OPTIONAL_DIRECT_TENANT_TABLES,
+  ...Object.keys(OPTIONAL_INTENTIONALLY_GLOBAL_TABLES),
 ] as const;

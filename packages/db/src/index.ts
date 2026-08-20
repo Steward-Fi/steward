@@ -54,13 +54,17 @@ export {
 } from "./plugin-migrate";
 export {
   ALL_INVENTORIED_TABLES,
+  ALL_OPTIONAL_INVENTORIED_TABLES,
   BOOTSTRAP_ROOT_TABLES,
   DIRECT_TENANT_TABLES,
   HYBRID_SCOPE_TABLES,
   INDIRECT_TENANT_TABLES,
   INTENTIONALLY_GLOBAL_TABLES,
+  OPTIONAL_DIRECT_TENANT_TABLES,
+  OPTIONAL_INTENTIONALLY_GLOBAL_TABLES,
   TENANT_COLUMN_BACKFILL_TABLES,
 } from "./rls-inventory";
+export { assertTenantRlsDatabaseReady } from "./rls-readiness";
 // PGLite exports live in the `@stwd/db/pglite` subpath so Cloudflare Worker
 // bundles can import `@stwd/db` without pulling node:fs/node:path dependencies.
 export * from "./schema";

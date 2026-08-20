@@ -14,7 +14,13 @@
 
 import { createHash, timingSafeEqual } from "node:crypto";
 import { validateJwtSecretEnv } from "@stwd/auth";
-import { closeDb, getDb, getMigrationExpectation, runMigrations } from "@stwd/db";
+import {
+  assertTenantRlsDatabaseReady,
+  closeDb,
+  getDb,
+  getMigrationExpectation,
+  runMigrations,
+} from "@stwd/db";
 import { shouldUsePGLite } from "@stwd/db/pglite";
 import { redactedThrownDiagnostics } from "@stwd/shared";
 import { sql } from "drizzle-orm";
@@ -25,6 +31,7 @@ import { assertAuthStoresAreSafe, getAuthStoreSources, initAuthStores } from "./
 import {
   API_VERSION,
   type ApiResponse,
+  ensureDefaultTenantReady,
   nonceCleanupTimer,
   RATE_LIMIT_MAX_REQUESTS,
   RATE_LIMIT_WINDOW_MS,
@@ -58,6 +65,21 @@ if (!Number.isInteger(PORT) || PORT <= 0) {
   throw new Error("PORT must be a positive integer");
 }
 validateJwtSecretEnv();
+
+const skipMigrations =
+  process.env.SKIP_MIGRATIONS === "true" || process.env.SKIP_MIGRATIONS === "1";
+const productionPostgresRuntime =
+  !shouldUsePGLite() && process.env.NODE_ENV !== "development" && process.env.NODE_ENV !== "test";
+
+// Production traffic must never boot with a migration/owner credential. Core
+// and plugin migrations, role bootstrap, and RLS activation are an out-of-band
+// operator step; DATABASE_URL is reserved for the restricted application role.
+// Enforce that split before composing the app or touching the database.
+if (productionPostgresRuntime && !skipMigrations) {
+  throw new Error(
+    "PRODUCTION_RLS_REQUIRES_OUT_OF_BAND_MIGRATIONS: set SKIP_MIGRATIONS=1 and use the restricted app-role DATABASE_URL",
+  );
+}
 
 // Compose the deployable app: lean core + this repo's opt-in plugins (trading).
 // composeApp() is async because plugin registration may be async + the trading
@@ -292,7 +314,7 @@ app.get("/ready", async (c) => {
 if (shouldUsePGLite()) {
   migrationsRan = true;
   console.log("[steward] PGLite mode detected — skipping Postgres migrator.");
-} else if (process.env.SKIP_MIGRATIONS === "true" || process.env.SKIP_MIGRATIONS === "1") {
+} else if (skipMigrations) {
   migrationsRan = true;
   console.log("[steward] SKIP_MIGRATIONS set — skipping auto-migration. Run migrations manually.");
 } else {
@@ -339,6 +361,36 @@ if (shouldUsePGLite()) {
     console.error("[steward] Migration failed — cannot start", redactedThrownDiagnostics(err));
     process.exit(1);
   }
+}
+
+// A missing NODE_ENV is production posture. Routine service traffic must use
+// the dedicated no-bypass, non-owner app role against a completely activated
+// inventory; never trust a role name or deployment variable in place of the
+// live PostgreSQL catalog.
+if (productionPostgresRuntime) {
+  try {
+    await assertTenantRlsDatabaseReady(getDb());
+  } catch (err) {
+    console.error(
+      "[steward] Tenant RLS readiness failed — cannot start",
+      redactedThrownDiagnostics(err),
+    );
+    process.exit(1);
+  }
+}
+
+// The app graph is composed before migrations, so tenant bootstrap must be an
+// explicit post-migration step rather than module-evaluation I/O in context.ts.
+// Failure is fatal: serving without the bootstrap boundary would make tenant
+// authentication nondeterministically depend on the first request.
+try {
+  await ensureDefaultTenantReady();
+} catch (err) {
+  console.error(
+    "[steward] Default tenant bootstrap failed — cannot start",
+    redactedThrownDiagnostics(err),
+  );
+  process.exit(1);
 }
 
 // ─── Redis + auth stores (blocking — must complete before serving traffic) ──

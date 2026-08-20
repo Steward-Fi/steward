@@ -52,6 +52,7 @@ import {
   withJwtRuntimeAuthority,
 } from "@stwd/auth/jwt";
 import {
+  assertTenantRlsDatabaseReady,
   createDbForRequest,
   createNeonTransactionDbForRequest,
   getDb,
@@ -319,6 +320,43 @@ export function hydrateProcessEnv(env: Env): void {
 }
 
 let workerInit: Promise<void> | null = null;
+const workerRlsReadyByDatabase = new Map<string, Promise<void>>();
+const MAX_WORKER_RLS_AUTHORITIES = 8;
+
+export function __resetWorkerRlsReadinessForTests(): void {
+  workerRlsReadyByDatabase.clear();
+}
+
+export async function ensureWorkerTenantRlsReady(
+  env: Env,
+  assertReady: typeof assertTenantRlsDatabaseReady = assertTenantRlsDatabaseReady,
+): Promise<void> {
+  if (env.NODE_ENV === "development" || env.NODE_ENV === "test") return;
+  const databaseUrl = env.DATABASE_URL?.trim();
+  if (!databaseUrl) throw new Error("WORKER_RLS_DATABASE_URL_REQUIRED");
+  const key = `${env.DATABASE_DRIVER?.trim().toLowerCase() ?? ""}\n${databaseUrl}`;
+  let ready = workerRlsReadyByDatabase.get(key);
+  if (!ready) {
+    if (workerRlsReadyByDatabase.size >= MAX_WORKER_RLS_AUTHORITIES) {
+      throw new Error("WORKER_RLS_AUTHORITY_CACHE_EXHAUSTED");
+    }
+    ready = assertReady(getDb()).catch((error) => {
+      workerRlsReadyByDatabase.delete(key);
+      throw error;
+    });
+    workerRlsReadyByDatabase.set(key, ready);
+  }
+  await ready;
+}
+
+export async function runWorkerRlsGuardedTask<T>(
+  env: Env,
+  task: () => Promise<T>,
+  assertReady: typeof assertTenantRlsDatabaseReady = assertTenantRlsDatabaseReady,
+): Promise<T> {
+  await ensureWorkerTenantRlsReady(env, assertReady);
+  return task();
+}
 
 function workerJwtEnvironment(env: Env): Readonly<JwtRuntimeEnvironment> {
   return Object.freeze({
@@ -454,9 +492,11 @@ export default {
         return withWorkerRequestDatabase(
           env,
           async () => {
-            await ensureWorkerInit(env);
-            const app = await getComposedApp();
-            return app.fetch(request, env, ctx as never);
+            return runWorkerRlsGuardedTask(env, async () => {
+              await ensureWorkerInit(env);
+              const app = await getComposedApp();
+              return app.fetch(request, env, ctx as never);
+            });
           },
           waitUntil ? { waitUntil } : undefined,
         );
@@ -473,11 +513,17 @@ export default {
         hydrateProcessEnv(env);
         validateWorkerSecurityEnv();
         ctx.waitUntil(
-          Promise.all([
-            withWorkerRequestDatabase(env, () => runWorkerUpstreamCredentialLeaseSweep(env)),
-            withWorkerRequestDatabase(env, () => runWorkerGoogleCredentialLifecycleSweep(env)),
-            withWorkerRequestDatabase(env, () => runWorkerXCredentialLifecycleSweep(env)),
-          ]),
+          (async () => {
+            // Preflight one owned handle before opening any sweep handle. A bad
+            // role/catalog therefore starts zero background mutations, and the
+            // preflight handle is fully closed before concurrent work begins.
+            await withWorkerRequestDatabase(env, () => ensureWorkerTenantRlsReady(env));
+            await Promise.all([
+              withWorkerRequestDatabase(env, () => runWorkerUpstreamCredentialLeaseSweep(env)),
+              withWorkerRequestDatabase(env, () => runWorkerGoogleCredentialLifecycleSweep(env)),
+              withWorkerRequestDatabase(env, () => runWorkerXCredentialLifecycleSweep(env)),
+            ]);
+          })(),
         );
       });
     });

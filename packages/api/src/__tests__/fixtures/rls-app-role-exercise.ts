@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { generateApiKey, signAccessToken } from "@stwd/auth";
 import {
+  assertTenantRlsDatabaseReady,
   auditEvents,
   closeDb,
   getDb,
@@ -48,6 +49,7 @@ async function requestJson(
 try {
   assert(platformKey.length > 0, "STEWARD_PLATFORM_KEYS is required");
   assert(tenantId.length > 0, "STEWARD_RLS_TEST_TENANT is required");
+  await assertTenantRlsDatabaseReady(getDb());
 
   const email = `rls-app-role-${suffix}@example.test`;
   const created = await requestJson(

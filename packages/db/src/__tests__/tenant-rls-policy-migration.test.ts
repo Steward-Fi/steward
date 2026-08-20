@@ -96,6 +96,10 @@ describe("0111 tenant RLS policy installation", () => {
     expect(bootstrap).toContain("BEGIN;");
     expect(bootstrap).toContain("COMMIT;");
     expect(inventory).toContain("exactly 71 relations and 73 policies");
+    expect(inventory).toContain("auth_kv_store");
+    expect(inventory).toContain("capability_invocations");
+    expect(inventory).toContain("pg_partition_tree");
+    expect(inventory).toContain("unclassified public relations or partitions");
     expect(activate).toContain("\\ir rls-policy-inventory.sql");
     expect(rollback).toContain("\\ir rls-policy-inventory.sql");
     expect(activate).toContain("ENABLE ROW LEVEL SECURITY");

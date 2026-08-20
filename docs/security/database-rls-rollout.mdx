@@ -162,15 +162,52 @@ table in future migrations.
 6. Run real-Postgres cross-tenant read/write/upsert/delete/join tests plus
    concurrent pool-reuse and background-job tests against the deployment role.
 
-Create/finalize roles after migration `0111` (the invoking operator needs
-`CREATEROLE` and schema ownership):
+Production uses three distinct connection authorities. Never reuse the routine
+application `DATABASE_URL` for bootstrap or migrations:
 
 ```bash
-psql "$DATABASE_URL" \
+export STEWARD_ADMIN_DATABASE_URL='postgresql://bootstrap-admin:...@host/steward?sslmode=verify-full'
+export DATABASE_URL='postgresql://steward_app:...@host/steward?sslmode=verify-full' # runtime only
+```
+
+All URLs must be host-bearing TCP URLs; socket/hostless URLs do not reliably
+preserve substituted login credentials in operator tooling. The API
+now refuses production startup before composing the app when
+`SKIP_MIGRATIONS` is absent, and then verifies the live `DATABASE_URL` role and
+complete policy catalog before bootstrap or traffic.
+
+The fresh-database order is executable and strict:
+
+1. Apply core migrations through `0111` with the initial schema-owning admin.
+2. Run `rls-bootstrap.sql` as that admin to create roles and transfer ownership.
+3. Apply enabled-plugin migrations with the new migration-role credential.
+4. Activate as the admin, naming both the app and migration roles.
+5. Start API/proxy/Workers with only the app-role `DATABASE_URL` and
+   `SKIP_MIGRATIONS=1`.
+
+```bash
+DATABASE_URL= MIGRATION_DATABASE_URL="$STEWARD_ADMIN_DATABASE_URL" \
+  bun --cwd packages/api run migrate:production:core
+```
+
+Create/finalize roles (the invoking administrator needs `CREATEROLE` and schema
+ownership):
+
+```bash
+psql "$STEWARD_ADMIN_DATABASE_URL" \
   -v steward_app_role=steward_app \
   -v steward_migration_role=steward_migrator \
   -v steward_bootstrap_role=steward_bootstrap_owner \
   -f scripts/postgres/rls-bootstrap.sql
+```
+
+Set the new migration-role credential, then apply exactly the plugins enabled
+for this deployment through the same resolver used by the application:
+
+```bash
+export MIGRATION_DATABASE_URL='postgresql://steward_migrator:...@host/steward?sslmode=verify-full'
+DATABASE_URL= STEWARD_PLUGINS='capabilities,trading' \
+  bun --cwd packages/api run migrate:production:plugins
 ```
 
 The app and migration roles are separate login identities asserted
@@ -184,7 +221,8 @@ After all residual code paths and exact deployment-role tests pass, activate in
 one maintenance transaction:
 
 ```bash
-psql "$DATABASE_URL" \
+psql "$STEWARD_ADMIN_DATABASE_URL" \
+  -v steward_app_role=steward_app \
   -v steward_migration_role=steward_migrator \
   -f scripts/postgres/rls-activate.sql
 ```
@@ -196,7 +234,8 @@ and forced.
 
 ## Rollback
 
-Rollback is an operator action using the migration role, never a permission
+Rollback is an emergency operator action using the bootstrap administrator,
+never a permission
 granted to the API. Stop API/workers, retain application-layer tenant
 predicates, disable RLS on the complete activated table set in one audited
 maintenance transaction, roll back the application to pre-RLS transaction
@@ -207,5 +246,5 @@ and incident reason in the audit record.
 The atomic database step is:
 
 ```bash
-psql "$DATABASE_URL" -f scripts/postgres/rls-rollback.sql
+psql "$STEWARD_ADMIN_DATABASE_URL" -f scripts/postgres/rls-rollback.sql
 ```

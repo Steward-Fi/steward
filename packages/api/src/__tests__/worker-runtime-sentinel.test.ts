@@ -8,13 +8,71 @@ import {
 } from "@stwd/db";
 import { createPGLiteDb } from "@stwd/db/pglite";
 import {
+  __resetWorkerRlsReadinessForTests,
+  ensureWorkerTenantRlsReady,
   hydrateProcessEnv,
   runWorkerGoogleCredentialLifecycleSweep,
+  runWorkerRlsGuardedTask,
   runWorkerUpstreamCredentialLeaseSweep,
   runWorkerXCredentialLifecycleSweep,
   withWorkerRequestDatabase,
   default as worker,
 } from "../worker";
+
+test("Worker RLS readiness is authority-keyed, retryable, and gates scheduled work", async () => {
+  __resetWorkerRlsReadinessForTests();
+  const requestDb = { marker: "rls-readiness" } as unknown as ReturnType<typeof getDb>;
+  const baseEnv = {
+    DATABASE_URL: "postgresql://worker.invalid/steward-a",
+    DATABASE_DRIVER: "neon-websocket",
+    NODE_ENV: "production",
+  };
+  let assertions = 0;
+  let work = 0;
+  let rejectOnce = true;
+  const assertReady = async (db: ReturnType<typeof getDb>) => {
+    assertions += 1;
+    expect((db as unknown as { marker: string }).marker).toBe("rls-readiness");
+    if (rejectOnce) {
+      rejectOnce = false;
+      throw new Error("unsafe role");
+    }
+  };
+  const createHandle = () => ({
+    driver: "neon-websocket" as const,
+    db: requestDb as never,
+    async close() {},
+  });
+
+  await expect(
+    withWorkerRequestDatabase(
+      baseEnv,
+      () => runWorkerRlsGuardedTask(baseEnv, async () => void (work += 1), assertReady),
+      { createHandle },
+    ),
+  ).rejects.toThrow("unsafe role");
+  expect(work).toBe(0);
+
+  await withWorkerRequestDatabase(
+    baseEnv,
+    () => runWorkerRlsGuardedTask(baseEnv, async () => void (work += 1), assertReady),
+    { createHandle },
+  );
+  await withWorkerRequestDatabase(baseEnv, () => ensureWorkerTenantRlsReady(baseEnv, assertReady), {
+    createHandle,
+  });
+  expect(assertions).toBe(2);
+  expect(work).toBe(1);
+
+  const rotatedEnv = { ...baseEnv, DATABASE_URL: "postgresql://worker.invalid/steward-b" };
+  await withWorkerRequestDatabase(
+    rotatedEnv,
+    () => ensureWorkerTenantRlsReady(rotatedEnv, assertReady),
+    { createHandle },
+  );
+  expect(assertions).toBe(3);
+  __resetWorkerRlsReadinessForTests();
+});
 
 test("Worker hydration cannot be overridden by a STEWARD_RUNTIME binding", () => {
   const previous = process.env.STEWARD_RUNTIME;
@@ -210,8 +268,82 @@ test("Worker cron gives every autonomous sweep its own request database", async 
     }
   }
 
-  expect(databaseCount).toBe(3);
-  expect(seen.sort()).toEqual(["cron-db-1", "cron-db-2", "cron-db-3"]);
+  expect(databaseCount).toBe(4);
+  expect(seen.sort()).toEqual(["cron-db-2", "cron-db-3", "cron-db-4"]);
+});
+
+test("Worker scheduled-first production event denies before opening sweep handles", async () => {
+  __resetWorkerRlsReadinessForTests();
+  const upstreamScheduler = await import("../services/upstream-credential-lease-scheduler");
+  const googleScheduler = await import("../services/provider-google-lifecycle-scheduler");
+  const xScheduler = await import("../services/provider-x-lifecycle-scheduler");
+  let opened = 0;
+  let closed = 0;
+  const createHandleSpy = spyOn(
+    databaseModule,
+    "createNeonTransactionDbForRequest",
+  ).mockImplementation(() => {
+    opened += 1;
+    return {
+      driver: "neon-websocket",
+      db: { marker: "unsafe-cron-db" } as never,
+      async close() {
+        closed += 1;
+      },
+    };
+  });
+  const readinessSpy = spyOn(databaseModule, "assertTenantRlsDatabaseReady").mockRejectedValue(
+    new Error("unsafe production role"),
+  );
+  const upstreamSpy = spyOn(
+    upstreamScheduler,
+    "runUpstreamCredentialLeaseSweep",
+  ).mockImplementation(async () => {
+    throw new Error("upstream sweep must not start");
+  });
+  const googleSpy = spyOn(
+    googleScheduler,
+    "runGoogleCredentialLifecycleRecoverySweep",
+  ).mockImplementation(async () => {
+    throw new Error("google sweep must not start");
+  });
+  const xSpy = spyOn(xScheduler, "runXCredentialLifecycleRecoverySweep").mockImplementation(
+    async () => {
+      throw new Error("x sweep must not start");
+    },
+  );
+  let scheduledWork!: Promise<unknown>;
+  const env = {
+    DATABASE_URL: "postgresql://worker.invalid/steward",
+    DATABASE_DRIVER: "neon-websocket",
+    NODE_ENV: "production",
+    STEWARD_JWT_SECRET: "worker-cron-production-secret-at-least-32-chars",
+  };
+  const previousEnv = new Map(Object.keys(env).map((key) => [key, process.env[key]] as const));
+  try {
+    await worker.scheduled({}, env, {
+      waitUntil(promise) {
+        scheduledWork = promise;
+      },
+    });
+    await expect(scheduledWork).rejects.toThrow("unsafe production role");
+    expect(opened).toBe(1);
+    expect(closed).toBe(1);
+    expect(upstreamSpy).toHaveBeenCalledTimes(0);
+    expect(googleSpy).toHaveBeenCalledTimes(0);
+    expect(xSpy).toHaveBeenCalledTimes(0);
+  } finally {
+    createHandleSpy.mockRestore();
+    readinessSpy.mockRestore();
+    upstreamSpy.mockRestore();
+    googleSpy.mockRestore();
+    xSpy.mockRestore();
+    __resetWorkerRlsReadinessForTests();
+    for (const [key, value] of previousEnv) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
 });
 
 test("configured webhook work retains its request database until Worker cleanup", async () => {

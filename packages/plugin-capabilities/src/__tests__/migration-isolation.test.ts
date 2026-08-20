@@ -93,7 +93,7 @@ describe("capability plugin migrations: namespaced-journal isolation", () => {
     const pluginLedger = await client.query(
       `SELECT count(*)::int AS n FROM drizzle."__drizzle_migrations_plugin_capabilities"`,
     );
-    expect(pluginLedger.rows[0].n).toBeGreaterThanOrEqual(3);
+    expect(pluginLedger.rows[0].n).toBeGreaterThanOrEqual(4);
 
     // (c) the core journal carries NO capability-invocations migration row.
     const coreLedger = await client.query(
@@ -117,6 +117,36 @@ describe("capability plugin migrations: namespaced-journal isolation", () => {
       `SELECT count(*)::int AS n FROM pg_indexes WHERE indexname = 'capability_invocations_rate_idx'`,
     );
     expect(idx.rows[0].n).toBe(1);
+
+    const tenantPolicies = await client.query(`
+      SELECT c.relname, p.polname, c.relrowsecurity, c.relforcerowsecurity
+      FROM pg_policy p
+      JOIN pg_class c ON c.oid = p.polrelid
+      JOIN pg_namespace n ON n.oid = c.relnamespace
+      WHERE n.nspname = 'public'
+        AND c.relname IN ('capabilities', 'capability_grants', 'capability_invocations')
+      ORDER BY c.relname, p.polname
+    `);
+    expect(tenantPolicies.rows).toEqual([
+      {
+        relname: "capabilities",
+        polname: "steward_tenant_isolation",
+        relrowsecurity: false,
+        relforcerowsecurity: false,
+      },
+      {
+        relname: "capability_grants",
+        polname: "steward_tenant_isolation",
+        relrowsecurity: false,
+        relforcerowsecurity: false,
+      },
+      {
+        relname: "capability_invocations",
+        polname: "steward_tenant_isolation",
+        relrowsecurity: false,
+        relforcerowsecurity: false,
+      },
+    ]);
   });
 
   test("0002 revokes orphan grants without disabling a different tenant's route", async () => {
