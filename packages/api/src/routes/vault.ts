@@ -648,7 +648,8 @@ function transferActionResponse(input: {
     | "broadcast"
     | "confirmed"
     | "failed"
-    | "outcome_unknown";
+    | "outcome_unknown"
+    | "retired";
   chainId: number;
   to: string;
   value: string;
@@ -815,13 +816,15 @@ function transferResponseStatus(
   | "broadcast"
   | "confirmed"
   | "failed"
-  | "outcome_unknown" {
+  | "outcome_unknown"
+  | "retired" {
   if (status === "pending") return "pending_approval";
   if (status === "rejected") return "rejected";
   if (status === "broadcast") return "broadcast";
   if (status === "confirmed") return "confirmed";
   if (status === "failed") return "failed";
   if (status === "outcome_unknown") return "outcome_unknown";
+  if (status === "retired") return "retired";
   return "signed";
 }
 
@@ -3593,6 +3596,13 @@ vaultRoutes.post("/:agentId/actions/transfer", async (c) => {
         return c.json<ApiResponse>({ ok: false, error: reservationError }, 403);
       }
       let result: string;
+      let solanaArtifactEvidence:
+        | {
+            artifactSignature: string;
+            recentBlockhash: string;
+            blockhashKind: "recent" | "durable_nonce" | "unknown";
+          }
+        | undefined;
       if (isSolanaTokenTransfer) {
         if (!signRequest.data) {
           throw new Error("SPL transfer transaction was not built");
@@ -3633,6 +3643,13 @@ vaultRoutes.post("/:agentId/actions/transfer", async (c) => {
             : {}),
         });
         result = signed.signature;
+        if (signed.artifactSignature && signed.recentBlockhash && signed.blockhashKind) {
+          solanaArtifactEvidence = {
+            artifactSignature: signed.artifactSignature,
+            recentBlockhash: signed.recentBlockhash,
+            blockhashKind: signed.blockhashKind,
+          };
+        }
       } else {
         result = await vault.signTransaction(signRequest, {
           txId: actionId,
@@ -3660,9 +3677,16 @@ vaultRoutes.post("/:agentId/actions/transfer", async (c) => {
         .update(transactions)
         .set({
           status: txStatus,
-          txHash: transfer.broadcast ? result : undefined,
+          txHash: transfer.broadcast ? result : solanaArtifactEvidence?.artifactSignature,
           actionType: "transfer",
-          ...(solanaRecoveryBinding ? {} : { actionPayload: storedTransferActionPayload }),
+          ...(solanaRecoveryBinding
+            ? {}
+            : {
+                actionPayload: {
+                  ...storedTransferActionPayload,
+                  ...solanaArtifactEvidence,
+                },
+              }),
           policyResults: evaluation.results,
           signedAt: new Date(),
         })
@@ -4522,6 +4546,13 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
       });
 
       let txHash: string;
+      let solanaArtifactEvidence:
+        | {
+            artifactSignature: string;
+            recentBlockhash: string;
+            blockhashKind: "recent" | "durable_nonce" | "unknown";
+          }
+        | undefined;
 
       if (isSolana) {
         const isSolanaTokenTransfer =
@@ -4559,6 +4590,13 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
             onBroadcastPrepared: checkpoint,
           });
           txHash = result.signature;
+          if (result.artifactSignature && result.recentBlockhash && result.blockhashKind) {
+            solanaArtifactEvidence = {
+              artifactSignature: result.artifactSignature,
+              recentBlockhash: result.recentBlockhash,
+              blockhashKind: result.blockhashKind,
+            };
+          }
           if (shouldBroadcast && approvedSolanaExecutionToken) {
             const finalized = await finalizeSolanaRecoveryAnchor(
               txId,
@@ -4681,7 +4719,7 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
         .update(transactions)
         .set({
           status: nextStatus,
-          txHash: shouldBroadcast ? txHash : null,
+          txHash: shouldBroadcast ? txHash : (solanaArtifactEvidence?.artifactSignature ?? null),
           executionPayloadDigest:
             approvalExecutionPayloadDigest ?? transactionRow.executionPayloadDigest,
           executionPolicyRevisionHash: isPrimaryEvmApproval
@@ -4692,24 +4730,33 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
             ? {}
             : {
                 actionPayload: transferPayload
-                  ? transferActionPayload({
-                      token: transferPayload.token,
-                      recipient: transferPayload.recipient ?? transactionRow.toAddress,
-                      amount: transferPayload.amount ?? transactionRow.value,
-                      broadcast: transferPayload.broadcast,
-                      referenceId: transferPayload.referenceId,
-                      sponsorship: transferPayload.sponsorship,
-                    })
+                  ? {
+                      ...transferActionPayload({
+                        token: transferPayload.token,
+                        recipient: transferPayload.recipient ?? transactionRow.toAddress,
+                        amount: transferPayload.amount ?? transactionRow.value,
+                        broadcast: transferPayload.broadcast,
+                        referenceId: transferPayload.referenceId,
+                        sponsorship: transferPayload.sponsorship,
+                      }),
+                      ...solanaArtifactEvidence,
+                    }
                   : transactionPayload
-                    ? transactionActionPayload({
-                        broadcast: transactionPayload.broadcast,
-                        referenceId: transactionPayload.referenceId,
-                        nonce: transactionPayload.nonce,
-                        gasLimit: transactionPayload.gasLimit,
-                        venue: transactionPayload.venue,
-                        walletAddress: transactionPayload.walletAddress,
-                      })
-                    : transactionRow.actionPayload,
+                    ? {
+                        ...transactionActionPayload({
+                          broadcast: transactionPayload.broadcast,
+                          referenceId: transactionPayload.referenceId,
+                          nonce: transactionPayload.nonce,
+                          gasLimit: transactionPayload.gasLimit,
+                          venue: transactionPayload.venue,
+                          walletAddress: transactionPayload.walletAddress,
+                        }),
+                        ...solanaArtifactEvidence,
+                      }
+                    : {
+                        ...readSolanaRecoveryMetadata(transactionRow.actionPayload),
+                        ...solanaArtifactEvidence,
+                      },
               }),
           signedAt: resolvedAt,
         })
@@ -5299,6 +5346,7 @@ vaultRoutes.get("/:agentId/transactions", async (c) => {
     "confirmed",
     "failed",
     "outcome_unknown",
+    "retired",
   ]);
   if (status && !allowedStatuses.has(status)) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid transaction status filter" }, 400);
@@ -5357,7 +5405,6 @@ vaultRoutes.get("/:agentId/transactions/:txId", async (c) => {
     .where(and(eq(transactions.id, txId), eq(transactions.agentId, agentId)));
 
   if (!row) return c.json<ApiResponse>({ ok: false, error: "Transaction not found" }, 404);
-
   return c.json<ApiResponse>({ ok: true, data: toTransactionResponse(row) });
 });
 
@@ -5412,6 +5459,29 @@ vaultRoutes.post("/:agentId/transactions/:txId/lifecycle", async (c) => {
     .from(transactions)
     .where(and(eq(transactions.id, txId), eq(transactions.agentId, agentId)));
   if (!row) return c.json<ApiResponse>({ ok: false, error: "Transaction not found" }, 404);
+  const lifecycleMetadata = readSolanaRecoveryMetadata(row.actionPayload);
+
+  // A signed artifact remains independently broadcastable after Steward loses
+  // custody of the response. Generic provider errors therefore cannot prove a
+  // signed artifact is safe to abandon. Only the dedicated chain-authoritative
+  // retirement route may terminalize it.
+  if (
+    (row.status === "signed" ||
+      lifecycleMetadata.lifecycleOriginStatus === "signed" ||
+      isNonEmptyString(lifecycleMetadata.artifactSignature)) &&
+    (body.type === "transaction.failed" ||
+      body.type === "transaction.provider_error" ||
+      body.type === "transaction.execution_reverted")
+  ) {
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error:
+          "Transactions originating from a signed artifact cannot be relabeled as failed; use authoritative reconciliation or signed-artifact retirement",
+      },
+      409,
+    );
+  }
 
   const isBroadcastPromotion =
     body.type === "transaction.broadcasted" ||
@@ -5493,6 +5563,10 @@ vaultRoutes.post("/:agentId/transactions/:txId/lifecycle", async (c) => {
       update.status = "broadcast";
       update.txHash = eventTxHash;
       update.signedAt = row.signedAt ?? now;
+      update.actionPayload = {
+        ...lifecycleMetadata,
+        lifecycleOriginStatus: lifecycleMetadata.lifecycleOriginStatus ?? row.status,
+      };
       nextStatus = "broadcast";
       break;
     case "transaction.confirmed":
@@ -5521,6 +5595,10 @@ vaultRoutes.post("/:agentId/transactions/:txId/lifecycle", async (c) => {
       update.status = "broadcast";
       update.txHash = replacementTxHash;
       update.signedAt = row.signedAt ?? now;
+      update.actionPayload = {
+        ...lifecycleMetadata,
+        lifecycleOriginStatus: lifecycleMetadata.lifecycleOriginStatus ?? row.status,
+      };
       eventTxHash = replacementTxHash;
       nextStatus = "broadcast";
       break;
@@ -5569,9 +5647,25 @@ vaultRoutes.post("/:agentId/transactions/:txId/lifecycle", async (c) => {
       ? await db
           .update(transactions)
           .set(update)
-          .where(and(eq(transactions.id, txId), eq(transactions.agentId, agentId)))
+          .where(
+            and(
+              eq(transactions.id, txId),
+              eq(transactions.agentId, agentId),
+              eq(transactions.status, row.status),
+              row.txHash === null
+                ? sql`${transactions.txHash} is null`
+                : eq(transactions.txHash, row.txHash),
+            ),
+          )
           .returning()
       : [row];
+
+  if (!updated) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Transaction state changed concurrently; retry" },
+      409,
+    );
+  }
 
   await writeVaultAudit(c, {
     tenantId,
@@ -5772,9 +5866,30 @@ vaultRoutes.post("/:agentId/transactions/:txId/replace", async (c) => {
       status: "broadcast",
       txHash: replacementTxHash,
       signedAt: row.signedAt ?? now,
+      actionPayload: {
+        ...readSolanaRecoveryMetadata(row.actionPayload),
+        lifecycleOriginStatus:
+          readSolanaRecoveryMetadata(row.actionPayload).lifecycleOriginStatus ?? row.status,
+      },
     })
-    .where(and(eq(transactions.id, txId), eq(transactions.agentId, agentId)))
+    .where(
+      and(
+        eq(transactions.id, txId),
+        eq(transactions.agentId, agentId),
+        eq(transactions.status, row.status),
+        row.txHash === null
+          ? sql`${transactions.txHash} is null`
+          : eq(transactions.txHash, row.txHash),
+      ),
+    )
     .returning();
+
+  if (!updated) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Transaction state changed concurrently; retry" },
+      409,
+    );
+  }
 
   await writeVaultAudit(c, {
     tenantId,
@@ -8524,6 +8639,9 @@ type SolanaSigningResult = {
   broadcast: boolean;
   chainId: number;
   caip2?: string;
+  artifactSignature?: string;
+  recentBlockhash?: string;
+  blockhashKind?: "recent" | "durable_nonce" | "unknown";
 };
 
 type SolanaRecoveryBinding = {
@@ -8941,7 +9059,11 @@ async function checkpointSolanaBroadcastSubmission(
   txId: string,
   agentId: string,
   executionToken: string,
-  checkpoint: { signature: string; recentBlockhash: string },
+  checkpoint: {
+    signature: string;
+    recentBlockhash: string;
+    blockhashKind: "recent" | "durable_nonce" | "unknown";
+  },
 ): Promise<void> {
   const [existing] = await db
     .select({ actionPayload: transactions.actionPayload })
@@ -8956,7 +9078,9 @@ async function checkpointSolanaBroadcastSubmission(
       signedAt: new Date(),
       actionPayload: {
         ...readSolanaRecoveryMetadata(existing?.actionPayload),
+        artifactSignature: checkpoint.signature,
         recentBlockhash: checkpoint.recentBlockhash,
+        blockhashKind: checkpoint.blockhashKind,
       },
     })
     .where(
@@ -9184,12 +9308,27 @@ async function finalizeSolanaRecoveryAnchor(
   executionToken: string,
   result: SolanaSigningResult,
 ): Promise<boolean> {
+  const [existing] = await db
+    .select({ actionPayload: transactions.actionPayload })
+    .from(transactions)
+    .where(and(eq(transactions.id, txId), eq(transactions.agentId, agentId)))
+    .limit(1);
+  const metadata = readSolanaRecoveryMetadata(existing?.actionPayload);
   const rows = await db
     .update(transactions)
     .set({
       status: result.broadcast ? "broadcast" : "signed",
-      txHash: result.broadcast ? result.signature : null,
+      // `signature` contains signed bytes for the offline response. Persist
+      // only the deterministic public signature used for exact-chain status
+      // checks; signed bytes never enter durable metadata or logs.
+      txHash: result.artifactSignature ?? (result.broadcast ? result.signature : null),
       signedAt: new Date(),
+      actionPayload: {
+        ...metadata,
+        artifactSignature: result.artifactSignature ?? metadata.artifactSignature ?? null,
+        recentBlockhash: result.recentBlockhash ?? metadata.recentBlockhash ?? null,
+        blockhashKind: result.blockhashKind ?? metadata.blockhashKind ?? "unknown",
+      },
     })
     .where(
       and(
@@ -10028,6 +10167,213 @@ vaultRoutes.post("/:agentId/sign-solana", async (c) => {
       }
       return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(e) }, 500);
     }
+  });
+});
+
+vaultRoutes.post("/:agentId/transactions/:txId/retire-signed", async (c) => {
+  if (!requireAgentAccess(c)) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Forbidden: token scope does not match agent" },
+      403,
+    );
+  }
+  if (!hasTenantAdminSession(c) || !hasRecentSessionMfa(c)) {
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error: "Signed-artifact retirement requires owner or admin session with recent MFA",
+      },
+      403,
+    );
+  }
+
+  const tenantId = c.get("tenantId");
+  const agentId = c.req.param("agentId");
+  const txId = c.req.param("txId");
+  if (!(await ensureAgentForTenant(tenantId, agentId))) {
+    return c.json<ApiResponse>({ ok: false, error: "Transaction not found" }, 404);
+  }
+  const body = await safeJsonParse<{ reason?: unknown }>(c);
+  const reason = typeof body?.reason === "string" ? body.reason.trim() : "";
+  if (!reason || reason.length > 500) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "reason must be a non-empty string up to 500 characters" },
+      400,
+    );
+  }
+
+  const [row] = await db
+    .select()
+    .from(transactions)
+    .where(and(eq(transactions.id, txId), eq(transactions.agentId, agentId)))
+    .limit(1);
+  if (!row) return c.json<ApiResponse>({ ok: false, error: "Transaction not found" }, 404);
+  if (row.status !== "signed") {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Only signed transactions can enter artifact retirement" },
+      409,
+    );
+  }
+  if (!isSolanaActionChain(row.chainId)) {
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error:
+          "Signed-artifact retirement is not supported for this chain; EVM artifacts require authoritative finalized nonce replacement or consumption evidence",
+      },
+      409,
+    );
+  }
+  const metadata = readSolanaRecoveryMetadata(row.actionPayload);
+  const artifactSignature = isNonEmptyString(metadata.artifactSignature)
+    ? metadata.artifactSignature
+    : row.txHash;
+  const recentBlockhash = isNonEmptyString(metadata.recentBlockhash)
+    ? metadata.recentBlockhash
+    : null;
+  if (!isNonEmptyString(artifactSignature) || !isNonEmptyString(recentBlockhash)) {
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error:
+          "Signed Solana artifact lacks its deterministic signature or recent blockhash and cannot be retired",
+      },
+      409,
+    );
+  }
+  if (metadata.blockhashKind !== "recent") {
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error:
+          metadata.blockhashKind === "durable_nonce"
+            ? "Durable-nonce Solana artifacts remain broadcastable until authoritative nonce-account advancement is proven"
+            : "Solana artifact blockhash lifetime is unknown; ordinary blockhash expiry cannot authorize retirement",
+      },
+      409,
+    );
+  }
+
+  let inspection: Awaited<ReturnType<typeof vault.inspectSolanaSignedArtifact>>;
+  try {
+    inspection = await vault.inspectSolanaSignedArtifact({
+      signature: artifactSignature,
+      recentBlockhash,
+      chainId: row.chainId,
+    });
+  } catch (error) {
+    console.error(
+      "[vault] Signed Solana artifact inspection failed",
+      redactedThrownDiagnostics(error),
+    );
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error: "Authoritative Solana artifact status is unavailable; retirement blocked",
+      },
+      502,
+    );
+  }
+
+  if (inspection.result === "absent_live") {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Signed Solana artifact is still broadcastable; retirement blocked" },
+      409,
+    );
+  }
+
+  const checkedAt = new Date();
+  const landedStatus =
+    inspection.result === "landed_confirmed"
+      ? "confirmed"
+      : inspection.result === "landed_broadcast"
+        ? "broadcast"
+        : inspection.result === "landed_failed"
+          ? "failed"
+          : null;
+  const nextStatus = landedStatus ?? "retired";
+  const transitioned = await withTenantAuditedTransaction(
+    tenantId,
+    async (rawTx, appendRequiredAudit) => {
+      const tx = rawTx as typeof db;
+      const [updated] = await tx
+        .update(transactions)
+        .set({
+          status: nextStatus,
+          txHash: artifactSignature,
+          confirmedAt: nextStatus === "confirmed" ? checkedAt : row.confirmedAt,
+          actionPayload: {
+            ...metadata,
+            artifactSignature,
+            recentBlockhash,
+            blockhashKind: "recent",
+            signedArtifactResolution: {
+              checkedAt: checkedAt.toISOString(),
+              evidence:
+                inspection.result === "absent_expired"
+                  ? "solana_exact_signature_absent_and_blockhash_expired"
+                  : "solana_exact_signature_status",
+              result: inspection.result,
+              reason,
+            },
+          },
+        })
+        .where(
+          and(
+            eq(transactions.id, txId),
+            eq(transactions.agentId, agentId),
+            eq(transactions.status, "signed"),
+            row.txHash === null
+              ? sql`${transactions.txHash} is null`
+              : eq(transactions.txHash, row.txHash),
+          ),
+        )
+        .returning({ id: transactions.id });
+      if (!updated) return false;
+      await appendRequiredAudit({
+        tenantId,
+        actorType: "user",
+        actorId: c.get("userId") ?? c.get("authType") ?? null,
+        action: landedStatus ? "vault.signed_artifact.reconciled" : "vault.signed_artifact.retired",
+        resourceType: "transaction",
+        resourceId: txId,
+        metadata: {
+          previousStatus: "signed",
+          status: nextStatus,
+          chainFamily: "solana",
+          artifactSignature,
+          recentBlockhash,
+          blockhashKind: "recent",
+          inspectionResult: inspection.result,
+          reason,
+        },
+        ipAddress: c.req.header("x-forwarded-for") ?? null,
+        userAgent: c.req.header("user-agent") ?? null,
+        requestId: c.get("requestId") ?? null,
+      });
+      return true;
+    },
+  );
+  if (!transitioned) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Transaction state changed concurrently; retirement did not commit" },
+      409,
+    );
+  }
+
+  if (landedStatus) {
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error: "The exact signed artifact was found on chain and was reconciled instead of retired",
+        data: { txId, status: landedStatus, artifactSignature },
+      },
+      409,
+    );
+  }
+  return c.json<ApiResponse>({
+    ok: true,
+    data: { txId, status: "retired", artifactSignature, retiredAt: checkedAt.toISOString() },
   });
 });
 
