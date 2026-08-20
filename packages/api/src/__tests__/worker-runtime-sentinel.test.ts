@@ -8,14 +8,85 @@ import {
 } from "@stwd/db";
 import { createPGLiteDb } from "@stwd/db/pglite";
 import {
+  __resetWorkerRlsReadinessForTests,
   __setWorkerInitForTests,
+  ensureWorkerRlsReady,
   hydrateProcessEnv,
   runWorkerGoogleCredentialLifecycleSweep,
+  runWorkerRlsGuardedTask,
   runWorkerUpstreamCredentialLeaseSweep,
   runWorkerXCredentialLifecycleSweep,
   withWorkerRequestDatabase,
   default as worker,
 } from "../worker";
+
+test("Worker RLS readiness is authority-keyed, retryable, and gates work", async () => {
+  __resetWorkerRlsReadinessForTests();
+  const requestDb = { marker: "rls-readiness" } as unknown as ReturnType<typeof getDb>;
+  const baseEnv = {
+    DATABASE_URL: "postgresql://worker.invalid/steward-a",
+    DATABASE_DRIVER: "neon-websocket",
+    NODE_ENV: "production",
+    STEWARD_APP_DATABASE_ROLE: "steward_app",
+    STEWARD_PLATFORM_DATABASE_ROLE: "steward_platform",
+  };
+  let assertions = 0;
+  let work = 0;
+  let rejectOnce = true;
+  const assertReady = async (
+    db: ReturnType<typeof getDb>,
+    options: { expectedRole: string; expectedPlatformRole: string },
+  ) => {
+    assertions += 1;
+    expect((db as unknown as { marker: string }).marker).toBe("rls-readiness");
+    expect(options).toEqual({
+      expectedRole: "steward_app",
+      expectedPlatformRole: "steward_platform",
+    });
+    if (rejectOnce) {
+      rejectOnce = false;
+      throw new Error("unsafe role");
+    }
+  };
+  const createHandle = () => ({
+    driver: "neon-websocket" as const,
+    db: requestDb as never,
+    async close() {},
+  });
+
+  await expect(
+    withWorkerRequestDatabase(
+      baseEnv,
+      () => runWorkerRlsGuardedTask(baseEnv, async () => void (work += 1), assertReady as never),
+      { createHandle },
+    ),
+  ).rejects.toThrow("unsafe role");
+  expect(work).toBe(0);
+
+  await withWorkerRequestDatabase(
+    baseEnv,
+    () => runWorkerRlsGuardedTask(baseEnv, async () => void (work += 1), assertReady as never),
+    { createHandle },
+  );
+  await withWorkerRequestDatabase(
+    baseEnv,
+    () => ensureWorkerRlsReady(baseEnv, assertReady as never),
+    {
+      createHandle,
+    },
+  );
+  expect(assertions).toBe(2);
+  expect(work).toBe(1);
+
+  const rotatedEnv = { ...baseEnv, DATABASE_URL: "postgresql://worker.invalid/steward-b" };
+  await withWorkerRequestDatabase(
+    rotatedEnv,
+    () => ensureWorkerRlsReady(rotatedEnv, assertReady as never),
+    { createHandle },
+  );
+  expect(assertions).toBe(3);
+  __resetWorkerRlsReadinessForTests();
+});
 
 test("Worker hydration cannot be overridden by a STEWARD_RUNTIME binding", () => {
   const previous = process.env.STEWARD_RUNTIME;
@@ -160,20 +231,31 @@ test("cold Worker cron rejects a hostile database role before starting sweeps", 
     },
   } as unknown as ReturnType<typeof getDb>;
   let databases = 0;
-  const createDbSpy = spyOn(databaseModule, "createDbForRequest").mockImplementation(() => {
-    databases += 1;
-    return hostileDb;
-  });
+  let closes = 0;
+  const createDbSpy = spyOn(databaseModule, "createNeonTransactionDbForRequest").mockImplementation(
+    () => {
+      databases += 1;
+      return {
+        driver: "neon-websocket",
+        db: hostileDb as never,
+        async close() {
+          closes += 1;
+        },
+      };
+    },
+  );
   let scheduledWork!: Promise<unknown>;
   const env = {
     DATABASE_URL: "postgresql://worker.invalid/steward",
-    DATABASE_DRIVER: "neon-http",
-    NODE_ENV: "test",
+    DATABASE_DRIVER: "neon-websocket",
+    NODE_ENV: "production",
     STEWARD_APP_DATABASE_ROLE: "steward_app",
+    STEWARD_PLATFORM_DATABASE_ROLE: "steward_platform",
     STEWARD_JWT_SECRET: "worker-hostile-role-secret-at-least-32-chars",
   };
   const previousEnv = new Map(Object.keys(env).map((key) => [key, process.env[key]] as const));
   __setWorkerInitForTests(null);
+  __resetWorkerRlsReadinessForTests();
   try {
     await worker.scheduled({}, env, {
       waitUntil(promise) {
@@ -182,8 +264,10 @@ test("cold Worker cron rejects a hostile database role before starting sweeps", 
     });
     await expect(scheduledWork).rejects.toThrow("RLS_DEPLOYMENT_ROLE_UNSAFE");
     expect(databases).toBe(1);
+    expect(closes).toBe(1);
   } finally {
     __setWorkerInitForTests(null);
+    __resetWorkerRlsReadinessForTests();
     createDbSpy.mockRestore();
     for (const [key, value] of previousEnv) {
       if (value === undefined) delete process.env[key];
