@@ -148,6 +148,9 @@ describe.skipIf(SKIP)("retention sweep", () => {
     const { runRetentionSweep } = await import("../services/retention");
     delete process.env.STEWARD_RETENTION_AUDIT_EVENTS_DAYS;
     const db = getDb();
+    // Earlier sweep cases may emit their own retention audit event for this
+    // tenant. Reset the tenant-local chain so this assertion owns seq 1.
+    await db.execute(sql`DELETE FROM audit_events WHERE tenant_id = ${TENANT}`);
     // Insert an ancient audit event directly (bypassing the chain — just for retention assertion).
     await db.execute(sql`
       INSERT INTO audit_events
