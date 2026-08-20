@@ -19,22 +19,37 @@ export function ApprovalQueue({
     txId: string;
     action: "approve" | "reject";
   } | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
 
   if (!features.showApprovalQueue) return null;
 
   const handleConfirm = async () => {
     if (!confirmAction) return;
+    setActionError(null);
     try {
       if (confirmAction.action === "approve") {
         await approve(confirmAction.txId);
       } else {
         await reject(confirmAction.txId);
       }
-      onResolve?.(confirmAction.txId, confirmAction.action === "approve" ? "approved" : "rejected");
     } catch {
-      // Error handled by hook
+      setActionError(
+        `We couldn't ${confirmAction.action} this transaction. Check your connection and try again.`,
+      );
+      return;
     }
     setConfirmAction(null);
+    onResolve?.(confirmAction.txId, confirmAction.action === "approve" ? "approved" : "rejected");
+  };
+
+  const closeConfirmation = () => {
+    setActionError(null);
+    setConfirmAction(null);
+  };
+
+  const openConfirmation = (txId: string, action: "approve" | "reject") => {
+    setActionError(null);
+    setConfirmAction({ txId, action });
   };
 
   if (isLoading) {
@@ -99,14 +114,14 @@ export function ApprovalQueue({
                 <button
                   className="stwd-btn stwd-btn-error"
                   disabled={isResolving}
-                  onClick={() => setConfirmAction({ txId: entry.txId, action: "reject" })}
+                  onClick={() => openConfirmation(entry.txId, "reject")}
                 >
                   Deny
                 </button>
                 <button
                   className="stwd-btn stwd-btn-success"
                   disabled={isResolving}
-                  onClick={() => setConfirmAction({ txId: entry.txId, action: "approve" })}
+                  onClick={() => openConfirmation(entry.txId, "approve")}
                 >
                   Approve
                 </button>
@@ -118,7 +133,7 @@ export function ApprovalQueue({
 
       {/* Confirmation Dialog */}
       {confirmAction && (
-        <div className="stwd-modal-overlay" onClick={() => setConfirmAction(null)}>
+        <div className="stwd-modal-overlay" onClick={closeConfirmation}>
           <div className="stwd-modal" onClick={(e) => e.stopPropagation()}>
             <h3 className="stwd-heading">
               {confirmAction.action === "approve" ? "Approve Transaction?" : "Deny Transaction?"}
@@ -128,11 +143,13 @@ export function ApprovalQueue({
                 ? "This transaction will be signed and broadcast."
                 : "This transaction will be rejected and will not be executed."}
             </p>
+            {actionError && (
+              <div className="stwd-error-text" role="alert">
+                {actionError}
+              </div>
+            )}
             <div className="stwd-modal-actions">
-              <button
-                className="stwd-btn stwd-btn-secondary"
-                onClick={() => setConfirmAction(null)}
-              >
+              <button className="stwd-btn stwd-btn-secondary" onClick={closeConfirmation}>
                 Cancel
               </button>
               <button
