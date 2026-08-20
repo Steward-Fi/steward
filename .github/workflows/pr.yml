@@ -662,10 +662,12 @@ jobs:
         # size) and each process frees its WASM heap on exit. Reproduced in a
         # 6GB-capped Linux container: the single `--isolate` process is killed
         # at exit 137; a 6-way --shard split still OOMs (25 files/shard is too
-        # much); this runner at TEST_JOBS=2 finishes the full suite with zero
-        # OOM in ~2.3min. TEST_TIMEOUT=30000 absorbs per-file PGLite migration
-        # latency.
-        run: TEST_JOBS=2 TEST_TIMEOUT=30000 bun packages/api/scripts/run-tests-isolated.ts
+        # much). Keep this serial like canonical CI: two files share this job's
+        # one real PostgreSQL/Redis pair and can collide on deterministic
+        # fixtures or starve the API server. The 120-second per-file bound
+        # absorbs migration-heavy PGLite files while the 25-minute job timeout
+        # still caps the full suite.
+        run: TEST_JOBS=1 TEST_TIMEOUT=120000 bun packages/api/scripts/run-tests-isolated.ts
         env:
           DATABASE_URL: "postgres://steward:steward_ci@localhost:5432/steward_test"
           PORT: "3299"
@@ -767,7 +769,6 @@ jobs:
           if [ -f /tmp/steward-fi-e2e.log ]; then
             cat /tmp/steward-fi-e2e.log
           fi
-
 
   e2e-integration:
     name: E2E Integration (Compose)

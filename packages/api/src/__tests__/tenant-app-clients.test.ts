@@ -127,7 +127,7 @@ describe("tenant app clients hardening", () => {
 
     expect(cors).toContain("tenantAppClientsTable");
     expect(cors).toContain("eq(tenantAppClientsTable.enabled, true)");
-    expect(auth).toContain("tenantAppClients");
+    expect(auth).toContain("steward_bootstrap.auth_app_clients_subject");
     expect(auth).toContain("client_id");
     expect(auth).toContain("stateData.clientId");
     expect(auth).toContain("getTenantAppClientLoginMethods");

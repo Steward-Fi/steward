@@ -7,11 +7,13 @@ const authSource = readFileSync(join(import.meta.dir, "..", "routes", "auth.ts")
 
 describe("session membership hardening", () => {
   it("rejects missing users and rechecks tenant membership during session verification", () => {
-    for (const source of [contextSource, authSource]) {
-      expect(source).toContain("!user || user.deactivatedAt");
-      expect(source).toContain("from(userTenants)");
-      expect(source).toContain("eq(userTenants.tenantId, payload.tenantId)");
-      expect(source).toContain("if (!membership) return null");
-    }
+    expect(contextSource).toContain("steward_bootstrap.session_subject(");
+    expect(contextSource).toContain("!user || user.deactivated_at");
+    expect(contextSource).toContain("if (payload.tenantId && !user.membership_role) return null");
+
+    expect(authSource).toContain("!user || user.deactivatedAt");
+    expect(authSource).toContain("from(userTenants)");
+    expect(authSource).toContain("eq(userTenants.tenantId, payload.tenantId)");
+    expect(authSource).toContain("if (!membership) return null");
   });
 });
