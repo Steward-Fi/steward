@@ -82,7 +82,7 @@ describeWithPostgres("SEC-169 operator lifecycle on the real Steward schema", ()
     const firstMigration = await runCommand(["bun", "run", "packages/db/src/migrate.ts"], {
       DATABASE_URL: databaseUrl(databaseName),
     });
-    expect(firstMigration).toContain("0111_tenant_rls_policy_install");
+    expect(firstMigration).toContain("0112_personal_tenant_account_lifecycle");
 
     const db = postgres(databaseUrl(databaseName), { max: 1 });
     try {
@@ -211,6 +211,35 @@ describeWithPostgres("SEC-169 operator lifecycle on the real Steward schema", ()
           `;
         }),
       ).rejects.toThrow("Cannot deactivate the sole active tenant owner");
+
+      const personalOwnerId = randomUUID();
+      const personalTenant = `personal-${personalOwnerId}`;
+      await db`
+        INSERT INTO public.tenants(id, name, api_key_hash)
+        VALUES (${personalTenant}, 'Personal lifecycle owner', ${`personal-key-${suffix}`})
+      `;
+      await db`
+        INSERT INTO public.users(id, email)
+        VALUES (${personalOwnerId}::uuid, ${`personal-owner-${suffix}@example.test`})
+      `;
+      await db`
+        INSERT INTO public.user_tenants(user_id, tenant_id, role)
+        VALUES (${personalOwnerId}::uuid, ${personalTenant}, 'owner')
+      `;
+      const personalDeactivation = await db.begin(async (tx) => {
+        await tx.unsafe(`SET LOCAL ROLE ${appRole}`);
+        await tx`SELECT set_config('steward.tenant_id', 'platform', true)`;
+        return tx`
+          SELECT user_id, deactivated_at
+          FROM steward_bootstrap.platform_set_user_deactivation(
+            ${personalOwnerId}::uuid,
+            true
+          )
+        `;
+      });
+      expect(personalDeactivation).toHaveLength(1);
+      expect(personalDeactivation[0]?.user_id).toBe(personalOwnerId);
+      expect(personalDeactivation[0]?.deactivated_at).toBeInstanceOf(Date);
 
       const platformKey = `rls-platform-key-${suffix}`;
       const appRoleEvidence = await runCommand(
