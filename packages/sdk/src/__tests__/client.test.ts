@@ -193,6 +193,11 @@ const mockAgent = {
   createdAt: new Date("2024-01-01T00:00:00Z").toISOString(),
 };
 
+const mockAgentListResponse = {
+  ok: true,
+  data: { agents: [mockAgent], limit: 100, offset: 0 },
+};
+
 const mockPolicy: PolicyRule = {
   id: "rule-1",
   type: "spending-limit",
@@ -258,7 +263,7 @@ describe("StewardClient construction", () => {
   });
 
   it("strips trailing slash from baseUrl", async () => {
-    installMockFetch({ ok: true, data: [mockAgent] });
+    installMockFetch(mockAgentListResponse);
     const client = new StewardClient({ baseUrl: "https://api.example.com///" });
     await client.listAgents();
     expect(lastCapture?.url).not.toContain("///agents");
@@ -880,26 +885,26 @@ describe("StewardClient webhooks", () => {
 
 describe("Request headers", () => {
   it("always sends Content-Type: application/json", async () => {
-    installMockFetch({ ok: true, data: [mockAgent] });
+    installMockFetch(mockAgentListResponse);
     await makeClient().listAgents();
     expect(lastCapture?.headers["content-type"]).toBe("application/json");
   });
 
   it("always sends Accept: application/json", async () => {
-    installMockFetch({ ok: true, data: [mockAgent] });
+    installMockFetch(mockAgentListResponse);
     await makeClient().listAgents();
     expect(lastCapture?.headers.accept).toBe("application/json");
   });
 
   it("sends X-Steward-Key header when apiKey is set", async () => {
-    installMockFetch({ ok: true, data: [mockAgent] });
+    installMockFetch(mockAgentListResponse);
     const client = makeClient({ apiKey: "my-secret-key" });
     await client.listAgents();
     expect(lastCapture?.headers["x-steward-key"]).toBe("my-secret-key");
   });
 
   it("sends Privy-style app secret Basic auth when app credentials are set", async () => {
-    installMockFetch({ ok: true, data: [mockAgent] });
+    installMockFetch(mockAgentListResponse);
     const client = makeClient({ appId: "tenant-1/web-prod", appSecret: "stw_app_secret" });
     await client.listAgents();
     expect(lastCapture?.headers["x-steward-app-id"]).toBe("tenant-1/web-prod");
@@ -909,14 +914,14 @@ describe("Request headers", () => {
   });
 
   it("sends Authorization: Bearer header when bearerToken is set", async () => {
-    installMockFetch({ ok: true, data: [mockAgent] });
+    installMockFetch(mockAgentListResponse);
     const client = makeClient({ bearerToken: "my-jwt-token" });
     await client.listAgents();
     expect(lastCapture?.headers.authorization).toBe("Bearer my-jwt-token");
   });
 
   it("bearerToken takes priority over apiKey when both are set", async () => {
-    installMockFetch({ ok: true, data: [mockAgent] });
+    installMockFetch(mockAgentListResponse);
     const client = makeClient({
       apiKey: "my-api-key",
       bearerToken: "my-bearer",
@@ -928,7 +933,7 @@ describe("Request headers", () => {
   });
 
   it("sends X-Steward-Tenant header when tenantId is set", async () => {
-    installMockFetch({ ok: true, data: [mockAgent] });
+    installMockFetch(mockAgentListResponse);
     const client = makeClient({ tenantId: "my-tenant-123" });
     await client.listAgents();
     expect(lastCapture?.headers["x-steward-tenant"]).toBe("my-tenant-123");
@@ -944,7 +949,7 @@ describe("Request headers", () => {
   });
 
   it("does not send auth header when neither apiKey nor bearerToken is set", async () => {
-    installMockFetch({ ok: true, data: [mockAgent] });
+    installMockFetch(mockAgentListResponse);
     await makeClient().listAgents();
     expect(lastCapture?.headers.authorization).toBeUndefined();
     expect(lastCapture?.headers["x-steward-key"]).toBeUndefined();
@@ -1036,7 +1041,7 @@ describe("Request headers", () => {
   });
 
   it("does not sign non-sensitive requests", async () => {
-    installMockFetch({ ok: true, data: [mockAgent] });
+    installMockFetch(mockAgentListResponse);
     const client = makeClient({
       requestSigningSecret: "request-signing-secret",
     });
@@ -1072,13 +1077,13 @@ describe("Request headers", () => {
 
 describe("HTTP request building", () => {
   it("refuses redirects so Steward credentials cannot be replayed", async () => {
-    installMockFetch({ ok: true, data: [mockAgent] });
+    installMockFetch(mockAgentListResponse);
     await makeClient({ apiKey: "tenant-key" }).listAgents();
     expect(lastCapture?.redirect).toBe("error");
   });
 
   it("listAgents → GET /agents", async () => {
-    installMockFetch({ ok: true, data: [mockAgent] });
+    installMockFetch(mockAgentListResponse);
     await makeClient().listAgents();
     expect(lastCapture?.method).toBe("GET");
     expect(lastCapture?.url).toBe("https://api.steward.example/agents");
@@ -4845,15 +4850,20 @@ describe("Error handling", () => {
 
 describe("Response parsing", () => {
   it("listAgents returns parsed agent array", async () => {
-    installMockFetch({ ok: true, data: [mockAgent] });
+    installMockFetch({ ok: true, data: { agents: [mockAgent], limit: 100, offset: 0 } });
     const agents = await makeClient().listAgents();
     expect(agents).toHaveLength(1);
     expect(agents[0].id).toBe("agent-1");
     expect(agents[0].name).toBe("Test Agent");
   });
 
-  it("listAgents parses createdAt as Date object", async () => {
+  it("listAgents rejects the obsolete array envelope", async () => {
     installMockFetch({ ok: true, data: [mockAgent] });
+    await expect(makeClient().listAgents()).rejects.toThrow();
+  });
+
+  it("listAgents parses createdAt as Date object", async () => {
+    installMockFetch({ ok: true, data: { agents: [mockAgent], limit: 100, offset: 0 } });
     const agents = await makeClient().listAgents();
     // parseAgentIdentity converts createdAt string to Date
     expect(agents[0].createdAt).toBeInstanceOf(Date);

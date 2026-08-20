@@ -2388,13 +2388,16 @@ export class StewardClient {
   }
 
   async listAgents(): Promise<AgentIdentity[]> {
-    const response = await this.request<AgentIdentity[], StewardErrorResponse>("/agents");
+    const response = await this.request<
+      { agents: AgentIdentity[]; limit: number; offset: number },
+      StewardErrorResponse
+    >("/agents");
 
     if (!response.ok) {
       throw new StewardApiError(response.error, response.status, response.data);
     }
 
-    return response.data.map(parseAgentIdentity);
+    return response.data.agents.map(parseAgentIdentity);
   }
 
   /**

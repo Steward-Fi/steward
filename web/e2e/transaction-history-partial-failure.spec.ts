@@ -105,10 +105,14 @@ test("dashboard surfaces partial transaction history without discarding availabl
       await route.fulfill({
         json: {
           ok: true,
-          data: [
-            { id: "agent-available", name: "Available Agent" },
-            { id: "agent-unavailable", name: "Unavailable Agent" },
-          ],
+          data: {
+            agents: [
+              { id: "agent-available", name: "Available Agent" },
+              { id: "agent-unavailable", name: "Unavailable Agent" },
+            ],
+            limit: 100,
+            offset: 0,
+          },
         },
       });
     },

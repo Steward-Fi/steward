@@ -819,7 +819,9 @@ test.describe("Dashboard account management", () => {
       });
     });
     await page.route(/\/agents$/, async (route) => {
-      await route.fulfill({ json: { ok: true, data: agents } });
+      await route.fulfill({
+        json: { ok: true, data: { agents, limit: 100, offset: 0 } },
+      });
     });
 
     await loginWithMagicLink(page, request, email);
