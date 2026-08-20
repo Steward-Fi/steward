@@ -24,7 +24,10 @@ async function cleanup(): Promise<void> {
   await db.execute(sql`DELETE FROM refresh_tokens WHERE tenant_id = ${TENANT}`);
   await db.execute(sql`DELETE FROM transactions WHERE agent_id = ${AGENT}`);
   await db.execute(sql`DELETE FROM agents WHERE id = ${AGENT}`);
-  await db.execute(sql`DELETE FROM audit_events WHERE tenant_id = ${TENANT}`);
+  await db.transaction(async (tx) => {
+    await tx.execute(sql`DELETE FROM audit_events WHERE tenant_id = ${TENANT}`);
+    await tx.execute(sql`DELETE FROM audit_chain_heads WHERE tenant_id = ${TENANT}`);
+  });
   await db.execute(sql`DELETE FROM auth_kv_store WHERE namespace = ${`retention-test-${SUFFIX}`}`);
   await db.execute(sql`DELETE FROM tenants WHERE id = ${TENANT}`);
   await db.execute(sql`DELETE FROM users WHERE id = ${USER_ID}`);
@@ -148,9 +151,13 @@ describe.skipIf(SKIP)("retention sweep", () => {
     const { runRetentionSweep } = await import("../services/retention");
     delete process.env.STEWARD_RETENTION_AUDIT_EVENTS_DAYS;
     const db = getDb();
-    // Earlier sweep cases may emit their own retention audit event for this
-    // tenant. Reset the tenant-local chain so this assertion owns seq 1.
-    await db.execute(sql`DELETE FROM audit_events WHERE tenant_id = ${TENANT}`);
+    // Earlier sweep cases emit retention audit events for this tenant. Reset
+    // both the rows and their out-of-band high-water mark atomically so this
+    // assertion owns a valid tenant-local chain beginning at seq 1.
+    await db.transaction(async (tx) => {
+      await tx.execute(sql`DELETE FROM audit_events WHERE tenant_id = ${TENANT}`);
+      await tx.execute(sql`DELETE FROM audit_chain_heads WHERE tenant_id = ${TENANT}`);
+    });
     // Insert an ancient audit event directly (bypassing the chain — just for retention assertion).
     await db.execute(sql`
       INSERT INTO audit_events
