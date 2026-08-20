@@ -87,9 +87,7 @@ describe("RLS deployment safety gate", () => {
   };
 
   test("accepts only the exact safe role, relation/partition shape, and policies", async () => {
-    await expect(
-      assertRlsDeploymentSafety(database(), roles),
-    ).resolves.toBeUndefined();
+    await expect(assertRlsDeploymentSafety(database(), roles)).resolves.toBeUndefined();
   });
 
   test("accepts an installed capabilities group even when the plugin is disabled", async () => {
