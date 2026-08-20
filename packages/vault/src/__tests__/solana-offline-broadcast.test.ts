@@ -93,9 +93,15 @@ describe("signSolanaTransaction broadcast gate", () => {
     expect(confirm).not.toHaveBeenCalled();
 
     // The returned bytes are a genuinely, fully-signed transfer — NOT a signature.
-    const decoded = decodeSignedTx(result);
+    const decoded = decodeSignedTx(result.result);
     expect(decoded.verifySignatures()).toBe(true);
     expect(decoded.feePayer?.toBase58()).toBe(sender.publicKey);
+    expect(result.evidence).toMatchObject({
+      signer: sender.publicKey,
+      recentBlockhash: BLOCKHASH,
+      lastValidBlockHeight: 1000,
+      blockhashKind: "recent",
+    });
     // …and it is the exact transfer that was requested (recipient + lamports).
     assertSolanaTransferTransactionMatches(decoded, {
       from: restoreSolanaKeypair(sender.secretKey).publicKey,
@@ -110,7 +116,12 @@ describe("signSolanaTransaction broadcast gate", () => {
     const recipient = generateSolanaKeypair().publicKey;
 
     let checkpoint:
-      | { signature: string; recentBlockhash: string; blockhashKind: "recent" }
+      | {
+          signature: string;
+          recentBlockhash: string;
+          blockhashKind: "recent";
+          lastValidBlockHeight: number;
+        }
       | undefined;
     const result = await signSolanaTransaction(sender.secretKey, recipient, 50_000n, RPC_URL, {
       broadcast: true,
@@ -125,11 +136,12 @@ describe("signSolanaTransaction broadcast gate", () => {
     // The transaction handed to the network was the transfer for THIS request.
     const submitted = Transaction.from(send.mock.calls[0][0] as Uint8Array);
     // The caller gets the deterministic signature of the submitted bytes.
-    expect(result).toBe(bs58.encode(submitted.signature as Uint8Array));
+    expect(result.result).toBe(bs58.encode(submitted.signature as Uint8Array));
     expect(checkpoint).toEqual({
-      signature: result,
+      signature: result.result,
       recentBlockhash: BLOCKHASH,
       blockhashKind: "recent",
+      lastValidBlockHeight: 1000,
     });
     expect(send.mock.calls[0][1]).toMatchObject({ maxRetries: 0 });
     assertSolanaTransferTransactionMatches(submitted, {
@@ -140,7 +152,7 @@ describe("signSolanaTransaction broadcast gate", () => {
 
     // confirmTransaction was bound to the blockhash we fetched (replay-window guard).
     const confirmArg = confirm.mock.calls[0][0] as { signature: string; blockhash: string };
-    expect(confirmArg.signature).toBe(result);
+    expect(confirmArg.signature).toBe(result.result);
     expect(confirmArg.blockhash).toBe(BLOCKHASH);
   });
 
@@ -155,6 +167,6 @@ describe("signSolanaTransaction broadcast gate", () => {
 
     expect(send).toHaveBeenCalledTimes(1);
     const submitted = Transaction.from(send.mock.calls[0][0] as Uint8Array);
-    expect(result).toBe(bs58.encode(submitted.signature as Uint8Array));
+    expect(result.result).toBe(bs58.encode(submitted.signature as Uint8Array));
   });
 });

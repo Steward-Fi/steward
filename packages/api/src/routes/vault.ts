@@ -28,6 +28,8 @@ import { recordAggregationEvent } from "@stwd/redis";
 import {
   canonicalJsonStringify,
   ExecutionPayloadNormalizationError,
+  getTokenDecimalsStrict,
+  isSignedArtifactEvidence,
   type PolicyResult,
   rawSigningChainSupport,
   redactedThrownDiagnostics,
@@ -63,7 +65,7 @@ import {
   SolanaRecoveryOwnershipLostError,
   type UnpackedUserOperationFields,
 } from "@stwd/vault";
-import { and, desc, eq, type SQL, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, type SQL, sql } from "drizzle-orm";
 import { type Context, Hono } from "hono";
 import { isRedisAvailable, isRedisConfigured } from "../middleware/redis";
 import { enforceRateLimit, recordVaultSpend } from "../middleware/redis-enforcement";
@@ -2825,7 +2827,13 @@ vaultRoutes.post("/:agentId/sign", async (c) => {
         await db
           .update(transactions)
           .set({ status: "failed" })
-          .where(and(eq(transactions.id, executionTxId), eq(transactions.agentId, agentId)));
+          .where(
+            and(
+              eq(transactions.id, executionTxId),
+              eq(transactions.agentId, agentId),
+              inArray(transactions.status, ["pending", "approved"]),
+            ),
+          );
       }
       const requestId = c.get("requestId") || "unknown";
       console.error(`[${requestId}] Sign transaction failed for agent ${agentId}`);
@@ -4028,6 +4036,14 @@ vaultRoutes.post("/:agentId/actions/transfer", async (c) => {
       const frozen = frozenSigningResponse(c, e);
       if (frozen) return frozen;
       if (completedResult && completedStatus) {
+        if (completedStatus === "signed") {
+          // Signed bytes must never be returned after their durable evidence or
+          // required audit failed to commit.
+          return c.json<ApiResponse>(
+            { ok: false, error: "Signed artifact bookkeeping did not commit" },
+            500,
+          );
+        }
         if (solanaExecutionToken && transfer.broadcast) {
           await tryCompleteSolanaRecoveryEffects({
             tenantId,
@@ -4042,7 +4058,7 @@ vaultRoutes.post("/:agentId/actions/transfer", async (c) => {
               status: completedStatus,
               txHash: transfer.broadcast ? completedResult : undefined,
               actionType: "transfer",
-              actionPayload: storedTransferActionPayload,
+              ...(solanaRecoveryBinding ? {} : { actionPayload: storedTransferActionPayload }),
               policyResults: evaluation.results,
               signedAt: new Date(),
             })
@@ -5525,7 +5541,13 @@ vaultRoutes.post("/:agentId/reject/:txId", async (c) => {
     return tx
       .update(transactions)
       .set({ status: "rejected" })
-      .where(and(eq(transactions.id, txId), eq(transactions.agentId, agentId)))
+      .where(
+        and(
+          eq(transactions.id, txId),
+          eq(transactions.agentId, agentId),
+          sql`${transactions.status} in ('pending', 'approved')`,
+        ),
+      )
       .returning({
         actionType: transactions.actionType,
         actionPayload: transactions.actionPayload,
@@ -8695,6 +8717,7 @@ async function signSolanaBlind(
     transaction: string;
     chainId: number;
     broadcast?: boolean;
+    lastValidBlockHeight?: number;
     to: string;
     value: string;
     unparsedReason: string;
@@ -8871,12 +8894,19 @@ async function signSolanaBlind(
         transaction: args.transaction,
         chainId,
         broadcast: args.broadcast,
+        lastValidBlockHeight: args.lastValidBlockHeight,
         expectedTo: toAddress,
         expectedValue: txValue,
         onBroadcastPrepared: (checkpoint) =>
           checkpointSolanaBroadcastSubmission(txId, agentId, ownerToken, checkpoint),
       });
-      completedResult = { txId, ...result };
+      completedResult = {
+        txId,
+        signature: result.signature,
+        broadcast: result.broadcast,
+        chainId: result.chainId,
+        caip2: result.caip2,
+      };
       if (!(await finalizeSolanaRecoveryAnchor(txId, agentId, ownerToken, result))) {
         return solanaLostOwnershipResponse(c, txId, agentId, "sign-solana");
       }
@@ -8919,7 +8949,7 @@ async function signSolanaBlind(
           chainId: number;
           caip2?: string;
         }>
-      >({ ok: true, data: { txId, ...result } });
+      >({ ok: true, data: completedResult });
     } catch (e: unknown) {
       const requestId = c.get("requestId") || "unknown";
       console.error(
@@ -9011,6 +9041,11 @@ type SolanaSigningResult = {
   artifactSignature?: string;
   recentBlockhash?: string;
   blockhashKind?: "recent" | "durable_nonce" | "unknown";
+  lastValidBlockHeight?: number;
+  durableNonceAccount?: string;
+  durableNonceAuthority?: string;
+  signer?: string;
+  rawIntentDigest?: string;
 };
 
 type SolanaRecoveryBinding = {
@@ -10044,6 +10079,36 @@ async function finalizeSolanaRecoveryAnchor(
     .where(and(eq(transactions.id, txId), eq(transactions.agentId, agentId)))
     .limit(1);
   const metadata = readSolanaRecoveryMetadata(existing?.actionPayload);
+  if (
+    !result.artifactSignature ||
+    !result.signer ||
+    !result.recentBlockhash ||
+    !result.rawIntentDigest ||
+    (result.blockhashKind !== "recent" && result.blockhashKind !== "durable_nonce") ||
+    (result.blockhashKind === "recent" && !Number.isSafeInteger(result.lastValidBlockHeight)) ||
+    (result.blockhashKind === "durable_nonce" &&
+      (!result.durableNonceAccount || !result.durableNonceAuthority))
+  ) {
+    throw new Error("Signed Solana artifact evidence is incomplete");
+  }
+  const signedArtifactEvidence = {
+    version: 1 as const,
+    chainFamily: "solana" as const,
+    artifactSignature: result.artifactSignature,
+    signer: result.signer,
+    recentBlockhash: result.recentBlockhash,
+    blockhashKind: result.blockhashKind,
+    ...(result.lastValidBlockHeight === undefined
+      ? {}
+      : { lastValidBlockHeight: result.lastValidBlockHeight }),
+    ...(result.durableNonceAccount === undefined
+      ? {}
+      : { durableNonceAccount: result.durableNonceAccount }),
+    ...(result.durableNonceAuthority === undefined
+      ? {}
+      : { durableNonceAuthority: result.durableNonceAuthority }),
+    rawIntentDigest: result.rawIntentDigest,
+  };
   const rows = await db
     .update(transactions)
     .set({
@@ -10053,6 +10118,8 @@ async function finalizeSolanaRecoveryAnchor(
       // checks; signed bytes never enter durable metadata or logs.
       txHash: result.artifactSignature ?? (result.broadcast ? result.signature : null),
       signedAt: new Date(),
+      signedArtifactEvidence,
+      signedArtifactEvidenceDigest: sha256(canonicalJsonStringify(signedArtifactEvidence)),
       actionPayload: {
         ...metadata,
         artifactSignature: result.artifactSignature ?? metadata.artifactSignature ?? null,
@@ -10419,6 +10486,7 @@ vaultRoutes.post("/:agentId/sign-solana", async (c) => {
     transaction: string;
     chainId?: number;
     broadcast?: boolean;
+    lastValidBlockHeight?: number;
     to?: string;
     value?: string;
   }>(c);
@@ -10524,6 +10592,7 @@ vaultRoutes.post("/:agentId/sign-solana", async (c) => {
       transaction: body.transaction,
       chainId,
       broadcast: body.broadcast,
+      lastValidBlockHeight: body.lastValidBlockHeight,
       to: body.to,
       value: body.value,
       unparsedReason: parseErr instanceof Error ? parseErr.message : "undecodable transaction",
@@ -10559,6 +10628,7 @@ vaultRoutes.post("/:agentId/sign-solana", async (c) => {
       transaction: body.transaction,
       chainId,
       broadcast: body.broadcast,
+      lastValidBlockHeight: body.lastValidBlockHeight,
       to: body.to,
       value: body.value,
       unparsedReason: derived.summary.unparsedReasons.join("; "),
@@ -10849,6 +10919,7 @@ vaultRoutes.post("/:agentId/sign-solana", async (c) => {
             transaction: body.transaction,
             chainId,
             broadcast: body.broadcast,
+            lastValidBlockHeight: body.lastValidBlockHeight,
             expectedTo: toAddress,
             expectedValue: txValue,
             onBroadcastPrepared: (checkpoint) =>
@@ -10880,6 +10951,7 @@ vaultRoutes.post("/:agentId/sign-solana", async (c) => {
                 transaction: body.transaction,
                 chainId,
                 broadcast: body.broadcast,
+                lastValidBlockHeight: body.lastValidBlockHeight,
                 onBroadcastPrepared: (checkpoint) =>
                   checkpointSolanaBroadcastSubmission(txId, agentId, ownerToken, checkpoint),
               },
@@ -10954,7 +11026,7 @@ vaultRoutes.post("/:agentId/sign-solana", async (c) => {
         }>
       >({
         ok: true,
-        data: { txId, ...result },
+        data: completedResult,
       });
     } catch (e: unknown) {
       const requestId = c.get("requestId") || "unknown";
@@ -11086,81 +11158,77 @@ vaultRoutes.post("/:agentId/transactions/:txId/retire-signed", async (c) => {
       409,
     );
   }
-  if (!isSolanaActionChain(row.chainId)) {
+  const evidence = row.signedArtifactEvidence;
+  const evidenceDigest = row.signedArtifactEvidenceDigest;
+  if (
+    !isSignedArtifactEvidence(evidence) ||
+    !evidenceDigest ||
+    sha256(canonicalJsonStringify(evidence)) !== evidenceDigest
+  ) {
     return c.json<ApiResponse>(
       {
         ok: false,
-        error:
-          "Signed-artifact retirement is not supported for this chain; EVM artifacts require authoritative finalized nonce replacement or consumption evidence",
+        error: "Signed artifact lacks complete, digest-bound evidence and cannot be retired",
       },
       409,
     );
   }
-  const metadata = readSolanaRecoveryMetadata(row.actionPayload);
-  const artifactSignature = isNonEmptyString(metadata.artifactSignature)
-    ? metadata.artifactSignature
-    : row.txHash;
-  const recentBlockhash = isNonEmptyString(metadata.recentBlockhash)
-    ? metadata.recentBlockhash
-    : null;
-  if (!isNonEmptyString(artifactSignature) || !isNonEmptyString(recentBlockhash)) {
-    return c.json<ApiResponse>(
-      {
-        ok: false,
-        error:
-          "Signed Solana artifact lacks its deterministic signature or recent blockhash and cannot be retired",
-      },
-      409,
-    );
-  }
-  if (metadata.blockhashKind !== "recent") {
-    return c.json<ApiResponse>(
-      {
-        ok: false,
-        error:
-          metadata.blockhashKind === "durable_nonce"
-            ? "Durable-nonce Solana artifacts remain broadcastable until authoritative nonce-account advancement is proven"
-            : "Solana artifact blockhash lifetime is unknown; ordinary blockhash expiry cannot authorize retirement",
-      },
-      409,
-    );
-  }
-
-  let inspection: Awaited<ReturnType<typeof vault.inspectSolanaSignedArtifact>>;
+  const artifactId =
+    evidence.chainFamily === "solana" ? evidence.artifactSignature : evidence.artifactHash;
+  let inspectionResult:
+    | "landed_confirmed"
+    | "landed_broadcast"
+    | "landed_failed"
+    | "absent_live"
+    | "absent_expired"
+    | "absent_nonce_consumed";
   try {
-    inspection = await vault.inspectSolanaSignedArtifact({
-      signature: artifactSignature,
-      recentBlockhash,
-      chainId: row.chainId,
-    });
+    inspectionResult =
+      evidence.chainFamily === "solana"
+        ? (
+            await vault.inspectSolanaSignedArtifact({
+              signature: evidence.artifactSignature,
+              recentBlockhash: evidence.recentBlockhash,
+              chainId: row.chainId,
+              blockhashKind: evidence.blockhashKind,
+              lastValidBlockHeight: evidence.lastValidBlockHeight,
+              durableNonceAccount: evidence.durableNonceAccount,
+              durableNonceAuthority: evidence.durableNonceAuthority,
+            })
+          ).result
+        : (
+            await vault.inspectEvmSignedArtifact({
+              artifactHash: evidence.artifactHash,
+              signer: evidence.signer,
+              nonce: evidence.nonce,
+              chainId: row.chainId,
+            })
+          ).result;
   } catch (error) {
-    console.error(
-      "[vault] Signed Solana artifact inspection failed",
-      redactedThrownDiagnostics(error),
-    );
+    console.error("[vault] Signed artifact inspection failed", redactedThrownDiagnostics(error));
     return c.json<ApiResponse>(
       {
         ok: false,
-        error: "Authoritative Solana artifact status is unavailable; retirement blocked",
+        error: "Authoritative signed-artifact status is unavailable; retirement blocked",
       },
       502,
     );
   }
 
-  if (inspection.result === "absent_live") {
+  if (inspectionResult === "absent_live") {
     return c.json<ApiResponse>(
-      { ok: false, error: "Signed Solana artifact is still broadcastable; retirement blocked" },
+      { ok: false, error: "Signed artifact is still broadcastable; retirement blocked" },
       409,
     );
   }
 
   const checkedAt = new Date();
   const landedStatus =
-    inspection.result === "landed_confirmed"
+    inspectionResult === "landed_confirmed"
       ? "confirmed"
-      : inspection.result === "landed_broadcast"
+      : inspectionResult === "landed_broadcast"
         ? "broadcast"
-        : inspection.result === "landed_failed"
+        : inspectionResult === "landed_failed"
           ? "failed"
           : null;
   const nextStatus = landedStatus ?? "retired";
@@ -11172,20 +11240,19 @@ vaultRoutes.post("/:agentId/transactions/:txId/retire-signed", async (c) => {
         .update(transactions)
         .set({
           status: nextStatus,
-          txHash: artifactSignature,
+          txHash: artifactId,
           confirmedAt: nextStatus === "confirmed" ? checkedAt : row.confirmedAt,
           actionPayload: {
-            ...metadata,
-            artifactSignature,
-            recentBlockhash,
-            blockhashKind: "recent",
+            ...readSolanaRecoveryMetadata(row.actionPayload),
             signedArtifactResolution: {
               checkedAt: checkedAt.toISOString(),
               evidence:
-                inspection.result === "absent_expired"
-                  ? "solana_exact_signature_absent_and_blockhash_expired"
-                  : "solana_exact_signature_status",
-              result: inspection.result,
+                inspectionResult === "absent_expired"
+                  ? "solana_exact_signature_absent_and_lifetime_expired"
+                  : inspectionResult === "absent_nonce_consumed"
+                    ? "evm_exact_hash_absent_and_finalized_nonce_consumed"
+                    : "exact_artifact_chain_status",
+              result: inspectionResult,
               reason,
             },
           },
@@ -11195,9 +11262,7 @@ vaultRoutes.post("/:agentId/transactions/:txId/retire-signed", async (c) => {
             eq(transactions.id, txId),
             eq(transactions.agentId, agentId),
             eq(transactions.status, "signed"),
-            row.txHash === null
-              ? sql`${transactions.txHash} is null`
-              : eq(transactions.txHash, row.txHash),
+            eq(transactions.signedArtifactEvidenceDigest, evidenceDigest),
           ),
         )
         .returning({ id: transactions.id });
@@ -11212,11 +11277,11 @@ vaultRoutes.post("/:agentId/transactions/:txId/retire-signed", async (c) => {
         metadata: {
           previousStatus: "signed",
           status: nextStatus,
-          chainFamily: "solana",
-          artifactSignature,
-          recentBlockhash,
-          blockhashKind: "recent",
-          inspectionResult: inspection.result,
+          chainFamily: evidence.chainFamily,
+          artifactId,
+          signedArtifactEvidence: evidence,
+          evidenceDigest,
+          inspectionResult,
           reason,
         },
         ipAddress: c.req.header("x-forwarded-for") ?? null,
@@ -11238,14 +11303,14 @@ vaultRoutes.post("/:agentId/transactions/:txId/retire-signed", async (c) => {
       {
         ok: false,
         error: "The exact signed artifact was found on chain and was reconciled instead of retired",
-        data: { txId, status: landedStatus, artifactSignature },
+        data: { txId, status: landedStatus, artifactId },
       },
       409,
     );
   }
   return c.json<ApiResponse>({
     ok: true,
-    data: { txId, status: "retired", artifactSignature, retiredAt: checkedAt.toISOString() },
+    data: { txId, status: "retired", artifactId, retiredAt: checkedAt.toISOString() },
   });
 });
 

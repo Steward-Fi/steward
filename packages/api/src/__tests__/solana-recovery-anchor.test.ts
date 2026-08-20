@@ -28,6 +28,14 @@ const RECIPIENT = "6TcyBfPdBt1kjsvDZLzmBFnuMaLWiTaAt4RjUr9VA5YD";
 const SIGNATURE =
   "4oL4p7QvN3UH7V5wMGZgW5PuzEk4A9LXLHk9RxAoKjDKuLbQBsfXN8kEvKfj5K1oEJa8wFF6RVp2h7pP9w2f51ZV";
 const RECENT_BLOCKHASH = "11111111111111111111111111111111";
+const ARTIFACT_EVIDENCE = {
+  artifactSignature: SIGNATURE,
+  signer: "11111111111111111111111111111111",
+  recentBlockhash: RECENT_BLOCKHASH,
+  blockhashKind: "recent" as const,
+  lastValidBlockHeight: 1_000,
+  rawIntentDigest: "a".repeat(64),
+};
 const WITHIN_CAP_V0_TRANSFER =
   "AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAAQACBGa+fjMsekUzMr2dCn99sFX1xe8aBq2mbZizn7aBDEc6URw0oaLLUh3xa7JGuN6OeZfOI1x+drIqPXUDokgZ3YoDBkZv5SEXMv/srbpyw5vnvIzlu8X3EmssQ5s6QAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcDAgAFAkANAwACAAkD6AMAAAAAAAADAgABDAIAAAB7AAAAAAAAAAA=";
 
@@ -189,6 +197,7 @@ describe("Solana durable recovery anchors", () => {
         signature: SIGNATURE,
         broadcast: true,
         chainId: request.chainId ?? 101,
+        ...ARTIFACT_EVIDENCE,
         caip2: "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
       };
     };
@@ -252,7 +261,12 @@ describe("Solana durable recovery anchors", () => {
 
       process.env.STEWARD_AUDIT_HMAC_KEY = "too-weak";
       __resetAuditHmacKeyCacheForTests();
-      return { signature: SIGNATURE, broadcast: true, chainId: request.chainId ?? 101 };
+      return {
+        signature: SIGNATURE,
+        broadcast: true,
+        chainId: request.chainId ?? 101,
+        ...ARTIFACT_EVIDENCE,
+      };
     };
 
     try {
@@ -526,6 +540,7 @@ describe("Solana durable recovery anchors", () => {
         signature: SIGNATURE,
         broadcast: true,
         chainId: request.chainId ?? 101,
+        ...ARTIFACT_EVIDENCE,
         caip2: "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
       };
     };
@@ -632,6 +647,7 @@ describe("Solana durable recovery anchors", () => {
         signature: SIGNATURE,
         broadcast: true,
         chainId: request.chainId ?? 101,
+        ...ARTIFACT_EVIDENCE,
         caip2: "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
       };
     };

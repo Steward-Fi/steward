@@ -182,9 +182,9 @@ POST /vault/:agentId/transactions/:txId/retire-signed
 
 Request body: `{ "reason": "operator explanation" }`.
 
-This endpoint is intentionally narrower than the generic transaction lifecycle. A signed artifact remains independently broadcastable, so provider errors and local failures cannot relabel it as failed. Steward currently supports authoritative retirement only for Solana artifacts whose deterministic public signature, recent blockhash, and byte-derived ordinary-blockhash classification were durably captured at signing time. It queries exact-chain signature history and retires only when that signature is absent and the ordinary blockhash is expired. Durable-nonce and unclassified artifacts remain blocked until an authoritative nonce-account advancement lifecycle is implemented. A landed artifact is reconciled to its chain state instead; a live blockhash or RPC uncertainty leaves the transaction signed and blocks deletion.
+This endpoint is intentionally narrower than the generic transaction lifecycle. A signed artifact remains independently broadcastable, so provider errors and local failures cannot relabel it as failed. At signing time Steward stores only immutable, digest-bound public evidence—never signed bytes. Solana evidence binds the deterministic signature, signer, message intent, and either the recent blockhash plus last-valid height or the durable-nonce account and authority. EVM evidence binds the exact transaction hash, recovered signer, nonce, and caller intent.
 
-EVM signed-artifact retirement remains unsupported until Steward can verify an absent exact transaction together with finalized nonce consumption or replacement. Signed transaction bytes are never stored in retirement evidence.
+Retirement first checks the exact artifact. A landed artifact is reconciled to its chain state. An absent recent-blockhash Solana artifact can retire only beyond its recorded last-valid height; an absent durable-nonce artifact only after the exact nonce account advances; and an absent EVM artifact only after the signer’s finalized nonce is greater than the recorded nonce. Live artifacts, malformed evidence, and any RPC uncertainty remain signed and continue to block deletion. The evidence digest is part of the retirement CAS and the state transition plus required audit commit atomically.
 
 ---
 
