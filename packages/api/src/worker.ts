@@ -478,13 +478,6 @@ export function __setWorkerInitForTests(value: Promise<void> | null): void {
   workerInit = value;
 }
 
-/** Replace the isolate-cached app in focused Worker boundary tests only. */
-export function __setWorkerComposedAppForTests(
-  value: Awaited<ReturnType<typeof import("./compose").composeApp>> | null,
-): void {
-  composedApp = value;
-}
-
 async function getComposedApp() {
   if (composedApp) return composedApp;
   const { composeApp } = await import("./compose");
