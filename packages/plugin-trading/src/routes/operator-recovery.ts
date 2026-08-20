@@ -1,12 +1,9 @@
 /**
  * operator-recovery.ts — Operator fund-recovery endpoints.
  *
- * MOVED from `@stwd/api` (packages/api/src/routes/operator-recovery.ts) into the
- * opt-in trading plugin. behavior is IDENTICAL: every endpoint, auth check,
- * policy evaluation, audit event, and error response is preserved. the only
- * structural change is that core services this route used to import from
- * `../services/context` + `../services/audit` are INJECTED via the plugin
- * context (`StewardAppContext`), so this file does not import `@stwd/api`.
+ * Core services are injected through `StewardAppContext`, keeping this opt-in
+ * plugin decoupled from `@stwd/api` while preserving the operator authentication,
+ * policy, audit, idempotency, and durable production rate-limit boundaries.
  *
  * These routes implement the core promise of Steward: a HUMAN OPERATOR must
  * ALWAYS be able to close an agent's positions and withdraw its funds, even
@@ -52,6 +49,11 @@ import { Hono } from "hono";
 import { z } from "zod";
 import type { StewardAppContext } from "../context";
 import { DurableIdempotencyStore } from "./idempotency";
+import {
+  enforceTradingRateLimit,
+  MemoryTradingRateLimiter,
+  type TradingRateLimitResult,
+} from "./trading-rate-limit";
 
 const closeAllSchema = z.object({
   agentId: z.string().min(1),
@@ -307,56 +309,32 @@ export function createOperatorRecoveryRoutes(
   // ── Operator transfer rate limit (withdraw + usd-send) ────────────────────────
   // The per-call USDC cap bounds one call; this bounds the LOOP. A compromised
   // operator credential cannot drain an arbitrarily large balance by repeating
-  // capped calls. Mirrors trade.ts's order rate limit (Redis when available,
-  // process-local fallback otherwise).
+  // capped calls. Redis is mandatory in multi-instance production; the bounded
+  // process-local fallback is reserved for development or an explicitly
+  // acknowledged single-instance deployment.
   const OPERATOR_TRANSFER_RATE_WINDOW_MS = 60_000;
   const OPERATOR_TRANSFER_MAX_CALLS = 10;
-  const operatorTransferRateLimit = new Map<string, { count: number; resetAt: number }>();
+  const operatorTransferRateLimit = new MemoryTradingRateLimiter();
 
   async function enforceOperatorTransferRateLimit(
     rail: "withdraw" | "usd-send",
     tenantId: string,
     agentId: string,
-  ): Promise<{ allowed: boolean; resetMs: number }> {
-    const redis = getRedisClient();
-    if (redis) {
-      const result = await checkRateLimit(
-        `ratelimit:trade:operator:${rail}:${tenantId}:${agentId}:${OPERATOR_TRANSFER_RATE_WINDOW_MS}`,
-        OPERATOR_TRANSFER_RATE_WINDOW_MS,
-        OPERATOR_TRANSFER_MAX_CALLS,
-      );
-      return { allowed: result.allowed, resetMs: result.resetMs };
-    }
-
-    const now = Date.now();
+  ): Promise<TradingRateLimitResult> {
     const key = `${rail}:${tenantId}:${agentId}`;
-    const current = operatorTransferRateLimit.get(key);
-    if (!current || current.resetAt <= now) {
-      if (operatorTransferRateLimit.size >= 1_000) {
-        // Expired-sweep ONLY: evicting a live window under pressure would
-        // silently reset that agent's budget. When the map stays full of live
-        // windows, fail closed (deny as rate-limited) instead of growing the
-        // process-local map without bound — a flooded distinct key always
-        // getting a fresh budget is precisely the loop this limiter exists to
-        // close when Redis is unconfigured.
-        for (const [k, v] of operatorTransferRateLimit) {
-          if (v.resetAt <= now) operatorTransferRateLimit.delete(k);
-        }
-        if (operatorTransferRateLimit.size >= 1_000) {
-          return { allowed: false, resetMs: OPERATOR_TRANSFER_RATE_WINDOW_MS };
-        }
-      }
-      operatorTransferRateLimit.set(key, {
-        count: 1,
-        resetAt: now + OPERATOR_TRANSFER_RATE_WINDOW_MS,
-      });
-      return { allowed: true, resetMs: OPERATOR_TRANSFER_RATE_WINDOW_MS };
-    }
-    if (current.count >= OPERATOR_TRANSFER_MAX_CALLS) {
-      return { allowed: false, resetMs: current.resetAt - now };
-    }
-    current.count += 1;
-    return { allowed: true, resetMs: current.resetAt - now };
+    return enforceTradingRateLimit({
+      redisAvailable: getRedisClient() !== null,
+      checkRedis: () =>
+        checkRateLimit(
+          `ratelimit:trade:operator:${rail}:${tenantId}:${agentId}:${OPERATOR_TRANSFER_RATE_WINDOW_MS}`,
+          OPERATOR_TRANSFER_RATE_WINDOW_MS,
+          OPERATOR_TRANSFER_MAX_CALLS,
+        ),
+      memoryKey: key,
+      windowMs: OPERATOR_TRANSFER_RATE_WINDOW_MS,
+      maxRequests: OPERATOR_TRANSFER_MAX_CALLS,
+      memory: operatorTransferRateLimit,
+    });
   }
 
   /**
@@ -1190,6 +1168,12 @@ export function createOperatorRecoveryRoutes(
     if (!agent) return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
 
     const rate = await enforceOperatorTransferRateLimit("usd-send", tenantId, agentId);
+    if (rate.unavailable) {
+      return c.json<ApiResponse>(
+        { ok: false, error: "Operator transfer rate limit unavailable" },
+        503,
+      );
+    }
     if (!rate.allowed) {
       c.header("Retry-After", String(Math.ceil(rate.resetMs / 1000)));
       return c.json<ApiResponse>(
@@ -1781,6 +1765,12 @@ export function createOperatorRecoveryRoutes(
     // hardcoded zeroes made rate-limit and daily/weekly rules structurally
     // inert, and the misdenominated `value` disabled even per-tx USD caps).
     const rate = await enforceOperatorTransferRateLimit("withdraw", tenantId, agentId);
+    if (rate.unavailable) {
+      return c.json<ApiResponse>(
+        { ok: false, error: "Operator transfer rate limit unavailable" },
+        503,
+      );
+    }
     if (!rate.allowed) {
       c.header("Retry-After", String(Math.ceil(rate.resetMs / 1000)));
       return c.json<ApiResponse>(
