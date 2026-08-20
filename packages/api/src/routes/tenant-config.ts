@@ -3970,7 +3970,7 @@ tenantConfigRoutes.post("/:id/config/templates/:name/apply", requireTenantId, as
         metadata: {
           templateId: template.id,
           templateName: template.name,
-          policiesApplied: insertedPolicies.length,
+          policiesApplied: insertedRows.length,
           hasOverrides: !!body.overrides,
         },
         ipAddress: c.req.header("x-forwarded-for") ?? null,

@@ -4,7 +4,16 @@ import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 const SKIP = !process.env.DATABASE_URL;
 
 import { generateApiKey } from "@stwd/auth";
-import { agents, getDb, policies, tenantConfigs, tenants, users, userTenants } from "@stwd/db";
+import {
+  agents,
+  auditEvents,
+  getDb,
+  policies,
+  tenantConfigs,
+  tenants,
+  users,
+  userTenants,
+} from "@stwd/db";
 import { eq } from "drizzle-orm";
 
 // ─── Test Config ──────────────────────────────────────────────────────────
@@ -587,6 +596,50 @@ describe.skipIf(SKIP)("Tenant Config API", () => {
         .where(eq(policies.agentId, AGENT_ID));
       expect(existingPolicies).toHaveLength(1);
       expect(existingPolicies[0]?.id).toBe(`${AGENT_ID}-existing`);
+    });
+
+    it("applies a template and commits its final audit", async () => {
+      const requestId = `template-apply-${DASHBOARD_USER_ID}`;
+      const res = await fetch(
+        `${BASE_URL}/tenants/${TENANT_ID}/config/templates/test-template/apply`,
+        {
+          method: "POST",
+          headers: { ...adminHeaders(), "X-Request-Id": requestId },
+          body: JSON.stringify({ agentId: AGENT_ID }),
+        },
+      );
+
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.ok).toBe(true);
+      expect(body.data.policiesApplied).toBe(1);
+
+      const appliedPolicies = await getDb()
+        .select()
+        .from(policies)
+        .where(eq(policies.agentId, AGENT_ID));
+      expect(appliedPolicies).toHaveLength(1);
+      expect(appliedPolicies[0]?.type).toBe("spending-limit");
+
+      const requestAudits = await getDb()
+        .select({ action: auditEvents.action, resourceId: auditEvents.resourceId })
+        .from(auditEvents)
+        .where(eq(auditEvents.requestId, requestId));
+      expect(requestAudits).toContainEqual({
+        action: "policy.template.apply",
+        resourceId: AGENT_ID,
+      });
+
+      await getDb().delete(policies).where(eq(policies.agentId, AGENT_ID));
+      await getDb()
+        .insert(policies)
+        .values({
+          id: `${AGENT_ID}-existing`,
+          agentId: AGENT_ID,
+          type: "rate-limit",
+          enabled: true,
+          config: { maxTxPerDay: 1 },
+        });
     });
 
     it("rejects malformed stored templates before deleting existing policies", async () => {

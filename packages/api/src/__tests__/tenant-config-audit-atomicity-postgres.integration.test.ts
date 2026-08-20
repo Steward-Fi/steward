@@ -2,6 +2,7 @@ import { expect, it } from "bun:test";
 import { generateApiKey } from "@stwd/auth";
 import {
   __resetAuditHmacKeyCacheForTests,
+  auditChainHeads,
   auditEvents,
   createDb,
   tenantConfigs,
@@ -11,6 +12,7 @@ import {
 } from "@stwd/db";
 import { eq } from "drizzle-orm";
 import { Hono } from "hono";
+import { correlationId } from "../middleware/correlation";
 
 const databaseUrl = process.env.DATABASE_URL;
 const realPostgresIt = databaseUrl && !process.env.STEWARD_PGLITE_MEMORY ? it : it.skip;
@@ -78,6 +80,7 @@ realPostgresIt(
         { userId, tenantId, mfaVerifiedAt: Date.now(), mfaMethod: "totp" },
       );
       const app = new Hono();
+      app.use("*", correlationId);
       app.route("/tenants", tenantConfigRoutes);
       app.onError((error, c) => c.json({ ok: false, error: error.message }, 500));
 
@@ -161,7 +164,12 @@ realPostgresIt(
       locker.release();
       await admin.client.unsafe(`drop trigger if exists "${triggerName}" on audit_events`);
       await admin.client.unsafe(`drop function if exists "${triggerFunction}"()`);
+      await admin.db.delete(auditEvents).where(eq(auditEvents.tenantId, tenantId));
+      await admin.db.delete(auditChainHeads).where(eq(auditChainHeads.tenantId, tenantId));
+      await admin.db.delete(userTenants).where(eq(userTenants.tenantId, tenantId));
+      await admin.db.delete(tenantConfigs).where(eq(tenantConfigs.tenantId, tenantId));
       await admin.db.delete(tenants).where(eq(tenants.id, tenantId));
+      await admin.db.delete(users).where(eq(users.id, userId));
       await admin.client.end();
       if (previousJwtSecret === undefined) delete process.env.STEWARD_JWT_SECRET;
       else process.env.STEWARD_JWT_SECRET = previousJwtSecret;
