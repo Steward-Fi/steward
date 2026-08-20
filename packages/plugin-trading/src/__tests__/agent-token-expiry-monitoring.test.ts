@@ -88,7 +88,10 @@ beforeAll(async () => {
       {
         id: TENANT_NO_KEY_ID,
         name: "Agent Token Expiry No Key Tenant",
-        apiKeyHash: "",
+        // Keep the unique empty hash available for the bootstrap default
+        // tenant. Omitting X-Steward-Key still exercises the unauthenticated
+        // tenant path without racing defaultTenantReady during module import.
+        apiKeyHash: "not-a-real-key-hash-no-key-tenant",
       },
       {
         id: OTHER_TENANT_ID,
