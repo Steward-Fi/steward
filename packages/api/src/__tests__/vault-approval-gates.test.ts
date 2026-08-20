@@ -431,6 +431,92 @@ describe("vault approval gates (real /approve path)", () => {
     }
   });
 
+  it("replays parsed and blind Solana approvals with their durably bound signing modes", async () => {
+    const app = await makeApp({ authType: "session-jwt", role: "owner", mfa: true });
+    for (const mode of ["parsed", "blind"] as const) {
+      const txId = `tx-solana-${mode}-approval`;
+      await getDb()
+        .insert(transactions)
+        .values({
+          id: txId,
+          agentId: AGENT_SOLANA,
+          status: "pending",
+          toAddress: SOLANA_RECIPIENT,
+          value: mode === "parsed" ? "301" : "302",
+          data: `serialized-${mode}-solana-approval`,
+          chainId: 101,
+          actionType: "solana_transaction",
+          actionPayload: {
+            type: "solana_transaction",
+            recoveryType: "solana_transaction",
+            recoveryActionType: "solana_transaction",
+            broadcast: true,
+            signingMode: mode,
+            blindSigned: mode === "blind",
+            parsedEffects:
+              mode === "parsed"
+                ? { movesNativeSol: false, programIds: ["memo-program"], tokenTransfers: [] }
+                : undefined,
+            requestDigest: `${mode}-request-digest`,
+          },
+          policyResults: [],
+        });
+      await getDb()
+        .insert(approvalQueue)
+        .values({
+          id: `aq-${txId}`,
+          txId,
+          agentId: AGENT_SOLANA,
+          status: "pending",
+        });
+    }
+
+    const seen: Array<{ transaction: string; allowBlindSign?: boolean }> = [];
+    const sign = spyOn(Vault.prototype, "signSolanaTransaction").mockImplementation(
+      async (request) => {
+        seen.push({ transaction: request.transaction, allowBlindSign: request.allowBlindSign });
+        const signature =
+          "4oL4p7QvN3UH7V5wMGZgW5PuzEk4A9LXLHk9RxAoKjDKuLbQBsfXN8kEvKfj5K1oEJa8wFF6RVp2h7pP9w2f51ZV";
+        await request.onBroadcastPrepared?.({
+          signature,
+          recentBlockhash: "11111111111111111111111111111111",
+        });
+        return { signature, broadcast: true, chainId: 101 };
+      },
+    );
+    try {
+      expect((await approve(app, AGENT_SOLANA, "tx-solana-parsed-approval")).status).toBe(200);
+      expect((await approve(app, AGENT_SOLANA, "tx-solana-blind-approval")).status).toBe(200);
+      expect(seen).toEqual([
+        { transaction: "serialized-parsed-solana-approval", allowBlindSign: true },
+        { transaction: "serialized-blind-solana-approval", allowBlindSign: true },
+      ]);
+      const rows = await getDb()
+        .select({ id: transactions.id, actionPayload: transactions.actionPayload })
+        .from(transactions)
+        .where(
+          sql`${transactions.id} in ('tx-solana-parsed-approval', 'tx-solana-blind-approval')`,
+        );
+      expect(rows).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            id: "tx-solana-parsed-approval",
+            actionPayload: expect.objectContaining({
+              signingMode: "parsed",
+              parsedEffects: expect.objectContaining({ programIds: ["memo-program"] }),
+            }),
+          }),
+          expect.objectContaining({
+            id: "tx-solana-blind-approval",
+            actionPayload: expect.objectContaining({ signingMode: "blind", blindSigned: true }),
+          }),
+        ]),
+      );
+    } finally {
+      sign.mockRestore();
+    }
+  });
+
   it("atomically rolls back fresh queue approval when the Solana claim faults and a new app can retry", async () => {
     const txId = "tx-fresh-solana-claim-rollback";
     const queueId = `aq-${txId}`;

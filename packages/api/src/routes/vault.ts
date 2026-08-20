@@ -3259,8 +3259,36 @@ vaultRoutes.post("/:agentId/actions/transfer", async (c) => {
     "Broadcast transfer actions",
   );
   if (idempotencyResponse) return idempotencyResponse;
+  const solanaRecoveryBinding =
+    isSolanaActionChain(transfer.chainId) && transfer.broadcast
+      ? createSolanaTransferRecoveryBinding(c, {
+          tenantId,
+          agentId,
+          chainId: transfer.chainId,
+          to: transfer.to,
+          token: transfer.token,
+          value: transfer.value,
+          referenceId: transfer.referenceId,
+        })
+      : null;
   const existingAction = await findActionByReferenceId(agentId, "transfer", transfer.referenceId);
   if (existingAction) {
+    if (solanaRecoveryBinding) {
+      const metadata = readSolanaRecoveryMetadata(existingAction.actionPayload);
+      if (
+        metadata.idempotencyKeyDigest !== solanaRecoveryBinding.idempotencyKeyDigest ||
+        metadata.requestDigest !== solanaRecoveryBinding.requestDigest
+      ) {
+        return c.json<ApiResponse>(
+          {
+            ok: false,
+            error: "Idempotency-Key was already used for a different Solana transaction",
+          },
+          409,
+        );
+      }
+      return solanaLostOwnershipResponse(c, existingAction.id, agentId, "transfer");
+    }
     return c.json<ApiResponse>({
       ok: existingAction.status !== "rejected" && existingAction.status !== "failed",
       error:
@@ -3326,18 +3354,6 @@ vaultRoutes.post("/:agentId/actions/transfer", async (c) => {
     referenceId: transfer.referenceId,
     sponsorship: sponsorshipPayload,
   });
-  const solanaRecoveryBinding =
-    isSolanaTransfer && transfer.broadcast
-      ? createSolanaTransferRecoveryBinding(c, {
-          tenantId,
-          agentId,
-          chainId: transfer.chainId,
-          to: transfer.to,
-          token: transfer.token,
-          value: transfer.value,
-          referenceId: transfer.referenceId,
-        })
-      : null;
   const policySet = await getScopedPolicySet(tenantId, agentId, c.get("agentPolicyIds"));
   const conditionSets = await loadConditionSetsForPolicies(tenantId, policySet);
 
@@ -3366,6 +3382,22 @@ vaultRoutes.post("/:agentId/actions/transfer", async (c) => {
       transfer.referenceId,
     );
     if (lockedExistingAction) {
+      if (solanaRecoveryBinding) {
+        const metadata = readSolanaRecoveryMetadata(lockedExistingAction.actionPayload);
+        if (
+          metadata.idempotencyKeyDigest !== solanaRecoveryBinding.idempotencyKeyDigest ||
+          metadata.requestDigest !== solanaRecoveryBinding.requestDigest
+        ) {
+          return c.json<ApiResponse>(
+            {
+              ok: false,
+              error: "Idempotency-Key was already used for a different Solana transaction",
+            },
+            409,
+          );
+        }
+        return solanaLostOwnershipResponse(c, lockedExistingAction.id, agentId, "transfer");
+      }
       return c.json<ApiResponse>({
         ok: lockedExistingAction.status !== "rejected" && lockedExistingAction.status !== "failed",
         error:
@@ -4023,6 +4055,25 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
 
   const isSolana = transactionRow.chainId === 101 || transactionRow.chainId === 102;
   const approvalRecoveryMetadata = readSolanaRecoveryMetadata(transactionRow.actionPayload);
+  const queuedSolanaSigningMode =
+    approvalRecoveryMetadata.signingMode === "parsed" ||
+    approvalRecoveryMetadata.signingMode === "blind"
+      ? approvalRecoveryMetadata.signingMode
+      : null;
+  if (
+    isSolana &&
+    transactionRow.actionType === "solana_transaction" &&
+    queuedSolanaSigningMode === null
+  ) {
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error:
+          "This pending Solana approval predates signing-mode binding and cannot be replayed. Resubmit the transaction.",
+      },
+      409,
+    );
+  }
   if (
     isSolana &&
     pendingApproval.status === "approved" &&
@@ -4147,9 +4198,11 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
         ? transferPayload.broadcast
         : sendCallsPayload
           ? sendCallsPayload.broadcast
-          : transactionPayload
-            ? transactionPayload.broadcast
-            : true;
+          : isSolana && typeof approvalRecoveryMetadata.broadcast === "boolean"
+            ? approvalRecoveryMetadata.broadcast
+            : transactionPayload
+              ? transactionPayload.broadcast
+              : true;
       const shouldBroadcast = requestedBroadcast !== false;
       const approvalSignRequest: SignRequest = {
         ...toSignRequest(transactionRow),
@@ -4566,7 +4619,7 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
             transaction: transactionRow.data,
             chainId: transactionRow.chainId,
             broadcast: shouldBroadcast,
-            ...(isSolanaTokenTransfer
+            ...(isSolanaTokenTransfer || queuedSolanaSigningMode !== null
               ? { allowBlindSign: true }
               : { expectedTo: transactionRow.toAddress, expectedValue: transactionRow.value }),
             onBroadcastPrepared: checkpoint,
@@ -8286,7 +8339,20 @@ async function signSolanaBlind(
     if (!evaluation.approved) {
       const txId = crypto.randomUUID();
       const manual = evaluation.requiresManualApproval;
-      await db.insert(transactions).values({
+      const queuedBinding = manual
+        ? createSolanaRecoveryBinding(c, {
+            routeFamily: "sign-solana",
+            tenantId,
+            agentId,
+            transaction: args.transaction,
+            chainId,
+            toAddress,
+            value: txValue,
+            broadcastRequested: shouldBroadcast,
+            blindSigned: true,
+          })
+        : null;
+      const transactionValues: typeof transactions.$inferInsert = {
         id: txId,
         agentId,
         status: manual ? "pending" : "rejected",
@@ -8295,11 +8361,30 @@ async function signSolanaBlind(
         data: manual ? args.transaction : undefined,
         chainId,
         policyResults: evaluation.results,
-      });
+        actionType: manual ? "solana_transaction" : undefined,
+        actionPayload: manual
+          ? {
+              type: "solana_transaction",
+              recoveryType: "solana_transaction",
+              recoveryActionType: "solana_transaction",
+              broadcast: shouldBroadcast,
+              signingMode: "blind",
+              blindSigned: true,
+              unparsedReason: args.unparsedReason,
+              idempotencyKeyDigest: queuedBinding?.idempotencyKeyDigest,
+              requestDigest: queuedBinding?.requestDigest,
+            }
+          : undefined,
+      };
       if (manual) {
-        await db
-          .insert(approvalQueue)
-          .values(approvalQueueValues(c, agentId, txId, signerAuthorization.auth));
+        await db.transaction(async (tx) => {
+          await tx.insert(transactions).values(transactionValues);
+          await tx
+            .insert(approvalQueue)
+            .values(approvalQueueValues(c, agentId, txId, signerAuthorization.auth));
+        });
+      } else {
+        await db.insert(transactions).values(transactionValues);
       }
       await writeVaultAudit(c, {
         tenantId,
@@ -9863,6 +9948,18 @@ vaultRoutes.post("/:agentId/sign-solana", async (c) => {
       const txId = crypto.randomUUID();
 
       if (evaluation.requiresManualApproval) {
+        const queuedBinding = createSolanaRecoveryBinding(c, {
+          routeFamily: "sign-solana",
+          tenantId,
+          agentId,
+          transaction: body.transaction,
+          chainId,
+          toAddress,
+          value: txValue,
+          broadcastRequested: shouldBroadcast,
+          blindSigned: false,
+          parsedEffects: solanaParsedEffects(derived),
+        });
         await db.transaction(async (tx) => {
           await tx.insert(transactions).values({
             id: txId,
@@ -9873,6 +9970,18 @@ vaultRoutes.post("/:agentId/sign-solana", async (c) => {
             data: body.transaction,
             chainId,
             policyResults: evaluation.results,
+            actionType: "solana_transaction",
+            actionPayload: {
+              type: "solana_transaction",
+              recoveryType: "solana_transaction",
+              recoveryActionType: "solana_transaction",
+              broadcast: shouldBroadcast,
+              signingMode: "parsed",
+              blindSigned: false,
+              parsedEffects: solanaParsedEffects(derived),
+              idempotencyKeyDigest: queuedBinding.idempotencyKeyDigest,
+              requestDigest: queuedBinding.requestDigest,
+            },
           });
           await tx
             .insert(approvalQueue)
