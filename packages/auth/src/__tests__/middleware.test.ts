@@ -4,41 +4,41 @@
  * the dummy-hash comparison, so response shape/timing cannot enumerate valid
  * tenant ids.
  *
- * Two layers of proof:
- *   - behavioral: known-tenant/wrong-key and unknown-tenant responses are
- *     byte-identical 403s (status, body, content type);
- *   - structural: the middleware source pins the dummy-hash mechanism (a
- *     timing assertion would be flaky in CI).
+ * Known-tenant/wrong-key and unknown-tenant responses are byte-identical 403s
+ * (status, body, and content type), so requesters cannot enumerate tenant ids.
  */
 
-import { afterAll, beforeAll, describe, expect, it } from "bun:test";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { afterAll, beforeAll, describe, expect, it, setDefaultTimeout, spyOn } from "bun:test";
 import { closeDb, getDb, tenants } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { Hono } from "hono";
 
-import { generateApiKey } from "../api-keys";
+import * as apiKeys from "../api-keys";
 
 const TENANT_ID = "sec132-known-tenant";
 const ENV_KEYS = ["STEWARD_PGLITE_MEMORY", "STEWARD_DB_MODE", "STEWARD_MASTER_PASSWORD"] as const;
+const UNKNOWN_TENANT_DUMMY_HASH = apiKeys.hashApiKey("steward-unknown-tenant-dummy-key");
+
+setDefaultTimeout(30_000);
 
 describe("tenantAuthMiddleware unknown-tenant hardening (SEC-132)", () => {
   const savedEnv: Record<string, string | undefined> = {};
   let app: Hono;
   let validKey: string;
+  let validateApiKeySpy: ReturnType<typeof spyOn> | undefined;
 
   beforeAll(async () => {
     for (const key of ENV_KEYS) savedEnv[key] = process.env[key];
     process.env.STEWARD_PGLITE_MEMORY = "true";
     process.env.STEWARD_DB_MODE = "pglite";
     process.env.STEWARD_MASTER_PASSWORD ??= "sec132-middleware-test-master-password";
+    validateApiKeySpy = spyOn(apiKeys, "validateApiKey");
     const { db, client } = await createPGLiteDb("memory://");
     setPGLiteOverride(db, async () => {
       await client.close();
     });
 
-    const keyPair = generateApiKey();
+    const keyPair = apiKeys.generateApiKey();
     validKey = keyPair.key;
     await getDb()
       .insert(tenants)
@@ -53,12 +53,19 @@ describe("tenantAuthMiddleware unknown-tenant hardening (SEC-132)", () => {
   });
 
   afterAll(async () => {
-    await closeDb();
-    for (const key of ENV_KEYS) {
-      if (savedEnv[key] === undefined) {
-        delete process.env[key];
-      } else {
-        process.env[key] = savedEnv[key];
+    try {
+      await closeDb();
+    } finally {
+      try {
+        validateApiKeySpy?.mockRestore();
+      } finally {
+        for (const key of ENV_KEYS) {
+          if (savedEnv[key] === undefined) {
+            delete process.env[key];
+          } else {
+            process.env[key] = savedEnv[key];
+          }
+        }
       }
     }
   });
@@ -90,19 +97,7 @@ describe("tenantAuthMiddleware unknown-tenant hardening (SEC-132)", () => {
     expect(unknownTenantRes.headers.get("content-type")).toBe(
       knownBadKeyRes.headers.get("content-type"),
     );
-  });
-
-  it("pins the dummy-hash comparison in the middleware source", () => {
-    // The unknown-tenant path must still run validateApiKey against a dummy
-    // hash so response TIMING matches the known-tenant path. Pinning the
-    // construction beats a wall-clock assertion, which flakes under CI load.
-    const source = readFileSync(join(import.meta.dir, "..", "middleware.ts"), "utf8");
-    expect(source).toContain('hashApiKey("steward-unknown-tenant-dummy-key")');
-    expect(source).toContain(
-      "validateApiKey(apiKey, tenant?.apiKeyHash ?? UNKNOWN_TENANT_DUMMY_HASH)",
-    );
-    // One shared denial: no branch may reveal WHICH leg failed.
-    expect(source).toContain("if (!tenant || !keyValid)");
+    expect(validateApiKeySpy).toHaveBeenCalledWith("stw_wrong_key", UNKNOWN_TENANT_DUMMY_HASH);
   });
 
   it("keeps the healthcheck bypass exact: GET / and /health only", async () => {

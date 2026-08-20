@@ -10,7 +10,7 @@
   "scripts": {
     "build": "tsc --noEmit",
     "dev": "tsc --watch",
-    "test": "bun test --isolate --timeout 30000",
+    "test": "bun scripts/run-tests-isolated.ts",
     "typecheck": "tsc --noEmit",
     "lint": "tsc --noEmit"
   },

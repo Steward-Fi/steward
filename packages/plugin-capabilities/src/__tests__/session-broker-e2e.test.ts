@@ -29,6 +29,7 @@
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it, setDefaultTimeout } from "bun:test";
 import { fileURLToPath } from "node:url";
+import { signAgentToken } from "@stwd/auth";
 import { agents, closeDb, eq, getDb, runPluginMigrations, tenants } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import type { AppVariables, PolicyRule } from "@stwd/shared";
@@ -53,11 +54,30 @@ const PROXY_URL = "https://proxy.broker-e2e.test";
 const BROKER_HOST = "broker.cap-e2e.test";
 const CAP_NAME = "broker.session.render";
 const MIGRATIONS_FOLDER = fileURLToPath(new URL("../../drizzle", import.meta.url));
+const TEST_KDF_SALT = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+const TEST_ENV_KEYS = [
+  "NODE_ENV",
+  "STEWARD_KDF_SALT",
+  "REDIS_REQUIRED",
+  "STEWARD_ALLOW_PROXY_REDIS_SOFT_FAIL",
+  "STEWARD_PGLITE_MEMORY",
+  "STEWARD_MASTER_PASSWORD",
+  "STEWARD_JWT_SECRET",
+  "STEWARD_PROXY_REQUIRE_REQUEST_SIGNATURE",
+  "STEWARD_PROXY_REQUEST_SIGNING_SECRET",
+  "STEWARD_PROXY_ALLOWED_HOSTS",
+  "STEWARD_SECRET_ROUTE_ALLOWED_HOSTS",
+  "STEWARD_PROXY_DEV_MODE",
+  "STEWARD_PROXY_URL",
+] as const;
+const originalEnv = new Map<(typeof TEST_ENV_KEYS)[number], string | undefined>();
 
 let authMiddleware: typeof import("@stwd/proxy/src/middleware/auth")["authMiddleware"];
 let handleProxy: typeof import("@stwd/proxy/src/handlers/proxy")["handleProxy"];
 let setForwardProxyRequestForTests: typeof import("@stwd/proxy/src/handlers/proxy")["__setForwardProxyRequestForTests"];
 let setResolveProxyHostForTests: typeof import("@stwd/proxy/src/handlers/proxy")["__setResolveProxyHostForTests"];
+let setCheckProxyRateLimitForTests: typeof import("@stwd/proxy/src/handlers/proxy")["__setCheckProxyRateLimitForTests"];
+let resetProxyHandlerTestHooksForTests: typeof import("@stwd/proxy/src/handlers/proxy")["__resetProxyHandlerTestHooksForTests"];
 
 interface ForwardedCapture {
   url: string;
@@ -69,6 +89,8 @@ let lastForwarded: ForwardedCapture | null = null;
 // the broker's next response body (a test may seed a fat body).
 let brokerResponseBody: string = JSON.stringify({ ok: true, rendered: "small" });
 let proxyApp: Hono | null = null;
+let proxyRateLimitChecks = 0;
+let lastProxyRequestHeaders: Headers | null = null;
 const realFetch = globalThis.fetch;
 
 // the policy set the injected getPolicySet returns for the current test.
@@ -92,6 +114,11 @@ function capRule(
 }
 
 beforeAll(async () => {
+  for (const key of TEST_ENV_KEYS) originalEnv.set(key, process.env[key]);
+  process.env.NODE_ENV = "test";
+  process.env.STEWARD_KDF_SALT = TEST_KDF_SALT;
+  process.env.REDIS_REQUIRED = "false";
+  process.env.STEWARD_ALLOW_PROXY_REDIS_SOFT_FAIL = "false";
   process.env.STEWARD_PGLITE_MEMORY = "true";
   process.env.STEWARD_MASTER_PASSWORD = MASTER_PASSWORD;
   process.env.STEWARD_JWT_SECRET = "broker-e2e-jwt-secret-with-enough-bytes-0123456789ab";
@@ -101,6 +128,7 @@ beforeAll(async () => {
   // secret-route host allowlist (so a credential may be injected on it).
   process.env.STEWARD_PROXY_ALLOWED_HOSTS = BROKER_HOST;
   process.env.STEWARD_SECRET_ROUTE_ALLOWED_HOSTS = BROKER_HOST;
+  process.env.STEWARD_PROXY_DEV_MODE = "true";
   process.env.STEWARD_PROXY_URL = PROXY_URL;
 
   const { db, client } = await createPGLiteDb("memory://");
@@ -117,10 +145,16 @@ beforeAll(async () => {
     handleProxy,
     __setForwardProxyRequestForTests: setForwardProxyRequestForTests,
     __setResolveProxyHostForTests: setResolveProxyHostForTests,
+    __setCheckProxyRateLimitForTests: setCheckProxyRateLimitForTests,
+    __resetProxyHandlerTestHooksForTests: resetProxyHandlerTestHooksForTests,
   } = await import("@stwd/proxy/src/handlers/proxy"));
 
   // deterministic public ip so the DNS-level SSRF guard passes with no network.
   setResolveProxyHostForTests(async () => [{ address: "93.184.216.34", family: 4 }]);
+  setCheckProxyRateLimitForTests(async () => {
+    proxyRateLimitChecks += 1;
+    return { allowed: true, resetMs: 0 };
+  });
   // the stub broker: capture the forwarded request (to assert the injected token +
   // that the agent body reached the broker), return the seeded JSON body. The
   // forwarder signature is (url, method, headers, body: ReadableStream|null,
@@ -146,6 +180,7 @@ beforeAll(async () => {
       typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
     if (url.startsWith(PROXY_URL) && proxyApp) {
       const path = url.slice(PROXY_URL.length) || "/";
+      lastProxyRequestHeaders = new Headers(init?.headers);
       return proxyApp.request(path, init as RequestInit);
     }
     return realFetch(input as RequestInfo, init);
@@ -154,15 +189,20 @@ beforeAll(async () => {
 
 afterAll(async () => {
   globalThis.fetch = realFetch;
-  await closeDb().catch(() => {});
-  delete process.env.STEWARD_PGLITE_MEMORY;
-  delete process.env.STEWARD_MASTER_PASSWORD;
-  delete process.env.STEWARD_JWT_SECRET;
-  delete process.env.STEWARD_PROXY_REQUIRE_REQUEST_SIGNATURE;
-  delete process.env.STEWARD_PROXY_REQUEST_SIGNING_SECRET;
-  delete process.env.STEWARD_PROXY_ALLOWED_HOSTS;
-  delete process.env.STEWARD_SECRET_ROUTE_ALLOWED_HOSTS;
-  delete process.env.STEWARD_PROXY_URL;
+  try {
+    resetProxyHandlerTestHooksForTests?.();
+  } finally {
+    try {
+      await closeDb().catch(() => {});
+    } finally {
+      for (const key of TEST_ENV_KEYS) {
+        const original = originalEnv.get(key);
+        if (original === undefined) delete process.env[key];
+        else process.env[key] = original;
+      }
+      originalEnv.clear();
+    }
+  }
 });
 
 let tenantId: string;
@@ -266,10 +306,41 @@ beforeEach(async () => {
   await seedTenantAgent();
   currentPolicySet = [];
   lastForwarded = null;
+  proxyRateLimitChecks = 0;
+  lastProxyRequestHeaders = null;
   brokerResponseBody = JSON.stringify({ ok: true, rendered: "small" });
 });
 
 describe("session-broker e2e: full arc through the real proxy", () => {
+  it("pins hermetic test security settings independently of the ambient environment", () => {
+    expect(process.env.NODE_ENV).toBe("test");
+    expect(process.env.STEWARD_KDF_SALT).toBe(TEST_KDF_SALT);
+    expect(process.env.REDIS_REQUIRED).toBe("false");
+    expect(process.env.STEWARD_ALLOW_PROXY_REDIS_SOFT_FAIL).toBe("false");
+  });
+
+  it("keeps unsigned proxy requests fail-closed in production despite dev mode", async () => {
+    const token = await signAgentToken({ agentId, tenantId, scopes: ["api:proxy"] }, "5m");
+    process.env.STEWARD_PROXY_REQUIRE_REQUEST_SIGNATURE = "false";
+    process.env.NODE_ENV = "production";
+    try {
+      const response = await proxyApp!.request(`/proxy/${BROKER_HOST}/render`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}` },
+      });
+
+      expect(response.status).toBe(401);
+      expect(await response.json()).toEqual({
+        ok: false,
+        error: "X-Steward-Signature header required",
+      });
+      expect(lastForwarded).toBeNull();
+    } finally {
+      process.env.NODE_ENV = "test";
+      process.env.STEWARD_PROXY_REQUIRE_REQUEST_SIGNATURE = "true";
+    }
+  });
+
   it("allowed POST invoke injects the broker token, passes the JSON body through, token never seen by agent, records allow", async () => {
     const capId = await seedBrokerCapability("POST");
     currentPolicySet = [capRule("r1", "allow", { argEquals: { sessionId: "sess_123" } })];
@@ -286,6 +357,9 @@ describe("session-broker e2e: full arc through the real proxy", () => {
 
     // broker 200 passed through verbatim.
     expect(res.status).toBe(200);
+    expect(proxyRateLimitChecks).toBe(1);
+    expect(lastProxyRequestHeaders?.get("x-steward-signature")).toMatch(/^v1=[0-9a-f]{64}$/);
+    expect(lastProxyRequestHeaders?.get("x-steward-request-timestamp")).toMatch(/^\d+$/);
     const passthrough = await res.text();
     const parsed = JSON.parse(passthrough) as { ok: boolean; rendered: string };
     expect(parsed.ok).toBe(true);
@@ -322,6 +396,7 @@ describe("session-broker e2e: full arc through the real proxy", () => {
     });
 
     expect(res.status).toBe(200);
+    expect(proxyRateLimitChecks).toBe(1);
     const passthrough = await res.text();
     const parsed = JSON.parse(passthrough) as { ok: boolean; data: string };
     // the fat body survived the round trip byte-for-byte.
@@ -419,6 +494,7 @@ describe("session-broker e2e: full arc through the real proxy", () => {
     // missing idempotency key. The invoke path forwards the upstream/proxy status
     // verbatim. The request NEVER reached the broker.
     expect(res.status).toBe(400);
+    expect(proxyRateLimitChecks).toBe(1);
     const bodyText = await res.text();
     expect(bodyText).toContain("Idempotency-Key");
     // the broker was never called: no credential was ever attached/forwarded.
