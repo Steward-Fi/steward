@@ -14,28 +14,27 @@ describe("future-dated MFA timestamps", () => {
     expect(hasRecentSessionMfa(context as never)).toBe(false);
   });
 
-  it("every local recent-MFA helper has a non-negative age bound", async () => {
-    const files = [
-      "middleware/idempotency.ts",
-      "routes/agents.ts",
-      "routes/approvals.ts",
-      "routes/condition-sets.ts",
-      "routes/dashboard.ts",
-      "routes/erc8004.ts",
-      "routes/global-wallet.ts",
-      "routes/intents.ts",
-      "routes/policies-standalone.ts",
-      "routes/secrets.ts",
-      "routes/session-signers.ts",
-      "routes/tenant-config.ts",
-      "routes/tenants.ts",
-      "routes/user.ts",
-      "routes/vault.ts",
-      "routes/webhooks.ts",
-    ];
-    for (const relative of files) {
-      const source = await Bun.file(new URL(`../${relative}`, import.meta.url)).text();
-      expect(source, relative).toMatch(/(?:Date\.now\(\)|\bnow\b) - [\w.]+ >= 0/);
+  it("enforces the exact age and no-future boundaries", async () => {
+    const { isRecentMfaTimestamp } = await import("../services/recent-mfa");
+    const now = 1_800_000_000_000;
+    const maxAgeMs = 5 * 60_000;
+
+    expect(isRecentMfaTimestamp(now, maxAgeMs, now)).toBe(true);
+    expect(isRecentMfaTimestamp(now - maxAgeMs, maxAgeMs, now)).toBe(true);
+    expect(isRecentMfaTimestamp(now - maxAgeMs - 1, maxAgeMs, now)).toBe(false);
+    expect(isRecentMfaTimestamp(now + 1, maxAgeMs, now)).toBe(false);
+    expect(isRecentMfaTimestamp(now + 24 * 60 * 60_000, maxAgeMs, now)).toBe(false);
+  });
+
+  it("rejects malformed timestamps and invalid validation windows", async () => {
+    const { isRecentMfaTimestamp } = await import("../services/recent-mfa");
+    const now = 1_800_000_000_000;
+
+    for (const timestamp of [undefined, null, "recent", Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(isRecentMfaTimestamp(timestamp, 5 * 60_000, now), String(timestamp)).toBe(false);
     }
+    expect(isRecentMfaTimestamp(now, -1, now)).toBe(false);
+    expect(isRecentMfaTimestamp(now, Number.POSITIVE_INFINITY, now)).toBe(false);
+    expect(isRecentMfaTimestamp(now, 5 * 60_000, Number.NaN)).toBe(false);
   });
 });

@@ -106,6 +106,7 @@ import {
   readTenantGasSponsorshipConfig,
 } from "../services/gas-sponsorship";
 import { plaintextKeyExportResponseGateError } from "../services/key-export-plaintext-gate";
+import { isRecentMfaTimestamp } from "../services/recent-mfa";
 import { lockUserSession } from "../services/session-lock";
 import { createSignerCredentialHash, verifySignerCredential } from "../services/signer-credentials";
 import { getConfiguredVault } from "../services/vault-factory";
@@ -1003,12 +1004,7 @@ async function restoreUserAccountUnlinkMutation(
 }
 
 function hasRecentMfaStepUp(session: UserSessionPayload, maxAgeMs = 5 * 60_000): boolean {
-  return (
-    typeof session.mfaVerifiedAt === "number" &&
-    Number.isFinite(session.mfaVerifiedAt) &&
-    Date.now() - session.mfaVerifiedAt >= 0 &&
-    Date.now() - session.mfaVerifiedAt <= maxAgeMs
-  );
+  return isRecentMfaTimestamp(session.mfaVerifiedAt, maxAgeMs);
 }
 
 async function readPersonalTenantMfaPolicy(tenantId: string): Promise<TenantMfaPolicyConfig> {

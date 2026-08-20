@@ -19,6 +19,7 @@ import {
   setNoStoreHeaders,
   verifySessionToken,
 } from "../services/context";
+import { isRecentMfaTimestamp } from "../services/recent-mfa";
 import { getConfiguredVault } from "../services/vault-factory";
 
 type UserSessionPayload = {
@@ -431,13 +432,7 @@ function parseSendTransactionParams(value: unknown):
 }
 
 function hasRecentMfa(c: Context<{ Variables: GlobalWalletVariables }>): boolean {
-  const verifiedAt = c.get("sessionMfaVerifiedAt");
-  return (
-    typeof verifiedAt === "number" &&
-    Number.isFinite(verifiedAt) &&
-    Date.now() - verifiedAt >= 0 &&
-    Date.now() - verifiedAt <= MFA_MAX_AGE_MS
-  );
+  return isRecentMfaTimestamp(c.get("sessionMfaVerifiedAt"), MFA_MAX_AGE_MS);
 }
 
 async function getEnabledAppClient(

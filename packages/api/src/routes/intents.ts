@@ -34,6 +34,7 @@ import {
 } from "../services/context";
 import { redactSignedTransactions, toIntentResponse } from "../services/intent-response";
 import { getPolicyRulesValidationError } from "../services/policy-validation";
+import { isRecentMfaTimestamp } from "../services/recent-mfa";
 import { dispatchWebhook } from "../services/webhook-dispatch";
 
 export const intentRoutes = new Hono<{ Variables: AppVariables }>();
@@ -138,13 +139,7 @@ async function hasCurrentTenantReviewerMembership(
 }
 
 function hasRecentSessionMfa(c: Context<{ Variables: AppVariables }>, maxAgeMs = 5 * 60_000) {
-  const verifiedAt = c.get("sessionMfaVerifiedAt");
-  return (
-    typeof verifiedAt === "number" &&
-    Number.isFinite(verifiedAt) &&
-    Date.now() - verifiedAt >= 0 &&
-    Date.now() - verifiedAt <= maxAgeMs
-  );
+  return isRecentMfaTimestamp(c.get("sessionMfaVerifiedAt"), maxAgeMs);
 }
 
 function parseListLimit(value: string | undefined): number | null {

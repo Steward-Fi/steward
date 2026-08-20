@@ -106,6 +106,7 @@ import {
   resolveGasSponsorshipRequest,
 } from "../services/gas-sponsorship";
 import { plaintextKeyExportResponseGateError } from "../services/key-export-plaintext-gate";
+import { isRecentMfaTimestamp } from "../services/recent-mfa";
 import { verifySignerCredential } from "../services/signer-credentials";
 import { dispatchWebhook } from "../services/webhook-dispatch";
 import {
@@ -1553,13 +1554,7 @@ function hasRecentSessionMfa(
   c: Context<{ Variables: AppVariables }>,
   maxAgeMs = DEFAULT_MFA_MAX_AGE_MS,
 ) {
-  const verifiedAt = c.get("sessionMfaVerifiedAt");
-  return (
-    typeof verifiedAt === "number" &&
-    Number.isFinite(verifiedAt) &&
-    Date.now() - verifiedAt >= 0 &&
-    Date.now() - verifiedAt <= maxAgeMs
-  );
+  return isRecentMfaTimestamp(c.get("sessionMfaVerifiedAt"), maxAgeMs);
 }
 
 function hasTenantAdminSession(c: Context<{ Variables: AppVariables }>): boolean {
