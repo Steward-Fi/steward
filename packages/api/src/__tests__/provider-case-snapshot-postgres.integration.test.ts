@@ -20,14 +20,17 @@ const ORIGINAL_RISK_CLASS = "write";
 const CONCURRENT_RISK_CLASS = "read";
 
 describe.skipIf(SKIP)("provider-case mounted repeatable-read snapshot (Postgres)", () => {
-  const admin = createPostgresClient(DATABASE_URL!);
-  const locker = createPostgresClient(DATABASE_URL!);
-  const writer = createPostgresClient(DATABASE_URL!);
+  let admin: ReturnType<typeof createPostgresClient>;
+  let locker: ReturnType<typeof createPostgresClient>;
+  let writer: ReturnType<typeof createPostgresClient>;
   let app: any;
   let caseId: string;
   let ownerToken: string;
 
   beforeAll(async () => {
+    admin = createPostgresClient(DATABASE_URL!);
+    locker = createPostgresClient(DATABASE_URL!);
+    writer = createPostgresClient(DATABASE_URL!);
     process.env.STEWARD_AUDIT_HMAC_KEY ??= "a".repeat(64);
     process.env.STEWARD_MASTER_PASSWORD ??= "provider-case-snapshot-master-password";
     process.env.STEWARD_JWT_SECRET ??=
