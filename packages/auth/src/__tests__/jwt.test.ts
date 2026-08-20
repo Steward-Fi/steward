@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { scryptSync } from "node:crypto";
+import { decodeProtectedHeader } from "jose";
 
 import { getJwtSecret, signAccessToken, verifyToken } from "../jwt";
 
@@ -57,6 +58,7 @@ describe("getJwtSecret embedded-mode master password fallback (SEC-013)", () => 
     });
     const payload = await verifyToken(token);
     expect(payload.tenantId).toBe("default");
+    expect(decodeProtectedHeader(token)).toEqual({ alg: "HS256", typ: "JWT" });
   });
 
   it("prefers an explicit STEWARD_JWT_SECRET over the derivation", () => {

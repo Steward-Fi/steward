@@ -617,7 +617,7 @@ export async function signJwtPayload(
   // revocation store. Callers may pre-set payload.jti to override.
   const jti = (typeof payload.jti === "string" && payload.jti) || randomUUID();
   return new SignJWT({ ...payload, jti })
-    .setProtectedHeader({ alg: "HS256" })
+    .setProtectedHeader({ alg: "HS256", typ: "JWT" })
     .setIssuedAt()
     .setIssuer(issuer)
     .setAudience(audience)
