@@ -39,7 +39,8 @@ const health = await client.proxyHealth();
 
 - attaches `Authorization: Bearer <token>`
 - auto-generates an `Idempotency-Key` (UUID) for `POST`/`PUT`/`PATCH`/`DELETE`
-  when the caller did not supply one
+  and for every signed request (including `GET`/`HEAD`) when the caller did not
+  supply one; the proxy replay-binds signed safe requests to that key
 - when `signingSecret` is set, computes `X-Steward-Signature` +
   `X-Steward-Request-Timestamp` using the proxy's canonical form
 

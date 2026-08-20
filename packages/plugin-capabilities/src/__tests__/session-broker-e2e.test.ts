@@ -87,6 +87,14 @@ interface ForwardedCapture {
   body: string | null;
 }
 let lastForwarded: ForwardedCapture | null = null;
+let forwardCount = 0;
+interface ProxyRequestCapture {
+  path: string;
+  method: string;
+  headers: Headers;
+  body: BodyInit | null;
+}
+let lastProxyRequest: ProxyRequestCapture | null = null;
 // the broker's next response body (a test may seed a fat body).
 let brokerResponseBody: string = JSON.stringify({ ok: true, rendered: "small" });
 let proxyApp: Hono | null = null;
@@ -164,6 +172,7 @@ beforeAll(async () => {
   // forwarder signature is (url, method, headers, body: ReadableStream|null,
   // records); we drain the stream to a string to assert body passthrough.
   setForwardProxyRequestForTests(async (url, method, headers, body) => {
+    forwardCount += 1;
     let capturedBody: string | null = null;
     if (body != null) {
       capturedBody = await new Response(body as ReadableStream<Uint8Array>).text();
@@ -185,6 +194,12 @@ beforeAll(async () => {
     if (url.startsWith(PROXY_URL) && proxyApp) {
       const path = url.slice(PROXY_URL.length) || "/";
       lastProxyRequestHeaders = new Headers(init?.headers);
+      lastProxyRequest = {
+        path,
+        method: (init?.method ?? "GET").toUpperCase(),
+        headers: new Headers(init?.headers),
+        body: init?.body ?? null,
+      };
       return proxyApp.request(path, init as RequestInit);
     }
     return realFetch(input as RequestInfo, init);
@@ -315,6 +330,8 @@ beforeEach(async () => {
   lastForwarded = null;
   proxyRateLimitChecks = 0;
   lastProxyRequestHeaders = null;
+  lastProxyRequest = null;
+  forwardCount = 0;
   brokerResponseBody = JSON.stringify({ ok: true, rendered: "small" });
 });
 
@@ -469,7 +486,11 @@ describe("session-broker e2e: full arc through the real proxy", () => {
 
   it("signed GET reaches a broker-native read endpoint with query, bearer injection, replay binding, and no body", async () => {
     const capId = await seedBrokerCapability("GET", BROKER_READ_PATH);
-    currentPolicySet = [capRule("r1", "allow")];
+    currentPolicySet = [
+      capRule("r1", "allow", {
+        argEquals: { account: "primary", limit: "10", cursor: "next-page" },
+      }),
+    ];
     brokerResponseBody = JSON.stringify({ items: [{ id: "otter-note-1" }] });
     const app = buildInvokeApp();
 
@@ -478,7 +499,7 @@ describe("session-broker e2e: full arc through the real proxy", () => {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         args: { account: "primary" },
-        query: { limit: "10", cursor: "next-page" },
+        query: { account: "primary", limit: "10", cursor: "next-page" },
       }),
     });
 
@@ -490,10 +511,25 @@ describe("session-broker e2e: full arc through the real proxy", () => {
     expect(lastForwarded).not.toBeNull();
     expect(lastForwarded?.method).toBe("GET");
     expect(lastForwarded?.url).toBe(
-      `https://${BROKER_HOST}${BROKER_READ_PATH}?limit=10&cursor=next-page`,
+      `https://${BROKER_HOST}${BROKER_READ_PATH}?account=primary&limit=10&cursor=next-page`,
     );
     expect(lastForwarded?.headers.get("authorization")).toBe(`Bearer ${BROKER_TOKEN}`);
     expect(lastForwarded?.body).toBeNull();
+    expect(forwardCount).toBe(1);
+
+    // Replay the exact signed client request: same signature, timestamp, and
+    // generated idempotency key. The real proxy must reject it before the
+    // broker forwarder runs a second time.
+    expect(lastProxyRequest).not.toBeNull();
+    expect(lastProxyRequest?.headers.get("idempotency-key")).toMatch(/^[0-9a-f-]{36}$/);
+    expect(lastProxyRequest?.headers.get("x-steward-signature")).toMatch(/^v1=[0-9a-f]{64}$/);
+    const replay = await proxyApp!.request(lastProxyRequest!.path, {
+      method: lastProxyRequest!.method,
+      headers: new Headers(lastProxyRequest!.headers),
+      body: lastProxyRequest!.body,
+    });
+    expect(replay.status).toBe(409);
+    expect(forwardCount).toBe(1);
 
     const rows = await agentInvocations(capId);
     expect(rows.length).toBe(1);

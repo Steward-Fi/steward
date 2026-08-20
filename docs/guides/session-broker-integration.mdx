@@ -230,7 +230,11 @@ The envelope is `{ args?, body?, query? }`:
 - `args` drive policy constraints (`argEquals` / `argMatches`) — they are **not**
   forwarded to the broker.
 - `body` is the JSON request body forwarded to the broker (for `POST`/`PUT`/`PATCH`).
-- `query` is appended to the forwarded URL as a query string.
+- `query` is a bounded string map appended to the forwarded URL. Its exact
+  selectors are also merged into the policy `args`; if a selector is repeated in
+  `args`, both values must match. Query maps are limited to 32 entries, 128
+  characters per key, 2,048 characters per value, and 8,192 encoded characters.
+  Unknown envelope fields and non-string selector values are rejected with 400.
 
 On an allowed call the proxy returns the broker's status and body **verbatim** (the
 injected credential already scrubbed). A `403` means denied by policy or missing

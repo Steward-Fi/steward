@@ -43,8 +43,14 @@ export interface CapabilityInvokeRequest {
   name: string;
   args?: Record<string, unknown>;
   body?: unknown;
-  query?: Record<string, string>;
+  query?: unknown;
 }
+
+const INVOKE_ENVELOPE_KEYS = new Set(["args", "body", "query"]);
+const MAX_QUERY_SELECTORS = 32;
+const MAX_QUERY_SELECTOR_KEY_LENGTH = 128;
+const MAX_QUERY_SELECTOR_VALUE_LENGTH = 2_048;
+const MAX_ENCODED_QUERY_LENGTH = 8_192;
 
 /**
  * Internal marker on Steward-wrapped ({ok:...}) gate responses. The upstream
@@ -218,6 +224,54 @@ async function capabilityMapsToGovernedRoute(
   );
 }
 
+type NormalizedQuerySelectors = {
+  args: Record<string, unknown>;
+  query: Record<string, string> | undefined;
+};
+
+/**
+ * Validate the agent-controlled query surface and make the exact values that
+ * will be forwarded visible to capability-intent policy evaluation. A caller
+ * may describe a selector once in `query`, or repeat it in `args`; a repeated
+ * value must be byte-for-byte identical so authorization and dispatch cannot
+ * disagree about the selected resource.
+ */
+function normalizeQuerySelectors(
+  args: Record<string, unknown>,
+  rawQuery: unknown,
+): NormalizedQuerySelectors | null {
+  if (rawQuery === undefined) return { args, query: undefined };
+  if (rawQuery === null || typeof rawQuery !== "object" || Array.isArray(rawQuery)) return null;
+
+  const entries = Object.entries(rawQuery as Record<string, unknown>);
+  if (entries.length > MAX_QUERY_SELECTORS) return null;
+
+  // Null-prototype records keep special JavaScript property names (notably
+  // `__proto__`) as ordinary data if a provider legitimately uses them.
+  const query: Record<string, string> = Object.create(null) as Record<string, string>;
+  const effectiveArgs: Record<string, unknown> = Object.assign(
+    Object.create(null) as Record<string, unknown>,
+    args,
+  );
+  for (const [key, value] of entries) {
+    if (
+      key.length === 0 ||
+      key.length > MAX_QUERY_SELECTOR_KEY_LENGTH ||
+      typeof value !== "string" ||
+      value.length > MAX_QUERY_SELECTOR_VALUE_LENGTH
+    ) {
+      return null;
+    }
+    if (Object.hasOwn(args, key) && args[key] !== value) return null;
+    query[key] = value;
+    effectiveArgs[key] = value;
+  }
+
+  const encoded = new URLSearchParams(query).toString();
+  if (encoded.length > MAX_ENCODED_QUERY_LENGTH) return null;
+  return { args: effectiveArgs, query: entries.length > 0 ? query : undefined };
+}
+
 function buildProxyPath(cap: Capability, query: Record<string, string> | undefined): string {
   const host = cap.host.toLowerCase();
   const basePath = cap.pathPattern.startsWith("/") ? cap.pathPattern : `/${cap.pathPattern}`;
@@ -282,7 +336,6 @@ export async function invokeCapabilityThroughProxy(
   const store = new CapabilityStore(ctx.db);
   const engine = new PolicyEngine();
   const { tenantId, agentId, name } = request;
-  const invokeArgs = request.args ?? {};
 
   const usable = await store.listUsableCapabilitiesForAgent(tenantId, agentId);
   const match = usable.find((u) => u.capability.name === name);
@@ -297,6 +350,19 @@ export async function invokeCapabilityThroughProxy(
     });
   }
   const cap = match.capability;
+
+  const selectors = normalizeQuerySelectors(request.args ?? {}, request.query);
+  if (!selectors) {
+    return recordAndJson(store, {
+      tenantId,
+      agentId,
+      capabilityId: cap.id,
+      decision: "deny",
+      status: 400,
+      payload: { ok: false, error: "invalid capability query selectors" } satisfies ApiResponse,
+    });
+  }
+  const invokeArgs = selectors.args;
 
   let count1h: number;
   try {
@@ -506,7 +572,7 @@ export async function invokeCapabilityThroughProxy(
     });
 
     const method = cap.method.toUpperCase();
-    const path = buildProxyPath(cap, request.query);
+    const path = buildProxyPath(cap, selectors.query);
     const hasBody = method !== "GET" && method !== "HEAD" && request.body !== undefined;
     const init: RequestInit = { method };
     if (hasBody) {
@@ -579,9 +645,9 @@ export function createInvokeRoutes(ctx: StewardAppContext): Hono<{ Variables: Ap
     }
 
     type InvokeEnvelope = {
-      args?: Record<string, unknown>;
+      args?: unknown;
       body?: unknown;
-      query?: Record<string, string>;
+      query?: unknown;
     };
     let envelope: InvokeEnvelope = {};
     let rawBody = "";
@@ -598,7 +664,13 @@ export function createInvokeRoutes(ctx: StewardAppContext): Hono<{ Variables: Ap
             jsonResponse({ ok: false, error: "invoke body must be a JSON object" }, 400),
           );
         }
-        envelope = parsedBody as InvokeEnvelope;
+        const parsedEnvelope = parsedBody as Record<string, unknown>;
+        if (Object.keys(parsedEnvelope).some((key) => !INVOKE_ENVELOPE_KEYS.has(key))) {
+          return stripGateMarker(
+            jsonResponse({ ok: false, error: "unknown field in capability invoke body" }, 400),
+          );
+        }
+        envelope = parsedEnvelope as InvokeEnvelope;
       } catch {
         return stripGateMarker(
           jsonResponse({ ok: false, error: "invalid JSON in request body" }, 400),
@@ -606,14 +678,15 @@ export function createInvokeRoutes(ctx: StewardAppContext): Hono<{ Variables: Ap
       }
     }
 
-    const args =
-      envelope.args && typeof envelope.args === "object" && !Array.isArray(envelope.args)
-        ? (envelope.args as Record<string, unknown>)
-        : {};
-    const query =
-      envelope.query && typeof envelope.query === "object" && !Array.isArray(envelope.query)
-        ? (envelope.query as Record<string, string>)
-        : undefined;
+    if (
+      envelope.args !== undefined &&
+      (envelope.args === null || typeof envelope.args !== "object" || Array.isArray(envelope.args))
+    ) {
+      return stripGateMarker(
+        jsonResponse({ ok: false, error: "capability invoke args must be a JSON object" }, 400),
+      );
+    }
+    const args = (envelope.args ?? {}) as Record<string, unknown>;
 
     const res = await invokeCapabilityThroughProxy(ctx, {
       tenantId,
@@ -621,7 +694,7 @@ export function createInvokeRoutes(ctx: StewardAppContext): Hono<{ Variables: Ap
       name: c.req.param("name"),
       args,
       body: envelope.body,
-      query,
+      query: envelope.query,
     });
     return stripGateMarker(res);
   });
