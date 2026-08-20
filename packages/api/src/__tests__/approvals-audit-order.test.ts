@@ -64,6 +64,38 @@ describe("approval route audit ordering", () => {
     expectBefore('action: "approval_rule.create.authorized"', ".insert(autoApprovalRules)");
   });
 
+  it("serializes rule upserts and commits each mutation with its completion audit", () => {
+    const ruleBody = routeBody('approvalRoutes.put("/rules", async');
+    const transactionStart = ruleBody.indexOf("withTenantAuditedTransaction(");
+    const lockedRead = ruleBody.indexOf('.for("update")', transactionStart);
+    const updateAuthorization = ruleBody.indexOf(
+      'action: "approval_rule.update.authorized"',
+      lockedRead,
+    );
+    const update = ruleBody.indexOf(".update(autoApprovalRules)", lockedRead);
+    const updateAudit = ruleBody.indexOf('action: "approval_rule.update"', update);
+    const createAuthorization = ruleBody.indexOf(
+      'action: "approval_rule.create.authorized"',
+      lockedRead,
+    );
+    const create = ruleBody.indexOf(".insert(autoApprovalRules)", lockedRead);
+    const createAudit = ruleBody.indexOf('action: "approval_rule.create"', create);
+
+    expect(transactionStart).toBeGreaterThanOrEqual(0);
+    expect(lockedRead).toBeGreaterThan(transactionStart);
+    expect(updateAuthorization).toBeGreaterThan(lockedRead);
+    expect(update).toBeGreaterThan(updateAuthorization);
+    expect(updateAudit).toBeGreaterThan(update);
+    expect(createAuthorization).toBeGreaterThan(lockedRead);
+    expect(create).toBeGreaterThan(createAuthorization);
+    expect(createAudit).toBeGreaterThan(create);
+    expect(ruleBody).toContain("return await tx.transaction");
+    expect(ruleBody).toContain('return { kind: "failed" as const }');
+    expect(ruleBody).toContain('mutation.kind === "failed"');
+    expect(ruleBody).not.toContain("await db.delete(autoApprovalRules)");
+    expect(ruleBody).not.toContain("maxAmountWei: existing.maxAmountWei");
+  });
+
   it("does not let the generic approval route authorize vault-executable transactions", () => {
     const body = routeBody('approvalRoutes.post("/:txId/approve", async');
     expect(body).toContain(
