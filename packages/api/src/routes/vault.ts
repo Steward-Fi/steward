@@ -7843,6 +7843,17 @@ async function signSolanaBlind(
       caip2?: string;
     } | null = null;
     try {
+      await stageSolanaRecoveryAnchor({
+        txId,
+        agentId,
+        transaction: args.transaction,
+        chainId,
+        toAddress,
+        value: txValue,
+        broadcastRequested: shouldBroadcast,
+        blindSigned: true,
+        policyResults: evaluation.results,
+      });
       const result = await vault.signSolanaTransaction({
         agentId,
         tenantId,
@@ -7851,19 +7862,11 @@ async function signSolanaBlind(
         broadcast: args.broadcast,
         expectedTo: toAddress,
         expectedValue: txValue,
+        onBroadcastPrepared: (signature) =>
+          checkpointSolanaBroadcastSubmission(txId, agentId, signature),
       });
       completedResult = { txId, ...result };
-      await db.insert(transactions).values({
-        id: txId,
-        agentId,
-        status: result.broadcast ? "broadcast" : "signed",
-        toAddress,
-        value: txValue,
-        chainId,
-        txHash: result.broadcast ? result.signature : undefined,
-        policyResults: evaluation.results,
-        signedAt: new Date(),
-      });
+      await finalizeSolanaRecoveryAnchor(txId, agentId, result);
       recordVaultSpend(agentId, tenantId, txValue, chainId).catch((err) =>
         console.error("[vault] Failed to record Solana spend", redactedThrownDiagnostics(err)),
       );
@@ -7899,8 +7902,6 @@ async function signSolanaBlind(
         }>
       >({ ok: true, data: { txId, ...result } });
     } catch (e: unknown) {
-      const frozen = frozenSigningResponse(c, e);
-      if (frozen) return frozen;
       const requestId = c.get("requestId") || "unknown";
       console.error(
         `[${requestId}] Solana blind sign failed for agent ${agentId}`,
@@ -7921,6 +7922,34 @@ async function signSolanaBlind(
           }>
         >({ ok: true, data: completedResult });
       }
+      if (e instanceof ExternalBroadcastOutcomeUnknownError) {
+        await preserveUnknownSolanaOutcome(txId, agentId, e.transactionHash);
+        recordVaultSpend(agentId, tenantId, txValue, chainId).catch((err) =>
+          console.error(
+            "[vault] Failed to record ambiguous Solana spend",
+            redactedThrownDiagnostics(err),
+          ),
+        );
+        await writeOutcomeUnknownAudit(c, {
+          tenantId,
+          actorType: "agent",
+          actorId: agentId,
+          action: "vault.sign.solana.blind.outcome_unknown",
+          resourceType: "transaction",
+          resourceId: txId,
+          metadata: {
+            chainId,
+            to: toAddress,
+            value: txValue,
+            blindSigned: true,
+            signature: e.transactionHash,
+          },
+        });
+        return externalBroadcastOutcomeUnknownResponse(c, e, txId) as Response;
+      }
+      await markSolanaRecoveryAnchorFailed(txId, agentId);
+      const frozen = frozenSigningResponse(c, e);
+      if (frozen) return frozen;
       dispatchWebhook(tenantId, agentId, "tx_failed", {
         error: "Transaction failed",
         ...redactedThrownDiagnostics(e),
@@ -7932,6 +7961,129 @@ async function signSolanaBlind(
       return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(e) }, 500);
     }
   });
+}
+
+type SolanaSigningResult = {
+  signature: string;
+  broadcast: boolean;
+  chainId: number;
+  caip2?: string;
+};
+
+async function stageSolanaRecoveryAnchor(input: {
+  txId: string;
+  agentId: string;
+  transaction: string;
+  chainId: number;
+  toAddress: string;
+  value: string;
+  broadcastRequested: boolean;
+  blindSigned: boolean;
+  policyResults: PolicyResult[];
+}): Promise<void> {
+  await db.insert(transactions).values({
+    id: input.txId,
+    agentId: input.agentId,
+    status: "approved",
+    toAddress: input.toAddress,
+    value: input.value,
+    data: input.transaction,
+    chainId: input.chainId,
+    actionType: "solana_transaction",
+    actionPayload: {
+      type: "solana_transaction",
+      broadcast: input.broadcastRequested,
+      blindSigned: input.blindSigned,
+      recoveryAnchor: true,
+    },
+    policyResults: input.policyResults,
+  });
+}
+
+async function checkpointSolanaBroadcastSubmission(
+  txId: string,
+  agentId: string,
+  signature: string,
+): Promise<void> {
+  const rows = await db
+    .update(transactions)
+    .set({ status: "outcome_unknown", txHash: signature, signedAt: new Date() })
+    .where(
+      and(
+        eq(transactions.id, txId),
+        eq(transactions.agentId, agentId),
+        eq(transactions.status, "approved"),
+      ),
+    )
+    .returning({ id: transactions.id });
+  if (rows.length !== 1) {
+    throw new Error("Solana recovery anchor was not available for broadcast checkpoint");
+  }
+}
+
+async function finalizeSolanaRecoveryAnchor(
+  txId: string,
+  agentId: string,
+  result: SolanaSigningResult,
+): Promise<void> {
+  const rows = await db
+    .update(transactions)
+    .set({
+      status: result.broadcast ? "broadcast" : "signed",
+      txHash: result.broadcast ? result.signature : null,
+      signedAt: new Date(),
+    })
+    .where(
+      and(
+        eq(transactions.id, txId),
+        eq(transactions.agentId, agentId),
+        sql`${transactions.status} in ('approved', 'outcome_unknown')`,
+      ),
+    )
+    .returning({ id: transactions.id });
+  if (rows.length !== 1) {
+    throw new Error("Solana recovery anchor was not available for finalization");
+  }
+}
+
+async function preserveUnknownSolanaOutcome(
+  txId: string,
+  agentId: string,
+  signature: string,
+): Promise<void> {
+  try {
+    await db
+      .update(transactions)
+      .set({ status: "outcome_unknown", txHash: signature, signedAt: new Date() })
+      .where(and(eq(transactions.id, txId), eq(transactions.agentId, agentId)));
+  } catch (error) {
+    // The pre-sign approved row is already durable. Preserve the typed 202
+    // response even when the database cannot enrich it with the known hash.
+    console.error(
+      "[vault] Failed to persist ambiguous Solana broadcast hash",
+      redactedThrownDiagnostics(error),
+    );
+  }
+}
+
+async function markSolanaRecoveryAnchorFailed(txId: string, agentId: string): Promise<void> {
+  try {
+    await db
+      .update(transactions)
+      .set({ status: "failed" })
+      .where(
+        and(
+          eq(transactions.id, txId),
+          eq(transactions.agentId, agentId),
+          eq(transactions.status, "approved"),
+        ),
+      );
+  } catch (error) {
+    console.error(
+      "[vault] Failed to mark Solana recovery anchor as failed",
+      redactedThrownDiagnostics(error),
+    );
+  }
 }
 
 vaultRoutes.post("/:agentId/sign-solana", async (c) => {
@@ -8316,6 +8468,17 @@ vaultRoutes.post("/:agentId/sign-solana", async (c) => {
         derived.summary.instructions[0].instructionType === "system:Transfer" &&
         derived.to !== undefined;
 
+      await stageSolanaRecoveryAnchor({
+        txId,
+        agentId,
+        transaction: body.transaction,
+        chainId,
+        toAddress,
+        value: txValue,
+        broadcastRequested: shouldBroadcast,
+        blindSigned: false,
+        policyResults: evaluation.results,
+      });
       const result = await vault.signSolanaTransaction({
         agentId,
         tenantId,
@@ -8328,20 +8491,12 @@ vaultRoutes.post("/:agentId/sign-solana", async (c) => {
         ...(isSingleNativeTransfer
           ? { expectedTo: toAddress, expectedValue: txValue }
           : { allowBlindSign: true }),
+        onBroadcastPrepared: (signature) =>
+          checkpointSolanaBroadcastSubmission(txId, agentId, signature),
       });
       completedResult = { txId, ...result };
 
-      await db.insert(transactions).values({
-        id: txId,
-        agentId,
-        status: result.broadcast ? "broadcast" : "signed",
-        toAddress,
-        value: txValue,
-        chainId,
-        txHash: result.broadcast ? result.signature : undefined,
-        policyResults: evaluation.results,
-        signedAt: new Date(),
-      });
+      await finalizeSolanaRecoveryAnchor(txId, agentId, result);
 
       // ── Record spend in Redis (fire-and-forget) ──────────────────────────────
       recordVaultSpend(agentId, tenantId, txValue, chainId).catch((err) =>
@@ -8393,8 +8548,6 @@ vaultRoutes.post("/:agentId/sign-solana", async (c) => {
         data: { txId, ...result },
       });
     } catch (e: unknown) {
-      const frozen = frozenSigningResponse(c, e);
-      if (frozen) return frozen;
       const requestId = c.get("requestId") || "unknown";
       console.error(
         `[${requestId}] Solana sign failed for agent ${agentId}`,
@@ -8415,6 +8568,35 @@ vaultRoutes.post("/:agentId/sign-solana", async (c) => {
           }>
         >({ ok: true, data: completedResult });
       }
+
+      if (e instanceof ExternalBroadcastOutcomeUnknownError) {
+        await preserveUnknownSolanaOutcome(txId, agentId, e.transactionHash);
+        recordVaultSpend(agentId, tenantId, txValue, chainId).catch((err) =>
+          console.error(
+            "[vault] Failed to record ambiguous Solana spend",
+            redactedThrownDiagnostics(err),
+          ),
+        );
+        await writeOutcomeUnknownAudit(c, {
+          tenantId,
+          actorType: "agent",
+          actorId: agentId,
+          action: "vault.sign.solana.outcome_unknown",
+          resourceType: "transaction",
+          resourceId: txId,
+          metadata: {
+            chainId,
+            to: toAddress,
+            value: txValue,
+            signature: e.transactionHash,
+            derivedFromTransaction: true,
+          },
+        });
+        return externalBroadcastOutcomeUnknownResponse(c, e, txId) as Response;
+      }
+      await markSolanaRecoveryAnchorFailed(txId, agentId);
+      const frozen = frozenSigningResponse(c, e);
+      if (frozen) return frozen;
 
       dispatchWebhook(tenantId, agentId, "tx_failed", {
         error: "Transaction failed",

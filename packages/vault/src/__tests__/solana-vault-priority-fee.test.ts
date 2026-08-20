@@ -1,6 +1,7 @@
-import { afterAll, beforeEach, describe, expect, setDefaultTimeout, test } from "bun:test";
+import { afterAll, beforeEach, describe, expect, setDefaultTimeout, spyOn, test } from "bun:test";
 import {
   ComputeBudgetProgram,
+  Connection,
   PublicKey,
   SystemProgram,
   Transaction,
@@ -9,12 +10,15 @@ import {
 } from "@solana/web3.js";
 import { getDb, tenants } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
+import { ExternalBroadcastOutcomeUnknownError } from "../external-key-custody";
 import { Vault } from "../vault";
 
 const MASTER_PASSWORD = "test-vault-solana-priority-fee";
 const TENANT_ID = "vault-solana-priority-fee-tenant";
 const AGENT_ID = "vault-solana-priority-fee-agent";
 const RECENT_BLOCKHASH = new PublicKey(new Uint8Array(32).fill(11)).toBase58();
+const SUBMITTED_SIGNATURE =
+  "4oL4p7QvN3UH7V5wMGZgW5PuzEk4A9LXLHk9RxAoKjDKuLbQBsfXN8kEvKfj5K1oEJa8wFF6RVp2h7pP9w2f51ZV";
 
 setDefaultTimeout(30000);
 
@@ -146,5 +150,142 @@ describe("Vault.signSolanaTransaction priority fee cap", () => {
     const signed = Transaction.from(fromBase64(result.signature));
     expect(result.broadcast).toBe(false);
     expect(signed.signatures.some(({ signature }) => signature?.some((b) => b !== 0))).toBe(true);
+  });
+
+  test("aborts before network I/O when the durable pre-broadcast checkpoint fails", async () => {
+    const feePayer = await createSolanaAgent(vault);
+    let sendCalls = 0;
+    let blockhashCalls = 0;
+    let confirmCalls = 0;
+    const send = spyOn(Connection.prototype, "sendRawTransaction").mockImplementation(async () => {
+      sendCalls += 1;
+      return SUBMITTED_SIGNATURE;
+    });
+    const getBlockhash = spyOn(Connection.prototype, "getLatestBlockhash").mockImplementation(
+      async () => {
+        blockhashCalls += 1;
+        return { blockhash: RECENT_BLOCKHASH, lastValidBlockHeight: 100 };
+      },
+    );
+    const confirm = spyOn(Connection.prototype, "confirmTransaction").mockImplementation(
+      async () => {
+        confirmCalls += 1;
+        return { context: { slot: 1 }, value: { err: null } };
+      },
+    );
+    let error: unknown;
+    try {
+      await vault.signSolanaTransaction({
+        tenantId: TENANT_ID,
+        agentId: AGENT_ID,
+        transaction: legacyTransferWithPriorityFee(feePayer, 1_000),
+        broadcast: true,
+        allowBlindSign: true,
+        onBroadcastPrepared: async (signature) => {
+          expect(signature).toBeString();
+          throw new Error("injected durable checkpoint failure");
+        },
+      });
+    } catch (caught) {
+      error = caught;
+    } finally {
+      send.mockRestore();
+      getBlockhash.mockRestore();
+      confirm.mockRestore();
+    }
+
+    expect(error).toBeInstanceOf(Error);
+    expect(error).not.toBeInstanceOf(ExternalBroadcastOutcomeUnknownError);
+    expect((error as Error).message).toBe("injected durable checkpoint failure");
+    expect(sendCalls).toBe(0);
+    expect(blockhashCalls).toBe(0);
+    expect(confirmCalls).toBe(0);
+  });
+
+  test("checkpoints before confirmation and retains the hash when confirmation fails", async () => {
+    const feePayer = await createSolanaAgent(vault);
+    const order: string[] = [];
+    let preparedSignature = "";
+    const send = spyOn(Connection.prototype, "sendRawTransaction").mockImplementation(async () => {
+      order.push("submitted");
+      return preparedSignature;
+    });
+    const getBlockhash = spyOn(Connection.prototype, "getLatestBlockhash").mockResolvedValue({
+      blockhash: RECENT_BLOCKHASH,
+      lastValidBlockHeight: 100,
+    });
+    const confirm = spyOn(Connection.prototype, "confirmTransaction").mockImplementation(
+      async () => {
+        order.push("confirmation");
+        throw new Error("injected confirmation failure");
+      },
+    );
+    let error: unknown;
+    try {
+      await vault.signSolanaTransaction({
+        tenantId: TENANT_ID,
+        agentId: AGENT_ID,
+        transaction: legacyTransferWithPriorityFee(feePayer, 1_000),
+        broadcast: true,
+        allowBlindSign: true,
+        onBroadcastPrepared: async (signature) => {
+          preparedSignature = signature;
+          order.push("checkpoint");
+        },
+      });
+    } catch (caught) {
+      error = caught;
+    } finally {
+      send.mockRestore();
+      getBlockhash.mockRestore();
+      confirm.mockRestore();
+    }
+
+    expect(error).toBeInstanceOf(ExternalBroadcastOutcomeUnknownError);
+    expect((error as ExternalBroadcastOutcomeUnknownError).transactionHash).toBe(preparedSignature);
+    expect(preparedSignature).not.toBe("");
+    expect(order).toEqual(["checkpoint", "submitted", "confirmation"]);
+  });
+
+  test("retains the prepared hash when sendRawTransaction may have accepted but loses its response", async () => {
+    const feePayer = await createSolanaAgent(vault);
+    let preparedSignature = "";
+    let sendCalls = 0;
+    const send = spyOn(Connection.prototype, "sendRawTransaction").mockImplementation(async () => {
+      sendCalls += 1;
+      throw new Error("injected transport loss after submission");
+    });
+    const getBlockhash = spyOn(Connection.prototype, "getLatestBlockhash").mockResolvedValue({
+      blockhash: RECENT_BLOCKHASH,
+      lastValidBlockHeight: 100,
+    });
+    const confirm = spyOn(Connection.prototype, "confirmTransaction").mockResolvedValue({
+      context: { slot: 1 },
+      value: { err: null },
+    });
+    let error: unknown;
+    try {
+      await vault.signSolanaTransaction({
+        tenantId: TENANT_ID,
+        agentId: AGENT_ID,
+        transaction: legacyTransferWithPriorityFee(feePayer, 1_000),
+        broadcast: true,
+        allowBlindSign: true,
+        onBroadcastPrepared: async (signature) => {
+          preparedSignature = signature;
+        },
+      });
+    } catch (caught) {
+      error = caught;
+    } finally {
+      send.mockRestore();
+      getBlockhash.mockRestore();
+      confirm.mockRestore();
+    }
+
+    expect(sendCalls).toBe(1);
+    expect(preparedSignature).not.toBe("");
+    expect(error).toBeInstanceOf(ExternalBroadcastOutcomeUnknownError);
+    expect((error as ExternalBroadcastOutcomeUnknownError).transactionHash).toBe(preparedSignature);
   });
 });

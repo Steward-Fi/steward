@@ -25,6 +25,7 @@ import type {
   WalletAddressMetadata,
 } from "@stwd/shared";
 import { canonicalJsonStringify, toCaip2 } from "@stwd/shared";
+import bs58 from "bs58";
 import { and, eq, inArray, isNull, sql } from "drizzle-orm";
 import {
   type Chain,
@@ -3156,6 +3157,7 @@ export class Vault {
     };
 
     let signedBytes: Uint8Array;
+    let preparedSignature: string;
     if (isVersionedTransactionBytes(txBytes)) {
       const vtx = VersionedTransaction.deserialize(txBytes);
       assertSolanaPriorityFeeWithinCap(parseSolanaTransaction(request.transaction));
@@ -3167,6 +3169,11 @@ export class Vault {
       }
       vtx.sign([keypair]);
       signedBytes = vtx.serialize();
+      const signature = vtx.signatures[0];
+      if (!signature?.some((byte) => byte !== 0)) {
+        throw new Error("Solana versioned transaction did not produce a signer signature");
+      }
+      preparedSignature = bs58.encode(signature);
     } else {
       const tx = SolTransaction.from(txBytes);
       assertSolanaPriorityFeeWithinCap(parseSolanaTransaction(request.transaction));
@@ -3180,23 +3187,42 @@ export class Vault {
       }
       tx.partialSign(keypair);
       signedBytes = tx.serialize();
+      if (!tx.signature) {
+        throw new Error("Solana transaction did not produce a signer signature");
+      }
+      preparedSignature = bs58.encode(tx.signature);
     }
 
     if (shouldBroadcast) {
+      // Persist the deterministic signature before the first external write.
+      // A checkpoint failure aborts safely before sendRawTransaction.
+      await request.onBroadcastPrepared?.(preparedSignature);
       const connection = new Connection(rpcUrl, "confirmed");
-      const sig = await connection.sendRawTransaction(signedBytes, {
-        skipPreflight: false,
-        preflightCommitment: "confirmed",
-      });
-
-      const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash("confirmed");
-      await connection.confirmTransaction(
-        { signature: sig, blockhash, lastValidBlockHeight },
-        "confirmed",
-      );
+      try {
+        const sig = await connection.sendRawTransaction(signedBytes, {
+          skipPreflight: false,
+          preflightCommitment: "confirmed",
+        });
+        if (sig !== preparedSignature) {
+          throw new Error("Solana RPC returned a signature that does not match the signed bytes");
+        }
+        const { blockhash, lastValidBlockHeight } =
+          await connection.getLatestBlockhash("confirmed");
+        await connection.confirmTransaction(
+          { signature: sig, blockhash, lastValidBlockHeight },
+          "confirmed",
+        );
+      } catch (error) {
+        // The signed bytes and their deterministic signature were durably
+        // checkpointed before sendRawTransaction. Its rejection may represent
+        // a preflight denial, an accepted submission with a lost response, or
+        // a later confirmation failure, so every case is conservatively
+        // non-retryable until the signature is reconciled.
+        throw new ExternalBroadcastOutcomeUnknownError(preparedSignature, { cause: error });
+      }
 
       return {
-        signature: sig,
+        signature: preparedSignature,
         broadcast: true,
         chainId,
         caip2: toCaip2(chainId),

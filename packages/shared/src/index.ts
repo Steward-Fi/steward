@@ -679,6 +679,14 @@ export interface SignSolanaTransactionRequest {
    * sign. Never forward client-controlled input into this flag.
    */
   allowBlindSign?: boolean;
+  /**
+   * Durable recovery checkpoint invoked after signing has produced the
+   * deterministic transaction signature, but before any broadcast I/O. API
+   * callers use this to persist the signature as outcome_unknown so a crash,
+   * lost RPC response, or confirmation failure cannot make a potentially
+   * submitted transaction indistinguishable from one that was never sent.
+   */
+  onBroadcastPrepared?: (signature: string) => Promise<void>;
 }
 
 /**
