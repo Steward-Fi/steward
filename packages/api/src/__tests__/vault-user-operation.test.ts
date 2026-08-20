@@ -16,9 +16,15 @@ import { eq } from "drizzle-orm";
 import { Hono } from "hono";
 import type { AppVariables, RpcRequest } from "../services/context";
 
+import * as actualWebhookDispatch from "../services/webhook-dispatch";
+
 const dispatchWebhookMock = mock(() => {});
 
 mock.module("../services/webhook-dispatch", () => ({
+  // Preserve every real export (e.g. dispatchWebhookDurably) and override only
+  // the spied entrypoint; replacing the whole module drops named exports the
+  // routes under test import, surfacing as `Export named 'X' not found`.
+  ...actualWebhookDispatch,
   dispatchWebhook: dispatchWebhookMock,
 }));
 

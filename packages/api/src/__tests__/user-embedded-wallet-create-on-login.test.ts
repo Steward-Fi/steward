@@ -15,9 +15,15 @@ import { and, eq } from "drizzle-orm";
 const APP_TENANT_ID = "embedded-wallet-create-on-login-app";
 const OFF_TENANT_ID = "embedded-wallet-create-on-login-off";
 
+import * as actualWebhookDispatch from "../services/webhook-dispatch";
+
 const dispatchWebhookMock = mock(() => {});
 
 mock.module("../services/webhook-dispatch", () => ({
+  // Preserve every real export (e.g. dispatchWebhookDurably) and override only
+  // the spied entrypoint; replacing the whole module drops named exports the
+  // routes under test import, surfacing as `Export named 'X' not found`.
+  ...actualWebhookDispatch,
   dispatchWebhook: dispatchWebhookMock,
 }));
 

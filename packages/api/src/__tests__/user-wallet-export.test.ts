@@ -11,9 +11,15 @@ const hasDatabaseUrl = Boolean(previousDatabaseUrl);
 const describeWithDatabase = hasDatabaseUrl ? describe : describe.skip;
 process.env.DATABASE_URL ||= "postgres://unused:unused@localhost:5432/unused";
 
+import * as actualWebhookDispatch from "../services/webhook-dispatch";
+
 const dispatchWebhookMock = mock(() => {});
 
 mock.module("../services/webhook-dispatch", () => ({
+  // Preserve every real export (e.g. dispatchWebhookDurably) and override only
+  // the spied entrypoint; replacing the whole module drops named exports the
+  // routes under test import, surfacing as `Export named 'X' not found`.
+  ...actualWebhookDispatch,
   dispatchWebhook: dispatchWebhookMock,
 }));
 

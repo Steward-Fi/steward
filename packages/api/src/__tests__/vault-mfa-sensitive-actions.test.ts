@@ -30,10 +30,16 @@ import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { eq } from "drizzle-orm";
 import { Hono } from "hono";
 import type { AppVariables } from "../services/context";
+import * as actualWebhookDispatch from "../services/webhook-dispatch";
 
 const dispatchWebhookMock = mock(() => {});
 
+// Preserve every real export (e.g. dispatchWebhookDurably, dispatchTestWebhook)
+// and override only the spied entrypoint. Replacing the whole module with a
+// bare `{ dispatchWebhook }` object breaks the moment a route this test loads
+// imports another named export, surfacing as `Export named 'X' not found`.
 mock.module("../services/webhook-dispatch", () => ({
+  ...actualWebhookDispatch,
   dispatchWebhook: dispatchWebhookMock,
 }));
 

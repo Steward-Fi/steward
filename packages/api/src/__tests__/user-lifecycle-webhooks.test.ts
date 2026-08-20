@@ -14,9 +14,15 @@ setDefaultTimeout(30000);
 import { closeDb, getDb, tenantConfigs, tenants, users } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 
+import * as actualWebhookDispatch from "../services/webhook-dispatch";
+
 const dispatchWebhookMock = mock(() => {});
 
 mock.module("../services/webhook-dispatch", () => ({
+  // Preserve every real export (e.g. dispatchWebhookDurably) and override only
+  // the spied entrypoint; replacing the whole module drops named exports the
+  // routes under test import, surfacing as `Export named 'X' not found`.
+  ...actualWebhookDispatch,
   dispatchWebhook: dispatchWebhookMock,
 }));
 

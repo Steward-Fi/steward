@@ -4,6 +4,7 @@ import { closeDb, getDb, users } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { eq } from "drizzle-orm";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
+import * as actualWebhookDispatch from "../services/webhook-dispatch";
 
 type WebhookDispatch = {
   tenantId: string;
@@ -15,6 +16,10 @@ type WebhookDispatch = {
 const webhookDispatches: WebhookDispatch[] = [];
 
 mock.module("../services/webhook-dispatch", () => ({
+  // Preserve every real export (e.g. dispatchWebhookDurably) and override only
+  // the spied entrypoint; replacing the whole module drops named exports the
+  // routes under test import, surfacing as `Export named 'X' not found`.
+  ...actualWebhookDispatch,
   dispatchWebhook: mock(
     (tenantId: string, agentId: string, type: string, data: Record<string, unknown>) => {
       webhookDispatches.push({ tenantId, agentId, type, data });

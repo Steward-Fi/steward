@@ -467,8 +467,16 @@ jobs:
           POSTGRES_DB: steward_test
         ports:
           - 5432:5432
+        # pg_isready without -d probes a database named after the connecting
+        # role (steward), which this service never creates (POSTGRES_DB is
+        # steward_test). pg_isready still returns 0 (the server answered), so
+        # the healthcheck passed but the server logged a misleading
+        # `FATAL: database "steward" does not exist` on every 10s probe. Those
+        # log lines were repeatedly misread as a DB-bootstrap race. Point the
+        # probe at the database that actually exists so the container log is
+        # clean and the readiness signal is unambiguous.
         options: >-
-          --health-cmd "pg_isready -U steward"
+          --health-cmd "pg_isready -U steward -d steward_test"
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
