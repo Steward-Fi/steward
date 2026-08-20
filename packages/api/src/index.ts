@@ -31,6 +31,7 @@ import { assertAuthStoresAreSafe, getAuthStoreSources, initAuthStores } from "./
 import {
   API_VERSION,
   type ApiResponse,
+  ensureDefaultTenantReady,
   nonceCleanupTimer,
   RATE_LIMIT_MAX_REQUESTS,
   RATE_LIMIT_WINDOW_MS,
@@ -64,6 +65,16 @@ if (!Number.isInteger(PORT) || PORT <= 0) {
   throw new Error("PORT must be a positive integer");
 }
 validateJwtSecretEnv();
+
+const skipMigrations =
+  process.env.SKIP_MIGRATIONS === "true" || process.env.SKIP_MIGRATIONS === "1";
+const productionPostgresRuntime =
+  !shouldUsePGLite() && process.env.NODE_ENV !== "development" && process.env.NODE_ENV !== "test";
+if (productionPostgresRuntime && !skipMigrations) {
+  throw new Error(
+    "PRODUCTION_RLS_REQUIRES_OUT_OF_BAND_MIGRATIONS: set SKIP_MIGRATIONS=1",
+  );
+}
 
 // Compose the deployable app: lean core + this repo's opt-in plugins (trading).
 // composeApp() is async because plugin registration may be async + the trading
@@ -198,8 +209,11 @@ app.get("/ready", async (c) => {
     };
     if (process.env.NODE_ENV === "production") {
       const expectedRole = process.env.STEWARD_APP_DATABASE_ROLE;
-      if (!expectedRole) throw new Error("STEWARD_APP_DATABASE_ROLE is required in production");
-      await assertRlsDeploymentSafety(db, { expectedRole });
+      const expectedPlatformRole = process.env.STEWARD_PLATFORM_DATABASE_ROLE;
+      if (!expectedRole || !expectedPlatformRole) {
+        throw new Error("STEWARD database role expectations are required in production");
+      }
+      await assertRlsDeploymentSafety(db, { expectedRole, expectedPlatformRole });
       checks.rlsDeployment = { ok: true };
     }
   } catch {
@@ -304,7 +318,7 @@ app.get("/ready", async (c) => {
 if (shouldUsePGLite()) {
   migrationsRan = true;
   console.log("[steward] PGLite mode detected — skipping Postgres migrator.");
-} else if (process.env.SKIP_MIGRATIONS === "true" || process.env.SKIP_MIGRATIONS === "1") {
+} else if (skipMigrations) {
   migrationsRan = true;
   console.log("[steward] SKIP_MIGRATIONS set — skipping auto-migration. Run migrations manually.");
 } else {
@@ -353,11 +367,14 @@ if (shouldUsePGLite()) {
   }
 }
 
-if (process.env.NODE_ENV === "production" && !shouldUsePGLite()) {
+if (productionPostgresRuntime) {
   const expectedRole = process.env.STEWARD_APP_DATABASE_ROLE;
-  if (!expectedRole) throw new Error("STEWARD_APP_DATABASE_ROLE is required in production");
+  const expectedPlatformRole = process.env.STEWARD_PLATFORM_DATABASE_ROLE;
+  if (!expectedRole || !expectedPlatformRole) {
+    throw new Error("STEWARD database role expectations are required in production");
+  }
   try {
-    await assertRlsDeploymentSafety(getDb(), { expectedRole });
+    await assertRlsDeploymentSafety(getDb(), { expectedRole, expectedPlatformRole });
   } catch (error) {
     console.error(
       "[steward] RLS deployment safety assertion failed — cannot start",
@@ -365,6 +382,13 @@ if (process.env.NODE_ENV === "production" && !shouldUsePGLite()) {
     );
     process.exit(1);
   }
+}
+
+try {
+  await ensureDefaultTenantReady();
+} catch (error) {
+  console.error("[steward] Default tenant bootstrap failed — cannot start", redactedThrownDiagnostics(error));
+  process.exit(1);
 }
 
 // ─── Redis + auth stores (blocking — must complete before serving traffic) ──

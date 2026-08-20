@@ -405,9 +405,32 @@ export const tenantConfigs = new Map<string, TenantConfig>([
   [defaultTenantConfig.id, defaultTenantConfig],
 ]);
 
-export const defaultTenantReady = db.execute(sql`
-  SELECT steward_bootstrap.ensure_default_tenant(${process.env.STEWARD_DEFAULT_TENANT_KEY || ""})
-`);
+let defaultTenantDb: ReturnType<typeof getDb> | null = null;
+let defaultTenantReady: Promise<void> | null = null;
+
+/** Run tenant bootstrap only after the entry point has completed migrations. */
+export function ensureDefaultTenantReady(): Promise<void> {
+  const activeDb = getDb();
+  if (activeDb !== defaultTenantDb) {
+    defaultTenantDb = activeDb;
+    defaultTenantReady = null;
+  }
+  if (!defaultTenantReady) {
+    const pending = activeDb
+      .execute(sql`
+        SELECT steward_bootstrap.ensure_default_tenant(${process.env.STEWARD_DEFAULT_TENANT_KEY || ""})
+      `)
+      .then(() => undefined)
+      .catch((error) => {
+        if (defaultTenantDb === activeDb && defaultTenantReady === pending) {
+          defaultTenantReady = null;
+        }
+        throw error;
+      });
+    defaultTenantReady = pending;
+  }
+  return defaultTenantReady;
+}
 
 // ─── App variable types ───────────────────────────────────────────────────────
 
@@ -786,7 +809,7 @@ export async function tenantAuth(
   next: Next,
   options?: { requireTenantMatch?: string; bindTenantDatabase?: boolean },
 ) {
-  await defaultTenantReady;
+  await ensureDefaultTenantReady();
 
   const authHeader = c.req.header("Authorization");
   if (authHeader?.startsWith("Bearer ")) {

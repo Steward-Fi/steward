@@ -19,7 +19,8 @@ cd steward
 cp .env.example .env
 $EDITOR .env   # fill in required vars (see table below)
 
-# 3. Start everything
+# 3. Start everything. Compose runs core migration → role bootstrap → enabled
+#    plugin migration → RLS activation before API/proxy startup.
 docker compose up -d
 
 # 4. Tail logs
@@ -27,7 +28,7 @@ docker compose logs -f steward-api
 
 # 5. Verify
 curl http://localhost:3200/health   # {"status":"ok",...}
-curl http://localhost:3200/ready    # {"status":"ready",...} once migrations done
+curl http://localhost:3200/ready    # {"status":"ready",...} after activation/readiness
 curl http://localhost:8080/health   # {"ok":true,"service":"steward-proxy",...}
 ```
 
@@ -55,7 +56,7 @@ curl -s -X POST http://localhost:3200/platform/tenants \
 ```bash
 git pull
 docker compose build --no-cache steward-api
-docker compose up -d steward-api steward-proxy
+docker compose up -d
 ```
 
 ---
@@ -116,8 +117,9 @@ PORT=3200
 STEWARD_BIND_HOST=0.0.0.0
 NODE_ENV=production
 
-# Database
-DATABASE_URL=postgresql://steward:password@your-db-host/steward?sslmode=verify-full
+# Database runtime identity (restricted app role only)
+DATABASE_URL=postgresql://steward_app:password@your-db-host/steward?sslmode=verify-full
+SKIP_MIGRATIONS=1
 
 # Vault encryption — 32+ random bytes, hex-encoded
 STEWARD_MASTER_PASSWORD=<run: openssl rand -hex 32>
@@ -220,7 +222,8 @@ sudo nginx -t
 | Variable | Required | Default | Description |
 |---|---|---|---|
 | `STEWARD_MASTER_PASSWORD` | **Yes** | — | AES-256 vault encryption key. Use `openssl rand -hex 32`. Rotating this requires re-encrypting all vault entries. |
-| `DATABASE_URL` | **Yes** | — | PostgreSQL connection string. In Docker Compose, defaults to internal postgres container. |
+| `DATABASE_URL` | **Yes** | — | Restricted app-role PostgreSQL URL. Production startup rejects owner/bypass credentials and an incomplete RLS catalog. |
+| `SKIP_MIGRATIONS` | **Yes in production** | — | Must be `1`; use the out-of-band core/bootstrap/plugin/activation sequence in `docs/security/database-rls-rollout.mdx`. |
 | `STEWARD_PLATFORM_KEYS` | **Yes** | — | Comma-separated platform admin keys. Used for `/platform/*` routes (cross-tenant admin). |
 | `PORT` | No | `3200` | API listen port. |
 | `STEWARD_BIND_HOST` | No | `127.0.0.1` | Set to `0.0.0.0` when behind a reverse proxy or in Docker. |
@@ -241,8 +244,10 @@ sudo nginx -t
 | `STEWARD_PROXY_URL` | No | `http://steward-proxy:8080` in root Compose | Proxy URL used inside the API container; host-side clients normally use `http://localhost:8080`. |
 | `STEWARD_PROXY_REQUEST_SIGNING_SECRET` / `_SECRETS` | **Yes for full API+proxy Compose** | — | Shared HMAC root for signed proxy requests. Generate with `openssl rand -hex 32`; keep distinct from JWT/audit/master secrets. |
 | `STEWARD_DB_MODE` | No | — | Set to `pglite` for embedded DB (no Postgres needed). For local dev only. |
-| `POSTGRES_USER` | No | `steward` | Postgres user (Docker Compose internal DB). |
-| `POSTGRES_PASSWORD` | No | `changeme` | Postgres password (Docker Compose internal DB). Change this! |
+| `POSTGRES_USER` | No | `steward` | Bundled Postgres bootstrap administrator; retained for existing-volume compatibility and never exposed to API/proxy. |
+| `POSTGRES_PASSWORD` | **Yes for bundled DB** | — | Bundled bootstrap administrator password. |
+| `STEWARD_DB_APP_PASSWORD` | **Yes for bundled DB** | — | Distinct restricted runtime-role password. |
+| `STEWARD_DB_MIGRATION_PASSWORD` | **Yes for bundled DB** | — | Distinct migration-role password. |
 | `POSTGRES_DB` | No | `steward` | Postgres database name (Docker Compose internal DB). |
 
 ---
