@@ -120,6 +120,14 @@ describe("provider authority sandbox operator primitives", () => {
     const oddLength = envFixture();
     oddLength.STEWARD_KDF_SALT = "a".repeat(33);
     expect(() => validateEnvironment(oddLength)).toThrow("even-length hexadecimal string");
+
+    const trailingSpace = envFixture();
+    trailingSpace.STEWARD_KDF_SALT = `${"a".repeat(32)} `;
+    expect(() => validateEnvironment(trailingSpace)).toThrow("even-length hexadecimal string");
+
+    const uppercase = envFixture();
+    uppercase.STEWARD_KDF_SALT = "AB".repeat(16);
+    expect(() => validateEnvironment(uppercase)).not.toThrow();
   });
 
   it("rejects credential-bearing and public plaintext service URLs", async () => {

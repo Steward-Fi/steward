@@ -15,9 +15,19 @@ const altDomainRoot = new KeyStore(MASTER, SALT, "signing-vault");
 const TIMEOUT = 30_000;
 
 describe("KDF domain separation (#11)", () => {
-  test("rejects odd-length or partially decoded KDF salts", () => {
+  test("accepts compatible full-string hexadecimal KDF salts", () => {
+    const uppercase = new KeyStore(MASTER, "AB".repeat(16));
+    const lowercase = new KeyStore(MASTER, "ab".repeat(16));
+    const ciphertext = uppercase.encrypt("compatible-existing-root");
+    expect(lowercase.decrypt(ciphertext)).toBe("compatible-existing-root");
+  });
+
+  test("rejects odd-length, partially decoded, or whitespace-padded KDF salts", () => {
     expect(() => new KeyStore(MASTER, "a".repeat(33))).toThrow("even-length hexadecimal string");
     expect(() => new KeyStore(MASTER, `${"a".repeat(32)}zz`)).toThrow(
+      "even-length hexadecimal string",
+    );
+    expect(() => new KeyStore(MASTER, `${"a".repeat(32)} `)).toThrow(
       "even-length hexadecimal string",
     );
   });

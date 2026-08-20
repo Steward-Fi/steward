@@ -1,6 +1,7 @@
 import { createSign } from "node:crypto";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
+import { decodeKdfSalt } from "../../packages/vault/src/kdf-salt.mjs";
 
 export const REQUIRED_ENV = [
   "GITHUB_APP_ID",
@@ -144,16 +145,7 @@ export function validateEnvironment(env) {
   // must derive the same root key as the deployment that encrypted the seeded
   // credential; accepting a missing, short, or non-hex salt would make a
   // successful preflight meaningless and defer the failure until dispatch.
-  const kdfSalt = env.STEWARD_KDF_SALT;
-  if (kdfSalt.length < 32 || kdfSalt.length % 2 !== 0 || !/^[0-9a-fA-F]+$/.test(kdfSalt)) {
-    throw new Error(
-      "STEWARD_KDF_SALT must be an even-length hexadecimal string of at least 32 characters (16 bytes). Generate with: openssl rand -hex 32",
-    );
-  }
-  const decodedKdfSalt = Buffer.from(kdfSalt, "hex");
-  if (decodedKdfSalt.length < 16) {
-    throw new Error("STEWARD_KDF_SALT must decode to at least 16 bytes of randomness.");
-  }
+  decodeKdfSalt(env.STEWARD_KDF_SALT);
   const stewardBase = validateServiceUrl("STEWARD_API_URL", env.STEWARD_API_URL);
   const stewardUrl = new URL(stewardBase);
   if (stewardUrl.search || stewardUrl.hash) {
