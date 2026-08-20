@@ -18,6 +18,7 @@ import { decodeUtf8Strict, isApprovalReasonCode, strictParseJson } from "@stwd/s
 import type { Context, Hono } from "hono";
 import { type AppVariables, setNoStoreHeaders, tenantAuth } from "../services/context";
 import { providerApprovalService } from "../services/provider-approval";
+import { isRecentMfaTimestamp } from "../services/recent-mfa";
 
 type RouteContext = Context<{ Variables: AppVariables }>;
 
@@ -92,7 +93,7 @@ async function handleGetApproval(c: RouteContext) {
   if (typeof mfa !== "number" || !Number.isFinite(mfa)) {
     return err(c, "APPROVAL_MFA_REQUIRED", 403);
   }
-  if (Date.now() - mfa > 300_000) return err(c, "APPROVAL_MFA_STALE", 403);
+  if (!isRecentMfaTimestamp(mfa, 300_000)) return err(c, "APPROVAL_MFA_STALE", 403);
 
   // Eligibility (exact workspace approver) is enforced by the service via a
   // detail-load that first checks the caller is an eligible approver. For the
