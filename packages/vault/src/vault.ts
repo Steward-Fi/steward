@@ -26,7 +26,7 @@ import type {
 } from "@stwd/shared";
 import { canonicalJsonStringify, toCaip2 } from "@stwd/shared";
 import bs58 from "bs58";
-import { and, eq, inArray, isNull, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, isNull, sql } from "drizzle-orm";
 import {
   type Chain,
   createPublicClient,
@@ -1437,6 +1437,7 @@ export class Vault {
       .select()
       .from(agents)
       .where(eq(agents.tenantId, tenantId))
+      .orderBy(asc(agents.id))
       .limit(limit)
       .offset(offset);
     if (rows.length === 0) return [];

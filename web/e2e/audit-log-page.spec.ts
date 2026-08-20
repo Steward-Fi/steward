@@ -78,22 +78,26 @@ test.describe("Dashboard audit log", () => {
         await route.fulfill({
           json: {
             ok: true,
-            data: [
-              {
-                id: "agent-risk-review",
-                tenantId: "personal-test",
-                name: "Risk Review Agent",
-                walletAddress: "0x1111111111111111111111111111111111111111",
-                createdAt: "2026-06-04T13:00:00.000Z",
-              },
-              {
-                id: "agent-support",
-                tenantId: "personal-test",
-                name: "Support Agent",
-                walletAddress: "0x2222222222222222222222222222222222222222",
-                createdAt: "2026-06-04T13:05:00.000Z",
-              },
-            ],
+            data: {
+              agents: [
+                {
+                  id: "agent-risk-review",
+                  tenantId: "personal-test",
+                  name: "Risk Review Agent",
+                  walletAddress: "0x1111111111111111111111111111111111111111",
+                  createdAt: "2026-06-04T13:00:00.000Z",
+                },
+                {
+                  id: "agent-support",
+                  tenantId: "personal-test",
+                  name: "Support Agent",
+                  walletAddress: "0x2222222222222222222222222222222222222222",
+                  createdAt: "2026-06-04T13:05:00.000Z",
+                },
+              ],
+              limit: 100,
+              offset: 0,
+            },
           },
         });
       },

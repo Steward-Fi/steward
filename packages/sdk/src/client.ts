@@ -2388,13 +2388,36 @@ export class StewardClient {
   }
 
   async listAgents(): Promise<AgentIdentity[]> {
-    const response = await this.request<AgentIdentity[], StewardErrorResponse>("/agents");
+    const agents: AgentIdentity[] = [];
+    let offset = 0;
+    let firstPage = true;
 
-    if (!response.ok) {
-      throw new StewardApiError(response.error, response.status, response.data);
+    while (offset <= 100_000) {
+      const response = await this.request<
+        { agents: AgentIdentity[]; limit: number; offset: number },
+        StewardErrorResponse
+      >(firstPage ? "/agents" : `/agents?limit=100&offset=${offset}`);
+
+      if (!response.ok) {
+        throw new StewardApiError(response.error, response.status, response.data);
+      }
+      if (
+        !Array.isArray(response.data?.agents) ||
+        !Number.isSafeInteger(response.data.limit) ||
+        response.data.limit < 1 ||
+        response.data.limit > 200 ||
+        response.data.offset !== offset
+      ) {
+        throw new Error("Invalid paginated agent-list response");
+      }
+
+      agents.push(...response.data.agents.map(parseAgentIdentity));
+      if (response.data.agents.length < response.data.limit) break;
+      offset += response.data.limit;
+      firstPage = false;
     }
 
-    return response.data.map(parseAgentIdentity);
+    return agents;
   }
 
   /**
