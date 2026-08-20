@@ -56,9 +56,13 @@ describe("getJwtSecret embedded-mode master password fallback (SEC-013)", () => 
     const token = await signAccessToken({
       address: "0x0000000000000000000000000000000000000000",
       tenantId: "default",
+      userId: "user_123",
+      sub: "caller-controlled",
     });
     const payload = await verifyToken(token);
     expect(payload.tenantId).toBe("default");
+    expect(payload.userId).toBe("user_123");
+    expect(payload.sub).toBe("user_123");
     expect(decodeProtectedHeader(token)).toEqual({ alg: "HS256", typ: "JWT" });
   });
 

@@ -671,7 +671,8 @@ export async function signAccessToken(
   payload: AccessTokenPayload,
   expiresIn: string = ACCESS_TOKEN_EXPIRY,
 ): Promise<string> {
-  return signJwtPayload(payload, expiresIn);
+  const subject = typeof payload.userId === "string" ? payload.userId.trim() : "";
+  return signJwtPayload(subject ? { ...payload, sub: subject } : payload, expiresIn);
 }
 
 export async function signAgentToken(
