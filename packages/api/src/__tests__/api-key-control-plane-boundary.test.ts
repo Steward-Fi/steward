@@ -3,6 +3,7 @@ import { Hono } from "hono";
 import type { AppVariables } from "../services/context";
 
 type RouteRequest = {
+  body?: unknown;
   method: "DELETE" | "GET" | "PATCH" | "POST" | "PUT";
   path: string;
 };
@@ -48,7 +49,7 @@ async function expectMachinePrincipalRejected(
         "content-type": "application/json",
         "x-test-auth-type": authType,
       },
-      body: request.method === "GET" ? undefined : JSON.stringify({}),
+      body: request.method === "GET" ? undefined : JSON.stringify(request.body ?? {}),
     });
     expect(response.status, `${request.method} ${request.path}`).toBe(403);
     await expect(response.json(), `${request.method} ${request.path}`).resolves.toMatchObject({
@@ -83,6 +84,28 @@ describe("API key control-plane boundary", () => {
       { method: "PUT", path: `/policies/${policyId}` },
       { method: "DELETE", path: `/policies/${policyId}` },
       { method: "POST", path: `/policies/${policyId}/assign` },
+      {
+        body: {
+          policyId,
+          request: {
+            to: "0x1234567890abcdef1234567890abcdef12345678",
+            value: "0",
+          },
+        },
+        method: "POST",
+        path: "/policies/simulate",
+      },
+      {
+        body: {
+          agentId: "agent-id",
+          request: {
+            to: "0x1234567890abcdef1234567890abcdef12345678",
+            value: "0",
+          },
+        },
+        method: "POST",
+        path: "/policies/simulate",
+      },
     ]);
   });
 
@@ -96,6 +119,12 @@ describe("API key control-plane boundary", () => {
       { method: "GET", path: "/condition-sets/set-id/items" },
       { method: "POST", path: "/condition-sets/set-id/items" },
       { method: "PUT", path: "/condition-sets/set-id/items" },
+      { method: "GET", path: "/condition-sets/set-id/items/item-id" },
+      {
+        body: { value: "updated" },
+        method: "PATCH",
+        path: "/condition-sets/set-id/items/item-id",
+      },
       { method: "DELETE", path: "/condition-sets/set-id/items/item-id" },
     ]);
   });
