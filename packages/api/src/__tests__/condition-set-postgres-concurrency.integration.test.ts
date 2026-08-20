@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
 import {
   __resetAuditHmacKeyCacheForTests,
   auditChainHeads,
@@ -20,6 +20,7 @@ describeRealPostgres("condition set real-PostgreSQL atomicity", () => {
   let admin: ReturnType<typeof createDb>;
   let app: Hono<{ Variables: AppVariables }>;
   const tenantIds: string[] = [];
+  const childProcesses = new Set<ReturnType<typeof spawnRoute>>();
 
   beforeAll(async () => {
     admin = createDb(databaseUrl!);
@@ -48,6 +49,16 @@ describeRealPostgres("condition set real-PostgreSQL atomicity", () => {
     await admin.client.end();
   });
 
+  afterEach(async () => {
+    await Promise.all(
+      [...childProcesses].map(async (process) => {
+        process.kill("SIGTERM");
+        await process.exited;
+      }),
+    );
+    childProcesses.clear();
+  });
+
   async function createTenant(label: string) {
     const suffix = crypto.randomUUID().replaceAll("-", "");
     const tenantId = `condition-set-${label}-${suffix}`.slice(0, 64);
@@ -70,7 +81,7 @@ describeRealPostgres("condition set real-PostgreSQL atomicity", () => {
     body?: unknown;
     requestId?: string;
   }) {
-    return Bun.spawn(
+    const process = Bun.spawn(
       [
         process.execPath,
         new URL("./fixtures/condition-set-route-writer.ts", import.meta.url).pathname,
@@ -91,28 +102,54 @@ describeRealPostgres("condition set real-PostgreSQL atomicity", () => {
         stderr: "pipe",
       },
     );
+    childProcesses.add(process);
+    return process;
   }
 
   async function routeResult(process: ReturnType<typeof spawnRoute>) {
-    const exit = await process.exited;
-    const stdout = await new Response(process.stdout).text();
-    if (exit !== 0) {
-      throw new Error(`condition-set writer failed: ${await new Response(process.stderr).text()}`);
+    const stdout = new Response(process.stdout).text();
+    const stderr = new Response(process.stderr).text();
+    try {
+      const [exit, output, errorOutput] = await Promise.all([process.exited, stdout, stderr]);
+      if (exit !== 0) {
+        throw new Error(`condition-set writer failed: ${errorOutput}`);
+      }
+      return JSON.parse(output) as { status: number; body: unknown };
+    } finally {
+      childProcesses.delete(process);
     }
-    return JSON.parse(stdout) as { status: number; body: unknown };
   }
 
-  async function waitForAdvisoryWaiter(pattern: string) {
+  async function advisoryKey(value: string): Promise<string> {
+    const [row] = await admin.client<{ key: string }[]>`
+      select hashtextextended(${value}, 0)::text as key
+    `;
+    if (!row) throw new Error(`failed to derive advisory key for ${value}`);
+    return row.key;
+  }
+
+  async function waitForAdvisoryWaiter(lockKey: string, excludedPid?: number) {
     for (let attempt = 0; attempt < 200; attempt++) {
-      const [row] = await admin.client<{ total: string }[]>`
-        select count(*)::text as total
-        from pg_stat_activity
-        where wait_event = 'advisory' and query ilike ${pattern}
+      const rows = await admin.client<{ pid: number }[]>`
+        with expected as (select ${lockKey}::bigint as key)
+        select locks.pid
+        from pg_locks locks
+        cross join expected
+        where locks.locktype = 'advisory'
+          and not locks.granted
+          and locks.objsubid = 1
+          and locks.classid = ((expected.key >> 32) & 4294967295)::oid
+          and locks.objid = (expected.key & 4294967295)::oid
+          and (${excludedPid ?? null}::integer is null or locks.pid <> ${excludedPid ?? null})
       `;
-      if (Number(row?.total ?? "0") > 0) return;
-      if (attempt === 199) throw new Error(`missing advisory waiter matching ${pattern}`);
+      if (rows.length === 1) return rows[0].pid;
+      if (rows.length > 1) {
+        throw new Error(`ambiguous advisory waiters for key ${lockKey}: ${rows.length}`);
+      }
+      if (attempt === 199) throw new Error(`missing advisory waiter for key ${lockKey}`);
       await Bun.sleep(10);
     }
+    throw new Error(`missing advisory waiter for key ${lockKey}`);
   }
 
   async function installAuditGate(input: {
@@ -147,6 +184,7 @@ describeRealPostgres("condition set real-PostgreSQL atomicity", () => {
     await locker`select pg_advisory_lock(${gateKey})`;
     let locked = true;
     return {
+      gateKey,
       release: async () => {
         if (!locked) return;
         await locker`select pg_advisory_unlock(${gateKey})`;
@@ -245,7 +283,7 @@ describeRealPostgres("condition set real-PostgreSQL atomicity", () => {
         headers: { "x-request-id": failedRequestId },
         body: JSON.stringify({ label: "failed-label" }),
       });
-      await waitForAdvisoryWaiter("%INSERT INTO audit_events%");
+      const failedPid = await waitForAdvisoryWaiter(String(gate.gateKey));
       const winner = spawnRoute({
         tenantId,
         path: `/condition-sets/${set.id}/items/${item.id}`,
@@ -253,7 +291,11 @@ describeRealPostgres("condition set real-PostgreSQL atomicity", () => {
         requestId: winnerRequestId,
         body: { label: "winner-label" },
       });
-      await waitForAdvisoryWaiter("%pg_advisory_xact_lock%");
+      const winnerPid = await waitForAdvisoryWaiter(
+        await advisoryKey(`steward_audit_${tenantId}`),
+        failedPid,
+      );
+      expect(winnerPid).not.toBe(failedPid);
       await gate.release();
       const [failedResponse, winnerResponse] = await Promise.all([failed, routeResult(winner)]);
       expect(failedResponse.status).toBe(500);
@@ -303,7 +345,7 @@ describeRealPostgres("condition set real-PostgreSQL atomicity", () => {
         headers: { "x-request-id": replaceRequestId },
         body: JSON.stringify({ items: [{ value: "replacement" }] }),
       });
-      await waitForAdvisoryWaiter("%INSERT INTO audit_events%");
+      const replacePid = await waitForAdvisoryWaiter(String(gate.gateKey));
       const upsert = spawnRoute({
         tenantId,
         path: `/condition-sets/${set.id}/items`,
@@ -311,7 +353,11 @@ describeRealPostgres("condition set real-PostgreSQL atomicity", () => {
         requestId: upsertRequestId,
         body: { value: "concurrent-upsert" },
       });
-      await waitForAdvisoryWaiter("%pg_advisory_xact_lock%");
+      const upsertPid = await waitForAdvisoryWaiter(
+        await advisoryKey(`steward_audit_${tenantId}`),
+        replacePid,
+      );
+      expect(upsertPid).not.toBe(replacePid);
       await gate.release();
       const [replaceResponse, upsertResponse] = await Promise.all([replace, routeResult(upsert)]);
       expect(replaceResponse.status).toBe(200);

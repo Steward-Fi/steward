@@ -27,4 +27,10 @@ const response = await app.request(path, {
 });
 const body = await response.json();
 await closeDb();
-process.stdout.write(JSON.stringify({ body, status: response.status }));
+await new Promise<void>((resolve, reject) => {
+  process.stdout.write(`${JSON.stringify({ body, status: response.status })}\n`, (error) => {
+    if (error) reject(error);
+    else resolve();
+  });
+});
+process.exit(0);
