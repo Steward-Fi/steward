@@ -44,7 +44,11 @@ import {
 } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { canonicalJsonStringify } from "@stwd/shared";
-import { ExternalBroadcastOutcomeUnknownError, Vault } from "@stwd/vault";
+import {
+  ExternalBroadcastOutcomeUnknownError,
+  SolanaBroadcastNotSubmittedError,
+  Vault,
+} from "@stwd/vault";
 import { and, eq } from "drizzle-orm";
 import { Hono } from "hono";
 import type { AppVariables } from "../services/context";
@@ -373,7 +377,7 @@ describe("vault approval gates (real /approve path)", () => {
           .select()
           .from(transactions)
           .where(eq(transactions.id, "tx-approved-solana-recovery"));
-        expect(before.status).toBe("pending");
+        expect(before.status).toBe("approved");
         expect(before.actionPayload).toMatchObject({
           type: "transaction",
           recoveryActionType: "transaction",
@@ -414,13 +418,88 @@ describe("vault approval gates (real /approve path)", () => {
     }
   });
 
+  it("atomically rolls back a native approval reset when the queue owner changes", async () => {
+    const txId = "tx-native-approval-reset-race";
+    await getDb()
+      .insert(transactions)
+      .values({
+        id: txId,
+        agentId: AGENT_SOLANA,
+        status: "pending",
+        toAddress: SOLANA_RECIPIENT,
+        value: "123",
+        chainId: 101,
+        actionType: "transfer",
+        actionPayload: {
+          type: "transfer",
+          token: "native",
+          recipient: SOLANA_RECIPIENT,
+          amount: "123",
+          broadcast: true,
+        },
+        policyResults: [],
+      });
+    await getDb()
+      .insert(approvalQueue)
+      .values({
+        id: `aq-${txId}`,
+        txId,
+        agentId: AGENT_SOLANA,
+        status: "pending",
+      });
+    const app = await makeApp({ authType: "session-jwt", role: "owner", mfa: true });
+    const sign = spyOn(Vault.prototype, "signTransaction").mockImplementation(
+      async (_request, options) => {
+        await options.onSolanaBroadcastPrepared?.({
+          signature: SOLANA_SIGNATURE,
+          recentBlockhash: "11111111111111111111111111111111",
+        });
+        await getDb()
+          .update(approvalQueue)
+          .set({ resolvedById: REMOVED_ACTOR_ID })
+          .where(eq(approvalQueue.txId, txId));
+        throw new SolanaBroadcastNotSubmittedError(SOLANA_SIGNATURE);
+      },
+    );
+    try {
+      const response = await approve(app, AGENT_SOLANA, txId);
+      expect(response.status).toBe(202);
+      expect(await response.json()).toMatchObject({
+        ok: false,
+        data: { txId, txHash: SOLANA_SIGNATURE, reconciliationRequired: true },
+      });
+      const [transaction] = await getDb()
+        .select()
+        .from(transactions)
+        .where(eq(transactions.id, txId));
+      expect(transaction).toMatchObject({ status: "outcome_unknown", txHash: SOLANA_SIGNATURE });
+      const [approval] = await getDb()
+        .select()
+        .from(approvalQueue)
+        .where(eq(approvalQueue.txId, txId));
+      expect(approval).toMatchObject({ status: "approved", resolvedById: REMOVED_ACTOR_ID });
+      const notSubmittedAudits = await getDb()
+        .select()
+        .from(auditEvents)
+        .where(
+          and(
+            eq(auditEvents.resourceId, txId),
+            eq(auditEvents.action, "vault.sign.solana.not_submitted"),
+          ),
+        );
+      expect(notSubmittedAudits).toHaveLength(0);
+    } finally {
+      sign.mockRestore();
+    }
+  });
+
   it("blocks a live approved owner then CAS-takes over its expired pre-checkpoint lease once", async () => {
     const app = await makeApp({ authType: "session-jwt", role: "owner", mfa: true });
     const live = await approve(app, AGENT_SOLANA, "tx-crashed-approved-solana");
     expect(live.status).toBe(409);
     expect(await live.json()).toMatchObject({
       ok: false,
-      error: "Approved Solana execution is already in progress",
+      error: "Approved Solana execution is already owned by another attempt",
     });
 
     const [crashed] = await getDb()

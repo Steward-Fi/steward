@@ -37,6 +37,8 @@ export type AggregationScope = "agent" | "per_recipient" | "per_chain";
 /** A single authoritative activity event to fold into the rolling aggregates. */
 export interface AggregationEvent {
   agentId: string;
+  /** Stable idempotency identity for recovery/replay writers. */
+  eventId?: string;
   /** Recipient address (lowercased on write). Required for per_recipient scope. */
   to: string;
   /** Numeric chain id. Required for per_chain scope. */
@@ -111,6 +113,29 @@ end
 return 1
 `;
 
+// Idempotent recovery writer. KEYS[1] is the stable event marker, followed by
+// value/count sets and then recipient sets. The marker and every metric write
+// happen in one script so a retry cannot refresh the original score, change
+// its value, or partially duplicate only one metric family.
+// ARGV[1]=now ARGV[2]=cutoff ARGV[3]=ttlMs ARGV[4]=valueMember
+// ARGV[5]=recipientMember ARGV[6]=firstRecipientKeyIndex
+const RECORD_IDEMPOTENT_LUA = `
+local ttl = tonumber(ARGV[3])
+if redis.call('SET', KEYS[1], '1', 'NX', 'PX', ttl) == false then
+  return 0
+end
+local cutoff = tonumber(ARGV[2])
+local score = tonumber(ARGV[1])
+local firstRecipient = tonumber(ARGV[6])
+for i = 2, #KEYS do
+  local member = i < firstRecipient and ARGV[4] or ARGV[5]
+  redis.call('ZREMRANGEBYSCORE', KEYS[i], 0, cutoff)
+  redis.call('ZADD', KEYS[i], score, member .. ':' .. i)
+  redis.call('PEXPIRE', KEYS[i], ttl)
+end
+return 1
+`;
+
 // Read a window: prune expired, then return every member whose score is within
 // (windowStart, now]. We return raw members and aggregate in JS (bigint-exact
 // for value sums; Set-based for unique recipients). ZADD-pruning keeps the set
@@ -144,8 +169,9 @@ export async function recordAggregationEvent(event: AggregationEvent): Promise<v
   // Build the scoped key set. value + count families share the same member
   // (the value payload). recipients family stores the recipient as the payload
   // so unique-recipient counts collapse duplicate addresses within a window.
-  const valueMember = `${now}:${cryptoSeq()}|${valueRaw.toString()}`;
-  const recipientMember = `${now}:${cryptoSeq()}|${to}`;
+  const memberIdentity = event.eventId ? `event:${event.eventId}` : `${now}:${cryptoSeq()}`;
+  const valueMember = `${memberIdentity}|${valueRaw.toString()}`;
+  const recipientMember = `${memberIdentity}|${to}`;
 
   const redis = getRedis();
 
@@ -165,10 +191,27 @@ export async function recordAggregationEvent(event: AggregationEvent): Promise<v
     recipientKeys.push(aggKey(event.agentId, "recipients", "per_chain", chainKey));
   }
 
-  // value + count families carry the value payload member.
-  await runRecord(redis, [...valueKeys, ...countKeys], now, cutoff, valueMember);
-  // recipients family carries the recipient payload member.
-  await runRecord(redis, recipientKeys, now, cutoff, recipientMember);
+  if (event.eventId) {
+    const valueAndCountKeys = [...valueKeys, ...countKeys];
+    await redis.eval(
+      RECORD_IDEMPOTENT_LUA,
+      1 + valueAndCountKeys.length + recipientKeys.length,
+      `agg:${event.agentId}:event:${event.eventId}`,
+      ...valueAndCountKeys,
+      ...recipientKeys,
+      String(now),
+      String(cutoff),
+      String(RETENTION_MS),
+      valueMember,
+      recipientMember,
+      String(2 + valueAndCountKeys.length),
+    );
+  } else {
+    // value + count families carry the value payload member.
+    await runRecord(redis, [...valueKeys, ...countKeys], now, cutoff, valueMember);
+    // recipients family carries the recipient payload member.
+    await runRecord(redis, recipientKeys, now, cutoff, recipientMember);
+  }
 }
 
 async function runRecord(

@@ -2,6 +2,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, setDefaultTimeou
 import {
   __resetAuditHmacKeyCacheForTests,
   agents,
+  auditEvents,
   closeDb,
   getDb,
   policies,
@@ -10,8 +11,11 @@ import {
   transactions,
 } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
-import { ExternalBroadcastOutcomeUnknownError } from "@stwd/vault";
-import { eq, sql } from "drizzle-orm";
+import {
+  ExternalBroadcastOutcomeUnknownError,
+  SolanaBroadcastNotSubmittedError,
+} from "@stwd/vault";
+import { and, eq, sql } from "drizzle-orm";
 import { Hono } from "hono";
 import { idempotencyMiddleware, MemoryIdempotencyStore } from "../middleware/idempotency";
 import type { AppVariables } from "../services/context";
@@ -111,6 +115,7 @@ describe("Solana durable recovery anchors", () => {
       "solana-recovery-anchor-audit-hmac-key-with-more-than-32-bytes";
     __resetAuditHmacKeyCacheForTests();
     delete process.env.STEWARD_ALLOW_UNSAFE_SOLANA_BLIND_SIGNING;
+    delete process.env.REDIS_URL;
     await getDb().delete(transactions).where(eq(transactions.agentId, AGENT_ID));
   });
 
@@ -120,6 +125,7 @@ describe("Solana durable recovery anchors", () => {
     delete process.env.STEWARD_AUDIT_HMAC_KEY;
     delete process.env.STEWARD_ALLOW_DEV_SECRETS;
     delete process.env.STEWARD_ALLOW_UNSAFE_SOLANA_BLIND_SIGNING;
+    delete process.env.REDIS_URL;
     __resetAuditHmacKeyCacheForTests();
   });
 
@@ -219,20 +225,50 @@ describe("Solana durable recovery anchors", () => {
         }),
       });
 
-      expect(response.status).toBe(200);
-      expect(await response.json()).toMatchObject({
-        ok: true,
-        data: { signature: SIGNATURE, broadcast: true },
-      });
+      expect(response.status).toBe(500);
       const surviving = await onlyRecoveryRow();
       expect(surviving.status).toBe("broadcast");
       expect(surviving.txHash).toBe(SIGNATURE);
       expect(surviving.data).toBe("not-a-solana-transaction");
+      expect(readPayload(surviving.actionPayload).recoveryEffectsState).toBe("pending");
     } finally {
       context.vault.signSolanaTransaction = originalSign;
       process.env.STEWARD_AUDIT_HMAC_KEY =
         "solana-recovery-anchor-audit-hmac-key-with-more-than-32-bytes";
       __resetAuditHmacKeyCacheForTests();
+    }
+  });
+
+  it("keeps recovery effects pending while a configured Redis backend is unavailable", async () => {
+    process.env.REDIS_URL = "redis://127.0.0.1:1";
+    const context = await import("../services/context");
+    const originalSign = context.vault.signSolanaTransaction.bind(context.vault);
+    context.vault.signSolanaTransaction = async (request) => {
+      await request.onBroadcastPrepared?.({
+        signature: SIGNATURE,
+        recentBlockhash: RECENT_BLOCKHASH,
+      });
+      return { signature: SIGNATURE, broadcast: true, chainId: request.chainId ?? 101 };
+    };
+
+    try {
+      const response = await app.request(`/vault/${AGENT_ID}/sign-solana`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "Idempotency-Key": "solana-recovery-redis-unavailable",
+        },
+        body: JSON.stringify({ transaction: WITHIN_CAP_V0_TRANSFER, broadcast: true }),
+      });
+
+      expect(response.status).toBe(500);
+      const surviving = await onlyRecoveryRow();
+      expect(surviving.status).toBe("broadcast");
+      expect(surviving.txHash).toBe(SIGNATURE);
+      expect(readPayload(surviving.actionPayload).recoveryEffectsState).toBe("pending");
+    } finally {
+      context.vault.signSolanaTransaction = originalSign;
+      delete process.env.REDIS_URL;
     }
   });
 
@@ -272,6 +308,52 @@ describe("Solana durable recovery anchors", () => {
       const surviving = await onlyRecoveryRow();
       expect(surviving.status).toBe("outcome_unknown");
       expect(surviving.txHash).toBe(SIGNATURE);
+    } finally {
+      context.vault.signSolanaTransaction = originalSign;
+    }
+  });
+
+  it("replays the confirmed winner when definite-preflight cleanup loses its signature CAS", async () => {
+    const context = await import("../services/context");
+    const originalSign = context.vault.signSolanaTransaction.bind(context.vault);
+    context.vault.signSolanaTransaction = async (request) => {
+      await request.onBroadcastPrepared?.({
+        signature: SIGNATURE,
+        recentBlockhash: RECENT_BLOCKHASH,
+      });
+      const checkpoint = await onlyRecoveryRow();
+      await getDb()
+        .update(transactions)
+        .set({ status: "confirmed", confirmedAt: new Date() })
+        .where(eq(transactions.id, checkpoint.id));
+      throw new SolanaBroadcastNotSubmittedError(SIGNATURE);
+    };
+    try {
+      const response = await app.request(`/vault/${AGENT_ID}/sign-solana`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "Idempotency-Key": "solana-preflight-cas-winner",
+        },
+        body: JSON.stringify({ transaction: WITHIN_CAP_V0_TRANSFER, broadcast: true }),
+      });
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({
+        ok: true,
+        data: { signature: SIGNATURE, broadcast: true },
+      });
+      const row = await onlyRecoveryRow();
+      expect(row.status).toBe("confirmed");
+      const notSubmittedAudits = await getDb()
+        .select()
+        .from(auditEvents)
+        .where(
+          and(
+            eq(auditEvents.resourceId, row.id),
+            eq(auditEvents.action, "vault.sign.solana.not_submitted"),
+          ),
+        );
+      expect(notSubmittedAudits).toHaveLength(0);
     } finally {
       context.vault.signSolanaTransaction = originalSign;
     }
@@ -337,6 +419,17 @@ describe("Solana durable recovery anchors", () => {
       const row = await onlyRecoveryRow();
       expect(row.status).toBe("broadcast");
       expect(readPayload(row.actionPayload).recentBlockhash).toBe(RECENT_BLOCKHASH);
+      expect(readPayload(row.actionPayload).recoveryEffectsState).toBe("complete");
+      const completionAudits = await getDb()
+        .select()
+        .from(auditEvents)
+        .where(
+          and(
+            eq(auditEvents.resourceId, row.id),
+            eq(auditEvents.action, "vault.sign.solana.effects_completed"),
+          ),
+        );
+      expect(completionAudits).toHaveLength(1);
       expect((await context.getTransactionStats(AGENT_ID, 101)).recentTxCount24h).toBe(1);
 
       const mismatch = await app.request(`/vault/${AGENT_ID}/sign-solana`, {
@@ -430,7 +523,7 @@ describe("Solana durable recovery anchors", () => {
       expect(submittedCalls).toBe(0);
 
       releaseStale();
-      expect((await staleResponse).status).toBe(500);
+      expect((await staleResponse).status).toBe(409);
       expect((await onlyRecoveryRow()).status).toBe("approved");
       expect(submittedCalls).toBe(0);
 
@@ -473,6 +566,13 @@ describe("Solana durable recovery anchors", () => {
               type: "solana_transaction",
               recoveryAnchor: true,
               recentBlockhash: RECENT_BLOCKHASH,
+              ...(index === 0
+                ? {
+                    recoveryEffectsState: "processing",
+                    recoveryEffectsToken: "crashed-effects-owner",
+                    recoveryEffectsLeaseUntil: new Date(Date.now() - 1_000).toISOString(),
+                  }
+                : {}),
             },
           });
         context.vault.reconcileSolanaBroadcast = async (input) => {
@@ -490,6 +590,19 @@ describe("Solana durable recovery anchors", () => {
         expect(response.status).toBe(testCase.status);
         const [row] = await getDb().select().from(transactions).where(eq(transactions.id, txId));
         expect(row?.status).toBe(testCase.outcome);
+        if (testCase.outcome === "confirmed" || testCase.outcome === "broadcast") {
+          expect(readPayload(row?.actionPayload).recoveryEffectsState).toBe("complete");
+          const completionAudits = await getDb()
+            .select()
+            .from(auditEvents)
+            .where(
+              and(
+                eq(auditEvents.resourceId, txId),
+                eq(auditEvents.action, "vault.sign.solana.effects_completed"),
+              ),
+            );
+          expect(completionAudits).toHaveLength(1);
+        }
       }
     } finally {
       context.vault.reconcileSolanaBroadcast = originalReconcile;

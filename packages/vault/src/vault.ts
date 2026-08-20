@@ -463,6 +463,19 @@ export interface SignTransactionOptions {
     signature: string;
     recentBlockhash: string;
   }) => Promise<void>;
+  /**
+   * Ownership token for a gateway-staged Solana recovery anchor. When set,
+   * the post-broadcast write is an exact outcome_unknown+signature+token CAS
+   * instead of an upsert, so a stale signer cannot overwrite reconciliation.
+   */
+  solanaRecoveryExecutionToken?: string;
+}
+
+export class SolanaRecoveryOwnershipLostError extends Error {
+  constructor() {
+    super("Solana recovery execution ownership changed");
+    this.name = "SolanaRecoveryOwnershipLostError";
+  }
 }
 
 export interface ResolvedExecutionTarget {
@@ -871,6 +884,34 @@ export class Vault {
     const db = getDb();
     const txId = options.txId ?? crypto.randomUUID();
     const signedAt = new Date();
+    if (shouldBroadcast && options.solanaRecoveryExecutionToken) {
+      const recordedTransactions = await db
+        .update(transactions)
+        .set({
+          status: options.status ?? "broadcast",
+          toAddress: request.to,
+          value: request.value,
+          data: request.data,
+          chainId,
+          txHash: hash,
+          executionBackend: options.expectedBackend,
+          executionBackendIdentityDigest: options.expectedBackendIdentityDigest,
+          policyResults: options.policyResults ?? [],
+          signedAt,
+        })
+        .where(
+          and(
+            eq(transactions.id, txId),
+            eq(transactions.agentId, request.agentId),
+            eq(transactions.status, "outcome_unknown"),
+            eq(transactions.txHash, hash),
+            sql`${transactions.actionPayload}->>'executionToken' = ${options.solanaRecoveryExecutionToken}`,
+          ),
+        )
+        .returning({ id: transactions.id });
+      if (recordedTransactions.length !== 1) throw new SolanaRecoveryOwnershipLostError();
+      return;
+    }
     const recordedTransactions = await db
       .insert(transactions)
       .values({
