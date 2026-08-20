@@ -244,22 +244,6 @@ export async function verifySessionToken(token: string) {
   }
 }
 
-// ─── SIWE nonce store ─────────────────────────────────────────────────────────
-
-export const nonceStore = new Map<string, { nonce: string; expiresAt: number }>();
-
-export const nonceCleanupTimer = isWorkersRuntime
-  ? undefined
-  : setInterval(
-      () => {
-        const now = Date.now();
-        for (const [key, entry] of nonceStore.entries()) {
-          if (entry.expiresAt <= now) nonceStore.delete(key);
-        }
-      },
-      5 * 60 * 1000,
-    );
-
 // ─── Input validation helpers ─────────────────────────────────────────────────
 
 const AGENT_ID_RE = /^[a-zA-Z0-9_\-.:]{1,128}$/;
