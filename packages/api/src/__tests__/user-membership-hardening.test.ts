@@ -26,8 +26,15 @@ describe("user membership hardening", () => {
   it("validates tenant-admin user ids and audits self-service membership before mutation", () => {
     expect(userSource).toContain("function isValidUserId");
     expect(userSource).toContain("if (!isValidUserId(targetUserId))");
-    const joinAudit = userSource.indexOf('action: "tenant.member.join"');
-    expect(joinAudit).toBeLessThan(userSource.indexOf(".insert(userTenants)", joinAudit));
+    const joinStart = userSource.indexOf('user.post("/me/tenants/:tenantId/join"');
+    const joinRoute = userSource.slice(
+      joinStart,
+      userSource.indexOf('user.delete("/me/tenants/:tenantId/leave"', joinStart),
+    );
+    expect(joinRoute).toContain("withTenantAuditedTransaction(");
+    expect(joinRoute.indexOf('action: "tenant.member.join"')).toBeGreaterThan(
+      joinRoute.lastIndexOf(".insert(userTenants)"),
+    );
     const leaveAudit = userSource.indexOf('action: "tenant.member.leave"');
     const leaveDelete = userSource.indexOf(".delete(userTenants)", leaveAudit);
     expect(leaveAudit).toBeLessThan(leaveDelete);
@@ -150,7 +157,7 @@ describe("user membership hardening", () => {
     expect(platformInviteRoute.indexOf('action: "tenant.invitation.create"')).toBeGreaterThan(
       platformInviteRoute.indexOf(".insert(tenantInvitations)"),
     );
-    expect(platformInviteRoute).toContain("db.transaction");
+    expect(platformInviteRoute).toContain("withTenantAuditedTransaction(");
     expect(platformInviteRoute).toContain("valid email is required");
     expect(platformInviteRoute).toContain("invitedByUserId must belong to the tenant");
     expect(platformInviteRoute).toContain("hashSha256Hex(token)");
@@ -210,7 +217,7 @@ describe("user membership hardening", () => {
       userSource.indexOf('user.post("/me/tenants/:tenantId/invitations"'),
       userSource.indexOf('user.delete("/me/tenants/:tenantId/invitations/:invitationId"', 1),
     );
-    expect(userInviteCreateRoute).toContain("db.transaction");
+    expect(userInviteCreateRoute).toContain("withTenantAuditedTransaction(");
     expect(userInviteCreateRoute).toContain("body?.sendEmail === true");
     expect(userInviteCreateRoute).toContain("sendTenantInvitation(email");
     const userInviteRevokeRoute = userSource.slice(

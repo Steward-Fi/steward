@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 
 import { closeDb, getDb, tenants, users, userTenants } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
+import { and, eq } from "drizzle-orm";
 
 const TENANT_ID = "user-tenant-admin-users";
 const OTHER_TENANT_ID = "user-tenant-admin-users-other";
@@ -12,12 +13,14 @@ describe("user tenant-admin user directory routes", () => {
   let createSessionToken: typeof import("../routes/auth").createSessionToken;
   let verifySessionToken: typeof import("../routes/auth").verifySessionToken;
   let ownerId = "";
+  let secondOwnerId = "";
   let memberId = "";
 
   beforeAll(async () => {
     process.env.STEWARD_PGLITE_MEMORY = "true";
     process.env.STEWARD_MASTER_PASSWORD = "user-tenant-admin-users-master-password";
     process.env.STEWARD_JWT_SECRET = "user-tenant-admin-users-jwt-secret";
+    process.env.STEWARD_AUDIT_HMAC_KEY ??= "user-tenant-admin-users-audit-key-with-enough-entropy";
 
     const { db, client } = await createPGLiteDb("memory://");
     setPGLiteOverride(db, async () => {
@@ -53,7 +56,12 @@ describe("user tenant-admin user directory routes", () => {
       .insert(users)
       .values({ email: "member@example.test", emailVerified: true, name: "Member\\Only" })
       .returning({ id: users.id });
+    const [secondOwner] = await getDb()
+      .insert(users)
+      .values({ email: "second-owner@example.test", emailVerified: true, name: "Second Owner" })
+      .returning({ id: users.id });
     ownerId = owner.id;
+    secondOwnerId = secondOwner.id;
     memberId = member.id;
     await getDb()
       .insert(tenants)
@@ -70,6 +78,7 @@ describe("user tenant-admin user directory routes", () => {
         { userId: ownerId, tenantId: OWNER_PERSONAL_TENANT_ID, role: "owner" },
         { userId: ownerId, tenantId: TENANT_ID, role: "owner" },
         { userId: ownerId, tenantId: OTHER_TENANT_ID, role: "owner" },
+        { userId: secondOwnerId, tenantId: TENANT_ID, role: "owner" },
         {
           userId: memberId,
           tenantId: TENANT_ID,
@@ -242,5 +251,58 @@ describe("user tenant-admin user directory routes", () => {
     expect(directory.status).toBe(403);
     const directoryBody = (await directory.json()) as { error?: string };
     expect(directoryBody.error).toContain("recent MFA");
+  });
+
+  it("serializes concurrent owner demotions so exactly one wins", async () => {
+    await getDb()
+      .update(userTenants)
+      .set({ role: "owner" })
+      .where(and(eq(userTenants.tenantId, TENANT_ID), eq(userTenants.userId, secondOwnerId)));
+    const [firstToken, secondToken] = await Promise.all([
+      tokenFor(ownerId),
+      tokenFor(secondOwnerId),
+    ]);
+    const responses = await Promise.all([
+      userRoutes.request(`/me/tenants/${TENANT_ID}/users/${secondOwnerId}/role`, {
+        method: "PATCH",
+        headers: { Authorization: `Bearer ${firstToken}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ role: "member" }),
+      }),
+      userRoutes.request(`/me/tenants/${TENANT_ID}/users/${ownerId}/role`, {
+        method: "PATCH",
+        headers: { Authorization: `Bearer ${secondToken}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ role: "member" }),
+      }),
+    ]);
+    const statuses = responses.map((response) => response.status).sort();
+    expect(statuses[0]).toBe(200);
+    expect([403, 409]).toContain(statuses[1]);
+    const owners = await getDb()
+      .select({ userId: userTenants.userId })
+      .from(userTenants)
+      .where(and(eq(userTenants.tenantId, TENANT_ID), eq(userTenants.role, "owner")));
+    expect(owners).toHaveLength(1);
+
+    const winnerId = owners[0]!.userId;
+    const loserId = winnerId === ownerId ? secondOwnerId : ownerId;
+    const forbidden = await userRoutes.request(`/me/tenants/${TENANT_ID}/users/${winnerId}/role`, {
+      method: "PATCH",
+      headers: {
+        Authorization: `Bearer ${await tokenFor(loserId)}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ role: "member" }),
+    });
+    expect(forbidden.status).toBe(403);
+
+    const conflict = await userRoutes.request(`/me/tenants/${TENANT_ID}/users/${winnerId}/role`, {
+      method: "PATCH",
+      headers: {
+        Authorization: `Bearer ${await tokenFor(winnerId)}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ role: "member" }),
+    });
+    expect(conflict.status).toBe(409);
   });
 });

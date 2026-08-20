@@ -330,14 +330,13 @@ describe("platform security hardening", () => {
     expect(agentRollback).toBeGreaterThan(finalAgentAudit);
   });
 
-  it("restores platform user and membership mutations when final audit events fail", () => {
+  it("keeps global platform mutations compensated and membership role updates audit-atomic", () => {
     for (const [marker, rollback] of [
       ['platform.patch("/users/:userId/metadata"', "customMetadata: existing.customMetadata"],
       [
         'platform.post("/users/:userId/accounts/:provider/:providerAccountId/transfer"',
         "set({ userId: fromUserId })",
       ],
-      ['platform.patch("/tenants/:id/members/:userId"', "set({ role: updated.previousRole })"],
     ] as const) {
       const start = platformSource.indexOf(marker);
       expect(start).toBeGreaterThanOrEqual(0);
@@ -346,6 +345,11 @@ describe("platform security hardening", () => {
       expect(route).toContain("try {");
       expect(route).toContain(rollback);
     }
+    const roleStart = platformSource.indexOf('platform.patch("/tenants/:id/members/:userId"');
+    const roleRoute = platformSource.slice(roleStart);
+    expect(roleRoute).toContain("withTenantAuditedTransaction(");
+    expect(roleRoute).toContain("appendRequiredAudit");
+    expect(roleRoute).not.toContain("set({ role: updated.previousRole })");
     const deactivateStart = platformSource.indexOf('platform.patch("/users/:userId/deactivate"');
     const deactivateRoute = platformSource.slice(
       deactivateStart,
@@ -355,7 +359,7 @@ describe("platform security hardening", () => {
     expect(platformSource).toContain("continueWithTenantDatabase");
   });
 
-  it("repairs invitation state when final invitation audit events fail", () => {
+  it("commits invitation state and required audit events atomically", () => {
     const createStart = platformSource.indexOf('platform.post("/tenants/:id/invitations"');
     const createRoute = platformSource.slice(
       createStart,
@@ -364,12 +368,10 @@ describe("platform security hardening", () => {
         createStart,
       ),
     );
-    expect(createRoute).toContain("previousPendingInvitations");
+    expect(createRoute).toContain("withTenantAuditedTransaction(");
+    expect(createRoute).toContain("appendRequiredAudit");
     expect(createRoute).toContain('action: "tenant.invitation.create"');
-    expect(createRoute).toContain(
-      "delete(tenantInvitations).where(eq(tenantInvitations.id, invitation.id))",
-    );
-    expect(createRoute).toContain("status: previous.status");
+    expect(createRoute).not.toContain("previousPendingInvitations");
 
     const revokeStart = platformSource.indexOf(
       'platform.delete("/tenants/:id/invitations/:invitationId"',
@@ -382,8 +384,8 @@ describe("platform security hardening", () => {
     expect(revokeRoute.indexOf('action: "tenant.invitation.revoke"')).toBeGreaterThan(
       revokeRoute.indexOf(".update(tenantInvitations)"),
     );
-    expect(revokeRoute).toContain("status: candidate.status");
-    expect(revokeRoute).toContain("revokedAt: candidate.revokedAt");
+    expect(revokeRoute).toContain("appendRequiredAudit");
+    expect(revokeRoute).not.toContain("status: candidate.status");
   });
 
   it("locks account unlink and transfer last-login checks through mutation", () => {

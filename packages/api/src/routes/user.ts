@@ -94,7 +94,7 @@ import bs58 from "bs58";
 import { and, desc, eq, gte, ilike, inArray, isNull, ne, or, sql } from "drizzle-orm";
 import { type Context, Hono, type Next } from "hono";
 import { getAddress, verifyMessage as viemVerifyMessage } from "viem";
-import { writeAuditEvent } from "../services/audit";
+import { withTenantAuditedTransaction, writeAuditEvent } from "../services/audit";
 import {
   continueWithTenantDatabase,
   priceOracle,
@@ -6632,34 +6632,40 @@ user.post("/me/tenants/:tenantId/invitations", async (c) => {
   });
 
   const db = getDb();
-  const invitation = await db.transaction(async (tx) => {
-    const now = new Date();
-    await tx
-      .update(tenantInvitations)
-      .set({ status: "revoked", revokedAt: now, updatedAt: now })
-      .where(
-        and(
-          eq(tenantInvitations.tenantId, tenantId),
-          eq(tenantInvitations.email, email),
-          eq(tenantInvitations.status, "pending"),
-        ),
-      );
-    const [created] = await tx
-      .insert(tenantInvitations)
-      .values({ tenantId, email, role, tokenHash, invitedByUserId: admin.userId, expiresAt })
-      .returning(tenantAdminInvitationSelection());
-    return created;
-  });
-
-  await writeUserAudit(c, {
+  const invitation = await withTenantAuditedTransaction(
     tenantId,
-    actorType: "user",
-    actorId: admin.userId,
-    action: "tenant.invitation.create",
-    resourceType: "tenant_invitation",
-    resourceId: invitation.id,
-    metadata: { email, role, expiresAt: expiresAt.toISOString() },
-  });
+    async (txRaw, appendRequiredAudit) => {
+      const tx = txRaw as typeof db;
+      const now = new Date();
+      await tx
+        .update(tenantInvitations)
+        .set({ status: "revoked", revokedAt: now, updatedAt: now })
+        .where(
+          and(
+            eq(tenantInvitations.tenantId, tenantId),
+            eq(tenantInvitations.email, email),
+            eq(tenantInvitations.status, "pending"),
+          ),
+        );
+      const [created] = await tx
+        .insert(tenantInvitations)
+        .values({ tenantId, email, role, tokenHash, invitedByUserId: admin.userId, expiresAt })
+        .returning(tenantAdminInvitationSelection());
+      await appendRequiredAudit({
+        tenantId,
+        actorType: "user",
+        actorId: admin.userId,
+        action: "tenant.invitation.create",
+        resourceType: "tenant_invitation",
+        resourceId: created.id,
+        metadata: { email, role, expiresAt: expiresAt.toISOString() },
+        ipAddress: c.req.header("x-forwarded-for") ?? null,
+        userAgent: c.req.header("user-agent") ?? null,
+        requestId: c.get("requestId") ?? null,
+      });
+      return created;
+    },
+  );
 
   let emailSent = false;
   if (body?.sendEmail === true) {
@@ -6731,41 +6737,39 @@ user.delete("/me/tenants/:tenantId/invitations/:invitationId", async (c) => {
     metadata: { email: candidate.email, role: candidate.role },
   });
 
-  const [invitation] = await db
-    .update(tenantInvitations)
-    .set({ status: "revoked", revokedAt: new Date(), updatedAt: new Date() })
-    .where(
-      and(
-        eq(tenantInvitations.tenantId, tenantId),
-        eq(tenantInvitations.id, invitationId),
-        eq(tenantInvitations.status, "pending"),
-      ),
-    )
-    .returning(tenantAdminInvitationSelection());
+  const invitation = await withTenantAuditedTransaction(
+    tenantId,
+    async (txRaw, appendRequiredAudit) => {
+      const tx = txRaw as typeof db;
+      const [revoked] = await tx
+        .update(tenantInvitations)
+        .set({ status: "revoked", revokedAt: new Date(), updatedAt: new Date() })
+        .where(
+          and(
+            eq(tenantInvitations.tenantId, tenantId),
+            eq(tenantInvitations.id, invitationId),
+            eq(tenantInvitations.status, "pending"),
+          ),
+        )
+        .returning(tenantAdminInvitationSelection());
+      if (!revoked) return undefined;
+      await appendRequiredAudit({
+        tenantId,
+        actorType: "user",
+        actorId: admin.userId,
+        action: "tenant.invitation.revoke",
+        resourceType: "tenant_invitation",
+        resourceId: revoked.id,
+        metadata: { email: revoked.email, role: revoked.role },
+        ipAddress: c.req.header("x-forwarded-for") ?? null,
+        userAgent: c.req.header("user-agent") ?? null,
+        requestId: c.get("requestId") ?? null,
+      });
+      return revoked;
+    },
+  );
   if (!invitation) {
     return c.json<ApiResponse>({ ok: false, error: "Pending invitation not found" }, 404);
-  }
-
-  try {
-    await writeUserAudit(c, {
-      tenantId,
-      actorType: "user",
-      actorId: admin.userId,
-      action: "tenant.invitation.revoke",
-      resourceType: "tenant_invitation",
-      resourceId: invitation.id,
-      metadata: { email: invitation.email, role: invitation.role },
-    });
-  } catch (error) {
-    await db
-      .update(tenantInvitations)
-      .set({
-        status: candidate.status,
-        revokedAt: candidate.revokedAt,
-        updatedAt: candidate.updatedAt,
-      })
-      .where(and(eq(tenantInvitations.tenantId, tenantId), eq(tenantInvitations.id, invitationId)));
-    throw error;
   }
 
   return c.json<ApiResponse>({ ok: true });
@@ -7305,7 +7309,8 @@ user.patch("/me/tenants/:tenantId/users/:targetUserId/role", async (c) => {
   const db = getDb();
   let updated: { row: TenantAdminUserRow; previousRole: string } | null = null;
   try {
-    updated = await db.transaction(async (tx) => {
+    updated = await withTenantAuditedTransaction(tenantId, async (txRaw, appendRequiredAudit) => {
+      const tx = txRaw as typeof db;
       await lockTenantOwnerLifecycle(tx, tenantId);
       const [membership] = await tx
         .select({ role: userTenants.role })
@@ -7321,7 +7326,7 @@ user.patch("/me/tenants/:tenantId/users/:targetUserId/role", async (c) => {
         }
       }
 
-      await writeUserAudit(c, {
+      await appendRequiredAudit({
         tenantId,
         actorType: "user",
         actorId: requesterId,
@@ -7341,7 +7346,20 @@ user.patch("/me/tenants/:tenantId/users/:targetUserId/role", async (c) => {
         .from(userTenants)
         .innerJoin(users, eq(userTenants.userId, users.id))
         .where(and(eq(userTenants.tenantId, tenantId), eq(userTenants.userId, targetUserId)));
-      return row ? { row, previousRole: membership.role } : null;
+      if (!row) return null;
+      await appendRequiredAudit({
+        tenantId,
+        actorType: "user",
+        actorId: requesterId,
+        action: "tenant.member.role.update",
+        resourceType: "user",
+        resourceId: targetUserId,
+        metadata: { previousRole: membership.role, role: row.role },
+        ipAddress: c.req.header("x-forwarded-for") ?? null,
+        userAgent: c.req.header("user-agent") ?? null,
+        requestId: c.get("requestId") ?? null,
+      });
+      return { row, previousRole: membership.role };
     });
   } catch (err) {
     if (err instanceof Error && err.message === "Only owners can modify owner role") {
@@ -7354,24 +7372,6 @@ user.patch("/me/tenants/:tenantId/users/:targetUserId/role", async (c) => {
   }
 
   if (!updated) return c.json<ApiResponse>({ ok: false, error: "User not found in tenant" }, 404);
-
-  try {
-    await writeUserAudit(c, {
-      tenantId,
-      actorType: "user",
-      actorId: requesterId,
-      action: "tenant.member.role.update",
-      resourceType: "user",
-      resourceId: targetUserId,
-      metadata: { previousRole: updated.previousRole, role: updated.row.role },
-    });
-  } catch (error) {
-    await db
-      .update(userTenants)
-      .set({ role: updated.previousRole })
-      .where(and(eq(userTenants.tenantId, tenantId), eq(userTenants.userId, targetUserId)));
-    throw error;
-  }
 
   return c.json<ApiResponse<TenantAdminUserRow>>({ ok: true, data: updated.row });
 });
@@ -7423,19 +7423,20 @@ user.patch("/me/tenants/:tenantId/users/:targetUserId/metadata", async (c) => {
     metadata: { updatedTenant: true },
   });
 
-  await db
-    .update(userTenants)
-    .set({ customMetadata: body.tenantCustomMetadata })
-    .where(and(eq(userTenants.tenantId, tenantId), eq(userTenants.userId, targetUserId)));
-
-  const [row] = await db
-    .select(tenantAdminUserSelection())
-    .from(userTenants)
-    .innerJoin(users, eq(userTenants.userId, users.id))
-    .where(and(eq(userTenants.tenantId, tenantId), eq(userTenants.userId, targetUserId)));
-
-  try {
-    await writeUserAudit(c, {
+  const row = await withTenantAuditedTransaction(tenantId, async (txRaw, appendRequiredAudit) => {
+    const tx = txRaw as typeof db;
+    const [updated] = await tx
+      .update(userTenants)
+      .set({ customMetadata: body.tenantCustomMetadata })
+      .where(and(eq(userTenants.tenantId, tenantId), eq(userTenants.userId, targetUserId)))
+      .returning({ id: userTenants.id });
+    if (!updated) return undefined;
+    const [result] = await tx
+      .select(tenantAdminUserSelection())
+      .from(userTenants)
+      .innerJoin(users, eq(userTenants.userId, users.id))
+      .where(and(eq(userTenants.tenantId, tenantId), eq(userTenants.userId, targetUserId)));
+    await appendRequiredAudit({
       tenantId,
       actorType: "user",
       actorId: admin.userId,
@@ -7443,21 +7444,20 @@ user.patch("/me/tenants/:tenantId/users/:targetUserId/metadata", async (c) => {
       resourceType: "user",
       resourceId: targetUserId,
       metadata: { updatedTenant: true },
+      ipAddress: c.req.header("x-forwarded-for") ?? null,
+      userAgent: c.req.header("user-agent") ?? null,
+      requestId: c.get("requestId") ?? null,
     });
-  } catch (error) {
-    await db
-      .update(userTenants)
-      .set({ customMetadata: existing.customMetadata })
-      .where(and(eq(userTenants.tenantId, tenantId), eq(userTenants.userId, targetUserId)));
-    throw error;
-  }
+    return result;
+  });
+  if (!row) return c.json<ApiResponse>({ ok: false, error: "User not found in tenant" }, 404);
 
   dispatchWebhook(tenantId, targetUserId, "user.updated_account", {
     userId: targetUserId,
     scope: "tenant",
     field: "tenantCustomMetadata",
   });
-  return c.json<ApiResponse<TenantAdminUserRow>>({ ok: true, data: row as TenantAdminUserRow });
+  return c.json<ApiResponse<TenantAdminUserRow>>({ ok: true, data: row });
 });
 
 /**
@@ -7498,8 +7498,10 @@ user.patch("/me/tenants/:tenantId/users/:targetUserId/deactivate", async (c) => 
     resourceId: targetUserId,
   });
 
-  const result = await db
-    .transaction(async (tx) => {
+  const result = await withTenantAuditedTransaction(
+    tenantId,
+    async (txRaw, appendRequiredAudit) => {
+      const tx = txRaw as typeof db;
       await lockTenantOwnerLifecycle(tx, tenantId);
       const [membership] = await tx
         .select({ role: userTenants.role })
@@ -7529,12 +7531,12 @@ user.patch("/me/tenants/:tenantId/users/:targetUserId/deactivate", async (c) => 
         );
       }
 
-      const [previous] = await tx
-        .select({ deactivatedAt: users.deactivatedAt, updatedAt: users.updatedAt })
+      const [target] = await tx
+        .select({ id: users.id })
         .from(users)
         .where(eq(users.id, targetUserId))
         .limit(1);
-      if (!previous) return null;
+      if (!target) return null;
 
       const issuedBefore = await revocationStore.revokeUserTokens(targetUserId);
       await tx
@@ -7550,42 +7552,33 @@ user.patch("/me/tenants/:tenantId/users/:targetUserId/deactivate", async (c) => 
         .from(userTenants)
         .innerJoin(users, eq(userTenants.userId, users.id))
         .where(and(eq(userTenants.tenantId, tenantId), eq(userTenants.userId, targetUserId)));
-      return { row, previous, issuedBefore };
-    })
-    .catch((err: unknown) => {
-      if (err instanceof Error) {
-        if (err.message === "Cannot deactivate the sole owner") return err.message;
-        if (err.message.startsWith("Tenant dashboard lifecycle changes")) return err.message;
-      }
-      throw err;
-    });
+      await appendRequiredAudit({
+        tenantId,
+        actorType: "user",
+        actorId: admin.userId,
+        action: deactivated ? "tenant.member.deactivate" : "tenant.member.reactivate",
+        resourceType: "user",
+        resourceId: targetUserId,
+        metadata: { issuedBefore },
+        ipAddress: c.req.header("x-forwarded-for") ?? null,
+        userAgent: c.req.header("user-agent") ?? null,
+        requestId: c.get("requestId") ?? null,
+      });
+      return { row, issuedBefore };
+    },
+  ).catch((err: unknown) => {
+    if (err instanceof Error) {
+      if (err.message === "Cannot deactivate the sole owner") return err.message;
+      if (err.message.startsWith("Tenant dashboard lifecycle changes")) return err.message;
+    }
+    throw err;
+  });
 
   if (typeof result === "string") {
     return c.json<ApiResponse>({ ok: false, error: result }, 409);
   }
   if (result === null || !result.row) {
     return c.json<ApiResponse>({ ok: false, error: "User not found in tenant" }, 404);
-  }
-
-  try {
-    await writeUserAudit(c, {
-      tenantId,
-      actorType: "user",
-      actorId: admin.userId,
-      action: deactivated ? "tenant.member.deactivate" : "tenant.member.reactivate",
-      resourceType: "user",
-      resourceId: targetUserId,
-      metadata: { issuedBefore: result.issuedBefore },
-    });
-  } catch (error) {
-    await db
-      .update(users)
-      .set({
-        deactivatedAt: result.previous.deactivatedAt,
-        updatedAt: result.previous.updatedAt,
-      })
-      .where(eq(users.id, targetUserId));
-    throw error;
   }
 
   dispatchWebhook(tenantId, targetUserId, "user.updated_account", {
@@ -7658,6 +7651,8 @@ user.delete("/me/tenants/:tenantId/users/:targetUserId", async (c) => {
     metadata: { role: member.role },
   });
 
+  const revokedBefore = Math.floor(Date.now() / 1000) + 1;
+  await revocationStore.revokeUserTokens(targetUserId, revokedBefore);
   let deleted: {
     membership: {
       id: string;
@@ -7677,7 +7672,8 @@ user.delete("/me/tenants/:tenantId/users/:targetUserId", async (c) => {
     }>;
   } | null = null;
   try {
-    deleted = await db.transaction(async (tx) => {
+    deleted = await withTenantAuditedTransaction(tenantId, async (txRaw, appendRequiredAudit) => {
+      const tx = txRaw as typeof db;
       await lockTenantOwnerLifecycle(tx, tenantId);
       const [current] = await tx
         .select({
@@ -7714,6 +7710,18 @@ user.delete("/me/tenants/:tenantId/users/:targetUserId", async (c) => {
       await tx
         .delete(refreshTokens)
         .where(and(eq(refreshTokens.tenantId, tenantId), eq(refreshTokens.userId, targetUserId)));
+      await appendRequiredAudit({
+        tenantId,
+        actorType: "user",
+        actorId: admin.userId,
+        action: "tenant.member.remove",
+        resourceType: "user",
+        resourceId: targetUserId,
+        metadata: { role: current.role, revokedUserTokensIssuedBefore: revokedBefore },
+        ipAddress: c.req.header("x-forwarded-for") ?? null,
+        userAgent: c.req.header("user-agent") ?? null,
+        requestId: c.get("requestId") ?? null,
+      });
       return { membership: current, refreshTokens: tokenSnapshot };
     });
   } catch (err) {
@@ -7723,33 +7731,6 @@ user.delete("/me/tenants/:tenantId/users/:targetUserId", async (c) => {
     throw err;
   }
   if (!deleted) return c.json<ApiResponse>({ ok: false, error: "User not found in tenant" }, 404);
-
-  const revokedBefore = await revocationStore.revokeUserTokens(targetUserId);
-  try {
-    await writeUserAudit(c, {
-      tenantId,
-      actorType: "user",
-      actorId: admin.userId,
-      action: "tenant.member.remove",
-      resourceType: "user",
-      resourceId: targetUserId,
-      metadata: { role: deleted.membership.role, revokedUserTokensIssuedBefore: revokedBefore },
-    });
-  } catch (error) {
-    await db.transaction(async (tx) => {
-      await tx
-        .insert(userTenants)
-        .values(deleted.membership)
-        .onConflictDoNothing({ target: [userTenants.userId, userTenants.tenantId] });
-      if (deleted.refreshTokens.length > 0) {
-        await tx
-          .insert(refreshTokens)
-          .values(deleted.refreshTokens)
-          .onConflictDoNothing({ target: refreshTokens.tokenHash });
-      }
-    });
-    throw error;
-  }
 
   dispatchWebhook(tenantId, targetUserId, "user.updated_account", {
     userId: targetUserId,
@@ -7824,58 +7805,79 @@ user.post("/me/tenants/:tenantId/invitations/accept", async (c) => {
     metadata: { email, role: candidate.role },
   });
 
-  const accepted = await db.transaction(async (tx) => {
-    const [existingMembership] = await tx
-      .select({ role: userTenants.role })
-      .from(userTenants)
-      .where(and(eq(userTenants.userId, userId), eq(userTenants.tenantId, tenantId)))
-      .limit(1);
-    if (existingMembership) {
-      return {
-        id: candidate.id,
-        role: existingMembership.role,
-        alreadyMember: true,
-      };
-    }
-    const [invitation] = await tx
-      .update(tenantInvitations)
-      .set({
-        status: "accepted",
-        acceptedByUserId: userId,
-        acceptedAt: new Date(),
-        updatedAt: new Date(),
-      })
-      .where(
-        and(
-          eq(tenantInvitations.id, candidate.id),
-          eq(tenantInvitations.tenantId, tenantId),
-          eq(tenantInvitations.email, email),
-          eq(tenantInvitations.tokenHash, tokenHash),
-          eq(tenantInvitations.status, "pending"),
-          gte(tenantInvitations.expiresAt, new Date()),
-        ),
-      )
-      .returning({ id: tenantInvitations.id, role: tenantInvitations.role });
-    if (!invitation) return null;
-    await tx
-      .insert(userTenants)
-      .values({ userId, tenantId, role: invitation.role })
-      .onConflictDoNothing();
-    return { ...invitation, alreadyMember: false };
-  });
+  const accepted = await withTenantAuditedTransaction(
+    tenantId,
+    async (txRaw, appendRequiredAudit) => {
+      const tx = txRaw as typeof db;
+      const [existingMembership] = await tx
+        .select({ role: userTenants.role })
+        .from(userTenants)
+        .where(and(eq(userTenants.userId, userId), eq(userTenants.tenantId, tenantId)))
+        .limit(1);
+      if (existingMembership) {
+        const result = {
+          id: candidate.id,
+          role: existingMembership.role,
+          alreadyMember: true,
+        };
+        await appendRequiredAudit({
+          tenantId,
+          actorType: "user",
+          actorId: userId,
+          action: "tenant.invitation.accept",
+          resourceType: "tenant_invitation",
+          resourceId: result.id,
+          metadata: { email, role: result.role, alreadyMember: true },
+          ipAddress: c.req.header("x-forwarded-for") ?? null,
+          userAgent: c.req.header("user-agent") ?? null,
+          requestId: c.get("requestId") ?? null,
+        });
+        return result;
+      }
+      const [invitation] = await tx
+        .update(tenantInvitations)
+        .set({
+          status: "accepted",
+          acceptedByUserId: userId,
+          acceptedAt: new Date(),
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(tenantInvitations.id, candidate.id),
+            eq(tenantInvitations.tenantId, tenantId),
+            eq(tenantInvitations.email, email),
+            eq(tenantInvitations.tokenHash, tokenHash),
+            eq(tenantInvitations.status, "pending"),
+            gte(tenantInvitations.expiresAt, new Date()),
+          ),
+        )
+        .returning({ id: tenantInvitations.id, role: tenantInvitations.role });
+      if (!invitation) return null;
+      await tx
+        .insert(userTenants)
+        .values({ userId, tenantId, role: invitation.role })
+        .onConflictDoNothing();
+      const result = { ...invitation, alreadyMember: false };
+      await appendRequiredAudit({
+        tenantId,
+        actorType: "user",
+        actorId: userId,
+        action: "tenant.invitation.accept",
+        resourceType: "tenant_invitation",
+        resourceId: result.id,
+        metadata: { email, role: result.role },
+        ipAddress: c.req.header("x-forwarded-for") ?? null,
+        userAgent: c.req.header("user-agent") ?? null,
+        requestId: c.get("requestId") ?? null,
+      });
+      return result;
+    },
+  );
   if (!accepted) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid or expired invitation" }, 404);
   }
 
-  await writeUserAudit(c, {
-    tenantId,
-    actorType: "user",
-    actorId: userId,
-    action: "tenant.invitation.accept",
-    resourceType: "tenant_invitation",
-    resourceId: accepted.id,
-    metadata: { email, role: accepted.role },
-  });
   return c.json({
     ok: true,
     tenantId,
@@ -7982,49 +7984,55 @@ user.post("/me/tenants/:tenantId/join", async (c) => {
       metadata: { email, role: candidate.role },
     });
 
-    const accepted = await db.transaction(async (tx) => {
-      const [invitation] = await tx
-        .update(tenantInvitations)
-        .set({
-          status: "accepted",
-          acceptedByUserId: userId,
-          acceptedAt: new Date(),
-          updatedAt: new Date(),
-        })
-        .where(
-          and(
-            eq(tenantInvitations.id, candidate.id),
-            eq(tenantInvitations.tenantId, tenantId),
-            eq(tenantInvitations.email, email),
-            eq(tenantInvitations.tokenHash, tokenHash),
-            eq(tenantInvitations.status, "pending"),
-            gte(tenantInvitations.expiresAt, new Date()),
-          ),
-        )
-        .returning({ id: tenantInvitations.id, role: tenantInvitations.role });
-      if (!invitation) return null;
-      await tx
-        .insert(userTenants)
-        .values({ userId, tenantId, role: invitation.role })
-        .onConflictDoNothing();
-      return invitation;
-    });
+    const accepted = await withTenantAuditedTransaction(
+      tenantId,
+      async (txRaw, appendRequiredAudit) => {
+        const tx = txRaw as typeof db;
+        const [invitation] = await tx
+          .update(tenantInvitations)
+          .set({
+            status: "accepted",
+            acceptedByUserId: userId,
+            acceptedAt: new Date(),
+            updatedAt: new Date(),
+          })
+          .where(
+            and(
+              eq(tenantInvitations.id, candidate.id),
+              eq(tenantInvitations.tenantId, tenantId),
+              eq(tenantInvitations.email, email),
+              eq(tenantInvitations.tokenHash, tokenHash),
+              eq(tenantInvitations.status, "pending"),
+              gte(tenantInvitations.expiresAt, new Date()),
+            ),
+          )
+          .returning({ id: tenantInvitations.id, role: tenantInvitations.role });
+        if (!invitation) return null;
+        await tx
+          .insert(userTenants)
+          .values({ userId, tenantId, role: invitation.role })
+          .onConflictDoNothing();
+        await appendRequiredAudit({
+          tenantId,
+          actorType: "user",
+          actorId: userId,
+          action: "tenant.member.accept_invite",
+          resourceType: "tenant_invitation",
+          resourceId: invitation.id,
+          metadata: { email, role: invitation.role },
+          ipAddress: c.req.header("x-forwarded-for") ?? null,
+          userAgent: c.req.header("user-agent") ?? null,
+          requestId: c.get("requestId") ?? null,
+        });
+        return invitation;
+      },
+    );
     if (!accepted) {
       return c.json<ApiResponse>(
         { ok: false, error: `Tenant '${tenantId}' requires an invitation to join` },
         403,
       );
     }
-
-    await writeUserAudit(c, {
-      tenantId,
-      actorType: "user",
-      actorId: userId,
-      action: "tenant.member.accept_invite",
-      resourceType: "tenant_invitation",
-      resourceId: accepted.id,
-      metadata: { email, role: accepted.role },
-    });
 
     return c.json({ ok: true, tenantId, role: accepted.role });
   }
@@ -8041,17 +8049,22 @@ user.post("/me/tenants/:tenantId/join", async (c) => {
     );
   }
 
-  await writeUserAudit(c, {
-    tenantId,
-    actorType: "user",
-    actorId: userId,
-    action: "tenant.member.join",
-    resourceType: "tenant",
-    resourceId: tenantId,
-    metadata: { role: "member" },
+  await withTenantAuditedTransaction(tenantId, async (txRaw, appendRequiredAudit) => {
+    const tx = txRaw as typeof db;
+    await tx.insert(userTenants).values({ userId, tenantId, role: "member" }).onConflictDoNothing();
+    await appendRequiredAudit({
+      tenantId,
+      actorType: "user",
+      actorId: userId,
+      action: "tenant.member.join",
+      resourceType: "tenant",
+      resourceId: tenantId,
+      metadata: { role: "member" },
+      ipAddress: c.req.header("x-forwarded-for") ?? null,
+      userAgent: c.req.header("user-agent") ?? null,
+      requestId: c.get("requestId") ?? null,
+    });
   });
-  // 4. Create membership
-  await db.insert(userTenants).values({ userId, tenantId, role: "member" }).onConflictDoNothing();
 
   return c.json({ ok: true, tenantId, role: "member" });
 });
@@ -8090,39 +8103,46 @@ user.delete("/me/tenants/:tenantId/leave", async (c) => {
   const db = getDb();
   let deletedMembership: { role: string } | null | undefined;
   try {
-    deletedMembership = await db.transaction(async (tx) => {
-      await lockTenantOwnerLifecycle(tx, tenantId);
-      await lockUserSession(tx, userId);
-      const [membership] = await tx
-        .select({ role: userTenants.role })
-        .from(userTenants)
-        .where(and(eq(userTenants.userId, userId), eq(userTenants.tenantId, tenantId)));
+    deletedMembership = await withTenantAuditedTransaction(
+      tenantId,
+      async (txRaw, appendRequiredAudit) => {
+        const tx = txRaw as typeof db;
+        await lockTenantOwnerLifecycle(tx, tenantId);
+        await lockUserSession(tx, userId);
+        const [membership] = await tx
+          .select({ role: userTenants.role })
+          .from(userTenants)
+          .where(and(eq(userTenants.userId, userId), eq(userTenants.tenantId, tenantId)));
 
-      if (!membership) return null;
-      if (membership.role === "owner") {
-        if ((await activeTenantOwnerCount(tx, tenantId, userId)) < 1) {
-          throw new Error("Cannot leave tenant as the sole owner");
+        if (!membership) return null;
+        if (membership.role === "owner") {
+          if ((await activeTenantOwnerCount(tx, tenantId, userId)) < 1) {
+            throw new Error("Cannot leave tenant as the sole owner");
+          }
         }
-      }
 
-      await writeUserAudit(c, {
-        tenantId,
-        actorType: "user",
-        actorId: userId,
-        action: "tenant.member.leave",
-        resourceType: "tenant",
-        resourceId: tenantId,
-      });
+        await appendRequiredAudit({
+          tenantId,
+          actorType: "user",
+          actorId: userId,
+          action: "tenant.member.leave",
+          resourceType: "tenant",
+          resourceId: tenantId,
+          ipAddress: c.req.header("x-forwarded-for") ?? null,
+          userAgent: c.req.header("user-agent") ?? null,
+          requestId: c.get("requestId") ?? null,
+        });
 
-      const [deleted] = await tx
-        .delete(userTenants)
-        .where(and(eq(userTenants.userId, userId), eq(userTenants.tenantId, tenantId)))
-        .returning({ role: userTenants.role });
-      await tx
-        .delete(refreshTokens)
-        .where(and(eq(refreshTokens.tenantId, tenantId), eq(refreshTokens.userId, userId)));
-      return deleted ?? null;
-    });
+        const [deleted] = await tx
+          .delete(userTenants)
+          .where(and(eq(userTenants.userId, userId), eq(userTenants.tenantId, tenantId)))
+          .returning({ role: userTenants.role });
+        await tx
+          .delete(refreshTokens)
+          .where(and(eq(refreshTokens.tenantId, tenantId), eq(refreshTokens.userId, userId)));
+        return deleted ?? null;
+      },
+    );
   } catch (err) {
     if (err instanceof Error && err.message === "Cannot leave tenant as the sole owner") {
       return c.json<ApiResponse>({ ok: false, error: err.message }, 409);
