@@ -267,8 +267,20 @@ describeWithPostgres("SEC-169 operator lifecycle on the real Steward schema", ()
           STEWARD_RETENTION_DEACTIVATED_USERS_DELETE_CONFIRMED: undefined,
         },
       );
-      expect(appRoleEvidence).toContain('"ok":true');
-      expect(appRoleEvidence).toContain('"platformAuditActions"');
+      const evidenceLine = appRoleEvidence
+        .trim()
+        .split("\n")
+        .findLast((line) => line.startsWith('{"ok":true'));
+      expect(evidenceLine).toBeDefined();
+      const evidence = JSON.parse(evidenceLine as string) as {
+        ok: boolean;
+        platformAuditActions: string[];
+      };
+      expect(evidence.ok).toBe(true);
+      expect(evidence.platformAuditActions).toEqual([
+        "user.deactivate",
+        "user.deactivate.authorized",
+      ]);
 
       await runOperatorScript("rls-rollback.sql");
       const [rolledBack] = await db<{ enabled: number; forced: number }[]>`

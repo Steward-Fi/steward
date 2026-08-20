@@ -176,13 +176,22 @@ try {
     "rls-platform-audit-verify",
     async () =>
       getDb()
-        .select({ action: auditEvents.action })
+        .select({ seq: auditEvents.seq, action: auditEvents.action })
         .from(auditEvents)
         .where(eq(auditEvents.resourceId, userId)),
   );
   assert(
-    platformAudits.some((row) => row.action === "user.deactivate"),
-    "global platform lifecycle did not write its reserved-tenant audit event",
+    platformAudits.filter((row) => row.action === "user.deactivate.authorized").length === 1 &&
+      platformAudits.filter((row) => row.action === "user.deactivate").length === 1,
+    "global platform lifecycle did not write exactly one authorization and completion audit",
+  );
+  const authorizedAudit = platformAudits.find((row) => row.action === "user.deactivate.authorized");
+  const completionAudit = platformAudits.find((row) => row.action === "user.deactivate");
+  assert(
+    authorizedAudit !== undefined &&
+      completionAudit !== undefined &&
+      authorizedAudit.seq < completionAudit.seq,
+    "global platform lifecycle audit authorization did not precede completion",
   );
 
   const tenantRuns = await runInternalJobForEachTenant(
