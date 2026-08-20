@@ -216,15 +216,22 @@ describe("wallet extension E2E contract", () => {
     const descendantPidFile = join(cwd, "descendant-pid");
     const childTermFile = join(cwd, "child-term");
     const descendantTermFile = join(cwd, "descendant-term");
-    const descendantSource = `import { writeFileSync } from "node:fs"; process.on("SIGTERM",()=>writeFileSync(${JSON.stringify(descendantTermFile)},"term")); writeFileSync(${JSON.stringify(descendantPidFile)},String(process.pid)); await new Promise(()=>{});`;
-    const childSource = `import { writeFileSync } from "node:fs"; process.on("SIGTERM",()=>writeFileSync(${JSON.stringify(childTermFile)},"term")); Bun.spawn(["bun","-e",${JSON.stringify(descendantSource)}],{stdout:"ignore",stderr:"ignore"}); writeFileSync(${JSON.stringify(childPidFile)},String(process.pid)); await new Promise(()=>{});`;
-    const processGroupModule = join(import.meta.dir, "process-group.ts");
-    const harness = join(cwd, "harness.ts");
-    await writeFile(
-      harness,
-      `import { runProcessGroup } from ${JSON.stringify(processGroupModule)}; process.exitCode = await runProcessGroup(["bun","-e",${JSON.stringify(childSource)}],{cwd:${JSON.stringify(cwd)},stdin:"inherit",stdout:"inherit",stderr:"inherit"},200);`,
+    const fixture = join(import.meta.dir, "process-group-fixture.ts");
+    const parent = Bun.spawn(
+      [
+        process.execPath,
+        fixture,
+        "harness",
+        cwd,
+        "linger",
+        "200",
+        childPidFile,
+        childTermFile,
+        descendantPidFile,
+        descendantTermFile,
+      ],
+      { cwd, stderr: "pipe", stdout: "pipe" },
     );
-    const parent = Bun.spawn(["bun", harness], { cwd, stderr: "pipe", stdout: "pipe" });
     try {
       const childPid = Number(await waitForFile(childPidFile));
       const descendantPid = Number(await waitForFile(descendantPidFile));
@@ -245,15 +252,22 @@ describe("wallet extension E2E contract", () => {
     temporaryDirectories.push(cwd);
     const descendantPidFile = join(cwd, "descendant-pid");
     const descendantTermFile = join(cwd, "descendant-term");
-    const descendantSource = `import { writeFileSync } from "node:fs"; process.on("SIGTERM",()=>writeFileSync(${JSON.stringify(descendantTermFile)},"term")); writeFileSync(${JSON.stringify(descendantPidFile)},String(process.pid)); await new Promise(()=>{});`;
-    const childSource = `const descendant=Bun.spawn(["bun","-e",${JSON.stringify(descendantSource)}],{stdout:"ignore",stderr:"ignore"}); descendant.unref(); while (!require("node:fs").existsSync(${JSON.stringify(descendantPidFile)})) await Bun.sleep(10);`;
-    const processGroupModule = join(import.meta.dir, "process-group.ts");
-    const harness = join(cwd, "harness.ts");
-    await writeFile(
-      harness,
-      `import { runProcessGroup } from ${JSON.stringify(processGroupModule)}; process.exitCode = await runProcessGroup(["bun","-e",${JSON.stringify(childSource)}],{cwd:${JSON.stringify(cwd)},stdin:"inherit",stdout:"inherit",stderr:"inherit"},200);`,
+    const fixture = join(import.meta.dir, "process-group-fixture.ts");
+    const parent = Bun.spawn(
+      [
+        process.execPath,
+        fixture,
+        "harness",
+        cwd,
+        "success",
+        "200",
+        join(cwd, "child-pid"),
+        join(cwd, "child-term"),
+        descendantPidFile,
+        descendantTermFile,
+      ],
+      { cwd, stderr: "pipe", stdout: "pipe" },
     );
-    const parent = Bun.spawn(["bun", harness], { cwd, stderr: "pipe", stdout: "pipe" });
     try {
       const descendantPid = Number(await waitForFile(descendantPidFile));
 
