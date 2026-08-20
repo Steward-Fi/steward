@@ -51,6 +51,8 @@ services:
       - "steward_migration_role=steward_migrator"
       - "-v"
       - "steward_bootstrap_role=steward_bootstrap_owner"
+      - "-v"
+      - "steward_platform_role=steward_platform"
       - "-f"
       - "/scripts/postgres/rls-compose-bootstrap.sql"
     environment:
@@ -98,6 +100,8 @@ services:
       - "steward_app_role=steward_app"
       - "-v"
       - "steward_migration_role=steward_migrator"
+      - "-v"
+      - "steward_platform_role=steward_platform"
       - "-f"
       - "/scripts/postgres/rls-activate.sql"
     environment:
@@ -184,6 +188,7 @@ services:
       NODE_ENV: production
       DATABASE_URL: "${DATABASE_URL:?DATABASE_URL required}"
       STEWARD_APP_DATABASE_ROLE: "${STEWARD_APP_DATABASE_ROLE:-steward_app}"
+      STEWARD_PLATFORM_DATABASE_ROLE: "${STEWARD_PLATFORM_DATABASE_ROLE:-steward_platform}"
       REDIS_URL: "redis://redis:6379"
       # Fail CLOSED on spend-limit / rate-limit enforcement if Redis is
       # unreachable. Without this the proxy fails OPEN (enforcement silently

@@ -633,7 +633,7 @@ describe("SEC-020 deploy scripts keep the platform key off every argv", () => {
     expect(provision).not.toMatch(/\$\{SSH_CMD\}\s+"/);
     expect(provision).toContain("must be a single-line value");
     expect(provision).toContain(
-      "External PostgreSQL requires DATABASE_URL, STEWARD_ADMIN_DATABASE_URL, and MIGRATION_DATABASE_URL together",
+      "External PostgreSQL requires DATABASE_URL, STEWARD_ADMIN_DATABASE_URL, MIGRATION_DATABASE_URL, and STEWARD_PLATFORM_DATABASE_URL together",
     );
     expect(provision).toContain(
       'DATABASE_URL="postgresql://steward_app:${STEWARD_DB_APP_PASSWORD}@steward-db:5432/steward"',

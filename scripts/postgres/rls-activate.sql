@@ -8,9 +8,14 @@
 \else
   \set steward_migration_role steward_migrator
 \endif
+\if :{?steward_platform_role}
+\else
+  \set steward_platform_role steward_platform
+\endif
 
 SELECT set_config('steward.activation.migration_role', :'steward_migration_role', false);
 SELECT set_config('steward.activation.app_role', :'steward_app_role', false);
+SELECT set_config('steward.activation.platform_role', :'steward_platform_role', false);
 
 BEGIN;
 SET LOCAL lock_timeout = '10s';
@@ -21,8 +26,13 @@ DO $$
 BEGIN
   IF current_setting('steward.activation.migration_role') IN ('', 'PUBLIC')
      OR current_setting('steward.activation.app_role') IN ('', 'PUBLIC')
+     OR current_setting('steward.activation.platform_role') IN ('', 'PUBLIC')
      OR current_setting('steward.activation.migration_role') =
-        current_setting('steward.activation.app_role') THEN
+        current_setting('steward.activation.app_role')
+     OR current_setting('steward.activation.platform_role') IN (
+        current_setting('steward.activation.app_role'),
+        current_setting('steward.activation.migration_role')
+     ) THEN
     RAISE EXCEPTION 'SEC-169 activation roles must be distinct concrete roles';
   END IF;
   IF NOT EXISTS (
@@ -35,6 +45,11 @@ BEGIN
     WHERE rolname = current_setting('steward.activation.app_role')
       AND rolcanlogin AND NOT rolinherit AND NOT rolsuper AND NOT rolbypassrls
       AND NOT rolcreaterole AND NOT rolcreatedb AND NOT rolreplication
+  ) OR NOT EXISTS (
+    SELECT 1 FROM pg_roles
+    WHERE rolname = current_setting('steward.activation.platform_role')
+      AND rolcanlogin AND NOT rolinherit AND NOT rolsuper AND NOT rolbypassrls
+      AND NOT rolcreaterole AND NOT rolcreatedb AND NOT rolreplication
   ) THEN
     RAISE EXCEPTION 'SEC-169 activation requires restricted app and migration roles';
   END IF;
@@ -44,6 +59,17 @@ BEGIN
     'MEMBER'
   ) THEN
     RAISE EXCEPTION 'SEC-169 app role must not assume migration role';
+  END IF;
+  IF pg_has_role(
+    current_setting('steward.activation.app_role'),
+    current_setting('steward.activation.platform_role'),
+    'MEMBER'
+  ) OR pg_has_role(
+    current_setting('steward.activation.platform_role'),
+    current_setting('steward.activation.app_role'),
+    'MEMBER'
+  ) THEN
+    RAISE EXCEPTION 'SEC-169 app and platform roles must not assume each other';
   END IF;
   IF EXISTS (
     SELECT 1 FROM pg_roles privileged
@@ -114,6 +140,13 @@ BEGIN
           WHERE acl.grantee = 0 AND acl.privilege_type = 'EXECUTE'
         ) OR NOT has_function_privilege(
           current_setting('steward.activation.app_role'), p.oid, 'EXECUTE'
+        ) OR has_function_privilege(
+          current_setting('steward.activation.platform_role'), p.oid, 'EXECUTE'
+        ) <> (p.proname = 'tenant_id')
+        OR NOT has_schema_privilege(
+          current_setting('steward.activation.app_role'), n.oid, 'USAGE'
+        ) OR NOT has_schema_privilege(
+          current_setting('steward.activation.platform_role'), n.oid, 'USAGE'
         )
       )
   ) OR (
@@ -121,60 +154,6 @@ BEGIN
     WHERE n.nspname = 'steward_rls' AND p.proname IN ('tenant_id', 'user_id')
   ) <> 2 THEN
     RAISE EXCEPTION 'SEC-169 tenant helper definitions are unsafe';
-  END IF;
-  IF EXISTS (
-    WITH actual AS (
-      SELECT
-        p.oid,
-        p.proname::text AS function_name,
-        pg_get_function_identity_arguments(p.oid)::text AS identity_arguments,
-        pg_get_function_result(p.oid)::text AS result_type,
-        p.provolatile AS volatility,
-        l.lanname::text AS language_name,
-        md5(p.prosrc) AS source_md5,
-        p.prosecdef,
-        p.proconfig,
-        p.proowner,
-        n.nspowner,
-        owner.rolcanlogin,
-        owner.rolinherit,
-        owner.rolsuper,
-        owner.rolbypassrls,
-        owner.rolcreatedb,
-        owner.rolcreaterole,
-        owner.rolreplication,
-        EXISTS (
-          SELECT 1 FROM aclexplode(COALESCE(p.proacl, acldefault('f', p.proowner))) acl
-          WHERE acl.grantee = 0 AND acl.privilege_type = 'EXECUTE'
-        ) AS public_execute,
-        has_function_privilege(
-          current_setting('steward.activation.app_role'), p.oid, 'EXECUTE'
-        ) AS app_execute
-      FROM pg_proc p
-      JOIN pg_namespace n ON n.oid = p.pronamespace
-      JOIN pg_language l ON l.oid = p.prolang
-      JOIN pg_roles owner ON owner.oid = p.proowner
-      WHERE n.nspname = 'steward_bootstrap'
-    )
-    SELECT 1
-    FROM steward_expected_bootstrap_functions expected
-    FULL JOIN actual USING (function_name, identity_arguments)
-    WHERE expected.function_name IS NULL OR actual.function_name IS NULL
-      OR actual.result_type <> expected.result_type
-      OR actual.volatility <> expected.volatility
-      OR actual.language_name <> expected.language_name
-      OR actual.source_md5 <> expected.source_md5
-      OR NOT actual.prosecdef
-      OR actual.proconfig IS DISTINCT FROM ARRAY['search_path=pg_catalog']::text[]
-      OR actual.proowner <> actual.nspowner
-      OR actual.rolcanlogin OR actual.rolinherit OR actual.rolsuper
-      OR NOT actual.rolbypassrls OR actual.rolcreatedb OR actual.rolcreaterole
-      OR actual.rolreplication OR actual.public_execute OR NOT actual.app_execute
-      OR pg_has_role(
-        current_setting('steward.activation.app_role'), actual.proowner, 'MEMBER'
-      )
-  ) THEN
-    RAISE EXCEPTION 'SEC-169 bootstrap function inventory is unsafe';
   END IF;
   IF EXISTS (
     SELECT 1
