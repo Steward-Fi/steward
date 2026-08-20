@@ -79,6 +79,7 @@ import { deleteAgentAuthority } from "../services/agent-deletion";
 import { withTenantAuditedTransaction, writeAuditEvent } from "../services/audit";
 import {
   type AppVariables,
+  continueWithTenantDatabase,
   createAgentTokenForExistingAgent,
   getConditionSetReferenceValidationError,
   parseAgentTokenScopes,
@@ -254,34 +255,6 @@ async function lockTenantOwnerLifecycle(
   );
 }
 
-async function lockUserOwnerLifecycleTenants(
-  tx: Pick<ReturnType<typeof getDb>, "select" | "execute">,
-  userId: string,
-): Promise<string[]> {
-  const ownerMemberships = await tx
-    .select({ tenantId: userTenants.tenantId })
-    .from(userTenants)
-    .where(and(eq(userTenants.userId, userId), eq(userTenants.role, "owner")));
-  const tenantIds = [...new Set(ownerMemberships.map((membership) => membership.tenantId))].sort();
-  for (const tenantId of tenantIds) {
-    await lockTenantOwnerLifecycle(tx, tenantId);
-  }
-  return tenantIds;
-}
-
-async function assertUserIsNotSoleActiveOwner(
-  tx: Pick<ReturnType<typeof getDb>, "select" | "execute">,
-  userId: string,
-  message: string,
-): Promise<void> {
-  const tenantIds = await lockUserOwnerLifecycleTenants(tx, userId);
-  for (const tenantId of tenantIds) {
-    if ((await activeTenantOwnerCount(tx, tenantId, userId)) < 1) {
-      throw new Error(message);
-    }
-  }
-}
-
 function parseListLimit(value: string | undefined, fallback = 100): number {
   const parsed = value ? Number(value) : fallback;
   if (!Number.isSafeInteger(parsed) || parsed < 1) return fallback;
@@ -415,18 +388,13 @@ async function userHasLinkedThirdPartyWallet(userId: string): Promise<boolean> {
 }
 
 async function tenantIdsForWalletPolicy(userId: string, tenantId?: string): Promise<string[]> {
-  if (tenantId) {
-    const [membership] = await getDb()
-      .select({ tenantId: userTenants.tenantId })
-      .from(userTenants)
-      .where(and(eq(userTenants.userId, userId), eq(userTenants.tenantId, tenantId)));
-    return membership ? [membership.tenantId] : [];
-  }
-  const memberships = await getDb()
-    .select({ tenantId: userTenants.tenantId })
-    .from(userTenants)
-    .where(eq(userTenants.userId, userId));
-  return memberships.map((membership) => membership.tenantId);
+  const memberships = rowsFromExecute<{ tenant_id: string }>(
+    await getDb().execute(
+      sql`SELECT * FROM steward_bootstrap.platform_user_tenant_ids(${userId}::uuid)`,
+    ),
+  );
+  const tenantIds = memberships.map((membership) => membership.tenant_id);
+  return tenantId ? tenantIds.filter((candidate) => candidate === tenantId) : tenantIds;
 }
 
 async function restrictedWalletPolicyTenantIds(
@@ -656,6 +624,10 @@ async function safeJsonParse<T>(c: { req: { json: <X>() => Promise<X> } }): Prom
   }
 }
 
+function rowsFromExecute<T>(result: unknown): T[] {
+  return (Array.isArray(result) ? result : ((result as { rows?: unknown[] })?.rows ?? [])) as T[];
+}
+
 // ─── Route group ─────────────────────────────────────────────────────────────
 
 const platform = new Hono<{ Variables: AppVariables }>();
@@ -723,6 +695,84 @@ platform.use("*", async (c, next) => {
   return next();
 });
 
+// Resolve exceptional tenant authority that is not carried in a tenant route.
+platform.use("*", async (c, next) => {
+  const pathname = new URL(c.req.url).pathname.replace(/^\/platform(?=\/)/, "");
+  const agentRevocationMatch = pathname.match(/^\/agents\/([^/]+)\/revoke-tokens$/);
+  if (agentRevocationMatch) {
+    if (!hasPlatformScope(c.get("platformScopes"), "platform:agent-token:revoke")) return next();
+    const agentId = agentRevocationMatch[1] ?? "";
+    if (!isValidAgentId(agentId)) return next();
+    const result = await getDb().execute(
+      sql`SELECT * FROM steward_bootstrap.agent_tenant_subject(${agentId})`,
+    );
+    const [subject] = (
+      Array.isArray(result) ? result : ((result as { rows?: unknown[] }).rows ?? [])
+    ) as Array<{ tenant_id: string }> | [];
+    if (!subject?.tenant_id) return next();
+    return continueWithTenantDatabase(
+      subject.tenant_id,
+      "platform-agent-token-revocation",
+      "platform",
+      next,
+    );
+  }
+  if (pathname.startsWith("/tenants/")) return next();
+  let tenantId = c.req.query("tenantId")?.trim() || c.req.query("tenant_id")?.trim() || "";
+  if (["POST", "PUT", "PATCH"].includes(c.req.method)) {
+    try {
+      const body = (await c.req.raw.clone().json()) as { tenantId?: unknown };
+      tenantId = typeof body.tenantId === "string" ? body.tenantId.trim() : "";
+    } catch {
+      // The route owns malformed-body reporting; do not mint an RLS context.
+    }
+  }
+  if ((!tenantId || !isValidTenantId(tenantId)) && /^\/users(?:\/|$)/.test(pathname)) {
+    await getDb().execute(sql`SELECT steward_bootstrap.ensure_platform_tenant()`);
+    tenantId = PLATFORM_AUDIT_TENANT_ID;
+  }
+  if (!tenantId || !isValidTenantId(tenantId)) return next();
+  return continueWithTenantDatabase(tenantId, "platform-tenant-operation", "platform", next);
+});
+
+// A named middleware route limits this to reachable tenant routes. Hono does
+// not expose a later handler's params while earlier middleware is executing,
+// so resolve the value from the matched path segment before entering downstream.
+export async function bindPlatformTenantDatabase(
+  c: Context<{ Variables: AppVariables }>,
+  next: () => Promise<void>,
+) {
+  const match = new URL(c.req.url).pathname.match(/(?:^|\/platform)\/tenants\/([^/]+)(?:\/|$)/);
+  let tenantId = "";
+  try {
+    tenantId = match ? decodeURIComponent(match[1]) : "";
+  } catch {
+    return next();
+  }
+  if (!tenantId || !isValidTenantId(tenantId)) return next();
+  return continueWithTenantDatabase(tenantId, "platform-tenant-operation", "platform", next);
+}
+
+platform.use("/tenants/:tenantId", bindPlatformTenantDatabase);
+platform.use("/tenants/:tenantId/*", bindPlatformTenantDatabase);
+platform.use("/apps/gas_spend", async (c, next) => {
+  const tenantId = c.req.query("tenant_id")?.trim() || "";
+  if (!tenantId || !isValidTenantId(tenantId)) return next();
+  return continueWithTenantDatabase(tenantId, "platform-tenant-operation", "platform", next);
+});
+platform.use("/tenants", async (c, next) => {
+  if (c.req.method !== "POST") return next();
+  let tenantId = "";
+  try {
+    const body = (await c.req.raw.clone().json()) as { id?: unknown };
+    tenantId = typeof body.id === "string" ? body.id : "";
+  } catch {
+    // The route owns malformed-body reporting; do not mint an RLS context.
+  }
+  if (!tenantId || !isValidTenantId(tenantId)) return next();
+  return continueWithTenantDatabase(tenantId, "platform-tenant-operation", "platform", next);
+});
+
 function requirePlatformRouteScope(
   c: Context<{ Variables: AppVariables }>,
   scope: string,
@@ -746,20 +796,17 @@ platform.get("/stats", async (c) => {
   const scopeResponse = requirePlatformRouteScope(c, "platform:stats:read");
   if (scopeResponse) return scopeResponse;
 
-  const db = getDb();
-
-  const [[tenantCount], [agentCount], [txCount]] = await Promise.all([
-    db.select({ total: count() }).from(tenants),
-    db.select({ total: count() }).from(agents),
-    db.select({ total: count() }).from(transactions),
-  ]);
+  const result = await getDb().execute(sql`SELECT * FROM steward_bootstrap.platform_stats()`);
+  const [stats] = (
+    Array.isArray(result) ? result : ((result as { rows?: unknown[] }).rows ?? [])
+  ) as Array<{ tenant_count: number; agent_count: number; transaction_count: number }> | [];
 
   return c.json<ApiResponse<{ tenants: number; agents: number; transactions: number }>>({
     ok: true,
     data: {
-      tenants: tenantCount?.total ?? 0,
-      agents: agentCount?.total ?? 0,
-      transactions: txCount?.total ?? 0,
+      tenants: Number(stats?.tenant_count ?? 0),
+      agents: Number(stats?.agent_count ?? 0),
+      transactions: Number(stats?.transaction_count ?? 0),
     },
   });
 });
@@ -985,21 +1032,29 @@ platform.get("/tenants", async (c) => {
   const scopeResponse = requirePlatformRouteScope(c, "platform:tenant:read");
   if (scopeResponse) return scopeResponse;
 
-  const db = getDb();
   const limit = parseListLimit(c.req.query("limit"));
   const offset = parseListOffset(c.req.query("offset"));
-
-  const rows = await db
-    .select({
-      id: tenants.id,
-      name: tenants.name,
-      ownerAddress: tenants.ownerAddress,
-      createdAt: tenants.createdAt,
-      updatedAt: tenants.updatedAt,
-    })
-    .from(tenants)
-    .limit(limit)
-    .offset(offset);
+  const result = await getDb().execute(
+    sql`SELECT * FROM steward_bootstrap.platform_tenants(${limit}, ${offset})`,
+  );
+  const rawRows = (
+    Array.isArray(result) ? result : ((result as { rows?: unknown[] }).rows ?? [])
+  ) as
+    | Array<{
+        id: string;
+        name: string;
+        owner_address: string | null;
+        created_at: Date | string;
+        updated_at: Date | string;
+      }>
+    | [];
+  const rows = rawRows.map((row) => ({
+    id: row.id,
+    name: row.name,
+    ownerAddress: row.owner_address,
+    createdAt: new Date(row.created_at),
+    updatedAt: new Date(row.updated_at),
+  }));
 
   return c.json<ApiResponse<typeof rows>>({ ok: true, data: rows });
 });
@@ -2800,6 +2855,9 @@ platform.post("/users", async (c) => {
         ? body.externalId
         : undefined;
   const tenantId = typeof body.tenantId === "string" ? body.tenantId.trim() : undefined;
+  if (tenantId !== undefined && !isValidTenantId(tenantId)) {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid tenant id format" }, 400);
+  }
   if (walletExternalId !== undefined) {
     if (!tenantId)
       return c.json<ApiResponse>(
@@ -2851,7 +2909,7 @@ platform.post("/users", async (c) => {
       }
     }
     await writeAuditEvent({
-      tenantId: PLATFORM_AUDIT_TENANT_ID,
+      tenantId: tenantId ?? PLATFORM_AUDIT_TENANT_ID,
       actorType: "platform",
       action: "user.provision.existing",
       resourceType: "user",
@@ -2874,7 +2932,7 @@ platform.post("/users", async (c) => {
   }
 
   await writeAuditEvent({
-    tenantId: PLATFORM_AUDIT_TENANT_ID,
+    tenantId: tenantId ?? PLATFORM_AUDIT_TENANT_ID,
     actorType: "platform",
     action: "user.provision.create",
     resourceType: "user",
@@ -2914,7 +2972,7 @@ platform.post("/users", async (c) => {
     }
   }
 
-  dispatchWebhook(PLATFORM_AUDIT_TENANT_ID, newUser.id, "user.created", {
+  dispatchWebhook(tenantId ?? PLATFORM_AUDIT_TENANT_ID, newUser.id, "user.created", {
     userId: newUser.id,
     source: "platform.provision",
     hasEmail: true,
@@ -3105,9 +3163,8 @@ async function serializePlatformUserIdentity(userId: string): Promise<PlatformUs
   if (!user) return null;
   const [tenantRows, accountRows] = await Promise.all([
     db
-      .select({ tenantId: userTenants.tenantId })
-      .from(userTenants)
-      .where(eq(userTenants.userId, userId)),
+      .execute(sql`SELECT * FROM steward_bootstrap.platform_user_tenant_ids(${userId}::uuid)`)
+      .then((result) => rowsFromExecute<{ tenant_id: string }>(result)),
     db
       .select({
         id: accounts.id,
@@ -3118,7 +3175,7 @@ async function serializePlatformUserIdentity(userId: string): Promise<PlatformUs
       .from(accounts)
       .where(eq(accounts.userId, userId)),
   ]);
-  const tenantIds = tenantRows.map((row) => row.tenantId);
+  const tenantIds = tenantRows.map((row) => row.tenant_id);
   const walletExternalIds = accountRows
     .filter((row) => row.provider === WALLET_EXTERNAL_ID_PROVIDER)
     .map((row) => parseWalletExternalProviderAccountId(row.providerAccountId, tenantIds))
@@ -3552,31 +3609,24 @@ platform.patch("/users/:userId/deactivate", async (c) => {
     ...auditCtx(c),
   });
 
-  const result = await db
-    .transaction(async (tx) => {
-      await tx.execute(
-        sql`select pg_advisory_xact_lock(hashtextextended(${`platform_user_account_${userId}`}, 0))`,
+  const result = await Promise.resolve()
+    .then(async () => {
+      const [updated] = rowsFromExecute<{
+        user_id: string;
+        previous_deactivated_at: Date | null;
+        previous_updated_at: Date;
+        deactivated_at: Date | null;
+      }>(
+        await db.execute(sql`
+          SELECT * FROM steward_bootstrap.platform_set_user_deactivation(
+            ${userId}::uuid,
+            ${deactivated}
+          )
+        `),
       );
-      const [existing] = await tx
-        .select({ id: users.id, deactivatedAt: users.deactivatedAt, updatedAt: users.updatedAt })
-        .from(users)
-        .where(eq(users.id, userId));
-      if (!existing) throw new Error("User not found");
-      if (deactivated) {
-        await assertUserIsNotSoleActiveOwner(
-          tx,
-          userId,
-          "Cannot deactivate the sole active tenant owner",
-        );
-      }
+      if (!updated) throw new Error("User not found");
       const issuedBefore = await revocationStore.revokeUserTokens(userId);
-      const [updated] = await tx
-        .update(users)
-        .set({ deactivatedAt: deactivated ? new Date() : null, updatedAt: new Date() })
-        .where(eq(users.id, userId))
-        .returning({ id: users.id, deactivatedAt: users.deactivatedAt });
-      await tx.delete(refreshTokens).where(eq(refreshTokens.userId, userId));
-      return { issuedBefore, updated, previous: existing };
+      return { issuedBefore, updated };
     })
     .catch((err: unknown) => {
       if (err instanceof Error && err.message === "User not found") return null;
@@ -3594,26 +3644,18 @@ platform.patch("/users/:userId/deactivate", async (c) => {
   if (result === "Cannot deactivate the sole active tenant owner") {
     return c.json<ApiResponse>({ ok: false, error: result }, 409);
   }
-  try {
-    await writeAuditEvent({
-      tenantId: PLATFORM_AUDIT_TENANT_ID,
-      actorType: "platform",
-      action: deactivated ? "user.deactivate" : "user.reactivate",
-      resourceType: "user",
-      resourceId: userId,
-      metadata: { issuedBefore: result.issuedBefore },
-      ...auditCtx(c),
-    });
-  } catch (error) {
-    await db
-      .update(users)
-      .set({ deactivatedAt: result.previous.deactivatedAt, updatedAt: result.previous.updatedAt })
-      .where(eq(users.id, userId));
-    throw error;
-  }
+  await writeAuditEvent({
+    tenantId: PLATFORM_AUDIT_TENANT_ID,
+    actorType: "platform",
+    action: deactivated ? "user.deactivate" : "user.reactivate",
+    resourceType: "user",
+    resourceId: userId,
+    metadata: { issuedBefore: result.issuedBefore },
+    ...auditCtx(c),
+  });
   return c.json<ApiResponse<{ userId: string; deactivatedAt: Date | null }>>({
     ok: true,
-    data: { userId, deactivatedAt: result.updated.deactivatedAt },
+    data: { userId, deactivatedAt: result.updated.deactivated_at },
   });
 });
 
@@ -3641,22 +3683,15 @@ platform.delete("/users/:userId", async (c) => {
     ...auditCtx(c),
   });
 
-  const issuedBefore = await db
-    .transaction(async (tx) => {
-      await tx.execute(
-        sql`select pg_advisory_xact_lock(hashtextextended(${`platform_user_account_${userId}`}, 0))`,
+  const issuedBefore = await Promise.resolve()
+    .then(async () => {
+      const [deleted] = rowsFromExecute<{ user_id: string }>(
+        await db.execute(sql`
+          SELECT * FROM steward_bootstrap.platform_delete_user(${userId}::uuid)
+        `),
       );
-      const [user] = await tx.select({ id: users.id }).from(users).where(eq(users.id, userId));
-      if (!user) throw new Error("User not found");
-      await assertUserIsNotSoleActiveOwner(
-        tx,
-        userId,
-        "Cannot delete the sole active tenant owner",
-      );
-      const revokedBefore = await revocationStore.revokeUserTokens(userId);
-      await tx.delete(refreshTokens).where(eq(refreshTokens.userId, userId));
-      await tx.delete(users).where(eq(users.id, userId));
-      return revokedBefore;
+      if (!deleted) throw new Error("User not found");
+      return revocationStore.revokeUserTokens(userId);
     })
     .catch((error: unknown) => {
       if (error instanceof Error && error.message === "User not found") return null;
@@ -3835,7 +3870,7 @@ platform.post("/users/:userId/accounts", async (c) => {
   }
 
   await writeAuditEvent({
-    tenantId: PLATFORM_AUDIT_TENANT_ID,
+    tenantId: tenantId ?? PLATFORM_AUDIT_TENANT_ID,
     actorType: "platform",
     action: "user.account.link",
     resourceType: "user",
@@ -3847,7 +3882,7 @@ platform.post("/users/:userId/accounts", async (c) => {
     .insert(accounts)
     .values({ userId, provider, providerAccountId })
     .returning();
-  dispatchWebhook(PLATFORM_AUDIT_TENANT_ID, userId, "user.linked_account", {
+  dispatchWebhook(tenantId ?? PLATFORM_AUDIT_TENANT_ID, userId, "user.linked_account", {
     userId,
     provider,
   });
@@ -3934,7 +3969,9 @@ platform.delete("/users/:userId/accounts/:provider/:providerAccountId", async (c
         )
         .returning({ id: accounts.id });
       if (!deleted) throw new Error("Linked account changed during unlink");
-      await tx.delete(refreshTokens).where(eq(refreshTokens.userId, userId));
+      await tx.execute(
+        sql`SELECT steward_bootstrap.platform_revoke_user_refresh_tokens(${userId}::uuid)`,
+      );
       return revokedBefore;
     });
   } catch (error) {
@@ -4070,8 +4107,12 @@ platform.post("/users/:userId/accounts/:provider/:providerAccountId/transfer", a
         )
         .returning();
       if (!updated) throw new Error("Linked account changed during transfer");
-      await tx.delete(refreshTokens).where(eq(refreshTokens.userId, fromUserId));
-      await tx.delete(refreshTokens).where(eq(refreshTokens.userId, toUserId));
+      await tx.execute(
+        sql`SELECT steward_bootstrap.platform_revoke_user_refresh_tokens(${fromUserId}::uuid)`,
+      );
+      await tx.execute(
+        sql`SELECT steward_bootstrap.platform_revoke_user_refresh_tokens(${toUserId}::uuid)`,
+      );
       return { fromIssuedBefore: fromRevokedBefore, toIssuedBefore: toRevokedBefore, updated };
     });
     fromIssuedBefore = revocation.fromIssuedBefore;

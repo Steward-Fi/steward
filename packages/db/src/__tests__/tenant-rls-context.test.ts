@@ -15,7 +15,14 @@ describe("tenant RLS transaction context", () => {
       async execute() {
         executeCount += 1;
         calls.push(`execute-${executeCount}`);
-        return executeCount === 3 ? [{ tenant_id: "tenant-a" }] : [];
+        return executeCount === 4
+          ? [
+              {
+                tenant_id: "tenant-a",
+                user_id: "11111111-1111-4111-8111-111111111111",
+              },
+            ]
+          : [];
       },
     };
     const db = {
@@ -28,13 +35,21 @@ describe("tenant RLS transaction context", () => {
       tenantId: "tenant-a",
       method: "session-jwt",
       subject: "user:123",
+      userId: "11111111-1111-4111-8111-111111111111",
     });
     const result = await withTenantRlsTransaction(db, "postgres-js", context, async () => {
       calls.push("callback");
       return 42;
     });
     expect(result).toBe(42);
-    expect(calls).toEqual(["transaction", "execute-1", "execute-2", "execute-3", "callback"]);
+    expect(calls).toEqual([
+      "transaction",
+      "execute-1",
+      "execute-2",
+      "execute-3",
+      "execute-4",
+      "callback",
+    ]);
     expect(Object.isFrozen(context)).toBe(true);
     expect(Object.isFrozen(context.authority)).toBe(true);
   });
@@ -104,7 +119,7 @@ describe("tenant RLS transaction context", () => {
         },
       ),
     ).rejects.toThrow("RLS_TENANT_CONTEXT_DIRTY");
-    expect(executeCount).toBe(3);
+    expect(executeCount).toBe(4);
     expect(callbackCalled).toBe(false);
   });
 
@@ -155,7 +170,7 @@ describe("tenant RLS transaction context", () => {
     const tx = {
       async execute() {
         executeCount += 1;
-        return executeCount === 3 ? [{ tenant_id: "tenant-worker" }] : [];
+        return executeCount === 4 ? [{ tenant_id: "tenant-worker", user_id: null }] : [];
       },
     };
     const db = {
@@ -170,6 +185,6 @@ describe("tenant RLS transaction context", () => {
       async () => "bound",
     );
     expect(result).toBe("bound");
-    expect(executeCount).toBe(3);
+    expect(executeCount).toBe(4);
   });
 });

@@ -96,6 +96,7 @@ import { type Context, Hono, type Next } from "hono";
 import { getAddress, verifyMessage as viemVerifyMessage } from "viem";
 import { writeAuditEvent } from "../services/audit";
 import {
+  continueWithTenantDatabase,
   priceOracle,
   sanitizeErrorMessage,
   setNoStoreHeaders,
@@ -1733,7 +1734,10 @@ export async function userSessionAuth(
     c.set("sessionMfaMethod", payload.mfaMethod);
   }
 
-  await next();
+  if (!payload.tenantId) {
+    return c.json<ApiResponse>({ ok: false, error: "Session token missing tenantId claim" }, 401);
+  }
+  await continueWithTenantDatabase(payload.tenantId, "user-session-jwt", userId, next, userId);
 }
 
 // ─── Route group ──────────────────────────────────────────────────────────────

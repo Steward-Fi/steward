@@ -1,5 +1,6 @@
 import { redactedThrownDiagnostics } from "@stwd/shared";
 import { providerActionService } from "./provider-action-service";
+import { runInternalJobForEachTenant } from "./tenant-job";
 
 const DEFAULT_INTERVAL_MS = 15_000;
 
@@ -21,9 +22,11 @@ export function startProviderReservationReconciliationScheduler(): () => void {
   const tick = () => {
     if (running) return;
     running = true;
-    void providerActionService
-      .reconcilePolicyReservations()
-      .then((count) => {
+    void runInternalJobForEachTenant("provider-reservation-reconciliation", () =>
+      providerActionService.reconcilePolicyReservations(),
+    )
+      .then((results) => {
+        const count = results.reduce((total, result) => total + result.value, 0);
         if (count > 0) console.log(`[provider-reservations] reconciled ${count} reservation(s)`);
       })
       .catch((error) =>

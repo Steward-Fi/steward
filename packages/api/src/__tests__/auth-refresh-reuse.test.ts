@@ -24,10 +24,8 @@ describe("refresh token reuse detection", () => {
     expect(rotationBody).toContain("pg_advisory_xact_lock");
     expect(rotationBody).toContain("lockUserSession(tx, refreshCandidate.userId)");
     const userLock = rotationBody.indexOf("lockUserSession(tx, refreshCandidate.userId)");
-    const validDelete = rotationBody.indexOf(".delete(refreshTokens)", userLock);
-    expect(userLock).toBeLessThan(validDelete);
-    expect(rotationBody.indexOf("revocationStore.getUserRevokedBefore")).toBeLessThan(
-      rotationBody.indexOf(".insert(refreshTokens)"),
-    );
+    const atomicRotate = rotationBody.indexOf("auth_rotate_refresh_token", userLock);
+    expect(userLock).toBeLessThan(atomicRotate);
+    expect(rotationBody.indexOf("revocationStore.getUserRevokedBefore")).toBeLessThan(atomicRotate);
   });
 });

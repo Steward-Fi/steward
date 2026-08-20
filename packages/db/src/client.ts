@@ -487,10 +487,29 @@ interface RequestDatabaseContext {
   sourceDb: RequestDatabase;
   db: RequestDatabase | undefined;
   active: boolean;
+  tenantId?: string;
+  userId?: string;
   pendingTasks: Set<Promise<unknown>>;
   guardedObjects: WeakMap<object, object>;
 }
 const requestDatabaseStorage = new AsyncLocalStorage<RequestDatabaseContext>();
+const tenantTransactionDatabaseStorage = new AsyncLocalStorage<RequestDatabaseContext>();
+
+export function hasTenantTransactionDatabase(expected?: {
+  tenantId: string;
+  userId?: string;
+}): boolean {
+  const context = tenantTransactionDatabaseStorage.getStore();
+  if (!context?.active || !context.db) return false;
+  if (
+    expected &&
+    (context.tenantId !== expected.tenantId ||
+      (expected.userId !== undefined && context.userId !== expected.userId))
+  ) {
+    throw new Error("RLS_TENANT_DATABASE_CONTEXT_MISMATCH");
+  }
+  return true;
+}
 
 function assertRequestDatabaseContextActive(
   context: RequestDatabaseContext,
@@ -591,12 +610,51 @@ export function waitUntilRequestDatabaseTask<T>(task: () => Promise<T>): Promise
   backgroundContext.db = guardRequestDatabaseValue(backgroundContext.sourceDb, backgroundContext);
   const promise = requestDatabaseStorage.run(backgroundContext, task);
   const tracked = trackRequestDatabaseTask(context, promise);
+  const tenantContext = tenantTransactionDatabaseStorage.getStore();
+  if (tenantContext) trackRequestDatabaseTask(tenantContext, promise);
   const revokeBackgroundContext = () => {
     backgroundContext.active = false;
     backgroundContext.db = undefined;
   };
   void promise.then(revokeBackgroundContext, revokeBackgroundContext);
   return tracked;
+}
+
+/**
+ * Bind a transaction as the only database capability visible to downstream
+ * services. Existing route code can continue resolving `getDb()`, but every
+ * query is pinned to the same transaction carrying the tenant-local GUC.
+ * Detached registered work is drained before the transaction callback returns;
+ * retained handles are revoked at the boundary.
+ */
+export async function withTenantTransactionDatabase<T>(
+  transactionDb: RequestDatabase,
+  identity: { tenantId: string; userId?: string },
+  callback: () => Promise<T>,
+): Promise<T> {
+  if (tenantTransactionDatabaseStorage.getStore()) {
+    throw new Error("RLS_TENANT_DATABASE_CONTEXT_NESTED");
+  }
+  const context: RequestDatabaseContext = {
+    sourceDb: transactionDb,
+    db: undefined,
+    active: true,
+    tenantId: identity.tenantId,
+    userId: identity.userId,
+    pendingTasks: new Set(),
+    guardedObjects: new WeakMap(),
+  };
+  context.db = guardRequestDatabaseValue(transactionDb, context);
+  try {
+    return await tenantTransactionDatabaseStorage.run(context, async () => {
+      const result = await callback();
+      await drainRequestDatabaseTasks(context);
+      return result;
+    });
+  } finally {
+    context.active = false;
+    context.db = undefined;
+  }
 }
 
 /**
@@ -885,6 +943,11 @@ function buildGlobalDb(): GlobalDbHandle {
 }
 
 export function getDb() {
+  const tenantContext = tenantTransactionDatabaseStorage.getStore();
+  if (tenantContext) {
+    assertRequestDatabaseContextActive(tenantContext);
+    return tenantContext.db;
+  }
   const requestContext = requestDatabaseStorage.getStore();
   if (requestContext) {
     assertRequestDatabaseContextActive(requestContext);
@@ -910,6 +973,11 @@ export function getDb() {
  * template, which is portable across both.
  */
 export function getSql() {
+  const tenantContext = tenantTransactionDatabaseStorage.getStore();
+  if (tenantContext) {
+    if (!tenantContext.active) throw new Error("REQUEST_DATABASE_CONTEXT_CLOSED");
+    throw new Error("RLS_TENANT_RAW_SQL_UNAVAILABLE: use the tenant transaction database");
+  }
   const requestContext = requestDatabaseStorage.getStore();
   if (requestContext) {
     if (!requestContext.active) throw new Error("REQUEST_DATABASE_CONTEXT_CLOSED");

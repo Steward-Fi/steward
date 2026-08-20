@@ -19,7 +19,7 @@
  *
  * Required bindings (set via `wrangler secret put` or `vars` in wrangler.toml):
  *   - DATABASE_URL                  Neon HTTP connection string
- *   - DATABASE_DRIVER=neon-http     Selects the HTTP-based postgres driver
+ *   - DATABASE_DRIVER=neon-websocket Selects the request-owned transaction-capable driver
  *   - REDIS_DRIVER=upstash          Selects the Upstash REST adapter
  *   - KV_REST_API_URL               Upstash REST endpoint
  *   - KV_REST_API_TOKEN             Upstash REST token
@@ -126,8 +126,7 @@ type WorkerHttpDatabaseFactory = (env: {
 /**
  * Run one Worker unit of work with its request-owned database handle.
  *
- * neon-http remains the shipped default and needs no persistent cleanup. The
- * transaction-capable WebSocket driver is explicit: its handle is bound to the
+ * neon-websocket is the shipped driver: its handle is bound to the
  * async request so every legacy getDb() call resolves the same Drizzle object,
  * then close() is awaited on success and failure. No handle is cached on the
  * isolate.
@@ -148,6 +147,11 @@ export async function withWorkerRequestDatabase<T>(
     );
   }
   if (driver === "neon-http") {
+    if (env.NODE_ENV !== "development" && env.NODE_ENV !== "test") {
+      throw new Error(
+        "WORKER_DATABASE_DRIVER_NOT_TRANSACTIONAL: Workers require neon-websocket unless NODE_ENV is explicitly development or test",
+      );
+    }
     const db = (options?.createHttpDb ?? createDbForRequest)(env);
     return withRequestDatabase(
       db as unknown as ReturnType<typeof getDb>,

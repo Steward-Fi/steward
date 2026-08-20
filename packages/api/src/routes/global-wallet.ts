@@ -14,6 +14,7 @@ import type { Context, Next } from "hono";
 import { Hono } from "hono";
 import { writeAuditEvent } from "../services/audit";
 import {
+  continueWithTenantDatabase,
   safeJsonParse,
   sanitizeErrorMessage,
   setNoStoreHeaders,
@@ -96,7 +97,16 @@ async function userSessionAuth(
   if (typeof payload.mfaVerifiedAt === "number")
     c.set("sessionMfaVerifiedAt", payload.mfaVerifiedAt);
   if (typeof payload.mfaMethod === "string") c.set("sessionMfaMethod", payload.mfaMethod);
-  await next();
+  if (!payload.tenantId) {
+    return c.json<ApiResponse>({ ok: false, error: "Session token missing tenantId claim" }, 401);
+  }
+  await continueWithTenantDatabase(
+    payload.tenantId,
+    "global-wallet-jwt",
+    payload.userId,
+    next,
+    payload.userId,
+  );
   return undefined;
 }
 

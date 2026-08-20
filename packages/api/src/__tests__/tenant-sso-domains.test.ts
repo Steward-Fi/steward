@@ -71,7 +71,7 @@ describe("tenant SSO domain hardening", () => {
     expect(verifyRoute).toContain("existingVerifiedDomain");
     expect(verifyRoute).toContain("existingVerifiedDomain.tenantId !== tenantId");
     expect(verifyRoute).toContain("SSO domain is already verified by another tenant");
-    expect(auth).toContain(".limit(2)");
+    expect(auth).toContain("steward_bootstrap.auth_sso_discovery_subject");
     expect(auth).toContain("rows.length === 1");
   });
 

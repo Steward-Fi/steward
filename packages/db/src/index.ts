@@ -35,10 +35,12 @@ export {
   getDatabaseUrl,
   getDb,
   getSql,
+  hasTenantTransactionDatabase,
   setPGLiteOverride,
   waitUntilRequestDatabaseTask,
   withDatabaseDeadline,
   withRequestDatabase,
+  withTenantTransactionDatabase,
 } from "./client";
 export { runMigrations } from "./migrate";
 export { getMigrationExpectation, type MigrationExpectation } from "./migration-status";

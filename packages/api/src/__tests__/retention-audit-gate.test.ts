@@ -24,9 +24,14 @@ describe("retention audit gate", () => {
     setPGLiteOverride(db, async () => {
       await client.close();
     });
+    await getDb()
+      .insert(tenants)
+      .values({ id: TENANT_ID, name: TENANT_ID, apiKeyHash: `hash-${TENANT_ID}` })
+      .onConflictDoNothing();
   }, 120_000);
 
   afterAll(async () => {
+    await getDb().delete(tenants).where(eq(tenants.id, TENANT_ID));
     await closeDb();
     delete process.env.STEWARD_PGLITE_MEMORY;
     delete process.env.STEWARD_RETENTION_DISABLED;

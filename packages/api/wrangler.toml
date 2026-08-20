@@ -17,7 +17,7 @@ enabled = true
 [vars]
 NODE_ENV = "production"
 SKIP_MIGRATIONS = "1"
-DATABASE_DRIVER = "neon-http"
+DATABASE_DRIVER = "neon-websocket"
 REDIS_DRIVER = "upstash"
 # Non-secret config goes here. Anything sensitive must be set via
 # `wrangler secret put` instead so it doesn't end up in this file.
@@ -76,7 +76,7 @@ name = "steward-api-staging"
 [env.staging.vars]
 NODE_ENV = "production"
 SKIP_MIGRATIONS = "1"
-DATABASE_DRIVER = "neon-http"
+DATABASE_DRIVER = "neon-websocket"
 REDIS_DRIVER = "upstash"
 
 [env.production]
@@ -85,5 +85,5 @@ name = "steward-api-prod"
 [env.production.vars]
 NODE_ENV = "production"
 SKIP_MIGRATIONS = "1"
-DATABASE_DRIVER = "neon-http"
+DATABASE_DRIVER = "neon-websocket"
 REDIS_DRIVER = "upstash"

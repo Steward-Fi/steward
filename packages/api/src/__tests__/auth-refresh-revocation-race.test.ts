@@ -44,7 +44,8 @@ describe("auth refresh revocation race hardening", () => {
     );
     expect(rotateRoute).toContain("requestedTenantId?: string");
     expect(rotateRoute).toContain("const targetTenantId = requestedTenantId ?? record.tenantId");
-    expect(rotateRoute).toContain("eq(userTenants.tenantId, targetTenantId)");
+    expect(rotateRoute).toContain("authTenantSubject(targetTenantId, record.userId)");
+    expect(rotateRoute).toContain("steward_bootstrap.auth_rotate_refresh_token");
     expect(rotateRoute.match(/\.for\("update"\)/g)?.length).toBeGreaterThanOrEqual(2);
     expect(rotateRoute).toContain("createSessionToken(walletAddress, targetTenantId");
     expect(rotateRoute).toContain("tenantId: targetTenantId");
