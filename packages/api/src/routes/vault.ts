@@ -96,6 +96,7 @@ import {
   transactions,
   vault,
 } from "../services/context";
+import { isRuntimeVaultRpcMethodAllowed, resolveRuntimeChainId } from "../services/custody-runtime";
 import {
   consumeExecutionAuthorization,
   executionPayloadDigestForEvmSign,
@@ -228,12 +229,6 @@ const allowPrivateKeyImport = (): boolean =>
   process.env.STEWARD_ALLOW_PRIVATE_KEY_IMPORT === "true";
 const allowVaultPrivateKeyImport = (): boolean =>
   process.env.STEWARD_ALLOW_VAULT_PRIVATE_KEY_IMPORT === "true";
-const VAULT_RPC_ALLOWLIST = new Set(
-  (process.env.STEWARD_VAULT_RPC_ALLOWLIST ?? "eth_chainId,eth_blockNumber,eth_getBalance")
-    .split(",")
-    .map((method) => method.trim())
-    .filter(Boolean),
-);
 const MAX_VAULT_HISTORY_LIMIT = 200;
 const MAX_UINT256_DECIMAL =
   "115792089237316195423570985008687907853269984665640564039457584007913129639935";
@@ -552,7 +547,7 @@ function parseTransferActionInput(body: TransferActionInput): {
   const chainId =
     typeof body.chainId === "number" && Number.isInteger(body.chainId)
       ? body.chainId
-      : parseInt(process.env.CHAIN_ID || "8453", 10);
+      : resolveRuntimeChainId(8453);
   const referenceId = parseReferenceId(body.referenceId);
   const isSolanaTransfer = isSolanaActionChain(chainId);
 
@@ -605,7 +600,7 @@ function parseSendCallsActionInput(body: SendCallsActionInput):
   const chainId =
     typeof body.chainId === "number" && Number.isInteger(body.chainId)
       ? body.chainId
-      : parseInt(process.env.CHAIN_ID || "8453", 10);
+      : resolveRuntimeChainId(8453);
   if (!Number.isSafeInteger(chainId) || chainId <= 0) return "chainId must be a positive integer";
   const referenceId = parseReferenceId(body.referenceId);
   if (referenceId === null) return "referenceId must be a non-empty string up to 128 characters";
@@ -2096,7 +2091,7 @@ vaultRoutes.post("/:agentId/sign", async (c) => {
     );
   }
 
-  const resolvedChainId = request.chainId || parseInt(process.env.CHAIN_ID || "8453", 10);
+  const resolvedChainId = request.chainId || resolveRuntimeChainId(8453);
   if (!hasCalldata(request.data)) {
     const gasGuard = await nativeTransferGasAccountingGuard(
       c,
@@ -7252,7 +7247,7 @@ vaultRoutes.post("/:agentId/sign-typed-data", async (c) => {
 
   const resolvedChainId =
     (typeof body.domain.chainId === "number" ? body.domain.chainId : 0) ||
-    parseInt(process.env.CHAIN_ID || "8453", 10);
+    resolveRuntimeChainId(8453);
   // Use the EIP-712 domain's verifyingContract as the request `to` so that
   // destination-based policies (approved-addresses, condition-set, contract
   // allowlist) meaningfully gate the contract the typed data authorizes. Falls
@@ -10172,7 +10167,7 @@ vaultRoutes.post("/:agentId/rpc", async (c) => {
   if (!isNonEmptyString(body.method)) {
     return c.json<ApiResponse>({ ok: false, error: "'method' is required" }, 400);
   }
-  if (!VAULT_RPC_ALLOWLIST.has(body.method)) {
+  if (!isRuntimeVaultRpcMethodAllowed(body.method)) {
     return c.json<ApiResponse>({ ok: false, error: "RPC method is not allowlisted" }, 403);
   }
 

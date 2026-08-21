@@ -85,6 +85,9 @@ export interface Env {
   STEWARD_AWS_KMS_KEY_ARN?: string;
   STEWARD_AWS_REGION?: string;
   AWS_REGION?: string;
+  AWS_ACCESS_KEY_ID?: string;
+  AWS_SECRET_ACCESS_KEY?: string;
+  AWS_SESSION_TOKEN?: string;
   STEWARD_PKCS11_MODULE?: string;
   STEWARD_PKCS11_PIN?: string;
   STEWARD_PKCS11_KEY_LABEL?: string;

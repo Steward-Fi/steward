@@ -13,10 +13,17 @@ export interface AwsKmsClientLike {
   send(command: unknown): Promise<unknown>;
 }
 
+export interface AwsKmsCredentials {
+  accessKeyId: string;
+  secretAccessKey: string;
+  sessionToken?: string;
+}
+
 export interface AwsKmsEnvelopeOptions {
   provider: "aws";
   keyId?: string;
   region?: string;
+  credentials?: AwsKmsCredentials;
   client?: AwsKmsClientLike;
 }
 
@@ -249,9 +256,15 @@ export class KmsEnvelopeKeystore implements KeystoreBackend {
 
     const moduleName = "@aws-sdk/client-kms";
     const aws = (await import(moduleName)) as {
-      KMSClient: new (config: { region?: string }) => AwsKmsClientLike;
+      KMSClient: new (config: {
+        region?: string;
+        credentials?: AwsKmsCredentials;
+      }) => AwsKmsClientLike;
     };
-    this.awsClient = new aws.KMSClient({ region: this.options.region });
+    this.awsClient = new aws.KMSClient({
+      region: this.options.region,
+      credentials: this.options.credentials,
+    });
     return this.awsClient;
   }
 
