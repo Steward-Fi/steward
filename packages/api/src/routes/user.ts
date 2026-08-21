@@ -6270,6 +6270,7 @@ type TenantWalletPolicyBulkRemediationResult =
       accountId: string;
       status: number;
       error: string;
+      evidence?: { accountUnlinked: false; sessionsRevoked: true; issuedBefore: number };
     };
 
 function tenantAdminUserSelection() {
@@ -6342,7 +6343,12 @@ async function remediateTenantWalletPolicyAccount(
   params: { tenantId: string; targetUserId: string; accountId: string; adminUserId: string },
 ): Promise<
   | { ok: true; data: TenantWalletPolicyRemediationSuccess }
-  | { ok: false; status: number; error: string }
+  | {
+      ok: false;
+      status: number;
+      error: string;
+      evidence?: { accountUnlinked: false; sessionsRevoked: true; issuedBefore: number };
+    }
 > {
   const { tenantId, targetUserId, accountId, adminUserId } = params;
   const db = getDb();
@@ -6403,60 +6409,96 @@ async function remediateTenantWalletPolicyAccount(
     },
   });
 
-  const refreshTokenSnapshot = await db
-    .select()
-    .from(refreshTokens)
-    .where(eq(refreshTokens.userId, targetUserId));
-  const [deleted] = await db
-    .delete(accounts)
-    .where(
-      and(
-        eq(accounts.id, accountId),
-        eq(accounts.userId, targetUserId),
-        or(eq(accounts.provider, "wallet:ethereum"), eq(accounts.provider, "wallet:solana")),
-      ),
-    )
-    .returning();
-  if (!deleted) {
-    return { ok: false, status: 409, error: "Linked wallet account changed" };
-  }
-
+  // This cutoff is external to PostgreSQL and intentionally irreversible. It
+  // is established only after authorization/preflight, before the atomic DB
+  // unit. If that unit fails, callers receive explicit split-outcome evidence.
+  await revocationStore.revokeUserTokens(targetUserId, issuedBefore);
+  let deleted: typeof accounts.$inferSelect;
   try {
-    await revocationStore.revokeUserTokens(targetUserId, issuedBefore);
-    await db.delete(refreshTokens).where(eq(refreshTokens.userId, targetUserId));
-    await writeUserAudit(c, {
-      tenantId,
-      actorType: "user",
-      actorId: adminUserId,
-      action: "tenant.wallet_policy.remediation",
-      resourceType: "user",
-      resourceId: targetUserId,
-      metadata: {
-        accountId: deleted.id,
-        provider: deleted.provider,
-        providerAccountId: deleted.providerAccountId,
-        issuedBefore,
-      },
+    deleted = await withTenantAuditedTransaction(tenantId, async (txRaw, appendRequiredAudit) => {
+      const tx = txRaw as typeof db;
+      await lockUserSession(tx, targetUserId);
+      const [membership] = await tx
+        .select({ userId: userTenants.userId })
+        .from(userTenants)
+        .where(and(eq(userTenants.tenantId, tenantId), eq(userTenants.userId, targetUserId)));
+      if (!membership) throw new Error("Tenant user not found");
+      const [currentAccount] = await tx
+        .select()
+        .from(accounts)
+        .where(and(eq(accounts.id, accountId), eq(accounts.userId, targetUserId)));
+      if (
+        !currentAccount ||
+        (currentAccount.provider !== "wallet:ethereum" &&
+          currentAccount.provider !== "wallet:solana")
+      ) {
+        throw new Error("Linked wallet account changed");
+      }
+      const [currentUser] = await tx
+        .select({ id: users.id, email: users.email, walletAddress: users.walletAddress })
+        .from(users)
+        .where(eq(users.id, targetUserId));
+      if (!currentUser) throw new Error("Tenant user not found");
+      const currentAccounts = await tx
+        .select({ id: accounts.id })
+        .from(accounts)
+        .where(eq(accounts.userId, targetUserId));
+      const currentPasskeys = await tx
+        .select({ id: authenticators.id })
+        .from(authenticators)
+        .where(eq(authenticators.userId, targetUserId));
+      if (
+        primaryLoginMethods(currentUser).length + currentAccounts.length + currentPasskeys.length <=
+        1
+      ) {
+        throw new Error("Cannot unlink the user's last login method");
+      }
+      const [removed] = await tx
+        .delete(accounts)
+        .where(
+          and(
+            eq(accounts.id, accountId),
+            eq(accounts.userId, targetUserId),
+            or(eq(accounts.provider, "wallet:ethereum"), eq(accounts.provider, "wallet:solana")),
+          ),
+        )
+        .returning();
+      if (!removed) throw new Error("Linked wallet account changed");
+      await tx.delete(refreshTokens).where(eq(refreshTokens.userId, targetUserId));
+      await appendRequiredAudit({
+        tenantId,
+        actorType: "user",
+        actorId: adminUserId,
+        action: "tenant.wallet_policy.remediation",
+        resourceType: "user",
+        resourceId: targetUserId,
+        metadata: {
+          accountId: removed.id,
+          provider: removed.provider,
+          providerAccountId: removed.providerAccountId,
+          issuedBefore,
+        },
+        ipAddress: c.req.header("x-forwarded-for") ?? null,
+        userAgent: c.req.header("user-agent") ?? null,
+        requestId: c.get("requestId") ?? null,
+      });
+      return removed;
     });
   } catch (error) {
-    await db.insert(accounts).values({
-      id: deleted.id,
-      userId: deleted.userId,
-      provider: deleted.provider,
-      providerAccountId: deleted.providerAccountId,
-      accessTokenEncrypted: deleted.accessTokenEncrypted,
-      accessTokenIv: deleted.accessTokenIv,
-      accessTokenTag: deleted.accessTokenTag,
-      accessTokenSalt: deleted.accessTokenSalt,
-      refreshTokenEncrypted: deleted.refreshTokenEncrypted,
-      refreshTokenIv: deleted.refreshTokenIv,
-      refreshTokenTag: deleted.refreshTokenTag,
-      refreshTokenSalt: deleted.refreshTokenSalt,
-      expiresAt: deleted.expiresAt,
-    });
-    if (refreshTokenSnapshot.length > 0)
-      await db.insert(refreshTokens).values(refreshTokenSnapshot);
-    throw error;
+    const message = error instanceof Error ? error.message : "Internal server error";
+    const status =
+      message === "Tenant user not found"
+        ? 404
+        : message === "Linked wallet account changed" ||
+            message === "Cannot unlink the user's last login method"
+          ? 409
+          : 500;
+    return {
+      ok: false,
+      status,
+      error: status === 500 ? sanitizeErrorMessage(error) : message,
+      evidence: { accountUnlinked: false, sessionsRevoked: true, issuedBefore },
+    };
   }
 
   dispatchWebhook(tenantId, targetUserId, "user.unlinked_account", {
@@ -6963,6 +7005,7 @@ user.post("/me/tenants/:tenantId/users/wallet-policy/remediations", async (c) =>
         accountId,
         status: result.status,
         error: result.error,
+        evidence: result.evidence,
       });
     }
   }
@@ -7012,7 +7055,10 @@ user.delete(
       adminUserId: admin.userId,
     });
     if (!result.ok) {
-      return c.json<ApiResponse>({ ok: false, error: result.error }, result.status as 400);
+      return c.json<ApiResponse>(
+        { ok: false, error: result.error, data: result.evidence },
+        result.status as 400,
+      );
     }
 
     return c.json<ApiResponse<TenantWalletPolicyRemediationSuccess>>({

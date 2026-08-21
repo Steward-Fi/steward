@@ -22,11 +22,13 @@ import {
   revocationStore,
 } from "@stwd/auth";
 import {
+  type AppendRequiredAudit,
   accounts,
   agents,
   agentWallets,
   approvalQueue,
   auditEvents,
+  authenticators,
   encryptedChainKeys,
   encryptedKeys,
   getDb,
@@ -88,10 +90,7 @@ import {
 } from "../services/context";
 import { normalizeGasSpendQuery, querySponsoredGasSpend } from "../services/gas-sponsorship";
 import { normalizeOidcProviders } from "../services/oidc-provider-config";
-import {
-  withPlatformAuthorityDatabase,
-  withPlatformAuthorityTransaction,
-} from "../services/platform-authority-database";
+import { withPlatformAuthorityDatabase } from "../services/platform-authority-database";
 import { getPolicyRulesValidationError } from "../services/policy-validation";
 import { lockUserSession, lockUserSessions } from "../services/session-lock";
 import {
@@ -381,6 +380,35 @@ function auditCtx(c: {
   };
 }
 
+/**
+ * The platform identity graph is global, so its authoritative mutations use
+ * the dedicated platform-role connection. The tenant audit lock is acquired
+ * before user-session locks, and the completion audit shares the exact
+ * transaction that changes account ownership/credentials.
+ */
+async function withPlatformLinkedAccountTransaction<T>(
+  auditTenantId: string,
+  fn: (tx: ReturnType<typeof getDb>, appendRequiredAudit: AppendRequiredAudit) => Promise<T>,
+): Promise<T> {
+  return withPlatformAuthorityDatabase((platformDb) =>
+    withTenantAuditedTransactionOnDb(platformDb, auditTenantId, async (txRaw, append) => {
+      const tx = txRaw as ReturnType<typeof getDb>;
+      await tx.execute(sql`SELECT set_config('steward.tenant_id', 'platform', true)`);
+      return fn(tx, append);
+    }),
+  );
+}
+
+async function lockLinkedAccountIdentity(
+  tx: Pick<ReturnType<typeof getDb>, "execute">,
+  provider: string,
+  providerAccountId: string,
+): Promise<void> {
+  await tx.execute(
+    sql`select pg_advisory_xact_lock(hashtextextended(${`linked_account_${provider}:${providerAccountId}`}, 0))`,
+  );
+}
+
 function platformIdentityMigrationAllowed(): boolean {
   return process.env.STEWARD_ALLOW_PLATFORM_IDENTITY_MIGRATION === "true";
 }
@@ -472,8 +500,11 @@ function isThirdPartyWalletProvider(provider: string): boolean {
   return provider === "wallet:ethereum" || provider === "wallet:solana";
 }
 
-async function userHasLinkedThirdPartyWallet(userId: string): Promise<boolean> {
-  const [linkedWallet] = await getDb()
+async function userHasLinkedThirdPartyWallet(
+  userId: string,
+  db: ReturnType<typeof getDb> = getDb(),
+): Promise<boolean> {
+  const [linkedWallet] = await db
     .select({ id: accounts.id })
     .from(accounts)
     .where(
@@ -486,9 +517,13 @@ async function userHasLinkedThirdPartyWallet(userId: string): Promise<boolean> {
   return Boolean(linkedWallet);
 }
 
-async function tenantIdsForWalletPolicy(userId: string, tenantId?: string): Promise<string[]> {
+async function tenantIdsForWalletPolicy(
+  userId: string,
+  tenantId?: string,
+  db: ReturnType<typeof getDb> = getDb(),
+): Promise<string[]> {
   const memberships = rowsFromExecute<{ tenant_id: string }>(
-    await getDb().execute(
+    await db.execute(
       sql`SELECT * FROM steward_bootstrap.platform_user_tenant_ids(${userId}::uuid)`,
     ),
   );
@@ -499,11 +534,12 @@ async function tenantIdsForWalletPolicy(userId: string, tenantId?: string): Prom
 async function restrictedWalletPolicyTenantIds(
   userId: string,
   tenantId?: string,
+  db: ReturnType<typeof getDb> = getDb(),
 ): Promise<string[]> {
-  const tenantIds = await tenantIdsForWalletPolicy(userId, tenantId);
+  const tenantIds = await tenantIdsForWalletPolicy(userId, tenantId, db);
   if (tenantId && tenantIds.length === 0) return [];
   if (tenantIds.length === 0) return [];
-  const configs = await getDb()
+  const configs = await db
     .select({ tenantId: tenantConfigs.tenantId, authAbuseConfig: tenantConfigs.authAbuseConfig })
     .from(tenantConfigs)
     .where(inArray(tenantConfigs.tenantId, tenantIds));
@@ -4021,7 +4057,6 @@ platform.post("/users/:userId/accounts", async (c) => {
   const scopeResponse = requirePlatformRouteScope(c, "platform:identity-migration");
   if (scopeResponse) return scopeResponse;
 
-  const db = getDb();
   const userId = c.req.param("userId");
   if (!isValidUserId(userId)) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid user id format" }, 400);
@@ -4044,64 +4079,86 @@ platform.post("/users/:userId/accounts", async (c) => {
   if (tenantId !== undefined && !isValidTenantId(tenantId)) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid tenant id format" }, 400);
   }
-  const [user] = await db.select({ id: users.id }).from(users).where(eq(users.id, userId));
-  if (!user) return c.json<ApiResponse>({ ok: false, error: "User not found" }, 404);
+  let linked: typeof accounts.$inferSelect & { isNew: boolean };
+  try {
+    linked = await withPlatformLinkedAccountTransaction(
+      tenantId ?? PLATFORM_AUDIT_TENANT_ID,
+      async (tx, appendRequiredAudit) => {
+        await lockUserSession(tx, userId);
+        await lockLinkedAccountIdentity(tx, provider, providerAccountId);
+        const [user] = await tx.select({ id: users.id }).from(users).where(eq(users.id, userId));
+        if (!user) throw new Error("User not found");
 
-  const [existing] = await db
-    .select()
-    .from(accounts)
-    .where(and(eq(accounts.provider, provider), eq(accounts.providerAccountId, providerAccountId)));
-  if (existing) {
-    if (existing.userId !== userId) {
-      return c.json<ApiResponse>(
-        { ok: false, error: "Linked account already belongs to another user" },
-        409,
-      );
-    }
+        const [existing] = await tx
+          .select()
+          .from(accounts)
+          .where(
+            and(eq(accounts.provider, provider), eq(accounts.providerAccountId, providerAccountId)),
+          );
+        if (existing) {
+          if (existing.userId !== userId) {
+            throw new Error("Linked account already belongs to another user");
+          }
+          return { ...existing, isNew: false };
+        }
+
+        if (isThirdPartyWalletProvider(provider)) {
+          const restrictedTenantIds = await restrictedWalletPolicyTenantIds(userId, tenantId, tx);
+          if (tenantId && restrictedTenantIds.length === 0) {
+            const requestedTenantIds = await tenantIdsForWalletPolicy(userId, tenantId, tx);
+            if (requestedTenantIds.length === 0) {
+              throw new Error("User is not a member of tenant");
+            }
+          }
+          if (restrictedTenantIds.length > 0 && (await userHasLinkedThirdPartyWallet(userId, tx))) {
+            throw new Error("User already has a linked wallet");
+          }
+        }
+
+        const [created] = await tx
+          .insert(accounts)
+          .values({ userId, provider, providerAccountId })
+          .returning();
+        await appendRequiredAudit({
+          tenantId: tenantId ?? PLATFORM_AUDIT_TENANT_ID,
+          actorType: "platform",
+          action: "user.account.link",
+          resourceType: "user",
+          resourceId: userId,
+          metadata: { provider, tenantId },
+          ...auditCtx(c),
+        });
+        return { ...created, isNew: true };
+      },
+    );
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Internal server error";
+    const status =
+      message === "User not found"
+        ? 404
+        : message === "User is not a member of tenant"
+          ? 403
+          : message === "Linked account already belongs to another user" ||
+              message === "User already has a linked wallet"
+            ? 409
+            : 500;
+    return c.json<ApiResponse>(
+      { ok: false, error: status === 500 ? "Internal server error" : message },
+      status,
+    );
+  }
+  if (!linked.isNew) {
     return c.json<ApiResponse<PlatformLinkedAccountRow & { isNew: boolean }>>({
       ok: true,
       data: {
-        id: existing.id,
-        provider: existing.provider,
-        providerAccountId: existing.providerAccountId,
-        expiresAt: existing.expiresAt,
+        id: linked.id,
+        provider: linked.provider,
+        providerAccountId: linked.providerAccountId,
+        expiresAt: linked.expiresAt,
         isNew: false,
       },
     });
   }
-
-  if (isThirdPartyWalletProvider(provider)) {
-    const restrictedTenantIds = await restrictedWalletPolicyTenantIds(userId, tenantId);
-    if (tenantId && restrictedTenantIds.length === 0) {
-      const requestedTenantIds = await tenantIdsForWalletPolicy(userId, tenantId);
-      if (requestedTenantIds.length === 0) {
-        return c.json<ApiResponse>({ ok: false, error: "User is not a member of tenant" }, 403);
-      }
-    }
-    if (restrictedTenantIds.length > 0 && (await userHasLinkedThirdPartyWallet(userId))) {
-      return c.json<ApiResponse>(
-        {
-          ok: false,
-          error: "User already has a linked wallet",
-        },
-        409,
-      );
-    }
-  }
-
-  await writeAuditEvent({
-    tenantId: tenantId ?? PLATFORM_AUDIT_TENANT_ID,
-    actorType: "platform",
-    action: "user.account.link",
-    resourceType: "user",
-    resourceId: userId,
-    metadata: { provider, tenantId },
-    ...auditCtx(c),
-  });
-  const [created] = await db
-    .insert(accounts)
-    .values({ userId, provider, providerAccountId })
-    .returning();
   dispatchWebhook(tenantId ?? PLATFORM_AUDIT_TENANT_ID, userId, "user.linked_account", {
     userId,
     provider,
@@ -4110,10 +4167,10 @@ platform.post("/users/:userId/accounts", async (c) => {
     {
       ok: true,
       data: {
-        id: created.id,
-        provider: created.provider,
-        providerAccountId: created.providerAccountId,
-        expiresAt: created.expiresAt,
+        id: linked.id,
+        provider: linked.provider,
+        providerAccountId: linked.providerAccountId,
+        expiresAt: linked.expiresAt,
         isNew: true,
       },
     },
@@ -4147,80 +4204,128 @@ platform.delete("/users/:userId/accounts/:provider/:providerAccountId", async (c
     return c.json<ApiResponse>({ ok: false, error: "Invalid account identifier" }, 400);
   }
 
-  await writeAuditEvent({
-    tenantId: PLATFORM_AUDIT_TENANT_ID,
-    actorType: "platform",
-    action: "user.account.unlink",
-    resourceType: "user",
-    resourceId: userId,
-    metadata: { provider, forced: force },
-    ...auditCtx(c),
-  });
-
-  let issuedBefore: number;
-  try {
-    issuedBefore = await db.transaction(async (tx) => {
-      await tx.execute(
-        sql`select pg_advisory_xact_lock(hashtextextended(${`platform_user_account_${userId}`}, 0))`,
-      );
-      await lockUserSession(tx, userId);
-      const [user] = await tx.select().from(users).where(eq(users.id, userId));
-      if (!user) throw new Error("User not found");
-      const userAccounts = await tx.select().from(accounts).where(eq(accounts.userId, userId));
-      const account = userAccounts.find(
-        (row) => row.provider === provider && row.providerAccountId === providerAccountId,
-      );
-      if (!account) throw new Error("Linked account not found");
-      const hasOtherLogin = Boolean(user.email || user.walletAddress || userAccounts.length > 1);
-      if (!force && !hasOtherLogin) {
-        throw new Error("Cannot unlink the user's last login method");
-      }
-
-      const revokedBefore = await revocationStore.revokeUserTokens(userId);
-      const [deleted] = await tx
-        .delete(accounts)
-        .where(
-          and(
-            eq(accounts.id, account.id),
-            eq(accounts.userId, userId),
-            eq(accounts.provider, provider),
-            eq(accounts.providerAccountId, providerAccountId),
-          ),
-        )
-        .returning({ id: accounts.id });
-      if (!deleted) throw new Error("Linked account changed during unlink");
-      await withPlatformAuthorityTransaction((platformTx) =>
-        platformTx.execute(
-          sql`SELECT steward_bootstrap.platform_revoke_user_refresh_tokens(${userId}::uuid)`,
-        ),
-      );
-      return revokedBefore;
-    });
-  } catch (error) {
-    if (error instanceof Error) {
-      const status =
-        error.message === "User not found"
-          ? 404
-          : error.message === "Linked account not found"
-            ? 404
-            : error.message === "Cannot unlink the user's last login method"
-              ? 409
-              : error.message === "Linked account changed during unlink"
-                ? 409
-                : 500;
-      return c.json<ApiResponse>({ ok: false, error: error.message }, status);
-    }
-    throw error;
+  const [initialUser] = await db.select().from(users).where(eq(users.id, userId));
+  if (!initialUser) return c.json<ApiResponse>({ ok: false, error: "User not found" }, 404);
+  const initialAccounts = await db.select().from(accounts).where(eq(accounts.userId, userId));
+  const initialAccount = initialAccounts.find(
+    (row) => row.provider === provider && row.providerAccountId === providerAccountId,
+  );
+  if (!initialAccount) {
+    return c.json<ApiResponse>({ ok: false, error: "Linked account not found" }, 404);
   }
+  const initialPasskeys = await db
+    .select({ id: authenticators.id })
+    .from(authenticators)
+    .where(eq(authenticators.userId, userId));
+  if (
+    !force &&
+    !initialUser.email &&
+    !initialUser.walletAddress &&
+    initialAccounts.length + initialPasskeys.length <= 1
+  ) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Cannot unlink the user's last login method" },
+      409,
+    );
+  }
+
   await writeAuditEvent({
     tenantId: PLATFORM_AUDIT_TENANT_ID,
     actorType: "platform",
-    action: "user.sessions.revoked_for_account_unlink",
+    action: "user.account.unlink.authorized",
     resourceType: "user",
     resourceId: userId,
-    metadata: { issuedBefore },
+    metadata: { provider, providerAccountId, accountId: initialAccount.id, forced: force },
     ...auditCtx(c),
   });
+
+  // External revocation cannot participate in the PostgreSQL transaction. It
+  // remains fail-closed; every later failure reports that the account mutation
+  // rolled back while the established session cutoff remains in force.
+  const issuedBefore = await revocationStore.revokeUserTokens(userId);
+  try {
+    await withPlatformLinkedAccountTransaction(
+      PLATFORM_AUDIT_TENANT_ID,
+      async (tx, appendRequiredAudit) => {
+        await lockUserSession(tx, userId);
+        await lockLinkedAccountIdentity(tx, provider, providerAccountId);
+        const [user] = await tx.select().from(users).where(eq(users.id, userId));
+        if (!user) throw new Error("User not found");
+        const userAccounts = await tx.select().from(accounts).where(eq(accounts.userId, userId));
+        const passkeys = await tx
+          .select({ id: authenticators.id })
+          .from(authenticators)
+          .where(eq(authenticators.userId, userId));
+        const account = userAccounts.find(
+          (row) => row.provider === provider && row.providerAccountId === providerAccountId,
+        );
+        if (!account) throw new Error("Linked account not found");
+        const hasOtherLogin = Boolean(
+          user.email || user.walletAddress || userAccounts.length + passkeys.length > 1,
+        );
+        if (!force && !hasOtherLogin) {
+          throw new Error("Cannot unlink the user's last login method");
+        }
+
+        const [deleted] = await tx
+          .delete(accounts)
+          .where(
+            and(
+              eq(accounts.id, account.id),
+              eq(accounts.userId, userId),
+              eq(accounts.provider, provider),
+              eq(accounts.providerAccountId, providerAccountId),
+            ),
+          )
+          .returning({ id: accounts.id });
+        if (!deleted) throw new Error("Linked account changed during unlink");
+        await tx.execute(
+          sql`SELECT steward_bootstrap.platform_revoke_user_refresh_tokens(${userId}::uuid)`,
+        );
+        await appendRequiredAudit({
+          tenantId: PLATFORM_AUDIT_TENANT_ID,
+          actorType: "platform",
+          action: "user.account.unlink",
+          resourceType: "user",
+          resourceId: userId,
+          metadata: {
+            provider,
+            providerAccountId,
+            accountId: deleted.id,
+            forced: force,
+            issuedBefore,
+          },
+          ...auditCtx(c),
+        });
+        await appendRequiredAudit({
+          tenantId: PLATFORM_AUDIT_TENANT_ID,
+          actorType: "platform",
+          action: "user.sessions.revoked_for_account_unlink",
+          resourceType: "user",
+          resourceId: userId,
+          metadata: { issuedBefore },
+          ...auditCtx(c),
+        });
+      },
+    );
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Internal server error";
+    const status =
+      message === "User not found" || message === "Linked account not found"
+        ? 404
+        : message === "Cannot unlink the user's last login method" ||
+            message === "Linked account changed during unlink"
+          ? 409
+          : 500;
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error: status === 500 ? "Internal server error" : message,
+        data: { accountUnlinked: false, sessionsRevoked: true, issuedBefore },
+      },
+      status,
+    );
+  }
   dispatchWebhook(PLATFORM_AUDIT_TENANT_ID, userId, "user.unlinked_account", {
     userId,
     provider,
@@ -4280,6 +4385,31 @@ platform.post("/users/:userId/accounts/:provider/:providerAccountId/transfer", a
   ]);
   if (!fromUser) return c.json<ApiResponse>({ ok: false, error: "Source user not found" }, 404);
   if (!toUser) return c.json<ApiResponse>({ ok: false, error: "Target user not found" }, 404);
+  const initialFromAccounts = await db
+    .select()
+    .from(accounts)
+    .where(eq(accounts.userId, fromUserId));
+  const initialAccount = initialFromAccounts.find(
+    (row) => row.provider === provider && row.providerAccountId === providerAccountId,
+  );
+  if (!initialAccount) {
+    return c.json<ApiResponse>({ ok: false, error: "Linked account not found" }, 404);
+  }
+  const initialPasskeys = await db
+    .select({ id: authenticators.id })
+    .from(authenticators)
+    .where(eq(authenticators.userId, fromUserId));
+  if (
+    body.force !== true &&
+    !fromUser.email &&
+    !fromUser.walletAddress &&
+    initialFromAccounts.length + initialPasskeys.length <= 1
+  ) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Cannot transfer the source user's last login method" },
+      409,
+    );
+  }
 
   await writeAuditEvent({
     tenantId: PLATFORM_AUDIT_TENANT_ID,
@@ -4291,103 +4421,107 @@ platform.post("/users/:userId/accounts/:provider/:providerAccountId/transfer", a
     ...auditCtx(c),
   });
 
-  let fromIssuedBefore: number;
-  let toIssuedBefore: number;
+  // Establish both irreversible cutoffs before the atomic ownership/audit
+  // transition. A later failure leaves the account with its prior owner and
+  // reports that both users' existing sessions remain revoked.
+  const fromIssuedBefore = await revocationStore.revokeUserTokens(fromUserId);
+  const toIssuedBefore = await revocationStore.revokeUserTokens(toUserId);
   let updated: PlatformLinkedAccountRow;
   try {
-    const revocation = await db.transaction(async (tx) => {
-      await tx.execute(
-        sql`select pg_advisory_xact_lock(hashtextextended(${`platform_user_account_${fromUserId}`}, 0))`,
-      );
-      await lockUserSessions(tx, [fromUserId, toUserId]);
-      const [lockedFromUser] = await tx.select().from(users).where(eq(users.id, fromUserId));
-      if (!lockedFromUser) throw new Error("Source user not found");
-      const fromAccounts = await tx.select().from(accounts).where(eq(accounts.userId, fromUserId));
-      const account = fromAccounts.find(
-        (row) => row.provider === provider && row.providerAccountId === providerAccountId,
-      );
-      if (!account) throw new Error("Linked account not found");
-      const hasOtherLogin = Boolean(
-        lockedFromUser.email || lockedFromUser.walletAddress || fromAccounts.length > 1,
-      );
-      if (!body.force && !hasOtherLogin) {
-        throw new Error("Cannot transfer the source user's last login method");
-      }
+    updated = await withPlatformLinkedAccountTransaction(
+      PLATFORM_AUDIT_TENANT_ID,
+      async (tx, appendRequiredAudit) => {
+        await lockUserSessions(tx, [fromUserId, toUserId]);
+        await lockLinkedAccountIdentity(tx, provider, providerAccountId);
+        const [lockedFromUser] = await tx.select().from(users).where(eq(users.id, fromUserId));
+        if (!lockedFromUser) throw new Error("Source user not found");
+        const [lockedToUser] = await tx.select().from(users).where(eq(users.id, toUserId));
+        if (!lockedToUser) throw new Error("Target user not found");
+        const fromAccounts = await tx
+          .select()
+          .from(accounts)
+          .where(eq(accounts.userId, fromUserId));
+        const passkeys = await tx
+          .select({ id: authenticators.id })
+          .from(authenticators)
+          .where(eq(authenticators.userId, fromUserId));
+        const account = fromAccounts.find(
+          (row) => row.provider === provider && row.providerAccountId === providerAccountId,
+        );
+        if (!account) throw new Error("Linked account not found");
+        const hasOtherLogin = Boolean(
+          lockedFromUser.email ||
+            lockedFromUser.walletAddress ||
+            fromAccounts.length + passkeys.length > 1,
+        );
+        if (!body.force && !hasOtherLogin) {
+          throw new Error("Cannot transfer the source user's last login method");
+        }
 
-      const fromRevokedBefore = await revocationStore.revokeUserTokens(fromUserId);
-      const toRevokedBefore = await revocationStore.revokeUserTokens(toUserId);
-      const [updated] = await tx
-        .update(accounts)
-        .set({ userId: toUserId })
-        .where(
-          and(
-            eq(accounts.id, account.id),
-            eq(accounts.userId, fromUserId),
-            eq(accounts.provider, provider),
-            eq(accounts.providerAccountId, providerAccountId),
-          ),
-        )
-        .returning();
-      if (!updated) throw new Error("Linked account changed during transfer");
-      await withPlatformAuthorityTransaction(async (platformTx) => {
-        await platformTx.execute(
+        const [moved] = await tx
+          .update(accounts)
+          .set({ userId: toUserId })
+          .where(
+            and(
+              eq(accounts.id, account.id),
+              eq(accounts.userId, fromUserId),
+              eq(accounts.provider, provider),
+              eq(accounts.providerAccountId, providerAccountId),
+            ),
+          )
+          .returning();
+        if (!moved) throw new Error("Linked account changed during transfer");
+        await tx.execute(
           sql`SELECT steward_bootstrap.platform_revoke_user_refresh_tokens(${fromUserId}::uuid)`,
         );
-        await platformTx.execute(
+        await tx.execute(
           sql`SELECT steward_bootstrap.platform_revoke_user_refresh_tokens(${toUserId}::uuid)`,
         );
-      });
-      return { fromIssuedBefore: fromRevokedBefore, toIssuedBefore: toRevokedBefore, updated };
-    });
-    fromIssuedBefore = revocation.fromIssuedBefore;
-    toIssuedBefore = revocation.toIssuedBefore;
-    updated = revocation.updated;
+        await appendRequiredAudit({
+          tenantId: PLATFORM_AUDIT_TENANT_ID,
+          actorType: "platform",
+          action: "user.account.transfer",
+          resourceType: "user",
+          resourceId: fromUserId,
+          metadata: {
+            provider,
+            providerAccountId,
+            toUserId,
+            forced: body.force === true,
+            revokedSessions: {
+              fromUserId: fromIssuedBefore,
+              toUserId: toIssuedBefore,
+            },
+          },
+          ...auditCtx(c),
+        });
+        return moved;
+      },
+    );
   } catch (error) {
-    if (error instanceof Error) {
-      const status =
-        error.message === "Source user not found" || error.message === "Linked account not found"
-          ? 404
-          : error.message === "Cannot transfer the source user's last login method" ||
-              error.message === "Linked account changed during transfer"
-            ? 409
-            : 500;
-      return c.json<ApiResponse>({ ok: false, error: error.message }, status);
-    }
-    throw error;
-  }
-
-  try {
-    await writeAuditEvent({
-      tenantId: PLATFORM_AUDIT_TENANT_ID,
-      actorType: "platform",
-      action: "user.account.transfer",
-      resourceType: "user",
-      resourceId: fromUserId,
-      metadata: {
-        provider,
-        providerAccountId,
-        toUserId,
-        forced: body.force === true,
-        revokedSessions: {
-          fromUserId: fromIssuedBefore,
-          toUserId: toIssuedBefore,
+    const message = error instanceof Error ? error.message : "Internal server error";
+    const status =
+      message === "Source user not found" ||
+      message === "Target user not found" ||
+      message === "Linked account not found"
+        ? 404
+        : message === "Cannot transfer the source user's last login method" ||
+            message === "Linked account changed during transfer"
+          ? 409
+          : 500;
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error: status === 500 ? "Internal server error" : message,
+        data: {
+          accountTransferred: false,
+          sessionsRevoked: true,
+          fromIssuedBefore,
+          toIssuedBefore,
         },
       },
-      ...auditCtx(c),
-    });
-  } catch (error) {
-    await db
-      .update(accounts)
-      .set({ userId: fromUserId })
-      .where(
-        and(
-          eq(accounts.id, updated.id),
-          eq(accounts.userId, toUserId),
-          eq(accounts.provider, provider),
-          eq(accounts.providerAccountId, providerAccountId),
-        ),
-      );
-    throw error;
+      status,
+    );
   }
   dispatchWebhook(PLATFORM_AUDIT_TENANT_ID, fromUserId, "user.transferred_account", {
     fromUserId,

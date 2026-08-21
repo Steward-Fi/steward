@@ -1033,6 +1033,93 @@ describe("user linked account routes", () => {
     );
   });
 
+  it("rolls back tenant wallet remediation when its completion audit fails after cutoff", async () => {
+    const suffix = crypto.randomUUID().replaceAll("-", "");
+    const [target] = await getDb()
+      .insert(users)
+      .values({ email: `remediation-atomic-${suffix}@example.test`, emailVerified: true })
+      .returning({ id: users.id });
+    await getDb()
+      .insert(userTenants)
+      .values({ userId: target.id, tenantId: TENANT_ID, role: "member" });
+    const [wallet] = await getDb()
+      .insert(accounts)
+      .values({
+        userId: target.id,
+        provider: "wallet:solana",
+        providerAccountId: `SoAtomic${suffix}`,
+      })
+      .returning({ id: accounts.id });
+    await getDb()
+      .insert(refreshTokens)
+      .values({
+        id: `remediation-atomic-refresh-${suffix}`,
+        userId: target.id,
+        tenantId: TENANT_ID,
+        tokenHash: `remediation-atomic-refresh-hash-${suffix}`,
+        expiresAt: new Date(Date.now() + 60_000),
+      });
+    await getDb().execute(
+      sql.raw(`
+      CREATE OR REPLACE FUNCTION fail_wallet_remediation_audit_${suffix}()
+      RETURNS trigger AS $$
+      BEGIN
+        IF NEW.tenant_id = '${TENANT_ID}' AND NEW.action = 'tenant.wallet_policy.remediation' THEN
+          RAISE EXCEPTION 'forced wallet remediation audit failure';
+        END IF;
+        RETURN NEW;
+      END;
+      $$ LANGUAGE plpgsql
+    `),
+    );
+    await getDb().execute(
+      sql.raw(`
+      CREATE TRIGGER fail_wallet_remediation_audit_${suffix}
+      BEFORE INSERT ON audit_events
+      FOR EACH ROW EXECUTE FUNCTION fail_wallet_remediation_audit_${suffix}()
+    `),
+    );
+
+    try {
+      const response = await userRoutes.request(
+        `/me/tenants/${TENANT_ID}/users/${target.id}/wallet-policy/wallets/${wallet.id}`,
+        {
+          method: "DELETE",
+          headers: { Authorization: `Bearer ${await tenantAdminTokenFor(tenantOwnerUserId)}` },
+        },
+      );
+      expect(response.status).toBe(500);
+      expect(await response.json()).toMatchObject({
+        ok: false,
+        data: { accountUnlinked: false, sessionsRevoked: true },
+      });
+      expect(
+        await getDb().select({ id: accounts.id }).from(accounts).where(eq(accounts.id, wallet.id)),
+      ).toEqual([{ id: wallet.id }]);
+      expect(
+        await getDb().select().from(refreshTokens).where(eq(refreshTokens.userId, target.id)),
+      ).toHaveLength(1);
+      expect(
+        await getDb()
+          .select()
+          .from(auditEvents)
+          .where(
+            and(
+              eq(auditEvents.action, "tenant.wallet_policy.remediation"),
+              eq(auditEvents.resourceId, target.id),
+            ),
+          ),
+      ).toHaveLength(0);
+    } finally {
+      await getDb().execute(
+        sql.raw(`DROP TRIGGER IF EXISTS fail_wallet_remediation_audit_${suffix} ON audit_events`),
+      );
+      await getDb().execute(
+        sql.raw(`DROP FUNCTION IF EXISTS fail_wallet_remediation_audit_${suffix}()`),
+      );
+    }
+  });
+
   it("lets tenant admins bulk remediate selected wallet-policy violations with per-item results", async () => {
     const bulkWallets = await getDb()
       .select({ id: accounts.id, provider: accounts.provider })

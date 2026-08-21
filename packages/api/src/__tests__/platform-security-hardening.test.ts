@@ -330,13 +330,9 @@ describe("platform security hardening", () => {
     expect(agentRollback).toBeGreaterThan(finalAgentAudit);
   });
 
-  it("restores platform user and membership mutations when final audit events fail", () => {
+  it("rolls back or restores platform user and membership mutations when final audits fail", () => {
     for (const [marker, rollback] of [
       ['platform.patch("/users/:userId/metadata"', "customMetadata: existing.customMetadata"],
-      [
-        'platform.post("/users/:userId/accounts/:provider/:providerAccountId/transfer"',
-        "set({ userId: fromUserId })",
-      ],
       ['platform.patch("/tenants/:id/members/:userId"', "set({ role: updated.previousRole })"],
     ] as const) {
       const start = platformSource.indexOf(marker);
@@ -346,6 +342,16 @@ describe("platform security hardening", () => {
       expect(route).toContain("try {");
       expect(route).toContain(rollback);
     }
+    const transferStart = platformSource.indexOf(
+      'platform.post("/users/:userId/accounts/:provider/:providerAccountId/transfer"',
+    );
+    const transferRoute = platformSource.slice(
+      transferStart,
+      platformSource.indexOf("\nplatform.", transferStart + 1),
+    );
+    expect(transferRoute).toContain("withPlatformLinkedAccountTransaction(");
+    expect(transferRoute).toContain("appendRequiredAudit({");
+    expect(transferRoute).not.toContain("set({ userId: fromUserId })");
     const deactivateStart = platformSource.indexOf('platform.patch("/users/:userId/deactivate"');
     const deactivateRoute = platformSource.slice(
       deactivateStart,

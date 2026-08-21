@@ -1013,6 +1013,14 @@ export interface UserAccountUnlinkFailureEvidence {
   issuedBefore: number;
 }
 
+/** Evidence returned when transfer cutoffs succeeded but the ownership/audit unit failed. */
+export interface LinkedAccountTransferFailureEvidence {
+  accountTransferred: false;
+  sessionsRevoked: true;
+  fromIssuedBefore: number;
+  toIssuedBefore: number;
+}
+
 export interface UserEthereumWalletLinkNonce {
   nonce: string;
   message: string;
@@ -1223,8 +1231,11 @@ export interface StewardMfaRequiredErrorData {
 export type StewardErrorResponse = {
   results?: PolicyResult[];
   accountUnlinked?: false;
+  accountTransferred?: false;
   sessionsRevoked?: true;
   issuedBefore?: number;
+  fromIssuedBefore?: number;
+  toIssuedBefore?: number;
 } & StewardMfaRequiredErrorData;
 
 function errorMessageRequiresMfa(message: string): boolean {

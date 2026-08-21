@@ -14,6 +14,7 @@ import type {
   DigitalAssetAccount as RootDigitalAssetAccount,
   DigitalAssetAccountAggregation as RootDigitalAssetAccountAggregation,
   DigitalAssetAccountMutationInput as RootDigitalAssetAccountMutationInput,
+  LinkedAccountTransferFailureEvidence as RootLinkedAccountTransferFailureEvidence,
   PlatformLinkAccountResult as RootPlatformLinkAccountResult,
   PlatformTenantInvitationCreateResult as RootPlatformTenantInvitationCreateResult,
   PlatformTenantUser as RootPlatformTenantUser,
@@ -209,6 +210,7 @@ describe("root SDK parity exports", () => {
   it("exports platform admin and pregenerated wallet result types from the public entrypoint", () => {
     type PublicParityTypes =
       | RootPlatformLinkAccountResult
+      | RootLinkedAccountTransferFailureEvidence
       | RootPlatformTenantInvitationCreateResult
       | RootPlatformTenantUser
       | RootPlatformUserIdentity

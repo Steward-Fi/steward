@@ -293,3 +293,148 @@ realPostgresIt(
   },
   120_000,
 );
+
+realPostgresIt(
+  "serializes tenant wallet remediation with relink and never resurrects stale credentials",
+  async () => {
+    process.env.STEWARD_AUDIT_HMAC_KEY =
+      "wallet-remediation-real-postgres-audit-key-with-enough-entropy";
+    process.env.STEWARD_JWT_SECRET = "wallet-remediation-real-postgres-jwt-key-with-enough-entropy";
+    process.env.STEWARD_MASTER_PASSWORD = "wallet-remediation-real-postgres-master-password";
+    __resetAuditHmacKeyCacheForTests();
+    const suffix = crypto.randomUUID().replaceAll("-", "");
+    const tenantId = `remediation-${suffix}`;
+    const adminUserId = crypto.randomUUID();
+    const targetUserId = crypto.randomUUID();
+    const providerAccountId = `SoRemediation${suffix}`;
+    const freshAccountId = crypto.randomUUID();
+    const triggerFunction = `fail_remediation_audit_${suffix}`;
+    const triggerName = `fail_remediation_audit_${suffix}`;
+    const gateKey = Number.parseInt(suffix.slice(0, 12), 16);
+    const admin = createDb(databaseUrl!);
+    const concurrent = createDb(databaseUrl!);
+    const locker = await admin.client.reserve();
+    let gateLocked = true;
+
+    try {
+      await admin.db.insert(tenants).values({
+        id: tenantId,
+        name: "Remediation concurrency",
+        apiKeyHash: `remediation-${suffix}`,
+      });
+      await admin.db.insert(users).values([
+        { id: adminUserId, email: `admin-${suffix}@example.test`, emailVerified: true },
+        { id: targetUserId, email: `target-${suffix}@example.test`, emailVerified: true },
+      ]);
+      await admin.db.insert(userTenants).values([
+        { userId: adminUserId, tenantId, role: "owner" },
+        { userId: targetUserId, tenantId, role: "member" },
+      ]);
+      const [account] = await admin.db
+        .insert(accounts)
+        .values({ userId: targetUserId, provider: "wallet:solana", providerAccountId })
+        .returning({ id: accounts.id });
+      await admin.db.insert(refreshTokens).values({
+        id: `remediation-refresh-${suffix}`,
+        userId: targetUserId,
+        tenantId,
+        tokenHash: hashSha256Hex(`remediation-refresh-${suffix}`),
+        expiresAt: new Date(Date.now() + 60_000),
+      });
+      await admin.client.unsafe(`
+        create function "${triggerFunction}"() returns trigger language plpgsql as $$
+        begin
+          if new.tenant_id = '${tenantId}' and new.action = 'tenant.wallet_policy.remediation' then
+            perform pg_advisory_xact_lock(${gateKey});
+            raise exception 'forced remediation completion audit failure';
+          end if;
+          return new;
+        end
+        $$
+      `);
+      await admin.client.unsafe(`
+        create trigger "${triggerName}"
+        before insert on audit_events
+        for each row execute function "${triggerFunction}"()
+      `);
+      await locker`select pg_advisory_lock(${gateKey})`;
+
+      const [{ createSessionToken }, { userRoutes }] = await Promise.all([
+        import("../routes/auth"),
+        import("../routes/user"),
+      ]);
+      const token = await createSessionToken(
+        "0x0000000000000000000000000000000000000000",
+        tenantId,
+        { userId: adminUserId, tenantId, mfaVerifiedAt: Date.now(), mfaMethod: "totp" },
+      );
+      const app = new Hono();
+      app.use("*", correlationId);
+      app.route("/user", userRoutes);
+      app.onError((_error, c) => c.json({ ok: false, error: "Internal server error" }, 500));
+
+      const request = app.request(
+        `/user/me/tenants/${tenantId}/users/${targetUserId}/wallet-policy/wallets/${account.id}`,
+        { method: "DELETE", headers: { Authorization: `Bearer ${token}` } },
+      );
+      await waitForAdvisoryWaiter(admin.client, "%INSERT INTO audit_events%");
+      const relink = concurrent.db.transaction(async (tx) => {
+        await lockUserSession(tx, targetUserId);
+        await tx.delete(accounts).where(eq(accounts.id, account.id));
+        await tx.insert(accounts).values({
+          id: freshAccountId,
+          userId: targetUserId,
+          provider: "wallet:solana",
+          providerAccountId,
+        });
+      });
+      await waitForAdvisoryWaiter(admin.client, "%pg_advisory_xact_lock%");
+      await locker`select pg_advisory_unlock(${gateKey})`;
+      gateLocked = false;
+      const [response] = await Promise.all([request, relink]);
+
+      expect(response.status).toBe(500);
+      expect(await response.json()).toMatchObject({
+        ok: false,
+        data: { accountUnlinked: false, sessionsRevoked: true },
+      });
+      expect(
+        await admin.db
+          .select({ id: accounts.id })
+          .from(accounts)
+          .where(
+            and(
+              eq(accounts.userId, targetUserId),
+              eq(accounts.providerAccountId, providerAccountId),
+            ),
+          ),
+      ).toEqual([{ id: freshAccountId }]);
+      expect(
+        await admin.db
+          .select({ id: auditEvents.id })
+          .from(auditEvents)
+          .where(
+            and(
+              eq(auditEvents.tenantId, tenantId),
+              eq(auditEvents.action, "tenant.wallet_policy.remediation"),
+            ),
+          ),
+      ).toHaveLength(0);
+    } finally {
+      if (gateLocked) await locker`select pg_advisory_unlock(${gateKey})`;
+      locker.release();
+      await admin.client.unsafe(`drop trigger if exists "${triggerName}" on audit_events`);
+      await admin.client.unsafe(`drop function if exists "${triggerFunction}"()`);
+      await admin.db.delete(auditEvents).where(eq(auditEvents.tenantId, tenantId));
+      await admin.db.delete(auditChainHeads).where(eq(auditChainHeads.tenantId, tenantId));
+      await admin.db.delete(refreshTokens).where(eq(refreshTokens.userId, targetUserId));
+      await admin.db.delete(accounts).where(eq(accounts.userId, targetUserId));
+      await admin.db.delete(userTenants).where(eq(userTenants.tenantId, tenantId));
+      await admin.db.delete(tenants).where(eq(tenants.id, tenantId));
+      await admin.db.delete(users).where(eq(users.id, targetUserId));
+      await admin.db.delete(users).where(eq(users.id, adminUserId));
+      await Promise.all([concurrent.client.end(), admin.client.end()]);
+    }
+  },
+  120_000,
+);

@@ -102,6 +102,7 @@ export type {
   GlobalWalletTransactionScan,
   HyperliquidOrderResult,
   HyperliquidSubmitOrderInput,
+  LinkedAccountTransferFailureEvidence,
   MoneroBalanceResult,
   MoneroTransferDestinationInput,
   QuorumSignerCredential,
