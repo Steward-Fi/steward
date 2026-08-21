@@ -204,6 +204,12 @@ binding set, and rotate each password/salt pair atomically. The same rule applie
 to the optional webhook-specific root and salt; omitting either dedicated value
 selects its documented global fallback for that request.
 
+AWS KMS envelope or external-custody mode in Workers also requires
+`AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` bindings (plus
+`AWS_SESSION_TOKEN` for temporary credentials). These credentials are captured
+in the same request-local authority and passed explicitly to the AWS SDK; Worker
+custody never falls back to the isolate-global AWS credential chain.
+
 Example production-like `.dev.vars` shape:
 
 ```

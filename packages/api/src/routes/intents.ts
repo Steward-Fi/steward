@@ -1,4 +1,3 @@
-import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 /**
  * Privy-style generic intent routes.
  *
@@ -33,6 +32,7 @@ import {
   transactions,
   vault,
 } from "../services/context";
+import { isRuntimeVaultRpcMethodAllowed } from "../services/custody-runtime";
 import { redactSignedTransactions, toIntentResponse } from "../services/intent-response";
 import { getPolicyRulesValidationError } from "../services/policy-validation";
 import { isRecentMfaTimestamp } from "../services/recent-mfa";
@@ -78,13 +78,6 @@ const MAX_AGENT_SIGNER_METADATA_BYTES = 8_192;
 const DEFAULT_INTENT_TTL_SECONDS = 24 * 60 * 60;
 const MAX_INTENT_TTL_SECONDS = 7 * 24 * 60 * 60;
 const AGENT_KEY_QUORUM_STATUSES = new Set(["active", "paused", "revoked"]);
-const VAULT_RPC_ALLOWLIST = new Set(
-  (runtimeEnvironmentValue("STEWARD_VAULT_RPC_ALLOWLIST") ??
-    "eth_chainId,eth_blockNumber,eth_getBalance")
-    .split(",")
-    .map((method) => method.trim())
-    .filter(Boolean),
-);
 const MAX_UINT256_DECIMAL =
   "115792089237316195423570985008687907853269984665640564039457584007913129639935";
 const MAX_UINT256_DECIMAL_DIGITS = 78;
@@ -795,7 +788,7 @@ async function executeSendCallsIntent(row: typeof intents.$inferSelect) {
 
 async function executeRpcIntent(row: typeof intents.$inferSelect) {
   const method = normalizeRequiredText(row.payload.method, "method", 128);
-  if (!VAULT_RPC_ALLOWLIST.has(method)) {
+  if (!isRuntimeVaultRpcMethodAllowed(method)) {
     throw new IntentExecutionError("RPC method is not allowlisted", 403);
   }
   const request = {
@@ -1128,7 +1121,7 @@ class IntentExecutionError extends Error {
 }
 
 async function withAgentSpendLock<T>(agentId: string, fn: () => Promise<T>): Promise<T> {
-  if (runtimeEnvironmentValue("STEWARD_DB_MODE") === "pglite" || runtimeEnvironmentValue("STEWARD_PGLITE_MEMORY") === "true") {
+  if (process.env.STEWARD_DB_MODE === "pglite" || process.env.STEWARD_PGLITE_MEMORY === "true") {
     return fn();
   }
   return db.transaction(async (tx) => {

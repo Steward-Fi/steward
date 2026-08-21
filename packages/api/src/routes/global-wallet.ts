@@ -1,4 +1,3 @@
-import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 import { createHash } from "node:crypto";
 import {
   agents,
@@ -21,6 +20,7 @@ import {
   setNoStoreHeaders,
   verifySessionToken,
 } from "../services/context";
+import { resolveRuntimeChainId } from "../services/custody-runtime";
 import { globalWalletFeatureFlags } from "../services/global-wallet-runtime";
 import { isRecentMfaTimestamp } from "../services/recent-mfa";
 import { getConfiguredVault } from "../services/vault-factory";
@@ -383,7 +383,7 @@ function parseRpcQuantity(value: unknown): bigint | string {
 
 function parseRpcChainId(value: unknown): number | string {
   if (value === undefined || value === null || value === "") {
-    return Number(runtimeEnvironmentValue("CHAIN_ID") || "84532");
+    return resolveRuntimeChainId(84532);
   }
   const parsed = parseRpcQuantity(value);
   if (typeof parsed === "string")
@@ -1000,7 +1000,7 @@ globalWalletRoutes.post("/rpc/confirm", async (c) => {
     walletIndex,
   });
   const confirmation = await getDb().transaction(async (tx) => {
-    if (runtimeEnvironmentValue("STEWARD_DB_MODE") !== "pglite" && runtimeEnvironmentValue("STEWARD_PGLITE_MEMORY") !== "true") {
+    if (process.env.STEWARD_DB_MODE !== "pglite" && process.env.STEWARD_PGLITE_MEMORY !== "true") {
       await tx.execute(
         sql`select pg_advisory_xact_lock(hashtext(${`global-wallet-confirmation:${consent.id}:${method}:${requestHash}`}))`,
       );
@@ -1635,7 +1635,7 @@ globalWalletRoutes.post("/rpc", async (c) => {
   const result =
     method === "eth_accounts"
       ? [wallet.walletAddress]
-      : `0x${Number(runtimeEnvironmentValue("CHAIN_ID") || "84532").toString(16)}`;
+      : `0x${resolveRuntimeChainId(84532).toString(16)}`;
   return c.json<ApiResponse>({
     ok: true,
     data: { jsonrpc: body.jsonrpc ?? "2.0", id: body.id ?? null, result },

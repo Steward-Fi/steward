@@ -10,6 +10,7 @@ import {
   SecretVault,
   Vault,
 } from "@stwd/vault";
+import { resolveRuntimeChainId } from "./custody-runtime";
 
 const require = createRequire(import.meta.url);
 
@@ -80,12 +81,16 @@ export interface ConfiguredVaultOptions {
 
 export interface CustodyAuthority {
   readonly fingerprint: string;
+  readonly workerRuntime: boolean;
   readonly nodeEnvironment?: string;
   readonly masterPassword: string;
   readonly kdfSalt?: string;
   readonly mode: VaultMode;
   readonly kmsKeyId?: string;
   readonly awsRegion?: string;
+  readonly awsAccessKeyId?: string;
+  readonly awsSecretAccessKey?: string;
+  readonly awsSessionToken?: string;
   readonly pkcs11Module?: string;
   readonly pkcs11Pin?: string;
   readonly pkcs11KeyLabel?: string;
@@ -160,6 +165,15 @@ function positiveBigInt(value: string | undefined, name: string): bigint {
   return BigInt(value);
 }
 
+function awsCredentials(authority: CustodyAuthority) {
+  if (!authority.awsAccessKeyId || !authority.awsSecretAccessKey) return undefined;
+  return {
+    accessKeyId: authority.awsAccessKeyId,
+    secretAccessKey: authority.awsSecretAccessKey,
+    sessionToken: authority.awsSessionToken,
+  };
+}
+
 function createExternalCustodyProvider(authority: CustodyAuthority) {
   const provider = authority.externalCustodyProvider;
   if (!provider) return undefined;
@@ -175,6 +189,7 @@ function createExternalCustodyProvider(authority: CustodyAuthority) {
   }
   return new AwsKmsExternalKeyCustodyProvider({
     region: authority.externalCustodyAwsRegion,
+    credentials: awsCredentials(authority),
     maxGasLimit: positiveBigInt(
       authority.externalCustodyAwsMaxGasLimit,
       "STEWARD_EXTERNAL_CUSTODY_AWS_MAX_GAS_LIMIT",
@@ -319,18 +334,20 @@ export function resolveCustodyAuthority(options: ConfiguredVaultOptions = {}): C
   assertProductionCustodyAcknowledged(mode);
   const masterPassword = resolveMasterPassword(options);
   const nodeEnvironment = runtimeNodeEnvironment();
+  const workerRuntime = runtimeRaw("STEWARD_RUNTIME") === "workers";
   const legacySecretRoot = runtimeRaw("STEWARD_SECRET_VAULT_LEGACY_ROOT_FALLBACK");
-  const chainId = Number.parseInt(runtimeRaw("CHAIN_ID") ?? "84532", 10);
-  if (!Number.isSafeInteger(chainId) || chainId <= 0) {
-    throw new Error("CHAIN_ID must be a positive safe integer");
-  }
+  const chainId = resolveRuntimeChainId(84532);
   const resolved = {
+    workerRuntime,
     nodeEnvironment,
     masterPassword,
     kdfSalt: runtimeRaw("STEWARD_KDF_SALT"),
     mode,
     kmsKeyId: runtimeRaw("STEWARD_KMS_KEY_ID") ?? runtimeRaw("STEWARD_AWS_KMS_KEY_ARN"),
     awsRegion: runtimeRaw("STEWARD_AWS_REGION") ?? runtimeRaw("AWS_REGION"),
+    awsAccessKeyId: runtimeRaw("AWS_ACCESS_KEY_ID"),
+    awsSecretAccessKey: runtimeRaw("AWS_SECRET_ACCESS_KEY"),
+    awsSessionToken: runtimeRaw("AWS_SESSION_TOKEN"),
     pkcs11Module: runtimeRaw("STEWARD_PKCS11_MODULE"),
     pkcs11Pin: runtimeRaw("STEWARD_PKCS11_PIN"),
     pkcs11KeyLabel: runtimeRaw("STEWARD_PKCS11_KEY_LABEL"),
@@ -361,6 +378,16 @@ export function resolveCustodyAuthority(options: ConfiguredVaultOptions = {}): C
       legacySecretRoot === "true" ||
       (legacySecretRoot !== "false" && nodeEnvironment !== "production"),
   } satisfies Omit<CustodyAuthority, "fingerprint">;
+  const usesAws = mode === "kms-envelope:aws" || resolved.externalCustodyProvider === "aws-kms";
+  const hasAwsCredentialPart = Boolean(
+    resolved.awsAccessKeyId || resolved.awsSecretAccessKey || resolved.awsSessionToken,
+  );
+  const hasAwsCredentials = Boolean(resolved.awsAccessKeyId && resolved.awsSecretAccessKey);
+  if (usesAws && !hasAwsCredentials && (workerRuntime || hasAwsCredentialPart)) {
+    throw new Error(
+      "AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY must be configured together for AWS custody",
+    );
+  }
   return Object.freeze({ ...resolved, fingerprint: authorityFingerprint(resolved) });
 }
 
@@ -371,6 +398,7 @@ function createVaultForAuthority(authority: CustodyAuthority): Vault {
           provider: "aws",
           keyId: authority.kmsKeyId,
           region: authority.awsRegion,
+          credentials: awsCredentials(authority),
         })
       : authority.mode === "kms-envelope:pkcs11"
         ? new KmsEnvelopeKeystore({

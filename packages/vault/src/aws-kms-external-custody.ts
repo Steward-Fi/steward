@@ -70,6 +70,12 @@ export interface AwsKmsSigningClientLike {
   send(command: unknown, options?: { abortSignal?: AbortSignal }): Promise<unknown>;
 }
 
+export interface AwsKmsExternalCredentials {
+  accessKeyId: string;
+  secretAccessKey: string;
+  sessionToken?: string;
+}
+
 export interface AwsKmsEvmRpc {
   getChainId(): Promise<number>;
   prepareTransaction(
@@ -84,6 +90,7 @@ export interface AwsKmsEvmRpc {
 export interface AwsKmsExternalKeyCustodyOptions {
   client?: AwsKmsSigningClientLike;
   region?: string;
+  credentials?: AwsKmsExternalCredentials;
   rpcFactory?: (rpcUrl: string) => AwsKmsEvmRpc;
   maxGasLimit?: bigint;
   maxGasPriceWei?: bigint;
@@ -376,6 +383,7 @@ export class AwsKmsExternalKeyCustodyProvider implements ExternalKeyCustodyProvi
   private readonly clientIsInjected: boolean;
   private client?: AwsKmsSigningClientLike;
   private readonly region: string;
+  private readonly credentials?: AwsKmsExternalCredentials;
   private readonly rpcFactory: (rpcUrl: string) => AwsKmsEvmRpc;
   private readonly maxGasLimit?: bigint;
   private readonly maxGasPriceWei?: bigint;
@@ -387,6 +395,7 @@ export class AwsKmsExternalKeyCustodyProvider implements ExternalKeyCustodyProvi
     this.client = options.client;
     this.clientIsInjected = Boolean(options.client);
     this.region = options.region;
+    this.credentials = options.credentials;
     this.requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_EXTERNAL_REQUEST_TIMEOUT_MS;
     if (!Number.isSafeInteger(this.requestTimeoutMs) || this.requestTimeoutMs <= 0) {
       throw new Error("AWS KMS external custody requestTimeoutMs must be a positive safe integer");
@@ -648,9 +657,12 @@ export class AwsKmsExternalKeyCustodyProvider implements ExternalKeyCustodyProvi
     if (this.client) return this.client;
     const moduleName = "@aws-sdk/client-kms";
     const aws = (await import(moduleName)) as {
-      KMSClient: new (options: { region?: string }) => AwsKmsSigningClientLike;
+      KMSClient: new (options: {
+        region?: string;
+        credentials?: AwsKmsExternalCredentials;
+      }) => AwsKmsSigningClientLike;
     };
-    this.client = new aws.KMSClient({ region: this.region });
+    this.client = new aws.KMSClient({ region: this.region, credentials: this.credentials });
     return this.client;
   }
 
