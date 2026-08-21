@@ -72,13 +72,26 @@ DATABASE_URL=postgres://user:pass@localhost:5432/steward
 
 ### API Server
 
+Generate a dedicated JWT signing secret and store the output in your secret
+manager or `.env` file:
+
 ```bash
-STEWARD_PORT=3200                           # API port (default: 3200)
-STEWARD_BIND_HOST=0.0.0.0                   # Bind address
-STEWARD_JWT_SECRET=separate-jwt-signing-key  # Defaults to master password if not set
-STEWARD_PLATFORM_KEY=your-platform-admin-key # For platform-level management
-STEWARD_EMBEDDED=false                       # Set true for PGLite mode
+openssl rand -hex 32
 ```
+
+```bash
+PORT=3200                                              # API port (default: 3200)
+STEWARD_BIND_HOST=0.0.0.0                              # Bind address
+STEWARD_JWT_SECRET=<paste-64-character-hex-output-here> # Required outside embedded/local mode
+STEWARD_PLATFORM_KEY=your-platform-admin-key           # For platform-level management
+STEWARD_EMBEDDED=false                                  # Set true for PGLite mode
+```
+
+For non-embedded production, `STEWARD_JWT_SECRET` is required and must contain
+at least 32 high-entropy characters. Keep it separate from
+`STEWARD_MASTER_PASSWORD`. Derivation from the master password is available
+only in embedded/local development mode; production fails closed when the
+dedicated JWT secret is absent or too short.
 
 ### Blockchain
 
@@ -203,7 +216,7 @@ server {
 ## Production Checklist
 
 - [ ] Set a unique `STEWARD_MASTER_PASSWORD` (32+ chars, random)
-- [ ] Set a separate `STEWARD_JWT_SECRET`
+- [ ] Set a separate, high-entropy `STEWARD_JWT_SECRET` (32+ characters)
 - [ ] Use TLS for all connections (API + database)
 - [ ] Restrict database access to the Steward server only
 - [ ] Set `STEWARD_PLATFORM_KEY` for admin operations
