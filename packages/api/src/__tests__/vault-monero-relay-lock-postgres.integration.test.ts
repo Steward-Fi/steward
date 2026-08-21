@@ -11,6 +11,7 @@ import {
   transactions,
   users,
   userTenants,
+  withTenantAuditedTransaction,
 } from "@stwd/db";
 import {
   generateMoneroWallet,
@@ -513,17 +514,23 @@ describePostgres("mounted Monero recovery boundary (real Postgres)", () => {
     waiterPid: number;
   }> {
     for (let attempt = 0; attempt < 250; attempt += 1) {
-      const rows = await admin<{ pid: number; granted: boolean }[]>`
-        select pid, granted from pg_locks
-        where locktype = 'advisory'
-          and classid = (((hashtextextended(${lockIdentity}, 0) >> 32) & 4294967295)::text)::oid
-          and objid = ((hashtextextended(${lockIdentity}, 0) & 4294967295)::text)::oid
-          and objsubid = 1
-        order by granted desc, pid
+      const rows = await admin<{ pid: number; granted: boolean; blocker_pids: number[] }[]>`
+        select lock.pid, lock.granted, pg_blocking_pids(lock.pid)::int[] as blocker_pids
+        from pg_locks lock
+        where lock.locktype = 'advisory'
+          and lock.classid = (((hashtextextended(${lockIdentity}, 0) >> 32) & 4294967295)::text)::oid
+          and lock.objid = ((hashtextextended(${lockIdentity}, 0) & 4294967295)::text)::oid
+          and lock.objsubid = 1
+        order by lock.granted desc, lock.pid
       `;
       const holder = rows.find((row) => row.granted);
       const waiter = rows.find((row) => !row.granted);
-      if (holder && waiter && holder.pid !== waiter.pid) {
+      if (
+        holder &&
+        waiter &&
+        holder.pid !== waiter.pid &&
+        waiter.blocker_pids.includes(holder.pid)
+      ) {
         return { holderPid: holder.pid, waiterPid: waiter.pid };
       }
       await Bun.sleep(20);
@@ -531,15 +538,35 @@ describePostgres("mounted Monero recovery boundary (real Postgres)", () => {
     throw new Error(`mounted request did not wait on the exact ${lockIdentity} advisory lock`);
   }
 
-  async function waitForMountedTupleWaiter(tuple: AgentTuple): Promise<{
-    waiterPid: number;
-    blockerPid: number;
-  }> {
+  async function waitForMountedAdvisoryHolder(lockIdentity: string): Promise<number> {
     for (let attempt = 0; attempt < 250; attempt += 1) {
-      const rows = await admin<{ pid: number; blockers: number[] }[]>`
-        select activity.pid, pg_blocking_pids(activity.pid)::int[] as blockers
+      const [holder] = await admin<{ pid: number }[]>`
+        select lock.pid
+        from pg_locks lock
+        where lock.locktype = 'advisory'
+          and lock.granted
+          and lock.classid = (((hashtextextended(${lockIdentity}, 0) >> 32) & 4294967295)::text)::oid
+          and lock.objid = ((hashtextextended(${lockIdentity}, 0) & 4294967295)::text)::oid
+          and lock.objsubid = 1
+      `;
+      if (holder) return holder.pid;
+      await Bun.sleep(20);
+    }
+    throw new Error(`mounted request did not hold the exact ${lockIdentity} advisory lock`);
+  }
+
+  async function waitForMountedTupleWaiter(
+    tuple: AgentTuple,
+    expectedWaiterPid: number,
+    expectedBlockerPid: number,
+  ): Promise<void> {
+    for (let attempt = 0; attempt < 250; attempt += 1) {
+      const [waiter] = await admin<{ pid: number }[]>`
+        select activity.pid
         from pg_stat_activity activity
         where activity.datname = current_database()
+          and activity.pid = ${expectedWaiterPid}
+          and ${expectedBlockerPid} = any(pg_blocking_pids(activity.pid))
           and exists (
             select 1 from pg_locks xid_lock
             where xid_lock.pid = activity.pid
@@ -555,18 +582,14 @@ describePostgres("mounted Monero recovery boundary (real Postgres)", () => {
                 and tuple_lock.page = ${tuple.block}
                 and tuple_lock.tuple = ${tuple.offset}
             )
-            or activity.query ilike '%agents%for update%'
-            or activity.query ilike '%agents%for share%'
           )
       `;
-      const waiter = rows.find((row) => row.blockers.length > 0);
-      const blockerPid = waiter?.blockers[0];
-      if (waiter && blockerPid !== undefined) {
-        return { waiterPid: waiter.pid, blockerPid };
-      }
+      if (waiter?.pid === expectedWaiterPid) return;
       await Bun.sleep(20);
     }
-    throw new Error("mounted operation did not wait on the exact agent tuple");
+    throw new Error(
+      `backend ${expectedWaiterPid} did not wait on the exact agent tuple behind ${expectedBlockerPid}`,
+    );
   }
 
   function transfer(
@@ -657,12 +680,6 @@ describePostgres("mounted Monero recovery boundary (real Postgres)", () => {
     });
     app = new Hono<{ Variables: AppVariables }>();
     app.use("/vault/*", (c, next) => tenantAuth(c, next));
-    app.use("/vault/*", async (c, next) => {
-      await next();
-      if (c.req.header("x-test-force-outer-rollback") === "true") {
-        throw new Error("forced request transaction rollback after Monero checkpoint");
-      }
-    });
     app.use("/agents/*", (c, next) => tenantAuth(c, next));
     app.route("/vault", vaultRoutes);
     app.route("/agents", agentRoutes);
@@ -693,48 +710,89 @@ describePostgres("mounted Monero recovery boundary (real Postgres)", () => {
     restore("STEWARD_PLATFORM_KEY_SCOPES", originalRouteEnv.platformScopes);
   });
 
-  test("keeps the independently committed anchor when the outer request rolls back", async () => {
+  test("keeps only the independent checkpoint when its authenticated outer transaction rolls back", async () => {
+    const { withAuthenticatedTenantDatabase, withIndependentAuthenticatedTenantDatabase } =
+      await import("../services/context");
     const key = `outer-rollback-${suffix}`;
+    const keyDigest = createHash("sha256").update(key).digest("hex");
+    const transactionId = crypto.randomUUID();
     const baseline = rpc.relayCount();
-    const { vault: configuredVault } = await import("../services/context");
-    const originalRelay = configuredVault.relayMoneroTransfer.bind(configuredVault);
-    configuredVault.relayMoneroTransfer = async () => {
-      throw new Error("forced failure before Monero relay I/O");
-    };
-    try {
-      const response = await transfer(key, requestBody, {
-        "x-test-force-outer-rollback": "true",
-      });
-      expect(response.status).toBe(500);
-      expect(rpc.relayCount()).toBe(baseline);
+    const [before] = await admin<{ enabled: boolean }[]>`
+      select enabled from policies where id = ${`${agentId}-raw`}
+    `;
+    expect(before?.enabled).toBe(true);
 
-      const [anchor] = await admin<
-        { id: string; status: string; key_digest: string; audit_count: string }[]
-      >`
-        select t.id, t.status, t.action_payload->>'idempotencyKeyDigest' as key_digest,
-          (select count(*)::text from audit_events audit
-           where audit.resource_id = t.id
-             and audit.action = 'vault.monero_transfer.authorized') as audit_count
-        from transactions t
-        where t.agent_id = ${agentId}
-          and t.action_payload->>'idempotencyKeyDigest' = ${createHash("sha256").update(key).digest("hex")}
-      `;
-      expect(anchor).toMatchObject({ status: "failed", audit_count: "1" });
+    await expect(
+      withAuthenticatedTenantDatabase(
+        tenantId,
+        "session-jwt",
+        userId,
+        async () => {
+          await getDb()
+            .update(policies)
+            .set({ enabled: false })
+            .where(eq(policies.id, `${agentId}-raw`));
+          await withIndependentAuthenticatedTenantDatabase(
+            tenantId,
+            "session-jwt",
+            userId,
+            () =>
+              withTenantAuditedTransaction(tenantId, async (rawTx, appendRequiredAudit) => {
+                const tx = rawTx as ReturnType<typeof getDb>;
+                await tx.insert(transactions).values({
+                  id: transactionId,
+                  agentId,
+                  status: "approved",
+                  toAddress: recipient,
+                  value: "1025000000",
+                  chainId: 301,
+                  txHash: rpc.txHash,
+                  actionType: "monero_transfer",
+                  actionPayload: {
+                    type: "monero_transfer",
+                    recoveryVersion: 1,
+                    idempotencyKeyDigest: keyDigest,
+                    requestFingerprint: `outer-rollback-${suffix}`,
+                    relayState: "prepared",
+                  },
+                  policyResults: [],
+                });
+                await appendRequiredAudit({
+                  tenantId,
+                  actorType: "user",
+                  actorId: userId,
+                  action: "vault.monero_transfer.authorized",
+                  resourceType: "transaction",
+                  resourceId: transactionId,
+                  metadata: { idempotencyKeyDigest: keyDigest },
+                });
+              }),
+            userId,
+          );
+          throw new Error("forced authenticated outer transaction rollback");
+        },
+        userId,
+      ),
+    ).rejects.toThrow("forced authenticated outer transaction rollback");
 
-      configuredVault.relayMoneroTransfer = originalRelay;
-      const replay = await transfer(key);
-      expect(replay.status).toBe(409);
-      expect(
-        ((await replay.json()) as { data: { transactionId: string } }).data.transactionId,
-      ).toBe(anchor?.id);
-      expect(rpc.relayCount()).toBe(baseline);
-      await getDb()
-        .update(transactions)
-        .set({ status: "failed" })
-        .where(eq(transactions.id, anchor?.id ?? ""));
-    } finally {
-      configuredVault.relayMoneroTransfer = originalRelay;
-    }
+    const [outerState] = await admin<{ enabled: boolean }[]>`
+      select enabled from policies where id = ${`${agentId}-raw`}
+    `;
+    expect(outerState?.enabled).toBe(true);
+    const [anchor] = await admin<{ id: string; status: string; key_digest: string }[]>`
+      select id, status, action_payload->>'idempotencyKeyDigest' as key_digest
+      from transactions where id = ${transactionId}
+    `;
+    expect(anchor).toEqual({ id: transactionId, status: "approved", key_digest: keyDigest });
+    const checkpointAudits = await admin<{ action: string }[]>`
+      select action from audit_events where resource_id = ${transactionId} order by seq
+    `;
+    expect(checkpointAudits).toEqual([{ action: "vault.monero_transfer.authorized" }]);
+    expect(rpc.relayCount()).toBe(baseline);
+    await getDb()
+      .update(transactions)
+      .set({ status: "failed" })
+      .where(eq(transactions.id, transactionId));
   });
 
   test("commits the anchor before relay and recovers it before mutable gates", async () => {
@@ -887,8 +945,10 @@ describePostgres("mounted Monero recovery boundary (real Postgres)", () => {
     try {
       await waitForOwnedSignal(relayEntered.promise, transferRequest, "Monero-first relay");
       deletionRequest = deleteTenant();
-      const { waiterPid, blockerPid } = await waitForMountedTupleWaiter(tuple);
+      const blockerPid = await waitForMountedAdvisoryHolder(agentId);
+      const waiterPid = await waitForMountedAdvisoryHolder(`steward_tenant_delete_${tenantId}`);
       expect(waiterPid).not.toBe(blockerPid);
+      await waitForMountedTupleWaiter(tuple, waiterPid, blockerPid);
       expect(agentRevocations).toBe(0);
       expect(userRevocations).toBe(0);
       const [prematureAudit] = await admin<{ count: number }[]>`
@@ -949,8 +1009,10 @@ describePostgres("mounted Monero recovery boundary (real Postgres)", () => {
         }),
       ]);
       transferRequest = transfer(`tenant-delete-delete-first-${suffix}`);
-      const { waiterPid, blockerPid } = await waitForMountedTupleWaiter(tuple);
+      const blockerPid = await waitForMountedAdvisoryHolder(`steward_tenant_delete_${tenantId}`);
+      const waiterPid = await waitForMountedAdvisoryHolder(agentId);
       expect(waiterPid).not.toBe(blockerPid);
+      await waitForMountedTupleWaiter(tuple, waiterPid, blockerPid);
       expect(rpc.relayCount()).toBe(baseline);
 
       releaseRevocation.resolve();
