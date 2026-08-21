@@ -379,6 +379,224 @@ describeRealPostgres("condition set real-PostgreSQL atomicity", () => {
     }
   }, 120_000);
 
+  it("rolls back an audit-failed set patch before a concurrent delete commits", async () => {
+    const { suffix, tenantId } = await createTenant("patch-delete");
+    const [set] = await admin.db
+      .insert(conditionSets)
+      .values({
+        tenantId,
+        name: "patch delete",
+        description: "original",
+        ownerId: "postgres-race",
+      })
+      .returning({ id: conditionSets.id });
+    const failedRequestId = `failed-patch-${suffix}`;
+    const winnerRequestId = `winner-delete-${suffix}`;
+    const gate = await installAuditGate({
+      suffix,
+      tenantId,
+      requestId: failedRequestId,
+      action: "condition_set.update",
+      fail: true,
+    });
+    try {
+      const failedPatch = request(tenantId, `/condition-sets/${set.id}`, {
+        method: "PATCH",
+        headers: { "x-request-id": failedRequestId },
+        body: JSON.stringify({ description: "must roll back" }),
+      });
+      const failedPid = await waitForAdvisoryWaiter(String(gate.gateKey));
+      const winningDelete = spawnRoute({
+        tenantId,
+        path: `/condition-sets/${set.id}`,
+        method: "DELETE",
+        requestId: winnerRequestId,
+      });
+      const expectedWinnerPid = await winningDelete.backendPid;
+      const winnerPid = await waitForAdvisoryWaiter(
+        await advisoryKey(`steward_audit_${tenantId}`),
+        expectedWinnerPid,
+      );
+      expect(winnerPid).toBe(expectedWinnerPid);
+      expect(winnerPid).not.toBe(failedPid);
+
+      await gate.release();
+      const [failedResponse, winnerResponse] = await Promise.all([
+        failedPatch,
+        routeResult(winningDelete),
+      ]);
+      expect(failedResponse.status).toBe(500);
+      expect(winnerResponse.status).toBe(200);
+      expect(
+        await admin.db
+          .select({ id: conditionSets.id })
+          .from(conditionSets)
+          .where(eq(conditionSets.id, set.id)),
+      ).toEqual([]);
+      expect(
+        await admin.db
+          .select({ action: auditEvents.action, requestId: auditEvents.requestId })
+          .from(auditEvents)
+          .where(
+            and(
+              eq(auditEvents.tenantId, tenantId),
+              inArray(auditEvents.action, ["condition_set.update", "condition_set.delete"]),
+            ),
+          ),
+      ).toEqual([{ action: "condition_set.delete", requestId: winnerRequestId }]);
+    } finally {
+      await gate.cleanup();
+    }
+  }, 120_000);
+
+  it("rolls back an audit-failed item delete before a concurrent replacement commits", async () => {
+    const { suffix, tenantId } = await createTenant("delete-replace");
+    const [set] = await admin.db
+      .insert(conditionSets)
+      .values({ tenantId, name: "delete replace", ownerId: "postgres-race" })
+      .returning({ id: conditionSets.id });
+    const [item] = await admin.db
+      .insert(conditionSetItems)
+      .values({ tenantId, conditionSetId: set.id, value: "original", label: "original" })
+      .returning({ id: conditionSetItems.id });
+    const failedRequestId = `failed-delete-${suffix}`;
+    const winnerRequestId = `winner-replace-${suffix}`;
+    const gate = await installAuditGate({
+      suffix,
+      tenantId,
+      requestId: failedRequestId,
+      action: "condition_set.item.delete",
+      fail: true,
+    });
+    try {
+      const failedDelete = request(tenantId, `/condition-sets/${set.id}/items/${item.id}`, {
+        method: "DELETE",
+        headers: { "x-request-id": failedRequestId },
+      });
+      const failedPid = await waitForAdvisoryWaiter(String(gate.gateKey));
+      const winningReplace = spawnRoute({
+        tenantId,
+        path: `/condition-sets/${set.id}/items`,
+        method: "PUT",
+        requestId: winnerRequestId,
+        body: { items: [{ value: "replacement", label: "winner" }] },
+      });
+      const expectedWinnerPid = await winningReplace.backendPid;
+      const winnerPid = await waitForAdvisoryWaiter(
+        await advisoryKey(`steward_audit_${tenantId}`),
+        expectedWinnerPid,
+      );
+      expect(winnerPid).toBe(expectedWinnerPid);
+      expect(winnerPid).not.toBe(failedPid);
+
+      await gate.release();
+      const [failedResponse, winnerResponse] = await Promise.all([
+        failedDelete,
+        routeResult(winningReplace),
+      ]);
+      expect(failedResponse.status).toBe(500);
+      expect(winnerResponse.status).toBe(200);
+      expect(
+        await admin.db
+          .select({ value: conditionSetItems.value, label: conditionSetItems.label })
+          .from(conditionSetItems)
+          .where(eq(conditionSetItems.conditionSetId, set.id)),
+      ).toEqual([{ value: "replacement", label: "winner" }]);
+      expect(
+        await admin.db
+          .select({ action: auditEvents.action, requestId: auditEvents.requestId })
+          .from(auditEvents)
+          .where(
+            and(
+              eq(auditEvents.tenantId, tenantId),
+              inArray(auditEvents.action, [
+                "condition_set.item.delete",
+                "condition_set.items.replace",
+              ]),
+            ),
+          ),
+      ).toEqual([{ action: "condition_set.items.replace", requestId: winnerRequestId }]);
+    } finally {
+      await gate.cleanup();
+    }
+  }, 120_000);
+
+  it("rolls back an audit-failed item delete before a concurrent upsert commits", async () => {
+    const { suffix, tenantId } = await createTenant("delete-upsert");
+    const [set] = await admin.db
+      .insert(conditionSets)
+      .values({ tenantId, name: "delete upsert", ownerId: "postgres-race" })
+      .returning({ id: conditionSets.id });
+    const [item] = await admin.db
+      .insert(conditionSetItems)
+      .values({ tenantId, conditionSetId: set.id, value: "target", label: "original" })
+      .returning({ id: conditionSetItems.id });
+    const failedRequestId = `failed-delete-${suffix}`;
+    const winnerRequestId = `winner-upsert-${suffix}`;
+    const gate = await installAuditGate({
+      suffix,
+      tenantId,
+      requestId: failedRequestId,
+      action: "condition_set.item.delete",
+      fail: true,
+    });
+    try {
+      const failedDelete = request(tenantId, `/condition-sets/${set.id}/items/${item.id}`, {
+        method: "DELETE",
+        headers: { "x-request-id": failedRequestId },
+      });
+      const failedPid = await waitForAdvisoryWaiter(String(gate.gateKey));
+      const winningUpsert = spawnRoute({
+        tenantId,
+        path: `/condition-sets/${set.id}/items`,
+        method: "POST",
+        requestId: winnerRequestId,
+        body: { value: "target", label: "winner" },
+      });
+      const expectedWinnerPid = await winningUpsert.backendPid;
+      const winnerPid = await waitForAdvisoryWaiter(
+        await advisoryKey(`steward_audit_${tenantId}`),
+        expectedWinnerPid,
+      );
+      expect(winnerPid).toBe(expectedWinnerPid);
+      expect(winnerPid).not.toBe(failedPid);
+
+      await gate.release();
+      const [failedResponse, winnerResponse] = await Promise.all([
+        failedDelete,
+        routeResult(winningUpsert),
+      ]);
+      expect(failedResponse.status).toBe(500);
+      expect(winnerResponse.status).toBe(201);
+      expect(
+        await admin.db
+          .select({
+            id: conditionSetItems.id,
+            value: conditionSetItems.value,
+            label: conditionSetItems.label,
+          })
+          .from(conditionSetItems)
+          .where(eq(conditionSetItems.conditionSetId, set.id)),
+      ).toEqual([{ id: item.id, value: "target", label: "winner" }]);
+      expect(
+        await admin.db
+          .select({ action: auditEvents.action, requestId: auditEvents.requestId })
+          .from(auditEvents)
+          .where(
+            and(
+              eq(auditEvents.tenantId, tenantId),
+              inArray(auditEvents.action, [
+                "condition_set.item.delete",
+                "condition_set.item.upsert",
+              ]),
+            ),
+          ),
+      ).toEqual([{ action: "condition_set.item.upsert", requestId: winnerRequestId }]);
+    } finally {
+      await gate.cleanup();
+    }
+  }, 120_000);
+
   it("serializes replace before an upsert queued on the same condition set", async () => {
     const { suffix, tenantId } = await createTenant("replace-upsert");
     const [set] = await admin.db
@@ -438,7 +656,8 @@ describeRealPostgres("condition set real-PostgreSQL atomicity", () => {
               "condition_set.item.upsert",
             ]),
           ),
-        );
+        )
+        .orderBy(auditEvents.seq);
       expect(events).toEqual([
         { action: "condition_set.items.replace", requestId: replaceRequestId },
         { action: "condition_set.item.upsert", requestId: upsertRequestId },
