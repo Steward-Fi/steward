@@ -171,7 +171,12 @@ Steward backup.
 | --- | --- | --- | --- |
 | `PORT` | API listen port | `3200` | Must parse as a positive integer. |
 | `STEWARD_BIND_HOST` | API bind address | `127.0.0.1` | Use `0.0.0.0` only behind a firewall/reverse proxy. Compose sets this to `0.0.0.0` inside the container. |
-| `DATABASE_URL` | PostgreSQL connection string | none; PGLite selected when absent/forced in embedded paths | Required by the normal API entry point because `context.ts` calls `requireEnv("DATABASE_URL")`; embedded mode supplies `pglite://embedded` internally. |
+| `DATABASE_URL` | Restricted application PostgreSQL connection | none; PGLite selected when absent/forced in embedded paths | Production requires the non-owner `steward_app` login; never use a migrator, operator, superuser, or `BYPASSRLS` login. |
+| `STEWARD_APP_DATABASE_ROLE` | Exact application database role | none | Required in production and verified at startup. |
+| `STEWARD_PLATFORM_DATABASE_URL` | Restricted platform-authority connection | none | Required for destructive global platform operations; never reuse `DATABASE_URL`. |
+| `STEWARD_PLATFORM_DATABASE_ROLE` | Exact platform database role | `steward_platform` | Must match the login on `STEWARD_PLATFORM_DATABASE_URL`. |
+| `STEWARD_MIGRATION_DATABASE_URL` | Release-job migration connection | none | Keep out of the API environment; applies core/plugin migrations and activates RLS. |
+| `STEWARD_OPERATOR_DATABASE_URL` | Bootstrap operator connection | none | Keep out of the API environment; requires provider-superuser-equivalent authority. |
 | `STEWARD_DB_MODE` | Force database backend | auto | Set to `pglite` to force PGLite. |
 | `STEWARD_PGLITE_PATH` | PGLite persistence directory | `~/.steward/data` | Used only by PGLite. |
 | `STEWARD_PGLITE_MEMORY` | Use in-memory PGLite | `false` | Set exactly `true`; data is discarded on restart. |
@@ -211,7 +216,7 @@ Steward backup.
 | `STEWARD_PROXY_URL` | Proxy URL used by API invoke paths and web/server-side app code | `http://steward-proxy:8080` in root Compose (`http://localhost:8080` for host-side clients) | Use the compose-internal URL inside containers and the published URL outside containers. |
 | `STEWARD_PROXY_REQUEST_SIGNING_SECRET` / `_SECRETS` | HMAC root used by API invoke paths/clients to sign proxy requests and by the proxy to verify them | none | Required for the full API+proxy Compose stack; generate a value distinct from JWT/audit/master secrets. Use plural `_SECRETS` for rotation where supported. |
 | `STEWARD_AGENT_TOKEN` | Agent token for web/server-side routes | none | Required only by app paths that call Steward as an agent. |
-| `SKIP_MIGRATIONS` | Disable API startup migrations | false | Set `true` or `1` only when another process applies migrations. |
+| `SKIP_MIGRATIONS` | Disable API startup migrations | false | Required as `true` or `1` for production Postgres after the release gate completes. |
 | `STEWARD_MONERO_WALLET_RPC_URL` | monero-wallet-rpc sidecar endpoint | none | Empty disables Monero: every Monero endpoint fails closed with 503. In Compose use `http://monero-wallet-rpc:18083/json_rpc`. |
 | `MONERO_WALLET_RPC_PASSWORD` | Password for the sidecar's `--rpc-login` (username `steward`) | none | Required when the `monero` Compose profile is enabled; Compose mounts it into the sidecar as a secret and derives `STEWARD_MONERO_WALLET_RPC_LOGIN` from it. |
 | `STEWARD_MONERO_DAEMON_URL` | Explicit Monero daemon URL used for chain height at wallet creation | — (required when Monero is enabled) | Use HTTPS for remote daemons. Prefer a daemon you operate; a third-party node can correlate your IP with wallet activity. |
@@ -243,13 +248,21 @@ sidecar there); the API fails closed with 503 for Monero endpoints.
 
 ## Migration behavior
 
-Migrations run automatically on startup unless `SKIP_MIGRATIONS=true` or `SKIP_MIGRATIONS=1`.
+Production PostgreSQL API processes set `SKIP_MIGRATIONS=true`. Before rollout,
+a separate job with the same plugin selection runs:
 
-- Normal PostgreSQL mode calls the Drizzle migrator from `packages/db/src/migrate.ts` against `packages/db/drizzle` before the API serves traffic.
+```bash
+DATABASE_URL="$STEWARD_MIGRATION_DATABASE_URL" bun run --cwd packages/api migrate
+```
+
+It applies the core journal and all enabled-plugin journals. The
+provider-superuser-equivalent operator then runs `rls-bootstrap.sql`, followed
+by `rls-activate.sql` through the direct migration login. Neither privileged URL
+may be present in the API environment.
+
+- Development PostgreSQL may retain startup migrations with a suitably privileged local login.
 - PGLite mode does not run the Postgres migrator in `index.ts`. Instead, `packages/db/src/pglite.ts` replays `.sql` files from `packages/db/drizzle` in lexicographic order and tracks applied files in `__steward_migrations`.
 - If a PostgreSQL migration fails at startup, the API exits instead of serving with a partially migrated schema.
-
-Only set `SKIP_MIGRATIONS` when you have a separate migration job and can guarantee it completed before the API starts.
 
 ## Upgrades
 
@@ -269,4 +282,5 @@ docker compose build
 docker compose up -d
 ```
 
-Database migrations auto-apply during API startup. Back up Postgres before upgrades, especially before schema changes that affect vault, auth, or tenant tables.
+Back up Postgres, complete the migration/bootstrap/activation release gate, and
+only then roll out the production API. Do not rely on production API startup to migrate.

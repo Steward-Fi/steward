@@ -162,8 +162,11 @@ table in future migrations.
 6. Run real-Postgres cross-tenant read/write/upsert/delete/join tests plus
    concurrent pool-reuse and background-job tests against the deployment role.
 
-Create/finalize roles after all migrations in the release have applied (the
-invoking operator needs `CREATEROLE` and schema ownership):
+Create/finalize roles after all migrations in the release have applied. The
+bootstrap creates and maintains a `BYPASSRLS` definer, so the invoking database
+operator must be a PostgreSQL superuser or a provider-controlled equivalent
+that is explicitly allowed to create/alter `BYPASSRLS` roles, change function
+owners, and own the migrated schemas. `CREATEROLE` alone is not sufficient:
 
 ```bash
 psql "$STEWARD_OPERATOR_DATABASE_URL" \
@@ -174,8 +177,9 @@ psql "$STEWARD_OPERATOR_DATABASE_URL" \
   -f scripts/postgres/rls-bootstrap.sql
 ```
 
-`STEWARD_OPERATOR_DATABASE_URL` is a CREATEROLE/schema-owner operator credential;
-never point it at the application login and never expose it to the API process.
+`STEWARD_OPERATOR_DATABASE_URL` is that provider-superuser-equivalent operator
+credential; never point it at the application login and never expose it to the
+API process.
 The app, platform-authority, and migration roles are separate login identities
 asserted `NOSUPERUSER NOBYPASSRLS`; the migration role owns the application
 relations, while the app cannot inherit or assume either privileged login.
@@ -197,8 +201,18 @@ enabled plugin's namespaced journal; invoking only the core package is not a
 complete release migration.
 Do not grant the migrator membership in the BYPASSRLS bootstrap owner. A future
 migration that must replace a bootstrap-owned function requires a separately
-reviewed operator-mediated ownership handoff; applying it directly as the
-migrator must fail rather than widening that authority boundary.
+reviewed, operator-mediated ownership handoff **before** the release migrator
+runs, followed by bootstrap ownership restoration. The generic release command
+does not perform that handoff and must fail rather than silently widening the
+authority boundary. Bootstrap reruns are supported only through the
+provider-superuser-equivalent operator above; a plain schema owner cannot
+reassign functions already owned by the NOLOGIN definer.
+
+On a brand-new empty database, the migration login does not exist yet. Run the
+initial complete API migration entrypoint with the provider operator as
+`DATABASE_URL`, bootstrap the roles, provision the three login credentials
+through the provider, and activate. Every subsequent release uses the dedicated
+migration URL before the operator bootstrap reconciliation.
 
 `bun scripts/generate-rls-policy-manifest.ts` replays the immutable migrations
 and the capabilities plugin migrations, then refreshes the committed exact relation/partition and policy-definition

@@ -189,10 +189,14 @@ first. A PGLite directory archive is not a portable `pg_restore` archive.
    Set files to `0600`. Do not print values in logs or shell tracing.
 6. **Resolve migration compatibility.** First run the recorded release against
    the restored schema. Compare the migration ledger to the checked-out
-   `packages/db/drizzle/` files. Then upgrade one tested release step at a time;
-   normal startup applies forward migrations. Never set `SKIP_MIGRATIONS` unless
-   a separately observed migration job has completed successfully. Never run an
-   older release against a schema already migrated by a newer release.
+   `packages/db/drizzle/` files. Then upgrade one tested release step at a time.
+   Run `DATABASE_URL="$STEWARD_MIGRATION_DATABASE_URL" bun run --cwd packages/api migrate`
+   with the restored plugin selection, reconcile ownership using
+   `rls-bootstrap.sql` through the provider-superuser-equivalent operator, and
+   activate through the direct migration login. Keep both privileged URLs out
+   of the API, set `SKIP_MIGRATIONS=true`, and start it only after all three
+   steps succeed. Never run an older release against a schema already migrated
+   by a newer release.
 7. **Restore or conservatively reset Redis.** Restore the matched snapshot, or
    enforce the documented cold-start hold for spend windows. Redis recovery must
    not delay inspection of durable PostgreSQL state.
