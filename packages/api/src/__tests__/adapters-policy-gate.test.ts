@@ -10,6 +10,8 @@ import {
   type BridgeHandoff,
   type BridgeQuote,
   MockBridgeAdapter,
+  MockEarnAdapter,
+  MockSwapAdapter,
 } from "@stwd/adapters";
 import {
   agents,
@@ -22,6 +24,7 @@ import {
   userTenants,
 } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
+import { checkSpendLimit, recordSpend } from "@stwd/redis";
 import { withRuntimeEnvironment } from "@stwd/shared/runtime-env";
 import { and, desc, eq } from "drizzle-orm";
 import { Hono } from "hono";
@@ -31,6 +34,8 @@ import type { AppVariables } from "../services/context";
 let adapterRoutesModule: Awaited<typeof import("../routes/adapters")>;
 
 beforeAll(async () => {
+  process.env.NODE_ENV ??= "test";
+  process.env.STEWARD_ALLOW_MEMORY_ADAPTER_SPEND ??= "true";
   process.env.STEWARD_PGLITE_MEMORY = "true";
   process.env.STEWARD_MASTER_PASSWORD ??= "test-master-password";
   // Audit writes require an HMAC key; set a sufficiently-strong one for tests.
@@ -40,8 +45,8 @@ beforeAll(async () => {
   setPGLiteOverride(db, async () => {
     await client.close();
   });
-  // The fund-moving spend gate (enforceFundMovingPolicy → checkAgentSpendLimit)
-  // fails CLOSED when Redis is *configured* (REDIS_URL set in this env) but the
+  // The atomic fund-moving spend reservation fails CLOSED when Redis is
+  // *configured* (REDIS_URL set in this env) but the
   // process never connected. Without an explicit connect, redisAvailable stays
   // false and every "within caps" build would be wrongly denied with a 400
   // "daily-spend-cap ... fail-closed" reason. The merged environment runs a real
@@ -61,6 +66,8 @@ afterEach(() => {
   // the next test back through the built-in mock so later boundary tests remain
   // hermetic; provider implementations stay durably registered.
   process.env.STEWARD_BRIDGE_ADAPTER = "mock";
+  process.env.STEWARD_SWAP_ADAPTER = "mock";
+  process.env.STEWARD_EARN_ADAPTER = "mock";
   adapterRegistry.register("bridge", "policy-test-reset", new MockBridgeAdapter());
 });
 
@@ -77,6 +84,30 @@ const WETH = {
 };
 const NATIVE_XMR_RECIPIENT =
   "45AmZ2FRjuqZts5NGzb7ZXSNRuwS9MUqEeakpyEeSHsB5mywLwBzzq2cTsbJzTVUuLSHxtbfgKyZJVBqPffpP8fm79sjAcK";
+
+class CountingSwapAdapter extends MockSwapAdapter {
+  builds = 0;
+  override buildSwap(...args: Parameters<MockSwapAdapter["buildSwap"]>) {
+    this.builds += 1;
+    return super.buildSwap(...args);
+  }
+}
+
+class CountingEarnAdapter extends MockEarnAdapter {
+  builds = 0;
+  override buildDeposit(...args: Parameters<MockEarnAdapter["buildDeposit"]>) {
+    this.builds += 1;
+    return super.buildDeposit(...args);
+  }
+}
+
+class CountingBridgeAdapter extends MockBridgeAdapter {
+  builds = 0;
+  override buildBridge(...args: Parameters<MockBridgeAdapter["buildBridge"]>) {
+    this.builds += 1;
+    return super.buildBridge(...args);
+  }
+}
 
 function externalHandoff(overrides: Partial<BridgeHandoff> = {}): BridgeHandoff {
   return {
@@ -261,6 +292,16 @@ describe("adapter fund-moving policy gate", () => {
   it("fails closed across mounted swap, earn, and bridge routes without durable production spend state", async () => {
     await shutdownRedis();
     try {
+      const provider = `adapter-spend-preflight-${Date.now()}`;
+      const swap = new CountingSwapAdapter();
+      const earn = new CountingEarnAdapter();
+      const bridge = new CountingBridgeAdapter();
+      adapterRegistry.register("swap", provider, swap);
+      adapterRegistry.register("earn", provider, earn);
+      adapterRegistry.register("bridge", provider, bridge);
+      process.env.STEWARD_SWAP_ADAPTER = provider;
+      process.env.STEWARD_EARN_ADAPTER = provider;
+      process.env.STEWARD_BRIDGE_ADAPTER = provider;
       for (const posture of [
         { name: "absent", environment: { NODE_ENV: "production" } },
         {
@@ -290,11 +331,17 @@ describe("adapter fund-moving policy gate", () => {
           expect(body.unsignedIntent).toBeUndefined();
         }
       }
+      expect({ swap: swap.builds, earn: earn.builds, bridge: bridge.builds }).toEqual({
+        swap: 0,
+        earn: 0,
+        bridge: 0,
+      });
 
       const { app, agentId } = await makeApp(`tenant-adapter-redis-dev-${Date.now()}`);
       const developmentResponses = await withRuntimeEnvironment(
         {
           NODE_ENV: "development",
+          STEWARD_ALLOW_MEMORY_ADAPTER_SPEND: "true",
           STEWARD_ADAPTER_PER_OP_CAP_USD: "1000",
           STEWARD_ADAPTER_DAILY_CAP_USD: "10000",
         },
@@ -306,6 +353,52 @@ describe("adapter fund-moving policy gate", () => {
     } finally {
       await initRedis();
     }
+  });
+
+  it("atomically admits only one mounted 59+1 daily-boundary request across restart", async () => {
+    if (process.env.STEWARD_REDIS_TESTS !== "1" || !process.env.REDIS_URL) return;
+    const tenantId = `tenant-adapter-atomic-${Date.now()}`;
+    const { app, agentId } = await makeApp(tenantId);
+    await recordSpend(agentId, tenantId, 59, "boundary-seed");
+    const quoteRes = await app.request("/adapters/swap/quote", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        agentId,
+        fromToken: USDC,
+        toToken: WETH,
+        amount: "1000000",
+        chainId: 8453,
+      }),
+    });
+    const { data } = (await quoteRes.json()) as { data: { quote: unknown } };
+    const request = () =>
+      app.request("/adapters/swap/build", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          agentId,
+          agentAddress: AGENT_WALLET,
+          quote: data.quote,
+          estimatedUsd: 1,
+        }),
+      });
+    const environment = {
+      NODE_ENV: "production",
+      REDIS_URL: process.env.REDIS_URL,
+      STEWARD_ADAPTER_PER_OP_CAP_USD: "60",
+      STEWARD_ADAPTER_DAILY_CAP_USD: "60",
+    };
+    const concurrent = await withRuntimeEnvironment(environment, () =>
+      Promise.all([request(), request()]),
+    );
+    expect(concurrent.map((response) => response.status).sort()).toEqual([200, 400]);
+    expect((await checkSpendLimit(agentId, 60, "day")).effectiveSpent).toBe(60);
+
+    await shutdownRedis();
+    expect(await initRedis()).toBe(true);
+    const afterRestart = await withRuntimeEnvironment(environment, request);
+    expect(afterRestart.status).toBe(400);
   });
 
   it("DENIES a swap build when the estimated notional exceeds the per-op cap", async () => {

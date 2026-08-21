@@ -9,14 +9,15 @@
 
 import {
   checkRateLimit,
-  checkSpendLimit,
   disconnectRedis,
   getRedis,
   type IoredisLike,
   type RateLimitResult,
   recordSpend,
-  type SpendPeriod,
+  reserveSpend,
   type SpendRecordOptions,
+  type SpendReservation,
+  settleReservedSpend,
 } from "@stwd/redis";
 import { redactedThrownDiagnostics } from "@stwd/shared";
 import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
@@ -25,6 +26,37 @@ import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 
 let redisAvailable = false;
 let redisClient: IoredisLike | null = null;
+
+export type AgentSpendReservation =
+  | { source: "redis"; agentId: string; tenantId: string; reservation: SpendReservation }
+  | { source: "memory"; key: string; units: number };
+
+const localAdapterReservations = new Map<string, number>();
+
+function adapterMemoryFallbackAllowed(): boolean {
+  const environment = runtimeEnvironmentValue("NODE_ENV");
+  return (
+    runtimeEnvironmentValue("STEWARD_RUNTIME") !== "workers" &&
+    (environment === "development" || environment === "test") &&
+    runtimeEnvironmentValue("STEWARD_ALLOW_MEMORY_ADAPTER_SPEND") === "true"
+  );
+}
+
+function adapterMemoryKey(agentId: string): string {
+  return `${agentId}:${new Date().toISOString().slice(0, 10)}`;
+}
+
+function toSpendUnits(value: number): number {
+  if (!Number.isFinite(value) || value <= 0) throw new Error("invalid adapter spend amount");
+  const units = Math.ceil(value * 10_000);
+  if (!Number.isSafeInteger(units)) throw new Error("adapter spend amount is too large");
+  return units;
+}
+
+/** Test-only reset for the explicitly acknowledged process-local fallback. */
+export function __resetAdapterMemorySpendForTests(): void {
+  localAdapterReservations.clear();
+}
 
 /**
  * Try to connect to Redis on startup. If it fails, route-level helpers decide
@@ -123,7 +155,7 @@ export async function checkAgentRateLimit(
 ): Promise<RateLimitResult> {
   // Redis not available: only skip enforcement when Redis was never configured
   // (documented dev path). If Redis IS configured (production), an unavailable
-  // backend must fail CLOSED — mirroring checkAgentSpendLimit (SEC-016).
+  // backend must fail CLOSED — mirroring adapter spend reservations (SEC-016).
   if (!redisAvailable) {
     if (!isRedisConfigured()) return PERMISSIVE_RATE_LIMIT;
     return { allowed: false, remaining: 0, resetMs: 60_000 };
@@ -174,36 +206,97 @@ export async function checkProxyRateLimit(
 // ─── Spend-tracking helpers (safe wrappers) ───────────────────────────────────
 
 /**
- * Check if an agent's spending would exceed their limit.
+ * Cheap preflight used before an adapter/provider is invoked. This is not the
+ * monetary admission decision; reserveAgentSpendLimit performs that atomically.
  */
-export async function checkAgentSpendLimit(
+export function isAgentSpendReservationAvailable(): boolean {
+  if (isRedisConfigured()) return redisAvailable;
+  return adapterMemoryFallbackAllowed();
+}
+
+/**
+ * Atomically reserve an adapter intent against settled + already-reserved daily
+ * spend. Successful reservations remain authoritative after the response so a
+ * concurrent process or restarted API cannot issue another intent past the cap.
+ */
+export async function reserveAgentSpendLimit(
   agentId: string,
+  tenantId: string,
+  amountUsd: number,
   limitUsd: number,
-  period: SpendPeriod,
-): Promise<{ allowed: boolean; spent: number; remaining: number }> {
-  // Resolve authority from the immutable request snapshot before consulting
-  // process-global connection state. A Worker request without Redis bindings
-  // must never inherit a client initialized by a previous request.
-  if (!isRedisConfigured()) {
-    if (runtimeEnvironmentValue("NODE_ENV") !== "production") {
-      return { allowed: true, spent: 0, remaining: limitUsd };
-    }
-    return { allowed: false, spent: 0, remaining: 0 };
+): Promise<
+  { allowed: true; reservation: AgentSpendReservation } | { allowed: false; reason: string }
+> {
+  let amountUnits: number;
+  let limitUnits: number;
+  try {
+    amountUnits = toSpendUnits(amountUsd);
+    limitUnits = toSpendUnits(limitUsd);
+  } catch {
+    return { allowed: false, reason: "adapter spend policy is invalid" };
   }
 
-  // The current request expects durable enforcement, but the configured client
-  // was absent or failed to initialize. Deny rather than assume zero spend.
-  if (!redisAvailable) return { allowed: false, spent: 0, remaining: 0 };
+  if (!isRedisConfigured()) {
+    if (!adapterMemoryFallbackAllowed()) {
+      return { allowed: false, reason: "durable adapter spend enforcement is unavailable" };
+    }
+    const key = adapterMemoryKey(agentId);
+    const current = localAdapterReservations.get(key) ?? 0;
+    if (amountUnits > limitUnits - current) {
+      return { allowed: false, reason: "adapter daily spend cap would be exceeded" };
+    }
+    localAdapterReservations.set(key, current + amountUnits);
+    return { allowed: true, reservation: { source: "memory", key, units: amountUnits } };
+  }
+
+  if (!redisAvailable) {
+    return { allowed: false, reason: "durable adapter spend enforcement is unavailable" };
+  }
 
   try {
-    return await checkSpendLimit(agentId, limitUsd, period);
+    const reservation = await reserveSpend(agentId, tenantId, amountUsd, { day: limitUsd });
+    return {
+      allowed: true,
+      reservation: { source: "redis", agentId, tenantId, reservation },
+    };
   } catch (err) {
-    // Configured backend threw: fail CLOSED — we cannot prove the spend is within limit.
     console.error(
-      "[steward:redis] Spend limit check failed, denying request (fail-closed)",
+      "[steward:redis] Adapter spend reservation failed, denying request",
       redactedThrownDiagnostics(err),
     );
-    return { allowed: false, spent: 0, remaining: 0 };
+    return { allowed: false, reason: "adapter daily spend cap or durable enforcement denied" };
+  }
+}
+
+/** Release a reservation only when no intent was handed to the caller. */
+export async function releaseAgentSpendReservation(
+  held: AgentSpendReservation | undefined,
+): Promise<void> {
+  if (!held) return;
+  if (held.source === "memory") {
+    const current = localAdapterReservations.get(held.key) ?? 0;
+    const after = Math.max(0, current - held.units);
+    if (after === 0) localAdapterReservations.delete(held.key);
+    else localAdapterReservations.set(held.key, after);
+    return;
+  }
+  try {
+    await settleReservedSpend(
+      held.agentId,
+      held.tenantId,
+      held.reservation.reservedUsd,
+      0,
+      "adapter-intent",
+      held.reservation.periods,
+      held.reservation.buckets,
+    );
+  } catch (err) {
+    // A failed release intentionally leaves the reservation in place. That is
+    // fail-closed and prevents a provider failure from freeing uncertain budget.
+    console.error(
+      "[steward:redis] Adapter spend reservation release failed; hold retained",
+      redactedThrownDiagnostics(err),
+    );
   }
 }
 

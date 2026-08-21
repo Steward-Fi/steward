@@ -33,17 +33,17 @@ import {
   type UnsignedTxIntent,
 } from "@stwd/adapters";
 import { getDb, tenantAppClients, userTenants } from "@stwd/db";
-import {
-  dailySpendCapEvaluator,
-  evaluateTradeOrder,
-  perOrderCapEvaluator,
-} from "@stwd/policy-engine";
+import { evaluateTradeOrder, perOrderCapEvaluator } from "@stwd/policy-engine";
 import { redactedThrownDiagnostics } from "@stwd/shared";
 import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 import { and, eq } from "drizzle-orm";
 import { type Context, Hono } from "hono";
 import { z } from "zod";
-import { checkAgentSpendLimit } from "../middleware/redis";
+import {
+  type AgentSpendReservation,
+  releaseAgentSpendReservation,
+  reserveAgentSpendLimit,
+} from "../middleware/redis";
 import { type ActorType, writeAuditEvent } from "../services/audit";
 import {
   type ApiResponse,
@@ -325,19 +325,14 @@ function decodeBase64(value: string): Uint8Array | null {
  * the agent's per-request budget so a deny here blocks the route from returning
  * any signable artifact. `estimatedUsd` is the route's notional estimate.
  *
- * The daily cap is enforced against the agent's REAL rolling daily USD spend,
- * sourced from the same Redis counter the signing path records into
- * (`recordVaultSpend` → `recordAgentSpend` → `recordSpend`'s `total` field).
- * This is what makes `STEWARD_ADAPTER_DAILY_CAP_USD` actually accumulate across
- * the day instead of evaluating every order in isolation (which would let a
- * caller issue unlimited per-order-cap-sized operations). `checkAgentSpendLimit`
- * fails CLOSED (allowed:false) when Redis is configured but unavailable, and
- * also reports allowed:false once the agent is already at/over the daily cap —
- * both cases must block, consistent with the money-path fail-closed posture.
+ * The daily cap is an atomic reservation against the same Redis bucket used by
+ * signing spend. It includes settled and already-reserved amounts, so two API
+ * replicas cannot both consume the final unit of budget. A successful unsigned
+ * intent keeps its hold; a provider/build failure releases it.
  *
  * Returns `{ allow: true }` when allowed; `{ allow: false, reason }` when denied.
  */
-async function enforceFundMovingPolicy(
+async function reserveFundMovingPolicy(
   c: Context<{ Variables: AppVariables }>,
   params: {
     agentId: string;
@@ -345,33 +340,29 @@ async function enforceFundMovingPolicy(
     perOrderCapUsd: number;
     dailyCapUsd: number;
   },
-): Promise<{ allow: true } | { allow: false; reason: string }> {
-  const spendStatus = await checkAgentSpendLimit(params.agentId, params.dailyCapUsd, "day");
-  if (!spendStatus.allowed) {
-    return {
-      allow: false,
-      reason:
-        "daily-spend-cap: agent is at or over the daily spend cap, or spend enforcement is unavailable (fail-closed)",
-    };
-  }
+): Promise<{ allow: true; reservation: AgentSpendReservation } | { allow: false; reason: string }> {
   const result = evaluateTradeOrder(
     {
       perOrderCapUsd: params.perOrderCapUsd,
-      dailyCapUsd: params.dailyCapUsd,
-      // Real rolling daily spend (USD) for this agent, not a hardcoded 0.
-      dailySpendUsd: spendStatus.spent,
     },
     {
       estimatedOrderUsd: params.estimatedUsd,
     },
-    // Adapter ops are not venue/asset/leverage constrained the way perps are, so
-    // we run ONLY the USD-cap evaluators (per-order + daily). This reuses the
-    // exact same spend-gate code the trade route uses; a deny here blocks the
-    // route from returning any signable artifact.
-    [perOrderCapEvaluator, dailySpendCapEvaluator],
+    [perOrderCapEvaluator],
   );
-  if (result.allow) return { allow: true };
-  return { allow: false, reason: result.reason ?? "operation violates spend policy" };
+  if (!result.allow) {
+    return { allow: false, reason: result.reason ?? "operation violates spend policy" };
+  }
+  const reservation = await reserveAgentSpendLimit(
+    params.agentId,
+    c.get("tenantId"),
+    params.estimatedUsd,
+    params.dailyCapUsd,
+  );
+  if (!reservation.allowed) {
+    return { allow: false, reason: `daily-spend-cap: ${reservation.reason}` };
+  }
+  return { allow: true, reservation: reservation.reservation };
 }
 
 /** Per-request spend caps. Configurable via env; conservative defaults. */
@@ -494,16 +485,18 @@ async function enforceAdapterIntentPolicy(
     estimatedUsd?: number;
     auditAction: string;
   },
-): Promise<{ allow: true } | { allow: false; response: Response }> {
+): Promise<
+  { allow: true; reservation: AgentSpendReservation } | { allow: false; response: Response }
+> {
   const caps = spendCaps();
   const estimatedUsd = params.estimatedUsd ?? caps.perOrderCapUsd;
-  const gate = await enforceFundMovingPolicy(c, {
+  const gate = await reserveFundMovingPolicy(c, {
     agentId: params.agentId,
     estimatedUsd,
     perOrderCapUsd: caps.perOrderCapUsd,
     dailyCapUsd: caps.dailyCapUsd,
   });
-  if (gate.allow) return { allow: true };
+  if (gate.allow) return { allow: true, reservation: gate.reservation };
   await auditAdapterEvent(c, params.auditAction, params.agentId, {
     reason: gate.reason,
     estimatedUsd,
@@ -753,32 +746,29 @@ adapterRoutes.post("/swap/build", async (c) => {
   if (!resolution.ok) return resolution.response;
   const agentId = resolution.agentId;
   const walletAddress = typeof raw.agentAddress === "string" ? raw.agentAddress : "";
+  const caps = spendCaps();
+  const estimatedUsd = parsed.data.estimatedUsd ?? caps.perOrderCapUsd;
+  const gate = await reserveFundMovingPolicy(c, {
+    agentId,
+    estimatedUsd,
+    perOrderCapUsd: caps.perOrderCapUsd,
+    dailyCapUsd: caps.dailyCapUsd,
+  });
+  if (!gate.allow) {
+    await auditAdapterEvent(c, "adapter.swap.policy-rejected", agentId, {
+      reason: gate.reason,
+      estimatedUsd,
+    });
+    return c.json({ code: "policy-violation", reason: gate.reason }, 400);
+  }
 
   try {
     const swap = adapterRegistry.swap();
-    // Build the UNSIGNED intent first.
     const intent = await swap.buildSwap(
       quoteInput as Parameters<typeof swap.buildSwap>[0],
       walletAddress,
     );
     assertUnsigned(intent);
-
-    // Fund-moving: gate BEFORE returning anything signable.
-    const caps = spendCaps();
-    const estimatedUsd = parsed.data.estimatedUsd ?? caps.perOrderCapUsd; // assume worst-case if unknown
-    const gate = await enforceFundMovingPolicy(c, {
-      agentId,
-      estimatedUsd,
-      perOrderCapUsd: caps.perOrderCapUsd,
-      dailyCapUsd: caps.dailyCapUsd,
-    });
-    if (!gate.allow) {
-      await auditAdapterEvent(c, "adapter.swap.policy-rejected", agentId, {
-        reason: gate.reason,
-        estimatedUsd,
-      });
-      return c.json({ code: "policy-violation", reason: gate.reason }, 400);
-    }
 
     await auditAdapterEvent(c, "adapter.swap.build.authorized", agentId, {
       chainId: intent.chainId,
@@ -788,6 +778,7 @@ adapterRoutes.post("/swap/build", async (c) => {
     // Returned artifact is UNSIGNED — caller must route it through the signing path.
     return c.json(ok({ unsignedIntent: intent }));
   } catch (err) {
+    await releaseAgentSpendReservation(gate.reservation);
     return handleAdapterError(c, err);
   }
 });
@@ -831,6 +822,21 @@ adapterRoutes.post("/earn/deposit", async (c) => {
     typeof (raw as Record<string, unknown>).owner === "string"
       ? ((raw as Record<string, unknown>).owner as string)
       : "";
+  const caps = spendCaps();
+  const estimatedUsd = parsed.data.estimatedUsd ?? caps.perOrderCapUsd;
+  const gate = await reserveFundMovingPolicy(c, {
+    agentId,
+    estimatedUsd,
+    perOrderCapUsd: caps.perOrderCapUsd,
+    dailyCapUsd: caps.dailyCapUsd,
+  });
+  if (!gate.allow) {
+    await auditAdapterEvent(c, "adapter.earn.deposit.policy-rejected", agentId, {
+      reason: gate.reason,
+      estimatedUsd,
+    });
+    return c.json({ code: "policy-violation", reason: gate.reason }, 400);
+  }
 
   try {
     const earn = adapterRegistry.earn();
@@ -841,28 +847,13 @@ adapterRoutes.post("/earn/deposit", async (c) => {
     });
     assertUnsigned(intent);
 
-    const caps = spendCaps();
-    const estimatedUsd = parsed.data.estimatedUsd ?? caps.perOrderCapUsd;
-    const gate = await enforceFundMovingPolicy(c, {
-      agentId,
-      estimatedUsd,
-      perOrderCapUsd: caps.perOrderCapUsd,
-      dailyCapUsd: caps.dailyCapUsd,
-    });
-    if (!gate.allow) {
-      await auditAdapterEvent(c, "adapter.earn.deposit.policy-rejected", agentId, {
-        reason: gate.reason,
-        estimatedUsd,
-      });
-      return c.json({ code: "policy-violation", reason: gate.reason }, 400);
-    }
-
     await auditAdapterEvent(c, "adapter.earn.deposit.authorized", agentId, {
       vault: parsed.data.vault,
       estimatedUsd,
     });
     return c.json(ok({ unsignedIntent: intent }));
   } catch (err) {
+    await releaseAgentSpendReservation(gate.reservation);
     return handleAdapterError(c, err);
   }
 });
@@ -880,6 +871,21 @@ adapterRoutes.post("/earn/withdraw", async (c) => {
     typeof (raw as Record<string, unknown>).owner === "string"
       ? ((raw as Record<string, unknown>).owner as string)
       : "";
+  const caps = spendCaps();
+  const estimatedUsd = parsed.data.estimatedUsd ?? caps.perOrderCapUsd;
+  const gate = await reserveFundMovingPolicy(c, {
+    agentId,
+    estimatedUsd,
+    perOrderCapUsd: caps.perOrderCapUsd,
+    dailyCapUsd: caps.dailyCapUsd,
+  });
+  if (!gate.allow) {
+    await auditAdapterEvent(c, "adapter.earn.withdraw.policy-rejected", agentId, {
+      reason: gate.reason,
+      estimatedUsd,
+    });
+    return c.json({ code: "policy-violation", reason: gate.reason }, 400);
+  }
 
   try {
     const earn = adapterRegistry.earn();
@@ -890,28 +896,13 @@ adapterRoutes.post("/earn/withdraw", async (c) => {
     });
     assertUnsigned(intent);
 
-    const caps = spendCaps();
-    const estimatedUsd = parsed.data.estimatedUsd ?? caps.perOrderCapUsd;
-    const gate = await enforceFundMovingPolicy(c, {
-      agentId,
-      estimatedUsd,
-      perOrderCapUsd: caps.perOrderCapUsd,
-      dailyCapUsd: caps.dailyCapUsd,
-    });
-    if (!gate.allow) {
-      await auditAdapterEvent(c, "adapter.earn.withdraw.policy-rejected", agentId, {
-        reason: gate.reason,
-        estimatedUsd,
-      });
-      return c.json({ code: "policy-violation", reason: gate.reason }, 400);
-    }
-
     await auditAdapterEvent(c, "adapter.earn.withdraw.authorized", agentId, {
       vault: parsed.data.vault,
       estimatedUsd,
     });
     return c.json(ok({ unsignedIntent: intent }));
   } catch (err) {
+    await releaseAgentSpendReservation(gate.reservation);
     return handleAdapterError(c, err);
   }
 });
@@ -951,6 +942,24 @@ adapterRoutes.post("/bridge/build", async (c) => {
   const resolution = await resolveAgentId(c, parsed.data.agentId);
   if (!resolution.ok) return resolution.response;
   const agentId = resolution.agentId;
+  const caps = spendCaps();
+  // The external handoff's trusted notional is provider-derived. Reserve the
+  // maximum admissible operation before invoking the provider, then resize the
+  // hold to the validated result before returning it.
+  const preflight = await reserveFundMovingPolicy(c, {
+    agentId,
+    estimatedUsd: caps.perOrderCapUsd,
+    perOrderCapUsd: caps.perOrderCapUsd,
+    dailyCapUsd: caps.dailyCapUsd,
+  });
+  if (!preflight.allow) {
+    await auditAdapterEvent(c, "adapter.bridge.policy-rejected", agentId, {
+      reason: preflight.reason,
+      estimatedUsd: caps.perOrderCapUsd,
+    });
+    return c.json({ code: "policy-violation", reason: preflight.reason }, 400);
+  }
+  let heldReservation: AgentSpendReservation | undefined = preflight.reservation;
 
   try {
     const bridge = adapterRegistry.bridge();
@@ -961,7 +970,6 @@ adapterRoutes.post("/bridge/build", async (c) => {
     if (result.kind === "external-handoff") assertBridgeHandoff(result);
     else assertUnsigned(result);
 
-    const caps = spendCaps();
     // External handoffs carry a server-derived notional from the provider. A
     // caller may submit a higher estimate, but can never understate it to bypass
     // the policy gate. Transaction-building adapters retain the conservative
@@ -970,18 +978,23 @@ adapterRoutes.post("/bridge/build", async (c) => {
       result.kind === "external-handoff"
         ? Math.max(result.estimatedUsd, parsed.data.estimatedUsd ?? 0)
         : (parsed.data.estimatedUsd ?? caps.perOrderCapUsd);
-    const gate = await enforceFundMovingPolicy(c, {
-      agentId,
-      estimatedUsd,
-      perOrderCapUsd: caps.perOrderCapUsd,
-      dailyCapUsd: caps.dailyCapUsd,
-    });
-    if (!gate.allow) {
-      await auditAdapterEvent(c, "adapter.bridge.policy-rejected", agentId, {
-        reason: gate.reason,
+    if (estimatedUsd !== caps.perOrderCapUsd) {
+      await releaseAgentSpendReservation(heldReservation);
+      heldReservation = undefined;
+      const resized = await reserveFundMovingPolicy(c, {
+        agentId,
         estimatedUsd,
+        perOrderCapUsd: caps.perOrderCapUsd,
+        dailyCapUsd: caps.dailyCapUsd,
       });
-      return c.json({ code: "policy-violation", reason: gate.reason }, 400);
+      if (!resized.allow) {
+        await auditAdapterEvent(c, "adapter.bridge.policy-rejected", agentId, {
+          reason: resized.reason,
+          estimatedUsd,
+        });
+        return c.json({ code: "policy-violation", reason: resized.reason }, 400);
+      }
+      heldReservation = resized.reservation;
     }
 
     if (result.kind === "external-handoff") {
@@ -1009,6 +1022,7 @@ adapterRoutes.post("/bridge/build", async (c) => {
     });
     return c.json(ok({ unsignedIntent: result }));
   } catch (err) {
+    await releaseAgentSpendReservation(heldReservation);
     return handleAdapterError(c, err);
   }
 });

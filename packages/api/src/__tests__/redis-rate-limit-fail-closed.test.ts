@@ -6,18 +6,35 @@ const checkRateLimitMock = mock(async () => ({
   remaining: 1,
   resetMs: 1_000,
 }));
-const checkSpendLimitMock = mock(async () => ({
-  allowed: true,
-  spent: 0,
-  remaining: 1,
-}));
 const disconnectRedisMock = mock(async () => undefined);
 const pingMock = mock(async () => "PONG");
 const recordSpendMock = mock(async () => undefined);
+const reserveSpendMock = mock(
+  async (
+    _agentId: string,
+    _tenantId: string,
+    amountUsd: number,
+    _limits: Partial<Record<"day" | "week" | "month", number>>,
+  ) => ({
+    reservedUsd: amountUsd,
+    periods: ["day"],
+    buckets: [{ period: "day", dateKey: "2026-08-20", key: "spend:test:day" }],
+  }),
+);
+const settleReservedSpendMock = mock(
+  async (
+    _agentId: string,
+    _tenantId: string,
+    _reservedUsd: number,
+    _actualUsd: number,
+    _host: string,
+    _periods: string[],
+    _buckets: unknown[],
+  ) => undefined,
+);
 
 mock.module("@stwd/redis", () => ({
   checkRateLimit: checkRateLimitMock,
-  checkSpendLimit: checkSpendLimitMock,
   createUpstashIoredisAdapter: () => ({ ping: pingMock }),
   disconnectRedis: disconnectRedisMock,
   estimateCost: () => 0,
@@ -33,9 +50,9 @@ mock.module("@stwd/redis", () => ({
   isKnownHost: () => false,
   recordAggregationEvent: async () => undefined,
   recordSpend: recordSpendMock,
-  reserveSpend: async () => ({ allowed: true, reservationId: "reservation-test" }),
+  reserveSpend: reserveSpendMock,
   setCachedPolicies: async () => undefined,
-  settleReservedSpend: async () => undefined,
+  settleReservedSpend: settleReservedSpendMock,
 }));
 
 const redisMiddleware = await import("../middleware/redis");
@@ -51,7 +68,6 @@ describe("Redis rate-limit wrappers", () => {
       remaining: 1,
       resetMs: 1_000,
     }));
-    checkSpendLimitMock.mockReset();
     disconnectRedisMock.mockReset();
     pingMock.mockReset();
     pingMock.mockImplementation(async () => "PONG");
@@ -143,14 +159,17 @@ describe("Redis spend-limit wrapper", () => {
   const originalRedisUrl = process.env.REDIS_URL;
 
   beforeEach(async () => {
-    checkSpendLimitMock.mockReset();
-    checkSpendLimitMock.mockImplementation(async () => ({
-      allowed: true,
-      spent: 0,
-      remaining: 1,
+    reserveSpendMock.mockReset();
+    reserveSpendMock.mockImplementation(async (_agentId, _tenantId, amountUsd) => ({
+      reservedUsd: amountUsd,
+      periods: ["day"],
+      buckets: [{ period: "day", dateKey: "2026-08-20", key: "spend:test:day" }],
     }));
+    settleReservedSpendMock.mockReset();
+    settleReservedSpendMock.mockImplementation(async () => undefined);
     pingMock.mockReset();
     pingMock.mockImplementation(async () => "PONG");
+    redisMiddleware.__resetAdapterMemorySpendForTests();
     await redisMiddleware.shutdownRedis();
   });
 
@@ -160,17 +179,24 @@ describe("Redis spend-limit wrapper", () => {
     else process.env.REDIS_URL = originalRedisUrl;
   });
 
-  it("fails closed in production when durable spend state is absent", async () => {
-    const result = await withRuntimeEnvironment(
+  it("fails closed without Redis unless development/test memory posture is explicitly acknowledged", async () => {
+    for (const environment of [
+      {},
+      { NODE_ENV: "production" },
+      { NODE_ENV: "staging" },
+      { NODE_ENV: "developmnt", STEWARD_ALLOW_MEMORY_ADAPTER_SPEND: "true" },
       {
-        NODE_ENV: "production",
-        STEWARD_ADAPTER_DAILY_CAP_USD: "1000",
+        NODE_ENV: "test",
+        STEWARD_RUNTIME: "workers",
+        STEWARD_ALLOW_MEMORY_ADAPTER_SPEND: "true",
       },
-      () => redisMiddleware.checkAgentSpendLimit("agent-production", 1000, "day"),
-    );
-
-    expect(result).toEqual({ allowed: false, spent: 0, remaining: 0 });
-    expect(checkSpendLimitMock).not.toHaveBeenCalled();
+    ]) {
+      const result = await withRuntimeEnvironment(environment, () =>
+        redisMiddleware.reserveAgentSpendLimit("agent-no-redis", "tenant-a", 1, 60),
+      );
+      expect(result.allowed).toBe(false);
+    }
+    expect(reserveSpendMock).not.toHaveBeenCalled();
   });
 
   it("fails closed in production when configured durable spend state is down", async () => {
@@ -190,11 +216,11 @@ describe("Redis spend-limit wrapper", () => {
         REDIS_URL: "redis://spend.test:6379",
         STEWARD_ADAPTER_DAILY_CAP_USD: "1000",
       },
-      () => redisMiddleware.checkAgentSpendLimit("agent-production", 1000, "day"),
+      () => redisMiddleware.reserveAgentSpendLimit("agent-production", "tenant-a", 1, 1000),
     );
 
-    expect(result).toEqual({ allowed: false, spent: 0, remaining: 0 });
-    expect(checkSpendLimitMock).not.toHaveBeenCalled();
+    expect(result.allowed).toBe(false);
+    expect(reserveSpendMock).not.toHaveBeenCalled();
   });
 
   it("does not inherit a stale configured client into a production request with no binding", async () => {
@@ -211,25 +237,118 @@ describe("Redis spend-limit wrapper", () => {
         NODE_ENV: "production",
         STEWARD_ADAPTER_DAILY_CAP_USD: "1000",
       },
-      () => redisMiddleware.checkAgentSpendLimit("agent-request-b", 1000, "day"),
+      () => redisMiddleware.reserveAgentSpendLimit("agent-request-b", "tenant-b", 1, 1000),
     );
 
-    expect(result).toEqual({ allowed: false, spent: 0, remaining: 0 });
-    expect(checkSpendLimitMock).not.toHaveBeenCalled();
+    expect(result.allowed).toBe(false);
+    expect(reserveSpendMock).not.toHaveBeenCalled();
   });
 
-  it("keeps explicit unconfigured development and test postures permissive", async () => {
+  it("uses an atomic bounded memory reservation only for explicitly acknowledged development/test", async () => {
     for (const nodeEnv of ["development", "test"] as const) {
-      const result = await withRuntimeEnvironment(
+      redisMiddleware.__resetAdapterMemorySpendForTests();
+      const exactBoundary = await withRuntimeEnvironment(
         {
           NODE_ENV: nodeEnv,
-          STEWARD_ADAPTER_DAILY_CAP_USD: "1000",
+          STEWARD_ALLOW_MEMORY_ADAPTER_SPEND: "true",
         },
-        () => redisMiddleware.checkAgentSpendLimit(`agent-${nodeEnv}`, 1000, "day"),
+        () => redisMiddleware.reserveAgentSpendLimit(`agent-${nodeEnv}`, "tenant-a", 60, 60),
       );
+      expect(exactBoundary.allowed).toBe(true);
+      const overBoundary = await withRuntimeEnvironment(
+        {
+          NODE_ENV: nodeEnv,
+          STEWARD_ALLOW_MEMORY_ADAPTER_SPEND: "true",
+        },
+        () => redisMiddleware.reserveAgentSpendLimit(`agent-${nodeEnv}`, "tenant-a", 0.0001, 60),
+      );
+      expect(overBoundary.allowed).toBe(false);
+    }
+    expect(reserveSpendMock).not.toHaveBeenCalled();
+  });
 
-      expect(result).toEqual({ allowed: true, spent: 0, remaining: 1000 });
-      expect(checkSpendLimitMock).not.toHaveBeenCalled();
+  it("delegates admission to the atomic Redis reservation and retains durable state across restart", async () => {
+    let reserved = 59;
+    reserveSpendMock.mockImplementation(async (_agent, _tenant, amount, limits) => {
+      const daily = (limits as { day: number }).day;
+      await Promise.resolve();
+      if (reserved + amount > daily) throw new Error("cap exceeded");
+      reserved += amount;
+      return {
+        reservedUsd: amount,
+        periods: ["day"],
+        buckets: [{ period: "day", dateKey: "2026-08-20", key: "spend:test:day" }],
+      };
+    });
+    await withRuntimeEnvironment(
+      { NODE_ENV: "production", REDIS_URL: "redis://spend.test:6379" },
+      () => redisMiddleware.initRedis({ REDIS_URL: "redis://spend.test:6379" }),
+    );
+
+    const concurrent = await withRuntimeEnvironment(
+      { NODE_ENV: "production", REDIS_URL: "redis://spend.test:6379" },
+      () =>
+        Promise.all([
+          redisMiddleware.reserveAgentSpendLimit("agent-race", "tenant-a", 1, 60),
+          redisMiddleware.reserveAgentSpendLimit("agent-race", "tenant-a", 1, 60),
+        ]),
+    );
+    expect(concurrent.filter((entry) => entry.allowed)).toHaveLength(1);
+
+    await redisMiddleware.shutdownRedis();
+    await withRuntimeEnvironment(
+      { NODE_ENV: "production", REDIS_URL: "redis://spend.test:6379" },
+      () => redisMiddleware.initRedis({ REDIS_URL: "redis://spend.test:6379" }),
+    );
+    const afterRestart = await withRuntimeEnvironment(
+      { NODE_ENV: "production", REDIS_URL: "redis://spend.test:6379" },
+      () => redisMiddleware.reserveAgentSpendLimit("agent-race", "tenant-a", 0.0001, 60),
+    );
+    expect(afterRestart.allowed).toBe(false);
+  });
+
+  it("keeps overlapping request postures isolated in AsyncLocalStorage", async () => {
+    const [acknowledgedDev, unboundProduction] = await Promise.all([
+      withRuntimeEnvironment(
+        { NODE_ENV: "development", STEWARD_ALLOW_MEMORY_ADAPTER_SPEND: "true" },
+        async () => {
+          await Promise.resolve();
+          return redisMiddleware.reserveAgentSpendLimit("agent-dev", "tenant-a", 1, 60);
+        },
+      ),
+      withRuntimeEnvironment({ NODE_ENV: "production" }, async () => {
+        await Promise.resolve();
+        return redisMiddleware.reserveAgentSpendLimit("agent-prod", "tenant-b", 1, 60);
+      }),
+    ]);
+    expect(acknowledgedDev.allowed).toBe(true);
+    expect(unboundProduction.allowed).toBe(false);
+  });
+
+  it("denies Redis reservation errors without logging raw diagnostics", async () => {
+    const secret = "redis://user:super-secret@example.test/private";
+    reserveSpendMock.mockImplementation(async () => {
+      throw new Error(secret);
+    });
+    await withRuntimeEnvironment(
+      { NODE_ENV: "production", REDIS_URL: "redis://spend.test:6379" },
+      () => redisMiddleware.initRedis({ REDIS_URL: "redis://spend.test:6379" }),
+    );
+    const originalConsoleError = console.error;
+    const logged: unknown[][] = [];
+    console.error = (...args: unknown[]) => {
+      logged.push(args);
+    };
+    try {
+      const result = await withRuntimeEnvironment(
+        { NODE_ENV: "production", REDIS_URL: "redis://spend.test:6379" },
+        () => redisMiddleware.reserveAgentSpendLimit("agent-secret", "tenant-a", 1, 60),
+      );
+      expect(result.allowed).toBe(false);
+      expect(JSON.stringify(logged)).not.toContain(secret);
+      expect(JSON.stringify(logged)).not.toContain("super-secret");
+    } finally {
+      console.error = originalConsoleError;
     }
   });
 });
