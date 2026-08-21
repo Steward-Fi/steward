@@ -109,6 +109,10 @@ export interface Env {
   STEWARD_MONERO_NETWORK?: string;
   STEWARD_WEBHOOK_SECRET_ENCRYPTION_KEY?: string;
   STEWARD_WEBHOOK_SECRET_KDF_SALT?: string;
+  /** Break-glass local/test override. Never configure on a production Worker. */
+  STEWARD_ALLOW_INSECURE_WEBHOOK_URLS?: string;
+  /** Break-glass local/test override. Never configure on a production Worker. */
+  STEWARD_ALLOW_PRIVATE_WEBHOOK_NETWORKS?: string;
   STEWARD_EMBEDDED?: string;
   STEWARD_EMBEDDED_MODE?: string;
   STEWARD_DB_MODE?: string;

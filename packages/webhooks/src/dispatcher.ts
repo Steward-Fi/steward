@@ -5,6 +5,7 @@ import { isIP, type LookupFunction } from "node:net";
 import { redactedThrownDiagnostics, type WebhookEvent } from "@stwd/shared";
 
 import type { WebhookConfig, WebhookDeliveryResult, WebhookDispatcherOptions } from "./types";
+import { currentWebhookRuntimeAuthority } from "./runtime-authority";
 
 // Signature scheme version. v2 binds timestamp + deliveryId + event type into the HMAC.
 const SIGNATURE_SCHEME = "v2";
@@ -28,10 +29,6 @@ const DEFAULT_MAX_RETRIES = 3;
 const DEFAULT_RETRY_DELAY_MS = 1_000;
 const DEFAULT_TIMEOUT_MS = 5_000;
 const MAX_RESPONSE_BYTES = 64 * 1024;
-const ALLOW_PRIVATE_WEBHOOK_NETWORKS =
-  (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env
-    ?.STEWARD_ALLOW_PRIVATE_WEBHOOK_NETWORKS === "true";
-
 // Once-per-process latch for the SEC-102 escape-hatch warning below.
 let warnedPrivateWebhookNetworks = false;
 
@@ -424,27 +421,17 @@ export class WebhookDispatcher {
   private readonly maxRetries: number;
   private readonly retryDelayMs: number;
   private readonly timeoutMs: number;
-  private readonly allowPrivateNetwork: boolean;
-  private readonly allowInsecureHttp: boolean;
+  private readonly allowPrivateNetwork?: boolean;
+  private readonly allowInsecureHttp?: boolean;
   private readonly lookup?: LookupFunction;
 
   constructor(options: WebhookDispatcherOptions = {}) {
     this.maxRetries = options.maxRetries ?? DEFAULT_MAX_RETRIES;
     this.retryDelayMs = options.retryDelayMs ?? DEFAULT_RETRY_DELAY_MS;
     this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-    this.allowPrivateNetwork = options.allowPrivateNetwork ?? ALLOW_PRIVATE_WEBHOOK_NETWORKS;
-    this.allowInsecureHttp = options.allowInsecureHttp ?? false;
+    this.allowPrivateNetwork = options.allowPrivateNetwork;
+    this.allowInsecureHttp = options.allowInsecureHttp;
     this.lookup = options.lookup;
-    // SEC-102: the SSRF escape hatch disables the private-network guard for
-    // every delivery this dispatcher makes (STEWARD_ALLOW_PRIVATE_WEBHOOK_NETWORKS
-    // does it process-wide at module load). Announce it loudly once per process
-    // instead of running unguarded in silence.
-    if (this.allowPrivateNetwork && !warnedPrivateWebhookNetworks) {
-      warnedPrivateWebhookNetworks = true;
-      console.warn(
-        "[steward] WARNING: webhook SSRF guard is DISABLED (allowPrivateNetwork / STEWARD_ALLOW_PRIVATE_WEBHOOK_NETWORKS=true). Loopback, link-local, and private-range webhook targets will be fetched. Use only for local development or trusted test harnesses.",
-      );
-    }
   }
 
   async dispatch(
@@ -452,6 +439,19 @@ export class WebhookDispatcher {
     webhook: WebhookConfig | string,
   ): Promise<WebhookDeliveryResult> {
     const config = normalizeWebhook(webhook);
+    // Resolve omitted policy once per dispatch. The request-local runtime
+    // environment is immutable, and explicit constructor options remain
+    // available to callers such as test sinks. A cached dispatcher therefore
+    // cannot retain a prior Worker's escape-hatch acknowledgement.
+    const runtimeAuthority = currentWebhookRuntimeAuthority();
+    const allowPrivateNetwork = this.allowPrivateNetwork ?? runtimeAuthority.allowPrivateNetwork;
+    const allowInsecureHttp = this.allowInsecureHttp ?? runtimeAuthority.allowInsecureHttp;
+    if (allowPrivateNetwork && !warnedPrivateWebhookNetworks) {
+      warnedPrivateWebhookNetworks = true;
+      console.warn(
+        "[steward] WARNING: webhook SSRF guard is DISABLED (allowPrivateNetwork / STEWARD_ALLOW_PRIVATE_WEBHOOK_NETWORKS=true). Loopback, link-local, and private-range webhook targets will be fetched. Use only for local development or trusted test harnesses.",
+      );
+    }
 
     // An empty events array means "subscribe to all" everywhere else
     // (acceptsConfiguredWebhookEvent, persistent-queue) — a truthy [] must
@@ -507,8 +507,8 @@ export class WebhookDispatcher {
           },
           body,
           timeoutMs: this.timeoutMs,
-          allowPrivateNetwork: this.allowPrivateNetwork,
-          allowInsecureHttp: this.allowInsecureHttp,
+          allowPrivateNetwork,
+          allowInsecureHttp,
           lookup: this.lookup,
         });
 

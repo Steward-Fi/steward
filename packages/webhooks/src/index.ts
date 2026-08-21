@@ -1,4 +1,8 @@
 export { WebhookDispatcher, WebhookValidationError } from "./dispatcher";
+export {
+  currentWebhookRuntimeAuthority,
+  type WebhookRuntimeAuthority,
+} from "./runtime-authority";
 export type {
   PersistentQueueOptions,
   PersistentQueueStats as PersistentStats,

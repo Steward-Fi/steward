@@ -5,6 +5,8 @@ import {
   decryptWebhookSecret,
   encryptWebhookSecret,
   isEncryptedWebhookSecret,
+  currentWebhookRuntimeAuthority,
+  type WebhookRuntimeAuthority,
   WebhookDispatcher,
 } from "@stwd/webhooks";
 import { db } from "./context";
@@ -28,6 +30,7 @@ export function dispatchWebhook(
   type: DispatchableWebhookEventType,
   data: Record<string, unknown>,
 ): void {
+  const webhookAuthority = currentWebhookRuntimeAuthority();
   const configuredType = toConfiguredWebhookEventType(type);
   // EMISSION-PATH WIDENING (Phase 2b): a plugin-declared event is one that is NOT
   // a core configured/alias type but IS present in the runtime
@@ -57,7 +60,13 @@ export function dispatchWebhook(
   // existing process-owned fire-and-forget behavior when no request lease is
   // active.
   void waitUntilRequestDatabaseTask(() =>
-    dispatchConfiguredWebhooks(event, configuredType, isPluginEvent ? type : null).catch(
+    dispatchConfiguredWebhooks(
+      event,
+      configuredType,
+      isPluginEvent ? type : null,
+      undefined,
+      webhookAuthority,
+    ).catch(
       (error) => {
         console.error(
           "[webhooks] Failed to dispatch configured webhooks",
@@ -81,6 +90,7 @@ export async function dispatchWebhookDurably(
   data: Record<string, unknown>,
   idempotencyKey: string,
 ): Promise<void> {
+  const webhookAuthority = currentWebhookRuntimeAuthority();
   const configuredType = toConfiguredWebhookEventType(type);
   const isPluginEvent = configuredType === null && webhookEventRegistry.has(type);
   await dispatchConfiguredWebhooks(
@@ -94,6 +104,7 @@ export async function dispatchWebhookDurably(
     configuredType,
     isPluginEvent ? type : null,
     idempotencyKey,
+    webhookAuthority,
   );
 }
 
@@ -105,6 +116,7 @@ export async function dispatchTestWebhook(config: {
   events: string[];
   actorId?: string | null;
 }): Promise<typeof webhookDeliveries.$inferSelect> {
+  const webhookAuthority = currentWebhookRuntimeAuthority();
   const event: WebhookEvent = {
     type: "webhook.test",
     tenantId: config.tenantId,
@@ -117,12 +129,16 @@ export async function dispatchTestWebhook(config: {
     timestamp: new Date(),
   };
 
-  return dispatchConfiguredWebhook(event, {
-    ...config,
-    maxRetries: 0,
-    retryBackoffMs: 0,
-    visibilityTimeoutMs: 0,
-  });
+  return dispatchConfiguredWebhook(
+    event,
+    {
+      ...config,
+      maxRetries: 0,
+      retryBackoffMs: 0,
+      visibilityTimeoutMs: 0,
+    },
+    webhookAuthority,
+  );
 }
 
 export async function dispatchReplayWebhook(config: {
@@ -139,6 +155,7 @@ export async function dispatchReplayWebhook(config: {
   originalAgentId?: string | null;
   originalCreatedAt: Date | string;
 }): Promise<typeof webhookDeliveries.$inferSelect> {
+  const webhookAuthority = currentWebhookRuntimeAuthority();
   const originalTimestamp =
     typeof config.originalPayload.timestamp === "string" ||
     config.originalPayload.timestamp instanceof Date
@@ -160,10 +177,14 @@ export async function dispatchReplayWebhook(config: {
       : originalTimestamp,
   };
 
-  return dispatchConfiguredWebhook(event, {
-    ...config,
-    replayedFromDeliveryId: config.replayedFromDeliveryId,
-  });
+  return dispatchConfiguredWebhook(
+    event,
+    {
+      ...config,
+      replayedFromDeliveryId: config.replayedFromDeliveryId,
+    },
+    webhookAuthority,
+  );
 }
 
 async function dispatchConfiguredWebhooks(
@@ -171,6 +192,7 @@ async function dispatchConfiguredWebhooks(
   configuredType: ConfiguredWebhookEventType | null,
   pluginEventType: string | null = null,
   idempotencyKey?: string,
+  webhookAuthority: WebhookRuntimeAuthority = currentWebhookRuntimeAuthority(),
 ): Promise<void> {
   const configs = await db
     .select()
@@ -191,15 +213,19 @@ async function dispatchConfiguredWebhooks(
           : config.events.length === 0;
       })
       .map((config) =>
-        dispatchConfiguredWebhook(event, {
-          id: config.id,
-          url: config.url,
-          secret: config.secret,
-          events: config.events,
-          maxRetries: config.maxRetries,
-          retryBackoffMs: config.retryBackoffMs,
-          idempotencyKey,
-        }),
+        dispatchConfiguredWebhook(
+          event,
+          {
+            id: config.id,
+            url: config.url,
+            secret: config.secret,
+            events: config.events,
+            maxRetries: config.maxRetries,
+            retryBackoffMs: config.retryBackoffMs,
+            idempotencyKey,
+          },
+          webhookAuthority,
+        ),
       ),
   );
 }
@@ -217,6 +243,7 @@ async function dispatchConfiguredWebhook(
     replayedFromDeliveryId?: string | null;
     idempotencyKey?: string;
   },
+  webhookAuthority: WebhookRuntimeAuthority = currentWebhookRuntimeAuthority(),
 ): Promise<typeof webhookDeliveries.$inferSelect> {
   const signingSecret = decryptWebhookSecret(config.secret);
   // Plaintext compatibility rows are upgraded lazily with a compare-and-set.
@@ -287,7 +314,11 @@ async function dispatchConfiguredWebhook(
   // SEC-017: re-validate the destination at delivery time with FRESH DNS
   // answers — registration-time validation cannot see DNS rebinding (public A
   // record at config time, private at fetch time). Fail closed: no fetch.
-  const deliveryUrlError = await validateWebhookUrlResolved(config.url);
+  const deliveryUrlError = await validateWebhookUrlResolved(
+    config.url,
+    undefined,
+    webhookAuthority,
+  );
   if (deliveryUrlError) {
     const [rejected] = await db
       .update(webhookDeliveries)
@@ -305,6 +336,8 @@ async function dispatchConfiguredWebhook(
   const dispatcher = new WebhookDispatcher({
     maxRetries: 0,
     retryDelayMs: 0,
+    allowPrivateNetwork: webhookAuthority.allowPrivateNetwork,
+    allowInsecureHttp: webhookAuthority.allowInsecureHttp,
   });
   const result = await dispatcher.dispatch(eventWithDelivery, { ...config, secret: signingSecret });
   const retryable = !result.success && config.maxRetries > 0;
