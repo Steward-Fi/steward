@@ -1,4 +1,4 @@
--- 0112 is reserved by the tenant-RLS corrective migration. This immutable
+-- 0114 is reserved by the personal-lifecycle corrective migration. This
 -- follow-up adds a distinct terminal state so authoritative artifact
 -- retirement can never be confused with a generic execution failure.
 ALTER TYPE "public"."transaction_status" ADD VALUE IF NOT EXISTS 'retired';
