@@ -241,13 +241,6 @@ async function restorePlatformTenantConfigRow(
   });
 }
 
-async function deletePlatformCreatedTenant(tenantId: string): Promise<void> {
-  const db = getDb();
-  await db.transaction(async (tx) => {
-    await tx.delete(tenants).where(eq(tenants.id, tenantId));
-  });
-}
-
 async function deletePlatformCreatedAgent(agentId: string, tenantId: string): Promise<void> {
   const db = getDb();
   await db.transaction(async (tx) => {
@@ -261,8 +254,10 @@ async function deletePlatformCreatedAgent(agentId: string, tenantId: string): Pr
   });
 }
 
-async function tenantIdHasRetainedState(tenantId: string): Promise<boolean> {
-  const db = getDb();
+async function tenantIdHasRetainedState(
+  tenantId: string,
+  db: Pick<ReturnType<typeof getDb>, "select"> = getDb(),
+): Promise<boolean> {
   const [[secret], [secretRoute], [proxyAudit], [auditEvent]] = await Promise.all([
     db.select({ id: secrets.id }).from(secrets).where(eq(secrets.tenantId, tenantId)).limit(1),
     db
@@ -1047,60 +1042,39 @@ platform.post("/tenants", async (c) => {
     );
   }
 
-  // Check for duplicates
-  const [existing] = await db
-    .select({ id: tenants.id })
-    .from(tenants)
-    .where(eq(tenants.id, body.id));
-
-  if (existing) {
-    return c.json<ApiResponse>({ ok: false, error: "Tenant already exists" }, 409);
-  }
-  if (await tenantIdHasRetainedState(body.id)) {
-    return c.json<ApiResponse>(
-      {
-        ok: false,
-        error: "Tenant id has retained historical state and cannot be reused",
-      },
-      409,
-    );
-  }
-
   const apiKeyPair = generateApiKey();
+  const result = await withTenantAuditedTransaction(body.id, async (txRaw, appendAudit) => {
+    const tx = txRaw as typeof db;
+    const [existing] = await tx
+      .select({ id: tenants.id })
+      .from(tenants)
+      .where(eq(tenants.id, body.id));
+    if (existing) return { status: "exists" as const };
+    if (await tenantIdHasRetainedState(body.id, tx)) return { status: "retained" as const };
 
-  await writeAuditEvent({
-    tenantId: body.id,
-    actorType: "platform",
-    action: "tenant.create.authorized",
-    resourceType: "tenant",
-    resourceId: body.id,
-    metadata: { name: body.name, viaPlatform: true },
-    ...auditCtx(c),
-  });
-  await writeAuditEvent({
-    tenantId: body.id,
-    actorType: "platform",
-    action: "tenant.api_key.create.authorized",
-    resourceType: "tenant",
-    resourceId: body.id,
-    ...auditCtx(c),
-  });
-
-  const [tenant] = await db
-    .insert(tenants)
-    .values({
-      id: body.id,
-      name: body.name,
-      apiKeyHash: apiKeyPair.hash,
-    })
-    .returning();
-
-  if (!tenant) {
-    return c.json<ApiResponse>({ ok: false, error: "Failed to create tenant" }, 500);
-  }
-
-  try {
-    await writeAuditEvent({
+    await appendAudit({
+      tenantId: body.id,
+      actorType: "platform",
+      action: "tenant.create.authorized",
+      resourceType: "tenant",
+      resourceId: body.id,
+      metadata: { name: body.name, viaPlatform: true },
+      ...auditCtx(c),
+    });
+    await appendAudit({
+      tenantId: body.id,
+      actorType: "platform",
+      action: "tenant.api_key.create.authorized",
+      resourceType: "tenant",
+      resourceId: body.id,
+      ...auditCtx(c),
+    });
+    const [tenant] = await tx
+      .insert(tenants)
+      .values({ id: body.id, name: body.name, apiKeyHash: apiKeyPair.hash })
+      .returning();
+    if (!tenant) throw new Error("Failed to create tenant");
+    await appendAudit({
       tenantId: tenant.id,
       actorType: "platform",
       action: "tenant.create",
@@ -1109,7 +1083,7 @@ platform.post("/tenants", async (c) => {
       metadata: { name: tenant.name, viaPlatform: true },
       ...auditCtx(c),
     });
-    await writeAuditEvent({
+    await appendAudit({
       tenantId: tenant.id,
       actorType: "platform",
       action: "tenant.api_key.create",
@@ -1117,10 +1091,18 @@ platform.post("/tenants", async (c) => {
       resourceId: tenant.id,
       ...auditCtx(c),
     });
-  } catch (error) {
-    await deletePlatformCreatedTenant(tenant.id);
-    throw error;
+    return { status: "created" as const, tenant };
+  });
+  if (result.status === "exists") {
+    return c.json<ApiResponse>({ ok: false, error: "Tenant already exists" }, 409);
   }
+  if (result.status === "retained") {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Tenant id has retained historical state and cannot be reused" },
+      409,
+    );
+  }
+  const { tenant } = result;
 
   return c.json<
     ApiResponse<{
