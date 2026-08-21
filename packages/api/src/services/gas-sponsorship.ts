@@ -11,6 +11,29 @@ import { validateWebhookUrl } from "./webhook-url";
 
 type SponsoredGasChainFamily = "evm" | "solana";
 
+const pgliteReservationTails = new Map<string, Promise<void>>();
+
+function isPGLiteRuntime(): boolean {
+  return process.env.STEWARD_DB_MODE === "pglite" || process.env.STEWARD_PGLITE_MEMORY === "true";
+}
+
+async function withPGLiteReservationLock<T>(tenantId: string, operation: () => Promise<T>) {
+  if (!isPGLiteRuntime()) return operation();
+  const prior = pgliteReservationTails.get(tenantId) ?? Promise.resolve();
+  let release!: () => void;
+  const tail = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  pgliteReservationTails.set(tenantId, tail);
+  await prior.catch(() => undefined);
+  try {
+    return await operation();
+  } finally {
+    release();
+    if (pgliteReservationTails.get(tenantId) === tail) pgliteReservationTails.delete(tenantId);
+  }
+}
+
 const PROVIDERS = new Set<GasSponsorshipProvider>([
   "custom_evm_paymaster",
   "custom_bundler",
@@ -318,6 +341,7 @@ async function getSponsorshipCapError(input: {
   estimatedUsd: number;
   config: TenantGasSponsorshipConfig;
   db?: Pick<ReturnType<typeof getDb>, "select">;
+  existingReservationUsd?: number;
 }): Promise<string | null> {
   const now = Date.now();
   const dayStart = new Date(now - 24 * 60 * 60 * 1000);
@@ -326,6 +350,7 @@ async function getSponsorshipCapError(input: {
   // `>` so spend exactly at the cap is allowed, matching the platform's spend-cap semantics
   // (policy-engine trade-order/evaluators) shared with the atomic reserve path.
   const estimatedCents = usdToCents(input.estimatedUsd);
+  const existingReservationCents = usdToCents(input.existingReservationUsd ?? 0);
   if (input.config.maxPerWalletDayUsd !== undefined) {
     // Fail closed: the per-wallet cap cannot be enforced without an agent identifier.
     if (!input.agentId) {
@@ -337,7 +362,10 @@ async function getSponsorshipCapError(input: {
       since: dayStart,
       db: input.db,
     });
-    if (usdToCents(walletDaySpend) + estimatedCents > usdToCents(input.config.maxPerWalletDayUsd)) {
+    if (
+      usdToCents(walletDaySpend) - existingReservationCents + estimatedCents >
+      usdToCents(input.config.maxPerWalletDayUsd)
+    ) {
       return "Gas sponsorship wallet daily cap exceeded";
     }
   }
@@ -347,7 +375,10 @@ async function getSponsorshipCapError(input: {
       since: dayStart,
       db: input.db,
     });
-    if (usdToCents(tenantDaySpend) + estimatedCents > usdToCents(input.config.maxTenantDayUsd)) {
+    if (
+      usdToCents(tenantDaySpend) - existingReservationCents + estimatedCents >
+      usdToCents(input.config.maxTenantDayUsd)
+    ) {
       return "Gas sponsorship tenant daily cap exceeded";
     }
   }
@@ -358,7 +389,7 @@ async function getSponsorshipCapError(input: {
       db: input.db,
     });
     if (
-      usdToCents(tenantMonthSpend) + estimatedCents >
+      usdToCents(tenantMonthSpend) - existingReservationCents + estimatedCents >
       usdToCents(input.config.maxTenantMonthUsd)
     ) {
       return "Gas sponsorship tenant monthly cap exceeded";
@@ -436,56 +467,75 @@ export async function reserveSponsoredGasEvent(input: {
   reservedUsd: number;
   metadata?: Record<string, unknown>;
 }): Promise<void | string> {
-  return getDb().transaction(async (tx) => {
-    await tx.execute(
-      sql`select pg_advisory_xact_lock(hashtextextended(${`sponsored_gas:${input.tenantId}`}, 0))`,
-    );
-    const [configRow] = await tx
-      .select({ gasSponsorshipConfig: tenantConfigsTable.gasSponsorshipConfig })
-      .from(tenantConfigsTable)
-      .where(eq(tenantConfigsTable.tenantId, input.tenantId));
-    const config =
-      (configRow?.gasSponsorshipConfig as TenantGasSponsorshipConfig | undefined) ?? {};
-    const capError = await getSponsorshipCapError({
-      tenantId: input.tenantId,
-      agentId: input.agentId,
-      estimatedUsd: input.reservedUsd,
-      config,
-      db: tx,
-    });
-    if (capError) return capError;
-
-    await tx
-      .insert(sponsoredGasEvents)
-      .values({
+  return withPGLiteReservationLock(input.tenantId, () =>
+    getDb().transaction(async (tx) => {
+      if (!isPGLiteRuntime()) {
+        await tx.execute(
+          sql`select pg_advisory_xact_lock(hashtextextended(${`sponsored_gas:${input.tenantId}`}, 0))`,
+        );
+      }
+      const [configRow] = await tx
+        .select({ gasSponsorshipConfig: tenantConfigsTable.gasSponsorshipConfig })
+        .from(tenantConfigsTable)
+        .where(eq(tenantConfigsTable.tenantId, input.tenantId));
+      const config =
+        (configRow?.gasSponsorshipConfig as TenantGasSponsorshipConfig | undefined) ?? {};
+      const [existingReservation] = await tx
+        .select({
+          actualUsd: sponsoredGasEvents.actualUsd,
+          reservedUsd: sponsoredGasEvents.reservedUsd,
+        })
+        .from(sponsoredGasEvents)
+        .where(
+          and(
+            eq(sponsoredGasEvents.tenantId, input.tenantId),
+            eq(sponsoredGasEvents.txId, input.txId),
+          ),
+        );
+      const capError = await getSponsorshipCapError({
         tenantId: input.tenantId,
         agentId: input.agentId,
-        txId: input.txId,
-        chainFamily: input.chainFamily ?? "evm",
-        chainId: input.chainId ?? null,
-        caip2: input.caip2 ?? null,
-        provider: input.provider,
-        mode: input.mode,
-        status: "reserved",
-        reservedUsd: String(input.reservedUsd),
-        actualUsd: null,
-        metadata: input.metadata ?? {},
-      })
-      .onConflictDoUpdate({
-        target: [sponsoredGasEvents.tenantId, sponsoredGasEvents.txId],
-        targetWhere: sql`${sponsoredGasEvents.txId} is not null`,
-        set: {
+        estimatedUsd: input.reservedUsd,
+        config,
+        db: tx,
+        existingReservationUsd: Number(
+          existingReservation?.actualUsd ?? existingReservation?.reservedUsd ?? 0,
+        ),
+      });
+      if (capError) return capError;
+
+      await tx
+        .insert(sponsoredGasEvents)
+        .values({
+          tenantId: input.tenantId,
+          agentId: input.agentId,
+          txId: input.txId,
+          chainFamily: input.chainFamily ?? "evm",
+          chainId: input.chainId ?? null,
+          caip2: input.caip2 ?? null,
+          provider: input.provider,
+          mode: input.mode,
           status: "reserved",
           reservedUsd: String(input.reservedUsd),
           actualUsd: null,
-          txHash: null,
-          userOperationHash: null,
-          signature: null,
           metadata: input.metadata ?? {},
-          updatedAt: new Date(),
-        },
-      });
-  });
+        })
+        .onConflictDoUpdate({
+          target: [sponsoredGasEvents.tenantId, sponsoredGasEvents.txId],
+          targetWhere: sql`${sponsoredGasEvents.txId} is not null`,
+          set: {
+            status: "reserved",
+            reservedUsd: String(input.reservedUsd),
+            actualUsd: null,
+            txHash: null,
+            userOperationHash: null,
+            signature: null,
+            metadata: input.metadata ?? {},
+            updatedAt: new Date(),
+          },
+        });
+    }),
+  );
 }
 
 export function normalizeGasSpendQuery(input: {
