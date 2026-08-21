@@ -64,12 +64,40 @@ SELECT format(
   :'steward_app_role'
 ) \gexec
 
+CREATE OR REPLACE FUNCTION steward_bootstrap.ensure_default_membership(
+  p_user_id uuid,
+  p_role text
+)
+RETURNS void
+LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path = pg_catalog
+AS $$
+BEGIN
+  PERFORM set_config('steward.lifecycle_wrapper', 'v1', true);
+  IF NULLIF(current_setting('steward.tenant_id', true), '') IS DISTINCT FROM 'default'
+     OR NULLIF(current_setting('steward.user_id', true), '') IS DISTINCT FROM p_user_id::text
+     OR p_role NOT IN ('member', 'guest') THEN
+    RAISE EXCEPTION 'default membership authority denied' USING ERRCODE = '42501';
+  END IF;
+  INSERT INTO public.user_tenants (user_id, tenant_id, role)
+  VALUES (p_user_id, 'default', p_role)
+  ON CONFLICT (user_id, tenant_id) DO NOTHING;
+  PERFORM set_config('steward.lifecycle_wrapper', '', true);
+END
+$$;
+REVOKE ALL ON FUNCTION steward_bootstrap.ensure_default_membership(uuid,text) FROM PUBLIC;
+SELECT format(
+  'GRANT EXECUTE ON FUNCTION steward_bootstrap.ensure_default_membership(uuid,text) TO %I',
+  :'steward_app_role'
+) \gexec
+
 CREATE OR REPLACE FUNCTION steward_bootstrap.platform_delete_user(p_user_id uuid)
 RETURNS TABLE (user_id uuid)
 LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path = pg_catalog
 AS $$
 BEGIN
+  PERFORM set_config('steward.lifecycle_wrapper', 'v1', true);
   RETURN QUERY SELECT * FROM public.steward_platform_delete_user_v2(p_user_id);
+  PERFORM set_config('steward.lifecycle_wrapper', '', true);
 END
 $$;
 
@@ -89,10 +117,12 @@ RETURNS TABLE (
 LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path = pg_catalog
 AS $$
 BEGIN
+  PERFORM set_config('steward.lifecycle_wrapper', 'v1', true);
   RETURN QUERY
   SELECT * FROM public.steward_platform_personal_tenant_delete_v2(
     p_tenant_id, p_execute
   );
+  PERFORM set_config('steward.lifecycle_wrapper', '', true);
 END
 $$;
 REVOKE ALL ON FUNCTION steward_bootstrap.platform_personal_tenant_delete(text, boolean)

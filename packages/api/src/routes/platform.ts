@@ -381,6 +381,41 @@ function auditCtx(c: {
   };
 }
 
+async function applyCommittedTenantDeletionRevocations(input: {
+  tenantId: string;
+  agentIds: string[];
+  userIds: string[];
+  audit: ReturnType<typeof auditCtx>;
+}): Promise<void> {
+  const results = await Promise.allSettled([
+    ...input.agentIds.map((agentId) => revocationStore.revokeAgentTokens(agentId)),
+    ...input.userIds.map((userId) => revocationStore.revokeUserTokens(userId)),
+  ]);
+  const failures = results.filter((result) => result.status === "rejected").length;
+
+  // The committed database deletion is the authorization boundary: deleted
+  // agents and memberships cannot authenticate even if a cache refresh is
+  // delayed. Record the post-commit cache disposition on the retained platform
+  // audit chain without turning a committed deletion into a false retry.
+  await writeAuditEvent({
+    tenantId: PLATFORM_AUDIT_TENANT_ID,
+    actorType: "platform",
+    action:
+      failures === 0
+        ? "tenant.delete.token_revocation_completed"
+        : "tenant.delete.token_revocation_deferred",
+    resourceType: "tenant",
+    resourceId: input.tenantId,
+    metadata: {
+      targetTenantId: input.tenantId,
+      agentTokenRevocationTargets: input.agentIds.length,
+      userTokenRevocationTargets: input.userIds.length,
+      failures,
+    },
+    ...input.audit,
+  }).catch(() => undefined);
+}
+
 function platformIdentityMigrationAllowed(): boolean {
   return process.env.STEWARD_ALLOW_PLATFORM_IDENTITY_MIGRATION === "true";
 }
@@ -2136,14 +2171,6 @@ platform.delete("/tenants/:id", async (c) => {
             return { status: prepared?.status ?? ("missing" as const) };
           }
 
-          const [agentRevocationCutoffs, userRevocationCutoffs] = await Promise.all([
-            Promise.all(
-              prepared.agent_ids.map((agentId) => revocationStore.revokeAgentTokens(agentId)),
-            ),
-            Promise.all(
-              prepared.member_ids.map((userId) => revocationStore.revokeUserTokens(userId)),
-            ),
-          ]);
           const capabilityCleanup = {
             activeGrantsRetired: prepared.active_grants_retired,
             terminalGrantsRemoved: prepared.terminal_grants_removed,
@@ -2161,19 +2188,6 @@ platform.delete("/tenants/:id", async (c) => {
               agentTokenRevocationTargets: prepared.agent_ids.length,
               userTokenRevocationTargets: prepared.member_ids.length,
               capabilityCleanup,
-            },
-            ...auditCtx(c),
-          });
-          await appendRequiredAudit({
-            tenantId: PLATFORM_AUDIT_TENANT_ID,
-            actorType: "platform",
-            action: "tenant.delete.token_revocation_completed",
-            resourceType: "tenant",
-            resourceId: tenantId,
-            metadata: {
-              targetTenantId: tenantId,
-              agentRevocationCutoffsEstablished: agentRevocationCutoffs.length,
-              userRevocationCutoffsEstablished: userRevocationCutoffs.length,
             },
             ...auditCtx(c),
           });
@@ -2201,7 +2215,11 @@ platform.delete("/tenants/:id", async (c) => {
           if (deleted?.status !== "deleted") {
             throw new Error("Personal tenant lifecycle changed while deletion lock was held");
           }
-          return { status: "deleted" as const };
+          return {
+            status: "deleted" as const,
+            agentIds: prepared.agent_ids,
+            userIds: prepared.member_ids,
+          };
         },
       ),
     );
@@ -2232,6 +2250,14 @@ platform.delete("/tenants/:id", async (c) => {
         { ok: false, error: "Personal tenant membership invariant violated" },
         409,
       );
+    }
+    if (personalResult.status === "deleted") {
+      await applyCommittedTenantDeletionRevocations({
+        tenantId,
+        agentIds: personalResult.agentIds,
+        userIds: personalResult.userIds,
+        audit: auditCtx(c),
+      });
     }
     return c.json<ApiResponse>({ ok: true });
   }
@@ -2299,15 +2325,6 @@ platform.delete("/tenants/:id", async (c) => {
       const capabilityCleanup = await cleanupOptionalTenantCapabilities(tx, tenantId);
       if (!capabilityCleanup) return { status: "blocked_by_capability_integrity" as const };
 
-      // Establish every externally enforced cutoff while the deletion fence is
-      // held and before any destructive database mutation. A revoker failure
-      // aborts the transaction; a later database rollback can only leave a
-      // conservatively revoked token, never a deleted tenant with live tokens.
-      const [agentRevocationCutoffs, userRevocationCutoffs] = await Promise.all([
-        Promise.all(tenantAgents.map((agent) => revocationStore.revokeAgentTokens(agent.id))),
-        Promise.all(tenantMembers.map((member) => revocationStore.revokeUserTokens(member.userId))),
-      ]);
-
       await appendRequiredAudit({
         tenantId,
         actorType: "platform",
@@ -2318,18 +2335,6 @@ platform.delete("/tenants/:id", async (c) => {
           agentTokenRevocationTargets: tenantAgents.length,
           userTokenRevocationTargets: tenantMembers.length,
           capabilityCleanup,
-        },
-        ...auditCtx(c),
-      });
-      await appendRequiredAudit({
-        tenantId,
-        actorType: "platform",
-        action: "tenant.delete.token_revocation_completed",
-        resourceType: "tenant",
-        resourceId: tenantId,
-        metadata: {
-          agentRevocationCutoffsEstablished: agentRevocationCutoffs.length,
-          userRevocationCutoffsEstablished: userRevocationCutoffs.length,
         },
         ...auditCtx(c),
       });
@@ -2354,6 +2359,8 @@ platform.delete("/tenants/:id", async (c) => {
       await tx.delete(tenants).where(eq(tenants.id, tenantId));
       return {
         status: "deleted" as const,
+        agentIds: tenantAgents.map((agent) => agent.id),
+        userIds: tenantMembers.map((member) => member.userId),
       };
     },
   );
@@ -2378,6 +2385,14 @@ platform.delete("/tenants/:id", async (c) => {
       { ok: false, error: "Tenant capability authority has cross-tenant references" },
       409,
     );
+  }
+  if (result.status === "deleted") {
+    await applyCommittedTenantDeletionRevocations({
+      tenantId,
+      agentIds: result.agentIds,
+      userIds: result.userIds,
+      audit: auditCtx(c),
+    });
   }
   return c.json<ApiResponse>({ ok: true });
 });
@@ -3970,18 +3985,9 @@ platform.patch("/users/:userId/deactivate", async (c) => {
   if (result === "Personal tenant membership invariant violated") {
     return c.json<ApiResponse>({ ok: false, error: result }, 409);
   }
-  try {
-    await revocationStore.revokeUserTokens(userId, result.issuedBefore);
-  } catch {
-    return c.json<ApiResponse>(
-      {
-        ok: false,
-        error:
-          "User lifecycle change committed, but token cache refresh is pending; retry the request",
-      },
-      503,
-    );
-  }
+  // Redis is only an acceleration layer; the committed database cutoff is
+  // authoritative and makes both deactivation and reactivation fail closed.
+  await revocationStore.revokeUserTokens(userId, result.issuedBefore).catch(() => undefined);
   return c.json<ApiResponse<{ userId: string; deactivatedAt: Date | null }>>({
     ok: true,
     data: { userId, deactivatedAt: result.updated.deactivated_at },

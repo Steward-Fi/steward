@@ -467,16 +467,14 @@ describe("platform security hardening", () => {
       tenantDeleteStart,
       platformSource.indexOf('platform.put("/tenants/:id/policies"', tenantDeleteStart),
     );
-    expect(tenantDeleteRoute.indexOf("revocationStore.revokeAgentTokens(agent.id)")).toBeLessThan(
-      tenantDeleteRoute.indexOf("tx.delete(tenants)"),
-    );
+    expect(tenantDeleteRoute).not.toContain("revocationStore.revokeAgentTokens(agent.id)");
+    expect(tenantDeleteRoute).not.toContain("revocationStore.revokeUserTokens(member.userId)");
+    expect(tenantDeleteRoute).toContain("applyCommittedTenantDeletionRevocations");
     expect(
-      tenantDeleteRoute.indexOf("revocationStore.revokeUserTokens(member.userId)"),
-    ).toBeLessThan(tenantDeleteRoute.indexOf("tx.delete(tenants)"));
-    expect(tenantDeleteRoute).toContain('action: "tenant.delete.token_revocation_completed"');
-    expect(
-      tenantDeleteRoute.indexOf('action: "tenant.delete.token_revocation_completed"'),
-    ).toBeLessThan(tenantDeleteRoute.indexOf("tx.delete(tenants)"));
+      tenantDeleteRoute.lastIndexOf("applyCommittedTenantDeletionRevocations"),
+    ).toBeGreaterThan(tenantDeleteRoute.indexOf("tx.delete(tenants)"));
+    expect(platformSource).toContain("action:\n      failures === 0");
+    expect(platformSource).toContain('"tenant.delete.token_revocation_deferred"');
   });
 
   it("removes non-cascading tenant credential state during tenant deletion", () => {

@@ -377,6 +377,18 @@ describeWithPostgres("personal lifecycle production upgrade topology", () => {
       { tenant_id: "t-legacy-wallet-owner", role: "owner" },
     ]);
     await expectDatabaseRejection(
+      appWriter`UPDATE users
+        SET wallet_address = '0x4444444444444444444444444444444444444444'
+        WHERE id = ${evmOwnerId}`,
+      /Wallet tenant owner identity is immutable while membership exists/,
+    );
+    await expectDatabaseRejection(
+      appWriter`UPDATE tenants
+        SET owner_address = '0x4444444444444444444444444444444444444444'
+        WHERE id = ${`eth:${evmAddress}`}`,
+      /Wallet tenant owner identity is immutable while membership exists/,
+    );
+    await expectDatabaseRejection(
       db`INSERT INTO user_tenants (user_id,tenant_id,role)
         VALUES (${otherOwnerId}, ${`eth:${evmAddress}`}, 'owner')`,
       /Reserved tenant membership is immutable/,
@@ -412,13 +424,17 @@ describeWithPostgres("personal lifecycle production upgrade topology", () => {
     await db`INSERT INTO tenants (id,name,api_key_hash)
       VALUES ('default', 'Default auth tenant', 'default-auth-hash')
       ON CONFLICT (id) DO NOTHING`;
+    await expectDatabaseRejection(
+      db`INSERT INTO user_tenants (user_id,tenant_id,role)
+        VALUES (${otherOwnerId}, 'default', 'member')`,
+      /Reserved tenant membership is immutable/,
+    );
     await appWriter.begin(async (tx) => {
       await tx`SELECT set_config('steward.tenant_id', 'default', true)`;
       await tx`SELECT set_config('steward.user_id', ${otherOwnerId}, true)`;
-      await tx`INSERT INTO user_tenants (user_id,tenant_id,role)
-        VALUES (${otherOwnerId}, 'default', 'member')`;
-      await tx`DELETE FROM user_tenants
-        WHERE user_id = ${otherOwnerId} AND tenant_id = 'default'`;
+      await tx`SELECT steward_bootstrap.ensure_default_membership(
+        ${otherOwnerId}::uuid, 'member'
+      )`;
     });
     await expectDatabaseRejection(
       db`INSERT INTO user_tenants (user_id,tenant_id,role)
@@ -468,6 +484,48 @@ describeWithPostgres("personal lifecycle production upgrade topology", () => {
       }
       throw new Error(`backend ${pid} did not reach the personal lifecycle advisory lock`);
     };
+
+    const walletRaceUserId = randomUUID();
+    const walletRaceAddress = "0x5555555555555555555555555555555555555555";
+    const walletRaceTenantId = `eth:${walletRaceAddress}`;
+    await db`INSERT INTO users (id,email,email_verified,wallet_address,wallet_chain)
+      VALUES (${walletRaceUserId}, 'wallet-race@example.test', true, ${walletRaceAddress}, 'ethereum')`;
+    await db`INSERT INTO tenants (id,name,api_key_hash,owner_address)
+      VALUES (${walletRaceTenantId}, 'Wallet identity race', 'wallet-race-hash', ${walletRaceAddress})`;
+
+    let identityFirstMembership: Promise<unknown> | undefined;
+    await writer.begin(async (tx) => {
+      await tx`UPDATE users
+        SET wallet_address = '0x6666666666666666666666666666666666666666'
+        WHERE id = ${walletRaceUserId}`;
+      identityFirstMembership = deleter.begin(async (other) => {
+        await other`INSERT INTO user_tenants (user_id,tenant_id,role)
+          VALUES (${walletRaceUserId}, ${walletRaceTenantId}, 'owner')`;
+      });
+      await waitForAdvisoryWait(deleterPid);
+    });
+    await expectDatabaseRejection(
+      identityFirstMembership as Promise<unknown>,
+      /Reserved tenant membership is immutable/,
+    );
+
+    await db`UPDATE users SET wallet_address = ${walletRaceAddress}
+      WHERE id = ${walletRaceUserId}`;
+    let membershipFirstIdentity: Promise<unknown> | undefined;
+    await deleter.begin(async (tx) => {
+      await tx`INSERT INTO user_tenants (user_id,tenant_id,role)
+        VALUES (${walletRaceUserId}, ${walletRaceTenantId}, 'owner')`;
+      membershipFirstIdentity = writer.begin(async (other) => {
+        await other`UPDATE users
+          SET wallet_address = '0x7777777777777777777777777777777777777777'
+          WHERE id = ${walletRaceUserId}`;
+      });
+      await waitForAdvisoryWait(writerPid);
+    });
+    await expectDatabaseRejection(
+      membershipFirstIdentity as Promise<unknown>,
+      /Wallet tenant owner identity is immutable while membership exists/,
+    );
 
     let writerFirstCompeting: Promise<unknown> | undefined;
     await writer.begin(async (tx) => {

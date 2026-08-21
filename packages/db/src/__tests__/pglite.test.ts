@@ -708,13 +708,13 @@ AQIDAQAB
         INSERT INTO user_tenants (user_id, tenant_id, role)
         VALUES ('${otherId}', '${tenantId}', 'member')
       `),
-    ).rejects.toThrow("Personal tenant membership is immutable");
+    ).rejects.toThrow("Reserved tenant membership is immutable");
     await expect(
       client.query(`
         UPDATE user_tenants SET role = 'member'
         WHERE user_id = '${ownerId}' AND tenant_id = '${tenantId}'
       `),
-    ).rejects.toThrow("Personal tenant membership is immutable");
+    ).rejects.toThrow("Reserved tenant membership is immutable");
     await expect(
       client.query(`
         INSERT INTO tenant_invitations (
@@ -724,13 +724,33 @@ AQIDAQAB
           'personal-invitation-hash', 'pending', now() + interval '1 day'
         )
       `),
-    ).rejects.toThrow("Personal tenant invitations are forbidden");
+    ).rejects.toThrow("Reserved tenant invitations are forbidden");
     await expect(
       client.query(`
         DELETE FROM user_tenants
         WHERE user_id = '${ownerId}' AND tenant_id = '${tenantId}'
       `),
-    ).rejects.toThrow("Personal tenant membership is immutable");
+    ).rejects.toThrow("Reserved tenant membership is immutable");
+
+    await client.query(`
+      INSERT INTO tenants (id, name, api_key_hash)
+      VALUES ('default', 'Default tenant', 'default-authority-hash')
+      ON CONFLICT (id) DO NOTHING
+    `);
+    await expect(
+      client.query(`INSERT INTO user_tenants (user_id, tenant_id, role)
+        VALUES ('${otherId}', 'default', 'member')`),
+    ).rejects.toThrow("Reserved tenant membership is immutable");
+    await client.query(`SELECT set_config('steward.tenant_id', 'default', false)`);
+    await client.query(`SELECT set_config('steward.user_id', '${otherId}', false)`);
+    await client.query(
+      `SELECT steward_bootstrap.ensure_default_membership('${otherId}'::uuid, 'member')`,
+    );
+    await expect(
+      client.query(`SELECT steward_bootstrap.ensure_default_membership(
+        '${ownerId}'::uuid, 'member'
+      )`),
+    ).rejects.toThrow("default membership authority denied");
 
     await client.query(`DELETE FROM tenants WHERE id = '${tenantId}'`);
     expect(

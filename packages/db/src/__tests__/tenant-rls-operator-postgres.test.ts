@@ -323,6 +323,7 @@ describeWithPostgres("SEC-169 operator lifecycle on the real Steward schema", ()
 
       const expectedPlatformAcls = [
         "function:steward_bootstrap.platform_delete_user(p_user_id uuid):EXECUTE:false",
+        "function:steward_bootstrap.platform_personal_tenant_delete(p_tenant_id text, p_execute boolean):EXECUTE:false",
         "function:steward_bootstrap.platform_revoke_user_refresh_tokens(p_user_id uuid):EXECUTE:false",
         "function:steward_bootstrap.platform_set_user_deactivation(p_user_id uuid, p_deactivated boolean):EXECUTE:false",
         "function:steward_bootstrap.platform_stats():EXECUTE:false",
@@ -498,8 +499,8 @@ describeWithPostgres("SEC-169 operator lifecycle on the real Steward schema", ()
         WHERE n.nspname = 'public' AND p.polname LIKE 'steward_%'
       `;
       // Retained provider evidence is permanently forced with no app policy,
-      // so it is intentionally absent from the 71 policy-bearing relations.
-      expect(activated).toEqual({ enabled: 71, forced: 71, maintenance: 71 });
+      // so it is intentionally absent from the 74 policy-bearing relations.
+      expect(activated).toEqual({ enabled: 74, forced: 74, maintenance: 74 });
 
       // Exercise the same load-bearing runtime gates used by the API and proxy
       // through their real restricted login connections. This catches query

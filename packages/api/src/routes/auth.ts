@@ -2658,6 +2658,15 @@ async function ensureUserTenantLink(
   role: string = "member",
 ): Promise<void> {
   await withVerifiedAuthTenant(tenantId, userId, async () => {
+    if (tenantId === "default") {
+      if (role !== "member" && role !== GUEST_TENANT_ROLE) {
+        throw new Error("Default tenant membership role is not permitted");
+      }
+      await getDb().execute(
+        sql`SELECT steward_bootstrap.ensure_default_membership(${userId}::uuid, ${role})`,
+      );
+      return;
+    }
     await getDb().insert(userTenants).values({ userId, tenantId, role }).onConflictDoNothing();
   });
 }
@@ -9309,6 +9318,12 @@ auth.post("/guest", async (c) => {
   // session cannot satisfy requireTenantLevel(). onConflictDoNothing keeps this
   // idempotent against a racing insert on the (userId, tenantId) unique index.
   await withVerifiedAuthTenant(tenantId, guest.id, async () => {
+    if (tenantId === "default") {
+      await getDb().execute(
+        sql`SELECT steward_bootstrap.ensure_default_membership(${guest.id}::uuid, ${GUEST_TENANT_ROLE})`,
+      );
+      return;
+    }
     await getDb()
       .insert(userTenants)
       .values({ userId: guest.id, tenantId, role: GUEST_TENANT_ROLE })
@@ -9417,18 +9432,10 @@ auth.delete("/guest", async (c) => {
       return Number(updated.tokens_revoked_before);
     }),
   );
-  try {
-    await revocationStore.revokeUserTokens(userId, issuedBefore);
-  } catch {
-    return c.json<ApiResponse>(
-      {
-        ok: false,
-        error:
-          "Guest deactivation committed, but token cache refresh is pending; retry the request",
-      },
-      503,
-    );
-  }
+  // The durable database boundary is authoritative. A guest cannot use the
+  // now-revoked token to retry this request, so cache refresh is deliberately
+  // best-effort after commit rather than an unreachable 503 contract.
+  await revocationStore.revokeUserTokens(userId, issuedBefore).catch(() => undefined);
 
   return c.json({
     ok: true,

@@ -113,7 +113,7 @@ REVOKE ALL ON ALL PROCEDURES IN SCHEMA steward_rls FROM PUBLIC;
 DO $$
 DECLARE
   actual text[];
-  expected constant text[] := ARRAY[
+  expected text[] := ARRAY[
     'steward_bootstrap.agent_subject(text,text,text)',
     'steward_bootstrap.agent_tenant_subject(text)',
     'steward_bootstrap.app_client_subject(text,text)',
@@ -128,6 +128,7 @@ DECLARE
     'steward_bootstrap.ensure_platform_tenant()',
     'steward_bootstrap.ensure_system_tenant()',
     'steward_bootstrap.platform_delete_user(uuid)',
+    'steward_bootstrap.platform_personal_tenant_delete(text,boolean)',
     'steward_bootstrap.platform_revoke_user_refresh_tokens(uuid)',
     'steward_bootstrap.platform_set_user_deactivation(uuid,boolean)',
     'steward_bootstrap.platform_stats()',
@@ -139,6 +140,20 @@ DECLARE
     'steward_bootstrap.tenant_ids_for_internal_job()'
   ];
 BEGIN
+  IF to_regprocedure('steward_bootstrap.ensure_default_membership(uuid,text)') IS NOT NULL THEN
+    expected := array_append(
+      expected,
+      'steward_bootstrap.ensure_default_membership(uuid,text)'
+    );
+  END IF;
+  IF to_regprocedure('steward_bootstrap.user_token_revocation_subject(uuid)') IS NOT NULL THEN
+    expected := array_append(
+      expected,
+      'steward_bootstrap.user_token_revocation_subject(uuid)'
+    );
+  END IF;
+  SELECT array_agg(identity ORDER BY identity) INTO expected
+  FROM unnest(expected) AS functions(identity);
   SELECT array_agg(p.oid::regprocedure::text ORDER BY p.oid::regprocedure::text)
     INTO actual
   FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
@@ -248,6 +263,14 @@ SELECT format(
   'steward_bootstrap.tenant_ids_for_internal_job() TO %I',
   :'steward_app_role'
 ) \gexec
+SELECT format(
+  'GRANT EXECUTE ON FUNCTION steward_bootstrap.ensure_default_membership(uuid,text) TO %I',
+  :'steward_app_role'
+) WHERE to_regprocedure('steward_bootstrap.ensure_default_membership(uuid,text)') IS NOT NULL \gexec
+SELECT format(
+  'GRANT EXECUTE ON FUNCTION steward_bootstrap.user_token_revocation_subject(uuid) TO %I',
+  :'steward_app_role'
+) WHERE to_regprocedure('steward_bootstrap.user_token_revocation_subject(uuid)') IS NOT NULL \gexec
 SELECT format(
   'GRANT EXECUTE ON FUNCTION public.steward_lock_tenant_deletion(text) TO %I',
   :'steward_app_role'
@@ -368,7 +391,19 @@ SELECT format(
   'GRANT EXECUTE ON FUNCTION steward_bootstrap.platform_personal_tenant_delete(text,boolean) TO %I',
   :'steward_platform_role'
 ) WHERE to_regprocedure('steward_bootstrap.platform_personal_tenant_delete(text,boolean)') IS NOT NULL \gexec
-SELECT format('GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO %I', :'steward_app_role') \gexec
+-- Grant the checked-in relation inventory explicitly. A newly created table is
+-- unavailable to the app until its semantics are reviewed and the manifest is
+-- regenerated; bootstrap must never turn schema growth into ambient authority.
+SELECT format(
+  'GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.%I TO %I',
+  relation_name,
+  :'steward_app_role'
+)
+FROM steward_expected_public_relations
+WHERE relation_name NOT IN ('users', 'retained_user_provider_evidence')
+ORDER BY relation_name
+\gexec
+SELECT format('GRANT SELECT ON public.users TO %I', :'steward_app_role') \gexec
 SELECT format('GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO %I', :'steward_app_role') \gexec
 -- User lifecycle authority is deliberately excluded from the shared app login.
 -- Profile/auth flows retain only the columns they legitimately mutate; global
@@ -392,6 +427,38 @@ SELECT format(
   :'steward_app_role'
 ) WHERE to_regclass('public.user_identity_subjects') IS NOT NULL
     AND to_regclass('public.retained_user_provider_evidence') IS NOT NULL \gexec
+
+-- Normalize migration-owned personal lifecycle implementations when the
+-- initial bootstrap follows an administrator-run schema migration. Restricted
+-- post-split migrations already create these objects with this owner.
+SELECT format(
+  'ALTER FUNCTION public.steward_lock_personal_lifecycle(uuid,text,boolean) OWNER TO %I',
+  :'steward_migration_role'
+) WHERE to_regprocedure('public.steward_lock_personal_lifecycle(uuid,text,boolean)') IS NOT NULL \gexec
+SELECT format(
+  'ALTER FUNCTION public.steward_platform_personal_tenant_delete_v2(text,boolean) OWNER TO %I',
+  :'steward_migration_role'
+) WHERE to_regprocedure('public.steward_platform_personal_tenant_delete_v2(text,boolean)') IS NOT NULL \gexec
+SELECT format(
+  'ALTER FUNCTION public.steward_platform_set_user_deactivation_v2(uuid,boolean) OWNER TO %I',
+  :'steward_migration_role'
+) WHERE to_regprocedure('public.steward_platform_set_user_deactivation_v2(uuid,boolean)') IS NOT NULL \gexec
+SELECT format(
+  'ALTER FUNCTION public.steward_platform_delete_user_v2(uuid) OWNER TO %I',
+  :'steward_migration_role'
+) WHERE to_regprocedure('public.steward_platform_delete_user_v2(uuid)') IS NOT NULL \gexec
+SELECT format(
+  'ALTER FUNCTION public.steward_guard_personal_membership_write() OWNER TO %I',
+  :'steward_migration_role'
+) WHERE to_regprocedure('public.steward_guard_personal_membership_write()') IS NOT NULL \gexec
+SELECT format(
+  'ALTER FUNCTION public.steward_guard_personal_membership_delete() OWNER TO %I',
+  :'steward_migration_role'
+) WHERE to_regprocedure('public.steward_guard_personal_membership_delete()') IS NOT NULL \gexec
+SELECT format(
+  'ALTER FUNCTION public.steward_guard_personal_invitation_write() OWNER TO %I',
+  :'steward_migration_role'
+) WHERE to_regprocedure('public.steward_guard_personal_invitation_write()') IS NOT NULL \gexec
 
 -- The function owner is non-login and may read only the fixed bootstrap inputs.
 SELECT format(
@@ -446,6 +513,8 @@ SELECT format('ALTER FUNCTION steward_bootstrap.agent_tenant_subject(text) OWNER
 SELECT format('ALTER FUNCTION steward_bootstrap.app_client_subject(text,text) OWNER TO %I', :'steward_bootstrap_role') \gexec
 SELECT format('ALTER FUNCTION steward_bootstrap.tenant_ids_for_internal_job() OWNER TO %I', :'steward_bootstrap_role') \gexec
 SELECT format('ALTER FUNCTION steward_bootstrap.ensure_default_tenant(text) OWNER TO %I', :'steward_bootstrap_role') \gexec
+SELECT format('ALTER FUNCTION steward_bootstrap.ensure_default_membership(uuid,text) OWNER TO %I', :'steward_bootstrap_role')
+WHERE to_regprocedure('steward_bootstrap.ensure_default_membership(uuid,text)') IS NOT NULL \gexec
 SELECT format('ALTER FUNCTION steward_bootstrap.ensure_system_tenant() OWNER TO %I', :'steward_bootstrap_role') \gexec
 SELECT format('ALTER FUNCTION steward_bootstrap.ensure_platform_tenant() OWNER TO %I', :'steward_bootstrap_role') \gexec
 SELECT format('ALTER FUNCTION steward_bootstrap.platform_user_tenant_ids(uuid) OWNER TO %I', :'steward_bootstrap_role') \gexec
@@ -481,8 +550,6 @@ SELECT format('ALTER SCHEMA drizzle OWNER TO %I', :'steward_migration_role')
 WHERE EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'drizzle') \gexec
 
 -- Future objects inherit the same split when migrations run as the migration role.
-SELECT format('ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO %I', :'steward_migration_role', :'steward_app_role') \gexec
-SELECT format('ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO %I', :'steward_migration_role', :'steward_app_role') \gexec
 SELECT format('ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA public REVOKE EXECUTE ON ROUTINES FROM PUBLIC', :'steward_migration_role') \gexec
 
 DO $$
@@ -627,6 +694,7 @@ BEGIN
          )
          AND function_object.oid <> ALL (ARRAY[
            'steward_bootstrap.platform_delete_user(uuid)'::regprocedure,
+           'steward_bootstrap.platform_personal_tenant_delete(text,boolean)'::regprocedure,
            'steward_bootstrap.platform_revoke_user_refresh_tokens(uuid)'::regprocedure,
            'steward_bootstrap.platform_set_user_deactivation(uuid,boolean)'::regprocedure,
            'steward_bootstrap.platform_stats()'::regprocedure,
@@ -690,6 +758,7 @@ BEGIN
     WHERE granted_role.rolname = current_setting('steward.bootstrap.platform_role')
   ) IS DISTINCT FROM ARRAY[
     'steward_bootstrap.platform_delete_user(p_user_id uuid):EXECUTE:false',
+    'steward_bootstrap.platform_personal_tenant_delete(p_tenant_id text, p_execute boolean):EXECUTE:false',
     'steward_bootstrap.platform_revoke_user_refresh_tokens(p_user_id uuid):EXECUTE:false',
     'steward_bootstrap.platform_set_user_deactivation(p_user_id uuid, p_deactivated boolean):EXECUTE:false',
     'steward_bootstrap.platform_stats():EXECUTE:false',

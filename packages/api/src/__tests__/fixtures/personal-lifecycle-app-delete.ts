@@ -48,29 +48,13 @@ try {
     body: JSON.stringify({ deactivated: true }),
   });
   assert(
-    deactivate.status === 503,
+    deactivate.status === 200,
     `mounted failed-cache deactivation returned ${deactivate.status}`,
   );
   assert(
     (await verifySessionToken(oldToken)) === null,
     "deactivation did not invalidate old token",
   );
-  const deactivateRetry = await app.request(
-    `http://steward.test/platform/users/${userId}/deactivate`,
-    {
-      method: "PATCH",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Steward-Platform-Key": platformKey,
-      },
-      body: JSON.stringify({ deactivated: true }),
-    },
-  );
-  assert(
-    deactivateRetry.status === 200,
-    `mounted deactivation retry returned ${deactivateRetry.status}`,
-  );
-
   // Mint while the database identity is inactive. This token is newer than the
   // successful deactivation cache line, so only the durable reactivation line
   // can keep it invalid after deactivated_at is cleared.
@@ -87,27 +71,12 @@ try {
     body: JSON.stringify({ deactivated: false }),
   });
   assert(
-    reactivate.status === 503,
+    reactivate.status === 200,
     `mounted failed-cache reactivation returned ${reactivate.status}`,
   );
   assert(
     (await verifySessionToken(betweenToken)) === null,
     "reactivation restored a token newer than the stale cache but older than the durable boundary",
-  );
-  const reactivateRetry = await app.request(
-    `http://steward.test/platform/users/${userId}/deactivate`,
-    {
-      method: "PATCH",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Steward-Platform-Key": platformKey,
-      },
-      body: JSON.stringify({ deactivated: false }),
-    },
-  );
-  assert(
-    reactivateRetry.status === 200,
-    `mounted reactivation retry returned ${reactivateRetry.status}`,
   );
   await Bun.sleep(1_100);
   const freshToken = await signAccessToken({ address: "", tenantId, userId });

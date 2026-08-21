@@ -1150,7 +1150,7 @@ describe("platform global identity graph routes", () => {
     }
   });
 
-  it("commits deactivation and its audit before a retryable token-cache refresh", async () => {
+  it("keeps committed deactivation successful when token-cache refresh fails", async () => {
     const [target] = await getDb()
       .insert(users)
       .values({ email: "deactivate-revocation-retry@example.test", emailVerified: true })
@@ -1164,10 +1164,7 @@ describe("platform global identity graph routes", () => {
         headers: headers(),
         body: JSON.stringify({ deactivated: true }),
       });
-      expect(first.status).toBe(503);
-      expect(((await first.json()) as { error: string }).error).toContain(
-        "lifecycle change committed",
-      );
+      expect(first.status).toBe(200);
       const [stored] = await getDb()
         .select({ deactivatedAt: users.deactivatedAt })
         .from(users)
@@ -1181,19 +1178,13 @@ describe("platform global identity graph routes", () => {
         );
       expect(completed).toHaveLength(1);
 
-      const retry = await platformRoutes.request(`/users/${target.id}/deactivate`, {
-        method: "PATCH",
-        headers: headers(),
-        body: JSON.stringify({ deactivated: true }),
-      });
-      expect(retry.status).toBe(200);
-      expect(revoke).toHaveBeenCalledTimes(2);
+      expect(revoke).toHaveBeenCalledTimes(1);
     } finally {
       revoke.mockRestore();
     }
   });
 
-  it("commits reactivation behind a durable token line before retrying the cache", async () => {
+  it("keeps committed reactivation successful behind the durable token line", async () => {
     const [target] = await getDb()
       .insert(users)
       .values({
@@ -1211,10 +1202,7 @@ describe("platform global identity graph routes", () => {
         headers: headers(),
         body: JSON.stringify({ deactivated: false }),
       });
-      expect(first.status).toBe(503);
-      expect(((await first.json()) as { error: string }).error).toContain(
-        "lifecycle change committed",
-      );
+      expect(first.status).toBe(200);
       const [stored] = await getDb()
         .select({
           deactivatedAt: users.deactivatedAt,
@@ -1232,13 +1220,7 @@ describe("platform global identity graph routes", () => {
         );
       expect(completed).toHaveLength(1);
 
-      const retry = await platformRoutes.request(`/users/${target.id}/deactivate`, {
-        method: "PATCH",
-        headers: headers(),
-        body: JSON.stringify({ deactivated: false }),
-      });
-      expect(retry.status).toBe(200);
-      expect(revoke).toHaveBeenCalledTimes(2);
+      expect(revoke).toHaveBeenCalledTimes(1);
     } finally {
       revoke.mockRestore();
     }

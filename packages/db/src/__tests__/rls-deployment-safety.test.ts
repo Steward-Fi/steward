@@ -57,15 +57,7 @@ function database(options?: {
       }
       if (query === 2) return [];
       if (query === 3) {
-        const acls = [
-          { acl: "database:steward:CONNECT:false" },
-          { acl: "default:steward_migrator:S:public:SELECT:false" },
-          { acl: "default:steward_migrator:S:public:USAGE:false" },
-          { acl: "default:steward_migrator:r:public:DELETE:false" },
-          { acl: "default:steward_migrator:r:public:INSERT:false" },
-          { acl: "default:steward_migrator:r:public:SELECT:false" },
-          { acl: "default:steward_migrator:r:public:UPDATE:false" },
-        ];
+        const acls = [{ acl: "database:steward:CONNECT:false" }];
         if (options?.appDatabaseAclDrift) {
           acls.push({ acl: "database:steward:CREATE:false" });
         }
@@ -203,6 +195,34 @@ function database(options?: {
         return rows.sort((left, right) => left.grantee.localeCompare(right.grantee));
       }
       if (query === 11) {
+        const usersInsertColumns = [
+          "created_at",
+          "custom_metadata",
+          "email",
+          "email_verified",
+          "guest_expires_at",
+          "id",
+          "image",
+          "is_guest",
+          "name",
+          "steward_wallet_id",
+          "updated_at",
+          "wallet_address",
+          "wallet_chain",
+        ];
+        const usersUpdateColumns = [
+          "custom_metadata",
+          "email",
+          "email_verified",
+          "guest_expires_at",
+          "image",
+          "is_guest",
+          "name",
+          "steward_wallet_id",
+          "updated_at",
+          "wallet_address",
+          "wallet_chain",
+        ];
         const appAcls = [
           "schema:public:USAGE:false",
           "schema:steward_bootstrap:USAGE:false",
@@ -214,11 +234,17 @@ function database(options?: {
           ),
           ...EXPECTED_PUBLIC_RELATIONS.filter(
             (relation) => relation.policy_group === "core" || options?.capabilities,
-          ).flatMap((relation) =>
-            ["DELETE", "INSERT", "SELECT", "UPDATE"].map(
+          ).flatMap((relation) => {
+            if (relation.relation_name === "retained_user_provider_evidence") return [];
+            if (relation.relation_name === "users") {
+              return ["relation:public.users:SELECT:false"];
+            }
+            return ["DELETE", "INSERT", "SELECT", "UPDATE"].map(
               (privilege) => `relation:public.${relation.relation_name}:${privilege}:false`,
-            ),
-          ),
+            );
+          }),
+          ...usersInsertColumns.map((column) => `column:public.users.${column}:INSERT:false`),
+          ...usersUpdateColumns.map((column) => `column:public.users.${column}:UPDATE:false`),
         ];
         if (options?.appAclDrift) appAcls.push("relation:public.users:TRUNCATE:false");
         return appAcls.sort().map((acl) => ({ acl }));
@@ -233,6 +259,7 @@ function database(options?: {
       if (query === 17) {
         const acls = [
           "function:steward_bootstrap.platform_delete_user(uuid):EXECUTE:false",
+          "function:steward_bootstrap.platform_personal_tenant_delete(text,boolean):EXECUTE:false",
           "function:steward_bootstrap.platform_revoke_user_refresh_tokens(uuid):EXECUTE:false",
           "function:steward_bootstrap.platform_set_user_deactivation(uuid,boolean):EXECUTE:false",
           "function:steward_bootstrap.platform_stats():EXECUTE:false",

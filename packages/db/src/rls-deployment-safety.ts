@@ -20,6 +20,7 @@ const APP_EXECUTABLE_FUNCTIONS = [
   "steward_bootstrap.auth_sso_domain_subject(text,text)",
   "steward_bootstrap.auth_tenant_config_subject(text)",
   "steward_bootstrap.auth_tenant_subject(text,uuid)",
+  "steward_bootstrap.ensure_default_membership(uuid,text)",
   "steward_bootstrap.ensure_default_tenant(text)",
   "steward_bootstrap.ensure_platform_tenant()",
   "steward_bootstrap.ensure_system_tenant()",
@@ -27,11 +28,13 @@ const APP_EXECUTABLE_FUNCTIONS = [
   "steward_bootstrap.session_subject(uuid,text)",
   "steward_bootstrap.tenant_api_key_subject(text)",
   "steward_bootstrap.tenant_ids_for_internal_job()",
+  "steward_bootstrap.user_token_revocation_subject(uuid)",
 ] as const;
 
 const PLATFORM_EXECUTABLE_FUNCTIONS = [
   "steward_rls.tenant_id()",
   "steward_bootstrap.platform_delete_user(uuid)",
+  "steward_bootstrap.platform_personal_tenant_delete(text,boolean)",
   "steward_bootstrap.platform_revoke_user_refresh_tokens(uuid)",
   "steward_bootstrap.platform_set_user_deactivation(uuid,boolean)",
   "steward_bootstrap.platform_stats()",
@@ -43,6 +46,34 @@ const PERSONAL_LIFECYCLE_LOCK_FUNCTION = "steward_lock_personal_lifecycle(uuid,t
 const APP_PUBLIC_EXECUTABLE_FUNCTIONS = [
   "steward_lock_tenant_deletion(text)",
   PERSONAL_LIFECYCLE_LOCK_FUNCTION,
+] as const;
+const APP_USERS_INSERT_COLUMNS = [
+  "created_at",
+  "custom_metadata",
+  "email",
+  "email_verified",
+  "guest_expires_at",
+  "id",
+  "image",
+  "is_guest",
+  "name",
+  "steward_wallet_id",
+  "updated_at",
+  "wallet_address",
+  "wallet_chain",
+] as const;
+const APP_USERS_UPDATE_COLUMNS = [
+  "custom_metadata",
+  "email",
+  "email_verified",
+  "guest_expires_at",
+  "image",
+  "is_guest",
+  "name",
+  "steward_wallet_id",
+  "updated_at",
+  "wallet_address",
+  "wallet_chain",
 ] as const;
 
 export const EXPECTED_PERSONAL_LIFECYCLE_LOCK_DEFINITION = {
@@ -59,6 +90,7 @@ export const EXPECTED_PERSONAL_LIFECYCLE_LOCK_DEFINITION = {
 
 const EXPECTED_PLATFORM_NAMED_ACLS = [
   "function:steward_bootstrap.platform_delete_user(uuid):EXECUTE:false",
+  "function:steward_bootstrap.platform_personal_tenant_delete(text,boolean):EXECUTE:false",
   "function:steward_bootstrap.platform_revoke_user_refresh_tokens(uuid):EXECUTE:false",
   "function:steward_bootstrap.platform_set_user_deactivation(uuid,boolean):EXECUTE:false",
   "function:steward_bootstrap.platform_stats():EXECUTE:false",
@@ -442,12 +474,6 @@ export async function assertRlsDeploymentSafety(
         await db.execute(sql`SELECT current_database()::text AS database_name`),
       )[0]?.database_name
     }:CONNECT:false`,
-    `default:${options.expectedMigrationRole}:S:public:SELECT:false`,
-    `default:${options.expectedMigrationRole}:S:public:USAGE:false`,
-    `default:${options.expectedMigrationRole}:r:public:DELETE:false`,
-    `default:${options.expectedMigrationRole}:r:public:INSERT:false`,
-    `default:${options.expectedMigrationRole}:r:public:SELECT:false`,
-    `default:${options.expectedMigrationRole}:r:public:UPDATE:false`,
   ].sort();
   if (
     stable(appDatabaseAndDefaultAcls.map((row) => row.acl)) !==
@@ -767,6 +793,17 @@ export async function assertRlsDeploymentSafety(
       WHERE relation.relkind IN ('r', 'p', 'v', 'm', 'f', 'S')
         AND granted_role.rolname = ${options.expectedRole}
       UNION ALL
+      SELECT 'column:' || namespace.nspname || '.' || relation.relname || '.' ||
+        attribute.attname || ':' || privilege.privilege_type || ':' ||
+        privilege.is_grantable AS acl
+      FROM pg_attribute attribute
+      JOIN pg_class relation ON relation.oid = attribute.attrelid
+      JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+      CROSS JOIN LATERAL aclexplode(attribute.attacl) privilege
+      JOIN pg_roles granted_role ON granted_role.oid = privilege.grantee
+      WHERE attribute.attnum > 0 AND NOT attribute.attisdropped
+        AND granted_role.rolname = ${options.expectedRole}
+      UNION ALL
       SELECT 'function:' || function_object.oid::regprocedure::text || ':' ||
         privilege.privilege_type || ':' || privilege.is_grantable AS acl
       FROM pg_proc function_object
@@ -788,11 +825,15 @@ export async function assertRlsDeploymentSafety(
     "schema:public:USAGE:false",
     "schema:steward_bootstrap:USAGE:false",
     "schema:steward_rls:USAGE:false",
-    ...expectedRelations.flatMap((relation) =>
-      ["DELETE", "INSERT", "SELECT", "UPDATE"].map(
+    ...expectedRelations.flatMap((relation) => {
+      if (relation.relation_name === "retained_user_provider_evidence") return [];
+      if (relation.relation_name === "users") return ["relation:public.users:SELECT:false"];
+      return ["DELETE", "INSERT", "SELECT", "UPDATE"].map(
         (privilege) => `relation:public.${relation.relation_name}:${privilege}:false`,
-      ),
-    ),
+      );
+    }),
+    ...APP_USERS_INSERT_COLUMNS.map((column) => `column:public.users.${column}:INSERT:false`),
+    ...APP_USERS_UPDATE_COLUMNS.map((column) => `column:public.users.${column}:UPDATE:false`),
     ...sequenceRows.flatMap((sequence) => [
       `relation:${sequence.identity}:SELECT:false`,
       `relation:${sequence.identity}:USAGE:false`,

@@ -307,13 +307,7 @@ BEGIN
       JOIN pg_roles granted ON granted.oid = acl.grantee
       WHERE granted.rolname = current_setting('steward.activation.app_role')
     ), expected(acl) AS (VALUES
-      ('database:' || current_database() || ':CONNECT:false'),
-      ('default:' || current_setting('steward.activation.migration_role') || ':S:public:SELECT:false'),
-      ('default:' || current_setting('steward.activation.migration_role') || ':S:public:USAGE:false'),
-      ('default:' || current_setting('steward.activation.migration_role') || ':r:public:DELETE:false'),
-      ('default:' || current_setting('steward.activation.migration_role') || ':r:public:INSERT:false'),
-      ('default:' || current_setting('steward.activation.migration_role') || ':r:public:SELECT:false'),
-      ('default:' || current_setting('steward.activation.migration_role') || ':r:public:UPDATE:false')
+      ('database:' || current_database() || ':CONNECT:false')
     )
     SELECT 1 FROM actual FULL JOIN expected USING (acl)
     WHERE actual.acl IS NULL OR expected.acl IS NULL
@@ -338,6 +332,16 @@ BEGIN
       WHERE c.relkind IN ('r', 'p', 'v', 'm', 'f', 'S')
         AND granted.rolname = current_setting('steward.activation.app_role')
       UNION ALL
+      SELECT 'column:' || n.nspname || '.' || c.relname || '.' || a.attname || ':' ||
+        acl.privilege_type || ':' || acl.is_grantable
+      FROM pg_attribute a
+      JOIN pg_class c ON c.oid = a.attrelid
+      JOIN pg_namespace n ON n.oid = c.relnamespace
+      CROSS JOIN LATERAL aclexplode(a.attacl) acl
+      JOIN pg_roles granted ON granted.oid = acl.grantee
+      WHERE a.attnum > 0 AND NOT a.attisdropped
+        AND granted.rolname = current_setting('steward.activation.app_role')
+      UNION ALL
       SELECT 'function:' || p.oid::regprocedure::text || ':' || acl.privilege_type || ':' ||
         acl.is_grantable
       FROM pg_proc p
@@ -356,6 +360,22 @@ BEGIN
       SELECT 'relation:public.' || relation.relation_name || ':' || privilege || ':false'
       FROM steward_expected_public_relations relation
       CROSS JOIN (VALUES ('DELETE'), ('INSERT'), ('SELECT'), ('UPDATE')) privileges(privilege)
+      WHERE relation.relation_name NOT IN ('users', 'retained_user_provider_evidence')
+      UNION ALL
+      SELECT 'relation:public.users:SELECT:false'
+      UNION ALL
+      SELECT 'column:public.users.' || column_name || ':' || privilege || ':false'
+      FROM (VALUES
+        ('created_at','INSERT'), ('custom_metadata','INSERT'), ('email','INSERT'),
+        ('email_verified','INSERT'), ('guest_expires_at','INSERT'), ('id','INSERT'),
+        ('image','INSERT'), ('is_guest','INSERT'), ('name','INSERT'),
+        ('steward_wallet_id','INSERT'), ('updated_at','INSERT'),
+        ('wallet_address','INSERT'), ('wallet_chain','INSERT'),
+        ('custom_metadata','UPDATE'), ('email','UPDATE'), ('email_verified','UPDATE'),
+        ('guest_expires_at','UPDATE'), ('image','UPDATE'), ('is_guest','UPDATE'),
+        ('name','UPDATE'), ('steward_wallet_id','UPDATE'), ('updated_at','UPDATE'),
+        ('wallet_address','UPDATE'), ('wallet_chain','UPDATE')
+      ) user_columns(column_name, privilege)
       UNION ALL
       SELECT 'relation:public.' || sequence.relname || ':' || privilege || ':false'
       FROM pg_class sequence
@@ -423,6 +443,7 @@ BEGIN
       WHERE granted.rolname = current_setting('steward.activation.platform_role')
     ), expected(acl) AS (VALUES
       ('function:steward_bootstrap.platform_delete_user(uuid):EXECUTE:false'),
+      ('function:steward_bootstrap.platform_personal_tenant_delete(text,boolean):EXECUTE:false'),
       ('function:steward_bootstrap.platform_revoke_user_refresh_tokens(uuid):EXECUTE:false'),
       ('function:steward_bootstrap.platform_set_user_deactivation(uuid,boolean):EXECUTE:false'),
       ('function:steward_bootstrap.platform_stats():EXECUTE:false'),
@@ -444,17 +465,62 @@ BEGIN
   ) THEN
     RAISE EXCEPTION 'SEC-169 platform authority ACL drift';
   END IF;
-  IF EXISTS (
+  IF (
+    SELECT array_agg(p.oid::regprocedure::text ORDER BY p.oid::regprocedure::text)
+    FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+    WHERE n.nspname = 'public' AND p.prosecdef
+  ) IS DISTINCT FROM ARRAY[
+    'steward_register_user_identity_subject()',
+    'steward_retire_user_identity_subject()'
+  ] OR EXISTS (
     SELECT 1
     FROM pg_proc p
     JOIN pg_namespace n ON n.oid = p.pronamespace
-    WHERE n.nspname = 'public' AND p.prosecdef
-      AND EXISTS (
+    JOIN pg_language l ON l.oid = p.prolang
+    WHERE n.nspname = 'public' AND p.prosecdef AND (
+      pg_get_userbyid(p.proowner) <> current_setting('steward.activation.migration_role')
+      OR l.lanname <> 'plpgsql' OR p.provolatile <> 'v' OR p.proparallel <> 'u'
+      OR array_to_string(p.proconfig, ',') IS DISTINCT FROM 'search_path=pg_catalog'
+      OR CASE p.oid::regprocedure::text
+        WHEN 'steward_register_user_identity_subject()' THEN
+          pg_get_function_result(p.oid) <> 'trigger'
+          OR md5(btrim(p.prosrc, E' \t\n\r')) <> 'a1198ec71cbf072f8259fefd8d7b976e'
+          OR has_function_privilege(current_setting('steward.activation.bootstrap_role'), p.oid, 'EXECUTE')
+        WHEN 'steward_retire_user_identity_subject()' THEN
+          pg_get_function_result(p.oid) <> 'trigger'
+          OR md5(btrim(p.prosrc, E' \t\n\r')) <> 'b9b8ce0ab96277824945a69b3a8f8bce'
+          OR has_function_privilege(current_setting('steward.activation.bootstrap_role'), p.oid, 'EXECUTE')
+        ELSE true
+      END
+      OR has_function_privilege(current_setting('steward.activation.app_role'), p.oid, 'EXECUTE')
+      OR has_function_privilege(current_setting('steward.activation.platform_role'), p.oid, 'EXECUTE')
+      OR EXISTS (
         SELECT 1 FROM aclexplode(COALESCE(p.proacl, acldefault('f', p.proowner))) acl
         WHERE acl.privilege_type = 'EXECUTE' AND acl.grantee <> p.proowner
       )
+    )
   ) THEN
-    RAISE EXCEPTION 'SEC-169 unknown executable public SECURITY DEFINER function';
+    RAISE EXCEPTION 'SEC-169 unknown executable public SECURITY DEFINER function'
+      USING DETAIL = (
+        SELECT jsonb_agg(jsonb_build_object(
+          'identity', p.oid::regprocedure::text,
+          'owner', pg_get_userbyid(p.proowner),
+          'result', pg_get_function_result(p.oid),
+          'body_md5', md5(btrim(p.prosrc, E' \t\n\r')),
+          'defaults', pg_get_expr(p.proargdefaults, 0),
+          'bootstrap_execute', has_function_privilege(
+            current_setting('steward.activation.bootstrap_role'), p.oid, 'EXECUTE'
+          ),
+          'app_execute', has_function_privilege(
+            current_setting('steward.activation.app_role'), p.oid, 'EXECUTE'
+          ),
+          'platform_execute', has_function_privilege(
+            current_setting('steward.activation.platform_role'), p.oid, 'EXECUTE'
+          )
+        ) ORDER BY p.oid::regprocedure::text)::text
+        FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+        WHERE n.nspname = 'public' AND p.prosecdef
+      );
   END IF;
   IF EXISTS (
     SELECT 1
@@ -518,10 +584,12 @@ BEGIN
           'steward_bootstrap.auth_sso_domain_subject(text,text)',
           'steward_bootstrap.auth_tenant_config_subject(text)',
           'steward_bootstrap.auth_tenant_subject(text,uuid)',
+          'steward_bootstrap.ensure_default_membership(uuid,text)',
           'steward_bootstrap.ensure_default_tenant(text)',
           'steward_bootstrap.ensure_platform_tenant()',
           'steward_bootstrap.ensure_system_tenant()',
           'steward_bootstrap.platform_delete_user(uuid)',
+          'steward_bootstrap.platform_personal_tenant_delete(text,boolean)',
           'steward_bootstrap.platform_revoke_user_refresh_tokens(uuid)',
           'steward_bootstrap.platform_set_user_deactivation(uuid,boolean)',
           'steward_bootstrap.platform_stats()',
@@ -530,7 +598,8 @@ BEGIN
           'steward_bootstrap.retention_delete_deactivated_users(integer)',
           'steward_bootstrap.session_subject(uuid,text)',
           'steward_bootstrap.tenant_api_key_subject(text)',
-          'steward_bootstrap.tenant_ids_for_internal_job()'
+          'steward_bootstrap.tenant_ids_for_internal_job()',
+          'steward_bootstrap.user_token_revocation_subject(uuid)'
         ])
         OR has_function_privilege(
           current_setting('steward.activation.app_role'), p.oid, 'EXECUTE'
@@ -545,18 +614,28 @@ BEGIN
           'steward_bootstrap.auth_sso_domain_subject(text,text)',
           'steward_bootstrap.auth_tenant_config_subject(text)',
           'steward_bootstrap.auth_tenant_subject(text,uuid)',
+          'steward_bootstrap.ensure_default_membership(uuid,text)',
           'steward_bootstrap.ensure_default_tenant(text)',
           'steward_bootstrap.ensure_platform_tenant()',
           'steward_bootstrap.ensure_system_tenant()',
           'steward_bootstrap.platform_user_tenant_ids(uuid)',
           'steward_bootstrap.session_subject(uuid,text)',
           'steward_bootstrap.tenant_api_key_subject(text)',
-          'steward_bootstrap.tenant_ids_for_internal_job()'
+          'steward_bootstrap.tenant_ids_for_internal_job()',
+          'steward_bootstrap.user_token_revocation_subject(uuid)'
         ]))
       )
     )
   ) THEN
-    RAISE EXCEPTION 'SEC-169 unexpected executable SECURITY DEFINER function';
+    RAISE EXCEPTION 'SEC-169 unexpected executable SECURITY DEFINER function: %', (
+      SELECT array_agg(p.oid::regprocedure::text ORDER BY p.oid::regprocedure::text)
+      FROM pg_proc p
+      JOIN pg_namespace n ON n.oid = p.pronamespace
+      WHERE n.nspname IN ('public', 'steward_rls') AND p.prosecdef
+        AND has_function_privilege(
+          current_setting('steward.activation.app_role'), p.oid, 'EXECUTE'
+        )
+    );
   END IF;
 END
 $$;

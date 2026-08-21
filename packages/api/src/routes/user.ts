@@ -7512,6 +7512,13 @@ user.patch("/me/tenants/:tenantId/users/:targetUserId/deactivate", async (c) => 
   const result = await withPlatformAuthorityDatabase((platformDb) =>
     withTenantAuditedTransactionOnDb(platformDb, tenantId, async (txRaw, appendRequiredAudit) => {
       const tx = txRaw as typeof platformDb;
+      // The DB lifecycle primitive takes the user-account lock before every
+      // tenant-owner lock. Take the same leading lock before inspecting the
+      // membership so a concurrent membership writer cannot form an
+      // owner-lock -> user-lock cycle with this mounted route.
+      await tx.execute(
+        sql`SELECT pg_advisory_xact_lock(hashtextextended(${`platform_user_account_${targetUserId}`}, 0))`,
+      );
       await lockTenantOwnerLifecycle(tx, tenantId);
       const [lockedTenant] = await tx
         .select({ id: tenants.id })
@@ -7593,18 +7600,9 @@ user.patch("/me/tenants/:tenantId/users/:targetUserId/deactivate", async (c) => 
     return c.json<ApiResponse>({ ok: false, error: "User not found in tenant" }, 404);
   }
 
-  try {
-    await revocationStore.revokeUserTokens(targetUserId, result.issuedBefore);
-  } catch {
-    return c.json<ApiResponse>(
-      {
-        ok: false,
-        error:
-          "User lifecycle change committed, but token cache refresh is pending; retry the request",
-      },
-      503,
-    );
-  }
+  // A self-deactivated administrator cannot authenticate a retry. Keep the
+  // committed database cutoff authoritative and refresh Redis best-effort.
+  await revocationStore.revokeUserTokens(targetUserId, result.issuedBefore).catch(() => undefined);
 
   dispatchWebhook(tenantId, targetUserId, "user.updated_account", {
     userId: targetUserId,

@@ -64,6 +64,7 @@ describe("0111 tenant RLS policy installation", () => {
       "auth_sso_domain_subject",
       "auth_tenant_config_subject",
       "auth_tenant_subject",
+      "ensure_default_membership",
       "ensure_default_tenant",
       "ensure_platform_tenant",
       "ensure_system_tenant",
