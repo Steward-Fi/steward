@@ -7,9 +7,9 @@
  *
  * SECURITY POSTURE (money-path):
  *   - Any endpoint that produces a fund-moving tx/intent (swap build, earn
- *     deposit/withdraw) MUST (a) build the unsigned intent via the adapter, then
- *     (b) run it through the SAME policy/spend gate the trade route uses
- *     (`evaluateTradeOrder`) BEFORE returning anything signable. Adapters never
+ *     deposit/withdraw) MUST (a) reserve spend through the SAME policy/spend
+ *     gate the trade route uses (`evaluateTradeOrder`) BEFORE invoking a
+ *     fund-moving provider builder, then (b) build an unsigned intent. Adapters never
  *     get a signing shortcut: the returned artifact is ALWAYS unsigned and must
  *     still traverse the existing vault/policy signing path to move value.
  *   - Quote/status/read endpoints are non-fund-moving and only require auth.
@@ -254,6 +254,10 @@ async function auditAdapterEvent(
   resourceId: string,
   metadata: Record<string, unknown>,
 ): Promise<void> {
+  if (adapterAuditEventWriterForTests) {
+    await adapterAuditEventWriterForTests(c, action, resourceId, metadata);
+    return;
+  }
   await writeAuditEvent({
     tenantId: c.get("tenantId"),
     actorType: auditActorType(c),
@@ -266,6 +270,14 @@ async function auditAdapterEvent(
     userAgent: c.req.header("user-agent") ?? null,
     requestId: c.get("requestId") ?? null,
   });
+}
+
+type AdapterAuditEventWriter = typeof auditAdapterEvent;
+let adapterAuditEventWriterForTests: AdapterAuditEventWriter | undefined;
+
+/** Test-only seam for proving post-reservation audit failures release holds. */
+export function __setAdapterAuditEventWriterForTests(writer?: AdapterAuditEventWriter): void {
+  adapterAuditEventWriterForTests = writer;
 }
 
 // ─── Error mapping ──────────────────────────────────────────────────────────
@@ -944,18 +956,20 @@ adapterRoutes.post("/bridge/build", async (c) => {
   const agentId = resolution.agentId;
   const caps = spendCaps();
   // The external handoff's trusted notional is provider-derived. Reserve the
-  // maximum admissible operation before invoking the provider, then resize the
-  // hold to the validated result before returning it.
+  // maximum admissible operation before invoking the provider. Retain that
+  // conservative hold through the response: releasing and reacquiring a
+  // smaller hold would create an admission gap across concurrent replicas.
+  const preflightEstimate = Math.max(caps.perOrderCapUsd, parsed.data.estimatedUsd ?? 0);
   const preflight = await reserveFundMovingPolicy(c, {
     agentId,
-    estimatedUsd: caps.perOrderCapUsd,
+    estimatedUsd: preflightEstimate,
     perOrderCapUsd: caps.perOrderCapUsd,
     dailyCapUsd: caps.dailyCapUsd,
   });
   if (!preflight.allow) {
     await auditAdapterEvent(c, "adapter.bridge.policy-rejected", agentId, {
       reason: preflight.reason,
-      estimatedUsd: caps.perOrderCapUsd,
+      estimatedUsd: preflightEstimate,
     });
     return c.json({ code: "policy-violation", reason: preflight.reason }, 400);
   }
@@ -978,23 +992,22 @@ adapterRoutes.post("/bridge/build", async (c) => {
       result.kind === "external-handoff"
         ? Math.max(result.estimatedUsd, parsed.data.estimatedUsd ?? 0)
         : (parsed.data.estimatedUsd ?? caps.perOrderCapUsd);
-    if (estimatedUsd !== caps.perOrderCapUsd) {
-      await releaseAgentSpendReservation(heldReservation);
-      heldReservation = undefined;
-      const resized = await reserveFundMovingPolicy(c, {
+    if (estimatedUsd > caps.perOrderCapUsd) {
+      const validated = await reserveFundMovingPolicy(c, {
         agentId,
         estimatedUsd,
         perOrderCapUsd: caps.perOrderCapUsd,
         dailyCapUsd: caps.dailyCapUsd,
       });
-      if (!resized.allow) {
+      if (!validated.allow) {
         await auditAdapterEvent(c, "adapter.bridge.policy-rejected", agentId, {
-          reason: resized.reason,
+          reason: validated.reason,
           estimatedUsd,
         });
-        return c.json({ code: "policy-violation", reason: resized.reason }, 400);
+        await releaseAgentSpendReservation(heldReservation);
+        heldReservation = undefined;
+        return c.json({ code: "policy-violation", reason: validated.reason }, 400);
       }
-      heldReservation = resized.reservation;
     }
 
     if (result.kind === "external-handoff") {
@@ -1248,21 +1261,22 @@ adapterRoutes.post("/spark/static-btc-deposits/claim", async (c) => {
   if (!access.ok) return access.response;
   const resolution = await resolveAgentId(c, parsed.data.agentId);
   if (!resolution.ok) return resolution.response;
+  const gate = await enforceAdapterIntentPolicy(c, {
+    agentId: resolution.agentId,
+    estimatedUsd: parsed.data.estimatedUsd,
+    auditAction: "adapter.spark.static_btc_deposit.policy-rejected",
+  });
+  if (!gate.allow) return gate.response;
   try {
     const intent = await adapterRegistry.spark().buildStaticBtcDepositClaim({
       quoteId: parsed.data.quoteId,
       owner: resolution.agentId,
     });
     if (intent.metadata?.walletId !== parsed.data.walletId) {
+      await releaseAgentSpendReservation(gate.reservation);
       return c.json<ApiResponse>({ ok: false, error: "quote does not belong to walletId" }, 400);
     }
     assertUnsigned(intent);
-    const gate = await enforceAdapterIntentPolicy(c, {
-      agentId: resolution.agentId,
-      estimatedUsd: parsed.data.estimatedUsd,
-      auditAction: "adapter.spark.static_btc_deposit.policy-rejected",
-    });
-    if (!gate.allow) return gate.response;
     await auditAdapterEvent(
       c,
       "adapter.spark.static_btc_deposit.claim.authorized",
@@ -1274,6 +1288,7 @@ adapterRoutes.post("/spark/static-btc-deposits/claim", async (c) => {
     );
     return c.json(ok({ unsignedIntent: intent }));
   } catch (err) {
+    await releaseAgentSpendReservation(gate.reservation);
     return handleAdapterError(c, err);
   }
 });
@@ -1318,6 +1333,12 @@ adapterRoutes.post("/spark/lightning/pay", async (c) => {
   if (!access.ok) return access.response;
   const resolution = await resolveAgentId(c, parsed.data.agentId);
   if (!resolution.ok) return resolution.response;
+  const gate = await enforceAdapterIntentPolicy(c, {
+    agentId: resolution.agentId,
+    estimatedUsd: parsed.data.estimatedUsd,
+    auditAction: "adapter.spark.lightning.pay.policy-rejected",
+  });
+  if (!gate.allow) return gate.response;
   try {
     const intent = await adapterRegistry.spark().buildLightningPayment({
       walletId: parsed.data.walletId,
@@ -1326,18 +1347,13 @@ adapterRoutes.post("/spark/lightning/pay", async (c) => {
       owner: resolution.agentId,
     });
     assertUnsigned(intent);
-    const gate = await enforceAdapterIntentPolicy(c, {
-      agentId: resolution.agentId,
-      estimatedUsd: parsed.data.estimatedUsd,
-      auditAction: "adapter.spark.lightning.pay.policy-rejected",
-    });
-    if (!gate.allow) return gate.response;
     await auditAdapterEvent(c, "adapter.spark.lightning.pay.authorized", resolution.agentId, {
       walletId: parsed.data.walletId,
       maxFeeSats: parsed.data.maxFeeSats,
     });
     return c.json(ok({ unsignedIntent: intent }));
   } catch (err) {
+    await releaseAgentSpendReservation(gate.reservation);
     return handleAdapterError(c, err);
   }
 });
@@ -1351,6 +1367,12 @@ adapterRoutes.post("/spark/transfers", async (c) => {
   if (!access.ok) return access.response;
   const resolution = await resolveAgentId(c, parsed.data.agentId);
   if (!resolution.ok) return resolution.response;
+  const gate = await enforceAdapterIntentPolicy(c, {
+    agentId: resolution.agentId,
+    estimatedUsd: parsed.data.estimatedUsd,
+    auditAction: "adapter.spark.transfer.policy-rejected",
+  });
+  if (!gate.allow) return gate.response;
   try {
     const intent = await adapterRegistry.spark().buildSparkTransfer({
       walletId: parsed.data.walletId,
@@ -1360,18 +1382,13 @@ adapterRoutes.post("/spark/transfers", async (c) => {
       owner: resolution.agentId,
     });
     assertUnsigned(intent);
-    const gate = await enforceAdapterIntentPolicy(c, {
-      agentId: resolution.agentId,
-      estimatedUsd: parsed.data.estimatedUsd,
-      auditAction: "adapter.spark.transfer.policy-rejected",
-    });
-    if (!gate.allow) return gate.response;
     await auditAdapterEvent(c, "adapter.spark.transfer.authorized", resolution.agentId, {
       walletId: parsed.data.walletId,
       amountSats: parsed.data.amountSats,
     });
     return c.json(ok({ unsignedIntent: intent }));
   } catch (err) {
+    await releaseAgentSpendReservation(gate.reservation);
     return handleAdapterError(c, err);
   }
 });
@@ -1385,6 +1402,12 @@ adapterRoutes.post("/spark/token-transfers", async (c) => {
   if (!access.ok) return access.response;
   const resolution = await resolveAgentId(c, parsed.data.agentId);
   if (!resolution.ok) return resolution.response;
+  const gate = await enforceAdapterIntentPolicy(c, {
+    agentId: resolution.agentId,
+    estimatedUsd: parsed.data.estimatedUsd,
+    auditAction: "adapter.spark.token_transfer.policy-rejected",
+  });
+  if (!gate.allow) return gate.response;
   try {
     const intent = await adapterRegistry.spark().buildSparkTokenTransfer({
       walletId: parsed.data.walletId,
@@ -1395,12 +1418,6 @@ adapterRoutes.post("/spark/token-transfers", async (c) => {
       owner: resolution.agentId,
     });
     assertUnsigned(intent);
-    const gate = await enforceAdapterIntentPolicy(c, {
-      agentId: resolution.agentId,
-      estimatedUsd: parsed.data.estimatedUsd,
-      auditAction: "adapter.spark.token_transfer.policy-rejected",
-    });
-    if (!gate.allow) return gate.response;
     await auditAdapterEvent(c, "adapter.spark.token_transfer.authorized", resolution.agentId, {
       walletId: parsed.data.walletId,
       tokenId: parsed.data.tokenId,
@@ -1408,6 +1425,7 @@ adapterRoutes.post("/spark/token-transfers", async (c) => {
     });
     return c.json(ok({ unsignedIntent: intent }));
   } catch (err) {
+    await releaseAgentSpendReservation(gate.reservation);
     return handleAdapterError(c, err);
   }
 });

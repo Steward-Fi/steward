@@ -11,6 +11,7 @@ import {
   type BridgeQuote,
   MockBridgeAdapter,
   MockEarnAdapter,
+  MockSparkAdapter,
   MockSwapAdapter,
 } from "@stwd/adapters";
 import {
@@ -68,7 +69,10 @@ afterEach(() => {
   process.env.STEWARD_BRIDGE_ADAPTER = "mock";
   process.env.STEWARD_SWAP_ADAPTER = "mock";
   process.env.STEWARD_EARN_ADAPTER = "mock";
+  process.env.STEWARD_SPARK_ADAPTER = "mock";
+  adapterRoutesModule.__setAdapterAuditEventWriterForTests();
   adapterRegistry.register("bridge", "policy-test-reset", new MockBridgeAdapter());
+  adapterRegistry.register("spark", "policy-test-reset", new MockSparkAdapter());
 });
 
 const AGENT_WALLET = "0x1111111111111111111111111111111111111111";
@@ -106,6 +110,39 @@ class CountingBridgeAdapter extends MockBridgeAdapter {
   override buildBridge(...args: Parameters<MockBridgeAdapter["buildBridge"]>) {
     this.builds += 1;
     return super.buildBridge(...args);
+  }
+}
+
+class CountingSparkAdapter extends MockSparkAdapter {
+  builds = {
+    claim: 0,
+    lightning: 0,
+    transfer: 0,
+    tokenTransfer: 0,
+  };
+
+  override buildStaticBtcDepositClaim(
+    ...args: Parameters<MockSparkAdapter["buildStaticBtcDepositClaim"]>
+  ) {
+    this.builds.claim += 1;
+    return super.buildStaticBtcDepositClaim(...args);
+  }
+
+  override buildLightningPayment(...args: Parameters<MockSparkAdapter["buildLightningPayment"]>) {
+    this.builds.lightning += 1;
+    return super.buildLightningPayment(...args);
+  }
+
+  override buildSparkTransfer(...args: Parameters<MockSparkAdapter["buildSparkTransfer"]>) {
+    this.builds.transfer += 1;
+    return super.buildSparkTransfer(...args);
+  }
+
+  override buildSparkTokenTransfer(
+    ...args: Parameters<MockSparkAdapter["buildSparkTokenTransfer"]>
+  ) {
+    this.builds.tokenTransfer += 1;
+    return super.buildSparkTokenTransfer(...args);
   }
 }
 
@@ -355,6 +392,148 @@ describe("adapter fund-moving policy gate", () => {
     }
   });
 
+  it("fails closed before every Spark fund builder when production Redis is absent or down", async () => {
+    const provider = `spark-spend-preflight-${Date.now()}`;
+    const spark = new CountingSparkAdapter();
+    adapterRegistry.register("spark", provider, spark);
+    process.env.STEWARD_SPARK_ADAPTER = provider;
+    const { app, agentId } = await makeApp(`tenant-spark-redis-${Date.now()}`);
+    const walletRes = await app.request("/adapters/spark/wallets", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ userId: USER_1, network: "testnet" }),
+    });
+    const wallet = (await walletRes.json()) as { data: { wallet: { id: string } } };
+    const walletId = wallet.data.wallet.id;
+    const quoteRes = await app.request("/adapters/spark/static-btc-deposits", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ walletId, amountSats: "1000" }),
+    });
+    const quote = (await quoteRes.json()) as { data: { quote: { id: string } } };
+    const requests = () =>
+      Promise.all([
+        app.request("/adapters/spark/static-btc-deposits/claim", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            agentId,
+            walletId,
+            quoteId: quote.data.quote.id,
+            estimatedUsd: 1,
+          }),
+        }),
+        app.request("/adapters/spark/lightning/pay", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            agentId,
+            walletId,
+            paymentRequest: "lntb2500n1mockinvoice",
+            estimatedUsd: 1,
+          }),
+        }),
+        app.request("/adapters/spark/transfers", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            agentId,
+            walletId,
+            recipient: "spk_testnet_recipient_123456",
+            amountSats: "1000",
+            estimatedUsd: 1,
+          }),
+        }),
+        app.request("/adapters/spark/token-transfers", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            agentId,
+            walletId,
+            recipient: "spk_testnet_recipient_123456",
+            tokenId: "token-1",
+            amount: "10",
+            estimatedUsd: 1,
+          }),
+        }),
+      ]);
+
+    await shutdownRedis();
+    try {
+      for (const environment of [
+        { NODE_ENV: "production" },
+        { NODE_ENV: "production", REDIS_URL: "redis://unavailable-spark-spend.test:6379" },
+      ]) {
+        const responses = await withRuntimeEnvironment(
+          {
+            ...environment,
+            STEWARD_ADAPTER_PER_OP_CAP_USD: "10",
+            STEWARD_ADAPTER_DAILY_CAP_USD: "10",
+          },
+          requests,
+        );
+        for (const response of responses) {
+          expect(response.status).toBe(400);
+          expect((await response.json()).code).toBe("policy-violation");
+        }
+      }
+      expect(spark.builds).toEqual({ claim: 0, lightning: 0, transfer: 0, tokenTransfer: 0 });
+    } finally {
+      await initRedis();
+    }
+  });
+
+  it("releases a Spark reservation when its required audit write fails", async () => {
+    const provider = `spark-audit-release-${Date.now()}`;
+    const spark = new CountingSparkAdapter();
+    adapterRegistry.register("spark", provider, spark);
+    process.env.STEWARD_SPARK_ADAPTER = provider;
+    const { app, agentId } = await makeApp(`tenant-spark-audit-${Date.now()}`);
+    const walletRes = await app.request("/adapters/spark/wallets", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ userId: USER_1, network: "testnet" }),
+    });
+    const wallet = (await walletRes.json()) as { data: { wallet: { id: string } } };
+    const request = () =>
+      app.request("/adapters/spark/transfers", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          agentId,
+          walletId: wallet.data.wallet.id,
+          recipient: "spk_testnet_recipient_123456",
+          amountSats: "1000",
+          estimatedUsd: 5,
+        }),
+      });
+
+    await shutdownRedis();
+    try {
+      const environment = {
+        NODE_ENV: "test",
+        STEWARD_ALLOW_MEMORY_ADAPTER_SPEND: "true",
+        STEWARD_ADAPTER_PER_OP_CAP_USD: "5",
+        STEWARD_ADAPTER_DAILY_CAP_USD: "5",
+      };
+      adapterRoutesModule.__setAdapterAuditEventWriterForTests(async () => {
+        throw new Error("synthetic audit failure");
+      });
+      const failed = await withRuntimeEnvironment(environment, request);
+      expect(failed.status).toBe(500);
+
+      adapterRoutesModule.__setAdapterAuditEventWriterForTests();
+      const admitted = await withRuntimeEnvironment(environment, request);
+      expect(admitted.status).toBe(200);
+      const held = await withRuntimeEnvironment(environment, request);
+      expect(held.status).toBe(400);
+      expect(spark.builds.transfer).toBe(2);
+    } finally {
+      adapterRoutesModule.__setAdapterAuditEventWriterForTests();
+      await initRedis();
+    }
+  });
+
   it("atomically admits only one mounted 59+1 daily-boundary request across restart", async () => {
     if (process.env.STEWARD_REDIS_TESTS !== "1" || !process.env.REDIS_URL) return;
     const tenantId = `tenant-adapter-atomic-${Date.now()}`;
@@ -399,6 +578,40 @@ describe("adapter fund-moving policy gate", () => {
     expect(await initRedis()).toBe(true);
     const afterRestart = await withRuntimeEnvironment(environment, request);
     expect(afterRestart.status).toBe(400);
+  });
+
+  it("retains the conservative bridge hold atomically across concurrent low-notional results", async () => {
+    if (process.env.STEWARD_REDIS_TESTS !== "1" || !process.env.REDIS_URL) return;
+    const tenantId = `tenant-adapter-bridge-hold-${Date.now()}`;
+    const { app, agentId } = await makeApp(tenantId);
+    const provider = `test-handoff-hold-${Date.now()}`;
+    selectBridgeAdapter(provider, externalHandoff({ provider, estimatedUsd: 1 }));
+    const request = () =>
+      app.request("/adapters/bridge/build", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          agentId,
+          owner: AGENT_WALLET,
+          quote: { quoteId: "test-handoff-quote" },
+          estimatedUsd: 1,
+        }),
+      });
+    const responses = await withRuntimeEnvironment(
+      {
+        NODE_ENV: "production",
+        REDIS_URL: process.env.REDIS_URL,
+        STEWARD_ADAPTER_PER_OP_CAP_USD: "60",
+        STEWARD_ADAPTER_DAILY_CAP_USD: "60",
+      },
+      () => Promise.all([request(), request()]),
+    );
+
+    expect(responses.map((response) => response.status).sort()).toEqual([200, 400]);
+    const spend = await checkSpendLimit(agentId, 60, "day");
+    expect(spend.spent).toBe(0);
+    expect(spend.reserved).toBe(60);
+    expect(spend.effectiveSpent).toBe(60);
   });
 
   it("DENIES a swap build when the estimated notional exceeds the per-op cap", async () => {
@@ -545,6 +758,10 @@ describe("adapter fund-moving policy gate", () => {
   it("DENIES a bridge build above cap before returning a signable artifact", async () => {
     process.env.STEWARD_ADAPTER_PER_OP_CAP_USD = "10";
     process.env.STEWARD_ADAPTER_DAILY_CAP_USD = "100";
+    const provider = `bridge-preflight-deny-${Date.now()}`;
+    const bridge = new CountingBridgeAdapter();
+    adapterRegistry.register("bridge", provider, bridge);
+    process.env.STEWARD_BRIDGE_ADAPTER = provider;
     const { app, agentId } = await makeApp(`tenant-adapter-bridge-deny-${Date.now()}`);
 
     const quoteRes = await app.request("/adapters/bridge/quote", {
@@ -576,6 +793,7 @@ describe("adapter fund-moving policy gate", () => {
     const body = (await buildRes.json()) as Record<string, unknown>;
     expect(body.code).toBe("policy-violation");
     expect(body.unsignedIntent).toBeUndefined();
+    expect(bridge.builds).toBe(0);
   });
 
   it("uses the server-derived handoff notional so callers cannot understate bridge policy spend", async () => {
