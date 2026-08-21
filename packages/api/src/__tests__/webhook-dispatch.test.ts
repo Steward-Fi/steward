@@ -1,9 +1,11 @@
 import { afterAll, beforeEach, describe, expect, it, mock } from "bun:test";
 import type { WebhookEvent } from "@stwd/shared";
+import { withRuntimeEnvironment } from "@stwd/shared/runtime-env";
 // Captured before mock.module replaces @stwd/webhooks, so these hold the REAL
 // secret-codec functions; the mock re-exports them so dispatched secrets keep
 // the real `stwd_whsec_v1:` envelope format.
 import {
+  currentWebhookRuntimeAuthority,
   decryptWebhookSecret,
   encryptWebhookSecret,
   isEncryptedWebhookSecret,
@@ -23,7 +25,12 @@ type DispatchRecord = {
   event: WebhookEvent;
   webhook: { url: string; secret: string; events?: string[] } | string;
 };
-type DispatcherOptions = { maxRetries?: number; retryDelayMs?: number };
+type DispatcherOptions = {
+  maxRetries?: number;
+  retryDelayMs?: number;
+  allowPrivateNetwork?: boolean;
+  allowInsecureHttp?: boolean;
+};
 type DispatchResult = {
   success: boolean;
   attempts: number;
@@ -112,6 +119,7 @@ mock.module("@stwd/db", () => ({
 // failures across the webhook + approvals API suites. We mock only the
 // dispatcher and pass the real secret-codec functions through.
 mock.module("@stwd/webhooks", () => ({
+  currentWebhookRuntimeAuthority,
   WebhookDispatcher: class {
     constructor(options: DispatcherOptions) {
       dispatcherOptions.push(options);
@@ -217,7 +225,12 @@ describe("dispatchWebhook", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     expect(dispatches).toHaveLength(1);
-    expect(dispatcherOptions[0]).toEqual({ maxRetries: 0, retryDelayMs: 0 });
+    expect(dispatcherOptions[0]).toEqual({
+      maxRetries: 0,
+      retryDelayMs: 0,
+      allowPrivateNetwork: false,
+      allowInsecureHttp: false,
+    });
     expect(dispatches[0]?.event.type).toBe("tx.signed");
     expect(dispatches[0]?.event.deliveryId).toMatch(
       /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
@@ -251,6 +264,41 @@ describe("dispatchWebhook", () => {
       status: "delivered",
       attempts: 1,
       lastError: null,
+    });
+  });
+
+  it("threads one mounted request policy through destination validation and dispatch", async () => {
+    webhookRows.push({
+      tenantId: "tenant-1",
+      url: "http://127.0.0.1/signed",
+      secret: "whsec_signed",
+      events: ["tx.signed"],
+      enabled: true,
+      maxRetries: 0,
+      retryBackoffMs: 1000,
+    });
+
+    await withRuntimeEnvironment(
+      {
+        STEWARD_ALLOW_INSECURE_WEBHOOK_URLS: "true",
+        STEWARD_ALLOW_PRIVATE_WEBHOOK_NETWORKS: "true",
+      },
+      () =>
+        dispatchWebhookDurably(
+          "tenant-1",
+          "agent-1",
+          "tx_signed",
+          { txId: "tx-policy" },
+          "runtime-policy-enabled",
+        ),
+    );
+
+    expect(dispatches).toHaveLength(1);
+    expect(dispatcherOptions[0]).toEqual({
+      maxRetries: 0,
+      retryDelayMs: 0,
+      allowPrivateNetwork: true,
+      allowInsecureHttp: true,
     });
   });
 
