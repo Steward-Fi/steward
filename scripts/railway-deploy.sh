@@ -18,6 +18,8 @@ set -euo pipefail
 #                                  canonical published OSS image)
 #   RAILWAY_HEALTH_URL  (optional) the deployer's own /health URL to verify
 #   DEPLOY_TIMEOUT      (optional) max seconds to wait for deploy, default: 300
+#   RAILWAY_HEALTH_TIMEOUT  (optional) max seconds to wait for health, default: 120
+#   RAILWAY_HEALTH_INTERVAL (optional) seconds between health probes, default: 5
 #   RAILWAY_ALLOW_REJECTED_DEPLOY (optional, default: fail closed) when "true",
 #                       a deployment Railway rejected before any container ran
 #                       (no build/deploy logs) degrades to a non-fatal warning
@@ -50,6 +52,8 @@ ENV_ID="${RAILWAY_ENV_ID:-}"
 IMAGE_REPO="${RAILWAY_IMAGE_REPO:-ghcr.io/steward-fi/steward}"
 HEALTH_URL="${RAILWAY_HEALTH_URL:-}"
 TIMEOUT="${DEPLOY_TIMEOUT:-300}"
+HEALTH_TIMEOUT="${RAILWAY_HEALTH_TIMEOUT:-120}"
+HEALTH_INTERVAL="${RAILWAY_HEALTH_INTERVAL:-5}"
 API="https://backboard.railway.com/graphql/v2"
 
 DRY_RUN=false
@@ -88,6 +92,13 @@ done
 
 if [[ -z "$IMAGE_TAG" ]]; then
   fail "Image tag required. Usage: $0 <image-tag>"
+  exit 1
+fi
+
+if [[ ! "$TIMEOUT" =~ ^[1-9][0-9]*$ ||
+      ! "$HEALTH_TIMEOUT" =~ ^[1-9][0-9]*$ ||
+      ! "$HEALTH_INTERVAL" =~ ^[1-9][0-9]*$ ]]; then
+  fail "DEPLOY_TIMEOUT, RAILWAY_HEALTH_TIMEOUT, and RAILWAY_HEALTH_INTERVAL must be positive integers"
   exit 1
 fi
 
@@ -234,7 +245,10 @@ redact_secrets() {
   sed -E \
     -e 's#(postgres(ql)?://[^:/@]+:)[^@]+@#\1…REDACTED…@#g' \
     -e 's/(Bearer )[A-Za-z0-9._~+/-]+/\1…REDACTED…/g' \
-    -e 's/((SECRET|SECRETS|PASSWORD|PASS|SALT|TOKEN|KEY|KEYS|HMAC|PRIVATE)[A-Z_]*=)[^[:space:]]+/\1…REDACTED…/g' \
+    -e 's/((SECRET|SECRETS|PASSWORD|PASS|SALT|TOKEN|KEY|KEYS|HMAC|PRIVATE)[A-Z_]*"[[:space:]]*:[[:space:]]*")[^"]*/\1…REDACTED…/g' \
+    -e 's/((SECRET|SECRETS|PASSWORD|PASS|SALT|TOKEN|KEY|KEYS|HMAC|PRIVATE)[A-Z_]*[[:space:]]*[:=][[:space:]]*")[^"]*/\1…REDACTED…/g' \
+    -e "s/((SECRET|SECRETS|PASSWORD|PASS|SALT|TOKEN|KEY|KEYS|HMAC|PRIVATE)[A-Z_]*[[:space:]]*[:=][[:space:]]*')[^']*/\1…REDACTED…/g" \
+    -e 's/((SECRET|SECRETS|PASSWORD|PASS|SALT|TOKEN|KEY|KEYS|HMAC|PRIVATE)[A-Z_]*[[:space:]]*[:=][[:space:]]*)[^[:space:],}]+/\1…REDACTED…/g' \
     -e 's/(^|[^A-Za-z0-9_])stw_[A-Za-z0-9]+/\1stw_…REDACTED…/g' \
     -e 's/(^|[^0-9a-fA-F])[0-9a-fA-F]{48,}([^0-9a-fA-F]|$)/\1…REDACTED…\2/g'
 }
@@ -376,25 +390,41 @@ fi
 
 log "Verifying health endpoint: ${HEALTH_URL}/health"
 
-# Give the service a moment to start accepting traffic
-sleep 5
-
 HEALTH_OK=false
-for i in 1 2 3; do
-  HTTP_CODE=$(curl -sf -o /dev/null -w "%{http_code}" "${HEALTH_URL}/health" 2>/dev/null) || HTTP_CODE="000"
+HTTP_CODE="000"
+HEALTH_ATTEMPT=0
+HEALTH_STARTED=$SECONDS
+HEALTH_ELAPSED=0
+while [[ $HEALTH_ELAPSED -lt $HEALTH_TIMEOUT ]]; do
+  HEALTH_ATTEMPT=$((HEALTH_ATTEMPT + 1))
+  HEALTH_REMAINING=$((HEALTH_TIMEOUT - HEALTH_ELAPSED))
+  REQUEST_TIMEOUT=$((HEALTH_REMAINING < 10 ? HEALTH_REMAINING : 10))
+  CONNECT_TIMEOUT=$((REQUEST_TIMEOUT < 5 ? REQUEST_TIMEOUT : 5))
+  HTTP_CODE=$(curl -sS \
+    --connect-timeout "$CONNECT_TIMEOUT" \
+    --max-time "$REQUEST_TIMEOUT" \
+    -o /dev/null \
+    -w "%{http_code}" \
+    "${HEALTH_URL}/health" 2>/dev/null) || HTTP_CODE="000"
   if [[ "$HTTP_CODE" == "200" ]]; then
     HEALTH_OK=true
     break
   fi
-  warn "  Health check attempt $i: HTTP ${HTTP_CODE}"
-  sleep 5
+  HEALTH_ELAPSED=$((SECONDS - HEALTH_STARTED))
+  warn "  Health check attempt ${HEALTH_ATTEMPT}: HTTP ${HTTP_CODE} (${HEALTH_ELAPSED}s elapsed)"
+  HEALTH_REMAINING=$((HEALTH_TIMEOUT - HEALTH_ELAPSED))
+  if [[ $HEALTH_REMAINING -gt 0 ]]; then
+    sleep "$((HEALTH_REMAINING < HEALTH_INTERVAL ? HEALTH_REMAINING : HEALTH_INTERVAL))"
+  fi
+  HEALTH_ELAPSED=$((SECONDS - HEALTH_STARTED))
 done
 
 if $HEALTH_OK; then
   ok "Health check passed"
 else
-  fail "Health check failed after 3 attempts (last HTTP: ${HTTP_CODE})"
-  fail "Service may still be starting. Check ${HEALTH_URL}/health manually."
+  fail "Health check failed after ${HEALTH_ATTEMPT} attempts / ${HEALTH_TIMEOUT}s (last HTTP: ${HTTP_CODE})"
+  fail "Collecting Railway logs for deployment ${DEPLOY_ID} before failing."
+  dump_failure
   exit 1
 fi
 
