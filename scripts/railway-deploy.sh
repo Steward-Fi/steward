@@ -243,8 +243,13 @@ LOGS_EMPTY=0
 # STEWARD_* secrets, Bearer tokens) to its logs (SEC-129).
 redact_secrets() {
   sed -E \
-    -e 's#(postgres(ql)?://[^:/@]+:)[^@]+@#\1…REDACTED…@#g' \
+    -e 's#([A-Za-z][A-Za-z0-9+.-]*://[^/@[:space:]:]*:)[^@/[:space:]]+@#\1…REDACTED…@#g' \
+    -e 's#([?&](access_key|access_token|api_key|apikey|auth|authorization|client_secret|code|credential|key|password|passwd|pwd|secret|signature|sig|token|x-amz-credential|x-amz-security-token|x-amz-signature)=)[^&#"'"'"'[:space:]]+#\1…REDACTED…#gI' \
     -e 's/(Bearer )[A-Za-z0-9._~+/-]+/\1…REDACTED…/g' \
+    -e 's/(([A-Za-z_][A-Za-z0-9_]*_(URL|URI|DSN)|URL|URI|DSN)"[[:space:]]*:[[:space:]]*")[^"]*/\1…REDACTED…/gI' \
+    -e 's/(([A-Za-z_][A-Za-z0-9_]*_(URL|URI|DSN)|URL|URI|DSN)[[:space:]]*[:=][[:space:]]*")[^"]*/\1…REDACTED…/gI' \
+    -e "s/(([A-Za-z_][A-Za-z0-9_]*_(URL|URI|DSN)|URL|URI|DSN)[[:space:]]*[:=][[:space:]]*')[^']*/\1…REDACTED…/gI" \
+    -e 's/(([A-Za-z_][A-Za-z0-9_]*_(URL|URI|DSN)|URL|URI|DSN)[[:space:]]*[:=][[:space:]]*)[^[:space:],}]+/\1…REDACTED…/gI' \
     -e 's/((SECRET|SECRETS|PASSWORD|PASS|SALT|TOKEN|KEY|KEYS|HMAC|PRIVATE)[A-Z_]*"[[:space:]]*:[[:space:]]*")[^"]*/\1…REDACTED…/g' \
     -e 's/((SECRET|SECRETS|PASSWORD|PASS|SALT|TOKEN|KEY|KEYS|HMAC|PRIVATE)[A-Z_]*[[:space:]]*[:=][[:space:]]*")[^"]*/\1…REDACTED…/g' \
     -e "s/((SECRET|SECRETS|PASSWORD|PASS|SALT|TOKEN|KEY|KEYS|HMAC|PRIVATE)[A-Z_]*[[:space:]]*[:=][[:space:]]*')[^']*/\1…REDACTED…/g" \
