@@ -67,26 +67,12 @@ import { getConfiguredVault } from "./vault-factory";
 export { API_VERSION } from "./version";
 export const DEFAULT_TENANT_ID = "default";
 
-/**
- * Read a positive-integer env override, falling back to a safe default when the
- * variable is unset or malformed. Used for operator-tunable limits so a bad
- * value can never silently disable a guard — it just reverts to the default.
- */
-function positiveIntEnv(name: string, fallback: number): number {
-  const raw = process.env[name]?.trim();
-  if (!raw) return fallback;
-  const parsed = Number(raw);
-  if (!Number.isInteger(parsed) || parsed <= 0) return fallback;
-  return parsed;
-}
-
-// Global in-memory request rate limit (Bun entry only). Operator-tunable via env
-// so load tests and local e2e suites — which hammer a single socket IP far harder
-// than any real client — can raise the ceiling without changing the production
-// default (100 requests / 60s per client IP). A missing or invalid override
-// falls back to that default, so this can never weaken the guard unintentionally.
-export const RATE_LIMIT_WINDOW_MS = positiveIntEnv("STEWARD_RATE_LIMIT_WINDOW_MS", 60_000);
-export const RATE_LIMIT_MAX_REQUESTS = positiveIntEnv("STEWARD_RATE_LIMIT_MAX_REQUESTS", 100);
+// Global request-rate defaults. The mounted limiter resolves the same overrides
+// from each immutable Worker request snapshot. These literals must never
+// capture process.env at module initialization because a later Worker binding
+// generation that omits an override must return to the documented defaults.
+export const RATE_LIMIT_WINDOW_MS = 60_000;
+export const RATE_LIMIT_MAX_REQUESTS = 100;
 export const isWorkersRuntime =
   process.env.STEWARD_RUNTIME === "workers" ||
   (typeof navigator !== "undefined" && navigator.userAgent === "Cloudflare-Workers");

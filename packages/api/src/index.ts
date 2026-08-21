@@ -5,8 +5,6 @@
  * served by other runtimes (Cloudflare Workers, Electrobun embedded). This
  * file only contains code that needs a long-lived Node/Bun process:
  *
- *   - The in-memory IP rate-limit log (only safe in single-process mode)
- *   - `setInterval` GC for expired entries
  *   - The blocking `runMigrations()` call at boot
  *   - The /ready readiness probe (depends on migration state + DB ping)
  *   - `Bun.serve` plus SIGINT/SIGTERM graceful shutdown
@@ -25,6 +23,7 @@ import { shouldUsePGLite } from "@stwd/db/pglite";
 import { redactedThrownDiagnostics } from "@stwd/shared";
 import { sql } from "drizzle-orm";
 import { composeApp } from "./compose";
+import { globalRateLimitRequiresRedis } from "./middleware/global-rate-limit";
 import { getRedisClient, initRedis, isRedisConfigured, shutdownRedis } from "./middleware/redis";
 import { resolveEnabledPlugins } from "./plugin-config";
 import { assertAuthStoresAreSafe, getAuthStoreSources, initAuthStores } from "./routes/auth";
@@ -32,20 +31,12 @@ import {
   API_VERSION,
   type ApiResponse,
   nonceCleanupTimer,
-  RATE_LIMIT_MAX_REQUESTS,
-  RATE_LIMIT_WINDOW_MS,
 } from "./services/context";
 import { startGoogleCredentialLifecycleScheduler } from "./services/provider-google-lifecycle-scheduler";
 import { startProviderReservationReconciliationScheduler } from "./services/provider-reservation-reconciliation-scheduler";
 import { startXCredentialLifecycleScheduler } from "./services/provider-x-lifecycle-scheduler";
 import { startRetentionScheduler } from "./services/retention";
-import {
-  InMemoryRateLimiter,
-  parseNonNegativeInt,
-  parsePositiveInt,
-  resolveClientIp,
-  SOCKET_PEER_ENV_KEY,
-} from "./services/runtime-gate";
+import { SOCKET_PEER_ENV_KEY } from "./services/runtime-gate";
 import { startTransactionReceiptPollingScheduler } from "./services/transaction-receipt-poller";
 import {
   getUpstreamCredentialLeaseSchedulerHealth,
@@ -72,23 +63,7 @@ validateJwtSecretEnv();
 const app = await composeApp();
 const capabilitiesEnabled = resolveEnabledPlugins().has("capabilities");
 
-// ─── In-memory rate-limit log + shutdown guard ───────────────────────────────
-//
-// NOT used by the Workers entry — the Workers runtime mounts the shared
-// Redis-backed sliding-window limiter across all routes instead (SEC-068,
-// see middleware/global-rate-limit.ts, gated on isWorkersRuntime in app.ts).
-//
-// SEC-014: the limiter keys on the socket peer unless the operator declares
-// STEWARD_TRUSTED_PROXY_HOPS > 0, in which case the client IP is derived from
-// the rightmost trusted XFF entries (client-supplied XFF prefixes are never
-// trusted). The key space is capped and fails closed when full.
-
-const trustedProxyHops = parseNonNegativeInt(process.env.STEWARD_TRUSTED_PROXY_HOPS, 0);
-const rateLimiter = new InMemoryRateLimiter(
-  RATE_LIMIT_MAX_REQUESTS,
-  RATE_LIMIT_WINDOW_MS,
-  parsePositiveInt(process.env.STEWARD_RATE_LIMIT_MAX_KEYS, 10_000),
-);
+// ─── Shutdown guard ───────────────────────────────────────────────────────────
 let isShuttingDown = false;
 let cancelRetention: (() => void) | undefined;
 let cancelProviderReservationReconciliation: (() => void) | undefined;
@@ -98,30 +73,15 @@ let cancelUpstreamCredentialLeaseScheduler: (() => Promise<void>) | undefined;
 let cancelGoogleCredentialLifecycleScheduler: (() => Promise<void>) | undefined;
 let cancelXCredentialLifecycleScheduler: (() => Promise<void>) | undefined;
 
-function runtimeGate(request: Request, peerAddress: string | null): Response | null {
-  const url = new URL(request.url);
-  if (url.pathname === "/health" || url.pathname === "/ready") return null;
-
+function runtimeGate(): Response | null {
   if (isShuttingDown) {
     return Response.json({ ok: false, error: "Server is shutting down" } satisfies ApiResponse, {
       status: 503,
     });
   }
 
-  const ip = resolveClientIp(request.headers, peerAddress, trustedProxyHops);
-  const verdict = rateLimiter.check(ip);
-  if (verdict.limited) {
-    return Response.json({ ok: false, error: "Rate limit exceeded" } satisfies ApiResponse, {
-      status: 429,
-      headers: { "Retry-After": verdict.retryAfterSeconds.toString() },
-    });
-  }
   return null;
 }
-
-const requestLogCleanupTimer = setInterval(() => {
-  rateLimiter.sweep();
-}, RATE_LIMIT_WINDOW_MS);
 
 // ─── /ready — deep readiness probe ───────────────────────────────────────────
 //
@@ -206,15 +166,26 @@ app.get("/ready", async (c) => {
     checks.database = { ok: false, error: "Database health check failed" };
   }
 
+  const redisRequired = globalRateLimitRequiresRedis();
   try {
     const redis = getRedisClient();
     checks.redis = redis
       ? { ok: (await redis.ping()).toUpperCase() === "PONG" }
       : isRedisConfigured()
-        ? { ok: false, error: "Redis is configured but not connected" }
-        : { ok: false, required: false, error: "Redis is not configured (optional mode)" };
+        ? redisRequired
+          ? { ok: false, error: "Redis is configured but not connected" }
+          : {
+              ok: false,
+              required: false,
+              error: "Redis is configured but not connected (memory acknowledged)",
+            }
+        : redisRequired
+          ? { ok: false, error: "Redis is required for durable production rate limiting" }
+          : { ok: false, required: false, error: "Redis is not configured (optional mode)" };
   } catch {
-    checks.redis = { ok: false, error: "Redis health check failed" };
+    checks.redis = redisRequired
+      ? { ok: false, error: "Redis health check failed" }
+      : { ok: false, required: false, error: "Redis health check failed (optional mode)" };
   }
 
   const proxyUrl = process.env.STEWARD_PROXY_URL?.replace(/\/+$/, "");
@@ -423,7 +394,7 @@ const serverOptions = {
     // per-route limiters (auth) can key on it when no trusted forwarding
     // config exists — it cannot be client-influenced, unlike any header.
     return (
-      runtimeGate(request, peerAddress) ??
+      runtimeGate() ??
       app.fetch(request, { [SOCKET_PEER_ENV_KEY]: peerAddress })
     );
   },
@@ -438,7 +409,6 @@ const shutdown = async (signal: string) => {
   console.log(`Received ${signal}, shutting down Steward API`);
 
   server.stop(true);
-  clearInterval(requestLogCleanupTimer);
   if (nonceCleanupTimer) clearInterval(nonceCleanupTimer);
   if (cancelRetention) cancelRetention();
   if (cancelProviderReservationReconciliation) cancelProviderReservationReconciliation();
@@ -447,7 +417,6 @@ const shutdown = async (signal: string) => {
   if (cancelUpstreamCredentialLeaseScheduler) await cancelUpstreamCredentialLeaseScheduler();
   if (cancelGoogleCredentialLifecycleScheduler) await cancelGoogleCredentialLifecycleScheduler();
   if (cancelXCredentialLifecycleScheduler) await cancelXCredentialLifecycleScheduler();
-  rateLimiter.clear();
 
   try {
     await Promise.all([closeDb(), shutdownRedis()]);

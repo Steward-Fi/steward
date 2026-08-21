@@ -14,8 +14,8 @@
  *   - Does NOT have any top-level `await` that hits the network at module init.
  *
  * Global rate limiting on this entry is provided by the shared Redis-backed
- * sliding-window limiter that app.ts mounts when it detects the Workers
- * runtime (SEC-068, see middleware/global-rate-limit.ts).
+ * sliding-window limiter that app.ts mounts for every runtime (SEC-068, see
+ * middleware/global-rate-limit.ts).
  *
  * Required bindings (set via `wrangler secret put` or `vars` in wrangler.toml):
  *   - DATABASE_URL                  Neon HTTP connection string
