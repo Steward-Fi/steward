@@ -19,6 +19,9 @@ All notable changes to `@stwd/react` are documented here.
 - Point example `baseUrl` values in JSDoc (`StewardProvider`, `StewardLogin`) and the README at a self-hosted instance (`http://localhost:3200`) instead of a hosted `api.steward.fi` URL. Steward is self-host-first today; there is no shared hosted API. Docs/comment only, no source behavior change.
 
 ### Tests
+- Replace the passkey-autofill source scaffold with a mounted `StewardLogin`
+  boundary probe that exercises the production component, verifies the email
+  autocomplete contract, and preserves the explicit typed-email passkey flow.
 - Added test coverage for utilities (format, theme, walletPanelRegistry), context hooks (useAuth, useSteward), data hooks (useWallet, useTransactions, useApprovals, usePolicies, useSpend), and SSR branch coverage for the component surface (auth guard, user button, tenant picker, spend dashboard, approval queue, wallet overview, policy controls, email/OAuth callbacks, passkey enrollment). Suite goes from 56 to 195 passing. No source changes.
 - State the StewardLogin hook-order regression as a current invariant instead of change-history narration. Test comment only; no runtime or API change.
 
