@@ -105,6 +105,12 @@ async function userSessionAuth(
 }
 
 globalWalletRoutes.use("*", userSessionAuth);
+globalWalletRoutes.use("*", async (c, next) => {
+  // RPC responses may contain signatures. Keep the policy at the authenticated
+  // route-group boundary so new RPC branches cannot accidentally be cacheable.
+  setNoStoreHeaders(c);
+  await next();
+});
 
 function getVault(): Vault {
   return getConfiguredVault();

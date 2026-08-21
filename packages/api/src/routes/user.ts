@@ -1767,6 +1767,14 @@ user.use("/me/wallet/export", async (c, next) => {
 
 // Apply session auth to all routes in this group
 user.use("*", userSessionAuth);
+user.use("*", async (c, next) => {
+  // User-wallet routes can return signatures, one-time invitation tokens, and
+  // short-lived import material. Apply the cache contract once, immediately
+  // after authentication, so every success and post-auth error branch inherits
+  // it without relying on handler-local ordering.
+  setNoStoreHeaders(c);
+  await next();
+});
 
 function personalTenantId(userId: string): string {
   return `personal-${userId}`;

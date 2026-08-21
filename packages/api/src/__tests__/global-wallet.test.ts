@@ -635,6 +635,9 @@ describe("global wallet routes", () => {
       }),
     });
     expect(staleMfa.status).toBe(403);
+    expect(staleMfa.headers.get("Cache-Control")).toBe("no-store, max-age=0");
+    expect(staleMfa.headers.get("Pragma")).toBe("no-cache");
+    expect(staleMfa.headers.get("Expires")).toBe("0");
 
     const authLike = await routes.request("/rpc", {
       method: "POST",
@@ -702,6 +705,9 @@ describe("global wallet routes", () => {
       }),
     });
     expect(signed.status).toBe(200);
+    expect(signed.headers.get("Cache-Control")).toBe("no-store, max-age=0");
+    expect(signed.headers.get("Pragma")).toBe("no-cache");
+    expect(signed.headers.get("Expires")).toBe("0");
     const signedBody = (await signed.json()) as { data: { id: number; result: string } };
     expect(signedBody.data.id).toBe(3);
     expect(signedBody.data.result).toMatch(/^0x[0-9a-fA-F]{130}$/);
@@ -915,6 +921,9 @@ describe("global wallet routes", () => {
       }),
     });
     expect(signed.status).toBe(200);
+    expect(signed.headers.get("Cache-Control")).toBe("no-store, max-age=0");
+    expect(signed.headers.get("Pragma")).toBe("no-cache");
+    expect(signed.headers.get("Expires")).toBe("0");
     const signedBody = (await signed.json()) as { data: { id: number; result: `0x${string}` } };
     expect(signedBody.data.id).toBe(4);
     expect(signedBody.data.result).toMatch(/^0x[0-9a-fA-F]{130}$/);
