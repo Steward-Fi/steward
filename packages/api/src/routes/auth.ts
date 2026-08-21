@@ -135,6 +135,7 @@ import {
   type TenantSamlSsoConfig,
   type TenantTestAccountConfig,
 } from "@stwd/shared";
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 import { type KeyStore, provisionUserWallet, Vault } from "@stwd/vault";
 import bs58 from "bs58";
 import { and, eq, gte, inArray, isNull, lt, sql } from "drizzle-orm";
@@ -259,9 +260,9 @@ function normalizeEmailDomain(value: unknown): string | null {
  * not preserved.
  */
 function trustedProxyHops(): number {
-  const raw = process.env.STEWARD_TRUSTED_PROXY_HOPS?.trim();
+  const raw = runtimeEnvironmentValue("STEWARD_TRUSTED_PROXY_HOPS")?.trim();
   if (raw === undefined || raw === "") {
-    return process.env.STEWARD_TRUST_PROXY_HEADERS === "true" ? 1 : 0;
+    return runtimeEnvironmentValue("STEWARD_TRUST_PROXY_HEADERS") === "true" ? 1 : 0;
   }
   // Canonical non-negative integer only: "1.5" must not truncate into trust.
   if (!/^\d+$/.test(raw)) return 0;
@@ -339,7 +340,7 @@ function logNoTrustedClientIpDiag(c: Context, hops: number): void {
  * never a shared "global" bucket, never open.
  */
 export function trustedClientIp(c: Context): string | undefined {
-  const trustCloudflare = process.env.STEWARD_TRUST_CLOUDFLARE === "true";
+  const trustCloudflare = runtimeEnvironmentValue("STEWARD_TRUST_CLOUDFLARE") === "true";
   if (trustCloudflare) {
     const cf = c.req.header("cf-connecting-ip")?.trim();
     if (cf && isIP(cf)) return cf;
@@ -435,7 +436,10 @@ function authRateLimitSubject(c: Context): { subject: string; coarse: boolean } 
   const peer = socketPeerFromEnv(c.env);
   if (peer && isIP(peer)) return { subject: `ip:${clientIpBucket(peer)}`, coarse: false };
   const now = Date.now();
-  if (process.env.NODE_ENV === "production" && now - coarseSubjectWarnedAt >= 60_000) {
+  if (
+    runtimeEnvironmentValue("NODE_ENV") === "production" &&
+    now - coarseSubjectWarnedAt >= 60_000
+  ) {
     coarseSubjectWarnedAt = now;
     console.warn(
       "[AuthRateLimit] No trusted client IP (set STEWARD_TRUSTED_PROXY_HOPS=2 on Railway); auth rate limits fall back to coarse per-host buckets instead of per-client budgets",

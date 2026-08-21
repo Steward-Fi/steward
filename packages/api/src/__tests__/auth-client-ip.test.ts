@@ -16,6 +16,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, mock } from "bun:
 import { hashSha256Hex } from "@stwd/auth";
 import { closeDb } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
+import { withRuntimeEnvironment } from "@stwd/shared/runtime-env";
 import { Hono } from "hono";
 import { SOCKET_PEER_ENV_KEY } from "../services/runtime-gate";
 
@@ -139,6 +140,51 @@ function capturedKeys(endpoint: string): string[] {
 }
 
 describe("trustedClientIp", () => {
+  it("isolates overlapping Worker proxy-trust bindings and their subjects", async () => {
+    // Hostile isolate-wide values must not affect either request snapshot.
+    process.env.STEWARD_TRUSTED_PROXY_HOPS = "9";
+    process.env.STEWARD_TRUST_CLOUDFLARE = "true";
+
+    let releaseFirst!: () => void;
+    const firstMayRun = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    let firstBound!: () => void;
+    const firstIsBound = new Promise<void>((resolve) => {
+      firstBound = resolve;
+    });
+
+    const first = withRuntimeEnvironment(
+      {
+        STEWARD_RUNTIME: "workers",
+        STEWARD_TRUSTED_PROXY_HOPS: "1",
+      },
+      async () => {
+        firstBound();
+        await firstMayRun;
+        return probeIp({ "x-forwarded-for": "203.0.113.10, 198.51.100.11" });
+      },
+    );
+    await firstIsBound;
+
+    const second = withRuntimeEnvironment(
+      {
+        STEWARD_RUNTIME: "workers",
+        STEWARD_TRUSTED_PROXY_HOPS: "2",
+      },
+      async () => {
+        // Release the first request while this incompatible binding snapshot is
+        // live. Each request must still derive its own client subject.
+        releaseFirst();
+        return probeIp({
+          "x-forwarded-for": "203.0.113.20, 198.51.100.21, 10.0.0.2",
+        });
+      },
+    );
+
+    expect(await Promise.all([first, second])).toEqual(["198.51.100.11", "198.51.100.21"]);
+  });
+
   it("trusts no forwarded header when no hops are configured (safe default)", async () => {
     delete process.env.STEWARD_TRUSTED_PROXY_HOPS;
     delete process.env.STEWARD_TRUST_PROXY_HEADERS;
@@ -310,6 +356,62 @@ describe("clientIpBucket", () => {
 });
 
 describe("auth rate-limit keying (route harness)", () => {
+  it("keeps overlapping Worker trust generations in distinct durable subjects", async () => {
+    await connectMockRedis();
+    // These isolate-wide values deliberately conflict with both request-local
+    // snapshots. Security-sensitive reads must never observe them.
+    process.env.STEWARD_TRUSTED_PROXY_HOPS = "9";
+    process.env.STEWARD_TRUST_CLOUDFLARE = "true";
+
+    let releaseFirst!: () => void;
+    const firstMayRun = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    let firstBound!: () => void;
+    const firstIsBound = new Promise<void>((resolve) => {
+      firstBound = resolve;
+    });
+
+    const first = withRuntimeEnvironment(
+      {
+        NODE_ENV: "production",
+        STEWARD_RUNTIME: "workers",
+        STEWARD_TRUSTED_PROXY_HOPS: "1",
+      },
+      async () => {
+        firstBound();
+        await firstMayRun;
+        return authRoutes.request("/nonce", {
+          headers: { "x-forwarded-for": "203.0.113.10, 198.51.100.11" },
+        });
+      },
+    );
+    await firstIsBound;
+    const second = withRuntimeEnvironment(
+      {
+        NODE_ENV: "production",
+        STEWARD_RUNTIME: "workers",
+        STEWARD_TRUSTED_PROXY_HOPS: "2",
+      },
+      async () => {
+        releaseFirst();
+        return authRoutes.request("/nonce", {
+          headers: {
+            "x-forwarded-for": "203.0.113.20, 198.51.100.21, 10.0.0.2",
+          },
+        });
+      },
+    );
+    await Promise.all([first, second]);
+
+    expect(new Set(capturedKeys("siwe-nonce"))).toEqual(
+      new Set([
+        `ratelimit:auth:siwe-nonce:${hashSha256Hex("ip:198.51.100.11")}:60000`,
+        `ratelimit:auth:siwe-nonce:${hashSha256Hex("ip:198.51.100.21")}:60000`,
+      ]),
+    );
+  });
+
   it("keys per trusted client IP: spoofed prefixes share a bucket, real clients get independent budgets", async () => {
     await connectMockRedis();
     process.env.STEWARD_TRUSTED_PROXY_HOPS = "1";

@@ -72,12 +72,7 @@ function mountedApp(middleware: ReturnType<typeof createGlobalRateLimitMiddlewar
   return app;
 }
 
-function mountedRequest(
-  app: Hono,
-  path = "/thing",
-  peer = "192.0.2.10",
-  headers?: HeadersInit,
-) {
+function mountedRequest(app: Hono, path = "/thing", peer = "192.0.2.10", headers?: HeadersInit) {
   return app.fetch(new Request(`http://steward.test${path}`, { headers }), {
     [SOCKET_PEER_ENV_KEY]: peer,
   });
@@ -119,9 +114,7 @@ describe("globalRateLimit (SEC-068)", () => {
     const sharedDurableCheck = async () => {
       const count = (counts.get("shared-client") ?? 0) + 1;
       counts.set("shared-client", count);
-      return count <= 2
-        ? { allowed: true }
-        : { allowed: false, retryAfterSecs: 60 };
+      return count <= 2 ? { allowed: true } : { allowed: false, retryAfterSecs: 60 };
     };
     const options = { maxRequests: 2, checkDurable: sharedDurableCheck };
     const firstReplica = mountedApp(createGlobalRateLimitMiddleware(options));
@@ -278,15 +271,19 @@ describe("globalRateLimit (SEC-068)", () => {
     );
   });
 
-  test("Workers ignore the Bun single-instance acknowledgement", async () => {
+  test("Workers without NODE_ENV still require durable state and ignore the Bun acknowledgement", async () => {
+    let durableCalls = 0;
     const app = mountedApp(
       createGlobalRateLimitMiddleware({
-        checkDurable: async () => ({ allowed: false, retryAfterSecs: 60 }),
+        durableAvailable: () => false,
+        checkDurable: async () => {
+          durableCalls += 1;
+          return { allowed: false, retryAfterSecs: 60 };
+        },
       }),
     );
     await withRuntimeEnvironment(
       {
-        NODE_ENV: "production",
         STEWARD_RUNTIME: "workers",
         STEWARD_ACKNOWLEDGE_SINGLE_INSTANCE_GLOBAL_RATE_LIMIT: "true",
       },
@@ -294,6 +291,7 @@ describe("globalRateLimit (SEC-068)", () => {
         expect(globalRateLimitPosture()).toBe("durable");
         expect(globalRateLimitRequiresRedis()).toBe(true);
         expect((await mountedRequest(app)).status).toBe(429);
+        expect(durableCalls).toBe(1);
       },
     );
   });
