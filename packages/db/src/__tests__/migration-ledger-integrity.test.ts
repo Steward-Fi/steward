@@ -38,6 +38,18 @@ const migratedDatabase = {
 };
 
 describe("core migration ledger integrity", () => {
+  test("inspects and rejects the target before creating migration bookkeeping", () => {
+    const source = readFileSync(new URL("../migrate.ts", import.meta.url), "utf8");
+    const inspect = source.indexOf("to_regclass('drizzle.__drizzle_migrations')");
+    const validate = source.indexOf(
+      "assertCoreMigrationLedgerIntegrity(existingRows, journal, databaseShape)",
+    );
+    const mutate = source.indexOf("CREATE SCHEMA IF NOT EXISTS drizzle");
+    expect(inspect).toBeGreaterThan(0);
+    expect(validate).toBeGreaterThan(inspect);
+    expect(mutate).toBeGreaterThan(validate);
+  });
+
   test("accepts a genuinely empty database before the first migration", () => {
     expect(() =>
       assertCoreMigrationLedgerIntegrity([], journal, {

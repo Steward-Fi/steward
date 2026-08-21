@@ -199,20 +199,13 @@ export async function runMigrations(): Promise<{ applied: string[] }> {
     try {
       const journal = readJournal();
 
-      // Ensure schema + table exist so we can inspect before drizzle's migrator runs.
-      await client`CREATE SCHEMA IF NOT EXISTS drizzle`;
-      await client`
-        CREATE TABLE IF NOT EXISTS drizzle.__drizzle_migrations (
-          id SERIAL PRIMARY KEY,
-          hash text NOT NULL,
-          created_at bigint
-        )
-      `;
-
-      let existingRows = (await client`
-        SELECT id, hash, created_at FROM drizzle.__drizzle_migrations ORDER BY id ASC
-      `) as CoreMigrationLedgerRow[];
-
+      // Inspect without writing first. A privileged migration URL can be
+      // misconfigured to point at an unrelated/shared database; even creating
+      // our bookkeeping schema there would be an unacceptable mutation before
+      // the fail-closed target check runs.
+      const ledgerExists = (await client`
+        SELECT to_regclass('drizzle.__drizzle_migrations') AS r
+      `) as Array<{ r: string | null }>;
       const tenantsExists = (await client`
         SELECT to_regclass('public.tenants') AS r
       `) as Array<{ r: string | null }>;
@@ -231,7 +224,23 @@ export async function runMigrations(): Promise<{ applied: string[] }> {
         auditEventsExists: Boolean(auditEventsExists[0]?.r),
         publicRelationCount: databaseInventory[0]?.public_relation_count ?? 0,
       };
+      let existingRows: CoreMigrationLedgerRow[] = [];
+      if (ledgerExists[0]?.r) {
+        existingRows = (await client`
+          SELECT id, hash, created_at FROM drizzle.__drizzle_migrations ORDER BY id ASC
+        `) as CoreMigrationLedgerRow[];
+      }
       assertCoreMigrationLedgerIntegrity(existingRows, journal, databaseShape);
+
+      // Only a verified empty/legacy Steward target may receive the ledger.
+      await client`CREATE SCHEMA IF NOT EXISTS drizzle`;
+      await client`
+        CREATE TABLE IF NOT EXISTS drizzle.__drizzle_migrations (
+          id SERIAL PRIMARY KEY,
+          hash text NOT NULL,
+          created_at bigint
+        )
+      `;
 
       // Backfill: legacy DB previously migrated by the psql loop.
       if (existingRows.length === 0 && tenantsExists[0]?.r) {
