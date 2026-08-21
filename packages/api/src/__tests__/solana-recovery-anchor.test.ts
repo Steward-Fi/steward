@@ -309,8 +309,14 @@ describe("Solana durable recovery anchors", () => {
       await request.onBroadcastPrepared?.({
         signature: SIGNATURE,
         recentBlockhash: RECENT_BLOCKHASH,
+        blockhashKind: "recent",
       });
-      return { signature: SIGNATURE, broadcast: true, chainId: request.chainId ?? 101 };
+      return {
+        signature: SIGNATURE,
+        broadcast: true,
+        chainId: request.chainId ?? 101,
+        ...ARTIFACT_EVIDENCE,
+      };
     };
 
     try {
@@ -476,6 +482,7 @@ describe("Solana durable recovery anchors", () => {
       await request.onBroadcastPrepared?.({
         signature: SIGNATURE,
         recentBlockhash: RECENT_BLOCKHASH,
+        blockhashKind: "recent",
       });
       const checkpoint = await onlyRecoveryRow();
       await getDb()
