@@ -150,7 +150,7 @@ choices.
 | `DATABASE_URL` | PostgreSQL connection string, not needed in embedded mode. |
 | `STEWARD_JWT_SECRET` | Canonical JWT signing and verification secret. Required in production and at least 32 characters. Keep it server-side and separate from the master password. |
 | `STEWARD_SESSION_SECRET` | Deprecated compatibility fallback for existing deployments. Rename it to `STEWARD_JWT_SECRET`. |
-| `REDIS_URL` | Redis for rate limiting and token/spend state. Adapter swap/earn/bridge daily-cap admission requires available Redis except in explicitly acknowledged development/test memory mode; the production proxy also fails closed unless its explicit soft-fail override is enabled. |
+| `REDIS_URL` | Redis for rate limiting and token/spend state. Daily-cap admission for adapter swap/earn/bridge intents and Spark static-BTC deposit claim, Lightning pay, transfer, and token-transfer intents requires available Redis except in explicitly acknowledged development/test memory mode; the production proxy also fails closed unless its explicit soft-fail override is enabled. |
 | `RESEND_API_KEY` | Email magic-link authentication, optional. |
 | `PASSKEY_RP_ID` | WebAuthn relying-party domain, optional. |
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | Google OAuth, optional. |
