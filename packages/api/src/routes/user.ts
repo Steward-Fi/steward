@@ -66,6 +66,7 @@ import {
   users,
   userTenants,
   userWalletAppConsents,
+  withTenantAuditedTransactionOnDb,
 } from "@stwd/db";
 import { PolicyEngine } from "@stwd/policy-engine";
 import {
@@ -107,6 +108,7 @@ import {
   readTenantGasSponsorshipConfig,
 } from "../services/gas-sponsorship";
 import { plaintextKeyExportResponseGateError } from "../services/key-export-plaintext-gate";
+import { withPlatformAuthorityDatabase } from "../services/platform-authority-database";
 import { isRecentMfaTimestamp } from "../services/recent-mfa";
 import { lockUserSession } from "../services/session-lock";
 import { createSignerCredentialHash, verifySignerCredential } from "../services/signer-credentials";
@@ -348,6 +350,10 @@ async function safeJsonParse<T>(c: Context): Promise<T | null> {
   } catch {
     return null;
   }
+}
+
+function rowsFromExecute<T>(result: unknown): T[] {
+  return (Array.isArray(result) ? result : ((result as { rows?: T[] })?.rows ?? [])) as T[];
 }
 
 function userWalletAgentId(userId: string, walletIndex = 0): string {
@@ -7492,7 +7498,6 @@ user.patch("/me/tenants/:tenantId/users/:targetUserId/deactivate", async (c) => 
   if (!body) return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
   const deactivated = body.deactivated !== false;
 
-  const db = getDb();
   await writeUserAudit(c, {
     tenantId,
     actorType: "user",
@@ -7504,21 +7509,9 @@ user.patch("/me/tenants/:tenantId/users/:targetUserId/deactivate", async (c) => 
     resourceId: targetUserId,
   });
 
-  const result = await db
-    .transaction(async (tx) => {
-      // Match the platform lifecycle order exactly: user account, every
-      // tenant-owner lifecycle lock, then the tenant row. The user advisory
-      // lock closes the gap before the row exists/is observed.
-      await tx.execute(
-        sql`select pg_advisory_xact_lock(hashtextextended(${`platform_user_account_${targetUserId}`}, 0))`,
-      );
-      const [previous] = await tx
-        .select({ deactivatedAt: users.deactivatedAt, updatedAt: users.updatedAt })
-        .from(users)
-        .where(eq(users.id, targetUserId))
-        .for("update")
-        .limit(1);
-      if (!previous) return null;
+  const result = await withPlatformAuthorityDatabase((platformDb) =>
+    withTenantAuditedTransactionOnDb(platformDb, tenantId, async (txRaw, appendRequiredAudit) => {
+      const tx = txRaw as typeof platformDb;
       await lockTenantOwnerLifecycle(tx, tenantId);
       const [lockedTenant] = await tx
         .select({ id: tenants.id })
@@ -7539,45 +7532,59 @@ user.patch("/me/tenants/:tenantId/users/:targetUserId/deactivate", async (c) => 
         }
       }
 
-      const [otherTenantCount] = await tx
-        .select({ count: sql<number>`count(*)` })
-        .from(userTenants)
-        .where(
-          and(
-            eq(userTenants.userId, targetUserId),
-            ne(userTenants.tenantId, tenantId),
-            sql`${userTenants.tenantId} <> ${`personal-${targetUserId}`}`,
-          ),
-        );
-      if (Number(otherTenantCount?.count ?? 0) > 0) {
+      await tx.execute(sql`SELECT set_config('steward.tenant_id', 'platform', true)`);
+      const otherTenantIds = rowsFromExecute<{ tenant_id: string }>(
+        await tx.execute(
+          sql`SELECT * FROM steward_bootstrap.platform_user_tenant_ids(${targetUserId}::uuid)`,
+        ),
+      ).filter(
+        ({ tenant_id }) => tenant_id !== tenantId && tenant_id !== `personal-${targetUserId}`,
+      );
+      if (otherTenantIds.length > 0) {
         throw new Error(
           "Tenant dashboard lifecycle changes are limited to users without other tenant memberships",
         );
       }
 
-      const issuedBefore = await revocationStore.revokeUserTokens(targetUserId);
-      await tx
-        .update(users)
-        .set({ deactivatedAt: deactivated ? new Date() : null, updatedAt: new Date() })
-        .where(eq(users.id, targetUserId));
-      await tx
-        .delete(refreshTokens)
-        .where(and(eq(refreshTokens.tenantId, tenantId), eq(refreshTokens.userId, targetUserId)));
+      const [updated] = rowsFromExecute<{ tokens_revoked_before: number }>(
+        await tx.execute(sql`
+        SELECT * FROM steward_bootstrap.platform_set_user_deactivation(
+          ${targetUserId}::uuid,
+          ${deactivated}
+        )
+      `),
+      );
+      if (!updated) throw new Error("User not found");
+      const issuedBefore = Number(updated.tokens_revoked_before);
+      await tx.execute(sql`SELECT set_config('steward.tenant_id', ${tenantId}, true)`);
+
+      await appendRequiredAudit({
+        tenantId,
+        actorType: "user",
+        actorId: admin.userId,
+        action: deactivated ? "tenant.member.deactivate" : "tenant.member.reactivate",
+        resourceType: "user",
+        resourceId: targetUserId,
+        metadata: { issuedBefore },
+        ipAddress: c.req.header("x-forwarded-for") ?? null,
+        userAgent: c.req.header("user-agent") ?? null,
+        requestId: c.get("requestId") ?? null,
+      });
 
       const [row] = await tx
         .select(tenantAdminUserSelection())
         .from(userTenants)
         .innerJoin(users, eq(userTenants.userId, users.id))
         .where(and(eq(userTenants.tenantId, tenantId), eq(userTenants.userId, targetUserId)));
-      return { row, previous, issuedBefore };
-    })
-    .catch((err: unknown) => {
-      if (err instanceof Error) {
-        if (err.message === "Cannot deactivate the sole owner") return err.message;
-        if (err.message.startsWith("Tenant dashboard lifecycle changes")) return err.message;
-      }
-      throw err;
-    });
+      return { row, issuedBefore };
+    }),
+  ).catch((err: unknown) => {
+    if (err instanceof Error) {
+      if (err.message === "Cannot deactivate the sole owner") return err.message;
+      if (err.message.startsWith("Tenant dashboard lifecycle changes")) return err.message;
+    }
+    throw err;
+  });
 
   if (typeof result === "string") {
     return c.json<ApiResponse>({ ok: false, error: result }, 409);
@@ -7587,24 +7594,16 @@ user.patch("/me/tenants/:tenantId/users/:targetUserId/deactivate", async (c) => 
   }
 
   try {
-    await writeUserAudit(c, {
-      tenantId,
-      actorType: "user",
-      actorId: admin.userId,
-      action: deactivated ? "tenant.member.deactivate" : "tenant.member.reactivate",
-      resourceType: "user",
-      resourceId: targetUserId,
-      metadata: { issuedBefore: result.issuedBefore },
-    });
-  } catch (error) {
-    await db
-      .update(users)
-      .set({
-        deactivatedAt: result.previous.deactivatedAt,
-        updatedAt: result.previous.updatedAt,
-      })
-      .where(eq(users.id, targetUserId));
-    throw error;
+    await revocationStore.revokeUserTokens(targetUserId, result.issuedBefore);
+  } catch {
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error:
+          "User lifecycle change committed, but token cache refresh is pending; retry the request",
+      },
+      503,
+    );
   }
 
   dispatchWebhook(tenantId, targetUserId, "user.updated_account", {

@@ -144,7 +144,8 @@ BEGIN
   FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
   WHERE n.nspname = 'steward_bootstrap' AND p.prosecdef;
   IF actual IS DISTINCT FROM expected THEN
-    RAISE EXCEPTION 'SEC-169 bootstrap SECURITY DEFINER inventory drift';
+    RAISE EXCEPTION 'SEC-169 bootstrap SECURITY DEFINER inventory drift'
+      USING DETAIL = format('expected=%s actual=%s', expected, actual);
   END IF;
 END
 $$;
@@ -341,6 +342,10 @@ SELECT format(
   :'steward_platform_role'
 ) \gexec
 SELECT format(
+  'GRANT SELECT ON public.users, public.user_tenants TO %I',
+  :'steward_platform_role'
+) \gexec
+SELECT format(
   'GRANT USAGE, SELECT ON SEQUENCE public.audit_events_id_seq TO %I',
   :'steward_platform_role'
 ) \gexec
@@ -348,6 +353,7 @@ SELECT format(
   'GRANT EXECUTE ON FUNCTION '
   'steward_bootstrap.platform_set_user_deactivation(uuid,boolean), '
   'steward_bootstrap.platform_delete_user(uuid), '
+  'steward_bootstrap.platform_user_tenant_ids(uuid), '
   'steward_bootstrap.platform_revoke_user_refresh_tokens(uuid), '
   'steward_bootstrap.retention_delete_deactivated_users(integer), '
   'steward_bootstrap.platform_stats(), '
@@ -364,6 +370,28 @@ SELECT format(
 ) WHERE to_regprocedure('steward_bootstrap.platform_personal_tenant_delete(text,boolean)') IS NOT NULL \gexec
 SELECT format('GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO %I', :'steward_app_role') \gexec
 SELECT format('GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO %I', :'steward_app_role') \gexec
+-- User lifecycle authority is deliberately excluded from the shared app login.
+-- Profile/auth flows retain only the columns they legitimately mutate; global
+-- deactivation and deletion must cross the separately authenticated platform
+-- authority and its bootstrap-owned lifecycle functions.
+SELECT format('REVOKE INSERT, UPDATE, DELETE ON public.users FROM %I', :'steward_app_role') \gexec
+SELECT format(
+  'GRANT INSERT (id, email, email_verified, name, image, wallet_address, wallet_chain, '
+  'steward_wallet_id, custom_metadata, is_guest, guest_expires_at, created_at, updated_at) '
+  'ON public.users TO %I',
+  :'steward_app_role'
+) \gexec
+SELECT format(
+  'GRANT UPDATE (email, email_verified, name, image, wallet_address, wallet_chain, '
+  'steward_wallet_id, custom_metadata, is_guest, guest_expires_at, updated_at) '
+  'ON public.users TO %I',
+  :'steward_app_role'
+) \gexec
+SELECT format(
+  'REVOKE ALL ON public.user_identity_subjects, public.retained_user_provider_evidence FROM %I',
+  :'steward_app_role'
+) WHERE to_regclass('public.user_identity_subjects') IS NOT NULL
+    AND to_regclass('public.retained_user_provider_evidence') IS NOT NULL \gexec
 
 -- The function owner is non-login and may read only the fixed bootstrap inputs.
 SELECT format(
@@ -386,6 +414,14 @@ SELECT format(
   :'steward_bootstrap_role'
 ) WHERE to_regprocedure('public.steward_platform_set_user_deactivation_v2(uuid,boolean)') IS NOT NULL \gexec
 SELECT format(
+  'GRANT EXECUTE ON FUNCTION public.steward_user_token_revocation_subject_v1(uuid) TO %I',
+  :'steward_bootstrap_role'
+) WHERE to_regprocedure('public.steward_user_token_revocation_subject_v1(uuid)') IS NOT NULL \gexec
+SELECT format(
+  'REVOKE ALL ON FUNCTION public.steward_lock_personal_lifecycle(uuid, text, boolean) FROM %I, %I, %I',
+  :'steward_app_role', :'steward_bootstrap_role', :'steward_platform_role'
+) WHERE to_regprocedure('public.steward_lock_personal_lifecycle(uuid,text,boolean)') IS NOT NULL \gexec
+SELECT format(
   'GRANT EXECUTE ON FUNCTION public.steward_lock_personal_lifecycle(uuid, text, boolean) TO %I',
   :'steward_bootstrap_role'
 ) WHERE to_regprocedure('public.steward_lock_personal_lifecycle(uuid,text,boolean)') IS NOT NULL \gexec
@@ -403,6 +439,8 @@ SELECT format('ALTER FUNCTION steward_rls.user_id() OWNER TO %I', :'steward_migr
 SELECT format('ALTER SCHEMA steward_bootstrap OWNER TO %I', :'steward_bootstrap_role') \gexec
 SELECT format('ALTER FUNCTION steward_bootstrap.tenant_api_key_subject(text) OWNER TO %I', :'steward_bootstrap_role') \gexec
 SELECT format('ALTER FUNCTION steward_bootstrap.session_subject(uuid,text) OWNER TO %I', :'steward_bootstrap_role') \gexec
+SELECT format('ALTER FUNCTION steward_bootstrap.user_token_revocation_subject(uuid) OWNER TO %I', :'steward_bootstrap_role')
+WHERE to_regprocedure('steward_bootstrap.user_token_revocation_subject(uuid)') IS NOT NULL \gexec
 SELECT format('ALTER FUNCTION steward_bootstrap.agent_subject(text,text,text) OWNER TO %I', :'steward_bootstrap_role') \gexec
 SELECT format('ALTER FUNCTION steward_bootstrap.agent_tenant_subject(text) OWNER TO %I', :'steward_bootstrap_role') \gexec
 SELECT format('ALTER FUNCTION steward_bootstrap.app_client_subject(text,text) OWNER TO %I', :'steward_bootstrap_role') \gexec

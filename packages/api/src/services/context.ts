@@ -198,12 +198,31 @@ export async function verifySessionToken(token: string) {
       mfaMethod?: string;
       jti?: string;
       exp?: number;
+      iat?: number;
     };
     if (payload.typ === "identity") return null;
     // Never accept a refresh JWT as an access token (SEC-055).
     if (payload.tokenType === "refresh") return null;
     await assertTokenNotRevoked(payload);
     if (payload.userId) {
+      const [revocationSubject] = rowsFromDbResult<{
+        tokens_revoked_before: number | string | null;
+      }>(
+        await getDb().execute(sql`
+          SELECT steward_bootstrap.user_token_revocation_subject(
+            ${payload.userId}::uuid
+          ) AS tokens_revoked_before
+        `),
+      );
+      const tokensRevokedBefore = Number(revocationSubject?.tokens_revoked_before);
+      if (
+        revocationSubject?.tokens_revoked_before === null ||
+        !Number.isSafeInteger(tokensRevokedBefore) ||
+        typeof payload.iat !== "number" ||
+        payload.iat <= tokensRevokedBefore
+      ) {
+        return null;
+      }
       const [user] = payload.tenantId
         ? rowsFromDbResult<{
             deactivated_at: Date | string | null;

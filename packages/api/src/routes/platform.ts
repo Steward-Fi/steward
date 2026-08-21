@@ -3265,7 +3265,9 @@ platform.post("/users", async (c) => {
       externalId: walletExternalId,
     });
     if (linked instanceof Error) {
-      await db.delete(users).where(eq(users.id, newUser.id));
+      await withPlatformAuthorityTransaction((tx) =>
+        tx.execute(sql`SELECT * FROM steward_bootstrap.platform_delete_user(${newUser.id}::uuid)`),
+      );
       return c.json<ApiResponse>(
         { ok: false, error: linked.message },
         walletExternalLinkStatus(linked),
@@ -3388,7 +3390,9 @@ platform.post("/users/wallet/external-id/connect-or-create", async (c) => {
   });
   if (linked instanceof Error) {
     if (isNew) {
-      await db.delete(users).where(eq(users.id, userId));
+      await withPlatformAuthorityTransaction((tx) =>
+        tx.execute(sql`SELECT * FROM steward_bootstrap.platform_delete_user(${userId}::uuid)`),
+      );
     } else if (createdMembership) {
       await rollbackTenantMembership({ userId, tenantId });
     }
@@ -3925,6 +3929,7 @@ platform.patch("/users/:userId/deactivate", async (c) => {
           previous_deactivated_at: Date | null;
           previous_updated_at: Date;
           deactivated_at: Date | null;
+          tokens_revoked_before: number;
         }>(
           await tx.execute(sql`
             SELECT * FROM steward_bootstrap.platform_set_user_deactivation(
@@ -3934,17 +3939,16 @@ platform.patch("/users/:userId/deactivate", async (c) => {
           `),
         );
         if (!updated) throw new Error("User not found");
-        const issuedBefore = await revocationStore.revokeUserTokens(userId);
         await appendRequiredAudit({
           tenantId: PLATFORM_AUDIT_TENANT_ID,
           actorType: "platform",
           action: deactivated ? "user.deactivate" : "user.reactivate",
           resourceType: "user",
           resourceId: userId,
-          metadata: { issuedBefore },
+          metadata: { issuedBefore: Number(updated.tokens_revoked_before) },
           ...auditCtx(c),
         });
-        return { issuedBefore, updated };
+        return { issuedBefore: Number(updated.tokens_revoked_before), updated };
       },
     ),
   ).catch((err: unknown) => {
@@ -3965,6 +3969,18 @@ platform.patch("/users/:userId/deactivate", async (c) => {
   }
   if (result === "Personal tenant membership invariant violated") {
     return c.json<ApiResponse>({ ok: false, error: result }, 409);
+  }
+  try {
+    await revocationStore.revokeUserTokens(userId, result.issuedBefore);
+  } catch {
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error:
+          "User lifecycle change committed, but token cache refresh is pending; retry the request",
+      },
+      503,
+    );
   }
   return c.json<ApiResponse<{ userId: string; deactivatedAt: Date | null }>>({
     ok: true,

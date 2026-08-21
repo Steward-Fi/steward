@@ -1150,6 +1150,100 @@ describe("platform global identity graph routes", () => {
     }
   });
 
+  it("commits deactivation and its audit before a retryable token-cache refresh", async () => {
+    const [target] = await getDb()
+      .insert(users)
+      .values({ email: "deactivate-revocation-retry@example.test", emailVerified: true })
+      .returning({ id: users.id });
+    const revoke = spyOn(revocationStore, "revokeUserTokens").mockRejectedValueOnce(
+      new Error("redis provider unavailable"),
+    );
+    try {
+      const first = await platformRoutes.request(`/users/${target.id}/deactivate`, {
+        method: "PATCH",
+        headers: headers(),
+        body: JSON.stringify({ deactivated: true }),
+      });
+      expect(first.status).toBe(503);
+      expect(((await first.json()) as { error: string }).error).toContain(
+        "lifecycle change committed",
+      );
+      const [stored] = await getDb()
+        .select({ deactivatedAt: users.deactivatedAt })
+        .from(users)
+        .where(eq(users.id, target.id));
+      expect(stored?.deactivatedAt).toBeInstanceOf(Date);
+      const completed = await getDb()
+        .select({ action: auditEvents.action })
+        .from(auditEvents)
+        .where(
+          and(eq(auditEvents.resourceId, target.id), eq(auditEvents.action, "user.deactivate")),
+        );
+      expect(completed).toHaveLength(1);
+
+      const retry = await platformRoutes.request(`/users/${target.id}/deactivate`, {
+        method: "PATCH",
+        headers: headers(),
+        body: JSON.stringify({ deactivated: true }),
+      });
+      expect(retry.status).toBe(200);
+      expect(revoke).toHaveBeenCalledTimes(2);
+    } finally {
+      revoke.mockRestore();
+    }
+  });
+
+  it("commits reactivation behind a durable token line before retrying the cache", async () => {
+    const [target] = await getDb()
+      .insert(users)
+      .values({
+        email: "reactivate-revocation-retry@example.test",
+        emailVerified: true,
+        deactivatedAt: new Date(),
+      })
+      .returning({ id: users.id });
+    const revoke = spyOn(revocationStore, "revokeUserTokens").mockRejectedValueOnce(
+      new Error("redis provider unavailable"),
+    );
+    try {
+      const first = await platformRoutes.request(`/users/${target.id}/deactivate`, {
+        method: "PATCH",
+        headers: headers(),
+        body: JSON.stringify({ deactivated: false }),
+      });
+      expect(first.status).toBe(503);
+      expect(((await first.json()) as { error: string }).error).toContain(
+        "lifecycle change committed",
+      );
+      const [stored] = await getDb()
+        .select({
+          deactivatedAt: users.deactivatedAt,
+          tokensRevokedBefore: users.tokensRevokedBefore,
+        })
+        .from(users)
+        .where(eq(users.id, target.id));
+      expect(stored?.deactivatedAt).toBeNull();
+      expect(stored?.tokensRevokedBefore).toBeGreaterThan(-1);
+      const completed = await getDb()
+        .select({ action: auditEvents.action })
+        .from(auditEvents)
+        .where(
+          and(eq(auditEvents.resourceId, target.id), eq(auditEvents.action, "user.reactivate")),
+        );
+      expect(completed).toHaveLength(1);
+
+      const retry = await platformRoutes.request(`/users/${target.id}/deactivate`, {
+        method: "PATCH",
+        headers: headers(),
+        body: JSON.stringify({ deactivated: false }),
+      });
+      expect(retry.status).toBe(200);
+      expect(revoke).toHaveBeenCalledTimes(2);
+    } finally {
+      revoke.mockRestore();
+    }
+  });
+
   it("deactivates a personal owner and deletes the tenant before its identity", async () => {
     const [personalUser] = await getDb()
       .insert(users)

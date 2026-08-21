@@ -124,6 +124,7 @@ import {
   tenants,
   users,
   userTenants,
+  withTenantAuditedTransactionOnDb,
   withTenantRlsTransaction,
   withTenantTransactionDatabase,
 } from "@stwd/db";
@@ -157,6 +158,7 @@ import {
   isAllowedOidcClientSecretEnvForTenant,
   normalizeOidcProviders,
 } from "../services/oidc-provider-config";
+import { withPlatformAuthorityDatabase } from "../services/platform-authority-database";
 import { socketPeerFromEnv } from "../services/runtime-gate";
 import { buildSamlServiceProviderUrls } from "../services/saml-sso-config";
 import { lockUserSession } from "../services/session-lock";
@@ -9390,24 +9392,43 @@ auth.delete("/guest", async (c) => {
     requestId: c.get("requestId") ?? null,
   });
 
-  await db.transaction(async (tx) => {
-    await tx.update(users).set({ deactivatedAt: new Date() }).where(eq(users.id, userId));
-    await tx.delete(refreshTokens).where(eq(refreshTokens.userId, userId));
-  });
-  await revocationStore.revokeUserTokens(userId);
-
-  await writeAuditEvent({
-    tenantId,
-    actorType: "user",
-    actorId: userId,
-    action: "auth.guest.deleted",
-    resourceType: "user",
-    resourceId: userId,
-    metadata: { method: "guest", wasAlreadyDeactivated: user.deactivatedAt !== null },
-    ipAddress: c.req.header("x-forwarded-for") ?? null,
-    userAgent: c.req.header("user-agent") ?? null,
-    requestId: c.get("requestId") ?? null,
-  });
+  const issuedBefore = await withPlatformAuthorityDatabase((platformDb) =>
+    withTenantAuditedTransactionOnDb(platformDb, tenantId, async (txRaw, appendRequiredAudit) => {
+      const tx = txRaw as typeof platformDb;
+      await tx.execute(sql`SELECT set_config('steward.tenant_id', 'platform', true)`);
+      const [updated] = bootstrapRows<{ tokens_revoked_before: number }>(
+        await tx.execute(sql`
+        SELECT * FROM steward_bootstrap.platform_set_user_deactivation(${userId}::uuid, true)
+      `),
+      );
+      if (!updated) throw new Error("User not found");
+      await appendRequiredAudit({
+        tenantId,
+        actorType: "user",
+        actorId: userId,
+        action: "auth.guest.deleted",
+        resourceType: "user",
+        resourceId: userId,
+        metadata: { method: "guest", wasAlreadyDeactivated: user.deactivatedAt !== null },
+        ipAddress: c.req.header("x-forwarded-for") ?? null,
+        userAgent: c.req.header("user-agent") ?? null,
+        requestId: c.get("requestId") ?? null,
+      });
+      return Number(updated.tokens_revoked_before);
+    }),
+  );
+  try {
+    await revocationStore.revokeUserTokens(userId, issuedBefore);
+  } catch {
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error:
+          "Guest deactivation committed, but token cache refresh is pending; retry the request",
+      },
+      503,
+    );
+  }
 
   return c.json({
     ok: true,

@@ -3,6 +3,14 @@
 \else
   \set steward_bootstrap_role steward_bootstrap_owner
 \endif
+\if :{?steward_app_role}
+\else
+  \set steward_app_role steward_app
+\endif
+\if :{?steward_platform_role}
+\else
+  \set steward_platform_role steward_platform
+\endif
 
 -- These SECURITY DEFINER entry points are owned by a NOLOGIN role after the
 -- role split. They must therefore be replaced through this explicit admin lane,
@@ -10,15 +18,21 @@
 -- and versioned by migration 0114.
 BEGIN;
 SET LOCAL lock_timeout = '10s';
+SELECT format(
+  'GRANT EXECUTE ON FUNCTION public.steward_user_token_revocation_subject_v1(uuid) TO %I',
+  :'steward_bootstrap_role'
+) \gexec
 SELECT format('GRANT %I TO %I', :'steward_bootstrap_role', current_user) \gexec
 SELECT format('SET LOCAL ROLE %I', :'steward_bootstrap_role') \gexec
 
-CREATE OR REPLACE FUNCTION steward_bootstrap.platform_set_user_deactivation(
+DROP FUNCTION steward_bootstrap.platform_set_user_deactivation(uuid, boolean);
+CREATE FUNCTION steward_bootstrap.platform_set_user_deactivation(
   p_user_id uuid, p_deactivated boolean
 )
 RETURNS TABLE (
   user_id uuid, previous_deactivated_at timestamptz,
-  previous_updated_at timestamptz, deactivated_at timestamptz
+  previous_updated_at timestamptz, deactivated_at timestamptz,
+  tokens_revoked_before bigint
 )
 LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path = pg_catalog
 AS $$
@@ -29,6 +43,26 @@ BEGIN
   );
 END
 $$;
+
+REVOKE ALL ON FUNCTION steward_bootstrap.platform_set_user_deactivation(uuid, boolean)
+FROM PUBLIC;
+SELECT format(
+  'GRANT EXECUTE ON FUNCTION steward_bootstrap.platform_set_user_deactivation(uuid,boolean) TO %I',
+  :'steward_platform_role'
+) \gexec
+
+CREATE OR REPLACE FUNCTION steward_bootstrap.user_token_revocation_subject(p_user_id uuid)
+RETURNS bigint
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog
+AS $$
+  SELECT public.steward_user_token_revocation_subject_v1(p_user_id)
+$$;
+
+REVOKE ALL ON FUNCTION steward_bootstrap.user_token_revocation_subject(uuid) FROM PUBLIC;
+SELECT format(
+  'GRANT EXECUTE ON FUNCTION steward_bootstrap.user_token_revocation_subject(uuid) TO %I',
+  :'steward_app_role'
+) \gexec
 
 CREATE OR REPLACE FUNCTION steward_bootstrap.platform_delete_user(p_user_id uuid)
 RETURNS TABLE (user_id uuid)

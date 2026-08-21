@@ -1,5 +1,6 @@
 import { relations, sql } from "drizzle-orm";
 import {
+  bigint,
   boolean,
   foreignKey,
   index,
@@ -43,6 +44,12 @@ export const users = pgTable(
      */
     guestExpiresAt: timestamp("guest_expires_at", { withTimezone: true }),
     deactivatedAt: timestamp("deactivated_at", { withTimezone: true }),
+    /**
+     * Database-authoritative access-token revocation line. Session iat values
+     * at or below this second are rejected even if the Redis acceleration
+     * cache is empty or unavailable.
+     */
+    tokensRevokedBefore: bigint("tokens_revoked_before", { mode: "number" }).notNull().default(-1),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },

@@ -186,9 +186,19 @@ the NOLOGIN bootstrap role:
 
 ```bash
 psql "$STEWARD_ADMIN_DATABASE_URL" \
+  -v steward_app_role=steward_app \
   -v steward_bootstrap_role=steward_bootstrap_owner \
   -f scripts/postgres/rls-upgrade-personal-lifecycle.sql
 ```
+
+Migration `0114` also stores the monotonic `users.tokens_revoked_before`
+boundary. Deactivation and reactivation advance it in the same audited database
+transaction; request authentication reads it through the narrow
+`steward_bootstrap.user_token_revocation_subject(uuid)` wrapper. Redis is only
+an acceleration cache and a failed cache refresh cannot make an old token valid
+again. Any exact bootstrap-function allowlist must include that read-only wrapper
+for the app and its public implementation only for the bootstrap owner; it must
+continue to exclude both lifecycle mutation wrappers from the app role.
 
 The app, platform-authority, and migration roles are separate login identities
 asserted `NOSUPERUSER NOBYPASSRLS`; the migration role owns the application

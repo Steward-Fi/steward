@@ -78,6 +78,7 @@ describe("0111 tenant RLS policy installation", () => {
       "session_subject",
       "tenant_api_key_subject",
       "tenant_ids_for_internal_job",
+      "user_token_revocation_subject",
     ]);
     expect(functions.rows.every((row) => row.prosecdef)).toBe(true);
     expect(functions.rows.every((row) => row.proconfig?.includes("search_path=pg_catalog"))).toBe(
