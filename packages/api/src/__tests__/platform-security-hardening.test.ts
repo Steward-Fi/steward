@@ -330,9 +330,8 @@ describe("platform security hardening", () => {
     expect(agentRollback).toBeGreaterThan(finalAgentAudit);
   });
 
-  it("restores platform user and membership mutations when final audit events fail", () => {
+  it("restores remaining platform user and membership mutations when final audit events fail", () => {
     for (const [marker, rollback] of [
-      ['platform.patch("/users/:userId/metadata"', "customMetadata: existing.customMetadata"],
       [
         'platform.post("/users/:userId/accounts/:provider/:providerAccountId/transfer"',
         "set({ userId: fromUserId })",
@@ -353,6 +352,16 @@ describe("platform security hardening", () => {
     );
     expect(deactivateRoute).toContain("platform_set_user_deactivation");
     expect(platformSource).toContain("continueWithTenantDatabase");
+  });
+
+  it("commits global metadata and its required audit in one platform transaction", () => {
+    const start = platformSource.indexOf('platform.patch("/users/:userId/metadata"');
+    const route = platformSource.slice(start, platformSource.indexOf("\nplatform.", start + 1));
+    expect(route).toContain("withPlatformAuthorityDatabase");
+    expect(route).toContain("withTenantAuditedTransactionOnDb");
+    expect(route).toContain("FOR UPDATE");
+    expect(route).toContain("appendRequiredAudit");
+    expect(route).not.toContain("customMetadata: existing.customMetadata");
   });
 
   it("repairs invitation state when final invitation audit events fail", () => {

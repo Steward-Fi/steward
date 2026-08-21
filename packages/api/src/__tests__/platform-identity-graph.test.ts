@@ -14,7 +14,7 @@ import {
   userTenants,
 } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 
 const PLATFORM_KEY = "platform-identity-graph-key";
 const TENANT_ID = "platform-identity-graph-tenant";
@@ -250,6 +250,39 @@ describe("platform global identity graph routes", () => {
     expect(oversized.status).toBe(400);
     const oversizedBody = (await oversized.json()) as { error: string };
     expect(oversizedBody.error).toContain("customMetadata");
+  });
+
+  it("rolls back global metadata when its completion audit fails", async () => {
+    await getDb().execute(sql`
+      CREATE FUNCTION reject_user_metadata_completion() RETURNS trigger AS $$
+      BEGIN
+        IF NEW.action = 'user.metadata.update' THEN
+          RAISE EXCEPTION 'injected completion audit failure';
+        END IF;
+        RETURN NEW;
+      END;
+      $$ LANGUAGE plpgsql
+    `);
+    await getDb().execute(sql`
+      CREATE TRIGGER reject_user_metadata_completion BEFORE INSERT ON audit_events
+      FOR EACH ROW EXECUTE FUNCTION reject_user_metadata_completion()
+    `);
+    try {
+      const response = await platformRoutes.request(`/users/${userId}/metadata`, {
+        method: "PATCH",
+        headers: headers(),
+        body: JSON.stringify({ customMetadata: { shouldNotCommit: true } }),
+      });
+      expect(response.status).toBe(500);
+      const [stored] = await getDb()
+        .select({ customMetadata: users.customMetadata })
+        .from(users)
+        .where(eq(users.id, userId));
+      expect(stored?.customMetadata).toEqual({ plan: "enterprise", seats: 12 });
+    } finally {
+      await getDb().execute(sql`DROP TRIGGER reject_user_metadata_completion ON audit_events`);
+      await getDb().execute(sql`DROP FUNCTION reject_user_metadata_completion()`);
+    }
   });
 
   it("rejects oversized metadata during user provisioning and tenant metadata updates", async () => {
