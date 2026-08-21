@@ -54,7 +54,6 @@ function mockRuntime(service: StewardService | null, overrides: Record<string, a
           agentId: TEST_AGENT_ID,
           tenantId: TENANT_ID,
           autoRegister: false,
-          fallbackLocal: false,
         },
       },
     },

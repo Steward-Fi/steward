@@ -78,7 +78,7 @@ export function assertSecureApiUrl(apiUrl: string): void {
 /**
  * Singleton service wrapping StewardClient for the ElizaOS runtime.
  *
- * Handles initialization, health checks, auto-discovery, and auto-registration.
+ * Handles initialization, health checks, agent discovery, and explicitly opted-in registration.
  * Access via `runtime.getService("STEWARD")`.
  */
 export class StewardService extends Service {
@@ -113,7 +113,6 @@ export class StewardService extends Service {
     this.pluginConfig = this.resolveConfig(runtime);
 
     if (!this.pluginConfig) {
-      console.warn("[Steward] No configuration found, plugin disabled");
       return;
     }
 
@@ -134,9 +133,6 @@ export class StewardService extends Service {
         await this.tryAutoRegister(runtime);
       } else {
         console.warn("[Steward] Could not connect", redactedThrownDiagnostics(err));
-        if (this.pluginConfig.fallbackLocal) {
-          console.info("[Steward] Falling back to local signing");
-        }
       }
     }
   }
@@ -159,8 +155,33 @@ export class StewardService extends Service {
     const settings = runtimeState.character?.settings?.steward ?? {};
     const env = process.env;
 
-    const apiUrl = settings.apiUrl ?? env.STEWARD_API_URL ?? "http://localhost:7860";
+    const apiUrl = settings.apiUrl ?? env.STEWARD_API_URL;
+    const apiKey = settings.apiKey ?? env.STEWARD_API_KEY;
+    const bearerToken = settings.bearerToken ?? env.STEWARD_JWT;
+    const agentId = settings.agentId ?? env.STEWARD_AGENT_ID ?? runtimeState.agentId;
+    const tenantId = settings.tenantId ?? env.STEWARD_TENANT_ID;
+
+    if (!apiUrl) {
+      console.warn("[Steward] Plugin disabled: STEWARD_API_URL is required");
+      return null;
+    }
+    if (!apiKey && !bearerToken) {
+      console.warn("[Steward] Plugin disabled: STEWARD_API_KEY or STEWARD_JWT is required");
+      return null;
+    }
+    if (!agentId) {
+      console.warn("[Steward] Plugin disabled: STEWARD_AGENT_ID or runtime agentId is required");
+      return null;
+    }
     assertSecureApiUrl(apiUrl);
+
+    const autoRegister = settings.autoRegister ?? env.STEWARD_AUTO_REGISTER === "true";
+    if (autoRegister && (!apiKey || !tenantId)) {
+      console.warn(
+        "[Steward] Plugin disabled: auto-registration requires STEWARD_API_KEY and STEWARD_TENANT_ID",
+      );
+      return null;
+    }
 
     return {
       apiUrl,
@@ -169,15 +190,11 @@ export class StewardService extends Service {
         settings.proxyRequestSigningSecret ??
         env.STEWARD_PROXY_REQUEST_SIGNING_SECRET ??
         env.STEWARD_PROXY_REQUEST_SIGNING_SECRETS?.split(",")[0]?.trim(),
-      apiKey: settings.apiKey ?? env.STEWARD_API_KEY,
-      bearerToken: settings.bearerToken ?? env.STEWARD_JWT,
-      agentId: settings.agentId ?? env.STEWARD_AGENT_ID ?? runtimeState.agentId ?? "default",
-      tenantId: settings.tenantId ?? env.STEWARD_TENANT_ID,
-      autoRegister: settings.autoRegister ?? env.STEWARD_AUTO_REGISTER !== "false",
-      // `fallbackLocal` only gates a single informational log line (see connect()):
-      // it does not itself create or expose a local signing key, so the
-      // historical default of `true` is inert and left as-is.
-      fallbackLocal: settings.fallbackLocal ?? env.STEWARD_FALLBACK_LOCAL !== "false",
+      apiKey,
+      bearerToken,
+      agentId,
+      tenantId,
+      autoRegister,
     };
   }
 
