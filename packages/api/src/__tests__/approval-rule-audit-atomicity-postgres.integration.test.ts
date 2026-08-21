@@ -136,12 +136,14 @@ realPostgres("auto-approval rule audit atomicity (mounted Postgres)", () => {
     });
   }
 
-  function spawnWriter(body: Record<string, unknown>, requestId: string) {
+  function spawnWriter(body: Record<string, unknown>, requestId: string, applicationName: string) {
+    const writerDatabaseUrl = new URL(databaseUrl!);
+    writerDatabaseUrl.searchParams.set("application_name", applicationName);
     return Bun.spawn([process.execPath, fixturePath], {
       cwd: new URL("../../../..", import.meta.url).pathname,
       env: {
         ...process.env,
-        DATABASE_URL: databaseUrl!,
+        DATABASE_URL: writerDatabaseUrl.toString(),
         TEST_TENANT_ID: tenantId,
         TEST_USER_ID: userId,
         TEST_REQUEST_ID: requestId,
@@ -162,17 +164,57 @@ realPostgres("auto-approval rule audit atomicity (mounted Postgres)", () => {
     return JSON.parse(stdout) as WriterResult;
   }
 
-  async function waitForAdvisoryWaiters(minimum: number, message: string): Promise<void> {
+  async function waitForNamedTenantAuditWaiter(
+    applicationName: string,
+    blockerPids: number[],
+    message: string,
+  ): Promise<number> {
     for (let attempt = 0; attempt < 2_000; attempt++) {
-      const [row] = await admin.client<{ count: string }[]>`
-        select count(*)::text as count
-        from pg_stat_activity
-        where datname = current_database() and wait_event = 'advisory'
+      const [row] = await admin.client<{ pid: number; blocker_pids: number[] }[]>`
+        select activity.pid, pg_blocking_pids(activity.pid) as blocker_pids
+        from pg_stat_activity activity
+        join pg_locks lock on lock.pid = activity.pid
+        where activity.datname = current_database()
+          and activity.application_name = ${applicationName}
+          and activity.wait_event = 'advisory'
+          and lock.locktype = 'advisory'
+          and not lock.granted
+          and lock.classid::bigint =
+            ((hashtextextended(${`steward_audit_${tenantId}`}, 0) >> 32) & 4294967295)
+          and lock.objid::bigint =
+            (hashtextextended(${`steward_audit_${tenantId}`}, 0) & 4294967295)
+          and lock.objsubid = 1
       `;
-      if (Number(row?.count ?? "0") >= minimum) return;
+      if (row && blockerPids.some((pid) => row.blocker_pids.includes(pid))) return row.pid;
       if (attempt === 1_999) throw new Error(message);
       await Bun.sleep(10);
     }
+    throw new Error(message);
+  }
+
+  async function waitForExactBigintAdvisoryWaiter(
+    gateKey: number,
+    blockerPid: number,
+    message: string,
+  ): Promise<number> {
+    for (let attempt = 0; attempt < 2_000; attempt++) {
+      const [row] = await admin.client<{ pid: number; blocker_pids: number[] }[]>`
+        select activity.pid, pg_blocking_pids(activity.pid) as blocker_pids
+        from pg_stat_activity activity
+        join pg_locks lock on lock.pid = activity.pid
+        where activity.datname = current_database()
+          and activity.wait_event = 'advisory'
+          and lock.locktype = 'advisory'
+          and not lock.granted
+          and lock.classid::bigint = ((${gateKey}::bigint >> 32) & 4294967295)
+          and lock.objid::bigint = (${gateKey}::bigint & 4294967295)
+          and lock.objsubid = 1
+      `;
+      if (row?.blocker_pids.includes(blockerPid)) return row.pid;
+      if (attempt === 1_999) throw new Error(message);
+      await Bun.sleep(10);
+    }
+    throw new Error(message);
   }
 
   async function installBlockingAuditFailure(input: {
@@ -222,6 +264,14 @@ realPostgres("auto-approval rule audit atomicity (mounted Postgres)", () => {
 
   async function lockTenantAudit(locker: Awaited<ReturnType<typeof admin.client.reserve>>) {
     await locker`select pg_advisory_lock(hashtextextended(${`steward_audit_${tenantId}`}, 0))`;
+  }
+
+  async function backendPid(
+    connection: Awaited<ReturnType<typeof admin.client.reserve>>,
+  ): Promise<number> {
+    const [row] = await connection<{ pid: number }[]>`select pg_backend_pid() as pid`;
+    if (!row) throw new Error("reserved Postgres connection has no backend PID");
+    return row.pid;
   }
 
   async function unlockTenantAudit(locker: Awaited<ReturnType<typeof admin.client.reserve>>) {
@@ -299,15 +349,34 @@ realPostgres("auto-approval rule audit atomicity (mounted Postgres)", () => {
   test("successful create-vs-create pairs authoritative authorization and completion audits", async () => {
     const firstRequestId = `create-pair-a-${suffix}`;
     const secondRequestId = `create-pair-b-${suffix}`;
+    const firstApplicationName = `approval-rule-create-a-${suffix}`;
+    const secondApplicationName = `approval-rule-create-b-${suffix}`;
     const locker = await admin.client.reserve();
     let locked = false;
     try {
       await lockTenantAudit(locker);
       locked = true;
-      const firstWriter = spawnWriter({ maxAmountWei: "111" }, firstRequestId);
-      await waitForAdvisoryWaiters(1, "first create did not reach the tenant audit lock");
-      const secondWriter = spawnWriter({ maxAmountWei: "222" }, secondRequestId);
-      await waitForAdvisoryWaiters(2, "second create did not reach the tenant audit lock");
+      const lockerPid = await backendPid(locker);
+      const firstWriter = spawnWriter(
+        { maxAmountWei: "111" },
+        firstRequestId,
+        firstApplicationName,
+      );
+      const firstWriterPid = await waitForNamedTenantAuditWaiter(
+        firstApplicationName,
+        [lockerPid],
+        "first create did not reach the tenant audit lock behind its holder",
+      );
+      const secondWriter = spawnWriter(
+        { maxAmountWei: "222" },
+        secondRequestId,
+        secondApplicationName,
+      );
+      await waitForNamedTenantAuditWaiter(
+        secondApplicationName,
+        [lockerPid, firstWriterPid],
+        "second create did not reach the tenant audit lock behind the holder or first writer",
+      );
       await unlockTenantAudit(locker);
       locked = false;
 
@@ -352,15 +421,30 @@ realPostgres("auto-approval rule audit atomicity (mounted Postgres)", () => {
       .returning();
     const firstRequestId = `update-pair-a-${suffix}`;
     const secondRequestId = `update-pair-b-${suffix}`;
+    const firstApplicationName = `approval-rule-update-a-${suffix}`;
+    const secondApplicationName = `approval-rule-update-b-${suffix}`;
     const locker = await admin.client.reserve();
     let locked = false;
     try {
       await lockTenantAudit(locker);
       locked = true;
-      const firstWriter = spawnWriter({ maxAmountWei: "111" }, firstRequestId);
-      await waitForAdvisoryWaiters(1, "first update did not reach the tenant audit lock");
-      const secondWriter = spawnWriter({ enabled: false }, secondRequestId);
-      await waitForAdvisoryWaiters(2, "second update did not reach the tenant audit lock");
+      const lockerPid = await backendPid(locker);
+      const firstWriter = spawnWriter(
+        { maxAmountWei: "111" },
+        firstRequestId,
+        firstApplicationName,
+      );
+      const firstWriterPid = await waitForNamedTenantAuditWaiter(
+        firstApplicationName,
+        [lockerPid],
+        "first update did not reach the tenant audit lock behind its holder",
+      );
+      const secondWriter = spawnWriter({ enabled: false }, secondRequestId, secondApplicationName);
+      await waitForNamedTenantAuditWaiter(
+        secondApplicationName,
+        [lockerPid, firstWriterPid],
+        "second update did not reach the tenant audit lock behind the holder or first writer",
+      );
       await unlockTenantAudit(locker);
       locked = false;
 
@@ -404,6 +488,7 @@ realPostgres("auto-approval rule audit atomicity (mounted Postgres)", () => {
     const successRequestId = `create-success-${suffix}`;
     const gateKey = Number.parseInt(suffix.slice(0, 12), 16);
     const triggerName = `fail_rule_create_${suffix}`;
+    const writerApplicationName = `approval-rule-create-winner-${suffix}`;
     const locker = await admin.client.reserve();
     let gateLocked = false;
     try {
@@ -415,11 +500,20 @@ realPostgres("auto-approval rule audit atomicity (mounted Postgres)", () => {
       });
       await locker`select pg_advisory_lock(${gateKey})`;
       gateLocked = true;
+      const lockerPid = await backendPid(locker);
 
       const failedRequest = putRule({ maxAmountWei: "111" }, failRequestId);
-      await waitForAdvisoryWaiters(1, "failed create did not reach its audit gate");
-      const writer = spawnWriter({ maxAmountWei: "222" }, successRequestId);
-      await waitForAdvisoryWaiters(2, "concurrent create did not reach the tenant audit lock");
+      const failedRequestPid = await waitForExactBigintAdvisoryWaiter(
+        gateKey,
+        lockerPid,
+        "failed create did not reach its exact audit gate behind the gate holder",
+      );
+      const writer = spawnWriter({ maxAmountWei: "222" }, successRequestId, writerApplicationName);
+      await waitForNamedTenantAuditWaiter(
+        writerApplicationName,
+        [failedRequestPid],
+        "concurrent create did not reach the tenant audit lock behind the failed writer",
+      );
       await locker`select pg_advisory_unlock(${gateKey})`;
       gateLocked = false;
 
@@ -462,6 +556,7 @@ realPostgres("auto-approval rule audit atomicity (mounted Postgres)", () => {
     const successRequestId = `update-success-${suffix}`;
     const gateKey = Number.parseInt(suffix.slice(12, 24), 16);
     const triggerName = `fail_rule_update_${suffix}`;
+    const writerApplicationName = `approval-rule-update-winner-${suffix}`;
     const locker = await admin.client.reserve();
     let gateLocked = false;
     try {
@@ -473,11 +568,20 @@ realPostgres("auto-approval rule audit atomicity (mounted Postgres)", () => {
       });
       await locker`select pg_advisory_lock(${gateKey})`;
       gateLocked = true;
+      const lockerPid = await backendPid(locker);
 
       const failedRequest = putRule({ maxAmountWei: "999" }, failRequestId);
-      await waitForAdvisoryWaiters(1, "failed update did not reach its audit gate");
-      const writer = spawnWriter({ enabled: false }, successRequestId);
-      await waitForAdvisoryWaiters(2, "concurrent update did not reach the tenant audit lock");
+      const failedRequestPid = await waitForExactBigintAdvisoryWaiter(
+        gateKey,
+        lockerPid,
+        "failed update did not reach its exact audit gate behind the gate holder",
+      );
+      const writer = spawnWriter({ enabled: false }, successRequestId, writerApplicationName);
+      await waitForNamedTenantAuditWaiter(
+        writerApplicationName,
+        [failedRequestPid],
+        "concurrent update did not reach the tenant audit lock behind the failed writer",
+      );
       await locker`select pg_advisory_unlock(${gateKey})`;
       gateLocked = false;
 
