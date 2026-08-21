@@ -37,6 +37,49 @@ describe("published Docker runtime network contract", () => {
   });
 });
 
+function readRepositoryFile(...segments: string[]): string {
+  return readFileSync(join(ROOT_DIR, ...segments), "utf8");
+}
+
+describe("#778 self-hosting JWT secret boundary", () => {
+  const guide = readRepositoryFile("docs", "guides", "self-hosting.mdx");
+
+  test("non-embedded production requires a dedicated high-entropy JWT secret", () => {
+    expect(guide).toContain("For non-embedded production, `STEWARD_JWT_SECRET` is required");
+    expect(guide).toContain("at least 32 high-entropy characters");
+    expect(guide).toContain("Keep it separate from\n`STEWARD_MASTER_PASSWORD`");
+    expect(guide).toContain("only in embedded/local development mode");
+    expect(guide).toContain("production fails closed");
+    expect(guide).not.toContain("Defaults to master password if not set");
+  });
+
+  test("the example generates rather than publishing a short literal secret", () => {
+    expect(guide).toContain("openssl rand -hex 32");
+    expect(guide).toContain("STEWARD_JWT_SECRET=<paste-64-character-hex-output-here>");
+    expect(guide).not.toContain("STEWARD_JWT_SECRET=separate-jwt-signing-key");
+  });
+});
+
+describe("#783 active deployment guides use the API runtime's canonical port variable", () => {
+  const apiEntry = readRepositoryFile("packages", "api", "src", "index.ts");
+  const activeGuides = [
+    "docs/guides/self-hosting.mdx",
+    "docs/guides/docker.mdx",
+    "docs/guides/cloud-deployment.mdx",
+  ].map((path) => [path, readRepositoryFile(...path.split("/"))] as const);
+
+  test("the API runtime declares PORT=3200 as its default", () => {
+    expect(apiEntry).toContain('process.env.PORT || "3200"');
+  });
+
+  for (const [path, guide] of activeGuides) {
+    test(`${path} configures PORT=3200 and never advertises STEWARD_PORT`, () => {
+      expect(guide).toMatch(/\bPORT(?:=|:\s*["']?)3200/);
+      expect(guide).not.toContain("STEWARD_PORT");
+    });
+  }
+});
+
 /**
  * Extract the `steward-proxy:` service block from the compose file (everything
  * from the `steward-proxy:` key up to the next top-level service or section).
