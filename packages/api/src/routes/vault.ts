@@ -4574,7 +4574,11 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
         const isSolanaTokenTransfer =
           transferPayload !== null && transferPayload.token !== "native";
         const checkpoint = approvedSolanaExecutionToken
-          ? (prepared: { signature: string; recentBlockhash: string }) =>
+          ? (prepared: {
+              signature: string;
+              recentBlockhash: string;
+              blockhashKind: "recent" | "durable_nonce" | "unknown";
+            }) =>
               checkpointSolanaBroadcastSubmission(
                 txId,
                 agentId,
