@@ -10865,7 +10865,11 @@ function parseOAuthRedirectUri(redirectUri: string): URL {
   }
 
   if (redirectUrl.protocol === "http:") {
-    const host = redirectUrl.hostname.toLowerCase();
+    const serializedHost = redirectUrl.hostname.toLowerCase();
+    const host =
+      serializedHost.startsWith("[") && serializedHost.endsWith("]")
+        ? serializedHost.slice(1, -1)
+        : serializedHost;
     const isLoopback = host === "localhost" || host === "127.0.0.1" || host === "::1";
     if (!isLoopback) {
       throw new Error("redirect_uri must use https except for loopback development origins");
