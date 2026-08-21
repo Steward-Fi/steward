@@ -21,7 +21,9 @@ type CacheEntry = {
 };
 
 const JWKS_CACHE_MS = 5 * 60 * 1000;
+const JWKS_MISS_REFRESH_MIN_INTERVAL_MS = 10 * 1000;
 const AGENT_TOKEN_EXPIRING_THRESHOLD_SECONDS = 5 * 60;
+const MAX_IAT_CLOCK_SKEW_SECONDS = 60;
 // Dev convenience trust anchor. SEC-069: only honored behind an explicit
 // opt-in (STEWARD_ALLOW_DEFAULT_ELIZA_JWKS=true) outside production — domain
 // takeover/compromise of this host would otherwise silently become a minting
@@ -31,6 +33,7 @@ const DEFAULT_ELIZA_CLOUD_JWKS_URL = "https://milady.shad0w.xyz/.well-known/jwks
 const TRADE_ORDER_SCOPE = "trade:order";
 
 let jwksCache: CacheEntry | null = null;
+let lastJwksMissRefreshAt = 0;
 
 function invalid(c: Context, reason: string, status: 401 = 401) {
   return c.json({ code: "invalid-jwt", reason }, status);
@@ -53,10 +56,12 @@ function resolveJwksUrl(): string {
   throw new Error("jwks-url-required");
 }
 
-async function loadJwks(): Promise<Map<string, Awaited<ReturnType<typeof importJWK>>>> {
+async function loadJwks(
+  forceRefresh = false,
+): Promise<Map<string, Awaited<ReturnType<typeof importJWK>>>> {
   const jwksUrl = resolveJwksUrl();
   const now = Date.now();
-  if (jwksCache && jwksCache.expiresAt > now) return jwksCache.keys;
+  if (!forceRefresh && jwksCache && jwksCache.expiresAt > now) return jwksCache.keys;
 
   const response = await fetch(jwksUrl, {
     headers: { accept: "application/json" },
@@ -276,8 +281,22 @@ export async function authenticateAgentJwt(
   if (header.alg !== "RS256") return { kind: "invalid-token", reason: "unsupported alg" };
 
   try {
-    const keys = await loadJwks();
-    const key = keys.get(header.kid);
+    const hadFreshCache = Boolean(jwksCache && jwksCache.expiresAt > Date.now());
+    let keys = await loadJwks();
+    let key = keys.get(header.kid);
+    // Issuers can publish a rotated kid before this process's cache expires.
+    // Refresh exactly once on a miss so rotation is prompt while an actually
+    // unknown kid remains fail-closed.
+    const now = Date.now();
+    if (
+      !key &&
+      hadFreshCache &&
+      now - lastJwksMissRefreshAt >= JWKS_MISS_REFRESH_MIN_INTERVAL_MS
+    ) {
+      lastJwksMissRefreshAt = now;
+      keys = await loadJwks(true);
+      key = keys.get(header.kid);
+    }
     if (!key) return { kind: "invalid-token", reason: "unknown kid" };
 
     const { payload } = await jwtVerify(token, key, {
@@ -288,6 +307,13 @@ export async function authenticateAgentJwt(
     const agentId = agentIdFromPayload(payload);
     if (!agentId) return { kind: "invalid-token", reason: "invalid agent claims" };
     const scopes = stringArrayClaim(payload, "scopes", "scope");
+    if (scopes.some((scope) => scope.startsWith("cap:"))) {
+      return { kind: "invalid-token", reason: "unsupported capability scope" };
+    }
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    if (typeof payload.iat === "number" && payload.iat > nowSeconds + MAX_IAT_CLOCK_SKEW_SECONDS) {
+      return { kind: "invalid-token", reason: "token issued in the future" };
+    }
 
     const tenantId = c.req.header("X-Steward-Tenant") || DEFAULT_TENANT_ID;
     // Tenant binding: when the token DOES carry a tenant claim it MUST match the
@@ -335,6 +361,12 @@ export async function authenticateAgentJwt(
     if (error instanceof errors.JWTExpired) {
       observeExpiredAgentToken(c, token);
       return { kind: "token-expired", reason: "token expired" };
+    }
+    if (error instanceof errors.JWTClaimValidationFailed) {
+      if (error.claim === "iss") return { kind: "invalid-token", reason: "invalid issuer" };
+      if (error.claim === "aud") return { kind: "invalid-token", reason: "invalid audience" };
+      if (error.claim === "nbf") return { kind: "invalid-token", reason: "token not active" };
+      return { kind: "invalid-token", reason: "invalid token claims" };
     }
     const reason = error instanceof Error ? error.message : "verification failed";
     return { kind: "invalid-token", reason };
@@ -469,4 +501,5 @@ export async function requireProviderAgentJwt(c: Context<{ Variables: AppVariabl
 
 export function clearAgentJwksCacheForTests() {
   jwksCache = null;
+  lastJwksMissRefreshAt = 0;
 }
