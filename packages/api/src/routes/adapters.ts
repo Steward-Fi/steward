@@ -39,6 +39,7 @@ import {
   perOrderCapEvaluator,
 } from "@stwd/policy-engine";
 import { redactedThrownDiagnostics } from "@stwd/shared";
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 import { and, eq } from "drizzle-orm";
 import { type Context, Hono } from "hono";
 import { z } from "zod";
@@ -375,8 +376,8 @@ async function enforceFundMovingPolicy(
 
 /** Per-request spend caps. Configurable via env; conservative defaults. */
 function spendCaps(): { perOrderCapUsd: number; dailyCapUsd: number } {
-  const perOrder = Number(process.env.STEWARD_ADAPTER_PER_OP_CAP_USD);
-  const daily = Number(process.env.STEWARD_ADAPTER_DAILY_CAP_USD);
+  const perOrder = Number(runtimeEnvironmentValue("STEWARD_ADAPTER_PER_OP_CAP_USD"));
+  const daily = Number(runtimeEnvironmentValue("STEWARD_ADAPTER_DAILY_CAP_USD"));
   return {
     perOrderCapUsd: Number.isFinite(perOrder) && perOrder > 0 ? perOrder : 10_000,
     dailyCapUsd: Number.isFinite(daily) && daily > 0 ? daily : 50_000,
