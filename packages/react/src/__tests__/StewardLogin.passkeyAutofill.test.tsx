@@ -23,164 +23,53 @@
  *      login with the typed email.
  */
 
-import { beforeEach, describe, expect, mock, test } from "bun:test";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
-import { Window } from "happy-dom";
-import * as React from "react";
-import { createRoot, type Root } from "react-dom/client";
-import { Simulate } from "react-dom/test-utils";
+import { beforeAll, describe, expect, test } from "bun:test";
 
-const window = new Window();
-Object.assign(globalThis, {
-  window,
-  document: window.document,
-  navigator: window.navigator,
-  HTMLElement: window.HTMLElement,
-  HTMLInputElement: window.HTMLInputElement,
-  HTMLButtonElement: window.HTMLButtonElement,
-  Event: window.Event,
-  KeyboardEvent: window.KeyboardEvent,
-  MouseEvent: window.MouseEvent,
-  IS_REACT_ACT_ENVIRONMENT: true,
-});
-
-// Spy on navigator.credentials.get so any conditional-mediation request
-// issued by the component (mount-time or type-time) is detected.
-const credentialsGet = mock(async (..._args: unknown[]) => {
-  throw new Error("navigator.credentials.get must not be called by StewardLogin");
-});
-Object.defineProperty(window.navigator, "credentials", {
-  value: { get: credentialsGet, create: mock(async () => null) },
-  configurable: true,
-});
-
-const { StewardLogin } = await import("../components/StewardLogin.js");
-const { StewardAuthContext } = await import("../provider.js");
-const { registerEvmWalletPanel, registerSolanaWalletPanel } = await import(
-  "../internal/walletPanelRegistry.js"
-);
-
-const loginSource = readFileSync(
-  join(import.meta.dir, "..", "components", "StewardLogin.tsx"),
-  "utf8",
-);
-
-const dummyPanel: React.ComponentType<unknown> = () => null;
-registerEvmWalletPanel({ load: async () => ({ default: dummyPanel }) });
-registerSolanaWalletPanel({ load: async () => ({ default: dummyPanel }) });
-
-const signInWithPasskey = mock(async (_email: string) => ({}));
-
-function baseCtx() {
-  return {
-    isAuthenticated: false,
-    isLoading: false,
-    user: null,
-    session: null,
-    providers: { google: true },
-    isProvidersLoading: false,
-    guestState: { isGuest: false, isExpired: false, expiryMessage: null },
-    signOut: () => {},
-    signInAsGuest: async () => ({}),
-    upgradeGuestWithEmail: async () => ({}),
-    deleteGuest: async () => ({}),
-    getToken: () => null,
-    signInWithPasskey,
-    signInWithEmail: async () => ({}),
-    sendSmsOtp: async () => ({}),
-    verifySmsOtp: async () => ({}),
-    sendWhatsAppOtp: async () => ({}),
-    verifyWhatsAppOtp: async () => ({}),
-    verifyEmailCallback: async () => ({}),
-    signInWithSIWE: async () => ({}),
-    signInWithSolana: async () => ({}),
-    signInWithOAuth: async () => ({}),
-    signInWithTelegram: async () => ({}),
-    signInWithFarcaster: async () => ({}),
-    activeTenantId: null,
-    tenants: null,
-    isTenantsLoading: false,
-    listTenants: async () => [],
-    switchTenant: async () => {},
-    joinTenant: async () => {},
-    leaveTenant: async () => {},
-  };
+interface MountedPasskeyProbe {
+  autocomplete: string | null;
+  credentialsCallsAfterMount: number;
+  credentialsCallsAfterTyping: number;
+  passkeyCallsAfterTyping: string[];
+  passkeyCallsAfterClick: string[];
 }
 
-let container: HTMLDivElement;
-let root: Root | null = null;
+let probe: MountedPasskeyProbe;
 
-async function renderLogin(): Promise<void> {
-  if (root) {
-    await React.act(async () => root?.unmount());
-    root = null;
+beforeAll(async () => {
+  // The mounted probe needs happy-dom and react-dom/client. Run it in a child
+  // process so those browser globals and module-cache choices cannot mutate
+  // the rest of the package's SSR-oriented test process.
+  const fixture = new URL("./fixtures/passkey-autofill-mounted.tsx", import.meta.url).pathname;
+  const child = Bun.spawn(["bun", fixture], {
+    cwd: new URL("../..", import.meta.url).pathname,
+    stdout: "pipe",
+    stderr: "pipe",
+    env: process.env,
+  });
+  const [stdout, stderr, code] = await Promise.all([
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+    child.exited,
+  ]);
+  if (code !== 0) {
+    throw new Error(`mounted passkey probe failed (${code}):\n${stderr || stdout}`);
   }
-  container = window.document.createElement("div") as unknown as HTMLDivElement;
-  window.document.body.replaceChildren(container as unknown as Node);
-  root = createRoot(container);
-  await React.act(async () => {
-    root?.render(
-      React.createElement(
-        StewardAuthContext.Provider,
-        { value: baseCtx() as unknown as React.ContextType<typeof StewardAuthContext> },
-        React.createElement(StewardLogin, {}),
-      ),
-    );
-  });
-}
-
-function emailInput(): HTMLInputElement {
-  const input = container.querySelector('input[aria-label="email"]');
-  if (!input) throw new Error("email input not found");
-  return input as unknown as HTMLInputElement;
-}
-
-async function typeEmail(value: string): Promise<void> {
-  const input = emailInput();
-  await React.act(async () => {
-    // happy-dom events don't traverse React 18's synthetic event plumbing
-    // for controlled inputs, so drive onChange via Simulate (deterministic
-    // and version-pinned alongside react-dom in this workspace).
-    (input as unknown as { value: string }).value = value;
-    Simulate.change(input as unknown as Element);
-  });
-}
-
-beforeEach(async () => {
-  credentialsGet.mockClear();
-  signInWithPasskey.mockClear();
-  signInWithPasskey.mockImplementation(async () => ({}));
-  await renderLogin();
+  probe = JSON.parse(stdout.trim()) as MountedPasskeyProbe;
 });
 
 describe("passkey conditional-mediation autofill regression", () => {
   test("email input does not carry the webauthn autofill token", () => {
-    const attr = (emailInput() as unknown as Element).getAttribute("autocomplete");
-    expect(attr).toBe("email");
-    expect(attr).not.toContain("webauthn");
-    // Source-level lock: the token must not come back in any casing/order.
-    expect(loginSource).not.toMatch(/autoComplete\s*=\s*"[^"]*webauthn[^"]*"/);
+    expect(probe.autocomplete).toBe("email");
+    expect(probe.autocomplete).not.toContain("webauthn");
   });
 
-  test("no conditional-mediation credentials.get() on mount or while typing a new email", async () => {
-    expect(credentialsGet).toHaveBeenCalledTimes(0);
-    await typeEmail("brand-new-user@example.com");
-    expect(credentialsGet).toHaveBeenCalledTimes(0);
-    // No passkey flow started implicitly either.
-    expect(signInWithPasskey).toHaveBeenCalledTimes(0);
+  test("no conditional-mediation credentials.get() on mount or while typing a new email", () => {
+    expect(probe.credentialsCallsAfterMount).toBe(0);
+    expect(probe.credentialsCallsAfterTyping).toBe(0);
+    expect(probe.passkeyCallsAfterTyping).toEqual([]);
   });
 
-  test("explicit passkey button still initiates email-scoped passkey login", async () => {
-    await typeEmail("brand-new-user@example.com");
-    const btn = [...container.querySelectorAll("button")].find(
-      (b) => b.textContent?.trim() === "passkey",
-    );
-    if (!btn) throw new Error("passkey button not found");
-    await React.act(async () => {
-      (btn as unknown as Element).dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
-    });
-    expect(signInWithPasskey).toHaveBeenCalledTimes(1);
-    expect(signInWithPasskey).toHaveBeenCalledWith("brand-new-user@example.com");
+  test("explicit passkey button still initiates email-scoped passkey login", () => {
+    expect(probe.passkeyCallsAfterClick).toEqual(["brand-new-user@example.com"]);
   });
 });
