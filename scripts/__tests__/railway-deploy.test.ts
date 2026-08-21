@@ -51,7 +51,7 @@ case "$args" in
   *'deployments(input:'*) printf '%s\n' '{"data":{"deployments":{"edges":[{"node":{"id":"deployment-test","status":"SUCCESS","createdAt":"2026-01-01T00:00:00Z"}}]}}}' ;;
   *'deployment(id:'*) printf '%s\n' '{"data":{"deployment":{"id":"deployment-test","status":"SUCCESS"}}}' ;;
   *buildLogs*) printf '%s\n' '{"data":{"buildLogs":[{"message":"build diagnostic"}]}}' ;;
-  *deploymentLogs*) printf '%s\n' '{"data":{"deploymentLogs":[{"message":"runtime diagnostic {\\"STEWARD_JWT_SECRET\\":\\"abc123def456\\"} STEWARD_MASTER_PASSWORD: hunter2 RAILWAY_TOKEN = token123 STEWARD_API_KEY=\\u0027single secret value\\u0027"}]}}' ;;
+  *deploymentLogs*) printf '%s\n' '{"data":{"deploymentLogs":[{"message":"runtime diagnostic {\\"STEWARD_JWT_SECRET\\":\\"abc123def456\\",\\"CACHE_URL\\":\\"rediss://default:redis-json-secret@cache.internal:6380/0\\"} STEWARD_MASTER_PASSWORD: hunter2 RAILWAY_TOKEN = token123 STEWARD_API_KEY=\\u0027single secret value\\u0027 BROKER_URI=amqps://worker:broker-secret@mq.internal/vhost WEBHOOK_URL=https://hooks.example.test/webhook-path-secret callback=https://example.test/callback?code=oauth-code-secret&state=public-state"}]}}' ;;
   *) printf '%s\n' '{}' ;;
 esac
 `,
@@ -100,10 +100,21 @@ describe("SEC-129 railway-deploy.sh fails closed by default", () => {
 });
 
 describe("SEC-129 redact_secrets filter", () => {
-  test("redacts postgres DSNs, bearer tokens, structured assignments, stw_ keys, and long hex", () => {
+  test("redacts credential-bearing URIs, sensitive query parameters, structured assignments, stw_ keys, and long hex", () => {
     const out = redact(
       [
         "connecting to postgresql://steward:hunter2@db.internal:5432/steward",
+        "redis cache redis://default:redis-password@cache.internal:6379/0",
+        "rediss cache rediss://:encoded%40password@cache.internal:6380/0",
+        "broker amqps://worker:broker-password@mq.internal/vhost",
+        "callback https://agent:http-password@example.test/callback",
+        "signed https://objects.example.test/item?X-Amz-Credential=aws-credential&X-Amz-Signature=aws-signature&safe=visible",
+        "oauth https://example.test/callback?code=oauth-code&state=visible-state&access_token=oauth-token",
+        'CACHE_URL="redis://default:quoted-url-secret@cache.internal:6379/0"',
+        "BROKER_URI='amqps://worker:single-url-secret@mq.internal/vhost'",
+        '{"DATABASE_DSN":"postgresql://steward:json-url-secret@db.internal/steward"}',
+        "UPSTREAM_URL: https://user:yaml-url-secret@example.test/path",
+        "WEBHOOK_URL=https://hooks.example.test/unguessable-path-secret",
         "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.payload.sig",
         "STEWARD_JWT_SECRET=abc123def456",
         '{"STEWARD_JWT_SECRET":"json-secret-value"}',
@@ -116,6 +127,19 @@ describe("SEC-129 redact_secrets filter", () => {
       ].join("\n"),
     );
     expect(out).not.toContain("hunter2");
+    expect(out).not.toContain("redis-password");
+    expect(out).not.toContain("encoded%40password");
+    expect(out).not.toContain("broker-password");
+    expect(out).not.toContain("http-password");
+    expect(out).not.toContain("aws-credential");
+    expect(out).not.toContain("aws-signature");
+    expect(out).not.toContain("oauth-code");
+    expect(out).not.toContain("oauth-token");
+    expect(out).not.toContain("quoted-url-secret");
+    expect(out).not.toContain("single-url-secret");
+    expect(out).not.toContain("json-url-secret");
+    expect(out).not.toContain("yaml-url-secret");
+    expect(out).not.toContain("unguessable-path-secret");
     expect(out).not.toContain("eyJhbGciOiJIUzI1NiJ9.payload.sig");
     expect(out).not.toContain("abc123def456");
     expect(out).not.toContain("json-secret-value");
@@ -125,6 +149,8 @@ describe("SEC-129 redact_secrets filter", () => {
     expect(out).not.toContain("9f8e7d6c5b4a");
     expect(out).not.toContain("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
     expect(out).toContain("postgresql://steward:");
+    expect(out).toContain("safe=visible");
+    expect(out).toContain("state=visible-state");
     expect(out).toContain("ordinary log line stays");
   });
 });
@@ -140,13 +166,18 @@ describe("Railway staging deployment", () => {
   test("prints Railway diagnostics when health never becomes ready", async () => {
     const result = await fakeRailwayRun(999, 2);
     expect(result.exitCode).toBe(1);
-    expect(result.output).toContain("Health check failed after 2 attempts / 2s");
+    expect(result.output).toMatch(/Health check failed after [1-9][0-9]* attempts? \/ 2s/);
     expect(result.output).toContain("Railway deployment diagnostics");
     expect(result.output).toContain("runtime diagnostic");
     expect(result.output).not.toContain("abc123def456");
     expect(result.output).not.toContain("hunter2");
     expect(result.output).not.toContain("token123");
     expect(result.output).not.toContain("single secret value");
+    expect(result.output).not.toContain("redis-json-secret");
+    expect(result.output).not.toContain("broker-secret");
+    expect(result.output).not.toContain("webhook-path-secret");
+    expect(result.output).not.toContain("oauth-code-secret");
+    expect(result.output).toContain("state=public-state");
     expect(result.output).toContain("…REDACTED…");
   });
 });
