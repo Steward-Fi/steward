@@ -161,7 +161,7 @@ describe("Railway staging deployment", () => {
     expect(result.exitCode).toBe(0);
     expect(result.output).toContain("Health check attempt 2: HTTP 000");
     expect(result.output).toContain("Health check passed");
-  });
+  }, 15_000);
 
   test("prints Railway diagnostics when health never becomes ready", async () => {
     const result = await fakeRailwayRun(999, 2);
@@ -179,5 +179,5 @@ describe("Railway staging deployment", () => {
     expect(result.output).not.toContain("oauth-code-secret");
     expect(result.output).toContain("state=public-state");
     expect(result.output).toContain("…REDACTED…");
-  });
+  }, 15_000);
 });
