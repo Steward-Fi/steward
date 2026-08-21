@@ -102,6 +102,7 @@ import {
   setNoStoreHeaders,
   verifySessionToken,
 } from "../services/context";
+import { resolveRuntimeChainId } from "../services/custody-runtime";
 import {
   publicGasSponsorshipState,
   readTenantGasSponsorshipConfig,
@@ -5102,7 +5103,7 @@ user.post("/me/wallet/sign", async (c) => {
 
   const tenantId = `personal-${userId}`;
   const agentId = wallet.id;
-  const chainId = signBody.chainId ?? parseInt(process.env.CHAIN_ID || "84532", 10);
+  const chainId = signBody.chainId ?? resolveRuntimeChainId(84532);
   let codeResponse: Awaited<ReturnType<Vault["rpcPassthrough"]>>;
   try {
     codeResponse = await vault.rpcPassthrough({

@@ -1,6 +1,8 @@
 import { describe, expect, it } from "bun:test";
 import { withRuntimeEnvironment } from "@stwd/shared/runtime-env";
 import { buildPluginContext } from "../plugin";
+import { isRuntimeVaultRpcMethodAllowed, resolveRuntimeChainId } from "../services/custody-runtime";
+import { resolveEvmReceiptRpcUrl } from "../services/transaction-receipt-poller";
 import {
   _clearConfiguredVaultsForTests,
   getConfiguredKeyStore,
@@ -138,6 +140,27 @@ describe("request-local custody authority", () => {
     expect(changed.solanaPriorityFees).toBe(false);
   });
 
+  it("fails closed on malformed request-local chain defaults", () => {
+    expect(withRuntimeEnvironment({}, () => resolveRuntimeChainId(84532))).toBe(84532);
+    expect(withRuntimeEnvironment({ CHAIN_ID: " 8453 " }, () => resolveRuntimeChainId(84532))).toBe(
+      8453,
+    );
+    for (const malformed of ["1junk", "0", "-1", "1.5", "01", "9007199254740992"]) {
+      expect(() =>
+        withRuntimeEnvironment({ CHAIN_ID: malformed }, () => resolveRuntimeChainId(84532)),
+      ).toThrow(/CHAIN_ID must be/);
+      expect(() =>
+        withRuntimeEnvironment(
+          { ...authorityEnvironment("malformed-chain", SALT_A), CHAIN_ID: malformed },
+          () => resolveCustodyAuthority(),
+        ),
+      ).toThrow(/CHAIN_ID must be/);
+    }
+    expect(() => withRuntimeEnvironment({}, () => resolveRuntimeChainId(0))).toThrow(
+      /CHAIN_ID fallback must be/,
+    );
+  });
+
   it("survives hostile A-suspends, B-runs, A-resumes overlap", async () => {
     _clearConfiguredVaultsForTests();
     let releaseA: (() => void) | undefined;
@@ -149,7 +172,22 @@ describe("request-local custody authority", () => {
       releaseA = resolve;
     });
 
-    const requestA = withRuntimeEnvironment(authorityEnvironment("overlap-a", SALT_A), async () => {
+    const authorityA = {
+      ...authorityEnvironment("overlap-a", SALT_A),
+      CHAIN_ID: "1",
+      RPC_URL: "https://rpc-a.example.invalid",
+      STEWARD_RPC_1: "https://receipt-a.example.invalid",
+      STEWARD_VAULT_RPC_ALLOWLIST: "eth_chainId,eth_aOnly",
+    };
+    const authorityB = {
+      ...authorityEnvironment("overlap-b", SALT_B),
+      CHAIN_ID: "8453",
+      RPC_URL: "https://rpc-b.example.invalid",
+      STEWARD_RPC_8453: "https://receipt-b.example.invalid",
+      STEWARD_VAULT_RPC_ALLOWLIST: "eth_chainId,eth_bOnly",
+    };
+
+    const requestA = withRuntimeEnvironment(authorityA, async () => {
       const before = resolveCustodyAuthority();
       const beforeStore = getConfiguredKeyStore("credential-lease");
       signalAStarted?.();
@@ -158,28 +196,69 @@ describe("request-local custody authority", () => {
         before,
         after: resolveCustodyAuthority(),
         sameStore: beforeStore === getConfiguredKeyStore("credential-lease"),
+        chainId: resolveRuntimeChainId(84532),
+        receiptRpc: resolveEvmReceiptRpcUrl(1),
+        allowsA: isRuntimeVaultRpcMethodAllowed("eth_aOnly"),
+        allowsB: isRuntimeVaultRpcMethodAllowed("eth_bOnly"),
       };
     });
 
     await aStarted;
-    const requestB = await withRuntimeEnvironment(
-      authorityEnvironment("overlap-b", SALT_B),
-      async () => ({
-        authority: resolveCustodyAuthority(),
-        store: getConfiguredKeyStore("credential-lease"),
-      }),
-    );
+    const requestB = await withRuntimeEnvironment(authorityB, async () => ({
+      authority: resolveCustodyAuthority(),
+      store: getConfiguredKeyStore("credential-lease"),
+      chainId: resolveRuntimeChainId(84532),
+      receiptRpc: resolveEvmReceiptRpcUrl(8453),
+      allowsA: isRuntimeVaultRpcMethodAllowed("eth_aOnly"),
+      allowsB: isRuntimeVaultRpcMethodAllowed("eth_bOnly"),
+    }));
     releaseA?.();
     const resumedA = await requestA;
 
     expect(resumedA.after.fingerprint).toBe(resumedA.before.fingerprint);
     expect(resumedA.sameStore).toBe(true);
     expect(resumedA.after.fingerprint).not.toBe(requestB.authority.fingerprint);
+    expect(resumedA.chainId).toBe(1);
+    expect(resumedA.receiptRpc).toBe("https://receipt-a.example.invalid");
+    expect(resumedA.allowsA).toBe(true);
+    expect(resumedA.allowsB).toBe(false);
+    expect(requestB.chainId).toBe(8453);
+    expect(requestB.receiptRpc).toBe("https://receipt-b.example.invalid");
+    expect(requestB.allowsA).toBe(false);
+    expect(requestB.allowsB).toBe(true);
     expect(
-      withRuntimeEnvironment(authorityEnvironment("overlap-a", SALT_A), () =>
-        getConfiguredKeyStore("credential-lease"),
-      ),
+      withRuntimeEnvironment(authorityA, () => getConfiguredKeyStore("credential-lease")),
     ).not.toBe(requestB.store);
+  });
+
+  it("keys Worker AWS custody by explicit request-local credentials and rejects omissions", () => {
+    const base = {
+      ...workerAuthorityEnvironment("aws-authority", SALT_A),
+      STEWARD_KMS_PROVIDER: "aws",
+      STEWARD_KMS_KEY_ID: "test-kms-key",
+      AWS_ACCESS_KEY_ID: "access-a",
+      AWS_SECRET_ACCESS_KEY: "secret-a",
+      AWS_SESSION_TOKEN: "session-a",
+    };
+    const authorityA = withWorkerRuntimeAuthority(base, () => resolveCustodyAuthority());
+    const authorityB = withWorkerRuntimeAuthority(
+      { ...base, AWS_SECRET_ACCESS_KEY: "secret-b", AWS_SESSION_TOKEN: "session-b" },
+      () => resolveCustodyAuthority(),
+    );
+
+    expect(authorityB.fingerprint).not.toBe(authorityA.fingerprint);
+    expect(authorityA.awsAccessKeyId).toBe("access-a");
+    expect(authorityA.awsSessionToken).toBe("session-a");
+    expect(() =>
+      withWorkerRuntimeAuthority(
+        {
+          ...workerAuthorityEnvironment("aws-authority", SALT_A),
+          STEWARD_KMS_PROVIDER: "aws",
+          STEWARD_KMS_KEY_ID: "test-kms-key",
+        },
+        () => resolveCustodyAuthority(),
+      ),
+    ).toThrow(/AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY must be configured together/);
   });
 
   it("keeps an isolate-cached plugin context late-bound to each request", async () => {
