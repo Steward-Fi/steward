@@ -162,11 +162,11 @@ table in future migrations.
 6. Run real-Postgres cross-tenant read/write/upsert/delete/join tests plus
    concurrent pool-reuse and background-job tests against the deployment role.
 
-Create/finalize roles after migration `0112` (the invoking operator needs
-`CREATEROLE` and schema ownership):
+Create/finalize roles after all migrations in the release have applied (the
+invoking operator needs `CREATEROLE` and schema ownership):
 
 ```bash
-psql "$DATABASE_URL" \
+psql "$STEWARD_OPERATOR_DATABASE_URL" \
   -v steward_app_role=steward_app \
   -v steward_migration_role=steward_migrator \
   -v steward_bootstrap_role=steward_bootstrap_owner \
@@ -174,15 +174,28 @@ psql "$DATABASE_URL" \
   -f scripts/postgres/rls-bootstrap.sql
 ```
 
+`STEWARD_OPERATOR_DATABASE_URL` is a CREATEROLE/schema-owner operator credential;
+never point it at the application login and never expose it to the API process.
 The app, platform-authority, and migration roles are separate login identities
 asserted `NOSUPERUSER NOBYPASSRLS`; the migration role owns the application
 relations, while the app cannot inherit or assume either privileged login.
 Supply their credentials through the database provider or `ALTER ROLE` outside
 source control. Set `DATABASE_URL`/`STEWARD_APP_DATABASE_ROLE` to the app login
 and `STEWARD_PLATFORM_DATABASE_URL`/`STEWARD_PLATFORM_DATABASE_ROLE` to the
-platform login. The bootstrap function owner is a non-login `BYPASSRLS` role
+platform login. Keep a separate `STEWARD_MIGRATION_DATABASE_URL` for the
+`steward_migrator` login. The bootstrap function owner is a non-login `BYPASSRLS` role
 with only narrow table privileges. The app loses EXECUTE on destructive global
 functions; only the platform login receives those named grants.
+
+Production API containers must set `SKIP_MIGRATIONS=true`: their `DATABASE_URL`
+is the restricted `steward_app` login and cannot own or create schema objects.
+Run `bun run packages/db/src/migrate.ts` as a separate release job with
+`DATABASE_URL="$STEWARD_MIGRATION_DATABASE_URL"`, wait for it to succeed, rerun
+`rls-bootstrap.sql` with the operator URL, and only then roll out the API.
+Do not grant the migrator membership in the BYPASSRLS bootstrap owner. A future
+migration that must replace a bootstrap-owned function requires a separately
+reviewed operator-mediated ownership handoff; applying it directly as the
+migrator must fail rather than widening that authority boundary.
 
 `bun scripts/generate-rls-policy-manifest.ts` replays the immutable migrations
 and the capabilities plugin migrations, then refreshes the committed exact relation/partition and policy-definition
@@ -197,7 +210,7 @@ After all residual code paths and exact deployment-role tests pass, activate in
 one maintenance transaction:
 
 ```bash
-psql "$DATABASE_URL" \
+psql "$STEWARD_MIGRATION_DATABASE_URL" \
   -v steward_migration_role=steward_migrator \
   -f scripts/postgres/rls-activate.sql
 ```

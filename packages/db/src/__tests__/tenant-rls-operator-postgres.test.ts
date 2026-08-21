@@ -12,6 +12,7 @@ const migrationRole = `steward_migrator_${suffix}`;
 const definerRole = `steward_definer_${suffix}`;
 const platformRole = `steward_platform_${suffix}`;
 const appRolePassword = randomUUID().replaceAll("-", "");
+const migrationRolePassword = randomUUID().replaceAll("-", "");
 const platformRolePassword = randomUUID().replaceAll("-", "");
 
 function databaseUrl(database: string): string {
@@ -34,6 +35,13 @@ function platformDatabaseUrl(): string {
   return url.toString();
 }
 
+function migrationDatabaseUrl(): string {
+  const url = new URL(databaseUrl(databaseName));
+  url.username = migrationRole;
+  url.password = migrationRolePassword;
+  return url.toString();
+}
+
 async function runCommand(command: string[], env: Record<string, string | undefined> = {}) {
   const child = Bun.spawn(command, {
     cwd: new URL("../../../../", import.meta.url).pathname,
@@ -53,7 +61,12 @@ async function runCommand(command: string[], env: Record<string, string | undefi
 }
 
 async function runOperatorScript(name: string, includeRoles = false) {
-  const command = ["psql", "--no-psqlrc", "--dbname", databaseUrl(databaseName)];
+  const command = [
+    "psql",
+    "--no-psqlrc",
+    "--dbname",
+    name === "rls-activate.sql" ? migrationDatabaseUrl() : databaseUrl(databaseName),
+  ];
   if (includeRoles) {
     command.push(
       "-v",
@@ -109,6 +122,7 @@ describeWithPostgres("SEC-169 operator lifecycle on the real Steward schema", ()
 
       await runOperatorScript("rls-bootstrap.sql", true);
       await admin.unsafe(`ALTER ROLE ${appRole} PASSWORD '${appRolePassword}'`);
+      await admin.unsafe(`ALTER ROLE ${migrationRole} PASSWORD '${migrationRolePassword}'`);
       await admin.unsafe(`ALTER ROLE ${platformRole} PASSWORD '${platformRolePassword}'`);
       const roleRows = await db<
         {
@@ -143,6 +157,22 @@ describeWithPostgres("SEC-169 operator lifecycle on the real Steward schema", ()
         rolbypassrls: false,
         rolsuper: false,
       });
+      const appReadinessDb = postgres(appDatabaseUrl(), { max: 1 });
+      try {
+        const [readiness] = await appReadinessDb<{ migration_created_at: number }[]>`
+          SELECT MAX(created_at) AS migration_created_at
+          FROM drizzle.__drizzle_migrations
+        `;
+        expect(Number(readiness?.migration_created_at)).toBeGreaterThan(0);
+        await expect(
+          appReadinessDb`
+            DELETE FROM drizzle.__drizzle_migrations
+            WHERE false
+          `,
+        ).rejects.toThrow(/permission denied/i);
+      } finally {
+        await appReadinessDb.end();
+      }
       const [platformRlsPrivileges] = await db<
         {
           schema_usage: boolean;
@@ -432,7 +462,7 @@ describeWithPostgres("SEC-169 operator lifecycle on the real Steward schema", ()
 
       await runOperatorScript("rls-activate.sql");
       const rerun = await runCommand(["bun", "run", "packages/db/src/migrate.ts"], {
-        DATABASE_URL: databaseUrl(databaseName),
+        DATABASE_URL: migrationDatabaseUrl(),
       });
       expect(rerun).toContain("Already up to date");
     } finally {
