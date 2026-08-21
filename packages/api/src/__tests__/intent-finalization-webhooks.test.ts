@@ -72,9 +72,38 @@ const dispatchWebhookMock = mock(
     return Promise.resolve();
   },
 );
+const enqueueWebhookMock = mock(
+  async (
+    _tx: unknown,
+    tenantId: string,
+    _agentId: string,
+    type: string,
+    payload: Record<string, unknown>,
+  ) => {
+    const intentId = String(payload.intent_id ?? payload.actionId ?? "");
+    webhookCalls.push({
+      type,
+      payload,
+      auditVisible: verifyAuditBeforeDispatch
+        ? getDb()
+            .select({ id: auditEvents.id })
+            .from(auditEvents)
+            .where(
+              and(
+                eq(auditEvents.tenantId, tenantId),
+                eq(auditEvents.action, "intent.executed"),
+                eq(auditEvents.resourceId, intentId),
+              ),
+            )
+            .then((rows) => rows.length === 1)
+        : null,
+    });
+  },
+);
 
 mock.module("../services/webhook-dispatch", () => ({
   dispatchWebhook: dispatchWebhookMock,
+  enqueueWebhookDurablyWithinTx: enqueueWebhookMock,
 }));
 
 async function makeApp(auth: "api-key" | "admin" | "other-admin") {
@@ -212,6 +241,7 @@ beforeEach(() => {
   webhookCalls = [];
   verifyAuditBeforeDispatch = false;
   dispatchWebhookMock.mockClear();
+  enqueueWebhookMock.mockClear();
 });
 
 afterAll(async () => {
@@ -257,7 +287,10 @@ describe("intent finalization webhook hardening", () => {
       expect(response.status).toBe(500);
       const [stored] = await getDb().select().from(intents).where(eq(intents.id, id));
       expect(stored.status).toBe("executing");
-      expect(stored.executionResult).toBeNull();
+      expect(stored.executionResult).toMatchObject({
+        handler: "wallet_action.transfer",
+        actionId: id,
+      });
       expect(webhookCalls).toHaveLength(0);
       const completionAudits = await getDb()
         .select()
@@ -270,6 +303,15 @@ describe("intent finalization webhook hardening", () => {
       );
       await getDb().execute(sql.raw("DROP FUNCTION IF EXISTS fail_intent_executed_audit()"));
     }
+
+    verifyAuditBeforeDispatch = true;
+    const recovered = await executeIntent(id);
+    expect(recovered.status).toBe(200);
+    expect(webhookCalls.map((call) => call.type)).toEqual([
+      "wallet_action.transfer.succeeded",
+      "intent.executed",
+    ]);
+    expect(await Promise.all(webhookCalls.map((call) => call.auditVisible))).toEqual([true, true]);
   });
 
   for (const kind of ["transfer", "send_calls"] as const) {

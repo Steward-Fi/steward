@@ -97,6 +97,82 @@ export async function dispatchWebhookDurably(
   );
 }
 
+/**
+ * Persist deterministic webhook deliveries through a caller-owned transaction
+ * without performing network I/O. The persistent retry worker is the sole
+ * sender for these rows, so an enclosing transaction rollback cannot emit an
+ * externally visible event and a crash after commit remains recoverable.
+ */
+export async function enqueueWebhookDurablyWithinTx(
+  tx: typeof db,
+  tenantId: string,
+  agentId: string,
+  type: DispatchableWebhookEventType,
+  data: Record<string, unknown>,
+  idempotencyKey: string,
+): Promise<void> {
+  const configuredType = toConfiguredWebhookEventType(type);
+  const isPluginEvent = configuredType === null && webhookEventRegistry.has(type);
+  const configs = await tx
+    .select()
+    .from(webhookConfigs)
+    .where(and(eq(webhookConfigs.tenantId, tenantId), eq(webhookConfigs.enabled, true)));
+  const timestamp = new Date();
+
+  for (const config of configs) {
+    const matches = isPluginEvent
+      ? config.events.length === 0 || config.events.includes(type)
+      : configuredType
+        ? acceptsConfiguredWebhookEvent(config.events, configuredType)
+        : config.events.length === 0;
+    if (!matches) continue;
+
+    const signingSecret = decryptWebhookSecret(config.secret);
+    const encryptedSecret = isEncryptedWebhookSecret(config.secret)
+      ? config.secret
+      : encryptWebhookSecret(signingSecret);
+    if (encryptedSecret !== config.secret) {
+      await tx
+        .update(webhookConfigs)
+        .set({ secret: encryptedSecret, updatedAt: new Date() })
+        .where(and(eq(webhookConfigs.id, config.id), eq(webhookConfigs.secret, config.secret)));
+    }
+
+    const eventType = (configuredType ?? type) as WebhookEvent["type"];
+    const deliveryId = deterministicDeliveryId(config.id, eventType, idempotencyKey);
+    const signedAt = Math.floor(timestamp.getTime() / 1000);
+    const event = {
+      type: eventType,
+      tenantId,
+      agentId,
+      data: redactWebhookSecrets(data) as Record<string, unknown>,
+      timestamp,
+      deliveryId,
+      webhookConfigId: config.id,
+      signedAt,
+    };
+    await tx
+      .insert(webhookDeliveries)
+      .values({
+        id: deliveryId,
+        tenantId,
+        webhookConfigId: config.id,
+        agentId,
+        eventType,
+        payload: event as unknown as Record<string, unknown>,
+        url: config.url,
+        secret: encryptedSecret,
+        events: config.events,
+        status: "pending",
+        attempts: 0,
+        maxAttempts: config.maxRetries + 1,
+        nextRetryAt: new Date(),
+      })
+      .onConflictDoNothing()
+      .returning({ id: webhookDeliveries.id });
+  }
+}
+
 export async function dispatchTestWebhook(config: {
   id: string;
   tenantId: string;

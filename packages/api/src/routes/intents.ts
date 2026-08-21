@@ -35,7 +35,7 @@ import {
 import { redactSignedTransactions, toIntentResponse } from "../services/intent-response";
 import { getPolicyRulesValidationError } from "../services/policy-validation";
 import { isRecentMfaTimestamp } from "../services/recent-mfa";
-import { dispatchWebhook } from "../services/webhook-dispatch";
+import { dispatchWebhook, enqueueWebhookDurablyWithinTx } from "../services/webhook-dispatch";
 
 export const intentRoutes = new Hono<{ Variables: AppVariables }>();
 
@@ -1093,27 +1093,63 @@ function dispatchIntentWebhook(
   });
 }
 
-function dispatchWalletActionSuccessWebhook(
+async function enqueueIntentSuccessWebhooksWithinTx(
+  tx: typeof db,
   tenantId: string,
   agentId: string | null,
   executionResult: Record<string, unknown>,
+  row: typeof intents.$inferSelect,
 ) {
   if (!agentId) return;
+  const keyPrefix = `intent:${row.id}:executed`;
   if (executionResult.handler === "wallet_action.transfer") {
-    dispatchWebhook(tenantId, agentId, "wallet_action.transfer.succeeded", {
-      actionId: executionResult.actionId,
-      intent_id: executionResult.actionId,
-      txHash: executionResult.txHash,
-      signedTx: executionResult.signedTx ? "[redacted]" : undefined,
-    });
+    await enqueueWebhookDurablyWithinTx(
+      tx,
+      tenantId,
+      agentId,
+      "wallet_action.transfer.succeeded",
+      {
+        actionId: executionResult.actionId,
+        intent_id: executionResult.actionId,
+        txHash: executionResult.txHash,
+        signedTx: executionResult.signedTx ? "[redacted]" : undefined,
+      },
+      `${keyPrefix}:wallet_action.transfer.succeeded`,
+    );
   }
   if (executionResult.handler === "wallet_action.send_calls") {
-    dispatchWebhook(tenantId, agentId, "wallet_action.send_calls.succeeded", {
-      actionId: executionResult.actionId,
-      intent_id: executionResult.actionId,
-      signedCalls: redactSignedTransactions(executionResult.signedCalls),
-    });
+    await enqueueWebhookDurablyWithinTx(
+      tx,
+      tenantId,
+      agentId,
+      "wallet_action.send_calls.succeeded",
+      {
+        actionId: executionResult.actionId,
+        intent_id: executionResult.actionId,
+        signedCalls: redactSignedTransactions(executionResult.signedCalls),
+      },
+      `${keyPrefix}:wallet_action.send_calls.succeeded`,
+    );
   }
+  await enqueueWebhookDurablyWithinTx(
+    tx,
+    tenantId,
+    agentId,
+    "intent.executed",
+    {
+      intent_id: row.id,
+      wallet_id: agentId,
+      action_type: row.intentType,
+      status: row.status,
+      resource_id: row.resourceId,
+      authorization_details: row.authorizationDetails,
+      execution_result: redactSignedTransactions(row.executionResult),
+      rejection_reason: row.rejectionReason,
+      cancellation_reason: row.cancellationReason,
+      failure_reason: row.failureReason,
+    },
+    `${keyPrefix}:intent.executed`,
+  );
 }
 
 class IntentExecutionError extends Error {
@@ -1727,13 +1763,19 @@ async function updateIntentStatus(
       409,
     );
   }
-  if (status === "executed" && existing.status !== "authorized") {
+  const hasExecutionCheckpoint =
+    status === "executed" &&
+    existing.status === "executing" &&
+    existing.executionResult !== null &&
+    typeof existing.executionResult === "object" &&
+    !Array.isArray(existing.executionResult);
+  if (status === "executed" && existing.status !== "authorized" && !hasExecutionCheckpoint) {
     return c.json<ApiResponse>(
       { ok: false, error: "Intent must be authorized before execution" },
       409,
     );
   }
-  if (status === "executed") {
+  if (status === "executed" && !hasExecutionCheckpoint) {
     try {
       await assertIntentAuthorizationBaselineCurrent(existing);
     } catch (error) {
@@ -1762,169 +1804,220 @@ async function updateIntentStatus(
     );
   }
   if (status === "executed") {
-    await writeIntentAudit(c, "intent.execute.authorized", existing.id, {
-      agentId: existing.agentId,
-      intentType: existing.intentType,
-    });
-    const claimedAt = new Date();
-    const [claimedUpdate] = await db
-      .update(intents)
-      .set({
-        status: "executing",
-        updatedAt: claimedAt,
-        executedBy: actorId(c),
-      })
-      .where(
-        and(
-          eq(intents.id, intentId),
-          eq(intents.tenantId, tenantId),
-          eq(intents.status, "authorized"),
-          intentNotExpiredPredicate(),
-        ),
-      )
-      .returning();
-    if (!claimedUpdate) {
-      const [expired] = await db
-        .update(intents)
-        .set({
-          status: "expired",
-          updatedAt: new Date(),
-          expiredAt: new Date(),
-          expiredBy: "system:expires_at",
-        })
-        .where(
-          and(
-            eq(intents.id, intentId),
-            eq(intents.tenantId, tenantId),
-            eq(intents.status, "authorized"),
-            sql`${intents.expiresAt} is not null and ${intents.expiresAt} <= now()`,
-          ),
-        )
-        .returning();
-      if (expired) {
-        await writeIntentAudit(c, "intent.expired", expired.id, {
-          agentId: expired.agentId,
-          intentType: expired.intentType,
-        });
-        dispatchIntentWebhook(tenantId, expired.agentId, "intent.expired", expired);
-        return c.json<ApiResponse>(
-          { ok: false, error: "Intent has expired", data: toIntentResponse(expired) },
-          409,
-        );
-      }
-      return c.json<ApiResponse>({ ok: false, error: "Intent lifecycle conflict" }, 409);
-    }
-    const [claimed] = await db
-      .select()
-      .from(intents)
-      .where(and(eq(intents.id, intentId), eq(intents.tenantId, tenantId)));
-    if (!claimed || claimed.status !== "executing") {
-      return c.json<ApiResponse>({ ok: false, error: "Intent lifecycle conflict" }, 409);
-    }
-
     let executionResult: Record<string, unknown>;
-    try {
-      await assertIntentAuthorizationBaselineCurrent(claimed);
-      executionResult = await executeTypedIntent(claimed);
-    } catch (error) {
-      const failureReason = sanitizeErrorMessage(error);
-      const failedAt = new Date();
-      const [failed] = await db
+    if (hasExecutionCheckpoint) {
+      executionResult = existing.executionResult as Record<string, unknown>;
+    } else {
+      await writeIntentAudit(c, "intent.execute.authorized", existing.id, {
+        agentId: existing.agentId,
+        intentType: existing.intentType,
+      });
+      const claimedAt = new Date();
+      const [claimedUpdate] = await db
         .update(intents)
         .set({
-          status: "failed",
-          updatedAt: failedAt,
-          failedAt,
-          failedBy: actorId(c),
-          failureReason,
-        })
-        .where(
-          and(
-            eq(intents.id, intentId),
-            eq(intents.tenantId, tenantId),
-            eq(intents.status, "executing"),
-          ),
-        )
-        .returning();
-      if (failed) {
-        await writeIntentAudit(c, "intent.failed", failed.id, {
-          agentId: failed.agentId,
-          intentType: failed.intentType,
-          reason: failureReason,
-        });
-        dispatchIntentWebhook(tenantId, failed.agentId, "intent.failed", failed);
-      }
-      if (error instanceof IntentExecutionError) {
-        if (error.status === 403) {
-          return c.json<ApiResponse>({ ok: false, error: error.message }, 403);
-        }
-        if (error.status === 404) {
-          return c.json<ApiResponse>({ ok: false, error: error.message }, 404);
-        }
-        if (error.status === 409) {
-          return c.json<ApiResponse>({ ok: false, error: error.message }, 409);
-        }
-        if (error.status === 429) {
-          return c.json<ApiResponse>({ ok: false, error: error.message }, 429);
-        }
-        if (error.status === 502) {
-          return c.json<ApiResponse>({ ok: false, error: error.message }, 502);
-        }
-        return c.json<ApiResponse>({ ok: false, error: error.message }, 400);
-      }
-      return c.json<ApiResponse>({ ok: false, error: failureReason }, 400);
-    }
-
-    const storedExecutionResult = redactSignedTransactions(executionResult) as Record<
-      string,
-      unknown
-    >;
-    const row = await withTenantAuditedTransaction(tenantId, async (txRaw, appendRequiredAudit) => {
-      const tx = txRaw as typeof db;
-      const now = new Date();
-      const [finalized] = await tx
-        .update(intents)
-        .set({
-          status: "executed",
-          executionResult: storedExecutionResult,
-          updatedAt: now,
-          executedAt: now,
+          status: "executing",
+          updatedAt: claimedAt,
           executedBy: actorId(c),
         })
         .where(
           and(
             eq(intents.id, intentId),
             eq(intents.tenantId, tenantId),
-            eq(intents.status, "executing"),
+            eq(intents.status, "authorized"),
+            intentNotExpiredPredicate(),
           ),
         )
         .returning();
-      if (!finalized) return null;
+      if (!claimedUpdate) {
+        const [expired] = await db
+          .update(intents)
+          .set({
+            status: "expired",
+            updatedAt: new Date(),
+            expiredAt: new Date(),
+            expiredBy: "system:expires_at",
+          })
+          .where(
+            and(
+              eq(intents.id, intentId),
+              eq(intents.tenantId, tenantId),
+              eq(intents.status, "authorized"),
+              sql`${intents.expiresAt} is not null and ${intents.expiresAt} <= now()`,
+            ),
+          )
+          .returning();
+        if (expired) {
+          await writeIntentAudit(c, "intent.expired", expired.id, {
+            agentId: expired.agentId,
+            intentType: expired.intentType,
+          });
+          dispatchIntentWebhook(tenantId, expired.agentId, "intent.expired", expired);
+          return c.json<ApiResponse>(
+            { ok: false, error: "Intent has expired", data: toIntentResponse(expired) },
+            409,
+          );
+        }
+        return c.json<ApiResponse>({ ok: false, error: "Intent lifecycle conflict" }, 409);
+      }
+      const [claimed] = await db
+        .select()
+        .from(intents)
+        .where(and(eq(intents.id, intentId), eq(intents.tenantId, tenantId)));
+      if (!claimed || claimed.status !== "executing") {
+        return c.json<ApiResponse>({ ok: false, error: "Intent lifecycle conflict" }, 409);
+      }
 
-      await appendRequiredAudit({
+      try {
+        await assertIntentAuthorizationBaselineCurrent(claimed);
+        executionResult = await executeTypedIntent(claimed);
+      } catch (error) {
+        const failureReason = sanitizeErrorMessage(error);
+        const failedAt = new Date();
+        const [failed] = await db
+          .update(intents)
+          .set({
+            status: "failed",
+            updatedAt: failedAt,
+            failedAt,
+            failedBy: actorId(c),
+            failureReason,
+          })
+          .where(
+            and(
+              eq(intents.id, intentId),
+              eq(intents.tenantId, tenantId),
+              eq(intents.status, "executing"),
+            ),
+          )
+          .returning();
+        if (failed) {
+          await writeIntentAudit(c, "intent.failed", failed.id, {
+            agentId: failed.agentId,
+            intentType: failed.intentType,
+            reason: failureReason,
+          });
+          dispatchIntentWebhook(tenantId, failed.agentId, "intent.failed", failed);
+        }
+        if (error instanceof IntentExecutionError) {
+          if (error.status === 403) {
+            return c.json<ApiResponse>({ ok: false, error: error.message }, 403);
+          }
+          if (error.status === 404) {
+            return c.json<ApiResponse>({ ok: false, error: error.message }, 404);
+          }
+          if (error.status === 409) {
+            return c.json<ApiResponse>({ ok: false, error: error.message }, 409);
+          }
+          if (error.status === 429) {
+            return c.json<ApiResponse>({ ok: false, error: error.message }, 429);
+          }
+          if (error.status === 502) {
+            return c.json<ApiResponse>({ ok: false, error: error.message }, 502);
+          }
+          return c.json<ApiResponse>({ ok: false, error: error.message }, 400);
+        }
+        return c.json<ApiResponse>({ ok: false, error: failureReason }, 400);
+      }
+
+      const storedCheckpoint = redactSignedTransactions(executionResult) as Record<string, unknown>;
+      const checkpointed = await withTenantAuditedTransaction(
         tenantId,
-        actorType: auditActorType(c),
-        actorId: actorId(c),
-        action: "intent.executed",
-        resourceType: "intent",
-        resourceId: finalized.id,
-        metadata: {
-          agentId: finalized.agentId,
-          intentType: finalized.intentType,
+        async (txRaw, appendRequiredAudit) => {
+          const tx = txRaw as typeof db;
+          const [checkpointed] = await tx
+            .update(intents)
+            .set({ executionResult: storedCheckpoint, updatedAt: new Date() })
+            .where(
+              and(
+                eq(intents.id, intentId),
+                eq(intents.tenantId, tenantId),
+                eq(intents.status, "executing"),
+                sql`${intents.executionResult} is null`,
+              ),
+            )
+            .returning();
+          if (!checkpointed) return false;
+          await appendRequiredAudit({
+            tenantId,
+            actorType: auditActorType(c),
+            actorId: actorId(c),
+            action: "intent.execution.checkpointed",
+            resourceType: "intent",
+            resourceId: checkpointed.id,
+            metadata: { agentId: checkpointed.agentId, intentType: checkpointed.intentType },
+            ipAddress: c.req.header("x-forwarded-for") ?? null,
+            userAgent: c.req.header("user-agent") ?? null,
+            requestId: c.get("requestId") ?? null,
+          });
+          return true;
         },
-        ipAddress: c.req.header("x-forwarded-for") ?? null,
-        userAgent: c.req.header("user-agent") ?? null,
-        requestId: c.get("requestId") ?? null,
+      );
+      if (!checkpointed) {
+        return c.json<ApiResponse>({ ok: false, error: "Intent lifecycle conflict" }, 409);
+      }
+    }
+
+    const storedExecutionResult = redactSignedTransactions(executionResult) as Record<
+      string,
+      unknown
+    >;
+    let row: typeof intents.$inferSelect | null;
+    try {
+      row = await withTenantAuditedTransaction(tenantId, async (txRaw, appendRequiredAudit) => {
+        const tx = txRaw as typeof db;
+        const now = new Date();
+        const [finalized] = await tx
+          .update(intents)
+          .set({
+            status: "executed",
+            executionResult: storedExecutionResult,
+            updatedAt: now,
+            executedAt: now,
+            executedBy: actorId(c),
+          })
+          .where(
+            and(
+              eq(intents.id, intentId),
+              eq(intents.tenantId, tenantId),
+              eq(intents.status, "executing"),
+            ),
+          )
+          .returning();
+        if (!finalized) return null;
+
+        await appendRequiredAudit({
+          tenantId,
+          actorType: auditActorType(c),
+          actorId: actorId(c),
+          action: "intent.executed",
+          resourceType: "intent",
+          resourceId: finalized.id,
+          metadata: {
+            agentId: finalized.agentId,
+            intentType: finalized.intentType,
+          },
+          ipAddress: c.req.header("x-forwarded-for") ?? null,
+          userAgent: c.req.header("user-agent") ?? null,
+          requestId: c.get("requestId") ?? null,
+        });
+        await enqueueIntentSuccessWebhooksWithinTx(
+          tx,
+          tenantId,
+          finalized.agentId,
+          storedExecutionResult,
+          finalized,
+        );
+        return finalized;
       });
-      return finalized;
-    });
+    } catch (error) {
+      console.error("[intents] execution finalization failed", redactedThrownDiagnostics(error));
+      return c.json<ApiResponse>({ ok: false, error: "Intent finalization failed" }, 500);
+    }
     if (!row) return c.json<ApiResponse>({ ok: false, error: "Intent lifecycle conflict" }, 409);
 
-    // External success effects are emitted only after the executed row and its
-    // required tamper-evident audit commit atomically. A failed audit rolls the
-    // status transition back to `executing` and reaches neither webhook.
-    dispatchWalletActionSuccessWebhook(tenantId, row.agentId, executionResult);
-    dispatchIntentWebhook(tenantId, row.agentId, "intent.executed", row);
+    // Network delivery is performed only by the persistent queue after this
+    // transaction commits. Stable delivery ids make recovery/retry idempotent.
     return c.json<ApiResponse>({
       ok: true,
       data: {
