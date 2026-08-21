@@ -198,6 +198,11 @@ WORKDIR /app
 
 ENV NODE_ENV=production
 ENV PORT=3200
+# The application defaults to loopback for safe direct/local execution. A
+# container image must accept traffic from the container network (Railway,
+# Kubernetes, Compose, and similar runtimes), so make the published image's
+# network boundary explicit. Operators can still override this at runtime.
+ENV STEWARD_BIND_HOST=0.0.0.0
 
 # Install production dependencies only (no dev/build tools)
 COPY package.json bun.lock turbo.json tsconfig.json ./
