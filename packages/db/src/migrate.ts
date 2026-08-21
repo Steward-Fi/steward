@@ -22,6 +22,115 @@ interface Journal {
   entries: JournalEntry[];
 }
 
+export interface CoreMigrationLedgerRow {
+  id: number;
+  hash: string;
+  created_at: string | number | null;
+}
+
+interface CoreMigrationDatabaseShape {
+  tenantsExists: boolean;
+  auditEventsExists: boolean;
+  publicRelationCount: number;
+}
+
+/**
+ * Drizzle trusts only the greatest `created_at` in its journal. An unrelated
+ * row with a future timestamp therefore makes every Steward migration appear
+ * applied. Validate the entire ledger against this repository before Drizzle
+ * is allowed to use that cutoff.
+ */
+export function assertCoreMigrationLedgerIntegrity(
+  rows: readonly CoreMigrationLedgerRow[],
+  journal: Journal,
+  database: CoreMigrationDatabaseShape,
+  options: { requireComplete?: boolean } = {},
+): void {
+  const expected = journal.entries.map((entry) => ({
+    ...entry,
+    hash: hashMigration(entry.tag),
+  }));
+  const expectedByIdentity = new Map(
+    expected.map((entry, index) => [`${entry.when}:${entry.hash}`, { entry, index }]),
+  );
+  if (expectedByIdentity.size !== expected.length) {
+    throw new Error("[migrate] Checked-in migration journal contains duplicate identities");
+  }
+
+  const recordedIndices: number[] = [];
+  const recordedIdentities = new Set<string>();
+  for (const row of rows) {
+    const createdAt = Number(row.created_at);
+    if (!Number.isSafeInteger(createdAt) || createdAt < 0 || !row.hash) {
+      throw new Error("[migrate] Core migration journal contains a malformed row");
+    }
+    const identity = `${createdAt}:${row.hash}`;
+    const match = expectedByIdentity.get(identity);
+    if (!match) {
+      throw new Error(
+        "[migrate] Core migration journal contains an entry not owned by this Steward build; " +
+          "refusing to trust a possibly shared or ahead database",
+      );
+    }
+    if (recordedIdentities.has(identity)) {
+      throw new Error("[migrate] Core migration journal contains a duplicate Steward entry");
+    }
+    recordedIdentities.add(identity);
+    recordedIndices.push(match.index);
+  }
+
+  if (
+    recordedIndices.some(
+      (index, position) => position > 0 && index <= recordedIndices[position - 1],
+    )
+  ) {
+    throw new Error("[migrate] Core migration journal is not in checked-in Steward order");
+  }
+
+  if (rows.length > 0 && !database.tenantsExists) {
+    throw new Error(
+      "[migrate] Core migration journal exists without public.tenants; refusing the wrong database",
+    );
+  }
+  if (rows.length === 0 && !database.tenantsExists && database.publicRelationCount > 0) {
+    throw new Error(
+      "[migrate] Non-empty public schema has no Steward migration history; refusing a shared database",
+    );
+  }
+  const auditMigrationIndex = journal.entries.findIndex(
+    (entry) => entry.tag === LEGACY_BACKFILL_TIP_TAG,
+  );
+  if (
+    auditMigrationIndex !== -1 &&
+    recordedIndices.some((index) => index >= auditMigrationIndex) &&
+    !database.auditEventsExists
+  ) {
+    throw new Error(
+      `[migrate] Journal claims ${LEGACY_BACKFILL_TIP_TAG} but ${LEGACY_BACKFILL_FINGERPRINT_TABLE} is missing`,
+    );
+  }
+
+  if (recordedIndices.length > 0) {
+    const greatestRecordedWhen = Math.max(
+      ...recordedIndices.map((index) => journal.entries[index].when),
+    );
+    const silentlySkipped = expected.filter(
+      (entry) =>
+        entry.when <= greatestRecordedWhen &&
+        !recordedIdentities.has(`${entry.when}:${entry.hash}`),
+    );
+    if (silentlySkipped.length > 0) {
+      throw new Error(
+        `[migrate] Core migration journal is missing ${silentlySkipped[0].tag} below its recorded cutoff`,
+      );
+    }
+  }
+
+  if (options.requireComplete && recordedIdentities.size !== expected.length) {
+    throw new Error("[migrate] Core migrator returned with an incomplete Steward journal");
+  }
+}
+
 /**
  * The legacy `psql -f` deploy loop was retired when this migrator was
  * introduced; the journal tip at that moment was 0024_audit_events. A legacy
@@ -100,23 +209,36 @@ export async function runMigrations(): Promise<{ applied: string[] }> {
         )
       `;
 
-      const existingRows = (await client`
-        SELECT created_at FROM drizzle.__drizzle_migrations
-      `) as Array<{ created_at: string | number | null }>;
+      let existingRows = (await client`
+        SELECT id, hash, created_at FROM drizzle.__drizzle_migrations ORDER BY id ASC
+      `) as CoreMigrationLedgerRow[];
 
       const tenantsExists = (await client`
         SELECT to_regclass('public.tenants') AS r
       `) as Array<{ r: string | null }>;
+      const auditEventsExists = (await client`
+        SELECT to_regclass(${LEGACY_BACKFILL_FINGERPRINT_TABLE}) AS r
+      `) as Array<{ r: string | null }>;
+      const databaseInventory = (await client`
+        SELECT count(*) FILTER (
+          WHERE namespace.nspname = 'public' AND relation.relkind IN ('r', 'p')
+        )::int AS public_relation_count
+        FROM pg_class relation
+        JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+      `) as Array<{ public_relation_count: number }>;
+      const databaseShape: CoreMigrationDatabaseShape = {
+        tenantsExists: Boolean(tenantsExists[0]?.r),
+        auditEventsExists: Boolean(auditEventsExists[0]?.r),
+        publicRelationCount: databaseInventory[0]?.public_relation_count ?? 0,
+      };
+      assertCoreMigrationLedgerIntegrity(existingRows, journal, databaseShape);
 
       // Backfill: legacy DB previously migrated by the psql loop.
       if (existingRows.length === 0 && tenantsExists[0]?.r) {
         // Fingerprint the psql-era tip before trusting the heuristic: a DB
         // frozen at an older tip must fail loudly here, not be seeded with
         // migrations it never applied.
-        const fingerprint = (await client`
-          SELECT to_regclass(${LEGACY_BACKFILL_FINGERPRINT_TABLE}) AS r
-        `) as Array<{ r: string | null }>;
-        if (!fingerprint[0]?.r) {
+        if (!databaseShape.auditEventsExists) {
           throw new Error(
             `[migrate] Legacy DB detected (public.tenants exists) but fingerprint table ` +
               `${LEGACY_BACKFILL_FINGERPRINT_TABLE} is missing — the DB predates migration ` +
@@ -138,6 +260,10 @@ export async function runMigrations(): Promise<{ applied: string[] }> {
             VALUES (${hash}, ${entry.when})
           `;
         }
+        existingRows = (await client`
+          SELECT id, hash, created_at FROM drizzle.__drizzle_migrations ORDER BY id ASC
+        `) as CoreMigrationLedgerRow[];
+        assertCoreMigrationLedgerIntegrity(existingRows, journal, databaseShape);
       }
 
       const beforeCount = (
@@ -149,10 +275,36 @@ export async function runMigrations(): Promise<{ applied: string[] }> {
       await migrate(db, { migrationsFolder: MIGRATIONS_FOLDER });
 
       const afterRows = (await client`
-        SELECT hash, created_at
+        SELECT id, hash, created_at
         FROM drizzle.__drizzle_migrations
         ORDER BY id ASC
-      `) as Array<{ hash: string; created_at: string | number | null }>;
+      `) as CoreMigrationLedgerRow[];
+      const [postMigrationShape] = (await client`
+        SELECT
+          to_regclass('public.tenants') IS NOT NULL AS tenants_exists,
+          to_regclass(${LEGACY_BACKFILL_FINGERPRINT_TABLE}) IS NOT NULL AS audit_events_exists,
+          count(*) FILTER (
+            WHERE namespace.nspname = 'public' AND relation.relkind IN ('r', 'p')
+          )::int AS public_relation_count
+        FROM pg_class relation
+        JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+      `) as Array<{
+        tenants_exists: boolean;
+        audit_events_exists: boolean;
+        public_relation_count: number;
+      }>;
+      assertCoreMigrationLedgerIntegrity(
+        afterRows,
+        journal,
+        {
+          tenantsExists: postMigrationShape?.tenants_exists ?? false,
+          auditEventsExists: postMigrationShape?.audit_events_exists ?? false,
+          publicRelationCount: postMigrationShape?.public_relation_count ?? 0,
+        },
+        {
+          requireComplete: true,
+        },
+      );
 
       const newRows = afterRows.slice(beforeCount);
       const tagByHash = new Map<string, string>();
