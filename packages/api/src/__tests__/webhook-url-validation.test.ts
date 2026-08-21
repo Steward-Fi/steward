@@ -1,7 +1,97 @@
 import { describe, expect, it } from "bun:test";
+import { withRuntimeEnvironment } from "@stwd/shared/runtime-env";
+import { currentWebhookRuntimeAuthority } from "@stwd/webhooks";
 import { validateWebhookUrl, validateWebhookUrlResolved } from "../services/webhook-url";
 
+const enabledWebhookPolicy = {
+  STEWARD_ALLOW_INSECURE_WEBHOOK_URLS: "true",
+  STEWARD_ALLOW_PRIVATE_WEBHOOK_NETWORKS: "true",
+};
+
+function validateCurrentWebhookUrl(url: string) {
+  return validateWebhookUrl(url, currentWebhookRuntimeAuthority());
+}
+
+function validateCurrentWebhookUrlResolved(url: string) {
+  return validateWebhookUrlResolved(url, undefined, currentWebhookRuntimeAuthority());
+}
+
 describe("webhook URL validation", () => {
+  it("does not retain Worker escape hatches after their bindings are removed", async () => {
+    expect(
+      await withRuntimeEnvironment(enabledWebhookPolicy, () =>
+        validateCurrentWebhookUrlResolved("http://127.0.0.1/hook"),
+      ),
+    ).toBeNull();
+
+    expect(
+      await withRuntimeEnvironment({}, () =>
+        validateCurrentWebhookUrlResolved("http://127.0.0.1/hook"),
+      ),
+    ).toBe("url must use https");
+    expect(
+      await withRuntimeEnvironment({}, () =>
+        validateCurrentWebhookUrlResolved("https://127.0.0.1/hook"),
+      ),
+    ).toBe("url host must be public");
+  });
+
+  it("keeps overlapping Worker webhook policies isolated", async () => {
+    let releaseEnabled!: () => void;
+    const enabledCanFinish = new Promise<void>((resolve) => {
+      releaseEnabled = resolve;
+    });
+    let enabledStarted!: () => void;
+    const enabledDidStart = new Promise<void>((resolve) => {
+      enabledStarted = resolve;
+    });
+
+    const enabled = withRuntimeEnvironment(enabledWebhookPolicy, async () => {
+      enabledStarted();
+      await enabledCanFinish;
+      return validateCurrentWebhookUrlResolved("http://127.0.0.1/hook");
+    });
+    await enabledDidStart;
+
+    const disabled = await withRuntimeEnvironment({}, async () => {
+      const result = await validateCurrentWebhookUrlResolved("http://127.0.0.1/hook");
+      releaseEnabled();
+      return result;
+    });
+
+    expect(disabled).toBe("url must use https");
+    expect(await enabled).toBeNull();
+  });
+
+  it("requires exact lowercase Worker acknowledgements", () => {
+    for (const value of ["TRUE", "True", "1", "yes", " true "]) {
+      const result = withRuntimeEnvironment(
+        {
+          STEWARD_ALLOW_INSECURE_WEBHOOK_URLS: value,
+          STEWARD_ALLOW_PRIVATE_WEBHOOK_NETWORKS: value,
+        },
+        () => ({
+          authority: currentWebhookRuntimeAuthority(),
+          validation: validateCurrentWebhookUrl("http://127.0.0.1/hook"),
+        }),
+      );
+      expect(result.authority).toEqual({
+        allowInsecureHttp: false,
+        allowPrivateNetwork: false,
+      });
+      expect(result.validation).toBe("url must use https");
+    }
+  });
+
+  it("does not widen generic URL consumers when webhook acknowledgements are enabled", async () => {
+    await withRuntimeEnvironment(enabledWebhookPolicy, async () => {
+      expect(validateWebhookUrl("https://127.0.0.1/hook")).toBe("url host must be public");
+      expect(await validateWebhookUrlResolved("https://127.0.0.1/hook")).toBe(
+        "url host must be public",
+      );
+    });
+  });
+
   it("rejects IPv4-mapped IPv6 private addresses in dotted and hex forms", () => {
     for (const url of [
       "https://[::ffff:127.0.0.1]/hook",

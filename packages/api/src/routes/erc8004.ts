@@ -13,6 +13,7 @@ import { redactedThrownDiagnostics } from "@stwd/shared";
 import { and, eq, sql } from "drizzle-orm";
 import { Hono } from "hono";
 import { z } from "zod";
+import { validateAgentCardApiUrl } from "../services/agent-card-url";
 import { writeAuditEvent } from "../services/audit";
 import {
   type ApiResponse,
@@ -23,7 +24,6 @@ import {
   requireTenantLevel,
 } from "../services/context";
 import { isRecentMfaTimestamp } from "../services/recent-mfa";
-import { validateWebhookUrlResolved } from "../services/webhook-url";
 
 export const erc8004Routes = new Hono<{ Variables: AppVariables }>();
 type AgentRegistrationRow = typeof agentRegistrations.$inferSelect;
@@ -79,14 +79,6 @@ function requireRecentAdminMfa(c: Parameters<typeof requireTenantLevel>[0], reas
 
 function signedFeedbackWritesEnabled(): boolean {
   return false;
-}
-
-async function validateAgentCardApiUrl(apiUrl: string): Promise<string | null> {
-  if (!apiUrl) return null;
-  const destinationError = await validateWebhookUrlResolved(apiUrl);
-  if (destinationError) return `apiUrl ${destinationError}`;
-  if (new URL(apiUrl).protocol !== "https:") return "apiUrl must use https";
-  return null;
 }
 
 function publicDiscoveryAgentRow(row: Record<string, unknown>) {

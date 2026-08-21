@@ -6,6 +6,10 @@ export type {
 export { PersistentQueue } from "./persistent-queue";
 export { RetryQueue } from "./queue";
 export {
+  currentWebhookRuntimeAuthority,
+  type WebhookRuntimeAuthority,
+} from "./runtime-authority";
+export {
   decryptWebhookSecret,
   encryptWebhookSecret,
   isEncryptedWebhookSecret,
