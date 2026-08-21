@@ -28,11 +28,14 @@ export function runtimeEnvironmentValue(name: string): string | undefined {
 
 /** True when runtime-local safety fallbacks must be treated as production posture. */
 export function isProductionRuntimeEnvironment(): boolean {
-  return (
-    runtimeEnvironmentValue("NODE_ENV") === "production" ||
+  if (
     runtimeEnvironmentValue("STEWARD_RUNTIME") === "workers" ||
     runtimeEnvironmentValue("CF_PAGES") === "1"
-  );
+  ) {
+    return true;
+  }
+  const nodeEnvironment = runtimeEnvironmentValue("NODE_ENV");
+  return nodeEnvironment !== "development" && nodeEnvironment !== "test";
 }
 
 /** Whether trading rate limits may use the bounded, single-process fallback. */

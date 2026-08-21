@@ -34,6 +34,24 @@ describe("request-local runtime environment", () => {
         tradingRateLimitRedisRequired(false),
       ),
     ).toBe(false);
+
+    for (const environment of [
+      {},
+      { NODE_ENV: "staging" },
+      { NODE_ENV: "prodution" },
+      { NODE_ENV: "development", STEWARD_RUNTIME: "workers" },
+    ]) {
+      expect(
+        await withRuntimeEnvironment(environment, () => tradingRateLimitRedisRequired(true)),
+      ).toBe(true);
+    }
+    for (const nodeEnvironment of ["development", "test"]) {
+      expect(
+        await withRuntimeEnvironment({ NODE_ENV: nodeEnvironment }, () =>
+          tradingRateLimitRedisRequired(true),
+        ),
+      ).toBe(false);
+    }
   });
 
   test("keeps overlapping Worker binding snapshots isolated", async () => {
