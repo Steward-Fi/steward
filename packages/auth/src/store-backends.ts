@@ -397,15 +397,25 @@ export class PostgresBackend implements StoreBackend {
    * @param namespace  Logical partition (e.g. "challenge", "token") so multiple
    *                   stores can share the same table without key collision.
    */
-  constructor(private readonly namespace: string) {}
+  constructor(
+    private readonly namespace: string,
+    private readonly sqlClient?: ReturnType<typeof getSql>,
+  ) {}
 
   private getSqlClient() {
-    return getSql();
+    return this.sqlClient ?? getSql();
   }
 
   private async ensureTable(): Promise<void> {
     if (this.initialized) return;
     const sql = this.getSqlClient();
+    const [existing] = await sql<Array<{ relation: string | null }>>`
+      SELECT to_regclass('public.auth_kv_store')::text AS relation
+    `;
+    if (existing?.relation) {
+      this.initialized = true;
+      return;
+    }
     await sql.begin(async (transaction: TransactionSql) => {
       // CREATE TABLE IF NOT EXISTS can still race in PostgreSQL's catalogs when
       // separate fresh backend instances initialize concurrently. Production
