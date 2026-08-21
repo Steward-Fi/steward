@@ -80,7 +80,7 @@ import {
 } from "drizzle-orm";
 import { type Context, Hono } from "hono";
 import { deleteAgentAuthority } from "../services/agent-deletion";
-import { withTenantAuditedTransaction, writeAuditEvent } from "../services/audit";
+import { writeAuditEvent } from "../services/audit";
 import {
   type AppVariables,
   continueWithTenantDatabase,
@@ -2080,16 +2080,17 @@ platform.delete("/tenants/:id", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: "Invalid tenant id format" }, 400);
   }
 
-  const result = await withTenantAuditedTransaction(
-    tenantId,
-    async (txRaw, appendRequiredAudit) => {
-      const tx = txRaw as typeof db;
+  // Lock the tenant/agent authority graph before taking the tenant audit lock.
+  // Relay routes hold the agent row while committing terminal audit evidence;
+  // taking the audit lock first here would invert that ordering and deadlock.
+  const result = await db.transaction(async (preflightTxRaw) => {
+      const lockedTx = preflightTxRaw as unknown as typeof db;
       // This advisory fence is also acquired by every lease/provider/route/
       // capability writer installed by migration 0110. Whichever side wins is
       // authoritative: a prior writer becomes visible to the preflight; a late
       // writer waits until the tenant and its parents are gone, then fails.
-      await tx.execute(sql`SELECT public.steward_lock_tenant_deletion(${tenantId})`);
-      const [existing] = await tx
+      await lockedTx.execute(sql`SELECT public.steward_lock_tenant_deletion(${tenantId})`);
+      const [existing] = await lockedTx
         .select({ id: tenants.id })
         .from(tenants)
         .where(eq(tenants.id, tenantId))
@@ -2099,22 +2100,22 @@ platform.delete("/tenants/:id", async (c) => {
       const personalOwnerId = canonicalPersonalTenantOwnerId(tenantId);
       if (isPersonalTenantId(tenantId)) {
         if (!personalOwnerId) return { status: "blocked_by_personal_membership" as const };
-        await tx.execute(
+        await lockedTx.execute(
           sql`SELECT pg_advisory_xact_lock(hashtextextended(${
             "platform_user_account_" + personalOwnerId
           }, 0))`,
         );
-        await tx.execute(
+        await lockedTx.execute(
           sql`SELECT pg_advisory_xact_lock(hashtextextended(${
             "tenant_owner_lifecycle_" + tenantId
           }, 0))`,
         );
-        const [owner] = await tx
+        const [owner] = await lockedTx
           .select({ id: users.id })
           .from(users)
           .where(eq(users.id, personalOwnerId))
           .for("update");
-        const personalMemberships = await tx
+        const personalMemberships = await lockedTx
           .select({ userId: userTenants.userId, role: userTenants.role })
           .from(userTenants)
           .where(eq(userTenants.tenantId, tenantId))
@@ -2129,18 +2130,34 @@ platform.delete("/tenants/:id", async (c) => {
         }
       }
 
-      const tenantAgents = await tx
+      const tenantAgents = await lockedTx
         .select({ id: agents.id })
         .from(agents)
         .where(eq(agents.tenantId, tenantId))
         .for("update");
-      const tenantMembers = await tx
+      const tenantMembers = await lockedTx
         .select({ userId: userTenants.userId })
         .from(userTenants)
         .where(eq(userTenants.tenantId, tenantId));
-      const [[unresolvedLease], [retainedProviderIntent], [retainedProviderBinding]] =
+      const [
+        [unresolvedExecution],
+        [unresolvedLease],
+        [retainedProviderIntent],
+        [retainedProviderBinding],
+      ] =
         await Promise.all([
-          tx
+          lockedTx
+            .select({ id: transactions.id })
+            .from(transactions)
+            .innerJoin(agents, eq(agents.id, transactions.agentId))
+            .where(
+              and(
+                eq(agents.tenantId, tenantId),
+                inArray(transactions.status, ["approved", "signed", "broadcast", "outcome_unknown"]),
+              ),
+            )
+            .limit(1),
+          lockedTx
             .select({ id: upstreamCredentialLeases.id })
             .from(upstreamCredentialLeases)
             .where(
@@ -2157,24 +2174,30 @@ platform.delete("/tenants/:id", async (c) => {
               ),
             )
             .limit(1),
-          tx
+          lockedTx
             .select({ id: intents.id })
             .from(intents)
             .where(and(eq(intents.tenantId, tenantId), eq(intents.intentType, "provider-action")))
             .limit(1),
-          tx
+          lockedTx
             .select({ intentId: providerActionBindings.intentId })
             .from(providerActionBindings)
             .where(eq(providerActionBindings.tenantId, tenantId))
             .limit(1),
         ]);
+      if (unresolvedExecution) return { status: "blocked_by_execution" as const };
       if (unresolvedLease) return { status: "blocked_by_lease" as const };
       if (retainedProviderIntent || retainedProviderBinding) {
         return { status: "blocked_by_provider" as const };
       }
 
-      const capabilityCleanup = await cleanupOptionalTenantCapabilities(tx, tenantId);
-      if (!capabilityCleanup) return { status: "blocked_by_capability_integrity" as const };
+      return withTenantAuditedTransactionOnDb(
+        lockedTx as ReturnType<typeof getDb>,
+        tenantId,
+        async (auditedTxRaw, appendRequiredAudit) => {
+          const tx = auditedTxRaw as typeof db;
+          const capabilityCleanup = await cleanupOptionalTenantCapabilities(tx, tenantId);
+          if (!capabilityCleanup) return { status: "blocked_by_capability_integrity" as const };
 
       // Establish every externally enforced cutoff while the deletion fence is
       // held and before any destructive database mutation. A revoker failure
@@ -2229,11 +2252,12 @@ platform.delete("/tenants/:id", async (c) => {
       await tx.delete(secrets).where(eq(secrets.tenantId, tenantId));
       await tx.delete(proxyAuditLog).where(eq(proxyAuditLog.tenantId, tenantId));
       await tx.delete(tenants).where(eq(tenants.id, tenantId));
-      return {
-        status: "deleted" as const,
-      };
-    },
-  );
+          return {
+            status: "deleted" as const,
+          };
+        },
+      );
+  });
 
   if (result.status === "missing") {
     return c.json<ApiResponse>({ ok: false, error: "Tenant not found" }, 404);
@@ -2241,6 +2265,12 @@ platform.delete("/tenants/:id", async (c) => {
   if (result.status === "blocked_by_lease") {
     return c.json<ApiResponse>(
       { ok: false, error: "Tenant has unresolved upstream credential leases" },
+      409,
+    );
+  }
+  if (result.status === "blocked_by_execution") {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Tenant has unresolved transaction execution" },
       409,
     );
   }

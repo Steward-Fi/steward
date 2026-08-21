@@ -545,6 +545,64 @@ describe("agent deletion upstream credential boundary", () => {
     }
   });
 
+  it("blocks tenant deletion on approved execution before revocation or deletion audit", async () => {
+    const tenantId = `approved-tenant-deletion-${crypto.randomUUID()}`;
+    const agentId = `approved-delete-${crypto.randomUUID()}`;
+    const transactionId = crypto.randomUUID();
+    await getDb().insert(tenants).values({ id: tenantId, name: tenantId, apiKeyHash: tenantId });
+    await getDb().insert(agents).values({
+      id: agentId,
+      tenantId,
+      name: agentId,
+      walletAddress: "0x1234567890123456789012345678901234567890",
+    });
+    await getDb()
+      .insert(transactions)
+      .values({
+        id: transactionId,
+        agentId,
+        status: "approved",
+        toAddress: "monero-pre-relay",
+        value: "1000000000",
+        chainId: 301,
+        actionType: "monero_transfer",
+        actionPayload: { type: "monero_transfer", relayState: "prepared" },
+        policyResults: [],
+      });
+    let revocations = 0;
+    const originalRevokeAgentTokens = revocationStore.revokeAgentTokens.bind(revocationStore);
+    const originalRevokeUserTokens = revocationStore.revokeUserTokens.bind(revocationStore);
+    revocationStore.revokeAgentTokens = async () => {
+      revocations += 1;
+      return Date.now();
+    };
+    revocationStore.revokeUserTokens = async () => {
+      revocations += 1;
+      return Date.now();
+    };
+    try {
+      const response = await platformTenantDelete(tenantId);
+      expect(response.status).toBe(409);
+      await expect(response.json()).resolves.toEqual({
+        ok: false,
+        error: "Tenant has unresolved transaction execution",
+      });
+      expect(revocations).toBe(0);
+      expect(
+        await getDb()
+          .select()
+          .from(auditEvents)
+          .where(and(eq(auditEvents.tenantId, tenantId), eq(auditEvents.action, "tenant.delete"))),
+      ).toHaveLength(0);
+    } finally {
+      revocationStore.revokeAgentTokens = originalRevokeAgentTokens;
+      revocationStore.revokeUserTokens = originalRevokeUserTokens;
+      await getDb().delete(transactions).where(eq(transactions.id, transactionId));
+      await getDb().delete(agents).where(eq(agents.id, agentId));
+      await getDb().delete(tenants).where(eq(tenants.id, tenantId));
+    }
+  });
+
   it("refuses tenant-admin deletion while an active sealed lease remains", async () => {
     await expectBlockedDeletion("tenant", "active");
   });
