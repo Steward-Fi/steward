@@ -16,6 +16,7 @@ import {
   intents,
   policies,
   tenants,
+  transactions,
   users,
   userTenants,
 } from "@stwd/db";
@@ -131,7 +132,10 @@ let adminApp: Awaited<ReturnType<typeof makeApp>>;
 let otherAdminApp: Awaited<ReturnType<typeof makeApp>>;
 let originalFetch: typeof globalThis.fetch;
 
-async function createAuthorizedIntent(kind: "transfer" | "send_calls"): Promise<string> {
+async function createAuthorizedIntent(
+  kind: "transfer" | "send_calls",
+  broadcast = false,
+): Promise<string> {
   const payload =
     kind === "transfer"
       ? {
@@ -140,7 +144,8 @@ async function createAuthorizedIntent(kind: "transfer" | "send_calls"): Promise<
             to: RECIPIENTS[0],
             value: "1",
             chainId: 84532,
-            broadcast: false,
+            gasLimit: "21000",
+            broadcast,
           },
         }
       : {
@@ -288,8 +293,12 @@ describe("intent finalization webhook hardening", () => {
       const [stored] = await getDb().select().from(intents).where(eq(intents.id, id));
       expect(stored.status).toBe("executing");
       expect(stored.executionResult).toMatchObject({
-        handler: "wallet_action.transfer",
-        actionId: id,
+        recoveryVersion: 1,
+        state: "completed",
+        result: {
+          handler: "wallet_action.transfer",
+          actionId: id,
+        },
       });
       expect(webhookCalls).toHaveLength(0);
       const completionAudits = await getDb()
@@ -353,5 +362,110 @@ describe("intent finalization webhook hardening", () => {
       .from(auditEvents)
       .where(and(eq(auditEvents.action, "intent.executed"), eq(auditEvents.resourceId, id)));
     expect(completionAudits).toHaveLength(1);
+  });
+
+  it("fails closed when mounted PGLite cannot create an autonomous reservation", async () => {
+    const id = await createAuthorizedIntent("transfer");
+    webhookCalls = [];
+    const { withAuthenticatedTenantDatabase } = await import("../services/context");
+
+    const response = await withAuthenticatedTenantDatabase(
+      TENANT_ID,
+      "session-jwt",
+      OTHER_ADMIN_USER_ID,
+      () => executeIntent(id),
+      OTHER_ADMIN_USER_ID,
+    );
+
+    expect(response.status).toBe(500);
+    const [stored] = await getDb().select().from(intents).where(eq(intents.id, id));
+    expect(stored).toMatchObject({ status: "authorized", executionResult: null });
+    expect(webhookCalls).toHaveLength(0);
+  });
+
+  it("retains an ambiguous broadcast and never sends it again", async () => {
+    const id = await createAuthorizedIntent("transfer", true);
+    webhookCalls = [];
+    const suiteFetch = globalThis.fetch;
+    let rawSends = 0;
+    globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const rpc = JSON.parse(String(init?.body ?? "{}")) as {
+        id?: number;
+        method?: string;
+      };
+      let result: unknown;
+      if (rpc.method === "eth_chainId") result = "0x14a34";
+      else if (rpc.method === "eth_getTransactionCount") result = "0x0";
+      else if (rpc.method === "eth_estimateGas") result = "0x5208";
+      else if (rpc.method === "eth_gasPrice") result = "0x3b9aca00";
+      else if (rpc.method === "eth_maxPriorityFeePerGas") result = "0x3b9aca00";
+      else if (rpc.method === "eth_getBlockByNumber") {
+        result = {
+          baseFeePerGas: "0x3b9aca00",
+          difficulty: "0x0",
+          extraData: "0x",
+          gasLimit: "0x1c9c380",
+          gasUsed: "0x0",
+          hash: `0x${"11".repeat(32)}`,
+          logsBloom: `0x${"00".repeat(256)}`,
+          miner: `0x${"00".repeat(20)}`,
+          mixHash: `0x${"22".repeat(32)}`,
+          nonce: "0x0000000000000000",
+          number: "0x1",
+          parentHash: `0x${"33".repeat(32)}`,
+          receiptsRoot: `0x${"44".repeat(32)}`,
+          sha3Uncles: `0x${"55".repeat(32)}`,
+          size: "0x1",
+          stateRoot: `0x${"66".repeat(32)}`,
+          timestamp: "0x1",
+          totalDifficulty: "0x0",
+          transactions: [],
+          transactionsRoot: `0x${"77".repeat(32)}`,
+          uncles: [],
+        };
+      } else if (rpc.method === "eth_sendRawTransaction") {
+        rawSends++;
+        throw new Error("response lost after accepted raw transaction");
+      } else if (rpc.method === "eth_getTransactionByHash") result = null;
+      else throw new Error(`unexpected RPC method ${rpc.method}`);
+      return Response.json({ jsonrpc: "2.0", id: rpc.id ?? 1, result });
+    }) as typeof fetch;
+
+    try {
+      const first = await executeIntent(id);
+      expect(first.status).toBe(202);
+      const firstBody = (await first.json()) as {
+        data: { executionState: string; recoveryRequired: boolean };
+      };
+      expect(firstBody.data).toMatchObject({
+        executionState: "outcome_unknown",
+        recoveryRequired: true,
+      });
+      expect(rawSends).toBe(1);
+
+      const [stored] = await getDb().select().from(intents).where(eq(intents.id, id));
+      expect(stored).toMatchObject({
+        status: "executing",
+        executionResult: {
+          recoveryVersion: 1,
+          state: "outcome_unknown",
+          executionDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
+          outcomeHash: expect.stringMatching(/^0x[0-9a-f]{64}$/),
+          outcomeDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
+        },
+      });
+      expect(
+        await getDb().select().from(transactions).where(eq(transactions.id, id)),
+      ).toMatchObject([
+        { status: "outcome_unknown", txHash: expect.stringMatching(/^0x[0-9a-f]{64}$/) },
+      ]);
+
+      const retry = await executeIntent(id);
+      expect(retry.status).toBe(202);
+      expect(rawSends).toBe(1);
+      expect(webhookCalls).toHaveLength(0);
+    } finally {
+      globalThis.fetch = suiteFetch;
+    }
   });
 });

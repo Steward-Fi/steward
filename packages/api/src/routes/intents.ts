@@ -6,6 +6,7 @@
 
 import { toPersistedPolicyRule, users, userTenants } from "@stwd/db";
 import { type PolicyRule, redactedThrownDiagnostics } from "@stwd/shared";
+import { ExternalBroadcastOutcomeUnknownError } from "@stwd/vault";
 import { and, desc, eq, inArray, type SQL, sql } from "drizzle-orm";
 import { type Context, Hono } from "hono";
 import { enforceRateLimit, recordVaultSpend } from "../middleware/redis-enforcement";
@@ -31,6 +32,7 @@ import {
   toPolicyRule,
   transactions,
   vault,
+  withIndependentAuthenticatedTenantDatabase,
 } from "../services/context";
 import { redactSignedTransactions, toIntentResponse } from "../services/intent-response";
 import { getPolicyRulesValidationError } from "../services/policy-validation";
@@ -109,6 +111,25 @@ type IntentSendCall = {
 type IntentAuthorizationBaseline = {
   kind: "policy-set" | "quorum";
   hash: string;
+};
+
+type IntentExecutionRecoveryEnvelope = {
+  recoveryVersion: 1;
+  state: "reserved" | "completed" | "outcome_unknown";
+  reservationId: string;
+  intentVersion: string;
+  intentDigest: string;
+  executionDigest: string;
+  authorizationBaseline: IntentAuthorizationBaseline | null;
+  reservedBy: string;
+  reservedActorType: ActorType;
+  requestId: string | null;
+  reservedAt: string;
+  result?: Record<string, unknown>;
+  resultDigest?: string;
+  outcomeReason?: string;
+  outcomeHash?: string | null;
+  outcomeDigest?: string;
 };
 
 const AUTHORIZATION_BASELINE_KEY = "__authorizationBaseline";
@@ -639,12 +660,10 @@ async function executeTransferIntent(row: typeof intents.$inferSelect) {
         );
         return completedResult;
       }
-      dispatchWebhook(row.tenantId, request.agentId, "wallet_action.transfer.failed", {
-        actionId: txId,
-        intent_id: row.id,
-        error: "Transfer execution failed",
-        ...redactedThrownDiagnostics(error),
-      });
+      if (error instanceof ExternalBroadcastOutcomeUnknownError) throw error;
+      // A signer/broadcast failure may follow external acceptance. The durable
+      // execution reservation owns classification; never emit a definite
+      // failure effect from inside the still-uncommitted execution unit.
       throw new IntentExecutionError("Transfer execution failed", 502);
     }
   });
@@ -779,13 +798,9 @@ async function executeSendCallsIntent(row: typeof intents.$inferSelect) {
         policyResults,
         signedCalls,
       };
-    } catch (error) {
-      dispatchWebhook(row.tenantId, request.agentId, "wallet_action.send_calls.failed", {
-        actionId: row.id,
-        intent_id: row.id,
-        error: "Batch call execution failed",
-        ...redactedThrownDiagnostics(error),
-      });
+    } catch (_error) {
+      // Do not publish a failure before the autonomous execution unit has
+      // durably classified the outcome.
       throw new IntentExecutionError("Batch call execution failed", 502);
     }
   });
@@ -1043,6 +1058,204 @@ async function assertIntentAuthorizationBaselineCurrent(row: typeof intents.$inf
       409,
     );
   }
+}
+
+function parseIntentExecutionRecovery(value: unknown): IntentExecutionRecoveryEnvelope | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const candidate = value as Record<string, unknown>;
+  if (
+    candidate.recoveryVersion !== 1 ||
+    (candidate.state !== "reserved" &&
+      candidate.state !== "completed" &&
+      candidate.state !== "outcome_unknown") ||
+    typeof candidate.reservationId !== "string" ||
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+      candidate.reservationId,
+    ) ||
+    typeof candidate.intentVersion !== "string" ||
+    !Number.isFinite(Date.parse(candidate.intentVersion)) ||
+    typeof candidate.intentDigest !== "string" ||
+    !/^[a-f0-9]{64}$/.test(candidate.intentDigest) ||
+    typeof candidate.executionDigest !== "string" ||
+    !/^[a-f0-9]{64}$/.test(candidate.executionDigest) ||
+    typeof candidate.reservedBy !== "string" ||
+    candidate.reservedBy.length === 0 ||
+    !["user", "agent", "api-key", "platform"].includes(String(candidate.reservedActorType)) ||
+    typeof candidate.reservedAt !== "string" ||
+    !Number.isFinite(Date.parse(candidate.reservedAt)) ||
+    (candidate.requestId !== null && typeof candidate.requestId !== "string")
+  ) {
+    return null;
+  }
+  const baseline = candidate.authorizationBaseline;
+  if (
+    baseline !== null &&
+    (!baseline ||
+      typeof baseline !== "object" ||
+      Array.isArray(baseline) ||
+      ((baseline as Record<string, unknown>).kind !== "policy-set" &&
+        (baseline as Record<string, unknown>).kind !== "quorum") ||
+      typeof (baseline as Record<string, unknown>).hash !== "string" ||
+      !/^[a-f0-9]{64}$/.test(String((baseline as Record<string, unknown>).hash)))
+  ) {
+    return null;
+  }
+  if (
+    candidate.state === "completed" &&
+    (!candidate.result ||
+      typeof candidate.result !== "object" ||
+      Array.isArray(candidate.result) ||
+      typeof candidate.resultDigest !== "string" ||
+      !/^[a-f0-9]{64}$/.test(candidate.resultDigest))
+  ) {
+    return null;
+  }
+  if (
+    (candidate.state === "reserved" &&
+      (candidate.result !== undefined ||
+        candidate.resultDigest !== undefined ||
+        candidate.outcomeReason !== undefined ||
+        candidate.outcomeHash !== undefined ||
+        candidate.outcomeDigest !== undefined)) ||
+    (candidate.state === "completed" &&
+      (candidate.outcomeReason !== undefined ||
+        candidate.outcomeHash !== undefined ||
+        candidate.outcomeDigest !== undefined)) ||
+    (candidate.state === "outcome_unknown" &&
+      (candidate.result !== undefined ||
+        candidate.resultDigest !== undefined ||
+        typeof candidate.outcomeReason !== "string" ||
+        candidate.outcomeReason.length === 0 ||
+        (candidate.outcomeHash !== null &&
+          (typeof candidate.outcomeHash !== "string" ||
+            !/^0x[0-9a-f]{64}$/i.test(candidate.outcomeHash))) ||
+        typeof candidate.outcomeDigest !== "string" ||
+        !/^[a-f0-9]{64}$/.test(candidate.outcomeDigest)))
+  ) {
+    return null;
+  }
+  return candidate as IntentExecutionRecoveryEnvelope;
+}
+
+async function intentExecutionBindingDigest(
+  recovery: Omit<IntentExecutionRecoveryEnvelope, "executionDigest" | "state" | "result">,
+): Promise<string> {
+  return hashStableJson({
+    domain: "steward.intent-execution-reservation.v1",
+    recoveryVersion: recovery.recoveryVersion,
+    reservationId: recovery.reservationId,
+    intentVersion: recovery.intentVersion,
+    intentDigest: recovery.intentDigest,
+    authorizationBaseline: recovery.authorizationBaseline,
+    reservedBy: recovery.reservedBy,
+    reservedActorType: recovery.reservedActorType,
+    requestId: recovery.requestId,
+    reservedAt: recovery.reservedAt,
+  });
+}
+
+async function intentExecutionDigest(
+  row: typeof intents.$inferSelect,
+  intentVersion = row.updatedAt.toISOString(),
+): Promise<string> {
+  const payload = {
+    recoveryVersion: 1,
+    intentVersion,
+    id: row.id,
+    tenantId: row.tenantId,
+    agentId: row.agentId,
+    intentType: row.intentType,
+    resourceType: row.resourceType,
+    resourceId: row.resourceId,
+    authorizationDetails: row.authorizationDetails,
+    payload: row.payload,
+    authorizedBy: row.authorizedBy,
+    authorizedAt: row.authorizedAt?.toISOString() ?? null,
+    authorizationBaseline: intentAuthorizationBaseline(row),
+  };
+  return hashStableJson(payload);
+}
+
+async function assertIntentExecutionRecoveryBinding(
+  row: typeof intents.$inferSelect,
+  recovery: IntentExecutionRecoveryEnvelope,
+): Promise<void> {
+  const digest = await intentExecutionDigest(row, recovery.intentVersion);
+  if (digest !== recovery.intentDigest) {
+    throw new IntentExecutionError("Intent execution recovery binding is invalid", 409);
+  }
+  const baseline = intentAuthorizationBaseline(row);
+  if (stableJson(baseline) !== stableJson(recovery.authorizationBaseline)) {
+    throw new IntentExecutionError("Intent execution recovery baseline is invalid", 409);
+  }
+  const executionDigest = await intentExecutionBindingDigest(recovery);
+  if (executionDigest !== recovery.executionDigest) {
+    throw new IntentExecutionError("Intent execution recovery envelope is invalid", 409);
+  }
+  if (
+    recovery.state === "completed" &&
+    (await hashStableJson(recovery.result)) !== recovery.resultDigest
+  ) {
+    throw new IntentExecutionError("Intent execution recovery result is invalid", 409);
+  }
+  if (
+    recovery.state === "outcome_unknown" &&
+    (await hashStableJson({
+      domain: "steward.intent-execution-outcome.v1",
+      reservationId: recovery.reservationId,
+      executionDigest: recovery.executionDigest,
+      outcomeReason: recovery.outcomeReason,
+      outcomeHash: recovery.outcomeHash,
+    })) !== recovery.outcomeDigest
+  ) {
+    throw new IntentExecutionError("Intent execution recovery outcome is invalid", 409);
+  }
+}
+
+function intentExecutionRecoveryCas(
+  recovery: IntentExecutionRecoveryEnvelope,
+  state: IntentExecutionRecoveryEnvelope["state"],
+): SQL {
+  const baseline = stableJson(recovery.authorizationBaseline);
+  return sql`
+    ${intents.executionResult}->>'recoveryVersion' = '1'
+    and ${intents.executionResult}->>'state' = ${state}
+    and ${intents.executionResult}->>'reservationId' = ${recovery.reservationId}
+    and ${intents.executionResult}->>'intentVersion' = ${recovery.intentVersion}
+    and ${intents.executionResult}->>'intentDigest' = ${recovery.intentDigest}
+    and ${intents.executionResult}->>'executionDigest' = ${recovery.executionDigest}
+    and ${intents.executionResult}->'authorizationBaseline' = ${baseline}::jsonb
+    and ${intents.executionResult}->>'reservedBy' = ${recovery.reservedBy}
+    and ${intents.executionResult}->>'reservedActorType' = ${recovery.reservedActorType}
+    and ${intents.executionResult}->>'reservedAt' = ${recovery.reservedAt}
+    and (
+      (${recovery.requestId}::text is null and ${intents.executionResult}->'requestId' = 'null'::jsonb)
+      or ${intents.executionResult}->>'requestId' = ${recovery.requestId}
+    )
+  `;
+}
+
+function tenantTransactionUserId(c: Context<{ Variables: AppVariables }>): string | undefined {
+  const userId = c.get("userId");
+  return userId &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(userId)
+    ? userId
+    : undefined;
+}
+
+function withIndependentIntentDatabase<T>(
+  c: Context<{ Variables: AppVariables }>,
+  tenantId: string,
+  intentId: string,
+  callback: () => Promise<T>,
+): Promise<T> {
+  return withIndependentAuthenticatedTenantDatabase(
+    tenantId,
+    c.get("authType") ?? "intent-execution",
+    c.get("agentSubject") ?? c.get("userId") ?? intentId,
+    callback,
+    tenantTransactionUserId(c),
+  );
 }
 
 async function writeIntentAudit(
@@ -1478,6 +1691,389 @@ async function executeTypedIntent(
   throw new IntentExecutionError(`No typed executor is available for ${row.intentType}`);
 }
 
+async function reserveIntentExecution(
+  c: Context<{ Variables: AppVariables }>,
+  existing: typeof intents.$inferSelect,
+): Promise<typeof intents.$inferSelect | null> {
+  return withIndependentIntentDatabase(c, existing.tenantId, existing.id, async () => {
+    const [current] = await db
+      .select()
+      .from(intents)
+      .where(and(eq(intents.id, existing.id), eq(intents.tenantId, existing.tenantId)));
+    if (!current || current.status !== "authorized") return null;
+    await assertIntentAuthorizationBaselineCurrent(current);
+
+    const reservedAt = new Date();
+    const intentVersion = current.updatedAt.toISOString();
+    const recoveryBinding = {
+      recoveryVersion: 1,
+      reservationId: crypto.randomUUID(),
+      intentVersion,
+      intentDigest: await intentExecutionDigest(current, intentVersion),
+      authorizationBaseline: intentAuthorizationBaseline(current),
+      reservedBy: actorId(c),
+      reservedActorType: auditActorType(c),
+      requestId: c.get("requestId") ?? null,
+      reservedAt: reservedAt.toISOString(),
+    } as const;
+    const recovery: IntentExecutionRecoveryEnvelope = {
+      ...recoveryBinding,
+      state: "reserved",
+      executionDigest: await intentExecutionBindingDigest(recoveryBinding),
+    };
+
+    const claimedId = await withTenantAuditedTransaction(
+      existing.tenantId,
+      async (txRaw, appendRequiredAudit) => {
+        const tx = txRaw as typeof db;
+        await tx
+          .update(intents)
+          .set({
+            status: "executing",
+            executionResult: recovery,
+            updatedAt: reservedAt,
+            executedBy: actorId(c),
+          })
+          .where(
+            and(
+              eq(intents.id, existing.id),
+              eq(intents.tenantId, existing.tenantId),
+              eq(intents.status, "authorized"),
+              eq(intents.updatedAt, current.updatedAt),
+              intentNotExpiredPredicate(),
+            ),
+          );
+        const [claimed] = await tx
+          .select({ id: intents.id })
+          .from(intents)
+          .where(
+            and(
+              eq(intents.id, existing.id),
+              eq(intents.tenantId, existing.tenantId),
+              eq(intents.status, "executing"),
+              intentExecutionRecoveryCas(recovery, "reserved"),
+            ),
+          );
+        if (!claimed) return null;
+        const claimedId = claimed.id;
+        await appendRequiredAudit({
+          tenantId: existing.tenantId,
+          actorType: auditActorType(c),
+          actorId: actorId(c),
+          action: "intent.execute.authorized",
+          resourceType: "intent",
+          resourceId: existing.id,
+          metadata: {
+            agentId: existing.agentId,
+            intentType: existing.intentType,
+            reservationId: recovery.reservationId,
+            intentDigest: recovery.intentDigest,
+            executionDigest: recovery.executionDigest,
+          },
+          ipAddress: c.req.header("x-forwarded-for") ?? null,
+          userAgent: c.req.header("user-agent") ?? null,
+          requestId: c.get("requestId") ?? null,
+        });
+        return claimedId;
+      },
+    );
+    if (!claimedId) return null;
+    const [claimed] = await db
+      .select()
+      .from(intents)
+      .where(and(eq(intents.id, claimedId), eq(intents.tenantId, existing.tenantId)));
+    return claimed ?? null;
+  });
+}
+
+async function executeReservedIntent(
+  c: Context<{ Variables: AppVariables }>,
+  claimed: typeof intents.$inferSelect,
+  recovery: IntentExecutionRecoveryEnvelope,
+): Promise<{
+  executionResult: Record<string, unknown>;
+  recovery: IntentExecutionRecoveryEnvelope;
+}> {
+  return withIndependentIntentDatabase(c, claimed.tenantId, claimed.id, async () => {
+    const [current] = await db
+      .select()
+      .from(intents)
+      .where(and(eq(intents.id, claimed.id), eq(intents.tenantId, claimed.tenantId)));
+    const currentRecovery = parseIntentExecutionRecovery(current?.executionResult);
+    if (
+      !current ||
+      current.status !== "executing" ||
+      !currentRecovery ||
+      currentRecovery.state !== "reserved" ||
+      currentRecovery.reservationId !== recovery.reservationId
+    ) {
+      throw new IntentExecutionError("Intent execution reservation is no longer active", 409);
+    }
+    await assertIntentExecutionRecoveryBinding(current, currentRecovery);
+
+    // All database evidence produced by the executor shares this autonomous
+    // tenant transaction. It commits before the request-owned transaction can
+    // acknowledge/finalize, so a later outer rollback cannot erase it.
+    const executionResult = await executeTypedIntent(current);
+    const storedResult = redactSignedTransactions(executionResult) as Record<string, unknown>;
+    const completed: IntentExecutionRecoveryEnvelope = {
+      ...currentRecovery,
+      state: "completed",
+      result: storedResult,
+      resultDigest: await hashStableJson(storedResult),
+    };
+    const checkpointed = await withTenantAuditedTransaction(
+      current.tenantId,
+      async (txRaw, appendRequiredAudit) => {
+        const tx = txRaw as typeof db;
+        const checkpointedAt = new Date();
+        await tx
+          .update(intents)
+          .set({ executionResult: completed, updatedAt: checkpointedAt })
+          .where(
+            and(
+              eq(intents.id, current.id),
+              eq(intents.tenantId, current.tenantId),
+              eq(intents.status, "executing"),
+              intentExecutionRecoveryCas(currentRecovery, "reserved"),
+            ),
+          );
+        const [updated] = await tx
+          .select({ id: intents.id })
+          .from(intents)
+          .where(
+            and(
+              eq(intents.id, current.id),
+              eq(intents.tenantId, current.tenantId),
+              eq(intents.status, "executing"),
+              eq(intents.updatedAt, checkpointedAt),
+              intentExecutionRecoveryCas(completed, "completed"),
+              sql`${intents.executionResult}->>'resultDigest' = ${completed.resultDigest}`,
+            ),
+          );
+        if (!updated) return false;
+        await appendRequiredAudit({
+          tenantId: current.tenantId,
+          actorType: auditActorType(c),
+          actorId: actorId(c),
+          action: "intent.execution.checkpointed",
+          resourceType: "intent",
+          resourceId: current.id,
+          metadata: {
+            agentId: current.agentId,
+            intentType: current.intentType,
+            reservationId: currentRecovery.reservationId,
+            intentDigest: currentRecovery.intentDigest,
+            executionDigest: currentRecovery.executionDigest,
+          },
+          ipAddress: c.req.header("x-forwarded-for") ?? null,
+          userAgent: c.req.header("user-agent") ?? null,
+          requestId: c.get("requestId") ?? null,
+        });
+        return true;
+      },
+    );
+    if (!checkpointed) {
+      throw new IntentExecutionError("Intent execution reservation is no longer active", 409);
+    }
+    return { executionResult, recovery: completed };
+  });
+}
+
+async function markReservedIntentFailed(
+  c: Context<{ Variables: AppVariables }>,
+  claimed: typeof intents.$inferSelect,
+  recovery: IntentExecutionRecoveryEnvelope,
+  failureReason: string,
+): Promise<typeof intents.$inferSelect | null> {
+  return withIndependentIntentDatabase(c, claimed.tenantId, claimed.id, () =>
+    withTenantAuditedTransaction(claimed.tenantId, async (txRaw, appendRequiredAudit) => {
+      const tx = txRaw as typeof db;
+      const failedAt = new Date();
+      await tx
+        .update(intents)
+        .set({
+          status: "failed",
+          executionResult: null,
+          updatedAt: failedAt,
+          failedAt,
+          failedBy: actorId(c),
+          failureReason,
+        })
+        .where(
+          and(
+            eq(intents.id, claimed.id),
+            eq(intents.tenantId, claimed.tenantId),
+            eq(intents.status, "executing"),
+            intentExecutionRecoveryCas(recovery, "reserved"),
+          ),
+        );
+      const [failed] = await tx
+        .select()
+        .from(intents)
+        .where(
+          and(
+            eq(intents.id, claimed.id),
+            eq(intents.tenantId, claimed.tenantId),
+            eq(intents.status, "failed"),
+            eq(intents.updatedAt, failedAt),
+            eq(intents.failedBy, actorId(c)),
+          ),
+        );
+      if (!failed) return null;
+      await appendRequiredAudit({
+        tenantId: claimed.tenantId,
+        actorType: auditActorType(c),
+        actorId: actorId(c),
+        action: "intent.failed",
+        resourceType: "intent",
+        resourceId: claimed.id,
+        metadata: {
+          agentId: claimed.agentId,
+          intentType: claimed.intentType,
+          reason: failureReason,
+          reservationId: recovery.reservationId,
+        },
+        ipAddress: c.req.header("x-forwarded-for") ?? null,
+        userAgent: c.req.header("user-agent") ?? null,
+        requestId: c.get("requestId") ?? null,
+      });
+      return failed;
+    }),
+  );
+}
+
+async function markReservedIntentOutcomeUnknown(
+  c: Context<{ Variables: AppVariables }>,
+  claimed: typeof intents.$inferSelect,
+  recovery: IntentExecutionRecoveryEnvelope,
+  outcomeHash: string | null,
+): Promise<typeof intents.$inferSelect | null> {
+  return withIndependentIntentDatabase(c, claimed.tenantId, claimed.id, () =>
+    withTenantAuditedTransaction(claimed.tenantId, async (txRaw, appendRequiredAudit) => {
+      const tx = txRaw as typeof db;
+      const outcomeReason = "Execution crossed its durable reservation without a provable outcome";
+      const outcomeDigest = await hashStableJson({
+        domain: "steward.intent-execution-outcome.v1",
+        reservationId: recovery.reservationId,
+        executionDigest: recovery.executionDigest,
+        outcomeReason,
+        outcomeHash,
+      });
+      const unknown: IntentExecutionRecoveryEnvelope = {
+        ...recovery,
+        state: "outcome_unknown",
+        outcomeReason,
+        outcomeHash,
+        outcomeDigest,
+      };
+      const unknownAt = new Date();
+      await tx
+        .update(intents)
+        .set({ executionResult: unknown, updatedAt: unknownAt })
+        .where(
+          and(
+            eq(intents.id, claimed.id),
+            eq(intents.tenantId, claimed.tenantId),
+            eq(intents.status, "executing"),
+            intentExecutionRecoveryCas(recovery, "reserved"),
+          ),
+        );
+      const [updated] = await tx
+        .select()
+        .from(intents)
+        .where(
+          and(
+            eq(intents.id, claimed.id),
+            eq(intents.tenantId, claimed.tenantId),
+            eq(intents.status, "executing"),
+            eq(intents.updatedAt, unknownAt),
+            intentExecutionRecoveryCas(unknown, "outcome_unknown"),
+          ),
+        );
+      if (!updated) return null;
+
+      if (
+        (claimed.intentType === "transfer" || claimed.intentType === "wallet_action") &&
+        claimed.payload.action !== "send_calls"
+      ) {
+        const request = normalizeTransferIntentPayload(claimed);
+        if (request.broadcast !== false) {
+          await tx
+            .insert(transactions)
+            .values({
+              id: claimed.id,
+              agentId: request.agentId,
+              status: "outcome_unknown",
+              txHash: outcomeHash,
+              toAddress: request.to,
+              value: request.value,
+              data: request.data,
+              chainId: request.chainId,
+              actionType: "transfer",
+              actionPayload: {
+                type: "transfer",
+                token: "native",
+                broadcast: true,
+                sourceIntentId: claimed.id,
+                intentExecutionReservationId: recovery.reservationId,
+                intentExecutionDigest: recovery.executionDigest,
+                intentOutcomeDigest: outcomeDigest,
+              },
+              policyResults: [],
+              signedAt: new Date(),
+            })
+            .onConflictDoNothing();
+          const [evidence] = await tx
+            .select({
+              id: transactions.id,
+              agentId: transactions.agentId,
+              status: transactions.status,
+              txHash: transactions.txHash,
+              actionPayload: transactions.actionPayload,
+            })
+            .from(transactions)
+            .where(eq(transactions.id, claimed.id));
+          const actionPayload = evidence?.actionPayload as Record<string, unknown> | null;
+          if (
+            !evidence ||
+            evidence.agentId !== request.agentId ||
+            evidence.status !== "outcome_unknown" ||
+            evidence.txHash !== outcomeHash ||
+            actionPayload?.intentExecutionReservationId !== recovery.reservationId ||
+            actionPayload?.intentExecutionDigest !== recovery.executionDigest ||
+            actionPayload?.intentOutcomeDigest !== outcomeDigest
+          ) {
+            throw new Error("Intent outcome-unknown evidence conflict");
+          }
+        }
+      }
+
+      await appendRequiredAudit({
+        tenantId: claimed.tenantId,
+        actorType: auditActorType(c),
+        actorId: actorId(c),
+        action: "intent.execution.outcome_unknown",
+        resourceType: "intent",
+        resourceId: claimed.id,
+        metadata: {
+          agentId: claimed.agentId,
+          intentType: claimed.intentType,
+          reservationId: recovery.reservationId,
+          intentDigest: recovery.intentDigest,
+          executionDigest: recovery.executionDigest,
+          outcomeHash,
+          outcomeDigest,
+        },
+        ipAddress: c.req.header("x-forwarded-for") ?? null,
+        userAgent: c.req.header("user-agent") ?? null,
+        requestId: c.get("requestId") ?? null,
+      });
+      return updated;
+    }),
+  );
+}
+
 intentRoutes.get("/", async (c) => {
   if (!requireTenantLevel(c)) {
     return c.json<ApiResponse>({ ok: false, error: "Tenant-level auth required" }, 403);
@@ -1763,19 +2359,55 @@ async function updateIntentStatus(
       409,
     );
   }
-  const hasExecutionCheckpoint =
+  const executionRecovery = parseIntentExecutionRecovery(existing.executionResult);
+  if (status === "executed" && executionRecovery) {
+    try {
+      await assertIntentExecutionRecoveryBinding(existing, executionRecovery);
+    } catch (error) {
+      if (error instanceof IntentExecutionError) {
+        return c.json<ApiResponse>({ ok: false, error: error.message }, error.status);
+      }
+      throw error;
+    }
+  }
+  const hasLegacyExecutionCheckpoint =
     status === "executed" &&
     existing.status === "executing" &&
+    !executionRecovery &&
     existing.executionResult !== null &&
     typeof existing.executionResult === "object" &&
     !Array.isArray(existing.executionResult);
-  if (status === "executed" && existing.status !== "authorized" && !hasExecutionCheckpoint) {
+  const hasCompletedExecutionCheckpoint =
+    hasLegacyExecutionCheckpoint || executionRecovery?.state === "completed";
+  if (
+    status === "executed" &&
+    existing.status === "executing" &&
+    executionRecovery &&
+    executionRecovery.state !== "completed"
+  ) {
+    return c.json<ApiResponse>(
+      {
+        ok: true,
+        data: {
+          ...toIntentResponse(existing),
+          executionState: executionRecovery.state,
+          recoveryRequired: true,
+        },
+      },
+      202,
+    );
+  }
+  if (
+    status === "executed" &&
+    existing.status !== "authorized" &&
+    !hasCompletedExecutionCheckpoint
+  ) {
     return c.json<ApiResponse>(
       { ok: false, error: "Intent must be authorized before execution" },
       409,
     );
   }
-  if (status === "executed" && !hasExecutionCheckpoint) {
+  if (status === "executed" && !hasCompletedExecutionCheckpoint) {
     try {
       await assertIntentAuthorizationBaselineCurrent(existing);
     } catch (error) {
@@ -1805,99 +2437,52 @@ async function updateIntentStatus(
   }
   if (status === "executed") {
     let executionResult: Record<string, unknown>;
-    if (hasExecutionCheckpoint) {
+    let finalizationRecovery: IntentExecutionRecoveryEnvelope | null = null;
+    if (executionRecovery?.state === "completed") {
+      executionResult = executionRecovery.result as Record<string, unknown>;
+      finalizationRecovery = executionRecovery;
+    } else if (hasLegacyExecutionCheckpoint) {
       executionResult = existing.executionResult as Record<string, unknown>;
     } else {
-      await writeIntentAudit(c, "intent.execute.authorized", existing.id, {
-        agentId: existing.agentId,
-        intentType: existing.intentType,
-      });
-      const claimedAt = new Date();
-      const [claimedUpdate] = await db
-        .update(intents)
-        .set({
-          status: "executing",
-          updatedAt: claimedAt,
-          executedBy: actorId(c),
-        })
-        .where(
-          and(
-            eq(intents.id, intentId),
-            eq(intents.tenantId, tenantId),
-            eq(intents.status, "authorized"),
-            intentNotExpiredPredicate(),
-          ),
-        )
-        .returning();
-      if (!claimedUpdate) {
-        const [expired] = await db
-          .update(intents)
-          .set({
-            status: "expired",
-            updatedAt: new Date(),
-            expiredAt: new Date(),
-            expiredBy: "system:expires_at",
-          })
-          .where(
-            and(
-              eq(intents.id, intentId),
-              eq(intents.tenantId, tenantId),
-              eq(intents.status, "authorized"),
-              sql`${intents.expiresAt} is not null and ${intents.expiresAt} <= now()`,
-            ),
-          )
-          .returning();
-        if (expired) {
-          await writeIntentAudit(c, "intent.expired", expired.id, {
-            agentId: expired.agentId,
-            intentType: expired.intentType,
-          });
-          dispatchIntentWebhook(tenantId, expired.agentId, "intent.expired", expired);
-          return c.json<ApiResponse>(
-            { ok: false, error: "Intent has expired", data: toIntentResponse(expired) },
-            409,
-          );
-        }
+      const claimed = await reserveIntentExecution(c, existing);
+      if (!claimed) {
         return c.json<ApiResponse>({ ok: false, error: "Intent lifecycle conflict" }, 409);
       }
-      const [claimed] = await db
-        .select()
-        .from(intents)
-        .where(and(eq(intents.id, intentId), eq(intents.tenantId, tenantId)));
-      if (!claimed || claimed.status !== "executing") {
-        return c.json<ApiResponse>({ ok: false, error: "Intent lifecycle conflict" }, 409);
+      const reserved = parseIntentExecutionRecovery(claimed.executionResult);
+      if (!reserved || reserved.state !== "reserved") {
+        throw new Error("Intent execution reservation was not persisted");
       }
 
       try {
-        await assertIntentAuthorizationBaselineCurrent(claimed);
-        executionResult = await executeTypedIntent(claimed);
+        const executed = await executeReservedIntent(c, claimed, reserved);
+        executionResult = executed.executionResult;
+        finalizationRecovery = executed.recovery;
       } catch (error) {
         const failureReason = sanitizeErrorMessage(error);
-        const failedAt = new Date();
-        const [failed] = await db
-          .update(intents)
-          .set({
-            status: "failed",
-            updatedAt: failedAt,
-            failedAt,
-            failedBy: actorId(c),
-            failureReason,
-          })
-          .where(
-            and(
-              eq(intents.id, intentId),
-              eq(intents.tenantId, tenantId),
-              eq(intents.status, "executing"),
-            ),
-          )
-          .returning();
-        if (failed) {
-          await writeIntentAudit(c, "intent.failed", failed.id, {
-            agentId: failed.agentId,
-            intentType: failed.intentType,
-            reason: failureReason,
-          });
-          dispatchIntentWebhook(tenantId, failed.agentId, "intent.failed", failed);
+        if (error instanceof IntentExecutionError && error.status !== 502) {
+          const failed = await markReservedIntentFailed(c, claimed, reserved, failureReason);
+          if (failed) dispatchIntentWebhook(tenantId, failed.agentId, "intent.failed", failed);
+        } else {
+          const unknown = await markReservedIntentOutcomeUnknown(
+            c,
+            claimed,
+            reserved,
+            error instanceof ExternalBroadcastOutcomeUnknownError ? error.transactionHash : null,
+          );
+          if (!unknown) {
+            return c.json<ApiResponse>({ ok: false, error: "Intent lifecycle conflict" }, 409);
+          }
+          return c.json<ApiResponse>(
+            {
+              ok: true,
+              data: {
+                ...toIntentResponse(unknown),
+                executionState: "outcome_unknown",
+                recoveryRequired: true,
+              },
+            },
+            202,
+          );
         }
         if (error instanceof IntentExecutionError) {
           if (error.status === 403) {
@@ -1912,49 +2497,9 @@ async function updateIntentStatus(
           if (error.status === 429) {
             return c.json<ApiResponse>({ ok: false, error: error.message }, 429);
           }
-          if (error.status === 502) {
-            return c.json<ApiResponse>({ ok: false, error: error.message }, 502);
-          }
           return c.json<ApiResponse>({ ok: false, error: error.message }, 400);
         }
         return c.json<ApiResponse>({ ok: false, error: failureReason }, 400);
-      }
-
-      const storedCheckpoint = redactSignedTransactions(executionResult) as Record<string, unknown>;
-      const checkpointed = await withTenantAuditedTransaction(
-        tenantId,
-        async (txRaw, appendRequiredAudit) => {
-          const tx = txRaw as typeof db;
-          const [checkpointed] = await tx
-            .update(intents)
-            .set({ executionResult: storedCheckpoint, updatedAt: new Date() })
-            .where(
-              and(
-                eq(intents.id, intentId),
-                eq(intents.tenantId, tenantId),
-                eq(intents.status, "executing"),
-                sql`${intents.executionResult} is null`,
-              ),
-            )
-            .returning();
-          if (!checkpointed) return false;
-          await appendRequiredAudit({
-            tenantId,
-            actorType: auditActorType(c),
-            actorId: actorId(c),
-            action: "intent.execution.checkpointed",
-            resourceType: "intent",
-            resourceId: checkpointed.id,
-            metadata: { agentId: checkpointed.agentId, intentType: checkpointed.intentType },
-            ipAddress: c.req.header("x-forwarded-for") ?? null,
-            userAgent: c.req.header("user-agent") ?? null,
-            requestId: c.get("requestId") ?? null,
-          });
-          return true;
-        },
-      );
-      if (!checkpointed) {
-        return c.json<ApiResponse>({ ok: false, error: "Intent lifecycle conflict" }, 409);
       }
     }
 
@@ -1967,23 +2512,41 @@ async function updateIntentStatus(
       row = await withTenantAuditedTransaction(tenantId, async (txRaw, appendRequiredAudit) => {
         const tx = txRaw as typeof db;
         const now = new Date();
-        const [finalized] = await tx
+        await tx
           .update(intents)
           .set({
             status: "executed",
             executionResult: storedExecutionResult,
             updatedAt: now,
             executedAt: now,
-            executedBy: actorId(c),
+            executedBy: finalizationRecovery?.reservedBy ?? actorId(c),
           })
           .where(
             and(
               eq(intents.id, intentId),
               eq(intents.tenantId, tenantId),
               eq(intents.status, "executing"),
+              finalizationRecovery?.state === "completed"
+                ? and(
+                    intentExecutionRecoveryCas(finalizationRecovery, "completed"),
+                    sql`${intents.executionResult}->>'resultDigest' = ${finalizationRecovery.resultDigest}`,
+                  )
+                : sql`${intents.executionResult} is not null`,
             ),
-          )
-          .returning();
+          );
+        const [finalized] = await tx
+          .select()
+          .from(intents)
+          .where(
+            and(
+              eq(intents.id, intentId),
+              eq(intents.tenantId, tenantId),
+              eq(intents.status, "executed"),
+              eq(intents.updatedAt, now),
+              eq(intents.executedAt, now),
+              eq(intents.executedBy, finalizationRecovery?.reservedBy ?? actorId(c)),
+            ),
+          );
         if (!finalized) return null;
 
         await appendRequiredAudit({
@@ -1996,6 +2559,14 @@ async function updateIntentStatus(
           metadata: {
             agentId: finalized.agentId,
             intentType: finalized.intentType,
+            ...(finalizationRecovery
+              ? {
+                  reservationId: finalizationRecovery.reservationId,
+                  intentDigest: finalizationRecovery.intentDigest,
+                  executionDigest: finalizationRecovery.executionDigest,
+                  resultDigest: finalizationRecovery.resultDigest,
+                }
+              : {}),
           },
           ipAddress: c.req.header("x-forwarded-for") ?? null,
           userAgent: c.req.header("user-agent") ?? null,

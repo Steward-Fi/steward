@@ -31,6 +31,7 @@ import {
   toPolicyRule,
   transactions,
   users,
+  withIndependentDatabase,
   withTenantRlsTransaction,
   withTenantTransactionDatabase,
 } from "@stwd/db";
@@ -768,6 +769,27 @@ export async function withAuthenticatedTenantDatabase<T>(
     async (tx) =>
       withTenantTransactionDatabase(tx as never, { tenantId, userId }, callback, characteristics),
     characteristics,
+  );
+}
+
+/**
+ * Commit an autonomous tenant-RLS unit while tenantAuth's request transaction
+ * remains open. Pre-I/O reservations use this boundary so a later request
+ * rollback cannot erase the non-replayable execution fence.
+ */
+export async function withIndependentAuthenticatedTenantDatabase<T>(
+  tenantId: string,
+  method: string,
+  subject: string,
+  callback: () => Promise<T>,
+  userId?: string,
+): Promise<T> {
+  const context = tenantContextFromAuthenticatedPrincipal({ tenantId, method, subject, userId });
+  const driver = isPGLiteRuntime ? "pglite" : getDatabaseDriver();
+  return withIndependentDatabase((independentDb) =>
+    withTenantRlsTransaction(independentDb as never, driver, context, async (tx) =>
+      withTenantTransactionDatabase(tx as never, { tenantId, userId }, callback),
+    ),
   );
 }
 
