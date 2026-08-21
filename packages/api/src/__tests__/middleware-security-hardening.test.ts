@@ -80,25 +80,24 @@ describe("middleware security hardening", () => {
     expect(contextSource).toContain('"Tenant header does not match token"');
   });
 
-  it("applies Bun runtime gates before Hono route dispatch", () => {
-    expect(indexSource).toContain(
-      "function runtimeGate(request: Request, peerAddress: string | null)",
-    );
+  it("applies the Bun shutdown gate before Hono route dispatch", () => {
+    expect(indexSource).toContain("function runtimeGate()");
     expect(indexSource).toContain("const peerAddress = server.requestIP(request)?.address ?? null");
-    expect(indexSource).toContain("runtimeGate(request, peerAddress)");
+    expect(indexSource).toContain("runtimeGate()");
     // The runtime gate must run before Hono route dispatch.
-    const gateAt = indexSource.indexOf("runtimeGate(request, peerAddress)");
+    const gateAt = indexSource.indexOf("runtimeGate()");
     const fetchAt = indexSource.indexOf("app.fetch(request,");
     expect(gateAt).toBeGreaterThanOrEqual(0);
     expect(fetchAt).toBeGreaterThan(gateAt);
     expect(indexSource).not.toContain('app.use("*", async (c, next) => {');
   });
 
-  it("mounts the shared Redis-backed global limiter on the Workers runtime (SEC-068)", () => {
-    expect(appSource).toContain("if (isWorkersRuntime) {");
-    expect(appSource).toContain('app.use("*", workersGlobalRateLimit)');
+  it("mounts the production-durable global limiter on every runtime (SEC-068)", () => {
+    expect(appSource).toContain('app.use("*", globalRateLimit)');
     expect(globalRateLimitSource).toContain("checkAuthRateLimit(");
     expect(globalRateLimitSource).toContain('c.req.path === "/health"');
+    expect(globalRateLimitSource).toContain('c.req.path === "/ready"');
+    expect(globalRateLimitSource).toContain("strictDurable: true");
     expect(globalRateLimitSource).toContain('"Rate limit exceeded"');
   });
 
@@ -108,6 +107,8 @@ describe("middleware security hardening", () => {
     expect(indexSource).toContain("timingSafeEqual");
     expect(indexSource).toContain('"x-steward-probe-token"');
     expect(indexSource).toContain("checks: verbose ? checks : publicChecks");
+    expect(indexSource).toContain("globalRateLimitRequiresRedis()");
+    expect(indexSource).toContain("Redis is required for durable production rate limiting");
   });
 
   it("documents production security headers and dashboard CSP checks in source", () => {
