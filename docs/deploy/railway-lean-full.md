@@ -20,7 +20,7 @@ plugins to register. source of truth: `packages/api/src/plugin-config.ts`
 | mode | env | what boots |
 |------|-----|------------|
 | **lean** | `STEWARD_PLUGINS` unset / empty | core only. trading routes NOT mounted, trading module never evaluated, trading migrations NOT run |
-| **full** | `STEWARD_PLUGINS=trading` | core + trading. trading routes mounted, trading migrations run on boot |
+| **full** | `STEWARD_PLUGINS=trading` | core + trading. the release job applies trading migrations before routes mount |
 
 legacy compatibility: `STEWARD_ENABLE_TRADING=true` ALSO enables trading (it
 unions `trading` into the set). prefer `STEWARD_PLUGINS=trading` for new config;
@@ -70,7 +70,11 @@ service where noted, e.g. each service its own DB).
 | `PORT=3200` | required | listen port; `/health` probe targets it | `Dockerfile` (`ENV PORT=3200`), `packages/api/src/index.ts` |
 | `STEWARD_BIND_HOST=0.0.0.0` | required on Railway | default is `127.0.0.1` (loopback only) — Railway's proxy can't reach the container unless it binds `0.0.0.0` | `packages/api/src/index.ts` (`STEWARD_BIND_HOST`) |
 | `STEWARD_TRUSTED_PROXY_HOPS=2` | required on Railway | per-client auth rate limiting: number of trusted proxies APPENDING to `x-forwarded-for` (the entry that many hops from the RIGHT is the client IP). Bare Railway = **2**: `x-forwarded-for` arrives as `<client>, <railway-edge>` and the right-most edge entry rotates between Railway nodes, so `hops=1` scatters a client across buckets while `hops=2` locks onto the stable client entry (verified against prod). Until it is set, auth rate limits fall back to coarse per-host buckets, which are weaker on a directly-exposed (non-Host-locked) service. Never set higher than the real hop count — that re-opens IP spoofing | `packages/api/src/routes/auth.ts` (`trustedClientIp`) |
-| `DATABASE_URL` | **[boot-fatal in prod]** | Postgres connection. boot runs `runMigrations()` blocking before serving; a bad/missing URL fails migration → `process.exit(1)` | `packages/api/src/index.ts`, `packages/db` (`shouldUsePGLite`) |
+| `DATABASE_URL` | **[boot-fatal in prod]** | Restricted, non-owner `steward_app` connection. Migration/operator credentials are forbidden here. | `packages/api/src/index.ts`, `packages/db/src/rls-deployment-safety.ts` |
+| `STEWARD_APP_DATABASE_ROLE=steward_app` | **[boot-fatal in prod]** | Pins the exact restricted login expected on `DATABASE_URL`. | `packages/api/src/index.ts` |
+| `STEWARD_PLATFORM_DATABASE_URL` | required for destructive platform operations | Separate restricted platform-authority login; never reuse the app URL. | `packages/api/src/services/platform-authority-database.ts` |
+| `STEWARD_PLATFORM_DATABASE_ROLE=steward_platform` | required with platform URL | Pins the exact login used by the platform authority pool. | `packages/api/src/services/platform-authority-database.ts` |
+| `SKIP_MIGRATIONS=true` | required | Production API containers start only after the external release gate applies core/plugins, reconciles bootstrap ownership, and activates RLS. | `packages/api/src/index.ts`, `packages/api/src/migrate.ts` |
 | `STEWARD_JWT_SECRET` | **[boot-fatal in prod]** | canonical JWT signing secret. `validateJwtSecretEnv()` runs at module load in `index.ts`; in prod it THROWS if unset or `< 32` chars | `packages/auth/src/jwt.ts` (`getJwtSecret`), called from `packages/api/src/index.ts` |
 | `STEWARD_MASTER_PASSWORD` | **[boot-fatal / ready-gate]** | derives per-agent vault encryption keys. `/ready` reports `vault: not ok` if unset; vault key derivation throws when used | `packages/api/src/index.ts` (`/ready`), `packages/vault/src/keystore.ts` |
 | `STEWARD_KDF_SALT` | **[boot-fatal in prod]** | per-deploy KDF salt for vault key derivation. `keystore.ts` THROWS in production if unset (and requires ≥ 32 hex chars) | `packages/vault/src/keystore.ts` |
@@ -95,9 +99,14 @@ recommended-but-optional (mode-independent), set if the feature is used:
 | `STEWARD_OAUTH_ALLOWED_REDIRECTS` | OAuth redirect allowlist | `packages/api/src` |
 
 leave UNSET in any shared/prod env (dangerous if set): `STEWARD_ALLOW_DEV_SECRETS`,
-`STEWARD_ENABLE_PROD_TEST_ACCOUNT_TOKEN`, `SKIP_MIGRATIONS`, and the
+`STEWARD_ENABLE_PROD_TEST_ACCOUNT_TOKEN`, and the
 `STEWARD_ALLOW_*_EXPORT` / `STEWARD_ALLOW_UNSAFE_*` family — these are dev/break-glass
 escape hatches (`.env.example`, `packages/api/src`, `packages/vault/src`).
+
+Keep `STEWARD_MIGRATION_DATABASE_URL` and `STEWARD_OPERATOR_DATABASE_URL` only
+in a protected release job. Mirror the service's `STEWARD_PLUGINS`, run the API
+package migrator, bootstrap as a provider-superuser-equivalent, and activate as
+the direct migration role before either API service rolls out.
 
 ### trading-only (FULL service only)
 
@@ -211,8 +220,18 @@ openssl rand -hex 32   # STEWARD_MASTER_PASSWORD (long random)
 
 ### B. ship the image
 
+Before either service rolls out, run its protected release job with the same
+`STEWARD_PLUGINS` value. The job uses `STEWARD_MIGRATION_DATABASE_URL` for
+`bun run --cwd packages/api migrate`, the provider-superuser-equivalent
+`STEWARD_OPERATOR_DATABASE_URL` for bootstrap reconciliation, and the direct
+migration login for RLS activation. Never add either privileged URL to a lean or
+full API service.
+
 staging (auto): merge to `develop`. `Docker` builds+pushes
-`:develop`, then `Deploy Staging` deploys it to the staging service(s).
+`:develop`, then `Deploy Staging` deploys it to the staging service(s). The
+image-only workflow does not migrate; enable this automation only when the
+protected release gate is guaranteed to complete first for the same image and
+plugin selection.
 
 production (gated): merge `develop → main` (reviewed), then dispatch
 `Deploy Railway (Production)` from the Actions tab with the image tag (`main` or
@@ -259,11 +278,12 @@ drift — trading routes and trading migrations are always both-on or both-off.
 
 practical consequences when you flip a service:
 
-- **lean → full** (`STEWARD_PLUGINS` unset → `trading`): on the next boot the
-  trading plugin's migrations run (into per-plugin namespaced tables
+- **lean → full** (`STEWARD_PLUGINS` unset → `trading`): before the next boot,
+  the full service's protected release job runs the trading plugin's migrations
+  (into per-plugin namespaced tables
   `drizzle.__drizzle_migrations_plugin_<id>`, isolated from the core's
-  `drizzle.__drizzle_migrations` journal), AFTER the core migrator, then trading
-  routes mount. expect a slightly longer first boot while migrations apply.
+  `drizzle.__drizzle_migrations` journal), after the core migrator. Bootstrap
+  reconciliation and RLS activation must pass before the trading routes mount.
 - **full → lean** (`trading` → unset): trading routes stop mounting immediately.
   the trading TABLES are LEFT IN PLACE — this is harmless: they live in an
   isolated namespaced journal, nothing references them in lean mode, and they are
