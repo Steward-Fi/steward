@@ -14,6 +14,13 @@ function stable(value: unknown): string {
   return JSON.stringify(value);
 }
 
+function boundTextArray(values: readonly string[]) {
+  return sql`ARRAY[${sql.join(
+    values.map((value) => sql`${value}`),
+    sql`, `,
+  )}]::text[]`;
+}
+
 /**
  * Load-bearing production gate for the SEC-169 deployment role and catalog.
  * It deliberately runs through the exact application connection before traffic
@@ -39,7 +46,9 @@ export async function assertRlsDeploymentSafety(
           SELECT 1 FROM pg_class relation
           JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
           WHERE namespace.nspname = 'public'
-            AND relation.relname = ANY(${[...new Set(EXPECTED_RLS_POLICY_DEFINITIONS.map((p) => p.relation_name))]})
+            AND relation.relname = ANY(${boundTextArray([
+              ...new Set(EXPECTED_RLS_POLICY_DEFINITIONS.map((p) => p.relation_name)),
+            ])})
             AND relation.relowner = role.oid
         ) AS owns_rls_relation
       FROM pg_roles role WHERE role.rolname = current_user
