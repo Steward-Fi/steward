@@ -7501,6 +7501,7 @@ user.patch("/me/tenants/:tenantId/users/:targetUserId/deactivate", async (c) => 
   const result = await db
     .transaction(async (tx) => {
       await lockTenantOwnerLifecycle(tx, tenantId);
+      await lockUserSession(tx, targetUserId);
       const [membership] = await tx
         .select({ role: userTenants.role })
         .from(userTenants)
@@ -7679,6 +7680,7 @@ user.delete("/me/tenants/:tenantId/users/:targetUserId", async (c) => {
   try {
     deleted = await db.transaction(async (tx) => {
       await lockTenantOwnerLifecycle(tx, tenantId);
+      await lockUserSession(tx, targetUserId);
       const [current] = await tx
         .select({
           id: userTenants.id,
