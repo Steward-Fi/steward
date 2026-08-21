@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
+import { withRuntimeEnvironment } from "@stwd/shared/runtime-env";
 
 const checkRateLimitMock = mock(async () => ({
   allowed: true,
@@ -135,5 +136,100 @@ describe("Redis rate-limit wrappers", () => {
 
     expect(result.allowed).toBe(true);
     expect(result.remaining).toBe(Infinity);
+  });
+});
+
+describe("Redis spend-limit wrapper", () => {
+  const originalRedisUrl = process.env.REDIS_URL;
+
+  beforeEach(async () => {
+    checkSpendLimitMock.mockReset();
+    checkSpendLimitMock.mockImplementation(async () => ({
+      allowed: true,
+      spent: 0,
+      remaining: 1,
+    }));
+    pingMock.mockReset();
+    pingMock.mockImplementation(async () => "PONG");
+    await redisMiddleware.shutdownRedis();
+  });
+
+  afterEach(async () => {
+    await redisMiddleware.shutdownRedis();
+    if (originalRedisUrl === undefined) delete process.env.REDIS_URL;
+    else process.env.REDIS_URL = originalRedisUrl;
+  });
+
+  it("fails closed in production when durable spend state is absent", async () => {
+    const result = await withRuntimeEnvironment(
+      {
+        NODE_ENV: "production",
+        STEWARD_ADAPTER_DAILY_CAP_USD: "1000",
+      },
+      () => redisMiddleware.checkAgentSpendLimit("agent-production", 1000, "day"),
+    );
+
+    expect(result).toEqual({ allowed: false, spent: 0, remaining: 0 });
+    expect(checkSpendLimitMock).not.toHaveBeenCalled();
+  });
+
+  it("fails closed in production when configured durable spend state is down", async () => {
+    pingMock.mockImplementation(async () => {
+      throw new Error("connect ECONNREFUSED");
+    });
+    expect(
+      await withRuntimeEnvironment(
+        { NODE_ENV: "production", REDIS_URL: "redis://spend.test:6379" },
+        () => redisMiddleware.initRedis({ REDIS_URL: "redis://spend.test:6379" }),
+      ),
+    ).toBe(false);
+
+    const result = await withRuntimeEnvironment(
+      {
+        NODE_ENV: "production",
+        REDIS_URL: "redis://spend.test:6379",
+        STEWARD_ADAPTER_DAILY_CAP_USD: "1000",
+      },
+      () => redisMiddleware.checkAgentSpendLimit("agent-production", 1000, "day"),
+    );
+
+    expect(result).toEqual({ allowed: false, spent: 0, remaining: 0 });
+    expect(checkSpendLimitMock).not.toHaveBeenCalled();
+  });
+
+  it("does not inherit a stale configured client into a production request with no binding", async () => {
+    expect(
+      await withRuntimeEnvironment(
+        { NODE_ENV: "production", REDIS_URL: "redis://request-a.test:6379" },
+        () => redisMiddleware.initRedis({ REDIS_URL: "redis://request-a.test:6379" }),
+      ),
+    ).toBe(true);
+    expect(redisMiddleware.isRedisAvailable()).toBe(true);
+
+    const result = await withRuntimeEnvironment(
+      {
+        NODE_ENV: "production",
+        STEWARD_ADAPTER_DAILY_CAP_USD: "1000",
+      },
+      () => redisMiddleware.checkAgentSpendLimit("agent-request-b", 1000, "day"),
+    );
+
+    expect(result).toEqual({ allowed: false, spent: 0, remaining: 0 });
+    expect(checkSpendLimitMock).not.toHaveBeenCalled();
+  });
+
+  it("keeps explicit unconfigured development and test postures permissive", async () => {
+    for (const nodeEnv of ["development", "test"] as const) {
+      const result = await withRuntimeEnvironment(
+        {
+          NODE_ENV: nodeEnv,
+          STEWARD_ADAPTER_DAILY_CAP_USD: "1000",
+        },
+        () => redisMiddleware.checkAgentSpendLimit(`agent-${nodeEnv}`, 1000, "day"),
+      );
+
+      expect(result).toEqual({ allowed: true, spent: 0, remaining: 1000 });
+      expect(checkSpendLimitMock).not.toHaveBeenCalled();
+    }
   });
 });

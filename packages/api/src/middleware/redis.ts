@@ -2,9 +2,9 @@
  * Redis middleware — initializes the Redis client and exposes
  * rate-limiting + spend-tracking helpers on the Hono context.
  *
- * When Redis is not configured, the middleware is a no-op and the helpers
- * return documented local-development defaults. If Redis is configured and a
- * money-path/rate-limit helper cannot read it, the helper fails closed.
+ * When Redis is not configured, the middleware is a no-op. Helpers return
+ * documented defaults only in explicit non-production postures; production
+ * money-path enforcement fails closed when durable state is absent or down.
  */
 
 import {
@@ -19,6 +19,7 @@ import {
   type SpendRecordOptions,
 } from "@stwd/redis";
 import { redactedThrownDiagnostics } from "@stwd/shared";
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 
 // ─── Redis availability flag ─────────────────────────────────────────────────
 
@@ -74,14 +75,16 @@ export function isRedisAvailable(): boolean {
 }
 
 export function isRedisConfigured(): boolean {
-  const driver = process.env.REDIS_DRIVER?.trim().toLowerCase() || "ioredis";
+  const driver = runtimeEnvironmentValue("REDIS_DRIVER")?.trim().toLowerCase() || "ioredis";
   if (driver === "upstash") {
     return Boolean(
-      (process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL) &&
-        (process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN),
+      (runtimeEnvironmentValue("KV_REST_API_URL") ||
+        runtimeEnvironmentValue("UPSTASH_REDIS_REST_URL")) &&
+        (runtimeEnvironmentValue("KV_REST_API_TOKEN") ||
+          runtimeEnvironmentValue("UPSTASH_REDIS_REST_TOKEN")),
     );
   }
-  return Boolean(process.env.REDIS_URL);
+  return Boolean(runtimeEnvironmentValue("REDIS_URL"));
 }
 
 /**
@@ -178,13 +181,19 @@ export async function checkAgentSpendLimit(
   limitUsd: number,
   period: SpendPeriod,
 ): Promise<{ allowed: boolean; spent: number; remaining: number }> {
-  // Redis not available: only skip enforcement when Redis was never configured
-  // (documented dev path). If Redis IS configured (production), an unavailable
-  // backend must fail CLOSED rather than silently allow unlimited spend.
-  if (!redisAvailable) {
-    if (!isRedisConfigured()) return { allowed: true, spent: 0, remaining: limitUsd };
+  // Resolve authority from the immutable request snapshot before consulting
+  // process-global connection state. A Worker request without Redis bindings
+  // must never inherit a client initialized by a previous request.
+  if (!isRedisConfigured()) {
+    if (runtimeEnvironmentValue("NODE_ENV") !== "production") {
+      return { allowed: true, spent: 0, remaining: limitUsd };
+    }
     return { allowed: false, spent: 0, remaining: 0 };
   }
+
+  // The current request expects durable enforcement, but the configured client
+  // was absent or failed to initialize. Deny rather than assume zero spend.
+  if (!redisAvailable) return { allowed: false, spent: 0, remaining: 0 };
 
   try {
     return await checkSpendLimit(agentId, limitUsd, period);
