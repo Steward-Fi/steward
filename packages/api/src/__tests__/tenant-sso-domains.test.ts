@@ -1,113 +1,469 @@
-import { describe, expect, it } from "bun:test";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { generateApiKey } from "@stwd/auth";
+import {
+  __resetAuditHmacKeyCacheForTests,
+  auditEvents,
+  closeDb,
+  getDb,
+  tenantConfigs,
+  tenantSamlSsoConfigs,
+  tenantSsoDomains,
+  tenants,
+  users,
+  userTenants,
+} from "@stwd/db";
+import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
+import { and, eq, sql } from "drizzle-orm";
+import { Hono } from "hono";
 
-const ROOT = join(import.meta.dir, "../../../..");
+const TENANT_ID = "tenant-sso-mounted";
+const DOMAIN = "company.example.test";
+const CERT = `-----BEGIN CERTIFICATE-----
+${"c2lnbmVkLXRlc3QtY2VydGlmaWNhdGU=".repeat(5)}
+-----END CERTIFICATE-----`;
 
-function read(path: string): string {
-  return readFileSync(join(ROOT, path), "utf-8");
-}
+describe("mounted tenant SAML and SSO-domain control plane", () => {
+  let app: Hono;
+  let ownerToken = "";
+  let memberToken = "";
+  let staleToken = "";
+  let apiKey = "";
+  let setTxtResolver: (resolver?: (hostname: string) => Promise<string[][]>) => void;
 
-describe("tenant SSO domain hardening", () => {
-  it("requires DNS TXT proof before a tenant SSO domain can become discoverable", () => {
-    const source = read("packages/api/src/routes/tenant-config.ts");
-    const verifyStart = source.indexOf('tenantConfigRoutes.post("/:id/sso-domains/:domain/verify"');
-    expect(verifyStart).toBeGreaterThanOrEqual(0);
-    const verifyEnd = source.indexOf("\ntenantConfigRoutes.", verifyStart + 1);
-    const verifyRoute = source.slice(verifyStart, verifyEnd === -1 ? undefined : verifyEnd);
+  beforeAll(async () => {
+    process.env.STEWARD_PGLITE_MEMORY = "true";
+    process.env.STEWARD_MASTER_PASSWORD = "tenant-sso-mounted-master-password";
+    process.env.STEWARD_JWT_SECRET = "tenant-sso-mounted-jwt-secret";
+    process.env.STEWARD_AUDIT_HMAC_KEY = "tenant-sso-mounted-audit-key-at-least-32-bytes";
+    process.env.APP_URL = "https://api.example.test/";
+    process.env.GOOGLE_CLIENT_ID = "tenant-sso-google-client";
+    process.env.GOOGLE_CLIENT_SECRET = "tenant-sso-google-secret";
+    process.env.STEWARD_ALLOW_UNBOUND_OAUTH_PROVIDER_CODE_EXCHANGE = "true";
+    __resetAuditHmacKeyCacheForTests();
 
-    expect(source).toContain('import { resolveTxt } from "node:dns/promises"');
-    expect(source).toContain("async function hasSsoDomainVerificationTxt");
-    expect(source).toContain("resolveTxt(`_steward-sso.${domain}`)");
-    expect(verifyRoute).toContain("previousDomain.verificationToken");
-    expect(verifyRoute).toContain(
-      "hasSsoDomainVerificationTxt(domain, previousDomain.verificationToken)",
+    const { db, client } = await createPGLiteDb("memory://");
+    setPGLiteOverride(db, async () => client.close());
+
+    const keyPair = generateApiKey();
+    apiKey = keyPair.key;
+    await getDb().insert(tenants).values({
+      id: TENANT_ID,
+      name: "Mounted SSO Tenant",
+      apiKeyHash: keyPair.hash,
+    });
+    await getDb()
+      .insert(tenantConfigs)
+      .values({
+        tenantId: TENANT_ID,
+        joinMode: "open",
+        allowedOrigins: ["https://app.example.test"],
+        allowedRedirectUrls: ["https://app.example.test/callback"],
+      });
+    const [owner, member] = await getDb()
+      .insert(users)
+      .values([
+        { email: "owner@company.example.test", emailVerified: true },
+        { email: "member@company.example.test", emailVerified: true },
+      ])
+      .returning({ id: users.id });
+    await getDb()
+      .insert(userTenants)
+      .values([
+        { userId: owner.id, tenantId: TENANT_ID, role: "owner" },
+        { userId: member.id, tenantId: TENANT_ID, role: "member" },
+      ]);
+
+    const authModule = await import("../routes/auth");
+    const tenantModule = await import("../routes/tenant-config");
+    setTxtResolver = tenantModule.__setSsoDomainTxtResolverForTests;
+    ownerToken = await authModule.createSessionToken(
+      "0x0000000000000000000000000000000000000000",
+      TENANT_ID,
+      { userId: owner.id, tenantId: TENANT_ID, mfaVerifiedAt: Date.now(), mfaMethod: "totp" },
     );
-    expect(verifyRoute).toContain('action: "tenant.sso_domain.verify.authorized"');
-    expect(verifyRoute.indexOf('action: "tenant.sso_domain.verify.authorized"')).toBeLessThan(
-      verifyRoute.indexOf(".update(tenantSsoDomains)"),
+    memberToken = await authModule.createSessionToken(
+      "0x0000000000000000000000000000000000000000",
+      TENANT_ID,
+      { userId: member.id, tenantId: TENANT_ID, mfaVerifiedAt: Date.now(), mfaMethod: "totp" },
     );
+    staleToken = await authModule.createSessionToken(
+      "0x0000000000000000000000000000000000000000",
+      TENANT_ID,
+      {
+        userId: owner.id,
+        tenantId: TENANT_ID,
+        mfaVerifiedAt: Date.now() - 20 * 60_000,
+        mfaMethod: "totp",
+      },
+    );
+
+    app = new Hono();
+    app.route("/tenants", tenantModule.tenantConfigRoutes);
+    app.route("/auth", authModule.authRoutes);
+    app.onError((error, c) => c.json({ ok: false, error: error.message }, 500));
+  }, 120_000);
+
+  afterAll(async () => {
+    setTxtResolver?.();
+    await closeDb();
+    for (const name of [
+      "STEWARD_PGLITE_MEMORY",
+      "STEWARD_MASTER_PASSWORD",
+      "STEWARD_JWT_SECRET",
+      "STEWARD_AUDIT_HMAC_KEY",
+      "APP_URL",
+      "GOOGLE_CLIENT_ID",
+      "GOOGLE_CLIENT_SECRET",
+      "STEWARD_ALLOW_UNBOUND_OAUTH_PROVIDER_CODE_EXCHANGE",
+    ]) {
+      delete process.env[name];
+    }
+    __resetAuditHmacKeyCacheForTests();
   });
 
-  it("makes SSO domain control-plane mutations atomic with final audits", () => {
-    const source = read("packages/api/src/routes/tenant-config.ts");
+  const sessionHeaders = (token = ownerToken): Record<string, string> => ({
+    Authorization: `Bearer ${token}`,
+    "Content-Type": "application/json",
+  });
 
-    for (const [marker, authorizedAction, finalAction] of [
-      [
-        'tenantConfigRoutes.post("/:id/sso-domains"',
-        'action: "tenant.sso_domain.upsert.authorized"',
-        'action: "tenant.sso_domain.upsert"',
-      ],
-      [
-        'tenantConfigRoutes.post("/:id/sso-domains/:domain/verify"',
-        'action: "tenant.sso_domain.verify.authorized"',
-        'action: "tenant.sso_domain.verify"',
-      ],
-      [
-        'tenantConfigRoutes.delete("/:id/sso-domains/:domain"',
-        'action: "tenant.sso_domain.delete.authorized"',
-        'action: "tenant.sso_domain.delete"',
-      ],
-    ] as const) {
-      const start = source.indexOf(marker);
-      expect(start).toBeGreaterThanOrEqual(0);
-      const nextRoute = source.indexOf("\ntenantConfigRoutes.", start + marker.length);
-      const route = source.slice(start, nextRoute === -1 ? undefined : nextRoute);
-      expect(route).toContain(authorizedAction);
-      expect(route).toContain("withTenantAuditedTransaction(tenantId");
-      expect(route).toContain("appendRequiredAudit({");
-      expect(route).toContain(finalAction);
-      expect(route).not.toContain("restoreTenantSsoDomain");
+  const samlConfig = () => ({
+    enabled: true,
+    idpEntityId: "https://idp.example.test/saml",
+    idpSsoUrl: "https://idp.example.test/sso",
+    idpCertPems: [CERT],
+    emailAttribute: "email",
+    groupsAttribute: "groups",
+    groupRoleMappings: [{ group: "Engineering", role: "developer" }],
+    allowJitProvisioning: true,
+  });
+
+  it("denies API keys, non-admin members, and stale MFA before SSO config reads or writes", async () => {
+    for (const headers of [
+      { "X-Steward-Key": apiKey, "X-Steward-Tenant": TENANT_ID },
+      sessionHeaders(memberToken),
+      sessionHeaders(staleToken),
+    ]) {
+      const getResponse = await app.request(`/tenants/${TENANT_ID}/saml-sso`, { headers });
+      expect(getResponse.status).toBe(403);
+      const putResponse = await app.request(`/tenants/${TENANT_ID}/saml-sso`, {
+        method: "PUT",
+        headers,
+        body: JSON.stringify(samlConfig()),
+      });
+      expect(putResponse.status).toBe(403);
     }
   });
 
-  it("does not let two tenants verify the same SSO discovery domain", () => {
-    const source = read("packages/api/src/routes/tenant-config.ts");
-    const auth = read("packages/api/src/routes/auth.ts");
-    const verifyStart = source.indexOf('tenantConfigRoutes.post("/:id/sso-domains/:domain/verify"');
-    const verifyEnd = source.indexOf("\ntenantConfigRoutes.", verifyStart + 1);
-    const verifyRoute = source.slice(verifyStart, verifyEnd === -1 ? undefined : verifyEnd);
+  it("mounts SAML config and public metadata with APP_URL-pinned, no-store SP URLs", async () => {
+    const unsafe = await app.request(`/tenants/${TENANT_ID}/saml-sso`, {
+      method: "PUT",
+      headers: sessionHeaders(),
+      body: JSON.stringify({ ...samlConfig(), idpSsoUrl: "https://127.0.0.1/sso" }),
+    });
+    expect(unsafe.status).toBe(400);
 
-    expect(verifyRoute).toContain("existingVerifiedDomain");
-    expect(verifyRoute).toContain("existingVerifiedDomain.tenantId !== tenantId");
-    expect(verifyRoute).toContain("SSO domain is already verified by another tenant");
-    expect(auth).toContain("steward_bootstrap.auth_sso_discovery_subject");
-    expect(auth).toContain("rows.length === 1");
+    const privateKey = await app.request(`/tenants/${TENANT_ID}/saml-sso`, {
+      method: "PUT",
+      headers: sessionHeaders(),
+      body: JSON.stringify({
+        ...samlConfig(),
+        idpCertPems: [`-----BEGIN PRIVATE KEY-----\n${"a".repeat(160)}\n-----END PRIVATE KEY-----`],
+      }),
+    });
+    expect(privateKey.status).toBe(400);
+
+    const put = await app.request(`/tenants/${TENANT_ID}/saml-sso`, {
+      method: "PUT",
+      headers: sessionHeaders(),
+      body: JSON.stringify(samlConfig()),
+    });
+    expect(put.status).toBe(200);
+    const putBody = (await put.json()) as {
+      data: { config: { spEntityId: string; acsUrl: string } };
+    };
+    expect(putBody.data.config).toMatchObject({
+      spEntityId: `https://api.example.test/auth/saml/${TENANT_ID}/metadata`,
+      acsUrl: `https://api.example.test/auth/saml/${TENANT_ID}/acs`,
+    });
+    expect(put.headers.get("cache-control")).toContain("no-store");
+
+    const get = await app.request(`/tenants/${TENANT_ID}/saml-sso`, {
+      headers: sessionHeaders(),
+    });
+    expect(get.status).toBe(200);
+    expect((await get.json()) as object).toEqual(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          serviceProvider: {
+            spEntityId: `https://api.example.test/auth/saml/${TENANT_ID}/metadata`,
+            acsUrl: `https://api.example.test/auth/saml/${TENANT_ID}/acs`,
+            metadataUrl: `https://api.example.test/auth/saml/${TENANT_ID}/metadata`,
+          },
+        }),
+      }),
+    );
+
+    const metadata = await app.request(`/auth/saml/${TENANT_ID}/metadata`);
+    expect(metadata.status).toBe(200);
+    expect(metadata.headers.get("content-type")).toContain("application/samlmetadata+xml");
+    const xml = await metadata.text();
+    expect(xml).toContain(`entityID="https://api.example.test/auth/saml/${TENANT_ID}/metadata"`);
+    expect(xml).toContain(`Location="https://api.example.test/auth/saml/${TENANT_ID}/acs"`);
+
+    const malformedAcs = await app.request(`/auth/saml/${TENANT_ID}/acs`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ SAMLResponse: "not-a-secret" }),
+    });
+    expect(malformedAcs.status).toBe(400);
+    const malformedBody = await malformedAcs.text();
+    expect(malformedBody).not.toContain(CERT);
+    expect(malformedBody).not.toContain("PRIVATE KEY");
   });
 
-  it("enforces SSO-required domains against email and built-in OAuth login", () => {
-    const auth = read("packages/api/src/routes/auth.ts");
+  it("uses injected DNS proof for add, verify, discovery, and delete behavior", async () => {
+    const add = await app.request(`/tenants/${TENANT_ID}/sso-domains`, {
+      method: "POST",
+      headers: sessionHeaders(),
+      body: JSON.stringify({ domain: DOMAIN.toUpperCase(), ssoRequired: true }),
+    });
+    expect(add.status).toBe(201);
+    const addBody = (await add.json()) as {
+      data: { domain: { domain: string; verificationToken: string; status: string } };
+    };
+    const token = addBody.data.domain.verificationToken;
+    expect(addBody.data.domain).toMatchObject({ domain: DOMAIN, status: "pending" });
 
-    expect(auth).toContain("async function isSsoRequiredForEmailDomain");
-    expect(auth).toContain("async function requireNonSsoEmailLoginAllowed");
-    expect(auth).toContain("Email login is disabled because this email domain requires SSO");
-    expect(auth).toContain("OAuth login is disabled because this email domain requires SSO");
-    expect(auth).toContain('authMethod: "oidc"');
-  });
+    let requestedHostname = "";
+    setTxtResolver(async (hostname) => {
+      requestedHostname = hostname;
+      return [["wrong-token"]];
+    });
+    const missing = await app.request(`/tenants/${TENANT_ID}/sso-domains/${DOMAIN}/verify`, {
+      method: "POST",
+      headers: sessionHeaders(),
+    });
+    expect(missing.status).toBe(409);
+    expect(requestedHostname).toBe(`_steward-sso.${DOMAIN}`);
 
-  it("enforces SSO-required domains against passkey enrollment and login", () => {
-    const auth = read("packages/api/src/routes/auth.ts");
+    setTxtResolver(async () => [[token.slice(0, 12), token.slice(12)]]);
+    const verify = await app.request(`/tenants/${TENANT_ID}/sso-domains/${DOMAIN}/verify`, {
+      method: "POST",
+      headers: sessionHeaders(),
+    });
+    expect(verify.status).toBe(200);
 
-    for (const [routeMarker, tenantMarker] of [
-      ['auth.post("/passkey/register/options"', "session.payload.tenantId"],
-      ['auth.post("/passkey/register/verify"', "tenantId"],
-      ['auth.post("/passkey/login/options"', "optionTenantId"],
-      ['auth.post("/passkey/login/verify"', "tenantId"],
+    const discovery = await app.request("/auth/sso/discover", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: `person@${DOMAIN}` }),
+    });
+    expect(discovery.status).toBe(200);
+    expect(await discovery.json()).toEqual({
+      ok: true,
+      data: {
+        available: true,
+        domain: DOMAIN,
+        tenantId: TENANT_ID,
+        ssoRequired: true,
+      },
+    });
+
+    for (const [path, body, headers] of [
+      [
+        "/auth/email/send",
+        { email: `owner@${DOMAIN}`, tenantId: TENANT_ID },
+        { "Content-Type": "application/json" },
+      ],
+      [
+        "/auth/passkey/login/options",
+        { email: `owner@${DOMAIN}`, tenantId: TENANT_ID },
+        { "Content-Type": "application/json" },
+      ],
+      ["/auth/passkey/register/options", { email: `owner@${DOMAIN}` }, sessionHeaders()],
     ] as const) {
-      const routeStart = auth.indexOf(routeMarker);
-      expect(routeStart).toBeGreaterThanOrEqual(0);
-      const nextRoute = auth.indexOf("\nauth.", routeStart + routeMarker.length);
-      const route = auth.slice(routeStart, nextRoute === -1 ? undefined : nextRoute);
-      expect(route).toContain("requireNonSsoEmailLoginAllowed(");
-      expect(route).toContain(tenantMarker);
-      expect(route).toContain("email");
-      expect(route).toContain('"Passkey"');
-      expect(route).toContain("if (ssoRequiredResponse) return ssoRequiredResponse");
-      if (routeMarker === 'auth.post("/passkey/login/verify"') {
-        expect(route.indexOf("if (ssoRequiredResponse) return ssoRequiredResponse")).toBeLessThan(
-          route.indexOf("getChallengeStore().consume"),
+      const blocked = await app.request(path, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(body),
+      });
+      expect(blocked.status).toBe(403);
+      expect(((await blocked.json()) as { error: string }).error).toContain("requires SSO");
+    }
+
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "https://oauth2.googleapis.com/token") {
+        return new Response(
+          JSON.stringify({
+            access_token: "provider-token",
+            expires_in: 3600,
+            token_type: "Bearer",
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
         );
       }
+      if (url === "https://www.googleapis.com/oauth2/v3/userinfo") {
+        return new Response(
+          JSON.stringify({
+            id: "sso-oauth-user",
+            email: `owner@${DOMAIN}`,
+            verified_email: true,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      return new Response(`unexpected fetch: ${url}`, { status: 500 });
+    }) as typeof fetch;
+    try {
+      const oauth = await app.request("/auth/oauth/google/token", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          code: "provider-code",
+          redirectUri: "https://app.example.test/callback",
+          tenantId: TENANT_ID,
+        }),
+      });
+      expect(oauth.status).toBe(403);
+      expect(((await oauth.json()) as { error: string }).error).toContain("requires SSO");
+    } finally {
+      globalThis.fetch = originalFetch;
     }
+
+    const remove = await app.request(`/tenants/${TENANT_ID}/sso-domains/${DOMAIN}`, {
+      method: "DELETE",
+      headers: sessionHeaders(),
+    });
+    expect(remove.status).toBe(200);
+    const unavailable = await app.request("/auth/sso/discover", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: `person@${DOMAIN}` }),
+    });
+    expect(await unavailable.json()).toEqual({
+      ok: true,
+      data: {
+        available: false,
+        domain: DOMAIN,
+        tenantId: null,
+        ssoRequired: false,
+      },
+    });
+  });
+
+  it("rolls back every SAML/domain mutation when its completion audit is rejected", async () => {
+    const cases = [
+      "tenant.saml_sso.update",
+      "tenant.saml_sso.delete",
+      "tenant.sso_domain.upsert",
+      "tenant.sso_domain.verify",
+      "tenant.sso_domain.delete",
+    ] as const;
+
+    for (const action of cases) {
+      const completedBefore = await getDb()
+        .select()
+        .from(auditEvents)
+        .where(and(eq(auditEvents.tenantId, TENANT_ID), eq(auditEvents.action, action)));
+      await getDb().execute(sql`DROP TRIGGER IF EXISTS reject_sso_completion ON audit_events`);
+      await getDb().execute(sql`DROP FUNCTION IF EXISTS reject_sso_completion()`);
+      await getDb().execute(
+        sql.raw(`
+        CREATE FUNCTION reject_sso_completion() RETURNS trigger AS $$
+        BEGIN
+          IF NEW.action = '${action}' THEN
+            RAISE EXCEPTION 'injected SSO completion audit failure';
+          END IF;
+          RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql
+      `),
+      );
+      await getDb().execute(sql`
+        CREATE TRIGGER reject_sso_completion BEFORE INSERT ON audit_events
+        FOR EACH ROW EXECUTE FUNCTION reject_sso_completion()
+      `);
+
+      if (action === "tenant.saml_sso.update") {
+        await getDb()
+          .delete(tenantSamlSsoConfigs)
+          .where(eq(tenantSamlSsoConfigs.tenantId, TENANT_ID));
+        const response = await app.request(`/tenants/${TENANT_ID}/saml-sso`, {
+          method: "PUT",
+          headers: sessionHeaders(),
+          body: JSON.stringify(samlConfig()),
+        });
+        expect(response.status).toBe(500);
+        expect(await getDb().select().from(tenantSamlSsoConfigs)).toHaveLength(0);
+      } else if (action === "tenant.saml_sso.delete") {
+        await getDb().execute(sql`DROP TRIGGER reject_sso_completion ON audit_events`);
+        await app.request(`/tenants/${TENANT_ID}/saml-sso`, {
+          method: "PUT",
+          headers: sessionHeaders(),
+          body: JSON.stringify(samlConfig()),
+        });
+        await getDb().execute(sql`
+          CREATE TRIGGER reject_sso_completion BEFORE INSERT ON audit_events
+          FOR EACH ROW EXECUTE FUNCTION reject_sso_completion()
+        `);
+        const response = await app.request(`/tenants/${TENANT_ID}/saml-sso`, {
+          method: "DELETE",
+          headers: sessionHeaders(),
+        });
+        expect(response.status).toBe(500);
+        expect(await getDb().select().from(tenantSamlSsoConfigs)).toHaveLength(1);
+      } else {
+        await getDb().delete(tenantSsoDomains).where(eq(tenantSsoDomains.tenantId, TENANT_ID));
+        if (action === "tenant.sso_domain.upsert") {
+          const response = await app.request(`/tenants/${TENANT_ID}/sso-domains`, {
+            method: "POST",
+            headers: sessionHeaders(),
+            body: JSON.stringify({ domain: DOMAIN, ssoRequired: true }),
+          });
+          expect(response.status).toBe(500);
+          expect(await getDb().select().from(tenantSsoDomains)).toHaveLength(0);
+        } else {
+          await getDb().execute(sql`DROP TRIGGER reject_sso_completion ON audit_events`);
+          await getDb()
+            .insert(tenantSsoDomains)
+            .values({
+              tenantId: TENANT_ID,
+              domain: DOMAIN,
+              verificationToken: "steward-sso-test-token",
+              status: action === "tenant.sso_domain.delete" ? "verified" : "pending",
+              ssoRequired: true,
+            });
+          await getDb().execute(sql`
+            CREATE TRIGGER reject_sso_completion BEFORE INSERT ON audit_events
+            FOR EACH ROW EXECUTE FUNCTION reject_sso_completion()
+          `);
+          setTxtResolver(async () => [["steward-sso-test-token"]]);
+          const response = await app.request(
+            `/tenants/${TENANT_ID}/sso-domains/${DOMAIN}${action.endsWith("verify") ? "/verify" : ""}`,
+            { method: action.endsWith("verify") ? "POST" : "DELETE", headers: sessionHeaders() },
+          );
+          expect(response.status).toBe(500);
+          const [stored] = await getDb()
+            .select()
+            .from(tenantSsoDomains)
+            .where(
+              and(eq(tenantSsoDomains.tenantId, TENANT_ID), eq(tenantSsoDomains.domain, DOMAIN)),
+            );
+          expect(stored?.status).toBe(action.endsWith("verify") ? "pending" : "verified");
+        }
+      }
+
+      expect(
+        await getDb()
+          .select()
+          .from(auditEvents)
+          .where(and(eq(auditEvents.tenantId, TENANT_ID), eq(auditEvents.action, action))),
+      ).toHaveLength(completedBefore.length);
+    }
+
+    await getDb().execute(sql`DROP TRIGGER IF EXISTS reject_sso_completion ON audit_events`);
+    await getDb().execute(sql`DROP FUNCTION IF EXISTS reject_sso_completion()`);
   });
 });
