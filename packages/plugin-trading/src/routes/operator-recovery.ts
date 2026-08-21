@@ -319,14 +319,16 @@ export function createOperatorRecoveryRoutes(
   async function enforceOperatorTransferRateLimit(
     rail: "withdraw" | "usd-send",
     tenantId: string,
-    agentId: string,
   ): Promise<TradingRateLimitResult> {
-    const key = `${rail}:${tenantId}:${agentId}`;
+    // The operator credential is tenant-scoped while agentId is body-supplied.
+    // Consume the real tenant/rail bucket before parsing so a compromised
+    // credential cannot multiply its budget by rotating body agent IDs.
+    const key = `${rail}:${tenantId}`;
     return enforceTradingRateLimit({
       redisAvailable: getRedisClient() !== null,
       checkRedis: () =>
         checkRateLimit(
-          `ratelimit:trade:operator:${rail}:${tenantId}:${agentId}:${OPERATOR_TRANSFER_RATE_WINDOW_MS}`,
+          `ratelimit:trade:operator:${rail}:${tenantId}:${OPERATOR_TRANSFER_RATE_WINDOW_MS}`,
           OPERATOR_TRANSFER_RATE_WINDOW_MS,
           OPERATOR_TRANSFER_MAX_CALLS,
         ),
@@ -1114,6 +1116,21 @@ export function createOperatorRecoveryRoutes(
       return c.json<ApiResponse>({ ok: false, error: "Platform key required for usdSend" }, 403);
     }
 
+    const rate = await enforceOperatorTransferRateLimit("usd-send", tenantId);
+    if (rate.unavailable) {
+      return c.json<ApiResponse>(
+        { ok: false, error: "Operator transfer rate limit unavailable" },
+        503,
+      );
+    }
+    if (!rate.allowed) {
+      c.header("Retry-After", String(Math.ceil(rate.resetMs / 1000)));
+      return c.json<ApiResponse>(
+        { ok: false, error: "Operator transfer rate limit exceeded" },
+        429,
+      );
+    }
+
     const raw = await safeJsonParse(c);
     const parsed = usdSendSchema.safeParse(raw);
     if (!parsed.success) {
@@ -1166,21 +1183,6 @@ export function createOperatorRecoveryRoutes(
 
     const agent = await ensureAgentForTenant(tenantId, agentId);
     if (!agent) return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
-
-    const rate = await enforceOperatorTransferRateLimit("usd-send", tenantId, agentId);
-    if (rate.unavailable) {
-      return c.json<ApiResponse>(
-        { ok: false, error: "Operator transfer rate limit unavailable" },
-        503,
-      );
-    }
-    if (!rate.allowed) {
-      c.header("Retry-After", String(Math.ceil(rate.resetMs / 1000)));
-      return c.json<ApiResponse>(
-        { ok: false, error: "Operator transfer rate limit exceeded" },
-        429,
-      );
-    }
 
     const walletAddress = await resolveVenueWallet(tenantId, agentId, venue);
     if (!walletAddress) {
@@ -1650,6 +1652,21 @@ export function createOperatorRecoveryRoutes(
       return c.json<ApiResponse>({ ok: false, error: `Unsupported venue: ${venue}` }, 400);
     }
 
+    const rate = await enforceOperatorTransferRateLimit("withdraw", tenantId);
+    if (rate.unavailable) {
+      return c.json<ApiResponse>(
+        { ok: false, error: "Operator transfer rate limit unavailable" },
+        503,
+      );
+    }
+    if (!rate.allowed) {
+      c.header("Retry-After", String(Math.ceil(rate.resetMs / 1000)));
+      return c.json<ApiResponse>(
+        { ok: false, error: "Operator transfer rate limit exceeded" },
+        429,
+      );
+    }
+
     const raw = await safeJsonParse(c);
     const parsed = withdrawSchema.safeParse(raw);
     if (!parsed.success) {
@@ -1764,21 +1781,6 @@ export function createOperatorRecoveryRoutes(
     // agent's REAL recent-tx counts + chain-scoped spend counters (the previous
     // hardcoded zeroes made rate-limit and daily/weekly rules structurally
     // inert, and the misdenominated `value` disabled even per-tx USD caps).
-    const rate = await enforceOperatorTransferRateLimit("withdraw", tenantId, agentId);
-    if (rate.unavailable) {
-      return c.json<ApiResponse>(
-        { ok: false, error: "Operator transfer rate limit unavailable" },
-        503,
-      );
-    }
-    if (!rate.allowed) {
-      c.header("Retry-After", String(Math.ceil(rate.resetMs / 1000)));
-      return c.json<ApiResponse>(
-        { ok: false, error: "Operator transfer rate limit exceeded" },
-        429,
-      );
-    }
-
     idempotency = await claimOperatorIdempotency(idempotency);
     const claimResponse = operatorIdempotencyResponse(c, idempotency);
     if (claimResponse) return claimResponse;

@@ -25,3 +25,25 @@ export function runtimeEnvironmentValue(name: string): string | undefined {
   const requestEnvironment = runtimeEnvironmentStorage.getStore();
   return requestEnvironment ? requestEnvironment[name] : process.env[name];
 }
+
+/** True when runtime-local safety fallbacks must be treated as production posture. */
+export function isProductionRuntimeEnvironment(): boolean {
+  return (
+    runtimeEnvironmentValue("NODE_ENV") === "production" ||
+    runtimeEnvironmentValue("STEWARD_RUNTIME") === "workers" ||
+    runtimeEnvironmentValue("CF_PAGES") === "1"
+  );
+}
+
+/** Whether trading rate limits may use the bounded, single-process fallback. */
+export function allowsMemoryTradingRateLimits(): boolean {
+  return (
+    !isProductionRuntimeEnvironment() ||
+    runtimeEnvironmentValue("STEWARD_ALLOW_MEMORY_TRADING_RATE_LIMITS") === "true"
+  );
+}
+
+/** Whether readiness must require Redis for the enabled trading plugin. */
+export function tradingRateLimitRedisRequired(tradingEnabled: boolean): boolean {
+  return tradingEnabled && isProductionRuntimeEnvironment() && !allowsMemoryTradingRateLimits();
+}

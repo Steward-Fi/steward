@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { runtimeEnvironmentValue, withRuntimeEnvironment } from "../runtime-env";
+import {
+  runtimeEnvironmentValue,
+  tradingRateLimitRedisRequired,
+  withRuntimeEnvironment,
+} from "../runtime-env";
 
 function deferred() {
   let resolve!: () => void;
@@ -10,6 +14,28 @@ function deferred() {
 }
 
 describe("request-local runtime environment", () => {
+  test("requires Redis readiness for unacknowledged production trading", async () => {
+    expect(
+      await withRuntimeEnvironment({ NODE_ENV: "production" }, () =>
+        tradingRateLimitRedisRequired(true),
+      ),
+    ).toBe(true);
+    expect(
+      await withRuntimeEnvironment(
+        {
+          NODE_ENV: "production",
+          STEWARD_ALLOW_MEMORY_TRADING_RATE_LIMITS: "true",
+        },
+        () => tradingRateLimitRedisRequired(true),
+      ),
+    ).toBe(false);
+    expect(
+      await withRuntimeEnvironment({ NODE_ENV: "production" }, () =>
+        tradingRateLimitRedisRequired(false),
+      ),
+    ).toBe(false);
+  });
+
   test("keeps overlapping Worker binding snapshots isolated", async () => {
     const firstEntered = deferred();
     const releaseFirst = deferred();

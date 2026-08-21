@@ -1,4 +1,4 @@
-import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
+import { allowsMemoryTradingRateLimits } from "@stwd/shared/runtime-env";
 
 export interface TradingRateLimitResult {
   allowed: boolean;
@@ -53,21 +53,6 @@ export class MemoryTradingRateLimiter {
   }
 }
 
-function isProductionRuntime(): boolean {
-  return (
-    runtimeEnvironmentValue("NODE_ENV") === "production" ||
-    runtimeEnvironmentValue("STEWARD_RUNTIME") === "workers" ||
-    runtimeEnvironmentValue("CF_PAGES") === "1"
-  );
-}
-
-function allowsMemoryFallback(): boolean {
-  return (
-    !isProductionRuntime() ||
-    runtimeEnvironmentValue("STEWARD_ALLOW_MEMORY_TRADING_RATE_LIMITS") === "true"
-  );
-}
-
 export async function enforceTradingRateLimit(input: {
   redisAvailable: boolean;
   checkRedis: () => Promise<{ allowed: boolean; resetMs: number }>;
@@ -85,7 +70,7 @@ export async function enforceTradingRateLimit(input: {
     }
   }
 
-  if (!allowsMemoryFallback()) {
+  if (!allowsMemoryTradingRateLimits()) {
     return { allowed: false, resetMs: input.windowMs, unavailable: true };
   }
 

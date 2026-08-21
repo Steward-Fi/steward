@@ -21,6 +21,7 @@ import {
 } from "@stwd/db";
 import { shouldUsePGLite } from "@stwd/db/pglite";
 import { redactedThrownDiagnostics } from "@stwd/shared";
+import { tradingRateLimitRedisRequired } from "@stwd/shared/runtime-env";
 import { sql } from "drizzle-orm";
 import { composeApp } from "./compose";
 import { globalRateLimitRequiresRedis } from "./middleware/global-rate-limit";
@@ -62,7 +63,9 @@ validateJwtSecretEnv();
 // plugin is dynamically imported so the lean core graph never statically pulls
 // in the trading stack. top-level await is supported by the Bun entry.
 const app = await composeApp();
-const capabilitiesEnabled = resolveEnabledPlugins().has("capabilities");
+const enabledPlugins = resolveEnabledPlugins();
+const capabilitiesEnabled = enabledPlugins.has("capabilities");
+const tradingEnabled = enabledPlugins.has("trading");
 
 // ─── Shutdown guard ───────────────────────────────────────────────────────────
 let isShuttingDown = false;
@@ -170,10 +173,12 @@ app.get("/ready", async (c) => {
   const redisRequired = globalRateLimitRequiresRedis();
   try {
     const redis = getRedisClient();
+    const tradingRequiresRedis = tradingRateLimitRedisRequired(tradingEnabled);
+    const durableRedisRequired = redisRequired || tradingRequiresRedis;
     checks.redis = redis
       ? { ok: (await redis.ping()).toUpperCase() === "PONG" }
       : isRedisConfigured()
-        ? redisRequired
+        ? durableRedisRequired
           ? { ok: false, error: "Redis is configured but not connected" }
           : {
               ok: false,
@@ -182,9 +187,12 @@ app.get("/ready", async (c) => {
             }
         : redisRequired
           ? { ok: false, error: "Redis is required for durable production rate limiting" }
+          : tradingRequiresRedis
+          ? { ok: false, required: true, error: "Redis is required for production trading" }
           : { ok: false, required: false, error: "Redis is not configured (optional mode)" };
   } catch {
-    checks.redis = redisRequired
+    const durableRedisRequired = redisRequired || tradingRateLimitRedisRequired(tradingEnabled);
+    checks.redis = durableRedisRequired
       ? { ok: false, error: "Redis health check failed" }
       : { ok: false, required: false, error: "Redis health check failed (optional mode)" };
   }
