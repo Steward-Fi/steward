@@ -1,5 +1,7 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
+import { revocationStore } from "@stwd/auth";
 import {
   agents,
   auditEvents,
@@ -26,6 +28,7 @@ import type { AppVariables } from "../services/context";
 type Sql = {
   <T extends unknown[]>(strings: TemplateStringsArray, ...values: unknown[]): Promise<T>;
   begin<T>(callback: (tx: Sql) => Promise<T>): Promise<T>;
+  unsafe(query: string): Promise<unknown>;
   end(): Promise<void>;
 };
 
@@ -48,6 +51,8 @@ const originalRouteEnv = {
   wallet: process.env.STEWARD_MONERO_WALLET_RPC_URL,
   daemon: process.env.STEWARD_MONERO_DAEMON_URL,
   network: process.env.STEWARD_MONERO_NETWORK,
+  platformKeys: process.env.STEWARD_PLATFORM_KEYS,
+  platformScopes: process.env.STEWARD_PLATFORM_KEY_SCOPES,
 };
 process.env.STEWARD_JWT_SECRET ??= "monero-real-pg-jwt";
 process.env.STEWARD_MASTER_PASSWORD ??= "monero-real-pg-master";
@@ -480,6 +485,7 @@ describePostgres("mounted Monero recovery boundary (real Postgres)", () => {
   const tenantId = `monero-route-tenant-${suffix}`;
   const agentId = `monero-route-agent-${suffix}`;
   const userId = crypto.randomUUID();
+  const platformKey = `monero-route-platform-${suffix}`;
   const recipient = generateMoneroWallet("mainnet").address;
   const walletScope = "monero:mainnet:0";
   const requestBody = {
@@ -491,15 +497,99 @@ describePostgres("mounted Monero recovery boundary (real Postgres)", () => {
   let admin: Sql;
   let rpc: ReturnType<typeof installRouteMoneroRpc>;
 
-  function transfer(key: string, body: typeof requestBody = requestBody) {
+  async function mountedAgentTuple(): Promise<AgentTuple> {
+    const [row] = await admin<AgentTuple[]>`
+      select tableoid::oid::integer as relation,
+        ((ctid::text::point)[0])::integer as block,
+        ((ctid::text::point)[1])::integer as offset
+      from agents where id = ${agentId}
+    `;
+    if (!row) throw new Error("mounted Monero agent tuple is unavailable");
+    return row;
+  }
+
+  async function waitForMountedAdvisoryPair(lockIdentity = agentId): Promise<{
+    holderPid: number;
+    waiterPid: number;
+  }> {
+    for (let attempt = 0; attempt < 250; attempt += 1) {
+      const rows = await admin<{ pid: number; granted: boolean }[]>`
+        select pid, granted from pg_locks
+        where locktype = 'advisory'
+          and classid = (((hashtextextended(${lockIdentity}, 0) >> 32) & 4294967295)::text)::oid
+          and objid = ((hashtextextended(${lockIdentity}, 0) & 4294967295)::text)::oid
+          and objsubid = 1
+        order by granted desc, pid
+      `;
+      const holder = rows.find((row) => row.granted);
+      const waiter = rows.find((row) => !row.granted);
+      if (holder && waiter && holder.pid !== waiter.pid) {
+        return { holderPid: holder.pid, waiterPid: waiter.pid };
+      }
+      await Bun.sleep(20);
+    }
+    throw new Error(`mounted request did not wait on the exact ${lockIdentity} advisory lock`);
+  }
+
+  async function waitForMountedTupleWaiter(tuple: AgentTuple): Promise<{
+    waiterPid: number;
+    blockerPid: number;
+  }> {
+    for (let attempt = 0; attempt < 250; attempt += 1) {
+      const rows = await admin<{ pid: number; blockers: number[] }[]>`
+        select activity.pid, pg_blocking_pids(activity.pid)::int[] as blockers
+        from pg_stat_activity activity
+        where activity.datname = current_database()
+          and exists (
+            select 1 from pg_locks xid_lock
+            where xid_lock.pid = activity.pid
+              and xid_lock.locktype = 'transactionid'
+              and not xid_lock.granted
+          )
+          and (
+            exists (
+              select 1 from pg_locks tuple_lock
+              where tuple_lock.pid = activity.pid
+                and tuple_lock.locktype = 'tuple'
+                and tuple_lock.relation = ${tuple.relation}::oid
+                and tuple_lock.page = ${tuple.block}
+                and tuple_lock.tuple = ${tuple.offset}
+            )
+            or activity.query ilike '%agents%for update%'
+            or activity.query ilike '%agents%for share%'
+          )
+      `;
+      const waiter = rows.find((row) => row.blockers.length > 0);
+      const blockerPid = waiter?.blockers[0];
+      if (waiter && blockerPid !== undefined) {
+        return { waiterPid: waiter.pid, blockerPid };
+      }
+      await Bun.sleep(20);
+    }
+    throw new Error("mounted operation did not wait on the exact agent tuple");
+  }
+
+  function transfer(
+    key: string,
+    body: typeof requestBody = requestBody,
+    headers: Record<string, string> = {},
+  ) {
     return app.request(`/vault/${agentId}/monero/transfer`, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${token}`,
         "Content-Type": "application/json",
         "Idempotency-Key": key,
+        ...headers,
       },
       body: JSON.stringify(body),
+    });
+  }
+
+  function deleteTenant() {
+    return app.request(`/platform/tenants/${tenantId}`, {
+      method: "DELETE",
+      headers: { "X-Steward-Platform-Key": platformKey },
     });
   }
 
@@ -510,6 +600,10 @@ describePostgres("mounted Monero recovery boundary (real Postgres)", () => {
     process.env.STEWARD_MONERO_WALLET_RPC_URL = "http://monero-route-wallet:18083/json_rpc";
     process.env.STEWARD_MONERO_DAEMON_URL = "http://monero-route-daemon:18089";
     process.env.STEWARD_MONERO_NETWORK = "mainnet";
+    process.env.STEWARD_PLATFORM_KEYS = platformKey;
+    process.env.STEWARD_PLATFORM_KEY_SCOPES = JSON.stringify({
+      [platformKey]: ["platform:*"],
+    });
     rpc = installRouteMoneroRpc();
     admin = postgres(databaseUrl!, { max: 1 });
 
@@ -552,6 +646,7 @@ describePostgres("mounted Monero recovery boundary (real Postgres)", () => {
 
     const { createSessionToken } = await import("../routes/auth");
     const { agentRoutes } = await import("../routes/agents");
+    const { platformRoutes } = await import("../routes/platform");
     const { vaultRoutes } = await import("../routes/vault");
     const { tenantAuth } = await import("../services/context");
     token = await createSessionToken("0x0000000000000000000000000000000000000000", tenantId, {
@@ -562,9 +657,16 @@ describePostgres("mounted Monero recovery boundary (real Postgres)", () => {
     });
     app = new Hono<{ Variables: AppVariables }>();
     app.use("/vault/*", (c, next) => tenantAuth(c, next));
+    app.use("/vault/*", async (c, next) => {
+      await next();
+      if (c.req.header("x-test-force-outer-rollback") === "true") {
+        throw new Error("forced request transaction rollback after Monero checkpoint");
+      }
+    });
     app.use("/agents/*", (c, next) => tenantAuth(c, next));
     app.route("/vault", vaultRoutes);
     app.route("/agents", agentRoutes);
+    app.route("/platform", platformRoutes);
     app.onError((error, c) => c.json({ ok: false, error: error.message }, 500));
   }, 120_000);
 
@@ -587,6 +689,52 @@ describePostgres("mounted Monero recovery boundary (real Postgres)", () => {
     restore("STEWARD_MONERO_WALLET_RPC_URL", originalRouteEnv.wallet);
     restore("STEWARD_MONERO_DAEMON_URL", originalRouteEnv.daemon);
     restore("STEWARD_MONERO_NETWORK", originalRouteEnv.network);
+    restore("STEWARD_PLATFORM_KEYS", originalRouteEnv.platformKeys);
+    restore("STEWARD_PLATFORM_KEY_SCOPES", originalRouteEnv.platformScopes);
+  });
+
+  test("keeps the independently committed anchor when the outer request rolls back", async () => {
+    const key = `outer-rollback-${suffix}`;
+    const baseline = rpc.relayCount();
+    const { vault: configuredVault } = await import("../services/context");
+    const originalRelay = configuredVault.relayMoneroTransfer.bind(configuredVault);
+    configuredVault.relayMoneroTransfer = async () => {
+      throw new Error("forced failure before Monero relay I/O");
+    };
+    try {
+      const response = await transfer(key, requestBody, {
+        "x-test-force-outer-rollback": "true",
+      });
+      expect(response.status).toBe(500);
+      expect(rpc.relayCount()).toBe(baseline);
+
+      const [anchor] = await admin<
+        { id: string; status: string; key_digest: string; audit_count: string }[]
+      >`
+        select t.id, t.status, t.action_payload->>'idempotencyKeyDigest' as key_digest,
+          (select count(*)::text from audit_events audit
+           where audit.resource_id = t.id
+             and audit.action = 'vault.monero_transfer.authorized') as audit_count
+        from transactions t
+        where t.agent_id = ${agentId}
+          and t.action_payload->>'idempotencyKeyDigest' = ${createHash("sha256").update(key).digest("hex")}
+      `;
+      expect(anchor).toMatchObject({ status: "failed", audit_count: "1" });
+
+      configuredVault.relayMoneroTransfer = originalRelay;
+      const replay = await transfer(key);
+      expect(replay.status).toBe(409);
+      expect(
+        ((await replay.json()) as { data: { transactionId: string } }).data.transactionId,
+      ).toBe(anchor?.id);
+      expect(rpc.relayCount()).toBe(baseline);
+      await getDb()
+        .update(transactions)
+        .set({ status: "failed" })
+        .where(eq(transactions.id, anchor?.id ?? ""));
+    } finally {
+      configuredVault.relayMoneroTransfer = originalRelay;
+    }
   });
 
   test("commits the anchor before relay and recovers it before mutable gates", async () => {
@@ -644,26 +792,180 @@ describePostgres("mounted Monero recovery boundary (real Postgres)", () => {
       .set({ config: { maxPerTx: "1500000000", maxPerDay: "2100000000" } })
       .where(eq(policies.id, `${agentId}-spend`));
     const key = `concurrent-${suffix}`;
-    const entered = deferred<void>();
-    const release = deferred<void>();
+    const keyDigest = createHash("sha256").update(key).digest("hex");
+    const gateIdentity = `monero-checkpoint-gate-${suffix}`;
+    const gateFunction = `steward_monero_checkpoint_gate_${suffix}`;
+    const gateTrigger = `steward_monero_checkpoint_gate_${suffix}`;
+    const gateClient = postgres(databaseUrl!, { max: 1 });
+    const gateReady = deferred<void>();
+    const releaseGate = deferred<void>();
     const baseline = rpc.relayCount();
     rpc.setRelayMode("success");
-    rpc.setBeforeRelay(async () => {
-      entered.resolve();
-      await release.promise;
+    await admin.unsafe(`
+      create function ${gateFunction}() returns trigger language plpgsql as $$
+      begin
+        if new.agent_id = '${agentId}'
+          and new.action_payload->>'idempotencyKeyDigest' = '${keyDigest}'
+        then
+          perform pg_advisory_xact_lock(hashtextextended('${gateIdentity}', 0));
+        end if;
+        return new;
+      end $$
+    `);
+    await admin.unsafe(`
+      create trigger ${gateTrigger} before insert on transactions
+      for each row execute function ${gateFunction}()
+    `);
+    const gateHolder = gateClient.begin(async (tx) => {
+      await tx`select pg_advisory_xact_lock(hashtextextended(${gateIdentity}, 0))`;
+      gateReady.resolve();
+      await releaseGate.promise;
     });
-    const first = transfer(key);
-    await waitForOwnedSignal(entered.promise, first, "mounted first relay");
-    const second = transfer(key);
-    await Bun.sleep(50);
-    release.resolve();
-    const [firstResponse, secondResponse] = await Promise.all([first, second]);
-    expect(firstResponse.status).toBe(200);
-    expect([200, 202]).toContain(secondResponse.status);
-    const firstBody = (await firstResponse.json()) as { data: { transactionId: string } };
-    const secondBody = (await secondResponse.json()) as { data: { transactionId: string } };
-    expect(secondBody.data.transactionId).toBe(firstBody.data.transactionId);
-    expect(rpc.relayCount()).toBe(baseline + 1);
-    rpc.setBeforeRelay(undefined);
+    let first: Promise<Response> | undefined;
+    let second: Promise<Response> | undefined;
+    try {
+      await waitForOwnedSignal(gateReady.promise, gateHolder, "checkpoint gate holder");
+      first = transfer(key);
+      await waitForMountedAdvisoryPair(gateIdentity);
+      second = transfer(key);
+      const { holderPid, waiterPid } = await waitForMountedAdvisoryPair();
+      expect(holderPid).not.toBe(waiterPid);
+      releaseGate.resolve();
+      const [firstResponse, secondResponse] = await Promise.all([first, second]);
+      expect(firstResponse.status).toBe(200);
+      expect([200, 202]).toContain(secondResponse.status);
+      const firstBody = (await firstResponse.json()) as { data: { transactionId: string } };
+      const secondBody = (await secondResponse.json()) as { data: { transactionId: string } };
+      expect(secondBody.data.transactionId).toBe(firstBody.data.transactionId);
+      expect(rpc.relayCount()).toBe(baseline + 1);
+    } finally {
+      releaseGate.resolve();
+      await Promise.allSettled([
+        gateHolder,
+        first ?? Promise.resolve(new Response()),
+        second ?? Promise.resolve(new Response()),
+      ]);
+      await admin.unsafe(`drop trigger if exists ${gateTrigger} on transactions`);
+      await admin.unsafe(`drop function if exists ${gateFunction}()`);
+      await gateClient.end();
+    }
+  });
+
+  test("Monero-first tenant deletion rechecks the durable anchor before side effects", async () => {
+    await getDb()
+      .update(transactions)
+      .set({ status: "failed" })
+      .where(eq(transactions.agentId, agentId));
+    await getDb()
+      .update(policies)
+      .set({ config: { maxPerTx: "1500000000", maxPerDay: "1500000000" } })
+      .where(eq(policies.id, `${agentId}-spend`));
+
+    const tuple = await mountedAgentTuple();
+    const relayEntered = deferred<void>();
+    const releaseRelay = deferred<void>();
+    const baseline = rpc.relayCount();
+    let agentRevocations = 0;
+    let userRevocations = 0;
+    const originalRevokeAgentTokens = revocationStore.revokeAgentTokens.bind(revocationStore);
+    const originalRevokeUserTokens = revocationStore.revokeUserTokens.bind(revocationStore);
+    revocationStore.revokeAgentTokens = async () => {
+      agentRevocations += 1;
+      return Date.now();
+    };
+    revocationStore.revokeUserTokens = async () => {
+      userRevocations += 1;
+      return Date.now();
+    };
+    rpc.setRelayMode("success");
+    rpc.setBeforeRelay(async () => {
+      relayEntered.resolve();
+      await releaseRelay.promise;
+    });
+    const transferRequest = transfer(`tenant-delete-monero-first-${suffix}`);
+    let deletionRequest: Promise<Response> | undefined;
+    try {
+      await waitForOwnedSignal(relayEntered.promise, transferRequest, "Monero-first relay");
+      deletionRequest = deleteTenant();
+      const { waiterPid, blockerPid } = await waitForMountedTupleWaiter(tuple);
+      expect(waiterPid).not.toBe(blockerPid);
+      expect(agentRevocations).toBe(0);
+      expect(userRevocations).toBe(0);
+      const [prematureAudit] = await admin<{ count: number }[]>`
+        select count(*)::int as count from audit_events
+        where tenant_id = ${tenantId} and action like 'tenant.delete%'
+      `;
+      expect(prematureAudit?.count).toBe(0);
+
+      releaseRelay.resolve();
+      expect((await transferRequest).status).toBe(200);
+      expect((await deletionRequest).status).toBe(409);
+      expect(rpc.relayCount()).toBe(baseline + 1);
+      expect(agentRevocations).toBe(0);
+      expect(userRevocations).toBe(0);
+      const [finalAudit] = await admin<{ count: number }[]>`
+        select count(*)::int as count from audit_events
+        where tenant_id = ${tenantId} and action like 'tenant.delete%'
+      `;
+      expect(finalAudit?.count).toBe(0);
+    } finally {
+      releaseRelay.resolve();
+      await Promise.allSettled([
+        transferRequest,
+        deletionRequest ?? Promise.resolve(new Response()),
+      ]);
+      rpc.setBeforeRelay(undefined);
+      revocationStore.revokeAgentTokens = originalRevokeAgentTokens;
+      revocationStore.revokeUserTokens = originalRevokeUserTokens;
+    }
+  });
+
+  test("delete-first blocks the mounted Monero route before relay", async () => {
+    await getDb()
+      .update(transactions)
+      .set({ status: "failed" })
+      .where(eq(transactions.agentId, agentId));
+    const tuple = await mountedAgentTuple();
+    const revocationEntered = deferred<void>();
+    const releaseRevocation = deferred<void>();
+    const baseline = rpc.relayCount();
+    const originalRevokeAgentTokens = revocationStore.revokeAgentTokens.bind(revocationStore);
+    const originalRevokeUserTokens = revocationStore.revokeUserTokens.bind(revocationStore);
+    revocationStore.revokeAgentTokens = async () => {
+      revocationEntered.resolve();
+      await releaseRevocation.promise;
+      return Date.now();
+    };
+    revocationStore.revokeUserTokens = async () => Date.now();
+    const deletionRequest = deleteTenant();
+    let transferRequest: Promise<Response> | undefined;
+    try {
+      await Promise.race([
+        revocationEntered.promise,
+        deletionRequest.then(async (response) => {
+          throw new Error(
+            `delete-first completed before revocation: ${response.status} ${await response.clone().text()}`,
+          );
+        }),
+      ]);
+      transferRequest = transfer(`tenant-delete-delete-first-${suffix}`);
+      const { waiterPid, blockerPid } = await waitForMountedTupleWaiter(tuple);
+      expect(waiterPid).not.toBe(blockerPid);
+      expect(rpc.relayCount()).toBe(baseline);
+
+      releaseRevocation.resolve();
+      expect((await deletionRequest).status).toBe(200);
+      expect((await transferRequest).status).toBeGreaterThanOrEqual(400);
+      expect(rpc.relayCount()).toBe(baseline);
+      expect(await getDb().select().from(tenants).where(eq(tenants.id, tenantId))).toHaveLength(0);
+    } finally {
+      releaseRevocation.resolve();
+      await Promise.allSettled([
+        deletionRequest,
+        transferRequest ?? Promise.resolve(new Response()),
+      ]);
+      revocationStore.revokeAgentTokens = originalRevokeAgentTokens;
+      revocationStore.revokeUserTokens = originalRevokeUserTokens;
+    }
   });
 });
