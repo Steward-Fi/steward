@@ -7,19 +7,13 @@
  *
  *   - The in-memory IP rate-limit log (only safe in single-process mode)
  *   - `setInterval` GC for expired entries
- *   - The blocking `runMigrations()` call at boot
+ *   - The blocking release-migration call at boot
  *   - The /ready readiness probe (depends on migration state + DB ping)
  *   - `Bun.serve` plus SIGINT/SIGTERM graceful shutdown
  */
 
 import { validateJwtSecretEnv } from "@stwd/auth";
-import {
-  assertRlsDeploymentSafety,
-  closeDb,
-  getDb,
-  getMigrationExpectation,
-  runMigrations,
-} from "@stwd/db";
+import { assertRlsDeploymentSafety, closeDb, getDb, getMigrationExpectation } from "@stwd/db";
 import { shouldUsePGLite } from "@stwd/db/pglite";
 import { redactedThrownDiagnostics } from "@stwd/shared";
 import { sql } from "drizzle-orm";
@@ -274,7 +268,8 @@ if (shouldUsePGLite()) {
 } else {
   try {
     console.log("[steward] Running database migrations...");
-    const { applied } = await runMigrations();
+    const { runConfiguredReleaseMigrations } = await import("./migrate");
+    const { applied, plugins: pluginResults } = await runConfiguredReleaseMigrations();
     migrationsRan = true;
     if (applied.length > 0) {
       console.log(`[steward] Applied ${applied.length} migration(s): ${applied.join(", ")}`);
@@ -296,14 +291,9 @@ if (shouldUsePGLite()) {
       console.log("[steward] Migrations already up to date.");
     }
 
-    // Plugin-owned migrations are applied AFTER the core migrator so a
-    // plugin migration may reference core tables via FK. Each plugin's migrations
-    // land in its OWN namespaced bookkeeping table
-    // (drizzle.__drizzle_migrations_plugin_<id>), totally isolated from the core's
-    // drizzle.__drizzle_migrations journal. Fail-closed: a plugin migration error
-    // aborts boot (we never half-boot with a partially-migrated plugin schema).
-    const { runComposedPluginMigrations } = await import("./compose");
-    const pluginResults = await runComposedPluginMigrations();
+    // The shared release runner applies plugin-owned migrations AFTER core and
+    // uses the same opt-in plugin resolver as app composition. A plugin failure
+    // therefore aborts both this legacy boot path and the out-of-band command.
     if (pluginResults.length > 0) {
       console.log(
         `[steward] Applied plugin migrations: ${pluginResults

@@ -189,9 +189,12 @@ functions; only the platform login receives those named grants.
 
 Production API containers must set `SKIP_MIGRATIONS=true`: their `DATABASE_URL`
 is the restricted `steward_app` login and cannot own or create schema objects.
-Run `bun run packages/db/src/migrate.ts` as a separate release job with
+Run `bun run --cwd packages/api migrate` as a separate release job with
 `DATABASE_URL="$STEWARD_MIGRATION_DATABASE_URL"`, wait for it to succeed, rerun
 `rls-bootstrap.sql` with the operator URL, and only then roll out the API.
+The API migration entrypoint applies the exact core journal first and then every
+enabled plugin's namespaced journal; invoking only the core package is not a
+complete release migration.
 Do not grant the migrator membership in the BYPASSRLS bootstrap owner. A future
 migration that must replace a bootstrap-owned function requires a separately
 reviewed operator-mediated ownership handoff; applying it directly as the

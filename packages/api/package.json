@@ -13,6 +13,7 @@
   "scripts": {
     "dev": "NODE_ENV=development bun --watch src/index.ts",
     "build": "tsc --noEmit",
+    "migrate": "bun src/migrate.ts",
     "start": "bun src/index.ts",
     "openapi:generate": "bun scripts/generate-openapi.ts",
     "sdk:types": "bun scripts/generate-sdk-types.ts",
