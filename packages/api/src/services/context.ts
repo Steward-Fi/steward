@@ -432,13 +432,11 @@ export type { AppVariables };
 // ─── Shared query helpers ─────────────────────────────────────────────────────
 
 export function getTenantPayload(tenant: Tenant): Omit<Tenant, "apiKeyHash"> & TenantConfig {
-  const config = tenantConfigs.get(tenant.id);
   const { apiKeyHash: _apiKeyHash, ...safeTenant } = tenant;
   return {
     ...safeTenant,
-    name: config?.name || tenant.name,
-    webhookUrl: config?.webhookUrl,
-    defaultPolicies: config?.defaultPolicies,
+    id: tenant.id,
+    name: tenant.name,
   };
 }
 
@@ -525,11 +523,14 @@ export async function ensureAgentForTenant(
   return vault.getAgent(tenantId, agentId);
 }
 
-export async function getPolicySet(tenantId: string, agentId: string): Promise<PolicyRule[]> {
+export async function getPolicySet(_tenantId: string, agentId: string): Promise<PolicyRule[]> {
   const storedPolicies = await db.select().from(policies).where(eq(policies.agentId, agentId));
 
   if (storedPolicies.length > 0) return storedPolicies.map(toPolicyRule);
-  return tenantConfigs.get(tenantId)?.defaultPolicies || [];
+  // Tenant-level defaults were process-local and could diverge across replicas
+  // or vanish on restart. Policy authority is now exclusively durable,
+  // agent-scoped rows; a missing assignment is an explicit empty policy set.
+  return [];
 }
 
 export async function getScopedPolicySet(

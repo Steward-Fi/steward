@@ -15,7 +15,8 @@ describe("legacy tenant webhook deprecation", () => {
   });
 
   it("does not present or preserve a historical inert URL as active", () => {
-    expect(source).toContain("const { webhookUrl: _webhookUrl");
-    expect(source).toContain("webhookUrl: undefined");
+    expect(source).toContain("data: getTenantPayload(tenant)");
+    expect(source).not.toContain("webhookUrl: body.webhookUrl");
+    expect(source).not.toContain("defaultPolicies: body.defaultPolicies");
   });
 });

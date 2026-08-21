@@ -1,36 +1,149 @@
-import { describe, expect, it } from "bun:test";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { auditEvents, getDb, policies, tenants, users, userTenants } from "@stwd/db";
+import { eq, inArray } from "drizzle-orm";
+import { Hono } from "hono";
+import type { AppVariables, PolicyRule } from "../services/context";
 
-const routeSource = readFileSync(join(import.meta.dir, "..", "routes", "tenants.ts"), "utf8");
+const PLATFORM_KEY = "tenant-policy-retirement-platform-key";
+const TENANT_ID = "tenant-policy-retirement-existing";
+const CREATE_ID = "tenant-policy-retirement-create";
+const USER_ID = "33333333-3333-4333-8333-333333333333";
+const DEFAULT_RULE: PolicyRule = {
+  id: "legacy-default",
+  type: "spending-limit",
+  enabled: true,
+  config: { maxPerTx: "1", maxPerDay: "1", maxPerWeek: "1" },
+};
 
-describe("tenant audit rollback hardening", () => {
-  it("rolls back tenant creation if the final audit event cannot be written", () => {
-    const createStart = routeSource.indexOf('tenantRoutes.post("/", platformAuthMiddleware()');
-    expect(createStart).toBeGreaterThanOrEqual(0);
-    const createRoute = routeSource.slice(
-      createStart,
-      routeSource.indexOf('tenantRoutes.get("/:id"', createStart),
-    );
+let sessionToken: string;
+let tenantConfigs: typeof import("../services/context")["tenantConfigs"];
+let getPolicySet: typeof import("../services/context")["getPolicySet"];
+let apps: Array<Hono<{ Variables: AppVariables }>>;
 
-    expect(createRoute).toContain('action: "tenant.create.authorized"');
-    expect(createRoute).toContain('action: "tenant.create"');
-    expect(createRoute).toContain("try {");
-    expect(createRoute).toContain("tenantConfigs.delete(body.id)");
-    expect(createRoute).toContain("db.delete(tenants).where(eq(tenants.id, body.id))");
+beforeAll(async () => {
+  process.env.STEWARD_PLATFORM_KEYS = PLATFORM_KEY;
+  process.env.STEWARD_PLATFORM_KEY_SCOPES = JSON.stringify({
+    [PLATFORM_KEY]: ["platform:write", "platform:tenant:create"],
+  });
+  const context = await import("../services/context");
+  const { tenantRoutes } = await import("../routes/tenants");
+  tenantConfigs = context.tenantConfigs;
+  getPolicySet = context.getPolicySet;
+
+  await getDb()
+    .insert(tenants)
+    .values({
+      id: TENANT_ID,
+      name: "Tenant policy retirement",
+      apiKeyHash: `hash-${TENANT_ID}`,
+    });
+  await getDb()
+    .insert(users)
+    .values({ id: USER_ID, email: `${USER_ID}@example.test` });
+  await getDb().insert(userTenants).values({ userId: USER_ID, tenantId: TENANT_ID, role: "owner" });
+  const { createSessionToken } = await import("../routes/auth");
+  sessionToken = await createSessionToken("0x0000000000000000000000000000000000000000", TENANT_ID, {
+    userId: USER_ID,
+    email: `${USER_ID}@example.test`,
+    mfaVerifiedAt: Date.now(),
+    mfaMethod: "totp",
+  });
+  tenantConfigs.set(TENANT_ID, {
+    id: TENANT_ID,
+    name: "Tenant policy retirement",
+    defaultPolicies: [DEFAULT_RULE],
+  });
+  apps = [new Hono<{ Variables: AppVariables }>(), new Hono<{ Variables: AppVariables }>()];
+  for (const app of apps) app.route("/tenants", tenantRoutes);
+});
+
+afterAll(async () => {
+  tenantConfigs?.delete(TENANT_ID);
+  await getDb().delete(policies).where(eq(policies.agentId, "missing-policy-agent"));
+  await getDb().delete(userTenants).where(eq(userTenants.tenantId, TENANT_ID));
+  await getDb().delete(users).where(eq(users.id, USER_ID));
+  await getDb()
+    .delete(tenants)
+    .where(inArray(tenants.id, [TENANT_ID, CREATE_ID]));
+  delete process.env.STEWARD_PLATFORM_KEYS;
+  delete process.env.STEWARD_PLATFORM_KEY_SCOPES;
+});
+
+async function policyAuditRows() {
+  return getDb()
+    .select({ id: auditEvents.id, action: auditEvents.action })
+    .from(auditEvents)
+    .where(inArray(auditEvents.tenantId, [TENANT_ID, CREATE_ID]));
+}
+
+async function updateFrom(app: Hono<{ Variables: AppVariables }>) {
+  return app.request(`/tenants/${TENANT_ID}/webhook`, {
+    method: "PUT",
+    headers: {
+      authorization: `Bearer ${sessionToken}`,
+      "content-type": "application/json",
+      "x-steward-tenant": TENANT_ID,
+    },
+    body: JSON.stringify({ defaultPolicies: [DEFAULT_RULE] }),
+  });
+}
+
+describe("retired process-local tenant policy authority", () => {
+  it("rejects create and update writes before database, cache, or audit mutation", async () => {
+    const auditsBefore = await policyAuditRows();
+    const create = await apps[0].request("/tenants", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-steward-platform-key": PLATFORM_KEY,
+      },
+      body: JSON.stringify({
+        id: CREATE_ID,
+        name: "Must not exist",
+        apiKeyHash: "raw-key",
+        defaultPolicies: [DEFAULT_RULE],
+      }),
+    });
+    const update = await updateFrom(apps[0]);
+
+    for (const response of [create, update]) {
+      expect(response.status).toBe(410);
+      await expect(response.json()).resolves.toMatchObject({
+        ok: false,
+        error: expect.stringContaining("not durable"),
+      });
+    }
+    expect(await getDb().select().from(tenants).where(eq(tenants.id, CREATE_ID))).toHaveLength(0);
+    expect(tenantConfigs.get(TENANT_ID)?.defaultPolicies).toEqual([DEFAULT_RULE]);
+    expect(await policyAuditRows()).toEqual(auditsBefore);
   });
 
-  it("restores previous tenant config state if the final update audit fails", () => {
-    const updateStart = routeSource.indexOf('tenantRoutes.put("/:id/webhook"');
-    expect(updateStart).toBeGreaterThanOrEqual(0);
-    const updateRoute = routeSource.slice(updateStart);
+  it("is restart- and replica-independent because no process-local write remains", async () => {
+    const first = await updateFrom(apps[0]);
+    tenantConfigs.delete(TENANT_ID); // model a fresh process with an empty legacy cache
+    const second = await updateFrom(apps[1]);
+    expect(first.status).toBe(410);
+    expect(second.status).toBe(410);
+    expect(await first.json()).toEqual(await second.json());
+    expect(tenantConfigs.has(TENANT_ID)).toBe(false);
+  });
 
-    expect(updateRoute).toContain('action: "tenant.update.authorized"');
-    expect(updateRoute).toContain('action: "tenant.update"');
-    expect(updateRoute).toContain("const previousConfig: TenantConfig = { ...tenantConfig }");
-    expect(updateRoute).toContain("tenantConfigs.set(tenant.id, previousConfig)");
-    expect(updateRoute).not.toContain("snapshotLegacyTenantWebhooks");
-    expect(updateRoute).not.toContain("restoreLegacyTenantWebhooks");
-    expect(updateRoute).toContain('actorId: c.get("userId") ?? tenant.id');
+  it("never treats historical map defaults as policy authority", async () => {
+    tenantConfigs.set(TENANT_ID, {
+      id: TENANT_ID,
+      name: "Tenant policy retirement",
+      defaultPolicies: [DEFAULT_RULE],
+    });
+    expect(await getPolicySet(TENANT_ID, "missing-policy-agent")).toEqual([]);
+    const read = await apps[0].request(`/tenants/${TENANT_ID}`, {
+      headers: {
+        authorization: `Bearer ${sessionToken}`,
+        "x-steward-tenant": TENANT_ID,
+      },
+    });
+    expect(read.status).toBe(200);
+    const payload = (await read.json()) as { ok: boolean; data: { id: string } };
+    expect(JSON.stringify(payload)).not.toContain("legacy-default");
+    expect(payload).toMatchObject({ ok: true, data: { id: TENANT_ID } });
   });
 });
