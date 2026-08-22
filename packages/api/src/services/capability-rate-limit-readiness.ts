@@ -1,6 +1,7 @@
 import { getDb } from "@stwd/db";
 import { checkRateLimit, type IoredisLike, rateLimitBucketKey } from "@stwd/redis";
 import { redactedThrownDiagnostics } from "@stwd/shared";
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 import { sql } from "drizzle-orm";
 import { getRedisClient, isRedisConfigured } from "../middleware/redis";
 import { withAuthenticatedTenantDatabase } from "./context";
@@ -94,7 +95,8 @@ export async function checkCapabilityRateLimitReadiness(
       error: "Configured Redis capability rate-limit backend is unavailable",
     };
   }
-  if (process.env.NODE_ENV === "development" || process.env.NODE_ENV === "test") {
+  const nodeEnvironment = runtimeEnvironmentValue("NODE_ENV");
+  if (nodeEnvironment === "development" || nodeEnvironment === "test") {
     return { ok: true, source: "memory" };
   }
 

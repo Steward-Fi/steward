@@ -1,4 +1,5 @@
 import type { VerifiedAgentPrincipal } from "@stwd/shared";
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 import type { Context, Next } from "hono";
 import { errors, importJWK, type JWTPayload, jwtVerify } from "jose";
 import { recordAgentTokenExp } from "../services/agent-token-status";
@@ -51,12 +52,13 @@ function invalid(c: Context, reason: string, status: 401 = 401) {
  * ELIZA_CLOUD_JWKS_URL; outside production the hardcoded dev anchor requires
  * the STEWARD_ALLOW_DEFAULT_ELIZA_JWKS=true opt-in. Fails closed otherwise.
  */
-function resolveJwksUrl(): string {
-  const configured = process.env.ELIZA_CLOUD_JWKS_URL?.trim();
+export function resolveJwksUrl(): string {
+  const configured = runtimeEnvironmentValue("ELIZA_CLOUD_JWKS_URL")?.trim();
   if (configured) return configured;
   if (
-    process.env.NODE_ENV !== "production" &&
-    process.env.STEWARD_ALLOW_DEFAULT_ELIZA_JWKS === "true"
+    runtimeEnvironmentValue("STEWARD_RUNTIME") !== "workers" &&
+    runtimeEnvironmentValue("NODE_ENV") !== "production" &&
+    runtimeEnvironmentValue("STEWARD_ALLOW_DEFAULT_ELIZA_JWKS") === "true"
   ) {
     return DEFAULT_ELIZA_CLOUD_JWKS_URL;
   }

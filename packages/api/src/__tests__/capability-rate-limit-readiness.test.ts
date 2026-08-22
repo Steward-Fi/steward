@@ -1,8 +1,26 @@
 import { describe, expect, it } from "bun:test";
 import type { IoredisLike } from "@stwd/redis";
+import { withRuntimeEnvironment } from "@stwd/shared/runtime-env";
 import { checkCapabilityRateLimitReadiness } from "../services/capability-rate-limit-readiness";
 
 describe("capability rate-limit Redis readiness", () => {
+  it("uses the immutable request posture instead of an ambient production value", async () => {
+    const priorNodeEnvironment = process.env.NODE_ENV;
+    process.env.NODE_ENV = "production";
+    try {
+      await expect(
+        withRuntimeEnvironment({ NODE_ENV: "development" }, () =>
+          checkCapabilityRateLimitReadiness({
+            getRedisClient: () => null,
+            isRedisConfigured: () => false,
+          }),
+        ),
+      ).resolves.toEqual({ ok: true, source: "memory" });
+    } finally {
+      if (priorNodeEnvironment === undefined) delete process.env.NODE_ENV;
+      else process.env.NODE_ENV = priorNodeEnvironment;
+    }
+  });
   it("executes a bounded physical-generation reservation and cleans it up", async () => {
     const evaluatedKeys: string[] = [];
     const deletedKeys: string[] = [];
