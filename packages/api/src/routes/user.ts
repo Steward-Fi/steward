@@ -4988,6 +4988,7 @@ user.delete("/me/wallet/signers/:signerId", async (c) => {
 // ─── POST /me/wallet/sign ─────────────────────────────────────────────────────
 
 user.post("/me/wallet/sign", async (c) => {
+  setNoStoreHeaders(c);
   const personalSessionResponse = requirePersonalUserSession(c);
   if (personalSessionResponse) return personalSessionResponse;
   const userId = c.get("userId");
@@ -5396,6 +5397,7 @@ user.get("/me/wallet/policies", async (c) => {
 // ─── POST /me/wallet/sign-message ─────────────────────────────────────────────
 
 user.post("/me/wallet/sign-message", async (c) => {
+  setNoStoreHeaders(c);
   const personalSessionResponse = requirePersonalUserSession(c);
   if (personalSessionResponse) return personalSessionResponse;
   if (!allowUnsafeMessageSigning() || !allowUserUnsafeMessageSigning()) {
@@ -6604,6 +6606,7 @@ user.post("/me/tenants/:tenantId/invitations", async (c) => {
     "Tenant invitation creation requires recent MFA verification",
   );
   if (!admin.ok) return admin.response;
+  setNoStoreHeaders(c);
 
   const body = await safeJsonParse<{
     email?: unknown;
