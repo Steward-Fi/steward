@@ -302,7 +302,6 @@ const isPGLiteRuntime =
 
 export const DATABASE_URL =
   process.env.DATABASE_URL?.trim() || (isPGLiteRuntime ? "" : requireEnv("DATABASE_URL"));
-export const MASTER_PASSWORD = requireEnv("STEWARD_MASTER_PASSWORD");
 
 if (process.env.DATABASE_URL) {
   process.env.DATABASE_URL = DATABASE_URL;
@@ -335,22 +334,11 @@ export const db: DbHandle = new Proxy({} as DbHandle, {
   },
 });
 
-// `vault` is a late-bound Proxy resolving the Vault for the CURRENT master
-// password, memoized per password. In production STEWARD_MASTER_PASSWORD is
-// fixed before this module loads, so exactly one Vault is ever built and every
-// access returns it — behaviorally identical to `const vault = new Vault(...)`.
-//
-// In the single-process api test suite, individual files set their own
-// STEWARD_MASTER_PASSWORD in beforeAll, and a few construct their OWN Vault with
-// that password to seal keys directly into their per-file PGLite db. A captured
-// singleton would have frozen the first (preload) password, so the route-level
-// vault could not decrypt keys those files sealed under a different password —
-// surfacing as AES-GCM "Unsupported state or unable to authenticate data". A
-// per-password memo keeps the route vault in lockstep with whatever password
-// sealed each key. MASTER_PASSWORD (captured at import) is the fallback when the
-// env var is transiently unset (e.g. another file's afterAll deleted it).
+// `vault` is a late-bound Proxy resolving the Vault for the current immutable
+// custody authority. Worker requests therefore cannot retain or borrow another
+// request's password/KDF/provider tuple; Bun resolves the same tuple from env.
 function activeVault(): Vault {
-  return getConfiguredVault({ fallbackPassword: MASTER_PASSWORD });
+  return getConfiguredVault();
 }
 export const vault: Vault = new Proxy({} as Vault, {
   get(_target, property) {

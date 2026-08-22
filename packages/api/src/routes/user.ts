@@ -102,6 +102,7 @@ import {
   setNoStoreHeaders,
   verifySessionToken,
 } from "../services/context";
+import { resolveRuntimeChainId, runtimeCustodyValue } from "../services/custody-runtime";
 import {
   publicGasSponsorshipState,
   readTenantGasSponsorshipConfig,
@@ -1744,18 +1745,18 @@ export async function userSessionAuth(
 
 const user = new Hono<{ Variables: UserVariables }>();
 const allowPrivateKeyExport = (): boolean =>
-  process.env.STEWARD_ALLOW_KEY_EXPORT !== "false" &&
-  process.env.STEWARD_ALLOW_PRIVATE_KEY_EXPORT === "true";
+  runtimeCustodyValue("STEWARD_ALLOW_KEY_EXPORT") !== "false" &&
+  runtimeCustodyValue("STEWARD_ALLOW_PRIVATE_KEY_EXPORT") === "true";
 const allowPrivateKeyImport = (): boolean =>
-  process.env.STEWARD_ALLOW_PRIVATE_KEY_IMPORT === "true";
+  runtimeCustodyValue("STEWARD_ALLOW_PRIVATE_KEY_IMPORT") === "true";
 const allowUnsafeMessageSigning = (): boolean =>
-  process.env.STEWARD_ALLOW_UNSAFE_MESSAGE_SIGNING === "true";
+  runtimeCustodyValue("STEWARD_ALLOW_UNSAFE_MESSAGE_SIGNING") === "true";
 const allowUserPrivateKeyExport = (): boolean =>
-  process.env.STEWARD_ALLOW_USER_PRIVATE_KEY_EXPORT === "true";
+  runtimeCustodyValue("STEWARD_ALLOW_USER_PRIVATE_KEY_EXPORT") === "true";
 const allowUserPrivateKeyImport = (): boolean =>
-  process.env.STEWARD_ALLOW_USER_PRIVATE_KEY_IMPORT === "true";
+  runtimeCustodyValue("STEWARD_ALLOW_USER_PRIVATE_KEY_IMPORT") === "true";
 const allowUserUnsafeMessageSigning = (): boolean =>
-  process.env.STEWARD_ALLOW_USER_UNSAFE_MESSAGE_SIGNING === "true";
+  runtimeCustodyValue("STEWARD_ALLOW_USER_UNSAFE_MESSAGE_SIGNING") === "true";
 
 // Key export responses are secret-bearing even when authentication, feature
 // gates, validation, auditing, or the vault fails. Apply the cache policy before
@@ -5111,7 +5112,7 @@ user.post("/me/wallet/sign", async (c) => {
 
   const tenantId = `personal-${userId}`;
   const agentId = wallet.id;
-  const chainId = signBody.chainId ?? parseInt(process.env.CHAIN_ID || "84532", 10);
+  const chainId = signBody.chainId ?? resolveRuntimeChainId(84532);
   let codeResponse: Awaited<ReturnType<Vault["rpcPassthrough"]>>;
   try {
     codeResponse = await vault.rpcPassthrough({

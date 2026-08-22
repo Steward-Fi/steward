@@ -76,7 +76,6 @@ import {
   IdentityJwtConfigurationError,
   InMemoryRecoveryCodeStore,
   isBuiltInProvider,
-  isDevSecretAllowed,
   isValidE164,
   type MagicLinkTemplateData,
   MockEmailInbox,
@@ -138,7 +137,8 @@ import {
   type TenantSamlSsoConfig,
   type TenantTestAccountConfig,
 } from "@stwd/shared";
-import { KeyStore, provisionUserWallet, Vault } from "@stwd/vault";
+import { runtimeEnvironmentIdentity, runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
+import { type KeyStore, provisionUserWallet, Vault } from "@stwd/vault";
 import bs58 from "bs58";
 import { and, eq, gte, inArray, isNull, lt, sql } from "drizzle-orm";
 import { type Context, Hono } from "hono";
@@ -163,7 +163,11 @@ import { socketPeerFromEnv } from "../services/runtime-gate";
 import { buildSamlServiceProviderUrls } from "../services/saml-sso-config";
 import { lockUserSession } from "../services/session-lock";
 import { testAccountOtpMatches } from "../services/test-account-credentials";
-import { getConfiguredVault } from "../services/vault-factory";
+import {
+  _clearConfiguredVaultsForTests,
+  getConfiguredKeyStore,
+  getConfiguredVault,
+} from "../services/vault-factory";
 import { dispatchWebhook } from "../services/webhook-dispatch";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -1444,7 +1448,7 @@ export async function initAuthStores(usePostgres = false): Promise<void> {
   _passkeyAuth = null;
   _phoneAuth = null;
   _passkeyAuthByOrigin.clear();
-  _emailAuthByTenant.clear();
+  _emailAuthByRequest = new WeakMap();
 }
 
 function getChallengeStore(): ChallengeStore {
@@ -1769,44 +1773,14 @@ function getPasskeyAuth(requestOrigin?: string): PasskeyAuth {
 
 // ─── EmailAuth cache ──────────────────────────────────────────────────────────
 
-const _emailAuthByTenant = new Map<string, Promise<EmailAuth>>();
-let _emailKeyStore: KeyStore | null = null;
-let _oauthKeyStore: KeyStore | null = null;
+let _emailAuthByRequest = new WeakMap<object, Map<string, Promise<EmailAuth>>>();
 
 function getEmailKeyStore(): KeyStore {
-  if (_emailKeyStore) return _emailKeyStore;
-
-  const masterPassword = process.env.STEWARD_MASTER_PASSWORD;
-  if (!masterPassword) {
-    if (!isDevSecretAllowed()) {
-      throw new Error(
-        "STEWARD_MASTER_PASSWORD is required. For local development only, set STEWARD_ALLOW_DEV_SECRETS=true to use the insecure dev key.",
-      );
-    }
-    _emailKeyStore = new KeyStore("dev-secret");
-    return _emailKeyStore;
-  }
-
-  _emailKeyStore = new KeyStore(masterPassword);
-  return _emailKeyStore;
+  return getConfiguredKeyStore(undefined, { allowDevSecretFallback: true });
 }
 
 function getOAuthKeyStore(): KeyStore {
-  if (_oauthKeyStore) return _oauthKeyStore;
-
-  const masterPassword = process.env.STEWARD_MASTER_PASSWORD;
-  if (!masterPassword) {
-    if (!isDevSecretAllowed()) {
-      throw new Error(
-        "STEWARD_MASTER_PASSWORD is required to encrypt OAuth provider tokens. For local development only, set STEWARD_ALLOW_DEV_SECRETS=true to use the insecure dev key.",
-      );
-    }
-    _oauthKeyStore = new KeyStore("dev-secret");
-    return _oauthKeyStore;
-  }
-
-  _oauthKeyStore = new KeyStore(masterPassword);
-  return _oauthKeyStore;
+  return getConfiguredKeyStore(undefined, { allowDevSecretFallback: true });
 }
 
 type OAuthEncryptedTokenFields = Pick<
@@ -1869,16 +1843,18 @@ export function decryptOAuthProviderToken(encrypted: {
 }
 
 function isMockEmailEnabled(): boolean {
-  if (process.env.EMAIL_PROVIDER === "mock" && process.env.NODE_ENV === "production") {
+  const provider = runtimeEnvironmentValue("EMAIL_PROVIDER");
+  const nodeEnvironment = runtimeEnvironmentValue("NODE_ENV");
+  if (provider === "mock" && nodeEnvironment === "production") {
     throw new Error(
       "EMAIL_PROVIDER=mock is forbidden in production. Unset EMAIL_PROVIDER or set RESEND_API_KEY.",
     );
   }
-  return process.env.EMAIL_PROVIDER === "mock" && process.env.NODE_ENV !== "production";
+  return provider === "mock" && nodeEnvironment !== "production";
 }
 
 function authTestInboxEnabled(): boolean {
-  return process.env.NODE_ENV === "test";
+  return runtimeEnvironmentValue("NODE_ENV") === "test";
 }
 
 function isEnabledTestAccount(
@@ -1971,23 +1947,28 @@ function buildGlobalEmailAuth(overrides?: {
   replyTo?: string;
   templates?: TenantEmailConfig["templates"];
 }): EmailAuth {
-  const resendKey = process.env.RESEND_API_KEY;
+  const resendKey = runtimeEnvironmentValue("RESEND_API_KEY");
+  const emailFrom = runtimeEnvironmentValue("EMAIL_FROM") || "login@steward.fi";
   // Mock takes precedence in non-production for deterministic e2e testing.
   const provider = isMockEmailEnabled()
     ? new MockEmailProvider()
     : resendKey
       ? new ResendProvider({
           apiKey: resendKey,
-          from: process.env.EMAIL_FROM || "login@steward.fi",
+          from: emailFrom,
         })
       : undefined;
 
   return new EmailAuth({
-    from: process.env.EMAIL_FROM || "login@steward.fi",
-    baseUrl: overrides?.baseUrl?.replace(/\/$/, "") || process.env.APP_URL || "https://steward.fi",
+    from: emailFrom,
+    baseUrl:
+      overrides?.baseUrl?.replace(/\/$/, "") ||
+      runtimeEnvironmentValue("APP_URL") ||
+      "https://steward.fi",
     callbackPath: overrides?.callbackPath,
     provider,
     tokenStore: getTokenStore(),
+    codeVerifierSecret: runtimeEnvironmentValue("STEWARD_EMAIL_CODE_SECRET"),
     templateId: overrides?.templateId,
     subjectOverride: overrides?.subjectOverride,
     replyTo: overrides?.replyTo,
@@ -2056,7 +2037,7 @@ async function createEmailAuthForTenant(tenantId: string): Promise<EmailAuth> {
   // We've already returned via buildGlobalEmailAuth above when apiKeyEncrypted
   // is missing, so it's safe to assume `emailConfig.from + apiKeyEncrypted`
   // are both present here.
-  const from = emailConfig.from || process.env.EMAIL_FROM || "login@steward.fi";
+  const from = emailConfig.from || runtimeEnvironmentValue("EMAIL_FROM") || "login@steward.fi";
   const provider =
     emailConfig.provider === "resend" && emailConfig.apiKeyEncrypted
       ? new ResendProvider({
@@ -2069,7 +2050,9 @@ async function createEmailAuthForTenant(tenantId: string): Promise<EmailAuth> {
       : undefined;
 
   const baseUrl =
-    magicLinkBaseUrl?.replace(/\/$/, "") || process.env.APP_URL || "https://steward.fi";
+    magicLinkBaseUrl?.replace(/\/$/, "") ||
+    runtimeEnvironmentValue("APP_URL") ||
+    "https://steward.fi";
 
   return new EmailAuth({
     from,
@@ -2077,6 +2060,7 @@ async function createEmailAuthForTenant(tenantId: string): Promise<EmailAuth> {
     callbackPath,
     provider,
     tokenStore: getTokenStore(),
+    codeVerifierSecret: runtimeEnvironmentValue("STEWARD_EMAIL_CODE_SECRET"),
     templateId: emailConfig.templateId,
     subjectOverride: emailConfig.subjectOverride,
     replyTo: emailConfig.replyTo,
@@ -2085,27 +2069,49 @@ async function createEmailAuthForTenant(tenantId: string): Promise<EmailAuth> {
 }
 
 export async function getEmailAuthForTenant(tenantId: string): Promise<EmailAuth> {
-  const cached = _emailAuthByTenant.get(tenantId);
+  const requestIdentity = runtimeEnvironmentIdentity();
+  if (!requestIdentity) return createEmailAuthForTenant(tenantId);
+
+  let tenants = _emailAuthByRequest.get(requestIdentity);
+  const cached = tenants?.get(tenantId);
   if (cached) return cached;
 
   const pending = createEmailAuthForTenant(tenantId).catch((error) => {
-    _emailAuthByTenant.delete(tenantId);
+    tenants?.delete(tenantId);
     throw error;
   });
-  _emailAuthByTenant.set(tenantId, pending);
+  if (!tenants) {
+    tenants = new Map();
+    _emailAuthByRequest.set(requestIdentity, tenants);
+  }
+  tenants.set(tenantId, pending);
   return pending;
 }
 
 export function invalidateEmailAuthForTenant(tenantId: string): void {
-  _emailAuthByTenant.delete(tenantId);
+  const identity = runtimeEnvironmentIdentity();
+  if (!identity) return;
+  const tenants = _emailAuthByRequest.get(identity);
+  const cached = tenants?.get(tenantId);
+  tenants?.delete(tenantId);
+  void cached?.then(
+    (auth) => auth.disposeProvider(),
+    () => undefined,
+  );
 }
 
 export function clearEmailAuthTenantCacheForTests(): void {
-  _emailAuthByTenant.clear();
+  _emailAuthByRequest = new WeakMap();
+}
+
+/** Internal behavior hook: no cache generations outside the active request are reachable. */
+export function emailAuthRequestCacheSizeForTests(): number {
+  const identity = runtimeEnvironmentIdentity();
+  return identity ? (_emailAuthByRequest.get(identity)?.size ?? 0) : 0;
 }
 
 export function clearOAuthTokenKeyStoreForTests(): void {
-  _oauthKeyStore = null;
+  _clearConfiguredVaultsForTests();
 }
 
 /**

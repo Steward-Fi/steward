@@ -1,5 +1,6 @@
 import { createHmac, randomBytes, randomInt, timingSafeEqual } from "node:crypto";
 import { redactedThrownDiagnostics } from "@stwd/shared";
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 
 import { hashSha256Hex } from "./crypto";
 import type { EmailDeliveryReceipt, EmailProvider } from "./email-provider";
@@ -468,24 +469,33 @@ export class EmailAuth {
     this.provider = config.provider ?? new ConsoleProvider();
     // Console delivery is forbidden in production. Reject before storing a
     // challenge so the API cannot report success for an undeliverable login.
+    const nodeEnvironment = runtimeEnvironmentValue("NODE_ENV");
     this.deliveryNotConfigured =
-      process.env.NODE_ENV === "production" && this.provider instanceof ConsoleProvider;
+      nodeEnvironment === "production" && this.provider instanceof ConsoleProvider;
     this.tokenStore = config.tokenStore ?? new TokenStore();
     this.replyTo = config.replyTo;
     this.templateId = config.templateId;
     this.subjectOverride = config.subjectOverride;
     const configuredCodeSecret =
-      config.codeVerifierSecret?.trim() || process.env.STEWARD_EMAIL_CODE_SECRET?.trim() || "";
+      config.codeVerifierSecret?.trim() ||
+      runtimeEnvironmentValue("STEWARD_EMAIL_CODE_SECRET")?.trim() ||
+      "";
     if (!configuredCodeSecret) {
       // Tests intentionally use an isolated deterministic fallback. Every
       // runnable non-test environment must explicitly opt in to that fallback,
       // matching the repository-wide dev-secret policy.
-      if (process.env.NODE_ENV !== "test" && !isDevSecretAllowed()) {
+      if (
+        nodeEnvironment !== "test" &&
+        !isDevSecretAllowed(nodeEnvironment, {
+          STEWARD_ALLOW_DEV_SECRETS: runtimeEnvironmentValue("STEWARD_ALLOW_DEV_SECRETS"),
+          STEWARD_ALLOW_DEV_SECRET: runtimeEnvironmentValue("STEWARD_ALLOW_DEV_SECRET"),
+        })
+      ) {
         throw new Error(
           "STEWARD_EMAIL_CODE_SECRET is required. For local development only, set STEWARD_ALLOW_DEV_SECRETS=true to use the insecure dev secret.",
         );
       }
-    } else if (process.env.NODE_ENV === "production" && configuredCodeSecret.length < 32) {
+    } else if (nodeEnvironment === "production" && configuredCodeSecret.length < 32) {
       throw new Error("STEWARD_EMAIL_CODE_SECRET must be at least 32 characters in production");
     }
     this.codeVerifierSecret = configuredCodeSecret || "steward-development-email-login-secret";
@@ -1225,9 +1235,17 @@ export class EmailAuth {
   }
 
   /**
-   * Clean up background timers.  Call in tests after each suite.
+   * Retire credential-bearing provider state without touching a shared token store.
+   */
+  disposeProvider(): void {
+    this.provider.destroy?.();
+  }
+
+  /**
+   * Clean up background timers and provider state. Call in tests after each suite.
    */
   destroy(): void {
+    this.disposeProvider();
     this.tokenStore.destroy();
   }
 }
