@@ -141,6 +141,12 @@ export const EXPECTED_PUBLIC_RELATIONS = [
   },
   {
     "policy_group": "core",
+    "relation_name": "digital_asset_account_wallet_lifecycles",
+    "relation_kind": "r",
+    "partition_parents": ""
+  },
+  {
+    "policy_group": "core",
     "relation_name": "digital_asset_account_wallets",
     "relation_kind": "r",
     "partition_parents": ""
@@ -220,6 +226,12 @@ export const EXPECTED_PUBLIC_RELATIONS = [
   {
     "policy_group": "core",
     "relation_name": "policy_templates",
+    "relation_kind": "r",
+    "partition_parents": ""
+  },
+  {
+    "policy_group": "core",
+    "relation_name": "pregenerated_wallet_claim_lifecycles",
     "relation_kind": "r",
     "partition_parents": ""
   },
@@ -696,6 +708,16 @@ export const EXPECTED_RLS_POLICY_DEFINITIONS = [
   },
   {
     "policy_group": "core",
+    "relation_name": "digital_asset_account_wallet_lifecycles",
+    "policy_name": "steward_tenant_isolation",
+    "command": "*",
+    "permissive": true,
+    "roles": "PUBLIC",
+    "using_expression": "((tenant_id)::text = NULLIF(current_setting('steward.tenant_id'::text, true), ''::text))",
+    "check_expression": "((tenant_id)::text = NULLIF(current_setting('steward.tenant_id'::text, true), ''::text))"
+  },
+  {
+    "policy_group": "core",
     "relation_name": "digital_asset_account_wallets",
     "policy_name": "steward_tenant_isolation",
     "command": "*",
@@ -833,6 +855,16 @@ export const EXPECTED_RLS_POLICY_DEFINITIONS = [
     "roles": "PUBLIC",
     "using_expression": "((tenant_id)::text = steward_rls.tenant_id())",
     "check_expression": "((tenant_id)::text = steward_rls.tenant_id())"
+  },
+  {
+    "policy_group": "core",
+    "relation_name": "pregenerated_wallet_claim_lifecycles",
+    "policy_name": "steward_tenant_isolation",
+    "command": "*",
+    "permissive": true,
+    "roles": "PUBLIC",
+    "using_expression": "(((source_tenant_id)::text = NULLIF(current_setting('steward.tenant_id'::text, true), ''::text)) OR ((target_tenant_id)::text = NULLIF(current_setting('steward.tenant_id'::text, true), ''::text)))",
+    "check_expression": "(((source_tenant_id)::text = NULLIF(current_setting('steward.tenant_id'::text, true), ''::text)) OR ((target_tenant_id)::text = NULLIF(current_setting('steward.tenant_id'::text, true), ''::text)))"
   },
   {
     "policy_group": "core",

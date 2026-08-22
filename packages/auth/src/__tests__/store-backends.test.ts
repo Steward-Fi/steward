@@ -4,6 +4,7 @@ import {
   buildBackend,
   MemoryBackend,
   NamespacedStoreBackend,
+  PostgresBackend,
   RedisBackend,
   type RedisLike,
   type StoreBackend,
@@ -88,6 +89,33 @@ describe("buildBackend Redis smoke test", () => {
     });
     const { source } = await buildBackend("challenge", client, false);
     expect(source).toBe("memory");
+  });
+});
+
+describe("PostgresBackend initialization", () => {
+  it("uses a pre-migrated auth store without attempting application-role DDL", async () => {
+    const statements: string[] = [];
+    let transactionCalls = 0;
+    const client = (async (strings: TemplateStringsArray) => {
+      const statement = strings.join("?");
+      statements.push(statement);
+      if (statement.includes("to_regclass")) return [{ relation: "auth_kv_store" }];
+      return [];
+    }) as unknown as ReturnType<typeof import("@stwd/db").getSql>;
+    client.begin = async () => {
+      transactionCalls += 1;
+      throw new Error("application role must not run DDL");
+    };
+
+    const backend = new PostgresBackend("challenge", client);
+    await backend.set("probe", "value", 1_000);
+
+    expect(transactionCalls).toBe(0);
+    expect(statements.some((statement) => statement.includes("to_regclass"))).toBe(true);
+    expect(statements.some((statement) => statement.includes("INSERT INTO auth_kv_store"))).toBe(
+      true,
+    );
+    expect(statements.some((statement) => statement.includes("CREATE TABLE"))).toBe(false);
   });
 });
 

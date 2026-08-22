@@ -59,7 +59,7 @@ import {
   timingSafeEqual,
 } from "node:crypto";
 import { getDb, type Secret, secrets as secretRows } from "@stwd/db";
-import { SecretVault } from "@stwd/vault";
+import type { SecretVault } from "@stwd/vault";
 import { and, asc, eq } from "drizzle-orm";
 import { type Context, Hono } from "hono";
 import { type AuditEventInput, writeAuditEvent } from "../services/audit";
@@ -68,10 +68,10 @@ import {
   type ApiResponse,
   type AppVariables,
   hasAgentTokenScope,
-  MASTER_PASSWORD,
   safeJsonParse,
   setNoStoreHeaders,
 } from "../services/context";
+import { getConfiguredSecretVault } from "../services/vault-factory";
 
 export const kmsRoutes = new Hono<{ Variables: AppVariables }>();
 
@@ -88,12 +88,8 @@ const B64_RE = /^[A-Za-z0-9+/]*={0,2}$/;
 // rather than pretending — the adapter surfaces the error loudly.
 const SUPPORTED_ALGORITHM = "ed25519";
 
-// Lazily initialised so context.ts can set MASTER_PASSWORD first (same pattern
-// as routes/secrets.ts — the SAME SecretVault custody plane, not a fork).
-let _secretVault: SecretVault | undefined;
 function getSecretVault(): SecretVault {
-  _secretVault ??= new SecretVault(MASTER_PASSWORD);
-  return _secretVault;
+  return getConfiguredSecretVault();
 }
 
 kmsRoutes.use("*", async (c, next) => {

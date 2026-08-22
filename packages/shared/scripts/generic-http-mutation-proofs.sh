@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# #201 generic-http profile mutation-strength proofs. Each mutation weakens ONE
+# Generic-http profile mutation-strength proofs. Each mutation weakens ONE
 # load-bearing security predicate of the generic-http descriptor validator /
 # canonicalizer; a proof is valid iff the named test PASSES clean AND FAILS after
 # the mutation. The file is restored after each proof (no .bak residue). Run from

@@ -9,17 +9,15 @@
  * credential outbound. the plugin NEVER decrypts a secret and NEVER injects a
  * credential itself; it maintains the route rows the proxy matches.
  *
- * this package uses the shipped plugin SDK contribution points:
- *   - migrations (2c): plugin-owned, namespaced-journal `capabilities` +
+ * this package uses the plugin SDK contribution points:
+ *   - migrations: plugin-owned, namespaced-journal `capabilities` +
  *     `capability_grants` tables (isolated from the core migration ledger).
- *   - routes (2a register): operator/tenant-auth capability + grant CRUD, plus
- *     the agent-scoped "what may this agent use" read.
- *   - webhookEvents (2a): the events THIS package emits at CRUD time.
- *
- * SCOPE (W-1a): schema + CRUD + grants + paired-route lifecycle ONLY. there is
- * NO policy evaluation and NO invoke/forward path here (those are W-1b / W-1c).
- * the package builds + tests STANDALONE and is NOT registered in the api
- * composition root yet (that wiring is W-1c's job).
+ *   - routes: operator capability/grant CRUD and agent-scoped manifest, token,
+ *     OpenAI-compatible, and invoke surfaces.
+ *   - policyRules: the fail-closed capability-intent evaluator.
+ *   - webhookEvents: CRUD and invoke outcome events emitted by this package.
+ * The deploy composition root registers this plugin only when capabilities are
+ * enabled.
  *
  * the core never imports this package, and this package never imports `@stwd/api`:
  * the shared service singletons + auth middleware the routes need are INJECTED via
@@ -108,15 +106,12 @@ export type StewardApiPlugin = StewardPlugin<StewardApp, StewardAppContext>;
 const MIGRATIONS_FOLDER = fileURLToPath(new URL("../drizzle", import.meta.url));
 
 /**
- * Webhook event-type names this package emits (Phase 2a contribution). Only the
- * CRUD lifecycle events W-1a produces are declared here; the invoke-time events
- * (capability.invoked / .denied / .approval_queued) are declared by W-1c, the
- * package that emits them.
+ * Webhook event-type names emitted by this package across CRUD and invoke
+ * outcomes. The plugin host registers the complete set before route dispatch.
  */
 export const CAPABILITY_WEBHOOK_EVENTS = [
   "capability.created",
   "capability.revoked",
-  // invoke-time events (W-1c). declared by THIS package because it emits them.
   "capability.invoked",
   "capability.denied",
   "capability.approval_queued",
@@ -131,16 +126,15 @@ export const CAPABILITY_WEBHOOK_EVENTS = [
  *   2. mounts the capability + grant CRUD router at /capabilities and /v1/capabilities.
  *   3. mounts the agent-scoped "usable capabilities" read at /agents and /v1/agents.
  *
- * NOTE: this plugin is NOT registered in the api composition root during W-1a; it
- * is verified STANDALONE (its own tests register it onto a bare hono app with an
- * injected context). the composition-root registration (compose.ts) is W-1c.
+ * The API composition root registers this plugin when the capabilities feature
+ * is enabled and injects the core context without a package dependency cycle.
  */
 export const capabilitiesPlugin: StewardApiPlugin = {
   name: "capabilities",
   version: "0.1.0",
   webhookEvents: CAPABILITY_WEBHOOK_EVENTS,
-  // the `capability-intent` policy rule (W-1b, shipped in @stwd/policy-engine as a
-  // PolicyRuleContribution). the plugin host registers it into the policy-engine
+  // The `capability-intent` PolicyRuleContribution is owned by
+  // @stwd/policy-engine. The plugin host registers it into the policy-engine
   // evaluator registry BEFORE any route runs, so the engine can evaluate a
   // capability-intent rule (via the registry's default arm) instead of denying it
   // as an unknown type. the invoke path (invoke.ts) still owns the effective

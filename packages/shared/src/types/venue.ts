@@ -15,7 +15,7 @@
 // When adding a new venue:
 //   - Append to VENUE_IDS below.
 //   - Add a row to VENUE_METADATA with chainFamily + display name.
-//   - Worker A's adapter registry will pick it up automatically.
+//   - Register the venue in every adapter that supports it.
 
 export const VENUE_IDS = ["hyperliquid", "polymarket", "drift", "aevo", "gmx"] as const;
 
@@ -74,7 +74,7 @@ export const VENUE_METADATA: Record<VenueId, VenueMetadata> = {
   },
 };
 
-// ─── Sprint 4 Day 1-2 (Worker A): trade execution types ─────────────────────
+// ─── Trade execution types ──────────────────────────────────────────────────
 // TradeAsset is the asset enum that venue-hyperliquid + trade-sessions use.
 // Keep tight: only assets Steward will actively support for perps trading.
 
