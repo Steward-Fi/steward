@@ -391,7 +391,7 @@ export class SecretVault {
     tenantId: string,
     name: string,
   ): Promise<Secret[]> {
-    if (process.env.STEWARD_PGLITE_MEMORY !== "true") {
+    if (process.env.STEWARD_DB_MODE !== "pglite" && process.env.STEWARD_PGLITE_MEMORY !== "true") {
       await tx.execute(
         sql`SELECT pg_advisory_xact_lock(hashtextextended(${`steward_secret_${tenantId}:${name}`}, 0))`,
       );

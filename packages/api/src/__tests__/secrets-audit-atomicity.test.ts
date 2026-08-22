@@ -14,6 +14,15 @@ const fn = `fail_secret_completion_${suffix}`;
 const trigger = fn;
 setDefaultTimeout(30_000);
 
+async function rejectAuditActions(actions: string[]): Promise<void> {
+  const actionList = actions.map((action) => `'${action}'`).join(",");
+  await getDb().execute(
+    sql.raw(
+      `CREATE OR REPLACE FUNCTION ${fn}() RETURNS trigger AS $$ BEGIN IF NEW.tenant_id='${tenantId}' AND NEW.action IN (${actionList}) THEN RAISE EXCEPTION 'forced secret audit failure'; END IF; RETURN NEW; END; $$ LANGUAGE plpgsql`,
+    ),
+  );
+}
+
 describe("secret CRUD audit atomicity", () => {
   let app: Hono<{ Variables: AppVariables }>;
   let vault: SecretVault;
@@ -30,11 +39,7 @@ describe("secret CRUD audit atomicity", () => {
       name: agentId,
       walletAddress: "0x1111111111111111111111111111111111111111",
     });
-    await getDb().execute(
-      sql.raw(
-        `CREATE FUNCTION ${fn}() RETURNS trigger AS $$ BEGIN IF NEW.tenant_id='${tenantId}' AND NEW.action IN ('secret.create','secret.rotate','secret.delete') THEN RAISE EXCEPTION 'forced secret completion audit failure'; END IF; RETURN NEW; END; $$ LANGUAGE plpgsql`,
-      ),
-    );
+    await rejectAuditActions(["secret.create", "secret.rotate", "secret.delete"]);
     await getDb().execute(
       sql.raw(
         `CREATE TRIGGER ${trigger} BEFORE INSERT ON audit_events FOR EACH ROW EXECUTE FUNCTION ${fn}()`,
@@ -62,6 +67,50 @@ describe("secret CRUD audit atomicity", () => {
     delete process.env.STEWARD_PGLITE_MEMORY;
     delete process.env.STEWARD_MASTER_PASSWORD;
     delete process.env.STEWARD_AUDIT_HMAC_KEY;
+  });
+
+  it("rejects authorization-audit failures before create, rotate, or delete mutates state", async () => {
+    await rejectAuditActions([
+      "secret.create.authorized",
+      "secret.rotate.authorized",
+      "secret.delete.authorized",
+    ]);
+    try {
+      const create = await app.request("/secrets", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: "authorization-create", value: "never-persisted" }),
+      });
+      expect(create.status).toBe(500);
+      expect(
+        await getDb().select().from(secrets).where(eq(secrets.name, "authorization-create")),
+      ).toHaveLength(0);
+
+      const original = await vault.createSecret(tenantId, "authorization-lineage", "old-value");
+      const rotate = await app.request(`/secrets/${original.id}`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ value: "new-value" }),
+      });
+      expect(rotate.status).toBe(500);
+      expect(
+        await getDb()
+          .select({ id: secrets.id, version: secrets.version })
+          .from(secrets)
+          .where(and(eq(secrets.name, "authorization-lineage"), isNull(secrets.deletedAt))),
+      ).toEqual([{ id: original.id, version: 1 }]);
+
+      const remove = await app.request(`/secrets/${original.id}`, { method: "DELETE" });
+      expect(remove.status).toBe(500);
+      expect(
+        await getDb()
+          .select({ id: secrets.id })
+          .from(secrets)
+          .where(and(eq(secrets.id, original.id), isNull(secrets.deletedAt))),
+      ).toEqual([{ id: original.id }]);
+    } finally {
+      await rejectAuditActions(["secret.create", "secret.rotate", "secret.delete"]);
+    }
   });
 
   it("rolls back create, rotate, route repointing, and delete with failed completion audits", async () => {
@@ -123,5 +172,33 @@ describe("secret CRUD audit atomicity", () => {
         .from(auditEvents)
         .where(and(eq(auditEvents.tenantId, tenantId), eq(auditEvents.action, "secret.rotate"))),
     ).toHaveLength(0);
+  });
+
+  it("uses the transaction lock path supported by file-backed PGLite", async () => {
+    const previousMemory = process.env.STEWARD_PGLITE_MEMORY;
+    const previousMode = process.env.STEWARD_DB_MODE;
+    delete process.env.STEWARD_PGLITE_MEMORY;
+    process.env.STEWARD_DB_MODE = "pglite";
+    let createdId: string | undefined;
+    try {
+      const created = await getDb().transaction((tx) =>
+        vault.createSecretWithinTx(
+          tx,
+          tenantId,
+          `file-backed-${suffix}`,
+          "file-backed-pglite-value",
+        ),
+      );
+      createdId = created.id;
+      expect(created.version).toBe(1);
+    } finally {
+      if (createdId) {
+        await getDb().delete(secrets).where(eq(secrets.id, createdId));
+      }
+      if (previousMemory === undefined) delete process.env.STEWARD_PGLITE_MEMORY;
+      else process.env.STEWARD_PGLITE_MEMORY = previousMemory;
+      if (previousMode === undefined) delete process.env.STEWARD_DB_MODE;
+      else process.env.STEWARD_DB_MODE = previousMode;
+    }
   });
 });
