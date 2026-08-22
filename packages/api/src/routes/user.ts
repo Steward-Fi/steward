@@ -7877,31 +7877,6 @@ user.post("/me/tenants/:tenantId/invitations/accept", async (c) => {
     async (txRaw, appendRequiredAudit) => {
       const tx = txRaw as typeof db;
       await lockTenantOwnerLifecycle(tx, tenantId);
-      const [existingMembership] = await tx
-        .select({ role: userTenants.role })
-        .from(userTenants)
-        .where(and(eq(userTenants.userId, userId), eq(userTenants.tenantId, tenantId)))
-        .limit(1);
-      if (existingMembership) {
-        const result = {
-          id: candidate.id,
-          role: existingMembership.role,
-          alreadyMember: true,
-        };
-        await appendRequiredAudit({
-          tenantId,
-          actorType: "user",
-          actorId: userId,
-          action: "tenant.invitation.accept",
-          resourceType: "tenant_invitation",
-          resourceId: result.id,
-          metadata: { email, role: result.role, alreadyMember: true },
-          ipAddress: c.req.header("x-forwarded-for") ?? null,
-          userAgent: c.req.header("user-agent") ?? null,
-          requestId: c.get("requestId") ?? null,
-        });
-        return result;
-      }
       const [invitation] = await tx
         .update(tenantInvitations)
         .set({
@@ -7922,11 +7897,22 @@ user.post("/me/tenants/:tenantId/invitations/accept", async (c) => {
         )
         .returning({ id: tenantInvitations.id, role: tenantInvitations.role });
       if (!invitation) return null;
-      await tx
-        .insert(userTenants)
-        .values({ userId, tenantId, role: invitation.role })
-        .onConflictDoNothing();
-      const result = { ...invitation, alreadyMember: false };
+      const [existingMembership] = await tx
+        .select({ role: userTenants.role })
+        .from(userTenants)
+        .where(and(eq(userTenants.userId, userId), eq(userTenants.tenantId, tenantId)))
+        .limit(1);
+      if (!existingMembership) {
+        await tx
+          .insert(userTenants)
+          .values({ userId, tenantId, role: invitation.role })
+          .onConflictDoNothing();
+      }
+      const result = {
+        ...invitation,
+        role: existingMembership?.role ?? invitation.role,
+        alreadyMember: Boolean(existingMembership),
+      };
       await appendRequiredAudit({
         tenantId,
         actorType: "user",
@@ -7934,7 +7920,7 @@ user.post("/me/tenants/:tenantId/invitations/accept", async (c) => {
         action: "tenant.invitation.accept",
         resourceType: "tenant_invitation",
         resourceId: result.id,
-        metadata: { email, role: result.role },
+        metadata: { email, role: result.role, alreadyMember: result.alreadyMember },
         ipAddress: c.req.header("x-forwarded-for") ?? null,
         userAgent: c.req.header("user-agent") ?? null,
         requestId: c.get("requestId") ?? null,

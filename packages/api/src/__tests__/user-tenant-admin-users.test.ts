@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { createHash } from "node:crypto";
 
-import { closeDb, getDb, tenants, users, userTenants } from "@stwd/db";
+import { closeDb, getDb, tenantInvitations, tenants, users, userTenants } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { and, eq } from "drizzle-orm";
 
@@ -268,6 +269,38 @@ describe("user tenant-admin user directory routes", () => {
       { method: "DELETE", headers: { Authorization: `Bearer ${token}` } },
     );
     expect(revoke.status).toBe(409);
+  });
+
+  it("consumes a single-use invitation even when the accepting user is already a member", async () => {
+    const token = "a".repeat(64);
+    const tokenHash = createHash("sha256").update(token).digest("hex");
+    const [invitation] = await getDb()
+      .insert(tenantInvitations)
+      .values({
+        tenantId: TENANT_ID,
+        email: "owner@example.test",
+        role: "member",
+        tokenHash,
+        expiresAt: new Date(Date.now() + 60_000),
+      })
+      .returning({ id: tenantInvitations.id });
+    const sessionToken = await personalTokenFor(ownerId);
+    const accept = () =>
+      userRoutes.request(`/me/tenants/${TENANT_ID}/invitations/accept`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${sessionToken}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ token }),
+      });
+
+    const first = await accept();
+    expect(first.status).toBe(200);
+    expect(await first.json()).toMatchObject({ ok: true, alreadyMember: true });
+    const [stored] = await getDb()
+      .select({ status: tenantInvitations.status })
+      .from(tenantInvitations)
+      .where(eq(tenantInvitations.id, invitation.id));
+    expect(stored?.status).toBe("accepted");
+    expect((await accept()).status).toBe(404);
   });
 
   it("serializes concurrent owner demotions so exactly one wins", async () => {

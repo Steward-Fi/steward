@@ -194,6 +194,9 @@ describe("user membership hardening", () => {
     expect(acceptRoute.indexOf(".update(tenantInvitations)")).toBeLessThan(
       acceptRoute.indexOf(".insert(userTenants)"),
     );
+    expect(acceptRoute.indexOf(".update(tenantInvitations)")).toBeLessThan(
+      acceptRoute.indexOf("const [existingMembership]"),
+    );
 
     for (const [routeMarker, auditMarker] of [
       [
