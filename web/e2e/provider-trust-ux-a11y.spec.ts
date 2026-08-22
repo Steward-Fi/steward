@@ -7,6 +7,9 @@ const API = "http://127.0.0.1:3299";
 const ACTION_ID = "pa_00000000-0000-4000-8000-000000000001";
 const HASH_A = `sha256:${"a".repeat(64)}`;
 const HASH_B = `sha256:${"b".repeat(64)}`;
+const PROVIDER_IDEMPOTENCY_HASH = `sha256:${"d".repeat(64)}`;
+const RAW_CANONICAL_BYTES = "raw-canonical-provider-action-must-not-render";
+const RAW_CREDENTIAL = "ghp_raw-provider-secret-must-not-render";
 
 type ApprovalAttempt = {
   body: Record<string, unknown>;
@@ -61,6 +64,12 @@ function approvalDetail(status = "pending_approval") {
     operationId: "operation-trust",
     providerAccountId: "account-trust",
     workspaceId: "workspace-trust",
+    // Deliberately hostile extra fields prove that the reachable page renders
+    // its safe projection rather than reflecting an over-broad API payload.
+    canonicalBytes: RAW_CANONICAL_BYTES,
+    canonicalActionBytes: RAW_CANONICAL_BYTES,
+    commentBody: RAW_CANONICAL_BYTES,
+    credential: { value: RAW_CREDENTIAL },
   };
 }
 
@@ -106,7 +115,7 @@ function baseCaseManifest() {
       dispatchState: "succeeded",
       upstreamStatusCode: 201,
       reconciled: false,
-      providerIdempotencyKeyHash: `sha256:${"d".repeat(64)}`,
+      providerIdempotencyKeyHash: PROVIDER_IDEMPOTENCY_HASH,
     },
     safeSummary: { operation: "github.pr.comment.create" },
     genesisAt: "2026-08-16T22:00:00.000Z",
@@ -276,9 +285,23 @@ test("mocked-session approval detail passes WCAG 2.1 AA and complete binding is 
 
   const approve = page.getByRole("button", { name: "Approve this provider action" });
   const deny = page.getByRole("button", { name: "Deny this provider action" });
+  await expect(page.getByLabel("Reason (required for approve and deny)")).toHaveAttribute(
+    "aria-required",
+    "true",
+  );
   const [approveBox, denyBox] = await Promise.all([approve.boundingBox(), deny.boundingBox()]);
   expect(approveBox?.width).toBe(denyBox?.width);
   expect(approveBox?.height).toBe(denyBox?.height);
+  await expect(page.getByLabel("Redacted safe summary")).toContainText(
+    '"operation": "github.pr.comment.create"',
+  );
+  await expect(page.getByLabel("Redacted safe summary")).toContainText(
+    '"repository": "Steward-Fi/steward"',
+  );
+  await expect(page.getByText(HASH_A)).toBeVisible();
+  await expect(page.getByText(HASH_B)).toBeVisible();
+  await expect(page.getByText(RAW_CANONICAL_BYTES)).toHaveCount(0);
+  await expect(page.getByText(RAW_CREDENTIAL)).toHaveCount(0);
 
   // The mock is deliberately fail-closed: a stale/mismatched commitment must
   // be rejected and must not alter the pending approval state.
@@ -352,6 +375,11 @@ test("mocked-session approval detail passes WCAG 2.1 AA and complete binding is 
   await denyPage.goto(`/dashboard/approvals/${ACTION_ID}`);
   await expect(denyPage.getByRole("heading", { name: "Provider action approval" })).toBeVisible();
   await expect(denyPage.getByRole("heading", { name: "Exact action" })).toBeVisible();
+  await denyPage.getByRole("button", { name: "Deny this provider action" }).click();
+  await expect(
+    denyPage.getByText("A typed reason is required for both approve and deny."),
+  ).toBeVisible();
+  expect(denyMocked.attempts).toHaveLength(0);
   const denyReason = denyPage.getByLabel("Reason (required for approve and deny)");
   await focusWithTab(denyPage, denyReason);
   await denyPage.keyboard.type("Denied after exact-request review");
@@ -381,6 +409,9 @@ test("mocked-session case detail passes WCAG 2.1 AA without widening the scan", 
   await page.goto(`/dashboard/actions/${ACTION_ID}`);
   await expect(page.getByRole("heading", { name: "Provider action case" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Commitments" })).toBeVisible();
+  await expect(page.getByRole("status").filter({ hasText: "Completeness: complete" })).toHaveClass(
+    /border-success/,
+  );
   await expectWcag21Aa(page, 'main[aria-labelledby="case-heading"]');
 });
 
@@ -400,6 +431,10 @@ test("the approval queue loads once and exposes per-item decisions", async ({ pa
   await expect(page.getByRole("heading", { name: "Approval Queue" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Approve", exact: true })).toHaveCount(1);
   await expect(page.getByRole("button", { name: "Reject", exact: true })).toHaveCount(1);
+  await expect(
+    page.getByRole("button", { name: /bulk approve|approve all|select all/i }),
+  ).toHaveCount(0);
+  await expect(page.getByRole("checkbox", { name: /select all/i })).toHaveCount(0);
   await page.waitForTimeout(1_000);
   const installedToken = await page.evaluate(() =>
     window.sessionStorage.getItem("steward_session_token"),
@@ -680,25 +715,33 @@ test("case detail preserves incomplete and unknown evidence without exposing raw
   browser,
   page,
 }) => {
-  const rawCredential = "ghp_raw-provider-secret-must-not-render";
   await mockAccessibilityApis(page, {
     manifest: caseManifest({
       completeness: "incomplete",
       incompletenessReasons: ["provider receipt missing"],
       missingRequiredRoles: ["provider_receipt"],
-      canonicalBytes: rawCredential,
-      credential: { value: rawCredential },
+      canonicalBytes: RAW_CANONICAL_BYTES,
+      canonicalActionBytes: RAW_CANONICAL_BYTES,
+      commentBody: RAW_CANONICAL_BYTES,
+      credential: { value: RAW_CREDENTIAL },
     }),
   });
   await page.goto(`/dashboard/actions/${ACTION_ID}`);
   await expect(page.getByText("Completeness: incomplete")).toBeVisible();
+  await expect(
+    page.getByRole("status").filter({ hasText: "Completeness: incomplete" }),
+  ).toHaveClass(/border-warning/);
   await expect(page.getByText("provider receipt missing")).toBeVisible();
   await expect(page.getByText(/Missing required roles:/)).toContainText("provider_receipt");
   await expect(page.getByText(/NOT an operator-integrity proof/)).toBeVisible();
   await expect(page.getByText(/--expected-key-fingerprint/)).toBeVisible();
+  await expect(page.getByText(/verify-evidence-bundle\.mjs/)).toBeVisible();
+  await expect(page.getByText(/verifying against the embedded key/)).toBeVisible();
   await expect(page.getByText(HASH_A)).toBeVisible();
   await expect(page.getByText(HASH_B)).toBeVisible();
-  await expect(page.getByText(rawCredential)).toHaveCount(0);
+  await expect(page.getByText(PROVIDER_IDEMPOTENCY_HASH)).toBeVisible();
+  await expect(page.getByText(RAW_CANONICAL_BYTES)).toHaveCount(0);
+  await expect(page.getByText(RAW_CREDENTIAL)).toHaveCount(0);
 
   const unknownContext = await browser.newContext();
   const unknownPage = await unknownContext.newPage();
@@ -708,6 +751,9 @@ test("case detail preserves incomplete and unknown evidence without exposing raw
   });
   await unknownPage.goto(`/dashboard/actions/${ACTION_ID}`);
   await expect(unknownPage.getByText("Completeness: unknown")).toBeVisible();
+  await expect(
+    unknownPage.getByRole("status").filter({ hasText: "Completeness: unknown" }),
+  ).toHaveClass(/border-warning/);
   await expect(unknownPage.getByText("audit gap")).toBeVisible();
   await unknownContext.close();
 });
@@ -724,15 +770,30 @@ test("terminal approvals disable both decisions and errors do not enumerate priv
 
   const renderedErrors: string[] = [];
   for (const status of [403, 404]) {
-    const context = await browser.newContext();
-    const errorPage = await context.newPage();
-    await seedSession(errorPage);
-    await mockAccessibilityApis(errorPage, { caseErrorStatus: status });
-    await errorPage.goto(`/dashboard/actions/${ACTION_ID}`);
-    const alert = errorPage.getByRole("alert");
-    await expect(alert.getByText("Not found or not authorized")).toBeVisible();
-    renderedErrors.push(await alert.getByText("Not found or not authorized").innerText());
-    await context.close();
+    for (const surface of ["approval", "case"] as const) {
+      const context = await browser.newContext();
+      const errorPage = await context.newPage();
+      await seedSession(errorPage);
+      await mockAccessibilityApis(errorPage, {
+        approvalErrorStatus: surface === "approval" ? status : undefined,
+        caseErrorStatus: surface === "case" ? status : undefined,
+      });
+      await errorPage.goto(
+        surface === "approval"
+          ? `/dashboard/approvals/${ACTION_ID}`
+          : `/dashboard/actions/${ACTION_ID}`,
+      );
+      const alert = errorPage.getByRole("alert");
+      await expect(alert.getByText("Not found or not authorized")).toBeVisible();
+      await expect(alert).not.toContainText(`PRIVATE_${status}`);
+      renderedErrors.push((await alert.innerText()).replaceAll(/\s+/g, " ").trim());
+      await context.close();
+    }
   }
-  expect(renderedErrors).toEqual(["Not found or not authorized", "Not found or not authorized"]);
+  expect(renderedErrors).toEqual([
+    "Not found or not authorized not found / not authorized",
+    "Not found or not authorized not found / not authorized",
+    "Not found or not authorized not found / not authorized",
+    "Not found or not authorized not found / not authorized",
+  ]);
 });
