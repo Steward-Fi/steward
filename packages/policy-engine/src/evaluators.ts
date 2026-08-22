@@ -295,13 +295,13 @@ export interface EvaluatorContext {
   /** Optional reputation score for reputation-based policies */
   reputationScore?: number;
   /**
-   * Sprint 4: trading venue the request is destined for. Required by the
+   * Trading venue the request is destined for. Required by the
    * `venue-allowlist` evaluator. Trade-sessions sets this from the venue
    * adapter dispatch step; non-trade signing requests leave it undefined.
    */
   venue?: string;
   /**
-   * Sprint 4: requested leverage multiple (e.g. 2 = 2x). Required by the
+   * Requested leverage multiple (e.g. 2 = 2x). Required by the
    * `leverage-cap` evaluator. Undefined for non-leveraged trades and for
    * spot transfers.
    */
@@ -336,7 +336,7 @@ export interface EvaluatorContext {
   };
   /**
    * Capability-invoke context for `capability-intent` policies. Populated ONLY
-   * by the capability invoke route (W-1c); absent on ordinary signing requests,
+   * by the capability invoke route; absent on ordinary signing requests,
    * so a `capability-intent` policy is "not applicable" (passes) when this is
    * undefined. Symmetry with `typedData`: capability policies cannot interfere
    * with transaction signing, and transaction policies cannot interfere with
@@ -354,7 +354,7 @@ export interface EvaluatorContext {
   /**
    * Rolling count of capability INVOKES in the trailing hour (distinct from
    * `recentTxCount1h`, which counts transaction signs). Populated ONLY by the
-   * capability invoke route (W-1c) alongside `capability`. When a
+   * capability invoke route alongside `capability`. When a
    * `capability-intent` rule sets `constraints.maxCallsPerHour` but this count
    * is absent, the rule FAILS CLOSED (deny) rather than borrowing the tx
    * counter, so an unwired invoke path can never silently pass a rate cap.
@@ -458,7 +458,7 @@ export async function evaluatePolicy(
     default: {
       // FALLTHROUGH FOR NON-CORE RULE TYPES ONLY. Every core type is handled by a
       // `case` above; control reaches here ONLY for a rule type the core does not
-      // own. Consult the plugin policy-rule registry (Phase 2b): if a plugin
+      // own. Consult the plugin policy-rule registry: if a plugin
       // registered an evaluator for this type, run it; otherwise preserve the
       // historical "Unknown policy type" deny. Core decisions are byte-identical
       // because no core type ever reaches this arm.

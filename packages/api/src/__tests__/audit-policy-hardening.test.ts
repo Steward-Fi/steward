@@ -105,9 +105,9 @@ describe("audit and policy route hardening", () => {
       policiesSource.indexOf('policiesStandaloneRoutes.post("/:id/assign"'),
     );
     expect(assignRoute.indexOf('action: "policy.template.assign.authorized"')).toBeLessThan(
-      assignRoute.indexOf("await db.transaction"),
+      assignRoute.indexOf("withTenantAuditedTransaction("),
     );
-    expect(assignRoute.indexOf("await db.transaction")).toBeLessThan(
+    expect(assignRoute.indexOf("withTenantAuditedTransaction(")).toBeLessThan(
       assignRoute.indexOf('action: "policy.template.assign"'),
     );
   });
@@ -117,25 +117,28 @@ describe("audit and policy route hardening", () => {
       conditionSetsSource.indexOf('conditionSetRoutes.patch("/:id"'),
     );
     expect(updateRoute.indexOf('action: "condition_set.update.authorized"')).toBeLessThan(
-      updateRoute.indexOf(".update(conditionSets)"),
+      updateRoute.indexOf("withTenantAuditedTransaction"),
     );
-    expect(updateRoute.indexOf(".returning()")).toBeLessThan(
-      updateRoute.indexOf("if (!row) return c.json<ApiResponse>"),
-    );
-    expect(updateRoute.indexOf("if (!row) return c.json<ApiResponse>")).toBeLessThan(
+    expect(updateRoute).toContain("readLockedConditionSet");
+    expect(updateRoute.indexOf(".update(conditionSets)")).toBeLessThan(
       updateRoute.indexOf('action: "condition_set.update"'),
+    );
+    expect(updateRoute.indexOf('action: "condition_set.update"')).toBeLessThan(
+      updateRoute.indexOf("return updated"),
     );
 
     const replaceRoute = conditionSetsSource.slice(
       conditionSetsSource.indexOf('conditionSetRoutes.put("/:id/items"'),
     );
     expect(replaceRoute.indexOf('action: "condition_set.items.replace.authorized"')).toBeLessThan(
-      replaceRoute.indexOf("await db.transaction"),
+      replaceRoute.indexOf("withTenantAuditedTransaction"),
     );
-    expect(replaceRoute).toContain("const [currentSet] = await tx");
-    expect(replaceRoute).toContain("if (!currentSet) return null");
-    expect(replaceRoute.indexOf("if (!rows) return c.json<ApiResponse>")).toBeLessThan(
+    expect(replaceRoute).toContain("readLockedConditionSet");
+    expect(replaceRoute.indexOf(".delete(conditionSetItems)")).toBeLessThan(
       replaceRoute.indexOf('action: "condition_set.items.replace"'),
+    );
+    expect(replaceRoute.indexOf('action: "condition_set.items.replace"')).toBeLessThan(
+      replaceRoute.indexOf("return replaced"),
     );
   });
 

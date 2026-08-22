@@ -14,7 +14,7 @@ import {
   upstreamCredentialLeaseEvents,
   upstreamCredentialLeases,
 } from "@stwd/db";
-import { and, eq, inArray, sql } from "drizzle-orm";
+import { and, eq, inArray, or, sql } from "drizzle-orm";
 import { type AuditEventInput, withTenantAuditedTransaction } from "./audit";
 
 // The lease owner scrubs these states only after confirmed provider revocation
@@ -131,13 +131,22 @@ export async function deleteAgentAuthority(
         and(
           eq(intents.tenantId, tenantId),
           eq(intents.agentId, agentId),
-          eq(intents.intentType, "provider-action"),
-          inArray(intents.status, ["pending", "authorized", "executing"]),
-          sql`NOT EXISTS (
-            SELECT 1 FROM public.provider_action_bindings AS binding
-            WHERE binding.tenant_id = ${intents.tenantId}
-              AND binding.intent_id = ${intents.id}
-          )`,
+          or(
+            // Every generic intent execution reservation is a durable
+            // non-replay fence. Deleting its agent would cascade-delete that
+            // fence while the autonomous executor is still live or awaiting
+            // recovery.
+            eq(intents.status, "executing"),
+            and(
+              eq(intents.intentType, "provider-action"),
+              inArray(intents.status, ["pending", "authorized"]),
+              sql`NOT EXISTS (
+                SELECT 1 FROM public.provider_action_bindings AS binding
+                WHERE binding.tenant_id = ${intents.tenantId}
+                  AND binding.intent_id = ${intents.id}
+              )`,
+            ),
+          ),
         ),
       )
       .limit(1)

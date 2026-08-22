@@ -15,7 +15,7 @@
  * a grant is: agent X may use capability Y (optionally until expiresAt). the
  * grant carries the id of its paired secret_route (per-GRANT pairing - the proxy
  * matches secret_routes by exact agentId, and capabilities are tenant-wide with
- * per-agent grants, so a route materializes once per grant; see PR / index.ts).
+ * per-agent grants, so a route materializes once per grant; see index.ts).
  */
 
 import { relations, sql } from "drizzle-orm";
@@ -96,7 +96,7 @@ export const capabilityGrants = pgTable(
 
 /**
  * capability_invocations - the append-only audit + rate-limit source for the
- * agent invoke path (W-1c). EVERY invoke attempt records exactly one row with its
+ * agent invoke path. EVERY invoke attempt records exactly one row with its
  * terminal decision (allow / deny / approval / error), regardless of outcome:
  *   - it is the audit trail (who invoked what, and how it was decided),
  *   - it is the source of the trailing-hour invoke count the `capability-intent`

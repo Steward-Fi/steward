@@ -39,7 +39,7 @@ services:
       DATABASE_URL: postgres://steward:${DB_PASSWORD:-changeme}@postgres:5432/steward
       STEWARD_MASTER_PASSWORD: ${STEWARD_MASTER_PASSWORD}
       STEWARD_JWT_SECRET: ${STEWARD_JWT_SECRET}
-      STEWARD_PORT: "3200"
+      PORT: "3200"
       STEWARD_BIND_HOST: "0.0.0.0"
       RPC_URL: ${RPC_URL:-https://mainnet.base.org}
       CHAIN_ID: ${CHAIN_ID:-8453}

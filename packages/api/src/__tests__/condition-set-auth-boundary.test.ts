@@ -65,6 +65,27 @@ describe("condition set executable auth boundary", () => {
       });
       expect(response.status).toBe(403);
     }
+
+    const setId = "10000000-0000-4000-8000-000000000001";
+    const itemId = "10000000-0000-4000-8000-000000000002";
+    for (const [path, method, body] of [
+      [`/condition-sets/${setId}`, "PATCH", { name: "blocked" }],
+      [`/condition-sets/${setId}`, "DELETE", undefined],
+      [`/condition-sets/${setId}/items`, "POST", { value: "blocked" }],
+      [`/condition-sets/${setId}/items`, "PUT", { items: [] }],
+      [`/condition-sets/${setId}/items/${itemId}`, "PATCH", { label: "blocked" }],
+      [`/condition-sets/${setId}/items/${itemId}`, "DELETE", undefined],
+    ] as const) {
+      const response = await app.request(path, {
+        method,
+        headers: {
+          ...(body ? { "Content-Type": "application/json" } : {}),
+          "x-test-auth-mode": "admin-no-mfa",
+        },
+        body: body ? JSON.stringify(body) : undefined,
+      });
+      expect(response.status).toBe(403);
+    }
   });
 
   it("allows owner/admin sessions with recent MFA to manage condition sets", async () => {

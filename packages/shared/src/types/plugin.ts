@@ -6,7 +6,8 @@
  * core never imports a plugin; a plugin contributes routes/middleware through the
  * register seam, so the majority of installs that only want the core never pull a
  * plugin's transitive dependencies (smaller install, smaller supply-chain and
- * audit surface). trading is the first such plugin.
+ * audit surface). the deployable composition root currently knows the trading,
+ * capabilities, and wxmr first-party plugins.
  *
  * `StewardPlugin` is intentionally generic and framework-agnostic here: it carries
  * no hono (or any http-framework) types so `@stwd/shared` keeps zero runtime deps.
@@ -69,9 +70,9 @@ export interface ContributedPolicyResult {
  * evaluate a rule type the plugin owns (e.g. a venue-specific gate) WITHOUT the
  * core importing the plugin.
  *
- * WIRED in Phase 2b. The plugin host registers each contribution into the policy
- * engine's runtime evaluator registry (fail-closed on a `type` that collides with
- * a core rule type or another plugin's). When `evaluatePolicy` meets a rule whose
+ * The plugin host registers each contribution into the policy engine's runtime
+ * evaluator registry, fail-closed on a `type` that collides with a core rule type
+ * or another plugin's. When `evaluatePolicy` meets a rule whose
  * `type` is not one of the core cases, it consults the registry; the contributed
  * `evaluate` runs and its result is used. Core rule evaluation is untouched.
  *
@@ -104,9 +105,9 @@ export interface PolicyRuleContribution<Ctx = unknown> {
  * created when the plugin is enabled, WITHOUT the core owning the plugin's
  * schema.
  *
- * WIRED in Phase 2c. The host applies these via `@stwd/db`'s
- * `runPluginMigrations`, which runs the plugin's drizzle migrations into a
- * SEPARATE, PER-PLUGIN bookkeeping table derived from `id`
+ * The host applies these via `@stwd/db`'s `runPluginMigrations`, which runs the
+ * plugin's drizzle migrations into a SEPARATE, PER-PLUGIN bookkeeping table
+ * derived from `id`
  * (`__drizzle_migrations_plugin_<sanitized id>` in the `drizzle` schema). The
  * isolation guarantee is total: a plugin's applied-migrations ledger is NEVER
  * written into or read from the core's `drizzle.__drizzle_migrations` journal, so
@@ -142,8 +143,8 @@ export interface PluginMigrationSource {
  * provider integration (a concrete swap/earn/onramp/.../exchange adapter).
  *
  * WIRED in Phase 2d. The host registers each contribution into the core's
- * {@link AdapterRegistry} via its existing `register(category, provider, adapter)`
- * seam, in `dependsOn` order, FAIL-CLOSED on a `(category, provider)` collision
+ * {@link AdapterRegistry} via its instance or request-factory registration seam,
+ * in `dependsOn` order, FAIL-CLOSED on a `(category, provider)` collision
  * with another plugin's contribution (the host never silently overwrites a real
  * money-route adapter — see the host's conflict detection). The registry's own
  * fail-closed-in-production RESOLUTION is untouched: a contributed adapter is
@@ -155,8 +156,8 @@ export interface PluginMigrationSource {
  * (`@stwd/adapters` depends on `@stwd/shared`, so importing the concrete
  * per-category adapter types here would create a dependency CYCLE). The category
  * is therefore a plain `string` (assignable to the registry's `AdapterCategory`,
- * validated by the host) and the concrete adapter instance is typed `unknown` —
- * the host casts it to the registry's per-category type at the api boundary,
+ * validated by the host) and the adapter instance/factory result is typed
+ * `unknown` — the host casts it to the registry's per-category type at the api boundary,
  * where `@stwd/adapters` is a legitimate dependency.
  */
 export interface AdapterContribution {
@@ -170,13 +171,17 @@ export interface AdapterContribution {
   /** the provider name this contribution registers under (must be non-empty). */
   readonly provider: string;
   /**
-   * the concrete adapter instance to register under `(category, provider)`.
-   * typed `unknown` at the shared layer to avoid a shared->adapters cycle (the
-   * concrete per-category adapter types live in `@stwd/adapters`); the host
-   * casts it to the registry's expected per-category type when it calls
-   * `adapterRegistry.register(...)`.
+   * A concrete, configuration-free adapter instance. Binding-dependent
+   * providers must use `createAdapter` instead so Worker binding generations
+   * cannot share endpoint or credential authority.
    */
-  readonly adapter: unknown;
+  readonly adapter?: unknown;
+  /**
+   * Request-authority factory. It is invoked only when this provider is selected
+   * under the current request environment; its result is never module-cached by
+   * the registry.
+   */
+  readonly createAdapter?: () => unknown;
 }
 
 export interface StewardPlugin<App = unknown, Ctx = unknown, EvalCtx = unknown> {
@@ -199,9 +204,8 @@ export interface StewardPlugin<App = unknown, Ctx = unknown, EvalCtx = unknown> 
    * for shared services and auth gates. may be async (e.g. to lazily resolve a
    * provider). called once, at the composition root, after the core is built.
    *
-   * OPTIONAL as of Phase 2: a plugin may contribute ONLY declaratively (via the
-   * contribution points below) without mounting any route/middleware. the
-   * trading plugin still uses `register` for back-compat.
+   * Optional: a plugin may contribute only declaratively through the contribution
+   * points below without mounting routes or middleware.
    */
   register?(app: App, ctx: Ctx): void | Promise<void>;
 
@@ -213,14 +217,13 @@ export interface StewardPlugin<App = unknown, Ctx = unknown, EvalCtx = unknown> 
    * webhook dispatcher/config validation accepts a plugin's event without the
    * core's closed union having to know about it ahead of time.
    *
-   * WIRED in Phase 2a — this is the keystone contribution point proven
-   * end-to-end by the trading plugin.
+   * The plugin host registers these names before route dispatch.
    */
   readonly webhookEvents?: readonly string[];
 
   /**
-   * policy rules this plugin contributes. WIRED in Phase 2b: the host registers
-   * each into the policy engine's runtime evaluator registry (fail-closed on a
+   * policy rules this plugin contributes. The host registers each into the
+   * policy engine's runtime evaluator registry (fail-closed on a
    * `type` collision with a core rule type or another plugin's). The policy
    * engine then evaluates a rule of a contributed `type` via the contribution's
    * `evaluate`. `EvalCtx` is bound by the concrete app plugin type (in
@@ -229,8 +232,8 @@ export interface StewardPlugin<App = unknown, Ctx = unknown, EvalCtx = unknown> 
   readonly policyRules?: readonly PolicyRuleContribution<EvalCtx>[];
 
   /**
-   * database migrations this plugin contributes. WIRED in Phase 2c: the host
-   * applies these via `@stwd/db`'s `runPluginMigrations` into a per-plugin
+   * database migrations this plugin contributes. The host applies these via
+   * `@stwd/db`'s `runPluginMigrations` into a per-plugin
    * namespaced bookkeeping table (`__drizzle_migrations_plugin_<id>`), totally
    * isolated from the core's `drizzle.__drizzle_migrations` journal, AFTER core
    * migrations and in `dependsOn` order, at the boot/migrate step only.
@@ -238,8 +241,8 @@ export interface StewardPlugin<App = unknown, Ctx = unknown, EvalCtx = unknown> 
   readonly migrations?: PluginMigrationSource;
 
   /**
-   * adapter integrations this plugin contributes. WIRED in Phase 2d: the host
-   * registers each into the core's adapter registry via its existing
+   * adapter integrations this plugin contributes. The host registers each into
+   * the core's adapter registry via its
    * `register(category, provider, adapter)` seam, in `dependsOn` order,
    * FAIL-CLOSED on a `(category, provider)` collision with another plugin's
    * contribution (never silently overwrites a real money-route adapter). The

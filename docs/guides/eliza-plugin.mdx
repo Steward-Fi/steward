@@ -45,7 +45,7 @@ Set the required environment variables:
 STEWARD_API_URL=http://localhost:3200    # Steward API base URL
 STEWARD_API_KEY=stwd_your_tenant_key       # Tenant API key
 STEWARD_AGENT_ID=my-trading-agent          # Agent ID in Steward
-STEWARD_AGENT_TOKEN=stwd_jwt_...           # Agent JWT (optional, preferred over API key)
+STEWARD_JWT=stwd_jwt_...                   # Agent JWT (optional, preferred over API key)
 ```
 
 ## What It Provides
@@ -142,15 +142,18 @@ For agents running in Docker containers (e.g., on a hosted cloud), the plugin us
 ```dockerfile
 # In your container configuration
 ENV STEWARD_API_URL=http://steward-api:3200
-ENV STEWARD_AGENT_TOKEN=stwd_jwt_...
+ENV STEWARD_JWT=stwd_jwt_...
 ENV STEWARD_AGENT_ID=my-agent
 ```
 
-When using the [Proxy Gateway](/concepts/proxy-gateway), the agent container only needs:
+When using the [Proxy Gateway](/concepts/proxy-gateway), add its URL to the core
+plugin configuration above and use an agent JWT:
 
 ```dockerfile
+ENV STEWARD_API_URL=http://steward-api:3200
 ENV STEWARD_PROXY_URL=http://steward-proxy:8080
-ENV STEWARD_AGENT_TOKEN=stwd_jwt_...
+ENV STEWARD_JWT=stwd_jwt_...
+ENV STEWARD_AGENT_ID=my-agent
 ```
 
 ## Handling Approval Flows

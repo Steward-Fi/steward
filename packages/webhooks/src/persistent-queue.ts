@@ -2,7 +2,9 @@
  * Persistent webhook delivery queue backed by the `webhook_deliveries` DB table.
  *
  * Replaces the in-memory RetryQueue for production use. Webhooks survive
- * process restarts and use exponential backoff for retries.
+ * process restarts and use exponential backoff for retries. Delivery is
+ * at-least-once: receivers must deduplicate the stable deliveryId because an
+ * HTTP success followed by a lost database acknowledgement is ambiguous.
  */
 
 import { randomUUID } from "node:crypto";
@@ -39,6 +41,34 @@ export interface PersistentQueueStats {
   dead: number;
 }
 
+type ClaimOutcomePatch = {
+  status: "delivered" | "failed" | "dead";
+  attempts: number;
+  lastError: string | null;
+  deliveredAt?: Date;
+  nextRetryAt?: Date | null;
+  payload?: Record<string, unknown>;
+};
+
+async function settleClaim(
+  deliveryId: string,
+  claimToken: string,
+  patch: ClaimOutcomePatch,
+): Promise<boolean> {
+  const [updated] = await getDb()
+    .update(webhookDeliveries)
+    .set({ ...patch, claimToken: null })
+    .where(
+      and(
+        eq(webhookDeliveries.id, deliveryId),
+        eq(webhookDeliveries.status, "processing"),
+        eq(webhookDeliveries.claimToken, claimToken),
+      ),
+    )
+    .returning({ id: webhookDeliveries.id });
+  return updated !== undefined;
+}
+
 export class PersistentQueue {
   private readonly dispatcher: WebhookDispatcher;
   private readonly maxAttempts: number;
@@ -59,11 +89,7 @@ export class PersistentQueue {
    */
   async enqueue(event: WebhookEvent, webhook: WebhookConfig | string): Promise<string> {
     const db = getDb();
-    // The queue row is the durable delivery identity. Persist it in the payload
-    // in the same insert that makes the work visible, before any worker can
-    // perform external I/O. If a worker disappears after the receiver accepts
-    // the request but before the result update, visibility recovery therefore
-    // reuses this identity instead of minting a second receiver-visible event.
+    // Persist the receiver-visible identity before the row becomes available to workers.
     const deliveryId = randomUUID();
     const signedAt =
       typeof event.signedAt === "number" && Number.isFinite(event.signedAt)
@@ -104,18 +130,19 @@ export class PersistentQueue {
   async processQueue(): Promise<WebhookDeliveryResult[]> {
     const db = getDb();
     const now = new Date();
+    const claimToken = randomUUID();
     const results: WebhookDeliveryResult[] = [];
 
     // Atomically claim due deliveries before dispatch. The temporary
     // nextRetryAt push acts as a visibility timeout if a worker crashes mid-send.
     const claimed = (await db.transaction(async (tx) => {
-      // A worker can disappear after the claim commits. Since the attempt was
-      // consumed by that claim, an expired row at its durable limit must be
-      // terminalized instead of becoming sendable forever.
+      // Claiming consumes an attempt. Once an abandoned claim has expired at
+      // its durable limit, terminalize it without another external send.
       await tx.execute(sql`
         UPDATE ${webhookDeliveries}
         SET
           "status" = 'dead',
+          "claim_token" = NULL,
           "last_error" = COALESCE("last_error", 'Max attempts exceeded')
         WHERE (
           ${webhookDeliveries.status} in ('pending', 'failed')
@@ -125,10 +152,25 @@ export class PersistentQueue {
           AND ${webhookDeliveries.attempts} >= ${webhookDeliveries.maxAttempts}
       `);
 
+      // A dependent success event must never overtake a predecessor that can
+      // no longer be delivered. Resolve the chain terminally instead of
+      // leaving an undeliverable row pending forever.
+      await tx.execute(sql`
+        UPDATE ${webhookDeliveries} AS dependent
+        SET
+          "status" = 'dead',
+          "claim_token" = NULL,
+          "last_error" = 'Predecessor webhook delivery is dead'
+        FROM ${webhookDeliveries} AS predecessor
+        WHERE dependent."predecessor_delivery_id" = predecessor."id"
+          AND predecessor."status" = 'dead'
+          AND dependent."status" in ('pending', 'failed', 'processing')
+      `);
       return tx.execute(sql`
         UPDATE ${webhookDeliveries}
         SET
           "status" = 'processing',
+          "claim_token" = ${claimToken},
           "attempts" = "attempts" + 1,
           "next_retry_at" = ${new Date(now.getTime() + CLAIM_VISIBILITY_TIMEOUT_MS).toISOString()},
           "payload" = jsonb_set(
@@ -152,15 +194,24 @@ export class PersistentQueue {
             true
           )
         WHERE "id" IN (
-          SELECT "id"
-          FROM ${webhookDeliveries}
+          SELECT candidate."id"
+          FROM ${webhookDeliveries} AS candidate
           WHERE (
-            ${webhookDeliveries.status} in ('pending', 'failed')
-            OR ${webhookDeliveries.status} = 'processing'
+            candidate."status" in ('pending', 'failed')
+            OR candidate."status" = 'processing'
           )
-            AND ${webhookDeliveries.nextRetryAt} <= ${now.toISOString()}
-            AND ${webhookDeliveries.attempts} < ${webhookDeliveries.maxAttempts}
-          ORDER BY ${webhookDeliveries.nextRetryAt} ASC
+            AND candidate."next_retry_at" <= ${now.toISOString()}
+            AND candidate."attempts" < candidate."max_attempts"
+            AND (
+              candidate."predecessor_delivery_id" IS NULL
+              OR EXISTS (
+                SELECT 1
+                FROM ${webhookDeliveries} AS predecessor
+                WHERE predecessor."id" = candidate."predecessor_delivery_id"
+                  AND predecessor."status" = 'delivered'
+              )
+            )
+          ORDER BY candidate."next_retry_at" ASC, candidate."created_at" ASC, candidate."id" ASC
           FOR UPDATE SKIP LOCKED
           LIMIT ${this.batchSize}
         )
@@ -170,6 +221,7 @@ export class PersistentQueue {
           "webhook_config_id" AS "webhookConfigId",
           "agent_id" AS "agentId",
           "event_type" AS "eventType",
+          "predecessor_delivery_id" AS "predecessorDeliveryId",
           "replayed_from_delivery_id" AS "replayedFromDeliveryId",
           "payload",
           "url",
@@ -179,6 +231,7 @@ export class PersistentQueue {
           "attempts",
           "max_attempts" AS "maxAttempts",
           "next_retry_at" AS "nextRetryAt",
+          "claim_token" AS "claimToken",
           "last_error" AS "lastError",
           "created_at" AS "createdAt",
           "delivered_at" AS "deliveredAt"
@@ -196,27 +249,17 @@ export class PersistentQueue {
     ) as (typeof webhookDeliveries.$inferSelect)[];
 
     for (const delivery of deliveries) {
+      if (!delivery.claimToken) continue;
       const event = delivery.payload as unknown as WebhookEvent;
-      // The atomic claim consumes the attempt before any external I/O, so a
-      // worker crash cannot make an accepted send invisible to maxAttempts.
+      // The atomic claim consumes the attempt before external I/O.
       const newAttempts = delivery.attempts;
-      // Every post-I/O write is fenced to the exact claim generation. If this
-      // worker outlives the visibility timeout and another worker reclaims the
-      // row, the stale completion must not overwrite the newer outcome.
-      const claimFence = and(
-        eq(webhookDeliveries.id, delivery.id),
-        eq(webhookDeliveries.status, "processing"),
-        eq(webhookDeliveries.attempts, newAttempts),
-      );
       if (!delivery.webhookConfigId || !delivery.secret) {
-        await db
-          .update(webhookDeliveries)
-          .set({
-            status: "dead",
-            attempts: newAttempts,
-            lastError: "Webhook delivery is missing original configuration snapshot",
-          })
-          .where(claimFence);
+        const settled = await settleClaim(delivery.id, delivery.claimToken, {
+          status: "dead",
+          attempts: newAttempts,
+          lastError: "Webhook delivery is missing original configuration snapshot",
+        });
+        if (!settled) continue;
         results.push({
           success: false,
           attempts: newAttempts,
@@ -242,14 +285,12 @@ export class PersistentQueue {
         .limit(1);
 
       if (!webhook) {
-        await db
-          .update(webhookDeliveries)
-          .set({
-            status: "dead",
-            attempts: newAttempts,
-            lastError: "Webhook configuration is disabled or deleted",
-          })
-          .where(claimFence);
+        const settled = await settleClaim(delivery.id, delivery.claimToken, {
+          status: "dead",
+          attempts: newAttempts,
+          lastError: "Webhook configuration is disabled or deleted",
+        });
+        if (!settled) continue;
         results.push({
           success: false,
           attempts: newAttempts,
@@ -258,14 +299,12 @@ export class PersistentQueue {
         continue;
       }
       if (webhook.url !== delivery.url) {
-        await db
-          .update(webhookDeliveries)
-          .set({
-            status: "dead",
-            attempts: newAttempts,
-            lastError: "Webhook delivery URL no longer matches its original configuration",
-          })
-          .where(claimFence);
+        const settled = await settleClaim(delivery.id, delivery.claimToken, {
+          status: "dead",
+          attempts: newAttempts,
+          lastError: "Webhook delivery URL no longer matches its original configuration",
+        });
+        if (!settled) continue;
         results.push({
           success: false,
           attempts: newAttempts,
@@ -274,14 +313,12 @@ export class PersistentQueue {
         continue;
       }
       if (webhook.events.length > 0 && !webhook.events.includes(delivery.eventType)) {
-        await db
-          .update(webhookDeliveries)
-          .set({
-            status: "dead",
-            attempts: newAttempts,
-            lastError: "Webhook configuration no longer subscribes to this event",
-          })
-          .where(claimFence);
+        const settled = await settleClaim(delivery.id, delivery.claimToken, {
+          status: "dead",
+          attempts: newAttempts,
+          lastError: "Webhook configuration no longer subscribes to this event",
+        });
+        if (!settled) continue;
         results.push({
           success: false,
           attempts: newAttempts,
@@ -306,14 +343,12 @@ export class PersistentQueue {
         });
       } catch (error) {
         const message = error instanceof Error ? error.message : "Unknown webhook delivery error";
-        await db
-          .update(webhookDeliveries)
-          .set({
-            status: "dead",
-            attempts: newAttempts,
-            lastError: `Webhook delivery failed deterministically: ${message}`,
-          })
-          .where(claimFence);
+        const settled = await settleClaim(delivery.id, delivery.claimToken, {
+          status: "dead",
+          attempts: newAttempts,
+          lastError: `Webhook delivery failed deterministically: ${message}`,
+        });
+        if (!settled) continue;
         results.push({
           success: false,
           attempts: newAttempts,
@@ -322,23 +357,20 @@ export class PersistentQueue {
         continue;
       }
 
-      // dispatch() mutates `event` with a stable deliveryId + original signedAt;
-      // persist both so retries retain delivery identity while each attempt gets
-      // a fresh X-Steward-Sent-At and signature.
+      // dispatch() mutates `event` with a stable deliveryId + signedAt; persist it
+      // so retries reuse the same id/timestamp/signature instead of re-signing fresh.
       const persistedPayload = event as unknown as Record<string, unknown>;
 
       if (result.success) {
         // Mark as delivered
-        await db
-          .update(webhookDeliveries)
-          .set({
-            status: "delivered",
-            attempts: newAttempts,
-            deliveredAt: new Date(),
-            lastError: null,
-            payload: persistedPayload,
-          })
-          .where(claimFence);
+        const settled = await settleClaim(delivery.id, delivery.claimToken, {
+          status: "delivered",
+          attempts: newAttempts,
+          deliveredAt: new Date(),
+          lastError: null,
+          payload: persistedPayload,
+        });
+        if (!settled) continue;
 
         results.push({ ...result, attempts: newAttempts });
         continue;
@@ -347,15 +379,13 @@ export class PersistentQueue {
       // Failed — check if we should retry or mark dead
       if (newAttempts >= delivery.maxAttempts) {
         // Dead letter
-        await db
-          .update(webhookDeliveries)
-          .set({
-            status: "dead",
-            attempts: newAttempts,
-            lastError: result.error ?? "Max attempts exceeded",
-            payload: persistedPayload,
-          })
-          .where(claimFence);
+        const settled = await settleClaim(delivery.id, delivery.claimToken, {
+          status: "dead",
+          attempts: newAttempts,
+          lastError: result.error ?? "Max attempts exceeded",
+          payload: persistedPayload,
+        });
+        if (!settled) continue;
 
         results.push({ ...result, attempts: newAttempts });
         continue;
@@ -366,16 +396,14 @@ export class PersistentQueue {
       const delayMs = RETRY_DELAYS_MS[delayIndex];
       const nextRetryAt = new Date(Date.now() + delayMs);
 
-      await db
-        .update(webhookDeliveries)
-        .set({
-          status: "failed",
-          attempts: newAttempts,
-          nextRetryAt,
-          lastError: result.error ?? "Delivery failed",
-          payload: persistedPayload,
-        })
-        .where(claimFence);
+      const settled = await settleClaim(delivery.id, delivery.claimToken, {
+        status: "failed",
+        attempts: newAttempts,
+        nextRetryAt,
+        lastError: result.error ?? "Delivery failed",
+        payload: persistedPayload,
+      });
+      if (!settled) continue;
 
       results.push({ ...result, attempts: newAttempts });
     }

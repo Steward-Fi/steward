@@ -4,17 +4,11 @@
  * that MUST be both freshness-checked (request-expiry) AND signature-checked
  * (authorization-signature) when those guards are enabled.
  *
- * Previously this predicate was duplicated byte-for-byte in
- * `request-expiry.ts` and `authorization-signature.ts`. Keeping two copies in
- * lockstep is a drift hazard: if one copy gained or dropped a prefix, a path
- * could be freshness-checked but not signature-checked (or vice-versa),
- * silently weakening a load-bearing guard. Both middlewares now import this
- * one helper so the two guards always cover the exact same surface.
+ * Both request-expiry.ts and authorization-signature.ts import this helper so
+ * the two guards always cover the exact same surface.
  *
- * The prefix set is the conservative UNION of what each copy historically
- * treated as sensitive (the two copies were already identical, so the union is
- * that same set), plus the money-/key-/auth-adjacent surfaces added in SEC-150
- * (`/v1/kms`, `/v2/provider-actions`, `/dashboard`, `/agent-enroll`). Adding a
+ * The prefix set conservatively covers money-, key-, auth-, and
+ * tenant-administration surfaces. Adding a
  * prefix here tightens BOTH guards together; never narrow it without auditing
  * both call sites.
  */

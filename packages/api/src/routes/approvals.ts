@@ -4,9 +4,14 @@
  * Mount: app.route("/approvals", approvalRoutes)
  */
 
+import { redactedThrownDiagnostics } from "@stwd/shared";
 import { and, desc, eq, inArray, lt, or, sql } from "drizzle-orm";
 import { type Context, Hono } from "hono";
-import { withTenantAuditedTransaction, writeAuditEvent } from "../services/audit";
+import {
+  appendAuditEventWithinTx,
+  withTenantAuditedTransaction,
+  writeAuditEvent,
+} from "../services/audit";
 import {
   type ApiResponse,
   type AppVariables,
@@ -416,14 +421,10 @@ async function requireProxyOperator(
 }
 
 async function expireProxyApprovals(tenantId: string): Promise<void> {
-  // Atomicity: the expiry state transition for every row and its
-  // `proxy.approval.expired` audit event commit in ONE transaction. Previously
-  // the bulk UPDATE committed first and the per-row audits were written after in
-  // separate transactions, so a crash mid-loop left expired rows with no audit
-  // record (spec section 11 item #10). Now a crash before commit leaves nothing
-  // expired and the next sweep/API call retries the whole batch idempotently
-  // (the `status IN ('pending','approved')` guard means already-expired rows are
-  // not re-selected and cannot be double-audited).
+  // The expiry state transition for every row and its `proxy.approval.expired`
+  // audit event commit in one transaction. A crash before commit leaves nothing
+  // expired, and the `status IN ('pending','approved')` guard makes retries
+  // idempotent without double-auditing already-expired rows.
   await withTenantAuditedTransaction(tenantId, async (tx, appendRequiredAudit) => {
     const dbTx = tx as typeof db;
     const expired = await dbTx
@@ -532,14 +533,10 @@ approvalRoutes.post("/proxy/:id/approve", async (c) => {
   const tenantId = c.get("tenantId");
   await expireProxyApprovals(tenantId);
   const actor = approvalActor(c);
-  // Atomicity: the pending -> approved transition and its
-  // `proxy.approval.approved` audit event commit in ONE transaction. Previously
-  // the UPDATE committed first and the audit was written in a separate
-  // transaction, so an audit failure or crash between them could leave an
-  // approved request with no audit record (spec section 11 item #10, invariant
-  // I14). The guarded `status = 'pending'` predicate keeps a retry after a crash
-  // idempotent: only one transaction can flip the row, and a replayed approve of
-  // an already-approved row returns 409 without a second transition or audit.
+  // The pending -> approved transition and its `proxy.approval.approved` audit
+  // event commit in one transaction. The guarded `status = 'pending'` predicate
+  // makes retries idempotent: only one transaction can flip the row, and a
+  // replayed approve returns 409 without a second transition or audit.
   const row = await withTenantAuditedTransaction(tenantId, async (tx, appendRequiredAudit) => {
     const dbTx = tx as typeof db;
     // Agent deletion takes the tenant fence before the parent agent and pending
@@ -600,14 +597,12 @@ approvalRoutes.post("/proxy/:id/deny", async (c) => {
       400,
     );
   const actor = approvalActor(c);
-  // Atomicity + race determinism: the deny/revoke transition and its audit event
-  // commit in ONE transaction (spec section 11 item #10, invariant I14).
+  // The deny/revoke transition and its audit event commit in one transaction.
   //
   // Denying an ALREADY-APPROVED-but-unconsumed request is a deliberate,
   // load-bearing admin action: it revokes an approval before the agent's release
-  // poll can claim+execute it (release.ts executes ONLY `status === 'approved'`;
-  // the deny-of-approved semantic was introduced and behaviorally tested in
-  // #181 / af1b330). It is therefore a DISTINCT transition from denying a
+  // poll can claim+execute it (release.ts executes ONLY `status === 'approved'`).
+  // It is therefore a DISTINCT transition from denying a
   // still-pending request, and it emits a DISTINCT audit event
   // (`proxy.approval.revoked` vs `proxy.approval.denied`).
   //
@@ -877,17 +872,11 @@ approvalRoutes.post("/:txId/deny", async (c) => {
     },
   });
 
-  // Atomicity: the queue+transaction rejection AND its completion
-  // `approval.deny` audit event commit in ONE transaction (invariant I14).
-  // Previously the state change committed in its own transaction and the
-  // completion audit was written afterwards, guarded only by a best-effort
-  // compensating rollback — a crash between the state commit and either the
-  // audit or the compensation left a rejected transaction with no completion
-  // audit and no rollback. Folding the audit into the same transaction removes
-  // that window entirely; the pre-mutation `approval.deny.authorized` intent log
-  // above is still written first as a durable record that the decision was
-  // attempted. The guarded `status = 'pending'` predicates keep a retry after a
-  // crash idempotent (already-rejected rows are not re-selected).
+  // The queue+transaction rejection and its completion `approval.deny` audit
+  // event commit in one transaction. The pre-mutation
+  // `approval.deny.authorized` intent log remains a durable record that the
+  // decision was attempted. Guarded `status = 'pending'` predicates make crash
+  // retries idempotent because already-rejected rows are not re-selected.
   const updated = await withTenantAuditedTransaction(tenantId, async (tx, appendRequiredAudit) => {
     const dbTx = tx as typeof db;
     const updatedRows = await dbTx
@@ -1051,83 +1040,113 @@ approvalRoutes.put("/rules", async (c) => {
     }
   }
 
-  // Upsert
-  const [existing] = await db
-    .select()
-    .from(autoApprovalRules)
-    .where(eq(autoApprovalRules.tenantId, tenantId));
+  const updates: Record<string, unknown> = { updatedAt: new Date() };
+  if (body.maxAmountWei !== undefined) updates.maxAmountWei = body.maxAmountWei;
+  if (body.autoDenyAfterHours !== undefined) updates.autoDenyAfterHours = body.autoDenyAfterHours;
+  if (body.escalateAboveWei !== undefined) updates.escalateAboveWei = body.escalateAboveWei;
+  if (body.enabled !== undefined) updates.enabled = body.enabled;
 
-  if (existing) {
-    const updates: Record<string, unknown> = { updatedAt: new Date() };
-    if (body.maxAmountWei !== undefined) updates.maxAmountWei = body.maxAmountWei;
-    if (body.autoDenyAfterHours !== undefined) updates.autoDenyAfterHours = body.autoDenyAfterHours;
-    if (body.escalateAboveWei !== undefined) updates.escalateAboveWei = body.escalateAboveWei;
-    if (body.enabled !== undefined) updates.enabled = body.enabled;
+  const mutation = await withTenantAuditedTransaction(
+    tenantId,
+    async (txRaw, appendRequiredAudit) => {
+      const tx = txRaw as typeof db;
+      // The audited transaction acquires the same real-Postgres advisory lock
+      // used by every tenant audit append before this re-read. That lock also
+      // serializes the missing-row create case, which SELECT FOR UPDATE alone
+      // cannot protect.
+      const [existing] = await tx
+        .select()
+        .from(autoApprovalRules)
+        .where(eq(autoApprovalRules.tenantId, tenantId))
+        .for("update");
 
-    await writeApprovalAudit(c, {
-      action: "approval_rule.update.authorized",
-      resourceType: "approval_rule",
-      resourceId: existing.id,
-      metadata: { before: existing, updates },
-    });
+      if (existing) {
+        const authorizationAttempt = {
+          action: "approval_rule.update.authorized",
+          resourceType: "approval_rule",
+          resourceId: existing.id,
+          metadata: { before: existing, updates },
+        };
+        await appendRequiredAudit(approvalAuditEvent(c, authorizationAttempt));
+        try {
+          return await tx.transaction(async (mutationTxRaw) => {
+            const mutationTx = mutationTxRaw as unknown as typeof db;
+            const [updated] = await mutationTx
+              .update(autoApprovalRules)
+              .set(updates)
+              .where(eq(autoApprovalRules.id, existing.id))
+              .returning();
+            await appendAuditEventWithinTx(
+              mutationTx as never,
+              approvalAuditEvent(c, {
+                action: "approval_rule.update",
+                resourceType: "approval_rule",
+                resourceId: updated.id,
+                metadata: { before: existing, after: updated },
+              }),
+            );
+            // Surface deferred database failures inside the mutation
+            // savepoint so the authorization attempt can still commit.
+            await mutationTx.execute(sql`SET CONSTRAINTS ALL IMMEDIATE`);
+            return { kind: "updated" as const, row: updated };
+          });
+        } catch (error) {
+          console.error(
+            "[approvals] auto-approval rule update failed",
+            redactedThrownDiagnostics(error),
+          );
+          return { kind: "failed" as const };
+        }
+      }
 
-    const [updated] = await db
-      .update(autoApprovalRules)
-      .set(updates)
-      .where(eq(autoApprovalRules.tenantId, tenantId))
-      .returning();
-    try {
-      await writeApprovalAudit(c, {
-        action: "approval_rule.update",
+      const createdId = crypto.randomUUID();
+      const authorizationAttempt = {
+        action: "approval_rule.create.authorized",
         resourceType: "approval_rule",
-        resourceId: updated.id,
-        metadata: { before: existing, after: updated },
-      });
-    } catch (err) {
-      await db
-        .update(autoApprovalRules)
-        .set({
-          maxAmountWei: existing.maxAmountWei,
-          autoDenyAfterHours: existing.autoDenyAfterHours,
-          escalateAboveWei: existing.escalateAboveWei,
-          enabled: existing.enabled,
-          updatedAt: existing.updatedAt,
-        })
-        .where(eq(autoApprovalRules.id, existing.id));
-      throw err;
-    }
+        resourceId: createdId,
+        metadata: { requested: body },
+      };
+      await appendRequiredAudit(approvalAuditEvent(c, authorizationAttempt));
+      try {
+        return await tx.transaction(async (mutationTxRaw) => {
+          const mutationTx = mutationTxRaw as unknown as typeof db;
+          const [created] = await mutationTx
+            .insert(autoApprovalRules)
+            .values({
+              id: createdId,
+              tenantId,
+              maxAmountWei: body.maxAmountWei || "0",
+              autoDenyAfterHours: body.autoDenyAfterHours ?? null,
+              escalateAboveWei: body.escalateAboveWei ?? null,
+              enabled: body.enabled ?? true,
+            })
+            .returning();
+          await appendAuditEventWithinTx(
+            mutationTx as never,
+            approvalAuditEvent(c, {
+              action: "approval_rule.create",
+              resourceType: "approval_rule",
+              resourceId: created.id,
+              metadata: { after: created },
+            }),
+          );
+          await mutationTx.execute(sql`SET CONSTRAINTS ALL IMMEDIATE`);
+          return { kind: "created" as const, row: created };
+        });
+      } catch (error) {
+        console.error(
+          "[approvals] auto-approval rule create failed",
+          redactedThrownDiagnostics(error),
+        );
+        return { kind: "failed" as const };
+      }
+    },
+  );
 
-    return c.json<ApiResponse>({ ok: true, data: updated });
+  if (mutation.kind === "failed") {
+    return c.json<ApiResponse>({ ok: false, error: "Failed to update approval rule" }, 500);
   }
-
-  await writeApprovalAudit(c, {
-    action: "approval_rule.create.authorized",
-    resourceType: "approval_rule",
-    resourceId: tenantId,
-    metadata: { requested: body },
-  });
-
-  const [created] = await db
-    .insert(autoApprovalRules)
-    .values({
-      tenantId,
-      maxAmountWei: body.maxAmountWei || "0",
-      autoDenyAfterHours: body.autoDenyAfterHours ?? null,
-      escalateAboveWei: body.escalateAboveWei ?? null,
-      enabled: body.enabled ?? true,
-    })
-    .returning();
-  try {
-    await writeApprovalAudit(c, {
-      action: "approval_rule.create",
-      resourceType: "approval_rule",
-      resourceId: created.id,
-      metadata: { after: created },
-    });
-  } catch (err) {
-    await db.delete(autoApprovalRules).where(eq(autoApprovalRules.id, created.id));
-    throw err;
-  }
-
-  return c.json<ApiResponse>({ ok: true, data: created }, 201);
+  return mutation.kind === "created"
+    ? c.json<ApiResponse>({ ok: true, data: mutation.row }, 201)
+    : c.json<ApiResponse>({ ok: true, data: mutation.row });
 });
