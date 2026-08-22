@@ -1197,7 +1197,6 @@ platform.post("/tenants/:id/freeze", async (c) => {
   if (!isValidTenantId(tenantId)) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid tenant id format" }, 400);
   }
-
   const [tenant] = await db
     .select({ id: tenants.id })
     .from(tenants)
@@ -1280,7 +1279,6 @@ platform.post("/tenants/:id/unfreeze", async (c) => {
   if (!isValidTenantId(tenantId)) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid tenant id format" }, 400);
   }
-
   const lifted = await db
     .update(vaultSigningFreezes)
     .set({ liftedAt: sql`now()`, liftedByType: "platform", liftedById: "platform" })
@@ -1697,9 +1695,9 @@ platform.get("/tenants/:tenantId/join-mode", async (c) => {
  * tenantId is auto-linked), 'invite' (existing user_tenants link required), or
  * 'closed' (no new members).
  *
- * This is the only application write surface for join_mode. It mirrors the
- * email-config mutation contract: scoped authorization, paired audits,
- * rollback on audit failure, and update-or-insert persistence.
+ * This is the only application write surface for join_mode. It shares the
+ * membership lifecycle lock so join authorization and its required audit
+ * change atomically with the policy that permits new members.
  */
 platform.patch("/tenants/:tenantId/join-mode", async (c) => {
   const scopeResponse = requirePlatformRouteScope(c, "platform:tenant-join-mode:write");
@@ -1710,6 +1708,12 @@ platform.patch("/tenants/:tenantId/join-mode", async (c) => {
 
   if (!isValidTenantId(tenantId)) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid tenant id format" }, 400);
+  }
+  if (isReservedTenantId(tenantId)) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Personal and reserved tenant membership is immutable" },
+      409,
+    );
   }
 
   if (!(await getTenantOr404(tenantId))) {
@@ -1739,23 +1743,22 @@ platform.patch("/tenants/:tenantId/join-mode", async (c) => {
     ...auditCtx(c),
   });
 
-  const previousConfigRow = await snapshotPlatformTenantConfigRow(tenantId);
-  const [existingConfig] = await db
-    .select({ tenantId: tenantConfigs.tenantId })
-    .from(tenantConfigs)
-    .where(eq(tenantConfigs.tenantId, tenantId));
-
-  if (existingConfig) {
-    await db
-      .update(tenantConfigs)
-      .set({ joinMode, updatedAt: new Date() })
+  await withTenantAuditedTransaction(tenantId, async (txRaw, appendRequiredAudit) => {
+    const tx = txRaw as typeof db;
+    await lockTenantOwnerLifecycle(tx, tenantId);
+    const [existingConfig] = await tx
+      .select({ tenantId: tenantConfigs.tenantId })
+      .from(tenantConfigs)
       .where(eq(tenantConfigs.tenantId, tenantId));
-  } else {
-    await db.insert(tenantConfigs).values({ tenantId, joinMode });
-  }
-
-  try {
-    await writeAuditEvent({
+    if (existingConfig) {
+      await tx
+        .update(tenantConfigs)
+        .set({ joinMode, updatedAt: new Date() })
+        .where(eq(tenantConfigs.tenantId, tenantId));
+    } else {
+      await tx.insert(tenantConfigs).values({ tenantId, joinMode });
+    }
+    await appendRequiredAudit({
       tenantId,
       actorType: "platform",
       action: "tenant.join_mode.update",
@@ -1764,10 +1767,7 @@ platform.patch("/tenants/:tenantId/join-mode", async (c) => {
       metadata: { joinMode },
       ...auditCtx(c),
     });
-  } catch (error) {
-    await restorePlatformTenantConfigRow(tenantId, previousConfigRow);
-    throw error;
-  }
+  });
 
   return c.json<ApiResponse<{ tenantId: string; joinMode: string }>>({
     ok: true,
@@ -4836,6 +4836,21 @@ platform.post("/tenants/:id/invitations", async (c) => {
     async (txRaw, appendRequiredAudit) => {
       const tx = txRaw as typeof db;
       await lockTenantOwnerLifecycle(tx, tenantId);
+      if (invitedByUserId) {
+        const [lockedInviterMembership] = await tx
+          .select({ userId: userTenants.userId })
+          .from(userTenants)
+          .where(
+            and(
+              eq(userTenants.tenantId, tenantId),
+              eq(userTenants.userId, invitedByUserId),
+            ),
+          )
+          .limit(1);
+        if (!lockedInviterMembership) {
+          return null;
+        }
+      }
       const now = new Date();
       await tx
         .update(tenantInvitations)
@@ -4872,6 +4887,12 @@ platform.post("/tenants/:id/invitations", async (c) => {
       return created;
     },
   );
+  if (!invitation) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Invitation authority changed before commit" },
+      409,
+    );
+  }
 
   let emailSent = false;
   if (body.sendEmail === true) {

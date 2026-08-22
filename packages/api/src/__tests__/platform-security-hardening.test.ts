@@ -388,6 +388,20 @@ describe("platform security hardening", () => {
     expect(revokeRoute).not.toContain("status: candidate.status");
   });
 
+  it("serializes join-mode authorization with self-service membership creation", () => {
+    const joinModeStart = platformSource.indexOf(
+      'platform.patch("/tenants/:tenantId/join-mode"',
+    );
+    const joinModeRoute = platformSource.slice(
+      joinModeStart,
+      platformSource.indexOf("\nplatform.", joinModeStart + 1),
+    );
+    expect(joinModeRoute).toContain("withTenantAuditedTransaction(");
+    expect(joinModeRoute).toContain("lockTenantOwnerLifecycle(tx, tenantId)");
+    expect(joinModeRoute).toContain('action: "tenant.join_mode.update"');
+    expect(joinModeRoute).not.toContain("restorePlatformTenantConfigRow");
+  });
+
   it("locks account unlink and transfer last-login checks through mutation", () => {
     expect(platformSource).toContain("platform_user_account_");
     expect(platformSource).toContain("pg_advisory_xact_lock");

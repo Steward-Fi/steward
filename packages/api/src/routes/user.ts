@@ -8118,9 +8118,16 @@ user.post("/me/tenants/:tenantId/join", async (c) => {
     );
   }
 
-  await withTenantAuditedTransaction(tenantId, async (txRaw, appendRequiredAudit) => {
+  const joined = await withTenantAuditedTransaction(tenantId, async (txRaw, appendRequiredAudit) => {
     const tx = txRaw as typeof db;
     await lockTenantOwnerLifecycle(tx, tenantId);
+    const [lockedConfig] = await tx
+      .select({ joinMode: tenantConfigs.joinMode })
+      .from(tenantConfigs)
+      .where(eq(tenantConfigs.tenantId, tenantId));
+    if (lockedConfig?.joinMode !== "open") {
+      return false;
+    }
     await tx.insert(userTenants).values({ userId, tenantId, role: "member" }).onConflictDoNothing();
     await appendRequiredAudit({
       tenantId,
@@ -8134,7 +8141,11 @@ user.post("/me/tenants/:tenantId/join", async (c) => {
       userAgent: c.req.header("user-agent") ?? null,
       requestId: c.get("requestId") ?? null,
     });
+    return true;
   });
+  if (!joined) {
+    return c.json<ApiResponse>({ ok: false, error: "Tenant is no longer open for joining" }, 409);
+  }
 
   return c.json({ ok: true, tenantId, role: "member" });
 });

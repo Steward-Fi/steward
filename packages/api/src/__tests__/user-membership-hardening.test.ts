@@ -32,6 +32,7 @@ describe("user membership hardening", () => {
       userSource.indexOf('user.delete("/me/tenants/:tenantId/leave"', joinStart),
     );
     expect(joinRoute).toContain("withTenantAuditedTransaction(");
+    expect(joinRoute).toContain("lockedConfig?.joinMode !== \"open\"");
     expect(joinRoute.indexOf('action: "tenant.member.join"')).toBeGreaterThan(
       joinRoute.lastIndexOf(".insert(userTenants)"),
     );
@@ -160,6 +161,7 @@ describe("user membership hardening", () => {
     expect(platformInviteRoute).toContain("withTenantAuditedTransaction(");
     expect(platformInviteRoute).toContain("valid email is required");
     expect(platformInviteRoute).toContain("invitedByUserId must belong to the tenant");
+    expect(platformInviteRoute).toContain("lockedInviterMembership");
     expect(platformInviteRoute).toContain("hashSha256Hex(token)");
     expect(platformInviteRoute).toContain("body.sendEmail === true");
     expect(platformInviteRoute).toContain("sendTenantInvitation(email");
