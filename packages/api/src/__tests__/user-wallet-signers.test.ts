@@ -1,8 +1,17 @@
 import { afterAll, beforeAll, describe, expect, it, spyOn } from "bun:test";
-import { agentSigners, agents, closeDb, getDb, tenants, users, userTenants } from "@stwd/db";
+import {
+  agentSigners,
+  agents,
+  auditEvents,
+  closeDb,
+  getDb,
+  tenants,
+  users,
+  userTenants,
+} from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { Vault } from "@stwd/vault";
-import { eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 
 const USER_ID = crypto.randomUUID();
 const USER_ADDRESS = "0x1234567890123456789012345678901234567890";
@@ -10,16 +19,29 @@ const PERSONAL_TENANT_ID = `personal-${USER_ID}`;
 const PRIMARY_WALLET_AGENT_ID = `user-wallet-${USER_ID}`;
 const WALLET_AGENT_ID = `user-wallet-${USER_ID}-2`;
 const RECIPIENT = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const MUTATED_ENV = [
+  "STEWARD_DB_MODE",
+  "STEWARD_PGLITE_MEMORY",
+  "STEWARD_MASTER_PASSWORD",
+  "STEWARD_JWT_SECRET",
+  "STEWARD_AUDIT_HMAC_KEY",
+  "STEWARD_SIGNER_CREDENTIAL_PEPPER",
+  "STEWARD_ALLOW_UNSAFE_MESSAGE_SIGNING",
+  "STEWARD_ALLOW_USER_UNSAFE_MESSAGE_SIGNING",
+] as const;
+const originalEnv = new Map(MUTATED_ENV.map((name) => [name, process.env[name]]));
 
 describe("user wallet additional signers API", () => {
   let userRoutes: typeof import("../routes/user").userRoutes;
   let createSessionToken: typeof import("../routes/auth").createSessionToken;
 
   beforeAll(async () => {
-    process.env.STEWARD_PGLITE_MEMORY = "true";
+    process.env.STEWARD_DB_MODE = "pglite";
+    delete process.env.STEWARD_PGLITE_MEMORY;
     process.env.STEWARD_MASTER_PASSWORD = "user-wallet-signers-master-password";
     process.env.STEWARD_JWT_SECRET = "user-wallet-signers-jwt-secret-32chars";
     process.env.STEWARD_AUDIT_HMAC_KEY = "user-wallet-signers-audit-hmac-key-32chars";
+    process.env.STEWARD_SIGNER_CREDENTIAL_PEPPER = "user-wallet-signers-credential-pepper";
     process.env.STEWARD_ALLOW_UNSAFE_MESSAGE_SIGNING = "true";
     process.env.STEWARD_ALLOW_USER_UNSAFE_MESSAGE_SIGNING = "true";
 
@@ -62,12 +84,10 @@ describe("user wallet additional signers API", () => {
 
   afterAll(async () => {
     await closeDb();
-    delete process.env.STEWARD_PGLITE_MEMORY;
-    delete process.env.STEWARD_MASTER_PASSWORD;
-    delete process.env.STEWARD_JWT_SECRET;
-    delete process.env.STEWARD_AUDIT_HMAC_KEY;
-    delete process.env.STEWARD_ALLOW_UNSAFE_MESSAGE_SIGNING;
-    delete process.env.STEWARD_ALLOW_USER_UNSAFE_MESSAGE_SIGNING;
+    for (const [name, value] of originalEnv) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
   });
 
   async function token(opts: { mfa?: boolean } = {}) {
@@ -118,7 +138,7 @@ describe("user wallet additional signers API", () => {
     expect(body.error).toContain("recent MFA");
   });
 
-  it("creates, lists, and revokes a bounded signer credential for an indexed wallet", async () => {
+  it("creates, lists, and revokes a bounded signer under explicit PGLite mode", async () => {
     const auth = { Authorization: `Bearer ${await token({ mfa: true })}` };
     const createResponse = await userRoutes.request("/me/wallet/signers", {
       method: "POST",
@@ -201,6 +221,95 @@ describe("user wallet additional signers API", () => {
     expect(revoked.data.status).toBe("revoked");
   });
 
+  it("rolls back user-wallet signer creation and revocation when completion audits fail", async () => {
+    const suffix = crypto.randomUUID().replaceAll("-", "");
+    const functionName = `fail_user_wallet_signer_audit_${suffix}`;
+    const triggerName = `user_wallet_signer_audit_failure_${suffix}`;
+    const seededId = crypto.randomUUID();
+    await getDb()
+      .insert(agentSigners)
+      .values({
+        id: seededId,
+        tenantId: PERSONAL_TENANT_ID,
+        agentId: WALLET_AGENT_ID,
+        signerType: "delegated",
+        subjectType: "external",
+        subjectId: `audit-rollback-existing-${suffix}`,
+        permissions: ["sign_message"],
+        status: "active",
+        createdBy: USER_ID,
+      });
+    try {
+      await getDb().execute(
+        sql.raw(`
+          CREATE FUNCTION ${functionName}() RETURNS trigger AS $$
+          BEGIN
+            IF NEW.tenant_id = '${PERSONAL_TENANT_ID}' AND NEW.action IN (
+              'user.wallet.signer.create', 'user.wallet.signer.revoke'
+            ) THEN
+              RAISE EXCEPTION 'required user wallet signer audit failed';
+            END IF;
+            RETURN NEW;
+          END;
+          $$ LANGUAGE plpgsql
+        `),
+      );
+      await getDb().execute(
+        sql.raw(`
+          CREATE TRIGGER ${triggerName} BEFORE INSERT ON audit_events
+          FOR EACH ROW EXECUTE FUNCTION ${functionName}()
+        `),
+      );
+      const auth = {
+        Authorization: `Bearer ${await token({ mfa: true })}`,
+        "Content-Type": "application/json",
+      };
+      const subjectId = `audit-rollback-create-${suffix}`;
+      const create = await userRoutes.request("/me/wallet/signers", {
+        method: "POST",
+        headers: auth,
+        body: JSON.stringify({ walletIndex: 2, subjectId }),
+      });
+      expect(create.status).toBe(500);
+      expect(
+        await getDb()
+          .select()
+          .from(agentSigners)
+          .where(
+            and(eq(agentSigners.agentId, WALLET_AGENT_ID), eq(agentSigners.subjectId, subjectId)),
+          ),
+      ).toHaveLength(0);
+
+      const revoke = await userRoutes.request(`/me/wallet/signers/${seededId}?walletIndex=2`, {
+        method: "DELETE",
+        headers: auth,
+      });
+      expect(revoke.status).toBe(500);
+      expect(
+        await getDb()
+          .select({ status: agentSigners.status })
+          .from(agentSigners)
+          .where(eq(agentSigners.id, seededId)),
+      ).toEqual([{ status: "active" }]);
+      expect(
+        await getDb()
+          .select()
+          .from(auditEvents)
+          .where(
+            and(
+              eq(auditEvents.tenantId, PERSONAL_TENANT_ID),
+              eq(auditEvents.resourceId, seededId),
+              eq(auditEvents.action, "user.wallet.signer.revoke"),
+            ),
+          ),
+      ).toHaveLength(0);
+    } finally {
+      await getDb().execute(sql.raw(`DROP TRIGGER IF EXISTS ${triggerName} ON audit_events`));
+      await getDb().execute(sql.raw(`DROP FUNCTION IF EXISTS ${functionName}()`));
+      await getDb().delete(agentSigners).where(eq(agentSigners.id, seededId));
+    }
+  });
+
   it("rejects forbidden non-signing capabilities and caller supplied secrets", async () => {
     const auth = {
       Authorization: `Bearer ${await token({ mfa: true })}`,
@@ -260,6 +369,9 @@ describe("user wallet additional signers API", () => {
       const body = (await response.json()) as { ok: boolean; data?: { txHash: string } };
 
       expect(response.status).toBe(200);
+      expect(response.headers.get("Cache-Control")).toBe("no-store, max-age=0");
+      expect(response.headers.get("Pragma")).toBe("no-cache");
+      expect(response.headers.get("Expires")).toBe("0");
       expect(body.ok).toBe(true);
       expect(body.data?.txHash).toBe("0xsigned");
       expect(signSpy).toHaveBeenCalled();
@@ -316,6 +428,9 @@ describe("user wallet additional signers API", () => {
         body: JSON.stringify({ walletIndex: 2, message: "hello from signer" }),
       });
       expect(signed.status).toBe(200);
+      expect(signed.headers.get("Cache-Control")).toBe("no-store, max-age=0");
+      expect(signed.headers.get("Pragma")).toBe("no-cache");
+      expect(signed.headers.get("Expires")).toBe("0");
       expect(signSpy).toHaveBeenCalledWith(
         PERSONAL_TENANT_ID,
         WALLET_AGENT_ID,

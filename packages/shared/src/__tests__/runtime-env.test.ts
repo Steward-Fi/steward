@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { runtimeEnvironmentValue, withRuntimeEnvironment } from "../runtime-env";
+import {
+  runtimeEnvironmentIdentity,
+  runtimeEnvironmentValue,
+  withRuntimeEnvironment,
+} from "../runtime-env";
 
 function deferred() {
   let resolve!: () => void;
@@ -21,9 +25,12 @@ describe("request-local runtime environment", () => {
         STEWARD_ALLOW_INSECURE_OIDC_JWKS_FETCH: "false",
       },
       async () => {
+        const identity = runtimeEnvironmentIdentity();
         firstEntered.resolve();
         await releaseFirst.promise;
         return {
+          identity,
+          resumedIdentity: runtimeEnvironmentIdentity(),
           age: runtimeEnvironmentValue("STEWARD_OIDC_JWKS_MAX_AGE_MS"),
           override: runtimeEnvironmentValue("STEWARD_ALLOW_INSECURE_OIDC_JWKS_FETCH"),
         };
@@ -38,13 +45,21 @@ describe("request-local runtime environment", () => {
         STEWARD_ALLOW_INSECURE_OIDC_JWKS_FETCH: "true",
       },
       async () => ({
+        identity: runtimeEnvironmentIdentity(),
         age: runtimeEnvironmentValue("STEWARD_OIDC_JWKS_MAX_AGE_MS"),
         override: runtimeEnvironmentValue("STEWARD_ALLOW_INSECURE_OIDC_JWKS_FETCH"),
       }),
     );
     releaseFirst.resolve();
 
-    expect(second).toEqual({ age: "120000", override: "true" });
-    expect(await first).toEqual({ age: "60000", override: "false" });
+    const resumedFirst = await first;
+    expect(second.age).toBe("120000");
+    expect(second.override).toBe("true");
+    expect(resumedFirst.age).toBe("60000");
+    expect(resumedFirst.override).toBe("false");
+    expect(resumedFirst.resumedIdentity).toBe(resumedFirst.identity);
+    expect(second.identity).not.toBe(resumedFirst.identity);
+    expect(Object.keys(second.identity as object)).toEqual([]);
+    expect(runtimeEnvironmentIdentity()).toBeUndefined();
   });
 });

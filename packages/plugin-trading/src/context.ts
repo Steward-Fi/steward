@@ -15,7 +15,7 @@
  */
 
 import type { AdapterRegistry } from "@stwd/adapters";
-import type { getDb } from "@stwd/db";
+import type { AppendRequiredAudit, getDb } from "@stwd/db";
 import type { PolicyEngine } from "@stwd/policy-engine";
 import type { IoredisLike } from "@stwd/redis";
 import type { AgentIdentity, AppVariables, PolicyRule, PriceOracle } from "@stwd/shared";
@@ -38,6 +38,11 @@ export interface AuditEventInput {
   userAgent?: string | null;
   requestId?: string | null;
 }
+
+export type AuditReadExecutor = Pick<DbHandle, "execute">;
+export type AuditChainVerification =
+  | { valid: true; count: number }
+  | { valid: false; brokenAt: number; limitExceeded?: boolean };
 
 /** last-observed agent trade-token expiry (read by GET /trade/token-status). */
 export interface AgentTokenStatus {
@@ -94,6 +99,20 @@ export interface StewardAppContext {
 
   // ── audit + token status (from @stwd/api services) ────────────────────────
   writeAuditEvent(ev: AuditEventInput): Promise<void>;
+  withTenantAuditedTransaction<T>(
+    tenantId: string,
+    fn: (tx: unknown, appendRequiredAudit: AppendRequiredAudit) => Promise<T>,
+  ): Promise<T>;
+  verifyAuditChain(
+    tenantId: string,
+    options: {
+      fromSeq?: number;
+      toSeq?: number;
+      requireHead?: boolean;
+      maxRows?: number;
+      executor?: AuditReadExecutor;
+    },
+  ): Promise<AuditChainVerification>;
   getAgentTokenStatus(agentId: string): Promise<AgentTokenStatus | null>;
 
   // ── redis (from @stwd/api middleware/redis) ───────────────────────────────

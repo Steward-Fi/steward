@@ -8,13 +8,13 @@
  * so tenantAuth is already applied by the parent middleware.
  */
 
-import { agentRegistrations, registryIndex } from "@stwd/db";
+import { registryIndex } from "@stwd/db";
 import { redactedThrownDiagnostics } from "@stwd/shared";
-import { and, eq, sql } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { Hono } from "hono";
 import { z } from "zod";
 import { validateAgentCardApiUrl } from "../services/agent-card-url";
-import { writeAuditEvent } from "../services/audit";
+import { withTenantAuditedTransaction, writeAuditEvent } from "../services/audit";
 import {
   type ApiResponse,
   type AppVariables,
@@ -26,7 +26,6 @@ import {
 import { isRecentMfaTimestamp } from "../services/recent-mfa";
 
 export const erc8004Routes = new Hono<{ Variables: AppVariables }>();
-type AgentRegistrationRow = typeof agentRegistrations.$inferSelect;
 
 const agentCardTextSchema = z
   .string()
@@ -96,46 +95,6 @@ function publicDiscoveryAgentRow(row: Record<string, unknown>) {
   };
 }
 
-async function snapshotAgentRegistration(
-  tenantId: string,
-  agentId: string,
-  chainId: number,
-): Promise<AgentRegistrationRow | null> {
-  const [row] = await db
-    .select()
-    .from(agentRegistrations)
-    .where(
-      and(
-        eq(agentRegistrations.tenantId, tenantId),
-        eq(agentRegistrations.agentId, agentId),
-        eq(agentRegistrations.chainId, chainId),
-      ),
-    );
-  return row ?? null;
-}
-
-async function restoreAgentRegistration(
-  tenantId: string,
-  agentId: string,
-  chainId: number,
-  snapshot: AgentRegistrationRow | null,
-): Promise<void> {
-  await db.transaction(async (tx) => {
-    await tx
-      .delete(agentRegistrations)
-      .where(
-        and(
-          eq(agentRegistrations.tenantId, tenantId),
-          eq(agentRegistrations.agentId, agentId),
-          eq(agentRegistrations.chainId, chainId),
-        ),
-      );
-    if (snapshot) {
-      await tx.insert(agentRegistrations).values(snapshot);
-    }
-  });
-}
-
 function canReadAgentOnchain(
   c: Parameters<typeof requireTenantLevel>[0],
   agentId: string,
@@ -203,33 +162,32 @@ erc8004Routes.post("/:id/register-onchain", async (c) => {
       requestId: c.get("requestId") ?? null,
     });
 
-    const previousRegistration = await snapshotAgentRegistration(tenantId, agentId, chainId);
-    const result = await db.execute(sql`
-      INSERT INTO agent_registrations (tenant_id, agent_id, chain_id, registry_address, agent_card_json, status)
-      VALUES (${tenantId}, ${agentId}, ${chainId}, ${registryAddress}, ${JSON.stringify(agentCard)}::jsonb, 'pending')
-      ON CONFLICT (tenant_id, agent_id, chain_id)
-      DO UPDATE SET agent_card_json = ${JSON.stringify(agentCard)}::jsonb, status = 'pending', updated_at = NOW()
-      RETURNING id, status, created_at
-    `);
-    const rows = getRows(result);
-
-    try {
-      await writeAuditEvent({
-        tenantId,
-        actorType: "user",
-        actorId: c.get("userId") ?? tenantId,
-        action: "erc8004.register",
-        resourceType: "agent",
-        resourceId: agentId,
-        metadata: { chainId, registryAddress, walletAddress: agent.walletAddress },
-        ipAddress: c.req.header("x-forwarded-for") ?? null,
-        userAgent: c.req.header("user-agent") ?? null,
-        requestId: c.get("requestId") ?? null,
-      });
-    } catch (error) {
-      await restoreAgentRegistration(tenantId, agentId, chainId, previousRegistration);
-      throw error;
-    }
+    const rows = await withTenantAuditedTransaction(
+      tenantId,
+      async (txRaw, appendRequiredAudit) => {
+        const tx = txRaw as typeof db;
+        const result = await tx.execute(sql`
+          INSERT INTO agent_registrations (tenant_id, agent_id, chain_id, registry_address, agent_card_json, status)
+          VALUES (${tenantId}, ${agentId}, ${chainId}, ${registryAddress}, ${JSON.stringify(agentCard)}::jsonb, 'pending')
+          ON CONFLICT (tenant_id, agent_id, chain_id)
+          DO UPDATE SET agent_card_json = ${JSON.stringify(agentCard)}::jsonb, status = 'pending', updated_at = NOW()
+          RETURNING id, status, created_at
+        `);
+        await appendRequiredAudit({
+          tenantId,
+          actorType: "user",
+          actorId: c.get("userId") ?? tenantId,
+          action: "erc8004.register",
+          resourceType: "agent",
+          resourceId: agentId,
+          metadata: { chainId, registryAddress, walletAddress: agent.walletAddress },
+          ipAddress: c.req.header("x-forwarded-for") ?? null,
+          userAgent: c.req.header("user-agent") ?? null,
+          requestId: c.get("requestId") ?? null,
+        });
+        return getRows(result);
+      },
+    );
 
     return c.json<ApiResponse>({
       ok: true,

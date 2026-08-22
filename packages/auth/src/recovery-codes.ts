@@ -143,17 +143,31 @@ export async function verifyRecoveryCode(
   userId: string,
   supplied: string,
 ): Promise<{ valid: boolean }> {
+  const match = await findUnusedRecoveryCode(store, userId, supplied);
+  if (!match) return { valid: false };
+  return { valid: await store.markUsed(match.id, new Date()) };
+}
+
+/**
+ * Validate a recovery code without consuming it. Callers that must claim a
+ * separate one-time challenge first can use this, then mark the returned id.
+ */
+export async function findUnusedRecoveryCode(
+  store: RecoveryCodeStore,
+  userId: string,
+  supplied: string,
+): Promise<StoredRecoveryCode | null> {
   const normalized = normalize(supplied);
-  if (!isAcceptedCodeLength(normalized.length)) return { valid: false };
+  if (!isAcceptedCodeLength(normalized.length)) return null;
 
   const stored = await store.listForUser(userId);
   for (const row of stored) {
     if (row.usedAt) continue;
     if (digestEquals(digest(row.salt, normalized), row.hash)) {
-      return { valid: await store.markUsed(row.id, new Date()) };
+      return row;
     }
   }
-  return { valid: false };
+  return null;
 }
 
 /** Count of unused codes for a user, for surfacing "you have N left" in the UI. */

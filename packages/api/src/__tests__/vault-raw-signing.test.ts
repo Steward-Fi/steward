@@ -1,10 +1,12 @@
-import { afterAll, beforeAll, describe, expect, it } from "bun:test";
-import { agentSigners, closeDb, getDb, tenants } from "@stwd/db";
+import { afterAll, beforeAll, describe, expect, it, setDefaultTimeout } from "bun:test";
+import { agentSigners, closeDb, getDb, policies, tenants } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { Vault } from "@stwd/vault";
 import { Hono } from "hono";
 import { recoverAddress } from "viem";
 import type { AppVariables } from "../services/context";
+
+setDefaultTimeout(30_000);
 
 const TENANT_ID = `raw-sign-tenant-${Date.now()}`;
 const AGENT_ID = `raw-sign-agent-${Date.now()}`;
@@ -41,6 +43,8 @@ describe("vault raw secp256k1 signing", () => {
     process.env.STEWARD_AUDIT_HMAC_KEY ??= "a".repeat(64);
     process.env.STEWARD_ALLOW_UNSAFE_RAW_SIGNING = "true";
     process.env.STEWARD_ALLOW_VAULT_UNSAFE_RAW_SIGNING = "true";
+    process.env.STEWARD_ALLOW_UNSAFE_MESSAGE_SIGNING = "true";
+    process.env.STEWARD_ALLOW_VAULT_UNSAFE_MESSAGE_SIGNING = "true";
     const { db, client } = await createPGLiteDb("memory://");
     setPGLiteOverride(db, async () => {
       await client.close();
@@ -54,6 +58,20 @@ describe("vault raw secp256k1 signing", () => {
       masterPassword: process.env.STEWARD_MASTER_PASSWORD,
     }).createAgent(TENANT_ID, AGENT_ID, "Raw Signing Agent");
     walletAddress = identity.walletAddress;
+    await getDb()
+      .insert(policies)
+      .values({
+        id: `${AGENT_ID}-typed-data`,
+        agentId: AGENT_ID,
+        type: "typed-data",
+        enabled: true,
+        config: {
+          verifyingContractAllowlist: ["0x000000000022d473030f116ddee9f6b43ac78ba3"],
+          allowedChainIds: [8453],
+          allowedDomainNames: ["CacheContract"],
+          allowedPrimaryTypes: ["Mail"],
+        },
+      });
     const [signer] = await getDb()
       .insert(agentSigners)
       .values({
@@ -87,6 +105,44 @@ describe("vault raw secp256k1 signing", () => {
     delete process.env.STEWARD_MASTER_PASSWORD;
     delete process.env.STEWARD_ALLOW_UNSAFE_RAW_SIGNING;
     delete process.env.STEWARD_ALLOW_VAULT_UNSAFE_RAW_SIGNING;
+    delete process.env.STEWARD_ALLOW_UNSAFE_MESSAGE_SIGNING;
+    delete process.env.STEWARD_ALLOW_VAULT_UNSAFE_MESSAGE_SIGNING;
+  });
+
+  it("returns a message signature with the complete non-cacheable response contract", async () => {
+    const response = await app.request(`/vault/${AGENT_ID}/sign-message`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ message: "cache contract" }),
+    });
+    expect(response.status).toBe(200);
+    expect(response.headers.get("Cache-Control")).toBe("no-store, max-age=0");
+    expect(response.headers.get("Pragma")).toBe("no-cache");
+    expect(response.headers.get("Expires")).toBe("0");
+    expect((await response.json()) as object).toHaveProperty("data.signature");
+  });
+
+  it("returns a typed-data signature with the complete non-cacheable response contract", async () => {
+    const response = await app.request(`/vault/${AGENT_ID}/sign-typed-data`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        domain: {
+          name: "CacheContract",
+          version: "1",
+          chainId: 8453,
+          verifyingContract: "0x000000000022d473030f116ddee9f6b43ac78ba3",
+        },
+        types: { Mail: [{ name: "contents", type: "string" }] },
+        primaryType: "Mail",
+        value: { contents: "non-cacheable" },
+      }),
+    });
+    expect(response.status).toBe(200);
+    expect(response.headers.get("Cache-Control")).toBe("no-store, max-age=0");
+    expect(response.headers.get("Pragma")).toBe("no-cache");
+    expect(response.headers.get("Expires")).toBe("0");
+    expect((await response.json()) as object).toHaveProperty("data.signature");
   });
 
   it("signs a 32-byte digest and recovers the agent EVM address", async () => {
@@ -96,6 +152,9 @@ describe("vault raw secp256k1 signing", () => {
       body: JSON.stringify({ hash: HASH, referenceId: "raw-ref-1" }),
     });
     expect(response.status).toBe(200);
+    expect(response.headers.get("Cache-Control")).toBe("no-store, max-age=0");
+    expect(response.headers.get("Pragma")).toBe("no-cache");
+    expect(response.headers.get("Expires")).toBe("0");
     const body = (await response.json()) as {
       ok: boolean;
       data: { signature: `0x${string}`; hash: typeof HASH; walletAddress: string };

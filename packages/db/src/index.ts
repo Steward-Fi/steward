@@ -39,6 +39,7 @@ export {
   setPGLiteOverride,
   waitUntilRequestDatabaseTask,
   withDatabaseDeadline,
+  withIndependentDatabase,
   withRequestDatabase,
   withTenantTransactionDatabase,
   withTenantTransactionDatabaseDeadline,

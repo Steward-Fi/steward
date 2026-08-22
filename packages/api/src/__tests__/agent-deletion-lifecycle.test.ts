@@ -855,6 +855,52 @@ describe("agent deletion upstream credential boundary", () => {
     expect((await tenantDelete(agentId)).status).toBe(200);
   });
 
+  it("counts a generic autonomous intent reservation as unresolved execution", async () => {
+    const agentId = `intent-reservation-${crypto.randomUUID()}`;
+    const intentId = crypto.randomUUID();
+    await createAgent(agentId);
+    await getDb()
+      .insert(intents)
+      .values({
+        id: intentId,
+        tenantId: TENANT_ID,
+        agentId,
+        intentType: "wallet_action",
+        status: "executing",
+        createdByType: "user",
+        createdById: crypto.randomUUID(),
+        payload: { action: "transfer" },
+        executionResult: {
+          recoveryVersion: 1,
+          state: "reserved",
+          reservationId: crypto.randomUUID(),
+        },
+      });
+
+    const blocked = await tenantDelete(agentId);
+    expect(blocked.status).toBe(409);
+    await expect(blocked.json()).resolves.toEqual({
+      ok: false,
+      error: "Agent has unresolved execution evidence; reconcile it first",
+    });
+
+    if (USING_REAL_POSTGRES) {
+      let directDeleteError: unknown;
+      try {
+        await getDb().delete(agents).where(eq(agents.id, agentId));
+      } catch (error) {
+        directDeleteError = error;
+      }
+      expect(directDeleteError).toBeInstanceOf(Error);
+      expect((directDeleteError as { cause?: { code?: string } }).cause?.code).toBe("55000");
+      expect(await getDb().select().from(agents).where(eq(agents.id, agentId))).toHaveLength(1);
+      expect(await getDb().select().from(intents).where(eq(intents.id, intentId))).toHaveLength(1);
+    }
+
+    await getDb().update(intents).set({ status: "failed" }).where(eq(intents.id, intentId));
+    expect((await tenantDelete(agentId)).status).toBe(200);
+  });
+
   it("retains resolved provider evidence and rejects new bindings after deletion", async () => {
     const agentId = `provider-evidence-${crypto.randomUUID()}`;
     await createAgent(agentId);

@@ -4,6 +4,7 @@ import {
   SAML,
   ValidateInResponseTo,
 } from "@node-saml/node-saml";
+import { parseDomFromString, xpath } from "@node-saml/node-saml/lib/xml";
 
 export interface VerifySamlAcsInput {
   samlResponse: string;
@@ -105,6 +106,77 @@ function profileAttributes(profile: Record<string, unknown>): Record<string, unk
   return Object.fromEntries(Object.entries(profile).filter(([key]) => !blocked.has(key)));
 }
 
+const RSA_SHA256 = "http://www.w3.org/2001/04/xmldsig-more#rsa-sha256";
+const DIGEST_SHA256 = "http://www.w3.org/2001/04/xmlenc#sha256";
+
+function exactSingleText(document: Document, expression: string, label: string): string {
+  const elements = xpath.selectElements(document, expression);
+  if (elements.length !== 1) throw new Error(`SAML ${label} is missing or ambiguous`);
+  return elements[0]?.textContent?.trim() ?? "";
+}
+
+function requireSha256XmlSignatures(document: Document): void {
+  const signatureAlgorithms = xpath.selectAttributes(
+    document,
+    "//*[local-name(.)='SignatureMethod']/@Algorithm",
+  );
+  const digestAlgorithms = xpath.selectAttributes(
+    document,
+    "//*[local-name(.)='DigestMethod']/@Algorithm",
+  );
+  if (
+    signatureAlgorithms.length === 0 ||
+    digestAlgorithms.length === 0 ||
+    signatureAlgorithms.some((attribute) => attribute.value !== RSA_SHA256) ||
+    digestAlgorithms.some((attribute) => attribute.value !== DIGEST_SHA256)
+  ) {
+    throw new Error("SAML signatures must use RSA-SHA256 and SHA-256 digests");
+  }
+}
+
+async function assertValidatedTrustPins(
+  profile: Record<string, unknown>,
+  input: VerifySamlAcsInput,
+): Promise<void> {
+  const getAssertionXml = profile.getAssertionXml;
+  const getSamlResponseXml = profile.getSamlResponseXml;
+  if (typeof getAssertionXml !== "function" || typeof getSamlResponseXml !== "function") {
+    throw new Error("SAML verifier did not return validated XML evidence");
+  }
+  // node-saml returns the cryptographically verified assertion bytes here. The
+  // response XML is safe for structural checks because response signing is
+  // mandatory above. Attribute values still come exclusively from `profile`.
+  const assertionDocument = await parseDomFromString(String(getAssertionXml()));
+  const responseDocument = await parseDomFromString(String(getSamlResponseXml()));
+
+  if (responseDocument.documentElement.getAttribute("Destination") !== input.acsUrl) {
+    throw new Error("SAML response destination is not the configured ACS URL");
+  }
+  const recipients = xpath.selectAttributes(
+    assertionDocument,
+    "//*[local-name(.)='SubjectConfirmationData']/@Recipient",
+  );
+  if (recipients.length === 0 || recipients.some((attribute) => attribute.value !== input.acsUrl)) {
+    throw new Error("SAML assertion recipient is not the configured ACS URL");
+  }
+  if (
+    exactSingleText(
+      responseDocument,
+      "/*[local-name(.)='Response']/*[local-name(.)='Issuer']",
+      "response issuer",
+    ) !== input.idpEntityId ||
+    exactSingleText(
+      assertionDocument,
+      "/*[local-name(.)='Assertion']/*[local-name(.)='Issuer']",
+      "assertion issuer",
+    ) !== input.idpEntityId
+  ) {
+    throw new Error("SAML issuer does not match the configured IdP");
+  }
+  requireSha256XmlSignatures(assertionDocument);
+  requireSha256XmlSignatures(responseDocument);
+}
+
 export async function verifySamlAcsResponse(
   input: VerifySamlAcsInput,
 ): Promise<VerifiedSamlAssertion> {
@@ -142,6 +214,7 @@ export async function verifySamlAcsResponse(
   }
 
   const profile = result.profile as Record<string, unknown>;
+  await assertValidatedTrustPins(profile, input);
   const assertionId = firstString(profile.ID);
   if (!assertionId) throw new Error("SAML assertion ID is required for replay protection");
 

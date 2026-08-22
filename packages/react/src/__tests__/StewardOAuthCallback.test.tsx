@@ -1,63 +1,179 @@
-/**
- * <StewardOAuthCallback /> initial-render coverage.
- *
- * Like StewardEmailCallback, all of the token-in-URL / code-in-URL / error
- * handling lives in a `useEffect` that reads `window.location.search` and
- * `localStorage`. SSR does not flush effects and the runner has no DOM, so we
- * cover the deterministic initial render (the "Completing … sign-in" loading
- * shell, optionally with the provider name) and the rules-of-hooks invariant.
- * The branch logic is exercised by the browser e2e suite.
- */
-
-import { describe, expect, test } from "bun:test";
+import { afterEach, beforeAll, beforeEach, describe, expect, mock, test } from "bun:test";
+import { Window } from "happy-dom";
 import * as React from "react";
-import { renderToString } from "react-dom/server";
+import { createRoot, type Root } from "react-dom/client";
+
+const browser = new Window({ url: "https://app.example.test/auth/callback" });
+Object.assign(globalThis, {
+  window: browser,
+  document: browser.document,
+  navigator: browser.navigator,
+  HTMLElement: browser.HTMLElement,
+  Event: browser.Event,
+  IS_REACT_ACT_ENVIRONMENT: true,
+});
 
 const { StewardOAuthCallback } = await import("../components/StewardOAuthCallback.js");
 const { StewardAuthContext } = await import("../provider.js");
 
-function ctx(overrides: Record<string, unknown> = {}): any {
+let root: Root | null = null;
+let container: HTMLDivElement;
+
+function context(isAuthenticated = false) {
   return {
-    isAuthenticated: false,
+    isAuthenticated,
     isLoading: false,
-    user: null,
+    user: isAuthenticated ? { id: "user-1", email: "user@example.test" } : null,
     session: null,
-    ...overrides,
   };
 }
 
-function render(value: unknown, props: Record<string, unknown> = {}) {
-  return renderToString(
-    React.createElement(
-      StewardAuthContext.Provider,
-      { value: value as React.ContextType<typeof StewardAuthContext> },
-      React.createElement(StewardOAuthCallback, props),
-    ),
-  );
+async function mount(
+  href: string,
+  props: Record<string, unknown> = {},
+  isAuthenticated = false,
+): Promise<void> {
+  browser.location.href = href;
+  container = browser.document.createElement("div") as unknown as HTMLDivElement;
+  browser.document.body.replaceChildren(container as unknown as Node);
+  root = createRoot(container);
+  await React.act(async () => {
+    root?.render(
+      React.createElement(
+        StewardAuthContext.Provider,
+        {
+          value: context(isAuthenticated) as unknown as React.ContextType<
+            typeof StewardAuthContext
+          >,
+        },
+        React.createElement(StewardOAuthCallback, props),
+      ),
+    );
+  });
 }
 
-describe("<StewardOAuthCallback /> initial render", () => {
-  test("renders the generic loading shell when no provider is given", () => {
-    const html = render(ctx());
-    expect(html).toContain("stwd-callback__loading");
-    expect(html).toContain("Completing");
-    expect(html).toContain("sign-in");
+beforeAll(() => {
+  Object.defineProperty(browser, "opener", { value: null, writable: true, configurable: true });
+});
+
+beforeEach(() => {
+  browser.localStorage.clear();
+  browser.sessionStorage.clear();
+});
+
+afterEach(async () => {
+  if (root) await React.act(async () => root?.unmount());
+  root = null;
+  browser.opener = null;
+  mock.restore();
+});
+
+describe("<StewardOAuthCallback /> mounted behavior", () => {
+  for (const suffix of [
+    "?token=access-secret&refreshToken=refresh-secret",
+    "#token=access-secret&refreshToken=refresh-secret",
+  ]) {
+    test(`rejects token credentials in ${suffix.startsWith("#") ? "fragment" : "query"}`, async () => {
+      const onError = mock((_error: Error) => {});
+      const postMessage = mock(() => {});
+      browser.opener = { postMessage } as unknown as Window;
+      await mount(`https://app.example.test/auth/callback${suffix}`, { onError });
+      expect(container.textContent).toContain("Token-in-URL OAuth callbacks are disabled");
+      expect(onError).toHaveBeenCalledTimes(1);
+      expect(postMessage).toHaveBeenCalledTimes(0);
+      expect(browser.localStorage.length).toBe(0);
+      expect(browser.sessionStorage.length).toBe(0);
+    });
+  }
+
+  test("posts and reports one exact code/state result", async () => {
+    const onSuccess = mock((_result: { code: string; state: string }) => {});
+    const postMessage = mock(() => {});
+    browser.opener = { postMessage } as unknown as Window;
+    await mount("https://app.example.test/auth/callback?code=one-time-code&state=bound-state", {
+      onSuccess,
+    });
+    expect(container.textContent).toContain("Signed in successfully");
+    expect(postMessage).toHaveBeenCalledTimes(1);
+    expect(postMessage).toHaveBeenCalledWith(
+      { type: "steward-oauth-callback", code: "one-time-code", state: "bound-state" },
+      "https://app.example.test",
+    );
+    expect(onSuccess).toHaveBeenCalledTimes(1);
+    expect(onSuccess).toHaveBeenCalledWith({ code: "one-time-code", state: "bound-state" });
   });
 
-  test("includes the provider name in the loading copy when provided", () => {
-    const html = render(ctx(), { provider: "google" });
-    expect(html).toContain("Completing");
-    expect(html).toContain("google");
+  test("sanitizes provider errors and invokes the error callback once", async () => {
+    const onError = mock((_error: Error) => {});
+    const postMessage = mock(() => {});
+    browser.opener = { postMessage } as unknown as Window;
+    await mount(
+      "https://app.example.test/auth/callback?error=access_denied&error_description=User%20cancelled",
+      { onError },
+    );
+    expect(container.textContent).toContain("User cancelled");
+    expect(postMessage).toHaveBeenCalledWith(
+      { type: "steward-oauth-callback", error: "access_denied" },
+      "https://app.example.test",
+    );
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect((onError.mock.calls[0]?.[0] as Error).message).toBe("User cancelled");
   });
 
-  test("mounting does not throw when already authenticated", () => {
-    expect(() => render(ctx({ isAuthenticated: true }))).not.toThrow();
+  for (const suffix of ["", "?code=missing-state", "?state=missing-code", "?code=&state=x"]) {
+    test(`rejects missing callback parameters (${suffix || "empty"})`, async () => {
+      const onError = mock((_error: Error) => {});
+      const onSuccess = mock(() => {});
+      await mount(`https://app.example.test/auth/callback${suffix}`, { onError, onSuccess });
+      expect(container.textContent).toContain("Missing authentication parameters");
+      expect(onError).toHaveBeenCalledTimes(1);
+      expect(onSuccess).toHaveBeenCalledTimes(0);
+    });
+  }
+
+  test("succeeds without an opener and does not rerun after a prop refresh", async () => {
+    const firstSuccess = mock(() => {});
+    const laterSuccess = mock(() => {});
+    await mount("https://app.example.test/auth/callback?code=code&state=state", {
+      onSuccess: firstSuccess,
+    });
+    await React.act(async () => {
+      root?.render(
+        React.createElement(
+          StewardAuthContext.Provider,
+          {
+            value: context(false) as unknown as React.ContextType<typeof StewardAuthContext>,
+          },
+          React.createElement(StewardOAuthCallback, { onSuccess: laterSuccess }),
+        ),
+      );
+    });
+    expect(firstSuccess).toHaveBeenCalledTimes(1);
+    expect(laterSuccess).toHaveBeenCalledTimes(0);
   });
 
-  test("hook order is stable across auth-context shapes (rules-of-hooks)", () => {
-    expect(() => render(ctx({ isAuthenticated: false, user: null }))).not.toThrow();
-    expect(() =>
-      render(ctx({ isAuthenticated: true, user: { id: "u", email: "u@x.io" } })),
-    ).not.toThrow();
+  test("already-authenticated mounts ignore callback parameters", async () => {
+    const onSuccess = mock(() => {});
+    const onError = mock(() => {});
+    const postMessage = mock(() => {});
+    browser.opener = { postMessage } as unknown as Window;
+    await mount(
+      "https://app.example.test/auth/callback?token=hostile&error=hostile&code=hostile&state=hostile",
+      { onSuccess, onError },
+      true,
+    );
+    expect(container.textContent).toContain("Signed in successfully");
+    expect(onSuccess).toHaveBeenCalledTimes(0);
+    expect(onError).toHaveBeenCalledTimes(0);
+    expect(postMessage).toHaveBeenCalledTimes(0);
+  });
+
+  test("unmounting after completion does not duplicate callbacks", async () => {
+    const onSuccess = mock(() => {});
+    await mount("https://app.example.test/auth/callback?code=code&state=state", { onSuccess });
+    await React.act(async () => root?.unmount());
+    root = null;
+    await Promise.resolve();
+    expect(onSuccess).toHaveBeenCalledTimes(1);
   });
 });

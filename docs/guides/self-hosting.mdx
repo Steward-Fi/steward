@@ -72,13 +72,29 @@ DATABASE_URL=postgres://user:pass@localhost:5432/steward
 
 ### API Server
 
+Generate a dedicated JWT signing secret and store the output in your secret
+manager or `.env` file:
+
 ```bash
-STEWARD_PORT=3200                           # API port (default: 3200)
-STEWARD_BIND_HOST=0.0.0.0                   # Bind address
-STEWARD_JWT_SECRET=separate-jwt-signing-key  # Defaults to master password if not set
-STEWARD_PLATFORM_KEY=your-platform-admin-key # For platform-level management
-STEWARD_EMBEDDED=false                       # Set true for PGLite mode
+openssl rand -hex 32
 ```
+
+```bash
+PORT=3200                                              # API port (default: 3200)
+STEWARD_BIND_HOST=0.0.0.0                              # Bind address
+STEWARD_JWT_SECRET=<paste-64-character-hex-output-here> # Canonical for new non-embedded production deployments
+STEWARD_PLATFORM_KEY=your-platform-admin-key           # For platform-level management
+STEWARD_EMBEDDED=false                                  # Set true for PGLite mode
+```
+
+For new non-embedded production deployments, configure the canonical
+`STEWARD_JWT_SECRET` with at least 32 high-entropy characters and keep it
+separate from `STEWARD_MASTER_PASSWORD`. During migration, the runtime
+temporarily accepts a 32+ character `STEWARD_SESSION_SECRET` when the canonical
+variable is absent, but that name is deprecated and should be replaced with
+`STEWARD_JWT_SECRET`. Without either sufficiently long signing secret,
+non-embedded production fails closed. Derivation from the master password is
+available only in embedded/local mode.
 
 ### Blockchain
 
@@ -203,7 +219,7 @@ server {
 ## Production Checklist
 
 - [ ] Set a unique `STEWARD_MASTER_PASSWORD` (32+ chars, random)
-- [ ] Set a separate `STEWARD_JWT_SECRET`
+- [ ] Set a separate, high-entropy `STEWARD_JWT_SECRET` (32+ characters)
 - [ ] Use TLS for all connections (API + database)
 - [ ] Restrict database access to the Steward server only
 - [ ] Set `STEWARD_PLATFORM_KEY` for admin operations

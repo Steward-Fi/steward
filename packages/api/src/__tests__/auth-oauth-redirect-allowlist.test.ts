@@ -109,6 +109,46 @@ describeWithDatabase("OAuth redirect_uri allowlist", () => {
     expect(body.error).toContain("redirect_uri is not allowed");
   });
 
+  it("allows an exact tenant-authorized IPv6 loopback HTTP redirect", async () => {
+    const redirectUri = "http://[::1]:4173/callback";
+    const db = getDb();
+    await db.delete(tenantConfigs).where(eq(tenantConfigs.tenantId, TENANT_ID));
+    await db.insert(tenantConfigs).values({
+      tenantId: TENANT_ID,
+      allowedOrigins: [],
+      allowedRedirectUrls: [redirectUri],
+    });
+
+    const res = await authRoutes.request(
+      `/oauth/google/authorize?tenant_id=${TENANT_ID}&redirect_uri=${encodeURIComponent(redirectUri)}${PKCE_QUERY}`,
+    );
+
+    expect(res.status).toBe(302);
+    expect(res.headers.get("location")).toStartWith(
+      "https://accounts.google.com/o/oauth2/v2/auth?",
+    );
+  });
+
+  it("rejects an allowlisted non-loopback HTTP redirect", async () => {
+    const redirectUri = "http://192.0.2.1:4173/callback";
+    const db = getDb();
+    await db.delete(tenantConfigs).where(eq(tenantConfigs.tenantId, TENANT_ID));
+    await db.insert(tenantConfigs).values({
+      tenantId: TENANT_ID,
+      allowedOrigins: [],
+      allowedRedirectUrls: [redirectUri],
+    });
+
+    const res = await authRoutes.request(
+      `/oauth/google/authorize?tenant_id=${TENANT_ID}&redirect_uri=${encodeURIComponent(redirectUri)}${PKCE_QUERY}`,
+    );
+
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { ok: boolean; error: string };
+    expect(body.ok).toBe(false);
+    expect(body.error).toContain("must use https except for loopback development origins");
+  });
+
   it("does not allow global OAuth redirects to satisfy a tenant-scoped /authorize request", async () => {
     const db = getDb();
     await db.delete(tenantConfigs).where(eq(tenantConfigs.tenantId, TENANT_ID));

@@ -2,8 +2,9 @@ import { describe, expect, test } from "bun:test";
 import { PublicKey } from "@solana/web3.js";
 import { AdapterProviderError, AdapterValidationError, type BridgeQuote } from "@stwd/adapters";
 import { MONERO_ON_SOLANA } from "@stwd/shared";
+import { withRuntimeEnvironment } from "@stwd/shared/runtime-env";
 import bs58 from "bs58";
-import { resolveRpcUrl, wxmrPlugin } from "../index";
+import { createWxmrBridgeAdapter, resolveRpcUrl, wxmrPlugin } from "../index";
 import {
   WXMR_BRIDGE_CONFIG_ACCOUNT,
   WXMR_BRIDGE_PROGRAM_ID,
@@ -584,7 +585,8 @@ describe("WxmrBridgeAdapter", () => {
       solana: process.env.SOLANA_RPC_URL,
     };
     try {
-      // Both unset -> undefined so the adapter falls back to the public default.
+      // Both unset -> undefined. The plugin factory fails closed rather than
+      // borrowing an endpoint from an earlier Worker generation.
       process.env.WXMR_SOLANA_RPC_URL = undefined;
       process.env.SOLANA_RPC_URL = undefined;
       delete process.env.WXMR_SOLANA_RPC_URL;
@@ -629,6 +631,24 @@ describe("WxmrBridgeAdapter", () => {
       category: "bridge",
       provider: WXMR_PROVIDER,
     });
-    expect(wxmrPlugin.adapters?.[0]?.adapter).toBeInstanceOf(WxmrBridgeAdapter);
+    expect(wxmrPlugin.adapters?.[0]?.adapter).toBeUndefined();
+    expect(wxmrPlugin.adapters?.[0]?.createAdapter).toBe(createWxmrBridgeAdapter);
+  });
+
+  test("request-owned provider instances preserve only authority-free session state", async () => {
+    await withRuntimeEnvironment(
+      { WXMR_SOLANA_RPC_URL: "https://request-rpc.example.test" },
+      async () => {
+        const first = createWxmrBridgeAdapter();
+        const quote = await inboundQuote(first);
+        const session = await first.createSession(quote, {
+          tenantId: "tenant-a",
+          userId: "user-a",
+        });
+
+        const nextRequest = createWxmrBridgeAdapter();
+        expect(await nextRequest.getSession(session.id)).toEqual(session);
+      },
+    );
   });
 });
