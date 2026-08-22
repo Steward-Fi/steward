@@ -16,6 +16,7 @@ const databaseUrl = process.env.DATABASE_URL;
 const realPostgresIt = databaseUrl && !process.env.STEWARD_PGLITE_MEMORY ? it : it.skip;
 const migrationsFolder = fileURLToPath(new URL("../../drizzle", import.meta.url));
 const savedNodeEnv = process.env.NODE_ENV;
+const savedAllowInsecureDb = process.env.STEWARD_ALLOW_INSECURE_DB;
 
 function databaseUrlWithApplicationName(name: string): string {
   const url = new URL(databaseUrl!);
@@ -53,12 +54,15 @@ beforeAll(async () => {
 afterAll(() => {
   if (savedNodeEnv === undefined) delete process.env.NODE_ENV;
   else process.env.NODE_ENV = savedNodeEnv;
+  if (savedAllowInsecureDb === undefined) delete process.env.STEWARD_ALLOW_INSECURE_DB;
+  else process.env.STEWARD_ALLOW_INSECURE_DB = savedAllowInsecureDb;
 });
 
 realPostgresIt(
   "serializes the exact boundary across independent connections and survives restart",
   async () => {
     process.env.NODE_ENV = "production";
+    process.env.STEWARD_ALLOW_INSECURE_DB = "true";
     const tenantId = `rate-tenant-${crypto.randomUUID()}`;
     const agentId = `rate-agent-${crypto.randomUUID()}`;
     const first = createDb(databaseUrl!);
@@ -148,6 +152,7 @@ realPostgresIt(
   "prevents bucket recreation across agent and tenant deletion commits",
   async () => {
     process.env.NODE_ENV = "production";
+    process.env.STEWARD_ALLOW_INSECURE_DB = "true";
     const observer = createDb(databaseUrl!);
     try {
       for (const deletionKind of ["agent", "tenant"] as const) {

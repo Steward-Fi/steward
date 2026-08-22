@@ -120,9 +120,10 @@ that is unavailable fails closed; it never silently changes backend.
 When Redis is not configured, production uses the plugin-owned
 `capability_rate_limit_buckets` PostgreSQL table. Its per-tenant/agent/surface
 row lock is the reservation boundary shared by every API replica, and the
-bounded timestamp array survives process restarts. Agent requests and bucket
-reservations run inside the same authenticated tenant/RLS transaction. A writer
-trigger takes the tenant-deletion lock before a parent-agent key-share lock, so
+bounded timestamp array survives process restarts. Agent authentication and
+bucket reservations each use an authenticated tenant/RLS transaction, and the
+reservation commits before downstream work. A writer trigger takes the
+tenant-deletion lock before a parent-agent key-share lock, so
 an in-flight reservation cannot recreate state after agent or tenant cleanup.
 The plugin migration must be applied before traffic. `/ready` reports
 `capabilityRateLimit` with source

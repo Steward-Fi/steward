@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { agents, tenants } from "@stwd/db";
+import type { IoredisLike } from "@stwd/redis";
 import { and, eq } from "drizzle-orm";
 import { Hono } from "hono";
 import { createInvokeRoutes } from "../invoke";
@@ -67,6 +68,53 @@ async function seedRateAgent(tenantId: string, agentId: string): Promise<void> {
 }
 
 describe("enforceCapabilityRateLimit", () => {
+  test("reserves on the exact Redis client supplied by the request context", async () => {
+    function countingClient(label: string) {
+      const counts = new Map<string, number>();
+      const calls: string[] = [];
+      const client = {
+        async eval(_script: string, _keyCount: number, ...args: Array<string | number>) {
+          const key = String(args[0]);
+          const max = Number(args[3]);
+          calls.push(`${label}:${key}`);
+          const prior = counts.get(key) ?? 0;
+          const allowed = prior < max;
+          const count = allowed ? prior + 1 : prior;
+          counts.set(key, count);
+          return [allowed ? 1 : 0, count, String(args[1])];
+        },
+      } as unknown as IoredisLike;
+      return { client, calls };
+    }
+
+    const authorityA = countingClient("A");
+    const authorityB = countingClient("B");
+    const tenantId = `tenant-${crypto.randomUUID()}`;
+    const agentId = `agent-${crypto.randomUUID()}`;
+    const context = (client: IoredisLike) => ({
+      db: null as never,
+      getRedisClient: () => client,
+      isRedisConfigured: () => true,
+    });
+
+    for (let i = 0; i < CAPABILITY_ISSUE_RATE_LIMIT.maxRequests; i++) {
+      expect(
+        (await enforceCapabilityRateLimit(context(authorityA.client), "issue", tenantId, agentId))
+          .allowed,
+      ).toBe(true);
+    }
+    expect(
+      (await enforceCapabilityRateLimit(context(authorityB.client), "issue", tenantId, agentId))
+        .allowed,
+    ).toBe(true);
+    expect(
+      (await enforceCapabilityRateLimit(context(authorityA.client), "issue", tenantId, agentId))
+        .allowed,
+    ).toBe(false);
+    expect(authorityA.calls).toHaveLength(CAPABILITY_ISSUE_RATE_LIMIT.maxRequests + 1);
+    expect(authorityB.calls).toHaveLength(1);
+  });
+
   test("permits memory only in explicit test/development posture", async () => {
     const tenant = `tenant-cap-rl-${crypto.randomUUID()}`;
     const agent = `agent-cap-rl-${crypto.randomUUID()}`;

@@ -17,6 +17,10 @@ function urlFor(database: string, role?: { name: string; password: string }): st
   const url = new URL(databaseUrl!);
   url.pathname = `/${database}`;
   if (role) {
+    // WHATWG URLs discard credentials on a hostless `postgresql:///db` URL.
+    // Use loopback for the restricted-role child so the fixture really proves
+    // app-role ACL/RLS behavior when the parent test uses a local Unix socket.
+    if (!url.hostname) url.hostname = "127.0.0.1";
     url.username = role.name;
     url.password = role.password;
   }
@@ -124,6 +128,7 @@ describePostgres("capability rate limit through the restricted production app ro
       JWT_SECRET: `capability-rate-jwt-${suffix}-0123456789abcdef`,
       STEWARD_AUDIT_HMAC_KEY: "ab".repeat(32),
       STEWARD_REDIS_REQUIRED: "false",
+      STEWARD_ALLOW_INSECURE_DB: "true",
     };
     const output = await runCommand(
       ["bun", "run", "packages/api/src/__tests__/fixtures/capability-rate-limit-app-role.ts"],
@@ -151,7 +156,7 @@ describePostgres("capability rate limit through the restricted production app ro
       const line = readinessOutput
         .trim()
         .split("\n")
-        .findLast((candidate) => candidate.startsWith('{"ok":false'));
+        .findLast((candidate) => candidate.startsWith("{"));
       expect(line).toBeDefined();
       expect(JSON.parse(line!)).toMatchObject({ ok: false, source: "postgres" });
     };
@@ -159,8 +164,16 @@ describePostgres("capability rate limit through the restricted production app ro
     const adminDatabase = createDb(adminDatabaseUrl).client;
     try {
       await adminDatabase.unsafe(
-        `REVOKE INSERT ON public.capability_rate_limit_buckets FROM ${appRole}`,
+        `REVOKE INSERT ON public.capability_rate_limit_buckets FROM PUBLIC, ${appRole}`,
       );
+      const [insertPrivilege] = await adminDatabase<{ allowed: boolean; acl: string }[]>`
+        SELECT
+          has_table_privilege(${appRole}, 'public.capability_rate_limit_buckets', 'INSERT') AS allowed,
+          coalesce(relation.relacl::text, '') AS acl
+        FROM pg_class relation
+        WHERE relation.oid = 'public.capability_rate_limit_buckets'::regclass
+      `;
+      expect(insertPrivilege?.allowed, insertPrivilege?.acl).toBe(false);
       await assertReadinessFails();
       await adminDatabase.unsafe(
         `GRANT INSERT ON public.capability_rate_limit_buckets TO ${appRole}`,
