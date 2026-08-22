@@ -235,6 +235,7 @@ export type {
 } from "./vault";
 export {
   BackendBindingMismatchError,
+  custodyTransitionLockKey,
   externalCustodyIdentityDigest,
   SolanaRecoveryOwnershipLostError,
   Vault,
