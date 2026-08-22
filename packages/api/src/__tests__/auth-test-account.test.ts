@@ -1,7 +1,15 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { readFileSync } from "node:fs";
 
-import { closeDb, getDb, tenantConfigs, tenants, users, userTenants } from "@stwd/db";
+import {
+  __resetAuditHmacKeyCacheForTests,
+  closeDb,
+  getDb,
+  tenantConfigs,
+  tenants,
+  users,
+  userTenants,
+} from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { and, eq } from "drizzle-orm";
 
@@ -18,6 +26,8 @@ describe("tenant test account credentials", () => {
     process.env.STEWARD_PGLITE_MEMORY = "true";
     process.env.STEWARD_MASTER_PASSWORD = "auth-test-account-master-password";
     process.env.STEWARD_JWT_SECRET = "auth-test-account-jwt-secret-with-enough-entropy";
+    process.env.STEWARD_AUDIT_HMAC_KEY = "auth-test-account-audit-key-with-enough-entropy";
+    __resetAuditHmacKeyCacheForTests();
     process.env.STEWARD_PLATFORM_KEYS = PLATFORM_KEY;
     process.env.STEWARD_PLATFORM_KEY_SCOPES = JSON.stringify({
       [PLATFORM_KEY]: ["platform:read", "platform:write", "platform:tenant-test-account:write"],
@@ -49,6 +59,8 @@ describe("tenant test account credentials", () => {
     delete process.env.STEWARD_PGLITE_MEMORY;
     delete process.env.STEWARD_MASTER_PASSWORD;
     delete process.env.STEWARD_JWT_SECRET;
+    delete process.env.STEWARD_AUDIT_HMAC_KEY;
+    __resetAuditHmacKeyCacheForTests();
     delete process.env.STEWARD_PLATFORM_KEYS;
     delete process.env.STEWARD_PLATFORM_KEY_SCOPES;
   });

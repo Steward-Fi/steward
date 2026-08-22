@@ -254,14 +254,26 @@ describe("platform security hardening", () => {
   it("writes authorization audit events before sensitive platform mutations", () => {
     expectBefore('action: "tenant.create.authorized"', ".insert(tenants)");
     expectBefore('action: "tenant.api_key.create.authorized"', ".insert(tenants)");
-    expectBefore('action: "tenant.email_config.update.authorized"', ".set({ emailConfig");
-    expectBefore('action: "tenant.oidc_providers.update.authorized"', ".set({ oidcProviders");
-    expectBefore('action: "tenant.test_account.enable.authorized"', ".set({ testAccount");
+    expectBefore(
+      'action: "tenant.email_config.update.authorized"',
+      "withTenantAuditedTransaction(",
+    );
+    expectBefore(
+      'action: "tenant.oidc_providers.update.authorized"',
+      "withTenantAuditedTransaction(",
+    );
+    expectBefore(
+      'action: "tenant.test_account.enable.authorized"',
+      "withTenantAuditedTransaction(",
+    );
     expectBefore(
       'action: "tenant.test_account.disable.authorized"',
-      ".set({ testAccount: disabled",
+      "withTenantAuditedTransaction(tenantId",
     );
-    expectBefore('action: "tenant.email_config.delete.authorized"', ".set({ emailConfig: null");
+    expectBefore(
+      'action: "tenant.email_config.delete.authorized"',
+      "withTenantAuditedTransaction(",
+    );
     expectBefore('action: "tenant.delete.authorized"', "revocationStore.revokeAgentTokens");
     expectBefore('action: "tenant.delete.authorized"', "revocationStore.revokeUserTokens");
     expectBefore(
@@ -272,17 +284,12 @@ describe("platform security hardening", () => {
     expectBefore('action: "user.metadata.update.authorized"', ".update(users)");
   });
 
-  it("restores platform-managed tenant config when final audit events fail", () => {
-    expect(platformSource).toContain(
-      "type PlatformTenantConfigRow = typeof tenantConfigs.$inferSelect",
-    );
-    expect(platformSource).toContain("async function snapshotPlatformTenantConfigRow");
-    expect(platformSource).toContain("async function restorePlatformTenantConfigRow");
-    expect(platformSource).toContain("tx.delete(tenantConfigs)");
-    expect(platformSource).toContain("tx.insert(tenantConfigs).values(snapshot)");
-
+  it("commits platform-managed tenant config only with its required audit", () => {
+    expect(platformSource).not.toContain("snapshotPlatformTenantConfigRow");
+    expect(platformSource).not.toContain("restorePlatformTenantConfigRow");
     for (const marker of [
       'platform.patch("/tenants/:tenantId/email-config"',
+      'platform.patch("/tenants/:tenantId/join-mode"',
       'platform.put("/tenants/:tenantId/oidc-providers"',
       'platform.post("/tenants/:tenantId/test-account"',
       'platform.delete("/tenants/:tenantId/test-account"',
@@ -292,9 +299,9 @@ describe("platform security hardening", () => {
       expect(start).toBeGreaterThanOrEqual(0);
       const nextRoute = platformSource.indexOf("\nplatform.", start + marker.length);
       const route = platformSource.slice(start, nextRoute === -1 ? undefined : nextRoute);
-      expect(route).toContain("snapshotPlatformTenantConfigRow(tenantId)");
-      expect(route).toContain("try {");
-      expect(route).toContain("restorePlatformTenantConfigRow(tenantId, previousConfigRow)");
+      expect(route).toContain("withTenantAuditedTransaction(");
+      expect(route).toContain('.for("update")');
+      expect(route).toContain("appendRequiredAudit({");
     }
   });
 
