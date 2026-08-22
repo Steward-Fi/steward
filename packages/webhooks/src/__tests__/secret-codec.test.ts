@@ -125,6 +125,19 @@ describe("webhook secret-codec dev-key gate (SEC-102)", () => {
     ).toThrow(/STEWARD_WEBHOOK_SECRET_ENCRYPTION_KEY or STEWARD_MASTER_PASSWORD is required/);
   });
 
+  it("classifies a blank Worker NODE_ENV as production", () => {
+    expect(() =>
+      withRuntimeEnvironment(
+        {
+          STEWARD_RUNTIME: "workers",
+          NODE_ENV: "   ",
+          STEWARD_ALLOW_DEV_SECRETS: "true",
+        },
+        () => encryptWebhookSecret("must-not-use-dev-root"),
+      ),
+    ).toThrow(/STEWARD_WEBHOOK_SECRET_ENCRYPTION_KEY or STEWARD_MASTER_PASSWORD is required/);
+  });
+
   it("preserves webhook authority when A suspends, B runs, then A resumes", async () => {
     const authorityA = {
       NODE_ENV: "production",

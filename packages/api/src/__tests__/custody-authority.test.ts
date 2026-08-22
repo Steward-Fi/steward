@@ -294,6 +294,18 @@ describe("request-local custody authority", () => {
     }
   });
 
+  it("classifies a blank Worker NODE_ENV as production", () => {
+    expect(() =>
+      withWorkerRuntimeAuthority(
+        {
+          ...workerAuthorityEnvironment("blank-node-env", SALT_A),
+          NODE_ENV: "   ",
+        },
+        () => resolveCustodyAuthority(),
+      ),
+    ).toThrow(/STEWARD_ACK_LOCAL_CUSTODY=true/);
+  });
+
   it("keeps an isolate-cached plugin context late-bound to each request", async () => {
     _clearConfiguredVaultsForTests();
     const pluginContext = buildPluginContext();

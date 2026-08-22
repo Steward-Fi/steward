@@ -30,8 +30,9 @@ function runtimeValue(name: string): string | undefined {
 
 /** Resolve one immutable webhook encryption root from the current runtime. */
 export function resolveWebhookSecretAuthority(): WebhookSecretAuthority {
+  const configuredNodeEnvironment = runtimeValue("NODE_ENV")?.trim();
   const nodeEnvironment =
-    runtimeValue("NODE_ENV") ??
+    configuredNodeEnvironment ||
     (runtimeValue("STEWARD_RUNTIME") === "workers" ? "production" : undefined);
   let encryptionKey =
     runtimeValue("STEWARD_WEBHOOK_SECRET_ENCRYPTION_KEY") ??

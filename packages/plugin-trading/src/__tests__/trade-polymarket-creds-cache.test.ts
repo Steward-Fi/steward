@@ -249,6 +249,7 @@ describe("SEC-108: Polymarket L2 creds Redis cache is encrypted at rest", () => 
       withRuntimeEnvironment(
         {
           STEWARD_RUNTIME: "workers",
+          NODE_ENV: " \t ",
           POLYMARKET_CLOB_API_URL: "http://insecure.example.invalid",
           STEWARD_PM_TEST_CREDS: "1",
         },

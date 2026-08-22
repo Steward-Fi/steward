@@ -138,10 +138,8 @@ function runtimeRaw(name: string): string | undefined {
 }
 
 function runtimeNodeEnvironment(): string | undefined {
-  return (
-    runtimeRaw("NODE_ENV") ??
-    (runtimeRaw("STEWARD_RUNTIME") === "workers" ? "production" : undefined)
-  );
+  const configured = runtimeRaw("NODE_ENV")?.trim();
+  return configured || (runtimeRaw("STEWARD_RUNTIME") === "workers" ? "production" : undefined);
 }
 
 function configuredKmsProvider(): "aws" | "pkcs11" | undefined {
