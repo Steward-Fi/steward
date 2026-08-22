@@ -1931,6 +1931,13 @@ export class ProviderAuthorityStore {
     await this.faultHooks.afterBudgetPreflight?.();
     return withTenantAuditedTransaction(ctx.tenantId, async (txRaw, append) => {
       const tx = txRaw as DbExecutor;
+      const [txAgent] = await tx
+        .select({ id: agents.id })
+        .from(agents)
+        .where(and(eq(agents.tenantId, ctx.tenantId), eq(agents.id, current.agentId)))
+        .limit(1)
+        .for("update");
+      if (!txAgent) throw new ProviderAuthorityError("resource not found", "not_found", 404);
       // Lock the budget and make the authority decision from this transaction's
       // current state. A revocation racing the earlier preflight can no longer
       // commit before an authority-dependent mutation without being observed.
@@ -2011,6 +2018,85 @@ export class ProviderAuthorityStore {
         },
       });
       return updated;
+    });
+  }
+
+  async deleteAgentBudget(ctx: MutationContext, id: string) {
+    assertMutationContext(ctx);
+    const [current] = await this.db()
+      .select()
+      .from(providerAgentBudgets)
+      .where(and(eq(providerAgentBudgets.tenantId, ctx.tenantId), eq(providerAgentBudgets.id, id)))
+      .limit(1);
+    if (!current) throw new ProviderAuthorityError("resource not found", "not_found", 404);
+    if (current.revision !== ctx.expectedRevision) {
+      throw new ProviderAuthorityError("budget revision conflict", "revision_conflict", 409);
+    }
+    const tenantAuthority = await this.hasTenantAdmin(ctx);
+    if (current.workspaceId && !current.autoFreeze) {
+      await this.requireWorkspaceAdmin(ctx, current.workspaceId, true);
+    } else if (!tenantAuthority) {
+      throw new ProviderAuthorityError("tenant authority required", "forbidden", 403);
+    }
+    await this.faultHooks.afterBudgetPreflight?.();
+    return withTenantAuditedTransaction(ctx.tenantId, async (txRaw, append) => {
+      const tx = txRaw as DbExecutor;
+      const [txAgent] = await tx
+        .select({ id: agents.id })
+        .from(agents)
+        .where(and(eq(agents.tenantId, ctx.tenantId), eq(agents.id, current.agentId)))
+        .limit(1)
+        .for("update");
+      if (!txAgent) throw new ProviderAuthorityError("resource not found", "not_found", 404);
+      const [txCurrent] = await tx
+        .select()
+        .from(providerAgentBudgets)
+        .where(
+          and(eq(providerAgentBudgets.tenantId, ctx.tenantId), eq(providerAgentBudgets.id, id)),
+        )
+        .limit(1)
+        .for("update");
+      if (!txCurrent) throw new ProviderAuthorityError("resource not found", "not_found", 404);
+      if (txCurrent.revision !== ctx.expectedRevision) {
+        throw new ProviderAuthorityError("budget revision conflict", "revision_conflict", 409);
+      }
+      const txTenantAuthority = await this.hasTenantAdmin(ctx, tx);
+      if (txCurrent.workspaceId && !txCurrent.autoFreeze) {
+        await this.requireWorkspaceAdmin(ctx, txCurrent.workspaceId, true, tx);
+      } else if (!txTenantAuthority) {
+        throw new ProviderAuthorityError("tenant authority required", "forbidden", 403);
+      }
+      const [deleted] = await tx
+        .delete(providerAgentBudgets)
+        .where(
+          and(
+            eq(providerAgentBudgets.tenantId, ctx.tenantId),
+            eq(providerAgentBudgets.id, id),
+            eq(providerAgentBudgets.revision, txCurrent.revision),
+          ),
+        )
+        .returning();
+      if (!deleted) {
+        throw new ProviderAuthorityError("budget revision conflict", "revision_conflict", 409);
+      }
+      await appendAuthorityMutationAudit(ctx, append, {
+        action: "provider.agent_budget.delete",
+        resourceType: "provider_agent_budget",
+        resourceId: id,
+        metadata: {
+          agentId: txCurrent.agentId,
+          workspaceId: txCurrent.workspaceId,
+          expectedRevision: txCurrent.revision,
+          dimension: txCurrent.dimension,
+          windowSeconds: txCurrent.windowSeconds,
+          max: txCurrent.max,
+          currency: txCurrent.currency,
+          autoFreeze: txCurrent.autoFreeze,
+          enabled: txCurrent.enabled,
+          reason: ctx.reason,
+        },
+      });
+      return deleted;
     });
   }
 
