@@ -45,6 +45,7 @@ import {
   tenantContextFromAuthenticatedPrincipal,
   transactions,
   withTenantRlsTransaction,
+  withTenantTransactionDatabase,
 } from "@stwd/db";
 import { checkRateLimit } from "@stwd/redis";
 import {
@@ -693,6 +694,27 @@ export function createOperatorRecoveryRoutes(
     return { actorType: "user", actorId: c.get("tenantId") ?? "operator" };
   }
 
+  async function withOperatorTenantDatabase<T>(
+    c: Context<{ Variables: AppVariables }>,
+    tenantId: string,
+    callback: () => Promise<T>,
+  ): Promise<T> {
+    if (hasTenantTransactionDatabase({ tenantId })) return callback();
+    const actor = operatorActor(c);
+    const context = tenantContextFromAuthenticatedPrincipal({
+      tenantId,
+      method: c.req.method,
+      subject: actor.actorId,
+    });
+    const driver =
+      process.env.STEWARD_DB_MODE === "pglite" || process.env.STEWARD_PGLITE_MEMORY === "true"
+        ? "pglite"
+        : getDatabaseDriver();
+    return withTenantRlsTransaction(db as never, driver, context, async (tx) =>
+      withTenantTransactionDatabase(tx as never, { tenantId }, callback),
+    );
+  }
+
   async function auditRecoveryEvent(
     c: Context<{ Variables: AppVariables }>,
     tenantId: string,
@@ -701,28 +723,35 @@ export function createOperatorRecoveryRoutes(
     metadata: Record<string, unknown>,
   ): Promise<void> {
     const actor = operatorActor(c);
-    await writeAuditEvent({
-      tenantId,
-      actorType: actor.actorType,
-      actorId: actor.actorId,
-      action,
-      resourceType: "trade",
-      resourceId: agentId,
-      metadata,
-    });
-    await db
-      .insert(proxyAuditLog)
-      .values({
+    await withOperatorTenantDatabase(c, tenantId, () =>
+      writeAuditEvent({
         tenantId,
-        agentId,
-        targetHost: action,
-        targetPath: JSON.stringify(metadata),
-        method: "AUDIT",
-        statusCode: 200,
-        latencyMs: 0,
-        reason: action,
-      })
-      .catch(() => undefined);
+        actorType: actor.actorType,
+        actorId: actor.actorId,
+        action,
+        resourceType: "trade",
+        resourceId: agentId,
+        metadata,
+      }),
+    );
+    // Keep the best-effort proxy log in its own tenant transaction. A
+    // restricted platform role intentionally has only audit-chain privileges;
+    // if proxy logging is denied, rolling back this separate transaction must
+    // not undo the required chained audit event above.
+    await withOperatorTenantDatabase(c, tenantId, () =>
+      getDb()
+        .insert(proxyAuditLog)
+        .values({
+          tenantId,
+          agentId,
+          targetHost: action,
+          targetPath: JSON.stringify(metadata),
+          method: "AUDIT",
+          statusCode: 200,
+          latencyMs: 0,
+          reason: action,
+        }),
+    ).catch(() => undefined);
   }
 
   type DurableTransferState = {
@@ -1601,15 +1630,17 @@ export function createOperatorRecoveryRoutes(
     // below observes the missing sequence/high-water count and fails closed.
     const guardActor = operatorActor(c);
     try {
-      await writeAuditEvent({
-        tenantId,
-        actorType: guardActor.actorType,
-        actorId: guardActor.actorId,
-        action: "trade.recovery.replay_guard",
-        resourceType: "trade",
-        resourceId: agentId,
-        metadata: { requestFingerprint },
-      });
+      await withOperatorTenantDatabase(c, tenantId, () =>
+        writeAuditEvent({
+          tenantId,
+          actorType: guardActor.actorType,
+          actorId: guardActor.actorId,
+          action: "trade.recovery.replay_guard",
+          resourceType: "trade",
+          resourceId: agentId,
+          metadata: { requestFingerprint },
+        }),
+      );
     } catch (err) {
       console.error(
         "[operator-recovery] collateral transfer replay guard failed",

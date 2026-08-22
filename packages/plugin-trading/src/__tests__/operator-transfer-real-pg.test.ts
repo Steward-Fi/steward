@@ -1,11 +1,15 @@
-import { afterAll, describe, expect, mock, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, mock, test } from "bun:test";
+import { randomUUID } from "node:crypto";
 import {
   agents,
   agentWallets,
   auditEvents,
   closeDb,
+  createDb,
   getDb,
+  tenantContextFromAuthenticatedPrincipal,
   tenants,
+  withTenantRlsTransaction,
   writeAuditEvent,
 } from "@stwd/db";
 import { and, asc, eq } from "drizzle-orm";
@@ -18,6 +22,10 @@ const HAS_REAL_PG =
   Boolean(process.env.DATABASE_URL) && process.env.STEWARD_PGLITE_MEMORY !== "true";
 const submitCalls: unknown[] = [];
 let submitError: Error | undefined;
+const restrictedRole = `steward_platform_transfer_${randomUUID().replaceAll("-", "")}`;
+const restrictedPassword = randomUUID().replaceAll("-", "");
+let adminHandle: ReturnType<typeof createDb> | undefined;
+let restrictedHandles: Array<ReturnType<typeof createDb>> = [];
 
 mock.module("@stwd/policy-engine", () => ({
   aggregationLookupFromMap: () => undefined,
@@ -81,15 +89,16 @@ async function seed() {
   return { tenantId, agentId };
 }
 
-async function buildApp(failAuditAction?: string) {
+async function buildApp(failAuditAction?: string, routeDb = getDb(), expectedTenantId?: string) {
   const { tradingPlugin } = await import("../index");
   const app = new Hono();
   const ctx = {
-    db: getDb(),
+    db: routeDb,
     vault: {
       getWallet: async () => ({ address: "0x00000000000000000000000000000000000000bb" }),
     },
-    ensureAgentForTenant: async (tenantId: string, agentId: string) => ({ id: agentId, tenantId }),
+    ensureAgentForTenant: async (tenantId: string, agentId: string) =>
+      expectedTenantId == null || tenantId === expectedTenantId ? { id: agentId, tenantId } : null,
     getPolicySet: async () => [],
     isValidAnyAddress: () => true,
     policyEngine: { evaluate: async () => ({ approved: true, results: [] }) },
@@ -154,11 +163,71 @@ async function actions(tenantId: string, agentId: string) {
   return rows.filter(({ action }) => action.includes("recovery.transfer"));
 }
 
-afterAll(async () => {
-  if (HAS_REAL_PG) await closeDb();
-});
-
 describe.skipIf(!HAS_REAL_PG)("collateral transfer durable replay on real PostgreSQL", () => {
+  beforeAll(async () => {
+    adminHandle = createDb(process.env.DATABASE_URL as string);
+    const roleRows = await adminHandle.client`
+      SELECT rolsuper FROM pg_roles WHERE rolname = current_user
+    `;
+    if (!roleRows[0]?.rolsuper) {
+      throw new Error("real-PG restricted platform proof requires a bootstrap superuser");
+    }
+    const databaseRows = await adminHandle.client`SELECT current_database() AS name`;
+    const databaseName = String(databaseRows[0]?.name).replaceAll('"', '""');
+    await adminHandle.client.unsafe(
+      `CREATE ROLE ${restrictedRole} LOGIN PASSWORD '${restrictedPassword}' ` +
+        "NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS",
+    );
+    await adminHandle.client.unsafe(
+      `GRANT CONNECT ON DATABASE "${databaseName}" TO ${restrictedRole}`,
+    );
+    await adminHandle.client.unsafe(
+      `GRANT USAGE ON SCHEMA public, steward_rls TO ${restrictedRole}`,
+    );
+    await adminHandle.client.unsafe(
+      `GRANT EXECUTE ON FUNCTION steward_rls.tenant_id() TO ${restrictedRole}`,
+    );
+    const platformAuthorization = await adminHandle.client`
+      SELECT to_regprocedure('steward_rls.platform_authorized()') AS function
+    `;
+    // Some local databases may already include the later platform-authority
+    // policy topology. Grant its pure GUC predicate when present so this proof
+    // still exercises tenant RLS with platform_authorized left unset/false.
+    if (platformAuthorization[0]?.function) {
+      await adminHandle.client.unsafe(
+        `GRANT EXECUTE ON FUNCTION steward_rls.platform_authorized() TO ${restrictedRole}`,
+      );
+    }
+    await adminHandle.client.unsafe(
+      `GRANT SELECT, INSERT, UPDATE ON audit_events, audit_chain_heads TO ${restrictedRole}`,
+    );
+    await adminHandle.client.unsafe(
+      `GRANT USAGE, SELECT ON SEQUENCE audit_events_id_seq TO ${restrictedRole}`,
+    );
+    const restrictedUrl = new URL(process.env.DATABASE_URL as string);
+    restrictedUrl.username = restrictedRole;
+    restrictedUrl.password = restrictedPassword;
+    restrictedHandles = [createDb(restrictedUrl.toString()), createDb(restrictedUrl.toString())];
+    for (const handle of restrictedHandles) {
+      const restrictedRows = await handle.client`
+        SELECT rolsuper, rolbypassrls, rolinherit FROM pg_roles WHERE rolname = current_user
+      `;
+      expect(restrictedRows[0]).toEqual(
+        expect.objectContaining({ rolsuper: false, rolbypassrls: false, rolinherit: false }),
+      );
+    }
+  });
+
+  afterAll(async () => {
+    await Promise.all(restrictedHandles.map(({ client }) => client.end()));
+    if (adminHandle) {
+      await adminHandle.client.unsafe(`DROP OWNED BY ${restrictedRole}`);
+      await adminHandle.client.unsafe(`DROP ROLE IF EXISTS ${restrictedRole}`);
+      await adminHandle.client.end();
+    }
+    await closeDb();
+  });
+
   test("cold workers replay terminal success and ambiguous failure from chained audit evidence", async () => {
     submitCalls.length = 0;
     submitError = undefined;
@@ -228,5 +297,63 @@ describe.skipIf(!HAS_REAL_PG)("collateral transfer durable replay on real Postgr
     expect((await actions(seeded.tenantId, seeded.agentId)).map(({ action }) => action)).toEqual([
       "trade.recovery.transfer.requested",
     ]);
+  });
+
+  test("restricted platform pools concurrently replay only their tenant's terminal evidence", async () => {
+    submitCalls.length = 0;
+    submitError = undefined;
+    const seeded = await seed();
+    const idempotencyKey = `restricted-${randomUUID()}`;
+    const first = await transfer(
+      await buildApp(undefined, getDb(), seeded.tenantId),
+      seeded.tenantId,
+      seeded.agentId,
+      idempotencyKey,
+    );
+    expect(first.status).toBe(200);
+    expect(submitCalls).toHaveLength(1);
+    submitCalls.length = 0;
+
+    const apps = await Promise.all(
+      restrictedHandles.map(({ db }) => buildApp(undefined, db as never, seeded.tenantId)),
+    );
+    const [replayA, replayB] = await Promise.all(
+      apps.map((app) => transfer(app, seeded.tenantId, seeded.agentId, idempotencyKey)),
+    );
+    for (const replay of [replayA, replayB]) {
+      expect(replay.status).toBe(200);
+      expect(replay.headers.get("Idempotency-Replayed")).toBe("true");
+    }
+    expect(submitCalls).toHaveLength(0);
+
+    const foreignTenantId = `transfer-pg-foreign-${randomUUID()}`;
+    await getDb()
+      .insert(tenants)
+      .values({
+        id: foreignTenantId,
+        name: "Transfer foreign PG",
+        apiKeyHash: `hash-${randomUUID()}`,
+      });
+    const foreignContext = tenantContextFromAuthenticatedPrincipal({
+      tenantId: foreignTenantId,
+      method: "operator-recovery-transfer-test",
+      subject: "platform-operator",
+    });
+    const hidden = await withTenantRlsTransaction(
+      restrictedHandles[0]!.db as never,
+      "postgres-js",
+      foreignContext,
+      async (tx) =>
+        (tx as ReturnType<typeof getDb>)
+          .select()
+          .from(auditEvents)
+          .where(eq(auditEvents.tenantId, seeded.tenantId)),
+      { isolationLevel: "repeatable read", readOnly: true },
+    );
+    expect(hidden).toHaveLength(0);
+    const denied = await transfer(apps[0]!, foreignTenantId, seeded.agentId, idempotencyKey);
+    expect(denied.status).toBe(404);
+    expect(denied.headers.get("Idempotency-Replayed")).toBeNull();
+    expect(submitCalls).toHaveLength(0);
   });
 });
