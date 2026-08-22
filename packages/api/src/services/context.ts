@@ -482,8 +482,20 @@ export async function ensureAgentForTenant(
   return vault.getAgent(tenantId, agentId);
 }
 
-export async function getPolicySet(_tenantId: string, agentId: string): Promise<PolicyRule[]> {
-  const storedPolicies = await db.select().from(policies).where(eq(policies.agentId, agentId));
+export async function getPolicySet(tenantId: string, agentId: string): Promise<PolicyRule[]> {
+  const storedPolicies = await db
+    .select({
+      id: policies.id,
+      agentId: policies.agentId,
+      type: policies.type,
+      enabled: policies.enabled,
+      config: policies.config,
+      createdAt: policies.createdAt,
+      updatedAt: policies.updatedAt,
+    })
+    .from(policies)
+    .innerJoin(agents, eq(policies.agentId, agents.id))
+    .where(and(eq(agents.tenantId, tenantId), eq(policies.agentId, agentId)));
 
   if (storedPolicies.length > 0) return storedPolicies.map(toPolicyRule);
   // Tenant-level defaults were process-local and could diverge across replicas
@@ -503,9 +515,24 @@ export async function getScopedPolicySet(
   if (uniquePolicyIds.length === 0) return [];
 
   const storedPolicies = await db
-    .select()
+    .select({
+      id: policies.id,
+      agentId: policies.agentId,
+      type: policies.type,
+      enabled: policies.enabled,
+      config: policies.config,
+      createdAt: policies.createdAt,
+      updatedAt: policies.updatedAt,
+    })
     .from(policies)
-    .where(and(eq(policies.agentId, agentId), inArray(policies.id, uniquePolicyIds)));
+    .innerJoin(agents, eq(policies.agentId, agents.id))
+    .where(
+      and(
+        eq(agents.tenantId, tenantId),
+        eq(policies.agentId, agentId),
+        inArray(policies.id, uniquePolicyIds),
+      ),
+    );
 
   return storedPolicies.map(toPolicyRule);
 }
