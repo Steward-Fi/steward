@@ -158,4 +158,31 @@ describe("policy template audit atomicity", () => {
       await allowCompletion();
     }
   });
+
+  it("assigns through the mounted route in persistent PGLite mode", async () => {
+    const previousDbMode = process.env.STEWARD_DB_MODE;
+    const previousPgliteMemory = process.env.STEWARD_PGLITE_MEMORY;
+    process.env.STEWARD_DB_MODE = "pglite";
+    delete process.env.STEWARD_PGLITE_MEMORY;
+    try {
+      const response = await app.request(`/policies/${TEMPLATE_ID}/assign`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ agentIds: [AGENT_ID] }),
+      });
+      expect(response.status, await response.clone().text()).toBe(200);
+      expect(await response.json()).toMatchObject({
+        ok: true,
+        data: { templateId: TEMPLATE_ID, assignedAgents: [AGENT_ID], rulesApplied: 1 },
+      });
+      const stored = await getDb().select().from(policies).where(eq(policies.agentId, AGENT_ID));
+      expect(stored).toHaveLength(1);
+      expect(stored[0]?.type).toBe("approved-addresses");
+    } finally {
+      if (previousDbMode === undefined) delete process.env.STEWARD_DB_MODE;
+      else process.env.STEWARD_DB_MODE = previousDbMode;
+      if (previousPgliteMemory === undefined) delete process.env.STEWARD_PGLITE_MEMORY;
+      else process.env.STEWARD_PGLITE_MEMORY = previousPgliteMemory;
+    }
+  });
 });

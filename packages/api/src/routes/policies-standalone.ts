@@ -865,7 +865,10 @@ policiesStandaloneRoutes.post("/:id/assign", async (c) => {
       for (const agentId of uniqueAgentIds) {
         // Match the canonical authority lock used by direct agent-policy
         // mutations (#715), in sorted agent order for multi-agent assignment.
-        if (process.env.STEWARD_PGLITE_MEMORY !== "true") {
+        if (
+          process.env.STEWARD_DB_MODE !== "pglite" &&
+          process.env.STEWARD_PGLITE_MEMORY !== "true"
+        ) {
           await tx.execute(
             sql`SELECT pg_advisory_xact_lock(hashtextextended(${`steward_agent_authority_${tenantId}:${agentId}`}, 0))`,
           );
