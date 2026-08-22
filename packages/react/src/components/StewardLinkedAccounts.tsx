@@ -1,5 +1,5 @@
 import type { UserLinkedAccount } from "@stwd/sdk";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useAuth } from "../hooks/useAuth.js";
 import { useSteward } from "../hooks/useSteward.js";
 import type { StewardLinkedAccountsProps } from "../types.js";
@@ -108,6 +108,7 @@ export function StewardLinkedAccounts({
   const [phoneCode, setPhoneCode] = useState("");
   const [phoneOtpSent, setPhoneOtpSent] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const refreshGeneration = useRef(0);
 
   const reportError = useCallback(
     (err: unknown) => {
@@ -120,17 +121,20 @@ export function StewardLinkedAccounts({
 
   const refresh = useCallback(async () => {
     if (!auth.isAuthenticated) return;
+    const generation = ++refreshGeneration.current;
     setIsLoading(true);
     setError(null);
     try {
       const result = await client.listUserAccounts();
+      if (generation !== refreshGeneration.current) return;
       setPrimaryMethods(result.primaryLoginMethods);
       setLinkedAccounts(result.accounts);
       onLoaded?.(result);
     } catch (err) {
+      if (generation !== refreshGeneration.current) return;
       reportError(err);
     } finally {
-      setIsLoading(false);
+      if (generation === refreshGeneration.current) setIsLoading(false);
     }
   }, [auth.isAuthenticated, client, onLoaded, reportError]);
 
