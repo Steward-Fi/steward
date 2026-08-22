@@ -37,7 +37,9 @@ railway link
 
 Or do it in the Railway dashboard: **Project → Settings → Connect Repo → select steward-fi**.
 
-Set the deploy branch (e.g. `develop` or `main`) under **Settings → Deploy → Branch**.
+For a development or staging service, set its deploy branch under **Settings →
+Deploy → Branch**. Production should use the gated immutable-digest workflow,
+not Railway branch auto-deploy.
 
 ---
 
@@ -171,6 +173,10 @@ Under **Service → Settings → Deploy → Health Check**:
 - **Port:** `3200`
 - **Timeout:** `45s` (Steward runs migrations on first boot, may take a moment)
 
+The repository's `railway.json` also declares `/health` with a 120-second
+timeout. Verify the effective service setting explicitly for image-only
+services, which may not consume repository config as code.
+
 ### Start Command
 
 Leave blank — the Dockerfile's `CMD` handles it:
@@ -182,7 +188,7 @@ CMD ["bun", "packages/api/src/index.ts"]
 
 ## 5. Deploy
 
-### Via GitHub (auto-deploy)
+### Via GitHub (staging auto-deploy)
 
 Push to your configured branch:
 
@@ -190,13 +196,18 @@ Push to your configured branch:
 git push origin develop
 ```
 
-Railway picks it up automatically. Watch the build in the dashboard.
+Railway picks it up automatically. Watch the build in the dashboard. Do not
+configure production to follow this mutable branch.
 
 ### Via CLI (manual)
 
 ```bash
 railway up
 ```
+
+Use direct CLI deploys for development or initial self-hosting only. Established
+production instances should follow the immutable, main-built digest flow in the
+[production promotion and rollback runbook](runbooks/production-promotion.md).
 
 ### First deploy
 
@@ -347,7 +358,7 @@ Redeploy the Vercel app after setting these.
 
 ## 9. CI/CD
 
-### Auto-deploy on push (recommended)
+### Staging auto-deploy on push
 
 Railway auto-deploys when you push to the connected branch:
 
@@ -357,20 +368,29 @@ git push origin develop
 ```
 
 Configure the branch in **Service → Settings → Source → Deploy Branch**.
+Production must not auto-deploy a mutable branch or tag.
 
-### Manual deploy via CLI
+### Manual development deploy via CLI
 
 ```bash
 # Deploy current directory
 railway up
 
-# Deploy with a specific environment
-railway up --environment production
+# Deploy with a specific non-production environment
+railway up --environment staging
 ```
+
+For production, dispatch **Deploy Railway (Production)** with a full commit SHA
+already on `main`. The workflow requires an exact successful main Docker build,
+resolves its manifest digest, and passes only that digest to Railway. See the
+[production promotion and rollback runbook](runbooks/production-promotion.md).
 
 ### Rollback
 
-In the Railway dashboard: **Deployments → click a previous successful deploy → Rollback**.
+Redeploy the last known-good main commit through the same production workflow;
+the provenance, immutable-digest, and `/health` gates still apply. Do not roll
+production back to a mutable branch/tag selector. See the
+[production promotion and rollback runbook](runbooks/production-promotion.md).
 
 ---
 

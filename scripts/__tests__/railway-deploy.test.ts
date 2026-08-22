@@ -7,7 +7,7 @@
  * filter is extracted from the real script and exercised behaviorally.
  */
 import { describe, expect, test } from "bun:test";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -20,6 +20,21 @@ function redact(input: string): string {
     ["-c", `eval "$(sed -n '/^redact_secrets()/,/^}/p' "$1")"; redact_secrets`, "bash", SCRIPT],
     { input, encoding: "utf8" },
   );
+}
+
+function dryRun(imageDigest: string, imageTag?: string) {
+  return spawnSync("bash", [SCRIPT, ...(imageTag ? [imageTag] : []), "--dry-run"], {
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      RAILWAY_TOKEN: "test-token",
+      RAILWAY_SERVICE_ID: "test-service",
+      RAILWAY_ENV_ID: "test-environment",
+      RAILWAY_IMAGE_DIGEST: imageDigest,
+      RAILWAY_HEALTH_URL: "https://example.test",
+      RAILWAY_REQUIRE_HEALTH: "true",
+    },
+  });
 }
 
 describe("SEC-129 railway-deploy.sh fails closed by default", () => {
@@ -37,6 +52,47 @@ describe("SEC-129 railway-deploy.sh fails closed by default", () => {
   test("dumped logs are piped through redact_secrets", () => {
     expect(source).toMatch(/echo "\$build_logs" \| redact_secrets/);
     expect(source).toMatch(/echo "\$deploy_logs" \| redact_secrets/);
+  });
+});
+
+describe("immutable Railway image selection", () => {
+  test("passes a validated digest to Railway without converting it to a tag", () => {
+    const digest = `sha256:${"a".repeat(64)}`;
+    const result = dryRun(digest);
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain(`ghcr.io/steward-fi/steward@${digest}`);
+    expect(result.stdout).not.toContain(`ghcr.io/steward-fi/steward:${digest}`);
+  });
+
+  test("rejects a malformed digest before a deployment mutation", () => {
+    const result = dryRun("sha256:not-a-digest");
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("Invalid image digest");
+    expect(result.stdout).not.toContain("Deploying");
+  });
+
+  test("rejects simultaneous tag and digest selectors", () => {
+    const result = dryRun(`sha256:${"a".repeat(64)}`, "main");
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("Choose exactly one image selector");
+    expect(result.stdout).not.toContain("Deploying");
+  });
+
+  test("production health enforcement fails before a deployment mutation", () => {
+    const result = spawnSync("bash", [SCRIPT, "main", "--dry-run"], {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        RAILWAY_TOKEN: "test-token",
+        RAILWAY_SERVICE_ID: "test-service",
+        RAILWAY_ENV_ID: "test-environment",
+        RAILWAY_HEALTH_URL: "",
+        RAILWAY_REQUIRE_HEALTH: "true",
+      },
+    });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("RAILWAY_HEALTH_URL is required");
+    expect(result.stdout).not.toContain("Deploying");
   });
 });
 
