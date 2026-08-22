@@ -306,7 +306,10 @@ export class TradeSessionManager {
     this.now = options.now ?? (() => new Date());
   }
 
-  async createSession(input: CreateSessionInput): Promise<TradeSession> {
+  prepareSession(input: CreateSessionInput): {
+    session: TradeSession;
+    values: InferInsertModel<typeof tradeSessions>;
+  } {
     validateCaps(input);
     const createdAt = this.now();
     const expiresAt =
@@ -351,9 +354,18 @@ export class TradeSessionManager {
       createdAt,
       expiresAt,
     };
-    await getDb().insert(tradeSessions).values(values);
+    return { session, values };
+  }
+
+  async publishSession(session: TradeSession): Promise<void> {
     await this.writeRedis(session);
-    return session;
+  }
+
+  async createSession(input: CreateSessionInput): Promise<TradeSession> {
+    const prepared = this.prepareSession(input);
+    await getDb().insert(tradeSessions).values(prepared.values);
+    await this.publishSession(prepared.session);
+    return prepared.session;
   }
 
   // Backward-compatible alias for the earlier skeleton.

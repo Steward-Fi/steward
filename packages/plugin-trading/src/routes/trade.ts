@@ -17,7 +17,17 @@
  */
 
 import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from "node:crypto";
-import { agentPolicies, eq, getDb, proxyAuditLog } from "@stwd/db";
+import {
+  agentPolicies,
+  agents,
+  agentWallets,
+  and,
+  eq,
+  getDb,
+  proxyAuditLog,
+  sql,
+  tradeSessions,
+} from "@stwd/db";
 import {
   assetAllowlistEvaluator,
   evaluateTradeOrder,
@@ -284,6 +294,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
     ensureAgentForTenant,
     safeJsonParse,
     writeAuditEvent,
+    withTenantAuditedTransaction,
     getAgentTokenStatus,
     getRedisClient,
   } = ctx;
@@ -592,32 +603,36 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
 
   async function resolveHyperliquidWallet(
     agentId: string,
-    agent: { walletAddress: string; walletAddresses?: { evm?: string } },
+    _agent: { walletAddress: string; walletAddresses?: { evm?: string } },
   ): Promise<string | null> {
-    if ("getWallet" in vault && typeof vault.getWallet === "function") {
-      try {
-        const wallet = await vault.getWallet({ agentId, venue: "hyperliquid" });
-        return wallet.address;
-      } catch {
-        return null;
-      }
-    }
-    return (
-      agent.walletAddresses?.evm ??
-      (agent.walletAddress.startsWith("0x") ? agent.walletAddress : null)
-    );
+    const [wallet] = await getDb()
+      .select({ address: agentWallets.address })
+      .from(agentWallets)
+      .where(
+        and(
+          eq(agentWallets.agentId, agentId),
+          eq(agentWallets.venue, "hyperliquid"),
+          eq(agentWallets.chainFamily, "evm"),
+        ),
+      );
+    return wallet?.address ?? null;
   }
 
   // Resolve the agent's polymarket venue wallet address for session creation. The
   // session binds to this address (walletId); the per-order route separately
   // resolves the same wallet + its funder Safe + L2 creds at submit time.
   async function resolvePolymarketWallet(agentId: string): Promise<string | null> {
-    try {
-      const wallet = await vault.getWallet({ agentId, venue: "polymarket" });
-      return wallet.address;
-    } catch {
-      return null;
-    }
+    const [wallet] = await getDb()
+      .select({ address: agentWallets.address })
+      .from(agentWallets)
+      .where(
+        and(
+          eq(agentWallets.agentId, agentId),
+          eq(agentWallets.venue, "polymarket"),
+          eq(agentWallets.chainFamily, "evm"),
+        ),
+      );
+    return wallet?.address ?? null;
   }
 
   tradeRoutes.get("/token-status", async (c) => {
@@ -878,7 +893,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
     });
 
     const sessionManager = getSessionManager();
-    const session = await sessionManager.createSession({
+    const prepared = sessionManager.prepareSession({
       agentId,
       tenantId,
       venue,
@@ -889,30 +904,91 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
       allowedAssets: sessionAllowedAssets,
       ttlSeconds,
     });
-
-    try {
-      await writeAuditEvent({
-        tenantId,
-        actorType: auditActor.actorType,
-        actorId: auditActor.actorId,
-        action: "trade.session.created",
-        resourceType: "trade",
-        resourceId: session.id,
-        metadata: {
-          sessionId: session.id,
-          venue: session.venue,
-          walletId: session.walletId,
-          dailyCapUsd: session.dailyCapUsd,
-          perOrderCapUsd: session.perOrderCapUsd,
-          leverageCap: session.leverageCap,
-          allowedAssets: session.allowedAssets,
-        },
-        requestId: session.id,
-      });
-    } catch (error) {
-      await sessionManager.deleteSession({ tenantId, id: session.id });
-      throw error;
-    }
+    const session = await withTenantAuditedTransaction(
+      tenantId,
+      async (rawTx, appendRequiredAudit) => {
+        const tx = rawTx as typeof db;
+        const [lockedAgent] = await tx
+          .select({ id: agents.id })
+          .from(agents)
+          .where(and(eq(agents.id, agentId), eq(agents.tenantId, tenantId)))
+          .for("update");
+        if (!lockedAgent) throw new Error("Agent not found");
+        const pgliteRuntime =
+          process.env.STEWARD_DB_MODE === "pglite" || process.env.STEWARD_PGLITE_MEMORY === "true";
+        if (!pgliteRuntime) {
+          // Match the policy mutation route's scoped lock. This also serializes
+          // the no-row case without taking a global table lock.
+          await tx.execute(
+            sql`SELECT pg_advisory_xact_lock(hashtextextended(${`agent-policy:${tenantId}:${agentId}`}, 0))`,
+          );
+        }
+        const [lockedPolicy] = await tx
+          .select()
+          .from(agentPolicies)
+          .where(eq(agentPolicies.agentId, agentId))
+          .for("update");
+        const policySnapshot = (policy: typeof agentPolicy) =>
+          policy
+            ? JSON.stringify({
+                tenantId: policy.tenantId,
+                dailyCapUsd: String(policy.dailyCapUsd),
+                perOrderCapUsd: String(policy.perOrderCapUsd),
+                leverageCap: String(policy.leverageCap),
+                allowedAssets: policy.allowedAssets,
+                allowedVenues: policy.allowedVenues,
+                allowBuilderPerps: policy.allowBuilderPerps,
+              })
+            : null;
+        if (policySnapshot(lockedPolicy) !== policySnapshot(agentPolicy)) {
+          throw new Error("Agent trade policy changed during session creation");
+        }
+        const [lockedVenueWallet] = await tx
+          .select({ address: agentWallets.address })
+          .from(agentWallets)
+          .where(
+            and(
+              eq(agentWallets.agentId, agentId),
+              eq(agentWallets.venue, venue),
+              eq(agentWallets.chainFamily, "evm"),
+            ),
+          )
+          .for("update");
+        const lockedWalletAddress = lockedVenueWallet?.address ?? null;
+        if (
+          (isPolymarket && lockedWalletAddress !== walletAddress) ||
+          (!isPolymarket && lockedWalletAddress !== null && lockedWalletAddress !== walletAddress)
+        ) {
+          throw new Error("Agent venue wallet changed during session creation");
+        }
+        if (!lockedVenueWallet && !isPolymarket && walletAddress !== parsed.data.walletAddress) {
+          throw new Error("Agent wallet changed during session creation");
+        }
+        await tx.insert(tradeSessions).values(prepared.values);
+        await appendRequiredAudit({
+          tenantId,
+          actorType: auditActor.actorType,
+          actorId: auditActor.actorId,
+          action: "trade.session.created",
+          resourceType: "trade",
+          resourceId: prepared.session.id,
+          metadata: {
+            sessionId: prepared.session.id,
+            venue: prepared.session.venue,
+            walletId: prepared.session.walletId,
+            dailyCapUsd: prepared.session.dailyCapUsd,
+            perOrderCapUsd: prepared.session.perOrderCapUsd,
+            leverageCap: prepared.session.leverageCap,
+            allowedAssets: prepared.session.allowedAssets,
+          },
+          requestId: prepared.session.id,
+        });
+        return prepared.session;
+      },
+    );
+    // Deliberately omit cache publication. In production tenantAuth may own an
+    // outer transaction, so this callback's success is not the commit boundary.
+    // The durable DB row is authoritative and readDb provides bounded recovery.
 
     return c.json(
       responseData({
