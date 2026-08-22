@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
 import postgres from "postgres";
 
 const describeWithPostgres = process.env.DATABASE_URL ? describe : describe.skip;
@@ -312,6 +313,65 @@ describeWithPostgres("SEC-169 operator lifecycle on the real Steward schema", ()
         migrator_drizzle_create: true,
       });
 
+      const collisionSuccessor = "0118_generic_intent_execution_delete_fence";
+      const collisionHash = createHash("sha256")
+        .update(readFileSync(new URL(`../../drizzle/${collisionSuccessor}.sql`, import.meta.url)))
+        .digest("hex");
+      await db`DROP TRIGGER agents_active_intent_execution_fence ON public.agents`;
+      await db`DROP FUNCTION public.steward_guard_generic_intent_execution_delete()`;
+      await db`DROP INDEX public.webhook_deliveries_predecessor_idx`;
+      await db`
+        ALTER TABLE public.webhook_deliveries
+          DROP CONSTRAINT webhook_deliveries_predecessor_fk,
+          DROP COLUMN predecessor_delivery_id,
+          DROP COLUMN claim_token
+      `;
+      await db`DELETE FROM drizzle.__drizzle_migrations WHERE hash = ${collisionHash}`;
+
+      const collisionUpgrade = await runCommand(
+        ["bun", "run", "--cwd", "packages/api", "migrate"],
+        {
+          DATABASE_URL: migrationDatabaseUrl(),
+          STEWARD_PLUGINS: "capabilities",
+          STEWARD_ENABLE_TRADING: "false",
+          STEWARD_MASTER_PASSWORD: `restricted-migrator-master-${suffix}`,
+        },
+      );
+      expect(collisionUpgrade).toContain(collisionSuccessor);
+      const [collisionRecovered] = await db<
+        Array<{
+          ledger_rows: number;
+          trigger_exists: boolean;
+          predecessor_column_exists: boolean;
+          claim_column_exists: boolean;
+        }>
+      >`
+        SELECT
+          (SELECT count(*)::int FROM drizzle.__drizzle_migrations WHERE hash = ${collisionHash}) AS ledger_rows,
+          to_regclass('public.agents') IS NOT NULL AND EXISTS (
+            SELECT 1 FROM pg_trigger
+            WHERE tgrelid = 'public.agents'::regclass
+              AND tgname = 'agents_active_intent_execution_fence'
+              AND NOT tgisinternal
+          ) AS trigger_exists,
+          EXISTS (
+            SELECT 1 FROM pg_attribute
+            WHERE attrelid = 'public.webhook_deliveries'::regclass
+              AND attname = 'predecessor_delivery_id' AND NOT attisdropped
+          ) AS predecessor_column_exists,
+          EXISTS (
+            SELECT 1 FROM pg_attribute
+            WHERE attrelid = 'public.webhook_deliveries'::regclass
+              AND attname = 'claim_token' AND NOT attisdropped
+          ) AS claim_column_exists
+      `;
+      expect(collisionRecovered).toEqual({
+        ledger_rows: 1,
+        trigger_exists: true,
+        predecessor_column_exists: true,
+        claim_column_exists: true,
+      });
+
       const [installed] = await db<{ relations: number; policies: number }[]>`
         SELECT count(DISTINCT c.relname)::int AS relations, count(*)::int AS policies
         FROM pg_policy p
@@ -320,9 +380,9 @@ describeWithPostgres("SEC-169 operator lifecycle on the real Steward schema", ()
         WHERE n.nspname = 'public'
       `;
       // Core contributes 71 policy-bearing relations/73 policies; the enabled
-      // capabilities plugin contributes its three independently journaled
+      // capabilities plugin contributes its four independently journaled
       // tenant-scoped relations and policies in the same restricted release.
-      expect(installed).toEqual({ relations: 74, policies: 76 });
+      expect(installed).toEqual({ relations: 75, policies: 77 });
 
       await runOperatorScript("rls-bootstrap.sql", true);
       await admin.unsafe(`ALTER ROLE ${appRole} PASSWORD '${appRolePassword}'`);
@@ -490,7 +550,7 @@ describeWithPostgres("SEC-169 operator lifecycle on the real Steward schema", ()
         JOIN pg_namespace n ON n.oid = c.relnamespace
         WHERE n.nspname = 'public' AND p.polname LIKE 'steward_%'
       `;
-      expect(activated).toEqual({ enabled: 74, forced: 74, maintenance: 74 });
+      expect(activated).toEqual({ enabled: 75, forced: 75, maintenance: 75 });
       const [maintenanceBoundary] = await db<{ wrong_role_count: number }[]>`
         SELECT count(*)::int AS wrong_role_count
         FROM pg_policy policy

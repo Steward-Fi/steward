@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
 import {
   resolveStartupPhaseTimeoutMs,
   runStartupPhase,
@@ -6,6 +7,16 @@ import {
 } from "../startup-phase";
 
 describe("bounded pre-listen startup phases", () => {
+  test("keeps plugin migration discovery inside the bounded compose phase", () => {
+    const source = readFileSync(new URL("../index.ts", import.meta.url), "utf8");
+    const phaseStart = source.indexOf('runStartupPhase("compose"');
+    const phaseEnd = source.indexOf("}));", phaseStart);
+    const discovery = source.indexOf("getComposedPluginMigrationSources()", phaseStart);
+    expect(phaseStart).toBeGreaterThanOrEqual(0);
+    expect(discovery).toBeGreaterThan(phaseStart);
+    expect(discovery).toBeLessThanOrEqual(phaseEnd);
+  });
+
   test("uses an exact phase override and rejects invalid bounds", () => {
     expect(
       resolveStartupPhaseTimeoutMs("redis", {

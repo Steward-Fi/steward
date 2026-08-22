@@ -105,7 +105,7 @@ export function assertCoreMigrationLedgerIntegrity(
   rows: readonly CoreMigrationLedgerRow[],
   journal: Journal,
   database: CoreMigrationDatabaseShape,
-  options: { requireComplete?: boolean } = {},
+  options: { requireComplete?: boolean; allowShippedTimestampCollision?: boolean } = {},
 ): void {
   if ((database.alwaysRejectedObjectCount ?? 0) > 0) {
     throw new Error(
@@ -194,10 +194,19 @@ export function assertCoreMigrationLedgerIntegrity(
     const greatestRecordedWhen = Math.max(
       ...recordedIndices.map((index) => journal.entries[index].when),
     );
+    const collisionPredecessor = expected.find(
+      (entry) => entry.tag === SHIPPED_COLLISION_PREDECESSOR_TAG,
+    );
     const silentlySkipped = expected.filter(
       (entry) =>
         entry.when <= greatestRecordedWhen &&
-        !recordedIdentities.has(`${entry.when}:${entry.hash}`),
+        !recordedIdentities.has(`${entry.when}:${entry.hash}`) &&
+        !(
+          options.allowShippedTimestampCollision === true &&
+          entry.tag === SHIPPED_COLLISION_SUCCESSOR_TAG &&
+          collisionPredecessor?.when === entry.when &&
+          recordedIdentities.has(`${collisionPredecessor.when}:${collisionPredecessor.hash}`)
+        ),
     );
     if (silentlySkipped.length > 0) {
       throw new Error(
@@ -210,6 +219,9 @@ export function assertCoreMigrationLedgerIntegrity(
     throw new Error("[migrate] Core migrator returned with an incomplete Steward journal");
   }
 }
+
+const SHIPPED_COLLISION_PREDECESSOR_TAG = "0114_durable_wallet_claim_account_audit";
+const SHIPPED_COLLISION_SUCCESSOR_TAG = "0118_generic_intent_execution_delete_fence";
 
 /**
  * The legacy `psql -f` deploy loop was retired when this migrator was
@@ -252,6 +264,39 @@ function hashMigration(tag: string): string {
   const crypto = require("node:crypto") as typeof import("node:crypto");
   const sql = readFileSync(`${MIGRATIONS_FOLDER}/${tag}.sql`, "utf-8");
   return crypto.createHash("sha256").update(sql).digest("hex");
+}
+
+async function recoverShippedTimestampCollision(
+  db: MigrationQueryExecutor,
+  rows: readonly CoreMigrationLedgerRow[],
+  journal: Journal,
+): Promise<boolean> {
+  const predecessor = journal.entries.find(
+    (entry) => entry.tag === SHIPPED_COLLISION_PREDECESSOR_TAG,
+  );
+  const successor = journal.entries.find((entry) => entry.tag === SHIPPED_COLLISION_SUCCESSOR_TAG);
+  if (!predecessor || !successor || predecessor.when !== successor.when) return false;
+
+  const hasPredecessor = rows.some(
+    (row) =>
+      row.hash === hashMigration(predecessor.tag) && Number(row.created_at) === predecessor.when,
+  );
+  const hasSuccessor = rows.some(
+    (row) => row.hash === hashMigration(successor.tag) && Number(row.created_at) === successor.when,
+  );
+  if (!hasPredecessor || hasSuccessor) return false;
+
+  const migrationSql = readFileSync(`${MIGRATIONS_FOLDER}/${successor.tag}.sql`, "utf8");
+  const statements = migrationSql
+    .split("--> statement-breakpoint")
+    .map((statement) => statement.trim())
+    .filter(Boolean);
+  for (const statement of statements) await db.execute(sql.raw(statement));
+  await db.execute(sql`
+    INSERT INTO drizzle.__drizzle_migrations (hash, created_at)
+    VALUES (${hashMigration(successor.tag)}, ${successor.when})
+  `);
+  return true;
 }
 
 type MigrationQueryExecutor = {
@@ -1389,7 +1434,9 @@ export async function runMigrations(): Promise<{ applied: string[] }> {
           SELECT id, hash, created_at FROM drizzle.__drizzle_migrations ORDER BY id ASC
         `) as CoreMigrationLedgerRow[];
       }
-      assertCoreMigrationLedgerIntegrity(existingRows, journal, databaseShape);
+      assertCoreMigrationLedgerIntegrity(existingRows, journal, databaseShape, {
+        allowShippedTimestampCollision: true,
+      });
       if (existingRows.length === journal.entries.length) {
         assertCoreMigrationLedgerIntegrity(existingRows, journal, databaseShape, {
           requireComplete: true,
@@ -1421,11 +1468,16 @@ export async function runMigrations(): Promise<{ applied: string[] }> {
             ),
           );
         }
-        assertCoreMigrationLedgerIntegrity(transactionalRows, journal, {
-          ...databaseShape,
-          tenantsExists: Boolean(txTenantsExists[0]?.r),
-          coreLedgerExists: Boolean(txLedgerExists[0]?.r),
-        });
+        assertCoreMigrationLedgerIntegrity(
+          transactionalRows,
+          journal,
+          {
+            ...databaseShape,
+            tenantsExists: Boolean(txTenantsExists[0]?.r),
+            coreLedgerExists: Boolean(txLedgerExists[0]?.r),
+          },
+          { allowShippedTimestampCollision: true },
+        );
 
         // Only a verified empty/legacy Steward target may receive the ledger.
         // Avoid even idempotent CREATE statements once admin topology/the ledger
@@ -1483,6 +1535,15 @@ export async function runMigrations(): Promise<{ applied: string[] }> {
         const beforeCount = queryRows<{ n: number }>(
           await tx.execute(sql`SELECT count(*)::int AS n FROM drizzle.__drizzle_migrations`),
         )[0].n;
+
+        if (await recoverShippedTimestampCollision(tx, transactionalRows, journal)) {
+          transactionalRows = queryRows<CoreMigrationLedgerRow>(
+            await tx.execute(
+              sql`SELECT id, hash, created_at FROM drizzle.__drizzle_migrations ORDER BY id ASC`,
+            ),
+          );
+          assertCoreMigrationLedgerIntegrity(transactionalRows, journal, databaseShape);
+        }
 
         // The postgres-js migrator normally opens its own transaction. We are
         // already inside the ownership-check transaction, so give it the same
