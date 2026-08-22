@@ -52,12 +52,16 @@ beforeAll(async () => {
   tenantConfigs = context.tenantConfigs;
   getPolicySet = context.getPolicySet;
 
-  await getDb().insert(tenants).values({
-    id: TENANT_ID,
-    name: "Tenant policy retirement",
-    apiKeyHash: `hash-${TENANT_ID}`,
-  });
-  await getDb().insert(users).values({ id: USER_ID, email: `${USER_ID}@example.test` });
+  await getDb()
+    .insert(tenants)
+    .values({
+      id: TENANT_ID,
+      name: "Tenant policy retirement",
+      apiKeyHash: `hash-${TENANT_ID}`,
+    });
+  await getDb()
+    .insert(users)
+    .values({ id: USER_ID, email: `${USER_ID}@example.test` });
   await getDb().insert(userTenants).values({ userId: USER_ID, tenantId: TENANT_ID, role: "owner" });
   const { createSessionToken } = await import("../routes/auth");
   sessionToken = await createSessionToken("0x0000000000000000000000000000000000000000", TENANT_ID, {
@@ -76,7 +80,9 @@ afterAll(async () => {
   await getDb().delete(policies).where(eq(policies.agentId, "missing-policy-agent"));
   await getDb().delete(userTenants).where(eq(userTenants.tenantId, TENANT_ID));
   await getDb().delete(users).where(eq(users.id, USER_ID));
-  await getDb().delete(tenants).where(inArray(tenants.id, [TENANT_ID, CREATE_ID]));
+  await getDb()
+    .delete(tenants)
+    .where(inArray(tenants.id, [TENANT_ID, CREATE_ID]));
   await closeDb();
   delete process.env.STEWARD_PGLITE_MEMORY;
   delete process.env.STEWARD_AUDIT_HMAC_KEY;

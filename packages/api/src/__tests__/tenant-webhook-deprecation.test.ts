@@ -1,4 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import {
   __resetAuditHmacKeyCacheForTests,
   auditEvents,
@@ -11,8 +13,6 @@ import {
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { and, eq, inArray } from "drizzle-orm";
 import { Hono } from "hono";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import type { AppVariables } from "../services/context";
 
 const PLATFORM_KEY = "legacy-webhook-platform-key-with-enough-entropy";
@@ -161,6 +161,6 @@ describe("legacy tenant webhook deprecation", () => {
     expect(tenantDocs).toContain("returns HTTP 410 for both `webhookUrl`");
     expect(tenantDocs).toContain("The generated OpenAPI contract likewise");
     expect(tenantDocs).not.toContain("Update the default policies for a tenant");
-    expect(openApi).not.toContain('\"/tenants/{id}/webhook\"');
+    expect(openApi).not.toContain('"/tenants/{id}/webhook"');
   });
 });

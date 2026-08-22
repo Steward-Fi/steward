@@ -33,10 +33,13 @@ try {
   await withTenantAuditedTransactionOnDb(handle.db, "platform", async (txRaw, appendAudit) => {
     const tx = txRaw as typeof handle.db;
     await tx.execute(sql`SELECT id FROM users WHERE id = ${userId}::uuid FOR UPDATE`);
-    await tx.update(users).set({
-      customMetadata: { owner: "concurrent-winner" },
-      updatedAt: new Date(),
-    }).where(eq(users.id, userId));
+    await tx
+      .update(users)
+      .set({
+        customMetadata: { owner: "concurrent-winner" },
+        updatedAt: new Date(),
+      })
+      .where(eq(users.id, userId));
     await appendAudit({
       tenantId: "platform",
       actorType: "platform",
