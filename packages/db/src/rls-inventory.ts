@@ -56,6 +56,7 @@ export const DIRECT_TENANT_TABLES = [
   "tenant_saml_authn_requests",
   "tenant_saml_sso_configs",
   "tenant_sso_domains",
+  "trade_order_recoveries",
   "trade_sessions",
   "upstream_credential_lease_events",
   "upstream_credential_leases",
