@@ -338,7 +338,9 @@ describe("RetryQueue", () => {
     expect(persistentQueueSource).toContain("FOR UPDATE SKIP LOCKED");
     expect(persistentQueueSource).toContain("CLAIM_VISIBILITY_TIMEOUT_MS");
     expect(persistentQueueSource).toContain("\"status\" = 'processing'");
-    expect(persistentQueueSource).toContain("OR ${webhookDeliveries.status} = 'processing'");
+    expect(persistentQueueSource).toContain("OR candidate.\"status\" = 'processing'");
+    expect(persistentQueueSource).toContain("predecessor.\"status\" = 'delivered'");
+    expect(persistentQueueSource).toContain('"webhook_config_id" AS "webhookConfigId"');
     expect(persistentQueueSource.indexOf("UPDATE ${webhookDeliveries}")).toBeLessThan(
       persistentQueueSource.indexOf("this.dispatcher.dispatch(event, {"),
     );
