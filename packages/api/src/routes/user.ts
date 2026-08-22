@@ -102,7 +102,7 @@ import {
   setNoStoreHeaders,
   verifySessionToken,
 } from "../services/context";
-import { resolveRuntimeChainId } from "../services/custody-runtime";
+import { resolveRuntimeChainId, runtimeCustodyValue } from "../services/custody-runtime";
 import {
   publicGasSponsorshipState,
   readTenantGasSponsorshipConfig,
@@ -1745,18 +1745,18 @@ export async function userSessionAuth(
 
 const user = new Hono<{ Variables: UserVariables }>();
 const allowPrivateKeyExport = (): boolean =>
-  process.env.STEWARD_ALLOW_KEY_EXPORT !== "false" &&
-  process.env.STEWARD_ALLOW_PRIVATE_KEY_EXPORT === "true";
+  runtimeCustodyValue("STEWARD_ALLOW_KEY_EXPORT") !== "false" &&
+  runtimeCustodyValue("STEWARD_ALLOW_PRIVATE_KEY_EXPORT") === "true";
 const allowPrivateKeyImport = (): boolean =>
-  process.env.STEWARD_ALLOW_PRIVATE_KEY_IMPORT === "true";
+  runtimeCustodyValue("STEWARD_ALLOW_PRIVATE_KEY_IMPORT") === "true";
 const allowUnsafeMessageSigning = (): boolean =>
-  process.env.STEWARD_ALLOW_UNSAFE_MESSAGE_SIGNING === "true";
+  runtimeCustodyValue("STEWARD_ALLOW_UNSAFE_MESSAGE_SIGNING") === "true";
 const allowUserPrivateKeyExport = (): boolean =>
-  process.env.STEWARD_ALLOW_USER_PRIVATE_KEY_EXPORT === "true";
+  runtimeCustodyValue("STEWARD_ALLOW_USER_PRIVATE_KEY_EXPORT") === "true";
 const allowUserPrivateKeyImport = (): boolean =>
-  process.env.STEWARD_ALLOW_USER_PRIVATE_KEY_IMPORT === "true";
+  runtimeCustodyValue("STEWARD_ALLOW_USER_PRIVATE_KEY_IMPORT") === "true";
 const allowUserUnsafeMessageSigning = (): boolean =>
-  process.env.STEWARD_ALLOW_USER_UNSAFE_MESSAGE_SIGNING === "true";
+  runtimeCustodyValue("STEWARD_ALLOW_USER_UNSAFE_MESSAGE_SIGNING") === "true";
 
 // Apply session auth to all routes in this group
 user.use("*", userSessionAuth);
