@@ -48,6 +48,7 @@ let submitSpy: ReturnType<typeof spyOn> | undefined;
 let getWalletSpy: ReturnType<typeof spyOn> | undefined;
 let buildSpy: ReturnType<typeof spyOn> | undefined;
 let fenceSpy: ReturnType<typeof spyOn> | undefined;
+let orderIdentitySpy: ReturnType<typeof spyOn> | undefined;
 let createTradeRoutesForTest: typeof import("../routes/trade").createTradeRoutes;
 
 // Inject a polymarket venue wallet WITH funder metadata so the creds resolver
@@ -194,6 +195,9 @@ beforeAll(async () => {
       return cb();
     }) as never,
   );
+  orderIdentitySpy = spyOn(PolymarketExecutionAdapter.prototype, "orderIdentity").mockResolvedValue(
+    `0x${"7".repeat(64)}`,
+  );
   const { createTradeRoutes } = await import("../routes/trade");
   createTradeRoutesForTest = createTradeRoutes;
   const { testCtx } = await import("./_ctx");
@@ -203,6 +207,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   fenceSpy?.mockRestore();
+  orderIdentitySpy?.mockRestore();
   await closeDb();
   delete process.env.STEWARD_PGLITE_MEMORY;
 });
