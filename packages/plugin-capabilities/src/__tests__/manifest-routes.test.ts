@@ -41,6 +41,9 @@ const GH_SPEC = {
 function buildCtx(db: unknown): StewardAppContext {
   return {
     db,
+    withCapabilityTenantDatabase(_tenantId, callback) {
+      return callback(db as StewardAppContext["db"]);
+    },
     getRedisClient() {
       return null;
     },

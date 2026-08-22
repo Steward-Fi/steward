@@ -16,6 +16,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, mock } from "bun:
 import { hashSha256Hex } from "@stwd/auth";
 import { closeDb } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
+import { withRuntimeEnvironment } from "@stwd/shared/runtime-env";
 import { Hono } from "hono";
 import { SOCKET_PEER_ENV_KEY } from "../services/runtime-gate";
 
@@ -149,6 +150,36 @@ function capturedKeys(endpoint: string): string[] {
 }
 
 describe("trustedClientIp", () => {
+  it("keeps hostile overlapping Worker trust snapshots request-local", async () => {
+    process.env.STEWARD_TRUST_CLOUDFLARE = "true";
+    process.env.STEWARD_TRUSTED_PROXY_HOPS = "10";
+    let releaseFirst!: () => void;
+    let firstReady!: () => void;
+    const ready = new Promise<void>((resolve) => {
+      firstReady = resolve;
+    });
+    const barrier = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+
+    const first = withRuntimeEnvironment(
+      { STEWARD_RUNTIME: "workers", STEWARD_TRUST_CLOUDFLARE: "true" },
+      async () => {
+        firstReady();
+        await barrier;
+        return probeIp({ "cf-connecting-ip": "198.51.100.11", "x-forwarded-for": "203.0.113.1" });
+      },
+    );
+    await ready;
+    const second = await withRuntimeEnvironment(
+      { STEWARD_RUNTIME: "workers", STEWARD_TRUSTED_PROXY_HOPS: "1" },
+      () => probeIp({ "cf-connecting-ip": "198.51.100.22", "x-forwarded-for": "203.0.113.2" }),
+    );
+    releaseFirst();
+
+    expect(await first).toBe("198.51.100.11");
+    expect(second).toBe("203.0.113.2");
+  });
   it("trusts no forwarded header when no hops are configured (safe default)", async () => {
     delete process.env.STEWARD_TRUSTED_PROXY_HOPS;
     delete process.env.STEWARD_TRUST_PROXY_HEADERS;
@@ -558,6 +589,29 @@ describe("auth rate-limit keying (route harness)", () => {
     });
     expect(strict.status).toBe(429);
     expect(strict.headers.get("retry-after")).toBe("60");
+  });
+
+  it("uses request-local Worker outage posture despite a permissive process mirror", async () => {
+    process.env.NODE_ENV = "development";
+    process.env.STEWARD_ALLOW_AUTH_RATE_LIMIT_SOFT_FAIL = "true";
+    process.env.STEWARD_AUTH_RATE_LIMIT_OUTAGE_VALVE_MAX = "300";
+    process.env.REDIS_URL = "redis://ambient-soft-fail.invalid:6379";
+    await redisMiddleware.shutdownRedis();
+
+    const strict = await withRuntimeEnvironment(
+      {
+        STEWARD_RUNTIME: "workers",
+        NODE_ENV: "production",
+        REDIS_DRIVER: "ioredis",
+        REDIS_URL: "redis://request-local-outage.invalid:6379",
+        STEWARD_AUTH_RATE_LIMIT_OUTAGE_VALVE_MAX: "0",
+      },
+      () => authRoutes.request("/nonce"),
+    );
+
+    expect(strict.status).toBe(429);
+    expect(strict.headers.get("retry-after")).toBe("60");
+    expect(rateLimitCalls).toHaveLength(0);
   });
 
   it("never-configured Redis in production stays hard fail-closed (valve does not apply)", async () => {

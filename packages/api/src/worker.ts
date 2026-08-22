@@ -526,7 +526,7 @@ async function initializeWorker(env: Env): Promise<void> {
         dbUrl.includes("sslmode=verify-ca") ||
         dbUrl.includes("sslmode=verify-full"),
       hstsEnabled: isHstsEnabled(),
-      insecureDbAllowed: process.env.STEWARD_ALLOW_INSECURE_DB === "true",
+      insecureDbAllowed: env.STEWARD_ALLOW_INSECURE_DB === "true",
       runtime: "workers",
     },
   });
