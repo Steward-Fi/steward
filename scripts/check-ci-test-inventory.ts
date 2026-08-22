@@ -4,6 +4,10 @@ import { dirname, resolve } from "node:path";
 const WORKFLOWS = [".github/workflows/pr.yml", ".github/workflows/ci.yml"] as const;
 const NON_WORKSPACE_MATRIX_ENTRIES = ["scripts/__tests__"] as const;
 const WALLET_CONTRACT = "web/e2e/wallets/wallet-e2e-contract.test.ts";
+const WALLET_CONTRACT_COMMAND = "bun test --isolate src e2e/wallets/wallet-e2e-contract.test.ts";
+const CHROMIUM_INSTALL_COMMAND = "bun run playwright install --with-deps chromium";
+const CHROMIUM_LAUNCH_ASSERTION =
+  "bun -e 'import { chromium } from \"@playwright/test\"; const browser = await chromium.launch(); await browser.close();'";
 const WALLET_SPECS = [
   "web/e2e/wallets/metamask-siwe.spec.ts",
   "web/e2e/wallets/phantom-siws.spec.ts",
@@ -365,8 +369,19 @@ export function assertWalletE2EInventory(rootDir: string): void {
   }
   for (const workflowPath of WORKFLOWS) {
     const workflow = readFileSync(resolve(rootDir, workflowPath), "utf8");
-    if (!workflow.includes("bun test src e2e/wallets/wallet-e2e-contract.test.ts")) {
-      throw new Error(`${workflowPath} does not explicitly execute the wallet E2E contract`);
+    if (!workflow.includes(WALLET_CONTRACT_COMMAND)) {
+      throw new Error(
+        `${workflowPath} does not explicitly execute the isolated wallet E2E contract`,
+      );
+    }
+    if (workflow.includes("bunx playwright")) {
+      throw new Error(`${workflowPath} uses an unpinned Playwright CLI`);
+    }
+    if (!workflow.includes(`working-directory: web\n        run: ${CHROMIUM_INSTALL_COMMAND}`)) {
+      throw new Error(`${workflowPath} does not install Chromium through the web workspace CLI`);
+    }
+    if (!workflow.includes(`working-directory: web\n        run: ${CHROMIUM_LAUNCH_ASSERTION}`)) {
+      throw new Error(`${workflowPath} does not verify the workspace Chromium launch`);
     }
   }
 

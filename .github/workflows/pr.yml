@@ -163,7 +163,11 @@ jobs:
 
       - name: Install Chromium
         working-directory: web
-        run: bunx playwright install --with-deps chromium
+        run: bun run playwright install --with-deps chromium
+
+      - name: Verify Chromium launch
+        working-directory: web
+        run: bun -e 'import { chromium } from "@playwright/test"; const browser = await chromium.launch(); await browser.close();'
 
       - name: Axe scan and keyboard-only approval flows
         working-directory: web
@@ -504,7 +508,12 @@ jobs:
         run: bun install --frozen-lockfile
 
       - name: Install Chromium
-        run: bunx playwright install --with-deps chromium
+        working-directory: web
+        run: bun run playwright install --with-deps chromium
+
+      - name: Verify Chromium launch
+        working-directory: web
+        run: bun -e 'import { chromium } from "@playwright/test"; const browser = await chromium.launch(); await browser.close();'
 
       - name: Build workspace dependencies
         run: bunx turbo run build --filter=@stwd/react --filter=@stwd/sdk --filter=@stwd/shared

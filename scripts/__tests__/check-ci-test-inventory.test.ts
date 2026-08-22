@@ -35,7 +35,13 @@ describe("CI test inventory", () => {
       for (const workflow of ["pr.yml", "ci.yml"]) {
         writeFileSync(
           join(root, ".github/workflows", workflow),
-          "run: bun test src e2e/wallets/wallet-e2e-contract.test.ts\n",
+          [
+            "run: bun test --isolate src e2e/wallets/wallet-e2e-contract.test.ts",
+            "working-directory: web",
+            "        run: bun run playwright install --with-deps chromium",
+            "working-directory: web",
+            "        run: bun -e 'import { chromium } from \"@playwright/test\"; const browser = await chromium.launch(); await browser.close();'",
+          ].join("\n"),
         );
       }
       writeFileSync(
@@ -54,6 +60,43 @@ describe("CI test inventory", () => {
         writeFileSync(join(root, "web/e2e/wallets", path), "");
       }
       expect(() => assertWalletE2EInventory(root)).not.toThrow();
+      writeFileSync(
+        join(root, ".github/workflows", "pr.yml"),
+        "run: bun test src e2e/wallets/wallet-e2e-contract.test.ts\n",
+      );
+      expect(() => assertWalletE2EInventory(root)).toThrow(
+        ".github/workflows/pr.yml does not explicitly execute the isolated wallet E2E contract",
+      );
+      writeFileSync(
+        join(root, ".github/workflows", "pr.yml"),
+        [
+          "run: bun test --isolate src e2e/wallets/wallet-e2e-contract.test.ts",
+          "working-directory: web",
+          "        run: bun run playwright install --with-deps chromium",
+          "working-directory: web",
+          "        run: bun -e 'import { chromium } from \"@playwright/test\"; const browser = await chromium.launch(); await browser.close();'",
+        ].join("\n"),
+      );
+      const ciWorkflowPath = join(root, ".github/workflows", "ci.yml");
+      const validCiWorkflow = readFileSync(ciWorkflowPath, "utf8");
+      writeFileSync(
+        ciWorkflowPath,
+        validCiWorkflow.replace(
+          "bun run playwright install --with-deps chromium",
+          "bunx playwright install --with-deps chromium",
+        ),
+      );
+      expect(() => assertWalletE2EInventory(root)).toThrow(
+        ".github/workflows/ci.yml uses an unpinned Playwright CLI",
+      );
+      writeFileSync(
+        ciWorkflowPath,
+        validCiWorkflow.replace("const browser = await chromium.launch()", "const browser = null"),
+      );
+      expect(() => assertWalletE2EInventory(root)).toThrow(
+        ".github/workflows/ci.yml does not verify the workspace Chromium launch",
+      );
+      writeFileSync(ciWorkflowPath, validCiWorkflow);
       rmSync(join(root, "web/e2e/wallets/phantom-siws.spec.ts"));
       expect(() => assertWalletE2EInventory(root)).toThrow(
         "wallet E2E inventory is missing web/e2e/wallets/phantom-siws.spec.ts",

@@ -66,6 +66,10 @@ describe("core migration ledger integrity", () => {
     expect(source).toContain('name: "capability_grants_agent_fence"');
     expect(source).toContain('tag: "0003_tenant_rls_policies"');
     expect(source).toContain('kind: "policy"');
+    expect(source).toContain('tag: "0004_capability_rate_limit_buckets"');
+    expect(source).toContain('name: "capability_rate_limit_buckets"');
+    expect(source).toContain('name: "capability_rate_limit_bucket_agent_fence()"');
+    expect(source).toContain('name: "capability_rate_limit_bucket_agent_fence"');
     expect(source).toContain("schema does not match its applied migration prefix");
   });
 
