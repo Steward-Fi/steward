@@ -686,8 +686,6 @@ describe("POST /v1/trade/polymarket/order", () => {
 
   it("SEC-111: STEWARD_PM_TEST_CREDS is hard-disabled in production", async () => {
     const { tenantId, agentId, sessionId } = await seedSession({});
-    stubWallet(true); // wallet + funder present, but no provisioned L2 creds
-    const app = makeApp(tenantId, agentId, tradeRoutes);
 
     const prevNodeEnv = process.env.NODE_ENV;
     const prevMemoryAck = process.env.STEWARD_ALLOW_MEMORY_TRADING_IDEMPOTENCY;
@@ -697,6 +695,20 @@ describe("POST /v1/trade/polymarket/order", () => {
     process.env.STEWARD_ALLOW_MEMORY_TRADING_RATE_LIMITS = "true";
     process.env.STEWARD_PM_TEST_CREDS = "1";
     try {
+      const routes = createTradeRoutesForTest({
+        ...sharedTestContext,
+        vault: {
+          getWallet: async () => ({
+            agentId,
+            chainFamily: "evm" as const,
+            venue: "polymarket",
+            purpose: null,
+            address: WALLET,
+            metadata: { funderAddress: FUNDER },
+          }),
+        } as StewardAppContext["vault"],
+      });
+      const app = makeApp(tenantId, agentId, routes);
       const res = await postOrder(app, sessionId, crypto.randomUUID());
       // The test-creds seam is ignored in production, so creds resolution falls
       // through to real L2 derivation, which fails closed in this harness.
@@ -721,7 +733,6 @@ describe("POST /v1/trade/polymarket/order", () => {
 
   it("SEC-111: a plain-http POLYMARKET_CLOB_API_URL is refused in production", async () => {
     const { tenantId, agentId, sessionId } = await seedSession({});
-    stubWallet(true);
     // Mock the adapter edge so the ONLY thing that can fail the order is creds
     // resolution: the HTTP override and test credentials must not bypass it.
     buildSpy = spyOn(PolymarketExecutionAdapter.prototype, "buildSignedOrder").mockResolvedValue(
@@ -737,8 +748,6 @@ describe("POST /v1/trade/polymarket/order", () => {
       actualAmount: 20,
       actualPrice: 0.5,
     } as Awaited<ReturnType<PolymarketExecutionAdapter["submitSignedOrder"]>>);
-    const app = makeApp(tenantId, agentId, tradeRoutes);
-
     const prevNodeEnv = process.env.NODE_ENV;
     const prevMemoryAck = process.env.STEWARD_ALLOW_MEMORY_TRADING_IDEMPOTENCY;
     const prevRateLimitMemoryAck = process.env.STEWARD_ALLOW_MEMORY_TRADING_RATE_LIMITS;
@@ -748,6 +757,20 @@ describe("POST /v1/trade/polymarket/order", () => {
     process.env.POLYMARKET_CLOB_API_URL = "http://clob.e2e.invalid";
     process.env.STEWARD_PM_TEST_CREDS = "1";
     try {
+      const routes = createTradeRoutesForTest({
+        ...sharedTestContext,
+        vault: {
+          getWallet: async () => ({
+            agentId,
+            chainFamily: "evm" as const,
+            venue: "polymarket",
+            purpose: null,
+            address: WALLET,
+            metadata: { funderAddress: FUNDER },
+          }),
+        } as StewardAppContext["vault"],
+      });
+      const app = makeApp(tenantId, agentId, routes);
       const res = await postOrder(app, sessionId, crypto.randomUUID());
       expect(res.status).toBe(409);
       expect(((await res.json()) as { error?: string }).error).toContain(
@@ -1326,6 +1349,12 @@ describe("POST /v1/trade/sessions (polymarket)", () => {
       tenantId,
       name: "PM Sess Agent",
       walletAddress: "0x0000000000000000000000000000000000000001",
+    });
+    await getDb().insert(agentWallets).values({
+      agentId,
+      chainFamily: "evm",
+      venue: "polymarket",
+      address: WALLET,
     });
     return { tenantId, agentId };
   }

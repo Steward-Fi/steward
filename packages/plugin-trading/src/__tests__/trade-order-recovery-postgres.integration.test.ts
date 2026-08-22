@@ -90,12 +90,15 @@ realServices("trade recovery across real PostgreSQL and Redis processes", () => 
 
   test("two cold replicas replay one Redis result and deliver one signed effect", async () => {
     const gateKey = Number.parseInt(suffix.slice(0, 12), 16);
+    const applicationNames = [
+      `trade-recovery-${suffix}-worker-0`,
+      `trade-recovery-${suffix}-worker-1`,
+    ];
     const locker = await admin.client.reserve();
     await locker`select pg_advisory_lock(${gateKey})`;
     let gateLocked = true;
-    const env = {
+    const sharedEnv = {
       ...process.env,
-      DATABASE_URL: databaseUrl!,
       REDIS_URL: redisUrl!,
       STEWARD_AUDIT_HMAC_KEY: auditKey,
       STEWARD_DB_MODE: "postgres",
@@ -106,20 +109,16 @@ realServices("trade recovery across real PostgreSQL and Redis processes", () => 
       TEST_IDEMPOTENCY_KEY: idempotencyKey,
       TEST_BODY_HASH: bodyHash,
     };
-    const workers = [
-      Bun.spawn([process.execPath, fixturePath], {
+    const workers = applicationNames.map((applicationName) => {
+      const workerDatabaseUrl = new URL(databaseUrl!);
+      workerDatabaseUrl.searchParams.set("application_name", applicationName);
+      return Bun.spawn([process.execPath, fixturePath], {
         cwd: repositoryRoot,
-        env,
+        env: { ...sharedEnv, DATABASE_URL: workerDatabaseUrl.toString() },
         stdout: "pipe",
         stderr: "pipe",
-      }),
-      Bun.spawn([process.execPath, fixturePath], {
-        cwd: repositoryRoot,
-        env,
-        stdout: "pipe",
-        stderr: "pipe",
-      }),
-    ];
+      });
+    });
     try {
       for (let attempt = 0; attempt < 2_000; attempt++) {
         const [waiting] = await admin.client<{ count: string }[]>`
@@ -127,6 +126,7 @@ realServices("trade recovery across real PostgreSQL and Redis processes", () => 
           from pg_stat_activity
           where wait_event = 'advisory'
             and query ilike '%pg_advisory_lock_shared%'
+            and application_name in (${applicationNames[0]}, ${applicationNames[1]})
         `;
         if (Number(waiting?.count ?? "0") >= 2) break;
         if (attempt === 1_999) throw new Error("trade recovery workers missed the start gate");
