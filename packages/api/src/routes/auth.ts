@@ -2486,20 +2486,22 @@ async function writeAuthLoginAudit(
   claims: Record<string, unknown> | undefined,
   metadata: Record<string, unknown> = {},
 ): Promise<void> {
-  await writeAuditEvent({
-    tenantId,
-    actorType: "user",
-    actorId: userId,
-    action: "auth.login",
-    resourceType: "session",
-    metadata: {
-      method: typeof claims?.authMethod === "string" ? claims.authMethod : "unknown",
-      ...metadata,
-    },
-    ipAddress: c.req.header("x-forwarded-for") ?? null,
-    userAgent: c.req.header("user-agent") ?? null,
-    requestId: c.req.header("x-request-id") ?? null,
-  });
+  await withVerifiedAuthTenant(tenantId, userId, () =>
+    writeAuditEvent({
+      tenantId,
+      actorType: "user",
+      actorId: userId,
+      action: "auth.login",
+      resourceType: "session",
+      metadata: {
+        method: typeof claims?.authMethod === "string" ? claims.authMethod : "unknown",
+        ...metadata,
+      },
+      ipAddress: c.req.header("x-forwarded-for") ?? null,
+      userAgent: c.req.header("user-agent") ?? null,
+      requestId: c.get("requestId") ?? c.req.header("x-request-id") ?? null,
+    }),
+  );
 }
 
 type WalletTenantResult = {
@@ -3289,19 +3291,7 @@ async function buildAuthOrMfaResponse(
   }
 
   if (c) {
-    await writeAuditEvent({
-      tenantId,
-      actorType: "user",
-      actorId: userId,
-      action: "auth.login",
-      resourceType: "session",
-      metadata: {
-        method: typeof claims.authMethod === "string" ? claims.authMethod : "unknown",
-      },
-      ipAddress: c.req.header("x-forwarded-for") ?? null,
-      userAgent: c.req.header("user-agent") ?? null,
-      requestId: c.get("requestId") ?? null,
-    });
+    await writeAuthLoginAudit(c, tenantId, userId, claims);
   }
   const token = await createSessionToken(address, tenantId, sessionClaims);
   const refreshToken = await createRefreshToken(userId, tenantId, sessionClaims);
