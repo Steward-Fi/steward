@@ -16,7 +16,7 @@ set -euo pipefail
 #   RAILWAY_ENV_ID      (REQUIRED) the deployer's own Railway environment id
 #   RAILWAY_IMAGE_REPO  (optional) default: ghcr.io/steward-fi/steward (the
 #                                  canonical published OSS image)
-#   RAILWAY_HEALTH_URL  (optional) the deployer's own /health URL to verify
+#   RAILWAY_HEALTH_URL  (required) the deployer's public HTTPS root origin
 #   DEPLOY_TIMEOUT      (optional) max seconds to wait for deploy, default: 300
 #   RAILWAY_HEALTH_TIMEOUT  (optional) max seconds to wait for health, default: 120
 #   RAILWAY_HEALTH_INTERVAL (optional) seconds between health probes, default: 5
@@ -53,7 +53,6 @@ SERVICE_ID="${RAILWAY_SERVICE_ID:-}"
 ENV_ID="${RAILWAY_ENV_ID:-}"
 IMAGE_REPO="${RAILWAY_IMAGE_REPO:-ghcr.io/steward-fi/steward}"
 HEALTH_URL="${RAILWAY_HEALTH_URL:-}"
-HEALTH_URL="${HEALTH_URL%/}"
 TIMEOUT="${DEPLOY_TIMEOUT:-300}"
 HEALTH_TIMEOUT="${RAILWAY_HEALTH_TIMEOUT:-120}"
 HEALTH_INTERVAL="${RAILWAY_HEALTH_INTERVAL:-5}"
@@ -123,6 +122,18 @@ if [[ -z "${RAILWAY_TOKEN:-}" ]]; then
 fi
 
 FULL_IMAGE="${IMAGE_REPO}:${IMAGE_TAG}"
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+
+# Validate the probe authority before the first control-plane request. Never
+# print the untrusted input: it may contain userinfo or query credentials.
+if [[ -z "$HEALTH_URL" ]]; then
+  fail "RAILWAY_HEALTH_URL is required for deployment acceptance"
+  exit 1
+fi
+if ! HEALTH_URL=$(node "$SCRIPT_DIR/validate-public-origin.mjs" --resolve-origin "$HEALTH_URL"); then
+  fail "RAILWAY_HEALTH_URL must be a credential-free public HTTPS root origin"
+  exit 1
+fi
 
 # Redact every externally supplied diagnostic before it reaches CI. This covers
 # credential-bearing URLs (Postgres, Redis, brokers, generic HTTP userinfo),
@@ -422,15 +433,12 @@ fi
 # A Railway SUCCESS state only proves control-plane rollout. Deployment
 # acceptance requires an explicit public probe authority plus both liveness and
 # durable readiness receipts; absent authority must never look shipped.
-if [[ -z "$HEALTH_URL" ]]; then
-  fail "RAILWAY_HEALTH_URL is required for deployment acceptance; refusing to skip public /health and /ready receipts."
-  exit 1
-fi
-
 verify_public_probe() {
   local path="$1"
   local label="$2"
+  local probe_result="000 "
   local http_code="000"
+  local remote_ip=""
   local attempt=0
   local started=$SECONDS
   local elapsed=0
@@ -441,13 +449,15 @@ verify_public_probe() {
     local remaining=$((HEALTH_TIMEOUT - elapsed))
     local request_timeout=$((remaining < 10 ? remaining : 10))
     local connect_timeout=$((request_timeout < 5 ? request_timeout : 5))
-    http_code=$(curl -sS \
+    probe_result=$(curl -sS \
       --connect-timeout "$connect_timeout" \
       --max-time "$request_timeout" \
       -o /dev/null \
-      -w "%{http_code}" \
-      "${HEALTH_URL}${path}" 2>/dev/null) || http_code="000"
-    if [[ "$http_code" == "200" ]]; then
+      -w "%{http_code} %{remote_ip}" \
+      "${HEALTH_URL}${path}" 2>/dev/null) || probe_result="000 "
+    read -r http_code remote_ip <<< "$probe_result"
+    if [[ "$http_code" == "200" ]] &&
+       node "$SCRIPT_DIR/validate-public-origin.mjs" --ip "$remote_ip" >/dev/null 2>&1; then
       ok "${label} check passed"
       return 0
     fi

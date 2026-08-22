@@ -1,8 +1,13 @@
 import { expect, spyOn, test } from "bun:test";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import * as databaseModule from "@stwd/db";
 import {
   __resetAuditHmacKeyCacheForTests,
   getDb,
+  getMigrationExpectation,
+  getPluginMigrationLedgerExpectation,
   tenants,
   waitUntilRequestDatabaseTask,
   withIndependentDatabase,
@@ -11,6 +16,7 @@ import {
 import { createPGLiteDb } from "@stwd/db/pglite";
 import {
   __setWorkerInitForTests,
+  assertWorkerMigrationReadiness,
   hydrateProcessEnv,
   runWorkerGoogleCredentialLifecycleSweep,
   runWorkerUpstreamCredentialLeaseSweep,
@@ -180,6 +186,50 @@ test("Worker request membrane preserves real Drizzle query execution", async () 
     expect(Array.isArray(rows)).toBe(true);
   } finally {
     await client.close();
+  }
+});
+
+test("Worker boot rejects missing and stale enabled-plugin journals on its request database", async () => {
+  const folder = await mkdtemp(join(tmpdir(), "steward-worker-plugin-ledger-"));
+  const source = { id: "worker-proof", migrationsFolder: folder };
+  try {
+    await mkdir(join(folder, "meta"));
+    await writeFile(
+      join(folder, "meta/_journal.json"),
+      JSON.stringify({ entries: [{ tag: "0000_worker", when: 1_750_000_000_000 }] }),
+    );
+    await writeFile(join(folder, "0000_worker.sql"), "SELECT 1;\n");
+    const core = getMigrationExpectation();
+    const plugin = getPluginMigrationLedgerExpectation(source);
+    let pluginRows: Array<{ hash: string; created_at: number }> = [];
+    let queryIndex = 0;
+    const requestDb = {
+      async execute() {
+        queryIndex += 1;
+        if (queryIndex % 2 === 1) {
+          return [{ database_time_ms: Date.now(), migration_created_at: core.createdAt }];
+        }
+        return pluginRows;
+      },
+    } as unknown as ReturnType<typeof getDb>;
+    const prove = () =>
+      withWorkerRequestDatabase(
+        {
+          DATABASE_URL: "postgresql://worker.invalid/steward",
+          DATABASE_DRIVER: "neon-http",
+          NODE_ENV: "test",
+        },
+        () => assertWorkerMigrationReadiness([{ pluginName: "worker-proof", source }]),
+        { createHttpDb: () => requestDb },
+      );
+
+    await expect(prove()).rejects.toThrow("WORKER_MIGRATION_READINESS_FAILED");
+    pluginRows = [{ hash: "stale", created_at: plugin.entries[0]!.createdAt }];
+    await expect(prove()).rejects.toThrow("WORKER_MIGRATION_READINESS_FAILED");
+    pluginRows = [{ hash: plugin.entries[0]!.hash, created_at: plugin.entries[0]!.createdAt }];
+    await expect(prove()).resolves.toBeUndefined();
+  } finally {
+    await rm(folder, { recursive: true });
   }
 });
 

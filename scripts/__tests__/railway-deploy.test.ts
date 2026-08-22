@@ -9,6 +9,7 @@ import { readFileSync } from "node:fs";
 import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { isPublicIp, resolvePublicHttpsOrigin } from "../validate-public-origin.mjs";
 
 const repoRoot = resolve(import.meta.dir, "../..");
 const SCRIPT = join(repoRoot, "scripts/railway-deploy.sh");
@@ -32,6 +33,8 @@ async function fakeRailwayRun(
   healthTimeout = 4,
   readyAfter = 1,
   healthUrl: string | null = "https://example.test",
+  remoteIp = "1.1.1.1",
+  dnsAnswers = "1.1.1.1",
 ) {
   const dir = await mkdtemp(join(tmpdir(), "steward-railway-deploy-"));
   temporaryDirectories.push(dir);
@@ -39,6 +42,7 @@ async function fakeRailwayRun(
   const readyStateFile = join(dir, "ready-attempts");
   const curlLog = join(dir, "curl-arguments");
   const fakeCurl = join(dir, "curl");
+  const fakeNode = join(dir, "node");
   const fakeSleep = join(dir, "sleep");
 
   await writeFile(
@@ -52,14 +56,14 @@ case "$args" in
     [ ! -f "$FAKE_HEALTH_STATE" ] || count=$(cat "$FAKE_HEALTH_STATE")
     count=$((count + 1))
     echo "$count" > "$FAKE_HEALTH_STATE"
-    if [ "$count" -ge "$FAKE_HEALTHY_AFTER" ]; then printf 200; else printf 000; fi
+    if [ "$count" -ge "$FAKE_HEALTHY_AFTER" ]; then printf '200 %s' "$FAKE_REMOTE_IP"; else printf '000 '; fi
     ;;
   *example.test/ready*)
     count=0
     [ ! -f "$FAKE_READY_STATE" ] || count=$(cat "$FAKE_READY_STATE")
     count=$((count + 1))
     echo "$count" > "$FAKE_READY_STATE"
-    if [ "$count" -ge "$FAKE_READY_AFTER" ]; then printf 200; else printf 503; fi
+    if [ "$count" -ge "$FAKE_READY_AFTER" ]; then printf '200 %s' "$FAKE_REMOTE_IP"; else printf '503 %s' "$FAKE_REMOTE_IP"; fi
     ;;
   *serviceInstanceUpdate*) printf '%s\n' '{"data":{"serviceInstanceUpdate":true}}' ;;
   *serviceInstanceDeployV2*) printf '%s\n' '{"data":{"serviceInstanceDeployV2":"deployment-test"}}' ;;
@@ -71,10 +75,27 @@ case "$args" in
 esac
 `,
   );
+  await writeFile(
+    fakeNode,
+    `#!/bin/sh
+if [ "\${2:-}" = "--resolve-origin" ]; then
+  origin=$($REAL_NODE "$1" "$3") || exit 1
+  old_ifs=$IFS
+  IFS=,
+  for address in $FAKE_DNS_ANSWERS; do
+    "$REAL_NODE" "$1" --ip "$address" >/dev/null 2>&1 || exit 1
+  done
+  IFS=$old_ifs
+  printf %s "$origin"
+  exit 0
+fi
+exec "$REAL_NODE" "$@"
+`,
+  );
   await writeFile(fakeSleep, '#!/bin/sh\n[ "$1" = "10" ] && exit 0\nexec /bin/sleep "$@"\n');
-  await Promise.all([chmod(fakeCurl, 0o755), chmod(fakeSleep, 0o755)]);
+  await Promise.all([chmod(fakeCurl, 0o755), chmod(fakeNode, 0o755), chmod(fakeSleep, 0o755)]);
 
-  const process = Bun.spawn(["bash", SCRIPT, "sha-test"], {
+  const child = Bun.spawn(["bash", SCRIPT, "sha-test"], {
     cwd: repoRoot,
     env: {
       ...Bun.env,
@@ -84,6 +105,9 @@ esac
       FAKE_CURL_LOG: curlLog,
       FAKE_HEALTHY_AFTER: String(healthyAfter),
       FAKE_READY_AFTER: String(readyAfter),
+      FAKE_REMOTE_IP: remoteIp,
+      FAKE_DNS_ANSWERS: dnsAnswers,
+      REAL_NODE: process.execPath,
       RAILWAY_TOKEN: "test-token",
       RAILWAY_SERVICE_ID: "test-service",
       RAILWAY_ENV_ID: "test-environment",
@@ -95,11 +119,11 @@ esac
     stderr: "pipe",
   });
   const [exitCode, stdout, stderr] = await Promise.all([
-    process.exited,
-    new Response(process.stdout).text(),
-    new Response(process.stderr).text(),
+    child.exited,
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
   ]);
-  const curlArguments = await Bun.file(curlLog).text();
+  const curlArguments = (await Bun.file(curlLog).exists()) ? await Bun.file(curlLog).text() : "";
   return { exitCode, output: stdout + stderr, curlArguments };
 }
 
@@ -181,8 +205,47 @@ describe("Railway staging deployment", () => {
     const result = await fakeRailwayRun(1, 2, 1, null);
     expect(result.exitCode).toBe(1);
     expect(result.output).toContain("RAILWAY_HEALTH_URL is required for deployment acceptance");
-    expect(result.output).toContain("refusing to skip public /health and /ready receipts");
+    expect(result.curlArguments).not.toContain("serviceInstanceUpdate");
   }, 15_000);
+
+  for (const invalidOrigin of [
+    "http://example.test",
+    "https://user:secret@example.test",
+    "https://example.test/private",
+    "https://example.test?token=secret",
+    "https://localhost",
+    "https://127.0.0.1",
+    "https://10.0.0.1",
+    "https://169.254.1.1",
+    "https://192.88.99.1",
+    "https://[::1]",
+    "https://[fc00::1]",
+    "https://[2001:2::1]",
+    "https://[2001:10::1]",
+    "https://[3fff::1]",
+  ]) {
+    test(`rejects ${invalidOrigin.split(":")[0]} invalid probe authority before mutation`, async () => {
+      const result = await fakeRailwayRun(1, 2, 1, invalidOrigin);
+      expect(result.exitCode).toBe(1);
+      expect(result.curlArguments).not.toContain("serviceInstanceUpdate");
+      expect(result.curlArguments).not.toContain("serviceInstanceDeployV2");
+      expect(result.output).not.toContain("secret");
+    });
+  }
+
+  test("rejects any private DNS answer before the first deployment mutation", async () => {
+    const result = await fakeRailwayRun(
+      1,
+      2,
+      1,
+      "https://example.test",
+      "1.1.1.1",
+      "1.1.1.1,10.0.0.8",
+    );
+    expect(result.exitCode).toBe(1);
+    expect(result.curlArguments).not.toContain("serviceInstanceUpdate");
+    expect(result.curlArguments).not.toContain("serviceInstanceDeployV2");
+  });
 
   test("waits through delayed health before accepting the deployment", async () => {
     const result = await fakeRailwayRun(3);
@@ -196,6 +259,12 @@ describe("Railway staging deployment", () => {
       expect(call).toContain("--connect-timeout 5");
       expect(call).toContain("--max-time 20");
     }
+  }, 15_000);
+
+  test("rejects a public-looking authority whose successful probe resolves privately", async () => {
+    const result = await fakeRailwayRun(1, 2, 1, "https://example.test", "10.0.0.8");
+    expect(result.exitCode).toBe(1);
+    expect(result.output).toContain("Health check failed");
   }, 15_000);
 
   test("rejects a live deployment whose durable readiness never passes", async () => {
@@ -229,4 +298,37 @@ describe("Railway staging deployment", () => {
       expect(call).toContain("--max-time 20");
     }
   }, 15_000);
+});
+
+describe("public deployment authority classification", () => {
+  test("conservatively rejects special-purpose IPv4 and IPv6 registries", () => {
+    for (const address of [
+      "192.88.99.1",
+      "2001:2::1",
+      "2001:10::1",
+      "2001:db8::1",
+      "3fff::1",
+      "fc00::1",
+    ]) {
+      expect(isPublicIp(address)).toBe(false);
+    }
+    for (const address of ["1.1.1.1", "8.8.8.8", "2606:4700:4700::1111"]) {
+      expect(isPublicIp(address)).toBe(true);
+    }
+  });
+
+  test("rejects a hostname when any resolved address is non-public", async () => {
+    await expect(
+      resolvePublicHttpsOrigin("https://health.example", async () => [
+        { address: "1.1.1.1", family: 4 },
+        { address: "2001:10::1", family: 6 },
+      ]),
+    ).rejects.toThrow("non-public");
+    await expect(
+      resolvePublicHttpsOrigin("https://health.example", async () => [
+        { address: "1.1.1.1", family: 4 },
+        { address: "2606:4700:4700::1111", family: 6 },
+      ]),
+    ).resolves.toBe("https://health.example");
+  });
 });
