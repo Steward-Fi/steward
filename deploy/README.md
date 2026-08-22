@@ -230,7 +230,8 @@ sudo nginx -t
 | `AGENT_TOKEN_EXPIRY` | No | `24h` | Default expiry for agent-scoped JWTs. |
 | `RPC_URL` | No | `https://sepolia.base.org` | EVM RPC endpoint. |
 | `CHAIN_ID` | No | `84532` | Default chain ID (84532 = Base Sepolia, 8453 = Base mainnet). |
-| `REDIS_URL` | No | — | Redis connection string. Enables persistent rate limiting + spend tracking. Without it, falls back to in-memory (resets on restart). |
+| `REDIS_URL` | Production | — | Redis connection string for the production global limiter and spend tracking. Production fails closed without durable global rate-limit state unless the single-instance acknowledgement below is exact `true`; development uses bounded memory. |
+| `STEWARD_ACKNOWLEDGE_SINGLE_INSTANCE_GLOBAL_RATE_LIMIT` | No | — | Exact `true` permits a guaranteed single-instance production Bun service to use restart-resetting memory for the global limiter. Never use with multiple replicas; Workers ignore it. |
 | `RESEND_API_KEY` | No | — | Resend API key for magic link emails. Without it, tokens print to console (dev mode). |
 | `EMAIL_FROM` | No | `login@localhost` in root Compose; code fallback `login@steward.fi` | From address for magic links. |
 | `APP_URL` | No | `http://localhost:3200` in root Compose; set a public URL for production/OAuth | Base URL for magic link callbacks. |

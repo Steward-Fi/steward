@@ -22,8 +22,6 @@ type TenantPayload = {
   id: string;
   name: string;
   apiKeyHash: string;
-  webhookUrl?: string;
-  defaultPolicies?: PolicyRule[];
 };
 
 type PendingApprovalRecord = {
@@ -51,6 +49,7 @@ type ReceivedWebhook = {
 };
 
 const webhookUrl = `http://127.0.0.1:${config.webhookPort}${config.webhookPath}`;
+let webhookSigningSecret = config.webhookSecret;
 
 function parseEther(value: string): bigint {
   const [wholePart, fractionalPart = ""] = value.split(".");
@@ -139,15 +138,13 @@ async function requestJson<T>(path: string, init: RequestInit = {}): Promise<T> 
   return payload.data;
 }
 
-async function registerOrUpdateTenant(defaultPolicies: PolicyRule[]) {
+async function registerTenant() {
   section("Tenant Registration");
 
   const payload: TenantPayload = {
     id: config.tenantId,
     name: config.tenantName,
     apiKeyHash: config.apiKey,
-    webhookUrl,
-    defaultPolicies,
   };
 
   const createResponse = await fetch(`${config.apiUrl}/tenants`, {
@@ -162,7 +159,6 @@ async function registerOrUpdateTenant(defaultPolicies: PolicyRule[]) {
   const body = (await createResponse.json()) as ApiResponse<TenantPayload>;
   if (createResponse.ok && body.ok && body.data) {
     detail("tenant", body.data.id);
-    detail("webhook", body.data.webhookUrl);
     return;
   }
 
@@ -170,19 +166,28 @@ async function registerOrUpdateTenant(defaultPolicies: PolicyRule[]) {
     throw new Error(body.error ?? `Failed to register tenant: ${createResponse.status}`);
   }
 
-  await requestJson(`/tenants/${encodeURIComponent(config.tenantId)}/webhook`, {
-    method: "PUT",
-    body: JSON.stringify({
-      webhookUrl,
-      defaultPolicies,
-    }),
-  });
-
   const tenant = await requestJson<TenantPayload>(
     `/tenants/${encodeURIComponent(config.tenantId)}`,
   );
   detail("tenant", `${tenant.id} (reused)`);
-  detail("webhook", tenant.webhookUrl ?? "not set");
+}
+
+async function ensureSignedWebhook(client: StewardClient) {
+  const existing = (await client.listWebhooks()).find((webhook) => webhook.url === webhookUrl);
+  if (existing) {
+    detail("webhook", `${existing.id} (reused; secret supplied by WAIFU_WEBHOOK_SECRET)`);
+    return;
+  }
+  const created = await client.createWebhook({
+    url: webhookUrl,
+    events: ["approval_required", "tx_signed", "tx_confirmed", "tx_failed"],
+    description: "waifu.fun integration example",
+  });
+  if (!created.secret) {
+    throw new Error("Webhook creation did not return its one-time signing secret");
+  }
+  webhookSigningSecret = created.secret;
+  detail("webhook", `${created.id} (signed endpoint created)`);
 }
 
 async function fetchPendingApprovals(agentId: string): Promise<PendingApprovalRecord[]> {
@@ -202,7 +207,7 @@ async function fetchHistory(agentId: string) {
 
 async function sendWebhookNotification(event: WebhookEvent) {
   const body = JSON.stringify(event);
-  const signature = await signWebhookPayload(body, config.webhookSecret);
+  const signature = await signWebhookPayload(body, webhookSigningSecret);
 
   const response = await fetch(webhookUrl, {
     method: "POST",
@@ -236,7 +241,7 @@ async function startWebhookServer(received: ReceivedWebhook[]) {
       const event = request.headers.get("X-Steward-Event") ?? "unknown";
       const signature = request.headers.get("X-Steward-Signature") ?? "";
       const rawBody = await request.text();
-      const isValid = await verifyWebhookPayload(rawBody, config.webhookSecret, signature);
+      const isValid = await verifyWebhookPayload(rawBody, webhookSigningSecret, signature);
 
       if (!isValid) {
         return new Response(JSON.stringify({ ok: false, error: "Invalid webhook signature" }), {
@@ -326,8 +331,8 @@ async function main() {
       tenantId: config.tenantId,
     });
 
-    const bootstrapPolicies = buildDefaultPolicies("0x0000000000000000000000000000000000000000");
-    await registerOrUpdateTenant(bootstrapPolicies);
+    await registerTenant();
+    await ensureSignedWebhook(client);
 
     section("Agent Wallet");
 

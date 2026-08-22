@@ -14,8 +14,8 @@
  *   - Does NOT have any top-level `await` that hits the network at module init.
  *
  * Global rate limiting on this entry is provided by the shared Redis-backed
- * sliding-window limiter that app.ts mounts when it detects the Workers
- * runtime (SEC-068, see middleware/global-rate-limit.ts).
+ * sliding-window limiter that app.ts mounts for every runtime (SEC-068, see
+ * middleware/global-rate-limit.ts).
  *
  * Required bindings (set via `wrangler secret put` or `vars` in wrangler.toml):
  *   - DATABASE_URL                  Neon HTTP connection string
@@ -458,71 +458,87 @@ function validateWorkerSecurityEnv(): void {
   validateJwtSecretEnv();
 }
 
-async function ensureWorkerInit(env: Env): Promise<void> {
+export function assertWorkerRedisReady(redisOk: boolean): void {
+  if (!redisOk) {
+    throw new Error("Durable Redis is required on Workers");
+  }
+}
+
+async function initializeWorker(env: Env): Promise<void> {
+  // Workers bindings are only available inside fetch(). Hydrate process.env
+  // before importing app modules that read required env at module init.
+  hydrateProcessEnv(env);
+  // SEC-134: the Bun entry (index.ts) runs validateJwtSecretEnv() at startup;
+  // run the same validation on the Workers boot path so a bad/missing JWT
+  // secret or malformed AGENT_TOKEN_EXPIRY fails closed at cold start instead
+  // of surfacing at first token sign/verify.
+  validateWorkerSecurityEnv();
+  const expectedRole = env.STEWARD_APP_DATABASE_ROLE?.trim();
+  if (!expectedRole) {
+    throw new Error("STEWARD_APP_DATABASE_ROLE is required on Workers");
+  }
+  await assertRlsDeploymentSafety(getDb(), { expectedRole });
+  const redisOk = await initRedis(env);
+  assertWorkerRedisReady(redisOk);
+  // Auth stores (passkey challenges, magic-link tokens, SIWE/SIWS nonces)
+  // must be initialized too — without this they stay on the lazy memory
+  // backend and one-time state is lost across isolates / cold starts.
+  const { trackAuditEvent } = await import("./services/audit");
+  const { isHstsEnabled } = await import("./middleware/security-headers");
+  const dbUrl = (env.DATABASE_URL || "").toLowerCase();
+  // Best-effort boot telemetry (a one-time observability breadcrumb of the
+  // TLS/HSTS posture at cold start) — NOT a security mutation or a tamper-
+  // evident control event, and there is no client action to deny. A write
+  // failure here must not abort worker init. Security/compliance events use
+  // awaited writeAuditEvent.
+  // Await even this best-effort breadcrumb before releasing a request-owned
+  // WebSocket handle. trackAuditEvent absorbs/logs its own failure, so boot
+  // still proceeds without leaving background DB work on a closed handle.
+  await trackAuditEvent({
+    tenantId: "system",
+    actorType: "system",
+    action: "system.tls.config",
+    metadata: {
+      dbTlsEnforced:
+        dbUrl.includes("sslmode=require") ||
+        dbUrl.includes("sslmode=verify-ca") ||
+        dbUrl.includes("sslmode=verify-full"),
+      hstsEnabled: isHstsEnabled(),
+      insecureDbAllowed: process.env.STEWARD_ALLOW_INSECURE_DB === "true",
+      runtime: "workers",
+    },
+  });
+  const { assertAuthStoresAreSafe, initAuthStores } = await import("./routes/auth");
+  // usePostgres=false: Workers deployments do not run migrations on startup
+  // (SKIP_MIGRATIONS=1 in wrangler.toml) so auth_kv_store may not exist;
+  // Redis is the canonical store on Workers.
+  await initAuthStores(false);
+  assertAuthStoresAreSafe();
+  const { getAuthStoreSources } = await import("./routes/auth");
+  const { importSession } = getAuthStoreSources();
+  if (importSession === "memory") {
+    console.warn(
+      "[steward:workers] encrypted import sessions are using memory storage; configure Redis for durable one-time import sessions across isolates",
+    );
+  }
+}
+
+async function ensureWorkerInit(
+  env: Env,
+  initialize: (env: Env) => Promise<void> = initializeWorker,
+): Promise<void> {
   if (workerInit) return workerInit;
-  workerInit = (async () => {
-    // Workers bindings are only available inside fetch(). Hydrate process.env
-    // before importing app modules that read required env at module init.
-    hydrateProcessEnv(env);
-    // SEC-134: the Bun entry (index.ts) runs validateJwtSecretEnv() at startup;
-    // run the same validation on the Workers boot path so a bad/missing JWT
-    // secret or malformed AGENT_TOKEN_EXPIRY fails closed at cold start instead
-    // of surfacing at first token sign/verify.
-    validateWorkerSecurityEnv();
-    const expectedRole = env.STEWARD_APP_DATABASE_ROLE?.trim();
-    if (!expectedRole) {
-      throw new Error("STEWARD_APP_DATABASE_ROLE is required on Workers");
-    }
-    await assertRlsDeploymentSafety(getDb(), { expectedRole });
-    const redisOk = await initRedis(env);
-    // Auth stores (passkey challenges, magic-link tokens, SIWE/SIWS nonces)
-    // must be initialized too — without this they stay on the lazy memory
-    // backend and one-time state is lost across isolates / cold starts.
-    const { trackAuditEvent } = await import("./services/audit");
-    const { isHstsEnabled } = await import("./middleware/security-headers");
-    const dbUrl = (env.DATABASE_URL || "").toLowerCase();
-    // Best-effort boot telemetry (a one-time observability breadcrumb of the
-    // TLS/HSTS posture at cold start) — NOT a security mutation or a tamper-
-    // evident control event, and there is no client action to deny. A write
-    // failure here must not abort worker init. Security/compliance events use
-    // awaited writeAuditEvent.
-    // Await even this best-effort breadcrumb before releasing a request-owned
-    // WebSocket handle. trackAuditEvent absorbs/logs its own failure, so boot
-    // still proceeds without leaving background DB work on a closed handle.
-    await trackAuditEvent({
-      tenantId: "system",
-      actorType: "system",
-      action: "system.tls.config",
-      metadata: {
-        dbTlsEnforced:
-          dbUrl.includes("sslmode=require") ||
-          dbUrl.includes("sslmode=verify-ca") ||
-          dbUrl.includes("sslmode=verify-full"),
-        hstsEnabled: isHstsEnabled(),
-        insecureDbAllowed: process.env.STEWARD_ALLOW_INSECURE_DB === "true",
-        runtime: "workers",
-      },
-    });
-    const { assertAuthStoresAreSafe, initAuthStores } = await import("./routes/auth");
-    // usePostgres=false: Workers deployments do not run migrations on startup
-    // (SKIP_MIGRATIONS=1 in wrangler.toml) so auth_kv_store may not exist;
-    // Redis is the canonical store on Workers.
-    await initAuthStores(false);
-    assertAuthStoresAreSafe();
-    const { getAuthStoreSources } = await import("./routes/auth");
-    const { importSession } = getAuthStoreSources();
-    if (importSession === "memory") {
-      console.warn(
-        "[steward:workers] encrypted import sessions are using memory storage; configure Redis for durable one-time import sessions across isolates",
-      );
-    }
-    if (!redisOk) {
-      console.warn(
-        "[steward:workers] Redis not initialized — passkey/magic-link/SIWE flows will use in-memory backend per isolate",
-      );
-    }
-  })();
-  return workerInit;
+  const attempt = initialize(env);
+  workerInit = attempt;
+  try {
+    await attempt;
+  } catch (error) {
+    // A transient missing/down binding must fail this invocation closed, but
+    // must not poison the isolate forever. Keep concurrent callers on the same
+    // attempt and clear only if no newer test/runtime authority replaced it.
+    if (workerInit === attempt) workerInit = null;
+    throw error;
+  }
 }
 
 // Compose the deployable app once per isolate: lean core + this repo's opt-in
@@ -533,6 +549,10 @@ let composedApp: Awaited<ReturnType<typeof import("./compose").composeApp>> | nu
 
 export function __setWorkerInitForTests(value: Promise<void> | null): void {
   workerInit = value;
+}
+
+export function __ensureWorkerInitForTests(initialize: () => Promise<void>): Promise<void> {
+  return ensureWorkerInit({ DATABASE_URL: "test://worker-init" }, initialize);
 }
 
 async function getComposedApp() {
@@ -559,6 +579,10 @@ export default {
         return withWorkerRequestDatabase(
           env,
           async () => {
+            // Redis authority is request-generation scoped. Rebind before every
+            // invocation so rotated/removed bindings cannot inherit the first
+            // isolate request's client through workerInit.
+            assertWorkerRedisReady(await initRedis(env));
             await ensureWorkerInit(env);
             const app = await getComposedApp();
             return app.fetch(request, env, ctx as never);
@@ -577,7 +601,10 @@ export default {
       return withWorkerJwtAuthority(env, () => {
         hydrateProcessEnv(env);
         validateWorkerSecurityEnv();
-        const scheduledWork = withWorkerRequestDatabase(env, () => ensureWorkerInit(env)).then(() =>
+        const scheduledWork = withWorkerRequestDatabase(env, async () => {
+          assertWorkerRedisReady(await initRedis(env));
+          await ensureWorkerInit(env);
+        }).then(() =>
           Promise.all([
             withWorkerRequestDatabase(env, () => runWorkerProviderActionRecoverySweep(env)),
             withWorkerRequestDatabase(env, () => runWorkerUpstreamCredentialLeaseSweep(env)),

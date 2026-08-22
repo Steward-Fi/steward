@@ -2,15 +2,9 @@
  * trade.ts — trade-session management + venue order routes (Hyperliquid +
  * Polymarket).
  *
- * MOVED from `@stwd/api` (packages/api/src/routes/trade.ts) into the opt-in
- * trading plugin. behavior is IDENTICAL to the pre-move route: every endpoint,
- * auth check, policy evaluation, audit event, idempotency rule, and error
- * response is preserved. the only structural change is that the core services
- * this route used to import from `../services/context`, `../services/audit`,
- * `../services/agent-token-status`, and `../middleware/redis` are now INJECTED
- * via the plugin context (`StewardAppContext`), so this file does not import
- * `@stwd/api` (no circular dependency: the core does not import the plugin and
- * the plugin does not import the core).
+ * Core services are injected through `StewardAppContext`, so this opt-in plugin
+ * remains decoupled from `@stwd/api` while enforcing the same tenant, policy,
+ * audit, idempotency, and durable production rate-limit boundaries as the core.
  *
  * `createTradeRoutes(ctx)` returns the hono router the plugin mounts at
  * /trade + /v1/trade.
@@ -78,6 +72,11 @@ import {
   tradeRecoveryEnvelope,
   tradeRecoveryHash,
 } from "./trade-recovery";
+import {
+  enforceTradingRateLimit,
+  MemoryTradingRateLimiter,
+  type TradingRateLimitResult,
+} from "./trading-rate-limit";
 
 const PM_CREDS_KEY_DOMAIN = "steward-kdf:pm-clob-l2-cache:v2";
 const PM_CREDS_CACHE_PREFIX = "stwd_pmclob_v1:";
@@ -314,7 +313,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
 
   const tradeRoutes = new Hono<{ Variables: AppVariables }>();
 
-  const memoryRateLimit = new Map<string, { count: number; resetAt: number }>();
+  const memoryRateLimit = new MemoryTradingRateLimiter();
 
   // SEC-043: idempotency records are Redis-backed when a client is available
   // (multi-replica dedup survives restarts), with the bounded wave-2
@@ -461,24 +460,17 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
     return JSON.stringify(body);
   }
 
-  async function enforceOrderRateLimit(
-    agentId: string,
-  ): Promise<{ allowed: boolean; resetMs: number }> {
+  async function enforceOrderRateLimit(agentId: string): Promise<TradingRateLimitResult> {
     const redis = getRedisClient();
-    if (redis) {
-      const result = await checkRateLimit(`ratelimit:trade:hyperliquid:${agentId}:1000`, 1000, 10);
-      return { allowed: result.allowed, resetMs: result.resetMs };
-    }
-
-    const now = Date.now();
-    const current = memoryRateLimit.get(agentId);
-    if (!current || current.resetAt <= now) {
-      memoryRateLimit.set(agentId, { count: 1, resetAt: now + 1000 });
-      return { allowed: true, resetMs: 1000 };
-    }
-    if (current.count >= 10) return { allowed: false, resetMs: current.resetAt - now };
-    current.count += 1;
-    return { allowed: true, resetMs: current.resetAt - now };
+    return enforceTradingRateLimit({
+      redisAvailable: redis !== null,
+      checkRedis: () =>
+        checkRateLimit(`ratelimit:trade:hyperliquid:${agentId}:1000`, 1_000, 10, redis!),
+      memoryKey: `hyperliquid:${agentId}`,
+      windowMs: 1_000,
+      maxRequests: 10,
+      memory: memoryRateLimit,
+    });
   }
 
   type RouteIdempotency = {
@@ -1118,6 +1110,9 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
     }
 
     const rate = await enforceOrderRateLimit(agentId);
+    if (rate.unavailable) {
+      return c.json<ApiResponse>({ ok: false, error: "Trade order rate limit unavailable" }, 503);
+    }
     if (!rate.allowed) {
       c.header("Retry-After", String(Math.ceil(rate.resetMs / 1000)));
       return c.json<ApiResponse>({ ok: false, error: "Trade order rate limit exceeded" }, 429);
@@ -1752,23 +1747,17 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
     return routeIdempotency(check);
   }
 
-  async function enforcePolymarketOrderRateLimit(
-    agentId: string,
-  ): Promise<{ allowed: boolean; resetMs: number }> {
+  async function enforcePolymarketOrderRateLimit(agentId: string): Promise<TradingRateLimitResult> {
     const redis = getRedisClient();
-    if (redis) {
-      const result = await checkRateLimit(`ratelimit:trade:polymarket:${agentId}:1000`, 1000, 10);
-      return { allowed: result.allowed, resetMs: result.resetMs };
-    }
-    const now = Date.now();
-    const current = memoryRateLimit.get(`pm:${agentId}`);
-    if (!current || current.resetAt <= now) {
-      memoryRateLimit.set(`pm:${agentId}`, { count: 1, resetAt: now + 1000 });
-      return { allowed: true, resetMs: 1000 };
-    }
-    if (current.count >= 10) return { allowed: false, resetMs: current.resetAt - now };
-    current.count += 1;
-    return { allowed: true, resetMs: current.resetAt - now };
+    return enforceTradingRateLimit({
+      redisAvailable: redis !== null,
+      checkRedis: () =>
+        checkRateLimit(`ratelimit:trade:polymarket:${agentId}:1000`, 1_000, 10, redis!),
+      memoryKey: `polymarket:${agentId}`,
+      windowMs: 1_000,
+      maxRequests: 10,
+      memory: memoryRateLimit,
+    });
   }
 
   // Notional USD of a Polymarket order. BUY: amount IS the USD spent. SELL: amount
@@ -2051,6 +2040,9 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
     }
 
     const rate = await enforcePolymarketOrderRateLimit(agentId);
+    if (rate.unavailable) {
+      return c.json<ApiResponse>({ ok: false, error: "Trade order rate limit unavailable" }, 503);
+    }
     if (!rate.allowed) {
       c.header("Retry-After", String(Math.ceil(rate.resetMs / 1000)));
       return c.json<ApiResponse>({ ok: false, error: "Trade order rate limit exceeded" }, 429);

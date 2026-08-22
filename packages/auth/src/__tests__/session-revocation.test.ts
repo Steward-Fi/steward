@@ -162,10 +162,10 @@ describe("session revocation", () => {
       // TLS assertion must fire before any connection is attempted.
       const { revocationStore: freshStore } = await import(`../revocation?sec032=${Date.now()}`);
       await expect(freshStore.isRevoked("sec032-probe")).rejects.toThrow(
-        "rediss:// (TLS) in production",
+        "rediss:// (TLS) outside explicit local development/test",
       );
       await expect(freshStore.revokeToken("sec032-probe", Date.now() + 60_000)).rejects.toThrow(
-        "rediss:// (TLS) in production",
+        "rediss:// (TLS) outside explicit local development/test",
       );
     } finally {
       if (previousNodeEnv === undefined) {

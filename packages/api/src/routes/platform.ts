@@ -94,6 +94,7 @@ import { normalizeOidcProviders } from "../services/oidc-provider-config";
 import { withPlatformAuthorityDatabase } from "../services/platform-authority-database";
 import { getPolicyRulesValidationError } from "../services/policy-validation";
 import { lockUserSession, lockUserSessions } from "../services/session-lock";
+import { TENANT_DEFAULT_POLICIES_RETIREMENT } from "../services/tenant-policy-retirement";
 import {
   createTenantTestAccountConfig,
   publicTestAccount,
@@ -114,8 +115,6 @@ const MAX_PLATFORM_METADATA_KEYS = 100;
 const MAX_PLATFORM_METADATA_STRING_BYTES = 4_096;
 const WALLET_EXTERNAL_ID_PROVIDER = "wallet_external_id";
 const MAX_WALLET_EXTERNAL_ID_LENGTH = 180;
-type PlatformTenantConfigRow = typeof tenantConfigs.$inferSelect;
-
 interface TenantCapabilityCleanup {
   activeGrantsRetired: number;
   terminalGrantsRemoved: number;
@@ -218,27 +217,6 @@ function parseDurationSeconds(value: string): number | null {
   const unit = match[2].toLowerCase();
   const multiplier = unit === "s" ? 1 : unit === "m" ? 60 : unit === "h" ? 60 * 60 : 24 * 60 * 60;
   return amount * multiplier;
-}
-
-async function snapshotPlatformTenantConfigRow(
-  tenantId: string,
-): Promise<PlatformTenantConfigRow | null> {
-  const db = getDb();
-  const [row] = await db.select().from(tenantConfigs).where(eq(tenantConfigs.tenantId, tenantId));
-  return row ?? null;
-}
-
-async function restorePlatformTenantConfigRow(
-  tenantId: string,
-  snapshot: PlatformTenantConfigRow | null,
-): Promise<void> {
-  const db = getDb();
-  await db.transaction(async (tx) => {
-    await tx.delete(tenantConfigs).where(eq(tenantConfigs.tenantId, tenantId));
-    if (snapshot) {
-      await tx.insert(tenantConfigs).values(snapshot);
-    }
-  });
 }
 
 async function deletePlatformCreatedAgent(agentId: string, tenantId: string): Promise<void> {
@@ -1012,7 +990,7 @@ platform.get("/apps/gas_spend", async (c) => {
 
 /**
  * POST /tenants
- * Body: { id: string; name: string; webhookUrl?: string; defaultPolicies?: PolicyRule[] }
+ * Body: { id: string; name: string; webhookUrl?: string }
  *
  * Creates a new tenant, auto-generates an API key, and returns the raw key
  * (once — it is never stored in plaintext and cannot be retrieved later).
@@ -1022,12 +1000,13 @@ platform.post("/tenants", async (c) => {
   if (scopeResponse) return scopeResponse;
 
   const db = getDb();
-  const body = await safeJsonParse<{
-    id: string;
-    name: string;
-    webhookUrl?: string;
-    defaultPolicies?: PolicyRule[];
-  }>(c);
+  const body = await safeJsonParse<
+    {
+      id: string;
+      name: string;
+      webhookUrl?: string;
+    } & Record<string, unknown>
+  >(c);
 
   if (!body) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
@@ -1052,14 +1031,10 @@ platform.post("/tenants", async (c) => {
       400,
     );
   }
-  if (body.defaultPolicies !== undefined) {
+  if (body["defaultPolicies"] !== undefined) {
     return c.json<ApiResponse>(
-      {
-        ok: false,
-        error:
-          "defaultPolicies are not persisted by this endpoint; configure per-agent policies instead",
-      },
-      501,
+      { ok: false, error: TENANT_DEFAULT_POLICIES_RETIREMENT.error },
+      TENANT_DEFAULT_POLICIES_RETIREMENT.status,
     );
   }
 
@@ -1132,7 +1107,6 @@ platform.post("/tenants", async (c) => {
       createdAt: Date;
       apiKey: string;
       webhookUrl?: string;
-      defaultPolicies?: PolicyRule[];
     }>
   >(
     {
@@ -1488,11 +1462,6 @@ platform.patch("/tenants/:tenantId/email-config", async (c) => {
     );
   }
 
-  const [existingRow] = await db
-    .select({ emailConfig: tenantConfigs.emailConfig })
-    .from(tenantConfigs)
-    .where(eq(tenantConfigs.tenantId, tenantId));
-
   // `templates: null` clears stored templates; undefined leaves them alone
   // (template-only merge) or omits them (full provider replace).
   const templatesPatch =
@@ -1502,20 +1471,8 @@ platform.patch("/tenants/:tenantId/email-config", async (c) => {
         ? { templates: undefined }
         : { templates: body.templates };
 
-  const emailConfig = isTemplateOnly
-    ? {
-        // Merge branding fields over the existing config so a template-only
-        // PATCH can't clobber magic-link overrides or provider creds.
-        ...(existingRow?.emailConfig ?? {}),
-        ...(body.replyTo ? { replyTo: body.replyTo.trim() } : {}),
-        ...(body.templateId ? { templateId: body.templateId.trim() } : {}),
-        ...(body.subjectOverride ? { subjectOverride: body.subjectOverride.trim() } : {}),
-        ...(body.magicLinkBaseUrl ? { magicLinkBaseUrl: body.magicLinkBaseUrl.trim() } : {}),
-        ...(body.magicLinkCallbackPath
-          ? { magicLinkCallbackPath: body.magicLinkCallbackPath.trim() }
-          : {}),
-        ...templatesPatch,
-      }
+  const replacementEmailConfig = isTemplateOnly
+    ? null
     : {
         provider: "resend" as const,
         apiKeyEncrypted: JSON.stringify(platformKeyStore().encrypt(body.apiKey.trim())),
@@ -1536,45 +1493,61 @@ platform.patch("/tenants/:tenantId/email-config", async (c) => {
     action: "tenant.email_config.update.authorized",
     resourceType: "tenant",
     resourceId: tenantId,
-    metadata: { from: emailConfig.from, hasReplyTo: !!emailConfig.replyTo },
+    metadata: {
+      from: replacementEmailConfig?.from,
+      hasReplyTo: Boolean(body.replyTo),
+    },
     ...auditCtx(c),
   });
 
-  const previousConfigRow = await snapshotPlatformTenantConfigRow(tenantId);
-  const [existingConfig] = await db
-    .select({ tenantId: tenantConfigs.tenantId })
-    .from(tenantConfigs)
-    .where(eq(tenantConfigs.tenantId, tenantId));
+  const emailConfig = await withTenantAuditedTransaction(
+    tenantId,
+    async (txRaw, appendRequiredAudit) => {
+      const tx = txRaw as typeof db;
+      const [lockedConfig] = await tx
+        .select({ emailConfig: tenantConfigs.emailConfig })
+        .from(tenantConfigs)
+        .where(eq(tenantConfigs.tenantId, tenantId))
+        .for("update");
+      const nextEmailConfig = replacementEmailConfig ?? {
+        // Re-read while locked so a template-only PATCH merges over the
+        // authoritative committed config without clobbering concurrent fields.
+        ...(lockedConfig?.emailConfig ?? {}),
+        ...(body.replyTo ? { replyTo: body.replyTo.trim() } : {}),
+        ...(body.templateId ? { templateId: body.templateId.trim() } : {}),
+        ...(body.subjectOverride ? { subjectOverride: body.subjectOverride.trim() } : {}),
+        ...(body.magicLinkBaseUrl ? { magicLinkBaseUrl: body.magicLinkBaseUrl.trim() } : {}),
+        ...(body.magicLinkCallbackPath
+          ? { magicLinkCallbackPath: body.magicLinkCallbackPath.trim() }
+          : {}),
+        ...templatesPatch,
+      };
+      const [updated] = await tx
+        .insert(tenantConfigs)
+        .values({ tenantId, emailConfig: nextEmailConfig })
+        .onConflictDoUpdate({
+          target: tenantConfigs.tenantId,
+          set: { emailConfig: nextEmailConfig, updatedAt: new Date() },
+        })
+        .returning({ emailConfig: tenantConfigs.emailConfig });
+      await appendRequiredAudit({
+        tenantId,
+        actorType: "platform",
+        action: "tenant.email_config.update",
+        resourceType: "tenant",
+        resourceId: tenantId,
+        metadata: {
+          from: nextEmailConfig.from,
+          hasReplyTo: Boolean(nextEmailConfig.replyTo),
+        },
+        ...auditCtx(c),
+      });
+      return updated?.emailConfig ?? nextEmailConfig;
+    },
+  );
 
-  if (existingConfig) {
-    await db
-      .update(tenantConfigs)
-      .set({ emailConfig, updatedAt: new Date() })
-      .where(eq(tenantConfigs.tenantId, tenantId));
-  } else {
-    await db.insert(tenantConfigs).values({
-      tenantId,
-      emailConfig,
-    });
-  }
-
+  // Consumers may only observe the new authority after mutation + audit commit.
   invalidateEmailAuthForTenant(tenantId);
-
-  try {
-    await writeAuditEvent({
-      tenantId,
-      actorType: "platform",
-      action: "tenant.email_config.update",
-      resourceType: "tenant",
-      resourceId: tenantId,
-      metadata: { from: emailConfig.from, hasReplyTo: !!emailConfig.replyTo },
-      ...auditCtx(c),
-    });
-  } catch (error) {
-    await restorePlatformTenantConfigRow(tenantId, previousConfigRow);
-    invalidateEmailAuthForTenant(tenantId);
-    throw error;
-  }
 
   return c.json<
     ApiResponse<{
@@ -1699,8 +1672,8 @@ platform.get("/tenants/:tenantId/join-mode", async (c) => {
  * 'closed' (no new members).
  *
  * This is the only application write surface for join_mode. It shares the
- * membership lifecycle lock so join authorization and its required audit
- * change atomically with the policy that permits new members.
+ * membership lifecycle lock and the email-config mutation contract, so the
+ * policy change and its required audit commit atomically.
  */
 platform.patch("/tenants/:tenantId/join-mode", async (c) => {
   const scopeResponse = requirePlatformRouteScope(c, "platform:tenant-join-mode:write");
@@ -1752,7 +1725,8 @@ platform.patch("/tenants/:tenantId/join-mode", async (c) => {
     const [existingConfig] = await tx
       .select({ tenantId: tenantConfigs.tenantId })
       .from(tenantConfigs)
-      .where(eq(tenantConfigs.tenantId, tenantId));
+      .where(eq(tenantConfigs.tenantId, tenantId))
+      .for("update");
     if (existingConfig) {
       await tx
         .update(tenantConfigs)
@@ -1834,39 +1808,39 @@ platform.put("/tenants/:tenantId/oidc-providers", async (c) => {
     ...auditCtx(c),
   });
 
-  const previousConfigRow = await snapshotPlatformTenantConfigRow(tenantId);
-  const [existingConfig] = await db
-    .select({ tenantId: tenantConfigs.tenantId })
-    .from(tenantConfigs)
-    .where(eq(tenantConfigs.tenantId, tenantId));
-
-  if (existingConfig) {
-    await db
-      .update(tenantConfigs)
-      .set({ oidcProviders: providers, updatedAt: new Date() })
-      .where(eq(tenantConfigs.tenantId, tenantId));
-  } else {
-    await db.insert(tenantConfigs).values({ tenantId, oidcProviders: providers });
-  }
-
-  try {
-    await writeAuditEvent({
-      tenantId,
-      actorType: "platform",
-      action: "tenant.oidc_providers.update",
-      resourceType: "tenant",
-      resourceId: tenantId,
-      metadata: { providerIds: providers.map((provider) => provider.id) },
-      ...auditCtx(c),
-    });
-  } catch (error) {
-    await restorePlatformTenantConfigRow(tenantId, previousConfigRow);
-    throw error;
-  }
+  const persistedProviders = await withTenantAuditedTransaction(
+    tenantId,
+    async (txRaw, appendRequiredAudit) => {
+      const tx = txRaw as typeof db;
+      await tx
+        .select({ tenantId: tenantConfigs.tenantId })
+        .from(tenantConfigs)
+        .where(eq(tenantConfigs.tenantId, tenantId))
+        .for("update");
+      const [updated] = await tx
+        .insert(tenantConfigs)
+        .values({ tenantId, oidcProviders: providers })
+        .onConflictDoUpdate({
+          target: tenantConfigs.tenantId,
+          set: { oidcProviders: providers, updatedAt: new Date() },
+        })
+        .returning({ oidcProviders: tenantConfigs.oidcProviders });
+      await appendRequiredAudit({
+        tenantId,
+        actorType: "platform",
+        action: "tenant.oidc_providers.update",
+        resourceType: "tenant",
+        resourceId: tenantId,
+        metadata: { providerIds: providers.map((provider) => provider.id) },
+        ...auditCtx(c),
+      });
+      return updated?.oidcProviders ?? providers;
+    },
+  );
 
   return c.json<ApiResponse<{ providers: TenantOidcProviderConfig[] }>>({
     ok: true,
-    data: { providers },
+    data: { providers: persistedProviders },
   });
 });
 
@@ -1920,39 +1894,39 @@ platform.post("/tenants/:tenantId/test-account", async (c) => {
     ...auditCtx(c),
   });
 
-  const previousConfigRow = await snapshotPlatformTenantConfigRow(tenantId);
-  const [existingConfig] = await db
-    .select({ tenantId: tenantConfigs.tenantId })
-    .from(tenantConfigs)
-    .where(eq(tenantConfigs.tenantId, tenantId));
-
-  if (existingConfig) {
-    await db
-      .update(tenantConfigs)
-      .set({ testAccount, updatedAt: new Date() })
-      .where(eq(tenantConfigs.tenantId, tenantId));
-  } else {
-    await db.insert(tenantConfigs).values({ tenantId, testAccount });
-  }
-
-  try {
-    await writeAuditEvent({
-      tenantId,
-      actorType: "platform",
-      action: "tenant.test_account.enable",
-      resourceType: "tenant",
-      resourceId: tenantId,
-      metadata: { email: testAccount.email, phone: testAccount.phone, rotated: true },
-      ...auditCtx(c),
-    });
-  } catch (error) {
-    await restorePlatformTenantConfigRow(tenantId, previousConfigRow);
-    throw error;
-  }
+  const persistedTestAccount = await withTenantAuditedTransaction(
+    tenantId,
+    async (txRaw, appendRequiredAudit) => {
+      const tx = txRaw as typeof db;
+      await tx
+        .select({ tenantId: tenantConfigs.tenantId })
+        .from(tenantConfigs)
+        .where(eq(tenantConfigs.tenantId, tenantId))
+        .for("update");
+      const [updated] = await tx
+        .insert(tenantConfigs)
+        .values({ tenantId, testAccount })
+        .onConflictDoUpdate({
+          target: tenantConfigs.tenantId,
+          set: { testAccount, updatedAt: new Date() },
+        })
+        .returning({ testAccount: tenantConfigs.testAccount });
+      await appendRequiredAudit({
+        tenantId,
+        actorType: "platform",
+        action: "tenant.test_account.enable",
+        resourceType: "tenant",
+        resourceId: tenantId,
+        metadata: { email: testAccount.email, phone: testAccount.phone, rotated: true },
+        ...auditCtx(c),
+      });
+      return updated?.testAccount ?? testAccount;
+    },
+  );
 
   return c.json<ApiResponse<{ testAccount: TenantTestAccountConfig }>>({
     ok: true,
-    data: { testAccount: publicTestAccount(testAccount, otp) },
+    data: { testAccount: publicTestAccount(persistedTestAccount, otp) },
   });
 });
 
@@ -1981,23 +1955,21 @@ platform.delete("/tenants/:tenantId/test-account", async (c) => {
     ...auditCtx(c),
   });
 
-  const previousConfigRow = await snapshotPlatformTenantConfigRow(tenantId);
-  const [existingConfig] = await db
-    .select({ tenantId: tenantConfigs.tenantId })
-    .from(tenantConfigs)
-    .where(eq(tenantConfigs.tenantId, tenantId));
-
-  if (existingConfig) {
-    await db
-      .update(tenantConfigs)
-      .set({ testAccount: disabled, updatedAt: new Date() })
-      .where(eq(tenantConfigs.tenantId, tenantId));
-  } else {
-    await db.insert(tenantConfigs).values({ tenantId, testAccount: disabled });
-  }
-
-  try {
-    await writeAuditEvent({
+  await withTenantAuditedTransaction(tenantId, async (txRaw, appendRequiredAudit) => {
+    const tx = txRaw as typeof db;
+    await tx
+      .select({ tenantId: tenantConfigs.tenantId })
+      .from(tenantConfigs)
+      .where(eq(tenantConfigs.tenantId, tenantId))
+      .for("update");
+    await tx
+      .insert(tenantConfigs)
+      .values({ tenantId, testAccount: disabled })
+      .onConflictDoUpdate({
+        target: tenantConfigs.tenantId,
+        set: { testAccount: disabled, updatedAt: new Date() },
+      });
+    await appendRequiredAudit({
       tenantId,
       actorType: "platform",
       action: "tenant.test_account.disable",
@@ -2006,10 +1978,7 @@ platform.delete("/tenants/:tenantId/test-account", async (c) => {
       metadata: {},
       ...auditCtx(c),
     });
-  } catch (error) {
-    await restorePlatformTenantConfigRow(tenantId, previousConfigRow);
-    throw error;
-  }
+  });
 
   return c.json<ApiResponse<{ testAccount: TenantTestAccountConfig }>>({
     ok: true,
@@ -2036,11 +2005,6 @@ platform.delete("/tenants/:tenantId/email-config", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: "Tenant not found" }, 404);
   }
 
-  const [existingConfig] = await db
-    .select({ tenantId: tenantConfigs.tenantId })
-    .from(tenantConfigs)
-    .where(eq(tenantConfigs.tenantId, tenantId));
-
   await writeAuditEvent({
     tenantId,
     actorType: "platform",
@@ -2050,18 +2014,20 @@ platform.delete("/tenants/:tenantId/email-config", async (c) => {
     ...auditCtx(c),
   });
 
-  const previousConfigRow = await snapshotPlatformTenantConfigRow(tenantId);
-  if (existingConfig) {
-    await db
-      .update(tenantConfigs)
-      .set({ emailConfig: null, updatedAt: new Date() })
-      .where(eq(tenantConfigs.tenantId, tenantId));
-  }
-
-  invalidateEmailAuthForTenant(tenantId);
-
-  try {
-    await writeAuditEvent({
+  await withTenantAuditedTransaction(tenantId, async (txRaw, appendRequiredAudit) => {
+    const tx = txRaw as typeof db;
+    const [lockedConfig] = await tx
+      .select({ tenantId: tenantConfigs.tenantId })
+      .from(tenantConfigs)
+      .where(eq(tenantConfigs.tenantId, tenantId))
+      .for("update");
+    if (lockedConfig) {
+      await tx
+        .update(tenantConfigs)
+        .set({ emailConfig: null, updatedAt: new Date() })
+        .where(eq(tenantConfigs.tenantId, tenantId));
+    }
+    await appendRequiredAudit({
       tenantId,
       actorType: "platform",
       action: "tenant.email_config.delete",
@@ -2069,11 +2035,10 @@ platform.delete("/tenants/:tenantId/email-config", async (c) => {
       resourceId: tenantId,
       ...auditCtx(c),
     });
-  } catch (error) {
-    await restorePlatformTenantConfigRow(tenantId, previousConfigRow);
-    invalidateEmailAuthForTenant(tenantId);
-    throw error;
-  }
+  });
+
+  // Cache invalidation follows the durable mutation + completion audit commit.
+  invalidateEmailAuthForTenant(tenantId);
 
   return c.json<ApiResponse>({ ok: true });
 });
@@ -2314,13 +2279,8 @@ platform.delete("/tenants/:id", async (c) => {
  * PUT /tenants/:id/policies
  * Body: PolicyRule[]
  *
- * Sets the default policy set for all agents in a tenant.
- * These are applied when an agent has no per-agent policies.
- *
- * Note: Because default policies live in-process (TenantConfig) in the main
- * API, this route stores them as a JSONB blob on the tenant row using a
- * dedicated `default_policies` column convention — integrate with the in-memory
- * tenantConfigs map when mounting in the main app.
+ * Retired compatibility boundary. Tenant defaults were process-local and are
+ * never accepted as policy authority; configure durable per-agent policies.
  */
 platform.put("/tenants/:id/policies", async (c) => {
   const scopeResponse = requirePlatformRouteScope(c, "platform:tenant-policy:write");
@@ -2402,12 +2362,8 @@ platform.put("/tenants/:id/policies", async (c) => {
   }
 
   return c.json<ApiResponse>(
-    {
-      ok: false,
-      error:
-        "Tenant default policies are not persisted or enforced by this endpoint; configure per-agent policies instead",
-    },
-    501,
+    { ok: false, error: TENANT_DEFAULT_POLICIES_RETIREMENT.error },
+    TENANT_DEFAULT_POLICIES_RETIREMENT.status,
   );
 });
 
@@ -2630,7 +2586,7 @@ platform.post("/tenants/:id/agents/batch", async (c) => {
       const identity = await vault().createAgent(tenantId, spec.id, spec.name, spec.platformId);
       createdAgentId = spec.id;
 
-      // Optionally apply default policies
+      // Optionally persist the requested policy set on this agent.
       if (persistedApplyPolicies.length > 0) {
         await db.transaction(async (tx) => {
           await tx.delete(policies).where(eq(policies.agentId, spec.id));

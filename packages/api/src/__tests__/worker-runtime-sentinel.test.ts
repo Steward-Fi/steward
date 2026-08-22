@@ -10,6 +10,7 @@ import {
 } from "@stwd/db";
 import { createPGLiteDb } from "@stwd/db/pglite";
 import { withRuntimeEnvironment } from "@stwd/shared/runtime-env";
+import * as redisMiddleware from "../middleware/redis";
 import {
   __setWorkerInitForTests,
   hydrateProcessEnv,
@@ -231,6 +232,7 @@ test("cold Worker cron rejects a hostile database role before starting sweeps", 
     databases += 1;
     return hostileDb;
   });
+  const initRedisSpy = spyOn(redisMiddleware, "initRedis").mockResolvedValue(true);
   let scheduledWork!: Promise<unknown>;
   const env = {
     DATABASE_URL: "postgresql://worker.invalid/steward",
@@ -251,6 +253,7 @@ test("cold Worker cron rejects a hostile database role before starting sweeps", 
     expect(databases).toBe(1);
   } finally {
     __setWorkerInitForTests(null);
+    initRedisSpy.mockRestore();
     createDbSpy.mockRestore();
     for (const [key, value] of previousEnv) {
       if (value === undefined) delete process.env[key];
@@ -280,6 +283,7 @@ test("Worker cron gives every autonomous sweep its own request database", async 
     seen.push((getDb() as unknown as { marker: string }).marker);
     return { auditsDelivered: 1, reservationsReconciled: 1, failures: [] };
   });
+  const initRedisSpy = spyOn(redisMiddleware, "initRedis").mockResolvedValue(true);
   const upstreamSpy = spyOn(
     upstreamScheduler,
     "runUpstreamCredentialLeaseSweep",
@@ -328,6 +332,7 @@ test("Worker cron gives every autonomous sweep its own request database", async 
     await scheduledWork;
   } finally {
     __setWorkerInitForTests(null);
+    initRedisSpy.mockRestore();
     createDbSpy.mockRestore();
     providerActionSpy.mockRestore();
     upstreamSpy.mockRestore();

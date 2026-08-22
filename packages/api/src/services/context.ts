@@ -68,26 +68,12 @@ import { getConfiguredVault } from "./vault-factory";
 export { API_VERSION } from "./version";
 export const DEFAULT_TENANT_ID = "default";
 
-/**
- * Read a positive-integer env override, falling back to a safe default when the
- * variable is unset or malformed. Used for operator-tunable limits so a bad
- * value can never silently disable a guard — it just reverts to the default.
- */
-function positiveIntEnv(name: string, fallback: number): number {
-  const raw = process.env[name]?.trim();
-  if (!raw) return fallback;
-  const parsed = Number(raw);
-  if (!Number.isInteger(parsed) || parsed <= 0) return fallback;
-  return parsed;
-}
-
-// Global in-memory request rate limit (Bun entry only). Operator-tunable via env
-// so load tests and local e2e suites — which hammer a single socket IP far harder
-// than any real client — can raise the ceiling without changing the production
-// default (100 requests / 60s per client IP). A missing or invalid override
-// falls back to that default, so this can never weaken the guard unintentionally.
-export const RATE_LIMIT_WINDOW_MS = positiveIntEnv("STEWARD_RATE_LIMIT_WINDOW_MS", 60_000);
-export const RATE_LIMIT_MAX_REQUESTS = positiveIntEnv("STEWARD_RATE_LIMIT_MAX_REQUESTS", 100);
+// Global request-rate defaults. The mounted limiter resolves the same overrides
+// from each immutable Worker request snapshot. These literals must never
+// capture process.env at module initialization because a later Worker binding
+// generation that omits an override must return to the documented defaults.
+export const RATE_LIMIT_WINDOW_MS = 60_000;
+export const RATE_LIMIT_MAX_REQUESTS = 100;
 export const isWorkersRuntime =
   process.env.STEWARD_RUNTIME === "workers" ||
   (typeof navigator !== "undefined" && navigator.userAgent === "Cloudflare-Workers");
@@ -442,13 +428,11 @@ export type { AppVariables };
 // ─── Shared query helpers ─────────────────────────────────────────────────────
 
 export function getTenantPayload(tenant: Tenant): Omit<Tenant, "apiKeyHash"> & TenantConfig {
-  const config = tenantConfigs.get(tenant.id);
   const { apiKeyHash: _apiKeyHash, ...safeTenant } = tenant;
   return {
     ...safeTenant,
-    name: config?.name || tenant.name,
-    webhookUrl: config?.webhookUrl,
-    defaultPolicies: config?.defaultPolicies,
+    id: tenant.id,
+    name: tenant.name,
   };
 }
 
@@ -535,11 +519,14 @@ export async function ensureAgentForTenant(
   return vault.getAgent(tenantId, agentId);
 }
 
-export async function getPolicySet(tenantId: string, agentId: string): Promise<PolicyRule[]> {
+export async function getPolicySet(_tenantId: string, agentId: string): Promise<PolicyRule[]> {
   const storedPolicies = await db.select().from(policies).where(eq(policies.agentId, agentId));
 
   if (storedPolicies.length > 0) return storedPolicies.map(toPolicyRule);
-  return tenantConfigs.get(tenantId)?.defaultPolicies || [];
+  // Tenant-level defaults were process-local and could diverge across replicas
+  // or vanish on restart. Policy authority is now exclusively durable,
+  // agent-scoped rows; a missing assignment is an explicit empty policy set.
+  return [];
 }
 
 export async function getScopedPolicySet(

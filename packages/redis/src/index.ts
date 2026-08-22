@@ -11,11 +11,14 @@ export {
 export {
   assertRedisUrlTls,
   assertUpstashRestUrlTls,
+  createRedisClient,
   disconnectRedis,
   getRedis,
   getRedisDriver,
   type IoredisLike,
+  type RedisClientEnvironment,
   type RedisDriver,
+  setRedisClientResolverForRuntime,
 } from "./client.js";
 export {
   estimateCost,
@@ -58,7 +61,9 @@ export {
   checkSpendLimit,
   getSpend,
   getSpendByHost,
+  type IdempotentSpendReservationResult,
   recordSpend,
+  reserveDailySpendIdempotently,
   reserveSpend,
   type SpendLimitSnapshot,
   type SpendPeriod,
