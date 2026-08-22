@@ -32,3 +32,11 @@ CREATE INDEX "trade_order_recoveries_pending_effects_idx"
 CREATE UNIQUE INDEX "audit_events_trade_recovery_identity_uidx"
   ON "audit_events" ("tenant_id", ("metadata"->>'tradeRecoveryId'))
   WHERE "metadata" ? 'tradeRecoveryId';
+--> statement-breakpoint
+DROP POLICY IF EXISTS "steward_tenant_isolation" ON "trade_order_recoveries";
+CREATE POLICY "steward_tenant_isolation" ON "trade_order_recoveries"
+  FOR ALL
+  USING ("tenant_id" = "steward_rls"."tenant_id"())
+  WITH CHECK ("tenant_id" = "steward_rls"."tenant_id"());
+--> statement-breakpoint
+ALTER TABLE "trade_order_recoveries" ENABLE ROW LEVEL SECURITY;

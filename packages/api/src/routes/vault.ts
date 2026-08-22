@@ -28,7 +28,6 @@ import { recordAggregationEvent } from "@stwd/redis";
 import {
   canonicalJsonStringify,
   ExecutionPayloadNormalizationError,
-  getTokenDecimalsStrict,
   isSignedArtifactEvidence,
   type PolicyResult,
   rawSigningChainSupport,

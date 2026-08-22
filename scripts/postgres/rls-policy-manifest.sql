@@ -71,6 +71,7 @@ INSERT INTO steward_expected_public_relations VALUES
   ('core','tenant_saml_sso_configs','r',''),
   ('core','tenant_sso_domains','r',''),
   ('core','tenants','r',''),
+  ('core','trade_order_recoveries','r',''),
   ('core','trade_sessions','r',''),
   ('core','transactions','r',''),
   ('core','upstream_credential_lease_events','r',''),
@@ -181,6 +182,7 @@ INSERT INTO steward_expected_rls_policy_definitions VALUES
   ('core','tenant_saml_sso_configs','steward_tenant_isolation','*',true,'PUBLIC','((tenant_id)::text = steward_rls.tenant_id())','((tenant_id)::text = steward_rls.tenant_id())'),
   ('core','tenant_sso_domains','steward_tenant_isolation','*',true,'PUBLIC','((tenant_id)::text = steward_rls.tenant_id())','((tenant_id)::text = steward_rls.tenant_id())'),
   ('core','tenants','steward_tenant_isolation','*',true,'PUBLIC','((id)::text = steward_rls.tenant_id())','((id)::text = steward_rls.tenant_id())'),
+  ('core','trade_order_recoveries','steward_tenant_isolation','*',true,'PUBLIC','((tenant_id)::text = steward_rls.tenant_id())','((tenant_id)::text = steward_rls.tenant_id())'),
   ('core','trade_sessions','steward_tenant_isolation','*',true,'PUBLIC','((tenant_id)::text = steward_rls.tenant_id())','((tenant_id)::text = steward_rls.tenant_id())'),
   ('core','transactions','steward_tenant_isolation','*',true,'PUBLIC','(EXISTS ( SELECT 1
    FROM agents parent
