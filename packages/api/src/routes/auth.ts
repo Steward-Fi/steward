@@ -1781,8 +1781,23 @@ const EMAIL_AUTH_REQUEST_CACHE_TTL_MS = 30_000;
 interface EmailAuthRequestCacheEntry {
   readonly createdAt: number;
   readonly pending: Promise<EmailAuth>;
+  readonly retirementTimer: ReturnType<typeof setTimeout>;
 }
 let _emailAuthByRequest = new WeakMap<object, Map<string, EmailAuthRequestCacheEntry>>();
+
+function retireEmailAuthCacheEntry(
+  tenants: Map<string, EmailAuthRequestCacheEntry>,
+  tenantId: string,
+  entry: EmailAuthRequestCacheEntry,
+): void {
+  if (tenants.get(tenantId) !== entry) return;
+  tenants.delete(tenantId);
+  clearTimeout(entry.retirementTimer);
+  void entry.pending.then(
+    (auth) => auth.disposeProvider(),
+    () => undefined,
+  );
+}
 
 function getEmailKeyStore(): KeyStore {
   return getConfiguredKeyStore(undefined, { allowDevSecretFallback: true });
@@ -2086,13 +2101,7 @@ export async function getEmailAuthForTenant(tenantId: string): Promise<EmailAuth
   if (cached && Date.now() - cached.createdAt < EMAIL_AUTH_REQUEST_CACHE_TTL_MS) {
     return cached.pending;
   }
-  if (cached) {
-    tenants?.delete(tenantId);
-    void cached.pending.then(
-      (auth) => auth.disposeProvider(),
-      () => undefined,
-    );
-  }
+  if (cached && tenants) retireEmailAuthCacheEntry(tenants, tenantId, cached);
 
   let entry: EmailAuthRequestCacheEntry;
   const pending = createEmailAuthForTenant(tenantId).catch((error) => {
@@ -2103,7 +2112,12 @@ export async function getEmailAuthForTenant(tenantId: string): Promise<EmailAuth
     tenants = new Map();
     _emailAuthByRequest.set(requestIdentity, tenants);
   }
-  entry = { createdAt: Date.now(), pending };
+  const retirementTimer = setTimeout(() => {
+    if (tenants) retireEmailAuthCacheEntry(tenants, tenantId, entry);
+  }, EMAIL_AUTH_REQUEST_CACHE_TTL_MS);
+  // A request-local cache deadline must not keep a Node/Bun process alive.
+  retirementTimer.unref?.();
+  entry = { createdAt: Date.now(), pending, retirementTimer };
   tenants.set(tenantId, entry);
   return pending;
 }
@@ -2113,11 +2127,7 @@ export function invalidateEmailAuthForTenant(tenantId: string): void {
   if (!identity) return;
   const tenants = _emailAuthByRequest.get(identity);
   const cached = tenants?.get(tenantId);
-  tenants?.delete(tenantId);
-  void cached?.pending.then(
-    (auth) => auth.disposeProvider(),
-    () => undefined,
-  );
+  if (cached && tenants) retireEmailAuthCacheEntry(tenants, tenantId, cached);
 }
 
 export function clearEmailAuthTenantCacheForTests(): void {
@@ -2136,7 +2146,7 @@ export function expireEmailAuthTenantCacheForTests(tenantId: string): void {
   if (!identity) return;
   const tenants = _emailAuthByRequest.get(identity);
   const cached = tenants?.get(tenantId);
-  if (cached) tenants?.set(tenantId, { ...cached, createdAt: 0 });
+  if (cached && tenants) retireEmailAuthCacheEntry(tenants, tenantId, cached);
 }
 
 export function clearOAuthTokenKeyStoreForTests(): void {
