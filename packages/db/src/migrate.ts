@@ -34,6 +34,16 @@ interface CoreMigrationDatabaseShape {
   auditEventsExists: boolean;
   legacyFingerprintMatches: boolean;
   userObjectCount: number;
+  /**
+   * Objects that cannot belong to a fresh Steward target. This inventory is
+   * deliberately broader than `public` tables: schema-separated shared
+   * databases, views, sequences, routines, and user-defined types must all
+   * fail before migration bookkeeping is created.
+   */
+  unapprovedObjectCount?: number;
+  alwaysRejectedObjectCount?: number;
+  coreLedgerExists?: boolean;
+  coreLedgerShapeMatches?: boolean;
 }
 
 export interface MigrationTimeouts {
@@ -95,6 +105,11 @@ export function assertCoreMigrationLedgerIntegrity(
   database: CoreMigrationDatabaseShape,
   options: { requireComplete?: boolean } = {},
 ): void {
+  if ((database.alwaysRejectedObjectCount ?? 0) > 0) {
+    throw new Error(
+      "[migrate] Database contains objects outside the verified Steward and provider inventories; refusing a shared database",
+    );
+  }
   const expected = journal.entries.map((entry) => ({
     ...entry,
     hash: hashMigration(entry.tag),
@@ -141,14 +156,23 @@ export function assertCoreMigrationLedgerIntegrity(
       "[migrate] Core migration journal exists without public.tenants; refusing the wrong database",
     );
   }
+  if (database.coreLedgerExists && !database.coreLedgerShapeMatches) {
+    throw new Error(
+      "[migrate] drizzle.__drizzle_migrations does not match Steward's migration-ledger shape; refusing the wrong database",
+    );
+  }
   if (rows.length === 0 && database.tenantsExists && !database.legacyFingerprintMatches) {
     throw new Error(
       "[migrate] Non-empty database resembles Steward but does not match the complete legacy schema fingerprint; refusing to create migration bookkeeping",
     );
   }
-  if (rows.length === 0 && !database.tenantsExists && database.userObjectCount > 0) {
+  if (
+    rows.length === 0 &&
+    !database.tenantsExists &&
+    (database.unapprovedObjectCount ?? database.userObjectCount) > 0
+  ) {
     throw new Error(
-      "[migrate] Non-empty user schema has no Steward migration history; refusing a shared database",
+      "[migrate] Non-empty database has no Steward migration history; refusing a shared database",
     );
   }
   const auditMigrationIndex = journal.entries.findIndex(
@@ -290,28 +314,388 @@ export async function runMigrations(): Promise<{ applied: string[] }> {
         SELECT to_regclass(${LEGACY_BACKFILL_FINGERPRINT_TABLE}) AS r
       `) as Array<{ r: string | null }>;
       const databaseInventory = (await client`
-        SELECT
-          (
-            SELECT count(*) FROM pg_namespace candidate
-            WHERE candidate.nspname NOT IN (
-              'public', 'drizzle', 'steward_rls', 'steward_bootstrap',
-              'pg_catalog', 'information_schema'
+        WITH
+        allowed_extensions(extname) AS (
+          VALUES ('neon'), ('pg_stat_statements')
+        ),
+        ledger_shape AS (
+          SELECT
+            to_regclass('drizzle.__drizzle_migrations') IS NOT NULL AS ledger_exists,
+            (
+              NOT EXISTS (
+                SELECT 1
+                FROM pg_class relation
+                JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+                WHERE namespace.nspname = 'drizzle'
+              )
+              AND NOT EXISTS (
+                SELECT 1
+                FROM pg_proc routine
+                JOIN pg_namespace namespace ON namespace.oid = routine.pronamespace
+                WHERE namespace.nspname = 'drizzle'
+              )
+              AND NOT EXISTS (
+                SELECT 1
+                FROM pg_type type_inventory
+                JOIN pg_namespace namespace ON namespace.oid = type_inventory.typnamespace
+                WHERE namespace.nspname = 'drizzle'
+                  AND type_inventory.typrelid = 0
+                  AND type_inventory.typelem = 0
+              )
+            ) AS ledger_schema_empty,
+            (
+              EXISTS (
+                SELECT 1
+                FROM pg_class relation
+                JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+                WHERE namespace.nspname = 'drizzle'
+                  AND relation.relname = '__drizzle_migrations'
+                  AND relation.relkind = 'r'
+              )
+              AND (
+                SELECT count(*) = 3
+                  AND bool_or(
+                    column_inventory.column_name = 'id'
+                    AND column_inventory.data_type = 'integer'
+                    AND column_inventory.is_nullable = 'NO'
+                    AND column_inventory.column_default =
+                      'nextval(''drizzle.__drizzle_migrations_id_seq''::regclass)'
+                  )
+                  AND bool_or(
+                    column_inventory.column_name = 'hash'
+                    AND column_inventory.data_type = 'text'
+                    AND column_inventory.is_nullable = 'NO'
+                  )
+                  AND bool_or(
+                    column_inventory.column_name = 'created_at'
+                    AND column_inventory.data_type = 'bigint'
+                    AND column_inventory.is_nullable = 'YES'
+                  )
+                FROM information_schema.columns column_inventory
+                WHERE column_inventory.table_schema = 'drizzle'
+                  AND column_inventory.table_name = '__drizzle_migrations'
+              )
+              AND EXISTS (
+                SELECT 1
+                FROM pg_constraint constraint_inventory
+                WHERE constraint_inventory.conrelid =
+                    to_regclass('drizzle.__drizzle_migrations')
+                  AND constraint_inventory.contype = 'p'
+                  AND pg_get_constraintdef(constraint_inventory.oid) = 'PRIMARY KEY (id)'
+              )
+              AND pg_get_serial_sequence(
+                'drizzle.__drizzle_migrations',
+                'id'
+              ) = 'drizzle.__drizzle_migrations_id_seq'
+              AND NOT EXISTS (
+                SELECT 1
+                FROM pg_class relation
+                JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+                WHERE namespace.nspname = 'drizzle'
+                  AND relation.relkind IN ('r', 'p', 'v', 'm', 'S', 'f', 'c')
+                  AND NOT (
+                    (relation.relname = '__drizzle_migrations' AND relation.relkind = 'r')
+                    OR (
+                      relation.relkind = 'r'
+                      AND relation.relname ~ '^__drizzle_migrations_plugin_[a-z0-9_]+$'
+                      AND (
+                        SELECT count(*) = 3
+                          AND bool_or(
+                            column_inventory.column_name = 'id'
+                            AND column_inventory.data_type = 'integer'
+                            AND column_inventory.is_nullable = 'NO'
+                          )
+                          AND bool_or(
+                            column_inventory.column_name = 'hash'
+                            AND column_inventory.data_type = 'text'
+                            AND column_inventory.is_nullable = 'NO'
+                          )
+                          AND bool_or(
+                            column_inventory.column_name = 'created_at'
+                            AND column_inventory.data_type = 'bigint'
+                            AND column_inventory.is_nullable = 'YES'
+                          )
+                        FROM information_schema.columns column_inventory
+                        WHERE column_inventory.table_schema = 'drizzle'
+                          AND column_inventory.table_name = relation.relname
+                      )
+                      AND EXISTS (
+                        SELECT 1
+                        FROM pg_constraint constraint_inventory
+                        WHERE constraint_inventory.conrelid = relation.oid
+                          AND constraint_inventory.contype = 'p'
+                          AND pg_get_constraintdef(constraint_inventory.oid) =
+                            'PRIMARY KEY (id)'
+                      )
+                      AND pg_get_serial_sequence(
+                        format('%I.%I', namespace.nspname, relation.relname),
+                        'id'
+                      ) IS NOT NULL
+                    )
+                    OR (
+                      relation.relkind = 'S'
+                      AND EXISTS (
+                        SELECT 1
+                        FROM pg_depend dependency
+                        JOIN pg_class ledger_table
+                          ON ledger_table.oid = dependency.refobjid
+                        JOIN pg_namespace ledger_namespace
+                          ON ledger_namespace.oid = ledger_table.relnamespace
+                        JOIN pg_attribute ledger_column
+                          ON ledger_column.attrelid = ledger_table.oid
+                          AND ledger_column.attnum = dependency.refobjsubid
+                        WHERE dependency.classid = 'pg_class'::regclass
+                          AND dependency.objid = relation.oid
+                          AND dependency.refclassid = 'pg_class'::regclass
+                          AND dependency.deptype = 'a'
+                          AND ledger_namespace.nspname = 'drizzle'
+                          AND ledger_column.attname = 'id'
+                          AND (
+                            ledger_table.relname = '__drizzle_migrations'
+                            OR ledger_table.relname ~
+                              '^__drizzle_migrations_plugin_[a-z0-9_]+$'
+                          )
+                      )
+                    )
+                  )
+              )
+              AND NOT EXISTS (
+                SELECT 1
+                FROM pg_proc routine
+                JOIN pg_namespace namespace ON namespace.oid = routine.pronamespace
+                WHERE namespace.nspname = 'drizzle'
+              )
+              AND NOT EXISTS (
+                SELECT 1
+                FROM pg_type type_inventory
+                JOIN pg_namespace namespace ON namespace.oid = type_inventory.typnamespace
+                WHERE namespace.nspname = 'drizzle'
+                  AND type_inventory.typrelid = 0
+                  AND type_inventory.typelem = 0
+                  AND type_inventory.typtype IN ('d', 'e', 'r', 'm')
+              )
+            ) AS ledger_shape_matches
+        ),
+        namespaced_catalog_objects(classid, object_oid, namespace_oid, kind, identity) AS (
+          SELECT 'pg_collation'::regclass::oid, oid, collnamespace, 'collation', collname
+          FROM pg_collation
+          UNION ALL
+          SELECT 'pg_conversion'::regclass::oid, oid, connamespace, 'conversion', conname
+          FROM pg_conversion
+          UNION ALL
+          SELECT 'pg_operator'::regclass::oid, oid, oprnamespace, 'operator', oprname
+          FROM pg_operator
+          UNION ALL
+          SELECT 'pg_opclass'::regclass::oid, oid, opcnamespace, 'operator class', opcname
+          FROM pg_opclass
+          UNION ALL
+          SELECT 'pg_opfamily'::regclass::oid, oid, opfnamespace, 'operator family', opfname
+          FROM pg_opfamily
+          UNION ALL
+          SELECT 'pg_ts_config'::regclass::oid, oid, cfgnamespace, 'text search config', cfgname
+          FROM pg_ts_config
+          UNION ALL
+          SELECT 'pg_ts_dict'::regclass::oid, oid, dictnamespace, 'text search dictionary', dictname
+          FROM pg_ts_dict
+          UNION ALL
+          SELECT 'pg_ts_parser'::regclass::oid, oid, prsnamespace, 'text search parser', prsname
+          FROM pg_ts_parser
+          UNION ALL
+          SELECT 'pg_ts_template'::regclass::oid, oid, tmplnamespace, 'text search template', tmplname
+          FROM pg_ts_template
+        ),
+        unapproved_objects(kind, identity, always_reject) AS (
+          SELECT 'schema', namespace.nspname, true
+          FROM pg_namespace namespace
+          CROSS JOIN ledger_shape
+          WHERE namespace.nspname <> 'information_schema'
+            AND namespace.nspname NOT LIKE 'pg\\_%' ESCAPE '\\'
+            AND namespace.nspname NOT IN (
+              'public', 'neon', 'steward_rls', 'steward_bootstrap'
             )
-              AND candidate.nspname !~ '^pg_(toast|temp|toast_temp)'
-          ) + (
-            SELECT count(*) FROM pg_class object
-            JOIN pg_namespace candidate ON candidate.oid = object.relnamespace
-            WHERE candidate.nspname IN ('public', 'drizzle', 'steward_rls', 'steward_bootstrap')
-          ) + (
-            SELECT count(*) FROM pg_proc object
-            JOIN pg_namespace candidate ON candidate.oid = object.pronamespace
-            WHERE candidate.nspname IN ('public', 'drizzle', 'steward_rls', 'steward_bootstrap')
-          ) + (
-            SELECT count(*) FROM pg_type object
-            JOIN pg_namespace candidate ON candidate.oid = object.typnamespace
-            WHERE candidate.nspname IN ('public', 'drizzle', 'steward_rls', 'steward_bootstrap')
-              AND object.typtype IN ('c', 'd', 'e', 'm', 'r')
-          ) AS user_object_count,
+            AND NOT (
+              namespace.nspname = 'drizzle'
+              AND (
+                ledger_shape.ledger_shape_matches
+                OR ledger_shape.ledger_schema_empty
+              )
+            )
+
+          UNION ALL
+
+          SELECT
+            'relation',
+            format('%I.%I', namespace.nspname, relation.relname),
+            namespace.nspname = 'neon'
+              OR namespace.nspname NOT IN (
+                'public', 'drizzle', 'steward_rls', 'steward_bootstrap'
+              )
+              OR (
+                namespace.nspname = 'public'
+                AND relation.relkind IN ('v', 'm', 'f', 'c')
+              )
+          FROM pg_class relation
+          JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+          CROSS JOIN ledger_shape
+          WHERE namespace.nspname <> 'information_schema'
+            AND namespace.nspname NOT LIKE 'pg\\_%' ESCAPE '\\'
+            AND relation.relkind IN ('r', 'p', 'v', 'm', 'S', 'f', 'c')
+            AND NOT (
+              namespace.nspname = 'drizzle'
+              AND ledger_shape.ledger_shape_matches
+            )
+            AND NOT EXISTS (
+              SELECT 1
+              FROM pg_depend dependency
+              JOIN pg_extension extension_inventory
+                ON extension_inventory.oid = dependency.refobjid
+              JOIN allowed_extensions allowed
+                ON allowed.extname = extension_inventory.extname
+              WHERE dependency.classid = 'pg_class'::regclass
+                AND dependency.objid = relation.oid
+                AND dependency.objsubid = 0
+                AND dependency.refclassid = 'pg_extension'::regclass
+                AND dependency.deptype = 'e'
+            )
+
+          UNION ALL
+
+          SELECT
+            'routine',
+            format('%I.%I', namespace.nspname, routine.proname),
+            namespace.nspname = 'neon'
+              OR namespace.nspname NOT IN (
+                'public', 'steward_rls', 'steward_bootstrap'
+              )
+          FROM pg_proc routine
+          JOIN pg_namespace namespace ON namespace.oid = routine.pronamespace
+          WHERE namespace.nspname <> 'information_schema'
+            AND namespace.nspname NOT LIKE 'pg\\_%' ESCAPE '\\'
+            AND NOT EXISTS (
+              SELECT 1
+              FROM pg_depend dependency
+              JOIN pg_extension extension_inventory
+                ON extension_inventory.oid = dependency.refobjid
+              JOIN allowed_extensions allowed
+                ON allowed.extname = extension_inventory.extname
+              WHERE dependency.classid = 'pg_proc'::regclass
+                AND dependency.objid = routine.oid
+                AND dependency.objsubid = 0
+                AND dependency.refclassid = 'pg_extension'::regclass
+                AND dependency.deptype = 'e'
+            )
+
+          UNION ALL
+
+          SELECT
+            'type',
+            format('%I.%I', namespace.nspname, type_inventory.typname),
+            namespace.nspname = 'neon'
+              OR namespace.nspname NOT IN (
+                'public', 'steward_rls', 'steward_bootstrap'
+              )
+          FROM pg_type type_inventory
+          JOIN pg_namespace namespace ON namespace.oid = type_inventory.typnamespace
+          WHERE namespace.nspname <> 'information_schema'
+            AND namespace.nspname NOT LIKE 'pg\\_%' ESCAPE '\\'
+            AND type_inventory.typrelid = 0
+            AND type_inventory.typelem = 0
+            AND type_inventory.typtype IN ('d', 'e', 'r', 'm')
+            AND NOT EXISTS (
+              SELECT 1
+              FROM pg_depend dependency
+              JOIN pg_extension extension_inventory
+                ON extension_inventory.oid = dependency.refobjid
+              JOIN allowed_extensions allowed
+                ON allowed.extname = extension_inventory.extname
+              WHERE dependency.classid = 'pg_type'::regclass
+                AND dependency.objid = type_inventory.oid
+                AND dependency.objsubid = 0
+                AND dependency.refclassid = 'pg_extension'::regclass
+                AND dependency.deptype = 'e'
+            )
+
+          UNION ALL
+
+          SELECT
+            catalog_object.kind,
+            format('%I.%I', namespace.nspname, catalog_object.identity),
+            namespace.nspname = 'neon'
+              OR namespace.nspname NOT IN (
+                'public', 'steward_rls', 'steward_bootstrap'
+              )
+          FROM namespaced_catalog_objects catalog_object
+          JOIN pg_namespace namespace ON namespace.oid = catalog_object.namespace_oid
+          WHERE namespace.nspname <> 'information_schema'
+            AND namespace.nspname NOT LIKE 'pg\\_%' ESCAPE '\\'
+            AND NOT EXISTS (
+              SELECT 1
+              FROM pg_depend dependency
+              JOIN pg_extension extension_inventory
+                ON extension_inventory.oid = dependency.refobjid
+              JOIN allowed_extensions allowed
+                ON allowed.extname = extension_inventory.extname
+              WHERE dependency.classid = catalog_object.classid
+                AND dependency.objid = catalog_object.object_oid
+                AND dependency.objsubid = 0
+                AND dependency.refclassid = 'pg_extension'::regclass
+                AND dependency.deptype = 'e'
+            )
+
+          UNION ALL
+
+          SELECT 'extension', extension_inventory.extname, true
+          FROM pg_extension extension_inventory
+          WHERE extension_inventory.extname <> 'plpgsql'
+            AND NOT EXISTS (
+              SELECT 1
+              FROM allowed_extensions allowed
+              WHERE allowed.extname = extension_inventory.extname
+            )
+
+          UNION ALL
+
+          SELECT 'foreign data wrapper', wrapper.fdwname, true
+          FROM pg_foreign_data_wrapper wrapper
+          WHERE NOT EXISTS (
+            SELECT 1
+            FROM pg_depend dependency
+            JOIN pg_extension extension_inventory
+              ON extension_inventory.oid = dependency.refobjid
+            JOIN allowed_extensions allowed
+              ON allowed.extname = extension_inventory.extname
+            WHERE dependency.classid = 'pg_foreign_data_wrapper'::regclass
+              AND dependency.objid = wrapper.oid
+              AND dependency.objsubid = 0
+              AND dependency.refclassid = 'pg_extension'::regclass
+              AND dependency.deptype = 'e'
+          )
+
+          UNION ALL
+
+          SELECT 'foreign server', server.srvname, true FROM pg_foreign_server server
+
+          UNION ALL
+
+          SELECT 'event trigger', trigger.evtname, true FROM pg_event_trigger trigger
+
+          UNION ALL
+
+          SELECT 'publication', publication.pubname, true FROM pg_publication publication
+
+          UNION ALL
+
+          SELECT 'large object', large_object.oid::text, true
+          FROM pg_largeobject_metadata large_object
+        )
+        SELECT
+          (SELECT count(*)::int FROM unapproved_objects) AS user_object_count,
+          (SELECT ledger_exists FROM ledger_shape) AS ledger_exists,
+          (SELECT ledger_shape_matches FROM ledger_shape) AS ledger_shape_matches,
+          (SELECT count(*)::int FROM unapproved_objects) AS unapproved_object_count,
+          (
+            SELECT count(*)::int FROM unapproved_objects WHERE always_reject
+          ) AS always_rejected_object_count,
           (
             SELECT count(*) = 28
             FROM (VALUES
@@ -358,16 +742,30 @@ export async function runMigrations(): Promise<{ applied: string[] }> {
             ) AS required(index_name)
             WHERE to_regclass('public.' || required.index_name) IS NOT NULL
           ) AS legacy_fingerprint_matches
-        FROM pg_class relation
-        JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
-      `) as Array<{ user_object_count: number; legacy_fingerprint_matches: boolean }>;
+      `) as Array<{
+        user_object_count: number;
+        ledger_exists: boolean;
+        ledger_shape_matches: boolean;
+        unapproved_object_count: number;
+        always_rejected_object_count: number;
+        legacy_fingerprint_matches: boolean;
+      }>;
       const databaseShape: CoreMigrationDatabaseShape = {
         tenantsExists: Boolean(tenantsExists[0]?.r),
         auditEventsExists: Boolean(auditEventsExists[0]?.r),
         legacyFingerprintMatches: databaseInventory[0]?.legacy_fingerprint_matches === true,
         userObjectCount: databaseInventory[0]?.user_object_count ?? 0,
+        unapprovedObjectCount: databaseInventory[0]?.unapproved_object_count ?? 0,
+        alwaysRejectedObjectCount: databaseInventory[0]?.always_rejected_object_count ?? 0,
+        coreLedgerExists: databaseInventory[0]?.ledger_exists ?? false,
+        coreLedgerShapeMatches: databaseInventory[0]?.ledger_shape_matches ?? false,
       };
       let existingRows: CoreMigrationLedgerRow[] = [];
+      if (databaseShape.coreLedgerExists && !databaseShape.coreLedgerShapeMatches) {
+        throw new Error(
+          "[migrate] drizzle.__drizzle_migrations does not match Steward's migration-ledger shape; refusing the wrong database",
+        );
+      }
       if (ledgerExists[0]?.r) {
         existingRows = (await client`
           SELECT id, hash, created_at FROM drizzle.__drizzle_migrations ORDER BY id ASC

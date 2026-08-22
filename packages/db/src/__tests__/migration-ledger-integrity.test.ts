@@ -49,9 +49,9 @@ describe("core migration ledger integrity", () => {
     expect(inspect).toBeGreaterThan(0);
     expect(validate).toBeGreaterThan(inspect);
     expect(mutate).toBeGreaterThan(validate);
-    expect(source).toContain("FROM pg_namespace candidate");
-    expect(source).toContain("FROM pg_proc object");
-    expect(source).toContain("FROM pg_type object");
+    expect(source).toContain("FROM pg_namespace namespace");
+    expect(source).toContain("FROM pg_proc routine");
+    expect(source).toContain("FROM pg_type type_inventory");
     expect(source).toContain("AS user_object_count");
   });
 
@@ -116,6 +116,17 @@ describe("core migration ledger integrity", () => {
         auditEventsExists: false,
         legacyFingerprintMatches: false,
         userObjectCount: 1,
+        unapprovedObjectCount: 1,
+      }),
+    ).toThrow(/shared database/);
+
+    expect(() =>
+      assertCoreMigrationLedgerIntegrity([], journal, {
+        tenantsExists: false,
+        auditEventsExists: false,
+        legacyFingerprintMatches: false,
+        userObjectCount: 0,
+        unapprovedObjectCount: 1,
       }),
     ).toThrow(/shared database/);
 
@@ -130,6 +141,32 @@ describe("core migration ledger integrity", () => {
         userObjectCount: 251,
       }),
     ).not.toThrow();
+  });
+
+  test("rejects a malformed namespaced ledger before trusting its rows", () => {
+    expect(() =>
+      assertCoreMigrationLedgerIntegrity([], journal, {
+        tenantsExists: false,
+        auditEventsExists: false,
+        legacyFingerprintMatches: false,
+        userObjectCount: 0,
+        unapprovedObjectCount: 0,
+        coreLedgerExists: true,
+        coreLedgerShapeMatches: false,
+      }),
+    ).toThrow(/does not match Steward's migration-ledger shape/);
+  });
+
+  test("rejects foreign inventory even beside an otherwise valid Steward ledger", () => {
+    expect(() =>
+      assertCoreMigrationLedgerIntegrity(rows(journal.entries), journal, {
+        ...migratedDatabase,
+        unapprovedObjectCount: 1,
+        alwaysRejectedObjectCount: 1,
+        coreLedgerExists: true,
+        coreLedgerShapeMatches: true,
+      }),
+    ).toThrow(/outside the verified Steward and provider inventories/);
   });
 
   test("rejects claimed legacy-tip state without its complete schema fingerprint", () => {
