@@ -93,7 +93,7 @@ describe("capability plugin migrations: namespaced-journal isolation", () => {
     const pluginLedger = await client.query(
       `SELECT count(*)::int AS n FROM drizzle."__drizzle_migrations_plugin_capabilities"`,
     );
-    expect(pluginLedger.rows[0].n).toBeGreaterThanOrEqual(3);
+    expect(pluginLedger.rows[0].n).toBeGreaterThanOrEqual(4);
 
     // (c) the core journal carries NO capability-invocations migration row.
     const coreLedger = await client.query(

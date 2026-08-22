@@ -77,8 +77,15 @@ function stewardJwt(runtime: IAgentRuntime): string | undefined {
   return envValue(runtime, "STEWARD_JWT");
 }
 
+function stripTrailingSlashes(value: string): string {
+  let end = value.length;
+  while (end > 0 && value.charCodeAt(end - 1) === 0x2f) end -= 1;
+  return end === value.length ? value : value.slice(0, end);
+}
+
 function stewardApiUrl(runtime: IAgentRuntime): string | undefined {
-  const apiUrl = envValue(runtime, "STEWARD_API_URL")?.replace(/\/+$/, "");
+  const configuredUrl = envValue(runtime, "STEWARD_API_URL");
+  const apiUrl = configuredUrl ? stripTrailingSlashes(configuredUrl) : undefined;
   // Reject plaintext non-localhost URLs here too: this action reads the env URL
   // directly and would otherwise send the agent JWT in cleartext.
   if (apiUrl) assertSecureApiUrl(apiUrl);

@@ -8,6 +8,154 @@
 # ──────────────────────────────────────────────────────────────────────────────
 
 services:
+  steward-core-migrate:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: steward:latest
+    command: ["bun", "packages/api/scripts/migrate-production.ts", "core-through-0112"]
+    restart: "no"
+    networks: [milady-isolated]
+    environment:
+      MIGRATION_DATABASE_URL: "${STEWARD_ADMIN_DATABASE_URL:?STEWARD_ADMIN_DATABASE_URL must be set}"
+      STEWARD_ALLOW_INSECURE_DB: "${STEWARD_ALLOW_INSECURE_DB:-}"
+    depends_on:
+      steward-db:
+        condition: service_healthy
+
+  steward-rls-bootstrap:
+    image: postgres:16-alpine@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685
+    entrypoint: ["psql"]
+    command:
+      - "--no-psqlrc"
+      - "-v"
+      - "steward_app_role=steward_app"
+      - "-v"
+      - "steward_migration_role=steward_migrator"
+      - "-v"
+      - "steward_bootstrap_role=steward_bootstrap_owner"
+      - "-v"
+      - "steward_platform_role=steward_platform"
+      - "-f"
+      - "/scripts/postgres/rls-compose-bootstrap.sql"
+    restart: "no"
+    networks: [milady-isolated]
+    environment:
+      PGDATABASE: "${STEWARD_ADMIN_DATABASE_URL:?STEWARD_ADMIN_DATABASE_URL must be set}"
+      STEWARD_DB_APP_PASSWORD: "${STEWARD_DB_APP_PASSWORD:-}"
+      STEWARD_DB_MIGRATION_PASSWORD: "${STEWARD_DB_MIGRATION_PASSWORD:-}"
+      STEWARD_DB_PLATFORM_PASSWORD: "${STEWARD_DB_PLATFORM_PASSWORD:-}"
+      STEWARD_BOOTSTRAP_SET_ROLE_PASSWORDS: "${STEWARD_BOOTSTRAP_SET_ROLE_PASSWORDS:-false}"
+    volumes:
+      - ../scripts/postgres:/scripts/postgres:ro
+    depends_on:
+      steward-core-migrate:
+        condition: service_completed_successfully
+
+  steward-rls-prepare-0113:
+    image: postgres:16-alpine@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685
+    entrypoint: ["psql"]
+    command: ["--no-psqlrc", "-v", "steward_migration_role=steward_migrator", "-v", "steward_bootstrap_role=steward_bootstrap_owner", "-f", "/scripts/postgres/rls-prepare-personal-lifecycle.sql"]
+    restart: "no"
+    networks: [milady-isolated]
+    environment:
+      PGDATABASE: "${STEWARD_ADMIN_DATABASE_URL:?STEWARD_ADMIN_DATABASE_URL must be set}"
+    volumes:
+      - ../scripts/postgres:/scripts/postgres:ro
+    depends_on:
+      steward-rls-bootstrap:
+        condition: service_completed_successfully
+
+  steward-core-migrate-0113:
+    image: steward:latest
+    command: ["bun", "packages/api/scripts/migrate-production.ts", "core-through-0113"]
+    restart: "no"
+    networks: [milady-isolated]
+    environment:
+      MIGRATION_DATABASE_URL: "${MIGRATION_DATABASE_URL:?MIGRATION_DATABASE_URL must be set}"
+      STEWARD_ALLOW_INSECURE_DB: "${STEWARD_ALLOW_INSECURE_DB:-}"
+    depends_on:
+      steward-rls-prepare-0113:
+        condition: service_completed_successfully
+
+  steward-rls-upgrade-pre:
+    image: postgres:16-alpine@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685
+    entrypoint: ["psql"]
+    command: ["--no-psqlrc", "-v", "steward_app_role=steward_app", "-v", "steward_migration_role=steward_migrator", "-v", "steward_bootstrap_role=steward_bootstrap_owner", "-f", "/scripts/postgres/rls-upgrade-personal-lifecycle.sql"]
+    restart: "no"
+    networks: [milady-isolated]
+    environment:
+      PGDATABASE: "${STEWARD_ADMIN_DATABASE_URL:?STEWARD_ADMIN_DATABASE_URL must be set}"
+    volumes:
+      - ../scripts/postgres:/scripts/postgres:ro
+    depends_on:
+      steward-core-migrate-0113:
+        condition: service_completed_successfully
+
+  steward-core-migrate-final:
+    image: steward:latest
+    command: ["bun", "packages/api/scripts/migrate-production.ts", "core"]
+    restart: "no"
+    networks: [milady-isolated]
+    environment:
+      MIGRATION_DATABASE_URL: "${MIGRATION_DATABASE_URL:?MIGRATION_DATABASE_URL must be set}"
+      STEWARD_ALLOW_INSECURE_DB: "${STEWARD_ALLOW_INSECURE_DB:-}"
+    depends_on:
+      steward-rls-upgrade-pre:
+        condition: service_completed_successfully
+
+  steward-rls-bootstrap-final:
+    extends:
+      service: steward-rls-bootstrap
+    depends_on:
+      steward-plugin-migrate:
+        condition: service_completed_successfully
+
+  steward-rls-upgrade-final:
+    extends:
+      service: steward-rls-upgrade-pre
+    depends_on:
+      steward-rls-bootstrap-final:
+        condition: service_completed_successfully
+
+  steward-plugin-migrate:
+    image: steward:latest
+    command: ["bun", "packages/api/scripts/migrate-production.ts", "plugins"]
+    restart: "no"
+    networks: [milady-isolated]
+    environment:
+      MIGRATION_DATABASE_URL: "${MIGRATION_DATABASE_URL:?MIGRATION_DATABASE_URL must be set}"
+      STEWARD_PLUGINS: "${STEWARD_PLUGINS:-}"
+      STEWARD_ALLOW_INSECURE_DB: "${STEWARD_ALLOW_INSECURE_DB:-}"
+    depends_on:
+      steward-core-migrate-final:
+        condition: service_completed_successfully
+
+  steward-rls-activate:
+    image: postgres:16-alpine@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685
+    entrypoint: ["psql"]
+    command:
+      - "--no-psqlrc"
+      - "-v"
+      - "steward_app_role=steward_app"
+      - "-v"
+      - "steward_migration_role=steward_migrator"
+      - "-v"
+      - "steward_platform_role=steward_platform"
+      - "-v"
+      - "steward_bootstrap_role=steward_bootstrap_owner"
+      - "-f"
+      - "/scripts/postgres/rls-activate.sql"
+    restart: "no"
+    networks: [milady-isolated]
+    environment:
+      PGDATABASE: "${STEWARD_ADMIN_DATABASE_URL:?STEWARD_ADMIN_DATABASE_URL must be set}"
+    volumes:
+      - ../scripts/postgres:/scripts/postgres:ro
+    depends_on:
+      steward-rls-upgrade-final:
+        condition: service_completed_successfully
+
   # ── Steward API ──────────────────────────────────────────────────────────────
   steward:
     build:
@@ -29,7 +177,17 @@ services:
       # Explicit like the proxy service below: do not rely on the image's
       # ENV NODE_ENV=production for fail-closed production behavior (SEC-161).
       NODE_ENV: production
-      DATABASE_URL: "${DATABASE_URL:-postgresql://steward:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@steward-db:5432/steward}"
+      DATABASE_URL: "${DATABASE_URL:?DATABASE_URL must be set}"
+      STEWARD_APP_DATABASE_ROLE: "${STEWARD_APP_DATABASE_ROLE:-steward_app}"
+      STEWARD_BOOTSTRAP_DATABASE_ROLE: "${STEWARD_BOOTSTRAP_DATABASE_ROLE:-steward_bootstrap_owner}"
+      STEWARD_MIGRATION_DATABASE_ROLE: "${STEWARD_MIGRATION_DATABASE_ROLE:-steward_migrator}"
+      STEWARD_PLATFORM_DATABASE_URL: "${STEWARD_PLATFORM_DATABASE_URL:?STEWARD_PLATFORM_DATABASE_URL must be set}"
+      STEWARD_PLATFORM_DATABASE_ROLE: "${STEWARD_PLATFORM_DATABASE_ROLE:-steward_platform}"
+      SKIP_MIGRATIONS: "true"
+      # The bundled PostgreSQL endpoint is intentionally plaintext on the
+      # isolated Compose network. External database URLs must omit this opt-out
+      # and provide verified TLS instead.
+      STEWARD_ALLOW_INSECURE_DB: "${STEWARD_ALLOW_INSECURE_DB:-}"
       # The bundled Redis is reachable only on the Compose-internal network.
       # A production API without this wiring denies every non-probe request.
       REDIS_URL: "redis://redis:6379"
@@ -64,6 +222,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      steward-rls-activate:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "bun", "-e", "const r=await fetch('http://localhost:3200/ready');process.exit(r.ok?0:1)"]
       interval: 30s
@@ -86,7 +246,12 @@ services:
       - "127.0.0.1:8080:8080"
     environment:
       STEWARD_PROXY_PORT: "8080"
-      DATABASE_URL: "${DATABASE_URL:-postgresql://steward:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@steward-db:5432/steward}"
+      DATABASE_URL: "${DATABASE_URL:?DATABASE_URL must be set}"
+      STEWARD_APP_DATABASE_ROLE: "${STEWARD_APP_DATABASE_ROLE:-steward_app}"
+      STEWARD_BOOTSTRAP_DATABASE_ROLE: "${STEWARD_BOOTSTRAP_DATABASE_ROLE:-steward_bootstrap_owner}"
+      STEWARD_MIGRATION_DATABASE_ROLE: "${STEWARD_MIGRATION_DATABASE_ROLE:-steward_migrator}"
+      STEWARD_PLATFORM_DATABASE_ROLE: "${STEWARD_PLATFORM_DATABASE_ROLE:-steward_platform}"
+      STEWARD_ALLOW_INSECURE_DB: "${STEWARD_ALLOW_INSECURE_DB:-}"
       STEWARD_ALLOW_UNVERIFIED_DB_TLS: "${STEWARD_ALLOW_UNVERIFIED_DB_TLS:-}"
       STEWARD_MASTER_PASSWORD: "${STEWARD_MASTER_PASSWORD:?Set STEWARD_MASTER_PASSWORD in .env}"
       # JWT secret is required in production (auth verifyToken refuses dev fallback).

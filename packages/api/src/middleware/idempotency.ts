@@ -87,6 +87,30 @@ function parsePositiveInt(value: string | undefined, fallback: number): number {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
+export type IdempotencyRuntimeAuthority = Readonly<{
+  ttlMs: number;
+  metricsTtlSeconds: number;
+  maxEntries: number;
+  allowMemoryFallback: boolean;
+}>;
+
+/** Resolve idempotency policy from the active immutable request binding. */
+export function resolveIdempotencyRuntimeAuthority(): IdempotencyRuntimeAuthority {
+  const metricsTtlMs = parsePositiveInt(
+    runtimeEnvironmentValue("STEWARD_IDEMPOTENCY_METRICS_TTL_MS"),
+    DEFAULT_METRICS_TTL_MS,
+  );
+  return Object.freeze({
+    ttlMs: parsePositiveInt(runtimeEnvironmentValue("STEWARD_IDEMPOTENCY_TTL_MS"), DEFAULT_TTL_MS),
+    metricsTtlSeconds: Math.max(1, Math.ceil(metricsTtlMs / 1000)),
+    maxEntries: parsePositiveInt(
+      runtimeEnvironmentValue("STEWARD_IDEMPOTENCY_MAX_ENTRIES"),
+      DEFAULT_MAX_ENTRIES,
+    ),
+    allowMemoryFallback: runtimeEnvironmentValue("NODE_ENV") !== "production",
+  });
+}
+
 function emptyIdempotencyCounters(): IdempotencyMetricCounters {
   return {
     observed: 0,
@@ -120,11 +144,7 @@ function metricsRedisKey(tenantId: string): string {
 }
 
 function metricsTtlSeconds(): number {
-  const ttlMs = parsePositiveInt(
-    runtimeEnvironmentValue("STEWARD_IDEMPOTENCY_METRICS_TTL_MS"),
-    DEFAULT_METRICS_TTL_MS,
-  );
-  return Math.max(1, Math.ceil(ttlMs / 1000));
+  return resolveIdempotencyRuntimeAuthority().metricsTtlSeconds;
 }
 
 function tenantIdFromPath(pathname: string): string | null {
@@ -153,6 +173,10 @@ function recordIdempotencyMetric(
   counter: keyof IdempotencyMetricCounters,
   now = Date.now(),
 ) {
+  // Capture the active request binding before the fire-and-forget Redis write
+  // crosses an await boundary. A concurrent Worker request must not be able to
+  // substitute its metrics retention policy.
+  const metricRetentionSeconds = metricsTtlSeconds();
   let bucket = idempotencyMetricBuckets.get(tenantId);
   if (!bucket) {
     if (idempotencyMetricBuckets.size >= MAX_METRIC_TENANTS) {
@@ -168,13 +192,14 @@ function recordIdempotencyMetric(
   }
   bucket.counters[counter] += 1;
   bucket.lastSeenAt = now;
-  void recordIdempotencyMetricInRedis(tenantId, counter, now);
+  void recordIdempotencyMetricInRedis(tenantId, counter, now, metricRetentionSeconds);
 }
 
 async function recordIdempotencyMetricInRedis(
   tenantId: string,
   counter: keyof IdempotencyMetricCounters,
   now: number,
+  metricRetentionSeconds: number,
 ): Promise<void> {
   const redis = getRedisClient();
   if (!redis) return;
@@ -185,7 +210,7 @@ async function recordIdempotencyMetricInRedis(
     if (!existingWindow) pipeline.hset(key, "windowStartedAt", String(now));
     pipeline.hset(key, "lastSeenAt", String(now));
     pipeline.hincrby(key, counter, 1);
-    pipeline.expire(key, metricsTtlSeconds());
+    pipeline.expire(key, metricRetentionSeconds);
     await pipeline.exec();
   } catch (error) {
     console.error(
@@ -408,23 +433,32 @@ export class MemoryIdempotencyStore implements IdempotencyStore {
 }
 
 export class RedisIdempotencyStore implements IdempotencyStore {
-  private readonly fallback = new MemoryIdempotencyStore(
-    parsePositiveInt(
-      runtimeEnvironmentValue("STEWARD_IDEMPOTENCY_MAX_ENTRIES"),
-      DEFAULT_MAX_ENTRIES,
-    ),
-  );
+  private readonly fallbacks = new Map<number, MemoryIdempotencyStore>();
+
+  private fallback(): MemoryIdempotencyStore {
+    const { maxEntries } = resolveIdempotencyRuntimeAuthority();
+    const existing = this.fallbacks.get(maxEntries);
+    if (existing) return existing;
+    // Capacity is deployment authority rather than caller input, but keep the
+    // number of retained Worker binding generations bounded regardless.
+    if (this.fallbacks.size >= 8) {
+      throw new Error("Too many idempotency fallback capacity generations");
+    }
+    const fallback = new MemoryIdempotencyStore(maxEntries);
+    this.fallbacks.set(maxEntries, fallback);
+    return fallback;
+  }
 
   private client() {
     const redis = getRedisClient();
     if (redis) return redis;
-    if (runtimeEnvironmentValue("NODE_ENV") !== "production") return null;
+    if (resolveIdempotencyRuntimeAuthority().allowMemoryFallback) return null;
     throw new Error("Durable idempotency store unavailable");
   }
 
   async get(key: string): Promise<IdempotencyEntry | undefined> {
     const redis = this.client();
-    if (!redis) return this.fallback.get(key);
+    if (!redis) return this.fallback().get(key);
     return parseEntry(await redis.get(`idempotency:${key}`));
   }
 
@@ -440,7 +474,7 @@ export class RedisIdempotencyStore implements IdempotencyStore {
     entry: Omit<IdempotencyEntry, "status" | "response">,
   ): Promise<IdempotencyEntry | undefined> {
     const redis = this.client();
-    if (!redis) return this.fallback.reserve(key, entry);
+    if (!redis) return this.fallback().reserve(key, entry);
     const redisKey = `idempotency:${key}`;
     const value = serializeEntry({ ...entry, status: "processing" });
     const ttlMs = Math.max(1, entry.expiresAt - Date.now());
@@ -454,7 +488,7 @@ export class RedisIdempotencyStore implements IdempotencyStore {
     response?: NonNullable<IdempotencyEntry["response"]>,
   ): Promise<void> {
     const redis = this.client();
-    if (!redis) return this.fallback.setCompleted(key, response);
+    if (!redis) return this.fallback().setCompleted(key, response);
     const existing = await this.get(key);
     if (!existing) return;
     const ttlMs = Math.max(1, existing.expiresAt - Date.now());
@@ -468,7 +502,7 @@ export class RedisIdempotencyStore implements IdempotencyStore {
 
   async delete(key: string): Promise<void> {
     const redis = this.client();
-    if (!redis) return this.fallback.delete(key);
+    if (!redis) return this.fallback().delete(key);
     await redis.del(`idempotency:${key}`);
   }
 }
@@ -627,10 +661,10 @@ export function idempotencyMiddleware(options?: { store?: IdempotencyStore; ttlM
   const store = options?.store ?? defaultIdempotencyStore;
 
   return createMiddleware<{ Variables: AppVariables }>(async (c, next) => {
+    // Resolve once from the immutable request snapshot, before any body/hash or
+    // store await. Explicit test/application options remain authoritative.
+    const ttlMs = options?.ttlMs ?? resolveIdempotencyRuntimeAuthority().ttlMs;
     if (!MUTATING_METHODS.has(c.req.method.toUpperCase())) return next();
-    const ttlMs =
-      options?.ttlMs ??
-      parsePositiveInt(runtimeEnvironmentValue("STEWARD_IDEMPOTENCY_TTL_MS"), DEFAULT_TTL_MS);
 
     const key = c.req.header("Idempotency-Key");
     if (!key) return next();

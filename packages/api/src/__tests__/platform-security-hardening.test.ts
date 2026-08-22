@@ -18,10 +18,9 @@ const rlsMigrationSource = readFileSync(
   "utf8",
 );
 const personalLifecycleMigrationSource = readFileSync(
-  join(apiRoot, "..", "..", "db", "drizzle", "0113_personal_tenant_account_lifecycle.sql"),
+  join(apiRoot, "..", "..", "db", "drizzle", "0123_personal_lifecycle_invariants.sql"),
   "utf8",
 );
-
 function expectBefore(first: string, second: string) {
   const firstIndex = platformSource.indexOf(first);
   const secondIndex = platformSource.indexOf(second, firstIndex);
@@ -95,6 +94,7 @@ describe("platform security hardening", () => {
     expect(platformSource.indexOf("isReservedTenantId(body.id)", tenantCreateStart)).toBeLessThan(
       platformSource.indexOf(".insert(tenants)", tenantCreateStart),
     );
+    expect(platformSource).toContain('return tenantId.toLowerCase().startsWith("personal-")');
   });
 
   it("prevents tenant id reuse when retained tenant-scoped state exists", () => {
@@ -355,6 +355,7 @@ describe("platform security hardening", () => {
     expect(transferRoute).toContain("withPlatformLinkedAccountTransaction(");
     expect(transferRoute).toContain("appendRequiredAudit({");
     expect(transferRoute).not.toContain("set({ userId: fromUserId })");
+
     const deactivateStart = platformSource.indexOf('platform.patch("/users/:userId/deactivate"');
     const deactivateRoute = platformSource.slice(
       deactivateStart,
@@ -496,16 +497,17 @@ describe("platform security hardening", () => {
       tenantDeleteStart,
       platformSource.indexOf('platform.put("/tenants/:id/policies"', tenantDeleteStart),
     );
-    expect(tenantDeleteRoute.indexOf("revocationStore.revokeAgentTokens(agent.id)")).toBeLessThan(
-      tenantDeleteRoute.indexOf("tx.delete(tenants)"),
-    );
+    expect(tenantDeleteRoute).not.toContain("revocationStore.revokeAgentTokens(agent.id)");
+    expect(tenantDeleteRoute).not.toContain("revocationStore.revokeUserTokens(member.userId)");
+    expect(tenantDeleteRoute).toContain("applyCommittedTenantDeletionRevocations");
     expect(
-      tenantDeleteRoute.indexOf("revocationStore.revokeUserTokens(member.userId)"),
-    ).toBeLessThan(tenantDeleteRoute.indexOf("tx.delete(tenants)"));
-    expect(tenantDeleteRoute).toContain('action: "tenant.delete.token_revocation_completed"');
-    expect(
-      tenantDeleteRoute.indexOf('action: "tenant.delete.token_revocation_completed"'),
-    ).toBeLessThan(tenantDeleteRoute.indexOf("tx.delete(tenants)"));
+      tenantDeleteRoute.lastIndexOf("applyCommittedTenantDeletionRevocations"),
+    ).toBeGreaterThan(tenantDeleteRoute.indexOf("tx.delete(tenants)"));
+    expect(platformSource).toContain('action: "tenant.delete.token_revocation_completed"');
+    expect(platformSource).toContain("revocationJobId");
+    expect(platformSource).toContain("agentIds: tenantAgents.map");
+    expect(platformSource).toContain("if (failures > 0) return");
+    expect(platformSource).not.toContain('"tenant.delete.token_revocation_deferred"');
   });
 
   it("removes non-cascading tenant credential state during tenant deletion", () => {
@@ -557,8 +559,9 @@ describe("platform security hardening", () => {
     expect(personalLifecycleMigrationSource).toContain(
       "personal_tenant_id text := 'personal-' || p_user_id::text",
     );
+    expect(personalLifecycleMigrationSource).toContain("count(*) FILTER (");
     expect(personalLifecycleMigrationSource).toContain(
-      "count(*) FILTER (WHERE ut.user_id = p_user_id AND ut.role = 'owner')",
+      "WHERE ut.user_id = p_user_id AND ut.role = 'owner'",
     );
     expect(personalLifecycleMigrationSource).toContain(
       "Personal tenant membership invariant violated",

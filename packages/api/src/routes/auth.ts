@@ -125,6 +125,7 @@ import {
   tenants,
   users,
   userTenants,
+  withTenantAuditedTransactionOnDb,
   withTenantRlsTransaction,
   withTenantTransactionDatabase,
 } from "@stwd/db";
@@ -159,6 +160,7 @@ import {
   isAllowedOidcClientSecretEnvForTenant,
   normalizeOidcProviders,
 } from "../services/oidc-provider-config";
+import { withPlatformAuthorityDatabase } from "../services/platform-authority-database";
 import { socketPeerFromEnv } from "../services/runtime-gate";
 import { buildSamlServiceProviderUrls } from "../services/saml-sso-config";
 import { lockUserSession } from "../services/session-lock";
@@ -1377,8 +1379,6 @@ let _authStoreSources: AuthStoreSources = {
 let _phoneAuth: PhoneAuth | null = null;
 interface RuntimeAuthClientCache {
   phoneAuth: PhoneAuth | null;
-  passkeyAuth: PasskeyAuth | null;
-  readonly passkeyAuthByOrigin: Map<string, PasskeyAuth>;
 }
 let _runtimeAuthClients = new WeakMap<object, RuntimeAuthClientCache>();
 
@@ -1387,7 +1387,7 @@ function runtimeAuthClientCache(): RuntimeAuthClientCache | null {
   if (!identity) return null;
   let cache = _runtimeAuthClients.get(identity);
   if (!cache) {
-    cache = { phoneAuth: null, passkeyAuth: null, passkeyAuthByOrigin: new Map() };
+    cache = { phoneAuth: null };
     _runtimeAuthClients.set(identity, cache);
   }
   return cache;
@@ -1471,9 +1471,9 @@ export async function initAuthStores(usePostgres = false): Promise<void> {
   initUserLinkChallengeStores(challengeBackend);
 
   // Reset singletons so they pick up the new stores on next use
-  _passkeyAuth = null;
+  _passkeyAuthByRequest = new WeakMap();
   _phoneAuth = null;
-  _passkeyAuthByOrigin.clear();
+  _passkeyAuthWithoutRequest.clear();
   _runtimeAuthClients = new WeakMap();
   _emailAuthByRequest = new WeakMap();
 }
@@ -1665,8 +1665,9 @@ export function assertAuthStoresAreSafe(sources: AuthStoreSources = getAuthStore
   if (
     !requiresDurableStores ||
     runtimeEnvironmentValue("STEWARD_ALLOW_MEMORY_AUTH_STORES") === "true"
-  )
+  ) {
     return;
+  }
 
   const memoryStores = Object.entries(sources)
     .filter(([, source]) => source === "memory")
@@ -1694,8 +1695,43 @@ export function decryptImportSessionJson<T>(value: string): T {
   return JSON.parse(getOAuthKeyStore().decrypt(encrypted)) as T;
 }
 
-let _passkeyAuth: PasskeyAuth | null = null;
-const _passkeyAuthByOrigin = new Map<string, PasskeyAuth>();
+let _passkeyAuthByRequest = new WeakMap<object, Map<string, PasskeyAuth>>();
+const _passkeyAuthWithoutRequest = new Map<string, PasskeyAuth>();
+
+export type PasskeyRuntimeAuthority = Readonly<{
+  defaultRpID: string;
+  defaultOrigin: string;
+  rpName: string;
+  allowedOrigins: readonly string[];
+}>;
+
+/** Resolve WebAuthn authority from the active immutable request binding. */
+export function resolvePasskeyRuntimeAuthority(): PasskeyRuntimeAuthority {
+  const defaultRpID = runtimeEnvironmentValue("PASSKEY_RP_ID") || "steward.fi";
+  const defaultOrigin = runtimeEnvironmentValue("PASSKEY_ORIGIN") || "https://steward.fi";
+  const rpName = runtimeEnvironmentValue("PASSKEY_RP_NAME") || "Steward";
+  const allowedOrigins = (runtimeEnvironmentValue("PASSKEY_ALLOWED_ORIGINS") || defaultOrigin)
+    .split(",")
+    .map((origin) => origin.trim())
+    .filter(Boolean);
+  return Object.freeze({
+    defaultRpID,
+    defaultOrigin,
+    rpName,
+    allowedOrigins: Object.freeze(allowedOrigins),
+  });
+}
+
+function passkeyAuthCache(): Map<string, PasskeyAuth> {
+  const identity = runtimeEnvironmentIdentity();
+  if (!identity) return _passkeyAuthWithoutRequest;
+  let cache = _passkeyAuthByRequest.get(identity);
+  if (!cache) {
+    cache = new Map();
+    _passkeyAuthByRequest.set(identity, cache);
+  }
+  return cache;
+}
 
 /**
  * Get PasskeyAuth for a specific origin (multi-tenant passkey support).
@@ -1742,30 +1778,21 @@ function resolveRpID(requestHostname: string, allowedOrigins: string[], fallback
 }
 
 function getPasskeyAuth(requestOrigin?: string): PasskeyAuth {
-  const runtimeCache = runtimeAuthClientCache();
-  const defaultRpID = runtimeEnvironmentValue("PASSKEY_RP_ID") || "steward.fi";
-  const defaultOrigin = runtimeEnvironmentValue("PASSKEY_ORIGIN") || "https://steward.fi";
-  const rpName = runtimeEnvironmentValue("PASSKEY_RP_NAME") || "Steward";
+  const { defaultRpID, defaultOrigin, rpName, allowedOrigins } = resolvePasskeyRuntimeAuthority();
+  const cache = passkeyAuthCache();
 
   // If no origin provided, use the default singleton
   if (!requestOrigin) {
-    const cachedDefault = runtimeCache?.passkeyAuth ?? _passkeyAuth;
-    if (!cachedDefault) {
-      const origins = (runtimeEnvironmentValue("PASSKEY_ALLOWED_ORIGINS") || defaultOrigin)
-        .split(",")
-        .map((o) => o.trim())
-        .filter(Boolean);
-      const auth = new PasskeyAuth({
-        rpName,
-        rpID: defaultRpID,
-        origin: origins.length > 1 ? origins : defaultOrigin,
-        challengeStore: getChallengeStore(),
-      });
-      if (runtimeCache) runtimeCache.passkeyAuth = auth;
-      else _passkeyAuth = auth;
-      return auth;
-    }
-    return cachedDefault;
+    const cached = cache.get("default:configuration");
+    if (cached) return cached;
+    const auth = new PasskeyAuth({
+      rpName,
+      rpID: defaultRpID,
+      origin: allowedOrigins.length > 1 ? [...allowedOrigins] : defaultOrigin,
+      challengeStore: getChallengeStore(),
+    });
+    cache.set("default:configuration", auth);
+    return auth;
   }
 
   // Parse origin to get hostname
@@ -1777,10 +1804,7 @@ function getPasskeyAuth(requestOrigin?: string): PasskeyAuth {
   }
 
   // Validate against allowed origins
-  const allowed = (runtimeEnvironmentValue("PASSKEY_ALLOWED_ORIGINS") || defaultOrigin)
-    .split(",")
-    .map((o) => o.trim())
-    .filter(Boolean);
+  const allowed = [...allowedOrigins];
   if (!allowed.includes(requestOrigin) && requestHostname !== defaultRpID) {
     return getPasskeyAuth(); // not in allowed list, use default
   }
@@ -1791,8 +1815,8 @@ function getPasskeyAuth(requestOrigin?: string): PasskeyAuth {
   const rpID = resolveRpID(requestHostname, allowed, defaultRpID);
 
   // Cache per rpID
-  const passkeyAuthByOrigin = runtimeCache?.passkeyAuthByOrigin ?? _passkeyAuthByOrigin;
-  const cached = passkeyAuthByOrigin.get(rpID);
+  const cacheKey = `rp:${rpID}`;
+  const cached = cache.get(cacheKey);
   if (cached) return cached;
 
   // Origin list passed to PasskeyAuth covers all variants the browser may
@@ -1805,8 +1829,13 @@ function getPasskeyAuth(requestOrigin?: string): PasskeyAuth {
     origin: acceptedOrigins,
     challengeStore: getChallengeStore(),
   });
-  passkeyAuthByOrigin.set(rpID, auth);
+  cache.set(cacheKey, auth);
   return auth;
+}
+
+/** Test seam for verifying request-bound PasskeyAuth generation isolation. */
+export function _getPasskeyAuthForTests(requestOrigin?: string): PasskeyAuth {
+  return getPasskeyAuth(requestOrigin);
 }
 
 // ─── EmailAuth cache ──────────────────────────────────────────────────────────
@@ -2517,20 +2546,22 @@ async function writeAuthLoginAudit(
   claims: Record<string, unknown> | undefined,
   metadata: Record<string, unknown> = {},
 ): Promise<void> {
-  await writeAuditEvent({
-    tenantId,
-    actorType: "user",
-    actorId: userId,
-    action: "auth.login",
-    resourceType: "session",
-    metadata: {
-      method: typeof claims?.authMethod === "string" ? claims.authMethod : "unknown",
-      ...metadata,
-    },
-    ipAddress: c.req.header("x-forwarded-for") ?? null,
-    userAgent: c.req.header("user-agent") ?? null,
-    requestId: c.req.header("x-request-id") ?? null,
-  });
+  await withVerifiedAuthTenant(tenantId, userId, () =>
+    writeAuditEvent({
+      tenantId,
+      actorType: "user",
+      actorId: userId,
+      action: "auth.login",
+      resourceType: "session",
+      metadata: {
+        method: typeof claims?.authMethod === "string" ? claims.authMethod : "unknown",
+        ...metadata,
+      },
+      ipAddress: c.req.header("x-forwarded-for") ?? null,
+      userAgent: c.req.header("user-agent") ?? null,
+      requestId: c.get("requestId") ?? c.req.header("x-request-id") ?? null,
+    }),
+  );
 }
 
 type WalletTenantResult = {
@@ -2589,7 +2620,7 @@ function ethereumWalletTenantId(address: string): string {
   return `eth:${address.toLowerCase()}`;
 }
 
-function getAllowedSiweDomains(): string[] {
+export function getAllowedSiweDomains(): string[] {
   const raw = runtimeEnvironmentValue("SIWE_ALLOWED_DOMAINS")?.trim();
   if (raw) {
     const domains = raw
@@ -2730,10 +2761,16 @@ async function ensurePersonalTenant(userId: string, displayName: string): Promis
   const tenantId = `personal-${userId}`;
   return withVerifiedAuthTenant(tenantId, userId, async () => {
     const { hash } = generateApiKey();
-    await getDb()
-      .insert(tenants)
-      .values({ id: tenantId, name: displayName, apiKeyHash: hash })
-      .onConflictDoNothing();
+    await getDb().transaction(async (tx) => {
+      await tx
+        .insert(tenants)
+        .values({ id: tenantId, name: displayName, apiKeyHash: hash })
+        .onConflictDoNothing();
+      await tx
+        .insert(userTenants)
+        .values({ userId, tenantId, role: "owner" })
+        .onConflictDoNothing();
+    });
     return tenantId;
   });
 }
@@ -2749,7 +2786,24 @@ async function ensureUserTenantLink(
   role: string = "member",
 ): Promise<void> {
   await withVerifiedAuthTenant(tenantId, userId, async () => {
-    await getDb().insert(userTenants).values({ userId, tenantId, role }).onConflictDoNothing();
+    // Migration 0123 enforces that a canonical personal tenant has exactly
+    // one owner and no member-shaped alias. BEFORE triggers run even when a
+    // duplicate insert would later be suppressed by ON CONFLICT, so derive
+    // the only valid role before attempting the idempotent write.
+    const membershipRole = tenantId === `personal-${userId}` ? "owner" : role;
+    if (tenantId === "default") {
+      if (membershipRole !== "member" && membershipRole !== GUEST_TENANT_ROLE) {
+        throw new Error("Default tenant membership role is not permitted");
+      }
+      await getDb().execute(
+        sql`SELECT steward_bootstrap.ensure_default_membership(${userId}::uuid, ${membershipRole})`,
+      );
+      return;
+    }
+    await getDb()
+      .insert(userTenants)
+      .values({ userId, tenantId, role: membershipRole })
+      .onConflictDoNothing();
   });
 }
 
@@ -3333,19 +3387,7 @@ async function buildAuthOrMfaResponse(
   }
 
   if (c) {
-    await writeAuditEvent({
-      tenantId,
-      actorType: "user",
-      actorId: userId,
-      action: "auth.login",
-      resourceType: "session",
-      metadata: {
-        method: typeof claims.authMethod === "string" ? claims.authMethod : "unknown",
-      },
-      ipAddress: c.req.header("x-forwarded-for") ?? null,
-      userAgent: c.req.header("user-agent") ?? null,
-      requestId: c.get("requestId") ?? null,
-    });
+    await writeAuthLoginAudit(c, tenantId, userId, claims);
   }
   const token = await createSessionToken(address, tenantId, sessionClaims);
   const refreshToken = await createRefreshToken(userId, tenantId, sessionClaims);
@@ -9484,6 +9526,12 @@ auth.post("/guest", async (c) => {
   // session cannot satisfy requireTenantLevel(). onConflictDoNothing keeps this
   // idempotent against a racing insert on the (userId, tenantId) unique index.
   await withVerifiedAuthTenant(tenantId, guest.id, async () => {
+    if (tenantId === "default") {
+      await getDb().execute(
+        sql`SELECT steward_bootstrap.ensure_default_membership(${guest.id}::uuid, ${GUEST_TENANT_ROLE})`,
+      );
+      return;
+    }
     await getDb()
       .insert(userTenants)
       .values({ userId: guest.id, tenantId, role: GUEST_TENANT_ROLE })
@@ -9567,24 +9615,35 @@ auth.delete("/guest", async (c) => {
     requestId: c.get("requestId") ?? null,
   });
 
-  await db.transaction(async (tx) => {
-    await tx.update(users).set({ deactivatedAt: new Date() }).where(eq(users.id, userId));
-    await tx.delete(refreshTokens).where(eq(refreshTokens.userId, userId));
-  });
-  await revocationStore.revokeUserTokens(userId);
-
-  await writeAuditEvent({
-    tenantId,
-    actorType: "user",
-    actorId: userId,
-    action: "auth.guest.deleted",
-    resourceType: "user",
-    resourceId: userId,
-    metadata: { method: "guest", wasAlreadyDeactivated: user.deactivatedAt !== null },
-    ipAddress: c.req.header("x-forwarded-for") ?? null,
-    userAgent: c.req.header("user-agent") ?? null,
-    requestId: c.get("requestId") ?? null,
-  });
+  const issuedBefore = await withPlatformAuthorityDatabase((platformDb) =>
+    withTenantAuditedTransactionOnDb(platformDb, tenantId, async (txRaw, appendRequiredAudit) => {
+      const tx = txRaw as typeof platformDb;
+      await tx.execute(sql`SELECT set_config('steward.tenant_id', 'platform', true)`);
+      const [updated] = bootstrapRows<{ tokens_revoked_before: number }>(
+        await tx.execute(sql`
+        SELECT * FROM steward_bootstrap.platform_set_user_deactivation(${userId}::uuid, true)
+      `),
+      );
+      if (!updated) throw new Error("User not found");
+      await appendRequiredAudit({
+        tenantId,
+        actorType: "user",
+        actorId: userId,
+        action: "auth.guest.deleted",
+        resourceType: "user",
+        resourceId: userId,
+        metadata: { method: "guest", wasAlreadyDeactivated: user.deactivatedAt !== null },
+        ipAddress: c.req.header("x-forwarded-for") ?? null,
+        userAgent: c.req.header("user-agent") ?? null,
+        requestId: c.get("requestId") ?? null,
+      });
+      return Number(updated.tokens_revoked_before);
+    }),
+  );
+  // The durable database boundary is authoritative. A guest cannot use the
+  // now-revoked token to retry this request, so cache refresh is deliberately
+  // best-effort after commit rather than an unreachable 503 contract.
+  await revocationStore.revokeUserTokens(userId, issuedBefore).catch(() => undefined);
 
   return c.json({
     ok: true,
@@ -10839,7 +10898,7 @@ async function provisionOAuthUser(opts: {
  * APP_URL is mandatory in production so a forged Host/X-Forwarded-Proto header
  * cannot influence the provider redirect_uri.
  */
-function authCallbackBaseUrl(c: Context): string {
+export function authCallbackBaseUrl(c: Context): string {
   const configured = runtimeEnvironmentValue("APP_URL")?.trim();
   if (configured) return configured.replace(/\/$/, "");
   if (runtimeEnvironmentValue("NODE_ENV") === "production") {
@@ -10978,7 +11037,7 @@ async function exchangeOidcAuthorizationCode(opts: {
     if (!isAllowedOidcClientSecretEnvForTenant(provider.clientSecretEnv, tenantId)) {
       throw new Error("OIDC client secret env is outside the allowed tenant namespace");
     }
-    const secret = runtimeEnvironmentValue(provider.clientSecretEnv);
+    const secret = getConfiguredOidcClientSecret(provider.clientSecretEnv);
     if (!secret) throw new Error(`OIDC client secret env ${provider.clientSecretEnv} is not set`);
     body.set("client_secret", secret);
   }
@@ -11027,12 +11086,17 @@ async function exchangeOidcAuthorizationCode(opts: {
   return payload.id_token.trim();
 }
 
+/** Read an allowlisted tenant OIDC secret from the active request binding. */
+export function getConfiguredOidcClientSecret(envName: string): string | undefined {
+  return runtimeEnvironmentValue(envName);
+}
+
 const OAUTH_REDIRECT_ALLOWLIST_ENV_KEYS = [
   "STEWARD_OAUTH_ALLOWED_REDIRECTS",
   "STEWARD_OAUTH_REDIRECT_ALLOWLIST",
 ] as const;
 
-function parseOAuthRedirectAllowlistEnv(): string[] {
+export function parseOAuthRedirectAllowlistEnv(): string[] {
   const entries = new Set<string>();
 
   for (const envName of OAUTH_REDIRECT_ALLOWLIST_ENV_KEYS) {

@@ -37,6 +37,7 @@
 
 import { platformAuthMiddleware } from "@stwd/auth";
 import { redactedThrownDiagnostics } from "@stwd/shared";
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { authorizationSignature } from "./middleware/authorization-signature";
@@ -152,10 +153,17 @@ export function createApp(): Hono<{ Variables: AppVariables }> {
   // strict mode so browser/unsigned SDK clients keep working until an operator
   // has rolled out signing clients. Mounted in pre-idempotency setup so these
   // guards always run before the idempotency middleware.
-  app.use("*", requestExpiry({ required: process.env.STEWARD_REQUIRE_REQUEST_EXPIRY === "true" }));
   app.use(
     "*",
-    authorizationSignature({ required: process.env.STEWARD_REQUIRE_AUTH_SIGNATURE === "true" }),
+    requestExpiry({
+      required: () => runtimeEnvironmentValue("STEWARD_REQUIRE_REQUEST_EXPIRY") === "true",
+    }),
+  );
+  app.use(
+    "*",
+    authorizationSignature({
+      required: () => runtimeEnvironmentValue("STEWARD_REQUIRE_AUTH_SIGNATURE") === "true",
+    }),
   );
 
   // ─── Auth middleware per route group ────────────────────────────────────────

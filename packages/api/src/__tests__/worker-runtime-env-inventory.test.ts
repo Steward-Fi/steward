@@ -20,11 +20,12 @@ function directEnvironmentKeys(source: string): string[] {
   return [...keys].sort();
 }
 
-// The middleware authority migration is complete. Any direct process.env read
-// reintroduced under middleware is an unclassified mutable-global regression.
+// #770 has eliminated direct mutable-global authority from security middleware.
+// Keep the exact inventory empty so new readers fail CI instead of silently
+// expanding the compatibility bridge.
 const pendingMiddlewareReaders = {};
 
-const migratedRequestGuardKeys = [
+const migratedRuntimeAuthorityKeys = [
   "STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS",
   "STEWARD_REQUEST_EXPIRY_MAX_SKEW_MS",
   "STEWARD_REQUEST_SIGNING_SECRET",
@@ -32,7 +33,23 @@ const migratedRequestGuardKeys = [
   "STEWARD_REQUEST_TIMESTAMP_TTL_MS",
   "STEWARD_REQUIRE_AUTH_SIGNATURE",
   "STEWARD_REQUIRE_REQUEST_EXPIRY",
+  "STEWARD_IDEMPOTENCY_MAX_ENTRIES",
+  "STEWARD_IDEMPOTENCY_METRICS_TTL_MS",
+  "STEWARD_IDEMPOTENCY_TTL_MS",
+  "APP_URL",
+  "PASSKEY_ALLOWED_ORIGINS",
+  "PASSKEY_ORIGIN",
+  "PASSKEY_RP_ID",
+  "PASSKEY_RP_NAME",
+  "SIWE_ALLOWED_DOMAINS",
+  "STEWARD_ALLOW_UNBOUND_OAUTH_PROVIDER_CODE_EXCHANGE",
+  "STEWARD_OAUTH_ALLOWED_REDIRECTS",
+  "STEWARD_OAUTH_REDIRECT_ALLOWLIST",
 ] as const;
+
+// The auth route now resolves every request-sensitive switch and credential
+// through the immutable runtime binding.
+const pendingAuthRouteReaders: string[] = [];
 
 describe("Worker runtime environment static inventory", () => {
   it("rejects unclassified direct process.env readers in security middleware", () => {
@@ -48,16 +65,26 @@ describe("Worker runtime environment static inventory", () => {
     expect(actual).toEqual(pendingMiddlewareReaders);
   });
 
-  it("keeps the migrated request-guard authority off mutable process.env globally", () => {
+  it("keeps migrated runtime authority off mutable process.env globally", () => {
     const violations: string[] = [];
     for (const path of productionTypescriptFiles(srcRoot)) {
       const keys = directEnvironmentKeys(readFileSync(path, "utf8"));
       for (const key of keys) {
-        if (migratedRequestGuardKeys.includes(key as (typeof migratedRequestGuardKeys)[number])) {
+        if (
+          migratedRuntimeAuthorityKeys.includes(
+            key as (typeof migratedRuntimeAuthorityKeys)[number],
+          )
+        ) {
           violations.push(`${relative(srcRoot, path)}:${key}`);
         }
       }
     }
     expect(violations).toEqual([]);
+  });
+
+  it("pins the remaining auth-route mutable-global compatibility inventory", () => {
+    const authSource = readFileSync(join(srcRoot, "routes", "auth.ts"), "utf8");
+    expect(directEnvironmentKeys(authSource)).toEqual(pendingAuthRouteReaders);
+    expect(authSource).not.toMatch(/process\.env\s*\[/);
   });
 });

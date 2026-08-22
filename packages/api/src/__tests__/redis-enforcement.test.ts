@@ -169,6 +169,38 @@ describe("extractSpendLimitPolicy", () => {
 // ─── Graceful degradation tests (no Redis) ───────────────────────────────────
 
 describe("enforceRateLimit (no Redis)", () => {
+  it("isolates production fail-closed posture across hostile Worker bindings", async () => {
+    const policies: PolicyRule[] = [
+      {
+        id: "runtime-rate-limit",
+        type: "rate-limit",
+        enabled: true,
+        config: { maxTxPerHour: 10, maxTxPerDay: 20 },
+      },
+    ];
+    const [development, production, missing] = await Promise.all([
+      withRuntimeEnvironment({ NODE_ENV: "development" }, async () => {
+        await Promise.resolve();
+        return enforceRateLimit("agent-development", policies);
+      }),
+      withRuntimeEnvironment({ NODE_ENV: "production" }, async () => {
+        await Promise.resolve();
+        return enforceRateLimit("agent-production", policies);
+      }),
+      withRuntimeEnvironment({}, async () => {
+        await Promise.resolve();
+        return enforceRateLimit("agent-missing", policies);
+      }),
+    ]);
+
+    expect(development.allowed).toBe(true);
+    expect(missing.allowed).toBe(true);
+    expect(production).toMatchObject({
+      allowed: false,
+      reason: "Rate limit enforcement is unavailable",
+    });
+  });
+
   it("allows requests when Redis is not available", async () => {
     const policies: PolicyRule[] = [
       {

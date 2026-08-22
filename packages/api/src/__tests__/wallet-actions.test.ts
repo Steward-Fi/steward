@@ -774,6 +774,13 @@ describe("wallet transfer actions", () => {
         signature: "base64-signed-spl-transfer-transaction",
         broadcast: false,
         chainId: request.chainId,
+        artifactSignature:
+          "3oL4p7QvN3UH7V5wMGZgW5PuzEk4A9LXLHk9RxAoKjDKuLbQBsfXN8kEvKfj5K1oEJa8wFF6RVp2h7pP9w2f51ZV",
+        signer: "11111111111111111111111111111111",
+        recentBlockhash: "11111111111111111111111111111111",
+        blockhashKind: "recent",
+        lastValidBlockHeight: 1_000,
+        rawIntentDigest: "a".repeat(64),
       };
     };
 

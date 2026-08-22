@@ -45,6 +45,7 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import type { PluginMigrationSource } from "@stwd/shared";
+import { readMigrationFiles } from "drizzle-orm/migrator";
 import { migrate } from "drizzle-orm/postgres-js/migrator";
 
 import { createDb } from "./client";
@@ -283,11 +284,48 @@ export async function runPluginMigrations(
       // CRITICAL ISOLATION: migrationsTable scopes drizzle's applied-migrations
       // bookkeeping to the per-plugin table. The core's __drizzle_migrations is
       // NEVER touched by this call.
-      await migrateFn(db, {
-        migrationsFolder: source.migrationsFolder,
-        migrationsTable,
-        migrationsSchema: PLUGIN_MIGRATIONS_SCHEMA,
-      });
+      const [ledgerShape] =
+        ownsClient && useAdvisoryLock
+          ? await client.unsafe("SELECT to_regclass($1) IS NOT NULL AS ledger_exists", [
+              `${PLUGIN_MIGRATIONS_SCHEMA}.${migrationsTable}`,
+            ])
+          : [{ ledger_exists: false }];
+      if (ownsClient && ledgerShape?.ledger_exists) {
+        // Drizzle always issues CREATE SCHEMA IF NOT EXISTS before applying a
+        // plugin migration. PostgreSQL still requires database-level CREATE
+        // for that statement, even when the schema already exists. Activated
+        // deployments deliberately revoke that privilege from the migration
+        // role, so replay the checked-in suffix directly against the already-
+        // owned namespaced ledger instead.
+        const migrationFiles = readMigrationFiles({ migrationsFolder: source.migrationsFolder });
+        const ledgerRows = await client.unsafe(
+          `SELECT hash, created_at FROM ${PLUGIN_MIGRATIONS_SCHEMA}."${migrationsTable}" ORDER BY id ASC`,
+        );
+        if (ledgerRows.length > migrationFiles.length) {
+          throw new Error(`plugin migration "${source.id}" ledger is ahead of this build`);
+        }
+        for (const [index, row] of ledgerRows.entries()) {
+          const expected = migrationFiles[index];
+          if (row.hash !== expected?.hash || Number(row.created_at) !== expected.folderMillis) {
+            throw new Error(`plugin migration "${source.id}" ledger identity mismatch`);
+          }
+        }
+        await client.begin(async (transaction: any) => {
+          for (const migration of migrationFiles.slice(ledgerRows.length)) {
+            for (const statement of migration.sql) await transaction.unsafe(statement);
+            await transaction.unsafe(
+              `INSERT INTO ${PLUGIN_MIGRATIONS_SCHEMA}."${migrationsTable}" (hash, created_at) VALUES ($1, $2)`,
+              [migration.hash, migration.folderMillis],
+            );
+          }
+        });
+      } else {
+        await migrateFn(db, {
+          migrationsFolder: source.migrationsFolder,
+          migrationsTable,
+          migrationsSchema: PLUGIN_MIGRATIONS_SCHEMA,
+        });
+      }
     } finally {
       if (advisoryLockHeld && client && !overallTimedOut) {
         await client`SELECT pg_advisory_unlock(hashtextextended(${lockKey}, 0))`;
