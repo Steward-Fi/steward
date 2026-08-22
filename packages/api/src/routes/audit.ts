@@ -1,3 +1,4 @@
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 /**
  * Audit routes — read-only endpoints for querying transaction history,
  * proxy audit logs, and approval queue data across all agents for a tenant.
@@ -455,7 +456,7 @@ auditRoutes.get("/summary", async (c) => {
       since = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
       break;
     case "all":
-      if (process.env.STEWARD_ALLOW_UNBOUNDED_AUDIT_SUMMARY !== "true") {
+      if (runtimeEnvironmentValue("STEWARD_ALLOW_UNBOUNDED_AUDIT_SUMMARY") !== "true") {
         return c.json<ApiResponse>(
           { ok: false, error: "range=all requires STEWARD_ALLOW_UNBOUNDED_AUDIT_SUMMARY=true" },
           400,
@@ -840,7 +841,7 @@ auditRoutes.post("/verify", async (c) => {
 // applies; no HMAC key or private signing material is returned.
 auditRoutes.get("/integrity", async (c) => {
   const tenantId = c.get("tenantId");
-  const configuredLimit = Number(process.env.STEWARD_DOCTOR_AUDIT_MAX_EVENTS ?? "100000");
+  const configuredLimit = Number(runtimeEnvironmentValue("STEWARD_DOCTOR_AUDIT_MAX_EVENTS") ?? "100000");
   const maxEvents =
     Number.isSafeInteger(configuredLimit) && configuredLimit > 0 ? configuredLimit : 100_000;
   const data = await db.transaction(async (tx) => {
@@ -1196,7 +1197,7 @@ auditRoutes.get("/bundle", async (c) => {
   const tenantId = c.get("tenantId");
 
   if (!isCheckpointSigningConfigured()) {
-    if (process.env.NODE_ENV === "production") {
+    if (runtimeEnvironmentValue("NODE_ENV") === "production") {
       return c.json<ApiResponse>(
         {
           ok: false,

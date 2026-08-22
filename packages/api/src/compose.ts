@@ -1,3 +1,4 @@
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 /**
  * compose.ts — the COMPOSITION ROOT that assembles the deployable Steward
  * server: the lean core (`createApp()`) plus the opt-in plugins this repo's own
@@ -110,7 +111,7 @@ export async function composeApp(): Promise<Hono<{ Variables: AppVariables }>> {
   // unknown plugin name, so a typo'd STEWARD_PLUGINS aborts boot here rather than
   // silently shipping a wrong feature profile. composeApp reads process.env
   // directly (prod signature unchanged); the resolver itself is env-injectable
-  // for tests, which set/restore process.env.STEWARD_PLUGINS around each case.
+  // for tests, which set/restore runtimeEnvironmentValue("STEWARD_PLUGINS") around each case.
   const enabled = resolveEnabledPlugins();
 
   // 1) lean core: global mw + all core auth mw (NO idempotency, NO routes yet).

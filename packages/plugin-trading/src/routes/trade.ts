@@ -1,3 +1,4 @@
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 /**
  * trade.ts — trade-session management + venue order routes (Hyperliquid +
  * Polymarket).
@@ -1464,7 +1465,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
   let pmCredsDerivedKey: { source: string; key: Buffer } | null = null;
 
   function pmCredsCacheEncryptionKey(): Buffer | null {
-    const masterPassword = process.env.STEWARD_MASTER_PASSWORD;
+    const masterPassword = runtimeEnvironmentValue("STEWARD_MASTER_PASSWORD");
     if (!masterPassword) return null;
     if (pmCredsDerivedKey?.source === masterPassword) return pmCredsDerivedKey.key;
     const key = scryptSync(masterPassword, "steward-kdf:pm-clob-l2-cache:v1", 32) as Buffer;
@@ -1518,7 +1519,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
   // SEC-111: in production the override must use https — a stray plain-http
   // endpoint would send L1-signed derivations + L2 HMAC headers in cleartext.
   function configuredPolymarketClobUrl(): string | undefined {
-    const raw = process.env.POLYMARKET_CLOB_API_URL?.trim();
+    const raw = runtimeEnvironmentValue("POLYMARKET_CLOB_API_URL")?.trim();
     if (!raw) return undefined;
     if (raw.length > 2_048 || /[\u0000-\u001f\u007f]/.test(raw)) {
       throw new Error("POLYMARKET_CLOB_API_URL is invalid");
@@ -1530,7 +1531,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
     if (url.username || url.password || url.search || url.hash) {
       throw new Error("POLYMARKET_CLOB_API_URL must not contain credentials, query, or fragment");
     }
-    if (process.env.NODE_ENV === "production" && url.protocol !== "https:") {
+    if (runtimeEnvironmentValue("NODE_ENV") === "production" && url.protocol !== "https:") {
       throw new Error("POLYMARKET_CLOB_API_URL must use https in production");
     }
     return url.toString().replace(/\/$/, "");
@@ -1597,8 +1598,8 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
     // SEC-111: hard-disabled in production (same force-off idiom as the
     // unsigned-webhook escape hatch) so a stray env var can never swap in the
     // hardcoded test creds on a live deployment.
-    if (process.env.STEWARD_PM_TEST_CREDS === "1") {
-      if (process.env.NODE_ENV === "production") {
+    if (runtimeEnvironmentValue("STEWARD_PM_TEST_CREDS") === "1") {
+      if (runtimeEnvironmentValue("NODE_ENV") === "production") {
         console.error(
           "[trade] STEWARD_PM_TEST_CREDS is set but ignored in production; real L2 creds stay required.",
         );

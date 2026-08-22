@@ -1,4 +1,5 @@
 import { redactedThrownDiagnostics } from "@stwd/shared";
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 import { runInternalJobForEachTenant } from "./tenant-job";
 
 const DEFAULT_INTERVAL_MS = 15_000;
@@ -74,10 +75,10 @@ export async function runUpstreamCredentialLeaseSweep() {
 }
 
 function configuredInterval(): number {
-  if (process.env.STEWARD_UPSTREAM_LEASE_SWEEP_INTERVAL_MS === undefined) {
+  if (runtimeEnvironmentValue("STEWARD_UPSTREAM_LEASE_SWEEP_INTERVAL_MS") === undefined) {
     return DEFAULT_INTERVAL_MS;
   }
-  const parsed = Number(process.env.STEWARD_UPSTREAM_LEASE_SWEEP_INTERVAL_MS);
+  const parsed = Number(runtimeEnvironmentValue("STEWARD_UPSTREAM_LEASE_SWEEP_INTERVAL_MS"));
   if (!Number.isSafeInteger(parsed) || parsed < 1_000 || parsed > MAX_INTERVAL_MS) {
     throw new Error(
       `STEWARD_UPSTREAM_LEASE_SWEEP_INTERVAL_MS must be between 1000 and ${MAX_INTERVAL_MS}`,
@@ -102,7 +103,7 @@ export async function startUpstreamCredentialLeaseScheduler(options?: {
     remaining?: boolean;
   }>;
 }): Promise<() => Promise<void>> {
-  if (process.env.STEWARD_UPSTREAM_LEASE_SWEEPER === "false") {
+  if (runtimeEnvironmentValue("STEWARD_UPSTREAM_LEASE_SWEEPER") === "false") {
     Object.assign(schedulerHealth, {
       enabled: false,
       inFlight: false,

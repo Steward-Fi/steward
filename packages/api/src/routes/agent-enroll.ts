@@ -1,3 +1,4 @@
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 /**
  * agent-enroll.ts — the public keypair-only agent enrollment surface. Mounted
  * before the tenant gate: an enrolling agent holds only its
@@ -60,7 +61,7 @@ export const ENROLL_TOKEN_TTL_MAX_SECONDS = 3600;
  * surfaces as a 500 at token-mint time, and an unbounded value mints
  * long-lived tokens that defeat the minute-scale revocation story. */
 function resolveEnrollTokenTtl(): string {
-  const raw = process.env.STEWARD_AGENT_ENROLL_TOKEN_TTL?.trim();
+  const raw = runtimeEnvironmentValue("STEWARD_AGENT_ENROLL_TOKEN_TTL")?.trim();
   if (!raw) return "5m";
   const seconds = parseDurationSeconds(raw);
   if (seconds === null) {

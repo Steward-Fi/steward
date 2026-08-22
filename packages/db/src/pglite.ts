@@ -1,3 +1,4 @@
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 /**
  * PGLite adapter for Steward — runs Postgres in-process via WASM.
  *
@@ -29,8 +30,8 @@ let globalPGLite: { client: PGlite; db: PGLiteDb } | undefined;
  * Resolve the data directory for PGLite persistence.
  */
 export function getDataDir(): string {
-  if (process.env.STEWARD_PGLITE_PATH) {
-    return resolve(process.env.STEWARD_PGLITE_PATH);
+  if (runtimeEnvironmentValue("STEWARD_PGLITE_PATH")) {
+    return resolve(runtimeEnvironmentValue("STEWARD_PGLITE_PATH"));
   }
   return join(homedir(), ".steward", "data");
 }
@@ -39,8 +40,8 @@ export function getDataDir(): string {
  * Determine whether PGLite should be used based on environment variables.
  */
 export function shouldUsePGLite(): boolean {
-  if (process.env.STEWARD_DB_MODE === "pglite") return true;
-  if (!process.env.DATABASE_URL) return true;
+  if (runtimeEnvironmentValue("STEWARD_DB_MODE") === "pglite") return true;
+  if (!runtimeEnvironmentValue("DATABASE_URL")) return true;
   return false;
 }
 
@@ -113,7 +114,7 @@ async function runPGLiteMigrations(client: PGlite): Promise<void> {
  * @param dataDir - directory for persistence, or "memory://" for in-memory
  */
 export async function createPGLiteDb(dataDir?: string): Promise<{ client: PGlite; db: PGLiteDb }> {
-  const useMemory = process.env.STEWARD_PGLITE_MEMORY === "true";
+  const useMemory = runtimeEnvironmentValue("STEWARD_PGLITE_MEMORY") === "true";
 
   let connectionTarget: string;
   if (useMemory) {

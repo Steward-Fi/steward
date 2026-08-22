@@ -7,6 +7,8 @@
  * assembly.
  */
 
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
+
 import { spawnSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -449,7 +451,7 @@ function validateTimestampUrl(raw: string): URL {
   if (url.username || url.password) {
     throw new AuditCheckpointAnchorError("RFC 3161 URL must not contain credentials");
   }
-  if (url.protocol !== "https:" && process.env.NODE_ENV === "production") {
+  if (url.protocol !== "https:" && runtimeEnvironmentValue("NODE_ENV") === "production") {
     throw new AuditCheckpointAnchorError("RFC 3161 URL must use HTTPS in production");
   }
   if (url.protocol !== "https:" && url.protocol !== "http:") {
@@ -567,7 +569,7 @@ export class Rfc3161TimestampSink implements AuditCheckpointAnchorSink {
 }
 
 function configuredMode(): AuditCheckpointAnchorMode {
-  const value = process.env.STEWARD_AUDIT_CHECKPOINT_ANCHOR_MODE?.trim() || "off";
+  const value = runtimeEnvironmentValue("STEWARD_AUDIT_CHECKPOINT_ANCHOR_MODE")?.trim() || "off";
   if (value === "off" || value === "best-effort" || value === "required") return value;
   throw new AuditCheckpointAnchorError(
     "STEWARD_AUDIT_CHECKPOINT_ANCHOR_MODE must be off, best-effort, or required",
@@ -582,7 +584,7 @@ export function configuredAuditCheckpointAnchor(): {
 } {
   const mode = configuredMode();
   if (mode === "off") return { mode };
-  const provider = process.env.STEWARD_AUDIT_CHECKPOINT_ANCHOR_PROVIDER?.trim() || "rfc3161";
+  const provider = runtimeEnvironmentValue("STEWARD_AUDIT_CHECKPOINT_ANCHOR_PROVIDER")?.trim() || "rfc3161";
   if (provider !== "rfc3161") {
     const registration = registeredSinkProviders.get(provider);
     if (!registration) {
@@ -597,22 +599,22 @@ export function configuredAuditCheckpointAnchor(): {
       verify: registration.verify,
     };
   }
-  const url = process.env.STEWARD_AUDIT_RFC3161_URL?.trim();
+  const url = runtimeEnvironmentValue("STEWARD_AUDIT_RFC3161_URL")?.trim();
   if (!url) {
     throw new AuditCheckpointAnchorError(
       "STEWARD_AUDIT_RFC3161_URL is required when checkpoint anchoring is enabled",
     );
   }
-  const rawTimeout = process.env.STEWARD_AUDIT_RFC3161_TIMEOUT_MS?.trim();
+  const rawTimeout = runtimeEnvironmentValue("STEWARD_AUDIT_RFC3161_TIMEOUT_MS")?.trim();
   const timeoutMs = rawTimeout ? Number(rawTimeout) : undefined;
-  const caFile = process.env.STEWARD_AUDIT_RFC3161_CA_FILE?.trim();
+  const caFile = runtimeEnvironmentValue("STEWARD_AUDIT_RFC3161_CA_FILE")?.trim();
   if (!caFile) {
     throw new AuditCheckpointAnchorError(
       "STEWARD_AUDIT_RFC3161_CA_FILE is required when RFC 3161 anchoring is enabled",
     );
   }
   const seconds = (name: string, fallback: number) => {
-    const raw = process.env[name]?.trim();
+    const raw = runtimeEnvironmentValue(name)?.trim();
     const value = raw ? Number(raw) : fallback;
     if (!Number.isSafeInteger(value) || value < 0 || value > 3600) {
       throw new AuditCheckpointAnchorError(`${name} must be an integer from 0 to 3600 seconds`);
@@ -626,8 +628,8 @@ export function configuredAuditCheckpointAnchor(): {
       url,
       timeoutMs,
       caFile,
-      untrustedFile: process.env.STEWARD_AUDIT_RFC3161_UNTRUSTED_FILE?.trim(),
-      expectedPolicyOid: process.env.STEWARD_AUDIT_RFC3161_POLICY_OID?.trim(),
+      untrustedFile: runtimeEnvironmentValue("STEWARD_AUDIT_RFC3161_UNTRUSTED_FILE")?.trim(),
+      expectedPolicyOid: runtimeEnvironmentValue("STEWARD_AUDIT_RFC3161_POLICY_OID")?.trim(),
       maxPastAgeMs: seconds("STEWARD_AUDIT_RFC3161_MAX_AGE_SECONDS", 300),
       maxFutureSkewMs: seconds("STEWARD_AUDIT_RFC3161_MAX_FUTURE_SKEW_SECONDS", 300),
     }),

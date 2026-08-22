@@ -1,3 +1,4 @@
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 /**
  * ERC-8004 on-chain identity, reputation, and discovery routes.
  *
@@ -355,8 +356,8 @@ erc8004Routes.post("/:id/feedback", async (c) => {
   try {
     const duplicate = await db.transaction(async (tx) => {
       if (
-        process.env.STEWARD_DB_MODE !== "pglite" &&
-        process.env.STEWARD_PGLITE_MEMORY !== "true"
+        runtimeEnvironmentValue("STEWARD_DB_MODE") !== "pglite" &&
+        runtimeEnvironmentValue("STEWARD_PGLITE_MEMORY") !== "true"
       ) {
         await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${feedbackReplayKey}))`);
       }

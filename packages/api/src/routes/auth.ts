@@ -136,6 +136,7 @@ import {
   type TenantSamlSsoConfig,
   type TenantTestAccountConfig,
 } from "@stwd/shared";
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 import { KeyStore, provisionUserWallet, Vault } from "@stwd/vault";
 import bs58 from "bs58";
 import { and, eq, gte, inArray, isNull, lt, sql } from "drizzle-orm";
@@ -179,7 +180,7 @@ async function withVerifiedAuthTenant<T>(
     userId: subject,
   });
   const driver =
-    process.env.STEWARD_DB_MODE === "pglite" || process.env.STEWARD_PGLITE_MEMORY === "true"
+    runtimeEnvironmentValue("STEWARD_DB_MODE") === "pglite" || runtimeEnvironmentValue("STEWARD_PGLITE_MEMORY") === "true"
       ? "pglite"
       : getDatabaseDriver();
   return withTenantRlsTransaction(getDb() as never, driver, context, async (tx) =>
@@ -199,7 +200,7 @@ async function withPreAuthTenant<T>(
     subject: "public-auth-flow",
   });
   const driver =
-    process.env.STEWARD_DB_MODE === "pglite" || process.env.STEWARD_PGLITE_MEMORY === "true"
+    runtimeEnvironmentValue("STEWARD_DB_MODE") === "pglite" || runtimeEnvironmentValue("STEWARD_PGLITE_MEMORY") === "true"
       ? "pglite"
       : getDatabaseDriver();
   return withTenantRlsTransaction(getDb() as never, driver, context, async (tx) =>
@@ -255,9 +256,9 @@ function normalizeEmailDomain(value: unknown): string | null {
  * not preserved.
  */
 function trustedProxyHops(): number {
-  const raw = process.env.STEWARD_TRUSTED_PROXY_HOPS?.trim();
+  const raw = runtimeEnvironmentValue("STEWARD_TRUSTED_PROXY_HOPS")?.trim();
   if (raw === undefined || raw === "") {
-    return process.env.STEWARD_TRUST_PROXY_HEADERS === "true" ? 1 : 0;
+    return runtimeEnvironmentValue("STEWARD_TRUST_PROXY_HEADERS") === "true" ? 1 : 0;
   }
   // Canonical non-negative integer only: "1.5" must not truncate into trust.
   if (!/^\d+$/.test(raw)) return 0;
@@ -335,7 +336,7 @@ function logNoTrustedClientIpDiag(c: Context, hops: number): void {
  * never a shared "global" bucket, never open.
  */
 export function trustedClientIp(c: Context): string | undefined {
-  const trustCloudflare = process.env.STEWARD_TRUST_CLOUDFLARE === "true";
+  const trustCloudflare = runtimeEnvironmentValue("STEWARD_TRUST_CLOUDFLARE") === "true";
   if (trustCloudflare) {
     const cf = c.req.header("cf-connecting-ip")?.trim();
     if (cf && isIP(cf)) return cf;
@@ -431,7 +432,7 @@ function authRateLimitSubject(c: Context): { subject: string; coarse: boolean } 
   const peer = socketPeerFromEnv(c.env);
   if (peer && isIP(peer)) return { subject: `ip:${clientIpBucket(peer)}`, coarse: false };
   const now = Date.now();
-  if (process.env.NODE_ENV === "production" && now - coarseSubjectWarnedAt >= 60_000) {
+  if (runtimeEnvironmentValue("NODE_ENV") === "production" && now - coarseSubjectWarnedAt >= 60_000) {
     coarseSubjectWarnedAt = now;
     console.warn(
       "[AuthRateLimit] No trusted client IP (set STEWARD_TRUSTED_PROXY_HOPS=2 on Railway); auth rate limits fall back to coarse per-host buckets instead of per-client budgets",
@@ -445,8 +446,8 @@ function authRateLimitSubject(c: Context): { subject: string; coarse: boolean } 
 
 function allowAuthRateLimitSoftFail(): boolean {
   return (
-    process.env.NODE_ENV !== "production" ||
-    process.env.STEWARD_ALLOW_AUTH_RATE_LIMIT_SOFT_FAIL === "true"
+    runtimeEnvironmentValue("NODE_ENV") !== "production" ||
+    runtimeEnvironmentValue("STEWARD_ALLOW_AUTH_RATE_LIMIT_SOFT_FAIL") === "true"
   );
 }
 
@@ -462,7 +463,7 @@ function allowAuthRateLimitSoftFail(): boolean {
  * isolate on Workers, which only tightens it).
  */
 function authRateLimitOutageValveMax(): number {
-  const raw = process.env.STEWARD_AUTH_RATE_LIMIT_OUTAGE_VALVE_MAX;
+  const raw = runtimeEnvironmentValue("STEWARD_AUTH_RATE_LIMIT_OUTAGE_VALVE_MAX");
   if (raw === undefined || raw === "") return 300;
   const parsed = Number.parseInt(raw, 10);
   return Number.isInteger(parsed) && parsed >= 0 ? parsed : 300;
@@ -1576,7 +1577,7 @@ async function markOidcIdTokenUsedOnce(
 }
 
 function isUnsafeUnboundOAuthProviderCodeExchangeAllowed(): boolean {
-  return process.env.STEWARD_ALLOW_UNBOUND_OAUTH_PROVIDER_CODE_EXCHANGE === "true";
+  return runtimeEnvironmentValue("STEWARD_ALLOW_UNBOUND_OAUTH_PROVIDER_CODE_EXCHANGE") === "true";
 }
 
 function isValidPkceCodeVerifier(value: string): boolean {
@@ -1622,8 +1623,8 @@ export function getAuthStoreSources(): AuthStoreSources {
  */
 export function assertAuthStoresAreSafe(sources: AuthStoreSources = getAuthStoreSources()): void {
   const requiresDurableStores =
-    process.env.NODE_ENV === "production" || process.env.STEWARD_RUNTIME === "workers";
-  if (!requiresDurableStores || process.env.STEWARD_ALLOW_MEMORY_AUTH_STORES === "true") return;
+    runtimeEnvironmentValue("NODE_ENV") === "production" || runtimeEnvironmentValue("STEWARD_RUNTIME") === "workers";
+  if (!requiresDurableStores || runtimeEnvironmentValue("STEWARD_ALLOW_MEMORY_AUTH_STORES") === "true") return;
 
   const memoryStores = Object.entries(sources)
     .filter(([, source]) => source === "memory")
@@ -1651,8 +1652,7 @@ export function decryptImportSessionJson<T>(value: string): T {
   return JSON.parse(getOAuthKeyStore().decrypt(encrypted)) as T;
 }
 
-let _passkeyAuth: PasskeyAuth | null = null;
-const _passkeyAuthByOrigin = new Map<string, PasskeyAuth>();
+const _passkeyAuthByAuthority = new Map<string, PasskeyAuth>();
 
 /**
  * Get PasskeyAuth for a specific origin (multi-tenant passkey support).
@@ -1699,25 +1699,31 @@ function resolveRpID(requestHostname: string, allowedOrigins: string[], fallback
 }
 
 function getPasskeyAuth(requestOrigin?: string): PasskeyAuth {
-  const defaultRpID = process.env.PASSKEY_RP_ID || "steward.fi";
-  const defaultOrigin = process.env.PASSKEY_ORIGIN || "https://steward.fi";
-  const rpName = process.env.PASSKEY_RP_NAME || "Steward";
+  const defaultRpID = runtimeEnvironmentValue("PASSKEY_RP_ID") || "steward.fi";
+  const defaultOrigin = runtimeEnvironmentValue("PASSKEY_ORIGIN") || "https://steward.fi";
+  const rpName = runtimeEnvironmentValue("PASSKEY_RP_NAME") || "Steward";
 
-  // If no origin provided, use the default singleton
+  const allowed = (runtimeEnvironmentValue("PASSKEY_ALLOWED_ORIGINS") || defaultOrigin)
+    .split(",")
+    .map((o) => o.trim())
+    .filter(Boolean);
+
+  // Cache by the complete passkey authority, never only by rpID. Binding-only
+  // rotations must not inherit the prior origin allowlist or relying-party
+  // name from an app object cached earlier in the isolate.
   if (!requestOrigin) {
-    if (!_passkeyAuth) {
-      const origins = (process.env.PASSKEY_ALLOWED_ORIGINS || defaultOrigin)
-        .split(",")
-        .map((o) => o.trim())
-        .filter(Boolean);
-      _passkeyAuth = new PasskeyAuth({
-        rpName,
-        rpID: defaultRpID,
-        origin: origins.length > 1 ? origins : defaultOrigin,
-        challengeStore: getChallengeStore(),
-      });
-    }
-    return _passkeyAuth;
+    const acceptedOrigins = allowed.length > 1 ? allowed : [defaultOrigin];
+    const authorityKey = JSON.stringify([rpName, defaultRpID, acceptedOrigins]);
+    const cached = _passkeyAuthByAuthority.get(authorityKey);
+    if (cached) return cached;
+    const auth = new PasskeyAuth({
+      rpName,
+      rpID: defaultRpID,
+      origin: acceptedOrigins.length > 1 ? acceptedOrigins : defaultOrigin,
+      challengeStore: getChallengeStore(),
+    });
+    _passkeyAuthByAuthority.set(authorityKey, auth);
+    return auth;
   }
 
   // Parse origin to get hostname
@@ -1729,10 +1735,6 @@ function getPasskeyAuth(requestOrigin?: string): PasskeyAuth {
   }
 
   // Validate against allowed origins
-  const allowed = (process.env.PASSKEY_ALLOWED_ORIGINS || defaultOrigin)
-    .split(",")
-    .map((o) => o.trim())
-    .filter(Boolean);
   if (!allowed.includes(requestOrigin) && requestHostname !== defaultRpID) {
     return getPasskeyAuth(); // not in allowed list, use default
   }
@@ -1742,21 +1744,20 @@ function getPasskeyAuth(requestOrigin?: string): PasskeyAuth {
   // shared across apex + all subdomains.
   const rpID = resolveRpID(requestHostname, allowed, defaultRpID);
 
-  // Cache per rpID
-  const cached = _passkeyAuthByOrigin.get(rpID);
+  const acceptedOrigins = allowed.length > 0 ? allowed : [requestOrigin];
+  const authorityKey = JSON.stringify([rpName, rpID, acceptedOrigins]);
+  const cached = _passkeyAuthByAuthority.get(authorityKey);
   if (cached) return cached;
 
   // Origin list passed to PasskeyAuth covers all variants the browser may
   // present (apex + www) so SimpleWebAuthn accepts assertions from either.
-  const acceptedOrigins = allowed.length > 0 ? allowed : [requestOrigin];
-
   const auth = new PasskeyAuth({
     rpName,
     rpID,
     origin: acceptedOrigins,
     challengeStore: getChallengeStore(),
   });
-  _passkeyAuthByOrigin.set(rpID, auth);
+  _passkeyAuthByAuthority.set(authorityKey, auth);
   return auth;
 }
 
@@ -1769,7 +1770,7 @@ let _oauthKeyStore: KeyStore | null = null;
 function getEmailKeyStore(): KeyStore {
   if (_emailKeyStore) return _emailKeyStore;
 
-  const masterPassword = process.env.STEWARD_MASTER_PASSWORD;
+  const masterPassword = runtimeEnvironmentValue("STEWARD_MASTER_PASSWORD");
   if (!masterPassword) {
     if (!isDevSecretAllowed()) {
       throw new Error(
@@ -1787,7 +1788,7 @@ function getEmailKeyStore(): KeyStore {
 function getOAuthKeyStore(): KeyStore {
   if (_oauthKeyStore) return _oauthKeyStore;
 
-  const masterPassword = process.env.STEWARD_MASTER_PASSWORD;
+  const masterPassword = runtimeEnvironmentValue("STEWARD_MASTER_PASSWORD");
   if (!masterPassword) {
     if (!isDevSecretAllowed()) {
       throw new Error(
@@ -1862,16 +1863,16 @@ export function decryptOAuthProviderToken(encrypted: {
 }
 
 function isMockEmailEnabled(): boolean {
-  if (process.env.EMAIL_PROVIDER === "mock" && process.env.NODE_ENV === "production") {
+  if (runtimeEnvironmentValue("EMAIL_PROVIDER") === "mock" && runtimeEnvironmentValue("NODE_ENV") === "production") {
     throw new Error(
       "EMAIL_PROVIDER=mock is forbidden in production. Unset EMAIL_PROVIDER or set RESEND_API_KEY.",
     );
   }
-  return process.env.EMAIL_PROVIDER === "mock" && process.env.NODE_ENV !== "production";
+  return runtimeEnvironmentValue("EMAIL_PROVIDER") === "mock" && runtimeEnvironmentValue("NODE_ENV") !== "production";
 }
 
 function authTestInboxEnabled(): boolean {
-  return process.env.NODE_ENV === "test";
+  return runtimeEnvironmentValue("NODE_ENV") === "test";
 }
 
 function isEnabledTestAccount(
@@ -1964,20 +1965,20 @@ function buildGlobalEmailAuth(overrides?: {
   replyTo?: string;
   templates?: TenantEmailConfig["templates"];
 }): EmailAuth {
-  const resendKey = process.env.RESEND_API_KEY;
+  const resendKey = runtimeEnvironmentValue("RESEND_API_KEY");
   // Mock takes precedence in non-production for deterministic e2e testing.
   const provider = isMockEmailEnabled()
     ? new MockEmailProvider()
     : resendKey
       ? new ResendProvider({
           apiKey: resendKey,
-          from: process.env.EMAIL_FROM || "login@steward.fi",
+          from: runtimeEnvironmentValue("EMAIL_FROM") || "login@steward.fi",
         })
       : undefined;
 
   return new EmailAuth({
-    from: process.env.EMAIL_FROM || "login@steward.fi",
-    baseUrl: overrides?.baseUrl?.replace(/\/$/, "") || process.env.APP_URL || "https://steward.fi",
+    from: runtimeEnvironmentValue("EMAIL_FROM") || "login@steward.fi",
+    baseUrl: overrides?.baseUrl?.replace(/\/$/, "") || runtimeEnvironmentValue("APP_URL") || "https://steward.fi",
     callbackPath: overrides?.callbackPath,
     provider,
     tokenStore: getTokenStore(),
@@ -2049,7 +2050,7 @@ async function createEmailAuthForTenant(tenantId: string): Promise<EmailAuth> {
   // We've already returned via buildGlobalEmailAuth above when apiKeyEncrypted
   // is missing, so it's safe to assume `emailConfig.from + apiKeyEncrypted`
   // are both present here.
-  const from = emailConfig.from || process.env.EMAIL_FROM || "login@steward.fi";
+  const from = emailConfig.from || runtimeEnvironmentValue("EMAIL_FROM") || "login@steward.fi";
   const provider =
     emailConfig.provider === "resend" && emailConfig.apiKeyEncrypted
       ? new ResendProvider({
@@ -2062,7 +2063,7 @@ async function createEmailAuthForTenant(tenantId: string): Promise<EmailAuth> {
       : undefined;
 
   const baseUrl =
-    magicLinkBaseUrl?.replace(/\/$/, "") || process.env.APP_URL || "https://steward.fi";
+    magicLinkBaseUrl?.replace(/\/$/, "") || runtimeEnvironmentValue("APP_URL") || "https://steward.fi";
 
   return new EmailAuth({
     from,
@@ -2497,7 +2498,7 @@ function ethereumWalletTenantId(address: string): string {
 }
 
 function getAllowedSiweDomains(): string[] {
-  const raw = process.env.SIWE_ALLOWED_DOMAINS?.trim();
+  const raw = runtimeEnvironmentValue("SIWE_ALLOWED_DOMAINS")?.trim();
   if (raw) {
     const domains = raw
       .split(",")
@@ -2506,7 +2507,7 @@ function getAllowedSiweDomains(): string[] {
     if (domains.length > 0) return domains;
   }
 
-  const appUrl = process.env.APP_URL?.trim() || "https://steward.fi";
+  const appUrl = runtimeEnvironmentValue("APP_URL")?.trim() || "https://steward.fi";
   try {
     return [new URL(appUrl).host.toLowerCase()];
   } catch {
@@ -2795,19 +2796,19 @@ export function getPhoneAuth(): PhoneAuth {
   if (_phoneAuth) return _phoneAuth;
 
   let provider: SmsProvider | undefined;
-  if (process.env.SMS_PROVIDER === "mock" && process.env.NODE_ENV !== "production") {
+  if (runtimeEnvironmentValue("SMS_PROVIDER") === "mock" && runtimeEnvironmentValue("NODE_ENV") !== "production") {
     provider = new MockSmsProvider();
   } else if (
-    process.env.TWILIO_ACCOUNT_SID &&
-    process.env.TWILIO_AUTH_TOKEN &&
-    process.env.TWILIO_FROM
+    runtimeEnvironmentValue("TWILIO_ACCOUNT_SID") &&
+    runtimeEnvironmentValue("TWILIO_AUTH_TOKEN") &&
+    runtimeEnvironmentValue("TWILIO_FROM")
   ) {
     provider = new TwilioSmsProvider({
-      accountSid: process.env.TWILIO_ACCOUNT_SID,
-      authToken: process.env.TWILIO_AUTH_TOKEN,
-      from: process.env.TWILIO_FROM,
+      accountSid: runtimeEnvironmentValue("TWILIO_ACCOUNT_SID"),
+      authToken: runtimeEnvironmentValue("TWILIO_AUTH_TOKEN"),
+      from: runtimeEnvironmentValue("TWILIO_FROM"),
     });
-  } else if (process.env.NODE_ENV === "production") {
+  } else if (runtimeEnvironmentValue("NODE_ENV") === "production") {
     throw new Error("SMS provider not configured");
   }
 
@@ -2819,11 +2820,11 @@ export function getPhoneAuth(): PhoneAuth {
 }
 
 function isWhatsAppOtpEnabled(): boolean {
-  return process.env.WHATSAPP_OTP_ENABLED === "true";
+  return runtimeEnvironmentValue("WHATSAPP_OTP_ENABLED") === "true";
 }
 
 function isFarcasterLoginEnabled(): boolean {
-  return process.env.FARCASTER_LOGIN_ENABLED === "true";
+  return runtimeEnvironmentValue("FARCASTER_LOGIN_ENABLED") === "true";
 }
 
 const TELEGRAM_LOGIN_MAX_AGE_SEC = 24 * 60 * 60;
@@ -3072,8 +3073,13 @@ class MfaRecoveryCodeStore implements RecoveryCodeStore {
   }
 }
 
-const recoveryCodeStore: RecoveryCodeStore =
-  process.env.NODE_ENV === "test" ? new InMemoryRecoveryCodeStore() : new MfaRecoveryCodeStore();
+const inMemoryRecoveryCodeStore = new InMemoryRecoveryCodeStore();
+const durableRecoveryCodeStore = new MfaRecoveryCodeStore();
+function recoveryCodeStore(): RecoveryCodeStore {
+  return runtimeEnvironmentValue("NODE_ENV") === "test"
+    ? inMemoryRecoveryCodeStore
+    : durableRecoveryCodeStore;
+}
 
 type PendingMfaAuth = {
   mfaType: "totp" | "sms";
@@ -4004,7 +4010,7 @@ function resolveSamlMappedRole(config: TenantSamlSsoConfig, groups: string[]): s
 }
 
 function getEmailAuthRedirectBaseUrl(): string {
-  return (process.env.EMAIL_AUTH_REDIRECT_BASE_URL || "https://www.elizacloud.ai").replace(
+  return (runtimeEnvironmentValue("EMAIL_AUTH_REDIRECT_BASE_URL") || "https://www.elizacloud.ai").replace(
     /\/$/,
     "",
   );
@@ -4616,7 +4622,7 @@ auth.get("/providers", async (c) => {
     discord: enabledOauth.includes("discord"),
     github: enabledOauth.includes("github"),
     twitter: enabledOauth.includes("twitter"),
-    telegram: methodEnabled("telegram") && Boolean(process.env.TELEGRAM_BOT_TOKEN?.trim()),
+    telegram: methodEnabled("telegram") && Boolean(runtimeEnvironmentValue("TELEGRAM_BOT_TOKEN")?.trim()),
     farcaster: methodEnabled("farcaster") && isFarcasterLoginEnabled(),
     linkedin: enabledOauth.includes("linkedin"),
     spotify: enabledOauth.includes("spotify"),
@@ -4645,7 +4651,7 @@ auth.post("/telegram/challenge", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
   }
 
-  const botToken = process.env.TELEGRAM_BOT_TOKEN?.trim();
+  const botToken = runtimeEnvironmentValue("TELEGRAM_BOT_TOKEN")?.trim();
   if (!botToken) {
     return c.json<ApiResponse>({ ok: false, error: "Telegram login is not configured" }, 503);
   }
@@ -4688,7 +4694,7 @@ auth.post("/telegram/verify", async (c) => {
   >(c);
   if (!body) return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
 
-  const botToken = process.env.TELEGRAM_BOT_TOKEN?.trim();
+  const botToken = runtimeEnvironmentValue("TELEGRAM_BOT_TOKEN")?.trim();
   if (!botToken) {
     return c.json<ApiResponse>({ ok: false, error: "Telegram login is not configured" }, 503);
   }
@@ -5516,8 +5522,8 @@ auth.get("/test/inbox/:email", (c) => {
 
 auth.get("/test/sms-inbox/:phone", (c) => {
   if (
-    process.env.SMS_PROVIDER !== "mock" ||
-    process.env.NODE_ENV === "production" ||
+    runtimeEnvironmentValue("SMS_PROVIDER") !== "mock" ||
+    runtimeEnvironmentValue("NODE_ENV") === "production" ||
     !authTestInboxEnabled()
   ) {
     return c.json<ApiResponse>({ ok: false, error: "Not found" }, 404);
@@ -5554,8 +5560,8 @@ auth.post("/test/token", async (c) => {
   // supervised app-review / automation windows and disable it immediately
   // afterward. Never leave it enabled on an internet-reachable prod deploy.
   if (
-    process.env.NODE_ENV === "production" &&
-    process.env.STEWARD_ENABLE_PROD_TEST_ACCOUNT_TOKEN !== "true"
+    runtimeEnvironmentValue("NODE_ENV") === "production" &&
+    runtimeEnvironmentValue("STEWARD_ENABLE_PROD_TEST_ACCOUNT_TOKEN") !== "true"
   ) {
     return c.json<ApiResponse>(
       { ok: false, error: "Test account token exchange is disabled" },
@@ -6880,7 +6886,7 @@ auth.post("/mfa/totp/enroll", async (c) => {
   const secret = generateTotpSecret();
   const accountName =
     session.payload.email || session.payload.address || `user:${session.payload.userId}`;
-  const issuer = process.env.TOTP_ISSUER || "Steward";
+  const issuer = runtimeEnvironmentValue("TOTP_ISSUER") || "Steward";
 
   await writeMfaJson(
     mfaKey("totp:pending", session.payload.userId),
@@ -6958,7 +6964,7 @@ auth.post("/mfa/totp/verify", async (c) => {
     });
     await writeMfaJson(mfaKey("totp:enabled", session.payload.userId), stored);
     await getMfaBackend().delete(mfaKey("totp:pending", session.payload.userId));
-    const recoveryCodes = await generateRecoveryCodes(recoveryCodeStore, session.payload.userId);
+    const recoveryCodes = await generateRecoveryCodes(recoveryCodeStore(), session.payload.userId);
     const { issuedBefore } = await revokeUserRefreshSessions(session.payload.userId);
     await writeAuditEvent({
       tenantId: session.payload.tenantId,
@@ -7060,7 +7066,7 @@ auth.post("/mfa/totp/complete", async (c) => {
       return c.json<ApiResponse>({ ok: false, error: "Invalid or expired MFA challenge" }, 401);
     }
     const verified = await verifyRecoveryCode(
-      recoveryCodeStore,
+      recoveryCodeStore(),
       challenge.userId,
       body.recoveryCode ?? "",
     );
@@ -7150,7 +7156,7 @@ auth.post("/mfa/totp/step-up", async (c) => {
   let method: "totp" | "recovery_code" = "totp";
   if (hasRecoveryCode) {
     const verified = await verifyRecoveryCode(
-      recoveryCodeStore,
+      recoveryCodeStore(),
       session.payload.userId,
       body?.recoveryCode ?? "",
     );
@@ -7181,7 +7187,7 @@ auth.get("/mfa/recovery-codes/status", async (c) => {
 
   const enabled = await hasTotpEnabled(session.payload.userId);
   const remaining = enabled
-    ? await unusedRecoveryCodeCount(recoveryCodeStore, session.payload.userId)
+    ? await unusedRecoveryCodeCount(recoveryCodeStore(), session.payload.userId)
     : 0;
   return c.json({ ok: true, enabled, remaining });
 });
@@ -7234,7 +7240,7 @@ auth.post("/mfa/recovery-codes/regenerate", async (c) => {
     ...verified.stored,
     lastAcceptedStep: verified.acceptedStep,
   });
-  const recoveryCodes = await generateRecoveryCodes(recoveryCodeStore, session.payload.userId);
+  const recoveryCodes = await generateRecoveryCodes(recoveryCodeStore(), session.payload.userId);
   await writeAuditEvent({
     tenantId: session.payload.tenantId,
     actorType: "user",
@@ -10663,9 +10669,9 @@ async function provisionOAuthUser(opts: {
  * cannot influence the provider redirect_uri.
  */
 function authCallbackBaseUrl(c: Context): string {
-  const configured = process.env.APP_URL?.trim();
+  const configured = runtimeEnvironmentValue("APP_URL")?.trim();
   if (configured) return configured.replace(/\/$/, "");
-  if (process.env.NODE_ENV === "production") {
+  if (runtimeEnvironmentValue("NODE_ENV") === "production") {
     throw new Error("APP_URL is required for OAuth/OIDC callback URLs in production");
   }
   return `${c.req.header("x-forwarded-proto") ?? "https"}://${c.req.header("host") ?? "localhost"}`;
@@ -10801,7 +10807,7 @@ async function exchangeOidcAuthorizationCode(opts: {
     if (!isAllowedOidcClientSecretEnvForTenant(provider.clientSecretEnv, tenantId)) {
       throw new Error("OIDC client secret env is outside the allowed tenant namespace");
     }
-    const secret = process.env[provider.clientSecretEnv];
+    const secret = runtimeEnvironmentValue(provider.clientSecretEnv);
     if (!secret) throw new Error(`OIDC client secret env ${provider.clientSecretEnv} is not set`);
     body.set("client_secret", secret);
   }
@@ -10859,7 +10865,7 @@ function parseOAuthRedirectAllowlistEnv(): string[] {
   const entries = new Set<string>();
 
   for (const envName of OAUTH_REDIRECT_ALLOWLIST_ENV_KEYS) {
-    const raw = process.env[envName];
+    const raw = runtimeEnvironmentValue(envName);
     if (!raw) continue;
 
     for (const entry of raw.split(",")) {

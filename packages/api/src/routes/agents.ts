@@ -1,3 +1,4 @@
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 /**
  * Agent CRUD, batch creation, token generation, and policy management routes.
  *
@@ -308,7 +309,7 @@ function requireTenantAdminOrApiKey(c: Parameters<typeof requireTenantLevel>[0])
  */
 function allowApiKeyAdminMutations(c: Parameters<typeof requireTenantLevel>[0]): boolean {
   return (
-    c.get("authType") === "api-key" && process.env.STEWARD_ALLOW_API_KEY_ADMIN_MUTATIONS === "true"
+    c.get("authType") === "api-key" && runtimeEnvironmentValue("STEWARD_ALLOW_API_KEY_ADMIN_MUTATIONS") === "true"
   );
 }
 
@@ -1799,7 +1800,7 @@ agentRoutes.put("/:agentId/policy", async (c) => {
       // Serialize the complete partial-patch read/materialize/write sequence,
       // including initial-row creation where SELECT FOR UPDATE has no row to
       // lock. PGLite runs tests on one connection and lacks this PG function.
-      if (process.env.STEWARD_PGLITE_MEMORY !== "true") {
+      if (runtimeEnvironmentValue("STEWARD_PGLITE_MEMORY") !== "true") {
         await tx.execute(
           sql`SELECT pg_advisory_xact_lock(hashtextextended(${`agent-policy:${tenantId}:${agentId}`}, 0))`,
         );

@@ -1,3 +1,4 @@
+import { runtimeEnvironmentValue } from "./runtime-env.js";
 /**
  * Provider execution authorization v2 signing (spec §3.2).
  *
@@ -66,7 +67,7 @@ function constantTimeEqual(left: string, right: string): boolean {
  * can never collide with the v1 (STEWARD_JWT_SECRET) key material.
  */
 export function loadExecutionAuthV2Keys(): ProviderExecutionAuthV2KeyEntry[] {
-  const raw = process.env.STEWARD_EXECUTION_AUTH_SECRET?.trim();
+  const raw = runtimeEnvironmentValue("STEWARD_EXECUTION_AUTH_SECRET")?.trim();
   if (!raw) {
     throw new ProviderExecutionAuthV2Error(
       "STEWARD_EXECUTION_AUTH_SECRET is required for provider execution authorization v2",

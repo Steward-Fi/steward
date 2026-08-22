@@ -5,6 +5,8 @@
  * Mount: app.route("/vault", vaultRoutes)
  */
 
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
+
 import {
   createDecipheriv,
   createHash,
@@ -189,32 +191,32 @@ async function writeOutcomeUnknownAudit(
 // Fail-closed by construction: anything other than the exact string "true"
 // (unset, "false", "1", etc.) yields false, i.e. signing disabled.
 const allowPrivateKeyExport = (): boolean =>
-  process.env.STEWARD_ALLOW_KEY_EXPORT !== "false" &&
-  process.env.STEWARD_ALLOW_PRIVATE_KEY_EXPORT === "true";
+  runtimeEnvironmentValue("STEWARD_ALLOW_KEY_EXPORT") !== "false" &&
+  runtimeEnvironmentValue("STEWARD_ALLOW_PRIVATE_KEY_EXPORT") === "true";
 const allowVaultPrivateKeyExport = (): boolean =>
-  process.env.STEWARD_ALLOW_VAULT_PRIVATE_KEY_EXPORT === "true";
+  runtimeEnvironmentValue("STEWARD_ALLOW_VAULT_PRIVATE_KEY_EXPORT") === "true";
 const allowUnsafeMessageSigning = (): boolean =>
-  process.env.STEWARD_ALLOW_UNSAFE_MESSAGE_SIGNING === "true";
+  runtimeEnvironmentValue("STEWARD_ALLOW_UNSAFE_MESSAGE_SIGNING") === "true";
 const allowVaultUnsafeMessageSigning = (): boolean =>
-  process.env.STEWARD_ALLOW_VAULT_UNSAFE_MESSAGE_SIGNING === "true";
+  runtimeEnvironmentValue("STEWARD_ALLOW_VAULT_UNSAFE_MESSAGE_SIGNING") === "true";
 // Audited opt-in for UNCONSTRAINED EIP-712 typed-data signing (no `typed-data`
 // policy required). Both flags must be set. Normally typed-data signing is
 // authorized per-agent by a `typed-data` policy instead; this is the
 // break-glass equivalent of the message-signing flags.
 const allowUnsafeTypedDataSigning = (): boolean =>
-  process.env.STEWARD_ALLOW_UNSAFE_TYPED_DATA_SIGNING === "true";
+  runtimeEnvironmentValue("STEWARD_ALLOW_UNSAFE_TYPED_DATA_SIGNING") === "true";
 const allowVaultUnsafeTypedDataSigning = (): boolean =>
-  process.env.STEWARD_ALLOW_VAULT_UNSAFE_TYPED_DATA_SIGNING === "true";
+  runtimeEnvironmentValue("STEWARD_ALLOW_VAULT_UNSAFE_TYPED_DATA_SIGNING") === "true";
 const allowUnsafeRawSigning = (): boolean =>
-  process.env.STEWARD_ALLOW_UNSAFE_RAW_SIGNING === "true";
+  runtimeEnvironmentValue("STEWARD_ALLOW_UNSAFE_RAW_SIGNING") === "true";
 const allowVaultUnsafeRawSigning = (): boolean =>
-  process.env.STEWARD_ALLOW_VAULT_UNSAFE_RAW_SIGNING === "true";
+  runtimeEnvironmentValue("STEWARD_ALLOW_VAULT_UNSAFE_RAW_SIGNING") === "true";
 const allowUnsafeContractCallSigning = (): boolean =>
-  process.env.STEWARD_ALLOW_UNSAFE_CONTRACT_CALL_SIGNING === "true";
+  runtimeEnvironmentValue("STEWARD_ALLOW_UNSAFE_CONTRACT_CALL_SIGNING") === "true";
 const allowUnsafeUserOperationSigning = (): boolean =>
-  process.env.STEWARD_ALLOW_UNSAFE_USER_OPERATION_SIGNING === "true";
+  runtimeEnvironmentValue("STEWARD_ALLOW_UNSAFE_USER_OPERATION_SIGNING") === "true";
 const allowUnsafeAuthorizationSigning = (): boolean =>
-  process.env.STEWARD_ALLOW_UNSAFE_AUTHORIZATION_SIGNING === "true";
+  runtimeEnvironmentValue("STEWARD_ALLOW_UNSAFE_AUTHORIZATION_SIGNING") === "true";
 /**
  * Blind-signing opt-in for Solana. When false (default), the sign-solana route
  * refuses any transaction whose instructions cannot all be confidently decoded
@@ -223,13 +225,14 @@ const allowUnsafeAuthorizationSigning = (): boolean =>
  * that policy controls cannot be enforced against the transaction's real effects.
  */
 const allowUnsafeSolanaBlindSigning = (): boolean =>
-  process.env.STEWARD_ALLOW_UNSAFE_SOLANA_BLIND_SIGNING === "true";
+  runtimeEnvironmentValue("STEWARD_ALLOW_UNSAFE_SOLANA_BLIND_SIGNING") === "true";
 const allowPrivateKeyImport = (): boolean =>
-  process.env.STEWARD_ALLOW_PRIVATE_KEY_IMPORT === "true";
+  runtimeEnvironmentValue("STEWARD_ALLOW_PRIVATE_KEY_IMPORT") === "true";
 const allowVaultPrivateKeyImport = (): boolean =>
-  process.env.STEWARD_ALLOW_VAULT_PRIVATE_KEY_IMPORT === "true";
+  runtimeEnvironmentValue("STEWARD_ALLOW_VAULT_PRIVATE_KEY_IMPORT") === "true";
 const VAULT_RPC_ALLOWLIST = new Set(
-  (process.env.STEWARD_VAULT_RPC_ALLOWLIST ?? "eth_chainId,eth_blockNumber,eth_getBalance")
+  (runtimeEnvironmentValue("STEWARD_VAULT_RPC_ALLOWLIST") ??
+    "eth_chainId,eth_blockNumber,eth_getBalance")
     .split(",")
     .map((method) => method.trim())
     .filter(Boolean),
@@ -552,7 +555,7 @@ function parseTransferActionInput(body: TransferActionInput): {
   const chainId =
     typeof body.chainId === "number" && Number.isInteger(body.chainId)
       ? body.chainId
-      : parseInt(process.env.CHAIN_ID || "8453", 10);
+      : parseInt(runtimeEnvironmentValue("CHAIN_ID") || "8453", 10);
   const referenceId = parseReferenceId(body.referenceId);
   const isSolanaTransfer = isSolanaActionChain(chainId);
 
@@ -605,7 +608,7 @@ function parseSendCallsActionInput(body: SendCallsActionInput):
   const chainId =
     typeof body.chainId === "number" && Number.isInteger(body.chainId)
       ? body.chainId
-      : parseInt(process.env.CHAIN_ID || "8453", 10);
+      : parseInt(runtimeEnvironmentValue("CHAIN_ID") || "8453", 10);
   if (!Number.isSafeInteger(chainId) || chainId <= 0) return "chainId must be a positive integer";
   const referenceId = parseReferenceId(body.referenceId);
   if (referenceId === null) return "referenceId must be a non-empty string up to 128 characters";
@@ -1438,7 +1441,7 @@ function isBitcoinPsbtBase64(value: unknown): value is string {
 }
 
 function maxBitcoinPsbtFeeSats(): bigint {
-  const configured = process.env.STEWARD_MAX_BITCOIN_PSBT_FEE_SATS;
+  const configured = runtimeEnvironmentValue("STEWARD_MAX_BITCOIN_PSBT_FEE_SATS");
   if (configured && /^\d+$/.test(configured)) return BigInt(configured);
   return DEFAULT_MAX_BITCOIN_PSBT_FEE_SATS;
 }
@@ -1447,7 +1450,7 @@ function maxBitcoinPsbtFeeSats(): bigint {
 const DEFAULT_MAX_MONERO_FEE_PICONERO = 100_000_000_000n;
 
 function maxMoneroFeePiconero(): bigint {
-  const configured = process.env.STEWARD_MAX_MONERO_FEE_PICONERO;
+  const configured = runtimeEnvironmentValue("STEWARD_MAX_MONERO_FEE_PICONERO");
   if (configured && /^\d+$/.test(configured)) return BigInt(configured);
   return DEFAULT_MAX_MONERO_FEE_PICONERO;
 }
@@ -1967,7 +1970,7 @@ async function requireSignerPermission(
 }
 
 async function withAgentSpendLock<T>(agentId: string, fn: () => Promise<T>): Promise<T> {
-  if (process.env.STEWARD_DB_MODE === "pglite" || process.env.STEWARD_PGLITE_MEMORY === "true") {
+  if (runtimeEnvironmentValue("STEWARD_DB_MODE") === "pglite" || runtimeEnvironmentValue("STEWARD_PGLITE_MEMORY") === "true") {
     return fn();
   }
   return db.transaction(async (tx) => {
@@ -2096,7 +2099,8 @@ vaultRoutes.post("/:agentId/sign", async (c) => {
     );
   }
 
-  const resolvedChainId = request.chainId || parseInt(process.env.CHAIN_ID || "8453", 10);
+  const resolvedChainId =
+    request.chainId || parseInt(runtimeEnvironmentValue("CHAIN_ID") || "8453", 10);
   if (!hasCalldata(request.data)) {
     const gasGuard = await nativeTransferGasAccountingGuard(
       c,
@@ -7252,7 +7256,7 @@ vaultRoutes.post("/:agentId/sign-typed-data", async (c) => {
 
   const resolvedChainId =
     (typeof body.domain.chainId === "number" ? body.domain.chainId : 0) ||
-    parseInt(process.env.CHAIN_ID || "8453", 10);
+    parseInt(runtimeEnvironmentValue("CHAIN_ID") || "8453", 10);
   // Use the EIP-712 domain's verifyingContract as the request `to` so that
   // destination-based policies (approved-addresses, condition-set, contract
   // allowlist) meaningfully gate the contract the typed data authorizes. Falls

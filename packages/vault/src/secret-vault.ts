@@ -1,3 +1,4 @@
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 /**
  * Secret Vault — encrypted credential storage for tenant API keys and secrets.
  *
@@ -944,8 +945,8 @@ export class SecretVault {
  * then remove the flag. Non-production retains the compatibility default.
  */
 function allowLegacySecretRootFallback(): boolean {
-  const configured = process.env.STEWARD_SECRET_VAULT_LEGACY_ROOT_FALLBACK;
+  const configured = runtimeEnvironmentValue("STEWARD_SECRET_VAULT_LEGACY_ROOT_FALLBACK");
   if (configured === "true") return true;
   if (configured === "false") return false;
-  return process.env.NODE_ENV !== "production";
+  return runtimeEnvironmentValue("NODE_ENV") !== "production";
 }

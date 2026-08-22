@@ -7,6 +7,8 @@
  * private dev deploys without HTTPS.
  */
 
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
+
 import type { MiddlewareHandler } from "hono";
 
 const STATIC_HEADERS: Record<string, string> = {
@@ -26,7 +28,7 @@ const STATIC_HEADERS: Record<string, string> = {
 const HSTS_VALUE = "max-age=63072000; includeSubDomains; preload";
 
 export function isHstsEnabled(): boolean {
-  return process.env.STEWARD_HSTS_DISABLED !== "true";
+  return runtimeEnvironmentValue("STEWARD_HSTS_DISABLED") !== "true";
 }
 
 function hostFromRequest(req: Request): string {

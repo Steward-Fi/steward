@@ -14,6 +14,8 @@
  *   app.use("*", tenantCors);
  */
 
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
+
 import {
   getDb,
   tenantAppClients as tenantAppClientsTable,
@@ -147,7 +149,7 @@ const MAX_AGE = "86400";
  * environments all fail closed.
  */
 function devWildcardAllowed(): boolean {
-  const env = process.env.NODE_ENV;
+  const env = runtimeEnvironmentValue("NODE_ENV");
   return env === "development" || env === "test";
 }
 

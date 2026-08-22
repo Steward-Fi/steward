@@ -17,6 +17,7 @@ import {
   userTenants,
 } from "@stwd/db";
 import { redactedThrownDiagnostics } from "@stwd/shared";
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 import { and, eq, inArray, isNull, sql } from "drizzle-orm";
 import { Hono } from "hono";
 import { writeAuditEvent } from "../services/audit";
@@ -262,7 +263,9 @@ function accountBalanceChainId(wallet: { chainFamily: ChainFamily }, chainId?: n
   if (wallet.chainFamily === "bitcoin") {
     return chainId === 202 ? 202 : 201;
   }
-  return chainId && !isSolanaChainId(chainId) ? chainId : Number(process.env.CHAIN_ID || "84532");
+  return chainId && !isSolanaChainId(chainId)
+    ? chainId
+    : Number(runtimeEnvironmentValue("CHAIN_ID") || "84532");
 }
 
 function balanceRowsForChainFilter<T extends { chainFamily: ChainFamily }>(

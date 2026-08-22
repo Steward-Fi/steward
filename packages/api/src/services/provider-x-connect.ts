@@ -287,7 +287,9 @@ export interface XConnectConfig {
  * user-auth `TWITTER_CLIENT_ID` / `TWITTER_CLIENT_SECRET` (login plane). See
  * .env.example for the separation rationale.
  */
-export function resolveXConnectConfig(env: NodeJS.ProcessEnv = process.env): XConnectConfig {
+export function resolveXConnectConfig(
+  env: Readonly<Record<string, string | undefined>> = runtimeEnvironmentSnapshot(),
+): XConnectConfig {
   const clientId = env.X_CLIENT_ID?.trim();
   const clientSecret = env.X_CLIENT_SECRET?.trim();
   if (!clientId || !clientSecret) {
@@ -3127,3 +3129,4 @@ async function revokeUpstreamBestEffort(
 
 // re-export sql for callers/tests that need raw predicates
 export { sql };
+import { runtimeEnvironmentSnapshot } from "@stwd/shared/runtime-env";

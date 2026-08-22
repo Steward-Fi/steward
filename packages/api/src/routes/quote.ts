@@ -1,3 +1,4 @@
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 import {
   type AttestationProvider,
   createDstackTdxProvider,
@@ -76,7 +77,7 @@ quoteRoutes.get("/", async (c) => {
 });
 
 export function createConfiguredAttestationProvider(): AttestationProvider {
-  const provider = process.env.STEWARD_ATTESTATION_PROVIDER ?? "noop-dev";
+  const provider = runtimeEnvironmentValue("STEWARD_ATTESTATION_PROVIDER") ?? "noop-dev";
   switch (provider) {
     case "dstack-tdx":
       return createDstackTdxProvider();

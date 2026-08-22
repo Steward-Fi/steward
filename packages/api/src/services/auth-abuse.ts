@@ -1,3 +1,4 @@
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 import type {
   TenantAuthAbuseConfig,
   TenantCaptchaAction,
@@ -442,7 +443,7 @@ export function validateEmailAbusePolicy(
   }
   if (emailConfig.blockDisposable) {
     const envDomains = new Set(
-      (process.env.STEWARD_DISPOSABLE_EMAIL_DOMAINS ?? "")
+      (runtimeEnvironmentValue("STEWARD_DISPOSABLE_EMAIL_DOMAINS") ?? "")
         .split(",")
         .map((entry) => entry.trim().toLowerCase())
         .filter(Boolean),
@@ -502,7 +503,7 @@ export function validatePhoneAbusePolicy(
     return "phone country code is blocked";
   }
   if (phoneConfig.blockVoip) {
-    const blockedPrefixes = (process.env.STEWARD_VOIP_PHONE_PREFIXES ?? "")
+    const blockedPrefixes = (runtimeEnvironmentValue("STEWARD_VOIP_PHONE_PREFIXES") ?? "")
       .split(",")
       .map((entry) => entry.trim())
       .filter(Boolean);
@@ -535,7 +536,7 @@ export async function verifyCaptchaToken(
   if (typeof safeSecretEnv === "string" && safeSecretEnv.startsWith("captcha.")) {
     return { ok: false, status: 503, error: "CAPTCHA provider is not configured" };
   }
-  const secret = process.env[secretEnv]?.trim();
+  const secret = runtimeEnvironmentValue(secretEnv)?.trim();
   if (!secret) {
     return { ok: false, status: 503, error: "CAPTCHA provider is not configured" };
   }

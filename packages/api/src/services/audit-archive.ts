@@ -2,6 +2,7 @@
 
 import { createHash, createPublicKey, type KeyObject, randomUUID, sign, verify } from "node:crypto";
 import { getDb } from "@stwd/db";
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 import { sql } from "drizzle-orm";
 import { type AuditReadExecutor, verifyAuditChain, withTenantAuditedTransaction } from "./audit";
 import { parseSigningKey, publicKeyPem } from "./audit-checkpoint";
@@ -90,7 +91,7 @@ const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3
 const DURABILITY_URI_PATTERN = /^(?:s3|gs|azure|https):\/\/[^\s]{1,1900}$/;
 
 function parseTrustedKeyRegistry(envName: string): Readonly<Record<string, string>> {
-  const raw = process.env[envName]?.trim();
+  const raw = runtimeEnvironmentValue(envName)?.trim();
   if (!raw) return Object.freeze({});
   let parsed: unknown;
   try {
@@ -120,11 +121,11 @@ function currentArchiveSigningIdentity(): {
   privateKey: KeyObject;
   publicKey: string;
 } {
-  const keyId = process.env.STEWARD_AUDIT_SIGNING_KEY_ID?.trim() ?? "";
+  const keyId = runtimeEnvironmentValue("STEWARD_AUDIT_SIGNING_KEY_ID")?.trim() ?? "";
   if (!KEY_ID_PATTERN.test(keyId)) {
     throw new Error("STEWARD_AUDIT_SIGNING_KEY_ID is required for audit archives");
   }
-  const privateKey = parseSigningKey(process.env.STEWARD_AUDIT_SIGNING_KEY ?? "");
+  const privateKey = parseSigningKey(runtimeEnvironmentValue("STEWARD_AUDIT_SIGNING_KEY") ?? "");
   const publicKey = publicKeyPem(privateKey);
   const trusted = parseTrustedKeyRegistry("STEWARD_AUDIT_ARCHIVE_TRUSTED_SIGNING_KEYS");
   const configured = trusted[keyId];
@@ -273,7 +274,7 @@ async function lockTenantAuditWriter(
   tx: { execute(query: ReturnType<typeof sql>): Promise<unknown> },
   tenantId: string,
 ) {
-  if (process.env.STEWARD_DB_MODE !== "pglite" && process.env.STEWARD_PGLITE_MEMORY !== "true") {
+  if (runtimeEnvironmentValue("STEWARD_DB_MODE") !== "pglite" && runtimeEnvironmentValue("STEWARD_PGLITE_MEMORY") !== "true") {
     await tx.execute(
       sql`SELECT pg_advisory_xact_lock(hashtextextended(${`steward_audit_${tenantId}`}, 0))`,
     );

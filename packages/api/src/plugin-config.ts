@@ -73,12 +73,12 @@ export class UnknownPluginError extends Error {
  * throws {@link UnknownPluginError}. The legacy boolean only ever adds a KNOWN
  * name, so it cannot trip the unknown-name guard.
  *
- * @param env the environment to read. defaults to `process.env`; injectable so
+ * @param env the environment to read. Defaults to the current request snapshot;
  *   tests can drive it hermetically without mutating the real process env.
  * @returns the set of enabled plugin names (lowercased). empty in LEAN mode.
  */
 export function resolveEnabledPlugins(
-  env: Record<string, string | undefined> = process.env,
+  env: Readonly<Record<string, string | undefined>> = runtimeEnvironmentSnapshot(),
 ): Set<string> {
   const enabled = new Set<string>();
 
@@ -103,3 +103,4 @@ export function resolveEnabledPlugins(
 
   return enabled;
 }
+import { runtimeEnvironmentSnapshot } from "@stwd/shared/runtime-env";

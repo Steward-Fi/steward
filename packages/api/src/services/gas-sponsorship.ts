@@ -1,4 +1,5 @@
 import { getDb, sponsoredGasEvents, tenantConfigs as tenantConfigsTable } from "@stwd/db";
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 import type {
   GasSponsorshipMode,
   GasSponsorshipProvider,
@@ -46,9 +47,9 @@ function normalizeHttpsUrl(value: unknown, field: string): string | undefined | 
     return `${field} must be a valid URL`;
   }
   const localProviderUrlsAllowed =
-    process.env.STEWARD_ALLOW_LOCAL_PROVIDER_URLS === "true" ||
-    process.env.NODE_ENV === "test" ||
-    process.env.NODE_ENV === "development";
+    runtimeEnvironmentValue("STEWARD_ALLOW_LOCAL_PROVIDER_URLS") === "true" ||
+    runtimeEnvironmentValue("NODE_ENV") === "test" ||
+    runtimeEnvironmentValue("NODE_ENV") === "development";
   if (url.protocol !== "https:" && url.hostname !== "localhost" && url.hostname !== "127.0.0.1") {
     return `${field} must use https`;
   }

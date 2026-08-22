@@ -1,3 +1,4 @@
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 import { randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
 
 const SIGNER_CREDENTIAL_VERSION = "stwd_scrypt_v1";
@@ -7,7 +8,7 @@ const SCRYPT_PARALLELIZATION = 1;
 const SCRYPT_KEY_LENGTH = 32;
 
 function signerCredentialPepper(): string {
-  const pepper = process.env.STEWARD_SIGNER_CREDENTIAL_PEPPER;
+  const pepper = runtimeEnvironmentValue("STEWARD_SIGNER_CREDENTIAL_PEPPER");
   if (pepper && pepper.trim().length >= 32) return pepper;
   if (pepper) {
     throw new Error(
@@ -20,13 +21,13 @@ function signerCredentialPepper(): string {
   // defense-in-depth against a DB-only attacker (scrypt+salt still applies),
   // but losing it must be loud, not silent. Production fails closed; outside
   // production the pepperless path requires the explicit dev opt-in.
-  if (process.env.NODE_ENV === "production") {
+  if (runtimeEnvironmentValue("NODE_ENV") === "production") {
     throw new Error(
       "STEWARD_SIGNER_CREDENTIAL_PEPPER is required in production. " +
         "Generate with `openssl rand -hex 32`.",
     );
   }
-  if (process.env.STEWARD_ALLOW_DEV_SECRETS !== "true") {
+  if (runtimeEnvironmentValue("STEWARD_ALLOW_DEV_SECRETS") !== "true") {
     throw new Error(
       "STEWARD_SIGNER_CREDENTIAL_PEPPER is required. For local development only, set " +
         "STEWARD_ALLOW_DEV_SECRETS=true to run without a pepper.",

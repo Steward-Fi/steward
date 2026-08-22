@@ -1,3 +1,4 @@
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 /**
  * Shared tamper-evident audit-chain WRITE core.
  *
@@ -30,7 +31,7 @@ import { DatabaseDeadlineExceededError, getDb, hasTenantTransactionDatabase } fr
 const ZERO_HASH = new Uint8Array(32);
 
 function isPGLiteRuntime(): boolean {
-  return process.env.STEWARD_DB_MODE === "pglite" || process.env.STEWARD_PGLITE_MEMORY === "true";
+  return runtimeEnvironmentValue("STEWARD_DB_MODE") === "pglite" || runtimeEnvironmentValue("STEWARD_PGLITE_MEMORY") === "true";
 }
 
 function toU8(value: unknown): Uint8Array {
@@ -138,7 +139,7 @@ export function __resetAuditHmacKeyCacheForTests(): void {
 
 function getHmacKey(): Uint8Array {
   if (cachedKey) return cachedKey;
-  const env = process.env.STEWARD_AUDIT_HMAC_KEY;
+  const env = runtimeEnvironmentValue("STEWARD_AUDIT_HMAC_KEY");
   if (env && env.length > 0) {
     const isHex = /^[0-9a-fA-F]+$/.test(env) && env.length % 2 === 0;
     // Hex keys decode to env.length/2 bytes; raw keys count chars directly.
@@ -154,14 +155,14 @@ function getHmacKey(): Uint8Array {
       isHex && env.length >= MIN_HMAC_RAW_BYTES * 2 ? toU8(env) : new TextEncoder().encode(env);
     return cachedKey;
   }
-  if (process.env.NODE_ENV === "production") {
+  if (runtimeEnvironmentValue("NODE_ENV") === "production") {
     throw new Error(
       "STEWARD_AUDIT_HMAC_KEY is required in production. Generate with `openssl rand -hex 32`.",
     );
   }
   // Default-deny: the dev fallback is only allowed with an explicit opt-in
   // consistent with the rest of the repo (STEWARD_ALLOW_DEV_SECRETS).
-  if (process.env.STEWARD_ALLOW_DEV_SECRETS !== "true") {
+  if (runtimeEnvironmentValue("STEWARD_ALLOW_DEV_SECRETS") !== "true") {
     throw new Error(
       "STEWARD_AUDIT_HMAC_KEY is required. For local development only, set " +
         "STEWARD_ALLOW_DEV_SECRETS=true to use the insecure dev key.",

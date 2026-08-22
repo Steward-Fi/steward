@@ -1,3 +1,4 @@
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 /**
  * Shared secret-route config validator — single source of truth.
  *
@@ -148,7 +149,7 @@ export type SecretRouteConfigInput = {
 };
 
 function allowBroadSecretRoutes(): boolean {
-  return process.env.STEWARD_ALLOW_BROAD_SECRET_ROUTES === "true";
+  return runtimeEnvironmentValue("STEWARD_ALLOW_BROAD_SECRET_ROUTES") === "true";
 }
 
 /**
@@ -158,7 +159,7 @@ function allowBroadSecretRoutes(): boolean {
  * cookie injection blocked.
  */
 function allowCookieInjection(): boolean {
-  return process.env.STEWARD_ALLOW_COOKIE_INJECTION === "true";
+  return runtimeEnvironmentValue("STEWARD_ALLOW_COOKIE_INJECTION") === "true";
 }
 
 /**
@@ -168,7 +169,7 @@ function allowCookieInjection(): boolean {
 export function configuredSecretRouteHosts(): string[] {
   return [
     ...DEFAULT_SECRET_ROUTE_HOSTS,
-    ...(process.env.STEWARD_SECRET_ROUTE_ALLOWED_HOSTS ?? "")
+    ...(runtimeEnvironmentValue("STEWARD_SECRET_ROUTE_ALLOWED_HOSTS") ?? "")
       .split(",")
       .map((host) => host.trim().toLowerCase())
       .filter(Boolean),

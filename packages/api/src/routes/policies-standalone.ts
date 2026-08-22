@@ -1,3 +1,4 @@
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 /**
  * Standalone Policy Template CRUD, assignment, and simulation routes.
  *
@@ -180,7 +181,7 @@ async function insertTemplateWithQuota(
   id: string,
 ): Promise<PolicyTemplate> {
   return db.transaction(async (tx) => {
-    if (process.env.STEWARD_DB_MODE !== "pglite" && process.env.STEWARD_PGLITE_MEMORY !== "true") {
+    if (runtimeEnvironmentValue("STEWARD_DB_MODE") !== "pglite" && runtimeEnvironmentValue("STEWARD_PGLITE_MEMORY") !== "true") {
       await tx.execute(
         sql`select pg_advisory_xact_lock(hashtext(${`policy_templates:${tenantId}`}))`,
       );

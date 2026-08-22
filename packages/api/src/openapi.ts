@@ -1,3 +1,4 @@
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 import { isSensitivePath, SENSITIVE_PATH_PREFIXES } from "./middleware/sensitive-paths";
 
 type JsonSchema = Record<string, unknown>;
@@ -7031,10 +7032,10 @@ export function getOpenApiSpec() {
 }
 
 export function isOpenApiHttpEnabled(): boolean {
-  const explicit = process.env.STEWARD_OPENAPI_ENABLED;
+  const explicit = runtimeEnvironmentValue("STEWARD_OPENAPI_ENABLED");
   if (explicit === "1" || explicit === "true") return true;
   if (explicit === "0" || explicit === "false") return false;
-  return process.env.NODE_ENV !== undefined && process.env.NODE_ENV !== "production";
+  return runtimeEnvironmentValue("NODE_ENV") !== undefined && runtimeEnvironmentValue("NODE_ENV") !== "production";
 }
 
 export const OPENAPI_DOC = getOpenApiSpec();

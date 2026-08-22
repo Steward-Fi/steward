@@ -1,3 +1,4 @@
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 /**
  * client-ip.ts - best-effort trustworthy client IP for the capability audit
  * trail.
@@ -34,9 +35,9 @@ import type { Context } from "hono";
  * default); the deprecated STEWARD_TRUST_PROXY_HEADERS=true maps to hops=1.
  */
 function trustedProxyHops(): number {
-  const raw = process.env.STEWARD_TRUSTED_PROXY_HOPS?.trim();
+  const raw = runtimeEnvironmentValue("STEWARD_TRUSTED_PROXY_HOPS")?.trim();
   if (raw === undefined || raw === "") {
-    return process.env.STEWARD_TRUST_PROXY_HEADERS === "true" ? 1 : 0;
+    return runtimeEnvironmentValue("STEWARD_TRUST_PROXY_HEADERS") === "true" ? 1 : 0;
   }
   // Canonical non-negative integer only: "1.5" must not truncate into trust.
   if (!/^\d+$/.test(raw)) return 0;
@@ -65,7 +66,7 @@ function normalizeIpCandidate(value: string | undefined): string | undefined {
 
 /** Best-effort trustworthy client IP, or undefined when none can be derived. */
 export function trustedClientIp(c: Context): string | undefined {
-  const trustCloudflare = process.env.STEWARD_TRUST_CLOUDFLARE === "true";
+  const trustCloudflare = runtimeEnvironmentValue("STEWARD_TRUST_CLOUDFLARE") === "true";
   if (trustCloudflare) {
     const cf = c.req.header("cf-connecting-ip")?.trim();
     if (cf && isIP(cf)) return cf;

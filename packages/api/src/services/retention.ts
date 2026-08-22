@@ -12,6 +12,8 @@
  * untrusted env values can never be interpolated into SQL text.
  */
 
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
+
 import { getDb } from "@stwd/db";
 import { redactedThrownDiagnostics } from "@stwd/shared";
 import { sql } from "drizzle-orm";
@@ -67,7 +69,7 @@ class RetentionAuthorizationAuditError extends Error {
 }
 
 function readPositiveInt(envName: string): number | undefined {
-  const raw = process.env[envName];
+  const raw = runtimeEnvironmentValue(envName);
   if (raw === undefined || raw === "") return undefined;
   const n = Number(raw);
   if (!Number.isFinite(n) || !Number.isInteger(n) || n < 0) {
@@ -211,7 +213,7 @@ async function sweepDeactivatedUsers(ctx: RetentionSweepContext): Promise<SweepR
         `${MIN_DEACTIVATED_USERS_DAYS}-day floor; refusing to hard-delete users.`,
     );
   }
-  if (process.env.STEWARD_RETENTION_DEACTIVATED_USERS_DELETE_CONFIRMED !== "true") {
+  if (runtimeEnvironmentValue("STEWARD_RETENTION_DEACTIVATED_USERS_DELETE_CONFIRMED") !== "true") {
     throw new Error(
       "[retention] Deactivated-user cleanup performs global hard deletes. Set " +
         "STEWARD_RETENTION_DEACTIVATED_USERS_DELETE_CONFIRMED=true only after account " +
@@ -366,7 +368,7 @@ async function runRetentionSweeper(
  * Returns a cancel function.
  */
 export function startRetentionScheduler(): () => void {
-  if (process.env.STEWARD_RETENTION_DISABLED === "true") {
+  if (runtimeEnvironmentValue("STEWARD_RETENTION_DISABLED") === "true") {
     console.log("[retention] STEWARD_RETENTION_DISABLED=true; scheduler not started");
     return () => {};
   }

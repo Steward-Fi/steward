@@ -1,3 +1,4 @@
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 /**
  * Access-token revocation store.
  *
@@ -127,8 +128,8 @@ class RedisRevocationStore implements RevocationStore {
   private warnedMemoryFallback = false;
 
   private getRedis(): Redis | null {
-    if (!process.env.REDIS_URL) {
-      if (process.env.NODE_ENV === "production") {
+    if (!runtimeEnvironmentValue("REDIS_URL")) {
+      if (runtimeEnvironmentValue("NODE_ENV") === "production") {
         throw new Error("Shared token revocation store unavailable");
       }
       // SEC-056: revocation state silently degrading to per-process memory
@@ -147,8 +148,8 @@ class RedisRevocationStore implements RevocationStore {
       // SEC-032: enforce the same rediss:// production TLS assertion as the
       // shared client in @stwd/redis — revocation state is auth data and must
       // not cross a cleartext link.
-      assertRedisUrlTls(process.env.REDIS_URL);
-      this.redis = new Redis(process.env.REDIS_URL, {
+      assertRedisUrlTls(runtimeEnvironmentValue("REDIS_URL"));
+      this.redis = new Redis(runtimeEnvironmentValue("REDIS_URL"), {
         maxRetriesPerRequest: 1,
         lazyConnect: false,
         enableReadyCheck: true,

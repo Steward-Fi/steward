@@ -1,3 +1,4 @@
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 /**
  * provider-action-service.ts — the provider-action authority pipeline.
  *
@@ -1041,7 +1042,7 @@ class ProviderActionService {
         const verification = verifyXSummonAttestation(
           input.summonAttestation,
           {
-            audience: process.env.STEWARD_X_SUMMON_ATTESTATION_AUDIENCE ?? "",
+            audience: runtimeEnvironmentValue("STEWARD_X_SUMMON_ATTESTATION_AUDIENCE") ?? "",
             tenantId,
             workspaceId: input.workspaceId,
             actorAgentId,
@@ -1049,7 +1050,7 @@ class ProviderActionService {
             sourcePostId,
             idempotencyKeyHash: input.idempotencyKeyHash,
           },
-          process.env.STEWARD_X_SUMMON_ATTESTATION_PUBLIC_KEYS,
+          runtimeEnvironmentValue("STEWARD_X_SUMMON_ATTESTATION_PUBLIC_KEYS"),
           providerPolicyClockForTests?.() ?? new Date(),
         );
         if (verification.ok) {
@@ -1161,7 +1162,7 @@ class ProviderActionService {
         // PGLite is a single-connection test harness and has no advisory-lock
         // function. Production Postgres must serialize this identity before the
         // locked replay check below.
-        if (process.env.STEWARD_PGLITE_MEMORY !== "true") {
+        if (runtimeEnvironmentValue("STEWARD_PGLITE_MEMORY") !== "true") {
           await tx.execute(
             sql`SELECT pg_advisory_xact_lock(hashtextextended(${`provider-action-create:${createIdentity}`}, 0))`,
           );
@@ -2803,7 +2804,7 @@ class ProviderActionService {
         const verification = verifyXSummonAttestation(
           persistedAttestation,
           {
-            audience: process.env.STEWARD_X_SUMMON_ATTESTATION_AUDIENCE ?? "",
+            audience: runtimeEnvironmentValue("STEWARD_X_SUMMON_ATTESTATION_AUDIENCE") ?? "",
             tenantId: args.tenantId,
             workspaceId: args.workspaceId,
             actorAgentId: args.actorAgentId,
@@ -2811,7 +2812,7 @@ class ProviderActionService {
             sourcePostId,
             idempotencyKeyHash: args.idempotencyKeyHash,
           },
-          process.env.STEWARD_X_SUMMON_ATTESTATION_PUBLIC_KEYS,
+          runtimeEnvironmentValue("STEWARD_X_SUMMON_ATTESTATION_PUBLIC_KEYS"),
           providerPolicyClockForTests?.() ?? new Date(),
         );
         if (!verification.ok) {

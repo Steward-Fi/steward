@@ -1,11 +1,12 @@
 import { redactedThrownDiagnostics } from "@stwd/shared";
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 import { providerActionService } from "./provider-action-service";
 import { runInternalJobForEachTenant } from "./tenant-job";
 
 const DEFAULT_INTERVAL_MS = 15_000;
 
 function configuredInterval(): number {
-  const parsed = Number(process.env.STEWARD_PROVIDER_RESERVATION_SWEEP_INTERVAL_MS);
+  const parsed = Number(runtimeEnvironmentValue("STEWARD_PROVIDER_RESERVATION_SWEEP_INTERVAL_MS"));
   return Number.isSafeInteger(parsed) && parsed >= 1_000 ? parsed : DEFAULT_INTERVAL_MS;
 }
 
@@ -17,7 +18,7 @@ function configuredInterval(): number {
  * into an unobservable catch.
  */
 export function startProviderReservationReconciliationScheduler(): () => void {
-  if (process.env.STEWARD_PROVIDER_RESERVATION_SWEEPER === "false") return () => {};
+  if (runtimeEnvironmentValue("STEWARD_PROVIDER_RESERVATION_SWEEPER") === "false") return () => {};
   let running = false;
   const tick = () => {
     if (running) return;

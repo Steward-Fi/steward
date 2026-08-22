@@ -1,3 +1,4 @@
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 /**
  * EIP-1271 verification helper.
  *
@@ -73,11 +74,11 @@ const DEFAULT_PUBLIC_RPCS: Record<number, string> = {
  * Returns null if no RPC is available for this chain.
  */
 export function resolveRpcUrl(chainId: number): string | null {
-  const envOverride = process.env[`SIWE_RPC_${chainId}`];
+  const envOverride = runtimeEnvironmentValue(`SIWE_RPC_${chainId}`);
   if (envOverride && envOverride.trim().length > 0) {
     return envOverride.trim();
   }
-  if (process.env.NODE_ENV === "production") return null;
+  if (runtimeEnvironmentValue("NODE_ENV") === "production") return null;
   return DEFAULT_PUBLIC_RPCS[chainId] ?? null;
 }
 

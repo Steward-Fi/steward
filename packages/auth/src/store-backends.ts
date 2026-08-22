@@ -1,3 +1,4 @@
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 /**
  * Pluggable backend implementations for ChallengeStore and TokenStore.
  *
@@ -135,7 +136,7 @@ interface MemoryEntry {
  * This is the zero-config default — no external dependencies required.
  */
 const isWorkersRuntime =
-  process.env.STEWARD_RUNTIME === "workers" ||
+  runtimeEnvironmentValue("STEWARD_RUNTIME") === "workers" ||
   (typeof navigator !== "undefined" && navigator.userAgent === "Cloudflare-Workers");
 
 export class MemoryBackend implements StoreBackend {

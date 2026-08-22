@@ -1,3 +1,4 @@
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 import { lookup as dnsLookup } from "node:dns";
 import type { LookupFunction } from "node:net";
 import { assertPublicInternetAddress } from "./public-endpoint";
@@ -10,7 +11,7 @@ import { assertPublicInternetAddress } from "./public-endpoint";
  * exposes a transport that can pin a validated address while retaining TLS SNI.
  */
 export function assertPinnedDnsTransportSupported(resource: string): void {
-  if (process.env.STEWARD_RUNTIME === "workers") {
+  if (runtimeEnvironmentValue("STEWARD_RUNTIME") === "workers") {
     throw new Error(`${resource} requires connect-time DNS validation unavailable in Workers`);
   }
 }

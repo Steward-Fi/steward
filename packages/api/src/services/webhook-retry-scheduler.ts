@@ -1,4 +1,5 @@
 import { redactedThrownDiagnostics } from "@stwd/shared";
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 import { PersistentQueue } from "@stwd/webhooks";
 import { runInternalJobForEachTenant } from "./tenant-job";
 
@@ -12,17 +13,17 @@ function parsePositiveInt(value: string | undefined, fallback: number): number {
 }
 
 export function startWebhookRetryScheduler(): () => void {
-  if (process.env.STEWARD_WEBHOOK_RETRY_WORKER === "false") {
+  if (runtimeEnvironmentValue("STEWARD_WEBHOOK_RETRY_WORKER") === "false") {
     console.log("[webhooks] Retry scheduler disabled by STEWARD_WEBHOOK_RETRY_WORKER=false");
     return () => {};
   }
 
   const intervalMs = parsePositiveInt(
-    process.env.STEWARD_WEBHOOK_RETRY_INTERVAL_MS,
+    runtimeEnvironmentValue("STEWARD_WEBHOOK_RETRY_INTERVAL_MS"),
     DEFAULT_WEBHOOK_RETRY_INTERVAL_MS,
   );
   const batchSize = parsePositiveInt(
-    process.env.STEWARD_WEBHOOK_RETRY_BATCH_SIZE,
+    runtimeEnvironmentValue("STEWARD_WEBHOOK_RETRY_BATCH_SIZE"),
     DEFAULT_WEBHOOK_RETRY_BATCH_SIZE,
   );
   const queue = new PersistentQueue(undefined, { batchSize });

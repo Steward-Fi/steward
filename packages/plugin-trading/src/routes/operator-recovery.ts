@@ -1,3 +1,4 @@
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 /**
  * operator-recovery.ts — Operator fund-recovery endpoints.
  *
@@ -484,7 +485,7 @@ export function createOperatorRecoveryRoutes(
       // serializes operator reservations with both other operator rails and
       // on-chain transaction evaluation/commit for the cumulative cap.
       const pgliteRuntime =
-        process.env.STEWARD_DB_MODE === "pglite" || process.env.STEWARD_PGLITE_MEMORY === "true";
+        runtimeEnvironmentValue("STEWARD_DB_MODE") === "pglite" || runtimeEnvironmentValue("STEWARD_PGLITE_MEMORY") === "true";
       if (!pgliteRuntime) {
         await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${input.agentId}, 0))`);
       }

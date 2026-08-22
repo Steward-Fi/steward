@@ -25,3 +25,15 @@ export function runtimeEnvironmentValue(name: string): string | undefined {
   const requestEnvironment = runtimeEnvironmentStorage.getStore();
   return requestEnvironment ? requestEnvironment[name] : process.env[name];
 }
+
+/**
+ * Resolve the complete immutable environment authority for the current unit of
+ * work. Bun callers receive a frozen snapshot of process.env; Worker callers
+ * receive the snapshot bound by withRuntimeEnvironment. Consumers that need to
+ * enumerate prefixed settings must use this instead of Object.keys(process.env)
+ * so an overlapping Worker request cannot replace their authority mid-read.
+ */
+export function runtimeEnvironmentSnapshot(): RuntimeEnvironment {
+  const requestEnvironment = runtimeEnvironmentStorage.getStore();
+  return requestEnvironment ?? snapshotRuntimeEnvironment(process.env);
+}

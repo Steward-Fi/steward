@@ -31,6 +31,8 @@
  * Zero new dependencies: uses node:crypto Ed25519 primitives.
  */
 
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
+
 import {
   createHash,
   createPrivateKey,
@@ -365,7 +367,7 @@ let cachedSignerKeySource: string | null = null;
  * to decide between hard-fail (production) and disabled-with-warning (dev).
  */
 export function isCheckpointSigningConfigured(): boolean {
-  const env = process.env.STEWARD_AUDIT_SIGNING_KEY;
+  const env = runtimeEnvironmentValue("STEWARD_AUDIT_SIGNING_KEY");
   return typeof env === "string" && env.trim().length > 0;
 }
 
@@ -376,7 +378,7 @@ export function isCheckpointSigningConfigured(): boolean {
  * gracefully.
  */
 export function getCheckpointSigner(): AuditCheckpointSigner {
-  const env = process.env.STEWARD_AUDIT_SIGNING_KEY ?? "";
+  const env = runtimeEnvironmentValue("STEWARD_AUDIT_SIGNING_KEY") ?? "";
   if (env.trim().length === 0) {
     throw new AuditSigningKeyError(
       "STEWARD_AUDIT_SIGNING_KEY is not configured. Generate one with: " +

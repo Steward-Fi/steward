@@ -1,3 +1,4 @@
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 /**
  * provider-case.ts — correlated provider-case evidence assembler (pure read).
  *
@@ -91,7 +92,7 @@ export class CaseRangeTooLargeError extends Error {
  * escalate to REPEATABLE READ READ ONLY for a true snapshot.
  */
 function isPGLiteRuntime(): boolean {
-  return process.env.STEWARD_DB_MODE === "pglite" || process.env.STEWARD_PGLITE_MEMORY === "true";
+  return runtimeEnvironmentValue("STEWARD_DB_MODE") === "pglite" || runtimeEnvironmentValue("STEWARD_PGLITE_MEMORY") === "true";
 }
 
 /** Sensitive-key set for the safe-summary re-validation (spec §3.3). Mirrors the

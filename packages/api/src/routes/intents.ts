@@ -1,3 +1,4 @@
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 /**
  * Privy-style generic intent routes.
  *
@@ -78,7 +79,8 @@ const DEFAULT_INTENT_TTL_SECONDS = 24 * 60 * 60;
 const MAX_INTENT_TTL_SECONDS = 7 * 24 * 60 * 60;
 const AGENT_KEY_QUORUM_STATUSES = new Set(["active", "paused", "revoked"]);
 const VAULT_RPC_ALLOWLIST = new Set(
-  (process.env.STEWARD_VAULT_RPC_ALLOWLIST ?? "eth_chainId,eth_blockNumber,eth_getBalance")
+  (runtimeEnvironmentValue("STEWARD_VAULT_RPC_ALLOWLIST") ??
+    "eth_chainId,eth_blockNumber,eth_getBalance")
     .split(",")
     .map((method) => method.trim())
     .filter(Boolean),
@@ -1126,7 +1128,7 @@ class IntentExecutionError extends Error {
 }
 
 async function withAgentSpendLock<T>(agentId: string, fn: () => Promise<T>): Promise<T> {
-  if (process.env.STEWARD_DB_MODE === "pglite" || process.env.STEWARD_PGLITE_MEMORY === "true") {
+  if (runtimeEnvironmentValue("STEWARD_DB_MODE") === "pglite" || runtimeEnvironmentValue("STEWARD_PGLITE_MEMORY") === "true") {
     return fn();
   }
   return db.transaction(async (tx) => {

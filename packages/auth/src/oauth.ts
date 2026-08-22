@@ -1,3 +1,4 @@
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 /**
  * oauth.ts — Generic OAuth2 authorization-code flow helper
  *
@@ -222,7 +223,7 @@ function overrideUrl(
   kind: "AUTHORIZATION" | "TOKEN" | "USERINFO",
 ): string | undefined {
   const key = `${provider.toUpperCase()}_${kind}_URL`;
-  const value = process.env[key];
+  const value = runtimeEnvironmentValue(key);
   return value && value.trim().length > 0 ? value.trim() : undefined;
 }
 
@@ -231,7 +232,7 @@ function envPrefix(provider: string): string {
 }
 
 function envCredential(provider: string, kind: "CLIENT_ID" | "CLIENT_SECRET"): string | undefined {
-  const value = process.env[`${envPrefix(provider)}_${kind}`];
+  const value = runtimeEnvironmentValue(`${envPrefix(provider)}_${kind}`);
   return value && value.trim().length > 0 ? value.trim() : undefined;
 }
 
@@ -263,8 +264,8 @@ function isHttpsUrl(value: string): boolean {
 
 function allowInsecureProviderUrls(): boolean {
   return (
-    process.env.NODE_ENV !== "production" &&
-    process.env.STEWARD_ALLOW_INSECURE_OAUTH_PROVIDER_URLS === "true"
+    runtimeEnvironmentValue("NODE_ENV") !== "production" &&
+    runtimeEnvironmentValue("STEWARD_ALLOW_INSECURE_OAUTH_PROVIDER_URLS") === "true"
   );
 }
 
@@ -305,7 +306,7 @@ function readMappedValue(source: Record<string, unknown>, path: string): unknown
 type CustomOAuthProviderInput = OAuthProvider & { id: string };
 
 function getCustomProviderConfigs(): CustomOAuthProviderInput[] {
-  const raw = process.env.STEWARD_CUSTOM_OAUTH_PROVIDERS?.trim();
+  const raw = runtimeEnvironmentValue("STEWARD_CUSTOM_OAUTH_PROVIDERS")?.trim();
   if (!raw) return [];
   const parsed = JSON.parse(raw) as unknown;
   if (!Array.isArray(parsed)) {

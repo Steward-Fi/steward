@@ -1,3 +1,4 @@
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 /**
  * Provider-account X (Twitter) OAuth connect routes (issue #195 workstream A).
  *
@@ -53,7 +54,7 @@ async function getConnectStore(): Promise<PendingConnectStore> {
   if (_connectStore) return _connectStore;
   const { getRedisClient } = await import("../middleware/redis.js");
   const redisClient = getRedisClient();
-  const usePostgres = process.env.STEWARD_AUTH_STORE_BACKEND === "postgres";
+  const usePostgres = runtimeEnvironmentValue("STEWARD_AUTH_STORE_BACKEND") === "postgres";
   const { backend } = await buildBackend("challenge", redisClient, usePostgres);
   // TTL is fixed at construction; the store's set() ignores a per-call ttl.
   const store = new ChallengeStore({ backend, ttlMs: X_CONNECT_STATE_TTL_MS });

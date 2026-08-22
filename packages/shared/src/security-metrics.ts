@@ -183,14 +183,14 @@ export function renderSecurityMetrics(nowMs = Date.now()): string {
 }
 
 export function securityMetricsEnabled(
-  env: Record<string, string | undefined> = process.env,
+  env: Readonly<Record<string, string | undefined>> = runtimeEnvironmentSnapshot(),
 ): boolean {
   return env.STEWARD_METRICS_ENABLED === "true";
 }
 
 export function metricsTokenIsValid(
   candidate: string | undefined,
-  env: Record<string, string | undefined> = process.env,
+  env: Readonly<Record<string, string | undefined>> = runtimeEnvironmentSnapshot(),
 ): boolean {
   const configured = env.STEWARD_METRICS_TOKEN;
   if (!configured || configured.length < 32 || !candidate) return false;
@@ -217,3 +217,4 @@ export function __resetSecurityMetricsForTests(): void {
   lastCheckpointAtMs = null;
   failObserverForTests = false;
 }
+import { runtimeEnvironmentSnapshot } from "./runtime-env.js";

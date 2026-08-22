@@ -1104,7 +1104,7 @@ export interface MoneroEnv {
  * Monero support is not configured (callers fail closed on null).
  */
 export function createMoneroBackendFromEnv(
-  env: MoneroEnv = process.env as MoneroEnv,
+  env: MoneroEnv = runtimeEnvironmentSnapshot(),
 ): MoneroWalletBackend | null {
   const rpcUrl = env.STEWARD_MONERO_WALLET_RPC_URL;
   if (!rpcUrl) return null;
@@ -1127,3 +1127,4 @@ export function createMoneroBackendFromEnv(
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
+import { runtimeEnvironmentSnapshot } from "@stwd/shared/runtime-env";

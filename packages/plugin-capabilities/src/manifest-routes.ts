@@ -1,3 +1,4 @@
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 /**
  * manifest-routes.ts — agent-facing manifest + issuance/renewal surface (A1).
  *
@@ -52,12 +53,12 @@ export function upstreamLeaseIssuanceAvailableInRuntime(): boolean {
   // 30-second delivery recovery contract. Do not expose live provider tokens
   // from a runtime that cannot autonomously revoke abandoned delivery.
   if (
-    process.env.STEWARD_RUNTIME === "workers" ||
-    process.env.STEWARD_UPSTREAM_LEASE_SWEEPER === "false"
+    runtimeEnvironmentValue("STEWARD_RUNTIME") === "workers" ||
+    runtimeEnvironmentValue("STEWARD_UPSTREAM_LEASE_SWEEPER") === "false"
   ) {
     return false;
   }
-  const configured = process.env.STEWARD_UPSTREAM_LEASE_SWEEP_INTERVAL_MS;
+  const configured = runtimeEnvironmentValue("STEWARD_UPSTREAM_LEASE_SWEEP_INTERVAL_MS");
   if (configured === undefined) return true;
   const intervalMs = Number(configured);
   return (

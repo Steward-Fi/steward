@@ -59,7 +59,7 @@ import {
   type NeonTransactionDbHandle,
   withRequestDatabase,
 } from "@stwd/db";
-import { withRuntimeEnvironment } from "@stwd/shared/runtime-env";
+import { runtimeEnvironmentValue, withRuntimeEnvironment } from "@stwd/shared/runtime-env";
 import { initRedis } from "./middleware/redis";
 
 export interface Env {
@@ -232,7 +232,7 @@ export async function runWorkerUpstreamCredentialLeaseSweep(
   const capabilitiesEnabled =
     options?.capabilitiesEnabled ??
     (await import("./plugin-config")).resolveEnabledPlugins().has("capabilities");
-  if (!capabilitiesEnabled || process.env.STEWARD_UPSTREAM_LEASE_SWEEPER === "false") return null;
+  if (!capabilitiesEnabled || runtimeEnvironmentValue("STEWARD_UPSTREAM_LEASE_SWEEPER") === "false") return null;
   const sweep =
     options?.sweep ??
     (await import("./services/upstream-credential-lease-scheduler"))
@@ -246,9 +246,9 @@ export async function runWorkerGoogleCredentialLifecycleSweep(
 ): Promise<unknown | null> {
   hydrateProcessEnv(env);
   if (
-    process.env.STEWARD_GOOGLE_LIFECYCLE_SWEEPER === "false" ||
-    !process.env.GOOGLE_PROVIDER_CLIENT_ID ||
-    !process.env.GOOGLE_PROVIDER_CLIENT_SECRET
+    runtimeEnvironmentValue("STEWARD_GOOGLE_LIFECYCLE_SWEEPER") === "false" ||
+    !runtimeEnvironmentValue("GOOGLE_PROVIDER_CLIENT_ID") ||
+    !runtimeEnvironmentValue("GOOGLE_PROVIDER_CLIENT_SECRET")
   ) {
     return null;
   }
@@ -265,10 +265,10 @@ export async function runWorkerXCredentialLifecycleSweep(
 ): Promise<unknown | null> {
   hydrateProcessEnv(env);
   if (
-    process.env.STEWARD_X_LIFECYCLE_SWEEPER === "false" ||
-    !process.env.X_CLIENT_ID ||
-    !process.env.X_CLIENT_SECRET ||
-    !process.env.STEWARD_MASTER_PASSWORD
+    runtimeEnvironmentValue("STEWARD_X_LIFECYCLE_SWEEPER") === "false" ||
+    !runtimeEnvironmentValue("X_CLIENT_ID") ||
+    !runtimeEnvironmentValue("X_CLIENT_SECRET") ||
+    !runtimeEnvironmentValue("STEWARD_MASTER_PASSWORD")
   ) {
     return null;
   }
@@ -281,7 +281,7 @@ export async function runWorkerXCredentialLifecycleSweep(
 
 /**
  * Pull Worker `env` bindings into `globalThis.process.env` so any code that
- * reads `process.env.X` at request time (e.g. JWT secret, RPC URL) can find it.
+ * reads `runtimeEnvironmentValue("X")` at request time (e.g. JWT secret, RPC URL) can find it.
  *
  * Workers expose `nodejs_compat`'s `process.env` as an empty object on cold
  * boot — bindings come in via the `fetch` handler's `env` argument instead.
@@ -407,7 +407,7 @@ async function ensureWorkerInit(env: Env): Promise<void> {
           dbUrl.includes("sslmode=verify-ca") ||
           dbUrl.includes("sslmode=verify-full"),
         hstsEnabled: isHstsEnabled(),
-        insecureDbAllowed: process.env.STEWARD_ALLOW_INSECURE_DB === "true",
+        insecureDbAllowed: runtimeEnvironmentValue("STEWARD_ALLOW_INSECURE_DB") === "true",
         runtime: "workers",
       },
     });

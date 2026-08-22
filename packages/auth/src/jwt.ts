@@ -1,3 +1,4 @@
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID, scryptSync } from "node:crypto";
 import {
@@ -53,7 +54,7 @@ export interface RefreshTokenPayload extends StewardJwtPayload {
 }
 
 export interface JwtSecretOptions {
-  /** Defaults to process.env.NODE_ENV. */
+  /** Defaults to runtimeEnvironmentValue("NODE_ENV"). */
   nodeEnv?: string;
   /** Defaults to console.warn. Pass null to silence warnings. */
   warn?: ((message: string) => void) | null;
@@ -164,7 +165,7 @@ function isEmbeddedMode(environment: JwtRuntimeEnvironment = process.env): boole
  * same consistent guard.
  */
 export function isDevSecretAllowed(
-  nodeEnv: string | undefined = process.env.NODE_ENV,
+  nodeEnv: string | undefined = runtimeEnvironmentValue("NODE_ENV"),
   environment: JwtRuntimeEnvironment = process.env,
 ): boolean {
   if (nodeEnv === "production") return false;
@@ -214,7 +215,7 @@ export function checkJwtSecretStrength(
   options: { nodeEnv?: string; warn?: ((message: string) => void) | null } = {},
 ): void {
   if (secret.length >= 32) return;
-  const nodeEnv = options.nodeEnv ?? process.env.NODE_ENV;
+  const nodeEnv = options.nodeEnv ?? runtimeEnvironmentValue("NODE_ENV");
   if (nodeEnv === "production") {
     throw new Error(
       `⛔ ${sourceName} must be at least 32 characters in production (canonical env var: STEWARD_JWT_SECRET).`,
@@ -315,14 +316,14 @@ function getIdentityJwtAlgorithm(): IdentityJwtAlgorithm {
   const authority = jwtRuntimeAuthorityStorage.getStore();
   return (
     authority?.identityJwtAlgorithm ??
-    resolveIdentityJwtAlgorithm(process.env.STEWARD_IDENTITY_JWT_ALG)
+    resolveIdentityJwtAlgorithm(runtimeEnvironmentValue("STEWARD_IDENTITY_JWT_ALG"))
   );
 }
 
 function getIdentityJwtPrivateKeyInput(): string | undefined {
   const authority = jwtRuntimeAuthorityStorage.getStore();
   if (authority) return authority.identityJwtPrivateKey;
-  return process.env.STEWARD_IDENTITY_JWT_PRIVATE_KEY?.trim() || undefined;
+  return runtimeEnvironmentValue("STEWARD_IDENTITY_JWT_PRIVATE_KEY")?.trim() || undefined;
 }
 
 export function isAsymmetricIdentityJwtConfigured(): boolean {
@@ -331,10 +332,10 @@ export function isAsymmetricIdentityJwtConfigured(): boolean {
 
 function resolveIdentityJwtBase(requestOrigin?: string): string {
   const authority = jwtRuntimeAuthorityStorage.getStore();
-  const nodeEnv = authority?.nodeEnv ?? process.env.NODE_ENV;
+  const nodeEnv = authority?.nodeEnv ?? runtimeEnvironmentValue("NODE_ENV");
   const configured = authority
     ? authority.identityJwtIssuer || authority.appUrl
-    : process.env.STEWARD_IDENTITY_JWT_ISSUER?.trim() || process.env.APP_URL?.trim();
+    : runtimeEnvironmentValue("STEWARD_IDENTITY_JWT_ISSUER")?.trim() || runtimeEnvironmentValue("APP_URL")?.trim();
   if (configured) {
     let url: URL;
     try {
@@ -380,7 +381,7 @@ export function getIdentityDiscoveryBaseUrl(requestUrl: string): string {
 export function getIdentityJwtAudience(): string {
   return (
     jwtRuntimeAuthorityStorage.getStore()?.identityJwtAudience ??
-    process.env.STEWARD_IDENTITY_JWT_AUDIENCE?.trim() ??
+    runtimeEnvironmentValue("STEWARD_IDENTITY_JWT_AUDIENCE")?.trim() ??
     JWT_AUDIENCE
   );
 }
@@ -407,7 +408,7 @@ async function identityPublicJwk(alg: IdentityJwtAlgorithm): Promise<JWK | null>
   const authority = jwtRuntimeAuthorityStorage.getStore();
   publicJwk.kid = authority
     ? authority.identityJwtKid || publicJwk.kid || (await calculateJwkThumbprint(publicJwk))
-    : process.env.STEWARD_IDENTITY_JWT_KID?.trim() ||
+    : runtimeEnvironmentValue("STEWARD_IDENTITY_JWT_KID")?.trim() ||
       publicJwk.kid ||
       (await calculateJwkThumbprint(publicJwk));
   delete publicJwk.d;
@@ -524,7 +525,7 @@ export function validateAgentTokenExpiryEnv(value?: string): void {
   const resolved =
     value ??
     jwtRuntimeAuthorityStorage.getStore()?.agentTokenExpiry ??
-    process.env.AGENT_TOKEN_EXPIRY ??
+    runtimeEnvironmentValue("AGENT_TOKEN_EXPIRY") ??
     AGENT_TOKEN_EXPIRY;
   const seconds = parseDurationSeconds(resolved);
   if (seconds === null) {
@@ -544,7 +545,7 @@ export function getAgentTokenExpiry(value?: string): string {
   const normalized = (
     value ??
     jwtRuntimeAuthorityStorage.getStore()?.agentTokenExpiry ??
-    process.env.AGENT_TOKEN_EXPIRY ??
+    runtimeEnvironmentValue("AGENT_TOKEN_EXPIRY") ??
     AGENT_TOKEN_EXPIRY
   ).trim();
   validateAgentTokenExpiryEnv(normalized);

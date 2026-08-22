@@ -15,7 +15,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 export function plaintextKeyExportResponseGateError(
   body: unknown,
-  env: EnvLike = process.env,
+  env: EnvLike = runtimeEnvironmentSnapshot(),
 ): string | null {
   if (!isProductionLike(env)) return null;
 
@@ -32,3 +32,4 @@ export function plaintextKeyExportResponseGateError(
 
   return null;
 }
+import { runtimeEnvironmentSnapshot } from "@stwd/shared/runtime-env";

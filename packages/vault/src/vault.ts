@@ -1,3 +1,4 @@
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 import { createHash, randomUUID } from "node:crypto";
 import {
   agents,
@@ -554,7 +555,7 @@ function custodyTransitionLockKey(
  * transitions across replicas/connections cannot interleave check-then-act.
  */
 function usesCustodyAdvisoryLock(): boolean {
-  return process.env.STEWARD_DB_MODE !== "pglite" && process.env.STEWARD_PGLITE_MEMORY !== "true";
+  return runtimeEnvironmentValue("STEWARD_DB_MODE") !== "pglite" && runtimeEnvironmentValue("STEWARD_PGLITE_MEMORY") !== "true";
 }
 
 interface MnemonicWalletMaterial {
@@ -1864,7 +1865,8 @@ export class Vault {
         // price, bounded by COMPUTE_BUDGET_BOUNDS). Estimation never throws and
         // falls back to safe defaults on RPC error. Set STEWARD_SOLANA_PRIORITY_FEES=0
         // to revert to the legacy no-compute-budget transfer.
-        computeBudget: process.env.STEWARD_SOLANA_PRIORITY_FEES === "0" ? false : {},
+        computeBudget:
+          runtimeEnvironmentValue("STEWARD_SOLANA_PRIORITY_FEES") === "0" ? false : {},
       });
     } else {
       assertEvmWalletAddressMatches(secretKey, request.walletAddress);
@@ -3847,7 +3849,7 @@ export class Vault {
       throw new Error(`No RPC URL configured for chainId ${chainId}`);
     }
 
-    const configured = process.env.STEWARD_VAULT_RPC_ALLOWLIST;
+    const configured = runtimeEnvironmentValue("STEWARD_VAULT_RPC_ALLOWLIST");
     const configuredMethods = configured
       ?.split(",")
       .map((method) => method.trim())

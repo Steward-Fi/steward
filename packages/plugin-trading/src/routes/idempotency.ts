@@ -1,3 +1,4 @@
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 /**
  * Durable, multi-replica idempotency for fund-moving trading routes.
  *
@@ -225,10 +226,10 @@ export class DurableIdempotencyStore<TRecord extends IdempotencyRecord> {
     }
 
     if (
-      (process.env.NODE_ENV === "production" ||
-        process.env.STEWARD_RUNTIME === "workers" ||
-        process.env.CF_PAGES === "1") &&
-      process.env.STEWARD_ALLOW_MEMORY_TRADING_IDEMPOTENCY !== "true"
+      (runtimeEnvironmentValue("NODE_ENV") === "production" ||
+        runtimeEnvironmentValue("STEWARD_RUNTIME") === "workers" ||
+        runtimeEnvironmentValue("CF_PAGES") === "1") &&
+      runtimeEnvironmentValue("STEWARD_ALLOW_MEMORY_TRADING_IDEMPOTENCY") !== "true"
     ) {
       throw new Error(
         "Trading idempotency requires Redis in production; set STEWARD_ALLOW_MEMORY_TRADING_IDEMPOTENCY=true only for an explicitly single-instance deployment",

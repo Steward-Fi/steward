@@ -1,3 +1,4 @@
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 import { isIP } from "node:net";
 import { secp256k1 } from "@noble/curves/secp256k1";
 import {
@@ -91,7 +92,7 @@ export interface AwsKmsExternalKeyCustodyOptions {
 }
 
 function positiveBigIntEnv(name: string): bigint {
-  const raw = process.env[name]?.trim();
+  const raw = runtimeEnvironmentValue(name)?.trim();
   if (!raw || !/^\d+$/.test(raw) || BigInt(raw) <= 0n) {
     throw new Error(`${name} is required and must be a positive integer`);
   }
@@ -399,7 +400,7 @@ export class AwsKmsExternalKeyCustodyProvider implements ExternalKeyCustodyProvi
 
   static fromEnv(): AwsKmsExternalKeyCustodyProvider {
     return new AwsKmsExternalKeyCustodyProvider({
-      region: process.env.STEWARD_EXTERNAL_CUSTODY_AWS_REGION,
+      region: runtimeEnvironmentValue("STEWARD_EXTERNAL_CUSTODY_AWS_REGION"),
       maxGasLimit: positiveBigIntEnv("STEWARD_EXTERNAL_CUSTODY_AWS_MAX_GAS_LIMIT"),
       maxGasPriceWei: positiveBigIntEnv("STEWARD_EXTERNAL_CUSTODY_AWS_MAX_GAS_PRICE_WEI"),
       maxTotalFeeWei: positiveBigIntEnv("STEWARD_EXTERNAL_CUSTODY_AWS_MAX_TOTAL_FEE_WEI"),

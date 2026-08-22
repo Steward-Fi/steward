@@ -1,3 +1,4 @@
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 /**
  * Pluggable database client for Steward.
  *
@@ -45,14 +46,14 @@ const FULL_SCHEMA = { ...schema, ...schemaAuth };
 type FullSchema = typeof FULL_SCHEMA;
 
 export function getDatabaseDriver(): DatabaseDriver {
-  const raw = process.env.DATABASE_DRIVER?.trim().toLowerCase();
+  const raw = runtimeEnvironmentValue("DATABASE_DRIVER")?.trim().toLowerCase();
   if (raw === "neon-http") return "neon-http";
   if (raw === "neon-websocket") return "neon-websocket";
   return "postgres-js";
 }
 
 export function getDatabaseUrl(): string {
-  const connectionString = process.env.DATABASE_URL;
+  const connectionString = runtimeEnvironmentValue("DATABASE_URL");
 
   if (!connectionString) {
     throw new Error("DATABASE_URL is required");

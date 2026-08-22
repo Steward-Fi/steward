@@ -1,3 +1,4 @@
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 /**
  * Google Workspace provider-account OAuth connect routes (#203).
  *
@@ -56,7 +57,7 @@ async function getConnectStore(): Promise<PendingConnectStore> {
   if (_connectStore) return _connectStore;
   const { getRedisClient } = await import("../middleware/redis.js");
   const redisClient = getRedisClient();
-  const usePostgres = process.env.STEWARD_AUTH_STORE_BACKEND === "postgres";
+  const usePostgres = runtimeEnvironmentValue("STEWARD_AUTH_STORE_BACKEND") === "postgres";
   const { backend, source } = await buildBackend("challenge", redisClient, usePostgres);
   assertGoogleConnectStoreIsSafe(source);
   // TTL is fixed at construction; the store's set() ignores a per-call ttl.

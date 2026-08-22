@@ -1,3 +1,7 @@
+import {
+  runtimeEnvironmentSnapshot,
+  runtimeEnvironmentValue,
+} from "@stwd/shared/runtime-env";
 export interface EvmSimulationRequest {
   chainId: number;
   from: string;
@@ -58,7 +62,10 @@ function hexWei(decimal: string): `0x${string}` {
 }
 
 export class JsonRpcEvmSimulator implements EvmSimulator {
-  constructor(private readonly env: Record<string, string | undefined> = process.env) {}
+  constructor(
+    private readonly env: Readonly<Record<string, string | undefined>> =
+      runtimeEnvironmentSnapshot(),
+  ) {}
 
   async simulate(request: EvmSimulationRequest): Promise<EvmSimulationResult> {
     const url = rpcUrlForChain(request.chainId, this.env);
@@ -86,7 +93,7 @@ export class JsonRpcEvmSimulator implements EvmSimulator {
 
 export function createEnvEvmSimulator(): EvmSimulator | null {
   const hasJson =
-    Object.keys(parseRpcUrls(process.env.STEWARD_EVM_RPC_URLS_JSON)).length > 0 ||
-    Object.keys(process.env).some((key) => /^STEWARD_EVM_RPC_URL_\d+$/.test(key));
+    Object.keys(parseRpcUrls(runtimeEnvironmentValue("STEWARD_EVM_RPC_URLS_JSON"))).length > 0 ||
+    Object.keys(runtimeEnvironmentSnapshot()).some((key) => /^STEWARD_EVM_RPC_URL_\d+$/.test(key));
   return hasJson ? new JsonRpcEvmSimulator() : null;
 }

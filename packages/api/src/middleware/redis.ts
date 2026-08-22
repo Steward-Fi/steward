@@ -1,3 +1,4 @@
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 /**
  * Redis middleware — initializes the Redis client and exposes
  * rate-limiting + spend-tracking helpers on the Hono context.
@@ -39,11 +40,11 @@ export async function initRedis(env?: Record<string, unknown>): Promise<boolean>
     }
   }
 
-  const driver = process.env.REDIS_DRIVER?.trim().toLowerCase() || "ioredis";
-  const hasIoredisUrl = Boolean(process.env.REDIS_URL);
+  const driver = runtimeEnvironmentValue("REDIS_DRIVER")?.trim().toLowerCase() || "ioredis";
+  const hasIoredisUrl = Boolean(runtimeEnvironmentValue("REDIS_URL"));
   const hasUpstashConfig = Boolean(
-    (process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL) &&
-      (process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN),
+    (runtimeEnvironmentValue("KV_REST_API_URL") || runtimeEnvironmentValue("UPSTASH_REDIS_REST_URL")) &&
+      (runtimeEnvironmentValue("KV_REST_API_TOKEN") || runtimeEnvironmentValue("UPSTASH_REDIS_REST_TOKEN")),
   );
 
   if (driver === "upstash" ? !hasUpstashConfig : !hasIoredisUrl) {
@@ -74,14 +75,14 @@ export function isRedisAvailable(): boolean {
 }
 
 export function isRedisConfigured(): boolean {
-  const driver = process.env.REDIS_DRIVER?.trim().toLowerCase() || "ioredis";
+  const driver = runtimeEnvironmentValue("REDIS_DRIVER")?.trim().toLowerCase() || "ioredis";
   if (driver === "upstash") {
     return Boolean(
-      (process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL) &&
-        (process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN),
+      (runtimeEnvironmentValue("KV_REST_API_URL") || runtimeEnvironmentValue("UPSTASH_REDIS_REST_URL")) &&
+        (runtimeEnvironmentValue("KV_REST_API_TOKEN") || runtimeEnvironmentValue("UPSTASH_REDIS_REST_TOKEN")),
     );
   }
-  return Boolean(process.env.REDIS_URL);
+  return Boolean(runtimeEnvironmentValue("REDIS_URL"));
 }
 
 /**

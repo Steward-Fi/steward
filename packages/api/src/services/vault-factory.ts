@@ -1,5 +1,6 @@
 import { createRequire } from "node:module";
 import { isDevSecretAllowed } from "@stwd/auth";
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 import { AwsKmsExternalKeyCustodyProvider, KmsEnvelopeKeystore, Vault } from "@stwd/vault";
 
 const require = createRequire(import.meta.url);
@@ -73,14 +74,14 @@ const vaultsByKey = new Map<string, Vault>();
 let warnedDevSecretFallback = false;
 
 function configuredKmsProvider(): "aws" | "pkcs11" | undefined {
-  const value = process.env.STEWARD_KMS_PROVIDER?.trim();
+  const value = runtimeEnvironmentValue("STEWARD_KMS_PROVIDER")?.trim();
   if (!value) return undefined;
   if (value === "aws" || value === "pkcs11") return value;
   throw new Error(`Unsupported STEWARD_KMS_PROVIDER: ${value}`);
 }
 
 function configuredExternalCustodyProvider(): ExternalCustodyProviderName | undefined {
-  const value = process.env.STEWARD_EXTERNAL_CUSTODY_PROVIDER?.trim();
+  const value = runtimeEnvironmentValue("STEWARD_EXTERNAL_CUSTODY_PROVIDER")?.trim();
   if (!value) return undefined;
   if (value === "aws-kms") return value;
   throw new Error(`Unsupported STEWARD_EXTERNAL_CUSTODY_PROVIDER: ${value}`);
@@ -104,16 +105,19 @@ function createExternalCustodyProvider() {
 
 function requireKmsConfiguration(provider: "aws" | "pkcs11"): void {
   if (provider === "aws") {
-    if (!process.env.STEWARD_KMS_KEY_ID?.trim() && !process.env.STEWARD_AWS_KMS_KEY_ARN?.trim()) {
+    if (
+      !runtimeEnvironmentValue("STEWARD_KMS_KEY_ID")?.trim() &&
+      !runtimeEnvironmentValue("STEWARD_AWS_KMS_KEY_ARN")?.trim()
+    ) {
       throw new Error("STEWARD_KMS_KEY_ID or STEWARD_AWS_KMS_KEY_ARN is required for AWS KMS");
     }
     return;
   }
 
   const missing = [
-    ["STEWARD_PKCS11_MODULE", process.env.STEWARD_PKCS11_MODULE],
-    ["STEWARD_PKCS11_PIN", process.env.STEWARD_PKCS11_PIN],
-    ["STEWARD_PKCS11_KEY_LABEL", process.env.STEWARD_PKCS11_KEY_LABEL],
+    ["STEWARD_PKCS11_MODULE", runtimeEnvironmentValue("STEWARD_PKCS11_MODULE")],
+    ["STEWARD_PKCS11_PIN", runtimeEnvironmentValue("STEWARD_PKCS11_PIN")],
+    ["STEWARD_PKCS11_KEY_LABEL", runtimeEnvironmentValue("STEWARD_PKCS11_KEY_LABEL")],
   ]
     .filter(([, value]) => !value?.trim())
     .map(([name]) => name);
@@ -153,7 +157,7 @@ export function modeExposesPlaintextAtSignTime(mode: VaultMode): boolean {
 }
 
 function localCustodyAcknowledged(): boolean {
-  return process.env[LOCAL_CUSTODY_ACK_ENV] === "true";
+  return runtimeEnvironmentValue(LOCAL_CUSTODY_ACK_ENV) === "true";
 }
 
 /**
@@ -166,7 +170,7 @@ function localCustodyAcknowledged(): boolean {
  * ack because selecting them is already an explicit configuration decision.
  */
 export function assertProductionCustodyAcknowledged(mode: VaultMode): void {
-  if (process.env.NODE_ENV !== "production") return;
+  if (runtimeEnvironmentValue("NODE_ENV") !== "production") return;
   if (mode !== "local") return;
   if (localCustodyAcknowledged()) return;
   throw new LocalCustodyAcknowledgementRequiredError();
@@ -189,7 +193,7 @@ function configuredMode(): VaultMode {
 }
 
 function resolveMasterPassword(options: ConfiguredVaultOptions): string {
-  const configured = process.env.STEWARD_MASTER_PASSWORD?.trim();
+  const configured = runtimeEnvironmentValue("STEWARD_MASTER_PASSWORD")?.trim();
   if (configured) return configured;
   if (options.fallbackPassword?.trim()) return options.fallbackPassword.trim();
 
@@ -218,8 +222,8 @@ export function createConfiguredVault(options: ConfiguredVaultOptions = {}): Vau
   const masterPassword = resolveMasterPassword(options);
   return new Vault({
     masterPassword,
-    rpcUrl: process.env.RPC_URL || "https://sepolia.base.org",
-    chainId: parseInt(process.env.CHAIN_ID || "84532", 10),
+    rpcUrl: runtimeEnvironmentValue("RPC_URL") || "https://sepolia.base.org",
+    chainId: parseInt(runtimeEnvironmentValue("CHAIN_ID") || "84532", 10),
     ...(mode === "local" ? {} : { keystoreBackend: KmsEnvelopeKeystore.fromEnv() }),
     ...(configuredExternalCustodyProvider()
       ? { externalKeyCustodyProvider: createExternalCustodyProvider() }
@@ -250,7 +254,7 @@ export function configuredVaultStartupLogLine(): string {
   // Surface that acknowledgement in the boot log so it is auditable. Never emit
   // key material, KMS key ids, or the master password here.
   const ack =
-    mode === "local" && process.env.NODE_ENV === "production"
+    mode === "local" && runtimeEnvironmentValue("NODE_ENV") === "production"
       ? ` local_custody_acknowledged=${localCustodyAcknowledged()}`
       : "";
   return (

@@ -1,3 +1,4 @@
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 /**
  * Platform-level management routes.
  *
@@ -382,7 +383,7 @@ function auditCtx(c: {
 }
 
 function platformIdentityMigrationAllowed(): boolean {
-  return process.env.STEWARD_ALLOW_PLATFORM_IDENTITY_MIGRATION === "true";
+  return runtimeEnvironmentValue("STEWARD_ALLOW_PLATFORM_IDENTITY_MIGRATION") === "true";
 }
 
 function platformIdentityMigrationDisabledResponse(c: Context) {
@@ -411,7 +412,7 @@ let _platformKeyStore: KeyStore | undefined;
 function platformKeyStore(): KeyStore {
   if (_platformKeyStore) return _platformKeyStore;
 
-  const masterPassword = process.env.STEWARD_MASTER_PASSWORD;
+  const masterPassword = runtimeEnvironmentValue("STEWARD_MASTER_PASSWORD");
   if (!masterPassword) {
     if (!isDevSecretAllowed()) {
       throw new Error(

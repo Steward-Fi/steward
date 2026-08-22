@@ -1,3 +1,4 @@
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 // node:crypto under Cloudflare nodejs_compat:
 //   - createCipheriv / createDecipheriv (AES-256-GCM) - supported.
 //   - randomBytes                                      - supported.
@@ -62,12 +63,12 @@ export class KeyStore {
     // Each encrypt() call further derives a unique key with a random per-record salt,
     // so the master key salt does not need to be per-record, but SHOULD be unique
     // per deployment to resist precomputed/rainbow-table attacks on the password.
-    const envSalt = masterSalt ?? process.env.STEWARD_KDF_SALT;
+    const envSalt = masterSalt ?? runtimeEnvironmentValue("STEWARD_KDF_SALT");
     let salt: Buffer;
     if (envSalt) {
       salt = decodeKdfSalt(envSalt);
     } else {
-      if (process.env.NODE_ENV === "production") {
+      if (runtimeEnvironmentValue("NODE_ENV") === "production") {
         throw new Error(
           "STEWARD_KDF_SALT is required in production. Generate with: openssl rand -hex 32",
         );
@@ -160,6 +161,6 @@ function allowLegacyDecryptFallback(): boolean {
   // ciphertext row would decrypt across contexts). It is ONLY for migrating
   // pre-context-binding ciphertext outside production. Production NEVER takes
   // this path, regardless of the env flag — the flag cannot enable it in prod.
-  if (process.env.NODE_ENV === "production") return false;
-  return process.env.STEWARD_ALLOW_LEGACY_KEYSTORE_DECRYPT_FALLBACK === "true";
+  if (runtimeEnvironmentValue("NODE_ENV") === "production") return false;
+  return runtimeEnvironmentValue("STEWARD_ALLOW_LEGACY_KEYSTORE_DECRYPT_FALLBACK") === "true";
 }

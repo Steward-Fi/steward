@@ -1,3 +1,4 @@
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
 
 import type { EncryptedKey } from "./keystore";
@@ -290,14 +291,14 @@ export class KmsEnvelopeKeystore implements KeystoreBackend {
 export function resolveKmsEnvelopeOptions(
   options?: Partial<KmsEnvelopeOptions>,
 ): KmsEnvelopeOptions {
-  const provider = (options?.provider ?? process.env.STEWARD_KMS_PROVIDER ?? "aws") as KmsProvider;
+  const provider = (options?.provider ?? runtimeEnvironmentValue("STEWARD_KMS_PROVIDER") ?? "aws") as KmsProvider;
   if (provider === "aws") {
     const awsOptions = options as Partial<AwsKmsEnvelopeOptions> | undefined;
     return {
       provider: "aws",
       keyId:
-        awsOptions?.keyId ?? process.env.STEWARD_KMS_KEY_ID ?? process.env.STEWARD_AWS_KMS_KEY_ARN,
-      region: awsOptions?.region ?? process.env.STEWARD_AWS_REGION ?? process.env.AWS_REGION,
+        awsOptions?.keyId ?? runtimeEnvironmentValue("STEWARD_KMS_KEY_ID") ?? runtimeEnvironmentValue("STEWARD_AWS_KMS_KEY_ARN"),
+      region: awsOptions?.region ?? runtimeEnvironmentValue("STEWARD_AWS_REGION") ?? runtimeEnvironmentValue("AWS_REGION"),
       client: awsOptions?.client,
     };
   }
@@ -305,9 +306,9 @@ export function resolveKmsEnvelopeOptions(
     const pkcs11Options = options as Partial<Pkcs11KmsEnvelopeOptions> | undefined;
     return {
       provider: "pkcs11",
-      modulePath: pkcs11Options?.modulePath ?? process.env.STEWARD_PKCS11_MODULE,
-      pin: pkcs11Options?.pin ?? process.env.STEWARD_PKCS11_PIN,
-      keyLabel: pkcs11Options?.keyLabel ?? process.env.STEWARD_PKCS11_KEY_LABEL,
+      modulePath: pkcs11Options?.modulePath ?? runtimeEnvironmentValue("STEWARD_PKCS11_MODULE"),
+      pin: pkcs11Options?.pin ?? runtimeEnvironmentValue("STEWARD_PKCS11_PIN"),
+      keyLabel: pkcs11Options?.keyLabel ?? runtimeEnvironmentValue("STEWARD_PKCS11_KEY_LABEL"),
       client: pkcs11Options?.client,
     };
   }

@@ -6,6 +6,7 @@
  */
 
 import { randomBytes, randomUUID } from "node:crypto";
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 import { resolveTxt } from "node:dns/promises";
 import { hashSha256Hex } from "@stwd/auth";
 import {
@@ -448,8 +449,8 @@ function hasLocalhostUrl(value: string): boolean {
 
 function configuredRequestSigningSecrets(): string[] {
   return [
-    ...(process.env.STEWARD_REQUEST_SIGNING_SECRETS ?? "").split(","),
-    process.env.STEWARD_REQUEST_SIGNING_SECRET ?? "",
+    ...(runtimeEnvironmentValue("STEWARD_REQUEST_SIGNING_SECRETS") ?? "").split(","),
+    runtimeEnvironmentValue("STEWARD_REQUEST_SIGNING_SECRET") ?? "",
   ]
     .map((secret) => secret.trim())
     .filter(Boolean);
@@ -480,13 +481,13 @@ function buildTenantSecurityChecklist(
   appClientSecrets: TenantAppClientSecret[],
   requestSigningKeys: TenantRequestSigningKey[],
 ): TenantSecurityChecklist {
-  const production = process.env.NODE_ENV === "production";
+  const production = runtimeEnvironmentValue("NODE_ENV") === "production";
   // SEC-010: these mirror the ACTUAL enforcement posture of the mounted
   // guards (app.ts). Freshness/signature headers are always verified when
   // present; they are REQUIRED only via the explicit env opt-ins, so the
   // checklist must not claim production enforcement that does not exist.
-  const requestExpiryRequired = process.env.STEWARD_REQUIRE_REQUEST_EXPIRY === "true";
-  const authSignatureRequired = process.env.STEWARD_REQUIRE_AUTH_SIGNATURE === "true";
+  const requestExpiryRequired = runtimeEnvironmentValue("STEWARD_REQUIRE_REQUEST_EXPIRY") === "true";
+  const authSignatureRequired = runtimeEnvironmentValue("STEWARD_REQUIRE_AUTH_SIGNATURE") === "true";
   const signingSecrets = configuredRequestSigningSecrets();
   const appClientSigningSecrets = appClientSecrets.filter(
     (secret) =>
