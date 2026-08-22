@@ -10246,6 +10246,7 @@ type SolanaRecoveryRow = {
   txHash: string | null;
   chainId: number;
   actionPayload: unknown;
+  signedArtifactEvidence?: unknown;
   actionType?: string | null;
 };
 
@@ -10275,6 +10276,9 @@ function solanaReplayResponse(
     ) as Response;
   }
   if ((row.status === "broadcast" || row.status === "confirmed") && row.txHash) {
+    const evidence = isSignedArtifactEvidence(row.signedArtifactEvidence)
+      ? row.signedArtifactEvidence
+      : null;
     return c.json<ApiResponse<SolanaSigningResult & { txId: string }>>({
       ok: true,
       data: {
@@ -10283,6 +10287,24 @@ function solanaReplayResponse(
         broadcast: true,
         chainId: row.chainId,
         caip2: toCaip2(row.chainId),
+        ...(evidence?.chainFamily === "solana"
+          ? {
+              artifactSignature: evidence.artifactSignature,
+              signer: evidence.signer,
+              recentBlockhash: evidence.recentBlockhash,
+              blockhashKind: evidence.blockhashKind,
+              ...(evidence.lastValidBlockHeight === undefined
+                ? {}
+                : { lastValidBlockHeight: evidence.lastValidBlockHeight }),
+              ...(evidence.durableNonceAccount === undefined
+                ? {}
+                : { durableNonceAccount: evidence.durableNonceAccount }),
+              ...(evidence.durableNonceAuthority === undefined
+                ? {}
+                : { durableNonceAuthority: evidence.durableNonceAuthority }),
+              rawIntentDigest: evidence.rawIntentDigest,
+            }
+          : {}),
       },
     });
   }
