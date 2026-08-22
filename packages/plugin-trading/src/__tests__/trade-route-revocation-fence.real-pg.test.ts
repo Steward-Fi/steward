@@ -210,4 +210,39 @@ realPostgres("assembled trade route final revocation fence", () => {
     sign.mockRestore();
     submit.mockRestore();
   });
+
+  test("route timeout abort releases the fence for queued revocation", async () => {
+    const sessionId = await seedSession();
+    let abortSubmit!: () => void;
+    const submitAborted = new Promise<void>((_resolve, reject) => {
+      abortSubmit = () => reject(new DOMException("venue timeout", "AbortError"));
+    });
+    let entered!: () => void;
+    const venueEntered = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const sign = spyOn(HyperliquidAdapter.prototype, "signOrder").mockResolvedValue({} as never);
+    const submit = spyOn(HyperliquidAdapter.prototype, "submitOrder").mockImplementation(
+      async () => {
+        entered();
+        await submitAborted;
+        throw new Error("unreachable");
+      },
+    );
+    const response = postOrder(mountedApp(), sessionId, crypto.randomUUID());
+    await venueEntered;
+    const revocation = new TradeSessionManager().revokeSession({
+      tenantId,
+      id: sessionId,
+      revokedBy: "route-timeout-test",
+    });
+    await waitForBlockedLock(lockKey(sessionId), 1);
+    abortSubmit();
+
+    expect((await response).status).toBe(502);
+    expect((await revocation)?.status).toBe("revoked");
+    expect(submit).toHaveBeenCalledTimes(1);
+    sign.mockRestore();
+    submit.mockRestore();
+  });
 });

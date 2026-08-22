@@ -1,24 +1,27 @@
--- Durable terminal replay authority for fund-moving venue orders. Redis owns
--- the fast pending claim; this immutable PostgreSQL row survives Redis CAS
--- failures, process restarts, and pending-key expiry after a definite venue
--- response.
+-- Durable execution + terminal replay authority for fund-moving venue orders.
+-- Redis owns the fast pending claim. PostgreSQL receives one immutable `claim`
+-- row before venue I/O and one immutable `terminal` row after a known result.
+-- A claim without a terminal row survives Redis expiry/restart as a fail-closed
+-- reconciliation anchor and can never authorize another venue submission.
 CREATE TABLE "trading_order_outcomes" (
 	"id" varchar(64) PRIMARY KEY NOT NULL,
 	"tenant_id" varchar(64) NOT NULL,
 	"agent_id" varchar(64) NOT NULL,
 	"venue" varchar(32) NOT NULL,
+	"phase" varchar(16) NOT NULL,
 	"idempotency_key_hash" varchar(64) NOT NULL,
 	"request_hash" varchar(64) NOT NULL,
 	"http_status" integer NOT NULL,
 	"response" jsonb NOT NULL,
 	"created_at" timestamptz DEFAULT now() NOT NULL,
-	CONSTRAINT "trading_order_outcomes_status_chk" CHECK ("http_status" IN (200, 400, 502)),
+	CONSTRAINT "trading_order_outcomes_status_chk" CHECK ("http_status" IN (200, 400, 409, 502)),
+	CONSTRAINT "trading_order_outcomes_phase_chk" CHECK ("phase" IN ('claim', 'terminal')),
 	CONSTRAINT "trading_order_outcomes_key_hash_chk" CHECK ("idempotency_key_hash" ~ '^[0-9a-f]{64}$'),
 	CONSTRAINT "trading_order_outcomes_request_hash_chk" CHECK ("request_hash" ~ '^[0-9a-f]{64}$'),
 	CONSTRAINT "trading_order_outcomes_response_size_chk" CHECK (octet_length("response"::text) <= 16384)
 );
 --> statement-breakpoint
-CREATE UNIQUE INDEX "trading_order_outcomes_request_uidx" ON "trading_order_outcomes" ("tenant_id","agent_id","venue","idempotency_key_hash");
+CREATE UNIQUE INDEX "trading_order_outcomes_request_uidx" ON "trading_order_outcomes" ("tenant_id","agent_id","venue","idempotency_key_hash","phase");
 --> statement-breakpoint
 CREATE INDEX "trading_order_outcomes_tenant_created_idx" ON "trading_order_outcomes" ("tenant_id","created_at");
 --> statement-breakpoint

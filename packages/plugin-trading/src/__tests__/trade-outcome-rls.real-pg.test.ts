@@ -121,9 +121,9 @@ realPostgresTest(
       await tx`SELECT set_config('steward.tenant_id', ${tenantA}, true)`;
       await tx`
         INSERT INTO trading_order_outcomes
-          (id, tenant_id, agent_id, venue, idempotency_key_hash, request_hash, http_status, response)
+          (id, tenant_id, agent_id, venue, phase, idempotency_key_hash, request_hash, http_status, response)
         VALUES
-          (${id}, ${tenantA}, ${agentId}, 'hyperliquid', ${keyHash}, ${requestHash}, 502,
+          (${id}, ${tenantA}, ${agentId}, 'hyperliquid', 'claim', ${keyHash}, ${requestHash}, 502,
            ${JSON.stringify(response)}::jsonb)
       `;
       const replay = await tx<{ response: typeof response }[]>`
@@ -145,9 +145,9 @@ realPostgresTest(
         await tx`SELECT set_config('steward.tenant_id', ${tenantB}, true)`;
         await tx`
           INSERT INTO trading_order_outcomes
-            (id, tenant_id, agent_id, venue, idempotency_key_hash, request_hash, http_status, response)
+            (id, tenant_id, agent_id, venue, phase, idempotency_key_hash, request_hash, http_status, response)
           VALUES
-            (${"c".repeat(64)}, ${tenantA}, ${agentId}, 'hyperliquid', ${"d".repeat(64)},
+            (${"c".repeat(64)}, ${tenantA}, ${agentId}, 'hyperliquid', 'claim', ${"d".repeat(64)},
              ${requestHash}, 502, ${JSON.stringify(response)}::jsonb)
         `;
       });

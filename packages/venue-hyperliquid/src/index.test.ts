@@ -320,6 +320,25 @@ describe("Hyperliquid L1 signing", () => {
     );
     expect(signed.nonce).toBe(NONCE);
   });
+
+  test("stamps a validated client order id into the signed venue action", async () => {
+    const cloid = "0x1234567890abcdef1234567890abcdef";
+    const signed = await signOrder(
+      PRIVATE_KEY,
+      { coin: "BTC", side: "buy", size: 0.01, limitPx: 100_000, cloid },
+      { nonce: NONCE, isMainnet: false },
+    );
+    expect(((signed.action.orders as Array<Record<string, unknown>>)[0] as { c?: string }).c).toBe(
+      cloid,
+    );
+    await expect(
+      signOrder(
+        PRIVATE_KEY,
+        { coin: "BTC", side: "buy", size: 0.01, limitPx: 100_000, cloid: "0x1234" },
+        { nonce: NONCE, isMainnet: false },
+      ),
+    ).rejects.toThrow();
+  });
 });
 
 describe("Hyperliquid HIP-3 builder perps", () => {
@@ -985,6 +1004,17 @@ describe("Hyperliquid withdraw (user-signed action)", () => {
       signal: callerSignal,
     });
     expect(seenSignal).toBe(callerSignal);
+  });
+
+  test("clamps the configured fetch timeout to a positive bounded value", async () => {
+    const { parseHyperliquidFetchTimeoutMs } = await import("./index");
+    expect(parseHyperliquidFetchTimeoutMs(undefined)).toBe(10_000);
+    expect(parseHyperliquidFetchTimeoutMs("0")).toBe(10_000);
+    expect(parseHyperliquidFetchTimeoutMs("-1")).toBe(10_000);
+    expect(parseHyperliquidFetchTimeoutMs("not-a-number")).toBe(10_000);
+    expect(parseHyperliquidFetchTimeoutMs("1")).toBe(100);
+    expect(parseHyperliquidFetchTimeoutMs("60001")).toBe(60_000);
+    expect(parseHyperliquidFetchTimeoutMs("2500")).toBe(2_500);
   });
 
   test("rejects an HTTP-200 status err as a definite venue rejection", async () => {

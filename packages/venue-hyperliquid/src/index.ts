@@ -53,7 +53,17 @@ const approveBuilderFeePrimaryType = "HyperliquidTransaction:ApproveBuilderFee";
 // or a much larger percentage would let a compromised builder configuration
 // charge materially more than Steward itself will stamp on an order.
 const MAX_APPROVED_BUILDER_FEE_PERCENT = 0.1;
-const DEFAULT_FETCH_TIMEOUT_MS = Number(process.env.HYPERLIQUID_FETCH_TIMEOUT_MS ?? 10_000);
+const FALLBACK_FETCH_TIMEOUT_MS = 10_000;
+const MIN_FETCH_TIMEOUT_MS = 100;
+const MAX_FETCH_TIMEOUT_MS = 60_000;
+export function parseHyperliquidFetchTimeoutMs(raw: string | undefined): number {
+  const parsed = raw === undefined ? FALLBACK_FETCH_TIMEOUT_MS : Number(raw);
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) return FALLBACK_FETCH_TIMEOUT_MS;
+  return Math.min(Math.max(parsed, MIN_FETCH_TIMEOUT_MS), MAX_FETCH_TIMEOUT_MS);
+}
+const DEFAULT_FETCH_TIMEOUT_MS = parseHyperliquidFetchTimeoutMs(
+  process.env.HYPERLIQUID_FETCH_TIMEOUT_MS,
+);
 
 const BUILDER_PERP_ASSET_ID_OFFSET = 100_000;
 const BUILDER_PERP_DEX_STRIDE = 10_000;
@@ -136,6 +146,9 @@ export const hyperliquidOrderSchema = z.object({
   reduceOnly: z.boolean().default(false),
   leverage: z.number().positive().max(50).optional(),
   nonce: z.number().int().positive().optional(),
+  // Hyperliquid client order id: an optional provider-visible 128-bit identity
+  // that can be queried through `orderStatus` after an ambiguous submit.
+  cloid: z.string().regex(/^0x[0-9a-fA-F]{32}$/).optional(),
   // SEC-186 precedence: an order-supplied builder OVERRIDES the
   // HL_BUILDER_ADDRESS / HL_BUILDER_FEE_TENTHS_BP env config (see
   // exchangeActionFromNormalized). The hosted trade route never forwards a
@@ -333,7 +346,7 @@ function nextNonce(): number {
 }
 
 function withTimeoutSignal(init: RequestInit): RequestInit {
-  if (init.signal || DEFAULT_FETCH_TIMEOUT_MS <= 0) return init;
+  if (init.signal) return init;
   return { ...init, signal: AbortSignal.timeout(DEFAULT_FETCH_TIMEOUT_MS) };
 }
 
@@ -536,6 +549,7 @@ function normalized(order: HyperliquidOrder) {
     reduceOnly: p.reduceOnly ?? false,
     tif: p.orderType?.limit?.tif ?? "Ioc",
     nonce: p.nonce,
+    cloid: p.cloid,
     builder: p.builder,
   };
 }
@@ -609,6 +623,7 @@ function exchangeActionFromNormalized(
         s: formatSizeForAsset(o.sz, asset),
         r: o.reduceOnly,
         t: { limit: { tif: o.tif } },
+        ...(o.cloid ? { c: o.cloid.toLowerCase() } : {}),
       },
     ],
     grouping: "na",

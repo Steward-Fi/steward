@@ -9,11 +9,13 @@ import {
 } from "drizzle-orm/pg-core";
 
 /**
- * Durable terminal replay authority for venue orders.
+ * Durable execution and terminal replay authority for venue orders.
  *
- * Redis remains the fast claim/CAS layer. This PostgreSQL row is written after
- * a venue returns a definite result and before the route responds, so a Redis
- * outage or expired pending marker can never authorize the same movement again.
+ * Redis remains the fast claim/CAS layer. PostgreSQL rows are written before
+ * venue I/O (phase `claim`) and after a terminal result (phase
+ * `terminal`). Both rows are immutable. A claim without a terminal row is a
+ * durable reconciliation anchor, so a Redis outage or expired pending marker
+ * can never authorize the same movement again.
  */
 export const tradingOrderOutcomes = pgTable(
   "trading_order_outcomes",
@@ -22,6 +24,7 @@ export const tradingOrderOutcomes = pgTable(
     tenantId: varchar("tenant_id", { length: 64 }).notNull(),
     agentId: varchar("agent_id", { length: 64 }).notNull(),
     venue: varchar("venue", { length: 32 }).notNull(),
+    phase: varchar("phase", { length: 16 }).notNull(),
     idempotencyKeyHash: varchar("idempotency_key_hash", { length: 64 }).notNull(),
     requestHash: varchar("request_hash", { length: 64 }).notNull(),
     httpStatus: integer("http_status").notNull(),
@@ -34,6 +37,7 @@ export const tradingOrderOutcomes = pgTable(
       table.agentId,
       table.venue,
       table.idempotencyKeyHash,
+      table.phase,
     ),
     tenantCreated: index("trading_order_outcomes_tenant_created_idx").on(
       table.tenantId,
