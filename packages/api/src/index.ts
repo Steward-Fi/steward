@@ -14,18 +14,12 @@
 
 import { createHash, timingSafeEqual } from "node:crypto";
 import { validateJwtSecretEnv } from "@stwd/auth";
-import {
-  assertRlsDeploymentSafety,
-  closeDb,
-  getDb,
-  getMigrationExpectation,
-  getPluginMigrationLedgerExpectation,
-} from "@stwd/db";
+import { assertRlsDeploymentSafety, closeDb, getDb } from "@stwd/db";
 import { shouldUsePGLite } from "@stwd/db/pglite";
 import { redactedThrownDiagnostics } from "@stwd/shared";
-import { sql } from "drizzle-orm";
 import { composeApp, getComposedPluginMigrationSources } from "./compose";
 import { getRedisClient, initRedis, isRedisConfigured, shutdownRedis } from "./middleware/redis";
+import { readMigrationReadiness } from "./migration-readiness";
 import { resolveEnabledPlugins } from "./plugin-config";
 import { assertAuthStoresAreSafe, getAuthStoreSources, initAuthStores } from "./routes/auth";
 import {
@@ -153,99 +147,12 @@ app.get("/ready", async (c) => {
     { ok: boolean; required?: boolean; error?: string; source?: string; detail?: unknown }
   > = {};
 
-  const expectedMigration = getMigrationExpectation();
-  checks.migrations = { ok: false, detail: { expected: expectedMigration.tag } };
-  checks.pluginMigrations = {
-    ok: pluginMigrationSources.length === 0,
-    ...(pluginMigrationSources.length === 0 ? { required: false } : {}),
-  };
-
   try {
     const db = getDb();
-    const pglite = shouldUsePGLite();
-    const result = pglite
-      ? await db.execute(sql`
-          SELECT
-            EXTRACT(EPOCH FROM CURRENT_TIMESTAMP) * 1000 AS database_time_ms,
-            EXISTS(
-              SELECT 1 FROM __steward_migrations WHERE tag = ${expectedMigration.tag}
-            ) AS expected_migration_applied
-        `)
-      : await db.execute(sql`
-          SELECT
-            EXTRACT(EPOCH FROM clock_timestamp()) * 1000 AS database_time_ms,
-            (SELECT MAX(created_at) FROM drizzle.__drizzle_migrations) AS migration_created_at
-        `);
-    const rows = Array.isArray(result)
-      ? result
-      : ((result as unknown as { rows?: unknown[] }).rows ?? []);
-    const row = rows[0] as
-      | { database_time_ms?: string | number; migration_created_at?: string | number | null }
-      | undefined;
-    const databaseTimeMs = Number(row?.database_time_ms);
-    const migrationCreatedAt = Number(row?.migration_created_at);
-    const expectedMigrationApplied =
-      (row as { expected_migration_applied?: unknown } | undefined)?.expected_migration_applied ===
-      true;
-    const databaseSkewMs = Math.abs(Date.now() - databaseTimeMs);
-    checks.database = {
-      ok: Number.isFinite(databaseTimeMs) && databaseSkewMs <= 30_000,
-      detail: { clockSkewMs: Math.round(databaseSkewMs), serverTime: new Date().toISOString() },
-    };
-    checks.migrations = {
-      ok:
-        migrationsRan &&
-        (pglite ? expectedMigrationApplied : migrationCreatedAt === expectedMigration.createdAt),
-      detail: {
-        expected: expectedMigration.tag,
-        expectedCreatedAt: expectedMigration.createdAt,
-        ...(pglite
-          ? { expectedMigrationApplied }
-          : { actualCreatedAt: Number.isFinite(migrationCreatedAt) ? migrationCreatedAt : null }),
-      },
-    };
-    if (pluginMigrationSources.length > 0) {
-      try {
-        const pluginDetails: Array<{ plugin: string; ok: boolean; expectedEntries: number }> = [];
-        for (const { pluginName, source } of pluginMigrationSources) {
-          const expectation = getPluginMigrationLedgerExpectation(source);
-          const result = await db.execute(
-            sql.raw(
-              `SELECT hash, created_at FROM drizzle."${expectation.migrationsTable}" ORDER BY id ASC`,
-            ),
-          );
-          const rows = (
-            Array.isArray(result)
-              ? result
-              : ((result as unknown as { rows?: unknown[] }).rows ?? [])
-          ) as Array<{
-            hash?: unknown;
-            created_at?: unknown;
-          }>;
-          const ok =
-            rows.length === expectation.entries.length &&
-            rows.every(
-              (row, index) =>
-                row.hash === expectation.entries[index]?.hash &&
-                Number(row.created_at) === expectation.entries[index]?.createdAt,
-            );
-          pluginDetails.push({
-            plugin: pluginName,
-            ok,
-            expectedEntries: expectation.entries.length,
-          });
-        }
-        checks.pluginMigrations = {
-          ok: pluginDetails.every((plugin) => plugin.ok),
-          detail: pluginDetails,
-        };
-      } catch {
-        checks.pluginMigrations = {
-          ok: false,
-          error: "Enabled plugin migration ledger check failed",
-        };
-      }
-    }
+    Object.assign(
+      checks,
+      await readMigrationReadiness({ db, migrationsRan, pluginMigrationSources }),
+    );
     if (process.env.NODE_ENV === "production") {
       const expectedRole = process.env.STEWARD_APP_DATABASE_ROLE;
       if (!expectedRole) throw new Error("STEWARD_APP_DATABASE_ROLE is required in production");

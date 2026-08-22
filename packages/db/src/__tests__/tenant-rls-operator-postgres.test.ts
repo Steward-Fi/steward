@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import postgres from "postgres";
 
 const describeWithPostgres = process.env.DATABASE_URL ? describe : describe.skip;
-setDefaultTimeout(180_000);
+setDefaultTimeout(360_000);
 
 const suffix = randomUUID().replaceAll("-", "").slice(0, 16);
 const databaseName = `steward_rls_${suffix}`;

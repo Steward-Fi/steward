@@ -366,9 +366,30 @@ function validateWorkerSecurityEnv(): void {
   validateJwtSecretEnv();
 }
 
+export async function assertWorkerMigrationReadiness(
+  pluginMigrationSources?: import("./migration-readiness").EnabledPluginMigrationSource[],
+): Promise<void> {
+  const { readMigrationReadiness } = await import("./migration-readiness");
+  const enabledSources =
+    pluginMigrationSources ?? (await import("./compose")).getComposedPluginMigrationSources();
+  const migrationReadiness = await readMigrationReadiness({
+    db: getDb(),
+    migrationsRan: true,
+    pluginMigrationSources: await enabledSources,
+    pglite: false,
+  });
+  if (
+    !migrationReadiness.database.ok ||
+    !migrationReadiness.migrations.ok ||
+    !migrationReadiness.pluginMigrations.ok
+  ) {
+    throw new Error("WORKER_MIGRATION_READINESS_FAILED");
+  }
+}
+
 async function ensureWorkerInit(env: Env): Promise<void> {
   if (workerInit) return workerInit;
-  workerInit = (async () => {
+  const pendingInit = (async () => {
     // Workers bindings are only available inside fetch(). Hydrate process.env
     // before importing app modules that read required env at module init.
     hydrateProcessEnv(env);
@@ -381,6 +402,7 @@ async function ensureWorkerInit(env: Env): Promise<void> {
     if (!expectedRole) {
       throw new Error("STEWARD_APP_DATABASE_ROLE is required on Workers");
     }
+    await assertWorkerMigrationReadiness();
     await assertRlsDeploymentSafety(getDb(), { expectedRole });
     const redisOk = await initRedis(env);
     // Auth stores (passkey challenges, magic-link tokens, SIWE/SIWS nonces)
@@ -430,7 +452,16 @@ async function ensureWorkerInit(env: Env): Promise<void> {
       );
     }
   })();
-  return workerInit;
+  workerInit = pendingInit;
+  try {
+    await pendingInit;
+  } catch (error) {
+    // A release may repair a missing/stale ledger without recycling every
+    // isolate. Keep concurrent callers on the same failed attempt, then allow
+    // the next request to prove the corrected binding/database generation.
+    if (workerInit === pendingInit) workerInit = null;
+    throw error;
+  }
 }
 
 // Compose the deployable app once per isolate: lean core + this repo's opt-in

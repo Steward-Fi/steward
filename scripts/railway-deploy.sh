@@ -130,7 +130,7 @@ if [[ -z "$HEALTH_URL" ]]; then
   fail "RAILWAY_HEALTH_URL is required for deployment acceptance"
   exit 1
 fi
-if ! HEALTH_URL=$(node "$SCRIPT_DIR/validate-public-origin.mjs" "$HEALTH_URL"); then
+if ! HEALTH_URL=$(node "$SCRIPT_DIR/validate-public-origin.mjs" --resolve-origin "$HEALTH_URL"); then
   fail "RAILWAY_HEALTH_URL must be a credential-free public HTTPS root origin"
   exit 1
 fi
