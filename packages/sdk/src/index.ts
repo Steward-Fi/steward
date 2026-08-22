@@ -70,6 +70,8 @@ export type {
   AdapterRegistryDescription,
   AdapterTokenRef,
   AdapterUnsignedIntent,
+  AgentListOptions,
+  AgentListResult,
   AgentPolicyRuleCreate,
   AgentPolicyRuleUpdate,
   BatchAgentSpec,

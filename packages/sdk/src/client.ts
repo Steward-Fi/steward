@@ -156,6 +156,30 @@ export interface BatchCreateResult {
   errors: Array<{ id: string; error: string }>;
 }
 
+export interface AgentListOptions {
+  limit?: number;
+  offset?: number;
+}
+
+export interface AgentListResult {
+  agents: AgentIdentity[];
+  limit: number;
+  offset: number;
+}
+
+type DecodedAgentListResult = {
+  result: AgentListResult;
+  legacyArray: boolean;
+};
+
+type DecodedTransactionListResult = {
+  result: TransactionListResult;
+  legacyArray: boolean;
+};
+
+const MAX_LIST_PAGE_SIZE = 200;
+const MAX_LIST_OFFSET = 100_000;
+
 export interface WalletBatchSpec {
   /** Client-side reference id used only for partial-failure reporting. */
   id: string;
@@ -2410,37 +2434,100 @@ export class StewardClient {
     return parseAgentIdentity(response.data);
   }
 
+  /**
+   * List all agents for backwards compatibility, walking every canonical API page.
+   * Use {@link listAgentsPage} when explicit pagination metadata is needed.
+   */
   async listAgents(): Promise<AgentIdentity[]> {
     const agents: AgentIdentity[] = [];
-    let offset = 0;
-    let firstPage = true;
+    const seenAgentIds = new Set<string>();
+    let requestedOffset = 0;
 
-    while (offset <= 100_000) {
-      const response = await this.request<
-        { agents: AgentIdentity[]; limit: number; offset: number },
-        StewardErrorResponse
-      >(firstPage ? "/agents" : `/agents?limit=100&offset=${offset}`);
-
-      if (!response.ok) {
-        throw new StewardApiError(response.error, response.status, response.data);
+    while (true) {
+      const decoded = await this.requestAgentListPage({
+        limit: MAX_LIST_PAGE_SIZE,
+        offset: requestedOffset,
+      });
+      const page = decoded.result;
+      if (!decoded.legacyArray && page.offset !== requestedOffset) {
+        throw new StewardApiError("Invalid agent list pagination response", 0, page);
       }
+      for (const agent of page.agents) {
+        if (seenAgentIds.has(agent.id)) {
+          throw new StewardApiError("Duplicate agent in paginated response", 0, page);
+        }
+        seenAgentIds.add(agent.id);
+        agents.push(agent);
+      }
+
+      if (decoded.legacyArray || page.agents.length === 0 || page.agents.length < page.limit) {
+        return agents;
+      }
+
+      const nextOffset = page.offset + page.agents.length;
       if (
-        !Array.isArray(response.data?.agents) ||
-        !Number.isSafeInteger(response.data.limit) ||
-        response.data.limit < 1 ||
-        response.data.limit > 200 ||
-        response.data.offset !== offset
+        !Number.isSafeInteger(nextOffset) ||
+        nextOffset <= requestedOffset ||
+        nextOffset > MAX_LIST_OFFSET
       ) {
-        throw new Error("Invalid paginated agent-list response");
+        throw new StewardApiError("Invalid agent list pagination response", 0, page);
       }
+      requestedOffset = nextOffset;
+    }
+  }
 
-      agents.push(...response.data.agents.map(parseAgentIdentity));
-      if (response.data.agents.length < response.data.limit) break;
-      offset += response.data.limit;
-      firstPage = false;
+  /** List one page of agents with the canonical API pagination metadata. */
+  async listAgentsPage(options: AgentListOptions = {}): Promise<AgentListResult> {
+    return (await this.requestAgentListPage(options)).result;
+  }
+
+  private async requestAgentListPage(options: AgentListOptions): Promise<DecodedAgentListResult> {
+    const params = new URLSearchParams();
+    if (options.limit !== undefined) params.set("limit", String(options.limit));
+    if (options.offset !== undefined) params.set("offset", String(options.offset));
+    const query = params.toString();
+    const response = await this.request<AgentIdentity[] | AgentListResult, StewardErrorResponse>(
+      `/agents${query ? `?${query}` : ""}`,
+    );
+
+    if (!response.ok) {
+      throw new StewardApiError(response.error, response.status, response.data);
     }
 
-    return agents;
+    // Steward versions before agent-list pagination returned a bare array.
+    // Keep that response compatibility narrow and expose truthful synthetic
+    // metadata rather than requiring downstream consumers to branch on shape.
+    if (Array.isArray(response.data)) {
+      return {
+        result: {
+          agents: response.data.map(parseAgentIdentity),
+          limit: response.data.length,
+          offset: 0,
+        },
+        legacyArray: true,
+      };
+    }
+
+    if (
+      !Array.isArray(response.data.agents) ||
+      !Number.isSafeInteger(response.data.limit) ||
+      response.data.limit < 1 ||
+      response.data.limit > MAX_LIST_PAGE_SIZE ||
+      response.data.agents.length > response.data.limit ||
+      !Number.isSafeInteger(response.data.offset) ||
+      response.data.offset < 0 ||
+      response.data.offset > MAX_LIST_OFFSET
+    ) {
+      throw new StewardApiError("Invalid agent list response", 0, response.data);
+    }
+
+    return {
+      result: {
+        ...response.data,
+        agents: response.data.agents.map(parseAgentIdentity),
+      },
+      legacyArray: false,
+    };
   }
 
   /**
@@ -2466,16 +2553,82 @@ export class StewardClient {
    * original sign request.
    */
   async getTransactionHistory(agentId: string): Promise<TxRecord[]> {
-    const response = await this.request<TxRecord[] | TransactionListResult, StewardErrorResponse>(
-      `/vault/${encodeURIComponent(agentId)}/history`,
-    );
+    const records: TxRecord[] = [];
+    const seenTransactionIds = new Set<string>();
+    let requestedOffset = 0;
 
+    while (true) {
+      const decoded = await this.requestTransactionHistoryPage(agentId, requestedOffset);
+      const page = decoded.result;
+      if (!decoded.legacyArray && page.offset !== requestedOffset) {
+        throw new StewardApiError("Invalid transaction history pagination response", 0, page);
+      }
+      for (const transaction of page.transactions) {
+        if (seenTransactionIds.has(transaction.id)) {
+          throw new StewardApiError("Duplicate transaction in paginated history", 0, page);
+        }
+        seenTransactionIds.add(transaction.id);
+        records.push(transaction);
+      }
+      if (
+        decoded.legacyArray ||
+        page.transactions.length === 0 ||
+        page.transactions.length < page.limit
+      ) {
+        return records;
+      }
+
+      const nextOffset = page.offset + page.transactions.length;
+      if (
+        !Number.isSafeInteger(nextOffset) ||
+        nextOffset <= requestedOffset ||
+        nextOffset > MAX_LIST_OFFSET
+      ) {
+        throw new StewardApiError("Invalid transaction history pagination response", 0, page);
+      }
+      requestedOffset = nextOffset;
+    }
+  }
+
+  private async requestTransactionHistoryPage(
+    agentId: string,
+    offset: number,
+  ): Promise<DecodedTransactionListResult> {
+    const response = await this.request<TxRecord[] | TransactionListResult, StewardErrorResponse>(
+      `/vault/${encodeURIComponent(agentId)}/history?limit=${MAX_LIST_PAGE_SIZE}&offset=${offset}`,
+    );
     if (!response.ok) {
       throw new StewardApiError(response.error, response.status, response.data);
     }
-
-    const records = Array.isArray(response.data) ? response.data : response.data.transactions;
-    return records.map(parseTxRecord);
+    if (Array.isArray(response.data)) {
+      return {
+        result: {
+          transactions: response.data.map(parseTxRecord),
+          limit: response.data.length,
+          offset: 0,
+        },
+        legacyArray: true,
+      };
+    }
+    if (
+      !Array.isArray(response.data.transactions) ||
+      !Number.isSafeInteger(response.data.limit) ||
+      response.data.limit < 1 ||
+      response.data.limit > MAX_LIST_PAGE_SIZE ||
+      response.data.transactions.length > response.data.limit ||
+      !Number.isSafeInteger(response.data.offset) ||
+      response.data.offset < 0 ||
+      response.data.offset > MAX_LIST_OFFSET
+    ) {
+      throw new StewardApiError("Invalid transaction history response", 0, response.data);
+    }
+    return {
+      result: {
+        ...response.data,
+        transactions: response.data.transactions.map(parseTxRecord),
+      },
+      legacyArray: false,
+    };
   }
 
   async listTransactions(
