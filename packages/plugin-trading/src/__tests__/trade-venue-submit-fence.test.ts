@@ -868,13 +868,15 @@ describe("Hyperliquid venue-submit spend-fence (real /hyperliquid/order path)", 
       status: "filled",
     } as Awaited<ReturnType<HyperliquidAdapter["submitOrder"]>>);
 
-    const response = await postOrder(app, sessionId, crypto.randomUUID(), {
+    const key = crypto.randomUUID();
+    const orderBody = {
       asset: builderAsset,
       side: "buy",
       size: 1,
       limitPx: 10,
       leverage: 10,
-    });
+    } as const;
+    const response = await postOrder(app, sessionId, key, orderBody);
     expect(response.status).toBe(502);
     expect(updateLeverageSpy).toHaveBeenCalledWith({
       coin: builderAsset,
@@ -885,5 +887,31 @@ describe("Hyperliquid venue-submit spend-fence (real /hyperliquid/order path)", 
     expect(submitSpy).not.toHaveBeenCalled();
     expect(await dailySpendOf(sessionId)).toBe(0);
     expect(await auditCount(tenantId, "trade.order.leverage.failed")).toBe(1);
+    expect(await terminalPhaseCount(tenantId, agentId)).toBe(1);
+    const replay = await postOrder(app, sessionId, key, orderBody);
+    expect(replay.status).toBe(502);
+    expect(updateLeverageSpy).toHaveBeenCalledTimes(1);
+    expect(signSpy).not.toHaveBeenCalled();
+  });
+
+  it("terminalizes a definite signing failure before releasing spend", async () => {
+    const { tenantId, agentId, sessionId } = await seedSession();
+    const app = makeApp(tenantId, agentId, tradeRoutes);
+    signSpy = spyOn(HyperliquidAdapter.prototype, "signOrder").mockRejectedValue(
+      new Error("vault rejected typed data"),
+    );
+    submitSpy = spyOn(HyperliquidAdapter.prototype, "submitOrder");
+    const key = crypto.randomUUID();
+    const failed = await postOrder(app, sessionId, key);
+    expect(failed.status).toBe(400);
+    expect(await terminalPhaseCount(tenantId, agentId)).toBe(1);
+    expect(await dailySpendOf(sessionId)).toBe(0);
+    expect(submitSpy).not.toHaveBeenCalled();
+
+    const replay = await postOrder(app, sessionId, key);
+    expect(replay.status).toBe(400);
+    expect(replay.headers.get("Idempotency-Replayed")).toBe("true");
+    expect(signSpy).toHaveBeenCalledTimes(1);
+    expect(submitSpy).not.toHaveBeenCalled();
   });
 });
