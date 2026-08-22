@@ -183,6 +183,11 @@ describe("durable trade order recovery", () => {
       venue: "hyperliquid" as const,
       idempotencyKey: "durable-key-prepared",
       bodyHash: "c".repeat(64),
+      effectMetadata: {
+        sessionId: "recovery-session-prepared",
+        venue: "hyperliquid",
+        walletAddress: "0x0000000000000000000000000000000000000001",
+      },
     };
     const original = await beginTradeRecovery(db, input);
     if (original.kind !== "new") throw new Error("expected new recovery");
