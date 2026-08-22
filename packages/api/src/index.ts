@@ -369,10 +369,7 @@ const serverOptions = {
     // Hand the runtime-observed socket peer to the app via Hono's env bag so
     // per-route limiters (auth) can key on it when no trusted forwarding
     // config exists — it cannot be client-influenced, unlike any header.
-    return (
-      runtimeGate() ??
-      app.fetch(request, { [SOCKET_PEER_ENV_KEY]: peerAddress })
-    );
+    return runtimeGate() ?? app.fetch(request, { [SOCKET_PEER_ENV_KEY]: peerAddress });
   },
   idleTimeout: 30,
 } as Parameters<typeof Bun.serve>[0] & { hostname?: string };

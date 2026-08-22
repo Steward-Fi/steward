@@ -114,15 +114,18 @@ point at your plugin's OWN drizzle migrations folder (with its own `meta/_journa
 
 The capabilities plugin enforces invoke/OpenAI-adapter requests at 60 per agent
 per rolling minute and manifest issue/renew requests at 30 per agent per rolling
-minute. Redis is used when configured and healthy. A configured Redis backend
-that is unavailable fails closed; it never silently changes backend.
+minute. Bun uses Redis when configured and healthy. A configured Bun Redis
+backend that is unavailable fails closed; it never silently changes backend.
 
 When Redis is not configured, production uses the plugin-owned
 `capability_rate_limit_buckets` PostgreSQL table. Its per-tenant/agent/surface
 row lock is the reservation boundary shared by every API replica, and the
 bounded timestamp array survives process restarts. Agent authentication and
 bucket reservations each use an authenticated tenant/RLS transaction, and the
-reservation commits before downstream work. A writer trigger takes the
+Cloudflare Worker path always uses this request-owned PostgreSQL boundary so
+overlapping binding rotations or removals cannot inherit an isolate-global
+Redis client from another request. The reservation commits before downstream
+work. A writer trigger takes the
 tenant-deletion lock before a parent-agent key-share lock, so
 an in-flight reservation cannot recreate state after agent or tenant cleanup.
 The plugin migration must be applied before traffic. `/ready` reports

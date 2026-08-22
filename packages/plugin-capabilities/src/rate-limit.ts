@@ -1,9 +1,10 @@
 /**
  * Per-agent rate limiting for capability invoke/OpenAI-adapter and manifest
- * issuance. Redis remains the preferred sliding-window backend. When Redis was
- * never configured, production uses a plugin-owned Postgres bucket whose row
- * lock is the cross-replica reservation boundary. Process memory is available
- * only in explicit development/test posture.
+ * issuance. Bun prefers Redis and uses a plugin-owned Postgres bucket when
+ * Redis was never configured. Workers always use that request-owned Postgres
+ * boundary so overlapping binding generations cannot share isolate authority.
+ * Process memory is available only in explicit non-Worker development/test
+ * posture.
  */
 
 import { checkRateLimit } from "@stwd/redis";
@@ -164,8 +165,9 @@ async function reservePostgres(
 
 /**
  * Atomically reserve one request before any invocation/audit/upstream work.
- * Configured Redis errors deny. Redis-absent production reserves in Postgres.
- * Only explicit NODE_ENV=test/development may use process memory.
+ * Configured Redis errors deny on Bun. Redis-absent production and every Worker
+ * invocation reserve in Postgres. Only explicit non-Worker
+ * NODE_ENV=test/development may use process memory.
  */
 export async function enforceCapabilityRateLimit(
   ctx: CapabilityRateContext,
