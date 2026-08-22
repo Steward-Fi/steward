@@ -24,7 +24,7 @@ import {
 } from "@stwd/db";
 import { capabilities, capabilityGrants, capabilityInvocations } from "@stwd/plugin-capabilities";
 import { canonicalJsonStringify } from "@stwd/shared";
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { migrate as pgliteMigrate } from "drizzle-orm/pglite/migrator";
 import { Hono } from "hono";
 import type { AppVariables } from "../services/context";
@@ -68,6 +68,10 @@ setDefaultTimeout(60_000);
 
 let tenantApp: Hono<{ Variables: AppVariables }>;
 let platformRoutes: Awaited<typeof import("../routes/platform")>["platformRoutes"];
+
+function executeRows<T>(result: unknown): T[] {
+  return (Array.isArray(result) ? result : ((result as { rows?: T[] }).rows ?? [])) as T[];
+}
 
 async function createAgent(agentId: string): Promise<void> {
   await getDb().insert(agents).values({
@@ -690,6 +694,11 @@ describe("agent deletion upstream credential boundary", () => {
     const agentId = `capability-existing-${crypto.randomUUID()}`;
     await createAgent(agentId);
     const { grantId, routeId } = await createCapability(agentId);
+    await getDb().execute(sql`
+      INSERT INTO public.capability_rate_limit_buckets (
+        tenant_id, agent_id, surface, reservations
+      ) VALUES (${TENANT_ID}, ${agentId}, 'invoke', ARRAY[clock_timestamp()])
+    `);
 
     expect((await tenantDelete(agentId)).status).toBe(200);
     expect(
@@ -704,6 +713,15 @@ describe("agent deletion upstream credential boundary", () => {
         .from(secretRoutes)
         .where(eq(secretRoutes.id, routeId as string)),
     ).toMatchObject([{ enabled: false }]);
+    expect(
+      executeRows(
+        await getDb().execute(sql`
+          SELECT tenant_id
+          FROM public.capability_rate_limit_buckets
+          WHERE tenant_id = ${TENANT_ID} AND agent_id = ${agentId}
+        `),
+      ),
+    ).toHaveLength(0);
 
     let reactivationError: unknown;
     try {
@@ -836,6 +854,13 @@ describe("agent deletion upstream credential boundary", () => {
       capabilityId: activeCapabilityId,
       decision: "allow",
     });
+    await getDb().execute(sql`
+      INSERT INTO public.capability_rate_limit_buckets (
+        tenant_id, agent_id, surface, reservations
+      ) VALUES
+        (${tenantId}, ${activeAgentId}, 'invoke', ARRAY[clock_timestamp()]),
+        (${tenantId}, ${terminalAgentId}, 'issue', ARRAY[clock_timestamp()])
+    `);
 
     const response = await platformTenantDelete(tenantId);
     expect(response.status).toBe(200);
@@ -845,6 +870,15 @@ describe("agent deletion upstream credential boundary", () => {
     ).toHaveLength(0);
     expect(
       await getDb().select().from(capabilities).where(eq(capabilities.tenantId, tenantId)),
+    ).toHaveLength(0);
+    expect(
+      executeRows(
+        await getDb().execute(sql`
+          SELECT tenant_id
+          FROM public.capability_rate_limit_buckets
+          WHERE tenant_id = ${tenantId}
+        `),
+      ),
     ).toHaveLength(0);
     expect(
       await getDb().select().from(secretRoutes).where(eq(secretRoutes.tenantId, tenantId)),
@@ -868,6 +902,7 @@ describe("agent deletion upstream credential boundary", () => {
           activeGrantsRetired: 1,
           terminalGrantsRemoved: 1,
           capabilitiesRemoved: 2,
+          rateLimitBucketsRemoved: 2,
           invocationEvidenceRetained: 1,
         },
       },

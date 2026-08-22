@@ -51,7 +51,7 @@ curl http://127.0.0.1:3200/ready
 curl http://127.0.0.1:8080/health
 ```
 
-`/health` is a liveness check. `/ready` verifies migrations have completed, the database is reachable, and `STEWARD_MASTER_PASSWORD` is set. Unauthenticated `/ready` responses contain only the status code and per-check `ok` flags; set `STEWARD_READY_PROBE_TOKEN` and send it as the `X-Steward-Probe-Token` header to receive the full diagnostic detail (migration tags, backend identity, clock skew).
+`/health` is a liveness check. `/ready` verifies migrations have completed, the database is reachable, and `STEWARD_MASTER_PASSWORD` is set. When the capabilities plugin is enabled it also verifies the capability rate-limit backend: healthy configured Redis, or an actual tenant-bound, forced-RLS PostgreSQL DML exercise (including the bucket writer trigger, tenant-deletion lock function, and parent-agent lookup) when Redis is absent. The exercise rolls back inside a PL/pgSQL exception subtransaction and leaves no readiness row. Process memory is reported as ready only for explicit `NODE_ENV=development|test`; configured-but-unavailable Redis and a missing, inaccessible, or incorrectly protected production bucket are not ready. Unauthenticated `/ready` responses contain only the status code and per-check `ok` flags; set `STEWARD_READY_PROBE_TOKEN` and send it as the `X-Steward-Probe-Token` header to receive the full diagnostic detail (migration tags, backend identity, clock skew).
 
 Create a platform key by generating a random value and putting it in `STEWARD_PLATFORM_KEYS` before startup. Multiple platform keys can be configured as a comma-separated list.
 

@@ -27,7 +27,9 @@ export type ReadinessDependencies = {
   checkProxyClock: () => Promise<ReadinessCheck>;
   getAuthStoreSources: () => AuthStoreSources;
   isVaultConfigured: () => boolean;
-  getAdditionalChecks?: () => Record<string, ReadinessCheck>;
+  getAdditionalChecks?: () =>
+    | Record<string, ReadinessCheck>
+    | Promise<Record<string, ReadinessCheck>>;
 };
 
 function probeAuthorized(presented: string | undefined, expected: string | undefined): boolean {
@@ -96,7 +98,11 @@ export function createReadinessHandler(
     };
 
     if (dependencies.getAdditionalChecks) {
-      Object.assign(checks, dependencies.getAdditionalChecks());
+      try {
+        Object.assign(checks, await dependencies.getAdditionalChecks());
+      } catch {
+        checks.additional = { ok: false, error: "Additional readiness check failed" };
+      }
     }
 
     const allOk = Object.values(checks).every((check) => check.ok || check.required === false);

@@ -11,24 +11,44 @@
 import { randomUUID } from "node:crypto";
 import { getRedis } from "./client.js";
 
-// KEYS[1]=zset  ARGV: now, windowStart, maxRequests, member, ttlMs
+// KEYS[1]=zset  ARGV: windowMs, maxRequests, member, ttlMs
 // Prune the window, count, and add the member only if strictly under the
 // limit (count < max → the Nth request is admitted, N+1 rejected). Done in one
-// script so concurrent requests cannot collectively pass the ceiling.
+// script so concurrent requests cannot collectively pass the ceiling. Redis
+// TIME is the authority for every replica: an application host with a skewed
+// clock cannot expire another replica's still-live reservations.
 const RATE_LIMIT_LUA = `
-redis.call('ZREMRANGEBYSCORE', KEYS[1], 0, tonumber(ARGV[2]))
+local redisTime = redis.call('TIME')
+local now = (tonumber(redisTime[1]) * 1000) + math.floor(tonumber(redisTime[2]) / 1000)
+local windowMs = tonumber(ARGV[1])
+local windowStart = now - windowMs
+redis.call('ZREMRANGEBYSCORE', KEYS[1], 0, windowStart)
 local count = redis.call('ZCARD', KEYS[1])
 local allowed = 0
-if count < tonumber(ARGV[3]) then
-  redis.call('ZADD', KEYS[1], tonumber(ARGV[1]), ARGV[4])
+if count < tonumber(ARGV[2]) then
+  redis.call('ZADD', KEYS[1], now, ARGV[3])
   allowed = 1
   count = count + 1
 end
-redis.call('PEXPIRE', KEYS[1], tonumber(ARGV[5]))
+redis.call('PEXPIRE', KEYS[1], tonumber(ARGV[4]))
 local oldest = redis.call('ZRANGE', KEYS[1], 0, 0, 'WITHSCORES')
-local oldestScore = ARGV[1]
+local oldestScore = now
 if oldest[2] ~= nil then oldestScore = oldest[2] end
-return {allowed, count, oldestScore}
+local resetMs = math.max(0, tonumber(oldestScore) + windowMs - now)
+return {allowed, count, oldestScore, now, resetMs}
+`;
+
+const RATE_LIMIT_STATUS_LUA = `
+local redisTime = redis.call('TIME')
+local now = (tonumber(redisTime[1]) * 1000) + math.floor(tonumber(redisTime[2]) / 1000)
+local windowMs = tonumber(ARGV[1])
+redis.call('ZREMRANGEBYSCORE', KEYS[1], 0, now - windowMs)
+local count = redis.call('ZCARD', KEYS[1])
+local oldest = redis.call('ZRANGE', KEYS[1], 0, 0, 'WITHSCORES')
+local oldestScore = now
+if oldest[2] ~= nil then oldestScore = oldest[2] end
+local resetMs = math.max(0, tonumber(oldestScore) + windowMs - now)
+return {count, oldestScore, now, resetMs}
 `;
 
 export interface RateLimitResult {
@@ -53,11 +73,23 @@ function validateRateLimitInput(key: string, windowMs: number, maxRequests: numb
 }
 
 /**
+ * Bind the durable bucket to the complete policy generation. Callers often
+ * include the window in their logical key, but historically omitted the cap.
+ * Reusing that bucket after a limit rotation lets the new policy inherit the
+ * old generation's reservations (or, when loosening and later tightening,
+ * reinterpret them). Keep the caller-facing key stable while fencing the
+ * physical Redis key by both numeric policy inputs.
+ */
+function durableBucketKey(key: string, windowMs: number, maxRequests: number): string {
+  return `${key}:policy:${windowMs}:${maxRequests}`;
+}
+
+/**
  * Check and increment a sliding window rate limit.
  *
  * Uses a sorted set where:
- * - Score = timestamp (ms)
- * - Member = unique request ID (timestamp + random suffix to avoid collisions)
+ * - Score = Redis server timestamp (ms)
+ * - Member = unique request ID
  *
  * The window slides: we remove all entries older than (now - windowMs),
  * then count remaining entries to determine if under the limit.
@@ -74,26 +106,21 @@ export async function checkRateLimit(
 ): Promise<RateLimitResult> {
   validateRateLimitInput(key, windowMs, maxRequests);
   const redis = client ?? getRedis();
-  const now = Date.now();
-  const windowStart = now - windowMs;
 
-  // Unique member: timestamp + random suffix to handle sub-ms bursts
-  const member = `${now}:${randomUUID()}`;
+  // Redis supplies the timestamp inside the script. The UUID only distinguishes
+  // concurrent reservations that share the same server millisecond.
+  const member = randomUUID();
 
   const res = (await redis.eval(
     RATE_LIMIT_LUA,
     1,
-    key,
-    String(now),
-    String(windowStart),
+    durableBucketKey(key, windowMs, maxRequests),
+    String(windowMs),
     String(maxRequests),
     member,
     String(windowMs + 1000), // TTL = window + 1s buffer
-  )) as [number, number, string];
-  const [allowed, count, oldestScore] = res;
-
-  const oldestTimestamp = oldestScore != null ? Number(oldestScore) : now;
-  const resetMs = Math.max(0, oldestTimestamp + windowMs - now);
+  )) as [number, number, string, number, number];
+  const [allowed, count, _oldestScore, _serverNow, resetMs] = res;
 
   if (allowed !== 1) {
     return { allowed: false, remaining: 0, resetMs };
@@ -120,18 +147,15 @@ export async function getRateLimitStatus(
 ): Promise<RateLimitResult> {
   validateRateLimitInput(key, windowMs, maxRequests);
   const redis = getRedis();
-  const now = Date.now();
-  const windowStart = now - windowMs;
-
-  // Clean up and count
-  await redis.zremrangebyscore(key, 0, windowStart);
-  const [count, oldest] = await Promise.all([
-    redis.zcard(key),
-    redis.zrange(key, 0, 0, "WITHSCORES"),
-  ]);
-
-  const oldestTimestamp = oldest.length >= 2 ? Number(oldest[1]) : now;
-  const resetMs = Math.max(0, oldestTimestamp + windowMs - now);
+  // Although advisory, status performs expiry cleanup. Keep that mutation on
+  // the same Redis clock as enforcement so a skewed observer cannot prune live
+  // reservations and weaken the gate.
+  const [count, _oldestScore, _serverNow, resetMs] = (await redis.eval(
+    RATE_LIMIT_STATUS_LUA,
+    1,
+    durableBucketKey(key, windowMs, maxRequests),
+    String(windowMs),
+  )) as [number, string, number, number];
 
   return {
     allowed: count < maxRequests,

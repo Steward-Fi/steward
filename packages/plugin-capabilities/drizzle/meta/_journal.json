@@ -29,6 +29,13 @@
       "when": 1787203700000,
       "tag": "0003_tenant_rls_policies",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1787250000000,
+      "tag": "0004_capability_rate_limit_buckets",
+      "breakpoints": true
     }
   ]
 }

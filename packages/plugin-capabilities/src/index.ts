@@ -71,12 +71,19 @@ export type {
   Capability,
   CapabilityGrant,
   CapabilityInvocation,
+  CapabilityRateLimitBucket,
   InvocationDecision,
   NewCapability,
   NewCapabilityGrant,
   NewCapabilityInvocation,
+  NewCapabilityRateLimitBucket,
 } from "./schema";
-export { capabilities, capabilityGrants, capabilityInvocations } from "./schema";
+export {
+  capabilities,
+  capabilityGrants,
+  capabilityInvocations,
+  capabilityRateLimitBuckets,
+} from "./schema";
 export type { CapabilitySpec } from "./store";
 export { AgentNotFoundError, CapabilityStore, GrantExistsError, isExpired } from "./store";
 export {
