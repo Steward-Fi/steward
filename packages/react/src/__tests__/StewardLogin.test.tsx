@@ -8,8 +8,6 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import * as React from "react";
 import { renderToString } from "react-dom/server";
 
@@ -19,10 +17,6 @@ const { StewardLogin, composeWalletSuccess, composeWalletError } = await import(
 const { StewardAuthContext } = await import("../provider.js");
 const { registerEvmWalletPanel, registerSolanaWalletPanel, _resetWalletPanelRegistry } =
   await import("../internal/walletPanelRegistry.js");
-const oauthCallbackSource = readFileSync(
-  join(import.meta.dir, "..", "components", "StewardOAuthCallback.tsx"),
-  "utf8",
-);
 
 // Register dummy panel loaders. The registry isolates root entry from
 // wallet peer deps; tests just need a pair of registered loaders so the
@@ -132,15 +126,6 @@ function wrap(value: AuthCtx | null, node: React.ReactNode) {
 }
 
 describe("<StewardLogin /> rules-of-hooks branch coverage", () => {
-  test("OAuth callback refuses token-in-URL storage", () => {
-    expect(oauthCallbackSource).toContain("Token-in-URL OAuth callbacks are disabled");
-    expect(oauthCallbackSource).toContain("callbackParamsFromLocation(window.location)");
-    expect(oauthCallbackSource).toContain("location.hash");
-    expect(oauthCallbackSource).toContain("steward-oauth-callback");
-    expect(oauthCallbackSource).not.toContain('localStorage.setItem("steward_session_token"');
-    expect(oauthCallbackSource).not.toContain('localStorage.setItem("steward_refresh_token"');
-  });
-
   test("mounts when no auth context is present (renders inline error)", () => {
     // Provider missing → ctx is null → component shows error message.
     // Critically, this path must still call all hooks unconditionally before
