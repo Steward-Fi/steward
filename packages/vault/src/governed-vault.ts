@@ -4,7 +4,10 @@ import {
   type ExecutionAuthorization,
   normalizeEvmExecutionPayload,
   type SignRequest,
+  type SignSolanaTransactionRequest,
 } from "@stwd/shared";
+import { createGovernedParsedSolanaSigningGrant } from "./governed-solana-signing";
+import { normalizedSolanaMessageDigest } from "./solana";
 import type { SignTransactionOptions, Vault } from "./vault";
 
 export type ExecutionAuthorizationConsumeCallback = (
@@ -51,6 +54,105 @@ export interface GovernedSolanaNativeSignOptions extends SignTransactionOptions 
     executionClaimDigest: string;
     payloadDigest: string;
   }) => Promise<void>;
+}
+
+export interface GovernedSolanaParsedEffects {
+  movesNativeSol: boolean;
+  programIds: string[];
+  tokenTransfers: Array<{ mint?: string; destination: string; amount: string }>;
+}
+
+export type GovernedSolanaParsedSignRequest = Omit<
+  SignSolanaTransactionRequest,
+  "allowBlindSign" | "expectedTo" | "expectedValue"
+> & {
+  allowBlindSign?: never;
+  expectedTo?: never;
+  expectedValue?: never;
+};
+
+export interface GovernedSolanaParsedExecutionClaim {
+  tenantId: string;
+  agentId: string;
+  txId: string;
+  executionToken: string;
+  executionClaimDigest: string;
+  executionPayloadDigest: string;
+  messageDigest: string;
+  parsedEffects: GovernedSolanaParsedEffects;
+  policyRevisionHash: string;
+  chainId: number;
+  broadcast: boolean;
+}
+
+export interface GovernedSolanaParsedSignOptions {
+  txId: string;
+  executionToken: string;
+  executionClaimDigest: string;
+  executionPayloadDigest: string;
+  messageDigest: string;
+  parsedEffects: GovernedSolanaParsedEffects;
+  policyRevisionHash: string;
+  consumeExecutionClaim: (expected: GovernedSolanaParsedExecutionClaim) => Promise<void>;
+}
+
+export function executionPayloadDigestForGovernedSolanaParsedSign(
+  request: GovernedSolanaParsedSignRequest,
+  input: {
+    messageDigest: string;
+    parsedEffects: GovernedSolanaParsedEffects;
+    policyRevisionHash: string;
+  },
+): string {
+  const chainId = request.chainId ?? 101;
+  if (chainId !== 101 && chainId !== 102) {
+    throw new GovernedVaultError(
+      "Governed parsed Solana signing requires a Solana chain",
+      "unsupported_chain_family",
+    );
+  }
+  const actualMessageDigest = normalizedSolanaMessageDigest(request.transaction);
+  if (!input.messageDigest || input.messageDigest !== actualMessageDigest) {
+    throw new GovernedVaultError(
+      "Parsed Solana message digest does not match the serialized transaction",
+      "payload_digest_mismatch",
+    );
+  }
+  if (!input.policyRevisionHash) {
+    throw new GovernedVaultError(
+      "Parsed Solana signing requires a policy revision",
+      "missing_authorization",
+    );
+  }
+  return createHash("sha256")
+    .update(
+      canonicalJsonStringify({
+        agentId: request.agentId,
+        broadcast: request.broadcast !== false,
+        chainId,
+        messageDigest: actualMessageDigest,
+        parsedEffects: input.parsedEffects,
+        policyRevisionHash: input.policyRevisionHash,
+        tenantId: request.tenantId,
+      }),
+    )
+    .digest("hex");
+}
+
+export function executionClaimDigestForGovernedSolanaParsedSign(input: {
+  executionPayloadDigest: string;
+  executionToken: string;
+  txId: string;
+}): string {
+  return createHash("sha256")
+    .update(
+      canonicalJsonStringify({
+        executionPayloadDigest: input.executionPayloadDigest,
+        executionToken: input.executionToken,
+        txId: input.txId,
+      }),
+    )
+    .digest("hex");
 }
 
 export function executionPayloadDigestForGovernedSolanaNativeSign(request: SignRequest): string {
@@ -208,5 +310,72 @@ export class GovernedVault {
       ...rawOptions
     } = options;
     return this.rawVault.signTransaction(request, rawOptions);
+  }
+
+  async signSolanaParsedTransactionAuthorized(
+    request: GovernedSolanaParsedSignRequest,
+    options: GovernedSolanaParsedSignOptions,
+  ): ReturnType<Vault["signSolanaTransaction"]> {
+    if (!options.txId || !options.executionToken || !options.executionClaimDigest) {
+      throw new GovernedVaultError(
+        "A durable parsed Solana execution claim is required",
+        "missing_authorization",
+      );
+    }
+    const executionPayloadDigest = executionPayloadDigestForGovernedSolanaParsedSign(request, {
+      messageDigest: options.messageDigest,
+      parsedEffects: options.parsedEffects,
+      policyRevisionHash: options.policyRevisionHash,
+    });
+    if (
+      !options.executionPayloadDigest ||
+      options.executionPayloadDigest !== executionPayloadDigest ||
+      options.executionClaimDigest !==
+        executionClaimDigestForGovernedSolanaParsedSign({
+          executionPayloadDigest,
+          executionToken: options.executionToken,
+          txId: options.txId,
+        })
+    ) {
+      throw new GovernedVaultError(
+        "Parsed Solana execution digest does not match the governed request",
+        "payload_digest_mismatch",
+      );
+    }
+
+    const expected: GovernedSolanaParsedExecutionClaim = {
+      tenantId: request.tenantId,
+      agentId: request.agentId,
+      txId: options.txId,
+      executionToken: options.executionToken,
+      executionClaimDigest: options.executionClaimDigest,
+      executionPayloadDigest,
+      messageDigest: options.messageDigest,
+      parsedEffects: options.parsedEffects,
+      policyRevisionHash: options.policyRevisionHash,
+      chainId: request.chainId ?? 101,
+      broadcast: request.broadcast !== false,
+    };
+    try {
+      await options.consumeExecutionClaim(expected);
+    } catch (error) {
+      if (error instanceof GovernedVaultError) throw error;
+      throw new GovernedVaultError(
+        error instanceof Error ? error.message : "Parsed Solana execution claim was rejected",
+        "authorization_rejected",
+      );
+    }
+
+    return this.rawVault.signSolanaTransaction({
+      ...request,
+      governedParsedSign: createGovernedParsedSolanaSigningGrant({
+        agentId: request.agentId,
+        broadcast: request.broadcast !== false,
+        chainId: request.chainId ?? 101,
+        executionPayloadDigest,
+        messageDigest: options.messageDigest,
+        tenantId: request.tenantId,
+      }),
+    });
   }
 }

@@ -80,7 +80,28 @@ describe("Vault blind-sign gate (SEC-163)", () => {
         transaction: tx,
         broadcast: false,
       }),
-    ).rejects.toThrow(/allowBlindSign/);
+    ).rejects.toThrow(/governed execution grant/);
+  });
+
+  test("signSolanaTransaction rejects a caller-forged parsed execution object", async () => {
+    const feePayer = await createSolanaAgent(vault);
+    const tx = nativeTransfer(feePayer, PublicKey.unique(), 1_000);
+    const forged = {
+      tenantId: TENANT_ID,
+      agentId: AGENT_ID,
+      transaction: tx,
+      broadcast: false,
+      governedParsedSign: {
+        tenantId: TENANT_ID,
+        agentId: AGENT_ID,
+        chainId: 101,
+        broadcast: false,
+        messageDigest: "attacker-controlled",
+        executionPayloadDigest: "attacker-controlled",
+      },
+    } as unknown as Parameters<Vault["signSolanaTransaction"]>[0];
+
+    await expect(vault.signSolanaTransaction(forged)).rejects.toThrow(/governed execution grant/);
   });
 
   test("signSolanaTransaction signs an envelope-less request with allowBlindSign: true", async () => {

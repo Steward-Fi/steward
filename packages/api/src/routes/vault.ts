@@ -17,6 +17,7 @@ import {
   randomBytes,
 } from "node:crypto";
 import {
+  agents,
   executionAuthorizationNonces,
   tenantConfigs as tenantConfigsTable,
   users,
@@ -43,7 +44,11 @@ import {
   ENTRY_POINT_V07,
   type ExportPrivateKeyResult,
   ExternalBroadcastOutcomeUnknownError,
+  executionClaimDigestForGovernedSolanaParsedSign,
   executionPayloadDigestForGovernedSolanaNativeSign,
+  executionPayloadDigestForGovernedSolanaParsedSign,
+  type GovernedSolanaParsedEffects,
+  type GovernedSolanaParsedExecutionClaim,
   GovernedVault,
   GovernedVaultError,
   getUserOperationHash,
@@ -3483,6 +3488,7 @@ vaultRoutes.post("/:agentId/actions/transfer", async (c) => {
         : {}),
     };
     const policySet = await getScopedPolicySet(tenantId, agentId, c.get("agentPolicyIds"));
+    const transferPolicyRevisionHash = policyRevisionHashForPolicySet(policySet);
     const conditionSets = await loadConditionSetsForPolicies(tenantId, policySet);
 
     const rateLimitResult = await enforceRateLimit(agentId, policySet);
@@ -3639,20 +3645,36 @@ vaultRoutes.post("/:agentId/actions/transfer", async (c) => {
 
     let solanaExecutionToken: string | null = null;
     let storedTransferActionPayload: Record<string, unknown> = baseTransferActionPayload;
-    if (solanaRecoveryBinding) {
+    const solanaSigningBinding = isSolanaTokenTransfer
+      ? (solanaRecoveryBinding ?? {
+          txId: actionId,
+          requestDigest: parsedSolanaTransferApproval?.reviewedRequestDigest,
+        })
+      : solanaRecoveryBinding;
+    if (solanaSigningBinding) {
       try {
         const staged = await stageSolanaRecoveryAnchor({
+          tenantId,
           agentId,
           transaction: signRequest.data ?? "",
           chainId: transfer.chainId,
           toAddress: transfer.to,
           value: transfer.value,
-          broadcastRequested: true,
+          broadcastRequested: transfer.broadcast,
           blindSigned: false,
           policyResults: evaluation.results,
-          binding: solanaRecoveryBinding,
+          binding: solanaSigningBinding,
           actionType: "transfer",
           actionPayload: baseTransferActionPayload,
+          ...(isSolanaTokenTransfer && parsedSolanaTransferApproval
+            ? {
+                parsedAuthorization: {
+                  messageDigest: normalizedSolanaMessageDigest(signRequest.data!),
+                  parsedEffects: parsedSolanaTransferApproval.parsedEffects,
+                  policyRevisionHash: transferPolicyRevisionHash,
+                },
+              }
+            : {}),
         });
         if (!staged.executionToken) {
           return solanaLostOwnershipResponse(c, actionId, agentId, "transfer");
@@ -3725,7 +3747,7 @@ vaultRoutes.post("/:agentId/actions/transfer", async (c) => {
         if (!signRequest.data) {
           throw new Error("SPL transfer transaction was not built");
         }
-        if (!solanaRecoveryBinding)
+        if (!solanaExecutionToken)
           await db.insert(transactions).values({
             id: actionId,
             agentId,
@@ -3738,28 +3760,61 @@ vaultRoutes.post("/:agentId/actions/transfer", async (c) => {
             actionPayload: storedTransferActionPayload,
             policyResults: evaluation.results,
           });
-        const signed = await vault.signSolanaTransaction({
-          agentId,
-          tenantId,
-          transaction: signRequest.data,
-          chainId: transfer.chainId,
-          broadcast: transfer.broadcast,
-          // SEC-163: SPL token transfers carry no vault-layer envelope (the
-          // byte-level check only models native SOL transfers); the edge
-          // policy evaluation above approved this transfer.
-          allowParsedSign: true,
-          ...(solanaExecutionToken
-            ? {
-                onBroadcastPrepared: (checkpoint) =>
-                  checkpointSolanaBroadcastSubmission(
-                    actionId,
-                    agentId,
-                    solanaExecutionToken,
-                    checkpoint,
-                  ),
-              }
-            : {}),
-        });
+        if (!solanaExecutionToken || !parsedSolanaTransferApproval) {
+          throw new SolanaExecutionLeaseConflictError(
+            "SPL transfer lacks a durable parsed Solana execution claim",
+          );
+        }
+        const messageDigest = normalizedSolanaMessageDigest(signRequest.data);
+        const executionPayloadDigest = executionPayloadDigestForGovernedSolanaParsedSign(
+          {
+            agentId,
+            tenantId,
+            transaction: signRequest.data,
+            chainId: transfer.chainId,
+            broadcast: transfer.broadcast,
+          },
+          {
+            messageDigest,
+            parsedEffects: parsedSolanaTransferApproval.parsedEffects,
+            policyRevisionHash: transferPolicyRevisionHash,
+          },
+        );
+        const signed = await new GovernedVault(vault, async () => {
+          throw new GovernedVaultError(
+            "EVM execution authorization is unavailable on the Solana gateway",
+            "unsupported_chain_family",
+          );
+        }).signSolanaParsedTransactionAuthorized(
+          {
+            agentId,
+            tenantId,
+            transaction: signRequest.data,
+            chainId: transfer.chainId,
+            broadcast: transfer.broadcast,
+            onBroadcastPrepared: (checkpoint) =>
+              checkpointSolanaBroadcastSubmission(
+                actionId,
+                agentId,
+                solanaExecutionToken!,
+                checkpoint,
+              ),
+          },
+          {
+            txId: actionId,
+            executionToken: solanaExecutionToken,
+            executionClaimDigest: executionClaimDigestForGovernedSolanaParsedSign({
+              executionPayloadDigest,
+              executionToken: solanaExecutionToken,
+              txId: actionId,
+            }),
+            executionPayloadDigest,
+            messageDigest,
+            parsedEffects: parsedSolanaTransferApproval.parsedEffects,
+            policyRevisionHash: transferPolicyRevisionHash,
+            consumeExecutionClaim: consumeParsedSolanaExecutionClaim,
+          },
+        );
         result = signed.signature;
       } else {
         result = await vault.signTransaction(signRequest, {
@@ -3783,6 +3838,18 @@ vaultRoutes.post("/:agentId/actions/transfer", async (c) => {
       const txStatus = transfer.broadcast ? "broadcast" : "signed";
       completedResult = result;
       completedStatus = txStatus;
+      if (
+        isSolanaTokenTransfer &&
+        solanaExecutionToken &&
+        !(await finalizeSolanaRecoveryAnchor(actionId, agentId, solanaExecutionToken, {
+          signature: result,
+          broadcast: transfer.broadcast,
+          chainId: transfer.chainId,
+          caip2: toCaip2(transfer.chainId),
+        }))
+      ) {
+        return solanaLostOwnershipResponse(c, actionId, agentId, "transfer");
+      }
       const signedTx = transfer.broadcast ? undefined : result;
       const updatedTransfer = await db
         .update(transactions)
@@ -3800,8 +3867,10 @@ vaultRoutes.post("/:agentId/actions/transfer", async (c) => {
             eq(transactions.agentId, agentId),
             solanaExecutionToken
               ? and(
-                  eq(transactions.status, "broadcast"),
-                  eq(transactions.txHash, result),
+                  eq(transactions.status, txStatus),
+                  transfer.broadcast
+                    ? eq(transactions.txHash, result)
+                    : sql`${transactions.txHash} is null`,
                   sql`${transactions.actionPayload}->>'executionToken' = ${solanaExecutionToken}`,
                 )
               : undefined,
@@ -3970,7 +4039,7 @@ vaultRoutes.post("/:agentId/actions/transfer", async (c) => {
           }),
         });
       }
-      if (solanaRecoveryBinding) {
+      if (solanaExecutionToken) {
         if (!(await markSolanaRecoveryAnchorFailed(actionId, agentId, solanaExecutionToken))) {
           return solanaLostOwnershipResponse(c, actionId, agentId, "transfer");
         }
@@ -4176,6 +4245,7 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
     transactionRow.actionType === "transfer" &&
     typeof approvalRecoveryMetadata.token === "string" &&
     approvalRecoveryMetadata.token !== "native";
+  let queuedParsedSolanaEffects: GovernedSolanaParsedEffects | null = null;
   if (
     isSolana &&
     (transactionRow.actionType === "solana_transaction" || isQueuedSolanaSplTransfer) &&
@@ -4207,7 +4277,7 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
       );
     }
     try {
-      assertQueuedParsedSolanaIntent({
+      queuedParsedSolanaEffects = assertQueuedParsedSolanaIntent({
         tenantId,
         agentId,
         transaction: transactionRow.data,
@@ -4703,6 +4773,18 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
           takeover: isApprovedSolanaResume,
           resolver: approverPrincipal,
           approvePendingQueue: isFreshApproval ? { resolvedAt } : undefined,
+          ...(queuedSolanaSigningMode === "parsed" &&
+          transactionRow.data &&
+          queuedParsedSolanaEffects
+            ? {
+                parsedAuthorization: {
+                  tenantId,
+                  messageDigest: normalizedSolanaMessageDigest(transactionRow.data),
+                  parsedEffects: queuedParsedSolanaEffects,
+                  policyRevisionHash: currentExecutionPolicyRevisionHash,
+                },
+              }
+            : {}),
         });
         approvedSolanaExecutionToken = claimed.executionToken;
         approvedSolanaActionPayload = claimed.actionPayload;
@@ -4718,8 +4800,6 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
       let txHash: string;
 
       if (isSolana) {
-        const isSolanaTokenTransfer =
-          transferPayload !== null && transferPayload.token !== "native";
         const checkpoint = approvedSolanaExecutionToken
           ? (prepared: { signature: string; recentBlockhash: string }) =>
               checkpointSolanaBroadcastSubmission(
@@ -4767,19 +4847,74 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
           if (!transactionRow.data) {
             throw new Error("Solana transaction blob not found; cannot replay approval");
           }
-          const result = await vault.signSolanaTransaction({
-            agentId,
-            tenantId,
-            transaction: transactionRow.data,
-            chainId: transactionRow.chainId,
-            broadcast: shouldBroadcast,
-            ...(isSolanaTokenTransfer || queuedSolanaSigningMode === "parsed"
-              ? { allowParsedSign: true }
-              : queuedSolanaSigningMode === "blind"
-                ? { allowBlindSign: true }
-                : { expectedTo: transactionRow.toAddress, expectedValue: transactionRow.value }),
-            onBroadcastPrepared: checkpoint,
-          });
+          const result =
+            queuedSolanaSigningMode === "parsed"
+              ? await (async () => {
+                  if (!approvedSolanaExecutionToken || !queuedParsedSolanaEffects) {
+                    throw new SolanaExecutionLeaseConflictError(
+                      "Approved parsed Solana transaction lacks a durable execution claim",
+                    );
+                  }
+                  const messageDigest = normalizedSolanaMessageDigest(transactionRow.data!);
+                  const executionPayloadDigest = executionPayloadDigestForGovernedSolanaParsedSign(
+                    {
+                      agentId,
+                      tenantId,
+                      transaction: transactionRow.data!,
+                      chainId: transactionRow.chainId,
+                      broadcast: shouldBroadcast,
+                      onBroadcastPrepared: checkpoint,
+                    },
+                    {
+                      messageDigest,
+                      parsedEffects: queuedParsedSolanaEffects,
+                      policyRevisionHash: currentExecutionPolicyRevisionHash,
+                    },
+                  );
+                  return new GovernedVault(vault, async () => {
+                    throw new GovernedVaultError(
+                      "EVM execution authorization is unavailable on the Solana gateway",
+                      "unsupported_chain_family",
+                    );
+                  }).signSolanaParsedTransactionAuthorized(
+                    {
+                      agentId,
+                      tenantId,
+                      transaction: transactionRow.data!,
+                      chainId: transactionRow.chainId,
+                      broadcast: shouldBroadcast,
+                      onBroadcastPrepared: checkpoint,
+                    },
+                    {
+                      txId,
+                      executionToken: approvedSolanaExecutionToken,
+                      executionClaimDigest: executionClaimDigestForGovernedSolanaParsedSign({
+                        executionPayloadDigest,
+                        executionToken: approvedSolanaExecutionToken,
+                        txId,
+                      }),
+                      executionPayloadDigest,
+                      messageDigest,
+                      parsedEffects: queuedParsedSolanaEffects,
+                      policyRevisionHash: currentExecutionPolicyRevisionHash,
+                      consumeExecutionClaim: consumeParsedSolanaExecutionClaim,
+                    },
+                  );
+                })()
+              : await vault.signSolanaTransaction({
+                  agentId,
+                  tenantId,
+                  transaction: transactionRow.data,
+                  chainId: transactionRow.chainId,
+                  broadcast: shouldBroadcast,
+                  ...(queuedSolanaSigningMode === "blind"
+                    ? { allowBlindSign: true }
+                    : {
+                        expectedTo: transactionRow.toAddress,
+                        expectedValue: transactionRow.value,
+                      }),
+                  onBroadcastPrepared: checkpoint,
+                });
           txHash = result.signature;
           if (shouldBroadcast && approvedSolanaExecutionToken) {
             const finalized = await finalizeSolanaRecoveryAnchor(
@@ -8776,11 +8911,7 @@ type SolanaCallerIntent = {
   referenceId?: string;
   sponsor?: boolean;
   messageDigest?: string;
-  parsedEffects?: {
-    movesNativeSol: boolean;
-    programIds: string[];
-    tokenTransfers: Array<{ mint?: string; destination: string; amount: string }>;
-  };
+  parsedEffects?: GovernedSolanaParsedEffects;
 };
 
 function solanaCallerIntentDigest(intent: SolanaCallerIntent): string {
@@ -8790,9 +8921,7 @@ function solanaCallerIntentDigest(intent: SolanaCallerIntent): string {
   return sha256(canonicalJsonStringify(intent));
 }
 
-function solanaParsedEffects(
-  derived: DerivedSolanaPolicyFields,
-): SolanaCallerIntent["parsedEffects"] {
+function solanaParsedEffects(derived: DerivedSolanaPolicyFields): GovernedSolanaParsedEffects {
   return {
     movesNativeSol: derived.movesNativeSol,
     programIds: derived.programIds,
@@ -8813,7 +8942,7 @@ function assertQueuedParsedSolanaIntent(input: {
   value: string | null;
   actionType: string | null;
   metadata: Record<string, unknown>;
-}): void {
+}): GovernedSolanaParsedEffects {
   const summary = parseSolanaTransaction(input.transaction);
   assertSolanaPriorityFeeWithinCap(summary);
   const derived = deriveSolanaPolicyFields(summary);
@@ -8865,6 +8994,7 @@ function assertQueuedParsedSolanaIntent(input: {
       "Approved parsed Solana transaction no longer matches its reviewed policy effects",
     );
   }
+  return parsedEffects;
 }
 
 function createSolanaTransferRecoveryBinding(
@@ -9185,6 +9315,7 @@ function solanaTransferReplayResponse(
 }
 
 async function stageSolanaRecoveryAnchor(input: {
+  tenantId?: string;
   agentId: string;
   transaction?: string;
   chainId: number;
@@ -9196,9 +9327,43 @@ async function stageSolanaRecoveryAnchor(input: {
   binding: SolanaRecoveryBinding;
   actionType?: string;
   actionPayload?: Record<string, unknown>;
+  parsedAuthorization?: {
+    messageDigest: string;
+    parsedEffects: GovernedSolanaParsedEffects;
+    policyRevisionHash: string;
+  };
 }): Promise<{ row: SolanaRecoveryRow; executionToken: string | null }> {
   const executionToken = crypto.randomUUID();
   const attemptLeaseUntil = new Date(Date.now() + SOLANA_SIGNING_ATTEMPT_LEASE_MS).toISOString();
+  let parsedAuthorizationPayload: Record<string, unknown> = {};
+  if (input.parsedAuthorization) {
+    if (!input.tenantId || !input.transaction) {
+      throw new SolanaExecutionLeaseConflictError(
+        "Parsed Solana execution staging requires tenant and transaction bindings",
+      );
+    }
+    const executionPayloadDigest = executionPayloadDigestForGovernedSolanaParsedSign(
+      {
+        agentId: input.agentId,
+        tenantId: input.tenantId,
+        transaction: input.transaction,
+        chainId: input.chainId,
+        broadcast: input.broadcastRequested,
+      },
+      input.parsedAuthorization,
+    );
+    parsedAuthorizationPayload = {
+      messageDigest: input.parsedAuthorization.messageDigest,
+      parsedEffects: input.parsedAuthorization.parsedEffects,
+      policyRevisionHash: input.parsedAuthorization.policyRevisionHash,
+      parsedExecutionPayloadDigest: executionPayloadDigest,
+      parsedExecutionClaimDigest: executionClaimDigestForGovernedSolanaParsedSign({
+        executionPayloadDigest,
+        executionToken,
+        txId: input.binding.txId,
+      }),
+    };
+  }
   const inserted = await db
     .insert(transactions)
     .values({
@@ -9222,6 +9387,7 @@ async function stageSolanaRecoveryAnchor(input: {
         requestDigest: input.binding.requestDigest,
         executionToken,
         attemptLeaseUntil,
+        ...parsedAuthorizationPayload,
       },
       policyResults: input.policyResults,
     })
@@ -9250,6 +9416,9 @@ async function stageSolanaRecoveryAnchor(input: {
   if (existing.status !== "approved") {
     return { row: existing as SolanaRecoveryRow, executionToken: null };
   }
+  if (input.parsedAuthorization && metadata.parsedClaimConsumedAt !== undefined) {
+    return { row: existing as SolanaRecoveryRow, executionToken: null };
+  }
 
   const priorLeaseUntil =
     typeof metadata.attemptLeaseUntil === "string"
@@ -9266,7 +9435,12 @@ async function stageSolanaRecoveryAnchor(input: {
   const [takenOver] = await db
     .update(transactions)
     .set({
-      actionPayload: { ...metadata, executionToken, attemptLeaseUntil },
+      actionPayload: {
+        ...metadata,
+        executionToken,
+        attemptLeaseUntil,
+        ...parsedAuthorizationPayload,
+      },
     })
     .where(
       and(
@@ -9285,6 +9459,68 @@ async function stageSolanaRecoveryAnchor(input: {
     .where(eq(transactions.id, input.binding.txId))
     .limit(1);
   return { row: (winner ?? existing) as SolanaRecoveryRow, executionToken: null };
+}
+
+async function consumeParsedSolanaExecutionClaim(
+  expected: GovernedSolanaParsedExecutionClaim,
+): Promise<void> {
+  const [row] = await db
+    .select({ transaction: transactions })
+    .from(transactions)
+    .innerJoin(
+      agents,
+      and(eq(agents.id, transactions.agentId), eq(agents.tenantId, expected.tenantId)),
+    )
+    .where(and(eq(transactions.id, expected.txId), eq(transactions.agentId, expected.agentId)))
+    .limit(1);
+  const claimedTransaction = row?.transaction;
+  if (
+    !claimedTransaction ||
+    !claimedTransaction.data ||
+    claimedTransaction.chainId !== expected.chainId
+  ) {
+    throw new SolanaExecutionLeaseConflictError("Parsed Solana execution claim is unavailable");
+  }
+  const metadata = readSolanaRecoveryMetadata(claimedTransaction.actionPayload);
+  if (
+    normalizedSolanaMessageDigest(claimedTransaction.data) !== expected.messageDigest ||
+    metadata.messageDigest !== expected.messageDigest ||
+    metadata.policyRevisionHash !== expected.policyRevisionHash ||
+    metadata.parsedExecutionPayloadDigest !== expected.executionPayloadDigest ||
+    metadata.parsedExecutionClaimDigest !== expected.executionClaimDigest ||
+    canonicalJsonStringify(metadata.parsedEffects) !==
+      canonicalJsonStringify(expected.parsedEffects) ||
+    metadata.broadcast !== expected.broadcast
+  ) {
+    throw new SolanaExecutionLeaseConflictError(
+      "Parsed Solana execution claim no longer matches its reviewed authority",
+    );
+  }
+
+  const [consumed] = await db
+    .update(transactions)
+    .set({
+      actionPayload: {
+        ...metadata,
+        parsedClaimConsumedAt: new Date().toISOString(),
+      },
+    })
+    .where(
+      and(
+        eq(transactions.id, expected.txId),
+        eq(transactions.agentId, expected.agentId),
+        sql`${transactions.status} in ('approved', 'pending')`,
+        sql`${transactions.actionPayload}->>'executionToken' = ${expected.executionToken}`,
+        sql`${transactions.actionPayload}->>'parsedExecutionClaimDigest' = ${expected.executionClaimDigest}`,
+        sql`${transactions.actionPayload}->>'parsedClaimConsumedAt' is null`,
+      ),
+    )
+    .returning({ id: transactions.id });
+  if (!consumed) {
+    throw new SolanaExecutionLeaseConflictError(
+      "Parsed Solana execution claim was already consumed or ownership changed",
+    );
+  }
 }
 
 async function checkpointSolanaBroadcastSubmission(
@@ -9363,6 +9599,12 @@ export async function claimApprovedSolanaExecution(
     takeover: boolean;
     resolver: ApprovalPrincipal;
     approvePendingQueue?: { resolvedAt: Date };
+    parsedAuthorization?: {
+      tenantId: string;
+      messageDigest: string;
+      parsedEffects: GovernedSolanaParsedEffects;
+      policyRevisionHash: string;
+    };
   },
 ): Promise<{ executionToken: string; actionPayload: Record<string, unknown> }> {
   const prior = readSolanaRecoveryMetadata(row.actionPayload);
@@ -9435,6 +9677,35 @@ export async function claimApprovedSolanaExecution(
     throw new SolanaExecutionLeaseConflictError();
   }
   const executionToken = crypto.randomUUID();
+  let parsedAuthorizationPayload: Record<string, unknown> = {};
+  if (options.parsedAuthorization) {
+    if (!row.data || prior.parsedClaimConsumedAt !== undefined) {
+      throw new SolanaExecutionLeaseConflictError(
+        "Approved parsed Solana authority is unavailable or was already consumed",
+      );
+    }
+    const executionPayloadDigest = executionPayloadDigestForGovernedSolanaParsedSign(
+      {
+        agentId: row.agentId,
+        tenantId: options.parsedAuthorization.tenantId,
+        transaction: row.data,
+        chainId: row.chainId,
+        broadcast: prior.broadcast !== false,
+      },
+      options.parsedAuthorization,
+    );
+    parsedAuthorizationPayload = {
+      messageDigest: options.parsedAuthorization.messageDigest,
+      parsedEffects: options.parsedAuthorization.parsedEffects,
+      policyRevisionHash: options.parsedAuthorization.policyRevisionHash,
+      parsedExecutionPayloadDigest: executionPayloadDigest,
+      parsedExecutionClaimDigest: executionClaimDigestForGovernedSolanaParsedSign({
+        executionPayloadDigest,
+        executionToken,
+        txId: row.id,
+      }),
+    };
+  }
   const actionPayload = {
     ...prior,
     recoveryType: "solana_transaction",
@@ -9443,6 +9714,7 @@ export async function claimApprovedSolanaExecution(
     executionDigest,
     executionToken,
     attemptLeaseUntil: new Date(Date.now() + SOLANA_SIGNING_ATTEMPT_LEASE_MS).toISOString(),
+    ...parsedAuthorizationPayload,
   };
   return db.transaction(async (tx) => {
     const [claimed] = await tx
@@ -10403,6 +10675,7 @@ vaultRoutes.post("/:agentId/sign-solana", async (c) => {
         derived.to !== undefined;
 
       const staged = await stageSolanaRecoveryAnchor({
+        tenantId,
         agentId,
         transaction: body.transaction,
         chainId,
@@ -10412,27 +10685,78 @@ vaultRoutes.post("/:agentId/sign-solana", async (c) => {
         blindSigned: false,
         policyResults: evaluation.results,
         binding,
+        ...(!isSingleNativeTransfer
+          ? {
+              parsedAuthorization: {
+                messageDigest: normalizedSolanaMessageDigest(body.transaction),
+                parsedEffects: solanaParsedEffects(derived),
+                policyRevisionHash: policyRevisionHashForPolicySet(policySet),
+              },
+            }
+          : {}),
       });
       if (!staged.executionToken) {
         return solanaLostOwnershipResponse(c, txId, agentId, "sign-solana");
       }
       const ownerToken = staged.executionToken;
       executionToken = ownerToken;
-      const result = await vault.signSolanaTransaction({
-        agentId,
-        tenantId,
-        transaction: body.transaction,
-        chainId,
-        broadcast: body.broadcast,
-        // SEC-163: non-single-transfer shapes carry no vault-layer envelope —
-        // the instruction-parser policy check above approved the effects, so
-        // the caller attests via allowBlindSign instead.
-        ...(isSingleNativeTransfer
-          ? { expectedTo: toAddress, expectedValue: txValue }
-          : { allowParsedSign: true }),
-        onBroadcastPrepared: (checkpoint) =>
-          checkpointSolanaBroadcastSubmission(txId, agentId, ownerToken, checkpoint),
-      });
+      const result = isSingleNativeTransfer
+        ? await vault.signSolanaTransaction({
+            agentId,
+            tenantId,
+            transaction: body.transaction,
+            chainId,
+            broadcast: body.broadcast,
+            expectedTo: toAddress,
+            expectedValue: txValue,
+            onBroadcastPrepared: (checkpoint) =>
+              checkpointSolanaBroadcastSubmission(txId, agentId, ownerToken, checkpoint),
+          })
+        : await (async () => {
+            const parsedEffects = solanaParsedEffects(derived);
+            const messageDigest = normalizedSolanaMessageDigest(body.transaction);
+            const policyRevisionHash = policyRevisionHashForPolicySet(policySet);
+            const executionPayloadDigest = executionPayloadDigestForGovernedSolanaParsedSign(
+              {
+                agentId,
+                tenantId,
+                transaction: body.transaction,
+                chainId,
+                broadcast: body.broadcast,
+              },
+              { messageDigest, parsedEffects, policyRevisionHash },
+            );
+            return new GovernedVault(vault, async () => {
+              throw new GovernedVaultError(
+                "EVM execution authorization is unavailable on the Solana gateway",
+                "unsupported_chain_family",
+              );
+            }).signSolanaParsedTransactionAuthorized(
+              {
+                agentId,
+                tenantId,
+                transaction: body.transaction,
+                chainId,
+                broadcast: body.broadcast,
+                onBroadcastPrepared: (checkpoint) =>
+                  checkpointSolanaBroadcastSubmission(txId, agentId, ownerToken, checkpoint),
+              },
+              {
+                txId,
+                executionToken: ownerToken,
+                executionClaimDigest: executionClaimDigestForGovernedSolanaParsedSign({
+                  executionPayloadDigest,
+                  executionToken: ownerToken,
+                  txId,
+                }),
+                executionPayloadDigest,
+                messageDigest,
+                parsedEffects,
+                policyRevisionHash,
+                consumeExecutionClaim: consumeParsedSolanaExecutionClaim,
+              },
+            );
+          })();
       completedResult = { txId, ...result };
 
       if (!(await finalizeSolanaRecoveryAnchor(txId, agentId, ownerToken, result))) {

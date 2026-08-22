@@ -594,7 +594,7 @@ describe("Solana durable recovery anchors", () => {
     }
   });
 
-  it("fences a stale callback after an expired signing lease is taken over", async () => {
+  it("never takes over an expired lease after its parsed claim entered raw custody", async () => {
     const context = await import("../services/context");
     const originalSign = context.vault.signSolanaTransaction.bind(context.vault);
     let signCalls = 0;
@@ -607,23 +607,10 @@ describe("Solana durable recovery anchors", () => {
     const staleStarted = new Promise<void>((resolve) => {
       signalStaleStarted = resolve;
     });
-    let releaseWinner!: () => void;
-    const winnerBarrier = new Promise<void>((resolve) => {
-      releaseWinner = resolve;
-    });
-    let signalWinnerStarted!: () => void;
-    const winnerStarted = new Promise<void>((resolve) => {
-      signalWinnerStarted = resolve;
-    });
     context.vault.signSolanaTransaction = async (request) => {
       signCalls += 1;
-      if (signCalls === 1) {
-        signalStaleStarted();
-        await staleBarrier;
-      } else {
-        signalWinnerStarted();
-        await winnerBarrier;
-      }
+      signalStaleStarted();
+      await staleBarrier;
       await request.onBroadcastPrepared?.({
         signature: SIGNATURE,
         recentBlockhash: RECENT_BLOCKHASH,
@@ -660,23 +647,21 @@ describe("Solana durable recovery anchors", () => {
         })
         .where(eq(transactions.id, staged.id));
 
-      const takeoverResponse = request();
-      await winnerStarted;
-      expect(signCalls).toBe(2);
+      const takeoverResponse = await request();
+      expect(takeoverResponse.status).toBe(409);
+      expect(await takeoverResponse.json()).toMatchObject({
+        ok: false,
+        data: { status: "processing" },
+      });
+      expect(signCalls).toBe(1);
       expect(submittedCalls).toBe(0);
 
       releaseStale();
-      expect((await staleResponse).status).toBe(409);
-      expect((await onlyRecoveryRow()).status).toBe("approved");
-      expect(submittedCalls).toBe(0);
-
-      releaseWinner();
-      expect((await takeoverResponse).status).toBe(200);
+      expect((await staleResponse).status).toBe(200);
       expect(submittedCalls).toBe(1);
       expect((await onlyRecoveryRow()).status).toBe("broadcast");
     } finally {
       releaseStale();
-      releaseWinner();
       context.vault.signSolanaTransaction = originalSign;
     }
   });

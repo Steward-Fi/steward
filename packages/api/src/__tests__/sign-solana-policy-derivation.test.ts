@@ -103,20 +103,31 @@ describe("sign-solana — parser-derived policy wiring", () => {
     );
   });
 
-  it("only passes the legacy single-transfer envelope for a single native SOL transfer", () => {
+  it("only uses the raw legacy envelope for a single native SOL transfer", () => {
     const route = routeSlice();
     const guard = route.indexOf("const isSingleNativeTransfer =");
     expect(guard).toBeGreaterThanOrEqual(0);
     // Whitespace-normalized so formatter rewrapping does not break the wiring
-    // assertion: the envelope stays conditioned on the guard, and (SEC-163)
-    // every other parsed shape must carry the parsed-sign attestation. Only
-    // the separately audited unsafe-blind route may opt into blind signing.
+    // assertion: the envelope stays conditioned on the guard, while every
+    // other parsed shape must pass through the durable governed gateway.
     const normalized = route.replace(/\s+/g, " ");
-    const envelopeSpread = normalized.indexOf(
-      "isSingleNativeTransfer ? { expectedTo: toAddress, expectedValue: txValue } : { allowParsedSign: true }",
+    expect(normalized).toContain(
+      "const result = isSingleNativeTransfer ? await vault.signSolanaTransaction(",
     );
-    expect(envelopeSpread).toBeGreaterThanOrEqual(0);
+    expect(normalized).toContain(".signSolanaParsedTransactionAuthorized(");
+    expect(vaultSource).not.toContain("allowParsedSign");
     expect(route).toContain('instructionType === "system:Transfer"');
+  });
+
+  it("binds parsed signing to message, effects, policy revision, tx id, and execution token", () => {
+    const route = routeSlice();
+    const normalized = route.replace(/\s+/g, " ");
+    expect(normalized).toContain("messageDigest = normalizedSolanaMessageDigest(body.transaction)");
+    expect(normalized).toContain("parsedEffects = solanaParsedEffects(derived)");
+    expect(normalized).toContain("policyRevisionHashForPolicySet(policySet)");
+    expect(normalized).toContain("executionToken: ownerToken");
+    expect(normalized).toContain("txId,");
+    expect(normalized).toContain("consumeExecutionClaim: consumeParsedSolanaExecutionClaim");
   });
 
   it("preserves the existing policy-evaluation, rate-limit, audit, and webhook gates", () => {

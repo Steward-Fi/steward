@@ -68,6 +68,10 @@ import {
   normalizeExternalKeyHandleRegistration,
   SolanaBroadcastNotSubmittedError,
 } from "./external-key-custody";
+import {
+  assertGovernedParsedSolanaSigningGrant,
+  type GovernedParsedSolanaSigningGrant,
+} from "./governed-solana-signing";
 import { deriveBitcoinKey, deriveEvmKey, deriveSolanaKey, generateMnemonic } from "./hd-wallet";
 import { type EncryptedKey, KeyStore } from "./keystore";
 import { backendFromKeyStore, type KeystoreBackend } from "./keystore-backend";
@@ -3096,7 +3100,9 @@ export class Vault {
    * Works for both multi-wallet agents (new) and legacy Solana-only agents.
    */
   async signSolanaTransaction(
-    request: SignSolanaTransactionRequest & { allowParsedSign?: boolean },
+    request: SignSolanaTransactionRequest & {
+      governedParsedSign?: GovernedParsedSolanaSigningGrant;
+    },
   ): Promise<{
     signature: string;
     broadcast: boolean;
@@ -3128,12 +3134,12 @@ export class Vault {
     // so the caller must explicitly attest that its own edge policy evaluation
     // approved the transaction. Checked after the signing freeze (a freeze
     // must still report as a freeze) and before any key material is touched.
+    if ((request.expectedTo === undefined) !== (request.expectedValue === undefined)) {
+      throw new Error("Solana transaction policy envelope requires expectedTo and expectedValue");
+    }
     if (request.expectedTo === undefined && request.expectedValue === undefined) {
-      if (request.allowBlindSign !== true && request.allowParsedSign !== true) {
-        throw new Error(
-          "Solana transaction signing without a policy envelope requires allowParsedSign: true " +
-            "or allowBlindSign: true from the caller",
-        );
+      if (request.allowBlindSign !== true) {
+        assertGovernedParsedSolanaSigningGrant(request.governedParsedSign, request);
       }
       if (request.allowBlindSign === true) {
         console.warn(

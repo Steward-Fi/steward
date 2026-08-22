@@ -65,9 +65,15 @@ export type {
   ExecutionAuthorizationConsumeCallback,
   GovernedSignTransactionOptions,
   GovernedSolanaNativeSignOptions,
+  GovernedSolanaParsedEffects,
+  GovernedSolanaParsedExecutionClaim,
+  GovernedSolanaParsedSignOptions,
+  GovernedSolanaParsedSignRequest,
 } from "./governed-vault";
 export {
+  executionClaimDigestForGovernedSolanaParsedSign,
   executionPayloadDigestForGovernedSolanaNativeSign,
+  executionPayloadDigestForGovernedSolanaParsedSign,
   GovernedVault,
   GovernedVaultError,
 } from "./governed-vault";
