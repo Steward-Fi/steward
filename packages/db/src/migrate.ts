@@ -6,11 +6,60 @@ import { createDb } from "./client";
 
 declare const process: {
   argv: string[];
+  env: Record<string, string | undefined>;
   exitCode?: number;
 };
 
 const MIGRATIONS_FOLDER = new URL("../drizzle", import.meta.url).pathname;
 const ADVISORY_LOCK_KEY = "steward_migrations";
+
+function positiveIntegerEnvironment(
+  environment: Record<string, string | undefined>,
+  name: string,
+  fallback: number,
+): number {
+  const raw = environment[name]?.trim();
+  if (!raw) return fallback;
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new Error(`[migrate] ${name} must be a positive integer`);
+  }
+  return value;
+}
+
+export interface MigrationTimeouts {
+  connectTimeoutSeconds: number;
+  lockTimeoutMs: number;
+  statementTimeoutMs: number;
+  overallTimeoutMs: number;
+}
+
+export function resolveMigrationTimeouts(
+  environment: Record<string, string | undefined> = process.env,
+): MigrationTimeouts {
+  return {
+    connectTimeoutSeconds: positiveIntegerEnvironment(
+      environment,
+      "STEWARD_MIGRATION_CONNECT_TIMEOUT_SECONDS",
+      10,
+    ),
+    lockTimeoutMs: positiveIntegerEnvironment(
+      environment,
+      "STEWARD_MIGRATION_LOCK_TIMEOUT_MS",
+      30_000,
+    ),
+    statementTimeoutMs: positiveIntegerEnvironment(
+      environment,
+      "STEWARD_MIGRATION_STATEMENT_TIMEOUT_MS",
+      120_000,
+    ),
+    overallTimeoutMs: positiveIntegerEnvironment(
+      environment,
+      "STEWARD_MIGRATION_OVERALL_TIMEOUT_MS",
+      180_000,
+    ),
+  };
+}
 
 interface JournalEntry {
   idx: number;
@@ -80,7 +129,20 @@ function hashMigration(tag: string): string {
  * constraint-only hardening migrations whose absence produces no runtime error.
  */
 export async function runMigrations(): Promise<{ applied: string[] }> {
-  const { client, db } = createDb();
+  const { connectTimeoutSeconds, lockTimeoutMs, statementTimeoutMs, overallTimeoutMs } =
+    resolveMigrationTimeouts();
+  const { client, db } = createDb(undefined, {
+    max: 1,
+    connectTimeoutSeconds,
+    lockTimeoutMs,
+    statementTimeoutMs,
+    idleTransactionTimeoutMs: statementTimeoutMs,
+  });
+  let overallDeadlineExceeded = false;
+  const overallTimer = setTimeout(() => {
+    overallDeadlineExceeded = true;
+    void client.end({ timeout: 0 });
+  }, overallTimeoutMs);
 
   try {
     // Session-scoped advisory lock spans the whole migrator (which uses its
@@ -161,10 +223,20 @@ export async function runMigrations(): Promise<{ applied: string[] }> {
 
       return { applied };
     } finally {
-      await client`SELECT pg_advisory_unlock(hashtextextended(${ADVISORY_LOCK_KEY}, 0))`;
+      if (!overallDeadlineExceeded) {
+        await client`SELECT pg_advisory_unlock(hashtextextended(${ADVISORY_LOCK_KEY}, 0))`;
+      }
     }
+  } catch (error) {
+    if (overallDeadlineExceeded) {
+      throw new Error(`[migrate] overall deadline exceeded after ${overallTimeoutMs}ms`, {
+        cause: error,
+      });
+    }
+    throw error;
   } finally {
-    await client.end();
+    clearTimeout(overallTimer);
+    await client.end({ timeout: 0 });
   }
 }
 

@@ -54,9 +54,14 @@ async function withLoopbackServer(
     releaseResponse: () => releaseResponse?.(),
     close: () =>
       new Promise<void>((resolve, reject) => {
+        // Bun's Node-compatible HTTP client keeps successful loopback sockets
+        // alive beyond the response. Tear them down before closing the test
+        // listener; some runtimes report that teardown as already closed.
+        server.closeAllConnections();
         server.close((error) => {
-          if (error) reject(error);
-          else resolve();
+          if (error && (error as NodeJS.ErrnoException).code !== "ERR_SERVER_NOT_RUNNING") {
+            reject(error);
+          } else resolve();
         });
       }),
   };

@@ -152,11 +152,36 @@ export function assertDatabaseUrlTls(
   );
 }
 
-export function createPostgresClient(connectionString = getDatabaseUrl()) {
+export interface PostgresClientOptions {
+  max?: number;
+  connectTimeoutSeconds?: number;
+  statementTimeoutMs?: number;
+  lockTimeoutMs?: number;
+  idleTransactionTimeoutMs?: number;
+}
+
+export function createPostgresClient(
+  connectionString = getDatabaseUrl(),
+  options: PostgresClientOptions = {},
+) {
   assertDatabaseUrlTls(connectionString);
   return postgres(connectionString, {
-    max: 10,
+    max: options.max ?? 10,
     prepare: false,
+    ...(options.connectTimeoutSeconds ? { connect_timeout: options.connectTimeoutSeconds } : {}),
+    ...(options.statementTimeoutMs || options.lockTimeoutMs || options.idleTransactionTimeoutMs
+      ? {
+          connection: {
+            ...(options.statementTimeoutMs
+              ? { statement_timeout: options.statementTimeoutMs }
+              : {}),
+            ...(options.lockTimeoutMs ? { lock_timeout: options.lockTimeoutMs } : {}),
+            ...(options.idleTransactionTimeoutMs
+              ? { idle_in_transaction_session_timeout: options.idleTransactionTimeoutMs }
+              : {}),
+          },
+        }
+      : {}),
   });
 }
 
@@ -296,8 +321,8 @@ export async function withDatabaseDeadline<T>(
 
 // ─── postgres-js (Bun/Node) ───────────────────────────────────────────────────
 
-export function createDb(connectionString = getDatabaseUrl()) {
-  const client = createPostgresClient(connectionString);
+export function createDb(connectionString = getDatabaseUrl(), options: PostgresClientOptions = {}) {
+  const client = createPostgresClient(connectionString, options);
   const db = drizzlePostgres(client, { schema: FULL_SCHEMA });
 
   return { client, db };

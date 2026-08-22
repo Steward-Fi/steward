@@ -28,17 +28,17 @@ import { globalRateLimitRequiresRedis } from "./middleware/global-rate-limit";
 import { getRedisClient, initRedis, isRedisConfigured, shutdownRedis } from "./middleware/redis";
 import { resolveEnabledPlugins } from "./plugin-config";
 import { assertAuthStoresAreSafe, getAuthStoreSources, initAuthStores } from "./routes/auth";
-import {
-  API_VERSION,
-  type ApiResponse,
-  RATE_LIMIT_MAX_REQUESTS,
-  RATE_LIMIT_WINDOW_MS,
-} from "./services/context";
+import { API_VERSION, type ApiResponse } from "./services/context";
 import { startGoogleCredentialLifecycleScheduler } from "./services/provider-google-lifecycle-scheduler";
 import { startProviderReservationReconciliationScheduler } from "./services/provider-reservation-reconciliation-scheduler";
 import { startXCredentialLifecycleScheduler } from "./services/provider-x-lifecycle-scheduler";
 import { startRetentionScheduler } from "./services/retention";
 import { SOCKET_PEER_ENV_KEY } from "./services/runtime-gate";
+import {
+  installBootDeadline,
+  migrationPhaseTimeoutMs,
+  runStartupPhase,
+} from "./services/startup-phase";
 import { startTransactionReceiptPollingScheduler } from "./services/transaction-receipt-poller";
 import {
   getUpstreamCredentialLeaseSchedulerHealth,
@@ -57,12 +57,13 @@ if (!Number.isInteger(PORT) || PORT <= 0) {
   throw new Error("PORT must be a positive integer");
 }
 validateJwtSecretEnv();
+const cancelBootDeadline = installBootDeadline(() => process.exit(1));
 
 // Compose the deployable app: lean core + this repo's opt-in plugins (trading).
 // composeApp() is async because plugin registration may be async + the trading
 // plugin is dynamically imported so the lean core graph never statically pulls
 // in the trading stack. top-level await is supported by the Bun entry.
-const app = await composeApp();
+const app = await runStartupPhase("compose", composeApp);
 const enabledPlugins = resolveEnabledPlugins();
 const capabilitiesEnabled = enabledPlugins.has("capabilities");
 const tradingEnabled = enabledPlugins.has("trading");
@@ -188,8 +189,8 @@ app.get("/ready", async (c) => {
         : redisRequired
           ? { ok: false, error: "Redis is required for durable production rate limiting" }
           : tradingRequiresRedis
-          ? { ok: false, required: true, error: "Redis is required for production trading" }
-          : { ok: false, required: false, error: "Redis is not configured (optional mode)" };
+            ? { ok: false, required: true, error: "Redis is required for production trading" }
+            : { ok: false, required: false, error: "Redis is not configured (optional mode)" };
   } catch {
     const durableRedisRequired = redisRequired || tradingRateLimitRedisRequired(tradingEnabled);
     checks.redis = durableRedisRequired
@@ -290,7 +291,11 @@ if (shouldUsePGLite()) {
 } else {
   try {
     console.log("[steward] Running database migrations...");
-    const { applied } = await runMigrations();
+    const { applied } = await runStartupPhase(
+      "core-migrations",
+      runMigrations,
+      migrationPhaseTimeoutMs(),
+    );
     migrationsRan = true;
     if (applied.length > 0) {
       console.log(`[steward] Applied ${applied.length} migration(s): ${applied.join(", ")}`);
@@ -319,7 +324,7 @@ if (shouldUsePGLite()) {
     // drizzle.__drizzle_migrations journal. Fail-closed: a plugin migration error
     // aborts boot (we never half-boot with a partially-migrated plugin schema).
     const { runComposedPluginMigrations } = await import("./compose");
-    const pluginResults = await runComposedPluginMigrations();
+    const pluginResults = await runStartupPhase("plugin-migrations", runComposedPluginMigrations);
     if (pluginResults.length > 0) {
       console.log(
         `[steward] Applied plugin migrations: ${pluginResults
@@ -337,7 +342,9 @@ if (process.env.NODE_ENV === "production" && !shouldUsePGLite()) {
   const expectedRole = process.env.STEWARD_APP_DATABASE_ROLE;
   if (!expectedRole) throw new Error("STEWARD_APP_DATABASE_ROLE is required in production");
   try {
-    await assertRlsDeploymentSafety(getDb(), { expectedRole });
+    await runStartupPhase("rls-readiness", () =>
+      assertRlsDeploymentSafety(getDb(), { expectedRole }),
+    );
   } catch (error) {
     console.error(
       "[steward] RLS deployment safety assertion failed — cannot start",
@@ -351,7 +358,7 @@ if (process.env.NODE_ENV === "production" && !shouldUsePGLite()) {
 
 let redisOk = false;
 try {
-  redisOk = await initRedis();
+  redisOk = await runStartupPhase("redis", initRedis);
 } catch (err) {
   console.warn(
     "[steward] Redis initialization failed; trying Postgres auth storage",
@@ -362,33 +369,39 @@ try {
 // Postgres is the durable fallback for the long-lived server when Redis is not
 // available. buildBackend probes every namespace; the assertion below turns
 // any production fallback to process-local memory into a startup failure.
-await initAuthStores(migrationsRan && !redisOk);
-assertAuthStoresAreSafe();
+await runStartupPhase("auth-stores", async () => {
+  await initAuthStores(migrationsRan && !redisOk);
+  assertAuthStoresAreSafe();
+});
 
 // ─── Data retention scheduler (SOC2 CC2) ────────────────────────────────────
 
 if (migrationsRan) {
-  if (process.env.GOOGLE_PROVIDER_CLIENT_ID && process.env.GOOGLE_PROVIDER_CLIENT_SECRET) {
-    cancelGoogleCredentialLifecycleScheduler = startGoogleCredentialLifecycleScheduler();
-  }
-  if (process.env.X_CLIENT_ID && process.env.X_CLIENT_SECRET) {
-    cancelXCredentialLifecycleScheduler = startXCredentialLifecycleScheduler();
-  }
-  cancelRetention = startRetentionScheduler();
-  if (redisOk) {
-    cancelProviderReservationReconciliation = startProviderReservationReconciliationScheduler();
-  }
-  cancelTransactionReceiptPolling = startTransactionReceiptPollingScheduler();
-  cancelWebhookRetryScheduler = startWebhookRetryScheduler();
-  if (capabilitiesEnabled) {
-    cancelUpstreamCredentialLeaseScheduler = await startUpstreamCredentialLeaseScheduler();
-  }
+  await runStartupPhase("schedulers", async () => {
+    if (process.env.GOOGLE_PROVIDER_CLIENT_ID && process.env.GOOGLE_PROVIDER_CLIENT_SECRET) {
+      cancelGoogleCredentialLifecycleScheduler = startGoogleCredentialLifecycleScheduler();
+    }
+    if (process.env.X_CLIENT_ID && process.env.X_CLIENT_SECRET) {
+      cancelXCredentialLifecycleScheduler = startXCredentialLifecycleScheduler();
+    }
+    cancelRetention = startRetentionScheduler();
+    if (redisOk) {
+      cancelProviderReservationReconciliation = startProviderReservationReconciliationScheduler();
+    }
+    cancelTransactionReceiptPolling = startTransactionReceiptPollingScheduler();
+    cancelWebhookRetryScheduler = startWebhookRetryScheduler();
+    if (capabilitiesEnabled) {
+      cancelUpstreamCredentialLeaseScheduler = await startUpstreamCredentialLeaseScheduler();
+    }
+  });
 }
 
 // Resolve custody before accepting traffic. A configured backend that cannot
 // initialize throws here, so production never falls back to local AES.
-getConfiguredVault();
-console.log(configuredVaultStartupLogLine());
+await runStartupPhase("custody", () => {
+  getConfiguredVault();
+  console.log(configuredVaultStartupLogLine());
+});
 
 // ─── Server ───────────────────────────────────────────────────────────────────
 
@@ -402,15 +415,14 @@ const serverOptions = {
     // Hand the runtime-observed socket peer to the app via Hono's env bag so
     // per-route limiters (auth) can key on it when no trusted forwarding
     // config exists — it cannot be client-influenced, unlike any header.
-    return (
-      runtimeGate() ??
-      app.fetch(request, { [SOCKET_PEER_ENV_KEY]: peerAddress })
-    );
+    return runtimeGate() ?? app.fetch(request, { [SOCKET_PEER_ENV_KEY]: peerAddress });
   },
   idleTimeout: 30,
 } as Parameters<typeof Bun.serve>[0] & { hostname?: string };
 
 const server = Bun.serve(serverOptions);
+cancelBootDeadline();
+console.log(`[steward:start] phase=listen state=complete host=${BIND_HOST} port=${PORT}`);
 
 const shutdown = async (signal: string) => {
   if (isShuttingDown) return;
@@ -418,7 +430,6 @@ const shutdown = async (signal: string) => {
   console.log(`Received ${signal}, shutting down Steward API`);
 
   server.stop(true);
-  clearInterval(requestLogCleanupTimer);
   if (cancelRetention) cancelRetention();
   if (cancelProviderReservationReconciliation) cancelProviderReservationReconciliation();
   if (cancelTransactionReceiptPolling) cancelTransactionReceiptPolling();
