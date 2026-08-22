@@ -41,9 +41,10 @@ concurrency:
 jobs:
   deploy-staging:
     runs-on: ubuntu-latest
-    # Staging is intentionally fully automatic: repository/organization Actions
-    # secrets provide release-only authority without a reviewer or wait gate.
-    # Production keeps its separate protected deployment boundary.
+    # Privileged database URLs live only in the protected staging environment.
+    # Environment policy can require reviewers and a wait gate before any
+    # migration authority is released to this job.
+    environment: staging
     # The verifier independently requires successful exact-SHA CI and Docker
     # runs and rejects a candidate that is no longer the live develop tip.
     if: >-

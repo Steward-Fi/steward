@@ -19,9 +19,9 @@ describe("staging deployment workflow", () => {
     expect(workflow).toContain('RAILWAY_REQUIRE_DIRECT_HEALTH: "true"');
   });
 
-  test("has no human staging environment gate or mutable manual image bypass", async () => {
+  test("uses the protected staging environment and has no mutable manual image bypass", async () => {
     const workflow = await readFile(workflowPath, "utf8");
-    expect(workflow).not.toMatch(/^ {4}environment:/m);
+    expect(workflow).toMatch(/^ {4}environment: staging$/m);
     expect(workflow).not.toContain("inputs.image_tag");
     expect(workflow).not.toContain("DISPATCH_TAG");
   });

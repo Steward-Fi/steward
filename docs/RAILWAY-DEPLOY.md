@@ -238,11 +238,12 @@ releases use the dedicated migrator. Only after this gate passes may the API
 start with `SKIP_MIGRATIONS=true` and be checked at `/health` and `/ready`.
 
 Staging performs this sequence in `deploy-staging.yml` after the exact develop
-SHA has passed CI and Docker validation. Staging has no GitHub environment,
-reviewer, or wait gate. Configure repository or organization Actions secrets
+SHA has passed CI and Docker validation. The job targets the protected GitHub
+`staging` environment; configure its required reviewers/wait policy and store
+the environment secrets
 `STAGING_MIGRATION_DATABASE_URL`, `STAGING_OPERATOR_DATABASE_URL`, and
 `STAGING_APP_DATABASE_URL`. Configure the exact app, migration, operator,
-bootstrap, and platform identities as `STAGING_*_DATABASE_ROLE` repository
+bootstrap, and platform identities as `STAGING_*_DATABASE_ROLE` environment
 variables, along with `STAGING_STEWARD_PLUGINS`.
 Set `STAGING_RAILWAY_DIRECT_HEALTH_URL` to the Railway-provided service origin;
 the existing `STAGING_RAILWAY_HEALTH_URL` remains the public/custom origin.
