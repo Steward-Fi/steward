@@ -14,6 +14,7 @@ import {
   vaultSigningFreezes,
 } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
+import { Vault } from "@stwd/vault";
 import { and, eq } from "drizzle-orm";
 import { Hono } from "hono";
 import { _clearConfiguredVaultsForTests, getConfiguredVault } from "../services/vault-factory";
@@ -105,15 +106,14 @@ describe("pregenerated wallet claim durable lifecycle", () => {
     });
 
   it("recovers a partial chain import without reusing the token or duplicating authority", async () => {
-    const vault = getConfiguredVault();
-    const originalImportKey = vault.importKey.bind(vault);
+    const originalImportKey = Vault.prototype.importKey;
     let failedEvmOnce = false;
-    vault.importKey = async (...args) => {
+    Vault.prototype.importKey = async function (...args) {
       if (args[3] === "evm" && !failedEvmOnce) {
         failedEvmOnce = true;
         throw new Error("injected EVM import failure");
       }
-      return originalImportKey(...args);
+      return originalImportKey.apply(this, args);
     };
 
     const failed = await claim();
@@ -150,8 +150,8 @@ describe("pregenerated wallet claim durable lifecycle", () => {
       );
     expect(activeFreeze?.liftedAt).toBeNull();
 
-    vault.importKey = async (...args) => {
-      const imported = await originalImportKey(...args);
+    Vault.prototype.importKey = async function (...args) {
+      const imported = await originalImportKey.apply(this, args);
       if (args[3] === "evm") {
         process.env.STEWARD_AUDIT_HMAC_KEY = "too-short";
         __resetAuditHmacKeyCacheForTests();
@@ -184,7 +184,7 @@ describe("pregenerated wallet claim durable lifecycle", () => {
     ).toHaveLength(0);
     process.env.STEWARD_AUDIT_HMAC_KEY = AUDIT_KEY;
     __resetAuditHmacKeyCacheForTests();
-    vault.importKey = originalImportKey;
+    Vault.prototype.importKey = originalImportKey;
     const completed = await claim();
     expect(completed.status).toBe(201);
     const [lifecycle] = await getDb()

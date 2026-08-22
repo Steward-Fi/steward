@@ -16,6 +16,7 @@ import {
   userTenants,
 } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
+import { Vault } from "@stwd/vault";
 import { and, eq } from "drizzle-orm";
 import { Hono } from "hono";
 import type { AppVariables } from "../services/context";
@@ -376,11 +377,10 @@ describe("digital asset account resources", () => {
 
     const get = await app.request("/accounts/acct_existing_wallets");
     expect(get.status).toBe(200);
-    const context = await import("../services/context");
-    const originalGetBalance = context.vault.getBalance.bind(context.vault);
-    const originalGetTokenBalances = context.vault.getTokenBalances.bind(context.vault);
-    const originalGetSplTokenBalances = context.vault.getSplTokenBalances.bind(context.vault);
-    context.vault.getBalance = async (_tenantId: string, agentId: string, chainId?: number) => ({
+    const originalGetBalance = Vault.prototype.getBalance;
+    const originalGetTokenBalances = Vault.prototype.getTokenBalances;
+    const originalGetSplTokenBalances = Vault.prototype.getSplTokenBalances;
+    Vault.prototype.getBalance = async (_tenantId: string, agentId: string, chainId?: number) => ({
       native: agentId === WALLET_B && chainId === 101 ? 2_000_000_000n : 1_000_000_000n,
       nativeFormatted: agentId === WALLET_B && chainId === 101 ? "2" : "1",
       chainId: chainId ?? 84532,
@@ -390,7 +390,7 @@ describe("digital asset account resources", () => {
           ? "8cV5Y7R3UKPqJb1x4yQzq8oZsVbGZ3h5m3NkQW2kUZmx"
           : "0x2222222222222222222222222222222222222222",
     });
-    context.vault.getTokenBalances = async (
+    Vault.prototype.getTokenBalances = async (
       _tenantId: string,
       _agentId: string,
       chainId?: number,
@@ -405,7 +405,7 @@ describe("digital asset account resources", () => {
         chainId,
       } as never,
     ];
-    context.vault.getSplTokenBalances = async () => [
+    Vault.prototype.getSplTokenBalances = async () => [
       {
         mint: "So11111111111111111111111111111111111111112",
         token: "So11111111111111111111111111111111111111112",
@@ -531,9 +531,9 @@ describe("digital asset account resources", () => {
         },
       ]);
     } finally {
-      context.vault.getBalance = originalGetBalance;
-      context.vault.getTokenBalances = originalGetTokenBalances;
-      context.vault.getSplTokenBalances = originalGetSplTokenBalances;
+      Vault.prototype.getBalance = originalGetBalance;
+      Vault.prototype.getTokenBalances = originalGetTokenBalances;
+      Vault.prototype.getSplTokenBalances = originalGetSplTokenBalances;
     }
 
     const deleted = await app.request("/accounts/acct_existing_wallets", { method: "DELETE" });
