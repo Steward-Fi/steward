@@ -5467,8 +5467,8 @@ platform.delete("/tenants/:id/members/:userId", async (c) => {
   try {
     deleted = await withTenantAuditedTransaction(tenantId, async (txRaw, appendRequiredAudit) => {
       const tx = txRaw as typeof db;
-      await lockTenantOwnerLifecycle(tx, tenantId);
       await lockUserSession(tx, userId);
+      await lockTenantOwnerLifecycle(tx, tenantId);
       const [current] = await tx
         .select({ role: userTenants.role })
         .from(userTenants)
@@ -5601,6 +5601,7 @@ platform.patch("/tenants/:id/members/:userId", async (c) => {
   try {
     updated = await withTenantAuditedTransaction(tenantId, async (txRaw, appendRequiredAudit) => {
       const tx = txRaw as typeof db;
+      await lockUserSession(tx, userId);
       await lockTenantOwnerLifecycle(tx, tenantId);
       const [current] = await tx
         .select({ role: userTenants.role })

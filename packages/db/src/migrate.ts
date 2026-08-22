@@ -927,8 +927,27 @@ async function assertBundledPluginLedgerIntegrity(db: MigrationQueryExecutor): P
           ],
         },
         {
-          tag: "0005_activated_rls_inheritance",
-          effects: [],
+          tag: "0005_four_role_rls_activation",
+          effects: [
+            {
+              kind: "policy",
+              schema: "public",
+              table: "capabilities",
+              name: "steward_migration_maintenance",
+            },
+            {
+              kind: "policy",
+              schema: "public",
+              table: "capability_grants",
+              name: "steward_migration_maintenance",
+            },
+            {
+              kind: "policy",
+              schema: "public",
+              table: "capability_invocations",
+              name: "steward_migration_maintenance",
+            },
+          ],
         },
       ],
     },

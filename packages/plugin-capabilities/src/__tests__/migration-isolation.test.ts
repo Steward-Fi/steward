@@ -93,7 +93,7 @@ describe("capability plugin migrations: namespaced-journal isolation", () => {
     const pluginLedger = await client.query(
       `SELECT count(*)::int AS n FROM drizzle."__drizzle_migrations_plugin_capabilities"`,
     );
-    expect(pluginLedger.rows[0].n).toBeGreaterThanOrEqual(4);
+    expect(pluginLedger.rows[0].n).toBeGreaterThanOrEqual(6);
 
     // (c) the core journal carries NO capability-invocations migration row.
     const coreLedger = await client.query(
@@ -141,6 +141,13 @@ describe("capability plugin migrations: namespaced-journal isolation", () => {
          AND relforcerowsecurity`,
     );
     expect(pluginRls.rows[0].n).toBe(4);
+    const maintenancePolicies = await client.query(
+      `SELECT count(*)::int AS n FROM pg_policies
+       WHERE schemaname = 'public'
+         AND tablename IN ('capabilities', 'capability_grants', 'capability_invocations')
+         AND policyname = 'steward_migration_maintenance'`,
+    );
+    expect(maintenancePolicies.rows[0].n).toBe(3);
     const bucketConstraint = await client.query(
       `SELECT count(*)::int AS n FROM pg_constraint
        WHERE conname = 'capability_rate_limit_buckets_surface_check'`,

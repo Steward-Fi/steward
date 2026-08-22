@@ -219,8 +219,8 @@ BEGIN
      OR p_tenant_id ~* '^(default|platform|system|personal-|eth:|solana:|t-)' THEN
     RAISE EXCEPTION 'tenant lifecycle authority denied' USING ERRCODE = '42501';
   END IF;
-  PERFORM pg_advisory_xact_lock(hashtextextended('tenant_owner_lifecycle_' || p_tenant_id, 0));
   PERFORM pg_advisory_xact_lock(hashtextextended('platform_user_account_' || p_user_id::text, 0));
+  PERFORM pg_advisory_xact_lock(hashtextextended('tenant_owner_lifecycle_' || p_tenant_id, 0));
   SELECT membership.role INTO actor_role
   FROM public.user_tenants membership
   JOIN public.users actor ON actor.id = membership.user_id

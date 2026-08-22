@@ -40,8 +40,8 @@
     {
       "idx": 5,
       "version": "7",
-      "when": 1787250000001,
-      "tag": "0005_activated_rls_inheritance",
+      "when": 1787439000000,
+      "tag": "0005_four_role_rls_activation",
       "breakpoints": true
     }
   ]
