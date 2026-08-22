@@ -68,27 +68,31 @@ function restoreBrowserShim(): void {
   globalThis.window = originalWindow;
 }
 
+const startRegistration = mock(async () => ({
+  id: "credential-1",
+  rawId: "credential-1",
+  response: {
+    clientDataJSON: "client-data",
+    attestationObject: "attestation",
+  },
+  type: "public-key",
+}));
+
+const startAuthentication = mock(async () => ({
+  id: "credential-login",
+  rawId: "credential-login",
+  response: {
+    clientDataJSON: "client-data",
+    authenticatorData: "authenticator-data",
+    signature: "signature",
+    userHandle: "u-1",
+  },
+  type: "public-key",
+}));
+
 mock.module("@simplewebauthn/browser", () => ({
-  startRegistration: async () => ({
-    id: "credential-1",
-    rawId: "credential-1",
-    response: {
-      clientDataJSON: "client-data",
-      attestationObject: "attestation",
-    },
-    type: "public-key",
-  }),
-  startAuthentication: async () => ({
-    id: "credential-login",
-    rawId: "credential-login",
-    response: {
-      clientDataJSON: "client-data",
-      authenticatorData: "authenticator-data",
-      signature: "signature",
-      userHandle: "u-1",
-    },
-    type: "public-key",
-  }),
+  startRegistration,
+  startAuthentication,
 }));
 
 function fakeJwt(claims: Record<string, unknown> = {}): string {
@@ -126,6 +130,8 @@ function memoryStorage(): SessionStorage {
 
 beforeEach(() => {
   captured = [];
+  startRegistration.mockClear();
+  startAuthentication.mockClear();
   originalFetch = global.fetch;
   installFetch();
   installBrowserShim();
@@ -154,6 +160,7 @@ describe("StewardAuth.addPasskey", () => {
       id: "credential-1",
       type: "public-key",
     });
+    expect(startRegistration).toHaveBeenCalledWith({ optionsJSON: REG_OPTIONS });
 
     // And the resulting session reflects the verify payload.
     expect(result.token).toBe("test-jwt");
@@ -212,6 +219,13 @@ describe("StewardAuth.addPasskey", () => {
       challengeId: "login-challenge",
       response: { id: "credential-login", type: "public-key" },
     });
+    expect(startAuthentication).toHaveBeenCalledWith({
+      optionsJSON: {
+        challenge: "login-challenge",
+        challengeId: "login-challenge",
+        rpId: "api.example.test",
+      },
+    });
   });
 
   it("completes passkey MFA with bearer auth and stores the refreshed session", async () => {
@@ -261,6 +275,13 @@ describe("StewardAuth.addPasskey", () => {
     expect(captured[1]?.body).toMatchObject({
       challengeId: "mfa-challenge",
       response: { id: "credential-login", type: "public-key" },
+    });
+    expect(startAuthentication).toHaveBeenCalledWith({
+      optionsJSON: {
+        challenge: "mfa-challenge",
+        challengeId: "mfa-challenge",
+        rpId: "api.example.test",
+      },
     });
     expect(result.token).toBe(steppedUpToken);
     expect(storage.getItem("steward_session_token")).toBe(steppedUpToken);
