@@ -1,11 +1,14 @@
 import { describe, expect, it } from "bun:test";
 import type { ExecutionAuthorization, SignRequest } from "@stwd/shared";
 import {
+  executionClaimDigestForGovernedSolanaParsedSign,
   executionPayloadDigestForGovernedEvmSign,
   executionPayloadDigestForGovernedSolanaNativeSign,
+  executionPayloadDigestForGovernedSolanaParsedSign,
   GovernedVault,
   GovernedVaultError,
 } from "../governed-vault";
+import { normalizedSolanaMessageDigest } from "../solana";
 import type { SignTransactionOptions, Vault } from "../vault";
 
 const request: SignRequest = {
@@ -35,6 +38,140 @@ const authorization: ExecutionAuthorization = {
 };
 
 describe("GovernedVault", () => {
+  it("consumes the complete parsed Solana claim before entering the raw custody signer", async () => {
+    const calls: string[] = [];
+    const transaction = "opaque-parsed-solana-transaction";
+    const parsedRequest = {
+      tenantId: "tenant-1",
+      agentId: "agent-1",
+      transaction,
+      chainId: 101,
+      broadcast: false,
+    } as const;
+    const parsedEffects = {
+      movesNativeSol: false,
+      programIds: ["TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"],
+      tokenTransfers: [{ mint: "mint-1", destination: "destination-1", amount: "7" }],
+    };
+    const messageDigest = normalizedSolanaMessageDigest(transaction);
+    const policyRevisionHash = "policy-revision-1";
+    const executionPayloadDigest = executionPayloadDigestForGovernedSolanaParsedSign(
+      parsedRequest,
+      { messageDigest, parsedEffects, policyRevisionHash },
+    );
+    const executionClaimDigest = executionClaimDigestForGovernedSolanaParsedSign({
+      executionPayloadDigest,
+      executionToken: "lease-token-1",
+      txId: "tx-parsed-1",
+    });
+    const rawVault = {
+      async signSolanaTransaction(rawRequest: Record<string, unknown>) {
+        expect(rawRequest.allowBlindSign).toBeUndefined();
+        expect(rawRequest.governedParsedSign).toBeDefined();
+        calls.push("raw-sign");
+        return { signature: "signed", broadcast: false, chainId: 101 };
+      },
+    } as unknown as Vault;
+    const governed = new GovernedVault(rawVault, async () => {});
+
+    const result = await governed.signSolanaParsedTransactionAuthorized(parsedRequest, {
+      txId: "tx-parsed-1",
+      executionToken: "lease-token-1",
+      executionClaimDigest,
+      executionPayloadDigest,
+      messageDigest,
+      parsedEffects,
+      policyRevisionHash,
+      consumeExecutionClaim: async (expected) => {
+        expect(expected).toEqual({
+          tenantId: "tenant-1",
+          agentId: "agent-1",
+          txId: "tx-parsed-1",
+          executionToken: "lease-token-1",
+          executionClaimDigest,
+          executionPayloadDigest,
+          messageDigest,
+          parsedEffects,
+          policyRevisionHash,
+          chainId: 101,
+          broadcast: false,
+        });
+        calls.push("consume-claim");
+      },
+    });
+
+    expect(result.signature).toBe("signed");
+    expect(calls).toEqual(["consume-claim", "raw-sign"]);
+  });
+
+  it("never enters raw parsed Solana signing for stale, mutated, or replayed authority", async () => {
+    let rawCalls = 0;
+    const transaction = "opaque-parsed-solana-transaction";
+    const parsedRequest = {
+      tenantId: "tenant-1",
+      agentId: "agent-1",
+      transaction,
+      chainId: 101,
+      broadcast: true,
+    } as const;
+    const parsedEffects = {
+      movesNativeSol: false,
+      programIds: ["program-1"],
+      tokenTransfers: [{ destination: "destination-1", amount: "7" }],
+    };
+    const messageDigest = normalizedSolanaMessageDigest(transaction);
+    const executionPayloadDigest = executionPayloadDigestForGovernedSolanaParsedSign(
+      parsedRequest,
+      { messageDigest, parsedEffects, policyRevisionHash: "policy-1" },
+    );
+    const options = {
+      txId: "tx-parsed-2",
+      executionToken: "lease-token-2",
+      executionClaimDigest: executionClaimDigestForGovernedSolanaParsedSign({
+        executionPayloadDigest,
+        executionToken: "lease-token-2",
+        txId: "tx-parsed-2",
+      }),
+      executionPayloadDigest,
+      messageDigest,
+      parsedEffects,
+      policyRevisionHash: "policy-1",
+      consumeExecutionClaim: async () => {
+        throw new Error("claim already consumed");
+      },
+    };
+    const rawVault = {
+      async signSolanaTransaction() {
+        rawCalls += 1;
+        return { signature: "never", broadcast: true, chainId: 101 };
+      },
+    } as unknown as Vault;
+    const governed = new GovernedVault(rawVault, async () => {});
+
+    await expect(
+      governed.signSolanaParsedTransactionAuthorized(parsedRequest, options),
+    ).rejects.toThrow("claim already consumed");
+    await expect(
+      governed.signSolanaParsedTransactionAuthorized(
+        { ...parsedRequest, transaction: "mutated-transaction" },
+        options,
+      ),
+    ).rejects.toThrow("does not match");
+    await expect(
+      governed.signSolanaParsedTransactionAuthorized(parsedRequest, {
+        ...options,
+        parsedEffects: { ...parsedEffects, programIds: ["program-2"] },
+      }),
+    ).rejects.toThrow("does not match");
+    await expect(
+      governed.signSolanaParsedTransactionAuthorized(parsedRequest, {
+        ...options,
+        policyRevisionHash: "policy-2",
+      }),
+    ).rejects.toThrow("does not match");
+    expect(rawCalls).toBe(0);
+  });
+
   it("consumes a durable Solana claim immediately before native raw signing", async () => {
     const calls: string[] = [];
     const solanaRequest: SignRequest = {

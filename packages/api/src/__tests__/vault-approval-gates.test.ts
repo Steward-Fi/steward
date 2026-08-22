@@ -47,6 +47,7 @@ import { canonicalJsonStringify } from "@stwd/shared";
 import {
   deriveSolanaPolicyFields,
   ExternalBroadcastOutcomeUnknownError,
+  GovernedVault,
   normalizedSolanaMessageDigest,
   parseSolanaTransaction,
   SolanaBroadcastNotSubmittedError,
@@ -652,14 +653,14 @@ describe("vault approval gates (real /approve path)", () => {
     const seen: Array<{
       transaction: string;
       allowBlindSign?: boolean;
-      allowParsedSign?: boolean;
+      governedParsedSign?: boolean;
     }> = [];
     const sign = spyOn(Vault.prototype, "signSolanaTransaction").mockImplementation(
       async (request) => {
         seen.push({
           transaction: request.transaction,
-          allowBlindSign: request.allowBlindSign,
-          allowParsedSign: request.allowParsedSign,
+          ...(request.allowBlindSign ? { allowBlindSign: true } : {}),
+          ...(request.governedParsedSign ? { governedParsedSign: true } : {}),
         });
         const signature =
           "4oL4p7QvN3UH7V5wMGZgW5PuzEk4A9LXLHk9RxAoKjDKuLbQBsfXN8kEvKfj5K1oEJa8wFF6RVp2h7pP9w2f51ZV";
@@ -686,9 +687,9 @@ describe("vault approval gates (real /approve path)", () => {
         409,
       );
       expect(seen).toEqual([
-        { transaction: PARSED_SOLANA_APPROVAL, allowParsedSign: true },
+        { transaction: PARSED_SOLANA_APPROVAL, governedParsedSign: true },
         { transaction: "serialized-blind-solana-approval", allowBlindSign: true },
-        { transaction: PARSED_SPL_APPROVAL, allowParsedSign: true },
+        { transaction: PARSED_SPL_APPROVAL, governedParsedSign: true },
       ]);
       const rows = await getDb()
         .select({ id: transactions.id, actionPayload: transactions.actionPayload })
@@ -715,6 +716,115 @@ describe("vault approval gates (real /approve path)", () => {
       );
     } finally {
       sign.mockRestore();
+    }
+  });
+
+  it("fails closed before raw custody when the durable parsed claim is tampered after approval", async () => {
+    const txId = "tx-solana-parsed-claim-tamper";
+    const parsed = deriveSolanaPolicyFields(parseSolanaTransaction(PARSED_SOLANA_APPROVAL));
+    const parsedEffects = {
+      movesNativeSol: parsed.movesNativeSol,
+      programIds: parsed.programIds,
+      tokenTransfers: parsed.summary.tokenTransfers.map((transfer) => ({
+        mint: transfer.mint,
+        destination: transfer.destination,
+        amount: transfer.amount,
+      })),
+    };
+    const requestDigest = createHash("sha256")
+      .update(
+        canonicalJsonStringify({
+          route: "sign-solana",
+          tenantId: TENANT_ID,
+          agentId: AGENT_SOLANA,
+          chainId: 101,
+          broadcast: true,
+          signingMode: "parsed",
+          to: SOLANA_RECIPIENT,
+          value: "301",
+          messageDigest: normalizedSolanaMessageDigest(PARSED_SOLANA_APPROVAL),
+          parsedEffects,
+        }),
+      )
+      .digest("hex");
+    await getDb()
+      .insert(transactions)
+      .values({
+        id: txId,
+        agentId: AGENT_SOLANA,
+        status: "pending",
+        toAddress: SOLANA_RECIPIENT,
+        value: "301",
+        data: PARSED_SOLANA_APPROVAL,
+        chainId: 101,
+        actionType: "solana_transaction",
+        actionPayload: {
+          type: "solana_transaction",
+          recoveryType: "solana_transaction",
+          recoveryActionType: "solana_transaction",
+          broadcast: true,
+          signingMode: "parsed",
+          blindSigned: false,
+          parsedEffects,
+          requestDigest,
+        },
+        policyResults: [],
+      });
+    await getDb()
+      .insert(approvalQueue)
+      .values({
+        id: `aq-${txId}`,
+        txId,
+        agentId: AGENT_SOLANA,
+        status: "pending",
+      });
+
+    const originalGateway = GovernedVault.prototype.signSolanaParsedTransactionAuthorized;
+    let rawCalls = 0;
+    const rawSpy = spyOn(Vault.prototype, "signSolanaTransaction").mockImplementation(async () => {
+      rawCalls += 1;
+      throw new Error("raw custody must not be reached");
+    });
+    const gatewaySpy = spyOn(
+      GovernedVault.prototype,
+      "signSolanaParsedTransactionAuthorized",
+    ).mockImplementation(async function (request, options) {
+      const [row] = await getDb()
+        .select({ actionPayload: transactions.actionPayload })
+        .from(transactions)
+        .where(eq(transactions.id, txId));
+      await getDb()
+        .update(transactions)
+        .set({
+          actionPayload: {
+            ...(row.actionPayload as Record<string, unknown>),
+            parsedExecutionClaimDigest: "tampered-after-approval",
+          },
+        })
+        .where(eq(transactions.id, txId));
+      return originalGateway.call(this, request, options);
+    });
+    try {
+      const app = await makeApp({ authType: "session-jwt", role: "owner", mfa: true });
+      const response = await approve(app, AGENT_SOLANA, txId);
+      expect(response.status).not.toBe(200);
+      expect(await response.json()).toMatchObject({ ok: false });
+      expect(rawCalls).toBe(0);
+
+      const [row] = await getDb()
+        .select({ status: transactions.status, actionPayload: transactions.actionPayload })
+        .from(transactions)
+        .where(eq(transactions.id, txId));
+      const [queue] = await getDb()
+        .select({ status: approvalQueue.status })
+        .from(approvalQueue)
+        .where(eq(approvalQueue.txId, txId));
+      expect(row.status).toBe("pending");
+      expect(row.actionPayload).not.toHaveProperty("parsedClaimConsumedAt");
+      expect(queue.status).toBe("pending");
+    } finally {
+      gatewaySpy.mockRestore();
+      rawSpy.mockRestore();
     }
   });
 
