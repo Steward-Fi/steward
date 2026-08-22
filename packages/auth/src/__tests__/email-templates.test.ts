@@ -35,6 +35,21 @@ describe("renderTemplate", () => {
   });
 });
 
+describe("default magic-link template", () => {
+  it("uses and HTML-escapes the configured tenant brand", () => {
+    const rendered = renderDefaultTemplate({
+      ...MAGIC_LINK_DATA,
+      tenantName: '<b>Customer "Cloud"</b>',
+    });
+
+    expect(rendered.subject).toBe('Sign in to <b>Customer "Cloud"</b>');
+    expect(rendered.text).toContain('— <b>Customer "Cloud"</b>');
+    expect(rendered.html).toContain("&lt;b&gt;Customer &quot;Cloud&quot;&lt;/b&gt;");
+    expect(rendered.html).not.toContain('<b>Customer "Cloud"</b>');
+    expect(rendered.html).not.toContain("agent wallet infrastructure");
+  });
+});
+
 describe("renderOtpTemplate", () => {
   it("falls back to the default OTP template for unknown/absent template ids", () => {
     expect(renderOtpTemplate(undefined, OTP_DATA)).toEqual(renderDefaultOtpTemplate(OTP_DATA));

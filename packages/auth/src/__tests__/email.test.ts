@@ -108,6 +108,44 @@ describe("EmailAuth.sendMagicLink", () => {
     auth.destroy();
   });
 
+  it("passes the configured brand to magic-link and OTP renderers", async () => {
+    const sent = mock(async () => ({ provider: "test" }));
+    const templateRenderer = mock(() => ({
+      subject: "magic subject",
+      text: "magic text",
+      html: "<p>magic html</p>",
+    }));
+    const otpTemplateRenderer = mock(() => ({
+      subject: "otp subject",
+      text: "otp text",
+      html: "<p>otp html</p>",
+    }));
+    const auth = new EmailAuth({
+      from: "login@example.test",
+      baseUrl: "https://app.example.test",
+      callbackPath: "/auth/callback/email",
+      brandName: "Customer Cloud",
+      provider: { send: sent },
+      templateRenderer,
+      otpTemplateRenderer,
+    });
+
+    await auth.sendMagicLink("user@example.test", { tenantId: "customer" });
+    await auth.sendOtp("user@example.test", { tenantId: "customer" });
+
+    const [, magicData] = templateRenderer.mock.calls[0]!;
+    const [, otpData] = otpTemplateRenderer.mock.calls[0]!;
+    expect(magicData).toMatchObject({
+      tenantName: "Customer Cloud",
+    });
+    expect(magicData.magicLink).toContain("https://app.example.test/auth/callback/email?");
+    expect(otpData).toMatchObject({
+      brandName: "Customer Cloud",
+    });
+
+    auth.destroy();
+  });
+
   it("binds the tenant into the magic link for non-default tenants (and omits it otherwise)", async () => {
     const sent = mock(async () => ({ provider: "test" }));
     const templateRenderer = mock(() => ({
