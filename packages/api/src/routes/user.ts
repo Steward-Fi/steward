@@ -117,6 +117,7 @@ import { redactWalletMetadataSecrets } from "../services/wallet-metadata";
 import { dispatchWebhook } from "../services/webhook-dispatch";
 import {
   assertAllowedOAuthRedirectUri,
+  authStoreAuthorityKey,
   claimSmsVerifyAttempt,
   clearSmsVerifyFailures,
   createSessionToken,
@@ -207,23 +208,77 @@ let currentUserLinkBackend: StoreBackend | null = null;
 let walletLinkChallenges: ChallengeStore;
 let socialLinkChallenges: ChallengeStore;
 let oauthLinkChallenges: ChallengeStore;
+type UserLinkStores = {
+  wallet: ChallengeStore;
+  social: ChallengeStore;
+  oauth: ChallengeStore;
+};
+const userLinkStoresByAuthority = new Map<string, UserLinkStores>();
+
+function createUserLinkStores(backend: StoreBackend): UserLinkStores {
+  return {
+    wallet: new ChallengeStore({
+      backend: new NamespacedStoreBackend(backend, "user-link-wallet"),
+      ttlMs: WALLET_LINK_CHALLENGE_TTL_MS,
+    }),
+    social: new ChallengeStore({
+      backend: new NamespacedStoreBackend(backend, "user-link-social"),
+      ttlMs: SOCIAL_LINK_CHALLENGE_TTL_MS,
+    }),
+    oauth: new ChallengeStore({
+      backend: new NamespacedStoreBackend(backend, "user-link-oauth"),
+      ttlMs: OAUTH_LINK_CHALLENGE_TTL_MS,
+    }),
+  };
+}
+
+function currentUserLinkStores(): UserLinkStores {
+  const authority = authStoreAuthorityKey();
+  if (authority !== null) {
+    const stores = userLinkStoresByAuthority.get(authority);
+    if (!stores)
+      throw new Error("User-link challenge stores are not initialized for this authority");
+    return stores;
+  }
+  return {
+    wallet: walletLinkChallenges,
+    social: socialLinkChallenges,
+    oauth: oauthLinkChallenges,
+  };
+}
+
+/** @internal request-authority regression seams. */
+export async function __setUserLinkChallengeForTests(
+  kind: keyof UserLinkStores,
+  key: string,
+  value: string,
+): Promise<boolean> {
+  return currentUserLinkStores()[kind].setIfNotExists(key, value);
+}
+
+/** @internal request-authority regression seams. */
+export async function __consumeUserLinkChallengeForTests(
+  kind: keyof UserLinkStores,
+  key: string,
+): Promise<string | null> {
+  return currentUserLinkStores()[kind].consume(key);
+}
 
 /** Bind account-link challenges to auth startup's selected durable backend. */
-export function initUserLinkChallengeStores(backend: StoreBackend): void {
+export function initUserLinkChallengeStores(
+  backend: StoreBackend,
+  authority?: string | null,
+): void {
+  if (authority !== undefined && authority !== null) {
+    userLinkStoresByAuthority.set(authority, createUserLinkStores(backend));
+    return;
+  }
   const supersededBackend = currentUserLinkBackend;
   currentUserLinkBackend = backend;
-  walletLinkChallenges = new ChallengeStore({
-    backend: new NamespacedStoreBackend(backend, "user-link-wallet"),
-    ttlMs: WALLET_LINK_CHALLENGE_TTL_MS,
-  });
-  socialLinkChallenges = new ChallengeStore({
-    backend: new NamespacedStoreBackend(backend, "user-link-social"),
-    ttlMs: SOCIAL_LINK_CHALLENGE_TTL_MS,
-  });
-  oauthLinkChallenges = new ChallengeStore({
-    backend: new NamespacedStoreBackend(backend, "user-link-oauth"),
-    ttlMs: OAUTH_LINK_CHALLENGE_TTL_MS,
-  });
+  const stores = createUserLinkStores(backend);
+  walletLinkChallenges = stores.wallet;
+  socialLinkChallenges = stores.social;
+  oauthLinkChallenges = stores.oauth;
   if (supersededBackend instanceof MemoryBackend && supersededBackend !== backend) {
     supersededBackend.destroy();
   }
@@ -2072,7 +2127,7 @@ function telegramLinkHashKey(hash: string): string {
 async function consumeTelegramLinkHashOnce(hash: string, authDate: number): Promise<boolean> {
   const expiresAtMs = (authDate + TELEGRAM_LINK_MAX_AGE_SEC) * 1000;
   const ttlMs = Math.max(1_000, expiresAtMs - Date.now());
-  return socialLinkChallenges.setIfNotExists(telegramLinkHashKey(hash), "1", ttlMs);
+  return currentUserLinkStores().social.setIfNotExists(telegramLinkHashKey(hash), "1", ttlMs);
 }
 
 type UserLinkedAccount = {
@@ -2494,7 +2549,7 @@ user.post("/me/accounts/wallet/ethereum/nonce", async (c) => {
     issuedAt,
     ...(requestedAddress ? { account: requestedAddress } : {}),
   });
-  await walletLinkChallenges.setIfNotExists(
+  await currentUserLinkStores().wallet.setIfNotExists(
     walletLinkChallengeKey("ethereum", userId, nonce),
     JSON.stringify({ userId, address: requestedAddress, issuedAt }),
   );
@@ -2544,7 +2599,7 @@ user.post("/me/accounts/wallet/ethereum", async (c) => {
   }
 
   const challengeKey = walletLinkChallengeKey("ethereum", userId, parsed.nonce);
-  const rawChallenge = await walletLinkChallenges.get(challengeKey);
+  const rawChallenge = await currentUserLinkStores().wallet.get(challengeKey);
   if (!rawChallenge) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid or expired wallet link nonce" }, 401);
   }
@@ -2561,19 +2616,25 @@ user.post("/me/accounts/wallet/ethereum", async (c) => {
   if (!verified) return c.json<ApiResponse>({ ok: false, error: "Invalid wallet signature" }, 401);
 
   const lockKey = walletLinkRedeemLockKey("ethereum", userId, parsed.nonce);
-  if (!(await walletLinkChallenges.setIfNotExists(lockKey, "1", WALLET_LINK_REDEEM_LOCK_TTL_MS))) {
+  if (
+    !(await currentUserLinkStores().wallet.setIfNotExists(
+      lockKey,
+      "1",
+      WALLET_LINK_REDEEM_LOCK_TTL_MS,
+    ))
+  ) {
     return c.json<ApiResponse>(
       { ok: false, error: "Wallet link nonce is already being redeemed" },
       409,
     );
   }
   try {
-    const consumed = await walletLinkChallenges.consume(challengeKey);
+    const consumed = await currentUserLinkStores().wallet.consume(challengeKey);
     if (!consumed || consumed !== rawChallenge) {
       return c.json<ApiResponse>({ ok: false, error: "Invalid or expired wallet link nonce" }, 401);
     }
   } finally {
-    await walletLinkChallenges.delete(lockKey);
+    await currentUserLinkStores().wallet.delete(lockKey);
   }
 
   const normalized = address.toLowerCase();
@@ -2680,7 +2741,7 @@ user.post("/me/accounts/wallet/solana/nonce", async (c) => {
     issuedAt,
     ...(requestedPublicKey ? { account: requestedPublicKey } : {}),
   });
-  await walletLinkChallenges.setIfNotExists(
+  await currentUserLinkStores().wallet.setIfNotExists(
     walletLinkChallengeKey("solana", userId, nonce),
     JSON.stringify({ userId, publicKey: requestedPublicKey, issuedAt }),
   );
@@ -2736,7 +2797,7 @@ user.post("/me/accounts/wallet/solana", async (c) => {
   }
 
   const challengeKey = walletLinkChallengeKey("solana", userId, parsed.nonce);
-  const rawChallenge = await walletLinkChallenges.get(challengeKey);
+  const rawChallenge = await currentUserLinkStores().wallet.get(challengeKey);
   if (!rawChallenge) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid or expired wallet link nonce" }, 401);
   }
@@ -2750,19 +2811,25 @@ user.post("/me/accounts/wallet/solana", async (c) => {
   }
 
   const lockKey = walletLinkRedeemLockKey("solana", userId, parsed.nonce);
-  if (!(await walletLinkChallenges.setIfNotExists(lockKey, "1", WALLET_LINK_REDEEM_LOCK_TTL_MS))) {
+  if (
+    !(await currentUserLinkStores().wallet.setIfNotExists(
+      lockKey,
+      "1",
+      WALLET_LINK_REDEEM_LOCK_TTL_MS,
+    ))
+  ) {
     return c.json<ApiResponse>(
       { ok: false, error: "Wallet link nonce is already being redeemed" },
       409,
     );
   }
   try {
-    const consumed = await walletLinkChallenges.consume(challengeKey);
+    const consumed = await currentUserLinkStores().wallet.consume(challengeKey);
     if (!consumed || consumed !== rawChallenge) {
       return c.json<ApiResponse>({ ok: false, error: "Invalid or expired wallet link nonce" }, 401);
     }
   } finally {
-    await walletLinkChallenges.delete(lockKey);
+    await currentUserLinkStores().wallet.delete(lockKey);
   }
 
   const [userRow] = await getDb()
@@ -2885,7 +2952,7 @@ user.post("/me/accounts/oauth/:provider/challenge", async (c) => {
 
   const userId = c.get("userId");
   const state = randomOAuthLinkState();
-  await oauthLinkChallenges.setIfNotExists(
+  await currentUserLinkStores().oauth.setIfNotExists(
     oauthLinkChallengeKey(userId, state),
     JSON.stringify({
       userId,
@@ -2948,7 +3015,9 @@ user.post("/me/accounts/oauth/:provider/token", async (c) => {
   }
 
   const userId = c.get("userId");
-  const challenge = await oauthLinkChallenges.consume(oauthLinkChallengeKey(userId, state));
+  const challenge = await currentUserLinkStores().oauth.consume(
+    oauthLinkChallengeKey(userId, state),
+  );
   if (!challenge) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid or expired OAuth link state" }, 401);
   }
@@ -3286,7 +3355,7 @@ user.post("/me/accounts/telegram/challenge", async (c) => {
   }
   const userId = c.get("userId");
   const challengeId = crypto.randomUUID();
-  await socialLinkChallenges.setIfNotExists(
+  await currentUserLinkStores().social.setIfNotExists(
     socialLinkChallengeKey("telegram", userId, challengeId),
     JSON.stringify({ userId, issuedAt: new Date().toISOString() }),
   );
@@ -3319,7 +3388,7 @@ user.post("/me/accounts/telegram", async (c) => {
   }
   const userId = c.get("userId");
   const challengeKey = socialLinkChallengeKey("telegram", userId, challengeId);
-  const challenge = await socialLinkChallenges.consume(challengeKey);
+  const challenge = await currentUserLinkStores().social.consume(challengeKey);
   if (!challenge) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid or expired Telegram challenge" }, 401);
   }
@@ -3413,7 +3482,7 @@ user.post("/me/accounts/farcaster/nonce", async (c) => {
   const nonce = Array.from(crypto.getRandomValues(new Uint8Array(16)))
     .map((byte) => byte.toString(16).padStart(2, "0"))
     .join("");
-  await socialLinkChallenges.setIfNotExists(
+  await currentUserLinkStores().social.setIfNotExists(
     socialLinkChallengeKey("farcaster", userId, nonce),
     JSON.stringify({ userId, issuedAt: new Date().toISOString() }),
   );
@@ -3455,7 +3524,7 @@ user.post("/me/accounts/farcaster", async (c) => {
 
   const userId = c.get("userId");
   const nonceKey = socialLinkChallengeKey("farcaster", userId, farcasterUser.message.nonce);
-  const nonceRecord = await socialLinkChallenges.consume(nonceKey);
+  const nonceRecord = await currentUserLinkStores().social.consume(nonceKey);
   if (!nonceRecord) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid or expired Farcaster nonce" }, 401);
   }

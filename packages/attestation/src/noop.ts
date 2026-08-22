@@ -1,3 +1,4 @@
+import { runtimeEnvironmentSnapshot } from "@stwd/shared/runtime-env";
 import type {
   AttestationProvider,
   AttestationQuote,
@@ -23,9 +24,12 @@ export class NoopDevAttestationProvider implements AttestationProvider {
   private readonly now: () => Date;
 
   constructor(options: NoopDevProviderOptions = {}) {
-    const requested =
-      options.allowUnverified ?? process.env.STEWARD_ATTESTATION_NOOP_ALLOW === "true";
-    this.environment = options.environment ?? process.env.NODE_ENV ?? "development";
+    const env = runtimeEnvironmentSnapshot();
+    const requested = options.allowUnverified ?? env.STEWARD_ATTESTATION_NOOP_ALLOW === "true";
+    this.environment =
+      options.environment ??
+      env.NODE_ENV ??
+      (env.STEWARD_RUNTIME === "workers" ? "production" : "development");
     this.now = options.now ?? (() => new Date());
     // SEC-029: keying the insecure mode solely on NODE_ENV means any
     // deployment that forgets NODE_ENV=production gets vacuous-green quotes.
@@ -34,8 +38,7 @@ export class NoopDevAttestationProvider implements AttestationProvider {
     // and never in production.
     const devSecretsAllowed =
       options.allowDevSecrets ??
-      (process.env.STEWARD_ALLOW_DEV_SECRETS === "true" ||
-        process.env.STEWARD_ALLOW_DEV_SECRET === "true");
+      (env.STEWARD_ALLOW_DEV_SECRETS === "true" || env.STEWARD_ALLOW_DEV_SECRET === "true");
     if (requested && this.environment === "production") {
       throw new Error("noop-dev attestation cannot be explicitly allowed in production");
     }

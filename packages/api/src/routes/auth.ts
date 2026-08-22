@@ -1395,7 +1395,7 @@ type AuthStoreBundle = {
 
 const authStoresByAuthority = new Map<string, AuthStoreBundle>();
 
-function authStoreAuthorityKey(): string | null {
+export function authStoreAuthorityKey(): string | null {
   if (runtimeEnvironmentValue("STEWARD_RUNTIME") !== "workers") return null;
   const env = runtimeEnvironmentSnapshot();
   return JSON.stringify([
@@ -1495,7 +1495,7 @@ export async function initAuthStores(usePostgres = false): Promise<void> {
   }
 
   const { initUserLinkChallengeStores } = await import("./user.js");
-  initUserLinkChallengeStores(challengeBackend);
+  initUserLinkChallengeStores(challengeBackend, authorityKey);
 
   // Reset singletons so they pick up the new stores on next use
   phoneAuthByAuthority.clear();
@@ -2151,6 +2151,8 @@ export async function getEmailAuthForTenant(tenantId: string): Promise<EmailAuth
     runtimeEnvironmentValue("EMAIL_FROM") ?? "",
     runtimeEnvironmentValue("APP_URL") ?? "",
     runtimeEnvironmentValue("NODE_ENV") ?? "",
+    runtimeEnvironmentValue("STEWARD_EMAIL_CODE_SECRET") ?? "",
+    runtimeEnvironmentValue("STEWARD_ALLOW_DEV_SECRETS") ?? "",
     authStoreAuthorityKey() ?? "bun",
   ]);
   let authorities = _emailAuthByTenant.get(tenantId);

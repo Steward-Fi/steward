@@ -22,4 +22,8 @@ export const POLYMARKET_BATCH_PRICE_HISTORY_LIMIT = 20;
 // hardcode operator config in callers.
 export const DEFAULT_POLYGON_RPC_URL = "https://polygon-rpc.com";
 
-export const DEFAULT_FETCH_TIMEOUT_MS = Number(process.env.POLYMARKET_FETCH_TIMEOUT_MS ?? 15_000);
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
+
+export function defaultFetchTimeoutMs(): number {
+  return Number(runtimeEnvironmentValue("POLYMARKET_FETCH_TIMEOUT_MS") ?? 15_000);
+}

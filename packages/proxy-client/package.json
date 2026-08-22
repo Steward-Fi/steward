@@ -21,6 +21,9 @@
   },
   "author": "Steward-Fi",
   "license": "MIT",
+  "dependencies": {
+    "@stwd/shared": "workspace:*"
+  },
   "devDependencies": {
     "@stwd/auth": "workspace:*",
     "@stwd/db": "workspace:*",

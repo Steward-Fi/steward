@@ -1,4 +1,5 @@
 import { request as httpRequest } from "node:http";
+import { runtimeEnvironmentSnapshot } from "@stwd/shared/runtime-env";
 import type {
   AttestationMeasurement,
   AttestationProvider,
@@ -91,8 +92,9 @@ export class DstackTdxAttestationProvider implements AttestationProvider {
   private readonly now: () => Date;
 
   constructor(options: DstackTdxProviderOptions = {}) {
-    this.socketPath = options.socketPath ?? process.env.DSTACK_SOCKET_PATH ?? DEFAULT_DSTACK_SOCKET;
-    this.verifierUrl = options.verifierUrl ?? process.env.STEWARD_DSTACK_VERIFIER_URL;
+    const env = runtimeEnvironmentSnapshot();
+    this.socketPath = options.socketPath ?? env.DSTACK_SOCKET_PATH ?? DEFAULT_DSTACK_SOCKET;
+    this.verifierUrl = options.verifierUrl ?? env.STEWARD_DSTACK_VERIFIER_URL;
     this.fetchImpl = options.fetchImpl ?? fetch;
     this.now = options.now ?? (() => new Date());
     warnIfVerifierChannelInsecure(this.verifierUrl);

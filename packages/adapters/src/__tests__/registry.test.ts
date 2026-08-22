@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import { withRuntimeEnvironment } from "@stwd/shared/runtime-env";
 import { MockSwapAdapter, type SwapAdapter } from "../adapters/swap.js";
-import { AdapterRegistry } from "../registry.js";
+import { AdapterRegistry, adapterRegistry } from "../registry.js";
 import { AdapterNotConfiguredError } from "../types.js";
 
 const FRESH_TOKENS = {
@@ -11,6 +12,18 @@ const FRESH_TOKENS = {
 };
 
 describe("AdapterRegistry resolution", () => {
+  test("default singleton is authority-keyed across A to B to missing", () => {
+    const provider = (env: Record<string, string>) =>
+      withRuntimeEnvironment(
+        { STEWARD_RUNTIME: "workers", ...env },
+        () => adapterRegistry.swap().provider,
+      );
+    expect(provider({ STEWARD_SWAP_ADAPTER: "mock", STEWARD_ALLOW_MOCK_ADAPTERS: "true" })).toBe(
+      "mock",
+    );
+    expect(provider({ STEWARD_SWAP_ADAPTER: "not-registered" })).toBe("disabled");
+    expect(provider({})).toBe("disabled");
+  });
   test("DEV (no NODE_ENV): returns working mocks", async () => {
     const reg = new AdapterRegistry({ env: {} });
     expect(reg.swap().provider).toBe("mock");

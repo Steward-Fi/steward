@@ -21,6 +21,9 @@
     "test": "bun test"
   },
   "license": "MIT",
+  "dependencies": {
+    "@stwd/shared": "workspace:*"
+  },
   "devDependencies": {
     "@types/bun": "1.3.14",
     "@types/node": "^25.5.0"

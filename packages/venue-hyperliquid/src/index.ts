@@ -1,3 +1,4 @@
+import { runtimeEnvironmentSnapshot, runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 import { concatBytes, type Hex, keccak256, parseSignature, toBytes } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { z } from "zod";
@@ -53,7 +54,9 @@ const approveBuilderFeePrimaryType = "HyperliquidTransaction:ApproveBuilderFee";
 // or a much larger percentage would let a compromised builder configuration
 // charge materially more than Steward itself will stamp on an order.
 const MAX_APPROVED_BUILDER_FEE_PERCENT = 0.1;
-const DEFAULT_FETCH_TIMEOUT_MS = Number(process.env.HYPERLIQUID_FETCH_TIMEOUT_MS ?? 10_000);
+function defaultFetchTimeoutMs(): number {
+  return Number(runtimeEnvironmentValue("HYPERLIQUID_FETCH_TIMEOUT_MS") ?? 10_000);
+}
 
 const BUILDER_PERP_ASSET_ID_OFFSET = 100_000;
 const BUILDER_PERP_DEX_STRIDE = 10_000;
@@ -100,8 +103,9 @@ export type HyperliquidBuilderFee = z.infer<typeof builderFeeSchema>;
  * builder attribution.
  */
 export function validateBuilderFeeEnv(): void {
-  const address = process.env.HL_BUILDER_ADDRESS;
-  const rawFee = process.env.HL_BUILDER_FEE_TENTHS_BP;
+  const env = runtimeEnvironmentSnapshot();
+  const address = env.HL_BUILDER_ADDRESS;
+  const rawFee = env.HL_BUILDER_FEE_TENTHS_BP;
   const hasAddress = Boolean(address?.trim());
   const hasFee = rawFee !== undefined && rawFee.trim() !== "";
   if (!hasAddress && !hasFee) return;
@@ -333,8 +337,9 @@ function nextNonce(): number {
 }
 
 function withTimeoutSignal(init: RequestInit): RequestInit {
-  if (init.signal || DEFAULT_FETCH_TIMEOUT_MS <= 0) return init;
-  return { ...init, signal: AbortSignal.timeout(DEFAULT_FETCH_TIMEOUT_MS) };
+  const timeoutMs = defaultFetchTimeoutMs();
+  if (init.signal || timeoutMs <= 0) return init;
+  return { ...init, signal: AbortSignal.timeout(timeoutMs) };
 }
 
 async function postInfo(
@@ -515,8 +520,9 @@ async function withMarketableLimitPx(
   return { ...order, limitPx: await getMarketableLimitPx(coin, isBuy, options) };
 }
 function configuredBuilderFee(): HyperliquidBuilderFee | undefined {
-  const address = process.env.HL_BUILDER_ADDRESS;
-  const rawFee = process.env.HL_BUILDER_FEE_TENTHS_BP;
+  const env = runtimeEnvironmentSnapshot();
+  const address = env.HL_BUILDER_ADDRESS;
+  const rawFee = env.HL_BUILDER_FEE_TENTHS_BP;
   if (!address || rawFee === undefined || rawFee === "") return undefined;
   const feeTenthsBps = Number(rawFee);
   return builderFeeSchema.parse({ address, feeTenthsBps });

@@ -16,6 +16,7 @@
  * STEWARD_ALLOW_MOCK_ADAPTERS=true (intended for staging/load tests only).
  */
 
+import { runtimeEnvironmentSnapshot } from "@stwd/shared/runtime-env";
 import { type BridgeAdapter, MockBridgeAdapter } from "./adapters/bridge.js";
 import { type CustodialWalletAdapter, MockCustodialWalletAdapter } from "./adapters/custodial.js";
 import { type EarnAdapter, MockEarnAdapter } from "./adapters/earn.js";
@@ -30,7 +31,7 @@ import { MockTosAdapter, type TosAdapter } from "./adapters/tos.js";
 import { type AdapterCategory, AdapterNotConfiguredError, type BaseAdapter } from "./types.js";
 
 export interface AdapterRegistryOptions {
-  /** Defaults to process.env. Injectable for tests. */
+  /** Explicit immutable authority. Defaults to the current request snapshot. */
   env?: Record<string, string | undefined>;
 }
 
@@ -109,21 +110,26 @@ function makeMockAdapter<C extends AdapterCategory>(category: C): CategoryToAdap
 }
 
 export class AdapterRegistry {
-  private readonly env: Record<string, string | undefined>;
+  private readonly explicitEnv?: Record<string, string | undefined>;
   // category -> (providerName -> adapter) for explicitly registered real adapters
   private readonly registered = new Map<AdapterCategory, Map<string, BaseAdapter>>();
-  private readonly resolved = new Map<AdapterCategory, BaseAdapter>();
+  private readonly resolved = new Map<string, BaseAdapter>();
 
   constructor(options?: AdapterRegistryOptions) {
-    this.env = options?.env ?? process.env;
+    this.explicitEnv = options?.env ? Object.freeze({ ...options.env }) : undefined;
   }
 
-  private isProduction(): boolean {
-    return this.env.NODE_ENV === "production";
+  private environment(): Readonly<Record<string, string | undefined>> {
+    return this.explicitEnv ?? runtimeEnvironmentSnapshot();
   }
 
-  private allowMocksInProd(): boolean {
-    return this.env.STEWARD_ALLOW_MOCK_ADAPTERS === "true";
+  private authorityKey(env: Readonly<Record<string, string | undefined>>): string {
+    return JSON.stringify([
+      env.NODE_ENV ?? "",
+      env.STEWARD_RUNTIME ?? "",
+      env.STEWARD_ALLOW_MOCK_ADAPTERS ?? "",
+      ...ALL_CATEGORIES.map((category) => env[envKey(category)] ?? ""),
+    ]);
   }
 
   /**
@@ -142,7 +148,7 @@ export class AdapterRegistry {
     }
     byName.set(providerName, adapter);
     // Invalidate any previously-resolved instance for this category.
-    this.resolved.delete(category);
+    this.resolved.clear();
   }
 
   /**
@@ -156,35 +162,39 @@ export class AdapterRegistry {
   }
 
   private resolve<C extends AdapterCategory>(category: C): CategoryToAdapter[C] {
-    const cached = this.resolved.get(category);
+    const env = this.environment();
+    const cacheKey = `${this.authorityKey(env)}:${category}`;
+    const cached = this.resolved.get(cacheKey);
     if (cached) return cached as CategoryToAdapter[C];
 
-    const configured = this.env[envKey(category)]?.trim();
+    const configured = env[envKey(category)]?.trim();
+    const isProduction = env.NODE_ENV === "production" || env.STEWARD_RUNTIME === "workers";
+    const allowMocksInProd = env.STEWARD_ALLOW_MOCK_ADAPTERS === "true";
     const byName = this.registered.get(category);
 
     // 1. Explicit env selection of a registered provider.
     if (configured && configured !== "mock" && byName?.has(configured)) {
       const adapter = byName.get(configured) as CategoryToAdapter[C];
-      this.resolved.set(category, adapter);
+      this.resolved.set(cacheKey, adapter);
       return adapter;
     }
 
     // 2. Env explicitly asks for "mock".
     if (configured === "mock") {
-      if (this.isProduction() && !this.allowMocksInProd()) {
+      if (isProduction && !allowMocksInProd) {
         const disabled = makeDisabledAdapter(category);
-        this.resolved.set(category, disabled);
+        this.resolved.set(cacheKey, disabled);
         return disabled;
       }
       const mock = makeMockAdapter(category);
-      this.resolved.set(category, mock);
+      this.resolved.set(cacheKey, mock);
       return mock;
     }
 
     // 3. A single real adapter registered without env disambiguation: use it.
     if (!configured && byName && byName.size === 1) {
       const [adapter] = byName.values();
-      this.resolved.set(category, adapter as CategoryToAdapter[C]);
+      this.resolved.set(cacheKey, adapter as CategoryToAdapter[C]);
       return adapter as CategoryToAdapter[C];
     }
 
@@ -192,18 +202,18 @@ export class AdapterRegistry {
     //    fall back to a mock when an operator asked for a specific provider).
     if (configured && configured !== "mock") {
       const disabled = makeDisabledAdapter(category);
-      this.resolved.set(category, disabled);
+      this.resolved.set(cacheKey, disabled);
       return disabled;
     }
 
     // 5. Nothing configured. DEV -> mock; PROD -> disabled (fail closed).
-    if (this.isProduction() && !this.allowMocksInProd()) {
+    if (isProduction && !allowMocksInProd) {
       const disabled = makeDisabledAdapter(category);
-      this.resolved.set(category, disabled);
+      this.resolved.set(cacheKey, disabled);
       return disabled;
     }
     const mock = makeMockAdapter(category);
-    this.resolved.set(category, mock);
+    this.resolved.set(cacheKey, mock);
     return mock;
   }
 

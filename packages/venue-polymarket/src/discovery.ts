@@ -1,4 +1,4 @@
-import { DEFAULT_FETCH_TIMEOUT_MS, POLYMARKET_GAMMA_API_BASE } from "./constants";
+import { defaultFetchTimeoutMs, POLYMARKET_GAMMA_API_BASE } from "./constants";
 import { getClobTokenIds, getOutcomePrices, getOutcomes } from "./parsing";
 import { type PolymarketEvent, type PolymarketMarket } from "./types";
 
@@ -32,8 +32,9 @@ function gammaUrl(
 
 function timeoutSignal(opts?: PolymarketFetchOptions): AbortSignal | undefined {
   if (opts?.signal) return opts.signal;
-  if (DEFAULT_FETCH_TIMEOUT_MS <= 0) return undefined;
-  return AbortSignal.timeout(DEFAULT_FETCH_TIMEOUT_MS);
+  const timeoutMs = defaultFetchTimeoutMs();
+  if (timeoutMs <= 0) return undefined;
+  return AbortSignal.timeout(timeoutMs);
 }
 
 // Raw Gamma market shape (JSON-string fields parsed inside the adapter).

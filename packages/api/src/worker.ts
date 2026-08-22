@@ -362,6 +362,11 @@ export function hydrateProcessEnv(env: Env): void {
   target.STEWARD_RUNTIME = "workers";
 }
 
+/** @internal prevent mounted Worker tests from changing later Bun test authority. */
+export function __resetWorkerHydrationForTests(): void {
+  hydratedEnvKeys.clear();
+}
+
 const workerInitByAuthority = new Map<string, Promise<void>>();
 let workerInitOverride: Promise<void> | null = null;
 
@@ -497,13 +502,24 @@ const composedApps = new Map<
   string,
   Promise<Awaited<ReturnType<typeof import("./compose").composeApp>>>
 >();
+let composedAppOverride: {
+  fetch(request: Request, env: Env, ctx: unknown): Promise<Response>;
+} | null = null;
 
 export function __setWorkerInitForTests(value: Promise<void> | null): void {
   workerInitByAuthority.clear();
   workerInitOverride = value;
 }
 
+export function __setWorkerComposedAppForTests(
+  value: { fetch(request: Request, env: Env, ctx: unknown): Promise<Response> } | null,
+): void {
+  composedApps.clear();
+  composedAppOverride = value;
+}
+
 async function getComposedApp() {
+  if (composedAppOverride) return composedAppOverride;
   const authorityKey = workerInitAuthorityKey();
   const existing = composedApps.get(authorityKey);
   if (existing) return existing;

@@ -1,6 +1,6 @@
 import { strictParseJson } from "@stwd/shared";
 import {
-  DEFAULT_FETCH_TIMEOUT_MS,
+  defaultFetchTimeoutMs,
   POLYMARKET_BATCH_PRICE_HISTORY_LIMIT,
   POLYMARKET_CLOB_API_BASE,
 } from "./constants";
@@ -24,15 +24,16 @@ import {
 
 function timeoutSignal(opts?: PolymarketFetchOptions): AbortSignal | undefined {
   if (opts?.signal) return opts.signal;
-  if (DEFAULT_FETCH_TIMEOUT_MS <= 0) return undefined;
-  return AbortSignal.timeout(DEFAULT_FETCH_TIMEOUT_MS);
+  const timeoutMs = defaultFetchTimeoutMs();
+  if (timeoutMs <= 0) return undefined;
+  return AbortSignal.timeout(timeoutMs);
 }
 
 const MAX_MARKET_BY_TOKEN_RESPONSE_BYTES = 16 * 1024;
-const MARKET_BY_TOKEN_TIMEOUT_MS =
-  Number.isSafeInteger(DEFAULT_FETCH_TIMEOUT_MS) && DEFAULT_FETCH_TIMEOUT_MS > 0
-    ? Math.min(DEFAULT_FETCH_TIMEOUT_MS, 60_000)
-    : 15_000;
+function marketByTokenTimeoutMs(): number {
+  const timeoutMs = defaultFetchTimeoutMs();
+  return Number.isSafeInteger(timeoutMs) && timeoutMs > 0 ? Math.min(timeoutMs, 60_000) : 15_000;
+}
 
 class PolymarketMarketMetadataError extends Error {}
 
@@ -167,7 +168,7 @@ export async function getMarketByToken(
       timedOut = true;
       controller.abort();
       reject(marketMetadataError("Polymarket market metadata request timed out"));
-    }, MARKET_BY_TOKEN_TIMEOUT_MS);
+    }, marketByTokenTimeoutMs());
   });
   opts?.signal?.addEventListener("abort", abortFromCaller, { once: true });
 

@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { withRuntimeEnvironment } from "@stwd/shared/runtime-env";
 import type { EthersSignerLike, PolymarketAccount } from "./credentials";
 import { listPositions } from "./data";
 import { normalizeGammaMarket } from "./discovery";
@@ -272,6 +273,23 @@ describe("signEndpointUrl normalization", () => {
 });
 
 describe("builder attribution defaults OFF", () => {
+  test("builder authority follows A to B to missing", () => {
+    const resolve = (env: Record<string, string>) =>
+      withRuntimeEnvironment({ STEWARD_RUNTIME: "workers", ...env }, () => resolveBuilderConfig());
+    expect(
+      resolve({
+        POLYMARKET_BUILDER_ENABLED: "true",
+        POLYMARKET_BUILDER_RECEIVER: FUNDER,
+        POLYMARKET_BUILDER_FEE_BPS: "10",
+        POLYMARKET_SIGNING_SERVER_URL: "https://signer.example.com",
+        POLYMARKET_SIGNING_SERVER_TOKEN: "a",
+      }).enabled,
+    ).toBe(true);
+    expect(() => resolve({ POLYMARKET_BUILDER_ENABLED: "true" })).toThrow(
+      "enabled builder requires receiver",
+    );
+    expect(resolve({})).toMatchObject({ enabled: false, feeBps: 0 });
+  });
   test("resolveBuilderConfig with no input/env defaults disabled, feeBps 0", () => {
     // Ensure env doesn't leak in.
     const saved = {

@@ -1,3 +1,4 @@
+import { runtimeEnvironmentSnapshot } from "@stwd/shared/runtime-env";
 import { z } from "zod";
 
 // ---------------------------------------------------------------------------
@@ -105,14 +106,15 @@ export type ResolvedBuilderConfig = z.infer<typeof builderConfigInputSchema>;
 export function resolveBuilderConfig(input?: BuilderConfigInput): ResolvedBuilderConfig {
   if (input) return builderConfigInputSchema.parse(input);
 
-  const envEnabled = process.env.POLYMARKET_BUILDER_ENABLED === "true";
-  const envFeeRaw = process.env.POLYMARKET_BUILDER_FEE_BPS;
+  const env = runtimeEnvironmentSnapshot();
+  const envEnabled = env.POLYMARKET_BUILDER_ENABLED === "true";
+  const envFeeRaw = env.POLYMARKET_BUILDER_FEE_BPS;
   return builderConfigInputSchema.parse({
     enabled: envEnabled,
-    receiver: process.env.POLYMARKET_BUILDER_RECEIVER || undefined,
+    receiver: env.POLYMARKET_BUILDER_RECEIVER || undefined,
     feeBps: envFeeRaw !== undefined && envFeeRaw !== "" ? Number(envFeeRaw) : 0,
-    signingServerUrl: process.env.POLYMARKET_SIGNING_SERVER_URL || undefined,
-    signingServerToken: process.env.POLYMARKET_SIGNING_SERVER_TOKEN || undefined,
+    signingServerUrl: env.POLYMARKET_SIGNING_SERVER_URL || undefined,
+    signingServerToken: env.POLYMARKET_SIGNING_SERVER_TOKEN || undefined,
   });
 }
 

@@ -1,4 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
+import { adapterRegistry } from "@stwd/adapters";
+import { MemoryBackend } from "@stwd/auth";
 import * as databaseModule from "@stwd/db";
 import {
   __resetAuditHmacKeyCacheForTests,
@@ -8,14 +10,163 @@ import {
 } from "@stwd/db";
 import { createPGLiteDb } from "@stwd/db/pglite";
 import {
+  __resetWorkerHydrationForTests,
+  __setWorkerComposedAppForTests,
   __setWorkerInitForTests,
   hydrateProcessEnv,
   runWorkerGoogleCredentialLifecycleSweep,
   runWorkerUpstreamCredentialLeaseSweep,
   runWorkerXCredentialLifecycleSweep,
   withWorkerRequestDatabase,
+  withWorkerRuntimeAuthority,
   default as worker,
 } from "../worker";
+
+test("user-link stores remain bound to overlapping request authorities", async () => {
+  const authority = (token: string) => ({
+    DATABASE_URL: `postgresql://worker.invalid/${token}`,
+    DATABASE_DRIVER: "neon-http",
+    NODE_ENV: "test",
+    STEWARD_JWT_SECRET: `worker-${token}-jwt-secret-at-least-32-chars`,
+    REDIS_DRIVER: "upstash",
+    KV_REST_API_URL: `https://${token}.redis.invalid`,
+    KV_REST_API_TOKEN: token,
+  });
+  const a = authority("authority-a");
+  const b = authority("authority-b");
+  const [userRoutes, authRoutes] = await withWorkerRuntimeAuthority(a, () =>
+    Promise.all([import("../routes/user"), import("../routes/auth")]),
+  );
+  const {
+    __consumeUserLinkChallengeForTests,
+    __setUserLinkChallengeForTests,
+    initUserLinkChallengeStores,
+  } = userRoutes;
+  const { authStoreAuthorityKey } = authRoutes;
+  withWorkerRuntimeAuthority(a, () =>
+    initUserLinkChallengeStores(new MemoryBackend(), authStoreAuthorityKey()),
+  );
+  withWorkerRuntimeAuthority(b, () =>
+    initUserLinkChallengeStores(new MemoryBackend(), authStoreAuthorityKey()),
+  );
+  let releaseA!: () => void;
+  const aBlocked = new Promise<void>((resolve) => {
+    releaseA = resolve;
+  });
+  const pendingA = withWorkerRuntimeAuthority(a, async () => {
+    await __setUserLinkChallengeForTests("wallet", "same", "a");
+    await aBlocked;
+    return __consumeUserLinkChallengeForTests("wallet", "same");
+  });
+  expect(
+    await withWorkerRuntimeAuthority(b, async () => {
+      await __setUserLinkChallengeForTests("wallet", "same", "b");
+      return __consumeUserLinkChallengeForTests("wallet", "same");
+    }),
+  ).toBe("b");
+  releaseA();
+  expect(await pendingA).toBe("a");
+  await expect(
+    withWorkerRuntimeAuthority(authority("missing"), () =>
+      __consumeUserLinkChallengeForTests("wallet", "same"),
+    ),
+  ).rejects.toThrow("not initialized for this authority");
+});
+
+test("mounted fetch and scheduled consumers retain hostile overlapping authorities", async () => {
+  const upstreamScheduler = await import("../services/upstream-credential-lease-scheduler");
+  const googleScheduler = await import("../services/provider-google-lifecycle-scheduler");
+  const xScheduler = await import("../services/provider-x-lifecycle-scheduler");
+  const createDbSpy = spyOn(databaseModule, "createDbForRequest").mockImplementation(
+    () => ({ marker: "runtime-authority" }) as unknown as ReturnType<typeof getDb>,
+  );
+  let releaseFetch!: () => void;
+  let fetchEntered!: () => void;
+  const fetchBlocked = new Promise<void>((resolve) => {
+    releaseFetch = resolve;
+  });
+  const fetchStarted = new Promise<void>((resolve) => {
+    fetchEntered = resolve;
+  });
+  const scheduledProviders: string[] = [];
+  const upstreamSpy = spyOn(upstreamScheduler, "runUpstreamCredentialLeaseSweep").mockResolvedValue(
+    {
+      unknown: 0,
+      revoked: 0,
+      attention: 0,
+      expired: 0,
+    },
+  );
+  const googleSpy = spyOn(
+    googleScheduler,
+    "runGoogleCredentialLifecycleRecoverySweep",
+  ).mockImplementation(async () => {
+    scheduledProviders.push(adapterRegistry.swap().provider);
+    return {} as never;
+  });
+  const xSpy = spyOn(xScheduler, "runXCredentialLifecycleRecoverySweep").mockResolvedValue(
+    {} as never,
+  );
+  __setWorkerInitForTests(Promise.resolve());
+  __setWorkerComposedAppForTests({
+    async fetch() {
+      fetchEntered();
+      await fetchBlocked;
+      return new Response(adapterRegistry.swap().provider);
+    },
+  });
+  const common = {
+    DATABASE_URL: "postgresql://worker.invalid/steward",
+    DATABASE_DRIVER: "neon-http",
+    NODE_ENV: "test",
+    STEWARD_JWT_SECRET: "worker-runtime-authority-secret-at-least-32-chars",
+    GOOGLE_PROVIDER_CLIENT_ID: "runtime-google-client",
+    GOOGLE_PROVIDER_CLIENT_SECRET: "runtime-google-secret",
+  } as const;
+  const hydratedKeys = [...Object.keys(common), "STEWARD_SWAP_ADAPTER"];
+  const previousEnvironment = new Map(hydratedKeys.map((key) => [key, process.env[key]] as const));
+  try {
+    const fetchResponse = worker.fetch(
+      new Request("https://steward.test/consumer"),
+      {
+        ...common,
+        STEWARD_SWAP_ADAPTER: "mock",
+      },
+      {},
+    );
+    await fetchStarted;
+    let scheduledWork!: Promise<unknown>;
+    await worker.scheduled(
+      {},
+      { ...common, STEWARD_SWAP_ADAPTER: "not-registered" },
+      {
+        waitUntil(promise) {
+          scheduledWork = promise;
+        },
+      },
+    );
+    await scheduledWork;
+    releaseFetch();
+    expect(await (await fetchResponse).text()).toBe("mock");
+    expect(scheduledProviders).toEqual(["disabled"]);
+
+    const missing = await worker.fetch(new Request("https://steward.test/missing"), common, {});
+    expect(await missing.text()).toBe("disabled");
+  } finally {
+    releaseFetch();
+    __setWorkerComposedAppForTests(null);
+    __setWorkerInitForTests(null);
+    createDbSpy.mockRestore();
+    upstreamSpy.mockRestore();
+    googleSpy.mockRestore();
+    xSpy.mockRestore();
+    __resetWorkerHydrationForTests();
+    for (const [key, value] of previousEnvironment) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});
 
 test("Worker hydration cannot be overridden by a STEWARD_RUNTIME binding", () => {
   const previous = process.env.STEWARD_RUNTIME;

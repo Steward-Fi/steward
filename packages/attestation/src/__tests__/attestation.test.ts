@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { generateKeyPairSync, sign } from "node:crypto";
+import { withRuntimeEnvironment } from "@stwd/shared/runtime-env";
 import {
   canonicalizeJson,
   createDstackTdxProvider,
@@ -17,6 +18,29 @@ import {
 const now = () => new Date("2026-07-30T00:00:00.000Z");
 
 describe("attestation providers", () => {
+  test("provider authority follows A to B to missing without process fallback", async () => {
+    const allowed = await withRuntimeEnvironment(
+      {
+        STEWARD_RUNTIME: "workers",
+        NODE_ENV: "test",
+        STEWARD_ATTESTATION_NOOP_ALLOW: "true",
+        STEWARD_ALLOW_DEV_SECRETS: "true",
+      },
+      () => createNoopDevProvider({ now }).generateQuote(),
+    );
+    expect(allowed.verified).toBe(true);
+    expect(() =>
+      withRuntimeEnvironment(
+        { STEWARD_RUNTIME: "workers", STEWARD_ATTESTATION_NOOP_ALLOW: "true" },
+        () => createNoopDevProvider({ now }),
+      ),
+    ).toThrow("cannot be explicitly allowed in production");
+    expect(
+      await withRuntimeEnvironment({ STEWARD_RUNTIME: "workers" }, () =>
+        createNoopDevProvider({ now }).generateQuote(),
+      ),
+    ).toMatchObject({ verified: false });
+  });
   test("noop-dev refuses to silently verify", async () => {
     const provider = createNoopDevProvider({ now });
     const quote = await provider.generateQuote();

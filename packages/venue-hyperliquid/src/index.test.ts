@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { withRuntimeEnvironment } from "@stwd/shared/runtime-env";
 import { privateKeyToAccount } from "viem/accounts";
 import {
   actionHash,
@@ -59,6 +60,20 @@ const xyzSpcxTransport = (extra?: {
 });
 
 describe("Hyperliquid L1 signing", () => {
+  test("builder authority follows A to B to missing", () => {
+    const validate = (env: Record<string, string>) =>
+      withRuntimeEnvironment({ STEWARD_RUNTIME: "workers", ...env }, () => validateBuilderFeeEnv());
+    expect(() =>
+      validate({
+        HL_BUILDER_ADDRESS: "0xABCDEF0123456789abcdef0123456789ABCDEF01",
+        HL_BUILDER_FEE_TENTHS_BP: "10",
+      }),
+    ).not.toThrow();
+    expect(() =>
+      validate({ HL_BUILDER_ADDRESS: "not-an-address", HL_BUILDER_FEE_TENTHS_BP: "10" }),
+    ).toThrow("Invalid HL builder fee configuration");
+    expect(() => validate({})).not.toThrow();
+  });
   test("builds the documented wire action and deterministic L1 typed data", async () => {
     const action = toExchangeAction({
       coin: "BTC",

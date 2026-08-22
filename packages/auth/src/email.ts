@@ -1,6 +1,6 @@
 import { createHmac, randomBytes, randomInt, timingSafeEqual } from "node:crypto";
 import { redactedThrownDiagnostics } from "@stwd/shared";
-import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
+import { runtimeEnvironmentSnapshot, runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 
 import { hashSha256Hex } from "./crypto";
 import type { EmailDeliveryReceipt, EmailProvider } from "./email-provider";
@@ -483,7 +483,10 @@ export class EmailAuth {
       // Tests intentionally use an isolated deterministic fallback. Every
       // runnable non-test environment must explicitly opt in to that fallback,
       // matching the repository-wide dev-secret policy.
-      if (runtimeEnvironmentValue("NODE_ENV") !== "test" && !isDevSecretAllowed()) {
+      if (
+        runtimeEnvironmentValue("NODE_ENV") !== "test" &&
+        !isDevSecretAllowed(runtimeEnvironmentValue("NODE_ENV"), runtimeEnvironmentSnapshot())
+      ) {
         throw new Error(
           "STEWARD_EMAIL_CODE_SECRET is required. For local development only, set STEWARD_ALLOW_DEV_SECRETS=true to use the insecure dev secret.",
         );

@@ -9,7 +9,9 @@
  * unearned reliance on the caller's retry-idempotency contract.
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { withRuntimeEnvironment } from "@stwd/shared/runtime-env";
 import {
+  __auditHmacDigestForTests,
   __resetAuditHmacKeyCacheForTests,
   withTenantAuditedTransaction,
   withTenantAuditedTransactionOnDb,
@@ -25,6 +27,22 @@ function uniqueViolation(constraint: string): Error {
 }
 
 describe("audit-chain retry classification (SEC-167)", () => {
+  test("HMAC cache is authority-keyed across A to B to missing", () => {
+    const digest = (key?: string) =>
+      withRuntimeEnvironment(
+        {
+          STEWARD_RUNTIME: "workers",
+          NODE_ENV: "production",
+          ...(key ? { STEWARD_AUDIT_HMAC_KEY: key } : {}),
+        },
+        () => __auditHmacDigestForTests("authority-probe"),
+      );
+    const a = digest("a".repeat(64));
+    const b = digest("b".repeat(64));
+    expect(a).not.toBe(b);
+    expect(digest("a".repeat(64))).toBe(a);
+    expect(() => digest()).toThrow("STEWARD_AUDIT_HMAC_KEY is required in production");
+  });
   beforeAll(async () => {
     process.env.STEWARD_PGLITE_MEMORY = "true";
     const { db, client } = await createPGLiteDb("memory://");

@@ -4,6 +4,7 @@
  */
 
 import { describe, expect, test } from "bun:test";
+import { withRuntimeEnvironment } from "@stwd/shared/runtime-env";
 import { StewardProxyClient } from "../client";
 
 interface Captured {
@@ -30,6 +31,16 @@ function makeCapturingFetch(): { fetch: typeof fetch; calls: Captured[] } {
 }
 
 describe("StewardProxyClient construction", () => {
+  test("default transport policy follows A to B to missing Worker authority", () => {
+    const construct = (env: Record<string, string>) =>
+      withRuntimeEnvironment(
+        { STEWARD_RUNTIME: "workers", ...env },
+        () => new StewardProxyClient({ proxyUrl: "http://localhost:8080", token: "t" }),
+      );
+    expect(() => construct({ NODE_ENV: "production" })).toThrow("must be https");
+    expect(() => construct({ NODE_ENV: "test" })).toThrow("must be https");
+    expect(() => construct({})).toThrow("must be https");
+  });
   test("requires proxyUrl and token", () => {
     // @ts-expect-error missing token
     expect(() => new StewardProxyClient({ proxyUrl: "https://p" })).toThrow("token is required");

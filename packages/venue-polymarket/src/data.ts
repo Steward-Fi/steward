@@ -1,4 +1,4 @@
-import { DEFAULT_FETCH_TIMEOUT_MS, POLYMARKET_DATA_API_BASE } from "./constants";
+import { defaultFetchTimeoutMs, POLYMARKET_DATA_API_BASE } from "./constants";
 import type { PolymarketFetchOptions } from "./discovery";
 import { type PolymarketPosition } from "./types";
 
@@ -11,8 +11,9 @@ import { type PolymarketPosition } from "./types";
 
 function timeoutSignal(opts?: PolymarketFetchOptions): AbortSignal | undefined {
   if (opts?.signal) return opts.signal;
-  if (DEFAULT_FETCH_TIMEOUT_MS <= 0) return undefined;
-  return AbortSignal.timeout(DEFAULT_FETCH_TIMEOUT_MS);
+  const timeoutMs = defaultFetchTimeoutMs();
+  if (timeoutMs <= 0) return undefined;
+  return AbortSignal.timeout(timeoutMs);
 }
 
 interface RawDataApiPosition {

@@ -123,10 +123,16 @@ function u8Equals(a: Uint8Array, b: Uint8Array): boolean {
 const MIN_HMAC_RAW_BYTES = 32;
 
 let warnedDevFallback = false;
-let cachedKey: Uint8Array | null = null;
+const cachedKeys = new Map<string, Uint8Array>();
 function getHmacKey(): Uint8Array {
-  if (cachedKey) return cachedKey;
   const env = runtimeEnvironmentValue("STEWARD_AUDIT_HMAC_KEY");
+  const authority = JSON.stringify([
+    env ?? "",
+    runtimeEnvironmentValue("NODE_ENV") ?? "",
+    runtimeEnvironmentValue("STEWARD_ALLOW_DEV_SECRETS") ?? "",
+  ]);
+  const cachedKey = cachedKeys.get(authority);
+  if (cachedKey) return cachedKey;
   if (env && env.length > 0) {
     const isHex = /^[0-9a-fA-F]+$/.test(env) && env.length % 2 === 0;
     // Hex keys decode to env.length/2 bytes; raw keys count chars directly.
@@ -138,9 +144,10 @@ function getHmacKey(): Uint8Array {
           "Generate with `openssl rand -hex 32`.",
       );
     }
-    cachedKey =
+    const key =
       isHex && env.length >= MIN_HMAC_RAW_BYTES * 2 ? toU8(env) : new TextEncoder().encode(env);
-    return cachedKey;
+    cachedKeys.set(authority, key);
+    return key;
   }
   if (runtimeEnvironmentValue("NODE_ENV") === "production") {
     throw new Error(
@@ -162,10 +169,11 @@ function getHmacKey(): Uint8Array {
         "(STEWARD_ALLOW_DEV_SECRETS=true). Audit chain is NOT tamper-evident. Never use in production.",
     );
   }
-  cachedKey = new TextEncoder().encode(
+  const key = new TextEncoder().encode(
     "dev-audit-hmac-key-do-not-use-in-production-aaaaaaaaaaaaaaaaaaaaaaaa",
   );
-  return cachedKey;
+  cachedKeys.set(authority, key);
+  return key;
 }
 
 /**

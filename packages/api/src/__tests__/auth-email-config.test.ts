@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { readFileSync } from "node:fs";
 import { closeDb, getDb, tenantConfigs, tenants } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
+import { withRuntimeEnvironment } from "@stwd/shared/runtime-env";
 import { KeyStore } from "@stwd/vault";
 import { eq } from "drizzle-orm";
 import {
@@ -58,6 +59,31 @@ describe("getEmailAuthForTenant", () => {
     expect(provider.constructor.name).toBe("ResendProvider");
     expect(provider.from).toBe("Global <login@example.com>");
     expect(provider.replyTo).toBeUndefined();
+  });
+
+  it("keys cached EmailAuth by code-secret authority and fails closed when missing", async () => {
+    clearEmailAuthTenantCacheForTests();
+    const common = {
+      STEWARD_RUNTIME: "workers",
+      NODE_ENV: "production",
+      STEWARD_MASTER_PASSWORD: MASTER_PASSWORD,
+      STEWARD_ACK_LOCAL_CUSTODY: "true",
+      STEWARD_KDF_SALT: "ab".repeat(32),
+      RESEND_API_KEY: "runtime-resend-key",
+      EMAIL_FROM: "Runtime <login@example.com>",
+      APP_URL: "https://runtime.example.com",
+    };
+    const resolve = (secret?: string) =>
+      withRuntimeEnvironment(
+        { ...common, ...(secret ? { STEWARD_EMAIL_CODE_SECRET: secret } : {}) },
+        () => getEmailAuthForTenant(TEST_TENANT_ID),
+      );
+    const a = await resolve("a".repeat(32));
+    const b = await resolve("b".repeat(32));
+    expect(a).not.toBe(b);
+    expect((a as any).codeVerifierSecret).toBe("a".repeat(32));
+    expect((b as any).codeVerifierSecret).toBe("b".repeat(32));
+    await expect(resolve()).rejects.toThrow("STEWARD_EMAIL_CODE_SECRET is required");
   });
 
   it("uses the tenant-specific config when emailConfig is set", async () => {

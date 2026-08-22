@@ -21,6 +21,7 @@
  * Callers build the path (e.g. "/openai/v1/chat/completions") and body.
  */
 
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 import { signProxyRequest } from "./signature";
 
 const MUTATING_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
@@ -96,7 +97,10 @@ export class StewardProxyClient {
     if (!options.proxyUrl) throw new Error("proxyUrl is required");
     if (!options.token) throw new Error("token is required");
 
-    const requireHttps = options.requireHttps ?? process.env.NODE_ENV === "production";
+    const requireHttps =
+      options.requireHttps ??
+      (runtimeEnvironmentValue("NODE_ENV") === "production" ||
+        runtimeEnvironmentValue("STEWARD_RUNTIME") === "workers");
     if (requireHttps && !/^https:\/\//i.test(options.proxyUrl)) {
       throw new Error("proxyUrl must be https in production");
     }
