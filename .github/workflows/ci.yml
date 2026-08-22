@@ -152,6 +152,12 @@ jobs:
             PKG_NAME="@stwd/$(basename ${{ matrix.package }})"
             bunx turbo run build --filter="${PKG_NAME}..."
           fi
+          # plugin-trading tests reach API source that imports newly added
+          # @stwd/redis exports. Rebuild the emitted package entry explicitly
+          # so a stale dist artifact cannot survive workspace orchestration.
+          if [ "${{ matrix.package }}" = "packages/plugin-trading" ]; then
+            bun run --cwd packages/redis build
+          fi
 
       - name: Test ${{ matrix.package }}
         # --isolate gives each test file a fresh global object so module
@@ -591,6 +597,9 @@ jobs:
           STEWARD_EMAIL_CODE_SECRET: "ci-email-code-secret-must-be-at-least-32-chars-long"
           STEWARD_EXECUTION_AUTH_SECRET: "v2-ci-1:ci-execution-auth-secret-must-be-at-least-32-bytes-long"
           STEWARD_AUDIT_HMAC_KEY: "ci-audit-hmac-key-must-be-at-least-32-bytes-long"
+          # Isolated files share the real Redis service and one coarse fallback
+          # subject. Focused limiter suites override this via runtime snapshots.
+          STEWARD_RATE_LIMIT_MAX_REQUESTS: "1000000"
           # Isolated files reuse deterministic agent/host fixtures, so retain
           # Redis enforcement with a high bounded ceiling for the test flood.
           STEWARD_PROXY_RATE_LIMIT_MAX: "1000000"

@@ -23,6 +23,7 @@ import { SOCKET_PEER_ENV_KEY } from "../services/runtime-gate";
 
 const rateLimitCalls: Array<{ key: string; windowMs: number; max: number }> = [];
 const rateLimitCounts = new Map<string, number>();
+const redisClientEnvironments: Array<Record<string, string | undefined>> = [];
 let forceDenyAll = false;
 
 const checkRateLimitMock = mock(async (key: string, windowMs: number, max: number) => {
@@ -33,10 +34,15 @@ const checkRateLimitMock = mock(async (key: string, windowMs: number, max: numbe
   return { allowed: count <= max, remaining: Math.max(max - count, 0), resetMs: windowMs };
 });
 const pingMock = mock(async () => "PONG");
+const createRedisClientMock = mock((env: Record<string, string | undefined>) => {
+  redisClientEnvironments.push(env);
+  return { ping: pingMock };
+});
 
 mock.module("@stwd/redis", () => ({
   checkRateLimit: checkRateLimitMock,
   checkSpendLimit: async () => ({ allowed: true, spent: 0, remaining: 1 }),
+  createRedisClient: createRedisClientMock,
   createUpstashIoredisAdapter: () => ({ ping: pingMock }),
   disconnectRedis: async () => undefined,
   estimateCost: () => 0,
@@ -130,6 +136,10 @@ async function connectMockRedis(): Promise<void> {
   process.env.REDIS_DRIVER = "ioredis";
   process.env.REDIS_URL = "redis://auth-client-ip.test:6379";
   expect(await redisMiddleware.initRedis()).toBe(true);
+  expect(redisClientEnvironments.at(-1)).toMatchObject({
+    REDIS_DRIVER: "ioredis",
+    REDIS_URL: "redis://auth-client-ip.test:6379",
+  });
 }
 
 function capturedKeys(endpoint: string): string[] {
