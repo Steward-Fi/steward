@@ -44,9 +44,10 @@ async function runCommand(command: string[], env: Record<string, string | undefi
 }
 
 describePostgres("capability rate limit through the restricted production app role", () => {
-  const admin = createDb(databaseUrl!).client;
+  let admin!: ReturnType<typeof createDb>["client"];
 
   beforeAll(async () => {
+    admin = createDb(databaseUrl!).client;
     const [role] = await admin<{ rolsuper: boolean }[]>`
       SELECT rolsuper FROM pg_roles WHERE rolname = current_user
     `;
