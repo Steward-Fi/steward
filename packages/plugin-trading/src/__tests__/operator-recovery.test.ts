@@ -55,42 +55,6 @@ const adapterVaultClients: Array<{
   signTypedData: (input: Record<string, unknown>) => Promise<string>;
 }> = [];
 
-mock.module("@stwd/policy-engine", () => ({
-  PolicyEngine: class {
-    async evaluate(
-      policies: Array<{ type?: string; config?: { addresses?: string[] } }>,
-      context: { request?: { to?: string } },
-    ) {
-      const destination = context.request?.to?.toLowerCase();
-      const addressPolicy = policies.find((policy) => policy.type === "approved-addresses");
-      if (
-        destination &&
-        addressPolicy?.config?.addresses &&
-        !addressPolicy.config.addresses.some((address) => address.toLowerCase() === destination)
-      ) {
-        return {
-          approved: false,
-          results: [{ passed: false, reason: "destination is not approved" }],
-        };
-      }
-      return { approved: true, results: [] };
-    }
-  },
-  policyRuleRegistry: {
-    register: () => undefined,
-    unregister: () => undefined,
-    get: () => undefined,
-    list: () => [],
-  },
-  aggregationLookupFromMap: () => undefined,
-  aggregationQueriesForPolicies: () => [],
-  aggregationQueryKey: () => "unused",
-  assetAllowlistEvaluator: () => ({ passed: true }),
-  evaluateTradeOrder: () => ({ approved: true, results: [] }),
-  tradeLeverageCapEvaluator: () => ({ passed: true }),
-  tradeVenueAllowlistEvaluator: () => ({ passed: true }),
-}));
-
 class MockHyperliquidAdapter {
   constructor(
     public vault: unknown,

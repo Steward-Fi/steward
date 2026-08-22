@@ -215,6 +215,7 @@ async function fetchWithdrawable(walletAddress: string): Promise<string | null> 
  */
 export function createOperatorRecoveryRoutes(
   ctx: StewardAppContext,
+  options: { memoryRateLimitMaxEntries?: number } = {},
 ): Hono<{ Variables: AppVariables }> {
   const {
     db,
@@ -328,7 +329,7 @@ export function createOperatorRecoveryRoutes(
   // acknowledged single-instance deployment.
   const OPERATOR_TRANSFER_RATE_WINDOW_MS = 60_000;
   const OPERATOR_TRANSFER_MAX_CALLS = 10;
-  const operatorTransferRateLimit = new MemoryTradingRateLimiter();
+  const operatorTransferRateLimit = new MemoryTradingRateLimiter(options.memoryRateLimitMaxEntries);
 
   async function enforceOperatorTransferRateLimit(
     rail: "withdraw" | "usd-send",

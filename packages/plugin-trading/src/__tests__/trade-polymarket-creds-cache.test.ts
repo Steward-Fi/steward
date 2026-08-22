@@ -16,7 +16,6 @@ import {
   describe,
   expect,
   it,
-  mock,
   setDefaultTimeout,
   spyOn,
 } from "bun:test";
@@ -26,6 +25,7 @@ import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import type { AppVariables } from "@stwd/shared";
 import { withRuntimeEnvironment } from "@stwd/shared/runtime-env";
 import { TradeSessionManager } from "@stwd/trade-sessions";
+import { PolymarketExecutionAdapter } from "@stwd/venue-polymarket";
 import { Hono } from "hono";
 import type { StewardAppContext } from "../context";
 
@@ -50,6 +50,9 @@ const fakeRedis = {
     token: string,
     ...args: unknown[]
   ) => {
+    if (script.includes("ZREMRANGEBYSCORE") && script.includes("ZADD")) {
+      return [1, 1, Date.now(), Date.now(), 1_000];
+    }
     const raw = redisStore.get(key);
     if (!raw) return 0;
     const current = JSON.parse(raw) as { state?: string; claimToken?: string };
@@ -69,34 +72,6 @@ const fakeRedis = {
   },
 };
 
-// With a Redis client present the route's rate limiter calls the real
-// @stwd/redis singleton; keep it in-memory for this harness.
-mock.module("@stwd/redis", () => ({
-  // @stwd/auth's revocation store (SEC-032) statically imports this; the mock
-  // namespace must provide every name importers bind or bun throws at load.
-  assertRedisUrlTls: () => undefined,
-  checkRateLimit: async () => ({ allowed: true, remaining: 9, resetMs: 1_000 }),
-  checkSpendLimit: async () => ({ allowed: true, spent: 0, remaining: 1 }),
-  createUpstashIoredisAdapter: () => ({ ping: async () => "PONG" }),
-  disconnectRedis: async () => undefined,
-  estimateCost: () => 0,
-  getAggregationSnapshot: async () => null,
-  getCachedPolicies: async () => null,
-  getPricingTable: () => ({}),
-  getRedis: () => fakeRedis,
-  getRedisDriver: () => "ioredis",
-  getSpend: async () => 0,
-  getSpendByHost: async () => ({}),
-  invalidateCache: async () => undefined,
-  invalidateTenantCache: async () => undefined,
-  isKnownHost: () => false,
-  recordAggregationEvent: async () => undefined,
-  recordSpend: async () => undefined,
-  reserveSpend: async () => ({ allowed: true, reservationId: "reservation-test" }),
-  setCachedPolicies: async () => undefined,
-  settleReservedSpend: async () => undefined,
-}));
-
 const TOKEN_ID = "71321045679252212594626385532706912750332728571942532289631379312455583992563";
 const DERIVED_CREDS = {
   apiKey: "cache-test-key",
@@ -105,6 +80,7 @@ const DERIVED_CREDS = {
 };
 
 let fenceSpy: ReturnType<typeof spyOn> | undefined;
+let orderIdentitySpy: ReturnType<typeof spyOn> | undefined;
 
 async function seedTenantAgent(): Promise<{ tenantId: string; agentId: string }> {
   const suffix = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -172,10 +148,14 @@ beforeAll(async () => {
       return cb();
     }) as never,
   );
+  orderIdentitySpy = spyOn(PolymarketExecutionAdapter.prototype, "orderIdentity").mockResolvedValue(
+    `0x${"7".repeat(64)}`,
+  );
 });
 
 afterAll(async () => {
   fenceSpy?.mockRestore();
+  orderIdentitySpy?.mockRestore();
   await closeDb();
   delete process.env.STEWARD_PGLITE_MEMORY;
 });

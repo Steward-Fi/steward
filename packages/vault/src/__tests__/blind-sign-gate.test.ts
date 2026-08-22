@@ -114,6 +114,7 @@ describe("Vault blind-sign gate (SEC-163)", () => {
       transaction: tx,
       broadcast: false,
       allowBlindSign: true,
+      lastValidBlockHeight: 1_000,
     });
 
     expect(result.broadcast).toBe(false);
@@ -133,6 +134,7 @@ describe("Vault blind-sign gate (SEC-163)", () => {
       broadcast: false,
       expectedTo: recipient.toBase58(),
       expectedValue: "1000",
+      lastValidBlockHeight: 1_000,
     });
     expect(result.broadcast).toBe(false);
 
@@ -145,6 +147,7 @@ describe("Vault blind-sign gate (SEC-163)", () => {
         broadcast: false,
         expectedTo: PublicKey.unique().toBase58(),
         expectedValue: "1000",
+        lastValidBlockHeight: 1_000,
       }),
     ).rejects.toThrow(/recipient does not match/i);
   });

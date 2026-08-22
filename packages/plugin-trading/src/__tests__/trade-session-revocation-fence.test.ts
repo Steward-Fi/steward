@@ -82,10 +82,11 @@ describe("trade session revocation fence", () => {
     const submitOrder = route.indexOf("adapter.submitOrder(signed)");
     const response = route.indexOf("const response = {", submitOrder);
     const envelope = route.indexOf("const envelope: TradeIdempotencyResponse", response);
-    const auditTry = route.indexOf("try {", envelope);
+    const checkpoint = route.indexOf("checkpointTradeResult", envelope);
+    const auditDrain = route.indexOf("await drainTradeRecoveryAudit", checkpoint);
     const completeBestEffort = route.indexOf(
-      "completeTradeIdempotencyBestEffort(idempotency, envelope)",
-      auditTry,
+      "await completeTradeIdempotencyBestEffort(idempotency, envelope)",
+      auditDrain,
     );
     const returnSuccess = route.indexOf(
       "return c.json(responseData(response))",
@@ -96,8 +97,9 @@ describe("trade session revocation fence", () => {
     expect(submitOrder).toBeGreaterThanOrEqual(0);
     expect(response).toBeGreaterThan(submitOrder);
     expect(envelope).toBeGreaterThan(response);
-    expect(auditTry).toBeGreaterThan(envelope);
-    expect(completeBestEffort).toBeGreaterThan(auditTry);
+    expect(checkpoint).toBeGreaterThan(envelope);
+    expect(auditDrain).toBeGreaterThan(checkpoint);
+    expect(completeBestEffort).toBeGreaterThan(auditDrain);
     expect(returnSuccess).toBeGreaterThan(completeBestEffort);
   });
 });
