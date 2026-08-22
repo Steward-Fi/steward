@@ -33,7 +33,18 @@
  * signWithdraw, submitWithdraw) — no signing is reimplemented here.
  */
 
-import { operatorTransferReservations, policies, proxyAuditLog, transactions } from "@stwd/db";
+import { createHash } from "node:crypto";
+import {
+  auditEvents,
+  getDatabaseDriver,
+  hasTenantTransactionDatabase,
+  operatorTransferReservations,
+  policies,
+  proxyAuditLog,
+  tenantContextFromAuthenticatedPrincipal,
+  transactions,
+  withTenantRlsTransaction,
+} from "@stwd/db";
 import { checkRateLimit } from "@stwd/redis";
 import {
   type ApiResponse,
@@ -46,7 +57,7 @@ import {
   hyperliquidAssetSchema,
   isBuilderPerpSymbol,
 } from "@stwd/venue-hyperliquid";
-import { and, eq, gte, sql } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, sql } from "drizzle-orm";
 import type { Context } from "hono";
 import { Hono } from "hono";
 import { z } from "zod";
@@ -710,6 +721,58 @@ export function createOperatorRecoveryRoutes(
         reason: action,
       })
       .catch(() => undefined);
+  }
+
+  type DurableTransferState = {
+    action: string;
+    metadata: Record<string, unknown>;
+  };
+
+  async function findDurableTransferState(
+    c: Context<{ Variables: AppVariables }>,
+    tenantId: string,
+    agentId: string,
+    idempotencyKey: string,
+  ): Promise<DurableTransferState | undefined> {
+    const query = async (queryDb: typeof db) => {
+      const rows = await queryDb
+        .select({ action: auditEvents.action, metadata: auditEvents.metadata })
+        .from(auditEvents)
+        .where(
+          and(
+            eq(auditEvents.tenantId, tenantId),
+            eq(auditEvents.resourceId, agentId),
+            inArray(auditEvents.action, [
+              "trade.recovery.transfer.requested",
+              "trade.recovery.transfer.failed",
+              "trade.recovery.transfer.submitted",
+            ]),
+            sql`${auditEvents.metadata}->>'idempotencyKey' = ${idempotencyKey}`,
+          ),
+        )
+        .orderBy(desc(auditEvents.seq))
+        .limit(1);
+      return rows[0];
+    };
+    if (hasTenantTransactionDatabase({ tenantId })) return query(db);
+
+    // Platform-key operator requests intentionally bypass tenantAuth, so they
+    // do not already carry a tenant-bound database capability. Establish one
+    // from the authenticated operator identity before reading the RLS-protected
+    // durable audit chain. Request body/header values never mint this context.
+    const actor = operatorActor(c);
+    const context = tenantContextFromAuthenticatedPrincipal({
+      tenantId,
+      method: "operator-recovery-transfer",
+      subject: actor.actorId,
+    });
+    const driver =
+      process.env.STEWARD_DB_MODE === "pglite" || process.env.STEWARD_PGLITE_MEMORY === "true"
+        ? "pglite"
+        : getDatabaseDriver();
+    return withTenantRlsTransaction(db as never, driver, context, async (tx) =>
+      query(tx as typeof db),
+    );
   }
 
   /**
@@ -1483,16 +1546,65 @@ export function createOperatorRecoveryRoutes(
       );
     }
 
-    let idempotency = await getOperatorIdempotency(`${tenantId}:transfer`, body.idempotencyKey, {
+    const requestCommitment = {
       agentId,
       venue,
       sourceDex,
       destinationDex,
       amount: amountBaseUnits.toString(),
       token: body.token ?? null,
-    });
+    };
+    const requestFingerprint = createHash("sha256")
+      .update(JSON.stringify(requestCommitment))
+      .digest("hex");
+    let idempotency = await getOperatorIdempotency(
+      `${tenantId}:transfer`,
+      body.idempotencyKey,
+      requestCommitment,
+    );
     const replayResponse = operatorIdempotencyResponse(c, idempotency);
     if (replayResponse) return replayResponse;
+
+    // The HMAC-chained audit log is the durable replay backstop when Redis or a
+    // process-local idempotency cache is unavailable. A requested event without
+    // a terminal event means submission may have happened; fail closed instead
+    // of repeating a capital movement.
+    const durableState = await findDurableTransferState(c, tenantId, agentId, body.idempotencyKey);
+    if (durableState) {
+      if (durableState.metadata.requestFingerprint !== requestFingerprint) {
+        return c.json<ApiResponse>(
+          { ok: false, error: "Idempotency key reused with a different body" },
+          409,
+        );
+      }
+      if (durableState.action === "trade.recovery.transfer.submitted") {
+        c.header("Idempotency-Replayed", "true");
+        return c.json<ApiResponse>({ ok: true, data: durableState.metadata.response });
+      }
+      if (
+        durableState.action === "trade.recovery.transfer.failed" &&
+        durableState.metadata.ambiguousOutcome === true
+      ) {
+        c.header("Idempotency-Replayed", "true");
+        return c.json<ApiResponse>(
+          {
+            ok: false,
+            error: "Failed to submit collateral transfer",
+          },
+          502,
+        );
+      }
+      if (durableState.action === "trade.recovery.transfer.requested") {
+        c.header("Retry-After", "60");
+        return c.json<ApiResponse>(
+          {
+            ok: false,
+            error: "Collateral transfer outcome requires reconciliation",
+          },
+          409,
+        );
+      }
+    }
 
     const agent = await ensureAgentForTenant(tenantId, agentId);
     if (!agent) return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
@@ -1514,6 +1626,9 @@ export function createOperatorRecoveryRoutes(
       destinationDex,
       amountUsdc: String(body.amountUsdc),
       amountBaseUnits: amountBaseUnits.toString(),
+      idempotencyKey: body.idempotencyKey,
+      requestFingerprint,
+      outcome: "submission_pending",
     });
 
     // Signing is local (nothing reaches the venue), so a sign failure is safe to
@@ -1538,6 +1653,10 @@ export function createOperatorRecoveryRoutes(
         sourceDex,
         destinationDex,
         amountUsdc: String(body.amountUsdc),
+        idempotencyKey: body.idempotencyKey,
+        requestFingerprint,
+        ambiguousOutcome: false,
+        phase: "sign",
         ...redactedThrownDiagnostics(err),
       }).catch((auditErr) => {
         console.error(
@@ -1569,7 +1688,11 @@ export function createOperatorRecoveryRoutes(
         sourceDex,
         destinationDex,
         amountUsdc: String(body.amountUsdc),
+        idempotencyKey: body.idempotencyKey,
+        requestFingerprint,
         definiteRejection: definitelyRejected,
+        ambiguousOutcome: !definitelyRejected,
+        phase: "submit",
         ...redactedThrownDiagnostics(err),
       }).catch((auditErr) => {
         console.error(
@@ -1591,7 +1714,12 @@ export function createOperatorRecoveryRoutes(
     // The venue effect is terminal once submitSendAsset returns. Persist replay
     // evidence before the completion audit so an audit outage cannot make a
     // retry submit the same capital movement again.
-    await idempotency.store?.(response);
+    await idempotency.store?.(response).catch((storeErr) => {
+      console.error(
+        "[operator-recovery] collateral transfer replay persistence failed",
+        redactedThrownDiagnostics(storeErr),
+      );
+    });
     await auditRecoveryEvent(c, tenantId, agentId, "trade.recovery.transfer.submitted", {
       venue,
       walletAddress,
@@ -1599,6 +1727,9 @@ export function createOperatorRecoveryRoutes(
       destinationDex,
       amountUsdc: String(body.amountUsdc),
       amountBaseUnits: amountBaseUnits.toString(),
+      idempotencyKey: body.idempotencyKey,
+      requestFingerprint,
+      response,
       action,
     }).catch((auditErr) => {
       console.error(
