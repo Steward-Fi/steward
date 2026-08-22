@@ -366,8 +366,15 @@ export const SECURITY_SURFACE_OPERATIONS = [
     id: "wallet.solana_transaction.sign",
     kind: "wallet-signing",
     capability: "sign_solana_transaction",
-    vaultMethods: ["signSolanaTransaction"],
+    vaultMethods: ["signSolanaTransaction", "signTransaction"],
     routes: [
+      {
+        file: "packages/api/src/routes/vault.ts",
+        method: "POST",
+        path: "/:agentId/sign",
+        notes:
+          "Solana native branch consumes a durable execution claim through GovernedVault before raw signing",
+      },
       { file: "packages/api/src/routes/vault.ts", method: "POST", path: "/:agentId/sign-solana" },
       {
         file: "packages/api/src/routes/vault.ts",
@@ -379,7 +386,8 @@ export const SECURITY_SURFACE_OPERATIONS = [
         file: "packages/api/src/routes/vault.ts",
         method: "POST",
         path: "/:agentId/approve/:txId",
-        notes: "Solana approval execution branch",
+        notes:
+          "Solana approval execution branch; native transfers consume a durable execution claim through GovernedVault immediately before raw signing",
       },
     ],
     auth: ["agent access", "delegated sign_transaction"],
@@ -552,27 +560,13 @@ export interface RawEvmSignCallSite {
  * entry without removing the call also fails.
  */
 export const RAW_EVM_SIGN_INVENTORY = [
-  // ── packages/api/src/routes/vault.ts (4 raw calls) ──
-  {
-    file: "packages/api/src/routes/vault.ts",
-    marker: "invariant: primary EVM sign reached raw signer without gateway authorization",
-    classification: "migrated-invariant-guarded",
-    reason:
-      "Primary /sign Solana-only fallback. An isEvmSignRequest invariant guard throws immediately above it, so no EVM request can reach raw signing.",
-  },
+  // ── packages/api/src/routes/vault.ts (2 raw calls) ──
   {
     file: "packages/api/src/routes/vault.ts",
     marker: "/:agentId/actions/transfer",
     classification: "legacy",
     reason:
       "Transfer action EVM sign; separate non-migrated surface. One-for-one with LEGACY_EVM_SIGN_CALL_SITES.",
-  },
-  {
-    file: "packages/api/src/routes/vault.ts",
-    marker: 'transferPayload?.token === "native" && !transactionRow.data',
-    classification: "migrated-invariant-guarded",
-    reason:
-      "Approved native-SOL replay. The enclosing isSolana branch prevents every EVM approval from reaching this raw signer.",
   },
   {
     file: "packages/api/src/routes/vault.ts",

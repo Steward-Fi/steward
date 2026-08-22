@@ -64,8 +64,19 @@ export { runExternalKeyCustodyV1Conformance } from "./external-key-custody-confo
 export type {
   ExecutionAuthorizationConsumeCallback,
   GovernedSignTransactionOptions,
+  GovernedSolanaNativeSignOptions,
+  GovernedSolanaParsedEffects,
+  GovernedSolanaParsedExecutionClaim,
+  GovernedSolanaParsedSignOptions,
+  GovernedSolanaParsedSignRequest,
 } from "./governed-vault";
-export { GovernedVault, GovernedVaultError } from "./governed-vault";
+export {
+  executionClaimDigestForGovernedSolanaParsedSign,
+  executionPayloadDigestForGovernedSolanaNativeSign,
+  executionPayloadDigestForGovernedSolanaParsedSign,
+  GovernedVault,
+  GovernedVaultError,
+} from "./governed-vault";
 export type { BitcoinAddressType, BitcoinNetwork, DerivedBitcoinKey } from "./hd-wallet";
 export {
   deriveBitcoinKey,
@@ -174,6 +185,7 @@ export {
   getSolanaBalance,
   getSplTokenBalances,
   isValidSolanaPublicKey,
+  normalizedSolanaMessageDigest,
   restoreSolanaKeypair,
   signSolanaMessage,
   signSolanaTransaction,
