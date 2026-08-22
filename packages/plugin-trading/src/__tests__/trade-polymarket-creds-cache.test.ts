@@ -24,6 +24,7 @@ import { ClobClient } from "@polymarket/clob-client";
 import { agents, closeDb, getDb, tenants, tradeSessions } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import type { AppVariables } from "@stwd/shared";
+import { withRuntimeEnvironment } from "@stwd/shared/runtime-env";
 import { TradeSessionManager } from "@stwd/trade-sessions";
 import { Hono } from "hono";
 import type { StewardAppContext } from "../context";
@@ -184,6 +185,47 @@ beforeEach(() => {
 });
 
 describe("SEC-108: Polymarket L2 creds Redis cache is encrypted at rest", () => {
+  it("binds its derived key to each request's password and KDF salt across hostile overlap", async () => {
+    const { _polymarketCredentialCacheKeyFingerprintForTests } = await import("../routes/trade");
+    const authorityA = {
+      STEWARD_MASTER_PASSWORD: "shared-password",
+      STEWARD_KDF_SALT: "a1".repeat(16),
+    };
+    const authorityB = {
+      STEWARD_MASTER_PASSWORD: "shared-password",
+      STEWARD_KDF_SALT: "b2".repeat(16),
+    };
+
+    let releaseA: (() => void) | undefined;
+    let signalAStarted: (() => void) | undefined;
+    const aStarted = new Promise<void>((resolve) => {
+      signalAStarted = resolve;
+    });
+    const aMayResume = new Promise<void>((resolve) => {
+      releaseA = resolve;
+    });
+    const requestA = withRuntimeEnvironment(authorityA, async () => {
+      const before = _polymarketCredentialCacheKeyFingerprintForTests();
+      signalAStarted?.();
+      await aMayResume;
+      return {
+        before,
+        after: _polymarketCredentialCacheKeyFingerprintForTests(),
+      };
+    });
+
+    await aStarted;
+    const requestB = withRuntimeEnvironment(authorityB, () =>
+      _polymarketCredentialCacheKeyFingerprintForTests(),
+    );
+    releaseA?.();
+    const resumedA = await requestA;
+
+    expect(requestB).not.toBe(resumedA.before);
+    expect(resumedA.after).toBe(resumedA.before);
+    expect(withRuntimeEnvironment({}, _polymarketCredentialCacheKeyFingerprintForTests)).toBeNull();
+  });
+
   it("caches creds encrypted, serves the next order from cache, and rewrites legacy plaintext", async () => {
     const { createTradeRoutes } = await import("../routes/trade");
     const { testCtx } = await import("./_ctx");
@@ -327,7 +369,7 @@ describe("SEC-108: Polymarket L2 creds Redis cache is encrypted at rest", () => 
     }
   });
 
-  it("skips the cache entirely when no encryption key material is configured", async () => {
+  it("fails the order closed when the current request has no custody key material", async () => {
     const { createTradeRoutes } = await import("../routes/trade");
     const { testCtx } = await import("./_ctx");
     const ctx = {
@@ -394,10 +436,10 @@ describe("SEC-108: Polymarket L2 creds Redis cache is encrypted at rest", () => 
           negRisk: true,
         }),
       });
-      // Fail closed WITHOUT failing the order: the order still executes (creds
-      // are derived fresh), but nothing is written to the shared Redis.
-      expect(res.status).toBe(200);
-      expect(deriveCount).toBe(1);
+      // The current request authority is missing, so the late-bound vault fails
+      // before deriving venue credentials or writing shared cache state.
+      expect(res.status).toBe(409);
+      expect(deriveCount).toBe(0);
       const pmKeys = [...redisStore.keys()].filter((key) => key.startsWith("pm:clob-l2:"));
       expect(pmKeys).toHaveLength(0);
     } finally {

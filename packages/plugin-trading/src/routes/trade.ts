@@ -16,7 +16,7 @@
  * /trade + /v1/trade.
  */
 
-import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from "node:crypto";
+import { createCipheriv, createDecipheriv, createHash, randomBytes, scryptSync } from "node:crypto";
 import { agentPolicies, eq, getDb, proxyAuditLog } from "@stwd/db";
 import {
   assetAllowlistEvaluator,
@@ -26,6 +26,7 @@ import {
 } from "@stwd/policy-engine";
 import { checkRateLimit } from "@stwd/redis";
 import { type ApiResponse, type AppVariables, redactedThrownDiagnostics } from "@stwd/shared";
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 import { type TradeSession, TradeSessionManager } from "@stwd/trade-sessions";
 import {
   getMarketableLimitPx,
@@ -54,6 +55,44 @@ import { Hono } from "hono";
 import { z } from "zod";
 import type { StewardAppContext } from "../context";
 import { DurableIdempotencyStore } from "./idempotency";
+
+const PM_CREDS_KEY_DOMAIN = "steward-kdf:pm-clob-l2-cache:v2";
+let pmCredsDerivedKey: { authorityFingerprint: string; key: Buffer } | null = null;
+
+function polymarketCredentialCacheAuthority(): {
+  authorityFingerprint: string;
+  password: string;
+  salt: string;
+} | null {
+  const password = runtimeEnvironmentValue("STEWARD_MASTER_PASSWORD")?.trim();
+  if (!password) return null;
+  const salt = runtimeEnvironmentValue("STEWARD_KDF_SALT") ?? "";
+  const authorityFingerprint = createHash("sha256")
+    .update(JSON.stringify({ password, salt }))
+    .digest("hex");
+  return { authorityFingerprint, password, salt };
+}
+
+function pmCredsCacheEncryptionKey(): Buffer | null {
+  const authority = polymarketCredentialCacheAuthority();
+  if (!authority) return null;
+  if (pmCredsDerivedKey?.authorityFingerprint === authority.authorityFingerprint) {
+    return pmCredsDerivedKey.key;
+  }
+  const key = scryptSync(
+    authority.password,
+    `${PM_CREDS_KEY_DOMAIN}:${authority.salt}`,
+    32,
+  ) as Buffer;
+  pmCredsDerivedKey = { authorityFingerprint: authority.authorityFingerprint, key };
+  return key;
+}
+
+/** Internal behavior hook for request-authority isolation tests. */
+export function _polymarketCredentialCacheKeyFingerprintForTests(): string | null {
+  const key = pmCredsCacheEncryptionKey();
+  return key ? createHash("sha256").update(key).digest("hex") : null;
+}
 
 // Prediction-market session asset: pm:<tokenId> (a single outcome token) or
 // pm:cond:<conditionId> (a whole market). Mirrors @stwd/trade-sessions'
@@ -1455,23 +1494,12 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
   // SEC-108: the cached L2 creds carry full trading authority on the venue as
   // the agent (outside Steward's session caps and audit), so they never touch
   // the shared Redis in plaintext. The cache value is AES-256-GCM encrypted
-  // with a key scrypt-derived from STEWARD_MASTER_PASSWORD under a
-  // domain-separated label (same idiom as the webhook secret codec + embedded
-  // JWT derivation), so a process or tenant with read access to Redis cannot
-  // lift them. If no master password is configured the cache is SKIPPED
+  // with a key scrypt-derived from the request-local master-password + KDF-salt
+  // authority under a domain-separated label (same idiom as the webhook secret
+  // codec + embedded JWT derivation), so a process or tenant with read access to
+  // Redis cannot lift them. If no current master password is configured the cache is SKIPPED
   // entirely (fail closed: never write plaintext; re-derive per order).
   const PM_CREDS_CACHE_PREFIX = "stwd_pmclob_v1:";
-  let pmCredsDerivedKey: { source: string; key: Buffer } | null = null;
-
-  function pmCredsCacheEncryptionKey(): Buffer | null {
-    const masterPassword = process.env.STEWARD_MASTER_PASSWORD;
-    if (!masterPassword) return null;
-    if (pmCredsDerivedKey?.source === masterPassword) return pmCredsDerivedKey.key;
-    const key = scryptSync(masterPassword, "steward-kdf:pm-clob-l2-cache:v1", 32) as Buffer;
-    pmCredsDerivedKey = { source: masterPassword, key };
-    return key;
-  }
-
   function encryptPmCredsCacheValue(plaintext: string, cacheKey: string): string | null {
     const key = pmCredsCacheEncryptionKey();
     if (!key) return null;
