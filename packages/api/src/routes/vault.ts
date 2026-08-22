@@ -96,7 +96,11 @@ import {
   transactions,
   vault,
 } from "../services/context";
-import { isRuntimeVaultRpcMethodAllowed, resolveRuntimeChainId } from "../services/custody-runtime";
+import {
+  isRuntimeVaultRpcMethodAllowed,
+  resolveRuntimeChainId,
+  runtimeCustodyValue,
+} from "../services/custody-runtime";
 import {
   consumeExecutionAuthorization,
   executionPayloadDigestForEvmSign,
@@ -175,47 +179,43 @@ async function writeOutcomeUnknownAudit(
     );
   }
 }
-// ─── Unsafe-signing opt-in flags (read LIVE, not captured at module-init) ──────
+// ─── Unsafe-signing opt-in flags (request-local, not module-captured) ──────
 //
-// Each accessor reads its env var on every call instead of freezing the value
-// when this module first loads. In production the relevant env vars are fixed
-// before this module is imported, so a live read returns exactly what a captured
-// `const` would — behavior is identical. Reading live matters only for the api
-// test suite, which runs all ~135 files in ONE `bun test` process: Bun shares
-// the module registry, so a captured const would freeze whichever file imported
-// vault.ts first and ignore every later file's beforeAll/afterAll flag toggles.
-// Live reads let each file exercise BOTH the opt-in path and the fail-closed
-// default within the single process.
+// Each accessor resolves the immutable environment snapshot bound to the active
+// request. Node entrypoints fall back to process.env, while concurrent Worker
+// requests cannot borrow break-glass authority from the isolate-wide compatibility
+// mirror after an await. Call-time resolution also lets the single-process API
+// suite exercise opt-in and fail-closed paths without module-registry leakage.
 //
 // Fail-closed by construction: anything other than the exact string "true"
 // (unset, "false", "1", etc.) yields false, i.e. signing disabled.
 const allowPrivateKeyExport = (): boolean =>
-  process.env.STEWARD_ALLOW_KEY_EXPORT !== "false" &&
-  process.env.STEWARD_ALLOW_PRIVATE_KEY_EXPORT === "true";
+  runtimeCustodyValue("STEWARD_ALLOW_KEY_EXPORT") !== "false" &&
+  runtimeCustodyValue("STEWARD_ALLOW_PRIVATE_KEY_EXPORT") === "true";
 const allowVaultPrivateKeyExport = (): boolean =>
-  process.env.STEWARD_ALLOW_VAULT_PRIVATE_KEY_EXPORT === "true";
+  runtimeCustodyValue("STEWARD_ALLOW_VAULT_PRIVATE_KEY_EXPORT") === "true";
 const allowUnsafeMessageSigning = (): boolean =>
-  process.env.STEWARD_ALLOW_UNSAFE_MESSAGE_SIGNING === "true";
+  runtimeCustodyValue("STEWARD_ALLOW_UNSAFE_MESSAGE_SIGNING") === "true";
 const allowVaultUnsafeMessageSigning = (): boolean =>
-  process.env.STEWARD_ALLOW_VAULT_UNSAFE_MESSAGE_SIGNING === "true";
+  runtimeCustodyValue("STEWARD_ALLOW_VAULT_UNSAFE_MESSAGE_SIGNING") === "true";
 // Audited opt-in for UNCONSTRAINED EIP-712 typed-data signing (no `typed-data`
 // policy required). Both flags must be set. Normally typed-data signing is
 // authorized per-agent by a `typed-data` policy instead; this is the
 // break-glass equivalent of the message-signing flags.
 const allowUnsafeTypedDataSigning = (): boolean =>
-  process.env.STEWARD_ALLOW_UNSAFE_TYPED_DATA_SIGNING === "true";
+  runtimeCustodyValue("STEWARD_ALLOW_UNSAFE_TYPED_DATA_SIGNING") === "true";
 const allowVaultUnsafeTypedDataSigning = (): boolean =>
-  process.env.STEWARD_ALLOW_VAULT_UNSAFE_TYPED_DATA_SIGNING === "true";
+  runtimeCustodyValue("STEWARD_ALLOW_VAULT_UNSAFE_TYPED_DATA_SIGNING") === "true";
 const allowUnsafeRawSigning = (): boolean =>
-  process.env.STEWARD_ALLOW_UNSAFE_RAW_SIGNING === "true";
+  runtimeCustodyValue("STEWARD_ALLOW_UNSAFE_RAW_SIGNING") === "true";
 const allowVaultUnsafeRawSigning = (): boolean =>
-  process.env.STEWARD_ALLOW_VAULT_UNSAFE_RAW_SIGNING === "true";
+  runtimeCustodyValue("STEWARD_ALLOW_VAULT_UNSAFE_RAW_SIGNING") === "true";
 const allowUnsafeContractCallSigning = (): boolean =>
-  process.env.STEWARD_ALLOW_UNSAFE_CONTRACT_CALL_SIGNING === "true";
+  runtimeCustodyValue("STEWARD_ALLOW_UNSAFE_CONTRACT_CALL_SIGNING") === "true";
 const allowUnsafeUserOperationSigning = (): boolean =>
-  process.env.STEWARD_ALLOW_UNSAFE_USER_OPERATION_SIGNING === "true";
+  runtimeCustodyValue("STEWARD_ALLOW_UNSAFE_USER_OPERATION_SIGNING") === "true";
 const allowUnsafeAuthorizationSigning = (): boolean =>
-  process.env.STEWARD_ALLOW_UNSAFE_AUTHORIZATION_SIGNING === "true";
+  runtimeCustodyValue("STEWARD_ALLOW_UNSAFE_AUTHORIZATION_SIGNING") === "true";
 /**
  * Blind-signing opt-in for Solana. When false (default), the sign-solana route
  * refuses any transaction whose instructions cannot all be confidently decoded
@@ -224,11 +224,11 @@ const allowUnsafeAuthorizationSigning = (): boolean =>
  * that policy controls cannot be enforced against the transaction's real effects.
  */
 const allowUnsafeSolanaBlindSigning = (): boolean =>
-  process.env.STEWARD_ALLOW_UNSAFE_SOLANA_BLIND_SIGNING === "true";
+  runtimeCustodyValue("STEWARD_ALLOW_UNSAFE_SOLANA_BLIND_SIGNING") === "true";
 const allowPrivateKeyImport = (): boolean =>
-  process.env.STEWARD_ALLOW_PRIVATE_KEY_IMPORT === "true";
+  runtimeCustodyValue("STEWARD_ALLOW_PRIVATE_KEY_IMPORT") === "true";
 const allowVaultPrivateKeyImport = (): boolean =>
-  process.env.STEWARD_ALLOW_VAULT_PRIVATE_KEY_IMPORT === "true";
+  runtimeCustodyValue("STEWARD_ALLOW_VAULT_PRIVATE_KEY_IMPORT") === "true";
 const MAX_VAULT_HISTORY_LIMIT = 200;
 const MAX_UINT256_DECIMAL =
   "115792089237316195423570985008687907853269984665640564039457584007913129639935";
@@ -1433,7 +1433,7 @@ function isBitcoinPsbtBase64(value: unknown): value is string {
 }
 
 function maxBitcoinPsbtFeeSats(): bigint {
-  const configured = process.env.STEWARD_MAX_BITCOIN_PSBT_FEE_SATS;
+  const configured = runtimeCustodyValue("STEWARD_MAX_BITCOIN_PSBT_FEE_SATS");
   if (configured && /^\d+$/.test(configured)) return BigInt(configured);
   return DEFAULT_MAX_BITCOIN_PSBT_FEE_SATS;
 }
@@ -1442,7 +1442,7 @@ function maxBitcoinPsbtFeeSats(): bigint {
 const DEFAULT_MAX_MONERO_FEE_PICONERO = 100_000_000_000n;
 
 function maxMoneroFeePiconero(): bigint {
-  const configured = process.env.STEWARD_MAX_MONERO_FEE_PICONERO;
+  const configured = runtimeCustodyValue("STEWARD_MAX_MONERO_FEE_PICONERO");
   if (configured && /^\d+$/.test(configured)) return BigInt(configured);
   return DEFAULT_MAX_MONERO_FEE_PICONERO;
 }

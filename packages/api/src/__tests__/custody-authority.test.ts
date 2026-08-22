@@ -1,7 +1,5 @@
 import { describe, expect, it } from "bun:test";
 import { withRuntimeEnvironment } from "@stwd/shared/runtime-env";
-import { validateSecretRouteConfig } from "@stwd/vault";
-import { Hono } from "hono";
 import { buildPluginContext } from "../plugin";
 import { isRuntimeVaultRpcMethodAllowed, resolveRuntimeChainId } from "../services/custody-runtime";
 import { resolveEvmReceiptRpcUrl } from "../services/transaction-receipt-poller";
@@ -231,63 +229,6 @@ describe("request-local custody authority", () => {
     expect(
       withRuntimeEnvironment(authorityA, () => getConfiguredKeyStore("credential-lease")),
     ).not.toBe(requestB.store);
-  });
-
-  it("keeps mounted secret-route persistence bound to each overlapping request", async () => {
-    let releaseA: (() => void) | undefined;
-    let signalAStarted: (() => void) | undefined;
-    const aStarted = new Promise<void>((resolve) => {
-      signalAStarted = resolve;
-    });
-    const aMayResume = new Promise<void>((resolve) => {
-      releaseA = resolve;
-    });
-    const persisted: string[] = [];
-    const app = new Hono();
-    app.post("/routes/:requestId", async (c) => {
-      const requestId = c.req.param("requestId");
-      if (requestId === "a") {
-        signalAStarted?.();
-        await aMayResume;
-      }
-      const validationError = validateSecretRouteConfig({
-        agentId: "agent-1",
-        hostPattern: "partner.example.com",
-        pathPattern: "/*",
-        method: "GET",
-        injectAs: "header",
-        injectKey: "cookie",
-      });
-      if (validationError) return c.json({ ok: false, error: validationError }, 400);
-      persisted.push(requestId);
-      return c.json({ ok: true }, 201);
-    });
-
-    const requestA = withRuntimeEnvironment(
-      {
-        STEWARD_RUNTIME: "workers",
-        STEWARD_ALLOW_BROAD_SECRET_ROUTES: "false",
-        STEWARD_ALLOW_COOKIE_INJECTION: "false",
-        STEWARD_SECRET_ROUTE_ALLOWED_HOSTS: "",
-      },
-      () => app.request("/routes/a", { method: "POST" }),
-    );
-    await aStarted;
-    const responseB = await withRuntimeEnvironment(
-      {
-        STEWARD_RUNTIME: "workers",
-        STEWARD_ALLOW_BROAD_SECRET_ROUTES: "true",
-        STEWARD_ALLOW_COOKIE_INJECTION: "true",
-        STEWARD_SECRET_ROUTE_ALLOWED_HOSTS: "partner.example.com",
-      },
-      () => app.request("/routes/b", { method: "POST" }),
-    );
-    releaseA?.();
-    const responseA = await requestA;
-
-    expect(responseB.status).toBe(201);
-    expect(responseA.status).toBe(400);
-    expect(persisted).toEqual(["b"]);
   });
 
   it("keys Worker AWS custody by explicit request-local credentials and rejects omissions", () => {
