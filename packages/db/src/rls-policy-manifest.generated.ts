@@ -429,6 +429,12 @@ export const EXPECTED_PUBLIC_RELATIONS = [
   },
   {
     "policy_group": "core",
+    "relation_name": "trade_order_recoveries",
+    "relation_kind": "r",
+    "partition_parents": ""
+  },
+  {
+    "policy_group": "core",
     "relation_name": "trade_sessions",
     "relation_kind": "r",
     "partition_parents": ""
@@ -1171,6 +1177,16 @@ export const EXPECTED_RLS_POLICY_DEFINITIONS = [
     "roles": "PUBLIC",
     "using_expression": "((id)::text = steward_rls.tenant_id())",
     "check_expression": "((id)::text = steward_rls.tenant_id())"
+  },
+  {
+    "policy_group": "core",
+    "relation_name": "trade_order_recoveries",
+    "policy_name": "steward_tenant_isolation",
+    "command": "*",
+    "permissive": true,
+    "roles": "PUBLIC",
+    "using_expression": "((tenant_id)::text = steward_rls.tenant_id())",
+    "check_expression": "((tenant_id)::text = steward_rls.tenant_id())"
   },
   {
     "policy_group": "core",
