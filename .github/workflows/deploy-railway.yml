@@ -132,6 +132,7 @@ jobs:
           echo "Production candidate resolved to an immutable main-built digest."
 
       - name: Create GitHub deployment
+        if: ${{ inputs.dry_run == false }}
         id: deployment
         uses: chrnorm/deployment-action@500aa6a23c81ffa1acf71072aee3cfa2cc2e556a # v2
         with:
@@ -159,7 +160,7 @@ jobs:
           ./scripts/railway-deploy.sh "${ARGS[@]}"
 
       - name: Update deployment status (success)
-        if: success()
+        if: ${{ inputs.dry_run == false && success() }}
         uses: chrnorm/deployment-status@6df8d036fd2fee9eb82936733953da1f8382b41e # v2
         with:
           token: ${{ github.token }}
@@ -168,7 +169,7 @@ jobs:
           environment-url: ${{ vars.PRODUCTION_RAILWAY_HEALTH_URL }}
 
       - name: Update deployment status (failure)
-        if: failure() && steps.deployment.outputs.deployment_id != ''
+        if: ${{ inputs.dry_run == false && failure() && steps.deployment.outputs.deployment_id != '' }}
         uses: chrnorm/deployment-status@6df8d036fd2fee9eb82936733953da1f8382b41e # v2
         with:
           token: ${{ github.token }}

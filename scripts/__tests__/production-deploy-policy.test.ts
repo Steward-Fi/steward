@@ -38,4 +38,16 @@ describe("production deploy policy", () => {
     expect(deployScript).toContain('RAILWAY_REQUIRE_HEALTH:-false}" == "true"');
     expect(deployScript).toContain("RAILWAY_HEALTH_URL is required");
   });
+
+  test("does not create or mark a GitHub Production deployment during dry run", () => {
+    expect(workflow).toMatch(
+      /- name: Create GitHub deployment\n\s+if: \$\{\{ inputs\.dry_run == false \}\}/,
+    );
+    expect(workflow).toMatch(
+      /- name: Update deployment status \(success\)\n\s+if: \$\{\{ inputs\.dry_run == false && success\(\) \}\}/,
+    );
+    expect(workflow).toMatch(
+      /- name: Update deployment status \(failure\)\n\s+if: \$\{\{ inputs\.dry_run == false && failure\(\) && steps\.deployment\.outputs\.deployment_id != '' \}\}/,
+    );
+  });
 });
