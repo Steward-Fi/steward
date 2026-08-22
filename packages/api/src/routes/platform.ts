@@ -624,7 +624,7 @@ function isOptionalString(value: unknown): value is string | undefined {
 function isOptionalEmailBrandName(value: unknown): value is string | undefined {
   return (
     value === undefined ||
-    (isNonEmptyString(value) && value.trim().length <= 100 && !/[\r\n]/.test(value))
+    (isNonEmptyString(value) && value.trim().length <= 100 && !/[\u0000-\u001f\u007f]/.test(value))
   );
 }
 

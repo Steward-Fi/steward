@@ -315,7 +315,14 @@ describe("platform tenant email config routes", () => {
     });
     expect(emptyResponse.status).toBe(400);
 
-    for (const brandName of ["", "line one\nline two", "x".repeat(101)]) {
+    for (const brandName of [
+      "",
+      "line one\nline two",
+      "tab\tseparated",
+      "null\u0000byte",
+      "delete\u007fcharacter",
+      "x".repeat(101),
+    ]) {
       const invalidBrandResponse = await platformRoutes.request(
         `/tenants/${TENANT_ID}/email-config`,
         {
