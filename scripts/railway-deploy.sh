@@ -419,12 +419,12 @@ fi
 # ---------------------------------------------------------------------------
 # Step 3: Health check
 # ---------------------------------------------------------------------------
-# Skip when no health URL is configured; otherwise a deployer who only set the
-# required service/env IDs would have the service image updated and THEN see the
-# deploy marked failed against a bare "/health" URL.
+# A Railway SUCCESS state only proves control-plane rollout. Deployment
+# acceptance requires an explicit public probe authority plus both liveness and
+# durable readiness receipts; absent authority must never look shipped.
 if [[ -z "$HEALTH_URL" ]]; then
-  ok "Service image updated. Skipping health check (RAILWAY_HEALTH_URL not set)."
-  exit 0
+  fail "RAILWAY_HEALTH_URL is required for deployment acceptance; refusing to skip public /health and /ready receipts."
+  exit 1
 fi
 
 verify_public_probe() {
@@ -481,4 +481,5 @@ ok "  Railway Deploy Complete"
 ok "  Image:   ${FULL_IMAGE}"
 ok "  Service: ${SERVICE_ID}"
 ok "  Health:  ${HEALTH_URL}/health ✓"
+ok "  Ready:   ${HEALTH_URL}/ready ✓"
 ok "=========================================="

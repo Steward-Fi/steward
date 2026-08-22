@@ -16,13 +16,18 @@ export async function runConfiguredReleaseMigrations() {
 }
 
 if (import.meta.main) {
-  runConfiguredReleaseMigrations()
-    .then(({ applied, plugins }) => {
-      console.log(`[migrate] Core migrations applied: ${applied.length}`);
-      console.log(`[migrate] Plugin migration ledgers reconciled: ${plugins.length}`);
-    })
-    .catch((error) => {
-      console.error("[migrate] Release migration failed", redactedThrownDiagnostics(error));
-      process.exitCode = 1;
-    });
+  try {
+    const { applied, plugins } = await runConfiguredReleaseMigrations();
+    console.log(`[migrate] Core migrations applied: ${applied.length}`);
+    console.log(`[migrate] Plugin migration ledgers reconciled: ${plugins.length}`);
+    // Plugin discovery imports the API composition graph, whose Bun server
+    // compatibility modules own bounded housekeeping timers. The release
+    // command has closed every migration client at this point; terminate
+    // explicitly so those unrelated timers cannot keep a successful release
+    // job alive forever.
+    process.exit(0);
+  } catch (error) {
+    console.error("[migrate] Release migration failed", redactedThrownDiagnostics(error));
+    process.exit(1);
+  }
 }

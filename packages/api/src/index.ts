@@ -47,6 +47,7 @@ import {
 } from "./services/upstream-credential-lease-scheduler";
 import { configuredVaultStartupLogLine, getConfiguredVault } from "./services/vault-factory";
 import { startWebhookRetryScheduler } from "./services/webhook-retry-scheduler";
+import { runStartupPhase } from "./startup-phase";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -63,7 +64,7 @@ validateJwtSecretEnv();
 // composeApp() is async because plugin registration may be async + the trading
 // plugin is dynamically imported so the lean core graph never statically pulls
 // in the trading stack. top-level await is supported by the Bun entry.
-const app = await composeApp();
+const app = await runStartupPhase("compose", () => composeApp());
 const capabilitiesEnabled = resolveEnabledPlugins().has("capabilities");
 
 // ─── In-memory rate-limit log + shutdown guard ───────────────────────────────
@@ -310,60 +311,60 @@ if (shouldUsePGLite()) {
 if (process.env.NODE_ENV === "production" && !shouldUsePGLite()) {
   const expectedRole = process.env.STEWARD_APP_DATABASE_ROLE;
   if (!expectedRole) throw new Error("STEWARD_APP_DATABASE_ROLE is required in production");
-  try {
-    await assertRlsDeploymentSafety(getDb(), { expectedRole });
-  } catch (error) {
-    console.error(
-      "[steward] RLS deployment safety assertion failed — cannot start",
-      redactedThrownDiagnostics(error),
-    );
-    process.exit(1);
-  }
+  await runStartupPhase("rls", () => assertRlsDeploymentSafety(getDb(), { expectedRole }));
 }
 
 // ─── Redis + auth stores (blocking — must complete before serving traffic) ──
 
-let redisOk = false;
-try {
-  redisOk = await initRedis();
-} catch (err) {
-  console.warn(
-    "[steward] Redis initialization failed; trying Postgres auth storage",
-    redactedThrownDiagnostics(err),
-  );
-}
+const redisOk = await runStartupPhase("redis", async () => {
+  try {
+    return await initRedis();
+  } catch (err) {
+    console.warn(
+      "[steward] Redis initialization failed; trying Postgres auth storage",
+      redactedThrownDiagnostics(err),
+    );
+    return false;
+  }
+});
 
 // Postgres is the durable fallback for the long-lived server when Redis is not
 // available. buildBackend probes every namespace; the assertion below turns
 // any production fallback to process-local memory into a startup failure.
-await initAuthStores(migrationsRan && !redisOk);
-assertAuthStoresAreSafe();
+await runStartupPhase("auth-stores", async () => {
+  await initAuthStores(migrationsRan && !redisOk);
+  assertAuthStoresAreSafe();
+});
 
 // ─── Data retention scheduler (SOC2 CC2) ────────────────────────────────────
 
-if (migrationsRan) {
-  cancelAccountWalletLifecycleRecoveryScheduler = startAccountWalletLifecycleRecoveryScheduler();
-  if (process.env.GOOGLE_PROVIDER_CLIENT_ID && process.env.GOOGLE_PROVIDER_CLIENT_SECRET) {
-    cancelGoogleCredentialLifecycleScheduler = startGoogleCredentialLifecycleScheduler();
+await runStartupPhase("schedulers", async () => {
+  if (migrationsRan) {
+    cancelAccountWalletLifecycleRecoveryScheduler = startAccountWalletLifecycleRecoveryScheduler();
+    if (process.env.GOOGLE_PROVIDER_CLIENT_ID && process.env.GOOGLE_PROVIDER_CLIENT_SECRET) {
+      cancelGoogleCredentialLifecycleScheduler = startGoogleCredentialLifecycleScheduler();
+    }
+    if (process.env.X_CLIENT_ID && process.env.X_CLIENT_SECRET) {
+      cancelXCredentialLifecycleScheduler = startXCredentialLifecycleScheduler();
+    }
+    cancelRetention = startRetentionScheduler();
+    if (redisOk) {
+      cancelProviderReservationReconciliation = startProviderReservationReconciliationScheduler();
+    }
+    cancelTransactionReceiptPolling = startTransactionReceiptPollingScheduler();
+    cancelWebhookRetryScheduler = startWebhookRetryScheduler();
+    if (capabilitiesEnabled) {
+      cancelUpstreamCredentialLeaseScheduler = await startUpstreamCredentialLeaseScheduler();
+    }
   }
-  if (process.env.X_CLIENT_ID && process.env.X_CLIENT_SECRET) {
-    cancelXCredentialLifecycleScheduler = startXCredentialLifecycleScheduler();
-  }
-  cancelRetention = startRetentionScheduler();
-  if (redisOk) {
-    cancelProviderReservationReconciliation = startProviderReservationReconciliationScheduler();
-  }
-  cancelTransactionReceiptPolling = startTransactionReceiptPollingScheduler();
-  cancelWebhookRetryScheduler = startWebhookRetryScheduler();
-  if (capabilitiesEnabled) {
-    cancelUpstreamCredentialLeaseScheduler = await startUpstreamCredentialLeaseScheduler();
-  }
-}
+});
 
 // Resolve custody before accepting traffic. A configured backend that cannot
 // initialize throws here, so production never falls back to local AES.
-getConfiguredVault();
-console.log(configuredVaultStartupLogLine());
+await runStartupPhase("custody", () => {
+  getConfiguredVault();
+  console.log(configuredVaultStartupLogLine());
+});
 
 // ─── Server ───────────────────────────────────────────────────────────────────
 

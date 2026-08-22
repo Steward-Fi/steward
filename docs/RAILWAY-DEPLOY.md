@@ -506,6 +506,8 @@ curl -sf "$BASE/platform/tenants" \
 | `STEWARD_MIGRATION_LOCK_TIMEOUT_MS` | Release job only | `60000` | Positive advisory-lock deadline, no greater than the overall deadline. |
 | `STEWARD_MIGRATION_STATEMENT_TIMEOUT_MS` | Release job only | `300000` | Positive SQL statement deadline, no greater than the overall deadline. |
 | `STEWARD_MIGRATION_OVERALL_TIMEOUT_MS` | Release job only | `600000` | Positive deadline for each complete core or plugin migration attempt. |
+| `STEWARD_STARTUP_PHASE_TIMEOUT_MS` | No | `30000` | Positive default deadline for each pre-listen compose/RLS/Redis/auth-store/scheduler/custody phase. |
+| `STEWARD_STARTUP_<PHASE>_TIMEOUT_MS` | No | phase default | Optional exact override; phases are `COMPOSE`, `RLS`, `REDIS`, `AUTH_STORES`, `SCHEDULERS`, and `CUSTODY`. |
 | `STEWARD_OPERATOR_DATABASE_URL` | **Bootstrap job only** | — | Provider-superuser-equivalent; never expose to the API. |
 | `STEWARD_MASTER_PASSWORD` | **Yes** | — | Vault encryption secret. Keep separate from JWT signing material. |
 | `STEWARD_KDF_SALT` | **Yes in production** | — | Stable deployment KDF salt, at least 16 random bytes. Back it up with the encrypted vault data. |

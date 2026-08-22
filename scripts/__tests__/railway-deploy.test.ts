@@ -27,7 +27,12 @@ function redact(input: string): string {
   );
 }
 
-async function fakeRailwayRun(healthyAfter: number, healthTimeout = 4, readyAfter = 1) {
+async function fakeRailwayRun(
+  healthyAfter: number,
+  healthTimeout = 4,
+  readyAfter = 1,
+  healthUrl: string | null = "https://example.test",
+) {
   const dir = await mkdtemp(join(tmpdir(), "steward-railway-deploy-"));
   temporaryDirectories.push(dir);
   const stateFile = join(dir, "health-attempts");
@@ -82,7 +87,7 @@ esac
       RAILWAY_TOKEN: "test-token",
       RAILWAY_SERVICE_ID: "test-service",
       RAILWAY_ENV_ID: "test-environment",
-      RAILWAY_HEALTH_URL: "https://example.test",
+      RAILWAY_HEALTH_URL: healthUrl ?? "",
       RAILWAY_HEALTH_TIMEOUT: String(healthTimeout),
       RAILWAY_HEALTH_INTERVAL: "1",
     },
@@ -172,6 +177,13 @@ describe("SEC-129 redact_secrets filter", () => {
 });
 
 describe("Railway staging deployment", () => {
+  test("rejects deployment acceptance when no public probe authority is configured", async () => {
+    const result = await fakeRailwayRun(1, 2, 1, null);
+    expect(result.exitCode).toBe(1);
+    expect(result.output).toContain("RAILWAY_HEALTH_URL is required for deployment acceptance");
+    expect(result.output).toContain("refusing to skip public /health and /ready receipts");
+  }, 15_000);
+
   test("waits through delayed health before accepting the deployment", async () => {
     const result = await fakeRailwayRun(3);
     expect(result.exitCode).toBe(0);
