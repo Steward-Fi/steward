@@ -60,6 +60,7 @@ import { TradeSessionManager } from "@stwd/trade-sessions";
 import { HyperliquidAdapter } from "@stwd/venue-hyperliquid";
 import { and, eq } from "drizzle-orm";
 import { Hono } from "hono";
+import type { StewardAppContext } from "../context";
 import type { AppVariables } from "../services/context";
 
 // size 1 @ limitPx 10 (a BUY, so estimateHyperliquidOrderUsd needs no price
@@ -79,6 +80,8 @@ let signSpy: ReturnType<typeof spyOn> | undefined;
 let submitSpy: ReturnType<typeof spyOn> | undefined;
 let updateLeverageSpy: ReturnType<typeof spyOn> | undefined;
 let fenceSpy: ReturnType<typeof spyOn> | undefined;
+let createTradeRoutesForTest: typeof import("../routes/trade").createTradeRoutes;
+let sharedTestContext: StewardAppContext;
 
 async function seedSession(
   allowedAssets: string[] = ["BTC"],
@@ -181,8 +184,10 @@ describe("Hyperliquid venue-submit spend-fence (real /hyperliquid/order path)", 
       (async (_input, cb) => cb(undefined)) as never,
     );
     const { createTradeRoutes } = await import("../routes/trade");
+    createTradeRoutesForTest = createTradeRoutes;
     const { testCtx } = await import("./_ctx");
-    tradeRoutes = createTradeRoutes(testCtx());
+    sharedTestContext = testCtx();
+    tradeRoutes = createTradeRoutes(sharedTestContext);
   });
 
   afterAll(async () => {
@@ -336,6 +341,43 @@ describe("Hyperliquid venue-submit spend-fence (real /hyperliquid/order path)", 
     expect(authorized[0].actorType).toBe("agent");
     expect(authorized[0].actorId).toBe(agentId);
     expect(authorized[0].seq).toBeLessThan(submitted[0].seq);
+  });
+
+  it("repairs a post-submit audit outage on replay without a second venue submission", async () => {
+    const { tenantId, agentId, sessionId } = await seedSession();
+    let failSubmittedAudit = true;
+    const recoveryRoutes = createTradeRoutesForTest({
+      ...sharedTestContext,
+      writeAuditEvent: async (event) => {
+        if (failSubmittedAudit && event.action === "trade.order.submitted") {
+          throw new Error("injected post-submit audit outage");
+        }
+        return sharedTestContext.writeAuditEvent(event);
+      },
+    });
+    const app = makeApp(tenantId, agentId, recoveryRoutes);
+    signSpy = spyOn(HyperliquidAdapter.prototype, "signOrder").mockResolvedValue(
+      {} as Awaited<ReturnType<HyperliquidAdapter["signOrder"]>>,
+    );
+    submitSpy = spyOn(HyperliquidAdapter.prototype, "submitOrder").mockResolvedValue({
+      orderId: "hl-recovered-audit-1",
+      status: "filled",
+      filledQty: 1,
+      avgPrice: 10,
+    } as Awaited<ReturnType<HyperliquidAdapter["submitOrder"]>>);
+
+    const key = crypto.randomUUID();
+    const first = await postOrder(app, sessionId, key);
+    expect(first.status).toBe(200);
+    expect(submitSpy).toHaveBeenCalledTimes(1);
+    expect(await auditCount(tenantId, "trade.order.submitted")).toBe(0);
+
+    failSubmittedAudit = false;
+    const replay = await postOrder(app, sessionId, key);
+    expect(replay.status).toBe(200);
+    expect(replay.headers.get("Idempotency-Replayed")).toBe("true");
+    expect(submitSpy).toHaveBeenCalledTimes(1);
+    expect(await auditCount(tenantId, "trade.order.submitted")).toBe(1);
   });
 
   it("sets clamped isolated leverage before signing builder-perp orders", async () => {
