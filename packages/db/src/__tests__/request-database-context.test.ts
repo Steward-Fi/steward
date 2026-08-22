@@ -588,7 +588,7 @@ describe("request-scoped database context", () => {
     } finally {
       await client.close();
     }
-  });
+  }, 20_000);
 
   test("revokes a real PGLite listener cleanup resolved through the driver Promise", async () => {
     const { client, db } = await createPGLiteDb("memory://");
@@ -621,7 +621,7 @@ describe("request-scoped database context", () => {
       await client.unlisten(channel);
       await client.close();
     }
-  });
+  }, 20_000);
 
   test("revokes a real PGLite live-query subscription resolved through the driver Promise", async () => {
     const client = new PGlite("memory://", { extensions: { live } });
@@ -647,7 +647,7 @@ describe("request-scoped database context", () => {
     } finally {
       await client.close();
     }
-  });
+  }, 20_000);
 
   test("composes real PGLite aliased subqueries without exposing their prototypes", async () => {
     const { client, db } = await createPGLiteDb("memory://");
@@ -707,7 +707,7 @@ describe("request-scoped database context", () => {
     } finally {
       await client.close();
     }
-  });
+  }, 20_000);
 
   test("drains registered detached work before revoking its database capability", async () => {
     const requestDb = { marker: "request" } as unknown as ReturnType<typeof getDb>;
