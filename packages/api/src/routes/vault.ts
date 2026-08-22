@@ -9843,16 +9843,24 @@ async function completeSolanaRecoveryEffects(input: {
       throw new Error("Configured Redis accounting backend is unavailable");
     }
     const occurredAt = row.signedAt ?? row.createdAt;
+    const transferPayload = getTransferActionPayload(row.actionPayload);
+    const tokenAddress =
+      transferPayload?.token && transferPayload.token !== "native"
+        ? transferPayload.token
+        : undefined;
     if (isRedisAvailable()) {
       await recordVaultSpend(input.agentId, input.tenantId, row.value, row.chainId, {
         eventId: `solana:${input.txId}:${input.signature}`,
         occurredAt,
         throwOnError: true,
+        tokenAddress,
       });
       await recordAggregationEvent({
         eventId: `solana:${input.txId}:${input.signature}`,
         agentId: input.agentId,
-        valueRaw: row.value,
+        // Aggregation value_sum is native-base-unit denominated. Preserve
+        // counts for SPL transfers without folding token units into lamports.
+        valueRaw: tokenAddress ? "0" : row.value,
         to: row.toAddress,
         chainId: row.chainId,
         timestamp: occurredAt.getTime(),
@@ -9892,7 +9900,6 @@ async function completeSolanaRecoveryEffects(input: {
         },
       );
     }
-    const transferPayload = getTransferActionPayload(row.actionPayload);
     if (transferPayload) {
       await recordSponsoredActionIfNeeded({
         sponsorship: transferPayload.sponsorship,
@@ -10605,6 +10612,25 @@ vaultRoutes.post("/:agentId/transactions/:txId/reconcile-solana", async (c) => {
   ) {
     return c.json<ApiResponse>({ ok: false, error: "Solana transaction not found" }, 404);
   }
+  if ((row.status === "broadcast" || row.status === "confirmed") && isNonEmptyString(row.txHash)) {
+    if (
+      !(await completeSolanaRecoveryEffects({
+        tenantId,
+        agentId,
+        txId,
+        signature: row.txHash,
+      }))
+    ) {
+      return c.json<ApiResponse>(
+        { ok: false, error: "Solana recovery accounting is being completed; retry" },
+        409,
+      );
+    }
+    return c.json<ApiResponse>({
+      ok: true,
+      data: { txId, signature: row.txHash, status: row.status },
+    });
+  }
   if (row.status !== "outcome_unknown") {
     return c.json<ApiResponse>(
       { ok: false, error: "Only outcome_unknown Solana transactions can be reconciled" },
@@ -10680,6 +10706,26 @@ vaultRoutes.post("/:agentId/transactions/:txId/reconcile-solana", async (c) => {
     },
   );
   if (!transitioned) {
+    const [winner] = await db
+      .select({ status: transactions.status, txHash: transactions.txHash })
+      .from(transactions)
+      .where(and(eq(transactions.id, txId), eq(transactions.agentId, agentId)))
+      .limit(1);
+    if (
+      winner?.txHash === signature &&
+      (winner.status === "broadcast" || winner.status === "confirmed")
+    ) {
+      if (!(await completeSolanaRecoveryEffects({ tenantId, agentId, txId, signature }))) {
+        return c.json<ApiResponse>(
+          { ok: false, error: "Solana recovery accounting is being completed; retry" },
+          409,
+        );
+      }
+      return c.json<ApiResponse>({
+        ok: true,
+        data: { txId, signature, status: winner.status },
+      });
+    }
     return c.json<ApiResponse>({ ok: false, error: "Transaction state changed; retry" }, 409);
   }
   if (

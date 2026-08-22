@@ -10,6 +10,7 @@ import {
   MONERO_ON_SOLANA,
   VENUE_IDS,
   VENUE_METADATA,
+  WRAPPED_SOL_ON_SOLANA,
 } from "../index";
 
 const originalFetch = globalThis.fetch;
@@ -51,6 +52,12 @@ describe("token helpers", () => {
     expect(getKnownToken(101, MONERO_ON_SOLANA.address)).toBe(MONERO_ON_SOLANA);
     expect(getTokenDecimals(101, MONERO_ON_SOLANA.address)).toBe(12);
     expect(getKnownToken(101, MONERO_ON_SOLANA.address.toLowerCase())).toBeUndefined();
+  });
+
+  it("registers wrapped SOL for exact SPL valuation without losing native lookup", () => {
+    expect(getKnownToken(101, WRAPPED_SOL_ON_SOLANA.address)).toBe(WRAPPED_SOL_ON_SOLANA);
+    expect(getTokenDecimals(101, WRAPPED_SOL_ON_SOLANA.address)).toBe(9);
+    expect(getWrappedNativeAddress(101)).toBe(WRAPPED_SOL_ON_SOLANA.address);
   });
 
   it("exposes wrapped native addresses only for configured chains", () => {
@@ -162,6 +169,23 @@ describe("createPriceOracle", () => {
     await expect(oracle.weiToUsd("1000000000", 101)).resolves.toBe(200);
     await expect(oracle.weiToUsd("500000000", 102)).resolves.toBe(100);
     expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("values wrapped SOL token base units with the registered 9 decimals", async () => {
+    globalThis.fetch = mock(
+      async () =>
+        new Response(
+          JSON.stringify({
+            pairs: [{ chainId: "solana", priceUsd: "200", liquidity: { usd: 50_000 } }],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+    ) as unknown as typeof fetch;
+
+    const oracle = createPriceOracle({ cacheTtlMs: 0 });
+    await expect(
+      oracle.weiToUsd("1500000000", 101, WRAPPED_SOL_ON_SOLANA.address),
+    ).resolves.toBe(300);
   });
 
   it("keeps case-distinct Solana mint prices isolated in the cache", async () => {

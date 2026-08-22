@@ -751,6 +751,68 @@ describe("Solana durable recovery anchors", () => {
       context.vault.reconcileSolanaBroadcast = originalReconcile;
     }
   });
+
+  it("retries durable effects without re-querying Solana after reconciliation committed", async () => {
+    const context = await import("../services/context");
+    const originalReconcile = context.vault.reconcileSolanaBroadcast.bind(context.vault);
+    let reconcileCalls = 0;
+    context.vault.reconcileSolanaBroadcast = async () => {
+      reconcileCalls++;
+      return "broadcast";
+    };
+    const txId = "solana-reconcile-effects-retry";
+    await getDb()
+      .insert(transactions)
+      .values({
+        id: txId,
+        agentId: AGENT_ID,
+        status: "outcome_unknown",
+        toAddress: RECIPIENT,
+        value: "123",
+        chainId: 101,
+        txHash: SIGNATURE,
+        actionType: "solana_transaction",
+        actionPayload: {
+          type: "solana_transaction",
+          recoveryAnchor: true,
+          recentBlockhash: RECENT_BLOCKHASH,
+          recoveryEffectsState: "pending",
+        },
+      });
+    try {
+      // Force the effects phase to fail only after the authoritative RPC result
+      // has already transitioned the row to broadcast.
+      process.env.REDIS_URL = "redis://127.0.0.1:1";
+      const first = await app.request(
+        `/vault/${AGENT_ID}/transactions/${txId}/reconcile-solana`,
+        { method: "POST" },
+      );
+      expect(first.status).toBe(500);
+      const [committed] = await getDb().select().from(transactions).where(eq(transactions.id, txId));
+      expect(committed.status).toBe("broadcast");
+      expect(readPayload(committed.actionPayload).recoveryEffectsState).toBe("pending");
+
+      delete process.env.REDIS_URL;
+      context.vault.reconcileSolanaBroadcast = async () => {
+        throw new Error("a committed reconciliation must not be queried again");
+      };
+      const response = await app.request(
+        `/vault/${AGENT_ID}/transactions/${txId}/reconcile-solana`,
+        { method: "POST" },
+      );
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({
+        ok: true,
+        data: { txId, signature: SIGNATURE, status: "broadcast" },
+      });
+      const [row] = await getDb().select().from(transactions).where(eq(transactions.id, txId));
+      expect(readPayload(row.actionPayload).recoveryEffectsState).toBe("complete");
+      expect(reconcileCalls).toBe(1);
+    } finally {
+      delete process.env.REDIS_URL;
+      context.vault.reconcileSolanaBroadcast = originalReconcile;
+    }
+  });
 });
 
 function readPayload(value: unknown): Record<string, unknown> {

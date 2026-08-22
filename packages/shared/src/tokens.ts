@@ -33,7 +33,19 @@ export const MONERO_ON_SOLANA: TokenInfo = Object.freeze({
   website: "https://wxmr.io",
 });
 
-export const KNOWN_TOKENS: readonly TokenInfo[] = Object.freeze([MONERO_ON_SOLANA]);
+export const WRAPPED_SOL_ON_SOLANA: TokenInfo = Object.freeze({
+  address: "So11111111111111111111111111111111111111112",
+  symbol: "wSOL",
+  decimals: 9,
+  chainId: 101,
+  name: "Wrapped SOL",
+  website: "https://solana.com",
+});
+
+export const KNOWN_TOKENS: readonly TokenInfo[] = Object.freeze([
+  MONERO_ON_SOLANA,
+  WRAPPED_SOL_ON_SOLANA,
+]);
 
 /**
  * Return exact token metadata when Steward knows the asset. Solana addresses
