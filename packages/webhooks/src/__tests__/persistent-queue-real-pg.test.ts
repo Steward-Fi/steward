@@ -198,6 +198,43 @@ describeWithPostgres("PersistentQueue authority on real PostgreSQL", () => {
     });
   });
 
+  test("a stale worker cannot overwrite a reclaimed delivery outcome", async () => {
+    const { tenantId, config } = await seedConfig();
+    const staleEntered = deferred();
+    const releaseStale = deferred();
+    const staleQueue = queueWithDispatcher(async () => {
+      staleEntered.resolve();
+      await releaseStale.promise;
+      return { success: false, attempts: 1, error: "late stale failure" };
+    });
+    const winningQueue = queueWithDispatcher(async () => ({
+      success: true,
+      attempts: 1,
+      deliveredAt: new Date(),
+    }));
+    const { deliveryId } = await enqueueSnapshot(staleQueue, tenantId, config);
+
+    const staleRun = staleQueue.processQueue();
+    await staleEntered.promise;
+    await dueNow(deliveryId);
+    expect(await winningQueue.processQueue()).toMatchObject([{ success: true, attempts: 2 }]);
+    expect(await winningQueue.getDelivery(deliveryId)).toMatchObject({
+      status: "delivered",
+      attempts: 2,
+      lastError: null,
+    });
+
+    releaseStale.resolve();
+    expect(await staleRun).toMatchObject([
+      { success: false, attempts: 1, error: "late stale failure" },
+    ]);
+    expect(await winningQueue.getDelivery(deliveryId)).toMatchObject({
+      status: "delivered",
+      attempts: 2,
+      lastError: null,
+    });
+  });
+
   test("a crashed claim stays hidden until visibility expiry", async () => {
     const { tenantId, config } = await seedConfig();
     const calls: DispatchCall[] = [];
@@ -284,13 +321,9 @@ describeWithPostgres("PersistentQueue authority on real PostgreSQL", () => {
       expect(receiver.requests).toHaveLength(2);
       const [first, retry] = receiver.requests;
       expect(retry?.headers["x-steward-delivery-id"]).toBe(deliveryId);
-      expect(retry?.headers["x-steward-delivery-id"]).toBe(
-        first?.headers["x-steward-delivery-id"],
-      );
+      expect(retry?.headers["x-steward-delivery-id"]).toBe(first?.headers["x-steward-delivery-id"]);
       expect(retry?.headers["x-steward-sent-at"]).not.toBe(first?.headers["x-steward-sent-at"]);
-      expect(retry?.headers["x-steward-signature"]).not.toBe(
-        first?.headers["x-steward-signature"],
-      );
+      expect(retry?.headers["x-steward-signature"]).not.toBe(first?.headers["x-steward-signature"]);
       expect(JSON.parse(retry?.body ?? "{}")).toEqual(JSON.parse(first?.body ?? "{}"));
       expect(receiver.acceptedDeliveryIds).toEqual(new Set([deliveryId]));
       expect(await recoveryQueue.getDelivery(deliveryId)).toMatchObject({

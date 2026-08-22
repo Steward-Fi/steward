@@ -200,6 +200,14 @@ export class PersistentQueue {
       // The atomic claim consumes the attempt before any external I/O, so a
       // worker crash cannot make an accepted send invisible to maxAttempts.
       const newAttempts = delivery.attempts;
+      // Every post-I/O write is fenced to the exact claim generation. If this
+      // worker outlives the visibility timeout and another worker reclaims the
+      // row, the stale completion must not overwrite the newer outcome.
+      const claimFence = and(
+        eq(webhookDeliveries.id, delivery.id),
+        eq(webhookDeliveries.status, "processing"),
+        eq(webhookDeliveries.attempts, newAttempts),
+      );
       if (!delivery.webhookConfigId || !delivery.secret) {
         await db
           .update(webhookDeliveries)
@@ -208,7 +216,7 @@ export class PersistentQueue {
             attempts: newAttempts,
             lastError: "Webhook delivery is missing original configuration snapshot",
           })
-          .where(eq(webhookDeliveries.id, delivery.id));
+          .where(claimFence);
         results.push({
           success: false,
           attempts: newAttempts,
@@ -241,7 +249,7 @@ export class PersistentQueue {
             attempts: newAttempts,
             lastError: "Webhook configuration is disabled or deleted",
           })
-          .where(eq(webhookDeliveries.id, delivery.id));
+          .where(claimFence);
         results.push({
           success: false,
           attempts: newAttempts,
@@ -257,7 +265,7 @@ export class PersistentQueue {
             attempts: newAttempts,
             lastError: "Webhook delivery URL no longer matches its original configuration",
           })
-          .where(eq(webhookDeliveries.id, delivery.id));
+          .where(claimFence);
         results.push({
           success: false,
           attempts: newAttempts,
@@ -273,7 +281,7 @@ export class PersistentQueue {
             attempts: newAttempts,
             lastError: "Webhook configuration no longer subscribes to this event",
           })
-          .where(eq(webhookDeliveries.id, delivery.id));
+          .where(claimFence);
         results.push({
           success: false,
           attempts: newAttempts,
@@ -305,7 +313,7 @@ export class PersistentQueue {
             attempts: newAttempts,
             lastError: `Webhook delivery failed deterministically: ${message}`,
           })
-          .where(eq(webhookDeliveries.id, delivery.id));
+          .where(claimFence);
         results.push({
           success: false,
           attempts: newAttempts,
@@ -330,7 +338,7 @@ export class PersistentQueue {
             lastError: null,
             payload: persistedPayload,
           })
-          .where(eq(webhookDeliveries.id, delivery.id));
+          .where(claimFence);
 
         results.push({ ...result, attempts: newAttempts });
         continue;
@@ -347,7 +355,7 @@ export class PersistentQueue {
             lastError: result.error ?? "Max attempts exceeded",
             payload: persistedPayload,
           })
-          .where(eq(webhookDeliveries.id, delivery.id));
+          .where(claimFence);
 
         results.push({ ...result, attempts: newAttempts });
         continue;
@@ -367,7 +375,7 @@ export class PersistentQueue {
           lastError: result.error ?? "Delivery failed",
           payload: persistedPayload,
         })
-        .where(eq(webhookDeliveries.id, delivery.id));
+        .where(claimFence);
 
       results.push({ ...result, attempts: newAttempts });
     }
