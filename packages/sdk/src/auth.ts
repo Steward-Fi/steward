@@ -2631,7 +2631,10 @@ async function generateCodeVerifier(): Promise<string> {
  */
 async function generateCodeChallenge(verifier: string): Promise<string> {
   const encoder = new TextEncoder();
-  const data = encoder.encode(verifier);
+  // `slice()` materializes an ArrayBuffer-backed view. Some runtimes type
+  // TextEncoder output as Uint8Array<ArrayBufferLike>, while WebCrypto only
+  // accepts non-shared BufferSource inputs.
+  const data = encoder.encode(verifier).slice();
   const digest = await globalThis.crypto.subtle.digest("SHA-256", data);
   return base64urlEncode(new Uint8Array(digest));
 }
