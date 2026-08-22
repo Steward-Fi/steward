@@ -47,6 +47,7 @@
 import { createPublicKey, randomBytes, verify as verifySignature } from "node:crypto";
 import { request as httpsRequest } from "node:https";
 import { isIP } from "node:net";
+import { parseXml2JsFromString } from "@node-saml/node-saml/lib/xml";
 import {
   ACCESS_TOKEN_EXPIRY,
   ACCESS_TOKEN_EXPIRY_SECONDS,
@@ -64,6 +65,7 @@ import {
   EmailDeliveryNotConfiguredError,
   evaluateSiwePolicy,
   type FarcasterLoginPayload,
+  findUnusedRecoveryCode,
   generateApiKey,
   generateRecoveryCodes,
   generateTotpSecret,
@@ -74,7 +76,6 @@ import {
   IdentityJwtConfigurationError,
   InMemoryRecoveryCodeStore,
   isBuiltInProvider,
-  isDevSecretAllowed,
   isValidE164,
   type MagicLinkTemplateData,
   MockEmailInbox,
@@ -136,7 +137,8 @@ import {
   type TenantSamlSsoConfig,
   type TenantTestAccountConfig,
 } from "@stwd/shared";
-import { KeyStore, provisionUserWallet, Vault } from "@stwd/vault";
+import { runtimeEnvironmentIdentity, runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
+import { type KeyStore, provisionUserWallet, Vault } from "@stwd/vault";
 import bs58 from "bs58";
 import { and, eq, gte, inArray, isNull, lt, sql } from "drizzle-orm";
 import { type Context, Hono } from "hono";
@@ -161,7 +163,11 @@ import { socketPeerFromEnv } from "../services/runtime-gate";
 import { buildSamlServiceProviderUrls } from "../services/saml-sso-config";
 import { lockUserSession } from "../services/session-lock";
 import { testAccountOtpMatches } from "../services/test-account-credentials";
-import { getConfiguredVault } from "../services/vault-factory";
+import {
+  _clearConfiguredVaultsForTests,
+  getConfiguredKeyStore,
+  getConfiguredVault,
+} from "../services/vault-factory";
 import { dispatchWebhook } from "../services/webhook-dispatch";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -422,7 +428,7 @@ let coarseSubjectWarnedAt = 0;
  * that edge invariant, so deployments should prefer STEWARD_TRUSTED_PROXY_HOPS
  * or a socket-bearing entry. checkAuthRateLimit widens the coarse budget by
  * AUTH_RATE_LIMIT_FALLBACK_HEADROOM because many clients share each bucket.
- * No configuration yields the old literal "global" chokepoint (#268), and no
+ * No configuration yields the literal "global" chokepoint, and no
  * client-controlled free text ever reaches Redis unhashed.
  */
 function authRateLimitSubject(c: Context): { subject: string; coarse: boolean } {
@@ -518,6 +524,7 @@ export async function checkAuthRateLimit(
   windowMs: number,
   max: number,
   subjectOverride?: string,
+  options: { strictDurable?: boolean } = {},
 ): Promise<{ allowed: boolean; retryAfterSecs?: number }> {
   const resolved =
     subjectOverride !== undefined
@@ -540,7 +547,9 @@ export async function checkAuthRateLimit(
 
   try {
     const redisMw = await import("../middleware/redis.js");
-    if (!redisMw.isRedisAvailable()) {
+    const redisClient = redisMw.getRedisClient();
+    if (!redisClient) {
+      if (options.strictDurable) return deny(60);
       if (allowAuthRateLimitSoftFail()) return { allowed: true };
       if (redisMw.isRedisConfigured() && authRateLimitOutageAllow(endpoint)) {
         return { allowed: true };
@@ -549,12 +558,13 @@ export async function checkAuthRateLimit(
     }
 
     const { checkRateLimit } = await import("@stwd/redis");
-    const result = await checkRateLimit(key, windowMs, effectiveMax);
+    const result = await checkRateLimit(key, windowMs, effectiveMax, redisClient);
     if (!result.allowed) {
       return deny(Math.ceil(result.resetMs / 1000));
     }
     return { allowed: true };
   } catch (err) {
+    if (options.strictDurable) return deny(60);
     if (allowAuthRateLimitSoftFail()) return { allowed: true };
     // Any step above can throw — the dynamic imports, the availability probe,
     // or checkRateLimit itself — so a throw is NOT proof Redis was seen
@@ -1133,7 +1143,7 @@ async function rotateRefreshTokenInsideTenant(
       await tx.execute(sql`
         SELECT * FROM steward_bootstrap.auth_rotate_refresh_token(
           ${tokenHash}, ${targetTenantId}, ${successorId},
-          ${newRefreshTokenHash}, ${successorExpiresAt}
+          ${newRefreshTokenHash}, ${successorExpiresAt.toISOString()}::timestamptz
         )
       `),
     );
@@ -1442,7 +1452,7 @@ export async function initAuthStores(usePostgres = false): Promise<void> {
   _passkeyAuth = null;
   _phoneAuth = null;
   _passkeyAuthByOrigin.clear();
-  _emailAuthByTenant.clear();
+  _emailAuthByRequest = new WeakMap();
 }
 
 function getChallengeStore(): ChallengeStore {
@@ -1601,6 +1611,11 @@ function getMfaBackend(): StoreBackend {
   const { MemoryBackend } = require("@stwd/auth") as typeof import("@stwd/auth");
   _mfaBackend = new MemoryBackend();
   return _mfaBackend;
+}
+
+/** Test-only failure-injection seam for mounted MFA lifecycle coverage. */
+export function _getAuthMfaBackendForTests(): StoreBackend {
+  return getMfaBackend();
 }
 
 export function getImportSessionBackend(): StoreBackend {
@@ -1762,44 +1777,14 @@ function getPasskeyAuth(requestOrigin?: string): PasskeyAuth {
 
 // ─── EmailAuth cache ──────────────────────────────────────────────────────────
 
-const _emailAuthByTenant = new Map<string, Promise<EmailAuth>>();
-let _emailKeyStore: KeyStore | null = null;
-let _oauthKeyStore: KeyStore | null = null;
+let _emailAuthByRequest = new WeakMap<object, Map<string, Promise<EmailAuth>>>();
 
 function getEmailKeyStore(): KeyStore {
-  if (_emailKeyStore) return _emailKeyStore;
-
-  const masterPassword = process.env.STEWARD_MASTER_PASSWORD;
-  if (!masterPassword) {
-    if (!isDevSecretAllowed()) {
-      throw new Error(
-        "STEWARD_MASTER_PASSWORD is required. For local development only, set STEWARD_ALLOW_DEV_SECRETS=true to use the insecure dev key.",
-      );
-    }
-    _emailKeyStore = new KeyStore("dev-secret");
-    return _emailKeyStore;
-  }
-
-  _emailKeyStore = new KeyStore(masterPassword);
-  return _emailKeyStore;
+  return getConfiguredKeyStore(undefined, { allowDevSecretFallback: true });
 }
 
 function getOAuthKeyStore(): KeyStore {
-  if (_oauthKeyStore) return _oauthKeyStore;
-
-  const masterPassword = process.env.STEWARD_MASTER_PASSWORD;
-  if (!masterPassword) {
-    if (!isDevSecretAllowed()) {
-      throw new Error(
-        "STEWARD_MASTER_PASSWORD is required to encrypt OAuth provider tokens. For local development only, set STEWARD_ALLOW_DEV_SECRETS=true to use the insecure dev key.",
-      );
-    }
-    _oauthKeyStore = new KeyStore("dev-secret");
-    return _oauthKeyStore;
-  }
-
-  _oauthKeyStore = new KeyStore(masterPassword);
-  return _oauthKeyStore;
+  return getConfiguredKeyStore(undefined, { allowDevSecretFallback: true });
 }
 
 type OAuthEncryptedTokenFields = Pick<
@@ -1862,16 +1847,18 @@ export function decryptOAuthProviderToken(encrypted: {
 }
 
 function isMockEmailEnabled(): boolean {
-  if (process.env.EMAIL_PROVIDER === "mock" && process.env.NODE_ENV === "production") {
+  const provider = runtimeEnvironmentValue("EMAIL_PROVIDER");
+  const nodeEnvironment = runtimeEnvironmentValue("NODE_ENV");
+  if (provider === "mock" && nodeEnvironment === "production") {
     throw new Error(
       "EMAIL_PROVIDER=mock is forbidden in production. Unset EMAIL_PROVIDER or set RESEND_API_KEY.",
     );
   }
-  return process.env.EMAIL_PROVIDER === "mock" && process.env.NODE_ENV !== "production";
+  return provider === "mock" && nodeEnvironment !== "production";
 }
 
 function authTestInboxEnabled(): boolean {
-  return process.env.NODE_ENV === "test";
+  return runtimeEnvironmentValue("NODE_ENV") === "test";
 }
 
 function isEnabledTestAccount(
@@ -1901,7 +1888,7 @@ function invalidTestAccountCredentials() {
 
 /**
  * Map typed email-delivery failures to fail-closed HTTP responses
- * (elizaOS/eliza#18452): 503 when no delivery-capable provider is configured
+ * Returns 503 when no delivery-capable provider is configured
  * (challenge never issued), 502 when the provider rejected the send (the
  * challenge was already invalidated by EmailAuth). Returns null for any other
  * error so it propagates unchanged. Response bodies are generic — no
@@ -1964,23 +1951,28 @@ function buildGlobalEmailAuth(overrides?: {
   replyTo?: string;
   templates?: TenantEmailConfig["templates"];
 }): EmailAuth {
-  const resendKey = process.env.RESEND_API_KEY;
+  const resendKey = runtimeEnvironmentValue("RESEND_API_KEY");
+  const emailFrom = runtimeEnvironmentValue("EMAIL_FROM") || "login@steward.fi";
   // Mock takes precedence in non-production for deterministic e2e testing.
   const provider = isMockEmailEnabled()
     ? new MockEmailProvider()
     : resendKey
       ? new ResendProvider({
           apiKey: resendKey,
-          from: process.env.EMAIL_FROM || "login@steward.fi",
+          from: emailFrom,
         })
       : undefined;
 
   return new EmailAuth({
-    from: process.env.EMAIL_FROM || "login@steward.fi",
-    baseUrl: overrides?.baseUrl?.replace(/\/$/, "") || process.env.APP_URL || "https://steward.fi",
+    from: emailFrom,
+    baseUrl:
+      overrides?.baseUrl?.replace(/\/$/, "") ||
+      runtimeEnvironmentValue("APP_URL") ||
+      "https://steward.fi",
     callbackPath: overrides?.callbackPath,
     provider,
     tokenStore: getTokenStore(),
+    codeVerifierSecret: runtimeEnvironmentValue("STEWARD_EMAIL_CODE_SECRET"),
     templateId: overrides?.templateId,
     subjectOverride: overrides?.subjectOverride,
     replyTo: overrides?.replyTo,
@@ -2049,7 +2041,7 @@ async function createEmailAuthForTenant(tenantId: string): Promise<EmailAuth> {
   // We've already returned via buildGlobalEmailAuth above when apiKeyEncrypted
   // is missing, so it's safe to assume `emailConfig.from + apiKeyEncrypted`
   // are both present here.
-  const from = emailConfig.from || process.env.EMAIL_FROM || "login@steward.fi";
+  const from = emailConfig.from || runtimeEnvironmentValue("EMAIL_FROM") || "login@steward.fi";
   const provider =
     emailConfig.provider === "resend" && emailConfig.apiKeyEncrypted
       ? new ResendProvider({
@@ -2062,7 +2054,9 @@ async function createEmailAuthForTenant(tenantId: string): Promise<EmailAuth> {
       : undefined;
 
   const baseUrl =
-    magicLinkBaseUrl?.replace(/\/$/, "") || process.env.APP_URL || "https://steward.fi";
+    magicLinkBaseUrl?.replace(/\/$/, "") ||
+    runtimeEnvironmentValue("APP_URL") ||
+    "https://steward.fi";
 
   return new EmailAuth({
     from,
@@ -2070,6 +2064,7 @@ async function createEmailAuthForTenant(tenantId: string): Promise<EmailAuth> {
     callbackPath,
     provider,
     tokenStore: getTokenStore(),
+    codeVerifierSecret: runtimeEnvironmentValue("STEWARD_EMAIL_CODE_SECRET"),
     templateId: emailConfig.templateId,
     subjectOverride: emailConfig.subjectOverride,
     replyTo: emailConfig.replyTo,
@@ -2078,27 +2073,49 @@ async function createEmailAuthForTenant(tenantId: string): Promise<EmailAuth> {
 }
 
 export async function getEmailAuthForTenant(tenantId: string): Promise<EmailAuth> {
-  const cached = _emailAuthByTenant.get(tenantId);
+  const requestIdentity = runtimeEnvironmentIdentity();
+  if (!requestIdentity) return createEmailAuthForTenant(tenantId);
+
+  let tenants = _emailAuthByRequest.get(requestIdentity);
+  const cached = tenants?.get(tenantId);
   if (cached) return cached;
 
   const pending = createEmailAuthForTenant(tenantId).catch((error) => {
-    _emailAuthByTenant.delete(tenantId);
+    tenants?.delete(tenantId);
     throw error;
   });
-  _emailAuthByTenant.set(tenantId, pending);
+  if (!tenants) {
+    tenants = new Map();
+    _emailAuthByRequest.set(requestIdentity, tenants);
+  }
+  tenants.set(tenantId, pending);
   return pending;
 }
 
 export function invalidateEmailAuthForTenant(tenantId: string): void {
-  _emailAuthByTenant.delete(tenantId);
+  const identity = runtimeEnvironmentIdentity();
+  if (!identity) return;
+  const tenants = _emailAuthByRequest.get(identity);
+  const cached = tenants?.get(tenantId);
+  tenants?.delete(tenantId);
+  void cached?.then(
+    (auth) => auth.disposeProvider(),
+    () => undefined,
+  );
 }
 
 export function clearEmailAuthTenantCacheForTests(): void {
-  _emailAuthByTenant.clear();
+  _emailAuthByRequest = new WeakMap();
+}
+
+/** Internal behavior hook: no cache generations outside the active request are reachable. */
+export function emailAuthRequestCacheSizeForTests(): number {
+  const identity = runtimeEnvironmentIdentity();
+  return identity ? (_emailAuthByRequest.get(identity)?.size ?? 0) : 0;
 }
 
 export function clearOAuthTokenKeyStoreForTests(): void {
-  _oauthKeyStore = null;
+  _clearConfiguredVaultsForTests();
 }
 
 /**
@@ -2240,8 +2257,15 @@ async function findOrCreateUserWithStatus(email: string): Promise<UserProvisionR
   const db = getDb();
   const [existing] = await db.select().from(users).where(eq(users.email, email));
   if (existing) return { user: existing, isNew: false };
-  const [newUser] = await db.insert(users).values({ email, emailVerified: false }).returning();
-  return { user: newUser, isNew: true };
+  const [inserted] = await db
+    .insert(users)
+    .values({ email, emailVerified: false })
+    .onConflictDoNothing({ target: users.email })
+    .returning();
+  if (inserted) return { user: inserted, isNew: true };
+  const [winner] = await db.select().from(users).where(eq(users.email, email));
+  if (!winner) throw new Error("Concurrent user provisioning did not produce a user");
+  return { user: winner, isNew: false };
 }
 
 async function findUserByEmail(email: string): Promise<typeof users.$inferSelect | null> {
@@ -4065,6 +4089,9 @@ function escapeOAuthCallbackHtml(value: string): string {
 
 function oauthCallbackPrefersHtml(c: Context): boolean {
   const accept = c.req.header("accept")?.toLowerCase() ?? "";
+  if (!accept.trim()) {
+    return c.req.header("sec-fetch-mode")?.toLowerCase() === "navigate";
+  }
   const qualityFor = (target: "application/json" | "text/html"): number | undefined => {
     const [targetType] = target.split("/");
     let bestMatch: { specificity: number; quality: number } | undefined;
@@ -4361,6 +4388,44 @@ async function recordSamlAssertionReplay(
   });
 }
 
+async function assertSamlAcsTenantBinding(
+  samlResponse: string,
+  expectedAcsUrl: string,
+): Promise<void> {
+  const parsed = (await parseXml2JsFromString(
+    Buffer.from(samlResponse, "base64").toString("utf8"),
+  )) as {
+    Response?: {
+      $?: { Destination?: string };
+      Assertion?: Array<{
+        Subject?: Array<{
+          SubjectConfirmation?: Array<{
+            SubjectConfirmationData?: Array<{ $?: { Recipient?: string } }>;
+          }>;
+        }>;
+      }>;
+    };
+  };
+  const response = parsed.Response;
+  if (response?.$?.Destination !== expectedAcsUrl) {
+    throw new Error("SAML response destination did not match this tenant's ACS");
+  }
+  const recipients =
+    response.Assertion?.flatMap(
+      (assertion) =>
+        assertion.Subject?.flatMap(
+          (subject) =>
+            subject.SubjectConfirmation?.flatMap(
+              (confirmation) =>
+                confirmation.SubjectConfirmationData?.map((data) => data.$?.Recipient) ?? [],
+            ) ?? [],
+        ) ?? [],
+    ) ?? [];
+  if (recipients.length === 0 || recipients.some((recipient) => recipient !== expectedAcsUrl)) {
+    throw new Error("SAML assertion recipient did not match this tenant's ACS");
+  }
+}
+
 /**
  * GET /saml/:tenantId/login
  * SP-initiated dashboard/team SSO. Stores an app-bound PKCE exchange request
@@ -4502,6 +4567,10 @@ auth.post("/saml/:tenantId/acs", async (c) => {
       emailAttribute: config.emailAttribute,
       groupsAttribute: config.groupsAttribute,
     });
+    await assertSamlAcsTenantBinding(samlResponse, config.acsUrl);
+    if (verified.issuer !== config.idpEntityId) {
+      throw new Error("SAML assertion issuer did not match the configured IdP");
+    }
     if (!(await isVerifiedSsoEmailDomainForTenant(tenantId, verified.email))) {
       redirectUrl.searchParams.set("error", "saml_email_domain_not_verified");
       return c.redirect(redirectUrl.toString(), 302);
@@ -4556,11 +4625,8 @@ auth.post("/saml/:tenantId/acs", async (c) => {
     const appState = await getChallengeStore().consume(`saml-app-state:${relayState}`);
     setRedirectFragment(redirectUrl, { code: exchangeCode, state: appState ?? undefined });
     return c.redirect(redirectUrl.toString(), 302);
-  } catch (err) {
-    return c.json<ApiResponse>(
-      { ok: false, error: err instanceof Error ? err.message : "SAML verification failed" },
-      401,
-    );
+  } catch {
+    return c.json<ApiResponse>({ ok: false, error: "SAML verification failed" }, 401);
   }
 });
 
@@ -7047,24 +7113,28 @@ auth.post("/mfa/totp/complete", async (c) => {
       429,
     );
   }
+  if (!(await isActiveTenantMember(challenge.userId, challenge.tenantId))) {
+    return c.json<ApiResponse>({ ok: false, error: "User is not a member of this tenant" }, 403);
+  }
 
   let method: "totp" | "recovery_code" = "totp";
   if (hasRecoveryCode) {
-    // SEC-146: consume the challenge BEFORE burning the recovery code. The
-    // burn is irreversible, so a concurrent completion must lose on the
-    // challenge consume — not forfeit a valid recovery code to a 401.
-    // Consequence: an invalid recovery code now consumes the challenge too
-    // (each guess needs a fresh MFA challenge), which is the fail-closed
-    // direction — the per-challenge attempt counter no longer applies here.
-    if ((await getMfaBackend().consume(challengeKey)) === null) {
-      return c.json<ApiResponse>({ ok: false, error: "Invalid or expired MFA challenge" }, 401);
-    }
-    const verified = await verifyRecoveryCode(
+    // Validate without mutating either one-time credential. Wrong codes leave
+    // the pending login retryable; a valid code is burned only after this
+    // request atomically wins the challenge claim.
+    const recoveryCode = await findUnusedRecoveryCode(
       recoveryCodeStore,
       challenge.userId,
       body.recoveryCode ?? "",
     );
-    if (!verified.valid) {
+    if (!recoveryCode) {
+      await recordTotpVerifyFailure(attemptScope);
+      return c.json<ApiResponse>({ ok: false, error: "Invalid code" }, 401);
+    }
+    if ((await getMfaBackend().consume(challengeKey)) === null) {
+      return c.json<ApiResponse>({ ok: false, error: "Invalid or expired MFA challenge" }, 401);
+    }
+    if (!(await recoveryCodeStore.markUsed(recoveryCode.id, new Date()))) {
       return c.json<ApiResponse>({ ok: false, error: "Invalid code" }, 401);
     }
     method = "recovery_code";
@@ -7090,9 +7160,6 @@ auth.post("/mfa/totp/complete", async (c) => {
     mfaMethod: method,
     factorEnrollmentVerifiedAt: Date.now(),
   };
-  if (!(await isActiveTenantMember(challenge.userId, challenge.tenantId))) {
-    return c.json<ApiResponse>({ ok: false, error: "User is not a member of this tenant" }, 403);
-  }
   await writeAuthLoginAudit(c, challenge.tenantId, challenge.userId, challenge.claims, {
     mfaMethod: method,
   });
@@ -7680,9 +7747,10 @@ const completePasskeyMfaHandler = async (c: Context) => {
   }
 
   let verification: Awaited<ReturnType<PasskeyAuth["verifyAuthentication"]>>;
+  const challengeKey = passkeyMfaChallengeKey(session.payload.userId, body.challengeId);
+  let expectedChallenge: string | null = null;
   try {
-    const challengeKey = passkeyMfaChallengeKey(session.payload.userId, body.challengeId);
-    const expectedChallenge = await getChallengeStore().get(challengeKey);
+    expectedChallenge = await getChallengeStore().get(challengeKey);
     if (!expectedChallenge) {
       return c.json<ApiResponse>({ ok: false, error: "Invalid or expired passkey challenge" }, 401);
     }
@@ -7692,9 +7760,6 @@ const completePasskeyMfaHandler = async (c: Context) => {
       cred.credentialPublicKey,
       cred.counter,
     );
-    if ((await getChallengeStore().consume(challengeKey)) === null) {
-      return c.json<ApiResponse>({ ok: false, error: "Invalid or expired passkey challenge" }, 401);
-    }
   } catch {
     return c.json<ApiResponse>({ ok: false, error: "Passkey MFA verification failed" }, 400);
   }
@@ -7717,12 +7782,25 @@ const completePasskeyMfaHandler = async (c: Context) => {
     return c.json<ApiResponse>({ ok: false, error: "Passkey MFA verification failed" }, 401);
   }
 
+  // Failed assertions and clone/counter checks must not burn a valid ceremony.
+  // Claim the challenge only after all verification has succeeded; this is the
+  // one-winner fence for concurrent submissions of the same assertion.
+  if ((await getChallengeStore().consume(challengeKey)) === null) {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid or expired passkey challenge" }, 401);
+  }
+
   const updatedMfaCounters = await getDb()
     .update(authenticators)
     .set({ counter: verification.authenticationInfo.newCounter })
     .where(and(eq(authenticators.id, cred.id), eq(authenticators.counter, cred.counter)))
     .returning({ id: authenticators.id });
   if (updatedMfaCounters.length !== 1) {
+    // This request lost the credential-counter CAS to another valid ceremony.
+    // Restore its independently claimed challenge so the user can retry with
+    // the authenticator's newly advanced counter instead of losing both gates.
+    if (expectedChallenge) {
+      await getChallengeStore().set(challengeKey, expectedChallenge);
+    }
     console.warn(`[PasskeyAuth] Concurrent MFA counter update rejected for credential ${cred.id}`);
     return c.json<ApiResponse>({ ok: false, error: "Passkey MFA verification failed" }, 401);
   }
@@ -7742,6 +7820,9 @@ const completePasskeyMfaHandler = async (c: Context) => {
     mfaMethod: "passkey",
     factorEnrollmentVerifiedAt: Date.now(),
   };
+  await writeAuthLoginAudit(c, session.payload.tenantId, session.payload.userId, session.payload, {
+    mfaMethod: "passkey",
+  });
   const token = await createSessionToken(session.payload.address, session.payload.tenantId, {
     userId: session.payload.userId,
     email: session.payload.email,
@@ -8989,25 +9070,32 @@ auth.post("/email/code/verify", async (c) => {
   }
 
   const emailAuth = await getEmailAuthForTenant(resolvedTenantId);
-  const result = await emailAuth.verifyEmailLoginCode(email, code, resolvedTenantId);
-  if (!result.valid) {
+  const claim = await emailAuth.claimEmailLoginCode(email, code, resolvedTenantId);
+  if (!claim.valid) {
     return c.json<ApiResponse>(
       {
         ok: false,
         error:
-          result.reason === "locked"
+          claim.reason === "locked"
             ? "Too many verification attempts. Try again later."
             : "Invalid or expired code",
       },
-      result.reason === "locked" ? 429 : 401,
+      claim.reason === "locked" ? 429 : 401,
     );
   }
 
-  const authResult = await completeEmailAuth(c, email, body.tenantId);
-  if (!authResult.ok) {
-    return c.json<ApiResponse>({ ok: false, error: authResult.error }, authResult.status);
+  let committed = false;
+  try {
+    const authResult = await completeEmailAuth(c, email, body.tenantId);
+    if (!authResult.ok) {
+      return c.json<ApiResponse>({ ok: false, error: authResult.error }, authResult.status);
+    }
+    await claim.commit();
+    committed = true;
+    return authExchangeJson(c, authResult.response);
+  } finally {
+    if (!committed) await claim.rollback();
   }
-  return authExchangeJson(c, authResult.response);
 });
 
 auth.post("/email/status", async (c) => {
@@ -9038,7 +9126,11 @@ auth.post("/email/status", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: tenantHintError }, 404);
   }
   const emailAuth = await getEmailAuthForTenant(resolvedTenantId);
-  const status = await emailAuth.getEmailLoginStatus(body.challengeId, body.pollSecret);
+  const status = await emailAuth.getEmailLoginStatus(
+    body.challengeId,
+    body.pollSecret,
+    resolvedTenantId,
+  );
   return c.json<ApiResponse<{ status: string; expiresAt?: string }>>({
     ok: true,
     data: {
@@ -10882,7 +10974,11 @@ function parseOAuthRedirectUri(redirectUri: string): URL {
   }
 
   if (redirectUrl.protocol === "http:") {
-    const host = redirectUrl.hostname.toLowerCase();
+    const serializedHost = redirectUrl.hostname.toLowerCase();
+    const host =
+      serializedHost.startsWith("[") && serializedHost.endsWith("]")
+        ? serializedHost.slice(1, -1)
+        : serializedHost;
     const isLoopback = host === "localhost" || host === "127.0.0.1" || host === "::1";
     if (!isLoopback) {
       throw new Error("redirect_uri must use https except for loopback development origins");

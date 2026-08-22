@@ -6,6 +6,7 @@ import {
   getSpendByHost,
   isoWeek,
   recordSpend,
+  reserveDailySpendIdempotently,
   reserveSpend,
   settleReservedSpend,
 } from "../spend-tracker.js";
@@ -20,18 +21,14 @@ beforeEach(async () => {
   if (!runRedis) return;
   // Clean up test keys
   const redis = getRedis();
-  let cursor = "0";
-  do {
-    const [newCursor, keys] = await redis.scan(
-      cursor,
-      "MATCH",
-      `spend:${TEST_AGENT}:*`,
-      "COUNT",
-      100,
-    );
-    cursor = newCursor;
-    if (keys.length > 0) await redis.del(...keys);
-  } while (cursor !== "0");
+  for (const pattern of [`spend:${TEST_AGENT}:*`, `spend:*:${TEST_AGENT}:*`]) {
+    let cursor = "0";
+    do {
+      const [newCursor, keys] = await redis.scan(cursor, "MATCH", pattern, "COUNT", 100);
+      cursor = newCursor;
+      if (keys.length > 0) await redis.del(...keys);
+    } while (cursor !== "0");
+  }
 });
 
 afterAll(async () => {
@@ -71,6 +68,100 @@ describe("isoWeek (ISO-8601)", () => {
 });
 
 describeRedis("Spend Tracker", () => {
+  test("atomically admits one of two concurrent daily issuance reservations", async () => {
+    const [first, second] = await Promise.all([
+      reserveDailySpendIdempotently(
+        TEST_AGENT,
+        TEST_TENANT,
+        60,
+        100,
+        "a".repeat(64),
+        "1".repeat(64),
+      ),
+      reserveDailySpendIdempotently(
+        TEST_AGENT,
+        TEST_TENANT,
+        60,
+        100,
+        "b".repeat(64),
+        "2".repeat(64),
+      ),
+    ]);
+    expect([first.allowed, second.allowed].sort()).toEqual([false, true]);
+    const third = await reserveDailySpendIdempotently(
+      TEST_AGENT,
+      TEST_TENANT,
+      60,
+      100,
+      "e".repeat(64),
+      "5".repeat(64),
+    );
+    expect(third.allowed).toBe(false);
+  });
+
+  test("replays one issuance key without double reservation and rejects changed intent", async () => {
+    const reservationId = "c".repeat(64);
+    const requestDigest = "3".repeat(64);
+    expect(
+      await reserveDailySpendIdempotently(
+        TEST_AGENT,
+        TEST_TENANT,
+        25,
+        100,
+        reservationId,
+        requestDigest,
+      ),
+    ).toMatchObject({ allowed: true, replayed: false });
+    expect(
+      await reserveDailySpendIdempotently(
+        TEST_AGENT,
+        TEST_TENANT,
+        25,
+        100,
+        reservationId,
+        requestDigest,
+      ),
+    ).toMatchObject({ allowed: true, replayed: true });
+    const secondIntent = await reserveDailySpendIdempotently(
+      TEST_AGENT,
+      TEST_TENANT,
+      75,
+      100,
+      "d".repeat(64),
+      "6".repeat(64),
+    );
+    expect(secondIntent.allowed).toBe(true);
+    expect(
+      (
+        await reserveDailySpendIdempotently(
+          TEST_AGENT,
+          TEST_TENANT,
+          0.0001,
+          100,
+          "f".repeat(64),
+          "7".repeat(64),
+        )
+      ).allowed,
+    ).toBe(false);
+    expect(
+      await reserveDailySpendIdempotently(
+        TEST_AGENT,
+        TEST_TENANT,
+        25,
+        100,
+        reservationId,
+        "4".repeat(64),
+      ),
+    ).toMatchObject({ allowed: false, conflict: true });
+  });
+
+  test("isolates issuance reservations for the same agent identity across tenants", async () => {
+    const reserve = (tenantId: string) =>
+      reserveDailySpendIdempotently(TEST_AGENT, tenantId, 100, 100, "8".repeat(64), "9".repeat(64));
+    expect(await reserve(TEST_TENANT)).toMatchObject({ allowed: true, replayed: false });
+    expect(await reserve(`${TEST_TENANT}-other`)).toMatchObject({ allowed: true, replayed: false });
+  });
+
   test("records and queries spend", async () => {
     await recordSpend(TEST_AGENT, TEST_TENANT, 0.05, "api.openai.com");
     await recordSpend(TEST_AGENT, TEST_TENANT, 0.03, "api.openai.com");

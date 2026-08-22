@@ -70,9 +70,10 @@ export async function checkRateLimit(
   key: string,
   windowMs: number,
   maxRequests: number,
+  client?: ReturnType<typeof getRedis>,
 ): Promise<RateLimitResult> {
   validateRateLimitInput(key, windowMs, maxRequests);
-  const redis = getRedis();
+  const redis = client ?? getRedis();
   const now = Date.now();
   const windowStart = now - windowMs;
 

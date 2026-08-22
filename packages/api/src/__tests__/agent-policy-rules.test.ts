@@ -281,7 +281,7 @@ describe("agent policy rule CRUD", () => {
     ).toEqual(beforeAudits);
   });
 
-  it("restores policy replacement and rule mutations when completion audits fail", async () => {
+  it("rolls back policy replacement and rule mutations when completion audits fail", async () => {
     const [seeded] = await getDb()
       .insert(policies)
       .values({

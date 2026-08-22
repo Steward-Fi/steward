@@ -422,6 +422,22 @@ providerAuthorityRoutes.put("/provider-agent-budgets/:id", async (c) => {
   }
 });
 
+providerAuthorityRoutes.delete("/provider-agent-budgets/:id", async (c) => {
+  const body = await safeJsonParse<{ expectedRevision: number; reason: string }>(c);
+  if (!body) return c.json<ApiResponse>({ ok: false, error: "Invalid JSON body" }, 400);
+  try {
+    return c.json({
+      ok: true,
+      data: await providerAuthorityStore.deleteAgentBudget(
+        mutationContext(c, body),
+        c.req.param("id"),
+      ),
+    });
+  } catch (error) {
+    return fail(c, error);
+  }
+});
+
 providerAuthorityRoutes.post("/provider-access/check", async (c) => {
   const body = await safeJsonParse<
     Omit<ProviderAccessRequestV1, "tenantId" | "actor" | "evaluatedAt"> & {

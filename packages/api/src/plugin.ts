@@ -1,20 +1,13 @@
 /**
  * plugin.ts — the lean-core + opt-in-plugin seam for the Steward app.
  *
- * WHY THIS EXISTS
- * ---------------
- * steward serves two audiences from one codebase: teams that want only the auth +
- * embedded-wallet + policy core, and teams that ALSO want agent trading (venue
- * execution + trade sessions). historically these were coupled: `@stwd/api`
- * hard-depended on the trading stack (`@stwd/trade-sessions`, `@stwd/venue-*`) and
- * the trade routes imported the venue adapters directly, so an auth-only install
- * still compiled + shipped the entire trading stack (the venue SDKs, ethers, clob
- * clients) — an unnecessary install-size, supply-chain, and audit-surface cost for
- * the majority of installs that never trade.
- *
- * the architecture here is a LEAN OPEN CORE (auth + vault + policy + proxy +
- * webhooks) plus OPT-IN PLUGINS that a host registers. trading is the first such
- * plugin (`@stwd/plugin-trading`). this mirrors the plugin model of mature
+ * OWNERSHIP CONTRACT
+ * ------------------
+ * steward serves teams that want only the auth + embedded-wallet + policy core
+ * and teams that also enable first-party or third-party extensions. The
+ * architecture is a LEAN OPEN CORE (auth + vault + policy + proxy + webhooks)
+ * plus OPT-IN PLUGINS that a host registers. This repository ships trading,
+ * capabilities, and wxmr plugins. this mirrors the plugin model of mature
  * frameworks (fastify/vite/hono-style `app.register(plugin)`): take only what you
  * need, and anyone can write + register their own plugin.
  *
@@ -81,7 +74,6 @@ import {
 } from "@stwd/policy-engine";
 import type { PluginMigrationSource, StewardPlugin } from "@stwd/shared";
 import { WebhookEventRegistry } from "@stwd/shared";
-import { KeyStore, SecretVault } from "@stwd/vault";
 import type { Hono } from "hono";
 import {
   requireAgentJwt,
@@ -91,14 +83,13 @@ import {
 import { operatorAuth } from "./middleware/operator-auth";
 import { getRedisClient } from "./middleware/redis";
 import { getAgentTokenStatus } from "./services/agent-token-status";
-import { writeAuditEvent } from "./services/audit";
+import { verifyAuditChain, writeAuditEvent } from "./services/audit";
 import {
   type AppVariables,
   db,
   ensureAgentForTenant,
   getPolicySet,
   isValidAnyAddress,
-  MASTER_PASSWORD,
   policyEngine,
   priceOracle,
   safeJsonParse,
@@ -106,6 +97,7 @@ import {
   vault,
 } from "./services/context";
 import { createEnvEvmSimulator, type EvmSimulator } from "./services/evm-simulator";
+import { getConfiguredKeyStore, getConfiguredSecretVault } from "./services/vault-factory";
 import { CONFIGURED_WEBHOOK_EVENT_TYPES } from "./services/webhook-events";
 
 /** the steward app a plugin mounts onto: a hono app with the shared variables. */
@@ -193,6 +185,7 @@ export interface StewardAppContext {
   safeJsonParse: typeof safeJsonParse;
   isValidAnyAddress: typeof isValidAnyAddress;
   writeAuditEvent: typeof writeAuditEvent;
+  verifyAuditChain: typeof verifyAuditChain;
   withTenantAuditedTransaction: typeof withTenantAuditedTransaction;
   withCredentialLeaseDatabaseDeadline<T>(
     deadlineAt: number,
@@ -238,11 +231,12 @@ export interface StewardAppContext {
   tenantAuth: typeof tenantAuth;
   /**
    * the core's adapter registry — the seam a plugin's `adapters` contributions
-   * register a real provider integration into. Defaults to the
-   * process-wide {@link adapterRegistry} routes consult; tests inject a fresh
-   * {@link AdapterRegistry} (with a controlled env) so adapter resolution is
-   * hermetic. the host only CALLS `register(category, provider, adapter)` on it;
-   * the registry's fail-closed-in-production resolution is untouched.
+   * register a durable provider integration into. Defaults to the process-wide
+   * {@link adapterRegistry} routes consult; its provider implementations persist
+   * while authority selection comes from the current request environment. Tests
+   * can inject a fresh {@link AdapterRegistry} for hermetic resolution. The host
+   * only CALLS `register(category, provider, adapter)` on it; the registry's
+   * fail-closed-in-production resolution is untouched.
    */
   adapterRegistry: AdapterRegistry;
   evmSimulator: EvmSimulator | null;
@@ -263,8 +257,6 @@ export type StewardApiPlugin = StewardPlugin<StewardApp, StewardAppContext, Eval
  * root and passed to {@link registerPlugin}.
  */
 export function buildPluginContext(): StewardAppContext {
-  const credentialVault = new SecretVault(MASTER_PASSWORD);
-  const leaseKeyStore = new KeyStore(MASTER_PASSWORD, undefined, "credential-lease");
   return {
     db,
     vault,
@@ -275,6 +267,7 @@ export function buildPluginContext(): StewardAppContext {
     safeJsonParse,
     isValidAnyAddress,
     writeAuditEvent,
+    verifyAuditChain,
     withTenantAuditedTransaction,
     withCredentialLeaseDatabaseDeadline: (deadlineAt, use) => {
       if (hasTenantTransactionDatabase()) {
@@ -291,11 +284,15 @@ export function buildPluginContext(): StewardAppContext {
     getAgentTokenStatus,
     getRedisClient,
     exerciseCredentialSecret: (tenantId, secretId, use) =>
-      credentialVault.exerciseSecret(tenantId, secretId, use),
+      getConfiguredSecretVault().exerciseSecret(tenantId, secretId, use),
     sealCredentialLeaseToken: async (tenantId, leaseId, token) =>
-      leaseKeyStore.encrypt(token, { tenantId, name: `upstream-lease:${leaseId}`, version: 1 }),
+      getConfiguredKeyStore("credential-lease").encrypt(token, {
+        tenantId,
+        name: `upstream-lease:${leaseId}`,
+        version: 1,
+      }),
     exerciseCredentialLeaseToken: async (tenantId, leaseId, sealed, use) => {
-      const token = leaseKeyStore.decrypt(sealed, {
+      const token = getConfiguredKeyStore("credential-lease").decrypt(sealed, {
         tenantId,
         name: `upstream-lease:${leaseId}`,
         version: 1,
@@ -639,10 +636,12 @@ export class PluginHost<Ctx> {
                 "empty provider name.",
             );
           }
-          if (contribution.adapter === undefined || contribution.adapter === null) {
+          const hasAdapter = contribution.adapter !== undefined && contribution.adapter !== null;
+          const hasFactory = typeof contribution.createAdapter === "function";
+          if (hasAdapter === hasFactory) {
             throw new PluginHostError(
               `plugin "${plugin.name}" contributes a "${category}" adapter under ` +
-                `provider "${provider}" with no adapter instance.`,
+                `provider "${provider}" with ${hasAdapter ? "both an adapter and a factory" : "neither an adapter nor a factory"}.`,
             );
           }
           const key = `${category}::${provider}`;
@@ -668,11 +667,19 @@ export class PluginHost<Ctx> {
           // the api boundary where @stwd/adapters is a legitimate dependency. The
           // cast is unavoidable (see AdapterContribution's cycle note); the
           // contribution author owns the adapter conforming to its category.
-          hostRegistry.register(
-            category,
-            provider,
-            contribution.adapter as Parameters<AdapterRegistry["register"]>[2],
-          );
+          if (hasFactory) {
+            hostRegistry.registerFactory(
+              category,
+              provider,
+              contribution.createAdapter as Parameters<AdapterRegistry["registerFactory"]>[2],
+            );
+          } else {
+            hostRegistry.register(
+              category,
+              provider,
+              contribution.adapter as Parameters<AdapterRegistry["register"]>[2],
+            );
+          }
           const list = this.adapterContributions.get(plugin.name) ?? [];
           list.push(key);
           this.adapterContributions.set(plugin.name, list);

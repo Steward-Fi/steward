@@ -13,13 +13,19 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-export function plaintextKeyExportResponseGateError(
-  body: unknown,
-  env: EnvLike = process.env,
-): string | null {
-  if (!isProductionLike(env)) return null;
+export function plaintextKeyExportResponseGateError(body: unknown, env?: EnvLike): string | null {
+  const authority =
+    env ??
+    Object.freeze({
+      NODE_ENV: runtimeEnvironmentValue("NODE_ENV"),
+      STEWARD_ENV: runtimeEnvironmentValue("STEWARD_ENV"),
+      STEWARD_ALLOW_PLAINTEXT_KEY_EXPORT_IN_PRODUCTION: runtimeEnvironmentValue(
+        "STEWARD_ALLOW_PLAINTEXT_KEY_EXPORT_IN_PRODUCTION",
+      ),
+    });
+  if (!isProductionLike(authority)) return null;
 
-  if (env.STEWARD_ALLOW_PLAINTEXT_KEY_EXPORT_IN_PRODUCTION !== "true") {
+  if (authority.STEWARD_ALLOW_PLAINTEXT_KEY_EXPORT_IN_PRODUCTION !== "true") {
     return "Plaintext private key export responses are disabled in production. Use an encrypted export flow or set STEWARD_ALLOW_PLAINTEXT_KEY_EXPORT_IN_PRODUCTION=true for an audited break-glass operation.";
   }
 
@@ -32,3 +38,5 @@ export function plaintextKeyExportResponseGateError(
 
   return null;
 }
+
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";

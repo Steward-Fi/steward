@@ -1,9 +1,9 @@
 /**
  * operations.ts — X provider-action operation schemas + canonical action
- * construction (issue #195 workstream B).
+ * construction.
  *
  * This adapter owns method, origin, path construction, header selection, and
- * body shape for the three workstream-B operations. It validates operation
+ * body shape for the three supported operations. It validates operation
  * ARGUMENTS strictly (fail closed with stable CANON_* codes), builds a raw
  * internal HTTP representation, and runs it through the ONE shared X
  * canonicalizer (`canonicalizeRawInternalXAction`) so the action digest matches
@@ -162,7 +162,7 @@ function textHasUrl(text: string): boolean {
   // `contentPolicy.allowUrls:false` / URL-spend / URL-approval policy be BYPASSED
   // by a real bare domain on an uncommon TLD (e.g. `example.social`, `foo.shop`).
   // A false positive only denies/escalates a borderline post, which is the safe
-  // direction (codex P2, PR review). We therefore treat ANY `label.tld` token
+  // direction. We therefore treat ANY `label.tld` token
   // (tld = 2+ ASCII letters) with a path OR a plausible domain shape as a URL,
   // and EXCLUDE only a small deny-list of common English abbreviations that
   // appear as `word.word` in ordinary prose.
@@ -266,8 +266,7 @@ function buildTweetCreate(rawArgs: unknown): XActionBuild {
   const textSha256 = `sha256:${createHash("sha256").update(Buffer.from(text, "utf8")).digest("hex")}`;
 
   // Safe summary mirrors the GitHub adapter: length + sha256 only, never any
-  // slice of the text. A preview was intentionally REMOVED (codex P2, #195
-  // workstream B): for short tweets a prefix preview equals the full body, which
+  // slice of the text. A preview would equal the full body for short tweets, which
   // would leak user content the summary is contractually forbidden to contain.
   const safeSummary: Record<string, unknown> = {
     operation: "x.tweet.create",

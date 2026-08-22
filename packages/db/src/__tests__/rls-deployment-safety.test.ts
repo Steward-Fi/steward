@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { PgDialect } from "drizzle-orm/pg-core";
 import { assertRlsDeploymentSafety } from "../rls-deployment-safety";
 import {
   EXPECTED_PUBLIC_RELATIONS,
@@ -11,11 +12,13 @@ function database(options?: {
   relationDrift?: boolean;
   capabilities?: boolean;
   partialCapabilities?: boolean;
+  onQuery?: (statement: unknown, queryNumber: number) => void;
 }) {
   let query = 0;
   return {
-    async execute() {
+    async execute(statement: unknown) {
       query += 1;
+      options?.onQuery?.(statement, query);
       if (query === 1) {
         return [
           {
@@ -72,6 +75,25 @@ function database(options?: {
 }
 
 describe("RLS deployment safety gate", () => {
+  test("binds the expected relation inventory as a valid parameterized IN list", async () => {
+    let roleStatement: unknown;
+    await assertRlsDeploymentSafety(
+      database({
+        onQuery(statement, queryNumber) {
+          if (queryNumber === 1) roleStatement = statement;
+        },
+      }),
+      { expectedRole: "steward_app" },
+    );
+
+    const compiled = new PgDialect().sqlToQuery(roleStatement);
+    expect(compiled.sql).toContain("relation.relname IN ($1, $2");
+    expect(compiled.sql).not.toContain("ANY((");
+    expect(compiled.params).toEqual([
+      ...new Set(EXPECTED_RLS_POLICY_DEFINITIONS.map((policy) => policy.relation_name)),
+    ]);
+  });
+
   test("accepts only the exact safe role, relation/partition shape, and policies", async () => {
     await expect(
       assertRlsDeploymentSafety(database(), { expectedRole: "steward_app" }),
