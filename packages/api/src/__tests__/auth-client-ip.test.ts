@@ -365,7 +365,7 @@ describe("auth rate-limit keying (route harness)", () => {
       if (res.status === 429) denied = res;
     }
     const nonceKeys = capturedKeys("siwe-nonce");
-    const expectedKey = `ratelimit:auth:siwe-nonce:${hashSha256Hex("ip:198.51.100.7")}:60000`;
+    const expectedKey = `ratelimit:auth:siwe-nonce:${hashSha256Hex("ip:198.51.100.7")}:60000:30`;
     expect(new Set(nonceKeys)).toEqual(new Set([expectedKey]));
     expect(denied).not.toBeNull();
     expect(denied?.headers.get("retry-after")).toBe("60");
@@ -378,7 +378,7 @@ describe("auth rate-limit keying (route harness)", () => {
     });
     expect(other.status).toBe(400);
     expect(capturedKeys("siwe-nonce")).toContain(
-      `ratelimit:auth:siwe-nonce:${hashSha256Hex("ip:203.0.113.99")}:60000`,
+      `ratelimit:auth:siwe-nonce:${hashSha256Hex("ip:203.0.113.99")}:60000:30`,
     );
   });
 
@@ -390,7 +390,7 @@ describe("auth rate-limit keying (route harness)", () => {
     });
     expect(res.status).not.toBe(429);
     expect(capturedKeys("siwe-nonce")).toContain(
-      `ratelimit:auth:siwe-nonce:${hashSha256Hex("ip:198.51.100.7")}:60000`,
+      `ratelimit:auth:siwe-nonce:${hashSha256Hex("ip:198.51.100.7")}:60000:30`,
     );
   });
 
@@ -422,8 +422,8 @@ describe("auth rate-limit keying (route harness)", () => {
     // Host gets its own bucket, and no request ever lands in the legacy
     // "global" chokepoint or puts raw client-controlled bytes in the key.
     expect(calls.map((entry) => entry.key)).toEqual([
-      `ratelimit:auth:siwe-nonce:${hashSha256Hex("host:api.steward.example")}:60000`,
-      `ratelimit:auth:siwe-nonce:${hashSha256Hex("host:staging.steward.example")}:60000`,
+      `ratelimit:auth:siwe-nonce:${hashSha256Hex("host:api.steward.example")}:60000:150`,
+      `ratelimit:auth:siwe-nonce:${hashSha256Hex("host:staging.steward.example")}:60000:150`,
     ]);
     expect(calls[0]?.key).not.toBe(calls[1]?.key);
     for (const call of calls) {
@@ -445,7 +445,7 @@ describe("auth rate-limit keying (route harness)", () => {
       { [SOCKET_PEER_ENV_KEY]: "198.51.100.60" },
     );
     expect(capturedKeys("siwe-nonce")).toEqual([
-      `ratelimit:auth:siwe-nonce:${hashSha256Hex("ip:198.51.100.60")}:60000`,
+      `ratelimit:auth:siwe-nonce:${hashSha256Hex("ip:198.51.100.60")}:60000:30`,
     ]);
 
     // A non-IP injection (runtime could not supply a peer) must NOT become an
@@ -457,7 +457,7 @@ describe("auth rate-limit keying (route harness)", () => {
       { [SOCKET_PEER_ENV_KEY]: "not-an-ip" },
     );
     expect(capturedKeys("siwe-nonce")).toEqual([
-      `ratelimit:auth:siwe-nonce:${hashSha256Hex("host:api.steward.example")}:60000`,
+      `ratelimit:auth:siwe-nonce:${hashSha256Hex("host:api.steward.example")}:60000:150`,
     ]);
   });
 
@@ -479,7 +479,7 @@ describe("auth rate-limit keying (route harness)", () => {
     }
     // The destination limiter still keys deterministically on the email.
     expect(capturedKeys("email-send-destination")).toContain(
-      `ratelimit:auth:email-send-destination:${hashSha256Hex(email)}:600000`,
+      `ratelimit:auth:email-send-destination:${hashSha256Hex(email)}:600000:5`,
     );
   });
 

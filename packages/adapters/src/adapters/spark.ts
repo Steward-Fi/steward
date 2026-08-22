@@ -285,6 +285,9 @@ export class MockSparkAdapter implements SparkAdapter {
   async buildLightningPayment(request: LightningPaymentRequest): Promise<UnsignedTxIntent> {
     const wallet = this.requireWallet(request.walletId);
     const paymentRequest = assertLightningInvoice(request.paymentRequest);
+    const invoice = [...this.invoices.values()].find(
+      (candidate) => candidate.paymentRequest === paymentRequest,
+    );
     const maxFeeSats =
       request.maxFeeSats === undefined
         ? undefined
@@ -295,7 +298,12 @@ export class MockSparkAdapter implements SparkAdapter {
       owner: assertId(request.owner, "owner", 128),
       to: paymentRequest,
       value: "0",
-      metadata: { walletId: wallet.id, network: wallet.network, maxFeeSats },
+      metadata: {
+        walletId: wallet.id,
+        network: wallet.network,
+        maxFeeSats,
+        amountSats: invoice?.amountSats,
+      },
     });
   }
 

@@ -531,7 +531,7 @@ export async function checkAuthRateLimit(
       ? { subject: subjectOverride, coarse: false }
       : authRateLimitSubject(c);
   const effectiveMax = resolved.coarse ? max * AUTH_RATE_LIMIT_FALLBACK_HEADROOM : max;
-  const key = `ratelimit:auth:${endpoint}:${hashSha256Hex(resolved.subject)}:${windowMs}`;
+  const key = `ratelimit:auth:${endpoint}:${hashSha256Hex(resolved.subject)}:${windowMs}:${effectiveMax}`;
 
   const deny = (retryAfterSecs: number) => {
     const headers = formatRateLimitHeaders({

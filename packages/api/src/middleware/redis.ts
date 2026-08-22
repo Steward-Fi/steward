@@ -265,7 +265,7 @@ export function redisEnforcementRequiresDurability(): boolean {
 /**
  * Check rate limit for an agent's vault signing requests.
  *
- * Key format: ratelimit:vault:{agentId}:{windowMs}
+ * Key format: ratelimit:vault:{agentId}:{windowMs}:{maxRequests}
  */
 export async function checkAgentRateLimit(
   agentId: string,
@@ -282,7 +282,7 @@ export async function checkAgentRateLimit(
   }
 
   try {
-    const key = `ratelimit:vault:${agentId}:${windowMs}`;
+    const key = `ratelimit:vault:${agentId}:${windowMs}:${maxRequests}`;
     return await checkRateLimit(key, windowMs, maxRequests, client);
   } catch (err) {
     console.error(
@@ -296,7 +296,7 @@ export async function checkAgentRateLimit(
 /**
  * Check rate limit for proxy requests.
  *
- * Key format: ratelimit:proxy:{agentId}:{host}:{windowMs}
+ * Key format: ratelimit:proxy:{agentId}:{host}:{windowMs}:{maxRequests}
  */
 export async function checkProxyRateLimit(
   agentId: string,
@@ -313,7 +313,7 @@ export async function checkProxyRateLimit(
   }
 
   try {
-    const key = `ratelimit:proxy:${agentId}:${host}:${windowMs}`;
+    const key = `ratelimit:proxy:${agentId}:${host}:${windowMs}:${maxRequests}`;
     return await checkRateLimit(key, windowMs, maxRequests, client);
   } catch (err) {
     console.error(
