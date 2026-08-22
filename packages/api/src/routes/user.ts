@@ -1275,10 +1275,13 @@ async function requireTenantUserDirectoryReader(
 async function ensurePersonalTenant(userId: string, displayName: string): Promise<string> {
   const tenantId = `personal-${userId}`;
   const { hash } = generateApiKey();
-  await getDb()
-    .insert(tenants)
-    .values({ id: tenantId, name: displayName, apiKeyHash: hash })
-    .onConflictDoNothing();
+  await getDb().transaction(async (tx) => {
+    await tx
+      .insert(tenants)
+      .values({ id: tenantId, name: displayName, apiKeyHash: hash })
+      .onConflictDoNothing();
+    await tx.insert(userTenants).values({ userId, tenantId, role: "owner" }).onConflictDoNothing();
+  });
   return tenantId;
 }
 
@@ -6566,6 +6569,10 @@ user.post("/me/tenants/switch", async (c) => {
 
   const userId = c.get("userId");
   const session = c.get("userSession");
+  const sourceTenantId = session.tenantId;
+  if (typeof sourceTenantId !== "string" || sourceTenantId.length === 0) {
+    return c.json<ApiResponse>({ ok: false, error: "Session tenant is required" }, 401);
+  }
   if (!hasRecentMfaStepUp(session)) {
     return c.json<ApiResponse>(
       { ok: false, error: "Tenant switching requires a recent MFA step-up session" },
@@ -6619,12 +6626,13 @@ user.post("/me/tenants/switch", async (c) => {
   );
 
   await writeUserAudit(c, {
-    tenantId: membership.tenantId,
+    tenantId: sourceTenantId,
     actorType: "user",
     actorId: userId,
     action: "tenant.switch",
     resourceType: "tenant",
     resourceId: membership.tenantId,
+    metadata: { targetTenantId: membership.tenantId },
   });
   dispatchWebhook(membership.tenantId, userId, "user.authenticated", {
     userId,
@@ -8108,13 +8116,15 @@ user.patch("/me/tenants/:tenantId/users/:targetUserId/deactivate", async (c) => 
         .limit(1);
       if (!target) return null;
 
-      const issuedBefore = Math.floor(Date.now() / 1000) + 1;
+      const [lifecycle] = await tx.execute(sql<{ tokensRevokedBefore: number | string }>`
+        SELECT tokens_revoked_before AS "tokensRevokedBefore"
+        FROM steward_bootstrap.tenant_set_user_deactivation(
+          ${tenantId}, ${admin.userId}::uuid, ${targetUserId}::uuid, ${deactivated}
+        )
+      `);
+      if (!lifecycle) throw new Error("Tenant lifecycle target disappeared");
+      const issuedBefore = Number(lifecycle.tokensRevokedBefore);
       await revocationStore.revokeUserTokens(targetUserId, issuedBefore);
-
-      await tx
-        .update(users)
-        .set({ deactivatedAt: deactivated ? new Date() : null, updatedAt: new Date() })
-        .where(eq(users.id, targetUserId));
       await tx
         .delete(refreshTokens)
         .where(and(eq(refreshTokens.tenantId, tenantId), eq(refreshTokens.userId, targetUserId)));

@@ -1,5 +1,6 @@
 import { relations, sql } from "drizzle-orm";
 import {
+  bigint,
   boolean,
   foreignKey,
   index,
@@ -43,6 +44,12 @@ export const users = pgTable(
      */
     guestExpiresAt: timestamp("guest_expires_at", { withTimezone: true }),
     deactivatedAt: timestamp("deactivated_at", { withTimezone: true }),
+    /**
+     * Database-authoritative access-token revocation line. Session iat values
+     * at or below this second are rejected even if the Redis acceleration
+     * cache is empty or unavailable.
+     */
+    tokensRevokedBefore: bigint("tokens_revoked_before", { mode: "number" }).notNull().default(-1),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -229,6 +236,25 @@ export const accounts = pgTable(
       table.providerAccountId,
     ),
     userIdIdx: index("accounts_user_id_idx").on(table.userId),
+  }),
+);
+
+/** Permanent, credential-free evidence retained after a user identity is deleted. */
+export const retainedUserProviderEvidence = pgTable(
+  "retained_user_provider_evidence",
+  {
+    accountId: uuid("account_id").primaryKey(),
+    deletedUserId: uuid("deleted_user_id").notNull(),
+    provider: varchar("provider", { length: 64 }).notNull(),
+    providerAccountId: varchar("provider_account_id", { length: 255 }).notNull(),
+    retainedAt: timestamp("retained_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    deletedProviderUnique: uniqueIndex("retained_user_provider_evidence_identity_idx").on(
+      table.deletedUserId,
+      table.provider,
+      table.providerAccountId,
+    ),
   }),
 );
 

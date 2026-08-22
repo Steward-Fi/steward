@@ -12,18 +12,6 @@
  */
 import { beforeEach, describe, expect, test } from "bun:test";
 
-// Bootstrap the entrypoint's boot-time env BEFORE any dynamic import of
-// `../index.ts`. index.ts runs `validateJwtSecretEnv()` and requires a database
-// URL at module load (it `process.exit(1)`s otherwise), so a bare
-// `bun test metrics-exposure.test.ts` under the normal isolated runner (which
-// inherits the ambient env and injects nothing) must supply these itself. Using
-// the in-memory PGLite posture keeps the test fully self-contained with no
-// third-party Postgres/JWT config, matching the other proxy suites' isolation.
-process.env.STEWARD_ALLOW_DEV_SECRETS = "true";
-process.env.STEWARD_JWT_SECRET ||= "test-proxy-metrics-jwt-secret-32-characters-min";
-process.env.STEWARD_PGLITE_MEMORY = "true";
-process.env.DATABASE_URL ||= "postgres://steward:steward@127.0.0.1:5432/steward_test";
-
 const TOKEN = "operator-metrics-token-32-characters-minimum";
 
 beforeEach(() => {
@@ -33,7 +21,7 @@ beforeEach(() => {
 
 describe("proxy /metrics exposure guard", () => {
   test("disabled /metrics is byte-identical to an unknown path (no fingerprint)", async () => {
-    const mod = await import("../index.ts");
+    const mod = await import("../app.ts");
     const app = mod.default as { fetch: (r: Request) => Promise<Response> };
 
     const metrics = await app.fetch(new Request("http://proxy.local/metrics"));
@@ -53,7 +41,7 @@ describe("proxy /metrics exposure guard", () => {
   test("enabled + valid operator token renders metrics; missing token is rejected", async () => {
     process.env.STEWARD_METRICS_ENABLED = "true";
     process.env.STEWARD_METRICS_TOKEN = TOKEN;
-    const mod = await import("../index.ts");
+    const mod = await import("../app.ts");
     const app = mod.default as { fetch: (r: Request) => Promise<Response> };
 
     const authed = await app.fetch(

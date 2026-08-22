@@ -31,12 +31,13 @@ import { createReadinessHandler, type ReadinessCheck } from "./readiness";
 import { assertAuthStoresAreSafe, getAuthStoreSources, initAuthStores } from "./routes/auth";
 import { startAccountWalletLifecycleRecoveryScheduler } from "./services/account-wallet-lifecycle";
 import { checkCapabilityRateLimitReadiness } from "./services/capability-rate-limit-readiness";
-import { API_VERSION, type ApiResponse } from "./services/context";
+import { API_VERSION, type ApiResponse, ensureDefaultTenantReady } from "./services/context";
 import { startGoogleCredentialLifecycleScheduler } from "./services/provider-google-lifecycle-scheduler";
 import { startProviderReservationReconciliationScheduler } from "./services/provider-reservation-reconciliation-scheduler";
 import { startXCredentialLifecycleScheduler } from "./services/provider-x-lifecycle-scheduler";
 import { startRetentionScheduler } from "./services/retention";
 import { SOCKET_PEER_ENV_KEY } from "./services/runtime-gate";
+import { startTenantDeletionRevocationScheduler } from "./services/tenant-deletion-revocation-scheduler";
 import { startTransactionReceiptPollingScheduler } from "./services/transaction-receipt-poller";
 import {
   getUpstreamCredentialLeaseSchedulerHealth,
@@ -57,6 +58,14 @@ if (!Number.isInteger(PORT) || PORT <= 0) {
 }
 validateJwtSecretEnv();
 
+const skipMigrations =
+  process.env.SKIP_MIGRATIONS === "true" || process.env.SKIP_MIGRATIONS === "1";
+const productionPostgresRuntime =
+  !shouldUsePGLite() && process.env.NODE_ENV !== "development" && process.env.NODE_ENV !== "test";
+if (productionPostgresRuntime && !skipMigrations) {
+  throw new Error("PRODUCTION_RLS_REQUIRES_OUT_OF_BAND_MIGRATIONS: set SKIP_MIGRATIONS=1");
+}
+
 // Compose the deployable app: lean core + this repo's opt-in plugins (trading).
 // composeApp() is async because plugin registration may be async + the trading
 // plugin is dynamically imported so the lean core graph never statically pulls
@@ -72,6 +81,7 @@ let isShuttingDown = false;
 let cancelRetention: (() => void) | undefined;
 let cancelProviderReservationReconciliation: (() => void) | undefined;
 let cancelTransactionReceiptPolling: (() => void) | undefined;
+let cancelTenantDeletionRevocationScheduler: (() => void) | undefined;
 let cancelWebhookRetryScheduler: (() => void) | undefined;
 let cancelUpstreamCredentialLeaseScheduler: (() => Promise<void>) | undefined;
 let cancelGoogleCredentialLifecycleScheduler: (() => Promise<void>) | undefined;
@@ -128,8 +138,23 @@ app.get(
         );
         if (process.env.NODE_ENV === "production") {
           const expectedRole = process.env.STEWARD_APP_DATABASE_ROLE;
-          if (!expectedRole) throw new Error("STEWARD_APP_DATABASE_ROLE is required in production");
-          await assertRlsDeploymentSafety(db, { expectedRole });
+          const expectedPlatformRole = process.env.STEWARD_PLATFORM_DATABASE_ROLE;
+          const expectedBootstrapRole = process.env.STEWARD_BOOTSTRAP_DATABASE_ROLE;
+          const expectedMigrationRole = process.env.STEWARD_MIGRATION_DATABASE_ROLE;
+          if (
+            !expectedRole ||
+            !expectedPlatformRole ||
+            !expectedBootstrapRole ||
+            !expectedMigrationRole
+          ) {
+            throw new Error("STEWARD database role expectations are required in production");
+          }
+          await assertRlsDeploymentSafety(db, {
+            expectedRole,
+            expectedPlatformRole,
+            expectedBootstrapRole,
+            expectedMigrationRole,
+          });
           checks.rlsDeployment = { ok: true };
         }
       } catch {
@@ -210,7 +235,7 @@ app.get(
 if (shouldUsePGLite()) {
   migrationsRan = true;
   console.log("[steward] PGLite mode detected — skipping Postgres migrator.");
-} else if (process.env.SKIP_MIGRATIONS === "true" || process.env.SKIP_MIGRATIONS === "1") {
+} else if (skipMigrations) {
   migrationsRan = true;
   console.log("[steward] SKIP_MIGRATIONS set — skipping auto-migration. Run migrations manually.");
 } else {
@@ -255,10 +280,32 @@ if (shouldUsePGLite()) {
   }
 }
 
-if (process.env.NODE_ENV === "production" && !shouldUsePGLite()) {
+if (productionPostgresRuntime) {
   const expectedRole = process.env.STEWARD_APP_DATABASE_ROLE;
-  if (!expectedRole) throw new Error("STEWARD_APP_DATABASE_ROLE is required in production");
-  await runStartupPhase("rls", () => assertRlsDeploymentSafety(getDb(), { expectedRole }));
+  const expectedPlatformRole = process.env.STEWARD_PLATFORM_DATABASE_ROLE;
+  const expectedBootstrapRole = process.env.STEWARD_BOOTSTRAP_DATABASE_ROLE;
+  const expectedMigrationRole = process.env.STEWARD_MIGRATION_DATABASE_ROLE;
+  if (!expectedRole || !expectedPlatformRole || !expectedBootstrapRole || !expectedMigrationRole) {
+    throw new Error("STEWARD database role expectations are required in production");
+  }
+  await runStartupPhase("rls", () =>
+    assertRlsDeploymentSafety(getDb(), {
+      expectedRole,
+      expectedPlatformRole,
+      expectedBootstrapRole,
+      expectedMigrationRole,
+    }),
+  );
+}
+
+try {
+  await ensureDefaultTenantReady();
+} catch (error) {
+  console.error(
+    "[steward] Default tenant bootstrap failed — cannot start",
+    redactedThrownDiagnostics(error),
+  );
+  process.exit(1);
 }
 
 // ─── Redis + auth stores (blocking — must complete before serving traffic) ──
@@ -304,6 +351,7 @@ await runStartupPhase("schedulers", async () => {
       cancelUpstreamCredentialLeaseScheduler = await startUpstreamCredentialLeaseScheduler();
     }
   }
+  cancelTenantDeletionRevocationScheduler = startTenantDeletionRevocationScheduler();
 });
 
 // Resolve custody before accepting traffic. A configured backend that cannot
@@ -341,6 +389,7 @@ const shutdown = async (signal: string) => {
   if (cancelRetention) cancelRetention();
   if (cancelProviderReservationReconciliation) cancelProviderReservationReconciliation();
   if (cancelTransactionReceiptPolling) cancelTransactionReceiptPolling();
+  if (cancelTenantDeletionRevocationScheduler) cancelTenantDeletionRevocationScheduler();
   if (cancelWebhookRetryScheduler) cancelWebhookRetryScheduler();
   if (cancelUpstreamCredentialLeaseScheduler) await cancelUpstreamCredentialLeaseScheduler();
   if (cancelGoogleCredentialLifecycleScheduler) await cancelGoogleCredentialLifecycleScheduler();

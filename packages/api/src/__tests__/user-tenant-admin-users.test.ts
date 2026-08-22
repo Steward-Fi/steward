@@ -16,7 +16,6 @@ import { Hono } from "hono";
 
 const TENANT_ID = "user-tenant-admin-users";
 const OTHER_TENANT_ID = "user-tenant-admin-users-other";
-const OWNER_PERSONAL_TENANT_ID = "personal-user-tenant-admin-owner";
 
 describe("user tenant-admin user directory routes", () => {
   const previousDbMode = process.env.STEWARD_DB_MODE;
@@ -42,13 +41,6 @@ describe("user tenant-admin user directory routes", () => {
       await client.close();
     });
 
-    await getDb()
-      .insert(tenants)
-      .values({
-        id: OWNER_PERSONAL_TENANT_ID,
-        name: "Owner Personal Tenant",
-        apiKeyHash: `${OWNER_PERSONAL_TENANT_ID}-hash`,
-      });
     await getDb()
       .insert(tenants)
       .values({
@@ -78,19 +70,17 @@ describe("user tenant-admin user directory routes", () => {
     ownerId = owner.id;
     secondOwnerId = secondOwner.id;
     memberId = member.id;
-    await getDb()
-      .insert(tenants)
-      .values({
-        id: `personal-${ownerId}`,
-        name: "Owner Dynamic Personal Tenant",
-        apiKeyHash: `personal-${ownerId}-hash`,
-      })
-      .onConflictDoNothing();
-    await getDb()
-      .insert(userTenants)
-      .values([
+    await getDb().transaction(async (tx) => {
+      await tx
+        .insert(tenants)
+        .values({
+          id: `personal-${ownerId}`,
+          name: "Owner Dynamic Personal Tenant",
+          apiKeyHash: `personal-${ownerId}-hash`,
+        })
+        .onConflictDoNothing();
+      await tx.insert(userTenants).values([
         { userId: ownerId, tenantId: `personal-${ownerId}`, role: "owner" },
-        { userId: ownerId, tenantId: OWNER_PERSONAL_TENANT_ID, role: "owner" },
         { userId: ownerId, tenantId: TENANT_ID, role: "owner" },
         { userId: ownerId, tenantId: OTHER_TENANT_ID, role: "owner" },
         { userId: secondOwnerId, tenantId: TENANT_ID, role: "owner" },
@@ -101,6 +91,7 @@ describe("user tenant-admin user directory routes", () => {
           customMetadata: { externalId: "crm-member" },
         },
       ]);
+    });
 
     const userModule = await import("../routes/user");
     ({ isUserTenantTransitionRequest, userRoutes } = userModule);
@@ -137,6 +128,7 @@ describe("user tenant-admin user directory routes", () => {
     else process.env.STEWARD_PGLITE_MEMORY = previousPgliteMemory;
     delete process.env.STEWARD_MASTER_PASSWORD;
     delete process.env.STEWARD_JWT_SECRET;
+    delete process.env.STEWARD_AUDIT_HMAC_KEY;
   });
 
   async function tokenFor(userId: string): Promise<string> {
@@ -267,6 +259,26 @@ describe("user tenant-admin user directory routes", () => {
       headers: { Authorization: `Bearer ${tenantBToken}` },
     });
     expect(matchingTenant.status).toBe(200);
+  });
+
+  it("rejects the mounted user invitation writer for a personal tenant", async () => {
+    const personalTenantId = `personal-${ownerId}`;
+    const token = await personalTokenFor(ownerId);
+    const response = await userRoutes.request(`/me/tenants/${personalTenantId}/invitations`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ email: "blocked-personal-invite@example.test", role: "member" }),
+    });
+
+    expect(response.status).toBe(409);
+    expect((await response.json()) as { error?: string }).toEqual({
+      ok: false,
+      error: "Personal and reserved tenant membership is immutable",
+    });
+    expect(await getDb().select().from(tenantInvitations)).toEqual([]);
   });
 
   it("does not carry MFA freshness across tenant switches", async () => {
@@ -416,18 +428,20 @@ describe("user tenant-admin user directory routes", () => {
     const token = "c".repeat(64);
     const tokenHash = createHash("sha256").update(token).digest("hex");
     const memberPersonalTenantId = `personal-${memberId}`;
-    await getDb()
-      .insert(tenants)
-      .values({
-        id: memberPersonalTenantId,
-        name: "Member Personal Tenant",
-        apiKeyHash: `${memberPersonalTenantId}-hash`,
-      })
-      .onConflictDoNothing();
-    await getDb()
-      .insert(userTenants)
-      .values({ userId: memberId, tenantId: memberPersonalTenantId, role: "owner" })
-      .onConflictDoNothing();
+    await getDb().transaction(async (tx) => {
+      await tx
+        .insert(tenants)
+        .values({
+          id: memberPersonalTenantId,
+          name: "Member Personal Tenant",
+          apiKeyHash: `${memberPersonalTenantId}-hash`,
+        })
+        .onConflictDoNothing();
+      await tx
+        .insert(userTenants)
+        .values({ userId: memberId, tenantId: memberPersonalTenantId, role: "owner" })
+        .onConflictDoNothing();
+    });
     const [invitation] = await getDb()
       .insert(tenantInvitations)
       .values({
