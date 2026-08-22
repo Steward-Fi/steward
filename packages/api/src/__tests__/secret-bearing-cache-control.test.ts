@@ -1,96 +1,175 @@
-import { describe, expect, it } from "bun:test";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { closeDb, getDb, tenants, users, userTenants } from "@stwd/db";
+import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
+import { Hono } from "hono";
 
-function source(path: string): string {
-  return readFileSync(join(import.meta.dir, "..", ...path.split("/")), "utf8");
+const TENANT_ID = "secret-cache-contract";
+const USER_ID = crypto.randomUUID();
+const USER_ADDRESS = "0x1234567890123456789012345678901234567890";
+const PLATFORM_KEY = "secret-cache-contract-platform-key";
+
+type RouteGroup =
+  | "app-client"
+  | "invitation-user"
+  | "invitation-platform"
+  | "vault"
+  | "user-wallet"
+  | "global-wallet"
+  | "audit"
+  | "dashboard"
+  | "auth";
+
+/** Explicit inventory of response families that can expose sensitive data. */
+const SECRET_BEARING_RESPONSE_INVENTORY = [
+  { family: "app-client secret rotation", group: "app-client" },
+  { family: "user invitation token", group: "invitation-user" },
+  { family: "platform invitation token", group: "invitation-platform" },
+  { family: "vault message signature", group: "vault" },
+  { family: "vault raw-hash signature", group: "vault" },
+  { family: "vault raw-digest signature", group: "vault" },
+  { family: "vault typed-data signature", group: "vault" },
+  { family: "vault user-operation signature", group: "vault" },
+  { family: "vault authorization signature", group: "vault" },
+  { family: "vault Solana signature", group: "vault" },
+  { family: "user-wallet message and transaction signatures", group: "user-wallet" },
+  { family: "global-wallet personal and typed-data signatures", group: "global-wallet" },
+  { family: "MFA-gated audit reads", group: "audit" },
+  { family: "MFA-gated dashboard reads", group: "dashboard" },
+  { family: "identity token", group: "auth" },
+  { family: "refresh token rotation", group: "auth" },
+  { family: "OAuth exchange token", group: "auth" },
+  { family: "OAuth provider token", group: "auth" },
+] as const satisfies ReadonlyArray<{ family: string; group: RouteGroup }>;
+
+type Probe = () => Promise<Response>;
+let probes: Record<RouteGroup, Probe>;
+
+function expectNoStore(response: Response, family: string): void {
+  expect(response.headers.get("Cache-Control"), family).toBe("no-store, max-age=0");
+  expect(response.headers.get("Pragma"), family).toBe("no-cache");
+  expect(response.headers.get("Expires"), family).toBe("0");
 }
 
-function expectNoStoreBeforeReturn(src: string, marker: string, returnedSecret: string) {
-  const start = src.indexOf(marker);
-  expect(start).toBeGreaterThanOrEqual(0);
-  const noStore = src.indexOf("setNoStoreHeaders(c)", start);
-  const returned = src.indexOf(returnedSecret, start);
-  expect(noStore).toBeGreaterThan(start);
-  expect(returned).toBeGreaterThan(noStore);
-}
+beforeAll(async () => {
+  process.env.NODE_ENV = "test";
+  process.env.STEWARD_PGLITE_MEMORY = "true";
+  process.env.STEWARD_MASTER_PASSWORD = "secret-cache-contract-master-password";
+  process.env.STEWARD_JWT_SECRET = "secret-cache-contract-jwt-secret-32chars";
+  process.env.STEWARD_AUDIT_HMAC_KEY = "secret-cache-contract-audit-key-32chars";
+  process.env.STEWARD_PLATFORM_KEYS = PLATFORM_KEY;
+  process.env.STEWARD_PLATFORM_KEY_SCOPES = JSON.stringify({ [PLATFORM_KEY]: ["platform:*"] });
 
-describe("secret-bearing responses", () => {
-  it("marks one-time app secrets and invitation tokens as non-cacheable", () => {
-    expectNoStoreBeforeReturn(
-      source("routes/tenant-config.ts"),
-      'action: "tenant.app_client_secret.rotate"',
-      "appSecret: generated.secret",
-    );
-    expectNoStoreBeforeReturn(
-      source("routes/user.ts"),
-      "sendTenantInvitation(email",
-      "token, emailSent",
-    );
-    expectNoStoreBeforeReturn(
-      source("routes/platform.ts"),
-      "sendTenantInvitation(email",
-      "token, emailSent",
-    );
+  const { db, client } = await createPGLiteDb("memory://");
+  setPGLiteOverride(db, async () => client.close());
+  await getDb().insert(tenants).values({ id: TENANT_ID, name: "Cache Contract", apiKeyHash: "x" });
+  await getDb().insert(users).values({ id: USER_ID, walletAddress: USER_ADDRESS });
+  await getDb().insert(userTenants).values({ userId: USER_ID, tenantId: TENANT_ID, role: "owner" });
+
+  const [
+    { tenantConfigRoutes },
+    { platformRoutes },
+    { vaultRoutes },
+    { userRoutes },
+    { globalWalletRoutes },
+    { auditRoutes },
+    { dashboardRoutes },
+    { authRoutes, createSessionToken },
+  ] = await Promise.all([
+    import("../routes/tenant-config"),
+    import("../routes/platform"),
+    import("../routes/vault"),
+    import("../routes/user"),
+    import("../routes/global-wallet"),
+    import("../routes/audit"),
+    import("../routes/dashboard"),
+    import("../routes/auth"),
+  ]);
+
+  const sessionToken = await createSessionToken(USER_ADDRESS, TENANT_ID, {
+    userId: USER_ID,
+    tenantId: TENANT_ID,
+    mfaVerifiedAt: Date.now(),
+    mfaMethod: "totp",
   });
+  const sessionHeaders = { Authorization: `Bearer ${sessionToken}` };
 
-  it("marks wallet signature responses as non-cacheable", () => {
-    const vault = source("routes/vault.ts");
-    for (const marker of [
-      'action: "vault.message.signed"',
-      'action: "vault.raw_hash.signed"',
-      'action: "vault.raw_digest.signed"',
-      'action: "vault.sign.typed_data"',
-      'action: "vault.sign.user_operation"',
-      'action: "vault.sign.authorization"',
-      'action: "vault.sign.solana"',
-    ]) {
-      expectNoStoreBeforeReturn(vault, marker, "return c.json");
-    }
+  const authorized = (mounted: Hono): Hono => {
+    const app = new Hono();
+    app.use("*", async (c, next) => {
+      c.set("tenantId", TENANT_ID);
+      c.set("authType", "session-jwt");
+      c.set("tenantRole", "owner");
+      c.set("sessionMfaVerifiedAt", Date.now());
+      c.set("userId", USER_ID);
+      await next();
+    });
+    app.route("/", mounted);
+    return app;
+  };
 
-    expectNoStoreBeforeReturn(
-      source("routes/user.ts"),
-      'action: "user.wallet.sign_message"',
-      "signature, address",
+  const tenant = authorized(tenantConfigRoutes);
+  const vault = authorized(vaultRoutes);
+  const audit = authorized(auditRoutes);
+  const dashboard = authorized(dashboardRoutes);
+
+  probes = {
+    "app-client": () => tenant.request("/__cache-contract-probe__"),
+    "invitation-user": () =>
+      userRoutes.request("/__cache-contract-probe__", { headers: sessionHeaders }),
+    "invitation-platform": () =>
+      platformRoutes.request("/__cache-contract-probe__", {
+        headers: { "X-Steward-Platform-Key": PLATFORM_KEY },
+      }),
+    vault: () => vault.request("/__cache-contract-probe__"),
+    "user-wallet": () =>
+      userRoutes.request("/__cache-contract-probe__", { headers: sessionHeaders }),
+    "global-wallet": () =>
+      globalWalletRoutes.request("/__cache-contract-probe__", { headers: sessionHeaders }),
+    audit: () => audit.request("/events?limit=1"),
+    dashboard: () => dashboard.request("/missing-agent"),
+    auth: () => authRoutes.request("/identity-token"),
+  };
+}, 120_000);
+
+afterAll(async () => {
+  await closeDb();
+  for (const name of [
+    "NODE_ENV",
+    "STEWARD_PGLITE_MEMORY",
+    "STEWARD_MASTER_PASSWORD",
+    "STEWARD_JWT_SECRET",
+    "STEWARD_AUDIT_HMAC_KEY",
+    "STEWARD_PLATFORM_KEYS",
+    "STEWARD_PLATFORM_KEY_SCOPES",
+  ]) {
+    delete process.env[name];
+  }
+});
+
+describe("secret-bearing response cache contract", () => {
+  for (const entry of SECRET_BEARING_RESPONSE_INVENTORY) {
+    it(`${entry.family} is non-cacheable after its authorization boundary`, async () => {
+      const response = await probes[entry.group]();
+      expect(response.status, entry.family).toBeGreaterThanOrEqual(200);
+      expectNoStore(response, entry.family);
+    });
+  }
+
+  it("keeps the inventory complete and uniquely named", () => {
+    expect(SECRET_BEARING_RESPONSE_INVENTORY).toHaveLength(18);
+    expect(new Set(SECRET_BEARING_RESPONSE_INVENTORY.map(({ family }) => family)).size).toBe(18);
+    expect(new Set(SECRET_BEARING_RESPONSE_INVENTORY.map(({ group }) => group))).toEqual(
+      new Set<RouteGroup>([
+        "app-client",
+        "invitation-user",
+        "invitation-platform",
+        "vault",
+        "user-wallet",
+        "global-wallet",
+        "audit",
+        "dashboard",
+        "auth",
+      ]),
     );
-    const globalWallet = source("routes/global-wallet.ts");
-    expectNoStoreBeforeReturn(globalWallet, 'method === "personal_sign"', "result: signature");
-    expectNoStoreBeforeReturn(
-      globalWallet,
-      'method === "eth_signTypedData_v4"',
-      "result: signature",
-    );
-  });
-
-  it("marks MFA-gated audit and dashboard reads as non-cacheable", () => {
-    // Audit routes get no-store via the shared owner/admin+MFA gate
-    // (middleware/audit-gate.ts), wired onto every /audit route with
-    // `.use("*", auditOwnerAdminMfaGate)`. The gate sets no-store only AFTER the
-    // auth checks pass, so a 403 rejection never emits cacheable secret bodies.
-    expect(source("routes/audit.ts")).toContain('auditRoutes.use("*", auditOwnerAdminMfaGate)');
-    expect(source("middleware/audit-gate.ts")).toContain("setNoStoreHeaders(c);");
-    expectNoStoreBeforeReturn(
-      source("routes/dashboard.ts"),
-      "Dashboard data requires recent MFA verification",
-      "AgentDashboardResponse",
-    );
-  });
-
-  it("marks auth routes as non-cacheable before token responses can be returned", () => {
-    const auth = source("routes/auth.ts");
-    expect(auth).toContain("function setAuthNoStoreHeaders");
-    const middleware = auth.indexOf('auth.use("*"');
-    const header = auth.indexOf("setAuthNoStoreHeaders(c)", middleware);
-    expect(middleware).toBeGreaterThanOrEqual(0);
-    expect(header).toBeGreaterThan(middleware);
-    for (const marker of [
-      "buildAuthResponse",
-      'auth.get("/identity-token"',
-      'auth.post("/refresh"',
-      'auth.post("/oauth/exchange"',
-      'auth.post("/oauth/:provider/token"',
-    ]) {
-      expect(auth.indexOf(marker, middleware)).toBeGreaterThan(header);
-    }
   });
 });

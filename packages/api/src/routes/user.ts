@@ -1757,8 +1757,24 @@ const allowUserPrivateKeyImport = (): boolean =>
 const allowUserUnsafeMessageSigning = (): boolean =>
   process.env.STEWARD_ALLOW_USER_UNSAFE_MESSAGE_SIGNING === "true";
 
+// Key export responses are secret-bearing even when authentication, feature
+// gates, validation, auditing, or the vault fails. Apply the cache policy before
+// auth so every response variant is non-cacheable.
+user.use("/me/wallet/export", async (c, next) => {
+  setNoStoreHeaders(c);
+  await next();
+});
+
 // Apply session auth to all routes in this group
 user.use("*", userSessionAuth);
+user.use("*", async (c, next) => {
+  // User-wallet routes can return signatures, one-time invitation tokens, and
+  // short-lived import material. Apply the cache contract once, immediately
+  // after authentication, so every success and post-auth error branch inherits
+  // it without relying on handler-local ordering.
+  setNoStoreHeaders(c);
+  await next();
+});
 
 function personalTenantId(userId: string): string {
   return `personal-${userId}`;
@@ -5898,9 +5914,6 @@ user.post("/me/wallet/export", async (c) => {
       walletIndex: walletIndex.value,
     });
 
-    c.header("Cache-Control", "no-store, max-age=0");
-    c.header("Pragma", "no-cache");
-    c.header("Expires", "0");
     return c.json<
       ApiResponse<{
         evm?: { privateKey: string; address: string };
