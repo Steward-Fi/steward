@@ -456,37 +456,33 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
         },
       },
     };
-    const inserted = await withAuthenticatedTenantDatabase(
-      tenantId,
-      "agent-jwt-rs256",
-      agentId,
-      () =>
-        db
-          .insert(tradingOrderOutcomes)
-          .values({
-            id: executionId,
-            tenantId,
-            agentId,
-            venue: "hyperliquid",
-            phase: "claim",
-            idempotencyKeyHash,
-            requestHash: sha256(bodyHash),
-            httpStatus: envelope.status,
-            response: envelope as unknown as Record<string, unknown>,
-          })
-          .onConflictDoNothing()
-          .returning({ id: tradingOrderOutcomes.id }),
-    );
-    const durable = await findDurableHyperliquidOutcome(
-      tenantId,
-      agentId,
-      idempotencyKey,
-      bodyHash,
-    );
-    if (durable.conflict || !durable.response) {
-      throw new Error("Durable Hyperliquid execution claim could not be verified");
-    }
-    return { claimed: inserted.length === 1, response: durable.response };
+    return withAuthenticatedTenantDatabase(tenantId, "agent-jwt-rs256", agentId, async () => {
+      const inserted = await db
+        .insert(tradingOrderOutcomes)
+        .values({
+          id: executionId,
+          tenantId,
+          agentId,
+          venue: "hyperliquid",
+          phase: "claim",
+          idempotencyKeyHash,
+          requestHash: sha256(bodyHash),
+          httpStatus: envelope.status,
+          response: envelope as unknown as Record<string, unknown>,
+        })
+        .onConflictDoNothing()
+        .returning({ id: tradingOrderOutcomes.id });
+      const durable = await findDurableHyperliquidOutcome(
+        tenantId,
+        agentId,
+        idempotencyKey,
+        bodyHash,
+      );
+      if (durable.conflict || !durable.response) {
+        throw new Error("Durable Hyperliquid execution claim could not be verified");
+      }
+      return { claimed: inserted.length === 1, response: durable.response };
+    });
   }
 
   async function persistDurableHyperliquidOutcome(
@@ -505,8 +501,8 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
       throw new Error("Only terminal Hyperliquid outcomes may be persisted for replay");
     }
     const idempotencyKeyHash = sha256(idempotencyKey);
-    await withAuthenticatedTenantDatabase(tenantId, "agent-jwt-rs256", agentId, () =>
-      db
+    await withAuthenticatedTenantDatabase(tenantId, "agent-jwt-rs256", agentId, async () => {
+      await db
         .insert(tradingOrderOutcomes)
         .values({
           id: durableOutcomeId(tenantId, agentId, "hyperliquid", idempotencyKeyHash, "terminal"),
@@ -519,20 +515,20 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
           httpStatus: envelope.status,
           response: envelope as unknown as Record<string, unknown>,
         })
-        .onConflictDoNothing(),
-    );
-    const durable = await findDurableHyperliquidOutcome(
-      tenantId,
-      agentId,
-      idempotencyKey,
-      bodyHash,
-    );
-    if (durable.conflict || !durable.response) {
-      throw new Error("Durable Hyperliquid terminal outcome could not be verified");
-    }
-    if (canonicalJsonStringify(durable.response) !== canonicalJsonStringify(envelope)) {
-      throw new Error("Durable Hyperliquid terminal outcome disagrees with venue response");
-    }
+        .onConflictDoNothing();
+      const durable = await findDurableHyperliquidOutcome(
+        tenantId,
+        agentId,
+        idempotencyKey,
+        bodyHash,
+      );
+      if (durable.conflict || !durable.response) {
+        throw new Error("Durable Hyperliquid terminal outcome could not be verified");
+      }
+      if (canonicalJsonStringify(durable.response) !== canonicalJsonStringify(envelope)) {
+        throw new Error("Durable Hyperliquid terminal outcome disagrees with venue response");
+      }
+    });
   }
 
   async function persistDurableHyperliquidOutcomeByRequestHash(
@@ -543,8 +539,8 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
     envelope: TradeIdempotencyResponse,
   ): Promise<void> {
     const idempotencyKeyHash = sha256(idempotencyKey);
-    await withAuthenticatedTenantDatabase(tenantId, "agent-jwt-rs256", agentId, () =>
-      db
+    await withAuthenticatedTenantDatabase(tenantId, "agent-jwt-rs256", agentId, async () => {
+      await db
         .insert(tradingOrderOutcomes)
         .values({
           id: durableOutcomeId(tenantId, agentId, "hyperliquid", idempotencyKeyHash, "terminal"),
@@ -557,18 +553,18 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
           httpStatus: envelope.status,
           response: envelope as unknown as Record<string, unknown>,
         })
-        .onConflictDoNothing(),
-    );
-    const rows = await loadDurableHyperliquidClaim(tenantId, agentId, idempotencyKey);
-    const parsed = rows.terminal && durableEnvelopeSchema.safeParse(rows.terminal.response);
-    if (
-      !parsed ||
-      !parsed.success ||
-      rows.terminal?.requestHash !== requestHash ||
-      canonicalJsonStringify(parsed.data) !== canonicalJsonStringify(envelope)
-    ) {
-      throw new Error("Durable Hyperliquid reconciliation outcome could not be verified");
-    }
+        .onConflictDoNothing();
+      const rows = await loadDurableHyperliquidClaim(tenantId, agentId, idempotencyKey);
+      const parsed = rows.terminal && durableEnvelopeSchema.safeParse(rows.terminal.response);
+      if (
+        !parsed ||
+        !parsed.success ||
+        rows.terminal?.requestHash !== requestHash ||
+        canonicalJsonStringify(parsed.data) !== canonicalJsonStringify(envelope)
+      ) {
+        throw new Error("Durable Hyperliquid reconciliation outcome could not be verified");
+      }
+    });
   }
 
   async function enforceOrderRateLimit(
