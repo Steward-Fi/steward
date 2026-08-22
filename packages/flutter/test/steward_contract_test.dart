@@ -12,12 +12,12 @@ Map<String, String> _lowercaseHeaders(Map<String, String> headers) => {
       for (final entry in headers.entries) entry.key.toLowerCase(): entry.value,
     };
 
-Uri _uri(List<String> pathSegments, {Map<String, dynamic>? query}) => Uri(
-      scheme: 'https',
-      host: 'api.example.test',
-      pathSegments: ['v1', ...pathSegments],
-      queryParameters: query,
-    );
+Uri _uri(List<String> pathSegments, {Map<String, dynamic>? query}) {
+  final encodedPath = ['v1', ...pathSegments].map(Uri.encodeComponent).join('/');
+  return Uri.parse('https://api.example.test/$encodedPath').replace(
+    queryParameters: query,
+  );
+}
 
 final class _Exchange {
   _Exchange({
