@@ -13,12 +13,11 @@ import {
 } from "@stwd/db";
 import { eq } from "drizzle-orm";
 import { type Context, Hono, type Next } from "hono";
-import { writeAuditEvent } from "../services/audit";
+import { withTenantAuditedTransaction, writeAuditEvent } from "../services/audit";
 import {
   type ApiResponse,
   type AppVariables,
   db,
-  findTenant,
   getConditionSetReferenceValidationError,
   getTenantPayload,
   isNonEmptyString,
@@ -61,24 +60,27 @@ function isReservedTenantId(id: string): boolean {
   );
 }
 
-async function tenantIdHasRetainedState(tenantId: string): Promise<boolean> {
+async function tenantIdHasRetainedState(
+  tenantId: string,
+  executor: Pick<typeof db, "select"> = db,
+): Promise<boolean> {
   const [[secret], [secretRoute], [proxyAudit], [auditEvent]] = await Promise.all([
-    db
+    executor
       .select({ id: secretRows.id })
       .from(secretRows)
       .where(eq(secretRows.tenantId, tenantId))
       .limit(1),
-    db
+    executor
       .select({ id: secretRouteRows.id })
       .from(secretRouteRows)
       .where(eq(secretRouteRows.tenantId, tenantId))
       .limit(1),
-    db
+    executor
       .select({ id: proxyAuditLogRows.id })
       .from(proxyAuditLogRows)
       .where(eq(proxyAuditLogRows.tenantId, tenantId))
       .limit(1),
-    db
+    executor
       .select({ id: auditEventRows.id })
       .from(auditEventRows)
       .where(eq(auditEventRows.tenantId, tenantId))
@@ -196,78 +198,71 @@ tenantRoutes.post("/", platformAuthMiddleware(), async (c) => {
     if (conditionSetError) return c.json<ApiResponse>({ ok: false, error: conditionSetError }, 400);
   }
 
-  const existingTenant = await findTenant(body.id);
-  if (existingTenant) {
-    return c.json<ApiResponse>({ ok: false, error: "Tenant already exists" }, 400);
-  }
-  if (await tenantIdHasRetainedState(body.id)) {
-    return c.json<ApiResponse>(
-      {
-        ok: false,
-        error: "Tenant id has retained historical state and cannot be reused",
-      },
-      409,
-    );
-  }
-
   const apiKeyHash =
     body.apiKeyHash && !body.apiKeyHash.match(/^[0-9a-f]{64}$/)
       ? hashApiKey(body.apiKeyHash)
       : body.apiKeyHash;
 
-  await writeAuditEvent({
-    tenantId: body.id,
-    actorType: "platform",
-    action: "tenant.create.authorized",
-    resourceType: "tenant",
-    resourceId: body.id,
-    metadata: {
+  const result = await withTenantAuditedTransaction(body.id, async (txRaw, appendAudit) => {
+    const tx = txRaw as typeof db;
+    const [existing] = await tx
+      .select({ id: tenants.id })
+      .from(tenants)
+      .where(eq(tenants.id, body.id));
+    if (existing) return { status: "exists" as const };
+    if (await tenantIdHasRetainedState(body.id, tx)) return { status: "retained" as const };
+    const metadata = {
       name: body.name,
       hasWebhook: !!body.webhookUrl,
       defaultPolicyCount: body.defaultPolicies?.length ?? 0,
-    },
-    ipAddress: c.req.header("x-forwarded-for") ?? null,
-    userAgent: c.req.header("user-agent") ?? null,
-    requestId: c.get("requestId") ?? null,
+    };
+    await appendAudit({
+      tenantId: body.id,
+      actorType: "platform",
+      action: "tenant.create.authorized",
+      resourceType: "tenant",
+      resourceId: body.id,
+      metadata,
+      ipAddress: c.req.header("x-forwarded-for") ?? null,
+      userAgent: c.req.header("user-agent") ?? null,
+      requestId: c.get("requestId") ?? null,
+    });
+    const [tenant] = await tx
+      .insert(tenants)
+      .values({ id: body.id, name: body.name, apiKeyHash })
+      .returning();
+    if (!tenant) throw new Error("Failed to create tenant");
+    await appendAudit({
+      tenantId: body.id,
+      actorType: "platform",
+      action: "tenant.create",
+      resourceType: "tenant",
+      resourceId: body.id,
+      metadata,
+      ipAddress: c.req.header("x-forwarded-for") ?? null,
+      userAgent: c.req.header("user-agent") ?? null,
+      requestId: c.get("requestId") ?? null,
+    });
+    return { status: "created" as const, tenant };
   });
-
-  const [tenant] = await db
-    .insert(tenants)
-    .values({
-      id: body.id,
-      name: body.name,
-      apiKeyHash,
-    })
-    .returning();
-
+  if (result.status === "exists") {
+    return c.json<ApiResponse>({ ok: false, error: "Tenant already exists" }, 400);
+  }
+  if (result.status === "retained") {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Tenant id has retained historical state and cannot be reused" },
+      409,
+    );
+  }
+  const { tenant } = result;
+  // Presentation cache only: populate after the audited database transaction
+  // commits so another replica can never observe uncommitted authority.
   tenantConfigs.set(body.id, {
     id: body.id,
     name: body.name,
     webhookUrl: body.webhookUrl,
     defaultPolicies: body.defaultPolicies,
   });
-
-  try {
-    await writeAuditEvent({
-      tenantId: body.id,
-      actorType: "platform",
-      action: "tenant.create",
-      resourceType: "tenant",
-      resourceId: body.id,
-      metadata: {
-        name: body.name,
-        hasWebhook: !!body.webhookUrl,
-        defaultPolicyCount: body.defaultPolicies?.length ?? 0,
-      },
-      ipAddress: c.req.header("x-forwarded-for") ?? null,
-      userAgent: c.req.header("user-agent") ?? null,
-      requestId: c.get("requestId") ?? null,
-    });
-  } catch (error) {
-    tenantConfigs.delete(body.id);
-    await db.delete(tenants).where(eq(tenants.id, body.id));
-    throw error;
-  }
 
   return c.json<ApiResponse<Omit<Tenant, "apiKeyHash"> & TenantConfig>>({
     ok: true,
