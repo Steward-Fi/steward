@@ -6,6 +6,8 @@ import {
   closeDb,
   getDb,
   tenantConfigs,
+  tenantSamlAssertionReplays,
+  tenantSamlAuthnRequests,
   tenantSamlSsoConfigs,
   tenantSsoDomains,
   tenants,
@@ -15,12 +17,11 @@ import {
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { and, eq, sql } from "drizzle-orm";
 import { Hono } from "hono";
+import { signedSamlResponse, TEST_IDP_CERT } from "./fixtures/saml-idp";
 
 const TENANT_ID = "tenant-sso-mounted";
 const DOMAIN = "company.example.test";
-const CERT = `-----BEGIN CERTIFICATE-----
-${"c2lnbmVkLXRlc3QtY2VydGlmaWNhdGU=".repeat(5)}
------END CERTIFICATE-----`;
+const CERT = TEST_IDP_CERT;
 
 describe("mounted tenant SAML and SSO-domain control plane", () => {
   let app: Hono;
@@ -137,20 +138,36 @@ describe("mounted tenant SAML and SSO-domain control plane", () => {
     allowJitProvisioning: true,
   });
 
-  it("denies API keys, non-admin members, and stale MFA before SSO config reads or writes", async () => {
+  it("denies API keys, non-admin members, and stale MFA before every SSO config read or mutation", async () => {
+    const requests = [
+      { path: `/tenants/${TENANT_ID}/saml-sso`, method: "GET" },
+      { path: `/tenants/${TENANT_ID}/saml-sso`, method: "PUT", body: samlConfig() },
+      { path: `/tenants/${TENANT_ID}/saml-sso`, method: "DELETE" },
+      { path: `/tenants/${TENANT_ID}/sso-domains`, method: "GET" },
+      {
+        path: `/tenants/${TENANT_ID}/sso-domains`,
+        method: "POST",
+        body: { domain: DOMAIN, ssoRequired: true },
+      },
+      {
+        path: `/tenants/${TENANT_ID}/sso-domains/${DOMAIN}/verify`,
+        method: "POST",
+      },
+      { path: `/tenants/${TENANT_ID}/sso-domains/${DOMAIN}`, method: "DELETE" },
+    ] as const;
     for (const headers of [
       { "X-Steward-Key": apiKey, "X-Steward-Tenant": TENANT_ID },
       sessionHeaders(memberToken),
       sessionHeaders(staleToken),
     ]) {
-      const getResponse = await app.request(`/tenants/${TENANT_ID}/saml-sso`, { headers });
-      expect(getResponse.status).toBe(403);
-      const putResponse = await app.request(`/tenants/${TENANT_ID}/saml-sso`, {
-        method: "PUT",
-        headers,
-        body: JSON.stringify(samlConfig()),
-      });
-      expect(putResponse.status).toBe(403);
+      for (const request of requests) {
+        const response = await app.request(request.path, {
+          method: request.method,
+          headers,
+          body: "body" in request ? JSON.stringify(request.body) : undefined,
+        });
+        expect(response.status, `${request.method} ${request.path}`).toBe(403);
+      }
     }
   });
 
@@ -219,6 +236,122 @@ describe("mounted tenant SAML and SSO-domain control plane", () => {
     const malformedBody = await malformedAcs.text();
     expect(malformedBody).not.toContain(CERT);
     expect(malformedBody).not.toContain("PRIVATE KEY");
+  });
+
+  it("mounts signed IdP login and ACS success with issuer, audience, tenant, and replay denial", async () => {
+    const configure = await app.request(`/tenants/${TENANT_ID}/saml-sso`, {
+      method: "PUT",
+      headers: sessionHeaders(),
+      body: JSON.stringify(samlConfig()),
+    });
+    expect(configure.status).toBe(200);
+    await getDb()
+      .insert(tenantSsoDomains)
+      .values({
+        tenantId: TENANT_ID,
+        domain: DOMAIN,
+        verificationToken: "signed-saml-domain-proof",
+        status: "verified",
+        ssoRequired: true,
+      })
+      .onConflictDoUpdate({
+        target: [tenantSsoDomains.tenantId, tenantSsoDomains.domain],
+        set: { status: "verified", ssoRequired: true },
+      });
+    await getDb()
+      .delete(tenantSamlAssertionReplays)
+      .where(eq(tenantSamlAssertionReplays.tenantId, TENANT_ID));
+
+    const startLogin = async () => {
+      const login = await app.request(
+        `/auth/saml/${TENANT_ID}/login?redirect_uri=${encodeURIComponent("https://app.example.test/callback")}&state=mounted-state&response_type=code&code_challenge=${"a".repeat(43)}&code_challenge_method=S256`,
+      );
+      expect(login.status).toBe(302);
+      const idpLocation = login.headers.get("location");
+      expect(idpLocation).toStartWith("https://idp.example.test/sso?");
+      const relayState = new URL(idpLocation as string).searchParams.get("RelayState");
+      expect(relayState).toBeTruthy();
+      const [request] = await getDb()
+        .select()
+        .from(tenantSamlAuthnRequests)
+        .where(
+          and(
+            eq(tenantSamlAuthnRequests.tenantId, TENANT_ID),
+            eq(tenantSamlAuthnRequests.relayState, relayState as string),
+          ),
+        );
+      expect(request?.requestId).toBeTruthy();
+      return { relayState: relayState as string, requestId: request.requestId };
+    };
+    const postAcs = (relayState: string, response: string) =>
+      app.request(`/auth/saml/${TENANT_ID}/acs`, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({ RelayState: relayState, SAMLResponse: response }),
+      });
+    const responseFor = (
+      requestId: string,
+      assertionId: string,
+      overrides: Partial<Parameters<typeof signedSamlResponse>[0]> = {},
+    ) =>
+      signedSamlResponse({
+        requestId,
+        assertionId,
+        issuer: "https://idp.example.test/saml",
+        audience: `https://api.example.test/auth/saml/${TENANT_ID}/metadata`,
+        acsUrl: `https://api.example.test/auth/saml/${TENANT_ID}/acs`,
+        email: `owner@${DOMAIN}`,
+        ...overrides,
+      });
+
+    const initial = await startLogin();
+    for (const { label, response } of [
+      {
+        label: "issuer",
+        response: responseFor(initial.requestId, "_wrong-issuer", {
+          issuer: "https://hostile-idp.example.test/saml",
+        }),
+      },
+      {
+        label: "audience",
+        response: responseFor(initial.requestId, "_wrong-audience", {
+          audience: "https://hostile-sp.example.test/metadata",
+        }),
+      },
+      {
+        label: "tenant",
+        response: responseFor(initial.requestId, "_wrong-tenant", {
+          destination: "https://api.example.test/auth/saml/another-tenant/acs",
+          recipient: "https://api.example.test/auth/saml/another-tenant/acs",
+        }),
+      },
+    ]) {
+      const denied = await postAcs(initial.relayState, response);
+      expect(denied.status, label).toBe(401);
+      const text = await denied.text();
+      expect(text).not.toContain(CERT);
+      expect(text).not.toContain("PRIVATE KEY");
+    }
+
+    const assertionId = "_mounted-success-assertion";
+    const success = await postAcs(initial.relayState, responseFor(initial.requestId, assertionId));
+    expect(success.status, await success.clone().text()).toBe(302);
+    const successRedirect = new URL(success.headers.get("location") as string);
+    expect(successRedirect.origin + successRedirect.pathname).toBe(
+      "https://app.example.test/callback",
+    );
+    expect(successRedirect.hash).toContain("code=");
+    expect(successRedirect.hash).toContain("state=mounted-state");
+
+    const replay = await startLogin();
+    const replayed = await postAcs(
+      replay.relayState,
+      responseFor(replay.requestId, assertionId, { responseId: "_mounted-replay-response" }),
+    );
+    expect(replayed.status).toBe(302);
+    expect(new URL(replayed.headers.get("location") as string).searchParams.get("error")).toBe(
+      "saml_assertion_replay",
+    );
   });
 
   it("uses injected DNS proof for add, verify, discovery, and delete behavior", async () => {
