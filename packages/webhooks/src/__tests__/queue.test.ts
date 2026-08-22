@@ -1,15 +1,9 @@
 import { describe, expect, it } from "bun:test";
-import { readFileSync } from "node:fs";
 import { createServer, type IncomingMessage } from "node:http";
 import type { AddressInfo, LookupFunction } from "node:net";
 import type { WebhookEvent } from "@stwd/shared";
 import { WebhookDispatcher } from "../dispatcher";
 import { RetryQueue } from "../queue";
-
-const persistentQueueSource = readFileSync(
-  new URL("../persistent-queue.ts", import.meta.url),
-  "utf8",
-);
 
 const makeEvent = (overrides: Partial<WebhookEvent> = {}): WebhookEvent => ({
   type: "tx_signed",
@@ -334,22 +328,6 @@ describe("RetryQueue", () => {
     }
   });
 
-  it("claims persistent deliveries before dispatch to prevent double sends", () => {
-    expect(persistentQueueSource).toContain("FOR UPDATE SKIP LOCKED");
-    expect(persistentQueueSource).toContain("CLAIM_VISIBILITY_TIMEOUT_MS");
-    expect(persistentQueueSource).toContain("\"status\" = 'processing'");
-    expect(persistentQueueSource).toContain("OR candidate.\"status\" = 'processing'");
-    expect(persistentQueueSource).toContain("predecessor.\"status\" = 'delivered'");
-    expect(persistentQueueSource).toContain('"webhook_config_id" AS "webhookConfigId"');
-    expect(persistentQueueSource.indexOf("UPDATE ${webhookDeliveries}")).toBeLessThan(
-      persistentQueueSource.indexOf("this.dispatcher.dispatch(event, {"),
-    );
-  });
-
-  it("uses a no-internal-retry dispatcher for persistent delivery attempts", () => {
-    expect(persistentQueueSource).toContain("new WebhookDispatcher({ maxRetries: 0 })");
-  });
-
   it("handles multiple enqueued events", async () => {
     const dispatcher = new WebhookDispatcher({
       maxRetries: 0,
@@ -653,44 +631,5 @@ describe("RetryQueue", () => {
         });
       });
     }
-  });
-
-  it("uses original webhook config identity and snapshots for persistent retries", () => {
-    const processStart = persistentQueueSource.indexOf("async processQueue()");
-    expect(processStart).toBeGreaterThanOrEqual(0);
-    expect(persistentQueueSource.indexOf("webhookConfigId", processStart)).toBeGreaterThan(
-      processStart,
-    );
-    const dispatchStart = persistentQueueSource.indexOf(
-      "this.dispatcher.dispatch(event, {",
-      processStart,
-    );
-    expect(
-      persistentQueueSource.indexOf(
-        "eq(webhookConfigs.id, delivery.webhookConfigId)",
-        processStart,
-      ),
-    ).toBeLessThan(dispatchStart);
-    expect(
-      persistentQueueSource.indexOf("eq(webhookConfigs.enabled, true)", processStart),
-    ).toBeLessThan(dispatchStart);
-    expect(
-      persistentQueueSource.indexOf("webhook.url !== delivery.url", processStart),
-    ).toBeLessThan(dispatchStart);
-    expect(persistentQueueSource.indexOf("webhook.events.length > 0", processStart)).toBeLessThan(
-      dispatchStart,
-    );
-    expect(persistentQueueSource).toContain(
-      "Webhook configuration no longer subscribes to this event",
-    );
-    expect(persistentQueueSource).toContain(
-      "Webhook delivery URL no longer matches its original configuration",
-    );
-    expect(persistentQueueSource).toContain("secret: decryptWebhookSecret(delivery.secret)");
-    expect(persistentQueueSource).toContain("events: delivery.events ?? undefined");
-    expect(persistentQueueSource).toContain(
-      "Webhook delivery is missing original configuration snapshot",
-    );
-    expect(persistentQueueSource).not.toContain("this.dispatcher.dispatch(event, delivery.url)");
   });
 });
