@@ -49,6 +49,7 @@ import {
   users,
   userTenants,
   vaultSigningFreezes,
+  withTenantAuditedTransaction,
   withTenantAuditedTransactionOnDb,
 } from "@stwd/db";
 import { shouldUsePGLite } from "@stwd/db/pglite";
