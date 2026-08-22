@@ -532,7 +532,7 @@ describe.skipIf(!process.env.DATABASE_URL)("Privy-competitor integration complet
       },
       body: JSON.stringify({ tenantId: TENANT_ID, claimToken }),
     });
-    expect(replayClaim.status).toBe(404);
+    expect(replayClaim.status).toBe(409);
     await expect(json<{ error: string }>(replayClaim)).resolves.toMatchObject({
       error: "Invalid or already claimed wallet token",
     });

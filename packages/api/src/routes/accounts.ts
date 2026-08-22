@@ -11,15 +11,21 @@ import {
   agentWallets,
   digitalAssetAccountAggregations,
   digitalAssetAccounts,
+  digitalAssetAccountWalletLifecycles,
   digitalAssetAccountWallets,
   policies,
   users,
   userTenants,
 } from "@stwd/db";
-import { redactedThrownDiagnostics } from "@stwd/shared";
 import { and, eq, inArray, isNull, sql } from "drizzle-orm";
 import { Hono } from "hono";
-import { writeAuditEvent } from "../services/audit";
+import {
+  lockAccountMutation,
+  recoverStaleAccountWalletLifecyclesForTenant,
+  retireStagedAccountWallets,
+  type StagedAccountWallet,
+} from "../services/account-wallet-lifecycle";
+import { withTenantAuditedTransaction } from "../services/audit";
 import {
   type ApiResponse,
   type AppVariables,
@@ -525,15 +531,18 @@ function dedupeMemberships(items: AccountMembershipInput[]): AccountMembershipIn
   return result;
 }
 
-async function writeAccountAudit(input: Parameters<typeof writeAuditEvent>[0]) {
-  try {
-    await writeAuditEvent(input);
-  } catch (error) {
-    console.error(
-      "[accounts] Failed to write account audit event",
-      redactedThrownDiagnostics(error),
-    );
-  }
+function accountAudit(input: {
+  tenantId: string;
+  action: string;
+  resourceType: string;
+  resourceId: string;
+  metadata?: Record<string, unknown>;
+}) {
+  return {
+    ...input,
+    actorType: "api-key" as const,
+    metadata: input.metadata ?? {},
+  };
 }
 
 async function existingWalletMemberships(
@@ -574,7 +583,7 @@ async function configuredWalletMemberships(
   tenantId: string,
   accountId: string,
   configs: WalletConfiguration[],
-  createdWalletAgentIds: string[],
+  stagedWallets: StagedAccountWallet[],
 ): Promise<AccountMembershipInput[] | string> {
   const memberships: AccountMembershipInput[] = [];
   for (const [index, config] of configs.entries()) {
@@ -586,15 +595,12 @@ async function configuredWalletMemberships(
       chainFamily !== "bitcoin" &&
       chainFamily !== "monero"
     ) {
-      await cleanupCreatedAccountWallets(tenantId, createdWalletAgentIds);
       return `wallets_configuration[${index}].${chainFamily}`;
     }
     if (chainFamily === "bitcoin") {
-      await cleanupCreatedAccountWallets(tenantId, createdWalletAgentIds);
       return "wallets_configuration bitcoin wallets must be created through the agent wallet API";
     }
     if (chainFamily === "monero") {
-      await cleanupCreatedAccountWallets(tenantId, createdWalletAgentIds);
       return "wallets_configuration monero wallets must be created through the agent wallet API";
     }
     const requestedId = config.wallet_id ?? config.walletId;
@@ -603,7 +609,6 @@ async function configuredWalletMemberships(
         ? requestedId.trim()
         : newAccountWalletAgentId();
     if (!ACCOUNT_ID_PATTERN.test(walletAgentId)) {
-      await cleanupCreatedAccountWallets(tenantId, createdWalletAgentIds);
       return "wallet_id must be 1-64 alphanumeric characters (plus _ - . :)";
     }
     const name =
@@ -611,10 +616,42 @@ async function configuredWalletMemberships(
         ? config.name.trim()
         : `${accountId} ${chainFamily} wallet`;
     try {
-      await vault.createAgent(tenantId, walletAgentId, name, accountId, chainFamily);
-      createdWalletAgentIds.push(walletAgentId);
+      const ownerToken = crypto.randomUUID();
+      const [lifecycle] = await db
+        .insert(digitalAssetAccountWalletLifecycles)
+        .values({
+          tenantId,
+          accountId,
+          walletAgentId,
+          chainFamily,
+          state: "staging",
+          ownerToken,
+          leaseExpiresAt: new Date(Date.now() + 2 * 60_000),
+        })
+        .returning({ id: digitalAssetAccountWalletLifecycles.id });
+      if (!lifecycle) throw new Error("Failed to reserve configured wallet authority");
+      const staged = { lifecycleId: lifecycle.id, tenantId, accountId, walletAgentId, ownerToken };
+      stagedWallets.push(staged);
+      await vault.createAgent(
+        tenantId,
+        walletAgentId,
+        name,
+        `account-provision:${lifecycle.id}`,
+        chainFamily,
+      );
+      const [provisioned] = await db
+        .update(digitalAssetAccountWalletLifecycles)
+        .set({ state: "provisioned", provisionedAt: new Date(), updatedAt: new Date() })
+        .where(
+          and(
+            eq(digitalAssetAccountWalletLifecycles.id, lifecycle.id),
+            eq(digitalAssetAccountWalletLifecycles.ownerToken, ownerToken),
+            eq(digitalAssetAccountWalletLifecycles.state, "staging"),
+          ),
+        )
+        .returning({ id: digitalAssetAccountWalletLifecycles.id });
+      if (!provisioned) throw new Error("Configured wallet provisioning lease was lost");
     } catch (error) {
-      await cleanupCreatedAccountWallets(tenantId, createdWalletAgentIds);
       const message = error instanceof Error ? error.message : "Failed to create configured wallet";
       return message;
     }
@@ -627,7 +664,7 @@ async function buildMemberships(
   tenantId: string,
   accountId: string,
   body: AccountMutationBody,
-  createdWalletAgentIds: string[] = [],
+  stagedWallets: StagedAccountWallet[] = [],
 ): Promise<AccountMembershipInput[] | undefined | string> {
   const walletIds = normalizeWalletIds(body);
   const userWalletIds = normalizeUserWalletIds(body);
@@ -657,7 +694,7 @@ async function buildMemberships(
       tenantId,
       accountId,
       walletConfigs,
-      createdWalletAgentIds,
+      stagedWallets,
     );
     if (typeof configured === "string") return configured;
     memberships.push(...configured);
@@ -670,11 +707,33 @@ async function buildMemberships(
   return deduped;
 }
 
-async function cleanupCreatedAccountWallets(tenantId: string, walletAgentIds: string[]) {
-  if (walletAgentIds.length === 0) return;
-  await db
-    .delete(agents)
-    .where(and(eq(agents.tenantId, tenantId), inArray(agents.id, walletAgentIds)));
+async function adoptStagedAccountWallets(tx: typeof db, stagedWallets: StagedAccountWallet[]) {
+  for (const staged of stagedWallets) {
+    const [ownedAgent] = await tx
+      .update(agents)
+      .set({ platformId: staged.accountId, updatedAt: new Date() })
+      .where(
+        and(
+          eq(agents.id, staged.walletAgentId),
+          eq(agents.tenantId, staged.tenantId),
+          eq(agents.platformId, `account-provision:${staged.lifecycleId}`),
+        ),
+      )
+      .returning({ id: agents.id });
+    if (!ownedAgent) throw new Error("Configured wallet authority no longer matches lifecycle");
+    const [adopted] = await tx
+      .update(digitalAssetAccountWalletLifecycles)
+      .set({ state: "adopted", adoptedAt: new Date(), updatedAt: new Date(), lastError: null })
+      .where(
+        and(
+          eq(digitalAssetAccountWalletLifecycles.id, staged.lifecycleId),
+          eq(digitalAssetAccountWalletLifecycles.ownerToken, staged.ownerToken),
+          eq(digitalAssetAccountWalletLifecycles.state, "provisioned"),
+        ),
+      )
+      .returning({ id: digitalAssetAccountWalletLifecycles.id });
+    if (!adopted) throw new Error("Configured wallet authority adoption lost its lifecycle fence");
+  }
 }
 
 async function walletAgentIdsForAccount(tenantId: string, accountId: string): Promise<string[]> {
@@ -1007,42 +1066,46 @@ async function serializeAggregation(tenantId: string, accountId: string, aggrega
 }
 
 async function applyAccountUpdates(
+  tx: typeof db,
   tenantId: string,
   accountId: string,
   updates: Partial<typeof digitalAssetAccounts.$inferInsert>,
   memberships: AccountMembershipInput[] | undefined,
+  expectedUpdatedAt: Date,
 ) {
-  await db.transaction(async (tx) => {
-    if (Object.keys(updates).length > 0) {
-      await tx
-        .update(digitalAssetAccounts)
-        .set(updates)
-        .where(
-          and(eq(digitalAssetAccounts.tenantId, tenantId), eq(digitalAssetAccounts.id, accountId)),
-        );
-    }
+  const [updated] = await tx
+    .update(digitalAssetAccounts)
+    .set({ ...updates, updatedAt: new Date() })
+    .where(
+      and(
+        eq(digitalAssetAccounts.tenantId, tenantId),
+        eq(digitalAssetAccounts.id, accountId),
+        eq(digitalAssetAccounts.updatedAt, expectedUpdatedAt),
+      ),
+    )
+    .returning({ id: digitalAssetAccounts.id });
+  if (!updated) throw new Error("Account changed concurrently; retry the request");
 
-    if (memberships !== undefined) {
-      await tx
-        .delete(digitalAssetAccountWallets)
-        .where(
-          and(
-            eq(digitalAssetAccountWallets.tenantId, tenantId),
-            eq(digitalAssetAccountWallets.accountId, accountId),
-          ),
-        );
-      if (memberships.length > 0) {
-        await tx.insert(digitalAssetAccountWallets).values(
-          memberships.map((membership) => ({
-            tenantId,
-            accountId,
-            walletAgentId: membership.walletAgentId,
-            chainFamily: membership.chainFamily,
-          })),
-        );
-      }
+  if (memberships !== undefined) {
+    await tx
+      .delete(digitalAssetAccountWallets)
+      .where(
+        and(
+          eq(digitalAssetAccountWallets.tenantId, tenantId),
+          eq(digitalAssetAccountWallets.accountId, accountId),
+        ),
+      );
+    if (memberships.length > 0) {
+      await tx.insert(digitalAssetAccountWallets).values(
+        memberships.map((membership) => ({
+          tenantId,
+          accountId,
+          walletAgentId: membership.walletAgentId,
+          chainFamily: membership.chainFamily,
+        })),
+      );
     }
-  });
+  }
 }
 
 accountRoutes.get("/", async (c) => {
@@ -1076,6 +1139,7 @@ accountRoutes.post("/", async (c) => {
   if (!accountId) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid account id" }, 400);
   }
+  await recoverStaleAccountWalletLifecyclesForTenant(tenantId);
 
   let displayName: string | null | undefined;
   let metadata: Record<string, unknown> | undefined;
@@ -1094,11 +1158,11 @@ accountRoutes.post("/", async (c) => {
   }
 
   let memberships: AccountMembershipInput[] | undefined | string;
-  const createdWalletAgentIds: string[] = [];
+  const stagedWallets: StagedAccountWallet[] = [];
   try {
-    memberships = await buildMemberships(tenantId, accountId, body, createdWalletAgentIds);
+    memberships = await buildMemberships(tenantId, accountId, body, stagedWallets);
   } catch (error) {
-    await cleanupCreatedAccountWallets(tenantId, createdWalletAgentIds);
+    await retireStagedAccountWallets(stagedWallets);
     // SEC-210: membership building can surface vault/DB internals — sanitize.
     return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(error) }, 400);
   }
@@ -1109,7 +1173,7 @@ accountRoutes.post("/", async (c) => {
     );
   }
   if (typeof memberships === "string") {
-    await cleanupCreatedAccountWallets(tenantId, createdWalletAgentIds);
+    await retireStagedAccountWallets(stagedWallets);
     return c.json<ApiResponse>({ ok: false, error: memberships }, 400);
   }
   const authorization = await normalizeAccountAuthorization(
@@ -1119,7 +1183,7 @@ accountRoutes.post("/", async (c) => {
     memberships.map((membership) => membership.walletAgentId),
   );
   if (typeof authorization === "string") {
-    await cleanupCreatedAccountWallets(tenantId, createdWalletAgentIds);
+    await retireStagedAccountWallets(stagedWallets);
     return c.json<ApiResponse>({ ok: false, error: authorization }, 400);
   }
   const storedMetadata =
@@ -1128,7 +1192,9 @@ accountRoutes.post("/", async (c) => {
       : mergeAccountAuthorizationMetadata(metadata ?? {}, authorization);
 
   try {
-    await db.transaction(async (tx) => {
+    await withTenantAuditedTransaction(tenantId, async (txRaw, appendRequiredAudit) => {
+      const tx = txRaw as typeof db;
+      await lockAccountMutation(tx, tenantId, accountId);
       await tx.insert(digitalAssetAccounts).values({
         id: accountId,
         tenantId,
@@ -1145,17 +1211,19 @@ accountRoutes.post("/", async (c) => {
           })),
         );
       }
-    });
-    await writeAccountAudit({
-      tenantId,
-      actorType: "api-key",
-      action: "account.create",
-      resourceType: "account",
-      resourceId: accountId,
-      metadata: { walletCount: memberships.length },
+      await adoptStagedAccountWallets(tx, stagedWallets);
+      await appendRequiredAudit(
+        accountAudit({
+          tenantId,
+          action: "account.create",
+          resourceType: "account",
+          resourceId: accountId,
+          metadata: { walletCount: memberships.length },
+        }),
+      );
     });
   } catch (error) {
-    await cleanupCreatedAccountWallets(tenantId, createdWalletAgentIds);
+    await retireStagedAccountWallets(stagedWallets);
     return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(error) }, 400);
   }
 
@@ -1343,22 +1411,36 @@ accountRoutes.post("/:accountId/aggregations", async (c) => {
   const walletIds = [...new Set(account.wallets.map((wallet) => wallet.walletId))];
   const chainFamilies = [...new Set(account.wallets.map((wallet) => wallet.chainFamily))];
   try {
-    await db.insert(digitalAssetAccountAggregations).values({
-      id: aggregationId,
-      tenantId,
-      accountId,
-      displayName,
-      walletAgentIds: walletIds,
-      chainFamilies,
-      metadata: metadata ?? {},
-    });
-    await writeAccountAudit({
-      tenantId,
-      actorType: "api-key",
-      action: "account.aggregation.create",
-      resourceType: "account_aggregation",
-      resourceId: aggregationId,
-      metadata: { accountId, walletCount: walletIds.length },
+    await withTenantAuditedTransaction(tenantId, async (txRaw, appendRequiredAudit) => {
+      const tx = txRaw as typeof db;
+      await lockAccountMutation(tx, tenantId, accountId);
+      const [currentAccount] = await tx
+        .select({ updatedAt: digitalAssetAccounts.updatedAt })
+        .from(digitalAssetAccounts)
+        .where(
+          and(eq(digitalAssetAccounts.tenantId, tenantId), eq(digitalAssetAccounts.id, accountId)),
+        );
+      if (!currentAccount || currentAccount.updatedAt.getTime() !== account.updatedAt.getTime()) {
+        throw new Error("Account changed concurrently; retry the request");
+      }
+      await tx.insert(digitalAssetAccountAggregations).values({
+        id: aggregationId,
+        tenantId,
+        accountId,
+        displayName,
+        walletAgentIds: walletIds,
+        chainFamilies,
+        metadata: metadata ?? {},
+      });
+      await appendRequiredAudit(
+        accountAudit({
+          tenantId,
+          action: "account.aggregation.create",
+          resourceType: "account_aggregation",
+          resourceId: aggregationId,
+          metadata: { accountId, walletCount: walletIds.length },
+        }),
+      );
     });
   } catch (error) {
     return c.json<ApiResponse>(
@@ -1398,27 +1480,38 @@ accountRoutes.delete("/:accountId/aggregations/:aggregationId", async (c) => {
   const account = await serializeAccount(tenantId, accountId);
   if (!account) return c.json<ApiResponse>({ ok: false, error: "Account not found" }, 404);
   const aggregationId = c.req.param("aggregationId");
-  const deleted = await db
-    .delete(digitalAssetAccountAggregations)
-    .where(
-      and(
-        eq(digitalAssetAccountAggregations.tenantId, tenantId),
-        eq(digitalAssetAccountAggregations.accountId, accountId),
-        eq(digitalAssetAccountAggregations.id, aggregationId),
-      ),
-    )
-    .returning({ id: digitalAssetAccountAggregations.id });
+  const deleted = await withTenantAuditedTransaction(
+    tenantId,
+    async (txRaw, appendRequiredAudit) => {
+      const tx = txRaw as typeof db;
+      await lockAccountMutation(tx, tenantId, accountId);
+      const rows = await tx
+        .delete(digitalAssetAccountAggregations)
+        .where(
+          and(
+            eq(digitalAssetAccountAggregations.tenantId, tenantId),
+            eq(digitalAssetAccountAggregations.accountId, accountId),
+            eq(digitalAssetAccountAggregations.id, aggregationId),
+          ),
+        )
+        .returning({ id: digitalAssetAccountAggregations.id });
+      if (rows.length > 0) {
+        await appendRequiredAudit(
+          accountAudit({
+            tenantId,
+            action: "account.aggregation.delete",
+            resourceType: "account_aggregation",
+            resourceId: aggregationId,
+            metadata: { accountId },
+          }),
+        );
+      }
+      return rows;
+    },
+  );
   if (deleted.length === 0) {
     return c.json<ApiResponse>({ ok: false, error: "Account aggregation not found" }, 404);
   }
-  await writeAccountAudit({
-    tenantId,
-    actorType: "api-key",
-    action: "account.aggregation.delete",
-    resourceType: "account_aggregation",
-    resourceId: aggregationId,
-    metadata: { accountId },
-  });
   return c.json<ApiResponse>({ ok: true, data: { id: aggregationId, deleted: true } });
 });
 
@@ -1428,6 +1521,7 @@ accountRoutes.patch("/:accountId", async (c) => {
   }
   const tenantId = c.get("tenantId");
   const accountId = c.req.param("accountId");
+  await recoverStaleAccountWalletLifecyclesForTenant(tenantId);
   const existing = await serializeAccount(tenantId, accountId);
   if (!existing) return c.json<ApiResponse>({ ok: false, error: "Account not found" }, 404);
 
@@ -1452,16 +1546,16 @@ accountRoutes.patch("/:accountId", async (c) => {
   }
 
   let memberships: AccountMembershipInput[] | undefined | string;
-  const createdWalletAgentIds: string[] = [];
+  const stagedWallets: StagedAccountWallet[] = [];
   try {
-    memberships = await buildMemberships(tenantId, accountId, body, createdWalletAgentIds);
+    memberships = await buildMemberships(tenantId, accountId, body, stagedWallets);
   } catch (error) {
-    await cleanupCreatedAccountWallets(tenantId, createdWalletAgentIds);
+    await retireStagedAccountWallets(stagedWallets);
     // SEC-210: membership building can surface vault/DB internals — sanitize.
     return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(error) }, 400);
   }
   if (typeof memberships === "string") {
-    await cleanupCreatedAccountWallets(tenantId, createdWalletAgentIds);
+    await retireStagedAccountWallets(stagedWallets);
     return c.json<ApiResponse>({ ok: false, error: memberships }, 400);
   }
   const walletAgentIds =
@@ -1476,7 +1570,7 @@ accountRoutes.patch("/:accountId", async (c) => {
     { validateExisting: memberships !== undefined },
   );
   if (typeof authorization === "string") {
-    await cleanupCreatedAccountWallets(tenantId, createdWalletAgentIds);
+    await retireStagedAccountWallets(stagedWallets);
     return c.json<ApiResponse>({ ok: false, error: authorization }, 400);
   }
   if (authorization !== undefined) {
@@ -1492,24 +1586,29 @@ accountRoutes.patch("/:accountId", async (c) => {
   }
 
   try {
-    await applyAccountUpdates(tenantId, accountId, updates, memberships);
+    await withTenantAuditedTransaction(tenantId, async (txRaw, appendRequiredAudit) => {
+      const tx = txRaw as typeof db;
+      await lockAccountMutation(tx, tenantId, accountId);
+      await applyAccountUpdates(tx, tenantId, accountId, updates, memberships, existing.updatedAt);
+      await adoptStagedAccountWallets(tx, stagedWallets);
+      await appendRequiredAudit(
+        accountAudit({
+          tenantId,
+          action: "account.update",
+          resourceType: "account",
+          resourceId: accountId,
+          metadata: {
+            walletCount: memberships?.length ?? existing.wallets.length,
+            fields: Object.keys(updates),
+          },
+        }),
+      );
+    });
   } catch (error) {
-    await cleanupCreatedAccountWallets(tenantId, createdWalletAgentIds);
+    await retireStagedAccountWallets(stagedWallets);
     // SEC-210: DB-write failures must not leak constraint names/internals.
     return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(error) }, 400);
   }
-  await writeAccountAudit({
-    tenantId,
-    actorType: "api-key",
-    action: "account.update",
-    resourceType: "account",
-    resourceId: accountId,
-    metadata: {
-      walletCount: memberships?.length ?? existing.wallets.length,
-      fields: Object.keys(updates),
-    },
-  });
-
   const account = await serializeAccount(tenantId, accountId);
   return c.json<ApiResponse>({ ok: true, data: account });
 });
@@ -1520,20 +1619,32 @@ accountRoutes.delete("/:accountId", async (c) => {
   }
   const tenantId = c.get("tenantId");
   const accountId = c.req.param("accountId");
-  const deleted = await db
-    .delete(digitalAssetAccounts)
-    .where(and(eq(digitalAssetAccounts.tenantId, tenantId), eq(digitalAssetAccounts.id, accountId)))
-    .returning({ id: digitalAssetAccounts.id });
+  const deleted = await withTenantAuditedTransaction(
+    tenantId,
+    async (txRaw, appendRequiredAudit) => {
+      const tx = txRaw as typeof db;
+      await lockAccountMutation(tx, tenantId, accountId);
+      const rows = await tx
+        .delete(digitalAssetAccounts)
+        .where(
+          and(eq(digitalAssetAccounts.tenantId, tenantId), eq(digitalAssetAccounts.id, accountId)),
+        )
+        .returning({ id: digitalAssetAccounts.id });
+      if (rows.length > 0) {
+        await appendRequiredAudit(
+          accountAudit({
+            tenantId,
+            action: "account.delete",
+            resourceType: "account",
+            resourceId: accountId,
+          }),
+        );
+      }
+      return rows;
+    },
+  );
   if (deleted.length === 0) {
     return c.json<ApiResponse>({ ok: false, error: "Account not found" }, 404);
   }
-  await writeAccountAudit({
-    tenantId,
-    actorType: "api-key",
-    action: "account.delete",
-    resourceType: "account",
-    resourceId: accountId,
-    metadata: {},
-  });
   return c.json<ApiResponse>({ ok: true, data: { id: accountId, deleted: true } });
 });

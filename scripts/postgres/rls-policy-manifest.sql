@@ -26,6 +26,7 @@ INSERT INTO steward_expected_public_relations VALUES
   ('core','condition_set_items','r',''),
   ('core','condition_sets','r',''),
   ('core','digital_asset_account_aggregations','r',''),
+  ('core','digital_asset_account_wallet_lifecycles','r',''),
   ('core','digital_asset_account_wallets','r',''),
   ('core','digital_asset_accounts','r',''),
   ('core','encrypted_chain_keys','r',''),
@@ -40,6 +41,7 @@ INSERT INTO steward_expected_public_relations VALUES
   ('core','pending_proxy_requests','r',''),
   ('core','policies','r',''),
   ('core','policy_templates','r',''),
+  ('core','pregenerated_wallet_claim_lifecycles','r',''),
   ('core','provider_accounts','r',''),
   ('core','provider_action_approvals','r',''),
   ('core','provider_action_audit_outbox','r',''),
@@ -122,6 +124,7 @@ INSERT INTO steward_expected_rls_policy_definitions VALUES
   ('core','condition_set_items','steward_tenant_isolation','*',true,'PUBLIC','((tenant_id)::text = steward_rls.tenant_id())','((tenant_id)::text = steward_rls.tenant_id())'),
   ('core','condition_sets','steward_tenant_isolation','*',true,'PUBLIC','((tenant_id)::text = steward_rls.tenant_id())','((tenant_id)::text = steward_rls.tenant_id())'),
   ('core','digital_asset_account_aggregations','steward_tenant_isolation','*',true,'PUBLIC','((tenant_id)::text = steward_rls.tenant_id())','((tenant_id)::text = steward_rls.tenant_id())'),
+  ('core','digital_asset_account_wallet_lifecycles','steward_tenant_isolation','*',true,'PUBLIC','((tenant_id)::text = NULLIF(current_setting(''steward.tenant_id''::text, true), ''''::text))','((tenant_id)::text = NULLIF(current_setting(''steward.tenant_id''::text, true), ''''::text))'),
   ('core','digital_asset_account_wallets','steward_tenant_isolation','*',true,'PUBLIC','((tenant_id)::text = steward_rls.tenant_id())','((tenant_id)::text = steward_rls.tenant_id())'),
   ('core','digital_asset_accounts','steward_tenant_isolation','*',true,'PUBLIC','((tenant_id)::text = steward_rls.tenant_id())','((tenant_id)::text = steward_rls.tenant_id())'),
   ('core','encrypted_chain_keys','steward_tenant_isolation','*',true,'PUBLIC','(EXISTS ( SELECT 1
@@ -148,6 +151,7 @@ INSERT INTO steward_expected_rls_policy_definitions VALUES
    FROM agents parent
   WHERE (((parent.id)::text = (policies.agent_id)::text) AND ((parent.tenant_id)::text = steward_rls.tenant_id()))))'),
   ('core','policy_templates','steward_tenant_isolation','*',true,'PUBLIC','((tenant_id)::text = steward_rls.tenant_id())','((tenant_id)::text = steward_rls.tenant_id())'),
+  ('core','pregenerated_wallet_claim_lifecycles','steward_tenant_isolation','*',true,'PUBLIC','(((source_tenant_id)::text = NULLIF(current_setting(''steward.tenant_id''::text, true), ''''::text)) OR ((target_tenant_id)::text = NULLIF(current_setting(''steward.tenant_id''::text, true), ''''::text)))','(((source_tenant_id)::text = NULLIF(current_setting(''steward.tenant_id''::text, true), ''''::text)) OR ((target_tenant_id)::text = NULLIF(current_setting(''steward.tenant_id''::text, true), ''''::text)))'),
   ('core','provider_accounts','steward_tenant_isolation','*',true,'PUBLIC','((tenant_id)::text = steward_rls.tenant_id())','((tenant_id)::text = steward_rls.tenant_id())'),
   ('core','provider_action_approvals','steward_tenant_isolation','*',true,'PUBLIC','((tenant_id)::text = steward_rls.tenant_id())','((tenant_id)::text = steward_rls.tenant_id())'),
   ('core','provider_action_audit_outbox','steward_tenant_isolation','*',true,'PUBLIC','((tenant_id)::text = steward_rls.tenant_id())','((tenant_id)::text = steward_rls.tenant_id())'),

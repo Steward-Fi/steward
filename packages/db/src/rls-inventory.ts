@@ -18,6 +18,7 @@ export const DIRECT_TENANT_TABLES = [
   "condition_set_items",
   "condition_sets",
   "digital_asset_account_aggregations",
+  "digital_asset_account_wallet_lifecycles",
   "digital_asset_account_wallets",
   "digital_asset_accounts",
   "evm_wallet_nonce_inflight",
@@ -73,6 +74,8 @@ export const INDIRECT_TENANT_TABLES = {
   encrypted_chain_keys: "EXISTS agents(id = agent_id AND tenant_id = current tenant)",
   encrypted_keys: "EXISTS agents(id = agent_id AND tenant_id = current tenant)",
   policies: "EXISTS agents(id = agent_id AND tenant_id = current tenant)",
+  pregenerated_wallet_claim_lifecycles:
+    "cross-tenant custody transfer is visible only to its source or target tenant",
   reputation_cache: "EXISTS agents(id = agent_id AND tenant_id = current tenant)",
   transactions: "EXISTS agents(id = agent_id AND tenant_id = current tenant)",
 } as const;
