@@ -108,6 +108,11 @@ describe("MockSwapAdapter.buildSwap", () => {
     expect(intent.kind).toBe("evm-tx");
     expect(intent.category).toBe("swap");
     expect(intent.owner).toBe("0x1111111111111111111111111111111111111111");
+    expect(intent.metadata).toMatchObject({
+      amountIn: "1000",
+      sourceChainId: 8453,
+      sourceTokenAddress: USDC.address,
+    });
     // No signature-bearing fields.
     expect((intent as Record<string, unknown>).signature).toBeUndefined();
     expect((intent as Record<string, unknown>).rawTransaction).toBeUndefined();
@@ -126,6 +131,25 @@ describe("MockSwapAdapter.buildSwap", () => {
     await expect(
       later.buildSwap(quote, "0x1111111111111111111111111111111111111111"),
     ).rejects.toBeInstanceOf(AdapterValidationError);
+  });
+
+  test("rejects a caller-tampered source token with a forged matching quote id", async () => {
+    const swap = new MockSwapAdapter(fixedClock(1_000));
+    const quote = await swap.getQuote({
+      fromToken: USDC,
+      toToken: WETH,
+      amount: "1000000",
+      chainId: 8453,
+    });
+    const tampered = {
+      ...quote,
+      fromToken: WETH,
+      quoteId: `mock-swap-${quote.chainId}-${quote.amountIn}-${quote.slippageBps}-${WETH.address}-${quote.toToken.address}-${quote.expiresAt}`,
+    };
+
+    await expect(
+      swap.buildSwap(tampered, "0x1111111111111111111111111111111111111111"),
+    ).rejects.toThrow("quote binding is invalid");
   });
 
   test("rejects a malformed agent address", async () => {
