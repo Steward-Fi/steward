@@ -383,6 +383,9 @@ export function resolveCustodyAuthority(options: ConfiguredVaultOptions = {}): C
     resolved.awsAccessKeyId || resolved.awsSecretAccessKey || resolved.awsSessionToken,
   );
   const hasAwsCredentials = Boolean(resolved.awsAccessKeyId && resolved.awsSecretAccessKey);
+  if (workerRuntime && !resolved.kdfSalt) {
+    throw new Error("STEWARD_KDF_SALT is required for Worker custody authority");
+  }
   if (usesAws && !hasAwsCredentials && (workerRuntime || hasAwsCredentialPart)) {
     throw new Error(
       "AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY must be configured together for AWS custody",
@@ -396,6 +399,7 @@ function createVaultForAuthority(authority: CustodyAuthority): Vault {
     authority.mode === "kms-envelope:aws"
       ? new KmsEnvelopeKeystore({
           provider: "aws",
+          environmentFallback: false,
           keyId: authority.kmsKeyId,
           region: authority.awsRegion,
           credentials: awsCredentials(authority),
@@ -403,6 +407,7 @@ function createVaultForAuthority(authority: CustodyAuthority): Vault {
       : authority.mode === "kms-envelope:pkcs11"
         ? new KmsEnvelopeKeystore({
             provider: "pkcs11",
+            environmentFallback: false,
             modulePath: authority.pkcs11Module,
             pin: authority.pkcs11Pin,
             keyLabel: authority.pkcs11KeyLabel,

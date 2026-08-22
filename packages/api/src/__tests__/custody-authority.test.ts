@@ -261,6 +261,26 @@ describe("request-local custody authority", () => {
     ).toThrow(/AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY must be configured together/);
   });
 
+  it("fails closed when the current Worker authority omits its KDF salt", () => {
+    const previousSalt = process.env.STEWARD_KDF_SALT;
+    process.env.STEWARD_KDF_SALT = SALT_B;
+    try {
+      expect(() =>
+        withWorkerRuntimeAuthority(
+          {
+            DATABASE_URL: "postgresql://worker.invalid/steward",
+            NODE_ENV: "test",
+            STEWARD_MASTER_PASSWORD: "request-password",
+          },
+          () => resolveCustodyAuthority(),
+        ),
+      ).toThrow("STEWARD_KDF_SALT is required for Worker custody authority");
+    } finally {
+      if (previousSalt === undefined) delete process.env.STEWARD_KDF_SALT;
+      else process.env.STEWARD_KDF_SALT = previousSalt;
+    }
+  });
+
   it("keeps an isolate-cached plugin context late-bound to each request", async () => {
     _clearConfiguredVaultsForTests();
     const pluginContext = buildPluginContext();

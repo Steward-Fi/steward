@@ -21,6 +21,8 @@ export interface AwsKmsCredentials {
 
 export interface AwsKmsEnvelopeOptions {
   provider: "aws";
+  /** Disable process.env fallback when options came from an immutable request authority. */
+  environmentFallback?: boolean;
   keyId?: string;
   region?: string;
   credentials?: AwsKmsCredentials;
@@ -37,6 +39,8 @@ export interface Pkcs11ClientLike {
 
 export interface Pkcs11KmsEnvelopeOptions {
   provider: "pkcs11";
+  /** Disable process.env fallback when options came from an immutable request authority. */
+  environmentFallback?: boolean;
   modulePath?: string;
   pin?: string;
   keyLabel?: string;
@@ -304,13 +308,23 @@ export function resolveKmsEnvelopeOptions(
   options?: Partial<KmsEnvelopeOptions>,
 ): KmsEnvelopeOptions {
   const provider = (options?.provider ?? process.env.STEWARD_KMS_PROVIDER ?? "aws") as KmsProvider;
+  const environmentFallback = options?.environmentFallback !== false;
   if (provider === "aws") {
     const awsOptions = options as Partial<AwsKmsEnvelopeOptions> | undefined;
     return {
       provider: "aws",
+      environmentFallback,
       keyId:
-        awsOptions?.keyId ?? process.env.STEWARD_KMS_KEY_ID ?? process.env.STEWARD_AWS_KMS_KEY_ARN,
-      region: awsOptions?.region ?? process.env.STEWARD_AWS_REGION ?? process.env.AWS_REGION,
+        awsOptions?.keyId ??
+        (environmentFallback
+          ? (process.env.STEWARD_KMS_KEY_ID ?? process.env.STEWARD_AWS_KMS_KEY_ARN)
+          : undefined),
+      region:
+        awsOptions?.region ??
+        (environmentFallback
+          ? (process.env.STEWARD_AWS_REGION ?? process.env.AWS_REGION)
+          : undefined),
+      credentials: awsOptions?.credentials,
       client: awsOptions?.client,
     };
   }
@@ -318,9 +332,14 @@ export function resolveKmsEnvelopeOptions(
     const pkcs11Options = options as Partial<Pkcs11KmsEnvelopeOptions> | undefined;
     return {
       provider: "pkcs11",
-      modulePath: pkcs11Options?.modulePath ?? process.env.STEWARD_PKCS11_MODULE,
-      pin: pkcs11Options?.pin ?? process.env.STEWARD_PKCS11_PIN,
-      keyLabel: pkcs11Options?.keyLabel ?? process.env.STEWARD_PKCS11_KEY_LABEL,
+      environmentFallback,
+      modulePath:
+        pkcs11Options?.modulePath ??
+        (environmentFallback ? process.env.STEWARD_PKCS11_MODULE : undefined),
+      pin: pkcs11Options?.pin ?? (environmentFallback ? process.env.STEWARD_PKCS11_PIN : undefined),
+      keyLabel:
+        pkcs11Options?.keyLabel ??
+        (environmentFallback ? process.env.STEWARD_PKCS11_KEY_LABEL : undefined),
       client: pkcs11Options?.client,
     };
   }

@@ -5,7 +5,11 @@ import { encryptedKeys, eq, getDb, tenants } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { KeyStore } from "../keystore";
 import { backendFromKeyStore } from "../keystore-backend";
-import { type AwsKmsClientLike, KmsEnvelopeKeystore } from "../keystore-kms";
+import {
+  type AwsKmsClientLike,
+  KmsEnvelopeKeystore,
+  resolveKmsEnvelopeOptions,
+} from "../keystore-kms";
 import { Vault } from "../vault";
 
 const MASTER_PASSWORD = "test-kms-keystore-master";
@@ -124,6 +128,36 @@ describe("KMS envelope keystore", () => {
     expect(encrypted.salt.startsWith("kms-envelope:v1:")).toBe(true);
     expect(client.encryptCalls).toBe(1);
     expect(client.decryptCalls).toBe(1);
+  });
+
+  test("preserves explicit request credentials without borrowing stale AWS environment", () => {
+    const previousRegion = process.env.STEWARD_AWS_REGION;
+    const previousKeyId = process.env.STEWARD_KMS_KEY_ID;
+    process.env.STEWARD_AWS_REGION = "stale-global-region";
+    process.env.STEWARD_KMS_KEY_ID = "stale-global-key";
+    const credentials = {
+      accessKeyId: "request-access",
+      secretAccessKey: "request-secret",
+      sessionToken: "request-session",
+    };
+    try {
+      const resolved = resolveKmsEnvelopeOptions({
+        provider: "aws",
+        environmentFallback: false,
+        keyId: "request-key",
+        credentials,
+      });
+      expect(resolved.provider).toBe("aws");
+      if (resolved.provider !== "aws") throw new Error("expected AWS options");
+      expect(resolved.keyId).toBe("request-key");
+      expect(resolved.region).toBeUndefined();
+      expect(resolved.credentials).toBe(credentials);
+    } finally {
+      if (previousRegion === undefined) delete process.env.STEWARD_AWS_REGION;
+      else process.env.STEWARD_AWS_REGION = previousRegion;
+      if (previousKeyId === undefined) delete process.env.STEWARD_KMS_KEY_ID;
+      else process.env.STEWARD_KMS_KEY_ID = previousKeyId;
+    }
   });
 
   test("KMS records reject cross-backend decrypt and tampered wrapped keys", async () => {

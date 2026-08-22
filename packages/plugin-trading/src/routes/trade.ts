@@ -94,6 +94,49 @@ export function _polymarketCredentialCacheKeyFingerprintForTests(): string | nul
   return key ? createHash("sha256").update(key).digest("hex") : null;
 }
 
+type PolymarketRuntimeConfig = {
+  clobUrl?: string;
+  testCredentialsRequested: boolean;
+  testCredentialsEnabled: boolean;
+};
+
+function resolvePolymarketRuntimeConfig(): PolymarketRuntimeConfig {
+  const nodeEnvironment = runtimeEnvironmentValue("NODE_ENV");
+  const testCredentialsRequested = runtimeEnvironmentValue("STEWARD_PM_TEST_CREDS") === "1";
+  const raw = runtimeEnvironmentValue("POLYMARKET_CLOB_API_URL")?.trim();
+  let clobUrl: string | undefined;
+  if (raw) {
+    if (raw.length > 2_048 || /[\u0000-\u001f\u007f]/.test(raw)) {
+      throw new Error("POLYMARKET_CLOB_API_URL is invalid");
+    }
+    const url = new URL(raw);
+    if (url.protocol !== "http:" && url.protocol !== "https:") {
+      throw new Error("POLYMARKET_CLOB_API_URL must use http or https");
+    }
+    if (url.username || url.password || url.search || url.hash) {
+      throw new Error("POLYMARKET_CLOB_API_URL must not contain credentials, query, or fragment");
+    }
+    if (nodeEnvironment === "production" && url.protocol !== "https:") {
+      throw new Error("POLYMARKET_CLOB_API_URL must use https in production");
+    }
+    clobUrl = url.toString().replace(/\/$/, "");
+  }
+  return {
+    ...(clobUrl ? { clobUrl } : {}),
+    testCredentialsRequested,
+    testCredentialsEnabled: testCredentialsRequested && nodeEnvironment !== "production",
+  };
+}
+
+function configuredPolymarketClobUrl(): string | undefined {
+  return resolvePolymarketRuntimeConfig().clobUrl;
+}
+
+/** Internal behavior hook for request-authority isolation tests. */
+export function _polymarketRuntimeConfigForTests(): PolymarketRuntimeConfig {
+  return resolvePolymarketRuntimeConfig();
+}
+
 // Prediction-market session asset: pm:<tokenId> (a single outcome token) or
 // pm:cond:<conditionId> (a whole market). Mirrors @stwd/trade-sessions'
 // predictionMarketAssetSchema so a Polymarket session can be created through the
@@ -1545,25 +1588,6 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
   // L2 HMAC auth, and order serialization against the configured HTTP edge.
   // SEC-111: in production the override must use https — a stray plain-http
   // endpoint would send L1-signed derivations + L2 HMAC headers in cleartext.
-  function configuredPolymarketClobUrl(): string | undefined {
-    const raw = process.env.POLYMARKET_CLOB_API_URL?.trim();
-    if (!raw) return undefined;
-    if (raw.length > 2_048 || /[\u0000-\u001f\u007f]/.test(raw)) {
-      throw new Error("POLYMARKET_CLOB_API_URL is invalid");
-    }
-    const url = new URL(raw);
-    if (url.protocol !== "http:" && url.protocol !== "https:") {
-      throw new Error("POLYMARKET_CLOB_API_URL must use http or https");
-    }
-    if (url.username || url.password || url.search || url.hash) {
-      throw new Error("POLYMARKET_CLOB_API_URL must not contain credentials, query, or fragment");
-    }
-    if (process.env.NODE_ENV === "production" && url.protocol !== "https:") {
-      throw new Error("POLYMARKET_CLOB_API_URL must use https in production");
-    }
-    return url.toString().replace(/\/$/, "");
-  }
-
   function pmCredsCacheKey(
     tenantId: string,
     agentId: string,
@@ -1614,19 +1638,20 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
     const funderAddress = funderMeta ?? walletAddress;
     const signatureType = funderMeta ? POLY_GNOSIS_SAFE_SIGNATURE_TYPE : POLY_EOA_SIGNATURE_TYPE;
 
-    let clobUrl: string | undefined;
+    let runtimeConfig: PolymarketRuntimeConfig;
     try {
-      clobUrl = configuredPolymarketClobUrl();
+      runtimeConfig = resolvePolymarketRuntimeConfig();
     } catch {
       return { ok: false, reason: "derive-failed" };
     }
+    const clobUrl = runtimeConfig.clobUrl;
 
     // 2) L2 CLOB apiCredentials. Test-only deterministic seam first (inert in prod).
     // SEC-111: hard-disabled in production (same force-off idiom as the
     // unsigned-webhook escape hatch) so a stray env var can never swap in the
     // hardcoded test creds on a live deployment.
-    if (process.env.STEWARD_PM_TEST_CREDS === "1") {
-      if (process.env.NODE_ENV === "production") {
+    if (runtimeConfig.testCredentialsRequested) {
+      if (!runtimeConfig.testCredentialsEnabled) {
         console.error(
           "[trade] STEWARD_PM_TEST_CREDS is set but ignored in production; real L2 creds stay required.",
         );

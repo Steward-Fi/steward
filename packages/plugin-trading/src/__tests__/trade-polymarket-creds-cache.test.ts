@@ -186,14 +186,21 @@ beforeEach(() => {
 
 describe("SEC-108: Polymarket L2 creds Redis cache is encrypted at rest", () => {
   it("binds its derived key to each request's password and KDF salt across hostile overlap", async () => {
-    const { _polymarketCredentialCacheKeyFingerprintForTests } = await import("../routes/trade");
+    const { _polymarketCredentialCacheKeyFingerprintForTests, _polymarketRuntimeConfigForTests } =
+      await import("../routes/trade");
     const authorityA = {
+      NODE_ENV: "test",
       STEWARD_MASTER_PASSWORD: "shared-password",
       STEWARD_KDF_SALT: "a1".repeat(16),
+      POLYMARKET_CLOB_API_URL: "https://clob-a.example.invalid",
+      STEWARD_PM_TEST_CREDS: "1",
     };
     const authorityB = {
+      NODE_ENV: "production",
       STEWARD_MASTER_PASSWORD: "shared-password",
       STEWARD_KDF_SALT: "b2".repeat(16),
+      POLYMARKET_CLOB_API_URL: "https://clob-b.example.invalid",
+      STEWARD_PM_TEST_CREDS: "1",
     };
 
     let releaseA: (() => void) | undefined;
@@ -206,23 +213,38 @@ describe("SEC-108: Polymarket L2 creds Redis cache is encrypted at rest", () => 
     });
     const requestA = withRuntimeEnvironment(authorityA, async () => {
       const before = _polymarketCredentialCacheKeyFingerprintForTests();
+      const configBefore = _polymarketRuntimeConfigForTests();
       signalAStarted?.();
       await aMayResume;
       return {
         before,
         after: _polymarketCredentialCacheKeyFingerprintForTests(),
+        configBefore,
+        configAfter: _polymarketRuntimeConfigForTests(),
       };
     });
 
     await aStarted;
-    const requestB = withRuntimeEnvironment(authorityB, () =>
-      _polymarketCredentialCacheKeyFingerprintForTests(),
-    );
+    const requestB = withRuntimeEnvironment(authorityB, () => ({
+      key: _polymarketCredentialCacheKeyFingerprintForTests(),
+      config: _polymarketRuntimeConfigForTests(),
+    }));
     releaseA?.();
     const resumedA = await requestA;
 
-    expect(requestB).not.toBe(resumedA.before);
+    expect(requestB.key).not.toBe(resumedA.before);
     expect(resumedA.after).toBe(resumedA.before);
+    expect(resumedA.configAfter).toEqual(resumedA.configBefore);
+    expect(resumedA.configAfter).toEqual({
+      clobUrl: "https://clob-a.example.invalid",
+      testCredentialsRequested: true,
+      testCredentialsEnabled: true,
+    });
+    expect(requestB.config).toEqual({
+      clobUrl: "https://clob-b.example.invalid",
+      testCredentialsRequested: true,
+      testCredentialsEnabled: false,
+    });
     expect(withRuntimeEnvironment({}, _polymarketCredentialCacheKeyFingerprintForTests)).toBeNull();
   });
 
