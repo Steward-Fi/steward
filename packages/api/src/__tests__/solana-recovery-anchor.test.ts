@@ -783,12 +783,14 @@ describe("Solana durable recovery anchors", () => {
       // Force the effects phase to fail only after the authoritative RPC result
       // has already transitioned the row to broadcast.
       process.env.REDIS_URL = "redis://127.0.0.1:1";
-      const first = await app.request(
-        `/vault/${AGENT_ID}/transactions/${txId}/reconcile-solana`,
-        { method: "POST" },
-      );
+      const first = await app.request(`/vault/${AGENT_ID}/transactions/${txId}/reconcile-solana`, {
+        method: "POST",
+      });
       expect(first.status).toBe(500);
-      const [committed] = await getDb().select().from(transactions).where(eq(transactions.id, txId));
+      const [committed] = await getDb()
+        .select()
+        .from(transactions)
+        .where(eq(transactions.id, txId));
       expect(committed.status).toBe("broadcast");
       expect(readPayload(committed.actionPayload).recoveryEffectsState).toBe("pending");
 
