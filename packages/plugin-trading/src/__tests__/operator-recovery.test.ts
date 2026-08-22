@@ -27,6 +27,7 @@ import { and, asc, eq, inArray } from "drizzle-orm";
 import { Hono } from "hono";
 import { z } from "zod";
 import { verifyAuditChain } from "../../../api/src/services/audit";
+import type { StewardAppContext } from "../context";
 
 const PLATFORM_KEY = "stw_platform_test_operator_key";
 setDefaultTimeout(30_000);
@@ -50,6 +51,9 @@ const submitSendAssetCalls: unknown[] = [];
 let signSendAssetError: Error | undefined;
 let submitSendAssetError: Error | undefined;
 let closeAllPause: Promise<void> | null = null;
+const adapterVaultClients: Array<{
+  signTypedData: (input: Record<string, unknown>) => Promise<string>;
+}> = [];
 
 mock.module("@stwd/policy-engine", () => ({
   aggregationLookupFromMap: () => undefined,
@@ -66,7 +70,11 @@ class MockHyperliquidAdapter {
     public vault: unknown,
     public agentId: string,
     public walletAddress: string,
-  ) {}
+  ) {
+    adapterVaultClients.push(
+      vault as { signTypedData: (input: Record<string, unknown>) => Promise<string> },
+    );
+  }
 
   async closeAllPositions() {
     closeAllCalls.push(Date.now());
@@ -221,7 +229,7 @@ async function seedAgent(opts: {
  * plus the unauthenticated/wrong-key rejections, which is what production
  * operator recovery uses).
  */
-async function buildApp() {
+async function buildApp(ctxOverrides: Partial<StewardAppContext> = {}) {
   const { isValidPlatformKey } = await import("@stwd/auth");
   const { createOperatorRecoveryRoutes } = await import("../routes/operator-recovery");
   const { testCtx } = await import("./_ctx");
@@ -239,7 +247,7 @@ async function buildApp() {
     c.set("authType", "platform");
     return next();
   });
-  app.route("/v1/trade", createOperatorRecoveryRoutes(testCtx()));
+  app.route("/v1/trade", createOperatorRecoveryRoutes({ ...testCtx(), ...ctxOverrides }));
   return app;
 }
 
@@ -740,6 +748,52 @@ describe("operator recovery leverage", () => {
     expect(body.data.leverage).toBe(3);
     expect(body.data.isCross).toBe(false);
     expect(updateLeverageCalls).toEqual([{ coin: "xyz:SPCX", leverage: 3, isCross: false }]);
+  });
+
+  it("binds operator-recovery signatures to the resolved venue wallet", async () => {
+    const tenantId = `tenant-lev-wallet-${Date.now()}`;
+    const agentId = `agent-lev-wallet-${Date.now()}`;
+    await seedAgent({ tenantId, agentId });
+    adapterVaultClients.length = 0;
+    const signedInputs: Array<Record<string, unknown>> = [];
+    const app = await buildApp({
+      vault: {
+        getWallet: async () => ({
+          address: "0x00000000000000000000000000000000000000bb",
+        }),
+        signTypedData: async (input: Record<string, unknown>) => {
+          signedInputs.push(input);
+          return `0x${"1".repeat(128)}1b`;
+        },
+      } as unknown as StewardAppContext["vault"],
+    });
+    const res = await app.request("/v1/trade/hyperliquid/leverage", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Steward-Platform-Key": PLATFORM_KEY,
+        "X-Steward-Tenant": tenantId,
+        "Idempotency-Key": crypto.randomUUID(),
+      },
+      body: JSON.stringify({ agentId, coin: "BTC", leverage: 2, isCross: false }),
+    });
+    expect(res.status).toBe(200);
+    expect(adapterVaultClients).toHaveLength(1);
+
+    await adapterVaultClients[0]!.signTypedData({
+      agentId,
+      domain: { name: "Hyperliquid", version: "1", chainId: 42161 },
+      types: { Action: [{ name: "nonce", type: "uint64" }] },
+      primaryType: "Action",
+      value: { nonce: 1 },
+    });
+    expect(signedInputs).toHaveLength(1);
+    expect(signedInputs[0]).toMatchObject({
+      agentId,
+      tenantId,
+      venue: "hyperliquid",
+      expectedWalletAddress: "0x00000000000000000000000000000000000000bb",
+    });
   });
 });
 

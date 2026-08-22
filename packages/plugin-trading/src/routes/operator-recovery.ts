@@ -883,7 +883,12 @@ export function createOperatorRecoveryRoutes(
   function buildAdapter(tenantId: string, agentId: string, walletAddress: string) {
     const vaultClient = {
       signTypedData: (input: Omit<Parameters<typeof vault.signTypedData>[0], "tenantId">) =>
-        vault.signTypedData({ ...input, tenantId, venue: "hyperliquid" as const }),
+        vault.signTypedData({
+          ...input,
+          tenantId,
+          venue: "hyperliquid" as const,
+          expectedWalletAddress: walletAddress,
+        }),
     };
     return new HyperliquidAdapter(vaultClient, agentId, walletAddress);
   }

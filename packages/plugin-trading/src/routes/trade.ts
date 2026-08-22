@@ -1159,7 +1159,12 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
         if (storedSession?.agentId === agentId && storedSession.venue === "hyperliquid") {
           const vaultClient = {
             signTypedData: (input: Omit<Parameters<typeof vault.signTypedData>[0], "tenantId">) =>
-              vault.signTypedData({ ...input, tenantId, venue: "hyperliquid" }),
+              vault.signTypedData({
+                ...input,
+                tenantId,
+                venue: "hyperliquid",
+                expectedWalletAddress: storedSession.walletId,
+              }),
           };
           const adapter = new HyperliquidAdapter(vaultClient, agentId, storedSession.walletId);
           try {
@@ -1402,7 +1407,6 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
       );
     }
 
-    const walletAddress = session.walletId;
     const manager = getSessionManager();
     const fenced = await manager.withActiveSubmissionFence(
       { tenantId, id: session.id },
@@ -1420,6 +1424,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
           await idempotency.store?.(envelope);
           return envelope;
         }
+        const walletAddress = activeSession.walletId;
 
         const reserved = await getSessionManager().incrementSpend({
           tenantId,
@@ -1448,7 +1453,12 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
 
         const vaultClient = {
           signTypedData: (input: Omit<Parameters<typeof vault.signTypedData>[0], "tenantId">) =>
-            vault.signTypedData({ ...input, tenantId, venue: "hyperliquid" }),
+            vault.signTypedData({
+              ...input,
+              tenantId,
+              venue: "hyperliquid",
+              expectedWalletAddress: walletAddress,
+            }),
         };
         const adapter = new HyperliquidAdapter(vaultClient, agentId, walletAddress);
         if (builderPerp) {

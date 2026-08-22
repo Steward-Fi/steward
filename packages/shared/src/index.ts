@@ -639,6 +639,13 @@ export interface SignTypedDataRequest {
    * otherwise it resolves the unscoped wallet.
    */
   venue?: VenueId;
+  /**
+   * Optional fail-closed assertion for a wallet identity authorized before the
+   * custody boundary. The vault never uses this value to select a key: under
+   * the custody-transition lock it resolves the current scoped wallet and key,
+   * then requires both to derive this address before signing.
+   */
+  expectedWalletAddress?: string;
   domain: TypedDataDomain;
   types: Record<string, TypedDataField[]>;
   primaryType: string;
