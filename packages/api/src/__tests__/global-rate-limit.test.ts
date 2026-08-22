@@ -1,13 +1,24 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, describe, expect, test } from "bun:test";
 import { withRuntimeEnvironment } from "@stwd/shared/runtime-env";
 import { Hono } from "hono";
-import {
+import { SOCKET_PEER_ENV_KEY } from "../services/runtime-gate";
+
+process.env.NODE_ENV = "test";
+process.env.STEWARD_PGLITE_MEMORY = "true";
+const { createPGLiteDb, setPGLiteOverride } = await import("@stwd/db/pglite");
+const { closeDb } = await import("@stwd/db");
+const { db: pgliteDb, client: pgliteClient } = await createPGLiteDb("memory://");
+setPGLiteOverride(pgliteDb, async () => pgliteClient.close());
+const {
   createGlobalRateLimitMiddleware,
   globalRateLimit,
   globalRateLimitPosture,
   globalRateLimitRequiresRedis,
-} from "../middleware/global-rate-limit";
-import { SOCKET_PEER_ENV_KEY } from "../services/runtime-gate";
+} = await import("../middleware/global-rate-limit");
+
+afterAll(async () => {
+  await closeDb();
+});
 
 /**
  * SEC-068: app.ts mounts one global limiter across Bun and Workers. Production

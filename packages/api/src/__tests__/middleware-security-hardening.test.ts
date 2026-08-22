@@ -1,7 +1,18 @@
-import { describe, expect, it } from "bun:test";
+import { afterAll, describe, expect, it } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import app from "../app";
+
+process.env.NODE_ENV = "test";
+process.env.STEWARD_PGLITE_MEMORY = "true";
+const { createPGLiteDb, setPGLiteOverride } = await import("@stwd/db/pglite");
+const { closeDb } = await import("@stwd/db");
+const { db: pgliteDb, client: pgliteClient } = await createPGLiteDb("memory://");
+setPGLiteOverride(pgliteDb, async () => pgliteClient.close());
+const { default: app } = await import("../app");
+
+afterAll(async () => {
+  await closeDb();
+});
 
 const apiRoot = join(import.meta.dir, "..");
 const idempotencySource = readFileSync(join(apiRoot, "middleware", "idempotency.ts"), "utf8");
