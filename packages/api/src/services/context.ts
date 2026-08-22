@@ -359,10 +359,8 @@ export const vault: Vault = new Proxy({} as Vault, {
   get(_target, property) {
     const overrides = vaultMethodOverrides.get(getDb() as object);
     if (overrides?.has(property)) return overrides.get(property);
-    const active = (vaultInstanceOverrides.get(getDb() as object) ?? activeVault()) as unknown as Record<
-      PropertyKey,
-      unknown
-    >;
+    const active = (vaultInstanceOverrides.get(getDb() as object) ??
+      activeVault()) as unknown as Record<PropertyKey, unknown>;
     const value = active[property];
     return typeof value === "function"
       ? (value as (...args: unknown[]) => unknown).bind(active)
