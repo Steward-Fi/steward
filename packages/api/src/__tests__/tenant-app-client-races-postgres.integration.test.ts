@@ -22,6 +22,9 @@ realPostgresIt(
     const tenantId = `app-client-race-${suffix}`;
     const userId = crypto.randomUUID();
     const gateKey = Number.parseInt(suffix.slice(0, 12), 16);
+    const requestApplicationName = `app-client-race-${suffix}`;
+    const requestDatabaseUrl = new URL(databaseUrl!);
+    requestDatabaseUrl.searchParams.set("application_name", requestApplicationName);
     const triggerFunction = `gate_app_client_delete_${suffix}`;
     const triggerName = `gate_app_client_delete_${suffix}`;
     const previousJwtSecret = process.env.STEWARD_JWT_SECRET;
@@ -62,7 +65,7 @@ realPostgresIt(
             cwd: new URL("../../../..", import.meta.url).pathname,
             env: {
               ...process.env,
-              DATABASE_URL: databaseUrl!,
+              DATABASE_URL: requestDatabaseUrl.toString(),
               TEST_TENANT_ID: tenantId,
               TEST_SESSION_TOKEN: token,
               TEST_METHOD: method,
@@ -145,7 +148,10 @@ realPostgresIt(
         const [waiting] = await admin.client<{ count: string }[]>`
           select count(*)::text as count
           from pg_stat_activity
-          where wait_event = 'advisory' and query ilike '%INSERT INTO audit_events%'
+          where datname = current_database()
+            and application_name = ${requestApplicationName}
+            and wait_event_type = 'Lock'
+            and cardinality(pg_blocking_pids(pid)) > 0
         `;
         if (Number(waiting?.count ?? "0") > 0) break;
         if (attempt === 99) throw new Error("delete did not reach the completion-audit gate");
@@ -157,7 +163,12 @@ realPostgresIt(
       });
       for (let attempt = 0; attempt < 100; attempt++) {
         const [waiting] = await admin.client<{ count: string }[]>`
-          select count(*)::text as count from pg_stat_activity where wait_event = 'advisory'
+          select count(*)::text as count
+          from pg_stat_activity
+          where datname = current_database()
+            and application_name = ${requestApplicationName}
+            and wait_event_type = 'Lock'
+            and cardinality(pg_blocking_pids(pid)) > 0
         `;
         if (Number(waiting?.count ?? "0") >= 2) break;
         if (attempt === 99) throw new Error("replace did not queue behind delete");
