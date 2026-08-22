@@ -760,6 +760,48 @@ export function createOperatorRecoveryRoutes(
     metadata: Record<string, unknown>;
   };
 
+  function durableTransferResponse(
+    c: Context<{ Variables: AppVariables }>,
+    durableState: DurableTransferState | undefined,
+    requestFingerprint: string,
+  ): Response | undefined {
+    if (!durableState) return undefined;
+    if (durableState.metadata.requestFingerprint !== requestFingerprint) {
+      return c.json<ApiResponse>(
+        { ok: false, error: "Idempotency key reused with a different body" },
+        409,
+      );
+    }
+    if (durableState.action === "trade.recovery.transfer.submitted") {
+      c.header("Idempotency-Replayed", "true");
+      return c.json<ApiResponse>({ ok: true, data: durableState.metadata.response });
+    }
+    if (
+      durableState.action === "trade.recovery.transfer.failed" &&
+      durableState.metadata.ambiguousOutcome === true
+    ) {
+      c.header("Idempotency-Replayed", "true");
+      return c.json<ApiResponse>(
+        {
+          ok: false,
+          error: "Failed to submit collateral transfer",
+        },
+        502,
+      );
+    }
+    if (durableState.action === "trade.recovery.transfer.requested") {
+      c.header("Retry-After", "60");
+      return c.json<ApiResponse>(
+        {
+          ok: false,
+          error: "Collateral transfer outcome requires reconciliation",
+        },
+        409,
+      );
+    }
+    return undefined;
+  }
+
   async function findDurableTransferState(
     c: Context<{ Variables: AppVariables }>,
     tenantId: string,
@@ -1669,41 +1711,8 @@ export function createOperatorRecoveryRoutes(
         503,
       );
     }
-    if (durableState) {
-      if (durableState.metadata.requestFingerprint !== requestFingerprint) {
-        return c.json<ApiResponse>(
-          { ok: false, error: "Idempotency key reused with a different body" },
-          409,
-        );
-      }
-      if (durableState.action === "trade.recovery.transfer.submitted") {
-        c.header("Idempotency-Replayed", "true");
-        return c.json<ApiResponse>({ ok: true, data: durableState.metadata.response });
-      }
-      if (
-        durableState.action === "trade.recovery.transfer.failed" &&
-        durableState.metadata.ambiguousOutcome === true
-      ) {
-        c.header("Idempotency-Replayed", "true");
-        return c.json<ApiResponse>(
-          {
-            ok: false,
-            error: "Failed to submit collateral transfer",
-          },
-          502,
-        );
-      }
-      if (durableState.action === "trade.recovery.transfer.requested") {
-        c.header("Retry-After", "60");
-        return c.json<ApiResponse>(
-          {
-            ok: false,
-            error: "Collateral transfer outcome requires reconciliation",
-          },
-          409,
-        );
-      }
-    }
+    const durableResponse = durableTransferResponse(c, durableState, requestFingerprint);
+    if (durableResponse) return durableResponse;
 
     const agent = await ensureAgentForTenant(tenantId, agentId);
     if (!agent) return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
@@ -1718,7 +1727,7 @@ export function createOperatorRecoveryRoutes(
 
     const adapter = buildAdapter(tenantId, agentId, walletAddress);
 
-    await auditRecoveryEvent(c, tenantId, agentId, "trade.recovery.transfer.requested", {
+    const requestedMetadata = {
       venue,
       walletAddress,
       sourceDex,
@@ -1728,14 +1737,88 @@ export function createOperatorRecoveryRoutes(
       idempotencyKey: body.idempotencyKey,
       requestFingerprint,
       outcome: "submission_pending",
-    });
+    };
+
+    // Serialize the authoritative absence check and requested append on a
+    // database-scoped key. Two fresh workers can both miss the earlier replay
+    // lookup, but only one may cross this transaction boundary without seeing
+    // the other's durable requested evidence. The lock includes the request
+    // identity (tenant + agent + idempotency key) so conflicting fingerprints
+    // also serialize; the requested row binds the winning fingerprint and the
+    // deterministic loser returns the canonical 409 conflict below.
+    let claimState: DurableTransferState | undefined;
+    try {
+      claimState = await withOperatorTenantDatabase(c, tenantId, async () => {
+        if (
+          process.env.STEWARD_DB_MODE !== "pglite" &&
+          process.env.STEWARD_PGLITE_MEMORY !== "true"
+        ) {
+          const claimKey = `operator-collateral:${tenantId}:${agentId}:${body.idempotencyKey}`;
+          await getDb().execute(
+            sql`SELECT pg_advisory_xact_lock(hashtextextended(${claimKey}, 0))`,
+          );
+        }
+        const existing = await findDurableTransferState(c, tenantId, agentId, body.idempotencyKey);
+        // A definite local signing failure is explicitly safe to retry. It is
+        // durable evidence, but not a claim that may have reached the venue,
+        // so append a new requested marker while still holding this key lock.
+        if (
+          existing &&
+          !(
+            existing.action === "trade.recovery.transfer.failed" &&
+            existing.metadata.ambiguousOutcome === false
+          )
+        ) {
+          return existing;
+        }
+        const actor = operatorActor(c);
+        await writeAuditEvent({
+          tenantId,
+          actorType: actor.actorType,
+          actorId: actor.actorId,
+          action: "trade.recovery.transfer.requested",
+          resourceType: "trade",
+          resourceId: agentId,
+          metadata: requestedMetadata,
+        });
+        return undefined;
+      });
+    } catch (err) {
+      console.error(
+        "[operator-recovery] collateral transfer durable claim failed",
+        redactedThrownDiagnostics(err),
+      );
+      return c.json<ApiResponse>(
+        { ok: false, error: "Collateral transfer replay evidence is unavailable" },
+        503,
+      );
+    }
+    const claimResponse = durableTransferResponse(c, claimState, requestFingerprint);
+    if (claimResponse) return claimResponse;
+
+    // The required requested event committed before this best-effort proxy
+    // record. Keep proxy failure isolated from the durable claim transaction.
+    await withOperatorTenantDatabase(c, tenantId, () =>
+      getDb()
+        .insert(proxyAuditLog)
+        .values({
+          tenantId,
+          agentId,
+          targetHost: "trade.recovery.transfer.requested",
+          targetPath: JSON.stringify(requestedMetadata),
+          method: "AUDIT",
+          statusCode: 200,
+          latencyMs: 0,
+          reason: "trade.recovery.transfer.requested",
+        }),
+    ).catch(() => undefined);
 
     // Signing is local (nothing reaches the venue), so a sign failure is safe to
     // retry and is NOT stored; a submit failure means the transfer may have
     // landed, so the ambiguous outcome IS stored and retries replay it.
     idempotency = await claimOperatorIdempotency(idempotency);
-    const claimResponse = operatorIdempotencyResponse(c, idempotency);
-    if (claimResponse) return claimResponse;
+    const idempotencyClaimResponse = operatorIdempotencyResponse(c, idempotency);
+    if (idempotencyClaimResponse) return idempotencyClaimResponse;
     let signed: Awaited<ReturnType<HyperliquidAdapter["signSendAsset"]>>;
     try {
       signed = await adapter.signSendAsset({

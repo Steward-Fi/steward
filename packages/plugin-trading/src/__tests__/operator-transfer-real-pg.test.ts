@@ -7,6 +7,7 @@ import {
   closeDb,
   createDb,
   getDb,
+  proxyAuditLog,
   tenantContextFromAuthenticatedPrincipal,
   tenants,
   withTenantRlsTransaction,
@@ -22,6 +23,8 @@ const HAS_REAL_PG =
   Boolean(process.env.DATABASE_URL) && process.env.STEWARD_PGLITE_MEMORY !== "true";
 const submitCalls: unknown[] = [];
 let submitError: Error | undefined;
+let submitGate: Promise<void> | undefined;
+let notifySubmitEntered: (() => void) | undefined;
 const restrictedRole = `steward_platform_transfer_${randomUUID().replaceAll("-", "")}`;
 const restrictedPassword = randomUUID().replaceAll("-", "");
 let adminHandle: ReturnType<typeof createDb> | undefined;
@@ -44,6 +47,8 @@ class MockHyperliquidAdapter {
 
   async submitSendAsset(signed: unknown) {
     submitCalls.push(signed);
+    notifySubmitEntered?.();
+    if (submitGate) await submitGate;
     if (submitError) throw submitError;
     return { status: "ok", response: { type: "default" } };
   }
@@ -136,7 +141,13 @@ async function buildApp(failAuditAction?: string, routeDb = getDb(), expectedTen
   return app;
 }
 
-function transfer(app: Hono, tenantId: string, agentId: string, idempotencyKey: string) {
+function transfer(
+  app: Hono,
+  tenantId: string,
+  agentId: string,
+  idempotencyKey: string,
+  amountUsdc = "7.5",
+) {
   return app.request("/v1/trade/hyperliquid/transfer", {
     method: "POST",
     headers: {
@@ -149,7 +160,7 @@ function transfer(app: Hono, tenantId: string, agentId: string, idempotencyKey: 
       agentId,
       sourceDex: "xyz",
       destinationDex: "",
-      amountUsdc: "7.5",
+      amountUsdc,
     }),
   });
 }
@@ -210,10 +221,17 @@ describe.skipIf(!HAS_REAL_PG)("collateral transfer durable replay on real Postgr
     restrictedHandles = [createDb(restrictedUrl.toString()), createDb(restrictedUrl.toString())];
     for (const handle of restrictedHandles) {
       const restrictedRows = await handle.client`
-        SELECT rolsuper, rolbypassrls, rolinherit FROM pg_roles WHERE rolname = current_user
+        SELECT rolsuper, rolbypassrls, rolinherit,
+               has_table_privilege(current_user, 'public.proxy_audit_log', 'INSERT') AS proxy_insert
+        FROM pg_roles WHERE rolname = current_user
       `;
       expect(restrictedRows[0]).toEqual(
-        expect.objectContaining({ rolsuper: false, rolbypassrls: false, rolinherit: false }),
+        expect.objectContaining({
+          rolsuper: false,
+          rolbypassrls: false,
+          rolinherit: false,
+          proxy_insert: false,
+        }),
       );
     }
   });
@@ -355,5 +373,82 @@ describe.skipIf(!HAS_REAL_PG)("collateral transfer durable replay on real Postgr
     expect(denied.status).toBe(404);
     expect(denied.headers.get("Idempotency-Replayed")).toBeNull();
     expect(submitCalls).toHaveLength(0);
+  });
+
+  test("two fresh restricted workers serialize first submission before venue execution", async () => {
+    submitCalls.length = 0;
+    submitError = undefined;
+    const seeded = await seed();
+    const idempotencyKey = `fresh-race-${randomUUID()}`;
+    const apps = await Promise.all(
+      restrictedHandles.map(({ db }) => buildApp(undefined, db as never, seeded.tenantId)),
+    );
+    let releaseSubmit = () => undefined;
+    submitGate = new Promise<void>((resolve) => {
+      releaseSubmit = resolve;
+    });
+    const entered = new Promise<void>((resolve) => {
+      notifySubmitEntered = resolve;
+    });
+    const requests = apps.map((app) =>
+      transfer(app, seeded.tenantId, seeded.agentId, idempotencyKey),
+    );
+    await entered;
+    const peer = await Promise.race(requests);
+    expect(peer.status).toBe(409);
+    expect(peer.headers.get("Retry-After")).toBe("60");
+    releaseSubmit();
+    const responses = await Promise.all(requests);
+    submitGate = undefined;
+    notifySubmitEntered = undefined;
+    expect(responses.map(({ status }) => status).sort()).toEqual([200, 409]);
+    expect(submitCalls).toHaveLength(1);
+    expect((await actions(seeded.tenantId, seeded.agentId)).map(({ action }) => action)).toEqual([
+      "trade.recovery.transfer.requested",
+      "trade.recovery.transfer.submitted",
+    ]);
+    const proxyRows = await getDb()
+      .select({ id: proxyAuditLog.id })
+      .from(proxyAuditLog)
+      .where(eq(proxyAuditLog.tenantId, seeded.tenantId));
+    expect(proxyRows).toHaveLength(0);
+  });
+
+  test("concurrent conflicting fingerprints serialize on the idempotency identity", async () => {
+    submitCalls.length = 0;
+    submitError = undefined;
+    const seeded = await seed();
+    const idempotencyKey = `conflict-race-${randomUUID()}`;
+    const apps = await Promise.all(
+      restrictedHandles.map(({ db }) => buildApp(undefined, db as never, seeded.tenantId)),
+    );
+    let releaseSubmit = () => undefined;
+    submitGate = new Promise<void>((resolve) => {
+      releaseSubmit = resolve;
+    });
+    const entered = new Promise<void>((resolve) => {
+      notifySubmitEntered = resolve;
+    });
+    const requests = [
+      transfer(apps[0]!, seeded.tenantId, seeded.agentId, idempotencyKey, "7.5"),
+      transfer(apps[1]!, seeded.tenantId, seeded.agentId, idempotencyKey, "8.5"),
+    ];
+    await entered;
+    const peer = await Promise.race(requests);
+    expect(peer.status).toBe(409);
+    expect(await peer.json()).toEqual({
+      ok: false,
+      error: "Idempotency key reused with a different body",
+    });
+    releaseSubmit();
+    const responses = await Promise.all(requests);
+    submitGate = undefined;
+    notifySubmitEntered = undefined;
+    expect(responses.map(({ status }) => status).sort()).toEqual([200, 409]);
+    expect(submitCalls).toHaveLength(1);
+    expect((await actions(seeded.tenantId, seeded.agentId)).map(({ action }) => action)).toEqual([
+      "trade.recovery.transfer.requested",
+      "trade.recovery.transfer.submitted",
+    ]);
   });
 });
