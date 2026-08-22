@@ -144,10 +144,13 @@ describe("capability plugin migrations: namespaced-journal isolation", () => {
     const maintenancePolicies = await client.query(
       `SELECT count(*)::int AS n FROM pg_policies
        WHERE schemaname = 'public'
-         AND tablename IN ('capabilities', 'capability_grants', 'capability_invocations')
+         AND tablename IN (
+           'capabilities', 'capability_grants', 'capability_invocations',
+           'capability_rate_limit_buckets'
+         )
          AND policyname = 'steward_migration_maintenance'`,
     );
-    expect(maintenancePolicies.rows[0].n).toBe(3);
+    expect(maintenancePolicies.rows[0].n).toBe(4);
     const bucketConstraint = await client.query(
       `SELECT count(*)::int AS n FROM pg_constraint
        WHERE conname = 'capability_rate_limit_buckets_surface_check'`,
