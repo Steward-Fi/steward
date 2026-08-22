@@ -7,10 +7,16 @@
  * - only full SHA-1 object IDs are accepted (no attacker-controlled refspecs),
  * - fork commits are verified locally and never fetched by raw object ID,
  * - filenames are read with `-z` (newlines and other metacharacters are data),
- * - merely touching package.json is not called a version bump.
+ * - merely touching a package's version manifest is not called a version bump.
  */
 
-const PUBLIC_PACKAGES = ["sdk", "react", "eliza-plugin"] as const;
+const PUBLIC_PACKAGES = ["sdk", "react", "eliza-plugin", "flutter"] as const;
+const VERSION_FILES: Readonly<Record<(typeof PUBLIC_PACKAGES)[number], string>> = {
+  sdk: "package.json",
+  react: "package.json",
+  "eliza-plugin": "package.json",
+  flutter: "pubspec.yaml",
+};
 const FULL_SHA1 = /^[0-9a-f]{40}$/;
 const CHANGELOG_NAMES = new Set(["CHANGELOG.md", "CHANGELOG", "changelog.md"]);
 const SEMVER =
@@ -82,14 +88,15 @@ export function evaluatePublicPackageMetadata(input: PackageMetadataInput): stri
     if (relative.length === 0) continue;
 
     const changelogChanged = relative.some((file) => CHANGELOG_NAMES.has(file));
-    const packageJsonChanged = relative.includes("package.json");
+    const versionFile = VERSION_FILES[pkg];
+    const versionFileChanged = relative.includes(versionFile);
     const version = input.versions[pkg];
     const versionBumped =
-      packageJsonChanged && isStrictSemverIncrease(version?.base ?? null, version?.head ?? null);
+      versionFileChanged && isStrictSemverIncrease(version?.base ?? null, version?.head ?? null);
 
     if (!changelogChanged && !versionBumped) {
       errors.push(
-        `${prefix.slice(0, -1)} changed without a package.json version bump or changelog update`,
+        `${prefix.slice(0, -1)} changed without a ${versionFile} version bump or changelog update`,
       );
     }
   }
@@ -121,13 +128,20 @@ function ensureCommit(sha: string): void {
 }
 
 function readVersion(commit: string, pkg: string): string | null {
-  const result = Bun.spawnSync(["git", "show", `${commit}:packages/${pkg}/package.json`], {
+  const versionFile = VERSION_FILES[pkg as (typeof PUBLIC_PACKAGES)[number]];
+  if (!versionFile) return null;
+  const result = Bun.spawnSync(["git", "show", `${commit}:packages/${pkg}/${versionFile}`], {
     stdout: "pipe",
     stderr: "ignore",
   });
   if (result.exitCode !== 0) return null;
   try {
-    const parsed = JSON.parse(new TextDecoder().decode(result.stdout)) as { version?: unknown };
+    const source = new TextDecoder().decode(result.stdout);
+    if (versionFile === "pubspec.yaml") {
+      const match = /^version:\s*([^\s#]+)\s*(?:#.*)?$/m.exec(source);
+      return match?.[1] ?? null;
+    }
+    const parsed = JSON.parse(source) as { version?: unknown };
     return typeof parsed.version === "string" ? parsed.version : null;
   } catch {
     return null;

@@ -96,7 +96,7 @@ export function SolanaWalletProvider({
   // Build a fresh adapter list per provider mount when no wallets prop
   // was passed. Sharing a single module-level array across mounts would
   // leak connection state between providers (the previous behavior was
-  // a P2 codex finding).
+  // a cross-mount isolation defect).
   const resolvedWallets = useMemo(() => wallets ?? createDefaultSolanaWallets(), [wallets]);
 
   return (

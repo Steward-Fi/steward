@@ -238,6 +238,7 @@ let reservationReconciliationFaultForTests: "before_apply" | "after_apply" | nul
 let providerPolicyClockForTests: (() => Date) | null = null;
 let decisionReservationCrashForTests = false;
 let providerCreateAfterOptimisticReplayLookupForTests: (() => Promise<void>) | null = null;
+let providerCreateAfterBudgetReservationForTests: (() => Promise<void>) | null = null;
 
 class SimulatedDecisionReservationCrash extends Error {}
 
@@ -266,6 +267,16 @@ export function __setProviderCreateAfterOptimisticReplayLookupForTests(
   hook: (() => Promise<void>) | null,
 ): void {
   providerCreateAfterOptimisticReplayLookupForTests = hook;
+}
+
+/** Test-only barrier after the public action pipeline has reserved agent
+ * budgets while its production transaction still owns the agent/budget
+ * snapshot locks. This proves authority mutations serialize against the real
+ * admission boundary rather than a test-only copy of its private helper. */
+export function __setProviderCreateAfterBudgetReservationForTests(
+  hook: (() => Promise<void>) | null,
+): void {
+  providerCreateAfterBudgetReservationForTests = hook;
 }
 
 function persistedReservationHandles(
@@ -1262,6 +1273,7 @@ class ProviderActionService {
                 authenticatedXSummoned,
               })
             : null;
+        if (policy) await providerCreateAfterBudgetReservationForTests?.();
         cumulativeSpendReservations = policy?.cumulativeSpendReservations ?? [];
         windowedInvokeReservation = policy?.windowedInvokeReservation;
         if (

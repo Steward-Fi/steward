@@ -39,6 +39,11 @@ export interface AuditEventInput {
   requestId?: string | null;
 }
 
+export type AuditReadExecutor = Pick<DbHandle, "execute">;
+export type AuditChainVerification =
+  | { valid: true; count: number }
+  | { valid: false; brokenAt: number; limitExceeded?: boolean };
+
 /** last-observed agent trade-token expiry (read by GET /trade/token-status). */
 export interface AgentTokenStatus {
   agentId: string;
@@ -94,6 +99,16 @@ export interface StewardAppContext {
 
   // ── audit + token status (from @stwd/api services) ────────────────────────
   writeAuditEvent(ev: AuditEventInput): Promise<void>;
+  verifyAuditChain(
+    tenantId: string,
+    options: {
+      fromSeq?: number;
+      toSeq?: number;
+      requireHead?: boolean;
+      maxRows?: number;
+      executor?: AuditReadExecutor;
+    },
+  ): Promise<AuditChainVerification>;
   getAgentTokenStatus(agentId: string): Promise<AgentTokenStatus | null>;
 
   // ── redis (from @stwd/api middleware/redis) ───────────────────────────────

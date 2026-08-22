@@ -18,7 +18,6 @@ import {
   setDefaultTimeout,
   spyOn,
 } from "bun:test";
-import { readFileSync } from "node:fs";
 import { ChallengeStore } from "@stwd/auth";
 import { closeDb } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
@@ -62,13 +61,17 @@ function makeApp(): Hono {
 async function postExchange(
   app: Hono,
   body: Record<string, unknown>,
-): Promise<{ status: number; json: Record<string, unknown> }> {
+): Promise<{ status: number; json: Record<string, unknown>; headers: Headers }> {
   const res = await app.request("/auth/oauth/exchange", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
-  return { status: res.status, json: (await res.json()) as Record<string, unknown> };
+  return {
+    status: res.status,
+    json: (await res.json()) as Record<string, unknown>,
+    headers: res.headers,
+  };
 }
 
 describe("POST /auth/oauth/exchange", () => {
@@ -124,14 +127,43 @@ describe("POST /auth/oauth/exchange", () => {
     expect(json.error).toContain("response_type=token is disabled");
   });
 
-  it("does not retain token-in-query redirect branches in OAuth or email callbacks", () => {
-    const source = readFileSync(new URL("../routes/auth.ts", import.meta.url), "utf8");
+  it("requires S256 PKCE at the mounted authorize boundary", async () => {
+    process.env.APP_URL = "https://api.example.test";
+    process.env.GOOGLE_CLIENT_ID = "google-client";
+    process.env.GOOGLE_CLIENT_SECRET = "google-secret";
+    process.env.STEWARD_OAUTH_ALLOWED_REDIRECTS = REDIRECT_URI;
+    const base = `/auth/oauth/google/authorize?redirect_uri=${encodeURIComponent(REDIRECT_URI)}&response_type=code`;
 
-    expect(source).not.toContain("STEWARD_ALLOW_OAUTH_TOKEN_REDIRECTS");
-    expect(source).not.toContain("STEWARD_ALLOW_EMAIL_TOKEN_REDIRECTS");
-    expect(source).not.toContain('searchParams.set("token"');
-    expect(source).not.toContain('searchParams.set("refreshToken"');
-    expect(source).not.toContain("buildEmailAuthRedirectUrl({\n      token:");
+    const missing = await makeApp().request(base);
+    expect(missing.status).toBe(400);
+    expect(((await missing.json()) as { error: string }).error).toContain(
+      "code_challenge is required",
+    );
+
+    const plain = await makeApp().request(
+      `${base}&code_challenge=abcdefghijklmnopqrstuvwxyzABCDEFG0123456789-_&code_challenge_method=plain`,
+    );
+    expect(plain.status).toBe(400);
+    expect(((await plain.json()) as { error: string }).error).toBe(
+      "code_challenge_method must be 'S256'",
+    );
+  });
+
+  it("does not exchange a raw provider code without explicit unsafe opt-in", async () => {
+    delete process.env.STEWARD_ALLOW_UNBOUND_OAUTH_PROVIDER_CODE_EXCHANGE;
+    process.env.STEWARD_OAUTH_ALLOWED_REDIRECTS = REDIRECT_URI;
+    const providerFetch = spyOn(globalThis, "fetch");
+    const response = await makeApp().request("/auth/oauth/google/token", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ code: "raw-provider-code", redirectUri: REDIRECT_URI }),
+    });
+    expect(response.status).toBe(401);
+    expect(((await response.json()) as { error: string }).error).toContain(
+      "Unbound OAuth provider code exchange is disabled",
+    );
+    expect(providerFetch).toHaveBeenCalledTimes(0);
+    providerFetch.mockRestore();
   });
 
   it("returns the bound tokens when code + redirect_uri + tenant_id all match", async () => {
@@ -143,13 +175,16 @@ describe("POST /auth/oauth/exchange", () => {
       tenantId: TENANT_ID,
     });
 
-    const { status, json } = await postExchange(app, {
+    const { status, json, headers } = await postExchange(app, {
       code: "nonce-happy-path",
       redirect_uri: REDIRECT_URI,
       tenant_id: TENANT_ID,
     });
 
     expect(status).toBe(200);
+    expect(headers.get("Cache-Control")).toBe("no-store, max-age=0");
+    expect(headers.get("Pragma")).toBe("no-cache");
+    expect(headers.get("Expires")).toBe("0");
     expect(json.ok).toBe(true);
     expect(json.token).toBe("access-jwt");
     expect(json.refreshToken).toBe("refresh-raw");

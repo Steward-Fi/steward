@@ -3,7 +3,7 @@
  *
  * these are the OPERATOR-facing management routes (create/list/read/update/delete
  * a capability, grant/revoke, and "what may an agent use"). the agent-facing
- * invoke route is W-1c and is NOT here. mounted by the plugin's `register` behind
+ * invoke route lives in invoke.ts. These routes are mounted by `register` behind
  * the tenant gate (see index.ts), and each mutation additionally requires a
  * recent tenant-admin MFA verification - the SAME bar the core /secrets + route
  * CRUD requires, because capabilities drive live credential injection.
@@ -479,7 +479,7 @@ export function createCapabilityRoutes(ctx: StewardAppContext): Hono<{ Variables
 
 /**
  * The agent-scoped read: what capabilities an agent may USE (active, unexpired
- * grants to enabled capabilities). This is what the W-1c invoke path consults. It
+ * grants to enabled capabilities). This is what the invoke path consults. It
  * is a SEPARATE router mounted under a different prefix (/agents) - see index.ts.
  * Never returns a secret value.
  */

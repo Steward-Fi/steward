@@ -55,6 +55,7 @@
       "version": "0.4.4",
       "dependencies": {
         "@aws-sdk/client-kms": "^3.700.0",
+        "@node-saml/node-saml": "5.1.0",
         "@scure/btc-signer": "^2.2.0",
         "@stwd/adapters": "workspace:*",
         "@stwd/attestation": "workspace:*",

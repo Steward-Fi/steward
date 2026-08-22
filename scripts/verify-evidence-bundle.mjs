@@ -679,7 +679,7 @@ function verifyManifest(manifest, events, payload) {
   // the manifest references (the case's own seqs) into `caseEvents` and derive
   // ALL role/fact reasoning from that set — never from the whole segment — so an
   // unrelated case's `exec_authorized` (or any role) can neither back a fact nor
-  // satisfy the forged-completeness guard (codex P1).
+  // satisfy the forged-completeness guard.
   const bySeq = new Map();
   for (const ev of events) bySeq.set(ev.seq, ev);
   if (!Array.isArray(manifest.events)) fail("manifest.events is not an array");

@@ -6,7 +6,7 @@
  * (provider-action.ts) and `x.provider-action.v1` (x-provider-action.ts). Where
  * those two hardcode a single origin/host and a fixed set of operations, this
  * profile lets an operator DECLARE a governed HTTP operation for an arbitrary
- * public HTTPS host via config only (issue #201): allowed origin, method
+ * public HTTPS host via config only: allowed origin, method
  * allowlist, a path template with TYPED named segments, typed allowlisted query
  * params, allowlisted (never-credential) request headers, and a strict body
  * schema. The descriptor drives argument validation the same way the github

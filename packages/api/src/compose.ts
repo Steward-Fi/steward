@@ -8,12 +8,12 @@
  * `app.ts`'s `createApp()` is the LEAN CORE: trading-free, with no dependency on
  * the trading stack. a third party importing `@stwd/api` and calling `createApp()`
  * gets exactly that. THIS repo's deployed server (index.ts / worker.ts /
- * embedded.ts) can run the SAME image LEAN (core only) or FULL (core + trading)
+ * embedded.ts) can run the SAME image LEAN (core only) or FULL (core plus the
+ * configured first-party plugins)
  * by environment: `composeApp()` consults `resolveEnabledPlugins()`
  * (`plugin-config.ts`, reading `STEWARD_PLUGINS` / legacy `STEWARD_ENABLE_TRADING`)
- * and only registers the trading plugin when it is enabled. that keeps the library
- * core lean, the deploy configurable, and — in FULL mode — behavior-identical to
- * the historical hardcoded composition.
+ * and registers only the named plugins. that keeps the library
+ * core lean while keeping the deploy configurable.
  *
  * ORDERING (load-bearing — money rail)
  * ------------------------------------
@@ -98,15 +98,16 @@ function makeDeferredRouteApp(app: StewardApp): {
  * Build the fully-composed deployable Steward app: lean core + this repo's opt-in
  * plugins, with the canonical middleware/route ordering preserved.
  *
- * the trading plugin is imported with a static, bundler-discoverable specifier
- * (so the deployed Worker bundle includes it); only this deploy-only composition
- * root references `@stwd/plugin-trading`. the lean core graph in `app.ts` / the
- * library entry `lib.ts` never reference it, so a consumer importing `@stwd/api`
- * stays trading-free.
+ * enabled first-party plugins are imported with static, bundler-discoverable
+ * specifiers so the deployed Worker bundle includes them. only this deploy-only
+ * composition root references those plugin packages; the lean core graph in
+ * `app.ts` / the library entry `lib.ts` never does, so a consumer importing
+ * `@stwd/api` stays free of their transitive dependencies.
  */
 export async function composeApp(): Promise<Hono<{ Variables: AppVariables }>> {
   // which opt-in plugins this deploy enables (env-driven). LEAN = empty set
-  // (core only); FULL = { "trading" }. resolveEnabledPlugins fails closed on an
+  // (core only); FULL = the configured subset of trading, capabilities, and wxmr.
+  // resolveEnabledPlugins fails closed on an
   // unknown plugin name, so a typo'd STEWARD_PLUGINS aborts boot here rather than
   // silently shipping a wrong feature profile. composeApp reads process.env
   // directly (prod signature unchanged); the resolver itself is env-injectable
@@ -128,9 +129,8 @@ export async function composeApp(): Promise<Hono<{ Variables: AppVariables }>> {
     return app;
   }
 
-  // FULL MODE: register this deploy's enabled opt-in plugins. behavior-identical
-  // to the historical hardcoded path for trading — same registration, same
-  // ordering, same migrations — plus any other enabled plugin (capabilities).
+  // FULL MODE: register this deploy's enabled opt-in plugins with the same
+  // middleware, route, and migration ordering contract for every plugin.
   //
   // 2) plugin auth-middleware phase + buffered routes. each plugin's auth mw lands
   //    now, before idempotency; its routes are buffered for after.
@@ -199,7 +199,7 @@ export async function composeApp(): Promise<Hono<{ Variables: AppVariables }>> {
 }
 
 /**
- * Apply this deploy's opt-in plugins' OWN migrations (Phase 2c), into per-plugin
+ * Apply this deploy's opt-in plugins' OWN migrations into per-plugin
  * NAMESPACED bookkeeping tables (`drizzle.__drizzle_migrations_plugin_<id>`),
  * totally isolated from the core's `drizzle.__drizzle_migrations` journal.
  *
