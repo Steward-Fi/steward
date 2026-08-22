@@ -924,9 +924,11 @@ export class StewardAuth {
     let authResponse: unknown;
     try {
       // Server-provided options; types are validated by the WebAuthn browser library.
-      authResponse = await lib.startAuthentication(
-        options as Parameters<SimpleWebAuthnBrowser["startAuthentication"]>[0],
-      );
+      authResponse = await lib.startAuthentication({
+        optionsJSON: options as Parameters<
+          SimpleWebAuthnBrowser["startAuthentication"]
+        >[0]["optionsJSON"],
+      });
     } catch (err) {
       throw new StewardApiError(
         `WebAuthn authentication cancelled or failed: ${err instanceof Error ? err.message : String(err)}`,
@@ -985,9 +987,11 @@ export class StewardAuth {
     let regResponse: unknown;
     try {
       // Server-provided options; types are validated by the WebAuthn browser library.
-      regResponse = await lib.startRegistration(
-        regOptsRes.data as Parameters<SimpleWebAuthnBrowser["startRegistration"]>[0],
-      );
+      regResponse = await lib.startRegistration({
+        optionsJSON: regOptsRes.data as unknown as Parameters<
+          SimpleWebAuthnBrowser["startRegistration"]
+        >[0]["optionsJSON"],
+      });
     } catch (err) {
       throw new StewardApiError(
         `WebAuthn registration cancelled or failed: ${err instanceof Error ? err.message : String(err)}`,
@@ -1736,9 +1740,11 @@ export class StewardAuth {
 
     let authResponse: unknown;
     try {
-      authResponse = await browserLib.startAuthentication(
-        optionsRes.data as Parameters<SimpleWebAuthnBrowser["startAuthentication"]>[0],
-      );
+      authResponse = await browserLib.startAuthentication({
+        optionsJSON: optionsRes.data as unknown as Parameters<
+          SimpleWebAuthnBrowser["startAuthentication"]
+        >[0]["optionsJSON"],
+      });
     } catch (err) {
       throw new StewardApiError(
         `WebAuthn authentication cancelled or failed: ${err instanceof Error ? err.message : String(err)}`,
