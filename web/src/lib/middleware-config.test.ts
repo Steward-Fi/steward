@@ -70,6 +70,7 @@ describe("middleware security contract", () => {
       expect(csp).toContain("upgrade-insecure-requests");
 
       const nonce = csp?.match(/'nonce-([^']+)'/)?.[1];
+      if (!nonce) throw new Error("middleware CSP did not contain a nonce");
       expect(nonce).toMatch(/^[A-Za-z0-9+/]{22}==$/);
       expect(nonce).not.toBe("attacker-controlled");
       expect(response.headers.get("x-middleware-request-x-nonce")).toBe(nonce);

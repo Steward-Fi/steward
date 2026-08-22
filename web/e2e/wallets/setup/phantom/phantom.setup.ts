@@ -11,10 +11,11 @@
 
 import { defineWalletSetup } from "@synthetixio/synpress";
 import { Phantom } from "@synthetixio/synpress/playwright";
+import { PHANTOM_CACHE_ID } from "../../cache-contract";
 
 export const PHANTOM_SEED = process.env.E2E_PHANTOM_SEED_PHRASE?.trim() ?? "";
 export const PHANTOM_PASSWORD = process.env.E2E_PHANTOM_PASSWORD?.trim() ?? "";
-export const PHANTOM_CACHE_ID = "steward-phantom-siws-v5";
+export { PHANTOM_CACHE_ID };
 
 const phantomSetup = defineWalletSetup(PHANTOM_PASSWORD, async (context, walletPage) => {
   const phantom = new Phantom(context, walletPage, PHANTOM_PASSWORD);
