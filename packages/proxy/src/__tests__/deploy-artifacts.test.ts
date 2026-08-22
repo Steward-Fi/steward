@@ -26,7 +26,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, posix } from "node:path";
 
 const DEPLOY_DIR = join(import.meta.dir, "..", "..", "..", "..", "deploy");
 const ROOT_DIR = join(DEPLOY_DIR, "..");
@@ -42,6 +42,18 @@ describe("published Docker runtime network contract", () => {
 
     expect(runtime).toContain("ENV STEWARD_BIND_HOST=0.0.0.0");
     expect(runtime).toContain('CMD ["bun", "packages/api/src/index.ts"]');
+  });
+
+  test("workspace links resolve inside /app instead of escaping the image root", () => {
+    const dockerfile = readFileSync(join(ROOT_DIR, "Dockerfile"), "utf8");
+    const links = [
+      ...dockerfile.matchAll(/ln -sf (\.\.\/[^\s]+)\s+node_modules\/@stwd\/([^\s;&]+)/g),
+    ];
+
+    expect(links.length).toBeGreaterThan(0);
+    for (const [, target, packageName] of links) {
+      expect(posix.resolve("/app/node_modules/@stwd", target)).toBe(`/app/packages/${packageName}`);
+    }
   });
 });
 

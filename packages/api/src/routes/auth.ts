@@ -11188,16 +11188,17 @@ async function getAllowedOAuthRedirectEntries(
   const resolvedTenantId = explicitTenantId || defaultAuthTenantId();
   const entries = new Set<string>();
 
+  const clientIdSupplied = clientId !== undefined;
   const normalizedClientId = normalizePublicClientId(clientId);
   const appClientRows = await authAppClientSubjects(resolvedTenantId);
 
-  if (normalizedClientId) {
+  if (clientIdSupplied) {
+    if (!normalizedClientId) return [];
     const client = appClientRows.find((candidate) => candidate.id === normalizedClientId);
-    if (client) {
-      for (const entry of client.allowed_redirect_urls ?? []) {
-        const trimmed = entry.trim();
-        if (trimmed && trimmed !== "*") entries.add(trimmed);
-      }
+    if (!client) return [];
+    for (const entry of client.allowed_redirect_urls ?? []) {
+      const trimmed = entry.trim();
+      if (trimmed && trimmed !== "*") entries.add(trimmed);
     }
     return [...entries];
   }
@@ -11217,7 +11218,12 @@ async function getAllowedOAuthRedirectEntries(
     }
   }
 
-  if (!explicitTenantId) {
+  // Deployment redirects are compatibility authority only when the caller did
+  // not name a tenant, or when an explicit tenant has no redirect authority
+  // records at all. Present-but-empty tenant/client configuration is an
+  // intentional deny and must never inherit the deployment-wide allowlist.
+  const hasTenantRedirectAuthority = config !== null || appClientRows.length > 0;
+  if (!explicitTenantId || !hasTenantRedirectAuthority) {
     for (const entry of parseOAuthRedirectAllowlistEnv()) {
       entries.add(entry);
     }
