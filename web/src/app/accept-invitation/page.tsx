@@ -4,7 +4,7 @@ import { useAuth } from "@stwd/react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import type React from "react";
-import { Suspense, useState } from "react";
+import { Suspense, useEffect, useRef, useState } from "react";
 import { API_URL } from "@/lib/api";
 
 type AcceptState = "idle" | "accepting" | "accepted" | "error";
@@ -28,7 +28,8 @@ async function acceptInvitation(tenantId: string, token: string, sessionToken: s
     error?: string;
   };
   if (!response.ok || !body.ok) {
-    throw new Error(body.error || `Request failed with ${response.status}`);
+    // Do not reflect server/provider details into this public invitation page.
+    throw new Error("The invitation could not be accepted. Please verify the link and try again.");
   }
   return body.data;
 }
@@ -38,19 +39,48 @@ function AcceptInvitationInner() {
   const params = useSearchParams();
   const tenantId = params?.get("tenantId") ?? "";
   const token = params?.get("token") ?? "";
+  const invitationKey = `${tenantId}\u0000${token}`;
   const [state, setState] = useState<AcceptState>("idle");
   const [message, setMessage] = useState<string | null>(null);
+  const [activeInvitationKey, setActiveInvitationKey] = useState(invitationKey);
+  const acceptingRef = useRef(false);
+  const requestGeneration = useRef(0);
+
+  // App-router query navigation can retain this component instance. Reset the
+  // confirmation and invalidate any old completion before exposing controls
+  // for a different invitation.
+  useEffect(() => {
+    if (activeInvitationKey === invitationKey) return;
+    requestGeneration.current += 1;
+    acceptingRef.current = false;
+    setState("idle");
+    setMessage(null);
+    setActiveInvitationKey(invitationKey);
+  }, [activeInvitationKey, invitationKey]);
 
   // SEC-075: never auto-accept on page load. Joining a tenant is a
   // security-relevant account change and must require an explicit click from
   // the signed-in user — merely opening a crafted link must not fire the POST.
   function handleAccept() {
     const sessionToken = auth.getToken();
-    if (!tenantId || !token || !sessionToken || state !== "idle") return;
+    if (
+      !tenantId ||
+      !token ||
+      !sessionToken ||
+      activeInvitationKey !== invitationKey ||
+      state !== "idle" ||
+      acceptingRef.current
+    )
+      return;
 
+    // Ref fencing closes the same-event-loop double-click window before React
+    // commits the accepting state and removes the button.
+    acceptingRef.current = true;
+    const generation = requestGeneration.current;
     setState("accepting");
     acceptInvitation(tenantId, token, sessionToken)
       .then((result) => {
+        if (requestGeneration.current !== generation) return;
         setState("accepted");
         setMessage(
           result?.alreadyMember
@@ -59,6 +89,8 @@ function AcceptInvitationInner() {
         );
       })
       .catch((error) => {
+        if (requestGeneration.current !== generation) return;
+        acceptingRef.current = false;
         setState("error");
         setMessage(error instanceof Error ? error.message : "Failed to accept invitation");
       });
@@ -66,7 +98,8 @@ function AcceptInvitationInner() {
 
   const missingParams = !tenantId || !token;
   const needsLogin = !missingParams && !auth.getToken();
-  const showConfirm = !missingParams && !needsLogin && state === "idle";
+  const showConfirm =
+    activeInvitationKey === invitationKey && !missingParams && !needsLogin && state === "idle";
 
   return (
     <div className="min-h-screen bg-bg flex items-center justify-center px-4">
