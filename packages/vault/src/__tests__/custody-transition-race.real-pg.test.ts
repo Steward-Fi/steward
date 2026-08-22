@@ -37,6 +37,7 @@ const restoreFirstAgentId = `custody-race-restore-first-${suffix}`;
 const externalBeforeImportAgentId = `race-external-first-${suffix}`;
 const importBeforeExternalAgentId = `race-local-first-${suffix}`;
 const typedDataRotationAgentId = `typed-data-rotation-${suffix}`;
+const transactionRotationAgentId = `transaction-rotation-${suffix}`;
 const blocker = databaseUrl ? createPostgresClient(databaseUrl) : null;
 const inspector = databaseUrl ? createPostgresClient(databaseUrl) : null;
 
@@ -503,6 +504,84 @@ suite("custody transitions across real PostgreSQL connections", () => {
     if (result.status === "rejected") {
       expect(String(result.reason)).toContain(
         "Typed-data signer no longer matches the authorized wallet",
+      );
+    }
+  });
+
+  test("a queued transaction signature cannot use a concurrently rotated venue key", async () => {
+    if (!blocker || !inspector) throw new Error("real PostgreSQL clients are unavailable");
+    const venue = "hyperliquid";
+    const vault = new Vault({ masterPassword: MASTER_PASSWORD });
+    await vault.createAgent(tenantId, transactionRotationAgentId, "Transaction Rotation Agent");
+    const original = await vault.provisionVenueWallet({
+      tenantId,
+      agentId: transactionRotationAgentId,
+      venue,
+      chainFamily: "evm",
+      approvedAddresses: [],
+    });
+
+    const replacementPrivateKey = generatePrivateKey();
+    const replacementAddress = privateKeyToAccount(replacementPrivateKey).address;
+    const replacement = new KeyStore(MASTER_PASSWORD).encrypt(replacementPrivateKey, {
+      tenantId,
+      agentId: transactionRotationAgentId,
+      chainFamily: "evm",
+      venue,
+    });
+    const lockKey = JSON.stringify([
+      "vault-custody-v1",
+      tenantId,
+      transactionRotationAgentId,
+      "evm",
+      venue,
+    ]);
+    let signingResult!: Promise<
+      { status: "fulfilled"; value: string } | { status: "rejected"; reason: unknown }
+    >;
+
+    await blocker.begin(async (tx) => {
+      await tx`select pg_advisory_xact_lock(hashtextextended(${lockKey}, 0))`;
+      signingResult = vault
+        .signTransaction({
+          tenantId,
+          agentId: transactionRotationAgentId,
+          venue,
+          walletAddress: original.address,
+          to: "0x1111111111111111111111111111111111111111",
+          value: "1",
+          chainId: 8453,
+          nonce: 0,
+          gasLimit: "21000",
+          broadcast: false,
+        })
+        .then(
+          (value) => ({ status: "fulfilled" as const, value }),
+          (reason: unknown) => ({ status: "rejected" as const, reason }),
+        );
+      await waitForBlockedAdvisoryConnections(lockKey, 1);
+      await tx`
+        update encrypted_chain_keys
+        set ciphertext = ${replacement.ciphertext}, iv = ${replacement.iv},
+            tag = ${replacement.tag}, salt = ${replacement.salt}
+        where agent_id = ${transactionRotationAgentId}
+          and chain_family = 'evm'
+          and venue = ${venue}
+      `;
+      await tx`
+        update agent_wallets
+        set address = ${replacementAddress}
+        where agent_id = ${transactionRotationAgentId}
+          and chain_family = 'evm'
+          and venue = ${venue}
+      `;
+    });
+
+    const result = await signingResult;
+    expect(result.status).toBe("rejected");
+    if (result.status === "rejected") {
+      expect(String(result.reason)).toContain(
+        "Transaction signer no longer matches the authorized wallet",
       );
     }
   });
