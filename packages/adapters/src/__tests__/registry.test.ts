@@ -36,6 +36,33 @@ function namedAdapter(category: AdapterCategory, provider: string): BaseAdapter 
 }
 
 describe("AdapterRegistry resolution", () => {
+  test("invokes provider factories under the current request and never retains their adapters", () => {
+    const reg = new AdapterRegistry();
+    let generation = 0;
+    reg.registerFactory("swap", "request-swap", () => ({
+      category: "swap",
+      provider: `request-swap-${++generation}`,
+      enabled: true,
+      async getQuote() {
+        throw new Error("not implemented in test");
+      },
+      async buildSwap() {
+        throw new Error("not implemented in test");
+      },
+    }));
+
+    const resolve = () =>
+      withRuntimeEnvironment(
+        {
+          STEWARD_RUNTIME: "workers",
+          NODE_ENV: "production",
+          STEWARD_SWAP_ADAPTER: "request-swap",
+        },
+        () => reg.swap(),
+      );
+    expect(resolve().provider).toBe("request-swap-1");
+    expect(resolve().provider).toBe("request-swap-2");
+  });
   test("DEV (no NODE_ENV): returns working mocks", async () => {
     const reg = new AdapterRegistry({ env: {} });
     expect(reg.swap().provider).toBe("mock");

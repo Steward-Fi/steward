@@ -1,5 +1,5 @@
 /**
- * AdapterRegistry — keeps durable provider implementations while resolving
+ * AdapterRegistry — keeps durable stateless providers/factories while resolving
  * selection policy from the current request's immutable runtime environment.
  *
  * Resolution order per category (e.g. "swap"):
@@ -51,6 +51,10 @@ type CategoryToAdapter = {
   spark: SparkAdapter;
   exchange: ExchangeEmbedAdapter;
 };
+
+type RegisteredProvider<C extends AdapterCategory = AdapterCategory> =
+  | { readonly kind: "instance"; readonly adapter: CategoryToAdapter[C] }
+  | { readonly kind: "factory"; readonly createAdapter: () => CategoryToAdapter[C] };
 
 const ALL_CATEGORIES: readonly AdapterCategory[] = [
   "swap",
@@ -114,11 +118,11 @@ function makeMockAdapter<C extends AdapterCategory>(category: C): CategoryToAdap
 
 export class AdapterRegistry {
   private readonly env: Readonly<Record<string, string | undefined>> | null;
-  // category -> (providerName -> adapter) for explicitly registered real adapters
-  private readonly registered = new Map<AdapterCategory, Map<string, BaseAdapter>>();
-  // Implementations are durable; only selection/policy is request-scoped. Stable
-  // mock instances preserve their in-memory development behavior without ever
-  // caching the authority decision that made one reachable.
+  // category -> (providerName -> stateless instance or request-authority factory)
+  private readonly registered = new Map<AdapterCategory, Map<string, RegisteredProvider>>();
+  // Configuration-free implementations may be durable; binding-dependent ones
+  // are factories. Stable mock instances preserve their in-memory development
+  // behavior without caching the authority decision that made one reachable.
   private readonly mockAdapters = new Map<AdapterCategory, BaseAdapter>();
   private readonly disabledAdapters = new Map<AdapterCategory, BaseAdapter>();
 
@@ -176,7 +180,27 @@ export class AdapterRegistry {
       byName = new Map();
       this.registered.set(category, byName);
     }
-    byName.set(providerName, adapter);
+    byName.set(providerName, { kind: "instance", adapter } as RegisteredProvider);
+  }
+
+  /**
+   * Register a stateless provider factory. The registry invokes it only after
+   * the current request selects this provider and never retains the returned
+   * adapter. Binding-dependent integrations MUST use this seam so a reused
+   * Worker isolate cannot carry an endpoint or credential into another binding
+   * generation.
+   */
+  registerFactory<C extends AdapterCategory>(
+    category: C,
+    providerName: string,
+    createAdapter: () => CategoryToAdapter[C],
+  ): void {
+    let byName = this.registered.get(category);
+    if (!byName) {
+      byName = new Map();
+      this.registered.set(category, byName);
+    }
+    byName.set(providerName, { kind: "factory", createAdapter } as RegisteredProvider);
   }
 
   /**
@@ -189,6 +213,12 @@ export class AdapterRegistry {
     return this.registered.get(category)?.has(providerName) ?? false;
   }
 
+  private instantiate<C extends AdapterCategory>(
+    provider: RegisteredProvider<C>,
+  ): CategoryToAdapter[C] {
+    return provider.kind === "factory" ? provider.createAdapter() : provider.adapter;
+  }
+
   private resolve<C extends AdapterCategory>(category: C): CategoryToAdapter[C] {
     // Never cache this authority decision: the same Worker isolate can serve a
     // rotated binding set, and overlapping requests retain distinct ALS-backed
@@ -198,7 +228,7 @@ export class AdapterRegistry {
 
     // 1. Explicit env selection of a registered provider.
     if (configured && configured !== "mock" && byName?.has(configured)) {
-      return byName.get(configured) as CategoryToAdapter[C];
+      return this.instantiate(byName.get(configured) as RegisteredProvider<C>);
     }
 
     // 2. Env explicitly asks for "mock".
@@ -212,8 +242,8 @@ export class AdapterRegistry {
     // 3. Bun development convenience: a sole registered provider needs no env
     // disambiguation. Production requires a current, explicit binding.
     if (!configured && !this.isProduction() && byName && byName.size === 1) {
-      const [adapter] = byName.values();
-      return adapter as CategoryToAdapter[C];
+      const [provider] = byName.values();
+      return this.instantiate(provider as RegisteredProvider<C>);
     }
 
     // 4. Env names an unknown provider -> fail closed everywhere (never silently
