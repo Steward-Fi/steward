@@ -310,6 +310,29 @@ describeWithPostgres("personal lifecycle production upgrade topology", () => {
       insertTokenBoundary: false,
       deleteUser: false,
     });
+    const [platformMetadataPrivileges] = await db<
+      {
+        updateMetadata: boolean;
+        updateTimestamp: boolean;
+        updateEmail: boolean;
+        updateDeactivated: boolean;
+        updateTokenBoundary: boolean;
+      }[]
+    >`
+      SELECT
+        has_column_privilege(${platformRole}, 'public.users', 'custom_metadata', 'UPDATE') AS "updateMetadata",
+        has_column_privilege(${platformRole}, 'public.users', 'updated_at', 'UPDATE') AS "updateTimestamp",
+        has_column_privilege(${platformRole}, 'public.users', 'email', 'UPDATE') AS "updateEmail",
+        has_column_privilege(${platformRole}, 'public.users', 'deactivated_at', 'UPDATE') AS "updateDeactivated",
+        has_column_privilege(${platformRole}, 'public.users', 'tokens_revoked_before', 'UPDATE') AS "updateTokenBoundary"
+    `;
+    expect(platformMetadataPrivileges).toEqual({
+      updateMetadata: true,
+      updateTimestamp: true,
+      updateEmail: false,
+      updateDeactivated: false,
+      updateTokenBoundary: false,
+    });
 
     const [restricted] = await migrator<{ rolsuper: boolean; rolbypassrls: boolean }[]>`
       SELECT rolsuper, rolbypassrls FROM pg_roles WHERE rolname = current_user
@@ -449,7 +472,7 @@ describeWithPostgres("personal lifecycle production upgrade topology", () => {
       },
     );
     expect(lockOrderEvidence).toContain(
-      "mounted tenant-before-user membership/lifecycle lock order passed",
+      "mounted user-before-tenant membership/lifecycle lock order passed",
     );
     expect(await db`SELECT id FROM tenants WHERE id = ${mountedPersonalTenantId}`).toHaveLength(0);
 

@@ -76,12 +76,11 @@ describe("core migration ledger integrity", () => {
     expect(source).toContain("policy.polpermissive = expected.policy_permissive");
     expect(source).toContain("policy.polroles = ARRAY[0::oid]");
     expect(source).toContain("schema does not match its applied migration prefix");
-  });
 
-  test("preserves the shipped capabilities tenant-policy identity", () => {
-    const pluginMigrations = new URL("../../../plugin-capabilities/drizzle/", import.meta.url);
-    const shippedPolicy = readFileSync(new URL("0003_tenant_rls_policies.sql", pluginMigrations));
-    expect(createHash("sha256").update(shippedPolicy).digest("hex")).toBe(
+    const shipped0003 = readFileSync(
+      new URL("../../../plugin-capabilities/drizzle/0003_tenant_rls_policies.sql", import.meta.url),
+    );
+    expect(createHash("sha256").update(shipped0003).digest("hex")).toBe(
       "0d45006776d6c932d36eeec87811b98b24e3d1fb388af6aafd8109b70ae1bc2b",
     );
     const shippedInheritance = readFileSync(
