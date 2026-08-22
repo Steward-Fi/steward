@@ -138,6 +138,16 @@ describe("#101 deploy/docker-compose.yml proxy production env", () => {
       expect(/^\s{2}redis:\s*$/m.test(compose)).toBe(true);
     }
   });
+
+  test("production API and proxy both wire the private Redis transport explicitly", () => {
+    const apiStart = compose.indexOf("  steward:\n");
+    const proxyStart = compose.indexOf("  steward-proxy:\n");
+    const api = compose.slice(apiStart, proxyStart);
+    expect(api).toContain('REDIS_URL: "redis://redis:6379"');
+    expect(api).toContain('STEWARD_ALLOW_INSECURE_REDIS: "true"');
+    expect(proxy).toContain('REDIS_URL: "redis://redis:6379"');
+    expect(proxy).toContain('STEWARD_ALLOW_INSECURE_REDIS: "true"');
+  });
 });
 
 describe("#101 deploy/DEPLOYMENT.md docs reconciled with fail-closed code", () => {
