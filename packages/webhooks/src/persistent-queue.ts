@@ -113,7 +113,24 @@ export class PersistentQueue {
           FOR UPDATE SKIP LOCKED
           LIMIT ${this.batchSize}
         )
-        RETURNING *
+        RETURNING
+          "id",
+          "tenant_id" AS "tenantId",
+          "webhook_config_id" AS "webhookConfigId",
+          "agent_id" AS "agentId",
+          "event_type" AS "eventType",
+          "replayed_from_delivery_id" AS "replayedFromDeliveryId",
+          "payload",
+          "url",
+          "secret",
+          "events",
+          "status",
+          "attempts",
+          "max_attempts" AS "maxAttempts",
+          "next_retry_at" AS "nextRetryAt",
+          "last_error" AS "lastError",
+          "created_at" AS "createdAt",
+          "delivered_at" AS "deliveredAt"
       `),
     )) as unknown;
     const claimedRows =
@@ -244,8 +261,9 @@ export class PersistentQueue {
         continue;
       }
 
-      // dispatch() mutates `event` with a stable deliveryId + signedAt; persist it
-      // so retries reuse the same id/timestamp/signature instead of re-signing fresh.
+      // dispatch() mutates `event` with a stable deliveryId + original signedAt;
+      // persist both so retries retain delivery identity while each attempt gets
+      // a fresh X-Steward-Sent-At and signature.
       const persistedPayload = event as unknown as Record<string, unknown>;
 
       if (result.success) {

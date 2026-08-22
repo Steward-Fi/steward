@@ -2,9 +2,9 @@ import { describe, expect, it, mock } from "bun:test";
 import type { WebhookEvent } from "@stwd/shared";
 
 // PersistentQueue talks to the DB through @stwd/db + drizzle-orm; mock both so
-// the queue loop can be exercised without a live database. No other test file
-// in this package imports either module, so the process-wide module mock is
-// contained.
+// poison-pill isolation remains runnable without a live database. Run this
+// file in its own Bun isolate so its process-wide module mocks cannot replace
+// the real-PostgreSQL authority suite's database module.
 const webhookConfigRow = { id: "cfg-1", url: "https://receiver.example.com/hook", events: [] };
 const updateSets: Record<string, unknown>[] = [];
 
