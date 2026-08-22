@@ -282,6 +282,7 @@ describe("dispatchWebhook", () => {
       {
         STEWARD_ALLOW_INSECURE_WEBHOOK_URLS: "true",
         STEWARD_ALLOW_PRIVATE_WEBHOOK_NETWORKS: "true",
+        STEWARD_MASTER_PASSWORD: "webhook-dispatch-test-master-password",
       },
       () =>
         dispatchWebhookDurably(
