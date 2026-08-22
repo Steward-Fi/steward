@@ -59,6 +59,8 @@ export interface EmailAuthConfig {
   ) => RenderedMagicLinkTemplate;
   /** Template ID to render for outgoing magic-link emails. */
   templateId?: string;
+  /** Display brand used by the built-in magic-link and OTP templates. */
+  brandName?: string;
   /** Override the rendered subject line. */
   subjectOverride?: string;
   /** Optional reply-to address to pass through to the provider. */
@@ -451,6 +453,7 @@ export class EmailAuth {
   private from: string;
   private replyTo?: string;
   private templateId?: string;
+  private brandName?: string;
   private subjectOverride?: string;
   private codeVerifierSecret: string;
   private templateRenderer: (
@@ -486,6 +489,7 @@ export class EmailAuth {
     this.tokenStore = config.tokenStore ?? new TokenStore();
     this.replyTo = config.replyTo;
     this.templateId = config.templateId;
+    this.brandName = config.brandName?.trim() || undefined;
     this.subjectOverride = config.subjectOverride;
     const configuredCodeSecret =
       config.codeVerifierSecret?.trim() ||
@@ -730,7 +734,7 @@ export class EmailAuth {
       email,
       code,
       expiresInMinutes: Math.floor(ttlMs / (60 * 1000)),
-      tenantName: undefined,
+      tenantName: this.brandName,
     });
     const subject = this.subjectOverride || rendered.subject;
     const body = rendered.text;
@@ -897,7 +901,7 @@ export class EmailAuth {
     }
 
     const minutes = Math.floor(this.tokenTtlMs / (60 * 1000));
-    const brand = context.tenantName || "Steward";
+    const brand = context.tenantName || this.brandName || "Steward";
     const rendered = this.otpTemplateRenderer(this.templateId, {
       email,
       code,
