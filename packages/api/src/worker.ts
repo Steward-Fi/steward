@@ -366,6 +366,12 @@ function validateWorkerSecurityEnv(): void {
   validateJwtSecretEnv();
 }
 
+export function assertWorkerRedisReady(redisOk: boolean): void {
+  if (!redisOk) {
+    throw new Error("Durable Redis is required on Workers");
+  }
+}
+
 async function ensureWorkerInit(env: Env): Promise<void> {
   if (workerInit) return workerInit;
   workerInit = (async () => {
@@ -383,6 +389,7 @@ async function ensureWorkerInit(env: Env): Promise<void> {
     }
     await assertRlsDeploymentSafety(getDb(), { expectedRole });
     const redisOk = await initRedis(env);
+    assertWorkerRedisReady(redisOk);
     // Auth stores (passkey challenges, magic-link tokens, SIWE/SIWS nonces)
     // must be initialized too — without this they stay on the lazy memory
     // backend and one-time state is lost across isolates / cold starts.
@@ -422,11 +429,6 @@ async function ensureWorkerInit(env: Env): Promise<void> {
     if (importSession === "memory") {
       console.warn(
         "[steward:workers] encrypted import sessions are using memory storage; configure Redis for durable one-time import sessions across isolates",
-      );
-    }
-    if (!redisOk) {
-      console.warn(
-        "[steward:workers] Redis not initialized — passkey/magic-link/SIWE flows will use in-memory backend per isolate",
       );
     }
   })();
@@ -470,7 +472,7 @@ export default {
             // Redis authority is request-generation scoped. Rebind before every
             // invocation so rotated/removed bindings cannot inherit the first
             // isolate request's client through workerInit.
-            await initRedis(env);
+            assertWorkerRedisReady(await initRedis(env));
             await ensureWorkerInit(env);
             const app = await getComposedApp();
             return app.fetch(request, env, ctx as never);
@@ -490,7 +492,7 @@ export default {
         hydrateProcessEnv(env);
         validateWorkerSecurityEnv();
         const scheduledWork = withWorkerRequestDatabase(env, async () => {
-          await initRedis(env);
+          assertWorkerRedisReady(await initRedis(env));
           await ensureWorkerInit(env);
         }).then(() =>
           Promise.all([
