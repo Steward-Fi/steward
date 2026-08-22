@@ -1,9 +1,11 @@
-import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it, spyOn } from "bun:test";
+import { revocationStore } from "@stwd/auth";
 import {
   __resetAuditHmacKeyCacheForTests,
   auditChainHeads,
   auditEvents,
   createDb,
+  tenantInvitations,
   tenants,
   users,
   userTenants,
@@ -26,7 +28,10 @@ realPostgresDescribe("tenant membership audit atomicity with real PostgreSQL", (
   const triggerName = `fail_membership_audit_${suffix}`;
   let admin: ReturnType<typeof createDb>;
   let app: Hono;
-  let createSessionToken: typeof import("../routes/auth").createSessionToken;
+  const revokeUserTokens =
+    databaseUrl && !process.env.STEWARD_PGLITE_MEMORY
+      ? spyOn(revocationStore, "revokeUserTokens").mockResolvedValue(0)
+      : null;
   const previousJwtSecret = process.env.STEWARD_JWT_SECRET;
   const previousMasterPassword = process.env.STEWARD_MASTER_PASSWORD;
   const previousAuditKey = process.env.STEWARD_AUDIT_HMAC_KEY;
@@ -59,7 +64,6 @@ realPostgresDescribe("tenant membership audit atomicity with real PostgreSQL", (
       { userId: ownerB, tenantId, role: "owner" },
       { userId: member, tenantId, role: "member" },
     ]);
-    ({ createSessionToken } = await import("../routes/auth"));
     const { userRoutes } = await import("../routes/user");
     const { platformRoutes } = await import("../routes/platform");
     app = new Hono();
@@ -70,10 +74,12 @@ realPostgresDescribe("tenant membership audit atomicity with real PostgreSQL", (
   });
 
   afterAll(async () => {
+    revokeUserTokens?.mockRestore();
     await admin.client.unsafe(`drop trigger if exists "${triggerName}" on audit_events`);
     await admin.client.unsafe(`drop function if exists "${triggerFunction}"()`);
     await admin.db.delete(auditEvents).where(eq(auditEvents.tenantId, tenantId));
     await admin.db.delete(auditChainHeads).where(eq(auditChainHeads.tenantId, tenantId));
+    await admin.db.delete(tenantInvitations).where(eq(tenantInvitations.tenantId, tenantId));
     await admin.db.delete(userTenants).where(eq(userTenants.tenantId, tenantId));
     await admin.db.delete(tenants).where(eq(tenants.id, tenantId));
     await admin.db.delete(users).where(inArray(users.id, [ownerA, ownerB, member]));
@@ -91,17 +97,9 @@ realPostgresDescribe("tenant membership audit atomicity with real PostgreSQL", (
     __resetAuditHmacKeyCacheForTests();
   });
 
-  async function tokenFor(userId: string): Promise<string> {
-    return createSessionToken("0x0000000000000000000000000000000000000000", tenantId, {
-      userId,
-      tenantId,
-      mfaVerifiedAt: Date.now(),
-      mfaMethod: "totp",
-    });
-  }
-
   it("allows only one concurrent owner demotion and preserves exactly one owner", async () => {
-    const responses = await Promise.all([
+    const locker = await holdTenantLifecycleLock(admin, tenantId);
+    const pendingResponses = Promise.all([
       app.request(`/platform/tenants/${tenantId}/members/${ownerB}`, {
         method: "PATCH",
         headers: {
@@ -119,6 +117,10 @@ realPostgresDescribe("tenant membership audit atomicity with real PostgreSQL", (
         body: JSON.stringify({ role: "member" }),
       }),
     ]);
+    await waitForAdvisoryWaiters(admin, 2);
+    await locker`commit`;
+    locker.release();
+    const responses = await pendingResponses;
     expect(responses.map((response) => response.status).sort()).toEqual([200, 409]);
     const owners = await admin.db
       .select({ userId: userTenants.userId })
@@ -137,7 +139,50 @@ realPostgresDescribe("tenant membership audit atomicity with real PostgreSQL", (
     expect(completions).toHaveLength(1);
   });
 
+  it("serializes concurrent invitation replacement and leaves one audited pending token", async () => {
+    const email = `invite-race-${suffix}@example.test`;
+    const locker = await holdTenantLifecycleLock(admin, tenantId);
+    const createInvitation = () =>
+      app.request(`/platform/tenants/${tenantId}/invitations`, {
+        method: "POST",
+        headers: {
+          "X-Steward-Platform-Key": process.env.STEWARD_PLATFORM_KEYS!,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ email, role: "member" }),
+      });
+    const pendingResponses = Promise.all([createInvitation(), createInvitation()]);
+    await waitForAdvisoryWaiters(admin, 2);
+    await locker`commit`;
+    locker.release();
+
+    const responses = await pendingResponses;
+    expect(responses.map((response) => response.status)).toEqual([201, 201]);
+    const pending = await admin.db
+      .select({ id: tenantInvitations.id })
+      .from(tenantInvitations)
+      .where(
+        and(
+          eq(tenantInvitations.tenantId, tenantId),
+          eq(tenantInvitations.email, email),
+          eq(tenantInvitations.status, "pending"),
+        ),
+      );
+    expect(pending).toHaveLength(1);
+    const completions = await admin.db
+      .select({ id: auditEvents.id })
+      .from(auditEvents)
+      .where(
+        and(
+          eq(auditEvents.tenantId, tenantId),
+          eq(auditEvents.action, "tenant.invitation.create"),
+        ),
+      );
+    expect(completions).toHaveLength(2);
+  });
+
   it("rolls back the role update when the required completion audit faults", async () => {
+    revokeUserTokens?.mockClear();
     await admin.client.unsafe(`
       create function "${triggerFunction}"() returns trigger language plpgsql as $$
       begin
@@ -153,17 +198,13 @@ realPostgresDescribe("tenant membership audit atomicity with real PostgreSQL", (
       before insert on audit_events
       for each row execute function "${triggerFunction}"()
     `);
-    const [owner] = await admin.db
-      .select({ userId: userTenants.userId })
-      .from(userTenants)
-      .where(and(eq(userTenants.tenantId, tenantId), eq(userTenants.role, "owner")));
-    const response = await app.request(`/user/me/tenants/${tenantId}/users/${member}/role`, {
+    const response = await app.request(`/platform/tenants/${tenantId}/members/${member}`, {
       method: "PATCH",
       headers: {
-        Authorization: `Bearer ${await tokenFor(owner.userId)}`,
+        "X-Steward-Platform-Key": process.env.STEWARD_PLATFORM_KEYS!,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ role: "viewer" }),
+      body: JSON.stringify({ role: "admin" }),
     });
     expect(response.status).toBe(500);
     const [stored] = await admin.db
@@ -182,5 +223,37 @@ realPostgresDescribe("tenant membership audit atomicity with real PostgreSQL", (
         ),
       );
     expect(completion).toHaveLength(0);
+    const authorization = await admin.db
+      .select({ id: auditEvents.id })
+      .from(auditEvents)
+      .where(
+        and(
+          eq(auditEvents.tenantId, tenantId),
+          eq(auditEvents.action, "tenant.member.role.update.authorized"),
+          eq(auditEvents.resourceId, member),
+        ),
+      );
+    expect(authorization).toHaveLength(1);
+    expect(revokeUserTokens).not.toHaveBeenCalled();
   });
 });
+
+async function holdTenantLifecycleLock(admin: ReturnType<typeof createDb>, tenantId: string) {
+  const locker = await admin.client.reserve();
+  await locker`begin`;
+  await locker`select pg_advisory_xact_lock(
+    hashtextextended(${`tenant_owner_lifecycle_${tenantId}`}, 0)
+  )`;
+  return locker;
+}
+
+async function waitForAdvisoryWaiters(admin: ReturnType<typeof createDb>, minimum: number) {
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    const [row] = await admin.client<{ count: string }[]>`
+      select count(*)::text as count from pg_stat_activity where wait_event = 'advisory'
+    `;
+    if (Number(row?.count ?? "0") >= minimum) return;
+    if (attempt === 199) throw new Error(`expected ${minimum} tenant lifecycle lock waiters`);
+    await Bun.sleep(10);
+  }
+}

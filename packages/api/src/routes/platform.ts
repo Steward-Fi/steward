@@ -4598,6 +4598,7 @@ platform.patch("/tenants/:id/users/:userId/metadata", async (c) => {
 
   await withTenantAuditedTransaction(tenantId, async (txRaw, appendRequiredAudit) => {
     const tx = txRaw as typeof db;
+    await lockTenantOwnerLifecycle(tx, tenantId);
     const [updated] = await tx
       .update(userTenants)
       .set({ customMetadata: body.tenantCustomMetadata })
@@ -4834,6 +4835,7 @@ platform.post("/tenants/:id/invitations", async (c) => {
     tenantId,
     async (txRaw, appendRequiredAudit) => {
       const tx = txRaw as typeof db;
+      await lockTenantOwnerLifecycle(tx, tenantId);
       const now = new Date();
       await tx
         .update(tenantInvitations)
@@ -4942,6 +4944,7 @@ platform.delete("/tenants/:id/invitations/:invitationId", async (c) => {
     tenantId,
     async (txRaw, appendRequiredAudit) => {
       const tx = txRaw as typeof db;
+      await lockTenantOwnerLifecycle(tx, tenantId);
       const [revoked] = await tx
         .update(tenantInvitations)
         .set({ status: "revoked", revokedAt: new Date(), updatedAt: new Date() })
@@ -5025,10 +5028,21 @@ platform.post("/tenants/:id/members", async (c) => {
     );
   }
 
+  await writeAuditEvent({
+    tenantId,
+    actorType: "platform",
+    action: "tenant.member.add.authorized",
+    resourceType: "user",
+    resourceId: email,
+    metadata: { email, requestedRole: role },
+    ...auditCtx(c),
+  });
+
   const result = await withTenantAuditedTransaction(
     tenantId,
     async (txRaw, appendRequiredAudit) => {
       const tx = txRaw as typeof db;
+      await lockTenantOwnerLifecycle(tx, tenantId);
       let [user] = await tx.select().from(users).where(eq(users.email, email));
       const createdUser = !user;
       if (!user) {
@@ -5132,7 +5146,17 @@ platform.delete("/tenants/:id/members/:userId", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: "Member not found in tenant" }, 404);
   }
 
-  const revokedBefore = await revocationStore.revokeUserTokens(userId);
+  await writeAuditEvent({
+    tenantId,
+    actorType: "platform",
+    action: "tenant.member.remove.authorized",
+    resourceType: "user",
+    resourceId: userId,
+    metadata: { role: currentMember.role },
+    ...auditCtx(c),
+  });
+
+  const revokedBefore = Math.floor(Date.now() / 1000) + 1;
 
   let deleted: typeof userTenants.$inferSelect | undefined;
   try {
@@ -5177,6 +5201,8 @@ platform.delete("/tenants/:id/members/:userId", async (c) => {
   if (!deleted) {
     return c.json<ApiResponse>({ ok: false, error: "Member not found in tenant" }, 404);
   }
+
+  await revocationStore.revokeUserTokens(userId, revokedBefore);
 
   return c.json<ApiResponse>({ ok: true });
 });
@@ -5249,6 +5275,16 @@ platform.patch("/tenants/:id/members/:userId", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: "Member not found in tenant" }, 404);
   }
 
+  await writeAuditEvent({
+    tenantId,
+    actorType: "platform",
+    action: "tenant.member.role.update.authorized",
+    resourceType: "user",
+    resourceId: userId,
+    metadata: { previousRole: currentMember.role, role },
+    ...auditCtx(c),
+  });
+
   let updated:
     | {
         row: typeof userTenants.$inferSelect;
@@ -5273,7 +5309,6 @@ platform.patch("/tenants/:id/members/:userId", async (c) => {
       const revokedUserTokensIssuedBefore =
         current.role === role ? null : Math.floor(Date.now() / 1000) + 1;
       if (revokedUserTokensIssuedBefore !== null) {
-        await revocationStore.revokeUserTokens(userId, revokedUserTokensIssuedBefore);
         await tx
           .delete(refreshTokens)
           .where(and(eq(refreshTokens.tenantId, tenantId), eq(refreshTokens.userId, userId)));
@@ -5311,6 +5346,10 @@ platform.patch("/tenants/:id/members/:userId", async (c) => {
   }
   if (!updated) {
     return c.json<ApiResponse>({ ok: false, error: "Member not found in tenant" }, 404);
+  }
+
+  if (updated.revokedUserTokensIssuedBefore !== null) {
+    await revocationStore.revokeUserTokens(userId, updated.revokedUserTokensIssuedBefore);
   }
 
   return c.json<ApiResponse<{ userId: string; tenantId: string; role: string }>>({

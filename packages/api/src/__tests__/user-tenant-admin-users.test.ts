@@ -253,6 +253,23 @@ describe("user tenant-admin user directory routes", () => {
     expect(directoryBody.error).toContain("recent MFA");
   });
 
+  it("rejects reachable tenant-admin invitation mutations for personal tenants", async () => {
+    const personalTenantId = `personal-${ownerId}`;
+    const token = await personalTokenFor(ownerId);
+    const create = await userRoutes.request(`/me/tenants/${personalTenantId}/invitations`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ email: "invitee@example.test", role: "member" }),
+    });
+    expect(create.status).toBe(409);
+
+    const revoke = await userRoutes.request(
+      `/me/tenants/${personalTenantId}/invitations/${crypto.randomUUID()}`,
+      { method: "DELETE", headers: { Authorization: `Bearer ${token}` } },
+    );
+    expect(revoke.status).toBe(409);
+  });
+
   it("serializes concurrent owner demotions so exactly one wins", async () => {
     await getDb()
       .update(userTenants)

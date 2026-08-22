@@ -1121,6 +1121,27 @@ async function lockTenantOwnerLifecycle(
   );
 }
 
+class TenantAdminAuthorityChangedError extends Error {
+  constructor() {
+    super("Tenant admin access required");
+  }
+}
+
+async function requireLockedTenantAdmin(
+  tx: Pick<ReturnType<typeof getDb>, "select" | "execute">,
+  tenantId: string,
+  userId: string,
+): Promise<string> {
+  await lockTenantOwnerLifecycle(tx, tenantId);
+  const [membership] = await tx
+    .select({ role: userTenants.role })
+    .from(userTenants)
+    .where(and(eq(userTenants.tenantId, tenantId), eq(userTenants.userId, userId)))
+    .limit(1);
+  if (!isTenantAdminRole(membership?.role)) throw new TenantAdminAuthorityChangedError();
+  return membership.role;
+}
+
 function clampLimit(value: string | null, fallback = 50): number {
   const parsed = value ? Number(value) : fallback;
   if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
@@ -6593,6 +6614,12 @@ user.post("/me/tenants/:tenantId/invitations", async (c) => {
   if (!isValidTenantId(tenantId)) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid tenant id format" }, 400);
   }
+  if (isReservedTenantId(tenantId)) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Personal and reserved tenant membership is immutable" },
+      409,
+    );
+  }
   const admin = await requireTenantAdminMfa(
     c,
     tenantId,
@@ -6632,10 +6659,11 @@ user.post("/me/tenants/:tenantId/invitations", async (c) => {
   });
 
   const db = getDb();
-  const invitation = await withTenantAuditedTransaction(
-    tenantId,
-    async (txRaw, appendRequiredAudit) => {
+  let invitation: TenantAdminInvitationRow;
+  try {
+    invitation = await withTenantAuditedTransaction(tenantId, async (txRaw, appendRequiredAudit) => {
       const tx = txRaw as typeof db;
+      await requireLockedTenantAdmin(tx, tenantId, admin.userId);
       const now = new Date();
       await tx
         .update(tenantInvitations)
@@ -6664,8 +6692,13 @@ user.post("/me/tenants/:tenantId/invitations", async (c) => {
         requestId: c.get("requestId") ?? null,
       });
       return created;
-    },
-  );
+    });
+  } catch (error) {
+    if (error instanceof TenantAdminAuthorityChangedError) {
+      return c.json<ApiResponse>({ ok: false, error: error.message }, 403);
+    }
+    throw error;
+  }
 
   let emailSent = false;
   if (body?.sendEmail === true) {
@@ -6693,6 +6726,12 @@ user.delete("/me/tenants/:tenantId/invitations/:invitationId", async (c) => {
   const invitationId = c.req.param("invitationId");
   if (!isValidTenantId(tenantId)) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid tenant id format" }, 400);
+  }
+  if (isReservedTenantId(tenantId)) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Personal and reserved tenant membership is immutable" },
+      409,
+    );
   }
   if (!isValidUserId(invitationId)) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid invitation id format" }, 400);
@@ -6737,10 +6776,11 @@ user.delete("/me/tenants/:tenantId/invitations/:invitationId", async (c) => {
     metadata: { email: candidate.email, role: candidate.role },
   });
 
-  const invitation = await withTenantAuditedTransaction(
-    tenantId,
-    async (txRaw, appendRequiredAudit) => {
+  let invitation: TenantAdminInvitationRow | undefined;
+  try {
+    invitation = await withTenantAuditedTransaction(tenantId, async (txRaw, appendRequiredAudit) => {
       const tx = txRaw as typeof db;
+      await requireLockedTenantAdmin(tx, tenantId, admin.userId);
       const [revoked] = await tx
         .update(tenantInvitations)
         .set({ status: "revoked", revokedAt: new Date(), updatedAt: new Date() })
@@ -6766,8 +6806,13 @@ user.delete("/me/tenants/:tenantId/invitations/:invitationId", async (c) => {
         requestId: c.get("requestId") ?? null,
       });
       return revoked;
-    },
-  );
+    });
+  } catch (error) {
+    if (error instanceof TenantAdminAuthorityChangedError) {
+      return c.json<ApiResponse>({ ok: false, error: error.message }, 403);
+    }
+    throw error;
+  }
   if (!invitation) {
     return c.json<ApiResponse>({ ok: false, error: "Pending invitation not found" }, 404);
   }
@@ -7306,18 +7351,28 @@ user.patch("/me/tenants/:tenantId/users/:targetUserId/role", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: "Only owners can grant owner role" }, 403);
   }
 
+  await writeUserAudit(c, {
+    tenantId,
+    actorType: "user",
+    actorId: requesterId,
+    action: "tenant.member.role.update.authorized",
+    resourceType: "user",
+    resourceId: targetUserId,
+    metadata: { nextRole },
+  });
+
   const db = getDb();
   let updated: { row: TenantAdminUserRow; previousRole: string } | null = null;
   try {
     updated = await withTenantAuditedTransaction(tenantId, async (txRaw, appendRequiredAudit) => {
       const tx = txRaw as typeof db;
-      await lockTenantOwnerLifecycle(tx, tenantId);
+      const lockedRequesterRole = await requireLockedTenantAdmin(tx, tenantId, requesterId);
       const [membership] = await tx
         .select({ role: userTenants.role })
         .from(userTenants)
         .where(and(eq(userTenants.tenantId, tenantId), eq(userTenants.userId, targetUserId)));
       if (!membership) return null;
-      if (membership.role === "owner" && requesterRole !== "owner" && nextRole !== "owner") {
+      if (membership.role === "owner" && lockedRequesterRole !== "owner" && nextRole !== "owner") {
         throw new Error("Only owners can modify owner role");
       }
       if (membership.role === "owner" && nextRole !== "owner") {
@@ -7325,16 +7380,6 @@ user.patch("/me/tenants/:tenantId/users/:targetUserId/role", async (c) => {
           throw new Error("Cannot demote the sole owner");
         }
       }
-
-      await appendRequiredAudit({
-        tenantId,
-        actorType: "user",
-        actorId: requesterId,
-        action: "tenant.member.role.update.authorized",
-        resourceType: "user",
-        resourceId: targetUserId,
-        metadata: { previousRole: membership.role, nextRole },
-      });
 
       await tx
         .update(userTenants)
@@ -7362,6 +7407,9 @@ user.patch("/me/tenants/:tenantId/users/:targetUserId/role", async (c) => {
       return { row, previousRole: membership.role };
     });
   } catch (err) {
+    if (err instanceof TenantAdminAuthorityChangedError) {
+      return c.json<ApiResponse>({ ok: false, error: err.message }, 403);
+    }
     if (err instanceof Error && err.message === "Only owners can modify owner role") {
       return c.json<ApiResponse>({ ok: false, error: err.message }, 403);
     }
@@ -7423,9 +7471,12 @@ user.patch("/me/tenants/:tenantId/users/:targetUserId/metadata", async (c) => {
     metadata: { updatedTenant: true },
   });
 
-  const row = await withTenantAuditedTransaction(tenantId, async (txRaw, appendRequiredAudit) => {
-    const tx = txRaw as typeof db;
-    const [updated] = await tx
+  let row: TenantAdminUserRow | undefined;
+  try {
+    row = await withTenantAuditedTransaction(tenantId, async (txRaw, appendRequiredAudit) => {
+      const tx = txRaw as typeof db;
+      await requireLockedTenantAdmin(tx, tenantId, admin.userId);
+      const [updated] = await tx
       .update(userTenants)
       .set({ customMetadata: body.tenantCustomMetadata })
       .where(and(eq(userTenants.tenantId, tenantId), eq(userTenants.userId, targetUserId)))
@@ -7448,8 +7499,14 @@ user.patch("/me/tenants/:tenantId/users/:targetUserId/metadata", async (c) => {
       userAgent: c.req.header("user-agent") ?? null,
       requestId: c.get("requestId") ?? null,
     });
-    return result;
-  });
+      return result;
+    });
+  } catch (error) {
+    if (error instanceof TenantAdminAuthorityChangedError) {
+      return c.json<ApiResponse>({ ok: false, error: error.message }, 403);
+    }
+    throw error;
+  }
   if (!row) return c.json<ApiResponse>({ ok: false, error: "User not found in tenant" }, 404);
 
   dispatchWebhook(tenantId, targetUserId, "user.updated_account", {
@@ -7499,10 +7556,10 @@ user.patch("/me/tenants/:tenantId/users/:targetUserId/deactivate", async (c) => 
   });
 
   const result = await withTenantAuditedTransaction(
-    tenantId,
-    async (txRaw, appendRequiredAudit) => {
-      const tx = txRaw as typeof db;
-      await lockTenantOwnerLifecycle(tx, tenantId);
+      tenantId,
+      async (txRaw, appendRequiredAudit) => {
+        const tx = txRaw as typeof db;
+      await requireLockedTenantAdmin(tx, tenantId, admin.userId);
       const [membership] = await tx
         .select({ role: userTenants.role })
         .from(userTenants)
@@ -7538,7 +7595,7 @@ user.patch("/me/tenants/:tenantId/users/:targetUserId/deactivate", async (c) => 
         .limit(1);
       if (!target) return null;
 
-      const issuedBefore = await revocationStore.revokeUserTokens(targetUserId);
+      const issuedBefore = Math.floor(Date.now() / 1000) + 1;
       await tx
         .update(users)
         .set({ deactivatedAt: deactivated ? new Date() : null, updatedAt: new Date() })
@@ -7568,18 +7625,24 @@ user.patch("/me/tenants/:tenantId/users/:targetUserId/deactivate", async (c) => 
     },
   ).catch((err: unknown) => {
     if (err instanceof Error) {
+      if (err instanceof TenantAdminAuthorityChangedError) return err.message;
       if (err.message === "Cannot deactivate the sole owner") return err.message;
       if (err.message.startsWith("Tenant dashboard lifecycle changes")) return err.message;
     }
     throw err;
   });
 
+  if (result === "Tenant admin access required") {
+    return c.json<ApiResponse>({ ok: false, error: result }, 403);
+  }
   if (typeof result === "string") {
     return c.json<ApiResponse>({ ok: false, error: result }, 409);
   }
   if (result === null || !result.row) {
     return c.json<ApiResponse>({ ok: false, error: "User not found in tenant" }, 404);
   }
+
+  await revocationStore.revokeUserTokens(targetUserId, result.issuedBefore);
 
   dispatchWebhook(tenantId, targetUserId, "user.updated_account", {
     userId: targetUserId,
@@ -7652,7 +7715,6 @@ user.delete("/me/tenants/:tenantId/users/:targetUserId", async (c) => {
   });
 
   const revokedBefore = Math.floor(Date.now() / 1000) + 1;
-  await revocationStore.revokeUserTokens(targetUserId, revokedBefore);
   let deleted: {
     membership: {
       id: string;
@@ -7674,7 +7736,7 @@ user.delete("/me/tenants/:tenantId/users/:targetUserId", async (c) => {
   try {
     deleted = await withTenantAuditedTransaction(tenantId, async (txRaw, appendRequiredAudit) => {
       const tx = txRaw as typeof db;
-      await lockTenantOwnerLifecycle(tx, tenantId);
+      await requireLockedTenantAdmin(tx, tenantId, admin.userId);
       const [current] = await tx
         .select({
           id: userTenants.id,
@@ -7725,12 +7787,17 @@ user.delete("/me/tenants/:tenantId/users/:targetUserId", async (c) => {
       return { membership: current, refreshTokens: tokenSnapshot };
     });
   } catch (err) {
+    if (err instanceof TenantAdminAuthorityChangedError) {
+      return c.json<ApiResponse>({ ok: false, error: err.message }, 403);
+    }
     if (err instanceof Error && err.message === "Cannot remove the sole owner") {
       return c.json<ApiResponse>({ ok: false, error: err.message }, 409);
     }
     throw err;
   }
   if (!deleted) return c.json<ApiResponse>({ ok: false, error: "User not found in tenant" }, 404);
+
+  await revocationStore.revokeUserTokens(targetUserId, revokedBefore);
 
   dispatchWebhook(tenantId, targetUserId, "user.updated_account", {
     userId: targetUserId,
@@ -7809,6 +7876,7 @@ user.post("/me/tenants/:tenantId/invitations/accept", async (c) => {
     tenantId,
     async (txRaw, appendRequiredAudit) => {
       const tx = txRaw as typeof db;
+      await lockTenantOwnerLifecycle(tx, tenantId);
       const [existingMembership] = await tx
         .select({ role: userTenants.role })
         .from(userTenants)
@@ -7988,6 +8056,7 @@ user.post("/me/tenants/:tenantId/join", async (c) => {
       tenantId,
       async (txRaw, appendRequiredAudit) => {
         const tx = txRaw as typeof db;
+        await lockTenantOwnerLifecycle(tx, tenantId);
         const [invitation] = await tx
           .update(tenantInvitations)
           .set({
@@ -8051,6 +8120,7 @@ user.post("/me/tenants/:tenantId/join", async (c) => {
 
   await withTenantAuditedTransaction(tenantId, async (txRaw, appendRequiredAudit) => {
     const tx = txRaw as typeof db;
+    await lockTenantOwnerLifecycle(tx, tenantId);
     await tx.insert(userTenants).values({ userId, tenantId, role: "member" }).onConflictDoNothing();
     await appendRequiredAudit({
       tenantId,
