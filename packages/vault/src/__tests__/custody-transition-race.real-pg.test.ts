@@ -11,12 +11,13 @@ import {
   isNull,
   tenants,
 } from "@stwd/db";
-import { generatePrivateKey } from "viem/accounts";
+import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import type {
   ExternalKeyCustodyProvider,
   ExternalKeyHandleImportRequest,
   ExternalKeyHandleRegistration,
 } from "../external-key-custody";
+import { KeyStore } from "../keystore";
 import { Vault } from "../vault";
 
 setDefaultTimeout(120_000);
@@ -35,6 +36,7 @@ const agentId = `custody-race-agent-${suffix}`;
 const restoreFirstAgentId = `custody-race-restore-first-${suffix}`;
 const externalBeforeImportAgentId = `race-external-first-${suffix}`;
 const importBeforeExternalAgentId = `race-local-first-${suffix}`;
+const typedDataRotationAgentId = `typed-data-rotation-${suffix}`;
 const blocker = databaseUrl ? createPostgresClient(databaseUrl) : null;
 const inspector = databaseUrl ? createPostgresClient(databaseUrl) : null;
 
@@ -427,5 +429,81 @@ suite("custody transitions across real PostgreSQL connections", () => {
         (wallet) => (wallet.metadata as Record<string, unknown> | null)?.custody === "external",
       ),
     ).toBe(false);
+  });
+
+  test("a queued typed-data signature revalidates the venue wallet after a concurrent rotation", async () => {
+    if (!blocker || !inspector) throw new Error("real PostgreSQL clients are unavailable");
+    const venue = "hyperliquid";
+    const vault = new Vault({ masterPassword: MASTER_PASSWORD });
+    await vault.createAgent(tenantId, typedDataRotationAgentId, "Typed Data Rotation Agent");
+    const original = await vault.provisionVenueWallet({
+      tenantId,
+      agentId: typedDataRotationAgentId,
+      venue,
+      chainFamily: "evm",
+      approvedAddresses: [],
+    });
+
+    const replacementPrivateKey = generatePrivateKey();
+    const replacementAddress = privateKeyToAccount(replacementPrivateKey).address;
+    const replacement = new KeyStore(MASTER_PASSWORD).encrypt(replacementPrivateKey, {
+      tenantId,
+      agentId: typedDataRotationAgentId,
+      chainFamily: "evm",
+      venue,
+    });
+    const lockKey = JSON.stringify([
+      "vault-custody-v1",
+      tenantId,
+      typedDataRotationAgentId,
+      "evm",
+      venue,
+    ]);
+    let signingResult!: Promise<
+      { status: "fulfilled"; value: string } | { status: "rejected"; reason: unknown }
+    >;
+
+    await blocker.begin(async (tx) => {
+      await tx`select pg_advisory_xact_lock(hashtextextended(${lockKey}, 0))`;
+      signingResult = vault
+        .signTypedData({
+          tenantId,
+          agentId: typedDataRotationAgentId,
+          venue,
+          expectedWalletAddress: original.address,
+          domain: { name: "Steward wallet rotation", version: "1", chainId: 8453 },
+          types: { Rotation: [{ name: "session", type: "string" }] },
+          primaryType: "Rotation",
+          value: { session: "authorized-before-rotation" },
+        })
+        .then(
+          (value) => ({ status: "fulfilled" as const, value }),
+          (reason: unknown) => ({ status: "rejected" as const, reason }),
+        );
+      await waitForBlockedAdvisoryConnections(lockKey, 1);
+      await tx`
+        update encrypted_chain_keys
+        set ciphertext = ${replacement.ciphertext}, iv = ${replacement.iv},
+            tag = ${replacement.tag}, salt = ${replacement.salt}
+        where agent_id = ${typedDataRotationAgentId}
+          and chain_family = 'evm'
+          and venue = ${venue}
+      `;
+      await tx`
+        update agent_wallets
+        set address = ${replacementAddress}
+        where agent_id = ${typedDataRotationAgentId}
+          and chain_family = 'evm'
+          and venue = ${venue}
+      `;
+    });
+
+    const result = await signingResult;
+    expect(result.status).toBe("rejected");
+    if (result.status === "rejected") {
+      expect(String(result.reason)).toContain(
+        "Typed-data signer no longer matches the authorized wallet",
+      );
+    }
   });
 });

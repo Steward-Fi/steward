@@ -3041,19 +3041,14 @@ export class Vault {
   async signTypedData(request: SignTypedDataRequest): Promise<string> {
     const db = getDb();
 
-    // Verify agent exists for this tenant
-    const [agentRow] = await db
-      .select({ walletAddress: agents.walletAddress })
-      .from(agents)
-      .where(and(eq(agents.id, request.agentId), eq(agents.tenantId, request.tenantId)));
-
-    if (!agentRow) {
-      throw new Error(`Agent ${request.agentId} not found for tenant ${request.tenantId}`);
+    if (request.venue === "hyperliquid" && !request.expectedWalletAddress) {
+      throw new Error("Hyperliquid typed-data signing requires an authorized wallet assertion");
     }
 
-    if (detectChainType(agentRow.walletAddress) === "solana") {
-      throw new Error("EIP-712 typed data signing is not supported for Solana wallets");
-    }
+    // These guards use their established stores/connections. Run them before
+    // opening the custody-lock transaction so single-connection PGlite cannot
+    // self-deadlock; the locked key/address revalidation below remains the
+    // authoritative protection against a concurrent local wallet rotation.
     await assertVaultSigningActive({
       tenantId: request.tenantId,
       agentId: request.agentId,
@@ -3062,76 +3057,114 @@ export class Vault {
     });
     await this.assertLocalSigningScopeIsNotExternal(request.agentId, "evm", request.venue ?? null);
 
-    // Resolve signing key: prefer encryptedChainKeys (multi-wallet), scoped by
-    // venue when requested, then fall back to legacy encryptedKeys only for
-    // legacy NULL-venue requests.
-    let secretKey: string;
-    const [chainKey] = await db
-      .select()
-      .from(encryptedChainKeys)
-      .where(
-        and(
-          eq(encryptedChainKeys.agentId, request.agentId),
-          eq(encryptedChainKeys.chainFamily, "evm"),
-          request.venue
-            ? eq(encryptedChainKeys.venue, request.venue)
-            : isNull(encryptedChainKeys.venue),
-        ),
-      );
+    const signWithCurrentKey = async (queryDb: Pick<typeof db, "select">): Promise<string> => {
+      // Re-check tenant ownership after taking the custody lock. A request that
+      // raced an agent/custody transition must use the post-lock state.
+      const [agentRow] = await queryDb
+        .select({ walletAddress: agents.walletAddress })
+        .from(agents)
+        .where(and(eq(agents.id, request.agentId), eq(agents.tenantId, request.tenantId)));
 
-    if (chainKey) {
-      secretKey = await this.keyStore.decrypt(
-        {
-          ciphertext: chainKey.ciphertext,
-          iv: chainKey.iv,
-          tag: chainKey.tag,
-          salt: chainKey.salt,
-        },
-        {
+      if (!agentRow) {
+        throw new Error(`Agent ${request.agentId} not found for tenant ${request.tenantId}`);
+      }
+      if (detectChainType(agentRow.walletAddress) === "solana") {
+        throw new Error("EIP-712 typed data signing is not supported for Solana wallets");
+      }
+      const venue = request.venue ?? null;
+      const [walletRow] = await queryDb
+        .select({ address: agentWallets.address })
+        .from(agentWallets)
+        .where(
+          and(
+            eq(agentWallets.agentId, request.agentId),
+            eq(agentWallets.chainFamily, "evm"),
+            venue ? eq(agentWallets.venue, venue) : isNull(agentWallets.venue),
+          ),
+        );
+      // Resolve signing key: prefer encryptedChainKeys (multi-wallet), scoped by
+      // venue when requested, then fall back to legacy encryptedKeys only for
+      // legacy NULL-venue requests.
+      let secretKey: string;
+      const [chainKey] = await queryDb
+        .select()
+        .from(encryptedChainKeys)
+        .where(
+          and(
+            eq(encryptedChainKeys.agentId, request.agentId),
+            eq(encryptedChainKeys.chainFamily, "evm"),
+            request.venue
+              ? eq(encryptedChainKeys.venue, request.venue)
+              : isNull(encryptedChainKeys.venue),
+          ),
+        );
+
+      if (chainKey) {
+        secretKey = await this.keyStore.decrypt(
+          {
+            ciphertext: chainKey.ciphertext,
+            iv: chainKey.iv,
+            tag: chainKey.tag,
+            salt: chainKey.salt,
+          },
+          {
+            tenantId: request.tenantId,
+            agentId: request.agentId,
+            chainFamily: "evm",
+            venue: request.venue ?? null,
+          },
+        );
+      } else {
+        if (request.venue) {
+          throw new Error(
+            `No signing key found for agent ${request.agentId} on venue ${request.venue}`,
+          );
+        }
+        const [legacyKey] = await queryDb
+          .select()
+          .from(encryptedKeys)
+          .where(eq(encryptedKeys.agentId, request.agentId));
+        if (!legacyKey) {
+          throw new Error(`No signing key found for agent ${request.agentId}`);
+        }
+        secretKey = await this.keyStore.decrypt(legacyKey as EncryptedKey, {
           tenantId: request.tenantId,
           agentId: request.agentId,
           chainFamily: "evm",
-          venue: request.venue ?? null,
+          venue: null,
+        });
+      }
+
+      const account = privateKeyToAccount(secretKey as `0x${string}`);
+      if (
+        request.expectedWalletAddress &&
+        (walletRow?.address.toLowerCase() !== request.expectedWalletAddress.toLowerCase() ||
+          account.address.toLowerCase() !== request.expectedWalletAddress.toLowerCase())
+      ) {
+        throw new Error("Typed-data signer no longer matches the authorized wallet");
+      }
+
+      return account.signTypedData({
+        domain: {
+          name: request.domain.name,
+          version: request.domain.version,
+          chainId: request.domain.chainId,
+          verifyingContract: request.domain.verifyingContract as `0x${string}` | undefined,
+          salt: request.domain.salt as `0x${string}` | undefined,
         },
-      );
-    } else {
-      if (request.venue) {
-        throw new Error(
-          `No signing key found for agent ${request.agentId} on venue ${request.venue}`,
-        );
-      }
-      // Fallback: legacy encrypted_keys table
-      const [legacyKey] = await db
-        .select()
-        .from(encryptedKeys)
-        .where(eq(encryptedKeys.agentId, request.agentId));
-      if (!legacyKey) {
-        throw new Error(`No signing key found for agent ${request.agentId}`);
-      }
-      secretKey = await this.keyStore.decrypt(legacyKey as EncryptedKey, {
-        tenantId: request.tenantId,
-        agentId: request.agentId,
-        chainFamily: "evm",
-        venue: null,
+        types: request.types as Record<string, Array<{ name: string; type: string }>>,
+        primaryType: request.primaryType,
+        message: request.value,
       });
-    }
+    };
 
-    const account = privateKeyToAccount(secretKey as `0x${string}`);
-
-    const signature = await account.signTypedData({
-      domain: {
-        name: request.domain.name,
-        version: request.domain.version,
-        chainId: request.domain.chainId,
-        verifyingContract: request.domain.verifyingContract as `0x${string}` | undefined,
-        salt: request.domain.salt as `0x${string}` | undefined,
-      },
-      types: request.types as Record<string, Array<{ name: string; type: string }>>,
-      primaryType: request.primaryType,
-      message: request.value,
+    if (!usesCustodyAdvisoryLock()) return signWithCurrentKey(db);
+    return db.transaction(async (tx) => {
+      await tx.execute(
+        sql`select pg_advisory_xact_lock(hashtextextended(${custodyTransitionLockKey(request.tenantId, request.agentId, "evm", request.venue ?? null)}, 0))`,
+      );
+      return signWithCurrentKey(tx);
     });
-
-    return signature;
   }
 
   /**

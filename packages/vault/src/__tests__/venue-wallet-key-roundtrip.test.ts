@@ -98,6 +98,50 @@ describe("provisionVenueWallet key round-trip (AAD context regression)", () => {
         .where(and(eq(agentWallets.agentId, "agent1"), eq(agentWallets.venue, venue)));
       expect(walletRow?.chainFamily).toBe(chainFamily);
 
+      if (chainFamily === "evm") {
+        const typedData = {
+          agentId: "agent1",
+          tenantId: TENANT_ID,
+          venue,
+          domain: { name: "Steward wallet binding", version: "1", chainId: 8453 },
+          types: { Binding: [{ name: "session", type: "string" }] },
+          primaryType: "Binding",
+          value: { session: "session-before-wallet-rotation" },
+        };
+        const signature = await vault.signTypedData({
+          ...typedData,
+          expectedWalletAddress: walletRow!.address,
+        });
+        expect(signature).toMatch(/^0x[0-9a-f]{130}$/i);
+
+        await expect(vault.signTypedData(typedData)).rejects.toThrow(
+          "Hyperliquid typed-data signing requires an authorized wallet assertion",
+        );
+
+        await expect(
+          vault.signTypedData({
+            ...typedData,
+            expectedWalletAddress: "0x2222222222222222222222222222222222222222",
+          }),
+        ).rejects.toThrow("Typed-data signer no longer matches the authorized wallet");
+
+        await getDb()
+          .delete(agentWallets)
+          .where(
+            and(
+              eq(agentWallets.agentId, "agent1"),
+              eq(agentWallets.chainFamily, "evm"),
+              eq(agentWallets.venue, venue),
+            ),
+          );
+        await expect(
+          vault.signTypedData({
+            ...typedData,
+            expectedWalletAddress: walletRow!.address,
+          }),
+        ).rejects.toThrow("Typed-data signer no longer matches the authorized wallet");
+      }
+
       // AAD genuinely binds the venue: a different or absent venue must NOT decrypt.
       expect(() => keyStore.decrypt(enc, { ...ctx, venue: "polymarket" })).toThrow();
       expect(() =>

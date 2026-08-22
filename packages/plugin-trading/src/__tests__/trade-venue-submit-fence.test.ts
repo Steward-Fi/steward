@@ -57,6 +57,7 @@ import {
 import { agents, auditEvents, closeDb, getDb, tenants, tradeSessions } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { TradeSessionManager } from "@stwd/trade-sessions";
+import { Vault } from "@stwd/vault";
 import { HyperliquidAdapter } from "@stwd/venue-hyperliquid";
 import { and, eq } from "drizzle-orm";
 import { Hono } from "hono";
@@ -82,6 +83,7 @@ let updateLeverageSpy: ReturnType<typeof spyOn> | undefined;
 let fenceSpy: ReturnType<typeof spyOn> | undefined;
 let createTradeRoutesForTest: typeof import("../routes/trade").createTradeRoutes;
 let sharedTestContext: StewardAppContext;
+let vaultTypedSignSpy: ReturnType<typeof spyOn> | undefined;
 
 async function seedSession(
   allowedAssets: string[] = ["BTC"],
@@ -200,9 +202,35 @@ describe("Hyperliquid venue-submit spend-fence (real /hyperliquid/order path)", 
     signSpy?.mockRestore();
     submitSpy?.mockRestore();
     updateLeverageSpy?.mockRestore();
+    vaultTypedSignSpy?.mockRestore();
     signSpy = undefined;
     submitSpy = undefined;
     updateLeverageSpy = undefined;
+    vaultTypedSignSpy = undefined;
+  });
+
+  it("binds every Hyperliquid signature to the fenced session wallet", async () => {
+    const { tenantId, agentId, sessionId } = await seedSession();
+    const app = makeApp(tenantId, agentId, tradeRoutes);
+    vaultTypedSignSpy = spyOn(Vault.prototype, "signTypedData").mockResolvedValue(
+      `0x${"1".repeat(128)}1b`,
+    );
+    submitSpy = spyOn(HyperliquidAdapter.prototype, "submitOrder").mockResolvedValue({
+      orderId: "hl-wallet-bound",
+      status: "filled",
+      filledQty: 1,
+      avgPrice: 10,
+    } as Awaited<ReturnType<HyperliquidAdapter["submitOrder"]>>);
+
+    const response = await postOrder(app, sessionId, crypto.randomUUID());
+    expect(response.status).toBe(200);
+    expect(vaultTypedSignSpy).toHaveBeenCalledTimes(1);
+    expect(vaultTypedSignSpy!.mock.calls[0]?.[0]).toMatchObject({
+      agentId,
+      tenantId,
+      venue: "hyperliquid",
+      expectedWalletAddress: "0x0000000000000000000000000000000000000001",
+    });
   });
 
   it("releases spend and cancels (no submitted audit) when the venue rejects the order", async () => {
