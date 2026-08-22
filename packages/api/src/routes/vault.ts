@@ -3747,7 +3747,10 @@ vaultRoutes.post("/:agentId/actions/transfer", async (c) => {
         if (!signRequest.data) {
           throw new Error("SPL transfer transaction was not built");
         }
-        if (!solanaExecutionToken)
+        // Sponsored actions are pre-staged before the durable reservation so
+        // sponsored_gas_events can satisfy its transaction FK. Reuse that row
+        // for SPL execution instead of inserting the same action id twice.
+        if (!solanaRecoveryBinding && !sponsoredTransferStaged)
           await db.insert(transactions).values({
             id: actionId,
             agentId,
