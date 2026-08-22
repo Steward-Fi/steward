@@ -268,8 +268,6 @@ async function tenantCommand(action: string | undefined, ctx: CommandContext) {
     id: required(stringFlag(ctx.flags, "id"), "id"),
     name: required(stringFlag(ctx.flags, "name"), "name"),
     apiKeyHash: apiKey,
-    webhookUrl: stringFlag(ctx.flags, "webhook-url"),
-    defaultPolicies: parseJsonFlag(ctx.flags, "default-policies", undefined),
   };
   return ctx.api.request("POST", "/tenants", body, { platform: true, tenant: false });
 }

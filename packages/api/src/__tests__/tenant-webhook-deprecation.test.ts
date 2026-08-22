@@ -3,6 +3,14 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 const source = readFileSync(join(import.meta.dir, "..", "routes", "tenants.ts"), "utf8");
+const tenantDocs = readFileSync(
+  join(import.meta.dir, "..", "..", "..", "..", "docs", "api-reference", "tenants.mdx"),
+  "utf8",
+);
+const openApi = readFileSync(
+  join(import.meta.dir, "..", "..", "..", "..", "docs", "api-reference", "openapi.json"),
+  "utf8",
+);
 
 describe("legacy tenant webhook deprecation", () => {
   it("rejects new legacy values and never creates an undisclosed signing secret", () => {
@@ -18,5 +26,12 @@ describe("legacy tenant webhook deprecation", () => {
     expect(source).toContain("data: getTenantPayload(tenant)");
     expect(source).not.toContain("webhookUrl: body.webhookUrl");
     expect(source).not.toContain("defaultPolicies: body.defaultPolicies");
+  });
+
+  it("documents the legacy route as 410-only and keeps it out of OpenAPI", () => {
+    expect(tenantDocs).toContain("returns HTTP 410 for both `webhookUrl`");
+    expect(tenantDocs).toContain("The generated OpenAPI contract likewise");
+    expect(tenantDocs).not.toContain("Update the default policies for a tenant");
+    expect(openApi).not.toContain('"/tenants/{id}/webhook"');
   });
 });
