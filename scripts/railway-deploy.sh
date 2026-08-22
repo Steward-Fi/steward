@@ -17,6 +17,10 @@ set -euo pipefail
 #   RAILWAY_IMAGE_REPO  (optional) default: ghcr.io/steward-fi/steward (the
 #                                  canonical published OSS image)
 #   RAILWAY_HEALTH_URL  (required) the deployer's public HTTPS root origin
+#   RAILWAY_DIRECT_HEALTH_URL (optional) a second direct service HTTPS origin
+#   RAILWAY_REQUIRE_DIRECT_HEALTH (optional, default false) require the direct
+#                       origin and accept the rollout only after both origins
+#                       report /health and /ready HTTP 200
 #   DEPLOY_TIMEOUT      (optional) max seconds to wait for deploy, default: 300
 #   RAILWAY_HEALTH_TIMEOUT  (optional) max seconds to wait for health, default: 120
 #   RAILWAY_HEALTH_INTERVAL (optional) seconds between health probes, default: 5
@@ -53,6 +57,8 @@ SERVICE_ID="${RAILWAY_SERVICE_ID:-}"
 ENV_ID="${RAILWAY_ENV_ID:-}"
 IMAGE_REPO="${RAILWAY_IMAGE_REPO:-ghcr.io/steward-fi/steward}"
 HEALTH_URL="${RAILWAY_HEALTH_URL:-}"
+DIRECT_HEALTH_URL="${RAILWAY_DIRECT_HEALTH_URL:-}"
+REQUIRE_DIRECT_HEALTH="${RAILWAY_REQUIRE_DIRECT_HEALTH:-false}"
 TIMEOUT="${DEPLOY_TIMEOUT:-300}"
 HEALTH_TIMEOUT="${RAILWAY_HEALTH_TIMEOUT:-120}"
 HEALTH_INTERVAL="${RAILWAY_HEALTH_INTERVAL:-5}"
@@ -132,6 +138,19 @@ if [[ -z "$HEALTH_URL" ]]; then
 fi
 if ! HEALTH_URL=$(node "$SCRIPT_DIR/validate-public-origin.mjs" --resolve-origin "$HEALTH_URL"); then
   fail "RAILWAY_HEALTH_URL must be a credential-free public HTTPS root origin"
+  exit 1
+fi
+if [[ "$REQUIRE_DIRECT_HEALTH" != "true" && "$REQUIRE_DIRECT_HEALTH" != "false" ]]; then
+  fail "RAILWAY_REQUIRE_DIRECT_HEALTH must be true or false"
+  exit 1
+fi
+if [[ "$REQUIRE_DIRECT_HEALTH" == "true" && -z "$DIRECT_HEALTH_URL" ]]; then
+  fail "RAILWAY_DIRECT_HEALTH_URL is required for direct deployment acceptance"
+  exit 1
+fi
+if [[ -n "$DIRECT_HEALTH_URL" ]] &&
+   ! DIRECT_HEALTH_URL=$(node "$SCRIPT_DIR/validate-public-origin.mjs" --resolve-origin "$DIRECT_HEALTH_URL"); then
+  fail "RAILWAY_DIRECT_HEALTH_URL must be a credential-free public HTTPS root origin"
   exit 1
 fi
 
@@ -436,6 +455,7 @@ fi
 verify_public_probe() {
   local path="$1"
   local label="$2"
+  local origin="${3:-$HEALTH_URL}"
   local probe_result="000 "
   local http_code="000"
   local remote_ip=""
@@ -443,7 +463,7 @@ verify_public_probe() {
   local started=$SECONDS
   local elapsed=0
 
-  log "Verifying ${label} endpoint: ${HEALTH_URL}${path}"
+  log "Verifying ${label} endpoint: ${origin}${path}"
   while [[ $elapsed -lt $HEALTH_TIMEOUT ]]; do
     attempt=$((attempt + 1))
     local remaining=$((HEALTH_TIMEOUT - elapsed))
@@ -454,7 +474,7 @@ verify_public_probe() {
       --max-time "$request_timeout" \
       -o /dev/null \
       -w "%{http_code} %{remote_ip}" \
-      "${HEALTH_URL}${path}" 2>/dev/null) || probe_result="000 "
+      "${origin}${path}" 2>/dev/null) || probe_result="000 "
     read -r http_code remote_ip <<< "$probe_result"
     if [[ "$http_code" == "200" ]] &&
        node "$SCRIPT_DIR/validate-public-origin.mjs" --ip "$remote_ip" >/dev/null 2>&1; then
@@ -481,6 +501,10 @@ verify_public_probe "/health" "Health" || exit 1
 # deployment role, Redis/auth stores, and other durable dependencies before a
 # Railway deployment is accepted.
 verify_public_probe "/ready" "Readiness" || exit 1
+if [[ -n "$DIRECT_HEALTH_URL" ]]; then
+  verify_public_probe "/health" "Direct health" "$DIRECT_HEALTH_URL" || exit 1
+  verify_public_probe "/ready" "Direct readiness" "$DIRECT_HEALTH_URL" || exit 1
+fi
 
 # ---------------------------------------------------------------------------
 # Summary
@@ -492,4 +516,7 @@ ok "  Image:   ${FULL_IMAGE}"
 ok "  Service: ${SERVICE_ID}"
 ok "  Health:  ${HEALTH_URL}/health ✓"
 ok "  Ready:   ${HEALTH_URL}/ready ✓"
+if [[ -n "$DIRECT_HEALTH_URL" ]]; then
+  ok "  Direct:  ${DIRECT_HEALTH_URL}/ready ✓"
+fi
 ok "=========================================="
