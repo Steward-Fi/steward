@@ -10,6 +10,7 @@ import { Hono } from "hono";
 import {
   clearEmailAuthTenantCacheForTests,
   emailAuthRequestCacheSizeForTests,
+  expireEmailAuthTenantCacheForTests,
   getEmailAuthForTenant,
   initAuthStores,
   invalidateEmailAuthForTenant,
@@ -415,6 +416,32 @@ describe("getEmailAuthForTenant", () => {
 
         const replacement = await getEmailAuthForTenant(TEST_TENANT_ID);
         expect(replacement).not.toBe(first);
+        expect(emailAuthRequestCacheSizeForTests()).toBe(1);
+      },
+    );
+  });
+
+  it("expires and retires request-local email authority after the bounded TTL", async () => {
+    clearEmailAuthTenantCacheForTests();
+    await getDb().delete(tenantConfigs).where(eq(tenantConfigs.tenantId, TEST_TENANT_ID));
+
+    await withRuntimeEnvironment(
+      {
+        NODE_ENV: "test",
+        RESEND_API_KEY: "expiring-request-resend-key",
+        EMAIL_FROM: "Expiring <login@request.example>",
+      },
+      async () => {
+        const first = await getEmailAuthForTenant(TEST_TENANT_ID);
+        const firstProvider = (first as any).provider;
+        expireEmailAuthTenantCacheForTests(TEST_TENANT_ID);
+
+        const replacement = await getEmailAuthForTenant(TEST_TENANT_ID);
+        await Promise.resolve();
+
+        expect(replacement).not.toBe(first);
+        expect(firstProvider.client).toBeNull();
+        expect(firstProvider.from).toBe("");
         expect(emailAuthRequestCacheSizeForTests()).toBe(1);
       },
     );

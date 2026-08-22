@@ -524,6 +524,7 @@ interface RequestDatabaseContext {
   isolationLevel?: "repeatable read";
   readOnly?: boolean;
   pendingTasks: Set<Promise<unknown>>;
+  afterCommitTasks?: Array<() => void | Promise<void>>;
   guardedObjects: WeakMap<object, object>;
 }
 const requestDatabaseStorage = new AsyncLocalStorage<RequestDatabaseContext>();
@@ -720,6 +721,7 @@ export async function withTenantTransactionDatabase<T>(
   identity: { tenantId: string; userId?: string },
   callback: () => Promise<T>,
   characteristics?: { isolationLevel?: "repeatable read"; readOnly?: boolean },
+  afterCommitTasks?: Array<() => void | Promise<void>>,
 ): Promise<T> {
   if (tenantTransactionDatabaseStorage.getStore()) {
     throw new Error("RLS_TENANT_DATABASE_CONTEXT_NESTED");
@@ -733,6 +735,7 @@ export async function withTenantTransactionDatabase<T>(
     isolationLevel: characteristics?.isolationLevel,
     readOnly: characteristics?.readOnly,
     pendingTasks: new Set(),
+    afterCommitTasks,
     guardedObjects: new WeakMap(),
   };
   context.db = guardRequestDatabaseValue(transactionDb, context);
@@ -746,6 +749,18 @@ export async function withTenantTransactionDatabase<T>(
     context.active = false;
     context.db = undefined;
   }
+}
+
+/**
+ * Defer a side effect until the owner of the active tenant transaction has
+ * observed a successful outer commit. Returns false when there is no commit
+ * owner so callers can perform the side effect immediately.
+ */
+export function afterTenantTransactionCommit(task: () => void | Promise<void>): boolean {
+  const context = tenantTransactionDatabaseStorage.getStore();
+  if (!context?.active || !context.afterCommitTasks) return false;
+  context.afterCommitTasks.push(task);
+  return true;
 }
 
 /**
