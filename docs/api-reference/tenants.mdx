@@ -187,13 +187,16 @@ DELETE /platform/tenants/:id
   Deleting a tenant cascades to all agents, wallets, policies, and transactions. This is permanent.
 </Warning>
 
-### Set Default Policies
+### Retired Tenant Default Policy Route
 
 ```
 PUT /platform/tenants/:id/policies
 ```
 
-Sets the default policy template for all agents in the tenant.
+This compatibility route returns HTTP 410 and performs no write. Tenant-wide
+process-local defaults are not policy authority. Use
+`PUT /agents/:agentId/policies` to persist the complete policy set for each
+agent instead.
 
 ---
 

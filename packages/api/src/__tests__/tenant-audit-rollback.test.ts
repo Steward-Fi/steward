@@ -20,6 +20,12 @@ let tenantConfigs: typeof import("../services/context")["tenantConfigs"];
 let getPolicySet: typeof import("../services/context")["getPolicySet"];
 let apps: Array<Hono<{ Variables: AppVariables }>>;
 
+const historicalProcessLocalConfig = () => ({
+  id: TENANT_ID,
+  name: "Tenant policy retirement",
+  defaultPolicies: [DEFAULT_RULE],
+});
+
 beforeAll(async () => {
   process.env.STEWARD_PLATFORM_KEYS = PLATFORM_KEY;
   process.env.STEWARD_PLATFORM_KEY_SCOPES = JSON.stringify({
@@ -48,11 +54,7 @@ beforeAll(async () => {
     mfaVerifiedAt: Date.now(),
     mfaMethod: "totp",
   });
-  tenantConfigs.set(TENANT_ID, {
-    id: TENANT_ID,
-    name: "Tenant policy retirement",
-    defaultPolicies: [DEFAULT_RULE],
-  });
+  tenantConfigs.set(TENANT_ID, historicalProcessLocalConfig());
   apps = [new Hono<{ Variables: AppVariables }>(), new Hono<{ Variables: AppVariables }>()];
   for (const app of apps) app.route("/tenants", tenantRoutes);
 });
@@ -114,7 +116,7 @@ describe("retired process-local tenant policy authority", () => {
       });
     }
     expect(await getDb().select().from(tenants).where(eq(tenants.id, CREATE_ID))).toHaveLength(0);
-    expect(tenantConfigs.get(TENANT_ID)?.defaultPolicies).toEqual([DEFAULT_RULE]);
+    expect(tenantConfigs.get(TENANT_ID)).toMatchObject(historicalProcessLocalConfig());
     expect(await policyAuditRows()).toEqual(auditsBefore);
   });
 
@@ -129,11 +131,7 @@ describe("retired process-local tenant policy authority", () => {
   });
 
   it("never treats historical map defaults as policy authority", async () => {
-    tenantConfigs.set(TENANT_ID, {
-      id: TENANT_ID,
-      name: "Tenant policy retirement",
-      defaultPolicies: [DEFAULT_RULE],
-    });
+    tenantConfigs.set(TENANT_ID, historicalProcessLocalConfig());
     expect(await getPolicySet(TENANT_ID, "missing-policy-agent")).toEqual([]);
     const read = await apps[0].request(`/tenants/${TENANT_ID}`, {
       headers: {

@@ -381,7 +381,7 @@ describeConditionSets("condition sets", () => {
 
   it("does not treat historical process-local tenant defaults as policy authority", async () => {
     const { tenantConfigs } = await import("../services/context");
-    tenantConfigs.set(TENANT_ID, {
+    const historicalProcessLocalConfig = {
       id: TENANT_ID,
       name: "Condition Sets Tenant",
       defaultPolicies: [
@@ -396,7 +396,8 @@ describeConditionSets("condition sets", () => {
           },
         },
       ],
-    });
+    };
+    tenantConfigs.set(TENANT_ID, historicalProcessLocalConfig);
 
     const response = await app.request("/policies/simulate", {
       method: "POST",

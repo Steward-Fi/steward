@@ -32,12 +32,11 @@ import {
   tenants,
 } from "../services/context";
 import { isRecentMfaTimestamp } from "../services/recent-mfa";
+import { TENANT_DEFAULT_POLICIES_RETIREMENT } from "../services/tenant-policy-retirement";
 
 export const tenantRoutes = new Hono<{ Variables: AppVariables }>();
 const LEGACY_WEBHOOK_DEPRECATION_ERROR =
   "webhookUrl is retired because it cannot provision a receiver-verifiable signing secret; create a webhook with POST /webhooks instead (the secret is returned once)";
-const LEGACY_DEFAULT_POLICIES_DEPRECATION_ERROR =
-  "defaultPolicies are retired because process-local tenant policy state is not durable; use /policies and durable per-agent policy assignments instead";
 
 // Per-route auth that pins the JWT's tenantId to the URL :id path param.
 // Applied directly on handlers below so the "public discovery" route in
@@ -170,8 +169,8 @@ tenantRoutes.post("/", platformAuthMiddleware(), async (c) => {
   }
   if (body.defaultPolicies !== undefined) {
     return c.json<ApiResponse>(
-      { ok: false, error: LEGACY_DEFAULT_POLICIES_DEPRECATION_ERROR },
-      410,
+      { ok: false, error: TENANT_DEFAULT_POLICIES_RETIREMENT.error },
+      TENANT_DEFAULT_POLICIES_RETIREMENT.status,
     );
   }
 
@@ -282,5 +281,8 @@ tenantRoutes.put("/:id/webhook", requireTenantId, async (c) => {
     return c.json<ApiResponse>({ ok: false, error: LEGACY_WEBHOOK_DEPRECATION_ERROR }, 410);
   }
 
-  return c.json<ApiResponse>({ ok: false, error: LEGACY_DEFAULT_POLICIES_DEPRECATION_ERROR }, 410);
+  return c.json<ApiResponse>(
+    { ok: false, error: TENANT_DEFAULT_POLICIES_RETIREMENT.error },
+    TENANT_DEFAULT_POLICIES_RETIREMENT.status,
+  );
 });
