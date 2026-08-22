@@ -31,6 +31,7 @@ async function fakeRailwayRun(healthyAfter: number, healthTimeout = 4) {
   const dir = await mkdtemp(join(tmpdir(), "steward-railway-deploy-"));
   temporaryDirectories.push(dir);
   const stateFile = join(dir, "health-attempts");
+  const curlLog = join(dir, "curl-arguments");
   const fakeCurl = join(dir, "curl");
   const fakeSleep = join(dir, "sleep");
 
@@ -38,6 +39,7 @@ async function fakeRailwayRun(healthyAfter: number, healthTimeout = 4) {
     fakeCurl,
     `#!/bin/sh
 args="$*"
+printf '%s\n' "$args" >> "$FAKE_CURL_LOG"
 case "$args" in
   *example.test/health*)
     count=0
@@ -65,6 +67,7 @@ esac
       ...Bun.env,
       PATH: `${dir}:${Bun.env.PATH ?? ""}`,
       FAKE_HEALTH_STATE: stateFile,
+      FAKE_CURL_LOG: curlLog,
       FAKE_HEALTHY_AFTER: String(healthyAfter),
       RAILWAY_TOKEN: "test-token",
       RAILWAY_SERVICE_ID: "test-service",
@@ -81,7 +84,8 @@ esac
     new Response(process.stdout).text(),
     new Response(process.stderr).text(),
   ]);
-  return { exitCode, output: stdout + stderr };
+  const curlArguments = await Bun.file(curlLog).text();
+  return { exitCode, output: stdout + stderr, curlArguments };
 }
 
 describe("SEC-129 railway-deploy.sh fails closed by default", () => {
@@ -108,6 +112,7 @@ describe("SEC-129 redact_secrets filter", () => {
         "rediss cache rediss://:encoded%40password@cache.internal:6380/0",
         "broker amqps://worker:broker-password@mq.internal/vhost",
         "callback https://agent:http-password@example.test/callback",
+        "token-user https://opaque-access-token@example.test/private",
         "signed https://objects.example.test/item?X-Amz-Credential=aws-credential&X-Amz-Signature=aws-signature&safe=visible",
         "oauth https://example.test/callback?code=oauth-code&state=visible-state&access_token=oauth-token",
         'CACHE_URL="redis://default:quoted-url-secret@cache.internal:6379/0"',
@@ -131,6 +136,7 @@ describe("SEC-129 redact_secrets filter", () => {
     expect(out).not.toContain("encoded%40password");
     expect(out).not.toContain("broker-password");
     expect(out).not.toContain("http-password");
+    expect(out).not.toContain("opaque-access-token");
     expect(out).not.toContain("aws-credential");
     expect(out).not.toContain("aws-signature");
     expect(out).not.toContain("oauth-code");
@@ -161,6 +167,12 @@ describe("Railway staging deployment", () => {
     expect(result.exitCode).toBe(0);
     expect(result.output).toContain("Health check attempt 2: HTTP 000");
     expect(result.output).toContain("Health check passed");
+    for (const call of result.curlArguments
+      .split("\n")
+      .filter((line) => line.includes("graphql"))) {
+      expect(call).toContain("--connect-timeout 5");
+      expect(call).toContain("--max-time 20");
+    }
   }, 15_000);
 
   test("prints Railway diagnostics when health never becomes ready", async () => {
@@ -179,5 +191,12 @@ describe("Railway staging deployment", () => {
     expect(result.output).not.toContain("oauth-code-secret");
     expect(result.output).toContain("state=public-state");
     expect(result.output).toContain("…REDACTED…");
+    expect(result.output).not.toContain('Response: {"data"');
+    for (const call of result.curlArguments
+      .split("\n")
+      .filter((line) => line.includes("graphql"))) {
+      expect(call).toContain("--connect-timeout 5");
+      expect(call).toContain("--max-time 20");
+    }
   }, 15_000);
 });

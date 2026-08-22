@@ -85,6 +85,90 @@ async function runOperatorScript(name: string, includeRoles = false) {
   return runCommand(command);
 }
 
+async function reserveLoopbackPort(): Promise<number> {
+  const listener = Bun.listen({
+    hostname: "127.0.0.1",
+    port: 0,
+    socket: { data() {} },
+  });
+  const port = listener.port;
+  await listener.stop(true);
+  return port;
+}
+
+async function proveRestrictedApiStartupReadiness(platformKey: string) {
+  const port = await reserveLoopbackPort();
+  const probeToken = `rls-ready-${suffix}`;
+  const child = Bun.spawn(["bun", "run", "packages/api/src/index.ts"], {
+    cwd: new URL("../../../../", import.meta.url).pathname,
+    env: {
+      ...process.env,
+      PORT: String(port),
+      STEWARD_BIND_HOST: "127.0.0.1",
+      NODE_ENV: "production",
+      SKIP_MIGRATIONS: "true",
+      DATABASE_DRIVER: "postgres-js",
+      DATABASE_URL: appDatabaseUrl(),
+      STEWARD_APP_DATABASE_ROLE: appRole,
+      STEWARD_PLATFORM_DATABASE_URL: platformDatabaseUrl(),
+      STEWARD_PLATFORM_DATABASE_ROLE: platformRole,
+      STEWARD_PLUGINS: "",
+      STEWARD_ENABLE_TRADING: "false",
+      STEWARD_REDIS_REQUIRED: "false",
+      REDIS_URL: "",
+      STEWARD_REDIS_URL: "",
+      APP_URL: `http://127.0.0.1:${port}`,
+      STEWARD_JWT_SECRET: `rls-startup-jwt-${suffix}-0123456789abcdef`,
+      STEWARD_KDF_SALT: "ab".repeat(32),
+      STEWARD_AUDIT_HMAC_KEY: "cd".repeat(32),
+      STEWARD_DEFAULT_TENANT_KEY: `rls-startup-default-${suffix}`,
+      STEWARD_MASTER_PASSWORD: `rls-startup-master-${suffix}`,
+      STEWARD_PLATFORM_KEYS: platformKey,
+      STEWARD_PLATFORM_KEY_SCOPES: JSON.stringify({ [platformKey]: ["platform:*"] }),
+      STEWARD_READY_PROBE_TOKEN: probeToken,
+      STEWARD_ACK_LOCAL_CUSTODY: "true",
+      STEWARD_ALLOW_MEMORY_AUTH_STORES: "false",
+      STEWARD_ALLOW_INSECURE_AUTH_STORES: "false",
+    },
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const stdoutPromise = new Response(child.stdout).text();
+  const stderrPromise = new Response(child.stderr).text();
+  let proof: {
+    status?: string;
+    checks?: Record<string, { ok?: boolean; source?: string }>;
+  } | null = null;
+
+  try {
+    const deadline = Date.now() + 30_000;
+    while (Date.now() < deadline && child.exitCode === null) {
+      try {
+        const response = await fetch(`http://127.0.0.1:${port}/ready`, {
+          headers: { "x-steward-probe-token": probeToken },
+          signal: AbortSignal.timeout(1_000),
+        });
+        if (response.status === 200) {
+          proof = (await response.json()) as typeof proof;
+          break;
+        }
+      } catch {
+        // The real entrypoint is still starting. Keep polling within the bound.
+      }
+      await Bun.sleep(100);
+    }
+  } finally {
+    if (child.exitCode === null) child.kill("SIGTERM");
+    await child.exited;
+  }
+
+  const [stdout, stderr] = await Promise.all([stdoutPromise, stderrPromise]);
+  if (!proof) {
+    throw new Error(`restricted API did not become ready:\n${stderr || stdout}`);
+  }
+  return proof;
+}
+
 describeWithPostgres("SEC-169 operator lifecycle on the real Steward schema", () => {
   const admin = postgres(process.env.DATABASE_URL as string, { max: 1 });
 
@@ -218,6 +302,14 @@ describeWithPostgres("SEC-169 operator lifecycle on the real Steward schema", ()
         WHERE n.nspname = 'public' AND p.polname LIKE 'steward_%'
       `;
       expect(activated).toEqual({ enabled: 71, forced: 71, maintenance: 71 });
+
+      const startupPlatformKey = `rls-startup-platform-key-${suffix}`;
+      const startupProof = await proveRestrictedApiStartupReadiness(startupPlatformKey);
+      expect(startupProof.status).toBe("ready");
+      expect(startupProof.checks?.database?.ok).toBe(true);
+      expect(startupProof.checks?.migrations?.ok).toBe(true);
+      expect(startupProof.checks?.rlsDeployment?.ok).toBe(true);
+      expect(startupProof.checks?.authStores?.ok).toBe(true);
 
       const refreshUserId = randomUUID();
       const sourceTenant = `source-${suffix}`;

@@ -176,6 +176,10 @@ Steward backup.
 | `STEWARD_PLATFORM_DATABASE_URL` | Restricted platform-authority connection | none | Required for destructive global platform operations; never reuse `DATABASE_URL`. |
 | `STEWARD_PLATFORM_DATABASE_ROLE` | Exact platform database role | `steward_platform` | Must match the login on `STEWARD_PLATFORM_DATABASE_URL`. |
 | `STEWARD_MIGRATION_DATABASE_URL` | Release-job migration connection | none | Keep out of the API environment; applies core/plugin migrations and activates RLS. |
+| `STEWARD_MIGRATION_CONNECT_TIMEOUT_SECONDS` | Migrator connection deadline | `15` | Positive integer; applies to core and plugin migration clients. |
+| `STEWARD_MIGRATION_LOCK_TIMEOUT_MS` | Migrator advisory-lock deadline | `60000` | Positive integer no greater than the overall deadline. |
+| `STEWARD_MIGRATION_STATEMENT_TIMEOUT_MS` | Per-statement migration deadline | `300000` | Positive integer no greater than the overall deadline. |
+| `STEWARD_MIGRATION_OVERALL_TIMEOUT_MS` | Complete core or plugin migration deadline | `600000` | Positive integer; timed-out clients are terminated instead of serving indefinitely. |
 | `STEWARD_OPERATOR_DATABASE_URL` | Bootstrap operator connection | none | Keep out of the API environment; requires provider-superuser-equivalent authority. |
 | `STEWARD_DB_MODE` | Force database backend | auto | Set to `pglite` to force PGLite. |
 | `STEWARD_PGLITE_PATH` | PGLite persistence directory | `~/.steward/data` | Used only by PGLite. |
@@ -258,7 +262,9 @@ DATABASE_URL="$STEWARD_MIGRATION_DATABASE_URL" bun run --cwd packages/api migrat
 It applies the core journal and all enabled-plugin journals. The
 provider-superuser-equivalent operator then runs `rls-bootstrap.sql`, followed
 by `rls-activate.sql` through the direct migration login. Neither privileged URL
-may be present in the API environment.
+may be present in the API environment. The `STEWARD_MIGRATION_*_TIMEOUT_*`
+settings bound connection establishment, advisory-lock acquisition, individual
+statements, and each complete migration attempt.
 
 - Development PostgreSQL may retain startup migrations with a suitably privileged local login.
 - PGLite mode does not run the Postgres migrator in `index.ts`. Instead, `packages/db/src/pglite.ts` replays `.sql` files from `packages/db/drizzle` in lexicographic order and tracks applied files in `__steward_migrations`.

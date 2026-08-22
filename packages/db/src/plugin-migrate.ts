@@ -46,6 +46,7 @@ import type { PluginMigrationSource } from "@stwd/shared";
 import { migrate } from "drizzle-orm/postgres-js/migrator";
 
 import { createDb } from "./client";
+import { resolveMigrationTimeouts } from "./migrate";
 
 /** the schema the per-plugin bookkeeping table lives in (same as core's). */
 const PLUGIN_MIGRATIONS_SCHEMA = "drizzle";
@@ -202,12 +203,31 @@ export async function runPluginMigrations(
   let ownsClient = false;
   let db = options.db;
   let client = options.client;
+  const timeouts = resolveMigrationTimeouts();
   if (!db) {
-    const created = createDb();
+    const created = createDb(undefined, {
+      max: 1,
+      connectTimeoutSeconds: timeouts.connectSeconds,
+      statementTimeoutMs: timeouts.statementMs,
+      lockTimeoutMs: timeouts.advisoryLockMs,
+      idleInTransactionTimeoutMs: timeouts.statementMs,
+    });
     db = created.db;
     client = created.client;
     ownsClient = true;
   }
+
+  let overallTimedOut = false;
+  let deadlineClose: Promise<void> | undefined;
+  const overallTimer = ownsClient
+    ? setTimeout(() => {
+        overallTimedOut = true;
+        const close = client.end({ timeout: 0 });
+        deadlineClose = close;
+        void close.catch(() => undefined);
+      }, timeouts.overallMs)
+    : undefined;
+  let advisoryLockHeld = false;
 
   try {
     if (useAdvisoryLock) {
@@ -217,7 +237,14 @@ export async function runPluginMigrations(
             "but no SQL client was provided. Pass `client` or set useAdvisoryLock:false.",
         );
       }
+      if (ownsClient) {
+        await client`SELECT set_config('statement_timeout', ${`${timeouts.advisoryLockMs}ms`}, false)`;
+      }
       await client`SELECT pg_advisory_lock(hashtextextended(${lockKey}, 0))`;
+      advisoryLockHeld = true;
+      if (ownsClient) {
+        await client`SELECT set_config('statement_timeout', ${`${timeouts.statementMs}ms`}, false)`;
+      }
     }
 
     try {
@@ -230,15 +257,25 @@ export async function runPluginMigrations(
         migrationsSchema: PLUGIN_MIGRATIONS_SCHEMA,
       });
     } finally {
-      if (useAdvisoryLock && client) {
+      if (advisoryLockHeld && client && !overallTimedOut) {
         await client`SELECT pg_advisory_unlock(hashtextextended(${lockKey}, 0))`;
       }
     }
 
     return { id: source.id, migrationsTable };
+  } catch (error) {
+    if (overallTimedOut) {
+      throw new Error(
+        `plugin migration "${source.id}" exceeded the ${timeouts.overallMs}ms overall timeout`,
+        { cause: error },
+      );
+    }
+    throw error;
   } finally {
+    if (overallTimer) clearTimeout(overallTimer);
     if (ownsClient && client && typeof client.end === "function") {
-      await client.end();
+      if (deadlineClose) await deadlineClose.catch(() => undefined);
+      else await client.end({ timeout: 0 });
     }
   }
 }
