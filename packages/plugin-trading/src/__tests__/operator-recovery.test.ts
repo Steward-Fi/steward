@@ -56,6 +56,32 @@ const adapterVaultClients: Array<{
 }> = [];
 
 mock.module("@stwd/policy-engine", () => ({
+  PolicyEngine: class {
+    async evaluate(
+      policies: Array<{ type?: string; config?: { addresses?: string[] } }>,
+      context: { request?: { to?: string } },
+    ) {
+      const destination = context.request?.to?.toLowerCase();
+      const addressPolicy = policies.find((policy) => policy.type === "approved-addresses");
+      if (
+        destination &&
+        addressPolicy?.config?.addresses &&
+        !addressPolicy.config.addresses.some((address) => address.toLowerCase() === destination)
+      ) {
+        return {
+          approved: false,
+          results: [{ passed: false, reason: "destination is not approved" }],
+        };
+      }
+      return { approved: true, results: [] };
+    }
+  },
+  policyRuleRegistry: {
+    register: () => undefined,
+    unregister: () => undefined,
+    get: () => undefined,
+    list: () => [],
+  },
   aggregationLookupFromMap: () => undefined,
   aggregationQueriesForPolicies: () => [],
   aggregationQueryKey: () => "unused",
@@ -1010,6 +1036,46 @@ describe("operator recovery add-margin", () => {
     expect(body.data.amountUsdc).toBe("25.5");
     expect(body.data.amountBaseUnits).toBe("25500000");
     expect(addIsolatedMarginCalls).toEqual([{ coin: "xyz:SPCX", amountUsdc: "25.5" }]);
+  });
+});
+
+describe("operator recovery deposit wallet binding", () => {
+  it("passes the resolved venue wallet assertion into transaction signing", async () => {
+    const tenantId = `tenant-deposit-wallet-${crypto.randomUUID()}`;
+    const agentId = `agent-deposit-wallet-${crypto.randomUUID()}`;
+    const walletAddress = "0x00000000000000000000000000000000000000bb";
+    await seedAgent({ tenantId, agentId });
+    const signedInputs: Array<Record<string, unknown>> = [];
+    const app = await buildApp({
+      vault: {
+        getWallet: async () => ({ address: walletAddress }),
+        signTransaction: async (input: Record<string, unknown>) => {
+          signedInputs.push(input);
+          return `0x${"1".repeat(64)}`;
+        },
+      } as unknown as StewardAppContext["vault"],
+    });
+
+    const response = await app.request("/v1/trade/hyperliquid/deposit", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Steward-Platform-Key": PLATFORM_KEY,
+        "X-Steward-Tenant": tenantId,
+        "Idempotency-Key": crypto.randomUUID(),
+      },
+      body: JSON.stringify({ agentId, amount: "5" }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(signedInputs).toHaveLength(1);
+    expect(signedInputs[0]).toMatchObject({
+      tenantId,
+      agentId,
+      venue: "hyperliquid",
+      walletAddress,
+      broadcast: true,
+    });
   });
 });
 

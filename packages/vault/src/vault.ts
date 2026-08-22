@@ -1672,6 +1672,97 @@ export class Vault {
     request: SignRequest,
     options: SignTransactionOptions = {},
   ): Promise<string> {
+    const chainId = request.chainId || this.config.chainId || 8453;
+    const venue = resolveSignVenueSelector(request);
+    if (venue === "hyperliquid" && !request.walletAddress) {
+      throw new Error("Hyperliquid transaction signing requires an authorized wallet assertion");
+    }
+
+    const isSolana = chainId === 101 || chainId === 102;
+    if (!isSolana && venue && request.walletAddress) {
+      const db = getDb();
+      const assertCurrentVenueWallet = async (queryDb: Pick<typeof db, "select">) => {
+        const [agentRow] = await queryDb
+          .select({ id: agents.id })
+          .from(agents)
+          .where(and(eq(agents.id, request.agentId), eq(agents.tenantId, request.tenantId)));
+        const [walletRow] = await queryDb
+          .select({ address: agentWallets.address })
+          .from(agentWallets)
+          .where(
+            and(
+              eq(agentWallets.agentId, request.agentId),
+              eq(agentWallets.chainFamily, "evm"),
+              eq(agentWallets.venue, venue),
+            ),
+          );
+        const [chainKey] = await queryDb
+          .select()
+          .from(encryptedChainKeys)
+          .where(
+            and(
+              eq(encryptedChainKeys.agentId, request.agentId),
+              eq(encryptedChainKeys.chainFamily, "evm"),
+              eq(encryptedChainKeys.venue, venue),
+            ),
+          );
+
+        if (
+          !agentRow ||
+          !walletRow ||
+          walletRow.address.toLowerCase() !== request.walletAddress!.toLowerCase()
+        ) {
+          throw new Error("Transaction signer no longer matches the authorized wallet");
+        }
+        // External-custody scopes intentionally have no local encrypted key;
+        // their provider identity/address is revalidated by the implementation.
+        // Local scopes bind both the durable wallet row and decrypted key to
+        // the address the route authorized before entering the vault.
+        if (chainKey) {
+          const secretKey = await this.keyStore.decrypt(
+            {
+              ciphertext: chainKey.ciphertext,
+              iv: chainKey.iv,
+              tag: chainKey.tag,
+              salt: chainKey.salt,
+            },
+            {
+              tenantId: request.tenantId,
+              agentId: request.agentId,
+              chainFamily: "evm",
+              venue,
+            },
+          );
+          try {
+            assertEvmWalletAddressMatches(secretKey, request.walletAddress);
+          } catch {
+            throw new Error("Transaction signer no longer matches the authorized wallet");
+          }
+        }
+      };
+
+      if (usesCustodyAdvisoryLock()) {
+        return db.transaction(async (tx) => {
+          await tx.execute(
+            sql`select pg_advisory_xact_lock(hashtextextended(${custodyTransitionLockKey(request.tenantId, request.agentId, "evm", venue)}, 0))`,
+          );
+          await assertCurrentVenueWallet(tx);
+          // Retain the transaction-scoped custody lock through provider/RPC
+          // signing and broadcast. A rotation either commits first and fails
+          // this re-read, or waits until this authorized attempt is complete.
+          return this.signTransactionWithResolvedCustody(request, options);
+        });
+      }
+      await assertCurrentVenueWallet(db);
+    }
+
+    return this.signTransactionWithResolvedCustody(request, options);
+  }
+
+  private async signTransactionWithResolvedCustody(
+    request: SignRequest,
+    options: SignTransactionOptions,
+  ): Promise<string> {
     const db = getDb();
 
     // Verify agent exists for this tenant

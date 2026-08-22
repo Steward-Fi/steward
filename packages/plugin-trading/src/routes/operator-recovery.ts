@@ -995,6 +995,9 @@ export function createOperatorRecoveryRoutes(
         data,
         chainId: ARBITRUM_CHAIN_ID,
         venue: "hyperliquid",
+        // Bind signing to the venue wallet authorized above. The vault holds
+        // the matching custody lock through signing and broadcast.
+        walletAddress,
         broadcast: true,
       });
     } catch (err) {

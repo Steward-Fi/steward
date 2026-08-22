@@ -37,6 +37,7 @@ const restoreFirstAgentId = `custody-race-restore-first-${suffix}`;
 const externalBeforeImportAgentId = `race-external-first-${suffix}`;
 const importBeforeExternalAgentId = `race-local-first-${suffix}`;
 const typedDataRotationAgentId = `typed-data-rotation-${suffix}`;
+const transactionRotationAgentId = `transaction-rotation-${suffix}`;
 const blocker = databaseUrl ? createPostgresClient(databaseUrl) : null;
 const inspector = databaseUrl ? createPostgresClient(databaseUrl) : null;
 
@@ -504,6 +505,120 @@ suite("custody transitions across real PostgreSQL connections", () => {
       expect(String(result.reason)).toContain(
         "Typed-data signer no longer matches the authorized wallet",
       );
+    }
+  });
+
+  test("venue rotation waits until an authorized transaction finishes RPC signing", async () => {
+    if (!blocker || !inspector) throw new Error("real PostgreSQL clients are unavailable");
+    const venue = "hyperliquid";
+    const vault = new Vault({ masterPassword: MASTER_PASSWORD });
+    await vault.createAgent(tenantId, transactionRotationAgentId, "Transaction Rotation Agent");
+    const original = await vault.provisionVenueWallet({
+      tenantId,
+      agentId: transactionRotationAgentId,
+      venue,
+      chainFamily: "evm",
+      approvedAddresses: [],
+    });
+    const replacementPrivateKey = generatePrivateKey();
+    const replacementAddress = privateKeyToAccount(replacementPrivateKey).address;
+    const replacement = new KeyStore(MASTER_PASSWORD).encrypt(replacementPrivateKey, {
+      tenantId,
+      agentId: transactionRotationAgentId,
+      chainFamily: "evm",
+      venue,
+    });
+    const lockKey = JSON.stringify([
+      "vault-custody-v1",
+      tenantId,
+      transactionRotationAgentId,
+      "evm",
+      venue,
+    ]);
+
+    let releaseRpc!: () => void;
+    const rpcRelease = new Promise<void>((resolve) => {
+      releaseRpc = resolve;
+    });
+    let rpcReached!: () => void;
+    const rpcPaused = new Promise<void>((resolve) => {
+      rpcReached = resolve;
+    });
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body)) as { id: number; method: string };
+      if (body.method === "eth_chainId") {
+        return Response.json({ jsonrpc: "2.0", id: body.id, result: "0x2105" });
+      }
+      if (body.method === "eth_gasPrice") {
+        rpcReached();
+        await rpcRelease;
+        return Response.json({ jsonrpc: "2.0", id: body.id, result: "0x3b9aca00" });
+      }
+      throw new Error(`Unexpected JSON-RPC method: ${body.method}`);
+    }) as typeof fetch;
+
+    let rotationFinished = false;
+    try {
+      const signing = vault.signTransaction({
+        tenantId,
+        agentId: transactionRotationAgentId,
+        venue,
+        walletAddress: original.address,
+        to: "0x1111111111111111111111111111111111111111",
+        value: "1",
+        chainId: 8453,
+        nonce: 0,
+        gasLimit: "21000",
+        broadcast: false,
+      });
+      await rpcPaused;
+
+      const rotation = blocker
+        .begin(async (tx) => {
+          await tx`select pg_advisory_xact_lock(hashtextextended(${lockKey}, 0))`;
+          await tx`
+            update encrypted_chain_keys
+            set ciphertext = ${replacement.ciphertext}, iv = ${replacement.iv},
+                tag = ${replacement.tag}, salt = ${replacement.salt}
+            where agent_id = ${transactionRotationAgentId}
+              and chain_family = 'evm'
+              and venue = ${venue}
+          `;
+          await tx`
+            update agent_wallets
+            set address = ${replacementAddress}
+            where agent_id = ${transactionRotationAgentId}
+              and chain_family = 'evm'
+              and venue = ${venue}
+          `;
+        })
+        .then(() => {
+          rotationFinished = true;
+        });
+
+      await waitForBlockedAdvisoryConnections(lockKey, 1);
+      expect(rotationFinished).toBe(false);
+      releaseRpc();
+
+      const signed = await signing;
+      expect(signed).toMatch(/^0x[0-9a-f]+$/i);
+      await rotation;
+      expect(rotationFinished).toBe(true);
+      const [wallet] = await getDb()
+        .select({ address: agentWallets.address })
+        .from(agentWallets)
+        .where(
+          and(
+            eq(agentWallets.agentId, transactionRotationAgentId),
+            eq(agentWallets.chainFamily, "evm"),
+            eq(agentWallets.venue, venue),
+          ),
+        );
+      expect(wallet?.address.toLowerCase()).toBe(replacementAddress.toLowerCase());
+    } finally {
+      releaseRpc();
+      globalThis.fetch = originalFetch;
     }
   });
 });
