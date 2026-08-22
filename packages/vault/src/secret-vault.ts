@@ -132,24 +132,7 @@ export class SecretVault {
     options?: CreateSecretOptions,
   ): Promise<SecretMetadata> {
     const db = getDb();
-    const encrypted = this.keyStore.encrypt(value, { tenantId, name, version: 1 });
-
-    const [row] = await db
-      .insert(secrets)
-      .values({
-        tenantId,
-        name,
-        description: options?.description ?? null,
-        ciphertext: encrypted.ciphertext,
-        iv: encrypted.iv,
-        authTag: encrypted.tag,
-        salt: encrypted.salt,
-        version: 1,
-        expiresAt: options?.expiresAt ?? null,
-      })
-      .returning();
-
-    return this.toMetadata(row);
+    return db.transaction((tx) => this.createSecretWithinTx(tx, tenantId, name, value, options));
   }
 
   /**
@@ -431,6 +414,22 @@ export class SecretVault {
     if (!lineage.some((row) => row.id === secretId && row.deletedAt === null)) return false;
     const ids = lineage.map((row) => row.id);
     if (ids.length > 0) {
+      const governedRoutes = await tx
+        .select({ id: secretRoutes.id })
+        .from(secretRoutes)
+        .where(
+          and(
+            eq(secretRoutes.tenantId, tenantId),
+            inArray(secretRoutes.secretId, ids),
+            sql`(${secretRoutes.authorityMode} = 'governed_v2' OR ${secretRoutes.providerOperationId} IS NOT NULL)`,
+          ),
+        )
+        .limit(1);
+      if (governedRoutes.length > 0) {
+        throw new Error(
+          "Governed secret authority must be revoked through its provider-operation lifecycle",
+        );
+      }
       await tx
         .delete(secretRoutes)
         .where(and(eq(secretRoutes.tenantId, tenantId), inArray(secretRoutes.secretId, ids)));
@@ -454,46 +453,7 @@ export class SecretVault {
    */
   async rotateSecret(tenantId: string, name: string, newValue: string): Promise<SecretMetadata> {
     const db = getDb();
-
-    // Find current version
-    const current = await this.getSecret(tenantId, name);
-    if (!current) {
-      throw new Error(`Secret "${name}" not found for tenant ${tenantId}`);
-    }
-
-    const newVersion = current.version + 1;
-    const encrypted = this.keyStore.encrypt(newValue, { tenantId, name, version: newVersion });
-    const now = new Date();
-
-    return db.transaction(async (tx) => {
-      const [row] = await tx
-        .insert(secrets)
-        .values({
-          tenantId,
-          name,
-          description: current.description,
-          ciphertext: encrypted.ciphertext,
-          iv: encrypted.iv,
-          authTag: encrypted.tag,
-          salt: encrypted.salt,
-          version: newVersion,
-          rotatedAt: now,
-          expiresAt: current.expiresAt,
-        })
-        .returning();
-
-      await tx
-        .update(secretRoutes)
-        .set({ secretId: row.id })
-        .where(and(eq(secretRoutes.tenantId, tenantId), eq(secretRoutes.secretId, current.id)));
-
-      await tx
-        .update(secrets)
-        .set({ deletedAt: now, updatedAt: now })
-        .where(and(eq(secrets.id, current.id), eq(secrets.tenantId, tenantId)));
-
-      return this.toMetadata(row);
-    });
+    return db.transaction((tx) => this.rotateSecretWithinTx(tx, tenantId, name, newValue));
   }
 
   /**
@@ -501,49 +461,16 @@ export class SecretVault {
    */
   async deleteSecret(tenantId: string, secretId: string): Promise<boolean> {
     const db = getDb();
-
-    const [row] = await db
-      .select()
-      .from(secrets)
-      .where(
-        and(eq(secrets.id, secretId), eq(secrets.tenantId, tenantId), isNull(secrets.deletedAt)),
-      );
-
-    if (!row) return false;
-
-    const relatedSecretRows = await db
-      .select({ id: secrets.id })
-      .from(secrets)
-      .where(and(eq(secrets.tenantId, tenantId), eq(secrets.name, row.name)));
-
-    const relatedSecretIds = relatedSecretRows.map((secretRow) => secretRow.id);
-    const now = new Date();
-
-    await db.transaction(async (tx) => {
-      if (relatedSecretIds.length > 0) {
-        await tx
-          .delete(secretRoutes)
-          .where(
-            and(
-              eq(secretRoutes.tenantId, tenantId),
-              inArray(secretRoutes.secretId, relatedSecretIds),
-            ),
-          );
-      }
-
-      await tx
-        .update(secrets)
-        .set({ deletedAt: now, updatedAt: now })
+    return db.transaction(async (tx) => {
+      const [row] = await tx
+        .select({ name: secrets.name })
+        .from(secrets)
         .where(
-          and(
-            eq(secrets.tenantId, tenantId),
-            eq(secrets.name, row.name),
-            isNull(secrets.deletedAt),
-          ),
+          and(eq(secrets.id, secretId), eq(secrets.tenantId, tenantId), isNull(secrets.deletedAt)),
         );
+      if (!row) return false;
+      return this.deleteSecretWithinTx(tx, tenantId, secretId, row.name);
     });
-
-    return true;
   }
 
   /**
@@ -984,11 +911,27 @@ export class SecretVault {
 
   async deleteRoute(tenantId: string, routeId: string): Promise<boolean> {
     const db = getDb();
-    const result = await db
-      .delete(secretRoutes)
-      .where(and(eq(secretRoutes.id, routeId), eq(secretRoutes.tenantId, tenantId)))
-      .returning();
-    return result.length > 0;
+    return db.transaction(async (tx) => {
+      const [route] = await tx
+        .select({
+          authorityMode: secretRoutes.authorityMode,
+          providerOperationId: secretRoutes.providerOperationId,
+        })
+        .from(secretRoutes)
+        .where(and(eq(secretRoutes.id, routeId), eq(secretRoutes.tenantId, tenantId)))
+        .for("update");
+      if (!route) return false;
+      if (route.authorityMode === "governed_v2" || route.providerOperationId !== null) {
+        throw new Error(
+          "Governed secret routes must be revoked through their provider-operation lifecycle",
+        );
+      }
+      const result = await tx
+        .delete(secretRoutes)
+        .where(and(eq(secretRoutes.id, routeId), eq(secretRoutes.tenantId, tenantId)))
+        .returning();
+      return result.length > 0;
+    });
   }
 
   // ─── Private helpers ─────────────────────────────────────────────────────────

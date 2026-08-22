@@ -62,7 +62,11 @@ import { getDb, type Secret, secrets as secretRows } from "@stwd/db";
 import type { SecretVault } from "@stwd/vault";
 import { and, asc, eq } from "drizzle-orm";
 import { type Context, Hono } from "hono";
-import { type AuditEventInput, writeAuditEvent } from "../services/audit";
+import {
+  type AuditEventInput,
+  withTenantAuditedTransaction,
+  writeAuditEvent,
+} from "../services/audit";
 import {
   AGENT_SCOPE,
   type ApiResponse,
@@ -74,6 +78,8 @@ import {
 import { getConfiguredSecretVault } from "../services/vault-factory";
 
 export const kmsRoutes = new Hono<{ Variables: AppVariables }>();
+type VaultDb = ReturnType<typeof getDb>;
+type VaultTx = Parameters<Parameters<VaultDb["transaction"]>[0]>[0];
 
 // HKDF domain for deriving per-use working keys from a version root. Versioned
 // so a future derivation change can coexist with old material.
@@ -155,14 +161,14 @@ function decodeB64Field(value: unknown): Buffer | null {
   return decoded;
 }
 
-async function auditKms(
+function kmsAuditEvent(
   c: Context<{ Variables: AppVariables }>,
   principal: KmsPrincipal,
   action: string,
   keyId: string,
   metadata: Record<string, unknown> = {},
-): Promise<void> {
-  const event: AuditEventInput = {
+): AuditEventInput {
+  return {
     tenantId: principal.tenantId,
     actorType: "agent",
     actorId: principal.agentId,
@@ -175,7 +181,16 @@ async function auditKms(
     userAgent: c.req.header("user-agent") ?? null,
     requestId: c.get("requestId") ?? null,
   };
-  await writeAuditEvent(event);
+}
+
+async function auditKms(
+  c: Context<{ Variables: AppVariables }>,
+  principal: KmsPrincipal,
+  action: string,
+  keyId: string,
+  metadata: Record<string, unknown> = {},
+): Promise<void> {
+  await writeAuditEvent(kmsAuditEvent(c, principal, action, keyId, metadata));
 }
 
 // ── key-material access (existing secrets table, per-version rows) ───────────
@@ -253,10 +268,21 @@ kmsRoutes.post("/keys", async (c) => {
 
   const rootHex = randomBytes(32).toString("hex");
   try {
-    const created = await getSecretVault().createSecret(principal.tenantId, name, rootHex, {
-      description: `KMS key material for agent ${principal.agentId}`,
+    const created = await withTenantAuditedTransaction(principal.tenantId, async (tx, append) => {
+      const secret = await getSecretVault().createSecretWithinTx(
+        tx as VaultTx,
+        principal.tenantId,
+        name,
+        rootHex,
+        {
+          description: `KMS key material for agent ${principal.agentId}`,
+        },
+      );
+      await append(
+        kmsAuditEvent(c, principal, "kms.key.created", keyId, { version: secret.version }),
+      );
+      return secret;
     });
-    await auditKms(c, principal, "kms.key.created", keyId, { version: created.version });
     return c.json({ keyId, version: created.version });
   } catch {
     // lost a create race — the unique (tenant, name, version) index rejected the
@@ -278,12 +304,18 @@ kmsRoutes.post("/keys/:keyId/rotate", async (c) => {
   const existing = currentRow(await listKeyRows(principal.tenantId, name));
   if (!existing) return c.json<ApiResponse>({ ok: false, error: "key not found" }, 404);
 
-  const rotated = await getSecretVault().rotateSecret(
-    principal.tenantId,
-    name,
-    randomBytes(32).toString("hex"),
-  );
-  await auditKms(c, principal, "kms.key.rotated", keyId, { newVersion: rotated.version });
+  const rotated = await withTenantAuditedTransaction(principal.tenantId, async (tx, append) => {
+    const secret = await getSecretVault().rotateSecretWithinTx(
+      tx as VaultTx,
+      principal.tenantId,
+      name,
+      randomBytes(32).toString("hex"),
+    );
+    await append(
+      kmsAuditEvent(c, principal, "kms.key.rotated", keyId, { newVersion: secret.version }),
+    );
+    return secret;
+  });
   return c.json({ keyId, newVersion: rotated.version });
 });
 
