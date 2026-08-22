@@ -8,6 +8,7 @@ type Captured = { url: string; body?: Record<string, unknown> };
 let captured: Captured[];
 let originalFetch: typeof fetch;
 let originalWindow: unknown;
+let startAuthenticationCalls: number;
 
 const REG_OPTIONS = {
   challenge: "abc",
@@ -78,17 +79,20 @@ mock.module("@simplewebauthn/browser", () => ({
     },
     type: "public-key",
   }),
-  startAuthentication: async () => ({
-    id: "credential-login",
-    rawId: "credential-login",
-    response: {
-      clientDataJSON: "client-data",
-      authenticatorData: "authenticator-data",
-      signature: "signature",
-      userHandle: "u-1",
-    },
-    type: "public-key",
-  }),
+  startAuthentication: async () => {
+    startAuthenticationCalls += 1;
+    return {
+      id: "credential-login",
+      rawId: "credential-login",
+      response: {
+        clientDataJSON: "client-data",
+        authenticatorData: "authenticator-data",
+        signature: "signature",
+        userHandle: "u-1",
+      },
+      type: "public-key",
+    };
+  },
 }));
 
 function fakeJwt(claims: Record<string, unknown> = {}): string {
@@ -126,6 +130,7 @@ function memoryStorage(): SessionStorage {
 
 beforeEach(() => {
   captured = [];
+  startAuthenticationCalls = 0;
   originalFetch = global.fetch;
   installFetch();
   installBrowserShim();
@@ -179,6 +184,39 @@ describe("StewardAuth.addPasskey", () => {
     await expect(auth.addPasskey("shadow@shad0w.xyz")).rejects.toBeInstanceOf(StewardApiError);
   });
 
+  it("surfaces a passkey-options 404 without invoking registration when fallback is disabled", async () => {
+    global.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
+      const body = init?.body ? JSON.parse(init.body as string) : undefined;
+      captured.push({ url, body });
+      return new Response(
+        JSON.stringify({
+          ok: false,
+          error: "Passkey sign-in is unavailable for this email",
+        }),
+        { status: 404, headers: { "content-type": "application/json" } },
+      );
+    }) as typeof fetch;
+
+    const auth = new StewardAuth({ baseUrl: "https://api.example.test" });
+    await expect(
+      auth.signInWithPasskey("shadow@shad0w.xyz", {
+        fallbackToRegistration: false,
+      }),
+    ).rejects.toMatchObject({
+      status: 404,
+      message: "Passkey sign-in is unavailable for this email",
+    });
+
+    expect(captured).toEqual([
+      {
+        url: "https://api.example.test/auth/passkey/login/options",
+        body: { email: "shadow@shad0w.xyz" },
+      },
+    ]);
+    expect(startAuthenticationCalls).toBe(0);
+  });
+
   it("forwards challengeId when completing passkey login", async () => {
     global.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = typeof input === "string" ? input : input.toString();
@@ -206,6 +244,7 @@ describe("StewardAuth.addPasskey", () => {
     const auth = new StewardAuth({ baseUrl: "https://api.example.test" });
     await auth.signInWithPasskey("shadow@shad0w.xyz");
 
+    expect(startAuthenticationCalls).toBe(1);
     expect(captured[1]?.url).toBe("https://api.example.test/auth/passkey/login/verify");
     expect(captured[1]?.body).toMatchObject({
       email: "shadow@shad0w.xyz",

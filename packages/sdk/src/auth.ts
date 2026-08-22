@@ -824,11 +824,17 @@ export class StewardAuth {
 
   /**
    * Sign in with a passkey. Smart flow: tries login first, falls back to registration.
+   * Set `fallbackToRegistration` to false when the caller owns an email/OTP
+   * fallback and needs a 404 to remain distinguishable without invoking a
+   * registration ceremony.
    *
    * Requires a browser environment and `@simplewebauthn/browser` installed.
    * Throws `StewardApiError` in Node or when the dependency is missing.
    */
-  async signInWithPasskey(email: string): Promise<StewardAuthResult | StewardMfaRequiredResult> {
+  async signInWithPasskey(
+    email: string,
+    options: { fallbackToRegistration?: boolean } = {},
+  ): Promise<StewardAuthResult | StewardMfaRequiredResult> {
     if (!isBrowser()) {
       throw new StewardApiError(
         "Passkeys require a browser environment. Use signInWithEmail or signInWithSIWE in Node.",
@@ -865,8 +871,9 @@ export class StewardAuth {
       return this.completePasskeyLogin(email, loginOptsRes.data, browserLib);
     }
 
-    if (loginOptsRes.status === 404) {
-      // No account or no passkeys — run registration flow
+    if (loginOptsRes.status === 404 && options.fallbackToRegistration !== false) {
+      // No account or no passkeys — run registration flow unless the caller
+      // owns a separate verified-email fallback.
       return this.completePasskeyRegister(email, browserLib);
     }
 
