@@ -150,6 +150,14 @@ describe("0111 tenant RLS policy installation", () => {
     expect(activate).toContain("SEC-169 personal lifecycle lock semantic manifest drift");
     expect(activate).toContain("SEC-169 personal lifecycle lock ACL manifest drift");
     expect(activate).toContain("fa9e1a06071746fd3b29dbc4db3706ad");
+    for (const helper of [
+      "steward_is_authoritative_wallet_identity(text,text,text,text)",
+      "steward_is_authoritative_wallet_tenant_owner(text,uuid)",
+      "steward_is_reserved_tenant_id(text)",
+      "steward_reserved_tenant_kind(text)",
+    ]) {
+      expect(activate).toContain(`function:${helper}:EXECUTE:false`);
+    }
     expect(rollback).toContain("NO FORCE ROW LEVEL SECURITY");
     expect(rollback).toContain("DISABLE ROW LEVEL SECURITY");
   });

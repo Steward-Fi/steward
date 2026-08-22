@@ -174,10 +174,11 @@ psql "$DATABASE_URL" \
   -f scripts/postgres/rls-bootstrap.sql
 ```
 
-The personal-lifecycle rollout has an explicit split-role sequence. Apply
-`0113` as the restricted migration role, run the privileged wrapper upgrade as
-the admin before `0114`, apply `0114` as the restricted migration role, then
-rerun `rls-bootstrap.sql` and the privileged wrapper upgrade. The first upgrade
+The personal-lifecycle rollout has an explicit split-role sequence. After
+`0112` and role bootstrap, run the privileged 0113 handoff, apply unchanged
+`0113` as the restricted migration role, then run the privileged wrapper
+upgrade before restricted `0114`. Finally rerun `rls-bootstrap.sql` and the
+privileged wrapper upgrade. The first upgrade
 is valid before the versioned public implementation exists because its PL/pgSQL
 body resolves that implementation only when invoked; traffic must remain
 stopped until the complete sequence finishes. Both operator scripts are
@@ -186,7 +187,13 @@ the NOLOGIN bootstrap role:
 
 ```bash
 psql "$STEWARD_ADMIN_DATABASE_URL" \
+  -v steward_migration_role=steward_migrator \
+  -v steward_bootstrap_role=steward_bootstrap_owner \
+  -f scripts/postgres/rls-prepare-personal-lifecycle.sql
+
+psql "$STEWARD_ADMIN_DATABASE_URL" \
   -v steward_app_role=steward_app \
+  -v steward_migration_role=steward_migrator \
   -v steward_bootstrap_role=steward_bootstrap_owner \
   -f scripts/postgres/rls-upgrade-personal-lifecycle.sql
 ```

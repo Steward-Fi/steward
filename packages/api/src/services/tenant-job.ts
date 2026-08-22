@@ -6,17 +6,25 @@ import {
   withTenantTransactionDatabase,
 } from "@stwd/db";
 import { sql } from "drizzle-orm";
+import { withPlatformAuthorityDatabase } from "./platform-authority-database";
 
 function rowsOf<T>(result: unknown): T[] {
   return (Array.isArray(result) ? result : ((result as { rows?: unknown[] })?.rows ?? [])) as T[];
 }
 
-/** Enumerate tenants through the fixed-shape SECURITY DEFINER bootstrap API. */
-export async function internalJobTenantIds(): Promise<string[]> {
-  const result = await getDb().execute(
+/** Enumerate tenants through the fixed-shape platform-authority bootstrap API.
+ * The shared app role cannot call this global inventory primitive. */
+export async function internalJobTenantIdsOnDb(
+  platformDb: Pick<ReturnType<typeof getDb>, "execute">,
+): Promise<string[]> {
+  const result = await platformDb.execute(
     sql`SELECT tenant_id FROM steward_bootstrap.tenant_ids_for_internal_job()`,
   );
   return rowsOf<{ tenant_id: string }>(result).map((row) => row.tenant_id);
+}
+
+export async function internalJobTenantIds(): Promise<string[]> {
+  return withPlatformAuthorityDatabase(internalJobTenantIdsOnDb);
 }
 
 /**

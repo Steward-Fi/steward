@@ -101,9 +101,9 @@ describeWithPostgres("personal lifecycle production upgrade topology", () => {
     expect(migrationHash("0113_personal_tenant_account_lifecycle")).toBe(
       "81e4d8907075ce85c5b4d46c43623b849bf9f26af1d90ad5dc7caa74f739d534",
     );
-    const through0113 = journal.entries.filter((entry) => entry.idx <= 113);
+    const through0112 = journal.entries.filter((entry) => entry.idx <= 112);
     const migrationArgs = ["psql", "--no-psqlrc", "--dbname", databaseUrl()];
-    for (const entry of through0113) {
+    for (const entry of through0112) {
       migrationArgs.push("-f", `${migrationsRoot}${entry.tag}.sql`);
     }
     await command(migrationArgs);
@@ -113,7 +113,7 @@ describeWithPostgres("personal lifecycle production upgrade topology", () => {
     await db`CREATE TABLE drizzle.__drizzle_migrations (
       id serial PRIMARY KEY, hash text NOT NULL, created_at bigint
     )`;
-    for (const entry of through0113) {
+    for (const entry of through0112) {
       await db`INSERT INTO drizzle.__drizzle_migrations (hash, created_at)
         VALUES (${migrationHash(entry.tag)}, ${entry.when})`;
     }
@@ -130,8 +130,62 @@ describeWithPostgres("personal lifecycle production upgrade topology", () => {
       WHERE n.nspname = 'steward_bootstrap' AND p.proname = 'platform_delete_user'
     `;
     expect(beforeUpgrade?.owner).toBe(bootstrapRole);
-
+    await command(operatorArgs("scripts/postgres/rls-prepare-personal-lifecycle.sql"));
     const originalDatabaseUrl = process.env.DATABASE_URL;
+    let applied0113: string[];
+    try {
+      process.env.DATABASE_URL = databaseUrl(databaseName, migrationRole);
+      ({ applied: applied0113 } = await runMigrations({
+        throughTag: "0113_personal_tenant_account_lifecycle",
+      }));
+    } finally {
+      process.env.DATABASE_URL = originalDatabaseUrl;
+    }
+    expect(applied0113).toEqual(["0113_personal_tenant_account_lifecycle"]);
+    // Production runs the admin-owned wrapper refresh on both sides of the
+    // restricted 0114 migration. The pre-upgrade pass must compile safely even
+    // though the v2 implementation functions do not exist yet.
+    await command(operatorArgs("scripts/postgres/rls-upgrade-personal-lifecycle.sql"));
+    const [handoffClosed] = await db<
+      { migration_can_create: boolean; deactivation_owner: string; deletion_owner: string }[]
+    >`
+      SELECT
+        has_schema_privilege(${migrationRole}, 'steward_bootstrap', 'CREATE')
+          AS migration_can_create,
+        pg_get_userbyid(
+          (SELECT proowner FROM pg_proc WHERE oid =
+            'steward_bootstrap.platform_set_user_deactivation(uuid,boolean)'::regprocedure::oid)
+        ) AS deactivation_owner,
+        pg_get_userbyid(
+          (SELECT proowner FROM pg_proc WHERE oid =
+            'steward_bootstrap.platform_delete_user(uuid)'::regprocedure::oid)
+        ) AS deletion_owner
+    `;
+    expect(handoffClosed).toEqual({
+      migration_can_create: false,
+      deactivation_owner: bootstrapRole,
+      deletion_owner: bootstrapRole,
+    });
+
+    const invalidLegacyUserId = randomUUID();
+    await db`INSERT INTO users (id,email,email_verified)
+      VALUES (${invalidLegacyUserId}, 'invalid-legacy-default@example.test', true)`;
+    await db`INSERT INTO tenants (id,name,api_key_hash)
+      VALUES ('default', 'Default auth tenant', 'legacy-default-hash')
+      ON CONFLICT (id) DO NOTHING`;
+    await db`INSERT INTO user_tenants (user_id,tenant_id,role)
+      VALUES (${invalidLegacyUserId}, 'default', 'owner')`;
+    try {
+      process.env.DATABASE_URL = databaseUrl(databaseName, migrationRole);
+      await expect(runMigrations()).rejects.toThrow(
+        "Legacy reserved tenant membership violates authoritative invariant",
+      );
+    } finally {
+      process.env.DATABASE_URL = originalDatabaseUrl;
+    }
+    await db`DELETE FROM user_tenants WHERE user_id = ${invalidLegacyUserId}`;
+    await db`DELETE FROM users WHERE id = ${invalidLegacyUserId}`;
+
     let applied: string[];
     try {
       process.env.DATABASE_URL = databaseUrl(databaseName, migrationRole);
@@ -143,6 +197,20 @@ describeWithPostgres("personal lifecycle production upgrade topology", () => {
     await command(operatorArgs("scripts/postgres/rls-bootstrap.sql"));
     await command(operatorArgs("scripts/postgres/rls-upgrade-personal-lifecycle.sql"));
     await command(operatorArgs("scripts/postgres/rls-upgrade-personal-lifecycle.sql"));
+    const [revocationJobAuthority] = await db<
+      { can_read_audit_jobs: boolean; can_enumerate_jobs: boolean }[]
+    >`
+      SELECT
+        has_table_privilege(${bootstrapRole}, 'public.audit_events', 'SELECT')
+          AS can_read_audit_jobs,
+        has_function_privilege(
+          ${bootstrapRole}, 'public.steward_internal_job_tenant_ids_v2()', 'EXECUTE'
+        ) AS can_enumerate_jobs
+    `;
+    expect(revocationJobAuthority).toEqual({
+      can_read_audit_jobs: true,
+      can_enumerate_jobs: true,
+    });
 
     const [afterUpgrade] = await db<{ owner: string; acl: string | null }[]>`
       SELECT pg_get_userbyid(p.proowner) AS owner, p.proacl::text AS acl
@@ -163,27 +231,33 @@ describeWithPostgres("personal lifecycle production upgrade topology", () => {
         appReadsBoundary: boolean;
         appCallsMutation: boolean;
         appCallsImplementation: boolean;
+        appCallsGlobalTenantInventory: boolean;
         platformCallsMutation: boolean;
+        platformCallsGlobalTenantInventory: boolean;
       }[]
     >`
       SELECT
         has_function_privilege(${appRole}, 'steward_bootstrap.user_token_revocation_subject(uuid)', 'EXECUTE') AS "appReadsBoundary",
         has_function_privilege(${appRole}, 'steward_bootstrap.platform_set_user_deactivation(uuid,boolean)', 'EXECUTE') AS "appCallsMutation",
         has_function_privilege(${appRole}, 'public.steward_user_token_revocation_subject_v1(uuid)', 'EXECUTE') AS "appCallsImplementation",
-        has_function_privilege(${platformRole}, 'steward_bootstrap.platform_set_user_deactivation(uuid,boolean)', 'EXECUTE') AS "platformCallsMutation"
+        has_function_privilege(${appRole}, 'steward_bootstrap.platform_user_tenant_ids(uuid)', 'EXECUTE') AS "appCallsGlobalTenantInventory",
+        has_function_privilege(${platformRole}, 'steward_bootstrap.platform_set_user_deactivation(uuid,boolean)', 'EXECUTE') AS "platformCallsMutation",
+        has_function_privilege(${platformRole}, 'steward_bootstrap.tenant_ids_for_internal_job()', 'EXECUTE') AS "platformCallsGlobalTenantInventory"
     `;
     expect(lifecycleFunctionPrivileges).toEqual({
       appReadsBoundary: true,
       appCallsMutation: false,
       appCallsImplementation: false,
+      appCallsGlobalTenantInventory: false,
       platformCallsMutation: true,
+      platformCallsGlobalTenantInventory: true,
     });
     const [tombstonePrivileges] = await db<{ app: boolean; bootstrap: boolean }[]>`
       SELECT
         has_table_privilege(${appRole}, 'public.user_identity_subjects', 'SELECT,INSERT,UPDATE,DELETE') AS app,
         has_table_privilege(${bootstrapRole}, 'public.user_identity_subjects', 'SELECT,UPDATE') AS bootstrap
     `;
-    expect(tombstonePrivileges).toEqual({ app: false, bootstrap: true });
+    expect(tombstonePrivileges).toEqual({ app: false, bootstrap: false });
     const [userLifecyclePrivileges] = await db<
       {
         updateName: boolean;
@@ -277,6 +351,7 @@ describeWithPostgres("personal lifecycle production upgrade topology", () => {
           [platformKey]: [
             "platform:write",
             "platform:tenant:delete",
+            "platform:tenant-member:write",
             "platform:user-lifecycle:write",
           ],
         }),
@@ -295,6 +370,41 @@ describeWithPostgres("personal lifecycle production upgrade topology", () => {
         .split("\n")
         .findLast((line) => line === '{"ok":true,"deleted":true,"lifecycle":true}'),
     ).toBeDefined();
+    const lockOrderEvidence = await command(
+      [
+        "bun",
+        "run",
+        "packages/api/src/__tests__/fixtures/personal-lifecycle-membership-lock-order.ts",
+      ],
+      {
+        DATABASE_URL: databaseUrl(databaseName, appRole),
+        DATABASE_DRIVER: "postgres-js",
+        STEWARD_APP_DATABASE_ROLE: appRole,
+        STEWARD_PLATFORM_DATABASE_URL: databaseUrl(databaseName, platformRole),
+        STEWARD_PLATFORM_DATABASE_ROLE: platformRole,
+        NODE_ENV: "test",
+        JWT_SECRET: `personal-lifecycle-jwt-${suffix}-0123456789abcdef`,
+        STEWARD_JWT_SECRET: `personal-lifecycle-jwt-${suffix}-0123456789abcdef`,
+        STEWARD_AUDIT_HMAC_KEY: "ab".repeat(32),
+        STEWARD_DEFAULT_TENANT_KEY: `personal-lifecycle-default-${suffix}`,
+        STEWARD_MASTER_PASSWORD: `personal-lifecycle-master-${suffix}`,
+        STEWARD_PLATFORM_KEYS: platformKey,
+        STEWARD_PLATFORM_KEY_SCOPES: JSON.stringify({
+          [platformKey]: [
+            "platform:write",
+            "platform:tenant-member:write",
+            "platform:user-lifecycle:write",
+          ],
+        }),
+        STEWARD_REDIS_REQUIRED: "false",
+        STEWARD_ALLOW_INSECURE_AUTH_STORES: "true",
+        TEST_ADMIN_DATABASE_URL: databaseUrl(),
+        TEST_SHARED_TENANT_ID: teamTenantId,
+        TEST_SHARED_OWNER_ID: teamTargetId,
+        TEST_PLATFORM_KEY: platformKey,
+      },
+    );
+    expect(lockOrderEvidence).toContain("mounted membership/lifecycle lock order passed");
     expect(await db`SELECT id FROM tenants WHERE id = ${mountedPersonalTenantId}`).toHaveLength(0);
 
     const evmOwnerId = randomUUID();

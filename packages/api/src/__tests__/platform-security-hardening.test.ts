@@ -21,6 +21,7 @@ const personalLifecycleMigrationSource = readFileSync(
   join(apiRoot, "..", "..", "db", "drizzle", "0114_personal_lifecycle_invariants.sql"),
   "utf8",
 );
+const tenantJobSource = readFileSync(join(apiRoot, "services", "tenant-job.ts"), "utf8");
 
 function expectBefore(first: string, second: string) {
   const firstIndex = platformSource.indexOf(first);
@@ -330,14 +331,13 @@ describe("platform security hardening", () => {
     expect(agentRollback).toBeGreaterThan(finalAgentAudit);
   });
 
-  it("restores platform user and membership mutations when final audit events fail", () => {
+  it("restores platform user mutations and commits membership updates with their audit", () => {
     for (const [marker, rollback] of [
       ['platform.patch("/users/:userId/metadata"', "customMetadata: existing.customMetadata"],
       [
         'platform.post("/users/:userId/accounts/:provider/:providerAccountId/transfer"',
         "set({ userId: fromUserId })",
       ],
-      ['platform.patch("/tenants/:id/members/:userId"', "set({ role: updated.previousRole })"],
     ] as const) {
       const start = platformSource.indexOf(marker);
       expect(start).toBeGreaterThanOrEqual(0);
@@ -346,6 +346,11 @@ describe("platform security hardening", () => {
       expect(route).toContain("try {");
       expect(route).toContain(rollback);
     }
+    const membershipStart = platformSource.indexOf('platform.patch("/tenants/:id/members/:userId"');
+    const membershipRoute = platformSource.slice(membershipStart);
+    expect(membershipRoute).toContain("withTenantAuditedTransaction(tenantId");
+    expect(membershipRoute).toContain("appendRequiredAudit({");
+    expect(membershipRoute).not.toContain("set({ role: updated.previousRole })");
     const deactivateStart = platformSource.indexOf('platform.patch("/users/:userId/deactivate"');
     const deactivateRoute = platformSource.slice(
       deactivateStart,
@@ -446,6 +451,11 @@ describe("platform security hardening", () => {
     );
   });
 
+  it("enumerates autonomous tenant jobs only through the platform database authority", () => {
+    expect(tenantJobSource).toContain("withPlatformAuthorityDatabase(internalJobTenantIdsOnDb)");
+    expect(tenantJobSource).not.toContain("const result = await getDb().execute(");
+  });
+
   it("revokes user access tokens for tenant membership removal and tenant deletion", () => {
     const memberDeleteStart = platformSource.indexOf(
       'platform.delete("/tenants/:id/members/:userId"',
@@ -473,8 +483,11 @@ describe("platform security hardening", () => {
     expect(
       tenantDeleteRoute.lastIndexOf("applyCommittedTenantDeletionRevocations"),
     ).toBeGreaterThan(tenantDeleteRoute.indexOf("tx.delete(tenants)"));
-    expect(platformSource).toContain("action:\n      failures === 0");
-    expect(platformSource).toContain('"tenant.delete.token_revocation_deferred"');
+    expect(platformSource).toContain('action: "tenant.delete.token_revocation_completed"');
+    expect(platformSource).toContain("revocationJobId");
+    expect(platformSource).toContain("agentIds: tenantAgents.map");
+    expect(platformSource).toContain("if (failures > 0) return");
+    expect(platformSource).not.toContain('"tenant.delete.token_revocation_deferred"');
   });
 
   it("removes non-cascading tenant credential state during tenant deletion", () => {

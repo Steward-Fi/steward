@@ -24,10 +24,8 @@ const APP_EXECUTABLE_FUNCTIONS = [
   "steward_bootstrap.ensure_default_tenant(text)",
   "steward_bootstrap.ensure_platform_tenant()",
   "steward_bootstrap.ensure_system_tenant()",
-  "steward_bootstrap.platform_user_tenant_ids(uuid)",
   "steward_bootstrap.session_subject(uuid,text)",
   "steward_bootstrap.tenant_api_key_subject(text)",
-  "steward_bootstrap.tenant_ids_for_internal_job()",
   "steward_bootstrap.user_token_revocation_subject(uuid)",
 ] as const;
 
@@ -35,17 +33,25 @@ const PLATFORM_EXECUTABLE_FUNCTIONS = [
   "steward_rls.tenant_id()",
   "steward_bootstrap.platform_delete_user(uuid)",
   "steward_bootstrap.platform_personal_tenant_delete(text,boolean)",
+  "steward_bootstrap.platform_provision_user(text,boolean,text,jsonb)",
   "steward_bootstrap.platform_revoke_user_refresh_tokens(uuid)",
   "steward_bootstrap.platform_set_user_deactivation(uuid,boolean)",
+  "steward_bootstrap.platform_user_tenant_ids(uuid)",
+  "steward_bootstrap.platform_user_identity(uuid)",
   "steward_bootstrap.platform_stats()",
   "steward_bootstrap.platform_tenants(integer,integer)",
   "steward_bootstrap.retention_delete_deactivated_users(integer)",
+  "steward_bootstrap.tenant_ids_for_internal_job()",
 ] as const;
 
 const PERSONAL_LIFECYCLE_LOCK_FUNCTION = "steward_lock_personal_lifecycle(uuid,text,boolean)";
 const APP_PUBLIC_EXECUTABLE_FUNCTIONS = [
+  "steward_is_authoritative_wallet_identity(text,text,text,text)",
+  "steward_is_authoritative_wallet_tenant_owner(text,uuid)",
+  "steward_is_reserved_tenant_id(text)",
   "steward_lock_tenant_deletion(text)",
   PERSONAL_LIFECYCLE_LOCK_FUNCTION,
+  "steward_reserved_tenant_kind(text)",
 ] as const;
 const APP_USERS_INSERT_COLUMNS = [
   "created_at",
@@ -91,11 +97,15 @@ export const EXPECTED_PERSONAL_LIFECYCLE_LOCK_DEFINITION = {
 const EXPECTED_PLATFORM_NAMED_ACLS = [
   "function:steward_bootstrap.platform_delete_user(uuid):EXECUTE:false",
   "function:steward_bootstrap.platform_personal_tenant_delete(text,boolean):EXECUTE:false",
+  "function:steward_bootstrap.platform_provision_user(text,boolean,text,jsonb):EXECUTE:false",
   "function:steward_bootstrap.platform_revoke_user_refresh_tokens(uuid):EXECUTE:false",
   "function:steward_bootstrap.platform_set_user_deactivation(uuid,boolean):EXECUTE:false",
   "function:steward_bootstrap.platform_stats():EXECUTE:false",
   "function:steward_bootstrap.platform_tenants(integer,integer):EXECUTE:false",
+  "function:steward_bootstrap.platform_user_identity(uuid):EXECUTE:false",
+  "function:steward_bootstrap.platform_user_tenant_ids(uuid):EXECUTE:false",
   "function:steward_bootstrap.retention_delete_deactivated_users(integer):EXECUTE:false",
+  "function:steward_bootstrap.tenant_ids_for_internal_job():EXECUTE:false",
   "function:steward_rls.tenant_id():EXECUTE:false",
   "relation:public.audit_chain_heads:INSERT:false",
   "relation:public.audit_chain_heads:SELECT:false",
@@ -104,6 +114,8 @@ const EXPECTED_PLATFORM_NAMED_ACLS = [
   "relation:public.audit_events:SELECT:false",
   "relation:public.audit_events_id_seq:SELECT:false",
   "relation:public.audit_events_id_seq:USAGE:false",
+  "relation:public.user_tenants:SELECT:false",
+  "relation:public.users:SELECT:false",
   "schema:steward_bootstrap:USAGE:false",
   "schema:steward_rls:USAGE:false",
 ] as const;
@@ -609,6 +621,13 @@ export async function assertRlsDeploymentSafety(
       JOIN pg_namespace namespace ON namespace.oid = function.pronamespace
       JOIN pg_language language ON language.oid = function.prolang
       WHERE namespace.nspname IN ('steward_bootstrap', 'steward_rls')
+        OR (
+          namespace.nspname = 'public'
+          AND function.oid::regprocedure::text = ANY(${boundTextArray([
+            "steward_register_user_identity_subject()",
+            "steward_retire_user_identity_subject()",
+          ])})
+        )
       ORDER BY function.oid::regprocedure::text
     `),
   );
@@ -651,6 +670,13 @@ export async function assertRlsDeploymentSafety(
         COALESCE(function.proacl, acldefault('f', function.proowner))
       ) privilege
       WHERE namespace.nspname IN ('steward_bootstrap', 'steward_rls')
+        OR (
+          namespace.nspname = 'public'
+          AND function.oid::regprocedure::text = ANY(${boundTextArray([
+            "steward_register_user_identity_subject()",
+            "steward_retire_user_identity_subject()",
+          ])})
+        )
       ORDER BY identity, grantee, privilege, grantable
     `),
   );
@@ -826,7 +852,11 @@ export async function assertRlsDeploymentSafety(
     "schema:steward_bootstrap:USAGE:false",
     "schema:steward_rls:USAGE:false",
     ...expectedRelations.flatMap((relation) => {
-      if (relation.relation_name === "retained_user_provider_evidence") return [];
+      if (
+        relation.relation_name === "retained_user_provider_evidence" ||
+        relation.relation_name === "user_identity_subjects"
+      )
+        return [];
       if (relation.relation_name === "users") return ["relation:public.users:SELECT:false"];
       return ["DELETE", "INSERT", "SELECT", "UPDATE"].map(
         (privilege) => `relation:public.${relation.relation_name}:${privilege}:false`,

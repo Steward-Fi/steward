@@ -417,11 +417,18 @@ export async function appendAuditEventWithinTx(
  */
 export async function appendAuditEvent(ev: AuditEventInput): Promise<void> {
   const db = getDb();
+  // Reject attempts to retarget an authenticated request's retained database
+  // capability before applying the standalone transaction-local RLS binding.
+  hasTenantTransactionDatabase({ tenantId: ev.tenantId, db });
 
   for (let attempt = 0; attempt < 5; attempt++) {
     try {
       await db.transaction(async (tx) => {
         if (!isPGLiteRuntime()) {
+          // Standalone platform/system writers do not arrive through the
+          // authenticated tenant middleware. Bind the exact audit tenant
+          // transaction-locally before touching forced-RLS audit tables.
+          await tx.execute(sql`SELECT set_config('steward.tenant_id', ${ev.tenantId}, true)`);
           await tx.execute(
             sql`SELECT pg_advisory_xact_lock(hashtextextended(${`steward_audit_${ev.tenantId}`}, 0))`,
           );
@@ -569,7 +576,12 @@ export async function withTenantAuditedTransactionOnDb<T>(
     for (let attempt = 0; attempt < 5; attempt++) {
       try {
         assertRemaining();
-        const outcome = await db.transaction((tx) => runOnTransaction(tx as AuditTxLike));
+        const outcome = await db.transaction(async (tx) => {
+          if (!isPGLiteRuntime()) {
+            await tx.execute(sql`SELECT set_config('steward.tenant_id', ${tenantId}, true)`);
+          }
+          return runOnTransaction(tx as AuditTxLike);
+        });
         observeCommittedEvents(outcome.committedEvents);
         return outcome.result;
       } catch (err) {

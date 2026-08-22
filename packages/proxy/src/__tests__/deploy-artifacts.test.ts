@@ -423,14 +423,41 @@ describe("SEC-169 production Compose uses the restricted RLS runtime role", () =
     return match?.[1] ?? "";
   };
 
-  test("orders core migration, role bootstrap, plugin migration, and activation", () => {
+  test("orders split-safe core migration, privileged wrapper upgrades, plugins, and activation", () => {
     for (const compose of composeFiles) {
       expect(serviceBlock(compose, "steward-core-migrate")).toContain(
-        'migrate-production.ts", "core',
+        'migrate-production.ts", "core-through-0112',
       );
       expect(serviceBlock(compose, "steward-rls-bootstrap")).toContain("steward-core-migrate:");
-      expect(serviceBlock(compose, "steward-plugin-migrate")).toContain("steward-rls-bootstrap:");
-      expect(serviceBlock(compose, "steward-rls-activate")).toContain("steward-plugin-migrate:");
+      expect(serviceBlock(compose, "steward-rls-prepare-0113")).toContain("steward-rls-bootstrap:");
+      expect(serviceBlock(compose, "steward-rls-prepare-0113")).toContain(
+        "rls-prepare-personal-lifecycle.sql",
+      );
+      expect(serviceBlock(compose, "steward-core-migrate-0113")).toContain(
+        "steward-rls-prepare-0113:",
+      );
+      expect(serviceBlock(compose, "steward-core-migrate-0113")).toContain(
+        'migrate-production.ts", "core-through-0113',
+      );
+      expect(serviceBlock(compose, "steward-core-migrate-0113")).toContain(
+        "MIGRATION_DATABASE_URL",
+      );
+      expect(serviceBlock(compose, "steward-rls-upgrade-pre")).toContain(
+        "steward-core-migrate-0113:",
+      );
+      expect(serviceBlock(compose, "steward-core-migrate-final")).toContain(
+        "steward-rls-upgrade-pre:",
+      );
+      expect(serviceBlock(compose, "steward-plugin-migrate")).toContain(
+        "steward-core-migrate-final:",
+      );
+      expect(serviceBlock(compose, "steward-rls-bootstrap-final")).toContain(
+        "steward-plugin-migrate:",
+      );
+      expect(serviceBlock(compose, "steward-rls-upgrade-final")).toContain(
+        "steward-rls-bootstrap-final:",
+      );
+      expect(serviceBlock(compose, "steward-rls-activate")).toContain("steward-rls-upgrade-final:");
     }
   });
 

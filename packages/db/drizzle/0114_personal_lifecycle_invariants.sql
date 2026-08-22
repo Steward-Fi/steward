@@ -24,6 +24,90 @@ AS $$
   SELECT public.steward_reserved_tenant_kind(p_tenant_id) IS NOT NULL
 $$;
 
+-- Platform provisioning is a deliberately narrow global-identity mutation.
+-- The restricted platform login has no table privileges; it reaches this
+-- migrator-owned implementation only through the bootstrap-owned wrapper.
+CREATE OR REPLACE FUNCTION public.steward_platform_provision_user_v1(
+  p_email text,
+  p_email_verified boolean,
+  p_name text,
+  p_custom_metadata jsonb
+)
+RETURNS TABLE (user_id uuid, is_new boolean)
+LANGUAGE plpgsql
+VOLATILE
+SET search_path = pg_catalog
+AS $$
+DECLARE
+  provisioned_id uuid;
+BEGIN
+  IF p_email IS NULL OR btrim(p_email) = '' THEN
+    RAISE EXCEPTION 'A valid email is required' USING ERRCODE = '22023';
+  END IF;
+  PERFORM pg_advisory_xact_lock(
+    hashtextextended('platform_user_email_' || lower(btrim(p_email)), 0)
+  );
+  SELECT u.id INTO provisioned_id
+  FROM public.users u
+  WHERE u.email = lower(btrim(p_email));
+  IF provisioned_id IS NOT NULL THEN
+    RETURN QUERY SELECT provisioned_id, false;
+    RETURN;
+  END IF;
+  INSERT INTO public.users (email, email_verified, name, custom_metadata)
+  VALUES (
+    lower(btrim(p_email)),
+    COALESCE(p_email_verified, false),
+    p_name,
+    COALESCE(p_custom_metadata, '{}'::jsonb)
+  )
+  RETURNING id INTO provisioned_id;
+  RETURN QUERY SELECT provisioned_id, true;
+END
+$$;
+
+REVOKE ALL ON FUNCTION public.steward_platform_provision_user_v1(
+  text, boolean, text, jsonb
+) FROM PUBLIC;
+
+CREATE OR REPLACE FUNCTION public.steward_platform_user_identity_v1(p_user_id uuid)
+RETURNS jsonb
+LANGUAGE sql
+STABLE
+SET search_path = pg_catalog
+AS $$
+  SELECT jsonb_build_object(
+    'userId', u.id,
+    'email', u.email,
+    'emailVerified', u.email_verified,
+    'name', u.name,
+    'image', u.image,
+    'walletAddress', u.wallet_address,
+    'walletChain', u.wallet_chain,
+    'customMetadata', COALESCE(u.custom_metadata, '{}'::jsonb),
+    'deactivatedAt', u.deactivated_at,
+    'createdAt', u.created_at,
+    'updatedAt', u.updated_at,
+    'tenantIds', COALESCE((
+      SELECT jsonb_agg(ut.tenant_id ORDER BY ut.tenant_id)
+      FROM public.user_tenants ut WHERE ut.user_id = u.id
+    ), '[]'::jsonb),
+    'linkedAccounts', COALESCE((
+      SELECT jsonb_agg(jsonb_build_object(
+        'id', a.id,
+        'provider', a.provider,
+        'providerAccountId', a.provider_account_id,
+        'expiresAt', a.expires_at
+      ) ORDER BY a.id)
+      FROM public.accounts a WHERE a.user_id = u.id
+    ), '[]'::jsonb)
+  )
+  FROM public.users u
+  WHERE u.id = p_user_id
+$$;
+
+REVOKE ALL ON FUNCTION public.steward_platform_user_identity_v1(uuid) FROM PUBLIC;
+
 -- Wallet-owned reserved tenants are intentionally joinable only by the user
 -- whose persisted wallet identity matches the tenant's persisted owner. The
 -- check is database-verifiable and does not trust a route-supplied address.
@@ -616,6 +700,35 @@ FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.steward_platform_delete_user_v2(uuid)
 FROM PUBLIC;
 
+-- Preserve deleted-tenant revocation jobs in the retained audit chain. The
+-- bootstrap wrapper may enumerate a deleted tenant id until its idempotent
+-- cache-revocation completion marker is committed under the same chain.
+CREATE OR REPLACE FUNCTION public.steward_internal_job_tenant_ids_v2()
+RETURNS TABLE (tenant_id varchar(64))
+LANGUAGE sql
+STABLE
+SET search_path = pg_catalog
+AS $$
+  SELECT jobs.tenant_id
+  FROM (
+    SELECT t.id AS tenant_id FROM public.tenants t
+    WHERE t.id NOT IN ('system', 'platform')
+    UNION
+    SELECT source.tenant_id
+    FROM public.audit_events source
+    WHERE source.action = 'tenant.delete'
+      AND source.metadata ? 'revocationJobId'
+      AND NOT EXISTS (
+        SELECT 1 FROM public.audit_events completion
+        WHERE completion.tenant_id = source.tenant_id
+          AND completion.action = 'tenant.delete.token_revocation_completed'
+          AND completion.metadata->>'revocationJobId' = source.metadata->>'revocationJobId'
+      )
+  ) jobs
+  ORDER BY jobs.tenant_id
+$$;
+REVOKE ALL ON FUNCTION public.steward_internal_job_tenant_ids_v2() FROM PUBLIC;
+
 -- PGLite has no operator role-split lane. It may refresh the tiny wrappers only
 -- when its current migration identity already owns them. On a split production
 -- database this branch is false; the admin script is the sole replacement path.
@@ -663,8 +776,14 @@ BEGIN
     EXECUTE $ddl$
       CREATE OR REPLACE FUNCTION steward_bootstrap.user_token_revocation_subject(p_user_id uuid)
       RETURNS bigint
-      LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog
-      AS 'SELECT public.steward_user_token_revocation_subject_v1(p_user_id)'
+      LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = pg_catalog
+      AS 'BEGIN RETURN public.steward_user_token_revocation_subject_v1(p_user_id); END'
+    $ddl$;
+    EXECUTE $ddl$
+      CREATE OR REPLACE FUNCTION steward_bootstrap.tenant_ids_for_internal_job()
+      RETURNS TABLE (tenant_id varchar(64))
+      LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = pg_catalog
+      AS 'BEGIN RETURN QUERY SELECT * FROM public.steward_internal_job_tenant_ids_v2(); END'
     $ddl$;
     EXECUTE $ddl$
       CREATE OR REPLACE FUNCTION steward_bootstrap.ensure_default_membership(
@@ -711,6 +830,41 @@ $$;
 -- transaction-local value inherited while upgrading before ordinary callers
 -- can exercise the guards below.
 SELECT set_config('steward.lifecycle_wrapper', '', true);
+
+-- Triggers are prospective. Refuse to bless legacy rows that already violate
+-- the reserved-namespace invariant; silently carrying them forward would leave
+-- an authorization grant that no post-upgrade writer could create or repair.
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1
+    FROM public.user_tenants membership
+    WHERE CASE public.steward_reserved_tenant_kind(membership.tenant_id)
+      WHEN 'fixed' THEN NOT (
+        lower(membership.tenant_id) = 'default'
+        AND membership.role IN ('member', 'guest')
+      )
+      WHEN 'personal' THEN membership.tenant_id IS DISTINCT FROM
+        'personal-' || membership.user_id::text OR membership.role IS DISTINCT FROM 'owner'
+      WHEN 'wallet' THEN membership.role IS DISTINCT FROM 'owner'
+        OR NOT public.steward_is_authoritative_wallet_tenant_owner(
+          membership.tenant_id, membership.user_id
+        )
+      ELSE false
+    END
+  ) THEN
+    RAISE EXCEPTION 'Legacy reserved tenant membership violates authoritative invariant'
+      USING ERRCODE = '23514';
+  END IF;
+  IF EXISTS (
+    SELECT 1 FROM public.tenant_invitations invitation
+    WHERE public.steward_is_reserved_tenant_id(invitation.tenant_id)
+  ) THEN
+    RAISE EXCEPTION 'Legacy reserved tenant invitation violates authoritative invariant'
+      USING ERRCODE = '23514';
+  END IF;
+END
+$$;
 
 CREATE OR REPLACE FUNCTION public.steward_guard_personal_membership_write()
 RETURNS trigger LANGUAGE plpgsql AS $$
@@ -878,3 +1032,32 @@ BEGIN
   END LOOP;
 END
 $$;
+
+-- Rebind durable actor provenance to the non-reusable identity registry. This
+-- permits deletion of the mutable users row while rejecting invented actor
+-- UUIDs from direct writers and retaining historical attribution forever.
+ALTER TABLE public.workspaces
+  ADD CONSTRAINT workspaces_created_by_identity_subject_fk
+  FOREIGN KEY (created_by) REFERENCES public.user_identity_subjects(user_id)
+  ON DELETE RESTRICT NOT VALID;
+ALTER TABLE public.provider_role_bindings
+  ADD CONSTRAINT provider_role_bindings_granted_by_identity_subject_fk
+  FOREIGN KEY (granted_by_user_id) REFERENCES public.user_identity_subjects(user_id)
+  ON DELETE RESTRICT NOT VALID;
+ALTER TABLE public.provider_grants
+  ADD CONSTRAINT provider_grants_granted_by_identity_subject_fk
+  FOREIGN KEY (granted_by_user_id) REFERENCES public.user_identity_subjects(user_id)
+  ON DELETE RESTRICT NOT VALID;
+ALTER TABLE public.provider_grants
+  ADD CONSTRAINT provider_grants_revoked_by_identity_subject_fk
+  FOREIGN KEY (revoked_by_user_id) REFERENCES public.user_identity_subjects(user_id)
+  ON DELETE RESTRICT NOT VALID;
+
+ALTER TABLE public.workspaces
+  VALIDATE CONSTRAINT workspaces_created_by_identity_subject_fk;
+ALTER TABLE public.provider_role_bindings
+  VALIDATE CONSTRAINT provider_role_bindings_granted_by_identity_subject_fk;
+ALTER TABLE public.provider_grants
+  VALIDATE CONSTRAINT provider_grants_granted_by_identity_subject_fk;
+ALTER TABLE public.provider_grants
+  VALIDATE CONSTRAINT provider_grants_revoked_by_identity_subject_fk;

@@ -197,6 +197,12 @@ BEGIN
       JOIN pg_namespace n ON n.oid = p.pronamespace
       JOIN pg_language l ON l.oid = p.prolang
       WHERE n.nspname IN ('steward_bootstrap', 'steward_rls')
+        OR (
+          n.nspname = 'public'
+          AND p.oid::regprocedure::text IN (
+            SELECT identity FROM steward_expected_rls_functions
+          )
+        )
     )
     SELECT 1
     FROM steward_expected_rls_functions expected
@@ -217,7 +223,41 @@ BEGIN
       OR actual.app_execute IS DISTINCT FROM expected.app_execute
       OR actual.platform_execute IS DISTINCT FROM expected.platform_execute
   ) THEN
-    RAISE EXCEPTION 'SEC-169 privileged function semantic manifest drift';
+    RAISE EXCEPTION 'SEC-169 privileged function semantic manifest drift'
+      USING DETAIL = (
+        SELECT jsonb_agg(jsonb_build_object(
+          'identity', p.oid::regprocedure::text,
+          'result', pg_get_function_result(p.oid),
+          'language', l.lanname,
+          'body_md5', md5(btrim(p.prosrc, E' \t\n\r')),
+          'owner', pg_get_userbyid(p.proowner),
+          'volatility', p.provolatile,
+          'parallelism', p.proparallel,
+          'security_definer', p.prosecdef,
+          'settings', COALESCE(array_to_string(p.proconfig, E'\n'), ''),
+          'public_execute', EXISTS (
+            SELECT 1
+            FROM aclexplode(COALESCE(p.proacl, acldefault('f', p.proowner))) acl
+            WHERE acl.grantee = 0 AND acl.privilege_type = 'EXECUTE'
+          ),
+          'app_execute', has_function_privilege(
+            current_setting('steward.activation.app_role'), p.oid, 'EXECUTE'
+          ),
+          'platform_execute', has_function_privilege(
+            current_setting('steward.activation.platform_role'), p.oid, 'EXECUTE'
+          )
+        ) ORDER BY p.oid::regprocedure::text)::text
+        FROM pg_proc p
+        JOIN pg_namespace n ON n.oid = p.pronamespace
+        JOIN pg_language l ON l.oid = p.prolang
+        WHERE n.nspname IN ('steward_bootstrap', 'steward_rls')
+          OR (
+            n.nspname = 'public'
+            AND p.oid::regprocedure::text IN (
+              SELECT identity FROM steward_expected_rls_functions
+            )
+          )
+      );
   END IF;
   IF EXISTS (
     WITH actual AS (
@@ -228,6 +268,12 @@ BEGIN
       JOIN pg_namespace n ON n.oid = p.pronamespace
       CROSS JOIN LATERAL aclexplode(COALESCE(p.proacl, acldefault('f', p.proowner))) acl
       WHERE n.nspname IN ('steward_bootstrap', 'steward_rls')
+        OR (
+          n.nspname = 'public'
+          AND p.oid::regprocedure::text IN (
+            SELECT identity FROM steward_expected_rls_functions
+          )
+        )
     ), expected AS (
       SELECT manifest.identity,
         CASE manifest.owner_kind WHEN 'migration'
@@ -287,7 +333,18 @@ BEGIN
     SELECT 1 FROM actual FULL JOIN expected USING (grantee, privilege, grantable)
     WHERE actual.grantee IS NULL OR expected.grantee IS NULL
   ) THEN
-    RAISE EXCEPTION 'SEC-169 personal lifecycle lock ACL manifest drift';
+    RAISE EXCEPTION 'SEC-169 personal lifecycle lock ACL manifest drift: %', (
+      SELECT array_agg(format('%s:%s:%s',
+        CASE acl.grantee WHEN 0 THEN 'PUBLIC' ELSE pg_get_userbyid(acl.grantee) END,
+        acl.privilege_type,
+        acl.is_grantable
+      ) ORDER BY 1)
+      FROM pg_proc p
+      CROSS JOIN LATERAL aclexplode(COALESCE(p.proacl, acldefault('f', p.proowner))) acl
+      WHERE p.oid = to_regprocedure(
+        'public.steward_lock_personal_lifecycle(uuid,text,boolean)'
+      )
+    );
   END IF;
   IF EXISTS (
     WITH actual AS (
@@ -353,14 +410,20 @@ BEGIN
         ('schema:public:USAGE:false'),
         ('schema:steward_bootstrap:USAGE:false'),
         ('schema:steward_rls:USAGE:false'),
+        ('function:steward_is_authoritative_wallet_identity(text,text,text,text):EXECUTE:false'),
+        ('function:steward_is_authoritative_wallet_tenant_owner(text,uuid):EXECUTE:false'),
+        ('function:steward_is_reserved_tenant_id(text):EXECUTE:false'),
         ('function:steward_lock_tenant_deletion(text):EXECUTE:false'),
-        ('function:steward_lock_personal_lifecycle(uuid,text,boolean):EXECUTE:false')
+        ('function:steward_lock_personal_lifecycle(uuid,text,boolean):EXECUTE:false'),
+        ('function:steward_reserved_tenant_kind(text):EXECUTE:false')
       ) fixed(acl)
       UNION ALL
       SELECT 'relation:public.' || relation.relation_name || ':' || privilege || ':false'
       FROM steward_expected_public_relations relation
       CROSS JOIN (VALUES ('DELETE'), ('INSERT'), ('SELECT'), ('UPDATE')) privileges(privilege)
-      WHERE relation.relation_name NOT IN ('users', 'retained_user_provider_evidence')
+      WHERE relation.relation_name NOT IN (
+        'users', 'retained_user_provider_evidence', 'user_identity_subjects'
+      )
       UNION ALL
       SELECT 'relation:public.users:SELECT:false'
       UNION ALL
@@ -444,11 +507,15 @@ BEGIN
     ), expected(acl) AS (VALUES
       ('function:steward_bootstrap.platform_delete_user(uuid):EXECUTE:false'),
       ('function:steward_bootstrap.platform_personal_tenant_delete(text,boolean):EXECUTE:false'),
+      ('function:steward_bootstrap.platform_provision_user(text,boolean,text,jsonb):EXECUTE:false'),
       ('function:steward_bootstrap.platform_revoke_user_refresh_tokens(uuid):EXECUTE:false'),
       ('function:steward_bootstrap.platform_set_user_deactivation(uuid,boolean):EXECUTE:false'),
+      ('function:steward_bootstrap.platform_user_tenant_ids(uuid):EXECUTE:false'),
+      ('function:steward_bootstrap.platform_user_identity(uuid):EXECUTE:false'),
       ('function:steward_bootstrap.platform_stats():EXECUTE:false'),
       ('function:steward_bootstrap.platform_tenants(integer,integer):EXECUTE:false'),
       ('function:steward_bootstrap.retention_delete_deactivated_users(integer):EXECUTE:false'),
+      ('function:steward_bootstrap.tenant_ids_for_internal_job():EXECUTE:false'),
       ('function:steward_rls.tenant_id():EXECUTE:false'),
       ('relation:public.audit_chain_heads:INSERT:false'),
       ('relation:public.audit_chain_heads:SELECT:false'),
@@ -457,6 +524,8 @@ BEGIN
       ('relation:public.audit_events:SELECT:false'),
       ('relation:public.audit_events_id_seq:SELECT:false'),
       ('relation:public.audit_events_id_seq:USAGE:false'),
+      ('relation:public.user_tenants:SELECT:false'),
+      ('relation:public.users:SELECT:false'),
       ('schema:steward_bootstrap:USAGE:false'),
       ('schema:steward_rls:USAGE:false')
     )
@@ -484,11 +553,11 @@ BEGIN
       OR CASE p.oid::regprocedure::text
         WHEN 'steward_register_user_identity_subject()' THEN
           pg_get_function_result(p.oid) <> 'trigger'
-          OR md5(btrim(p.prosrc, E' \t\n\r')) <> 'a1198ec71cbf072f8259fefd8d7b976e'
+          OR md5(btrim(p.prosrc, E' \t\n\r')) <> '88032ecac08ef35e10948b9c2e6215c9'
           OR has_function_privilege(current_setting('steward.activation.bootstrap_role'), p.oid, 'EXECUTE')
         WHEN 'steward_retire_user_identity_subject()' THEN
           pg_get_function_result(p.oid) <> 'trigger'
-          OR md5(btrim(p.prosrc, E' \t\n\r')) <> 'b9b8ce0ab96277824945a69b3a8f8bce'
+          OR md5(btrim(p.prosrc, E' \t\n\r')) <> '4b23041b4549c735955ccfb9af6c30fd'
           OR has_function_privilege(current_setting('steward.activation.bootstrap_role'), p.oid, 'EXECUTE')
         ELSE true
       END
@@ -590,11 +659,13 @@ BEGIN
           'steward_bootstrap.ensure_system_tenant()',
           'steward_bootstrap.platform_delete_user(uuid)',
           'steward_bootstrap.platform_personal_tenant_delete(text,boolean)',
+          'steward_bootstrap.platform_provision_user(text,boolean,text,jsonb)',
           'steward_bootstrap.platform_revoke_user_refresh_tokens(uuid)',
           'steward_bootstrap.platform_set_user_deactivation(uuid,boolean)',
           'steward_bootstrap.platform_stats()',
           'steward_bootstrap.platform_tenants(integer,integer)',
           'steward_bootstrap.platform_user_tenant_ids(uuid)',
+          'steward_bootstrap.platform_user_identity(uuid)',
           'steward_bootstrap.retention_delete_deactivated_users(integer)',
           'steward_bootstrap.session_subject(uuid,text)',
           'steward_bootstrap.tenant_api_key_subject(text)',
@@ -618,10 +689,8 @@ BEGIN
           'steward_bootstrap.ensure_default_tenant(text)',
           'steward_bootstrap.ensure_platform_tenant()',
           'steward_bootstrap.ensure_system_tenant()',
-          'steward_bootstrap.platform_user_tenant_ids(uuid)',
           'steward_bootstrap.session_subject(uuid,text)',
           'steward_bootstrap.tenant_api_key_subject(text)',
-          'steward_bootstrap.tenant_ids_for_internal_job()',
           'steward_bootstrap.user_token_revocation_subject(uuid)'
         ]))
       )

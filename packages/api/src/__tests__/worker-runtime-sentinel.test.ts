@@ -286,6 +286,7 @@ test("Worker cron gives every autonomous sweep its own request database", async 
   const upstreamScheduler = await import("../services/upstream-credential-lease-scheduler");
   const googleScheduler = await import("../services/provider-google-lifecycle-scheduler");
   const xScheduler = await import("../services/provider-x-lifecycle-scheduler");
+  const tenantDeletionScheduler = await import("../services/tenant-deletion-revocation-scheduler");
   const seen: string[] = [];
   let databaseCount = 0;
   const createDbSpy = spyOn(databaseModule, "createDbForRequest").mockImplementation(() => {
@@ -315,6 +316,14 @@ test("Worker cron gives every autonomous sweep its own request database", async 
       return {} as never;
     },
   );
+  const tenantDeletionSpy = spyOn(
+    tenantDeletionScheduler,
+    "runTenantDeletionRevocationSweep",
+  ).mockImplementation(async () => {
+    await Promise.resolve();
+    seen.push((getDb() as unknown as { marker: string }).marker);
+    return [];
+  });
   let scheduledWork!: Promise<unknown>;
   const env = {
     DATABASE_URL: "postgresql://worker.invalid/steward",
@@ -344,14 +353,15 @@ test("Worker cron gives every autonomous sweep its own request database", async 
     upstreamSpy.mockRestore();
     googleSpy.mockRestore();
     xSpy.mockRestore();
+    tenantDeletionSpy.mockRestore();
     for (const [key, value] of previousEnv) {
       if (value === undefined) delete process.env[key];
       else process.env[key] = value;
     }
   }
 
-  expect(databaseCount).toBe(4);
-  expect(seen.sort()).toEqual(["cron-db-2", "cron-db-3", "cron-db-4"]);
+  expect(databaseCount).toBe(5);
+  expect(seen.sort()).toEqual(["cron-db-2", "cron-db-3", "cron-db-4", "cron-db-5"]);
 });
 
 test("configured webhook work retains its request database until Worker cleanup", async () => {

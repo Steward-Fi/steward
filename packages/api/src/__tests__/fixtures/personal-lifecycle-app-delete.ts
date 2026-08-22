@@ -24,9 +24,16 @@ try {
   assert(teamTenantId.length > 0, "team lifecycle tenant is required");
   assert(teamAdminId.length > 0 && teamTargetId.length > 0, "team lifecycle users are required");
 
-  const oldToken = await signAccessToken({ address: "", tenantId, userId });
+  // Exercise the durable token boundary on a non-owner team member. The
+  // personal owner is intentionally protected by the authoritative invariant
+  // and cannot be deactivated while it is the canonical personal owner.
+  const oldToken = await signAccessToken({
+    address: "",
+    tenantId: teamTenantId,
+    userId: teamTargetId,
+  });
   assert(
-    (await verifySessionToken(oldToken))?.userId === userId,
+    (await verifySessionToken(oldToken))?.userId === teamTargetId,
     "old token was not initially valid",
   );
   let failNextCacheRefresh = true;
@@ -39,17 +46,20 @@ try {
   };
   cacheOverrideInstalled = true;
 
-  const deactivate = await app.request(`http://steward.test/platform/users/${userId}/deactivate`, {
-    method: "PATCH",
-    headers: {
-      "Content-Type": "application/json",
-      "X-Steward-Platform-Key": platformKey,
+  const deactivate = await app.request(
+    `http://steward.test/platform/users/${teamTargetId}/deactivate`,
+    {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Steward-Platform-Key": platformKey,
+      },
+      body: JSON.stringify({ deactivated: true }),
     },
-    body: JSON.stringify({ deactivated: true }),
-  });
+  );
   assert(
     deactivate.status === 200,
-    `mounted failed-cache deactivation returned ${deactivate.status}`,
+    `mounted failed-cache deactivation returned ${deactivate.status}: ${await deactivate.text()}`,
   );
   assert(
     (await verifySessionToken(oldToken)) === null,
@@ -59,17 +69,24 @@ try {
   // successful deactivation cache line, so only the durable reactivation line
   // can keep it invalid after deactivated_at is cleared.
   await Bun.sleep(1_100);
-  const betweenToken = await signAccessToken({ address: "", tenantId, userId });
+  const betweenToken = await signAccessToken({
+    address: "",
+    tenantId: teamTenantId,
+    userId: teamTargetId,
+  });
   failNextCacheRefresh = true;
 
-  const reactivate = await app.request(`http://steward.test/platform/users/${userId}/deactivate`, {
-    method: "PATCH",
-    headers: {
-      "Content-Type": "application/json",
-      "X-Steward-Platform-Key": platformKey,
+  const reactivate = await app.request(
+    `http://steward.test/platform/users/${teamTargetId}/deactivate`,
+    {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Steward-Platform-Key": platformKey,
+      },
+      body: JSON.stringify({ deactivated: false }),
     },
-    body: JSON.stringify({ deactivated: false }),
-  });
+  );
   assert(
     reactivate.status === 200,
     `mounted failed-cache reactivation returned ${reactivate.status}`,
@@ -79,9 +96,13 @@ try {
     "reactivation restored a token newer than the stale cache but older than the durable boundary",
   );
   await Bun.sleep(1_100);
-  const freshToken = await signAccessToken({ address: "", tenantId, userId });
+  const freshToken = await signAccessToken({
+    address: "",
+    tenantId: teamTenantId,
+    userId: teamTargetId,
+  });
   assert(
-    (await verifySessionToken(freshToken))?.userId === userId,
+    (await verifySessionToken(freshToken))?.userId === teamTargetId,
     "fresh post-reactivation token was not accepted",
   );
 

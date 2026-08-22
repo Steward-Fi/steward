@@ -79,7 +79,9 @@ function hashMigration(tag: string): string {
  * silently skip every migration between the DB's true tip and now, including
  * constraint-only hardening migrations whose absence produces no runtime error.
  */
-export async function runMigrations(): Promise<{ applied: string[] }> {
+export async function runMigrations(options?: {
+  throughTag?: string;
+}): Promise<{ applied: string[] }> {
   const { client } = createDb();
 
   try {
@@ -89,6 +91,12 @@ export async function runMigrations(): Promise<{ applied: string[] }> {
 
     try {
       const journal = readJournal();
+      const throughEntry = options?.throughTag
+        ? journal.entries.find((entry) => entry.tag === options.throughTag)
+        : undefined;
+      if (options?.throughTag && !throughEntry) {
+        throw new Error(`[migrate] Unknown terminal migration tag: ${options.throughTag}`);
+      }
 
       // PostgreSQL checks database CREATE privilege even for CREATE SCHEMA IF
       // NOT EXISTS. After the role split, the restricted migrator owns the
@@ -164,6 +172,7 @@ export async function runMigrations(): Promise<{ applied: string[] }> {
       `) as Array<{ created_at: string | number | null }>;
       await client.begin(async (tx) => {
         for (const migration of migrations) {
+          if (throughEntry && migration.folderMillis > throughEntry.when) continue;
           if (
             latestMigration?.created_at !== null &&
             latestMigration?.created_at !== undefined &&

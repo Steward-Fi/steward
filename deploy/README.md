@@ -19,8 +19,9 @@ cd steward
 cp .env.example .env
 $EDITOR .env   # fill in required vars (see table below)
 
-# 3. Start everything. Compose runs core migration → role bootstrap → enabled
-#    plugin migration → RLS activation before API/proxy startup.
+# 3. Start everything. Compose runs core through 0112 as admin → role bootstrap
+#    → 0113 as restricted migrator → privileged wrapper upgrade → remaining
+#    restricted core → plugins → final bootstrap/upgrade → RLS activation.
 docker compose up -d
 
 # 4. Tail logs

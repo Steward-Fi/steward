@@ -31,7 +31,9 @@ describe("tenant team RBAC hardening", () => {
     expect(source).toContain("tenant.member.role.update.authorized");
     expect(source).toContain("tenant.member.role.update");
     expect(source).toContain("previousRole: membership.role");
-    expect(source).toContain(".set({ role: updated.previousRole })");
+    expect(source).toContain("withTenantAuditedTransactionOnDb(");
+    expect(source).toContain("appendRequiredAudit({");
+    expect(source).not.toContain(".set({ role: updated.previousRole })");
   });
 
   it("surfaces role editing in the dashboard users page", () => {

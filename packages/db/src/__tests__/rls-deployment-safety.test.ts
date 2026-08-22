@@ -227,15 +227,23 @@ function database(options?: {
           "schema:public:USAGE:false",
           "schema:steward_bootstrap:USAGE:false",
           "schema:steward_rls:USAGE:false",
+          "function:steward_is_authoritative_wallet_identity(text,text,text,text):EXECUTE:false",
+          "function:steward_is_authoritative_wallet_tenant_owner(text,uuid):EXECUTE:false",
+          "function:steward_is_reserved_tenant_id(text):EXECUTE:false",
           "function:steward_lock_tenant_deletion(text):EXECUTE:false",
           "function:steward_lock_personal_lifecycle(uuid,text,boolean):EXECUTE:false",
+          "function:steward_reserved_tenant_kind(text):EXECUTE:false",
           ...EXPECTED_RLS_FUNCTION_DEFINITIONS.filter((definition) => definition.appExecute).map(
             (definition) => `function:${definition.identity}:EXECUTE:false`,
           ),
           ...EXPECTED_PUBLIC_RELATIONS.filter(
             (relation) => relation.policy_group === "core" || options?.capabilities,
           ).flatMap((relation) => {
-            if (relation.relation_name === "retained_user_provider_evidence") return [];
+            if (
+              relation.relation_name === "retained_user_provider_evidence" ||
+              relation.relation_name === "user_identity_subjects"
+            )
+              return [];
             if (relation.relation_name === "users") {
               return ["relation:public.users:SELECT:false"];
             }
@@ -260,11 +268,15 @@ function database(options?: {
         const acls = [
           "function:steward_bootstrap.platform_delete_user(uuid):EXECUTE:false",
           "function:steward_bootstrap.platform_personal_tenant_delete(text,boolean):EXECUTE:false",
+          "function:steward_bootstrap.platform_provision_user(text,boolean,text,jsonb):EXECUTE:false",
           "function:steward_bootstrap.platform_revoke_user_refresh_tokens(uuid):EXECUTE:false",
           "function:steward_bootstrap.platform_set_user_deactivation(uuid,boolean):EXECUTE:false",
+          "function:steward_bootstrap.platform_user_identity(uuid):EXECUTE:false",
+          "function:steward_bootstrap.platform_user_tenant_ids(uuid):EXECUTE:false",
           "function:steward_bootstrap.platform_stats():EXECUTE:false",
           "function:steward_bootstrap.platform_tenants(integer,integer):EXECUTE:false",
           "function:steward_bootstrap.retention_delete_deactivated_users(integer):EXECUTE:false",
+          "function:steward_bootstrap.tenant_ids_for_internal_job():EXECUTE:false",
           "function:steward_rls.tenant_id():EXECUTE:false",
           "relation:public.audit_chain_heads:INSERT:false",
           "relation:public.audit_chain_heads:SELECT:false",
@@ -273,11 +285,13 @@ function database(options?: {
           "relation:public.audit_events:SELECT:false",
           "relation:public.audit_events_id_seq:SELECT:false",
           "relation:public.audit_events_id_seq:USAGE:false",
+          "relation:public.user_tenants:SELECT:false",
+          "relation:public.users:SELECT:false",
           "schema:steward_bootstrap:USAGE:false",
           "schema:steward_rls:USAGE:false",
         ];
         if (options?.platformAclDrift) acls.push("relation:public.users:DELETE:false");
-        return acls.map((acl) => ({ acl }));
+        return acls.sort().map((acl) => ({ acl }));
       }
       if (query > 17) return [];
       const policies = EXPECTED_RLS_POLICY_DEFINITIONS.filter(

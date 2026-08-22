@@ -47,6 +47,7 @@ import {
   resolveClientIp,
   SOCKET_PEER_ENV_KEY,
 } from "./services/runtime-gate";
+import { startTenantDeletionRevocationScheduler } from "./services/tenant-deletion-revocation-scheduler";
 import { startTransactionReceiptPollingScheduler } from "./services/transaction-receipt-poller";
 import {
   getUpstreamCredentialLeaseSchedulerHealth,
@@ -102,6 +103,7 @@ let isShuttingDown = false;
 let cancelRetention: (() => void) | undefined;
 let cancelProviderReservationReconciliation: (() => void) | undefined;
 let cancelTransactionReceiptPolling: (() => void) | undefined;
+let cancelTenantDeletionRevocationScheduler: (() => void) | undefined;
 let cancelWebhookRetryScheduler: (() => void) | undefined;
 let cancelUpstreamCredentialLeaseScheduler: (() => Promise<void>) | undefined;
 let cancelGoogleCredentialLifecycleScheduler: (() => Promise<void>) | undefined;
@@ -443,6 +445,7 @@ if (migrationsRan) {
     cancelProviderReservationReconciliation = startProviderReservationReconciliationScheduler();
   }
   cancelTransactionReceiptPolling = startTransactionReceiptPollingScheduler();
+  cancelTenantDeletionRevocationScheduler = startTenantDeletionRevocationScheduler();
   cancelWebhookRetryScheduler = startWebhookRetryScheduler();
   if (capabilitiesEnabled) {
     cancelUpstreamCredentialLeaseScheduler = await startUpstreamCredentialLeaseScheduler();
@@ -487,6 +490,7 @@ const shutdown = async (signal: string) => {
   if (cancelRetention) cancelRetention();
   if (cancelProviderReservationReconciliation) cancelProviderReservationReconciliation();
   if (cancelTransactionReceiptPolling) cancelTransactionReceiptPolling();
+  if (cancelTenantDeletionRevocationScheduler) cancelTenantDeletionRevocationScheduler();
   if (cancelWebhookRetryScheduler) cancelWebhookRetryScheduler();
   if (cancelUpstreamCredentialLeaseScheduler) await cancelUpstreamCredentialLeaseScheduler();
   if (cancelGoogleCredentialLifecycleScheduler) await cancelGoogleCredentialLifecycleScheduler();

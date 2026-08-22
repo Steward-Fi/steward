@@ -441,6 +441,12 @@ export const EXPECTED_PUBLIC_RELATIONS = [
   },
   {
     "policy_group": "core",
+    "relation_name": "user_identity_subjects",
+    "relation_kind": "r",
+    "partition_parents": ""
+  },
+  {
+    "policy_group": "core",
     "relation_name": "user_push_subscriptions",
     "relation_kind": "r",
     "partition_parents": ""

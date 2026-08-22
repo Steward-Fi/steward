@@ -234,6 +234,7 @@ export function initUserLinkChallengeStores(backend: StoreBackend): void {
 initUserLinkChallengeStores(initialUserLinkBackend);
 const TELEGRAM_LINK_MAX_AGE_SEC = 24 * 60 * 60;
 const TENANT_ROLES = ["owner", "admin", "developer", "billing", "viewer", "member"] as const;
+const PLATFORM_AUDIT_TENANT_ID = "platform";
 type TenantRole = (typeof TENANT_ROLES)[number];
 const TENANT_INVITATION_ROLES = ["admin", "developer", "billing", "viewer", "member"] as const;
 type TenantInvitationRole = (typeof TENANT_INVITATION_ROLES)[number];
@@ -1124,6 +1125,15 @@ async function lockTenantOwnerLifecycle(
 ): Promise<void> {
   await tx.execute(
     sql`select pg_advisory_xact_lock(hashtextextended(${tenantOwnerLifecycleLockKey(tenantId)}, 0))`,
+  );
+}
+
+async function lockPlatformUserAccount(
+  tx: Pick<ReturnType<typeof getDb>, "execute">,
+  userId: string,
+): Promise<void> {
+  await tx.execute(
+    sql`select pg_advisory_xact_lock(hashtextextended(${`platform_user_account_${userId}`}, 0))`,
   );
 }
 
@@ -7317,44 +7327,67 @@ user.patch("/me/tenants/:tenantId/users/:targetUserId/role", async (c) => {
   const db = getDb();
   let updated: { row: TenantAdminUserRow; previousRole: string } | null = null;
   try {
-    updated = await db.transaction(async (tx) => {
-      await lockTenantOwnerLifecycle(tx, tenantId);
-      const [membership] = await tx
-        .select({ role: userTenants.role })
-        .from(userTenants)
-        .where(and(eq(userTenants.tenantId, tenantId), eq(userTenants.userId, targetUserId)));
-      if (!membership) return null;
-      if (membership.role === "owner" && requesterRole !== "owner" && nextRole !== "owner") {
-        throw new Error("Only owners can modify owner role");
-      }
-      if (membership.role === "owner" && nextRole !== "owner") {
-        if ((await activeTenantOwnerCount(tx, tenantId, targetUserId)) < 1) {
-          throw new Error("Cannot demote the sole owner");
+    updated = await withTenantAuditedTransactionOnDb(
+      db,
+      tenantId,
+      async (txRaw, appendRequiredAudit) => {
+        const tx = txRaw as typeof db;
+        await lockPlatformUserAccount(tx, targetUserId);
+        await lockTenantOwnerLifecycle(tx, tenantId);
+        const [membership] = await tx
+          .select({ role: userTenants.role })
+          .from(userTenants)
+          .where(and(eq(userTenants.tenantId, tenantId), eq(userTenants.userId, targetUserId)));
+        if (!membership) return null;
+        if (membership.role === "owner" && requesterRole !== "owner" && nextRole !== "owner") {
+          throw new Error("Only owners can modify owner role");
         }
-      }
+        if (membership.role === "owner" && nextRole !== "owner") {
+          if ((await activeTenantOwnerCount(tx, tenantId, targetUserId)) < 1) {
+            throw new Error("Cannot demote the sole owner");
+          }
+        }
 
-      await writeUserAudit(c, {
-        tenantId,
-        actorType: "user",
-        actorId: requesterId,
-        action: "tenant.member.role.update.authorized",
-        resourceType: "user",
-        resourceId: targetUserId,
-        metadata: { previousRole: membership.role, nextRole },
-      });
+        await appendRequiredAudit({
+          tenantId,
+          actorType: "user",
+          actorId: requesterId,
+          action: "tenant.member.role.update.authorized",
+          resourceType: "user",
+          resourceId: targetUserId,
+          metadata: { previousRole: membership.role, nextRole },
+          ipAddress: c.req.header("x-forwarded-for") ?? null,
+          userAgent: c.req.header("user-agent") ?? null,
+          requestId: c.get("requestId") ?? null,
+        });
 
-      await tx
-        .update(userTenants)
-        .set({ role: nextRole })
-        .where(and(eq(userTenants.tenantId, tenantId), eq(userTenants.userId, targetUserId)));
+        await tx
+          .update(userTenants)
+          .set({ role: nextRole })
+          .where(and(eq(userTenants.tenantId, tenantId), eq(userTenants.userId, targetUserId)));
 
-      const [row] = await tx
-        .select(tenantAdminUserSelection())
-        .from(userTenants)
-        .innerJoin(users, eq(userTenants.userId, users.id))
-        .where(and(eq(userTenants.tenantId, tenantId), eq(userTenants.userId, targetUserId)));
-      return row ? { row, previousRole: membership.role } : null;
-    });
+        const [row] = await tx
+          .select(tenantAdminUserSelection())
+          .from(userTenants)
+          .innerJoin(users, eq(userTenants.userId, users.id))
+          .where(and(eq(userTenants.tenantId, tenantId), eq(userTenants.userId, targetUserId)));
+        if (row) {
+          await appendRequiredAudit({
+            tenantId,
+            actorType: "user",
+            actorId: requesterId,
+            action: "tenant.member.role.update",
+            resourceType: "user",
+            resourceId: targetUserId,
+            metadata: { previousRole: membership.role, role: row.role },
+            ipAddress: c.req.header("x-forwarded-for") ?? null,
+            userAgent: c.req.header("user-agent") ?? null,
+            requestId: c.get("requestId") ?? null,
+          });
+        }
+        return row ? { row, previousRole: membership.role } : null;
+      },
+    );
   } catch (err) {
     if (err instanceof Error && err.message === "Only owners can modify owner role") {
       return c.json<ApiResponse>({ ok: false, error: err.message }, 403);
@@ -7366,24 +7399,6 @@ user.patch("/me/tenants/:tenantId/users/:targetUserId/role", async (c) => {
   }
 
   if (!updated) return c.json<ApiResponse>({ ok: false, error: "User not found in tenant" }, 404);
-
-  try {
-    await writeUserAudit(c, {
-      tenantId,
-      actorType: "user",
-      actorId: requesterId,
-      action: "tenant.member.role.update",
-      resourceType: "user",
-      resourceId: targetUserId,
-      metadata: { previousRole: updated.previousRole, role: updated.row.role },
-    });
-  } catch (error) {
-    await db
-      .update(userTenants)
-      .set({ role: updated.previousRole })
-      .where(and(eq(userTenants.tenantId, tenantId), eq(userTenants.userId, targetUserId)));
-    throw error;
-  }
 
   return c.json<ApiResponse<TenantAdminUserRow>>({ ok: true, data: updated.row });
 });
@@ -7498,93 +7513,96 @@ user.patch("/me/tenants/:tenantId/users/:targetUserId/deactivate", async (c) => 
   if (!body) return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
   const deactivated = body.deactivated !== false;
 
-  await writeUserAudit(c, {
-    tenantId,
-    actorType: "user",
-    actorId: admin.userId,
-    action: deactivated
-      ? "tenant.member.deactivate.authorized"
-      : "tenant.member.reactivate.authorized",
-    resourceType: "user",
-    resourceId: targetUserId,
-  });
-
   const result = await withPlatformAuthorityDatabase((platformDb) =>
-    withTenantAuditedTransactionOnDb(platformDb, tenantId, async (txRaw, appendRequiredAudit) => {
-      const tx = txRaw as typeof platformDb;
-      // The DB lifecycle primitive takes the user-account lock before every
-      // tenant-owner lock. Take the same leading lock before inspecting the
-      // membership so a concurrent membership writer cannot form an
-      // owner-lock -> user-lock cycle with this mounted route.
-      await tx.execute(
-        sql`SELECT pg_advisory_xact_lock(hashtextextended(${`platform_user_account_${targetUserId}`}, 0))`,
-      );
-      await lockTenantOwnerLifecycle(tx, tenantId);
-      const [lockedTenant] = await tx
-        .select({ id: tenants.id })
-        .from(tenants)
-        .where(eq(tenants.id, tenantId))
-        .for("update")
-        .limit(1);
-      if (!lockedTenant) return null;
-      const [membership] = await tx
-        .select({ role: userTenants.role })
-        .from(userTenants)
-        .where(and(eq(userTenants.tenantId, tenantId), eq(userTenants.userId, targetUserId)))
-        .limit(1);
-      if (!membership) return null;
-      if (deactivated && membership.role === "owner") {
-        if ((await activeTenantOwnerCount(tx, tenantId, targetUserId)) < 1) {
-          throw new Error("Cannot deactivate the sole owner");
-        }
-      }
-
-      await tx.execute(sql`SELECT set_config('steward.tenant_id', 'platform', true)`);
-      const otherTenantIds = rowsFromExecute<{ tenant_id: string }>(
+    withTenantAuditedTransactionOnDb(
+      platformDb,
+      PLATFORM_AUDIT_TENANT_ID,
+      async (txRaw, appendRequiredAudit) => {
+        const tx = txRaw as typeof platformDb;
+        await tx.execute(sql`SELECT set_config('steward.tenant_id', ${tenantId}, true)`);
+        // The DB lifecycle primitive takes the user-account lock before every
+        // tenant-owner lock. Take the same leading lock before inspecting the
+        // membership so a concurrent membership writer cannot form an
+        // owner-lock -> user-lock cycle with this mounted route.
         await tx.execute(
-          sql`SELECT * FROM steward_bootstrap.platform_user_tenant_ids(${targetUserId}::uuid)`,
-        ),
-      ).filter(
-        ({ tenant_id }) => tenant_id !== tenantId && tenant_id !== `personal-${targetUserId}`,
-      );
-      if (otherTenantIds.length > 0) {
-        throw new Error(
-          "Tenant dashboard lifecycle changes are limited to users without other tenant memberships",
+          sql`SELECT pg_advisory_xact_lock(hashtextextended(${`platform_user_account_${targetUserId}`}, 0))`,
         );
-      }
+        await lockTenantOwnerLifecycle(tx, tenantId);
+        const [membership] = await tx
+          .select({ role: userTenants.role })
+          .from(userTenants)
+          .where(and(eq(userTenants.tenantId, tenantId), eq(userTenants.userId, targetUserId)))
+          .limit(1);
+        if (!membership) return null;
+        if (deactivated && membership.role === "owner") {
+          if ((await activeTenantOwnerCount(tx, tenantId, targetUserId)) < 1) {
+            throw new Error("Cannot deactivate the sole owner");
+          }
+        }
 
-      const [updated] = rowsFromExecute<{ tokens_revoked_before: number }>(
-        await tx.execute(sql`
+        await tx.execute(
+          sql`SELECT set_config('steward.tenant_id', ${PLATFORM_AUDIT_TENANT_ID}, true)`,
+        );
+        await appendRequiredAudit({
+          tenantId: PLATFORM_AUDIT_TENANT_ID,
+          actorType: "user",
+          actorId: admin.userId,
+          action: deactivated
+            ? "tenant.member.deactivate.authorized"
+            : "tenant.member.reactivate.authorized",
+          resourceType: "user",
+          resourceId: targetUserId,
+          metadata: { targetTenantId: tenantId },
+          ipAddress: c.req.header("x-forwarded-for") ?? null,
+          userAgent: c.req.header("user-agent") ?? null,
+          requestId: c.get("requestId") ?? null,
+        });
+
+        const otherTenantIds = rowsFromExecute<{ tenant_id: string }>(
+          await tx.execute(
+            sql`SELECT * FROM steward_bootstrap.platform_user_tenant_ids(${targetUserId}::uuid)`,
+          ),
+        ).filter(
+          ({ tenant_id }) => tenant_id !== tenantId && tenant_id !== `personal-${targetUserId}`,
+        );
+        if (otherTenantIds.length > 0) {
+          throw new Error(
+            "Tenant dashboard lifecycle changes are limited to users without other tenant memberships",
+          );
+        }
+
+        const [updated] = rowsFromExecute<{ tokens_revoked_before: number }>(
+          await tx.execute(sql`
         SELECT * FROM steward_bootstrap.platform_set_user_deactivation(
           ${targetUserId}::uuid,
           ${deactivated}
         )
       `),
-      );
-      if (!updated) throw new Error("User not found");
-      const issuedBefore = Number(updated.tokens_revoked_before);
-      await tx.execute(sql`SELECT set_config('steward.tenant_id', ${tenantId}, true)`);
+        );
+        if (!updated) throw new Error("User not found");
+        const issuedBefore = Number(updated.tokens_revoked_before);
+        await appendRequiredAudit({
+          tenantId: PLATFORM_AUDIT_TENANT_ID,
+          actorType: "user",
+          actorId: admin.userId,
+          action: deactivated ? "tenant.member.deactivate" : "tenant.member.reactivate",
+          resourceType: "user",
+          resourceId: targetUserId,
+          metadata: { targetTenantId: tenantId, issuedBefore },
+          ipAddress: c.req.header("x-forwarded-for") ?? null,
+          userAgent: c.req.header("user-agent") ?? null,
+          requestId: c.get("requestId") ?? null,
+        });
 
-      await appendRequiredAudit({
-        tenantId,
-        actorType: "user",
-        actorId: admin.userId,
-        action: deactivated ? "tenant.member.deactivate" : "tenant.member.reactivate",
-        resourceType: "user",
-        resourceId: targetUserId,
-        metadata: { issuedBefore },
-        ipAddress: c.req.header("x-forwarded-for") ?? null,
-        userAgent: c.req.header("user-agent") ?? null,
-        requestId: c.get("requestId") ?? null,
-      });
-
-      const [row] = await tx
-        .select(tenantAdminUserSelection())
-        .from(userTenants)
-        .innerJoin(users, eq(userTenants.userId, users.id))
-        .where(and(eq(userTenants.tenantId, tenantId), eq(userTenants.userId, targetUserId)));
-      return { row, issuedBefore };
-    }),
+        await tx.execute(sql`SELECT set_config('steward.tenant_id', ${tenantId}, true)`);
+        const [row] = await tx
+          .select(tenantAdminUserSelection())
+          .from(userTenants)
+          .innerJoin(users, eq(userTenants.userId, users.id))
+          .where(and(eq(userTenants.tenantId, tenantId), eq(userTenants.userId, targetUserId)));
+        return { row, issuedBefore };
+      },
+    ),
   ).catch((err: unknown) => {
     if (err instanceof Error) {
       if (err.message === "Cannot deactivate the sole owner") return err.message;
@@ -7640,98 +7658,61 @@ user.delete("/me/tenants/:tenantId/users/:targetUserId", async (c) => {
   }
 
   const db = getDb();
-  let member: { role: string } | null = null;
+  let deleted: { role: string; revokedBefore: number } | null = null;
   try {
-    member = await db.transaction(async (tx) => {
-      await lockTenantOwnerLifecycle(tx, tenantId);
-      const [current] = await tx
-        .select({ role: userTenants.role })
-        .from(userTenants)
-        .where(and(eq(userTenants.tenantId, tenantId), eq(userTenants.userId, targetUserId)));
-      if (!current) return null;
-      if (current.role === "owner") {
-        if ((await activeTenantOwnerCount(tx, tenantId, targetUserId)) < 1) {
-          throw new Error("Cannot remove the sole owner");
+    deleted = await withTenantAuditedTransactionOnDb(
+      db,
+      tenantId,
+      async (txRaw, appendRequiredAudit) => {
+        const tx = txRaw as typeof db;
+        await lockPlatformUserAccount(tx, targetUserId);
+        await lockTenantOwnerLifecycle(tx, tenantId);
+        const [current] = await tx
+          .select({ role: userTenants.role })
+          .from(userTenants)
+          .where(and(eq(userTenants.tenantId, tenantId), eq(userTenants.userId, targetUserId)));
+        if (!current) return null;
+        if (current.role === "owner") {
+          if ((await activeTenantOwnerCount(tx, tenantId, targetUserId)) < 1) {
+            throw new Error("Cannot remove the sole owner");
+          }
         }
-      }
-      return current;
-    });
-  } catch (err) {
-    if (err instanceof Error && err.message === "Cannot remove the sole owner") {
-      return c.json<ApiResponse>({ ok: false, error: err.message }, 409);
-    }
-    throw err;
-  }
-  if (!member) return c.json<ApiResponse>({ ok: false, error: "User not found in tenant" }, 404);
-
-  await writeUserAudit(c, {
-    tenantId,
-    actorType: "user",
-    actorId: admin.userId,
-    action: "tenant.member.remove.authorized",
-    resourceType: "user",
-    resourceId: targetUserId,
-    metadata: { role: member.role },
-  });
-
-  let deleted: {
-    membership: {
-      id: string;
-      userId: string;
-      tenantId: string;
-      role: string;
-      customMetadata: Record<string, unknown>;
-      createdAt: Date;
-    };
-    refreshTokens: Array<{
-      id: string;
-      userId: string;
-      tenantId: string;
-      tokenHash: string;
-      expiresAt: Date;
-      createdAt: Date;
-    }>;
-  } | null = null;
-  try {
-    deleted = await db.transaction(async (tx) => {
-      await lockTenantOwnerLifecycle(tx, tenantId);
-      const [current] = await tx
-        .select({
-          id: userTenants.id,
-          userId: userTenants.userId,
-          tenantId: userTenants.tenantId,
-          role: userTenants.role,
-          customMetadata: userTenants.customMetadata,
-          createdAt: userTenants.createdAt,
-        })
-        .from(userTenants)
-        .where(and(eq(userTenants.tenantId, tenantId), eq(userTenants.userId, targetUserId)));
-      if (!current) return null;
-      if (current.role === "owner") {
-        if ((await activeTenantOwnerCount(tx, tenantId, targetUserId)) < 1) {
-          throw new Error("Cannot remove the sole owner");
-        }
-      }
-      const tokenSnapshot = await tx
-        .select({
-          id: refreshTokens.id,
-          userId: refreshTokens.userId,
-          tenantId: refreshTokens.tenantId,
-          tokenHash: refreshTokens.tokenHash,
-          expiresAt: refreshTokens.expiresAt,
-          createdAt: refreshTokens.createdAt,
-        })
-        .from(refreshTokens)
-        .where(and(eq(refreshTokens.tenantId, tenantId), eq(refreshTokens.userId, targetUserId)));
-      await tx
-        .delete(userTenants)
-        .where(and(eq(userTenants.tenantId, tenantId), eq(userTenants.userId, targetUserId)))
-        .returning({ role: userTenants.role });
-      await tx
-        .delete(refreshTokens)
-        .where(and(eq(refreshTokens.tenantId, tenantId), eq(refreshTokens.userId, targetUserId)));
-      return { membership: current, refreshTokens: tokenSnapshot };
-    });
+        await appendRequiredAudit({
+          tenantId,
+          actorType: "user",
+          actorId: admin.userId,
+          action: "tenant.member.remove.authorized",
+          resourceType: "user",
+          resourceId: targetUserId,
+          metadata: { role: current.role },
+          ipAddress: c.req.header("x-forwarded-for") ?? null,
+          userAgent: c.req.header("user-agent") ?? null,
+          requestId: c.get("requestId") ?? null,
+        });
+        const revokedBefore = await revocationStore.revokeUserTokens(targetUserId);
+        const [removed] = await tx
+          .delete(userTenants)
+          .where(and(eq(userTenants.tenantId, tenantId), eq(userTenants.userId, targetUserId)))
+          .returning({ role: userTenants.role });
+        if (!removed) return null;
+        await tx
+          .delete(refreshTokens)
+          .where(and(eq(refreshTokens.tenantId, tenantId), eq(refreshTokens.userId, targetUserId)));
+        await appendRequiredAudit({
+          tenantId,
+          actorType: "user",
+          actorId: admin.userId,
+          action: "tenant.member.remove",
+          resourceType: "user",
+          resourceId: targetUserId,
+          metadata: { role: removed.role, revokedUserTokensIssuedBefore: revokedBefore },
+          ipAddress: c.req.header("x-forwarded-for") ?? null,
+          userAgent: c.req.header("user-agent") ?? null,
+          requestId: c.get("requestId") ?? null,
+        });
+        return { role: removed.role, revokedBefore };
+      },
+    );
   } catch (err) {
     if (err instanceof Error && err.message === "Cannot remove the sole owner") {
       return c.json<ApiResponse>({ ok: false, error: err.message }, 409);
@@ -7739,33 +7720,6 @@ user.delete("/me/tenants/:tenantId/users/:targetUserId", async (c) => {
     throw err;
   }
   if (!deleted) return c.json<ApiResponse>({ ok: false, error: "User not found in tenant" }, 404);
-
-  const revokedBefore = await revocationStore.revokeUserTokens(targetUserId);
-  try {
-    await writeUserAudit(c, {
-      tenantId,
-      actorType: "user",
-      actorId: admin.userId,
-      action: "tenant.member.remove",
-      resourceType: "user",
-      resourceId: targetUserId,
-      metadata: { role: deleted.membership.role, revokedUserTokensIssuedBefore: revokedBefore },
-    });
-  } catch (error) {
-    await db.transaction(async (tx) => {
-      await tx
-        .insert(userTenants)
-        .values(deleted.membership)
-        .onConflictDoNothing({ target: [userTenants.userId, userTenants.tenantId] });
-      if (deleted.refreshTokens.length > 0) {
-        await tx
-          .insert(refreshTokens)
-          .values(deleted.refreshTokens)
-          .onConflictDoNothing({ target: refreshTokens.tokenHash });
-      }
-    });
-    throw error;
-  }
 
   dispatchWebhook(tenantId, targetUserId, "user.updated_account", {
     userId: targetUserId,
@@ -8106,39 +8060,48 @@ user.delete("/me/tenants/:tenantId/leave", async (c) => {
   const db = getDb();
   let deletedMembership: { role: string } | null | undefined;
   try {
-    deletedMembership = await db.transaction(async (tx) => {
-      await lockTenantOwnerLifecycle(tx, tenantId);
-      await lockUserSession(tx, userId);
-      const [membership] = await tx
-        .select({ role: userTenants.role })
-        .from(userTenants)
-        .where(and(eq(userTenants.userId, userId), eq(userTenants.tenantId, tenantId)));
+    deletedMembership = await withTenantAuditedTransactionOnDb(
+      db,
+      tenantId,
+      async (txRaw, appendRequiredAudit) => {
+        const tx = txRaw as typeof db;
+        await lockPlatformUserAccount(tx, userId);
+        await lockTenantOwnerLifecycle(tx, tenantId);
+        await lockUserSession(tx, userId);
+        const [membership] = await tx
+          .select({ role: userTenants.role })
+          .from(userTenants)
+          .where(and(eq(userTenants.userId, userId), eq(userTenants.tenantId, tenantId)));
 
-      if (!membership) return null;
-      if (membership.role === "owner") {
-        if ((await activeTenantOwnerCount(tx, tenantId, userId)) < 1) {
-          throw new Error("Cannot leave tenant as the sole owner");
+        if (!membership) return null;
+        if (membership.role === "owner") {
+          if ((await activeTenantOwnerCount(tx, tenantId, userId)) < 1) {
+            throw new Error("Cannot leave tenant as the sole owner");
+          }
         }
-      }
 
-      await writeUserAudit(c, {
-        tenantId,
-        actorType: "user",
-        actorId: userId,
-        action: "tenant.member.leave",
-        resourceType: "tenant",
-        resourceId: tenantId,
-      });
+        await appendRequiredAudit({
+          tenantId,
+          actorType: "user",
+          actorId: userId,
+          action: "tenant.member.leave",
+          resourceType: "tenant",
+          resourceId: tenantId,
+          ipAddress: c.req.header("x-forwarded-for") ?? null,
+          userAgent: c.req.header("user-agent") ?? null,
+          requestId: c.get("requestId") ?? null,
+        });
 
-      const [deleted] = await tx
-        .delete(userTenants)
-        .where(and(eq(userTenants.userId, userId), eq(userTenants.tenantId, tenantId)))
-        .returning({ role: userTenants.role });
-      await tx
-        .delete(refreshTokens)
-        .where(and(eq(refreshTokens.tenantId, tenantId), eq(refreshTokens.userId, userId)));
-      return deleted ?? null;
-    });
+        const [deleted] = await tx
+          .delete(userTenants)
+          .where(and(eq(userTenants.userId, userId), eq(userTenants.tenantId, tenantId)))
+          .returning({ role: userTenants.role });
+        await tx
+          .delete(refreshTokens)
+          .where(and(eq(refreshTokens.tenantId, tenantId), eq(refreshTokens.userId, userId)));
+        return deleted ?? null;
+      },
+    );
   } catch (err) {
     if (err instanceof Error && err.message === "Cannot leave tenant as the sole owner") {
       return c.json<ApiResponse>({ ok: false, error: err.message }, 409);

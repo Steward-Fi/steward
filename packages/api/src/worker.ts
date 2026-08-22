@@ -281,6 +281,18 @@ export async function runWorkerXCredentialLifecycleSweep(
   return sweep();
 }
 
+export async function runWorkerTenantDeletionRevocationSweep(
+  env: Env,
+  options?: { sweep?: () => Promise<unknown> },
+): Promise<unknown> {
+  hydrateProcessEnv(env);
+  const sweep =
+    options?.sweep ??
+    (await import("./services/tenant-deletion-revocation-scheduler"))
+      .runTenantDeletionRevocationSweep;
+  return sweep();
+}
+
 /**
  * Pull Worker `env` bindings into `globalThis.process.env` so any code that
  * reads `process.env.X` at request time (e.g. JWT secret, RPC URL) can find it.
@@ -545,6 +557,7 @@ export default {
             withWorkerRequestDatabase(env, () => runWorkerUpstreamCredentialLeaseSweep(env)),
             withWorkerRequestDatabase(env, () => runWorkerGoogleCredentialLifecycleSweep(env)),
             withWorkerRequestDatabase(env, () => runWorkerXCredentialLifecycleSweep(env)),
+            withWorkerRequestDatabase(env, () => runWorkerTenantDeletionRevocationSweep(env)),
           ]);
           const failedSweep = sweepResults.find(
             (result): result is PromiseRejectedResult => result.status === "rejected",

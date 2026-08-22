@@ -507,6 +507,12 @@ export function hasTenantTransactionDatabase(expected?: {
 }): boolean {
   const context = tenantTransactionDatabaseStorage.getStore();
   if (!context?.active || !context.db) return false;
+  // An explicitly supplied, distinct executor is an independent authority
+  // connection, not an attempt to reuse the request-bound tenant capability.
+  // Classify it before comparing tenant identity so platform maintenance can
+  // open its own audited transaction without weakening or replacing the
+  // authenticated request context.
+  if (expected?.db !== undefined && expected.db !== context.db) return false;
   if (
     expected &&
     (context.tenantId !== expected.tenantId ||
@@ -522,7 +528,6 @@ export function hasTenantTransactionDatabase(expected?: {
   ) {
     throw new Error("RLS_TENANT_DATABASE_CHARACTERISTICS_MISMATCH");
   }
-  if (expected?.db !== undefined && expected.db !== context.db) return false;
   return true;
 }
 

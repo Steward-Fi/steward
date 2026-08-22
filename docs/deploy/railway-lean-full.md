@@ -212,11 +212,10 @@ openssl rand -hex 32   # STEWARD_MASTER_PASSWORD (long random)
 
 ### B. ship the image
 
-Before either runtime deploy, run the exact admin → bootstrap → migration-role
-→ activation sequence in `docs/security/database-rls-rollout.mdx`. Use
-`migrate:production:core` with the schema-owning admin URL, run
-`rls-bootstrap.sql`, run `migrate:production:plugins` with the migration-role
-URL and the service's exact `STEWARD_PLUGINS`, then run `rls-activate.sql`.
+Before either runtime deploy, run the exact admin-through-0112 → bootstrap →
+restricted-0113 → privileged-wrapper → restricted-0114+ → plugin → final
+bootstrap/wrapper → activation sequence in
+`docs/security/database-rls-rollout.mdx`.
 Never place either operator URL in the Railway service; it receives only the
 restricted `DATABASE_URL` and `SKIP_MIGRATIONS=1`.
 

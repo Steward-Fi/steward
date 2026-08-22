@@ -76,6 +76,7 @@ INSERT INTO steward_expected_public_relations VALUES
   ('core','transactions','r',''),
   ('core','upstream_credential_lease_events','r',''),
   ('core','upstream_credential_leases','r',''),
+  ('core','user_identity_subjects','r',''),
   ('core','user_push_subscriptions','r',''),
   ('core','user_tenants','r',''),
   ('core','user_wallet_app_consents','r',''),

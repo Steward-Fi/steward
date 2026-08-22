@@ -17,7 +17,7 @@ services:
       context: ../..
       dockerfile: Dockerfile
     image: steward:${STEWARD_IMAGE_TAG:-enterprise-reference}
-    command: ["bun", "packages/api/scripts/migrate-production.ts", "core"]
+    command: ["bun", "packages/api/scripts/migrate-production.ts", "core-through-0112"]
     environment:
       MIGRATION_DATABASE_URL: "${STEWARD_ADMIN_DATABASE_URL:?STEWARD_ADMIN_DATABASE_URL required}"
       # Explicit acknowledgement is required because this allows plaintext DB
@@ -72,6 +72,80 @@ services:
       steward-data: {}
     restart: "no"
 
+  steward-rls-prepare-0113:
+    profiles: ["enterprise-reference"]
+    image: postgres:16-alpine@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685
+    entrypoint: ["psql"]
+    command: ["--no-psqlrc", "-v", "steward_migration_role=steward_migrator", "-v", "steward_bootstrap_role=steward_bootstrap_owner", "-f", "/scripts/postgres/rls-prepare-personal-lifecycle.sql"]
+    environment:
+      PGDATABASE: "${STEWARD_ADMIN_DATABASE_URL:?STEWARD_ADMIN_DATABASE_URL required}"
+    volumes:
+      - ../../scripts/postgres:/scripts/postgres:ro
+    depends_on:
+      steward-rls-bootstrap:
+        condition: service_completed_successfully
+    networks:
+      steward-backend:
+        gw_priority: 1
+      steward-data: {}
+    restart: "no"
+
+  steward-core-migrate-0113:
+    extends:
+      service: steward-core-migrate
+    command: ["bun", "packages/api/scripts/migrate-production.ts", "core-through-0113"]
+    environment:
+      MIGRATION_DATABASE_URL: "${MIGRATION_DATABASE_URL:?MIGRATION_DATABASE_URL required}"
+      STEWARD_ALLOW_INSECURE_DB: "${STEWARD_ALLOW_INSECURE_DB:-}"
+      STEWARD_ALLOW_UNVERIFIED_DB_TLS: "${STEWARD_ALLOW_UNVERIFIED_DB_TLS:-}"
+    depends_on:
+      steward-rls-prepare-0113:
+        condition: service_completed_successfully
+
+  steward-rls-upgrade-pre:
+    profiles: ["enterprise-reference"]
+    image: postgres:16-alpine@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685
+    entrypoint: ["psql"]
+    command: ["--no-psqlrc", "-v", "steward_app_role=steward_app", "-v", "steward_migration_role=steward_migrator", "-v", "steward_bootstrap_role=steward_bootstrap_owner", "-f", "/scripts/postgres/rls-upgrade-personal-lifecycle.sql"]
+    environment:
+      PGDATABASE: "${STEWARD_ADMIN_DATABASE_URL:?STEWARD_ADMIN_DATABASE_URL required}"
+    volumes:
+      - ../../scripts/postgres:/scripts/postgres:ro
+    depends_on:
+      steward-core-migrate-0113:
+        condition: service_completed_successfully
+    networks:
+      steward-backend:
+        gw_priority: 1
+      steward-data: {}
+    restart: "no"
+
+  steward-core-migrate-final:
+    extends:
+      service: steward-core-migrate
+    command: ["bun", "packages/api/scripts/migrate-production.ts", "core"]
+    environment:
+      MIGRATION_DATABASE_URL: "${MIGRATION_DATABASE_URL:?MIGRATION_DATABASE_URL required}"
+      STEWARD_ALLOW_INSECURE_DB: "${STEWARD_ALLOW_INSECURE_DB:-}"
+      STEWARD_ALLOW_UNVERIFIED_DB_TLS: "${STEWARD_ALLOW_UNVERIFIED_DB_TLS:-}"
+    depends_on:
+      steward-rls-upgrade-pre:
+        condition: service_completed_successfully
+
+  steward-rls-bootstrap-final:
+    extends:
+      service: steward-rls-bootstrap
+    depends_on:
+      steward-plugin-migrate:
+        condition: service_completed_successfully
+
+  steward-rls-upgrade-final:
+    extends:
+      service: steward-rls-upgrade-pre
+    depends_on:
+      steward-rls-bootstrap-final:
+        condition: service_completed_successfully
+
   steward-plugin-migrate:
     profiles: ["enterprise-reference"]
     image: steward:${STEWARD_IMAGE_TAG:-enterprise-reference}
@@ -82,7 +156,7 @@ services:
       STEWARD_ALLOW_INSECURE_DB: "${STEWARD_ALLOW_INSECURE_DB:-}"
       STEWARD_ALLOW_UNVERIFIED_DB_TLS: "${STEWARD_ALLOW_UNVERIFIED_DB_TLS:-}"
     depends_on:
-      steward-rls-bootstrap:
+      steward-core-migrate-final:
         condition: service_completed_successfully
     networks:
       steward-backend:
@@ -111,7 +185,7 @@ services:
     volumes:
       - ../../scripts/postgres:/scripts/postgres:ro
     depends_on:
-      steward-plugin-migrate:
+      steward-rls-upgrade-final:
         condition: service_completed_successfully
     networks:
       steward-backend:
