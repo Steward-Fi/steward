@@ -4134,9 +4134,10 @@ platform.delete("/users/:userId", async (c) => {
   // revocation cache afterward as defense in depth, but never turn an already
   // committed deletion into a misleading 500. Retrying the DELETE is safe.
   await revocationStore.revokeUserTokens(userId, deletionResult).catch((error: unknown) => {
-    console.error("[Platform] Post-delete token cache refresh failed", {
-      errorClass: error instanceof Error ? error.name : typeof error,
-    });
+    console.error(
+      "[Platform] Post-delete token cache refresh failed",
+      redactedThrownDiagnostics(error),
+    );
   });
 
   return c.json<ApiResponse<{ userId: string; deleted: boolean }>>({

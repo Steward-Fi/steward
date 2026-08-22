@@ -40,6 +40,7 @@ describe("merged migration gap backfill", () => {
       "0120_monero_pre_relay_lifecycle",
       "0121_trade_order_recovery",
       "0122_provider_action_audit_outbox_delivery",
+      "0123_personal_lifecycle_invariants",
     ]);
   });
 });
