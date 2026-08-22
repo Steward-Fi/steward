@@ -5,11 +5,11 @@ import { closeDb, getDb, tenantConfigs, tenants } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { withRuntimeEnvironment } from "@stwd/shared/runtime-env";
 import { KeyStore } from "@stwd/vault";
-import { eq, inArray } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import { Hono } from "hono";
 import {
   clearEmailAuthTenantCacheForTests,
-  emailAuthCacheEntryCountForTests,
+  emailAuthRequestCacheSizeForTests,
   getEmailAuthForTenant,
   initAuthStores,
   invalidateEmailAuthForTenant,
@@ -159,49 +159,6 @@ describe("getEmailAuthForTenant", () => {
     expect((instances.get("a") as any).provider.client.key).toBe("resend-authority-a");
     expect((instances.get("b") as any).provider.client.key).toBe("resend-authority-b");
     clearEmailAuthTenantCacheForTests();
-  });
-
-  it("globally bounds plaintext provider instances across distinct tenants", async () => {
-    clearEmailAuthTenantCacheForTests();
-    const tenantIds = Array.from(
-      { length: 65 },
-      (_, index) => `tenant-email-global-cache-${index.toString().padStart(2, "0")}`,
-    );
-    await getDb()
-      .insert(tenants)
-      .values(
-        tenantIds.map((id) => ({
-          id,
-          name: id,
-          apiKeyHash: `hash-${id}`,
-        })),
-      );
-    const environment = {
-      NODE_ENV: "test",
-      STEWARD_MASTER_PASSWORD: "global-email-cache-custody",
-      STEWARD_KDF_SALT: "cd".repeat(16),
-      RESEND_API_KEY: "global-email-cache-resend",
-      EMAIL_FROM: "Cache <cache@example.test>",
-      APP_URL: "https://cache.example.test",
-      STEWARD_EMAIL_CODE_SECRET: "c".repeat(32),
-    };
-
-    const first = await withRuntimeEnvironment(environment, () =>
-      getEmailAuthForTenant(tenantIds[0]),
-    );
-    for (const tenantId of tenantIds.slice(1)) {
-      await withRuntimeEnvironment(environment, () => getEmailAuthForTenant(tenantId));
-    }
-    expect(emailAuthCacheEntryCountForTests()).toBe(64);
-    const reloadedFirst = await withRuntimeEnvironment(environment, () =>
-      getEmailAuthForTenant(tenantIds[0]),
-    );
-
-    expect(reloadedFirst).not.toBe(first);
-    expect(emailAuthCacheEntryCountForTests()).toBe(64);
-    for (const tenantId of tenantIds) invalidateEmailAuthForTenant(tenantId);
-    await getDb().delete(tenants).where(inArray(tenants.id, tenantIds));
-    expect(emailAuthCacheEntryCountForTests()).toBe(0);
   });
 
   it("uses the tenant-specific config when emailConfig is set", async () => {
@@ -407,6 +364,60 @@ describe("getEmailAuthForTenant", () => {
 
     await dbHandle.delete(tenantConfigs).where(eq(tenantConfigs.tenantId, TEST_TENANT_ID));
     invalidateEmailAuthForTenant(TEST_TENANT_ID);
+  });
+
+  it("bounds EmailAuth reachability to one request across custody rotations", async () => {
+    clearEmailAuthTenantCacheForTests();
+    const dbHandle = getDb();
+    await dbHandle.delete(tenantConfigs).where(eq(tenantConfigs.tenantId, TEST_TENANT_ID));
+    const seen = new Set<object>();
+
+    for (let generation = 0; generation < 40; generation += 1) {
+      const auth = await withRuntimeEnvironment(
+        {
+          NODE_ENV: "test",
+          STEWARD_MASTER_PASSWORD: `email-rotation-${generation}`,
+          STEWARD_KDF_SALT: generation.toString(16).padStart(2, "0").repeat(16),
+        },
+        async () => {
+          const first = await getEmailAuthForTenant(TEST_TENANT_ID);
+          expect(await getEmailAuthForTenant(TEST_TENANT_ID)).toBe(first);
+          expect(emailAuthRequestCacheSizeForTests()).toBe(1);
+          return first;
+        },
+      );
+      seen.add(auth);
+      expect(emailAuthRequestCacheSizeForTests()).toBe(0);
+    }
+
+    expect(seen.size).toBe(40);
+  });
+
+  it("retires the old credential-bearing provider on request-local invalidation", async () => {
+    clearEmailAuthTenantCacheForTests();
+    await getDb().delete(tenantConfigs).where(eq(tenantConfigs.tenantId, TEST_TENANT_ID));
+
+    await withRuntimeEnvironment(
+      {
+        NODE_ENV: "test",
+        RESEND_API_KEY: "request-local-resend-key",
+        EMAIL_FROM: "Request <login@request.example>",
+        APP_URL: "https://request.example",
+      },
+      async () => {
+        const first = await getEmailAuthForTenant(TEST_TENANT_ID);
+        const firstProvider = (first as any).provider;
+        expect(firstProvider.client).not.toBeNull();
+        invalidateEmailAuthForTenant(TEST_TENANT_ID);
+        await Promise.resolve();
+        expect(firstProvider.client).toBeNull();
+        expect(firstProvider.from).toBe("");
+
+        const replacement = await getEmailAuthForTenant(TEST_TENANT_ID);
+        expect(replacement).not.toBe(first);
+        expect(emailAuthRequestCacheSizeForTests()).toBe(1);
+      },
+    );
   });
 });
 

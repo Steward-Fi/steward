@@ -5,6 +5,7 @@ import { isRuntimeVaultRpcMethodAllowed, resolveRuntimeChainId } from "../servic
 import { resolveEvmReceiptRpcUrl } from "../services/transaction-receipt-poller";
 import {
   _clearConfiguredVaultsForTests,
+  _configuredCustodyInstanceCountForTests,
   getConfiguredKeyStore,
   getConfiguredSecretVault,
   getConfiguredVault,
@@ -53,7 +54,8 @@ describe("request-local custody authority", () => {
       leases: getConfiguredKeyStore("credential-lease"),
     }));
 
-    expect(b.authority.fingerprint).not.toBe(a.authority.fingerprint);
+    expect("fingerprint" in a.authority).toBe(false);
+    expect("fingerprint" in b.authority).toBe(false);
     expect(b.vault).not.toBe(a.vault);
     expect(b.secrets).not.toBe(a.secrets);
     expect(b.oauth).not.toBe(a.oauth);
@@ -98,7 +100,6 @@ describe("request-local custody authority", () => {
       keyStore: getConfiguredKeyStore("secret-vault"),
     }));
 
-    expect(b.authority.fingerprint).not.toBe(a.authority.fingerprint);
     expect(b.vault).not.toBe(a.vault);
     expect(b.keyStore).not.toBe(a.keyStore);
     const ciphertext = a.keyStore.encrypt("scope-a", {
@@ -115,7 +116,7 @@ describe("request-local custody authority", () => {
     ).toThrow();
   });
 
-  it("fingerprints the full RPC, chain, and legacy-gate tuple", () => {
+  it("resolves the full RPC, chain, and legacy-gate tuple without a secret fingerprint", () => {
     const base = authorityEnvironment("full-authority", SALT_A);
     const first = withRuntimeEnvironment(base, () => resolveCustodyAuthority());
     const changed = withRuntimeEnvironment(
@@ -132,7 +133,8 @@ describe("request-local custody authority", () => {
     );
 
     expect(Object.isFrozen(first)).toBe(true);
-    expect(changed.fingerprint).not.toBe(first.fingerprint);
+    expect("fingerprint" in first).toBe(false);
+    expect("fingerprint" in changed).toBe(false);
     expect(changed.rpcUrl).toBe("https://rotated-rpc.example.invalid");
     expect(changed.chainId).toBe(84532);
     expect(changed.allowLegacySecretRootFallback).toBe(false);
@@ -215,9 +217,9 @@ describe("request-local custody authority", () => {
     releaseA?.();
     const resumedA = await requestA;
 
-    expect(resumedA.after.fingerprint).toBe(resumedA.before.fingerprint);
     expect(resumedA.sameStore).toBe(true);
-    expect(resumedA.after.fingerprint).not.toBe(requestB.authority.fingerprint);
+    expect(resumedA.after.masterPassword).toBe(resumedA.before.masterPassword);
+    expect(resumedA.after.masterPassword).not.toBe(requestB.authority.masterPassword);
     expect(resumedA.chainId).toBe(1);
     expect(resumedA.receiptRpc).toBe("https://receipt-a.example.invalid");
     expect(resumedA.allowsA).toBe(true);
@@ -247,7 +249,7 @@ describe("request-local custody authority", () => {
       () => resolveCustodyAuthority(),
     );
 
-    expect(authorityB.fingerprint).not.toBe(authorityA.fingerprint);
+    expect(authorityB.awsSecretAccessKey).not.toBe(authorityA.awsSecretAccessKey);
     expect(authorityA.awsAccessKeyId).toBe("access-a");
     expect(authorityA.awsSessionToken).toBe("session-a");
     expect(() =>
@@ -348,5 +350,35 @@ describe("request-local custody authority", () => {
         ),
       ),
     ).resolves.toBe("token-b");
+  });
+
+  it("keeps custody instances request-local and leaves no reachable rotation generations", () => {
+    _clearConfiguredVaultsForTests();
+    const identities = new Set<object>();
+    for (let generation = 0; generation < 12; generation += 1) {
+      withRuntimeEnvironment(
+        authorityEnvironment(
+          `rotation-${generation}`,
+          generation.toString(16).padStart(2, "0").repeat(16),
+        ),
+        () => {
+          const vault = getConfiguredVault();
+          const secretVault = getConfiguredSecretVault();
+          const oauth = getConfiguredKeyStore();
+          const lease = getConfiguredKeyStore("credential-lease");
+          identities.add(vault);
+          identities.add(secretVault);
+          identities.add(oauth);
+          identities.add(lease);
+          expect(getConfiguredVault()).toBe(vault);
+          expect(getConfiguredSecretVault()).toBe(secretVault);
+          expect(getConfiguredKeyStore()).toBe(oauth);
+          expect(getConfiguredKeyStore("credential-lease")).toBe(lease);
+          expect(_configuredCustodyInstanceCountForTests()).toBe(4);
+        },
+      );
+      expect(_configuredCustodyInstanceCountForTests()).toBe(0);
+    }
+    expect(identities.size).toBe(48);
   });
 });

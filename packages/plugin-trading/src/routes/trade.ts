@@ -16,7 +16,7 @@
  * /trade + /v1/trade.
  */
 
-import { createCipheriv, createDecipheriv, createHash, randomBytes, scryptSync } from "node:crypto";
+import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from "node:crypto";
 import { agentPolicies, eq, getDb, proxyAuditLog } from "@stwd/db";
 import {
   assetAllowlistEvaluator,
@@ -57,41 +57,72 @@ import type { StewardAppContext } from "../context";
 import { DurableIdempotencyStore } from "./idempotency";
 
 const PM_CREDS_KEY_DOMAIN = "steward-kdf:pm-clob-l2-cache:v2";
-let pmCredsDerivedKey: { authorityFingerprint: string; key: Buffer } | null = null;
+const PM_CREDS_CACHE_PREFIX = "stwd_pmclob_v1:";
 
 function polymarketCredentialCacheAuthority(): {
-  authorityFingerprint: string;
   password: string;
   salt: string;
 } | null {
   const password = runtimeEnvironmentValue("STEWARD_MASTER_PASSWORD")?.trim();
   if (!password) return null;
   const salt = runtimeEnvironmentValue("STEWARD_KDF_SALT") ?? "";
-  const authorityFingerprint = createHash("sha256")
-    .update(JSON.stringify({ password, salt }))
-    .digest("hex");
-  return { authorityFingerprint, password, salt };
+  return { password, salt };
 }
 
 function pmCredsCacheEncryptionKey(): Buffer | null {
   const authority = polymarketCredentialCacheAuthority();
   if (!authority) return null;
-  if (pmCredsDerivedKey?.authorityFingerprint === authority.authorityFingerprint) {
-    return pmCredsDerivedKey.key;
-  }
-  const key = scryptSync(
-    authority.password,
-    `${PM_CREDS_KEY_DOMAIN}:${authority.salt}`,
-    32,
-  ) as Buffer;
-  pmCredsDerivedKey = { authorityFingerprint: authority.authorityFingerprint, key };
-  return key;
+  return scryptSync(authority.password, `${PM_CREDS_KEY_DOMAIN}:${authority.salt}`, 32) as Buffer;
 }
 
-/** Internal behavior hook for request-authority isolation tests. */
-export function _polymarketCredentialCacheKeyFingerprintForTests(): string | null {
+/** Encrypt one Redis credential-cache value under the current request authority. */
+export function encryptPolymarketCredentialCacheValue(
+  plaintext: string,
+  cacheKey: string,
+): string | null {
   const key = pmCredsCacheEncryptionKey();
-  return key ? createHash("sha256").update(key).digest("hex") : null;
+  if (!key) return null;
+  try {
+    const iv = randomBytes(12);
+    const cipher = createCipheriv("aes-256-gcm", key, iv);
+    cipher.setAAD(Buffer.from(cacheKey, "utf8"));
+    let ciphertext = cipher.update(plaintext, "utf8", "hex");
+    ciphertext += cipher.final("hex");
+    return `${PM_CREDS_CACHE_PREFIX}${JSON.stringify({
+      ciphertext,
+      iv: iv.toString("hex"),
+      tag: cipher.getAuthTag().toString("hex"),
+    })}`;
+  } finally {
+    key.fill(0);
+  }
+}
+
+/** Decrypt only envelopes authenticated by the current request authority. */
+export function decryptPolymarketCredentialCacheValue(
+  stored: string,
+  cacheKey: string,
+): string | null {
+  if (!stored.startsWith(PM_CREDS_CACHE_PREFIX)) return null;
+  const key = pmCredsCacheEncryptionKey();
+  if (!key) return null;
+  try {
+    const payload = JSON.parse(stored.slice(PM_CREDS_CACHE_PREFIX.length)) as {
+      ciphertext: string;
+      iv: string;
+      tag: string;
+    };
+    const decipher = createDecipheriv("aes-256-gcm", key, Buffer.from(payload.iv, "hex"));
+    decipher.setAAD(Buffer.from(cacheKey, "utf8"));
+    decipher.setAuthTag(Buffer.from(payload.tag, "hex"));
+    let plaintext = decipher.update(payload.ciphertext, "hex", "utf8");
+    plaintext += decipher.final("utf8");
+    return plaintext;
+  } catch {
+    return null;
+  } finally {
+    key.fill(0);
+  }
 }
 
 type PolymarketRuntimeConfig = {
@@ -1545,46 +1576,6 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
   // codec + embedded JWT derivation), so a process or tenant with read access to
   // Redis cannot lift them. If no current master password is configured the cache is SKIPPED
   // entirely (fail closed: never write plaintext; re-derive per order).
-  const PM_CREDS_CACHE_PREFIX = "stwd_pmclob_v1:";
-  function encryptPmCredsCacheValue(plaintext: string, cacheKey: string): string | null {
-    const key = pmCredsCacheEncryptionKey();
-    if (!key) return null;
-    const iv = randomBytes(12);
-    const cipher = createCipheriv("aes-256-gcm", key, iv);
-    cipher.setAAD(Buffer.from(cacheKey, "utf8"));
-    let ciphertext = cipher.update(plaintext, "utf8", "hex");
-    ciphertext += cipher.final("hex");
-    return `${PM_CREDS_CACHE_PREFIX}${JSON.stringify({
-      ciphertext,
-      iv: iv.toString("hex"),
-      tag: cipher.getAuthTag().toString("hex"),
-    })}`;
-  }
-
-  // Returns null for anything that is not a valid envelope for THIS key —
-  // including legacy plaintext entries — so the caller treats it as a cache
-  // miss, re-derives, and overwrites with an encrypted value.
-  function decryptPmCredsCacheValue(stored: string, cacheKey: string): string | null {
-    if (!stored.startsWith(PM_CREDS_CACHE_PREFIX)) return null;
-    const key = pmCredsCacheEncryptionKey();
-    if (!key) return null;
-    try {
-      const payload = JSON.parse(stored.slice(PM_CREDS_CACHE_PREFIX.length)) as {
-        ciphertext: string;
-        iv: string;
-        tag: string;
-      };
-      const decipher = createDecipheriv("aes-256-gcm", key, Buffer.from(payload.iv, "hex"));
-      decipher.setAAD(Buffer.from(cacheKey, "utf8"));
-      decipher.setAuthTag(Buffer.from(payload.tag, "hex"));
-      let plaintext = decipher.update(payload.ciphertext, "hex", "utf8");
-      plaintext += decipher.final("utf8");
-      return plaintext;
-    } catch {
-      return null;
-    }
-  }
-
   // Optional endpoint override for deterministic integration environments and
   // compatible CLOB gateways. It is deployment configuration, not a test-creds
   // bypass: the real clob-client still performs L1 derivation, EIP-712 signing,
@@ -1676,7 +1667,9 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
     if (redis) {
       try {
         const cached = await redis.get(cacheKey);
-        const cachedPlaintext = cached ? decryptPmCredsCacheValue(cached, cacheKey) : null;
+        const cachedPlaintext = cached
+          ? decryptPolymarketCredentialCacheValue(cached, cacheKey)
+          : null;
         if (cachedPlaintext) {
           const parsed = clobApiCredentialsSchema.safeParse(JSON.parse(cachedPlaintext));
           if (parsed.success) {
@@ -1706,7 +1699,10 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
     if (redis) {
       // Fail closed: without cache encryption key material, skip the write and
       // re-derive per order rather than ever storing the creds in plaintext.
-      const cacheValue = encryptPmCredsCacheValue(JSON.stringify(apiCredentials), cacheKey);
+      const cacheValue = encryptPolymarketCredentialCacheValue(
+        JSON.stringify(apiCredentials),
+        cacheKey,
+      );
       if (cacheValue) {
         await redis.setex(cacheKey, PM_CREDS_CACHE_TTL_SECONDS, cacheValue).catch(() => undefined);
       }

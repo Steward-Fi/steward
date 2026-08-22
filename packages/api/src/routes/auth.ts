@@ -135,7 +135,7 @@ import {
   type TenantSamlSsoConfig,
   type TenantTestAccountConfig,
 } from "@stwd/shared";
-import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
+import { runtimeEnvironmentIdentity, runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 import { type KeyStore, provisionUserWallet, Vault } from "@stwd/vault";
 import bs58 from "bs58";
 import { and, eq, gte, inArray, isNull, lt, sql } from "drizzle-orm";
@@ -165,7 +165,6 @@ import {
   _clearConfiguredVaultsForTests,
   getConfiguredKeyStore,
   getConfiguredVault,
-  resolveCustodyAuthority,
 } from "../services/vault-factory";
 import { dispatchWebhook } from "../services/webhook-dispatch";
 
@@ -1447,7 +1446,7 @@ export async function initAuthStores(usePostgres = false): Promise<void> {
   _passkeyAuth = null;
   _phoneAuth = null;
   _passkeyAuthByOrigin.clear();
-  _emailAuthByTenant.clear();
+  _emailAuthByRequest = new WeakMap();
 }
 
 function getChallengeStore(): ChallengeStore {
@@ -1767,74 +1766,7 @@ function getPasskeyAuth(requestOrigin?: string): PasskeyAuth {
 
 // ─── EmailAuth cache ──────────────────────────────────────────────────────────
 
-const _emailAuthByTenant = new Map<string, Map<string, Promise<EmailAuth>>>();
-type CachedEmailAuthAuthority = {
-  tenantId: string;
-  authorityFingerprint: string;
-  pending: Promise<EmailAuth>;
-};
-const _emailAuthAuthorityLru = new Map<string, CachedEmailAuthAuthority>();
-// Bound both per-tenant rotations and the process-wide population. Otherwise
-// one authority per tenant still retains plaintext provider credentials for
-// every tenant ever observed by a long-lived isolate.
-const MAX_EMAIL_AUTH_AUTHORITIES_PER_TENANT = 4;
-const MAX_EMAIL_AUTH_AUTHORITIES_GLOBAL = 64;
-
-function emailAuthAuthorityCacheKey(tenantId: string, authorityFingerprint: string): string {
-  return JSON.stringify([tenantId, authorityFingerprint]);
-}
-
-function removeCachedEmailAuthAuthority(entry: CachedEmailAuthAuthority): void {
-  const key = emailAuthAuthorityCacheKey(entry.tenantId, entry.authorityFingerprint);
-  if (_emailAuthAuthorityLru.get(key)?.pending === entry.pending) {
-    _emailAuthAuthorityLru.delete(key);
-  }
-  const authorities = _emailAuthByTenant.get(entry.tenantId);
-  if (authorities?.get(entry.authorityFingerprint) !== entry.pending) return;
-  authorities.delete(entry.authorityFingerprint);
-  if (authorities.size === 0 && _emailAuthByTenant.get(entry.tenantId) === authorities) {
-    _emailAuthByTenant.delete(entry.tenantId);
-  }
-}
-
-function touchCachedEmailAuthAuthority(entry: CachedEmailAuthAuthority): void {
-  const key = emailAuthAuthorityCacheKey(entry.tenantId, entry.authorityFingerprint);
-  if (_emailAuthAuthorityLru.get(key)?.pending !== entry.pending) return;
-  _emailAuthAuthorityLru.delete(key);
-  _emailAuthAuthorityLru.set(key, entry);
-}
-
-function cacheEmailAuthAuthority(
-  tenantId: string,
-  authorities: Map<string, Promise<EmailAuth>>,
-  authorityFingerprint: string,
-  pending: Promise<EmailAuth>,
-): void {
-  if (authorities.size >= MAX_EMAIL_AUTH_AUTHORITIES_PER_TENANT) {
-    const oldestAuthority = authorities.keys().next().value as string | undefined;
-    const oldestPending = oldestAuthority ? authorities.get(oldestAuthority) : undefined;
-    if (oldestAuthority && oldestPending) {
-      removeCachedEmailAuthAuthority({
-        tenantId,
-        authorityFingerprint: oldestAuthority,
-        pending: oldestPending,
-      });
-    }
-  }
-  if (_emailAuthAuthorityLru.size >= MAX_EMAIL_AUTH_AUTHORITIES_GLOBAL) {
-    const oldestKey = _emailAuthAuthorityLru.keys().next().value as string | undefined;
-    const oldestEntry = oldestKey ? _emailAuthAuthorityLru.get(oldestKey) : undefined;
-    if (oldestEntry) removeCachedEmailAuthAuthority(oldestEntry);
-  }
-  // Global eviction can remove the final older generation for this same
-  // tenant. Re-register the still-current map before installing its successor.
-  if (_emailAuthByTenant.get(tenantId) !== authorities) {
-    _emailAuthByTenant.set(tenantId, authorities);
-  }
-  authorities.set(authorityFingerprint, pending);
-  const entry = { tenantId, authorityFingerprint, pending };
-  _emailAuthAuthorityLru.set(emailAuthAuthorityCacheKey(tenantId, authorityFingerprint), entry);
-}
+let _emailAuthByRequest = new WeakMap<object, Map<string, Promise<EmailAuth>>>();
 
 function getEmailKeyStore(): KeyStore {
   return getConfiguredKeyStore(undefined, { allowDevSecretFallback: true });
@@ -2130,66 +2062,45 @@ async function createEmailAuthForTenant(tenantId: string): Promise<EmailAuth> {
 }
 
 export async function getEmailAuthForTenant(tenantId: string): Promise<EmailAuth> {
-  const custodyFingerprint = resolveCustodyAuthority({
-    allowDevSecretFallback: true,
-  }).fingerprint;
-  // EmailAuth construction crosses an awaited tenant-config lookup. Bind its
-  // cache identity to the immutable request-local provider authority too, so
-  // overlapping requests with the same custody root cannot lend each other a
-  // Resend key, sender, callback origin, or code-verifier authority.
-  const emailAuthorityFingerprint = hashSha256Hex(
-    JSON.stringify({
-      nodeEnvironment: runtimeEnvironmentValue("NODE_ENV"),
-      provider: runtimeEnvironmentValue("EMAIL_PROVIDER"),
-      resendApiKey: runtimeEnvironmentValue("RESEND_API_KEY"),
-      emailFrom: runtimeEnvironmentValue("EMAIL_FROM"),
-      appUrl: runtimeEnvironmentValue("APP_URL"),
-      codeVerifierSecret: runtimeEnvironmentValue("STEWARD_EMAIL_CODE_SECRET"),
-      allowDevSecrets: runtimeEnvironmentValue("STEWARD_ALLOW_DEV_SECRETS"),
-      allowLegacyDevSecret: runtimeEnvironmentValue("STEWARD_ALLOW_DEV_SECRET"),
-    }),
-  );
-  const authorityFingerprint = hashSha256Hex(`${custodyFingerprint}:${emailAuthorityFingerprint}`);
-  let authorities = _emailAuthByTenant.get(tenantId);
-  const cached = authorities?.get(authorityFingerprint);
-  if (cached && authorities) {
-    authorities.delete(authorityFingerprint);
-    authorities.set(authorityFingerprint, cached);
-    touchCachedEmailAuthAuthority({ tenantId, authorityFingerprint, pending: cached });
-    return cached;
-  }
+  const requestIdentity = runtimeEnvironmentIdentity();
+  if (!requestIdentity) return createEmailAuthForTenant(tenantId);
 
-  let pending: Promise<EmailAuth>;
-  pending = createEmailAuthForTenant(tenantId).catch((error) => {
-    if (authorities?.get(authorityFingerprint) === pending) {
-      removeCachedEmailAuthAuthority({ tenantId, authorityFingerprint, pending });
-    }
+  let tenants = _emailAuthByRequest.get(requestIdentity);
+  const cached = tenants?.get(tenantId);
+  if (cached) return cached;
+
+  const pending = createEmailAuthForTenant(tenantId).catch((error) => {
+    tenants?.delete(tenantId);
     throw error;
   });
-  if (!authorities) {
-    authorities = new Map();
-    _emailAuthByTenant.set(tenantId, authorities);
+  if (!tenants) {
+    tenants = new Map();
+    _emailAuthByRequest.set(requestIdentity, tenants);
   }
-  cacheEmailAuthAuthority(tenantId, authorities, authorityFingerprint, pending);
+  tenants.set(tenantId, pending);
   return pending;
 }
 
 export function invalidateEmailAuthForTenant(tenantId: string): void {
-  const authorities = _emailAuthByTenant.get(tenantId);
-  if (!authorities) return;
-  for (const [authorityFingerprint, pending] of authorities) {
-    removeCachedEmailAuthAuthority({ tenantId, authorityFingerprint, pending });
-  }
+  const identity = runtimeEnvironmentIdentity();
+  if (!identity) return;
+  const tenants = _emailAuthByRequest.get(identity);
+  const cached = tenants?.get(tenantId);
+  tenants?.delete(tenantId);
+  void cached?.then(
+    (auth) => auth.disposeProvider(),
+    () => undefined,
+  );
 }
 
 export function clearEmailAuthTenantCacheForTests(): void {
-  _emailAuthByTenant.clear();
-  _emailAuthAuthorityLru.clear();
+  _emailAuthByRequest = new WeakMap();
 }
 
-/** Internal behavior hook for deterministic cache-bound regressions. */
-export function emailAuthCacheEntryCountForTests(): number {
-  return _emailAuthAuthorityLru.size;
+/** Internal behavior hook: no cache generations outside the active request are reachable. */
+export function emailAuthRequestCacheSizeForTests(): number {
+  const identity = runtimeEnvironmentIdentity();
+  return identity ? (_emailAuthByRequest.get(identity)?.size ?? 0) : 0;
 }
 
 export function clearOAuthTokenKeyStoreForTests(): void {

@@ -1228,9 +1228,17 @@ export class EmailAuth {
   }
 
   /**
-   * Clean up background timers.  Call in tests after each suite.
+   * Retire credential-bearing provider state without touching a shared token store.
+   */
+  disposeProvider(): void {
+    this.provider.destroy?.();
+  }
+
+  /**
+   * Clean up background timers and provider state. Call in tests after each suite.
    */
   destroy(): void {
+    this.disposeProvider();
     this.tokenStore.destroy();
   }
 }

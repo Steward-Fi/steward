@@ -185,9 +185,12 @@ beforeEach(() => {
 });
 
 describe("SEC-108: Polymarket L2 creds Redis cache is encrypted at rest", () => {
-  it("binds its derived key to each request's password and KDF salt across hostile overlap", async () => {
-    const { _polymarketCredentialCacheKeyFingerprintForTests, _polymarketRuntimeConfigForTests } =
-      await import("../routes/trade");
+  it("keeps runtime configuration isolated across hostile request overlap", async () => {
+    const {
+      _polymarketRuntimeConfigForTests,
+      decryptPolymarketCredentialCacheValue,
+      encryptPolymarketCredentialCacheValue,
+    } = await import("../routes/trade");
     const authorityA = {
       NODE_ENV: "test",
       STEWARD_MASTER_PASSWORD: "shared-password",
@@ -212,13 +215,10 @@ describe("SEC-108: Polymarket L2 creds Redis cache is encrypted at rest", () => 
       releaseA = resolve;
     });
     const requestA = withRuntimeEnvironment(authorityA, async () => {
-      const before = _polymarketCredentialCacheKeyFingerprintForTests();
       const configBefore = _polymarketRuntimeConfigForTests();
       signalAStarted?.();
       await aMayResume;
       return {
-        before,
-        after: _polymarketCredentialCacheKeyFingerprintForTests(),
         configBefore,
         configAfter: _polymarketRuntimeConfigForTests(),
       };
@@ -226,14 +226,11 @@ describe("SEC-108: Polymarket L2 creds Redis cache is encrypted at rest", () => 
 
     await aStarted;
     const requestB = withRuntimeEnvironment(authorityB, () => ({
-      key: _polymarketCredentialCacheKeyFingerprintForTests(),
       config: _polymarketRuntimeConfigForTests(),
     }));
     releaseA?.();
     const resumedA = await requestA;
 
-    expect(requestB.key).not.toBe(resumedA.before);
-    expect(resumedA.after).toBe(resumedA.before);
     expect(resumedA.configAfter).toEqual(resumedA.configBefore);
     expect(resumedA.configAfter).toEqual({
       clobUrl: "https://clob-a.example.invalid",
@@ -256,7 +253,23 @@ describe("SEC-108: Polymarket L2 creds Redis cache is encrypted at rest", () => 
         _polymarketRuntimeConfigForTests,
       ),
     ).toThrow("POLYMARKET_CLOB_API_URL must use https in production");
-    expect(withRuntimeEnvironment({}, _polymarketCredentialCacheKeyFingerprintForTests)).toBeNull();
+
+    const cacheKey = "pm:clob-l2:tenant:agent:wallet:endpoint";
+    const envelopeA = withRuntimeEnvironment(authorityA, () =>
+      encryptPolymarketCredentialCacheValue("authority-a", cacheKey),
+    );
+    expect(envelopeA).not.toBeNull();
+    const envelopeB = withRuntimeEnvironment(authorityB, () => {
+      expect(decryptPolymarketCredentialCacheValue(envelopeA as string, cacheKey)).toBeNull();
+      return encryptPolymarketCredentialCacheValue("authority-b", cacheKey);
+    });
+    expect(envelopeB).not.toBeNull();
+    withRuntimeEnvironment(authorityA, () => {
+      expect(decryptPolymarketCredentialCacheValue(envelopeB as string, cacheKey)).toBeNull();
+      expect(decryptPolymarketCredentialCacheValue(envelopeA as string, cacheKey)).toBe(
+        "authority-a",
+      );
+    });
   });
 
   it("caches creds encrypted, serves the next order from cache, and rewrites legacy plaintext", async () => {
@@ -266,7 +279,6 @@ describe("SEC-108: Polymarket L2 creds Redis cache is encrypted at rest", () => 
       ...testCtx(),
       getRedisClient: () => fakeRedis,
     } as unknown as StewardAppContext;
-    const tradeRoutes = createTradeRoutes(ctx);
 
     const { tenantId, agentId } = await seedTenantAgent();
     // Real provisioning into the encrypted venue-scoped vault; no key material
@@ -278,6 +290,7 @@ describe("SEC-108: Polymarket L2 creds Redis cache is encrypted at rest", () => 
       chainType: "evm",
     });
     const sessionId = await seedSession(tenantId, agentId, wallet.address);
+    const tradeRoutes = createTradeRoutes(ctx);
     const app = makeApp(tenantId, agentId, tradeRoutes);
 
     const authKeyRequests: unknown[] = [];

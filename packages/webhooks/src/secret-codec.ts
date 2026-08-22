@@ -1,4 +1,4 @@
-import { createCipheriv, createDecipheriv, createHash, randomBytes, scryptSync } from "node:crypto";
+import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from "node:crypto";
 import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 
 const PREFIX = "stwd_whsec_v1:";
@@ -12,11 +12,8 @@ type EncryptedWebhookSecret = {
 };
 
 let warnedDevSecret = false;
-const rootKeysByAuthority = new Map<string, Buffer>();
-const MAX_CACHED_WEBHOOK_AUTHORITIES = 8;
 
 export interface WebhookSecretAuthority {
-  readonly fingerprint: string;
   readonly nodeEnvironment?: string;
   readonly encryptionKey: string;
   readonly kdfSalt: string;
@@ -91,12 +88,8 @@ export function resolveWebhookSecretAuthority(): WebhookSecretAuthority {
     kdfSalt = DEFAULT_KDF_SALT;
     kdfSaltIsHex = false;
   }
-  if (kdfSaltIsHex) decodeConfiguredKdfSalt(kdfSalt);
-  const fingerprint = createHash("sha256")
-    .update(JSON.stringify({ nodeEnvironment, encryptionKey, kdfSalt, kdfSaltIsHex }))
-    .digest("hex");
+  if (kdfSaltIsHex) decodeConfiguredKdfSalt(kdfSalt).fill(0);
   return Object.freeze({
-    fingerprint,
     nodeEnvironment,
     encryptionKey,
     kdfSalt,
@@ -106,25 +99,23 @@ export function resolveWebhookSecretAuthority(): WebhookSecretAuthority {
 
 function rootKey(): Buffer {
   const authority = resolveWebhookSecretAuthority();
-  let key = rootKeysByAuthority.get(authority.fingerprint);
-  if (key) return key;
   const salt = authority.kdfSaltIsHex
     ? decodeConfiguredKdfSalt(authority.kdfSalt)
     : Buffer.from(authority.kdfSalt, "utf8");
-  key = scryptSync(authority.encryptionKey, salt, 32) as Buffer;
-  if (rootKeysByAuthority.size >= MAX_CACHED_WEBHOOK_AUTHORITIES) {
-    const oldest = rootKeysByAuthority.keys().next().value as string | undefined;
-    if (oldest) {
-      rootKeysByAuthority.get(oldest)?.fill(0);
-      rootKeysByAuthority.delete(oldest);
-    }
+  try {
+    return scryptSync(authority.encryptionKey, salt, 32) as Buffer;
+  } finally {
+    salt.fill(0);
   }
-  rootKeysByAuthority.set(authority.fingerprint, key);
-  return key;
 }
 
 function deriveRecordKey(recordSalt: Buffer): Buffer {
-  return scryptSync(rootKey(), recordSalt, 32) as Buffer;
+  const root = rootKey();
+  try {
+    return scryptSync(root, recordSalt, 32) as Buffer;
+  } finally {
+    root.fill(0);
+  }
 }
 
 export function isEncryptedWebhookSecret(value: string): boolean {
@@ -135,16 +126,21 @@ export function encryptWebhookSecret(secret: string): string {
   if (isEncryptedWebhookSecret(secret)) return secret;
   const iv = randomBytes(16);
   const salt = randomBytes(16);
-  const cipher = createCipheriv("aes-256-gcm", deriveRecordKey(salt), iv);
-  let ciphertext = cipher.update(secret, "utf8", "hex");
-  ciphertext += cipher.final("hex");
-  const payload: EncryptedWebhookSecret = {
-    ciphertext,
-    iv: iv.toString("hex"),
-    tag: cipher.getAuthTag().toString("hex"),
-    salt: salt.toString("hex"),
-  };
-  return `${PREFIX}${JSON.stringify(payload)}`;
+  const recordKey = deriveRecordKey(salt);
+  try {
+    const cipher = createCipheriv("aes-256-gcm", recordKey, iv);
+    let ciphertext = cipher.update(secret, "utf8", "hex");
+    ciphertext += cipher.final("hex");
+    const payload: EncryptedWebhookSecret = {
+      ciphertext,
+      iv: iv.toString("hex"),
+      tag: cipher.getAuthTag().toString("hex"),
+      salt: salt.toString("hex"),
+    };
+    return `${PREFIX}${JSON.stringify(payload)}`;
+  } finally {
+    recordKey.fill(0);
+  }
 }
 
 export function decryptWebhookSecret(secret: string): string {
@@ -154,9 +150,14 @@ export function decryptWebhookSecret(secret: string): string {
   const iv = Buffer.from(payload.iv, "hex");
   const salt = Buffer.from(payload.salt, "hex");
   const tag = Buffer.from(payload.tag, "hex");
-  const decipher = createDecipheriv("aes-256-gcm", deriveRecordKey(salt), iv);
-  decipher.setAuthTag(tag);
-  let plaintext = decipher.update(payload.ciphertext, "hex", "utf8");
-  plaintext += decipher.final("utf8");
-  return plaintext;
+  const recordKey = deriveRecordKey(salt);
+  try {
+    const decipher = createDecipheriv("aes-256-gcm", recordKey, iv);
+    decipher.setAuthTag(tag);
+    let plaintext = decipher.update(payload.ciphertext, "hex", "utf8");
+    plaintext += decipher.final("utf8");
+    return plaintext;
+  } finally {
+    recordKey.fill(0);
+  }
 }
