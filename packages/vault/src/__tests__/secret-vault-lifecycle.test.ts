@@ -173,6 +173,33 @@ describe("SecretVault lifecycle semantics", () => {
     expect(await vault.listRoutes(tenantId)).toEqual([]);
   });
 
+  it("refuses generic deletion of governed provider authority", async () => {
+    const tenantId = `tenant-governed-delete-${crypto.randomUUID()}`;
+    const agentId = `agent-governed-delete-${crypto.randomUUID()}`;
+    await ensureTenant(tenantId);
+    await ensureAgent(tenantId, agentId);
+
+    const secret = await vault.createSecret(tenantId, "governed-provider", "provider-token");
+    const route = await vault.createRoute(tenantId, secret.id, {
+      agentId,
+      hostPattern: "api.github.com",
+      pathPattern: "/repos/acme/widgets",
+      method: "GET",
+      injectAs: "header",
+      injectKey: "authorization",
+    });
+    await promoteRoute(tenantId, route.id);
+
+    await expect(vault.deleteRoute(tenantId, route.id)).rejects.toThrow(
+      /provider-operation lifecycle/,
+    );
+    await expect(vault.deleteSecret(tenantId, secret.id)).rejects.toThrow(
+      /provider-operation lifecycle/,
+    );
+    expect(await vault.getRoute(tenantId, route.id)).not.toBeNull();
+    expect(await vault.getSecretById(tenantId, secret.id)).not.toBeNull();
+  });
+
   it("rejects creating routes for expired secrets", async () => {
     const tenantId = `tenant-expired-${crypto.randomUUID()}`;
     await ensureTenant(tenantId);
