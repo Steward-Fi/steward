@@ -2968,6 +2968,58 @@ export const tradeSessions = pgTable(
 export type TradeSessionRow = typeof tradeSessions.$inferSelect;
 export type NewTradeSessionRow = typeof tradeSessions.$inferInsert;
 
+/**
+ * Durable recovery journal for venue order submission.
+ *
+ * A row is created before the irreversible venue call.  `venueIdentity` is
+ * populated before submission with a venue-queryable client identity (HL
+ * cloid or Polymarket order hash), while `responseEnvelope` checkpoints the
+ * exact externally observed result before required completion effects run.
+ * The claim columns fence both concurrent request replay and stale-worker
+ * takeover; no recovery owner is allowed to submit a second venue order.
+ */
+export const tradeOrderRecoveries = pgTable(
+  "trade_order_recoveries",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    tenantId: varchar("tenant_id", { length: 64 }).notNull(),
+    agentId: varchar("agent_id", { length: 64 }).notNull(),
+    sessionId: varchar("session_id", { length: 128 }).notNull(),
+    venue: varchar("venue", { length: 32 }).notNull(),
+    idempotencyKeyHash: varchar("idempotency_key_hash", { length: 64 }).notNull(),
+    bodyHash: varchar("body_hash", { length: 64 }).notNull(),
+    state: varchar("state", { length: 32 }).notNull().default("prepared"),
+    venueIdentity: varchar("venue_identity", { length: 255 }),
+    venueResult: jsonb("venue_result").$type<Record<string, unknown>>(),
+    responseEnvelope: jsonb("response_envelope").$type<Record<string, unknown>>(),
+    occurrenceAt: timestamp("occurrence_at", { withTimezone: true }).notNull().defaultNow(),
+    submitStartedAt: timestamp("submit_started_at", { withTimezone: true }),
+    auditDeliveredAt: timestamp("audit_delivered_at", { withTimezone: true }),
+    claimToken: uuid("claim_token").notNull(),
+    claimedAt: timestamp("claimed_at", { withTimezone: true }).notNull().defaultNow(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    replayUnique: uniqueIndex("trade_order_recoveries_replay_uidx").on(
+      table.tenantId,
+      table.agentId,
+      table.venue,
+      table.idempotencyKeyHash,
+    ),
+    pendingEffectsIdx: index("trade_order_recoveries_pending_effects_idx")
+      .on(table.claimedAt, table.createdAt, table.id)
+      .where(sql`${table.auditDeliveredAt} IS NULL`),
+    stateCheck: check(
+      "trade_order_recoveries_state_chk",
+      sql`${table.state} IN ('prepared','submitting','ambiguous','submitted','rejected','completed')`,
+    ),
+  }),
+);
+
+export type TradeOrderRecoveryRow = typeof tradeOrderRecoveries.$inferSelect;
+export type NewTradeOrderRecoveryRow = typeof tradeOrderRecoveries.$inferInsert;
+
 export const agentPolicies = pgTable(
   "agent_policies",
   {
@@ -3031,6 +3083,9 @@ export const auditEvents = pgTable(
     requiredOutboxIdentityIdx: uniqueIndex("audit_events_required_outbox_identity_uidx")
       .on(table.tenantId, sql`(${table.metadata}->>'requiredOutboxId')`)
       .where(sql`${table.metadata} ? 'requiredOutboxId'`),
+    tradeRecoveryIdentityIdx: uniqueIndex("audit_events_trade_recovery_identity_uidx")
+      .on(table.tenantId, sql`(${table.metadata}->>'tradeRecoveryId')`)
+      .where(sql`${table.metadata} ? 'tradeRecoveryId'`),
   }),
 );
 

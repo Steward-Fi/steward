@@ -136,6 +136,13 @@ export const hyperliquidOrderSchema = z.object({
   reduceOnly: z.boolean().default(false),
   leverage: z.number().positive().max(50).optional(),
   nonce: z.number().int().positive().optional(),
+  // Stable 16-byte client order id. The hosted route derives this from its
+  // durable recovery identity so an ambiguous transport loss can be queried
+  // from the venue without submitting again.
+  clientOrderId: z
+    .string()
+    .regex(/^0x[0-9a-fA-F]{32}$/)
+    .optional(),
   // SEC-186 precedence: an order-supplied builder OVERRIDES the
   // HL_BUILDER_ADDRESS / HL_BUILDER_FEE_TENTHS_BP env config (see
   // exchangeActionFromNormalized). The hosted trade route never forwards a
@@ -536,6 +543,7 @@ function normalized(order: HyperliquidOrder) {
     reduceOnly: p.reduceOnly ?? false,
     tif: p.orderType?.limit?.tif ?? "Ioc",
     nonce: p.nonce,
+    clientOrderId: p.clientOrderId,
     builder: p.builder,
   };
 }
@@ -609,6 +617,7 @@ function exchangeActionFromNormalized(
         s: formatSizeForAsset(o.sz, asset),
         r: o.reduceOnly,
         t: { limit: { tif: o.tif } },
+        ...(o.clientOrderId ? { c: o.clientOrderId.toLowerCase() } : {}),
       },
     ],
     grouping: "na",
@@ -1277,6 +1286,25 @@ export async function getOpenOrders(
     openOrderSchema.parse({ ...(o as Record<string, unknown>), raw: o }),
   );
 }
+
+/** Query one order by immutable venue identity (numeric oid or client cloid). */
+export async function getOrderStatus(
+  userAddress: string,
+  orderIdentity: string,
+  options: { transport?: HyperliquidTransport; baseUrl?: string } = {},
+): Promise<unknown> {
+  const r = await (options.transport ?? { fetch }).fetch(
+    `${options.baseUrl ?? DEFAULT_BASE_URL}/info`,
+    withTimeoutSignal({
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ type: "orderStatus", user: userAddress, oid: orderIdentity }),
+    }),
+  );
+  const body = await r.json().catch(() => null);
+  if (!r.ok) throw new Error(`Hyperliquid info returned ${r.status}`);
+  return body;
+}
 export async function cancelOrder(
   walletPrivateKey: Hex,
   input: CancelOrderInput,
@@ -1508,6 +1536,12 @@ export class HyperliquidAdapter {
   }
   getOpenOrders(userAddress = this.walletAddress) {
     return getOpenOrders(userAddress, { transport: this.transport, baseUrl: this.baseUrl });
+  }
+  getOrderStatus(orderIdentity: string, userAddress = this.walletAddress) {
+    return getOrderStatus(userAddress, orderIdentity, {
+      transport: this.transport,
+      baseUrl: this.baseUrl,
+    });
   }
   async cancelOrder(input: CancelOrderInput) {
     const nonce = input.nonce ?? nextNonce();
