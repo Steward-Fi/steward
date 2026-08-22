@@ -274,7 +274,10 @@ async function lockTenantAuditWriter(
   tx: { execute(query: ReturnType<typeof sql>): Promise<unknown> },
   tenantId: string,
 ) {
-  if (runtimeEnvironmentValue("STEWARD_DB_MODE") !== "pglite" && runtimeEnvironmentValue("STEWARD_PGLITE_MEMORY") !== "true") {
+  if (
+    runtimeEnvironmentValue("STEWARD_DB_MODE") !== "pglite" &&
+    runtimeEnvironmentValue("STEWARD_PGLITE_MEMORY") !== "true"
+  ) {
     await tx.execute(
       sql`SELECT pg_advisory_xact_lock(hashtextextended(${`steward_audit_${tenantId}`}, 0))`,
     );

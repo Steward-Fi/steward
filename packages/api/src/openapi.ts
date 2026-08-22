@@ -7035,7 +7035,10 @@ export function isOpenApiHttpEnabled(): boolean {
   const explicit = runtimeEnvironmentValue("STEWARD_OPENAPI_ENABLED");
   if (explicit === "1" || explicit === "true") return true;
   if (explicit === "0" || explicit === "false") return false;
-  return runtimeEnvironmentValue("NODE_ENV") !== undefined && runtimeEnvironmentValue("NODE_ENV") !== "production";
+  return (
+    runtimeEnvironmentValue("NODE_ENV") !== undefined &&
+    runtimeEnvironmentValue("NODE_ENV") !== "production"
+  );
 }
 
 export const OPENAPI_DOC = getOpenApiSpec();

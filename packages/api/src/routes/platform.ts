@@ -1,3 +1,4 @@
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 /**
  * Platform-level management routes.
  *
@@ -381,7 +382,7 @@ function auditCtx(c: {
 }
 
 function platformIdentityMigrationAllowed(): boolean {
-  return process.env.STEWARD_ALLOW_PLATFORM_IDENTITY_MIGRATION === "true";
+  return runtimeEnvironmentValue("STEWARD_ALLOW_PLATFORM_IDENTITY_MIGRATION") === "true";
 }
 
 function platformIdentityMigrationDisabledResponse(c: Context) {

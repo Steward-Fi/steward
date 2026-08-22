@@ -1,6 +1,6 @@
-import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 import { createHash, timingSafeEqual } from "node:crypto";
 import type { ApiResponse } from "@stwd/shared";
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 import { createMiddleware } from "hono/factory";
 
 /**
@@ -28,7 +28,10 @@ import { createMiddleware } from "hono/factory";
  */
 
 function getValidPlatformKeys(): string[] {
-  return [runtimeEnvironmentValue("STEWARD_PLATFORM_KEYS"), runtimeEnvironmentValue("STEWARD_PLATFORM_KEY")]
+  return [
+    runtimeEnvironmentValue("STEWARD_PLATFORM_KEYS"),
+    runtimeEnvironmentValue("STEWARD_PLATFORM_KEY"),
+  ]
     .filter((value): value is string => Boolean(value))
     .join(",")
     .split(",")

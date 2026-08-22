@@ -1127,4 +1127,5 @@ export function createMoneroBackendFromEnv(
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
+
 import { runtimeEnvironmentSnapshot } from "@stwd/shared/runtime-env";

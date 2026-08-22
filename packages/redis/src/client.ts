@@ -24,14 +24,35 @@
  *               set (assertUpstashRestUrlTls).
  */
 
+import {
+  type RuntimeEnvironment,
+  runtimeEnvironmentSnapshot,
+  runtimeEnvironmentValue,
+} from "@stwd/shared/runtime-env";
 import { Redis as UpstashRedis } from "@upstash/redis";
 import { Redis } from "ioredis";
 import { createUpstashIoredisAdapter, type IoredisLike } from "./upstash-adapter.js";
 
 export type RedisDriver = "ioredis" | "upstash";
 
-let instance: IoredisLike | null = null;
+const instances = new Map<string, IoredisLike>();
 let shutdownRegistered = false;
+
+function redisAuthority(): RuntimeEnvironment {
+  return runtimeEnvironmentSnapshot();
+}
+
+function authorityFingerprint(environment: RuntimeEnvironment): string {
+  return JSON.stringify([
+    environment.REDIS_DRIVER ?? "ioredis",
+    environment.REDIS_URL ?? "",
+    environment.KV_REST_API_URL ?? environment.UPSTASH_REDIS_REST_URL ?? "",
+    environment.KV_REST_API_TOKEN ?? environment.UPSTASH_REDIS_REST_TOKEN ?? "",
+    environment.NODE_ENV ?? "",
+    environment.STEWARD_RUNTIME ?? "",
+    environment.STEWARD_ALLOW_INSECURE_REDIS ?? "",
+  ]);
+}
 
 /**
  * Refuse to start in production if REDIS_URL is not using TLS (rediss://).
@@ -42,7 +63,10 @@ let shutdownRegistered = false;
  * deployments (logs a loud warning), matching the STEWARD_ALLOW_INSECURE_DB
  * posture in @stwd/db.
  */
-export function assertRedisUrlTls(url: string, env: NodeJS.ProcessEnv = process.env): void {
+export function assertRedisUrlTls(
+  url: string,
+  env: Readonly<Record<string, string | undefined>> = redisAuthority(),
+): void {
   if (env.NODE_ENV !== "production") return;
 
   const allowInsecure = env.STEWARD_ALLOW_INSECURE_REDIS === "true";
@@ -90,7 +114,10 @@ export function assertRedisUrlTls(url: string, env: NodeJS.ProcessEnv = process.
  * unless the endpoint is loopback; STEWARD_ALLOW_INSECURE_REDIS=true overrides
  * (loud warning), matching assertRedisUrlTls.
  */
-export function assertUpstashRestUrlTls(url: string, env: NodeJS.ProcessEnv = process.env): void {
+export function assertUpstashRestUrlTls(
+  url: string,
+  env: Readonly<Record<string, string | undefined>> = redisAuthority(),
+): void {
   const allowInsecure = env.STEWARD_ALLOW_INSECURE_REDIS === "true";
   let parsed: URL;
   try {
@@ -129,14 +156,18 @@ export function assertUpstashRestUrlTls(url: string, env: NodeJS.ProcessEnv = pr
 }
 
 export function getRedisDriver(): RedisDriver {
-  const raw = process.env.REDIS_DRIVER?.trim().toLowerCase();
+  const raw = runtimeEnvironmentValue("REDIS_DRIVER")?.trim().toLowerCase();
   if (raw === "upstash") return "upstash";
   return "ioredis";
 }
 
-function buildIoredis(): Redis {
-  const url = process.env.REDIS_URL || "redis://localhost:6379";
-  assertRedisUrlTls(url);
+function buildIoredis(environment: RuntimeEnvironment): Redis {
+  const configuredUrl = environment.REDIS_URL?.trim();
+  if (!configuredUrl && environment.STEWARD_RUNTIME === "workers") {
+    throw new Error("REDIS_URL is required for the ioredis driver on Workers");
+  }
+  const url = configuredUrl || "redis://localhost:6379";
+  assertRedisUrlTls(url, environment);
   const client = new Redis(url, {
     maxRetriesPerRequest: 3,
     retryStrategy(times: number) {
@@ -161,11 +192,13 @@ function buildIoredis(): Redis {
   if (!shutdownRegistered) {
     shutdownRegistered = true;
     const shutdown = async () => {
-      if (instance && "quit" in instance && typeof instance.quit === "function") {
-        console.log("[steward:redis] shutting down connection...");
-        await (instance as Redis).quit().catch(() => {});
-        instance = null;
+      for (const client of instances.values()) {
+        if ("quit" in client && typeof client.quit === "function") {
+          console.log("[steward:redis] shutting down connection...");
+          await (client as Redis).quit().catch(() => {});
+        }
       }
+      instances.clear();
     };
     process.on("SIGINT", shutdown);
     process.on("SIGTERM", shutdown);
@@ -175,9 +208,9 @@ function buildIoredis(): Redis {
   return client;
 }
 
-function buildUpstash(): IoredisLike {
-  const url = process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL || "";
-  const token = process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN || "";
+function buildUpstash(environment: RuntimeEnvironment): IoredisLike {
+  const url = environment.KV_REST_API_URL || environment.UPSTASH_REDIS_REST_URL || "";
+  const token = environment.KV_REST_API_TOKEN || environment.UPSTASH_REDIS_REST_TOKEN || "";
 
   if (!url || !token) {
     throw new Error(
@@ -188,7 +221,7 @@ function buildUpstash(): IoredisLike {
 
   // SEC-032: same TLS posture as the ioredis path — the REST token rides every
   // request, so a cleartext http:// endpoint in production is fail-closed.
-  assertUpstashRestUrlTls(url);
+  assertUpstashRestUrlTls(url, environment);
 
   const upstash = new UpstashRedis({ url, token });
   console.log("[steward:redis] using upstash REST adapter");
@@ -200,22 +233,29 @@ function buildUpstash(): IoredisLike {
  * Creates the connection on first call.
  */
 export function getRedis(): IoredisLike {
-  if (!instance) {
-    const driver = getRedisDriver();
-    instance = driver === "upstash" ? buildUpstash() : (buildIoredis() as unknown as IoredisLike);
-  }
-  return instance;
+  const environment = redisAuthority();
+  const fingerprint = authorityFingerprint(environment);
+  const cached = instances.get(fingerprint);
+  if (cached) return cached;
+  const driver = getRedisDriver();
+  const client =
+    driver === "upstash"
+      ? buildUpstash(environment)
+      : (buildIoredis(environment) as unknown as IoredisLike);
+  instances.set(fingerprint, client);
+  return client;
 }
 
 /**
  * Disconnect and reset the singleton (useful for tests).
  */
 export async function disconnectRedis(): Promise<void> {
-  if (!instance) return;
-  if ("quit" in instance && typeof instance.quit === "function") {
-    await (instance as Redis).quit().catch(() => {});
+  for (const client of instances.values()) {
+    if ("quit" in client && typeof client.quit === "function") {
+      await (client as Redis).quit().catch(() => {});
+    }
   }
-  instance = null;
+  instances.clear();
 }
 
 export type { IoredisLike };

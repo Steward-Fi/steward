@@ -1,6 +1,6 @@
-import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 import { createHmac, randomBytes, randomInt, timingSafeEqual } from "node:crypto";
 import { redactedThrownDiagnostics } from "@stwd/shared";
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 
 import { hashSha256Hex } from "./crypto";
 import type { EmailDeliveryReceipt, EmailProvider } from "./email-provider";
@@ -469,13 +469,16 @@ export class EmailAuth {
     // Console delivery is forbidden in production. Reject before storing a
     // challenge so the API cannot report success for an undeliverable login.
     this.deliveryNotConfigured =
-      runtimeEnvironmentValue("NODE_ENV") === "production" && this.provider instanceof ConsoleProvider;
+      runtimeEnvironmentValue("NODE_ENV") === "production" &&
+      this.provider instanceof ConsoleProvider;
     this.tokenStore = config.tokenStore ?? new TokenStore();
     this.replyTo = config.replyTo;
     this.templateId = config.templateId;
     this.subjectOverride = config.subjectOverride;
     const configuredCodeSecret =
-      config.codeVerifierSecret?.trim() || runtimeEnvironmentValue("STEWARD_EMAIL_CODE_SECRET")?.trim() || "";
+      config.codeVerifierSecret?.trim() ||
+      runtimeEnvironmentValue("STEWARD_EMAIL_CODE_SECRET")?.trim() ||
+      "";
     if (!configuredCodeSecret) {
       // Tests intentionally use an isolated deterministic fallback. Every
       // runnable non-test environment must explicitly opt in to that fallback,
@@ -485,7 +488,10 @@ export class EmailAuth {
           "STEWARD_EMAIL_CODE_SECRET is required. For local development only, set STEWARD_ALLOW_DEV_SECRETS=true to use the insecure dev secret.",
         );
       }
-    } else if (runtimeEnvironmentValue("NODE_ENV") === "production" && configuredCodeSecret.length < 32) {
+    } else if (
+      runtimeEnvironmentValue("NODE_ENV") === "production" &&
+      configuredCodeSecret.length < 32
+    ) {
       throw new Error("STEWARD_EMAIL_CODE_SECRET must be at least 32 characters in production");
     }
     this.codeVerifierSecret = configuredCodeSecret || "steward-development-email-login-secret";

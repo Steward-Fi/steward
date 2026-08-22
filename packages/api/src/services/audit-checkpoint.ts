@@ -31,8 +31,6 @@
  * Zero new dependencies: uses node:crypto Ed25519 primitives.
  */
 
-import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
-
 import {
   createHash,
   createPrivateKey,
@@ -41,6 +39,7 @@ import {
   sign,
   verify,
 } from "node:crypto";
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 
 // This package is typechecked with @cloudflare/workers-types in scope, whose
 // `Buffer` shadows Node's and lacks `concat` / "base64". We therefore avoid

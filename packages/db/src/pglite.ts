@@ -30,9 +30,8 @@ let globalPGLite: { client: PGlite; db: PGLiteDb } | undefined;
  * Resolve the data directory for PGLite persistence.
  */
 export function getDataDir(): string {
-  if (runtimeEnvironmentValue("STEWARD_PGLITE_PATH")) {
-    return resolve(runtimeEnvironmentValue("STEWARD_PGLITE_PATH"));
-  }
+  const configuredPath = runtimeEnvironmentValue("STEWARD_PGLITE_PATH");
+  if (configuredPath) return resolve(configuredPath);
   return join(homedir(), ".steward", "data");
 }
 

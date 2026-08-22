@@ -8,6 +8,7 @@ import {
   userWalletAppConsents,
 } from "@stwd/db";
 import type { ApiResponse, SignTypedDataRequest } from "@stwd/shared";
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 import { Vault } from "@stwd/vault";
 import { and, eq, sql } from "drizzle-orm";
 import type { Context, Next } from "hono";
@@ -1000,7 +1001,10 @@ globalWalletRoutes.post("/rpc/confirm", async (c) => {
     walletIndex,
   });
   const confirmation = await getDb().transaction(async (tx) => {
-    if (process.env.STEWARD_DB_MODE !== "pglite" && process.env.STEWARD_PGLITE_MEMORY !== "true") {
+    if (
+      runtimeEnvironmentValue("STEWARD_DB_MODE") !== "pglite" &&
+      runtimeEnvironmentValue("STEWARD_PGLITE_MEMORY") !== "true"
+    ) {
       await tx.execute(
         sql`select pg_advisory_xact_lock(hashtext(${`global-wallet-confirmation:${consent.id}:${method}:${requestHash}`}))`,
       );

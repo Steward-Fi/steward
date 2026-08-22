@@ -1,4 +1,5 @@
 import { redactedThrownDiagnostics } from "@stwd/shared";
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 import {
   resolveXConnectConfig,
   runXCredentialLifecycleSweep,
@@ -12,7 +13,7 @@ const MIN_INTERVAL_MS = 5_000;
 const MAX_INTERVAL_MS = 5 * 60_000;
 
 function configuredInterval(): number {
-  const raw = process.env.STEWARD_X_LIFECYCLE_SWEEP_INTERVAL_MS;
+  const raw = runtimeEnvironmentValue("STEWARD_X_LIFECYCLE_SWEEP_INTERVAL_MS");
   if (raw === undefined) return DEFAULT_INTERVAL_MS;
   const parsed = Number(raw);
   if (!Number.isSafeInteger(parsed) || parsed < MIN_INTERVAL_MS || parsed > MAX_INTERVAL_MS) {

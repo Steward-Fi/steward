@@ -25,6 +25,7 @@ import type {
   WalletAddressMetadata,
 } from "@stwd/shared";
 import { canonicalJsonStringify, toCaip2 } from "@stwd/shared";
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 import bs58 from "bs58";
 import { and, asc, eq, inArray, isNull, sql } from "drizzle-orm";
 import {
@@ -564,7 +565,10 @@ function custodyTransitionLockKey(
  * transitions across replicas/connections cannot interleave check-then-act.
  */
 function usesCustodyAdvisoryLock(): boolean {
-  return process.env.STEWARD_DB_MODE !== "pglite" && process.env.STEWARD_PGLITE_MEMORY !== "true";
+  return (
+    runtimeEnvironmentValue("STEWARD_DB_MODE") !== "pglite" &&
+    runtimeEnvironmentValue("STEWARD_PGLITE_MEMORY") !== "true"
+  );
 }
 
 interface MnemonicWalletMaterial {
@@ -1881,7 +1885,8 @@ export class Vault {
         // falls back to safe defaults on RPC error. Set STEWARD_SOLANA_PRIORITY_FEES=0
         // to revert to the legacy no-compute-budget transfer.
         computeBudget:
-          (this.config.solanaPriorityFees ?? process.env.STEWARD_SOLANA_PRIORITY_FEES !== "0")
+          (this.config.solanaPriorityFees ??
+          runtimeEnvironmentValue("STEWARD_SOLANA_PRIORITY_FEES") !== "0")
             ? {}
             : false,
       });
@@ -3868,7 +3873,7 @@ export class Vault {
 
     const configured =
       this.config.rpcPassthroughAllowlist === undefined
-        ? process.env.STEWARD_VAULT_RPC_ALLOWLIST
+        ? runtimeEnvironmentValue("STEWARD_VAULT_RPC_ALLOWLIST")
         : (this.config.rpcPassthroughAllowlist ?? undefined);
     const configuredMethods = configured
       ?.split(",")

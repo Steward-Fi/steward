@@ -1,5 +1,5 @@
-import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 import { randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 
 const SIGNER_CREDENTIAL_VERSION = "stwd_scrypt_v1";
 const SCRYPT_COST = 16_384;

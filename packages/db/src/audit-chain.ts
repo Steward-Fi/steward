@@ -31,7 +31,10 @@ import { DatabaseDeadlineExceededError, getDb, hasTenantTransactionDatabase } fr
 const ZERO_HASH = new Uint8Array(32);
 
 function isPGLiteRuntime(): boolean {
-  return runtimeEnvironmentValue("STEWARD_DB_MODE") === "pglite" || runtimeEnvironmentValue("STEWARD_PGLITE_MEMORY") === "true";
+  return (
+    runtimeEnvironmentValue("STEWARD_DB_MODE") === "pglite" ||
+    runtimeEnvironmentValue("STEWARD_PGLITE_MEMORY") === "true"
+  );
 }
 
 function toU8(value: unknown): Uint8Array {

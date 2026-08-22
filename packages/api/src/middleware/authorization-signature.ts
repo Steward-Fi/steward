@@ -8,6 +8,7 @@ import {
   tenantAppClients,
   tenantRequestSigningKeys,
 } from "@stwd/db";
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 import type { EncryptedKey, KeyStore } from "@stwd/vault";
 import { and, eq } from "drizzle-orm";
 import type { Context } from "hono";
@@ -69,8 +70,8 @@ export type AuthorizationSignatureOptions = {
 
 function configuredSecrets(): string[] {
   const combined = [
-    process.env.STEWARD_REQUEST_SIGNING_SECRETS,
-    process.env.STEWARD_REQUEST_SIGNING_SECRET,
+    runtimeEnvironmentValue("STEWARD_REQUEST_SIGNING_SECRETS"),
+    runtimeEnvironmentValue("STEWARD_REQUEST_SIGNING_SECRET"),
   ]
     .filter(Boolean)
     .join(",");
@@ -810,25 +811,24 @@ export async function buildAuthorizationCanonicalString(
 }
 
 export function authorizationSignature(options?: AuthorizationSignatureOptions) {
-  const required =
-    options?.required ??
-    (process.env.STEWARD_REQUIRE_AUTH_SIGNATURE === "true" ||
-      process.env.NODE_ENV === "production");
-  const secrets = options?.secrets ?? configuredSecrets();
   const appSecretResolver = options?.appSecretResolver ?? appClientSecretSigningCandidates;
   const tenantKeyStoreFactory =
     options?.tenantKeyStoreFactory ??
     ((_masterPassword, _masterSalt, domain) => getConfiguredKeyStore(domain));
-  const maxClockSkewMs = parsePositiveInt(
-    process.env.STEWARD_REQUEST_EXPIRY_MAX_SKEW_MS,
-    DEFAULT_MAX_CLOCK_SKEW_MS,
-  );
-  const timestampTtlMs = parsePositiveInt(
-    process.env.STEWARD_REQUEST_TIMESTAMP_TTL_MS,
-    DEFAULT_TIMESTAMP_TTL_MS,
-  );
-
   return createMiddleware<{ Variables: AppVariables }>(async (c, next) => {
+    const required =
+      options?.required ??
+      (runtimeEnvironmentValue("STEWARD_REQUIRE_AUTH_SIGNATURE") === "true" ||
+        runtimeEnvironmentValue("NODE_ENV") === "production");
+    const secrets = options?.secrets ?? configuredSecrets();
+    const maxClockSkewMs = parsePositiveInt(
+      runtimeEnvironmentValue("STEWARD_REQUEST_EXPIRY_MAX_SKEW_MS"),
+      DEFAULT_MAX_CLOCK_SKEW_MS,
+    );
+    const timestampTtlMs = parsePositiveInt(
+      runtimeEnvironmentValue("STEWARD_REQUEST_TIMESTAMP_TTL_MS"),
+      DEFAULT_TIMESTAMP_TTL_MS,
+    );
     if (!MUTATING_METHODS.has(c.req.method.toUpperCase()) || !isSensitivePath(c.req.path)) {
       return next();
     }

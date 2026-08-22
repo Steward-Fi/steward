@@ -135,16 +135,19 @@ interface MemoryEntry {
  * Simple in-memory backend with automatic TTL expiry.
  * This is the zero-config default — no external dependencies required.
  */
-const isWorkersRuntime =
-  runtimeEnvironmentValue("STEWARD_RUNTIME") === "workers" ||
-  (typeof navigator !== "undefined" && navigator.userAgent === "Cloudflare-Workers");
+function isWorkersRuntime(): boolean {
+  return (
+    runtimeEnvironmentValue("STEWARD_RUNTIME") === "workers" ||
+    (typeof navigator !== "undefined" && navigator.userAgent === "Cloudflare-Workers")
+  );
+}
 
 export class MemoryBackend implements StoreBackend {
   private readonly store = new Map<string, MemoryEntry>();
   private readonly cleanupTimer?: ReturnType<typeof setInterval>;
 
   constructor(cleanupIntervalMs = 60_000) {
-    if (!isWorkersRuntime) {
+    if (!isWorkersRuntime()) {
       this.cleanupTimer = setInterval(() => this._cleanup(), cleanupIntervalMs);
       if (this.cleanupTimer.unref) this.cleanupTimer.unref();
     }

@@ -1,10 +1,10 @@
-import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 import {
   type AttestationProvider,
   createDstackTdxProvider,
   createNoopDevProvider,
 } from "@stwd/attestation";
 import { redactedThrownDiagnostics } from "@stwd/shared";
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 import { Hono } from "hono";
 import type { AppVariables } from "../services/context";
 import { checkAuthRateLimit } from "./auth";

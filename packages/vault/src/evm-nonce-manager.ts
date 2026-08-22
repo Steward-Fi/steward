@@ -1,4 +1,3 @@
-import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 import {
   and,
   asc,
@@ -9,6 +8,7 @@ import {
   getDb,
   sql,
 } from "@stwd/db";
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 import type { Address } from "viem";
 
 type PendingNonceReader = (address: Address) => Promise<number>;
@@ -16,7 +16,10 @@ type PendingNonceReader = (address: Address) => Promise<number>;
 const locks = new Map<string, Promise<void>>();
 
 function usesAdvisoryLock(): boolean {
-  return runtimeEnvironmentValue("STEWARD_DB_MODE") !== "pglite" && runtimeEnvironmentValue("STEWARD_PGLITE_MEMORY") !== "true";
+  return (
+    runtimeEnvironmentValue("STEWARD_DB_MODE") !== "pglite" &&
+    runtimeEnvironmentValue("STEWARD_PGLITE_MEMORY") !== "true"
+  );
 }
 
 async function withNonceLock<T>(key: string, fn: () => Promise<T>): Promise<T> {

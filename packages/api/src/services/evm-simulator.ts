@@ -1,7 +1,4 @@
-import {
-  runtimeEnvironmentSnapshot,
-  runtimeEnvironmentValue,
-} from "@stwd/shared/runtime-env";
+import { runtimeEnvironmentSnapshot, runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 export interface EvmSimulationRequest {
   chainId: number;
   from: string;
@@ -63,8 +60,9 @@ function hexWei(decimal: string): `0x${string}` {
 
 export class JsonRpcEvmSimulator implements EvmSimulator {
   constructor(
-    private readonly env: Readonly<Record<string, string | undefined>> =
-      runtimeEnvironmentSnapshot(),
+    private readonly env: Readonly<
+      Record<string, string | undefined>
+    > = runtimeEnvironmentSnapshot(),
   ) {}
 
   async simulate(request: EvmSimulationRequest): Promise<EvmSimulationResult> {

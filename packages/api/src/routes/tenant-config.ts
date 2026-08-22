@@ -6,7 +6,6 @@
  */
 
 import { randomBytes, randomUUID } from "node:crypto";
-import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 import { resolveTxt } from "node:dns/promises";
 import { hashSha256Hex } from "@stwd/auth";
 import {
@@ -39,6 +38,7 @@ import type {
   TenantTestAccountConfig,
   TenantTheme,
 } from "@stwd/shared";
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 import type { EncryptedKey, KeyStore } from "@stwd/vault";
 import { and, eq } from "drizzle-orm";
 import { Hono } from "hono";
@@ -486,8 +486,10 @@ function buildTenantSecurityChecklist(
   // guards (app.ts). Freshness/signature headers are always verified when
   // present; they are REQUIRED only via the explicit env opt-ins, so the
   // checklist must not claim production enforcement that does not exist.
-  const requestExpiryRequired = runtimeEnvironmentValue("STEWARD_REQUIRE_REQUEST_EXPIRY") === "true";
-  const authSignatureRequired = runtimeEnvironmentValue("STEWARD_REQUIRE_AUTH_SIGNATURE") === "true";
+  const requestExpiryRequired =
+    runtimeEnvironmentValue("STEWARD_REQUIRE_REQUEST_EXPIRY") === "true";
+  const authSignatureRequired =
+    runtimeEnvironmentValue("STEWARD_REQUIRE_AUTH_SIGNATURE") === "true";
   const signingSecrets = configuredRequestSigningSecrets();
   const appClientSigningSecrets = appClientSecrets.filter(
     (secret) =>

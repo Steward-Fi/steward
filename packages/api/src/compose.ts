@@ -1,4 +1,3 @@
-import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 /**
  * compose.ts — the COMPOSITION ROOT that assembles the deployable Steward
  * server: the lean core (`createApp()`) plus the opt-in plugins this repo's own

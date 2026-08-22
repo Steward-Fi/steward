@@ -1,3 +1,4 @@
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 /**
  * Privy-style generic intent routes.
  *
@@ -1121,7 +1122,10 @@ class IntentExecutionError extends Error {
 }
 
 async function withAgentSpendLock<T>(agentId: string, fn: () => Promise<T>): Promise<T> {
-  if (process.env.STEWARD_DB_MODE === "pglite" || process.env.STEWARD_PGLITE_MEMORY === "true") {
+  if (
+    runtimeEnvironmentValue("STEWARD_DB_MODE") === "pglite" ||
+    runtimeEnvironmentValue("STEWARD_PGLITE_MEMORY") === "true"
+  ) {
     return fn();
   }
   return db.transaction(async (tx) => {

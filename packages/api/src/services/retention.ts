@@ -12,10 +12,9 @@
  * untrusted env values can never be interpolated into SQL text.
  */
 
-import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
-
 import { getDb } from "@stwd/db";
 import { redactedThrownDiagnostics } from "@stwd/shared";
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 import { sql } from "drizzle-orm";
 import { writeAuditEvent } from "./audit";
 import { runTenantAuditRetention } from "./audit-archive";

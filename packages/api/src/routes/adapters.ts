@@ -21,8 +21,6 @@
  * route in app.ts.
  */
 
-import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
-
 import {
   AdapterNotConfiguredError,
   AdapterProviderError,
@@ -41,6 +39,7 @@ import {
   perOrderCapEvaluator,
 } from "@stwd/policy-engine";
 import { redactedThrownDiagnostics } from "@stwd/shared";
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 import { and, eq } from "drizzle-orm";
 import { type Context, Hono } from "hono";
 import { z } from "zod";

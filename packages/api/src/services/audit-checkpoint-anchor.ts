@@ -7,13 +7,12 @@
  * assembly.
  */
 
-import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
-
 import { spawnSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 import { canonicalCheckpointBytes, type SignedCheckpoint } from "./audit-checkpoint";
 
 export type AuditCheckpointAnchorMode = "off" | "best-effort" | "required";
@@ -584,7 +583,8 @@ export function configuredAuditCheckpointAnchor(): {
 } {
   const mode = configuredMode();
   if (mode === "off") return { mode };
-  const provider = runtimeEnvironmentValue("STEWARD_AUDIT_CHECKPOINT_ANCHOR_PROVIDER")?.trim() || "rfc3161";
+  const provider =
+    runtimeEnvironmentValue("STEWARD_AUDIT_CHECKPOINT_ANCHOR_PROVIDER")?.trim() || "rfc3161";
   if (provider !== "rfc3161") {
     const registration = registeredSinkProviders.get(provider);
     if (!registration) {

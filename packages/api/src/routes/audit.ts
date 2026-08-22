@@ -841,7 +841,9 @@ auditRoutes.post("/verify", async (c) => {
 // applies; no HMAC key or private signing material is returned.
 auditRoutes.get("/integrity", async (c) => {
   const tenantId = c.get("tenantId");
-  const configuredLimit = Number(runtimeEnvironmentValue("STEWARD_DOCTOR_AUDIT_MAX_EVENTS") ?? "100000");
+  const configuredLimit = Number(
+    runtimeEnvironmentValue("STEWARD_DOCTOR_AUDIT_MAX_EVENTS") ?? "100000",
+  );
   const maxEvents =
     Number.isSafeInteger(configuredLimit) && configuredLimit > 0 ? configuredLimit : 100_000;
   const data = await db.transaction(async (tx) => {

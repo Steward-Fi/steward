@@ -1,4 +1,3 @@
-import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 import {
   getDatabaseDriver,
   getDb,
@@ -6,6 +5,7 @@ import {
   withTenantRlsTransaction,
   withTenantTransactionDatabase,
 } from "@stwd/db";
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 import { sql } from "drizzle-orm";
 
 function rowsOf<T>(result: unknown): T[] {
@@ -47,7 +47,8 @@ export async function runInternalJobForTenant<T>(
   const context = tenantContextForInternalJob({ tenantId, job });
   return withTenantRlsTransaction(
     getDb() as never,
-    runtimeEnvironmentValue("STEWARD_DB_MODE") === "pglite" || runtimeEnvironmentValue("STEWARD_PGLITE_MEMORY") === "true"
+    runtimeEnvironmentValue("STEWARD_DB_MODE") === "pglite" ||
+      runtimeEnvironmentValue("STEWARD_PGLITE_MEMORY") === "true"
       ? "pglite"
       : getDatabaseDriver(),
     context,

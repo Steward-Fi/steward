@@ -266,7 +266,10 @@ const MAX_CONDITION_SET_ITEM_LABEL_LENGTH = 255;
 const MAX_ITEM_METADATA_BYTES = 4_096;
 
 function shouldUsePostgresAdvisoryLocks(): boolean {
-  return runtimeEnvironmentValue("STEWARD_DB_MODE") !== "pglite" && runtimeEnvironmentValue("STEWARD_PGLITE_MEMORY") !== "true";
+  return (
+    runtimeEnvironmentValue("STEWARD_DB_MODE") !== "pglite" &&
+    runtimeEnvironmentValue("STEWARD_PGLITE_MEMORY") !== "true"
+  );
 }
 
 function parsePaginationParam(

@@ -1,9 +1,9 @@
-import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 import type {
   TenantAuthAbuseConfig,
   TenantCaptchaAction,
   TenantCaptchaProvider,
 } from "@stwd/shared";
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 
 const CAPTCHA_PROVIDERS = new Set<TenantCaptchaProvider>(["turnstile", "hcaptcha"]);
 const CAPTCHA_ACTIONS = new Set<TenantCaptchaAction>(["email_otp", "sms_otp"]);

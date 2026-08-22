@@ -21,6 +21,7 @@ import {
 } from "@stwd/policy-engine";
 import { StewardProxyClient } from "@stwd/proxy-client";
 import type { ApiResponse, AppVariables, PolicyRule, SignRequest } from "@stwd/shared";
+import { runtimeEnvironmentSnapshot } from "@stwd/shared/runtime-env";
 import { Hono } from "hono";
 import type { StewardAppContext } from "./context";
 import { enforceCapabilityRateLimit } from "./rate-limit";
@@ -119,7 +120,9 @@ async function toOpenAICompatible(res: Response): Promise<Response> {
   });
 }
 
-function readProxyEnv(env: NodeJS.ProcessEnv = process.env): ProxyEnv | null {
+function readProxyEnv(
+  env: Readonly<Record<string, string | undefined>> = runtimeEnvironmentSnapshot(),
+): ProxyEnv | null {
   const proxyUrl = (env.STEWARD_PROXY_URL ?? "").trim();
   const signingSecret = (
     env.STEWARD_PROXY_REQUEST_SIGNING_SECRET ??

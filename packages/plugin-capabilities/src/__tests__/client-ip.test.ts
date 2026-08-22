@@ -7,6 +7,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { withRuntimeEnvironment } from "@stwd/shared/runtime-env";
 import { Hono } from "hono";
 import { trustedClientIp } from "../client-ip";
 
@@ -43,6 +44,17 @@ afterEach(() => {
 });
 
 describe("trustedClientIp (capability audit)", () => {
+  test("uses the current request proxy authority for A, B, and missing generations", async () => {
+    const headers = { "x-forwarded-for": "198.51.100.1, 203.0.113.9" };
+    expect(
+      await withRuntimeEnvironment({ STEWARD_TRUSTED_PROXY_HOPS: "1" }, () => requestIp(headers)),
+    ).toBe("203.0.113.9");
+    expect(
+      await withRuntimeEnvironment({ STEWARD_TRUSTED_PROXY_HOPS: "2" }, () => requestIp(headers)),
+    ).toBe("198.51.100.1");
+    expect(await withRuntimeEnvironment({}, () => requestIp(headers))).toBeNull();
+  });
+
   test("ignores x-forwarded-for entirely when no trust is configured", async () => {
     expect(await requestIp({ "x-forwarded-for": "203.0.113.9" })).toBeNull();
   });

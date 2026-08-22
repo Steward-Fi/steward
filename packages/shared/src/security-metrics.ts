@@ -217,4 +217,5 @@ export function __resetSecurityMetricsForTests(): void {
   lastCheckpointAtMs = null;
   failObserverForTests = false;
 }
+
 import { runtimeEnvironmentSnapshot } from "./runtime-env.js";

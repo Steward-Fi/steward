@@ -1,6 +1,6 @@
-import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 import { isIP } from "node:net";
 import { secp256k1 } from "@noble/curves/secp256k1";
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 import {
   type Address,
   createPublicClient,

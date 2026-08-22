@@ -1,4 +1,5 @@
 import { redactedThrownDiagnostics } from "@stwd/shared";
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 import {
   type GoogleCredentialLifecycleSweepResult,
   resolveGoogleConnectConfig,
@@ -11,7 +12,7 @@ const DEFAULT_INTERVAL_MS = 60_000;
 const MIN_INTERVAL_MS = 5_000;
 const MAX_INTERVAL_MS = 5 * 60_000;
 function configuredInterval(): number {
-  const raw = process.env.STEWARD_GOOGLE_LIFECYCLE_SWEEP_INTERVAL_MS;
+  const raw = runtimeEnvironmentValue("STEWARD_GOOGLE_LIFECYCLE_SWEEP_INTERVAL_MS");
   if (raw === undefined) return DEFAULT_INTERVAL_MS;
   const parsed = Number(raw);
   if (!Number.isSafeInteger(parsed) || parsed < MIN_INTERVAL_MS || parsed > MAX_INTERVAL_MS) {
@@ -45,7 +46,8 @@ export function startGoogleCredentialLifecycleScheduler(options?: {
   intervalMs?: number;
   sweep?: () => Promise<GoogleCredentialLifecycleSweepResult>;
 }): () => Promise<void> {
-  if (process.env.STEWARD_GOOGLE_LIFECYCLE_SWEEPER === "false") return async () => {};
+  if (runtimeEnvironmentValue("STEWARD_GOOGLE_LIFECYCLE_SWEEPER") === "false")
+    return async () => {};
   const sweep = options?.sweep ?? runGoogleCredentialLifecycleRecoverySweep;
   let active: Promise<void> | undefined;
   let stopped = false;

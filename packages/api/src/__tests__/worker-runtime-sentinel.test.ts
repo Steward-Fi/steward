@@ -648,3 +648,53 @@ test("Worker X lifecycle recovery is inert when the provider is unavailable", as
   expect(calls).toBe(0);
   expect(result).toBeNull();
 });
+
+test("overlapping scheduler invocations retain their own binding generation", async () => {
+  let releaseFirst!: () => void;
+  const firstEntered = Promise.withResolvers<void>();
+  const firstRelease = new Promise<void>((resolve) => {
+    releaseFirst = resolve;
+  });
+  let disabledCalls = 0;
+
+  const first = runWorkerGoogleCredentialLifecycleSweep(
+    {
+      DATABASE_URL: "postgresql://worker-a.invalid/steward",
+      GOOGLE_PROVIDER_CLIENT_ID: "provider-a",
+      GOOGLE_PROVIDER_CLIENT_SECRET: "secret-a",
+    },
+    {
+      sweep: async () => {
+        firstEntered.resolve();
+        await firstRelease;
+        return { generation: "a" };
+      },
+    },
+  );
+  await firstEntered.promise;
+  const disabled = await runWorkerGoogleCredentialLifecycleSweep(
+    {
+      DATABASE_URL: "postgresql://worker-b.invalid/steward",
+      GOOGLE_PROVIDER_CLIENT_ID: "provider-b",
+      GOOGLE_PROVIDER_CLIENT_SECRET: "secret-b",
+      STEWARD_GOOGLE_LIFECYCLE_SWEEPER: "false",
+    },
+    {
+      sweep: async () => {
+        disabledCalls += 1;
+        return { generation: "b" };
+      },
+    },
+  );
+  releaseFirst();
+
+  expect(disabled).toBeNull();
+  expect(disabledCalls).toBe(0);
+  expect(await first).toEqual({ generation: "a" });
+  expect(
+    await runWorkerGoogleCredentialLifecycleSweep(
+      { DATABASE_URL: "postgresql://worker-missing.invalid/steward" },
+      { sweep: async () => ({ generation: "missing" }) },
+    ),
+  ).toBeNull();
+});

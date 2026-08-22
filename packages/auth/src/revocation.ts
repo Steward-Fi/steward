@@ -123,12 +123,13 @@ class InMemoryRevocationStore implements RevocationStore {
 }
 
 class RedisRevocationStore implements RevocationStore {
-  private redis: Redis | null = null;
+  private readonly redisByAuthority = new Map<string, Redis>();
   private readonly fallback = new InMemoryRevocationStore();
   private warnedMemoryFallback = false;
 
   private getRedis(): Redis | null {
-    if (!runtimeEnvironmentValue("REDIS_URL")) {
+    const redisUrl = runtimeEnvironmentValue("REDIS_URL")?.trim();
+    if (!redisUrl) {
       if (runtimeEnvironmentValue("NODE_ENV") === "production") {
         throw new Error("Shared token revocation store unavailable");
       }
@@ -144,21 +145,31 @@ class RedisRevocationStore implements RevocationStore {
       }
       return null;
     }
-    if (!this.redis) {
+    const authorityKey = JSON.stringify([
+      redisUrl,
+      runtimeEnvironmentValue("NODE_ENV") ?? "",
+      runtimeEnvironmentValue("STEWARD_ALLOW_INSECURE_REDIS") ?? "",
+    ]);
+    let redis = this.redisByAuthority.get(authorityKey);
+    if (!redis) {
       // SEC-032: enforce the same rediss:// production TLS assertion as the
       // shared client in @stwd/redis — revocation state is auth data and must
       // not cross a cleartext link.
-      assertRedisUrlTls(runtimeEnvironmentValue("REDIS_URL"));
-      this.redis = new Redis(runtimeEnvironmentValue("REDIS_URL"), {
+      assertRedisUrlTls(redisUrl, {
+        NODE_ENV: runtimeEnvironmentValue("NODE_ENV"),
+        STEWARD_ALLOW_INSECURE_REDIS: runtimeEnvironmentValue("STEWARD_ALLOW_INSECURE_REDIS"),
+      });
+      redis = new Redis(redisUrl, {
         maxRetriesPerRequest: 1,
         lazyConnect: false,
         enableReadyCheck: true,
       });
-      this.redis.on("error", (err) => {
+      redis.on("error", (err) => {
         console.warn("[steward:auth] Redis revocation unavailable", redactedThrownDiagnostics(err));
       });
+      this.redisByAuthority.set(authorityKey, redis);
     }
-    return this.redis;
+    return redis;
   }
 
   private fallbackAgentRevokedBefore(agentId: string): Promise<number | null> {

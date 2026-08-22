@@ -1,6 +1,6 @@
-import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 /** Opt-in wxmr.io bridge provider for Steward. */
 import type { StewardPlugin } from "@stwd/shared";
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 import { WxmrBridgeAdapter } from "./wxmr-bridge";
 
 export * from "./wxmr-bridge";
@@ -13,7 +13,10 @@ export * from "./wxmr-bridge";
  * and silently drop the operator's RPC in favor of the public default.
  */
 export function resolveRpcUrl(): string | undefined {
-  for (const candidate of [runtimeEnvironmentValue("WXMR_SOLANA_RPC_URL"), runtimeEnvironmentValue("SOLANA_RPC_URL")]) {
+  for (const candidate of [
+    runtimeEnvironmentValue("WXMR_SOLANA_RPC_URL"),
+    runtimeEnvironmentValue("SOLANA_RPC_URL"),
+  ]) {
     const trimmed = candidate?.trim();
     if (trimmed) return trimmed;
   }

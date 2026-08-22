@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { withRuntimeEnvironment } from "@stwd/shared/runtime-env";
 import { Hono } from "hono";
 import {
   authorizationSignature,
@@ -40,6 +41,15 @@ function makeApp(required = false) {
 function makeDefaultApp() {
   const app = new Hono<{ Variables: { requestSignatureVerified?: boolean } }>();
   app.use("*", authorizationSignature({ secrets: [SECRET] }));
+  app.post("/vault/:agentId/sign", (c) =>
+    c.json({ ok: true, verified: Boolean(c.get("requestSignatureVerified")) }),
+  );
+  return app;
+}
+
+function makeRuntimeConfiguredApp() {
+  const app = new Hono<{ Variables: { requestSignatureVerified?: boolean } }>();
+  app.use("*", authorizationSignature());
   app.post("/vault/:agentId/sign", (c) =>
     c.json({ ok: true, verified: Boolean(c.get("requestSignatureVerified")) }),
   );
@@ -496,5 +506,32 @@ describe("authorizationSignature", () => {
       if (originalAllow === undefined) delete process.env.STEWARD_ALLOW_UNSIGNED_SENSITIVE_REQUESTS;
       else process.env.STEWARD_ALLOW_UNSIGNED_SENSITIVE_REQUESTS = originalAllow;
     }
+  });
+
+  it("observes signing-authority rotations and missing bindings without rebuilding middleware", async () => {
+    const app = makeRuntimeConfiguredApp();
+    const headers = await signedHeaders();
+    const request = () =>
+      app.request("/vault/agent-1/sign", { method: "POST", headers, body: BODY });
+
+    const accepted = await withRuntimeEnvironment(
+      {
+        NODE_ENV: "production",
+        STEWARD_REQUEST_SIGNING_SECRET: SECRET,
+      },
+      request,
+    );
+    const rotated = await withRuntimeEnvironment(
+      {
+        NODE_ENV: "production",
+        STEWARD_REQUEST_SIGNING_SECRET: "rotated-request-signing-secret-with-enough-entropy",
+      },
+      request,
+    );
+    const missing = await withRuntimeEnvironment({ NODE_ENV: "production" }, request);
+
+    expect(accepted.status).toBe(200);
+    expect(rotated.status).toBe(401);
+    expect(missing.status).toBeGreaterThanOrEqual(400);
   });
 });

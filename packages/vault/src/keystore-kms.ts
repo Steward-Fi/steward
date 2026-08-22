@@ -1,5 +1,5 @@
-import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 
 import type { EncryptedKey } from "./keystore";
 import type { KeystoreBackend, KeystoreContext } from "./keystore-backend";
@@ -304,14 +304,21 @@ export class KmsEnvelopeKeystore implements KeystoreBackend {
 export function resolveKmsEnvelopeOptions(
   options?: Partial<KmsEnvelopeOptions>,
 ): KmsEnvelopeOptions {
-  const provider = (options?.provider ?? runtimeEnvironmentValue("STEWARD_KMS_PROVIDER") ?? "aws") as KmsProvider;
+  const provider = (options?.provider ??
+    runtimeEnvironmentValue("STEWARD_KMS_PROVIDER") ??
+    "aws") as KmsProvider;
   if (provider === "aws") {
     const awsOptions = options as Partial<AwsKmsEnvelopeOptions> | undefined;
     return {
       provider: "aws",
       keyId:
-        awsOptions?.keyId ?? runtimeEnvironmentValue("STEWARD_KMS_KEY_ID") ?? runtimeEnvironmentValue("STEWARD_AWS_KMS_KEY_ARN"),
-      region: awsOptions?.region ?? runtimeEnvironmentValue("STEWARD_AWS_REGION") ?? runtimeEnvironmentValue("AWS_REGION"),
+        awsOptions?.keyId ??
+        runtimeEnvironmentValue("STEWARD_KMS_KEY_ID") ??
+        runtimeEnvironmentValue("STEWARD_AWS_KMS_KEY_ARN"),
+      region:
+        awsOptions?.region ??
+        runtimeEnvironmentValue("STEWARD_AWS_REGION") ??
+        runtimeEnvironmentValue("AWS_REGION"),
       client: awsOptions?.client,
     };
   }

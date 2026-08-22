@@ -409,7 +409,10 @@ export class MemoryIdempotencyStore implements IdempotencyStore {
 
 export class RedisIdempotencyStore implements IdempotencyStore {
   private readonly fallback = new MemoryIdempotencyStore(
-    parsePositiveInt(runtimeEnvironmentValue("STEWARD_IDEMPOTENCY_MAX_ENTRIES"), DEFAULT_MAX_ENTRIES),
+    parsePositiveInt(
+      runtimeEnvironmentValue("STEWARD_IDEMPOTENCY_MAX_ENTRIES"),
+      DEFAULT_MAX_ENTRIES,
+    ),
   );
 
   private client() {
@@ -623,7 +626,8 @@ function hasReplaySafePublicContext(c: { req: { path: string } }) {
 export function idempotencyMiddleware(options?: { store?: IdempotencyStore; ttlMs?: number }) {
   const store = options?.store ?? defaultIdempotencyStore;
   const ttlMs =
-    options?.ttlMs ?? parsePositiveInt(runtimeEnvironmentValue("STEWARD_IDEMPOTENCY_TTL_MS"), DEFAULT_TTL_MS);
+    options?.ttlMs ??
+    parsePositiveInt(runtimeEnvironmentValue("STEWARD_IDEMPOTENCY_TTL_MS"), DEFAULT_TTL_MS);
 
   return createMiddleware<{ Variables: AppVariables }>(async (c, next) => {
     if (!MUTATING_METHODS.has(c.req.method.toUpperCase())) return next();

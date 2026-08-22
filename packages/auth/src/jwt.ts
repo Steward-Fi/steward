@@ -1,6 +1,6 @@
-import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID, scryptSync } from "node:crypto";
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 import {
   calculateJwkThumbprint,
   exportJWK,
@@ -335,7 +335,8 @@ function resolveIdentityJwtBase(requestOrigin?: string): string {
   const nodeEnv = authority?.nodeEnv ?? runtimeEnvironmentValue("NODE_ENV");
   const configured = authority
     ? authority.identityJwtIssuer || authority.appUrl
-    : runtimeEnvironmentValue("STEWARD_IDENTITY_JWT_ISSUER")?.trim() || runtimeEnvironmentValue("APP_URL")?.trim();
+    : runtimeEnvironmentValue("STEWARD_IDENTITY_JWT_ISSUER")?.trim() ||
+      runtimeEnvironmentValue("APP_URL")?.trim();
   if (configured) {
     let url: URL;
     try {

@@ -14,14 +14,13 @@
  *   app.use("*", tenantCors);
  */
 
-import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
-
 import {
   getDb,
   tenantAppClients as tenantAppClientsTable,
   tenantConfigs as tenantConfigsTable,
 } from "@stwd/db";
 import { redactedThrownDiagnostics } from "@stwd/shared";
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 import { and, eq } from "drizzle-orm";
 import type { Context, Next } from "hono";
 

@@ -1,6 +1,6 @@
-import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 import { lookup as dnsLookup } from "node:dns";
 import type { LookupFunction } from "node:net";
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 import { assertPublicInternetAddress } from "./public-endpoint";
 
 /**

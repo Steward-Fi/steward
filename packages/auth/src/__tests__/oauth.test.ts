@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { createHash } from "node:crypto";
+import { withRuntimeEnvironment } from "@stwd/shared/runtime-env";
 import { getEnabledProviders, getProviderConfig, isBuiltInProvider, OAuthClient } from "../oauth";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -65,6 +66,25 @@ describe("isBuiltInProvider", () => {
 // ─── getEnabledProviders ─────────────────────────────────────────────────────
 
 describe("getEnabledProviders", () => {
+  it("observes provider credential rotations and missing bindings per request", () => {
+    const first = withRuntimeEnvironment(
+      { GOOGLE_CLIENT_ID: "google-a", GOOGLE_CLIENT_SECRET: "secret-a" },
+      () => getProviderConfig("google"),
+    );
+    const second = withRuntimeEnvironment(
+      { GOOGLE_CLIENT_ID: "google-b", GOOGLE_CLIENT_SECRET: "secret-b" },
+      () => getProviderConfig("google"),
+    );
+
+    expect(first.clientId).toBe("google-a");
+    expect(first.clientSecret).toBe("secret-a");
+    expect(second.clientId).toBe("google-b");
+    expect(second.clientSecret).toBe("secret-b");
+    expect(() => withRuntimeEnvironment({}, () => getProviderConfig("google"))).toThrow(
+      "Google OAuth not configured",
+    );
+  });
+
   it("returns empty array when no provider env vars are set", () => {
     const orig = {
       GOOGLE_CLIENT_ID: process.env.GOOGLE_CLIENT_ID,

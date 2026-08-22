@@ -1,5 +1,4 @@
 import { getDb, sponsoredGasEvents, tenantConfigs as tenantConfigsTable } from "@stwd/db";
-import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 import type {
   GasSponsorshipMode,
   GasSponsorshipProvider,
@@ -7,6 +6,7 @@ import type {
   SponsoredGasSpendSummary,
   TenantGasSponsorshipConfig,
 } from "@stwd/shared";
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 import { and, desc, eq, gte, inArray, lte, sql } from "drizzle-orm";
 import { validateWebhookUrl } from "./webhook-url";
 

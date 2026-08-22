@@ -1,4 +1,5 @@
 import { redactedThrownDiagnostics, toCaip2 } from "@stwd/shared";
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 import { and, asc, eq, inArray, isNotNull, sql } from "drizzle-orm";
 import { createPublicClient, http, type TransactionReceipt } from "viem";
 import { withTenantAuditedTransaction, writeAuditEvent } from "./audit";
@@ -586,22 +587,24 @@ export async function pollBroadcastTransactionReceiptsForAllTenants(
 }
 
 export function startTransactionReceiptPollingScheduler(): () => void {
-  if (process.env.STEWARD_TRANSACTION_RECEIPT_POLLER === "false") {
+  if (runtimeEnvironmentValue("STEWARD_TRANSACTION_RECEIPT_POLLER") === "false") {
     console.log("[tx-poller] Disabled by STEWARD_TRANSACTION_RECEIPT_POLLER=false");
     return () => {};
   }
 
   const intervalMs = parsePositiveInt(
-    process.env.STEWARD_TRANSACTION_RECEIPT_POLL_INTERVAL_MS,
+    runtimeEnvironmentValue("STEWARD_TRANSACTION_RECEIPT_POLL_INTERVAL_MS"),
     DEFAULT_RECEIPT_POLL_INTERVAL_MS,
   );
   const batchSize = parsePositiveInt(
-    process.env.STEWARD_TRANSACTION_RECEIPT_POLL_BATCH_SIZE,
+    runtimeEnvironmentValue("STEWARD_TRANSACTION_RECEIPT_POLL_BATCH_SIZE"),
     DEFAULT_RECEIPT_POLL_BATCH_SIZE,
   );
   // SEC-152: when unset (or invalid), leave undefined so each chain's default
   // applies (e.g. 12 for Ethereum L1 mainnet) instead of forcing 1 everywhere.
-  const confirmationsEnv = process.env.STEWARD_TRANSACTION_RECEIPT_CONFIRMATIONS?.trim();
+  const confirmationsEnv = runtimeEnvironmentValue(
+    "STEWARD_TRANSACTION_RECEIPT_CONFIRMATIONS",
+  )?.trim();
   const parsedConfirmations = confirmationsEnv ? Number(confirmationsEnv) : undefined;
   const minConfirmations =
     parsedConfirmations !== undefined &&
@@ -610,11 +613,11 @@ export function startTransactionReceiptPollingScheduler(): () => void {
       ? parsedConfirmations
       : undefined;
   const stillPendingAfterMs = parsePositiveInt(
-    process.env.STEWARD_TRANSACTION_STILL_PENDING_AFTER_MS,
+    runtimeEnvironmentValue("STEWARD_TRANSACTION_STILL_PENDING_AFTER_MS"),
     DEFAULT_STILL_PENDING_AFTER_MS,
   );
   const stillPendingIntervalMs = parsePositiveInt(
-    process.env.STEWARD_TRANSACTION_STILL_PENDING_INTERVAL_MS,
+    runtimeEnvironmentValue("STEWARD_TRANSACTION_STILL_PENDING_INTERVAL_MS"),
     DEFAULT_STILL_PENDING_INTERVAL_MS,
   );
   let running = false;

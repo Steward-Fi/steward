@@ -59,7 +59,11 @@ import {
   type NeonTransactionDbHandle,
   withRequestDatabase,
 } from "@stwd/db";
-import { withRuntimeEnvironment } from "@stwd/shared/runtime-env";
+import {
+  runtimeEnvironmentSnapshot,
+  runtimeEnvironmentValue,
+  withRuntimeEnvironment,
+} from "@stwd/shared/runtime-env";
 import { initRedis } from "./middleware/redis";
 
 export interface Env {
@@ -258,60 +262,67 @@ export async function runWorkerUpstreamCredentialLeaseSweep(
     sweep?: () => Promise<WorkerLeaseSweepResult>;
   },
 ): Promise<WorkerLeaseSweepResult | null> {
-  hydrateProcessEnv(env);
-  const capabilitiesEnabled =
-    options?.capabilitiesEnabled ??
-    (await import("./plugin-config")).resolveEnabledPlugins().has("capabilities");
-  if (!capabilitiesEnabled || process.env.STEWARD_UPSTREAM_LEASE_SWEEPER === "false") return null;
-  const sweep =
-    options?.sweep ??
-    (await import("./services/upstream-credential-lease-scheduler"))
-      .runUpstreamCredentialLeaseSweep;
-  return sweep();
+  return withWorkerRuntimeAuthority(env, async () => {
+    const capabilitiesEnabled =
+      options?.capabilitiesEnabled ??
+      (await import("./plugin-config")).resolveEnabledPlugins().has("capabilities");
+    if (
+      !capabilitiesEnabled ||
+      runtimeEnvironmentValue("STEWARD_UPSTREAM_LEASE_SWEEPER") === "false"
+    )
+      return null;
+    const sweep =
+      options?.sweep ??
+      (await import("./services/upstream-credential-lease-scheduler"))
+        .runUpstreamCredentialLeaseSweep;
+    return sweep();
+  });
 }
 
 export async function runWorkerGoogleCredentialLifecycleSweep(
   env: Env,
   options?: { sweep?: () => Promise<unknown> },
 ): Promise<unknown | null> {
-  hydrateProcessEnv(env);
-  if (
-    process.env.STEWARD_GOOGLE_LIFECYCLE_SWEEPER === "false" ||
-    !env.GOOGLE_PROVIDER_CLIENT_ID ||
-    !env.GOOGLE_PROVIDER_CLIENT_SECRET
-  ) {
-    return null;
-  }
-  const sweep =
-    options?.sweep ??
-    (await import("./services/provider-google-lifecycle-scheduler"))
-      .runGoogleCredentialLifecycleRecoverySweep;
-  return sweep();
+  return withWorkerRuntimeAuthority(env, async () => {
+    if (
+      runtimeEnvironmentValue("STEWARD_GOOGLE_LIFECYCLE_SWEEPER") === "false" ||
+      !runtimeEnvironmentValue("GOOGLE_PROVIDER_CLIENT_ID") ||
+      !runtimeEnvironmentValue("GOOGLE_PROVIDER_CLIENT_SECRET")
+    ) {
+      return null;
+    }
+    const sweep =
+      options?.sweep ??
+      (await import("./services/provider-google-lifecycle-scheduler"))
+        .runGoogleCredentialLifecycleRecoverySweep;
+    return sweep();
+  });
 }
 
 export async function runWorkerXCredentialLifecycleSweep(
   env: Env,
   options?: { sweep?: () => Promise<unknown> },
 ): Promise<unknown | null> {
-  hydrateProcessEnv(env);
-  if (
-    process.env.STEWARD_X_LIFECYCLE_SWEEPER === "false" ||
-    !env.X_CLIENT_ID ||
-    !env.X_CLIENT_SECRET ||
-    !env.STEWARD_MASTER_PASSWORD
-  ) {
-    return null;
-  }
-  const sweep =
-    options?.sweep ??
-    (await import("./services/provider-x-lifecycle-scheduler"))
-      .runXCredentialLifecycleRecoverySweep;
-  return sweep();
+  return withWorkerRuntimeAuthority(env, async () => {
+    if (
+      runtimeEnvironmentValue("STEWARD_X_LIFECYCLE_SWEEPER") === "false" ||
+      !runtimeEnvironmentValue("X_CLIENT_ID") ||
+      !runtimeEnvironmentValue("X_CLIENT_SECRET") ||
+      !runtimeEnvironmentValue("STEWARD_MASTER_PASSWORD")
+    ) {
+      return null;
+    }
+    const sweep =
+      options?.sweep ??
+      (await import("./services/provider-x-lifecycle-scheduler"))
+        .runXCredentialLifecycleRecoverySweep;
+    return sweep();
+  });
 }
 
 /**
  * Pull Worker `env` bindings into `globalThis.process.env` so any code that
- * reads `process.env.X` at request time (e.g. JWT secret, RPC URL) can find it.
+ * reads `runtimeEnvironmentValue("X")` at request time (e.g. JWT secret, RPC URL) can find it.
  *
  * Workers expose `nodejs_compat`'s `process.env` as an empty object on cold
  * boot — bindings come in via the `fetch` handler's `env` argument instead.
@@ -324,10 +335,9 @@ export async function runWorkerXCredentialLifecycleSweep(
  * that is inherent to the module registry and unchanged by this.
  *
  * Known trade-off (accepted, SEC-148): string bindings — including secrets —
- * are copied onto the global `process.env`, because the entire codebase reads
- * configuration through `process.env`. Moving every reader onto per-request
- * binding access is out of scope; per-request hydration at least keeps the
- * values current and bounded to the current binding set.
+ * are copied onto the global `process.env` only for audited compatibility
+ * callers. Security and routing decisions resolve the immutable request
+ * snapshot and must not depend on this bridge.
  */
 const hydratedEnvKeys = new Set<string>();
 
@@ -352,7 +362,14 @@ export function hydrateProcessEnv(env: Env): void {
   target.STEWARD_RUNTIME = "workers";
 }
 
-let workerInit: Promise<void> | null = null;
+const workerInitByAuthority = new Map<string, Promise<void>>();
+let workerInitOverride: Promise<void> | null = null;
+
+function workerInitAuthorityKey(): string {
+  return JSON.stringify(
+    Object.entries(runtimeEnvironmentSnapshot()).sort(([a], [b]) => a.localeCompare(b)),
+  );
+}
 
 function workerJwtEnvironment(env: Env): Readonly<JwtRuntimeEnvironment> {
   return Object.freeze({
@@ -402,8 +419,11 @@ function validateWorkerSecurityEnv(): void {
 }
 
 async function ensureWorkerInit(env: Env): Promise<void> {
-  if (workerInit) return workerInit;
-  workerInit = (async () => {
+  if (workerInitOverride) return workerInitOverride;
+  const authorityKey = workerInitAuthorityKey();
+  const existing = workerInitByAuthority.get(authorityKey);
+  if (existing) return existing;
+  const pending = (async () => {
     // Workers bindings are only available inside fetch(). Hydrate process.env
     // before importing app modules that read required env at module init.
     hydrateProcessEnv(env);
@@ -442,7 +462,7 @@ async function ensureWorkerInit(env: Env): Promise<void> {
           dbUrl.includes("sslmode=verify-ca") ||
           dbUrl.includes("sslmode=verify-full"),
         hstsEnabled: isHstsEnabled(),
-        insecureDbAllowed: process.env.STEWARD_ALLOW_INSECURE_DB === "true",
+        insecureDbAllowed: runtimeEnvironmentValue("STEWARD_ALLOW_INSECURE_DB") === "true",
         runtime: "workers",
       },
     });
@@ -465,24 +485,32 @@ async function ensureWorkerInit(env: Env): Promise<void> {
       );
     }
   })();
-  return workerInit;
+  workerInitByAuthority.set(authorityKey, pending);
+  pending.catch(() => workerInitByAuthority.delete(authorityKey));
+  return pending;
 }
 
-// Compose the deployable app once per isolate: lean core + this repo's opt-in
-// plugins (trading). cached so we don't re-register plugins on every request.
-// composeApp() dynamically imports the trading plugin so the lean core graph
-// never statically references the trading stack.
-let composedApp: Awaited<ReturnType<typeof import("./compose").composeApp>> | null = null;
+// Cache composed apps by their complete immutable binding generation. Plugin
+// topology and route gates may change in a binding-only deploy; one isolate
+// must never retain the prior generation's app for a later request.
+const composedApps = new Map<
+  string,
+  Promise<Awaited<ReturnType<typeof import("./compose").composeApp>>>
+>();
 
 export function __setWorkerInitForTests(value: Promise<void> | null): void {
-  workerInit = value;
+  workerInitByAuthority.clear();
+  workerInitOverride = value;
 }
 
 async function getComposedApp() {
-  if (composedApp) return composedApp;
-  const { composeApp } = await import("./compose");
-  composedApp = await composeApp();
-  return composedApp;
+  const authorityKey = workerInitAuthorityKey();
+  const existing = composedApps.get(authorityKey);
+  if (existing) return existing;
+  const pending = import("./compose").then(({ composeApp }) => composeApp());
+  composedApps.set(authorityKey, pending);
+  pending.catch(() => composedApps.delete(authorityKey));
+  return pending;
 }
 
 export default {

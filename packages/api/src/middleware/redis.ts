@@ -1,4 +1,4 @@
-import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
+import { runtimeEnvironmentSnapshot, runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 /**
  * Redis middleware — initializes the Redis client and exposes
  * rate-limiting + spend-tracking helpers on the Hono context.
@@ -23,28 +23,37 @@ import { redactedThrownDiagnostics } from "@stwd/shared";
 
 // ─── Redis availability flag ─────────────────────────────────────────────────
 
-let redisAvailable = false;
-let redisClient: IoredisLike | null = null;
+const redisClients = new Map<string, IoredisLike>();
+
+function redisAuthorityFingerprint(): string {
+  const environment = runtimeEnvironmentSnapshot();
+  return JSON.stringify([
+    environment.REDIS_DRIVER ?? "ioredis",
+    environment.REDIS_URL ?? "",
+    environment.KV_REST_API_URL ?? environment.UPSTASH_REDIS_REST_URL ?? "",
+    environment.KV_REST_API_TOKEN ?? environment.UPSTASH_REDIS_REST_TOKEN ?? "",
+    environment.NODE_ENV ?? "",
+    environment.STEWARD_RUNTIME ?? "",
+    environment.STEWARD_ALLOW_INSECURE_REDIS ?? "",
+  ]);
+}
 
 /**
  * Try to connect to Redis on startup. If it fails, route-level helpers decide
  * whether to use local-development defaults or fail closed based on whether
  * Redis was configured for this deployment.
  */
-export async function initRedis(env?: Record<string, unknown>): Promise<boolean> {
-  if (redisAvailable && redisClient) return true;
-
-  if (env) {
-    for (const [key, value] of Object.entries(env)) {
-      if (typeof value === "string") process.env[key] = value;
-    }
-  }
+export async function initRedis(_env?: Record<string, unknown>): Promise<boolean> {
+  const fingerprint = redisAuthorityFingerprint();
+  if (redisClients.has(fingerprint)) return true;
 
   const driver = runtimeEnvironmentValue("REDIS_DRIVER")?.trim().toLowerCase() || "ioredis";
   const hasIoredisUrl = Boolean(runtimeEnvironmentValue("REDIS_URL"));
   const hasUpstashConfig = Boolean(
-    (runtimeEnvironmentValue("KV_REST_API_URL") || runtimeEnvironmentValue("UPSTASH_REDIS_REST_URL")) &&
-      (runtimeEnvironmentValue("KV_REST_API_TOKEN") || runtimeEnvironmentValue("UPSTASH_REDIS_REST_TOKEN")),
+    (runtimeEnvironmentValue("KV_REST_API_URL") ||
+      runtimeEnvironmentValue("UPSTASH_REDIS_REST_URL")) &&
+      (runtimeEnvironmentValue("KV_REST_API_TOKEN") ||
+        runtimeEnvironmentValue("UPSTASH_REDIS_REST_TOKEN")),
   );
 
   if (driver === "upstash" ? !hasUpstashConfig : !hasIoredisUrl) {
@@ -54,10 +63,10 @@ export async function initRedis(env?: Record<string, unknown>): Promise<boolean>
   }
 
   try {
-    redisClient = getRedis();
+    const redisClient = getRedis();
     // Ping to verify the connection
     await redisClient?.ping();
-    redisAvailable = true;
+    redisClients.set(fingerprint, redisClient);
     console.log("[steward:redis] Redis connected — rate limiting and spend tracking enabled");
     return true;
   } catch (err) {
@@ -65,21 +74,23 @@ export async function initRedis(env?: Record<string, unknown>): Promise<boolean>
       "[steward:redis] Failed to connect — Redis enforcement disabled",
       redactedThrownDiagnostics(err),
     );
-    redisAvailable = false;
+    redisClients.delete(fingerprint);
     return false;
   }
 }
 
 export function isRedisAvailable(): boolean {
-  return redisAvailable;
+  return redisClients.has(redisAuthorityFingerprint());
 }
 
 export function isRedisConfigured(): boolean {
   const driver = runtimeEnvironmentValue("REDIS_DRIVER")?.trim().toLowerCase() || "ioredis";
   if (driver === "upstash") {
     return Boolean(
-      (runtimeEnvironmentValue("KV_REST_API_URL") || runtimeEnvironmentValue("UPSTASH_REDIS_REST_URL")) &&
-        (runtimeEnvironmentValue("KV_REST_API_TOKEN") || runtimeEnvironmentValue("UPSTASH_REDIS_REST_TOKEN")),
+      (runtimeEnvironmentValue("KV_REST_API_URL") ||
+        runtimeEnvironmentValue("UPSTASH_REDIS_REST_URL")) &&
+        (runtimeEnvironmentValue("KV_REST_API_TOKEN") ||
+          runtimeEnvironmentValue("UPSTASH_REDIS_REST_TOKEN")),
     );
   }
   return Boolean(runtimeEnvironmentValue("REDIS_URL"));
@@ -90,14 +101,13 @@ export function isRedisConfigured(): boolean {
  * if Redis is not available. Call isRedisAvailable() first to check.
  */
 export function getRedisClient(): IoredisLike | null {
-  return redisAvailable ? redisClient : null;
+  return redisClients.get(redisAuthorityFingerprint()) ?? null;
 }
 
 export async function shutdownRedis(): Promise<void> {
-  if (redisAvailable) {
+  if (redisClients.size > 0) {
     await disconnectRedis();
-    redisAvailable = false;
-    redisClient = null;
+    redisClients.clear();
   }
 }
 
@@ -122,7 +132,7 @@ export async function checkAgentRateLimit(
   // Redis not available: only skip enforcement when Redis was never configured
   // (documented dev path). If Redis IS configured (production), an unavailable
   // backend must fail CLOSED — mirroring checkAgentSpendLimit (SEC-016).
-  if (!redisAvailable) {
+  if (!isRedisAvailable()) {
     if (!isRedisConfigured()) return PERMISSIVE_RATE_LIMIT;
     return { allowed: false, remaining: 0, resetMs: 60_000 };
   }
@@ -152,7 +162,7 @@ export async function checkProxyRateLimit(
 ): Promise<RateLimitResult> {
   // Same fail-closed posture as checkAgentRateLimit (SEC-016): permissive only
   // when Redis was never configured; a configured-but-down backend denies.
-  if (!redisAvailable) {
+  if (!isRedisAvailable()) {
     if (!isRedisConfigured()) return PERMISSIVE_RATE_LIMIT;
     return { allowed: false, remaining: 0, resetMs: 60_000 };
   }
@@ -182,7 +192,7 @@ export async function checkAgentSpendLimit(
   // Redis not available: only skip enforcement when Redis was never configured
   // (documented dev path). If Redis IS configured (production), an unavailable
   // backend must fail CLOSED rather than silently allow unlimited spend.
-  if (!redisAvailable) {
+  if (!isRedisAvailable()) {
     if (!isRedisConfigured()) return { allowed: true, spent: 0, remaining: limitUsd };
     return { allowed: false, spent: 0, remaining: 0 };
   }
@@ -209,7 +219,7 @@ export async function recordAgentSpend(
   host: string,
   options: SpendRecordOptions & { throwOnError?: boolean } = {},
 ): Promise<void> {
-  if (!redisAvailable) {
+  if (!isRedisAvailable()) {
     if (options.throwOnError && isRedisConfigured()) {
       throw new Error("Configured Redis spend backend is unavailable");
     }
