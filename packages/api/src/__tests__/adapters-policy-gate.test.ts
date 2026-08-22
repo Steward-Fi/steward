@@ -25,12 +25,14 @@ import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { withRuntimeEnvironment } from "@stwd/shared/runtime-env";
 import { and, desc, eq } from "drizzle-orm";
 import { Hono } from "hono";
-import { initRedis, shutdownRedis } from "../middleware/redis";
-import { type AppVariables, priceOracle } from "../services/context";
+import type { AppVariables } from "../services/context";
 
 let adapterRoutesModule: Awaited<typeof import("../routes/adapters")>;
-const originalWeiToUsd = priceOracle.weiToUsd.bind(priceOracle);
-const originalTokenPrice = priceOracle.getTokenUsdPrice.bind(priceOracle);
+let initRedis: typeof import("../middleware/redis")["initRedis"];
+let shutdownRedis: typeof import("../middleware/redis")["shutdownRedis"];
+let priceOracle: typeof import("../services/context")["priceOracle"];
+let originalWeiToUsd: typeof priceOracle.weiToUsd;
+let originalTokenPrice: typeof priceOracle.getTokenUsdPrice;
 
 beforeAll(async () => {
   process.env.STEWARD_PGLITE_MEMORY = "true";
@@ -42,6 +44,10 @@ beforeAll(async () => {
   setPGLiteOverride(db, async () => {
     await client.close();
   });
+  ({ initRedis, shutdownRedis } = await import("../middleware/redis"));
+  ({ priceOracle } = await import("../services/context"));
+  originalWeiToUsd = priceOracle.weiToUsd.bind(priceOracle);
+  originalTokenPrice = priceOracle.getTokenUsdPrice.bind(priceOracle);
   // The fund-moving spend gate (enforceFundMovingPolicy → checkAgentSpendLimit)
   // fails CLOSED when Redis is *configured* (REDIS_URL set in this env) but the
   // process never connected. Without an explicit connect, redisAvailable stays
