@@ -663,29 +663,29 @@
     {
       "idx": 114,
       "version": "7",
-      "when": 1787223601000,
-      "tag": "0114_signed_artifact_retirement",
+      "when": 1787306400000,
+      "tag": "0114_durable_wallet_claim_account_audit",
       "breakpoints": true
     },
     {
       "idx": 115,
       "version": "7",
-      "when": 1787260000000,
-      "tag": "0115_monero_pre_relay_lifecycle",
+      "when": 1787223601000,
+      "tag": "0115_signed_artifact_retirement",
       "breakpoints": true
     },
     {
       "idx": 116,
       "version": "7",
-      "when": 1787331600000,
-      "tag": "0116_trade_order_recovery",
+      "when": 1787260000000,
+      "tag": "0116_monero_pre_relay_lifecycle",
       "breakpoints": true
     },
     {
       "idx": 117,
       "version": "7",
-      "when": 1787331601000,
-      "tag": "0117_provider_action_audit_outbox_delivery",
+      "when": 1787331600000,
+      "tag": "0117_trade_order_recovery",
       "breakpoints": true
     },
     {
@@ -693,6 +693,13 @@
       "version": "7",
       "when": 1787306400000,
       "tag": "0118_generic_intent_execution_delete_fence",
+      "breakpoints": true
+    },
+    {
+      "idx": 119,
+      "version": "7",
+      "when": 1787331601000,
+      "tag": "0119_provider_action_audit_outbox_delivery",
       "breakpoints": true
     }
   ]

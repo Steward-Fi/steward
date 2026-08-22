@@ -11,6 +11,7 @@ import {
   revocationStore,
 } from "@stwd/auth";
 import { agentPolicies, toPersistedPolicyRule } from "@stwd/db";
+import { shouldUsePGLite } from "@stwd/db/pglite";
 import { getSpend, getSpendByHost, invalidateCache, type SpendPeriod } from "@stwd/redis";
 import { redactedThrownDiagnostics } from "@stwd/shared";
 import { and, eq, gte, inArray, isNull, sql } from "drizzle-orm";
@@ -119,8 +120,6 @@ type PortfolioAsset = {
   usdPriceText: string | null;
   usdValueText: string | null;
 };
-type AgentSignerRow = typeof agentSigners.$inferSelect;
-type AgentKeyQuorumRow = typeof agentKeyQuorums.$inferSelect;
 type PolicyRow = typeof policies.$inferSelect;
 type AgentWalletChainFamily = "evm" | "solana" | "bitcoin" | "monero";
 type BitcoinNetwork = "mainnet" | "testnet";
@@ -426,39 +425,34 @@ async function deleteAgentWalletRows(
   });
 }
 
-async function deleteAgentSignerRow(signerId: string): Promise<void> {
-  await db.delete(agentSigners).where(eq(agentSigners.id, signerId));
-}
-
-async function restoreAgentSigner(row: AgentSignerRow): Promise<void> {
-  await db.transaction(async (tx) => {
-    await tx.delete(agentSigners).where(eq(agentSigners.id, row.id));
-    await tx.insert(agentSigners).values(row);
-  });
-}
-
-async function deleteAgentKeyQuorumRow(quorumId: string): Promise<void> {
-  await db.delete(agentKeyQuorums).where(eq(agentKeyQuorums.id, quorumId));
-}
-
-async function restoreAgentKeyQuorum(row: AgentKeyQuorumRow): Promise<void> {
-  await db.transaction(async (tx) => {
-    await tx.delete(agentKeyQuorums).where(eq(agentKeyQuorums.id, row.id));
-    await tx.insert(agentKeyQuorums).values(row);
-  });
-}
-
 async function snapshotAgentPolicies(agentId: string): Promise<PolicyRow[]> {
   return db.select().from(policies).where(eq(policies.agentId, agentId));
 }
 
-async function restoreAgentPolicies(agentId: string, snapshot: PolicyRow[]): Promise<void> {
-  await db.transaction(async (tx) => {
-    await tx.delete(policies).where(eq(policies.agentId, agentId));
-    if (snapshot.length > 0) {
-      await tx.insert(policies).values(snapshot);
-    }
-  });
+function authoritySnapshot(value: unknown): string {
+  return JSON.stringify(value, (_key, item) => (item instanceof Date ? item.toISOString() : item));
+}
+
+function policySetSnapshot(rows: PolicyRow[]): string {
+  return authoritySnapshot([...rows].sort((left, right) => left.id.localeCompare(right.id)));
+}
+
+async function lockAgentAuthority(
+  tx: typeof db,
+  tenantId: string,
+  agentId: string,
+): Promise<boolean> {
+  if (!shouldUsePGLite()) {
+    await tx.execute(
+      sql`SELECT pg_advisory_xact_lock(hashtextextended(${`steward_agent_authority_${tenantId}:${agentId}`}, 0))`,
+    );
+  }
+  const [agent] = await tx
+    .select({ id: agents.id })
+    .from(agents)
+    .where(and(eq(agents.id, agentId), eq(agents.tenantId, tenantId)))
+    .for("update");
+  return Boolean(agent);
 }
 
 /**
@@ -565,9 +559,10 @@ function normalizeSignerPolicyIds(value: unknown): string[] {
 async function validateSignerPolicyIdsForAgent(
   agentId: string,
   policyIds: string[],
+  executor: typeof db = db,
 ): Promise<void> {
   if (policyIds.length === 0) return;
-  const rows = await db
+  const rows = await executor
     .select({ id: policies.id })
     .from(policies)
     .where(and(eq(policies.agentId, agentId), inArray(policies.id, policyIds)));
@@ -666,8 +661,9 @@ async function validateQuorumMembers(
   memberSignerIds: string[],
   memberQuorumIds: string[] = [],
   selfQuorumId?: string,
+  executor: typeof db = db,
 ): Promise<string | null> {
-  const rows = await db
+  const rows = await executor
     .select({ id: agentSigners.id, status: agentSigners.status })
     .from(agentSigners)
     .where(and(eq(agentSigners.tenantId, tenantId), eq(agentSigners.agentId, agentId)));
@@ -678,7 +674,7 @@ async function validateQuorumMembers(
     if (status !== "active") return `memberSignerIds contains inactive signer ${id}`;
   }
   if (memberQuorumIds.length > 0) {
-    const quorumRows = await db
+    const quorumRows = await executor
       .select({ id: agentKeyQuorums.id, status: agentKeyQuorums.status })
       .from(agentKeyQuorums)
       .where(and(eq(agentKeyQuorums.tenantId, tenantId), eq(agentKeyQuorums.agentId, agentId)));
@@ -1796,13 +1792,11 @@ agentRoutes.put("/:agentId/policy", async (c) => {
     tenantId,
     async (txRaw, appendRequiredAudit) => {
       const tx = txRaw as typeof db;
-      // Serialize the complete partial-patch read/materialize/write sequence,
-      // including initial-row creation where SELECT FOR UPDATE has no row to
-      // lock. PGLite runs tests on one connection and lacks this PG function.
-      if (process.env.STEWARD_PGLITE_MEMORY !== "true") {
-        await tx.execute(
-          sql`SELECT pg_advisory_xact_lock(hashtextextended(${`agent-policy:${tenantId}:${agentId}`}, 0))`,
-        );
+      // Share the canonical authority lock with signer, quorum, rule-policy,
+      // and user-wallet signer mutations. This also serializes initial policy
+      // creation, where SELECT FOR UPDATE has no row to lock.
+      if (!(await lockAgentAuthority(tx, tenantId, agentId))) {
+        return { kind: "missing-agent" as const };
       }
       const [existing] = await tx
         .select()
@@ -1903,6 +1897,9 @@ agentRoutes.put("/:agentId/policy", async (c) => {
     },
   );
 
+  if (mutation.kind === "missing-agent") {
+    return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
+  }
   if (mutation.kind === "invalid") {
     return c.json<ApiResponse>({ ok: false, error: mutation.error }, mutation.status);
   }
@@ -2579,39 +2576,69 @@ agentRoutes.post("/:agentId/signers", async (c) => {
           }
         : {}),
     };
-    const [row] = await db
-      .insert(agentSigners)
-      .values({
-        tenantId,
-        agentId,
-        signerType,
-        subjectType,
-        subjectId,
-        keyType,
-        publicKey,
-        address,
-        chainFamily,
-        label,
-        permissions,
-        policyIds,
-        metadata: storedMetadata,
-        status: "active",
-        createdBy: c.get("userId") ?? c.get("authType") ?? null,
-      })
-      .returning();
-
-    try {
-      await writeAgentAudit(c, {
-        tenantId,
-        action: "agent.signer.create",
-        resourceType: "agent_signer",
-        resourceId: row.id,
-        metadata: { agentId, signerType, subjectType, subjectId },
-      });
-    } catch (error) {
-      await deleteAgentSignerRow(row.id);
-      throw error;
+    const mutation = await withTenantAuditedTransaction(
+      tenantId,
+      async (txRaw, appendRequiredAudit) => {
+        const tx = txRaw as typeof db;
+        if (!(await lockAgentAuthority(tx, tenantId, agentId))) {
+          return { kind: "missing-agent" as const };
+        }
+        const [duplicate] = await tx
+          .select({ id: agentSigners.id })
+          .from(agentSigners)
+          .where(
+            and(
+              eq(agentSigners.tenantId, tenantId),
+              eq(agentSigners.agentId, agentId),
+              eq(agentSigners.subjectType, subjectType),
+              eq(agentSigners.subjectId, subjectId),
+            ),
+          )
+          .for("update");
+        if (duplicate) return { kind: "duplicate" as const };
+        await validateSignerPolicyIdsForAgent(agentId, policyIds, tx);
+        const [row] = await tx
+          .insert(agentSigners)
+          .values({
+            tenantId,
+            agentId,
+            signerType,
+            subjectType,
+            subjectId,
+            keyType,
+            publicKey,
+            address,
+            chainFamily,
+            label,
+            permissions,
+            policyIds,
+            metadata: storedMetadata,
+            status: "active",
+            createdBy: c.get("userId") ?? c.get("authType") ?? null,
+          })
+          .returning();
+        await appendRequiredAudit(
+          agentAuditEvent(c, {
+            tenantId,
+            action: "agent.signer.create",
+            resourceType: "agent_signer",
+            resourceId: row.id,
+            metadata: { agentId, signerType, subjectType, subjectId },
+          }),
+        );
+        return { kind: "created" as const, row };
+      },
+    );
+    if (mutation.kind === "missing-agent") {
+      return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
     }
+    if (mutation.kind === "duplicate") {
+      return c.json<ApiResponse>(
+        { ok: false, error: "Signer already exists for this agent and subject" },
+        409,
+      );
+    }
+    const { row } = mutation;
 
     if (credentialSecret) {
       c.header("Cache-Control", "no-store, max-age=0");
@@ -2799,34 +2826,78 @@ agentRoutes.patch("/:agentId/signers/:signerId", async (c) => {
     metadata: { agentId, fields: Object.keys(updates) },
   });
 
-  const [row] = await db
-    .update(agentSigners)
-    .set(updates)
-    .where(
-      and(
-        eq(agentSigners.id, signerId),
-        eq(agentSigners.tenantId, tenantId),
-        eq(agentSigners.agentId, agentId),
-      ),
-    )
-    .returning();
-
-  if (!row) return c.json<ApiResponse>({ ok: false, error: "Signer not found" }, 404);
-
-  try {
-    await writeAgentAudit(c, {
-      tenantId,
-      action: "agent.signer.update",
-      resourceType: "agent_signer",
-      resourceId: row.id,
-      metadata: { agentId, status: row.status },
-    });
-  } catch (error) {
-    await restoreAgentSigner(existingSigner);
-    throw error;
+  const mutation = await withTenantAuditedTransaction(
+    tenantId,
+    async (txRaw, appendRequiredAudit) => {
+      const tx = txRaw as typeof db;
+      if (!(await lockAgentAuthority(tx, tenantId, agentId))) {
+        return { kind: "missing-agent" as const };
+      }
+      const [locked] = await tx
+        .select()
+        .from(agentSigners)
+        .where(
+          and(
+            eq(agentSigners.id, signerId),
+            eq(agentSigners.tenantId, tenantId),
+            eq(agentSigners.agentId, agentId),
+          ),
+        )
+        .for("update");
+      if (!locked) return { kind: "missing" as const };
+      if (authoritySnapshot(locked) !== authoritySnapshot(existingSigner)) {
+        return { kind: "conflict" as const };
+      }
+      if (updates.policyIds) {
+        await validateSignerPolicyIdsForAgent(agentId, updates.policyIds, tx);
+      }
+      const exactUpdates =
+        body.metadata === undefined
+          ? updates
+          : {
+              ...updates,
+              metadata: mergeSignerMetadataPreservingReserved(
+                locked.metadata,
+                normalizeSignerMetadata(body.metadata),
+              ),
+            };
+      const [row] = await tx
+        .update(agentSigners)
+        .set(exactUpdates)
+        .where(
+          and(
+            eq(agentSigners.id, signerId),
+            eq(agentSigners.tenantId, tenantId),
+            eq(agentSigners.agentId, agentId),
+          ),
+        )
+        .returning();
+      if (!row) return { kind: "missing" as const };
+      await appendRequiredAudit(
+        agentAuditEvent(c, {
+          tenantId,
+          action: "agent.signer.update",
+          resourceType: "agent_signer",
+          resourceId: row.id,
+          metadata: { agentId, status: row.status },
+        }),
+      );
+      return { kind: "updated" as const, row };
+    },
+  );
+  if (mutation.kind === "missing-agent") {
+    return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
   }
-
-  return c.json<ApiResponse>({ ok: true, data: toAgentSignerResponse(row) });
+  if (mutation.kind === "missing") {
+    return c.json<ApiResponse>({ ok: false, error: "Signer not found" }, 404);
+  }
+  if (mutation.kind === "conflict") {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Signer changed concurrently; retry against the latest signer" },
+      409,
+    );
+  }
+  return c.json<ApiResponse>({ ok: true, data: toAgentSignerResponse(mutation.row) });
 });
 
 agentRoutes.delete("/:agentId/signers/:signerId", async (c) => {
@@ -2866,34 +2937,58 @@ agentRoutes.delete("/:agentId/signers/:signerId", async (c) => {
     metadata: { agentId },
   });
 
-  const [row] = await db
-    .update(agentSigners)
-    .set({ status: "revoked" })
-    .where(
-      and(
-        eq(agentSigners.id, signerId),
-        eq(agentSigners.tenantId, tenantId),
-        eq(agentSigners.agentId, agentId),
-      ),
-    )
-    .returning();
-
-  if (!row) return c.json<ApiResponse>({ ok: false, error: "Signer not found" }, 404);
-
-  try {
-    await writeAgentAudit(c, {
-      tenantId,
-      action: "agent.signer.revoke",
-      resourceType: "agent_signer",
-      resourceId: row.id,
-      metadata: { agentId },
-    });
-  } catch (error) {
-    await restoreAgentSigner(existingSigner);
-    throw error;
+  const mutation = await withTenantAuditedTransaction(
+    tenantId,
+    async (txRaw, appendRequiredAudit) => {
+      const tx = txRaw as typeof db;
+      if (!(await lockAgentAuthority(tx, tenantId, agentId))) {
+        return { kind: "missing-agent" as const };
+      }
+      const [locked] = await tx
+        .select()
+        .from(agentSigners)
+        .where(
+          and(
+            eq(agentSigners.id, signerId),
+            eq(agentSigners.tenantId, tenantId),
+            eq(agentSigners.agentId, agentId),
+          ),
+        )
+        .for("update");
+      if (!locked) return { kind: "missing" as const };
+      if (authoritySnapshot(locked) !== authoritySnapshot(existingSigner)) {
+        return { kind: "conflict" as const };
+      }
+      const [row] = await tx
+        .update(agentSigners)
+        .set({ status: "revoked" })
+        .where(eq(agentSigners.id, signerId))
+        .returning();
+      await appendRequiredAudit(
+        agentAuditEvent(c, {
+          tenantId,
+          action: "agent.signer.revoke",
+          resourceType: "agent_signer",
+          resourceId: row.id,
+          metadata: { agentId },
+        }),
+      );
+      return { kind: "revoked" as const, row };
+    },
+  );
+  if (mutation.kind === "missing-agent") {
+    return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
   }
-
-  return c.json<ApiResponse>({ ok: true, data: toAgentSignerResponse(row) });
+  if (mutation.kind === "missing") {
+    return c.json<ApiResponse>({ ok: false, error: "Signer not found" }, 404);
+  }
+  if (mutation.kind === "conflict") {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Signer changed concurrently; retry against the latest signer" },
+      409,
+    );
+  }
+  return c.json<ApiResponse>({ ok: true, data: toAgentSignerResponse(mutation.row) });
 });
 
 // ─── Agent signing freeze (kill-switch) ──────────────────────────────────────
@@ -3161,36 +3256,56 @@ agentRoutes.post("/:agentId/key-quorums", async (c) => {
     metadata: { agentId, name, threshold, memberSignerIds, memberQuorumIds, permissions },
   });
 
-  const [row] = await db
-    .insert(agentKeyQuorums)
-    .values({
-      tenantId,
-      agentId,
-      name,
-      threshold,
-      memberSignerIds,
-      memberQuorumIds,
-      permissions,
-      metadata,
-      status: "active",
-      createdBy: c.get("userId") ?? c.get("authType") ?? null,
-    })
-    .returning();
-
-  try {
-    await writeAgentAudit(c, {
-      tenantId,
-      action: "agent.key_quorum.create",
-      resourceType: "agent_key_quorum",
-      resourceId: row.id,
-      metadata: { agentId, threshold, memberSignerIds, memberQuorumIds },
-    });
-  } catch (error) {
-    await deleteAgentKeyQuorumRow(row.id);
-    throw error;
+  const mutation = await withTenantAuditedTransaction(
+    tenantId,
+    async (txRaw, appendRequiredAudit) => {
+      const tx = txRaw as typeof db;
+      if (!(await lockAgentAuthority(tx, tenantId, agentId))) {
+        return { kind: "missing-agent" as const };
+      }
+      const lockedMemberError = await validateQuorumMembers(
+        tenantId,
+        agentId,
+        memberSignerIds,
+        memberQuorumIds,
+        undefined,
+        tx,
+      );
+      if (lockedMemberError) return { kind: "invalid" as const, error: lockedMemberError };
+      const [row] = await tx
+        .insert(agentKeyQuorums)
+        .values({
+          tenantId,
+          agentId,
+          name,
+          threshold,
+          memberSignerIds,
+          memberQuorumIds,
+          permissions,
+          metadata,
+          status: "active",
+          createdBy: c.get("userId") ?? c.get("authType") ?? null,
+        })
+        .returning();
+      await appendRequiredAudit(
+        agentAuditEvent(c, {
+          tenantId,
+          action: "agent.key_quorum.create",
+          resourceType: "agent_key_quorum",
+          resourceId: row.id,
+          metadata: { agentId, threshold, memberSignerIds, memberQuorumIds },
+        }),
+      );
+      return { kind: "created" as const, row };
+    },
+  );
+  if (mutation.kind === "missing-agent") {
+    return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
   }
-
-  return c.json<ApiResponse>({ ok: true, data: toAgentKeyQuorumResponse(row) }, 201);
+  if (mutation.kind === "invalid") {
+    return c.json<ApiResponse>({ ok: false, error: mutation.error }, 400);
+  }
+  return c.json<ApiResponse>({ ok: true, data: toAgentKeyQuorumResponse(mutation.row) }, 201);
 });
 
 agentRoutes.patch("/:agentId/key-quorums/:quorumId", async (c) => {
@@ -3302,32 +3417,72 @@ agentRoutes.patch("/:agentId/key-quorums/:quorumId", async (c) => {
     metadata: { agentId, fields: Object.keys(updates) },
   });
 
-  const [row] = await db
-    .update(agentKeyQuorums)
-    .set({ ...updates, updatedAt: new Date() })
-    .where(
-      and(
-        eq(agentKeyQuorums.id, quorumId),
-        eq(agentKeyQuorums.tenantId, tenantId),
-        eq(agentKeyQuorums.agentId, agentId),
-      ),
-    )
-    .returning();
-
-  try {
-    await writeAgentAudit(c, {
-      tenantId,
-      action: "agent.key_quorum.update",
-      resourceType: "agent_key_quorum",
-      resourceId: row.id,
-      metadata: { agentId, status: row.status },
-    });
-  } catch (error) {
-    await restoreAgentKeyQuorum(existing);
-    throw error;
+  const mutation = await withTenantAuditedTransaction(
+    tenantId,
+    async (txRaw, appendRequiredAudit) => {
+      const tx = txRaw as typeof db;
+      if (!(await lockAgentAuthority(tx, tenantId, agentId))) {
+        return { kind: "missing-agent" as const };
+      }
+      const [locked] = await tx
+        .select()
+        .from(agentKeyQuorums)
+        .where(
+          and(
+            eq(agentKeyQuorums.id, quorumId),
+            eq(agentKeyQuorums.tenantId, tenantId),
+            eq(agentKeyQuorums.agentId, agentId),
+          ),
+        )
+        .for("update");
+      if (!locked) return { kind: "missing" as const };
+      if (authoritySnapshot(locked) !== authoritySnapshot(existing)) {
+        return { kind: "conflict" as const };
+      }
+      const nextSignerIds = (updates.memberSignerIds ?? locked.memberSignerIds) as string[];
+      const nextQuorumIds = (updates.memberQuorumIds ?? locked.memberQuorumIds) as string[];
+      const lockedMemberError = await validateQuorumMembers(
+        tenantId,
+        agentId,
+        nextSignerIds,
+        nextQuorumIds,
+        quorumId,
+        tx,
+      );
+      if (lockedMemberError) return { kind: "invalid" as const, error: lockedMemberError };
+      const [row] = await tx
+        .update(agentKeyQuorums)
+        .set({ ...updates, updatedAt: new Date() })
+        .where(eq(agentKeyQuorums.id, quorumId))
+        .returning();
+      await appendRequiredAudit(
+        agentAuditEvent(c, {
+          tenantId,
+          action: "agent.key_quorum.update",
+          resourceType: "agent_key_quorum",
+          resourceId: row.id,
+          metadata: { agentId, status: row.status },
+        }),
+      );
+      return { kind: "updated" as const, row };
+    },
+  );
+  if (mutation.kind === "missing-agent") {
+    return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
   }
-
-  return c.json<ApiResponse>({ ok: true, data: toAgentKeyQuorumResponse(row) });
+  if (mutation.kind === "missing") {
+    return c.json<ApiResponse>({ ok: false, error: "Key quorum not found" }, 404);
+  }
+  if (mutation.kind === "conflict") {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Key quorum changed concurrently; retry against the latest quorum" },
+      409,
+    );
+  }
+  if (mutation.kind === "invalid") {
+    return c.json<ApiResponse>({ ok: false, error: mutation.error }, 400);
+  }
+  return c.json<ApiResponse>({ ok: true, data: toAgentKeyQuorumResponse(mutation.row) });
 });
 
 agentRoutes.delete("/:agentId/key-quorums/:quorumId", async (c) => {
@@ -3364,33 +3519,58 @@ agentRoutes.delete("/:agentId/key-quorums/:quorumId", async (c) => {
     metadata: { agentId },
   });
 
-  const [row] = await db
-    .update(agentKeyQuorums)
-    .set({ status: "revoked", updatedAt: new Date() })
-    .where(
-      and(
-        eq(agentKeyQuorums.id, quorumId),
-        eq(agentKeyQuorums.tenantId, tenantId),
-        eq(agentKeyQuorums.agentId, agentId),
-      ),
-    )
-    .returning();
-  if (!row) return c.json<ApiResponse>({ ok: false, error: "Key quorum not found" }, 404);
-
-  try {
-    await writeAgentAudit(c, {
-      tenantId,
-      action: "agent.key_quorum.revoke",
-      resourceType: "agent_key_quorum",
-      resourceId: row.id,
-      metadata: { agentId },
-    });
-  } catch (error) {
-    await restoreAgentKeyQuorum(existing);
-    throw error;
+  const mutation = await withTenantAuditedTransaction(
+    tenantId,
+    async (txRaw, appendRequiredAudit) => {
+      const tx = txRaw as typeof db;
+      if (!(await lockAgentAuthority(tx, tenantId, agentId))) {
+        return { kind: "missing-agent" as const };
+      }
+      const [locked] = await tx
+        .select()
+        .from(agentKeyQuorums)
+        .where(
+          and(
+            eq(agentKeyQuorums.id, quorumId),
+            eq(agentKeyQuorums.tenantId, tenantId),
+            eq(agentKeyQuorums.agentId, agentId),
+          ),
+        )
+        .for("update");
+      if (!locked) return { kind: "missing" as const };
+      if (authoritySnapshot(locked) !== authoritySnapshot(existing)) {
+        return { kind: "conflict" as const };
+      }
+      const [row] = await tx
+        .update(agentKeyQuorums)
+        .set({ status: "revoked", updatedAt: new Date() })
+        .where(eq(agentKeyQuorums.id, quorumId))
+        .returning();
+      await appendRequiredAudit(
+        agentAuditEvent(c, {
+          tenantId,
+          action: "agent.key_quorum.revoke",
+          resourceType: "agent_key_quorum",
+          resourceId: row.id,
+          metadata: { agentId },
+        }),
+      );
+      return { kind: "revoked" as const, row };
+    },
+  );
+  if (mutation.kind === "missing-agent") {
+    return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
   }
-
-  return c.json<ApiResponse>({ ok: true, data: toAgentKeyQuorumResponse(row) });
+  if (mutation.kind === "missing") {
+    return c.json<ApiResponse>({ ok: false, error: "Key quorum not found" }, 404);
+  }
+  if (mutation.kind === "conflict") {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Key quorum changed concurrently; retry against the latest quorum" },
+      409,
+    );
+  }
+  return c.json<ApiResponse>({ ok: true, data: toAgentKeyQuorumResponse(mutation.row) });
 });
 
 // ─── Batch create agents ──────────────────────────────────────────────────────
@@ -3648,6 +3828,8 @@ agentRoutes.put("/:agentId/policies", async (c) => {
     );
   }
 
+  const previousPolicies = await snapshotAgentPolicies(agentId);
+
   await writeAgentAudit(c, {
     tenantId,
     action: "agent.policies.update.authorized",
@@ -3659,43 +3841,61 @@ agentRoutes.put("/:agentId/policies", async (c) => {
     },
   });
 
-  const previousPolicies = await snapshotAgentPolicies(agentId);
-  const storedPolicies = await db.transaction(async (tx) => {
-    await tx.delete(policies).where(eq(policies.agentId, agentId));
-
-    if (nextPolicies.length > 0) {
-      const persistedPolicies = nextPolicies.map(toPersistedPolicyRule);
-      await tx.insert(policies).values(
-        persistedPolicies.map((policy) => ({
-          id: crypto.randomUUID(),
-          agentId,
-          type: policy.type,
-          enabled: policy.enabled,
-          config: policy.config,
-        })),
+  const mutation = await withTenantAuditedTransaction(
+    tenantId,
+    async (txRaw, appendRequiredAudit) => {
+      const tx = txRaw as typeof db;
+      if (!(await lockAgentAuthority(tx, tenantId, agentId))) {
+        return { kind: "missing-agent" as const };
+      }
+      const lockedPolicies = await tx
+        .select()
+        .from(policies)
+        .where(eq(policies.agentId, agentId))
+        .for("update");
+      if (policySetSnapshot(lockedPolicies) !== policySetSnapshot(previousPolicies)) {
+        return { kind: "conflict" as const };
+      }
+      await tx.delete(policies).where(eq(policies.agentId, agentId));
+      if (nextPolicies.length > 0) {
+        const persistedPolicies = nextPolicies.map(toPersistedPolicyRule);
+        await tx.insert(policies).values(
+          persistedPolicies.map((policy) => ({
+            id: crypto.randomUUID(),
+            agentId,
+            type: policy.type,
+            enabled: policy.enabled,
+            config: policy.config,
+          })),
+        );
+      }
+      const storedPolicies = await tx.select().from(policies).where(eq(policies.agentId, agentId));
+      await appendRequiredAudit(
+        agentAuditEvent(c, {
+          tenantId,
+          action: "agent.policies.update",
+          resourceType: "agent",
+          resourceId: agentId,
+          metadata: {
+            count: storedPolicies.length,
+            types: storedPolicies.map((p) => p.type),
+          },
+        }),
       );
-    }
-
-    return tx.select().from(policies).where(eq(policies.agentId, agentId));
-  });
-
-  await invalidateAgentPolicyCache(agentId, tenantId);
-
-  try {
-    await writeAgentAudit(c, {
-      tenantId,
-      action: "agent.policies.update",
-      resourceType: "agent",
-      resourceId: agentId,
-      metadata: {
-        count: storedPolicies.length,
-        types: storedPolicies.map((p) => p.type),
-      },
-    });
-  } catch (error) {
-    await restoreAgentPolicies(agentId, previousPolicies);
-    throw error;
+      return { kind: "updated" as const, storedPolicies };
+    },
+  );
+  if (mutation.kind === "missing-agent") {
+    return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
   }
+  if (mutation.kind === "conflict") {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Agent policies changed concurrently; retry against the latest set" },
+      409,
+    );
+  }
+  const { storedPolicies } = mutation;
+  await invalidateAgentPolicyCache(agentId, tenantId);
 
   return c.json<ApiResponse<PolicyRule[]>>({
     ok: true,
@@ -3750,9 +3950,8 @@ agentRoutes.post("/:agentId/policies/rules", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(e) }, 400);
   }
 
-  const currentRules = (await db.select().from(policies).where(eq(policies.agentId, agentId))).map(
-    toPolicyRule,
-  );
+  const currentRows = await db.select().from(policies).where(eq(policies.agentId, agentId));
+  const currentRules = currentRows.map(toPolicyRule);
   const nextRules = [...currentRules, nextRule];
   const policyValidationError = getPolicyRulesValidationError(nextRules);
   if (policyValidationError) {
@@ -3775,29 +3974,57 @@ agentRoutes.post("/:agentId/policies/rules", async (c) => {
   });
 
   const persistedRule = toPersistedPolicyRule(nextRule);
-  await db.insert(policies).values({
-    id: persistedRule.id,
-    agentId,
-    type: persistedRule.type,
-    enabled: persistedRule.enabled,
-    config: persistedRule.config,
-  });
-
-  try {
-    await writeAgentAudit(c, {
-      tenantId,
-      action: "agent.policy_rule.create",
-      resourceType: "policy_rule",
-      resourceId: nextRule.id,
-      metadata: { agentId, type: nextRule.type },
-    });
-  } catch (error) {
-    await db
-      .delete(policies)
-      .where(and(eq(policies.agentId, agentId), eq(policies.id, nextRule.id)));
-    throw error;
+  const mutation = await withTenantAuditedTransaction(
+    tenantId,
+    async (txRaw, appendRequiredAudit) => {
+      const tx = txRaw as typeof db;
+      if (!(await lockAgentAuthority(tx, tenantId, agentId))) {
+        return { kind: "missing-agent" as const };
+      }
+      const lockedRows = await tx
+        .select()
+        .from(policies)
+        .where(eq(policies.agentId, agentId))
+        .for("update");
+      if (policySetSnapshot(lockedRows) !== policySetSnapshot(currentRows)) {
+        return { kind: "conflict" as const };
+      }
+      const lockedValidation = getPolicyRulesValidationError([
+        ...lockedRows.map(toPolicyRule),
+        nextRule,
+      ]);
+      if (lockedValidation) return { kind: "invalid" as const, error: lockedValidation };
+      await tx.insert(policies).values({
+        id: persistedRule.id,
+        agentId,
+        type: persistedRule.type,
+        enabled: persistedRule.enabled,
+        config: persistedRule.config,
+      });
+      await appendRequiredAudit(
+        agentAuditEvent(c, {
+          tenantId,
+          action: "agent.policy_rule.create",
+          resourceType: "policy_rule",
+          resourceId: nextRule.id,
+          metadata: { agentId, type: nextRule.type },
+        }),
+      );
+      return { kind: "created" as const };
+    },
+  );
+  if (mutation.kind === "missing-agent") {
+    return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
   }
-
+  if (mutation.kind === "conflict") {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Agent policies changed concurrently; retry against the latest set" },
+      409,
+    );
+  }
+  if (mutation.kind === "invalid") {
+    return c.json<ApiResponse>({ ok: false, error: mutation.error }, 400);
+  }
   await invalidateAgentPolicyCache(agentId, tenantId);
   return c.json<ApiResponse<PolicyRule>>({ ok: true, data: nextRule }, 201);
 });
@@ -3815,7 +4042,6 @@ agentRoutes.get("/:agentId/policies/rules/:ruleId", async (c) => {
   const ruleId = c.req.param("ruleId");
   const agent = await ensureAgentForTenant(tenantId, agentId);
   if (!agent) return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
-
   const [rule] = await db
     .select()
     .from(policies)
@@ -3877,41 +4103,58 @@ agentRoutes.patch("/:agentId/policies/rules/:ruleId", async (c) => {
   });
 
   const persistedRule = toPersistedPolicyRule(nextRule);
-  const [updated] = await db
-    .update(policies)
-    .set({
-      type: persistedRule.type,
-      enabled: persistedRule.enabled,
-      config: persistedRule.config,
-      updatedAt: new Date(),
-    })
-    .where(and(eq(policies.agentId, agentId), eq(policies.id, ruleId)))
-    .returning();
-  if (!updated) return c.json<ApiResponse>({ ok: false, error: "Policy rule not found" }, 404);
-
-  try {
-    await writeAgentAudit(c, {
-      tenantId,
-      action: "agent.policy_rule.update",
-      resourceType: "policy_rule",
-      resourceId: ruleId,
-      metadata: { agentId, type: nextRule.type },
-    });
-  } catch (error) {
-    await db
-      .update(policies)
-      .set({
-        type: existing.type,
-        enabled: existing.enabled,
-        config: existing.config,
-        updatedAt: existing.updatedAt,
-      })
-      .where(and(eq(policies.agentId, agentId), eq(policies.id, ruleId)));
-    throw error;
+  const mutation = await withTenantAuditedTransaction(
+    tenantId,
+    async (txRaw, appendRequiredAudit) => {
+      const tx = txRaw as typeof db;
+      if (!(await lockAgentAuthority(tx, tenantId, agentId))) {
+        return { kind: "missing-agent" as const };
+      }
+      const lockedRows = await tx
+        .select()
+        .from(policies)
+        .where(eq(policies.agentId, agentId))
+        .for("update");
+      if (policySetSnapshot(lockedRows) !== policySetSnapshot(currentRows)) {
+        return { kind: "conflict" as const };
+      }
+      if (!lockedRows.some((rule) => rule.id === ruleId)) return { kind: "missing" as const };
+      const [updated] = await tx
+        .update(policies)
+        .set({
+          type: persistedRule.type,
+          enabled: persistedRule.enabled,
+          config: persistedRule.config,
+          updatedAt: new Date(),
+        })
+        .where(and(eq(policies.agentId, agentId), eq(policies.id, ruleId)))
+        .returning();
+      await appendRequiredAudit(
+        agentAuditEvent(c, {
+          tenantId,
+          action: "agent.policy_rule.update",
+          resourceType: "policy_rule",
+          resourceId: ruleId,
+          metadata: { agentId, type: nextRule.type },
+        }),
+      );
+      return { kind: "updated" as const, updated };
+    },
+  );
+  if (mutation.kind === "missing-agent") {
+    return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
   }
-
+  if (mutation.kind === "missing") {
+    return c.json<ApiResponse>({ ok: false, error: "Policy rule not found" }, 404);
+  }
+  if (mutation.kind === "conflict") {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Agent policies changed concurrently; retry against the latest set" },
+      409,
+    );
+  }
   await invalidateAgentPolicyCache(agentId, tenantId);
-  return c.json<ApiResponse<PolicyRule>>({ ok: true, data: toPolicyRule(updated) });
+  return c.json<ApiResponse<PolicyRule>>({ ok: true, data: toPolicyRule(mutation.updated) });
 });
 
 agentRoutes.delete("/:agentId/policies/rules/:ruleId", async (c) => {
@@ -3929,6 +4172,11 @@ agentRoutes.delete("/:agentId/policies/rules/:ruleId", async (c) => {
   const ruleId = c.req.param("ruleId");
   const agent = await ensureAgentForTenant(tenantId, agentId);
   if (!agent) return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
+  const [existing] = await db
+    .select()
+    .from(policies)
+    .where(and(eq(policies.agentId, agentId), eq(policies.id, ruleId)));
+  if (!existing) return c.json<ApiResponse>({ ok: false, error: "Policy rule not found" }, 404);
 
   await writeAgentAudit(c, {
     tenantId,
@@ -3938,25 +4186,50 @@ agentRoutes.delete("/:agentId/policies/rules/:ruleId", async (c) => {
     metadata: { agentId },
   });
 
-  const [deleted] = await db
-    .delete(policies)
-    .where(and(eq(policies.agentId, agentId), eq(policies.id, ruleId)))
-    .returning();
-  if (!deleted) return c.json<ApiResponse>({ ok: false, error: "Policy rule not found" }, 404);
-
-  try {
-    await writeAgentAudit(c, {
-      tenantId,
-      action: "agent.policy_rule.delete",
-      resourceType: "policy_rule",
-      resourceId: ruleId,
-      metadata: { agentId, type: deleted.type },
-    });
-  } catch (error) {
-    await db.insert(policies).values(deleted);
-    throw error;
+  const mutation = await withTenantAuditedTransaction(
+    tenantId,
+    async (txRaw, appendRequiredAudit) => {
+      const tx = txRaw as typeof db;
+      if (!(await lockAgentAuthority(tx, tenantId, agentId))) {
+        return { kind: "missing-agent" as const };
+      }
+      const [locked] = await tx
+        .select()
+        .from(policies)
+        .where(and(eq(policies.agentId, agentId), eq(policies.id, ruleId)))
+        .for("update");
+      if (!locked) return { kind: "missing" as const };
+      if (authoritySnapshot(locked) !== authoritySnapshot(existing)) {
+        return { kind: "conflict" as const };
+      }
+      const [deleted] = await tx
+        .delete(policies)
+        .where(and(eq(policies.agentId, agentId), eq(policies.id, ruleId)))
+        .returning();
+      await appendRequiredAudit(
+        agentAuditEvent(c, {
+          tenantId,
+          action: "agent.policy_rule.delete",
+          resourceType: "policy_rule",
+          resourceId: ruleId,
+          metadata: { agentId, type: deleted.type },
+        }),
+      );
+      return { kind: "deleted" as const, deleted };
+    },
+  );
+  if (mutation.kind === "missing-agent") {
+    return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
   }
-
+  if (mutation.kind === "missing") {
+    return c.json<ApiResponse>({ ok: false, error: "Policy rule not found" }, 404);
+  }
+  if (mutation.kind === "conflict") {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Policy rule changed concurrently; retry against the latest rule" },
+      409,
+    );
+  }
   await invalidateAgentPolicyCache(agentId, tenantId);
-  return c.json<ApiResponse<PolicyRule>>({ ok: true, data: toPolicyRule(deleted) });
+  return c.json<ApiResponse<PolicyRule>>({ ok: true, data: toPolicyRule(mutation.deleted) });
 });

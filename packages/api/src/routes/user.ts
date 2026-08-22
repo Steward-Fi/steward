@@ -54,6 +54,7 @@ import {
   authenticators,
   getDb,
   policies,
+  pregeneratedWalletClaimLifecycles,
   refreshTokens,
   tenantAppClients,
   tenantConfigs,
@@ -66,7 +67,9 @@ import {
   users,
   userTenants,
   userWalletAppConsents,
+  vaultSigningFreezes,
 } from "@stwd/db";
+import { shouldUsePGLite } from "@stwd/db/pglite";
 import { PolicyEngine } from "@stwd/policy-engine";
 import {
   type AgentBalance,
@@ -94,7 +97,11 @@ import bs58 from "bs58";
 import { and, desc, eq, gte, ilike, inArray, isNull, ne, or, sql } from "drizzle-orm";
 import { type Context, Hono, type Next } from "hono";
 import { getAddress, verifyMessage as viemVerifyMessage } from "viem";
-import { withTenantAuditedTransaction, writeAuditEvent } from "../services/audit";
+import {
+  type AuditEventInput,
+  withTenantAuditedTransaction,
+  writeAuditEvent,
+} from "../services/audit";
 import {
   continueWithTenantDatabase,
   priceOracle,
@@ -237,6 +244,7 @@ const PREGENERATED_USER_WALLET_TYPE = "pregenerated_user";
 const PREGENERATED_CLAIM_PREFIX = "pregenerated:";
 const CLAIMED_PREGENERATED_CLAIM_PREFIX = "claimed:";
 const EXPIRED_PREGENERATED_CLAIM_PREFIX = "expired:";
+const PREGENERATED_CLAIM_LEASE_MS = 2 * 60_000;
 const EMBEDDED_WALLET_CREATE_ON_LOGIN = ["off", "users-without-wallets", "all-users"] as const;
 const USER_WALLET_SIGNER_STATUSES = new Set(["active", "paused", "revoked"]);
 const USER_WALLET_SIGNER_SUBJECT_TYPES = new Set(["user", "wallet", "external"]);
@@ -291,6 +299,76 @@ function parsePregeneratedClaimPlatformId(
   const expiresAtMs = Number(platformId.slice(prefix.length + 1));
   if (!Number.isSafeInteger(expiresAtMs) || expiresAtMs <= 0) return null;
   return { hash: claimTokenHash, expiresAt: new Date(expiresAtMs) };
+}
+
+type PregeneratedClaimLifecycle = typeof pregeneratedWalletClaimLifecycles.$inferSelect;
+
+class PregeneratedClaimConflict extends Error {
+  constructor(
+    message: string,
+    readonly status: 404 | 409 | 410 = 409,
+    readonly expiredSource?: {
+      tenantId: string;
+      agentId: string;
+      originalPlatformId: string;
+      tokenHash: string;
+    },
+  ) {
+    super(message);
+  }
+}
+
+function assertPregeneratedClaimBinding(
+  lifecycle: PregeneratedClaimLifecycle,
+  expected: {
+    sourceTenantId: string;
+    targetTenantId: string;
+    targetAgentId: string;
+    userId: string;
+    walletIndex: number;
+  },
+): void {
+  if (
+    lifecycle.sourceTenantId !== expected.sourceTenantId ||
+    lifecycle.targetTenantId !== expected.targetTenantId ||
+    lifecycle.targetAgentId !== expected.targetAgentId ||
+    lifecycle.userId !== expected.userId ||
+    lifecycle.walletIndex !== expected.walletIndex
+  ) {
+    throw new PregeneratedClaimConflict("Claim token is already bound to another wallet");
+  }
+}
+
+function pregeneratedClaimAuditEvent(
+  c: Context<{ Variables: UserVariables }>,
+  input: {
+    tenantId: string;
+    userId: string;
+    action: string;
+    targetAgentId: string;
+    sourceTenantId: string;
+    sourceAgentId: string;
+    walletIndex: number;
+    lifecycleId: string;
+  },
+) {
+  return {
+    tenantId: input.tenantId,
+    actorType: "user" as const,
+    actorId: input.userId,
+    action: input.action,
+    resourceType: "wallet",
+    resourceId: input.targetAgentId,
+    metadata: {
+      sourceTenantId: input.sourceTenantId,
+      sourceAgentId: input.sourceAgentId,
+      walletIndex: input.walletIndex,
+      lifecycleId: input.lifecycleId,
+    },
+    ipAddress: c.req.header("x-forwarded-for") ?? null,
+    userAgent: c.req.header("user-agent") ?? null,
+    requestId: c.get("requestId") ?? null,
+  };
 }
 
 type PushProvider = (typeof PUSH_PROVIDERS)[number];
@@ -935,12 +1013,45 @@ async function writeUserAudit(
     metadata?: Record<string, unknown>;
   },
 ): Promise<void> {
-  await writeAuditEvent({
+  await writeAuditEvent(userAuditEvent(c, event));
+}
+
+function userAuditEvent(
+  c: Context<{ Variables: UserVariables }>,
+  event: {
+    tenantId: string;
+    actorType: "user";
+    actorId?: string | null;
+    action: string;
+    resourceType?: string | null;
+    resourceId?: string | null;
+    metadata?: Record<string, unknown>;
+  },
+): AuditEventInput {
+  return {
     ...event,
     ipAddress: c.req.header("x-forwarded-for") ?? null,
     userAgent: c.req.header("user-agent") ?? null,
     requestId: c.get("requestId") ?? null,
-  });
+  };
+}
+
+async function lockUserWalletSignerAuthority(
+  tx: ReturnType<typeof getDb>,
+  tenantId: string,
+  agentId: string,
+): Promise<boolean> {
+  if (!shouldUsePGLite()) {
+    await tx.execute(
+      sql`SELECT pg_advisory_xact_lock(hashtextextended(${`steward_agent_authority_${tenantId}:${agentId}`}, 0))`,
+    );
+  }
+  const [agent] = await tx
+    .select({ id: agents.id })
+    .from(agents)
+    .where(and(eq(agents.id, agentId), eq(agents.tenantId, tenantId)))
+    .for("update");
+  return Boolean(agent);
 }
 
 async function writeInvalidUserWalletIndexAudit(
@@ -4130,155 +4241,366 @@ user.post("/me/wallet/claim-pregenerated", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: "Vault not configured" }, 503);
   }
 
-  const existing = await getUserWallet(vault, userId, undefined, walletIndex.value);
-  if (existing) {
-    return c.json<ApiResponse>(
-      { ok: false, error: "User already has an embedded wallet at the selected walletIndex" },
-      409,
-    );
-  }
-
   const claimTokenHash = hashSha256Hex(claimToken);
   const platformIdPrefix = pregeneratedClaimPlatformIdPrefix(claimTokenHash);
   const db = getDb();
-  const [claimable] = await db
-    .select()
-    .from(agents)
-    .where(
-      and(
-        eq(agents.tenantId, sourceTenantId),
-        eq(agents.walletType, PREGENERATED_USER_WALLET_TYPE),
-        or(
-          eq(agents.platformId, platformIdPrefix),
-          sql`${agents.platformId} like ${`${platformIdPrefix}:%`}`,
-        ),
-      ),
-    );
-  if (!claimable) {
-    return c.json<ApiResponse>(
-      { ok: false, error: "Invalid or already claimed wallet token" },
-      404,
-    );
-  }
-  const claimablePlatformId = claimable.platformId;
-  const claimRecord = parsePregeneratedClaimPlatformId(claimablePlatformId, claimTokenHash);
-  if (!claimablePlatformId || !claimRecord) {
-    return c.json<ApiResponse>(
-      { ok: false, error: "Invalid or already claimed wallet token" },
-      404,
-    );
-  }
-  if (claimRecord.expiresAt && claimRecord.expiresAt.getTime() <= Date.now()) {
-    await db
-      .update(agents)
-      .set({
-        platformId: `${EXPIRED_PREGENERATED_CLAIM_PREFIX}${claimTokenHash}`,
-        updatedAt: new Date(),
-      })
-      .where(
-        and(
-          eq(agents.id, claimable.id),
-          eq(agents.tenantId, sourceTenantId),
-          eq(agents.walletType, PREGENERATED_USER_WALLET_TYPE),
-          eq(agents.platformId, claimablePlatformId),
-        ),
-      );
-    return c.json<ApiResponse>({ ok: false, error: "Wallet claim token expired" }, 410);
-  }
-
   const displayName = (session.address as string | undefined) ?? session.email ?? userId;
   const personalTenant = await ensurePersonalTenant(userId, displayName);
   const targetAgentId =
     walletIndex.value === 0
       ? `user-wallet-${userId}`
       : `user-wallet-${userId}-${walletIndex.value}`;
+  const binding = {
+    sourceTenantId,
+    targetTenantId: personalTenant,
+    targetAgentId,
+    userId,
+    walletIndex: walletIndex.value,
+  };
+  const leaseOwner = crypto.randomUUID();
+  const claimedPlatformId = `${CLAIMED_PREGENERATED_CLAIM_PREFIX}${claimTokenHash}`;
+
+  let lifecycle: PregeneratedClaimLifecycle | undefined;
 
   try {
-    await writeUserAudit(c, {
-      tenantId: personalTenant,
-      actorType: "user",
-      actorId: userId,
-      action: "user.wallet.pregenerated_claim.authorized",
-      resourceType: "wallet",
-      resourceId: targetAgentId,
-      metadata: { sourceTenantId, sourceAgentId: claimable.id, walletIndex: walletIndex.value },
-    });
+    lifecycle = await withTenantAuditedTransaction(
+      personalTenant,
+      async (txRaw, appendRequiredAudit) => {
+        const tx = txRaw as typeof db;
+        const [current] = await tx
+          .select()
+          .from(pregeneratedWalletClaimLifecycles)
+          .where(eq(pregeneratedWalletClaimLifecycles.claimTokenHash, claimTokenHash));
+        if (current) {
+          assertPregeneratedClaimBinding(current, binding);
+          if (current.state === "completed") return current;
+          if (
+            current.ownerToken &&
+            current.leaseExpiresAt &&
+            current.leaseExpiresAt.getTime() > Date.now() &&
+            current.state !== "recoverable"
+          ) {
+            throw new PregeneratedClaimConflict("Wallet claim is already in progress");
+          }
+          const [leased] = await tx
+            .update(pregeneratedWalletClaimLifecycles)
+            .set({
+              state: current.targetAdopted ? "adopted" : "importing",
+              ownerToken: leaseOwner,
+              leaseExpiresAt: new Date(Date.now() + PREGENERATED_CLAIM_LEASE_MS),
+              lastError: null,
+              updatedAt: new Date(),
+            })
+            .where(eq(pregeneratedWalletClaimLifecycles.id, current.id))
+            .returning();
+          if (!leased) throw new PregeneratedClaimConflict("Wallet claim lease was lost");
+          return leased;
+        }
 
-    const [claimed] = await db
-      .update(agents)
-      .set({
-        platformId: `${CLAIMED_PREGENERATED_CLAIM_PREFIX}${claimTokenHash}`,
-        updatedAt: new Date(),
-      })
-      .where(
-        and(
-          eq(agents.id, claimable.id),
-          eq(agents.tenantId, sourceTenantId),
-          eq(agents.walletType, PREGENERATED_USER_WALLET_TYPE),
-          eq(agents.platformId, claimablePlatformId),
-        ),
-      )
-      .returning({ id: agents.id });
-    if (!claimed) {
-      return c.json<ApiResponse>(
-        { ok: false, error: "Invalid or already claimed wallet token" },
-        409,
-      );
+        const [claimable] = await tx
+          .select()
+          .from(agents)
+          .where(
+            and(
+              eq(agents.tenantId, sourceTenantId),
+              eq(agents.walletType, PREGENERATED_USER_WALLET_TYPE),
+              or(
+                eq(agents.platformId, platformIdPrefix),
+                sql`${agents.platformId} like ${`${platformIdPrefix}:%`}`,
+              ),
+            ),
+          );
+        const originalClaimPlatformId = claimable?.platformId;
+        const claimRecord = parsePregeneratedClaimPlatformId(
+          originalClaimPlatformId ?? null,
+          claimTokenHash,
+        );
+        if (!claimable || !originalClaimPlatformId || !claimRecord) {
+          throw new PregeneratedClaimConflict("Invalid or already claimed wallet token", 404);
+        }
+        if (claimRecord.expiresAt && claimRecord.expiresAt.getTime() <= Date.now()) {
+          throw new PregeneratedClaimConflict("Wallet claim token expired", 410, {
+            tenantId: sourceTenantId,
+            agentId: claimable.id,
+            originalPlatformId: originalClaimPlatformId,
+            tokenHash: claimTokenHash,
+          });
+        }
+
+        const [claimed] = await tx
+          .update(agents)
+          .set({ platformId: claimedPlatformId, updatedAt: new Date() })
+          .where(
+            and(
+              eq(agents.id, claimable.id),
+              eq(agents.tenantId, sourceTenantId),
+              eq(agents.walletType, PREGENERATED_USER_WALLET_TYPE),
+              eq(agents.platformId, originalClaimPlatformId),
+            ),
+          )
+          .returning({ id: agents.id });
+        if (!claimed) {
+          throw new PregeneratedClaimConflict("Invalid or already claimed wallet token");
+        }
+
+        const lifecycleId = crypto.randomUUID();
+        const [reserved] = await tx
+          .insert(pregeneratedWalletClaimLifecycles)
+          .values({
+            id: lifecycleId,
+            claimTokenHash,
+            originalClaimPlatformId,
+            sourceTenantId,
+            sourceAgentId: claimable.id,
+            targetTenantId: personalTenant,
+            targetAgentId,
+            userId,
+            walletIndex: walletIndex.value,
+            state: "importing",
+            ownerToken: leaseOwner,
+            leaseExpiresAt: new Date(Date.now() + PREGENERATED_CLAIM_LEASE_MS),
+          })
+          .returning();
+        if (!reserved) throw new Error("Failed to reserve wallet claim lifecycle");
+        await tx.insert(agents).values({
+          id: targetAgentId,
+          tenantId: personalTenant,
+          name: `${displayName}'s Wallet`,
+          walletAddress: claimable.walletAddress,
+          platformId: `claiming:${lifecycleId}`,
+          walletType: "claim_pending",
+        });
+        await tx.insert(vaultSigningFreezes).values({
+          tenantId: personalTenant,
+          scopeType: "agent",
+          agentId: targetAgentId,
+          reason: "Pregenerated wallet custody transfer is incomplete",
+          createdByType: "system",
+          createdById: lifecycleId,
+        });
+        await appendRequiredAudit(
+          pregeneratedClaimAuditEvent(c, {
+            tenantId: personalTenant,
+            userId,
+            action: "user.wallet.pregenerated_claim.authorized",
+            targetAgentId,
+            sourceTenantId,
+            sourceAgentId: claimable.id,
+            walletIndex: walletIndex.value,
+            lifecycleId,
+          }),
+        );
+        return reserved;
+      },
+    );
+
+    if (!lifecycle) throw new Error("Wallet claim lifecycle was not reserved");
+    if (lifecycle.state === "completed") {
+      const completedWallet = await getUserWallet(vault, userId, undefined, walletIndex.value);
+      if (!completedWallet) throw new Error("Completed claim target wallet is unavailable");
+      return c.json<
+        ApiResponse<{ agentId: string; walletAddress: string; walletIndex: number; claimed: true }>
+      >({
+        ok: true,
+        data: {
+          agentId: completedWallet.id,
+          walletAddress: completedWallet.walletAddress,
+          walletIndex: walletIndex.value,
+          claimed: true,
+        },
+      });
     }
+    let activeLifecycle = lifecycle;
 
-    try {
-      const keys = await vault.exportPrivateKey(sourceTenantId, claimable.id, {
+    const advance = async (
+      updates: Partial<typeof pregeneratedWalletClaimLifecycles.$inferInsert>,
+    ) => {
+      const [advanced] = await db
+        .update(pregeneratedWalletClaimLifecycles)
+        .set({
+          ...updates,
+          leaseExpiresAt: new Date(Date.now() + PREGENERATED_CLAIM_LEASE_MS),
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(pregeneratedWalletClaimLifecycles.id, activeLifecycle.id),
+            eq(pregeneratedWalletClaimLifecycles.ownerToken, leaseOwner),
+            eq(pregeneratedWalletClaimLifecycles.state, "importing"),
+          ),
+        )
+        .returning();
+      if (!advanced) throw new PregeneratedClaimConflict("Wallet claim lease was lost");
+      activeLifecycle = advanced;
+      lifecycle = advanced;
+    };
+
+    if (!activeLifecycle.targetAdopted) {
+      const keys = await vault.exportPrivateKey(sourceTenantId, activeLifecycle.sourceAgentId, {
         breakGlass: true,
         actorId: userId,
         reason: "claim pregenerated user wallet",
       });
-      if (!keys.evm?.privateKey) {
-        throw new Error("Pregenerated wallet is missing an EVM key");
+      if (!keys.evm?.privateKey) throw new Error("Pregenerated wallet is missing an EVM key");
+      if (!activeLifecycle.solanaImported) {
+        if (keys.solana?.privateKey) {
+          await vault.importKey(personalTenant, targetAgentId, keys.solana.privateKey, "solana");
+        }
+        await advance({ solanaImported: true });
+      }
+      if (!activeLifecycle.evmImported) {
+        await vault.importKey(personalTenant, targetAgentId, keys.evm.privateKey, "evm");
+        await advance({ evmImported: true });
       }
 
-      if (keys.solana?.privateKey) {
-        await vault.importKey(personalTenant, targetAgentId, keys.solana.privateKey, "solana");
-      }
-      await vault.importKey(personalTenant, targetAgentId, keys.evm.privateKey, "evm");
-      await db
-        .update(agents)
-        .set({
-          name: `${displayName}'s Wallet`,
-          platformId: `user:${userId}`,
-          walletType: "claimed_user",
-          updatedAt: new Date(),
-        })
-        .where(and(eq(agents.id, targetAgentId), eq(agents.tenantId, personalTenant)));
-      await applyUserWalletDefaults(userId, personalTenant);
-      await db
-        .delete(agents)
-        .where(and(eq(agents.id, claimable.id), eq(agents.tenantId, sourceTenantId)));
-    } catch (claimError) {
-      await db
-        .update(agents)
-        .set({ platformId: claimablePlatformId, updatedAt: new Date() })
-        .where(
-          and(
-            eq(agents.id, claimable.id),
-            eq(agents.tenantId, sourceTenantId),
-            eq(agents.platformId, `${CLAIMED_PREGENERATED_CLAIM_PREFIX}${claimTokenHash}`),
-          ),
+      activeLifecycle = await withTenantAuditedTransaction(personalTenant, async (txRaw) => {
+        const tx = txRaw as typeof db;
+        const [owned] = await tx
+          .select()
+          .from(pregeneratedWalletClaimLifecycles)
+          .where(
+            and(
+              eq(pregeneratedWalletClaimLifecycles.id, activeLifecycle.id),
+              eq(pregeneratedWalletClaimLifecycles.ownerToken, leaseOwner),
+              eq(pregeneratedWalletClaimLifecycles.state, "importing"),
+              eq(pregeneratedWalletClaimLifecycles.evmImported, true),
+            ),
+          );
+        if (!owned) throw new PregeneratedClaimConflict("Wallet claim lease was lost");
+        const [adoptedAgent] = await tx
+          .update(agents)
+          .set({
+            name: `${displayName}'s Wallet`,
+            platformId: `user:${userId}`,
+            walletType: "claimed_user",
+            updatedAt: new Date(),
+          })
+          .where(
+            and(
+              eq(agents.id, targetAgentId),
+              eq(agents.tenantId, personalTenant),
+              eq(agents.platformId, `claiming:${activeLifecycle.id}`),
+            ),
+          )
+          .returning({ id: agents.id });
+        if (!adoptedAgent) throw new Error("Claim target authority no longer matches lifecycle");
+        await tx.delete(policies).where(eq(policies.agentId, targetAgentId));
+        await tx.insert(policies).values(
+          USER_WALLET_DEFAULT_POLICIES.map((policy) => ({
+            id:
+              walletIndex.value === 0
+                ? `${policy.id}-${userId}`
+                : `${policy.id}-${userId}-${walletIndex.value}`,
+            agentId: targetAgentId,
+            type: policy.type,
+            enabled: policy.enabled,
+            config: policy.config,
+          })),
         );
-      throw claimError;
+        const [adopted] = await tx
+          .update(pregeneratedWalletClaimLifecycles)
+          .set({
+            state: "adopted",
+            targetAdopted: true,
+            leaseExpiresAt: new Date(Date.now() + PREGENERATED_CLAIM_LEASE_MS),
+            updatedAt: new Date(),
+          })
+          .where(
+            and(
+              eq(pregeneratedWalletClaimLifecycles.id, activeLifecycle.id),
+              eq(pregeneratedWalletClaimLifecycles.ownerToken, leaseOwner),
+            ),
+          )
+          .returning();
+        if (!adopted) throw new PregeneratedClaimConflict("Wallet claim lease was lost");
+        return adopted;
+      });
+      lifecycle = activeLifecycle;
     }
+
+    activeLifecycle = await withTenantAuditedTransaction(
+      personalTenant,
+      async (txRaw, appendRequiredAudit) => {
+        const tx = txRaw as typeof db;
+        const [owned] = await tx
+          .select()
+          .from(pregeneratedWalletClaimLifecycles)
+          .where(
+            and(
+              eq(pregeneratedWalletClaimLifecycles.id, activeLifecycle.id),
+              eq(pregeneratedWalletClaimLifecycles.ownerToken, leaseOwner),
+              eq(pregeneratedWalletClaimLifecycles.state, "adopted"),
+              eq(pregeneratedWalletClaimLifecycles.targetAdopted, true),
+            ),
+          );
+        if (!owned) throw new PregeneratedClaimConflict("Wallet claim lease was lost");
+        const retired = await tx
+          .delete(agents)
+          .where(
+            and(
+              eq(agents.id, activeLifecycle.sourceAgentId),
+              eq(agents.tenantId, sourceTenantId),
+              eq(agents.platformId, claimedPlatformId),
+            ),
+          )
+          .returning({ id: agents.id });
+        if (retired.length !== 1) throw new Error("Claim source authority could not be retired");
+        const lifted = await tx
+          .update(vaultSigningFreezes)
+          .set({
+            liftedAt: new Date(),
+            liftedByType: "system",
+            liftedById: activeLifecycle.id,
+          })
+          .where(
+            and(
+              eq(vaultSigningFreezes.tenantId, personalTenant),
+              eq(vaultSigningFreezes.scopeType, "agent"),
+              eq(vaultSigningFreezes.agentId, targetAgentId),
+              eq(vaultSigningFreezes.createdById, activeLifecycle.id),
+              isNull(vaultSigningFreezes.liftedAt),
+            ),
+          )
+          .returning({ id: vaultSigningFreezes.id });
+        if (lifted.length !== 1) throw new Error("Claim target signing fence could not be lifted");
+        const [completed] = await tx
+          .update(pregeneratedWalletClaimLifecycles)
+          .set({
+            state: "completed",
+            ownerToken: null,
+            leaseExpiresAt: null,
+            completedAt: new Date(),
+            lastError: null,
+            updatedAt: new Date(),
+          })
+          .where(
+            and(
+              eq(pregeneratedWalletClaimLifecycles.id, activeLifecycle.id),
+              eq(pregeneratedWalletClaimLifecycles.ownerToken, leaseOwner),
+              eq(pregeneratedWalletClaimLifecycles.state, "adopted"),
+            ),
+          )
+          .returning();
+        if (!completed) throw new PregeneratedClaimConflict("Wallet claim lease was lost");
+        await appendRequiredAudit(
+          pregeneratedClaimAuditEvent(c, {
+            tenantId: personalTenant,
+            userId,
+            action: "user.wallet.pregenerated_claim",
+            targetAgentId,
+            sourceTenantId,
+            sourceAgentId: activeLifecycle.sourceAgentId,
+            walletIndex: walletIndex.value,
+            lifecycleId: activeLifecycle.id,
+          }),
+        );
+        return completed;
+      },
+    );
+    lifecycle = activeLifecycle;
 
     const wallet = await getUserWallet(vault, userId, undefined, walletIndex.value);
     if (!wallet) throw new Error("Claim succeeded but wallet could not be fetched");
-
-    await writeUserAudit(c, {
-      tenantId: personalTenant,
-      actorType: "user",
-      actorId: userId,
-      action: "user.wallet.pregenerated_claim",
-      resourceType: "wallet",
-      resourceId: wallet.id,
-      metadata: { sourceTenantId, sourceAgentId: claimable.id, walletIndex: walletIndex.value },
-    });
     dispatchWebhook(personalTenant, wallet.id, "user.wallet_created", {
       userId,
       walletId: wallet.id,
@@ -4302,6 +4624,46 @@ user.post("/me/wallet/claim-pregenerated", async (c) => {
       201,
     );
   } catch (e) {
+    if (typeof lifecycle !== "undefined" && lifecycle.state !== "completed") {
+      await db
+        .update(pregeneratedWalletClaimLifecycles)
+        .set({
+          state: "recoverable",
+          ownerToken: null,
+          leaseExpiresAt: new Date(),
+          lastError: sanitizeErrorMessage(e).slice(0, 512),
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(pregeneratedWalletClaimLifecycles.id, lifecycle.id),
+            eq(pregeneratedWalletClaimLifecycles.ownerToken, leaseOwner),
+            ne(pregeneratedWalletClaimLifecycles.state, "completed"),
+          ),
+        );
+    }
+    if (e instanceof PregeneratedClaimConflict) {
+      if (e.status === 410 && e.expiredSource) {
+        await db
+          .update(agents)
+          .set({
+            platformId: `${EXPIRED_PREGENERATED_CLAIM_PREFIX}${e.expiredSource.tokenHash}`,
+            updatedAt: new Date(),
+          })
+          .where(
+            and(
+              eq(agents.id, e.expiredSource.agentId),
+              eq(agents.tenantId, e.expiredSource.tenantId),
+              eq(agents.platformId, e.expiredSource.originalPlatformId),
+            ),
+          );
+        return c.json<ApiResponse>({ ok: false, error: e.message }, 410);
+      }
+      if (e.status === 404) {
+        return c.json<ApiResponse>({ ok: false, error: e.message }, 404);
+      }
+      return c.json<ApiResponse>({ ok: false, error: e.message }, 409);
+    }
     return c.json<ApiResponse>(
       { ok: false, error: `Failed to claim wallet: ${sanitizeErrorMessage(e)}` },
       500,
@@ -4787,45 +5149,80 @@ user.post("/me/wallet/signers", async (c) => {
 
   const credentialSecret = createUserWalletSignerSecret();
   try {
-    const [row] = await getDb()
-      .insert(agentSigners)
-      .values({
-        tenantId,
-        agentId: wallet.id,
-        signerType: "delegated",
-        subjectType,
-        subjectId,
-        keyType: "hmac",
-        publicKey: null,
-        address,
-        chainFamily,
-        label,
-        permissions,
-        policyIds: [],
-        metadata: {
-          ...metadata,
-          credentialHash: await createSignerCredentialHash(credentialSecret),
-          credentialCreatedAt: new Date().toISOString(),
-        },
-        status: "active",
-        createdBy: userId,
-      })
-      .returning();
-
-    try {
-      await writeUserAudit(c, {
-        tenantId,
-        actorType: "user",
-        actorId: userId,
-        action: "user.wallet.signer.create",
-        resourceType: "agent_signer",
-        resourceId: row.id,
-        metadata: { agentId: wallet.id, subjectType, subjectId, walletIndex: walletIndex.value },
-      });
-    } catch (error) {
-      await getDb().delete(agentSigners).where(eq(agentSigners.id, row.id));
-      throw error;
+    const credentialHash = await createSignerCredentialHash(credentialSecret);
+    const mutation = await withTenantAuditedTransaction(
+      tenantId,
+      async (txRaw, appendRequiredAudit) => {
+        const tx = txRaw as ReturnType<typeof getDb>;
+        if (!(await lockUserWalletSignerAuthority(tx, tenantId, wallet.id))) {
+          return { kind: "missing-wallet" as const };
+        }
+        const [duplicate] = await tx
+          .select({ id: agentSigners.id })
+          .from(agentSigners)
+          .where(
+            and(
+              eq(agentSigners.tenantId, tenantId),
+              eq(agentSigners.agentId, wallet.id),
+              eq(agentSigners.subjectType, subjectType),
+              eq(agentSigners.subjectId, subjectId),
+            ),
+          )
+          .for("update");
+        if (duplicate) return { kind: "duplicate" as const };
+        const [row] = await tx
+          .insert(agentSigners)
+          .values({
+            tenantId,
+            agentId: wallet.id,
+            signerType: "delegated",
+            subjectType,
+            subjectId,
+            keyType: "hmac",
+            publicKey: null,
+            address,
+            chainFamily,
+            label,
+            permissions,
+            policyIds: [],
+            metadata: {
+              ...metadata,
+              credentialHash,
+              credentialCreatedAt: new Date().toISOString(),
+            },
+            status: "active",
+            createdBy: userId,
+          })
+          .returning();
+        await appendRequiredAudit(
+          userAuditEvent(c, {
+            tenantId,
+            actorType: "user",
+            actorId: userId,
+            action: "user.wallet.signer.create",
+            resourceType: "agent_signer",
+            resourceId: row.id,
+            metadata: {
+              agentId: wallet.id,
+              subjectType,
+              subjectId,
+              walletIndex: walletIndex.value,
+            },
+          }),
+        );
+        return { kind: "created" as const, row };
+      },
+    );
+    if (mutation.kind === "missing-wallet") {
+      return c.json<ApiResponse>({ ok: false, error: "Wallet authority no longer exists" }, 404);
     }
+    if (mutation.kind === "duplicate") {
+      return c.json<ApiResponse>(
+        { ok: false, error: "Signer already exists for this wallet and subject" },
+        409,
+      );
+    }
+    const { row } = mutation;
 
     return c.json<
       ApiResponse<ReturnType<typeof toUserWalletSignerResponse> & { credentialSecret: string }>
@@ -4928,29 +5325,60 @@ user.delete("/me/wallet/signers/:signerId", async (c) => {
     metadata: { agentId: wallet.id, walletIndex: walletIndex.value },
   });
 
-  const [row] = await getDb()
-    .update(agentSigners)
-    .set({ status: "revoked" })
-    .where(
-      and(
-        eq(agentSigners.id, signerId),
-        eq(agentSigners.tenantId, tenantId),
-        eq(agentSigners.agentId, wallet.id),
-      ),
-    )
-    .returning();
-
-  if (!row) return c.json<ApiResponse>({ ok: false, error: "Signer not found" }, 404);
-
-  await writeUserAudit(c, {
+  const mutation = await withTenantAuditedTransaction(
     tenantId,
-    actorType: "user",
-    actorId: userId,
-    action: "user.wallet.signer.revoke",
-    resourceType: "agent_signer",
-    resourceId: row.id,
-    metadata: { agentId: wallet.id, walletIndex: walletIndex.value },
-  });
+    async (txRaw, appendRequiredAudit) => {
+      const tx = txRaw as ReturnType<typeof getDb>;
+      if (!(await lockUserWalletSignerAuthority(tx, tenantId, wallet.id))) {
+        return { kind: "missing-wallet" as const };
+      }
+      const [locked] = await tx
+        .select()
+        .from(agentSigners)
+        .where(
+          and(
+            eq(agentSigners.id, signerId),
+            eq(agentSigners.tenantId, tenantId),
+            eq(agentSigners.agentId, wallet.id),
+          ),
+        )
+        .for("update");
+      if (!locked) return { kind: "missing" as const };
+      if (JSON.stringify(locked) !== JSON.stringify(existingSigner)) {
+        return { kind: "conflict" as const };
+      }
+      const [row] = await tx
+        .update(agentSigners)
+        .set({ status: "revoked" })
+        .where(eq(agentSigners.id, signerId))
+        .returning();
+      await appendRequiredAudit(
+        userAuditEvent(c, {
+          tenantId,
+          actorType: "user",
+          actorId: userId,
+          action: "user.wallet.signer.revoke",
+          resourceType: "agent_signer",
+          resourceId: row.id,
+          metadata: { agentId: wallet.id, walletIndex: walletIndex.value },
+        }),
+      );
+      return { kind: "revoked" as const, row };
+    },
+  );
+  if (mutation.kind === "missing-wallet") {
+    return c.json<ApiResponse>({ ok: false, error: "Wallet authority no longer exists" }, 404);
+  }
+  if (mutation.kind === "missing") {
+    return c.json<ApiResponse>({ ok: false, error: "Signer not found" }, 404);
+  }
+  if (mutation.kind === "conflict") {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Signer changed concurrently; retry against the latest signer" },
+      409,
+    );
+  }
+  const { row } = mutation;
 
   return c.json<ApiResponse<ReturnType<typeof toUserWalletSignerResponse>>>({
     ok: true,

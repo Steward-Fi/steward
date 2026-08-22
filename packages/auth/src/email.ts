@@ -180,6 +180,17 @@ export type EmailLoginVerifyResult =
   | { valid: true; email: string; tenantId?: string; challengeId: string }
   | { valid: false; email: ""; reason?: "invalid" | "locked" };
 
+export type EmailLoginCodeClaimResult =
+  | {
+      valid: true;
+      email: string;
+      tenantId?: string;
+      challengeId: string;
+      commit: () => Promise<void>;
+      rollback: () => Promise<boolean>;
+    }
+  | { valid: false; email: ""; reason?: "invalid" | "locked" };
+
 export type EmailLoginChallengeStatus =
   | { status: "pending"; expiresAt: string }
   | { status: "consumed" | "locked" | "expired" | "invalid" };
@@ -1120,6 +1131,27 @@ export class EmailAuth {
     code: string,
     tenantId?: string,
   ): Promise<EmailLoginVerifyResult> {
+    const claim = await this.claimEmailLoginCode(email, code, tenantId);
+    if (!claim.valid) return claim;
+    await claim.commit();
+    return {
+      valid: true,
+      email: claim.email,
+      tenantId: claim.tenantId,
+      challengeId: claim.challengeId,
+    };
+  }
+
+  /**
+   * Atomically claim a login code while its downstream authentication work runs.
+   * Commit makes the credential single-use; rollback restores the same challenge
+   * only while its email, tenant, and code aliases still identify this claim.
+   */
+  async claimEmailLoginCode(
+    email: string,
+    code: string,
+    tenantId?: string,
+  ): Promise<EmailLoginCodeClaimResult> {
     email = email.toLowerCase().trim();
     if (!/^\d{6}$/.test(code)) {
       const reason = await this.recordEmailLoginCodeFailure(email, tenantId);
@@ -1149,11 +1181,51 @@ export class EmailAuth {
       await this.tokenStore.consume(emailLoginChallengeKey(challengeId)),
     );
     if (!consumed || consumed.status !== "active") return { email: "", valid: false };
-    await Promise.allSettled([
-      this.tokenStore.delete(emailLoginCodeAliasKey(verifier)),
-      this.markEmailLoginConsumed(challengeId),
-    ]);
-    return { email, tenantId: payload.tenantId, valid: true, challengeId };
+    let settled = false;
+    return {
+      email,
+      tenantId: payload.tenantId,
+      valid: true,
+      challengeId,
+      commit: async () => {
+        if (settled) return;
+        settled = true;
+        await Promise.allSettled([
+          this.tokenStore.delete(emailLoginCodeAliasKey(verifier)),
+          this.markEmailLoginConsumed(challengeId),
+        ]);
+      },
+      rollback: async () => {
+        if (settled) return false;
+        const expiresAt = new Date(consumed.expiresAt).getTime();
+        if (expiresAt <= Date.now()) {
+          settled = true;
+          return false;
+        }
+        const restored = await this.publishChallenge([
+          {
+            key: emailLoginChallengeKey(challengeId),
+            value: JSON.stringify(consumed),
+            expiresAt,
+            expected: null,
+          },
+          {
+            key: emailLoginCodeAliasKey(verifier),
+            value: challengeId,
+            expiresAt,
+            expected: challengeId,
+          },
+          {
+            key: emailLoginTargetKey(email, tenantId),
+            value: challengeId,
+            expiresAt,
+            expected: challengeId,
+          },
+        ]);
+        settled = true;
+        return restored;
+      },
+    };
   }
 
   /**

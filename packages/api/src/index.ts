@@ -28,6 +28,7 @@ import { getRedisClient, initRedis, isRedisConfigured, shutdownRedis } from "./m
 import { resolveEnabledPlugins } from "./plugin-config";
 import { createReadinessHandler, type ReadinessCheck } from "./readiness";
 import { assertAuthStoresAreSafe, getAuthStoreSources, initAuthStores } from "./routes/auth";
+import { startAccountWalletLifecycleRecoveryScheduler } from "./services/account-wallet-lifecycle";
 import {
   API_VERSION,
   type ApiResponse,
@@ -96,6 +97,7 @@ let cancelWebhookRetryScheduler: (() => void) | undefined;
 let cancelUpstreamCredentialLeaseScheduler: (() => Promise<void>) | undefined;
 let cancelGoogleCredentialLifecycleScheduler: (() => Promise<void>) | undefined;
 let cancelXCredentialLifecycleScheduler: (() => Promise<void>) | undefined;
+let cancelAccountWalletLifecycleRecoveryScheduler: (() => Promise<void>) | undefined;
 
 function runtimeGate(request: Request, peerAddress: string | null): Response | null {
   const url = new URL(request.url);
@@ -350,6 +352,7 @@ assertAuthStoresAreSafe();
 // ─── Data retention scheduler (SOC2 CC2) ────────────────────────────────────
 
 if (migrationsRan) {
+  cancelAccountWalletLifecycleRecoveryScheduler = startAccountWalletLifecycleRecoveryScheduler();
   if (process.env.GOOGLE_PROVIDER_CLIENT_ID && process.env.GOOGLE_PROVIDER_CLIENT_SECRET) {
     cancelGoogleCredentialLifecycleScheduler = startGoogleCredentialLifecycleScheduler();
   }
@@ -409,6 +412,9 @@ const shutdown = async (signal: string) => {
   if (cancelUpstreamCredentialLeaseScheduler) await cancelUpstreamCredentialLeaseScheduler();
   if (cancelGoogleCredentialLifecycleScheduler) await cancelGoogleCredentialLifecycleScheduler();
   if (cancelXCredentialLifecycleScheduler) await cancelXCredentialLifecycleScheduler();
+  if (cancelAccountWalletLifecycleRecoveryScheduler) {
+    await cancelAccountWalletLifecycleRecoveryScheduler();
+  }
   rateLimiter.clear();
 
   try {
