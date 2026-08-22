@@ -55,9 +55,9 @@ import {
   getUserOperationHash,
   isVaultSigningFrozenError,
   MoneroNotConfiguredError,
-  normalizedSolanaMessageDigest,
   MoneroRelayOutcomeUnknownError,
   MoneroRelayRejectedError,
+  normalizedSolanaMessageDigest,
   packUserOperation,
   parseMoneroWalletScope,
   parseSolanaTransaction,
@@ -872,21 +872,6 @@ async function findActionByReferenceId(
         eq(transactions.agentId, agentId),
         eq(transactions.actionType, actionType),
         sql`(${transactions.actionPayload}->>'referenceId' = ${referenceId} or ${transactions.actionPayload}->>'reference_id' = ${referenceId})`,
-      ),
-    )
-    .limit(1);
-  return existing ?? null;
-}
-
-async function findMoneroActionByIdempotency(agentId: string, idempotencyKeyDigest: string) {
-  const [existing] = await db
-    .select()
-    .from(transactions)
-    .where(
-      and(
-        eq(transactions.agentId, agentId),
-        eq(transactions.actionType, "monero_transfer"),
-        sql`${transactions.actionPayload}->>'idempotencyKeyDigest' = ${idempotencyKeyDigest}`,
       ),
     )
     .limit(1);

@@ -61,11 +61,6 @@ import { z } from "zod";
 import type { StewardAppContext } from "../context";
 import { DurableIdempotencyStore } from "./idempotency";
 import {
-  enforceTradingRateLimit,
-  MemoryTradingRateLimiter,
-  type TradingRateLimitResult,
-} from "./trading-rate-limit";
-import {
   beginTradeRecovery,
   checkpointReconciledTradeResult,
   checkpointTradeAmbiguous,
@@ -77,6 +72,11 @@ import {
   tradeRecoveryEnvelope,
   tradeRecoveryHash,
 } from "./trade-recovery";
+import {
+  enforceTradingRateLimit,
+  MemoryTradingRateLimiter,
+  type TradingRateLimitResult,
+} from "./trading-rate-limit";
 
 const PM_CREDS_KEY_DOMAIN = "steward-kdf:pm-clob-l2-cache:v2";
 const PM_CREDS_CACHE_PREFIX = "stwd_pmclob_v1:";
