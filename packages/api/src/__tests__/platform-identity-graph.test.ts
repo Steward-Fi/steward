@@ -1232,15 +1232,17 @@ describe("platform global identity graph routes", () => {
       .values({ email: "delete-personal-owner@example.test", emailVerified: true })
       .returning({ id: users.id });
     const personalTenantId = `personal-${personalUser.id}`;
-    await getDb().insert(tenants).values({
-      id: personalTenantId,
-      name: "Personal deletion owner",
-      apiKeyHash: "personal-delete-owner-hash",
-    });
-    await getDb().insert(userTenants).values({
-      userId: personalUser.id,
-      tenantId: personalTenantId,
-      role: "owner",
+    await getDb().transaction(async (tx) => {
+      await tx.insert(tenants).values({
+        id: personalTenantId,
+        name: "Personal deletion owner",
+        apiKeyHash: "personal-delete-owner-hash",
+      });
+      await tx.insert(userTenants).values({
+        userId: personalUser.id,
+        tenantId: personalTenantId,
+        role: "owner",
+      });
     });
     await getDb().insert(accounts).values({
       userId: personalUser.id,
@@ -1288,6 +1290,19 @@ describe("platform global identity graph routes", () => {
         .from(users)
         .where(eq(users.email, "personal-extra-member@example.test")),
     ).toHaveLength(0);
+
+    const hostileCaseVariant = `Personal-${personalUser.id}`;
+    const hostileDelete = await platformRoutes.request(`/tenants/${hostileCaseVariant}`, {
+      method: "DELETE",
+      headers: headers(),
+    });
+    expect(hostileDelete.status).toBe(409);
+    expect(((await hostileDelete.json()) as { error: string }).error).toBe(
+      "Personal tenant membership invariant violated",
+    );
+    expect(
+      await getDb().select().from(tenants).where(eq(tenants.id, personalTenantId)),
+    ).toHaveLength(1);
 
     const deactivate = await platformRoutes.request(`/users/${personalUser.id}/deactivate`, {
       method: "PATCH",

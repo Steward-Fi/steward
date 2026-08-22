@@ -186,6 +186,32 @@ describeWithPostgres("personal lifecycle production upgrade topology", () => {
     await db`DELETE FROM user_tenants WHERE user_id = ${invalidLegacyUserId}`;
     await db`DELETE FROM users WHERE id = ${invalidLegacyUserId}`;
 
+    const legacyCaseVariant = `Personal-${randomUUID()}`;
+    await db`INSERT INTO tenants (id,name,api_key_hash)
+      VALUES (${legacyCaseVariant}, 'Legacy case variant', 'legacy-case-hash')`;
+    try {
+      process.env.DATABASE_URL = databaseUrl(databaseName, migrationRole);
+      await expect(runMigrations()).rejects.toThrow(
+        "Legacy reserved tenant id is not canonical lowercase",
+      );
+    } finally {
+      process.env.DATABASE_URL = originalDatabaseUrl;
+    }
+    await db`DELETE FROM tenants WHERE id = ${legacyCaseVariant}`;
+
+    const legacyOwnerlessPersonal = `personal-${randomUUID()}`;
+    await db`INSERT INTO tenants (id,name,api_key_hash)
+      VALUES (${legacyOwnerlessPersonal}, 'Legacy ownerless personal', 'legacy-ownerless-hash')`;
+    try {
+      process.env.DATABASE_URL = databaseUrl(databaseName, migrationRole);
+      await expect(runMigrations()).rejects.toThrow(
+        "Legacy personal tenant lacks exactly one canonical owner",
+      );
+    } finally {
+      process.env.DATABASE_URL = originalDatabaseUrl;
+    }
+    await db`DELETE FROM tenants WHERE id = ${legacyOwnerlessPersonal}`;
+
     let applied: string[];
     try {
       process.env.DATABASE_URL = databaseUrl(databaseName, migrationRole);
@@ -303,22 +329,39 @@ describeWithPostgres("personal lifecycle production upgrade topology", () => {
     await db`INSERT INTO users (id,email,email_verified) VALUES
       (${userId}, 'deleted-owner@example.test', true),
       (${otherOwnerId}, 'surviving-owner@example.test', true)`;
-    await db`INSERT INTO tenants (id,name,api_key_hash) VALUES
-      (${personalTenantId}, 'Personal lifecycle race', 'personal-hash'),
-      ('shared-provenance', 'Shared provenance', 'shared-hash')`;
-    await db`INSERT INTO user_tenants (user_id,tenant_id,role) VALUES
-      (${userId}, ${personalTenantId}, 'owner'),
-      (${userId}, 'shared-provenance', 'owner'),
-      (${otherOwnerId}, 'shared-provenance', 'owner')`;
+    await db.begin(async (tx) => {
+      await tx`INSERT INTO tenants (id,name,api_key_hash) VALUES
+        (${personalTenantId}, 'Personal lifecycle race', 'personal-hash'),
+        ('shared-provenance', 'Shared provenance', 'shared-hash')`;
+      await tx`INSERT INTO user_tenants (user_id,tenant_id,role) VALUES
+        (${userId}, ${personalTenantId}, 'owner'),
+        (${userId}, 'shared-provenance', 'owner'),
+        (${otherOwnerId}, 'shared-provenance', 'owner')`;
+    });
 
     const mountedOwnerId = randomUUID();
     const mountedPersonalTenantId = `personal-${mountedOwnerId}`;
     await db`INSERT INTO users (id,email,email_verified)
       VALUES (${mountedOwnerId}, 'mounted-personal-owner@example.test', true)`;
+    await db.begin(async (tx) => {
+      await tx`INSERT INTO tenants (id,name,api_key_hash)
+        VALUES (${mountedPersonalTenantId}, 'Mounted personal lifecycle', 'mounted-personal-hash')`;
+      await tx`INSERT INTO user_tenants (user_id,tenant_id,role)
+        VALUES (${mountedOwnerId}, ${mountedPersonalTenantId}, 'owner')`;
+    });
+    const reservedUpdateSource = `solana:ReservedUpdate${suffix}`;
     await db`INSERT INTO tenants (id,name,api_key_hash)
-      VALUES (${mountedPersonalTenantId}, 'Mounted personal lifecycle', 'mounted-personal-hash')`;
-    await db`INSERT INTO user_tenants (user_id,tenant_id,role)
-      VALUES (${mountedOwnerId}, ${mountedPersonalTenantId}, 'owner')`;
+      VALUES (${reservedUpdateSource}, 'Reserved update source', 'reserved-update-hash')`;
+    await expectDatabaseRejection(
+      db`UPDATE tenants SET id = 'escaped-reserved-tenant'
+        WHERE id = ${reservedUpdateSource}`,
+      /Reserved tenant id is immutable/,
+    );
+    await expectDatabaseRejection(
+      db`UPDATE tenants SET id = 'eth:0x1111111111111111111111111111111111111111'
+        WHERE id = ${reservedUpdateSource}`,
+      /Reserved tenant id is immutable/,
+    );
     const teamAdminId = randomUUID();
     const teamTargetId = randomUUID();
     const teamTenantId = `team-lifecycle-${suffix}`;
@@ -427,6 +470,40 @@ describeWithPostgres("personal lifecycle production upgrade topology", () => {
       RETURNING id
     `;
     expect(appCreatedUser?.id).toBeDefined();
+    const appCreatedUserId = appCreatedUser?.id;
+    if (!appCreatedUserId) throw new Error("restricted app user fixture was not created");
+    const hostileCaseTenantId = `Personal-${randomUUID()}`;
+    await expectDatabaseRejection(
+      appWriter.begin(async (tx) => {
+        await tx`SELECT set_config('steward.tenant_id', ${hostileCaseTenantId}, true)`;
+        await tx`SELECT set_config('steward.user_id', ${appCreatedUserId}, true)`;
+        await tx`INSERT INTO tenants (id,name,api_key_hash)
+          VALUES (${hostileCaseTenantId}, 'Hostile case tenant', 'hostile-case-hash')`;
+      }),
+      /Reserved tenant id must use canonical lowercase form/,
+    );
+    const hostileOwnerlessTenantId = `personal-${appCreatedUserId}`;
+    await expectDatabaseRejection(
+      appWriter.begin(async (tx) => {
+        await tx`SELECT set_config('steward.tenant_id', ${hostileOwnerlessTenantId}, true)`;
+        await tx`SELECT set_config('steward.user_id', ${appCreatedUserId}, true)`;
+        await tx`INSERT INTO tenants (id,name,api_key_hash)
+          VALUES (${hostileOwnerlessTenantId}, 'Hostile ownerless tenant', 'hostile-ownerless-hash')`;
+      }),
+      /Personal tenant requires exactly one canonical owner/,
+    );
+    await appWriter.begin(async (tx) => {
+      await tx`SELECT set_config('steward.tenant_id', ${hostileOwnerlessTenantId}, true)`;
+      await tx`SELECT set_config('steward.user_id', ${appCreatedUserId}, true)`;
+      await tx`INSERT INTO tenants (id,name,api_key_hash)
+        VALUES (${hostileOwnerlessTenantId}, 'Atomic personal tenant', 'atomic-personal-hash')`;
+      await tx`INSERT INTO user_tenants (user_id,tenant_id,role)
+        VALUES (${appCreatedUserId}, ${hostileOwnerlessTenantId}, 'owner')`;
+    });
+    expect(
+      await db`SELECT tenant_id FROM user_tenants
+        WHERE user_id = ${appCreatedUserId} AND tenant_id = ${hostileOwnerlessTenantId}`,
+    ).toHaveLength(1);
     await expectDatabaseRejection(
       appWriter`INSERT INTO users (email,deactivated_at)
         VALUES ('app-forged-lifecycle@example.test', now())`,
@@ -508,7 +585,6 @@ describeWithPostgres("personal lifecycle production upgrade topology", () => {
       "platform",
       "system",
       "personal",
-      "personal-invalid-owner",
       "eth:reserved-real-pg",
       "t-reserved-real-pg",
       "solana:reserved-real-pg",
@@ -709,11 +785,10 @@ describeWithPostgres("personal lifecycle production upgrade topology", () => {
     const deleteRaceTenantId = `personal-${deleteRaceUserId}`;
     await db`INSERT INTO users (id,email,email_verified)
       VALUES (${deleteRaceUserId}, 'membership-delete-race@example.test', true)`;
-    await db`INSERT INTO tenants (id,name,api_key_hash)
-      VALUES (${deleteRaceTenantId}, 'Membership delete race', 'membership-delete-race-hash')`;
-
     let writerFirstDelete: Promise<unknown> | undefined;
     await writer.begin(async (tx) => {
+      await tx`INSERT INTO tenants (id,name,api_key_hash)
+        VALUES (${deleteRaceTenantId}, 'Membership delete race', 'membership-delete-race-hash')`;
       await tx`INSERT INTO user_tenants (user_id,tenant_id,role)
         VALUES (${deleteRaceUserId}, ${deleteRaceTenantId}, 'owner')`;
       writerFirstDelete = deleter.begin(async (other) => {
@@ -727,8 +802,12 @@ describeWithPostgres("personal lifecycle production upgrade topology", () => {
     await writerFirstDelete;
     expect(await db`SELECT id FROM tenants WHERE id = ${deleteRaceTenantId}`).toHaveLength(0);
 
-    await db`INSERT INTO tenants (id,name,api_key_hash)
-      VALUES (${deleteRaceTenantId}, 'Membership delete race', 'membership-delete-race-hash-2')`;
+    await db.begin(async (tx) => {
+      await tx`INSERT INTO tenants (id,name,api_key_hash)
+        VALUES (${deleteRaceTenantId}, 'Membership delete race', 'membership-delete-race-hash-2')`;
+      await tx`INSERT INTO user_tenants (user_id,tenant_id,role)
+        VALUES (${deleteRaceUserId}, ${deleteRaceTenantId}, 'owner')`;
+    });
     let deleteFirstWriter: Promise<unknown> | undefined;
     await deleter.begin(async (tx) => {
       await tx`SELECT * FROM public.steward_lock_personal_lifecycle(

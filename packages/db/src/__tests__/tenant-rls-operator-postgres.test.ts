@@ -8,7 +8,7 @@ import {
 } from "../rls-deployment-safety";
 
 const describeWithPostgres = process.env.DATABASE_URL ? describe : describe.skip;
-setDefaultTimeout(180_000);
+setDefaultTimeout(240_000);
 
 const suffix = randomUUID().replaceAll("-", "").slice(0, 16);
 const databaseName = `steward_rls_${suffix}`;
@@ -1113,18 +1113,20 @@ describeWithPostgres("SEC-169 operator lifecycle on the real Steward schema", ()
 
       const personalOwnerId = randomUUID();
       const personalTenant = `personal-${personalOwnerId}`;
-      await db`
-        INSERT INTO public.tenants(id, name, api_key_hash)
-        VALUES (${personalTenant}, 'Personal lifecycle owner', ${`personal-key-${suffix}`})
-      `;
-      await db`
-        INSERT INTO public.users(id, email)
-        VALUES (${personalOwnerId}::uuid, ${`personal-owner-${suffix}@example.test`})
-      `;
-      await db`
-        INSERT INTO public.user_tenants(user_id, tenant_id, role)
-        VALUES (${personalOwnerId}::uuid, ${personalTenant}, 'owner')
-      `;
+      await db.begin(async (tx) => {
+        await tx`
+          INSERT INTO public.users(id, email)
+          VALUES (${personalOwnerId}::uuid, ${`personal-owner-${suffix}@example.test`})
+        `;
+        await tx`
+          INSERT INTO public.tenants(id, name, api_key_hash)
+          VALUES (${personalTenant}, 'Personal lifecycle owner', ${`personal-key-${suffix}`})
+        `;
+        await tx`
+          INSERT INTO public.user_tenants(user_id, tenant_id, role)
+          VALUES (${personalOwnerId}::uuid, ${personalTenant}, 'owner')
+        `;
+      });
       const personalDeactivation = await db.begin(async (tx) => {
         await tx.unsafe(`SET LOCAL ROLE ${platformRole}`);
         await tx`SELECT set_config('steward.tenant_id', 'platform', true)`;
@@ -1145,21 +1147,22 @@ describeWithPostgres("SEC-169 operator lifecycle on the real Steward schema", ()
         const malformedExtraId = randomUUID();
         const malformedTenant = `personal-${malformedOwnerId}`;
         await db`
-          INSERT INTO public.tenants(id, name, api_key_hash)
-          VALUES (
-            ${malformedTenant},
-            ${`Malformed personal ${extraRole}`},
-            ${`malformed-personal-${extraRole}-${suffix}`}
-          )
-        `;
-        await db`
           INSERT INTO public.users(id, email)
           VALUES
             (${malformedOwnerId}::uuid, ${`malformed-${extraRole}-owner-${suffix}@example.test`}),
             (${malformedExtraId}::uuid, ${`malformed-${extraRole}-extra-${suffix}@example.test`})
         `;
+        await db`ALTER TABLE public.tenants DISABLE TRIGGER tenants_reserved_commit_state_guard`;
         await db`ALTER TABLE public.user_tenants DISABLE TRIGGER user_tenants_personal_authority_guard`;
         try {
+          await db`
+            INSERT INTO public.tenants(id, name, api_key_hash)
+            VALUES (
+              ${malformedTenant},
+              ${`Malformed personal ${extraRole}`},
+              ${`malformed-personal-${extraRole}-${suffix}`}
+            )
+          `;
           await db`
             INSERT INTO public.user_tenants(user_id, tenant_id, role)
             VALUES
@@ -1168,6 +1171,7 @@ describeWithPostgres("SEC-169 operator lifecycle on the real Steward schema", ()
           `;
         } finally {
           await db`ALTER TABLE public.user_tenants ENABLE TRIGGER user_tenants_personal_authority_guard`;
+          await db`ALTER TABLE public.tenants ENABLE TRIGGER tenants_reserved_commit_state_guard`;
         }
         await db`
           INSERT INTO public.refresh_tokens(id, user_id, tenant_id, token_hash, expires_at)
@@ -1259,6 +1263,33 @@ describeWithPostgres("SEC-169 operator lifecycle on the real Steward schema", ()
         "user.deactivate",
         "user.deactivate.authorized",
       ]);
+
+      const workerDeadlineEvidence = await runCommand(
+        [
+          "bun",
+          "run",
+          "packages/api/src/__tests__/fixtures/worker-credential-deadline-postgres.ts",
+        ],
+        {
+          DATABASE_URL: appDatabaseUrl(),
+          DATABASE_DRIVER: "postgres-js",
+          NODE_ENV: "test",
+          STEWARD_AUDIT_HMAC_KEY: "ab".repeat(32),
+          STEWARD_MASTER_PASSWORD: `rls-master-password-${suffix}`,
+          STEWARD_RLS_TEST_TENANT: targetTenant,
+          STEWARD_RLS_TEST_USER_ID: refreshUserId,
+        },
+      );
+      const workerDeadlineLine = workerDeadlineEvidence
+        .trim()
+        .split("\n")
+        .findLast((line) => line.startsWith('{"ok":true'));
+      expect(workerDeadlineLine).toBeDefined();
+      expect(JSON.parse(workerDeadlineLine as string)).toMatchObject({
+        ok: true,
+        tenantId: targetTenant,
+        closed: true,
+      });
 
       await runOperatorScript("rls-rollback.sql");
       const [rolledBack] = await db<{ enabled: number; forced: number }[]>`

@@ -694,6 +694,7 @@ AQIDAQAB
         ('${ownerId}', 'personal-owner@example.test', true),
         ('${otherId}', 'personal-other@example.test', true)
     `);
+    await client.query("BEGIN");
     await client.query(`
       INSERT INTO tenants (id, name, api_key_hash)
       VALUES ('${tenantId}', 'Canonical personal', 'personal-authority-hash')
@@ -702,6 +703,58 @@ AQIDAQAB
       INSERT INTO user_tenants (user_id, tenant_id, role)
       VALUES ('${ownerId}', '${tenantId}', 'owner')
     `);
+    await client.query("COMMIT");
+
+    await client.query(`
+      INSERT INTO tenants (id, name, api_key_hash)
+      VALUES ('solana:AbCdEf123', 'Case-sensitive Solana payload', 'solana-payload-hash')
+    `);
+    await expect(
+      client.query(`
+        INSERT INTO tenants (id, name, api_key_hash)
+        VALUES ('Solana:AbCdEf456', 'Hostile Solana prefix', 'solana-prefix-hash')
+      `),
+    ).rejects.toThrow("Reserved tenant id must use canonical lowercase form");
+    await expect(
+      client.query(`
+        INSERT INTO tenants (id, name, api_key_hash)
+        VALUES ('Personal-${otherId}', 'Hostile personal prefix', 'personal-prefix-hash')
+      `),
+    ).rejects.toThrow("Reserved tenant id must use canonical lowercase form");
+    await expect(
+      client.query(`
+        INSERT INTO tenants (id, name, api_key_hash)
+        VALUES ('personal-${otherId}', 'Ownerless personal', 'ownerless-personal-hash')
+      `),
+    ).rejects.toThrow("Personal tenant requires exactly one canonical owner");
+    await client.query(`
+      INSERT INTO tenants (id, name, api_key_hash)
+      VALUES ('ordinary-reserved-update', 'Ordinary update source', 'ordinary-update-hash')
+    `);
+    await expect(
+      client.query(`
+        UPDATE tenants SET id = 'Personal-${otherId}'
+        WHERE id = 'ordinary-reserved-update'
+      `),
+    ).rejects.toThrow("Reserved tenant id must use canonical lowercase form");
+    await expect(
+      client.query(`
+        UPDATE tenants SET id = 'personal-${otherId}'
+        WHERE id = 'ordinary-reserved-update'
+      `),
+    ).rejects.toThrow("Personal tenant requires exactly one canonical owner");
+    await expect(
+      client.query(`
+        UPDATE tenants SET id = 'escaped-personal-tenant'
+        WHERE id = 'solana:AbCdEf123'
+      `),
+    ).rejects.toThrow("Reserved tenant id is immutable");
+    await expect(
+      client.query(`
+        UPDATE tenants SET id = 'eth:0x1111111111111111111111111111111111111111'
+        WHERE id = 'solana:AbCdEf123'
+      `),
+    ).rejects.toThrow("Reserved tenant id is immutable");
 
     await expect(
       client.query(`

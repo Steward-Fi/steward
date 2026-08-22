@@ -800,7 +800,7 @@ function errorChainHasExactMessage(error: unknown, expected: string): boolean {
 }
 
 function isPersonalTenantId(tenantId: string): boolean {
-  return tenantId.startsWith("personal-");
+  return tenantId.toLowerCase().startsWith("personal-");
 }
 
 // ─── Route group ─────────────────────────────────────────────────────────────

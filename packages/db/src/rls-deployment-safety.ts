@@ -624,6 +624,7 @@ export async function assertRlsDeploymentSafety(
         OR (
           namespace.nspname = 'public'
           AND function.oid::regprocedure::text = ANY(${boundTextArray([
+            "steward_enforce_reserved_tenant_commit_state()",
             "steward_register_user_identity_subject()",
             "steward_retire_user_identity_subject()",
           ])})
@@ -673,6 +674,7 @@ export async function assertRlsDeploymentSafety(
         OR (
           namespace.nspname = 'public'
           AND function.oid::regprocedure::text = ANY(${boundTextArray([
+            "steward_enforce_reserved_tenant_commit_state()",
             "steward_register_user_identity_subject()",
             "steward_retire_user_identity_subject()",
           ])})

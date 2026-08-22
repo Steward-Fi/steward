@@ -529,6 +529,10 @@ SELECT format(
   :'steward_migration_role'
 ) WHERE to_regprocedure('public.steward_guard_personal_invitation_write()') IS NOT NULL \gexec
 SELECT format(
+  'ALTER FUNCTION public.steward_enforce_reserved_tenant_commit_state() OWNER TO %I',
+  :'steward_migration_role'
+) WHERE to_regprocedure('public.steward_enforce_reserved_tenant_commit_state()') IS NOT NULL \gexec
+SELECT format(
   'ALTER FUNCTION public.steward_register_user_identity_subject() OWNER TO %I',
   :'steward_migration_role'
 ) WHERE to_regprocedure('public.steward_register_user_identity_subject()') IS NOT NULL \gexec

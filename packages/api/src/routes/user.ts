@@ -1184,10 +1184,13 @@ async function requireTenantUserDirectoryReader(
 async function ensurePersonalTenant(userId: string, displayName: string): Promise<string> {
   const tenantId = `personal-${userId}`;
   const { hash } = generateApiKey();
-  await getDb()
-    .insert(tenants)
-    .values({ id: tenantId, name: displayName, apiKeyHash: hash })
-    .onConflictDoNothing();
+  await getDb().transaction(async (tx) => {
+    await tx
+      .insert(tenants)
+      .values({ id: tenantId, name: displayName, apiKeyHash: hash })
+      .onConflictDoNothing();
+    await tx.insert(userTenants).values({ userId, tenantId, role: "owner" }).onConflictDoNothing();
+  });
   return tenantId;
 }
 

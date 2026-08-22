@@ -43,6 +43,7 @@ INSERT INTO steward_expected_rls_functions VALUES
 ('steward_bootstrap.tenant_api_key_subject(text)', 'TABLE(id character varying, name character varying, api_key_hash text, owner_address character varying, created_at timestamp with time zone, updated_at timestamp with time zone)', 'sql', 's', 'u', true, 'search_path=pg_catalog', 'bootstrap', '079dda464c16b36814995c77c761ff6b', true, false),
 ('steward_bootstrap.tenant_ids_for_internal_job()', 'TABLE(tenant_id character varying)', 'plpgsql', 's', 'u', true, 'search_path=pg_catalog', 'bootstrap', 'b913161e17e3a76a26f10d68226055b1', false, true),
 ('steward_bootstrap.user_token_revocation_subject(uuid)', 'bigint', 'plpgsql', 's', 'u', true, 'search_path=pg_catalog', 'bootstrap', '1015f7aa0998dea751905c61d75d6e78', true, false),
+('steward_enforce_reserved_tenant_commit_state()', 'trigger', 'plpgsql', 'v', 'u', false, '', 'migration', 'd21fa9d480ee899c31a609a0599eb363', false, false),
 ('steward_register_user_identity_subject()', 'trigger', 'plpgsql', 'v', 'u', true, 'search_path=pg_catalog', 'migration', '88032ecac08ef35e10948b9c2e6215c9', false, false),
 ('steward_retire_user_identity_subject()', 'trigger', 'plpgsql', 'v', 'u', true, 'search_path=pg_catalog', 'migration', '4b23041b4549c735955ccfb9af6c30fd', false, false),
 ('steward_rls.tenant_id()', 'text', 'sql', 's', 's', false, 'search_path=pg_catalog', 'migration', 'a5e810ce69b3abe9d459f147d6af81ca', true, true),

@@ -96,6 +96,7 @@ describe("platform security hardening", () => {
     expect(platformSource.indexOf("isReservedTenantId(body.id)", tenantCreateStart)).toBeLessThan(
       platformSource.indexOf(".insert(tenants)", tenantCreateStart),
     );
+    expect(platformSource).toContain('return tenantId.toLowerCase().startsWith("personal-")');
   });
 
   it("prevents tenant id reuse when retained tenant-scoped state exists", () => {

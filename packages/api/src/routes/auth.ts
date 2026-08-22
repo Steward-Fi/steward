@@ -2639,10 +2639,16 @@ async function ensurePersonalTenant(userId: string, displayName: string): Promis
   const tenantId = `personal-${userId}`;
   return withVerifiedAuthTenant(tenantId, userId, async () => {
     const { hash } = generateApiKey();
-    await getDb()
-      .insert(tenants)
-      .values({ id: tenantId, name: displayName, apiKeyHash: hash })
-      .onConflictDoNothing();
+    await getDb().transaction(async (tx) => {
+      await tx
+        .insert(tenants)
+        .values({ id: tenantId, name: displayName, apiKeyHash: hash })
+        .onConflictDoNothing();
+      await tx
+        .insert(userTenants)
+        .values({ userId, tenantId, role: "owner" })
+        .onConflictDoNothing();
+    });
     return tenantId;
   });
 }

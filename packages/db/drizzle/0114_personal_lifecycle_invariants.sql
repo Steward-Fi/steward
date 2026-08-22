@@ -831,11 +831,111 @@ $$;
 -- can exercise the guards below.
 SELECT set_config('steward.lifecycle_wrapper', '', true);
 
+-- A personal tenant and its canonical owner are one commit-time invariant.
+-- The deferred constraint permits the legitimate tenant-first insert sequence
+-- inside a single transaction, while rejecting ownerless or mixed-case
+-- reserved rows before they become visible.
+CREATE OR REPLACE FUNCTION public.steward_enforce_reserved_tenant_commit_state()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  reserved_kind text := public.steward_reserved_tenant_kind(NEW.id);
+  canonical_owner_count integer;
+BEGIN
+  IF TG_OP = 'UPDATE'
+    AND OLD.id IS DISTINCT FROM NEW.id
+    AND public.steward_reserved_tenant_kind(OLD.id) IS NOT NULL THEN
+    RAISE EXCEPTION 'Reserved tenant id is immutable'
+      USING ERRCODE = '23514';
+  END IF;
+  IF reserved_kind IS NULL THEN
+    RETURN NEW;
+  END IF;
+  -- A deferred INSERT event can survive until COMMIT after the row was
+  -- deliberately removed again in the same transaction.  In that case there
+  -- is no committed tenant state left to validate.
+  IF NOT EXISTS (SELECT 1 FROM public.tenants tenant WHERE tenant.id = NEW.id) THEN
+    RETURN NEW;
+  END IF;
+  IF (reserved_kind IN ('fixed', 'personal') AND NEW.id IS DISTINCT FROM lower(NEW.id))
+    OR (reserved_kind = 'wallet' AND (
+      (lower(NEW.id) LIKE 'eth:%' AND left(NEW.id, 4) IS DISTINCT FROM 'eth:')
+      OR (lower(NEW.id) LIKE 'solana:%' AND left(NEW.id, 7) IS DISTINCT FROM 'solana:')
+      OR (lower(NEW.id) LIKE 't-%' AND left(NEW.id, 2) IS DISTINCT FROM 't-')
+    )) THEN
+    RAISE EXCEPTION 'Reserved tenant id must use canonical lowercase form'
+      USING ERRCODE = '23514';
+  END IF;
+  IF reserved_kind = 'personal' THEN
+    SELECT count(*)::integer INTO canonical_owner_count
+    FROM public.user_tenants membership
+    WHERE membership.tenant_id = NEW.id
+      AND membership.role = 'owner'
+      AND NEW.id = 'personal-' || membership.user_id::text;
+    IF canonical_owner_count IS DISTINCT FROM 1 OR EXISTS (
+      SELECT 1 FROM public.user_tenants membership
+      WHERE membership.tenant_id = NEW.id
+        AND (membership.role IS DISTINCT FROM 'owner'
+          OR NEW.id IS DISTINCT FROM 'personal-' || membership.user_id::text)
+    ) THEN
+      RAISE EXCEPTION 'Personal tenant requires exactly one canonical owner'
+        USING ERRCODE = '23514';
+    END IF;
+  END IF;
+  RETURN NEW;
+END
+$$;
+
+REVOKE ALL ON FUNCTION public.steward_enforce_reserved_tenant_commit_state() FROM PUBLIC;
+
+CREATE CONSTRAINT TRIGGER tenants_reserved_commit_state_guard
+AFTER INSERT OR UPDATE OF id ON public.tenants
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION public.steward_enforce_reserved_tenant_commit_state();
+
 -- Triggers are prospective. Refuse to bless legacy rows that already violate
 -- the reserved-namespace invariant; silently carrying them forward would leave
 -- an authorization grant that no post-upgrade writer could create or repair.
 DO $$
 BEGIN
+  IF EXISTS (
+    SELECT 1 FROM public.tenants tenant
+    WHERE public.steward_is_reserved_tenant_id(tenant.id)
+      AND CASE public.steward_reserved_tenant_kind(tenant.id)
+        WHEN 'fixed' THEN tenant.id IS DISTINCT FROM lower(tenant.id)
+        WHEN 'personal' THEN tenant.id IS DISTINCT FROM lower(tenant.id)
+        WHEN 'wallet' THEN (
+          (lower(tenant.id) LIKE 'eth:%' AND left(tenant.id, 4) IS DISTINCT FROM 'eth:')
+          OR (lower(tenant.id) LIKE 'solana:%'
+            AND left(tenant.id, 7) IS DISTINCT FROM 'solana:')
+          OR (lower(tenant.id) LIKE 't-%' AND left(tenant.id, 2) IS DISTINCT FROM 't-')
+        )
+        ELSE false
+      END
+  ) THEN
+    RAISE EXCEPTION 'Legacy reserved tenant id is not canonical lowercase'
+      USING ERRCODE = '23514';
+  END IF;
+  IF EXISTS (
+    SELECT 1 FROM public.tenants tenant
+    WHERE public.steward_reserved_tenant_kind(tenant.id) = 'personal'
+      AND (
+        (SELECT count(*) FROM public.user_tenants membership
+          WHERE membership.tenant_id = tenant.id
+            AND membership.role = 'owner'
+            AND tenant.id = 'personal-' || membership.user_id::text) <> 1
+        OR EXISTS (
+          SELECT 1 FROM public.user_tenants membership
+          WHERE membership.tenant_id = tenant.id
+            AND (membership.role IS DISTINCT FROM 'owner'
+              OR tenant.id IS DISTINCT FROM 'personal-' || membership.user_id::text)
+        )
+      )
+  ) THEN
+    RAISE EXCEPTION 'Legacy personal tenant lacks exactly one canonical owner'
+      USING ERRCODE = '23514';
+  END IF;
   IF EXISTS (
     SELECT 1
     FROM public.user_tenants membership
