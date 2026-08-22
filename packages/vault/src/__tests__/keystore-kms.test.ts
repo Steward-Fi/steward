@@ -145,12 +145,13 @@ describe("KMS envelope keystore", () => {
         provider: "aws",
         environmentFallback: false,
         keyId: "request-key",
+        region: "request-region",
         credentials,
       });
       expect(resolved.provider).toBe("aws");
       if (resolved.provider !== "aws") throw new Error("expected AWS options");
       expect(resolved.keyId).toBe("request-key");
-      expect(resolved.region).toBeUndefined();
+      expect(resolved.region).toBe("request-region");
       expect(resolved.credentials).toBe(credentials);
     } finally {
       if (previousRegion === undefined) delete process.env.STEWARD_AWS_REGION;

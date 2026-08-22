@@ -196,7 +196,7 @@ describe("SEC-108: Polymarket L2 creds Redis cache is encrypted at rest", () => 
       STEWARD_PM_TEST_CREDS: "1",
     };
     const authorityB = {
-      NODE_ENV: "production",
+      STEWARD_RUNTIME: "workers",
       STEWARD_MASTER_PASSWORD: "shared-password",
       STEWARD_KDF_SALT: "b2".repeat(16),
       POLYMARKET_CLOB_API_URL: "https://clob-b.example.invalid",
@@ -245,6 +245,16 @@ describe("SEC-108: Polymarket L2 creds Redis cache is encrypted at rest", () => 
       testCredentialsRequested: true,
       testCredentialsEnabled: false,
     });
+    expect(() =>
+      withRuntimeEnvironment(
+        {
+          STEWARD_RUNTIME: "workers",
+          POLYMARKET_CLOB_API_URL: "http://insecure.example.invalid",
+          STEWARD_PM_TEST_CREDS: "1",
+        },
+        _polymarketRuntimeConfigForTests,
+      ),
+    ).toThrow("POLYMARKET_CLOB_API_URL must use https in production");
     expect(withRuntimeEnvironment({}, _polymarketCredentialCacheKeyFingerprintForTests)).toBeNull();
   });
 

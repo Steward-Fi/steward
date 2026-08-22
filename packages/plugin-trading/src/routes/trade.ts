@@ -101,7 +101,9 @@ type PolymarketRuntimeConfig = {
 };
 
 function resolvePolymarketRuntimeConfig(): PolymarketRuntimeConfig {
-  const nodeEnvironment = runtimeEnvironmentValue("NODE_ENV");
+  const nodeEnvironment =
+    runtimeEnvironmentValue("NODE_ENV") ??
+    (runtimeEnvironmentValue("STEWARD_RUNTIME") === "workers" ? "production" : undefined);
   const testCredentialsRequested = runtimeEnvironmentValue("STEWARD_PM_TEST_CREDS") === "1";
   const raw = runtimeEnvironmentValue("POLYMARKET_CLOB_API_URL")?.trim();
   let clobUrl: string | undefined;

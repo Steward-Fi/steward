@@ -236,6 +236,7 @@ describe("request-local custody authority", () => {
       ...workerAuthorityEnvironment("aws-authority", SALT_A),
       STEWARD_KMS_PROVIDER: "aws",
       STEWARD_KMS_KEY_ID: "test-kms-key",
+      STEWARD_AWS_REGION: "us-west-2",
       AWS_ACCESS_KEY_ID: "access-a",
       AWS_SECRET_ACCESS_KEY: "secret-a",
       AWS_SESSION_TOKEN: "session-a",
@@ -255,10 +256,22 @@ describe("request-local custody authority", () => {
           ...workerAuthorityEnvironment("aws-authority", SALT_A),
           STEWARD_KMS_PROVIDER: "aws",
           STEWARD_KMS_KEY_ID: "test-kms-key",
+          STEWARD_AWS_REGION: "us-west-2",
         },
         () => resolveCustodyAuthority(),
       ),
     ).toThrow(/AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY must be configured together/);
+
+    expect(() =>
+      withWorkerRuntimeAuthority(
+        {
+          ...base,
+          STEWARD_AWS_REGION: undefined,
+          AWS_REGION: undefined,
+        },
+        () => resolveCustodyAuthority(),
+      ),
+    ).toThrow("STEWARD_AWS_REGION or AWS_REGION is required for Worker AWS KMS custody");
   });
 
   it("fails closed when the current Worker authority omits its KDF salt", () => {

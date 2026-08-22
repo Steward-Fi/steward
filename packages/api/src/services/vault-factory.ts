@@ -386,6 +386,9 @@ export function resolveCustodyAuthority(options: ConfiguredVaultOptions = {}): C
   if (workerRuntime && !resolved.kdfSalt) {
     throw new Error("STEWARD_KDF_SALT is required for Worker custody authority");
   }
+  if (workerRuntime && mode === "kms-envelope:aws" && !resolved.awsRegion) {
+    throw new Error("STEWARD_AWS_REGION or AWS_REGION is required for Worker AWS KMS custody");
+  }
   if (usesAws && !hasAwsCredentials && (workerRuntime || hasAwsCredentialPart)) {
     throw new Error(
       "AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY must be configured together for AWS custody",
