@@ -359,6 +359,62 @@ describe("user tenant-admin user directory routes", () => {
     });
   });
 
+  it("binds invitation transitions to the exact target tenant and verified user", async () => {
+    const token = "c".repeat(64);
+    const tokenHash = createHash("sha256").update(token).digest("hex");
+    const memberPersonalTenantId = `personal-${memberId}`;
+    await getDb()
+      .insert(tenants)
+      .values({
+        id: memberPersonalTenantId,
+        name: "Member Personal Tenant",
+        apiKeyHash: `${memberPersonalTenantId}-hash`,
+      })
+      .onConflictDoNothing();
+    await getDb()
+      .insert(userTenants)
+      .values({ userId: memberId, tenantId: memberPersonalTenantId, role: "owner" })
+      .onConflictDoNothing();
+    const [invitation] = await getDb()
+      .insert(tenantInvitations)
+      .values({
+        tenantId: OTHER_TENANT_ID,
+        email: "owner@example.test",
+        role: "member",
+        tokenHash,
+        expiresAt: new Date(Date.now() + 60_000),
+      })
+      .returning({ id: tenantInvitations.id });
+    const request = (requestTenantId: string, sessionToken: string) =>
+      userRoutes.request(`/me/tenants/${requestTenantId}/invitations/accept`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${sessionToken}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ token }),
+      });
+
+    expect(await request(TENANT_ID, await personalTokenFor(ownerId))).toHaveProperty("status", 404);
+    expect(await request(OTHER_TENANT_ID, await personalTokenFor(memberId))).toHaveProperty(
+      "status",
+      404,
+    );
+    const [pending] = await getDb()
+      .select({ status: tenantInvitations.status })
+      .from(tenantInvitations)
+      .where(eq(tenantInvitations.id, invitation.id));
+    expect(pending?.status).toBe("pending");
+
+    const accepted = await request(OTHER_TENANT_ID, await personalTokenFor(ownerId));
+    expect(accepted.status).toBe(200);
+    const [stored] = await getDb()
+      .select({
+        status: tenantInvitations.status,
+        acceptedByUserId: tenantInvitations.acceptedByUserId,
+      })
+      .from(tenantInvitations)
+      .where(eq(tenantInvitations.id, invitation.id));
+    expect(stored).toMatchObject({ status: "accepted", acceptedByUserId: ownerId });
+  });
+
   it("serializes concurrent owner demotions so exactly one wins", async () => {
     await getDb()
       .update(userTenants)
@@ -382,7 +438,10 @@ describe("user tenant-admin user directory routes", () => {
     ]);
     const statuses = responses.map((response) => response.status).sort();
     expect(statuses[0]).toBe(200);
-    expect([403, 409]).toContain(statuses[1]);
+    // The winning demotion revokes the losing owner's token before commit. If
+    // the losing request has not completed authentication yet, conservative
+    // revocation may reject it with 401 instead of the later 403/409 checks.
+    expect([401, 403, 409]).toContain(statuses[1]);
     const owners = await getDb()
       .select({ userId: userTenants.userId })
       .from(userTenants)
@@ -399,7 +458,7 @@ describe("user tenant-admin user directory routes", () => {
       },
       body: JSON.stringify({ role: "member" }),
     });
-    expect(forbidden.status).toBe(403);
+    expect([401, 403]).toContain(forbidden.status);
 
     const conflict = await userRoutes.request(`/me/tenants/${TENANT_ID}/users/${winnerId}/role`, {
       method: "PATCH",

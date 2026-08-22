@@ -101,6 +101,7 @@ import {
   sanitizeErrorMessage,
   setNoStoreHeaders,
   verifySessionToken,
+  withAuthenticatedTenantDatabase,
 } from "../services/context";
 import {
   publicGasSponsorshipState,
@@ -1757,6 +1758,18 @@ export async function userSessionAuth(
 
   if (!payload.tenantId) {
     return c.json<ApiResponse>({ ok: false, error: "Session token missing tenantId claim" }, 401);
+  }
+  // Invitation acceptance is the only user-session flow allowed to move from
+  // the personal session tenant into a different tenant. Do not bind the
+  // personal tenant transaction around those two exact routes: each handler
+  // validates the target and token, then opens its own target-tenant RLS
+  // transaction with the verified user id as the non-forgeable authority.
+  const isInvitationTransition =
+    c.req.method === "POST" &&
+    /^\/me\/tenants\/[^/]+\/(?:join|invitations\/accept)$/.test(c.req.path);
+  if (isInvitationTransition) {
+    await next();
+    return undefined;
   }
   await continueWithTenantDatabase(payload.tenantId, "user-session-jwt", userId, next, userId);
 }
@@ -7850,113 +7863,121 @@ user.post("/me/tenants/:tenantId/invitations/accept", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: "token is required" }, 400);
   }
 
-  const db = getDb();
-  const [userRecord] = await db
-    .select({ email: users.email, emailVerified: users.emailVerified })
-    .from(users)
-    .where(eq(users.id, userId));
-  const email = userRecord?.email?.toLowerCase().trim();
-  if (!email || !userRecord?.emailVerified) {
-    return c.json<ApiResponse>(
-      { ok: false, error: "Invitation acceptance requires a verified email session" },
-      403,
-    );
-  }
-
-  const tokenHash = hashSha256Hex(body.token);
-  const [candidate] = await db
-    .select({ id: tenantInvitations.id, role: tenantInvitations.role })
-    .from(tenantInvitations)
-    .where(
-      and(
-        eq(tenantInvitations.tenantId, tenantId),
-        eq(tenantInvitations.email, email),
-        eq(tenantInvitations.tokenHash, tokenHash),
-        eq(tenantInvitations.status, "pending"),
-        gte(tenantInvitations.expiresAt, new Date()),
-      ),
-    );
-  if (!candidate) {
-    return c.json<ApiResponse>({ ok: false, error: "Invalid or expired invitation" }, 404);
-  }
-
-  await writeUserAudit(c, {
+  return withAuthenticatedTenantDatabase(
     tenantId,
-    actorType: "user",
-    actorId: userId,
-    action: "tenant.invitation.accept.authorized",
-    resourceType: "tenant_invitation",
-    resourceId: candidate.id,
-    metadata: { email, role: candidate.role },
-  });
+    "user-invitation-accept",
+    userId,
+    async () => {
+      const db = getDb();
+      const [userRecord] = await db
+        .select({ email: users.email, emailVerified: users.emailVerified })
+        .from(users)
+        .where(eq(users.id, userId));
+      const email = userRecord?.email?.toLowerCase().trim();
+      if (!email || !userRecord?.emailVerified) {
+        return c.json<ApiResponse>(
+          { ok: false, error: "Invitation acceptance requires a verified email session" },
+          403,
+        );
+      }
 
-  const accepted = await withTenantAuditedTransaction(
-    tenantId,
-    async (txRaw, appendRequiredAudit) => {
-      const tx = txRaw as typeof db;
-      await lockTenantOwnerLifecycle(tx, tenantId);
-      const [invitation] = await tx
-        .update(tenantInvitations)
-        .set({
-          status: "accepted",
-          acceptedByUserId: userId,
-          acceptedAt: new Date(),
-          updatedAt: new Date(),
-        })
+      const tokenHash = hashSha256Hex(body.token);
+      const [candidate] = await db
+        .select({ id: tenantInvitations.id, role: tenantInvitations.role })
+        .from(tenantInvitations)
         .where(
           and(
-            eq(tenantInvitations.id, candidate.id),
             eq(tenantInvitations.tenantId, tenantId),
             eq(tenantInvitations.email, email),
             eq(tenantInvitations.tokenHash, tokenHash),
             eq(tenantInvitations.status, "pending"),
             gte(tenantInvitations.expiresAt, new Date()),
           ),
-        )
-        .returning({ id: tenantInvitations.id, role: tenantInvitations.role });
-      if (!invitation) return null;
-      const [existingMembership] = await tx
-        .select({ role: userTenants.role })
-        .from(userTenants)
-        .where(and(eq(userTenants.userId, userId), eq(userTenants.tenantId, tenantId)))
-        .limit(1);
-      if (!existingMembership) {
-        await tx
-          .insert(userTenants)
-          .values({ userId, tenantId, role: invitation.role })
-          .onConflictDoNothing();
+        );
+      if (!candidate) {
+        return c.json<ApiResponse>({ ok: false, error: "Invalid or expired invitation" }, 404);
       }
-      const result = {
-        ...invitation,
-        role: existingMembership?.role ?? invitation.role,
-        alreadyMember: Boolean(existingMembership),
-      };
-      await appendRequiredAudit({
+
+      await writeUserAudit(c, {
         tenantId,
         actorType: "user",
         actorId: userId,
-        action: "tenant.invitation.accept",
+        action: "tenant.invitation.accept.authorized",
         resourceType: "tenant_invitation",
-        resourceId: result.id,
-        metadata: { email, role: result.role, alreadyMember: result.alreadyMember },
-        ipAddress: c.req.header("x-forwarded-for") ?? null,
-        userAgent: c.req.header("user-agent") ?? null,
-        requestId: c.get("requestId") ?? null,
+        resourceId: candidate.id,
+        metadata: { email, role: candidate.role },
       });
-      return result;
-    },
-  );
-  if (!accepted) {
-    return c.json<ApiResponse>({ ok: false, error: "Invalid or expired invitation" }, 404);
-  }
 
-  return c.json({
-    ok: true,
-    tenantId,
-    role: accepted.role,
-    invitationId: accepted.id,
-    ...(accepted.alreadyMember ? { alreadyMember: true } : {}),
-  });
+      const accepted = await withTenantAuditedTransaction(
+        tenantId,
+        async (txRaw, appendRequiredAudit) => {
+          const tx = txRaw as typeof db;
+          await lockTenantOwnerLifecycle(tx, tenantId);
+          const [invitation] = await tx
+            .update(tenantInvitations)
+            .set({
+              status: "accepted",
+              acceptedByUserId: userId,
+              acceptedAt: new Date(),
+              updatedAt: new Date(),
+            })
+            .where(
+              and(
+                eq(tenantInvitations.id, candidate.id),
+                eq(tenantInvitations.tenantId, tenantId),
+                eq(tenantInvitations.email, email),
+                eq(tenantInvitations.tokenHash, tokenHash),
+                eq(tenantInvitations.status, "pending"),
+                gte(tenantInvitations.expiresAt, new Date()),
+              ),
+            )
+            .returning({ id: tenantInvitations.id, role: tenantInvitations.role });
+          if (!invitation) return null;
+          const [existingMembership] = await tx
+            .select({ role: userTenants.role })
+            .from(userTenants)
+            .where(and(eq(userTenants.userId, userId), eq(userTenants.tenantId, tenantId)))
+            .limit(1);
+          if (!existingMembership) {
+            await tx
+              .insert(userTenants)
+              .values({ userId, tenantId, role: invitation.role })
+              .onConflictDoNothing();
+          }
+          const result = {
+            ...invitation,
+            role: existingMembership?.role ?? invitation.role,
+            alreadyMember: Boolean(existingMembership),
+          };
+          await appendRequiredAudit({
+            tenantId,
+            actorType: "user",
+            actorId: userId,
+            action: "tenant.invitation.accept",
+            resourceType: "tenant_invitation",
+            resourceId: result.id,
+            metadata: { email, role: result.role, alreadyMember: result.alreadyMember },
+            ipAddress: c.req.header("x-forwarded-for") ?? null,
+            userAgent: c.req.header("user-agent") ?? null,
+            requestId: c.get("requestId") ?? null,
+          });
+          return result;
+        },
+      );
+      if (!accepted) {
+        return c.json<ApiResponse>({ ok: false, error: "Invalid or expired invitation" }, 404);
+      }
+
+      return c.json({
+        ok: true,
+        tenantId,
+        role: accepted.role,
+        invitationId: accepted.id,
+        ...(accepted.alreadyMember ? { alreadyMember: true } : {}),
+      });
+    },
+    userId,
+  );
 });
 
 /**
@@ -7968,7 +7989,6 @@ user.post("/me/tenants/:tenantId/join", async (c) => {
   if (personalSessionResponse) return personalSessionResponse;
   const userId = c.get("userId");
   const tenantId = c.req.param("tenantId");
-  const db = getDb();
 
   if (!isValidTenantId(tenantId)) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid tenant id format" }, 400);
@@ -7977,191 +7997,203 @@ user.post("/me/tenants/:tenantId/join", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: "Personal tenants cannot be self-joined" }, 403);
   }
 
-  // 1. Verify tenant exists
-  const [tenant] = await db
-    .select({ id: tenants.id })
-    .from(tenants)
-    .where(eq(tenants.id, tenantId));
+  return withAuthenticatedTenantDatabase(
+    tenantId,
+    "user-tenant-join",
+    userId,
+    async () => {
+      const db = getDb();
+      // 1. Verify tenant exists
+      const [tenant] = await db
+        .select({ id: tenants.id })
+        .from(tenants)
+        .where(eq(tenants.id, tenantId));
 
-  if (!tenant) {
-    return c.json<ApiResponse>({ ok: false, error: "Tenant not found" }, 404);
-  }
+      if (!tenant) {
+        return c.json<ApiResponse>({ ok: false, error: "Tenant not found" }, 404);
+      }
 
-  // 2. Check join_mode. Invite-mode requests must consume their token before
-  // returning an existing membership; otherwise that token can be replayed
-  // after the membership is later removed.
-  const [config] = await db
-    .select({ joinMode: tenantConfigs.joinMode })
-    .from(tenantConfigs)
-    .where(eq(tenantConfigs.tenantId, tenantId));
+      // 2. Check join_mode. Invite-mode requests must consume their token before
+      // returning an existing membership; otherwise that token can be replayed
+      // after the membership is later removed.
+      const [config] = await db
+        .select({ joinMode: tenantConfigs.joinMode })
+        .from(tenantConfigs)
+        .where(eq(tenantConfigs.tenantId, tenantId));
 
-  const joinMode = config?.joinMode;
+      const joinMode = config?.joinMode;
 
-  if (joinMode === "invite") {
-    const body = await safeJsonParse<{ token?: string }>(c);
-    if (!body?.token || typeof body.token !== "string" || !/^[a-f0-9]{64}$/i.test(body.token)) {
-      return c.json<ApiResponse>(
-        { ok: false, error: "Tenant invitation token is required to join" },
-        403,
-      );
-    }
+      if (joinMode === "invite") {
+        const body = await safeJsonParse<{ token?: string }>(c);
+        if (!body?.token || typeof body.token !== "string" || !/^[a-f0-9]{64}$/i.test(body.token)) {
+          return c.json<ApiResponse>(
+            { ok: false, error: "Tenant invitation token is required to join" },
+            403,
+          );
+        }
 
-    const [userRecord] = await db
-      .select({ email: users.email, emailVerified: users.emailVerified })
-      .from(users)
-      .where(eq(users.id, userId));
-    const email = userRecord?.email?.toLowerCase().trim();
-    if (!email || !userRecord?.emailVerified) {
-      return c.json<ApiResponse>(
-        { ok: false, error: "Tenant invitation acceptance requires a verified email session" },
-        403,
-      );
-    }
+        const [userRecord] = await db
+          .select({ email: users.email, emailVerified: users.emailVerified })
+          .from(users)
+          .where(eq(users.id, userId));
+        const email = userRecord?.email?.toLowerCase().trim();
+        if (!email || !userRecord?.emailVerified) {
+          return c.json<ApiResponse>(
+            { ok: false, error: "Tenant invitation acceptance requires a verified email session" },
+            403,
+          );
+        }
 
-    const tokenHash = hashSha256Hex(body.token);
-    const [candidate] = await db
-      .select({ id: tenantInvitations.id, role: tenantInvitations.role })
-      .from(tenantInvitations)
-      .where(
-        and(
-          eq(tenantInvitations.tenantId, tenantId),
-          eq(tenantInvitations.email, email),
-          eq(tenantInvitations.tokenHash, tokenHash),
-          eq(tenantInvitations.status, "pending"),
-          gte(tenantInvitations.expiresAt, new Date()),
-        ),
-      );
-    if (!candidate) {
-      return c.json<ApiResponse>(
-        { ok: false, error: `Tenant '${tenantId}' requires an invitation to join` },
-        403,
-      );
-    }
-
-    await writeUserAudit(c, {
-      tenantId,
-      actorType: "user",
-      actorId: userId,
-      action: "tenant.member.accept_invite.authorized",
-      resourceType: "tenant_invitation",
-      resourceId: candidate.id,
-      metadata: { email, role: candidate.role },
-    });
-
-    const accepted = await withTenantAuditedTransaction(
-      tenantId,
-      async (txRaw, appendRequiredAudit) => {
-        const tx = txRaw as typeof db;
-        await lockTenantOwnerLifecycle(tx, tenantId);
-        const [invitation] = await tx
-          .update(tenantInvitations)
-          .set({
-            status: "accepted",
-            acceptedByUserId: userId,
-            acceptedAt: new Date(),
-            updatedAt: new Date(),
-          })
+        const tokenHash = hashSha256Hex(body.token);
+        const [candidate] = await db
+          .select({ id: tenantInvitations.id, role: tenantInvitations.role })
+          .from(tenantInvitations)
           .where(
             and(
-              eq(tenantInvitations.id, candidate.id),
               eq(tenantInvitations.tenantId, tenantId),
               eq(tenantInvitations.email, email),
               eq(tenantInvitations.tokenHash, tokenHash),
               eq(tenantInvitations.status, "pending"),
               gte(tenantInvitations.expiresAt, new Date()),
             ),
-          )
-          .returning({ id: tenantInvitations.id, role: tenantInvitations.role });
-        if (!invitation) return null;
-        const [existingMembership] = await tx
-          .select({ role: userTenants.role })
-          .from(userTenants)
-          .where(and(eq(userTenants.userId, userId), eq(userTenants.tenantId, tenantId)));
-        if (!existingMembership) {
-          await tx.insert(userTenants).values({ userId, tenantId, role: invitation.role });
+          );
+        if (!candidate) {
+          return c.json<ApiResponse>(
+            { ok: false, error: `Tenant '${tenantId}' requires an invitation to join` },
+            403,
+          );
         }
-        const actualRole = existingMembership?.role ?? invitation.role;
-        await appendRequiredAudit({
+
+        await writeUserAudit(c, {
           tenantId,
           actorType: "user",
           actorId: userId,
-          action: "tenant.member.accept_invite",
+          action: "tenant.member.accept_invite.authorized",
           resourceType: "tenant_invitation",
-          resourceId: invitation.id,
-          metadata: { email, role: actualRole, requestedRole: invitation.role },
-          ipAddress: c.req.header("x-forwarded-for") ?? null,
-          userAgent: c.req.header("user-agent") ?? null,
-          requestId: c.get("requestId") ?? null,
+          resourceId: candidate.id,
+          metadata: { email, role: candidate.role },
         });
-        return { id: invitation.id, role: actualRole };
-      },
-    );
-    if (!accepted) {
-      return c.json<ApiResponse>(
-        { ok: false, error: `Tenant '${tenantId}' requires an invitation to join` },
-        403,
-      );
-    }
 
-    return c.json({ ok: true, tenantId, role: accepted.role });
-  }
+        const accepted = await withTenantAuditedTransaction(
+          tenantId,
+          async (txRaw, appendRequiredAudit) => {
+            const tx = txRaw as typeof db;
+            await lockTenantOwnerLifecycle(tx, tenantId);
+            const [invitation] = await tx
+              .update(tenantInvitations)
+              .set({
+                status: "accepted",
+                acceptedByUserId: userId,
+                acceptedAt: new Date(),
+                updatedAt: new Date(),
+              })
+              .where(
+                and(
+                  eq(tenantInvitations.id, candidate.id),
+                  eq(tenantInvitations.tenantId, tenantId),
+                  eq(tenantInvitations.email, email),
+                  eq(tenantInvitations.tokenHash, tokenHash),
+                  eq(tenantInvitations.status, "pending"),
+                  gte(tenantInvitations.expiresAt, new Date()),
+                ),
+              )
+              .returning({ id: tenantInvitations.id, role: tenantInvitations.role });
+            if (!invitation) return null;
+            const [existingMembership] = await tx
+              .select({ role: userTenants.role })
+              .from(userTenants)
+              .where(and(eq(userTenants.userId, userId), eq(userTenants.tenantId, tenantId)));
+            if (!existingMembership) {
+              await tx.insert(userTenants).values({ userId, tenantId, role: invitation.role });
+            }
+            const actualRole = existingMembership?.role ?? invitation.role;
+            await appendRequiredAudit({
+              tenantId,
+              actorType: "user",
+              actorId: userId,
+              action: "tenant.member.accept_invite",
+              resourceType: "tenant_invitation",
+              resourceId: invitation.id,
+              metadata: { email, role: actualRole, requestedRole: invitation.role },
+              ipAddress: c.req.header("x-forwarded-for") ?? null,
+              userAgent: c.req.header("user-agent") ?? null,
+              requestId: c.get("requestId") ?? null,
+            });
+            return { id: invitation.id, role: actualRole };
+          },
+        );
+        if (!accepted) {
+          return c.json<ApiResponse>(
+            { ok: false, error: `Tenant '${tenantId}' requires an invitation to join` },
+            403,
+          );
+        }
 
-  const [existing] = await db
-    .select({ role: userTenants.role })
-    .from(userTenants)
-    .where(and(eq(userTenants.userId, userId), eq(userTenants.tenantId, tenantId)));
-  if (existing) {
-    return c.json({ ok: true, tenantId, role: existing.role, alreadyMember: true });
-  }
-
-  if (joinMode !== "open") {
-    return c.json<ApiResponse>(
-      {
-        ok: false,
-        error: joinMode
-          ? `Tenant is not open for joining (mode: ${joinMode})`
-          : "Tenant is not configured for self-join",
-      },
-      403,
-    );
-  }
-
-  const joined = await withTenantAuditedTransaction(
-    tenantId,
-    async (txRaw, appendRequiredAudit) => {
-      const tx = txRaw as typeof db;
-      await lockTenantOwnerLifecycle(tx, tenantId);
-      const [lockedConfig] = await tx
-        .select({ joinMode: tenantConfigs.joinMode })
-        .from(tenantConfigs)
-        .where(eq(tenantConfigs.tenantId, tenantId));
-      if (lockedConfig?.joinMode !== "open") {
-        return false;
+        return c.json({ ok: true, tenantId, role: accepted.role });
       }
-      await tx
-        .insert(userTenants)
-        .values({ userId, tenantId, role: "member" })
-        .onConflictDoNothing();
-      await appendRequiredAudit({
-        tenantId,
-        actorType: "user",
-        actorId: userId,
-        action: "tenant.member.join",
-        resourceType: "tenant",
-        resourceId: tenantId,
-        metadata: { role: "member" },
-        ipAddress: c.req.header("x-forwarded-for") ?? null,
-        userAgent: c.req.header("user-agent") ?? null,
-        requestId: c.get("requestId") ?? null,
-      });
-      return true;
-    },
-  );
-  if (!joined) {
-    return c.json<ApiResponse>({ ok: false, error: "Tenant is no longer open for joining" }, 409);
-  }
 
-  return c.json({ ok: true, tenantId, role: "member" });
+      const [existing] = await db
+        .select({ role: userTenants.role })
+        .from(userTenants)
+        .where(and(eq(userTenants.userId, userId), eq(userTenants.tenantId, tenantId)));
+      if (existing) {
+        return c.json({ ok: true, tenantId, role: existing.role, alreadyMember: true });
+      }
+
+      if (joinMode !== "open") {
+        return c.json<ApiResponse>(
+          {
+            ok: false,
+            error: joinMode
+              ? `Tenant is not open for joining (mode: ${joinMode})`
+              : "Tenant is not configured for self-join",
+          },
+          403,
+        );
+      }
+
+      const joined = await withTenantAuditedTransaction(
+        tenantId,
+        async (txRaw, appendRequiredAudit) => {
+          const tx = txRaw as typeof db;
+          await lockTenantOwnerLifecycle(tx, tenantId);
+          const [lockedConfig] = await tx
+            .select({ joinMode: tenantConfigs.joinMode })
+            .from(tenantConfigs)
+            .where(eq(tenantConfigs.tenantId, tenantId));
+          if (lockedConfig?.joinMode !== "open") {
+            return false;
+          }
+          await tx
+            .insert(userTenants)
+            .values({ userId, tenantId, role: "member" })
+            .onConflictDoNothing();
+          await appendRequiredAudit({
+            tenantId,
+            actorType: "user",
+            actorId: userId,
+            action: "tenant.member.join",
+            resourceType: "tenant",
+            resourceId: tenantId,
+            metadata: { role: "member" },
+            ipAddress: c.req.header("x-forwarded-for") ?? null,
+            userAgent: c.req.header("user-agent") ?? null,
+            requestId: c.get("requestId") ?? null,
+          });
+          return true;
+        },
+      );
+      if (!joined) {
+        return c.json<ApiResponse>(
+          { ok: false, error: "Tenant is no longer open for joining" },
+          409,
+        );
+      }
+
+      return c.json({ ok: true, tenantId, role: "member" });
+    },
+    userId,
+  );
 });
 
 /**
