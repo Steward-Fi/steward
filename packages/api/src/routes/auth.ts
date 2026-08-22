@@ -6476,17 +6476,13 @@ auth.post("/verify", async (c) => {
     },
   );
 
-  await writeAuditEvent({
-    tenantId: effectiveTenantId,
-    actorType: "user",
-    actorId: user.id,
-    action: "auth.login",
-    resourceType: "session",
-    metadata: { method: "siwe", address, walletChain: "ethereum" },
-    ipAddress: c.req.header("x-forwarded-for") ?? null,
-    userAgent: c.req.header("user-agent") ?? null,
-    requestId: c.get("requestId") ?? null,
-  });
+  await writeAuthLoginAudit(
+    c,
+    effectiveTenantId,
+    user.id,
+    { authMethod: "siwe" },
+    { address, walletChain: "ethereum" },
+  );
 
   responseData.userId = user.id;
   responseData.address = address;
