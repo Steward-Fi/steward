@@ -10,6 +10,7 @@ import { describe, expect, it } from "bun:test";
 import type { PolicyRule } from "@stwd/shared";
 import { withRuntimeEnvironment } from "@stwd/shared/runtime-env";
 import {
+  conservativeNativeSpendUsd,
   enforceRateLimit,
   extractRateLimitPolicy,
   extractSpendLimitPolicy,
@@ -259,6 +260,27 @@ describe("nativePriceFallbackUsd", () => {
         nativePriceFallbackUsd(),
       ),
     ).toBe(10_000);
+  });
+});
+
+describe("conservativeNativeSpendUsd", () => {
+  it("uses Solana's 9-decimal base units when no oracle price is available", () => {
+    expect(
+      withRuntimeEnvironment({ STEWARD_NATIVE_PRICE_FALLBACK_USD: "10000" }, () =>
+        conservativeNativeSpendUsd(1_000_000_000n, 101),
+      ),
+    ).toBe(10_000);
+    expect(
+      withRuntimeEnvironment({ STEWARD_NATIVE_PRICE_FALLBACK_USD: "10000" }, () =>
+        conservativeNativeSpendUsd(1_500_000_000n, 102),
+      ),
+    ).toBe(15_000);
+  });
+
+  it("fails closed when native decimals are unknown", () => {
+    expect(() => conservativeNativeSpendUsd(1n, 999_999)).toThrow(
+      "Native-token decimals are not configured",
+    );
   });
 });
 

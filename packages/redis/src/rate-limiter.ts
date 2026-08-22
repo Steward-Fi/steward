@@ -80,7 +80,7 @@ function validateRateLimitInput(key: string, windowMs: number, maxRequests: numb
  * reinterpret them). Keep the caller-facing key stable while fencing the
  * physical Redis key by both numeric policy inputs.
  */
-function durableBucketKey(key: string, windowMs: number, maxRequests: number): string {
+export function rateLimitBucketKey(key: string, windowMs: number, maxRequests: number): string {
   return `${key}:policy:${windowMs}:${maxRequests}`;
 }
 
@@ -114,7 +114,7 @@ export async function checkRateLimit(
   const res = (await redis.eval(
     RATE_LIMIT_LUA,
     1,
-    durableBucketKey(key, windowMs, maxRequests),
+    rateLimitBucketKey(key, windowMs, maxRequests),
     String(windowMs),
     String(maxRequests),
     member,
@@ -153,7 +153,7 @@ export async function getRateLimitStatus(
   const [count, _oldestScore, _serverNow, resetMs] = (await redis.eval(
     RATE_LIMIT_STATUS_LUA,
     1,
-    durableBucketKey(key, windowMs, maxRequests),
+    rateLimitBucketKey(key, windowMs, maxRequests),
     String(windowMs),
   )) as [number, string, number, number];
 

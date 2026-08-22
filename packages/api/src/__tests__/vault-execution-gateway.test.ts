@@ -27,7 +27,7 @@ import {
   externalCustodyIdentityDigest,
   Vault,
 } from "@stwd/vault";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { Hono } from "hono";
 import type { AppVariables } from "../services/context";
 import { executionPayloadDigestForEvmSign } from "../services/execution-authorization";
@@ -161,23 +161,24 @@ describe("vault EVM execution gateway", () => {
     }
   });
 
-  it("preserves the legacy Solana sign path without minting an EVM authorization", async () => {
+  it("governs the Solana sign path without minting an EVM authorization", async () => {
     const beforeRows = await getDb().select().from(executionAuthorizationNonces);
     const signSpy = spyOn(Vault.prototype, "signTransaction").mockImplementation(
-      async (request, options) => {
+      async (_request, options) => {
+        const [claimed] = await getDb()
+          .select()
+          .from(transactions)
+          .where(and(eq(transactions.agentId, AGENT_ID), eq(transactions.status, "approved")))
+          .limit(1);
+        expect(claimed?.actionPayload).toMatchObject({
+          recoveryType: "solana_transaction",
+          executionToken: expect.any(String),
+          executionDigest: expect.any(String),
+        });
         await getDb()
-          .insert(transactions)
-          .values({
-            id: options.txId,
-            agentId: request.agentId,
-            status: "signed",
-            toAddress: request.to,
-            value: request.value,
-            data: request.data,
-            chainId: request.chainId,
-            actionPayload: { type: "transaction", broadcast: false },
-            policyResults: options.policyResults ?? [],
-          });
+          .update(transactions)
+          .set({ status: "signed", signedAt: new Date() })
+          .where(eq(transactions.id, options.txId));
         return "solana-signed";
       },
     );

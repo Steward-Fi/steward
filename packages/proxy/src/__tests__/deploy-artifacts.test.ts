@@ -145,6 +145,7 @@ describe("#101 deploy/docker-compose.yml proxy production env", () => {
     const api = compose.slice(apiStart, proxyStart);
     expect(api).toContain('REDIS_URL: "redis://redis:6379"');
     expect(api).toContain('STEWARD_ALLOW_INSECURE_REDIS: "true"');
+    expect(api).toContain("fetch('http://localhost:3200/ready')");
     expect(proxy).toContain('REDIS_URL: "redis://redis:6379"');
     expect(proxy).toContain('STEWARD_ALLOW_INSECURE_REDIS: "true"');
   });

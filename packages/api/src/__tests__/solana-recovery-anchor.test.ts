@@ -14,6 +14,7 @@ import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import {
   ExternalBroadcastOutcomeUnknownError,
   SolanaBroadcastNotSubmittedError,
+  Vault,
 } from "@stwd/vault";
 import { and, eq, sql } from "drizzle-orm";
 import { Hono } from "hono";
@@ -29,6 +30,40 @@ const SIGNATURE =
 const RECENT_BLOCKHASH = "11111111111111111111111111111111";
 const WITHIN_CAP_V0_TRANSFER =
   "AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAAQACBGa+fjMsekUzMr2dCn99sFX1xe8aBq2mbZizn7aBDEc6URw0oaLLUh3xa7JGuN6OeZfOI1x+drIqPXUDokgZ3YoDBkZv5SEXMv/srbpyw5vnvIzlu8X3EmssQ5s6QAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcDAgAFAkANAwACAAkD6AMAAAAAAAADAgABDAIAAAB7AAAAAAAAAAA=";
+
+function withRecentBlockhash(transaction: string, blockhash: string): string {
+  const bytes = Buffer.from(transaction, "base64");
+  const readShortVec = (offset: number): [number, number] => {
+    let value = 0;
+    let shift = 0;
+    let cursor = offset;
+    while (true) {
+      const byte = bytes[cursor++];
+      value |= (byte & 0x7f) << shift;
+      if ((byte & 0x80) === 0) return [value, cursor];
+      shift += 7;
+    }
+  };
+  const [signatureCount, messageOffset] = readShortVec(0);
+  let cursor = messageOffset + signatureCount * 64;
+  if ((bytes[cursor] & 0x80) !== 0) cursor += 1;
+  cursor += 3;
+  const [accountCount, accountsOffset] = readShortVec(cursor);
+  cursor = accountsOffset + accountCount * 32;
+  const replacement = Buffer.alloc(32);
+  Buffer.from(blockhash).copy(replacement, 0, 0, 32);
+  replacement.copy(bytes, cursor);
+  return bytes.toString("base64");
+}
+
+function withComputeUnitLimit(transaction: string, units: number): string {
+  const bytes = Buffer.from(transaction, "base64");
+  const marker = Buffer.from([2, 0x40, 0x0d, 0x03, 0]);
+  const offset = bytes.indexOf(marker);
+  if (offset < 0) throw new Error("compute-unit-limit instruction not found");
+  bytes.writeUInt32LE(units, offset + 1);
+  return bytes.toString("base64");
+}
 
 setDefaultTimeout(30_000);
 
@@ -130,9 +165,8 @@ describe("Solana durable recovery anchors", () => {
   });
 
   it("keeps the parsed-route anchor and submitted signature when final bookkeeping fails", async () => {
-    const context = await import("../services/context");
-    const originalSign = context.vault.signSolanaTransaction.bind(context.vault);
-    context.vault.signSolanaTransaction = async (request) => {
+    const originalSign = Vault.prototype.signSolanaTransaction;
+    Vault.prototype.signSolanaTransaction = async (request) => {
       const staged = await onlyRecoveryRow();
       expect(staged.status).toBe("approved");
       expect(staged.data).toBe(WITHIN_CAP_V0_TRANSFER);
@@ -180,7 +214,7 @@ describe("Solana durable recovery anchors", () => {
       expect(surviving.txHash).toBe(SIGNATURE);
       expect(surviving.data).toBe(WITHIN_CAP_V0_TRANSFER);
     } finally {
-      context.vault.signSolanaTransaction = originalSign;
+      Vault.prototype.signSolanaTransaction = originalSign;
       await getDb().execute(
         sql.raw("ALTER TABLE transactions DROP CONSTRAINT test_reject_solana_finalization"),
       );
@@ -189,9 +223,8 @@ describe("Solana durable recovery anchors", () => {
 
   it("keeps the blind-route broadcast row and success response when final audit fails", async () => {
     process.env.STEWARD_ALLOW_UNSAFE_SOLANA_BLIND_SIGNING = "true";
-    const context = await import("../services/context");
-    const originalSign = context.vault.signSolanaTransaction.bind(context.vault);
-    context.vault.signSolanaTransaction = async (request) => {
+    const originalSign = Vault.prototype.signSolanaTransaction;
+    Vault.prototype.signSolanaTransaction = async (request) => {
       const staged = await onlyRecoveryRow();
       expect(staged.status).toBe("approved");
       expect(staged.data).toBe("not-a-solana-transaction");
@@ -225,14 +258,18 @@ describe("Solana durable recovery anchors", () => {
         }),
       });
 
-      expect(response.status).toBe(500);
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({
+        ok: true,
+        data: { txId: expect.any(String), signature: SIGNATURE, broadcast: true },
+      });
       const surviving = await onlyRecoveryRow();
       expect(surviving.status).toBe("broadcast");
       expect(surviving.txHash).toBe(SIGNATURE);
       expect(surviving.data).toBe("not-a-solana-transaction");
       expect(readPayload(surviving.actionPayload).recoveryEffectsState).toBe("pending");
     } finally {
-      context.vault.signSolanaTransaction = originalSign;
+      Vault.prototype.signSolanaTransaction = originalSign;
       process.env.STEWARD_AUDIT_HMAC_KEY =
         "solana-recovery-anchor-audit-hmac-key-with-more-than-32-bytes";
       __resetAuditHmacKeyCacheForTests();
@@ -241,9 +278,8 @@ describe("Solana durable recovery anchors", () => {
 
   it("keeps recovery effects pending while a configured Redis backend is unavailable", async () => {
     process.env.REDIS_URL = "redis://127.0.0.1:1";
-    const context = await import("../services/context");
-    const originalSign = context.vault.signSolanaTransaction.bind(context.vault);
-    context.vault.signSolanaTransaction = async (request) => {
+    const originalSign = Vault.prototype.signSolanaTransaction;
+    Vault.prototype.signSolanaTransaction = async (request) => {
       await request.onBroadcastPrepared?.({
         signature: SIGNATURE,
         recentBlockhash: RECENT_BLOCKHASH,
@@ -261,21 +297,24 @@ describe("Solana durable recovery anchors", () => {
         body: JSON.stringify({ transaction: WITHIN_CAP_V0_TRANSFER, broadcast: true }),
       });
 
-      expect(response.status).toBe(500);
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({
+        ok: true,
+        data: { txId: expect.any(String), signature: SIGNATURE, broadcast: true },
+      });
       const surviving = await onlyRecoveryRow();
       expect(surviving.status).toBe("broadcast");
       expect(surviving.txHash).toBe(SIGNATURE);
       expect(readPayload(surviving.actionPayload).recoveryEffectsState).toBe("pending");
     } finally {
-      context.vault.signSolanaTransaction = originalSign;
+      Vault.prototype.signSolanaTransaction = originalSign;
       delete process.env.REDIS_URL;
     }
   });
 
   it("returns a non-retryable 202 with the durable hash when confirmation is ambiguous", async () => {
-    const context = await import("../services/context");
-    const originalSign = context.vault.signSolanaTransaction.bind(context.vault);
-    context.vault.signSolanaTransaction = async (request) => {
+    const originalSign = Vault.prototype.signSolanaTransaction;
+    Vault.prototype.signSolanaTransaction = async (request) => {
       expect((await onlyRecoveryRow()).status).toBe("approved");
       await request.onBroadcastPrepared?.({
         signature: SIGNATURE,
@@ -308,15 +347,105 @@ describe("Solana durable recovery anchors", () => {
       const surviving = await onlyRecoveryRow();
       expect(surviving.status).toBe("outcome_unknown");
       expect(surviving.txHash).toBe(SIGNATURE);
+      expect(readPayload(surviving.actionPayload).recoveryEffectsState).toBe("accounted_unknown");
+      expect(
+        await getDb()
+          .select()
+          .from(auditEvents)
+          .where(
+            and(
+              eq(auditEvents.resourceId, surviving.id),
+              eq(auditEvents.action, "vault.sign.solana.effects_completed"),
+            ),
+          ),
+      ).toHaveLength(0);
     } finally {
-      context.vault.signSolanaTransaction = originalSign;
+      Vault.prototype.signSolanaTransaction = originalSign;
+    }
+  });
+
+  it("serializes ambiguous accounting against a failed reconciliation without success evidence", async () => {
+    const routes = await import("../routes/vault");
+    const originalSign = Vault.prototype.signSolanaTransaction;
+    const originalReconcile = Vault.prototype.reconcileSolanaBroadcast;
+    let releaseClaim!: () => void;
+    const claimRelease = new Promise<void>((resolve) => {
+      releaseClaim = resolve;
+    });
+    let reportClaim!: () => void;
+    const claimEntered = new Promise<void>((resolve) => {
+      reportClaim = resolve;
+    });
+    const restoreClaimHook = routes.__setSolanaRecoveryEffectsClaimHookForTests(async (input) => {
+      if (input.status !== "outcome_unknown") return;
+      reportClaim();
+      await claimRelease;
+    });
+    Vault.prototype.signSolanaTransaction = async (request) => {
+      await request.onBroadcastPrepared?.({
+        signature: SIGNATURE,
+        recentBlockhash: RECENT_BLOCKHASH,
+      });
+      throw new ExternalBroadcastOutcomeUnknownError(SIGNATURE);
+    };
+    Vault.prototype.reconcileSolanaBroadcast = async () => "failed";
+
+    try {
+      const first = app.request(`/vault/${AGENT_ID}/sign-solana`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "Idempotency-Key": "solana-recovery-effects-reconcile-race",
+        },
+        body: JSON.stringify({ transaction: WITHIN_CAP_V0_TRANSFER, broadcast: true }),
+      });
+      await claimEntered;
+      const staged = await onlyRecoveryRow();
+      expect(readPayload(staged.actionPayload).recoveryEffectsState).toBe("processing");
+
+      const blocked = await app.request(
+        `/vault/${AGENT_ID}/transactions/${staged.id}/reconcile-solana`,
+        { method: "POST" },
+      );
+      expect(blocked.status).toBe(409);
+      expect((await onlyRecoveryRow()).status).toBe("outcome_unknown");
+
+      releaseClaim();
+      expect((await first).status).toBe(202);
+      expect(readPayload((await onlyRecoveryRow()).actionPayload).recoveryEffectsState).toBe(
+        "accounted_unknown",
+      );
+
+      const reconciled = await app.request(
+        `/vault/${AGENT_ID}/transactions/${staged.id}/reconcile-solana`,
+        { method: "POST" },
+      );
+      expect(reconciled.status).toBe(200);
+      const final = await onlyRecoveryRow();
+      expect(final.status).toBe("failed");
+      expect(readPayload(final.actionPayload).recoveryEffectsState).toBe("accounted_unknown");
+      expect(
+        await getDb()
+          .select()
+          .from(auditEvents)
+          .where(
+            and(
+              eq(auditEvents.resourceId, staged.id),
+              eq(auditEvents.action, "vault.sign.solana.effects_completed"),
+            ),
+          ),
+      ).toHaveLength(0);
+    } finally {
+      releaseClaim();
+      restoreClaimHook();
+      Vault.prototype.signSolanaTransaction = originalSign;
+      Vault.prototype.reconcileSolanaBroadcast = originalReconcile;
     }
   });
 
   it("replays the confirmed winner when definite-preflight cleanup loses its signature CAS", async () => {
-    const context = await import("../services/context");
-    const originalSign = context.vault.signSolanaTransaction.bind(context.vault);
-    context.vault.signSolanaTransaction = async (request) => {
+    const originalSign = Vault.prototype.signSolanaTransaction;
+    Vault.prototype.signSolanaTransaction = async (request) => {
       await request.onBroadcastPrepared?.({
         signature: SIGNATURE,
         recentBlockhash: RECENT_BLOCKHASH,
@@ -355,13 +484,13 @@ describe("Solana durable recovery anchors", () => {
         );
       expect(notSubmittedAudits).toHaveLength(0);
     } finally {
-      context.vault.signSolanaTransaction = originalSign;
+      Vault.prototype.signSolanaTransaction = originalSign;
     }
   });
 
   it("durably replays across both cache-unsafe and cache-safe session auth", async () => {
     const context = await import("../services/context");
-    const originalSign = context.vault.signSolanaTransaction.bind(context.vault);
+    const originalSign = Vault.prototype.signSolanaTransaction;
     let signCalls = 0;
     let releaseAttempt!: () => void;
     const attemptBarrier = new Promise<void>((resolve) => {
@@ -371,7 +500,7 @@ describe("Solana durable recovery anchors", () => {
     const attemptStarted = new Promise<void>((resolve) => {
       signalAttemptStarted = resolve;
     });
-    context.vault.signSolanaTransaction = async (request) => {
+    Vault.prototype.signSolanaTransaction = async (request) => {
       signCalls += 1;
       signalAttemptStarted();
       await attemptBarrier;
@@ -386,7 +515,7 @@ describe("Solana durable recovery anchors", () => {
         caip2: "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
       };
     };
-    const request = (recentMfa = false) =>
+    const request = (recentMfa = false, transaction = WITHIN_CAP_V0_TRANSFER) =>
       app.request(`/vault/${AGENT_ID}/sign-solana`, {
         method: "POST",
         headers: {
@@ -394,7 +523,7 @@ describe("Solana durable recovery anchors", () => {
           "Idempotency-Key": "session-admin-durable-solana-replay",
           ...(recentMfa ? { "x-test-recent-mfa": "true" } : {}),
         },
-        body: JSON.stringify({ transaction: WITHIN_CAP_V0_TRANSFER, broadcast: true }),
+        body: JSON.stringify({ transaction, broadcast: true }),
       });
 
     try {
@@ -410,7 +539,16 @@ describe("Solana durable recovery anchors", () => {
 
       releaseAttempt();
       const first = await firstPromise;
-      const replay = await request(true);
+      const changedComputeBudget = await request(
+        true,
+        withComputeUnitLimit(WITHIN_CAP_V0_TRANSFER, 210_000),
+      );
+      expect(changedComputeBudget.status).toBe(409);
+      expect(await changedComputeBudget.json()).toMatchObject({
+        ok: false,
+        error: "Idempotency-Key was already used for a different Solana transaction",
+      });
+      const replay = await request(true, withRecentBlockhash(WITHIN_CAP_V0_TRANSFER, RECIPIENT));
       expect(first.status).toBe(200);
       expect(replay.status).toBe(200);
       expect(replay.headers.get("Idempotency-Replayed")).toBeNull();
@@ -447,13 +585,13 @@ describe("Solana durable recovery anchors", () => {
       expect(mismatch.status).toBe(409);
       expect(signCalls).toBe(1);
     } finally {
-      context.vault.signSolanaTransaction = originalSign;
+      Vault.prototype.signSolanaTransaction = originalSign;
     }
   });
 
-  it("fences a stale callback after an expired signing lease is taken over", async () => {
+  it("never takes over an expired lease after its parsed claim entered raw custody", async () => {
     const context = await import("../services/context");
-    const originalSign = context.vault.signSolanaTransaction.bind(context.vault);
+    const originalSign = Vault.prototype.signSolanaTransaction;
     let signCalls = 0;
     let submittedCalls = 0;
     let releaseStale!: () => void;
@@ -464,23 +602,10 @@ describe("Solana durable recovery anchors", () => {
     const staleStarted = new Promise<void>((resolve) => {
       signalStaleStarted = resolve;
     });
-    let releaseWinner!: () => void;
-    const winnerBarrier = new Promise<void>((resolve) => {
-      releaseWinner = resolve;
-    });
-    let signalWinnerStarted!: () => void;
-    const winnerStarted = new Promise<void>((resolve) => {
-      signalWinnerStarted = resolve;
-    });
-    context.vault.signSolanaTransaction = async (request) => {
+    Vault.prototype.signSolanaTransaction = async (request) => {
       signCalls += 1;
-      if (signCalls === 1) {
-        signalStaleStarted();
-        await staleBarrier;
-      } else {
-        signalWinnerStarted();
-        await winnerBarrier;
-      }
+      signalStaleStarted();
+      await staleBarrier;
       await request.onBroadcastPrepared?.({
         signature: SIGNATURE,
         recentBlockhash: RECENT_BLOCKHASH,
@@ -517,30 +642,27 @@ describe("Solana durable recovery anchors", () => {
         })
         .where(eq(transactions.id, staged.id));
 
-      const takeoverResponse = request();
-      await winnerStarted;
-      expect(signCalls).toBe(2);
+      const takeoverResponse = await request();
+      expect(takeoverResponse.status).toBe(409);
+      expect(await takeoverResponse.json()).toMatchObject({
+        ok: false,
+        data: { status: "processing" },
+      });
+      expect(signCalls).toBe(1);
       expect(submittedCalls).toBe(0);
 
       releaseStale();
-      expect((await staleResponse).status).toBe(409);
-      expect((await onlyRecoveryRow()).status).toBe("approved");
-      expect(submittedCalls).toBe(0);
-
-      releaseWinner();
-      expect((await takeoverResponse).status).toBe(200);
+      expect((await staleResponse).status).toBe(200);
       expect(submittedCalls).toBe(1);
       expect((await onlyRecoveryRow()).status).toBe("broadcast");
     } finally {
       releaseStale();
-      releaseWinner();
-      context.vault.signSolanaTransaction = originalSign;
+      Vault.prototype.signSolanaTransaction = originalSign;
     }
   });
 
   it("reconciles only the stored signature and blockhash through guarded transitions", async () => {
-    const context = await import("../services/context");
-    const originalReconcile = context.vault.reconcileSolanaBroadcast.bind(context.vault);
+    const originalReconcile = Vault.prototype.reconcileSolanaBroadcast;
     const cases = [
       { outcome: "confirmed" as const, status: 200 },
       { outcome: "broadcast" as const, status: 200 },
@@ -575,7 +697,7 @@ describe("Solana durable recovery anchors", () => {
                 : {}),
             },
           });
-        context.vault.reconcileSolanaBroadcast = async (input) => {
+        Vault.prototype.reconcileSolanaBroadcast = async (input) => {
           expect(input).toEqual({
             signature: SIGNATURE,
             recentBlockhash: RECENT_BLOCKHASH,
@@ -605,7 +727,70 @@ describe("Solana durable recovery anchors", () => {
         }
       }
     } finally {
-      context.vault.reconcileSolanaBroadcast = originalReconcile;
+      Vault.prototype.reconcileSolanaBroadcast = originalReconcile;
+    }
+  });
+
+  it("retries durable effects without re-querying Solana after reconciliation committed", async () => {
+    const originalReconcile = Vault.prototype.reconcileSolanaBroadcast;
+    let reconcileCalls = 0;
+    Vault.prototype.reconcileSolanaBroadcast = async () => {
+      reconcileCalls++;
+      return "broadcast";
+    };
+    const txId = "solana-reconcile-effects-retry";
+    await getDb()
+      .insert(transactions)
+      .values({
+        id: txId,
+        agentId: AGENT_ID,
+        status: "outcome_unknown",
+        toAddress: RECIPIENT,
+        value: "123",
+        chainId: 101,
+        txHash: SIGNATURE,
+        actionType: "solana_transaction",
+        actionPayload: {
+          type: "solana_transaction",
+          recoveryAnchor: true,
+          recentBlockhash: RECENT_BLOCKHASH,
+          recoveryEffectsState: "pending",
+        },
+      });
+    try {
+      // Force the effects phase to fail only after the authoritative RPC result
+      // has already transitioned the row to broadcast.
+      process.env.REDIS_URL = "redis://127.0.0.1:1";
+      const first = await app.request(`/vault/${AGENT_ID}/transactions/${txId}/reconcile-solana`, {
+        method: "POST",
+      });
+      expect(first.status).toBe(500);
+      const [committed] = await getDb()
+        .select()
+        .from(transactions)
+        .where(eq(transactions.id, txId));
+      expect(committed.status).toBe("broadcast");
+      expect(readPayload(committed.actionPayload).recoveryEffectsState).toBe("pending");
+
+      delete process.env.REDIS_URL;
+      Vault.prototype.reconcileSolanaBroadcast = async () => {
+        throw new Error("a committed reconciliation must not be queried again");
+      };
+      const response = await app.request(
+        `/vault/${AGENT_ID}/transactions/${txId}/reconcile-solana`,
+        { method: "POST" },
+      );
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({
+        ok: true,
+        data: { txId, signature: SIGNATURE, status: "broadcast" },
+      });
+      const [row] = await getDb().select().from(transactions).where(eq(transactions.id, txId));
+      expect(readPayload(row.actionPayload).recoveryEffectsState).toBe("complete");
+      expect(reconcileCalls).toBe(1);
+    } finally {
+      delete process.env.REDIS_URL;
+      Vault.prototype.reconcileSolanaBroadcast = originalReconcile;
     }
   });
 });
