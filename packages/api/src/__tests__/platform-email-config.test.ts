@@ -1,6 +1,12 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 
-import { closeDb, getDb, tenantConfigs, tenants } from "@stwd/db";
+import {
+  __resetAuditHmacKeyCacheForTests,
+  closeDb,
+  getDb,
+  tenantConfigs,
+  tenants,
+} from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { eq } from "drizzle-orm";
 
@@ -13,6 +19,8 @@ describe("platform tenant email config routes", () => {
   beforeAll(async () => {
     process.env.STEWARD_PGLITE_MEMORY = "true";
     process.env.STEWARD_MASTER_PASSWORD = "platform-email-config-master-password";
+    process.env.STEWARD_AUDIT_HMAC_KEY = "platform-email-config-audit-key-with-enough-entropy";
+    __resetAuditHmacKeyCacheForTests();
     process.env.STEWARD_PLATFORM_KEYS = PLATFORM_KEY;
     process.env.STEWARD_PLATFORM_KEY_SCOPES = JSON.stringify({
       [PLATFORM_KEY]: [
@@ -43,6 +51,8 @@ describe("platform tenant email config routes", () => {
   afterAll(async () => {
     await closeDb();
     delete process.env.STEWARD_MASTER_PASSWORD;
+    delete process.env.STEWARD_AUDIT_HMAC_KEY;
+    __resetAuditHmacKeyCacheForTests();
     delete process.env.STEWARD_PLATFORM_KEYS;
     delete process.env.STEWARD_PLATFORM_KEY_SCOPES;
   });

@@ -126,12 +126,23 @@ for (const writerMode of ["same", "unrelated"] as const) {
             stderr: "pipe",
           },
         );
+        const writerApplicationName = `platform-config-writer-${successRequestId}`;
         for (let attempt = 0; attempt < 100; attempt++) {
-          const [waiting] = await admin.client<{ count: string }[]>`
-            select count(*)::text as count from pg_stat_activity where wait_event = 'advisory'
+          const [writerActivity] = await admin.client<
+            { state: string; wait_event_type: string | null; wait_event: string | null }[]
+          >`
+            select state, wait_event_type, wait_event
+            from pg_stat_activity
+            where application_name = ${writerApplicationName}
           `;
-          if (Number(waiting?.count ?? "0") >= 2) break;
-          if (attempt === 99) throw new Error("concurrent writer did not reach tenant audit lock");
+          if (writerActivity?.state === "active" && writerActivity.wait_event_type === "Lock") {
+            break;
+          }
+          if (attempt === 99) {
+            throw new Error(
+              `concurrent writer did not block on the route transaction row lock: ${JSON.stringify(writerActivity ?? null)}`,
+            );
+          }
           await Bun.sleep(10);
         }
 
