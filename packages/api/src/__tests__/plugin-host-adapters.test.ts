@@ -20,6 +20,7 @@
 import { describe, expect, it } from "bun:test";
 import { AdapterRegistry } from "@stwd/adapters";
 import type { AdapterContribution } from "@stwd/shared";
+import { withRuntimeEnvironment } from "@stwd/shared/runtime-env";
 import type { StewardApp } from "../plugin";
 import { PluginHost, PluginHostError } from "../plugin";
 
@@ -79,6 +80,22 @@ describe("PluginHost — adapter contributions (Phase 2d)", () => {
     expect(host.describe().adapterContributions.trading).toEqual(["swap::test-swap"]);
   });
 
+  it("registers request-authority factories without retaining their results", async () => {
+    const registry = new AdapterRegistry({ env: { STEWARD_SWAP_ADAPTER: "factory-swap" } });
+    let generation = 0;
+    const plugin = adapterPlugin("factory-plugin", [
+      {
+        category: "swap",
+        provider: "factory-swap",
+        createAdapter: () => fakeSwapAdapter(`factory-${++generation}`),
+      },
+    ]);
+
+    await new PluginHost<typeof registry>().register(app, ctxWith(registry), plugin);
+    expect(registry.swap().provider).toBe("factory-1");
+    expect(registry.swap().provider).toBe("factory-2");
+  });
+
   it("registers without env disambiguation when a single provider is contributed", async () => {
     // No STEWARD_SWAP_ADAPTER set; a single registered provider is used as-is.
     const registry = new AdapterRegistry({ env: {} });
@@ -92,6 +109,36 @@ describe("PluginHost — adapter contributions (Phase 2d)", () => {
     await host.register(app, ctx, plugin);
 
     expect(registry.swap().provider).toBe("solo-swap");
+  });
+
+  it("keeps plugin providers durable while each request selects its own authority", async () => {
+    const registry = new AdapterRegistry();
+    const ctx = ctxWith(registry);
+    const plugin = adapterPlugin("rotating-trading", [
+      { category: "swap", provider: "plugin-a", adapter: fakeSwapAdapter("plugin-a") },
+      { category: "swap", provider: "plugin-b", adapter: fakeSwapAdapter("plugin-b") },
+    ]);
+
+    const host = new PluginHost<typeof ctx>();
+    await host.register(app, ctx, plugin);
+
+    const selected = (provider: string) =>
+      withRuntimeEnvironment(
+        {
+          STEWARD_RUNTIME: "workers",
+          NODE_ENV: "production",
+          STEWARD_SWAP_ADAPTER: provider,
+        },
+        () => registry.swap(),
+      );
+
+    expect(selected("plugin-a").provider).toBe("plugin-a");
+    expect(selected("plugin-b").provider).toBe("plugin-b");
+    expect(selected("removed-plugin")).toMatchObject({ provider: "disabled", enabled: false });
+    expect(host.describe().adapterContributions["rotating-trading"]).toEqual([
+      "swap::plugin-a",
+      "swap::plugin-b",
+    ]);
   });
 
   it("FAILS CLOSED on a (category, provider) collision between two plugins", async () => {
@@ -183,6 +230,23 @@ describe("PluginHost — adapter contributions (Phase 2d)", () => {
 
     const host = new PluginHost<typeof ctx>();
     await expect(host.register(app, ctx, plugin)).rejects.toThrow(PluginHostError);
+  });
+
+  it("FAILS CLOSED when a contribution supplies both an instance and a factory", async () => {
+    const registry = new AdapterRegistry({ env: {} });
+    const ctx = ctxWith(registry);
+    const plugin = adapterPlugin("ambiguous", [
+      {
+        category: "swap",
+        provider: "x",
+        adapter: fakeSwapAdapter("x"),
+        createAdapter: () => fakeSwapAdapter("x"),
+      },
+    ]);
+
+    await expect(new PluginHost<typeof ctx>().register(app, ctx, plugin)).rejects.toThrow(
+      PluginHostError,
+    );
   });
 
   it("FAILS CLOSED on an empty provider name", async () => {

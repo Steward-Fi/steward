@@ -22,6 +22,7 @@ const globalRateLimitSource = readFileSync(
 const appSource = readFileSync(join(apiRoot, "app.ts"), "utf8");
 const contextSource = readFileSync(join(apiRoot, "services", "context.ts"), "utf8");
 const indexSource = readFileSync(join(apiRoot, "index.ts"), "utf8");
+const readinessSource = readFileSync(join(apiRoot, "readiness.ts"), "utf8");
 const webRoot = join(import.meta.dir, "..", "..", "..", "..", "web", "src");
 const webMiddlewareSource = readFileSync(join(webRoot, "middleware.ts"), "utf8");
 // The dashboard CSP is constructed in web/src/lib/csp.ts (extracted from
@@ -102,11 +103,11 @@ describe("middleware security hardening", () => {
   });
 
   it("trims /ready fingerprint detail unless a probe token is presented (SEC-071)", () => {
-    expect(indexSource).toContain("function readyProbeAuthorized(");
+    expect(readinessSource).toContain("function probeAuthorized(");
     expect(indexSource).toContain("STEWARD_READY_PROBE_TOKEN");
-    expect(indexSource).toContain("timingSafeEqual");
-    expect(indexSource).toContain('"x-steward-probe-token"');
-    expect(indexSource).toContain("checks: verbose ? checks : publicChecks");
+    expect(readinessSource).toContain("timingSafeEqual");
+    expect(readinessSource).toContain('"x-steward-probe-token"');
+    expect(readinessSource).toContain("checks: verbose ? checks : publicChecks");
     expect(indexSource).toContain("globalRateLimitRequiresRedis()");
     expect(indexSource).toContain("Redis is required for durable production rate limiting");
   });

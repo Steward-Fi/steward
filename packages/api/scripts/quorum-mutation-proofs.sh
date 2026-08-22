@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# #205 quorum mutation-strength proofs. Each mutation weakens ONE security
+# Quorum mutation-strength proofs. Each mutation weakens ONE security
 # predicate of the M-of-N quorum lifecycle; a proof is valid iff the named test
 # PASSES clean AND FAILS after the mutation. The file is restored after each
 # proof (no .bak residue). Run from packages/api:

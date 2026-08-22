@@ -25,9 +25,13 @@ import { arbitrum, base, bsc, gnosis, mainnet, optimism, polygon } from "wagmi/c
  * loudly at runtime if the fallback is somehow still in use.
  */
 const SHARED_FALLBACK_PROJECT_ID = "2c7ddf841a48e522748c5e2782d73443";
-const projectId = process.env.NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID || SHARED_FALLBACK_PROJECT_ID;
+export const WALLETCONNECT_PROJECT_ID =
+  process.env.NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID || SHARED_FALLBACK_PROJECT_ID;
 
-if (process.env.NODE_ENV === "production" && projectId === SHARED_FALLBACK_PROJECT_ID) {
+if (
+  process.env.NODE_ENV === "production" &&
+  WALLETCONNECT_PROJECT_ID === SHARED_FALLBACK_PROJECT_ID
+) {
   console.warn(
     "[steward] NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID is unset: this build shares the default WalletConnect projectId quota/identity. Configure a dedicated projectId for production.",
   );
@@ -65,7 +69,7 @@ export function getWagmiConfig(): Config {
         ],
       },
     ],
-    { appName: "Steward", projectId },
+    { appName: "Steward", projectId: WALLETCONNECT_PROJECT_ID },
   );
   cachedConfig = createConfig({
     connectors,

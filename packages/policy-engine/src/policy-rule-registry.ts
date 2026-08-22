@@ -10,8 +10,8 @@
  * owns its own rule type (e.g. a venue-specific gate) cannot have that type
  * evaluated: it falls into `default:` and is denied as "Unknown policy type".
  *
- * Phase 2b of the plugin SDK lets a plugin DECLARE a rule type + evaluator
- * (`StewardPlugin.policyRules`). the plugin host registers those evaluators HERE
+ * A plugin declares a rule type and evaluator through
+ * `StewardPlugin.policyRules`. the plugin host registers those evaluators HERE
  * at composition time. `evaluatePolicy`'s `default:` consults this registry BEFORE
  * returning "Unknown policy type": if a plugin registered an evaluator for the
  * rule's type, that evaluator runs; otherwise the deny is unchanged.
@@ -19,7 +19,7 @@
  * IMPORTANT — CORE BEHAVIOR IS UNTOUCHED. the 16 core `case` arms are not changed
  * in any way; the registry is consulted ONLY in the `default:` arm, i.e. ONLY for
  * a rule type that is not a core type. a core policy decision is byte-identical
- * before and after this phase. the registry can never shadow a core rule type:
+ * with or without plugin contributions. the registry can never shadow a core rule type:
  * registration FAILS CLOSED (throws) on a `type` that is a core type or that a
  * prior plugin already registered.
  *

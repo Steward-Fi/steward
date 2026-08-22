@@ -26,20 +26,22 @@ describe("webhook audit ordering", () => {
   // so they require a recent owner/admin MFA session before
   // the tenant-level check — a tenant API key or stale admin session cannot
   // create, modify, or replay persistent webhooks.
-  it("requires recent owner/admin MFA for webhook control-plane routes", () => {
+  it("requires recent owner/admin MFA for webhook mutation and delivery-control routes", () => {
     for (const marker of [
       'webhookRoutes.post("/",',
-      'webhookRoutes.get("/",',
       'webhookRoutes.put("/:id",',
       'webhookRoutes.delete("/:id",',
+      'webhookRoutes.post("/:id/test",',
       'webhookRoutes.get("/:id/deliveries",',
+      'webhookRoutes.get("/:id/deliveries/export",',
+      'webhookRoutes.post("/deliveries/:id/replay",',
       'webhookRoutes.post("/deliveries/:id/retry",',
     ] as const) {
       const start = routeSource.indexOf(marker);
       expect(start).toBeGreaterThanOrEqual(0);
-      // Each control-plane route gates on a recent owner/admin MFA session.
-      const mfaCheck = routeSource.indexOf("requireRecentTenantAdminMfa(c", start);
-      expect(mfaCheck).toBeGreaterThan(start);
+      const nextRoute = routeSource.indexOf("\nwebhookRoutes.", start + marker.length);
+      const route = routeSource.slice(start, nextRoute === -1 ? undefined : nextRoute);
+      expect(route).toContain("requireRecentTenantAdminMfa(c");
     }
   });
 
@@ -49,19 +51,18 @@ describe("webhook audit ordering", () => {
     expectBefore('action: "webhook_delivery.retry.authorized"', ".update(webhookDeliveries)");
   });
 
-  it("rolls back webhook mutations when final audit writes fail", () => {
+  it("commits webhook mutations and completion audits in one transaction", () => {
     const updateStart = routeSource.indexOf('webhookRoutes.put("/:id"');
     expect(updateStart).toBeGreaterThanOrEqual(0);
     const updateRoute = routeSource.slice(
       updateStart,
       routeSource.indexOf('webhookRoutes.delete("/:id"', updateStart),
     );
+    expect(updateRoute).toContain("withTenantAuditedTransaction");
     expect(updateRoute).toContain('action: "webhook.update"');
-    expect(updateRoute).toContain("} catch (err) {");
     expect(updateRoute).toContain(".update(webhookConfigs)");
-    expect(updateRoute).toContain("url: existing.url");
-    expect(updateRoute).toContain("secret: existing.secret");
-    expect(updateRoute).toContain("updatedAt: existing.updatedAt");
+    expect(updateRoute).not.toContain("secret: existing.secret");
+    expect(updateRoute).not.toContain("updatedAt: existing.updatedAt");
 
     const deleteStart = routeSource.indexOf('webhookRoutes.delete("/:id"');
     expect(deleteStart).toBeGreaterThanOrEqual(0);
@@ -69,24 +70,21 @@ describe("webhook audit ordering", () => {
       deleteStart,
       routeSource.indexOf('webhookRoutes.get("/:id/deliveries"', deleteStart),
     );
+    expect(deleteRoute).toContain("withTenantAuditedTransaction");
     expect(deleteRoute).toContain('action: "webhook.delete"');
-    expect(deleteRoute).toContain("} catch (err) {");
-    expect(deleteRoute).toContain("db.insert(webhookConfigs).values");
-    expect(deleteRoute).toContain("id: deleted.id");
-    expect(deleteRoute).toContain("secret: deleted.secret");
-    expect(deleteRoute).toContain("updatedAt: deleted.updatedAt");
+    expect(deleteRoute).not.toContain("db.insert(webhookConfigs).values");
+    expect(deleteRoute).not.toContain("secret: deleted.secret");
 
     const retryStart = routeSource.indexOf('webhookRoutes.post("/deliveries/:id/retry"');
     expect(retryStart).toBeGreaterThanOrEqual(0);
     const retryRoute = routeSource.slice(retryStart);
     const mutation = retryRoute.indexOf(".update(webhookDeliveries)");
     const finalAudit = retryRoute.indexOf('action: "webhook_delivery.retry"', mutation);
-    const rollback = retryRoute.indexOf("status: delivery.status", finalAudit);
     expect(mutation).toBeGreaterThanOrEqual(0);
     expect(finalAudit).toBeGreaterThan(mutation);
-    expect(rollback).toBeGreaterThan(finalAudit);
-    expect(retryRoute).toContain("nextRetryAt: delivery.nextRetryAt");
-    expect(retryRoute).toContain("lastError: delivery.lastError");
+    expect(retryRoute).toContain("withTenantAuditedTransaction");
+    expect(retryRoute).not.toContain("status: delivery.status");
+    expect(retryRoute).not.toContain("nextRetryAt: delivery.nextRetryAt");
   });
 
   it("does not report test or replay dispatch success when final audit fails", () => {
@@ -187,7 +185,7 @@ describe("webhook audit ordering", () => {
     expect(retryRouteIndex).toBeGreaterThanOrEqual(0);
     const retryRoute = routeSource.slice(retryRouteIndex);
 
-    expect(retryRoute).toContain("attempt budget");
+    expect(retryRoute).toContain("retry budget");
     expect(retryRoute).not.toContain("attempts: 0");
   });
 

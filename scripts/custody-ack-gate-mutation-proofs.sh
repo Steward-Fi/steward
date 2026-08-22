@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Mutation proofs for the production local-custody acknowledgement gate (issue #213).
+# Mutation proofs for the production local-custody acknowledgement gate.
 #
 # For each mutation we WEAKEN the guard in vault-factory.ts, confirm the
 # security test suite goes RED, then RESTORE the original and confirm GREEN.

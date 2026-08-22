@@ -16,17 +16,18 @@ import {
   generateApiKey,
   hashSha256Hex,
   hasPlatformScope,
-  isDevSecretAllowed,
   isValidE164,
   platformAuthMiddleware,
   revocationStore,
 } from "@stwd/auth";
 import {
+  type AppendRequiredAudit,
   accounts,
   agents,
   agentWallets,
   approvalQueue,
   auditEvents,
+  authenticators,
   encryptedChainKeys,
   encryptedKeys,
   getDb,
@@ -50,6 +51,7 @@ import {
   vaultSigningFreezes,
   withTenantAuditedTransactionOnDb,
 } from "@stwd/db";
+import { shouldUsePGLite } from "@stwd/db/pglite";
 import {
   type AgentIdentity,
   type ApiResponse,
@@ -60,7 +62,7 @@ import {
   type TenantOidcProviderConfig,
   type TenantTestAccountConfig,
 } from "@stwd/shared";
-import { KeyStore, Vault } from "@stwd/vault";
+import { type KeyStore, Vault } from "@stwd/vault";
 import {
   and,
   count,
@@ -88,10 +90,7 @@ import {
 } from "../services/context";
 import { normalizeGasSpendQuery, querySponsoredGasSpend } from "../services/gas-sponsorship";
 import { normalizeOidcProviders } from "../services/oidc-provider-config";
-import {
-  withPlatformAuthorityDatabase,
-  withPlatformAuthorityTransaction,
-} from "../services/platform-authority-database";
+import { withPlatformAuthorityDatabase } from "../services/platform-authority-database";
 import { getPolicyRulesValidationError } from "../services/policy-validation";
 import { lockUserSession, lockUserSessions } from "../services/session-lock";
 import {
@@ -99,7 +98,7 @@ import {
   publicTestAccount,
   redactedTestAccount,
 } from "../services/test-account-credentials";
-import { getConfiguredVault } from "../services/vault-factory";
+import { getConfiguredKeyStore, getConfiguredVault } from "../services/vault-factory";
 import { dispatchWebhook } from "../services/webhook-dispatch";
 import { getEmailAuthForTenant, invalidateEmailAuthForTenant } from "./auth";
 
@@ -241,13 +240,6 @@ async function restorePlatformTenantConfigRow(
   });
 }
 
-async function deletePlatformCreatedTenant(tenantId: string): Promise<void> {
-  const db = getDb();
-  await db.transaction(async (tx) => {
-    await tx.delete(tenants).where(eq(tenants.id, tenantId));
-  });
-}
-
 async function deletePlatformCreatedAgent(agentId: string, tenantId: string): Promise<void> {
   const db = getDb();
   await db.transaction(async (tx) => {
@@ -261,8 +253,10 @@ async function deletePlatformCreatedAgent(agentId: string, tenantId: string): Pr
   });
 }
 
-async function tenantIdHasRetainedState(tenantId: string): Promise<boolean> {
-  const db = getDb();
+async function tenantIdHasRetainedState(
+  tenantId: string,
+  db: Pick<ReturnType<typeof getDb>, "select"> = getDb(),
+): Promise<boolean> {
   const [[secret], [secretRoute], [proxyAudit], [auditEvent]] = await Promise.all([
     db.select({ id: secrets.id }).from(secrets).where(eq(secrets.tenantId, tenantId)).limit(1),
     db
@@ -349,6 +343,7 @@ async function lockTenantOwnerLifecycle(
   tx: Pick<ReturnType<typeof getDb>, "execute">,
   tenantId: string,
 ): Promise<void> {
+  if (shouldUsePGLite()) return;
   await tx.execute(
     sql`select pg_advisory_xact_lock(hashtextextended(${tenantOwnerLifecycleLockKey(tenantId)}, 0))`,
   );
@@ -381,6 +376,35 @@ function auditCtx(c: {
   };
 }
 
+/**
+ * The platform identity graph is global, so its authoritative mutations use
+ * the dedicated platform-role connection. The tenant audit lock is acquired
+ * before user-session locks, and the completion audit shares the exact
+ * transaction that changes account ownership/credentials.
+ */
+async function withPlatformLinkedAccountTransaction<T>(
+  auditTenantId: string,
+  fn: (tx: ReturnType<typeof getDb>, appendRequiredAudit: AppendRequiredAudit) => Promise<T>,
+): Promise<T> {
+  return withPlatformAuthorityDatabase((platformDb) =>
+    withTenantAuditedTransactionOnDb(platformDb, auditTenantId, async (txRaw, append) => {
+      const tx = txRaw as ReturnType<typeof getDb>;
+      await tx.execute(sql`SELECT set_config('steward.tenant_id', 'platform', true)`);
+      return fn(tx, append);
+    }),
+  );
+}
+
+async function lockLinkedAccountIdentity(
+  tx: Pick<ReturnType<typeof getDb>, "execute">,
+  provider: string,
+  providerAccountId: string,
+): Promise<void> {
+  await tx.execute(
+    sql`select pg_advisory_xact_lock(hashtextextended(${`linked_account_${provider}:${providerAccountId}`}, 0))`,
+  );
+}
+
 function platformIdentityMigrationAllowed(): boolean {
   return process.env.STEWARD_ALLOW_PLATFORM_IDENTITY_MIGRATION === "true";
 }
@@ -407,25 +431,8 @@ function vault(): Vault {
   return getVault();
 }
 
-let _platformKeyStore: KeyStore | undefined;
 function platformKeyStore(): KeyStore {
-  if (_platformKeyStore) return _platformKeyStore;
-
-  const masterPassword = process.env.STEWARD_MASTER_PASSWORD;
-  if (!masterPassword) {
-    if (!isDevSecretAllowed()) {
-      throw new Error(
-        "⛔ STEWARD_MASTER_PASSWORD must be set. For local development only, opt in to the " +
-          "insecure dev fallback with STEWARD_ALLOW_DEV_SECRETS=true.",
-      );
-    }
-    console.warn(
-      "⚠️  [DEV ONLY] Using insecure 'dev-secret' as vault master password. Set STEWARD_MASTER_PASSWORD before going to production!",
-    );
-  }
-
-  _platformKeyStore = new KeyStore(masterPassword || "dev-secret");
-  return _platformKeyStore;
+  return getConfiguredKeyStore(undefined, { allowDevSecretFallback: true });
 }
 
 // ─── Validation helpers ───────────────────────────────────────────────────────
@@ -472,8 +479,11 @@ function isThirdPartyWalletProvider(provider: string): boolean {
   return provider === "wallet:ethereum" || provider === "wallet:solana";
 }
 
-async function userHasLinkedThirdPartyWallet(userId: string): Promise<boolean> {
-  const [linkedWallet] = await getDb()
+async function userHasLinkedThirdPartyWallet(
+  userId: string,
+  db: ReturnType<typeof getDb> = getDb(),
+): Promise<boolean> {
+  const [linkedWallet] = await db
     .select({ id: accounts.id })
     .from(accounts)
     .where(
@@ -486,9 +496,13 @@ async function userHasLinkedThirdPartyWallet(userId: string): Promise<boolean> {
   return Boolean(linkedWallet);
 }
 
-async function tenantIdsForWalletPolicy(userId: string, tenantId?: string): Promise<string[]> {
+async function tenantIdsForWalletPolicy(
+  userId: string,
+  tenantId?: string,
+  db: ReturnType<typeof getDb> = getDb(),
+): Promise<string[]> {
   const memberships = rowsFromExecute<{ tenant_id: string }>(
-    await getDb().execute(
+    await db.execute(
       sql`SELECT * FROM steward_bootstrap.platform_user_tenant_ids(${userId}::uuid)`,
     ),
   );
@@ -499,11 +513,12 @@ async function tenantIdsForWalletPolicy(userId: string, tenantId?: string): Prom
 async function restrictedWalletPolicyTenantIds(
   userId: string,
   tenantId?: string,
+  db: ReturnType<typeof getDb> = getDb(),
 ): Promise<string[]> {
-  const tenantIds = await tenantIdsForWalletPolicy(userId, tenantId);
+  const tenantIds = await tenantIdsForWalletPolicy(userId, tenantId, db);
   if (tenantId && tenantIds.length === 0) return [];
   if (tenantIds.length === 0) return [];
-  const configs = await getDb()
+  const configs = await db
     .select({ tenantId: tenantConfigs.tenantId, authAbuseConfig: tenantConfigs.authAbuseConfig })
     .from(tenantConfigs)
     .where(inArray(tenantConfigs.tenantId, tenantIds));
@@ -1047,60 +1062,39 @@ platform.post("/tenants", async (c) => {
     );
   }
 
-  // Check for duplicates
-  const [existing] = await db
-    .select({ id: tenants.id })
-    .from(tenants)
-    .where(eq(tenants.id, body.id));
-
-  if (existing) {
-    return c.json<ApiResponse>({ ok: false, error: "Tenant already exists" }, 409);
-  }
-  if (await tenantIdHasRetainedState(body.id)) {
-    return c.json<ApiResponse>(
-      {
-        ok: false,
-        error: "Tenant id has retained historical state and cannot be reused",
-      },
-      409,
-    );
-  }
-
   const apiKeyPair = generateApiKey();
+  const result = await withTenantAuditedTransaction(body.id, async (txRaw, appendAudit) => {
+    const tx = txRaw as typeof db;
+    const [existing] = await tx
+      .select({ id: tenants.id })
+      .from(tenants)
+      .where(eq(tenants.id, body.id));
+    if (existing) return { status: "exists" as const };
+    if (await tenantIdHasRetainedState(body.id, tx)) return { status: "retained" as const };
 
-  await writeAuditEvent({
-    tenantId: body.id,
-    actorType: "platform",
-    action: "tenant.create.authorized",
-    resourceType: "tenant",
-    resourceId: body.id,
-    metadata: { name: body.name, viaPlatform: true },
-    ...auditCtx(c),
-  });
-  await writeAuditEvent({
-    tenantId: body.id,
-    actorType: "platform",
-    action: "tenant.api_key.create.authorized",
-    resourceType: "tenant",
-    resourceId: body.id,
-    ...auditCtx(c),
-  });
-
-  const [tenant] = await db
-    .insert(tenants)
-    .values({
-      id: body.id,
-      name: body.name,
-      apiKeyHash: apiKeyPair.hash,
-    })
-    .returning();
-
-  if (!tenant) {
-    return c.json<ApiResponse>({ ok: false, error: "Failed to create tenant" }, 500);
-  }
-
-  try {
-    await writeAuditEvent({
+    await appendAudit({
+      tenantId: body.id,
+      actorType: "platform",
+      action: "tenant.create.authorized",
+      resourceType: "tenant",
+      resourceId: body.id,
+      metadata: { name: body.name, viaPlatform: true },
+      ...auditCtx(c),
+    });
+    await appendAudit({
+      tenantId: body.id,
+      actorType: "platform",
+      action: "tenant.api_key.create.authorized",
+      resourceType: "tenant",
+      resourceId: body.id,
+      ...auditCtx(c),
+    });
+    const [tenant] = await tx
+      .insert(tenants)
+      .values({ id: body.id, name: body.name, apiKeyHash: apiKeyPair.hash })
+      .returning();
+    if (!tenant) throw new Error("Failed to create tenant");
+    await appendAudit({
       tenantId: tenant.id,
       actorType: "platform",
       action: "tenant.create",
@@ -1109,7 +1103,7 @@ platform.post("/tenants", async (c) => {
       metadata: { name: tenant.name, viaPlatform: true },
       ...auditCtx(c),
     });
-    await writeAuditEvent({
+    await appendAudit({
       tenantId: tenant.id,
       actorType: "platform",
       action: "tenant.api_key.create",
@@ -1117,10 +1111,18 @@ platform.post("/tenants", async (c) => {
       resourceId: tenant.id,
       ...auditCtx(c),
     });
-  } catch (error) {
-    await deletePlatformCreatedTenant(tenant.id);
-    throw error;
+    return { status: "created" as const, tenant };
+  });
+  if (result.status === "exists") {
+    return c.json<ApiResponse>({ ok: false, error: "Tenant already exists" }, 409);
   }
+  if (result.status === "retained") {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Tenant id has retained historical state and cannot be reused" },
+      409,
+    );
+  }
+  const { tenant } = result;
 
   return c.json<
     ApiResponse<{
@@ -1197,7 +1199,6 @@ platform.post("/tenants/:id/freeze", async (c) => {
   if (!isValidTenantId(tenantId)) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid tenant id format" }, 400);
   }
-
   const [tenant] = await db
     .select({ id: tenants.id })
     .from(tenants)
@@ -1280,7 +1281,6 @@ platform.post("/tenants/:id/unfreeze", async (c) => {
   if (!isValidTenantId(tenantId)) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid tenant id format" }, 400);
   }
-
   const lifted = await db
     .update(vaultSigningFreezes)
     .set({ liftedAt: sql`now()`, liftedByType: "platform", liftedById: "platform" })
@@ -1697,9 +1697,9 @@ platform.get("/tenants/:tenantId/join-mode", async (c) => {
  * tenantId is auto-linked), 'invite' (existing user_tenants link required), or
  * 'closed' (no new members).
  *
- * This is the only application write surface for join_mode. It mirrors the
- * email-config mutation contract: scoped authorization, paired audits,
- * rollback on audit failure, and update-or-insert persistence.
+ * This is the only application write surface for join_mode. It shares the
+ * membership lifecycle lock so join authorization and its required audit
+ * change atomically with the policy that permits new members.
  */
 platform.patch("/tenants/:tenantId/join-mode", async (c) => {
   const scopeResponse = requirePlatformRouteScope(c, "platform:tenant-join-mode:write");
@@ -1710,6 +1710,12 @@ platform.patch("/tenants/:tenantId/join-mode", async (c) => {
 
   if (!isValidTenantId(tenantId)) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid tenant id format" }, 400);
+  }
+  if (isReservedTenantId(tenantId)) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Personal and reserved tenant membership is immutable" },
+      409,
+    );
   }
 
   if (!(await getTenantOr404(tenantId))) {
@@ -1739,23 +1745,22 @@ platform.patch("/tenants/:tenantId/join-mode", async (c) => {
     ...auditCtx(c),
   });
 
-  const previousConfigRow = await snapshotPlatformTenantConfigRow(tenantId);
-  const [existingConfig] = await db
-    .select({ tenantId: tenantConfigs.tenantId })
-    .from(tenantConfigs)
-    .where(eq(tenantConfigs.tenantId, tenantId));
-
-  if (existingConfig) {
-    await db
-      .update(tenantConfigs)
-      .set({ joinMode, updatedAt: new Date() })
+  await withTenantAuditedTransaction(tenantId, async (txRaw, appendRequiredAudit) => {
+    const tx = txRaw as typeof db;
+    await lockTenantOwnerLifecycle(tx, tenantId);
+    const [existingConfig] = await tx
+      .select({ tenantId: tenantConfigs.tenantId })
+      .from(tenantConfigs)
       .where(eq(tenantConfigs.tenantId, tenantId));
-  } else {
-    await db.insert(tenantConfigs).values({ tenantId, joinMode });
-  }
-
-  try {
-    await writeAuditEvent({
+    if (existingConfig) {
+      await tx
+        .update(tenantConfigs)
+        .set({ joinMode, updatedAt: new Date() })
+        .where(eq(tenantConfigs.tenantId, tenantId));
+    } else {
+      await tx.insert(tenantConfigs).values({ tenantId, joinMode });
+    }
+    await appendRequiredAudit({
       tenantId,
       actorType: "platform",
       action: "tenant.join_mode.update",
@@ -1764,10 +1769,7 @@ platform.patch("/tenants/:tenantId/join-mode", async (c) => {
       metadata: { joinMode },
       ...auditCtx(c),
     });
-  } catch (error) {
-    await restorePlatformTenantConfigRow(tenantId, previousConfigRow);
-    throw error;
-  }
+  });
 
   return c.json<ApiResponse<{ tenantId: string; joinMode: string }>>({
     ok: true,
@@ -3710,7 +3712,6 @@ platform.patch("/users/:userId/metadata", async (c) => {
   const scopeResponse = requirePlatformRouteScope(c, "platform:user:write");
   if (scopeResponse) return scopeResponse;
 
-  const db = getDb();
   const userId = c.req.param("userId");
   if (!isValidUserId(userId)) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid user id format" }, 400);
@@ -3724,12 +3725,6 @@ platform.patch("/users/:userId/metadata", async (c) => {
   const metadataError = getPlatformMetadataValidationError(body.customMetadata, "customMetadata");
   if (metadataError) return c.json<ApiResponse>({ ok: false, error: metadataError }, 400);
 
-  const [existing] = await db
-    .select({ id: users.id, customMetadata: users.customMetadata, updatedAt: users.updatedAt })
-    .from(users)
-    .where(eq(users.id, userId));
-  if (!existing) return c.json<ApiResponse>({ ok: false, error: "User not found" }, 404);
-
   await writeAuditEvent({
     tenantId: PLATFORM_AUDIT_TENANT_ID,
     actorType: "platform",
@@ -3740,30 +3735,39 @@ platform.patch("/users/:userId/metadata", async (c) => {
     ...auditCtx(c),
   });
 
-  const [updated] = await db
-    .update(users)
-    .set({ customMetadata: body.customMetadata, updatedAt: new Date() })
-    .where(eq(users.id, userId))
-    .returning({ id: users.id });
+  const updated = await withPlatformAuthorityDatabase((platformDb) =>
+    withTenantAuditedTransactionOnDb(
+      platformDb,
+      PLATFORM_AUDIT_TENANT_ID,
+      async (txRaw, appendRequiredAudit) => {
+        const tx = txRaw as typeof platformDb;
+        await tx.execute(
+          sql`SELECT set_config('steward.tenant_id', ${PLATFORM_AUDIT_TENANT_ID}, true)`,
+        );
+        const locked = rowsFromExecute<{ id: string }>(
+          await tx.execute(sql`SELECT id FROM users WHERE id = ${userId}::uuid FOR UPDATE`),
+        )[0];
+        if (!locked) return null;
+        const result = await tx
+          .update(users)
+          .set({ customMetadata: body.customMetadata, updatedAt: new Date() })
+          .where(eq(users.id, userId))
+          .returning({ id: users.id });
+        if (!result[0]) return null;
+        await appendRequiredAudit({
+          tenantId: PLATFORM_AUDIT_TENANT_ID,
+          actorType: "platform",
+          action: "user.metadata.update",
+          resourceType: "user",
+          resourceId: userId,
+          metadata: { updatedGlobal: true },
+          ...auditCtx(c),
+        });
+        return result[0];
+      },
+    ),
+  );
   if (!updated) return c.json<ApiResponse>({ ok: false, error: "User not found" }, 404);
-
-  try {
-    await writeAuditEvent({
-      tenantId: PLATFORM_AUDIT_TENANT_ID,
-      actorType: "platform",
-      action: "user.metadata.update",
-      resourceType: "user",
-      resourceId: userId,
-      metadata: { updatedGlobal: true },
-      ...auditCtx(c),
-    });
-  } catch (error) {
-    await db
-      .update(users)
-      .set({ customMetadata: existing.customMetadata, updatedAt: existing.updatedAt })
-      .where(eq(users.id, userId));
-    throw error;
-  }
   dispatchWebhook(PLATFORM_AUDIT_TENANT_ID, userId, "user.updated_account", {
     userId,
     scope: "global",
@@ -3806,6 +3810,7 @@ platform.patch("/users/:userId/deactivate", async (c) => {
         await tx.execute(
           sql`SELECT pg_advisory_xact_lock(hashtextextended(${"platform_user_account_" + userId}, 0))`,
         );
+        await lockUserSession(tx, userId);
         await appendRequiredAudit({
           tenantId: PLATFORM_AUDIT_TENANT_ID,
           actorType: "platform",
@@ -4021,7 +4026,6 @@ platform.post("/users/:userId/accounts", async (c) => {
   const scopeResponse = requirePlatformRouteScope(c, "platform:identity-migration");
   if (scopeResponse) return scopeResponse;
 
-  const db = getDb();
   const userId = c.req.param("userId");
   if (!isValidUserId(userId)) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid user id format" }, 400);
@@ -4044,64 +4048,86 @@ platform.post("/users/:userId/accounts", async (c) => {
   if (tenantId !== undefined && !isValidTenantId(tenantId)) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid tenant id format" }, 400);
   }
-  const [user] = await db.select({ id: users.id }).from(users).where(eq(users.id, userId));
-  if (!user) return c.json<ApiResponse>({ ok: false, error: "User not found" }, 404);
+  let linked: typeof accounts.$inferSelect & { isNew: boolean };
+  try {
+    linked = await withPlatformLinkedAccountTransaction(
+      tenantId ?? PLATFORM_AUDIT_TENANT_ID,
+      async (tx, appendRequiredAudit) => {
+        await lockUserSession(tx, userId);
+        await lockLinkedAccountIdentity(tx, provider, providerAccountId);
+        const [user] = await tx.select({ id: users.id }).from(users).where(eq(users.id, userId));
+        if (!user) throw new Error("User not found");
 
-  const [existing] = await db
-    .select()
-    .from(accounts)
-    .where(and(eq(accounts.provider, provider), eq(accounts.providerAccountId, providerAccountId)));
-  if (existing) {
-    if (existing.userId !== userId) {
-      return c.json<ApiResponse>(
-        { ok: false, error: "Linked account already belongs to another user" },
-        409,
-      );
-    }
+        const [existing] = await tx
+          .select()
+          .from(accounts)
+          .where(
+            and(eq(accounts.provider, provider), eq(accounts.providerAccountId, providerAccountId)),
+          );
+        if (existing) {
+          if (existing.userId !== userId) {
+            throw new Error("Linked account already belongs to another user");
+          }
+          return { ...existing, isNew: false };
+        }
+
+        if (isThirdPartyWalletProvider(provider)) {
+          const restrictedTenantIds = await restrictedWalletPolicyTenantIds(userId, tenantId, tx);
+          if (tenantId && restrictedTenantIds.length === 0) {
+            const requestedTenantIds = await tenantIdsForWalletPolicy(userId, tenantId, tx);
+            if (requestedTenantIds.length === 0) {
+              throw new Error("User is not a member of tenant");
+            }
+          }
+          if (restrictedTenantIds.length > 0 && (await userHasLinkedThirdPartyWallet(userId, tx))) {
+            throw new Error("User already has a linked wallet");
+          }
+        }
+
+        const [created] = await tx
+          .insert(accounts)
+          .values({ userId, provider, providerAccountId })
+          .returning();
+        await appendRequiredAudit({
+          tenantId: tenantId ?? PLATFORM_AUDIT_TENANT_ID,
+          actorType: "platform",
+          action: "user.account.link",
+          resourceType: "user",
+          resourceId: userId,
+          metadata: { provider, tenantId },
+          ...auditCtx(c),
+        });
+        return { ...created, isNew: true };
+      },
+    );
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Internal server error";
+    const status =
+      message === "User not found"
+        ? 404
+        : message === "User is not a member of tenant"
+          ? 403
+          : message === "Linked account already belongs to another user" ||
+              message === "User already has a linked wallet"
+            ? 409
+            : 500;
+    return c.json<ApiResponse>(
+      { ok: false, error: status === 500 ? "Internal server error" : message },
+      status,
+    );
+  }
+  if (!linked.isNew) {
     return c.json<ApiResponse<PlatformLinkedAccountRow & { isNew: boolean }>>({
       ok: true,
       data: {
-        id: existing.id,
-        provider: existing.provider,
-        providerAccountId: existing.providerAccountId,
-        expiresAt: existing.expiresAt,
+        id: linked.id,
+        provider: linked.provider,
+        providerAccountId: linked.providerAccountId,
+        expiresAt: linked.expiresAt,
         isNew: false,
       },
     });
   }
-
-  if (isThirdPartyWalletProvider(provider)) {
-    const restrictedTenantIds = await restrictedWalletPolicyTenantIds(userId, tenantId);
-    if (tenantId && restrictedTenantIds.length === 0) {
-      const requestedTenantIds = await tenantIdsForWalletPolicy(userId, tenantId);
-      if (requestedTenantIds.length === 0) {
-        return c.json<ApiResponse>({ ok: false, error: "User is not a member of tenant" }, 403);
-      }
-    }
-    if (restrictedTenantIds.length > 0 && (await userHasLinkedThirdPartyWallet(userId))) {
-      return c.json<ApiResponse>(
-        {
-          ok: false,
-          error: "User already has a linked wallet",
-        },
-        409,
-      );
-    }
-  }
-
-  await writeAuditEvent({
-    tenantId: tenantId ?? PLATFORM_AUDIT_TENANT_ID,
-    actorType: "platform",
-    action: "user.account.link",
-    resourceType: "user",
-    resourceId: userId,
-    metadata: { provider, tenantId },
-    ...auditCtx(c),
-  });
-  const [created] = await db
-    .insert(accounts)
-    .values({ userId, provider, providerAccountId })
-    .returning();
   dispatchWebhook(tenantId ?? PLATFORM_AUDIT_TENANT_ID, userId, "user.linked_account", {
     userId,
     provider,
@@ -4110,10 +4136,10 @@ platform.post("/users/:userId/accounts", async (c) => {
     {
       ok: true,
       data: {
-        id: created.id,
-        provider: created.provider,
-        providerAccountId: created.providerAccountId,
-        expiresAt: created.expiresAt,
+        id: linked.id,
+        provider: linked.provider,
+        providerAccountId: linked.providerAccountId,
+        expiresAt: linked.expiresAt,
         isNew: true,
       },
     },
@@ -4147,80 +4173,128 @@ platform.delete("/users/:userId/accounts/:provider/:providerAccountId", async (c
     return c.json<ApiResponse>({ ok: false, error: "Invalid account identifier" }, 400);
   }
 
-  await writeAuditEvent({
-    tenantId: PLATFORM_AUDIT_TENANT_ID,
-    actorType: "platform",
-    action: "user.account.unlink",
-    resourceType: "user",
-    resourceId: userId,
-    metadata: { provider, forced: force },
-    ...auditCtx(c),
-  });
-
-  let issuedBefore: number;
-  try {
-    issuedBefore = await db.transaction(async (tx) => {
-      await tx.execute(
-        sql`select pg_advisory_xact_lock(hashtextextended(${`platform_user_account_${userId}`}, 0))`,
-      );
-      await lockUserSession(tx, userId);
-      const [user] = await tx.select().from(users).where(eq(users.id, userId));
-      if (!user) throw new Error("User not found");
-      const userAccounts = await tx.select().from(accounts).where(eq(accounts.userId, userId));
-      const account = userAccounts.find(
-        (row) => row.provider === provider && row.providerAccountId === providerAccountId,
-      );
-      if (!account) throw new Error("Linked account not found");
-      const hasOtherLogin = Boolean(user.email || user.walletAddress || userAccounts.length > 1);
-      if (!force && !hasOtherLogin) {
-        throw new Error("Cannot unlink the user's last login method");
-      }
-
-      const revokedBefore = await revocationStore.revokeUserTokens(userId);
-      const [deleted] = await tx
-        .delete(accounts)
-        .where(
-          and(
-            eq(accounts.id, account.id),
-            eq(accounts.userId, userId),
-            eq(accounts.provider, provider),
-            eq(accounts.providerAccountId, providerAccountId),
-          ),
-        )
-        .returning({ id: accounts.id });
-      if (!deleted) throw new Error("Linked account changed during unlink");
-      await withPlatformAuthorityTransaction((platformTx) =>
-        platformTx.execute(
-          sql`SELECT steward_bootstrap.platform_revoke_user_refresh_tokens(${userId}::uuid)`,
-        ),
-      );
-      return revokedBefore;
-    });
-  } catch (error) {
-    if (error instanceof Error) {
-      const status =
-        error.message === "User not found"
-          ? 404
-          : error.message === "Linked account not found"
-            ? 404
-            : error.message === "Cannot unlink the user's last login method"
-              ? 409
-              : error.message === "Linked account changed during unlink"
-                ? 409
-                : 500;
-      return c.json<ApiResponse>({ ok: false, error: error.message }, status);
-    }
-    throw error;
+  const [initialUser] = await db.select().from(users).where(eq(users.id, userId));
+  if (!initialUser) return c.json<ApiResponse>({ ok: false, error: "User not found" }, 404);
+  const initialAccounts = await db.select().from(accounts).where(eq(accounts.userId, userId));
+  const initialAccount = initialAccounts.find(
+    (row) => row.provider === provider && row.providerAccountId === providerAccountId,
+  );
+  if (!initialAccount) {
+    return c.json<ApiResponse>({ ok: false, error: "Linked account not found" }, 404);
   }
+  const initialPasskeys = await db
+    .select({ id: authenticators.id })
+    .from(authenticators)
+    .where(eq(authenticators.userId, userId));
+  if (
+    !force &&
+    !initialUser.email &&
+    !initialUser.walletAddress &&
+    initialAccounts.length + initialPasskeys.length <= 1
+  ) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Cannot unlink the user's last login method" },
+      409,
+    );
+  }
+
   await writeAuditEvent({
     tenantId: PLATFORM_AUDIT_TENANT_ID,
     actorType: "platform",
-    action: "user.sessions.revoked_for_account_unlink",
+    action: "user.account.unlink.authorized",
     resourceType: "user",
     resourceId: userId,
-    metadata: { issuedBefore },
+    metadata: { provider, providerAccountId, accountId: initialAccount.id, forced: force },
     ...auditCtx(c),
   });
+
+  // External revocation cannot participate in the PostgreSQL transaction. It
+  // remains fail-closed; every later failure reports that the account mutation
+  // rolled back while the established session cutoff remains in force.
+  const issuedBefore = await revocationStore.revokeUserTokens(userId);
+  try {
+    await withPlatformLinkedAccountTransaction(
+      PLATFORM_AUDIT_TENANT_ID,
+      async (tx, appendRequiredAudit) => {
+        await lockUserSession(tx, userId);
+        await lockLinkedAccountIdentity(tx, provider, providerAccountId);
+        const [user] = await tx.select().from(users).where(eq(users.id, userId));
+        if (!user) throw new Error("User not found");
+        const userAccounts = await tx.select().from(accounts).where(eq(accounts.userId, userId));
+        const passkeys = await tx
+          .select({ id: authenticators.id })
+          .from(authenticators)
+          .where(eq(authenticators.userId, userId));
+        const account = userAccounts.find(
+          (row) => row.provider === provider && row.providerAccountId === providerAccountId,
+        );
+        if (!account) throw new Error("Linked account not found");
+        const hasOtherLogin = Boolean(
+          user.email || user.walletAddress || userAccounts.length + passkeys.length > 1,
+        );
+        if (!force && !hasOtherLogin) {
+          throw new Error("Cannot unlink the user's last login method");
+        }
+
+        const [deleted] = await tx
+          .delete(accounts)
+          .where(
+            and(
+              eq(accounts.id, account.id),
+              eq(accounts.userId, userId),
+              eq(accounts.provider, provider),
+              eq(accounts.providerAccountId, providerAccountId),
+            ),
+          )
+          .returning({ id: accounts.id });
+        if (!deleted) throw new Error("Linked account changed during unlink");
+        await tx.execute(
+          sql`SELECT steward_bootstrap.platform_revoke_user_refresh_tokens(${userId}::uuid)`,
+        );
+        await appendRequiredAudit({
+          tenantId: PLATFORM_AUDIT_TENANT_ID,
+          actorType: "platform",
+          action: "user.account.unlink",
+          resourceType: "user",
+          resourceId: userId,
+          metadata: {
+            provider,
+            providerAccountId,
+            accountId: deleted.id,
+            forced: force,
+            issuedBefore,
+          },
+          ...auditCtx(c),
+        });
+        await appendRequiredAudit({
+          tenantId: PLATFORM_AUDIT_TENANT_ID,
+          actorType: "platform",
+          action: "user.sessions.revoked_for_account_unlink",
+          resourceType: "user",
+          resourceId: userId,
+          metadata: { issuedBefore },
+          ...auditCtx(c),
+        });
+      },
+    );
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Internal server error";
+    const status =
+      message === "User not found" || message === "Linked account not found"
+        ? 404
+        : message === "Cannot unlink the user's last login method" ||
+            message === "Linked account changed during unlink"
+          ? 409
+          : 500;
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error: status === 500 ? "Internal server error" : message,
+        data: { accountUnlinked: false, sessionsRevoked: true, issuedBefore },
+      },
+      status,
+    );
+  }
   dispatchWebhook(PLATFORM_AUDIT_TENANT_ID, userId, "user.unlinked_account", {
     userId,
     provider,
@@ -4280,6 +4354,31 @@ platform.post("/users/:userId/accounts/:provider/:providerAccountId/transfer", a
   ]);
   if (!fromUser) return c.json<ApiResponse>({ ok: false, error: "Source user not found" }, 404);
   if (!toUser) return c.json<ApiResponse>({ ok: false, error: "Target user not found" }, 404);
+  const initialFromAccounts = await db
+    .select()
+    .from(accounts)
+    .where(eq(accounts.userId, fromUserId));
+  const initialAccount = initialFromAccounts.find(
+    (row) => row.provider === provider && row.providerAccountId === providerAccountId,
+  );
+  if (!initialAccount) {
+    return c.json<ApiResponse>({ ok: false, error: "Linked account not found" }, 404);
+  }
+  const initialPasskeys = await db
+    .select({ id: authenticators.id })
+    .from(authenticators)
+    .where(eq(authenticators.userId, fromUserId));
+  if (
+    body.force !== true &&
+    !fromUser.email &&
+    !fromUser.walletAddress &&
+    initialFromAccounts.length + initialPasskeys.length <= 1
+  ) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Cannot transfer the source user's last login method" },
+      409,
+    );
+  }
 
   await writeAuditEvent({
     tenantId: PLATFORM_AUDIT_TENANT_ID,
@@ -4291,103 +4390,107 @@ platform.post("/users/:userId/accounts/:provider/:providerAccountId/transfer", a
     ...auditCtx(c),
   });
 
-  let fromIssuedBefore: number;
-  let toIssuedBefore: number;
+  // Establish both irreversible cutoffs before the atomic ownership/audit
+  // transition. A later failure leaves the account with its prior owner and
+  // reports that both users' existing sessions remain revoked.
+  const fromIssuedBefore = await revocationStore.revokeUserTokens(fromUserId);
+  const toIssuedBefore = await revocationStore.revokeUserTokens(toUserId);
   let updated: PlatformLinkedAccountRow;
   try {
-    const revocation = await db.transaction(async (tx) => {
-      await tx.execute(
-        sql`select pg_advisory_xact_lock(hashtextextended(${`platform_user_account_${fromUserId}`}, 0))`,
-      );
-      await lockUserSessions(tx, [fromUserId, toUserId]);
-      const [lockedFromUser] = await tx.select().from(users).where(eq(users.id, fromUserId));
-      if (!lockedFromUser) throw new Error("Source user not found");
-      const fromAccounts = await tx.select().from(accounts).where(eq(accounts.userId, fromUserId));
-      const account = fromAccounts.find(
-        (row) => row.provider === provider && row.providerAccountId === providerAccountId,
-      );
-      if (!account) throw new Error("Linked account not found");
-      const hasOtherLogin = Boolean(
-        lockedFromUser.email || lockedFromUser.walletAddress || fromAccounts.length > 1,
-      );
-      if (!body.force && !hasOtherLogin) {
-        throw new Error("Cannot transfer the source user's last login method");
-      }
+    updated = await withPlatformLinkedAccountTransaction(
+      PLATFORM_AUDIT_TENANT_ID,
+      async (tx, appendRequiredAudit) => {
+        await lockUserSessions(tx, [fromUserId, toUserId]);
+        await lockLinkedAccountIdentity(tx, provider, providerAccountId);
+        const [lockedFromUser] = await tx.select().from(users).where(eq(users.id, fromUserId));
+        if (!lockedFromUser) throw new Error("Source user not found");
+        const [lockedToUser] = await tx.select().from(users).where(eq(users.id, toUserId));
+        if (!lockedToUser) throw new Error("Target user not found");
+        const fromAccounts = await tx
+          .select()
+          .from(accounts)
+          .where(eq(accounts.userId, fromUserId));
+        const passkeys = await tx
+          .select({ id: authenticators.id })
+          .from(authenticators)
+          .where(eq(authenticators.userId, fromUserId));
+        const account = fromAccounts.find(
+          (row) => row.provider === provider && row.providerAccountId === providerAccountId,
+        );
+        if (!account) throw new Error("Linked account not found");
+        const hasOtherLogin = Boolean(
+          lockedFromUser.email ||
+            lockedFromUser.walletAddress ||
+            fromAccounts.length + passkeys.length > 1,
+        );
+        if (!body.force && !hasOtherLogin) {
+          throw new Error("Cannot transfer the source user's last login method");
+        }
 
-      const fromRevokedBefore = await revocationStore.revokeUserTokens(fromUserId);
-      const toRevokedBefore = await revocationStore.revokeUserTokens(toUserId);
-      const [updated] = await tx
-        .update(accounts)
-        .set({ userId: toUserId })
-        .where(
-          and(
-            eq(accounts.id, account.id),
-            eq(accounts.userId, fromUserId),
-            eq(accounts.provider, provider),
-            eq(accounts.providerAccountId, providerAccountId),
-          ),
-        )
-        .returning();
-      if (!updated) throw new Error("Linked account changed during transfer");
-      await withPlatformAuthorityTransaction(async (platformTx) => {
-        await platformTx.execute(
+        const [moved] = await tx
+          .update(accounts)
+          .set({ userId: toUserId })
+          .where(
+            and(
+              eq(accounts.id, account.id),
+              eq(accounts.userId, fromUserId),
+              eq(accounts.provider, provider),
+              eq(accounts.providerAccountId, providerAccountId),
+            ),
+          )
+          .returning();
+        if (!moved) throw new Error("Linked account changed during transfer");
+        await tx.execute(
           sql`SELECT steward_bootstrap.platform_revoke_user_refresh_tokens(${fromUserId}::uuid)`,
         );
-        await platformTx.execute(
+        await tx.execute(
           sql`SELECT steward_bootstrap.platform_revoke_user_refresh_tokens(${toUserId}::uuid)`,
         );
-      });
-      return { fromIssuedBefore: fromRevokedBefore, toIssuedBefore: toRevokedBefore, updated };
-    });
-    fromIssuedBefore = revocation.fromIssuedBefore;
-    toIssuedBefore = revocation.toIssuedBefore;
-    updated = revocation.updated;
+        await appendRequiredAudit({
+          tenantId: PLATFORM_AUDIT_TENANT_ID,
+          actorType: "platform",
+          action: "user.account.transfer",
+          resourceType: "user",
+          resourceId: fromUserId,
+          metadata: {
+            provider,
+            providerAccountId,
+            toUserId,
+            forced: body.force === true,
+            revokedSessions: {
+              fromUserId: fromIssuedBefore,
+              toUserId: toIssuedBefore,
+            },
+          },
+          ...auditCtx(c),
+        });
+        return moved;
+      },
+    );
   } catch (error) {
-    if (error instanceof Error) {
-      const status =
-        error.message === "Source user not found" || error.message === "Linked account not found"
-          ? 404
-          : error.message === "Cannot transfer the source user's last login method" ||
-              error.message === "Linked account changed during transfer"
-            ? 409
-            : 500;
-      return c.json<ApiResponse>({ ok: false, error: error.message }, status);
-    }
-    throw error;
-  }
-
-  try {
-    await writeAuditEvent({
-      tenantId: PLATFORM_AUDIT_TENANT_ID,
-      actorType: "platform",
-      action: "user.account.transfer",
-      resourceType: "user",
-      resourceId: fromUserId,
-      metadata: {
-        provider,
-        providerAccountId,
-        toUserId,
-        forced: body.force === true,
-        revokedSessions: {
-          fromUserId: fromIssuedBefore,
-          toUserId: toIssuedBefore,
+    const message = error instanceof Error ? error.message : "Internal server error";
+    const status =
+      message === "Source user not found" ||
+      message === "Target user not found" ||
+      message === "Linked account not found"
+        ? 404
+        : message === "Cannot transfer the source user's last login method" ||
+            message === "Linked account changed during transfer"
+          ? 409
+          : 500;
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error: status === 500 ? "Internal server error" : message,
+        data: {
+          accountTransferred: false,
+          sessionsRevoked: true,
+          fromIssuedBefore,
+          toIssuedBefore,
         },
       },
-      ...auditCtx(c),
-    });
-  } catch (error) {
-    await db
-      .update(accounts)
-      .set({ userId: fromUserId })
-      .where(
-        and(
-          eq(accounts.id, updated.id),
-          eq(accounts.userId, toUserId),
-          eq(accounts.provider, provider),
-          eq(accounts.providerAccountId, providerAccountId),
-        ),
-      );
-    throw error;
+      status,
+    );
   }
   dispatchWebhook(PLATFORM_AUDIT_TENANT_ID, fromUserId, "user.transferred_account", {
     fromUserId,
@@ -4573,6 +4676,12 @@ platform.patch("/tenants/:id/users/:userId/metadata", async (c) => {
   if (!isValidTenantId(tenantId)) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid tenant id format" }, 400);
   }
+  if (isReservedTenantId(tenantId)) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Personal and reserved tenant membership is immutable" },
+      409,
+    );
+  }
   if (!isValidUserId(userId)) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid user id format" }, 400);
   }
@@ -4596,22 +4705,25 @@ platform.patch("/tenants/:id/users/:userId/metadata", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: "User not found in tenant" }, 404);
   }
 
-  await writeAuditEvent({
-    tenantId,
-    actorType: "platform",
-    action: "tenant.user.metadata.update",
-    resourceType: "user",
-    resourceId: userId,
-    metadata: {
-      updatedTenant: true,
-    },
-    ...auditCtx(c),
+  await withTenantAuditedTransaction(tenantId, async (txRaw, appendRequiredAudit) => {
+    const tx = txRaw as typeof db;
+    await lockTenantOwnerLifecycle(tx, tenantId);
+    const [updated] = await tx
+      .update(userTenants)
+      .set({ customMetadata: body.tenantCustomMetadata })
+      .where(and(eq(userTenants.tenantId, tenantId), eq(userTenants.userId, userId)))
+      .returning({ id: userTenants.id });
+    if (!updated) throw new Error("Tenant membership changed during metadata update");
+    await appendRequiredAudit({
+      tenantId,
+      actorType: "platform",
+      action: "tenant.user.metadata.update",
+      resourceType: "user",
+      resourceId: userId,
+      metadata: { updatedTenant: true },
+      ...auditCtx(c),
+    });
   });
-
-  await db
-    .update(userTenants)
-    .set({ customMetadata: body.tenantCustomMetadata })
-    .where(and(eq(userTenants.tenantId, tenantId), eq(userTenants.userId, userId)));
   dispatchWebhook(tenantId, userId, "user.updated_account", {
     userId,
     scope: "tenant",
@@ -4753,7 +4865,7 @@ platform.post("/tenants/:id/invitations", async (c) => {
   if (!isValidTenantId(tenantId)) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid tenant id format" }, 400);
   }
-  if (isPersonalTenantId(tenantId)) {
+  if (isReservedTenantId(tenantId)) {
     return c.json<ApiResponse>(
       { ok: false, error: "Personal tenant membership is immutable" },
       409,
@@ -4828,70 +4940,62 @@ platform.post("/tenants/:id/invitations", async (c) => {
     ...auditCtx(c),
   });
 
-  const previousPendingInvitations = await db
-    .select()
-    .from(tenantInvitations)
-    .where(
-      and(
-        eq(tenantInvitations.tenantId, tenantId),
-        eq(tenantInvitations.email, email),
-        eq(tenantInvitations.status, "pending"),
-      ),
-    );
-
-  const invitation = await db.transaction(async (tx) => {
-    const now = new Date();
-    await tx
-      .update(tenantInvitations)
-      .set({ status: "revoked", revokedAt: now, updatedAt: now })
-      .where(
-        and(
-          eq(tenantInvitations.tenantId, tenantId),
-          eq(tenantInvitations.email, email),
-          eq(tenantInvitations.status, "pending"),
-        ),
-      );
-
-    const [created] = await tx
-      .insert(tenantInvitations)
-      .values({ tenantId, email, role, tokenHash, invitedByUserId, expiresAt })
-      .returning({
-        id: tenantInvitations.id,
-        tenantId: tenantInvitations.tenantId,
-        email: tenantInvitations.email,
-        role: tenantInvitations.role,
-        status: tenantInvitations.status,
-        expiresAt: tenantInvitations.expiresAt,
-        createdAt: tenantInvitations.createdAt,
-      });
-    return created;
-  });
-
-  try {
-    await writeAuditEvent({
-      tenantId,
-      actorType: "platform",
-      action: "tenant.invitation.create",
-      resourceType: "tenant_invitation",
-      resourceId: invitation.id,
-      metadata: { email, role, expiresAt: expiresAt.toISOString() },
-      ...auditCtx(c),
-    });
-  } catch (error) {
-    await db.transaction(async (tx) => {
-      await tx.delete(tenantInvitations).where(eq(tenantInvitations.id, invitation.id));
-      for (const previous of previousPendingInvitations) {
-        await tx
-          .update(tenantInvitations)
-          .set({
-            status: previous.status,
-            revokedAt: previous.revokedAt,
-            updatedAt: previous.updatedAt,
-          })
-          .where(eq(tenantInvitations.id, previous.id));
+  const invitation = await withTenantAuditedTransaction(
+    tenantId,
+    async (txRaw, appendRequiredAudit) => {
+      const tx = txRaw as typeof db;
+      await lockTenantOwnerLifecycle(tx, tenantId);
+      if (invitedByUserId) {
+        const [lockedInviterMembership] = await tx
+          .select({ userId: userTenants.userId })
+          .from(userTenants)
+          .where(and(eq(userTenants.tenantId, tenantId), eq(userTenants.userId, invitedByUserId)))
+          .limit(1);
+        if (!lockedInviterMembership) {
+          return null;
+        }
       }
-    });
-    throw error;
+      const now = new Date();
+      await tx
+        .update(tenantInvitations)
+        .set({ status: "revoked", revokedAt: now, updatedAt: now })
+        .where(
+          and(
+            eq(tenantInvitations.tenantId, tenantId),
+            eq(tenantInvitations.email, email),
+            eq(tenantInvitations.status, "pending"),
+          ),
+        );
+
+      const [created] = await tx
+        .insert(tenantInvitations)
+        .values({ tenantId, email, role, tokenHash, invitedByUserId, expiresAt })
+        .returning({
+          id: tenantInvitations.id,
+          tenantId: tenantInvitations.tenantId,
+          email: tenantInvitations.email,
+          role: tenantInvitations.role,
+          status: tenantInvitations.status,
+          expiresAt: tenantInvitations.expiresAt,
+          createdAt: tenantInvitations.createdAt,
+        });
+      await appendRequiredAudit({
+        tenantId,
+        actorType: "platform",
+        action: "tenant.invitation.create",
+        resourceType: "tenant_invitation",
+        resourceId: created.id,
+        metadata: { email, role, expiresAt: expiresAt.toISOString() },
+        ...auditCtx(c),
+      });
+      return created;
+    },
+  );
+  if (!invitation) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Invitation authority changed before commit" },
+      409,
+    );
   }
 
   let emailSent = false;
@@ -4925,7 +5029,7 @@ platform.delete("/tenants/:id/invitations/:invitationId", async (c) => {
   if (!isValidTenantId(tenantId)) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid tenant id format" }, 400);
   }
-  if (isPersonalTenantId(tenantId)) {
+  if (isReservedTenantId(tenantId)) {
     return c.json<ApiResponse>(
       { ok: false, error: "Personal tenant membership is immutable" },
       409,
@@ -4961,45 +5065,41 @@ platform.delete("/tenants/:id/invitations/:invitationId", async (c) => {
     ...auditCtx(c),
   });
 
-  const [invitation] = await db
-    .update(tenantInvitations)
-    .set({ status: "revoked", revokedAt: new Date(), updatedAt: new Date() })
-    .where(
-      and(
-        eq(tenantInvitations.tenantId, tenantId),
-        eq(tenantInvitations.id, invitationId),
-        eq(tenantInvitations.status, "pending"),
-      ),
-    )
-    .returning({
-      id: tenantInvitations.id,
-      email: tenantInvitations.email,
-      role: tenantInvitations.role,
-    });
+  const invitation = await withTenantAuditedTransaction(
+    tenantId,
+    async (txRaw, appendRequiredAudit) => {
+      const tx = txRaw as typeof db;
+      await lockTenantOwnerLifecycle(tx, tenantId);
+      const [revoked] = await tx
+        .update(tenantInvitations)
+        .set({ status: "revoked", revokedAt: new Date(), updatedAt: new Date() })
+        .where(
+          and(
+            eq(tenantInvitations.tenantId, tenantId),
+            eq(tenantInvitations.id, invitationId),
+            eq(tenantInvitations.status, "pending"),
+          ),
+        )
+        .returning({
+          id: tenantInvitations.id,
+          email: tenantInvitations.email,
+          role: tenantInvitations.role,
+        });
+      if (!revoked) return undefined;
+      await appendRequiredAudit({
+        tenantId,
+        actorType: "platform",
+        action: "tenant.invitation.revoke",
+        resourceType: "tenant_invitation",
+        resourceId: revoked.id,
+        metadata: { email: revoked.email, role: revoked.role },
+        ...auditCtx(c),
+      });
+      return revoked;
+    },
+  );
   if (!invitation) {
     return c.json<ApiResponse>({ ok: false, error: "Pending invitation not found" }, 404);
-  }
-
-  try {
-    await writeAuditEvent({
-      tenantId,
-      actorType: "platform",
-      action: "tenant.invitation.revoke",
-      resourceType: "tenant_invitation",
-      resourceId: invitation.id,
-      metadata: { email: invitation.email, role: invitation.role },
-      ...auditCtx(c),
-    });
-  } catch (error) {
-    await db
-      .update(tenantInvitations)
-      .set({
-        status: candidate.status,
-        revokedAt: candidate.revokedAt,
-        updatedAt: candidate.updatedAt,
-      })
-      .where(and(eq(tenantInvitations.tenantId, tenantId), eq(tenantInvitations.id, invitationId)));
-    throw error;
   }
 
   return c.json<ApiResponse>({ ok: true });
@@ -5020,7 +5120,7 @@ platform.post("/tenants/:id/members", async (c) => {
   if (!isValidTenantId(tenantId)) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid tenant id format" }, 400);
   }
-  if (isPersonalTenantId(tenantId)) {
+  if (isReservedTenantId(tenantId)) {
     return c.json<ApiResponse>(
       { ok: false, error: "Personal tenant membership is immutable" },
       409,
@@ -5053,35 +5153,54 @@ platform.post("/tenants/:id/members", async (c) => {
     );
   }
 
-  // Find user now; create after audit if needed so audit failure cannot create identity state.
-  let [user] = await db.select().from(users).where(eq(users.email, email));
-  const [existingMembership] = user
-    ? await db
-        .select({ role: userTenants.role })
-        .from(userTenants)
-        .where(and(eq(userTenants.userId, user.id), eq(userTenants.tenantId, tenantId)))
-    : [undefined];
-  const actualRole = existingMembership?.role ?? role;
-
   await writeAuditEvent({
     tenantId,
     actorType: "platform",
-    action: "tenant.member.add",
+    action: "tenant.member.add.authorized",
     resourceType: "user",
-    resourceId: user?.id ?? email,
-    metadata: { email, role: actualRole, requestedRole: role, isNew: !existingMembership },
+    resourceId: email,
+    metadata: { email, requestedRole: role },
     ...auditCtx(c),
   });
 
-  const createdUser = !user;
-  if (!user) {
-    const [newUser] = await db.insert(users).values({ email, emailVerified: false }).returning();
-    user = newUser;
-  }
-
-  if (!existingMembership) {
-    await db.insert(userTenants).values({ userId: user.id, tenantId, role }).onConflictDoNothing();
-  }
+  const result = await withTenantAuditedTransaction(
+    tenantId,
+    async (txRaw, appendRequiredAudit) => {
+      const tx = txRaw as typeof db;
+      await lockTenantOwnerLifecycle(tx, tenantId);
+      let [user] = await tx.select().from(users).where(eq(users.email, email));
+      const createdUser = !user;
+      if (!user) {
+        const [newUser] = await tx
+          .insert(users)
+          .values({ email, emailVerified: false })
+          .returning();
+        user = newUser;
+      }
+      const [existingMembership] = await tx
+        .select({ role: userTenants.role })
+        .from(userTenants)
+        .where(and(eq(userTenants.userId, user.id), eq(userTenants.tenantId, tenantId)));
+      const actualRole = existingMembership?.role ?? role;
+      if (!existingMembership) {
+        await tx
+          .insert(userTenants)
+          .values({ userId: user.id, tenantId, role })
+          .onConflictDoNothing();
+      }
+      await appendRequiredAudit({
+        tenantId,
+        actorType: "platform",
+        action: "tenant.member.add",
+        resourceType: "user",
+        resourceId: user.id,
+        metadata: { email, role: actualRole, requestedRole: role, isNew: !existingMembership },
+        ...auditCtx(c),
+      });
+      return { user, actualRole, createdUser };
+    },
+  );
+  const { user, actualRole, createdUser } = result;
   if (createdUser) {
     dispatchWebhook(tenantId, user.id, "user.created", {
       userId: user.id,
@@ -5115,7 +5234,7 @@ platform.delete("/tenants/:id/members/:userId", async (c) => {
   if (!isValidTenantId(tenantId)) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid tenant id format" }, 400);
   }
-  if (isPersonalTenantId(tenantId)) {
+  if (isReservedTenantId(tenantId)) {
     return c.json<ApiResponse>(
       { ok: false, error: "Personal tenant membership is immutable" },
       409,
@@ -5152,22 +5271,25 @@ platform.delete("/tenants/:id/members/:userId", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: "Member not found in tenant" }, 404);
   }
 
-  const revokedBefore = await revocationStore.revokeUserTokens(userId);
-
   await writeAuditEvent({
     tenantId,
     actorType: "platform",
-    action: "tenant.member.remove",
+    action: "tenant.member.remove.authorized",
     resourceType: "user",
     resourceId: userId,
-    metadata: { revokedUserTokensIssuedBefore: revokedBefore },
+    metadata: { role: currentMember.role },
     ...auditCtx(c),
   });
 
+  const revokedBefore = Math.floor(Date.now() / 1000) + 1;
+  await revocationStore.revokeUserTokens(userId, revokedBefore);
+
   let deleted: typeof userTenants.$inferSelect | undefined;
   try {
-    deleted = await db.transaction(async (tx) => {
+    deleted = await withTenantAuditedTransaction(tenantId, async (txRaw, appendRequiredAudit) => {
+      const tx = txRaw as typeof db;
       await lockTenantOwnerLifecycle(tx, tenantId);
+      await lockUserSession(tx, userId);
       const [current] = await tx
         .select({ role: userTenants.role })
         .from(userTenants)
@@ -5182,6 +5304,19 @@ platform.delete("/tenants/:id/members/:userId", async (c) => {
         .delete(userTenants)
         .where(and(eq(userTenants.tenantId, tenantId), eq(userTenants.userId, userId)))
         .returning();
+      if (!row) return undefined;
+      await tx
+        .delete(refreshTokens)
+        .where(and(eq(refreshTokens.tenantId, tenantId), eq(refreshTokens.userId, userId)));
+      await appendRequiredAudit({
+        tenantId,
+        actorType: "platform",
+        action: "tenant.member.remove",
+        resourceType: "user",
+        resourceId: userId,
+        metadata: { role: current.role, revokedUserTokensIssuedBefore: revokedBefore },
+        ...auditCtx(c),
+      });
       return row;
     });
   } catch (err) {
@@ -5193,10 +5328,6 @@ platform.delete("/tenants/:id/members/:userId", async (c) => {
   if (!deleted) {
     return c.json<ApiResponse>({ ok: false, error: "Member not found in tenant" }, 404);
   }
-
-  await db
-    .delete(refreshTokens)
-    .where(and(eq(refreshTokens.tenantId, tenantId), eq(refreshTokens.userId, userId)));
 
   return c.json<ApiResponse>({ ok: true });
 });
@@ -5217,7 +5348,7 @@ platform.patch("/tenants/:id/members/:userId", async (c) => {
   if (!isValidTenantId(tenantId)) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid tenant id format" }, 400);
   }
-  if (isPersonalTenantId(tenantId)) {
+  if (isReservedTenantId(tenantId)) {
     return c.json<ApiResponse>(
       { ok: false, error: "Personal tenant membership is immutable" },
       409,
@@ -5269,6 +5400,16 @@ platform.patch("/tenants/:id/members/:userId", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: "Member not found in tenant" }, 404);
   }
 
+  await writeAuditEvent({
+    tenantId,
+    actorType: "platform",
+    action: "tenant.member.role.update.authorized",
+    resourceType: "user",
+    resourceId: userId,
+    metadata: { previousRole: currentMember.role, role },
+    ...auditCtx(c),
+  });
+
   let updated:
     | {
         row: typeof userTenants.$inferSelect;
@@ -5277,7 +5418,8 @@ platform.patch("/tenants/:id/members/:userId", async (c) => {
       }
     | undefined;
   try {
-    updated = await db.transaction(async (tx) => {
+    updated = await withTenantAuditedTransaction(tenantId, async (txRaw, appendRequiredAudit) => {
+      const tx = txRaw as typeof db;
       await lockTenantOwnerLifecycle(tx, tenantId);
       const [current] = await tx
         .select({ role: userTenants.role })
@@ -5289,10 +5431,15 @@ platform.patch("/tenants/:id/members/:userId", async (c) => {
           throw new Error("Cannot downgrade the sole tenant owner");
         }
       }
+      // Derive the cutoff from the membership protected by the final lifecycle
+      // lock. A preflight member -> concurrent owner -> requested member
+      // interleaving must still revoke credentials before the demotion commits.
       const revokedUserTokensIssuedBefore =
         current.role === role ? null : Math.floor(Date.now() / 1000) + 1;
       if (revokedUserTokensIssuedBefore !== null) {
         await revocationStore.revokeUserTokens(userId, revokedUserTokensIssuedBefore);
+      }
+      if (revokedUserTokensIssuedBefore !== null) {
         await tx
           .delete(refreshTokens)
           .where(and(eq(refreshTokens.tenantId, tenantId), eq(refreshTokens.userId, userId)));
@@ -5302,13 +5449,25 @@ platform.patch("/tenants/:id/members/:userId", async (c) => {
         .set({ role })
         .where(and(eq(userTenants.tenantId, tenantId), eq(userTenants.userId, userId)))
         .returning();
-      return row
-        ? {
-            row,
-            previousRole: current.role,
-            revokedUserTokensIssuedBefore,
-          }
-        : undefined;
+      if (!row) return undefined;
+      await appendRequiredAudit({
+        tenantId,
+        actorType: "platform",
+        action: "tenant.member.role.update",
+        resourceType: "user",
+        resourceId: userId,
+        metadata: {
+          previousRole: current.role,
+          role,
+          revokedUserTokensIssuedBefore,
+        },
+        ...auditCtx(c),
+      });
+      return {
+        row,
+        previousRole: current.role,
+        revokedUserTokensIssuedBefore,
+      };
     });
   } catch (err) {
     if (err instanceof Error && err.message === "Cannot downgrade the sole tenant owner") {
@@ -5318,28 +5477,6 @@ platform.patch("/tenants/:id/members/:userId", async (c) => {
   }
   if (!updated) {
     return c.json<ApiResponse>({ ok: false, error: "Member not found in tenant" }, 404);
-  }
-
-  try {
-    await writeAuditEvent({
-      tenantId,
-      actorType: "platform",
-      action: "tenant.member.role.update",
-      resourceType: "user",
-      resourceId: userId,
-      metadata: {
-        previousRole: updated.previousRole,
-        role,
-        revokedUserTokensIssuedBefore: updated.revokedUserTokensIssuedBefore,
-      },
-      ...auditCtx(c),
-    });
-  } catch (error) {
-    await db
-      .update(userTenants)
-      .set({ role: updated.previousRole })
-      .where(and(eq(userTenants.tenantId, tenantId), eq(userTenants.userId, userId)));
-    throw error;
   }
 
   return c.json<ApiResponse<{ userId: string; tenantId: string; role: string }>>({

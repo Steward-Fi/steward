@@ -4,8 +4,15 @@ import { agentPolicies, agents, auditEvents, closeDb, getDb, tenants } from "@st
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { eq } from "drizzle-orm";
 
-process.env.DATABASE_URL = "postgres://test:test@localhost:5432/test";
-process.env.STEWARD_MASTER_PASSWORD = "test-master-password";
+const MUTATED_ENV = [
+  "DATABASE_URL",
+  "STEWARD_DB_MODE",
+  "STEWARD_PGLITE_MEMORY",
+  "STEWARD_MASTER_PASSWORD",
+  "STEWARD_JWT_SECRET",
+  "STEWARD_AUDIT_HMAC_KEY",
+] as const;
+const originalEnv = new Map(MUTATED_ENV.map((name) => [name, process.env[name]]));
 setDefaultTimeout(60000);
 
 const tenantId = "tenant-agent-policy-test";
@@ -29,7 +36,9 @@ async function putPolicy(body: Record<string, unknown>) {
 }
 
 beforeAll(async () => {
-  process.env.STEWARD_PGLITE_MEMORY = "true";
+  process.env.DATABASE_URL = "postgres://test:test@localhost:5432/test";
+  process.env.STEWARD_DB_MODE = "pglite";
+  delete process.env.STEWARD_PGLITE_MEMORY;
   process.env.STEWARD_MASTER_PASSWORD = "test-master-password";
   process.env.STEWARD_JWT_SECRET = "agent-policy-test-jwt-secret-with-enough-entropy";
   process.env.STEWARD_AUDIT_HMAC_KEY = "agent-policy-test-audit-hmac-key-with-enough-entropy";
@@ -80,8 +89,10 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await closeDb().catch(() => undefined);
-  delete process.env.STEWARD_JWT_SECRET;
-  delete process.env.STEWARD_AUDIT_HMAC_KEY;
+  for (const [name, value] of originalEnv) {
+    if (value === undefined) delete process.env[name];
+    else process.env[name] = value;
+  }
 });
 
 describe("agent trade policy", () => {
@@ -147,7 +158,7 @@ describe("agent trade policy", () => {
     expect(row).toBeUndefined();
   });
 
-  it("PUT tighten-updates the admin-seeded policy row and records updated_by", async () => {
+  it("PUT tighten-updates policy under explicit PGLite mode and records updated_by", async () => {
     const res = await putPolicy({
       dailyCap: 800,
       perOrderCap: 250,

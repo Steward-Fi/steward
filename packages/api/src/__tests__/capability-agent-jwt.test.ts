@@ -108,7 +108,7 @@ describe("requireCapabilityAgentJwt (SEC-092)", () => {
 
   test("control: requireAgentJwt still hard-requires trade:order", async () => {
     const res = await probe("/trade/probe", await signToken(["cap:github:app:org"]));
-    expect(res.status).toBe(403);
+    expect(res.status).toBe(401);
     const scoped = await probe("/trade/probe", await signToken(["trade:order"]));
     expect(scoped.status).toBe(200);
   });

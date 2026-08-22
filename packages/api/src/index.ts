@@ -5,12 +5,13 @@
  * served by other runtimes (Cloudflare Workers, Electrobun embedded). This
  * file only contains code that needs a long-lived Node/Bun process:
  *
+ *   - The in-memory IP rate-limit log (only safe in single-process mode)
+ *   - `setInterval` GC for expired entries
  *   - The blocking `runMigrations()` call at boot
  *   - The /ready readiness probe (depends on migration state + DB ping)
  *   - `Bun.serve` plus SIGINT/SIGTERM graceful shutdown
  */
 
-import { createHash, timingSafeEqual } from "node:crypto";
 import { validateJwtSecretEnv } from "@stwd/auth";
 import {
   assertRlsDeploymentSafety,
@@ -32,8 +33,10 @@ import {
   shutdownRedis,
 } from "./middleware/redis";
 import { resolveEnabledPlugins } from "./plugin-config";
+import { createReadinessHandler, type ReadinessCheck } from "./readiness";
 import { assertAuthStoresAreSafe, getAuthStoreSources, initAuthStores } from "./routes/auth";
-import { API_VERSION, type ApiResponse, nonceCleanupTimer } from "./services/context";
+import { startAccountWalletLifecycleRecoveryScheduler } from "./services/account-wallet-lifecycle";
+import { API_VERSION, type ApiResponse } from "./services/context";
 import { startGoogleCredentialLifecycleScheduler } from "./services/provider-google-lifecycle-scheduler";
 import { startProviderReservationReconciliationScheduler } from "./services/provider-reservation-reconciliation-scheduler";
 import { startXCredentialLifecycleScheduler } from "./services/provider-x-lifecycle-scheduler";
@@ -65,7 +68,7 @@ validateJwtSecretEnv();
 const app = await composeApp();
 const capabilitiesEnabled = resolveEnabledPlugins().has("capabilities");
 
-// ─── Shutdown guard ───────────────────────────────────────────────────────────
+// ─── Shutdown guard ──────────────────────────────────────────────────────────
 let isShuttingDown = false;
 let cancelRetention: (() => void) | undefined;
 let cancelProviderReservationReconciliation: (() => void) | undefined;
@@ -74,6 +77,7 @@ let cancelWebhookRetryScheduler: (() => void) | undefined;
 let cancelUpstreamCredentialLeaseScheduler: (() => Promise<void>) | undefined;
 let cancelGoogleCredentialLifecycleScheduler: (() => Promise<void>) | undefined;
 let cancelXCredentialLifecycleScheduler: (() => Promise<void>) | undefined;
+let cancelAccountWalletLifecycleRecoveryScheduler: (() => Promise<void>) | undefined;
 
 function runtimeGate(): Response | null {
   if (isShuttingDown) {
@@ -95,110 +99,115 @@ function runtimeGate(): Response | null {
 // STEWARD_MASTER_PASSWORD is set, DB/proxy clock skew, error strings).
 // Unauthenticated callers get the same 200/503 status plus per-check ok flags
 // only; operators can set STEWARD_READY_PROBE_TOKEN and send it as
-// X-Steward-Probe-Token to receive the full diagnostic detail.
+// X-Steward-Probe-Token to receive the full diagnostic detail. The handler
+// policy lives in readiness.ts; this entrypoint supplies the production I/O.
 
-function readyProbeAuthorized(presented: string | undefined): boolean {
-  const expected = process.env.STEWARD_READY_PROBE_TOKEN;
-  if (!expected || !presented) return false;
-  const a = createHash("sha256").update(expected).digest();
-  const b = createHash("sha256").update(presented).digest();
-  return timingSafeEqual(a, b);
-}
-
-app.get("/ready", async (c) => {
-  const checks: Record<
-    string,
-    { ok: boolean; required?: boolean; error?: string; source?: string; detail?: unknown }
-  > = {};
-
-  const expectedMigration = getMigrationExpectation();
-  checks.migrations = { ok: false, detail: { expected: expectedMigration.tag } };
-
-  try {
-    const db = getDb();
-    const pglite = shouldUsePGLite();
-    const result = pglite
-      ? await db.execute(sql`
+app.get(
+  "/ready",
+  createReadinessHandler({
+    apiVersion: API_VERSION,
+    startedAt: startTime,
+    environment: () => ({
+      allowMemoryAuthStores: process.env.STEWARD_ALLOW_MEMORY_AUTH_STORES === "true",
+      probeToken: process.env.STEWARD_READY_PROBE_TOKEN,
+      requiresDurableAuthStores:
+        process.env.NODE_ENV === "production" || process.env.STEWARD_RUNTIME === "workers",
+    }),
+    checkDatabase: async () => {
+      const checks: Record<string, ReadinessCheck> = {};
+      const expectedMigration = getMigrationExpectation();
+      checks.migrations = { ok: false, detail: { expected: expectedMigration.tag } };
+      try {
+        const db = getDb();
+        const pglite = shouldUsePGLite();
+        const result = pglite
+          ? await db.execute(sql`
           SELECT
             EXTRACT(EPOCH FROM CURRENT_TIMESTAMP) * 1000 AS database_time_ms,
             EXISTS(
               SELECT 1 FROM __steward_migrations WHERE tag = ${expectedMigration.tag}
             ) AS expected_migration_applied
         `)
-      : await db.execute(sql`
+          : await db.execute(sql`
           SELECT
             EXTRACT(EPOCH FROM clock_timestamp()) * 1000 AS database_time_ms,
             (SELECT MAX(created_at) FROM drizzle.__drizzle_migrations) AS migration_created_at
         `);
-    const rows = Array.isArray(result)
-      ? result
-      : ((result as unknown as { rows?: unknown[] }).rows ?? []);
-    const row = rows[0] as
-      | { database_time_ms?: string | number; migration_created_at?: string | number | null }
-      | undefined;
-    const databaseTimeMs = Number(row?.database_time_ms);
-    const migrationCreatedAt = Number(row?.migration_created_at);
-    const expectedMigrationApplied =
-      (row as { expected_migration_applied?: unknown } | undefined)?.expected_migration_applied ===
-      true;
-    const databaseSkewMs = Math.abs(Date.now() - databaseTimeMs);
-    checks.database = {
-      ok: Number.isFinite(databaseTimeMs) && databaseSkewMs <= 30_000,
-      detail: { clockSkewMs: Math.round(databaseSkewMs), serverTime: new Date().toISOString() },
-    };
-    checks.migrations = {
-      ok:
-        migrationsRan &&
-        (pglite ? expectedMigrationApplied : migrationCreatedAt === expectedMigration.createdAt),
-      detail: {
-        expected: expectedMigration.tag,
-        expectedCreatedAt: expectedMigration.createdAt,
-        ...(pglite
-          ? { expectedMigrationApplied }
-          : { actualCreatedAt: Number.isFinite(migrationCreatedAt) ? migrationCreatedAt : null }),
-      },
-    };
-    if (process.env.NODE_ENV === "production") {
-      const expectedRole = process.env.STEWARD_APP_DATABASE_ROLE;
-      if (!expectedRole) throw new Error("STEWARD_APP_DATABASE_ROLE is required in production");
-      await assertRlsDeploymentSafety(db, { expectedRole });
-      checks.rlsDeployment = { ok: true };
-    }
-  } catch {
-    checks.database = { ok: false, error: "Database health check failed" };
-  }
-
-  const redisRequired = globalRateLimitRequiresRedis() || redisEnforcementRequiresDurability();
-  try {
-    const redis = getRedisClient();
-    checks.redis = redis
-      ? { ok: (await redis.ping()).toUpperCase() === "PONG" }
-      : isRedisConfigured()
-        ? redisRequired
-          ? { ok: false, error: "Redis is configured but not connected" }
-          : {
-              ok: false,
-              required: false,
-              error: "Redis is configured but not connected (memory acknowledged)",
-            }
-        : redisRequired
-          ? { ok: false, error: "Redis is required for durable production rate limiting" }
-          : { ok: false, required: false, error: "Redis is not configured (optional mode)" };
-  } catch {
-    checks.redis = redisRequired
-      ? { ok: false, error: "Redis health check failed" }
-      : { ok: false, required: false, error: "Redis health check failed (optional mode)" };
-  }
-
-  const proxyUrl = process.env.STEWARD_PROXY_URL?.replace(/\/+$/, "");
-  if (!proxyUrl) {
-    checks.proxyClock = {
-      ok: false,
-      required: false,
-      error: "STEWARD_PROXY_URL not configured",
-    };
-  } else {
-    try {
+        const rows = Array.isArray(result)
+          ? result
+          : ((result as unknown as { rows?: unknown[] }).rows ?? []);
+        const row = rows[0] as
+          | { database_time_ms?: string | number; migration_created_at?: string | number | null }
+          | undefined;
+        const databaseTimeMs = Number(row?.database_time_ms);
+        const migrationCreatedAt = Number(row?.migration_created_at);
+        const expectedMigrationApplied =
+          (row as { expected_migration_applied?: unknown } | undefined)
+            ?.expected_migration_applied === true;
+        const databaseSkewMs = Math.abs(Date.now() - databaseTimeMs);
+        checks.database = {
+          ok: Number.isFinite(databaseTimeMs) && databaseSkewMs <= 30_000,
+          detail: { clockSkewMs: Math.round(databaseSkewMs), serverTime: new Date().toISOString() },
+        };
+        checks.migrations = {
+          ok:
+            migrationsRan &&
+            (pglite
+              ? expectedMigrationApplied
+              : migrationCreatedAt === expectedMigration.createdAt),
+          detail: {
+            expected: expectedMigration.tag,
+            expectedCreatedAt: expectedMigration.createdAt,
+            ...(pglite
+              ? { expectedMigrationApplied }
+              : {
+                  actualCreatedAt: Number.isFinite(migrationCreatedAt) ? migrationCreatedAt : null,
+                }),
+          },
+        };
+        if (process.env.NODE_ENV === "production") {
+          const expectedRole = process.env.STEWARD_APP_DATABASE_ROLE;
+          if (!expectedRole) throw new Error("STEWARD_APP_DATABASE_ROLE is required in production");
+          await assertRlsDeploymentSafety(db, { expectedRole });
+          checks.rlsDeployment = { ok: true };
+        }
+      } catch {
+        checks.database = { ok: false, error: "Database health check failed" };
+      }
+      return checks;
+    },
+    checkRedis: async () => {
+      const redisRequired = globalRateLimitRequiresRedis() || redisEnforcementRequiresDurability();
+      try {
+        const redis = getRedisClient();
+        return redis
+          ? { ok: (await redis.ping()).toUpperCase() === "PONG" }
+          : isRedisConfigured()
+            ? redisRequired
+              ? { ok: false, error: "Redis is configured but not connected" }
+              : {
+                  ok: false,
+                  required: false,
+                  error: "Redis is configured but not connected (memory acknowledged)",
+                }
+            : redisRequired
+              ? { ok: false, error: "Redis is required for durable production rate limiting" }
+              : { ok: false, required: false, error: "Redis is not configured (optional mode)" };
+      } catch {
+        return redisRequired
+          ? { ok: false, error: "Redis health check failed" }
+          : { ok: false, required: false, error: "Redis health check failed (optional mode)" };
+      }
+    },
+    checkProxyClock: async () => {
+      const proxyUrl = process.env.STEWARD_PROXY_URL?.replace(/\/+$/, "");
+      if (!proxyUrl) {
+        return {
+          ok: false,
+          required: false,
+          error: "STEWARD_PROXY_URL not configured",
+        };
+      }
       const startedAt = Date.now();
       const response = await fetch(`${proxyUrl}/health`, { signal: AbortSignal.timeout(3_000) });
       const body = (await response.json()) as { serverTime?: unknown };
@@ -206,71 +215,33 @@ app.get("/ready", async (c) => {
       const proxyTime = Date.parse(String(body.serverTime ?? ""));
       const midpoint = startedAt + (endedAt - startedAt) / 2;
       const skewMs = Math.abs(proxyTime - midpoint);
-      checks.proxyClock = {
+      return {
         ok: response.ok && Number.isFinite(proxyTime) && skewMs <= 30_000,
         detail: { clockSkewMs: Math.round(skewMs) },
       };
-    } catch {
-      checks.proxyClock = { ok: false, error: "Proxy health check failed" };
-    }
-  }
-
-  if (!process.env.STEWARD_MASTER_PASSWORD) {
-    checks.vault = { ok: false, error: "STEWARD_MASTER_PASSWORD not set" };
-  } else {
-    checks.vault = { ok: true };
-  }
-
-  const storeSources = getAuthStoreSources();
-  const memoryAuthStores = Object.entries(storeSources)
-    .filter(([, source]) => source === "memory")
-    .map(([name]) => name);
-  const memoryAuthStoresAllowed =
-    process.env.STEWARD_ALLOW_MEMORY_AUTH_STORES === "true" ||
-    process.env.NODE_ENV !== "production";
-  checks.authStores = {
-    ok: memoryAuthStores.length === 0 || memoryAuthStoresAllowed,
-    source: Object.entries(storeSources)
-      .map(([name, source]) => `${name}:${source}`)
-      .join(","),
-    ...(memoryAuthStores.length > 0 && !memoryAuthStoresAllowed
-      ? { error: `Production auth stores using memory: ${memoryAuthStores.join(", ")}` }
-      : {}),
-  };
-
-  if (capabilitiesEnabled) {
-    const health = getUpstreamCredentialLeaseSchedulerHealth();
-    checks.upstreamCredentialLeases = {
-      ok: health.ok,
-      detail: {
-        enabled: health.enabled,
-        inFlight: health.inFlight,
-        lastStartedAt: health.lastStartedAt,
-        lastSucceededAt: health.lastSucceededAt,
-        lastFailedAt: health.lastFailedAt,
-      },
-      ...(health.lastError ? { error: health.lastError } : {}),
-    };
-  }
-
-  const allOk = Object.values(checks).every((check) => check.ok || check.required === false);
-  const verbose = readyProbeAuthorized(c.req.header("x-steward-probe-token"));
-  const publicChecks = Object.fromEntries(
-    Object.entries(checks).map(([name, check]) => [
-      name,
-      { ok: check.ok, ...(check.required === false ? { required: false } : {}) },
-    ]),
-  );
-  return c.json(
-    {
-      status: allOk ? "ready" : "not_ready",
-      version: API_VERSION,
-      uptime: Math.floor((Date.now() - startTime) / 1000),
-      checks: verbose ? checks : publicChecks,
     },
-    allOk ? 200 : 503,
-  );
-});
+    getAuthStoreSources,
+    isVaultConfigured: () => Boolean(process.env.STEWARD_MASTER_PASSWORD),
+    getAdditionalChecks: capabilitiesEnabled
+      ? () => {
+          const health = getUpstreamCredentialLeaseSchedulerHealth();
+          return {
+            upstreamCredentialLeases: {
+              ok: health.ok,
+              detail: {
+                enabled: health.enabled,
+                inFlight: health.inFlight,
+                lastStartedAt: health.lastStartedAt,
+                lastSucceededAt: health.lastSucceededAt,
+                lastFailedAt: health.lastFailedAt,
+              },
+              ...(health.lastError ? { error: health.lastError } : {}),
+            },
+          };
+        }
+      : undefined,
+  }),
+);
 
 // ─── Database migrations (blocking — must complete before serving traffic) ───
 
@@ -305,7 +276,7 @@ if (shouldUsePGLite()) {
       console.log("[steward] Migrations already up to date.");
     }
 
-    // Plugin-owned migrations (Phase 2c): applied AFTER the core migrator so a
+    // Plugin-owned migrations are applied AFTER the core migrator so a
     // plugin migration may reference core tables via FK. Each plugin's migrations
     // land in its OWN namespaced bookkeeping table
     // (drizzle.__drizzle_migrations_plugin_<id>), totally isolated from the core's
@@ -361,6 +332,7 @@ assertAuthStoresAreSafe();
 // ─── Data retention scheduler (SOC2 CC2) ────────────────────────────────────
 
 if (migrationsRan) {
+  cancelAccountWalletLifecycleRecoveryScheduler = startAccountWalletLifecycleRecoveryScheduler();
   if (process.env.GOOGLE_PROVIDER_CLIENT_ID && process.env.GOOGLE_PROVIDER_CLIENT_SECRET) {
     cancelGoogleCredentialLifecycleScheduler = startGoogleCredentialLifecycleScheduler();
   }
@@ -395,7 +367,10 @@ const serverOptions = {
     // Hand the runtime-observed socket peer to the app via Hono's env bag so
     // per-route limiters (auth) can key on it when no trusted forwarding
     // config exists — it cannot be client-influenced, unlike any header.
-    return runtimeGate() ?? app.fetch(request, { [SOCKET_PEER_ENV_KEY]: peerAddress });
+    return (
+      runtimeGate() ??
+      app.fetch(request, { [SOCKET_PEER_ENV_KEY]: peerAddress })
+    );
   },
   idleTimeout: 30,
 } as Parameters<typeof Bun.serve>[0] & { hostname?: string };
@@ -408,7 +383,6 @@ const shutdown = async (signal: string) => {
   console.log(`Received ${signal}, shutting down Steward API`);
 
   server.stop(true);
-  if (nonceCleanupTimer) clearInterval(nonceCleanupTimer);
   if (cancelRetention) cancelRetention();
   if (cancelProviderReservationReconciliation) cancelProviderReservationReconciliation();
   if (cancelTransactionReceiptPolling) cancelTransactionReceiptPolling();
@@ -416,6 +390,9 @@ const shutdown = async (signal: string) => {
   if (cancelUpstreamCredentialLeaseScheduler) await cancelUpstreamCredentialLeaseScheduler();
   if (cancelGoogleCredentialLifecycleScheduler) await cancelGoogleCredentialLifecycleScheduler();
   if (cancelXCredentialLifecycleScheduler) await cancelXCredentialLifecycleScheduler();
+  if (cancelAccountWalletLifecycleRecoveryScheduler) {
+    await cancelAccountWalletLifecycleRecoveryScheduler();
+  }
 
   try {
     await Promise.all([closeDb(), shutdownRedis()]);

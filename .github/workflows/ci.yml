@@ -368,8 +368,8 @@ jobs:
         run: bun run test
 
   unit-flutter:
-    # The Bun validator checks repository shape and required strings; only the
-    # Dart toolchain can prove the SDK and its security contract tests compile.
+    # The Bun validator checks artifact presence only; the Dart toolchain
+    # executes the SDK wire and security contracts.
     name: Unit Tests (packages/flutter)
     runs-on: ubuntu-latest
     timeout-minutes: 10

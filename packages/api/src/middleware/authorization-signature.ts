@@ -8,11 +8,16 @@ import {
   tenantAppClients,
   tenantRequestSigningKeys,
 } from "@stwd/db";
-import { type EncryptedKey, KeyStore } from "@stwd/vault";
+import type { EncryptedKey, KeyStore } from "@stwd/vault";
 import { and, eq } from "drizzle-orm";
 import type { Context } from "hono";
 import { createMiddleware } from "hono/factory";
 import { type ApiResponse, type AppVariables, isValidTenantId } from "../services/context";
+import {
+  type CustodyAuthority,
+  getConfiguredKeyStore,
+  resolveCustodyAuthority,
+} from "../services/vault-factory";
 import { isSensitivePath } from "./sensitive-paths";
 
 const MUTATING_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
@@ -167,8 +172,12 @@ async function tenantRequestSigningKeyCandidates(
   // reach the indexed lookup and subsequent decrypt.
   const keyId = request.headers.get("X-Steward-Signing-Key-Id");
   if (!keyId || !SIGNING_KEY_ID_PATTERN.test(keyId)) return [];
-  const masterPassword = process.env.STEWARD_MASTER_PASSWORD;
-  if (!masterPassword) return [];
+  let authority: CustodyAuthority;
+  try {
+    authority = resolveCustodyAuthority();
+  } catch {
+    return [];
+  }
 
   const now = new Date();
   const rows = await getDb()
@@ -184,7 +193,7 @@ async function tenantRequestSigningKeyCandidates(
   // Defer KeyStore construction (itself a scrypt KDF) until a row exists, so
   // an unknown key id costs only the cheap lookup above.
   if (rows.length === 0) return [];
-  const keyStore = createKeyStore(masterPassword, undefined, "secret-vault");
+  const keyStore = createKeyStore(authority.masterPassword, authority.kdfSalt, "secret-vault");
   return rows.flatMap((row) => {
     if (row.revokedAt) return [];
     if (row.expiresAt && row.expiresAt <= now) return [];
@@ -809,7 +818,7 @@ export function authorizationSignature(options?: AuthorizationSignatureOptions) 
   const appSecretResolver = options?.appSecretResolver ?? appClientSecretSigningCandidates;
   const tenantKeyStoreFactory =
     options?.tenantKeyStoreFactory ??
-    ((masterPassword, masterSalt, domain) => new KeyStore(masterPassword, masterSalt, domain));
+    ((_masterPassword, _masterSalt, domain) => getConfiguredKeyStore(domain));
   const maxClockSkewMs = parsePositiveInt(
     process.env.STEWARD_REQUEST_EXPIRY_MAX_SKEW_MS,
     DEFAULT_MAX_CLOCK_SKEW_MS,

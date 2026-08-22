@@ -231,7 +231,7 @@ async function testProviderDiscovery() {
       return;
     }
 
-    // /auth/providers returns ApiResponse<{...}> after #27. Some older builds
+    // /auth/providers returns ApiResponse<{...}>. Some older builds
     // returned a flat object; tolerate both for forwards compatibility.
     const providers = data?.ok && data?.data ? data.data : data;
 

@@ -75,7 +75,7 @@ export {
   isValidMnemonic,
   mnemonicToSeed,
 } from "./hd-wallet";
-export type { EncryptedKey } from "./keystore";
+export type { EncryptedKey, KeyStoreDomain, KeyStoreRuntimeOptions } from "./keystore";
 export { KeyStore } from "./keystore";
 export type { KeystoreBackend, KeystoreContext } from "./keystore-backend";
 export { backendFromKeyStore } from "./keystore-backend";
@@ -235,6 +235,7 @@ export type {
 } from "./vault";
 export {
   BackendBindingMismatchError,
+  custodyTransitionLockKey,
   externalCustodyIdentityDigest,
   SolanaRecoveryOwnershipLostError,
   Vault,

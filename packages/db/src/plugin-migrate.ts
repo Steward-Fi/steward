@@ -1,7 +1,7 @@
 /**
  * plugin-migrate.ts — plugin-owned database migrations with NAMESPACED journals.
  *
- * WHY THIS EXISTS (Phase 2c)
+ * PLUGIN MIGRATION OWNERSHIP
  * --------------------------
  * a steward plugin (e.g. trading) may own tables the lean core does not know
  * about. it declares its schema via a {@link PluginMigrationSource}: its OWN
