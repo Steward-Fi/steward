@@ -42,25 +42,20 @@ describe("ERC-8004 audit ordering", () => {
     ).toBeLessThan(routeSource.indexOf("INSERT INTO reputation_cache", feedbackStart));
   });
 
-  it("restores the previous agent registration when final registration audit fails", () => {
-    expect(routeSource).toContain(
-      "type AgentRegistrationRow = typeof agentRegistrations.$inferSelect",
-    );
-    expect(routeSource).toContain("async function snapshotAgentRegistration");
-    expect(routeSource).toContain("async function restoreAgentRegistration");
-
+  it("commits registration and its required audit in one tenant-audited transaction", () => {
     const registerStart = routeSource.indexOf('erc8004Routes.post("/:id/register-onchain"');
     expect(registerStart).toBeGreaterThanOrEqual(0);
     const registerRoute = routeSource.slice(
       registerStart,
       routeSource.indexOf('erc8004Routes.get("/:id/onchain"', registerStart),
     );
-    expect(registerRoute).toContain("snapshotAgentRegistration(tenantId, agentId, chainId)");
+    expect(registerRoute).toContain("withTenantAuditedTransaction(");
+    expect(registerRoute).toContain("async (txRaw, appendRequiredAudit)");
+    expect(registerRoute).toContain("const result = await tx.execute");
     expect(registerRoute).toContain('action: "erc8004.register"');
-    expect(registerRoute).toContain("try {");
-    expect(registerRoute).toContain(
-      "restoreAgentRegistration(tenantId, agentId, chainId, previousRegistration)",
-    );
+    expect(registerRoute).toContain("await appendRequiredAudit");
+    expect(registerRoute).not.toContain("snapshotAgentRegistration");
+    expect(registerRoute).not.toContain("restoreAgentRegistration");
   });
 
   it("rejects replayed feedback before reputation aggregate mutation", () => {

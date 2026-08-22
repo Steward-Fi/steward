@@ -75,7 +75,7 @@ describe("webhook retry hardening", () => {
     expect(webhookRoutesSource).toContain("${webhookDeliveries.status} = 'processing'");
   });
 
-  it("writes webhook creation authorization before insert and enables only after create audit", () => {
+  it("creates only the final enabled row with both audits in the same transaction", () => {
     const createStart = webhookRoutesSource.indexOf('webhookRoutes.post("/",');
     expect(createStart).toBeGreaterThanOrEqual(0);
     const authorized = webhookRoutesSource.indexOf(
@@ -83,14 +83,13 @@ describe("webhook retry hardening", () => {
       createStart,
     );
     const insert = webhookRoutesSource.indexOf(".insert(webhookConfigs)", createStart);
-    const disabledInsert = webhookRoutesSource.indexOf("enabled: false", insert);
+    const enabledInsert = webhookRoutesSource.indexOf("enabled: true", insert);
     const created = webhookRoutesSource.indexOf('action: "webhook.create"', insert);
-    const enable = webhookRoutesSource.indexOf(".update(webhookConfigs)", created);
     expect(authorized).toBeGreaterThan(createStart);
     expect(authorized).toBeLessThan(insert);
-    expect(disabledInsert).toBeGreaterThan(insert);
+    expect(enabledInsert).toBeGreaterThan(insert);
     expect(created).toBeGreaterThan(insert);
-    expect(enable).toBeGreaterThan(created);
+    expect(webhookRoutesSource.slice(createStart, created)).not.toContain("enabled: false");
   });
 
   it("rejects retired tenant webhook secrets instead of storing them", () => {
@@ -107,13 +106,13 @@ describe("webhook retry hardening", () => {
     expect(webhookDispatchSource).toContain("isEncryptedWebhookSecret(config.secret)");
     expect(webhookDispatchSource).toContain("encryptWebhookSecret(signingSecret)");
     expect(webhookDispatchSource).toContain("const signedAt = Math.floor(Date.now() / 1000)");
-    const insertIndex = webhookDispatchSource.indexOf(".insert(webhookDeliveries)");
+    const insertIndex = webhookDispatchSource.indexOf(
+      "const deliveryInsert = db.insert(webhookDeliveries)",
+    );
+    expect(insertIndex).toBeGreaterThanOrEqual(0);
     const insertSnapshot = webhookDispatchSource.slice(
       insertIndex,
-      // Anchor on the per-delivery dispatcher construction that follows the
-      // insert, not the legacy tenant-config dispatcher (new WebhookDispatcher())
-      // that appears earlier in the file.
-      webhookDispatchSource.indexOf("const dispatcher = new WebhookDispatcher", insertIndex),
+      webhookDispatchSource.indexOf("const [delivery]", insertIndex),
     );
     expect(insertSnapshot).toContain("secret: encryptedSecret");
     expect(insertSnapshot).toContain("payload: eventWithDelivery");

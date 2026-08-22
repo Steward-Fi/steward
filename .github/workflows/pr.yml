@@ -238,6 +238,12 @@ jobs:
             PKG_NAME="@stwd/$(basename ${{ matrix.package }})"
             bunx turbo run build --filter="${PKG_NAME}..."
           fi
+          # plugin-trading tests reach API source that imports newly added
+          # @stwd/redis exports. Rebuild the emitted package entry explicitly
+          # so a stale dist artifact cannot survive workspace orchestration.
+          if [ "${{ matrix.package }}" = "packages/plugin-trading" ]; then
+            bun run --cwd packages/redis build
+          fi
 
       - name: Test ${{ matrix.package }}
         # --isolate gives each test file a fresh global object so module
@@ -449,8 +455,8 @@ jobs:
         run: bun run test
 
   unit-flutter:
-    # The Bun validator checks repository shape and required strings; only the
-    # Dart toolchain can prove the SDK and its security contract tests compile.
+    # The Bun validator checks artifact presence only; the Dart toolchain
+    # executes the SDK wire and security contracts.
     name: Unit Tests (packages/flutter)
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -679,6 +685,9 @@ jobs:
           STEWARD_EXECUTION_AUTH_SECRET: "v2-ci-1:ci-execution-auth-secret-must-be-at-least-32-bytes-long"
           STEWARD_AUDIT_HMAC_KEY: "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
           STEWARD_REDIS_TESTS: "1"
+          # Isolated files share the real Redis service and one coarse fallback
+          # subject. Focused limiter suites override this via runtime snapshots.
+          STEWARD_RATE_LIMIT_MAX_REQUESTS: "1000000"
           # Isolated files share one Redis service and reuse deterministic
           # agent/host fixtures, so retain enforcement with a high bounded
           # ceiling for this test-only flood. The dev flag permits in-process

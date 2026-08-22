@@ -1,3 +1,6 @@
+/**
+ * Exercises email-auth credential issuance and redemption against deterministic store backends.
+ */
 import { describe, expect, it, mock } from "bun:test";
 
 import { EmailAuth } from "../email";
@@ -212,6 +215,31 @@ describe("EmailAuth.sendMagicLink", () => {
     const linkAfterCode = await auth.verifyMagicLink(token2, "user@example.com", "tenant-a");
     expect(linkAfterCode.valid).toBe(false);
 
+    auth.destroy();
+  });
+
+  it("restores a claimed login code when downstream authentication fails", async () => {
+    let text = "";
+    const auth = new EmailAuth({
+      from: "login@steward.fi",
+      baseUrl: "https://steward.fi",
+      provider: { send: async (_to, _subject, body) => ((text = body), { provider: "test" }) },
+    });
+
+    await auth.sendMagicLink("retry@example.com", { tenantId: "tenant-a" });
+    const code = text.match(/\b(\d{6})\b/)?.[1] ?? "";
+    const failedAttempt = await auth.claimEmailLoginCode("retry@example.com", code, "tenant-a");
+    expect(failedAttempt.valid).toBe(true);
+    if (!failedAttempt.valid) throw new Error("expected a valid login-code claim");
+    await failedAttempt.rollback();
+
+    const retry = await auth.claimEmailLoginCode("retry@example.com", code, "tenant-a");
+    expect(retry.valid).toBe(true);
+    if (!retry.valid) throw new Error("expected the rolled-back code to be claimable");
+    await retry.commit();
+
+    const replay = await auth.verifyEmailLoginCode("retry@example.com", code, "tenant-a");
+    expect(replay.valid).toBe(false);
     auth.destroy();
   });
 

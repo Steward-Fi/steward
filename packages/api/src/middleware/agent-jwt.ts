@@ -16,12 +16,15 @@ type JwksKey = JsonWebKey & { kid?: string; alg?: string; use?: string };
 type Jwks = { keys?: JwksKey[] };
 
 type CacheEntry = {
+  url: string;
   keys: Map<string, Awaited<ReturnType<typeof importJWK>>>;
   expiresAt: number;
 };
 
 const JWKS_CACHE_MS = 5 * 60 * 1000;
+const JWKS_MISS_REFRESH_MIN_INTERVAL_MS = 10 * 1000;
 const AGENT_TOKEN_EXPIRING_THRESHOLD_SECONDS = 5 * 60;
+const MAX_IAT_CLOCK_SKEW_SECONDS = 60;
 // Dev convenience trust anchor. SEC-069: only honored behind an explicit
 // opt-in (STEWARD_ALLOW_DEFAULT_ELIZA_JWKS=true) outside production — domain
 // takeover/compromise of this host would otherwise silently become a minting
@@ -31,6 +34,11 @@ const DEFAULT_ELIZA_CLOUD_JWKS_URL = "https://milady.shad0w.xyz/.well-known/jwks
 const TRADE_ORDER_SCOPE = "trade:order";
 
 let jwksCache: CacheEntry | null = null;
+const lastJwksMissRefreshAt = new Map<string, number>();
+const jwksMissRefreshInFlight = new Map<
+  string,
+  Promise<Map<string, Awaited<ReturnType<typeof importJWK>>>>
+>();
 
 function invalid(c: Context, reason: string, status: 401 = 401) {
   return c.json({ code: "invalid-jwt", reason }, status);
@@ -53,10 +61,14 @@ function resolveJwksUrl(): string {
   throw new Error("jwks-url-required");
 }
 
-async function loadJwks(): Promise<Map<string, Awaited<ReturnType<typeof importJWK>>>> {
-  const jwksUrl = resolveJwksUrl();
+async function loadJwks(
+  forceRefresh = false,
+  jwksUrl = resolveJwksUrl(),
+): Promise<Map<string, Awaited<ReturnType<typeof importJWK>>>> {
   const now = Date.now();
-  if (jwksCache && jwksCache.expiresAt > now) return jwksCache.keys;
+  if (!forceRefresh && jwksCache?.url === jwksUrl && jwksCache.expiresAt > now) {
+    return jwksCache.keys;
+  }
 
   const response = await fetch(jwksUrl, {
     headers: { accept: "application/json" },
@@ -73,8 +85,29 @@ async function loadJwks(): Promise<Map<string, Awaited<ReturnType<typeof importJ
     keys.set(jwk.kid, await importJWK(jwk, jwk.alg ?? "RS256"));
   }
 
-  jwksCache = { keys, expiresAt: now + JWKS_CACHE_MS };
+  jwksCache = { url: jwksUrl, keys, expiresAt: now + JWKS_CACHE_MS };
   return keys;
+}
+
+function refreshJwksAfterMiss(
+  jwksUrl: string,
+): Promise<Map<string, Awaited<ReturnType<typeof importJWK>>>> | null {
+  const inFlight = jwksMissRefreshInFlight.get(jwksUrl);
+  if (inFlight) return inFlight;
+
+  const now = Date.now();
+  if (now - (lastJwksMissRefreshAt.get(jwksUrl) ?? 0) < JWKS_MISS_REFRESH_MIN_INTERVAL_MS) {
+    return null;
+  }
+  lastJwksMissRefreshAt.set(jwksUrl, now);
+  let refresh: Promise<Map<string, Awaited<ReturnType<typeof importJWK>>>>;
+  refresh = loadJwks(true, jwksUrl).finally(() => {
+    if (jwksMissRefreshInFlight.get(jwksUrl) === refresh) {
+      jwksMissRefreshInFlight.delete(jwksUrl);
+    }
+  });
+  jwksMissRefreshInFlight.set(jwksUrl, refresh);
+  return refresh;
 }
 
 function getBearer(c: Context): string | null {
@@ -267,6 +300,7 @@ export function isAgentJwtFailure(
  */
 export async function authenticateAgentJwt(
   c: Context<{ Variables: AppVariables }>,
+  options: { rejectCapabilityScopes?: boolean } = {},
 ): Promise<AgentJwtAuthenticationResult | AgentJwtAuthenticationFailure> {
   const token = getBearer(c);
   if (!token) return { kind: "invalid-token", reason: "missing bearer token" };
@@ -276,8 +310,20 @@ export async function authenticateAgentJwt(
   if (header.alg !== "RS256") return { kind: "invalid-token", reason: "unsupported alg" };
 
   try {
-    const keys = await loadJwks();
-    const key = keys.get(header.kid);
+    const jwksUrl = resolveJwksUrl();
+    const hadFreshCache = Boolean(jwksCache?.url === jwksUrl && jwksCache.expiresAt > Date.now());
+    let keys = await loadJwks(false, jwksUrl);
+    let key = keys.get(header.kid);
+    // Issuers can publish a rotated kid before this process's cache expires.
+    // Refresh exactly once on a miss so rotation is prompt while an actually
+    // unknown kid remains fail-closed.
+    if (!key && hadFreshCache) {
+      const refresh = refreshJwksAfterMiss(jwksUrl);
+      if (refresh) {
+        keys = await refresh;
+        key = keys.get(header.kid);
+      }
+    }
     if (!key) return { kind: "invalid-token", reason: "unknown kid" };
 
     const { payload } = await jwtVerify(token, key, {
@@ -288,6 +334,13 @@ export async function authenticateAgentJwt(
     const agentId = agentIdFromPayload(payload);
     if (!agentId) return { kind: "invalid-token", reason: "invalid agent claims" };
     const scopes = stringArrayClaim(payload, "scopes", "scope");
+    if (options.rejectCapabilityScopes && scopes.some((scope) => scope.startsWith("cap:"))) {
+      return { kind: "invalid-token", reason: "unsupported capability scope" };
+    }
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    if (typeof payload.iat === "number" && payload.iat > nowSeconds + MAX_IAT_CLOCK_SKEW_SECONDS) {
+      return { kind: "invalid-token", reason: "token issued in the future" };
+    }
 
     const tenantId = c.req.header("X-Steward-Tenant") || DEFAULT_TENANT_ID;
     // Tenant binding: when the token DOES carry a tenant claim it MUST match the
@@ -336,6 +389,12 @@ export async function authenticateAgentJwt(
       observeExpiredAgentToken(c, token);
       return { kind: "token-expired", reason: "token expired" };
     }
+    if (error instanceof errors.JWTClaimValidationFailed) {
+      if (error.claim === "iss") return { kind: "invalid-token", reason: "invalid issuer" };
+      if (error.claim === "aud") return { kind: "invalid-token", reason: "invalid audience" };
+      if (error.claim === "nbf") return { kind: "invalid-token", reason: "token not active" };
+      return { kind: "invalid-token", reason: "invalid token claims" };
+    }
     const reason = error instanceof Error ? error.message : "verification failed";
     return { kind: "invalid-token", reason };
   }
@@ -382,7 +441,7 @@ export async function installAgentJwtContext(
  * trading endpoints depend on.
  */
 export async function requireAgentJwt(c: Context<{ Variables: AppVariables }>, next: Next) {
-  const auth = await authenticateAgentJwt(c);
+  const auth = await authenticateAgentJwt(c, { rejectCapabilityScopes: true });
   if (isAgentJwtFailure(auth)) {
     // Preserve the EXACT legacy wire behavior per failure kind.
     if (auth.kind === "tenant-not-found") {
@@ -447,7 +506,7 @@ export async function requireCapabilityAgentJwt(
  * bindings/grants, never by token scope. ONLY provider-action routes use this.
  */
 export async function requireProviderAgentJwt(c: Context<{ Variables: AppVariables }>, next: Next) {
-  const auth = await authenticateAgentJwt(c);
+  const auth = await authenticateAgentJwt(c, { rejectCapabilityScopes: true });
   if (isAgentJwtFailure(auth)) {
     // Map onto the spec §8 deny table for provider-action routes.
     if (auth.kind === "token-expired") {
@@ -469,4 +528,6 @@ export async function requireProviderAgentJwt(c: Context<{ Variables: AppVariabl
 
 export function clearAgentJwksCacheForTests() {
   jwksCache = null;
+  lastJwksMissRefreshAt.clear();
+  jwksMissRefreshInFlight.clear();
 }

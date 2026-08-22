@@ -62,10 +62,11 @@ curl -X POST http://localhost:3200/agents \
 
 ## List Agents
 
-Returns all agents for the authenticated tenant.
+Returns a bounded page of agents for the authenticated tenant. The default
+limit is 100 and the maximum is 200.
 
 ```
-GET /agents
+GET /agents?limit=100&offset=0
 ```
 
 **Auth:** Tenant API key
@@ -75,25 +76,28 @@ GET /agents
 ```json
 {
   "ok": true,
-  "data": [
-    {
+  "data": {
+    "agents": [{
       "id": "my-agent",
       "name": "My Trading Agent",
       "tenantId": "your-tenant",
       "walletAddresses": { "evm": "0x742d...", "solana": "7xKXtg..." },
       "createdAt": "2026-03-26T12:00:00.000Z"
-    }
-  ]
+    }],
+    "limit": 100,
+    "offset": 0
+  }
 }
 ```
 
 <CodeGroup>
 ```typescript SDK
 const agents = await steward.listAgents();
+const page = await steward.listAgentsPage({ limit: 100, offset: 0 });
 ```
 
 ```bash cURL
-curl http://localhost:3200/agents \
+curl 'http://localhost:3200/agents?limit=100&offset=0' \
   -H "X-Steward-Key: your-key"
 ```
 </CodeGroup>

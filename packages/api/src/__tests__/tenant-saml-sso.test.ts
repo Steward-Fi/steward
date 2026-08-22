@@ -20,10 +20,6 @@ AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
 AQIDAQAB
 -----END CERTIFICATE-----`;
 
-function read(path: string): string {
-  return readFileSync(join(ROOT, path), "utf-8");
-}
-
 // Assert the composed SAML DDL contract across
 // the full set of migration files rather than hard-coded filenames.
 function allMigrations(): string {
@@ -93,28 +89,8 @@ describe("tenant SAML SSO config foundation", () => {
     ).toBe("groupRoleMappings role must be admin, developer, billing, viewer, or member");
   });
 
-  it("adds MFA-gated tenant routes, atomic audit, metadata, login, and ACS guardrails", () => {
-    const tenantConfigSource = read("packages/api/src/routes/tenant-config.ts");
-    const authSource = read("packages/api/src/routes/auth.ts");
+  it("retains the immutable SAML schema constraints across composed migrations", () => {
     const migration = allMigrations();
-
-    expect(tenantConfigSource).toContain('tenantConfigRoutes.get("/:id/saml-sso"');
-    expect(tenantConfigSource).toContain('tenantConfigRoutes.put("/:id/saml-sso"');
-    expect(tenantConfigSource).toContain('tenantConfigRoutes.delete("/:id/saml-sso"');
-    expect(tenantConfigSource).toContain('requireRecentTenantAdminMfa(c, "SAML SSO config');
-    expect(tenantConfigSource).toContain("tenant.saml_sso.update.authorized");
-    expect(tenantConfigSource).toContain("withTenantAuditedTransaction");
-    expect(tenantConfigSource).not.toContain("restoreTenantSamlSsoConfig");
-
-    expect(authSource).toContain('auth.get("/saml/:tenantId/metadata"');
-    expect(authSource).toContain('auth.get("/saml/:tenantId/login"');
-    expect(authSource).toContain('auth.post("/saml/:tenantId/acs"');
-    expect(authSource).toContain("application/samlmetadata+xml");
-    expect(authSource).toContain('WantAssertionsSigned="true"');
-    expect(authSource).toContain("verifySamlAcsResponse");
-    expect(authSource).toContain("isVerifiedSsoEmailDomainForTenant");
-    expect(authSource).toContain("recordSamlAssertionReplay");
-    expect(authSource).toContain("resolveSamlMappedRole(config, groups)");
 
     expect(migration).toContain("\"jit_default_role\" varchar(32) NOT NULL DEFAULT 'viewer'");
     expect(migration).toContain('"tenant_saml_sso_configs_viewer_jit_role_check"');

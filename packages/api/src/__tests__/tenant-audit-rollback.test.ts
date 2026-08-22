@@ -1,147 +1,117 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
-import { auditEvents, getDb, policies, tenants, users, userTenants } from "@stwd/db";
-import { eq, inArray } from "drizzle-orm";
-import { Hono } from "hono";
-import type { AppVariables, PolicyRule } from "../services/context";
+import {
+  __resetAuditHmacKeyCacheForTests,
+  auditChainHeads,
+  auditEvents,
+  closeDb,
+  getDb,
+  tenants,
+} from "@stwd/db";
+import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
+import { asc, eq } from "drizzle-orm";
 
-const PLATFORM_KEY = "tenant-policy-retirement-platform-key";
-const TENANT_ID = "tenant-policy-retirement-existing";
-const CREATE_ID = "tenant-policy-retirement-create";
-const USER_ID = "33333333-3333-4333-8333-333333333333";
-const DEFAULT_RULE: PolicyRule = {
-  id: "legacy-default",
-  type: "spending-limit",
-  enabled: true,
-  config: { maxPerTx: "1", maxPerDay: "1", maxPerWeek: "1" },
-};
-
-let sessionToken: string;
-let tenantConfigs: typeof import("../services/context")["tenantConfigs"];
-let getPolicySet: typeof import("../services/context")["getPolicySet"];
-let apps: Array<Hono<{ Variables: AppVariables }>>;
-
-const historicalProcessLocalConfig = () => ({
-  id: TENANT_ID,
-  name: "Tenant policy retirement",
-  defaultPolicies: [DEFAULT_RULE],
-});
+const PLATFORM_KEY = "tenant-create-atomic-platform-key";
+const GOOD_AUDIT_KEY = "tenant-create-atomic-audit-key-with-enough-entropy";
+let platformRoutes: Awaited<typeof import("../routes/platform")>["platformRoutes"];
+let tenantRoutes: Awaited<typeof import("../routes/tenants")>["tenantRoutes"];
 
 beforeAll(async () => {
+  process.env.STEWARD_PGLITE_MEMORY = "true";
+  process.env.STEWARD_AUDIT_HMAC_KEY = GOOD_AUDIT_KEY;
   process.env.STEWARD_PLATFORM_KEYS = PLATFORM_KEY;
   process.env.STEWARD_PLATFORM_KEY_SCOPES = JSON.stringify({
     [PLATFORM_KEY]: ["platform:write", "platform:tenant:create"],
   });
-  const context = await import("../services/context");
-  const { tenantRoutes } = await import("../routes/tenants");
-  tenantConfigs = context.tenantConfigs;
-  getPolicySet = context.getPolicySet;
-
-  await getDb()
-    .insert(tenants)
-    .values({
-      id: TENANT_ID,
-      name: "Tenant policy retirement",
-      apiKeyHash: `hash-${TENANT_ID}`,
-    });
-  await getDb()
-    .insert(users)
-    .values({ id: USER_ID, email: `${USER_ID}@example.test` });
-  await getDb().insert(userTenants).values({ userId: USER_ID, tenantId: TENANT_ID, role: "owner" });
-  const { createSessionToken } = await import("../routes/auth");
-  sessionToken = await createSessionToken("0x0000000000000000000000000000000000000000", TENANT_ID, {
-    userId: USER_ID,
-    email: `${USER_ID}@example.test`,
-    mfaVerifiedAt: Date.now(),
-    mfaMethod: "totp",
-  });
-  tenantConfigs.set(TENANT_ID, historicalProcessLocalConfig());
-  apps = [new Hono<{ Variables: AppVariables }>(), new Hono<{ Variables: AppVariables }>()];
-  for (const app of apps) app.route("/tenants", tenantRoutes);
+  __resetAuditHmacKeyCacheForTests();
+  const { db, client } = await createPGLiteDb("memory://");
+  setPGLiteOverride(db, async () => client.close());
+  ({ platformRoutes } = await import("../routes/platform"));
+  ({ tenantRoutes } = await import("../routes/tenants"));
 });
 
 afterAll(async () => {
-  tenantConfigs?.delete(TENANT_ID);
-  await getDb().delete(policies).where(eq(policies.agentId, "missing-policy-agent"));
-  await getDb().delete(userTenants).where(eq(userTenants.tenantId, TENANT_ID));
-  await getDb().delete(users).where(eq(users.id, USER_ID));
-  await getDb()
-    .delete(tenants)
-    .where(inArray(tenants.id, [TENANT_ID, CREATE_ID]));
+  await closeDb();
+  delete process.env.STEWARD_PGLITE_MEMORY;
+  delete process.env.STEWARD_AUDIT_HMAC_KEY;
   delete process.env.STEWARD_PLATFORM_KEYS;
   delete process.env.STEWARD_PLATFORM_KEY_SCOPES;
+  __resetAuditHmacKeyCacheForTests();
 });
 
-async function policyAuditRows() {
+const platformHeaders = {
+  "content-type": "application/json",
+  "x-steward-platform-key": PLATFORM_KEY,
+};
+
+async function platformCreate(id: string) {
+  return platformRoutes.request("/tenants", {
+    method: "POST",
+    headers: platformHeaders,
+    body: JSON.stringify({ id, name: `Tenant ${id}` }),
+  });
+}
+
+async function legacyCreate(id: string) {
+  return tenantRoutes.request("/", {
+    method: "POST",
+    headers: platformHeaders,
+    body: JSON.stringify({ id, name: `Tenant ${id}`, apiKeyHash: `raw-${id}` }),
+  });
+}
+
+async function actionsFor(tenantId: string) {
   return getDb()
-    .select({ id: auditEvents.id, action: auditEvents.action })
+    .select({ action: auditEvents.action })
     .from(auditEvents)
-    .where(inArray(auditEvents.tenantId, [TENANT_ID, CREATE_ID]));
+    .where(eq(auditEvents.tenantId, tenantId))
+    .orderBy(asc(auditEvents.seq));
 }
 
-async function updateFrom(app: Hono<{ Variables: AppVariables }>) {
-  return app.request(`/tenants/${TENANT_ID}/webhook`, {
-    method: "PUT",
-    headers: {
-      authorization: `Bearer ${sessionToken}`,
-      "content-type": "application/json",
-      "x-steward-tenant": TENANT_ID,
-    },
-    body: JSON.stringify({ defaultPolicies: [DEFAULT_RULE] }),
+async function withBrokenAuditKey<T>(fn: () => Promise<T>): Promise<T> {
+  process.env.STEWARD_AUDIT_HMAC_KEY = "too-weak";
+  __resetAuditHmacKeyCacheForTests();
+  try {
+    return await fn();
+  } finally {
+    process.env.STEWARD_AUDIT_HMAC_KEY = GOOD_AUDIT_KEY;
+    __resetAuditHmacKeyCacheForTests();
+  }
+}
+
+describe("tenant creation audit atomicity", () => {
+  it("commits platform tenant, API-key custody evidence, and final audits together", async () => {
+    const tenantId = "tenant-create-atomic-success";
+    const response = await platformCreate(tenantId);
+    expect(response.status).toBe(201);
+    expect(await getDb().select().from(tenants).where(eq(tenants.id, tenantId))).toHaveLength(1);
+    expect(await actionsFor(tenantId)).toEqual([
+      { action: "tenant.create.authorized" },
+      { action: "tenant.api_key.create.authorized" },
+      { action: "tenant.create" },
+      { action: "tenant.api_key.create" },
+    ]);
   });
-}
 
-describe("retired process-local tenant policy authority", () => {
-  it("rejects create and update writes before database, cache, or audit mutation", async () => {
-    const auditsBefore = await policyAuditRows();
-    const create = await apps[0].request("/tenants", {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "x-steward-platform-key": PLATFORM_KEY,
-      },
-      body: JSON.stringify({
-        id: CREATE_ID,
-        name: "Must not exist",
-        apiKeyHash: "raw-key",
-        defaultPolicies: [DEFAULT_RULE],
-      }),
-    });
-    const update = await updateFrom(apps[0]);
-
-    for (const response of [create, update]) {
-      expect(response.status).toBe(410);
-      await expect(response.json()).resolves.toMatchObject({
-        ok: false,
-        error: expect.stringContaining("not durable"),
-      });
+  it("rolls back both creation surfaces when required audit cannot append", async () => {
+    for (const [tenantId, create] of [
+      ["tenant-create-atomic-platform-failure", platformCreate],
+      ["tenant-create-atomic-legacy-failure", legacyCreate],
+    ] as const) {
+      const response = await withBrokenAuditKey(() => create(tenantId));
+      expect(response.status, tenantId).toBe(500);
+      expect(await getDb().select().from(tenants).where(eq(tenants.id, tenantId))).toHaveLength(0);
+      expect(await actionsFor(tenantId)).toEqual([]);
+      expect(
+        await getDb().select().from(auditChainHeads).where(eq(auditChainHeads.tenantId, tenantId)),
+      ).toHaveLength(0);
     }
-    expect(await getDb().select().from(tenants).where(eq(tenants.id, CREATE_ID))).toHaveLength(0);
-    expect(tenantConfigs.get(TENANT_ID)).toMatchObject(historicalProcessLocalConfig());
-    expect(await policyAuditRows()).toEqual(auditsBefore);
   });
 
-  it("is restart- and replica-independent because no process-local write remains", async () => {
-    const first = await updateFrom(apps[0]);
-    tenantConfigs.delete(TENANT_ID); // model a fresh process with an empty legacy cache
-    const second = await updateFrom(apps[1]);
-    expect(first.status).toBe(410);
-    expect(second.status).toBe(410);
-    expect(await first.json()).toEqual(await second.json());
-    expect(tenantConfigs.has(TENANT_ID)).toBe(false);
-  });
-
-  it("never treats historical map defaults as policy authority", async () => {
-    tenantConfigs.set(TENANT_ID, historicalProcessLocalConfig());
-    expect(await getPolicySet(TENANT_ID, "missing-policy-agent")).toEqual([]);
-    const read = await apps[0].request(`/tenants/${TENANT_ID}`, {
-      headers: {
-        authorization: `Bearer ${sessionToken}`,
-        "x-steward-tenant": TENANT_ID,
-      },
-    });
-    expect(read.status).toBe(200);
-    const payload = (await read.json()) as { ok: boolean; data: { id: string } };
-    expect(JSON.stringify(payload)).not.toContain("legacy-default");
-    expect(payload).toMatchObject({ ok: true, data: { id: TENANT_ID } });
+  it("serializes duplicate creates to one tenant and one complete audit sequence", async () => {
+    const tenantId = "tenant-create-atomic-race";
+    const responses = await Promise.all([platformCreate(tenantId), platformCreate(tenantId)]);
+    expect(responses.map((response) => response.status).sort()).toEqual([201, 409]);
+    expect(await getDb().select().from(tenants).where(eq(tenants.id, tenantId))).toHaveLength(1);
+    expect(await actionsFor(tenantId)).toHaveLength(4);
   });
 });

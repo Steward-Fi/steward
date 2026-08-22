@@ -7,6 +7,7 @@ import {
   closeDb,
   digitalAssetAccountAggregations,
   digitalAssetAccounts,
+  digitalAssetAccountWalletLifecycles,
   digitalAssetAccountWallets,
   getDb,
   policies,
@@ -15,6 +16,7 @@ import {
   userTenants,
 } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
+import { Vault } from "@stwd/vault";
 import { and, eq } from "drizzle-orm";
 import { Hono } from "hono";
 import type { AppVariables } from "../services/context";
@@ -375,11 +377,10 @@ describe("digital asset account resources", () => {
 
     const get = await app.request("/accounts/acct_existing_wallets");
     expect(get.status).toBe(200);
-    const context = await import("../services/context");
-    const originalGetBalance = context.vault.getBalance.bind(context.vault);
-    const originalGetTokenBalances = context.vault.getTokenBalances.bind(context.vault);
-    const originalGetSplTokenBalances = context.vault.getSplTokenBalances.bind(context.vault);
-    context.vault.getBalance = async (_tenantId: string, agentId: string, chainId?: number) => ({
+    const originalGetBalance = Vault.prototype.getBalance;
+    const originalGetTokenBalances = Vault.prototype.getTokenBalances;
+    const originalGetSplTokenBalances = Vault.prototype.getSplTokenBalances;
+    Vault.prototype.getBalance = async (_tenantId: string, agentId: string, chainId?: number) => ({
       native: agentId === WALLET_B && chainId === 101 ? 2_000_000_000n : 1_000_000_000n,
       nativeFormatted: agentId === WALLET_B && chainId === 101 ? "2" : "1",
       chainId: chainId ?? 84532,
@@ -389,7 +390,7 @@ describe("digital asset account resources", () => {
           ? "8cV5Y7R3UKPqJb1x4yQzq8oZsVbGZ3h5m3NkQW2kUZmx"
           : "0x2222222222222222222222222222222222222222",
     });
-    context.vault.getTokenBalances = async (
+    Vault.prototype.getTokenBalances = async (
       _tenantId: string,
       _agentId: string,
       chainId?: number,
@@ -404,7 +405,7 @@ describe("digital asset account resources", () => {
         chainId,
       } as never,
     ];
-    context.vault.getSplTokenBalances = async () => [
+    Vault.prototype.getSplTokenBalances = async () => [
       {
         mint: "So11111111111111111111111111111111111111112",
         token: "So11111111111111111111111111111111111111112",
@@ -530,9 +531,9 @@ describe("digital asset account resources", () => {
         },
       ]);
     } finally {
-      context.vault.getBalance = originalGetBalance;
-      context.vault.getTokenBalances = originalGetTokenBalances;
-      context.vault.getSplTokenBalances = originalGetSplTokenBalances;
+      Vault.prototype.getBalance = originalGetBalance;
+      Vault.prototype.getTokenBalances = originalGetTokenBalances;
+      Vault.prototype.getSplTokenBalances = originalGetSplTokenBalances;
     }
 
     const deleted = await app.request("/accounts/acct_existing_wallets", { method: "DELETE" });
@@ -1126,5 +1127,40 @@ describe("digital asset account resources", () => {
       .from(agents)
       .where(and(eq(agents.tenantId, TENANT_ID), eq(agents.id, "acct_cleanup_orphan_candidate")));
     expect(orphaned).toHaveLength(0);
+    const [lifecycle] = await getDb()
+      .select({ state: digitalAssetAccountWalletLifecycles.state })
+      .from(digitalAssetAccountWalletLifecycles)
+      .where(
+        and(
+          eq(digitalAssetAccountWalletLifecycles.tenantId, TENANT_ID),
+          eq(digitalAssetAccountWalletLifecycles.walletAgentId, "acct_cleanup_orphan_candidate"),
+        ),
+      );
+    expect(lifecycle?.state).toBe("retired");
+  });
+
+  it("never retires a pre-existing authority when configured provisioning loses the id race", async () => {
+    const existingId = "acct_existing_authority_race";
+    await getDb().insert(agents).values({
+      id: existingId,
+      tenantId: TENANT_ID,
+      name: "Pre-existing authority",
+      walletAddress: "0x9999999999999999999999999999999999999999",
+      platformId: "unrelated-owner",
+    });
+    const response = await app.request("/accounts", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        id: "acct_existing_authority_target",
+        wallets_configuration: [{ chain_type: "ethereum", wallet_id: existingId }],
+      }),
+    });
+    expect(response.status).toBe(400);
+    const [preserved] = await getDb()
+      .select({ platformId: agents.platformId })
+      .from(agents)
+      .where(and(eq(agents.tenantId, TENANT_ID), eq(agents.id, existingId)));
+    expect(preserved?.platformId).toBe("unrelated-owner");
   });
 });
