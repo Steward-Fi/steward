@@ -9,6 +9,8 @@ import {
   generateMoneroWallet,
   MONERO_ATOMIC_UNITS,
   type MoneroKeyPayloadV1,
+  MoneroRelayOutcomeUnknownError,
+  MoneroRelayRejectedError,
   MoneroRpcError,
   MoneroWalletRpcBackend,
   moneroAddressFromPublicKeys,
@@ -528,16 +530,165 @@ describe("MoneroWalletRpcBackend (scripted)", () => {
       { method: "relay_tx", result: { tx_hash: "cd".repeat(32) } },
       { method: "close_wallet", result: {} },
     ]);
-    const relayed = await backend.relayTransfer(PAYLOAD, CONTEXT, "deadbeef");
+    const relayed = await backend.relayTransfer(PAYLOAD, CONTEXT, "deadbeef", "cd".repeat(32));
     expect(relayed.txHash).toBe("cd".repeat(32));
     expect(consumed()).toBe(true);
     // The wallet MUST be open when relay_tx fires — verified against
     // monero-wallet-rpc v0.18.5.0, which returns -13 "No wallet file" otherwise.
     const methods = calls.map((call) => call.method);
     expect(methods.indexOf("relay_tx")).toBeGreaterThan(methods.indexOf("open_wallet"));
-    await expect(backend.relayTransfer(PAYLOAD, CONTEXT, "")).rejects.toThrow(
+    await expect(backend.relayTransfer(PAYLOAD, CONTEXT, "", "cd".repeat(32))).rejects.toThrow(
       /prepared transaction/,
     );
+  });
+
+  test("classifies only proven pre-submit relay rejection codes as terminal", async () => {
+    const rejected = scriptedBackend([
+      { method: "open_wallet", result: {} },
+      { method: "get_address", result: { address: VECTOR.address, addresses: [] } },
+      { method: "relay_tx", error: { code: -13, message: "no wallet file" } },
+      { method: "close_wallet", result: {} },
+    ]).backend;
+    await expect(
+      rejected.relayTransfer(PAYLOAD, CONTEXT, "deadbeef", "cd".repeat(32)),
+    ).rejects.toBeInstanceOf(MoneroRelayRejectedError);
+
+    const ambiguousRpcFailure = scriptedBackend([
+      { method: "open_wallet", result: {} },
+      { method: "get_address", result: { address: VECTOR.address, addresses: [] } },
+      { method: "relay_tx", error: { code: -4, message: "transaction rejected" } },
+      { method: "close_wallet", result: {} },
+    ]).backend;
+    await expect(
+      ambiguousRpcFailure.relayTransfer(PAYLOAD, CONTEXT, "deadbeef", "cd".repeat(32)),
+    ).rejects.toBeInstanceOf(MoneroRelayOutcomeUnknownError);
+
+    const mismatched = scriptedBackend([
+      { method: "open_wallet", result: {} },
+      { method: "get_address", result: { address: VECTOR.address, addresses: [] } },
+      { method: "relay_tx", result: { tx_hash: "ef".repeat(32) } },
+      { method: "close_wallet", result: {} },
+    ]).backend;
+    await expect(
+      mismatched.relayTransfer(PAYLOAD, CONTEXT, "deadbeef", "cd".repeat(32)),
+    ).rejects.toBeInstanceOf(MoneroRelayOutcomeUnknownError);
+  });
+
+  test("strictly reconciles one exact hash through the configured daemon", async () => {
+    const txHash = "12".repeat(32);
+    const networkIdentity = {
+      status: "OK",
+      nettype: "mainnet",
+      mainnet: true,
+      stagenet: false,
+      testnet: false,
+    };
+    const responses = [
+      { status: "OK", txs: [], missed_tx: [txHash] },
+      { status: "OK", txs: [{ tx_hash: txHash, in_pool: true }], missed_tx: [] },
+      {
+        status: "OK",
+        txs: [{ tx_hash: txHash, in_pool: false, block_height: 3_500_001 }],
+        missed_tx: [],
+      },
+    ];
+    const requests: Array<{ url: string; body: unknown }> = [];
+    const backend = new MoneroWalletRpcBackend({
+      network: "mainnet",
+      rpcUrl: "http://monero-wallet-rpc:18083/json_rpc",
+      daemonUrl: "http://configured-daemon:18089",
+      fetchFn: (async (input: string | URL | Request, init?: RequestInit) => {
+        const url = String(input);
+        requests.push({ url, body: JSON.parse(String(init?.body)) });
+        return new Response(
+          JSON.stringify(url.endsWith("/get_info") ? networkIdentity : responses.shift()),
+          { status: 200 },
+        );
+      }) as typeof fetch,
+    });
+
+    expect(await backend.getTransactionStatus(txHash)).toBe("not_found");
+    expect(await backend.getTransactionStatus(txHash)).toBe("broadcast");
+    expect(await backend.getTransactionStatus(txHash)).toBe("confirmed");
+    expect(requests).toEqual([
+      ...Array.from({ length: 3 }, () => [
+        { url: "http://configured-daemon:18089/get_info", body: {} },
+        {
+          url: "http://configured-daemon:18089/get_transactions",
+          body: { txs_hashes: [txHash], decode_as_json: false },
+        },
+      ]).flat(),
+    ]);
+  });
+
+  test("fails closed on malformed or mismatched daemon reconciliation evidence", async () => {
+    const txHash = "12".repeat(32);
+    const responses = [
+      { status: "OK", txs: [], missed_tx: [] },
+      {
+        status: "OK",
+        txs: [{ tx_hash: "34".repeat(32), in_pool: true }],
+        missed_tx: [],
+      },
+      { status: "BUSY", txs: [], missed_tx: [txHash] },
+    ];
+    const backend = new MoneroWalletRpcBackend({
+      network: "mainnet",
+      rpcUrl: "http://monero-wallet-rpc:18083/json_rpc",
+      daemonUrl: "http://configured-daemon:18089",
+      fetchFn: (async (input: string | URL | Request) =>
+        new Response(
+          JSON.stringify(
+            String(input).endsWith("/get_info")
+              ? {
+                  status: "OK",
+                  nettype: "mainnet",
+                  mainnet: true,
+                  stagenet: false,
+                  testnet: false,
+                }
+              : responses.shift(),
+          ),
+          { status: 200 },
+        )) as typeof fetch,
+    });
+    for (const _response of responses.slice()) {
+      await expect(backend.getTransactionStatus(txHash)).rejects.toBeInstanceOf(MoneroRpcError);
+    }
+  });
+
+  test("rejects daemon reconciliation evidence from the wrong network", async () => {
+    const backend = new MoneroWalletRpcBackend({
+      network: "mainnet",
+      rpcUrl: "http://monero-wallet-rpc:18083/json_rpc",
+      daemonUrl: "http://configured-daemon:18089",
+      fetchFn: (async () =>
+        new Response(
+          JSON.stringify({
+            status: "OK",
+            nettype: "stagenet",
+            mainnet: false,
+            stagenet: true,
+            testnet: false,
+          }),
+          { status: 200 },
+        )) as typeof fetch,
+    });
+    await expect(backend.getTransactionStatus("12".repeat(32))).rejects.toThrow(/network identity/);
+  });
+
+  test("rejects an oversized daemon response before reading its body", async () => {
+    const backend = new MoneroWalletRpcBackend({
+      network: "mainnet",
+      rpcUrl: "http://monero-wallet-rpc:18083/json_rpc",
+      daemonUrl: "http://configured-daemon:18089",
+      fetchFn: (async () =>
+        new Response("{}", {
+          status: 200,
+          headers: { "content-length": "1048577" },
+        })) as typeof fetch,
+    });
+    await expect(backend.getTransactionStatus("12".repeat(32))).rejects.toThrow(/size limit/);
   });
 
   test("recovers when the cache file exists but cannot be opened (rehydration race)", async () => {
@@ -685,7 +836,7 @@ describe("MoneroWalletRpcBackend (scripted)", () => {
       rpcLogin: "steward:secret",
       fetchFn,
     });
-    const result = await backend.relayTransfer(PAYLOAD, CONTEXT, "deadbeef");
+    const result = await backend.relayTransfer(PAYLOAD, CONTEXT, "deadbeef", "ef".repeat(32));
     expect(result.txHash).toBe("ef".repeat(32));
     // Every RPC method (open, get_address, relay, close) got challenged once.
     expect(unauthorizedResponses).toBeGreaterThanOrEqual(3);

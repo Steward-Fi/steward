@@ -33,11 +33,20 @@ import {
   users,
   userTenants,
   workspaces,
+  writeAuditEvent,
 } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { eq, sql } from "drizzle-orm";
-import { providerActionService } from "../services/provider-action-service";
+import {
+  __setProviderAuditOutboxAfterClaimForTests,
+  __setProviderAuditOutboxFaultForTests,
+  providerActionService,
+} from "../services/provider-action-service";
 import { AuditUnavailableError, providerApprovalService } from "../services/provider-approval";
+import {
+  recoverProviderActionTenant,
+  startProviderReservationReconciliationScheduler,
+} from "../services/provider-reservation-reconciliation-scheduler";
 import {
   auditCount,
   bindingRow,
@@ -129,6 +138,8 @@ describe("approval-lifecycle concurrency + fault matrix", () => {
   });
   afterEach(() => {
     providerApprovalService.faultHooks = {};
+    __setProviderAuditOutboxAfterClaimForTests(null);
+    __setProviderAuditOutboxFaultForTests(null);
   });
 
   test("C01: two humans approve the same pending action concurrently => exactly one transition + one decided event", async () => {
@@ -370,7 +381,7 @@ describe("approval-lifecycle concurrency + fault matrix", () => {
     expect(await auditCount()).toBe(auditsBefore);
   });
 
-  test("C2 crash recovery: a crash between commit and drain leaves an undelivered outbox row; the sweeper signs it exactly once", async () => {
+  test("C2 scheduler startup and tick deliver orphaned outbox rows exactly once", async () => {
     // Create an approval-required action but SIMULATE a crash before the drain by
     // marking the just-created outbox row undelivered again (createApprovalRequired
     // already drains). Instead: create a fresh action and null delivered_at to
@@ -380,24 +391,88 @@ describe("approval-lifecycle concurrency + fault matrix", () => {
       .update(providerActionAuditOutbox)
       .set({ deliveredAt: null })
       .where(eq(providerActionAuditOutbox.intentId, intentId));
-    // Delete any signed event that was produced so we can prove the sweeper
-    // produces exactly one.
+    // Delete the signed event that was produced so startup and the next timer
+    // tick can each prove delivery for one immutable outbox identity.
     await getDb().execute(
       sql`DELETE FROM audit_events WHERE tenant_id = ${F.TENANT} AND resource_id = ${intentId}`,
     );
-    // First sweep signs it; second sweep is a no-op (exactly once).
-    const first = await providerActionService.recoverUnsignedIntents(F.TENANT, intentId);
-    const second = await providerActionService.recoverUnsignedIntents(F.TENANT, intentId);
-    expect(first).toBe(1);
-    expect(second).toBe(0);
-    const events = await correlatedAudit(intentId);
-    expect(events.filter((e) => e.action === "provider.action.approval_required").length).toBe(1);
-    // The outbox row is delivered.
-    const [row] = await getDb()
+    const [original] = await getDb()
       .select()
       .from(providerActionAuditOutbox)
       .where(eq(providerActionAuditOutbox.intentId, intentId));
-    expect(row.deliveredAt).not.toBeNull();
+    let sweeps = 0;
+    let reservationCalls = 0;
+    let firstDelivered!: () => void;
+    const startupPass = new Promise<void>((resolve) => {
+      firstDelivered = resolve;
+    });
+    let releaseStartup!: () => void;
+    const startupGate = new Promise<void>((resolve) => {
+      releaseStartup = resolve;
+    });
+    let secondDelivered!: () => void;
+    const tickPass = new Promise<void>((resolve) => {
+      secondDelivered = resolve;
+    });
+    const stop = startProviderReservationReconciliationScheduler({
+      intervalMs: 5,
+      sweep: async () => {
+        sweeps += 1;
+        const result = await recoverProviderActionTenant(F.TENANT);
+        reservationCalls += 1;
+        if (sweeps === 1) {
+          firstDelivered();
+          await startupGate;
+        } else if (sweeps === 2) {
+          secondDelivered();
+        }
+        return result;
+      },
+    });
+    await startupPass;
+
+    // Create a second immutable outbox identity while the startup pass is held;
+    // the next real timer tick must discover and sign it.
+    const [second] = await getDb()
+      .insert(providerActionAuditOutbox)
+      .values({
+        tenantId: original.tenantId,
+        intentId: original.intentId,
+        action: original.action,
+        resourceType: original.resourceType,
+        resourceId: original.resourceId,
+        metadata: original.metadata,
+      })
+      .returning();
+    releaseStartup();
+    await tickPass;
+    stop();
+
+    expect(sweeps).toBe(2);
+    expect(reservationCalls).toBe(2);
+    const events = await correlatedAudit(intentId);
+    expect(events.filter((e) => e.action === "provider.action.approval_required").length).toBe(2);
+    const rows = await getDb()
+      .select()
+      .from(providerActionAuditOutbox)
+      .where(eq(providerActionAuditOutbox.intentId, intentId));
+    expect(rows).toHaveLength(2);
+    expect(rows.every((row) => row.deliveredAt !== null)).toBe(true);
+    const evidence = await getDb().execute(sql`
+      SELECT metadata->>'requiredOutboxId' AS outbox_id
+      FROM audit_events
+      WHERE tenant_id = ${F.TENANT}
+        AND resource_type = ${original.resourceType}
+        AND resource_id = ${original.resourceId}
+        AND action = ${original.action}
+      ORDER BY metadata->>'requiredOutboxId'
+    `);
+    const evidenceRows = Array.isArray(evidence)
+      ? evidence
+      : ((evidence as { rows?: unknown[] }).rows ?? []);
+    expect(evidenceRows).toEqual(
+      [original.id, second.id].sort().map((outbox_id) => ({ outbox_id })),
+    );
   });
 
   test("C2 recovery is idempotent under concurrency: two parallel sweeps sign exactly once", async () => {
@@ -416,5 +491,157 @@ describe("approval-lifecycle concurrency + fault matrix", () => {
     expect(a + b).toBe(1);
     const events = await correlatedAudit(intentId);
     expect(events.length).toBe(1);
+  });
+
+  test("C2 recovery rolls back append and completion together, then retries exactly once", async () => {
+    const { intentId } = await createApprovalRequired();
+    await getDb()
+      .update(providerActionAuditOutbox)
+      .set({ deliveredAt: null })
+      .where(eq(providerActionAuditOutbox.intentId, intentId));
+    await getDb().execute(
+      sql`DELETE FROM audit_events WHERE tenant_id = ${F.TENANT} AND resource_id = ${intentId}`,
+    );
+
+    __setProviderAuditOutboxFaultForTests("after_append");
+    await expect(providerActionService.recoverUnsignedIntents(F.TENANT, intentId)).rejects.toThrow(
+      "injected crash after required-audit append",
+    );
+    const afterFault = await correlatedAudit(intentId);
+    expect(afterFault).toHaveLength(0);
+    const [pending] = await getDb()
+      .select()
+      .from(providerActionAuditOutbox)
+      .where(eq(providerActionAuditOutbox.intentId, intentId));
+    expect(pending.deliveredAt).toBeNull();
+    expect(pending.claimToken).toBeNull();
+
+    __setProviderAuditOutboxFaultForTests(null);
+    expect(await providerActionService.recoverUnsignedIntents(F.TENANT, intentId)).toBe(1);
+    expect(await correlatedAudit(intentId)).toHaveLength(1);
+  });
+
+  test("C2 recovery rejects a reused outbox id with a conflicting audit identity", async () => {
+    const { intentId } = await createApprovalRequired();
+    const [outbox] = await getDb()
+      .select()
+      .from(providerActionAuditOutbox)
+      .where(eq(providerActionAuditOutbox.intentId, intentId));
+    await getDb()
+      .update(providerActionAuditOutbox)
+      .set({ deliveredAt: null })
+      .where(eq(providerActionAuditOutbox.id, outbox.id));
+    await getDb().execute(
+      sql`DELETE FROM audit_events WHERE tenant_id = ${F.TENANT} AND resource_id = ${intentId}`,
+    );
+    await writeAuditEvent({
+      tenantId: F.TENANT,
+      actorType: "agent",
+      actorId: null,
+      action: `${outbox.action}.conflict`,
+      resourceType: outbox.resourceType,
+      resourceId: outbox.resourceId,
+      metadata: { requiredOutboxId: outbox.id },
+    });
+
+    await expect(providerActionService.recoverUnsignedIntents(F.TENANT, intentId)).rejects.toThrow(
+      "required-audit outbox identity conflicts",
+    );
+    const [pending] = await getDb()
+      .select()
+      .from(providerActionAuditOutbox)
+      .where(eq(providerActionAuditOutbox.id, outbox.id));
+    expect(pending.deliveredAt).toBeNull();
+    expect(pending.claimToken).toBeNull();
+  });
+
+  test("C2 stale-claim takeover fences the expired worker token", async () => {
+    const { intentId } = await createApprovalRequired();
+    await getDb()
+      .update(providerActionAuditOutbox)
+      .set({ deliveredAt: null })
+      .where(eq(providerActionAuditOutbox.intentId, intentId));
+    await getDb().execute(
+      sql`DELETE FROM audit_events WHERE tenant_id = ${F.TENANT} AND resource_id = ${intentId}`,
+    );
+
+    let releaseExpiredWorker!: () => void;
+    const expiredWorkerGate = new Promise<void>((resolve) => {
+      releaseExpiredWorker = resolve;
+    });
+    let firstClaimed!: () => void;
+    const firstClaim = new Promise<void>((resolve) => {
+      firstClaimed = resolve;
+    });
+    __setProviderAuditOutboxAfterClaimForTests(async (_claimToken, rowIds) => {
+      if (rowIds.length === 0) return;
+      firstClaimed();
+      await expiredWorkerGate;
+    });
+    const expiredWorker = providerActionService.recoverUnsignedIntents(F.TENANT, intentId);
+    await firstClaim;
+    await getDb().execute(sql`
+      UPDATE provider_action_audit_outbox
+      SET claimed_at = now() - interval '2 minutes'
+      WHERE tenant_id = ${F.TENANT} AND intent_id = ${intentId}
+    `);
+    __setProviderAuditOutboxAfterClaimForTests(null);
+    const takeover = await providerActionService.recoverUnsignedIntents(F.TENANT, intentId);
+    releaseExpiredWorker();
+
+    expect(takeover).toBe(1);
+    expect(await expiredWorker).toBe(0);
+    expect(await correlatedAudit(intentId)).toHaveLength(1);
+    const [completed] = await getDb()
+      .select()
+      .from(providerActionAuditOutbox)
+      .where(eq(providerActionAuditOutbox.intentId, intentId));
+    expect(completed.deliveredAt).not.toBeNull();
+    expect(completed.claimToken).toBeNull();
+  });
+
+  test("C2 immutable outbox identity preserves distinct same-action events", async () => {
+    const { intentId } = await createApprovalRequired();
+    const [original] = await getDb()
+      .select()
+      .from(providerActionAuditOutbox)
+      .where(eq(providerActionAuditOutbox.intentId, intentId));
+    await getDb()
+      .update(providerActionAuditOutbox)
+      .set({ deliveredAt: null })
+      .where(eq(providerActionAuditOutbox.id, original.id));
+    await getDb().execute(
+      sql`DELETE FROM audit_events WHERE tenant_id = ${F.TENANT} AND resource_id = ${intentId}`,
+    );
+    const [second] = await getDb()
+      .insert(providerActionAuditOutbox)
+      .values({
+        tenantId: original.tenantId,
+        intentId: original.intentId,
+        action: original.action,
+        resourceType: original.resourceType,
+        resourceId: original.resourceId,
+        metadata: original.metadata,
+      })
+      .returning();
+
+    expect(await providerActionService.recoverUnsignedIntents(F.TENANT, intentId)).toBe(2);
+    const evidence = await getDb().execute(sql`
+      SELECT metadata->>'requiredOutboxId' AS outbox_id
+      FROM audit_events
+      WHERE tenant_id = ${F.TENANT}
+        AND resource_type = ${original.resourceType}
+        AND resource_id = ${original.resourceId}
+        AND action = ${original.action}
+      ORDER BY metadata->>'requiredOutboxId'
+    `);
+    const rows = Array.isArray(evidence)
+      ? evidence
+      : ((evidence as { rows?: unknown[] }).rows ?? []);
+    expect(rows).toEqual(
+      [{ outbox_id: original.id }, { outbox_id: second.id }].sort((a, b) =>
+        a.outbox_id.localeCompare(b.outbox_id),
+      ),
+    );
   });
 });

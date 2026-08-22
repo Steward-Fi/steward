@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it, setDefaultTimeout } from "bun:test";
+import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { revocationStore } from "@stwd/auth";
@@ -22,6 +23,7 @@ import {
   workspaces,
 } from "@stwd/db";
 import { capabilities, capabilityGrants, capabilityInvocations } from "@stwd/plugin-capabilities";
+import { canonicalJsonStringify } from "@stwd/shared";
 import { and, eq, sql } from "drizzle-orm";
 import { migrate as pgliteMigrate } from "drizzle-orm/pglite/migrator";
 import { Hono } from "hono";
@@ -476,6 +478,7 @@ beforeAll(async () => {
     });
 
   const { agentRoutes } = await import("../routes/agents");
+  const { vaultRoutes } = await import("../routes/vault");
   tenantApp = new Hono<{ Variables: AppVariables }>();
   tenantApp.use("*", async (c, next) => {
     c.set("tenantId", TENANT_ID);
@@ -486,6 +489,7 @@ beforeAll(async () => {
     await next();
   });
   tenantApp.route("/agents", agentRoutes);
+  tenantApp.route("/vault", vaultRoutes);
   tenantApp.onError((_error, c) => c.json({ ok: false, error: "Internal server error" }, 500));
   ({ platformRoutes } = await import("../routes/platform"));
 });
@@ -536,6 +540,64 @@ describe("agent deletion upstream credential boundary", () => {
       ).toHaveLength(0);
     } finally {
       revocationStore.revokeAgentTokens = originalRevokeAgentTokens;
+      await getDb().delete(agents).where(eq(agents.id, agentId));
+      await getDb().delete(tenants).where(eq(tenants.id, tenantId));
+    }
+  });
+
+  it("blocks tenant deletion on approved execution before revocation or deletion audit", async () => {
+    const tenantId = `approved-tenant-deletion-${crypto.randomUUID()}`;
+    const agentId = `approved-delete-${crypto.randomUUID()}`;
+    const transactionId = crypto.randomUUID();
+    await getDb().insert(tenants).values({ id: tenantId, name: tenantId, apiKeyHash: tenantId });
+    await getDb().insert(agents).values({
+      id: agentId,
+      tenantId,
+      name: agentId,
+      walletAddress: "0x1234567890123456789012345678901234567890",
+    });
+    await getDb()
+      .insert(transactions)
+      .values({
+        id: transactionId,
+        agentId,
+        status: "approved",
+        toAddress: "monero-pre-relay",
+        value: "1000000000",
+        chainId: 301,
+        actionType: "monero_transfer",
+        actionPayload: { type: "monero_transfer", relayState: "prepared" },
+        policyResults: [],
+      });
+    let revocations = 0;
+    const originalRevokeAgentTokens = revocationStore.revokeAgentTokens.bind(revocationStore);
+    const originalRevokeUserTokens = revocationStore.revokeUserTokens.bind(revocationStore);
+    revocationStore.revokeAgentTokens = async () => {
+      revocations += 1;
+      return Date.now();
+    };
+    revocationStore.revokeUserTokens = async () => {
+      revocations += 1;
+      return Date.now();
+    };
+    try {
+      const response = await platformTenantDelete(tenantId);
+      expect(response.status).toBe(409);
+      await expect(response.json()).resolves.toEqual({
+        ok: false,
+        error: "Tenant has unresolved transaction execution",
+      });
+      expect(revocations).toBe(0);
+      expect(
+        await getDb()
+          .select()
+          .from(auditEvents)
+          .where(and(eq(auditEvents.tenantId, tenantId), eq(auditEvents.action, "tenant.delete"))),
+      ).toHaveLength(0);
+    } finally {
+      revocationStore.revokeAgentTokens = originalRevokeAgentTokens;
+      revocationStore.revokeUserTokens = originalRevokeUserTokens;
+      await getDb().delete(transactions).where(eq(transactions.id, transactionId));
       await getDb().delete(agents).where(eq(agents.id, agentId));
       await getDb().delete(tenants).where(eq(tenants.id, tenantId));
     }
@@ -855,18 +917,81 @@ describe("agent deletion upstream credential boundary", () => {
     await getDb().delete(capabilityInvocations).where(eq(capabilityInvocations.id, invocationId));
   });
 
-  it("refuses both routed and direct deletion while signed execution is unresolved", async () => {
+  for (const unresolvedStatus of ["approved", "signed"] as const) {
+    it(`refuses both routed and direct deletion while ${unresolvedStatus} execution is unresolved`, async () => {
+      const agentId = `${unresolvedStatus}-execution-${crypto.randomUUID()}`;
+      const transactionId = crypto.randomUUID();
+      await createAgent(agentId);
+      await getDb().insert(transactions).values({
+        id: transactionId,
+        agentId,
+        status: unresolvedStatus,
+        toAddress: "0x1234567890123456789012345678901234567890",
+        value: "0",
+        chainId: 1,
+      });
+
+      const response = await tenantDelete(agentId);
+      expect(response.status).toBe(409);
+      await expect(response.json()).resolves.toEqual({
+        ok: false,
+        error: "Agent has unresolved execution evidence; reconcile it first",
+      });
+
+      if (USING_REAL_POSTGRES) {
+        let directDeleteError: unknown;
+        try {
+          await getDb().delete(agents).where(eq(agents.id, agentId));
+        } catch (error) {
+          directDeleteError = error;
+        }
+        expect(directDeleteError).toBeInstanceOf(Error);
+        expect((directDeleteError as { cause?: { code?: string } }).cause?.code).toBe("55000");
+        expect(await getDb().select().from(agents).where(eq(agents.id, agentId))).toHaveLength(1);
+      }
+      await getDb().delete(transactions).where(eq(transactions.id, transactionId));
+      expect((await tenantDelete(agentId)).status).toBe(200);
+    });
+  }
+
+  it("retires an authoritatively expired signed Solana artifact before mounted deletion", async () => {
     const agentId = `signed-execution-${crypto.randomUUID()}`;
     const transactionId = crypto.randomUUID();
+    const signedArtifactEvidence = {
+      version: 1 as const,
+      chainFamily: "solana" as const,
+      artifactSignature:
+        "4oL4p7QvN3UH7V5wMGZgW5PuzEk4A9LXLHk9RxAoKjDKuLbQBsfXN8kEvKfj5K1oEJa8wFF6RVp2h7pP9w2f51ZV",
+      signer: "11111111111111111111111111111111",
+      recentBlockhash: "11111111111111111111111111111111",
+      blockhashKind: "recent" as const,
+      lastValidBlockHeight: 100,
+      rawIntentDigest: "a".repeat(64),
+    };
     await createAgent(agentId);
-    await getDb().insert(transactions).values({
-      id: transactionId,
-      agentId,
-      status: "signed",
-      toAddress: "0x1234567890123456789012345678901234567890",
-      value: "0",
-      chainId: 1,
-    });
+    await getDb()
+      .insert(transactions)
+      .values({
+        id: transactionId,
+        agentId,
+        status: "signed",
+        toAddress: "0x1234567890123456789012345678901234567890",
+        value: "0",
+        chainId: 101,
+        txHash:
+          "4oL4p7QvN3UH7V5wMGZgW5PuzEk4A9LXLHk9RxAoKjDKuLbQBsfXN8kEvKfj5K1oEJa8wFF6RVp2h7pP9w2f51ZV",
+        actionType: "solana_transaction",
+        actionPayload: {
+          artifactSignature:
+            "4oL4p7QvN3UH7V5wMGZgW5PuzEk4A9LXLHk9RxAoKjDKuLbQBsfXN8kEvKfj5K1oEJa8wFF6RVp2h7pP9w2f51ZV",
+          recentBlockhash: "11111111111111111111111111111111",
+          blockhashKind: "recent",
+        },
+        signedArtifactEvidence,
+        signedArtifactEvidenceDigest: createHash("sha256")
+          .update(canonicalJsonStringify(signedArtifactEvidence))
+          .digest("hex"),
+      });
 
     const response = await tenantDelete(agentId);
     expect(response.status).toBe(409);
@@ -886,8 +1011,37 @@ describe("agent deletion upstream credential boundary", () => {
       expect((directDeleteError as { cause?: { code?: string } }).cause?.code).toBe("55000");
       expect(await getDb().select().from(agents).where(eq(agents.id, agentId))).toHaveLength(1);
     }
-    await getDb().delete(transactions).where(eq(transactions.id, transactionId));
-    expect((await tenantDelete(agentId)).status).toBe(200);
+    const context = await import("../services/context");
+    const originalInspect = context.vault.inspectSolanaSignedArtifact.bind(context.vault);
+    context.vault.inspectSolanaSignedArtifact = async () => ({ result: "absent_expired" });
+    try {
+      const retirement = await tenantApp.request(
+        `/vault/${agentId}/transactions/${transactionId}/retire-signed`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ reason: "retire test-only expired artifact before deletion" }),
+        },
+      );
+      expect(retirement.status).toBe(200);
+      expect(await retirement.json()).toMatchObject({
+        ok: true,
+        data: { txId: transactionId, status: "retired" },
+      });
+      expect((await tenantDelete(agentId)).status).toBe(200);
+      const [retirementAudit] = await getDb()
+        .select({ metadata: auditEvents.metadata })
+        .from(auditEvents)
+        .where(
+          and(
+            eq(auditEvents.resourceId, transactionId),
+            eq(auditEvents.action, "vault.signed_artifact.retired"),
+          ),
+        );
+      expect(retirementAudit?.metadata).toMatchObject({ signedArtifactEvidence });
+    } finally {
+      context.vault.inspectSolanaSignedArtifact = originalInspect;
+    }
   });
 
   it("counts a generic autonomous intent reservation as unresolved execution", async () => {

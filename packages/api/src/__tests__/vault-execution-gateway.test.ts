@@ -29,6 +29,7 @@ import {
 } from "@stwd/vault";
 import { and, eq } from "drizzle-orm";
 import { Hono } from "hono";
+import { idempotencyMiddleware, MemoryIdempotencyStore } from "../middleware/idempotency";
 import type { AppVariables } from "../services/context";
 import { executionPayloadDigestForEvmSign } from "../services/execution-authorization";
 import { getConfiguredVault } from "../services/vault-factory";
@@ -53,6 +54,7 @@ async function makeApp() {
     c.set("sessionMfaVerifiedAt", Date.now());
     await next();
   });
+  app.use("*", idempotencyMiddleware({ store: new MemoryIdempotencyStore(100), ttlMs: 60_000 }));
   app.route("/vault", vaultRoutes);
   return app;
 }
@@ -765,20 +767,23 @@ describe("vault EVM execution gateway", () => {
       throw new Error("injected direct outcome write failure");
     };
     try {
+      const { _withVaultOverrideForTests } = await import("../services/context");
       const app = await makeApp();
-      const res = await app.request(`/vault/${EXTERNAL_AGENT_ID}/sign`, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          "Idempotency-Key": "ext-custody-outcome-unknown-direct",
-        },
-        body: JSON.stringify({
-          to: "0x1111111111111111111111111111111111111111",
-          value: "1",
-          chainId: 8453,
-          broadcast: true,
+      const res = await _withVaultOverrideForTests(routeVault, () =>
+        app.request(`/vault/${EXTERNAL_AGENT_ID}/sign`, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "Idempotency-Key": "ext-custody-outcome-unknown-direct",
+          },
+          body: JSON.stringify({
+            to: "0x1111111111111111111111111111111111111111",
+            value: "1",
+            chainId: 8453,
+            broadcast: true,
+          }),
         }),
-      });
+      );
       const text = await res.text();
       const body = JSON.parse(text);
       expect(res.status).toBe(202);
@@ -812,24 +817,120 @@ describe("vault EVM execution gateway", () => {
       // A persistence failure inside Vault still surfaces the same typed error.
       // Replaying the caller's idempotency key is rejected by the consumed
       // authorization and cannot enter the signer a second time.
-      const retry = await app.request(`/vault/${EXTERNAL_AGENT_ID}/sign`, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          "Idempotency-Key": "ext-custody-outcome-unknown-direct",
-        },
-        body: JSON.stringify({
-          to: "0x1111111111111111111111111111111111111111",
-          value: "1",
-          chainId: 8453,
-          broadcast: true,
+      const retry = await _withVaultOverrideForTests(routeVault, () =>
+        app.request(`/vault/${EXTERNAL_AGENT_ID}/sign`, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "Idempotency-Key": "ext-custody-outcome-unknown-direct",
+          },
+          body: JSON.stringify({
+            to: "0x1111111111111111111111111111111111111111",
+            value: "1",
+            chainId: 8453,
+            broadcast: true,
+          }),
         }),
-      });
+      );
       expect(retry.status).not.toBe(200);
       expect(provider.signCalls).toBe(1);
     } finally {
       routeVault.externalKeyCustodyProvider = priorProvider;
       routeVault.recordSignedTransaction = originalRecord;
+    }
+  });
+
+  it("keeps a broadcast terminal across an accounting outage and drains it on same-key replay", async () => {
+    await seedExternalCustodyAgent();
+    const txHash = `0x${"ac".repeat(32)}`;
+    const provider: ExternalKeyCustodyProvider & { signCalls: number } = {
+      id: "accounting-recovery-provider",
+      contractVersion: 1,
+      signCalls: 0,
+      async registerKeyHandle(): Promise<ExternalKeyHandleRegistration> {
+        throw new Error("registerKeyHandle is not used by this test");
+      },
+      async signTransaction(request): Promise<ExternalKeySignTransactionResult> {
+        this.signCalls += 1;
+        await request.onPreparedBroadcast?.(txHash);
+        return { result: txHash, broadcast: true };
+      },
+    };
+    const routeVault = getConfiguredVault({
+      fallbackPassword: process.env.STEWARD_MASTER_PASSWORD,
+    }) as unknown as { externalKeyCustodyProvider?: ExternalKeyCustodyProvider };
+    const priorProvider = routeVault.externalKeyCustodyProvider;
+    routeVault.externalKeyCustodyProvider = provider;
+    process.env.REDIS_URL = "redis://127.0.0.1:1";
+    const request = {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "Idempotency-Key": "direct-accounting-recovery",
+      },
+      body: JSON.stringify({
+        to: "0x1111111111111111111111111111111111111111",
+        value: "1",
+        chainId: 8453,
+        broadcast: true,
+      }),
+    };
+    try {
+      const { _withVaultOverrideForTests } = await import("../services/context");
+      const app = await makeApp();
+      const first = await _withVaultOverrideForTests(routeVault, () =>
+        app.request(`/vault/${EXTERNAL_AGENT_ID}/sign`, request),
+      );
+      expect(first.status).toBe(503);
+      const firstBody = await first.json();
+      expect(firstBody).toMatchObject({
+        data: { status: "broadcast", accounting: "pending" },
+      });
+      const txId = firstBody.data.txId as string;
+      const [pending] = await getDb()
+        .select({ status: transactions.status, actionPayload: transactions.actionPayload })
+        .from(transactions)
+        .where(eq(transactions.id, txId));
+      expect(pending?.status).toBe("broadcast");
+      expect(pending?.actionPayload).toMatchObject({ recoveryEffectsState: "pending" });
+      const occurredAt = (pending?.actionPayload as Record<string, unknown>)
+        .recoveryEffectsOccurredAt;
+
+      // A durable terminal must recover independently of mutable policy. This
+      // policy would reject a new request to the same destination; the replay
+      // is not a new signing decision and must not call the provider again.
+      await getDb()
+        .update(policies)
+        .set({ config: { mode: "whitelist", addresses: [] } })
+        .where(eq(policies.id, `${EXTERNAL_AGENT_ID}-approved-addresses`));
+      delete process.env.REDIS_URL;
+      const replay = await _withVaultOverrideForTests(routeVault, () =>
+        app.request(`/vault/${EXTERNAL_AGENT_ID}/sign`, request),
+      );
+      expect(replay.status).toBe(200);
+      expect(await replay.json()).toMatchObject({ ok: true, data: { txId, txHash } });
+      expect(provider.signCalls).toBe(1);
+      const [complete] = await getDb()
+        .select({ actionPayload: transactions.actionPayload })
+        .from(transactions)
+        .where(eq(transactions.id, txId));
+      expect(complete?.actionPayload).toMatchObject({ recoveryEffectsState: "complete" });
+      expect((complete?.actionPayload as Record<string, unknown>).recoveryEffectsOccurredAt).toBe(
+        occurredAt,
+      );
+    } finally {
+      await getDb()
+        .update(policies)
+        .set({
+          config: {
+            mode: "whitelist",
+            addresses: ["0x1111111111111111111111111111111111111111"],
+          },
+        })
+        .where(eq(policies.id, `${EXTERNAL_AGENT_ID}-approved-addresses`));
+      routeVault.externalKeyCustodyProvider = priorProvider;
+      if (ORIGINAL_REDIS_URL === undefined) delete process.env.REDIS_URL;
+      else process.env.REDIS_URL = ORIGINAL_REDIS_URL;
     }
   });
 
@@ -1057,12 +1158,15 @@ describe("vault EVM execution gateway", () => {
       await originalRecord.apply(routeVault, args);
     };
     try {
+      const { _withVaultOverrideForTests } = await import("../services/context");
       const app = await makeApp();
-      const res = await app.request(`/vault/${EXTERNAL_AGENT_ID}/approve/${txId}`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: "{}",
-      });
+      const res = await _withVaultOverrideForTests(routeVault, () =>
+        app.request(`/vault/${EXTERNAL_AGENT_ID}/approve/${txId}`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: "{}",
+        }),
+      );
       const body = await res.json();
       expect(res.status).toBe(202);
       expect(body.data).toMatchObject({
@@ -1081,15 +1185,18 @@ describe("vault EVM execution gateway", () => {
         .where(eq(transactions.id, txId));
       expect(transaction).toEqual({ status: "outcome_unknown", txHash });
 
-      const retry = await app.request(`/vault/${EXTERNAL_AGENT_ID}/approve/${txId}`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: "{}",
-      });
-      expect(retry.status).toBe(409);
+      const retry = await _withVaultOverrideForTests(routeVault, () =>
+        app.request(`/vault/${EXTERNAL_AGENT_ID}/approve/${txId}`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: "{}",
+        }),
+      );
+      // Same-key replay now drains durable accounting before returning the
+      // already-recorded ambiguous outcome; it must never resend externally.
+      expect(retry.status).toBe(202);
       expect(await retry.json()).toMatchObject({
-        ok: false,
-        error: "Transaction already processed or not found",
+        data: { code: "external_broadcast_outcome_unknown", txHash },
       });
       expect(provider.signCalls).toBe(1);
       expect(writes).toBe(2);

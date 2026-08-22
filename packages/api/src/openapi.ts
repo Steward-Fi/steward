@@ -1598,6 +1598,7 @@ const transferActionSchema: JsonSchema = {
         "confirmed",
         "failed",
         "outcome_unknown",
+        "retired",
       ],
     },
     chainId: { type: "integer", minimum: 1 },
@@ -7022,6 +7023,39 @@ export function getOpenApiSpec() {
                 },
               }),
             ),
+            ...errorResponses(),
+          },
+        },
+      },
+      "/vault/{agentId}/transactions/{txId}/retire-signed": {
+        parameters: [parameter("agentId", "path"), parameter("txId", "path")],
+        post: {
+          tags: ["Vault"],
+          summary: "Authoritatively retire a signed transaction artifact",
+          description:
+            "Requires an owner/admin browser session with recent MFA. Solana retirement succeeds only when the exact deterministic signature is absent from chain history and its byte-classified ordinary blockhash is expired. Durable-nonce and unclassified artifacts remain blocked. Landed artifacts are reconciled instead. Provider uncertainty and unsupported EVM artifacts remain non-terminal.",
+          security: [{ bearerAuth: [] }],
+          requestBody: jsonRequestBody({
+            type: "object",
+            additionalProperties: false,
+            required: ["reason"],
+            properties: { reason: { type: "string", minLength: 1, maxLength: 500 } },
+          }),
+          responses: {
+            "200": jsonResponse(
+              apiResponse({
+                type: "object",
+                required: ["txId", "status", "artifactId", "retiredAt"],
+                properties: {
+                  txId: stringSchema,
+                  status: { type: "string", const: "retired" },
+                  artifactId: stringSchema,
+                  retiredAt: stringSchema,
+                },
+              }),
+            ),
+            "409": jsonResponse(errorResponse()),
+            "502": jsonResponse(errorResponse()),
             ...errorResponses(),
           },
         },

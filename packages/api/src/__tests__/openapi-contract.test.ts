@@ -841,6 +841,7 @@ describe("generated OpenAPI contract", () => {
     const transfer = spec.paths["/vault/{agentId}/actions/transfer"].post;
     const sendCalls = spec.paths["/vault/{agentId}/actions/send-calls"].post;
     const status = spec.paths["/vault/{agentId}/actions/{actionId}"].get;
+    const retirement = spec.paths["/vault/{agentId}/transactions/{txId}/retire-signed"].post;
 
     const transferBody = transfer.requestBody.content["application/json"].schema;
     expect(quote.requestBody.content["application/json"].schema).toBe(transferBody);
@@ -858,6 +859,7 @@ describe("generated OpenAPI contract", () => {
       "confirmed",
       "failed",
       "outcome_unknown",
+      "retired",
     ]);
     expect(transfer.responses).toHaveProperty("202");
     expect(transfer.responses).toHaveProperty("429");
@@ -868,6 +870,10 @@ describe("generated OpenAPI contract", () => {
     expect(transfer.description).toContain("Policy-denied actions return 403");
     expect(transfer.description).toContain("Broadcast actions require idempotency");
     expect(quote.description).toContain("ERC20 execution requires");
+    expect(retirement.security).toEqual([{ bearerAuth: [] }]);
+    expect(retirement.requestBody.content["application/json"].schema.required).toEqual(["reason"]);
+    expect(retirement.description).toContain("exact deterministic signature");
+    expect(retirement.description).toContain("unsupported EVM artifacts remain non-terminal");
 
     const sendCallsData =
       sendCalls.responses["202"].content["application/json"].schema.properties.data;

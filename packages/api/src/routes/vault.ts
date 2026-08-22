@@ -28,6 +28,7 @@ import { recordAggregationEvent } from "@stwd/redis";
 import {
   canonicalJsonStringify,
   ExecutionPayloadNormalizationError,
+  isSignedArtifactEvidence,
   type PolicyResult,
   rawSigningChainSupport,
   redactedThrownDiagnostics,
@@ -54,6 +55,8 @@ import {
   getUserOperationHash,
   isVaultSigningFrozenError,
   MoneroNotConfiguredError,
+  MoneroRelayOutcomeUnknownError,
+  MoneroRelayRejectedError,
   normalizedSolanaMessageDigest,
   packUserOperation,
   parseMoneroWalletScope,
@@ -63,7 +66,7 @@ import {
   SolanaRecoveryOwnershipLostError,
   type UnpackedUserOperationFields,
 } from "@stwd/vault";
-import { and, desc, eq, type SQL, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, type SQL, sql } from "drizzle-orm";
 import { type Context, Hono } from "hono";
 import { isRedisAvailable, isRedisConfigured } from "../middleware/redis";
 import { enforceRateLimit, recordVaultSpend } from "../middleware/redis-enforcement";
@@ -102,6 +105,7 @@ import {
   toTxRecord,
   transactions,
   vault,
+  withIndependentAuthenticatedTenantDatabase,
 } from "../services/context";
 import {
   isRuntimeVaultRpcMethodAllowed,
@@ -122,6 +126,10 @@ import {
 import { plaintextKeyExportResponseGateError } from "../services/key-export-plaintext-gate";
 import { isRecentMfaTimestamp } from "../services/recent-mfa";
 import { verifySignerCredential } from "../services/signer-credentials";
+import {
+  completeNonSolanaAccountingEffects,
+  stageNonSolanaAccountingEffects,
+} from "../services/vault-accounting-effects";
 import { dispatchWebhook, dispatchWebhookDurably } from "../services/webhook-dispatch";
 import {
   decryptImportSessionJson,
@@ -655,7 +663,8 @@ function transferActionResponse(input: {
     | "broadcast"
     | "confirmed"
     | "failed"
-    | "outcome_unknown";
+    | "outcome_unknown"
+    | "retired";
   chainId: number;
   to: string;
   value: string;
@@ -822,13 +831,15 @@ function transferResponseStatus(
   | "broadcast"
   | "confirmed"
   | "failed"
-  | "outcome_unknown" {
+  | "outcome_unknown"
+  | "retired" {
   if (status === "pending") return "pending_approval";
   if (status === "rejected") return "rejected";
   if (status === "broadcast") return "broadcast";
   if (status === "confirmed") return "confirmed";
   if (status === "failed") return "failed";
   if (status === "outcome_unknown") return "outcome_unknown";
+  if (status === "retired") return "retired";
   return "signed";
 }
 
@@ -1461,6 +1472,322 @@ function isPiconeroAmountString(value: unknown): value is string {
   return amount > 0n && amount <= 2n ** 64n - 1n;
 }
 
+type MoneroRecoveryPayload = {
+  type: "monero_transfer";
+  recoveryVersion: 1;
+  idempotencyKeyDigest: string;
+  requestFingerprint: string;
+  txMetadataDigest: string;
+  relayState: "prepared" | "outcome_unknown" | "broadcast" | "confirmed" | "failed";
+  walletScope: string;
+  walletAddress: string;
+  network: "mainnet" | "stagenet";
+  destinations: Array<{ address: string; amountPiconero: string }>;
+  destinationTotalPiconero: string;
+  feePiconero: string;
+  totalPiconero: string;
+  priority: number;
+  referenceId: string | null;
+  recoveryEffectsState?: "pending" | "processing" | "complete";
+  recoveryEffectsToken?: string;
+  recoveryEffectsLeaseUntil?: string;
+  recoveryEffectsCompletedAt?: string;
+};
+
+function digestMoneroValue(value: string): string {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+function moneroRequestFingerprint(input: {
+  walletScope: string;
+  destinations: Array<{ address: string; amountPiconero: string }>;
+  priority: number;
+}): string {
+  return digestMoneroValue(canonicalJsonStringify(input));
+}
+
+function readMoneroRecoveryPayload(value: unknown): MoneroRecoveryPayload | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const payload = value as Record<string, unknown>;
+  if (
+    payload.type !== "monero_transfer" ||
+    payload.recoveryVersion !== 1 ||
+    typeof payload.idempotencyKeyDigest !== "string" ||
+    !/^[0-9a-f]{64}$/.test(payload.idempotencyKeyDigest) ||
+    typeof payload.requestFingerprint !== "string" ||
+    !/^[0-9a-f]{64}$/.test(payload.requestFingerprint) ||
+    typeof payload.txMetadataDigest !== "string" ||
+    !/^[0-9a-f]{64}$/.test(payload.txMetadataDigest) ||
+    !["prepared", "outcome_unknown", "broadcast", "confirmed", "failed"].includes(
+      String(payload.relayState),
+    ) ||
+    typeof payload.walletScope !== "string" ||
+    typeof payload.walletAddress !== "string" ||
+    (payload.network !== "mainnet" && payload.network !== "stagenet") ||
+    !Array.isArray(payload.destinations) ||
+    typeof payload.destinationTotalPiconero !== "string" ||
+    typeof payload.feePiconero !== "string" ||
+    typeof payload.totalPiconero !== "string" ||
+    typeof payload.priority !== "number" ||
+    !(payload.referenceId === null || typeof payload.referenceId === "string")
+  ) {
+    return null;
+  }
+  const destinations: Array<{ address: string; amountPiconero: string }> = [];
+  for (const destination of payload.destinations) {
+    if (!destination || typeof destination !== "object" || Array.isArray(destination)) return null;
+    const entry = destination as Record<string, unknown>;
+    if (typeof entry.address !== "string" || !isPiconeroAmountString(entry.amountPiconero)) {
+      return null;
+    }
+    destinations.push({ address: entry.address, amountPiconero: entry.amountPiconero });
+  }
+  return {
+    type: "monero_transfer",
+    recoveryVersion: 1,
+    idempotencyKeyDigest: payload.idempotencyKeyDigest,
+    requestFingerprint: payload.requestFingerprint,
+    txMetadataDigest: payload.txMetadataDigest,
+    relayState: payload.relayState as MoneroRecoveryPayload["relayState"],
+    walletScope: payload.walletScope,
+    walletAddress: payload.walletAddress,
+    network: payload.network,
+    destinations,
+    destinationTotalPiconero: payload.destinationTotalPiconero,
+    feePiconero: payload.feePiconero,
+    totalPiconero: payload.totalPiconero,
+    priority: payload.priority,
+    referenceId: payload.referenceId,
+    ...(payload.recoveryEffectsState === "pending" ||
+    payload.recoveryEffectsState === "processing" ||
+    payload.recoveryEffectsState === "complete"
+      ? { recoveryEffectsState: payload.recoveryEffectsState }
+      : {}),
+    ...(typeof payload.recoveryEffectsToken === "string"
+      ? { recoveryEffectsToken: payload.recoveryEffectsToken }
+      : {}),
+    ...(typeof payload.recoveryEffectsLeaseUntil === "string"
+      ? { recoveryEffectsLeaseUntil: payload.recoveryEffectsLeaseUntil }
+      : {}),
+    ...(typeof payload.recoveryEffectsCompletedAt === "string"
+      ? { recoveryEffectsCompletedAt: payload.recoveryEffectsCompletedAt }
+      : {}),
+  };
+}
+
+async function findMoneroActionByIdempotency(agentId: string, keyDigest: string) {
+  const rows = await db
+    .select()
+    .from(transactions)
+    .where(
+      and(
+        eq(transactions.agentId, agentId),
+        eq(transactions.actionType, "monero_transfer"),
+        sql`${transactions.actionPayload}->>'idempotencyKeyDigest' = ${keyDigest}`,
+      ),
+    )
+    .limit(2);
+  if (rows.length > 1) throw new Error("Duplicate Monero idempotency anchors");
+  return rows[0] ?? null;
+}
+
+async function moneroRecoveryResponse(
+  c: Context<{ Variables: AppVariables }>,
+  row: typeof transactions.$inferSelect,
+  expectedFingerprint: string,
+): Promise<Response> {
+  const payload = readMoneroRecoveryPayload(row.actionPayload);
+  if (!payload) {
+    return c.json<ApiResponse>({ ok: false, error: "Monero recovery anchor is malformed" }, 409);
+  }
+  if (payload.requestFingerprint !== expectedFingerprint) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Idempotency-Key is already bound to a different Monero transfer" },
+      409,
+    );
+  }
+  const data = {
+    transactionId: row.id,
+    txHash: row.txHash,
+    status: row.status,
+    feePiconero: payload.feePiconero,
+    amountPiconero: payload.destinationTotalPiconero,
+    totalPiconero: payload.totalPiconero,
+    walletScope: payload.walletScope,
+    walletAddress: payload.walletAddress,
+    network: payload.network,
+    deduplicated: true,
+  };
+  if (row.status === "broadcast" || row.status === "confirmed") {
+    try {
+      if (
+        !(await completeMoneroRecoveryEffects({
+          tenantId: c.get("tenantId"),
+          agentId: row.agentId,
+          txId: row.id,
+          txHash: row.txHash ?? "",
+        }))
+      ) {
+        return c.json<ApiResponse>(
+          { ok: false, error: "Monero relay effects are pending retry", data },
+          202,
+        );
+      }
+    } catch (error) {
+      console.error(
+        `[Vault] Monero recovery effects retry failed for ${row.id}`,
+        redactedThrownDiagnostics(error),
+      );
+      return c.json<ApiResponse>(
+        { ok: false, error: "Monero relay effects are pending retry", data },
+        202,
+      );
+    }
+    return c.json<ApiResponse>({ ok: true, data });
+  }
+  if (row.status === "failed") {
+    return c.json<ApiResponse>({ ok: false, error: "Monero relay was rejected", data }, 409);
+  }
+  return c.json<ApiResponse>(
+    { ok: false, error: "Monero relay outcome is pending reconciliation", data },
+    202,
+  );
+}
+
+async function completeMoneroRecoveryEffects(input: {
+  tenantId: string;
+  agentId: string;
+  txId: string;
+  txHash: string;
+}): Promise<boolean> {
+  if (!/^[0-9a-f]{64}$/.test(input.txHash)) return false;
+  const [row] = await db
+    .select()
+    .from(transactions)
+    .where(
+      and(
+        eq(transactions.id, input.txId),
+        eq(transactions.agentId, input.agentId),
+        eq(transactions.actionType, "monero_transfer"),
+        eq(transactions.txHash, input.txHash),
+        inArray(transactions.status, ["broadcast", "confirmed"]),
+      ),
+    )
+    .limit(1);
+  if (!row) return false;
+  const payload = readMoneroRecoveryPayload(row.actionPayload);
+  if (!payload) return false;
+  if (payload.recoveryEffectsState === "complete") return true;
+
+  const claimToken = crypto.randomUUID();
+  const claimLeaseUntil = new Date(Date.now() + 60_000).toISOString();
+  const claimableBefore = new Date().toISOString();
+  const [claimed] = await db
+    .update(transactions)
+    .set({
+      actionPayload: sql`jsonb_set(jsonb_set(jsonb_set(coalesce(${transactions.actionPayload}, '{}'::jsonb), '{recoveryEffectsState}', '"processing"'::jsonb), '{recoveryEffectsToken}', ${JSON.stringify(claimToken)}::jsonb), '{recoveryEffectsLeaseUntil}', ${JSON.stringify(claimLeaseUntil)}::jsonb)`,
+    })
+    .where(
+      and(
+        eq(transactions.id, input.txId),
+        eq(transactions.agentId, input.agentId),
+        eq(transactions.txHash, input.txHash),
+        eq(transactions.status, row.status),
+        sql`(
+          coalesce(${transactions.actionPayload}->>'recoveryEffectsState', 'pending') = 'pending'
+          or (
+            ${transactions.actionPayload}->>'recoveryEffectsState' = 'processing'
+            and coalesce(${transactions.actionPayload}->>'recoveryEffectsLeaseUntil', '') <= ${claimableBefore}
+          )
+        )`,
+      ),
+    )
+    .returning({ id: transactions.id });
+  if (!claimed) return false;
+
+  try {
+    if (isRedisConfigured() && !isRedisAvailable()) {
+      throw new Error("Configured Redis accounting backend is unavailable");
+    }
+    const eventId = `monero:${input.txId}:${input.txHash}`;
+    const occurredAt = row.signedAt ?? row.createdAt;
+    if (isRedisAvailable()) {
+      await recordVaultSpend(input.agentId, input.tenantId, row.value, row.chainId, {
+        eventId,
+        occurredAt,
+        throwOnError: true,
+      });
+      await recordAggregationEvent({
+        eventId,
+        agentId: input.agentId,
+        valueRaw: row.value,
+        to: row.toAddress,
+        chainId: row.chainId,
+        timestamp: occurredAt.getTime(),
+      });
+    }
+    await dispatchWebhookDurably(
+      input.tenantId,
+      input.agentId,
+      "tx_signed",
+      {
+        transactionId: input.txId,
+        chainId: row.chainId,
+        caip2: toCaip2(row.chainId),
+        txHash: input.txHash,
+        to: row.toAddress,
+        value: row.value,
+        actionType: "monero_transfer",
+      },
+      eventId,
+    );
+    return await withTenantAuditedTransaction(
+      input.tenantId,
+      async (rawTx, appendRequiredAudit) => {
+        const tx = rawTx as typeof db;
+        const [completed] = await tx
+          .update(transactions)
+          .set({
+            actionPayload: sql`jsonb_set(jsonb_set(coalesce(${transactions.actionPayload}, '{}'::jsonb), '{recoveryEffectsState}', '"complete"'::jsonb), '{recoveryEffectsCompletedAt}', ${JSON.stringify(new Date().toISOString())}::jsonb) - 'recoveryEffectsToken' - 'recoveryEffectsLeaseUntil'`,
+          })
+          .where(
+            and(
+              eq(transactions.id, input.txId),
+              eq(transactions.agentId, input.agentId),
+              eq(transactions.txHash, input.txHash),
+              sql`${transactions.actionPayload}->>'recoveryEffectsToken' = ${claimToken}`,
+            ),
+          )
+          .returning({ id: transactions.id });
+        if (!completed) return false;
+        await appendRequiredAudit({
+          tenantId: input.tenantId,
+          actorType: "system",
+          actorId: "monero-recovery",
+          action: "vault.monero_transfer.effects_completed",
+          resourceType: "transaction",
+          resourceId: input.txId,
+          metadata: { txHash: input.txHash, status: row.status },
+        });
+        return true;
+      },
+    );
+  } catch (error) {
+    await db
+      .update(transactions)
+      .set({
+        actionPayload: sql`jsonb_set(coalesce(${transactions.actionPayload}, '{}'::jsonb), '{recoveryEffectsState}', '"pending"'::jsonb) - 'recoveryEffectsToken' - 'recoveryEffectsLeaseUntil'`,
+      })
+      .where(
+        and(
+          eq(transactions.id, input.txId),
+          sql`${transactions.actionPayload}->>'recoveryEffectsToken' = ${claimToken}`,
+        ),
+      );
+    throw error;
+  }
+}
+
 /**
  * Maps Monero vault failures to their HTTP shape: 423 for signing freezes,
  * 503 when the wallet-rpc backend is not configured (fail closed, e.g. the
@@ -2013,6 +2340,63 @@ async function withAgentTransferSpendLock<T>(agentId: string, fn: () => Promise<
   }
 }
 
+function accountingEffectsPendingResponse(
+  c: Context<{ Variables: AppVariables }>,
+  txId: string,
+  status: string,
+): Response {
+  c.header("Retry-After", "1");
+  return c.json<ApiResponse>(
+    {
+      ok: false,
+      error:
+        "Transaction completed, but durable accounting is still pending; retry the same request",
+      data: { txId, status, accounting: "pending" },
+    },
+    // A terminal chain result exists, but the request is not settled until its
+    // durable accounting effects complete. A 5xx is intentional here: the
+    // global idempotency middleware releases (rather than caches) 5xx
+    // reservations, so the same key can re-enter the recovery path without
+    // ever resubmitting the external transaction.
+    503,
+  );
+}
+
+/**
+ * Keep the agent parent row alive from the recovery checkpoint through the
+ * irreversible Monero relay. Agent deletion takes FOR UPDATE on the same row,
+ * so it cannot cascade the anchor while wallet-rpc may still submit it.
+ */
+async function withMoneroRelayLock<T>(
+  agentId: string,
+  fn: () => Promise<T>,
+  onBackendForTests?: (pid: number) => void,
+): Promise<T> {
+  if (process.env.STEWARD_DB_MODE === "pglite" || process.env.STEWARD_PGLITE_MEMORY === "true") {
+    return fn();
+  }
+  return db.transaction(async (tx) => {
+    if (onBackendForTests) {
+      const [backend] = await tx.execute(sql<{ pid: number }>`select pg_backend_pid()::int as pid`);
+      if (!backend) throw new Error("Monero relay lock backend is unavailable");
+      const backendPid = Number(backend.pid);
+      if (!Number.isInteger(backendPid)) throw new Error("Monero relay lock backend is invalid");
+      onBackendForTests(backendPid);
+    }
+    await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${agentId}, 0))`);
+    const locked = await tx
+      .select({ id: agents.id })
+      .from(agents)
+      .where(eq(agents.id, agentId))
+      .for("share");
+    if (locked.length !== 1) throw new Error("Agent disappeared before Monero relay lock");
+    return fn();
+  });
+}
+
+/** Real-Postgres lock contract seam; production callers use withMoneroRelayLock directly. */
+export const __withMoneroRelayLockForTests = withMoneroRelayLock;
+
 async function nativeTransferGasAccountingGuard(
   c: Context<{ Variables: AppVariables }>,
   to: string,
@@ -2382,6 +2766,19 @@ vaultRoutes.post("/:agentId/sign", async (c) => {
             ),
           );
         if (priorTransaction?.status === "outcome_unknown" && priorTransaction.txHash) {
+          if (
+            !(await completeNonSolanaAccountingEffects({
+              tenantId,
+              agentId,
+              txId: priorAuthorization.requestId,
+            }))
+          ) {
+            return accountingEffectsPendingResponse(
+              c,
+              priorAuthorization.requestId,
+              priorTransaction.status,
+            );
+          }
           const response = externalBroadcastOutcomeUnknownResponse(
             c,
             new ExternalBroadcastOutcomeUnknownError(priorTransaction.txHash),
@@ -2394,6 +2791,19 @@ vaultRoutes.post("/:agentId/sign", async (c) => {
           priorTransaction?.txHash &&
           (priorTransaction.status === "broadcast" || priorTransaction.status === "confirmed")
         ) {
+          if (
+            !(await completeNonSolanaAccountingEffects({
+              tenantId,
+              agentId,
+              txId: priorAuthorization.requestId,
+            }))
+          ) {
+            return accountingEffectsPendingResponse(
+              c,
+              priorAuthorization.requestId,
+              priorTransaction.status,
+            );
+          }
           return c.json<ApiResponse<{ txId: string; txHash: string }>>({
             ok: true,
             data: { txId: priorAuthorization.requestId, txHash: priorTransaction.txHash },
@@ -2427,6 +2837,7 @@ vaultRoutes.post("/:agentId/sign", async (c) => {
       ? executionPayloadDigestForGovernedSolanaNativeSign(signRequest)
       : null;
     const executionTxId = solanaNativeBinding?.txId ?? crypto.randomUUID();
+    const nonSolanaEffectsOccurredAt = new Date();
     let solanaNativeExecutionToken: string | null = null;
     try {
       const txId = executionTxId;
@@ -2544,13 +2955,20 @@ vaultRoutes.post("/:agentId/sign", async (c) => {
                   executionBackend: executionTarget.backend,
                   executionBackendIdentityDigest: executionTarget.backendIdentityDigest,
                   policyResults: evaluation.results,
-                  actionPayload: transactionActionPayload({
-                    broadcast: shouldBroadcast,
-                    nonce: signRequest.nonce,
-                    gasLimit: signRequest.gasLimit,
-                    venue: signRequest.venue,
-                    walletAddress: signRequest.walletAddress,
-                  }),
+                  actionPayload: stageNonSolanaAccountingEffects(
+                    transactionActionPayload({
+                      broadcast: shouldBroadcast,
+                      nonce: signRequest.nonce,
+                      gasLimit: signRequest.gasLimit,
+                      venue: signRequest.venue,
+                      walletAddress: signRequest.walletAddress,
+                    }),
+                    {
+                      txId,
+                      occurredAt: nonSolanaEffectsOccurredAt,
+                      shouldAccount: shouldBroadcast,
+                    },
+                  ),
                 });
               } catch (error) {
                 await writeVaultAudit(c, {
@@ -2613,6 +3031,7 @@ vaultRoutes.post("/:agentId/sign", async (c) => {
               });
             })();
 
+      const completedAt = new Date();
       const updated = await db
         .update(transactions)
         .set({
@@ -2621,7 +3040,25 @@ vaultRoutes.post("/:agentId/sign", async (c) => {
           executionPayloadDigest,
           executionPolicyRevisionHash,
           policyResults: evaluation.results,
-          signedAt: new Date(),
+          signedAt: completedAt,
+          ...(isEvmSignRequest && !solanaNativeExecutionToken
+            ? {
+                actionPayload: stageNonSolanaAccountingEffects(
+                  transactionActionPayload({
+                    broadcast: shouldBroadcast,
+                    nonce: signRequest.nonce,
+                    gasLimit: signRequest.gasLimit,
+                    venue: signRequest.venue,
+                    walletAddress: signRequest.walletAddress,
+                  }),
+                  {
+                    txId,
+                    occurredAt: nonSolanaEffectsOccurredAt,
+                    shouldAccount: shouldBroadcast,
+                  },
+                ),
+              }
+            : {}),
         })
         .where(
           and(
@@ -2649,31 +3086,14 @@ vaultRoutes.post("/:agentId/sign", async (c) => {
       if (solanaNativeExecutionToken && shouldBroadcast) {
         await tryCompleteSolanaRecoveryEffects({ tenantId, agentId, txId, signature: result });
       } else {
-        // ── Record spend in Redis (fire-and-forget) ──────────────────────────────
-        recordVaultSpend(agentId, tenantId, signRequest.value, resolvedChainId).catch((err) =>
-          console.error("[vault] Failed to record spend", redactedThrownDiagnostics(err)),
-        );
-
-        // ── Record the authoritative aggregation event ───────────────────────────
-        // AWAITED (unlike recordVaultSpend) and still inside the per-agent spend
-        // lock, so the next request's loadAggregationsForPolicies snapshot already
-        // includes this contribution — cumulative caps cannot be raced past the
-        // threshold by overlapping signs. The tx is already committed/broadcast at
-        // this point, so a record failure cannot retroactively fail the request;
-        // we log it loudly (an undercounted aggregate is a known residual risk of
-        // any post-commit counter, bounded by the spend lock's serialization).
-        try {
-          await recordAggregationEvent({
-            agentId,
-            valueRaw: signRequest.value,
-            to: signRequest.to,
-            chainId: resolvedChainId,
-          });
-        } catch (err) {
-          console.error(
-            "[vault] Failed to record aggregation event",
-            redactedThrownDiagnostics(err),
-          );
+        // Signed-only artifacts do not debit spend because Steward did not
+        // submit an on-chain effect. Broadcast and outcome-unknown artifacts
+        // use the durable, idempotent accounting protocol.
+        if (
+          shouldBroadcast &&
+          !(await completeNonSolanaAccountingEffects({ tenantId, agentId, txId }))
+        ) {
+          return accountingEffectsPendingResponse(c, txId, txStatus);
         }
 
         await writeVaultAudit(c, {
@@ -2756,13 +3176,28 @@ vaultRoutes.post("/:agentId/sign", async (c) => {
         // write. Preserve the irreversible hash on the pre-staged intent before
         // returning the typed 202 response.
         try {
+          const outcomeOccurredAt = new Date();
           await db
             .update(transactions)
             .set({
               status: "outcome_unknown",
               txHash:
                 e instanceof ExternalBroadcastOutcomeUnknownError ? e.transactionHash : undefined,
-              signedAt: new Date(),
+              signedAt: outcomeOccurredAt,
+              actionPayload: stageNonSolanaAccountingEffects(
+                transactionActionPayload({
+                  broadcast: true,
+                  nonce: signRequest.nonce,
+                  gasLimit: signRequest.gasLimit,
+                  venue: signRequest.venue,
+                  walletAddress: signRequest.walletAddress,
+                }),
+                {
+                  txId: executionTxId,
+                  occurredAt: nonSolanaEffectsOccurredAt,
+                  shouldAccount: true,
+                },
+              ),
             })
             .where(and(eq(transactions.id, executionTxId), eq(transactions.agentId, agentId)));
         } catch {
@@ -2772,23 +3207,14 @@ vaultRoutes.post("/:agentId/sign", async (c) => {
           console.error("[vault] Failed to refresh durable outcome_unknown transaction state");
         }
 
-        // A lost response may still represent real spend. Account for it
-        // conservatively before releasing the per-agent spend lock.
-        recordVaultSpend(agentId, tenantId, signRequest.value, resolvedChainId).catch((err) =>
-          console.error("[vault] Failed to record ambiguous spend", redactedThrownDiagnostics(err)),
-        );
-        try {
-          await recordAggregationEvent({
+        if (
+          !(await completeNonSolanaAccountingEffects({
+            tenantId,
             agentId,
-            valueRaw: signRequest.value,
-            to: signRequest.to,
-            chainId: resolvedChainId,
-          });
-        } catch (err) {
-          console.error(
-            "[vault] Failed to record ambiguous aggregation event",
-            redactedThrownDiagnostics(err),
-          );
+            txId: executionTxId,
+          }))
+        ) {
+          return accountingEffectsPendingResponse(c, executionTxId, "outcome_unknown");
         }
         const outcomeUnknownTransactionHash =
           e instanceof ExternalBroadcastOutcomeUnknownError ? e.transactionHash : null;
@@ -2822,10 +3248,19 @@ vaultRoutes.post("/:agentId/sign", async (c) => {
         await db
           .update(transactions)
           .set({ status: "failed" })
-          .where(and(eq(transactions.id, executionTxId), eq(transactions.agentId, agentId)));
+          .where(
+            and(
+              eq(transactions.id, executionTxId),
+              eq(transactions.agentId, agentId),
+              inArray(transactions.status, ["pending", "approved"]),
+            ),
+          );
       }
       const requestId = c.get("requestId") || "unknown";
-      console.error(`[${requestId}] Sign transaction failed for agent ${agentId}`);
+      console.error(
+        `[${requestId}] Sign transaction failed for agent ${agentId}`,
+        redactedThrownDiagnostics(e),
+      );
 
       dispatchWebhook(tenantId, agentId, "tx_failed", {
         error: "Transaction signing failed",
@@ -3270,6 +3705,21 @@ vaultRoutes.post("/:agentId/actions/transfer", async (c) => {
     "Broadcast transfer actions",
   );
   if (idempotencyResponse) return idempotencyResponse;
+  const transferIdempotencyKey = c.req.header("Idempotency-Key");
+  const transferIdempotencyKeyDigest =
+    transfer.broadcast && transferIdempotencyKey
+      ? sha256(`${tenantId}\0${agentId}\0${transferIdempotencyKey}`)
+      : undefined;
+  const transferRequestDigest = sha256(
+    canonicalJsonStringify({
+      to: transfer.to,
+      token: transfer.token,
+      value: transfer.value,
+      chainId: transfer.chainId,
+      broadcast: transfer.broadcast,
+      sponsor: transfer.sponsor === true,
+    }),
+  );
   const solanaRecoveryBinding =
     isSolanaActionChain(transfer.chainId) && transfer.broadcast
       ? createSolanaTransferRecoveryBinding(c, {
@@ -3298,13 +3748,16 @@ vaultRoutes.post("/:agentId/actions/transfer", async (c) => {
             )
             .limit(1)
             .then((rows) => rows[0] ?? null)
-        : Promise.resolve(null),
+        : transferIdempotencyKeyDigest
+          ? findActionByIdempotency(agentId, "transfer", transferIdempotencyKeyDigest)
+          : Promise.resolve(null),
       findActionByReferenceId(agentId, "transfer", transfer.referenceId),
     ]);
     if (byIdempotencyKey && byReferenceId && byIdempotencyKey.id !== byReferenceId.id) {
-      return { conflict: true as const };
+      return { conflict: "Idempotency-Key and referenceId identify different requests" } as const;
     }
     const existing = byIdempotencyKey ?? byReferenceId;
+    if (!existing) return { existing: null } as const;
     if (existing && solanaRecoveryBinding) {
       const metadata = readSolanaRecoveryMetadata(existing.actionPayload);
       if (
@@ -3312,22 +3765,46 @@ vaultRoutes.post("/:agentId/actions/transfer", async (c) => {
         metadata.idempotencyKeyDigest !== solanaRecoveryBinding.idempotencyKeyDigest ||
         metadata.requestDigest !== solanaRecoveryBinding.requestDigest
       ) {
-        return { conflict: true as const };
+        return { conflict: "Idempotency-Key was already used for a different request" } as const;
       }
+      return { existing } as const;
     }
-    return { existing };
+    const payload = existing.actionPayload as Record<string, unknown> | null;
+    if (payload?.requestDigest !== transferRequestDigest) {
+      return {
+        conflict:
+          typeof payload?.requestDigest !== "string"
+            ? "Stored transfer replay binding is incomplete"
+            : byIdempotencyKey
+              ? "Idempotency-Key was already used for a different request"
+              : "referenceId was already used for a different request",
+      } as const;
+    }
+    if (byIdempotencyKey && actionReferenceId(payload) !== (transfer.referenceId ?? null)) {
+      return { conflict: "Idempotency-Key was already used with a different referenceId" } as const;
+    }
+    return { existing } as const;
   };
   const existingLookup = await findExistingTransferAction();
   if ("conflict" in existingLookup) {
-    return c.json<ApiResponse>(
-      { ok: false, error: "Idempotency-Key and referenceId identify different requests" },
-      409,
-    );
+    return c.json<ApiResponse>({ ok: false, error: existingLookup.conflict }, 409);
   }
   const existingAction = existingLookup.existing;
   if (existingAction) {
     if (solanaRecoveryBinding) {
       return solanaLostOwnershipResponse(c, existingAction.id, agentId, "transfer");
+    }
+    if (
+      (existingAction.status === "broadcast" ||
+        existingAction.status === "confirmed" ||
+        existingAction.status === "outcome_unknown") &&
+      !(await completeNonSolanaAccountingEffects({
+        tenantId,
+        agentId,
+        txId: existingAction.id,
+      }))
+    ) {
+      return accountingEffectsPendingResponse(c, existingAction.id, existingAction.status);
     }
     return c.json<ApiResponse>({
       ok: existingAction.status !== "rejected" && existingAction.status !== "failed",
@@ -3344,15 +3821,28 @@ vaultRoutes.post("/:agentId/actions/transfer", async (c) => {
   return withAgentTransferSpendLock(agentId, async () => {
     const lockedLookup = await findExistingTransferAction();
     if ("conflict" in lockedLookup) {
-      return c.json<ApiResponse>(
-        { ok: false, error: "Idempotency-Key and referenceId identify different requests" },
-        409,
-      );
+      return c.json<ApiResponse>({ ok: false, error: lockedLookup.conflict }, 409);
     }
     const lockedExistingAction = lockedLookup.existing;
     if (lockedExistingAction) {
       if (solanaRecoveryBinding) {
         return solanaLostOwnershipResponse(c, lockedExistingAction.id, agentId, "transfer");
+      }
+      if (
+        (lockedExistingAction.status === "broadcast" ||
+          lockedExistingAction.status === "confirmed" ||
+          lockedExistingAction.status === "outcome_unknown") &&
+        !(await completeNonSolanaAccountingEffects({
+          tenantId,
+          agentId,
+          txId: lockedExistingAction.id,
+        }))
+      ) {
+        return accountingEffectsPendingResponse(
+          c,
+          lockedExistingAction.id,
+          lockedExistingAction.status,
+        );
       }
       return c.json<ApiResponse>({
         ok: lockedExistingAction.status !== "rejected" && lockedExistingAction.status !== "failed",
@@ -3476,6 +3966,9 @@ vaultRoutes.post("/:agentId/actions/transfer", async (c) => {
         broadcast: transfer.broadcast,
         referenceId: transfer.referenceId,
         sponsorship: sponsorshipPayload,
+        idempotencyKeyDigest: transferIdempotencyKeyDigest,
+        requestDigest:
+          transferIdempotencyKeyDigest || transfer.referenceId ? transferRequestDigest : undefined,
       }),
       ...(parsedSolanaTransferApproval ?? {}),
       ...(solanaRecoveryBinding
@@ -3692,6 +4185,7 @@ vaultRoutes.post("/:agentId/actions/transfer", async (c) => {
     let completedResult: string | null = null;
     let completedStatus: "broadcast" | "signed" | null = null;
     let sponsoredTransferStaged = false;
+    let transferActionStaged = false;
     try {
       await writeVaultAudit(c, {
         tenantId,
@@ -3724,6 +4218,7 @@ vaultRoutes.post("/:agentId/actions/transfer", async (c) => {
           policyResults: evaluation.results,
         });
         sponsoredTransferStaged = true;
+        transferActionStaged = true;
       }
       const reservationError = await recordSponsoredActionIfNeeded({
         sponsorship: sponsorshipPayload,
@@ -3739,10 +4234,38 @@ vaultRoutes.post("/:agentId/actions/transfer", async (c) => {
         if (sponsoredTransferStaged) {
           await db.delete(transactions).where(eq(transactions.id, actionId));
           sponsoredTransferStaged = false;
+          transferActionStaged = false;
         }
         return c.json<ApiResponse>({ ok: false, error: reservationError }, 403);
       }
+      if (!isSolanaTransfer && transfer.broadcast) {
+        storedTransferActionPayload = stageNonSolanaAccountingEffects(storedTransferActionPayload, {
+          txId: actionId,
+          occurredAt: new Date(),
+          shouldAccount: transfer.broadcast,
+        });
+        await db.insert(transactions).values({
+          id: actionId,
+          agentId,
+          status: "approved",
+          toAddress: signRequest.to,
+          value: signRequest.value,
+          data: signRequest.data,
+          chainId: signRequest.chainId,
+          actionType: "transfer",
+          actionPayload: storedTransferActionPayload,
+          policyResults: evaluation.results,
+        });
+        transferActionStaged = true;
+      }
       let result: string;
+      let solanaArtifactEvidence:
+        | {
+            artifactSignature: string;
+            recentBlockhash: string;
+            blockhashKind: "recent" | "durable_nonce" | "unknown";
+          }
+        | undefined;
       if (isSolanaTokenTransfer) {
         if (!signRequest.data) {
           throw new Error("SPL transfer transaction was not built");
@@ -3819,6 +4342,13 @@ vaultRoutes.post("/:agentId/actions/transfer", async (c) => {
           },
         );
         result = signed.signature;
+        if (signed.artifactSignature && signed.recentBlockhash && signed.blockhashKind) {
+          solanaArtifactEvidence = {
+            artifactSignature: signed.artifactSignature,
+            recentBlockhash: signed.recentBlockhash,
+            blockhashKind: signed.blockhashKind,
+          };
+        }
       } else {
         result = await vault.signTransaction(signRequest, {
           txId: actionId,
@@ -3854,15 +4384,26 @@ vaultRoutes.post("/:agentId/actions/transfer", async (c) => {
         return solanaLostOwnershipResponse(c, actionId, agentId, "transfer");
       }
       const signedTx = transfer.broadcast ? undefined : result;
+      const completedAt = new Date();
       const updatedTransfer = await db
         .update(transactions)
         .set({
           status: txStatus,
-          txHash: transfer.broadcast ? result : undefined,
+          txHash: transfer.broadcast ? result : solanaArtifactEvidence?.artifactSignature,
           actionType: "transfer",
-          ...(solanaRecoveryBinding ? {} : { actionPayload: storedTransferActionPayload }),
+          ...(solanaRecoveryBinding
+            ? {}
+            : {
+                actionPayload: isSolanaTransfer
+                  ? { ...storedTransferActionPayload, ...solanaArtifactEvidence }
+                  : stageNonSolanaAccountingEffects(storedTransferActionPayload, {
+                      txId: actionId,
+                      occurredAt: completedAt,
+                      shouldAccount: transfer.broadcast,
+                    }),
+              }),
           policyResults: evaluation.results,
-          signedAt: new Date(),
+          signedAt: completedAt,
         })
         .where(
           and(
@@ -3895,13 +4436,11 @@ vaultRoutes.post("/:agentId/actions/transfer", async (c) => {
           signature: result,
         });
       } else {
-        if (transfer.broadcast) {
-          recordVaultSpend(agentId, tenantId, signRequest.value, signRequest.chainId).catch((err) =>
-            console.error(
-              "[vault] Failed to record transfer action spend",
-              redactedThrownDiagnostics(err),
-            ),
-          );
+        if (
+          transfer.broadcast &&
+          !(await completeNonSolanaAccountingEffects({ tenantId, agentId, txId: actionId }))
+        ) {
+          return accountingEffectsPendingResponse(c, actionId, txStatus);
         }
         await recordSponsoredActionIfNeeded({
           sponsorship: sponsorshipPayload,
@@ -4004,6 +4543,14 @@ vaultRoutes.post("/:agentId/actions/transfer", async (c) => {
       const frozen = frozenSigningResponse(c, e);
       if (frozen) return frozen;
       if (completedResult && completedStatus) {
+        if (completedStatus === "signed") {
+          // Signed bytes must never be returned after their durable evidence or
+          // required audit failed to commit.
+          return c.json<ApiResponse>(
+            { ok: false, error: "Signed artifact bookkeeping did not commit" },
+            500,
+          );
+        }
         if (solanaExecutionToken && transfer.broadcast) {
           await tryCompleteSolanaRecoveryEffects({
             tenantId,
@@ -4012,18 +4559,35 @@ vaultRoutes.post("/:agentId/actions/transfer", async (c) => {
             signature: completedResult,
           });
         } else {
+          const recoveredAt = new Date();
           await db
             .update(transactions)
             .set({
               status: completedStatus,
               txHash: transfer.broadcast ? completedResult : undefined,
               actionType: "transfer",
-              actionPayload: storedTransferActionPayload,
+              ...(solanaRecoveryBinding
+                ? {}
+                : {
+                    actionPayload: isSolanaTransfer
+                      ? storedTransferActionPayload
+                      : stageNonSolanaAccountingEffects(storedTransferActionPayload, {
+                          txId: actionId,
+                          occurredAt: recoveredAt,
+                          shouldAccount: transfer.broadcast,
+                        }),
+                  }),
               policyResults: evaluation.results,
-              signedAt: new Date(),
+              signedAt: recoveredAt,
             })
             .where(eq(transactions.id, actionId))
             .catch(() => null);
+          if (
+            transfer.broadcast &&
+            !(await completeNonSolanaAccountingEffects({ tenantId, agentId, txId: actionId }))
+          ) {
+            return accountingEffectsPendingResponse(c, actionId, completedStatus);
+          }
         }
 
         return c.json<ApiResponse>({
@@ -4046,7 +4610,7 @@ vaultRoutes.post("/:agentId/actions/transfer", async (c) => {
         if (!(await markSolanaRecoveryAnchorFailed(actionId, agentId, solanaExecutionToken))) {
           return solanaLostOwnershipResponse(c, actionId, agentId, "transfer");
         }
-      } else if (sponsoredTransferStaged) {
+      } else if (transferActionStaged) {
         await db
           .update(transactions)
           .set({ status: "failed", policyResults: evaluation.results })
@@ -4311,6 +4875,30 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
       transactionRow.status === "confirmed")
   ) {
     return solanaLostOwnershipResponse(c, txId, agentId, "approval");
+  }
+  if (
+    !isSolana &&
+    pendingApproval.status === "approved" &&
+    (transactionRow.status === "broadcast" ||
+      transactionRow.status === "confirmed" ||
+      transactionRow.status === "outcome_unknown")
+  ) {
+    if (!(await completeNonSolanaAccountingEffects({ tenantId, agentId, txId }))) {
+      return accountingEffectsPendingResponse(c, txId, transactionRow.status);
+    }
+    if (transactionRow.status === "outcome_unknown" && transactionRow.txHash) {
+      return externalBroadcastOutcomeUnknownResponse(
+        c,
+        new ExternalBroadcastOutcomeUnknownError(transactionRow.txHash),
+        txId,
+      ) as Response;
+    }
+    if (transactionRow.txHash) {
+      return c.json<ApiResponse<{ txId: string; txHash: string }>>({
+        ok: true,
+        data: { txId, txHash: transactionRow.txHash },
+      });
+    }
   }
   const leaseUntil =
     typeof approvalRecoveryMetadata.attemptLeaseUntil === "string"
@@ -4792,6 +5380,18 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
         approvedSolanaExecutionToken = claimed.executionToken;
         approvedSolanaActionPayload = claimed.actionPayload;
       }
+      if (!isSolana && shouldBroadcast) {
+        await db
+          .update(transactions)
+          .set({
+            actionPayload: stageNonSolanaAccountingEffects(transactionRow.actionPayload, {
+              txId,
+              occurredAt: resolvedAt,
+              shouldAccount: true,
+            }),
+          })
+          .where(and(eq(transactions.id, txId), eq(transactions.agentId, agentId)));
+      }
       dispatchIntentWebhook(tenantId, agentId, "intent.authorized", {
         intentId: txId,
         actionType: transactionRow.actionType,
@@ -4801,10 +5401,21 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
       });
 
       let txHash: string;
+      let solanaArtifactEvidence:
+        | {
+            artifactSignature: string;
+            recentBlockhash: string;
+            blockhashKind: "recent" | "durable_nonce" | "unknown";
+          }
+        | undefined;
 
       if (isSolana) {
         const checkpoint = approvedSolanaExecutionToken
-          ? (prepared: { signature: string; recentBlockhash: string }) =>
+          ? (prepared: {
+              signature: string;
+              recentBlockhash: string;
+              blockhashKind: "recent" | "durable_nonce" | "unknown";
+            }) =>
               checkpointSolanaBroadcastSubmission(
                 txId,
                 agentId,
@@ -4919,6 +5530,13 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
                   onBroadcastPrepared: checkpoint,
                 });
           txHash = result.signature;
+          if (result.artifactSignature && result.recentBlockhash && result.blockhashKind) {
+            solanaArtifactEvidence = {
+              artifactSignature: result.artifactSignature,
+              recentBlockhash: result.recentBlockhash,
+              blockhashKind: result.blockhashKind,
+            };
+          }
           if (shouldBroadcast && approvedSolanaExecutionToken) {
             const finalized = await finalizeSolanaRecoveryAnchor(
               txId,
@@ -5037,11 +5655,42 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
           : transactionPayload?.broadcast === false
             ? "signed"
             : "broadcast";
+      const rebuiltApprovalActionPayload = transferPayload
+        ? transferActionPayload({
+            token: transferPayload.token,
+            recipient: transferPayload.recipient ?? transactionRow.toAddress,
+            amount: transferPayload.amount ?? transactionRow.value,
+            broadcast: transferPayload.broadcast,
+            referenceId: transferPayload.referenceId,
+            sponsorship: transferPayload.sponsorship,
+          })
+        : transactionPayload
+          ? transactionActionPayload({
+              broadcast: transactionPayload.broadcast,
+              referenceId: transactionPayload.referenceId,
+              nonce: transactionPayload.nonce,
+              gasLimit: transactionPayload.gasLimit,
+              venue: transactionPayload.venue,
+              walletAddress: transactionPayload.walletAddress,
+            })
+          : transactionRow.actionPayload;
+      const completedApprovalActionPayload = isSolana
+        ? {
+            ...(transferPayload || transactionPayload
+              ? (rebuiltApprovalActionPayload as Record<string, unknown>)
+              : readSolanaRecoveryMetadata(transactionRow.actionPayload)),
+            ...solanaArtifactEvidence,
+          }
+        : stageNonSolanaAccountingEffects(rebuiltApprovalActionPayload, {
+            txId,
+            occurredAt: resolvedAt,
+            shouldAccount: shouldBroadcast,
+          });
       const updatedApprovedTransactions = await db
         .update(transactions)
         .set({
           status: nextStatus,
-          txHash: shouldBroadcast ? txHash : null,
+          txHash: shouldBroadcast ? txHash : (solanaArtifactEvidence?.artifactSignature ?? null),
           executionPayloadDigest:
             approvalExecutionPayloadDigest ?? transactionRow.executionPayloadDigest,
           executionPolicyRevisionHash: isPrimaryEvmApproval
@@ -5051,25 +5700,7 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
           ...(approvedSolanaActionPayload
             ? {}
             : {
-                actionPayload: transferPayload
-                  ? transferActionPayload({
-                      token: transferPayload.token,
-                      recipient: transferPayload.recipient ?? transactionRow.toAddress,
-                      amount: transferPayload.amount ?? transactionRow.value,
-                      broadcast: transferPayload.broadcast,
-                      referenceId: transferPayload.referenceId,
-                      sponsorship: transferPayload.sponsorship,
-                    })
-                  : transactionPayload
-                    ? transactionActionPayload({
-                        broadcast: transactionPayload.broadcast,
-                        referenceId: transactionPayload.referenceId,
-                        nonce: transactionPayload.nonce,
-                        gasLimit: transactionPayload.gasLimit,
-                        venue: transactionPayload.venue,
-                        walletAddress: transactionPayload.walletAddress,
-                      })
-                    : transactionRow.actionPayload,
+                actionPayload: completedApprovalActionPayload,
               }),
           signedAt: resolvedAt,
         })
@@ -5096,14 +5727,12 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
       if (approvedSolanaExecutionToken && shouldBroadcast) {
         await tryCompleteSolanaRecoveryEffects({ tenantId, agentId, txId, signature: txHash });
       } else {
-        if (!isSolana && shouldBroadcast) {
-          recordVaultSpend(agentId, tenantId, transactionRow.value, transactionRow.chainId).catch(
-            (err) =>
-              console.error(
-                "[vault] Failed to record approved transaction spend",
-                redactedThrownDiagnostics(err),
-              ),
-          );
+        if (
+          !isSolana &&
+          shouldBroadcast &&
+          !(await completeNonSolanaAccountingEffects({ tenantId, agentId, txId }))
+        ) {
+          return accountingEffectsPendingResponse(c, txId, nextStatus);
         }
         if (transferPayload) {
           await recordSponsoredActionIfNeeded({
@@ -5306,6 +5935,11 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
                     : "broadcast",
                 txHash: completedTxHash ?? transactionRow.txHash ?? null,
                 signedAt: resolvedAt,
+                actionPayload: stageNonSolanaAccountingEffects(transactionRow.actionPayload, {
+                  txId,
+                  occurredAt: resolvedAt,
+                  shouldAccount: true,
+                }),
               })
               .where(and(eq(transactions.id, txId), eq(transactions.agentId, agentId)));
           }
@@ -5331,25 +5965,8 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
           });
           return outcomeUnknown;
         }
-        recordVaultSpend(agentId, tenantId, transactionRow.value, transactionRow.chainId).catch(
-          (err) =>
-            console.error(
-              "[vault] Failed to record ambiguous approved spend",
-              redactedThrownDiagnostics(err),
-            ),
-        );
-        try {
-          await recordAggregationEvent({
-            agentId,
-            valueRaw: transactionRow.value,
-            to: transactionRow.toAddress,
-            chainId: transactionRow.chainId,
-          });
-        } catch (err) {
-          console.error(
-            "[vault] Failed to record ambiguous approved aggregation event",
-            redactedThrownDiagnostics(err),
-          );
+        if (!(await completeNonSolanaAccountingEffects({ tenantId, agentId, txId }))) {
+          return accountingEffectsPendingResponse(c, txId, "outcome_unknown");
         }
         await writeOutcomeUnknownAudit(c, {
           tenantId,
@@ -5478,7 +6095,13 @@ vaultRoutes.post("/:agentId/reject/:txId", async (c) => {
     return tx
       .update(transactions)
       .set({ status: "rejected" })
-      .where(and(eq(transactions.id, txId), eq(transactions.agentId, agentId)))
+      .where(
+        and(
+          eq(transactions.id, txId),
+          eq(transactions.agentId, agentId),
+          sql`${transactions.status} in ('pending', 'approved')`,
+        ),
+      )
       .returning({
         actionType: transactions.actionType,
         actionPayload: transactions.actionPayload,
@@ -5645,6 +6268,7 @@ vaultRoutes.get("/:agentId/transactions", async (c) => {
     "confirmed",
     "failed",
     "outcome_unknown",
+    "retired",
   ]);
   if (status && !allowedStatuses.has(status)) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid transaction status filter" }, 400);
@@ -5703,7 +6327,6 @@ vaultRoutes.get("/:agentId/transactions/:txId", async (c) => {
     .where(and(eq(transactions.id, txId), eq(transactions.agentId, agentId)));
 
   if (!row) return c.json<ApiResponse>({ ok: false, error: "Transaction not found" }, 404);
-
   return c.json<ApiResponse>({ ok: true, data: toTransactionResponse(row) });
 });
 
@@ -5758,6 +6381,40 @@ vaultRoutes.post("/:agentId/transactions/:txId/lifecycle", async (c) => {
     .from(transactions)
     .where(and(eq(transactions.id, txId), eq(transactions.agentId, agentId)));
   if (!row) return c.json<ApiResponse>({ ok: false, error: "Transaction not found" }, 404);
+  const lifecycleMetadata = readSolanaRecoveryMetadata(row.actionPayload);
+
+  // A signed artifact remains independently broadcastable after Steward loses
+  // custody of the response. Generic provider errors therefore cannot prove a
+  // signed artifact is safe to abandon. Only the dedicated chain-authoritative
+  // retirement route may terminalize it.
+  if (
+    (row.status === "signed" ||
+      lifecycleMetadata.lifecycleOriginStatus === "signed" ||
+      isNonEmptyString(lifecycleMetadata.artifactSignature)) &&
+    (body.type === "transaction.failed" ||
+      body.type === "transaction.provider_error" ||
+      body.type === "transaction.execution_reverted")
+  ) {
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error:
+          "Transactions originating from a signed artifact cannot be relabeled as failed; use authoritative reconciliation or signed-artifact retirement",
+      },
+      409,
+    );
+  }
+
+  if (
+    row.chainId !== 101 &&
+    row.chainId !== 102 &&
+    (row.status === "broadcast" ||
+      row.status === "confirmed" ||
+      row.status === "outcome_unknown") &&
+    !(await completeNonSolanaAccountingEffects({ tenantId, agentId, txId }))
+  ) {
+    return accountingEffectsPendingResponse(c, txId, row.status);
+  }
 
   const isBroadcastPromotion =
     body.type === "transaction.broadcasted" ||
@@ -5839,6 +6496,18 @@ vaultRoutes.post("/:agentId/transactions/:txId/lifecycle", async (c) => {
       update.status = "broadcast";
       update.txHash = eventTxHash;
       update.signedAt = row.signedAt ?? now;
+      if (row.chainId === 101 || row.chainId === 102) {
+        update.actionPayload = {
+          ...lifecycleMetadata,
+          lifecycleOriginStatus: lifecycleMetadata.lifecycleOriginStatus ?? row.status,
+        };
+      } else if (row.status === "signed") {
+        update.actionPayload = stageNonSolanaAccountingEffects(row.actionPayload, {
+          txId,
+          occurredAt: row.signedAt ?? now,
+          shouldAccount: true,
+        });
+      }
       nextStatus = "broadcast";
       break;
     case "transaction.confirmed":
@@ -5867,6 +6536,10 @@ vaultRoutes.post("/:agentId/transactions/:txId/lifecycle", async (c) => {
       update.status = "broadcast";
       update.txHash = replacementTxHash;
       update.signedAt = row.signedAt ?? now;
+      update.actionPayload = {
+        ...lifecycleMetadata,
+        lifecycleOriginStatus: lifecycleMetadata.lifecycleOriginStatus ?? row.status,
+      };
       eventTxHash = replacementTxHash;
       nextStatus = "broadcast";
       break;
@@ -5915,9 +6588,34 @@ vaultRoutes.post("/:agentId/transactions/:txId/lifecycle", async (c) => {
       ? await db
           .update(transactions)
           .set(update)
-          .where(and(eq(transactions.id, txId), eq(transactions.agentId, agentId)))
+          .where(
+            and(
+              eq(transactions.id, txId),
+              eq(transactions.agentId, agentId),
+              eq(transactions.status, row.status),
+              row.txHash === null
+                ? sql`${transactions.txHash} is null`
+                : eq(transactions.txHash, row.txHash),
+            ),
+          )
           .returning()
       : [row];
+
+  if (!updated) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Transaction state changed concurrently; retry" },
+      409,
+    );
+  }
+
+  if (
+    row.chainId !== 101 &&
+    row.chainId !== 102 &&
+    nextStatus === "broadcast" &&
+    !(await completeNonSolanaAccountingEffects({ tenantId, agentId, txId }))
+  ) {
+    return accountingEffectsPendingResponse(c, txId, nextStatus);
+  }
 
   await writeVaultAudit(c, {
     tenantId,
@@ -6118,9 +6816,30 @@ vaultRoutes.post("/:agentId/transactions/:txId/replace", async (c) => {
       status: "broadcast",
       txHash: replacementTxHash,
       signedAt: row.signedAt ?? now,
+      actionPayload: {
+        ...readSolanaRecoveryMetadata(row.actionPayload),
+        lifecycleOriginStatus:
+          readSolanaRecoveryMetadata(row.actionPayload).lifecycleOriginStatus ?? row.status,
+      },
     })
-    .where(and(eq(transactions.id, txId), eq(transactions.agentId, agentId)))
+    .where(
+      and(
+        eq(transactions.id, txId),
+        eq(transactions.agentId, agentId),
+        eq(transactions.status, row.status),
+        row.txHash === null
+          ? sql`${transactions.txHash} is null`
+          : eq(transactions.txHash, row.txHash),
+      ),
+    )
     .returning();
+
+  if (!updated) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Transaction state changed concurrently; retry" },
+      409,
+    );
+  }
 
   await writeVaultAudit(c, {
     tenantId,
@@ -7202,38 +7921,34 @@ vaultRoutes.post("/:agentId/monero/transfer", async (c) => {
   );
   if (!signerAuthorization.ok) return signerAuthorization.response;
 
-  const policySet = await getScopedPolicySet(tenantId, agentId, c.get("agentPolicyIds"));
-  const hasMoneroSigningPolicy = policySet.some((p) => p.enabled && p.type === "raw-signing-chain");
-  if (!hasMoneroSigningPolicy) {
-    return c.json<ApiResponse>(
-      {
-        ok: false,
-        error:
-          "Monero transfers require a `raw-signing-chain` policy for this agent. Add one that explicitly allows monero and ed25519.",
-      },
-      403,
-    );
-  }
-  const conditionSets = await loadConditionSetsForPolicies(tenantId, policySet);
-  const rateLimitResult = await enforceRateLimit(agentId, policySet);
-  if (!rateLimitResult.allowed) {
-    if (rateLimitResult.headers) {
-      for (const [key, value] of Object.entries(rateLimitResult.headers)) c.header(key, value);
-    }
-    return c.json<ApiResponse>(
-      { ok: false, error: rateLimitResult.reason || "Rate limit exceeded" },
-      429,
-    );
-  }
-  if (rateLimitResult.headers) {
-    for (const [key, value] of Object.entries(rateLimitResult.headers)) c.header(key, value);
-  }
-
-  // This route broadcasts: require idempotency and honor referenceId dedupe.
+  // Recover an already-durable request before reading mutable policy/rate
+  // state. A retry after an acknowledgement loss must return the anchored
+  // outcome even when limits or policy configuration changed meanwhile.
   const idempotencyResponse = requireBroadcastActionIdempotency(c, true, "Monero transfers");
   if (idempotencyResponse) return idempotencyResponse;
+  const idempotencyKey = c.req.header("Idempotency-Key") as string;
+  const idempotencyKeyDigest = digestMoneroValue(idempotencyKey);
+  const requestFingerprint = moneroRequestFingerprint({
+    walletScope,
+    destinations,
+    priority: priority ?? 0,
+  });
+  const existingIdempotencyAction = await findMoneroActionByIdempotency(
+    agentId,
+    idempotencyKeyDigest,
+  );
+  if (existingIdempotencyAction) {
+    return moneroRecoveryResponse(c, existingIdempotencyAction, requestFingerprint);
+  }
   const existingAction = await findActionByReferenceId(agentId, "monero_transfer", referenceId);
   if (existingAction) {
+    const recovery = readMoneroRecoveryPayload(existingAction.actionPayload);
+    if (recovery && recovery.requestFingerprint !== requestFingerprint) {
+      return c.json<ApiResponse>(
+        { ok: false, error: "referenceId is already bound to a different Monero transfer" },
+        409,
+      );
+    }
     return c.json<ApiResponse>({
       ok: existingAction.status !== "rejected" && existingAction.status !== "failed",
       error:
@@ -7251,19 +7966,29 @@ vaultRoutes.post("/:agentId/monero/transfer", async (c) => {
     });
   }
 
-  const destinationTotalPiconero = destinations.reduce(
-    (total, destination) => total + BigInt(destination.amountPiconero),
-    0n,
-  );
   const moneroChainId = scopeNetwork === "mainnet" ? 301 : 302;
 
-  return withAgentSpendLock(agentId, async () => {
+  return withMoneroRelayLock(agentId, async () => {
+    const lockedExistingIdempotencyAction = await findMoneroActionByIdempotency(
+      agentId,
+      idempotencyKeyDigest,
+    );
+    if (lockedExistingIdempotencyAction) {
+      return moneroRecoveryResponse(c, lockedExistingIdempotencyAction, requestFingerprint);
+    }
     const lockedExistingAction = await findActionByReferenceId(
       agentId,
       "monero_transfer",
       referenceId,
     );
     if (lockedExistingAction) {
+      const recovery = readMoneroRecoveryPayload(lockedExistingAction.actionPayload);
+      if (recovery && recovery.requestFingerprint !== requestFingerprint) {
+        return c.json<ApiResponse>(
+          { ok: false, error: "referenceId is already bound to a different Monero transfer" },
+          409,
+        );
+      }
       return c.json<ApiResponse>({
         ok: lockedExistingAction.status !== "rejected" && lockedExistingAction.status !== "failed",
         data: {
@@ -7274,6 +7999,39 @@ vaultRoutes.post("/:agentId/monero/transfer", async (c) => {
         },
       });
     }
+
+    const policySet = await getScopedPolicySet(tenantId, agentId, c.get("agentPolicyIds"));
+    const hasMoneroSigningPolicy = policySet.some(
+      (policy) => policy.enabled && policy.type === "raw-signing-chain",
+    );
+    if (!hasMoneroSigningPolicy) {
+      return c.json<ApiResponse>(
+        {
+          ok: false,
+          error:
+            "Monero transfers require a `raw-signing-chain` policy for this agent. Add one that explicitly allows monero and ed25519.",
+        },
+        403,
+      );
+    }
+    const conditionSets = await loadConditionSetsForPolicies(tenantId, policySet);
+    const rateLimitResult = await enforceRateLimit(agentId, policySet);
+    if (!rateLimitResult.allowed) {
+      if (rateLimitResult.headers) {
+        for (const [key, value] of Object.entries(rateLimitResult.headers)) c.header(key, value);
+      }
+      return c.json<ApiResponse>(
+        { ok: false, error: rateLimitResult.reason || "Rate limit exceeded" },
+        429,
+      );
+    }
+    if (rateLimitResult.headers) {
+      for (const [key, value] of Object.entries(rateLimitResult.headers)) c.header(key, value);
+    }
+    const destinationTotalPiconero = destinations.reduce(
+      (total, destination) => total + BigInt(destination.amountPiconero),
+      0n,
+    );
 
     const stats = await getTransactionStats(agentId, moneroChainId);
     const policyResults: PolicyResult[] = [];
@@ -7418,101 +8176,190 @@ vaultRoutes.post("/:agentId/monero/transfer", async (c) => {
       );
     }
 
-    await writeVaultAudit(c, {
-      tenantId,
-      actorType: "user",
-      actorId: c.get("userId") ?? c.get("authType") ?? null,
-      action: "vault.monero_transfer.authorized",
-      resourceType: "wallet",
-      resourceId: agentId,
-      metadata: {
-        walletScope,
-        network: prepared.network,
-        destinations,
-        destinationTotalPiconero: destinationTotalPiconero.toString(),
-        feePiconero: feePiconero.toString(),
-        totalPiconero: totalPiconero.toString(),
-        priority: priority ?? 0,
-        referenceId: referenceId ?? null,
-        policyResults,
-        ...signerAuthAuditMetadata(signerAuthorization.auth),
-      },
-    });
+    const transactionId = crypto.randomUUID();
+    const recoveryPayload: MoneroRecoveryPayload = {
+      type: "monero_transfer",
+      recoveryVersion: 1,
+      idempotencyKeyDigest,
+      requestFingerprint,
+      txMetadataDigest: digestMoneroValue(prepared.txMetadata),
+      relayState: "prepared",
+      walletScope: prepared.walletScope,
+      walletAddress: prepared.walletAddress,
+      network: prepared.network,
+      destinations,
+      destinationTotalPiconero: destinationTotalPiconero.toString(),
+      feePiconero: feePiconero.toString(),
+      totalPiconero: totalPiconero.toString(),
+      priority: priority ?? 0,
+      referenceId: referenceId ?? null,
+      recoveryEffectsState: "pending",
+    };
+    try {
+      const authenticatedUserId = c.get("userId");
+      const tenantTransactionUserId =
+        authenticatedUserId &&
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+          authenticatedUserId,
+        )
+          ? authenticatedUserId
+          : undefined;
+      await withIndependentAuthenticatedTenantDatabase(
+        tenantId,
+        c.get("authType") ?? "monero-transfer",
+        c.get("agentSubject") ?? c.get("userId") ?? agentId,
+        () =>
+          withTenantAuditedTransaction(tenantId, async (rawTx, appendRequiredAudit) => {
+            const tx = rawTx as typeof db;
+            await tx.insert(transactions).values({
+              id: transactionId,
+              agentId,
+              status: "approved",
+              toAddress: destinations[0].address,
+              value: totalPiconero.toString(),
+              data: null,
+              chainId: moneroChainId,
+              txHash: prepared.txHash,
+              actionType: "monero_transfer",
+              actionPayload: recoveryPayload,
+              policyResults,
+              signedAt: new Date(),
+            });
+            await appendRequiredAudit({
+              tenantId,
+              actorType: "user",
+              actorId: c.get("userId") ?? c.get("authType") ?? null,
+              action: "vault.monero_transfer.authorized",
+              resourceType: "transaction",
+              resourceId: transactionId,
+              metadata: {
+                walletScope,
+                network: prepared.network,
+                txHash: prepared.txHash,
+                txMetadataDigest: recoveryPayload.txMetadataDigest,
+                requestFingerprint,
+                destinations,
+                destinationTotalPiconero: destinationTotalPiconero.toString(),
+                feePiconero: feePiconero.toString(),
+                totalPiconero: totalPiconero.toString(),
+                priority: priority ?? 0,
+                referenceId: referenceId ?? null,
+                policyResults,
+                ...signerAuthAuditMetadata(signerAuthorization.auth),
+              },
+              ipAddress: c.req.header("x-forwarded-for") ?? null,
+              userAgent: c.req.header("user-agent") ?? null,
+              requestId: c.get("requestId") ?? null,
+            });
+          }),
+        tenantTransactionUserId,
+      );
+    } catch (checkpointError) {
+      await discardPrepared();
+      throw checkpointError;
+    }
 
+    let relayAccepted = false;
     try {
       const relayed = await vault.relayMoneroTransfer({
         tenantId,
         agentId,
         walletScope,
         txMetadata: prepared.txMetadata,
+        expectedTxHash: prepared.txHash,
       });
+      relayAccepted = true;
 
-      const transactionId = crypto.randomUUID();
-      await db.insert(transactions).values({
-        id: transactionId,
-        agentId,
-        status: "broadcast",
-        toAddress: destinations[0].address,
-        value: totalPiconero.toString(),
-        data: null,
-        chainId: moneroChainId,
-        // Monero hashes are stored WITHOUT a 0x prefix; the EVM receipt
-        // poller skips non-0x hashes by design.
-        txHash: relayed.txHash,
-        actionType: "monero_transfer",
-        actionPayload: {
-          type: "monero_transfer",
-          walletScope: prepared.walletScope,
-          walletAddress: prepared.walletAddress,
-          network: prepared.network,
-          destinations,
-          destinationTotalPiconero: destinationTotalPiconero.toString(),
-          feePiconero: feePiconero.toString(),
-          totalPiconero: totalPiconero.toString(),
-          priority: priority ?? 0,
-          referenceId: referenceId ?? null,
-        },
-        policyResults,
-        signedAt: new Date(),
-      });
-
-      recordVaultSpend(agentId, tenantId, totalPiconero.toString(), moneroChainId).catch((err) =>
-        console.error(
-          `[Vault] recordVaultSpend failed for ${agentId}`,
-          redactedThrownDiagnostics(err),
-        ),
-      );
-
-      await writeVaultAudit(c, {
+      const transitioned = await withTenantAuditedTransaction(
         tenantId,
-        actorType: "user",
-        actorId: c.get("userId") ?? c.get("authType") ?? null,
-        action: "vault.monero_transfer.relayed",
-        resourceType: "wallet",
-        resourceId: agentId,
-        metadata: {
-          transactionId,
-          walletScope: prepared.walletScope,
-          walletAddress: prepared.walletAddress,
-          network: prepared.network,
-          txHash: relayed.txHash,
-          destinationTotalPiconero: destinationTotalPiconero.toString(),
-          feePiconero: feePiconero.toString(),
-          totalPiconero: totalPiconero.toString(),
-          referenceId: referenceId ?? null,
-          ...signerAuthAuditMetadata(signerAuthorization.auth),
+        async (rawTx, appendRequiredAudit) => {
+          const tx = rawTx as typeof db;
+          const [updated] = await tx
+            .update(transactions)
+            .set({
+              status: "broadcast",
+              actionPayload: { ...recoveryPayload, relayState: "broadcast" },
+            })
+            .where(
+              and(
+                eq(transactions.id, transactionId),
+                eq(transactions.agentId, agentId),
+                eq(transactions.status, "approved"),
+                eq(transactions.txHash, relayed.txHash),
+                sql`${transactions.actionPayload}->>'requestFingerprint' = ${requestFingerprint}`,
+              ),
+            )
+            .returning({ id: transactions.id });
+          if (!updated) return false;
+          await appendRequiredAudit({
+            tenantId,
+            actorType: "user",
+            actorId: c.get("userId") ?? c.get("authType") ?? null,
+            action: "vault.monero_transfer.relayed",
+            resourceType: "transaction",
+            resourceId: transactionId,
+            metadata: {
+              walletScope: prepared.walletScope,
+              walletAddress: prepared.walletAddress,
+              network: prepared.network,
+              txHash: relayed.txHash,
+              requestFingerprint,
+              destinationTotalPiconero: destinationTotalPiconero.toString(),
+              feePiconero: feePiconero.toString(),
+              totalPiconero: totalPiconero.toString(),
+              referenceId: referenceId ?? null,
+              ...signerAuthAuditMetadata(signerAuthorization.auth),
+            },
+            ipAddress: c.req.header("x-forwarded-for") ?? null,
+            userAgent: c.req.header("user-agent") ?? null,
+            requestId: c.get("requestId") ?? null,
+          });
+          return true;
         },
-      });
+      );
+      if (!transitioned) {
+        return c.json<ApiResponse>(
+          {
+            ok: false,
+            error: "Monero relay completed but recovery state changed; reconcile by transactionId",
+            data: { transactionId, txHash: prepared.txHash, status: "outcome_unknown" },
+          },
+          202,
+        );
+      }
 
-      dispatchWebhook(tenantId, agentId, "tx_signed", {
-        transactionId,
-        chainId: moneroChainId,
-        caip2: toCaip2(moneroChainId),
-        txHash: relayed.txHash,
-        to: destinations[0].address,
-        value: totalPiconero.toString(),
-        actionType: "monero_transfer",
-      });
+      try {
+        if (
+          !(await completeMoneroRecoveryEffects({
+            tenantId,
+            agentId,
+            txId: transactionId,
+            txHash: relayed.txHash,
+          }))
+        ) {
+          return c.json<ApiResponse>(
+            {
+              ok: false,
+              error: "Monero relay completed; post-terminal effects are pending retry",
+              data: { transactionId, txHash: relayed.txHash, status: "broadcast" },
+            },
+            202,
+          );
+        }
+      } catch (effectError) {
+        console.error(
+          `[Vault] Monero post-terminal effects failed for ${transactionId}`,
+          redactedThrownDiagnostics(effectError),
+        );
+        return c.json<ApiResponse>(
+          {
+            ok: false,
+            error: "Monero relay completed; post-terminal effects are pending retry",
+            data: { transactionId, txHash: relayed.txHash, status: "broadcast" },
+          },
+          202,
+        );
+      }
 
       setNoStoreHeaders(c);
       return c.json<ApiResponse>({
@@ -7529,33 +8376,290 @@ vaultRoutes.post("/:agentId/monero/transfer", async (c) => {
         },
       });
     } catch (e) {
-      await discardPrepared();
       console.error(
         `[Vault] monero/transfer relay failed for ${tenantId}/${agentId}`,
         redactedThrownDiagnostics(e),
       );
-      await writeVaultAudit(c, {
-        tenantId,
-        actorType: "user",
-        actorId: c.get("userId") ?? c.get("authType") ?? null,
-        action: "vault.monero_transfer.failed",
-        resourceType: "wallet",
-        resourceId: agentId,
-        metadata: {
-          walletScope,
-          destinations,
-          feePiconero: feePiconero.toString(),
-          totalPiconero: totalPiconero.toString(),
-          referenceId: referenceId ?? null,
-          ...redactedThrownDiagnostics(e),
-          policyResults,
-          ...signerAuthAuditMetadata(signerAuthorization.auth),
-        },
-      });
+      const definiteRejection = e instanceof MoneroRelayRejectedError;
+      const definiteFailure = !relayAccepted && !(e instanceof MoneroRelayOutcomeUnknownError);
+      const ambiguous = !definiteFailure;
+      if (definiteFailure || ambiguous) {
+        const nextStatus = definiteFailure ? "failed" : "outcome_unknown";
+        const nextRelayState = definiteFailure ? "failed" : "outcome_unknown";
+        try {
+          await withTenantAuditedTransaction(tenantId, async (rawTx, appendRequiredAudit) => {
+            const tx = rawTx as typeof db;
+            const [updated] = await tx
+              .update(transactions)
+              .set({
+                status: nextStatus,
+                actionPayload: { ...recoveryPayload, relayState: nextRelayState },
+              })
+              .where(
+                and(
+                  eq(transactions.id, transactionId),
+                  eq(transactions.agentId, agentId),
+                  eq(transactions.status, "approved"),
+                  eq(transactions.txHash, prepared.txHash),
+                ),
+              )
+              .returning({ id: transactions.id });
+            if (!updated) return;
+            await appendRequiredAudit({
+              tenantId,
+              actorType: "user",
+              actorId: c.get("userId") ?? c.get("authType") ?? null,
+              action: definiteFailure
+                ? "vault.monero_transfer.failed"
+                : "vault.monero_transfer.outcome_unknown",
+              resourceType: "transaction",
+              resourceId: transactionId,
+              metadata: {
+                walletScope,
+                txHash: prepared.txHash,
+                requestFingerprint,
+                destinations,
+                feePiconero: feePiconero.toString(),
+                totalPiconero: totalPiconero.toString(),
+                referenceId: referenceId ?? null,
+                ...redactedThrownDiagnostics(e),
+                policyResults,
+                ...signerAuthAuditMetadata(signerAuthorization.auth),
+              },
+              ipAddress: c.req.header("x-forwarded-for") ?? null,
+              userAgent: c.req.header("user-agent") ?? null,
+              requestId: c.get("requestId") ?? null,
+            });
+          });
+        } catch (recoveryError) {
+          if (!ambiguous) throw recoveryError;
+          // The approved anchor already prevents a second relay. If persisting
+          // the stronger outcome_unknown state itself fails, still return the
+          // anchored identity and require daemon reconciliation.
+          console.error(
+            `[Vault] failed to persist ambiguous Monero relay state for ${transactionId}`,
+            redactedThrownDiagnostics(recoveryError),
+          );
+        }
+      }
+      if (ambiguous) {
+        return c.json<ApiResponse>(
+          {
+            ok: false,
+            error: "Monero relay outcome is unknown; reconcile by transactionId",
+            data: { transactionId, txHash: prepared.txHash, status: "outcome_unknown" },
+          },
+          202,
+        );
+      }
+      await discardPrepared();
+      if (definiteRejection) {
+        return c.json<ApiResponse>({ ok: false, error: "Monero relay was rejected" }, 502);
+      }
       const mapped = moneroErrorResponse(c, e);
       if (mapped) return mapped;
       return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(e) }, 500);
     }
+  });
+});
+
+// POST /vault/:agentId/monero/transactions/:txId/reconcile
+// Queries the configured daemon by the exact public transaction hash anchored
+// before relay_tx. This endpoint never has access to tx_metadata and can never
+// submit or resubmit a transaction.
+vaultRoutes.post("/:agentId/monero/transactions/:txId/reconcile", async (c) => {
+  if (!requireAgentAccess(c)) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Forbidden: token scope does not match agent" },
+      403,
+    );
+  }
+  const tenantId = c.get("tenantId");
+  const agentId = c.req.param("agentId");
+  const txId = c.req.param("txId");
+  const agent = await ensureAgentForTenant(tenantId, agentId);
+  if (!agent) return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
+  const signerAuthorization = await requireSignerPermission(
+    c,
+    tenantId,
+    agentId,
+    "sign_transaction",
+  );
+  if (!signerAuthorization.ok) return signerAuthorization.response;
+
+  const [row] = await db
+    .select()
+    .from(transactions)
+    .where(
+      and(
+        eq(transactions.id, txId),
+        eq(transactions.agentId, agentId),
+        eq(transactions.actionType, "monero_transfer"),
+      ),
+    )
+    .limit(1);
+  if (!row) return c.json<ApiResponse>({ ok: false, error: "Monero transaction not found" }, 404);
+  const payload = readMoneroRecoveryPayload(row.actionPayload);
+  if (!payload || !row.txHash || !/^[0-9a-f]{64}$/.test(row.txHash)) {
+    return c.json<ApiResponse>({ ok: false, error: "Monero recovery anchor is malformed" }, 409);
+  }
+  if (row.status === "broadcast" || row.status === "confirmed") {
+    try {
+      if (
+        !(await completeMoneroRecoveryEffects({
+          tenantId,
+          agentId,
+          txId: row.id,
+          txHash: row.txHash,
+        }))
+      ) {
+        return c.json<ApiResponse>(
+          {
+            ok: false,
+            error: "Monero relay effects are pending retry",
+            data: { transactionId: row.id, txHash: row.txHash, status: row.status },
+          },
+          202,
+        );
+      }
+    } catch (error) {
+      console.error(
+        `[Vault] Monero recovery effects retry failed for ${row.id}`,
+        redactedThrownDiagnostics(error),
+      );
+      return c.json<ApiResponse>(
+        {
+          ok: false,
+          error: "Monero relay effects are pending retry",
+          data: { transactionId: row.id, txHash: row.txHash, status: row.status },
+        },
+        202,
+      );
+    }
+    return c.json<ApiResponse>({
+      ok: true,
+      data: { transactionId: row.id, txHash: row.txHash, status: row.status, reconciled: true },
+    });
+  }
+  if (row.status === "failed") {
+    return c.json<ApiResponse>({ ok: false, error: "Monero relay was rejected" }, 409);
+  }
+  if (row.status !== "approved" && row.status !== "outcome_unknown") {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Monero transaction is not eligible for reconciliation" },
+      409,
+    );
+  }
+
+  const anchoredTxHash = row.txHash;
+  let daemonStatus: Awaited<ReturnType<typeof vault.reconcileMoneroTransfer>>;
+  try {
+    daemonStatus = await vault.reconcileMoneroTransfer(anchoredTxHash, payload.network);
+  } catch (error) {
+    console.error(
+      `[Vault] monero reconciliation failed for ${tenantId}/${agentId}/${txId}`,
+      redactedThrownDiagnostics(error),
+    );
+    return c.json<ApiResponse>(
+      { ok: false, error: "Monero daemon reconciliation is unavailable" },
+      503,
+    );
+  }
+  if (daemonStatus === "not_found") {
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error: "Monero relay outcome is still unknown",
+        data: { transactionId: row.id, txHash: row.txHash, status: "outcome_unknown" },
+      },
+      202,
+    );
+  }
+
+  const nextStatus = daemonStatus;
+  const transitioned = await withTenantAuditedTransaction(
+    tenantId,
+    async (rawTx, appendRequiredAudit) => {
+      const tx = rawTx as typeof db;
+      const [updated] = await tx
+        .update(transactions)
+        .set({
+          status: nextStatus,
+          confirmedAt: nextStatus === "confirmed" ? new Date() : row.confirmedAt,
+          actionPayload: {
+            ...payload,
+            relayState: nextStatus,
+            reconciledAt: new Date().toISOString(),
+          },
+        })
+        .where(
+          and(
+            eq(transactions.id, txId),
+            eq(transactions.agentId, agentId),
+            inArray(transactions.status, ["approved", "outcome_unknown"]),
+            eq(transactions.txHash, anchoredTxHash),
+            sql`${transactions.actionPayload}->>'requestFingerprint' = ${payload.requestFingerprint}`,
+            sql`${transactions.actionPayload}->>'txMetadataDigest' = ${payload.txMetadataDigest}`,
+          ),
+        )
+        .returning({ id: transactions.id });
+      if (!updated) return false;
+      await appendRequiredAudit({
+        tenantId,
+        actorType: "user",
+        actorId: c.get("userId") ?? c.get("authType") ?? null,
+        action: "vault.monero_transfer.reconciled",
+        resourceType: "transaction",
+        resourceId: txId,
+        metadata: {
+          previousStatus: row.status,
+          status: nextStatus,
+          txHash: row.txHash,
+          requestFingerprint: payload.requestFingerprint,
+          evidence: "monero_daemon_get_transactions",
+          ...signerAuthAuditMetadata(signerAuthorization.auth),
+        },
+        ipAddress: c.req.header("x-forwarded-for") ?? null,
+        userAgent: c.req.header("user-agent") ?? null,
+        requestId: c.get("requestId") ?? null,
+      });
+      return true;
+    },
+  );
+  if (!transitioned) {
+    return c.json<ApiResponse>({ ok: false, error: "Transaction state changed; retry" }, 409);
+  }
+
+  try {
+    if (
+      !(await completeMoneroRecoveryEffects({ tenantId, agentId, txId, txHash: anchoredTxHash }))
+    ) {
+      return c.json<ApiResponse>(
+        {
+          ok: false,
+          error: "Monero relay effects are pending retry",
+          data: { transactionId: txId, txHash: anchoredTxHash, status: nextStatus },
+        },
+        202,
+      );
+    }
+  } catch (error) {
+    console.error(
+      `[Vault] Monero recovery effects failed for ${txId}`,
+      redactedThrownDiagnostics(error),
+    );
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error: "Monero relay effects are pending retry",
+        data: { transactionId: txId, txHash: anchoredTxHash, status: nextStatus },
+      },
+      202,
+    );
+  }
+  return c.json<ApiResponse>({
+    ok: true,
+    data: { transactionId: txId, txHash: anchoredTxHash, status: nextStatus, reconciled: true },
   });
 });
 
@@ -8580,6 +9684,7 @@ async function signSolanaBlind(
     transaction: string;
     chainId: number;
     broadcast?: boolean;
+    lastValidBlockHeight?: number;
     to: string;
     value: string;
     unparsedReason: string;
@@ -8756,12 +9861,19 @@ async function signSolanaBlind(
         transaction: args.transaction,
         chainId,
         broadcast: args.broadcast,
+        lastValidBlockHeight: args.lastValidBlockHeight,
         expectedTo: toAddress,
         expectedValue: txValue,
         onBroadcastPrepared: (checkpoint) =>
           checkpointSolanaBroadcastSubmission(txId, agentId, ownerToken, checkpoint),
       });
-      completedResult = { txId, ...result };
+      completedResult = {
+        txId,
+        signature: result.signature,
+        broadcast: result.broadcast,
+        chainId: result.chainId,
+        caip2: result.caip2,
+      };
       if (!(await finalizeSolanaRecoveryAnchor(txId, agentId, ownerToken, result))) {
         return solanaLostOwnershipResponse(c, txId, agentId, "sign-solana");
       }
@@ -8804,7 +9916,7 @@ async function signSolanaBlind(
           chainId: number;
           caip2?: string;
         }>
-      >({ ok: true, data: { txId, ...result } });
+      >({ ok: true, data: completedResult });
     } catch (e: unknown) {
       const requestId = c.get("requestId") || "unknown";
       console.error(
@@ -8893,6 +10005,14 @@ type SolanaSigningResult = {
   broadcast: boolean;
   chainId: number;
   caip2?: string;
+  artifactSignature?: string;
+  recentBlockhash?: string;
+  blockhashKind?: "recent" | "durable_nonce" | "unknown";
+  lastValidBlockHeight?: number;
+  durableNonceAccount?: string;
+  durableNonceAuthority?: string;
+  signer?: string;
+  rawIntentDigest?: string;
 };
 
 type SolanaRecoveryBinding = {
@@ -9530,7 +10650,11 @@ async function checkpointSolanaBroadcastSubmission(
   txId: string,
   agentId: string,
   executionToken: string,
-  checkpoint: { signature: string; recentBlockhash: string },
+  checkpoint: {
+    signature: string;
+    recentBlockhash: string;
+    blockhashKind: "recent" | "durable_nonce" | "unknown";
+  },
 ): Promise<void> {
   const [existing] = await db
     .select({ actionPayload: transactions.actionPayload })
@@ -9545,7 +10669,9 @@ async function checkpointSolanaBroadcastSubmission(
       signedAt: new Date(),
       actionPayload: {
         ...readSolanaRecoveryMetadata(existing?.actionPayload),
+        artifactSignature: checkpoint.signature,
         recentBlockhash: checkpoint.recentBlockhash,
+        blockhashKind: checkpoint.blockhashKind,
       },
     })
     .where(
@@ -9914,12 +11040,59 @@ async function finalizeSolanaRecoveryAnchor(
   executionToken: string,
   result: SolanaSigningResult,
 ): Promise<boolean> {
+  const [existing] = await db
+    .select({ actionPayload: transactions.actionPayload })
+    .from(transactions)
+    .where(and(eq(transactions.id, txId), eq(transactions.agentId, agentId)))
+    .limit(1);
+  const metadata = readSolanaRecoveryMetadata(existing?.actionPayload);
+  if (
+    !result.artifactSignature ||
+    !result.signer ||
+    !result.recentBlockhash ||
+    !result.rawIntentDigest ||
+    (result.blockhashKind !== "recent" && result.blockhashKind !== "durable_nonce") ||
+    (result.blockhashKind === "recent" && !Number.isSafeInteger(result.lastValidBlockHeight)) ||
+    (result.blockhashKind === "durable_nonce" &&
+      (!result.durableNonceAccount || !result.durableNonceAuthority))
+  ) {
+    throw new Error("Signed Solana artifact evidence is incomplete");
+  }
+  const signedArtifactEvidence = {
+    version: 1 as const,
+    chainFamily: "solana" as const,
+    artifactSignature: result.artifactSignature,
+    signer: result.signer,
+    recentBlockhash: result.recentBlockhash,
+    blockhashKind: result.blockhashKind,
+    ...(result.lastValidBlockHeight === undefined
+      ? {}
+      : { lastValidBlockHeight: result.lastValidBlockHeight }),
+    ...(result.durableNonceAccount === undefined
+      ? {}
+      : { durableNonceAccount: result.durableNonceAccount }),
+    ...(result.durableNonceAuthority === undefined
+      ? {}
+      : { durableNonceAuthority: result.durableNonceAuthority }),
+    rawIntentDigest: result.rawIntentDigest,
+  };
   const rows = await db
     .update(transactions)
     .set({
       status: result.broadcast ? "broadcast" : "signed",
-      txHash: result.broadcast ? result.signature : null,
+      // `signature` contains signed bytes for the offline response. Persist
+      // only the deterministic public signature used for exact-chain status
+      // checks; signed bytes never enter durable metadata or logs.
+      txHash: result.artifactSignature ?? (result.broadcast ? result.signature : null),
       signedAt: new Date(),
+      signedArtifactEvidence,
+      signedArtifactEvidenceDigest: sha256(canonicalJsonStringify(signedArtifactEvidence)),
+      actionPayload: {
+        ...metadata,
+        artifactSignature: result.artifactSignature ?? metadata.artifactSignature ?? null,
+        recentBlockhash: result.recentBlockhash ?? metadata.recentBlockhash ?? null,
+        blockhashKind: result.blockhashKind ?? metadata.blockhashKind ?? "unknown",
+      },
     })
     .where(
       and(
@@ -10280,6 +11453,7 @@ vaultRoutes.post("/:agentId/sign-solana", async (c) => {
     transaction: string;
     chainId?: number;
     broadcast?: boolean;
+    lastValidBlockHeight?: number;
     to?: string;
     value?: string;
   }>(c);
@@ -10385,6 +11559,7 @@ vaultRoutes.post("/:agentId/sign-solana", async (c) => {
       transaction: body.transaction,
       chainId,
       broadcast: body.broadcast,
+      lastValidBlockHeight: body.lastValidBlockHeight,
       to: body.to,
       value: body.value,
       unparsedReason: parseErr instanceof Error ? parseErr.message : "undecodable transaction",
@@ -10420,6 +11595,7 @@ vaultRoutes.post("/:agentId/sign-solana", async (c) => {
       transaction: body.transaction,
       chainId,
       broadcast: body.broadcast,
+      lastValidBlockHeight: body.lastValidBlockHeight,
       to: body.to,
       value: body.value,
       unparsedReason: derived.summary.unparsedReasons.join("; "),
@@ -10710,6 +11886,7 @@ vaultRoutes.post("/:agentId/sign-solana", async (c) => {
             transaction: body.transaction,
             chainId,
             broadcast: body.broadcast,
+            lastValidBlockHeight: body.lastValidBlockHeight,
             expectedTo: toAddress,
             expectedValue: txValue,
             onBroadcastPrepared: (checkpoint) =>
@@ -10741,6 +11918,7 @@ vaultRoutes.post("/:agentId/sign-solana", async (c) => {
                 transaction: body.transaction,
                 chainId,
                 broadcast: body.broadcast,
+                lastValidBlockHeight: body.lastValidBlockHeight,
                 onBroadcastPrepared: (checkpoint) =>
                   checkpointSolanaBroadcastSubmission(txId, agentId, ownerToken, checkpoint),
               },
@@ -10815,7 +11993,7 @@ vaultRoutes.post("/:agentId/sign-solana", async (c) => {
         }>
       >({
         ok: true,
-        data: { txId, ...result },
+        data: completedResult,
       });
     } catch (e: unknown) {
       const requestId = c.get("requestId") || "unknown";
@@ -10900,6 +12078,206 @@ vaultRoutes.post("/:agentId/sign-solana", async (c) => {
       }
       return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(e) }, 500);
     }
+  });
+});
+
+vaultRoutes.post("/:agentId/transactions/:txId/retire-signed", async (c) => {
+  if (!requireAgentAccess(c)) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Forbidden: token scope does not match agent" },
+      403,
+    );
+  }
+  if (!hasTenantAdminSession(c) || !hasRecentSessionMfa(c)) {
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error: "Signed-artifact retirement requires owner or admin session with recent MFA",
+      },
+      403,
+    );
+  }
+
+  const tenantId = c.get("tenantId");
+  const agentId = c.req.param("agentId");
+  const txId = c.req.param("txId");
+  if (!(await ensureAgentForTenant(tenantId, agentId))) {
+    return c.json<ApiResponse>({ ok: false, error: "Transaction not found" }, 404);
+  }
+  const body = await safeJsonParse<{ reason?: unknown }>(c);
+  const reason = typeof body?.reason === "string" ? body.reason.trim() : "";
+  if (!reason || reason.length > 500) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "reason must be a non-empty string up to 500 characters" },
+      400,
+    );
+  }
+
+  const [row] = await db
+    .select()
+    .from(transactions)
+    .where(and(eq(transactions.id, txId), eq(transactions.agentId, agentId)))
+    .limit(1);
+  if (!row) return c.json<ApiResponse>({ ok: false, error: "Transaction not found" }, 404);
+  if (row.status !== "signed") {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Only signed transactions can enter artifact retirement" },
+      409,
+    );
+  }
+  const evidence = row.signedArtifactEvidence;
+  const evidenceDigest = row.signedArtifactEvidenceDigest;
+  if (
+    !isSignedArtifactEvidence(evidence) ||
+    !evidenceDigest ||
+    sha256(canonicalJsonStringify(evidence)) !== evidenceDigest
+  ) {
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error: "Signed artifact lacks complete, digest-bound evidence and cannot be retired",
+      },
+      409,
+    );
+  }
+  const artifactId =
+    evidence.chainFamily === "solana" ? evidence.artifactSignature : evidence.artifactHash;
+  let inspectionResult:
+    | "landed_confirmed"
+    | "landed_broadcast"
+    | "landed_failed"
+    | "absent_live"
+    | "absent_expired"
+    | "absent_nonce_consumed";
+  try {
+    inspectionResult =
+      evidence.chainFamily === "solana"
+        ? (
+            await vault.inspectSolanaSignedArtifact({
+              signature: evidence.artifactSignature,
+              recentBlockhash: evidence.recentBlockhash,
+              chainId: row.chainId,
+              blockhashKind: evidence.blockhashKind,
+              lastValidBlockHeight: evidence.lastValidBlockHeight,
+              durableNonceAccount: evidence.durableNonceAccount,
+              durableNonceAuthority: evidence.durableNonceAuthority,
+            })
+          ).result
+        : (
+            await vault.inspectEvmSignedArtifact({
+              artifactHash: evidence.artifactHash,
+              signer: evidence.signer,
+              nonce: evidence.nonce,
+              chainId: row.chainId,
+            })
+          ).result;
+  } catch (error) {
+    console.error("[vault] Signed artifact inspection failed", redactedThrownDiagnostics(error));
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error: "Authoritative signed-artifact status is unavailable; retirement blocked",
+      },
+      502,
+    );
+  }
+
+  if (inspectionResult === "absent_live") {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Signed artifact is still broadcastable; retirement blocked" },
+      409,
+    );
+  }
+
+  const checkedAt = new Date();
+  const landedStatus =
+    inspectionResult === "landed_confirmed"
+      ? "confirmed"
+      : inspectionResult === "landed_broadcast"
+        ? "broadcast"
+        : inspectionResult === "landed_failed"
+          ? "failed"
+          : null;
+  const nextStatus = landedStatus ?? "retired";
+  const transitioned = await withTenantAuditedTransaction(
+    tenantId,
+    async (rawTx, appendRequiredAudit) => {
+      const tx = rawTx as typeof db;
+      const [updated] = await tx
+        .update(transactions)
+        .set({
+          status: nextStatus,
+          txHash: artifactId,
+          confirmedAt: nextStatus === "confirmed" ? checkedAt : row.confirmedAt,
+          actionPayload: {
+            ...readSolanaRecoveryMetadata(row.actionPayload),
+            signedArtifactResolution: {
+              checkedAt: checkedAt.toISOString(),
+              evidence:
+                inspectionResult === "absent_expired"
+                  ? "solana_exact_signature_absent_and_lifetime_expired"
+                  : inspectionResult === "absent_nonce_consumed"
+                    ? "evm_exact_hash_absent_and_finalized_nonce_consumed"
+                    : "exact_artifact_chain_status",
+              result: inspectionResult,
+              reason,
+            },
+          },
+        })
+        .where(
+          and(
+            eq(transactions.id, txId),
+            eq(transactions.agentId, agentId),
+            eq(transactions.status, "signed"),
+            eq(transactions.signedArtifactEvidenceDigest, evidenceDigest),
+          ),
+        )
+        .returning({ id: transactions.id });
+      if (!updated) return false;
+      await appendRequiredAudit({
+        tenantId,
+        actorType: "user",
+        actorId: c.get("userId") ?? c.get("authType") ?? null,
+        action: landedStatus ? "vault.signed_artifact.reconciled" : "vault.signed_artifact.retired",
+        resourceType: "transaction",
+        resourceId: txId,
+        metadata: {
+          previousStatus: "signed",
+          status: nextStatus,
+          chainFamily: evidence.chainFamily,
+          artifactId,
+          signedArtifactEvidence: evidence,
+          evidenceDigest,
+          inspectionResult,
+          reason,
+        },
+        ipAddress: c.req.header("x-forwarded-for") ?? null,
+        userAgent: c.req.header("user-agent") ?? null,
+        requestId: c.get("requestId") ?? null,
+      });
+      return true;
+    },
+  );
+  if (!transitioned) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Transaction state changed concurrently; retirement did not commit" },
+      409,
+    );
+  }
+
+  if (landedStatus) {
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error: "The exact signed artifact was found on chain and was reconciled instead of retired",
+        data: { txId, status: landedStatus, artifactId },
+      },
+      409,
+    );
+  }
+  return c.json<ApiResponse>({
+    ok: true,
+    data: { txId, status: "retired", artifactId, retiredAt: checkedAt.toISOString() },
   });
 });
 

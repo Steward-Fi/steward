@@ -13,7 +13,7 @@ describe("0111 tenant RLS policy installation", () => {
     await client.close();
   });
 
-  test("installs the complete policy surface without prematurely activating it", async () => {
+  test("installs the complete policy surface and activates post-gate tables", async () => {
     const policies = await client.query<{
       relname: string;
       polname: string;
@@ -27,10 +27,17 @@ describe("0111 tenant RLS policy installation", () => {
       WHERE n.nspname = 'public' AND p.polname LIKE 'steward_%'
       ORDER BY c.relname, p.polname
     `);
-    expect(policies.rows).toHaveLength(75);
-    expect(policies.rows.every((row) => !row.relrowsecurity && !row.relforcerowsecurity)).toBe(
-      true,
-    );
+    expect(policies.rows).toHaveLength(76);
+    expect(
+      policies.rows
+        .filter((row) => row.relname !== "trade_order_recoveries")
+        .every((row) => !row.relrowsecurity && !row.relforcerowsecurity),
+    ).toBe(true);
+    expect(
+      policies.rows
+        .filter((row) => row.relname === "trade_order_recoveries")
+        .map((row) => ({ rls: row.relrowsecurity, forced: row.relforcerowsecurity })),
+    ).toEqual([{ rls: true, forced: false }]);
     expect(
       policies.rows.filter((row) => row.relname === "approval_queue").map((row) => row.polname),
     ).toEqual(["steward_tenant_derived", "steward_tenant_direct"]);

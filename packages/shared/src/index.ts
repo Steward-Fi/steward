@@ -598,7 +598,8 @@ export type TxStatus =
   | "broadcast"
   | "confirmed"
   | "failed"
-  | "outcome_unknown";
+  | "outcome_unknown"
+  | "retired";
 
 export interface SignRequest {
   agentId: string;
@@ -666,6 +667,8 @@ export interface SignSolanaTransactionRequest {
   transaction: string; // base64-encoded serialized transaction
   chainId?: number; // 101 = mainnet, 102 = devnet
   broadcast?: boolean; // default true
+  /** Conservative expiry boundary supplied with the recent blockhash. */
+  lastValidBlockHeight?: number;
   expectedTo?: string; // policy-evaluated recipient for serialized transfer validation
   expectedValue?: string; // policy-evaluated lamports for serialized transfer validation
   /**
@@ -687,7 +690,129 @@ export interface SignSolanaTransactionRequest {
   onBroadcastPrepared?: (checkpoint: {
     signature: string;
     recentBlockhash: string;
+    blockhashKind: "recent" | "durable_nonce" | "unknown";
+    lastValidBlockHeight?: number;
+    durableNonceAccount?: string;
+    durableNonceAuthority?: string;
   }) => Promise<void>;
+}
+
+/** Public, non-secret evidence binding an exact signed artifact to its lifetime. */
+export type SignedArtifactEvidence =
+  | {
+      version: 1;
+      chainFamily: "evm";
+      artifactHash: string;
+      signer: string;
+      nonce: string;
+      rawIntentDigest: string;
+    }
+  | {
+      version: 1;
+      chainFamily: "solana";
+      artifactSignature: string;
+      signer: string;
+      recentBlockhash: string;
+      blockhashKind: "recent" | "durable_nonce";
+      lastValidBlockHeight?: number;
+      durableNonceAccount?: string;
+      durableNonceAuthority?: string;
+      rawIntentDigest: string;
+    };
+
+const EVM_ARTIFACT_HASH_RE = /^0x[0-9a-fA-F]{64}$/;
+const EVM_SIGNER_RE = /^0x[0-9a-fA-F]{40}$/;
+const SHA256_HEX_RE = /^[0-9a-f]{64}$/;
+const BASE58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+
+function hasBase58DecodedLength(value: unknown, expectedLength: number): boolean {
+  if (typeof value !== "string" || !value) return false;
+  let numeric = 0n;
+  for (const character of value) {
+    const digit = BASE58_ALPHABET.indexOf(character);
+    if (digit < 0) return false;
+    numeric = numeric * 58n + BigInt(digit);
+  }
+  let byteLength = 0;
+  for (let remaining = numeric; remaining > 0n; remaining >>= 8n) byteLength += 1;
+  let leadingZeroBytes = 0;
+  while (value[leadingZeroBytes] === "1") leadingZeroBytes += 1;
+  return leadingZeroBytes + byteLength === expectedLength;
+}
+
+/** Runtime validator for public evidence loaded from durable JSONB. */
+export function isSignedArtifactEvidence(value: unknown): value is SignedArtifactEvidence {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const evidence = value as Record<string, unknown>;
+  if (evidence.version !== 1 || !SHA256_HEX_RE.test(String(evidence.rawIntentDigest ?? ""))) {
+    return false;
+  }
+  if (evidence.chainFamily === "evm") {
+    if (
+      !EVM_ARTIFACT_HASH_RE.test(String(evidence.artifactHash ?? "")) ||
+      !EVM_SIGNER_RE.test(String(evidence.signer ?? "")) ||
+      !/^\d+$/.test(String(evidence.nonce ?? ""))
+    ) {
+      return false;
+    }
+    return Object.keys(evidence).every((key) =>
+      ["version", "chainFamily", "artifactHash", "signer", "nonce", "rawIntentDigest"].includes(
+        key,
+      ),
+    );
+  }
+  if (
+    evidence.chainFamily !== "solana" ||
+    !hasBase58DecodedLength(evidence.artifactSignature, 64) ||
+    !hasBase58DecodedLength(evidence.signer, 32) ||
+    !hasBase58DecodedLength(evidence.recentBlockhash, 32)
+  ) {
+    return false;
+  }
+  if (evidence.blockhashKind === "recent") {
+    if (
+      !Number.isSafeInteger(evidence.lastValidBlockHeight) ||
+      Number(evidence.lastValidBlockHeight) < 0 ||
+      evidence.durableNonceAccount !== undefined ||
+      evidence.durableNonceAuthority !== undefined
+    ) {
+      return false;
+    }
+    return Object.keys(evidence).every((key) =>
+      [
+        "version",
+        "chainFamily",
+        "artifactSignature",
+        "signer",
+        "recentBlockhash",
+        "blockhashKind",
+        "lastValidBlockHeight",
+        "rawIntentDigest",
+      ].includes(key),
+    );
+  }
+  if (evidence.blockhashKind !== "durable_nonce" || evidence.lastValidBlockHeight !== undefined) {
+    return false;
+  }
+  if (
+    !hasBase58DecodedLength(evidence.durableNonceAccount, 32) ||
+    !hasBase58DecodedLength(evidence.durableNonceAuthority, 32)
+  ) {
+    return false;
+  }
+  return Object.keys(evidence).every((key) =>
+    [
+      "version",
+      "chainFamily",
+      "artifactSignature",
+      "signer",
+      "recentBlockhash",
+      "blockhashKind",
+      "durableNonceAccount",
+      "durableNonceAuthority",
+      "rawIntentDigest",
+    ].includes(key),
+  );
 }
 
 /**

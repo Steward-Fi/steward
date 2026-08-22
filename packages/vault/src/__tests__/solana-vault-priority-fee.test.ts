@@ -2,6 +2,7 @@ import { afterAll, beforeEach, describe, expect, setDefaultTimeout, spyOn, test 
 import {
   ComputeBudgetProgram,
   Connection,
+  NonceAccount,
   PublicKey,
   SendTransactionError,
   SystemProgram,
@@ -15,6 +16,7 @@ import {
   ExternalBroadcastOutcomeUnknownError,
   SolanaBroadcastNotSubmittedError,
 } from "../external-key-custody";
+import { classifySolanaBlockhashKind } from "../solana-instructions";
 import { Vault } from "../vault";
 
 const MASTER_PASSWORD = "test-vault-solana-priority-fee";
@@ -111,6 +113,83 @@ describe("Vault.signSolanaTransaction priority fee cap", () => {
     openClients.length = 0;
   });
 
+  test("classifies durable nonce bytes independently of ordinary blockhash validity", async () => {
+    const feePayer = await createSolanaAgent(vault);
+    const durableNonce = new Transaction({ feePayer, recentBlockhash: RECENT_BLOCKHASH }).add(
+      SystemProgram.nonceAdvance({
+        noncePubkey: PublicKey.unique(),
+        authorizedPubkey: feePayer,
+      }),
+      SystemProgram.transfer({
+        fromPubkey: feePayer,
+        toPubkey: PublicKey.unique(),
+        lamports: 1,
+      }),
+    );
+    expect(
+      classifySolanaBlockhashKind(
+        toBase64(durableNonce.serialize({ requireAllSignatures: false, verifySignatures: false })),
+      ),
+    ).toBe("durable_nonce");
+    expect(classifySolanaBlockhashKind(legacyTransferWithPriorityFee(feePayer, 1))).toBe("recent");
+  });
+
+  test("binds signed durable-nonce evidence to the live account authority", async () => {
+    const feePayer = await createSolanaAgent(vault);
+    const noncePubkey = PublicKey.unique();
+    const durableNonce = new Transaction({ feePayer, recentBlockhash: RECENT_BLOCKHASH }).add(
+      SystemProgram.nonceAdvance({ noncePubkey, authorizedPubkey: feePayer }),
+      SystemProgram.transfer({ fromPubkey: feePayer, toPubkey: PublicKey.unique(), lamports: 1 }),
+    );
+    const account = spyOn(Connection.prototype, "getAccountInfo").mockResolvedValue({
+      data: Buffer.alloc(80),
+      executable: false,
+      lamports: 1,
+      owner: SystemProgram.programId,
+      rentEpoch: 0,
+    });
+    const parse = spyOn(NonceAccount, "fromAccountData").mockReturnValue({
+      authorizedPubkey: PublicKey.unique(),
+      feeCalculator: { lamportsPerSignature: 5000 },
+      nonce: RECENT_BLOCKHASH,
+    });
+    try {
+      const request = {
+        tenantId: TENANT_ID,
+        agentId: AGENT_ID,
+        transaction: toBase64(
+          durableNonce.serialize({ requireAllSignatures: false, verifySignatures: false }),
+        ),
+        broadcast: false,
+        allowBlindSign: true,
+        lastValidBlockHeight: 100,
+      } as const;
+      await expect(vault.signSolanaTransaction(request)).rejects.toThrow(
+        "Durable nonce account does not match the signed message lifetime",
+      );
+      parse.mockReturnValue({
+        authorizedPubkey: feePayer,
+        feeCalculator: { lamportsPerSignature: 5000 },
+        nonce: RECENT_BLOCKHASH,
+      });
+      const result = await vault.signSolanaTransaction({
+        ...request,
+      });
+      expect(result).toMatchObject({
+        broadcast: false,
+        blockhashKind: "durable_nonce",
+        recentBlockhash: RECENT_BLOCKHASH,
+        durableNonceAccount: noncePubkey.toBase58(),
+        durableNonceAuthority: feePayer.toBase58(),
+        signer: feePayer.toBase58(),
+        rawIntentDigest: expect.stringMatching(/^[0-9a-f]{64}$/),
+      });
+    } finally {
+      account.mockRestore();
+      parse.mockRestore();
+    }
+  });
+
   test("rejects an over-cap v0 transaction before signing without an expected envelope", async () => {
     const feePayer = await createSolanaAgent(vault);
 
@@ -122,6 +201,7 @@ describe("Vault.signSolanaTransaction priority fee cap", () => {
         broadcast: false,
         // SEC-163: these tests intentionally exercise the no-envelope path.
         allowBlindSign: true,
+        lastValidBlockHeight: 100,
       }),
     ).rejects.toThrow(/priority fee.*exceeds the allowed maximum/i);
   });
@@ -136,6 +216,7 @@ describe("Vault.signSolanaTransaction priority fee cap", () => {
         transaction: legacyTransferWithPriorityFee(feePayer, 1_000_000),
         broadcast: false,
         allowBlindSign: true,
+        lastValidBlockHeight: 100,
       }),
     ).rejects.toThrow(/priority fee.*exceeds the allowed maximum/i);
   });
@@ -149,6 +230,7 @@ describe("Vault.signSolanaTransaction priority fee cap", () => {
       transaction: legacyTransferWithPriorityFee(feePayer, 1_000),
       broadcast: false,
       allowBlindSign: true,
+      lastValidBlockHeight: 100,
     });
 
     const signed = Transaction.from(fromBase64(result.signature));
@@ -185,9 +267,11 @@ describe("Vault.signSolanaTransaction priority fee cap", () => {
         transaction: legacyTransferWithPriorityFee(feePayer, 1_000),
         broadcast: true,
         allowBlindSign: true,
+        lastValidBlockHeight: 100,
         onBroadcastPrepared: async (checkpoint) => {
           expect(checkpoint.signature).toBeString();
           expect(checkpoint.recentBlockhash).toBe(RECENT_BLOCKHASH);
+          expect(checkpoint.blockhashKind).toBe("recent");
           throw new Error("injected durable checkpoint failure");
         },
       });
@@ -233,9 +317,11 @@ describe("Vault.signSolanaTransaction priority fee cap", () => {
         transaction: legacyTransferWithPriorityFee(feePayer, 1_000),
         broadcast: true,
         allowBlindSign: true,
+        lastValidBlockHeight: 100,
         onBroadcastPrepared: async (checkpoint) => {
           preparedSignature = checkpoint.signature;
           expect(checkpoint.recentBlockhash).toBe(RECENT_BLOCKHASH);
+          expect(checkpoint.blockhashKind).toBe("recent");
           order.push("checkpoint");
         },
       });
@@ -277,9 +363,11 @@ describe("Vault.signSolanaTransaction priority fee cap", () => {
         transaction: legacyTransferWithPriorityFee(feePayer, 1_000),
         broadcast: true,
         allowBlindSign: true,
+        lastValidBlockHeight: 100,
         onBroadcastPrepared: async (checkpoint) => {
           preparedSignature = checkpoint.signature;
           expect(checkpoint.recentBlockhash).toBe(RECENT_BLOCKHASH);
+          expect(checkpoint.blockhashKind).toBe("recent");
         },
       });
     } catch (caught) {
@@ -299,7 +387,13 @@ describe("Vault.signSolanaTransaction priority fee cap", () => {
   for (const version of ["legacy", "v0"] as const) {
     test(`checkpoints the deterministic ${version} signature and original blockhash`, async () => {
       const feePayer = await createSolanaAgent(vault);
-      let checkpoint: { signature: string; recentBlockhash: string } | undefined;
+      let checkpoint:
+        | {
+            signature: string;
+            recentBlockhash: string;
+            blockhashKind: "recent" | "durable_nonce" | "unknown";
+          }
+        | undefined;
       const send = spyOn(Connection.prototype, "sendRawTransaction").mockImplementation(
         async () => {
           if (!checkpoint) throw new Error("checkpoint did not run before send");
@@ -320,11 +414,13 @@ describe("Vault.signSolanaTransaction priority fee cap", () => {
               : v0TransferWithPriorityFee(feePayer, 1_000),
           broadcast: true,
           allowBlindSign: true,
+          lastValidBlockHeight: 100,
           onBroadcastPrepared: async (value) => {
             checkpoint = value;
           },
         });
         expect(checkpoint?.recentBlockhash).toBe(RECENT_BLOCKHASH);
+        expect(checkpoint?.blockhashKind).toBe("recent");
         expect(result.signature).toBe(checkpoint?.signature);
       } finally {
         send.mockRestore();
@@ -350,6 +446,7 @@ describe("Vault.signSolanaTransaction priority fee cap", () => {
         transaction: legacyTransferWithPriorityFee(feePayer, 1_000),
         broadcast: true,
         allowBlindSign: true,
+        lastValidBlockHeight: 100,
         onBroadcastPrepared: async (checkpoint) => {
           preparedSignature = checkpoint.signature;
         },
@@ -365,7 +462,7 @@ describe("Vault.signSolanaTransaction priority fee cap", () => {
 
   test("distinguishes signature evidence, live blockhash ambiguity, and expiry", async () => {
     const statuses = spyOn(Connection.prototype, "getSignatureStatuses");
-    const validity = spyOn(Connection.prototype, "isBlockhashValid");
+    const rpc = spyOn(globalThis, "fetch");
     try {
       statuses.mockResolvedValueOnce({
         context: { slot: 1 },
@@ -379,7 +476,16 @@ describe("Vault.signSolanaTransaction priority fee cap", () => {
       ).toBe("confirmed");
 
       statuses.mockResolvedValueOnce({ context: { slot: 1 }, value: [null] });
-      validity.mockResolvedValueOnce({ context: { slot: 1 }, value: true });
+      rpc.mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            id: 1,
+            result: { context: { slot: 1 }, value: true },
+          }),
+          { status: 200 },
+        ),
+      );
       expect(
         await vault.reconcileSolanaBroadcast({
           signature: SUBMITTED_SIGNATURE,
@@ -388,16 +494,43 @@ describe("Vault.signSolanaTransaction priority fee cap", () => {
       ).toBe("outcome_unknown");
 
       statuses.mockResolvedValueOnce({ context: { slot: 1 }, value: [null] });
-      validity.mockResolvedValueOnce({ context: { slot: 1 }, value: false });
+      rpc.mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            id: 1,
+            result: { context: { slot: 1 }, value: false },
+          }),
+          { status: 200 },
+        ),
+      );
       expect(
-        await vault.reconcileSolanaBroadcast({
+        await vault.inspectSolanaSignedArtifact({
           signature: SUBMITTED_SIGNATURE,
           recentBlockhash: RECENT_BLOCKHASH,
         }),
-      ).toBe("failed");
+      ).toEqual({ result: "absent_expired" });
+
+      statuses.mockResolvedValueOnce({
+        context: { slot: 1 },
+        value: [
+          {
+            slot: 1,
+            confirmations: null,
+            err: { InstructionError: [0, "Custom"] },
+            confirmationStatus: "finalized",
+          },
+        ],
+      });
+      expect(
+        await vault.inspectSolanaSignedArtifact({
+          signature: SUBMITTED_SIGNATURE,
+          recentBlockhash: RECENT_BLOCKHASH,
+        }),
+      ).toEqual({ result: "landed_failed" });
     } finally {
       statuses.mockRestore();
-      validity.mockRestore();
+      rpc.mockRestore();
     }
   });
 });

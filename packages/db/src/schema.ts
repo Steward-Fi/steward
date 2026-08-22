@@ -4,6 +4,7 @@ import type {
   PolicyResult,
   PolicyTemplate,
   SecretRoutePreset,
+  SignedArtifactEvidence,
   TenantAppClientEmbeddedWalletConfig,
   TenantAuthAbuseConfig,
   TenantFeatureFlags,
@@ -156,6 +157,10 @@ export const transactionStatusEnum = pgEnum("transaction_status", [
   "confirmed",
   "failed",
   "outcome_unknown",
+  // A signed artifact may only enter this state through the dedicated,
+  // chain-authoritative retirement lifecycle. Generic provider failures must
+  // never use it.
+  "retired",
 ]);
 
 export const approvalQueueStatusEnum = pgEnum("approval_queue_status", [
@@ -1080,6 +1085,8 @@ export const transactions = pgTable(
     txHash: varchar("tx_hash", { length: 128 }),
     actionType: varchar("action_type", { length: 64 }),
     actionPayload: jsonb("action_payload").$type<Record<string, unknown>>(),
+    signedArtifactEvidence: jsonb("signed_artifact_evidence").$type<SignedArtifactEvidence>(),
+    signedArtifactEvidenceDigest: varchar("signed_artifact_evidence_digest", { length: 64 }),
     executionPayloadDigest: varchar("execution_payload_digest", { length: 64 }),
     executionPolicyRevisionHash: varchar("execution_policy_revision_hash", { length: 64 }),
     executionBackend: varchar("execution_backend", { length: 32 }),
@@ -2885,6 +2892,8 @@ export const providerActionAuditOutbox = pgTable(
     resourceId: varchar("resource_id", { length: 255 }).notNull(),
     metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
     deliveredAt: timestamp("delivered_at", { withTimezone: true }),
+    claimToken: uuid("claim_token"),
+    claimedAt: timestamp("claimed_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
@@ -2893,10 +2902,12 @@ export const providerActionAuditOutbox = pgTable(
       foreignColumns: [intents.tenantId, intents.id],
       name: "provider_action_audit_outbox_intent_fk",
     }).onDelete("cascade"),
-    undeliveredIdx: index("provider_action_audit_outbox_undelivered_idx").on(
-      table.tenantId,
-      table.createdAt,
-    ),
+    undeliveredIdx: index("provider_action_audit_outbox_undelivered_idx")
+      .on(table.tenantId, table.createdAt)
+      .where(sql`${table.deliveredAt} IS NULL`),
+    claimDueIdx: index("provider_action_audit_outbox_claim_due_idx")
+      .on(table.claimedAt, table.tenantId, table.createdAt, table.id)
+      .where(sql`${table.deliveredAt} IS NULL`),
   }),
 );
 
@@ -3046,6 +3057,58 @@ export const tradeSessions = pgTable(
 export type TradeSessionRow = typeof tradeSessions.$inferSelect;
 export type NewTradeSessionRow = typeof tradeSessions.$inferInsert;
 
+/**
+ * Durable recovery journal for venue order submission.
+ *
+ * A row is created before the irreversible venue call.  `venueIdentity` is
+ * populated before submission with a venue-queryable client identity (HL
+ * cloid or Polymarket order hash), while `responseEnvelope` checkpoints the
+ * exact externally observed result before required completion effects run.
+ * The claim columns fence both concurrent request replay and stale-worker
+ * takeover; no recovery owner is allowed to submit a second venue order.
+ */
+export const tradeOrderRecoveries = pgTable(
+  "trade_order_recoveries",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    tenantId: varchar("tenant_id", { length: 64 }).notNull(),
+    agentId: varchar("agent_id", { length: 64 }).notNull(),
+    sessionId: varchar("session_id", { length: 128 }).notNull(),
+    venue: varchar("venue", { length: 32 }).notNull(),
+    idempotencyKeyHash: varchar("idempotency_key_hash", { length: 64 }).notNull(),
+    bodyHash: varchar("body_hash", { length: 64 }).notNull(),
+    state: varchar("state", { length: 32 }).notNull().default("prepared"),
+    venueIdentity: varchar("venue_identity", { length: 255 }),
+    venueResult: jsonb("venue_result").$type<Record<string, unknown>>(),
+    responseEnvelope: jsonb("response_envelope").$type<Record<string, unknown>>(),
+    occurrenceAt: timestamp("occurrence_at", { withTimezone: true }).notNull().defaultNow(),
+    submitStartedAt: timestamp("submit_started_at", { withTimezone: true }),
+    auditDeliveredAt: timestamp("audit_delivered_at", { withTimezone: true }),
+    claimToken: uuid("claim_token").notNull(),
+    claimedAt: timestamp("claimed_at", { withTimezone: true }).notNull().defaultNow(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    replayUnique: uniqueIndex("trade_order_recoveries_replay_uidx").on(
+      table.tenantId,
+      table.agentId,
+      table.venue,
+      table.idempotencyKeyHash,
+    ),
+    pendingEffectsIdx: index("trade_order_recoveries_pending_effects_idx")
+      .on(table.claimedAt, table.createdAt, table.id)
+      .where(sql`${table.auditDeliveredAt} IS NULL`),
+    stateCheck: check(
+      "trade_order_recoveries_state_chk",
+      sql`${table.state} IN ('prepared','submitting','ambiguous','submitted','rejected','completed')`,
+    ),
+  }),
+);
+
+export type TradeOrderRecoveryRow = typeof tradeOrderRecoveries.$inferSelect;
+export type NewTradeOrderRecoveryRow = typeof tradeOrderRecoveries.$inferInsert;
+
 export const agentPolicies = pgTable(
   "agent_policies",
   {
@@ -3106,6 +3169,12 @@ export const auditEvents = pgTable(
     tenantCreatedIdx: index("audit_events_tenant_created_idx").on(table.tenantId, table.createdAt),
     actionIdx: index("audit_events_action_idx").on(table.action),
     actorIdx: index("audit_events_actor_idx").on(table.actorType, table.actorId),
+    requiredOutboxIdentityIdx: uniqueIndex("audit_events_required_outbox_identity_uidx")
+      .on(table.tenantId, sql`(${table.metadata}->>'requiredOutboxId')`)
+      .where(sql`${table.metadata} ? 'requiredOutboxId'`),
+    tradeRecoveryIdentityIdx: uniqueIndex("audit_events_trade_recovery_identity_uidx")
+      .on(table.tenantId, sql`(${table.metadata}->>'tradeRecoveryId')`)
+      .where(sql`${table.metadata} ? 'tradeRecoveryId'`),
   }),
 );
 

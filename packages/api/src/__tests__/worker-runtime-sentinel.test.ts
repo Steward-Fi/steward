@@ -15,11 +15,13 @@ import {
 } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import * as redisMiddleware from "../middleware/redis";
+import { withRuntimeEnvironment } from "@stwd/shared/runtime-env";
 import {
   __setWorkerInitForTests,
   assertWorkerMigrationReadiness,
   hydrateProcessEnv,
   runWorkerGoogleCredentialLifecycleSweep,
+  runWorkerProviderActionRecoverySweep,
   runWorkerUpstreamCredentialLeaseSweep,
   runWorkerXCredentialLifecycleSweep,
   withWorkerRequestDatabase,
@@ -311,6 +313,9 @@ test("cold Worker cron rejects a hostile database role before starting sweeps", 
 });
 
 test("Worker cron gives every autonomous sweep its own request database", async () => {
+  const providerActionScheduler = await import(
+    "../services/provider-reservation-reconciliation-scheduler"
+  );
   const upstreamScheduler = await import("../services/upstream-credential-lease-scheduler");
   const googleScheduler = await import("../services/provider-google-lifecycle-scheduler");
   const xScheduler = await import("../services/provider-x-lifecycle-scheduler");
@@ -321,6 +326,14 @@ test("Worker cron gives every autonomous sweep its own request database", async 
     return { marker: `cron-db-${databaseCount}` } as unknown as ReturnType<typeof getDb>;
   });
   const initRedisSpy = spyOn(redisMiddleware, "initRedis").mockResolvedValue(true);
+  const providerActionSpy = spyOn(
+    providerActionScheduler,
+    "runProviderActionRecoverySweep",
+  ).mockImplementation(async () => {
+    await Promise.resolve();
+    seen.push((getDb() as unknown as { marker: string }).marker);
+    return { auditsDelivered: 1, reservationsReconciled: 1, failures: [] };
+  });
   const upstreamSpy = spyOn(
     upstreamScheduler,
     "runUpstreamCredentialLeaseSweep",
@@ -371,6 +384,7 @@ test("Worker cron gives every autonomous sweep its own request database", async 
     __setWorkerInitForTests(null);
     initRedisSpy.mockRestore();
     createDbSpy.mockRestore();
+    providerActionSpy.mockRestore();
     upstreamSpy.mockRestore();
     googleSpy.mockRestore();
     xSpy.mockRestore();
@@ -380,8 +394,8 @@ test("Worker cron gives every autonomous sweep its own request database", async 
     }
   }
 
-  expect(databaseCount).toBe(4);
-  expect(seen.sort()).toEqual(["cron-db-2", "cron-db-3", "cron-db-4"]);
+  expect(databaseCount).toBe(5);
+  expect(seen.sort()).toEqual(["cron-db-2", "cron-db-3", "cron-db-4", "cron-db-5"]);
 });
 
 test("configured webhook work retains its request database until Worker cleanup", async () => {
@@ -691,6 +705,50 @@ test("Worker scheduled recovery processes pre-existing leases when capabilities 
   );
   expect(calls).toBe(1);
   expect(result).toEqual({ unknown: 1, revoked: 2, attention: 0, expired: 3 });
+});
+
+test("Worker cron invokes provider required-audit and reservation recovery", async () => {
+  let calls = 0;
+  const result = await runWorkerProviderActionRecoverySweep(
+    { DATABASE_URL: "postgresql://worker.invalid/steward" },
+    {
+      sweep: async () => {
+        calls += 1;
+        return { auditsDelivered: 2, reservationsReconciled: 1, failures: [] };
+      },
+    },
+  );
+  expect(calls).toBe(1);
+  expect(result).toEqual({ auditsDelivered: 2, reservationsReconciled: 1, failures: [] });
+});
+
+test("Worker provider recovery uses the current binding after sweeper flag removal", async () => {
+  let calls = 0;
+  const sweep = async () => {
+    calls += 1;
+    return { auditsDelivered: 1, reservationsReconciled: 0, failures: [] };
+  };
+  const disabled = await withRuntimeEnvironment(
+    { STEWARD_RUNTIME: "workers", STEWARD_PROVIDER_RESERVATION_SWEEPER: "false" },
+    () =>
+      runWorkerProviderActionRecoverySweep(
+        {
+          DATABASE_URL: "postgresql://worker.invalid/steward",
+          STEWARD_PROVIDER_RESERVATION_SWEEPER: "false",
+        },
+        { sweep },
+      ),
+  );
+  const enabled = await withRuntimeEnvironment({ STEWARD_RUNTIME: "workers" }, () =>
+    runWorkerProviderActionRecoverySweep(
+      { DATABASE_URL: "postgresql://worker.invalid/steward" },
+      { sweep },
+    ),
+  );
+
+  expect(disabled).toBeNull();
+  expect(enabled).toEqual({ auditsDelivered: 1, reservationsReconciled: 0, failures: [] });
+  expect(calls).toBe(1);
 });
 
 test("Worker scheduled recovery is inert without the capabilities plugin", async () => {

@@ -156,7 +156,7 @@ import {
 } from "@stwd/redis";
 import { and, eq, isNull, or, sql } from "drizzle-orm";
 import type { ProviderPrincipalV1 } from "../middleware/provider-principal";
-import { appendAuditEvent, withTenantAuditQueue, writeAuditEvent } from "./audit";
+import { withTenantAuditedTransaction, writeAuditEvent } from "./audit";
 import { getGenericHttpProductionSpec } from "./provider-action-profile-specs";
 import { ApprovalArmError, buildApprovalArm } from "./provider-approval";
 
@@ -239,6 +239,10 @@ let providerPolicyClockForTests: (() => Date) | null = null;
 let decisionReservationCrashForTests = false;
 let providerCreateAfterOptimisticReplayLookupForTests: (() => Promise<void>) | null = null;
 let providerCreateAfterBudgetReservationForTests: (() => Promise<void>) | null = null;
+let providerAuditOutboxFaultForTests: "after_append" | null = null;
+let providerAuditOutboxAfterClaimForTests:
+  | ((claimToken: string, rowIds: string[]) => Promise<void>)
+  | null = null;
 
 class SimulatedDecisionReservationCrash extends Error {}
 
@@ -277,6 +281,18 @@ export function __setProviderCreateAfterBudgetReservationForTests(
   hook: (() => Promise<void>) | null,
 ): void {
   providerCreateAfterBudgetReservationForTests = hook;
+}
+
+/** Test-only fault at the audit-append / outbox-completion transaction boundary. */
+export function __setProviderAuditOutboxFaultForTests(fault: "after_append" | null): void {
+  providerAuditOutboxFaultForTests = fault;
+}
+
+/** Test-only lease barrier after a bounded batch has committed its claim. */
+export function __setProviderAuditOutboxAfterClaimForTests(
+  hook: ((claimToken: string, rowIds: string[]) => Promise<void>) | null,
+): void {
+  providerAuditOutboxAfterClaimForTests = hook;
 }
 
 function persistedReservationHandles(
@@ -921,6 +937,15 @@ type DbBase = ReturnType<typeof getDb>;
 /** The db handle OR a transaction executor — both support the queries the
  *  evaluators run, so access/policy can be evaluated inside the tx. */
 type DbExecutor = DbBase | Parameters<Parameters<DbBase["transaction"]>[0]>[0];
+
+/** Normalize postgres-js row arrays and PGLite's `{ rows }` execute result. */
+function rowsFromDatabaseResult<T>(result: unknown): T[] {
+  if (Array.isArray(result)) return result as T[];
+  if (result && typeof result === "object" && Array.isArray((result as { rows?: unknown }).rows)) {
+    return (result as { rows: T[] }).rows;
+  }
+  return [];
+}
 
 /** The non-null policy evaluation result shape (access=allow path). */
 type PolicyResult = {
@@ -2893,89 +2918,204 @@ class ProviderActionService {
   }
 
   /**
-   * C2 crash-recovery sweeper (spec §7.3). The required-audit outbox row commits
-   * IN-TX with the intent/binding, but its drain into the signed chain happens
-   * post-commit. A crash between commit and drain leaves an intent with an
-   * UNDELIVERED outbox row and therefore ZERO signed correlated events — which
-   * would break the C2 invariant (every persisted intent has >=1 signed event).
+   * C2 crash-recovery sweeper (spec §7.3). A short claim transaction assigns a
+   * bounded, disjoint batch to this worker. Each claimed row is then locked,
+   * appended to the signed audit chain, and marked delivered in ONE
+   * tenant-audited transaction. The immutable outbox UUID is signed into event
+   * metadata and protected by a database unique index, so retries and replicas
+   * cannot turn one required event into two pieces of signed evidence.
    *
-   * This sweeper drains every undelivered outbox row for the tenant (optionally
-   * scoped to one intent). It is safe to run repeatedly and concurrently: the
-   * drain marks `delivered_at` per row after the signed append, and
-   * `writeAuditEvent` is itself process-locally serialized, so repeated drains
-   * in one process avoid duplicate signed events. Cross-replica recovery is
-   * best effort because the audit lookup and append are not one unique DB
-   * transaction. Call it opportunistically (any read path) and/or from a
-   * periodic job; an undelivered row remains recoverable.
+   * Claims are leases rather than ownership. A worker that dies before opening
+   * the audited transaction leaves no partial audit append and its row is
+   * reclaimable after 60 seconds. Every completion predicate includes the exact
+   * claim token, fencing a stale worker after takeover.
    *
-   * Returns the number of rows delivered in this pass.
+   * Returns the number of newly signed rows in this pass.
+   */
+  async recoverRequiredAuditOutbox(tenantId: string, intentId?: string): Promise<number> {
+    const claimToken = randomUUID();
+    const intentFilter = intentId ? sql`AND intent_id = ${intentId}` : sql``;
+    const claimed = await this.db().transaction(async (tx) =>
+      rowsFromDatabaseResult<{ id: string }>(
+        await tx.execute(sql`
+          WITH due AS (
+            SELECT id
+            FROM provider_action_audit_outbox
+            WHERE tenant_id = ${tenantId}
+              AND delivered_at IS NULL
+              AND (claimed_at IS NULL OR claimed_at < now() - interval '60 seconds')
+              ${intentFilter}
+            ORDER BY created_at, id
+            LIMIT 50
+            FOR UPDATE SKIP LOCKED
+          )
+          UPDATE provider_action_audit_outbox AS outbox
+          SET claim_token = ${claimToken}::uuid, claimed_at = now()
+          FROM due
+          WHERE outbox.id = due.id
+          RETURNING outbox.id
+        `),
+      ),
+    );
+    await providerAuditOutboxAfterClaimForTests?.(
+      claimToken,
+      claimed.map((row) => row.id),
+    );
+
+    let signed = 0;
+    let auditFailure: unknown;
+    try {
+      for (const row of claimed) {
+        try {
+          const signedNow = await this.deliverClaimedAuditOutboxRow(row.id, tenantId, claimToken);
+          if (signedNow) signed += 1;
+        } catch (error) {
+          // A caught signer/transaction failure is known rolled back. Release
+          // this process's still-current lease for an immediate retry. A real
+          // process death cannot run this compensation and is recovered by the
+          // bounded stale-lease path above.
+          await this.db().execute(sql`
+            UPDATE provider_action_audit_outbox
+            SET claim_token = NULL, claimed_at = NULL
+            WHERE id = ${row.id}::uuid
+              AND claim_token = ${claimToken}::uuid
+              AND delivered_at IS NULL
+          `);
+          throw error;
+        }
+      }
+    } catch (error) {
+      auditFailure = error;
+      // Do not strand the rest of this bounded batch behind a live lease when
+      // this process is still healthy enough to report the transaction error.
+      await this.db().execute(sql`
+        UPDATE provider_action_audit_outbox
+        SET claim_token = NULL, claimed_at = NULL
+        WHERE claim_token = ${claimToken}::uuid
+          AND delivered_at IS NULL
+      `);
+    }
+
+    if (auditFailure !== undefined) throw auditFailure;
+    return signed;
+  }
+
+  /**
+   * Backwards-compatible C2 recovery entry point for an intent. Required audit
+   * delivery and reservation reconciliation are separate retry domains: either
+   * still runs when the other fails, and the original audit failure remains the
+   * primary error when both fail.
    */
   async recoverUnsignedIntents(tenantId: string, intentId?: string): Promise<number> {
-    const rows = await this.db()
-      .select()
-      .from(providerActionAuditOutbox)
-      .where(
-        and(
-          eq(providerActionAuditOutbox.tenantId, tenantId),
-          intentId
-            ? eq(providerActionAuditOutbox.intentId, intentId)
-            : (sql`true` as unknown as ReturnType<typeof eq>),
-          sql`${providerActionAuditOutbox.deliveredAt} IS NULL`,
-        ),
-      );
-    let delivered = 0;
-    for (const row of rows) {
-      // Process-local idempotent recovery. The source of truth for "is this
-      // event signed?" is the audit chain itself, keyed by the deterministic
-      // correlation (tenant, resource_id=intentId, action). `delivered_at` is
-      // only an optimization. We serialize the whole check+sign+mark per tenant
-      // (same queue writeAuditEvent uses) so two in-process sweeps cannot both
-      // sign. A cross-replica race can still duplicate the signed event because
-      // the audit table has no matching unique constraint.
-      const signedNow = await withTenantAuditQueue(row.tenantId, async () => {
-        const existing = await this.db().execute(
-          sql`SELECT 1 FROM audit_events
-              WHERE tenant_id = ${row.tenantId}
-                AND resource_type = ${row.resourceType}
-                AND resource_id = ${row.resourceId}
-                AND action = ${row.action}
-              LIMIT 1`,
-        );
-        const existingRows = Array.isArray(existing)
-          ? existing
-          : ((existing as { rows?: unknown[] }).rows ?? []);
-        if (existingRows.length === 0) {
-          await appendAuditEvent({
-            tenantId: row.tenantId,
-            actorType: "agent",
-            actorId: (row.metadata as { actorAgentId?: string }).actorAgentId ?? null,
-            action: row.action,
-            resourceType: row.resourceType,
-            resourceId: row.resourceId,
-            metadata: row.metadata as Record<string, unknown>,
-          });
-          return true;
-        }
-        return false;
-      });
-      // Mark delivered whether we just signed it or found it already signed.
-      const marked = await this.db()
-        .update(providerActionAuditOutbox)
-        .set({ deliveredAt: new Date() })
-        .where(
-          and(
-            eq(providerActionAuditOutbox.id, row.id),
-            sql`${providerActionAuditOutbox.deliveredAt} IS NULL`,
-          ),
-        )
-        .returning({ id: providerActionAuditOutbox.id });
-      if (marked.length > 0 && signedNow) delivered += 1;
+    let signed = 0;
+    let auditFailure: unknown;
+    try {
+      signed = await this.recoverRequiredAuditOutbox(tenantId, intentId);
+    } catch (error) {
+      auditFailure = error;
     }
-    // The same recovery pass covers durable policy reservations. Audit and
-    // reservation recovery are independently idempotent; a Redis outage leaves
-    // the reservation pending and fail-closed for the next sweep.
-    await this.reconcilePolicyReservations(tenantId, intentId);
-    return delivered;
+    try {
+      await this.reconcilePolicyReservations(tenantId, intentId);
+    } catch (error) {
+      if (auditFailure === undefined) throw error;
+      console.error(
+        "[provider-actions] reservation reconciliation also failed during audit recovery",
+        redactedThrownDiagnostics(error),
+      );
+    }
+    if (auditFailure !== undefined) throw auditFailure;
+    return signed;
+  }
+
+  private async deliverClaimedAuditOutboxRow(
+    outboxId: string,
+    tenantId: string,
+    claimToken: string,
+  ): Promise<boolean> {
+    return withTenantAuditedTransaction(tenantId, async (rawTx, appendRequiredAudit) => {
+      const tx = rawTx as DbExecutor;
+      const [row] = rowsFromDatabaseResult<{
+        id: string;
+        tenant_id: string;
+        action: string;
+        resource_type: string;
+        resource_id: string;
+        metadata: Record<string, unknown>;
+      }>(
+        await tx.execute(sql`
+          SELECT id, tenant_id, action, resource_type, resource_id, metadata
+          FROM provider_action_audit_outbox
+          WHERE id = ${outboxId}::uuid
+            AND tenant_id = ${tenantId}
+            AND delivered_at IS NULL
+            AND claim_token = ${claimToken}::uuid
+          FOR UPDATE
+        `),
+      );
+      if (!row) return false;
+
+      const identityMetadata: Record<string, unknown> = {
+        ...(row.metadata ?? {}),
+        requiredOutboxId: row.id,
+      };
+      const existing = rowsFromDatabaseResult<{
+        action: string;
+        resource_type: string;
+        resource_id: string;
+      }>(
+        await tx.execute(sql`
+          SELECT action, resource_type, resource_id
+          FROM audit_events
+          WHERE tenant_id = ${row.tenant_id}
+            AND metadata->>'requiredOutboxId' = ${row.id}
+          LIMIT 1
+        `),
+      );
+      const existingIdentity = existing[0];
+      if (
+        existingIdentity &&
+        (existingIdentity.action !== row.action ||
+          existingIdentity.resource_type !== row.resource_type ||
+          existingIdentity.resource_id !== row.resource_id)
+      ) {
+        throw new Error("required-audit outbox identity conflicts with an existing audit event");
+      }
+      let signedNow = false;
+      if (existing.length === 0) {
+        await appendRequiredAudit({
+          tenantId: row.tenant_id,
+          actorType: "agent",
+          actorId:
+            typeof identityMetadata.actorAgentId === "string"
+              ? identityMetadata.actorAgentId
+              : null,
+          action: row.action,
+          resourceType: row.resource_type,
+          resourceId: row.resource_id,
+          metadata: identityMetadata,
+        });
+        signedNow = true;
+        if (providerAuditOutboxFaultForTests === "after_append") {
+          throw new Error("injected crash after required-audit append");
+        }
+      }
+
+      const completed = rowsFromDatabaseResult<{ id: string }>(
+        await tx.execute(sql`
+          UPDATE provider_action_audit_outbox
+          SET delivered_at = now(), claim_token = NULL, claimed_at = NULL
+          WHERE id = ${row.id}::uuid
+            AND tenant_id = ${row.tenant_id}
+            AND delivered_at IS NULL
+            AND claim_token = ${claimToken}::uuid
+          RETURNING id
+        `),
+      );
+      if (completed.length !== 1) {
+        throw new Error("required-audit outbox claim was lost before completion");
+      }
+      return signedNow;
+    });
   }
 
   /**
@@ -3034,7 +3174,7 @@ class ProviderActionService {
         // recordReservationFailure transactionally enqueues REQUIRED evidence.
         // Draining is best effort here; a signer outage cannot erase the durable
         // attention row or outbox event and normal C2 recovery will retry it.
-        await this.recoverUnsignedIntents(row.tenantId, row.intentId).catch((error) =>
+        await this.recoverRequiredAuditOutbox(row.tenantId, row.intentId).catch((error) =>
           console.error(
             "[provider-reservations] malformed-generation audit drain failed",
             redactedThrownDiagnostics(error),
@@ -3188,11 +3328,23 @@ class ProviderActionService {
 
   // ── Required-audit outbox drain (post-commit, pre-stub) ──
   private async drainAuditOutbox(tenantId: string, intentId: string): Promise<boolean> {
-    // Delegate to the CAS-guarded recovery path so the inline drain and the
-    // crash-recovery sweeper share the same process-local idempotency path. Any
-    // signer failure propagates (caller maps it to EVIDENCE_REQUIRED_AUDIT_UNAVAILABLE).
+    // Delegate to the leased recovery path so inline drain and crash recovery
+    // share the same cross-replica transaction. Another worker may currently
+    // hold a live claim; that is not proof of delivery, so the request remains
+    // fail-closed until every required row is durably completed.
     await this.recoverUnsignedIntents(tenantId, intentId);
-    return true;
+    const remaining = await this.db()
+      .select({ id: providerActionAuditOutbox.id })
+      .from(providerActionAuditOutbox)
+      .where(
+        and(
+          eq(providerActionAuditOutbox.tenantId, tenantId),
+          eq(providerActionAuditOutbox.intentId, intentId),
+          sql`${providerActionAuditOutbox.deliveredAt} IS NULL`,
+        ),
+      )
+      .limit(1);
+    return remaining.length === 0;
   }
 
   private async writeRequiredDenialAudit(

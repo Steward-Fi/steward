@@ -13,6 +13,7 @@ import {
 import {
   deriveSolanaPolicyFields,
   detectSolanaPolicyConflicts,
+  extractSolanaLifetimeEvidence,
   parseSolanaTransaction,
   TOKEN_PROGRAM_ID,
 } from "../solana-instructions";
@@ -25,6 +26,22 @@ function legacyToBase64(tx: Transaction): string {
   const bytes = tx.serialize({ requireAllSignatures: false, verifySignatures: false });
   return Buffer.from(bytes).toString("base64");
 }
+
+describe("extractSolanaLifetimeEvidence", () => {
+  test("binds the exact durable nonce account and authority from the message", () => {
+    const payer = Keypair.generate().publicKey;
+    const nonceAccount = Keypair.generate().publicKey;
+    const nonceAuthority = Keypair.generate().publicKey;
+    const tx = new Transaction({ feePayer: payer, recentBlockhash: RECENT_BLOCKHASH }).add(
+      SystemProgram.nonceAdvance({ noncePubkey: nonceAccount, authorizedPubkey: nonceAuthority }),
+    );
+    expect(extractSolanaLifetimeEvidence(legacyToBase64(tx))).toEqual({
+      blockhashKind: "durable_nonce",
+      durableNonceAccount: nonceAccount.toBase58(),
+      durableNonceAuthority: nonceAuthority.toBase58(),
+    });
+  });
+});
 
 function v0ToBase64(
   instructions: TransactionInstruction[],

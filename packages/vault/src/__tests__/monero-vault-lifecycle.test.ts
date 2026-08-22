@@ -98,11 +98,15 @@ class FakeMoneroBackend implements MoneroWalletBackend {
     payload: MoneroKeyPayloadV1,
     _context: MoneroWalletBackendContext,
     txMetadata: string,
+    _expectedTxHash: string,
   ): Promise<{ txHash: string }> {
     this.calls.push("relayTransfer");
     if (!/^[0-9a-f]{64}$/.test(payload.spendKey)) throw new Error("bad payload reached backend");
     this.relayedMetadata.push(txMetadata);
     return { txHash: "cd".repeat(32) };
+  }
+  async getTransactionStatus(): Promise<"not_found"> {
+    return "not_found";
   }
 
   async discardPreparedTransfer(): Promise<void> {
