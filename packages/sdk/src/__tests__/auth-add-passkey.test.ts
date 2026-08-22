@@ -246,7 +246,7 @@ describe("StewardAuth.addPasskey", () => {
     const auth = new StewardAuth({ baseUrl: "https://api.example.test" });
     await auth.signInWithPasskey("shadow@shad0w.xyz");
 
-    expect(startAuthenticationCalls).toBe(1);
+    expect(startAuthentication).toHaveBeenCalledTimes(1);
     expect(captured[1]?.url).toBe("https://api.example.test/auth/passkey/login/verify");
     expect(captured[1]?.body).toMatchObject({
       email: "shadow@shad0w.xyz",
