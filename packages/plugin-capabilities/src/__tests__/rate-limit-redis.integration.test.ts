@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, it } from "bun:test";
-import { disconnectRedis, getRedis } from "@stwd/redis";
+import { checkRateLimit, disconnectRedis, getRedis, rateLimitBucketKey } from "@stwd/redis";
 import type { StewardAppContext } from "../context";
 import { CAPABILITY_INVOKE_RATE_LIMIT, enforceCapabilityRateLimit } from "../rate-limit";
 
@@ -14,6 +14,17 @@ describeRedis("capability rate limiting with real Redis", () => {
     const tenantId = `redis-rate-tenant-${crypto.randomUUID()}`;
     const agentId = `redis-rate-agent-${crypto.randomUUID()}`;
     const key = `ratelimit:capability:invoke:${tenantId}:${agentId}:${CAPABILITY_INVOKE_RATE_LIMIT.windowMs}`;
+    const physicalKey = rateLimitBucketKey(
+      key,
+      CAPABILITY_INVOKE_RATE_LIMIT.windowMs,
+      CAPABILITY_INVOKE_RATE_LIMIT.maxRequests,
+    );
+    const alternateMax = CAPABILITY_INVOKE_RATE_LIMIT.maxRequests + 1;
+    const alternatePhysicalKey = rateLimitBucketKey(
+      key,
+      CAPABILITY_INVOKE_RATE_LIMIT.windowMs,
+      alternateMax,
+    );
     const context = (): Pick<StewardAppContext, "db" | "getRedisClient" | "isRedisConfigured"> => ({
       db: {} as StewardAppContext["db"],
       getRedisClient: () => getRedis(),
@@ -37,13 +48,19 @@ describeRedis("capability rate limiting with real Redis", () => {
         CAPABILITY_INVOKE_RATE_LIMIT.maxRequests,
       );
       expect(results.filter((result) => !result.allowed)).toHaveLength(1);
+      expect(await getRedis().zcard(physicalKey)).toBe(CAPABILITY_INVOKE_RATE_LIMIT.maxRequests);
+      expect(
+        await checkRateLimit(key, CAPABILITY_INVOKE_RATE_LIMIT.windowMs, alternateMax, getRedis()),
+      ).toMatchObject({ allowed: true, remaining: alternateMax - 1 });
+      expect(await getRedis().zcard(alternatePhysicalKey)).toBe(1);
+      expect(await getRedis().zcard(physicalKey)).toBe(CAPABILITY_INVOKE_RATE_LIMIT.maxRequests);
 
       await disconnectRedis();
       expect(
         await enforceCapabilityRateLimit(context(), "invoke", tenantId, agentId),
       ).toMatchObject({ allowed: false });
     } finally {
-      await getRedis().del(key);
+      await getRedis().del(physicalKey, alternatePhysicalKey);
     }
   });
 });
