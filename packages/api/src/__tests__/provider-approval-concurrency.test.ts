@@ -33,6 +33,7 @@ import {
   users,
   userTenants,
   workspaces,
+  writeAuditEvent,
 } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { eq, sql } from "drizzle-orm";
@@ -41,11 +42,11 @@ import {
   __setProviderAuditOutboxFaultForTests,
   providerActionService,
 } from "../services/provider-action-service";
+import { AuditUnavailableError, providerApprovalService } from "../services/provider-approval";
 import {
   recoverProviderActionTenant,
   startProviderReservationReconciliationScheduler,
 } from "../services/provider-reservation-reconciliation-scheduler";
-import { AuditUnavailableError, providerApprovalService } from "../services/provider-approval";
 import {
   auditCount,
   bindingRow,
@@ -470,9 +471,7 @@ describe("approval-lifecycle concurrency + fault matrix", () => {
       ? evidence
       : ((evidence as { rows?: unknown[] }).rows ?? []);
     expect(evidenceRows).toEqual(
-      [original.id, second.id]
-        .sort()
-        .map((outbox_id) => ({ outbox_id })),
+      [original.id, second.id].sort().map((outbox_id) => ({ outbox_id })),
     );
   });
 
@@ -520,6 +519,40 @@ describe("approval-lifecycle concurrency + fault matrix", () => {
     __setProviderAuditOutboxFaultForTests(null);
     expect(await providerActionService.recoverUnsignedIntents(F.TENANT, intentId)).toBe(1);
     expect(await correlatedAudit(intentId)).toHaveLength(1);
+  });
+
+  test("C2 recovery rejects a reused outbox id with a conflicting audit identity", async () => {
+    const { intentId } = await createApprovalRequired();
+    const [outbox] = await getDb()
+      .select()
+      .from(providerActionAuditOutbox)
+      .where(eq(providerActionAuditOutbox.intentId, intentId));
+    await getDb()
+      .update(providerActionAuditOutbox)
+      .set({ deliveredAt: null })
+      .where(eq(providerActionAuditOutbox.id, outbox.id));
+    await getDb().execute(
+      sql`DELETE FROM audit_events WHERE tenant_id = ${F.TENANT} AND resource_id = ${intentId}`,
+    );
+    await writeAuditEvent({
+      tenantId: F.TENANT,
+      actorType: "agent",
+      actorId: null,
+      action: `${outbox.action}.conflict`,
+      resourceType: outbox.resourceType,
+      resourceId: outbox.resourceId,
+      metadata: { requiredOutboxId: outbox.id },
+    });
+
+    await expect(providerActionService.recoverUnsignedIntents(F.TENANT, intentId)).rejects.toThrow(
+      "required-audit outbox identity conflicts",
+    );
+    const [pending] = await getDb()
+      .select()
+      .from(providerActionAuditOutbox)
+      .where(eq(providerActionAuditOutbox.id, outbox.id));
+    expect(pending.deliveredAt).toBeNull();
+    expect(pending.claimToken).toBeNull();
   });
 
   test("C2 stale-claim takeover fences the expired worker token", async () => {
