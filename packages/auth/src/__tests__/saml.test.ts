@@ -80,6 +80,7 @@ interface SamlFixtureOptions {
   assertionId?: string;
   signatureAlgorithm?: "sha1" | "sha256";
   digestAlgorithm?: "sha1" | "sha256";
+  profileIdAttribute?: string;
   unsignedResponseAttributes?: string;
 }
 
@@ -103,7 +104,9 @@ function signedSamlResponse(options: SamlFixtureOptions = {}): string {
     `<saml:AuthnContext><saml:AuthnContextClassRef>urn:oasis:names:tc:SAML:2.0:ac:classes:PasswordProtectedTransport</saml:AuthnContextClassRef></saml:AuthnContext>`,
     `</saml:AuthnStatement>`,
     `<saml:AttributeStatement>`,
-    `<saml:Attribute Name="ID"><saml:AttributeValue>${options.assertionId ?? ASSERTION_ID}</saml:AttributeValue></saml:Attribute>`,
+    options.profileIdAttribute
+      ? `<saml:Attribute Name="ID"><saml:AttributeValue>${options.profileIdAttribute}</saml:AttributeValue></saml:Attribute>`
+      : "",
     `<saml:Attribute Name="email"><saml:AttributeValue>${USER_EMAIL}</saml:AttributeValue></saml:Attribute>`,
     `<saml:Attribute Name="mail"><saml:AttributeValue>fallback@example.test</saml:AttributeValue></saml:Attribute>`,
     `<saml:Attribute Name="groups"><saml:AttributeValue>engineering</saml:AttributeValue><saml:AttributeValue>security</saml:AttributeValue></saml:Attribute>`,
@@ -223,6 +226,22 @@ describe("SAML ACS verifier hardening", () => {
     await expect(
       verifySamlAcsResponse(verifierInput(signedSamlResponse({ assertionId: "" }))),
     ).rejects.toThrow();
+  });
+
+  it("uses the signed assertion XML ID instead of a conflicting profile attribute", async () => {
+    const assertion = await verifySamlAcsResponse(
+      verifierInput(
+        signedSamlResponse({
+          assertionId: "_signed-assertion-id",
+          profileIdAttribute: "_fabricated-profile-id",
+        }),
+      ),
+    );
+
+    expect(assertion.assertionId).toBe("_signed-assertion-id");
+    expect(assertion.attributes).toMatchObject({
+      attributes: { ID: "_fabricated-profile-id" },
+    });
   });
 
   it("returns only the validated signed profile when unsigned raw attributes disagree", async () => {
