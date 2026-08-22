@@ -31,14 +31,11 @@
  *   - the venue adapter's network edge — HyperliquidAdapter.signOrder /
  *     .submitOrder at the prototype (signOrder's output is irrelevant since
  *     submitOrder is stubbed too, so no key material or typed-data signing runs);
- *   - TradeSessionManager.withActiveSubmissionFence's DB-transaction wrapper,
- *     replaced by a faithful pass-through (run the callback, propagate its result
- *     or throw). The real wrapper opens a getDb().transaction, and the route's
- *     callback then issues base-connection queries (getActive, audit writes)
- *     inside it — which single-connection PGLite deadlocks on (production uses a
- *     pooled Postgres where those land on a separate connection). The advisory-
- *     lock atomicity of that wrapper is a @stwd/trade-sessions concern, distinct
- *     from the spend-accounting / audit-ordering invariants under test here.
+ *   - TradeSessionManager's initial and final DB-transaction fence wrappers,
+ *     replaced by controlled pass-throughs. The final wrapper can also choose a
+ *     revoke-first result without contacting the venue. Actual advisory-lock
+ *     ordering across two connections lives in the real-Postgres companion test;
+ *     this mounted suite owns route-side sign/submit/spend/audit behavior.
  *
  * Everything else runs for real: routing, validation, policy evaluation, spend
  * reserve/release, the submit-attempt catch, idempotency claim/replay, the audit
@@ -79,6 +76,7 @@ let signSpy: ReturnType<typeof spyOn> | undefined;
 let submitSpy: ReturnType<typeof spyOn> | undefined;
 let updateLeverageSpy: ReturnType<typeof spyOn> | undefined;
 let fenceSpy: ReturnType<typeof spyOn> | undefined;
+let venueFenceSpy: ReturnType<typeof spyOn> | undefined;
 
 async function seedSession(
   allowedAssets: string[] = ["BTC"],
@@ -168,18 +166,20 @@ describe("Hyperliquid venue-submit spend-fence (real /hyperliquid/order path)", 
     setPGLiteOverride(db, async () => {
       await client.close();
     });
-    // Faithful pass-through for the fence's DB-transaction wrapper. The real
-    // wrapper opens getDb().transaction() + an advisory lock, then re-selects the
-    // active session and runs the callback; under single-connection PGLite the
-    // callback's own base-connection queries (the authorization audit + getActive
-    // recheck) would deadlock against that outer transaction (production runs them
-    // on a pooled second connection). The route's revoke-before-submit recheck and
-    // every spend/audit invariant under test live in the callback, which runs for
-    // real — only the transaction/advisory-lock shell is replaced. The route's
-    // callback ignores its session argument, so undefined is passed.
+    // Pass through the initial fence's DB-transaction wrapper. The callback's
+    // spend/audit behavior runs for real; advisory-lock ordering is covered by the
+    // real-Postgres companion test. The route ignores this session argument.
     fenceSpy = spyOn(TradeSessionManager.prototype, "withActiveSubmissionFence").mockImplementation(
       (async (_input, cb) => cb(undefined)) as never,
     );
+    // The final venue fence itself is exercised with two real PostgreSQL
+    // connections in trade-session-revocation-fence.real-pg.test.ts. Here the
+    // seam lets the mounted route deterministically choose each winner while
+    // every route-side sign/submit/spend/audit behavior remains real.
+    venueFenceSpy = spyOn(
+      TradeSessionManager.prototype,
+      "withActiveVenueSubmissionFence",
+    ).mockImplementation((async (_input, cb) => cb(undefined)) as never);
     const { createTradeRoutes } = await import("../routes/trade");
     const { testCtx } = await import("./_ctx");
     tradeRoutes = createTradeRoutes(testCtx());
@@ -187,6 +187,7 @@ describe("Hyperliquid venue-submit spend-fence (real /hyperliquid/order path)", 
 
   afterAll(async () => {
     fenceSpy?.mockRestore();
+    venueFenceSpy?.mockRestore();
     await closeDb();
     delete process.env.STEWARD_PGLITE_MEMORY;
   });
@@ -338,6 +339,105 @@ describe("Hyperliquid venue-submit spend-fence (real /hyperliquid/order path)", 
     expect(authorized[0].seq).toBeLessThan(submitted[0].seq);
   });
 
+  it("does not call the venue when revocation wins the post-sign submission fence", async () => {
+    const { tenantId, agentId, sessionId } = await seedSession();
+    const app = makeApp(tenantId, agentId, tradeRoutes);
+    signSpy = spyOn(HyperliquidAdapter.prototype, "signOrder").mockResolvedValue(
+      {} as Awaited<ReturnType<HyperliquidAdapter["signOrder"]>>,
+    );
+    submitSpy = spyOn(HyperliquidAdapter.prototype, "submitOrder").mockResolvedValue({
+      orderId: "must-not-submit",
+      status: "filled",
+    } as Awaited<ReturnType<HyperliquidAdapter["submitOrder"]>>);
+    venueFenceSpy?.mockImplementationOnce((async (input) => {
+      await new TradeSessionManager().revokeSession({ ...input, revokedBy: "test-revoker" });
+      return null;
+    }) as never);
+
+    const key = crypto.randomUUID();
+    const response = await postOrder(app, sessionId, key);
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({
+      ok: false,
+      error: "Trade session was revoked before order submission",
+    });
+    expect(signSpy).toHaveBeenCalledTimes(1);
+    expect(submitSpy).not.toHaveBeenCalled();
+    expect(await dailySpendOf(sessionId)).toBe(0);
+
+    const replay = await postOrder(app, sessionId, key);
+    expect(replay.status).toBe(409);
+    expect(replay.headers.get("Idempotency-Replayed")).toBe("true");
+    expect(submitSpy).not.toHaveBeenCalled();
+  });
+
+  it("returns and replays a terminal fill when the completion audit fails", async () => {
+    const { createTradeRoutes } = await import("../routes/trade");
+    const { testCtx } = await import("./_ctx");
+    const baseCtx = testCtx();
+    const failingRoutes = createTradeRoutes({
+      ...baseCtx,
+      writeAuditEvent: async (event) => {
+        if (event.action === "trade.order.submitted") throw new Error("audit unavailable");
+        await baseCtx.writeAuditEvent(event);
+      },
+    });
+    const { tenantId, agentId, sessionId } = await seedSession();
+    const app = makeApp(tenantId, agentId, failingRoutes);
+    signSpy = spyOn(HyperliquidAdapter.prototype, "signOrder").mockResolvedValue(
+      {} as Awaited<ReturnType<HyperliquidAdapter["signOrder"]>>,
+    );
+    submitSpy = spyOn(HyperliquidAdapter.prototype, "submitOrder").mockResolvedValue({
+      orderId: "hl-audit-failure-terminal",
+      status: "filled",
+      filledQty: 1,
+      avgPrice: 10,
+    } as Awaited<ReturnType<HyperliquidAdapter["submitOrder"]>>);
+
+    const key = crypto.randomUUID();
+    const response = await postOrder(app, sessionId, key);
+    expect(response.status).toBe(200);
+    expect(((await response.json()) as { data: { orderId: string } }).data.orderId).toBe(
+      "hl-audit-failure-terminal",
+    );
+    const replay = await postOrder(app, sessionId, key);
+    expect(replay.status).toBe(200);
+    expect(replay.headers.get("Idempotency-Replayed")).toBe("true");
+    expect(((await replay.json()) as { data: { orderId: string } }).data.orderId).toBe(
+      "hl-audit-failure-terminal",
+    );
+    expect(submitSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("preserves a known venue result when the fence transaction faults afterward", async () => {
+    const { tenantId, agentId, sessionId } = await seedSession();
+    const app = makeApp(tenantId, agentId, tradeRoutes);
+    signSpy = spyOn(HyperliquidAdapter.prototype, "signOrder").mockResolvedValue(
+      {} as Awaited<ReturnType<HyperliquidAdapter["signOrder"]>>,
+    );
+    submitSpy = spyOn(HyperliquidAdapter.prototype, "submitOrder").mockResolvedValue({
+      orderId: "hl-post-submit-fence-fault",
+      status: "filled",
+      filledQty: 1,
+      avgPrice: 10,
+    } as Awaited<ReturnType<HyperliquidAdapter["submitOrder"]>>);
+    venueFenceSpy?.mockImplementationOnce((async (_input, callback) => {
+      await callback(undefined);
+      throw new Error("transaction commit failed after venue response");
+    }) as never);
+
+    const key = crypto.randomUUID();
+    const response = await postOrder(app, sessionId, key);
+    expect(response.status).toBe(200);
+    expect(((await response.json()) as { data: { orderId: string } }).data.orderId).toBe(
+      "hl-post-submit-fence-fault",
+    );
+    const replay = await postOrder(app, sessionId, key);
+    expect(replay.status).toBe(200);
+    expect(replay.headers.get("Idempotency-Replayed")).toBe("true");
+    expect(submitSpy).toHaveBeenCalledTimes(1);
+  });
+
   it("sets clamped isolated leverage before signing builder-perp orders", async () => {
     const builderAsset = "xyz:SPCX";
     const { tenantId, agentId, sessionId } = await seedSession([builderAsset]);
@@ -387,5 +487,39 @@ describe("Hyperliquid venue-submit spend-fence (real /hyperliquid/order path)", 
       expect.objectContaining({ asset: builderAsset, leverage: 3 }),
     );
     expect(await auditCount(tenantId, "trade.order.leverage.set")).toBe(1);
+  });
+
+  it("does not sign or submit when builder-perp leverage setup is rejected", async () => {
+    const builderAsset = "xyz:SPCX";
+    const { tenantId, agentId, sessionId } = await seedSession([builderAsset]);
+    const app = makeApp(tenantId, agentId, tradeRoutes);
+    updateLeverageSpy = spyOn(HyperliquidAdapter.prototype, "updateLeverage").mockRejectedValue(
+      new Error("venue leverage rejected"),
+    );
+    signSpy = spyOn(HyperliquidAdapter.prototype, "signOrder").mockResolvedValue(
+      {} as Awaited<ReturnType<HyperliquidAdapter["signOrder"]>>,
+    );
+    submitSpy = spyOn(HyperliquidAdapter.prototype, "submitOrder").mockResolvedValue({
+      orderId: "must-not-submit",
+      status: "filled",
+    } as Awaited<ReturnType<HyperliquidAdapter["submitOrder"]>>);
+
+    const response = await postOrder(app, sessionId, crypto.randomUUID(), {
+      asset: builderAsset,
+      side: "buy",
+      size: 1,
+      limitPx: 10,
+      leverage: 10,
+    });
+    expect(response.status).toBe(502);
+    expect(updateLeverageSpy).toHaveBeenCalledWith({
+      coin: builderAsset,
+      leverage: 3,
+      isCross: false,
+    });
+    expect(signSpy).not.toHaveBeenCalled();
+    expect(submitSpy).not.toHaveBeenCalled();
+    expect(await dailySpendOf(sessionId)).toBe(0);
+    expect(await auditCount(tenantId, "trade.order.leverage.failed")).toBe(1);
   });
 });

@@ -522,6 +522,38 @@ export class TradeSessionManager {
     return callback(session);
   }
 
+  /**
+   * Serialize the final, bounded venue submission with session revocation.
+   *
+   * Signing and policy work deliberately happen before this method so the
+   * advisory lock is never held across local signing or other preparation. The
+   * callback must contain only the venue submission, whose adapter timeout
+   * bounds how long revocation can wait. If revocation wins the lock first, the
+   * active-row check returns null and the venue callback is never invoked.
+   */
+  async withActiveVenueSubmissionFence<T>(
+    input: SessionFenceInput,
+    callback: (session: TradeSession) => Promise<T>,
+  ): Promise<T | null> {
+    return getDb().transaction(async (tx) => {
+      await tx.execute(
+        sql`select pg_advisory_xact_lock(hashtextextended(${sessionFenceKey(input.tenantId, input.id)}, 0))`,
+      );
+      const [row] = await tx
+        .select()
+        .from(tradeSessions)
+        .where(
+          and(
+            eq(tradeSessions.id, input.id),
+            eq(tradeSessions.tenantId, input.tenantId),
+            eq(tradeSessions.status, "active"),
+            sql`${tradeSessions.expiresAt} > ${this.now().toISOString()}`,
+          ),
+        );
+      return row ? callback(rowToSession(row)) : null;
+    });
+  }
+
   async releaseSpend(input: IncrementSpendInput): Promise<TradeSession | null> {
     if (!Number.isFinite(input.amountUsd) || input.amountUsd <= 0) {
       throw new Error("amountUsd must be positive");

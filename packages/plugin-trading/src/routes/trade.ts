@@ -1221,8 +1221,34 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
             body: { ok: false, error: "Order could not be signed; not submitted" },
           } satisfies TradeIdempotencyResponse;
         }
-        const activeAfterSign = await getSessionManager().getActive(tenantId, session.id);
-        if (!activeAfterSign) {
+        let completedVenueResult:
+          | Awaited<ReturnType<HyperliquidAdapter["submitOrder"]>>
+          | undefined;
+        let result: Awaited<ReturnType<HyperliquidAdapter["submitOrder"]>> | null;
+        try {
+          result = await manager.withActiveVenueSubmissionFence(
+            { tenantId, id: session.id },
+            async () => {
+              completedVenueResult = await adapter.submitOrder(signed);
+              return completedVenueResult;
+            },
+          );
+        } catch {
+          // A transaction/connection fault while releasing the advisory lock can
+          // happen after the venue returned a definite result. Preserve that
+          // terminal result; only a submit that never returned is ambiguous.
+          if (completedVenueResult) {
+            result = completedVenueResult;
+          } else {
+            const envelope: TradeIdempotencyResponse = {
+              status: 502,
+              body: { ok: false, error: "Trade submission status unknown" },
+            };
+            await idempotency.store?.(envelope);
+            return envelope;
+          }
+        }
+        if (!result) {
           await getSessionManager().releaseSpend({
             tenantId,
             id: session.id,
@@ -1234,18 +1260,6 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
               ok: false,
               error: "Trade session was revoked before order submission",
             },
-          };
-          await idempotency.store?.(envelope);
-          return envelope;
-        }
-
-        let result: Awaited<ReturnType<HyperliquidAdapter["submitOrder"]>>;
-        try {
-          result = await adapter.submitOrder(signed);
-        } catch {
-          const envelope: TradeIdempotencyResponse = {
-            status: 502,
-            body: { ok: false, error: "Trade submission status unknown" },
           };
           await idempotency.store?.(envelope);
           return envelope;
@@ -1279,23 +1293,6 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
           });
           await idempotency.store?.(envelope);
           return envelope;
-        }
-
-        // SEC-044: the submission fence no longer blocks revocation across
-        // venue I/O, so a revoke may have committed while the order was in
-        // flight. The order has landed regardless — detect + audit the race so
-        // operators can flatten manually.
-        const activeAfterSubmit = await getSessionManager().getActive(tenantId, session.id);
-        if (!activeAfterSubmit) {
-          await auditTradeEvent(tenantId, agentId, "trade.order.submitted-after-revoke", {
-            sessionId: session.id,
-            venue: "hyperliquid",
-            asset: parsedAsset.data,
-            leverage: effectiveLeverage,
-            size: body.size,
-            sizeUsd,
-            orderId: result.orderId ?? null,
-          });
         }
 
         const response = {
