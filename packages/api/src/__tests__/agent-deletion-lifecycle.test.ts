@@ -884,9 +884,98 @@ describe("agent deletion upstream credential boundary", () => {
       error: "Agent has unresolved execution evidence; reconcile it first",
     });
 
+    if (USING_REAL_POSTGRES) {
+      let directDeleteError: unknown;
+      try {
+        await getDb().delete(agents).where(eq(agents.id, agentId));
+      } catch (error) {
+        directDeleteError = error;
+      }
+      expect(directDeleteError).toBeInstanceOf(Error);
+      expect((directDeleteError as { cause?: { code?: string } }).cause?.code).toBe("55000");
+      expect(await getDb().select().from(agents).where(eq(agents.id, agentId))).toHaveLength(1);
+      expect(await getDb().select().from(intents).where(eq(intents.id, intentId))).toHaveLength(1);
+    }
+
     await getDb().update(intents).set({ status: "failed" }).where(eq(intents.id, intentId));
     expect((await tenantDelete(agentId)).status).toBe(200);
   });
+
+  it.skipIf(!USING_REAL_POSTGRES)(
+    "serializes a generic intent reservation ahead of concurrent agent deletion",
+    async () => {
+      const agentId = `intent-reservation-race-${crypto.randomUUID()}`;
+      const intentId = crypto.randomUUID();
+      await createAgent(agentId);
+      await getDb()
+        .insert(intents)
+        .values({
+          id: intentId,
+          tenantId: TENANT_ID,
+          agentId,
+          intentType: "wallet_action",
+          status: "authorized",
+          createdByType: "user",
+          createdById: crypto.randomUUID(),
+          payload: { action: "transfer" },
+        });
+
+      const writer = postgres(process.env.DATABASE_URL as string, { max: 1 });
+      const observer = postgres(process.env.DATABASE_URL as string, { max: 1 });
+      let releaseWriter!: () => void;
+      const release = new Promise<void>((resolve) => {
+        releaseWriter = resolve;
+      });
+      let writerPid = 0;
+      let writerReady!: () => void;
+      const ready = new Promise<void>((resolve) => {
+        writerReady = resolve;
+      });
+      const reservation = writer.begin(async (tx) => {
+        const [backend] = await tx<{ pid: number }[]>`SELECT pg_backend_pid()::int AS pid`;
+        writerPid = backend?.pid ?? 0;
+        await tx`SELECT public.steward_lock_tenant_deletion(${TENANT_ID})`;
+        await tx`SELECT id FROM agents WHERE tenant_id = ${TENANT_ID} AND id = ${agentId} FOR KEY SHARE`;
+        await tx`
+          UPDATE intents
+          SET status = 'executing', execution_result = ${JSON.stringify({
+            recoveryVersion: 1,
+            state: "reserved",
+            reservationId: crypto.randomUUID(),
+          })}::jsonb
+          WHERE tenant_id = ${TENANT_ID} AND id = ${intentId} AND status = 'authorized'
+        `;
+        writerReady();
+        await release;
+      });
+      await ready;
+
+      let deletion: Promise<Response> | undefined;
+      try {
+        deletion = tenantDelete(agentId);
+        expect(await waitUntilBackendBlockedBy(observer, writerPid)).toBe(true);
+        releaseWriter();
+        await reservation;
+
+        const response = await deletion;
+        expect(response.status).toBe(409);
+        await expect(response.json()).resolves.toEqual({
+          ok: false,
+          error: "Agent has unresolved execution evidence; reconcile it first",
+        });
+        expect(await getDb().select().from(intents).where(eq(intents.id, intentId))).toHaveLength(
+          1,
+        );
+      } finally {
+        releaseWriter();
+        await Promise.allSettled([reservation, deletion ?? Promise.resolve(new Response())]);
+        await Promise.all([writer.end(), observer.end()]);
+      }
+
+      await getDb().update(intents).set({ status: "failed" }).where(eq(intents.id, intentId));
+      expect((await tenantDelete(agentId)).status).toBe(200);
+    },
+  );
 
   it("retains resolved provider evidence and rejects new bindings after deletion", async () => {
     const agentId = `provider-evidence-${crypto.randomUUID()}`;

@@ -2,7 +2,9 @@
  * Persistent webhook delivery queue backed by the `webhook_deliveries` DB table.
  *
  * Replaces the in-memory RetryQueue for production use. Webhooks survive
- * process restarts and use exponential backoff for retries.
+ * process restarts and use exponential backoff for retries. Delivery is
+ * at-least-once: receivers must deduplicate the stable deliveryId because an
+ * HTTP success followed by a lost database acknowledgement is ambiguous.
  */
 
 import { getDb, webhookConfigs, webhookDeliveries } from "@stwd/db";
@@ -95,27 +97,67 @@ export class PersistentQueue {
 
     // Atomically claim due deliveries before dispatch. The temporary
     // nextRetryAt push acts as a visibility timeout if a worker crashes mid-send.
-    const claimed = (await db.transaction(async (tx) =>
-      tx.execute(sql`
+    const claimed = (await db.transaction(async (tx) => {
+      // A dependent success event must never overtake a predecessor that can
+      // no longer be delivered. Resolve the chain terminally instead of
+      // leaving an undeliverable row pending forever.
+      await tx.execute(sql`
+        UPDATE ${webhookDeliveries} AS dependent
+        SET
+          "status" = 'dead',
+          "last_error" = 'Predecessor webhook delivery is dead'
+        FROM ${webhookDeliveries} AS predecessor
+        WHERE dependent."predecessor_delivery_id" = predecessor."id"
+          AND predecessor."status" = 'dead'
+          AND dependent."status" in ('pending', 'failed', 'processing')
+      `);
+      return tx.execute(sql`
         UPDATE ${webhookDeliveries}
         SET
           "status" = 'processing',
           "next_retry_at" = ${new Date(now.getTime() + CLAIM_VISIBILITY_TIMEOUT_MS).toISOString()}
         WHERE "id" IN (
-          SELECT "id"
-          FROM ${webhookDeliveries}
+          SELECT candidate."id"
+          FROM ${webhookDeliveries} AS candidate
           WHERE (
-            ${webhookDeliveries.status} in ('pending', 'failed')
-            OR ${webhookDeliveries.status} = 'processing'
+            candidate."status" in ('pending', 'failed')
+            OR candidate."status" = 'processing'
           )
-            AND ${webhookDeliveries.nextRetryAt} <= ${now.toISOString()}
-          ORDER BY ${webhookDeliveries.nextRetryAt} ASC
+            AND candidate."next_retry_at" <= ${now.toISOString()}
+            AND (
+              candidate."predecessor_delivery_id" IS NULL
+              OR EXISTS (
+                SELECT 1
+                FROM ${webhookDeliveries} AS predecessor
+                WHERE predecessor."id" = candidate."predecessor_delivery_id"
+                  AND predecessor."status" = 'delivered'
+              )
+            )
+          ORDER BY candidate."next_retry_at" ASC, candidate."created_at" ASC, candidate."id" ASC
           FOR UPDATE SKIP LOCKED
           LIMIT ${this.batchSize}
         )
-        RETURNING *
-      `),
-    )) as unknown;
+        RETURNING
+          "id",
+          "tenant_id" AS "tenantId",
+          "webhook_config_id" AS "webhookConfigId",
+          "agent_id" AS "agentId",
+          "event_type" AS "eventType",
+          "predecessor_delivery_id" AS "predecessorDeliveryId",
+          "replayed_from_delivery_id" AS "replayedFromDeliveryId",
+          "payload",
+          "url",
+          "secret",
+          "events",
+          "status",
+          "attempts",
+          "max_attempts" AS "maxAttempts",
+          "next_retry_at" AS "nextRetryAt",
+          "last_error" AS "lastError",
+          "created_at" AS "createdAt",
+          "delivered_at" AS "deliveredAt"
+      `);
+    })) as unknown;
     const claimedRows =
       typeof claimed === "object" &&
       claimed !== null &&

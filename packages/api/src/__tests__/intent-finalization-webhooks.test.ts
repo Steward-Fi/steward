@@ -324,7 +324,7 @@ describe("intent finalization webhook hardening", () => {
   });
 
   for (const kind of ["transfer", "send_calls"] as const) {
-    it(`commits ${kind} audit before exactly ordered success webhooks and does not replay them`, async () => {
+    it(`commits ${kind} audit while reserving wallet-before-intent success effects once`, async () => {
       const id = await createAuthorizedIntent(kind);
       webhookCalls = [];
       verifyAuditBeforeDispatch = true;
@@ -347,7 +347,7 @@ describe("intent finalization webhook hardening", () => {
     });
   }
 
-  it("allows only one concurrent finalizer to emit success effects", async () => {
+  it("allows only one concurrent finalizer to reserve success effects", async () => {
     const id = await createAuthorizedIntent("transfer");
     webhookCalls = [];
     const responses = await Promise.all([executeIntent(id), executeIntent(id)]);

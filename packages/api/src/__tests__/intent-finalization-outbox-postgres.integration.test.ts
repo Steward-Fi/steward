@@ -14,6 +14,7 @@ import {
   webhookConfigs,
   webhookDeliveries,
 } from "@stwd/db";
+import { PersistentQueue } from "@stwd/webhooks";
 import { and, eq } from "drizzle-orm";
 import { Hono } from "hono";
 import { correlationId } from "../middleware/correlation";
@@ -29,6 +30,7 @@ const userId = crypto.randomUUID();
 const requestId = `intent-recovery-request-${suffix}`;
 const triggerName = `fail_intent_outer_commit_${suffix}`;
 const rlsTriggerName = `require_intent_tenant_context_${suffix}`;
+const deliveryAckTriggerName = `fail_delivery_ack_${suffix}`;
 const txHash = `0x${"71".repeat(32)}`;
 
 realPostgres("intent execution recovery (mounted production tenantAuth)", () => {
@@ -229,6 +231,10 @@ realPostgres("intent execution recovery (mounted production tenantAuth)", () => 
     await admin.client.unsafe(`drop function if exists "${triggerName}"()`);
     await admin.client.unsafe(`drop trigger if exists "${rlsTriggerName}" on intents`);
     await admin.client.unsafe(`drop function if exists "${rlsTriggerName}"()`);
+    await admin.client.unsafe(
+      `drop trigger if exists "${deliveryAckTriggerName}" on webhook_deliveries`,
+    );
+    await admin.client.unsafe(`drop function if exists "${deliveryAckTriggerName}"()`);
     await admin.db.delete(webhookDeliveries).where(eq(webhookDeliveries.tenantId, tenantId));
     await admin.db.delete(webhookConfigs).where(eq(webhookConfigs.tenantId, tenantId));
     await admin.db.delete(auditEvents).where(eq(auditEvents.tenantId, tenantId));
@@ -323,12 +329,19 @@ realPostgres("intent execution recovery (mounted production tenantAuth)", () => 
     };
     expect(recoveredBody.data.executionResult.txHash).toBe(txHash);
     expect(sendCount).toBe(1);
-    expect(
-      await admin.db
-        .select()
-        .from(webhookDeliveries)
-        .where(eq(webhookDeliveries.tenantId, tenantId)),
-    ).toHaveLength(2);
+    const reservedDeliveries = await admin.db
+      .select()
+      .from(webhookDeliveries)
+      .where(eq(webhookDeliveries.tenantId, tenantId));
+    expect(reservedDeliveries).toHaveLength(2);
+    const walletDelivery = reservedDeliveries.find(
+      ({ eventType }) => eventType === "wallet_action.transfer.succeeded",
+    );
+    const intentDelivery = reservedDeliveries.find(
+      ({ eventType }) => eventType === "intent.executed",
+    );
+    expect(walletDelivery?.predecessorDeliveryId).toBeNull();
+    expect(intentDelivery?.predecessorDeliveryId).toBe(walletDelivery?.id);
 
     const replay = await runMounted();
     expect(replay.status).toBe(409);
@@ -339,5 +352,64 @@ realPostgres("intent execution recovery (mounted production tenantAuth)", () => 
         .from(webhookDeliveries)
         .where(eq(webhookDeliveries.tenantId, tenantId)),
     ).toHaveLength(2);
+
+    const dispatchAttempts: Array<{ type: string; deliveryId: string }> = [];
+    const receiverEffects = new Set<string>();
+    const dispatcher = {
+      async dispatch(event: { type: string; deliveryId?: string }) {
+        const deliveryId = String(event.deliveryId);
+        dispatchAttempts.push({ type: event.type, deliveryId });
+        // This models the receiver contract: the stable delivery id, rather
+        // than transport acknowledgement, is the exact-effect dedupe key.
+        receiverEffects.add(deliveryId);
+        return { success: true, attempts: 1, deliveredAt: new Date() };
+      },
+    };
+    const queueA = new PersistentQueue(dispatcher as never, { batchSize: 1 });
+    const queueB = new PersistentQueue(dispatcher as never, { batchSize: 1 });
+
+    await admin.client.unsafe(`
+      create function "${deliveryAckTriggerName}"() returns trigger language plpgsql as $$
+      begin
+        if new.status = 'delivered' and old.event_type = 'wallet_action.transfer.succeeded' then
+          raise exception 'lost delivery database acknowledgement';
+        end if;
+        return new;
+      end
+      $$
+    `);
+    await admin.client.unsafe(`
+      create trigger "${deliveryAckTriggerName}"
+      before update on webhook_deliveries
+      for each row execute function "${deliveryAckTriggerName}"()
+    `);
+    await expect(queueA.processQueue()).rejects.toThrow();
+    expect(dispatchAttempts.map(({ type }) => type)).toEqual(["wallet_action.transfer.succeeded"]);
+    expect(receiverEffects.size).toBe(1);
+
+    await admin.client.unsafe(`drop trigger "${deliveryAckTriggerName}" on webhook_deliveries`);
+    await admin.client.unsafe(`drop function "${deliveryAckTriggerName}"()`);
+    await admin.db
+      .update(webhookDeliveries)
+      .set({ nextRetryAt: new Date() })
+      .where(eq(webhookDeliveries.id, walletDelivery!.id));
+
+    const walletRetryClaims = await Promise.all([queueA.processQueue(), queueB.processQueue()]);
+    expect(walletRetryClaims.flat()).toHaveLength(1);
+    expect(dispatchAttempts.map(({ type }) => type)).toEqual([
+      "wallet_action.transfer.succeeded",
+      "wallet_action.transfer.succeeded",
+    ]);
+    expect(dispatchAttempts[0]?.deliveryId).toBe(dispatchAttempts[1]?.deliveryId);
+    expect(receiverEffects.size).toBe(1);
+
+    const intentClaims = await Promise.all([queueA.processQueue(), queueB.processQueue()]);
+    expect(intentClaims.flat()).toHaveLength(1);
+    expect(dispatchAttempts.map(({ type }) => type)).toEqual([
+      "wallet_action.transfer.succeeded",
+      "wallet_action.transfer.succeeded",
+      "intent.executed",
+    ]);
+    expect(receiverEffects.size).toBe(2);
   }, 120_000);
 });

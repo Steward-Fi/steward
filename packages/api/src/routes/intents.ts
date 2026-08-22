@@ -1315,7 +1315,17 @@ async function enqueueIntentSuccessWebhooksWithinTx(
 ) {
   if (!agentId) return;
   const keyPrefix = `intent:${row.id}:executed`;
+  let predecessor:
+    | {
+        type: "wallet_action.transfer.succeeded" | "wallet_action.send_calls.succeeded";
+        idempotencyKey: string;
+      }
+    | undefined;
   if (executionResult.handler === "wallet_action.transfer") {
+    predecessor = {
+      type: "wallet_action.transfer.succeeded",
+      idempotencyKey: `${keyPrefix}:wallet_action.transfer.succeeded`,
+    };
     await enqueueWebhookDurablyWithinTx(
       tx,
       tenantId,
@@ -1327,10 +1337,14 @@ async function enqueueIntentSuccessWebhooksWithinTx(
         txHash: executionResult.txHash,
         signedTx: executionResult.signedTx ? "[redacted]" : undefined,
       },
-      `${keyPrefix}:wallet_action.transfer.succeeded`,
+      predecessor.idempotencyKey,
     );
   }
   if (executionResult.handler === "wallet_action.send_calls") {
+    predecessor = {
+      type: "wallet_action.send_calls.succeeded",
+      idempotencyKey: `${keyPrefix}:wallet_action.send_calls.succeeded`,
+    };
     await enqueueWebhookDurablyWithinTx(
       tx,
       tenantId,
@@ -1341,7 +1355,7 @@ async function enqueueIntentSuccessWebhooksWithinTx(
         intent_id: executionResult.actionId,
         signedCalls: redactSignedTransactions(executionResult.signedCalls),
       },
-      `${keyPrefix}:wallet_action.send_calls.succeeded`,
+      predecessor.idempotencyKey,
     );
   }
   await enqueueWebhookDurablyWithinTx(
@@ -1362,6 +1376,7 @@ async function enqueueIntentSuccessWebhooksWithinTx(
       failure_reason: row.failureReason,
     },
     `${keyPrefix}:intent.executed`,
+    predecessor ? { predecessor } : undefined,
   );
 }
 
@@ -1726,6 +1741,19 @@ async function reserveIntentExecution(
       existing.tenantId,
       async (txRaw, appendRequiredAudit) => {
         const tx = txRaw as typeof db;
+        // Agent retirement takes the same tenant fence before locking the
+        // parent agent. Holding a key-share lock through the reservation commit
+        // prevents deletion from cascading away the non-replay fence between
+        // authorization and external execution.
+        await tx.execute(sql`SELECT public.steward_lock_tenant_deletion(${existing.tenantId})`);
+        if (current.agentId) {
+          const [executionAgent] = await tx
+            .select({ id: agents.id })
+            .from(agents)
+            .where(and(eq(agents.id, current.agentId), eq(agents.tenantId, current.tenantId)))
+            .for("key share");
+          if (!executionAgent) return null;
+        }
         await tx
           .update(intents)
           .set({
@@ -2588,7 +2616,8 @@ async function updateIntentStatus(
     if (!row) return c.json<ApiResponse>({ ok: false, error: "Intent lifecycle conflict" }, 409);
 
     // Network delivery is performed only by the persistent queue after this
-    // transaction commits. Stable delivery ids make recovery/retry idempotent.
+    // transaction commits. Delivery is intentionally at-least-once: stable
+    // delivery ids let receivers deduplicate an ambiguous acknowledged send.
     return c.json<ApiResponse>({
       ok: true,
       data: {

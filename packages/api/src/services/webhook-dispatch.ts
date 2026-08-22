@@ -110,6 +110,9 @@ export async function enqueueWebhookDurablyWithinTx(
   type: DispatchableWebhookEventType,
   data: Record<string, unknown>,
   idempotencyKey: string,
+  options?: {
+    predecessor?: { type: DispatchableWebhookEventType; idempotencyKey: string };
+  },
 ): Promise<void> {
   const configuredType = toConfiguredWebhookEventType(type);
   const isPluginEvent = configuredType === null && webhookEventRegistry.has(type);
@@ -140,6 +143,25 @@ export async function enqueueWebhookDurablyWithinTx(
 
     const eventType = (configuredType ?? type) as WebhookEvent["type"];
     const deliveryId = deterministicDeliveryId(config.id, eventType, idempotencyKey);
+    const predecessorConfiguredType = options?.predecessor
+      ? toConfiguredWebhookEventType(options.predecessor.type)
+      : null;
+    const predecessorType = options?.predecessor
+      ? (predecessorConfiguredType ?? options.predecessor.type)
+      : null;
+    const configReceivesPredecessor = options?.predecessor
+      ? predecessorConfiguredType
+        ? acceptsConfiguredWebhookEvent(config.events, predecessorConfiguredType)
+        : config.events.length === 0 || config.events.includes(options.predecessor.type)
+      : false;
+    const predecessorDeliveryId =
+      options?.predecessor && configReceivesPredecessor
+        ? deterministicDeliveryId(
+            config.id,
+            predecessorType as string,
+            options.predecessor.idempotencyKey,
+          )
+        : null;
     const signedAt = Math.floor(timestamp.getTime() / 1000);
     const event = {
       type: eventType,
@@ -151,25 +173,22 @@ export async function enqueueWebhookDurablyWithinTx(
       webhookConfigId: config.id,
       signedAt,
     };
-    await tx
-      .insert(webhookDeliveries)
-      .values({
-        id: deliveryId,
-        tenantId,
-        webhookConfigId: config.id,
-        agentId,
-        eventType,
-        payload: event as unknown as Record<string, unknown>,
-        url: config.url,
-        secret: encryptedSecret,
-        events: config.events,
-        status: "pending",
-        attempts: 0,
-        maxAttempts: config.maxRetries + 1,
-        nextRetryAt: new Date(),
-      })
-      .onConflictDoNothing()
-      .returning({ id: webhookDeliveries.id });
+    await tx.insert(webhookDeliveries).values({
+      id: deliveryId,
+      tenantId,
+      webhookConfigId: config.id,
+      agentId,
+      eventType,
+      predecessorDeliveryId,
+      payload: event as unknown as Record<string, unknown>,
+      url: config.url,
+      secret: encryptedSecret,
+      events: config.events,
+      status: "pending",
+      attempts: 0,
+      maxAttempts: config.maxRetries + 1,
+      nextRetryAt: new Date(),
+    });
   }
 }
 
