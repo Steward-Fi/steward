@@ -64,6 +64,7 @@ import {
   EmailDeliveryNotConfiguredError,
   evaluateSiwePolicy,
   type FarcasterLoginPayload,
+  findUnusedRecoveryCode,
   generateApiKey,
   generateRecoveryCodes,
   generateTotpSecret,
@@ -2240,8 +2241,15 @@ async function findOrCreateUserWithStatus(email: string): Promise<UserProvisionR
   const db = getDb();
   const [existing] = await db.select().from(users).where(eq(users.email, email));
   if (existing) return { user: existing, isNew: false };
-  const [newUser] = await db.insert(users).values({ email, emailVerified: false }).returning();
-  return { user: newUser, isNew: true };
+  const [inserted] = await db
+    .insert(users)
+    .values({ email, emailVerified: false })
+    .onConflictDoNothing({ target: users.email })
+    .returning();
+  if (inserted) return { user: inserted, isNew: true };
+  const [winner] = await db.select().from(users).where(eq(users.email, email));
+  if (!winner) throw new Error("Concurrent user provisioning did not produce a user");
+  return { user: winner, isNew: false };
 }
 
 async function findUserByEmail(email: string): Promise<typeof users.$inferSelect | null> {
@@ -7050,21 +7058,22 @@ auth.post("/mfa/totp/complete", async (c) => {
 
   let method: "totp" | "recovery_code" = "totp";
   if (hasRecoveryCode) {
-    // SEC-146: consume the challenge BEFORE burning the recovery code. The
-    // burn is irreversible, so a concurrent completion must lose on the
-    // challenge consume — not forfeit a valid recovery code to a 401.
-    // Consequence: an invalid recovery code now consumes the challenge too
-    // (each guess needs a fresh MFA challenge), which is the fail-closed
-    // direction — the per-challenge attempt counter no longer applies here.
-    if ((await getMfaBackend().consume(challengeKey)) === null) {
-      return c.json<ApiResponse>({ ok: false, error: "Invalid or expired MFA challenge" }, 401);
-    }
-    const verified = await verifyRecoveryCode(
+    // Validate without mutating either one-time credential. Wrong codes leave
+    // the pending login retryable; a valid code is burned only after this
+    // request atomically wins the challenge claim.
+    const recoveryCode = await findUnusedRecoveryCode(
       recoveryCodeStore,
       challenge.userId,
       body.recoveryCode ?? "",
     );
-    if (!verified.valid) {
+    if (!recoveryCode) {
+      await recordTotpVerifyFailure(attemptScope);
+      return c.json<ApiResponse>({ ok: false, error: "Invalid code" }, 401);
+    }
+    if ((await getMfaBackend().consume(challengeKey)) === null) {
+      return c.json<ApiResponse>({ ok: false, error: "Invalid or expired MFA challenge" }, 401);
+    }
+    if (!(await recoveryCodeStore.markUsed(recoveryCode.id, new Date()))) {
       return c.json<ApiResponse>({ ok: false, error: "Invalid code" }, 401);
     }
     method = "recovery_code";
@@ -7680,9 +7689,10 @@ const completePasskeyMfaHandler = async (c: Context) => {
   }
 
   let verification: Awaited<ReturnType<PasskeyAuth["verifyAuthentication"]>>;
+  const challengeKey = passkeyMfaChallengeKey(session.payload.userId, body.challengeId);
+  let expectedChallenge: string | null = null;
   try {
-    const challengeKey = passkeyMfaChallengeKey(session.payload.userId, body.challengeId);
-    const expectedChallenge = await getChallengeStore().get(challengeKey);
+    expectedChallenge = await getChallengeStore().get(challengeKey);
     if (!expectedChallenge) {
       return c.json<ApiResponse>({ ok: false, error: "Invalid or expired passkey challenge" }, 401);
     }
@@ -7692,9 +7702,6 @@ const completePasskeyMfaHandler = async (c: Context) => {
       cred.credentialPublicKey,
       cred.counter,
     );
-    if ((await getChallengeStore().consume(challengeKey)) === null) {
-      return c.json<ApiResponse>({ ok: false, error: "Invalid or expired passkey challenge" }, 401);
-    }
   } catch {
     return c.json<ApiResponse>({ ok: false, error: "Passkey MFA verification failed" }, 400);
   }
@@ -7717,12 +7724,25 @@ const completePasskeyMfaHandler = async (c: Context) => {
     return c.json<ApiResponse>({ ok: false, error: "Passkey MFA verification failed" }, 401);
   }
 
+  // Failed assertions and clone/counter checks must not burn a valid ceremony.
+  // Claim the challenge only after all verification has succeeded; this is the
+  // one-winner fence for concurrent submissions of the same assertion.
+  if ((await getChallengeStore().consume(challengeKey)) === null) {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid or expired passkey challenge" }, 401);
+  }
+
   const updatedMfaCounters = await getDb()
     .update(authenticators)
     .set({ counter: verification.authenticationInfo.newCounter })
     .where(and(eq(authenticators.id, cred.id), eq(authenticators.counter, cred.counter)))
     .returning({ id: authenticators.id });
   if (updatedMfaCounters.length !== 1) {
+    // This request lost the credential-counter CAS to another valid ceremony.
+    // Restore its independently claimed challenge so the user can retry with
+    // the authenticator's newly advanced counter instead of losing both gates.
+    if (expectedChallenge) {
+      await getChallengeStore().set(challengeKey, expectedChallenge);
+    }
     console.warn(`[PasskeyAuth] Concurrent MFA counter update rejected for credential ${cred.id}`);
     return c.json<ApiResponse>({ ok: false, error: "Passkey MFA verification failed" }, 401);
   }

@@ -382,6 +382,16 @@ describe("SMS OTP auth and TOTP MFA routes", () => {
     expect(mfaRequired.token).toBeUndefined();
     expect(mfaRequired.refreshToken).toBeUndefined();
 
+    const wrongRecoveryRes = await authRoutes.request("/mfa/totp/complete", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        challengeId: mfaRequired.mfa.challengeId,
+        recoveryCode: "ABCDE-ABCDE-ABCD",
+      }),
+    });
+    expect(wrongRecoveryRes.status).toBe(401);
+
     const completeRes = await authRoutes.request("/mfa/totp/complete", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
