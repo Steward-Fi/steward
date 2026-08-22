@@ -253,6 +253,7 @@ describe("platform tenant email config routes", () => {
         "X-Steward-Platform-Key": PLATFORM_KEY,
       },
       body: JSON.stringify({
+        brandName: "Customer App",
         templateId: "customer-template",
         subjectOverride: "Sign in to Customer App",
       }),
@@ -261,9 +262,15 @@ describe("platform tenant email config routes", () => {
     expect(patchResponse.status).toBe(200);
     const patchBody = (await patchResponse.json()) as {
       ok: boolean;
-      data: { templateId?: string; subjectOverride?: string; hasApiKey: boolean };
+      data: {
+        brandName?: string;
+        templateId?: string;
+        subjectOverride?: string;
+        hasApiKey: boolean;
+      };
     };
     expect(patchBody.ok).toBe(true);
+    expect(patchBody.data.brandName).toBe("Customer App");
     expect(patchBody.data.templateId).toBe("customer-template");
     expect(patchBody.data.subjectOverride).toBe("Sign in to Customer App");
     expect(patchBody.data.hasApiKey).toBe(false);
@@ -273,9 +280,18 @@ describe("platform tenant email config routes", () => {
       .from(tenantConfigs)
       .where(eq(tenantConfigs.tenantId, TENANT_ID));
     expect(stored?.emailConfig?.templateId).toBe("customer-template");
+    expect(stored?.emailConfig?.brandName).toBe("Customer App");
     expect(stored?.emailConfig?.apiKeyEncrypted).toBeUndefined();
     expect(stored?.emailConfig?.magicLinkBaseUrl).toBe("https://app.customer.example");
     expect(stored?.emailConfig?.magicLinkCallbackPath).toBe("/auth/email/verify");
+
+    const getResponse = await platformRoutes.request(`/tenants/${TENANT_ID}/email-config`, {
+      headers: { "X-Steward-Platform-Key": PLATFORM_KEY },
+    });
+    const getBody = (await getResponse.json()) as {
+      data: { emailConfig: { brandName?: string } | null };
+    };
+    expect(getBody.data.emailConfig?.brandName).toBe("Customer App");
 
     // from without apiKey is rejected (provider config is all-or-nothing).
     const badResponse = await platformRoutes.request(`/tenants/${TENANT_ID}/email-config`, {
@@ -298,6 +314,21 @@ describe("platform tenant email config routes", () => {
       body: JSON.stringify({}),
     });
     expect(emptyResponse.status).toBe(400);
+
+    for (const brandName of ["", "line one\nline two", "x".repeat(101)]) {
+      const invalidBrandResponse = await platformRoutes.request(
+        `/tenants/${TENANT_ID}/email-config`,
+        {
+          method: "PATCH",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Steward-Platform-Key": PLATFORM_KEY,
+          },
+          body: JSON.stringify({ brandName }),
+        },
+      );
+      expect(invalidBrandResponse.status).toBe(400);
+    }
 
     // Cleanup so later tests see no residual config.
     await platformRoutes.request(`/tenants/${TENANT_ID}/email-config`, {

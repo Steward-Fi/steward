@@ -32,8 +32,13 @@ export function escapeEmailHtml(value: string): string {
 export function renderDefaultTemplate({
   magicLink,
   code,
+  tenantName,
   expiresInMinutes,
 }: MagicLinkTemplateData): RenderedMagicLinkTemplate {
+  const brandName = tenantName?.trim() || "Steward";
+  const escapedBrand = escapeEmailHtml(brandName);
+  const footer =
+    brandName === "Steward" ? "steward.fi — agent wallet infrastructure" : escapedBrand;
   const codeText = code
     ? [
         "Or enter this 6-digit code from the same email challenge:",
@@ -55,7 +60,7 @@ export function renderDefaultTemplate({
           </table>`
     : "";
   return {
-    subject: "Sign in to Steward",
+    subject: `Sign in to ${brandName}`,
     text: [
       "Click the link below to sign in:",
       "",
@@ -65,7 +70,7 @@ export function renderDefaultTemplate({
       `This sign-in email expires in ${expiresInMinutes} minutes.`,
       "If you didn't request this, you can safely ignore this email.",
       "",
-      "— Steward",
+      `— ${brandName}`,
     ].join("\n"),
     html: `<!DOCTYPE html>
 <html lang="en">
@@ -77,14 +82,14 @@ export function renderDefaultTemplate({
         <tr><td align="center" style="padding-bottom:40px;">
           <table cellpadding="0" cellspacing="0"><tr>
             <td style="font-size:20px;font-weight:700;color:#e8e5e0;letter-spacing:-0.02em;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;">
-              ✦&nbsp;&nbsp;steward
+              ✦&nbsp;&nbsp;${escapedBrand}
             </td>
           </tr></table>
         </td></tr>
         <tr><td style="background-color:#141210;border:1px solid #2a2722;padding:40px 32px;">
           <table width="100%" cellpadding="0" cellspacing="0">
             <tr><td style="font-size:22px;font-weight:700;color:#e8e5e0;letter-spacing:-0.02em;padding-bottom:8px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;">
-              Sign in to Steward
+              Sign in to ${escapedBrand}
             </td></tr>
             <tr><td style="font-size:14px;color:#6b6560;line-height:1.5;padding-bottom:32px;">
               Click the button below to securely sign in, or enter the code. This email expires in ${expiresInMinutes} minutes.
@@ -117,7 +122,7 @@ export function renderDefaultTemplate({
               If you didn't request this email, you can safely ignore it.
             </td></tr>
             <tr><td style="font-size:11px;color:#4a4540;padding-top:12px;">
-              steward.fi — agent wallet infrastructure
+              ${footer}
             </td></tr>
           </table>
         </td></tr>

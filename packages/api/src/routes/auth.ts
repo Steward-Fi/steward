@@ -2030,6 +2030,7 @@ function buildGlobalEmailAuth(overrides?: {
   baseUrl?: string;
   callbackPath?: string;
   templateId?: string;
+  brandName?: string;
   subjectOverride?: string;
   replyTo?: string;
   templates?: TenantEmailConfig["templates"];
@@ -2057,6 +2058,7 @@ function buildGlobalEmailAuth(overrides?: {
     tokenStore: getTokenStore(),
     codeVerifierSecret: runtimeEnvironmentValue("STEWARD_EMAIL_CODE_SECRET"),
     templateId: overrides?.templateId,
+    brandName: overrides?.brandName,
     subjectOverride: overrides?.subjectOverride,
     replyTo: overrides?.replyTo,
     ...buildTemplateRenderers(overrides?.templates),
@@ -2115,6 +2117,7 @@ async function createEmailAuthForTenant(tenantId: string): Promise<EmailAuth> {
       baseUrl: magicLinkBaseUrl,
       callbackPath,
       templateId: emailConfig?.templateId,
+      brandName: emailConfig?.brandName,
       subjectOverride: emailConfig?.subjectOverride,
       replyTo: emailConfig?.replyTo,
       templates: emailConfig?.templates,
@@ -2149,6 +2152,7 @@ async function createEmailAuthForTenant(tenantId: string): Promise<EmailAuth> {
     tokenStore: getTokenStore(),
     codeVerifierSecret: runtimeEnvironmentValue("STEWARD_EMAIL_CODE_SECRET"),
     templateId: emailConfig.templateId,
+    brandName: emailConfig.brandName,
     subjectOverride: emailConfig.subjectOverride,
     replyTo: emailConfig.replyTo,
     ...buildTemplateRenderers(emailConfig.templates),

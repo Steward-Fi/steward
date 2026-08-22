@@ -86,6 +86,12 @@ export interface TenantEmailConfig {
   apiKeyEncrypted?: string;
   from?: string;
   replyTo?: string;
+  /**
+   * Display brand used by the built-in magic-link and OTP templates. This
+   * keeps shared-provider tenants branded without requiring raw HTML
+   * templates. Defaults to "Steward" when unset.
+   */
+  brandName?: string;
   templateId?: string;
   subjectOverride?: string;
   /**
