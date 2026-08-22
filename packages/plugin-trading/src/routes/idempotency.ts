@@ -22,7 +22,7 @@ export interface IdempotencyCheck<TRecord extends IdempotencyRecord> {
   inProgress?: boolean;
   record?: TRecord;
   claim?: () => Promise<IdempotencyCheck<TRecord>>;
-  store?: (record: TRecord) => Promise<void>;
+  store?: (record: TRecord) => Promise<boolean>;
   release?: () => Promise<void>;
 }
 
@@ -163,13 +163,16 @@ export class DurableIdempotencyStore<TRecord extends IdempotencyRecord> {
           );
           if (Number(replaced) !== 1) {
             console.error("[idempotency] outcome was not persisted: claim ownership was lost");
+            return false;
           }
+          return true;
         } catch (err) {
           // The pending marker remains fail-closed, preventing a duplicate retry.
           console.error(
             "[idempotency] failed to persist outcome; claim remains pending",
             redactedThrownDiagnostics(err),
           );
+          return false;
         }
       },
       release: async () => {
@@ -271,13 +274,14 @@ export class DurableIdempotencyStore<TRecord extends IdempotencyRecord> {
         return {
           store: async (record) => {
             const current = this.memory.get(mapKey);
-            if (current?.state !== "pending" || current.claimToken !== claimToken) return;
+            if (current?.state !== "pending" || current.claimToken !== claimToken) return false;
             this.memory.set(mapKey, {
               bodyHash,
               state: "completed",
               record,
               expiresAt: Date.now() + IDEMPOTENCY_TTL_MS,
             });
+            return true;
           },
           release: async () => {
             const current = this.memory.get(mapKey);

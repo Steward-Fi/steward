@@ -263,10 +263,14 @@ export function createOperatorRecoveryRoutes(
     return {
       claim: check.claim ? async () => operatorIdempotency(await check.claim!()) : undefined,
       store: check.store
-        ? (response: unknown) => check.store!({ status: 200, body: { ok: true, data: response } })
+        ? async (response: unknown) => {
+            await check.store!({ status: 200, body: { ok: true, data: response } });
+          }
         : undefined,
       storeFailure: check.store
-        ? (errorBody: unknown) => check.store!({ status: 502, body: errorBody })
+        ? async (errorBody: unknown) => {
+            await check.store!({ status: 502, body: errorBody });
+          }
         : undefined,
       release: check.release,
     };

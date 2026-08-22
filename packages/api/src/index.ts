@@ -328,8 +328,17 @@ app.get("/ready", async (c) => {
 // ─── Database migrations (blocking — must complete before serving traffic) ───
 
 if (shouldUsePGLite()) {
+  const { runComposedPluginMigrations } = await import("./compose");
+  const pluginResults = await runComposedPluginMigrations();
+  if (pluginResults.length > 0) {
+    console.log(
+      `[steward] Applied PGLite plugin migrations: ${pluginResults
+        .map((r) => `${r.pluginName}\u2192${r.migrationsTable}`)
+        .join(", ")}`,
+    );
+  }
   migrationsRan = true;
-  console.log("[steward] PGLite mode detected — skipping Postgres migrator.");
+  console.log("[steward] PGLite mode detected — core and plugin migrations are ready.");
 } else if (skipMigrations) {
   migrationsRan = true;
   console.log("[steward] SKIP_MIGRATIONS set — skipping auto-migration. Run migrations manually.");

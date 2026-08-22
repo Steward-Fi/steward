@@ -20,6 +20,7 @@
  * keeps the dependency one-directional (no cycle).
  */
 
+import { fileURLToPath } from "node:url";
 import type { AppVariables, StewardPlugin } from "@stwd/shared";
 import { validateBuilderFeeEnv } from "@stwd/venue-hyperliquid";
 import type { Hono } from "hono";
@@ -32,12 +33,15 @@ export type { StewardAppContext } from "./context";
 export { createEvmSwapRoutes } from "./routes/evm-swap";
 export { createOperatorRecoveryRoutes } from "./routes/operator-recovery";
 export { createTradeRoutes } from "./routes/trade";
+export { tradingOrderOutcomes } from "./schema";
 
 /** the steward app the plugin mounts onto: a hono app with the shared variables. */
 export type StewardApp = Hono<{ Variables: AppVariables }>;
 
 /** a steward plugin concretely bound to the hono app + the injected context. */
 export type StewardApiPlugin = StewardPlugin<StewardApp, StewardAppContext>;
+
+const MIGRATIONS_FOLDER = fileURLToPath(new URL("../drizzle", import.meta.url));
 
 /**
  * Operator fund-recovery path predicate. These trade paths use the OPERATOR gate
@@ -98,6 +102,10 @@ export const TRADING_WEBHOOK_EVENTS = [
 export const tradingPlugin: StewardApiPlugin = {
   name: "trading",
   version: "0.1.0",
+  migrations: {
+    id: "trading",
+    migrationsFolder: MIGRATIONS_FOLDER,
+  },
   // declarative contribution: the trading lifecycle webhook event names. the host
   // merges these into the core's runtime event registry so they are valid to
   // subscribe to. register() below is unchanged (back-compat).

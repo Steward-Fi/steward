@@ -67,6 +67,7 @@ import {
   getDb,
   hasTenantTransactionDatabase,
   pluginMigrationsTable,
+  type RunPluginMigrationsOptions,
   runPluginMigrations,
   withDatabaseDeadline,
   withTenantAuditedTransaction,
@@ -104,6 +105,7 @@ import {
   safeJsonParse,
   tenantAuth,
   vault,
+  withAuthenticatedTenantDatabase,
 } from "./services/context";
 import { createEnvEvmSimulator, type EvmSimulator } from "./services/evm-simulator";
 import { CONFIGURED_WEBHOOK_EVENT_TYPES } from "./services/webhook-events";
@@ -193,6 +195,7 @@ export interface StewardAppContext {
   safeJsonParse: typeof safeJsonParse;
   isValidAnyAddress: typeof isValidAnyAddress;
   writeAuditEvent: typeof writeAuditEvent;
+  withAuthenticatedTenantDatabase: typeof withAuthenticatedTenantDatabase;
   withTenantAuditedTransaction: typeof withTenantAuditedTransaction;
   withCredentialLeaseDatabaseDeadline<T>(
     deadlineAt: number,
@@ -275,6 +278,7 @@ export function buildPluginContext(): StewardAppContext {
     safeJsonParse,
     isValidAnyAddress,
     writeAuditEvent,
+    withAuthenticatedTenantDatabase,
     withTenantAuditedTransaction,
     withCredentialLeaseDatabaseDeadline: (deadlineAt, use) => {
       if (hasTenantTransactionDatabase()) {
@@ -733,13 +737,13 @@ export class PluginHost<Ctx> {
    *   written to (for diagnostics / isolation assertions). Empty if no plugin
    *   declared a migration source.
    */
-  async runMigrations(): Promise<
-    Array<{ pluginName: string; id: string; migrationsTable: string }>
-  > {
+  async runMigrations(
+    options: RunPluginMigrationsOptions = {},
+  ): Promise<Array<{ pluginName: string; id: string; migrationsTable: string }>> {
     const results: Array<{ pluginName: string; id: string; migrationsTable: string }> = [];
     for (const { pluginName, source } of this.migrationSources) {
       try {
-        const { id, migrationsTable } = await runPluginMigrations(source);
+        const { id, migrationsTable } = await runPluginMigrations(source, options);
         results.push({ pluginName, id, migrationsTable });
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);

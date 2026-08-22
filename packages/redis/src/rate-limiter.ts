@@ -10,6 +10,7 @@
 
 import { randomUUID } from "node:crypto";
 import { getRedis } from "./client.js";
+import type { IoredisLike } from "./upstash-adapter.js";
 
 // KEYS[1]=zset  ARGV: now, windowStart, maxRequests, member, ttlMs
 // Prune the window, count, and add the member only if strictly under the
@@ -70,9 +71,9 @@ export async function checkRateLimit(
   key: string,
   windowMs: number,
   maxRequests: number,
+  redis: IoredisLike = getRedis(),
 ): Promise<RateLimitResult> {
   validateRateLimitInput(key, windowMs, maxRequests);
-  const redis = getRedis();
   const now = Date.now();
   const windowStart = now - windowMs;
 

@@ -16,8 +16,8 @@
  * /trade + /v1/trade.
  */
 
-import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from "node:crypto";
-import { agentPolicies, eq, getDb, proxyAuditLog } from "@stwd/db";
+import { createCipheriv, createDecipheriv, createHash, randomBytes, scryptSync } from "node:crypto";
+import { agentPolicies, and, eq, getDb, proxyAuditLog } from "@stwd/db";
 import {
   assetAllowlistEvaluator,
   evaluateTradeOrder,
@@ -25,7 +25,12 @@ import {
   tradeVenueAllowlistEvaluator,
 } from "@stwd/policy-engine";
 import { checkRateLimit } from "@stwd/redis";
-import { type ApiResponse, type AppVariables, redactedThrownDiagnostics } from "@stwd/shared";
+import {
+  type ApiResponse,
+  type AppVariables,
+  canonicalJsonStringify,
+  redactedThrownDiagnostics,
+} from "@stwd/shared";
 import { type TradeSession, TradeSessionManager } from "@stwd/trade-sessions";
 import {
   getMarketableLimitPx,
@@ -53,6 +58,7 @@ import type { Context } from "hono";
 import { Hono } from "hono";
 import { z } from "zod";
 import type { StewardAppContext } from "../context";
+import { tradingOrderOutcomes } from "../schema";
 import { DurableIdempotencyStore } from "./idempotency";
 
 // Prediction-market session asset: pm:<tokenId> (a single outcome token) or
@@ -168,6 +174,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
     ensureAgentForTenant,
     safeJsonParse,
     writeAuditEvent,
+    withAuthenticatedTenantDatabase,
     getAgentTokenStatus,
     getRedisClient,
   } = ctx;
@@ -321,12 +328,111 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
     return JSON.stringify(body);
   }
 
+  function sha256(value: string): string {
+    return createHash("sha256").update(value, "utf8").digest("hex");
+  }
+
+  function durableOutcomeId(
+    tenantId: string,
+    agentId: string,
+    venue: string,
+    idempotencyKeyHash: string,
+  ): string {
+    return sha256(
+      `${tenantId.length}:${tenantId}${agentId.length}:${agentId}${venue.length}:${venue}${idempotencyKeyHash}`,
+    );
+  }
+
+  const durableEnvelopeSchema = z.object({
+    status: z.union([z.literal(200), z.literal(400)]),
+    body: z.record(z.string(), z.unknown()),
+    headers: z.record(z.string(), z.string()).optional(),
+  });
+
+  async function findDurableHyperliquidOutcome(
+    tenantId: string,
+    agentId: string,
+    idempotencyKey: string,
+    bodyHash: string,
+  ): Promise<{ conflict?: true; response?: TradeIdempotencyResponse }> {
+    const keyHash = sha256(idempotencyKey);
+    const [row] = await withAuthenticatedTenantDatabase(tenantId, "agent-jwt-rs256", agentId, () =>
+      db
+        .select({
+          requestHash: tradingOrderOutcomes.requestHash,
+          httpStatus: tradingOrderOutcomes.httpStatus,
+          response: tradingOrderOutcomes.response,
+        })
+        .from(tradingOrderOutcomes)
+        .where(
+          and(
+            eq(tradingOrderOutcomes.tenantId, tenantId),
+            eq(tradingOrderOutcomes.agentId, agentId),
+            eq(tradingOrderOutcomes.venue, "hyperliquid"),
+            eq(tradingOrderOutcomes.idempotencyKeyHash, keyHash),
+          ),
+        ),
+    );
+    if (!row) return {};
+    if (row.requestHash !== sha256(bodyHash)) return { conflict: true };
+    const parsed = durableEnvelopeSchema.safeParse(row.response);
+    if (!parsed.success || parsed.data.status !== row.httpStatus) {
+      throw new Error("Malformed durable Hyperliquid terminal outcome");
+    }
+    return { response: parsed.data as TradeIdempotencyResponse };
+  }
+
+  async function persistDurableHyperliquidOutcome(
+    tenantId: string,
+    agentId: string,
+    idempotencyKey: string,
+    bodyHash: string,
+    envelope: TradeIdempotencyResponse,
+  ): Promise<void> {
+    if (envelope.status !== 200 && envelope.status !== 400) {
+      throw new Error("Only definite Hyperliquid outcomes may be persisted as terminal");
+    }
+    const idempotencyKeyHash = sha256(idempotencyKey);
+    await withAuthenticatedTenantDatabase(tenantId, "agent-jwt-rs256", agentId, () =>
+      db
+        .insert(tradingOrderOutcomes)
+        .values({
+          id: durableOutcomeId(tenantId, agentId, "hyperliquid", idempotencyKeyHash),
+          tenantId,
+          agentId,
+          venue: "hyperliquid",
+          idempotencyKeyHash,
+          requestHash: sha256(bodyHash),
+          httpStatus: envelope.status,
+          response: envelope as unknown as Record<string, unknown>,
+        })
+        .onConflictDoNothing(),
+    );
+    const durable = await findDurableHyperliquidOutcome(
+      tenantId,
+      agentId,
+      idempotencyKey,
+      bodyHash,
+    );
+    if (durable.conflict || !durable.response) {
+      throw new Error("Durable Hyperliquid terminal outcome could not be verified");
+    }
+    if (canonicalJsonStringify(durable.response) !== canonicalJsonStringify(envelope)) {
+      throw new Error("Durable Hyperliquid terminal outcome disagrees with venue response");
+    }
+  }
+
   async function enforceOrderRateLimit(
     agentId: string,
   ): Promise<{ allowed: boolean; resetMs: number }> {
     const redis = getRedisClient();
     if (redis) {
-      const result = await checkRateLimit(`ratelimit:trade:hyperliquid:${agentId}:1000`, 1000, 10);
+      const result = await checkRateLimit(
+        `ratelimit:trade:hyperliquid:${agentId}:1000`,
+        1000,
+        10,
+        redis,
+      );
       return { allowed: result.allowed, resetMs: result.resetMs };
     }
 
@@ -346,7 +452,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
     inProgress?: boolean;
     response?: TradeIdempotencyResponse;
     claim?: () => Promise<RouteIdempotency>;
-    store?: (response: TradeIdempotencyResponse) => Promise<void>;
+    store?: (response: TradeIdempotencyResponse) => Promise<boolean>;
     release?: () => Promise<void>;
   };
 
@@ -369,11 +475,13 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
     key: string | undefined,
     body: SubmitOrderBody,
   ): Promise<RouteIdempotency> {
-    const check = await hlIdempotencyStore.check(
-      `${tenantId}:${agentId}`,
-      key,
-      hashBody({ ...body, idempotencyKey: undefined }),
-    );
+    const bodyHash = hashBody({ ...body, idempotencyKey: undefined });
+    if (key) {
+      const durable = await findDurableHyperliquidOutcome(tenantId, agentId, key, bodyHash);
+      if (durable.conflict) return { conflict: true };
+      if (durable.response) return { response: durable.response };
+    }
+    const check = await hlIdempotencyStore.check(`${tenantId}:${agentId}`, key, bodyHash);
     return routeIdempotency(check);
   }
 
@@ -466,11 +574,12 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
   async function completeTradeIdempotencyBestEffort(
     idempotency: Awaited<ReturnType<typeof getIdempotency>>,
     envelope: TradeIdempotencyResponse,
-  ): Promise<void> {
+  ): Promise<boolean> {
     try {
-      await idempotency.store?.(envelope);
+      return (await idempotency.store?.(envelope)) ?? false;
     } catch {
       // Idempotency replay is best effort for this in-memory fallback path.
+      return false;
     }
   }
 
@@ -924,8 +1033,9 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
     if (!body.idempotencyKey) {
       return c.json<ApiResponse>({ ok: false, error: "Idempotency-Key is required" }, 400);
     }
+    const idempotencyKey = body.idempotencyKey;
 
-    let idempotency = await getIdempotency(tenantId, agentId, body.idempotencyKey, body);
+    let idempotency = await getIdempotency(tenantId, agentId, idempotencyKey, body);
     if (idempotency.conflict) {
       return c.json<ApiResponse>(
         { ok: false, error: "Idempotency key reused with a different body" },
@@ -1279,6 +1389,13 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
               data: { status: result.status },
             },
           };
+          await persistDurableHyperliquidOutcome(
+            tenantId,
+            agentId,
+            idempotencyKey,
+            hashBody({ ...body, idempotencyKey: undefined }),
+            envelope,
+          );
           await auditTradeEvent(tenantId, agentId, "trade.order.canceled", {
             sessionId: session.id,
             venue: "hyperliquid",
@@ -1307,6 +1424,13 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
           status: 200,
           body: responseData(response),
         };
+        await persistDurableHyperliquidOutcome(
+          tenantId,
+          agentId,
+          idempotencyKey,
+          hashBody({ ...body, idempotencyKey: undefined }),
+          envelope,
+        );
         try {
           await auditTradeEvent(tenantId, agentId, "trade.order.submitted", {
             sessionId: session.id,

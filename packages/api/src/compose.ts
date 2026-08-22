@@ -33,6 +33,7 @@
  * the exact pre-refactor ordering (trade auth -> idempotency -> trade routes).
  */
 
+import type { RunPluginMigrationsOptions } from "@stwd/db";
 import type { Hono } from "hono";
 import { createApp, mountCoreIdempotencyAndRoutes } from "./app";
 import { buildPluginContext, PluginHost, type StewardApp } from "./plugin";
@@ -220,9 +221,9 @@ export async function composeApp(): Promise<Hono<{ Variables: AppVariables }>> {
  * @returns per-plugin results (id + the namespaced table its ledger was written
  *   to). Empty if no opt-in plugin is enabled / declares a migration source.
  */
-export async function runComposedPluginMigrations(): Promise<
-  Array<{ pluginName: string; id: string; migrationsTable: string }>
-> {
+export async function runComposedPluginMigrations(
+  options?: RunPluginMigrationsOptions,
+): Promise<Array<{ pluginName: string; id: string; migrationsTable: string }>> {
   // PARITY with composeApp: resolve the SAME enabled set from the SAME resolver,
   // and collect migrations for EXACTLY the plugins composeApp registers. a plugin
   // that is disabled contributes NO migrations (its routes are also not mounted)
@@ -255,6 +256,19 @@ export async function runComposedPluginMigrations(): Promise<
       wxmrPlugin: ComposedPlugin;
     };
     host.collectMigrations(wxmrPlugin);
+  }
+
+  if (options) {
+    return host.runMigrations(options);
+  }
+
+  const { shouldUsePGLite, getPGLiteDb } = await import("@stwd/db/pglite");
+  if (shouldUsePGLite()) {
+    const [{ migrate }, db] = await Promise.all([
+      import("drizzle-orm/pglite/migrator"),
+      getPGLiteDb(),
+    ]);
+    return host.runMigrations({ db, useAdvisoryLock: false, migrateFn: migrate });
   }
 
   return host.runMigrations();

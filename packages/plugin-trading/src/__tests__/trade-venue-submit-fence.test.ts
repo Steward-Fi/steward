@@ -51,11 +51,22 @@ import {
   setDefaultTimeout,
   spyOn,
 } from "bun:test";
-import { agents, auditEvents, closeDb, getDb, tenants, tradeSessions } from "@stwd/db";
+import { fileURLToPath } from "node:url";
+import {
+  agents,
+  auditEvents,
+  closeDb,
+  getDb,
+  runPluginMigrations,
+  tenants,
+  tradeSessions,
+} from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
+import type { IoredisLike } from "@stwd/redis";
 import { TradeSessionManager } from "@stwd/trade-sessions";
 import { HyperliquidAdapter } from "@stwd/venue-hyperliquid";
 import { and, eq } from "drizzle-orm";
+import { migrate } from "drizzle-orm/pglite/migrator";
 import { Hono } from "hono";
 import type { AppVariables } from "../services/context";
 
@@ -77,6 +88,33 @@ let submitSpy: ReturnType<typeof spyOn> | undefined;
 let updateLeverageSpy: ReturnType<typeof spyOn> | undefined;
 let fenceSpy: ReturnType<typeof spyOn> | undefined;
 let venueFenceSpy: ReturnType<typeof spyOn> | undefined;
+
+function redisWithFailedCompletionCas(): { client: IoredisLike; values: Map<string, string> } {
+  const values = new Map<string, string>();
+  const client = {
+    get: async (key: string) => values.get(key) ?? null,
+    set: async (...args: Array<string | number>) => {
+      const [key, value, mode, , condition] = args;
+      if (condition === "NX" && values.has(String(key))) return null;
+      values.set(String(key), String(value));
+      return mode === "PX" ? "OK" : "OK";
+    },
+    setex: async (key: string, _seconds: number, value: string) => {
+      values.set(key, value);
+      return "OK";
+    },
+    del: async (...keys: string[]) => {
+      let removed = 0;
+      for (const key of keys) removed += values.delete(key) ? 1 : 0;
+      return removed;
+    },
+    eval: async (script: string) => {
+      if (script.includes("ZREMRANGEBYSCORE")) return [1, 1, String(Date.now())];
+      throw new Error("redis completion CAS unavailable");
+    },
+  } as unknown as IoredisLike;
+  return { client, values };
+}
 
 async function seedSession(
   allowedAssets: string[] = ["BTC"],
@@ -163,6 +201,13 @@ describe("Hyperliquid venue-submit spend-fence (real /hyperliquid/order path)", 
     process.env.STEWARD_AUDIT_HMAC_KEY ??=
       "venue-submit-fence-test-audit-hmac-key-0123456789abcdef";
     const { db, client } = await createPGLiteDb("memory://");
+    await runPluginMigrations(
+      {
+        id: "trading-test",
+        migrationsFolder: fileURLToPath(new URL("../../drizzle", import.meta.url)),
+      },
+      { db, useAdvisoryLock: false, migrateFn: migrate as never },
+    );
     setPGLiteOverride(db, async () => {
       await client.close();
     });
@@ -400,11 +445,52 @@ describe("Hyperliquid venue-submit spend-fence (real /hyperliquid/order path)", 
     expect(((await response.json()) as { data: { orderId: string } }).data.orderId).toBe(
       "hl-audit-failure-terminal",
     );
-    const replay = await postOrder(app, sessionId, key);
+    const replayRoutes = createTradeRoutes(baseCtx);
+    const replay = await postOrder(makeApp(tenantId, agentId, replayRoutes), sessionId, key);
     expect(replay.status).toBe(200);
     expect(replay.headers.get("Idempotency-Replayed")).toBe("true");
     expect(((await replay.json()) as { data: { orderId: string } }).data.orderId).toBe(
       "hl-audit-failure-terminal",
+    );
+    expect(submitSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("replays from PostgreSQL when Redis completion CAS leaves the claim pending", async () => {
+    const { createTradeRoutes } = await import("../routes/trade");
+    const { testCtx } = await import("./_ctx");
+    const redis = redisWithFailedCompletionCas();
+    const baseCtx = testCtx();
+    const routes = createTradeRoutes({ ...baseCtx, getRedisClient: () => redis.client });
+    const { tenantId, agentId, sessionId } = await seedSession();
+    const app = makeApp(tenantId, agentId, routes);
+    signSpy = spyOn(HyperliquidAdapter.prototype, "signOrder").mockResolvedValue(
+      {} as Awaited<ReturnType<HyperliquidAdapter["signOrder"]>>,
+    );
+    submitSpy = spyOn(HyperliquidAdapter.prototype, "submitOrder").mockResolvedValue({
+      orderId: "hl-durable-db-replay",
+      status: "filled",
+      filledQty: 1,
+      avgPrice: 10,
+    } as Awaited<ReturnType<HyperliquidAdapter["submitOrder"]>>);
+
+    const key = crypto.randomUUID();
+    const response = await postOrder(app, sessionId, key);
+    expect(response.status).toBe(200);
+    expect(((await response.json()) as { data: { orderId: string } }).data.orderId).toBe(
+      "hl-durable-db-replay",
+    );
+    expect([...redis.values.values()].some((value) => value.includes('"state":"pending"'))).toBe(
+      true,
+    );
+
+    // A fresh router has an empty process-local store. PostgreSQL must win over
+    // the stale Redis pending marker and replay without touching the venue.
+    const restartedRoutes = createTradeRoutes({ ...baseCtx, getRedisClient: () => redis.client });
+    const replay = await postOrder(makeApp(tenantId, agentId, restartedRoutes), sessionId, key);
+    expect(replay.status).toBe(200);
+    expect(replay.headers.get("Idempotency-Replayed")).toBe("true");
+    expect(((await replay.json()) as { data: { orderId: string } }).data.orderId).toBe(
+      "hl-durable-db-replay",
     );
     expect(submitSpy).toHaveBeenCalledTimes(1);
   });

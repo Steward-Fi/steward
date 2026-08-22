@@ -118,7 +118,7 @@ describe("DurableIdempotencyStore (SEC-043)", () => {
     await expect(store.check("scope", "key-1", "hash-1")).rejects.toThrow("redis down");
   });
 
-  it("swallows a Redis store error (the movement already executed; caller gets the real outcome)", async () => {
+  it("reports a swallowed Redis store error so callers can require a durable fallback", async () => {
     const data = new Map<string, string>();
     const broken = {
       get: async () => null,
@@ -136,7 +136,7 @@ describe("DurableIdempotencyStore (SEC-043)", () => {
     });
     const initial = await store.check("scope", "key-1", "hash-1");
     const check = await initial.claim?.();
-    await expect(check.store?.({ status: 200, body: {} })).resolves.toBeUndefined();
+    await expect(check.store?.({ status: 200, body: {} })).resolves.toBe(false);
   });
 
   it("falls back to bounded process-local memory without Redis (replay in-process only)", async () => {

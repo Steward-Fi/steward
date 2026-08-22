@@ -297,17 +297,16 @@ describe("parity — migration composition mirrors route composition", () => {
   });
 
   it("FULL: runComposedPluginMigrations() collects trading without throwing", async () => {
-    // The trading plugin declares NO migration source today (its tables ship via
-    // core migrations), so the APPLIED list is still empty in full mode — what
-    // this proves is the COLLECTION seam ran with trading enabled (no throw).
-    // If/when trading declares a migration source, full-mode applies it into the
-    // namespaced table and lean-mode skips it (asserted above).
+    // Trading owns its durable venue-outcome table. Full composition must apply
+    // that migration into the plugin's namespaced journal, while lean mode above
+    // remains byte-for-byte free of the plugin schema.
     const restore = withPlugins("trading");
     try {
       const results = await runComposedPluginMigrations();
-      expect(Array.isArray(results)).toBe(true);
-      // no trading-applied entry today (no declared source), but the path ran.
-      expect(results.find((r) => r.pluginName === "trading")).toBeUndefined();
+      expect(results.find((r) => r.pluginName === "trading")).toMatchObject({
+        id: "trading",
+        migrationsTable: "__drizzle_migrations_plugin_trading",
+      });
     } finally {
       restore();
     }

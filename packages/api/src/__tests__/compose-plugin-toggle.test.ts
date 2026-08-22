@@ -119,23 +119,17 @@ describe("compose plugin toggle — FULL (trading)", () => {
   });
 
   it("runComposedPluginMigrations() COLLECTS the trading plugin in full mode", async () => {
-    // NOTE: the trading plugin declares NO `migrations` source today (its tables
-    // ship via core migrations, e.g. 0023_trade_sessions.sql), so the APPLIED
-    // result is an empty array even in full mode. What this test proves is the
-    // PARITY contract at the collection seam: in full mode the resolver enables
-    // "trading" so the path collects the trading plugin (any migrations it
-    // declared would be applied) and returns WITHOUT throwing; the lean test
-    // above proves lean mode early-returns BEFORE collecting trading at all. so
-    // if/when trading declares a migration source, full-mode applies it and
-    // lean-mode skips it — routes and migrations stay both-on or both-off.
+    // The terminal venue-outcome table belongs to the trading plugin. Full mode
+    // applies it through the plugin-owned journal; the lean assertion above proves
+    // the migration and routes stay both-on or both-off.
     const restore = withPlugins("trading");
     try {
       const { runComposedPluginMigrations } = await import("../compose");
       const results = await runComposedPluginMigrations();
-      // trading has no declared migration source today → nothing applied. (No
-      // throw = the collection path ran with trading enabled.)
-      expect(Array.isArray(results)).toBe(true);
-      expect(results.find((r) => r.pluginName === "trading")).toBeUndefined();
+      expect(results.find((r) => r.pluginName === "trading")).toMatchObject({
+        id: "trading",
+        migrationsTable: "__drizzle_migrations_plugin_trading",
+      });
     } finally {
       restore();
     }

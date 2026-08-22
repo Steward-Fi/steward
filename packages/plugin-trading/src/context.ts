@@ -94,6 +94,13 @@ export interface StewardAppContext {
 
   // ── audit + token status (from @stwd/api services) ────────────────────────
   writeAuditEvent(ev: AuditEventInput): Promise<void>;
+  withAuthenticatedTenantDatabase<T>(
+    tenantId: string,
+    method: string,
+    subject: string,
+    callback: () => Promise<T>,
+    userId?: string,
+  ): Promise<T>;
   getAgentTokenStatus(agentId: string): Promise<AgentTokenStatus | null>;
 
   // ── redis (from @stwd/api middleware/redis) ───────────────────────────────
