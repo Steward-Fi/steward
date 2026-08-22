@@ -9,13 +9,11 @@ import { afterEach, describe, expect, it } from "bun:test";
 import { signAgentToken, signIdentityJwtPayload } from "@stwd/auth/jwt";
 import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 import { decodeJwt, decodeProtectedHeader, exportPKCS8, generateKeyPair, jwtVerify } from "jose";
-import worker, { hydrateProcessEnv, withWorkerJwtAuthority } from "../worker";
+import worker, { withWorkerJwtAuthority } from "../worker";
 
 /**
- * Keys this file mutates: bindings hydrateProcessEnv copies onto the global
- * process.env, plus ambient suite values (see test-preload.ts) that some cases
- * must clear to simulate a misconfigured deployment. All restored after each
- * test.
+ * Ambient suite values (see test-preload.ts) that some cases must clear to
+ * simulate a misconfigured deployment. All are restored after each test.
  */
 const MANAGED_KEYS = [
   "STEWARD_RUNTIME",
@@ -207,22 +205,26 @@ describe("workers boot JWT env validation (SEC-134)", () => {
     snapshotEnv();
     const firstSecret = "workers-first-rotated-secret-at-least-32-chars";
     const rotatedSecret = "workers-second-rotated-secret-at-least-32-chars";
-    hydrateProcessEnv({
+    const firstEnv = {
       STEWARD_JWT_SECRET: firstSecret,
       AGENT_TOKEN_EXPIRY: "1h",
       DATABASE_URL: "unused",
-    });
-    const firstToken = await signAgentToken({ agentId: "worker-agent", tenantId: "worker-tenant" });
+    };
+    const firstToken = await withWorkerJwtAuthority(firstEnv, () =>
+      signAgentToken({ agentId: "worker-agent", tenantId: "worker-tenant" }),
+    );
     const first = decodeJwt(firstToken);
-    hydrateProcessEnv({
+    const rotatedEnv = {
       STEWARD_JWT_SECRET: rotatedSecret,
       AGENT_TOKEN_EXPIRY: "5m",
       DATABASE_URL: "unused",
-    });
-    const rotatedToken = await signAgentToken({
-      agentId: "worker-agent",
-      tenantId: "worker-tenant",
-    });
+    };
+    const rotatedToken = await withWorkerJwtAuthority(rotatedEnv, () =>
+      signAgentToken({
+        agentId: "worker-agent",
+        tenantId: "worker-tenant",
+      }),
+    );
     const rotated = decodeJwt(rotatedToken);
 
     expect((first.exp ?? 0) - (first.iat ?? 0)).toBe(3600);
@@ -260,7 +262,6 @@ describe("workers boot JWT env validation (SEC-134)", () => {
     });
 
     const firstMint = withWorkerJwtAuthority(firstEnv, async () => {
-      hydrateProcessEnv(firstEnv);
       markFirstReady();
       await firstBarrier;
       return signAgentToken({ agentId: "worker-first", tenantId: "worker-tenant" });
@@ -270,9 +271,6 @@ describe("workers boot JWT env validation (SEC-134)", () => {
     let secondToken: string;
     try {
       secondToken = await withWorkerJwtAuthority(secondEnv, async () => {
-        // This is the hostile interleaving: overwrite the isolate-wide mirror
-        // while the first invocation is suspended before it mints.
-        hydrateProcessEnv(secondEnv);
         return signAgentToken({ agentId: "worker-second", tenantId: "worker-tenant" });
       });
     } finally {
@@ -332,7 +330,6 @@ describe("workers boot JWT env validation (SEC-134)", () => {
     });
 
     const firstMint = withWorkerJwtAuthority(firstEnv, async () => {
-      hydrateProcessEnv(firstEnv);
       markFirstReady();
       await firstBarrier;
       return signIdentityJwtPayload({ sub: "worker-first" });
@@ -342,7 +339,6 @@ describe("workers boot JWT env validation (SEC-134)", () => {
     let secondToken: string;
     try {
       secondToken = await withWorkerJwtAuthority(secondEnv, async () => {
-        hydrateProcessEnv(secondEnv);
         return signIdentityJwtPayload({ sub: "worker-second" });
       });
     } finally {

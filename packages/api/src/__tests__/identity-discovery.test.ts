@@ -10,7 +10,7 @@ import { closeDb, getDb, tenants, users, userTenants } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { decodeProtectedHeader, exportPKCS8, generateKeyPair, importJWK, jwtVerify } from "jose";
 import { identityDiscoveryRoutes } from "../routes/discovery";
-import { hydrateProcessEnv, withWorkerJwtAuthority } from "../worker";
+import { withWorkerJwtAuthority, withWorkerRuntimeAuthority } from "../worker";
 
 const ORIGINAL_ENV = {
   NODE_ENV: process.env.NODE_ENV,
@@ -147,18 +147,20 @@ describe("identity JWKS discovery", () => {
     const firstBarrier = new Promise<void>((resolve) => {
       releaseFirst = resolve;
     });
-    const firstRun = withWorkerJwtAuthority(firstEnv, async () => {
-      hydrateProcessEnv(firstEnv);
-      markFirstReady();
-      await firstBarrier;
-      return exerciseRoutes(firstUserId, "https://request-a.invalid");
-    });
+    const firstRun = withWorkerRuntimeAuthority(firstEnv, () =>
+      withWorkerJwtAuthority(firstEnv, async () => {
+        markFirstReady();
+        await firstBarrier;
+        return exerciseRoutes(firstUserId, "https://request-a.invalid");
+      }),
+    );
     await firstReady;
 
-    const secondRun = withWorkerJwtAuthority(secondEnv, async () => {
-      hydrateProcessEnv(secondEnv);
-      return exerciseRoutes(secondUserId, "https://request-b.invalid");
-    });
+    const secondRun = withWorkerRuntimeAuthority(secondEnv, () =>
+      withWorkerJwtAuthority(secondEnv, () =>
+        exerciseRoutes(secondUserId, "https://request-b.invalid"),
+      ),
+    );
     const [secondResult, firstResult] = await Promise.all([
       Promise.resolve(secondRun).finally(releaseFirst),
       firstRun,
@@ -276,14 +278,15 @@ describe("identity JWKS discovery", () => {
       STEWARD_IDENTITY_JWT_AUDIENCE: "explicit-worker-audience",
       APP_URL: "https://canonical.worker.test/",
     };
-    const result = await withWorkerJwtAuthority(workerEnv, async () => {
-      hydrateProcessEnv(workerEnv);
-      const token = await signIdentityJwtPayload({ sub: "explicit-base" });
-      const response = await identityDiscoveryRoutes.request(
-        "https://ignored-request-host.invalid/.well-known/openid-configuration",
-      );
-      return { token, response };
-    });
+    const result = await withWorkerRuntimeAuthority(workerEnv, () =>
+      withWorkerJwtAuthority(workerEnv, async () => {
+        const token = await signIdentityJwtPayload({ sub: "explicit-base" });
+        const response = await identityDiscoveryRoutes.request(
+          "https://ignored-request-host.invalid/.well-known/openid-configuration",
+        );
+        return { token, response };
+      }),
+    );
     expect(result.response.status).toBe(200);
     expect(await result.response.json()).toMatchObject({
       issuer: "https://canonical.worker.test",

@@ -43,8 +43,8 @@
  */
 
 // Import the dependency-light JWT module directly. Importing the auth barrel
-// here would evaluate Worker-sensitive auth modules before bindings are
-// hydrated into process.env.
+// here would evaluate Worker-sensitive auth modules before request authority is
+// bound.
 import {
   createJwtRuntimeAuthority,
   type JwtRuntimeEnvironment,
@@ -320,53 +320,6 @@ export async function runWorkerXCredentialLifecycleSweep(
   });
 }
 
-/**
- * Pull Worker `env` bindings into `globalThis.process.env` so any code that
- * reads `runtimeEnvironmentValue("X")` at request time (e.g. JWT secret, RPC URL) can find it.
- *
- * Workers expose `nodejs_compat`'s `process.env` as an empty object on cold
- * boot — bindings come in via the `fetch` handler's `env` argument instead.
- * This runs on EVERY request (SEC-148): Workers may reuse isolates across
- * different deployments (and therefore different binding sets), and rotated
- * bindings/secrets must take effect without waiting for an isolate recycle.
- * Keys we hydrated that disappear from a later binding set are deleted again
- * so stale values cannot linger. Module-init-time readers still see only the
- * first binding set an isolate ever served (imports are cached per isolate) —
- * that is inherent to the module registry and unchanged by this.
- *
- * Known trade-off (accepted, SEC-148): string bindings — including secrets —
- * are copied onto the global `process.env` only for audited compatibility
- * callers. Security and routing decisions resolve the immutable request
- * snapshot and must not depend on this bridge.
- */
-const hydratedEnvKeys = new Set<string>();
-
-export function hydrateProcessEnv(env: Env): void {
-  const target = (globalThis as any).process?.env;
-  if (!target) return;
-
-  const present = new Set<string>();
-  for (const key of Object.keys(env)) {
-    if (key === "STEWARD_RUNTIME") continue;
-    const value = env[key];
-    if (typeof value === "string") {
-      target[key] = value;
-      present.add(key);
-    }
-  }
-  for (const key of hydratedEnvKeys) {
-    if (!present.has(key)) delete target[key];
-  }
-  hydratedEnvKeys.clear();
-  for (const key of present) hydratedEnvKeys.add(key);
-  target.STEWARD_RUNTIME = "workers";
-}
-
-/** @internal prevent mounted Worker tests from changing later Bun test authority. */
-export function __resetWorkerHydrationForTests(): void {
-  hydratedEnvKeys.clear();
-}
-
 const workerInitByAuthority = new Map<string, Promise<void>>();
 let workerInitOverride: Promise<void> | null = null;
 
@@ -404,7 +357,7 @@ function workerJwtEnvironment(env: Env): Readonly<JwtRuntimeEnvironment> {
 /**
  * Bind authentication-critical Worker configuration before any request code
  * can yield. Downstream JWT signing and verification resolve this immutable
- * authority rather than the isolate-wide process.env compatibility mirror.
+ * authority rather than isolate-wide state.
  */
 export function withWorkerJwtAuthority<T>(env: Env, callback: () => T): T {
   const authority = createJwtRuntimeAuthority(workerJwtEnvironment(env));
@@ -418,8 +371,7 @@ export function withWorkerRuntimeAuthority<T>(env: Env, callback: () => T): T {
 
 function validateWorkerSecurityEnv(): void {
   // The request authority was resolved synchronously from this invocation's
-  // bindings. This validation never consults the process.env compatibility
-  // mirror, even after another request hydrates a different binding set.
+  // bindings and never consults another invocation's authority.
   validateJwtSecretEnv();
 }
 
@@ -429,9 +381,6 @@ async function ensureWorkerInit(env: Env): Promise<void> {
   const existing = workerInitByAuthority.get(authorityKey);
   if (existing) return existing;
   const pending = (async () => {
-    // Workers bindings are only available inside fetch(). Hydrate process.env
-    // before importing app modules that read required env at module init.
-    hydrateProcessEnv(env);
     // SEC-134: the Bun entry (index.ts) runs validateJwtSecretEnv() at startup;
     // run the same validation on the Workers boot path so a bad/missing JWT
     // secret or malformed AGENT_TOKEN_EXPIRY fails closed at cold start instead
@@ -532,11 +481,7 @@ async function getComposedApp() {
 export default {
   async fetch(request: Request, env: Env, ctx: unknown): Promise<Response> {
     return withWorkerRuntimeAuthority(env, async () => {
-      // Keep the legacy bridge for modules not yet migrated to request-local
-      // configuration. Security-sensitive OIDC settings use the immutable
-      // snapshot above and cannot be replaced by an overlapping request.
       return withWorkerJwtAuthority(env, async () => {
-        hydrateProcessEnv(env);
         validateWorkerSecurityEnv();
         const executionCtx = ctx as { waitUntil?: (promise: Promise<unknown>) => void };
         const waitUntil =
@@ -562,7 +507,6 @@ export default {
   ) {
     withWorkerRuntimeAuthority(env, () => {
       return withWorkerJwtAuthority(env, () => {
-        hydrateProcessEnv(env);
         validateWorkerSecurityEnv();
         const scheduledWork = withWorkerRequestDatabase(env, () => ensureWorkerInit(env)).then(() =>
           Promise.all([

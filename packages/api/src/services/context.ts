@@ -322,10 +322,6 @@ export const DATABASE_URL =
   runtimeEnvironmentValue("DATABASE_URL")?.trim() ||
   (isPGLiteRuntime ? "" : requireEnv("DATABASE_URL"));
 
-if (runtimeEnvironmentValue("DATABASE_URL")) {
-  process.env.DATABASE_URL = DATABASE_URL;
-}
-
 // ─── Singletons ───────────────────────────────────────────────────────────────
 
 // `db` is a late-bound Proxy over getDb() rather than a captured handle.

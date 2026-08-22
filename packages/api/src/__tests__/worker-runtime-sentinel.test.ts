@@ -9,11 +9,10 @@ import {
   waitUntilRequestDatabaseTask,
 } from "@stwd/db";
 import { createPGLiteDb } from "@stwd/db/pglite";
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 import {
-  __resetWorkerHydrationForTests,
   __setWorkerComposedAppForTests,
   __setWorkerInitForTests,
-  hydrateProcessEnv,
   runWorkerGoogleCredentialLifecycleSweep,
   runWorkerUpstreamCredentialLeaseSweep,
   runWorkerXCredentialLifecycleSweep,
@@ -123,8 +122,7 @@ test("mounted fetch and scheduled consumers retain hostile overlapping authoriti
     GOOGLE_PROVIDER_CLIENT_ID: "runtime-google-client",
     GOOGLE_PROVIDER_CLIENT_SECRET: "runtime-google-secret",
   } as const;
-  const hydratedKeys = [...Object.keys(common), "STEWARD_SWAP_ADAPTER"];
-  const previousEnvironment = new Map(hydratedKeys.map((key) => [key, process.env[key]] as const));
+  const processEnvironmentBefore = { ...process.env };
   try {
     const fetchResponse = worker.fetch(
       new Request("https://steward.test/consumer"),
@@ -146,12 +144,14 @@ test("mounted fetch and scheduled consumers retain hostile overlapping authoriti
       },
     );
     await scheduledWork;
+    expect({ ...process.env }).toEqual(processEnvironmentBefore);
     releaseFetch();
     expect(await (await fetchResponse).text()).toBe("mock");
     expect(scheduledProviders).toEqual(["disabled"]);
 
     const missing = await worker.fetch(new Request("https://steward.test/missing"), common, {});
     expect(await missing.text()).toBe("disabled");
+    expect({ ...process.env }).toEqual(processEnvironmentBefore);
   } finally {
     releaseFetch();
     __setWorkerComposedAppForTests(null);
@@ -160,26 +160,22 @@ test("mounted fetch and scheduled consumers retain hostile overlapping authoriti
     upstreamSpy.mockRestore();
     googleSpy.mockRestore();
     xSpy.mockRestore();
-    __resetWorkerHydrationForTests();
-    for (const [key, value] of previousEnvironment) {
-      if (value === undefined) delete process.env[key];
-      else process.env[key] = value;
-    }
   }
 });
 
-test("Worker hydration cannot be overridden by a STEWARD_RUNTIME binding", () => {
-  const previous = process.env.STEWARD_RUNTIME;
-  try {
-    hydrateProcessEnv({
+test("Worker authority cannot mutate process.env or accept a runtime override", async () => {
+  const processEnvironmentBefore = { ...process.env };
+  await withWorkerRuntimeAuthority(
+    {
       DATABASE_URL: "postgresql://worker.invalid/steward",
       STEWARD_RUNTIME: "bun",
-    });
-    expect(process.env.STEWARD_RUNTIME).toBe("workers");
-  } finally {
-    if (previous === undefined) delete process.env.STEWARD_RUNTIME;
-    else process.env.STEWARD_RUNTIME = previous;
-  }
+    },
+    async () => {
+      expect(runtimeEnvironmentValue("STEWARD_RUNTIME")).toBe("workers");
+      expect({ ...process.env }).toEqual(processEnvironmentBefore);
+    },
+  );
+  expect({ ...process.env }).toEqual(processEnvironmentBefore);
 });
 
 test("Worker request database is exact, request-owned, and always closed", async () => {
@@ -323,7 +319,7 @@ test("cold Worker cron rejects a hostile database role before starting sweeps", 
     STEWARD_APP_DATABASE_ROLE: "steward_app",
     STEWARD_JWT_SECRET: "worker-hostile-role-secret-at-least-32-chars",
   };
-  const previousEnv = new Map(Object.keys(env).map((key) => [key, process.env[key]] as const));
+  const processEnvironmentBefore = { ...process.env };
   __setWorkerInitForTests(null);
   try {
     await worker.scheduled({}, env, {
@@ -333,13 +329,10 @@ test("cold Worker cron rejects a hostile database role before starting sweeps", 
     });
     await expect(scheduledWork).rejects.toThrow("RLS_DEPLOYMENT_ROLE_UNSAFE");
     expect(databases).toBe(1);
+    expect({ ...process.env }).toEqual(processEnvironmentBefore);
   } finally {
     __setWorkerInitForTests(null);
     createDbSpy.mockRestore();
-    for (const [key, value] of previousEnv) {
-      if (value === undefined) delete process.env[key];
-      else process.env[key] = value;
-    }
   }
 });
 
@@ -389,7 +382,7 @@ test("Worker cron gives every autonomous sweep its own request database", async 
     X_CLIENT_SECRET: "x-secret",
     STEWARD_MASTER_PASSWORD: "worker-cron-master-password",
   };
-  const previousEnv = new Map(Object.keys(env).map((key) => [key, process.env[key]] as const));
+  const processEnvironmentBefore = { ...process.env };
 
   try {
     __setWorkerInitForTests(Promise.resolve());
@@ -399,16 +392,13 @@ test("Worker cron gives every autonomous sweep its own request database", async 
       },
     });
     await scheduledWork;
+    expect({ ...process.env }).toEqual(processEnvironmentBefore);
   } finally {
     __setWorkerInitForTests(null);
     createDbSpy.mockRestore();
     upstreamSpy.mockRestore();
     googleSpy.mockRestore();
     xSpy.mockRestore();
-    for (const [key, value] of previousEnv) {
-      if (value === undefined) delete process.env[key];
-      else process.env[key] = value;
-    }
   }
 
   expect(databaseCount).toBe(4);

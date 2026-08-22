@@ -14,10 +14,6 @@ export type WorkerRuntimeEnvInventoryEntry = {
 export const APPROVED_WORKER_PROCESS_ENV_READERS: Readonly<
   Record<string, WorkerRuntimeEnvInventoryEntry>
 > = Object.freeze({
-  "packages/api/src/services/context.ts": {
-    classification: "compatibility",
-    reason: "one DATABASE_URL normalization write remains for Bun-only legacy consumers",
-  },
   "packages/api/src/services/version.ts": {
     classification: "immutable-build",
     reason: "API_VERSION is build and release metadata, never request authority",
