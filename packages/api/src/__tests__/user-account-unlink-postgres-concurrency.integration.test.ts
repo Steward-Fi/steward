@@ -106,9 +106,7 @@ async function createFixture(label: string) {
   app.use("*", correlationId);
   app.route("/user", userRoutes);
   app.route("/auth", authRoutes);
-  app.onError((error, c) =>
-    c.json({ ok: false, error: error instanceof Error ? error.message : String(error) }, 500),
-  );
+  app.onError((_error, c) => c.json({ ok: false, error: "Internal server error" }, 500));
 
   return {
     accountId: account.id,
@@ -373,9 +371,7 @@ realPostgresIt(
       const app = new Hono();
       app.use("*", correlationId);
       app.route("/user", userRoutes);
-      app.onError((error, c) =>
-        c.json({ ok: false, error: error instanceof Error ? error.message : String(error) }, 500),
-      );
+      app.onError((_error, c) => c.json({ ok: false, error: "Internal server error" }, 500));
 
       const request = app.request(
         `/user/me/tenants/${tenantId}/users/${targetUserId}/wallet-policy/wallets/${account.id}`,
