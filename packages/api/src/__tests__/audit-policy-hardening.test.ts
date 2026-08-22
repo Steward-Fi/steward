@@ -105,9 +105,9 @@ describe("audit and policy route hardening", () => {
       policiesSource.indexOf('policiesStandaloneRoutes.post("/:id/assign"'),
     );
     expect(assignRoute.indexOf('action: "policy.template.assign.authorized"')).toBeLessThan(
-      assignRoute.indexOf("await db.transaction"),
+      assignRoute.indexOf("withTenantAuditedTransaction("),
     );
-    expect(assignRoute.indexOf("await db.transaction")).toBeLessThan(
+    expect(assignRoute.indexOf("withTenantAuditedTransaction(")).toBeLessThan(
       assignRoute.indexOf('action: "policy.template.assign"'),
     );
   });
