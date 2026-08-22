@@ -30,8 +30,14 @@ describe("tenant team RBAC hardening", () => {
     expect(source).toContain("Cannot demote the sole owner");
     expect(source).toContain("tenant.member.role.update.authorized");
     expect(source).toContain("tenant.member.role.update");
-    expect(source).toContain("previousRole: membership.role");
-    expect(source).toContain(".set({ role: updated.previousRole })");
+    expect(source).toContain("withTenantAuditedTransaction(tenantId");
+    expect(source).toContain("appendRequiredAudit");
+    expect(source).not.toContain(".set({ role: updated.previousRole })");
+    const roleRoute = source.slice(source.indexOf('user.patch("/me/tenants/:tenantId/users/'));
+    expect(roleRoute.indexOf("revocationStore.revokeUserTokens(targetUserId")).toBeLessThan(
+      roleRoute.indexOf(".set({ role: nextRole })"),
+    );
+    expect(roleRoute).toContain("revokedUserTokensIssuedBefore");
   });
 
   it("surfaces role editing in the dashboard users page", () => {

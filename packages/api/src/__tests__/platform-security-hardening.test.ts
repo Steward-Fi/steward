@@ -332,17 +332,12 @@ describe("platform security hardening", () => {
     expect(agentRollback).toBeGreaterThan(finalAgentAudit);
   });
 
-  it("restores remaining platform membership mutations when final audits fail", () => {
-    for (const [marker, rollback] of [
-      ['platform.patch("/tenants/:id/members/:userId"', "set({ role: updated.previousRole })"],
-    ] as const) {
-      const start = platformSource.indexOf(marker);
-      expect(start).toBeGreaterThanOrEqual(0);
-      const nextRoute = platformSource.indexOf("\nplatform.", start + marker.length);
-      const route = platformSource.slice(start, nextRoute === -1 ? undefined : nextRoute);
-      expect(route).toContain("try {");
-      expect(route).toContain(rollback);
-    }
+  it("keeps membership role and linked-account transfer updates audit-atomic", () => {
+    const roleStart = platformSource.indexOf('platform.patch("/tenants/:id/members/:userId"');
+    const roleRoute = platformSource.slice(roleStart);
+    expect(roleRoute).toContain("withTenantAuditedTransaction(");
+    expect(roleRoute).toContain("appendRequiredAudit");
+    expect(roleRoute).not.toContain("set({ role: updated.previousRole })");
     const transferStart = platformSource.indexOf(
       'platform.post("/users/:userId/accounts/:provider/:providerAccountId/transfer"',
     );
@@ -372,7 +367,7 @@ describe("platform security hardening", () => {
     expect(route).not.toContain("customMetadata: existing.customMetadata");
   });
 
-  it("repairs invitation state when final invitation audit events fail", () => {
+  it("commits invitation state and required audit events atomically", () => {
     const createStart = platformSource.indexOf('platform.post("/tenants/:id/invitations"');
     const createRoute = platformSource.slice(
       createStart,
@@ -381,12 +376,10 @@ describe("platform security hardening", () => {
         createStart,
       ),
     );
-    expect(createRoute).toContain("previousPendingInvitations");
+    expect(createRoute).toContain("withTenantAuditedTransaction(");
+    expect(createRoute).toContain("appendRequiredAudit");
     expect(createRoute).toContain('action: "tenant.invitation.create"');
-    expect(createRoute).toContain(
-      "delete(tenantInvitations).where(eq(tenantInvitations.id, invitation.id))",
-    );
-    expect(createRoute).toContain("status: previous.status");
+    expect(createRoute).not.toContain("previousPendingInvitations");
 
     const revokeStart = platformSource.indexOf(
       'platform.delete("/tenants/:id/invitations/:invitationId"',
@@ -399,8 +392,20 @@ describe("platform security hardening", () => {
     expect(revokeRoute.indexOf('action: "tenant.invitation.revoke"')).toBeGreaterThan(
       revokeRoute.indexOf(".update(tenantInvitations)"),
     );
-    expect(revokeRoute).toContain("status: candidate.status");
-    expect(revokeRoute).toContain("revokedAt: candidate.revokedAt");
+    expect(revokeRoute).toContain("appendRequiredAudit");
+    expect(revokeRoute).not.toContain("status: candidate.status");
+  });
+
+  it("serializes join-mode authorization with self-service membership creation", () => {
+    const joinModeStart = platformSource.indexOf('platform.patch("/tenants/:tenantId/join-mode"');
+    const joinModeRoute = platformSource.slice(
+      joinModeStart,
+      platformSource.indexOf("\nplatform.", joinModeStart + 1),
+    );
+    expect(joinModeRoute).toContain("withTenantAuditedTransaction(");
+    expect(joinModeRoute).toContain("lockTenantOwnerLifecycle(tx, tenantId)");
+    expect(joinModeRoute).toContain('action: "tenant.join_mode.update"');
+    expect(joinModeRoute).not.toContain("restorePlatformTenantConfigRow");
   });
 
   it("locks account unlink and transfer last-login checks through mutation", () => {
@@ -463,7 +468,7 @@ describe("platform security hardening", () => {
     );
   });
 
-  it("revokes user access tokens for tenant membership removal and tenant deletion", () => {
+  it("revokes user access tokens conservatively before tenant membership removal", () => {
     const memberDeleteStart = platformSource.indexOf(
       'platform.delete("/tenants/:id/members/:userId"',
     );

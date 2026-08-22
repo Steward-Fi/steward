@@ -5,6 +5,10 @@ import { join } from "node:path";
 const userSource = readFileSync(join(import.meta.dir, "..", "routes", "user.ts"), "utf8");
 const platformSource = readFileSync(join(import.meta.dir, "..", "routes", "platform.ts"), "utf8");
 const authSource = readFileSync(join(import.meta.dir, "..", "routes", "auth.ts"), "utf8");
+const sessionLockSource = readFileSync(
+  join(import.meta.dir, "..", "services", "session-lock.ts"),
+  "utf8",
+);
 const dbSchemaSource = readFileSync(
   join(import.meta.dir, "..", "..", "..", "db", "src", "schema.ts"),
   "utf8",
@@ -26,8 +30,19 @@ describe("user membership hardening", () => {
   it("validates tenant-admin user ids and audits self-service membership before mutation", () => {
     expect(userSource).toContain("function isValidUserId");
     expect(userSource).toContain("if (!isValidUserId(targetUserId))");
-    const joinAudit = userSource.indexOf('action: "tenant.member.join"');
-    expect(joinAudit).toBeLessThan(userSource.indexOf(".insert(userTenants)", joinAudit));
+    const joinStart = userSource.indexOf('user.post("/me/tenants/:tenantId/join"');
+    const joinRoute = userSource.slice(
+      joinStart,
+      userSource.indexOf('user.delete("/me/tenants/:tenantId/leave"', joinStart),
+    );
+    expect(joinRoute).toContain("withTenantAuditedTransaction(");
+    expect(joinRoute).toContain('lockedConfig?.joinMode !== "open"');
+    expect(joinRoute).toContain(".returning({ role: userTenants.role })");
+    expect(joinRoute).toContain("role: committedMembership.role");
+    expect(joinRoute).toContain("alreadyMember: !insertedMembership");
+    expect(joinRoute.indexOf('action: "tenant.member.join"')).toBeGreaterThan(
+      joinRoute.lastIndexOf(".insert(userTenants)"),
+    );
     const leaveAudit = userSource.indexOf('action: "tenant.member.leave"');
     const leaveDelete = userSource.indexOf(".delete(userTenants)", leaveAudit);
     expect(leaveAudit).toBeLessThan(leaveDelete);
@@ -85,6 +100,9 @@ describe("user membership hardening", () => {
     expect(userSource).toContain("innerJoin(users, eq(users.id, userTenants.userId))");
     expect(userSource).toContain("function tenantOwnerLifecycleLockKey");
     expect(userSource).toContain("tenant_owner_lifecycle_${tenantId}");
+    expect(userSource).toContain("if (shouldUsePGLite()) return");
+    expect(platformSource).toContain("if (shouldUsePGLite()) return");
+    expect(sessionLockSource).toContain("if (shouldUsePGLite()) return");
     expect(userSource).not.toContain("tenant_leave_${tenantId}");
     const leaveRoute = userSource.slice(
       userSource.indexOf('user.delete("/me/tenants/:tenantId/leave"'),
@@ -150,9 +168,23 @@ describe("user membership hardening", () => {
     expect(platformInviteRoute.indexOf('action: "tenant.invitation.create"')).toBeGreaterThan(
       platformInviteRoute.indexOf(".insert(tenantInvitations)"),
     );
-    expect(platformInviteRoute).toContain("db.transaction");
+    expect(platformInviteRoute).toContain("withTenantAuditedTransaction(");
     expect(platformInviteRoute).toContain("valid email is required");
     expect(platformInviteRoute).toContain("invitedByUserId must belong to the tenant");
+    expect(platformInviteRoute).toContain("lockedInviterMembership");
+    for (const marker of [
+      'platform.post("/tenants/:id/invitations"',
+      'platform.delete("/tenants/:id/invitations/:invitationId"',
+      'platform.post("/tenants/:id/members"',
+      'platform.delete("/tenants/:id/members/:userId"',
+      'platform.patch("/tenants/:id/members/:userId"',
+    ]) {
+      const start = platformSource.indexOf(marker);
+      const next = platformSource.indexOf("\nplatform.", start + marker.length);
+      expect(platformSource.slice(start, next === -1 ? undefined : next)).toContain(
+        "isReservedTenantId(tenantId)",
+      );
+    }
     expect(platformInviteRoute).toContain("hashSha256Hex(token)");
     expect(platformInviteRoute).toContain("body.sendEmail === true");
     expect(platformInviteRoute).toContain("sendTenantInvitation(email");
@@ -172,7 +204,8 @@ describe("user membership hardening", () => {
     expect(acceptRoute).toContain("requirePersonalUserSession(c)");
     expect(acceptRoute).toContain("emailVerified");
     expect(acceptRoute).toContain("/^[a-f0-9]{64}$/i.test(body.token)");
-    expect(acceptRoute).toContain("hashSha256Hex(body.token)");
+    expect(acceptRoute).toContain("const invitationToken = body.token");
+    expect(acceptRoute).toContain("hashSha256Hex(invitationToken)");
     // SEC-075: the invitation must be bound server-side to the accepting
     // account's verified email — in BOTH the candidate lookup and the atomic
     // accept update — so a leaked link cannot add a different signed-in user.
@@ -184,6 +217,9 @@ describe("user membership hardening", () => {
     );
     expect(acceptRoute.indexOf(".update(tenantInvitations)")).toBeLessThan(
       acceptRoute.indexOf(".insert(userTenants)"),
+    );
+    expect(acceptRoute.indexOf(".update(tenantInvitations)")).toBeLessThan(
+      acceptRoute.indexOf("const [existingMembership]"),
     );
 
     for (const [routeMarker, auditMarker] of [
@@ -210,7 +246,7 @@ describe("user membership hardening", () => {
       userSource.indexOf('user.post("/me/tenants/:tenantId/invitations"'),
       userSource.indexOf('user.delete("/me/tenants/:tenantId/invitations/:invitationId"', 1),
     );
-    expect(userInviteCreateRoute).toContain("db.transaction");
+    expect(userInviteCreateRoute).toContain("withTenantAuditedTransaction(");
     expect(userInviteCreateRoute).toContain("body?.sendEmail === true");
     expect(userInviteCreateRoute).toContain("sendTenantInvitation(email");
     const userInviteRevokeRoute = userSource.slice(

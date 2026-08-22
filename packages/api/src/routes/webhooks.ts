@@ -7,7 +7,7 @@
 import { randomBytes } from "node:crypto";
 import { tenantConfigs as tenantConfigsTable } from "@stwd/db";
 import { redactedThrownDiagnostics, type TenantAuthAbuseConfig } from "@stwd/shared";
-import { encryptWebhookSecret } from "@stwd/webhooks";
+import { currentWebhookRuntimeAuthority, encryptWebhookSecret } from "@stwd/webhooks";
 import { and, count, desc, eq, or, type SQL, sql } from "drizzle-orm";
 import { Hono } from "hono";
 import { withTenantAuditedTransaction, writeAuditEvent } from "../services/audit";
@@ -353,8 +353,9 @@ webhookRoutes.post("/", async (c) => {
 
   // SEC-017: resolve DNS and reject non-public answers (string checks alone
   // miss public-hostname-to-private-IP and rebinding).
+  const webhookAuthority = currentWebhookRuntimeAuthority();
   const urlError = isNonEmptyString(body.url)
-    ? await validateWebhookUrlResolved(body.url)
+    ? await validateWebhookUrlResolved(body.url, undefined, webhookAuthority)
     : "url is required";
   if (urlError) {
     return c.json<ApiResponse>({ ok: false, error: urlError }, 400);
@@ -521,8 +522,9 @@ webhookRoutes.put("/:id", async (c) => {
   }
 
   if (body.url !== undefined) {
+    const webhookAuthority = currentWebhookRuntimeAuthority();
     const urlError = isNonEmptyString(body.url)
-      ? await validateWebhookUrlResolved(body.url)
+      ? await validateWebhookUrlResolved(body.url, undefined, webhookAuthority)
       : "url is required";
     if (urlError) {
       return c.json<ApiResponse>({ ok: false, error: urlError }, 400);
