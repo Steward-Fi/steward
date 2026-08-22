@@ -131,13 +131,13 @@ import {
 import {
   type ApiResponse,
   redactedThrownDiagnostics,
-  runtimeEnvironmentValue,
   type SsoDiscoveryResult,
   type TenantAuthAbuseConfig,
   type TenantOidcProviderConfig,
   type TenantSamlSsoConfig,
   type TenantTestAccountConfig,
 } from "@stwd/shared";
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 import { KeyStore, provisionUserWallet, Vault } from "@stwd/vault";
 import bs58 from "bs58";
 import { and, eq, gte, inArray, isNull, lt, sql } from "drizzle-orm";
