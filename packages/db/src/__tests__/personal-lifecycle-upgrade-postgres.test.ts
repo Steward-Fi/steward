@@ -419,6 +419,7 @@ describeWithPostgres("personal lifecycle production upgrade topology", () => {
             "platform:tenant:delete",
             "platform:tenant-member:write",
             "platform:user-lifecycle:write",
+            "platform:user:write",
           ],
         }),
         STEWARD_PERSONAL_LIFECYCLE_TEST_TENANT: mountedPersonalTenantId,
@@ -434,7 +435,7 @@ describeWithPostgres("personal lifecycle production upgrade topology", () => {
       mountedEvidence
         .trim()
         .split("\n")
-        .findLast((line) => line === '{"ok":true,"deleted":true,"lifecycle":true}'),
+        .findLast((line) => line === '{"ok":true,"deleted":true,"lifecycle":true,"metadata":true}'),
     ).toBeDefined();
     const lockOrderEvidence = await command(
       [

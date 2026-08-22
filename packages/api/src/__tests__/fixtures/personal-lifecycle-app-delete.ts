@@ -1,5 +1,5 @@
 import { revocationStore, signAccessToken } from "@stwd/auth";
-import { closeDb, getDb, tenants } from "@stwd/db";
+import { closeDb, getDb, tenants, users } from "@stwd/db";
 import { eq } from "drizzle-orm";
 import app from "../../app";
 import { verifySessionToken } from "../../services/context";
@@ -106,6 +106,31 @@ try {
     "fresh post-reactivation token was not accepted",
   );
 
+  const metadata = { source: "restricted-platform-route", version: 1 };
+  const metadataResponse = await app.request(
+    `http://steward.test/platform/users/${teamTargetId}/metadata`,
+    {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Steward-Platform-Key": platformKey,
+      },
+      body: JSON.stringify({ customMetadata: metadata }),
+    },
+  );
+  assert(
+    metadataResponse.status === 200,
+    `mounted platform metadata update returned ${metadataResponse.status}: ${await metadataResponse.text()}`,
+  );
+  const [metadataRow] = await getDb()
+    .select({ customMetadata: users.customMetadata })
+    .from(users)
+    .where(eq(users.id, teamTargetId));
+  assert(
+    JSON.stringify(metadataRow?.customMetadata) === JSON.stringify(metadata),
+    "restricted platform metadata update did not persist the exact object",
+  );
+
   const adminToken = await signAccessToken({
     address: "",
     tenantId: teamTenantId,
@@ -144,7 +169,7 @@ try {
     (await getDb().select({ id: tenants.id }).from(tenants).where(eq(tenants.id, tenantId)))
       .length === 0;
   assert(deleted, "mounted personal tenant deletion did not commit through the app login");
-  console.log(JSON.stringify({ ok: true, deleted, lifecycle: true }));
+  console.log(JSON.stringify({ ok: true, deleted, lifecycle: true, metadata: true }));
 } finally {
   if (cacheOverrideInstalled) revocationStore.revokeUserTokens = originalRevokeUserTokens;
   await closeDb();

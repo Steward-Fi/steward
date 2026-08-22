@@ -96,7 +96,11 @@ import {
   withPlatformAuthorityTransaction,
 } from "../services/platform-authority-database";
 import { getPolicyRulesValidationError } from "../services/policy-validation";
-import { lockUserSession, lockUserSessions } from "../services/session-lock";
+import {
+  lockPlatformUserAccount,
+  lockUserSession,
+  lockUserSessions,
+} from "../services/session-lock";
 import { TENANT_DEFAULT_POLICIES_RETIREMENT } from "../services/tenant-policy-retirement";
 import {
   createTenantTestAccountConfig,
@@ -3883,16 +3887,6 @@ platform.patch("/users/:userId/metadata", async (c) => {
   const metadataError = getPlatformMetadataValidationError(body.customMetadata, "customMetadata");
   if (metadataError) return c.json<ApiResponse>({ ok: false, error: metadataError }, 400);
 
-  await writeAuditEvent({
-    tenantId: PLATFORM_AUDIT_TENANT_ID,
-    actorType: "platform",
-    action: "user.metadata.update.authorized",
-    resourceType: "user",
-    resourceId: userId,
-    metadata: { updatedGlobal: true },
-    ...auditCtx(c),
-  });
-
   const updated = await withPlatformAuthorityDatabase((platformDb) =>
     withTenantAuditedTransactionOnDb(
       platformDb,
@@ -3902,6 +3896,15 @@ platform.patch("/users/:userId/metadata", async (c) => {
         await tx.execute(
           sql`SELECT set_config('steward.tenant_id', ${PLATFORM_AUDIT_TENANT_ID}, true)`,
         );
+        await appendRequiredAudit({
+          tenantId: PLATFORM_AUDIT_TENANT_ID,
+          actorType: "platform",
+          action: "user.metadata.update.authorized",
+          resourceType: "user",
+          resourceId: userId,
+          metadata: { updatedGlobal: true },
+          ...auditCtx(c),
+        });
         const locked = rowsFromExecute<{ id: string }>(
           await tx.execute(sql`SELECT id FROM users WHERE id = ${userId}::uuid FOR UPDATE`),
         )[0];
@@ -3965,9 +3968,7 @@ platform.patch("/users/:userId/deactivate", async (c) => {
         await tx.execute(
           sql`SELECT set_config('steward.tenant_id', ${PLATFORM_AUDIT_TENANT_ID}, true)`,
         );
-        await tx.execute(
-          sql`SELECT pg_advisory_xact_lock(hashtextextended(${"platform_user_account_" + userId}, 0))`,
-        );
+        await lockPlatformUserAccount(tx, userId);
         await lockUserSession(tx, userId);
         await appendRequiredAudit({
           tenantId: PLATFORM_AUDIT_TENANT_ID,
@@ -4055,9 +4056,7 @@ platform.delete("/users/:userId", async (c) => {
         await tx.execute(
           sql`SELECT set_config('steward.tenant_id', ${PLATFORM_AUDIT_TENANT_ID}, true)`,
         );
-        await tx.execute(
-          sql`SELECT pg_advisory_xact_lock(hashtextextended(${"platform_user_account_" + userId}, 0))`,
-        );
+        await lockPlatformUserAccount(tx, userId);
         await appendRequiredAudit({
           tenantId: PLATFORM_AUDIT_TENANT_ID,
           actorType: "platform",
@@ -5426,6 +5425,8 @@ platform.delete("/tenants/:id/members/:userId", async (c) => {
   let currentMember: { role: string } | undefined;
   try {
     currentMember = await db.transaction(async (tx) => {
+      await lockPlatformUserAccount(tx, userId);
+      await lockUserSession(tx, userId);
       await lockTenantOwnerLifecycle(tx, tenantId);
       const [current] = await tx
         .select({ role: userTenants.role })
@@ -5467,6 +5468,7 @@ platform.delete("/tenants/:id/members/:userId", async (c) => {
   try {
     deleted = await withTenantAuditedTransaction(tenantId, async (txRaw, appendRequiredAudit) => {
       const tx = txRaw as typeof db;
+      await lockPlatformUserAccount(tx, userId);
       await lockUserSession(tx, userId);
       await lockTenantOwnerLifecycle(tx, tenantId);
       const [current] = await tx
@@ -5557,6 +5559,8 @@ platform.patch("/tenants/:id/members/:userId", async (c) => {
   let currentMember: { role: string } | undefined;
   try {
     currentMember = await db.transaction(async (tx) => {
+      await lockPlatformUserAccount(tx, userId);
+      await lockUserSession(tx, userId);
       await lockTenantOwnerLifecycle(tx, tenantId);
       const [current] = await tx
         .select({ role: userTenants.role })
@@ -5601,6 +5605,7 @@ platform.patch("/tenants/:id/members/:userId", async (c) => {
   try {
     updated = await withTenantAuditedTransaction(tenantId, async (txRaw, appendRequiredAudit) => {
       const tx = txRaw as typeof db;
+      await lockPlatformUserAccount(tx, userId);
       await lockUserSession(tx, userId);
       await lockTenantOwnerLifecycle(tx, tenantId);
       const [current] = await tx
