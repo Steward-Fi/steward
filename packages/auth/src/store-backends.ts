@@ -406,6 +406,17 @@ export class PostgresBackend implements StoreBackend {
   private async ensureTable(): Promise<void> {
     if (this.initialized) return;
     const sql = this.getSqlClient();
+    // Numbered release migrations own production DDL. A restricted application
+    // role can use the already-migrated store but must not need CREATE on the
+    // public schema merely because this compatibility fallback is shared with
+    // local development.
+    const [existing] = await sql<{ relation: string | null }[]>`
+      SELECT to_regclass('public.auth_kv_store')::text AS relation
+    `;
+    if (existing?.relation) {
+      this.initialized = true;
+      return;
+    }
     await sql.begin(async (transaction: TransactionSql) => {
       // CREATE TABLE IF NOT EXISTS can still race in PostgreSQL's catalogs when
       // separate fresh backend instances initialize concurrently. Production

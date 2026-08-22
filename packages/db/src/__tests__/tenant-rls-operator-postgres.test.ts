@@ -117,6 +117,10 @@ async function proveRestrictedApiStartupReadiness(platformKey: string) {
       STEWARD_REDIS_REQUIRED: "false",
       REDIS_URL: "",
       STEWARD_REDIS_URL: "",
+      KV_REST_API_URL: "",
+      KV_REST_API_TOKEN: "",
+      UPSTASH_REDIS_REST_URL: "",
+      UPSTASH_REDIS_REST_TOKEN: "",
       APP_URL: `http://127.0.0.1:${port}`,
       STEWARD_JWT_SECRET: `rls-startup-jwt-${suffix}-0123456789abcdef`,
       STEWARD_KDF_SALT: "ab".repeat(32),
@@ -186,15 +190,61 @@ describeWithPostgres("SEC-169 operator lifecycle on the real Steward schema", ()
       SELECT rolsuper FROM pg_roles WHERE rolname = current_user
     `;
     expect(adminRole?.rolsuper).toBe(true);
+    await admin.unsafe(
+      `CREATE ROLE ${migrationRole} LOGIN PASSWORD '${migrationRolePassword}' NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION`,
+    );
     await admin.unsafe(`CREATE DATABASE ${databaseName}`);
 
-    const firstMigration = await runCommand(["bun", "run", "packages/db/src/migrate.ts"], {
-      DATABASE_URL: databaseUrl(databaseName),
+    const emptyDatabase = postgres(databaseUrl(databaseName), { max: 1 });
+    try {
+      await emptyDatabase.unsafe(
+        `GRANT CONNECT, CREATE ON DATABASE ${databaseName} TO ${migrationRole}`,
+      );
+      await emptyDatabase.unsafe(`GRANT USAGE, CREATE ON SCHEMA public TO ${migrationRole}`);
+    } finally {
+      await emptyDatabase.end();
+    }
+
+    const firstMigration = await runCommand(["bun", "run", "--cwd", "packages/api", "migrate"], {
+      DATABASE_URL: migrationDatabaseUrl(),
+      STEWARD_PLUGINS: "capabilities",
+      STEWARD_ENABLE_TRADING: "false",
+      STEWARD_MASTER_PASSWORD: `restricted-migrator-master-${suffix}`,
     });
-    expect(firstMigration).toContain("0113_personal_tenant_account_lifecycle");
+    expect(firstMigration).toMatch(/\[migrate\] Core migrations applied: [1-9][0-9]*/);
+    expect(firstMigration).toContain("Plugin migration ledgers reconciled: 1");
 
     const db = postgres(databaseUrl(databaseName), { max: 1 });
     try {
+      const [restrictedRelease] = await db<
+        {
+          core_rows: number;
+          plugin_rows: number;
+          migrator_super: boolean;
+          migrator_bypassrls: boolean;
+          migrator_createrole: boolean;
+        }[]
+      >`
+        SELECT
+          (SELECT count(*)::int FROM drizzle.__drizzle_migrations) AS core_rows,
+          (
+            SELECT count(*)::int
+            FROM drizzle.__drizzle_migrations_plugin_capabilities
+          ) AS plugin_rows,
+          role.rolsuper AS migrator_super,
+          role.rolbypassrls AS migrator_bypassrls,
+          role.rolcreaterole AS migrator_createrole
+        FROM pg_roles role
+        WHERE role.rolname = ${migrationRole}
+      `;
+      expect(restrictedRelease?.core_rows).toBeGreaterThan(0);
+      expect(restrictedRelease?.plugin_rows).toBeGreaterThan(0);
+      expect(restrictedRelease).toMatchObject({
+        migrator_super: false,
+        migrator_bypassrls: false,
+        migrator_createrole: false,
+      });
+
       const [installed] = await db<{ relations: number; policies: number }[]>`
         SELECT count(DISTINCT c.relname)::int AS relations, count(*)::int AS policies
         FROM pg_policy p
@@ -202,11 +252,13 @@ describeWithPostgres("SEC-169 operator lifecycle on the real Steward schema", ()
         JOIN pg_namespace n ON n.oid = c.relnamespace
         WHERE n.nspname = 'public'
       `;
-      expect(installed).toEqual({ relations: 71, policies: 73 });
+      // Core contributes 71 policy-bearing relations/73 policies; the enabled
+      // capabilities plugin contributes its three independently journaled
+      // tenant-scoped relations and policies in the same restricted release.
+      expect(installed).toEqual({ relations: 74, policies: 76 });
 
       await runOperatorScript("rls-bootstrap.sql", true);
       await admin.unsafe(`ALTER ROLE ${appRole} PASSWORD '${appRolePassword}'`);
-      await admin.unsafe(`ALTER ROLE ${migrationRole} PASSWORD '${migrationRolePassword}'`);
       await admin.unsafe(`ALTER ROLE ${platformRole} PASSWORD '${platformRolePassword}'`);
       const roleRows = await db<
         {
@@ -248,12 +300,17 @@ describeWithPostgres("SEC-169 operator lifecycle on the real Steward schema", ()
           FROM drizzle.__drizzle_migrations
         `;
         expect(Number(readiness?.migration_created_at)).toBeGreaterThan(0);
-        await expect(
-          appReadinessDb`
+        let deniedError: unknown;
+        try {
+          await appReadinessDb`
             DELETE FROM drizzle.__drizzle_migrations
             WHERE false
-          `,
-        ).rejects.toThrow(/permission denied/i);
+          `;
+        } catch (error) {
+          deniedError = error;
+        }
+        expect(deniedError).toBeInstanceOf(Error);
+        expect((deniedError as Error).message).toMatch(/permission denied/i);
       } finally {
         await appReadinessDb.end();
       }
@@ -301,7 +358,7 @@ describeWithPostgres("SEC-169 operator lifecycle on the real Steward schema", ()
         JOIN pg_namespace n ON n.oid = c.relnamespace
         WHERE n.nspname = 'public' AND p.polname LIKE 'steward_%'
       `;
-      expect(activated).toEqual({ enabled: 71, forced: 71, maintenance: 71 });
+      expect(activated).toEqual({ enabled: 74, forced: 74, maintenance: 74 });
 
       const startupPlatformKey = `rls-startup-platform-key-${suffix}`;
       const startupProof = await proveRestrictedApiStartupReadiness(startupPlatformKey);
