@@ -95,7 +95,7 @@ describe("middleware security hardening", () => {
   });
 
   it("mounts the shared Redis-backed global limiter on the Workers runtime (SEC-068)", () => {
-    expect(appSource).toContain("if (isWorkersRuntime) {");
+    expect(appSource).toContain("if (isWorkersRuntime()) {");
     expect(appSource).toContain('app.use("*", workersGlobalRateLimit)');
     expect(globalRateLimitSource).toContain("checkAuthRateLimit(");
     expect(globalRateLimitSource).toContain('c.req.path === "/health"');

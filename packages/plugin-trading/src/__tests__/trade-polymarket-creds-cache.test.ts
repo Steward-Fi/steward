@@ -327,7 +327,7 @@ describe("SEC-108: Polymarket L2 creds Redis cache is encrypted at rest", () => 
     }
   });
 
-  it("skips the cache entirely when no encryption key material is configured", async () => {
+  it("fails the order closed when the current request has no custody key material", async () => {
     const { createTradeRoutes } = await import("../routes/trade");
     const { testCtx } = await import("./_ctx");
     const ctx = {
@@ -394,10 +394,10 @@ describe("SEC-108: Polymarket L2 creds Redis cache is encrypted at rest", () => 
           negRisk: true,
         }),
       });
-      // Fail closed WITHOUT failing the order: the order still executes (creds
-      // are derived fresh), but nothing is written to the shared Redis.
-      expect(res.status).toBe(200);
-      expect(deriveCount).toBe(1);
+      // The late-bound vault rejects the missing current authority before
+      // deriving venue credentials or writing shared cache state.
+      expect(res.status).toBe(409);
+      expect(deriveCount).toBe(0);
       const pmKeys = [...redisStore.keys()].filter((key) => key.startsWith("pm:clob-l2:"));
       expect(pmKeys).toHaveLength(0);
     } finally {

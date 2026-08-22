@@ -18,10 +18,6 @@ export const APPROVED_WORKER_PROCESS_ENV_READERS: Readonly<
     classification: "immutable-build",
     reason: "API_VERSION is build and release metadata, never request authority",
   },
-  "packages/api/src/services/webhook-url.ts": {
-    classification: "compatibility",
-    reason: "request-local webhook transport policy is independently owned by issue 769",
-  },
   "packages/auth/src/jwt.ts": {
     classification: "typed-bun-fallback",
     reason: "typed authority parameters and JWT AsyncLocalStorage are authoritative on Workers",

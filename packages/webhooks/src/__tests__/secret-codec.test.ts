@@ -86,9 +86,13 @@ describe("webhook secret-codec dev-key gate (SEC-102)", () => {
   it("does not mistake an invalid configured salt for the internal dev default", () => {
     process.env.STEWARD_MASTER_PASSWORD = "a-real-master-password-for-tests";
     process.env.STEWARD_WEBHOOK_SECRET_KDF_SALT = "steward-webhook-secret-v1";
-    expect(() => encryptWebhookSecret("tenant-secret")).toThrow(
-      /Webhook secret KDF salt must decode to at least 16 bytes/,
-    );
+    expect(() => encryptWebhookSecret("tenant-secret")).toThrow(/even-length hexadecimal string/);
+  });
+
+  it("rejects a configured salt with a valid hex prefix and invalid suffix", () => {
+    process.env.STEWARD_MASTER_PASSWORD = "a-real-master-password-for-tests";
+    process.env.STEWARD_WEBHOOK_SECRET_KDF_SALT = `${"ab".repeat(16)}zz`;
+    expect(() => encryptWebhookSecret("tenant-secret")).toThrow(/even-length hexadecimal string/);
   });
 
   it("keeps sequential Worker webhook roots separate across key and KDF rotations", () => {

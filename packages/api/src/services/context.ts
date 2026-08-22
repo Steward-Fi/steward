@@ -86,9 +86,11 @@ function positiveIntEnv(name: string, fallback: number): number {
 // than any real client — can raise the ceiling without changing the production
 // default (100 requests / 60s per client IP). A missing or invalid override
 // falls back to that default, so this can never weaken the guard unintentionally.
-export const RATE_LIMIT_WINDOW_MS = positiveIntEnv("STEWARD_RATE_LIMIT_WINDOW_MS", 60_000);
-export const RATE_LIMIT_MAX_REQUESTS = positiveIntEnv("STEWARD_RATE_LIMIT_MAX_REQUESTS", 100);
-export const isWorkersRuntime =
+export const rateLimitWindowMs = (): number =>
+  positiveIntEnv("STEWARD_RATE_LIMIT_WINDOW_MS", 60_000);
+export const rateLimitMaxRequests = (): number =>
+  positiveIntEnv("STEWARD_RATE_LIMIT_MAX_REQUESTS", 100);
+export const isWorkersRuntime = (): boolean =>
   runtimeEnvironmentValue("STEWARD_RUNTIME") === "workers" ||
   (typeof navigator !== "undefined" && navigator.userAgent === "Cloudflare-Workers");
 
@@ -249,7 +251,7 @@ export async function verifySessionToken(token: string) {
 
 export const nonceStore = new Map<string, { nonce: string; expiresAt: number }>();
 
-export const nonceCleanupTimer = isWorkersRuntime
+export const nonceCleanupTimer = isWorkersRuntime()
   ? undefined
   : setInterval(
       () => {
@@ -308,19 +310,9 @@ export { extractRpcErrorMessage, isRpcError } from "./rpc-error";
 
 // ─── Environment ──────────────────────────────────────────────────────────────
 
-function requireEnv(name: string): string {
-  const value = runtimeEnvironmentValue(name)?.trim();
-  if (!value) throw new Error(`${name} is required`);
-  return value;
-}
-
-const isPGLiteRuntime =
+export const isPGLiteRuntime = (): boolean =>
   runtimeEnvironmentValue("STEWARD_DB_MODE") === "pglite" ||
   runtimeEnvironmentValue("STEWARD_PGLITE_MEMORY") === "true";
-
-export const DATABASE_URL =
-  runtimeEnvironmentValue("DATABASE_URL")?.trim() ||
-  (isPGLiteRuntime ? "" : requireEnv("DATABASE_URL"));
 
 // ─── Singletons ───────────────────────────────────────────────────────────────
 
@@ -392,9 +384,11 @@ export const tenantConfigs = new Map<string, TenantConfig>([
   [defaultTenantConfig.id, defaultTenantConfig],
 ]);
 
-export const defaultTenantReady = db.execute(sql`
-  SELECT steward_bootstrap.ensure_default_tenant(${runtimeEnvironmentValue("STEWARD_DEFAULT_TENANT_KEY") || ""})
-`);
+async function ensureDefaultTenantReady(): Promise<void> {
+  await db.execute(sql`
+    SELECT steward_bootstrap.ensure_default_tenant(${runtimeEnvironmentValue("STEWARD_DEFAULT_TENANT_KEY") || ""})
+  `);
+}
 
 // ─── App variable types ───────────────────────────────────────────────────────
 
@@ -747,7 +741,7 @@ export async function withAuthenticatedTenantDatabase<T>(
 ): Promise<T> {
   if (hasTenantTransactionDatabase({ tenantId, userId, ...characteristics })) return callback();
   const context = tenantContextFromAuthenticatedPrincipal({ tenantId, method, subject, userId });
-  const driver = isPGLiteRuntime ? "pglite" : getDatabaseDriver();
+  const driver = isPGLiteRuntime() ? "pglite" : getDatabaseDriver();
   return withTenantRlsTransaction(
     getDb() as never,
     driver,
@@ -773,7 +767,7 @@ export async function tenantAuth(
   next: Next,
   options?: { requireTenantMatch?: string; bindTenantDatabase?: boolean },
 ) {
-  await defaultTenantReady;
+  await ensureDefaultTenantReady();
 
   const authHeader = c.req.header("Authorization");
   if (authHeader?.startsWith("Bearer ")) {

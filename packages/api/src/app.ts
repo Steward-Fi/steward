@@ -126,7 +126,7 @@ export function createApp(): Hono<{ Variables: AppVariables }> {
   // cross-isolate state). Mount the shared Redis-backed sliding-window limiter
   // across all routes for the Workers runtime only, so non-auth endpoints
   // there are no longer unthrottled.
-  if (isWorkersRuntime) {
+  if (isWorkersRuntime()) {
     app.use("*", workersGlobalRateLimit);
   }
 

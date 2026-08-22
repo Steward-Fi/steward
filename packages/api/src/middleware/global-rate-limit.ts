@@ -14,7 +14,7 @@
 
 import type { Context, Next } from "hono";
 import { checkAuthRateLimit } from "../routes/auth";
-import { RATE_LIMIT_MAX_REQUESTS, RATE_LIMIT_WINDOW_MS } from "../services/context";
+import { rateLimitMaxRequests, rateLimitWindowMs } from "../services/context";
 
 export async function workersGlobalRateLimit(
   c: Context,
@@ -28,8 +28,8 @@ export async function workersGlobalRateLimit(
   const verdict = await checkAuthRateLimit(
     c,
     "global",
-    RATE_LIMIT_WINDOW_MS,
-    RATE_LIMIT_MAX_REQUESTS,
+    rateLimitWindowMs(),
+    rateLimitMaxRequests(),
   );
   if (!verdict.allowed) {
     return c.json(

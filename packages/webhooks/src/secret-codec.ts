@@ -22,13 +22,27 @@ export interface WebhookSecretAuthority {
 
 function runtimeValue(name: string): string | undefined {
   const value = runtimeEnvironmentValue(name);
-  return value ? value : undefined;
+  // A blank binding is an omission, never an encryption root. Preserve the
+  // exact bytes of non-blank secrets for compatibility with existing records.
+  return value?.trim() ? value : undefined;
+}
+
+function decodeConfiguredKdfSalt(value: string): Buffer {
+  // Buffer.from(value, "hex") silently accepts a valid prefix and discards an
+  // invalid suffix. Validate the complete binding before deriving authority.
+  if (value.length < 32 || value.length % 2 !== 0 || !/^[0-9a-fA-F]+$/.test(value)) {
+    throw new Error(
+      "Webhook secret KDF salt must be an even-length hexadecimal string of at least 32 characters (16 bytes)",
+    );
+  }
+  return Buffer.from(value, "hex");
 }
 
 /** Resolve one immutable webhook encryption root from the current runtime. */
 export function resolveWebhookSecretAuthority(): WebhookSecretAuthority {
+  const configuredNodeEnvironment = runtimeValue("NODE_ENV")?.trim();
   const nodeEnvironment =
-    runtimeValue("NODE_ENV") ??
+    configuredNodeEnvironment ||
     (runtimeValue("STEWARD_RUNTIME") === "workers" ? "production" : undefined);
   let encryptionKey =
     runtimeValue("STEWARD_WEBHOOK_SECRET_ENCRYPTION_KEY") ??

@@ -59,6 +59,6 @@ export function runtimeEnvironmentIdentity(): object | undefined {
  * so an overlapping Worker request cannot replace their authority mid-read.
  */
 export function runtimeEnvironmentSnapshot(): RuntimeEnvironment {
-  const requestEnvironment = runtimeEnvironmentStorage.getStore();
-  return requestEnvironment ?? snapshotRuntimeEnvironment(process.env);
+  const context = runtimeEnvironmentStorage.getStore();
+  return context?.environment ?? snapshotRuntimeEnvironment(process.env);
 }

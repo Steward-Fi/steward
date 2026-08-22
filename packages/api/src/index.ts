@@ -32,8 +32,8 @@ import {
   API_VERSION,
   type ApiResponse,
   nonceCleanupTimer,
-  RATE_LIMIT_MAX_REQUESTS,
-  RATE_LIMIT_WINDOW_MS,
+  rateLimitMaxRequests,
+  rateLimitWindowMs,
 } from "./services/context";
 import { startGoogleCredentialLifecycleScheduler } from "./services/provider-google-lifecycle-scheduler";
 import { startProviderReservationReconciliationScheduler } from "./services/provider-reservation-reconciliation-scheduler";
@@ -85,8 +85,8 @@ const capabilitiesEnabled = resolveEnabledPlugins().has("capabilities");
 
 const trustedProxyHops = parseNonNegativeInt(process.env.STEWARD_TRUSTED_PROXY_HOPS, 0);
 const rateLimiter = new InMemoryRateLimiter(
-  RATE_LIMIT_MAX_REQUESTS,
-  RATE_LIMIT_WINDOW_MS,
+  rateLimitMaxRequests(),
+  rateLimitWindowMs(),
   parsePositiveInt(process.env.STEWARD_RATE_LIMIT_MAX_KEYS, 10_000),
 );
 let isShuttingDown = false;
@@ -121,7 +121,7 @@ function runtimeGate(request: Request, peerAddress: string | null): Response | n
 
 const requestLogCleanupTimer = setInterval(() => {
   rateLimiter.sweep();
-}, RATE_LIMIT_WINDOW_MS);
+}, rateLimitWindowMs());
 
 // ─── /ready — deep readiness probe ───────────────────────────────────────────
 //

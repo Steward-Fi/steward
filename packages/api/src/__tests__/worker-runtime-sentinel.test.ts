@@ -10,6 +10,9 @@ import {
 } from "@stwd/db";
 import { createPGLiteDb } from "@stwd/db/pglite";
 import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
+import { isPGLiteRuntime } from "../services/context";
+import { isRuntimeVaultRpcMethodAllowed } from "../services/custody-runtime";
+import { getConfiguredVault } from "../services/vault-factory";
 import {
   __setWorkerComposedAppForTests,
   __setWorkerInitForTests,
@@ -150,7 +153,10 @@ test("mounted fetch and scheduled consumers retain hostile overlapping authoriti
     expect(scheduledProviders).toEqual(["disabled"]);
 
     const missing = await worker.fetch(new Request("https://steward.test/missing"), common, {});
-    expect(await missing.text()).toBe("disabled");
+    // Explicit NODE_ENV=test retains the documented development mock fallback;
+    // production binding-removal fail-closed behavior is covered by the mounted
+    // adapter runtime suite with a production authority.
+    expect(await missing.text()).toBe("mock");
     expect({ ...process.env }).toEqual(processEnvironmentBefore);
   } finally {
     releaseFetch();
@@ -838,4 +844,114 @@ test("overlapping scheduler invocations retain their own binding generation", as
       { sweep: async () => ({ generation: "missing" }) },
     ),
   ).toBeNull();
+});
+
+test("mounted requests isolate database, vault, and RPC authority across A -> B -> missing -> A", async () => {
+  const createDbSpy = spyOn(databaseModule, "createDbForRequest").mockImplementation(
+    (env) => ({ marker: env.DATABASE_URL }) as unknown as ReturnType<typeof databaseModule.getDb>,
+  );
+  const vaultIds = new WeakMap<object, number>();
+  let nextVaultId = 1;
+  let releaseA!: () => void;
+  const aEntered = Promise.withResolvers<void>();
+  const aRelease = new Promise<void>((resolve) => {
+    releaseA = resolve;
+  });
+  const observe = () => {
+    const requestDb = getDb() as unknown as { marker: string };
+    const requestVault = getConfiguredVault() as unknown as object;
+    let vaultId = vaultIds.get(requestVault);
+    if (!vaultId) {
+      vaultId = nextVaultId++;
+      vaultIds.set(requestVault, vaultId);
+    }
+    return {
+      database: requestDb.marker,
+      vaultId,
+      pglite: isPGLiteRuntime(),
+      allowsA: isRuntimeVaultRpcMethodAllowed("eth_aOnly"),
+      allowsB: isRuntimeVaultRpcMethodAllowed("eth_bOnly"),
+    };
+  };
+
+  __setWorkerInitForTests(Promise.resolve());
+  __setWorkerComposedAppForTests({
+    async fetch(request) {
+      const before = observe();
+      if (new URL(request.url).pathname === "/a-overlap") {
+        aEntered.resolve();
+        await aRelease;
+      }
+      return Response.json({ before, after: observe() });
+    },
+  });
+
+  const common = {
+    DATABASE_DRIVER: "neon-http",
+    NODE_ENV: "test",
+    STEWARD_JWT_SECRET: "worker-mounted-authority-secret-at-least-32-chars",
+  } as const;
+  const authorityA = {
+    ...common,
+    DATABASE_URL: "postgresql://worker-a.invalid/steward",
+    STEWARD_MASTER_PASSWORD: "mounted-authority-a",
+    STEWARD_KDF_SALT: "a1".repeat(16),
+    STEWARD_VAULT_RPC_ALLOWLIST: "eth_chainId,eth_aOnly",
+  };
+  const authorityB = {
+    ...common,
+    DATABASE_URL: "postgresql://worker-b.invalid/steward",
+    STEWARD_DB_MODE: "pglite",
+    STEWARD_MASTER_PASSWORD: "mounted-authority-b",
+    STEWARD_KDF_SALT: "b2".repeat(16),
+    STEWARD_VAULT_RPC_ALLOWLIST: "eth_chainId,eth_bOnly",
+  };
+
+  try {
+    const pendingA = worker.fetch(new Request("https://steward.test/a-overlap"), authorityA, {});
+    await aEntered.promise;
+    const b = (await (
+      await worker.fetch(new Request("https://steward.test/b"), authorityB, {})
+    ).json()) as { before: ReturnType<typeof observe>; after: ReturnType<typeof observe> };
+    await expect(
+      worker.fetch(
+        new Request("https://steward.test/missing"),
+        {
+          ...common,
+          DATABASE_URL: "postgresql://worker-missing.invalid/steward",
+          STEWARD_KDF_SALT: "c3".repeat(16),
+        },
+        {},
+      ),
+    ).rejects.toThrow("STEWARD_MASTER_PASSWORD is required");
+    releaseA();
+    const a = (await (await pendingA).json()) as {
+      before: ReturnType<typeof observe>;
+      after: ReturnType<typeof observe>;
+    };
+    const replayA = (await (
+      await worker.fetch(new Request("https://steward.test/a-replay"), authorityA, {})
+    ).json()) as { before: ReturnType<typeof observe>; after: ReturnType<typeof observe> };
+
+    expect(a.before).toEqual(a.after);
+    expect(a.before.database).toBe(authorityA.DATABASE_URL);
+    expect(a.before.pglite).toBe(false);
+    expect(a.before.allowsA).toBe(true);
+    expect(a.before.allowsB).toBe(false);
+    expect(b.before).toEqual(b.after);
+    expect(b.before.database).toBe(authorityB.DATABASE_URL);
+    expect(b.before.pglite).toBe(true);
+    expect(b.before.allowsA).toBe(false);
+    expect(b.before.allowsB).toBe(true);
+    expect(b.before.vaultId).not.toBe(a.before.vaultId);
+    expect(replayA.before.database).toBe(authorityA.DATABASE_URL);
+    expect(replayA.before.allowsA).toBe(true);
+    expect(replayA.before.allowsB).toBe(false);
+    expect(replayA.before.vaultId).not.toBe(b.before.vaultId);
+  } finally {
+    releaseA();
+    __setWorkerComposedAppForTests(null);
+    __setWorkerInitForTests(null);
+    createDbSpy.mockRestore();
+  }
 });
