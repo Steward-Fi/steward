@@ -54,7 +54,15 @@ import {
   setDefaultTimeout,
   spyOn,
 } from "bun:test";
-import { agents, auditEvents, closeDb, getDb, tenants, tradeSessions } from "@stwd/db";
+import {
+  agents,
+  auditEvents,
+  closeDb,
+  getDb,
+  tenants,
+  tradeOrderRecoveries,
+  tradeSessions,
+} from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { TradeSessionManager } from "@stwd/trade-sessions";
 import { Vault } from "@stwd/vault";
@@ -80,7 +88,9 @@ setDefaultTimeout(30000);
 let signSpy: ReturnType<typeof spyOn> | undefined;
 let submitSpy: ReturnType<typeof spyOn> | undefined;
 let updateLeverageSpy: ReturnType<typeof spyOn> | undefined;
+let orderStatusSpy: ReturnType<typeof spyOn> | undefined;
 let fenceSpy: ReturnType<typeof spyOn> | undefined;
+let checkpointSpy: ReturnType<typeof spyOn> | undefined;
 let createTradeRoutesForTest: typeof import("../routes/trade").createTradeRoutes;
 let sharedTestContext: StewardAppContext;
 let vaultTypedSignSpy: ReturnType<typeof spyOn> | undefined;
@@ -203,10 +213,14 @@ describe("Hyperliquid venue-submit spend-fence (real /hyperliquid/order path)", 
     submitSpy?.mockRestore();
     updateLeverageSpy?.mockRestore();
     vaultTypedSignSpy?.mockRestore();
+    checkpointSpy?.mockRestore();
+    orderStatusSpy?.mockRestore();
     signSpy = undefined;
     submitSpy = undefined;
     updateLeverageSpy = undefined;
     vaultTypedSignSpy = undefined;
+    checkpointSpy = undefined;
+    orderStatusSpy = undefined;
   });
 
   it("binds every Hyperliquid signature to the fenced session wallet", async () => {
@@ -310,6 +324,42 @@ describe("Hyperliquid venue-submit spend-fence (real /hyperliquid/order path)", 
     expect(submitSpy).toHaveBeenCalledTimes(1);
   });
 
+  it("reconciles exact Hyperliquid evidence after revocation without resubmitting", async () => {
+    const { tenantId, agentId, sessionId } = await seedSession();
+    const app = makeApp(tenantId, agentId, tradeRoutes);
+    signSpy = spyOn(HyperliquidAdapter.prototype, "signOrder").mockResolvedValue(
+      {} as Awaited<ReturnType<HyperliquidAdapter["signOrder"]>>,
+    );
+    submitSpy = spyOn(HyperliquidAdapter.prototype, "submitOrder").mockRejectedValue(
+      new Error("lost response after submit"),
+    );
+
+    const key = crypto.randomUUID();
+    const first = await postOrder(app, sessionId, key);
+    expect(first.status).toBe(502);
+    expect(submitSpy).toHaveBeenCalledTimes(1);
+    await getDb()
+      .update(tradeSessions)
+      .set({ status: "revoked", revokedAt: new Date() })
+      .where(eq(tradeSessions.id, sessionId));
+    orderStatusSpy = spyOn(HyperliquidAdapter.prototype, "getOrderStatus").mockResolvedValue({
+      status: "order",
+      order: {
+        oid: `0x${"1".repeat(32)}`,
+        status: "filled",
+        filledSz: 1,
+        avgPx: 10,
+      },
+    });
+
+    const replay = await postOrder(app, sessionId, key);
+    expect(replay.status).toBe(200);
+    expect(replay.headers.get("Idempotency-Replayed")).toBe("true");
+    expect(orderStatusSpy).toHaveBeenCalledTimes(1);
+    expect(submitSpy).toHaveBeenCalledTimes(1);
+    expect(await auditCount(tenantId, "trade.order.submitted")).toBe(1);
+  });
+
   it("records submit-authorization before the submitted audit, with signOrder before submitOrder", async () => {
     const { tenantId, agentId, sessionId } = await seedSession();
     const app = makeApp(tenantId, agentId, tradeRoutes);
@@ -369,6 +419,46 @@ describe("Hyperliquid venue-submit spend-fence (real /hyperliquid/order path)", 
     expect(authorized[0].actorType).toBe("agent");
     expect(authorized[0].actorId).toBe(agentId);
     expect(authorized[0].seq).toBeLessThan(submitted[0].seq);
+  });
+
+  it("takes over a stale prepared journal through the mounted route without duplicate submit", async () => {
+    const { tenantId, agentId, sessionId } = await seedSession();
+    const app = makeApp(tenantId, agentId, tradeRoutes);
+    signSpy = spyOn(HyperliquidAdapter.prototype, "signOrder").mockResolvedValue(
+      {} as Awaited<ReturnType<HyperliquidAdapter["signOrder"]>>,
+    );
+    submitSpy = spyOn(HyperliquidAdapter.prototype, "submitOrder").mockResolvedValue({
+      orderId: "hl-takeover-1",
+      status: "filled",
+      filledQty: 1,
+      avgPrice: 10,
+    } as Awaited<ReturnType<HyperliquidAdapter["submitOrder"]>>);
+    const recoveryModule = await import("../routes/trade-recovery");
+    checkpointSpy = spyOn(recoveryModule, "checkpointTradeSubmissionStart").mockRejectedValueOnce(
+      new Error("injected crash after prepared journal"),
+    );
+
+    const key = crypto.randomUUID();
+    expect((await postOrder(app, sessionId, key)).status).toBe(500);
+    expect(submitSpy).not.toHaveBeenCalled();
+    const [prepared] = await getDb()
+      .select()
+      .from(tradeOrderRecoveries)
+      .where(
+        and(eq(tradeOrderRecoveries.tenantId, tenantId), eq(tradeOrderRecoveries.agentId, agentId)),
+      );
+    expect(prepared?.state).toBe("prepared");
+    await getDb()
+      .update(tradeOrderRecoveries)
+      .set({ claimedAt: new Date(Date.now() - 60_000) })
+      .where(eq(tradeOrderRecoveries.id, prepared!.id));
+    checkpointSpy.mockRestore();
+    checkpointSpy = undefined;
+
+    const retry = await postOrder(app, sessionId, key);
+    expect(retry.status).toBe(200);
+    expect(submitSpy).toHaveBeenCalledTimes(1);
+    expect(signSpy).toHaveBeenCalledTimes(2);
   });
 
   it("repairs a post-submit audit outage on replay without a second venue submission", async () => {

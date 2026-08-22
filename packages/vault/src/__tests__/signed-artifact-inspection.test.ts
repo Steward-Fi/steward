@@ -143,6 +143,36 @@ describe("strict signed-artifact chain inspection", () => {
     status.mockRestore();
   });
 
+  it("rejects blockhash-validity responses without a canonical context slot", async () => {
+    const status = spyOn(Connection.prototype, "getSignatureStatuses").mockResolvedValue({
+      context: { slot: 1 },
+      value: [null],
+    });
+    spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
+      const request = JSON.parse(String(init?.body)) as { method: string };
+      return new Response(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          result: request.method === "getBlockHeight" ? 101 : { context: {}, value: false },
+        }),
+      );
+    });
+    try {
+      const vault = new Vault({ masterPassword: MASTER_PASSWORD, rpcUrl: "https://rpc.invalid" });
+      await expect(
+        vault.inspectSolanaSignedArtifact({
+          signature: SIGNATURE,
+          recentBlockhash: "11111111111111111111111111111111",
+          blockhashKind: "recent",
+          lastValidBlockHeight: 100,
+        }),
+      ).rejects.toThrow("Malformed Solana blockhash-validity response");
+    } finally {
+      status.mockRestore();
+    }
+  });
+
   it("retires durable-nonce evidence only after the exact authorized account advances", async () => {
     const status = spyOn(Connection.prototype, "getSignatureStatuses").mockResolvedValue({
       context: { slot: 1 },

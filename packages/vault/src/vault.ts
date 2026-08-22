@@ -3666,9 +3666,13 @@ export class Vault {
         throw new Error("Malformed Solana blockhash-validity response");
       }
       const validityRecord = validity as Record<string, unknown>;
+      const validityContext = validityRecord.context;
       if (
-        !validityRecord.context ||
-        typeof validityRecord.context !== "object" ||
+        !validityContext ||
+        typeof validityContext !== "object" ||
+        Array.isArray(validityContext) ||
+        !Number.isSafeInteger((validityContext as Record<string, unknown>).slot) ||
+        ((validityContext as Record<string, unknown>).slot as number) < 0 ||
         typeof validityRecord.value !== "boolean"
       ) {
         throw new Error("Malformed Solana blockhash-validity response");
@@ -3683,9 +3687,13 @@ export class Vault {
       throw new Error("Malformed Solana blockhash-validity response");
     }
     const validityRecord = validity as Record<string, unknown>;
+    const validityContext = validityRecord.context;
     if (
-      !validityRecord.context ||
-      typeof validityRecord.context !== "object" ||
+      !validityContext ||
+      typeof validityContext !== "object" ||
+      Array.isArray(validityContext) ||
+      !Number.isSafeInteger((validityContext as Record<string, unknown>).slot) ||
+      ((validityContext as Record<string, unknown>).slot as number) < 0 ||
       typeof validityRecord.value !== "boolean"
     ) {
       throw new Error("Malformed Solana blockhash-validity response");

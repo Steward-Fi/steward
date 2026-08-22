@@ -708,6 +708,13 @@
       "when": 1787306405000,
       "tag": "0123_personal_lifecycle_invariants",
       "breakpoints": true
+    },
+    {
+      "idx": 124,
+      "version": "7",
+      "when": 1787390400000,
+      "tag": "0124_trade_recovery_effect_metadata",
+      "breakpoints": true
     }
   ]
 }
