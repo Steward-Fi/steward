@@ -185,7 +185,8 @@ async function withVerifiedAuthTenant<T>(
     userId: subject,
   });
   const driver =
-    process.env.STEWARD_DB_MODE === "pglite" || process.env.STEWARD_PGLITE_MEMORY === "true"
+    runtimeEnvironmentValue("STEWARD_DB_MODE") === "pglite" ||
+    runtimeEnvironmentValue("STEWARD_PGLITE_MEMORY") === "true"
       ? "pglite"
       : getDatabaseDriver();
   return withTenantRlsTransaction(getDb() as never, driver, context, async (tx) =>
@@ -205,7 +206,8 @@ async function withPreAuthTenant<T>(
     subject: "public-auth-flow",
   });
   const driver =
-    process.env.STEWARD_DB_MODE === "pglite" || process.env.STEWARD_PGLITE_MEMORY === "true"
+    runtimeEnvironmentValue("STEWARD_DB_MODE") === "pglite" ||
+    runtimeEnvironmentValue("STEWARD_PGLITE_MEMORY") === "true"
       ? "pglite"
       : getDatabaseDriver();
   return withTenantRlsTransaction(getDb() as never, driver, context, async (tx) =>
@@ -1373,6 +1375,23 @@ let _authStoreSources: AuthStoreSources = {
   importSession: "memory",
 };
 let _phoneAuth: PhoneAuth | null = null;
+interface RuntimeAuthClientCache {
+  phoneAuth: PhoneAuth | null;
+  passkeyAuth: PasskeyAuth | null;
+  readonly passkeyAuthByOrigin: Map<string, PasskeyAuth>;
+}
+let _runtimeAuthClients = new WeakMap<object, RuntimeAuthClientCache>();
+
+function runtimeAuthClientCache(): RuntimeAuthClientCache | null {
+  const identity = runtimeEnvironmentIdentity();
+  if (!identity) return null;
+  let cache = _runtimeAuthClients.get(identity);
+  if (!cache) {
+    cache = { phoneAuth: null, passkeyAuth: null, passkeyAuthByOrigin: new Map() };
+    _runtimeAuthClients.set(identity, cache);
+  }
+  return cache;
+}
 
 export type AuthStoreSource = "redis" | "postgres" | "memory";
 export type AuthStoreSources = {
@@ -1455,6 +1474,7 @@ export async function initAuthStores(usePostgres = false): Promise<void> {
   _passkeyAuth = null;
   _phoneAuth = null;
   _passkeyAuthByOrigin.clear();
+  _runtimeAuthClients = new WeakMap();
   _emailAuthByRequest = new WeakMap();
 }
 
@@ -1588,8 +1608,8 @@ async function markOidcIdTokenUsedOnce(
   return inserted ? { ok: true } : { ok: false, response: "replayed" };
 }
 
-function isUnsafeUnboundOAuthProviderCodeExchangeAllowed(): boolean {
-  return process.env.STEWARD_ALLOW_UNBOUND_OAUTH_PROVIDER_CODE_EXCHANGE === "true";
+export function isUnsafeUnboundOAuthProviderCodeExchangeAllowed(): boolean {
+  return runtimeEnvironmentValue("STEWARD_ALLOW_UNBOUND_OAUTH_PROVIDER_CODE_EXCHANGE") === "true";
 }
 
 function isValidPkceCodeVerifier(value: string): boolean {
@@ -1640,8 +1660,13 @@ export function getAuthStoreSources(): AuthStoreSources {
  */
 export function assertAuthStoresAreSafe(sources: AuthStoreSources = getAuthStoreSources()): void {
   const requiresDurableStores =
-    process.env.NODE_ENV === "production" || process.env.STEWARD_RUNTIME === "workers";
-  if (!requiresDurableStores || process.env.STEWARD_ALLOW_MEMORY_AUTH_STORES === "true") return;
+    runtimeEnvironmentValue("NODE_ENV") === "production" ||
+    runtimeEnvironmentValue("STEWARD_RUNTIME") === "workers";
+  if (
+    !requiresDurableStores ||
+    runtimeEnvironmentValue("STEWARD_ALLOW_MEMORY_AUTH_STORES") === "true"
+  )
+    return;
 
   const memoryStores = Object.entries(sources)
     .filter(([, source]) => source === "memory")
@@ -1717,25 +1742,30 @@ function resolveRpID(requestHostname: string, allowedOrigins: string[], fallback
 }
 
 function getPasskeyAuth(requestOrigin?: string): PasskeyAuth {
-  const defaultRpID = process.env.PASSKEY_RP_ID || "steward.fi";
-  const defaultOrigin = process.env.PASSKEY_ORIGIN || "https://steward.fi";
-  const rpName = process.env.PASSKEY_RP_NAME || "Steward";
+  const runtimeCache = runtimeAuthClientCache();
+  const defaultRpID = runtimeEnvironmentValue("PASSKEY_RP_ID") || "steward.fi";
+  const defaultOrigin = runtimeEnvironmentValue("PASSKEY_ORIGIN") || "https://steward.fi";
+  const rpName = runtimeEnvironmentValue("PASSKEY_RP_NAME") || "Steward";
 
   // If no origin provided, use the default singleton
   if (!requestOrigin) {
-    if (!_passkeyAuth) {
-      const origins = (process.env.PASSKEY_ALLOWED_ORIGINS || defaultOrigin)
+    const cachedDefault = runtimeCache?.passkeyAuth ?? _passkeyAuth;
+    if (!cachedDefault) {
+      const origins = (runtimeEnvironmentValue("PASSKEY_ALLOWED_ORIGINS") || defaultOrigin)
         .split(",")
         .map((o) => o.trim())
         .filter(Boolean);
-      _passkeyAuth = new PasskeyAuth({
+      const auth = new PasskeyAuth({
         rpName,
         rpID: defaultRpID,
         origin: origins.length > 1 ? origins : defaultOrigin,
         challengeStore: getChallengeStore(),
       });
+      if (runtimeCache) runtimeCache.passkeyAuth = auth;
+      else _passkeyAuth = auth;
+      return auth;
     }
-    return _passkeyAuth;
+    return cachedDefault;
   }
 
   // Parse origin to get hostname
@@ -1747,7 +1777,7 @@ function getPasskeyAuth(requestOrigin?: string): PasskeyAuth {
   }
 
   // Validate against allowed origins
-  const allowed = (process.env.PASSKEY_ALLOWED_ORIGINS || defaultOrigin)
+  const allowed = (runtimeEnvironmentValue("PASSKEY_ALLOWED_ORIGINS") || defaultOrigin)
     .split(",")
     .map((o) => o.trim())
     .filter(Boolean);
@@ -1761,7 +1791,8 @@ function getPasskeyAuth(requestOrigin?: string): PasskeyAuth {
   const rpID = resolveRpID(requestHostname, allowed, defaultRpID);
 
   // Cache per rpID
-  const cached = _passkeyAuthByOrigin.get(rpID);
+  const passkeyAuthByOrigin = runtimeCache?.passkeyAuthByOrigin ?? _passkeyAuthByOrigin;
+  const cached = passkeyAuthByOrigin.get(rpID);
   if (cached) return cached;
 
   // Origin list passed to PasskeyAuth covers all variants the browser may
@@ -1774,7 +1805,7 @@ function getPasskeyAuth(requestOrigin?: string): PasskeyAuth {
     origin: acceptedOrigins,
     challengeStore: getChallengeStore(),
   });
-  _passkeyAuthByOrigin.set(rpID, auth);
+  passkeyAuthByOrigin.set(rpID, auth);
   return auth;
 }
 
@@ -2559,7 +2590,7 @@ function ethereumWalletTenantId(address: string): string {
 }
 
 function getAllowedSiweDomains(): string[] {
-  const raw = process.env.SIWE_ALLOWED_DOMAINS?.trim();
+  const raw = runtimeEnvironmentValue("SIWE_ALLOWED_DOMAINS")?.trim();
   if (raw) {
     const domains = raw
       .split(",")
@@ -2568,7 +2599,7 @@ function getAllowedSiweDomains(): string[] {
     if (domains.length > 0) return domains;
   }
 
-  const appUrl = process.env.APP_URL?.trim() || "https://steward.fi";
+  const appUrl = runtimeEnvironmentValue("APP_URL")?.trim() || "https://steward.fi";
   try {
     return [new URL(appUrl).host.toLowerCase()];
   } catch {
@@ -2854,38 +2885,45 @@ async function requireRecentFactorEnrollmentStepUp(
 }
 
 export function getPhoneAuth(): PhoneAuth {
-  if (_phoneAuth) return _phoneAuth;
+  const runtimeCache = runtimeAuthClientCache();
+  const cached = runtimeCache?.phoneAuth ?? _phoneAuth;
+  if (cached) return cached;
 
   let provider: SmsProvider | undefined;
-  if (process.env.SMS_PROVIDER === "mock" && process.env.NODE_ENV !== "production") {
+  if (
+    runtimeEnvironmentValue("SMS_PROVIDER") === "mock" &&
+    runtimeEnvironmentValue("NODE_ENV") !== "production"
+  ) {
     provider = new MockSmsProvider();
   } else if (
-    process.env.TWILIO_ACCOUNT_SID &&
-    process.env.TWILIO_AUTH_TOKEN &&
-    process.env.TWILIO_FROM
+    runtimeEnvironmentValue("TWILIO_ACCOUNT_SID") &&
+    runtimeEnvironmentValue("TWILIO_AUTH_TOKEN") &&
+    runtimeEnvironmentValue("TWILIO_FROM")
   ) {
     provider = new TwilioSmsProvider({
-      accountSid: process.env.TWILIO_ACCOUNT_SID,
-      authToken: process.env.TWILIO_AUTH_TOKEN,
-      from: process.env.TWILIO_FROM,
+      accountSid: runtimeEnvironmentValue("TWILIO_ACCOUNT_SID") as string,
+      authToken: runtimeEnvironmentValue("TWILIO_AUTH_TOKEN") as string,
+      from: runtimeEnvironmentValue("TWILIO_FROM") as string,
     });
-  } else if (process.env.NODE_ENV === "production") {
+  } else if (runtimeEnvironmentValue("NODE_ENV") === "production") {
     throw new Error("SMS provider not configured");
   }
 
-  _phoneAuth = new PhoneAuth({
+  const phoneAuth = new PhoneAuth({
     provider,
     tokenStore: new TokenStore({ backend: getMfaBackend() }),
   });
-  return _phoneAuth;
+  if (runtimeCache) runtimeCache.phoneAuth = phoneAuth;
+  else _phoneAuth = phoneAuth;
+  return phoneAuth;
 }
 
 function isWhatsAppOtpEnabled(): boolean {
-  return process.env.WHATSAPP_OTP_ENABLED === "true";
+  return runtimeEnvironmentValue("WHATSAPP_OTP_ENABLED") === "true";
 }
 
 function isFarcasterLoginEnabled(): boolean {
-  return process.env.FARCASTER_LOGIN_ENABLED === "true";
+  return runtimeEnvironmentValue("FARCASTER_LOGIN_ENABLED") === "true";
 }
 
 const TELEGRAM_LOGIN_MAX_AGE_SEC = 24 * 60 * 60;
@@ -3134,8 +3172,14 @@ class MfaRecoveryCodeStore implements RecoveryCodeStore {
   }
 }
 
-const recoveryCodeStore: RecoveryCodeStore =
-  process.env.NODE_ENV === "test" ? new InMemoryRecoveryCodeStore() : new MfaRecoveryCodeStore();
+const durableRecoveryCodeStore: RecoveryCodeStore = new MfaRecoveryCodeStore();
+const testRecoveryCodeStore: RecoveryCodeStore = new InMemoryRecoveryCodeStore();
+
+function getRecoveryCodeStore(): RecoveryCodeStore {
+  return runtimeEnvironmentValue("NODE_ENV") === "test"
+    ? testRecoveryCodeStore
+    : durableRecoveryCodeStore;
+}
 
 type PendingMfaAuth = {
   mfaType: "totp" | "sms";
@@ -4066,10 +4110,9 @@ function resolveSamlMappedRole(config: TenantSamlSsoConfig, groups: string[]): s
 }
 
 function getEmailAuthRedirectBaseUrl(): string {
-  return (process.env.EMAIL_AUTH_REDIRECT_BASE_URL || "https://www.elizacloud.ai").replace(
-    /\/$/,
-    "",
-  );
+  return (
+    runtimeEnvironmentValue("EMAIL_AUTH_REDIRECT_BASE_URL") || "https://www.elizacloud.ai"
+  ).replace(/\/$/, "");
 }
 
 function buildEmailAuthRedirectUrl(params?: Record<string, string | undefined>): string {
@@ -4720,7 +4763,8 @@ auth.get("/providers", async (c) => {
     discord: enabledOauth.includes("discord"),
     github: enabledOauth.includes("github"),
     twitter: enabledOauth.includes("twitter"),
-    telegram: methodEnabled("telegram") && Boolean(process.env.TELEGRAM_BOT_TOKEN?.trim()),
+    telegram:
+      methodEnabled("telegram") && Boolean(runtimeEnvironmentValue("TELEGRAM_BOT_TOKEN")?.trim()),
     farcaster: methodEnabled("farcaster") && isFarcasterLoginEnabled(),
     linkedin: enabledOauth.includes("linkedin"),
     spotify: enabledOauth.includes("spotify"),
@@ -4749,7 +4793,7 @@ auth.post("/telegram/challenge", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
   }
 
-  const botToken = process.env.TELEGRAM_BOT_TOKEN?.trim();
+  const botToken = runtimeEnvironmentValue("TELEGRAM_BOT_TOKEN")?.trim();
   if (!botToken) {
     return c.json<ApiResponse>({ ok: false, error: "Telegram login is not configured" }, 503);
   }
@@ -4792,7 +4836,7 @@ auth.post("/telegram/verify", async (c) => {
   >(c);
   if (!body) return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
 
-  const botToken = process.env.TELEGRAM_BOT_TOKEN?.trim();
+  const botToken = runtimeEnvironmentValue("TELEGRAM_BOT_TOKEN")?.trim();
   if (!botToken) {
     return c.json<ApiResponse>({ ok: false, error: "Telegram login is not configured" }, 503);
   }
@@ -5620,8 +5664,8 @@ auth.get("/test/inbox/:email", (c) => {
 
 auth.get("/test/sms-inbox/:phone", (c) => {
   if (
-    process.env.SMS_PROVIDER !== "mock" ||
-    process.env.NODE_ENV === "production" ||
+    runtimeEnvironmentValue("SMS_PROVIDER") !== "mock" ||
+    runtimeEnvironmentValue("NODE_ENV") === "production" ||
     !authTestInboxEnabled()
   ) {
     return c.json<ApiResponse>({ ok: false, error: "Not found" }, 404);
@@ -5658,8 +5702,8 @@ auth.post("/test/token", async (c) => {
   // supervised app-review / automation windows and disable it immediately
   // afterward. Never leave it enabled on an internet-reachable prod deploy.
   if (
-    process.env.NODE_ENV === "production" &&
-    process.env.STEWARD_ENABLE_PROD_TEST_ACCOUNT_TOKEN !== "true"
+    runtimeEnvironmentValue("NODE_ENV") === "production" &&
+    runtimeEnvironmentValue("STEWARD_ENABLE_PROD_TEST_ACCOUNT_TOKEN") !== "true"
   ) {
     return c.json<ApiResponse>(
       { ok: false, error: "Test account token exchange is disabled" },
@@ -6984,7 +7028,7 @@ auth.post("/mfa/totp/enroll", async (c) => {
   const secret = generateTotpSecret();
   const accountName =
     session.payload.email || session.payload.address || `user:${session.payload.userId}`;
-  const issuer = process.env.TOTP_ISSUER || "Steward";
+  const issuer = runtimeEnvironmentValue("TOTP_ISSUER") || "Steward";
 
   await writeMfaJson(
     mfaKey("totp:pending", session.payload.userId),
@@ -7062,7 +7106,10 @@ auth.post("/mfa/totp/verify", async (c) => {
     });
     await writeMfaJson(mfaKey("totp:enabled", session.payload.userId), stored);
     await getMfaBackend().delete(mfaKey("totp:pending", session.payload.userId));
-    const recoveryCodes = await generateRecoveryCodes(recoveryCodeStore, session.payload.userId);
+    const recoveryCodes = await generateRecoveryCodes(
+      getRecoveryCodeStore(),
+      session.payload.userId,
+    );
     const { issuedBefore } = await revokeUserRefreshSessions(session.payload.userId);
     await writeAuditEvent({
       tenantId: session.payload.tenantId,
@@ -7161,7 +7208,7 @@ auth.post("/mfa/totp/complete", async (c) => {
     // the pending login retryable; a valid code is burned only after this
     // request atomically wins the challenge claim.
     const recoveryCode = await findUnusedRecoveryCode(
-      recoveryCodeStore,
+      getRecoveryCodeStore(),
       challenge.userId,
       body.recoveryCode ?? "",
     );
@@ -7172,7 +7219,7 @@ auth.post("/mfa/totp/complete", async (c) => {
     if ((await getMfaBackend().consume(challengeKey)) === null) {
       return c.json<ApiResponse>({ ok: false, error: "Invalid or expired MFA challenge" }, 401);
     }
-    if (!(await recoveryCodeStore.markUsed(recoveryCode.id, new Date()))) {
+    if (!(await getRecoveryCodeStore().markUsed(recoveryCode.id, new Date()))) {
       return c.json<ApiResponse>({ ok: false, error: "Invalid code" }, 401);
     }
     method = "recovery_code";
@@ -7255,7 +7302,7 @@ auth.post("/mfa/totp/step-up", async (c) => {
   let method: "totp" | "recovery_code" = "totp";
   if (hasRecoveryCode) {
     const verified = await verifyRecoveryCode(
-      recoveryCodeStore,
+      getRecoveryCodeStore(),
       session.payload.userId,
       body?.recoveryCode ?? "",
     );
@@ -7286,7 +7333,7 @@ auth.get("/mfa/recovery-codes/status", async (c) => {
 
   const enabled = await hasTotpEnabled(session.payload.userId);
   const remaining = enabled
-    ? await unusedRecoveryCodeCount(recoveryCodeStore, session.payload.userId)
+    ? await unusedRecoveryCodeCount(getRecoveryCodeStore(), session.payload.userId)
     : 0;
   return c.json({ ok: true, enabled, remaining });
 });
@@ -7339,7 +7386,7 @@ auth.post("/mfa/recovery-codes/regenerate", async (c) => {
     ...verified.stored,
     lastAcceptedStep: verified.acceptedStep,
   });
-  const recoveryCodes = await generateRecoveryCodes(recoveryCodeStore, session.payload.userId);
+  const recoveryCodes = await generateRecoveryCodes(getRecoveryCodeStore(), session.payload.userId);
   await writeAuditEvent({
     tenantId: session.payload.tenantId,
     actorType: "user",
@@ -10793,9 +10840,9 @@ async function provisionOAuthUser(opts: {
  * cannot influence the provider redirect_uri.
  */
 function authCallbackBaseUrl(c: Context): string {
-  const configured = process.env.APP_URL?.trim();
+  const configured = runtimeEnvironmentValue("APP_URL")?.trim();
   if (configured) return configured.replace(/\/$/, "");
-  if (process.env.NODE_ENV === "production") {
+  if (runtimeEnvironmentValue("NODE_ENV") === "production") {
     throw new Error("APP_URL is required for OAuth/OIDC callback URLs in production");
   }
   return `${c.req.header("x-forwarded-proto") ?? "https"}://${c.req.header("host") ?? "localhost"}`;
@@ -10931,7 +10978,7 @@ async function exchangeOidcAuthorizationCode(opts: {
     if (!isAllowedOidcClientSecretEnvForTenant(provider.clientSecretEnv, tenantId)) {
       throw new Error("OIDC client secret env is outside the allowed tenant namespace");
     }
-    const secret = process.env[provider.clientSecretEnv];
+    const secret = runtimeEnvironmentValue(provider.clientSecretEnv);
     if (!secret) throw new Error(`OIDC client secret env ${provider.clientSecretEnv} is not set`);
     body.set("client_secret", secret);
   }
@@ -10989,7 +11036,7 @@ function parseOAuthRedirectAllowlistEnv(): string[] {
   const entries = new Set<string>();
 
   for (const envName of OAUTH_REDIRECT_ALLOWLIST_ENV_KEYS) {
-    const raw = process.env[envName];
+    const raw = runtimeEnvironmentValue(envName);
     if (!raw) continue;
 
     for (const entry of raw.split(",")) {

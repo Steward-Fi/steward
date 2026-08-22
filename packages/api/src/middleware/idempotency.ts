@@ -1,4 +1,5 @@
 import { redactedThrownDiagnostics } from "@stwd/shared";
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 import { createMiddleware } from "hono/factory";
 import type { ApiResponse, AppVariables } from "../services/context";
 import { isRecentMfaTimestamp } from "../services/recent-mfa";
@@ -120,7 +121,7 @@ function metricsRedisKey(tenantId: string): string {
 
 function metricsTtlSeconds(): number {
   const ttlMs = parsePositiveInt(
-    process.env.STEWARD_IDEMPOTENCY_METRICS_TTL_MS,
+    runtimeEnvironmentValue("STEWARD_IDEMPOTENCY_METRICS_TTL_MS"),
     DEFAULT_METRICS_TTL_MS,
   );
   return Math.max(1, Math.ceil(ttlMs / 1000));
@@ -242,7 +243,7 @@ async function snapshotFromRedis(
 
 export async function getTenantIdempotencyMetrics(
   tenantId: string,
-  ttlMs = parsePositiveInt(process.env.STEWARD_IDEMPOTENCY_TTL_MS, DEFAULT_TTL_MS),
+  ttlMs = parsePositiveInt(runtimeEnvironmentValue("STEWARD_IDEMPOTENCY_TTL_MS"), DEFAULT_TTL_MS),
 ): Promise<TenantIdempotencyMetricsSnapshot> {
   const bucket = idempotencyMetricBuckets.get(tenantId);
   const now = Date.now();
@@ -408,13 +409,16 @@ export class MemoryIdempotencyStore implements IdempotencyStore {
 
 export class RedisIdempotencyStore implements IdempotencyStore {
   private readonly fallback = new MemoryIdempotencyStore(
-    parsePositiveInt(process.env.STEWARD_IDEMPOTENCY_MAX_ENTRIES, DEFAULT_MAX_ENTRIES),
+    parsePositiveInt(
+      runtimeEnvironmentValue("STEWARD_IDEMPOTENCY_MAX_ENTRIES"),
+      DEFAULT_MAX_ENTRIES,
+    ),
   );
 
   private client() {
     const redis = getRedisClient();
     if (redis) return redis;
-    if (process.env.NODE_ENV !== "production") return null;
+    if (runtimeEnvironmentValue("NODE_ENV") !== "production") return null;
     throw new Error("Durable idempotency store unavailable");
   }
 
@@ -621,11 +625,12 @@ function hasReplaySafePublicContext(c: { req: { path: string } }) {
 
 export function idempotencyMiddleware(options?: { store?: IdempotencyStore; ttlMs?: number }) {
   const store = options?.store ?? defaultIdempotencyStore;
-  const ttlMs =
-    options?.ttlMs ?? parsePositiveInt(process.env.STEWARD_IDEMPOTENCY_TTL_MS, DEFAULT_TTL_MS);
 
   return createMiddleware<{ Variables: AppVariables }>(async (c, next) => {
     if (!MUTATING_METHODS.has(c.req.method.toUpperCase())) return next();
+    const ttlMs =
+      options?.ttlMs ??
+      parsePositiveInt(runtimeEnvironmentValue("STEWARD_IDEMPOTENCY_TTL_MS"), DEFAULT_TTL_MS);
 
     const key = c.req.header("Idempotency-Key");
     if (!key) return next();

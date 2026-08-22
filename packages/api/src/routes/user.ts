@@ -81,6 +81,7 @@ import {
   type SignRequest,
   type TenantAuthAbuseConfig,
 } from "@stwd/shared";
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 import {
   applyUserWalletDefaults,
   generateMnemonic,
@@ -999,7 +1000,7 @@ function slugifyTenantId(value: string): string {
 }
 
 function userTenantCreationAllowed(): boolean {
-  return process.env.ALLOW_USER_TENANT_CREATION === "true";
+  return runtimeEnvironmentValue("ALLOW_USER_TENANT_CREATION") === "true";
 }
 
 async function writeUserAudit(
@@ -1664,7 +1665,10 @@ function userWalletRowsToAccountWallets(
 }
 
 async function withAgentSpendLock<T>(agentId: string, fn: () => Promise<T>): Promise<T> {
-  if (process.env.STEWARD_DB_MODE === "pglite" || process.env.STEWARD_PGLITE_MEMORY === "true") {
+  if (
+    runtimeEnvironmentValue("STEWARD_DB_MODE") === "pglite" ||
+    runtimeEnvironmentValue("STEWARD_PGLITE_MEMORY") === "true"
+  ) {
     return fn();
   }
   const db = getDb();
@@ -2169,7 +2173,7 @@ function farcasterProviderAccountId(address: string): string {
 }
 
 function userFarcasterAllowedDomains(): string[] | undefined {
-  const raw = process.env.SIWE_ALLOWED_DOMAINS?.trim();
+  const raw = runtimeEnvironmentValue("SIWE_ALLOWED_DOMAINS")?.trim();
   if (!raw) return undefined;
   const domains = raw
     .split(",")
@@ -3236,7 +3240,7 @@ for (const channel of ["sms", "whatsapp"] as const) {
   user.post(`/me/accounts/phone/${channel}/send`, async (c) => {
     const personalSessionResponse = requirePersonalUserSession(c);
     if (personalSessionResponse) return personalSessionResponse;
-    if (channel === "whatsapp" && process.env.WHATSAPP_OTP_ENABLED !== "true") {
+    if (channel === "whatsapp" && runtimeEnvironmentValue("WHATSAPP_OTP_ENABLED") !== "true") {
       return c.json<ApiResponse>({ ok: false, error: "WhatsApp OTP is not configured" }, 503);
     }
     const session = c.get("userSession");
@@ -3281,7 +3285,7 @@ for (const channel of ["sms", "whatsapp"] as const) {
   user.post(`/me/accounts/phone/${channel}/verify`, async (c) => {
     const personalSessionResponse = requirePersonalUserSession(c);
     if (personalSessionResponse) return personalSessionResponse;
-    if (channel === "whatsapp" && process.env.WHATSAPP_OTP_ENABLED !== "true") {
+    if (channel === "whatsapp" && runtimeEnvironmentValue("WHATSAPP_OTP_ENABLED") !== "true") {
       return c.json<ApiResponse>({ ok: false, error: "WhatsApp OTP is not configured" }, 503);
     }
     const session = c.get("userSession");
@@ -3407,7 +3411,7 @@ user.post("/me/accounts/telegram/challenge", async (c) => {
     );
   }
 
-  const botToken = process.env.TELEGRAM_BOT_TOKEN?.trim();
+  const botToken = runtimeEnvironmentValue("TELEGRAM_BOT_TOKEN")?.trim();
   if (!botToken) {
     return c.json<ApiResponse>({ ok: false, error: "Telegram login is not configured" }, 503);
   }
@@ -3434,7 +3438,7 @@ user.post("/me/accounts/telegram", async (c) => {
     );
   }
 
-  const botToken = process.env.TELEGRAM_BOT_TOKEN?.trim();
+  const botToken = runtimeEnvironmentValue("TELEGRAM_BOT_TOKEN")?.trim();
   if (!botToken) {
     return c.json<ApiResponse>({ ok: false, error: "Telegram login is not configured" }, 503);
   }
@@ -3532,7 +3536,7 @@ user.post("/me/accounts/farcaster/nonce", async (c) => {
       403,
     );
   }
-  if (process.env.FARCASTER_LOGIN_ENABLED !== "true") {
+  if (runtimeEnvironmentValue("FARCASTER_LOGIN_ENABLED") !== "true") {
     return c.json<ApiResponse>({ ok: false, error: "Farcaster login is not configured" }, 503);
   }
 
@@ -3561,7 +3565,7 @@ user.post("/me/accounts/farcaster", async (c) => {
     );
   }
 
-  if (process.env.FARCASTER_LOGIN_ENABLED !== "true") {
+  if (runtimeEnvironmentValue("FARCASTER_LOGIN_ENABLED") !== "true") {
     return c.json<ApiResponse>({ ok: false, error: "Farcaster login is not configured" }, 503);
   }
   const body = await safeJsonParse<Parameters<typeof verifyFarcasterLogin>[0]>(c);

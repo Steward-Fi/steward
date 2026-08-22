@@ -144,7 +144,9 @@ export async function enforceRateLimit(
   const rlParams = extractRateLimitPolicy(policies);
   if (!rlParams) return { allowed: true };
   if (!isRedisAvailable()) {
-    if (!isRedisConfigured() && process.env.NODE_ENV !== "production") return { allowed: true };
+    if (!isRedisConfigured() && runtimeEnvironmentValue("NODE_ENV") !== "production") {
+      return { allowed: true };
+    }
     return {
       allowed: false,
       reason: "Rate limit enforcement is unavailable",
