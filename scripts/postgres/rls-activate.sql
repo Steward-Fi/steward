@@ -20,6 +20,11 @@ DO $$
 DECLARE
   relation_name text;
 BEGIN
+  IF current_user <> current_setting('steward.activation.migration_role')
+     OR session_user <> current_setting('steward.activation.migration_role') THEN
+    RAISE EXCEPTION 'SEC-169 activation must connect directly as the migration role';
+  END IF;
+
   FOR relation_name IN
     SELECT inventory.relation_name
     FROM steward_expected_rls_policies inventory

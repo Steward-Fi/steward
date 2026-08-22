@@ -23,6 +23,7 @@ export {
 } from "./audit-chain";
 export type { DatabaseDriver, NeonTransactionDbHandle } from "./client";
 export {
+  afterTenantTransactionCommit,
   closeDb,
   createDb,
   createDbForRequest,
@@ -48,6 +49,8 @@ export { runMigrations } from "./migrate";
 export { getMigrationExpectation, type MigrationExpectation } from "./migration-status";
 export { encryptOAuthAccountPlaintextTokens } from "./oauth-token-encryption";
 export {
+  getPluginMigrationLedgerExpectation,
+  type PluginMigrationLedgerExpectation,
   pluginAdvisoryLockKey,
   pluginMigrationsTable,
   type RunPluginMigrationsOptions,

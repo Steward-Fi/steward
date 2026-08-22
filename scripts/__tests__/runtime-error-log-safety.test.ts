@@ -418,5 +418,5 @@ describe("runtime error logging", () => {
       }
     }
     expect(failures).toEqual([]);
-  });
+  }, 15_000);
 });

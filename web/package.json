@@ -47,6 +47,7 @@
   },
   "devDependencies": {
     "@axe-core/playwright": "^4.13.0",
+    "@depay/web3-mock": "14.19.1",
     "@opennextjs/cloudflare": "^1.19.11",
     "@playwright/test": "^1.60.0",
     "@scure/bip39": "1.6.0",

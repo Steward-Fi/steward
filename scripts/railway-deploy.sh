@@ -16,8 +16,12 @@ set -euo pipefail
 #   RAILWAY_ENV_ID      (REQUIRED) the deployer's own Railway environment id
 #   RAILWAY_IMAGE_REPO  (optional) default: ghcr.io/steward-fi/steward (the
 #                                  canonical published OSS image)
-#   RAILWAY_HEALTH_URL  (optional) the deployer's own /health URL to verify
+#   RAILWAY_HEALTH_URL  (required) the deployer's public HTTPS root origin
 #   DEPLOY_TIMEOUT      (optional) max seconds to wait for deploy, default: 300
+#   RAILWAY_HEALTH_TIMEOUT  (optional) max seconds to wait for health, default: 120
+#   RAILWAY_HEALTH_INTERVAL (optional) seconds between health probes, default: 5
+#   RAILWAY_API_CONNECT_TIMEOUT (optional) GraphQL connect bound, default: 5
+#   RAILWAY_API_TIMEOUT (optional) GraphQL request bound, default: 20
 #   RAILWAY_ALLOW_REJECTED_DEPLOY (optional, default: fail closed) when "true",
 #                       a deployment Railway rejected before any container ran
 #                       (no build/deploy logs) degrades to a non-fatal warning
@@ -50,6 +54,10 @@ ENV_ID="${RAILWAY_ENV_ID:-}"
 IMAGE_REPO="${RAILWAY_IMAGE_REPO:-ghcr.io/steward-fi/steward}"
 HEALTH_URL="${RAILWAY_HEALTH_URL:-}"
 TIMEOUT="${DEPLOY_TIMEOUT:-300}"
+HEALTH_TIMEOUT="${RAILWAY_HEALTH_TIMEOUT:-120}"
+HEALTH_INTERVAL="${RAILWAY_HEALTH_INTERVAL:-5}"
+API_CONNECT_TIMEOUT="${RAILWAY_API_CONNECT_TIMEOUT:-5}"
+API_TIMEOUT="${RAILWAY_API_TIMEOUT:-20}"
 API="https://backboard.railway.com/graphql/v2"
 
 DRY_RUN=false
@@ -91,6 +99,15 @@ if [[ -z "$IMAGE_TAG" ]]; then
   exit 1
 fi
 
+if [[ ! "$TIMEOUT" =~ ^[1-9][0-9]*$ ||
+      ! "$HEALTH_TIMEOUT" =~ ^[1-9][0-9]*$ ||
+      ! "$HEALTH_INTERVAL" =~ ^[1-9][0-9]*$ ||
+      ! "$API_CONNECT_TIMEOUT" =~ ^[1-9][0-9]*$ ||
+      ! "$API_TIMEOUT" =~ ^[1-9][0-9]*$ ]]; then
+  fail "deploy, health, and Railway API timeouts must be positive integers"
+  exit 1
+fi
+
 # OCI/Docker tags are at most 128 characters and contain only this conservative
 # subset. Reject whitespace, shell-like syntax, slashes, and control characters
 # before the value reaches logs or a deployment API.
@@ -105,13 +122,68 @@ if [[ -z "${RAILWAY_TOKEN:-}" ]]; then
 fi
 
 FULL_IMAGE="${IMAGE_REPO}:${IMAGE_TAG}"
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+
+# Validate the probe authority before the first control-plane request. Never
+# print the untrusted input: it may contain userinfo or query credentials.
+if [[ -z "$HEALTH_URL" ]]; then
+  fail "RAILWAY_HEALTH_URL is required for deployment acceptance"
+  exit 1
+fi
+if ! HEALTH_URL=$(node "$SCRIPT_DIR/validate-public-origin.mjs" --resolve-origin "$HEALTH_URL"); then
+  fail "RAILWAY_HEALTH_URL must be a credential-free public HTTPS root origin"
+  exit 1
+fi
+
+# Redact every externally supplied diagnostic before it reaches CI. This covers
+# credential-bearing URLs (Postgres, Redis, brokers, generic HTTP userinfo),
+# sensitive query parameters, structured assignments, bearer tokens, Steward
+# keys, and long cryptographic material.
+redact_secrets() {
+  sed -E \
+    -e 's#([A-Za-z][A-Za-z0-9+.-]*://[^/@[:space:]:]*:)[^@/[:space:]]+@#\1…REDACTED…@#g' \
+    -e 's#([A-Za-z][A-Za-z0-9+.-]*://)[^/:@[:space:]]+@#\1…REDACTED…@#g' \
+    -e 's#([?&](access_key|access_token|api_key|apikey|auth|authorization|client_secret|code|credential|key|password|passwd|pwd|secret|signature|sig|token|x-amz-credential|x-amz-security-token|x-amz-signature)=)[^&#"'"'"'[:space:]]+#\1…REDACTED…#gI' \
+    -e 's/(Bearer )[A-Za-z0-9._~+/-]+/\1…REDACTED…/g' \
+    -e 's/(([A-Za-z_][A-Za-z0-9_]*_(URL|URI|DSN)|URL|URI|DSN)"[[:space:]]*:[[:space:]]*")[^"]*/\1…REDACTED…/gI' \
+    -e 's/(([A-Za-z_][A-Za-z0-9_]*_(URL|URI|DSN)|URL|URI|DSN)[[:space:]]*[:=][[:space:]]*")[^"]*/\1…REDACTED…/gI' \
+    -e "s/(([A-Za-z_][A-Za-z0-9_]*_(URL|URI|DSN)|URL|URI|DSN)[[:space:]]*[:=][[:space:]]*')[^']*/\1…REDACTED…/gI" \
+    -e 's/(([A-Za-z_][A-Za-z0-9_]*_(URL|URI|DSN)|URL|URI|DSN)[[:space:]]*[:=][[:space:]]*)[^[:space:],}]+/\1…REDACTED…/gI' \
+    -e 's/((SECRET|SECRETS|PASSWORD|PASS|SALT|TOKEN|KEY|KEYS|HMAC|PRIVATE)[A-Z_]*"[[:space:]]*:[[:space:]]*")[^"]*/\1…REDACTED…/g' \
+    -e 's/((SECRET|SECRETS|PASSWORD|PASS|SALT|TOKEN|KEY|KEYS|HMAC|PRIVATE)[A-Z_]*[[:space:]]*[:=][[:space:]]*")[^"]*/\1…REDACTED…/g' \
+    -e "s/((SECRET|SECRETS|PASSWORD|PASS|SALT|TOKEN|KEY|KEYS|HMAC|PRIVATE)[A-Z_]*[[:space:]]*[:=][[:space:]]*')[^']*/\1…REDACTED…/g" \
+    -e 's/((SECRET|SECRETS|PASSWORD|PASS|SALT|TOKEN|KEY|KEYS|HMAC|PRIVATE)[A-Z_]*[[:space:]]*[:=][[:space:]]*)[^[:space:],}]+/\1…REDACTED…/g' \
+    -e 's/(^|[^A-Za-z0-9_])stw_[A-Za-z0-9]+/\1stw_…REDACTED…/g' \
+    -e 's/(^|[^0-9a-fA-F])[0-9a-fA-F]{48,}([^0-9a-fA-F]|$)/\1…REDACTED…\2/g'
+}
+
+redacted_text() {
+  printf '%s' "${1:-}" | redact_secrets
+}
+
+# Never print a raw GraphQL response: arbitrary provider messages can echo
+# request variables or deployment environment values. Keep only error code and
+# redacted message when the response is valid JSON.
+graphql_diagnostic() {
+  local response="${1:-}"
+  local diagnostic
+  diagnostic=$(printf '%s' "$response" | jq -c \
+    '[.errors[]? | {code: (.extensions.code // "UNKNOWN"), message: (.message // "request failed")}]' \
+    2>/dev/null) || diagnostic=""
+  if [[ -n "$diagnostic" && "$diagnostic" != "[]" ]]; then
+    redacted_text "$diagnostic"
+  else
+    printf '%s' '<no safe GraphQL diagnostic available>'
+  fi
+}
 
 # ---------------------------------------------------------------------------
 # Helper: GraphQL request
 # ---------------------------------------------------------------------------
 gql() {
   local query="$1"
-  curl -sf -X POST "$API" \
+  curl -sf --connect-timeout "$API_CONNECT_TIMEOUT" --max-time "$API_TIMEOUT" \
+    -X POST "$API" \
     -H "Authorization: Bearer ${RAILWAY_TOKEN}" \
     -H "Content-Type: application/json" \
     -d "$query"
@@ -159,13 +231,13 @@ START_TS=$(date -u +%s)
 
 CONNECT_RESULT=$(gql "$CONNECT_PAYLOAD" 2>&1) || {
   fail "serviceInstanceUpdate mutation failed"
-  fail "Response: $CONNECT_RESULT"
+  fail "Response: $(graphql_diagnostic "$CONNECT_RESULT")"
   exit 1
 }
 
 # Check for GraphQL errors
 if echo "$CONNECT_RESULT" | jq -e '.errors' >/dev/null 2>&1; then
-  fail "GraphQL error: $(echo "$CONNECT_RESULT" | jq -r '.errors[0].message')"
+  fail "GraphQL error: $(graphql_diagnostic "$CONNECT_RESULT")"
   exit 1
 fi
 
@@ -184,7 +256,7 @@ DEPLOY_PAYLOAD=$(jq -n \
 
 DEPLOY_TRIGGER=$(gql "$DEPLOY_PAYLOAD" 2>&1) || DEPLOY_TRIGGER=""
 if echo "$DEPLOY_TRIGGER" | jq -e '.errors' >/dev/null 2>&1; then
-  warn "serviceInstanceDeploy returned an error (service may auto-deploy on connect): $(echo "$DEPLOY_TRIGGER" | jq -r '.errors[0].message' 2>/dev/null)"
+  warn "serviceInstanceDeploy returned an error (service may auto-deploy on connect): $(graphql_diagnostic "$DEPLOY_TRIGGER")"
 else
   TRIGGER_DEPLOY_ID=$(echo "$DEPLOY_TRIGGER" | jq -r '.data.serviceInstanceDeployV2 // ""' 2>/dev/null) || TRIGGER_DEPLOY_ID=""
   [[ -n "$TRIGGER_DEPLOY_ID" ]] && ok "Triggered deployment ${TRIGGER_DEPLOY_ID}"
@@ -211,10 +283,11 @@ DEPLOY_ID=""
 # missing required env var on the Railway service) or an image-pull error — the
 # logs below are what tell the operator which. Uses a non-failing curl (the
 # normal gql() helper uses `curl -sf`, which drops the body on any HTTP error)
-# and prints RAW responses so a wrong field name / auth-scope problem is still
-# visible rather than silently swallowed.
+# and reports only whitelisted/redacted diagnostics; raw GraphQL responses may
+# contain echoed variables or provider secrets and are never printed.
 gql_raw() {
-  curl -s -X POST "$API" \
+  curl -s --connect-timeout "$API_CONNECT_TIMEOUT" --max-time "$API_TIMEOUT" \
+    -X POST "$API" \
     -H "Authorization: Bearer ${RAILWAY_TOKEN}" \
     -H "Content-Type: application/json" \
     -d "$1" 2>/dev/null
@@ -226,18 +299,6 @@ gql_raw() {
 # app/code regression). 0 when the container actually produced output (a real
 # crash/health failure that SHOULD fail the pipeline).
 LOGS_EMPTY=0
-
-# Redact obvious secret shapes before printing build/deploy logs to CI
-# stderr: a crash-looped container may have echoed config (DATABASE_URL,
-# STEWARD_* secrets, Bearer tokens) to its logs (SEC-129).
-redact_secrets() {
-  sed -E \
-    -e 's#(postgres(ql)?://[^:/@]+:)[^@]+@#\1…REDACTED…@#g' \
-    -e 's/(Bearer )[A-Za-z0-9._~+/-]+/\1…REDACTED…/g' \
-    -e 's/((SECRET|SECRETS|PASSWORD|PASS|SALT|TOKEN|KEY|KEYS|HMAC|PRIVATE)[A-Z_]*=)[^[:space:]]+/\1…REDACTED…/g' \
-    -e 's/(^|[^A-Za-z0-9_])stw_[A-Za-z0-9]+/\1stw_…REDACTED…/g' \
-    -e 's/(^|[^0-9a-fA-F])[0-9a-fA-F]{48,}([^0-9a-fA-F]|$)/\1…REDACTED…\2/g'
-}
 
 dump_failure() {
   LOGS_EMPTY=0
@@ -257,7 +318,10 @@ dump_failure() {
   q=$(jq -n --arg id "$DEPLOY_ID" \
     '{query: "query($id: String!) { deployment(id: $id) { id status createdAt staticUrl url canRedeploy } }", variables: {id: $id}}')
   resp=$(gql_raw "$q")
-  fail "deployment: ${resp:-<empty response>}"
+  local deployment_summary
+  deployment_summary=$(printf '%s' "${resp:-}" | jq -c \
+    '.data.deployment | {id, status, createdAt, canRedeploy}' 2>/dev/null) || deployment_summary=""
+  fail "deployment: ${deployment_summary:-$(graphql_diagnostic "$resp")}"
 
   q=$(jq -n --arg id "$DEPLOY_ID" \
     '{query: "query($id: String!) { buildLogs(deploymentId: $id, limit: 200) { message } }", variables: {id: $id}}')
@@ -267,7 +331,7 @@ dump_failure() {
   if [[ -n "$build_logs" ]]; then
     echo "$build_logs" | redact_secrets >&2
   else
-    fail "${resp:-<empty response>}"
+    fail "$(graphql_diagnostic "$resp")"
   fi
 
   q=$(jq -n --arg id "$DEPLOY_ID" \
@@ -278,7 +342,7 @@ dump_failure() {
   if [[ -n "$deploy_logs" ]]; then
     echo "$deploy_logs" | redact_secrets >&2
   else
-    fail "${resp:-<empty response>}"
+    fail "$(graphql_diagnostic "$resp")"
   fi
   fail "----------------------------------------"
 
@@ -366,37 +430,57 @@ fi
 # ---------------------------------------------------------------------------
 # Step 3: Health check
 # ---------------------------------------------------------------------------
-# Skip when no health URL is configured; otherwise a deployer who only set the
-# required service/env IDs would have the service image updated and THEN see the
-# deploy marked failed against a bare "/health" URL.
-if [[ -z "$HEALTH_URL" ]]; then
-  ok "Service image updated. Skipping health check (RAILWAY_HEALTH_URL not set)."
-  exit 0
-fi
+# A Railway SUCCESS state only proves control-plane rollout. Deployment
+# acceptance requires an explicit public probe authority plus both liveness and
+# durable readiness receipts; absent authority must never look shipped.
+verify_public_probe() {
+  local path="$1"
+  local label="$2"
+  local probe_result="000 "
+  local http_code="000"
+  local remote_ip=""
+  local attempt=0
+  local started=$SECONDS
+  local elapsed=0
 
-log "Verifying health endpoint: ${HEALTH_URL}/health"
+  log "Verifying ${label} endpoint: ${HEALTH_URL}${path}"
+  while [[ $elapsed -lt $HEALTH_TIMEOUT ]]; do
+    attempt=$((attempt + 1))
+    local remaining=$((HEALTH_TIMEOUT - elapsed))
+    local request_timeout=$((remaining < 10 ? remaining : 10))
+    local connect_timeout=$((request_timeout < 5 ? request_timeout : 5))
+    probe_result=$(curl -sS \
+      --connect-timeout "$connect_timeout" \
+      --max-time "$request_timeout" \
+      -o /dev/null \
+      -w "%{http_code} %{remote_ip}" \
+      "${HEALTH_URL}${path}" 2>/dev/null) || probe_result="000 "
+    read -r http_code remote_ip <<< "$probe_result"
+    if [[ "$http_code" == "200" ]] &&
+       node "$SCRIPT_DIR/validate-public-origin.mjs" --ip "$remote_ip" >/dev/null 2>&1; then
+      ok "${label} check passed"
+      return 0
+    fi
+    elapsed=$((SECONDS - started))
+    warn "  ${label} check attempt ${attempt}: HTTP ${http_code} (${elapsed}s elapsed)"
+    remaining=$((HEALTH_TIMEOUT - elapsed))
+    if [[ $remaining -gt 0 ]]; then
+      sleep "$((remaining < HEALTH_INTERVAL ? remaining : HEALTH_INTERVAL))"
+    fi
+    elapsed=$((SECONDS - started))
+  done
 
-# Give the service a moment to start accepting traffic
-sleep 5
+  fail "${label} check failed after ${attempt} attempts / ${HEALTH_TIMEOUT}s (last HTTP: ${http_code})"
+  fail "Collecting Railway logs for deployment ${DEPLOY_ID} before failing."
+  dump_failure
+  return 1
+}
 
-HEALTH_OK=false
-for i in 1 2 3; do
-  HTTP_CODE=$(curl -sf -o /dev/null -w "%{http_code}" "${HEALTH_URL}/health" 2>/dev/null) || HTTP_CODE="000"
-  if [[ "$HTTP_CODE" == "200" ]]; then
-    HEALTH_OK=true
-    break
-  fi
-  warn "  Health check attempt $i: HTTP ${HTTP_CODE}"
-  sleep 5
-done
-
-if $HEALTH_OK; then
-  ok "Health check passed"
-else
-  fail "Health check failed after 3 attempts (last HTTP: ${HTTP_CODE})"
-  fail "Service may still be starting. Check ${HEALTH_URL}/health manually."
-  exit 1
-fi
+verify_public_probe "/health" "Health" || exit 1
+# Liveness alone is insufficient: /ready verifies the migrated ledger, RLS
+# deployment role, Redis/auth stores, and other durable dependencies before a
+# Railway deployment is accepted.
+verify_public_probe "/ready" "Readiness" || exit 1
 
 # ---------------------------------------------------------------------------
 # Summary
@@ -407,4 +491,5 @@ ok "  Railway Deploy Complete"
 ok "  Image:   ${FULL_IMAGE}"
 ok "  Service: ${SERVICE_ID}"
 ok "  Health:  ${HEALTH_URL}/health ✓"
+ok "  Ready:   ${HEALTH_URL}/ready ✓"
 ok "=========================================="

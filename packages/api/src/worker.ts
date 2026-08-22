@@ -458,6 +458,27 @@ function validateWorkerSecurityEnv(): void {
   validateJwtSecretEnv();
 }
 
+export async function assertWorkerMigrationReadiness(
+  pluginMigrationSources?: import("./migration-readiness").EnabledPluginMigrationSource[],
+): Promise<void> {
+  const { readMigrationReadiness } = await import("./migration-readiness");
+  const enabledSources =
+    pluginMigrationSources ?? (await import("./compose")).getComposedPluginMigrationSources();
+  const migrationReadiness = await readMigrationReadiness({
+    db: getDb(),
+    migrationsRan: true,
+    pluginMigrationSources: await enabledSources,
+    pglite: false,
+  });
+  if (
+    !migrationReadiness.database.ok ||
+    !migrationReadiness.migrations.ok ||
+    !migrationReadiness.pluginMigrations.ok
+  ) {
+    throw new Error("WORKER_MIGRATION_READINESS_FAILED");
+  }
+}
+
 export function assertWorkerRedisReady(redisOk: boolean): void {
   if (!redisOk) {
     throw new Error("Durable Redis is required on Workers");
@@ -478,6 +499,7 @@ async function initializeWorker(env: Env): Promise<void> {
     throw new Error("STEWARD_APP_DATABASE_ROLE is required on Workers");
   }
   await assertRlsDeploymentSafety(getDb(), { expectedRole });
+  await assertWorkerMigrationReadiness();
   const redisOk = await initRedis(env);
   assertWorkerRedisReady(redisOk);
   // Auth stores (passkey challenges, magic-link tokens, SIWE/SIWS nonces)

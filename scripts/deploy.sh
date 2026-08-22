@@ -67,6 +67,7 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 REMOTE_DIR="/opt/steward"
+REMOTE_MIGRATION_ENV="${REMOTE_DIR}/.env.migrate"
 BUN="/root/.bun/bin/bun"
 
 # Host-key checking: TOFU (accept-new) at minimum — never "no" (SEC-019).
@@ -115,16 +116,39 @@ fi
 # 3. Migrations
 # ---------------------------------------------------------------------------
 if $DO_MIGRATE; then
-  log "Running migrations on $NODE_IP via drizzle migrator ..."
+  log "Running complete release migrations on $NODE_IP ..."
 
-  # Source DATABASE_URL from remote .env and run the in-app migrator. This uses
-  # drizzle's __drizzle_migrations tracking table, acquires an advisory lock
-  # for multi-replica safety, and backfills the tracking table on first run
-  # against a DB that was previously migrated by the old psql loop.
-  if remote "cd $REMOTE_DIR && set -a && . ./.env && set +a && $BUN packages/db/src/migrate.ts"; then
-    ok "Migrations complete"
+  # Privileged database URLs must live in the root-only migration environment,
+  # never in the API service's .env. Apply core + enabled-plugin journals as the
+  # dedicated migrator, then restore bootstrap ownership/ACLs as the provider
+  # operator, and finally activate the exact RLS inventory as the migrator.
+  # rls-bootstrap.sql requires a PostgreSQL superuser or provider-equivalent
+  # able to create/alter BYPASSRLS roles; CREATEROLE alone is insufficient.
+  MIGRATION_COMMAND=$(cat <<EOF
+cd $REMOTE_DIR &&
+test -f '.env' &&
+test -f '$REMOTE_MIGRATION_ENV' &&
+test -O '$REMOTE_MIGRATION_ENV' &&
+test "\$(stat -c '%a' '$REMOTE_MIGRATION_ENV')" = 600 &&
+set -a && . '.env' && . '$REMOTE_MIGRATION_ENV' && set +a &&
+: "\${STEWARD_MIGRATION_DATABASE_URL:?missing STEWARD_MIGRATION_DATABASE_URL}" &&
+: "\${STEWARD_OPERATOR_DATABASE_URL:?missing STEWARD_OPERATOR_DATABASE_URL}" &&
+DATABASE_URL="\$STEWARD_MIGRATION_DATABASE_URL" $BUN run --cwd packages/api migrate &&
+PGDATABASE="\$STEWARD_OPERATOR_DATABASE_URL" psql --no-psqlrc \
+  -v steward_app_role="\${STEWARD_APP_DATABASE_ROLE:-steward_app}" \
+  -v steward_migration_role="\${STEWARD_MIGRATION_DATABASE_ROLE:-steward_migrator}" \
+  -v steward_bootstrap_role="\${STEWARD_BOOTSTRAP_DATABASE_ROLE:-steward_bootstrap_owner}" \
+  -v steward_platform_role="\${STEWARD_PLATFORM_DATABASE_ROLE:-steward_platform}" \
+  -f scripts/postgres/rls-bootstrap.sql &&
+PGDATABASE="\$STEWARD_MIGRATION_DATABASE_URL" psql --no-psqlrc \
+  -v steward_migration_role="\${STEWARD_MIGRATION_DATABASE_ROLE:-steward_migrator}" \
+  -f scripts/postgres/rls-activate.sql
+EOF
+)
+  if remote "$MIGRATION_COMMAND"; then
+    ok "Core/plugin migrations, bootstrap reconciliation, and RLS activation complete"
   else
-    fail "Migration failed, aborting"
+    fail "Release migration/bootstrap/activation failed, aborting"
     exit 1
   fi
 fi
