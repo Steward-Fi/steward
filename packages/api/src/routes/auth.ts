@@ -135,6 +135,7 @@ import {
   type TenantSamlSsoConfig,
   type TenantTestAccountConfig,
 } from "@stwd/shared";
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 import { type KeyStore, provisionUserWallet, Vault } from "@stwd/vault";
 import bs58 from "bs58";
 import { and, eq, gte, inArray, isNull, lt, sql } from "drizzle-orm";
@@ -1767,20 +1768,72 @@ function getPasskeyAuth(requestOrigin?: string): PasskeyAuth {
 // ─── EmailAuth cache ──────────────────────────────────────────────────────────
 
 const _emailAuthByTenant = new Map<string, Map<string, Promise<EmailAuth>>>();
-// Keep current/overlapping deployment generations hot without retaining every
-// retired provider instance (and its decrypted tenant delivery key) forever.
+type CachedEmailAuthAuthority = {
+  tenantId: string;
+  authorityFingerprint: string;
+  pending: Promise<EmailAuth>;
+};
+const _emailAuthAuthorityLru = new Map<string, CachedEmailAuthAuthority>();
+// Bound both per-tenant rotations and the process-wide population. Otherwise
+// one authority per tenant still retains plaintext provider credentials for
+// every tenant ever observed by a long-lived isolate.
 const MAX_EMAIL_AUTH_AUTHORITIES_PER_TENANT = 4;
+const MAX_EMAIL_AUTH_AUTHORITIES_GLOBAL = 64;
+
+function emailAuthAuthorityCacheKey(tenantId: string, authorityFingerprint: string): string {
+  return JSON.stringify([tenantId, authorityFingerprint]);
+}
+
+function removeCachedEmailAuthAuthority(entry: CachedEmailAuthAuthority): void {
+  const key = emailAuthAuthorityCacheKey(entry.tenantId, entry.authorityFingerprint);
+  if (_emailAuthAuthorityLru.get(key)?.pending === entry.pending) {
+    _emailAuthAuthorityLru.delete(key);
+  }
+  const authorities = _emailAuthByTenant.get(entry.tenantId);
+  if (authorities?.get(entry.authorityFingerprint) !== entry.pending) return;
+  authorities.delete(entry.authorityFingerprint);
+  if (authorities.size === 0 && _emailAuthByTenant.get(entry.tenantId) === authorities) {
+    _emailAuthByTenant.delete(entry.tenantId);
+  }
+}
+
+function touchCachedEmailAuthAuthority(entry: CachedEmailAuthAuthority): void {
+  const key = emailAuthAuthorityCacheKey(entry.tenantId, entry.authorityFingerprint);
+  if (_emailAuthAuthorityLru.get(key)?.pending !== entry.pending) return;
+  _emailAuthAuthorityLru.delete(key);
+  _emailAuthAuthorityLru.set(key, entry);
+}
 
 function cacheEmailAuthAuthority(
+  tenantId: string,
   authorities: Map<string, Promise<EmailAuth>>,
   authorityFingerprint: string,
   pending: Promise<EmailAuth>,
 ): void {
   if (authorities.size >= MAX_EMAIL_AUTH_AUTHORITIES_PER_TENANT) {
     const oldestAuthority = authorities.keys().next().value as string | undefined;
-    if (oldestAuthority) authorities.delete(oldestAuthority);
+    const oldestPending = oldestAuthority ? authorities.get(oldestAuthority) : undefined;
+    if (oldestAuthority && oldestPending) {
+      removeCachedEmailAuthAuthority({
+        tenantId,
+        authorityFingerprint: oldestAuthority,
+        pending: oldestPending,
+      });
+    }
+  }
+  if (_emailAuthAuthorityLru.size >= MAX_EMAIL_AUTH_AUTHORITIES_GLOBAL) {
+    const oldestKey = _emailAuthAuthorityLru.keys().next().value as string | undefined;
+    const oldestEntry = oldestKey ? _emailAuthAuthorityLru.get(oldestKey) : undefined;
+    if (oldestEntry) removeCachedEmailAuthAuthority(oldestEntry);
+  }
+  // Global eviction can remove the final older generation for this same
+  // tenant. Re-register the still-current map before installing its successor.
+  if (_emailAuthByTenant.get(tenantId) !== authorities) {
+    _emailAuthByTenant.set(tenantId, authorities);
   }
   authorities.set(authorityFingerprint, pending);
+  const entry = { tenantId, authorityFingerprint, pending };
+  _emailAuthAuthorityLru.set(emailAuthAuthorityCacheKey(tenantId, authorityFingerprint), entry);
 }
 
 function getEmailKeyStore(): KeyStore {
@@ -1851,16 +1904,18 @@ export function decryptOAuthProviderToken(encrypted: {
 }
 
 function isMockEmailEnabled(): boolean {
-  if (process.env.EMAIL_PROVIDER === "mock" && process.env.NODE_ENV === "production") {
+  const provider = runtimeEnvironmentValue("EMAIL_PROVIDER");
+  const nodeEnvironment = runtimeEnvironmentValue("NODE_ENV");
+  if (provider === "mock" && nodeEnvironment === "production") {
     throw new Error(
       "EMAIL_PROVIDER=mock is forbidden in production. Unset EMAIL_PROVIDER or set RESEND_API_KEY.",
     );
   }
-  return process.env.EMAIL_PROVIDER === "mock" && process.env.NODE_ENV !== "production";
+  return provider === "mock" && nodeEnvironment !== "production";
 }
 
 function authTestInboxEnabled(): boolean {
-  return process.env.NODE_ENV === "test";
+  return runtimeEnvironmentValue("NODE_ENV") === "test";
 }
 
 function isEnabledTestAccount(
@@ -1953,20 +2008,24 @@ function buildGlobalEmailAuth(overrides?: {
   replyTo?: string;
   templates?: TenantEmailConfig["templates"];
 }): EmailAuth {
-  const resendKey = process.env.RESEND_API_KEY;
+  const resendKey = runtimeEnvironmentValue("RESEND_API_KEY");
+  const emailFrom = runtimeEnvironmentValue("EMAIL_FROM") || "login@steward.fi";
   // Mock takes precedence in non-production for deterministic e2e testing.
   const provider = isMockEmailEnabled()
     ? new MockEmailProvider()
     : resendKey
       ? new ResendProvider({
           apiKey: resendKey,
-          from: process.env.EMAIL_FROM || "login@steward.fi",
+          from: emailFrom,
         })
       : undefined;
 
   return new EmailAuth({
-    from: process.env.EMAIL_FROM || "login@steward.fi",
-    baseUrl: overrides?.baseUrl?.replace(/\/$/, "") || process.env.APP_URL || "https://steward.fi",
+    from: emailFrom,
+    baseUrl:
+      overrides?.baseUrl?.replace(/\/$/, "") ||
+      runtimeEnvironmentValue("APP_URL") ||
+      "https://steward.fi",
     callbackPath: overrides?.callbackPath,
     provider,
     tokenStore: getTokenStore(),
@@ -2038,7 +2097,7 @@ async function createEmailAuthForTenant(tenantId: string): Promise<EmailAuth> {
   // We've already returned via buildGlobalEmailAuth above when apiKeyEncrypted
   // is missing, so it's safe to assume `emailConfig.from + apiKeyEncrypted`
   // are both present here.
-  const from = emailConfig.from || process.env.EMAIL_FROM || "login@steward.fi";
+  const from = emailConfig.from || runtimeEnvironmentValue("EMAIL_FROM") || "login@steward.fi";
   const provider =
     emailConfig.provider === "resend" && emailConfig.apiKeyEncrypted
       ? new ResendProvider({
@@ -2051,7 +2110,9 @@ async function createEmailAuthForTenant(tenantId: string): Promise<EmailAuth> {
       : undefined;
 
   const baseUrl =
-    magicLinkBaseUrl?.replace(/\/$/, "") || process.env.APP_URL || "https://steward.fi";
+    magicLinkBaseUrl?.replace(/\/$/, "") ||
+    runtimeEnvironmentValue("APP_URL") ||
+    "https://steward.fi";
 
   return new EmailAuth({
     from,
@@ -2067,24 +2128,39 @@ async function createEmailAuthForTenant(tenantId: string): Promise<EmailAuth> {
 }
 
 export async function getEmailAuthForTenant(tenantId: string): Promise<EmailAuth> {
-  const authorityFingerprint = resolveCustodyAuthority({
+  const custodyFingerprint = resolveCustodyAuthority({
     allowDevSecretFallback: true,
   }).fingerprint;
+  // EmailAuth construction crosses an awaited tenant-config lookup. Bind its
+  // cache identity to the immutable request-local provider authority too, so
+  // overlapping requests with the same custody root cannot lend each other a
+  // Resend key, sender, callback origin, or code-verifier authority.
+  const emailAuthorityFingerprint = hashSha256Hex(
+    JSON.stringify({
+      nodeEnvironment: runtimeEnvironmentValue("NODE_ENV"),
+      provider: runtimeEnvironmentValue("EMAIL_PROVIDER"),
+      resendApiKey: runtimeEnvironmentValue("RESEND_API_KEY"),
+      emailFrom: runtimeEnvironmentValue("EMAIL_FROM"),
+      appUrl: runtimeEnvironmentValue("APP_URL"),
+      codeVerifierSecret: runtimeEnvironmentValue("STEWARD_EMAIL_CODE_SECRET"),
+      allowDevSecrets: runtimeEnvironmentValue("STEWARD_ALLOW_DEV_SECRETS"),
+      allowLegacyDevSecret: runtimeEnvironmentValue("STEWARD_ALLOW_DEV_SECRET"),
+    }),
+  );
+  const authorityFingerprint = hashSha256Hex(`${custodyFingerprint}:${emailAuthorityFingerprint}`);
   let authorities = _emailAuthByTenant.get(tenantId);
   const cached = authorities?.get(authorityFingerprint);
   if (cached && authorities) {
     authorities.delete(authorityFingerprint);
     authorities.set(authorityFingerprint, cached);
+    touchCachedEmailAuthAuthority({ tenantId, authorityFingerprint, pending: cached });
     return cached;
   }
 
   let pending: Promise<EmailAuth>;
   pending = createEmailAuthForTenant(tenantId).catch((error) => {
     if (authorities?.get(authorityFingerprint) === pending) {
-      authorities.delete(authorityFingerprint);
-    }
-    if (authorities?.size === 0 && _emailAuthByTenant.get(tenantId) === authorities) {
-      _emailAuthByTenant.delete(tenantId);
+      removeCachedEmailAuthAuthority({ tenantId, authorityFingerprint, pending });
     }
     throw error;
   });
@@ -2092,16 +2168,26 @@ export async function getEmailAuthForTenant(tenantId: string): Promise<EmailAuth
     authorities = new Map();
     _emailAuthByTenant.set(tenantId, authorities);
   }
-  cacheEmailAuthAuthority(authorities, authorityFingerprint, pending);
+  cacheEmailAuthAuthority(tenantId, authorities, authorityFingerprint, pending);
   return pending;
 }
 
 export function invalidateEmailAuthForTenant(tenantId: string): void {
-  _emailAuthByTenant.delete(tenantId);
+  const authorities = _emailAuthByTenant.get(tenantId);
+  if (!authorities) return;
+  for (const [authorityFingerprint, pending] of authorities) {
+    removeCachedEmailAuthAuthority({ tenantId, authorityFingerprint, pending });
+  }
 }
 
 export function clearEmailAuthTenantCacheForTests(): void {
   _emailAuthByTenant.clear();
+  _emailAuthAuthorityLru.clear();
+}
+
+/** Internal behavior hook for deterministic cache-bound regressions. */
+export function emailAuthCacheEntryCountForTests(): number {
+  return _emailAuthAuthorityLru.size;
 }
 
 export function clearOAuthTokenKeyStoreForTests(): void {

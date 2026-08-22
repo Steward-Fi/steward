@@ -1,12 +1,15 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { readFileSync } from "node:fs";
+import type { EmailAuth } from "@stwd/auth";
 import { closeDb, getDb, tenantConfigs, tenants } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { withRuntimeEnvironment } from "@stwd/shared/runtime-env";
 import { KeyStore } from "@stwd/vault";
-import { eq } from "drizzle-orm";
+import { eq, inArray } from "drizzle-orm";
+import { Hono } from "hono";
 import {
   clearEmailAuthTenantCacheForTests,
+  emailAuthCacheEntryCountForTests,
   getEmailAuthForTenant,
   initAuthStores,
   invalidateEmailAuthForTenant,
@@ -82,6 +85,123 @@ describe("getEmailAuthForTenant", () => {
 
     expect(reloadedFirst).not.toBe(first);
     clearEmailAuthTenantCacheForTests();
+  });
+
+  it("keeps mounted EmailAuth provider authority isolated across hostile request overlap", async () => {
+    clearEmailAuthTenantCacheForTests();
+    await getDb().delete(tenantConfigs).where(eq(tenantConfigs.tenantId, TEST_TENANT_ID));
+    let signalAStarted: (() => void) | undefined;
+    let releaseA: (() => void) | undefined;
+    const aStarted = new Promise<void>((resolve) => {
+      signalAStarted = resolve;
+    });
+    const aMayResume = new Promise<void>((resolve) => {
+      releaseA = resolve;
+    });
+    const instances = new Map<string, EmailAuth>();
+    const app = new Hono();
+    app.get("/email/:requestId", async (c) => {
+      const requestId = c.req.param("requestId");
+      if (requestId === "a") {
+        signalAStarted?.();
+        await aMayResume;
+      }
+      const auth = await getEmailAuthForTenant(TEST_TENANT_ID);
+      instances.set(requestId, auth);
+      return c.json({
+        from: (auth as any).from,
+        baseUrl: (auth as any).baseUrl,
+      });
+    });
+    const sharedCustody = {
+      NODE_ENV: "test",
+      STEWARD_MASTER_PASSWORD: "shared-overlap-custody",
+      STEWARD_KDF_SALT: "ab".repeat(16),
+    };
+
+    const requestA = withRuntimeEnvironment(
+      {
+        ...sharedCustody,
+        RESEND_API_KEY: "resend-authority-a",
+        EMAIL_FROM: "A <a@example.test>",
+        APP_URL: "https://a.example.test",
+        STEWARD_EMAIL_CODE_SECRET: "a".repeat(32),
+      },
+      () => app.request("/email/a"),
+    );
+    await aStarted;
+    const responseB = await withRuntimeEnvironment(
+      {
+        ...sharedCustody,
+        RESEND_API_KEY: "resend-authority-b",
+        EMAIL_FROM: "B <b@example.test>",
+        APP_URL: "https://b.example.test",
+        STEWARD_EMAIL_CODE_SECRET: "b".repeat(32),
+      },
+      () => app.request("/email/b"),
+    );
+    releaseA?.();
+    const responseA = await requestA;
+
+    expect(responseB.status).toBe(200);
+    expect(responseA.status).toBe(200);
+    expect(await responseB.json()).toEqual({
+      from: "B <b@example.test>",
+      baseUrl: "https://b.example.test",
+    });
+    expect(await responseA.json()).toEqual({
+      from: "A <a@example.test>",
+      baseUrl: "https://a.example.test",
+    });
+    expect(instances.get("a")).not.toBe(instances.get("b"));
+    expect((instances.get("a") as any).codeVerifierSecret).toBe("a".repeat(32));
+    expect((instances.get("b") as any).codeVerifierSecret).toBe("b".repeat(32));
+    expect((instances.get("a") as any).provider.client.key).toBe("resend-authority-a");
+    expect((instances.get("b") as any).provider.client.key).toBe("resend-authority-b");
+    clearEmailAuthTenantCacheForTests();
+  });
+
+  it("globally bounds plaintext provider instances across distinct tenants", async () => {
+    clearEmailAuthTenantCacheForTests();
+    const tenantIds = Array.from(
+      { length: 65 },
+      (_, index) => `tenant-email-global-cache-${index.toString().padStart(2, "0")}`,
+    );
+    await getDb()
+      .insert(tenants)
+      .values(
+        tenantIds.map((id) => ({
+          id,
+          name: id,
+          apiKeyHash: `hash-${id}`,
+        })),
+      );
+    const environment = {
+      NODE_ENV: "test",
+      STEWARD_MASTER_PASSWORD: "global-email-cache-custody",
+      STEWARD_KDF_SALT: "cd".repeat(16),
+      RESEND_API_KEY: "global-email-cache-resend",
+      EMAIL_FROM: "Cache <cache@example.test>",
+      APP_URL: "https://cache.example.test",
+      STEWARD_EMAIL_CODE_SECRET: "c".repeat(32),
+    };
+
+    const first = await withRuntimeEnvironment(environment, () =>
+      getEmailAuthForTenant(tenantIds[0]),
+    );
+    for (const tenantId of tenantIds.slice(1)) {
+      await withRuntimeEnvironment(environment, () => getEmailAuthForTenant(tenantId));
+    }
+    expect(emailAuthCacheEntryCountForTests()).toBe(64);
+    const reloadedFirst = await withRuntimeEnvironment(environment, () =>
+      getEmailAuthForTenant(tenantIds[0]),
+    );
+
+    expect(reloadedFirst).not.toBe(first);
+    expect(emailAuthCacheEntryCountForTests()).toBe(64);
+    for (const tenantId of tenantIds) invalidateEmailAuthForTenant(tenantId);
+    await getDb().delete(tenants).where(inArray(tenants.id, tenantIds));
+    expect(emailAuthCacheEntryCountForTests()).toBe(0);
   });
 
   it("uses the tenant-specific config when emailConfig is set", async () => {
