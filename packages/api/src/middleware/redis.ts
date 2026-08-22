@@ -37,7 +37,9 @@ type RedisBinding = Readonly<{
 
 const redisClients = new Map<string, IoredisLike>();
 const redisInitializations = new Map<string, Promise<boolean>>();
+const redisPingFlights = new WeakMap<IoredisLike, Promise<boolean>>();
 const MAX_REDIS_BINDING_GENERATIONS = 8;
+const REDIS_READINESS_TIMEOUT_MS = 1_000;
 const MAX_MEMORY_ADAPTER_BUCKETS = 1_000;
 const MAX_MEMORY_ADAPTER_RESERVATIONS_PER_BUCKET = 1_000;
 type MemoryAdapterBucket = { units: number; markers: Map<string, string> };
@@ -221,6 +223,87 @@ export function isRedisConfigured(): boolean {
 export function getRedisClient(): IoredisLike | null {
   const binding = redisBinding();
   return binding ? (redisClients.get(redisBindingKey(binding)) ?? null) : null;
+}
+
+interface RedisConnectionReadinessOptions {
+  timeoutMs?: number;
+  getClient?: () => IoredisLike | null;
+  discardClient?: (client: IoredisLike) => void;
+  refreshClient?: () => Promise<boolean>;
+}
+
+async function withinRedisReadinessDeadline<T>(
+  operation: Promise<T>,
+  timeoutMs: number,
+): Promise<T> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      operation,
+      new Promise<never>((_resolve, reject) => {
+        timeout = setTimeout(() => reject(new Error("Redis readiness timed out")), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+}
+
+function pingRedisClient(client: IoredisLike): Promise<boolean> {
+  const pending = redisPingFlights.get(client);
+  if (pending) return pending;
+  const operation = client.ping().then((reply) => reply.toUpperCase() === "PONG");
+  redisPingFlights.set(client, operation);
+  const clearFlight = () => {
+    if (redisPingFlights.get(client) === operation) redisPingFlights.delete(client);
+  };
+  void operation.then(clearFlight, clearFlight);
+  return operation;
+}
+
+function discardCurrentRedisClient(client: IoredisLike): void {
+  const binding = redisBinding();
+  if (!binding) return;
+  const key = redisBindingKey(binding);
+  if (redisClients.get(key) !== client) return;
+  redisClients.delete(key);
+  if ("quit" in client && typeof client.quit === "function") {
+    void client.quit().catch(() => undefined);
+  }
+}
+
+/** Bound Redis health I/O and replace a stale cached client through the same
+ * single-flight initialization path used at startup. A timed-out PING remains
+ * in one WeakMap flight until it settles, and the replacement initialization
+ * is likewise shared, so repeated public readiness probes cannot accumulate
+ * unbounded socket work. */
+export async function checkRedisConnectionReadiness(
+  options: RedisConnectionReadinessOptions = {},
+): Promise<boolean> {
+  const timeoutMs = options.timeoutMs ?? REDIS_READINESS_TIMEOUT_MS;
+  const getClient = options.getClient ?? getRedisClient;
+  const refreshClient = options.refreshClient ?? (() => initRedis());
+  const client = getClient();
+  if (!client) {
+    try {
+      return await withinRedisReadinessDeadline(refreshClient(), timeoutMs);
+    } catch {
+      return false;
+    }
+  }
+
+  try {
+    if (await withinRedisReadinessDeadline(pingRedisClient(client), timeoutMs)) return true;
+  } catch {
+    // A configured but stalled client is not a usable readiness authority.
+  }
+
+  (options.discardClient ?? discardCurrentRedisClient)(client);
+  try {
+    return await withinRedisReadinessDeadline(refreshClient(), timeoutMs);
+  } catch {
+    return false;
+  }
 }
 
 // Package helpers that have not yet grown an explicit client parameter must
