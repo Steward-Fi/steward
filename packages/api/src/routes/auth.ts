@@ -1604,6 +1604,11 @@ function getMfaBackend(): StoreBackend {
   return _mfaBackend;
 }
 
+/** Test-only failure-injection seam for mounted MFA lifecycle coverage. */
+export function _getAuthMfaBackendForTests(): StoreBackend {
+  return getMfaBackend();
+}
+
 export function getImportSessionBackend(): StoreBackend {
   if (_importSessionBackend) return _importSessionBackend;
   const { MemoryBackend } = require("@stwd/auth") as typeof import("@stwd/auth");
@@ -7055,6 +7060,9 @@ auth.post("/mfa/totp/complete", async (c) => {
       429,
     );
   }
+  if (!(await isActiveTenantMember(challenge.userId, challenge.tenantId))) {
+    return c.json<ApiResponse>({ ok: false, error: "User is not a member of this tenant" }, 403);
+  }
 
   let method: "totp" | "recovery_code" = "totp";
   if (hasRecoveryCode) {
@@ -7099,9 +7107,6 @@ auth.post("/mfa/totp/complete", async (c) => {
     mfaMethod: method,
     factorEnrollmentVerifiedAt: Date.now(),
   };
-  if (!(await isActiveTenantMember(challenge.userId, challenge.tenantId))) {
-    return c.json<ApiResponse>({ ok: false, error: "User is not a member of this tenant" }, 403);
-  }
   await writeAuthLoginAudit(c, challenge.tenantId, challenge.userId, challenge.claims, {
     mfaMethod: method,
   });
@@ -7762,6 +7767,9 @@ const completePasskeyMfaHandler = async (c: Context) => {
     mfaMethod: "passkey",
     factorEnrollmentVerifiedAt: Date.now(),
   };
+  await writeAuthLoginAudit(c, session.payload.tenantId, session.payload.userId, session.payload, {
+    mfaMethod: "passkey",
+  });
   const token = await createSessionToken(session.payload.address, session.payload.tenantId, {
     userId: session.payload.userId,
     email: session.payload.email,
@@ -9058,7 +9066,11 @@ auth.post("/email/status", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: tenantHintError }, 404);
   }
   const emailAuth = await getEmailAuthForTenant(resolvedTenantId);
-  const status = await emailAuth.getEmailLoginStatus(body.challengeId, body.pollSecret);
+  const status = await emailAuth.getEmailLoginStatus(
+    body.challengeId,
+    body.pollSecret,
+    resolvedTenantId,
+  );
   return c.json<ApiResponse<{ status: string; expiresAt?: string }>>({
     ok: true,
     data: {

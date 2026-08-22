@@ -170,6 +170,7 @@ type EmailLoginChallengeRecord = {
 type EmailLoginStatusRecord = {
   status: "delivery_pending" | "pending" | "consumed" | "locked";
   challengeId: string;
+  tenantId?: string;
   pollSecretHash: string;
   expiresAt: string;
 };
@@ -679,6 +680,7 @@ export class EmailAuth {
     const stagedStatus: EmailLoginStatusRecord = {
       status: "delivery_pending",
       challengeId,
+      tenantId: context.tenantId,
       pollSecretHash: challenge.pollSecretHash,
       expiresAt: challenge.expiresAt,
     };
@@ -1186,6 +1188,7 @@ export class EmailAuth {
             JSON.stringify({
               status: "locked",
               challengeId,
+              tenantId: challenge.tenantId,
               pollSecretHash: challenge.pollSecretHash,
               expiresAt: challenge.expiresAt,
             } satisfies EmailLoginStatusRecord),
@@ -1202,12 +1205,16 @@ export class EmailAuth {
   async getEmailLoginStatus(
     challengeId: string,
     pollSecret: string,
+    tenantId?: string,
   ): Promise<EmailLoginChallengeStatus> {
     const current = parseStatusRecord(
       await this.tokenStore.verify(emailLoginStatusKey(challengeId)),
     );
     if (!current) return { status: "expired" };
     if (!this.pollSecretMatches(challengeId, pollSecret, current.pollSecretHash)) {
+      return { status: "invalid" };
+    }
+    if (tenantId !== undefined && current.tenantId !== tenantId) {
       return { status: "invalid" };
     }
     return current.status === "pending"

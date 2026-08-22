@@ -1,12 +1,14 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, mock } from "bun:test";
+import { clearOidcJwksCacheForTests } from "@stwd/auth";
 import { closeDb, getDb, tenants } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
+import { exportJWK, generateKeyPair, type JWK, SignJWT } from "jose";
 
 process.env.NODE_ENV = "test";
 process.env.STEWARD_MASTER_PASSWORD = "nonce-binding-master-password";
 process.env.STEWARD_JWT_SECRET = "nonce-binding-jwt-secret-with-enough-entropy";
 process.env.STEWARD_PGLITE_MEMORY = "true";
-process.env.SIWE_ALLOWED_DOMAINS = "steward.fi";
+process.env.SIWE_ALLOWED_DOMAINS = "steward.fi,www.steward.fi";
 process.env.STEWARD_ALLOW_AUTH_RATE_LIMIT_SOFT_FAIL = "true";
 
 const originalFetch = globalThis.fetch;
@@ -51,7 +53,11 @@ afterEach(() => {
   delete process.env.APP_URL;
   delete process.env.GOOGLE_CLIENT_ID;
   delete process.env.GOOGLE_CLIENT_SECRET;
+  delete process.env.APPLE_CLIENT_ID;
+  delete process.env.APPLE_CLIENT_SECRET;
+  delete process.env.STEWARD_ALLOW_INSECURE_OIDC_JWKS_FETCH;
   delete process.env.STEWARD_OAUTH_ALLOWED_REDIRECTS;
+  clearOidcJwksCacheForTests();
 });
 
 afterAll(async () => {
@@ -69,6 +75,38 @@ describe("mounted nonce and OAuth state boundaries", () => {
       error: "SIWE nonce requests require an allowed Origin or Referer",
     });
 
+    const domainBound = await nonce();
+    const disallowedDomain = await auth.authRoutes.request("/verify", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        message: siweMessage(
+          "attacker.example",
+          "0x0000000000000000000000000000000000000742",
+          domainBound.body.nonce!,
+        ),
+        signature: `0x${"00".repeat(65)}`,
+      }),
+    });
+    expect(disallowedDomain.status).toBe(401);
+    expect(((await disallowedDomain.json()) as { error: string }).error).toContain("domain");
+
+    const originBound = await nonce();
+    const originMismatch = await auth.authRoutes.request("/verify", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        message: siweMessage(
+          "www.steward.fi",
+          "0x0000000000000000000000000000000000000742",
+          originBound.body.nonce!,
+        ),
+        signature: `0x${"00".repeat(65)}`,
+      }),
+    });
+    expect(originMismatch.status).toBe(401);
+    expect(((await originMismatch.json()) as { error: string }).error).toContain("origin");
+
     const issued = await nonce({ "x-steward-tenant": "bound-tenant" });
     expect(issued.response.status).toBe(200);
     expect(issued.body.nonce).toMatch(/^[A-Za-z0-9]{8,}$/);
@@ -85,7 +123,23 @@ describe("mounted nonce and OAuth state boundaries", () => {
       }),
     });
     expect(mismatch.status).toBe(401);
-    expect(((await mismatch.json()) as { error: string }).error).toContain("tenant");
+    const mismatchBody = (await mismatch.json()) as { error: string; token?: string };
+    expect(mismatchBody.error).toContain("tenant");
+    expect(mismatchBody.token).toBeUndefined();
+    const replay = await auth.authRoutes.request("/verify", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        message: siweMessage(
+          "steward.fi",
+          "0x0000000000000000000000000000000000000742",
+          issued.body.nonce!,
+        ),
+        signature: `0x${"00".repeat(65)}`,
+      }),
+    });
+    expect(replay.status).toBe(401);
+    expect(((await replay.json()) as { token?: string }).token).toBeUndefined();
   });
 
   it("uses APP_URL for provider callbacks even with a hostile Host", async () => {
@@ -123,6 +177,92 @@ describe("mounted nonce and OAuth state boundaries", () => {
     );
     expect(failed.status).toBe(502);
     expect(await auth.getAuthChallengeStore().get(`oauth:${state}`)).toBe(payload);
+  });
+
+  it("binds Apple callbacks to nonce, issuer, and audience before one-time state consume", async () => {
+    process.env.APP_URL = "https://api.example.test";
+    process.env.APPLE_CLIENT_ID = "com.example.steward";
+    process.env.APPLE_CLIENT_SECRET = "apple-client-secret-jwt";
+    process.env.STEWARD_OAUTH_ALLOWED_REDIRECTS = "https://app.example.test/callback";
+    process.env.STEWARD_ALLOW_INSECURE_OIDC_JWKS_FETCH = "true";
+
+    const keyPair = await generateKeyPair("ES256");
+    const publicJwk = (await exportJWK(keyPair.publicKey)) as JWK;
+    Object.assign(publicJwk, { kid: "apple-mounted-key", alg: "ES256", use: "sig" });
+    let nextToken = "";
+    globalThis.fetch = mock(async (input: RequestInfo | URL) => {
+      const url =
+        typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      if (url === "https://appleid.apple.com/auth/keys") {
+        return Response.json({ keys: [publicJwk] });
+      }
+      if (url === "https://appleid.apple.com/auth/token") {
+        return Response.json({
+          access_token: "apple-access",
+          token_type: "Bearer",
+          id_token: nextToken,
+        });
+      }
+      throw new Error(`unexpected mounted Apple fetch: ${url}`);
+    });
+
+    const authorize = await auth.authRoutes.request(
+      "/oauth/apple/authorize?redirect_uri=https%3A%2F%2Fapp.example.test%2Fcallback&code_challenge=abcdefghijklmnopqrstuvwxyzABCDEFG0123456789-_&code_challenge_method=S256",
+    );
+    expect(authorize.status).toBe(302);
+    const provider = new URL(authorize.headers.get("location")!);
+    const state = provider.searchParams.get("state")!;
+    const expectedNonce = provider.searchParams.get("nonce")!;
+    expect(expectedNonce).toBeString();
+
+    const idToken = (claims: { nonce: string; issuer?: string; audience?: string }) =>
+      new SignJWT({
+        email: "mounted-apple@privaterelay.appleid.com",
+        email_verified: true,
+        nonce: claims.nonce,
+      })
+        .setProtectedHeader({ alg: "ES256", kid: "apple-mounted-key" })
+        .setIssuer(claims.issuer ?? "https://appleid.apple.com")
+        .setAudience(claims.audience ?? "com.example.steward")
+        .setSubject("mounted-apple-subject")
+        .setIssuedAt()
+        .setExpirationTime("5m")
+        .sign(keyPair.privateKey);
+
+    nextToken = await idToken({ nonce: "wrong-nonce" });
+    const nonceMismatch = await auth.authRoutes.request(
+      `/oauth/apple/callback?code=provider-code&state=${state}`,
+    );
+    expect(nonceMismatch.status).toBe(502);
+    expect(await auth.getAuthChallengeStore().get(`oauth:${state}`)).not.toBeNull();
+
+    clearOidcJwksCacheForTests();
+    nextToken = await idToken({ nonce: expectedNonce, issuer: "https://issuer.example.test" });
+    const issuerMismatch = await auth.authRoutes.request(
+      `/oauth/apple/callback?code=provider-code&state=${state}`,
+    );
+    expect(issuerMismatch.status).toBe(502);
+    expect(await auth.getAuthChallengeStore().get(`oauth:${state}`)).not.toBeNull();
+
+    clearOidcJwksCacheForTests();
+    nextToken = await idToken({ nonce: expectedNonce, audience: "com.attacker.service" });
+    const audienceMismatch = await auth.authRoutes.request(
+      `/oauth/apple/callback?code=provider-code&state=${state}`,
+    );
+    expect(audienceMismatch.status).toBe(502);
+    expect(await auth.getAuthChallengeStore().get(`oauth:${state}`)).not.toBeNull();
+
+    clearOidcJwksCacheForTests();
+    nextToken = await idToken({ nonce: expectedNonce });
+    const success = await auth.authRoutes.request(
+      `/oauth/apple/callback?code=provider-code&state=${state}`,
+    );
+    expect(success.status).toBe(302);
+    expect(await auth.getAuthChallengeStore().get(`oauth:${state}`)).toBeNull();
+    expect(
+      (await auth.authRoutes.request(`/oauth/apple/callback?code=provider-code&state=${state}`))
+        .status,
+    ).toBe(401);
   });
 
   it("rate-limits challenge allocation without returning an extra nonce", async () => {

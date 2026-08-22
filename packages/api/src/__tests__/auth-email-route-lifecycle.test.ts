@@ -92,6 +92,26 @@ describe("mounted email login-code and OTP grant lifecycle", () => {
     );
     expect(wrong.response.status).toBe(200);
     expect(wrong.json.data.status).not.toBe("pending");
+    const wrongChallenge = await post(
+      "/email/status",
+      { challengeId: "wrong-challenge", pollSecret: credentials.pollSecret },
+      TENANT_A,
+    );
+    expect(wrongChallenge.response.status).toBe(200);
+    expect(wrongChallenge.json.data.status).not.toBe("pending");
+    const wrongPollTenant = await post("/email/status", credentials, TENANT_B);
+    expect(wrongPollTenant.response.status).toBe(200);
+    expect(wrongPollTenant.json.data.status).not.toBe("pending");
+    delete process.env.STEWARD_ALLOW_AUTH_RATE_LIMIT_SOFT_FAIL;
+    process.env.NODE_ENV = "production";
+    try {
+      const limited = await post("/email/status", credentials, TENANT_A);
+      expect(limited.response.status).toBe(429);
+      expect(limited.json.data?.status).toBeUndefined();
+    } finally {
+      process.env.NODE_ENV = "test";
+      process.env.STEWARD_ALLOW_AUTH_RATE_LIMIT_SOFT_FAIL = "true";
+    }
     const pending = await post("/email/status", credentials, TENANT_A);
     expect(pending.response.status).toBe(200);
     expect(pending.json.data.status).toBe("pending");
@@ -114,6 +134,26 @@ describe("mounted email login-code and OTP grant lifecycle", () => {
     expect(winner.json.token).toBeString();
     const replay = await post("/email/code/verify", { email, code, tenantId: TENANT_A }, TENANT_A);
     expect(replay.response.status).toBe(401);
+  });
+
+  it("checks tenant email policy before consuming a valid login code", async () => {
+    const email = "policy-before-consume@example.test";
+    expect((await post("/email/send", { email, tenantId: TENANT_A })).response.status).toBe(200);
+    const code = codeFrom((await inbox(email)).text);
+    await getDb()
+      .update(tenantConfigs)
+      .set({ authAbuseConfig: { loginMethods: { email: false } } })
+      .where(eq(tenantConfigs.tenantId, TENANT_A));
+    const denied = await post("/email/code/verify", { email, code, tenantId: TENANT_A }, TENANT_A);
+    expect(denied.response.status).toBe(403);
+    expect(denied.json.token).toBeUndefined();
+    await getDb()
+      .update(tenantConfigs)
+      .set({ authAbuseConfig: { loginMethods: { email: true } } })
+      .where(eq(tenantConfigs.tenantId, TENANT_A));
+    const retry = await post("/email/code/verify", { email, code, tenantId: TENANT_A }, TENANT_A);
+    expect(retry.response.status).toBe(200);
+    expect(retry.json.token).toBeString();
   });
 
   it("allows exactly one concurrent companion-code winner", async () => {
@@ -176,6 +216,20 @@ describe("mounted email login-code and OTP grant lifecycle", () => {
       TENANT_A,
     );
     const emailGrant = (verified.json.data as { emailGrant: string }).emailGrant;
+
+    expect(
+      (
+        await post(
+          "/passkey/register/options",
+          { email: "other@example.test", emailGrant, tenantId: TENANT_A },
+          TENANT_A,
+        )
+      ).response.status,
+    ).toBe(401);
+    expect(
+      (await post("/passkey/register/options", { email, emailGrant, tenantId: TENANT_B }, TENANT_B))
+        .response.status,
+    ).toBe(401);
 
     const options = await post(
       "/passkey/register/options",
@@ -240,6 +294,7 @@ describe("mounted email login-code and OTP grant lifecycle", () => {
       );
     const outcomes = await Promise.all([register("grant-winner-a"), register("grant-winner-b")]);
     expect(outcomes.map(({ response }) => response.status).sort()).toEqual([200, 401]);
+    expect(outcomes.filter(({ json }) => typeof json.token === "string")).toHaveLength(1);
     const stored = await getDb()
       .select({ id: authenticators.id })
       .from(authenticators)

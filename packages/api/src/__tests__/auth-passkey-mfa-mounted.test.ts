@@ -1,8 +1,8 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import { PasskeyAuth } from "@stwd/auth";
-import { authenticators, closeDb, getDb, tenants, users, userTenants } from "@stwd/db";
+import { auditEvents, authenticators, closeDb, getDb, tenants, users, userTenants } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 
 process.env.NODE_ENV = "test";
 const USING_REAL_POSTGRES = Boolean(process.env.DATABASE_URL);
@@ -144,6 +144,25 @@ describe("mounted passkey MFA clone and challenge fences", () => {
     }
   });
 
+  it("preserves the challenge when tenant membership no longer authorizes the user", async () => {
+    const challengeId = "tenant-membership-mismatch";
+    await seedChallenge(challengeId);
+    const verifier = spyOn(PasskeyAuth.prototype, "verifyAuthentication").mockResolvedValue({
+      verified: true,
+      authenticationInfo: { newCounter: 8 },
+    } as Awaited<ReturnType<PasskeyAuth["verifyAuthentication"]>>);
+    await getDb()
+      .delete(userTenants)
+      .where(and(eq(userTenants.userId, userId), eq(userTenants.tenantId, TENANT_ID)));
+    const denied = await submit(challengeId);
+    await getDb().insert(userTenants).values({ userId, tenantId: TENANT_ID, role: "member" });
+    expect(denied.status).toBe(401);
+    expect(await auth.getAuthChallengeStore().get(`mfa:passkey:${userId}:${challengeId}`)).toBe(
+      `expected-${challengeId}`,
+    );
+    verifier.mockRestore();
+  });
+
   it("allows one concurrent assertion winner and advances the counter exactly once", async () => {
     const challengeId = "concurrent-clone";
     await seedChallenge(challengeId);
@@ -151,6 +170,10 @@ describe("mounted passkey MFA clone and challenge fences", () => {
       verified: true,
       authenticationInfo: { newCounter: 8 },
     } as Awaited<ReturnType<PasskeyAuth["verifyAuthentication"]>>);
+    const auditsBefore = await getDb()
+      .select({ id: auditEvents.id })
+      .from(auditEvents)
+      .where(and(eq(auditEvents.tenantId, TENANT_ID), eq(auditEvents.action, "auth.login")));
     const responses = await Promise.all([submit(challengeId), submit(challengeId)]);
     expect(responses.map((response) => response.status).sort()).toEqual([200, 401]);
     const [stored] = await getDb()
@@ -158,6 +181,11 @@ describe("mounted passkey MFA clone and challenge fences", () => {
       .from(authenticators)
       .where(eq(authenticators.credentialId, CREDENTIAL_ID));
     expect(stored.counter).toBe(8);
+    const auditsAfter = await getDb()
+      .select({ id: auditEvents.id })
+      .from(auditEvents)
+      .where(and(eq(auditEvents.tenantId, TENANT_ID), eq(auditEvents.action, "auth.login")));
+    expect(auditsAfter).toHaveLength(auditsBefore.length + 1);
     verifier.mockRestore();
   });
 
