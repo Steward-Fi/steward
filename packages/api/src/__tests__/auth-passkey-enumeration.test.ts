@@ -8,8 +8,12 @@ setDefaultTimeout(120_000);
 const ENABLED_TENANT_ID = "passkey-enumeration-enabled";
 const DISABLED_TENANT_ID = "passkey-enumeration-disabled";
 const KNOWN_EMAIL = "passkey-known@example.test";
+const NO_PASSKEY_EMAIL = "passkey-none@example.test";
+const OTHER_EMAIL = "passkey-other@example.test";
 const UNKNOWN_EMAIL = "passkey-unknown@example.test";
-const SECRET_CREDENTIAL_ID = "credential-id-must-never-leave-options-route";
+const KNOWN_CREDENTIAL_ID = "credential-id-for-known-email";
+const SECOND_KNOWN_CREDENTIAL_ID = "second-credential-id-for-known-email";
+const OTHER_CREDENTIAL_ID = "credential-id-for-other-email";
 
 type LoginOptions = {
   challenge: string;
@@ -17,7 +21,7 @@ type LoginOptions = {
   rpId: string;
   timeout: number;
   userVerification: string;
-  allowCredentials: Array<{ id: string }>;
+  allowCredentials: Array<{ id: string; transports?: string[] }>;
   [key: string]: unknown;
 };
 
@@ -50,22 +54,46 @@ describe("passkey login options privacy", () => {
         tenantId: DISABLED_TENANT_ID,
         authAbuseConfig: { loginMethods: { passkey: false } },
       });
-    const [knownUser] = await getDb()
+    const [knownUser, otherUser] = await getDb()
       .insert(users)
-      .values({ email: KNOWN_EMAIL, emailVerified: true })
+      .values([
+        { email: KNOWN_EMAIL, emailVerified: true },
+        { email: OTHER_EMAIL, emailVerified: true },
+        { email: NO_PASSKEY_EMAIL, emailVerified: true },
+      ])
       .returning({ id: users.id });
     knownUserId = knownUser.id;
     await getDb()
       .insert(authenticators)
-      .values({
-        userId: knownUserId,
-        credentialId: SECRET_CREDENTIAL_ID,
-        credentialPublicKey: "credential-public-key-must-also-remain-private",
-        counter: 7,
-        credentialDeviceType: "singleDevice",
-        credentialBackedUp: false,
-        transports: ["internal"],
-      });
+      .values([
+        {
+          userId: knownUserId,
+          credentialId: KNOWN_CREDENTIAL_ID,
+          credentialPublicKey: "known-credential-public-key",
+          counter: 7,
+          credentialDeviceType: "singleDevice",
+          credentialBackedUp: false,
+          transports: ["internal"],
+        },
+        {
+          userId: knownUserId,
+          credentialId: SECOND_KNOWN_CREDENTIAL_ID,
+          credentialPublicKey: "second-known-credential-public-key",
+          counter: 0,
+          credentialDeviceType: "multiDevice",
+          credentialBackedUp: true,
+          transports: ["hybrid"],
+        },
+        {
+          userId: otherUser.id,
+          credentialId: OTHER_CREDENTIAL_ID,
+          credentialPublicKey: "other-credential-public-key",
+          counter: 2,
+          credentialDeviceType: "singleDevice",
+          credentialBackedUp: false,
+          transports: ["internal"],
+        },
+      ]);
 
     const auth = await import("../routes/auth");
     getAuthChallengeStore = auth.getAuthChallengeStore;
@@ -91,42 +119,60 @@ describe("passkey login options privacy", () => {
     });
   }
 
-  function assertDiscoverableCredentialShape(options: LoginOptions) {
+  function assertAuthenticationOptionsShape(options: LoginOptions) {
     expect(options.challenge).toMatch(/^[A-Za-z0-9_-]{32,}$/);
     expect(options.challengeId).toBe(options.challenge);
     expect(options.rpId).toBe("steward.fi");
     expect(options.timeout).toBeGreaterThan(0);
     expect(options.userVerification).toBe("required");
-    expect(options.allowCredentials).toEqual([]);
   }
 
-  it("returns the same non-enumerating shape for known and unknown emails", async () => {
-    const [knownResponse, unknownResponse] = await Promise.all([
-      requestOptions(`  ${KNOWN_EMAIL.toUpperCase()}  `),
-      requestOptions(UNKNOWN_EMAIL),
-    ]);
+  it("returns only credential ids and transports bound to the normalized typed email", async () => {
+    const knownResponse = await requestOptions(`  ${KNOWN_EMAIL.toUpperCase()}  `);
     expect(knownResponse.status).toBe(200);
-    expect(unknownResponse.status).toBe(200);
 
     const known = (await knownResponse.json()) as LoginOptions;
-    const unknown = (await unknownResponse.json()) as LoginOptions;
-    assertDiscoverableCredentialShape(known);
-    assertDiscoverableCredentialShape(unknown);
-    expect(Object.keys(known).sort()).toEqual(Object.keys(unknown).sort());
+    assertAuthenticationOptionsShape(known);
+    expect(known.allowCredentials).toHaveLength(2);
+    expect(known.allowCredentials.map(({ id }) => id).sort()).toEqual(
+      [KNOWN_CREDENTIAL_ID, SECOND_KNOWN_CREDENTIAL_ID].sort(),
+    );
+    expect(known.allowCredentials).toContainEqual({
+      id: KNOWN_CREDENTIAL_ID,
+      transports: ["internal"],
+      type: "public-key",
+    });
+    expect(known.allowCredentials).toContainEqual({
+      id: SECOND_KNOWN_CREDENTIAL_ID,
+      transports: ["hybrid"],
+      type: "public-key",
+    });
 
-    for (const payload of [known, unknown]) {
-      const serialized = JSON.stringify(payload);
-      expect(serialized).not.toContain(SECRET_CREDENTIAL_ID);
-      expect(serialized).not.toContain("credential-public-key-must-also-remain-private");
-      expect(serialized).not.toContain(knownUserId);
-    }
+    const serialized = JSON.stringify(known);
+    expect(serialized).not.toContain(OTHER_CREDENTIAL_ID);
+    expect(serialized).not.toContain("known-credential-public-key");
+    expect(serialized).not.toContain("other-credential-public-key");
+    expect(serialized).not.toContain(knownUserId);
 
     expect(
       await getAuthChallengeStore().get(`passkey-login:${KNOWN_EMAIL}:${known.challengeId}`),
     ).toBe(known.challenge);
-    expect(
-      await getAuthChallengeStore().get(`passkey-login:${UNKNOWN_EMAIL}:${unknown.challengeId}`),
-    ).toBe(unknown.challenge);
+  });
+
+  it("returns one generic unavailable response for unknown and no-passkey emails", async () => {
+    const [unknownResponse, noPasskeyResponse] = await Promise.all([
+      requestOptions(UNKNOWN_EMAIL),
+      requestOptions(NO_PASSKEY_EMAIL),
+    ]);
+
+    expect(unknownResponse.status).toBe(404);
+    expect(noPasskeyResponse.status).toBe(404);
+    const expected = {
+      ok: false,
+      error: "Passkey sign-in is unavailable for this email",
+    };
+    expect(await unknownResponse.json()).toEqual(expected);
+    expect(await noPasskeyResponse.json()).toEqual(expected);
   });
 
   it("honors explicit tenant existence and passkey login-method boundaries", async () => {
