@@ -767,20 +767,23 @@ describe("vault EVM execution gateway", () => {
       throw new Error("injected direct outcome write failure");
     };
     try {
+      const { _withVaultOverrideForTests } = await import("../services/context");
       const app = await makeApp();
-      const res = await app.request(`/vault/${EXTERNAL_AGENT_ID}/sign`, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          "Idempotency-Key": "ext-custody-outcome-unknown-direct",
-        },
-        body: JSON.stringify({
-          to: "0x1111111111111111111111111111111111111111",
-          value: "1",
-          chainId: 8453,
-          broadcast: true,
+      const res = await _withVaultOverrideForTests(routeVault, () =>
+        app.request(`/vault/${EXTERNAL_AGENT_ID}/sign`, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "Idempotency-Key": "ext-custody-outcome-unknown-direct",
+          },
+          body: JSON.stringify({
+            to: "0x1111111111111111111111111111111111111111",
+            value: "1",
+            chainId: 8453,
+            broadcast: true,
+          }),
         }),
-      });
+      );
       const text = await res.text();
       const body = JSON.parse(text);
       expect(res.status).toBe(202);
@@ -814,19 +817,21 @@ describe("vault EVM execution gateway", () => {
       // A persistence failure inside Vault still surfaces the same typed error.
       // Replaying the caller's idempotency key is rejected by the consumed
       // authorization and cannot enter the signer a second time.
-      const retry = await app.request(`/vault/${EXTERNAL_AGENT_ID}/sign`, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          "Idempotency-Key": "ext-custody-outcome-unknown-direct",
-        },
-        body: JSON.stringify({
-          to: "0x1111111111111111111111111111111111111111",
-          value: "1",
-          chainId: 8453,
-          broadcast: true,
+      const retry = await _withVaultOverrideForTests(routeVault, () =>
+        app.request(`/vault/${EXTERNAL_AGENT_ID}/sign`, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "Idempotency-Key": "ext-custody-outcome-unknown-direct",
+          },
+          body: JSON.stringify({
+            to: "0x1111111111111111111111111111111111111111",
+            value: "1",
+            chainId: 8453,
+            broadcast: true,
+          }),
         }),
-      });
+      );
       expect(retry.status).not.toBe(200);
       expect(provider.signCalls).toBe(1);
     } finally {
@@ -871,8 +876,11 @@ describe("vault EVM execution gateway", () => {
       }),
     };
     try {
+      const { _withVaultOverrideForTests } = await import("../services/context");
       const app = await makeApp();
-      const first = await app.request(`/vault/${EXTERNAL_AGENT_ID}/sign`, request);
+      const first = await _withVaultOverrideForTests(routeVault, () =>
+        app.request(`/vault/${EXTERNAL_AGENT_ID}/sign`, request),
+      );
       expect(first.status).toBe(503);
       const firstBody = await first.json();
       expect(firstBody).toMatchObject({
@@ -896,7 +904,9 @@ describe("vault EVM execution gateway", () => {
         .set({ config: { mode: "whitelist", addresses: [] } })
         .where(eq(policies.id, `${EXTERNAL_AGENT_ID}-approved-addresses`));
       delete process.env.REDIS_URL;
-      const replay = await app.request(`/vault/${EXTERNAL_AGENT_ID}/sign`, request);
+      const replay = await _withVaultOverrideForTests(routeVault, () =>
+        app.request(`/vault/${EXTERNAL_AGENT_ID}/sign`, request),
+      );
       expect(replay.status).toBe(200);
       expect(await replay.json()).toMatchObject({ ok: true, data: { txId, txHash } });
       expect(provider.signCalls).toBe(1);
@@ -1148,12 +1158,15 @@ describe("vault EVM execution gateway", () => {
       await originalRecord.apply(routeVault, args);
     };
     try {
+      const { _withVaultOverrideForTests } = await import("../services/context");
       const app = await makeApp();
-      const res = await app.request(`/vault/${EXTERNAL_AGENT_ID}/approve/${txId}`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: "{}",
-      });
+      const res = await _withVaultOverrideForTests(routeVault, () =>
+        app.request(`/vault/${EXTERNAL_AGENT_ID}/approve/${txId}`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: "{}",
+        }),
+      );
       const body = await res.json();
       expect(res.status).toBe(202);
       expect(body.data).toMatchObject({
@@ -1172,11 +1185,13 @@ describe("vault EVM execution gateway", () => {
         .where(eq(transactions.id, txId));
       expect(transaction).toEqual({ status: "outcome_unknown", txHash });
 
-      const retry = await app.request(`/vault/${EXTERNAL_AGENT_ID}/approve/${txId}`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: "{}",
-      });
+      const retry = await _withVaultOverrideForTests(routeVault, () =>
+        app.request(`/vault/${EXTERNAL_AGENT_ID}/approve/${txId}`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: "{}",
+        }),
+      );
       // Same-key replay now drains durable accounting before returning the
       // already-recorded ambiguous outcome; it must never resend externally.
       expect(retry.status).toBe(202);
