@@ -2,9 +2,9 @@ import { describe, expect, it, mock } from "bun:test";
 import type { WebhookEvent } from "@stwd/shared";
 
 // PersistentQueue talks to the DB through @stwd/db + drizzle-orm; mock both so
-// the queue loop can be exercised without a live database. No other test file
-// in this package imports either module, so the process-wide module mock is
-// contained.
+// poison-pill isolation remains runnable without a live database. Run this
+// file in its own Bun isolate so its process-wide module mocks cannot replace
+// the real-PostgreSQL authority suite's database module.
 const webhookConfigRow = { id: "cfg-1", url: "https://receiver.example.com/hook", events: [] };
 const updateSets: Record<string, unknown>[] = [];
 
@@ -26,8 +26,9 @@ const claimedRows = [
     // Undecryptable: valid prefix, garbage payload (e.g. post key-rotation row).
     secret: "stwd_whsec_v1:{not-json",
     events: null,
-    status: "pending",
-    attempts: 0,
+    status: "processing",
+    claimToken: "claim-poison",
+    attempts: 1,
     maxAttempts: 5,
     nextRetryAt: new Date(),
   },
@@ -47,8 +48,9 @@ const claimedRows = [
     url: webhookConfigRow.url,
     secret: "whsec_plaintext",
     events: null,
-    status: "pending",
-    attempts: 0,
+    status: "processing",
+    claimToken: "claim-good",
+    attempts: 1,
     maxAttempts: 5,
     nextRetryAt: new Date(),
   },
@@ -67,7 +69,11 @@ const db = {
   update: () => ({
     set: (value: Record<string, unknown>) => {
       updateSets.push(value);
-      return { where: () => Promise.resolve([{ id: "delivery-1", ...value }]) };
+      return {
+        where: () => ({
+          returning: () => Promise.resolve([{ id: "delivery-1", ...value }]),
+        }),
+      };
     },
   }),
 };
@@ -78,6 +84,8 @@ mock.module("@stwd/db", () => ({
   webhookDeliveries: {
     id: "id",
     status: "status",
+    claimToken: "claimToken",
+    attempts: "attempts",
     nextRetryAt: "nextRetryAt",
     tenantId: "tenantId",
   },

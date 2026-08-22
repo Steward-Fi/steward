@@ -1622,6 +1622,7 @@ export function createOperatorRecoveryRoutes(
         400,
       );
     }
+    const transferIdempotencyKey = body.idempotencyKey;
     const { agentId, sourceDex, destinationDex } = body;
 
     if (hasTooManyUsdcDecimals(body.amountUsdc)) {
@@ -1753,12 +1754,17 @@ export function createOperatorRecoveryRoutes(
           process.env.STEWARD_DB_MODE !== "pglite" &&
           process.env.STEWARD_PGLITE_MEMORY !== "true"
         ) {
-          const claimKey = `operator-collateral:${tenantId}:${agentId}:${body.idempotencyKey}`;
+          const claimKey = `operator-collateral:${tenantId}:${agentId}:${transferIdempotencyKey}`;
           await getDb().execute(
             sql`SELECT pg_advisory_xact_lock(hashtextextended(${claimKey}, 0))`,
           );
         }
-        const existing = await findDurableTransferState(c, tenantId, agentId, body.idempotencyKey);
+        const existing = await findDurableTransferState(
+          c,
+          tenantId,
+          agentId,
+          transferIdempotencyKey,
+        );
         // A definite local signing failure is explicitly safe to retry. It is
         // durable evidence, but not a claim that may have reached the venue,
         // so append a new requested marker while still holding this key lock.

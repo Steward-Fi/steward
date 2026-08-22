@@ -7,6 +7,7 @@
  * HTTP success followed by a lost database acknowledgement is ambiguous.
  */
 
+import { randomUUID } from "node:crypto";
 import { getDb, webhookConfigs, webhookDeliveries } from "@stwd/db";
 import type { WebhookEvent } from "@stwd/shared";
 import { and, eq, sql } from "drizzle-orm";
@@ -88,6 +89,13 @@ export class PersistentQueue {
    */
   async enqueue(event: WebhookEvent, webhook: WebhookConfig | string): Promise<string> {
     const db = getDb();
+    // Persist the receiver-visible identity before the row becomes available to workers.
+    const deliveryId = randomUUID();
+    const signedAt =
+      typeof event.signedAt === "number" && Number.isFinite(event.signedAt)
+        ? Math.floor(event.signedAt)
+        : Math.floor(Date.now() / 1000);
+    const persistedEvent: WebhookEvent = { ...event, deliveryId, signedAt };
     const url = typeof webhook === "string" ? webhook : webhook.url;
     const webhookConfigId = typeof webhook === "string" ? null : (webhook.id ?? null);
     const secret = typeof webhook === "string" ? null : encryptWebhookSecret(webhook.secret);
@@ -96,11 +104,12 @@ export class PersistentQueue {
     const [row] = await db
       .insert(webhookDeliveries)
       .values({
+        id: deliveryId,
         tenantId: event.tenantId,
         webhookConfigId,
         agentId: event.agentId,
         eventType: event.type,
-        payload: event as unknown as Record<string, unknown>,
+        payload: persistedEvent as unknown as Record<string, unknown>,
         url,
         secret,
         events,
@@ -121,12 +130,28 @@ export class PersistentQueue {
   async processQueue(): Promise<WebhookDeliveryResult[]> {
     const db = getDb();
     const now = new Date();
-    const claimToken = crypto.randomUUID();
+    const claimToken = randomUUID();
     const results: WebhookDeliveryResult[] = [];
 
     // Atomically claim due deliveries before dispatch. The temporary
     // nextRetryAt push acts as a visibility timeout if a worker crashes mid-send.
     const claimed = (await db.transaction(async (tx) => {
+      // Claiming consumes an attempt. Once an abandoned claim has expired at
+      // its durable limit, terminalize it without another external send.
+      await tx.execute(sql`
+        UPDATE ${webhookDeliveries}
+        SET
+          "status" = 'dead',
+          "claim_token" = NULL,
+          "last_error" = COALESCE("last_error", 'Max attempts exceeded')
+        WHERE (
+          ${webhookDeliveries.status} in ('pending', 'failed')
+          OR ${webhookDeliveries.status} = 'processing'
+        )
+          AND ${webhookDeliveries.nextRetryAt} <= ${now.toISOString()}
+          AND ${webhookDeliveries.attempts} >= ${webhookDeliveries.maxAttempts}
+      `);
+
       // A dependent success event must never overtake a predecessor that can
       // no longer be delivered. Resolve the chain terminally instead of
       // leaving an undeliverable row pending forever.
@@ -146,7 +171,28 @@ export class PersistentQueue {
         SET
           "status" = 'processing',
           "claim_token" = ${claimToken},
-          "next_retry_at" = ${new Date(now.getTime() + CLAIM_VISIBILITY_TIMEOUT_MS).toISOString()}
+          "attempts" = "attempts" + 1,
+          "next_retry_at" = ${new Date(now.getTime() + CLAIM_VISIBILITY_TIMEOUT_MS).toISOString()},
+          "payload" = jsonb_set(
+            jsonb_set(
+              "payload",
+              '{deliveryId}',
+              CASE
+                WHEN jsonb_typeof("payload"->'deliveryId') = 'string'
+                  AND length("payload"->>'deliveryId') > 0
+                THEN "payload"->'deliveryId'
+                ELSE to_jsonb("id"::text)
+              END,
+              true
+            ),
+            '{signedAt}',
+            CASE
+              WHEN jsonb_typeof("payload"->'signedAt') = 'number'
+                THEN "payload"->'signedAt'
+              ELSE to_jsonb(floor(extract(epoch from "created_at"))::bigint)
+            END,
+            true
+          )
         WHERE "id" IN (
           SELECT candidate."id"
           FROM ${webhookDeliveries} AS candidate
@@ -155,6 +201,7 @@ export class PersistentQueue {
             OR candidate."status" = 'processing'
           )
             AND candidate."next_retry_at" <= ${now.toISOString()}
+            AND candidate."attempts" < candidate."max_attempts"
             AND (
               candidate."predecessor_delivery_id" IS NULL
               OR EXISTS (
@@ -204,7 +251,8 @@ export class PersistentQueue {
     for (const delivery of deliveries) {
       if (!delivery.claimToken) continue;
       const event = delivery.payload as unknown as WebhookEvent;
-      const newAttempts = delivery.attempts + 1;
+      // The atomic claim consumes the attempt before external I/O.
+      const newAttempts = delivery.attempts;
       if (!delivery.webhookConfigId || !delivery.secret) {
         const settled = await settleClaim(delivery.id, delivery.claimToken, {
           status: "dead",
