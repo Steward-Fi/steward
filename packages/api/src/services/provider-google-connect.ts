@@ -1,5 +1,5 @@
 /**
- * Google Workspace provider-account OAuth connect + token lifecycle (#203).
+ * Google Workspace provider-account OAuth connect + token lifecycle.
  *
  * This is the PROVIDER-CONNECTION plane (agent execution authority), NOT the
  * user sign-in plane. A user-login OAuth provider authenticates a human; this

@@ -26,6 +26,9 @@
     "packages/adapters": {
       "name": "@stwd/adapters",
       "version": "0.1.0",
+      "dependencies": {
+        "@stwd/shared": "workspace:*",
+      },
       "devDependencies": {
         "@types/bun": "1.3.14",
         "@types/node": "^25.5.0",
@@ -52,6 +55,7 @@
       "version": "0.4.4",
       "dependencies": {
         "@aws-sdk/client-kms": "^3.700.0",
+        "@node-saml/node-saml": "5.1.0",
         "@scure/btc-signer": "^2.2.0",
         "@stwd/adapters": "workspace:*",
         "@stwd/attestation": "workspace:*",

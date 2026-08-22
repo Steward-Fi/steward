@@ -1610,6 +1610,10 @@ export const webhookDeliveries = pgTable(
     }),
     agentId: text("agent_id"),
     eventType: text("event_type").notNull(),
+    // Optional durable dependency used when two externally visible effects
+    // must be delivered in order. The SQL migration owns the self-referencing
+    // FK because declaring the circular table reference here is not type-safe.
+    predecessorDeliveryId: uuid("predecessor_delivery_id"),
     replayedFromDeliveryId: uuid("replayed_from_delivery_id"),
     payload: jsonb("payload").$type<Record<string, unknown>>().notNull(),
     url: text("url").notNull(),
@@ -1619,6 +1623,9 @@ export const webhookDeliveries = pgTable(
     attempts: integer("attempts").notNull().default(0),
     maxAttempts: integer("max_attempts").notNull().default(5),
     nextRetryAt: timestamp("next_retry_at", { withTimezone: true }),
+    // Rotated every time a worker claims/reclaims a delivery. Outcome writes
+    // compare this token so an expired worker cannot overwrite a newer claim.
+    claimToken: uuid("claim_token"),
     lastError: text("last_error"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     deliveredAt: timestamp("delivered_at", { withTimezone: true }),
@@ -1628,6 +1635,7 @@ export const webhookDeliveries = pgTable(
     nextRetryIdx: index("webhook_deliveries_next_retry_idx").on(table.nextRetryAt),
     tenantIdx: index("webhook_deliveries_tenant_idx").on(table.tenantId),
     webhookConfigIdx: index("webhook_deliveries_webhook_config_idx").on(table.webhookConfigId),
+    predecessorIdx: index("webhook_deliveries_predecessor_idx").on(table.predecessorDeliveryId),
     replayedFromIdx: index("webhook_deliveries_replayed_from_idx").on(table.replayedFromDeliveryId),
   }),
 );

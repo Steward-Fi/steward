@@ -133,8 +133,10 @@ to require eligible human sessions and recent MFA, with case and evidence
 further limited to owner/admin. The agent-readable route does not weaken or
 stand in for any of those human gates.
 
-These tools **do not implement MCP OAuth 2.1 resource-server semantics**. That
-separate authorization-layer work is tracked by issue #219.
+These tools **do not implement MCP OAuth 2.1 resource-server semantics**. They
+authenticate through Steward's configured API credential and tenant boundary;
+deployments that require an OAuth resource server must place one in front of
+this transport.
 
 ## Development
 

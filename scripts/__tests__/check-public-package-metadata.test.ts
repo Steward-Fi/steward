@@ -10,6 +10,7 @@ const unchangedVersions = {
   sdk: { base: "1.0.0", head: "1.0.0" },
   react: { base: "1.0.0", head: "1.0.0" },
   "eliza-plugin": { base: "1.0.0", head: "1.0.0" },
+  flutter: { base: "0.1.0", head: "0.1.0" },
 };
 
 describe("public package metadata check", () => {
@@ -42,6 +43,27 @@ describe("public package metadata check", () => {
     expect(
       evaluatePublicPackageMetadata({
         changedFiles: ["packages/react/src/index.ts", "packages/react/CHANGELOG.md"],
+        versions: unchangedVersions,
+      }),
+    ).toEqual([]);
+    expect(
+      evaluatePublicPackageMetadata({
+        changedFiles: ["packages/flutter/lib/src/client.dart", "packages/flutter/pubspec.yaml"],
+        versions: { ...unchangedVersions, flutter: { base: "0.1.0", head: "0.1.1" } },
+      }),
+    ).toEqual([]);
+  });
+
+  test("tracks Flutter through pubspec.yaml and its own changelog", () => {
+    expect(
+      evaluatePublicPackageMetadata({
+        changedFiles: ["packages/flutter/lib/src/client.dart"],
+        versions: unchangedVersions,
+      }),
+    ).toEqual(["packages/flutter changed without a pubspec.yaml version bump or changelog update"]);
+    expect(
+      evaluatePublicPackageMetadata({
+        changedFiles: ["packages/flutter/lib/src/client.dart", "packages/flutter/CHANGELOG.md"],
         versions: unchangedVersions,
       }),
     ).toEqual([]);

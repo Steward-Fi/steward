@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from "bun:test";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, mock, spyOn } from "bun:test";
 import { generateTotp, hashSha256Hex } from "@stwd/auth";
 import { closeDb, getDb, users } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
@@ -34,7 +34,9 @@ process.env.STEWARD_JWT_SECRET =
 process.env.STEWARD_AUDIT_HMAC_KEY =
   process.env.STEWARD_AUDIT_HMAC_KEY ?? "mfa-sms-test-audit-hmac-key-with-enough-entropy-32b";
 
-const { authRoutes, verifySessionToken } = await import("../routes/auth");
+const { authRoutes, verifySessionToken, _getAuthMfaBackendForTests } = await import(
+  "../routes/auth"
+);
 
 beforeAll(async () => {
   const { db, client } = await createPGLiteDb("memory://");
@@ -381,6 +383,37 @@ describe("SMS OTP auth and TOTP MFA routes", () => {
     expect(mfaRequired.mfaRequired).toBe(true);
     expect(mfaRequired.token).toBeUndefined();
     expect(mfaRequired.refreshToken).toBeUndefined();
+
+    const wrongRecoveryRes = await authRoutes.request("/mfa/totp/complete", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        challengeId: mfaRequired.mfa.challengeId,
+        recoveryCode: "ABCDE-ABCDE-ABCD",
+      }),
+    });
+    expect(wrongRecoveryRes.status).toBe(401);
+
+    const mfaBackend = _getAuthMfaBackendForTests();
+    const originalConsume = mfaBackend.consume.bind(mfaBackend);
+    const challengeKey = `auth:challenge:${mfaRequired.mfa.challengeId}`;
+    const consumeFailure = spyOn(mfaBackend, "consume").mockImplementation(async (key) =>
+      key === challengeKey ? null : originalConsume(key),
+    );
+    const lostChallengeRes = await authRoutes.request("/mfa/totp/complete", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        challengeId: mfaRequired.mfa.challengeId,
+        recoveryCode: mfaVerify.recoveryCodes[0],
+      }),
+    });
+    expect(lostChallengeRes.status).toBe(401);
+    consumeFailure.mockRestore();
+    const statusAfterConsumeFailure = await authRoutes.request("/mfa/recovery-codes/status", {
+      headers: { Authorization: `Bearer ${siweCompletedToken}` },
+    });
+    expect(await statusAfterConsumeFailure.json()).toMatchObject({ remaining: 9 });
 
     const completeRes = await authRoutes.request("/mfa/totp/complete", {
       method: "POST",

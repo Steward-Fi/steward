@@ -347,7 +347,7 @@ interface NeonTransactionRequestEnv extends DatabaseSecurityEnv {
 
 interface NeonTransactionPoolConfig {
   connectionString: string;
-  max: 1;
+  max: 2;
   connectionTimeoutMillis: number;
   idleTimeoutMillis: number;
   query_timeout: number;
@@ -383,7 +383,10 @@ export function __buildNeonTransactionPoolConfigForTests(
   const serverMs = NEON_TRANSACTION_DEADLINE_MS - DATABASE_DEADLINE_CLEANUP_GRACE_MS;
   return {
     connectionString: withServerDeadlineInUrl(connectionString, NEON_TRANSACTION_DEADLINE_MS),
-    max: 1,
+    // One connection remains pinned to tenantAuth's request transaction. A
+    // second bounded connection is required for durable pre-I/O checkpoints
+    // that must commit before the request transaction can return.
+    max: 2,
     connectionTimeoutMillis: NEON_TRANSACTION_CONNECT_TIMEOUT_MS,
     idleTimeoutMillis: NEON_TRANSACTION_DEADLINE_MS,
     query_timeout: NEON_TRANSACTION_DEADLINE_MS,
@@ -524,6 +527,27 @@ export function hasTenantTransactionDatabase(expected?: {
   }
   if (expected?.db !== undefined && expected.db !== context.db) return false;
   return true;
+}
+
+/**
+ * Run a bounded database operation outside the active tenant transaction while
+ * retaining the request-owned database capability. Callers must bind their own
+ * explicit tenant-RLS transaction before accessing tenant data.
+ *
+ * PGLite cannot provide an autonomous commit boundary, so escaping an active
+ * PGLite tenant transaction fails closed rather than masquerading a savepoint
+ * as durable state.
+ */
+export async function withIndependentDatabase<T>(
+  callback: (db: RequestDatabase) => Promise<T>,
+): Promise<T> {
+  const tenantContext = tenantTransactionDatabaseStorage.getStore();
+  if (!tenantContext) return callback(getDb());
+  assertRequestDatabaseContextActive(tenantContext);
+  if (pgliteOverride) {
+    throw new Error("RLS_INDEPENDENT_TRANSACTION_UNSUPPORTED_PGLITE");
+  }
+  return tenantTransactionDatabaseStorage.exit(() => callback(getDb()));
 }
 
 /**

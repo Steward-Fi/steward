@@ -6,7 +6,11 @@ import walletConfig from "../../playwright.wallets.config";
 import { cleanupWalletE2E } from "../../scripts/cleanup-wallet-e2e";
 import { assertWalletCaches, walletCacheRequirements } from "../../scripts/run-wallet-e2e";
 import { e2eChildProcessEnvironment } from "../global-setup";
-import { assertWalletExtensionIntegrity } from "./cache-contract";
+import {
+  assertWalletExtensionIntegrity,
+  METAMASK_CACHE_ID,
+  PHANTOM_CACHE_ID,
+} from "./cache-contract";
 import {
   assertWalletE2EPasswords,
   environmentWithoutWalletCredentials,
@@ -15,8 +19,6 @@ import {
   WALLET_E2E_PASSWORD_NAMES,
   withWalletCredentialsRemoved,
 } from "./credentials";
-import { METAMASK_CACHE_ID } from "./setup/metamask/metamask.setup";
-import { PHANTOM_CACHE_ID } from "./setup/phantom/phantom.setup";
 import { withWalletBrowserProfile } from "./wallet-browser-profile";
 import {
   assertWalletCacheIdentity,

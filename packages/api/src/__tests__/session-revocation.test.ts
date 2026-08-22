@@ -129,6 +129,9 @@ describe("API access-token revocation", () => {
     });
 
     expect(res.status).toBe(200);
+    expect(res.headers.get("Cache-Control")).toBe("no-store, max-age=0");
+    expect(res.headers.get("Pragma")).toBe("no-cache");
+    expect(res.headers.get("Expires")).toBe("0");
     const json = (await res.json()) as {
       ok: boolean;
       token: string;

@@ -1,11 +1,11 @@
 import { redactedThrownDiagnostics } from "@stwd/shared";
-import { SecretVault } from "@stwd/vault";
 import {
   resolveXConnectConfig,
   runXCredentialLifecycleSweep,
   type XCredentialLifecycleSweepResult,
 } from "./provider-x-connect";
 import { runInternalJobForEachTenant } from "./tenant-job";
+import { getConfiguredSecretVault } from "./vault-factory";
 
 const DEFAULT_INTERVAL_MS = 60_000;
 const MIN_INTERVAL_MS = 5_000;
@@ -24,11 +24,9 @@ function configuredInterval(): number {
 }
 
 export async function runXCredentialLifecycleRecoverySweep(): Promise<XCredentialLifecycleSweepResult> {
-  const password = process.env.STEWARD_MASTER_PASSWORD?.trim();
-  if (!password) throw new Error("STEWARD_MASTER_PASSWORD is required for X OAuth recovery");
   const results = await runInternalJobForEachTenant("x-credential-lifecycle-sweep", () =>
     runXCredentialLifecycleSweep({
-      vault: new SecretVault(password),
+      vault: getConfiguredSecretVault(),
       config: resolveXConnectConfig(),
     }),
   );

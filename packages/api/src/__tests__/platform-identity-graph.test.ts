@@ -4,6 +4,7 @@ import { hashSha256Hex, revocationStore } from "@stwd/auth";
 import {
   accounts,
   agents,
+  auditEvents,
   closeDb,
   getDb,
   refreshTokens,
@@ -14,7 +15,7 @@ import {
   userTenants,
 } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 
 const PLATFORM_KEY = "platform-identity-graph-key";
 const TENANT_ID = "platform-identity-graph-tenant";
@@ -656,6 +657,144 @@ describe("platform global identity graph routes", () => {
         ),
       );
     expect(remaining).toHaveLength(0);
+  });
+
+  it("rolls back platform linked-account create, delete, and transfer when completion audits fail", async () => {
+    const suffix = crypto.randomUUID().replaceAll("-", "");
+    const [source, target] = await getDb()
+      .insert(users)
+      .values([
+        { email: `atomic-source-${suffix}@example.test`, emailVerified: true },
+        { email: `atomic-target-${suffix}@example.test`, emailVerified: true },
+      ])
+      .returning({ id: users.id });
+    const installFailure = async (action: string) => {
+      await getDb().execute(
+        sql.raw(`
+        CREATE OR REPLACE FUNCTION fail_linked_account_audit_${suffix}()
+        RETURNS trigger AS $$
+        BEGIN
+          IF NEW.tenant_id = 'platform' AND NEW.action = '${action}' THEN
+            RAISE EXCEPTION 'forced linked-account completion audit failure';
+          END IF;
+          RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql
+      `),
+      );
+      await getDb().execute(
+        sql.raw(`
+        CREATE TRIGGER fail_linked_account_audit_${suffix}
+        BEFORE INSERT ON audit_events
+        FOR EACH ROW EXECUTE FUNCTION fail_linked_account_audit_${suffix}()
+      `),
+      );
+    };
+    const removeFailure = async () => {
+      await getDb().execute(
+        sql.raw(`DROP TRIGGER IF EXISTS fail_linked_account_audit_${suffix} ON audit_events`),
+      );
+      await getDb().execute(
+        sql.raw(`DROP FUNCTION IF EXISTS fail_linked_account_audit_${suffix}()`),
+      );
+    };
+
+    try {
+      await installFailure("user.account.link");
+      const create = await platformRoutes.request(`/users/${source.id}/accounts`, {
+        method: "POST",
+        headers: headers(),
+        body: JSON.stringify({ provider: "github", providerAccountId: `atomic-create-${suffix}` }),
+      });
+      expect(create.status).toBe(500);
+      expect(
+        await getDb()
+          .select()
+          .from(accounts)
+          .where(eq(accounts.providerAccountId, `atomic-create-${suffix}`)),
+      ).toHaveLength(0);
+      await removeFailure();
+
+      const [unlinkAccount] = await getDb()
+        .insert(accounts)
+        .values({
+          userId: source.id,
+          provider: "github",
+          providerAccountId: `atomic-unlink-${suffix}`,
+        })
+        .returning({ id: accounts.id });
+      await getDb()
+        .insert(refreshTokens)
+        .values({
+          id: `atomic-unlink-refresh-${suffix}`,
+          userId: source.id,
+          tenantId: TENANT_ID,
+          tokenHash: `atomic-unlink-refresh-hash-${suffix}`,
+          expiresAt: new Date(Date.now() + 60_000),
+        });
+      await installFailure("user.account.unlink");
+      const unlink = await platformRoutes.request(
+        `/users/${source.id}/accounts/github/atomic-unlink-${suffix}`,
+        { method: "DELETE", headers: headers() },
+      );
+      expect(unlink.status).toBe(500);
+      expect(await unlink.json()).toMatchObject({
+        ok: false,
+        data: { accountUnlinked: false, sessionsRevoked: true },
+      });
+      expect(
+        await getDb()
+          .select({ id: accounts.id })
+          .from(accounts)
+          .where(eq(accounts.id, unlinkAccount.id)),
+      ).toEqual([{ id: unlinkAccount.id }]);
+      expect(
+        await getDb().select().from(refreshTokens).where(eq(refreshTokens.userId, source.id)),
+      ).toHaveLength(1);
+      await removeFailure();
+
+      const [transferAccount] = await getDb()
+        .insert(accounts)
+        .values({
+          userId: source.id,
+          provider: "spotify",
+          providerAccountId: `atomic-transfer-${suffix}`,
+        })
+        .returning({ id: accounts.id });
+      await installFailure("user.account.transfer");
+      const transfer = await platformRoutes.request(
+        `/users/${source.id}/accounts/spotify/atomic-transfer-${suffix}/transfer`,
+        {
+          method: "POST",
+          headers: headers(),
+          body: JSON.stringify({ toUserId: target.id }),
+        },
+      );
+      expect(transfer.status).toBe(500);
+      expect(await transfer.json()).toMatchObject({
+        ok: false,
+        data: { accountTransferred: false, sessionsRevoked: true },
+      });
+      expect(
+        await getDb()
+          .select({ userId: accounts.userId })
+          .from(accounts)
+          .where(eq(accounts.id, transferAccount.id)),
+      ).toEqual([{ userId: source.id }]);
+      expect(
+        await getDb()
+          .select({ id: auditEvents.id })
+          .from(auditEvents)
+          .where(
+            and(
+              eq(auditEvents.action, "user.account.transfer"),
+              eq(auditEvents.resourceId, source.id),
+            ),
+          ),
+      ).toHaveLength(0);
+    } finally {
+      await removeFailure();
+    }
   });
 
   it("refuses to unlink the last login method without force", async () => {

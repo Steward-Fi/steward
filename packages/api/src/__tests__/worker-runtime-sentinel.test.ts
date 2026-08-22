@@ -5,6 +5,8 @@ import {
   getDb,
   tenants,
   waitUntilRequestDatabaseTask,
+  withIndependentDatabase,
+  withTenantTransactionDatabase,
 } from "@stwd/db";
 import { createPGLiteDb } from "@stwd/db/pglite";
 import {
@@ -71,6 +73,69 @@ test("Worker request database is exact, request-owned, and always closed", async
     ),
   ).rejects.toThrow("handler failed");
   expect(closes).toBe(2);
+});
+
+test("Worker keeps its request driver alive across outer and autonomous transactions", async () => {
+  let activeTransactions = 0;
+  let peakTransactions = 0;
+  let closes = 0;
+  let transactionNumber = 0;
+  const requestDb = {
+    async transaction<T>(callback: (tx: { marker: string }) => Promise<T>): Promise<T> {
+      activeTransactions += 1;
+      peakTransactions = Math.max(peakTransactions, activeTransactions);
+      const tx = { marker: `worker-transaction-${++transactionNumber}` };
+      try {
+        return await callback(tx);
+      } finally {
+        activeTransactions -= 1;
+      }
+    },
+  } as unknown as ReturnType<typeof getDb>;
+
+  const result = await withWorkerRequestDatabase(
+    {
+      DATABASE_URL: "postgresql://worker.invalid/steward",
+      DATABASE_DRIVER: "neon-websocket",
+    },
+    () =>
+      getDb().transaction((outer) =>
+        withTenantTransactionDatabase(
+          outer as never,
+          { tenantId: "worker-autonomous-tenant" },
+          () =>
+            withIndependentDatabase((independent) =>
+              independent.transaction((autonomous) =>
+                withTenantTransactionDatabase(
+                  autonomous as never,
+                  { tenantId: "worker-autonomous-tenant" },
+                  async () => {
+                    expect((getDb() as unknown as { marker: string }).marker).toBe(
+                      (autonomous as unknown as { marker: string }).marker,
+                    );
+                    expect(activeTransactions).toBe(2);
+                    return "committed";
+                  },
+                ),
+              ),
+            ),
+        ),
+      ),
+    {
+      createHandle: () => ({
+        driver: "neon-websocket" as const,
+        db: requestDb as never,
+        async close() {
+          expect(activeTransactions).toBe(0);
+          closes += 1;
+        },
+      }),
+    },
+  );
+
+  expect(result).toBe("committed");
+  expect(peakTransactions).toBe(2);
+  expect(closes).toBe(1);
 });
 
 test("Worker HTTP mode binds an exact request database without a persistent handle", async () => {

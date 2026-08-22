@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { unstable_doesMiddlewareMatch } from "next/experimental/testing/server";
 import { NextRequest } from "next/server";
@@ -15,7 +16,10 @@ const EXPECTED_SECURITY_HEADERS = {
 } as const;
 
 function matchesMiddleware(pathname: string): boolean {
-  return unstable_doesMiddlewareMatch({ config, url: `https://steward.test${pathname}` });
+  return unstable_doesMiddlewareMatch({
+    config,
+    url: `https://steward.test${pathname}`,
+  });
 }
 
 function configuredHeaders(allowInsecureHttp: boolean) {
@@ -32,6 +36,7 @@ function configuredHeaders(allowInsecureHttp: boolean) {
     stderr: "pipe",
     stdout: "pipe",
   });
+
   expect(result.exitCode, result.stderr.toString()).toBe(0);
   return JSON.parse(result.stdout.toString()) as Array<{
     source: string;
@@ -40,28 +45,40 @@ function configuredHeaders(allowInsecureHttp: boolean) {
 }
 
 describe("middleware security contract", () => {
-  test("sets response headers and replaces attacker-controlled nonce inputs", () => {
+  test("sets the response security headers and forwards one nonce-bound CSP", () => {
     const previousApiUrl = process.env.NEXT_PUBLIC_STEWARD_API_URL;
     process.env.NEXT_PUBLIC_STEWARD_API_URL = "https://api.steward.test";
+
     try {
       const response = middleware(
         new NextRequest("https://steward.test/dashboard", {
-          headers: { "x-nonce": "attacker-controlled", "content-security-policy": "default-src *" },
+          headers: {
+            "x-nonce": "attacker-controlled",
+            "content-security-policy": "default-src *",
+          },
         }),
       );
+
       for (const [key, value] of Object.entries(EXPECTED_SECURITY_HEADERS)) {
         expect(response.headers.get(key)).toBe(value);
       }
+
       const csp = response.headers.get("Content-Security-Policy");
+      expect(csp).not.toBeNull();
       expect(csp).toContain("default-src 'self'");
       expect(csp).toContain("frame-ancestors 'none'");
       expect(csp).toContain("upgrade-insecure-requests");
+
       const nonce = csp?.match(/'nonce-([^']+)'/)?.[1];
-      if (!nonce) throw new Error("middleware did not emit a nonce-bound CSP");
+      if (!nonce) throw new Error("middleware CSP did not contain a nonce");
       expect(nonce).toMatch(/^[A-Za-z0-9+/]{22}==$/);
       expect(nonce).not.toBe("attacker-controlled");
       expect(response.headers.get("x-middleware-request-x-nonce")).toBe(nonce);
       expect(response.headers.get("x-middleware-request-content-security-policy")).toBe(csp);
+      expect(response.headers.get("x-middleware-override-headers")?.split(",").sort()).toEqual([
+        "content-security-policy",
+        "x-nonce",
+      ]);
     } finally {
       if (previousApiUrl === undefined) delete process.env.NEXT_PUBLIC_STEWARD_API_URL;
       else process.env.NEXT_PUBLIC_STEWARD_API_URL = previousApiUrl;
@@ -80,10 +97,14 @@ describe("exported middleware matcher", () => {
     "/icon-192.png",
     "/apple-touch-icon.png",
     "/site.webmanifest",
-  ])("excludes %s", (pathname) => expect(matchesMiddleware(pathname)).toBe(false));
+  ])("excludes %s", (pathname) => {
+    expect(matchesMiddleware(pathname)).toBe(false);
+  });
+
   test.each(["/api-keys", "/dashboard", "/login"])("covers %s", (pathname) => {
     expect(matchesMiddleware(pathname)).toBe(true);
   });
+
   test.each([
     "/apiary",
     "/_next/staticity",
@@ -98,6 +119,7 @@ describe("exported middleware matcher", () => {
   ])("does not exempt hostile prefix/suffix path %s", (pathname) => {
     expect(matchesMiddleware(pathname)).toBe(true);
   });
+
   test("skips router prefetches through the exported missing-header rules", () => {
     expect(
       unstable_doesMiddlewareMatch({
@@ -114,16 +136,31 @@ describe("next.config static security headers", () => {
     const entries = configuredHeaders(false);
     expect(entries).toHaveLength(1);
     expect(entries[0]?.source).toBe("/:path*");
-    expect(
-      Object.fromEntries(entries[0]?.headers.map(({ key, value }) => [key, value]) ?? []),
-    ).toEqual(EXPECTED_SECURITY_HEADERS);
+
+    const actualHeaders = Object.fromEntries(
+      (entries[0]?.headers ?? []).map(({ key, value }) => [key, value]),
+    );
+    expect(actualHeaders).toEqual(EXPECTED_SECURITY_HEADERS);
   });
+
   test("only omits HSTS under the explicit e2e insecure-HTTP opt-out", () => {
     const entries = configuredHeaders(true);
-    const actual = Object.fromEntries(
-      entries[0]?.headers.map(({ key, value }) => [key, value]) ?? [],
+    const actualHeaders = Object.fromEntries(
+      (entries[0]?.headers ?? []).map(({ key, value }) => [key, value]),
     );
-    const { "Strict-Transport-Security": _hsts, ...expected } = EXPECTED_SECURITY_HEADERS;
-    expect(actual).toEqual(expected);
+    const { "Strict-Transport-Security": _hsts, ...expectedWithoutHsts } =
+      EXPECTED_SECURITY_HEADERS;
+
+    expect(actualHeaders).toEqual(expectedWithoutHsts);
+  });
+});
+
+describe("security configuration inventory", () => {
+  test("the provider does not retain the retired vercel.json CSP reference", () => {
+    const providersSource = readFileSync(
+      join(import.meta.dir, "..", "components", "providers.tsx"),
+      "utf8",
+    );
+    expect(providersSource).not.toContain("vercel.json");
   });
 });

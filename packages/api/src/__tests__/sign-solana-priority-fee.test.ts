@@ -1,8 +1,10 @@
-import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it, setDefaultTimeout } from "bun:test";
 import { agents, closeDb, getDb, policies, tenants } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { Hono } from "hono";
 import type { AppVariables } from "../services/context";
+
+setDefaultTimeout(30_000);
 
 const TENANT_ID = `solana-priority-fee-tenant-${Date.now()}`;
 const AGENT_ID = `solana-priority-fee-agent-${Date.now()}`;
@@ -158,6 +160,9 @@ describe("sign-solana priority-fee cap", () => {
       });
 
       expect(response.status).toBe(200);
+      expect(response.headers.get("Cache-Control")).toBe("no-store, max-age=0");
+      expect(response.headers.get("Pragma")).toBe("no-cache");
+      expect(response.headers.get("Expires")).toBe("0");
       const body = (await response.json()) as {
         ok: boolean;
         data?: { signature: string; broadcast: boolean; chainId: number };
