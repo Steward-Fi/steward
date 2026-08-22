@@ -1791,13 +1791,11 @@ agentRoutes.put("/:agentId/policy", async (c) => {
     tenantId,
     async (txRaw, appendRequiredAudit) => {
       const tx = txRaw as typeof db;
-      // Serialize the complete partial-patch read/materialize/write sequence,
-      // including initial-row creation where SELECT FOR UPDATE has no row to
-      // lock. PGLite runs tests on one connection and lacks this PG function.
-      if (process.env.STEWARD_PGLITE_MEMORY !== "true") {
-        await tx.execute(
-          sql`SELECT pg_advisory_xact_lock(hashtextextended(${`agent-policy:${tenantId}:${agentId}`}, 0))`,
-        );
+      // Share the canonical authority lock with signer, quorum, rule-policy,
+      // and user-wallet signer mutations. This also serializes initial policy
+      // creation, where SELECT FOR UPDATE has no row to lock.
+      if (!(await lockAgentAuthority(tx, tenantId, agentId))) {
+        return { kind: "missing-agent" as const };
       }
       const [existing] = await tx
         .select()
@@ -1898,6 +1896,9 @@ agentRoutes.put("/:agentId/policy", async (c) => {
     },
   );
 
+  if (mutation.kind === "missing-agent") {
+    return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
+  }
   if (mutation.kind === "invalid") {
     return c.json<ApiResponse>({ ok: false, error: mutation.error }, mutation.status);
   }

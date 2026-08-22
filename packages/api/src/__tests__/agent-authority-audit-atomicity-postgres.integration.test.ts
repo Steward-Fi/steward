@@ -2,6 +2,7 @@ import { expect, it, setDefaultTimeout } from "bun:test";
 import {
   __resetAuditHmacKeyCacheForTests,
   agentKeyQuorums,
+  agentPolicies,
   agentSigners,
   agents,
   auditChainHeads,
@@ -64,6 +65,7 @@ realPostgresIt(
     const suffix = crypto.randomUUID().replaceAll("-", "");
     const tenantId = `authority-atomic-${suffix}`;
     const agentId = `authority-agent-${suffix}`;
+    const initialPolicyAgentId = `authority-policy-${suffix}`;
     const signerId = crypto.randomUUID(),
       signerBId = crypto.randomUUID(),
       quorumId = crypto.randomUUID(),
@@ -88,6 +90,12 @@ realPostgresIt(
         tenantId,
         name: agentId,
         walletAddress: "0x1111111111111111111111111111111111111111",
+      });
+      await admin.db.insert(agents).values({
+        id: initialPolicyAgentId,
+        tenantId,
+        name: initialPolicyAgentId,
+        walletAddress: "0x2222222222222222222222222222222222222222",
       });
       await admin.db.insert(agentSigners).values([
         {
@@ -169,6 +177,30 @@ realPostgresIt(
           .from(agentSigners)
           .where(eq(agentSigners.id, signerId)),
       ).toEqual([{ label: "winner-a" }]);
+      const signerRevokeResponses = await race(
+        () =>
+          request(
+            tenantId,
+            `/agents/${agentId}/signers/${signerId}`,
+            "DELETE",
+            rid("signer-revoke"),
+          ),
+        () =>
+          request(
+            tenantId,
+            `/agents/${agentId}/signers/${signerId}`,
+            "PATCH",
+            rid("signer-after-revoke"),
+            JSON.stringify({ label: "must-not-resurrect" }),
+          ),
+      );
+      expect(signerRevokeResponses.map((x) => x.status)).toEqual([200, 409]);
+      expect(
+        await admin.db
+          .select({ label: agentSigners.label, status: agentSigners.status })
+          .from(agentSigners)
+          .where(eq(agentSigners.id, signerId)),
+      ).toEqual([{ label: "winner-a", status: "revoked" }]);
       const quorumResponses = await race(
         () =>
           request(
@@ -220,6 +252,48 @@ realPostgresIt(
           .from(policies)
           .where(eq(policies.agentId, agentId)),
       ).toEqual([{ config: { maxPerTx: "10" } }]);
+      const initialPolicyKey = `steward_agent_authority_${tenantId}:${initialPolicyAgentId}`;
+      await locker`SELECT pg_advisory_lock(hashtextextended(${initialPolicyKey},0))`;
+      heldLock = initialPolicyKey;
+      const firstInitialPolicy = request(
+        tenantId,
+        `/agents/${initialPolicyAgentId}/policy`,
+        "PUT",
+        rid("initial-policy-a"),
+        JSON.stringify({ reason: "create initial policy", dailyCap: 50, perOrderCap: 5 }),
+      );
+      await waiters(admin.client, 1);
+      const secondInitialPolicy = request(
+        tenantId,
+        `/agents/${initialPolicyAgentId}/policy`,
+        "PUT",
+        rid("initial-policy-b"),
+        JSON.stringify({ reason: "preserve first partial update", leverageCap: 2 }),
+      );
+      await waiters(admin.client, 2);
+      await locker`SELECT pg_advisory_unlock(hashtextextended(${initialPolicyKey},0))`;
+      heldLock = null;
+      expect(
+        (await Promise.all([firstInitialPolicy, secondInitialPolicy])).map((x) => x.status),
+      ).toEqual([200, 200]);
+      expect(
+        await admin.db
+          .select({
+            dailyCapUsd: agentPolicies.dailyCapUsd,
+            perOrderCapUsd: agentPolicies.perOrderCapUsd,
+            leverageCap: agentPolicies.leverageCap,
+            updatedReason: agentPolicies.updatedReason,
+          })
+          .from(agentPolicies)
+          .where(eq(agentPolicies.agentId, initialPolicyAgentId)),
+      ).toEqual([
+        {
+          dailyCapUsd: "50",
+          perOrderCapUsd: "5",
+          leverageCap: "2",
+          updatedReason: "preserve first partial update",
+        },
+      ]);
       const failRequestId = rid("fail-signer"),
         successRequestId = rid("success-signer");
       await admin.client.unsafe(
@@ -264,6 +338,7 @@ realPostgresIt(
             eq(auditEvents.tenantId, tenantId),
             inArray(auditEvents.action, [
               "agent.signer.update",
+              "agent.signer.revoke",
               "agent.key_quorum.revoke",
               "agent.key_quorum.update",
               "agent.policies.update",
@@ -274,7 +349,20 @@ realPostgresIt(
       expect(completionEvents.filter((x) => x.requestId === successRequestId)).toEqual([
         { action: "agent.signer.update", requestId: successRequestId },
       ]);
-      expect(completionEvents).toHaveLength(4);
+      expect(completionEvents).toHaveLength(5);
+      expect(
+        await admin.db
+          .select({ requestId: auditEvents.requestId })
+          .from(auditEvents)
+          .where(
+            and(
+              eq(auditEvents.tenantId, tenantId),
+              eq(auditEvents.action, "agent.policy.updated"),
+              eq(auditEvents.resourceId, initialPolicyAgentId),
+            ),
+          )
+          .orderBy(auditEvents.seq),
+      ).toEqual([{ requestId: rid("initial-policy-a") }, { requestId: rid("initial-policy-b") }]);
     } finally {
       if (failureGateHeld) await locker`SELECT pg_advisory_unlock(${failureGate})`;
       if (heldLock) await locker`SELECT pg_advisory_unlock(hashtextextended(${heldLock},0))`;
@@ -286,7 +374,8 @@ realPostgresIt(
       await admin.db.delete(agentKeyQuorums).where(eq(agentKeyQuorums.tenantId, tenantId));
       await admin.db.delete(agentSigners).where(eq(agentSigners.tenantId, tenantId));
       await admin.db.delete(policies).where(eq(policies.agentId, agentId));
-      await admin.db.delete(agents).where(eq(agents.id, agentId));
+      await admin.db.delete(agentPolicies).where(eq(agentPolicies.agentId, initialPolicyAgentId));
+      await admin.db.delete(agents).where(inArray(agents.id, [agentId, initialPolicyAgentId]));
       await admin.db.delete(tenants).where(eq(tenants.id, tenantId));
       await admin.client.end();
       if (previousAuditKey === undefined) delete process.env.STEWARD_AUDIT_HMAC_KEY;
