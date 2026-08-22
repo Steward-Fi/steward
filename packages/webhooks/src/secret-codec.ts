@@ -25,7 +25,20 @@ export interface WebhookSecretAuthority {
 
 function runtimeValue(name: string): string | undefined {
   const value = runtimeEnvironmentValue(name);
-  return value ? value : undefined;
+  // A blank binding is an omission, never an encryption root. Preserve the
+  // exact bytes of non-blank secrets for compatibility with existing records.
+  return value?.trim() ? value : undefined;
+}
+
+function decodeConfiguredKdfSalt(value: string): Buffer {
+  // Buffer.from(value, "hex") silently accepts a valid prefix and discards an
+  // invalid suffix. Validate the complete binding before deriving authority.
+  if (value.length < 32 || value.length % 2 !== 0 || !/^[0-9a-fA-F]+$/.test(value)) {
+    throw new Error(
+      "Webhook secret KDF salt must be an even-length hexadecimal string of at least 32 characters (16 bytes)",
+    );
+  }
+  return Buffer.from(value, "hex");
 }
 
 /** Resolve one immutable webhook encryption root from the current runtime. */
@@ -78,10 +91,7 @@ export function resolveWebhookSecretAuthority(): WebhookSecretAuthority {
     kdfSalt = DEFAULT_KDF_SALT;
     kdfSaltIsHex = false;
   }
-  const salt = Buffer.from(kdfSalt, kdfSaltIsHex ? "hex" : "utf8");
-  if (kdfSaltIsHex && salt.length < 16) {
-    throw new Error("Webhook secret KDF salt must decode to at least 16 bytes");
-  }
+  if (kdfSaltIsHex) decodeConfiguredKdfSalt(kdfSalt);
   const fingerprint = createHash("sha256")
     .update(JSON.stringify({ nodeEnvironment, encryptionKey, kdfSalt, kdfSaltIsHex }))
     .digest("hex");
@@ -98,7 +108,9 @@ function rootKey(): Buffer {
   const authority = resolveWebhookSecretAuthority();
   let key = rootKeysByAuthority.get(authority.fingerprint);
   if (key) return key;
-  const salt = Buffer.from(authority.kdfSalt, authority.kdfSaltIsHex ? "hex" : "utf8");
+  const salt = authority.kdfSaltIsHex
+    ? decodeConfiguredKdfSalt(authority.kdfSalt)
+    : Buffer.from(authority.kdfSalt, "utf8");
   key = scryptSync(authority.encryptionKey, salt, 32) as Buffer;
   if (rootKeysByAuthority.size >= MAX_CACHED_WEBHOOK_AUTHORITIES) {
     const oldest = rootKeysByAuthority.keys().next().value as string | undefined;

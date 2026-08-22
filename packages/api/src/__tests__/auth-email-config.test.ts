@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { readFileSync } from "node:fs";
 import { closeDb, getDb, tenantConfigs, tenants } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
+import { withRuntimeEnvironment } from "@stwd/shared/runtime-env";
 import { KeyStore } from "@stwd/vault";
 import { eq } from "drizzle-orm";
 import {
@@ -58,6 +59,29 @@ describe("getEmailAuthForTenant", () => {
     expect(provider.constructor.name).toBe("ResendProvider");
     expect(provider.from).toBe("Global <login@example.com>");
     expect(provider.replyTo).toBeUndefined();
+  });
+
+  it("bounds retired custody authorities retained by the per-tenant email cache", async () => {
+    clearEmailAuthTenantCacheForTests();
+    await getDb().delete(tenantConfigs).where(eq(tenantConfigs.tenantId, TEST_TENANT_ID));
+    const environments = Array.from({ length: 5 }, (_, index) => ({
+      NODE_ENV: "test",
+      STEWARD_MASTER_PASSWORD: `email-authority-${index}`,
+      STEWARD_KDF_SALT: `${(index + 1).toString(16).padStart(2, "0")}`.repeat(16),
+    }));
+
+    const first = await withRuntimeEnvironment(environments[0], () =>
+      getEmailAuthForTenant(TEST_TENANT_ID),
+    );
+    for (const environment of environments.slice(1)) {
+      await withRuntimeEnvironment(environment, () => getEmailAuthForTenant(TEST_TENANT_ID));
+    }
+    const reloadedFirst = await withRuntimeEnvironment(environments[0], () =>
+      getEmailAuthForTenant(TEST_TENANT_ID),
+    );
+
+    expect(reloadedFirst).not.toBe(first);
+    clearEmailAuthTenantCacheForTests();
   });
 
   it("uses the tenant-specific config when emailConfig is set", async () => {

@@ -1767,6 +1767,21 @@ function getPasskeyAuth(requestOrigin?: string): PasskeyAuth {
 // ─── EmailAuth cache ──────────────────────────────────────────────────────────
 
 const _emailAuthByTenant = new Map<string, Map<string, Promise<EmailAuth>>>();
+// Keep current/overlapping deployment generations hot without retaining every
+// retired provider instance (and its decrypted tenant delivery key) forever.
+const MAX_EMAIL_AUTH_AUTHORITIES_PER_TENANT = 4;
+
+function cacheEmailAuthAuthority(
+  authorities: Map<string, Promise<EmailAuth>>,
+  authorityFingerprint: string,
+  pending: Promise<EmailAuth>,
+): void {
+  if (authorities.size >= MAX_EMAIL_AUTH_AUTHORITIES_PER_TENANT) {
+    const oldestAuthority = authorities.keys().next().value as string | undefined;
+    if (oldestAuthority) authorities.delete(oldestAuthority);
+  }
+  authorities.set(authorityFingerprint, pending);
+}
 
 function getEmailKeyStore(): KeyStore {
   return getConfiguredKeyStore(undefined, { allowDevSecretFallback: true });
@@ -2057,18 +2072,27 @@ export async function getEmailAuthForTenant(tenantId: string): Promise<EmailAuth
   }).fingerprint;
   let authorities = _emailAuthByTenant.get(tenantId);
   const cached = authorities?.get(authorityFingerprint);
-  if (cached) return cached;
+  if (cached && authorities) {
+    authorities.delete(authorityFingerprint);
+    authorities.set(authorityFingerprint, cached);
+    return cached;
+  }
 
-  const pending = createEmailAuthForTenant(tenantId).catch((error) => {
-    authorities?.delete(authorityFingerprint);
-    if (authorities?.size === 0) _emailAuthByTenant.delete(tenantId);
+  let pending: Promise<EmailAuth>;
+  pending = createEmailAuthForTenant(tenantId).catch((error) => {
+    if (authorities?.get(authorityFingerprint) === pending) {
+      authorities.delete(authorityFingerprint);
+    }
+    if (authorities?.size === 0 && _emailAuthByTenant.get(tenantId) === authorities) {
+      _emailAuthByTenant.delete(tenantId);
+    }
     throw error;
   });
   if (!authorities) {
     authorities = new Map();
     _emailAuthByTenant.set(tenantId, authorities);
   }
-  authorities.set(authorityFingerprint, pending);
+  cacheEmailAuthAuthority(authorities, authorityFingerprint, pending);
   return pending;
 }
 

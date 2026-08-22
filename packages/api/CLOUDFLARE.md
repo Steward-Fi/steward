@@ -136,6 +136,13 @@ per isolate while a configured Upstash is unreachable (default 300, `0` =
 strict fail-closed). See `packages/api/src/routes/auth.ts`
 (`trustedClientIp`).
 
+Secret-route authority bindings are request-local too. Put optional
+`STEWARD_SECRET_ROUTE_ALLOWED_HOSTS`, `STEWARD_ALLOW_BROAD_SECRET_ROUTES`, and
+`STEWARD_ALLOW_COOKIE_INJECTION` values in the matching environment's `[vars]`
+table. Omitting either unsafe opt-in keeps that capability denied; an
+overlapping request from another binding generation cannot lend its opt-ins or
+host additions to the current request.
+
 On the Railway deploy (no Cloudflare in front), `STEWARD_TRUSTED_PROXY_HOPS=2`
 is REQUIRED, not optional (Railway's edge adds two `x-forwarded-for` entries and
 the right-most one rotates between nodes, so the client is the 2nd from the
