@@ -107,6 +107,7 @@ mock.module("@stwd/venue-hyperliquid", () => ({
   ]),
   isBuilderPerpSymbol: (coin: string) => /^[a-z0-9]+:[A-Z0-9]+$/.test(coin),
   getMarketableLimitPx: async () => "1",
+  validateBuilderFeeEnv: () => undefined,
 }));
 
 const stubPriceOracle: PriceOracle = {
