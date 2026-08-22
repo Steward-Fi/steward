@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { agents, tenants } from "@stwd/db";
 import type { IoredisLike } from "@stwd/redis";
+import { runtimeEnvironmentValue, withRuntimeEnvironment } from "@stwd/shared/runtime-env";
 import { and, eq } from "drizzle-orm";
 import { Hono } from "hono";
 import { createInvokeRoutes } from "../invoke";
@@ -15,6 +16,7 @@ import { type Harness, makeHarness } from "./_harness";
 
 const savedEnvironment = {
   NODE_ENV: process.env.NODE_ENV,
+  STEWARD_RUNTIME: process.env.STEWARD_RUNTIME,
   REDIS_DRIVER: process.env.REDIS_DRIVER,
   REDIS_URL: process.env.REDIS_URL,
   KV_REST_API_URL: process.env.KV_REST_API_URL,
@@ -35,6 +37,7 @@ function restoreEnvironment() {
 beforeEach(() => {
   process.env.NODE_ENV = "test";
   delete process.env.REDIS_DRIVER;
+  delete process.env.STEWARD_RUNTIME;
   delete process.env.REDIS_URL;
   delete process.env.KV_REST_API_URL;
   delete process.env.KV_REST_API_TOKEN;
@@ -238,6 +241,59 @@ describe("enforceCapabilityRateLimit", () => {
     );
     expect(result.allowed).toBe(false);
     expect(await harness.db.select().from(capabilityRateLimitBuckets)).toEqual([]);
+  });
+
+  test("keeps overlapping Worker binding generations on request-owned Postgres authority", async () => {
+    process.env.NODE_ENV = "production";
+    harness = await makeHarness();
+    const tenantId = `tenant-${crypto.randomUUID()}`;
+    const agentId = `agent-${crypto.randomUUID()}`;
+    await seedRateAgent(tenantId, agentId);
+    const redisSelections: string[] = [];
+    const postgresSelections: string[] = [];
+    const context = {
+      db: harness.db,
+      getRedisClient: () => {
+        redisSelections.push("legacy-isolate-client");
+        return {} as IoredisLike;
+      },
+      isRedisConfigured: () => true,
+      withCapabilityTenantDatabase: <T>(
+        _tenantId: string,
+        use: (db: typeof harness.db) => Promise<T>,
+      ) => {
+        postgresSelections.push(String(runtimeEnvironmentValue("KV_REST_API_URL")));
+        return use(harness!.db);
+      },
+    };
+    const reserve = (restUrl: string | undefined) =>
+      withRuntimeEnvironment(
+        {
+          STEWARD_RUNTIME: "workers",
+          NODE_ENV: "production",
+          REDIS_DRIVER: "upstash",
+          ...(restUrl ? { KV_REST_API_URL: restUrl, KV_REST_API_TOKEN: `token:${restUrl}` } : {}),
+        },
+        () => enforceCapabilityRateLimit(context, "issue", tenantId, agentId),
+      );
+
+    const generations = [
+      "https://redis-a.example.test",
+      "https://redis-b.example.test",
+      undefined,
+    ] as const;
+    for (let index = 0; index < CAPABILITY_ISSUE_RATE_LIMIT.maxRequests; index += 1) {
+      expect((await reserve(generations[index % generations.length])).allowed).toBe(true);
+    }
+    expect((await reserve("https://redis-a.example.test")).allowed).toBe(false);
+    expect(redisSelections).toEqual([]);
+    expect(postgresSelections.slice(0, 4)).toEqual([
+      "https://redis-a.example.test",
+      "https://redis-b.example.test",
+      "undefined",
+      "https://redis-a.example.test",
+    ]);
+    expect(postgresSelections).toHaveLength(CAPABILITY_ISSUE_RATE_LIMIT.maxRequests + 1);
   });
 
   test("absent Redis in production uses durable state across fresh service contexts and expiry", async () => {

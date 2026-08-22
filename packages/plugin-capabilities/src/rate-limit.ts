@@ -7,6 +7,7 @@
  */
 
 import { checkRateLimit } from "@stwd/redis";
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 import { sql } from "drizzle-orm";
 import type { StewardAppContext } from "./context";
 
@@ -39,18 +40,28 @@ function rowsFromExecute<T>(result: unknown): T[] {
 }
 
 function redisConfiguredFromEnvironment(): boolean {
-  const driver = process.env.REDIS_DRIVER?.trim().toLowerCase() || "ioredis";
+  const driver = runtimeEnvironmentValue("REDIS_DRIVER")?.trim().toLowerCase() || "ioredis";
   if (driver === "upstash") {
     return Boolean(
-      (process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL) &&
-        (process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN),
+      (runtimeEnvironmentValue("KV_REST_API_URL") ||
+        runtimeEnvironmentValue("UPSTASH_REDIS_REST_URL")) &&
+        (runtimeEnvironmentValue("KV_REST_API_TOKEN") ||
+          runtimeEnvironmentValue("UPSTASH_REDIS_REST_TOKEN")),
     );
   }
-  return Boolean(process.env.REDIS_URL);
+  return Boolean(runtimeEnvironmentValue("REDIS_URL"));
+}
+
+function workersRuntime(): boolean {
+  return (
+    runtimeEnvironmentValue("STEWARD_RUNTIME") === "workers" ||
+    (typeof navigator !== "undefined" && navigator.userAgent === "Cloudflare-Workers")
+  );
 }
 
 function explicitMemoryPosture(): boolean {
-  return process.env.NODE_ENV === "development" || process.env.NODE_ENV === "test";
+  const nodeEnvironment = runtimeEnvironmentValue("NODE_ENV");
+  return !workersRuntime() && (nodeEnvironment === "development" || nodeEnvironment === "test");
 }
 
 function reserveMemory(key: string, windowMs: number, maxRequests: number): CapabilityRateResult {
@@ -165,23 +176,30 @@ export async function enforceCapabilityRateLimit(
   const { windowMs, maxRequests } = RATE_LIMITS[surface];
   const key = `ratelimit:capability:${surface}:${tenantId}:${agentId}:${windowMs}`;
 
-  const redisClient = ctx.getRedisClient();
-  if (redisClient) {
-    try {
-      const result = await checkRateLimit(key, windowMs, maxRequests, redisClient);
-      return { allowed: result.allowed, resetMs: result.resetMs };
-    } catch {
+  // A Worker invocation always has a request-owned transactional database but
+  // the legacy Redis bridge remains isolate-global until the general Redis
+  // authority lane lands. Use the tenant-RLS Postgres bucket on Workers so an
+  // overlapping binding rotation/removal can never borrow another request's
+  // URL, credential, client, or reservation namespace.
+  if (!workersRuntime()) {
+    const redisClient = ctx.getRedisClient();
+    if (redisClient) {
+      try {
+        const result = await checkRateLimit(key, windowMs, maxRequests, redisClient);
+        return { allowed: result.allowed, resetMs: result.resetMs };
+      } catch {
+        return { allowed: false, resetMs: windowMs };
+      }
+    }
+
+    // A configured backend that failed startup must never be reclassified as
+    // "Redis absent" and silently fall through to Postgres or process memory.
+    if ((ctx.isRedisConfigured?.() ?? redisConfiguredFromEnvironment()) === true) {
       return { allowed: false, resetMs: windowMs };
     }
-  }
 
-  // A configured backend that failed startup must never be reclassified as
-  // "Redis absent" and silently fall through to Postgres or process memory.
-  if ((ctx.isRedisConfigured?.() ?? redisConfiguredFromEnvironment()) === true) {
-    return { allowed: false, resetMs: windowMs };
+    if (explicitMemoryPosture()) return reserveMemory(key, windowMs, maxRequests);
   }
-
-  if (explicitMemoryPosture()) return reserveMemory(key, windowMs, maxRequests);
 
   try {
     if (!ctx.withCapabilityTenantDatabase) {
