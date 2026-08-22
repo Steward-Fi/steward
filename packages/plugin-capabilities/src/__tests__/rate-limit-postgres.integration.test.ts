@@ -2,7 +2,9 @@ import { afterAll, beforeAll, expect, it } from "bun:test";
 import { fileURLToPath } from "node:url";
 import {
   agents,
+  closeDb,
   createDb,
+  runMigrations,
   runPluginMigrations,
   tenantContextFromAuthenticatedPrincipal,
   tenants,
@@ -15,11 +17,21 @@ import { CAPABILITY_INVOKE_RATE_LIMIT, enforceCapabilityRateLimit } from "../rat
 const databaseUrl = process.env.DATABASE_URL;
 const realPostgresIt = databaseUrl && !process.env.STEWARD_PGLITE_MEMORY ? it : it.skip;
 const migrationsFolder = fileURLToPath(new URL("../../drizzle", import.meta.url));
+const databaseName = `steward_cap_rate_concurrency_${crypto.randomUUID().replaceAll("-", "")}`;
 const savedNodeEnv = process.env.NODE_ENV;
 const savedAllowInsecureDb = process.env.STEWARD_ALLOW_INSECURE_DB;
+const savedDatabaseUrl = process.env.DATABASE_URL;
+let testDatabaseUrl = "";
+let adminClient: ReturnType<typeof createDb>["client"] | null = null;
+
+function urlForDatabase(name: string): string {
+  const url = new URL(databaseUrl!);
+  url.pathname = `/${name}`;
+  return url.toString();
+}
 
 function databaseUrlWithApplicationName(name: string): string {
-  const url = new URL(databaseUrl!);
+  const url = new URL(testDatabaseUrl);
   url.searchParams.set("application_name", name);
   return url.toString();
 }
@@ -45,17 +57,36 @@ async function waitForBlockedWriter(
 
 beforeAll(async () => {
   if (!databaseUrl || process.env.STEWARD_PGLITE_MEMORY) return;
+  adminClient = createDb(databaseUrl).client;
+  const [role] = await adminClient<{ rolsuper: boolean }[]>`
+    SELECT rolsuper FROM pg_roles WHERE rolname = current_user
+  `;
+  if (!role?.rolsuper) {
+    throw new Error("capability rate-limit concurrency proof requires a bootstrap superuser");
+  }
+  await adminClient.unsafe(`CREATE DATABASE ${databaseName}`);
+  testDatabaseUrl = urlForDatabase(databaseName);
+  process.env.DATABASE_URL = testDatabaseUrl;
+  process.env.STEWARD_ALLOW_INSECURE_DB = "true";
+  await runMigrations();
   await runPluginMigrations(
     { id: "capabilities", migrationsFolder },
     { migrateFn: postgresMigrate as never },
   );
 });
 
-afterAll(() => {
+afterAll(async () => {
+  await closeDb().catch(() => undefined);
+  if (adminClient) {
+    await adminClient.unsafe(`DROP DATABASE IF EXISTS ${databaseName} WITH (FORCE)`);
+    await adminClient.end();
+  }
   if (savedNodeEnv === undefined) delete process.env.NODE_ENV;
   else process.env.NODE_ENV = savedNodeEnv;
   if (savedAllowInsecureDb === undefined) delete process.env.STEWARD_ALLOW_INSECURE_DB;
   else process.env.STEWARD_ALLOW_INSECURE_DB = savedAllowInsecureDb;
+  if (savedDatabaseUrl === undefined) delete process.env.DATABASE_URL;
+  else process.env.DATABASE_URL = savedDatabaseUrl;
 });
 
 realPostgresIt(
@@ -65,8 +96,8 @@ realPostgresIt(
     process.env.STEWARD_ALLOW_INSECURE_DB = "true";
     const tenantId = `rate-tenant-${crypto.randomUUID()}`;
     const agentId = `rate-agent-${crypto.randomUUID()}`;
-    const first = createDb(databaseUrl!);
-    const second = createDb(databaseUrl!);
+    const first = createDb(testDatabaseUrl);
+    const second = createDb(testDatabaseUrl);
     await first.db.insert(tenants).values({
       id: tenantId,
       name: tenantId,
@@ -118,7 +149,7 @@ realPostgresIt(
 
       // Recreate the database client to model a service restart. Durable state
       // still rejects the next request in the same rolling window.
-      const restarted = createDb(databaseUrl!);
+      const restarted = createDb(testDatabaseUrl);
       try {
         const afterRestart = await enforceCapabilityRateLimit(
           context(restarted.db),
@@ -153,13 +184,13 @@ realPostgresIt(
   async () => {
     process.env.NODE_ENV = "production";
     process.env.STEWARD_ALLOW_INSECURE_DB = "true";
-    const observer = createDb(databaseUrl!);
+    const observer = createDb(testDatabaseUrl);
     try {
       for (const deletionKind of ["agent", "tenant"] as const) {
         const tenantId = `rate-delete-${deletionKind}-${crypto.randomUUID()}`;
         const agentId = `rate-delete-agent-${crypto.randomUUID()}`;
         const applicationName = `steward-rate-writer-${crypto.randomUUID()}`;
-        const deleter = createDb(databaseUrl!);
+        const deleter = createDb(testDatabaseUrl);
         const writer = createDb(databaseUrlWithApplicationName(applicationName));
         await observer.db.insert(tenants).values({
           id: tenantId,
