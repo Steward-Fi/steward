@@ -11,6 +11,7 @@ describe("production deploy policy", () => {
   test("accepts only a full main commit and verifies its exact main Docker build", () => {
     expect(workflow).toContain("main_sha:");
     expect(workflow).not.toContain("image_tag:");
+    expect(workflow).not.toContain("workflow_call:");
     expect(workflow).toContain("^[0-9a-f]{40}$");
     expect(workflow).toContain('git merge-base --is-ancestor "$MAIN_SHA" refs/remotes/origin/main');
     expect(workflow).toContain("actions/workflows/docker.yml/runs");
