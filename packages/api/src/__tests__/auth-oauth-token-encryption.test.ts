@@ -1,16 +1,15 @@
-import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, mock } from "bun:test";
 import { accounts, closeDb, tenantConfigs, tenants, users } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { eq } from "drizzle-orm";
-import {
-  authRoutes,
-  clearOAuthTokenKeyStoreForTests,
-  decryptOAuthProviderToken,
-  encryptOAuthProviderTokens,
-} from "../routes/auth";
 
 const MASTER_PASSWORD = "oauth-token-test-master";
 const originalFetch = globalThis.fetch;
+
+let authRoutes: typeof import("../routes/auth").authRoutes;
+let clearOAuthTokenKeyStoreForTests: typeof import("../routes/auth").clearOAuthTokenKeyStoreForTests;
+let decryptOAuthProviderToken: typeof import("../routes/auth").decryptOAuthProviderToken;
+let encryptOAuthProviderTokens: typeof import("../routes/auth").encryptOAuthProviderTokens;
 
 async function setupDb() {
   process.env.STEWARD_PGLITE_MEMORY = "true";
@@ -21,10 +20,24 @@ async function setupDb() {
   return db;
 }
 
+beforeAll(async () => {
+  process.env.STEWARD_MASTER_PASSWORD = MASTER_PASSWORD;
+  process.env.STEWARD_JWT_SECRET = "oauth-token-test-jwt-secret-with-enough-bytes";
+  process.env.STEWARD_AUDIT_HMAC_KEY = "a".repeat(64);
+  await setupDb();
+  ({
+    authRoutes,
+    clearOAuthTokenKeyStoreForTests,
+    decryptOAuthProviderToken,
+    encryptOAuthProviderTokens,
+  } = await import("../routes/auth"));
+});
+
 describe("OAuth provider token encryption", () => {
   beforeEach(() => {
     process.env.STEWARD_MASTER_PASSWORD = MASTER_PASSWORD;
-    process.env.JWT_SECRET = "oauth-token-test-jwt-secret-with-enough-bytes";
+    process.env.STEWARD_JWT_SECRET = "oauth-token-test-jwt-secret-with-enough-bytes";
+    process.env.STEWARD_AUDIT_HMAC_KEY = "a".repeat(64);
     process.env.APP_URL = "https://api.example.test";
     process.env.GOOGLE_CLIENT_ID = "google-client";
     process.env.GOOGLE_CLIENT_SECRET = "google-secret";
@@ -38,7 +51,8 @@ describe("OAuth provider token encryption", () => {
     clearOAuthTokenKeyStoreForTests();
     await closeDb().catch(() => {});
     delete process.env.STEWARD_MASTER_PASSWORD;
-    delete process.env.JWT_SECRET;
+    delete process.env.STEWARD_JWT_SECRET;
+    delete process.env.STEWARD_AUDIT_HMAC_KEY;
     delete process.env.APP_URL;
     delete process.env.GOOGLE_CLIENT_ID;
     delete process.env.GOOGLE_CLIENT_SECRET;
