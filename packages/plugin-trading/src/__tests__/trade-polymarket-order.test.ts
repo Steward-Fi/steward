@@ -69,6 +69,25 @@ function stubWallet(withFunder: boolean) {
   }) as never);
 }
 
+function productionTestVault(withFunder: boolean): Vault {
+  return {
+    getWallet: async (args: { venue?: string }) => {
+      if (args.venue !== "polymarket") throw new Error("no wallet");
+      return {
+        agentId: "x",
+        chainFamily: "evm" as const,
+        venue: "polymarket",
+        purpose: null,
+        address: WALLET,
+        metadata: withFunder ? { funderAddress: FUNDER } : {},
+      };
+    },
+    signTypedData: async () => {
+      throw new Error("production credential derivation is unavailable in this harness");
+    },
+  } as unknown as Vault;
+}
+
 async function seedSession(opts: {
   allowedAssets?: string[];
   perOrderCapUsd?: string;
@@ -678,15 +697,22 @@ describe("POST /v1/trade/polymarket/order", () => {
 
   it("SEC-111: STEWARD_PM_TEST_CREDS is hard-disabled in production", async () => {
     const { tenantId, agentId, sessionId } = await seedSession({});
-    stubWallet(true); // wallet + funder present, but no provisioned L2 creds
-    const app = makeApp(tenantId, agentId, tradeRoutes);
 
     const prevNodeEnv = process.env.NODE_ENV;
+    const prevCustodyAck = process.env.STEWARD_ACK_LOCAL_CUSTODY;
     const prevMemoryAck = process.env.STEWARD_ALLOW_MEMORY_TRADING_IDEMPOTENCY;
+    const prevRateLimitAck = process.env.STEWARD_ALLOW_MEMORY_TRADING_RATE_LIMITS;
     process.env.NODE_ENV = "production";
+    process.env.STEWARD_ACK_LOCAL_CUSTODY = "true";
     process.env.STEWARD_ALLOW_MEMORY_TRADING_IDEMPOTENCY = "true";
+    process.env.STEWARD_ALLOW_MEMORY_TRADING_RATE_LIMITS = "true";
     process.env.STEWARD_PM_TEST_CREDS = "1";
     try {
+      const routes = createTradeRoutesForTest({
+        ...sharedTestContext,
+        vault: productionTestVault(true),
+      });
+      const app = makeApp(tenantId, agentId, routes);
       const res = await postOrder(app, sessionId, crypto.randomUUID());
       // The test-creds seam is ignored in production, so creds resolution falls
       // through to real L2 derivation, which fails closed in this harness.
@@ -698,15 +724,19 @@ describe("POST /v1/trade/polymarket/order", () => {
     } finally {
       if (prevNodeEnv === undefined) delete process.env.NODE_ENV;
       else process.env.NODE_ENV = prevNodeEnv;
+      if (prevCustodyAck === undefined) delete process.env.STEWARD_ACK_LOCAL_CUSTODY;
+      else process.env.STEWARD_ACK_LOCAL_CUSTODY = prevCustodyAck;
       if (prevMemoryAck === undefined) delete process.env.STEWARD_ALLOW_MEMORY_TRADING_IDEMPOTENCY;
       else process.env.STEWARD_ALLOW_MEMORY_TRADING_IDEMPOTENCY = prevMemoryAck;
+      if (prevRateLimitAck === undefined)
+        delete process.env.STEWARD_ALLOW_MEMORY_TRADING_RATE_LIMITS;
+      else process.env.STEWARD_ALLOW_MEMORY_TRADING_RATE_LIMITS = prevRateLimitAck;
       delete process.env.STEWARD_PM_TEST_CREDS;
     }
   });
 
   it("SEC-111: a plain-http POLYMARKET_CLOB_API_URL is refused in production", async () => {
     const { tenantId, agentId, sessionId } = await seedSession({});
-    stubWallet(true);
     // Mock the adapter edge so the ONLY thing that can fail the order is creds
     // resolution: the HTTP override and test credentials must not bypass it.
     buildSpy = spyOn(PolymarketExecutionAdapter.prototype, "buildSignedOrder").mockResolvedValue(
@@ -722,15 +752,22 @@ describe("POST /v1/trade/polymarket/order", () => {
       actualAmount: 20,
       actualPrice: 0.5,
     } as Awaited<ReturnType<PolymarketExecutionAdapter["submitSignedOrder"]>>);
-    const app = makeApp(tenantId, agentId, tradeRoutes);
-
     const prevNodeEnv = process.env.NODE_ENV;
+    const prevCustodyAck = process.env.STEWARD_ACK_LOCAL_CUSTODY;
     const prevMemoryAck = process.env.STEWARD_ALLOW_MEMORY_TRADING_IDEMPOTENCY;
+    const prevRateLimitAck = process.env.STEWARD_ALLOW_MEMORY_TRADING_RATE_LIMITS;
     process.env.NODE_ENV = "production";
+    process.env.STEWARD_ACK_LOCAL_CUSTODY = "true";
     process.env.STEWARD_ALLOW_MEMORY_TRADING_IDEMPOTENCY = "true";
+    process.env.STEWARD_ALLOW_MEMORY_TRADING_RATE_LIMITS = "true";
     process.env.POLYMARKET_CLOB_API_URL = "http://clob.e2e.invalid";
     process.env.STEWARD_PM_TEST_CREDS = "1";
     try {
+      const routes = createTradeRoutesForTest({
+        ...sharedTestContext,
+        vault: productionTestVault(true),
+      });
+      const app = makeApp(tenantId, agentId, routes);
       const res = await postOrder(app, sessionId, crypto.randomUUID());
       expect(res.status).toBe(409);
       expect(((await res.json()) as { error?: string }).error).toContain(
@@ -741,8 +778,13 @@ describe("POST /v1/trade/polymarket/order", () => {
     } finally {
       if (prevNodeEnv === undefined) delete process.env.NODE_ENV;
       else process.env.NODE_ENV = prevNodeEnv;
+      if (prevCustodyAck === undefined) delete process.env.STEWARD_ACK_LOCAL_CUSTODY;
+      else process.env.STEWARD_ACK_LOCAL_CUSTODY = prevCustodyAck;
       if (prevMemoryAck === undefined) delete process.env.STEWARD_ALLOW_MEMORY_TRADING_IDEMPOTENCY;
       else process.env.STEWARD_ALLOW_MEMORY_TRADING_IDEMPOTENCY = prevMemoryAck;
+      if (prevRateLimitAck === undefined)
+        delete process.env.STEWARD_ALLOW_MEMORY_TRADING_RATE_LIMITS;
+      else process.env.STEWARD_ALLOW_MEMORY_TRADING_RATE_LIMITS = prevRateLimitAck;
       delete process.env.POLYMARKET_CLOB_API_URL;
       delete process.env.STEWARD_PM_TEST_CREDS;
     }

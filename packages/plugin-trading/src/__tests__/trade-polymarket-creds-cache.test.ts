@@ -25,6 +25,7 @@ import { agents, closeDb, getDb, tenants, tradeSessions } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import type { AppVariables } from "@stwd/shared";
 import { TradeSessionManager } from "@stwd/trade-sessions";
+import { Vault } from "@stwd/vault";
 import { Hono } from "hono";
 import type { StewardAppContext } from "../context";
 
@@ -330,8 +331,15 @@ describe("SEC-108: Polymarket L2 creds Redis cache is encrypted at rest", () => 
   it("skips the cache entirely when no encryption key material is configured", async () => {
     const { createTradeRoutes } = await import("../routes/trade");
     const { testCtx } = await import("./_ctx");
+    const masterPassword = process.env.STEWARD_MASTER_PASSWORD;
+    if (!masterPassword) throw new Error("test vault master password is required");
     const ctx = {
       ...testCtx(),
+      // This case isolates the independent Redis-cache encryption boundary.
+      // Keep an explicitly scoped test vault alive while the process-level
+      // cache key material is removed below; request-local custody behavior is
+      // covered by the API custody-authority suite.
+      vault: new Vault({ masterPassword }),
       getRedisClient: () => fakeRedis,
     } as unknown as StewardAppContext;
     const tradeRoutes = createTradeRoutes(ctx);
