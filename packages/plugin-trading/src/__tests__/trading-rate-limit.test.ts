@@ -73,6 +73,25 @@ describe("trading rate-limit fallback boundary", () => {
     expect(memory.entryCount()).toBe(1);
   });
 
+  it("fails closed for unset, staging, typo, and every Worker posture", async () => {
+    for (const environment of [
+      {},
+      { NODE_ENV: "staging" },
+      { NODE_ENV: "staging", STEWARD_ALLOW_MEMORY_TRADING_RATE_LIMITS: "true" },
+      { NODE_ENV: "developmnt" },
+      {
+        NODE_ENV: "test",
+        STEWARD_RUNTIME: "workers",
+        STEWARD_ALLOW_MEMORY_TRADING_RATE_LIMITS: "true",
+      },
+    ]) {
+      const result = await withRuntimeEnvironment(environment, () =>
+        consumeWithoutRedis(new MemoryTradingRateLimiter()),
+      );
+      expect(result.unavailable).toBe(true);
+    }
+  });
+
   it("keeps overlapping request environments isolated", async () => {
     let releaseAcknowledged!: () => void;
     const acknowledgedPaused = new Promise<void>((resolve) => {

@@ -24,14 +24,16 @@ import { redactedThrownDiagnostics } from "@stwd/shared";
 import { sql } from "drizzle-orm";
 import { composeApp } from "./compose";
 import { globalRateLimitRequiresRedis } from "./middleware/global-rate-limit";
-import { getRedisClient, initRedis, isRedisConfigured, shutdownRedis } from "./middleware/redis";
+import {
+  getRedisClient,
+  initRedis,
+  isRedisConfigured,
+  redisEnforcementRequiresDurability,
+  shutdownRedis,
+} from "./middleware/redis";
 import { resolveEnabledPlugins } from "./plugin-config";
 import { assertAuthStoresAreSafe, getAuthStoreSources, initAuthStores } from "./routes/auth";
-import {
-  API_VERSION,
-  type ApiResponse,
-  nonceCleanupTimer,
-} from "./services/context";
+import { API_VERSION, type ApiResponse, nonceCleanupTimer } from "./services/context";
 import { startGoogleCredentialLifecycleScheduler } from "./services/provider-google-lifecycle-scheduler";
 import { startProviderReservationReconciliationScheduler } from "./services/provider-reservation-reconciliation-scheduler";
 import { startXCredentialLifecycleScheduler } from "./services/provider-x-lifecycle-scheduler";
@@ -166,7 +168,7 @@ app.get("/ready", async (c) => {
     checks.database = { ok: false, error: "Database health check failed" };
   }
 
-  const redisRequired = globalRateLimitRequiresRedis();
+  const redisRequired = globalRateLimitRequiresRedis() || redisEnforcementRequiresDurability();
   try {
     const redis = getRedisClient();
     checks.redis = redis
@@ -393,10 +395,7 @@ const serverOptions = {
     // Hand the runtime-observed socket peer to the app via Hono's env bag so
     // per-route limiters (auth) can key on it when no trusted forwarding
     // config exists — it cannot be client-influenced, unlike any header.
-    return (
-      runtimeGate() ??
-      app.fetch(request, { [SOCKET_PEER_ENV_KEY]: peerAddress })
-    );
+    return runtimeGate() ?? app.fetch(request, { [SOCKET_PEER_ENV_KEY]: peerAddress });
   },
   idleTimeout: 30,
 } as Parameters<typeof Bun.serve>[0] & { hostname?: string };

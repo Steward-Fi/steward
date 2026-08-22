@@ -53,18 +53,19 @@ export class MemoryTradingRateLimiter {
   }
 }
 
-function isProductionRuntime(): boolean {
-  return (
-    runtimeEnvironmentValue("NODE_ENV") === "production" ||
+function allowsMemoryFallback(): boolean {
+  if (
     runtimeEnvironmentValue("STEWARD_RUNTIME") === "workers" ||
     runtimeEnvironmentValue("CF_PAGES") === "1"
-  );
-}
-
-function allowsMemoryFallback(): boolean {
+  ) {
+    return false;
+  }
+  const nodeEnv = runtimeEnvironmentValue("NODE_ENV");
   return (
-    !isProductionRuntime() ||
-    runtimeEnvironmentValue("STEWARD_ALLOW_MEMORY_TRADING_RATE_LIMITS") === "true"
+    nodeEnv === "development" ||
+    nodeEnv === "test" ||
+    (nodeEnv === "production" &&
+      runtimeEnvironmentValue("STEWARD_ALLOW_MEMORY_TRADING_RATE_LIMITS") === "true")
   );
 }
 

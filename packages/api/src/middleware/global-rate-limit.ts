@@ -10,7 +10,6 @@
 
 import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 import type { Context, MiddlewareHandler, Next } from "hono";
-import { isRedisAvailable } from "./redis";
 import { checkAuthRateLimit } from "../routes/auth";
 import { RATE_LIMIT_MAX_REQUESTS, RATE_LIMIT_WINDOW_MS } from "../services/context";
 import {
@@ -21,6 +20,7 @@ import {
   resolveClientIp,
   socketPeerFromEnv,
 } from "../services/runtime-gate";
+import { isRedisAvailable } from "./redis";
 
 export const SINGLE_INSTANCE_GLOBAL_RATE_LIMIT_ACK =
   "STEWARD_ACKNOWLEDGE_SINGLE_INSTANCE_GLOBAL_RATE_LIMIT";
@@ -31,10 +31,12 @@ export type GlobalRateLimitPosture = "durable" | "memory-development" | "memory-
 export function globalRateLimitPosture(
   durableAvailable: () => boolean = isRedisAvailable,
 ): GlobalRateLimitPosture {
-  if (runtimeEnvironmentValue("NODE_ENV") !== "production") return "memory-development";
   const workers = runtimeEnvironmentValue("STEWARD_RUNTIME") === "workers";
+  if (workers) return "durable";
+  const nodeEnv = runtimeEnvironmentValue("NODE_ENV");
+  if (nodeEnv === "development" || nodeEnv === "test") return "memory-development";
   if (
-    !workers &&
+    nodeEnv === "production" &&
     runtimeEnvironmentValue(SINGLE_INSTANCE_GLOBAL_RATE_LIMIT_ACK) === "true"
   ) {
     return durableAvailable() ? "durable" : "memory-acknowledged";
@@ -117,9 +119,7 @@ export function createGlobalRateLimitMiddleware(options?: {
       return c.json(
         { ok: false, error: "Rate limit exceeded" },
         429,
-        verdict.retryAfterSecs
-          ? { "Retry-After": String(verdict.retryAfterSecs) }
-          : undefined,
+        verdict.retryAfterSecs ? { "Retry-After": String(verdict.retryAfterSecs) } : undefined,
       );
     }
     await next();

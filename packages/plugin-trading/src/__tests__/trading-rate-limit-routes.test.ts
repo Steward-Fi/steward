@@ -41,7 +41,11 @@ async function makeOperatorApp() {
         destination: "0x1111111111111111111111111111111111111111",
         amount: "1",
       }),
-      ensureAgentForTenant: async () => ({ id: "rate-limit-agent" }),
+      ensureAgentForTenant: async () => ({
+        id: "rate-limit-agent",
+        walletAddresses: { evm: "0x1111111111111111111111111111111111111111" },
+      }),
+      isValidAnyAddress: () => true,
     } as unknown as StewardAppContext),
   );
   return app;
@@ -75,23 +79,25 @@ describe("trading route durable rate-limit boundary", () => {
     expect(((await response.json()) as { error: string }).error).not.toContain("rate limit");
   });
 
-  it("fails the operator transfer loop breaker closed before signing", async () => {
+  it("fails mounted usd-send and withdraw loop breakers closed before signing", async () => {
     const app = await makeOperatorApp();
-    const response = await withRuntimeEnvironment(
-      {
-        NODE_ENV: "production",
-        STEWARD_ALLOW_MEMORY_TRADING_IDEMPOTENCY: "true",
-      },
-      () =>
-        app.request("/v1/trade/hyperliquid/usd-send", {
-          method: "POST",
-          headers: { "Idempotency-Key": "operator-rate-limit-test" },
-        }),
-    );
-    expect(response.status).toBe(503);
-    expect(await response.json()).toEqual({
-      ok: false,
-      error: "Operator transfer rate limit unavailable",
-    });
+    for (const rail of ["usd-send", "withdraw"]) {
+      const response = await withRuntimeEnvironment(
+        {
+          NODE_ENV: "production",
+          STEWARD_ALLOW_MEMORY_TRADING_IDEMPOTENCY: "true",
+        },
+        () =>
+          app.request(`/v1/trade/hyperliquid/${rail}`, {
+            method: "POST",
+            headers: { "Idempotency-Key": `operator-rate-limit-${rail}` },
+          }),
+      );
+      expect(response.status).toBe(503);
+      expect(await response.json()).toEqual({
+        ok: false,
+        error: "Operator transfer rate limit unavailable",
+      });
+    }
   });
 });

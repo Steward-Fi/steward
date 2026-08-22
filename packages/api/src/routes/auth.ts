@@ -541,7 +541,8 @@ export async function checkAuthRateLimit(
 
   try {
     const redisMw = await import("../middleware/redis.js");
-    if (!redisMw.isRedisAvailable()) {
+    const redisClient = redisMw.getRedisClient();
+    if (!redisClient) {
       if (options.strictDurable) return deny(60);
       if (allowAuthRateLimitSoftFail()) return { allowed: true };
       if (redisMw.isRedisConfigured() && authRateLimitOutageAllow(endpoint)) {
@@ -551,7 +552,7 @@ export async function checkAuthRateLimit(
     }
 
     const { checkRateLimit } = await import("@stwd/redis");
-    const result = await checkRateLimit(key, windowMs, effectiveMax);
+    const result = await checkRateLimit(key, windowMs, effectiveMax, redisClient);
     if (!result.allowed) {
       return deny(Math.ceil(result.resetMs / 1000));
     }

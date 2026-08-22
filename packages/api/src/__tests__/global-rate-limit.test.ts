@@ -72,12 +72,7 @@ function mountedApp(middleware: ReturnType<typeof createGlobalRateLimitMiddlewar
   return app;
 }
 
-function mountedRequest(
-  app: Hono,
-  path = "/thing",
-  peer = "192.0.2.10",
-  headers?: HeadersInit,
-) {
+function mountedRequest(app: Hono, path = "/thing", peer = "192.0.2.10", headers?: HeadersInit) {
   return app.fetch(new Request(`http://steward.test${path}`, { headers }), {
     [SOCKET_PEER_ENV_KEY]: peer,
   });
@@ -114,14 +109,35 @@ describe("globalRateLimit (SEC-068)", () => {
     expect(res.status).toBe(200);
   });
 
+  test("unset, staging, typo, and Workers-test postures require durable state", async () => {
+    const app = mountedApp(
+      createGlobalRateLimitMiddleware({
+        checkDurable: async () => ({ allowed: false, retryAfterSecs: 60 }),
+      }),
+    );
+    for (const environment of [
+      {},
+      { NODE_ENV: "staging" },
+      {
+        NODE_ENV: "staging",
+        STEWARD_ACKNOWLEDGE_SINGLE_INSTANCE_GLOBAL_RATE_LIMIT: "true",
+      },
+      { NODE_ENV: "developmnt" },
+      { NODE_ENV: "test", STEWARD_RUNTIME: "workers" },
+    ]) {
+      await withRuntimeEnvironment(environment, async () => {
+        expect(globalRateLimitPosture()).toBe("durable");
+        expect((await mountedRequest(app)).status).toBe(429);
+      });
+    }
+  });
+
   test("two independent Bun contexts and a restarted context share the durable boundary", async () => {
     const counts = new Map<string, number>();
     const sharedDurableCheck = async () => {
       const count = (counts.get("shared-client") ?? 0) + 1;
       counts.set("shared-client", count);
-      return count <= 2
-        ? { allowed: true }
-        : { allowed: false, retryAfterSecs: 60 };
+      return count <= 2 ? { allowed: true } : { allowed: false, retryAfterSecs: 60 };
     };
     const options = { maxRequests: 2, checkDurable: sharedDurableCheck };
     const firstReplica = mountedApp(createGlobalRateLimitMiddleware(options));

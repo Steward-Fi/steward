@@ -321,9 +321,11 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
   }
 
   async function enforceOrderRateLimit(agentId: string): Promise<TradingRateLimitResult> {
+    const redis = getRedisClient();
     return enforceTradingRateLimit({
-      redisAvailable: getRedisClient() !== null,
-      checkRedis: () => checkRateLimit(`ratelimit:trade:hyperliquid:${agentId}:1000`, 1_000, 10),
+      redisAvailable: redis !== null,
+      checkRedis: () =>
+        checkRateLimit(`ratelimit:trade:hyperliquid:${agentId}:1000`, 1_000, 10, redis!),
       memoryKey: `hyperliquid:${agentId}`,
       windowMs: 1_000,
       maxRequests: 10,
@@ -1367,9 +1369,11 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
   }
 
   async function enforcePolymarketOrderRateLimit(agentId: string): Promise<TradingRateLimitResult> {
+    const redis = getRedisClient();
     return enforceTradingRateLimit({
-      redisAvailable: getRedisClient() !== null,
-      checkRedis: () => checkRateLimit(`ratelimit:trade:polymarket:${agentId}:1000`, 1_000, 10),
+      redisAvailable: redis !== null,
+      checkRedis: () =>
+        checkRateLimit(`ratelimit:trade:polymarket:${agentId}:1000`, 1_000, 10, redis!),
       memoryKey: `polymarket:${agentId}`,
       windowMs: 1_000,
       maxRequests: 10,

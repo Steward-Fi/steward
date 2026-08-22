@@ -467,6 +467,10 @@ export default {
         return withWorkerRequestDatabase(
           env,
           async () => {
+            // Redis authority is request-generation scoped. Rebind before every
+            // invocation so rotated/removed bindings cannot inherit the first
+            // isolate request's client through workerInit.
+            await initRedis(env);
             await ensureWorkerInit(env);
             const app = await getComposedApp();
             return app.fetch(request, env, ctx as never);
@@ -485,7 +489,10 @@ export default {
       return withWorkerJwtAuthority(env, () => {
         hydrateProcessEnv(env);
         validateWorkerSecurityEnv();
-        const scheduledWork = withWorkerRequestDatabase(env, () => ensureWorkerInit(env)).then(() =>
+        const scheduledWork = withWorkerRequestDatabase(env, async () => {
+          await initRedis(env);
+          await ensureWorkerInit(env);
+        }).then(() =>
           Promise.all([
             withWorkerRequestDatabase(env, () => runWorkerUpstreamCredentialLeaseSweep(env)),
             withWorkerRequestDatabase(env, () => runWorkerGoogleCredentialLifecycleSweep(env)),

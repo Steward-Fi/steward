@@ -322,13 +322,15 @@ export function createOperatorRecoveryRoutes(
     agentId: string,
   ): Promise<TradingRateLimitResult> {
     const key = `${rail}:${tenantId}:${agentId}`;
+    const redis = getRedisClient();
     return enforceTradingRateLimit({
-      redisAvailable: getRedisClient() !== null,
+      redisAvailable: redis !== null,
       checkRedis: () =>
         checkRateLimit(
           `ratelimit:trade:operator:${rail}:${tenantId}:${agentId}:${OPERATOR_TRANSFER_RATE_WINDOW_MS}`,
           OPERATOR_TRANSFER_RATE_WINDOW_MS,
           OPERATOR_TRANSFER_MAX_CALLS,
+          redis!,
         ),
       memoryKey: key,
       windowMs: OPERATOR_TRANSFER_RATE_WINDOW_MS,
