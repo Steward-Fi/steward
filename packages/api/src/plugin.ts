@@ -83,7 +83,7 @@ import {
 import { operatorAuth } from "./middleware/operator-auth";
 import { getRedisClient } from "./middleware/redis";
 import { getAgentTokenStatus } from "./services/agent-token-status";
-import { writeAuditEvent } from "./services/audit";
+import { verifyAuditChain, writeAuditEvent } from "./services/audit";
 import {
   type AppVariables,
   db,
@@ -185,6 +185,7 @@ export interface StewardAppContext {
   safeJsonParse: typeof safeJsonParse;
   isValidAnyAddress: typeof isValidAnyAddress;
   writeAuditEvent: typeof writeAuditEvent;
+  verifyAuditChain: typeof verifyAuditChain;
   withTenantAuditedTransaction: typeof withTenantAuditedTransaction;
   withCredentialLeaseDatabaseDeadline<T>(
     deadlineAt: number,
@@ -265,6 +266,7 @@ export function buildPluginContext(): StewardAppContext {
     safeJsonParse,
     isValidAnyAddress,
     writeAuditEvent,
+    verifyAuditChain,
     withTenantAuditedTransaction,
     withCredentialLeaseDatabaseDeadline: (deadlineAt, use) => {
       if (hasTenantTransactionDatabase()) {
