@@ -1,3 +1,4 @@
+import { shouldUsePGLite } from "@stwd/db/pglite";
 import { type SQLWrapper, sql } from "drizzle-orm";
 
 function userSessionLockKey(userId: string): string {
@@ -8,6 +9,7 @@ export async function lockUserSession(
   tx: { execute: (query: string | SQLWrapper) => unknown },
   userId: string,
 ) {
+  if (shouldUsePGLite()) return;
   await tx.execute(
     sql`select pg_advisory_xact_lock(hashtextextended(${userSessionLockKey(userId)}, 0))`,
   );

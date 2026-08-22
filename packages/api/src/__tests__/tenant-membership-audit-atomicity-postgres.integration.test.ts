@@ -191,6 +191,59 @@ realPostgresDescribe("tenant membership audit atomicity with real PostgreSQL", (
     expect(completions).toHaveLength(2);
   });
 
+  it("reports the committed role when concurrent open joins race", async () => {
+    await admin.db
+      .delete(userTenants)
+      .where(and(eq(userTenants.tenantId, tenantId), eq(userTenants.userId, member)));
+    await admin.db
+      .insert(tenantConfigs)
+      .values({ tenantId, joinMode: "open" })
+      .onConflictDoUpdate({
+        target: tenantConfigs.tenantId,
+        set: { joinMode: "open", updatedAt: new Date() },
+      });
+    const sessionToken = await createSessionToken("", memberPersonalTenantId, {
+      userId: member,
+      tenantId: memberPersonalTenantId,
+      mfaVerifiedAt: Date.now(),
+    });
+    const locker = await holdTenantLifecycleLock(admin, tenantId);
+    const join = () =>
+      app.request(`/user/me/tenants/${tenantId}/join`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${sessionToken}` },
+      });
+    const pending = Promise.all([join(), join()]);
+    await waitForAdvisoryWaiters(admin, 2);
+    await locker`commit`;
+    locker.release();
+
+    const responses = await pending;
+    expect(responses.map((response) => response.status)).toEqual([200, 200]);
+    const bodies = (await Promise.all(responses.map((response) => response.json()))) as Array<{
+      role: string;
+      alreadyMember: boolean;
+    }>;
+    expect(bodies.map((body) => body.role)).toEqual(["member", "member"]);
+    expect(bodies.map((body) => body.alreadyMember).sort()).toEqual([false, true]);
+    const completions = await admin.db
+      .select({ metadata: auditEvents.metadata })
+      .from(auditEvents)
+      .where(
+        and(
+          eq(auditEvents.tenantId, tenantId),
+          eq(auditEvents.action, "tenant.member.join"),
+          eq(auditEvents.actorId, member),
+        ),
+      );
+    expect(completions).toHaveLength(2);
+    expect(
+      completions
+        .map((event) => (event.metadata as { alreadyMember?: boolean }).alreadyMember)
+        .sort(),
+    ).toEqual([false, true]);
+  });
+
   it("derives role-change revocation from the final locked membership", async () => {
     revokeUserTokens?.mockClear();
     await admin.db

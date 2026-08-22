@@ -5,6 +5,10 @@ import { join } from "node:path";
 const userSource = readFileSync(join(import.meta.dir, "..", "routes", "user.ts"), "utf8");
 const platformSource = readFileSync(join(import.meta.dir, "..", "routes", "platform.ts"), "utf8");
 const authSource = readFileSync(join(import.meta.dir, "..", "routes", "auth.ts"), "utf8");
+const sessionLockSource = readFileSync(
+  join(import.meta.dir, "..", "services", "session-lock.ts"),
+  "utf8",
+);
 const dbSchemaSource = readFileSync(
   join(import.meta.dir, "..", "..", "..", "db", "src", "schema.ts"),
   "utf8",
@@ -33,6 +37,9 @@ describe("user membership hardening", () => {
     );
     expect(joinRoute).toContain("withTenantAuditedTransaction(");
     expect(joinRoute).toContain('lockedConfig?.joinMode !== "open"');
+    expect(joinRoute).toContain(".returning({ role: userTenants.role })");
+    expect(joinRoute).toContain("role: committedMembership.role");
+    expect(joinRoute).toContain("alreadyMember: !insertedMembership");
     expect(joinRoute.indexOf('action: "tenant.member.join"')).toBeGreaterThan(
       joinRoute.lastIndexOf(".insert(userTenants)"),
     );
@@ -93,6 +100,9 @@ describe("user membership hardening", () => {
     expect(userSource).toContain("innerJoin(users, eq(users.id, userTenants.userId))");
     expect(userSource).toContain("function tenantOwnerLifecycleLockKey");
     expect(userSource).toContain("tenant_owner_lifecycle_${tenantId}");
+    expect(userSource).toContain("if (shouldUsePGLite()) return");
+    expect(platformSource).toContain("if (shouldUsePGLite()) return");
+    expect(sessionLockSource).toContain("if (shouldUsePGLite()) return");
     expect(userSource).not.toContain("tenant_leave_${tenantId}");
     const leaveRoute = userSource.slice(
       userSource.indexOf('user.delete("/me/tenants/:tenantId/leave"'),
@@ -194,7 +204,8 @@ describe("user membership hardening", () => {
     expect(acceptRoute).toContain("requirePersonalUserSession(c)");
     expect(acceptRoute).toContain("emailVerified");
     expect(acceptRoute).toContain("/^[a-f0-9]{64}$/i.test(body.token)");
-    expect(acceptRoute).toContain("hashSha256Hex(body.token)");
+    expect(acceptRoute).toContain("const invitationToken = body.token");
+    expect(acceptRoute).toContain("hashSha256Hex(invitationToken)");
     // SEC-075: the invitation must be bound server-side to the accepting
     // account's verified email — in BOTH the candidate lookup and the atomic
     // accept update — so a leaked link cannot add a different signed-in user.

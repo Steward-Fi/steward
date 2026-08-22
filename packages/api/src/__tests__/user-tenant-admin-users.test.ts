@@ -19,6 +19,8 @@ const OTHER_TENANT_ID = "user-tenant-admin-users-other";
 const OWNER_PERSONAL_TENANT_ID = "personal-user-tenant-admin-owner";
 
 describe("user tenant-admin user directory routes", () => {
+  const previousDbMode = process.env.STEWARD_DB_MODE;
+  const previousPgliteMemory = process.env.STEWARD_PGLITE_MEMORY;
   let userRoutes: typeof import("../routes/user").userRoutes;
   let isUserTenantTransitionRequest: typeof import("../routes/user").isUserTenantTransitionRequest;
   let mountedUserRoutes: Hono;
@@ -29,7 +31,8 @@ describe("user tenant-admin user directory routes", () => {
   let memberId = "";
 
   beforeAll(async () => {
-    process.env.STEWARD_PGLITE_MEMORY = "true";
+    process.env.STEWARD_DB_MODE = "pglite";
+    delete process.env.STEWARD_PGLITE_MEMORY;
     process.env.STEWARD_MASTER_PASSWORD = "user-tenant-admin-users-master-password";
     process.env.STEWARD_JWT_SECRET = "user-tenant-admin-users-jwt-secret";
     process.env.STEWARD_AUDIT_HMAC_KEY ??= "user-tenant-admin-users-audit-key-with-enough-entropy";
@@ -128,7 +131,10 @@ describe("user tenant-admin user directory routes", () => {
 
   afterAll(async () => {
     await closeDb();
-    delete process.env.STEWARD_PGLITE_MEMORY;
+    if (previousDbMode === undefined) delete process.env.STEWARD_DB_MODE;
+    else process.env.STEWARD_DB_MODE = previousDbMode;
+    if (previousPgliteMemory === undefined) delete process.env.STEWARD_PGLITE_MEMORY;
+    else process.env.STEWARD_PGLITE_MEMORY = previousPgliteMemory;
     delete process.env.STEWARD_MASTER_PASSWORD;
     delete process.env.STEWARD_JWT_SECRET;
   });

@@ -67,6 +67,7 @@ import {
   userTenants,
   userWalletAppConsents,
 } from "@stwd/db";
+import { shouldUsePGLite } from "@stwd/db/pglite";
 import { PolicyEngine } from "@stwd/policy-engine";
 import {
   type AgentBalance,
@@ -1117,6 +1118,7 @@ async function lockTenantOwnerLifecycle(
   tx: Pick<ReturnType<typeof getDb>, "execute">,
   tenantId: string,
 ): Promise<void> {
+  if (shouldUsePGLite()) return;
   await tx.execute(
     sql`select pg_advisory_xact_lock(hashtextextended(${tenantOwnerLifecycleLockKey(tenantId)}, 0))`,
   );
@@ -7891,6 +7893,7 @@ user.post("/me/tenants/:tenantId/invitations/accept", async (c) => {
   if (!body?.token || typeof body.token !== "string" || !/^[a-f0-9]{64}$/i.test(body.token)) {
     return c.json<ApiResponse>({ ok: false, error: "token is required" }, 400);
   }
+  const invitationToken = body.token;
 
   return withAuthenticatedTenantDatabase(
     tenantId,
@@ -7898,7 +7901,7 @@ user.post("/me/tenants/:tenantId/invitations/accept", async (c) => {
     userId,
     async () => {
       const db = getDb();
-      const tokenHash = hashSha256Hex(body.token);
+      const tokenHash = hashSha256Hex(invitationToken);
       const [candidate] = await db
         .select({
           id: tenantInvitations.id,
@@ -8201,10 +8204,21 @@ user.post("/me/tenants/:tenantId/join", async (c) => {
           if (lockedConfig?.joinMode !== "open") {
             return false;
           }
-          await tx
+          const [insertedMembership] = await tx
             .insert(userTenants)
             .values({ userId, tenantId, role: "member" })
-            .onConflictDoNothing();
+            .onConflictDoNothing()
+            .returning({ role: userTenants.role });
+          const [committedMembership] = insertedMembership
+            ? [insertedMembership]
+            : await tx
+                .select({ role: userTenants.role })
+                .from(userTenants)
+                .where(and(eq(userTenants.userId, userId), eq(userTenants.tenantId, tenantId)))
+                .limit(1);
+          if (!committedMembership) {
+            throw new Error("Tenant membership changed during open join");
+          }
           await appendRequiredAudit({
             tenantId,
             actorType: "user",
@@ -8212,12 +8226,18 @@ user.post("/me/tenants/:tenantId/join", async (c) => {
             action: "tenant.member.join",
             resourceType: "tenant",
             resourceId: tenantId,
-            metadata: { role: "member" },
+            metadata: {
+              role: committedMembership.role,
+              alreadyMember: !insertedMembership,
+            },
             ipAddress: c.req.header("x-forwarded-for") ?? null,
             userAgent: c.req.header("user-agent") ?? null,
             requestId: c.get("requestId") ?? null,
           });
-          return true;
+          return {
+            role: committedMembership.role,
+            alreadyMember: !insertedMembership,
+          };
         },
       );
       if (!joined) {
@@ -8227,7 +8247,7 @@ user.post("/me/tenants/:tenantId/join", async (c) => {
         );
       }
 
-      return c.json({ ok: true, tenantId, role: "member" });
+      return c.json({ ok: true, tenantId, ...joined });
     },
     userId,
   );

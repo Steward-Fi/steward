@@ -50,6 +50,7 @@ import {
   vaultSigningFreezes,
   withTenantAuditedTransactionOnDb,
 } from "@stwd/db";
+import { shouldUsePGLite } from "@stwd/db/pglite";
 import {
   type AgentIdentity,
   type ApiResponse,
@@ -349,6 +350,7 @@ async function lockTenantOwnerLifecycle(
   tx: Pick<ReturnType<typeof getDb>, "execute">,
   tenantId: string,
 ): Promise<void> {
+  if (shouldUsePGLite()) return;
   await tx.execute(
     sql`select pg_advisory_xact_lock(hashtextextended(${tenantOwnerLifecycleLockKey(tenantId)}, 0))`,
   );
