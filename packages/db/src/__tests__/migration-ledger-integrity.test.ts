@@ -45,7 +45,7 @@ describe("core migration ledger integrity", () => {
     const validate = source.indexOf(
       "assertCoreMigrationLedgerIntegrity(existingRows, journal, databaseShape)",
     );
-    const mutate = source.indexOf("await client`CREATE SCHEMA drizzle`");
+    const mutate = source.indexOf("await tx.execute(sql`CREATE SCHEMA drizzle`)");
     expect(inspect).toBeGreaterThan(0);
     expect(validate).toBeGreaterThan(inspect);
     expect(mutate).toBeGreaterThan(validate);

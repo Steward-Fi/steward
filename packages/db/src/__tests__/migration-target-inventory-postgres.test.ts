@@ -189,4 +189,108 @@ describeWithPostgres("migration target inventory (real Postgres)", () => {
       await target.client.end({ timeout: 5 });
     }
   }, 200_000);
+
+  test("rejects ordinary extra objects even with a complete valid core ledger", async () => {
+    const target = await createTarget("valid_ledger_drift");
+    try {
+      const migrated = await runMigrator(target.url);
+      expect(migrated.exitCode, migrated.stderr || migrated.stdout).toBe(0);
+      const [before] = await target.client<Array<{ migration_count: number }>>`
+        SELECT count(*)::int AS migration_count FROM drizzle.__drizzle_migrations
+      `;
+
+      await target.client`CREATE TABLE public.foreign_customer_records (id integer)`;
+      await target.client`CREATE SEQUENCE public.foreign_customer_sequence`;
+      await target.client`CREATE TYPE public.foreign_customer_status AS ENUM ('active')`;
+      await target.client`
+        CREATE FUNCTION public.foreign_customer_identity(value integer)
+        RETURNS integer LANGUAGE sql IMMUTABLE AS 'SELECT value'
+      `;
+
+      const rejected = await runMigrator(target.url);
+      expect(rejected.exitCode).not.toBe(0);
+      const [after] = await target.client<Array<{ migration_count: number }>>`
+        SELECT count(*)::int AS migration_count FROM drizzle.__drizzle_migrations
+      `;
+      expect(after?.migration_count).toBe(before?.migration_count);
+    } finally {
+      await target.client.end({ timeout: 5 });
+    }
+  }, 200_000);
+
+  test("rejects malformed and unknown plugin ledgers on a valid core target", async () => {
+    const target = await createTarget("plugin_ledger_drift");
+    try {
+      const migrated = await runMigrator(target.url);
+      expect(migrated.exitCode, migrated.stderr || migrated.stdout).toBe(0);
+
+      await target.client`
+        CREATE TABLE drizzle.__drizzle_migrations_plugin_capabilities (
+          id serial PRIMARY KEY,
+          hash text NOT NULL,
+          created_at bigint
+        )
+      `;
+      await target.client`
+        INSERT INTO drizzle.__drizzle_migrations_plugin_capabilities(hash, created_at)
+        VALUES ('not-a-checked-in-hash', 1782800000000)
+      `;
+      const malformed = await runMigrator(target.url);
+      expect(malformed.exitCode).not.toBe(0);
+
+      await target.client`DROP TABLE drizzle.__drizzle_migrations_plugin_capabilities`;
+      await target.client`
+        CREATE TABLE drizzle.__drizzle_migrations_plugin_unknown (
+          id serial PRIMARY KEY,
+          hash text NOT NULL,
+          created_at bigint
+        )
+      `;
+      const unknown = await runMigrator(target.url);
+      expect(unknown.exitCode).not.toBe(0);
+    } finally {
+      await target.client.end({ timeout: 5 });
+    }
+  }, 200_000);
+
+  test("rolls back migrations when non-cooperating DDL lands during the migration", async () => {
+    const target = await createTarget("concurrent_ddl");
+    try {
+      const migration = runMigrator(target.url);
+      const deadline = Date.now() + 30_000;
+      let migrationTransactionObserved = false;
+      while (Date.now() < deadline) {
+        const [activity] = await target.client<Array<{ observed: boolean }>>`
+          SELECT EXISTS (
+            SELECT 1
+            FROM pg_stat_activity
+            WHERE datname = current_database()
+              AND pid <> pg_backend_pid()
+              AND xact_start IS NOT NULL
+              AND clock_timestamp() - xact_start > interval '250 milliseconds'
+          ) AS observed
+        `;
+        if (activity?.observed) {
+          migrationTransactionObserved = true;
+          break;
+        }
+        await Bun.sleep(25);
+      }
+      expect(migrationTransactionObserved).toBe(true);
+
+      await target.client`CREATE TABLE public.concurrent_foreign_records (id integer)`;
+      const result = await migration;
+      expect(result.exitCode).not.toBe(0);
+      const [shape] = await target.client<
+        Array<{ ledger_exists: boolean; foreign_table_exists: boolean }>
+      >`
+        SELECT
+          to_regclass('drizzle.__drizzle_migrations') IS NOT NULL AS ledger_exists,
+          to_regclass('public.concurrent_foreign_records') IS NOT NULL AS foreign_table_exists
+      `;
+      expect(shape).toEqual({ ledger_exists: false, foreign_table_exists: true });
+    } finally {
+      await target.client.end({ timeout: 5 });
+    }
+  }, 200_000);
 });
