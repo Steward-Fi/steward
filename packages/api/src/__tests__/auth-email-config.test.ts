@@ -64,7 +64,7 @@ describe("getEmailAuthForTenant", () => {
     expect(provider.replyTo).toBeUndefined();
   });
 
-  it("bounds retired custody authorities retained by the per-tenant email cache", async () => {
+  it("does not retain retired custody authorities across requests", async () => {
     clearEmailAuthTenantCacheForTests();
     await getDb().delete(tenantConfigs).where(eq(tenantConfigs.tenantId, TEST_TENANT_ID));
     const environments = Array.from({ length: 5 }, (_, index) => ({
