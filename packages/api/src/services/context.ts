@@ -185,12 +185,31 @@ export async function verifySessionToken(token: string) {
       mfaMethod?: string;
       jti?: string;
       exp?: number;
+      iat?: number;
     };
     if (payload.typ === "identity") return null;
     // Never accept a refresh JWT as an access token (SEC-055).
     if (payload.tokenType === "refresh") return null;
     await assertTokenNotRevoked(payload);
     if (payload.userId) {
+      const [revocationSubject] = rowsFromDbResult<{
+        tokens_revoked_before: number | string | null;
+      }>(
+        await getDb().execute(sql`
+          SELECT steward_bootstrap.user_token_revocation_subject(
+            ${payload.userId}::uuid
+          ) AS tokens_revoked_before
+        `),
+      );
+      const tokensRevokedBefore = Number(revocationSubject?.tokens_revoked_before);
+      if (
+        revocationSubject?.tokens_revoked_before === null ||
+        !Number.isSafeInteger(tokensRevokedBefore) ||
+        typeof payload.iat !== "number" ||
+        payload.iat <= tokensRevokedBefore
+      ) {
+        return null;
+      }
       const [user] = payload.tenantId
         ? rowsFromDbResult<{
             deactivated_at: Date | string | null;
@@ -364,9 +383,32 @@ export const tenantConfigs = new Map<string, TenantConfig>([
   [defaultTenantConfig.id, defaultTenantConfig],
 ]);
 
-export const defaultTenantReady = db.execute(sql`
-  SELECT steward_bootstrap.ensure_default_tenant(${process.env.STEWARD_DEFAULT_TENANT_KEY || ""})
-`);
+let defaultTenantDb: ReturnType<typeof getDb> | null = null;
+let defaultTenantReady: Promise<void> | null = null;
+
+/** Run tenant bootstrap only after the entry point has completed migrations. */
+export function ensureDefaultTenantReady(): Promise<void> {
+  const activeDb = getDb();
+  if (activeDb !== defaultTenantDb) {
+    defaultTenantDb = activeDb;
+    defaultTenantReady = null;
+  }
+  if (!defaultTenantReady) {
+    const pending = activeDb
+      .execute(sql`
+        SELECT steward_bootstrap.ensure_default_tenant(${process.env.STEWARD_DEFAULT_TENANT_KEY || ""})
+      `)
+      .then(() => undefined)
+      .catch((error) => {
+        if (defaultTenantDb === activeDb && defaultTenantReady === pending) {
+          defaultTenantReady = null;
+        }
+        throw error;
+      });
+    defaultTenantReady = pending;
+  }
+  return defaultTenantReady;
+}
 
 // ─── App variable types ───────────────────────────────────────────────────────
 
@@ -767,7 +809,7 @@ export async function tenantAuth(
   next: Next,
   options?: { requireTenantMatch?: string; bindTenantDatabase?: boolean },
 ) {
-  await defaultTenantReady;
+  await ensureDefaultTenantReady();
 
   const authHeader = c.req.header("Authorization");
   if (authHeader?.startsWith("Bearer ")) {

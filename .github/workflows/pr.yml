@@ -515,6 +515,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
+      NODE_ENV: "test"
       REDIS_URL: "redis://localhost:6379"
       STEWARD_REDIS_TESTS: "1"
 
@@ -625,6 +626,9 @@ jobs:
       - name: Start API test server
         env:
           DATABASE_URL: "postgres://steward:steward_ci@localhost:5432/steward_test"
+          # This smoke server uses the unactivated owner fixture intentionally;
+          # production/Compose exercise the four-role startup gate separately.
+          NODE_ENV: "test"
           PORT: "3299"
           SKIP_MIGRATIONS: "1"
           STEWARD_BIND_HOST: "127.0.0.1"
@@ -803,6 +807,16 @@ jobs:
           POSTGRES_DB: "steward_test"
           POSTGRES_USER: "steward"
           POSTGRES_PASSWORD: "steward_ci"
+          STEWARD_ADMIN_DATABASE_URL: "postgres://steward:steward_ci@postgres:5432/steward_test"
+          MIGRATION_DATABASE_URL: "postgres://steward_migrator:ci-migration-database-password-32@postgres:5432/steward_test"
+          DATABASE_URL: "postgres://steward_app:ci-app-database-password-32@postgres:5432/steward_test"
+          STEWARD_PLATFORM_DATABASE_URL: "postgres://steward_platform:ci-platform-database-password-32@postgres:5432/steward_test"
+          STEWARD_APP_DATABASE_ROLE: "steward_app"
+          STEWARD_PLATFORM_DATABASE_ROLE: "steward_platform"
+          STEWARD_DB_APP_PASSWORD: "ci-app-database-password-32"
+          STEWARD_DB_MIGRATION_PASSWORD: "ci-migration-database-password-32"
+          STEWARD_DB_PLATFORM_PASSWORD: "ci-platform-database-password-32"
+          STEWARD_BOOTSTRAP_SET_ROLE_PASSWORDS: "true"
           STEWARD_MASTER_PASSWORD: "ci-test-secret"
           STEWARD_PLATFORM_KEY: "ci-platform-key"
           STEWARD_PLATFORM_KEYS: "ci-platform-key"
@@ -867,6 +881,16 @@ jobs:
           POSTGRES_DB: "steward_test"
           POSTGRES_USER: "steward"
           POSTGRES_PASSWORD: "steward_ci"
+          STEWARD_ADMIN_DATABASE_URL: "postgres://steward:steward_ci@postgres:5432/steward_test"
+          MIGRATION_DATABASE_URL: "postgres://steward_migrator:ci-migration-database-password-32@postgres:5432/steward_test"
+          DATABASE_URL: "postgres://steward_app:ci-app-database-password-32@postgres:5432/steward_test"
+          STEWARD_PLATFORM_DATABASE_URL: "postgres://steward_platform:ci-platform-database-password-32@postgres:5432/steward_test"
+          STEWARD_APP_DATABASE_ROLE: "steward_app"
+          STEWARD_PLATFORM_DATABASE_ROLE: "steward_platform"
+          STEWARD_DB_APP_PASSWORD: "ci-app-database-password-32"
+          STEWARD_DB_MIGRATION_PASSWORD: "ci-migration-database-password-32"
+          STEWARD_DB_PLATFORM_PASSWORD: "ci-platform-database-password-32"
+          STEWARD_BOOTSTRAP_SET_ROLE_PASSWORDS: "true"
         run: |
-          docker compose logs steward-api steward-proxy redis postgres || true
+          docker compose logs steward-core-migrate steward-rls-bootstrap steward-rls-prepare-0113 steward-core-migrate-0113 steward-rls-upgrade-pre steward-core-migrate-final steward-rls-bootstrap-final steward-rls-upgrade-final steward-plugin-migrate steward-rls-activate steward-api steward-proxy redis postgres || true
           docker compose down -v

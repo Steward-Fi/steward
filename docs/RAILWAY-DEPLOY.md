@@ -50,7 +50,12 @@ In the Railway dashboard:
 1. Click **+ New** → **Database** → **PostgreSQL**
 2. Click **+ New** → **Database** → **Redis**
 
-Railway auto-provisions `DATABASE_URL` and `REDIS_URL` as shared variables. Reference them in your service env vars with `${{Postgres.DATABASE_URL}}` and `${{Redis.REDIS_URL}}`.
+Railway auto-provisions an owner `DATABASE_URL` and a `REDIS_URL`. The owner URL
+is an operator credential only—never reference it from API/proxy. Use it for the
+admin steps in `docs/security/database-rls-rollout.mdx`, create the separate
+`steward_app` and `steward_migrator` logins, then construct the runtime URL from
+the same host/database and the `steward_app` password. The Redis reference may
+be passed directly as `${{Redis.REDIS_URL}}`.
 
 ### Option B: External Neon Postgres + Railway Redis
 
@@ -75,8 +80,9 @@ NODE_ENV=production
 STEWARD_BIND_HOST=0.0.0.0
 
 # ─── Database ─────────────────────────────────────────────────────────────────
-# If using Railway Postgres:
-DATABASE_URL=${{Postgres.DATABASE_URL}}
+# If using Railway Postgres, use the steward_app URL created by the RLS runbook.
+# NEVER use ${{Postgres.DATABASE_URL}} here; that is the owner credential.
+DATABASE_URL=postgresql://steward_app:<password>@<railway-host>:<port>/<database>
 # If using third-party Neon:
 # DATABASE_URL=postgresql://user:pass@ep-xxx.neon.tech/steward?sslmode=require
 
@@ -169,7 +175,7 @@ Under **Service → Settings → Deploy → Health Check**:
 
 - **Path:** `/health`
 - **Port:** `3200`
-- **Timeout:** `45s` (Steward runs migrations on first boot, may take a moment)
+- **Timeout:** `45s` (startup verifies the restricted DB role and activated RLS catalog)
 
 ### Start Command
 
@@ -203,7 +209,8 @@ railway up
 The first deploy will:
 1. Build the multi-stage Docker image (~2-3 min)
 2. Start the API server on port 3200
-3. Run database migrations automatically (unless `SKIP_MIGRATIONS=true`)
+3. Verify core migration, bootstrap, plugin migration, and activation were
+   applied out of band; production startup rejects the owner/migration roles
 4. Pass the health check at `/health`
 
 Watch logs:
@@ -389,7 +396,7 @@ If you need the credential-injection proxy (for managing API keys on behalf of a
    STEWARD_PROXY_PORT=8080
    PORT=8080
    NODE_ENV=production
-   DATABASE_URL=${{Postgres.DATABASE_URL}}
+   DATABASE_URL=<same restricted steward_app URL as the API>
    STEWARD_MASTER_PASSWORD=<same as API service>
    STEWARD_KDF_SALT=<same as API service>
    STEWARD_JWT_SECRET=<same as API service>
@@ -466,7 +473,7 @@ curl -sf "$BASE/platform/tenants" \
 | `PORT` | No | `3200` | API listen port |
 | `STEWARD_BIND_HOST` | No | `127.0.0.1` | Bind host. **Set `0.0.0.0` on Railway** |
 | `NODE_ENV` | No | — | Set `production` |
-| `DATABASE_URL` | **Yes** | — | Postgres connection string |
+| `DATABASE_URL` | **Yes** | — | Restricted `steward_app` connection; owner/migration URLs must never reach runtime services |
 | `STEWARD_MASTER_PASSWORD` | **Yes** | — | Vault encryption secret. Keep separate from JWT signing material. |
 | `STEWARD_KDF_SALT` | **Yes in production** | — | Stable deployment KDF salt, at least 16 random bytes. Back it up with the encrypted vault data. |
 | `STEWARD_JWT_SECRET` | **Yes** | — | Canonical server-side signing and verification secret for user, session, and agent JWTs. Must be at least 32 characters in production. |

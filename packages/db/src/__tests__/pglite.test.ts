@@ -682,4 +682,139 @@ AQIDAQAB
 
     await client.close();
   });
+
+  test("personal tenant authority rejects every non-canonical membership writer", async () => {
+    const { client } = await freshDb();
+    const ownerId = "00000000-0000-4000-8000-000000000061";
+    const otherId = "00000000-0000-4000-8000-000000000062";
+    const tenantId = `personal-${ownerId}`;
+
+    await client.query(`
+      INSERT INTO users (id, email, email_verified) VALUES
+        ('${ownerId}', 'personal-owner@example.test', true),
+        ('${otherId}', 'personal-other@example.test', true)
+    `);
+    await client.query("BEGIN");
+    await client.query(`
+      INSERT INTO tenants (id, name, api_key_hash)
+      VALUES ('${tenantId}', 'Canonical personal', 'personal-authority-hash')
+    `);
+    await client.query(`
+      INSERT INTO user_tenants (user_id, tenant_id, role)
+      VALUES ('${ownerId}', '${tenantId}', 'owner')
+    `);
+    await client.query("COMMIT");
+
+    await client.query(`
+      INSERT INTO tenants (id, name, api_key_hash)
+      VALUES ('solana:AbCdEf123', 'Case-sensitive Solana payload', 'solana-payload-hash')
+    `);
+    await expect(
+      client.query(`
+        INSERT INTO tenants (id, name, api_key_hash)
+        VALUES ('Solana:AbCdEf456', 'Hostile Solana prefix', 'solana-prefix-hash')
+      `),
+    ).rejects.toThrow("Reserved tenant id must use canonical lowercase form");
+    await expect(
+      client.query(`
+        INSERT INTO tenants (id, name, api_key_hash)
+        VALUES ('Personal-${otherId}', 'Hostile personal prefix', 'personal-prefix-hash')
+      `),
+    ).rejects.toThrow("Reserved tenant id must use canonical lowercase form");
+    await expect(
+      client.query(`
+        INSERT INTO tenants (id, name, api_key_hash)
+        VALUES ('personal-${otherId}', 'Ownerless personal', 'ownerless-personal-hash')
+      `),
+    ).rejects.toThrow("Personal tenant requires exactly one canonical owner");
+    await client.query(`
+      INSERT INTO tenants (id, name, api_key_hash)
+      VALUES ('ordinary-reserved-update', 'Ordinary update source', 'ordinary-update-hash')
+    `);
+    await expect(
+      client.query(`
+        UPDATE tenants SET id = 'Personal-${otherId}'
+        WHERE id = 'ordinary-reserved-update'
+      `),
+    ).rejects.toThrow("Reserved tenant id must use canonical lowercase form");
+    await expect(
+      client.query(`
+        UPDATE tenants SET id = 'personal-${otherId}'
+        WHERE id = 'ordinary-reserved-update'
+      `),
+    ).rejects.toThrow("Personal tenant requires exactly one canonical owner");
+    await expect(
+      client.query(`
+        UPDATE tenants SET id = 'escaped-personal-tenant'
+        WHERE id = 'solana:AbCdEf123'
+      `),
+    ).rejects.toThrow("Reserved tenant id is immutable");
+    await expect(
+      client.query(`
+        UPDATE tenants SET id = 'eth:0x1111111111111111111111111111111111111111'
+        WHERE id = 'solana:AbCdEf123'
+      `),
+    ).rejects.toThrow("Reserved tenant id is immutable");
+
+    await expect(
+      client.query(`
+        INSERT INTO user_tenants (user_id, tenant_id, role)
+        VALUES ('${otherId}', '${tenantId}', 'member')
+      `),
+    ).rejects.toThrow("Reserved tenant membership is immutable");
+    await expect(
+      client.query(`
+        UPDATE user_tenants SET role = 'member'
+        WHERE user_id = '${ownerId}' AND tenant_id = '${tenantId}'
+      `),
+    ).rejects.toThrow("Reserved tenant membership is immutable");
+    await expect(
+      client.query(`
+        INSERT INTO tenant_invitations (
+          tenant_id, email, role, token_hash, status, expires_at
+        ) VALUES (
+          '${tenantId}', 'blocked@example.test', 'member',
+          'personal-invitation-hash', 'pending', now() + interval '1 day'
+        )
+      `),
+    ).rejects.toThrow("Reserved tenant invitations are forbidden");
+    await expect(
+      client.query(`
+        DELETE FROM user_tenants
+        WHERE user_id = '${ownerId}' AND tenant_id = '${tenantId}'
+      `),
+    ).rejects.toThrow("Reserved tenant membership is immutable");
+
+    await client.query(`
+      INSERT INTO tenants (id, name, api_key_hash)
+      VALUES ('default', 'Default tenant', 'default-authority-hash')
+      ON CONFLICT (id) DO NOTHING
+    `);
+    await expect(
+      client.query(`INSERT INTO user_tenants (user_id, tenant_id, role)
+        VALUES ('${otherId}', 'default', 'member')`),
+    ).rejects.toThrow("Reserved tenant membership is immutable");
+    await client.query(`SELECT set_config('steward.tenant_id', 'default', false)`);
+    await client.query(`SELECT set_config('steward.user_id', '${otherId}', false)`);
+    await client.query(
+      `SELECT steward_bootstrap.ensure_default_membership('${otherId}'::uuid, 'member')`,
+    );
+    await expect(
+      client.query(`SELECT steward_bootstrap.ensure_default_membership(
+        '${ownerId}'::uuid, 'member'
+      )`),
+    ).rejects.toThrow("default membership authority denied");
+
+    await client.query(`DELETE FROM tenants WHERE id = '${tenantId}'`);
+    expect(
+      readCountRow(
+        (
+          await client.query(
+            `SELECT COUNT(*)::int AS cnt FROM user_tenants WHERE tenant_id = '${tenantId}'`,
+          )
+        ).rows,
+      ),
+    ).toBe(0);
+    await client.close();
+  });
 });

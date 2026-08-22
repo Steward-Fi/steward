@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { redactedThrownDiagnostics } from "@stwd/shared";
-import { migrate } from "drizzle-orm/postgres-js/migrator";
+import { readMigrationFiles } from "drizzle-orm/migrator";
 
 import { createDb } from "./client";
 
@@ -79,8 +79,10 @@ function hashMigration(tag: string): string {
  * silently skip every migration between the DB's true tip and now, including
  * constraint-only hardening migrations whose absence produces no runtime error.
  */
-export async function runMigrations(): Promise<{ applied: string[] }> {
-  const { client, db } = createDb();
+export async function runMigrations(options?: {
+  throughTag?: string;
+}): Promise<{ applied: string[] }> {
+  const { client } = createDb();
 
   try {
     // Session-scoped advisory lock spans the whole migrator (which uses its
@@ -89,16 +91,33 @@ export async function runMigrations(): Promise<{ applied: string[] }> {
 
     try {
       const journal = readJournal();
+      const throughEntry = options?.throughTag
+        ? journal.entries.find((entry) => entry.tag === options.throughTag)
+        : undefined;
+      if (options?.throughTag && !throughEntry) {
+        throw new Error(`[migrate] Unknown terminal migration tag: ${options.throughTag}`);
+      }
 
-      // Ensure schema + table exist so we can inspect before drizzle's migrator runs.
-      await client`CREATE SCHEMA IF NOT EXISTS drizzle`;
-      await client`
-        CREATE TABLE IF NOT EXISTS drizzle.__drizzle_migrations (
-          id SERIAL PRIMARY KEY,
-          hash text NOT NULL,
-          created_at bigint
-        )
-      `;
+      // PostgreSQL checks database CREATE privilege even for CREATE SCHEMA IF
+      // NOT EXISTS. After the role split, the restricted migrator owns the
+      // existing drizzle schema but deliberately has no database-wide CREATE.
+      const [migrationSchema] = (await client`
+        SELECT 1 AS present FROM pg_namespace WHERE nspname = 'drizzle'
+      `) as Array<{ present: number }>;
+      if (!migrationSchema) await client`CREATE SCHEMA drizzle`;
+
+      const [migrationJournal] = (await client`
+        SELECT to_regclass('drizzle.__drizzle_migrations') AS relation
+      `) as Array<{ relation: string | null }>;
+      if (!migrationJournal?.relation) {
+        await client`
+          CREATE TABLE drizzle.__drizzle_migrations (
+            id SERIAL PRIMARY KEY,
+            hash text NOT NULL,
+            created_at bigint
+          )
+        `;
+      }
 
       const existingRows = (await client`
         SELECT created_at FROM drizzle.__drizzle_migrations
@@ -146,7 +165,28 @@ export async function runMigrations(): Promise<{ applied: string[] }> {
         }>
       )[0].n;
 
-      await migrate(db, { migrationsFolder: MIGRATIONS_FOLDER });
+      const migrations = readMigrationFiles({ migrationsFolder: MIGRATIONS_FOLDER });
+      const [latestMigration] = (await client`
+        SELECT created_at FROM drizzle.__drizzle_migrations
+        ORDER BY created_at DESC LIMIT 1
+      `) as Array<{ created_at: string | number | null }>;
+      await client.begin(async (tx) => {
+        for (const migration of migrations) {
+          if (throughEntry && migration.folderMillis > throughEntry.when) continue;
+          if (
+            latestMigration?.created_at !== null &&
+            latestMigration?.created_at !== undefined &&
+            Number(latestMigration.created_at) >= migration.folderMillis
+          ) {
+            continue;
+          }
+          for (const statement of migration.sql) await tx.unsafe(statement);
+          await tx`
+            INSERT INTO drizzle.__drizzle_migrations (hash, created_at)
+            VALUES (${migration.hash}, ${migration.folderMillis})
+          `;
+        }
+      });
 
       const afterRows = (await client`
         SELECT hash, created_at

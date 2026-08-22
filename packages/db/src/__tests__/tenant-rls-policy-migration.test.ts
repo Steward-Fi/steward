@@ -64,10 +64,12 @@ describe("0111 tenant RLS policy installation", () => {
       "auth_sso_domain_subject",
       "auth_tenant_config_subject",
       "auth_tenant_subject",
+      "ensure_default_membership",
       "ensure_default_tenant",
       "ensure_platform_tenant",
       "ensure_system_tenant",
       "platform_delete_user",
+      "platform_personal_tenant_delete",
       "platform_revoke_user_refresh_tokens",
       "platform_set_user_deactivation",
       "platform_stats",
@@ -77,6 +79,7 @@ describe("0111 tenant RLS policy installation", () => {
       "session_subject",
       "tenant_api_key_subject",
       "tenant_ids_for_internal_job",
+      "user_token_revocation_subject",
     ]);
     expect(functions.rows.every((row) => row.prosecdef)).toBe(true);
     expect(functions.rows.every((row) => row.proconfig?.includes("search_path=pg_catalog"))).toBe(
@@ -113,13 +116,26 @@ describe("0111 tenant RLS policy installation", () => {
     const activate = await readFile(new URL("rls-activate.sql", scripts), "utf8");
     const rollback = await readFile(new URL("rls-rollback.sql", scripts), "utf8");
     const inventory = await readFile(new URL("rls-policy-inventory.sql", scripts), "utf8");
-    expect(bootstrap).toContain("NOINHERIT NOBYPASSRLS");
+    expect(bootstrap).toContain("NOINHERIT NOREPLICATION NOBYPASSRLS");
     expect(bootstrap).toContain(
       "app, platform, migration-maintenance, and definer roles must be distinct",
     );
     expect(bootstrap).toContain("app role must not inherit or assume migration role");
     expect(bootstrap).toContain("app role must not inherit or assume platform role");
-    expect(bootstrap).toContain("REVOKE EXECUTE ON FUNCTION");
+    expect(bootstrap).toContain(
+      "REVOKE ALL ON ALL FUNCTIONS IN SCHEMA steward_bootstrap FROM PUBLIC",
+    );
+    expect(bootstrap).toContain("REVOKE ALL ON FUNCTION %s FROM %I");
+    expect(bootstrap).toContain("SEC-169 bootstrap SECURITY DEFINER inventory drift");
+    expect(bootstrap).toContain("steward_bootstrap.agent_subject(text,text,text), ");
+    expect(bootstrap).toContain("steward_bootstrap.platform_user_tenant_ids(uuid), ");
+    expect(bootstrap).not.toContain("GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA steward_bootstrap");
+    expect(bootstrap).toContain(
+      "to_regprocedure('public.steward_lock_personal_lifecycle(uuid,text,boolean)')",
+    );
+    expect(bootstrap).toContain(
+      "GRANT EXECUTE ON FUNCTION public.steward_lock_personal_lifecycle(uuid,text,boolean) TO %I, %I",
+    );
     expect(bootstrap).toContain("platform_set_user_deactivation(uuid,boolean)");
     expect(bootstrap).toContain("BEGIN;");
     expect(bootstrap).toContain("COMMIT;");
@@ -131,6 +147,17 @@ describe("0111 tenant RLS policy installation", () => {
     expect(activate).toContain("ENABLE ROW LEVEL SECURITY");
     expect(activate).toContain("FORCE ROW LEVEL SECURITY");
     expect(activate).toContain("steward_migration_maintenance");
+    expect(activate).toContain("SEC-169 personal lifecycle lock semantic manifest drift");
+    expect(activate).toContain("SEC-169 personal lifecycle lock ACL manifest drift");
+    expect(activate).toContain("fa9e1a06071746fd3b29dbc4db3706ad");
+    for (const helper of [
+      "steward_is_authoritative_wallet_identity(text,text,text,text)",
+      "steward_is_authoritative_wallet_tenant_owner(text,uuid)",
+      "steward_is_reserved_tenant_id(text)",
+      "steward_reserved_tenant_kind(text)",
+    ]) {
+      expect(activate).toContain(`function:${helper}:EXECUTE:false`);
+    }
     expect(rollback).toContain("NO FORCE ROW LEVEL SECURITY");
     expect(rollback).toContain("DISABLE ROW LEVEL SECURITY");
   });

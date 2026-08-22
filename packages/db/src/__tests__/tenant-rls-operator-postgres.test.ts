@@ -1,9 +1,14 @@
 import { afterAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { randomUUID } from "node:crypto";
 import postgres from "postgres";
+import { createDb } from "../client";
+import {
+  assertPlatformDatabaseAuthority,
+  assertRlsDeploymentSafety,
+} from "../rls-deployment-safety";
 
 const describeWithPostgres = process.env.DATABASE_URL ? describe : describe.skip;
-setDefaultTimeout(180_000);
+setDefaultTimeout(240_000);
 
 const suffix = randomUUID().replaceAll("-", "").slice(0, 16);
 const databaseName = `steward_rls_${suffix}`;
@@ -11,8 +16,60 @@ const appRole = `steward_app_${suffix}`;
 const migrationRole = `steward_migrator_${suffix}`;
 const definerRole = `steward_definer_${suffix}`;
 const platformRole = `steward_platform_${suffix}`;
+const hostileRole = `steward_hostile_${suffix}`;
 const appRolePassword = randomUUID().replaceAll("-", "");
+const migrationRolePassword = randomUUID().replaceAll("-", "");
 const platformRolePassword = randomUUID().replaceAll("-", "");
+
+// Exact #696/0114 helper body. This lane intentionally does not duplicate the
+// numbered migration; the fixture composes its contract so the RLS bootstrap,
+// activation, and runtime gates execute against the post-0114 topology.
+const personalLifecycleLockDefinition = `
+CREATE OR REPLACE FUNCTION public.steward_lock_personal_lifecycle(
+  p_user_id uuid,
+  p_tenant_id text,
+  p_tenant_delete boolean DEFAULT false
+)
+RETURNS TABLE (user_exists boolean, tenant_exists boolean)
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  owner_tenant record;
+BEGIN
+  IF p_tenant_id IS DISTINCT FROM 'personal-' || p_user_id::text THEN
+    RAISE EXCEPTION 'Personal tenant id does not match canonical owner' USING ERRCODE = '23514';
+  END IF;
+  PERFORM pg_advisory_xact_lock(hashtextextended('platform_user_account_' || p_user_id::text, 0));
+  SELECT true INTO user_exists FROM public.users u WHERE u.id = p_user_id FOR UPDATE;
+  user_exists := COALESCE(user_exists, false);
+
+  -- Take every owner-lifecycle lock before any tenant row. Membership writers
+  -- use the same advisory locks, so the ordered set cannot change underneath
+  -- the subsequent sole-owner checks.
+  FOR owner_tenant IN
+    SELECT tenant_id
+    FROM (
+      SELECT p_tenant_id AS tenant_id
+      UNION
+      SELECT ut.tenant_id
+      FROM public.user_tenants ut
+      WHERE ut.user_id = p_user_id AND ut.role = 'owner'
+    ) owned
+    ORDER BY tenant_id
+  LOOP
+    PERFORM pg_advisory_xact_lock(
+      hashtextextended('tenant_owner_lifecycle_' || owner_tenant.tenant_id, 0)
+    );
+  END LOOP;
+  IF p_tenant_delete THEN
+    PERFORM public.steward_lock_tenant_deletion(p_tenant_id);
+  END IF;
+  SELECT true INTO tenant_exists FROM public.tenants t WHERE t.id = p_tenant_id FOR UPDATE;
+  tenant_exists := COALESCE(tenant_exists, false);
+  RETURN NEXT;
+END
+$$;
+`;
 
 function databaseUrl(database: string): string {
   const url = new URL(process.env.DATABASE_URL as string);
@@ -31,6 +88,13 @@ function platformDatabaseUrl(): string {
   const url = new URL(databaseUrl(databaseName));
   url.username = platformRole;
   url.password = platformRolePassword;
+  return url.toString();
+}
+
+function migrationDatabaseUrl(): string {
+  const url = new URL(databaseUrl(databaseName));
+  url.username = migrationRole;
+  url.password = migrationRolePassword;
   return url.toString();
 }
 
@@ -66,7 +130,16 @@ async function runOperatorScript(name: string, includeRoles = false) {
       `steward_platform_role=${platformRole}`,
     );
   } else if (name === "rls-activate.sql") {
-    command.push("-v", `steward_migration_role=${migrationRole}`);
+    command.push(
+      "-v",
+      `steward_app_role=${appRole}`,
+      "-v",
+      `steward_migration_role=${migrationRole}`,
+      "-v",
+      `steward_platform_role=${platformRole}`,
+      "-v",
+      `steward_bootstrap_role=${definerRole}`,
+    );
   }
   command.push("-f", `scripts/postgres/${name}`);
   return runCommand(command);
@@ -81,12 +154,14 @@ describeWithPostgres("SEC-169 operator lifecycle on the real Steward schema", ()
     await admin.unsafe(`DROP ROLE IF EXISTS ${migrationRole}`);
     await admin.unsafe(`DROP ROLE IF EXISTS ${definerRole}`);
     await admin.unsafe(`DROP ROLE IF EXISTS ${platformRole}`);
+    await admin.unsafe(`DROP ROLE IF EXISTS ${hostileRole}`);
     await admin.end();
   });
 
   test("bootstraps, activates, rolls back, reactivates, and reruns the migrator", async () => {
-    const [adminRole] = await admin<{ rolsuper: boolean }[]>`
-      SELECT rolsuper FROM pg_roles WHERE rolname = current_user
+    const [adminRole] = await admin<{ role_name: string; rolsuper: boolean }[]>`
+      SELECT current_user::text AS role_name, rolsuper
+      FROM pg_roles WHERE rolname = current_user
     `;
     expect(adminRole?.rolsuper).toBe(true);
     await admin.unsafe(`CREATE DATABASE ${databaseName}`);
@@ -94,7 +169,7 @@ describeWithPostgres("SEC-169 operator lifecycle on the real Steward schema", ()
     const firstMigration = await runCommand(["bun", "run", "packages/db/src/migrate.ts"], {
       DATABASE_URL: databaseUrl(databaseName),
     });
-    expect(firstMigration).toContain("0113_personal_tenant_account_lifecycle");
+    expect(firstMigration).toContain("0119_personal_lifecycle_invariants");
 
     const db = postgres(databaseUrl(databaseName), { max: 1 });
     try {
@@ -105,20 +180,80 @@ describeWithPostgres("SEC-169 operator lifecycle on the real Steward schema", ()
         JOIN pg_namespace n ON n.oid = c.relnamespace
         WHERE n.nspname = 'public'
       `;
-      expect(installed).toEqual({ relations: 71, policies: 73 });
+      expect(installed).toEqual({ relations: 73, policies: 75 });
 
       await runOperatorScript("rls-bootstrap.sql", true);
+      await db.unsafe(personalLifecycleLockDefinition);
+      await db.unsafe(
+        "REVOKE ALL ON FUNCTION public.steward_lock_personal_lifecycle(uuid,text,boolean) FROM PUBLIC",
+      );
+      await db.unsafe(
+        `ALTER FUNCTION public.steward_lock_personal_lifecycle(uuid,text,boolean) OWNER TO ${migrationRole}`,
+      );
+      await runOperatorScript("rls-bootstrap.sql", true);
+      await runOperatorScript("rls-upgrade-personal-lifecycle.sql", true);
       await admin.unsafe(`ALTER ROLE ${appRole} PASSWORD '${appRolePassword}'`);
+      await admin.unsafe(`ALTER ROLE ${migrationRole} PASSWORD '${migrationRolePassword}'`);
       await admin.unsafe(`ALTER ROLE ${platformRole} PASSWORD '${platformRolePassword}'`);
+
+      // Core upgrades intentionally retain the database-owner/operator URL:
+      // core migrations can replace the non-login definer's ABI, while the
+      // restricted plugin migrator cannot mutate that privileged schema.
+      const postSplitCore = await runCommand(
+        ["bun", "run", "packages/api/scripts/migrate-production.ts", "core"],
+        {
+          DATABASE_URL: databaseUrl(databaseName),
+          MIGRATION_DATABASE_URL: databaseUrl(databaseName),
+        },
+      );
+      expect(postSplitCore).toContain('"phase":"core"');
+      const restricted = postgres(migrationDatabaseUrl(), { max: 1 });
+      try {
+        let restrictedUpgradeError: unknown;
+        try {
+          await restricted.unsafe(`
+            CREATE OR REPLACE FUNCTION steward_bootstrap.platform_stats()
+            RETURNS TABLE (tenant_count bigint, agent_count bigint, transaction_count bigint)
+            LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog AS $$
+              SELECT
+                (SELECT count(*) FROM public.tenants),
+                (SELECT count(*) FROM public.agents),
+                (SELECT count(*) FROM public.transactions)
+            $$
+          `);
+        } catch (error) {
+          restrictedUpgradeError = error;
+        }
+        expect(restrictedUpgradeError).toMatchObject({ code: "42501" });
+      } finally {
+        await restricted.end();
+      }
+
+      // This is a real post-split schema upgrade through the restricted
+      // plugin migrator login—not an owner connection that merely reports up to date.
+      const pluginMigration = await runCommand(
+        ["bun", "run", "packages/api/scripts/migrate-production.ts", "plugins"],
+        {
+          DATABASE_URL: migrationDatabaseUrl(),
+          MIGRATION_DATABASE_URL: migrationDatabaseUrl(),
+          STEWARD_PLUGINS: "capabilities",
+          STEWARD_MASTER_PASSWORD: "test-restricted-migrator-master-password",
+          STEWARD_AUDIT_HMAC_KEY:
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+          STEWARD_KDF_SALT: "0123456789abcdef0123456789abcdef",
+        },
+      );
+      expect(pluginMigration).toContain('"pluginName":"capabilities"');
       const roleRows = await db<
         {
           rolname: string;
           rolcanlogin: boolean;
           rolbypassrls: boolean;
+          rolreplication: boolean;
           rolsuper: boolean;
         }[]
       >`
-        SELECT rolname, rolcanlogin, rolbypassrls, rolsuper
+        SELECT rolname, rolcanlogin, rolbypassrls, rolreplication, rolsuper
         FROM pg_roles WHERE rolname IN (${appRole}, ${migrationRole}, ${definerRole}, ${platformRole})
         ORDER BY rolname
       `;
@@ -126,21 +261,25 @@ describeWithPostgres("SEC-169 operator lifecycle on the real Steward schema", ()
       expect(roleRows.find((row) => row.rolname === appRole)).toMatchObject({
         rolcanlogin: true,
         rolbypassrls: false,
+        rolreplication: false,
         rolsuper: false,
       });
       expect(roleRows.find((row) => row.rolname === migrationRole)).toMatchObject({
         rolcanlogin: true,
         rolbypassrls: false,
+        rolreplication: false,
         rolsuper: false,
       });
       expect(roleRows.find((row) => row.rolname === definerRole)).toMatchObject({
         rolcanlogin: false,
         rolbypassrls: true,
+        rolreplication: false,
         rolsuper: false,
       });
       expect(roleRows.find((row) => row.rolname === platformRole)).toMatchObject({
         rolcanlogin: true,
         rolbypassrls: false,
+        rolreplication: false,
         rolsuper: false,
       });
       const [platformRlsPrivileges] = await db<
@@ -148,6 +287,8 @@ describeWithPostgres("SEC-169 operator lifecycle on the real Steward schema", ()
           schema_usage: boolean;
           tenant_id_execute: boolean;
           user_id_execute: boolean;
+          public_lock_execute: boolean;
+          personal_lock_execute: boolean;
           audit_sequence_usage: boolean;
           other_sequence_usage: boolean;
           default_sequence_grant: boolean;
@@ -157,12 +298,14 @@ describeWithPostgres("SEC-169 operator lifecycle on the real Steward schema", ()
           has_schema_privilege(${platformRole}, 'steward_rls', 'USAGE') AS schema_usage,
           has_function_privilege(${platformRole}, 'steward_rls.tenant_id()', 'EXECUTE') AS tenant_id_execute,
           has_function_privilege(${platformRole}, 'steward_rls.user_id()', 'EXECUTE') AS user_id_execute,
+          has_function_privilege(${platformRole}, 'public.steward_lock_tenant_deletion(text)', 'EXECUTE') AS public_lock_execute,
+          has_function_privilege(${platformRole}, 'public.steward_lock_personal_lifecycle(uuid,text,boolean)', 'EXECUTE') AS personal_lock_execute,
           has_sequence_privilege(${platformRole}, 'public.audit_events_id_seq', 'USAGE,SELECT') AS audit_sequence_usage,
           has_sequence_privilege(${platformRole}, 'public.audit_checkpoints_id_seq', 'USAGE') AS other_sequence_usage,
           EXISTS (
             SELECT 1
             FROM pg_default_acl defaults
-            CROSS JOIN LATERAL aclexplode(COALESCE(defaults.defaclacl, '{}'::aclitem[])) privilege
+            CROSS JOIN LATERAL aclexplode(defaults.defaclacl) privilege
             JOIN pg_roles granted_role ON granted_role.oid = privilege.grantee
             WHERE defaults.defaclobjtype = 'S' AND granted_role.rolname = ${platformRole}
           ) AS default_sequence_grant
@@ -171,10 +314,184 @@ describeWithPostgres("SEC-169 operator lifecycle on the real Steward schema", ()
         schema_usage: true,
         tenant_id_execute: true,
         user_id_execute: false,
+        public_lock_execute: false,
+        personal_lock_execute: false,
         audit_sequence_usage: true,
         other_sequence_usage: false,
         default_sequence_grant: false,
       });
+
+      const expectedPlatformAcls = [
+        "function:steward_bootstrap.platform_delete_user(p_user_id uuid):EXECUTE:false",
+        "function:steward_bootstrap.platform_personal_tenant_delete(p_tenant_id text, p_execute boolean):EXECUTE:false",
+        "function:steward_bootstrap.platform_provision_user(p_email text, p_email_verified boolean, p_name text, p_custom_metadata jsonb):EXECUTE:false",
+        "function:steward_bootstrap.platform_revoke_user_refresh_tokens(p_user_id uuid):EXECUTE:false",
+        "function:steward_bootstrap.platform_set_user_deactivation(p_user_id uuid, p_deactivated boolean):EXECUTE:false",
+        "function:steward_bootstrap.platform_stats():EXECUTE:false",
+        "function:steward_bootstrap.platform_tenants(p_limit integer, p_offset integer):EXECUTE:false",
+        "function:steward_bootstrap.platform_user_identity(p_user_id uuid):EXECUTE:false",
+        "function:steward_bootstrap.platform_user_tenant_ids(p_user_id uuid):EXECUTE:false",
+        "function:steward_bootstrap.retention_delete_deactivated_users(p_days integer):EXECUTE:false",
+        "function:steward_bootstrap.tenant_ids_for_internal_job():EXECUTE:false",
+        "function:steward_rls.tenant_id():EXECUTE:false",
+        "relation:public.audit_chain_heads:INSERT:false",
+        "relation:public.audit_chain_heads:SELECT:false",
+        "relation:public.audit_chain_heads:UPDATE:false",
+        "relation:public.audit_events:INSERT:false",
+        "relation:public.audit_events:SELECT:false",
+        "relation:public.audit_events_id_seq:SELECT:false",
+        "relation:public.audit_events_id_seq:USAGE:false",
+        "relation:public.user_tenants:SELECT:false",
+        "relation:public.users:SELECT:false",
+        "schema:steward_bootstrap:USAGE:false",
+        "schema:steward_rls:USAGE:false",
+      ];
+      const platformNamedAcls = async () => {
+        const rows = await db<{ acl: string }[]>`
+          SELECT 'schema:' || namespace.nspname || ':' || privilege.privilege_type || ':' ||
+            privilege.is_grantable AS acl
+          FROM pg_namespace namespace
+          CROSS JOIN LATERAL aclexplode(namespace.nspacl) privilege
+          JOIN pg_roles granted_role ON granted_role.oid = privilege.grantee
+          WHERE granted_role.rolname = ${platformRole}
+          UNION ALL
+          SELECT 'relation:' || namespace.nspname || '.' || relation.relname || ':' ||
+            privilege.privilege_type || ':' || privilege.is_grantable AS acl
+          FROM pg_class relation
+          JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+          CROSS JOIN LATERAL aclexplode(relation.relacl) privilege
+          JOIN pg_roles granted_role ON granted_role.oid = privilege.grantee
+          WHERE relation.relkind IN ('r', 'p', 'v', 'm', 'f', 'S')
+            AND granted_role.rolname = ${platformRole}
+          UNION ALL
+          SELECT 'function:' || namespace.nspname || '.' || function_object.proname || '(' ||
+            pg_get_function_identity_arguments(function_object.oid) || '):' ||
+            privilege.privilege_type || ':' || privilege.is_grantable AS acl
+          FROM pg_proc function_object
+          JOIN pg_namespace namespace ON namespace.oid = function_object.pronamespace
+          CROSS JOIN LATERAL aclexplode(function_object.proacl) privilege
+          JOIN pg_roles granted_role ON granted_role.oid = privilege.grantee
+          WHERE granted_role.rolname = ${platformRole}
+          ORDER BY acl
+        `;
+        return rows.map((row) => row.acl);
+      };
+      expect(await platformNamedAcls()).toEqual(expectedPlatformAcls);
+
+      const [connectPosture] = await db<
+        {
+          app_connect: boolean;
+          migration_connect: boolean;
+          platform_connect: boolean;
+          public_connect: boolean;
+        }[]
+      >`
+        SELECT
+          has_database_privilege(${appRole}, current_database(), 'CONNECT') AS app_connect,
+          has_database_privilege(${migrationRole}, current_database(), 'CONNECT') AS migration_connect,
+          has_database_privilege(${platformRole}, current_database(), 'CONNECT') AS platform_connect,
+          EXISTS (
+            SELECT 1 FROM pg_database database_object
+            CROSS JOIN LATERAL aclexplode(
+              COALESCE(database_object.datacl, acldefault('d', database_object.datdba))
+            ) privilege
+            WHERE database_object.datname = current_database()
+              AND privilege.grantee = 0 AND privilege.privilege_type = 'CONNECT'
+          ) AS public_connect
+      `;
+      expect(connectPosture).toEqual({
+        app_connect: true,
+        migration_connect: true,
+        platform_connect: true,
+        public_connect: false,
+      });
+
+      await expect(
+        db.begin(async (tx) => {
+          await tx.unsafe(`SET LOCAL ROLE ${appRole}`);
+          return tx.unsafe("SELECT * FROM steward_bootstrap.platform_stats()");
+        }),
+      ).rejects.toMatchObject({ code: "42501" });
+      const [platformStats] = await db.begin(async (tx) => {
+        await tx.unsafe(`SET LOCAL ROLE ${platformRole}`);
+        return tx<{ tenant_count: number }[]>`
+          SELECT tenant_count::int FROM steward_bootstrap.platform_stats()
+        `;
+      });
+      expect(platformStats?.tenant_count).toBeGreaterThanOrEqual(0);
+
+      await db.unsafe(`
+        CREATE FUNCTION steward_bootstrap.unknown_authority_probe()
+        RETURNS integer LANGUAGE sql SECURITY DEFINER AS 'SELECT 1'
+      `);
+      try {
+        await expect(runOperatorScript("rls-bootstrap.sql", true)).rejects.toThrow(
+          "bootstrap SECURITY DEFINER inventory drift",
+        );
+      } finally {
+        await db.unsafe("DROP FUNCTION steward_bootstrap.unknown_authority_probe()");
+      }
+
+      await db.unsafe(`GRANT USAGE ON SCHEMA public TO ${platformRole}`);
+      await db.unsafe(`GRANT UPDATE ON public.audit_events TO ${platformRole} WITH GRANT OPTION`);
+      await db.unsafe(`GRANT USAGE ON SEQUENCE public.audit_checkpoints_id_seq TO ${platformRole}`);
+      await db.unsafe(
+        `GRANT EXECUTE ON FUNCTION steward_bootstrap.platform_stats() TO ${platformRole} WITH GRANT OPTION`,
+      );
+      await admin.unsafe(`ALTER ROLE ${platformRole} WITH REPLICATION`);
+      await runOperatorScript("rls-bootstrap.sql", true);
+      expect(await platformNamedAcls()).toEqual(expectedPlatformAcls);
+      const [resetPlatformRole] = await db<{ rolreplication: boolean }[]>`
+        SELECT rolreplication FROM pg_roles WHERE rolname = ${platformRole}
+      `;
+      expect(resetPlatformRole).toEqual({ rolreplication: false });
+
+      await db.unsafe(
+        "CREATE PROCEDURE public.platform_authority_probe() LANGUAGE SQL AS 'SELECT 1'",
+      );
+      await db.unsafe(
+        `GRANT EXECUTE ON PROCEDURE public.platform_authority_probe() TO ${platformRole}`,
+      );
+      await runOperatorScript("rls-bootstrap.sql", true);
+      const [procedureAccess] = await db<{ can_execute: boolean }[]>`
+        SELECT has_function_privilege(
+          ${platformRole}, 'public.platform_authority_probe()'::regprocedure, 'EXECUTE'
+        ) AS can_execute
+      `;
+      expect(procedureAccess).toEqual({ can_execute: false });
+      await db.unsafe("DROP PROCEDURE public.platform_authority_probe()");
+
+      await admin.unsafe(`GRANT CONNECT ON DATABASE postgres TO ${platformRole}`);
+      try {
+        await expect(runOperatorScript("rls-bootstrap.sql", true)).rejects.toThrow(
+          "platform database ACL drift",
+        );
+      } finally {
+        await admin.unsafe(`REVOKE CONNECT ON DATABASE postgres FROM ${platformRole}`);
+      }
+
+      await admin.unsafe(`GRANT ${definerRole} TO ${platformRole}`);
+      try {
+        await expect(runOperatorScript("rls-bootstrap.sql", true)).rejects.toThrow(
+          "platform role must not inherit, assume, or be assumable by another role",
+        );
+      } finally {
+        await admin.unsafe(`REVOKE ${definerRole} FROM ${platformRole}`);
+      }
+
+      await db.unsafe("CREATE SEQUENCE public.platform_owned_authority_probe");
+      await db.unsafe(
+        `ALTER SEQUENCE public.platform_owned_authority_probe OWNER TO ${platformRole}`,
+      );
+      try {
+        await expect(runOperatorScript("rls-bootstrap.sql", true)).rejects.toThrow(
+          "platform role must not own database objects",
+        );
+      } finally {
+        await db.unsafe("DROP SEQUENCE public.platform_owned_authority_probe");
+      }
+      await runOperatorScript("rls-bootstrap.sql", true);
+      expect(await platformNamedAcls()).toEqual(expectedPlatformAcls);
 
       await runOperatorScript("rls-activate.sql");
       const [activated] = await db<{ enabled: number; forced: number; maintenance: number }[]>`
@@ -187,7 +504,527 @@ describeWithPostgres("SEC-169 operator lifecycle on the real Steward schema", ()
         JOIN pg_namespace n ON n.oid = c.relnamespace
         WHERE n.nspname = 'public' AND p.polname LIKE 'steward_%'
       `;
-      expect(activated).toEqual({ enabled: 71, forced: 71, maintenance: 71 });
+      // Retained provider evidence is permanently forced with no app policy,
+      // so it is intentionally absent from the 77 policy-bearing relations.
+      expect(activated).toEqual({ enabled: 77, forced: 77, maintenance: 77 });
+
+      // Exercise the same load-bearing runtime gates used by the API and proxy
+      // through their real restricted login connections. This catches query
+      // binding errors that source assertions and mocked executors cannot.
+      const appHandle = createDb(appDatabaseUrl());
+      try {
+        await assertRlsDeploymentSafety(appHandle.db, {
+          expectedRole: appRole,
+          expectedPlatformRole: platformRole,
+          expectedBootstrapRole: definerRole,
+          expectedMigrationRole: migrationRole,
+        });
+      } finally {
+        await appHandle.client.end({ timeout: 5 });
+      }
+      const platformHandle = createDb(platformDatabaseUrl());
+      try {
+        await assertPlatformDatabaseAuthority(platformHandle.db, platformRole);
+      } finally {
+        await platformHandle.client.end({ timeout: 5 });
+      }
+
+      await admin.unsafe(`CREATE ROLE ${hostileRole} NOLOGIN`);
+
+      // The migration-owned INVOKER helper is deliberately executable by the
+      // app and bootstrap roles only. Reject both an unexpected grantee and a
+      // grant option, then prove bootstrap resets the complete named ACL.
+      await db.unsafe(
+        `GRANT EXECUTE ON FUNCTION public.steward_lock_personal_lifecycle(uuid,text,boolean) TO ${hostileRole} WITH GRANT OPTION`,
+      );
+      await db.unsafe(
+        `GRANT EXECUTE ON FUNCTION public.steward_lock_personal_lifecycle(uuid,text,boolean) TO ${platformRole}`,
+      );
+      await db.unsafe(
+        "GRANT EXECUTE ON FUNCTION public.steward_lock_personal_lifecycle(uuid,text,boolean) TO PUBLIC",
+      );
+      const personalLockAclDrift = createDb(appDatabaseUrl());
+      try {
+        await expect(
+          assertRlsDeploymentSafety(personalLockAclDrift.db, {
+            expectedRole: appRole,
+            expectedPlatformRole: platformRole,
+            expectedBootstrapRole: definerRole,
+            expectedMigrationRole: migrationRole,
+          }),
+        ).rejects.toThrow("RLS_DEPLOYMENT_PERSONAL_LIFECYCLE_LOCK_ACL_DRIFT");
+        await expect(runOperatorScript("rls-activate.sql")).rejects.toThrow(
+          "personal lifecycle lock ACL manifest drift",
+        );
+      } finally {
+        await personalLockAclDrift.client.end({ timeout: 5 });
+      }
+      await runOperatorScript("rls-bootstrap.sql", true);
+      const [personalLockPrivileges] = await db<
+        {
+          app: boolean;
+          bootstrap: boolean;
+          platform: boolean;
+          hostile: boolean;
+          public: boolean;
+          grantable: boolean;
+        }[]
+      >`
+        SELECT
+          has_function_privilege(${appRole}, 'public.steward_lock_personal_lifecycle(uuid,text,boolean)', 'EXECUTE') AS app,
+          has_function_privilege(${definerRole}, 'public.steward_lock_personal_lifecycle(uuid,text,boolean)', 'EXECUTE') AS bootstrap,
+          has_function_privilege(${platformRole}, 'public.steward_lock_personal_lifecycle(uuid,text,boolean)', 'EXECUTE') AS platform,
+          has_function_privilege(${hostileRole}, 'public.steward_lock_personal_lifecycle(uuid,text,boolean)', 'EXECUTE') AS hostile,
+          EXISTS (
+            SELECT 1 FROM pg_proc function_object
+            CROSS JOIN LATERAL aclexplode(function_object.proacl) privilege
+            WHERE function_object.oid =
+                'public.steward_lock_personal_lifecycle(uuid,text,boolean)'::regprocedure
+              AND privilege.grantee = 0 AND privilege.privilege_type = 'EXECUTE'
+          ) AS public,
+          EXISTS (
+            SELECT 1 FROM pg_proc function_object
+            CROSS JOIN LATERAL aclexplode(function_object.proacl) privilege
+            WHERE function_object.oid =
+                'public.steward_lock_personal_lifecycle(uuid,text,boolean)'::regprocedure
+              AND privilege.is_grantable
+          ) AS grantable
+      `;
+      expect(personalLockPrivileges).toEqual({
+        app: true,
+        bootstrap: true,
+        platform: false,
+        hostile: false,
+        public: false,
+        grantable: false,
+      });
+
+      await db.unsafe(`
+        CREATE OR REPLACE FUNCTION public.steward_lock_personal_lifecycle(
+          p_user_id uuid, p_tenant_id text, p_tenant_delete boolean DEFAULT false
+        ) RETURNS TABLE (user_exists boolean, tenant_exists boolean)
+        LANGUAGE plpgsql AS $$ BEGIN user_exists := false; tenant_exists := false; RETURN NEXT; END $$
+      `);
+      const personalLockDefinitionDrift = createDb(appDatabaseUrl());
+      try {
+        await expect(
+          assertRlsDeploymentSafety(personalLockDefinitionDrift.db, {
+            expectedRole: appRole,
+            expectedPlatformRole: platformRole,
+            expectedBootstrapRole: definerRole,
+            expectedMigrationRole: migrationRole,
+          }),
+        ).rejects.toThrow("RLS_DEPLOYMENT_PERSONAL_LIFECYCLE_LOCK_DEFINITION_DRIFT");
+        await expect(runOperatorScript("rls-activate.sql")).rejects.toThrow(
+          "personal lifecycle lock semantic manifest drift",
+        );
+      } finally {
+        await personalLockDefinitionDrift.client.end({ timeout: 5 });
+        await db.unsafe(personalLifecycleLockDefinition);
+        await db.unsafe(
+          `ALTER FUNCTION public.steward_lock_personal_lifecycle(uuid,text,boolean) OWNER TO ${migrationRole}`,
+        );
+        await runOperatorScript("rls-bootstrap.sql", true);
+      }
+
+      // NOINHERIT does not make role membership harmless: SET ROLE can still
+      // assume an ordinary ACL-carrier role. Reject the app's entire membership
+      // graph so indirect TRUNCATE/function/cross-database grants cannot evade
+      // the direct ACL manifests.
+      const carrierSchema = `steward_acl_carrier_${suffix}`;
+      const carrierTable = `steward_app_acl_carrier_${suffix}`;
+      await db.unsafe(`CREATE SCHEMA ${carrierSchema}`);
+      await db.unsafe(`CREATE TABLE ${carrierSchema}.${carrierTable} (id integer)`);
+      await db.unsafe(`INSERT INTO ${carrierSchema}.${carrierTable} VALUES (1)`);
+      await db.unsafe(`GRANT USAGE ON SCHEMA ${carrierSchema} TO ${hostileRole}`);
+      await db.unsafe(`GRANT TRUNCATE ON ${carrierSchema}.${carrierTable} TO ${hostileRole}`);
+      await admin.unsafe(`GRANT ${hostileRole} TO ${appRole}`);
+      const appCarrierDrift = createDb(appDatabaseUrl());
+      try {
+        await appCarrierDrift.client.unsafe(`SET ROLE ${hostileRole}`);
+        await appCarrierDrift.client.unsafe(`TRUNCATE ${carrierSchema}.${carrierTable}`);
+        await appCarrierDrift.client.unsafe("RESET ROLE");
+        const [{ count: carrierRows }] = await db.unsafe<{ count: number }[]>(
+          `SELECT count(*)::int AS count FROM ${carrierSchema}.${carrierTable}`,
+        );
+        expect(carrierRows).toBe(0);
+        await expect(
+          assertRlsDeploymentSafety(appCarrierDrift.db, {
+            expectedRole: appRole,
+            expectedPlatformRole: platformRole,
+            expectedBootstrapRole: definerRole,
+            expectedMigrationRole: migrationRole,
+          }),
+        ).rejects.toThrow("RLS_DEPLOYMENT_ROLE_UNSAFE");
+        await expect(runOperatorScript("rls-activate.sql")).rejects.toThrow(
+          "app role membership graph must be empty",
+        );
+      } finally {
+        await appCarrierDrift.client.end({ timeout: 5 });
+        await admin.unsafe(`REVOKE ${hostileRole} FROM ${appRole}`);
+        await db.unsafe(`DROP SCHEMA ${carrierSchema} CASCADE`);
+      }
+
+      // A stale TRUNCATE grant bypasses RLS. Both pre-traffic gates must reject
+      // it, and a bootstrap rerun must remove it rather than merely adding the
+      // expected DML privileges alongside it.
+      await db.unsafe(`GRANT TRUNCATE ON public.users TO ${appRole}`);
+      await db.unsafe(`GRANT UPDATE ON SEQUENCE public.audit_events_id_seq TO ${appRole}`);
+      await db.unsafe(
+        `GRANT EXECUTE ON FUNCTION public.steward_lock_tenant_deletion(text) TO ${appRole} WITH GRANT OPTION`,
+      );
+      const appRelationDrift = createDb(appDatabaseUrl());
+      try {
+        await expect(
+          assertRlsDeploymentSafety(appRelationDrift.db, {
+            expectedRole: appRole,
+            expectedPlatformRole: platformRole,
+            expectedBootstrapRole: definerRole,
+            expectedMigrationRole: migrationRole,
+          }),
+        ).rejects.toThrow("RLS_DEPLOYMENT_APP_ACL_DRIFT");
+        await expect(runOperatorScript("rls-activate.sql")).rejects.toThrow(
+          "application named ACL drift",
+        );
+      } finally {
+        await appRelationDrift.client.end({ timeout: 5 });
+      }
+      await runOperatorScript("rls-bootstrap.sql", true);
+      const [resetAppNamedAcls] = await db<
+        {
+          can_truncate: boolean;
+          can_create: boolean;
+          can_update_sequence: boolean;
+          function_grantable: boolean;
+        }[]
+      >`
+        SELECT
+          has_table_privilege(${appRole}, 'public.users', 'TRUNCATE') AS can_truncate,
+          has_schema_privilege(${appRole}, 'public', 'CREATE') AS can_create,
+          has_sequence_privilege(
+            ${appRole}, 'public.audit_events_id_seq', 'UPDATE'
+          ) AS can_update_sequence,
+          EXISTS (
+            SELECT 1 FROM pg_proc function_object
+            CROSS JOIN LATERAL aclexplode(function_object.proacl) privilege
+            JOIN pg_roles granted ON granted.oid = privilege.grantee
+            WHERE function_object.oid =
+              'public.steward_lock_tenant_deletion(text)'::regprocedure
+              AND granted.rolname = ${appRole} AND privilege.is_grantable
+          ) AS function_grantable
+      `;
+      expect(resetAppNamedAcls).toEqual({
+        can_truncate: false,
+        can_create: false,
+        can_update_sequence: false,
+        function_grantable: false,
+      });
+
+      // CREATE on a protected schema is also rejected by the role gate before
+      // the exhaustive named-ACL comparison and removed by bootstrap.
+      await db.unsafe(`GRANT CREATE ON SCHEMA public TO ${appRole}`);
+      const appSchemaCreateDrift = createDb(appDatabaseUrl());
+      try {
+        await expect(
+          assertRlsDeploymentSafety(appSchemaCreateDrift.db, {
+            expectedRole: appRole,
+            expectedPlatformRole: platformRole,
+            expectedBootstrapRole: definerRole,
+            expectedMigrationRole: migrationRole,
+          }),
+        ).rejects.toThrow("RLS_DEPLOYMENT_ROLE_UNSAFE");
+        await expect(runOperatorScript("rls-activate.sql")).rejects.toThrow(
+          "app role has assumable bypass or schema-owner authority",
+        );
+      } finally {
+        await appSchemaCreateDrift.client.end({ timeout: 5 });
+      }
+      await runOperatorScript("rls-bootstrap.sql", true);
+      const [resetAppSchemaCreate] = await db<{ can_create: boolean }[]>`
+        SELECT has_schema_privilege(${appRole}, 'public', 'CREATE') AS can_create
+      `;
+      expect(resetAppSchemaCreate.can_create).toBe(false);
+
+      await admin.unsafe(`GRANT CREATE ON DATABASE ${databaseName} TO ${appRole}`);
+      await db.unsafe(
+        `ALTER DEFAULT PRIVILEGES FOR ROLE ${migrationRole} IN SCHEMA public GRANT TRUNCATE ON TABLES TO ${appRole}`,
+      );
+      const appDatabaseDrift = createDb(appDatabaseUrl());
+      try {
+        await expect(
+          assertRlsDeploymentSafety(appDatabaseDrift.db, {
+            expectedRole: appRole,
+            expectedPlatformRole: platformRole,
+            expectedBootstrapRole: definerRole,
+            expectedMigrationRole: migrationRole,
+          }),
+        ).rejects.toThrow("RLS_DEPLOYMENT_APP_DATABASE_ACL_DRIFT");
+        await expect(runOperatorScript("rls-activate.sql")).rejects.toThrow(
+          "application database/default ACL drift",
+        );
+      } finally {
+        await appDatabaseDrift.client.end({ timeout: 5 });
+      }
+      await runOperatorScript("rls-bootstrap.sql", true);
+      const [resetAppDatabase] = await db<{ can_create: boolean; default_truncate: boolean }[]>`
+        SELECT
+          has_database_privilege(${appRole}, current_database(), 'CREATE') AS can_create,
+          EXISTS (
+            SELECT 1 FROM pg_default_acl defaults
+            CROSS JOIN LATERAL aclexplode(defaults.defaclacl) privilege
+            JOIN pg_roles granted ON granted.oid = privilege.grantee
+            WHERE granted.rolname = ${appRole} AND privilege.privilege_type = 'TRUNCATE'
+          ) AS default_truncate
+      `;
+      expect(resetAppDatabase).toEqual({ can_create: false, default_truncate: false });
+
+      await admin.unsafe(`GRANT CONNECT ON DATABASE postgres TO ${appRole}`);
+      const crossDatabaseApp = createDb(appDatabaseUrl());
+      try {
+        await expect(
+          assertRlsDeploymentSafety(crossDatabaseApp.db, {
+            expectedRole: appRole,
+            expectedPlatformRole: platformRole,
+            expectedBootstrapRole: definerRole,
+            expectedMigrationRole: migrationRole,
+          }),
+        ).rejects.toThrow("RLS_DEPLOYMENT_APP_DATABASE_ACL_DRIFT");
+        await expect(runOperatorScript("rls-activate.sql")).rejects.toThrow(
+          "application database/default ACL drift",
+        );
+      } finally {
+        await crossDatabaseApp.client.end({ timeout: 5 });
+      }
+      await runOperatorScript("rls-bootstrap.sql", true);
+      const [resetCrossDatabaseApp] = await admin<{ has_direct_grant: boolean }[]>`
+        SELECT EXISTS (
+          SELECT 1 FROM pg_database database_object
+          CROSS JOIN LATERAL aclexplode(database_object.datacl) privilege
+          JOIN pg_roles granted ON granted.oid = privilege.grantee
+          WHERE database_object.datname = 'postgres' AND granted.rolname = ${appRole}
+        ) AS has_direct_grant
+      `;
+      expect(resetCrossDatabaseApp.has_direct_grant).toBe(false);
+
+      await admin.unsafe(`GRANT CONNECT ON DATABASE postgres TO ${platformRole}`);
+      const crossDatabasePlatform = createDb(platformDatabaseUrl());
+      const appCrossDatabasePlatform = createDb(appDatabaseUrl());
+      try {
+        await expect(
+          assertPlatformDatabaseAuthority(crossDatabasePlatform.db, platformRole),
+        ).rejects.toThrow("PLATFORM_DATABASE_ACL_UNSAFE");
+        await expect(
+          assertRlsDeploymentSafety(appCrossDatabasePlatform.db, {
+            expectedRole: appRole,
+            expectedPlatformRole: platformRole,
+            expectedBootstrapRole: definerRole,
+            expectedMigrationRole: migrationRole,
+          }),
+        ).rejects.toThrow("RLS_DEPLOYMENT_PLATFORM_ACL_DRIFT");
+        await expect(runOperatorScript("rls-activate.sql")).rejects.toThrow(
+          "platform database/default ACL drift",
+        );
+      } finally {
+        await crossDatabasePlatform.client.end({ timeout: 5 });
+        await appCrossDatabasePlatform.client.end({ timeout: 5 });
+        await admin.unsafe(`REVOKE CONNECT ON DATABASE postgres FROM ${platformRole}`);
+      }
+
+      await db.unsafe(
+        `ALTER DEFAULT PRIVILEGES FOR ROLE ${migrationRole} IN SCHEMA public GRANT SELECT ON TABLES TO ${platformRole}`,
+      );
+      const platformDefaultDrift = createDb(platformDatabaseUrl());
+      try {
+        await expect(
+          assertPlatformDatabaseAuthority(platformDefaultDrift.db, platformRole),
+        ).rejects.toThrow("PLATFORM_DATABASE_ACL_UNSAFE");
+        await expect(runOperatorScript("rls-activate.sql")).rejects.toThrow(
+          "platform database/default ACL drift",
+        );
+      } finally {
+        await platformDefaultDrift.client.end({ timeout: 5 });
+      }
+      await runOperatorScript("rls-bootstrap.sql", true);
+
+      await admin.unsafe(`ALTER ROLE ${hostileRole} BYPASSRLS`);
+      await admin.unsafe(`GRANT ${hostileRole} TO ${migrationRole}`);
+      const migrationAssumptionDrift = createDb(appDatabaseUrl());
+      try {
+        await expect(
+          assertRlsDeploymentSafety(migrationAssumptionDrift.db, {
+            expectedRole: appRole,
+            expectedPlatformRole: platformRole,
+            expectedBootstrapRole: definerRole,
+            expectedMigrationRole: migrationRole,
+          }),
+        ).rejects.toThrow("RLS_DEPLOYMENT_ROLE_UNSAFE");
+        await expect(runOperatorScript("rls-activate.sql")).rejects.toThrow(
+          "migration role has assumable privileged or owner authority",
+        );
+        await expect(runOperatorScript("rls-bootstrap.sql", true)).rejects.toThrow(
+          "migration role has assumable privileged or owner authority",
+        );
+      } finally {
+        await migrationAssumptionDrift.client.end({ timeout: 5 });
+        await admin.unsafe(`REVOKE ${hostileRole} FROM ${migrationRole}`);
+        await admin.unsafe(`ALTER ROLE ${hostileRole} NOBYPASSRLS`);
+      }
+
+      await admin.unsafe(`GRANT ${definerRole} TO ${hostileRole}`);
+      const bootstrapMembershipDrift = createDb(appDatabaseUrl());
+      try {
+        await expect(
+          assertRlsDeploymentSafety(bootstrapMembershipDrift.db, {
+            expectedRole: appRole,
+            expectedPlatformRole: platformRole,
+            expectedBootstrapRole: definerRole,
+            expectedMigrationRole: migrationRole,
+          }),
+        ).rejects.toThrow("RLS_DEPLOYMENT_ROLE_UNSAFE");
+        await expect(runOperatorScript("rls-activate.sql")).rejects.toThrow(
+          "bootstrap role membership graph must be empty",
+        );
+        await expect(runOperatorScript("rls-bootstrap.sql", true)).rejects.toThrow(
+          "definer role membership graph must be empty",
+        );
+      } finally {
+        await bootstrapMembershipDrift.client.end({ timeout: 5 });
+        await admin.unsafe(`REVOKE ${definerRole} FROM ${hostileRole}`);
+      }
+
+      await db.unsafe(
+        `GRANT EXECUTE ON FUNCTION steward_bootstrap.platform_stats() TO ${hostileRole}`,
+      );
+      const namedGrantDrift = createDb(appDatabaseUrl());
+      try {
+        await expect(
+          assertRlsDeploymentSafety(namedGrantDrift.db, {
+            expectedRole: appRole,
+            expectedPlatformRole: platformRole,
+            expectedBootstrapRole: definerRole,
+            expectedMigrationRole: migrationRole,
+          }),
+        ).rejects.toThrow("RLS_DEPLOYMENT_FUNCTION_ACL_DRIFT");
+        await expect(runOperatorScript("rls-activate.sql")).rejects.toThrow(
+          "privileged function ACL manifest drift",
+        );
+      } finally {
+        await namedGrantDrift.client.end({ timeout: 5 });
+        await db.unsafe(
+          `REVOKE EXECUTE ON FUNCTION steward_bootstrap.platform_stats() FROM ${hostileRole}`,
+        );
+      }
+
+      await db.unsafe(`GRANT DELETE ON public.users TO ${platformRole}`);
+      const platformAclDrift = createDb(platformDatabaseUrl());
+      const appPlatformAclDrift = createDb(appDatabaseUrl());
+      try {
+        await expect(
+          assertPlatformDatabaseAuthority(platformAclDrift.db, platformRole),
+        ).rejects.toThrow("PLATFORM_DATABASE_ACL_UNSAFE");
+        await expect(
+          assertRlsDeploymentSafety(appPlatformAclDrift.db, {
+            expectedRole: appRole,
+            expectedPlatformRole: platformRole,
+            expectedBootstrapRole: definerRole,
+            expectedMigrationRole: migrationRole,
+          }),
+        ).rejects.toThrow("RLS_DEPLOYMENT_PLATFORM_ACL_DRIFT");
+        await expect(runOperatorScript("rls-activate.sql")).rejects.toThrow(
+          "platform authority ACL drift",
+        );
+      } finally {
+        await platformAclDrift.client.end({ timeout: 5 });
+        await appPlatformAclDrift.client.end({ timeout: 5 });
+        await db.unsafe(`REVOKE DELETE ON public.users FROM ${platformRole}`);
+      }
+
+      await admin.unsafe(`GRANT ${definerRole} TO ${migrationRole}`);
+      const migrationMembershipDrift = createDb(appDatabaseUrl());
+      try {
+        await expect(
+          assertRlsDeploymentSafety(migrationMembershipDrift.db, {
+            expectedRole: appRole,
+            expectedPlatformRole: platformRole,
+            expectedBootstrapRole: definerRole,
+            expectedMigrationRole: migrationRole,
+          }),
+        ).rejects.toThrow("RLS_DEPLOYMENT_ROLE_UNSAFE");
+        await expect(runOperatorScript("rls-activate.sql")).rejects.toThrow(
+          "migration role must not assume bootstrap role",
+        );
+      } finally {
+        await migrationMembershipDrift.client.end({ timeout: 5 });
+        await admin.unsafe(`REVOKE ${definerRole} FROM ${migrationRole}`);
+      }
+
+      await admin`ALTER DATABASE ${admin(databaseName)} OWNER TO ${admin(appRole)}`;
+      const appDatabaseOwnerDrift = createDb(appDatabaseUrl());
+      try {
+        await expect(
+          assertRlsDeploymentSafety(appDatabaseOwnerDrift.db, {
+            expectedRole: appRole,
+            expectedPlatformRole: platformRole,
+            expectedBootstrapRole: definerRole,
+            expectedMigrationRole: migrationRole,
+          }),
+        ).rejects.toThrow("RLS_DEPLOYMENT_ROLE_UNSAFE");
+        await expect(runOperatorScript("rls-activate.sql")).rejects.toThrow(
+          "app role has assumable bypass or schema-owner authority",
+        );
+      } finally {
+        await appDatabaseOwnerDrift.client.end({ timeout: 5 });
+        await admin`ALTER DATABASE ${admin(databaseName)} OWNER TO ${admin(adminRole.role_name)}`;
+        await admin`GRANT CONNECT ON DATABASE ${admin(databaseName)} TO ${admin(appRole)}`;
+      }
+
+      await db`ALTER FUNCTION steward_bootstrap.platform_stats() VOLATILE`;
+      const driftedApp = createDb(appDatabaseUrl());
+      try {
+        await expect(
+          assertRlsDeploymentSafety(driftedApp.db, {
+            expectedRole: appRole,
+            expectedPlatformRole: platformRole,
+            expectedBootstrapRole: definerRole,
+            expectedMigrationRole: migrationRole,
+          }),
+        ).rejects.toThrow("RLS_DEPLOYMENT_FUNCTION_DEFINITION_DRIFT");
+        await expect(runOperatorScript("rls-activate.sql")).rejects.toThrow(
+          "privileged function semantic manifest drift",
+        );
+      } finally {
+        await driftedApp.client.end({ timeout: 5 });
+        await db`ALTER FUNCTION steward_bootstrap.platform_stats() STABLE`;
+      }
+
+      await db.unsafe(`
+        CREATE FUNCTION public.steward_test_unknown_definer_${suffix}()
+        RETURNS integer LANGUAGE sql SECURITY DEFINER SET search_path = pg_catalog
+        AS 'SELECT 1'
+      `);
+      await db.unsafe(
+        `REVOKE ALL ON FUNCTION public.steward_test_unknown_definer_${suffix}() FROM PUBLIC`,
+      );
+      await db.unsafe(
+        `GRANT EXECUTE ON FUNCTION public.steward_test_unknown_definer_${suffix}() TO ${hostileRole}`,
+      );
+      const hostileDefinerApp = createDb(appDatabaseUrl());
+      try {
+        await expect(
+          assertRlsDeploymentSafety(hostileDefinerApp.db, {
+            expectedRole: appRole,
+            expectedPlatformRole: platformRole,
+            expectedBootstrapRole: definerRole,
+            expectedMigrationRole: migrationRole,
+          }),
+        ).rejects.toThrow("RLS_DEPLOYMENT_UNKNOWN_EXECUTABLE_SECURITY_DEFINER");
+        await expect(runOperatorScript("rls-activate.sql")).rejects.toThrow(
+          "unknown executable public SECURITY DEFINER function",
+        );
+      } finally {
+        await hostileDefinerApp.client.end({ timeout: 5 });
+        await db.unsafe(`DROP FUNCTION public.steward_test_unknown_definer_${suffix}()`);
+      }
 
       const refreshUserId = randomUUID();
       const sourceTenant = `source-${suffix}`;
@@ -276,18 +1113,20 @@ describeWithPostgres("SEC-169 operator lifecycle on the real Steward schema", ()
 
       const personalOwnerId = randomUUID();
       const personalTenant = `personal-${personalOwnerId}`;
-      await db`
-        INSERT INTO public.tenants(id, name, api_key_hash)
-        VALUES (${personalTenant}, 'Personal lifecycle owner', ${`personal-key-${suffix}`})
-      `;
-      await db`
-        INSERT INTO public.users(id, email)
-        VALUES (${personalOwnerId}::uuid, ${`personal-owner-${suffix}@example.test`})
-      `;
-      await db`
-        INSERT INTO public.user_tenants(user_id, tenant_id, role)
-        VALUES (${personalOwnerId}::uuid, ${personalTenant}, 'owner')
-      `;
+      await db.begin(async (tx) => {
+        await tx`
+          INSERT INTO public.users(id, email)
+          VALUES (${personalOwnerId}::uuid, ${`personal-owner-${suffix}@example.test`})
+        `;
+        await tx`
+          INSERT INTO public.tenants(id, name, api_key_hash)
+          VALUES (${personalTenant}, 'Personal lifecycle owner', ${`personal-key-${suffix}`})
+        `;
+        await tx`
+          INSERT INTO public.user_tenants(user_id, tenant_id, role)
+          VALUES (${personalOwnerId}::uuid, ${personalTenant}, 'owner')
+        `;
+      });
       const personalDeactivation = await db.begin(async (tx) => {
         await tx.unsafe(`SET LOCAL ROLE ${platformRole}`);
         await tx`SELECT set_config('steward.tenant_id', 'platform', true)`;
@@ -308,25 +1147,32 @@ describeWithPostgres("SEC-169 operator lifecycle on the real Steward schema", ()
         const malformedExtraId = randomUUID();
         const malformedTenant = `personal-${malformedOwnerId}`;
         await db`
-          INSERT INTO public.tenants(id, name, api_key_hash)
-          VALUES (
-            ${malformedTenant},
-            ${`Malformed personal ${extraRole}`},
-            ${`malformed-personal-${extraRole}-${suffix}`}
-          )
-        `;
-        await db`
           INSERT INTO public.users(id, email)
           VALUES
             (${malformedOwnerId}::uuid, ${`malformed-${extraRole}-owner-${suffix}@example.test`}),
             (${malformedExtraId}::uuid, ${`malformed-${extraRole}-extra-${suffix}@example.test`})
         `;
-        await db`
-          INSERT INTO public.user_tenants(user_id, tenant_id, role)
-          VALUES
-            (${malformedOwnerId}::uuid, ${malformedTenant}, 'owner'),
-            (${malformedExtraId}::uuid, ${malformedTenant}, ${extraRole})
-        `;
+        await db`ALTER TABLE public.tenants DISABLE TRIGGER tenants_reserved_commit_state_guard`;
+        await db`ALTER TABLE public.user_tenants DISABLE TRIGGER user_tenants_personal_authority_guard`;
+        try {
+          await db`
+            INSERT INTO public.tenants(id, name, api_key_hash)
+            VALUES (
+              ${malformedTenant},
+              ${`Malformed personal ${extraRole}`},
+              ${`malformed-personal-${extraRole}-${suffix}`}
+            )
+          `;
+          await db`
+            INSERT INTO public.user_tenants(user_id, tenant_id, role)
+            VALUES
+              (${malformedOwnerId}::uuid, ${malformedTenant}, 'owner'),
+              (${malformedExtraId}::uuid, ${malformedTenant}, ${extraRole})
+          `;
+        } finally {
+          await db`ALTER TABLE public.user_tenants ENABLE TRIGGER user_tenants_personal_authority_guard`;
+          await db`ALTER TABLE public.tenants ENABLE TRIGGER tenants_reserved_commit_state_guard`;
+        }
         await db`
           INSERT INTO public.refresh_tokens(id, user_id, tenant_id, token_hash, expires_at)
           VALUES (
@@ -385,6 +1231,7 @@ describeWithPostgres("SEC-169 operator lifecycle on the real Steward schema", ()
           DATABASE_DRIVER: "postgres-js",
           STEWARD_PLATFORM_DATABASE_URL: platformDatabaseUrl(),
           STEWARD_PLATFORM_DATABASE_ROLE: platformRole,
+          STEWARD_BOOTSTRAP_DATABASE_ROLE: definerRole,
           NODE_ENV: "test",
           APP_URL: "https://steward.test",
           JWT_SECRET: `rls-jwt-secret-${suffix}-0123456789abcdef`,
@@ -417,6 +1264,33 @@ describeWithPostgres("SEC-169 operator lifecycle on the real Steward schema", ()
         "user.deactivate.authorized",
       ]);
 
+      const workerDeadlineEvidence = await runCommand(
+        [
+          "bun",
+          "run",
+          "packages/api/src/__tests__/fixtures/worker-credential-deadline-postgres.ts",
+        ],
+        {
+          DATABASE_URL: appDatabaseUrl(),
+          DATABASE_DRIVER: "postgres-js",
+          NODE_ENV: "test",
+          STEWARD_AUDIT_HMAC_KEY: "ab".repeat(32),
+          STEWARD_MASTER_PASSWORD: `rls-master-password-${suffix}`,
+          STEWARD_RLS_TEST_TENANT: targetTenant,
+          STEWARD_RLS_TEST_USER_ID: refreshUserId,
+        },
+      );
+      const workerDeadlineLine = workerDeadlineEvidence
+        .trim()
+        .split("\n")
+        .findLast((line) => line.startsWith('{"ok":true'));
+      expect(workerDeadlineLine).toBeDefined();
+      expect(JSON.parse(workerDeadlineLine as string)).toMatchObject({
+        ok: true,
+        tenantId: targetTenant,
+        closed: true,
+      });
+
       await runOperatorScript("rls-rollback.sql");
       const [rolledBack] = await db<{ enabled: number; forced: number }[]>`
         SELECT
@@ -431,10 +1305,19 @@ describeWithPostgres("SEC-169 operator lifecycle on the real Steward schema", ()
       expect(rolledBack).toEqual({ enabled: 0, forced: 0 });
 
       await runOperatorScript("rls-activate.sql");
-      const rerun = await runCommand(["bun", "run", "packages/db/src/migrate.ts"], {
-        DATABASE_URL: databaseUrl(databaseName),
-      });
-      expect(rerun).toContain("Already up to date");
+      const rerun = await runCommand(
+        ["bun", "run", "packages/api/scripts/migrate-production.ts", "plugins"],
+        {
+          DATABASE_URL: migrationDatabaseUrl(),
+          MIGRATION_DATABASE_URL: migrationDatabaseUrl(),
+          STEWARD_PLUGINS: "capabilities",
+          STEWARD_MASTER_PASSWORD: "test-restricted-migrator-master-password",
+          STEWARD_AUDIT_HMAC_KEY:
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+          STEWARD_KDF_SALT: "0123456789abcdef0123456789abcdef",
+        },
+      );
+      expect(rerun).toContain('"pluginName":"capabilities"');
     } finally {
       await db.end();
     }

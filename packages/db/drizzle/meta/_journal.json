@@ -673,6 +673,13 @@
       "when": 1787306400000,
       "tag": "0118_generic_intent_execution_delete_fence",
       "breakpoints": true
+    },
+    {
+      "idx": 119,
+      "version": "7",
+      "when": 1787306401000,
+      "tag": "0119_personal_lifecycle_invariants",
+      "breakpoints": true
     }
   ]
 }

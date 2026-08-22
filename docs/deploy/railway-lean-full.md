@@ -20,7 +20,7 @@ plugins to register. source of truth: `packages/api/src/plugin-config.ts`
 | mode | env | what boots |
 |------|-----|------------|
 | **lean** | `STEWARD_PLUGINS` unset / empty | core only. trading routes NOT mounted, trading module never evaluated, trading migrations NOT run |
-| **full** | `STEWARD_PLUGINS=trading` | core + trading. trading routes mounted, trading migrations run on boot |
+| **full** | `STEWARD_PLUGINS=trading` | core + trading. trading routes mount only after the out-of-band migration command has applied the trading schema |
 
 legacy compatibility: `STEWARD_ENABLE_TRADING=true` ALSO enables trading (it
 unions `trading` into the set). prefer `STEWARD_PLUGINS=trading` for new config;
@@ -71,7 +71,8 @@ service where noted, e.g. each service its own DB).
 | `STEWARD_BIND_HOST=0.0.0.0` | required on Railway | default is `127.0.0.1` (loopback only) — Railway's proxy can't reach the container unless it binds `0.0.0.0` | `packages/api/src/index.ts` (`STEWARD_BIND_HOST`) |
 | `STEWARD_TRUSTED_PROXY_HOPS=2` | required on Railway | per-client auth rate limiting: number of trusted proxies APPENDING to `x-forwarded-for` (the entry that many hops from the RIGHT is the client IP). Bare Railway = **2**: `x-forwarded-for` arrives as `<client>, <railway-edge>` and the right-most edge entry rotates between Railway nodes, so `hops=1` scatters a client across buckets while `hops=2` locks onto the stable client entry (verified against prod). Until it is set, auth rate limits fall back to coarse per-host buckets, which are weaker on a directly-exposed (non-Host-locked) service. Never set higher than the real hop count — that re-opens IP spoofing | `packages/api/src/routes/auth.ts` (`trustedClientIp`) |
 | `REDIS_URL` | **[required for production global rate limiting]** | shared global request budgets across Railway replicas and restarts. absent/down fails closed unless a guaranteed single-replica Bun service sets `STEWARD_ACKNOWLEDGE_SINGLE_INSTANCE_GLOBAL_RATE_LIMIT=true`; never acknowledge on a scaled service | `packages/api/src/middleware/global-rate-limit.ts`, `packages/redis` |
-| `DATABASE_URL` | **[boot-fatal in prod]** | Postgres connection. boot runs `runMigrations()` blocking before serving; a bad/missing URL fails migration → `process.exit(1)` | `packages/api/src/index.ts`, `packages/db` (`shouldUsePGLite`) |
+| `DATABASE_URL` | **[boot-fatal in prod]** | restricted app-role Postgres connection. Startup validates the live role and exact activated policy catalog; it never migrates production | `packages/api/src/index.ts`, `packages/db/src/rls-readiness.ts` |
+| `SKIP_MIGRATIONS=1` | **[boot-fatal in prod]** | explicit acknowledgement that core/plugin migrations, role bootstrap, and activation ran out of band | `packages/api/src/index.ts` |
 | `STEWARD_JWT_SECRET` | **[boot-fatal in prod]** | canonical JWT signing secret. `validateJwtSecretEnv()` runs at module load in `index.ts`; in prod it THROWS if unset or `< 32` chars | `packages/auth/src/jwt.ts` (`getJwtSecret`), called from `packages/api/src/index.ts` |
 | `STEWARD_MASTER_PASSWORD` | **[boot-fatal / ready-gate]** | derives per-agent vault encryption keys. `/ready` reports `vault: not ok` if unset; vault key derivation throws when used | `packages/api/src/index.ts` (`/ready`), `packages/vault/src/keystore.ts` |
 | `STEWARD_KDF_SALT` | **[boot-fatal in prod]** | per-deploy KDF salt for vault key derivation. `keystore.ts` THROWS in production if unset (and requires ≥ 32 hex chars) | `packages/vault/src/keystore.ts` |
@@ -95,7 +96,7 @@ recommended-but-optional (mode-independent), set if the feature is used:
 | `STEWARD_OAUTH_ALLOWED_REDIRECTS` | OAuth redirect allowlist | `packages/api/src` |
 
 leave UNSET in any shared/prod env (dangerous if set): `STEWARD_ALLOW_DEV_SECRETS`,
-`STEWARD_ENABLE_PROD_TEST_ACCOUNT_TOKEN`, `SKIP_MIGRATIONS`, and the
+`STEWARD_ENABLE_PROD_TEST_ACCOUNT_TOKEN`, and the
 `STEWARD_ALLOW_*_EXPORT` / `STEWARD_ALLOW_UNSAFE_*` family — these are dev/break-glass
 escape hatches (`.env.example`, `packages/api/src`, `packages/vault/src`).
 
@@ -211,6 +212,13 @@ openssl rand -hex 32   # STEWARD_MASTER_PASSWORD (long random)
 
 ### B. ship the image
 
+Before either runtime deploy, run the exact admin-through-0112 → bootstrap →
+restricted-0113 → privileged-wrapper → restricted-0114+ → plugin → final
+bootstrap/wrapper → activation sequence in
+`docs/security/database-rls-rollout.mdx`.
+Never place either operator URL in the Railway service; it receives only the
+restricted `DATABASE_URL` and `SKIP_MIGRATIONS=1`.
+
 staging (auto): merge to `develop`. `Docker` builds+pushes
 `:develop`, then `Deploy Staging` deploys it to the staging service(s).
 
@@ -260,10 +268,10 @@ drift — trading routes and trading migrations are always both-on or both-off.
 practical consequences when you flip a service:
 
 - **lean → full** (`STEWARD_PLUGINS` unset → `trading`): on the next boot the
-  trading plugin's migrations run (into per-plugin namespaced tables
+  operator runs the trading plugin's migrations (into per-plugin namespaced tables
   `drizzle.__drizzle_migrations_plugin_<id>`, isolated from the core's
-  `drizzle.__drizzle_migrations` journal), AFTER the core migrator, then trading
-  routes mount. expect a slightly longer first boot while migrations apply.
+  `drizzle.__drizzle_migrations` journal), AFTER the core migrator and before
+  changing the runtime mode; then trading routes mount on the next deploy.
 - **full → lean** (`trading` → unset): trading routes stop mounting immediately.
   the trading TABLES are LEFT IN PLACE — this is harmless: they live in an
   isolated namespaced journal, nothing references them in lean mode, and they are
@@ -297,11 +305,10 @@ three independent levers, fastest first:
 after any rollback: re-run the smoke script and `curl /ready` on the affected
 service before declaring it healthy.
 
-migration note: a `lean → full` flip that fails DURING trading migrations
-fail-closes (`process.exit(1)` in `index.ts`) — the container won't serve
-traffic half-migrated. rolling that service back to lean (lever 1) restores
-service immediately; the partially-applied trading migration ledger is namespaced
-and isolated, so it does not corrupt the core schema.
+migration note: a failed `migrate:production:plugins` command exits nonzero
+before the runtime mode is changed. Keep the service lean until that command and
+activation succeed. The plugin ledger is namespaced and idempotent, so the
+operator can repair the migration and rerun it without corrupting core state.
 
 ---
 

@@ -503,7 +503,7 @@ afterAll(async () => {
 });
 
 describe("agent deletion upstream credential boundary", () => {
-  it("keeps the tenant intact when precommit external revocation fails", async () => {
+  it("commits deletion with durable retry evidence when postcommit revocation fails", async () => {
     const tenantId = `revocation-failure-${crypto.randomUUID()}`;
     const agentId = `revocation-failure-agent-${crypto.randomUUID()}`;
     await getDb()
@@ -525,14 +525,25 @@ describe("agent deletion upstream credential boundary", () => {
     };
     try {
       const response = await platformTenantDelete(tenantId);
-      expect(response.status).toBeGreaterThanOrEqual(500);
-      expect(await getDb().select().from(tenants).where(eq(tenants.id, tenantId))).toHaveLength(1);
-      expect(await getDb().select().from(agents).where(eq(agents.id, agentId))).toHaveLength(1);
+      expect(response.status).toBe(200);
+      expect(await getDb().select().from(tenants).where(eq(tenants.id, tenantId))).toHaveLength(0);
+      expect(await getDb().select().from(agents).where(eq(agents.id, agentId))).toHaveLength(0);
       expect(
         await getDb()
           .select()
           .from(auditEvents)
           .where(and(eq(auditEvents.tenantId, tenantId), eq(auditEvents.action, "tenant.delete"))),
+      ).toHaveLength(1);
+      expect(
+        await getDb()
+          .select()
+          .from(auditEvents)
+          .where(
+            and(
+              eq(auditEvents.tenantId, tenantId),
+              eq(auditEvents.action, "tenant.delete.token_revocation_completed"),
+            ),
+          ),
       ).toHaveLength(0);
     } finally {
       revocationStore.revokeAgentTokens = originalRevokeAgentTokens;
@@ -833,7 +844,7 @@ describe("agent deletion upstream credential boundary", () => {
       .where(eq(auditEvents.tenantId, tenantId));
     expect(deletionEvents).toContainEqual({
       action: "tenant.delete",
-      metadata: {
+      metadata: expect.objectContaining({
         agentTokenRevocationTargets: 2,
         userTokenRevocationTargets: 0,
         capabilityCleanup: {
@@ -843,16 +854,82 @@ describe("agent deletion upstream credential boundary", () => {
           rateLimitBucketsRemoved: 2,
           invocationEvidenceRetained: 1,
         },
-      },
+      }),
     });
     expect(deletionEvents).toContainEqual({
       action: "tenant.delete.token_revocation_completed",
-      metadata: {
-        agentRevocationCutoffsEstablished: 2,
-        userRevocationCutoffsEstablished: 0,
-      },
+      metadata: expect.objectContaining({
+        agentTokenRevocationTargets: 2,
+        userTokenRevocationTargets: 0,
+        failures: 0,
+      }),
     });
     await getDb().delete(capabilityInvocations).where(eq(capabilityInvocations.id, invocationId));
+  });
+
+  it("retries an ordinary deleted-tenant revocation job after a shared-store outage", async () => {
+    const tenantId = `tenant-revocation-outbox-${crypto.randomUUID()}`;
+    const agentId = `agent-revocation-outbox-${crypto.randomUUID()}`;
+    await getDb()
+      .insert(tenants)
+      .values({
+        id: tenantId,
+        name: "Revocation outbox",
+        apiKeyHash: crypto.randomUUID().replaceAll("-", ""),
+      });
+    await getDb().insert(agents).values({
+      id: agentId,
+      tenantId,
+      name: agentId,
+      walletAddress: "0x1234567890123456789012345678901234567890",
+    });
+
+    const originalRevoke = revocationStore.revokeAgentTokens;
+    let failOnce = true;
+    revocationStore.revokeAgentTokens = async (...args) => {
+      if (failOnce) {
+        failOnce = false;
+        throw new Error("injected shared revocation outage");
+      }
+      return originalRevoke.call(revocationStore, ...args);
+    };
+    try {
+      expect((await platformTenantDelete(tenantId)).status).toBe(200);
+    } finally {
+      revocationStore.revokeAgentTokens = originalRevoke;
+    }
+
+    expect(await getDb().select().from(tenants).where(eq(tenants.id, tenantId))).toHaveLength(0);
+    const { internalJobTenantIdsOnDb, runInternalJobForTenant } = await import(
+      "../services/tenant-job"
+    );
+    expect(await internalJobTenantIdsOnDb(getDb())).toContain(tenantId);
+    const { runTenantDeletionRevocationSweepForTenant } = await import(
+      "../services/tenant-deletion-revocation-scheduler"
+    );
+    await Promise.all([
+      runInternalJobForTenant(tenantId, "tenant-deletion-revocation-test-a", () =>
+        runTenantDeletionRevocationSweepForTenant(tenantId),
+      ),
+      runInternalJobForTenant(tenantId, "tenant-deletion-revocation-test-b", () =>
+        runTenantDeletionRevocationSweepForTenant(tenantId),
+      ),
+    ]);
+
+    const completed = await getDb()
+      .select({ action: auditEvents.action, metadata: auditEvents.metadata })
+      .from(auditEvents)
+      .where(
+        and(
+          eq(auditEvents.tenantId, tenantId),
+          eq(auditEvents.action, "tenant.delete.token_revocation_completed"),
+        ),
+      );
+    expect(completed).toHaveLength(1);
+    expect(completed[0]?.metadata).toEqual(
+      expect.objectContaining({ agentTokenRevocationTargets: 1, failures: 0 }),
+    );
+    expect(await internalJobTenantIdsOnDb(getDb())).not.toContain(tenantId);
   });
 
   it("refuses both routed and direct deletion while signed execution is unresolved", async () => {

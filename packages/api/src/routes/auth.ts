@@ -125,6 +125,7 @@ import {
   tenants,
   users,
   userTenants,
+  withTenantAuditedTransactionOnDb,
   withTenantRlsTransaction,
   withTenantTransactionDatabase,
 } from "@stwd/db";
@@ -159,6 +160,7 @@ import {
   isAllowedOidcClientSecretEnvForTenant,
   normalizeOidcProviders,
 } from "../services/oidc-provider-config";
+import { withPlatformAuthorityDatabase } from "../services/platform-authority-database";
 import { socketPeerFromEnv } from "../services/runtime-gate";
 import { buildSamlServiceProviderUrls } from "../services/saml-sso-config";
 import { lockUserSession } from "../services/session-lock";
@@ -2661,10 +2663,16 @@ async function ensurePersonalTenant(userId: string, displayName: string): Promis
   const tenantId = `personal-${userId}`;
   return withVerifiedAuthTenant(tenantId, userId, async () => {
     const { hash } = generateApiKey();
-    await getDb()
-      .insert(tenants)
-      .values({ id: tenantId, name: displayName, apiKeyHash: hash })
-      .onConflictDoNothing();
+    await getDb().transaction(async (tx) => {
+      await tx
+        .insert(tenants)
+        .values({ id: tenantId, name: displayName, apiKeyHash: hash })
+        .onConflictDoNothing();
+      await tx
+        .insert(userTenants)
+        .values({ userId, tenantId, role: "owner" })
+        .onConflictDoNothing();
+    });
     return tenantId;
   });
 }
@@ -2680,6 +2688,15 @@ async function ensureUserTenantLink(
   role: string = "member",
 ): Promise<void> {
   await withVerifiedAuthTenant(tenantId, userId, async () => {
+    if (tenantId === "default") {
+      if (role !== "member" && role !== GUEST_TENANT_ROLE) {
+        throw new Error("Default tenant membership role is not permitted");
+      }
+      await getDb().execute(
+        sql`SELECT steward_bootstrap.ensure_default_membership(${userId}::uuid, ${role})`,
+      );
+      return;
+    }
     await getDb().insert(userTenants).values({ userId, tenantId, role }).onConflictDoNothing();
   });
 }
@@ -9399,6 +9416,12 @@ auth.post("/guest", async (c) => {
   // session cannot satisfy requireTenantLevel(). onConflictDoNothing keeps this
   // idempotent against a racing insert on the (userId, tenantId) unique index.
   await withVerifiedAuthTenant(tenantId, guest.id, async () => {
+    if (tenantId === "default") {
+      await getDb().execute(
+        sql`SELECT steward_bootstrap.ensure_default_membership(${guest.id}::uuid, ${GUEST_TENANT_ROLE})`,
+      );
+      return;
+    }
     await getDb()
       .insert(userTenants)
       .values({ userId: guest.id, tenantId, role: GUEST_TENANT_ROLE })
@@ -9482,24 +9505,35 @@ auth.delete("/guest", async (c) => {
     requestId: c.get("requestId") ?? null,
   });
 
-  await db.transaction(async (tx) => {
-    await tx.update(users).set({ deactivatedAt: new Date() }).where(eq(users.id, userId));
-    await tx.delete(refreshTokens).where(eq(refreshTokens.userId, userId));
-  });
-  await revocationStore.revokeUserTokens(userId);
-
-  await writeAuditEvent({
-    tenantId,
-    actorType: "user",
-    actorId: userId,
-    action: "auth.guest.deleted",
-    resourceType: "user",
-    resourceId: userId,
-    metadata: { method: "guest", wasAlreadyDeactivated: user.deactivatedAt !== null },
-    ipAddress: c.req.header("x-forwarded-for") ?? null,
-    userAgent: c.req.header("user-agent") ?? null,
-    requestId: c.get("requestId") ?? null,
-  });
+  const issuedBefore = await withPlatformAuthorityDatabase((platformDb) =>
+    withTenantAuditedTransactionOnDb(platformDb, tenantId, async (txRaw, appendRequiredAudit) => {
+      const tx = txRaw as typeof platformDb;
+      await tx.execute(sql`SELECT set_config('steward.tenant_id', 'platform', true)`);
+      const [updated] = bootstrapRows<{ tokens_revoked_before: number }>(
+        await tx.execute(sql`
+        SELECT * FROM steward_bootstrap.platform_set_user_deactivation(${userId}::uuid, true)
+      `),
+      );
+      if (!updated) throw new Error("User not found");
+      await appendRequiredAudit({
+        tenantId,
+        actorType: "user",
+        actorId: userId,
+        action: "auth.guest.deleted",
+        resourceType: "user",
+        resourceId: userId,
+        metadata: { method: "guest", wasAlreadyDeactivated: user.deactivatedAt !== null },
+        ipAddress: c.req.header("x-forwarded-for") ?? null,
+        userAgent: c.req.header("user-agent") ?? null,
+        requestId: c.get("requestId") ?? null,
+      });
+      return Number(updated.tokens_revoked_before);
+    }),
+  );
+  // The durable database boundary is authoritative. A guest cannot use the
+  // now-revoked token to retry this request, so cache refresh is deliberately
+  // best-effort after commit rather than an unreachable 503 contract.
+  await revocationStore.revokeUserTokens(userId, issuedBefore).catch(() => undefined);
 
   return c.json({
     ok: true,
