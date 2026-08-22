@@ -32,7 +32,7 @@ describe("user membership hardening", () => {
       userSource.indexOf('user.delete("/me/tenants/:tenantId/leave"', joinStart),
     );
     expect(joinRoute).toContain("withTenantAuditedTransaction(");
-    expect(joinRoute).toContain("lockedConfig?.joinMode !== \"open\"");
+    expect(joinRoute).toContain('lockedConfig?.joinMode !== "open"');
     expect(joinRoute.indexOf('action: "tenant.member.join"')).toBeGreaterThan(
       joinRoute.lastIndexOf(".insert(userTenants)"),
     );

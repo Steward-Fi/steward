@@ -389,9 +389,7 @@ describe("platform security hardening", () => {
   });
 
   it("serializes join-mode authorization with self-service membership creation", () => {
-    const joinModeStart = platformSource.indexOf(
-      'platform.patch("/tenants/:tenantId/join-mode"',
-    );
+    const joinModeStart = platformSource.indexOf('platform.patch("/tenants/:tenantId/join-mode"');
     const joinModeRoute = platformSource.slice(
       joinModeStart,
       platformSource.indexOf("\nplatform.", joinModeStart + 1),

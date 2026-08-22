@@ -4846,12 +4846,7 @@ platform.post("/tenants/:id/invitations", async (c) => {
         const [lockedInviterMembership] = await tx
           .select({ userId: userTenants.userId })
           .from(userTenants)
-          .where(
-            and(
-              eq(userTenants.tenantId, tenantId),
-              eq(userTenants.userId, invitedByUserId),
-            ),
-          )
+          .where(and(eq(userTenants.tenantId, tenantId), eq(userTenants.userId, invitedByUserId)))
           .limit(1);
         if (!lockedInviterMembership) {
           return null;

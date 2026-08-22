@@ -173,10 +173,7 @@ realPostgresDescribe("tenant membership audit atomicity with real PostgreSQL", (
       .select({ id: auditEvents.id })
       .from(auditEvents)
       .where(
-        and(
-          eq(auditEvents.tenantId, tenantId),
-          eq(auditEvents.action, "tenant.invitation.create"),
-        ),
+        and(eq(auditEvents.tenantId, tenantId), eq(auditEvents.action, "tenant.invitation.create")),
       );
     expect(completions).toHaveLength(2);
   });
