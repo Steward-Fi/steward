@@ -7,6 +7,7 @@ import {
   closeDb,
   digitalAssetAccountAggregations,
   digitalAssetAccounts,
+  digitalAssetAccountWalletLifecycles,
   digitalAssetAccountWallets,
   getDb,
   policies,
@@ -1126,5 +1127,40 @@ describe("digital asset account resources", () => {
       .from(agents)
       .where(and(eq(agents.tenantId, TENANT_ID), eq(agents.id, "acct_cleanup_orphan_candidate")));
     expect(orphaned).toHaveLength(0);
+    const [lifecycle] = await getDb()
+      .select({ state: digitalAssetAccountWalletLifecycles.state })
+      .from(digitalAssetAccountWalletLifecycles)
+      .where(
+        and(
+          eq(digitalAssetAccountWalletLifecycles.tenantId, TENANT_ID),
+          eq(digitalAssetAccountWalletLifecycles.walletAgentId, "acct_cleanup_orphan_candidate"),
+        ),
+      );
+    expect(lifecycle?.state).toBe("retired");
+  });
+
+  it("never retires a pre-existing authority when configured provisioning loses the id race", async () => {
+    const existingId = "acct_existing_authority_race";
+    await getDb().insert(agents).values({
+      id: existingId,
+      tenantId: TENANT_ID,
+      name: "Pre-existing authority",
+      walletAddress: "0x9999999999999999999999999999999999999999",
+      platformId: "unrelated-owner",
+    });
+    const response = await app.request("/accounts", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        id: "acct_existing_authority_target",
+        wallets_configuration: [{ chain_type: "ethereum", wallet_id: existingId }],
+      }),
+    });
+    expect(response.status).toBe(400);
+    const [preserved] = await getDb()
+      .select({ platformId: agents.platformId })
+      .from(agents)
+      .where(and(eq(agents.tenantId, TENANT_ID), eq(agents.id, existingId)));
+    expect(preserved?.platformId).toBe("unrelated-owner");
   });
 });
