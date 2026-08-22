@@ -32,9 +32,10 @@ export type RedisDriver = "ioredis" | "upstash";
 
 let instance: IoredisLike | null = null;
 let shutdownRegistered = false;
+let runtimeClientResolver: (() => IoredisLike | null) | null = null;
 
 /**
- * Refuse to start in production if REDIS_URL is not using TLS (rediss://).
+ * Refuse cleartext remote Redis outside explicit local development/test.
  * Redis carries spend-limit state, rate-limit state, policy cache, and auth KV
  * (SIWE nonces), so a cleartext link lets a network-positioned attacker read
  * and tamper with enforcement data. Localhost connections are exempt. Set
@@ -43,20 +44,12 @@ let shutdownRegistered = false;
  * posture in @stwd/db.
  */
 export function assertRedisUrlTls(url: string, env: NodeJS.ProcessEnv = process.env): void {
-  if (env.NODE_ENV !== "production") return;
-
   const allowInsecure = env.STEWARD_ALLOW_INSECURE_REDIS === "true";
   let parsed: URL;
   try {
     parsed = new URL(url);
   } catch {
-    if (allowInsecure) {
-      console.warn(
-        "[steward:redis] WARNING: STEWARD_ALLOW_INSECURE_REDIS=true — REDIS_URL is not a valid URL, so TLS cannot be verified.",
-      );
-      return;
-    }
-    throw new Error("REDIS_URL must be a valid URL so TLS settings can be verified in production");
+    throw new Error("REDIS_URL must be a valid URL so TLS settings can be verified");
   }
 
   if (parsed.protocol === "rediss:") return;
@@ -68,6 +61,11 @@ export function assertRedisUrlTls(url: string, env: NodeJS.ProcessEnv = process.
   // URL.hostname keeps the brackets on IPv6 literals ([::1]).
   if (host === "localhost" || host === "127.0.0.1" || host === "::1" || host === "[::1]") return;
 
+  const explicitLocalPosture =
+    env.STEWARD_RUNTIME !== "workers" &&
+    (env.NODE_ENV === "development" || env.NODE_ENV === "test");
+  if (explicitLocalPosture) return;
+
   if (allowInsecure) {
     console.warn(
       "[steward:redis] WARNING: STEWARD_ALLOW_INSECURE_REDIS=true — REDIS_URL is cleartext redis://. " +
@@ -77,7 +75,7 @@ export function assertRedisUrlTls(url: string, env: NodeJS.ProcessEnv = process.
   }
 
   throw new Error(
-    "REDIS_URL must use rediss:// (TLS) in production. " +
+    "REDIS_URL must use rediss:// (TLS) outside explicit local development/test. " +
       "Set STEWARD_ALLOW_INSECURE_REDIS=true to override for private-network deployments.",
   );
 }
@@ -86,7 +84,7 @@ export function assertRedisUrlTls(url: string, env: NodeJS.ProcessEnv = process.
  * SEC-032, upstash path: the Upstash REST token authenticates every request,
  * so a cleartext http:// endpoint exposes it (and lets a network-positioned
  * attacker read/tamper with spend-limit, rate-limit, and auth KV state) even
- * though the ioredis path is TLS-asserted. In production require https://
+ * though the ioredis path is TLS-asserted. Outside local dev/test require https://
  * unless the endpoint is loopback; STEWARD_ALLOW_INSECURE_REDIS=true overrides
  * (loud warning), matching assertRedisUrlTls.
  */
@@ -96,9 +94,7 @@ export function assertUpstashRestUrlTls(url: string, env: NodeJS.ProcessEnv = pr
   try {
     parsed = new URL(url);
   } catch {
-    throw new Error(
-      "KV_REST_API_URL must be a valid URL so TLS settings can be verified in production",
-    );
+    throw new Error("KV_REST_API_URL must be a valid URL so TLS settings can be verified");
   }
 
   if (parsed.protocol !== "http:") {
@@ -108,10 +104,14 @@ export function assertUpstashRestUrlTls(url: string, env: NodeJS.ProcessEnv = pr
     return;
   }
 
-  if (env.NODE_ENV !== "production") return;
   const host = parsed.hostname.toLowerCase();
   // URL.hostname keeps the brackets on IPv6 literals ([::1]).
   if (host === "localhost" || host === "127.0.0.1" || host === "::1" || host === "[::1]") return;
+
+  const explicitLocalPosture =
+    env.STEWARD_RUNTIME !== "workers" &&
+    (env.NODE_ENV === "development" || env.NODE_ENV === "test");
+  if (explicitLocalPosture) return;
 
   if (allowInsecure) {
     console.warn(
@@ -123,7 +123,7 @@ export function assertUpstashRestUrlTls(url: string, env: NodeJS.ProcessEnv = pr
   }
 
   throw new Error(
-    "KV_REST_API_URL must use https:// in production — the Upstash REST token would otherwise cross the network in cleartext. " +
+    "KV_REST_API_URL must use https:// outside explicit local development/test — the Upstash REST token would otherwise cross the network in cleartext. " +
       "Set STEWARD_ALLOW_INSECURE_REDIS=true to override for private-network deployments.",
   );
 }
@@ -134,9 +134,11 @@ export function getRedisDriver(): RedisDriver {
   return "ioredis";
 }
 
-function buildIoredis(): Redis {
-  const url = process.env.REDIS_URL || "redis://localhost:6379";
-  assertRedisUrlTls(url);
+export type RedisClientEnvironment = Readonly<Record<string, string | undefined>>;
+
+function buildIoredis(env: RedisClientEnvironment = process.env): Redis {
+  const url = env.REDIS_URL || "redis://localhost:6379";
+  assertRedisUrlTls(url, { ...process.env, ...env });
   const client = new Redis(url, {
     maxRetriesPerRequest: 3,
     retryStrategy(times: number) {
@@ -175,9 +177,9 @@ function buildIoredis(): Redis {
   return client;
 }
 
-function buildUpstash(): IoredisLike {
-  const url = process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL || "";
-  const token = process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN || "";
+function buildUpstash(env: RedisClientEnvironment = process.env): IoredisLike {
+  const url = env.KV_REST_API_URL || env.UPSTASH_REDIS_REST_URL || "";
+  const token = env.KV_REST_API_TOKEN || env.UPSTASH_REDIS_REST_TOKEN || "";
 
   if (!url || !token) {
     throw new Error(
@@ -188,7 +190,7 @@ function buildUpstash(): IoredisLike {
 
   // SEC-032: same TLS posture as the ioredis path — the REST token rides every
   // request, so a cleartext http:// endpoint in production is fail-closed.
-  assertUpstashRestUrlTls(url);
+  assertUpstashRestUrlTls(url, { ...process.env, ...env });
 
   const upstash = new UpstashRedis({ url, token });
   console.log("[steward:redis] using upstash REST adapter");
@@ -200,11 +202,40 @@ function buildUpstash(): IoredisLike {
  * Creates the connection on first call.
  */
 export function getRedis(): IoredisLike {
+  if (runtimeClientResolver) {
+    const scopedClient = runtimeClientResolver();
+    if (!scopedClient) {
+      throw new Error("Request-bound Redis client is unavailable");
+    }
+    return scopedClient;
+  }
   if (!instance) {
     const driver = getRedisDriver();
     instance = driver === "upstash" ? buildUpstash() : (buildIoredis() as unknown as IoredisLike);
   }
   return instance;
+}
+
+/**
+ * Bind package-level Redis helpers to the host runtime's current request
+ * authority. The API installs this once so legacy helpers cannot fall back to
+ * a stale process singleton when Worker bindings rotate or disappear.
+ */
+export function setRedisClientResolverForRuntime(
+  resolver: (() => IoredisLike | null) | null,
+): void {
+  runtimeClientResolver = resolver;
+}
+
+/**
+ * Construct an environment-bound client without consulting or replacing the
+ * process singleton. Worker requests use this so one binding generation can
+ * never inherit another generation's URL, token, or connection state.
+ */
+export function createRedisClient(env: RedisClientEnvironment): IoredisLike {
+  const rawDriver = env.REDIS_DRIVER?.trim().toLowerCase();
+  const driver: RedisDriver = rawDriver === "upstash" ? "upstash" : "ioredis";
+  return driver === "upstash" ? buildUpstash(env) : (buildIoredis(env) as unknown as IoredisLike);
 }
 
 /**

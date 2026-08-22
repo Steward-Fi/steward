@@ -6,19 +6,50 @@
  */
 
 import { afterEach, describe, expect, test } from "bun:test";
-import { assertRedisUrlTls, assertUpstashRestUrlTls } from "../client";
+import {
+  assertRedisUrlTls,
+  assertUpstashRestUrlTls,
+  getRedis,
+  setRedisClientResolverForRuntime,
+} from "../client";
 
 const originalNodeEnv = process.env.NODE_ENV;
 const originalOverride = process.env.STEWARD_ALLOW_INSECURE_REDIS;
 
 afterEach(() => {
+  setRedisClientResolverForRuntime(null);
   if (originalNodeEnv === undefined) delete process.env.NODE_ENV;
   else process.env.NODE_ENV = originalNodeEnv;
   if (originalOverride === undefined) delete process.env.STEWARD_ALLOW_INSECURE_REDIS;
   else process.env.STEWARD_ALLOW_INSECURE_REDIS = originalOverride;
 });
 
+describe("runtime-bound Redis authority", () => {
+  test("returns only the client selected by the current runtime resolver", () => {
+    const scoped = { ping: async () => "PONG" } as unknown as ReturnType<typeof getRedis>;
+    setRedisClientResolverForRuntime(() => scoped);
+    expect(getRedis()).toBe(scoped);
+  });
+
+  test("fails closed instead of falling back to a process singleton", () => {
+    setRedisClientResolverForRuntime(() => null);
+    expect(() => getRedis()).toThrow("Request-bound Redis client is unavailable");
+  });
+});
+
 describe("redis transport security (SEC-032)", () => {
+  test("rejects cleartext remote Redis for unset, staging, and Workers postures", () => {
+    for (const environment of [
+      {},
+      { NODE_ENV: "staging" },
+      { NODE_ENV: "test", STEWARD_RUNTIME: "workers" },
+    ]) {
+      expect(() => assertRedisUrlTls("redis://redis.example.internal:6379", environment)).toThrow(
+        "rediss://",
+      );
+    }
+  });
+
   test("rejects cleartext redis:// to a remote host in production", () => {
     process.env.NODE_ENV = "production";
     delete process.env.STEWARD_ALLOW_INSECURE_REDIS;
@@ -66,6 +97,18 @@ describe("redis transport security (SEC-032)", () => {
 });
 
 describe("upstash REST transport security (SEC-032)", () => {
+  test("rejects cleartext remote REST tokens for unset, staging, and Workers postures", () => {
+    for (const environment of [
+      {},
+      { NODE_ENV: "staging" },
+      { NODE_ENV: "test", STEWARD_RUNTIME: "workers" },
+    ]) {
+      expect(() => assertUpstashRestUrlTls("http://us1-example.upstash.io", environment)).toThrow(
+        "https://",
+      );
+    }
+  });
+
   test("rejects cleartext http:// to a remote host in production", () => {
     process.env.NODE_ENV = "production";
     delete process.env.STEWARD_ALLOW_INSECURE_REDIS;

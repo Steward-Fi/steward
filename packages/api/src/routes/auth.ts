@@ -524,6 +524,7 @@ export async function checkAuthRateLimit(
   windowMs: number,
   max: number,
   subjectOverride?: string,
+  options: { strictDurable?: boolean } = {},
 ): Promise<{ allowed: boolean; retryAfterSecs?: number }> {
   const resolved =
     subjectOverride !== undefined
@@ -546,7 +547,9 @@ export async function checkAuthRateLimit(
 
   try {
     const redisMw = await import("../middleware/redis.js");
-    if (!redisMw.isRedisAvailable()) {
+    const redisClient = redisMw.getRedisClient();
+    if (!redisClient) {
+      if (options.strictDurable) return deny(60);
       if (allowAuthRateLimitSoftFail()) return { allowed: true };
       if (redisMw.isRedisConfigured() && authRateLimitOutageAllow(endpoint)) {
         return { allowed: true };
@@ -555,12 +558,13 @@ export async function checkAuthRateLimit(
     }
 
     const { checkRateLimit } = await import("@stwd/redis");
-    const result = await checkRateLimit(key, windowMs, effectiveMax);
+    const result = await checkRateLimit(key, windowMs, effectiveMax, redisClient);
     if (!result.allowed) {
       return deny(Math.ceil(result.resetMs / 1000));
     }
     return { allowed: true };
   } catch (err) {
+    if (options.strictDurable) return deny(60);
     if (allowAuthRateLimitSoftFail()) return { allowed: true };
     // Any step above can throw — the dynamic imports, the availability probe,
     // or checkRateLimit itself — so a throw is NOT proof Redis was seen

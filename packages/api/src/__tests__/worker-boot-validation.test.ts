@@ -9,7 +9,13 @@ import { afterEach, describe, expect, it } from "bun:test";
 import { signAgentToken, signIdentityJwtPayload } from "@stwd/auth/jwt";
 import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 import { decodeJwt, decodeProtectedHeader, exportPKCS8, generateKeyPair, jwtVerify } from "jose";
-import worker, { hydrateProcessEnv, withWorkerJwtAuthority } from "../worker";
+import worker, {
+  __ensureWorkerInitForTests,
+  __setWorkerInitForTests,
+  assertWorkerRedisReady,
+  hydrateProcessEnv,
+  withWorkerJwtAuthority,
+} from "../worker";
 
 /**
  * Keys this file mutates: bindings hydrateProcessEnv copies onto the global
@@ -39,6 +45,7 @@ describe("workers boot JWT env validation (SEC-134)", () => {
   const saved = new Map<string, string | undefined>();
 
   afterEach(() => {
+    __setWorkerInitForTests(null);
     for (const key of MANAGED_KEYS) {
       const prior = saved.get(key);
       if (prior === undefined) {
@@ -53,6 +60,33 @@ describe("workers boot JWT env validation (SEC-134)", () => {
   function snapshotEnv(): void {
     for (const key of MANAGED_KEYS) saved.set(key, process.env[key]);
   }
+
+  it("never reports a healthy Worker when the required Redis binding is absent", () => {
+    expect(() => assertWorkerRedisReady(false)).toThrow("Durable Redis is required on Workers");
+    expect(() => assertWorkerRedisReady(true)).not.toThrow();
+  });
+
+  it("fails a cold init closed but accepts a corrected binding on the next invocation", async () => {
+    let attempts = 0;
+    const initialize = async () => {
+      attempts++;
+      if (attempts === 1) throw new Error("Durable Redis is required on Workers");
+    };
+
+    await expect(__ensureWorkerInitForTests(initialize)).rejects.toThrow(
+      "Durable Redis is required on Workers",
+    );
+    await expect(__ensureWorkerInitForTests(initialize)).resolves.toBeUndefined();
+    expect(attempts).toBe(2);
+
+    // Once the corrected generation initializes, later overlapping requests
+    // reuse that one success instead of starting duplicate initialization.
+    await Promise.all([
+      __ensureWorkerInitForTests(initialize),
+      __ensureWorkerInitForTests(initialize),
+    ]);
+    expect(attempts).toBe(2);
+  });
 
   it("rejects a short JWT secret at cold start in production", async () => {
     snapshotEnv();

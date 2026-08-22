@@ -1,7 +1,18 @@
-import { describe, expect, it } from "bun:test";
+import { afterAll, describe, expect, it } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import app from "../app";
+
+process.env.NODE_ENV = "test";
+process.env.STEWARD_PGLITE_MEMORY = "true";
+const { createPGLiteDb, setPGLiteOverride } = await import("@stwd/db/pglite");
+const { closeDb } = await import("@stwd/db");
+const { db: pgliteDb, client: pgliteClient } = await createPGLiteDb("memory://");
+setPGLiteOverride(pgliteDb, async () => pgliteClient.close());
+const { default: app } = await import("../app");
+
+afterAll(async () => {
+  await closeDb();
+});
 
 const apiRoot = join(import.meta.dir, "..");
 const idempotencySource = readFileSync(join(apiRoot, "middleware", "idempotency.ts"), "utf8");
@@ -22,6 +33,7 @@ const globalRateLimitSource = readFileSync(
 const appSource = readFileSync(join(apiRoot, "app.ts"), "utf8");
 const contextSource = readFileSync(join(apiRoot, "services", "context.ts"), "utf8");
 const indexSource = readFileSync(join(apiRoot, "index.ts"), "utf8");
+const readinessSource = readFileSync(join(apiRoot, "readiness.ts"), "utf8");
 const webRoot = join(import.meta.dir, "..", "..", "..", "..", "web", "src");
 const webMiddlewareSource = readFileSync(join(webRoot, "middleware.ts"), "utf8");
 // The dashboard CSP is constructed in web/src/lib/csp.ts (extracted from
@@ -80,26 +92,35 @@ describe("middleware security hardening", () => {
     expect(contextSource).toContain('"Tenant header does not match token"');
   });
 
-  it("applies Bun runtime gates before Hono route dispatch", () => {
-    expect(indexSource).toContain(
-      "function runtimeGate(request: Request, peerAddress: string | null)",
-    );
+  it("applies the Bun shutdown gate before Hono route dispatch", () => {
+    expect(indexSource).toContain("function runtimeGate()");
     expect(indexSource).toContain("const peerAddress = server.requestIP(request)?.address ?? null");
-    expect(indexSource).toContain("runtimeGate(request, peerAddress)");
+    expect(indexSource).toContain("runtimeGate()");
     // The runtime gate must run before Hono route dispatch.
-    const gateAt = indexSource.indexOf("runtimeGate(request, peerAddress)");
+    const gateAt = indexSource.indexOf("runtimeGate()");
     const fetchAt = indexSource.indexOf("app.fetch(request,");
     expect(gateAt).toBeGreaterThanOrEqual(0);
     expect(fetchAt).toBeGreaterThan(gateAt);
     expect(indexSource).not.toContain('app.use("*", async (c, next) => {');
   });
 
-  it("mounts the shared Redis-backed global limiter on the Workers runtime (SEC-068)", () => {
-    expect(appSource).toContain("if (isWorkersRuntime) {");
-    expect(appSource).toContain('app.use("*", workersGlobalRateLimit)');
+  it("mounts the production-durable global limiter on every runtime (SEC-068)", () => {
+    expect(appSource).toContain('app.use("*", globalRateLimit)');
     expect(globalRateLimitSource).toContain("checkAuthRateLimit(");
     expect(globalRateLimitSource).toContain('c.req.path === "/health"');
+    expect(globalRateLimitSource).toContain('c.req.path === "/ready"');
+    expect(globalRateLimitSource).toContain("strictDurable: true");
     expect(globalRateLimitSource).toContain('"Rate limit exceeded"');
+  });
+
+  it("trims /ready fingerprint detail unless a probe token is presented (SEC-071)", () => {
+    expect(readinessSource).toContain("function probeAuthorized(");
+    expect(indexSource).toContain("STEWARD_READY_PROBE_TOKEN");
+    expect(readinessSource).toContain("timingSafeEqual");
+    expect(readinessSource).toContain('"x-steward-probe-token"');
+    expect(readinessSource).toContain("checks: verbose ? checks : publicChecks");
+    expect(indexSource).toContain("globalRateLimitRequiresRedis()");
+    expect(indexSource).toContain("Redis is required for durable production rate limiting");
   });
 
   it("documents production security headers and dashboard CSP checks in source", () => {

@@ -22,9 +22,10 @@ import {
   userTenants,
 } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
+import { withRuntimeEnvironment } from "@stwd/shared/runtime-env";
 import { and, desc, eq } from "drizzle-orm";
 import { Hono } from "hono";
-import { initRedis } from "../middleware/redis";
+import { initRedis, shutdownRedis } from "../middleware/redis";
 import type { AppVariables } from "../services/context";
 
 let adapterRoutesModule: Awaited<typeof import("../routes/adapters")>;
@@ -185,7 +186,128 @@ async function makeApp(tenantId: string, options?: { userId?: string }) {
   return { app, agentId };
 }
 
+async function requestAllMountedFundMovingRoutes(
+  app: Hono<{ Variables: AppVariables }>,
+  agentId: string,
+): Promise<Record<"swap" | "earn" | "bridge", Response>> {
+  const swapQuote = await app.request("/adapters/swap/quote", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      agentId,
+      fromToken: USDC,
+      toToken: WETH,
+      amount: "1000000",
+      chainId: 8453,
+    }),
+  });
+  expect(swapQuote.status).toBe(200);
+  const swapQuoteBody = (await swapQuote.json()) as { data: { quote: unknown } };
+
+  const bridgeQuote = await app.request("/adapters/bridge/quote", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      agentId,
+      fromChainId: 8453,
+      toChainId: 42161,
+      fromToken: USDC,
+      toToken: WETH,
+      amount: "1000000",
+      recipient: AGENT_WALLET,
+    }),
+  });
+  expect(bridgeQuote.status).toBe(200);
+  const bridgeQuoteBody = (await bridgeQuote.json()) as { data: { quote: unknown } };
+
+  const [swap, earn, bridge] = await Promise.all([
+    app.request("/adapters/swap/build", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        agentId,
+        agentAddress: AGENT_WALLET,
+        quote: swapQuoteBody.data.quote,
+        estimatedUsd: 25,
+      }),
+    }),
+    app.request("/adapters/earn/deposit", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        agentId,
+        vault: "0x4626000000000000000000000000000000000001",
+        assets: "1050",
+        owner: AGENT_WALLET,
+        estimatedUsd: 25,
+      }),
+    }),
+    app.request("/adapters/bridge/build", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        agentId,
+        owner: AGENT_WALLET,
+        quote: bridgeQuoteBody.data.quote,
+        estimatedUsd: 25,
+      }),
+    }),
+  ]);
+
+  return { swap, earn, bridge };
+}
+
 describe("adapter fund-moving policy gate", () => {
+  it("fails closed across mounted swap, earn, and bridge routes without durable production spend state", async () => {
+    await shutdownRedis();
+    try {
+      for (const posture of [
+        { name: "absent", environment: { NODE_ENV: "production" } },
+        {
+          name: "down",
+          environment: {
+            NODE_ENV: "production",
+            REDIS_URL: "redis://unavailable-adapter-spend.test:6379",
+          },
+        },
+      ] as const) {
+        const { app, agentId } = await makeApp(
+          `tenant-adapter-redis-${posture.name}-${Date.now()}`,
+        );
+        const responses = await withRuntimeEnvironment(
+          {
+            ...posture.environment,
+            STEWARD_ADAPTER_PER_OP_CAP_USD: "1000",
+            STEWARD_ADAPTER_DAILY_CAP_USD: "10000",
+          },
+          () => requestAllMountedFundMovingRoutes(app, agentId),
+        );
+
+        for (const [route, response] of Object.entries(responses)) {
+          expect(response.status, `${posture.name} Redis posture allowed ${route}`).toBe(400);
+          const body = (await response.json()) as Record<string, unknown>;
+          expect(body.code).toBe("policy-violation");
+          expect(body.unsignedIntent).toBeUndefined();
+        }
+      }
+
+      const { app, agentId } = await makeApp(`tenant-adapter-redis-dev-${Date.now()}`);
+      const developmentResponses = await withRuntimeEnvironment(
+        {
+          NODE_ENV: "development",
+          STEWARD_ADAPTER_PER_OP_CAP_USD: "1000",
+          STEWARD_ADAPTER_DAILY_CAP_USD: "10000",
+        },
+        () => requestAllMountedFundMovingRoutes(app, agentId),
+      );
+      for (const [route, response] of Object.entries(developmentResponses)) {
+        expect(response.status, `unconfigured development posture denied ${route}`).toBe(200);
+      }
+    } finally {
+      await initRedis();
+    }
+  });
+
   it("DENIES a swap build when the estimated notional exceeds the per-op cap", async () => {
     process.env.STEWARD_ADAPTER_PER_OP_CAP_USD = "100";
     process.env.STEWARD_ADAPTER_DAILY_CAP_USD = "1000";
@@ -283,7 +405,7 @@ describe("adapter fund-moving policy gate", () => {
     expect(body.code).toBe("policy-violation");
   });
 
-  it("ALLOWS a bridge build within caps and returns an UNSIGNED intent", async () => {
+  it("reserves a bridge build from its parsed request and returns an UNSIGNED intent", async () => {
     process.env.STEWARD_ADAPTER_PER_OP_CAP_USD = "100000";
     process.env.STEWARD_ADAPTER_DAILY_CAP_USD = "1000000";
     const { app, agentId } = await makeApp(`tenant-adapter-bridge-${Date.now()}`);
@@ -306,7 +428,10 @@ describe("adapter fund-moving policy gate", () => {
 
     const buildRes = await app.request("/adapters/bridge/build", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        "Idempotency-Key": "bridge-build-request-authority",
+      },
       body: JSON.stringify({
         agentId,
         owner: AGENT_WALLET,
@@ -325,6 +450,38 @@ describe("adapter fund-moving policy gate", () => {
     expect(body.data.unsignedIntent.signed).toBe(false);
     expect(body.data.unsignedIntent.category).toBe("bridge");
     expect(body.data.unsignedIntent.metadata.toChainId).toBe(42161);
+  });
+
+  it("rejects a regenerated bridge artifact that changed under the same idempotency key", async () => {
+    process.env.STEWARD_ADAPTER_PER_OP_CAP_USD = "1000";
+    process.env.STEWARD_ADAPTER_DAILY_CAP_USD = "10000";
+    const { app, agentId } = await makeApp(`tenant-adapter-bridge-replay-${Date.now()}`);
+    const provider = `test-handoff-replay-${Date.now()}`;
+    const artifact = externalHandoff({ provider, estimatedUsd: 500 });
+    selectBridgeAdapter(provider, artifact);
+    const request = () =>
+      app.request("/adapters/bridge/build", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Idempotency-Key": "bridge-regenerated-artifact",
+        },
+        body: JSON.stringify({
+          agentId,
+          owner: AGENT_WALLET,
+          quote: { quoteId: "test-handoff-quote" },
+          estimatedUsd: 500,
+        }),
+      });
+
+    expect((await request()).status).toBe(200);
+    artifact.feeObservedSlot += 1;
+    const changed = await request();
+    expect(changed.status).toBe(400);
+    const body = (await changed.json()) as { code?: string; reason?: string; data?: unknown };
+    expect(body.code).toBe("policy-violation");
+    expect(body.reason).toContain("idempotency-key");
+    expect(body.data).toBeUndefined();
   });
 
   it("DENIES a bridge build above cap before returning a signable artifact", async () => {
