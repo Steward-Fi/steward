@@ -1,4 +1,5 @@
 import type { TenantSamlSsoConfig, TenantSamlSsoUpdate } from "@stwd/shared";
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 import { validateWebhookUrl } from "./webhook-url";
 
 const MAX_CERTS = 5;
@@ -79,7 +80,10 @@ export function buildSamlServiceProviderUrls(tenantId: string): {
   acsUrl: string;
   metadataUrl: string;
 } {
-  const appUrl = (process.env.APP_URL?.trim() || "https://steward.fi").replace(/\/$/, "");
+  const appUrl = (runtimeEnvironmentValue("APP_URL")?.trim() || "https://steward.fi").replace(
+    /\/$/,
+    "",
+  );
   const encodedTenant = encodeURIComponent(tenantId);
   const metadataUrl = `${appUrl}/auth/saml/${encodedTenant}/metadata`;
   return {

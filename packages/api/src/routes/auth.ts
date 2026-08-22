@@ -1454,9 +1454,9 @@ export async function initAuthStores(usePostgres = false): Promise<void> {
   initUserLinkChallengeStores(challengeBackend);
 
   // Reset singletons so they pick up the new stores on next use
-  _passkeyAuth = null;
+  _passkeyAuthByRequest = new WeakMap();
   _phoneAuth = null;
-  _passkeyAuthByOrigin.clear();
+  _passkeyAuthWithoutRequest.clear();
   _emailAuthByRequest = new WeakMap();
 }
 
@@ -1591,7 +1591,7 @@ async function markOidcIdTokenUsedOnce(
 }
 
 function isUnsafeUnboundOAuthProviderCodeExchangeAllowed(): boolean {
-  return process.env.STEWARD_ALLOW_UNBOUND_OAUTH_PROVIDER_CODE_EXCHANGE === "true";
+  return runtimeEnvironmentValue("STEWARD_ALLOW_UNBOUND_OAUTH_PROVIDER_CODE_EXCHANGE") === "true";
 }
 
 function isValidPkceCodeVerifier(value: string): boolean {
@@ -1642,8 +1642,14 @@ export function getAuthStoreSources(): AuthStoreSources {
  */
 export function assertAuthStoresAreSafe(sources: AuthStoreSources = getAuthStoreSources()): void {
   const requiresDurableStores =
-    process.env.NODE_ENV === "production" || process.env.STEWARD_RUNTIME === "workers";
-  if (!requiresDurableStores || process.env.STEWARD_ALLOW_MEMORY_AUTH_STORES === "true") return;
+    runtimeEnvironmentValue("NODE_ENV") === "production" ||
+    runtimeEnvironmentValue("STEWARD_RUNTIME") === "workers";
+  if (
+    !requiresDurableStores ||
+    runtimeEnvironmentValue("STEWARD_ALLOW_MEMORY_AUTH_STORES") === "true"
+  ) {
+    return;
+  }
 
   const memoryStores = Object.entries(sources)
     .filter(([, source]) => source === "memory")
@@ -1671,8 +1677,43 @@ export function decryptImportSessionJson<T>(value: string): T {
   return JSON.parse(getOAuthKeyStore().decrypt(encrypted)) as T;
 }
 
-let _passkeyAuth: PasskeyAuth | null = null;
-const _passkeyAuthByOrigin = new Map<string, PasskeyAuth>();
+let _passkeyAuthByRequest = new WeakMap<object, Map<string, PasskeyAuth>>();
+const _passkeyAuthWithoutRequest = new Map<string, PasskeyAuth>();
+
+export type PasskeyRuntimeAuthority = Readonly<{
+  defaultRpID: string;
+  defaultOrigin: string;
+  rpName: string;
+  allowedOrigins: readonly string[];
+}>;
+
+/** Resolve WebAuthn authority from the active immutable request binding. */
+export function resolvePasskeyRuntimeAuthority(): PasskeyRuntimeAuthority {
+  const defaultRpID = runtimeEnvironmentValue("PASSKEY_RP_ID") || "steward.fi";
+  const defaultOrigin = runtimeEnvironmentValue("PASSKEY_ORIGIN") || "https://steward.fi";
+  const rpName = runtimeEnvironmentValue("PASSKEY_RP_NAME") || "Steward";
+  const allowedOrigins = (runtimeEnvironmentValue("PASSKEY_ALLOWED_ORIGINS") || defaultOrigin)
+    .split(",")
+    .map((origin) => origin.trim())
+    .filter(Boolean);
+  return Object.freeze({
+    defaultRpID,
+    defaultOrigin,
+    rpName,
+    allowedOrigins: Object.freeze(allowedOrigins),
+  });
+}
+
+function passkeyAuthCache(): Map<string, PasskeyAuth> {
+  const identity = runtimeEnvironmentIdentity();
+  if (!identity) return _passkeyAuthWithoutRequest;
+  let cache = _passkeyAuthByRequest.get(identity);
+  if (!cache) {
+    cache = new Map();
+    _passkeyAuthByRequest.set(identity, cache);
+  }
+  return cache;
+}
 
 /**
  * Get PasskeyAuth for a specific origin (multi-tenant passkey support).
@@ -1719,25 +1760,21 @@ function resolveRpID(requestHostname: string, allowedOrigins: string[], fallback
 }
 
 function getPasskeyAuth(requestOrigin?: string): PasskeyAuth {
-  const defaultRpID = process.env.PASSKEY_RP_ID || "steward.fi";
-  const defaultOrigin = process.env.PASSKEY_ORIGIN || "https://steward.fi";
-  const rpName = process.env.PASSKEY_RP_NAME || "Steward";
+  const { defaultRpID, defaultOrigin, rpName, allowedOrigins } = resolvePasskeyRuntimeAuthority();
+  const cache = passkeyAuthCache();
 
   // If no origin provided, use the default singleton
   if (!requestOrigin) {
-    if (!_passkeyAuth) {
-      const origins = (process.env.PASSKEY_ALLOWED_ORIGINS || defaultOrigin)
-        .split(",")
-        .map((o) => o.trim())
-        .filter(Boolean);
-      _passkeyAuth = new PasskeyAuth({
-        rpName,
-        rpID: defaultRpID,
-        origin: origins.length > 1 ? origins : defaultOrigin,
-        challengeStore: getChallengeStore(),
-      });
-    }
-    return _passkeyAuth;
+    const cached = cache.get("default:configuration");
+    if (cached) return cached;
+    const auth = new PasskeyAuth({
+      rpName,
+      rpID: defaultRpID,
+      origin: allowedOrigins.length > 1 ? [...allowedOrigins] : defaultOrigin,
+      challengeStore: getChallengeStore(),
+    });
+    cache.set("default:configuration", auth);
+    return auth;
   }
 
   // Parse origin to get hostname
@@ -1749,10 +1786,7 @@ function getPasskeyAuth(requestOrigin?: string): PasskeyAuth {
   }
 
   // Validate against allowed origins
-  const allowed = (process.env.PASSKEY_ALLOWED_ORIGINS || defaultOrigin)
-    .split(",")
-    .map((o) => o.trim())
-    .filter(Boolean);
+  const allowed = [...allowedOrigins];
   if (!allowed.includes(requestOrigin) && requestHostname !== defaultRpID) {
     return getPasskeyAuth(); // not in allowed list, use default
   }
@@ -1763,7 +1797,8 @@ function getPasskeyAuth(requestOrigin?: string): PasskeyAuth {
   const rpID = resolveRpID(requestHostname, allowed, defaultRpID);
 
   // Cache per rpID
-  const cached = _passkeyAuthByOrigin.get(rpID);
+  const cacheKey = `rp:${rpID}`;
+  const cached = cache.get(cacheKey);
   if (cached) return cached;
 
   // Origin list passed to PasskeyAuth covers all variants the browser may
@@ -1776,8 +1811,13 @@ function getPasskeyAuth(requestOrigin?: string): PasskeyAuth {
     origin: acceptedOrigins,
     challengeStore: getChallengeStore(),
   });
-  _passkeyAuthByOrigin.set(rpID, auth);
+  cache.set(cacheKey, auth);
   return auth;
+}
+
+/** Test seam for verifying request-bound PasskeyAuth generation isolation. */
+export function _getPasskeyAuthForTests(requestOrigin?: string): PasskeyAuth {
+  return getPasskeyAuth(requestOrigin);
 }
 
 // ─── EmailAuth cache ──────────────────────────────────────────────────────────
@@ -2562,8 +2602,8 @@ function ethereumWalletTenantId(address: string): string {
   return `eth:${address.toLowerCase()}`;
 }
 
-function getAllowedSiweDomains(): string[] {
-  const raw = process.env.SIWE_ALLOWED_DOMAINS?.trim();
+export function getAllowedSiweDomains(): string[] {
+  const raw = runtimeEnvironmentValue("SIWE_ALLOWED_DOMAINS")?.trim();
   if (raw) {
     const domains = raw
       .split(",")
@@ -2572,7 +2612,7 @@ function getAllowedSiweDomains(): string[] {
     if (domains.length > 0) return domains;
   }
 
-  const appUrl = process.env.APP_URL?.trim() || "https://steward.fi";
+  const appUrl = runtimeEnvironmentValue("APP_URL")?.trim() || "https://steward.fi";
   try {
     return [new URL(appUrl).host.toLowerCase()];
   } catch {
@@ -2728,16 +2768,24 @@ async function ensureUserTenantLink(
   role: string = "member",
 ): Promise<void> {
   await withVerifiedAuthTenant(tenantId, userId, async () => {
+    // Migration 0123 enforces that a canonical personal tenant has exactly
+    // one owner and no member-shaped alias. BEFORE triggers run even when a
+    // duplicate insert would later be suppressed by ON CONFLICT, so derive
+    // the only valid role before attempting the idempotent write.
+    const membershipRole = tenantId === `personal-${userId}` ? "owner" : role;
     if (tenantId === "default") {
-      if (role !== "member" && role !== GUEST_TENANT_ROLE) {
+      if (membershipRole !== "member" && membershipRole !== GUEST_TENANT_ROLE) {
         throw new Error("Default tenant membership role is not permitted");
       }
       await getDb().execute(
-        sql`SELECT steward_bootstrap.ensure_default_membership(${userId}::uuid, ${role})`,
+        sql`SELECT steward_bootstrap.ensure_default_membership(${userId}::uuid, ${membershipRole})`,
       );
       return;
     }
-    await getDb().insert(userTenants).values({ userId, tenantId, role }).onConflictDoNothing();
+    await getDb()
+      .insert(userTenants)
+      .values({ userId, tenantId, role: membershipRole })
+      .onConflictDoNothing();
   });
 }
 
@@ -10816,10 +10864,10 @@ async function provisionOAuthUser(opts: {
  * APP_URL is mandatory in production so a forged Host/X-Forwarded-Proto header
  * cannot influence the provider redirect_uri.
  */
-function authCallbackBaseUrl(c: Context): string {
-  const configured = process.env.APP_URL?.trim();
+export function authCallbackBaseUrl(c: Context): string {
+  const configured = runtimeEnvironmentValue("APP_URL")?.trim();
   if (configured) return configured.replace(/\/$/, "");
-  if (process.env.NODE_ENV === "production") {
+  if (runtimeEnvironmentValue("NODE_ENV") === "production") {
     throw new Error("APP_URL is required for OAuth/OIDC callback URLs in production");
   }
   return `${c.req.header("x-forwarded-proto") ?? "https"}://${c.req.header("host") ?? "localhost"}`;
@@ -10955,7 +11003,7 @@ async function exchangeOidcAuthorizationCode(opts: {
     if (!isAllowedOidcClientSecretEnvForTenant(provider.clientSecretEnv, tenantId)) {
       throw new Error("OIDC client secret env is outside the allowed tenant namespace");
     }
-    const secret = process.env[provider.clientSecretEnv];
+    const secret = getConfiguredOidcClientSecret(provider.clientSecretEnv);
     if (!secret) throw new Error(`OIDC client secret env ${provider.clientSecretEnv} is not set`);
     body.set("client_secret", secret);
   }
@@ -11004,16 +11052,21 @@ async function exchangeOidcAuthorizationCode(opts: {
   return payload.id_token.trim();
 }
 
+/** Read an allowlisted tenant OIDC secret from the active request binding. */
+export function getConfiguredOidcClientSecret(envName: string): string | undefined {
+  return runtimeEnvironmentValue(envName);
+}
+
 const OAUTH_REDIRECT_ALLOWLIST_ENV_KEYS = [
   "STEWARD_OAUTH_ALLOWED_REDIRECTS",
   "STEWARD_OAUTH_REDIRECT_ALLOWLIST",
 ] as const;
 
-function parseOAuthRedirectAllowlistEnv(): string[] {
+export function parseOAuthRedirectAllowlistEnv(): string[] {
   const entries = new Set<string>();
 
   for (const envName of OAUTH_REDIRECT_ALLOWLIST_ENV_KEYS) {
-    const raw = process.env[envName];
+    const raw = runtimeEnvironmentValue(envName);
     if (!raw) continue;
 
     for (const entry of raw.split(",")) {

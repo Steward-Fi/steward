@@ -81,6 +81,7 @@ import {
   type SignRequest,
   type TenantAuthAbuseConfig,
 } from "@stwd/shared";
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 import {
   applyUserWalletDefaults,
   generateMnemonic,
@@ -2172,7 +2173,7 @@ function farcasterProviderAccountId(address: string): string {
 }
 
 function userFarcasterAllowedDomains(): string[] | undefined {
-  const raw = process.env.SIWE_ALLOWED_DOMAINS?.trim();
+  const raw = runtimeEnvironmentValue("SIWE_ALLOWED_DOMAINS")?.trim();
   if (!raw) return undefined;
   const domains = raw
     .split(",")
