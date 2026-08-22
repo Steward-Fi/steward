@@ -52,6 +52,7 @@ describe("core migration ledger integrity", () => {
     expect(source).toContain("FROM pg_namespace namespace");
     expect(source).toContain("FROM pg_proc routine");
     expect(source).toContain("FROM pg_type type_inventory");
+    expect(source).toContain("steward_guard_generic_intent_execution_delete()");
     expect(source).toContain("AS user_object_count");
   });
 

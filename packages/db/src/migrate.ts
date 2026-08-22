@@ -381,6 +381,7 @@ async function assertExactMigrationObjectInventory(db: MigrationQueryExecutor): 
         ('public', 'steward_guard_agent_delete()'),
         ('public', 'steward_guard_audit_archive_immutability()'),
         ('public', 'steward_guard_audit_checkpoint_immutability()'),
+        ('public', 'steward_guard_generic_intent_execution_delete()'),
         ('public', 'steward_guard_workspace_delete()'),
         ('public', 'steward_lock_tenant_deletion(target_tenant text)'),
         ('public', 'steward_provider_action_binding_guard()'),
