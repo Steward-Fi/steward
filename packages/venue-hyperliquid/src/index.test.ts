@@ -59,6 +59,55 @@ const xyzSpcxTransport = (extra?: {
 });
 
 describe("Hyperliquid L1 signing", () => {
+  test("queries orderStatus by provider-visible cloid without signing", async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    const adapter = new HyperliquidAdapter(
+      {
+        signTypedData: async () => {
+          throw new Error("must not sign");
+        },
+      },
+      "agent-order-status",
+      WALLET,
+      {
+        transport: {
+          async fetch(_input, init) {
+            bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+            return new Response(
+              JSON.stringify({
+                status: "order",
+                order: {
+                  status: "filled",
+                  totalSz: "0.02",
+                  avgPx: "30000",
+                  order: { oid: 42 },
+                },
+              }),
+              { status: 200 },
+            );
+          },
+        },
+      },
+    );
+    const cloid = "0x0123456789abcdef0123456789abcdef" as const;
+    await expect(adapter.orderStatus(cloid)).resolves.toEqual({
+      status: "filled",
+      orderId: "42",
+      filledQty: 0.02,
+      avgPrice: 30000,
+      raw: {
+        status: "order",
+        order: {
+          status: "filled",
+          totalSz: "0.02",
+          avgPx: "30000",
+          order: { oid: 42 },
+        },
+      },
+    });
+    expect(bodies).toEqual([{ type: "orderStatus", user: WALLET, oid: cloid }]);
+  });
+
   test("builds the documented wire action and deterministic L1 typed data", async () => {
     const action = toExchangeAction({
       coin: "BTC",

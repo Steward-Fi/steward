@@ -9,10 +9,10 @@ import {
   tenants,
   tradeSessions,
 } from "@stwd/db";
+import type { AppVariables } from "@stwd/shared";
 import { TradeSessionManager } from "@stwd/trade-sessions";
 import { HyperliquidAdapter } from "@stwd/venue-hyperliquid";
 import { Hono } from "hono";
-import type { AppVariables } from "@stwd/shared";
 
 const databaseUrl = process.env.DATABASE_URL;
 const realPostgres = databaseUrl ? describe : describe.skip;

@@ -87,6 +87,7 @@ setDefaultTimeout(30000);
 let signSpy: ReturnType<typeof spyOn> | undefined;
 let submitSpy: ReturnType<typeof spyOn> | undefined;
 let updateLeverageSpy: ReturnType<typeof spyOn> | undefined;
+let orderStatusSpy: ReturnType<typeof spyOn> | undefined;
 let fenceSpy: ReturnType<typeof spyOn> | undefined;
 let venueFenceSpy: ReturnType<typeof spyOn> | undefined;
 
@@ -177,6 +178,14 @@ function postOrder(
   });
 }
 
+function reconcileOrder(app: Hono, sessionId: string, idempotencyKey: string) {
+  return app.request("/v1/trade/hyperliquid/order/reconcile", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ sessionId, idempotencyKey }),
+  });
+}
+
 async function dailySpendOf(sessionId: string): Promise<number> {
   const [row] = await getDb()
     .select({ spent: tradeSessions.dailySpendUsd })
@@ -208,10 +217,13 @@ async function terminalPhaseCount(tenantId: string, agentId: string): Promise<nu
 }
 
 async function setTerminalPersistenceFault(enabled: boolean): Promise<void> {
-  await getDb().execute(sql.raw("DROP TRIGGER IF EXISTS trading_test_reject_terminal ON trading_order_outcomes"));
+  await getDb().execute(
+    sql.raw("DROP TRIGGER IF EXISTS trading_test_reject_terminal ON trading_order_outcomes"),
+  );
   await getDb().execute(sql.raw("DROP FUNCTION IF EXISTS trading_test_reject_terminal()"));
   if (!enabled) return;
-  await getDb().execute(sql.raw(`
+  await getDb().execute(
+    sql.raw(`
     CREATE FUNCTION trading_test_reject_terminal() RETURNS trigger
     LANGUAGE plpgsql AS $$
     BEGIN
@@ -221,12 +233,43 @@ async function setTerminalPersistenceFault(enabled: boolean): Promise<void> {
       RETURN NEW;
     END;
     $$
-  `));
-  await getDb().execute(sql.raw(`
+  `),
+  );
+  await getDb().execute(
+    sql.raw(`
     CREATE TRIGGER trading_test_reject_terminal
     BEFORE INSERT ON trading_order_outcomes
     FOR EACH ROW EXECUTE FUNCTION trading_test_reject_terminal()
-  `));
+  `),
+  );
+}
+
+async function setClaimPersistenceFault(enabled: boolean): Promise<void> {
+  await getDb().execute(
+    sql.raw("DROP TRIGGER IF EXISTS trading_test_reject_claim ON trading_order_outcomes"),
+  );
+  await getDb().execute(sql.raw("DROP FUNCTION IF EXISTS trading_test_reject_claim()"));
+  if (!enabled) return;
+  await getDb().execute(
+    sql.raw(`
+    CREATE FUNCTION trading_test_reject_claim() RETURNS trigger
+    LANGUAGE plpgsql AS $$
+    BEGIN
+      IF NEW.phase = 'claim' THEN
+        RAISE EXCEPTION 'injected claim persistence fault' USING ERRCODE = '53100';
+      END IF;
+      RETURN NEW;
+    END;
+    $$
+  `),
+  );
+  await getDb().execute(
+    sql.raw(`
+    CREATE TRIGGER trading_test_reject_claim
+    BEFORE INSERT ON trading_order_outcomes
+    FOR EACH ROW EXECUTE FUNCTION trading_test_reject_claim()
+  `),
+  );
 }
 
 describe("Hyperliquid venue-submit spend-fence (real /hyperliquid/order path)", () => {
@@ -278,10 +321,36 @@ describe("Hyperliquid venue-submit spend-fence (real /hyperliquid/order path)", 
     signSpy?.mockRestore();
     submitSpy?.mockRestore();
     updateLeverageSpy?.mockRestore();
+    orderStatusSpy?.mockRestore();
     signSpy = undefined;
     submitSpy = undefined;
     updateLeverageSpy = undefined;
+    orderStatusSpy = undefined;
     await setTerminalPersistenceFault(false);
+    await setClaimPersistenceFault(false);
+  });
+
+  it("releases the fast claim and reserves no spend when durable claim persistence fails", async () => {
+    const { tenantId, agentId, sessionId } = await seedSession();
+    const app = makeApp(tenantId, agentId, tradeRoutes);
+    signSpy = spyOn(HyperliquidAdapter.prototype, "signOrder").mockResolvedValue({} as never);
+    submitSpy = spyOn(HyperliquidAdapter.prototype, "submitOrder").mockResolvedValue({
+      orderId: "hl-after-claim-recovery",
+      status: "filled",
+    } as never);
+    await setClaimPersistenceFault(true);
+    const key = crypto.randomUUID();
+    const failed = await postOrder(app, sessionId, key);
+    expect(failed.status).toBe(502);
+    expect(await dailySpendOf(sessionId)).toBe(0);
+    expect(signSpy).not.toHaveBeenCalled();
+    expect(submitSpy).not.toHaveBeenCalled();
+
+    await setClaimPersistenceFault(false);
+    const retry = await postOrder(app, sessionId, key);
+    expect(retry.status).toBe(200);
+    expect(signSpy).toHaveBeenCalledTimes(1);
+    expect(submitSpy).toHaveBeenCalledTimes(1);
   });
 
   it("releases spend and cancels (no submitted audit) when the venue rejects the order", async () => {
@@ -368,18 +437,9 @@ describe("Hyperliquid venue-submit spend-fence (real /hyperliquid/order path)", 
     const callOrder: string[] = [];
     let observedProviderRequestId: string | undefined;
     let observedSignedCloid: string | undefined;
-    signSpy = spyOn(HyperliquidAdapter.prototype, "signOrder").mockImplementation(
-      async (order) => {
-        callOrder.push("sign");
-        return {
-          action: { orders: [{ c: order.cloid }] },
-        } as Awaited<ReturnType<HyperliquidAdapter["signOrder"]>>;
-      },
-    );
-    submitSpy = spyOn(HyperliquidAdapter.prototype, "submitOrder").mockImplementation(async (signed) => {
-      expect(await terminalPhaseCount(tenantId, agentId)).toBe(0);
+    signSpy = spyOn(HyperliquidAdapter.prototype, "signOrder").mockImplementation(async (order) => {
       const claims = await getDb()
-        .select({ phase: tradingOrderOutcomes.phase, response: tradingOrderOutcomes.response })
+        .select({ phase: tradingOrderOutcomes.phase })
         .from(tradingOrderOutcomes)
         .where(
           and(
@@ -387,23 +447,42 @@ describe("Hyperliquid venue-submit spend-fence (real /hyperliquid/order path)", 
             eq(tradingOrderOutcomes.agentId, agentId),
           ),
         );
-      expect(claims).toHaveLength(1);
-      expect(claims[0]?.phase).toBe("claim");
-      observedProviderRequestId = (
-        claims[0]?.response as { body?: { data?: { providerRequestId?: string } } }
-      ).body?.data?.providerRequestId;
-      observedSignedCloid = (
-        (signed.action.orders as Array<Record<string, unknown>>)[0] as { c?: string }
-      ).c;
-      callOrder.push("submit");
+      expect(claims).toEqual([{ phase: "claim" }]);
+      callOrder.push("sign");
       return {
-        orderId: "hl-ok-1",
-        status: "filled",
-        filledQty: 1,
-        avgPrice: 10,
-        txHash: "0xabc",
-      } as Awaited<ReturnType<HyperliquidAdapter["submitOrder"]>>;
+        action: { orders: [{ c: order.cloid }] },
+      } as Awaited<ReturnType<HyperliquidAdapter["signOrder"]>>;
     });
+    submitSpy = spyOn(HyperliquidAdapter.prototype, "submitOrder").mockImplementation(
+      async (signed) => {
+        expect(await terminalPhaseCount(tenantId, agentId)).toBe(0);
+        const claims = await getDb()
+          .select({ phase: tradingOrderOutcomes.phase, response: tradingOrderOutcomes.response })
+          .from(tradingOrderOutcomes)
+          .where(
+            and(
+              eq(tradingOrderOutcomes.tenantId, tenantId),
+              eq(tradingOrderOutcomes.agentId, agentId),
+            ),
+          );
+        expect(claims).toHaveLength(1);
+        expect(claims[0]?.phase).toBe("claim");
+        observedProviderRequestId = (
+          claims[0]?.response as { body?: { data?: { providerRequestId?: string } } }
+        ).body?.data?.providerRequestId;
+        observedSignedCloid = (
+          (signed.action.orders as Array<Record<string, unknown>>)[0] as { c?: string }
+        ).c;
+        callOrder.push("submit");
+        return {
+          orderId: "hl-ok-1",
+          status: "filled",
+          filledQty: 1,
+          avgPrice: 10,
+          txHash: "0xabc",
+        } as Awaited<ReturnType<HyperliquidAdapter["submitOrder"]>>;
+      },
+    );
 
     const key = crypto.randomUUID();
     const res = await postOrder(app, sessionId, key);
@@ -447,6 +526,46 @@ describe("Hyperliquid venue-submit spend-fence (real /hyperliquid/order path)", 
     expect(authorized[0].actorId).toBe(agentId);
     expect(authorized[0].seq).toBeLessThan(submitted[0].seq);
     expect(await terminalPhaseCount(tenantId, agentId)).toBe(1);
+  });
+
+  it("reconciles a durable claim by its evidence-bound cloid without resubmitting", async () => {
+    const { tenantId, agentId, sessionId } = await seedSession();
+    const app = makeApp(tenantId, agentId, tradeRoutes);
+    signSpy = spyOn(HyperliquidAdapter.prototype, "signOrder").mockResolvedValue({} as never);
+    submitSpy = spyOn(HyperliquidAdapter.prototype, "submitOrder").mockRejectedValue(
+      new Error("connection lost after venue acceptance"),
+    );
+    await setTerminalPersistenceFault(true);
+    const key = crypto.randomUUID();
+    const first = await postOrder(app, sessionId, key);
+    expect(first.status).toBe(502);
+    expect(((await first.json()) as { error: string }).error).toBe(
+      "Trade execution requires reconciliation",
+    );
+    await setTerminalPersistenceFault(false);
+    orderStatusSpy = spyOn(HyperliquidAdapter.prototype, "orderStatus").mockImplementation(
+      async (cloid) => ({
+        status: "filled",
+        orderId: "hl-reconciled-1",
+        filledQty: 1,
+        avgPrice: 10,
+        raw: { status: "order", cloid },
+      }),
+    );
+
+    const reconciled = await reconcileOrder(app, sessionId, key);
+    expect(reconciled.status).toBe(200);
+    expect(((await reconciled.json()) as { data: { orderId: string } }).data.orderId).toBe(
+      "hl-reconciled-1",
+    );
+    expect(orderStatusSpy).toHaveBeenCalledWith(expect.stringMatching(/^0x[0-9a-f]{32}$/));
+    expect(submitSpy).toHaveBeenCalledTimes(1);
+    expect(await terminalPhaseCount(tenantId, agentId)).toBe(1);
+    expect(await auditCount(tenantId, "trade.order.reconciled")).toBe(1);
+
+    const replay = await postOrder(app, sessionId, key);
+    expect(replay.status).toBe(200);
+    expect(submitSpy).toHaveBeenCalledTimes(1);
   });
 
   for (const scenario of ["filled", "rejected", "ambiguous"] as const) {
@@ -680,6 +799,17 @@ describe("Hyperliquid venue-submit spend-fence (real /hyperliquid/order path)", 
     const callOrder: string[] = [];
     updateLeverageSpy = spyOn(HyperliquidAdapter.prototype, "updateLeverage").mockImplementation(
       async () => {
+        expect(await terminalPhaseCount(tenantId, agentId)).toBe(0);
+        const claims = await getDb()
+          .select({ phase: tradingOrderOutcomes.phase })
+          .from(tradingOrderOutcomes)
+          .where(
+            and(
+              eq(tradingOrderOutcomes.tenantId, tenantId),
+              eq(tradingOrderOutcomes.agentId, agentId),
+            ),
+          );
+        expect(claims).toEqual([{ phase: "claim" }]);
         callOrder.push("updateLeverage");
         return { status: "ok", raw: { response: { type: "default" } } } as Awaited<
           ReturnType<HyperliquidAdapter["updateLeverage"]>

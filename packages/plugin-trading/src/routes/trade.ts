@@ -122,6 +122,10 @@ const submitOrderSchema = z
   .refine((value) => value.coin ?? value.asset, "coin is required");
 
 type SubmitOrderBody = z.infer<typeof submitOrderSchema>;
+const reconcileOrderSchema = z.object({
+  sessionId: z.string().min(1),
+  idempotencyKey: z.string().min(1).max(256),
+});
 const hyperliquidOrderSchema = z.object({
   asset: hyperliquidAssetSchema,
   side: z.enum(["buy", "sell"]),
@@ -284,6 +288,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
       | "trade.session.created"
       | "trade.session.revoked"
       | "trade.order.submitted"
+      | "trade.order.reconciled"
       | "trade.order.submitted-after-revoke"
       | "trade.order.submit.authorized"
       | "trade.order.leverage.set"
@@ -393,12 +398,42 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
     return { response: parsed.data as TradeIdempotencyResponse };
   }
 
+  async function loadDurableHyperliquidClaim(
+    tenantId: string,
+    agentId: string,
+    idempotencyKey: string,
+  ) {
+    const keyHash = sha256(idempotencyKey);
+    const rows = await withAuthenticatedTenantDatabase(tenantId, "agent-jwt-rs256", agentId, () =>
+      db
+        .select({
+          phase: tradingOrderOutcomes.phase,
+          requestHash: tradingOrderOutcomes.requestHash,
+          response: tradingOrderOutcomes.response,
+        })
+        .from(tradingOrderOutcomes)
+        .where(
+          and(
+            eq(tradingOrderOutcomes.tenantId, tenantId),
+            eq(tradingOrderOutcomes.agentId, agentId),
+            eq(tradingOrderOutcomes.venue, "hyperliquid"),
+            eq(tradingOrderOutcomes.idempotencyKeyHash, keyHash),
+          ),
+        ),
+    );
+    return {
+      claim: rows.find((row) => row.phase === "claim"),
+      terminal: rows.find((row) => row.phase === "terminal"),
+    };
+  }
+
   async function claimDurableHyperliquidExecution(
     tenantId: string,
     agentId: string,
     idempotencyKey: string,
     bodyHash: string,
     clientOrderId: `0x${string}`,
+    evidence: { sessionId: string; walletAddress: string; sizeUsd: number },
   ): Promise<{ claimed: boolean; response: TradeIdempotencyResponse }> {
     const idempotencyKeyHash = sha256(idempotencyKey);
     const executionId = durableOutcomeId(
@@ -416,6 +451,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
         data: {
           executionId,
           providerRequestId: clientOrderId,
+          ...evidence,
           reconciliationRequired: true,
         },
       },
@@ -473,13 +509,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
       db
         .insert(tradingOrderOutcomes)
         .values({
-          id: durableOutcomeId(
-            tenantId,
-            agentId,
-            "hyperliquid",
-            idempotencyKeyHash,
-            "terminal",
-          ),
+          id: durableOutcomeId(tenantId, agentId, "hyperliquid", idempotencyKeyHash, "terminal"),
           tenantId,
           agentId,
           venue: "hyperliquid",
@@ -502,6 +532,42 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
     }
     if (canonicalJsonStringify(durable.response) !== canonicalJsonStringify(envelope)) {
       throw new Error("Durable Hyperliquid terminal outcome disagrees with venue response");
+    }
+  }
+
+  async function persistDurableHyperliquidOutcomeByRequestHash(
+    tenantId: string,
+    agentId: string,
+    idempotencyKey: string,
+    requestHash: string,
+    envelope: TradeIdempotencyResponse,
+  ): Promise<void> {
+    const idempotencyKeyHash = sha256(idempotencyKey);
+    await withAuthenticatedTenantDatabase(tenantId, "agent-jwt-rs256", agentId, () =>
+      db
+        .insert(tradingOrderOutcomes)
+        .values({
+          id: durableOutcomeId(tenantId, agentId, "hyperliquid", idempotencyKeyHash, "terminal"),
+          tenantId,
+          agentId,
+          venue: "hyperliquid",
+          phase: "terminal",
+          idempotencyKeyHash,
+          requestHash,
+          httpStatus: envelope.status,
+          response: envelope as unknown as Record<string, unknown>,
+        })
+        .onConflictDoNothing(),
+    );
+    const rows = await loadDurableHyperliquidClaim(tenantId, agentId, idempotencyKey);
+    const parsed = rows.terminal && durableEnvelopeSchema.safeParse(rows.terminal.response);
+    if (
+      !parsed ||
+      !parsed.success ||
+      rows.terminal?.requestHash !== requestHash ||
+      canonicalJsonStringify(parsed.data) !== canonicalJsonStringify(envelope)
+    ) {
+      throw new Error("Durable Hyperliquid reconciliation outcome could not be verified");
     }
   }
 
@@ -1313,6 +1379,56 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
           return envelope;
         }
 
+        let executionClaim: Awaited<ReturnType<typeof claimDurableHyperliquidExecution>>;
+        try {
+          // The immutable claim and provider-visible cloid must exist before
+          // updateLeverage, market resolution, or vault signing can perform
+          // external I/O. A surviving claim is therefore always sufficient to
+          // fence a retry after a process/Redis failure.
+          executionClaim = await claimDurableHyperliquidExecution(
+            tenantId,
+            agentId,
+            idempotencyKey,
+            durableRequestBodyHash,
+            order.cloid as `0x${string}`,
+            { sessionId: session.id, walletAddress, sizeUsd },
+          );
+        } catch {
+          // No spend has been reserved and no external side effect has begun.
+          // Release the fast claim so a database recovery can be retried.
+          await idempotency.release?.();
+          return {
+            status: 502,
+            body: {
+              ok: false,
+              error: "Trade execution could not be durably authorized; order not submitted",
+            },
+          } satisfies TradeIdempotencyResponse;
+        }
+        if (!executionClaim.claimed) {
+          await completeTradeIdempotencyBestEffort(idempotency, executionClaim.response);
+          return executionClaim.response;
+        }
+
+        const reconciliationResponse = executionClaim.response;
+        const persistTerminalOrRequireReconciliation = async (
+          envelope: TradeIdempotencyResponse,
+        ): Promise<boolean> => {
+          try {
+            await persistDurableHyperliquidOutcome(
+              tenantId,
+              agentId,
+              idempotencyKey,
+              durableRequestBodyHash,
+              envelope,
+            );
+            return true;
+          } catch {
+            await completeTradeIdempotencyBestEffort(idempotency, reconciliationResponse);
+            return false;
+          }
+        };
+
         const reserved = await getSessionManager().incrementSpend({
           tenantId,
           id: session.id,
@@ -1323,7 +1439,10 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
             status: 400,
             body: { ok: false, error: "Trade session cap exceeded" },
           };
-          await idempotency.store?.(envelope);
+          if (!(await persistTerminalOrRequireReconciliation(envelope))) {
+            return reconciliationResponse;
+          }
+          await completeTradeIdempotencyBestEffort(idempotency, envelope);
           return envelope;
         }
 
@@ -1355,11 +1474,6 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
             // dex default (e.g. 10x). If updateLeverage fails, abort the order and
             // release the reserved session spend so the daily cap isn't consumed
             // for an order that never signed/submitted.
-            await getSessionManager().releaseSpend({
-              tenantId,
-              id: session.id,
-              amountUsd: sizeUsd,
-            });
             await auditTradeEvent(tenantId, agentId, "trade.order.leverage.failed", {
               sessionId: session.id,
               venue: "hyperliquid",
@@ -1377,7 +1491,15 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
                 error: "Failed to set leverage before order; order not submitted",
               },
             };
-            await idempotency.store?.(envelope);
+            if (!(await persistTerminalOrRequireReconciliation(envelope))) {
+              return reconciliationResponse;
+            }
+            await getSessionManager().releaseSpend({
+              tenantId,
+              id: session.id,
+              amountUsd: sizeUsd,
+            });
+            await completeTradeIdempotencyBestEffort(idempotency, envelope);
             return envelope;
           }
           await auditTradeEvent(tenantId, agentId, "trade.order.leverage.set", {
@@ -1394,15 +1516,6 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
         try {
           signed = await adapter.signOrder(order);
         } catch (err) {
-          // Signing is local and no order reached the venue. Release both the
-          // spend reservation and idempotency claim so a corrected retry can
-          // execute instead of leaving a 24h pending tombstone.
-          await getSessionManager().releaseSpend({
-            tenantId,
-            id: session.id,
-            amountUsd: sizeUsd,
-          });
-          await idempotency.release?.();
           await auditTradeEvent(tenantId, agentId, "trade.order.canceled", {
             sessionId: session.id,
             venue: "hyperliquid",
@@ -1411,57 +1524,21 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
             reason: "pre-submit-sign-failed",
             ...redactedThrownDiagnostics(err),
           });
-          return {
+          const envelope = {
             status: 400,
             body: { ok: false, error: "Order could not be signed; not submitted" },
           } satisfies TradeIdempotencyResponse;
-        }
-        let executionClaim: Awaited<ReturnType<typeof claimDurableHyperliquidExecution>>;
-        try {
-          // Commit immutable request identity before the venue can observe the
-          // signed order. A surviving claim without a terminal row is a
-          // reconciliation anchor and must never authorize another submit.
-          executionClaim = await claimDurableHyperliquidExecution(
+          if (!(await persistTerminalOrRequireReconciliation(envelope))) {
+            return reconciliationResponse;
+          }
+          await getSessionManager().releaseSpend({
             tenantId,
-            agentId,
-            idempotencyKey,
-            durableRequestBodyHash,
-            order.cloid as `0x${string}`,
-          );
-        } catch {
-          const envelope: TradeIdempotencyResponse = {
-            status: 502,
-            body: {
-              ok: false,
-              error: "Trade execution could not be durably authorized; order not submitted",
-            },
-          };
+            id: session.id,
+            amountUsd: sizeUsd,
+          });
           await completeTradeIdempotencyBestEffort(idempotency, envelope);
           return envelope;
         }
-        if (!executionClaim.claimed) {
-          await completeTradeIdempotencyBestEffort(idempotency, executionClaim.response);
-          return executionClaim.response;
-        }
-
-        const reconciliationResponse = executionClaim.response;
-        const persistTerminalOrRequireReconciliation = async (
-          envelope: TradeIdempotencyResponse,
-        ): Promise<boolean> => {
-          try {
-            await persistDurableHyperliquidOutcome(
-              tenantId,
-              agentId,
-              idempotencyKey,
-              durableRequestBodyHash,
-              envelope,
-            );
-            return true;
-          } catch {
-            await completeTradeIdempotencyBestEffort(idempotency, reconciliationResponse);
-            return false;
-          }
-        };
         let completedVenueResult:
           | Awaited<ReturnType<HyperliquidAdapter["submitOrder"]>>
           | undefined;
@@ -1593,6 +1670,129 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
     }
     if (fenced instanceof Response) return fenced;
     return c.json(fenced.body, fenced.status);
+  });
+
+  tradeRoutes.post("/hyperliquid/order/reconcile", async (c) => {
+    const tenantId = c.get("tenantId");
+    const agentId = callerAgentId(c);
+    if (!agentId) {
+      return c.json<ApiResponse>({ ok: false, error: "Agent JWT required for trading" }, 403);
+    }
+    const parsed = reconcileOrderSchema.safeParse(await safeJsonParse(c));
+    if (!parsed.success) {
+      return c.json<ApiResponse>({ ok: false, error: parsed.error.message }, 400);
+    }
+    const { sessionId, idempotencyKey } = parsed.data;
+    const rows = await loadDurableHyperliquidClaim(tenantId, agentId, idempotencyKey);
+    if (!rows.claim) {
+      return c.json<ApiResponse>({ ok: false, error: "Durable trade claim not found" }, 404);
+    }
+    if (rows.terminal) {
+      const terminal = durableEnvelopeSchema.safeParse(rows.terminal.response);
+      if (!terminal.success || terminal.data.status !== rows.terminal.response.status) {
+        throw new Error("Malformed durable Hyperliquid terminal outcome");
+      }
+      c.header("Idempotency-Replayed", "true");
+      return c.json(terminal.data.body, terminal.data.status);
+    }
+    const claim = durableEnvelopeSchema.safeParse(rows.claim.response);
+    if (!claim.success) {
+      return c.json<ApiResponse>({ ok: false, error: "Durable trade claim is malformed" }, 409);
+    }
+    const claimData = z
+      .object({
+        executionId: z.string().length(64),
+        providerRequestId: z.string().regex(/^0x[0-9a-f]{32}$/),
+        reconciliationRequired: z.literal(true),
+        sessionId: z.string().min(1),
+        walletAddress: z.string().min(1),
+        sizeUsd: z.number().positive(),
+      })
+      .safeParse((claim.data.body as { data?: unknown }).data);
+    if (!claimData.success || claimData.data.sessionId !== sessionId) {
+      return c.json<ApiResponse>({ ok: false, error: "Durable trade claim is malformed" }, 409);
+    }
+    const expectedExecutionId = durableOutcomeId(
+      tenantId,
+      agentId,
+      "hyperliquid",
+      sha256(idempotencyKey),
+      "claim",
+    );
+    const expectedCloid = hyperliquidClientOrderId(tenantId, agentId, idempotencyKey);
+    if (
+      claimData.data.executionId !== expectedExecutionId ||
+      claimData.data.providerRequestId !== expectedCloid
+    ) {
+      return c.json<ApiResponse>({ ok: false, error: "Durable trade evidence mismatch" }, 409);
+    }
+    const session = await getSessionManager().getSession({ tenantId, id: sessionId });
+    if (
+      !session ||
+      session.agentId !== agentId ||
+      session.venue !== "hyperliquid" ||
+      session.walletId !== claimData.data.walletAddress
+    ) {
+      return c.json<ApiResponse>(
+        { ok: false, error: "Trade reconciliation session mismatch" },
+        409,
+      );
+    }
+    const adapter = new HyperliquidAdapter(
+      {
+        signTypedData: async () => {
+          throw new Error("Reconciliation must not request a vault signature");
+        },
+      },
+      agentId,
+      claimData.data.walletAddress,
+    );
+    const venue = await adapter.orderStatus(expectedCloid);
+    if (venue.status === "unknown") {
+      return c.json(claim.data.body, claim.data.status);
+    }
+    const rejected = venue.status === "rejected";
+    const envelope: TradeIdempotencyResponse = rejected
+      ? {
+          status: 400,
+          body: {
+            ok: false,
+            error: "Trade order rejected",
+            data: { status: venue.status, orderId: venue.orderId ?? null },
+          },
+        }
+      : {
+          status: 200,
+          body: responseData({
+            orderId: venue.orderId ?? expectedCloid,
+            status: venue.status,
+            filledQty: venue.filledQty ?? 0,
+            avgPrice: venue.avgPrice ?? 0,
+            txHash: null,
+          }),
+        };
+    await auditTradeEvent(tenantId, agentId, "trade.order.reconciled", {
+      sessionId,
+      executionId: expectedExecutionId,
+      providerRequestId: expectedCloid,
+      venueStatus: venue.status,
+      orderId: venue.orderId ?? null,
+    });
+    await persistDurableHyperliquidOutcomeByRequestHash(
+      tenantId,
+      agentId,
+      idempotencyKey,
+      rows.claim.requestHash,
+      envelope,
+    );
+    if (rejected) {
+      await getSessionManager().releaseSpend({
+        tenantId,
+        id: sessionId,
+        amountUsd: claimData.data.sizeUsd,
+      });
+    }
+    return c.json(envelope.body, envelope.status);
   });
 
   // ===========================================================================

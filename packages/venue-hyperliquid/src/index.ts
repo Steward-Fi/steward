@@ -148,7 +148,10 @@ export const hyperliquidOrderSchema = z.object({
   nonce: z.number().int().positive().optional(),
   // Hyperliquid client order id: an optional provider-visible 128-bit identity
   // that can be queried through `orderStatus` after an ambiguous submit.
-  cloid: z.string().regex(/^0x[0-9a-fA-F]{32}$/).optional(),
+  cloid: z
+    .string()
+    .regex(/^0x[0-9a-fA-F]{32}$/)
+    .optional(),
   // SEC-186 precedence: an order-supplied builder OVERRIDES the
   // HL_BUILDER_ADDRESS / HL_BUILDER_FEE_TENTHS_BP env config (see
   // exchangeActionFromNormalized). The hosted trade route never forwards a
@@ -197,6 +200,14 @@ export const orderResultSchema = z.object({
   error: z.string().optional(),
 });
 export type OrderResult = z.infer<typeof orderResultSchema>;
+export const orderStatusResultSchema = z.object({
+  status: z.enum(["open", "filled", "rejected", "canceled", "unknown"]),
+  orderId: z.string().optional(),
+  filledQty: z.number().nonnegative().optional(),
+  avgPrice: z.number().nonnegative().optional(),
+  raw: z.unknown(),
+});
+export type OrderStatusResult = z.infer<typeof orderStatusResultSchema>;
 export const cancelResultSchema = z.object({
   orderId: z.string(),
   status: z.string(),
@@ -1362,6 +1373,16 @@ export class HyperliquidAdapter {
   submitOrder(signed: SignedOrder) {
     return submitOrder(signed, { transport: this.transport, baseUrl: this.baseUrl });
   }
+  async orderStatus(clientOrderId: `0x${string}`): Promise<OrderStatusResult> {
+    if (!/^0x[0-9a-f]{32}$/.test(clientOrderId)) {
+      throw new Error("invalid Hyperliquid client order id");
+    }
+    const raw = await postInfo(
+      { type: "orderStatus", user: this.walletAddress, oid: clientOrderId },
+      { transport: this.transport, baseUrl: this.baseUrl },
+    );
+    return normalizeOrderStatusResult(raw);
+  }
   async signSendAsset(params: SendAssetParams): Promise<SignedSendAsset> {
     const nonce = params.nonce ?? nextNonce();
     const token =
@@ -1649,6 +1670,43 @@ function normalizeOrderResult(raw: unknown): OrderResult {
     filledQty: filled?.totalSz ? Number(filled.totalSz) : undefined,
     avgPrice: filled?.avgPx ? Number(filled.avgPx) : undefined,
     txHash: null,
+    raw,
+  });
+}
+function normalizeOrderStatusResult(raw: unknown): OrderStatusResult {
+  if (!raw || typeof raw !== "object") {
+    throw new Error("Malformed Hyperliquid orderStatus response");
+  }
+  const response = raw as Record<string, unknown>;
+  if (response.status === "unknownOid") {
+    return orderStatusResultSchema.parse({ status: "unknown", raw });
+  }
+  if (response.status !== "order" || !response.order || typeof response.order !== "object") {
+    throw new Error("Malformed Hyperliquid orderStatus response");
+  }
+  const wrapper = response.order as Record<string, unknown>;
+  const order =
+    wrapper.order && typeof wrapper.order === "object"
+      ? (wrapper.order as Record<string, unknown>)
+      : {};
+  const venueStatus = String(wrapper.status ?? "").toLowerCase();
+  const status =
+    venueStatus === "open"
+      ? "open"
+      : venueStatus === "filled"
+        ? "filled"
+        : venueStatus.includes("reject") || venueStatus.includes("margin")
+          ? "rejected"
+          : venueStatus.includes("cancel")
+            ? "canceled"
+            : "unknown";
+  const filledQty = Number(wrapper.totalSz ?? wrapper.filledSz ?? order.sz);
+  const avgPrice = Number(wrapper.avgPx ?? order.limitPx);
+  return orderStatusResultSchema.parse({
+    status,
+    orderId: order.oid === undefined ? undefined : String(order.oid),
+    filledQty: Number.isFinite(filledQty) && filledQty >= 0 ? filledQty : undefined,
+    avgPrice: Number.isFinite(avgPrice) && avgPrice >= 0 ? avgPrice : undefined,
     raw,
   });
 }
