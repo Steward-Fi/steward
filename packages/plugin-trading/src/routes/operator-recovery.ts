@@ -37,6 +37,7 @@ import { createHash } from "node:crypto";
 import {
   auditEvents,
   getDatabaseDriver,
+  getDb,
   hasTenantTransactionDatabase,
   operatorTransferReservations,
   policies,
@@ -222,6 +223,7 @@ export function createOperatorRecoveryRoutes(
     priceOracle,
     safeJsonParse,
     writeAuditEvent,
+    verifyAuditChain,
     getRedisClient,
   } = ctx;
 
@@ -724,6 +726,7 @@ export function createOperatorRecoveryRoutes(
   }
 
   type DurableTransferState = {
+    seq: number;
     action: string;
     metadata: Record<string, unknown>;
   };
@@ -736,7 +739,11 @@ export function createOperatorRecoveryRoutes(
   ): Promise<DurableTransferState | undefined> {
     const query = async (queryDb: typeof db) => {
       const rows = await queryDb
-        .select({ action: auditEvents.action, metadata: auditEvents.metadata })
+        .select({
+          seq: auditEvents.seq,
+          action: auditEvents.action,
+          metadata: auditEvents.metadata,
+        })
         .from(auditEvents)
         .where(
           and(
@@ -752,9 +759,20 @@ export function createOperatorRecoveryRoutes(
         )
         .orderBy(desc(auditEvents.seq))
         .limit(1);
-      return rows[0];
+      const selected = rows[0];
+      if (!selected) return undefined;
+      const verification = await verifyAuditChain(tenantId, {
+        fromSeq: selected.seq,
+        toSeq: selected.seq,
+        maxRows: 1,
+        executor: queryDb,
+      });
+      if (!verification.valid || verification.count !== 1) {
+        throw new Error("COLLATERAL_TRANSFER_AUDIT_EVIDENCE_INVALID");
+      }
+      return selected;
     };
-    if (hasTenantTransactionDatabase({ tenantId })) return query(db);
+    if (hasTenantTransactionDatabase({ tenantId })) return query(getDb());
 
     // Platform-key operator requests intentionally bypass tenantAuth, so they
     // do not already carry a tenant-bound database capability. Establish one
@@ -770,8 +788,12 @@ export function createOperatorRecoveryRoutes(
       process.env.STEWARD_DB_MODE === "pglite" || process.env.STEWARD_PGLITE_MEMORY === "true"
         ? "pglite"
         : getDatabaseDriver();
-    return withTenantRlsTransaction(db as never, driver, context, async (tx) =>
-      query(tx as typeof db),
+    return withTenantRlsTransaction(
+      db as never,
+      driver,
+      context,
+      async (tx) => query(tx as typeof db),
+      { isolationLevel: "repeatable read", readOnly: true },
     );
   }
 
@@ -1569,7 +1591,19 @@ export function createOperatorRecoveryRoutes(
     // process-local idempotency cache is unavailable. A requested event without
     // a terminal event means submission may have happened; fail closed instead
     // of repeating a capital movement.
-    const durableState = await findDurableTransferState(c, tenantId, agentId, body.idempotencyKey);
+    let durableState: DurableTransferState | undefined;
+    try {
+      durableState = await findDurableTransferState(c, tenantId, agentId, body.idempotencyKey);
+    } catch (err) {
+      console.error(
+        "[operator-recovery] collateral transfer audit evidence verification failed",
+        redactedThrownDiagnostics(err),
+      );
+      return c.json<ApiResponse>(
+        { ok: false, error: "Collateral transfer replay evidence is unavailable" },
+        503,
+      );
+    }
     if (durableState) {
       if (durableState.metadata.requestFingerprint !== requestFingerprint) {
         return c.json<ApiResponse>(

@@ -26,6 +26,7 @@ import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { and, asc, eq } from "drizzle-orm";
 import { Hono } from "hono";
 import { z } from "zod";
+import { verifyAuditChain } from "../../../api/src/services/audit";
 
 const PLATFORM_KEY = "stw_platform_test_operator_key";
 setDefaultTimeout(30_000);
@@ -270,6 +271,7 @@ async function buildTransferApp(failAuditAction?: string) {
       if (event.action === failAuditAction) throw new Error("forced completion audit failure");
       await baseWriteAuditEvent(event);
     },
+    verifyAuditChain,
     getRedisClient: () => null,
     requireAgentJwt: async (_c: unknown, next: () => Promise<void>) => next(),
     tenantAuth: async (_c: unknown, next: () => Promise<void>) => next(),
@@ -625,6 +627,46 @@ describe("mounted HIP-3 collateral transfer", () => {
     expect(await coldReplay.json()).toEqual({
       ok: false,
       error: "Collateral transfer outcome requires reconciliation",
+    });
+    expect(submitSendAssetCalls).toHaveLength(1);
+  });
+
+  it("fails closed instead of replaying tampered durable audit evidence", async () => {
+    resetSendAssetMock();
+    const tenantId = `tenant-transfer-tamper-${Date.now()}`;
+    const agentId = `agent-transfer-tamper-${Date.now()}`;
+    await seedAgent({ tenantId, agentId });
+    const idempotencyKey = "tampered-replay";
+    const first = await transferRequest(await buildTransferApp(), tenantId, agentId, {
+      idempotencyKey,
+    });
+    expect(first.status).toBe(200);
+
+    const durableAudits = await transferAudits(tenantId, agentId);
+    const submitted = durableAudits.at(-1);
+    expect(submitted?.action).toBe("trade.recovery.transfer.submitted");
+    await getDb()
+      .update(auditEvents)
+      .set({
+        metadata: {
+          ...submitted?.metadata,
+          response: { forged: true },
+        },
+      })
+      .where(
+        and(
+          eq(auditEvents.tenantId, tenantId),
+          eq(auditEvents.action, "trade.recovery.transfer.submitted"),
+        ),
+      );
+
+    const replay = await transferRequest(await buildTransferApp(), tenantId, agentId, {
+      idempotencyKey,
+    });
+    expect(replay.status).toBe(503);
+    expect(await replay.json()).toEqual({
+      ok: false,
+      error: "Collateral transfer replay evidence is unavailable",
     });
     expect(submitSendAssetCalls).toHaveLength(1);
   });

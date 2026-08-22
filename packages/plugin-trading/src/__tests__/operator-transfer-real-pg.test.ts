@@ -11,6 +11,7 @@ import {
 import { and, asc, eq } from "drizzle-orm";
 import { Hono } from "hono";
 import { z } from "zod";
+import { verifyAuditChain } from "../../../api/src/services/audit";
 
 const PLATFORM_KEY = "stw_platform_real_pg_transfer";
 const HAS_REAL_PG =
@@ -102,6 +103,7 @@ async function buildApp(failAuditAction?: string) {
       if (event.action === failAuditAction) throw new Error("forced terminal audit failure");
       await writeAuditEvent(event);
     },
+    verifyAuditChain,
     getRedisClient: () => null,
     requireAgentJwt: async (_c: unknown, next: () => Promise<void>) => next(),
     tenantAuth: async (_c: unknown, next: () => Promise<void>) => next(),
