@@ -111,6 +111,22 @@ async function mount(props: Record<string, unknown> = {}) {
   );
 }
 
+async function rerender(props: Record<string, unknown> = {}) {
+  await React.act(async () =>
+    root?.render(
+      React.createElement(
+        StewardProvider,
+        { client: client as any },
+        React.createElement(
+          StewardAuthContext.Provider,
+          { value: authContext() as any },
+          React.createElement(StewardLinkedAccounts, props),
+        ),
+      ),
+    ),
+  );
+}
+
 function button(label: string): HTMLButtonElement {
   const result = [...container.querySelectorAll("button")].find(
     (candidate) => candidate.textContent?.trim() === label,
@@ -298,5 +314,32 @@ describe("<StewardLinkedAccounts /> mounted interactions", () => {
     });
     expect(container.textContent).toContain("new-result");
     expect(container.textContent).not.toContain("stale-result");
+  });
+
+  test("signing out invalidates an in-flight account refresh", async () => {
+    const onLoaded = mock(() => {});
+    await mount({ onLoaded });
+    expect(onLoaded).toHaveBeenCalledTimes(1);
+
+    let resolveSignedInRefresh: ((value: unknown) => void) | undefined;
+    const signedInRefresh = new Promise((resolve) => {
+      resolveSignedInRefresh = resolve;
+    });
+    client.listUserAccounts.mockImplementationOnce(() => signedInRefresh);
+    await click("refresh");
+
+    authed = false;
+    await rerender({ onLoaded });
+    expect(container.textContent).toContain("Sign in to manage linked accounts");
+    await React.act(async () => {
+      resolveSignedInRefresh?.({
+        accounts: [account("stale", "github", "stale-after-signout")],
+        primaryLoginMethods: [{ provider: "email", providerAccountId: "stale@example.test" }],
+      });
+      await signedInRefresh;
+    });
+
+    expect(onLoaded).toHaveBeenCalledTimes(1);
+    expect(container.textContent).not.toContain("stale-after-signout");
   });
 });
