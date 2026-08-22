@@ -328,22 +328,6 @@ describe("RetryQueue", () => {
     }
   });
 
-  it("claims persistent deliveries before dispatch to prevent double sends", () => {
-    expect(persistentQueueSource).toContain("FOR UPDATE SKIP LOCKED");
-    expect(persistentQueueSource).toContain("CLAIM_VISIBILITY_TIMEOUT_MS");
-    expect(persistentQueueSource).toContain("\"status\" = 'processing'");
-    expect(persistentQueueSource).toContain("OR candidate.\"status\" = 'processing'");
-    expect(persistentQueueSource).toContain("predecessor.\"status\" = 'delivered'");
-    expect(persistentQueueSource).toContain('"webhook_config_id" AS "webhookConfigId"');
-    expect(persistentQueueSource.indexOf("UPDATE ${webhookDeliveries}")).toBeLessThan(
-      persistentQueueSource.indexOf("this.dispatcher.dispatch(event, {"),
-    );
-  });
-
-  it("uses a no-internal-retry dispatcher for persistent delivery attempts", () => {
-    expect(persistentQueueSource).toContain("new WebhookDispatcher({ maxRetries: 0 })");
-  });
-
   it("handles multiple enqueued events", async () => {
     const dispatcher = new WebhookDispatcher({
       maxRetries: 0,

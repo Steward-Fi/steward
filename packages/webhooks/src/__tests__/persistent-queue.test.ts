@@ -27,6 +27,7 @@ const claimedRows = [
     secret: "stwd_whsec_v1:{not-json",
     events: null,
     status: "processing",
+    claimToken: "claim-poison",
     attempts: 1,
     maxAttempts: 5,
     nextRetryAt: new Date(),
@@ -48,6 +49,7 @@ const claimedRows = [
     secret: "whsec_plaintext",
     events: null,
     status: "processing",
+    claimToken: "claim-good",
     attempts: 1,
     maxAttempts: 5,
     nextRetryAt: new Date(),
@@ -67,7 +69,11 @@ const db = {
   update: () => ({
     set: (value: Record<string, unknown>) => {
       updateSets.push(value);
-      return { where: () => Promise.resolve([{ id: "delivery-1", ...value }]) };
+      return {
+        where: () => ({
+          returning: () => Promise.resolve([{ id: "delivery-1", ...value }]),
+        }),
+      };
     },
   }),
 };
@@ -78,6 +84,7 @@ mock.module("@stwd/db", () => ({
   webhookDeliveries: {
     id: "id",
     status: "status",
+    claimToken: "claimToken",
     attempts: "attempts",
     nextRetryAt: "nextRetryAt",
     tenantId: "tenantId",
