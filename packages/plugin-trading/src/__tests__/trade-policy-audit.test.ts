@@ -1,17 +1,20 @@
 import { afterAll, beforeAll, describe, expect, it, mock, setDefaultTimeout } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   agents,
   agentWallets,
   auditEvents,
   closeDb,
   getDb,
+  runPluginMigrations,
   tenants,
   tradeSessions,
 } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { eq } from "drizzle-orm";
+import { migrate } from "drizzle-orm/pglite/migrator";
 import { Hono } from "hono";
 
 setDefaultTimeout(30000);
@@ -22,6 +25,13 @@ beforeAll(async () => {
   process.env.STEWARD_PGLITE_MEMORY = "true";
   process.env.STEWARD_AUDIT_HMAC_KEY ??= auditHmacKey;
   const { db, client } = await createPGLiteDb("memory://");
+  await runPluginMigrations(
+    {
+      id: "trading-policy-test",
+      migrationsFolder: fileURLToPath(new URL("../../drizzle", import.meta.url)),
+    },
+    { db, useAdvisoryLock: false, migrateFn: migrate as never },
+  );
   setPGLiteOverride(db, async () => {
     await client.close();
   });

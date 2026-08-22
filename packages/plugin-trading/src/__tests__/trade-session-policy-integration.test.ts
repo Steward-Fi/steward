@@ -6,6 +6,7 @@ import { Hono } from "hono";
 
 process.env.DATABASE_URL = "postgres://test:test@localhost:5432/test";
 process.env.STEWARD_MASTER_PASSWORD = "test-master-password";
+process.env.STEWARD_AUDIT_HMAC_KEY = "trade-session-policy-test-audit-hmac-key-0123456789abcdef";
 
 setDefaultTimeout(30000);
 
@@ -96,6 +97,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await closeDb().catch(() => undefined);
+  delete process.env.STEWARD_AUDIT_HMAC_KEY;
 });
 
 describe("trade session agent policy integration", () => {

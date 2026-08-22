@@ -216,6 +216,20 @@ async function terminalPhaseCount(tenantId: string, agentId: string): Promise<nu
   return rows.length;
 }
 
+async function releasePhaseCount(tenantId: string, agentId: string): Promise<number> {
+  const rows = await getDb()
+    .select({ id: tradingOrderOutcomes.id })
+    .from(tradingOrderOutcomes)
+    .where(
+      and(
+        eq(tradingOrderOutcomes.tenantId, tenantId),
+        eq(tradingOrderOutcomes.agentId, agentId),
+        eq(tradingOrderOutcomes.phase, "release"),
+      ),
+    );
+  return rows.length;
+}
+
 async function setTerminalPersistenceFault(enabled: boolean): Promise<void> {
   await getDb().execute(
     sql.raw("DROP TRIGGER IF EXISTS trading_test_reject_terminal ON trading_order_outcomes"),
@@ -268,6 +282,34 @@ async function setClaimPersistenceFault(enabled: boolean): Promise<void> {
     CREATE TRIGGER trading_test_reject_claim
     BEFORE INSERT ON trading_order_outcomes
     FOR EACH ROW EXECUTE FUNCTION trading_test_reject_claim()
+  `),
+  );
+}
+
+async function setReleasePersistenceFault(enabled: boolean): Promise<void> {
+  await getDb().execute(
+    sql.raw("DROP TRIGGER IF EXISTS trading_test_reject_release ON trading_order_outcomes"),
+  );
+  await getDb().execute(sql.raw("DROP FUNCTION IF EXISTS trading_test_reject_release()"));
+  if (!enabled) return;
+  await getDb().execute(
+    sql.raw(`
+    CREATE FUNCTION trading_test_reject_release() RETURNS trigger
+    LANGUAGE plpgsql AS $$
+    BEGIN
+      IF NEW.phase = 'release' THEN
+        RAISE EXCEPTION 'injected release persistence fault' USING ERRCODE = '53100';
+      END IF;
+      RETURN NEW;
+    END;
+    $$
+  `),
+  );
+  await getDb().execute(
+    sql.raw(`
+    CREATE TRIGGER trading_test_reject_release
+    BEFORE INSERT ON trading_order_outcomes
+    FOR EACH ROW EXECUTE FUNCTION trading_test_reject_release()
   `),
   );
 }
@@ -328,6 +370,73 @@ describe("Hyperliquid venue-submit spend-fence (real /hyperliquid/order path)", 
     orderStatusSpy = undefined;
     await setTerminalPersistenceFault(false);
     await setClaimPersistenceFault(false);
+    await setReleasePersistenceFault(false);
+  });
+
+  it("terminalizes and releases when the required pre-submit audit fails", async () => {
+    const { createTradeRoutes } = await import("../routes/trade");
+    const { testCtx } = await import("./_ctx");
+    const baseCtx = testCtx();
+    const routes = createTradeRoutes({
+      ...baseCtx,
+      writeAuditEvent: async (event) => {
+        if (event.action === "trade.order.submit.authorized") {
+          throw new Error("injected authorization audit outage");
+        }
+        await baseCtx.writeAuditEvent(event);
+      },
+    });
+    const { tenantId, agentId, sessionId } = await seedSession();
+    const app = makeApp(tenantId, agentId, routes);
+    signSpy = spyOn(HyperliquidAdapter.prototype, "signOrder");
+    submitSpy = spyOn(HyperliquidAdapter.prototype, "submitOrder");
+    const key = crypto.randomUUID();
+
+    const failed = await postOrder(app, sessionId, key);
+    expect(failed.status).toBe(502);
+    expect(await dailySpendOf(sessionId)).toBe(0);
+    expect(await terminalPhaseCount(tenantId, agentId)).toBe(1);
+    expect(await releasePhaseCount(tenantId, agentId)).toBe(1);
+    expect(signSpy).not.toHaveBeenCalled();
+    expect(submitSpy).not.toHaveBeenCalled();
+
+    const replay = await postOrder(app, sessionId, key);
+    expect(replay.status).toBe(502);
+    expect(replay.headers.get("Idempotency-Replayed")).toBe("true");
+    expect(await dailySpendOf(sessionId)).toBe(0);
+    expect(await releasePhaseCount(tenantId, agentId)).toBe(1);
+    expect(signSpy).not.toHaveBeenCalled();
+    expect(submitSpy).not.toHaveBeenCalled();
+  });
+
+  it("drains a crash-point release exactly once across concurrent replays", async () => {
+    const { tenantId, agentId, sessionId } = await seedSession();
+    const app = makeApp(tenantId, agentId, tradeRoutes);
+    signSpy = spyOn(HyperliquidAdapter.prototype, "signOrder").mockResolvedValue({} as never);
+    submitSpy = spyOn(HyperliquidAdapter.prototype, "submitOrder").mockResolvedValue({
+      orderId: "hl-release-crash",
+      status: "rejected",
+      error: "definite rejection",
+    } as never);
+    const key = crypto.randomUUID();
+    await setReleasePersistenceFault(true);
+
+    const first = await postOrder(app, sessionId, key);
+    expect(first.status).toBe(502);
+    expect(await dailySpendOf(sessionId)).toBe(SIZE_USD);
+    expect(await terminalPhaseCount(tenantId, agentId)).toBe(1);
+    expect(await releasePhaseCount(tenantId, agentId)).toBe(0);
+    expect(submitSpy).toHaveBeenCalledTimes(1);
+
+    await setReleasePersistenceFault(false);
+    const [replayA, replayB] = await Promise.all([
+      postOrder(app, sessionId, key),
+      postOrder(app, sessionId, key),
+    ]);
+    expect([replayA.status, replayB.status]).toEqual([400, 400]);
+    expect(await dailySpendOf(sessionId)).toBe(0);
+    expect(await releasePhaseCount(tenantId, agentId)).toBe(1);
+    expect(submitSpy).toHaveBeenCalledTimes(1);
   });
 
   it("releases the fast claim and reserves no spend when durable claim persistence fails", async () => {
@@ -568,6 +677,39 @@ describe("Hyperliquid venue-submit spend-fence (real /hyperliquid/order path)", 
     expect(submitSpy).toHaveBeenCalledTimes(1);
   });
 
+  it("reconciles a canceled order as a definite non-fill and releases once", async () => {
+    const { tenantId, agentId, sessionId } = await seedSession();
+    const app = makeApp(tenantId, agentId, tradeRoutes);
+    signSpy = spyOn(HyperliquidAdapter.prototype, "signOrder").mockResolvedValue({} as never);
+    submitSpy = spyOn(HyperliquidAdapter.prototype, "submitOrder").mockRejectedValue(
+      new Error("connection lost after venue acceptance"),
+    );
+    await setTerminalPersistenceFault(true);
+    const key = crypto.randomUUID();
+    expect((await postOrder(app, sessionId, key)).status).toBe(502);
+    await setTerminalPersistenceFault(false);
+    orderStatusSpy = spyOn(HyperliquidAdapter.prototype, "orderStatus").mockResolvedValue({
+      status: "canceled",
+      orderId: "hl-canceled-1",
+      raw: { status: "order" },
+    });
+
+    const reconciled = await reconcileOrder(app, sessionId, key);
+    expect(reconciled.status).toBe(400);
+    expect(((await reconciled.json()) as { error: string }).error).toBe("Trade order canceled");
+    expect(await dailySpendOf(sessionId)).toBe(0);
+    expect(await releasePhaseCount(tenantId, agentId)).toBe(1);
+    expect(submitSpy).toHaveBeenCalledTimes(1);
+    expect(orderStatusSpy).toHaveBeenCalledTimes(1);
+
+    const replay = await reconcileOrder(app, sessionId, key);
+    expect(replay.status).toBe(400);
+    expect(replay.headers.get("Idempotency-Replayed")).toBe("true");
+    expect(await releasePhaseCount(tenantId, agentId)).toBe(1);
+    expect(submitSpy).toHaveBeenCalledTimes(1);
+    expect(orderStatusSpy).toHaveBeenCalledTimes(1);
+  });
+
   for (const scenario of ["filled", "rejected", "ambiguous"] as const) {
     it(`keeps ${scenario} terminal-persistence faults non-resubmittable`, async () => {
       const { tenantId, agentId, sessionId } = await seedSession();
@@ -599,8 +741,9 @@ describe("Hyperliquid venue-submit spend-fence (real /hyperliquid/order path)", 
         "Trade execution requires reconciliation",
       );
       expect(submitSpy).toHaveBeenCalledTimes(1);
-      expect(await dailySpendOf(sessionId)).toBe(SIZE_USD);
+      expect(await dailySpendOf(sessionId)).toBe(scenario === "rejected" ? 0 : SIZE_USD);
       expect(await terminalPhaseCount(tenantId, agentId)).toBe(0);
+      expect(await releasePhaseCount(tenantId, agentId)).toBe(scenario === "rejected" ? 1 : 0);
 
       // Simulate restart/Redis loss with a fresh router. The immutable claim is
       // sufficient to fence the movement until an operator reconciles it.
@@ -854,9 +997,21 @@ describe("Hyperliquid venue-submit spend-fence (real /hyperliquid/order path)", 
   });
 
   it("does not sign or submit when builder-perp leverage setup is rejected", async () => {
+    const { createTradeRoutes } = await import("../routes/trade");
+    const { testCtx } = await import("./_ctx");
+    const baseCtx = testCtx();
+    const routes = createTradeRoutes({
+      ...baseCtx,
+      writeAuditEvent: async (event) => {
+        if (event.action === "trade.order.leverage.failed") {
+          throw new Error("injected leverage failure audit outage");
+        }
+        await baseCtx.writeAuditEvent(event);
+      },
+    });
     const builderAsset = "xyz:SPCX";
     const { tenantId, agentId, sessionId } = await seedSession([builderAsset]);
-    const app = makeApp(tenantId, agentId, tradeRoutes);
+    const app = makeApp(tenantId, agentId, routes);
     updateLeverageSpy = spyOn(HyperliquidAdapter.prototype, "updateLeverage").mockRejectedValue(
       new Error("venue leverage rejected"),
     );
@@ -886,17 +1041,78 @@ describe("Hyperliquid venue-submit spend-fence (real /hyperliquid/order path)", 
     expect(signSpy).not.toHaveBeenCalled();
     expect(submitSpy).not.toHaveBeenCalled();
     expect(await dailySpendOf(sessionId)).toBe(0);
-    expect(await auditCount(tenantId, "trade.order.leverage.failed")).toBe(1);
+    expect(await auditCount(tenantId, "trade.order.leverage.failed")).toBe(0);
     expect(await terminalPhaseCount(tenantId, agentId)).toBe(1);
+    expect(await releasePhaseCount(tenantId, agentId)).toBe(1);
     const replay = await postOrder(app, sessionId, key, orderBody);
     expect(replay.status).toBe(502);
     expect(updateLeverageSpy).toHaveBeenCalledTimes(1);
     expect(signSpy).not.toHaveBeenCalled();
   });
 
+  it("terminalizes and releases when the post-leverage audit fails", async () => {
+    const { createTradeRoutes } = await import("../routes/trade");
+    const { testCtx } = await import("./_ctx");
+    const baseCtx = testCtx();
+    const routes = createTradeRoutes({
+      ...baseCtx,
+      writeAuditEvent: async (event) => {
+        if (event.action === "trade.order.leverage.set") {
+          throw new Error("injected leverage-set audit outage");
+        }
+        await baseCtx.writeAuditEvent(event);
+      },
+    });
+    const builderAsset = "xyz:SPCX";
+    const { tenantId, agentId, sessionId } = await seedSession([builderAsset]);
+    const app = makeApp(tenantId, agentId, routes);
+    updateLeverageSpy = spyOn(HyperliquidAdapter.prototype, "updateLeverage").mockResolvedValue({
+      status: "ok",
+    } as never);
+    signSpy = spyOn(HyperliquidAdapter.prototype, "signOrder");
+    submitSpy = spyOn(HyperliquidAdapter.prototype, "submitOrder");
+    const key = crypto.randomUUID();
+    const orderBody = {
+      asset: builderAsset,
+      side: "buy",
+      size: 1,
+      leverage: 7,
+      limitPx: 10,
+    };
+
+    const failed = await postOrder(app, sessionId, key, orderBody);
+    expect(failed.status).toBe(502);
+    expect(await dailySpendOf(sessionId)).toBe(0);
+    expect(await terminalPhaseCount(tenantId, agentId)).toBe(1);
+    expect(await releasePhaseCount(tenantId, agentId)).toBe(1);
+    expect(updateLeverageSpy).toHaveBeenCalledTimes(1);
+    expect(signSpy).not.toHaveBeenCalled();
+    expect(submitSpy).not.toHaveBeenCalled();
+
+    const replay = await postOrder(app, sessionId, key, orderBody);
+    expect(replay.status).toBe(502);
+    expect(replay.headers.get("Idempotency-Replayed")).toBe("true");
+    expect(await releasePhaseCount(tenantId, agentId)).toBe(1);
+    expect(updateLeverageSpy).toHaveBeenCalledTimes(1);
+    expect(signSpy).not.toHaveBeenCalled();
+    expect(submitSpy).not.toHaveBeenCalled();
+  });
+
   it("terminalizes a definite signing failure before releasing spend", async () => {
+    const { createTradeRoutes } = await import("../routes/trade");
+    const { testCtx } = await import("./_ctx");
+    const baseCtx = testCtx();
+    const routes = createTradeRoutes({
+      ...baseCtx,
+      writeAuditEvent: async (event) => {
+        if (event.action === "trade.order.canceled") {
+          throw new Error("injected signing failure audit outage");
+        }
+        await baseCtx.writeAuditEvent(event);
+      },
+    });
     const { tenantId, agentId, sessionId } = await seedSession();
-    const app = makeApp(tenantId, agentId, tradeRoutes);
+    const app = makeApp(tenantId, agentId, routes);
     signSpy = spyOn(HyperliquidAdapter.prototype, "signOrder").mockRejectedValue(
       new Error("vault rejected typed data"),
     );
@@ -905,6 +1121,7 @@ describe("Hyperliquid venue-submit spend-fence (real /hyperliquid/order path)", 
     const failed = await postOrder(app, sessionId, key);
     expect(failed.status).toBe(400);
     expect(await terminalPhaseCount(tenantId, agentId)).toBe(1);
+    expect(await releasePhaseCount(tenantId, agentId)).toBe(1);
     expect(await dailySpendOf(sessionId)).toBe(0);
     expect(submitSpy).not.toHaveBeenCalled();
 

@@ -13,9 +13,10 @@ import {
  *
  * Redis remains the fast claim/CAS layer. PostgreSQL rows are written before
  * venue I/O (phase `claim`) and after a terminal result (phase
- * `terminal`). Both rows are immutable. A claim without a terminal row is a
- * durable reconciliation anchor, so a Redis outage or expired pending marker
- * can never authorize the same movement again.
+ * `terminal`). A third immutable `release` row is committed atomically with a
+ * spend decrement for terminal non-fill outcomes. A claim without a terminal
+ * row is a durable reconciliation anchor, so a Redis outage or expired pending
+ * marker can never authorize the same movement again.
  */
 export const tradingOrderOutcomes = pgTable(
   "trading_order_outcomes",

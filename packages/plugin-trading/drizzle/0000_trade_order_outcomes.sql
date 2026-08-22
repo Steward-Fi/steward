@@ -1,6 +1,8 @@
 -- Durable execution + terminal replay authority for fund-moving venue orders.
 -- Redis owns the fast pending claim. PostgreSQL receives one immutable `claim`
 -- row before venue I/O and one immutable `terminal` row after a known result.
+-- Non-fill outcomes add one immutable `release` row in the same transaction as
+-- the spend decrement, making replay-driven effect draining exactly once.
 -- A claim without a terminal row survives Redis expiry/restart as a fail-closed
 -- reconciliation anchor and can never authorize another venue submission.
 CREATE TABLE "trading_order_outcomes" (
@@ -15,7 +17,7 @@ CREATE TABLE "trading_order_outcomes" (
 	"response" jsonb NOT NULL,
 	"created_at" timestamptz DEFAULT now() NOT NULL,
 	CONSTRAINT "trading_order_outcomes_status_chk" CHECK ("http_status" IN (200, 400, 409, 502)),
-	CONSTRAINT "trading_order_outcomes_phase_chk" CHECK ("phase" IN ('claim', 'terminal')),
+	CONSTRAINT "trading_order_outcomes_phase_chk" CHECK ("phase" IN ('claim', 'terminal', 'release')),
 	CONSTRAINT "trading_order_outcomes_key_hash_chk" CHECK ("idempotency_key_hash" ~ '^[0-9a-f]{64}$'),
 	CONSTRAINT "trading_order_outcomes_request_hash_chk" CHECK ("request_hash" ~ '^[0-9a-f]{64}$'),
 	CONSTRAINT "trading_order_outcomes_response_size_chk" CHECK (octet_length("response"::text) <= 16384)
