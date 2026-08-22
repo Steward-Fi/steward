@@ -7381,6 +7381,17 @@ user.patch("/me/tenants/:tenantId/users/:targetUserId/role", async (c) => {
         }
       }
 
+      const revokedUserTokensIssuedBefore =
+        membership.role === nextRole ? null : Math.floor(Date.now() / 1000) + 1;
+      if (revokedUserTokensIssuedBefore !== null) {
+        await revocationStore.revokeUserTokens(targetUserId, revokedUserTokensIssuedBefore);
+        await tx
+          .delete(refreshTokens)
+          .where(
+            and(eq(refreshTokens.tenantId, tenantId), eq(refreshTokens.userId, targetUserId)),
+          );
+      }
+
       await tx
         .update(userTenants)
         .set({ role: nextRole })
@@ -7399,7 +7410,11 @@ user.patch("/me/tenants/:tenantId/users/:targetUserId/role", async (c) => {
         action: "tenant.member.role.update",
         resourceType: "user",
         resourceId: targetUserId,
-        metadata: { previousRole: membership.role, role: row.role },
+        metadata: {
+          previousRole: membership.role,
+          role: row.role,
+          revokedUserTokensIssuedBefore,
+        },
         ipAddress: c.req.header("x-forwarded-for") ?? null,
         userAgent: c.req.header("user-agent") ?? null,
         requestId: c.get("requestId") ?? null,
@@ -7555,6 +7570,9 @@ user.patch("/me/tenants/:tenantId/users/:targetUserId/deactivate", async (c) => 
     resourceId: targetUserId,
   });
 
+  const issuedBefore = Math.floor(Date.now() / 1000) + 1;
+  await revocationStore.revokeUserTokens(targetUserId, issuedBefore);
+
   const result = await withTenantAuditedTransaction(
       tenantId,
       async (txRaw, appendRequiredAudit) => {
@@ -7595,7 +7613,6 @@ user.patch("/me/tenants/:tenantId/users/:targetUserId/deactivate", async (c) => 
         .limit(1);
       if (!target) return null;
 
-      const issuedBefore = Math.floor(Date.now() / 1000) + 1;
       await tx
         .update(users)
         .set({ deactivatedAt: deactivated ? new Date() : null, updatedAt: new Date() })
@@ -7641,8 +7658,6 @@ user.patch("/me/tenants/:tenantId/users/:targetUserId/deactivate", async (c) => 
   if (result === null || !result.row) {
     return c.json<ApiResponse>({ ok: false, error: "User not found in tenant" }, 404);
   }
-
-  await revocationStore.revokeUserTokens(targetUserId, result.issuedBefore);
 
   dispatchWebhook(tenantId, targetUserId, "user.updated_account", {
     userId: targetUserId,
@@ -7715,6 +7730,7 @@ user.delete("/me/tenants/:tenantId/users/:targetUserId", async (c) => {
   });
 
   const revokedBefore = Math.floor(Date.now() / 1000) + 1;
+  await revocationStore.revokeUserTokens(targetUserId, revokedBefore);
   let deleted: {
     membership: {
       id: string;
@@ -7796,8 +7812,6 @@ user.delete("/me/tenants/:tenantId/users/:targetUserId", async (c) => {
     throw err;
   }
   if (!deleted) return c.json<ApiResponse>({ ok: false, error: "User not found in tenant" }, 404);
-
-  await revocationStore.revokeUserTokens(targetUserId, revokedBefore);
 
   dispatchWebhook(tenantId, targetUserId, "user.updated_account", {
     userId: targetUserId,

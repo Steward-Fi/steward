@@ -462,16 +462,14 @@ describe("platform security hardening", () => {
     );
   });
 
-  it("revokes user access tokens only after audited tenant membership removal commits", () => {
+  it("revokes user access tokens conservatively before tenant membership removal", () => {
     const memberDeleteStart = platformSource.indexOf(
       'platform.delete("/tenants/:id/members/:userId"',
     );
     expect(memberDeleteStart).toBeGreaterThanOrEqual(0);
     expect(
       platformSource.indexOf("revocationStore.revokeUserTokens(userId)", memberDeleteStart),
-    ).toBeGreaterThan(
-      platformSource.indexOf('action: "tenant.member.remove",', memberDeleteStart),
-    );
+    ).toBeLessThan(platformSource.indexOf(".delete(userTenants)", memberDeleteStart));
     expect(
       platformSource.indexOf("revokedUserTokensIssuedBefore", memberDeleteStart),
     ).toBeGreaterThan(memberDeleteStart);
@@ -516,16 +514,14 @@ describe("platform security hardening", () => {
     );
   });
 
-  it("revokes tenant member sessions only after audited platform role changes commit", () => {
+  it("revokes tenant member sessions before platform role changes take effect", () => {
     const memberRoleUpdateStart = platformSource.indexOf(
       'platform.patch("/tenants/:id/members/:userId"',
     );
     expect(memberRoleUpdateStart).toBeGreaterThanOrEqual(0);
     expect(
       platformSource.indexOf("revocationStore.revokeUserTokens(userId", memberRoleUpdateStart),
-    ).toBeGreaterThan(
-      platformSource.indexOf('action: "tenant.member.role.update",', memberRoleUpdateStart),
-    );
+    ).toBeLessThan(platformSource.indexOf(".set({ role })", memberRoleUpdateStart));
     expect(platformSource.indexOf(".delete(refreshTokens)", memberRoleUpdateStart)).toBeLessThan(
       platformSource.indexOf(".set({ role })", memberRoleUpdateStart),
     );

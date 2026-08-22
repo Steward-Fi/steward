@@ -234,7 +234,8 @@ realPostgresDescribe("tenant membership audit atomicity with real PostgreSQL", (
         ),
       );
     expect(authorization).toHaveLength(1);
-    expect(revokeUserTokens).not.toHaveBeenCalled();
+    expect(revokeUserTokens).toHaveBeenCalledTimes(1);
+    expect(revokeUserTokens).toHaveBeenCalledWith(member, expect.any(Number));
   });
 });
 

@@ -162,6 +162,19 @@ describe("user membership hardening", () => {
     expect(platformInviteRoute).toContain("valid email is required");
     expect(platformInviteRoute).toContain("invitedByUserId must belong to the tenant");
     expect(platformInviteRoute).toContain("lockedInviterMembership");
+    for (const marker of [
+      'platform.post("/tenants/:id/invitations"',
+      'platform.delete("/tenants/:id/invitations/:invitationId"',
+      'platform.post("/tenants/:id/members"',
+      'platform.delete("/tenants/:id/members/:userId"',
+      'platform.patch("/tenants/:id/members/:userId"',
+    ]) {
+      const start = platformSource.indexOf(marker);
+      const next = platformSource.indexOf("\nplatform.", start + marker.length);
+      expect(platformSource.slice(start, next === -1 ? undefined : next)).toContain(
+        "isReservedTenantId(tenantId)",
+      );
+    }
     expect(platformInviteRoute).toContain("hashSha256Hex(token)");
     expect(platformInviteRoute).toContain("body.sendEmail === true");
     expect(platformInviteRoute).toContain("sendTenantInvitation(email");

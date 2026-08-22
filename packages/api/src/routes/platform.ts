@@ -4573,6 +4573,12 @@ platform.patch("/tenants/:id/users/:userId/metadata", async (c) => {
   if (!isValidTenantId(tenantId)) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid tenant id format" }, 400);
   }
+  if (isReservedTenantId(tenantId)) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Personal and reserved tenant membership is immutable" },
+      409,
+    );
+  }
   if (!isValidUserId(userId)) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid user id format" }, 400);
   }
@@ -4756,7 +4762,7 @@ platform.post("/tenants/:id/invitations", async (c) => {
   if (!isValidTenantId(tenantId)) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid tenant id format" }, 400);
   }
-  if (isPersonalTenantId(tenantId)) {
+  if (isReservedTenantId(tenantId)) {
     return c.json<ApiResponse>(
       { ok: false, error: "Personal tenant membership is immutable" },
       409,
@@ -4925,7 +4931,7 @@ platform.delete("/tenants/:id/invitations/:invitationId", async (c) => {
   if (!isValidTenantId(tenantId)) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid tenant id format" }, 400);
   }
-  if (isPersonalTenantId(tenantId)) {
+  if (isReservedTenantId(tenantId)) {
     return c.json<ApiResponse>(
       { ok: false, error: "Personal tenant membership is immutable" },
       409,
@@ -5016,7 +5022,7 @@ platform.post("/tenants/:id/members", async (c) => {
   if (!isValidTenantId(tenantId)) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid tenant id format" }, 400);
   }
-  if (isPersonalTenantId(tenantId)) {
+  if (isReservedTenantId(tenantId)) {
     return c.json<ApiResponse>(
       { ok: false, error: "Personal tenant membership is immutable" },
       409,
@@ -5130,7 +5136,7 @@ platform.delete("/tenants/:id/members/:userId", async (c) => {
   if (!isValidTenantId(tenantId)) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid tenant id format" }, 400);
   }
-  if (isPersonalTenantId(tenantId)) {
+  if (isReservedTenantId(tenantId)) {
     return c.json<ApiResponse>(
       { ok: false, error: "Personal tenant membership is immutable" },
       409,
@@ -5178,6 +5184,7 @@ platform.delete("/tenants/:id/members/:userId", async (c) => {
   });
 
   const revokedBefore = Math.floor(Date.now() / 1000) + 1;
+  await revocationStore.revokeUserTokens(userId, revokedBefore);
 
   let deleted: typeof userTenants.$inferSelect | undefined;
   try {
@@ -5223,8 +5230,6 @@ platform.delete("/tenants/:id/members/:userId", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: "Member not found in tenant" }, 404);
   }
 
-  await revocationStore.revokeUserTokens(userId, revokedBefore);
-
   return c.json<ApiResponse>({ ok: true });
 });
 
@@ -5244,7 +5249,7 @@ platform.patch("/tenants/:id/members/:userId", async (c) => {
   if (!isValidTenantId(tenantId)) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid tenant id format" }, 400);
   }
-  if (isPersonalTenantId(tenantId)) {
+  if (isReservedTenantId(tenantId)) {
     return c.json<ApiResponse>(
       { ok: false, error: "Personal tenant membership is immutable" },
       409,
@@ -5306,6 +5311,12 @@ platform.patch("/tenants/:id/members/:userId", async (c) => {
     ...auditCtx(c),
   });
 
+  const revokedUserTokensIssuedBefore =
+    currentMember.role === role ? null : Math.floor(Date.now() / 1000) + 1;
+  if (revokedUserTokensIssuedBefore !== null) {
+    await revocationStore.revokeUserTokens(userId, revokedUserTokensIssuedBefore);
+  }
+
   let updated:
     | {
         row: typeof userTenants.$inferSelect;
@@ -5327,8 +5338,6 @@ platform.patch("/tenants/:id/members/:userId", async (c) => {
           throw new Error("Cannot downgrade the sole tenant owner");
         }
       }
-      const revokedUserTokensIssuedBefore =
-        current.role === role ? null : Math.floor(Date.now() / 1000) + 1;
       if (revokedUserTokensIssuedBefore !== null) {
         await tx
           .delete(refreshTokens)
@@ -5367,10 +5376,6 @@ platform.patch("/tenants/:id/members/:userId", async (c) => {
   }
   if (!updated) {
     return c.json<ApiResponse>({ ok: false, error: "Member not found in tenant" }, 404);
-  }
-
-  if (updated.revokedUserTokensIssuedBefore !== null) {
-    await revocationStore.revokeUserTokens(userId, updated.revokedUserTokensIssuedBefore);
   }
 
   return c.json<ApiResponse<{ userId: string; tenantId: string; role: string }>>({
