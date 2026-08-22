@@ -90,13 +90,13 @@ describe("transaction-capable Workers database driver", () => {
     ).toThrow("does not authenticate the database server");
   });
 
-  test("bounds connection, query, lock, statement, and idle transaction phases", () => {
+  test("bounds the request plus autonomous connection, query, lock, statement, and idle phases", () => {
     const config = __buildNeonTransactionPoolConfigForTests({
       DATABASE_DRIVER: "neon-websocket",
       DATABASE_URL: "postgresql://db.example.test/steward?sslmode=verify-full",
       NODE_ENV: "production",
     });
-    expect(config.max).toBe(1);
+    expect(config.max).toBe(2);
     expect(config.connectionTimeoutMillis).toBe(10_000);
     expect(config.idleTimeoutMillis).toBe(30_000);
     expect(config.query_timeout).toBe(30_000);

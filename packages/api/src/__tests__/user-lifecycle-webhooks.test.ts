@@ -11,7 +11,14 @@ import {
 
 setDefaultTimeout(30000);
 
-import { closeDb, getDb, tenantConfigs, tenants, users } from "@stwd/db";
+import {
+  __resetAuditHmacKeyCacheForTests,
+  closeDb,
+  getDb,
+  tenantConfigs,
+  tenants,
+  users,
+} from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 
 const dispatchWebhookMock = mock(() => {});
@@ -30,6 +37,9 @@ describe("user lifecycle webhook dispatch", () => {
   beforeAll(async () => {
     process.env.STEWARD_PGLITE_MEMORY = "true";
     process.env.STEWARD_MASTER_PASSWORD = "user-lifecycle-webhooks-master-password";
+    process.env.STEWARD_AUDIT_HMAC_KEY =
+      "user-lifecycle-webhooks-audit-hmac-key-with-enough-entropy";
+    __resetAuditHmacKeyCacheForTests();
     process.env.STEWARD_JWT_SECRET = "user-lifecycle-webhooks-jwt-secret-with-enough-entropy";
     process.env.STEWARD_PLATFORM_KEYS = PLATFORM_KEY;
     process.env.STEWARD_PLATFORM_KEY_SCOPES = JSON.stringify({
@@ -62,6 +72,8 @@ describe("user lifecycle webhook dispatch", () => {
     await closeDb();
     delete process.env.STEWARD_PGLITE_MEMORY;
     delete process.env.STEWARD_MASTER_PASSWORD;
+    delete process.env.STEWARD_AUDIT_HMAC_KEY;
+    __resetAuditHmacKeyCacheForTests();
     delete process.env.STEWARD_JWT_SECRET;
     delete process.env.STEWARD_PLATFORM_KEYS;
     delete process.env.STEWARD_PLATFORM_KEY_SCOPES;

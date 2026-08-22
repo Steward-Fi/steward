@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # client-entrypoint-mutation-proofs.sh
 #
-# Mutation proofs for the @stwd/shared/client contract test (issue #231).
+# Mutation proofs for the @stwd/shared/client contract test.
 # Each mutation weakens the client-safety guarantee, asserts the contract
 # test FAILS, then restores the original and asserts it PASSES again.
 #

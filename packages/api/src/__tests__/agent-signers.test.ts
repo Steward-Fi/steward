@@ -16,6 +16,7 @@ import type { AppVariables } from "../services/context";
 import {
   cleanupAgentBehaviorTestDatabase,
   setupAgentBehaviorTestDatabase,
+  USING_REAL_POSTGRES,
 } from "./agent-behavior-test-database";
 
 const TENANT_ID = `agent-signers-tenant-${Date.now()}`;
@@ -23,6 +24,7 @@ const AGENT_ID = `agent-signers-agent-${Date.now()}`;
 const AUDIT_TRIGGER_SUFFIX = `${process.pid}_${Math.random().toString(36).slice(2, 8)}`;
 const savedSignerCredentialPepper = process.env.STEWARD_SIGNER_CREDENTIAL_PEPPER;
 const MUTATED_ENV = [
+  "STEWARD_DB_MODE",
   "STEWARD_PGLITE_MEMORY",
   "STEWARD_MASTER_PASSWORD",
   "STEWARD_AUDIT_HMAC_KEY",
@@ -62,6 +64,10 @@ describe("agent signer API", () => {
       "agent-signers-credential-pepper-with-enough-entropy";
     __resetAuditHmacKeyCacheForTests();
     await setupAgentBehaviorTestDatabase();
+    if (!USING_REAL_POSTGRES) {
+      process.env.STEWARD_DB_MODE = "pglite";
+      delete process.env.STEWARD_PGLITE_MEMORY;
+    }
     await getDb()
       .insert(tenants)
       .values({
@@ -113,7 +119,7 @@ describe("agent signer API", () => {
     }
   });
 
-  it("creates, lists, updates, and revokes delegated signer metadata", async () => {
+  it("creates, lists, updates, and revokes delegated signer metadata in explicit PGLite mode", async () => {
     const createResponse = await app.request(`/agents/${AGENT_ID}/signers`, {
       method: "POST",
       headers: { "content-type": "application/json" },

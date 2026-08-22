@@ -1,8 +1,8 @@
 /**
  * client.ts: the browser/worker-safe entrypoint for `@stwd/shared`.
  *
- * WHY THIS EXISTS (issue #231)
- * ----------------------------
+ * CLIENT-SAFE BOUNDARY
+ * --------------------
  * The top-level barrel (`index.ts`) re-exports server-only modules that import
  * `node:crypto` (`provider-execution-auth.ts`, `provider-action.ts`). Any web
  * bundle that imports the barrel, even for a pure helper like

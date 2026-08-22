@@ -82,7 +82,9 @@ test.describe("Dashboard condition sets", () => {
     await page.route(
       (url) => url.href.startsWith(API) && /\/agents$/.test(url.pathname),
       async (route) => {
-        await route.fulfill({ json: { ok: true, data: [] } });
+        await route.fulfill({
+          json: { ok: true, data: { agents: [], limit: 100, offset: 0 } },
+        });
       },
     );
     await page.route(

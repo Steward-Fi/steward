@@ -87,13 +87,13 @@ export function StewardOAuthCallback({
     }
 
     // Code-in-URL (consumer handles the exchange)
-    if (code) {
+    if (code && state) {
       window.opener?.postMessage(
-        { type: "steward-oauth-callback", code, state: state ?? "" },
+        { type: "steward-oauth-callback", code, state },
         window.location.origin,
       );
       setStep("success");
-      onSuccess?.({ code, state: state ?? "" } as {
+      onSuccess?.({ code, state } as {
         code: string;
         state: string;
       });

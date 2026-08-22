@@ -28,7 +28,7 @@ if (!process.env.DATABASE_URL) {
   process.env.DATABASE_URL = "pglite://embedded";
 }
 
-// Ensure STEWARD_MASTER_PASSWORD is set (context.ts requires it at module level).
+// Ensure the Bun runtime custody authority has a durable master password.
 // Auto-generate one if not provided — the sidecar also generates one and passes
 // it via env, but standalone `bun run start:local` needs a fallback.
 // SEC-147: a fresh random password per boot silently makes everything sealed

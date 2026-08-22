@@ -55,11 +55,11 @@ export interface PolicyEvaluationContext {
   priceOracle?: PriceOracle;
   /** Optional reputation score for reputation-based policies */
   reputationScore?: number;
-  /** Sprint 4: trading venue (for `venue-allowlist`). */
+  /** Trading venue for `venue-allowlist`. */
   venue?: string;
-  /** Sprint 4: requested leverage multiple (for `leverage-cap`). */
+  /** Requested leverage multiple for `leverage-cap`. */
   leverage?: number;
-  /** Sprint 4: pre-computed USD value of the action. */
+  /** Pre-computed USD value of the action. */
   valueUsd?: number;
   /**
    * Privy-style condition set items keyed by conditionSetId. Callers load these
@@ -89,7 +89,7 @@ export interface PolicyEvaluationContext {
   };
   /**
    * Capability-invoke context for `capability-intent` policies. The capability
-   * invoke route (W-1c) wires this from the resolved capability; absent on
+   * invoke route wires this from the resolved capability; absent on
    * ordinary transaction signs, so capability policies stay inert on tx signing
    * (mirrors the `typedData` seam).
    */
@@ -102,7 +102,7 @@ export interface PolicyEvaluationContext {
   };
   /**
    * Trailing-hour capability-invoke count (distinct from `recentTxCount1h`). The
-   * invoke route (W-1c) wires this so `capability-intent`'s `maxCallsPerHour`
+   * invoke route wires this so `capability-intent`'s `maxCallsPerHour`
    * constraint can be enforced; absent => that constraint fails closed (deny).
    */
   capabilityInvokeCount1h?: number;
@@ -159,7 +159,7 @@ export type AuditHook = (event: PolicyEvaluatedEvent) => void | Promise<void>;
 
 export interface PolicyEngineOptions {
   /**
-   * Sprint 4: optional sink for `policy.evaluated` audit events. Trade-
+   * Optional sink for `policy.evaluated` audit events. Trade-
    * sessions wires this to the proxy audit log so every evaluation is
    * traceable to its inputs and verdict. Failures inside the hook are
    * swallowed so they don't block the trade — but counted on

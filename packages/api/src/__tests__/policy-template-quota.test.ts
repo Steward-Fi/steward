@@ -127,7 +127,9 @@ realPostgresIt("serializes same-tenant creates at the 100-template quota", async
       });
 
     const requests = [create("racer-a"), create("racer-b")];
-    await waitForAdvisoryWaiters(observer, holderPid, 2);
+    // The first request waits on the quota lock while holding the canonical
+    // tenant audit lock; the second waits behind it on that tenant lock.
+    await waitForAdvisoryWaiters(observer, holderPid, 1);
     releaseLock();
 
     const responses = await Promise.all(requests);

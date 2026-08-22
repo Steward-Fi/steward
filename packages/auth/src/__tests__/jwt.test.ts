@@ -148,3 +148,50 @@ describe("JWT secret strength policy (SEC-053, SEC-054)", () => {
     }
   });
 });
+
+describe("#778 non-embedded production JWT migration contract", () => {
+  it("rejects a master-password fallback outside embedded mode", async () => {
+    const { getJwtSecret } = await import(`../jwt?docs778-master=${Date.now()}`);
+    expect(() =>
+      getJwtSecret({
+        warn: null,
+        environment: {
+          NODE_ENV: "production",
+          STEWARD_MASTER_PASSWORD: "master-password-is-not-a-server-jwt-secret",
+        },
+      }),
+    ).toThrow("STEWARD_JWT_SECRET is required in production");
+  });
+
+  it("temporarily accepts and deprecates a sufficiently long legacy session secret", async () => {
+    const { getJwtSecret } = await import(`../jwt?docs778-session=${Date.now()}`);
+    const warnings: string[] = [];
+    const legacySecret = "legacy-session-secret-with-at-least-32-characters";
+    expect(
+      getJwtSecret({
+        warn: (message) => warnings.push(message),
+        environment: {
+          NODE_ENV: "production",
+          STEWARD_SESSION_SECRET: legacySecret,
+        },
+      }),
+    ).toBe(legacySecret);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("STEWARD_SESSION_SECRET is deprecated");
+  });
+
+  it("derives a domain-separated embedded production secret from the master", async () => {
+    const { getJwtSecret } = await import(`../jwt?docs778-embedded=${Date.now()}`);
+    const masterPassword = "embedded-master-password-with-at-least-32-characters";
+    const derived = getJwtSecret({
+      warn: null,
+      environment: {
+        NODE_ENV: "production",
+        STEWARD_EMBEDDED: "true",
+        STEWARD_MASTER_PASSWORD: masterPassword,
+      },
+    });
+    expect(derived).not.toBe(masterPassword);
+    expect(derived).toHaveLength(64);
+  });
+});

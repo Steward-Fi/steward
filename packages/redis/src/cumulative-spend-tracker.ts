@@ -1,7 +1,7 @@
 /**
  * Cumulative (aggregate) spend tracker with CONFIGURABLE trailing windows and
  * ATOMIC single-winner reservations - backs the policy-engine `cumulativeSpend`
- * capability-intent constraint (#206, Privy aggregate-limit parity).
+ * capability-intent aggregate-limit constraint.
  *
  * WHY A NEW TRACKER (vs spend-tracker.ts / aggregation-tracker.ts)
  * ---------------------------------------------------------------
@@ -11,13 +11,13 @@
  *   - `aggregation-tracker.ts` supports rolling windows but is READ-THEN-CHECK
  *     (record AFTER settle; the evaluator reads a snapshot). Two concurrent
  *     invokes can both read the same prior sum and both pass - unacceptable for a
- *     hard money cap (#206 req 4).
+ *     hard money cap.
  * This tracker combines both: a sorted-set rolling window (any windowSeconds) +
  * a single Lua script that prunes, sums, checks EACH cap's `sum + amount <= max`
  * over its own window, and only then appends the reservation - so concurrent
  * reservers can never collectively cross any cap (TOCTOU-free).
  *
- * STREAM KEY vs CAP THRESHOLDS (codex P1 fix)
+ * STREAM KEY vs CAP THRESHOLDS
  * -------------------------------------------
  * The Redis ZSET (the "spend stream") is keyed ONLY by the spend-stream identity
  * `(agentId, scope, scopeKey, currency)` - NOT by the cap's window/max. Editing a
@@ -25,7 +25,7 @@
  * accumulated history, never a fresh empty bucket. Cap thresholds are supplied as
  * check parameters per reserve, not baked into the key.
  *
- * MULTIPLE CAPS ON ONE STREAM (codex P2 fix)
+ * MULTIPLE CAPS ON ONE STREAM
  * ------------------------------------------
  * A single invoke that is governed by several caps on the same stream (e.g. a 1h
  * AND a 24h cap, or two rules) is reserved ONCE: the atomic script checks ALL
@@ -67,7 +67,7 @@ import { getRedis } from "./client.js";
 
 export type CumulativeSpendScope = "operation" | "agent" | "grant";
 
-/** Reserved currency tag for the #206 windowed invoke-count stream (never a real
+/** Reserved currency tag for the windowed invoke-count stream (never a real
  *  asset), so a count stream can never collide with a spend stream. */
 const WINDOWED_INVOKE_CURRENCY = "__calls__";
 
@@ -78,7 +78,7 @@ const MAX_LEGACY_BRIDGE_ENTRIES = 10_000;
 const LEGACY_BRIDGE_VERSION = "steward.cumulative-spend-bridge.v1";
 
 /** The spend-stream identity. Editing a cap does NOT change this key, so history
- *  persists across cap edits (codex P1). */
+ *  persists across cap edits. */
 export interface CumulativeSpendStream {
   /** Tenant namespace. New governed callers MUST supply it; omitted only for
    * legacy streams that predate tenant-bound keys. */
@@ -138,7 +138,7 @@ export function __setBeforeCumulativeSpendSumImportForTests(hook?: () => Promise
 
 function streamKey(s: CumulativeSpendStream): string {
   // scopeKey/currency are operator/adapter-derived tags; encode to keep the key
-  // delimiter-safe. Deliberately NO window/max in the key (codex P1): the stream
+  // delimiter-safe. Deliberately NO window/max in the key: the stream
   // identity is the spend history, not the current cap threshold.
   const enc = (v: string) => encodeURIComponent(v);
   if (s.tenantId) {
@@ -925,11 +925,11 @@ export async function getCumulativeSpendSum(
 }
 
 /**
- * #206 configurable count cap (maxCalls + callWindow): ATOMICALLY reserve ONE
+ * Configurable count cap (maxCalls + callWindow): ATOMICALLY reserve ONE
  * invoke against EVERY count window governing the operation. The invoke is added
  * to the operation-level `__calls__` stream EXACTLY ONCE (amount=1), and each
  * cap's window is checked atomically - so combining an hourly AND a daily cap
- * never double-counts a single invoke (codex P2), and concurrent invokes cannot
+ * never double-counts a single invoke, and concurrent invokes cannot
  * collectively exceed any cap (single-winner). Returns ok=false when ANY cap is
  * at its limit, plus the per-cap prior counts (same order as `caps`). Returns
  * { ok:false } on a Redis error (fail closed).

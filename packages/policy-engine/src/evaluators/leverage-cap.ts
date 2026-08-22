@@ -1,4 +1,4 @@
-// Sprint 4: leverage-cap policy evaluator.
+// Leverage-cap policy evaluator.
 //
 // Caps requested leverage at config.maxLeverage. A request without an
 // explicit `leverage` field (spot transfer, non-leveraged perp) ALWAYS
@@ -7,8 +7,7 @@
 // leverage from the order payload; @stwd/agent-trader and direct sign
 // requests leave it undefined.
 //
-// Per-venue refinement (e.g. 2x on Hyperliquid, 5x on Drift) is Phase 2.
-// For now a single cap per agent is sufficient for Sol's $100/day MVP.
+// The configured cap applies to the agent across venues.
 
 import type { LeverageCapConfig, PolicyResult, PolicyRule } from "@stwd/shared";
 

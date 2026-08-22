@@ -27,7 +27,7 @@ describe("0111 tenant RLS policy installation", () => {
       WHERE n.nspname = 'public' AND p.polname LIKE 'steward_%'
       ORDER BY c.relname, p.polname
     `);
-    expect(policies.rows).toHaveLength(73);
+    expect(policies.rows).toHaveLength(75);
     expect(policies.rows.every((row) => !row.relrowsecurity && !row.relforcerowsecurity)).toBe(
       true,
     );
@@ -123,7 +123,7 @@ describe("0111 tenant RLS policy installation", () => {
     expect(bootstrap).toContain("platform_set_user_deactivation(uuid,boolean)");
     expect(bootstrap).toContain("BEGIN;");
     expect(bootstrap).toContain("COMMIT;");
-    expect(inventory).toContain("core 71/73 and optional capabilities 0/0 or 3/3");
+    expect(inventory).toContain("core 73/75 and optional capabilities 0/0 or 3/3");
     expect(inventory).toContain("rls-policy-manifest.sql");
     expect(inventory).toContain("pg_get_expr");
     expect(activate).toContain("\\ir rls-policy-inventory.sql");
