@@ -31,4 +31,17 @@ describe("durable wallet claim and account provisioning migration", () => {
     expect(migration).not.toMatch(/ciphertext/i);
     expect(migration).not.toMatch(/mnemonic/i);
   });
+
+  it("installs tenant policies for both lifecycle tables before production activation", () => {
+    expect(migration.match(/CREATE POLICY "steward_tenant_isolation"/g)).toHaveLength(2);
+    expect(migration).toContain(
+      "tenant_id = NULLIF(current_setting('steward.tenant_id', true), '')",
+    );
+    expect(migration).toContain(
+      "source_tenant_id = NULLIF(current_setting('steward.tenant_id', true), '')",
+    );
+    expect(migration).toContain(
+      "target_tenant_id = NULLIF(current_setting('steward.tenant_id', true), '')",
+    );
+  });
 });

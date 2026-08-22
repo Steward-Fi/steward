@@ -64,3 +64,23 @@ CREATE UNIQUE INDEX IF NOT EXISTS "pregenerated_wallet_claim_source_uniq"
 --> statement-breakpoint
 CREATE INDEX IF NOT EXISTS "pregenerated_wallet_claim_recovery_idx"
   ON "pregenerated_wallet_claim_lifecycles" ("state", "lease_expires_at");
+--> statement-breakpoint
+DROP POLICY IF EXISTS "steward_tenant_isolation" ON "digital_asset_account_wallet_lifecycles";
+--> statement-breakpoint
+CREATE POLICY "steward_tenant_isolation" ON "digital_asset_account_wallet_lifecycles"
+  FOR ALL
+  USING (tenant_id = NULLIF(current_setting('steward.tenant_id', true), ''))
+  WITH CHECK (tenant_id = NULLIF(current_setting('steward.tenant_id', true), ''));
+--> statement-breakpoint
+DROP POLICY IF EXISTS "steward_tenant_isolation" ON "pregenerated_wallet_claim_lifecycles";
+--> statement-breakpoint
+CREATE POLICY "steward_tenant_isolation" ON "pregenerated_wallet_claim_lifecycles"
+  FOR ALL
+  USING (
+    source_tenant_id = NULLIF(current_setting('steward.tenant_id', true), '')
+    OR target_tenant_id = NULLIF(current_setting('steward.tenant_id', true), '')
+  )
+  WITH CHECK (
+    source_tenant_id = NULLIF(current_setting('steward.tenant_id', true), '')
+    OR target_tenant_id = NULLIF(current_setting('steward.tenant_id', true), '')
+  );

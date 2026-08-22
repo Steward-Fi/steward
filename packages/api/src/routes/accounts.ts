@@ -19,6 +19,12 @@ import {
 } from "@stwd/db";
 import { and, eq, inArray, isNull, sql } from "drizzle-orm";
 import { Hono } from "hono";
+import {
+  lockAccountMutation,
+  recoverStaleAccountWalletLifecyclesForTenant,
+  retireStagedAccountWallets,
+  type StagedAccountWallet,
+} from "../services/account-wallet-lifecycle";
 import { withTenantAuditedTransaction } from "../services/audit";
 import {
   type ApiResponse,
@@ -100,14 +106,6 @@ type AccountTokenBalanceRow = {
 type AccountMembershipInput = {
   walletAgentId: string;
   chainFamily: ChainFamily | null;
-};
-
-type StagedAccountWallet = {
-  lifecycleId: string;
-  tenantId: string;
-  accountId: string;
-  walletAgentId: string;
-  ownerToken: string;
 };
 
 type DigitalAssetAccountCapability =
@@ -546,16 +544,6 @@ function accountAudit(input: {
   };
 }
 
-async function lockAccountMutation(tx: typeof db, tenantId: string, accountId: string) {
-  // PGLite serializes its single connection already and does not implement
-  // PostgreSQL advisory locks. Real PostgreSQL gets a narrow per-account fence
-  // in addition to the tenant audit-chain lock.
-  if (process.env.STEWARD_PGLITE_MEMORY === "true" || process.env.STEWARD_PGLITE_PATH) return;
-  await tx.execute(
-    sql`select pg_advisory_xact_lock(hashtextextended(${`steward_account_${tenantId}_${accountId}`}, 0))`,
-  );
-}
-
 async function existingWalletMemberships(
   tenantId: string,
   walletIds: string[],
@@ -745,77 +733,6 @@ async function adoptStagedAccountWallets(tx: typeof db, stagedWallets: StagedAcc
       .returning({ id: digitalAssetAccountWalletLifecycles.id });
     if (!adopted) throw new Error("Configured wallet authority adoption lost its lifecycle fence");
   }
-}
-
-async function retireStagedAccountWallets(tenantId: string, stagedWallets: StagedAccountWallet[]) {
-  await Promise.allSettled(
-    stagedWallets.map((staged) =>
-      withTenantAuditedTransaction(tenantId, async (txRaw, appendRequiredAudit) => {
-        const tx = txRaw as typeof db;
-        await lockAccountMutation(tx, tenantId, staged.walletAgentId);
-        const [owned] = await tx
-          .update(digitalAssetAccountWalletLifecycles)
-          .set({ state: "retiring", updatedAt: new Date() })
-          .where(
-            and(
-              eq(digitalAssetAccountWalletLifecycles.id, staged.lifecycleId),
-              eq(digitalAssetAccountWalletLifecycles.ownerToken, staged.ownerToken),
-              inArray(digitalAssetAccountWalletLifecycles.state, [
-                "staging",
-                "provisioned",
-                "recoverable",
-              ]),
-            ),
-          )
-          .returning({ id: digitalAssetAccountWalletLifecycles.id });
-        if (!owned) return;
-        const [membership] = await tx
-          .select({ id: digitalAssetAccountWallets.id })
-          .from(digitalAssetAccountWallets)
-          .where(
-            and(
-              eq(digitalAssetAccountWallets.tenantId, tenantId),
-              eq(digitalAssetAccountWallets.walletAgentId, staged.walletAgentId),
-            ),
-          );
-        if (membership) {
-          await tx
-            .update(digitalAssetAccountWalletLifecycles)
-            .set({ state: "adopted", adoptedAt: new Date(), updatedAt: new Date() })
-            .where(eq(digitalAssetAccountWalletLifecycles.id, staged.lifecycleId));
-          return;
-        }
-        await tx
-          .delete(agents)
-          .where(
-            and(
-              eq(agents.tenantId, tenantId),
-              eq(agents.id, staged.walletAgentId),
-              eq(agents.platformId, `account-provision:${staged.lifecycleId}`),
-            ),
-          );
-        await tx
-          .update(digitalAssetAccountWalletLifecycles)
-          .set({ state: "retired", retiredAt: new Date(), updatedAt: new Date() })
-          .where(
-            and(
-              eq(digitalAssetAccountWalletLifecycles.id, staged.lifecycleId),
-              eq(digitalAssetAccountWalletLifecycles.ownerToken, staged.ownerToken),
-              eq(digitalAssetAccountWalletLifecycles.state, "retiring"),
-            ),
-          );
-        await appendRequiredAudit(
-          accountAudit({
-            tenantId,
-            action: "account.wallet_provision.retire",
-            resourceType: "wallet",
-            resourceId: staged.walletAgentId,
-            metadata: { lifecycleId: staged.lifecycleId },
-          }),
-        );
-      }),
-    ),
-  );
 }
 
 async function walletAgentIdsForAccount(tenantId: string, accountId: string): Promise<string[]> {
@@ -1221,6 +1138,7 @@ accountRoutes.post("/", async (c) => {
   if (!accountId) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid account id" }, 400);
   }
+  await recoverStaleAccountWalletLifecyclesForTenant(tenantId);
 
   let displayName: string | null | undefined;
   let metadata: Record<string, unknown> | undefined;
@@ -1243,7 +1161,7 @@ accountRoutes.post("/", async (c) => {
   try {
     memberships = await buildMemberships(tenantId, accountId, body, stagedWallets);
   } catch (error) {
-    await retireStagedAccountWallets(tenantId, stagedWallets);
+    await retireStagedAccountWallets(stagedWallets);
     // SEC-210: membership building can surface vault/DB internals — sanitize.
     return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(error) }, 400);
   }
@@ -1254,7 +1172,7 @@ accountRoutes.post("/", async (c) => {
     );
   }
   if (typeof memberships === "string") {
-    await retireStagedAccountWallets(tenantId, stagedWallets);
+    await retireStagedAccountWallets(stagedWallets);
     return c.json<ApiResponse>({ ok: false, error: memberships }, 400);
   }
   const authorization = await normalizeAccountAuthorization(
@@ -1264,7 +1182,7 @@ accountRoutes.post("/", async (c) => {
     memberships.map((membership) => membership.walletAgentId),
   );
   if (typeof authorization === "string") {
-    await retireStagedAccountWallets(tenantId, stagedWallets);
+    await retireStagedAccountWallets(stagedWallets);
     return c.json<ApiResponse>({ ok: false, error: authorization }, 400);
   }
   const storedMetadata =
@@ -1304,7 +1222,7 @@ accountRoutes.post("/", async (c) => {
       );
     });
   } catch (error) {
-    await retireStagedAccountWallets(tenantId, stagedWallets);
+    await retireStagedAccountWallets(stagedWallets);
     return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(error) }, 400);
   }
 
@@ -1602,6 +1520,7 @@ accountRoutes.patch("/:accountId", async (c) => {
   }
   const tenantId = c.get("tenantId");
   const accountId = c.req.param("accountId");
+  await recoverStaleAccountWalletLifecyclesForTenant(tenantId);
   const existing = await serializeAccount(tenantId, accountId);
   if (!existing) return c.json<ApiResponse>({ ok: false, error: "Account not found" }, 404);
 
@@ -1630,12 +1549,12 @@ accountRoutes.patch("/:accountId", async (c) => {
   try {
     memberships = await buildMemberships(tenantId, accountId, body, stagedWallets);
   } catch (error) {
-    await retireStagedAccountWallets(tenantId, stagedWallets);
+    await retireStagedAccountWallets(stagedWallets);
     // SEC-210: membership building can surface vault/DB internals — sanitize.
     return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(error) }, 400);
   }
   if (typeof memberships === "string") {
-    await retireStagedAccountWallets(tenantId, stagedWallets);
+    await retireStagedAccountWallets(stagedWallets);
     return c.json<ApiResponse>({ ok: false, error: memberships }, 400);
   }
   const walletAgentIds =
@@ -1650,7 +1569,7 @@ accountRoutes.patch("/:accountId", async (c) => {
     { validateExisting: memberships !== undefined },
   );
   if (typeof authorization === "string") {
-    await retireStagedAccountWallets(tenantId, stagedWallets);
+    await retireStagedAccountWallets(stagedWallets);
     return c.json<ApiResponse>({ ok: false, error: authorization }, 400);
   }
   if (authorization !== undefined) {
@@ -1685,7 +1604,7 @@ accountRoutes.patch("/:accountId", async (c) => {
       );
     });
   } catch (error) {
-    await retireStagedAccountWallets(tenantId, stagedWallets);
+    await retireStagedAccountWallets(stagedWallets);
     // SEC-210: DB-write failures must not leak constraint names/internals.
     return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(error) }, 400);
   }
