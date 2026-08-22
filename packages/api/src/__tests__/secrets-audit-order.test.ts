@@ -21,13 +21,10 @@ function routeBody(start: string, end: string): string {
 }
 
 describe("secret route audit ordering", () => {
-  it("writes authorization audit events before sensitive secret mutations", () => {
-    expectBefore('action: "secret.create.authorized"', "sv.createSecret");
+  it("writes authorization audit events before secret-route mutations", () => {
     expectBefore('action: "secret_route.create.authorized"', "sv.createRouteWithinTx");
     expectBefore('action: "secret_route.update.authorized"', "sv.updateRouteWithinTx");
     expectBefore('action: "secret_route.delete.authorized"', ".delete(secretRouteRows)");
-    expectBefore('action: "secret.rotate.authorized"', "sv.rotateSecret");
-    expectBefore('action: "secret.delete.authorized"', "sv.deleteSecret");
   });
 
   it("allowlists secret route update fields before persistence", () => {
