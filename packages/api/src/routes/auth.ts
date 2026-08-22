@@ -2768,16 +2768,24 @@ async function ensureUserTenantLink(
   role: string = "member",
 ): Promise<void> {
   await withVerifiedAuthTenant(tenantId, userId, async () => {
+    // Migration 0123 enforces that a canonical personal tenant has exactly
+    // one owner and no member-shaped alias. BEFORE triggers run even when a
+    // duplicate insert would later be suppressed by ON CONFLICT, so derive
+    // the only valid role before attempting the idempotent write.
+    const membershipRole = tenantId === `personal-${userId}` ? "owner" : role;
     if (tenantId === "default") {
-      if (role !== "member" && role !== GUEST_TENANT_ROLE) {
+      if (membershipRole !== "member" && membershipRole !== GUEST_TENANT_ROLE) {
         throw new Error("Default tenant membership role is not permitted");
       }
       await getDb().execute(
-        sql`SELECT steward_bootstrap.ensure_default_membership(${userId}::uuid, ${role})`,
+        sql`SELECT steward_bootstrap.ensure_default_membership(${userId}::uuid, ${membershipRole})`,
       );
       return;
     }
-    await getDb().insert(userTenants).values({ userId, tenantId, role }).onConflictDoNothing();
+    await getDb()
+      .insert(userTenants)
+      .values({ userId, tenantId, role: membershipRole })
+      .onConflictDoNothing();
   });
 }
 
