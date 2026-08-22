@@ -6,7 +6,8 @@
  * core never imports a plugin; a plugin contributes routes/middleware through the
  * register seam, so the majority of installs that only want the core never pull a
  * plugin's transitive dependencies (smaller install, smaller supply-chain and
- * audit surface). trading is the first such plugin.
+ * audit surface). the deployable composition root currently knows the trading,
+ * capabilities, and wxmr first-party plugins.
  *
  * `StewardPlugin` is intentionally generic and framework-agnostic here: it carries
  * no hono (or any http-framework) types so `@stwd/shared` keeps zero runtime deps.

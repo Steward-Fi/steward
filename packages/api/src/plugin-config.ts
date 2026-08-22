@@ -9,7 +9,7 @@
  * environment. It answers ONE question: "which opt-in plugins should the
  * composition root
  * register?" the actual registration, ordering, and migration logic is untouched
- * (see compose.ts) — this only gates WHETHER trading is composed in, never HOW.
+ * (see compose.ts) — this gates WHICH plugins are composed in, never HOW.
  *
  * THE CONTRACT
  * ------------

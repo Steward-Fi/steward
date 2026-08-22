@@ -326,8 +326,7 @@ function capabilityMatches(config: CapabilityIntentConfig, name: string): boolea
  * Recover ONLY the capability SELECTOR (the `capabilities` patterns) from an
  * otherwise-malformed rule config, WITHOUT validating the rest of the config.
  *
- * WHY THIS EXISTS (scope isolation, master-plan §5.3 / §"malformed-input
- * precedence applies to GOVERNING rules"):
+ * SCOPE-ISOLATION CONTRACT:
  *   malformed-input precedence must apply to the rules that GOVERN the requested
  *   capability. A rule whose selector is well-formed and demonstrably scoped to a
  *   DIFFERENT capability must not brick an unrelated invoke just because some
@@ -523,7 +522,7 @@ function timeWindowAllows(
  *   count is not fixed, so a spend WINDOW over them would be ambiguous (a money
  *   gate must never rest on an ambiguous window length).
  *
- * OVER-RETENTION REJECTED (codex P1): a window longer than the aggregate store's
+ * OVER-RETENTION REJECTED: a window longer than the aggregate store's
  * retention ({@link MAX_AGGREGATE_WINDOW_SECONDS}, 30d) would SILENTLY under-
  * enforce - entries older than retention are pruned, so a `P90D` cap would
  * behave like a 30d cap and let spend from days 31-90 slip. We reject such a
@@ -816,7 +815,7 @@ function parseConfig(rawInput: unknown): CapabilityIntentConfig | { error: strin
   // `github.*.delete`, `*.delete`, `git*hub`) would be treated by
   // `patternMatches` as an exact literal that can never match, silently making
   // a deny/require-approval rule inert. Reject it at parse so the misconfig
-  // denies instead of passing (codex P2).
+  // denies instead of passing.
   const badPattern = (capabilities as string[]).find(
     (p) => p.includes("*") && !(p.endsWith(".*") && !p.slice(0, -2).includes("*")),
   );
@@ -843,7 +842,7 @@ function parseConfig(rawInput: unknown): CapabilityIntentConfig | { error: strin
     const c = raw.constraints as Record<string, unknown>;
 
     // FAIL CLOSED on unknown constraint keys: a typo like `maxCallPerHour` must
-    // deny, not silently drop the rate cap on an `allow` rule (codex P2).
+    // deny, not silently drop the rate cap on an `allow` rule.
     const unknownConstraint = Object.keys(c).filter((k) => !ALLOWED_CONSTRAINT_KEYS.has(k));
     if (unknownConstraint.length > 0) {
       return {
@@ -1288,7 +1287,7 @@ export function evaluateCapabilityIntent(
  *   4. else any matching passing `allow` => ALLOW
  *   5. else (no governing rule matched/passed) => HARD DENY / no governing allow
  *
- * MALFORMED-INPUT PRECEDENCE IS SCOPED TO GOVERNING RULES (master-plan §5.3).
+ * MALFORMED-INPUT PRECEDENCE IS SCOPED TO GOVERNING RULES.
  * A malformed rule config does NOT automatically brick every invoke: if the
  * rule's `capabilities` SELECTOR is well-formed and provably scoped to a
  * DIFFERENT capability, the rule is not governing this request and stays inert
@@ -1351,7 +1350,7 @@ export function composeCapabilityIntentDecision(
     try {
       // Parse the config. A malformed/unknown config CANNOT simply hard-deny
       // every invoke: malformed-input precedence applies to GOVERNING rules only
-      // (master-plan §5.3). A rule scoped (by a well-formed selector) to a
+      // A rule scoped (by a well-formed selector) to a
       // DIFFERENT capability is not governing this request and must stay inert
       // even if the rest of its config is broken. But if the selector itself is
       // unrecoverable, we cannot prove the rule is non-governing, so fail closed.
@@ -1527,7 +1526,7 @@ export interface ProviderPolicyContext {
    * Authoritative invoke counts for configurable count caps, keyed by the
    * per-cap bucket key ({@link windowedInvokeBucketKey}: window+max). Two
    * `maxCalls` rules with DIFFERENT windows each read their OWN count, so a daily
-   * cap can never be evaluated against an hourly count (codex P2). A missing
+   * cap can never be evaluated against an hourly count. A missing
    * entry for a rule's bucket => fail closed (POLICY_INPUT_UNAVAILABLE). Kept
    * separate from `invokeCount1h` so the hardcoded-hour cap and the configurable
    * caps never borrow each other's counter.
@@ -1597,7 +1596,7 @@ export interface ProviderPolicyContext {
    * Keying by the FULL cap identity (scope + window + max + currency), NOT just
    * the scope, lets two rules that share a scope but declare DIFFERENT windows /
    * caps each read their OWN trailing-window sum - they never share a bucket, so
-   * the same invoke is never double-counted across distinct caps (codex P2).
+   * the same invoke is never double-counted across distinct caps.
    *
    * A missing entry for a rule's bucket => the aggregate is not wired for that
    * cap => DENY (POLICY_INPUT_UNAVAILABLE). Steward never assumes a zero prior
@@ -1712,7 +1711,7 @@ export function composeProviderActionPolicyDecision(
       if ("error" in parsed) {
         // SEC-181: malformed-input precedence is scoped to GOVERNING rules,
         // matching the legacy-plane composer (composeCapabilityIntentDecision)
-        // and master-plan §5.3. A well-formed selector provably scoped to a
+        // and the legacy-plane composer. A well-formed selector provably scoped to a
         // DIFFERENT operation stays inert even though the rest of the config
         // is broken; only a malformed rule that governs THIS operation, or
         // whose selector is unrecoverable (ambiguous scope), hard-denies.
@@ -1894,7 +1893,7 @@ function evaluateProviderConstraints(
   // Configurable count cap: maxCalls over the trailing callWindow. The
   // invoke layer supplies the count for THIS EXACT cap (window+max) via
   // ctx.windowedInvokeCounts, keyed by windowedInvokeBucketKey - so two maxCalls
-  // rules with DIFFERENT windows each read their own count (codex P2). Absent =>
+  // rules with DIFFERENT windows each read their own count. Absent =>
   // fail closed (same discipline as maxCallsPerHour). A malformed callWindow is
   // rejected at store time, but re-validate at runtime so a hand-edited row
   // cannot slip an unbounded window past the gate.

@@ -162,7 +162,7 @@ function textHasUrl(text: string): boolean {
   // `contentPolicy.allowUrls:false` / URL-spend / URL-approval policy be BYPASSED
   // by a real bare domain on an uncommon TLD (e.g. `example.social`, `foo.shop`).
   // A false positive only denies/escalates a borderline post, which is the safe
-  // direction (codex P2, PR review). We therefore treat ANY `label.tld` token
+  // direction. We therefore treat ANY `label.tld` token
   // (tld = 2+ ASCII letters) with a path OR a plausible domain shape as a URL,
   // and EXCLUDE only a small deny-list of common English abbreviations that
   // appear as `word.word` in ordinary prose.

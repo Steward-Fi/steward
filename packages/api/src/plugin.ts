@@ -3,12 +3,11 @@
  *
  * OWNERSHIP CONTRACT
  * ------------------
- * steward serves two audiences from one codebase: teams that want only the auth +
- * embedded-wallet + policy core, and teams that ALSO want agent trading (venue
- * execution + trade sessions). The architecture is a LEAN OPEN CORE (auth +
- * vault + policy + proxy + webhooks) plus OPT-IN PLUGINS that a host registers.
- * trading is the first such
- * plugin (`@stwd/plugin-trading`). this mirrors the plugin model of mature
+ * steward serves teams that want only the auth + embedded-wallet + policy core
+ * and teams that also enable first-party or third-party extensions. The
+ * architecture is a LEAN OPEN CORE (auth + vault + policy + proxy + webhooks)
+ * plus OPT-IN PLUGINS that a host registers. This repository ships trading,
+ * capabilities, and wxmr plugins. this mirrors the plugin model of mature
  * frameworks (fastify/vite/hono-style `app.register(plugin)`): take only what you
  * need, and anyone can write + register their own plugin.
  *

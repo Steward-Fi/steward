@@ -164,7 +164,7 @@ async function capabilityMapsToGovernedRoute(
 ): Promise<boolean> {
   const { and, eq, gt, isNull, or } = await import("drizzle-orm");
   const now = new Date();
-  // Mirror the proxy's route SELECTION (codex P2): only ENABLED governed routes
+  // Mirror the proxy's route selection: only ENABLED governed routes
   // whose backing secret is currently active (not deleted, not expired) can ever
   // be selected by the proxy, so only those should gate the plugin. A disabled
   // governed route or one backed by a deleted/expired secret is unselectable and
@@ -447,7 +447,7 @@ export async function invokeCapabilityThroughProxy(
   try {
     await engine.evaluate(capRules, evaluatorCtx);
 
-    // CANONICAL PRECEDENCE (master-plan §5.3): the policy-engine helper composes
+    // CANONICAL PRECEDENCE: the policy-engine helper composes
     // ALL enabled capability-intent rules in the one true order — hard deny
     // (incl. malformed config / failed hard constraint) > approval_required >
     // allow > default-deny. This is the single source of truth: an applicable

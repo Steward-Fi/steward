@@ -32,8 +32,8 @@ const MAX_UINT256 = (1n << 256n) - 1n;
 
 /**
  * Parse a human-readable amount like "0.1 ETH" or "50 USDC" into wei.
- * Handles native token amounts (ETH/BNB); ERC-20 transfers are not accepted by
- * this action.
+ * Handles native-currency amounts for the supported EVM chains; ERC-20 transfers
+ * are not accepted by this action.
  */
 function parseAmount(amountStr: string): { valueWei: string; symbol: string | null } {
   const cleaned = amountStr.trim();
