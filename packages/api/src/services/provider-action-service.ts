@@ -3058,15 +3058,28 @@ class ProviderActionService {
         ...(row.metadata ?? {}),
         requiredOutboxId: row.id,
       };
-      const existing = rowsFromDatabaseResult<{ found: number }>(
+      const existing = rowsFromDatabaseResult<{
+        action: string;
+        resource_type: string;
+        resource_id: string;
+      }>(
         await tx.execute(sql`
-          SELECT 1 AS found
+          SELECT action, resource_type, resource_id
           FROM audit_events
           WHERE tenant_id = ${row.tenant_id}
             AND metadata->>'requiredOutboxId' = ${row.id}
           LIMIT 1
         `),
       );
+      const existingIdentity = existing[0];
+      if (
+        existingIdentity &&
+        (existingIdentity.action !== row.action ||
+          existingIdentity.resource_type !== row.resource_type ||
+          existingIdentity.resource_id !== row.resource_id)
+      ) {
+        throw new Error("required-audit outbox identity conflicts with an existing audit event");
+      }
       let signedNow = false;
       if (existing.length === 0) {
         await appendRequiredAudit({
