@@ -20,7 +20,7 @@ different API replicas.
 import { createStewardSolanaSigner } from "@stwd/solana-signer";
 
 const signer = await createStewardSolanaSigner({
-  baseUrl: "http://127.0.0.1:3000",
+  baseUrl: "http://127.0.0.1:3200",
   agentId: "agent-1",
   bearerToken: process.env.STEWARD_AGENT_TOKEN,
   chainId: 102, // devnet; 101 (default) is mainnet

@@ -110,11 +110,11 @@ describe("platform security hardening", () => {
       tenantCreateStart,
       platformSource.indexOf('platform.get("/tenants"', tenantCreateStart),
     );
-    expect(tenantCreateRoute).toContain("tenantIdHasRetainedState(body.id)");
+    expect(tenantCreateRoute).toContain("tenantIdHasRetainedState(body.id, tx)");
     expect(tenantCreateRoute).toContain(
       "Tenant id has retained historical state and cannot be reused",
     );
-    expect(tenantCreateRoute.indexOf("tenantIdHasRetainedState(body.id)")).toBeLessThan(
+    expect(tenantCreateRoute.indexOf("tenantIdHasRetainedState(body.id, tx)")).toBeLessThan(
       tenantCreateRoute.indexOf('action: "tenant.create.authorized"'),
     );
 
@@ -126,11 +126,11 @@ describe("platform security hardening", () => {
       legacyTenantCreateStart,
       tenantRoutesSource.indexOf('tenantRoutes.get("/:id"', legacyTenantCreateStart),
     );
-    expect(legacyTenantCreateRoute).toContain("tenantIdHasRetainedState(body.id)");
+    expect(legacyTenantCreateRoute).toContain("tenantIdHasRetainedState(body.id, tx)");
     expect(legacyTenantCreateRoute).toContain(
       "Tenant id has retained historical state and cannot be reused",
     );
-    expect(legacyTenantCreateRoute.indexOf("tenantIdHasRetainedState(body.id)")).toBeLessThan(
+    expect(legacyTenantCreateRoute.indexOf("tenantIdHasRetainedState(body.id, tx)")).toBeLessThan(
       legacyTenantCreateRoute.indexOf('action: "tenant.create.authorized"'),
     );
   });
@@ -298,8 +298,7 @@ describe("platform security hardening", () => {
     }
   });
 
-  it("rolls back platform tenant and agent creation when final audit events fail", () => {
-    expect(platformSource).toContain("async function deletePlatformCreatedTenant");
+  it("atomically creates tenants and compensates non-atomic agent creation", () => {
     expect(platformSource).toContain("async function deletePlatformCreatedAgent");
     expect(platformSource).toContain("tx.delete(encryptedChainKeys)");
     expect(platformSource).toContain("tx.delete(encryptedKeys)");
@@ -312,10 +311,13 @@ describe("platform security hardening", () => {
     );
     const tenantInsert = tenantCreateRoute.indexOf(".insert(tenants)");
     const finalTenantAudit = tenantCreateRoute.indexOf('action: "tenant.create"', tenantInsert);
-    const tenantRollback = tenantCreateRoute.indexOf("deletePlatformCreatedTenant(tenant.id)");
+    const auditedTransaction = tenantCreateRoute.indexOf("withTenantAuditedTransaction(body.id");
+    const requiredAudit = tenantCreateRoute.indexOf("await appendAudit({");
+    expect(auditedTransaction).toBeGreaterThanOrEqual(0);
+    expect(requiredAudit).toBeGreaterThan(auditedTransaction);
     expect(tenantInsert).toBeGreaterThanOrEqual(0);
     expect(finalTenantAudit).toBeGreaterThan(tenantInsert);
-    expect(tenantRollback).toBeGreaterThan(finalTenantAudit);
+    expect(tenantCreateRoute).not.toContain("deletePlatformCreatedTenant");
 
     const agentCreateStart = platformSource.indexOf('platform.post("/tenants/:id/agents"');
     const agentCreateRoute = platformSource.slice(
@@ -330,13 +332,9 @@ describe("platform security hardening", () => {
     expect(agentRollback).toBeGreaterThan(finalAgentAudit);
   });
 
-  it("restores platform user and membership mutations when final audit events fail", () => {
+  it("rolls back or restores platform user and membership mutations when final audits fail", () => {
     for (const [marker, rollback] of [
       ['platform.patch("/users/:userId/metadata"', "customMetadata: existing.customMetadata"],
-      [
-        'platform.post("/users/:userId/accounts/:provider/:providerAccountId/transfer"',
-        "set({ userId: fromUserId })",
-      ],
       ['platform.patch("/tenants/:id/members/:userId"', "set({ role: updated.previousRole })"],
     ] as const) {
       const start = platformSource.indexOf(marker);
@@ -346,6 +344,16 @@ describe("platform security hardening", () => {
       expect(route).toContain("try {");
       expect(route).toContain(rollback);
     }
+    const transferStart = platformSource.indexOf(
+      'platform.post("/users/:userId/accounts/:provider/:providerAccountId/transfer"',
+    );
+    const transferRoute = platformSource.slice(
+      transferStart,
+      platformSource.indexOf("\nplatform.", transferStart + 1),
+    );
+    expect(transferRoute).toContain("withPlatformLinkedAccountTransaction(");
+    expect(transferRoute).toContain("appendRequiredAudit({");
+    expect(transferRoute).not.toContain("set({ userId: fromUserId })");
     const deactivateStart = platformSource.indexOf('platform.patch("/users/:userId/deactivate"');
     const deactivateRoute = platformSource.slice(
       deactivateStart,

@@ -69,6 +69,7 @@ import {
   userWalletAppConsents,
   vaultSigningFreezes,
 } from "@stwd/db";
+import { shouldUsePGLite } from "@stwd/db/pglite";
 import { PolicyEngine } from "@stwd/policy-engine";
 import {
   type AgentBalance,
@@ -96,7 +97,11 @@ import bs58 from "bs58";
 import { and, desc, eq, gte, ilike, inArray, isNull, ne, or, sql } from "drizzle-orm";
 import { type Context, Hono, type Next } from "hono";
 import { getAddress, verifyMessage as viemVerifyMessage } from "viem";
-import { withTenantAuditedTransaction, writeAuditEvent } from "../services/audit";
+import {
+  type AuditEventInput,
+  withTenantAuditedTransaction,
+  writeAuditEvent,
+} from "../services/audit";
 import {
   continueWithTenantDatabase,
   priceOracle,
@@ -104,6 +109,7 @@ import {
   setNoStoreHeaders,
   verifySessionToken,
 } from "../services/context";
+import { resolveRuntimeChainId, runtimeCustodyValue } from "../services/custody-runtime";
 import {
   publicGasSponsorshipState,
   readTenantGasSponsorshipConfig,
@@ -156,17 +162,6 @@ type UserVariables = {
   sessionMfaVerifiedAt?: number;
   sessionMfaMethod?: string;
   requestId?: string;
-};
-
-type UserAccountRow = typeof accounts.$inferSelect;
-type UserAuthenticatorRow = typeof authenticators.$inferSelect;
-type UserRefreshTokenRow = typeof refreshTokens.$inferSelect;
-
-type UserAccountUnlinkMutation = {
-  accountId: string;
-  deletedAccount?: UserAccountRow;
-  deletedPasskey?: UserAuthenticatorRow;
-  deletedRefreshTokens: UserRefreshTokenRow[];
 };
 
 type UserWalletSignResult =
@@ -1018,12 +1013,45 @@ async function writeUserAudit(
     metadata?: Record<string, unknown>;
   },
 ): Promise<void> {
-  await writeAuditEvent({
+  await writeAuditEvent(userAuditEvent(c, event));
+}
+
+function userAuditEvent(
+  c: Context<{ Variables: UserVariables }>,
+  event: {
+    tenantId: string;
+    actorType: "user";
+    actorId?: string | null;
+    action: string;
+    resourceType?: string | null;
+    resourceId?: string | null;
+    metadata?: Record<string, unknown>;
+  },
+): AuditEventInput {
+  return {
     ...event,
     ipAddress: c.req.header("x-forwarded-for") ?? null,
     userAgent: c.req.header("user-agent") ?? null,
     requestId: c.get("requestId") ?? null,
-  });
+  };
+}
+
+async function lockUserWalletSignerAuthority(
+  tx: ReturnType<typeof getDb>,
+  tenantId: string,
+  agentId: string,
+): Promise<boolean> {
+  if (!shouldUsePGLite()) {
+    await tx.execute(
+      sql`SELECT pg_advisory_xact_lock(hashtextextended(${`steward_agent_authority_${tenantId}:${agentId}`}, 0))`,
+    );
+  }
+  const [agent] = await tx
+    .select({ id: agents.id })
+    .from(agents)
+    .where(and(eq(agents.id, agentId), eq(agents.tenantId, tenantId)))
+    .for("update");
+  return Boolean(agent);
 }
 
 async function writeInvalidUserWalletIndexAudit(
@@ -1058,23 +1086,6 @@ async function writeInvalidUserWalletIndexAudit(
       redactedThrownDiagnostics(error),
     );
   }
-}
-
-async function restoreUserAccountUnlinkMutation(
-  mutation: UserAccountUnlinkMutation,
-): Promise<void> {
-  const db = getDb();
-  await db.transaction(async (tx) => {
-    if (mutation.deletedAccount) {
-      await tx.insert(accounts).values(mutation.deletedAccount).onConflictDoNothing();
-    }
-    if (mutation.deletedPasskey) {
-      await tx.insert(authenticators).values(mutation.deletedPasskey).onConflictDoNothing();
-    }
-    if (mutation.deletedRefreshTokens.length > 0) {
-      await tx.insert(refreshTokens).values(mutation.deletedRefreshTokens).onConflictDoNothing();
-    }
-  });
 }
 
 function hasRecentMfaStepUp(session: UserSessionPayload, maxAgeMs = 5 * 60_000): boolean {
@@ -1817,18 +1828,26 @@ export async function userSessionAuth(
 
 const user = new Hono<{ Variables: UserVariables }>();
 const allowPrivateKeyExport = (): boolean =>
-  process.env.STEWARD_ALLOW_KEY_EXPORT !== "false" &&
-  process.env.STEWARD_ALLOW_PRIVATE_KEY_EXPORT === "true";
+  runtimeCustodyValue("STEWARD_ALLOW_KEY_EXPORT") !== "false" &&
+  runtimeCustodyValue("STEWARD_ALLOW_PRIVATE_KEY_EXPORT") === "true";
 const allowPrivateKeyImport = (): boolean =>
-  process.env.STEWARD_ALLOW_PRIVATE_KEY_IMPORT === "true";
+  runtimeCustodyValue("STEWARD_ALLOW_PRIVATE_KEY_IMPORT") === "true";
 const allowUnsafeMessageSigning = (): boolean =>
-  process.env.STEWARD_ALLOW_UNSAFE_MESSAGE_SIGNING === "true";
+  runtimeCustodyValue("STEWARD_ALLOW_UNSAFE_MESSAGE_SIGNING") === "true";
 const allowUserPrivateKeyExport = (): boolean =>
-  process.env.STEWARD_ALLOW_USER_PRIVATE_KEY_EXPORT === "true";
+  runtimeCustodyValue("STEWARD_ALLOW_USER_PRIVATE_KEY_EXPORT") === "true";
 const allowUserPrivateKeyImport = (): boolean =>
-  process.env.STEWARD_ALLOW_USER_PRIVATE_KEY_IMPORT === "true";
+  runtimeCustodyValue("STEWARD_ALLOW_USER_PRIVATE_KEY_IMPORT") === "true";
 const allowUserUnsafeMessageSigning = (): boolean =>
-  process.env.STEWARD_ALLOW_USER_UNSAFE_MESSAGE_SIGNING === "true";
+  runtimeCustodyValue("STEWARD_ALLOW_USER_UNSAFE_MESSAGE_SIGNING") === "true";
+
+// Key export responses are secret-bearing even when authentication, feature
+// gates, validation, auditing, or the vault fails. Apply the cache policy before
+// auth so every response variant is non-cacheable.
+user.use("/me/wallet/export", async (c, next) => {
+  setNoStoreHeaders(c);
+  await next();
+});
 
 // Apply session auth to all routes in this group
 user.use("*", userSessionAuth);
@@ -3657,12 +3676,19 @@ user.delete("/me/accounts/:provider/:providerAccountId", async (c) => {
     },
   });
 
-  let mutation: UserAccountUnlinkMutation;
+  // The shared revocation line is intentionally irreversible. Establish it
+  // before touching account rows so every token issued before this request is
+  // fail-closed even if PostgreSQL or the required completion audit later
+  // fails. Post-cutoff errors below return explicit evidence of that split
+  // outcome: the account mutation did not commit, but old sessions stay
+  // revoked and the caller must authenticate again before retrying.
+  await revocationStore.revokeUserTokens(userId, issuedBefore);
+
+  let accountId: string;
   try {
-    mutation = await db.transaction(async (tx) => {
-      await tx.execute(
-        sql`select pg_advisory_xact_lock(hashtextextended(${`user_session_${userId}`}, 0))`,
-      );
+    accountId = await withTenantAuditedTransaction(tenantId, async (txRaw, appendRequiredAudit) => {
+      const tx = txRaw as typeof db;
+      await lockUserSession(tx, userId);
       const [userRow] = await tx
         .select({
           id: users.id,
@@ -3693,11 +3719,6 @@ user.delete("/me/accounts/:provider/:providerAccountId", async (c) => {
         throw new Error("Cannot unlink the user's last login method");
       }
 
-      const refreshTokenSnapshot = await tx
-        .select()
-        .from(refreshTokens)
-        .where(eq(refreshTokens.userId, userId));
-      await revocationStore.revokeUserTokens(userId, issuedBefore);
       const [deleted] = account
         ? await tx
             .delete(accounts)
@@ -3722,57 +3743,55 @@ user.delete("/me/accounts/:provider/:providerAccountId", async (c) => {
             .returning();
       if (!deleted) throw new Error("Linked account changed during unlink");
       await tx.delete(refreshTokens).where(eq(refreshTokens.userId, userId));
-      return {
-        accountId: deleted.id,
-        deletedAccount: account ? (deleted as UserAccountRow) : undefined,
-        deletedPasskey: passkey ? (deleted as UserAuthenticatorRow) : undefined,
-        deletedRefreshTokens: refreshTokenSnapshot,
-      };
+      await appendRequiredAudit({
+        tenantId,
+        actorType: "user",
+        actorId: userId,
+        action: "user.account.unlink",
+        resourceType: "user",
+        resourceId: userId,
+        metadata: { provider, providerAccountId, accountId: deleted.id, issuedBefore },
+        ipAddress: c.req.header("x-forwarded-for") ?? null,
+        userAgent: c.req.header("user-agent") ?? null,
+        requestId: c.get("requestId") ?? null,
+      });
+      return deleted.id;
     });
   } catch (error) {
-    if (error instanceof Error) {
-      const status =
-        error.message === "User not found"
+    const message = error instanceof Error ? error.message : null;
+    const status =
+      message === "User not found"
+        ? 404
+        : message === "Linked account not found"
           ? 404
-          : error.message === "Linked account not found"
-            ? 404
-            : error.message === "Cannot unlink the user's last login method"
+          : message === "Cannot unlink the user's last login method"
+            ? 409
+            : message === "Linked account changed during unlink"
               ? 409
-              : error.message === "Linked account changed during unlink"
-                ? 409
-                : 500;
-      // SEC-210: known client-facing messages keep their detail; anything else
-      // is an internal failure and must not leak internals to the client.
-      return c.json<ApiResponse>(
-        {
-          ok: false,
-          error: status === 500 ? sanitizeErrorMessage(error) : error.message,
+              : 500;
+    // SEC-210: known client-facing messages keep their detail; anything else
+    // is an internal failure and must not leak internals to the client. Every
+    // post-cutoff failure, including a non-Error throw, carries the same
+    // irreversible-revocation evidence contract.
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error: status === 500 ? sanitizeErrorMessage(error) : (message ?? "Internal server error"),
+        data: {
+          accountUnlinked: false,
+          sessionsRevoked: true,
+          issuedBefore,
         },
-        status,
-      );
-    }
-    throw error;
+      },
+      status,
+    );
   }
 
-  try {
-    await writeUserAudit(c, {
-      tenantId,
-      actorType: "user",
-      actorId: userId,
-      action: "user.account.unlink",
-      resourceType: "user",
-      resourceId: userId,
-      metadata: { provider, providerAccountId, accountId: mutation.accountId, issuedBefore },
-    });
-  } catch (error) {
-    await restoreUserAccountUnlinkMutation(mutation);
-    throw error;
-  }
   dispatchWebhook(tenantId, userId, "user.unlinked_account", {
     userId,
     provider,
     providerAccountId,
-    accountId: mutation.accountId,
+    accountId,
   });
 
   return c.json<ApiResponse<{ deleted: boolean; issuedBefore: number }>>({
@@ -5130,45 +5149,80 @@ user.post("/me/wallet/signers", async (c) => {
 
   const credentialSecret = createUserWalletSignerSecret();
   try {
-    const [row] = await getDb()
-      .insert(agentSigners)
-      .values({
-        tenantId,
-        agentId: wallet.id,
-        signerType: "delegated",
-        subjectType,
-        subjectId,
-        keyType: "hmac",
-        publicKey: null,
-        address,
-        chainFamily,
-        label,
-        permissions,
-        policyIds: [],
-        metadata: {
-          ...metadata,
-          credentialHash: await createSignerCredentialHash(credentialSecret),
-          credentialCreatedAt: new Date().toISOString(),
-        },
-        status: "active",
-        createdBy: userId,
-      })
-      .returning();
-
-    try {
-      await writeUserAudit(c, {
-        tenantId,
-        actorType: "user",
-        actorId: userId,
-        action: "user.wallet.signer.create",
-        resourceType: "agent_signer",
-        resourceId: row.id,
-        metadata: { agentId: wallet.id, subjectType, subjectId, walletIndex: walletIndex.value },
-      });
-    } catch (error) {
-      await getDb().delete(agentSigners).where(eq(agentSigners.id, row.id));
-      throw error;
+    const credentialHash = await createSignerCredentialHash(credentialSecret);
+    const mutation = await withTenantAuditedTransaction(
+      tenantId,
+      async (txRaw, appendRequiredAudit) => {
+        const tx = txRaw as ReturnType<typeof getDb>;
+        if (!(await lockUserWalletSignerAuthority(tx, tenantId, wallet.id))) {
+          return { kind: "missing-wallet" as const };
+        }
+        const [duplicate] = await tx
+          .select({ id: agentSigners.id })
+          .from(agentSigners)
+          .where(
+            and(
+              eq(agentSigners.tenantId, tenantId),
+              eq(agentSigners.agentId, wallet.id),
+              eq(agentSigners.subjectType, subjectType),
+              eq(agentSigners.subjectId, subjectId),
+            ),
+          )
+          .for("update");
+        if (duplicate) return { kind: "duplicate" as const };
+        const [row] = await tx
+          .insert(agentSigners)
+          .values({
+            tenantId,
+            agentId: wallet.id,
+            signerType: "delegated",
+            subjectType,
+            subjectId,
+            keyType: "hmac",
+            publicKey: null,
+            address,
+            chainFamily,
+            label,
+            permissions,
+            policyIds: [],
+            metadata: {
+              ...metadata,
+              credentialHash,
+              credentialCreatedAt: new Date().toISOString(),
+            },
+            status: "active",
+            createdBy: userId,
+          })
+          .returning();
+        await appendRequiredAudit(
+          userAuditEvent(c, {
+            tenantId,
+            actorType: "user",
+            actorId: userId,
+            action: "user.wallet.signer.create",
+            resourceType: "agent_signer",
+            resourceId: row.id,
+            metadata: {
+              agentId: wallet.id,
+              subjectType,
+              subjectId,
+              walletIndex: walletIndex.value,
+            },
+          }),
+        );
+        return { kind: "created" as const, row };
+      },
+    );
+    if (mutation.kind === "missing-wallet") {
+      return c.json<ApiResponse>({ ok: false, error: "Wallet authority no longer exists" }, 404);
     }
+    if (mutation.kind === "duplicate") {
+      return c.json<ApiResponse>(
+        { ok: false, error: "Signer already exists for this wallet and subject" },
+        409,
+      );
+    }
+    const { row } = mutation;
 
     return c.json<
       ApiResponse<ReturnType<typeof toUserWalletSignerResponse> & { credentialSecret: string }>
@@ -5271,29 +5325,60 @@ user.delete("/me/wallet/signers/:signerId", async (c) => {
     metadata: { agentId: wallet.id, walletIndex: walletIndex.value },
   });
 
-  const [row] = await getDb()
-    .update(agentSigners)
-    .set({ status: "revoked" })
-    .where(
-      and(
-        eq(agentSigners.id, signerId),
-        eq(agentSigners.tenantId, tenantId),
-        eq(agentSigners.agentId, wallet.id),
-      ),
-    )
-    .returning();
-
-  if (!row) return c.json<ApiResponse>({ ok: false, error: "Signer not found" }, 404);
-
-  await writeUserAudit(c, {
+  const mutation = await withTenantAuditedTransaction(
     tenantId,
-    actorType: "user",
-    actorId: userId,
-    action: "user.wallet.signer.revoke",
-    resourceType: "agent_signer",
-    resourceId: row.id,
-    metadata: { agentId: wallet.id, walletIndex: walletIndex.value },
-  });
+    async (txRaw, appendRequiredAudit) => {
+      const tx = txRaw as ReturnType<typeof getDb>;
+      if (!(await lockUserWalletSignerAuthority(tx, tenantId, wallet.id))) {
+        return { kind: "missing-wallet" as const };
+      }
+      const [locked] = await tx
+        .select()
+        .from(agentSigners)
+        .where(
+          and(
+            eq(agentSigners.id, signerId),
+            eq(agentSigners.tenantId, tenantId),
+            eq(agentSigners.agentId, wallet.id),
+          ),
+        )
+        .for("update");
+      if (!locked) return { kind: "missing" as const };
+      if (JSON.stringify(locked) !== JSON.stringify(existingSigner)) {
+        return { kind: "conflict" as const };
+      }
+      const [row] = await tx
+        .update(agentSigners)
+        .set({ status: "revoked" })
+        .where(eq(agentSigners.id, signerId))
+        .returning();
+      await appendRequiredAudit(
+        userAuditEvent(c, {
+          tenantId,
+          actorType: "user",
+          actorId: userId,
+          action: "user.wallet.signer.revoke",
+          resourceType: "agent_signer",
+          resourceId: row.id,
+          metadata: { agentId: wallet.id, walletIndex: walletIndex.value },
+        }),
+      );
+      return { kind: "revoked" as const, row };
+    },
+  );
+  if (mutation.kind === "missing-wallet") {
+    return c.json<ApiResponse>({ ok: false, error: "Wallet authority no longer exists" }, 404);
+  }
+  if (mutation.kind === "missing") {
+    return c.json<ApiResponse>({ ok: false, error: "Signer not found" }, 404);
+  }
+  if (mutation.kind === "conflict") {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Signer changed concurrently; retry against the latest signer" },
+      409,
+    );
+  }
+  const { row } = mutation;
 
   return c.json<ApiResponse<ReturnType<typeof toUserWalletSignerResponse>>>({
     ok: true,
@@ -5304,6 +5389,7 @@ user.delete("/me/wallet/signers/:signerId", async (c) => {
 // ─── POST /me/wallet/sign ─────────────────────────────────────────────────────
 
 user.post("/me/wallet/sign", async (c) => {
+  setNoStoreHeaders(c);
   const personalSessionResponse = requirePersonalUserSession(c);
   if (personalSessionResponse) return personalSessionResponse;
   const userId = c.get("userId");
@@ -5426,7 +5512,7 @@ user.post("/me/wallet/sign", async (c) => {
 
   const tenantId = `personal-${userId}`;
   const agentId = wallet.id;
-  const chainId = signBody.chainId ?? parseInt(process.env.CHAIN_ID || "84532", 10);
+  const chainId = signBody.chainId ?? resolveRuntimeChainId(84532);
   let codeResponse: Awaited<ReturnType<Vault["rpcPassthrough"]>>;
   try {
     codeResponse = await vault.rpcPassthrough({
@@ -5712,6 +5798,7 @@ user.get("/me/wallet/policies", async (c) => {
 // ─── POST /me/wallet/sign-message ─────────────────────────────────────────────
 
 user.post("/me/wallet/sign-message", async (c) => {
+  setNoStoreHeaders(c);
   const personalSessionResponse = requirePersonalUserSession(c);
   if (personalSessionResponse) return personalSessionResponse;
   if (!allowUnsafeMessageSigning() || !allowUserUnsafeMessageSigning()) {
@@ -6222,9 +6309,6 @@ user.post("/me/wallet/export", async (c) => {
       walletIndex: walletIndex.value,
     });
 
-    c.header("Cache-Control", "no-store, max-age=0");
-    c.header("Pragma", "no-cache");
-    c.header("Expires", "0");
     return c.json<
       ApiResponse<{
         evm?: { privateKey: string; address: string };
@@ -6622,6 +6706,7 @@ type TenantWalletPolicyBulkRemediationResult =
       accountId: string;
       status: number;
       error: string;
+      evidence?: { accountUnlinked: false; sessionsRevoked: true; issuedBefore: number };
     };
 
 function tenantAdminUserSelection() {
@@ -6694,7 +6779,12 @@ async function remediateTenantWalletPolicyAccount(
   params: { tenantId: string; targetUserId: string; accountId: string; adminUserId: string },
 ): Promise<
   | { ok: true; data: TenantWalletPolicyRemediationSuccess }
-  | { ok: false; status: number; error: string }
+  | {
+      ok: false;
+      status: number;
+      error: string;
+      evidence?: { accountUnlinked: false; sessionsRevoked: true; issuedBefore: number };
+    }
 > {
   const { tenantId, targetUserId, accountId, adminUserId } = params;
   const db = getDb();
@@ -6755,60 +6845,96 @@ async function remediateTenantWalletPolicyAccount(
     },
   });
 
-  const refreshTokenSnapshot = await db
-    .select()
-    .from(refreshTokens)
-    .where(eq(refreshTokens.userId, targetUserId));
-  const [deleted] = await db
-    .delete(accounts)
-    .where(
-      and(
-        eq(accounts.id, accountId),
-        eq(accounts.userId, targetUserId),
-        or(eq(accounts.provider, "wallet:ethereum"), eq(accounts.provider, "wallet:solana")),
-      ),
-    )
-    .returning();
-  if (!deleted) {
-    return { ok: false, status: 409, error: "Linked wallet account changed" };
-  }
-
+  // This cutoff is external to PostgreSQL and intentionally irreversible. It
+  // is established only after authorization/preflight, before the atomic DB
+  // unit. If that unit fails, callers receive explicit split-outcome evidence.
+  await revocationStore.revokeUserTokens(targetUserId, issuedBefore);
+  let deleted: typeof accounts.$inferSelect;
   try {
-    await revocationStore.revokeUserTokens(targetUserId, issuedBefore);
-    await db.delete(refreshTokens).where(eq(refreshTokens.userId, targetUserId));
-    await writeUserAudit(c, {
-      tenantId,
-      actorType: "user",
-      actorId: adminUserId,
-      action: "tenant.wallet_policy.remediation",
-      resourceType: "user",
-      resourceId: targetUserId,
-      metadata: {
-        accountId: deleted.id,
-        provider: deleted.provider,
-        providerAccountId: deleted.providerAccountId,
-        issuedBefore,
-      },
+    deleted = await withTenantAuditedTransaction(tenantId, async (txRaw, appendRequiredAudit) => {
+      const tx = txRaw as typeof db;
+      await lockUserSession(tx, targetUserId);
+      const [membership] = await tx
+        .select({ userId: userTenants.userId })
+        .from(userTenants)
+        .where(and(eq(userTenants.tenantId, tenantId), eq(userTenants.userId, targetUserId)));
+      if (!membership) throw new Error("Tenant user not found");
+      const [currentAccount] = await tx
+        .select()
+        .from(accounts)
+        .where(and(eq(accounts.id, accountId), eq(accounts.userId, targetUserId)));
+      if (
+        !currentAccount ||
+        (currentAccount.provider !== "wallet:ethereum" &&
+          currentAccount.provider !== "wallet:solana")
+      ) {
+        throw new Error("Linked wallet account changed");
+      }
+      const [currentUser] = await tx
+        .select({ id: users.id, email: users.email, walletAddress: users.walletAddress })
+        .from(users)
+        .where(eq(users.id, targetUserId));
+      if (!currentUser) throw new Error("Tenant user not found");
+      const currentAccounts = await tx
+        .select({ id: accounts.id })
+        .from(accounts)
+        .where(eq(accounts.userId, targetUserId));
+      const currentPasskeys = await tx
+        .select({ id: authenticators.id })
+        .from(authenticators)
+        .where(eq(authenticators.userId, targetUserId));
+      if (
+        primaryLoginMethods(currentUser).length + currentAccounts.length + currentPasskeys.length <=
+        1
+      ) {
+        throw new Error("Cannot unlink the user's last login method");
+      }
+      const [removed] = await tx
+        .delete(accounts)
+        .where(
+          and(
+            eq(accounts.id, accountId),
+            eq(accounts.userId, targetUserId),
+            or(eq(accounts.provider, "wallet:ethereum"), eq(accounts.provider, "wallet:solana")),
+          ),
+        )
+        .returning();
+      if (!removed) throw new Error("Linked wallet account changed");
+      await tx.delete(refreshTokens).where(eq(refreshTokens.userId, targetUserId));
+      await appendRequiredAudit({
+        tenantId,
+        actorType: "user",
+        actorId: adminUserId,
+        action: "tenant.wallet_policy.remediation",
+        resourceType: "user",
+        resourceId: targetUserId,
+        metadata: {
+          accountId: removed.id,
+          provider: removed.provider,
+          providerAccountId: removed.providerAccountId,
+          issuedBefore,
+        },
+        ipAddress: c.req.header("x-forwarded-for") ?? null,
+        userAgent: c.req.header("user-agent") ?? null,
+        requestId: c.get("requestId") ?? null,
+      });
+      return removed;
     });
   } catch (error) {
-    await db.insert(accounts).values({
-      id: deleted.id,
-      userId: deleted.userId,
-      provider: deleted.provider,
-      providerAccountId: deleted.providerAccountId,
-      accessTokenEncrypted: deleted.accessTokenEncrypted,
-      accessTokenIv: deleted.accessTokenIv,
-      accessTokenTag: deleted.accessTokenTag,
-      accessTokenSalt: deleted.accessTokenSalt,
-      refreshTokenEncrypted: deleted.refreshTokenEncrypted,
-      refreshTokenIv: deleted.refreshTokenIv,
-      refreshTokenTag: deleted.refreshTokenTag,
-      refreshTokenSalt: deleted.refreshTokenSalt,
-      expiresAt: deleted.expiresAt,
-    });
-    if (refreshTokenSnapshot.length > 0)
-      await db.insert(refreshTokens).values(refreshTokenSnapshot);
-    throw error;
+    const message = error instanceof Error ? error.message : "Internal server error";
+    const status =
+      message === "Tenant user not found"
+        ? 404
+        : message === "Linked wallet account changed" ||
+            message === "Cannot unlink the user's last login method"
+          ? 409
+          : 500;
+    return {
+      ok: false,
+      status,
+      error: status === 500 ? sanitizeErrorMessage(error) : message,
+      evidence: { accountUnlinked: false, sessionsRevoked: true, issuedBefore },
+    };
   }
 
   dispatchWebhook(tenantId, targetUserId, "user.unlinked_account", {
@@ -6923,6 +7049,7 @@ user.post("/me/tenants/:tenantId/invitations", async (c) => {
     "Tenant invitation creation requires recent MFA verification",
   );
   if (!admin.ok) return admin.response;
+  setNoStoreHeaders(c);
 
   const body = await safeJsonParse<{
     email?: unknown;
@@ -7315,6 +7442,7 @@ user.post("/me/tenants/:tenantId/users/wallet-policy/remediations", async (c) =>
         accountId,
         status: result.status,
         error: result.error,
+        evidence: result.evidence,
       });
     }
   }
@@ -7364,7 +7492,10 @@ user.delete(
       adminUserId: admin.userId,
     });
     if (!result.ok) {
-      return c.json<ApiResponse>({ ok: false, error: result.error }, result.status as 400);
+      return c.json<ApiResponse>(
+        { ok: false, error: result.error, data: result.evidence },
+        result.status as 400,
+      );
     }
 
     return c.json<ApiResponse<TenantWalletPolicyRemediationSuccess>>({
@@ -7825,6 +7956,7 @@ user.patch("/me/tenants/:tenantId/users/:targetUserId/deactivate", async (c) => 
   const result = await db
     .transaction(async (tx) => {
       await lockTenantOwnerLifecycle(tx, tenantId);
+      await lockUserSession(tx, targetUserId);
       const [membership] = await tx
         .select({ role: userTenants.role })
         .from(userTenants)
@@ -8003,6 +8135,7 @@ user.delete("/me/tenants/:tenantId/users/:targetUserId", async (c) => {
   try {
     deleted = await db.transaction(async (tx) => {
       await lockTenantOwnerLifecycle(tx, tenantId);
+      await lockUserSession(tx, targetUserId);
       const [current] = await tx
         .select({
           id: userTenants.id,

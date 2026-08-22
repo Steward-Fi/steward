@@ -358,8 +358,10 @@ test.describe("Dashboard account management", () => {
         },
       });
     });
-    await page.route(/\/agents$/, async (route) => {
-      await route.fulfill({ json: { ok: true, data: [] } });
+    await page.route(/\/agents(\?.*)?$/, async (route) => {
+      await route.fulfill({
+        json: { ok: true, data: { agents: [], limit: 100, offset: 0 } },
+      });
     });
     await page.route(/\/user\/me\/wallet\/signers(\?.*)?$/, async (route) => {
       await route.fulfill({ json: { ok: true, data: { signers: [] } } });
@@ -547,8 +549,10 @@ test.describe("Dashboard account management", () => {
         },
       });
     });
-    await page.route(/\/agents$/, async (route) => {
-      await route.fulfill({ json: { ok: true, data: [] } });
+    await page.route(/\/agents(\?.*)?$/, async (route) => {
+      await route.fulfill({
+        json: { ok: true, data: { agents: [], limit: 100, offset: 0 } },
+      });
     });
     await page.route(/\/user\/me\/wallet\/signers\/[^/?]+(\?.*)?$/, async (route) => {
       revokeUrl = route.request().url();
@@ -818,7 +822,7 @@ test.describe("Dashboard account management", () => {
         },
       });
     });
-    await page.route(/\/agents$/, async (route) => {
+    await page.route(/\/agents(\?.*)?$/, async (route) => {
       await route.fulfill({
         json: { ok: true, data: { agents, limit: 100, offset: 0 } },
       });

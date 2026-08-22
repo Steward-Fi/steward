@@ -3,6 +3,7 @@ import { and, asc, eq, inArray, isNotNull, sql } from "drizzle-orm";
 import { createPublicClient, http, type TransactionReceipt } from "viem";
 import { withTenantAuditedTransaction, writeAuditEvent } from "./audit";
 import { agents, db, transactions } from "./context";
+import { resolveRuntimeChainId, runtimeCustodyValue } from "./custody-runtime";
 import { runInternalJobForEachTenant } from "./tenant-job";
 import { dispatchWebhook } from "./webhook-dispatch";
 
@@ -74,11 +75,11 @@ function rpcEnvKey(chainId: number): string {
 }
 
 export function resolveEvmReceiptRpcUrl(chainId: number): string | null {
-  const chainSpecific = process.env[rpcEnvKey(chainId)]?.trim();
+  const chainSpecific = runtimeCustodyValue(rpcEnvKey(chainId))?.trim();
   if (chainSpecific) return chainSpecific;
 
-  const activeChainId = parsePositiveInt(process.env.CHAIN_ID, 84532);
-  const defaultRpc = process.env.RPC_URL?.trim();
+  const activeChainId = parsePositiveInt(String(resolveRuntimeChainId(84532)), 84532);
+  const defaultRpc = runtimeCustodyValue("RPC_URL")?.trim();
   if (defaultRpc && activeChainId === chainId) return defaultRpc;
 
   return EVM_CHAIN_RPCS[chainId] ?? null;

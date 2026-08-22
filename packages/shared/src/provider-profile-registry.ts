@@ -1,9 +1,8 @@
 /**
  * provider-profile-registry.ts - the versioned canonical-profile registry.
  *
- * Replaces the closed union `"github.provider-action.v1" | "x.provider-action.v1"`
- * (issue #201) with a code-side, fail-closed registry keyed by a stable profile
- * string. Every site that CONSUMES a canonical profile (store, eval, dispatch,
+ * This code-side, fail-closed registry is keyed by a stable profile string.
+ * Every site that CONSUMES a canonical profile (store, eval, dispatch,
  * approval binding, evidence) resolves it through {@link isRegisteredProfile} /
  * {@link assertRegisteredProfile}: an UNREGISTERED profile string is REJECTED
  * everywhere, never stored, never dispatched.

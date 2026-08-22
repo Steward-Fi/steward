@@ -69,7 +69,6 @@ type ReplaceItemsBody = {
   items: UpsertItemBody[];
 };
 
-type ConditionSetRow = typeof conditionSets.$inferSelect;
 type ConditionSetItemRow = typeof conditionSetItems.$inferSelect;
 
 class ConditionSetValidationError extends Error {}
@@ -197,62 +196,6 @@ async function ensureConditionSet(tenantId: string, id: string) {
   return set ?? null;
 }
 
-async function snapshotConditionSetItems(
-  tenantId: string,
-  conditionSetId: string,
-): Promise<ConditionSetItemRow[]> {
-  return db
-    .select()
-    .from(conditionSetItems)
-    .where(
-      and(
-        eq(conditionSetItems.tenantId, tenantId),
-        eq(conditionSetItems.conditionSetId, conditionSetId),
-      ),
-    );
-}
-
-async function restoreConditionSet(
-  tenantId: string,
-  set: ConditionSetRow,
-  items: ConditionSetItemRow[],
-): Promise<void> {
-  await db.transaction(async (tx) => {
-    await tx
-      .delete(conditionSetItems)
-      .where(
-        and(eq(conditionSetItems.tenantId, tenantId), eq(conditionSetItems.conditionSetId, set.id)),
-      );
-    await tx
-      .delete(conditionSets)
-      .where(and(eq(conditionSets.id, set.id), eq(conditionSets.tenantId, tenantId)));
-    await tx.insert(conditionSets).values(set);
-    if (items.length > 0) {
-      await tx.insert(conditionSetItems).values(items);
-    }
-  });
-}
-
-async function restoreConditionSetItems(
-  tenantId: string,
-  conditionSetId: string,
-  items: ConditionSetItemRow[],
-): Promise<void> {
-  await db.transaction(async (tx) => {
-    await tx
-      .delete(conditionSetItems)
-      .where(
-        and(
-          eq(conditionSetItems.tenantId, tenantId),
-          eq(conditionSetItems.conditionSetId, conditionSetId),
-        ),
-      );
-    if (items.length > 0) {
-      await tx.insert(conditionSetItems).values(items);
-    }
-  });
-}
-
 export const conditionSetRoutes = new Hono<{ Variables: AppVariables }>();
 
 const MAX_CONDITION_SETS = 100;
@@ -266,6 +209,24 @@ const MAX_ITEM_METADATA_BYTES = 4_096;
 
 function shouldUsePostgresAdvisoryLocks(): boolean {
   return process.env.STEWARD_DB_MODE !== "pglite" && process.env.STEWARD_PGLITE_MEMORY !== "true";
+}
+
+async function lockConditionSet(tx: typeof db, tenantId: string, conditionSetId: string) {
+  if (shouldUsePostgresAdvisoryLocks()) {
+    await tx.execute(
+      sql`select pg_advisory_xact_lock(hashtextextended(${`condition_set:${tenantId}:${conditionSetId}`}, 0))`,
+    );
+  }
+}
+
+async function readLockedConditionSet(tx: typeof db, tenantId: string, conditionSetId: string) {
+  await lockConditionSet(tx, tenantId, conditionSetId);
+  const query = tx
+    .select()
+    .from(conditionSets)
+    .where(and(eq(conditionSets.id, conditionSetId), eq(conditionSets.tenantId, tenantId)));
+  const [set] = shouldUsePostgresAdvisoryLocks() ? await query.for("update") : await query;
+  return set ?? null;
 }
 
 function parsePaginationParam(
@@ -377,7 +338,7 @@ conditionSetRoutes.post("/", async (c) => {
       const tx = txRaw as typeof db;
       if (shouldUsePostgresAdvisoryLocks()) {
         await tx.execute(
-          sql`select pg_advisory_xact_lock(hashtext(${`condition_sets:${tenantId}`}))`,
+          sql`select pg_advisory_xact_lock(hashtextextended(${`condition_sets:${tenantId}`}, 0))`,
         );
       }
 
@@ -456,24 +417,24 @@ conditionSetRoutes.patch("/:id", async (c) => {
   try {
     const current = await ensureConditionSet(tenantId, c.req.param("id"));
     if (!current) return c.json<ApiResponse>({ ok: false, error: "Condition set not found" }, 404);
-    const name =
+    const namePatch =
       body.name !== undefined
         ? normalizeRequiredText(body.name, "name", MAX_CONDITION_SET_NAME_LENGTH)
-        : current.name;
-    const description =
+        : undefined;
+    const descriptionPatch =
       body.description !== undefined
         ? normalizeOptionalText(
             body.description,
             "description",
             MAX_CONDITION_SET_DESCRIPTION_LENGTH,
           )
-        : current.description;
-    const ownerId =
+        : undefined;
+    const ownerIdPatch =
       body.ownerId !== undefined
         ? normalizeRequiredText(body.ownerId, "ownerId", MAX_CONDITION_SET_OWNER_ID_LENGTH)
-        : current.ownerId;
-    const metadata =
-      body.metadata !== undefined ? normalizeMetadata(body.metadata) : current.metadata;
+        : undefined;
+    const metadataPatch =
+      body.metadata !== undefined ? normalizeMetadata(body.metadata) : undefined;
 
     await writeAuditEvent({
       tenantId,
@@ -488,38 +449,38 @@ conditionSetRoutes.patch("/:id", async (c) => {
       requestId: c.get("requestId") ?? null,
     });
 
-    const [row] = await db
-      .update(conditionSets)
-      .set({
-        name,
-        description,
-        ownerId,
-        metadata,
-        updatedAt: new Date(),
-      })
-      .where(and(eq(conditionSets.id, current.id), eq(conditionSets.tenantId, tenantId)))
-      .returning();
-
-    if (!row) return c.json<ApiResponse>({ ok: false, error: "Condition set not found" }, 404);
-
-    try {
-      await writeAuditEvent({
+    const row = await withTenantAuditedTransaction(tenantId, async (txRaw, appendRequiredAudit) => {
+      const tx = txRaw as typeof db;
+      const locked = await readLockedConditionSet(tx, tenantId, current.id);
+      if (!locked) return null;
+      const [updated] = await tx
+        .update(conditionSets)
+        .set({
+          name: namePatch ?? locked.name,
+          description: descriptionPatch === undefined ? locked.description : descriptionPatch,
+          ownerId: ownerIdPatch ?? locked.ownerId,
+          metadata: metadataPatch ?? locked.metadata,
+          updatedAt: new Date(),
+        })
+        .where(and(eq(conditionSets.id, locked.id), eq(conditionSets.tenantId, tenantId)))
+        .returning();
+      if (!updated) return null;
+      await appendRequiredAudit({
         tenantId,
         actorType: "user",
         actorId: c.get("userId") ?? tenantId,
         action: "condition_set.update",
         resourceType: "condition_set",
-        resourceId: current.id,
+        resourceId: updated.id,
         metadata: {},
         ipAddress: c.req.header("x-forwarded-for") ?? null,
         userAgent: c.req.header("user-agent") ?? null,
         requestId: c.get("requestId") ?? null,
       });
-    } catch (error) {
-      const currentItems = await snapshotConditionSetItems(tenantId, current.id);
-      await restoreConditionSet(tenantId, current, currentItems);
-      throw error;
-    }
+      return updated;
+    });
+
+    if (!row) return c.json<ApiResponse>({ ok: false, error: "Condition set not found" }, 404);
 
     return c.json<ApiResponse<ConditionSetResponse>>({ ok: true, data: setToResponse(row) });
   } catch (err) {
@@ -540,7 +501,6 @@ conditionSetRoutes.delete("/:id", async (c) => {
 
   const current = await ensureConditionSet(tenantId, c.req.param("id"));
   if (!current) return c.json<ApiResponse>({ ok: false, error: "Condition set not found" }, 404);
-  const currentItems = await snapshotConditionSetItems(tenantId, current.id);
 
   await writeAuditEvent({
     tenantId,
@@ -555,32 +515,40 @@ conditionSetRoutes.delete("/:id", async (c) => {
     requestId: c.get("requestId") ?? null,
   });
 
-  const [deleted] = await db
-    .delete(conditionSets)
-    .where(and(eq(conditionSets.id, current.id), eq(conditionSets.tenantId, tenantId)))
-    .returning({ id: conditionSets.id });
-
-  if (!deleted) return c.json<ApiResponse>({ ok: false, error: "Condition set not found" }, 404);
-
   try {
-    await writeAuditEvent({
+    const deleted = await withTenantAuditedTransaction(
       tenantId,
-      actorType: "user",
-      actorId: c.get("userId") ?? tenantId,
-      action: "condition_set.delete",
-      resourceType: "condition_set",
-      resourceId: deleted.id,
-      metadata: {},
-      ipAddress: c.req.header("x-forwarded-for") ?? null,
-      userAgent: c.req.header("user-agent") ?? null,
-      requestId: c.get("requestId") ?? null,
-    });
-  } catch (error) {
-    await restoreConditionSet(tenantId, current, currentItems);
-    throw error;
-  }
+      async (txRaw, appendRequiredAudit) => {
+        const tx = txRaw as typeof db;
+        const locked = await readLockedConditionSet(tx, tenantId, current.id);
+        if (!locked) return null;
+        const [row] = await tx
+          .delete(conditionSets)
+          .where(and(eq(conditionSets.id, locked.id), eq(conditionSets.tenantId, tenantId)))
+          .returning({ id: conditionSets.id });
+        if (!row) return null;
+        await appendRequiredAudit({
+          tenantId,
+          actorType: "user",
+          actorId: c.get("userId") ?? tenantId,
+          action: "condition_set.delete",
+          resourceType: "condition_set",
+          resourceId: row.id,
+          metadata: {},
+          ipAddress: c.req.header("x-forwarded-for") ?? null,
+          userAgent: c.req.header("user-agent") ?? null,
+          requestId: c.get("requestId") ?? null,
+        });
+        return row;
+      },
+    );
 
-  return c.json<ApiResponse>({ ok: true });
+    if (!deleted) return c.json<ApiResponse>({ ok: false, error: "Condition set not found" }, 404);
+
+    return c.json<ApiResponse>({ ok: true });
+  } catch (err) {
+    return conditionSetMutationError(c, err);
+  }
 });
 
 conditionSetRoutes.get("/:id/items", async (c) => {
@@ -644,7 +612,6 @@ conditionSetRoutes.post("/:id/items", async (c) => {
 
   try {
     const item = normalizeItem(body);
-    const previousItems = await snapshotConditionSetItems(tenantId, set.id);
     await writeAuditEvent({
       tenantId,
       actorType: "user",
@@ -658,10 +625,10 @@ conditionSetRoutes.post("/:id/items", async (c) => {
       requestId: c.get("requestId") ?? null,
     });
 
-    const [row] = await db.transaction(async (tx) => {
-      if (shouldUsePostgresAdvisoryLocks()) {
-        await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${set.id}))`);
-      }
+    const row = await withTenantAuditedTransaction(tenantId, async (txRaw, appendRequiredAudit) => {
+      const tx = txRaw as typeof db;
+      const lockedSet = await readLockedConditionSet(tx, tenantId, set.id);
+      if (!lockedSet) return null;
 
       const [existing] = await tx
         .select({ id: conditionSetItems.id })
@@ -669,7 +636,7 @@ conditionSetRoutes.post("/:id/items", async (c) => {
         .where(
           and(
             eq(conditionSetItems.tenantId, tenantId),
-            eq(conditionSetItems.conditionSetId, set.id),
+            eq(conditionSetItems.conditionSetId, lockedSet.id),
             eq(conditionSetItems.value, item.value),
           ),
         );
@@ -681,7 +648,7 @@ conditionSetRoutes.post("/:id/items", async (c) => {
           .where(
             and(
               eq(conditionSetItems.tenantId, tenantId),
-              eq(conditionSetItems.conditionSetId, set.id),
+              eq(conditionSetItems.conditionSetId, lockedSet.id),
             ),
           );
         if (Number(total) >= MAX_CONDITION_SET_ITEMS) {
@@ -691,10 +658,10 @@ conditionSetRoutes.post("/:id/items", async (c) => {
         }
       }
 
-      return tx
+      const [upserted] = await tx
         .insert(conditionSetItems)
         .values({
-          conditionSetId: set.id,
+          conditionSetId: lockedSet.id,
           tenantId,
           value: item.value,
           label: item.label,
@@ -709,25 +676,21 @@ conditionSetRoutes.post("/:id/items", async (c) => {
           },
         })
         .returning();
-    });
-
-    try {
-      await writeAuditEvent({
+      await appendRequiredAudit({
         tenantId,
         actorType: "user",
         actorId: c.get("userId") ?? tenantId,
         action: "condition_set.item.upsert",
         resourceType: "condition_set_item",
-        resourceId: row.id,
-        metadata: { conditionSetId: set.id, value: row.value },
+        resourceId: upserted.id,
+        metadata: { conditionSetId: lockedSet.id, value: upserted.value },
         ipAddress: c.req.header("x-forwarded-for") ?? null,
         userAgent: c.req.header("user-agent") ?? null,
         requestId: c.get("requestId") ?? null,
       });
-    } catch (error) {
-      await restoreConditionSetItems(tenantId, set.id, previousItems);
-      throw error;
-    }
+      return upserted;
+    });
+    if (!row) return c.json<ApiResponse>({ ok: false, error: "Condition set not found" }, 404);
 
     return c.json<ApiResponse<ConditionSetItemResponse>>(
       { ok: true, data: itemToResponse(row) },
@@ -766,7 +729,6 @@ conditionSetRoutes.put("/:id/items", async (c) => {
 
   try {
     const items = body.items.map(normalizeItem);
-    const previousItems = await snapshotConditionSetItems(tenantId, set.id);
     await writeAuditEvent({
       tenantId,
       actorType: "user",
@@ -780,57 +742,60 @@ conditionSetRoutes.put("/:id/items", async (c) => {
       requestId: c.get("requestId") ?? null,
     });
 
-    const rows = await db.transaction(async (tx) => {
-      const [currentSet] = await tx
-        .select({ id: conditionSets.id })
-        .from(conditionSets)
-        .where(and(eq(conditionSets.id, set.id), eq(conditionSets.tenantId, tenantId)));
-      if (!currentSet) return null;
+    const rows = await withTenantAuditedTransaction(
+      tenantId,
+      async (txRaw, appendRequiredAudit) => {
+        const tx = txRaw as typeof db;
+        const lockedSet = await readLockedConditionSet(tx, tenantId, set.id);
+        if (!lockedSet) return null;
+        if (items.length > MAX_CONDITION_SET_ITEMS) {
+          throw new ConditionSetValidationError(
+            `items cannot contain more than ${MAX_CONDITION_SET_ITEMS} entries`,
+          );
+        }
 
-      await tx
-        .delete(conditionSetItems)
-        .where(
-          and(
-            eq(conditionSetItems.tenantId, tenantId),
-            eq(conditionSetItems.conditionSetId, set.id),
-          ),
-        );
+        await tx
+          .delete(conditionSetItems)
+          .where(
+            and(
+              eq(conditionSetItems.tenantId, tenantId),
+              eq(conditionSetItems.conditionSetId, lockedSet.id),
+            ),
+          );
 
-      if (items.length === 0) return [];
+        const replaced =
+          items.length === 0
+            ? []
+            : await tx
+                .insert(conditionSetItems)
+                .values(
+                  items.map((item) => ({
+                    conditionSetId: lockedSet.id,
+                    tenantId,
+                    value: item.value,
+                    label: item.label,
+                    metadata: item.metadata,
+                  })),
+                )
+                .returning();
 
-      return tx
-        .insert(conditionSetItems)
-        .values(
-          items.map((item) => ({
-            conditionSetId: set.id,
-            tenantId,
-            value: item.value,
-            label: item.label,
-            metadata: item.metadata,
-          })),
-        )
-        .returning();
-    });
+        await appendRequiredAudit({
+          tenantId,
+          actorType: "user",
+          actorId: c.get("userId") ?? tenantId,
+          action: "condition_set.items.replace",
+          resourceType: "condition_set",
+          resourceId: lockedSet.id,
+          metadata: { itemCount: replaced.length },
+          ipAddress: c.req.header("x-forwarded-for") ?? null,
+          userAgent: c.req.header("user-agent") ?? null,
+          requestId: c.get("requestId") ?? null,
+        });
+        return replaced;
+      },
+    );
 
     if (!rows) return c.json<ApiResponse>({ ok: false, error: "Condition set not found" }, 404);
-
-    try {
-      await writeAuditEvent({
-        tenantId,
-        actorType: "user",
-        actorId: c.get("userId") ?? tenantId,
-        action: "condition_set.items.replace",
-        resourceType: "condition_set",
-        resourceId: set.id,
-        metadata: { itemCount: rows.length },
-        ipAddress: c.req.header("x-forwarded-for") ?? null,
-        userAgent: c.req.header("user-agent") ?? null,
-        requestId: c.get("requestId") ?? null,
-      });
-    } catch (error) {
-      await restoreConditionSetItems(tenantId, set.id, previousItems);
-      throw error;
-    }
 
     return c.json<ApiResponse<ConditionSetItemResponse[]>>({
       ok: true,
@@ -901,8 +866,7 @@ conditionSetRoutes.patch("/:id/items/:itemId", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: "Condition set item not found" }, 404);
 
   try {
-    const item = normalizeItemUpdate(current, body);
-    const previousItems = await snapshotConditionSetItems(tenantId, set.id);
+    const authorizedItem = normalizeItemUpdate(current, body);
     await writeAuditEvent({
       tenantId,
       actorType: "user",
@@ -910,50 +874,74 @@ conditionSetRoutes.patch("/:id/items/:itemId", async (c) => {
       action: "condition_set.item.update.authorized",
       resourceType: "condition_set_item",
       resourceId: current.id,
-      metadata: { conditionSetId: set.id, value: item.value },
+      metadata: { conditionSetId: set.id, value: authorizedItem.value },
       ipAddress: c.req.header("x-forwarded-for") ?? null,
       userAgent: c.req.header("user-agent") ?? null,
       requestId: c.get("requestId") ?? null,
     });
 
-    const [row] = await db
-      .update(conditionSetItems)
-      .set({
-        value: item.value,
-        label: item.label,
-        metadata: item.metadata,
-        updatedAt: new Date(),
-      })
-      .where(
-        and(
-          eq(conditionSetItems.id, current.id),
-          eq(conditionSetItems.tenantId, tenantId),
-          eq(conditionSetItems.conditionSetId, set.id),
-        ),
-      )
-      .returning();
-
-    if (!row) return c.json<ApiResponse>({ ok: false, error: "Condition set item not found" }, 404);
-
-    try {
-      await writeAuditEvent({
+    const row = await withTenantAuditedTransaction(tenantId, async (txRaw, appendRequiredAudit) => {
+      const tx = txRaw as typeof db;
+      const lockedSet = await readLockedConditionSet(tx, tenantId, set.id);
+      if (!lockedSet) return { kind: "set_not_found" as const };
+      const query = tx
+        .select()
+        .from(conditionSetItems)
+        .where(
+          and(
+            eq(conditionSetItems.id, current.id),
+            eq(conditionSetItems.tenantId, tenantId),
+            eq(conditionSetItems.conditionSetId, lockedSet.id),
+          ),
+        );
+      const [lockedItem] = shouldUsePostgresAdvisoryLocks()
+        ? await query.for("update")
+        : await query;
+      if (!lockedItem) return { kind: "item_not_found" as const };
+      const item = normalizeItemUpdate(lockedItem, body);
+      const [updated] = await tx
+        .update(conditionSetItems)
+        .set({
+          value: item.value,
+          label: item.label,
+          metadata: item.metadata,
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(conditionSetItems.id, lockedItem.id),
+            eq(conditionSetItems.tenantId, tenantId),
+            eq(conditionSetItems.conditionSetId, lockedSet.id),
+          ),
+        )
+        .returning();
+      if (!updated) return { kind: "item_not_found" as const };
+      await appendRequiredAudit({
         tenantId,
         actorType: "user",
         actorId: c.get("userId") ?? tenantId,
         action: "condition_set.item.update",
         resourceType: "condition_set_item",
-        resourceId: row.id,
-        metadata: { conditionSetId: set.id, value: row.value },
+        resourceId: updated.id,
+        metadata: { conditionSetId: lockedSet.id, value: updated.value },
         ipAddress: c.req.header("x-forwarded-for") ?? null,
         userAgent: c.req.header("user-agent") ?? null,
         requestId: c.get("requestId") ?? null,
       });
-    } catch (error) {
-      await restoreConditionSetItems(tenantId, set.id, previousItems);
-      throw error;
+      return { kind: "updated" as const, row: updated };
+    });
+
+    if (row.kind === "set_not_found") {
+      return c.json<ApiResponse>({ ok: false, error: "Condition set not found" }, 404);
+    }
+    if (row.kind === "item_not_found") {
+      return c.json<ApiResponse>({ ok: false, error: "Condition set item not found" }, 404);
     }
 
-    return c.json<ApiResponse<ConditionSetItemResponse>>({ ok: true, data: itemToResponse(row) });
+    return c.json<ApiResponse<ConditionSetItemResponse>>({
+      ok: true,
+      data: itemToResponse(row.row),
+    });
   } catch (err) {
     return conditionSetMutationError(c, err);
   }
@@ -986,7 +974,6 @@ conditionSetRoutes.delete("/:id/items/:itemId", async (c) => {
 
   if (!current)
     return c.json<ApiResponse>({ ok: false, error: "Condition set item not found" }, 404);
-  const previousItems = await snapshotConditionSetItems(tenantId, set.id);
 
   await writeAuditEvent({
     tenantId,
@@ -1001,37 +988,49 @@ conditionSetRoutes.delete("/:id/items/:itemId", async (c) => {
     requestId: c.get("requestId") ?? null,
   });
 
-  const [deleted] = await db
-    .delete(conditionSetItems)
-    .where(
-      and(
-        eq(conditionSetItems.id, c.req.param("itemId")),
-        eq(conditionSetItems.tenantId, tenantId),
-        eq(conditionSetItems.conditionSetId, set.id),
-      ),
-    )
-    .returning({ id: conditionSetItems.id, value: conditionSetItems.value });
-
-  if (!deleted)
-    return c.json<ApiResponse>({ ok: false, error: "Condition set item not found" }, 404);
-
   try {
-    await writeAuditEvent({
+    const deleted = await withTenantAuditedTransaction(
       tenantId,
-      actorType: "user",
-      actorId: c.get("userId") ?? tenantId,
-      action: "condition_set.item.delete",
-      resourceType: "condition_set_item",
-      resourceId: deleted.id,
-      metadata: { conditionSetId: set.id, value: deleted.value },
-      ipAddress: c.req.header("x-forwarded-for") ?? null,
-      userAgent: c.req.header("user-agent") ?? null,
-      requestId: c.get("requestId") ?? null,
-    });
-  } catch (error) {
-    await restoreConditionSetItems(tenantId, set.id, previousItems);
-    throw error;
-  }
+      async (txRaw, appendRequiredAudit) => {
+        const tx = txRaw as typeof db;
+        const lockedSet = await readLockedConditionSet(tx, tenantId, set.id);
+        if (!lockedSet) return { kind: "set_not_found" as const };
+        const [row] = await tx
+          .delete(conditionSetItems)
+          .where(
+            and(
+              eq(conditionSetItems.id, c.req.param("itemId")),
+              eq(conditionSetItems.tenantId, tenantId),
+              eq(conditionSetItems.conditionSetId, lockedSet.id),
+            ),
+          )
+          .returning({ id: conditionSetItems.id, value: conditionSetItems.value });
+        if (!row) return { kind: "item_not_found" as const };
+        await appendRequiredAudit({
+          tenantId,
+          actorType: "user",
+          actorId: c.get("userId") ?? tenantId,
+          action: "condition_set.item.delete",
+          resourceType: "condition_set_item",
+          resourceId: row.id,
+          metadata: { conditionSetId: lockedSet.id, value: row.value },
+          ipAddress: c.req.header("x-forwarded-for") ?? null,
+          userAgent: c.req.header("user-agent") ?? null,
+          requestId: c.get("requestId") ?? null,
+        });
+        return { kind: "deleted" as const };
+      },
+    );
 
-  return c.json<ApiResponse>({ ok: true });
+    if (deleted.kind === "set_not_found") {
+      return c.json<ApiResponse>({ ok: false, error: "Condition set not found" }, 404);
+    }
+    if (deleted.kind === "item_not_found") {
+      return c.json<ApiResponse>({ ok: false, error: "Condition set item not found" }, 404);
+    }
+
+    return c.json<ApiResponse>({ ok: true });
+  } catch (err) {
+    return conditionSetMutationError(c, err);
+  }
 });

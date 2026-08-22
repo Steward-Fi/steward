@@ -666,6 +666,13 @@
       "when": 1787306400000,
       "tag": "0114_durable_wallet_claim_account_audit",
       "breakpoints": true
+    },
+    {
+      "idx": 118,
+      "version": "7",
+      "when": 1787306400000,
+      "tag": "0118_generic_intent_execution_delete_fence",
+      "breakpoints": true
     }
   ]
 }
