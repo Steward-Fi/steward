@@ -6,6 +6,7 @@ All notable changes to `@stwd/react` are documented here.
 
 ### Fixed
 - `StewardLogin` no longer emits the `webauthn` autocomplete token on the email input, so browser passkey conditional-mediation autofill cannot hijack a brand-new-email signup. Explicit passkey button flow is unchanged.
+- `StewardLinkedAccounts` now invalidates in-flight account reads when the authentication epoch changes, preventing a response started before sign-out from publishing stale account state or callbacks.
 
 ### Changed
 - Approval confirmations now keep failed mutations actionable while preventing a delayed result from closing or contaminating a newer confirmation.

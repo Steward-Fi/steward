@@ -120,8 +120,8 @@ export function StewardLinkedAccounts({
   );
 
   const refresh = useCallback(async () => {
-    if (!auth.isAuthenticated) return;
     const generation = ++refreshGeneration.current;
+    if (!auth.isAuthenticated) return;
     setIsLoading(true);
     setError(null);
     try {
