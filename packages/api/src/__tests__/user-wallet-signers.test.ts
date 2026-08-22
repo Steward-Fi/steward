@@ -19,13 +19,25 @@ const PERSONAL_TENANT_ID = `personal-${USER_ID}`;
 const PRIMARY_WALLET_AGENT_ID = `user-wallet-${USER_ID}`;
 const WALLET_AGENT_ID = `user-wallet-${USER_ID}-2`;
 const RECIPIENT = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const MUTATED_ENV = [
+  "STEWARD_DB_MODE",
+  "STEWARD_PGLITE_MEMORY",
+  "STEWARD_MASTER_PASSWORD",
+  "STEWARD_JWT_SECRET",
+  "STEWARD_AUDIT_HMAC_KEY",
+  "STEWARD_SIGNER_CREDENTIAL_PEPPER",
+  "STEWARD_ALLOW_UNSAFE_MESSAGE_SIGNING",
+  "STEWARD_ALLOW_USER_UNSAFE_MESSAGE_SIGNING",
+] as const;
+const originalEnv = new Map(MUTATED_ENV.map((name) => [name, process.env[name]]));
 
 describe("user wallet additional signers API", () => {
   let userRoutes: typeof import("../routes/user").userRoutes;
   let createSessionToken: typeof import("../routes/auth").createSessionToken;
 
   beforeAll(async () => {
-    process.env.STEWARD_PGLITE_MEMORY = "true";
+    process.env.STEWARD_DB_MODE = "pglite";
+    delete process.env.STEWARD_PGLITE_MEMORY;
     process.env.STEWARD_MASTER_PASSWORD = "user-wallet-signers-master-password";
     process.env.STEWARD_JWT_SECRET = "user-wallet-signers-jwt-secret-32chars";
     process.env.STEWARD_AUDIT_HMAC_KEY = "user-wallet-signers-audit-hmac-key-32chars";
@@ -72,13 +84,10 @@ describe("user wallet additional signers API", () => {
 
   afterAll(async () => {
     await closeDb();
-    delete process.env.STEWARD_PGLITE_MEMORY;
-    delete process.env.STEWARD_MASTER_PASSWORD;
-    delete process.env.STEWARD_JWT_SECRET;
-    delete process.env.STEWARD_AUDIT_HMAC_KEY;
-    delete process.env.STEWARD_SIGNER_CREDENTIAL_PEPPER;
-    delete process.env.STEWARD_ALLOW_UNSAFE_MESSAGE_SIGNING;
-    delete process.env.STEWARD_ALLOW_USER_UNSAFE_MESSAGE_SIGNING;
+    for (const [name, value] of originalEnv) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
   });
 
   async function token(opts: { mfa?: boolean } = {}) {
@@ -129,7 +138,7 @@ describe("user wallet additional signers API", () => {
     expect(body.error).toContain("recent MFA");
   });
 
-  it("creates, lists, and revokes a bounded signer credential for an indexed wallet", async () => {
+  it("creates, lists, and revokes a bounded signer under explicit PGLite mode", async () => {
     const auth = { Authorization: `Bearer ${await token({ mfa: true })}` };
     const createResponse = await userRoutes.request("/me/wallet/signers", {
       method: "POST",

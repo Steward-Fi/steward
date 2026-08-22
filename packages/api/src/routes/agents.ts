@@ -11,6 +11,7 @@ import {
   revocationStore,
 } from "@stwd/auth";
 import { agentPolicies, toPersistedPolicyRule } from "@stwd/db";
+import { shouldUsePGLite } from "@stwd/db/pglite";
 import { getSpend, getSpendByHost, invalidateCache, type SpendPeriod } from "@stwd/redis";
 import { redactedThrownDiagnostics } from "@stwd/shared";
 import { and, eq, gte, inArray, isNull, sql } from "drizzle-orm";
@@ -441,7 +442,7 @@ async function lockAgentAuthority(
   tenantId: string,
   agentId: string,
 ): Promise<boolean> {
-  if (process.env.STEWARD_PGLITE_MEMORY !== "true") {
+  if (!shouldUsePGLite()) {
     await tx.execute(
       sql`SELECT pg_advisory_xact_lock(hashtextextended(${`steward_agent_authority_${tenantId}:${agentId}`}, 0))`,
     );

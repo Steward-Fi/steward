@@ -67,6 +67,7 @@ import {
   userTenants,
   userWalletAppConsents,
 } from "@stwd/db";
+import { shouldUsePGLite } from "@stwd/db/pglite";
 import { PolicyEngine } from "@stwd/policy-engine";
 import {
   type AgentBalance,
@@ -977,7 +978,7 @@ async function lockUserWalletSignerAuthority(
   tenantId: string,
   agentId: string,
 ): Promise<boolean> {
-  if (process.env.STEWARD_PGLITE_MEMORY !== "true") {
+  if (!shouldUsePGLite()) {
     await tx.execute(
       sql`SELECT pg_advisory_xact_lock(hashtextextended(${`steward_agent_authority_${tenantId}:${agentId}`}, 0))`,
     );
