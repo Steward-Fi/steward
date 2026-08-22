@@ -4599,11 +4599,8 @@ auth.post("/saml/:tenantId/acs", async (c) => {
     const appState = await getChallengeStore().consume(`saml-app-state:${relayState}`);
     setRedirectFragment(redirectUrl, { code: exchangeCode, state: appState ?? undefined });
     return c.redirect(redirectUrl.toString(), 302);
-  } catch (err) {
-    return c.json<ApiResponse>(
-      { ok: false, error: err instanceof Error ? err.message : "SAML verification failed" },
-      401,
-    );
+  } catch {
+    return c.json<ApiResponse>({ ok: false, error: "SAML verification failed" }, 401);
   }
 });
 

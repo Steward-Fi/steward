@@ -305,11 +305,12 @@ describe("mounted tenant SAML and SSO-domain control plane", () => {
       });
 
     const initial = await startLogin();
+    const hostileMarker = "hostile-saml-verification-marker";
     for (const { label, response } of [
       {
         label: "issuer",
         response: responseFor(initial.requestId, "_wrong-issuer", {
-          issuer: "https://hostile-idp.example.test/saml",
+          issuer: `https://${hostileMarker}.example.test/saml`,
         }),
       },
       {
@@ -329,6 +330,8 @@ describe("mounted tenant SAML and SSO-domain control plane", () => {
       const denied = await postAcs(initial.relayState, response);
       expect(denied.status, label).toBe(401);
       const text = await denied.text();
+      expect(JSON.parse(text)).toEqual({ ok: false, error: "SAML verification failed" });
+      expect(text).not.toContain(hostileMarker);
       expect(text).not.toContain(CERT);
       expect(text).not.toContain("PRIVATE KEY");
     }
