@@ -405,6 +405,50 @@ describe("adapter fund-moving policy gate", () => {
     expect(body.data.unsignedIntent.category).toBe("swap");
   });
 
+  it("rejects a swap quote whose source token and deterministic id were forged cheaply", async () => {
+    process.env.STEWARD_ADAPTER_PER_OP_CAP_USD = "0.5";
+    process.env.STEWARD_ADAPTER_DAILY_CAP_USD = "1000";
+    const { app, agentId } = await makeApp(`tenant-adapter-swap-token-tamper-${Date.now()}`);
+    const quoteRes = await app.request("/adapters/swap/quote", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        agentId,
+        fromToken: USDC,
+        toToken: WETH,
+        amount: "1000000",
+        chainId: 8453,
+      }),
+    });
+    const { data } = (await quoteRes.json()) as {
+      data: {
+        quote: Record<string, unknown> & {
+          chainId: number;
+          amountIn: string;
+          slippageBps: number;
+          toToken: { address: string };
+          expiresAt: number;
+        };
+      };
+    };
+    const tamperedQuote = {
+      ...data.quote,
+      fromToken: WETH,
+      quoteId: `mock-swap-${data.quote.chainId}-${data.quote.amountIn}-${data.quote.slippageBps}-${WETH.address}-${data.quote.toToken.address}-${data.quote.expiresAt}`,
+    };
+
+    const response = await app.request("/adapters/swap/build", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ agentId, agentAddress: AGENT_WALLET, quote: tamperedQuote }),
+    });
+
+    expect(response.status).toBe(400);
+    const body = (await response.json()) as Record<string, unknown>;
+    expect(body.error).toContain("quote binding is invalid");
+    expect(body.unsignedIntent).toBeUndefined();
+  });
+
   it("rejects caller-supplied USD valuations instead of trusting an understatement", async () => {
     const { app, agentId } = await makeApp(`tenant-adapter-caller-price-${Date.now()}`);
     const quoteRes = await app.request("/adapters/swap/quote", {
@@ -530,6 +574,98 @@ describe("adapter fund-moving policy gate", () => {
     expect(body.data.unsignedIntent.signed).toBe(false);
     expect(body.data.unsignedIntent.category).toBe("bridge");
     expect(body.data.unsignedIntent.metadata.toChainId).toBe(42161);
+  });
+
+  it("rejects a bridge quote whose source token and deterministic id were forged cheaply", async () => {
+    process.env.STEWARD_ADAPTER_PER_OP_CAP_USD = "0.5";
+    process.env.STEWARD_ADAPTER_DAILY_CAP_USD = "1000";
+    const { app, agentId } = await makeApp(`tenant-adapter-bridge-token-tamper-${Date.now()}`);
+    const quoteRes = await app.request("/adapters/bridge/quote", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        agentId,
+        fromChainId: 8453,
+        toChainId: 42161,
+        fromToken: USDC,
+        toToken: WETH,
+        amount: "1000000",
+        recipient: AGENT_WALLET,
+      }),
+    });
+    const { data } = (await quoteRes.json()) as {
+      data: {
+        quote: Record<string, unknown> & {
+          fromChainId: number;
+          toChainId: number;
+          amountIn: string;
+          slippageBps: number;
+          toToken: { address: string };
+          expiresAt: number;
+        };
+      };
+    };
+    const tamperedQuote = {
+      ...data.quote,
+      fromToken: WETH,
+      quoteId: `mock-bridge-${data.quote.fromChainId}-${data.quote.toChainId}-${data.quote.amountIn}-${data.quote.slippageBps}-${WETH.address}-${data.quote.toToken.address}-${data.quote.expiresAt}`,
+    };
+
+    const response = await app.request("/adapters/bridge/build", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Idempotency-Key": "bridge-source-token-tamper",
+      },
+      body: JSON.stringify({ agentId, owner: AGENT_WALLET, quote: tamperedQuote }),
+    });
+
+    expect(response.status).toBe(400);
+    const body = (await response.json()) as Record<string, unknown>;
+    expect(body.error).toContain("quote binding is invalid");
+    expect(body.unsignedIntent).toBeUndefined();
+  });
+
+  it("fails closed when a bridge artifact omits or mismatches its valuation binding", async () => {
+    const { app, agentId } = await makeApp(`tenant-adapter-bridge-binding-${Date.now()}`);
+    for (const [caseName, metadata] of [
+      ["missing", { amountIn: "1000000", sourceChainId: 8453 }],
+      [
+        "chain-mismatch",
+        { amountIn: "1000000", sourceChainId: 1, sourceTokenAddress: USDC.address },
+      ],
+    ] as const) {
+      const provider = `test-artifact-binding-${caseName}-${Date.now()}`;
+      selectBridgeAdapter(provider, {
+        signed: false,
+        kind: "evm-tx",
+        chainId: 8453,
+        to: USDC.address,
+        value: "0",
+        data: "0x",
+        owner: AGENT_WALLET,
+        category: "bridge",
+        provider,
+        metadata,
+      });
+      const response = await app.request("/adapters/bridge/build", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Idempotency-Key": `bridge-artifact-binding-${caseName}`,
+        },
+        body: JSON.stringify({
+          agentId,
+          owner: AGENT_WALLET,
+          quote: { quoteId: `binding-${caseName}` },
+        }),
+      });
+
+      expect(response.status).toBe(400);
+      const body = (await response.json()) as Record<string, unknown>;
+      expect(body.reason).toBe("authoritative USD valuation is unavailable (fail-closed)");
+      expect(body.unsignedIntent).toBeUndefined();
+    }
   });
 
   it("rejects a regenerated bridge artifact that changed under the same idempotency key", async () => {

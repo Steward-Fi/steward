@@ -31,7 +31,6 @@ import {
   type BridgeHandoff,
   type BridgeQuote,
   type SparkWallet,
-  type SwapQuote,
   type UnsignedTxIntent,
 } from "@stwd/adapters";
 import { getDb, tenantAppClients, userTenants } from "@stwd/db";
@@ -593,6 +592,18 @@ async function tokenNotionalUsd(
   }
 }
 
+async function artifactTokenNotionalUsd(intent: UnsignedTxIntent): Promise<number | null> {
+  const metadata = intent.metadata;
+  if (
+    !metadata ||
+    metadata.sourceChainId !== intent.chainId ||
+    typeof metadata.sourceTokenAddress !== "string"
+  ) {
+    return null;
+  }
+  return tokenNotionalUsd(metadata.amountIn, metadata.sourceChainId, metadata.sourceTokenAddress);
+}
+
 async function bitcoinNotionalUsd(satoshis: unknown): Promise<number | null> {
   if (typeof satoshis !== "string" || !/^\d+$/.test(satoshis)) return null;
   try {
@@ -865,12 +876,7 @@ adapterRoutes.post("/swap/build", async (c) => {
 
     // Fund-moving: gate BEFORE returning anything signable.
     const caps = spendCaps();
-    const metadata = intent.metadata ?? {};
-    const estimatedUsd = await tokenNotionalUsd(
-      metadata.amountIn,
-      intent.chainId,
-      (quoteInput as SwapQuote).fromToken?.address,
-    );
+    const estimatedUsd = await artifactTokenNotionalUsd(intent);
     if (estimatedUsd === null) {
       return c.json(
         {
@@ -1115,11 +1121,7 @@ adapterRoutes.post("/bridge/build", async (c) => {
     const estimatedUsd =
       result.kind === "external-handoff"
         ? result.estimatedUsd
-        : await tokenNotionalUsd(
-            result.metadata?.amountIn,
-            result.chainId,
-            (parsed.data.quote as unknown as BridgeQuote).fromToken?.address,
-          );
+        : await artifactTokenNotionalUsd(result);
     if (estimatedUsd === null) {
       return c.json(
         {

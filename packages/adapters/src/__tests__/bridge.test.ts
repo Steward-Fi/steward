@@ -29,7 +29,7 @@ describe("MockBridgeAdapter", () => {
 
     expect(quote).toEqual({
       provider: "mock",
-      quoteId: "mock-bridge-1-8453-1000000-100",
+      quoteId: `mock-bridge-1-8453-1000000-100-${USDC.address}-${BASE_USDC.address}-1779819360000`,
       fromChainId: 1,
       toChainId: 8453,
       fromToken: USDC,
@@ -74,6 +74,8 @@ describe("MockBridgeAdapter", () => {
         toChainId: 8453,
         recipient: RECIPIENT,
         amountIn: "1000000",
+        sourceChainId: 1,
+        sourceTokenAddress: USDC.address,
         minAmountOut: "993010",
         slippageBps: 50,
       },
@@ -136,5 +138,26 @@ describe("MockBridgeAdapter", () => {
 
     const later = new MockBridgeAdapter({ now: () => 1779819360001 });
     await expect(later.buildBridge({ quote, owner: OWNER })).rejects.toThrow("quote has expired");
+  });
+
+  test("rejects a caller-tampered source token with a forged matching quote id", async () => {
+    const adapter = new MockBridgeAdapter({ now: () => 1779819300000 });
+    const quote = await adapter.getQuote({
+      fromChainId: 1,
+      toChainId: 8453,
+      fromToken: USDC,
+      toToken: BASE_USDC,
+      amount: "1000000",
+      recipient: RECIPIENT,
+    });
+    const tampered = {
+      ...quote,
+      fromToken: BASE_USDC,
+      quoteId: `mock-bridge-${quote.fromChainId}-${quote.toChainId}-${quote.amountIn}-${quote.slippageBps}-${BASE_USDC.address}-${quote.toToken.address}-${quote.expiresAt}`,
+    };
+
+    await expect(adapter.buildBridge({ quote: tampered, owner: OWNER })).rejects.toThrow(
+      "quote binding is invalid",
+    );
   });
 });
