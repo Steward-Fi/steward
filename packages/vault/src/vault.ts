@@ -1690,6 +1690,9 @@ export class Vault {
     const chainFamilyToUse = isSolana ? "solana" : "evm";
     const shouldBroadcast = request.broadcast !== false;
     const venue = resolveSignVenueSelector(request);
+    if (venue === "hyperliquid" && !request.walletAddress) {
+      throw new Error("Hyperliquid transaction signing requires an authorized wallet assertion");
+    }
     await assertVaultSigningActive({
       tenantId: request.tenantId,
       agentId: request.agentId,
@@ -1701,19 +1704,91 @@ export class Vault {
     // ── Resolve the correct signing key ─────────────────────────────────
     // 1. Try the multi-chain key table (new agents)
     // 2. Fall back to legacy single-key table (old EVM-only agents)
-    let secretKey: string;
-    const [chainKey] = await db
-      .select()
-      .from(encryptedChainKeys)
-      .where(
-        and(
-          eq(encryptedChainKeys.agentId, request.agentId),
-          eq(encryptedChainKeys.chainFamily, chainFamilyToUse),
-          venue ? eq(encryptedChainKeys.venue, venue) : isNull(encryptedChainKeys.venue),
-        ),
-      );
+    let lockedVenueSecretKey: string | undefined;
+    if (venue === "hyperliquid") {
+      const resolveLockedVenueKey = async (queryDb: Pick<typeof db, "select">) => {
+        const [walletRow] = await queryDb
+          .select({ address: agentWallets.address })
+          .from(agentWallets)
+          .where(
+            and(
+              eq(agentWallets.agentId, request.agentId),
+              eq(agentWallets.chainFamily, chainFamilyToUse),
+              eq(agentWallets.venue, venue),
+            ),
+          );
+        const [keyRow] = await queryDb
+          .select()
+          .from(encryptedChainKeys)
+          .where(
+            and(
+              eq(encryptedChainKeys.agentId, request.agentId),
+              eq(encryptedChainKeys.chainFamily, chainFamilyToUse),
+              eq(encryptedChainKeys.venue, venue),
+            ),
+          );
 
-    if (chainKey) {
+        // External-custody wallets intentionally have no local encrypted key;
+        // their fresh provider identity/address check remains below.
+        if (!keyRow) return undefined;
+
+        const resolvedSecretKey = await this.keyStore.decrypt(
+          {
+            ciphertext: keyRow.ciphertext,
+            iv: keyRow.iv,
+            tag: keyRow.tag,
+            salt: keyRow.salt,
+          },
+          {
+            tenantId: request.tenantId,
+            agentId: request.agentId,
+            chainFamily: chainFamilyToUse,
+            venue,
+          },
+        );
+        if (
+          walletRow?.address.toLowerCase() !== request.walletAddress?.toLowerCase() ||
+          (chainFamilyToUse === "evm" &&
+            privateKeyToAccount(resolvedSecretKey as `0x${string}`).address.toLowerCase() !==
+              request.walletAddress?.toLowerCase())
+        ) {
+          throw new Error("Transaction signer no longer matches the authorized wallet");
+        }
+        return resolvedSecretKey;
+      };
+
+      if (usesCustodyAdvisoryLock()) {
+        lockedVenueSecretKey = await db.transaction(async (tx) => {
+          await tx.execute(
+            sql`select pg_advisory_xact_lock(hashtextextended(${custodyTransitionLockKey(request.tenantId, request.agentId, chainFamilyToUse, venue)}, 0))`,
+          );
+          return resolveLockedVenueKey(tx);
+        });
+      } else {
+        lockedVenueSecretKey = await resolveLockedVenueKey(db);
+      }
+    }
+
+    let secretKey: string;
+    const [chainKey] = lockedVenueSecretKey
+      ? []
+      : await db
+          .select()
+          .from(encryptedChainKeys)
+          .where(
+            and(
+              eq(encryptedChainKeys.agentId, request.agentId),
+              eq(encryptedChainKeys.chainFamily, chainFamilyToUse),
+              venue ? eq(encryptedChainKeys.venue, venue) : isNull(encryptedChainKeys.venue),
+            ),
+          );
+
+    if (lockedVenueSecretKey) {
+      if (options.expectedBackend === "external-custody") {
+        throw new BackendBindingMismatchError("external-custody", "local-vault");
+      }
+      secretKey = lockedVenueSecretKey;
+    } else if (chainKey) {
       if (options.expectedBackend === "external-custody") {
         throw new BackendBindingMismatchError("external-custody", "local-vault");
       }

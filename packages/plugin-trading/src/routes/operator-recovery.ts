@@ -995,6 +995,10 @@ export function createOperatorRecoveryRoutes(
         data,
         chainId: ARBITRUM_CHAIN_ID,
         venue: "hyperliquid",
+        // Bind the vault operation to the venue wallet that was authorized
+        // above. A concurrent venue-wallet rotation must fail closed instead
+        // of signing the deposit with the replacement key.
+        walletAddress,
         broadcast: true,
       });
     } catch (err) {
