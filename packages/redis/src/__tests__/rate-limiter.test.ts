@@ -26,6 +26,29 @@ describe("Rate Limiter input validation", () => {
   });
 });
 
+describe("Rate Limiter policy authority", () => {
+  test("fences durable buckets by both window and effective cap", async () => {
+    const keys: string[] = [];
+    const client = {
+      async eval(_script: string, _keyCount: number, key: string) {
+        keys.push(key);
+        return [1, 1, "0", 0, 1_000];
+      },
+    } as unknown as ReturnType<typeof getRedis>;
+
+    await checkRateLimit("ratelimit:shared-subject", 60_000, 5, client);
+    await checkRateLimit("ratelimit:shared-subject", 60_000, 50, client);
+    await checkRateLimit("ratelimit:shared-subject", 10_000, 5, client);
+
+    expect(keys).toEqual([
+      "ratelimit:shared-subject:policy:60000:5",
+      "ratelimit:shared-subject:policy:60000:50",
+      "ratelimit:shared-subject:policy:10000:5",
+    ]);
+    expect(new Set(keys).size).toBe(3);
+  });
+});
+
 beforeEach(async () => {
   if (!runRedis) return;
   // Clean up test keys

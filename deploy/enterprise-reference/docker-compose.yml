@@ -50,6 +50,9 @@ services:
       NODE_ENV: production
       DATABASE_URL: "${DATABASE_URL:-postgresql://steward:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD required}@postgres:5432/steward}"
       REDIS_URL: "redis://redis:6379"
+      # The reference Redis has no published port and is reachable only on the
+      # internal data network; acknowledge that exact cleartext topology.
+      STEWARD_ALLOW_INSECURE_REDIS: "true"
       STEWARD_MASTER_PASSWORD: "${STEWARD_MASTER_PASSWORD:?required}"
       STEWARD_JWT_SECRET: "${STEWARD_JWT_SECRET:?required}"
       STEWARD_EXECUTION_AUTH_SECRET: "${STEWARD_EXECUTION_AUTH_SECRET:?required}"
@@ -106,6 +109,7 @@ services:
       NODE_ENV: production
       DATABASE_URL: "${DATABASE_URL:-postgresql://steward:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD required}@postgres:5432/steward}"
       REDIS_URL: "redis://redis:6379"
+      STEWARD_ALLOW_INSECURE_REDIS: "true"
       # Fail CLOSED on spend-limit / rate-limit enforcement if Redis is
       # unreachable. Without this the proxy fails OPEN (enforcement silently
       # bypassed) when redis dies — unacceptable for the reference profile.
