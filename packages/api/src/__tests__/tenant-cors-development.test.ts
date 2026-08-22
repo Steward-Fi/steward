@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, mock, test } from "bun:test";
+import { withRuntimeEnvironment } from "@stwd/shared/runtime-env";
 import { Hono } from "hono";
 
 let databaseReads = 0;
@@ -26,18 +27,19 @@ describe("tenant CORS development wildcard", () => {
   });
 
   test("does not consult tenant storage for an explicit development wildcard", async () => {
-    process.env.NODE_ENV = "development";
     databaseReads = 0;
     const app = new Hono();
     app.use("*", tenantCors);
 
-    const response = await app.request("/resource", {
-      method: "OPTIONS",
-      headers: {
-        Origin: "https://local-ui.example",
-        "Access-Control-Request-Method": "PATCH",
-      },
-    });
+    const response = await withRuntimeEnvironment({ NODE_ENV: "development" }, () =>
+      app.request("/resource", {
+        method: "OPTIONS",
+        headers: {
+          Origin: "https://local-ui.example",
+          "Access-Control-Request-Method": "PATCH",
+        },
+      }),
+    );
 
     expect(response.status).toBe(204);
     expect(response.headers.get("access-control-allow-origin")).toBe("*");
@@ -45,21 +47,49 @@ describe("tenant CORS development wildcard", () => {
   });
 
   test("keeps production fail closed when origin storage is unavailable", async () => {
-    process.env.NODE_ENV = "production";
     databaseReads = 0;
     const app = new Hono();
     app.use("*", tenantCors);
 
-    const response = await app.request("/resource", {
-      method: "OPTIONS",
-      headers: {
-        Origin: "https://console.example.com",
-        "Access-Control-Request-Method": "PATCH",
-      },
-    });
+    const response = await withRuntimeEnvironment({ NODE_ENV: "production" }, () =>
+      app.request("/resource", {
+        method: "OPTIONS",
+        headers: {
+          Origin: "https://console.example.com",
+          "Access-Control-Request-Method": "PATCH",
+        },
+      }),
+    );
 
     expect(response.status).toBe(403);
     expect(response.headers.get("access-control-allow-origin")).toBeNull();
     expect(databaseReads).toBe(1);
+  });
+
+  test("isolates overlapping development, production, and missing bindings", async () => {
+    databaseReads = 0;
+    const request = () => {
+      const app = new Hono();
+      app.use("*", tenantCors);
+      return app.request("/resource", {
+        method: "OPTIONS",
+        headers: {
+          Origin: "https://hostile-overlap.example",
+          "Access-Control-Request-Method": "PATCH",
+        },
+      });
+    };
+
+    const [development, production, missing] = await Promise.all([
+      withRuntimeEnvironment({ NODE_ENV: "development" }, request),
+      withRuntimeEnvironment({ NODE_ENV: "production" }, request),
+      withRuntimeEnvironment({}, request),
+    ]);
+
+    expect(development.status).toBe(204);
+    expect(development.headers.get("access-control-allow-origin")).toBe("*");
+    expect(production.status).toBe(403);
+    expect(missing.status).toBe(403);
+    expect(databaseReads).toBe(2);
   });
 });

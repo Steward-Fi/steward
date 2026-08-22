@@ -20,21 +20,12 @@ function directEnvironmentKeys(source: string): string[] {
   return [...keys].sort();
 }
 
-// Exact remaining middleware inventory. These are follow-up #770 tranches;
-// pinning the file/key pairs makes any new mutable-global middleware authority
-// fail CI instead of silently expanding the compatibility bridge.
-const pendingMiddlewareReaders = {
-  "idempotency.ts": [
-    "NODE_ENV",
-    "STEWARD_IDEMPOTENCY_MAX_ENTRIES",
-    "STEWARD_IDEMPOTENCY_METRICS_TTL_MS",
-    "STEWARD_IDEMPOTENCY_TTL_MS",
-  ],
-  "redis-enforcement.ts": ["NODE_ENV"],
-  "tenant-cors.ts": ["NODE_ENV"],
-};
+// #770 has eliminated direct mutable-global authority from security middleware.
+// Keep the exact inventory empty so new readers fail CI instead of silently
+// expanding the compatibility bridge.
+const pendingMiddlewareReaders = {};
 
-const migratedRequestGuardKeys = [
+const migratedRuntimeAuthorityKeys = [
   "STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS",
   "STEWARD_REQUEST_EXPIRY_MAX_SKEW_MS",
   "STEWARD_REQUEST_SIGNING_SECRET",
@@ -42,6 +33,9 @@ const migratedRequestGuardKeys = [
   "STEWARD_REQUEST_TIMESTAMP_TTL_MS",
   "STEWARD_REQUIRE_AUTH_SIGNATURE",
   "STEWARD_REQUIRE_REQUEST_EXPIRY",
+  "STEWARD_IDEMPOTENCY_MAX_ENTRIES",
+  "STEWARD_IDEMPOTENCY_METRICS_TTL_MS",
+  "STEWARD_IDEMPOTENCY_TTL_MS",
 ] as const;
 
 describe("Worker runtime environment static inventory", () => {
@@ -58,12 +52,16 @@ describe("Worker runtime environment static inventory", () => {
     expect(actual).toEqual(pendingMiddlewareReaders);
   });
 
-  it("keeps the migrated request-guard authority off mutable process.env globally", () => {
+  it("keeps migrated runtime authority off mutable process.env globally", () => {
     const violations: string[] = [];
     for (const path of productionTypescriptFiles(srcRoot)) {
       const keys = directEnvironmentKeys(readFileSync(path, "utf8"));
       for (const key of keys) {
-        if (migratedRequestGuardKeys.includes(key as (typeof migratedRequestGuardKeys)[number])) {
+        if (
+          migratedRuntimeAuthorityKeys.includes(
+            key as (typeof migratedRuntimeAuthorityKeys)[number],
+          )
+        ) {
           violations.push(`${relative(srcRoot, path)}:${key}`);
         }
       }

@@ -20,6 +20,7 @@ import {
   tenantConfigs as tenantConfigsTable,
 } from "@stwd/db";
 import { redactedThrownDiagnostics } from "@stwd/shared";
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 import { and, eq } from "drizzle-orm";
 import type { Context, Next } from "hono";
 
@@ -147,7 +148,7 @@ const MAX_AGE = "86400";
  * environments all fail closed.
  */
 function devWildcardAllowed(): boolean {
-  const env = process.env.NODE_ENV;
+  const env = runtimeEnvironmentValue("NODE_ENV");
   return env === "development" || env === "test";
 }
 
