@@ -40,6 +40,34 @@ export interface PersistentQueueStats {
   dead: number;
 }
 
+type ClaimOutcomePatch = {
+  status: "delivered" | "failed" | "dead";
+  attempts: number;
+  lastError: string | null;
+  deliveredAt?: Date;
+  nextRetryAt?: Date | null;
+  payload?: Record<string, unknown>;
+};
+
+async function settleClaim(
+  deliveryId: string,
+  claimToken: string,
+  patch: ClaimOutcomePatch,
+): Promise<boolean> {
+  const [updated] = await getDb()
+    .update(webhookDeliveries)
+    .set({ ...patch, claimToken: null })
+    .where(
+      and(
+        eq(webhookDeliveries.id, deliveryId),
+        eq(webhookDeliveries.status, "processing"),
+        eq(webhookDeliveries.claimToken, claimToken),
+      ),
+    )
+    .returning({ id: webhookDeliveries.id });
+  return updated !== undefined;
+}
+
 export class PersistentQueue {
   private readonly dispatcher: WebhookDispatcher;
   private readonly maxAttempts: number;
@@ -93,6 +121,7 @@ export class PersistentQueue {
   async processQueue(): Promise<WebhookDeliveryResult[]> {
     const db = getDb();
     const now = new Date();
+    const claimToken = crypto.randomUUID();
     const results: WebhookDeliveryResult[] = [];
 
     // Atomically claim due deliveries before dispatch. The temporary
@@ -105,6 +134,7 @@ export class PersistentQueue {
         UPDATE ${webhookDeliveries} AS dependent
         SET
           "status" = 'dead',
+          "claim_token" = NULL,
           "last_error" = 'Predecessor webhook delivery is dead'
         FROM ${webhookDeliveries} AS predecessor
         WHERE dependent."predecessor_delivery_id" = predecessor."id"
@@ -115,6 +145,7 @@ export class PersistentQueue {
         UPDATE ${webhookDeliveries}
         SET
           "status" = 'processing',
+          "claim_token" = ${claimToken},
           "next_retry_at" = ${new Date(now.getTime() + CLAIM_VISIBILITY_TIMEOUT_MS).toISOString()}
         WHERE "id" IN (
           SELECT candidate."id"
@@ -153,6 +184,7 @@ export class PersistentQueue {
           "attempts",
           "max_attempts" AS "maxAttempts",
           "next_retry_at" AS "nextRetryAt",
+          "claim_token" AS "claimToken",
           "last_error" AS "lastError",
           "created_at" AS "createdAt",
           "delivered_at" AS "deliveredAt"
@@ -170,17 +202,16 @@ export class PersistentQueue {
     ) as (typeof webhookDeliveries.$inferSelect)[];
 
     for (const delivery of deliveries) {
+      if (!delivery.claimToken) continue;
       const event = delivery.payload as unknown as WebhookEvent;
       const newAttempts = delivery.attempts + 1;
       if (!delivery.webhookConfigId || !delivery.secret) {
-        await db
-          .update(webhookDeliveries)
-          .set({
-            status: "dead",
-            attempts: newAttempts,
-            lastError: "Webhook delivery is missing original configuration snapshot",
-          })
-          .where(eq(webhookDeliveries.id, delivery.id));
+        const settled = await settleClaim(delivery.id, delivery.claimToken, {
+          status: "dead",
+          attempts: newAttempts,
+          lastError: "Webhook delivery is missing original configuration snapshot",
+        });
+        if (!settled) continue;
         results.push({
           success: false,
           attempts: newAttempts,
@@ -206,14 +237,12 @@ export class PersistentQueue {
         .limit(1);
 
       if (!webhook) {
-        await db
-          .update(webhookDeliveries)
-          .set({
-            status: "dead",
-            attempts: newAttempts,
-            lastError: "Webhook configuration is disabled or deleted",
-          })
-          .where(eq(webhookDeliveries.id, delivery.id));
+        const settled = await settleClaim(delivery.id, delivery.claimToken, {
+          status: "dead",
+          attempts: newAttempts,
+          lastError: "Webhook configuration is disabled or deleted",
+        });
+        if (!settled) continue;
         results.push({
           success: false,
           attempts: newAttempts,
@@ -222,14 +251,12 @@ export class PersistentQueue {
         continue;
       }
       if (webhook.url !== delivery.url) {
-        await db
-          .update(webhookDeliveries)
-          .set({
-            status: "dead",
-            attempts: newAttempts,
-            lastError: "Webhook delivery URL no longer matches its original configuration",
-          })
-          .where(eq(webhookDeliveries.id, delivery.id));
+        const settled = await settleClaim(delivery.id, delivery.claimToken, {
+          status: "dead",
+          attempts: newAttempts,
+          lastError: "Webhook delivery URL no longer matches its original configuration",
+        });
+        if (!settled) continue;
         results.push({
           success: false,
           attempts: newAttempts,
@@ -238,14 +265,12 @@ export class PersistentQueue {
         continue;
       }
       if (webhook.events.length > 0 && !webhook.events.includes(delivery.eventType)) {
-        await db
-          .update(webhookDeliveries)
-          .set({
-            status: "dead",
-            attempts: newAttempts,
-            lastError: "Webhook configuration no longer subscribes to this event",
-          })
-          .where(eq(webhookDeliveries.id, delivery.id));
+        const settled = await settleClaim(delivery.id, delivery.claimToken, {
+          status: "dead",
+          attempts: newAttempts,
+          lastError: "Webhook configuration no longer subscribes to this event",
+        });
+        if (!settled) continue;
         results.push({
           success: false,
           attempts: newAttempts,
@@ -270,14 +295,12 @@ export class PersistentQueue {
         });
       } catch (error) {
         const message = error instanceof Error ? error.message : "Unknown webhook delivery error";
-        await db
-          .update(webhookDeliveries)
-          .set({
-            status: "dead",
-            attempts: newAttempts,
-            lastError: `Webhook delivery failed deterministically: ${message}`,
-          })
-          .where(eq(webhookDeliveries.id, delivery.id));
+        const settled = await settleClaim(delivery.id, delivery.claimToken, {
+          status: "dead",
+          attempts: newAttempts,
+          lastError: `Webhook delivery failed deterministically: ${message}`,
+        });
+        if (!settled) continue;
         results.push({
           success: false,
           attempts: newAttempts,
@@ -292,16 +315,14 @@ export class PersistentQueue {
 
       if (result.success) {
         // Mark as delivered
-        await db
-          .update(webhookDeliveries)
-          .set({
-            status: "delivered",
-            attempts: newAttempts,
-            deliveredAt: new Date(),
-            lastError: null,
-            payload: persistedPayload,
-          })
-          .where(eq(webhookDeliveries.id, delivery.id));
+        const settled = await settleClaim(delivery.id, delivery.claimToken, {
+          status: "delivered",
+          attempts: newAttempts,
+          deliveredAt: new Date(),
+          lastError: null,
+          payload: persistedPayload,
+        });
+        if (!settled) continue;
 
         results.push({ ...result, attempts: newAttempts });
         continue;
@@ -310,15 +331,13 @@ export class PersistentQueue {
       // Failed — check if we should retry or mark dead
       if (newAttempts >= delivery.maxAttempts) {
         // Dead letter
-        await db
-          .update(webhookDeliveries)
-          .set({
-            status: "dead",
-            attempts: newAttempts,
-            lastError: result.error ?? "Max attempts exceeded",
-            payload: persistedPayload,
-          })
-          .where(eq(webhookDeliveries.id, delivery.id));
+        const settled = await settleClaim(delivery.id, delivery.claimToken, {
+          status: "dead",
+          attempts: newAttempts,
+          lastError: result.error ?? "Max attempts exceeded",
+          payload: persistedPayload,
+        });
+        if (!settled) continue;
 
         results.push({ ...result, attempts: newAttempts });
         continue;
@@ -329,16 +348,14 @@ export class PersistentQueue {
       const delayMs = RETRY_DELAYS_MS[delayIndex];
       const nextRetryAt = new Date(Date.now() + delayMs);
 
-      await db
-        .update(webhookDeliveries)
-        .set({
-          status: "failed",
-          attempts: newAttempts,
-          nextRetryAt,
-          lastError: result.error ?? "Delivery failed",
-          payload: persistedPayload,
-        })
-        .where(eq(webhookDeliveries.id, delivery.id));
+      const settled = await settleClaim(delivery.id, delivery.claimToken, {
+        status: "failed",
+        attempts: newAttempts,
+        nextRetryAt,
+        lastError: result.error ?? "Delivery failed",
+        payload: persistedPayload,
+      });
+      if (!settled) continue;
 
       results.push({ ...result, attempts: newAttempts });
     }

@@ -134,4 +134,98 @@ describe("persistent webhook dependency ordering", () => {
     expect(attempts[2]).toEqual({ type: "intent.executed", deliveryId: intentDeliveryId });
     expect(receiverEffects.size).toBe(2);
   });
+
+  it("fences an expired worker from overwriting the successor claim", async () => {
+    const [config] = await getDb()
+      .insert(webhookConfigs)
+      .values({
+        tenantId,
+        url: "https://receiver.example.test/lease-fence",
+        secret: "lease-secret",
+        events: [],
+      })
+      .returning();
+    const deliveryId = crypto.randomUUID();
+    const now = new Date();
+    await getDb()
+      .insert(webhookDeliveries)
+      .values({
+        id: deliveryId,
+        tenantId,
+        webhookConfigId: config.id,
+        agentId: "lease-agent",
+        eventType: "intent.executed",
+        payload: {
+          type: "intent.executed",
+          tenantId,
+          agentId: "lease-agent",
+          data: {},
+          timestamp: now,
+          deliveryId,
+          webhookConfigId: config.id,
+          signedAt: Math.floor(now.getTime() / 1_000),
+        },
+        url: config.url,
+        secret: config.secret,
+        events: [],
+        status: "pending",
+        attempts: 0,
+        maxAttempts: 1,
+        nextRetryAt: now,
+      });
+
+    let releaseExpired!: () => void;
+    const expiredRelease = new Promise<void>((resolve) => {
+      releaseExpired = resolve;
+    });
+    let expiredStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      expiredStarted = resolve;
+    });
+    const expiredWorker = new PersistentQueue(
+      {
+        async dispatch() {
+          expiredStarted();
+          await expiredRelease;
+          return { success: false, attempts: 1, error: "expired worker failure" };
+        },
+      } as never,
+      { batchSize: 1 },
+    );
+    const successorWorker = new PersistentQueue(
+      {
+        async dispatch() {
+          return { success: true, attempts: 1, deliveredAt: new Date() };
+        },
+      } as never,
+      { batchSize: 1 },
+    );
+
+    const expiredRun = expiredWorker.processQueue();
+    await started;
+    const [expiredClaim] = await getDb()
+      .select({ claimToken: webhookDeliveries.claimToken })
+      .from(webhookDeliveries)
+      .where(eq(webhookDeliveries.id, deliveryId));
+    expect(expiredClaim.claimToken).toEqual(expect.any(String));
+
+    await getDb()
+      .update(webhookDeliveries)
+      .set({ nextRetryAt: new Date(Date.now() - 1) })
+      .where(eq(webhookDeliveries.id, deliveryId));
+    expect(await successorWorker.processQueue()).toHaveLength(1);
+
+    releaseExpired();
+    expect(await expiredRun).toHaveLength(0);
+    const [finalDelivery] = await getDb()
+      .select()
+      .from(webhookDeliveries)
+      .where(eq(webhookDeliveries.id, deliveryId));
+    expect(finalDelivery).toMatchObject({
+      status: "delivered",
+      attempts: 1,
+      claimToken: null,
+      lastError: null,
+    });
+  });
 });

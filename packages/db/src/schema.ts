@@ -1623,6 +1623,9 @@ export const webhookDeliveries = pgTable(
     attempts: integer("attempts").notNull().default(0),
     maxAttempts: integer("max_attempts").notNull().default(5),
     nextRetryAt: timestamp("next_retry_at", { withTimezone: true }),
+    // Rotated every time a worker claims/reclaims a delivery. Outcome writes
+    // compare this token so an expired worker cannot overwrite a newer claim.
+    claimToken: uuid("claim_token"),
     lastError: text("last_error"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     deliveredAt: timestamp("delivered_at", { withTimezone: true }),

@@ -71,8 +71,9 @@ realPostgres("intent execution recovery (mounted production tenantAuth)", () => 
     await admin.db.insert(users).values({ id: userId, email: `${suffix}@example.test` });
     await admin.db.insert(userTenants).values({ userId, tenantId, role: "owner" });
 
-    const [{ intentRoutes }, context, { createSessionToken }] = await Promise.all([
+    const [{ intentRoutes }, { agentRoutes }, context, { createSessionToken }] = await Promise.all([
       import("../routes/intents"),
+      import("../routes/agents"),
       import("../services/context"),
       import("../routes/auth"),
     ]);
@@ -125,6 +126,7 @@ realPostgres("intent execution recovery (mounted production tenantAuth)", () => 
     app.use("*", correlationId);
     app.use("*", (c, next) => context.tenantAuth(c, next));
     app.route("/intents", intentRoutes);
+    app.route("/agents", agentRoutes);
     app.onError((error, c) => c.json({ ok: false, error: error.message }, 500));
 
     const authorized = await app.request(`/intents/${intentId}/authorize`, {
@@ -279,6 +281,21 @@ realPostgres("intent execution recovery (mounted production tenantAuth)", () => 
       requestId,
     });
     expect(sendCount).toBe(1);
+
+    // This request races the production execution endpoint after its
+    // autonomous reserveIntentExecution transaction committed and while the
+    // external send is still blocked. It exercises the real route locks and
+    // the database fence rather than copying their SQL into the fixture.
+    const blockedDeletion = await app.request(`/agents/${agentId}`, {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    expect(blockedDeletion.status).toBe(409);
+    await expect(blockedDeletion.json()).resolves.toEqual({
+      ok: false,
+      error: "Agent has unresolved execution evidence; reconcile it first",
+    });
+    expect(await admin.db.select().from(agents).where(eq(agents.id, agentId))).toHaveLength(1);
 
     const concurrentRetry = await runMounted();
     expect(concurrentRetry.status).toBe(202);

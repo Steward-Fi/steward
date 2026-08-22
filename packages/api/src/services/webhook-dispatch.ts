@@ -330,6 +330,7 @@ async function dispatchConfiguredWebhook(
   const deliveryId = config.idempotencyKey
     ? deterministicDeliveryId(config.id, event.type, config.idempotencyKey)
     : randomUUID();
+  const claimToken = randomUUID();
   const signedAt = Math.floor(Date.now() / 1000);
   const eventWithDelivery: WebhookEvent & {
     deliveryId: string;
@@ -356,6 +357,7 @@ async function dispatchConfiguredWebhook(
     secret: encryptedSecret,
     events: config.events,
     status: "processing",
+    claimToken,
     attempts: 0,
     maxAttempts: config.maxRetries + 1,
     nextRetryAt:
@@ -391,10 +393,23 @@ async function dispatchConfiguredWebhook(
         attempts: 0,
         lastError: `delivery blocked: ${deliveryUrlError}`,
         payload: eventWithDelivery as unknown as Record<string, unknown>,
+        claimToken: null,
       })
-      .where(eq(webhookDeliveries.id, delivery.id))
+      .where(
+        and(
+          eq(webhookDeliveries.id, delivery.id),
+          eq(webhookDeliveries.status, "processing"),
+          eq(webhookDeliveries.claimToken, claimToken),
+        ),
+      )
       .returning();
-    return rejected ?? delivery;
+    if (rejected) return rejected;
+    const [current] = await db
+      .select()
+      .from(webhookDeliveries)
+      .where(eq(webhookDeliveries.id, delivery.id))
+      .limit(1);
+    return current ?? delivery;
   }
 
   const dispatcher = new WebhookDispatcher({
@@ -413,11 +428,24 @@ async function dispatchConfiguredWebhook(
       lastError: result.error ?? null,
       nextRetryAt: retryable ? new Date(Date.now() + config.retryBackoffMs) : null,
       payload: eventWithDelivery as unknown as Record<string, unknown>,
+      claimToken: null,
     })
-    .where(eq(webhookDeliveries.id, delivery.id))
+    .where(
+      and(
+        eq(webhookDeliveries.id, delivery.id),
+        eq(webhookDeliveries.status, "processing"),
+        eq(webhookDeliveries.claimToken, claimToken),
+      ),
+    )
     .returning();
 
-  return updated ?? delivery;
+  if (updated) return updated;
+  const [current] = await db
+    .select()
+    .from(webhookDeliveries)
+    .where(eq(webhookDeliveries.id, delivery.id))
+    .limit(1);
+  return current ?? delivery;
 }
 
 function deterministicDeliveryId(configId: string, eventType: string, key: string): string {
