@@ -71,6 +71,7 @@ describe("core migration ledger integrity", () => {
     expect(source).toContain('name: "capability_rate_limit_bucket_agent_fence()"');
     expect(source).toContain('name: "capability_rate_limit_bucket_agent_fence"');
     expect(source).toContain('tag: "0005_activated_rls_inheritance"');
+    expect(source).toContain('name: "steward_migration_maintenance"');
     expect(source).toContain("schema does not match its applied migration prefix");
   });
 

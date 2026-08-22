@@ -23,16 +23,27 @@ BEGIN
     LOOP
       EXECUTE format('ALTER TABLE public.%I ENABLE ROW LEVEL SECURITY', relation_name);
       EXECUTE format('ALTER TABLE public.%I FORCE ROW LEVEL SECURITY', relation_name);
-      EXECUTE format(
-        'DROP POLICY IF EXISTS steward_migration_maintenance ON public.%I',
-        relation_name
-      );
-      EXECUTE format(
-        'CREATE POLICY steward_migration_maintenance ON public.%I FOR ALL TO %I USING (true) WITH CHECK (true)',
-        relation_name,
-        current_user
-      );
     END LOOP;
   END IF;
+  -- The policy effects are unconditional so the namespaced ledger has one
+  -- deterministic schema fingerprint whether core RLS was activated before
+  -- or after this plugin was installed.
+  FOREACH relation_name IN ARRAY ARRAY[
+    'capabilities',
+    'capability_grants',
+    'capability_invocations',
+    'capability_rate_limit_buckets'
+  ]
+  LOOP
+    EXECUTE format(
+      'DROP POLICY IF EXISTS steward_migration_maintenance ON public.%I',
+      relation_name
+    );
+    EXECUTE format(
+      'CREATE POLICY steward_migration_maintenance ON public.%I FOR ALL TO %I USING (true) WITH CHECK (true)',
+      relation_name,
+      current_user
+    );
+  END LOOP;
 END
 $$;

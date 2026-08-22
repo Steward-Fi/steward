@@ -131,6 +131,46 @@ describe("0109 agent policy builder-perps reconciliation", () => {
               status text NOT NULL
             )
           `;
+          process.env.DATABASE_URL = databaseUrl.toString();
+
+          // A known historical relation is accepted by its complete shape,
+          // never by name alone. Each probe is committed so runMigrations sees
+          // the same hostile catalog state that a fresh startup connection
+          // would observe.
+          await target`ALTER TABLE capability_grants ADD COLUMN hostile text`;
+          await expect(runMigrations()).rejects.toThrow(
+            /capabilities objects exist without their checked-in migration ledger/,
+          );
+          await target`ALTER TABLE capability_grants DROP COLUMN hostile`;
+
+          await target`
+            CREATE FUNCTION capability_grants_agent_fence()
+            RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$
+          `;
+          await expect(runMigrations()).rejects.toThrow(
+            /capabilities objects exist without their checked-in migration ledger/,
+          );
+
+          await target`
+            CREATE TRIGGER capability_grants_agent_fence
+            BEFORE INSERT ON capability_grants
+            FOR EACH ROW EXECUTE FUNCTION capability_grants_agent_fence()
+          `;
+          await expect(runMigrations()).rejects.toThrow(
+            /capabilities objects exist without their checked-in migration ledger/,
+          );
+          await target`DROP TRIGGER capability_grants_agent_fence ON capability_grants`;
+          await target`DROP FUNCTION capability_grants_agent_fence()`;
+
+          await target`
+            CREATE POLICY steward_tenant_isolation ON capability_grants
+            USING (true) WITH CHECK (true)
+          `;
+          await expect(runMigrations()).rejects.toThrow(
+            /capabilities objects exist without their checked-in migration ledger/,
+          );
+          await target`DROP POLICY steward_tenant_isolation ON capability_grants`;
+
           const before = await target<{ exists: boolean }[]>`
           SELECT EXISTS (
             SELECT 1 FROM information_schema.columns
@@ -142,7 +182,6 @@ describe("0109 agent policy builder-perps reconciliation", () => {
           await target.end({ timeout: 5 });
         }
 
-        process.env.DATABASE_URL = databaseUrl.toString();
         const first = await runMigrations();
         const expectedAfter0108 = journal.entries
           .filter(({ idx }) => idx > 108)
