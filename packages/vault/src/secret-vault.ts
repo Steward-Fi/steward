@@ -38,6 +38,7 @@ import {
   secretRoutes,
   secrets,
 } from "@stwd/db";
+import { sql } from "drizzle-orm";
 import { type EncryptedKey, KeyStore, type KeyStoreRuntimeOptions } from "./keystore";
 import {
   assertGovernedRouteUpdateIsSafe,
@@ -164,6 +165,7 @@ export class SecretVault {
     value: string,
     options?: CreateSecretOptions,
   ): Promise<SecretMetadata> {
+    await this.lockSecretLineageWithinTx(tx, tenantId, name);
     const encrypted = this.keyStore.encrypt(value, { tenantId, name, version: 1 });
     const [row] = await tx
       .insert(secrets)
@@ -209,6 +211,21 @@ export class SecretVault {
         and(eq(secrets.id, secretId), eq(secrets.tenantId, tenantId), isNull(secrets.deletedAt)),
       );
 
+    return row ? this.toMetadata(row) : null;
+  }
+
+  /** Metadata lookup on a caller-owned transaction; never returns plaintext. */
+  async getSecretByIdWithinTx(
+    tx: SecretTxExecutor,
+    tenantId: string,
+    secretId: string,
+  ): Promise<SecretMetadata | null> {
+    const [row] = await tx
+      .select()
+      .from(secrets)
+      .where(
+        and(eq(secrets.id, secretId), eq(secrets.tenantId, tenantId), isNull(secrets.deletedAt)),
+      );
     return row ? this.toMetadata(row) : null;
   }
 
@@ -334,18 +351,10 @@ export class SecretVault {
     newValue: string,
     options?: { allowDeletedCurrent?: boolean },
   ): Promise<SecretMetadata> {
-    const [current] = await tx
-      .select()
-      .from(secrets)
-      .where(
-        and(
-          eq(secrets.tenantId, tenantId),
-          eq(secrets.name, name),
-          options?.allowDeletedCurrent ? undefined : isNull(secrets.deletedAt),
-        ),
-      )
-      .orderBy(desc(secrets.version))
-      .limit(1);
+    const lineage = await this.lockSecretLineageWithinTx(tx, tenantId, name);
+    const current = lineage
+      .filter((row) => options?.allowDeletedCurrent || row.deletedAt === null)
+      .at(-1);
     if (!current) {
       throw new Error(`Secret "${name}" not found for tenant ${tenantId}`);
     }
@@ -380,6 +389,64 @@ export class SecretVault {
       .where(and(eq(secrets.id, current.id), eq(secrets.tenantId, tenantId)));
 
     return this.toMetadata(row);
+  }
+
+  /** Canonical tenant-audit -> secret-lineage -> version/route lock boundary. */
+  async lockSecretLineageWithinTx(
+    tx: SecretTxExecutor,
+    tenantId: string,
+    name: string,
+  ): Promise<Secret[]> {
+    if (process.env.STEWARD_DB_MODE !== "pglite" && process.env.STEWARD_PGLITE_MEMORY !== "true") {
+      await tx.execute(
+        sql`SELECT pg_advisory_xact_lock(hashtextextended(${`steward_secret_${tenantId}:${name}`}, 0))`,
+      );
+    }
+    const lineage = await tx
+      .select()
+      .from(secrets)
+      .where(and(eq(secrets.tenantId, tenantId), eq(secrets.name, name)))
+      .orderBy(secrets.version)
+      .for("update");
+    const ids = lineage.map((row) => row.id);
+    if (ids.length > 0) {
+      await tx
+        .select({ id: secretRoutes.id })
+        .from(secretRoutes)
+        .where(and(eq(secretRoutes.tenantId, tenantId), inArray(secretRoutes.secretId, ids)))
+        .orderBy(secretRoutes.id)
+        .for("update");
+    }
+    return lineage;
+  }
+
+  /** Soft-delete a full lineage and its routes inside the caller's transaction. */
+  async deleteSecretWithinTx(
+    tx: SecretTxExecutor,
+    tenantId: string,
+    secretId: string,
+    expectedName: string,
+  ): Promise<boolean> {
+    const lineage = await this.lockSecretLineageWithinTx(tx, tenantId, expectedName);
+    if (!lineage.some((row) => row.id === secretId && row.deletedAt === null)) return false;
+    const ids = lineage.map((row) => row.id);
+    if (ids.length > 0) {
+      await tx
+        .delete(secretRoutes)
+        .where(and(eq(secretRoutes.tenantId, tenantId), inArray(secretRoutes.secretId, ids)));
+    }
+    const now = new Date();
+    await tx
+      .update(secrets)
+      .set({ deletedAt: now, updatedAt: now })
+      .where(
+        and(
+          eq(secrets.tenantId, tenantId),
+          eq(secrets.name, expectedName),
+          isNull(secrets.deletedAt),
+        ),
+      );
+    return true;
   }
 
   /**

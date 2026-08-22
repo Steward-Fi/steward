@@ -14,7 +14,6 @@
 import {
   getDb as getVaultDb,
   secretRoutes as secretRouteRows,
-  secrets as secretRows,
   tenantConfigs as tenantConfigsTable,
 } from "@stwd/db";
 import { type SecretVault, validateSecretRouteConfig } from "@stwd/vault";
@@ -408,28 +407,30 @@ secretsRoutes.post("/", async (c) => {
       resourceId: body.name,
       metadata: { name: body.name, hasExpiry: !!body.expiresAt },
     });
-    const secret = await sv.createSecret(tenantId, body.name, body.value, {
-      description: body.description,
-      expiresAt: body.expiresAt ? new Date(body.expiresAt) : undefined,
-    });
-    try {
-      await writeSecretsAudit(c, {
+    const secret = await withTenantAuditedTransaction(tenantId, async (txRaw, appendAudit) => {
+      const created = await sv.createSecretWithinTx(
+        txRaw as VaultTx,
         tenantId,
-        actorType: "user",
-        actorId: c.get("userId") ?? c.get("authType") ?? tenantId,
-        action: "secret.create",
-        resourceType: "secret",
-        resourceId: secret.id,
-        metadata: { name: body.name, hasExpiry: !!body.expiresAt },
-      });
-    } catch (err) {
-      const now = new Date();
-      await getVaultDb()
-        .update(secretRows)
-        .set({ deletedAt: now, updatedAt: now })
-        .where(and(eq(secretRows.id, secret.id), eq(secretRows.tenantId, tenantId)));
-      throw err;
-    }
+        body.name,
+        body.value,
+        {
+          description: body.description,
+          expiresAt: body.expiresAt ? new Date(body.expiresAt) : undefined,
+        },
+      );
+      await appendAudit(
+        secretsAuditEvent(c, {
+          tenantId,
+          actorType: "user",
+          actorId: c.get("userId") ?? c.get("authType") ?? tenantId,
+          action: "secret.create",
+          resourceType: "secret",
+          resourceId: created.id,
+          metadata: { name: body.name, hasExpiry: !!body.expiresAt },
+        }),
+      );
+      return created;
+    });
     return c.json<ApiResponse>({ ok: true, data: secret }, 201);
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : "Unknown error";
@@ -499,6 +500,10 @@ secretsRoutes.post("/routes", async (c) => {
     }
 
     const sv = getSecretVault();
+    const secretBefore = await sv.getSecretById(tenantId, routeInput.secretId);
+    if (!secretBefore) {
+      return c.json<ApiResponse>({ ok: false, error: "Secret not found" }, 404);
+    }
     await writeSecretsAudit(c, {
       tenantId,
       actorType: "user",
@@ -522,6 +527,11 @@ secretsRoutes.post("/routes", async (c) => {
     });
     const route = await withTenantAuditedTransaction(tenantId, async (txRaw, appendAudit) => {
       const tx = txRaw as VaultTx;
+      await sv.lockSecretLineageWithinTx(tx, tenantId, secretBefore.name);
+      const currentSecret = await sv.getSecretByIdWithinTx(tx, tenantId, routeInput.secretId);
+      if (!currentSecret || currentSecret.version !== secretBefore.version) {
+        throw new SecretRouteAuthorityConflict("secret changed during route creation");
+      }
       await lockSecretRouteNamespaces(tx, tenantId, [routeInput.agentId]);
       const created = await sv.createRouteWithinTx(tx, tenantId, routeInput.secretId, {
         agentId: routeInput.agentId,
@@ -634,6 +644,10 @@ secretsRoutes.put("/routes/:id", async (c) => {
   if (!existing) {
     return c.json<ApiResponse>({ ok: false, error: "Route not found" }, 404);
   }
+  const existingSecret = await sv.getSecretById(tenantId, existing.secretId);
+  if (!existingSecret) {
+    return c.json<ApiResponse>({ ok: false, error: "Secret not found" }, 404);
+  }
   try {
     assertGovernedRouteUpdateIsSafe(existing, update);
   } catch (e) {
@@ -678,6 +692,7 @@ secretsRoutes.put("/routes/:id", async (c) => {
   try {
     updated = await withTenantAuditedTransaction(tenantId, async (txRaw, appendAudit) => {
       const tx = txRaw as VaultTx;
+      await sv.lockSecretLineageWithinTx(tx, tenantId, existingSecret.name);
       const [currentBeforeLock] = await tx
         .select()
         .from(secretRouteRows)
@@ -697,7 +712,11 @@ secretsRoutes.put("/routes/:id", async (c) => {
         .from(secretRouteRows)
         .where(and(eq(secretRouteRows.id, routeId), eq(secretRouteRows.tenantId, tenantId)))
         .limit(1);
-      if (!current || current.agentId !== currentBeforeLock.agentId) {
+      if (
+        !current ||
+        current.agentId !== currentBeforeLock.agentId ||
+        current.secretId !== existing.secretId
+      ) {
         throw new SecretRouteAuthorityConflict("route changed during update");
       }
       assertGovernedRouteUpdateIsSafe(current, update);
@@ -747,6 +766,10 @@ secretsRoutes.delete("/routes/:id", async (c) => {
   if (!existing) {
     return c.json<ApiResponse>({ ok: false, error: "Route not found" }, 404);
   }
+  const existingSecret = await sv.getSecretById(tenantId, existing.secretId);
+  if (!existingSecret) {
+    return c.json<ApiResponse>({ ok: false, error: "Secret not found" }, 404);
+  }
   await writeSecretsAudit(c, {
     tenantId,
     actorType: "user",
@@ -760,6 +783,7 @@ secretsRoutes.delete("/routes/:id", async (c) => {
   try {
     deleted = await withTenantAuditedTransaction(tenantId, async (txRaw, appendAudit) => {
       const tx = txRaw as VaultTx;
+      await sv.lockSecretLineageWithinTx(tx, tenantId, existingSecret.name);
       const [currentBeforeLock] = await tx
         .select()
         .from(secretRouteRows)
@@ -775,7 +799,11 @@ secretsRoutes.delete("/routes/:id", async (c) => {
         .from(secretRouteRows)
         .where(and(eq(secretRouteRows.id, routeId), eq(secretRouteRows.tenantId, tenantId)))
         .limit(1);
-      if (!current || current.agentId !== currentBeforeLock.agentId) {
+      if (
+        !current ||
+        current.agentId !== currentBeforeLock.agentId ||
+        current.secretId !== existing.secretId
+      ) {
         throw new SecretRouteAuthorityConflict("route changed during delete");
       }
       const [removed] = await tx
@@ -864,37 +892,32 @@ secretsRoutes.put("/:id", async (c) => {
       resourceId: secretId,
       metadata: { name: existing.name },
     });
-    const rotated = await sv.rotateSecret(tenantId, existing.name, body.value);
-    try {
-      await writeSecretsAudit(c, {
+    const rotated = await withTenantAuditedTransaction(tenantId, async (txRaw, appendAudit) => {
+      const current = await sv.getSecretByIdWithinTx(txRaw as VaultTx, tenantId, secretId);
+      if (!current || current.name !== existing.name || current.version !== existing.version) {
+        return null;
+      }
+      const changed = await sv.rotateSecretWithinTx(
+        txRaw as VaultTx,
         tenantId,
-        actorType: "user",
-        actorId: c.get("userId") ?? c.get("authType") ?? tenantId,
-        action: "secret.rotate",
-        resourceType: "secret",
-        resourceId: secretId,
-        metadata: { name: existing.name },
-      });
-    } catch (err) {
-      const now = new Date();
-      await getVaultDb().transaction(async (tx) => {
-        await tx
-          .update(secretRouteRows)
-          .set({ secretId: existing.id })
-          .where(
-            and(eq(secretRouteRows.tenantId, tenantId), eq(secretRouteRows.secretId, rotated.id)),
-          );
-        await tx
-          .update(secretRows)
-          .set({ deletedAt: now, updatedAt: now })
-          .where(and(eq(secretRows.id, rotated.id), eq(secretRows.tenantId, tenantId)));
-        await tx
-          .update(secretRows)
-          .set({ deletedAt: null, updatedAt: existing.updatedAt })
-          .where(and(eq(secretRows.id, existing.id), eq(secretRows.tenantId, tenantId)));
-      });
-      throw err;
-    }
+        existing.name,
+        body.value,
+      );
+      await appendAudit(
+        secretsAuditEvent(c, {
+          tenantId,
+          actorType: "user",
+          actorId: c.get("userId") ?? c.get("authType") ?? tenantId,
+          action: "secret.rotate",
+          resourceType: "secret",
+          resourceId: changed.id,
+          metadata: { name: existing.name },
+        }),
+      );
+      return changed;
+    });
+    if (!rotated)
+      return c.json<ApiResponse>({ ok: false, error: "Secret changed concurrently" }, 409);
     return c.json<ApiResponse>({ ok: true, data: rotated });
   } catch (e: unknown) {
     return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(e) }, 500);
@@ -913,23 +936,6 @@ secretsRoutes.delete("/:id", async (c) => {
   if (!existing) {
     return c.json<ApiResponse>({ ok: false, error: "Secret not found" }, 404);
   }
-  const secretVersions = await getVaultDb()
-    .select()
-    .from(secretRows)
-    .where(and(eq(secretRows.tenantId, tenantId), eq(secretRows.name, existing.name)));
-  const versionIds = secretVersions.map((row) => row.id);
-  const routeSnapshot =
-    versionIds.length > 0
-      ? await getVaultDb()
-          .select()
-          .from(secretRouteRows)
-          .where(
-            and(
-              eq(secretRouteRows.tenantId, tenantId),
-              inArray(secretRouteRows.secretId, versionIds),
-            ),
-          )
-      : [];
   await writeSecretsAudit(c, {
     tenantId,
     actorType: "user",
@@ -939,50 +945,29 @@ secretsRoutes.delete("/:id", async (c) => {
     resourceId: secretId,
     metadata: { name: existing.name },
   });
-  const deleted = await sv.deleteSecret(tenantId, secretId);
+  const deleted = await withTenantAuditedTransaction(tenantId, async (txRaw, appendAudit) => {
+    const removed = await sv.deleteSecretWithinTx(
+      txRaw as VaultTx,
+      tenantId,
+      secretId,
+      existing.name,
+    );
+    if (!removed) return false;
+    await appendAudit(
+      secretsAuditEvent(c, {
+        tenantId,
+        actorType: "user",
+        actorId: c.get("userId") ?? c.get("authType") ?? tenantId,
+        action: "secret.delete",
+        resourceType: "secret",
+        resourceId: secretId,
+      }),
+    );
+    return true;
+  });
 
   if (!deleted) {
     return c.json<ApiResponse>({ ok: false, error: "Secret not found" }, 404);
-  }
-
-  try {
-    await writeSecretsAudit(c, {
-      tenantId,
-      actorType: "user",
-      actorId: c.get("userId") ?? c.get("authType") ?? tenantId,
-      action: "secret.delete",
-      resourceType: "secret",
-      resourceId: secretId,
-    });
-  } catch (err) {
-    await getVaultDb().transaction(async (tx) => {
-      for (const row of secretVersions) {
-        await tx
-          .update(secretRows)
-          .set({ deletedAt: row.deletedAt, updatedAt: row.updatedAt })
-          .where(and(eq(secretRows.id, row.id), eq(secretRows.tenantId, tenantId)));
-      }
-      if (routeSnapshot.length > 0) {
-        await tx.insert(secretRouteRows).values(
-          routeSnapshot.map((route) => ({
-            id: route.id,
-            tenantId: route.tenantId,
-            agentId: route.agentId,
-            secretId: route.secretId,
-            hostPattern: route.hostPattern,
-            pathPattern: route.pathPattern,
-            method: route.method,
-            injectAs: route.injectAs,
-            injectKey: route.injectKey,
-            injectFormat: route.injectFormat,
-            priority: route.priority,
-            enabled: route.enabled,
-            createdAt: route.createdAt,
-          })),
-        );
-      }
-    });
-    throw err;
   }
 
   return c.json<ApiResponse>({ ok: true, data: { deleted: secretId } });
@@ -1021,37 +1006,32 @@ secretsRoutes.post("/:id/rotate", async (c) => {
       resourceId: secretId,
       metadata: { name: existing.name },
     });
-    const rotated = await sv.rotateSecret(tenantId, existing.name, body.value);
-    try {
-      await writeSecretsAudit(c, {
+    const rotated = await withTenantAuditedTransaction(tenantId, async (txRaw, appendAudit) => {
+      const current = await sv.getSecretByIdWithinTx(txRaw as VaultTx, tenantId, secretId);
+      if (!current || current.name !== existing.name || current.version !== existing.version) {
+        return null;
+      }
+      const changed = await sv.rotateSecretWithinTx(
+        txRaw as VaultTx,
         tenantId,
-        actorType: "user",
-        actorId: c.get("userId") ?? c.get("authType") ?? tenantId,
-        action: "secret.rotate",
-        resourceType: "secret",
-        resourceId: secretId,
-        metadata: { name: existing.name },
-      });
-    } catch (err) {
-      const now = new Date();
-      await getVaultDb().transaction(async (tx) => {
-        await tx
-          .update(secretRouteRows)
-          .set({ secretId: existing.id })
-          .where(
-            and(eq(secretRouteRows.tenantId, tenantId), eq(secretRouteRows.secretId, rotated.id)),
-          );
-        await tx
-          .update(secretRows)
-          .set({ deletedAt: now, updatedAt: now })
-          .where(and(eq(secretRows.id, rotated.id), eq(secretRows.tenantId, tenantId)));
-        await tx
-          .update(secretRows)
-          .set({ deletedAt: null, updatedAt: existing.updatedAt })
-          .where(and(eq(secretRows.id, existing.id), eq(secretRows.tenantId, tenantId)));
-      });
-      throw err;
-    }
+        existing.name,
+        body.value,
+      );
+      await appendAudit(
+        secretsAuditEvent(c, {
+          tenantId,
+          actorType: "user",
+          actorId: c.get("userId") ?? c.get("authType") ?? tenantId,
+          action: "secret.rotate",
+          resourceType: "secret",
+          resourceId: changed.id,
+          metadata: { name: existing.name },
+        }),
+      );
+      return changed;
+    });
+    if (!rotated)
+      return c.json<ApiResponse>({ ok: false, error: "Secret changed concurrently" }, 409);
     return c.json<ApiResponse>({ ok: true, data: rotated });
   } catch (e: unknown) {
     return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(e) }, 500);
