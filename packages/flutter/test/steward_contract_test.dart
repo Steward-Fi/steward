@@ -207,11 +207,12 @@ void main() {
     );
 
     final restore = UserWalletRecoveryRestoreInput(mnemonic: 'word /?#% ü');
+    const restoreBody = {'mnemonic': 'word /?#% ü'};
     await harness.expectSuccess(
       'recovery-restore',
       method: 'POST',
       uri: _uri(['user', 'me', 'wallet', 'recovery', 'restore']),
-      body: restore.toJson(),
+      body: restoreBody,
       invoke: () => harness.client.restoreUserWalletRecovery(restore),
     );
 
@@ -219,18 +220,22 @@ void main() {
       tenantId: 'tenant /?#% ü',
       claimToken: 'claim /?#% ü',
     );
+    const claimBody = {
+      'tenantId': 'tenant /?#% ü',
+      'claimToken': 'claim /?#% ü',
+    };
     await harness.expectSuccess(
       'wallet-claim',
       method: 'POST',
       uri: _uri(['user', 'me', 'wallet', 'claim-pregenerated']),
-      body: claim.toJson(),
+      body: claimBody,
       invoke: () => harness.client.claimPregeneratedUserWallet(claim),
     );
 
     await harness.expectFailure(
       method: 'POST',
       uri: _uri(['user', 'me', 'wallet', 'recovery', 'restore']),
-      body: restore.toJson(),
+      body: restoreBody,
       statusCode: 422,
       error: 'invalid recovery phrase',
       invoke: () => harness.client.restoreUserWalletRecovery(restore),
@@ -277,18 +282,22 @@ void main() {
     );
 
     final externalId = WalletExternalIdInput(tenantId: hostile, walletExternalId: hostile);
+    const externalIdBody = {
+      'tenantId': hostile,
+      'walletExternalId': hostile,
+    };
     await harness.expectSuccess(
       'wallet-assign',
       method: 'POST',
       uri: _uri(['platform', 'users', hostile, 'wallet', 'external-id']),
-      body: externalId.toJson(),
+      body: externalIdBody,
       invoke: () => harness.client.assignWalletExternalId(hostile, externalId),
     );
     await harness.expectSuccess(
       'wallet-resolve',
       method: 'POST',
       uri: _uri(['platform', 'users', 'wallet', 'external-id']),
-      body: externalId.toJson(),
+      body: externalIdBody,
       invoke: () => harness.client.resolveWalletExternalId(externalId),
     );
 
@@ -300,11 +309,19 @@ void main() {
       name: hostile,
       customMetadata: const {'hostile': '../?x=1&x=2'},
     );
+    const connectBody = {
+      'tenantId': hostile,
+      'walletExternalId': hostile,
+      'email': 'alice+wire@example.test',
+      'emailVerified': true,
+      'name': hostile,
+      'customMetadata': {'hostile': '../?x=1&x=2'},
+    };
     await harness.expectSuccess(
       'wallet-connect-or-create',
       method: 'POST',
       uri: _uri(['platform', 'users', 'wallet', 'external-id', 'connect-or-create']),
-      body: connect.toJson(),
+      body: connectBody,
       invoke: () => harness.client.connectOrCreateByWalletExternalId(connect),
     );
   });
@@ -325,6 +342,19 @@ void main() {
         ),
       ],
     );
+    const mutationBody = {
+      'id': accountId,
+      'display_name': 'Treasury /?#%',
+      'metadata': {'desk': 'ops', 'hostile': '../?x=1&x=2'},
+      'wallet_ids': ['wallet / one', 'wallet?two'],
+      'wallets_configuration': [
+        {
+          'chain_type': 'ethereum',
+          'name': 'Treasury EVM',
+          'wallet_id': 'wallet / one',
+        },
+      ],
+    };
 
     await harness.expectSuccess(
       'accounts-list',
@@ -337,7 +367,7 @@ void main() {
       'accounts-create',
       method: 'POST',
       uri: _uri(['accounts']),
-      body: mutation.toJson(),
+      body: mutationBody,
       invoke: () => harness.client.createAccount(mutation),
     );
     await harness.expectSuccess(
@@ -358,7 +388,7 @@ void main() {
       'accounts-update',
       method: 'PATCH',
       uri: _uri(['accounts', accountId]),
-      body: mutation.toJson(),
+      body: mutationBody,
       invoke: () => harness.client.updateAccount(accountId, mutation),
     );
     await harness.expectSuccess(
@@ -401,11 +431,17 @@ void main() {
       redirectUri: 'https://app.example.test/callback?next=/a%2Fb',
       scopes: const ['eth_accounts', 'personal_sign'],
     );
+    const approveBody = {
+      'app_id': hostile,
+      'origin': 'https://app.example.test/a?x=1',
+      'redirect_uri': 'https://app.example.test/callback?next=/a%2Fb',
+      'scopes': ['eth_accounts', 'personal_sign'],
+    };
     await harness.expectSuccess(
       'global-consent-approve',
       method: 'POST',
       uri: _uri(['global-wallet', 'consent', 'approve']),
-      body: approve.toJson(),
+      body: approveBody,
       invoke: () => harness.client.approveGlobalWalletConsent(approve),
     );
     await harness.expectSuccess(
@@ -429,11 +465,17 @@ void main() {
       origin: 'https://app.example.test',
       params: const ['0x1234', '../?x=1'],
     );
+    const actionBody = {
+      'app_id': hostile,
+      'origin': 'https://app.example.test',
+      'method': 'personal_sign',
+      'params': ['0x1234', '../?x=1'],
+    };
     await harness.expectSuccess(
       'global-confirm',
       method: 'POST',
       uri: _uri(['global-wallet', 'rpc', 'confirm']),
-      body: action.toJson(),
+      body: actionBody,
       invoke: () => harness.client.confirmGlobalWalletAction(action),
     );
 
@@ -444,11 +486,19 @@ void main() {
         {'to': '0x1234', 'data': '0xdeadbeef'}
       ],
     );
+    const scanBody = {
+      'app_id': hostile,
+      'origin': 'https://app.example.test',
+      'method': 'eth_sendTransaction',
+      'params': [
+        {'to': '0x1234', 'data': '0xdeadbeef'},
+      ],
+    };
     await harness.expectSuccess(
       'global-scan',
       method: 'POST',
       uri: _uri(['global-wallet', 'rpc', 'scan']),
-      body: scan.toJson(),
+      body: scanBody,
       invoke: () => harness.client.scanGlobalWalletTransaction(scan),
     );
 
@@ -463,18 +513,29 @@ void main() {
       id: 'rpc /?#%',
       jsonrpc: '2.0',
     );
+    const rpcBody = {
+      'app_id': hostile,
+      'origin': 'https://app.example.test',
+      'method': 'eth_sendTransaction',
+      'params': [
+        {'to': '0x1234'},
+      ],
+      'confirmation_id': hostile,
+      'id': 'rpc /?#%',
+      'jsonrpc': '2.0',
+    };
     await harness.expectSuccess(
       'global-rpc',
       method: 'POST',
       uri: _uri(['global-wallet', 'rpc']),
-      body: rpc.toJson(),
+      body: rpcBody,
       invoke: () => harness.client.globalWalletRpc(rpc),
     );
 
     await harness.expectFailure(
       method: 'POST',
       uri: _uri(['global-wallet', 'rpc']),
-      body: rpc.toJson(),
+      body: rpcBody,
       statusCode: 302,
       error: 'redirect refused',
       invoke: () => harness.client.globalWalletRpc(rpc),

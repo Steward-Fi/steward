@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 
 const requiredFiles = [
   "packages/flutter/pubspec.yaml",
+  "packages/flutter/CHANGELOG.md",
   "packages/flutter/README.md",
   "packages/flutter/lib/steward.dart",
   "packages/flutter/lib/src/client.dart",
