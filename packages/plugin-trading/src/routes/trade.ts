@@ -344,7 +344,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
   }
 
   const durableEnvelopeSchema = z.object({
-    status: z.union([z.literal(200), z.literal(400)]),
+    status: z.union([z.literal(200), z.literal(400), z.literal(502)]),
     body: z.record(z.string(), z.unknown()),
     headers: z.record(z.string(), z.string()).optional(),
   });
@@ -389,8 +389,8 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
     bodyHash: string,
     envelope: TradeIdempotencyResponse,
   ): Promise<void> {
-    if (envelope.status !== 200 && envelope.status !== 400) {
-      throw new Error("Only definite Hyperliquid outcomes may be persisted as terminal");
+    if (envelope.status !== 200 && envelope.status !== 400 && envelope.status !== 502) {
+      throw new Error("Only terminal Hyperliquid outcomes may be persisted for replay");
     }
     const idempotencyKeyHash = sha256(idempotencyKey);
     await withAuthenticatedTenantDatabase(tenantId, "agent-jwt-rs256", agentId, () =>
@@ -1354,6 +1354,13 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
               status: 502,
               body: { ok: false, error: "Trade submission status unknown" },
             };
+            await persistDurableHyperliquidOutcome(
+              tenantId,
+              agentId,
+              idempotencyKey,
+              hashBody({ ...body, idempotencyKey: undefined }),
+              envelope,
+            );
             await idempotency.store?.(envelope);
             return envelope;
           }

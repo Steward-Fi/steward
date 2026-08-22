@@ -12,7 +12,7 @@ CREATE TABLE "trading_order_outcomes" (
 	"http_status" integer NOT NULL,
 	"response" jsonb NOT NULL,
 	"created_at" timestamptz DEFAULT now() NOT NULL,
-	CONSTRAINT "trading_order_outcomes_status_chk" CHECK ("http_status" IN (200, 400)),
+	CONSTRAINT "trading_order_outcomes_status_chk" CHECK ("http_status" IN (200, 400, 502)),
 	CONSTRAINT "trading_order_outcomes_key_hash_chk" CHECK ("idempotency_key_hash" ~ '^[0-9a-f]{64}$'),
 	CONSTRAINT "trading_order_outcomes_request_hash_chk" CHECK ("request_hash" ~ '^[0-9a-f]{64}$'),
 	CONSTRAINT "trading_order_outcomes_response_size_chk" CHECK (octet_length("response"::text) <= 16384)

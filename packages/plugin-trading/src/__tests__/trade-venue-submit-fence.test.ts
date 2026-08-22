@@ -495,6 +495,40 @@ describe("Hyperliquid venue-submit spend-fence (real /hyperliquid/order path)", 
     expect(submitSpy).toHaveBeenCalledTimes(1);
   });
 
+  it("durably replays an ambiguous 502 when Redis completion CAS fails", async () => {
+    const { createTradeRoutes } = await import("../routes/trade");
+    const { testCtx } = await import("./_ctx");
+    const redis = redisWithFailedCompletionCas();
+    const baseCtx = testCtx();
+    const routes = createTradeRoutes({ ...baseCtx, getRedisClient: () => redis.client });
+    const { tenantId, agentId, sessionId } = await seedSession();
+    signSpy = spyOn(HyperliquidAdapter.prototype, "signOrder").mockResolvedValue(
+      {} as Awaited<ReturnType<HyperliquidAdapter["signOrder"]>>,
+    );
+    submitSpy = spyOn(HyperliquidAdapter.prototype, "submitOrder").mockRejectedValue(
+      new Error("connection lost after write"),
+    );
+
+    const key = crypto.randomUUID();
+    const response = await postOrder(makeApp(tenantId, agentId, routes), sessionId, key);
+    expect(response.status).toBe(502);
+    expect(((await response.json()) as { error: string }).error).toBe(
+      "Trade submission status unknown",
+    );
+    expect([...redis.values.values()].some((value) => value.includes('"state":"pending"'))).toBe(
+      true,
+    );
+
+    const restartedRoutes = createTradeRoutes({ ...baseCtx, getRedisClient: () => redis.client });
+    const replay = await postOrder(makeApp(tenantId, agentId, restartedRoutes), sessionId, key);
+    expect(replay.status).toBe(502);
+    expect(replay.headers.get("Idempotency-Replayed")).toBe("true");
+    expect(((await replay.json()) as { error: string }).error).toBe(
+      "Trade submission status unknown",
+    );
+    expect(submitSpy).toHaveBeenCalledTimes(1);
+  });
+
   it("preserves a known venue result when the fence transaction faults afterward", async () => {
     const { tenantId, agentId, sessionId } = await seedSession();
     const app = makeApp(tenantId, agentId, tradeRoutes);

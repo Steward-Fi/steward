@@ -283,6 +283,9 @@ SELECT format(
   'GRANT CONNECT ON DATABASE %I TO %I, %I',
   current_database(), :'steward_app_role', :'steward_migration_role'
 ) \gexec
+-- Drizzle's migrators issue CREATE SCHEMA IF NOT EXISTS for their journal
+-- schema. PostgreSQL requires database-level CREATE even when that schema
+-- already exists, so the restricted migration role needs this DDL capability.
 SELECT format('GRANT CREATE ON DATABASE %I TO %I', current_database(), :'steward_migration_role') \gexec
 SELECT format('GRANT USAGE, CREATE ON SCHEMA public TO %I', :'steward_migration_role') \gexec
 SELECT format('GRANT USAGE ON SCHEMA public, steward_bootstrap, steward_rls TO %I', :'steward_app_role') \gexec
