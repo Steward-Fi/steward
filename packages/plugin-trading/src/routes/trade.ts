@@ -1155,7 +1155,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
                 ...input,
                 tenantId,
                 venue: "hyperliquid",
-                expectedWalletAddress: storedSession.walletId,
+                expectedWalletAddress: durableWallet,
               }),
           };
           const adapter = new HyperliquidAdapter(vaultClient, agentId, durableWallet);
