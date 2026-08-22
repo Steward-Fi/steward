@@ -3,6 +3,10 @@ import { expect, test } from "@playwright/test";
 const COOP = "same-origin-allow-popups";
 const CORP = "same-origin";
 
+// This file verifies the policy itself. The shared trust-UX suite retains its
+// historical bypass, but these contexts must let Chromium enforce the CSP.
+test.use({ bypassCSP: false });
+
 function values(headers: Array<{ name: string; value: string }>, name: string): string[] {
   return headers
     .filter((header) => header.name.toLowerCase() === name.toLowerCase())
@@ -73,4 +77,59 @@ test("production static/image/favicon paths have exact non-conflicting isolation
     expect(values(response.headersArray(), "cross-origin-opener-policy"), path).toEqual([COOP]);
     expect(values(response.headersArray(), "cross-origin-resource-policy"), path).toEqual([CORP]);
   }
+});
+
+test("browser hydrates under CSP and enforces exact inline-script nonce binding", async ({
+  page,
+}) => {
+  await page.goto("/api-keys");
+  await expect(page.getByRole("heading", { name: "API keys" })).toBeVisible();
+  await page.waitForFunction(() =>
+    Array.isArray((window as typeof window & { __next_f?: unknown[] }).__next_f),
+  );
+
+  const nonce = await page
+    .locator("script[nonce]")
+    .first()
+    .evaluate((script) => script.nonce);
+  expect(nonce).toMatch(/^[A-Za-z0-9+/]{22}==$/);
+
+  async function appendInlineScript(key: string, candidateNonce?: string): Promise<boolean> {
+    return page.evaluate(
+      ({ candidateNonce, key }) => {
+        const target = window as typeof window & Record<string, unknown>;
+        delete target[key];
+        const script = document.createElement("script");
+        if (candidateNonce !== undefined) script.nonce = candidateNonce;
+        script.textContent = `window[${JSON.stringify(key)}] = true`;
+        document.head.append(script);
+        script.remove();
+        return target[key] === true;
+      },
+      { candidateNonce, key },
+    );
+  }
+
+  expect(await appendInlineScript("__stewardMissingNonce")).toBe(false);
+  expect(await appendInlineScript("__stewardMismatchedNonce", `${nonce}-attacker`)).toBe(false);
+  expect(await appendInlineScript("__stewardExactNonce", nonce)).toBe(true);
+
+  // A Next Link must perform client-side navigation after hydration. A full
+  // document navigation would discard this in-memory sentinel.
+  await page.evaluate(() => {
+    (
+      window as typeof window & { __stewardNavigationSentinel?: string }
+    ).__stewardNavigationSentinel = "preserved";
+  });
+  await Promise.all([
+    page.waitForURL("**/dashboard/secrets"),
+    page.getByRole("link", { name: "Manage governed credentials" }).click(),
+  ]);
+  expect(
+    await page.evaluate(
+      () =>
+        (window as typeof window & { __stewardNavigationSentinel?: string })
+          .__stewardNavigationSentinel,
+    ),
+  ).toBe("preserved");
 });

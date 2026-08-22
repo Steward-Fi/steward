@@ -71,6 +71,7 @@ describe("middleware security contract", () => {
 
 describe("exported middleware matcher", () => {
   test.each([
+    "/api",
     "/api/auth/refresh",
     "/api/anything",
     "/_next/static/chunk.js",
@@ -81,6 +82,20 @@ describe("exported middleware matcher", () => {
     "/site.webmanifest",
   ])("excludes %s", (pathname) => expect(matchesMiddleware(pathname)).toBe(false));
   test.each(["/api-keys", "/dashboard", "/login"])("covers %s", (pathname) => {
+    expect(matchesMiddleware(pathname)).toBe(true);
+  });
+  test.each([
+    "/apiary",
+    "/_next/staticity",
+    "/_next/images",
+    "/favicon.icoevil",
+    "/faviconXico",
+    "/icon-192.png/page",
+    "/icon-192Xpng",
+    "/icon-512.png-extra",
+    "/apple-touch-icon.png.bak",
+    "/siteXwebmanifest",
+  ])("does not exempt hostile prefix/suffix path %s", (pathname) => {
     expect(matchesMiddleware(pathname)).toBe(true);
   });
   test("skips router prefetches through the exported missing-header rules", () => {
