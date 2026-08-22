@@ -979,9 +979,28 @@ function serializeTenantSamlSsoConfig(row: TenantSamlSsoConfigRow): TenantSamlSs
   };
 }
 
+function databaseErrorCode(error: unknown): string | undefined {
+  let current = error;
+  for (let depth = 0; depth < 3 && current && typeof current === "object"; depth++) {
+    const candidate = current as { code?: unknown; cause?: unknown };
+    if (typeof candidate.code === "string") return candidate.code;
+    current = candidate.cause;
+  }
+  return undefined;
+}
+
+type SsoDomainTxtResolver = (hostname: string) => Promise<string[][]>;
+
+let ssoDomainTxtResolver: SsoDomainTxtResolver = resolveTxt;
+
+/** Replace DNS only in tests so route behavior never depends on the public network. */
+export function __setSsoDomainTxtResolverForTests(resolver?: SsoDomainTxtResolver): void {
+  ssoDomainTxtResolver = resolver ?? resolveTxt;
+}
+
 async function hasSsoDomainVerificationTxt(domain: string, token: string): Promise<boolean> {
   try {
-    const records = await resolveTxt(`_steward-sso.${domain}`);
+    const records = await ssoDomainTxtResolver(`_steward-sso.${domain}`);
     return records.some((chunks) => chunks.join("").trim() === token);
   } catch {
     return false;
@@ -1949,34 +1968,45 @@ tenantConfigRoutes.post("/:id/sso-domains/:domain/verify", requireTenantId, asyn
       409,
     );
   }
-  const row = await withTenantAuditedTransaction(tenantId, async (txRaw, appendRequiredAudit) => {
-    const tx = txRaw as typeof db;
-    const [updated] = await tx
-      .update(tenantSsoDomains)
-      .set({ status: "verified", verifiedAt: new Date(), updatedAt: new Date() })
-      .where(
-        and(
-          eq(tenantSsoDomains.tenantId, tenantId),
-          eq(tenantSsoDomains.domain, domain),
-          eq(tenantSsoDomains.verificationToken, previousDomain.verificationToken),
-        ),
-      )
-      .returning();
-    if (!updated) return null;
-    await appendRequiredAudit({
-      tenantId,
-      actorType: "user",
-      actorId: c.get("userId") ?? tenantId,
-      action: "tenant.sso_domain.verify",
-      resourceType: "tenant_sso_domain",
-      resourceId: updated.id,
-      metadata: { domain },
-      ipAddress: c.req.header("x-forwarded-for") ?? null,
-      userAgent: c.req.header("user-agent") ?? null,
-      requestId: c.get("requestId") ?? null,
+  let row: TenantSsoDomainRow | null;
+  try {
+    row = await withTenantAuditedTransaction(tenantId, async (txRaw, appendRequiredAudit) => {
+      const tx = txRaw as typeof db;
+      const [updated] = await tx
+        .update(tenantSsoDomains)
+        .set({ status: "verified", verifiedAt: new Date(), updatedAt: new Date() })
+        .where(
+          and(
+            eq(tenantSsoDomains.tenantId, tenantId),
+            eq(tenantSsoDomains.domain, domain),
+            eq(tenantSsoDomains.verificationToken, previousDomain.verificationToken),
+          ),
+        )
+        .returning();
+      if (!updated) return null;
+      await appendRequiredAudit({
+        tenantId,
+        actorType: "user",
+        actorId: c.get("userId") ?? tenantId,
+        action: "tenant.sso_domain.verify",
+        resourceType: "tenant_sso_domain",
+        resourceId: updated.id,
+        metadata: { domain },
+        ipAddress: c.req.header("x-forwarded-for") ?? null,
+        userAgent: c.req.header("user-agent") ?? null,
+        requestId: c.get("requestId") ?? null,
+      });
+      return updated;
     });
-    return updated;
-  });
+  } catch (error) {
+    if (databaseErrorCode(error) === "23505") {
+      return c.json<ApiResponse>(
+        { ok: false, error: "SSO domain is already verified by another tenant" },
+        409,
+      );
+    }
+    throw error;
+  }
   if (!row) {
     return c.json<ApiResponse>({ ok: false, error: "SSO domain changed during verification" }, 409);
   }

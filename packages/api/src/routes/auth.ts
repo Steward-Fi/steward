@@ -47,6 +47,7 @@
 import { createPublicKey, randomBytes, verify as verifySignature } from "node:crypto";
 import { request as httpsRequest } from "node:https";
 import { isIP } from "node:net";
+import { parseXml2JsFromString } from "@node-saml/node-saml/lib/xml";
 import {
   ACCESS_TOKEN_EXPIRY,
   ACCESS_TOKEN_EXPIRY_SECONDS,
@@ -4374,6 +4375,44 @@ async function recordSamlAssertionReplay(
   });
 }
 
+async function assertSamlAcsTenantBinding(
+  samlResponse: string,
+  expectedAcsUrl: string,
+): Promise<void> {
+  const parsed = (await parseXml2JsFromString(
+    Buffer.from(samlResponse, "base64").toString("utf8"),
+  )) as {
+    Response?: {
+      $?: { Destination?: string };
+      Assertion?: Array<{
+        Subject?: Array<{
+          SubjectConfirmation?: Array<{
+            SubjectConfirmationData?: Array<{ $?: { Recipient?: string } }>;
+          }>;
+        }>;
+      }>;
+    };
+  };
+  const response = parsed.Response;
+  if (response?.$?.Destination !== expectedAcsUrl) {
+    throw new Error("SAML response destination did not match this tenant's ACS");
+  }
+  const recipients =
+    response.Assertion?.flatMap(
+      (assertion) =>
+        assertion.Subject?.flatMap(
+          (subject) =>
+            subject.SubjectConfirmation?.flatMap(
+              (confirmation) =>
+                confirmation.SubjectConfirmationData?.map((data) => data.$?.Recipient) ?? [],
+            ) ?? [],
+        ) ?? [],
+    ) ?? [];
+  if (recipients.length === 0 || recipients.some((recipient) => recipient !== expectedAcsUrl)) {
+    throw new Error("SAML assertion recipient did not match this tenant's ACS");
+  }
+}
+
 /**
  * GET /saml/:tenantId/login
  * SP-initiated dashboard/team SSO. Stores an app-bound PKCE exchange request
@@ -4515,6 +4554,10 @@ auth.post("/saml/:tenantId/acs", async (c) => {
       emailAttribute: config.emailAttribute,
       groupsAttribute: config.groupsAttribute,
     });
+    await assertSamlAcsTenantBinding(samlResponse, config.acsUrl);
+    if (verified.issuer !== config.idpEntityId) {
+      throw new Error("SAML assertion issuer did not match the configured IdP");
+    }
     if (!(await isVerifiedSsoEmailDomainForTenant(tenantId, verified.email))) {
       redirectUrl.searchParams.set("error", "saml_email_domain_not_verified");
       return c.redirect(redirectUrl.toString(), 302);
@@ -4569,11 +4612,8 @@ auth.post("/saml/:tenantId/acs", async (c) => {
     const appState = await getChallengeStore().consume(`saml-app-state:${relayState}`);
     setRedirectFragment(redirectUrl, { code: exchangeCode, state: appState ?? undefined });
     return c.redirect(redirectUrl.toString(), 302);
-  } catch (err) {
-    return c.json<ApiResponse>(
-      { ok: false, error: err instanceof Error ? err.message : "SAML verification failed" },
-      401,
-    );
+  } catch {
+    return c.json<ApiResponse>({ ok: false, error: "SAML verification failed" }, 401);
   }
 });
 
