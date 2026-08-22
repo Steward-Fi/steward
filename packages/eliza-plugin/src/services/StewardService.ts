@@ -51,7 +51,8 @@ export type TrackedProviderAction =
 /**
  * Reject plaintext `http://` API URLs for non-localhost hosts. Talking to a
  * remote Steward API over http would expose API keys / bearer tokens and signed
- * transactions to network observers. The localhost default stays usable for dev.
+ * transactions to network observers. An explicitly configured localhost URL
+ * stays usable for development.
  */
 export function assertSecureApiUrl(apiUrl: string): void {
   let parsed: URL;
@@ -73,6 +74,12 @@ export function assertSecureApiUrl(apiUrl: string): void {
   } else if (parsed.protocol !== "https:") {
     throw new Error("[Steward] apiUrl must use https:// or loopback http://");
   }
+}
+
+function normalizeConfigString(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const normalized = value.trim();
+  return normalized.length > 0 ? normalized : undefined;
 }
 
 /**
@@ -139,8 +146,19 @@ export class StewardService extends Service {
 
   private async tryAutoRegister(runtime: IAgentRuntime): Promise<void> {
     try {
+      const config = this.pluginConfig;
+      if (!config?.apiKey || !config.tenantId) {
+        throw new Error("Steward auto-registration authority is not configured");
+      }
       const name = this.getRuntimeState(runtime).character?.name ?? this.getAgentId();
-      this.agentIdentity = await this.getClient().createWallet(this.getAgentId(), name);
+      // Registration is a tenant-level mutation. Never let the operational
+      // client's preferred bearer token shadow the explicitly required API key.
+      const registrationClient = new StewardClient({
+        baseUrl: config.apiUrl,
+        apiKey: config.apiKey,
+        tenantId: config.tenantId,
+      });
+      this.agentIdentity = await registrationClient.createWallet(this.getAgentId(), name);
       this._connected = true;
       console.info(`[Steward] Registered new wallet: ${this.agentIdentity.walletAddress}`);
     } catch (regErr) {
@@ -155,11 +173,13 @@ export class StewardService extends Service {
     const settings = runtimeState.character?.settings?.steward ?? {};
     const env = process.env;
 
-    const apiUrl = settings.apiUrl ?? env.STEWARD_API_URL;
-    const apiKey = settings.apiKey ?? env.STEWARD_API_KEY;
-    const bearerToken = settings.bearerToken ?? env.STEWARD_JWT;
-    const agentId = settings.agentId ?? env.STEWARD_AGENT_ID ?? runtimeState.agentId;
-    const tenantId = settings.tenantId ?? env.STEWARD_TENANT_ID;
+    const apiUrl = normalizeConfigString(settings.apiUrl ?? env.STEWARD_API_URL);
+    const apiKey = normalizeConfigString(settings.apiKey ?? env.STEWARD_API_KEY);
+    const bearerToken = normalizeConfigString(settings.bearerToken ?? env.STEWARD_JWT);
+    const agentId = normalizeConfigString(
+      settings.agentId ?? env.STEWARD_AGENT_ID ?? runtimeState.agentId,
+    );
+    const tenantId = normalizeConfigString(settings.tenantId ?? env.STEWARD_TENANT_ID);
 
     if (!apiUrl) {
       console.warn("[Steward] Plugin disabled: STEWARD_API_URL is required");
@@ -175,6 +195,14 @@ export class StewardService extends Service {
     }
     assertSecureApiUrl(apiUrl);
 
+    if (
+      settings.autoRegister !== undefined &&
+      settings.autoRegister !== true &&
+      settings.autoRegister !== false
+    ) {
+      console.warn("[Steward] Plugin disabled: autoRegister must be a boolean");
+      return null;
+    }
     const autoRegister = settings.autoRegister ?? env.STEWARD_AUTO_REGISTER === "true";
     if (autoRegister && (!apiKey || !tenantId)) {
       console.warn(
@@ -185,7 +213,7 @@ export class StewardService extends Service {
 
     return {
       apiUrl,
-      proxyUrl: settings.proxyUrl ?? env.STEWARD_PROXY_URL ?? apiUrl,
+      proxyUrl: normalizeConfigString(settings.proxyUrl ?? env.STEWARD_PROXY_URL) ?? apiUrl,
       proxyRequestSigningSecret:
         settings.proxyRequestSigningSecret ??
         env.STEWARD_PROXY_REQUEST_SIGNING_SECRET ??

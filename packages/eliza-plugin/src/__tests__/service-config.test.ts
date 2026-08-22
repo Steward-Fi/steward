@@ -122,6 +122,69 @@ describe("StewardService fail-closed configuration", () => {
     );
   });
 
+  it.each([
+    "true",
+    "false",
+    1,
+  ])("rejects non-boolean character autoRegister value %j before network access", async (autoRegister) => {
+    const fetch = vi.fn();
+    vi.stubGlobal("fetch", fetch);
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+    const service = await StewardService.start(
+      runtime({
+        apiUrl: "https://api.steward.example",
+        apiKey: "tenant-api-key",
+        tenantId: "tenant-1",
+        agentId: "agent-1",
+        autoRegister,
+      }),
+    );
+
+    expect(service.getConfig()).toBeNull();
+    expect(fetch).not.toHaveBeenCalled();
+    expect(warning).toHaveBeenCalledWith(expect.stringContaining("autoRegister must be a boolean"));
+  });
+
+  it.each([
+    {
+      name: "API URL",
+      settings: { apiUrl: "   ", apiKey: "tenant-api-key", agentId: "agent-1" },
+      diagnostic: "STEWARD_API_URL is required",
+    },
+    {
+      name: "authentication",
+      settings: { apiUrl: "https://api.steward.example", apiKey: "   ", agentId: "agent-1" },
+      diagnostic: "STEWARD_API_KEY or STEWARD_JWT is required",
+    },
+    {
+      name: "agent identity",
+      settings: { apiUrl: "https://api.steward.example", apiKey: "tenant-api-key", agentId: "   " },
+      diagnostic: "STEWARD_AGENT_ID or runtime agentId is required",
+    },
+    {
+      name: "registration tenant",
+      settings: {
+        apiUrl: "https://api.steward.example",
+        apiKey: "tenant-api-key",
+        agentId: "agent-1",
+        tenantId: "   ",
+        autoRegister: true,
+      },
+      diagnostic: "auto-registration requires STEWARD_API_KEY and STEWARD_TENANT_ID",
+    },
+  ])("rejects blank $name config before network access", async ({ settings, diagnostic }) => {
+    const fetch = vi.fn();
+    vi.stubGlobal("fetch", fetch);
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+    const service = await StewardService.start(runtime(settings));
+
+    expect(service.getConfig()).toBeNull();
+    expect(fetch).not.toHaveBeenCalled();
+    expect(warning).toHaveBeenCalledWith(expect.stringContaining(diagnostic));
+  });
+
   it("registers only after explicit opt-in with tenant-scoped API-key authority", async () => {
     const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       if (requestMethod(input, init) === "GET") {
@@ -152,6 +215,41 @@ describe("StewardService fail-closed configuration", () => {
       "GET",
       "POST",
     ]);
+    const registrationHeaders = new Headers(fetch.mock.calls[1]?.[1]?.headers);
+    expect(registrationHeaders.get("x-steward-key")).toBe("tenant-api-key");
+    expect(registrationHeaders.get("x-steward-tenant")).toBe("tenant-1");
+    expect(registrationHeaders.get("authorization")).toBeNull();
+  });
+
+  it("uses the tenant API key only for registration when normal requests prefer a JWT", async () => {
+    const seen: Array<{ method: string; headers: Headers }> = [];
+    const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      seen.push({ method: requestMethod(input, init), headers: new Headers(init?.headers) });
+      return new Response(JSON.stringify({ ok: false, error: "agent not found" }), {
+        status: requestMethod(input, init) === "GET" ? 404 : 403,
+        headers: { "content-type": "application/json" },
+      });
+    });
+    vi.stubGlobal("fetch", fetch);
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    await StewardService.start(
+      runtime({
+        apiUrl: " https://api.steward.example ",
+        apiKey: " tenant-api-key ",
+        bearerToken: " agent-token ",
+        tenantId: " tenant-1 ",
+        agentId: " agent-1 ",
+        autoRegister: true,
+      }),
+    );
+
+    expect(seen.map(({ method }) => method)).toEqual(["GET", "POST"]);
+    expect(seen[0]?.headers.get("authorization")).toBe("Bearer agent-token");
+    expect(seen[0]?.headers.get("x-steward-key")).toBeNull();
+    expect(seen[1]?.headers.get("authorization")).toBeNull();
+    expect(seen[1]?.headers.get("x-steward-key")).toBe("tenant-api-key");
+    expect(seen[1]?.headers.get("x-steward-tenant")).toBe("tenant-1");
   });
 
   it.each([
