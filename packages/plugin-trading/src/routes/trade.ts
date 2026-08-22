@@ -38,6 +38,7 @@ import { checkRateLimit } from "@stwd/redis";
 import { type ApiResponse, type AppVariables, redactedThrownDiagnostics } from "@stwd/shared";
 import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 import { type TradeSession, TradeSessionManager } from "@stwd/trade-sessions";
+import { custodyTransitionLockKey } from "@stwd/vault";
 import {
   getMarketableLimitPx,
   HyperliquidAdapter,
@@ -866,6 +867,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
     const venueWallet = isPolymarket
       ? await resolvePolymarketWallet(agentId)
       : await resolveHyperliquidWallet(agentId, agent);
+    const walletAuthoritySource = venueWallet !== null ? "venue-wallet" : "caller-fallback";
     // Polymarket order execution resolves creds strictly via the venue-scoped
     // wallet (vault.getWallet({venue:"polymarket"})). Allowing a caller-supplied
     // walletAddress fallback here would mint a session that can never execute
@@ -908,14 +910,21 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
       tenantId,
       async (rawTx, appendRequiredAudit) => {
         const tx = rawTx as typeof db;
+        const pgliteRuntime =
+          process.env.STEWARD_DB_MODE === "pglite" || process.env.STEWARD_PGLITE_MEMORY === "true";
+        if (!pgliteRuntime) {
+          // Share the vault's custody-transition lock. Unlike SELECT FOR UPDATE,
+          // this also serializes the no-row case with venue-wallet provisioning.
+          await tx.execute(
+            sql`SELECT pg_advisory_xact_lock(hashtextextended(${custodyTransitionLockKey(tenantId, agentId, "evm", venue)}, 0))`,
+          );
+        }
         const [lockedAgent] = await tx
           .select({ id: agents.id })
           .from(agents)
           .where(and(eq(agents.id, agentId), eq(agents.tenantId, tenantId)))
           .for("update");
         if (!lockedAgent) throw new Error("Agent not found");
-        const pgliteRuntime =
-          process.env.STEWARD_DB_MODE === "pglite" || process.env.STEWARD_PGLITE_MEMORY === "true";
         if (!pgliteRuntime) {
           // Match the policy mutation route's scoped lock. This also serializes
           // the no-row case without taking a global table lock.
@@ -955,13 +964,11 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
           )
           .for("update");
         const lockedWalletAddress = lockedVenueWallet?.address ?? null;
-        if (
-          (isPolymarket && lockedWalletAddress !== walletAddress) ||
-          (!isPolymarket && lockedWalletAddress !== null && lockedWalletAddress !== walletAddress)
-        ) {
-          throw new Error("Agent venue wallet changed during session creation");
-        }
-        if (!lockedVenueWallet && !isPolymarket && walletAddress !== parsed.data.walletAddress) {
+        const walletAuthorityChanged =
+          walletAuthoritySource === "venue-wallet"
+            ? lockedWalletAddress !== venueWallet
+            : lockedWalletAddress !== null || walletAddress !== parsed.data.walletAddress;
+        if (walletAuthorityChanged) {
           throw new Error("Agent wallet changed during session creation");
         }
         await tx.insert(tradeSessions).values(prepared.values);

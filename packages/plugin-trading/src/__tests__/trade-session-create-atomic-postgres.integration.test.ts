@@ -13,6 +13,8 @@ import {
   tenants,
   tradeSessions,
 } from "@stwd/db";
+import { custodyTransitionLockKey } from "@stwd/vault";
+import { sql } from "drizzle-orm";
 import { Hono } from "hono";
 import type { StewardAppContext } from "../context";
 
@@ -97,12 +99,31 @@ async function cleanup(admin: ReturnType<typeof createDb>, tenantId: string, age
   await admin.db.delete(tenants).where(eq(tenants.id, tenantId));
 }
 
-function sessionRequest(app: Hono, agentId: string) {
+async function waitForAdvisoryWaiter(
+  admin: ReturnType<typeof createDb>,
+  blockerPid: number,
+): Promise<void> {
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline) {
+    const rows = await admin.client<{ count: string }[]>`
+      select count(*)::text as count
+      from pg_stat_activity
+      where wait_event = 'advisory'
+        and ${blockerPid} = any(pg_blocking_pids(pid))
+    `;
+    if (Number(rows[0]?.count ?? 0) > 0) return;
+    await Bun.sleep(25);
+  }
+  throw new Error("mounted create did not wait on the custody transition lock");
+}
+
+function sessionRequest(app: Hono, agentId: string, walletAddress?: string) {
   return app.request("/v1/trade/sessions", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       agentId,
+      ...(walletAddress ? { walletAddress } : {}),
       venue: "hyperliquid",
       dailyCap: 200,
       perOrderCap: 40,
@@ -261,6 +282,167 @@ realPostgresIt(
     } finally {
       await cleanup(admin, tenantId, agentId);
       await writer.client.end();
+      await admin.client.end();
+    }
+  },
+  120_000,
+);
+
+realPostgresIt(
+  "rejects a mounted create when an absent venue wallet is concurrently provisioned",
+  async () => {
+    const suffix = crypto.randomUUID().replaceAll("-", "");
+    const tenantId = `tenant-session-wallet-insert-${suffix}`;
+    const agentId = `agent-session-wallet-insert-${suffix}`;
+    const fallbackAddress = "0x0000000000000000000000000000000000000755";
+    const insertedAddress = "0x0000000000000000000000000000000000000756";
+    const admin = createDb(databaseUrl!);
+    const writer = createDb(databaseUrl!);
+    try {
+      await seedAgent(admin, tenantId, agentId);
+      await admin.db.delete(agentWallets).where(eq(agentWallets.agentId, agentId));
+      let releaseTransaction!: () => void;
+      const transactionReleased = new Promise<void>((resolve) => {
+        releaseTransaction = resolve;
+      });
+      let reachedTransaction!: () => void;
+      const transactionReached = new Promise<void>((resolve) => {
+        reachedTransaction = resolve;
+      });
+      const { app } = await mountSessionRoute(tenantId, (ctx) => {
+        const realAuditedTransaction = ctx.withTenantAuditedTransaction;
+        ctx.withTenantAuditedTransaction = async (targetTenantId, fn) => {
+          reachedTransaction();
+          await transactionReleased;
+          return realAuditedTransaction(targetTenantId, fn);
+        };
+      });
+
+      const request = sessionRequest(app, agentId, fallbackAddress);
+      await Promise.race([
+        transactionReached,
+        Bun.sleep(10_000).then(() => {
+          throw new Error("mounted create did not reach the audited transaction boundary");
+        }),
+      ]);
+      await writer.db.insert(agentWallets).values({
+        agentId,
+        chainFamily: "evm",
+        venue: "hyperliquid",
+        address: insertedAddress,
+      });
+      releaseTransaction();
+
+      const response = await request;
+      expect(response.status).toBe(500);
+      expect(await response.json()).toMatchObject({
+        ok: false,
+        error: "Agent wallet changed during session creation",
+      });
+      expect(
+        await admin.db
+          .select({ id: tradeSessions.id })
+          .from(tradeSessions)
+          .where(and(eq(tradeSessions.tenantId, tenantId), eq(tradeSessions.agentId, agentId))),
+      ).toHaveLength(0);
+    } finally {
+      await cleanup(admin, tenantId, agentId);
+      await writer.client.end();
+      await admin.client.end();
+    }
+  },
+  120_000,
+);
+
+realPostgresIt(
+  "rejects a mounted create when the canonical venue wallet is deleted after preflight",
+  async () => {
+    const suffix = crypto.randomUUID().replaceAll("-", "");
+    const tenantId = `tenant-session-wallet-delete-${suffix}`;
+    const agentId = `agent-session-wallet-delete-${suffix}`;
+    const canonicalAddress = "0x0000000000000000000000000000000000000753";
+    const admin = createDb(databaseUrl!);
+    const writer = createDb(databaseUrl!);
+    try {
+      await seedAgent(admin, tenantId, agentId);
+      let releaseTransaction!: () => void;
+      const transactionReleased = new Promise<void>((resolve) => {
+        releaseTransaction = resolve;
+      });
+      let reachedTransaction!: () => void;
+      const transactionReached = new Promise<void>((resolve) => {
+        reachedTransaction = resolve;
+      });
+      const { app } = await mountSessionRoute(tenantId, (ctx) => {
+        const realAuditedTransaction = ctx.withTenantAuditedTransaction;
+        ctx.withTenantAuditedTransaction = async (targetTenantId, fn) => {
+          reachedTransaction();
+          await transactionReleased;
+          return realAuditedTransaction(targetTenantId, fn);
+        };
+      });
+
+      // Supplying the same address exercises provenance: it must remain a
+      // canonical-row authorization and may not silently become caller fallback.
+      const request = sessionRequest(app, agentId, canonicalAddress);
+      await Promise.race([
+        transactionReached,
+        Bun.sleep(10_000).then(() => {
+          throw new Error("mounted create did not reach the audited transaction boundary");
+        }),
+      ]);
+      await writer.db.delete(agentWallets).where(eq(agentWallets.agentId, agentId));
+      releaseTransaction();
+
+      const response = await request;
+      expect(response.status).toBe(500);
+      expect(await response.json()).toMatchObject({
+        ok: false,
+        error: "Agent wallet changed during session creation",
+      });
+      expect(
+        await admin.db
+          .select({ id: tradeSessions.id })
+          .from(tradeSessions)
+          .where(and(eq(tradeSessions.tenantId, tenantId), eq(tradeSessions.agentId, agentId))),
+      ).toHaveLength(0);
+    } finally {
+      await cleanup(admin, tenantId, agentId);
+      await writer.client.end();
+      await admin.client.end();
+    }
+  },
+  120_000,
+);
+
+realPostgresIt(
+  "serializes the no-row authority check with the shared custody transition lock",
+  async () => {
+    const suffix = crypto.randomUUID().replaceAll("-", "");
+    const tenantId = `tenant-session-wallet-lock-${suffix}`;
+    const agentId = `agent-session-wallet-lock-${suffix}`;
+    const fallbackAddress = "0x0000000000000000000000000000000000000757";
+    const admin = createDb(databaseUrl!);
+    const lockOwner = createDb(databaseUrl!);
+    try {
+      await seedAgent(admin, tenantId, agentId);
+      await admin.db.delete(agentWallets).where(eq(agentWallets.agentId, agentId));
+      await lockOwner.client.unsafe("begin");
+      const blockerRows = await lockOwner.client<{ pid: number }[]>`select pg_backend_pid() as pid`;
+      const blockerPid = Number(blockerRows[0]?.pid);
+      await lockOwner.db.execute(
+        sql`select pg_advisory_xact_lock(hashtextextended(${custodyTransitionLockKey(tenantId, agentId, "evm", "hyperliquid")}, 0))`,
+      );
+      const { app } = await mountSessionRoute(tenantId);
+      const request = sessionRequest(app, agentId, fallbackAddress);
+      await waitForAdvisoryWaiter(admin, blockerPid);
+      await lockOwner.client.unsafe("commit");
+      const response = await request;
+      expect(response.status).toBe(201);
+    } finally {
+      await lockOwner.client.unsafe("rollback").catch(() => undefined);
+      await cleanup(admin, tenantId, agentId);
+      await lockOwner.client.end();
       await admin.client.end();
     }
   },

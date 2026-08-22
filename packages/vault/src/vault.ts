@@ -545,7 +545,7 @@ export class BackendBindingMismatchError extends Error {
  * one (agent, chain family, venue) tuple. importKey always operates on the
  * venue-less scope, matching the legacy/unscoped key rows it writes.
  */
-function custodyTransitionLockKey(
+export function custodyTransitionLockKey(
   tenantId: string,
   agentId: string,
   chainFamily: string,
@@ -4077,6 +4077,11 @@ export class Vault {
     ];
 
     await db.transaction(async (tx) => {
+      if (usesCustodyAdvisoryLock()) {
+        await tx.execute(
+          sql`select pg_advisory_xact_lock(hashtextextended(${custodyTransitionLockKey(tenantId, agentId, chainFamily, venue)}, 0))`,
+        );
+      }
       await tx.insert(encryptedChainKeys).values({
         agentId,
         chainFamily,
@@ -4267,6 +4272,11 @@ export class Vault {
     const createdAt = new Date();
 
     await db.transaction(async (tx) => {
+      if (usesCustodyAdvisoryLock()) {
+        await tx.execute(
+          sql`select pg_advisory_xact_lock(hashtextextended(${custodyTransitionLockKey(agentRow.tenantId, agentId, chainType, venue)}, 0))`,
+        );
+      }
       await tx.insert(encryptedChainKeys).values({
         agentId,
         chainFamily: chainType,
