@@ -1,6 +1,15 @@
 import { createRequire } from "node:module";
-import { isDevSecretAllowed } from "@stwd/auth";
-import { AwsKmsExternalKeyCustodyProvider, KmsEnvelopeKeystore, Vault } from "@stwd/vault";
+import { runtimeEnvironmentIdentity, runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
+import {
+  AwsKmsExternalKeyCustodyProvider,
+  createMoneroBackendFromEnv,
+  KeyStore,
+  type KeyStoreDomain,
+  KmsEnvelopeKeystore,
+  SecretVault,
+  Vault,
+} from "@stwd/vault";
+import { resolveRuntimeChainId } from "./custody-runtime";
 
 const require = createRequire(import.meta.url);
 
@@ -69,25 +78,105 @@ export interface ConfiguredVaultOptions {
   fallbackPassword?: string;
 }
 
-const vaultsByKey = new Map<string, Vault>();
+export interface CustodyAuthority {
+  readonly workerRuntime: boolean;
+  readonly nodeEnvironment?: string;
+  readonly masterPassword: string;
+  readonly kdfSalt?: string;
+  readonly mode: VaultMode;
+  readonly kmsKeyId?: string;
+  readonly awsRegion?: string;
+  readonly awsAccessKeyId?: string;
+  readonly awsSecretAccessKey?: string;
+  readonly awsSessionToken?: string;
+  readonly pkcs11Module?: string;
+  readonly pkcs11Pin?: string;
+  readonly pkcs11KeyLabel?: string;
+  readonly externalCustodyProvider?: ExternalCustodyProviderName;
+  readonly externalCustodyAwsRegion?: string;
+  readonly externalCustodyAwsMaxGasLimit?: string;
+  readonly externalCustodyAwsMaxGasPriceWei?: string;
+  readonly externalCustodyAwsMaxTotalFeeWei?: string;
+  readonly localCustodyAcknowledged: boolean;
+  readonly rpcUrl: string;
+  readonly chainId: number;
+  readonly solanaPriorityFees: boolean;
+  readonly vaultRpcAllowlist?: string;
+  readonly moneroWalletRpcUrl?: string;
+  readonly moneroWalletRpcLogin?: string;
+  readonly moneroDaemonUrl?: string;
+  readonly moneroNetwork?: string;
+  readonly webhookSecretEncryptionKey?: string;
+  readonly webhookSecretKdfSalt?: string;
+  readonly allowLegacyKeystoreDecryptFallback: boolean;
+  readonly allowLegacySecretRootFallback: boolean;
+}
+
+interface RequestCustodyInstances {
+  vault?: Vault;
+  secretVault?: SecretVault;
+  readonly keyStores: Map<KeyStoreDomain | undefined, KeyStore>;
+}
+
+let custodyInstancesByRequest = new WeakMap<object, RequestCustodyInstances>();
 let warnedDevSecretFallback = false;
 
+function requestCustodyInstances(): RequestCustodyInstances | undefined {
+  const identity = runtimeEnvironmentIdentity();
+  if (!identity) return undefined;
+  let instances = custodyInstancesByRequest.get(identity);
+  if (!instances) {
+    instances = { keyStores: new Map() };
+    custodyInstancesByRequest.set(identity, instances);
+  }
+  return instances;
+}
+
+function runtimeValue(name: string): string | undefined {
+  return runtimeEnvironmentValue(name)?.trim() || undefined;
+}
+
+function runtimeRaw(name: string): string | undefined {
+  return runtimeEnvironmentValue(name) || undefined;
+}
+
+function runtimeNodeEnvironment(): string | undefined {
+  const configured = runtimeRaw("NODE_ENV")?.trim();
+  return configured || (runtimeRaw("STEWARD_RUNTIME") === "workers" ? "production" : undefined);
+}
+
 function configuredKmsProvider(): "aws" | "pkcs11" | undefined {
-  const value = process.env.STEWARD_KMS_PROVIDER?.trim();
+  const value = runtimeValue("STEWARD_KMS_PROVIDER");
   if (!value) return undefined;
   if (value === "aws" || value === "pkcs11") return value;
   throw new Error(`Unsupported STEWARD_KMS_PROVIDER: ${value}`);
 }
 
 function configuredExternalCustodyProvider(): ExternalCustodyProviderName | undefined {
-  const value = process.env.STEWARD_EXTERNAL_CUSTODY_PROVIDER?.trim();
+  const value = runtimeValue("STEWARD_EXTERNAL_CUSTODY_PROVIDER");
   if (!value) return undefined;
   if (value === "aws-kms") return value;
   throw new Error(`Unsupported STEWARD_EXTERNAL_CUSTODY_PROVIDER: ${value}`);
 }
 
-function createExternalCustodyProvider() {
-  const provider = configuredExternalCustodyProvider();
+function positiveBigInt(value: string | undefined, name: string): bigint {
+  if (!value || !/^\d+$/.test(value) || BigInt(value) <= 0n) {
+    throw new Error(`${name} is required and must be a positive integer`);
+  }
+  return BigInt(value);
+}
+
+function awsCredentials(authority: CustodyAuthority) {
+  if (!authority.awsAccessKeyId || !authority.awsSecretAccessKey) return undefined;
+  return {
+    accessKeyId: authority.awsAccessKeyId,
+    secretAccessKey: authority.awsSecretAccessKey,
+    sessionToken: authority.awsSessionToken,
+  };
+}
+
+function createExternalCustodyProvider(authority: CustodyAuthority) {
+  const provider = authority.externalCustodyProvider;
   if (!provider) return undefined;
   // External signing uses the same optional AWS SDK package as envelope mode,
   // but it is deliberately selected by a separate configuration key and never
@@ -99,21 +188,36 @@ function createExternalCustodyProvider() {
       "@aws-sdk/client-kms is required when STEWARD_EXTERNAL_CUSTODY_PROVIDER=aws-kms",
     );
   }
-  return AwsKmsExternalKeyCustodyProvider.fromEnv();
+  return new AwsKmsExternalKeyCustodyProvider({
+    region: authority.externalCustodyAwsRegion,
+    credentials: awsCredentials(authority),
+    maxGasLimit: positiveBigInt(
+      authority.externalCustodyAwsMaxGasLimit,
+      "STEWARD_EXTERNAL_CUSTODY_AWS_MAX_GAS_LIMIT",
+    ),
+    maxGasPriceWei: positiveBigInt(
+      authority.externalCustodyAwsMaxGasPriceWei,
+      "STEWARD_EXTERNAL_CUSTODY_AWS_MAX_GAS_PRICE_WEI",
+    ),
+    maxTotalFeeWei: positiveBigInt(
+      authority.externalCustodyAwsMaxTotalFeeWei,
+      "STEWARD_EXTERNAL_CUSTODY_AWS_MAX_TOTAL_FEE_WEI",
+    ),
+  });
 }
 
 function requireKmsConfiguration(provider: "aws" | "pkcs11"): void {
   if (provider === "aws") {
-    if (!process.env.STEWARD_KMS_KEY_ID?.trim() && !process.env.STEWARD_AWS_KMS_KEY_ARN?.trim()) {
+    if (!runtimeValue("STEWARD_KMS_KEY_ID") && !runtimeValue("STEWARD_AWS_KMS_KEY_ARN")) {
       throw new Error("STEWARD_KMS_KEY_ID or STEWARD_AWS_KMS_KEY_ARN is required for AWS KMS");
     }
     return;
   }
 
   const missing = [
-    ["STEWARD_PKCS11_MODULE", process.env.STEWARD_PKCS11_MODULE],
-    ["STEWARD_PKCS11_PIN", process.env.STEWARD_PKCS11_PIN],
-    ["STEWARD_PKCS11_KEY_LABEL", process.env.STEWARD_PKCS11_KEY_LABEL],
+    ["STEWARD_PKCS11_MODULE", runtimeValue("STEWARD_PKCS11_MODULE")],
+    ["STEWARD_PKCS11_PIN", runtimeValue("STEWARD_PKCS11_PIN")],
+    ["STEWARD_PKCS11_KEY_LABEL", runtimeValue("STEWARD_PKCS11_KEY_LABEL")],
   ]
     .filter(([, value]) => !value?.trim())
     .map(([name]) => name);
@@ -153,7 +257,7 @@ export function modeExposesPlaintextAtSignTime(mode: VaultMode): boolean {
 }
 
 function localCustodyAcknowledged(): boolean {
-  return process.env[LOCAL_CUSTODY_ACK_ENV] === "true";
+  return runtimeRaw(LOCAL_CUSTODY_ACK_ENV) === "true";
 }
 
 /**
@@ -166,7 +270,7 @@ function localCustodyAcknowledged(): boolean {
  * ack because selecting them is already an explicit configuration decision.
  */
 export function assertProductionCustodyAcknowledged(mode: VaultMode): void {
-  if (process.env.NODE_ENV !== "production") return;
+  if (runtimeNodeEnvironment() !== "production") return;
   if (mode !== "local") return;
   if (localCustodyAcknowledged()) return;
   throw new LocalCustodyAcknowledgementRequiredError();
@@ -189,12 +293,22 @@ function configuredMode(): VaultMode {
 }
 
 function resolveMasterPassword(options: ConfiguredVaultOptions): string {
-  const configured = process.env.STEWARD_MASTER_PASSWORD?.trim();
+  const configured = runtimeValue("STEWARD_MASTER_PASSWORD");
   if (configured) return configured;
-  if (options.fallbackPassword?.trim()) return options.fallbackPassword.trim();
+  const requestLocalAuthority = runtimeRaw("STEWARD_RUNTIME") === "workers";
 
-  if (options.allowDevSecretFallback) {
-    if (!isDevSecretAllowed()) {
+  // An active runtime snapshot is authoritative. Never fall back to a password
+  // captured by an older isolate/request when the current binding is absent.
+  if (!requestLocalAuthority && options.fallbackPassword?.trim()) {
+    return options.fallbackPassword.trim();
+  }
+
+  if (options.allowDevSecretFallback && !requestLocalAuthority) {
+    const devSecretAllowed =
+      runtimeNodeEnvironment() !== "production" &&
+      (runtimeRaw("STEWARD_ALLOW_DEV_SECRETS") === "true" ||
+        runtimeRaw("STEWARD_ALLOW_DEV_SECRET") === "true");
+    if (!devSecretAllowed) {
       throw new Error(
         "STEWARD_MASTER_PASSWORD must be set. For local development only, opt in to the insecure dev fallback with STEWARD_ALLOW_DEV_SECRETS=true.",
       );
@@ -211,47 +325,185 @@ function resolveMasterPassword(options: ConfiguredVaultOptions): string {
   throw new Error("STEWARD_MASTER_PASSWORD is required");
 }
 
-export function createConfiguredVault(options: ConfiguredVaultOptions = {}): Vault {
+/** Resolve and freeze the complete custody root from this request's authority. */
+export function resolveCustodyAuthority(options: ConfiguredVaultOptions = {}): CustodyAuthority {
   const mode = configuredMode();
-  // Root-of-trust gate: never silently boot local plaintext custody in prod.
   assertProductionCustodyAcknowledged(mode);
   const masterPassword = resolveMasterPassword(options);
-  return new Vault({
+  const nodeEnvironment = runtimeNodeEnvironment();
+  const workerRuntime = runtimeRaw("STEWARD_RUNTIME") === "workers";
+  const legacySecretRoot = runtimeRaw("STEWARD_SECRET_VAULT_LEGACY_ROOT_FALLBACK");
+  const chainId = resolveRuntimeChainId(84532);
+  const resolved = {
+    workerRuntime,
+    nodeEnvironment,
     masterPassword,
-    rpcUrl: process.env.RPC_URL || "https://sepolia.base.org",
-    chainId: parseInt(process.env.CHAIN_ID || "84532", 10),
-    ...(mode === "local" ? {} : { keystoreBackend: KmsEnvelopeKeystore.fromEnv() }),
-    ...(configuredExternalCustodyProvider()
-      ? { externalKeyCustodyProvider: createExternalCustodyProvider() }
+    kdfSalt: runtimeRaw("STEWARD_KDF_SALT"),
+    mode,
+    kmsKeyId: runtimeRaw("STEWARD_KMS_KEY_ID") ?? runtimeRaw("STEWARD_AWS_KMS_KEY_ARN"),
+    awsRegion: runtimeRaw("STEWARD_AWS_REGION") ?? runtimeRaw("AWS_REGION"),
+    awsAccessKeyId: runtimeRaw("AWS_ACCESS_KEY_ID"),
+    awsSecretAccessKey: runtimeRaw("AWS_SECRET_ACCESS_KEY"),
+    awsSessionToken: runtimeRaw("AWS_SESSION_TOKEN"),
+    pkcs11Module: runtimeRaw("STEWARD_PKCS11_MODULE"),
+    pkcs11Pin: runtimeRaw("STEWARD_PKCS11_PIN"),
+    pkcs11KeyLabel: runtimeRaw("STEWARD_PKCS11_KEY_LABEL"),
+    externalCustodyProvider: configuredExternalCustodyProvider(),
+    externalCustodyAwsRegion: runtimeRaw("STEWARD_EXTERNAL_CUSTODY_AWS_REGION"),
+    externalCustodyAwsMaxGasLimit: runtimeValue("STEWARD_EXTERNAL_CUSTODY_AWS_MAX_GAS_LIMIT"),
+    externalCustodyAwsMaxGasPriceWei: runtimeValue(
+      "STEWARD_EXTERNAL_CUSTODY_AWS_MAX_GAS_PRICE_WEI",
+    ),
+    externalCustodyAwsMaxTotalFeeWei: runtimeValue(
+      "STEWARD_EXTERNAL_CUSTODY_AWS_MAX_TOTAL_FEE_WEI",
+    ),
+    localCustodyAcknowledged: localCustodyAcknowledged(),
+    rpcUrl: runtimeRaw("RPC_URL") ?? "https://sepolia.base.org",
+    chainId,
+    solanaPriorityFees: runtimeRaw("STEWARD_SOLANA_PRIORITY_FEES") !== "0",
+    vaultRpcAllowlist: runtimeRaw("STEWARD_VAULT_RPC_ALLOWLIST"),
+    moneroWalletRpcUrl: runtimeRaw("STEWARD_MONERO_WALLET_RPC_URL"),
+    moneroWalletRpcLogin: runtimeRaw("STEWARD_MONERO_WALLET_RPC_LOGIN"),
+    moneroDaemonUrl: runtimeRaw("STEWARD_MONERO_DAEMON_URL"),
+    moneroNetwork: runtimeRaw("STEWARD_MONERO_NETWORK"),
+    webhookSecretEncryptionKey: runtimeEnvironmentValue("STEWARD_WEBHOOK_SECRET_ENCRYPTION_KEY"),
+    webhookSecretKdfSalt: runtimeEnvironmentValue("STEWARD_WEBHOOK_SECRET_KDF_SALT"),
+    allowLegacyKeystoreDecryptFallback:
+      nodeEnvironment !== "production" &&
+      runtimeRaw("STEWARD_ALLOW_LEGACY_KEYSTORE_DECRYPT_FALLBACK") === "true",
+    allowLegacySecretRootFallback:
+      legacySecretRoot === "true" ||
+      (legacySecretRoot !== "false" && nodeEnvironment !== "production"),
+  } satisfies CustodyAuthority;
+  const usesAws = mode === "kms-envelope:aws" || resolved.externalCustodyProvider === "aws-kms";
+  const hasAwsCredentialPart = Boolean(
+    resolved.awsAccessKeyId || resolved.awsSecretAccessKey || resolved.awsSessionToken,
+  );
+  const hasAwsCredentials = Boolean(resolved.awsAccessKeyId && resolved.awsSecretAccessKey);
+  if (workerRuntime && !resolved.kdfSalt) {
+    throw new Error("STEWARD_KDF_SALT is required for Worker custody authority");
+  }
+  if (workerRuntime && mode === "kms-envelope:aws" && !resolved.awsRegion) {
+    throw new Error("STEWARD_AWS_REGION or AWS_REGION is required for Worker AWS KMS custody");
+  }
+  if (usesAws && !hasAwsCredentials && (workerRuntime || hasAwsCredentialPart)) {
+    throw new Error(
+      "AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY must be configured together for AWS custody",
+    );
+  }
+  return Object.freeze(resolved);
+}
+
+function createVaultForAuthority(authority: CustodyAuthority): Vault {
+  const kmsEnvelope =
+    authority.mode === "kms-envelope:aws"
+      ? new KmsEnvelopeKeystore({
+          provider: "aws",
+          environmentFallback: false,
+          keyId: authority.kmsKeyId,
+          region: authority.awsRegion,
+          credentials: awsCredentials(authority),
+        })
+      : authority.mode === "kms-envelope:pkcs11"
+        ? new KmsEnvelopeKeystore({
+            provider: "pkcs11",
+            environmentFallback: false,
+            modulePath: authority.pkcs11Module,
+            pin: authority.pkcs11Pin,
+            keyLabel: authority.pkcs11KeyLabel,
+          })
+        : undefined;
+  const moneroBackend = createMoneroBackendFromEnv({
+    STEWARD_MONERO_WALLET_RPC_URL: authority.moneroWalletRpcUrl,
+    STEWARD_MONERO_WALLET_RPC_LOGIN: authority.moneroWalletRpcLogin,
+    STEWARD_MONERO_DAEMON_URL: authority.moneroDaemonUrl,
+    STEWARD_MONERO_NETWORK: authority.moneroNetwork,
+  });
+  return new Vault({
+    masterPassword: authority.masterPassword,
+    masterSalt: authority.kdfSalt,
+    nodeEnvironment: authority.nodeEnvironment,
+    allowLegacyKeystoreDecryptFallback: authority.allowLegacyKeystoreDecryptFallback,
+    rpcUrl: authority.rpcUrl,
+    chainId: authority.chainId,
+    solanaPriorityFees: authority.solanaPriorityFees,
+    rpcPassthroughAllowlist: authority.vaultRpcAllowlist ?? null,
+    ...(moneroBackend ? { moneroBackend } : {}),
+    ...(kmsEnvelope ? { keystoreBackend: kmsEnvelope } : {}),
+    ...(authority.externalCustodyProvider
+      ? { externalKeyCustodyProvider: createExternalCustodyProvider(authority) }
       : {}),
   });
 }
 
+export function createConfiguredVault(options: ConfiguredVaultOptions = {}): Vault {
+  return createVaultForAuthority(resolveCustodyAuthority(options));
+}
+
 export function getConfiguredVault(options: ConfiguredVaultOptions = {}): Vault {
-  const mode = configuredMode();
-  const externalCustody = configuredExternalCustodyProvider() ?? "none";
-  const masterPassword = resolveMasterPassword(options);
-  const key = `${mode}:${externalCustody}:${masterPassword}`;
-  let vault = vaultsByKey.get(key);
-  if (!vault) {
-    vault = createConfiguredVault({ ...options, fallbackPassword: masterPassword });
-    vaultsByKey.set(key, vault);
+  const instances = requestCustodyInstances();
+  if (!instances) return createConfiguredVault(options);
+  instances.vault ??= createVaultForAuthority(resolveCustodyAuthority(options));
+  return instances.vault;
+}
+
+export function getConfiguredSecretVault(options: ConfiguredVaultOptions = {}): SecretVault {
+  const instances = requestCustodyInstances();
+  if (!instances) {
+    const authority = resolveCustodyAuthority(options);
+    return new SecretVault(authority.masterPassword, authority.kdfSalt, {
+      nodeEnvironment: authority.nodeEnvironment,
+      allowLegacyDecryptFallback: authority.allowLegacyKeystoreDecryptFallback,
+      allowLegacySecretRootFallback: authority.allowLegacySecretRootFallback,
+    });
   }
-  return vault;
+  if (!instances.secretVault) {
+    const authority = resolveCustodyAuthority(options);
+    instances.secretVault = new SecretVault(authority.masterPassword, authority.kdfSalt, {
+      nodeEnvironment: authority.nodeEnvironment,
+      allowLegacyDecryptFallback: authority.allowLegacyKeystoreDecryptFallback,
+      allowLegacySecretRootFallback: authority.allowLegacySecretRootFallback,
+    });
+  }
+  return instances.secretVault;
+}
+
+export function getConfiguredKeyStore(
+  domain?: KeyStoreDomain,
+  options: ConfiguredVaultOptions = {},
+): KeyStore {
+  const instances = requestCustodyInstances();
+  if (!instances) {
+    const authority = resolveCustodyAuthority(options);
+    return new KeyStore(authority.masterPassword, authority.kdfSalt, domain, {
+      nodeEnvironment: authority.nodeEnvironment,
+      allowLegacyDecryptFallback: authority.allowLegacyKeystoreDecryptFallback,
+    });
+  }
+  let keyStore = instances.keyStores.get(domain);
+  if (!keyStore) {
+    const authority = resolveCustodyAuthority(options);
+    keyStore = new KeyStore(authority.masterPassword, authority.kdfSalt, domain, {
+      nodeEnvironment: authority.nodeEnvironment,
+      allowLegacyDecryptFallback: authority.allowLegacyKeystoreDecryptFallback,
+    });
+    instances.keyStores.set(domain, keyStore);
+  }
+  return keyStore;
 }
 
 export function configuredVaultStartupLogLine(): string {
-  const provider = configuredKmsProvider();
-  const mode: VaultMode = provider ? `kms-envelope:${provider}` : "local";
+  const authority = resolveCustodyAuthority();
+  const mode = authority.mode;
   const plaintextAtSignTime = modeExposesPlaintextAtSignTime(mode);
-  const externalCustody = configuredExternalCustodyProvider() ?? "none";
+  const externalCustody = authority.externalCustodyProvider ?? "none";
   // In production, local mode only reaches this point when the operator has
   // explicitly acknowledged the weak posture (see assertProductionCustodyAcknowledged).
   // Surface that acknowledgement in the boot log so it is auditable. Never emit
   // key material, KMS key ids, or the master password here.
   const ack =
-    mode === "local" && process.env.NODE_ENV === "production"
-      ? ` local_custody_acknowledged=${localCustodyAcknowledged()}`
+    mode === "local" && authority.nodeEnvironment === "production"
+      ? ` local_custody_acknowledged=${authority.localCustodyAcknowledged}`
       : "";
   return (
     `[steward] vault mode=${mode} external_custody=${externalCustody} ` +
@@ -261,6 +513,19 @@ export function configuredVaultStartupLogLine(): string {
 }
 
 export function _clearConfiguredVaultsForTests(): void {
-  vaultsByKey.clear();
+  custodyInstancesByRequest = new WeakMap();
   warnedDevSecretFallback = false;
+}
+
+/** Internal behavior hook: only the active request's instances are observable. */
+export function _configuredCustodyInstanceCountForTests(): number {
+  const identity = runtimeEnvironmentIdentity();
+  if (!identity) return 0;
+  const instances = custodyInstancesByRequest.get(identity);
+  if (!instances) return 0;
+  return (
+    Number(Boolean(instances.vault)) +
+    Number(Boolean(instances.secretVault)) +
+    instances.keyStores.size
+  );
 }

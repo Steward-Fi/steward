@@ -7,10 +7,10 @@
 import { randomBytes } from "node:crypto";
 import { tenantConfigs as tenantConfigsTable } from "@stwd/db";
 import { redactedThrownDiagnostics, type TenantAuthAbuseConfig } from "@stwd/shared";
-import { encryptWebhookSecret } from "@stwd/webhooks";
+import { currentWebhookRuntimeAuthority, encryptWebhookSecret } from "@stwd/webhooks";
 import { and, count, desc, eq, or, type SQL, sql } from "drizzle-orm";
 import { Hono } from "hono";
-import { writeAuditEvent } from "../services/audit";
+import { withTenantAuditedTransaction, writeAuditEvent } from "../services/audit";
 import {
   type ApiResponse,
   type AppVariables,
@@ -207,13 +207,26 @@ function deliveryCsv(rows: ReturnType<typeof redactDelivery>[]): string {
   return [header.join(","), ...lines].join("\n");
 }
 
-async function lockWebhookConfigTenant(
-  tx: Parameters<Parameters<typeof db.transaction>[0]>[0],
-  tenantId: string,
-): Promise<void> {
-  await tx.execute(
-    sql`select pg_advisory_xact_lock(hashtextextended(${`webhook_config_${tenantId}`}, 0))`,
-  );
+type WebhookAuditEvent = {
+  action: string;
+  resourceType: "webhook" | "webhook_delivery";
+  resourceId: string | null;
+  metadata: Record<string, unknown>;
+};
+
+function webhookAuditEvent(c: Parameters<typeof requireTenantLevel>[0], event: WebhookAuditEvent) {
+  return {
+    tenantId: c.get("tenantId"),
+    actorType: "user" as const,
+    actorId: c.get("userId") ?? c.get("authType") ?? null,
+    action: event.action,
+    resourceType: event.resourceType,
+    resourceId: event.resourceId,
+    metadata: event.metadata,
+    ipAddress: c.req.header("x-forwarded-for") ?? null,
+    userAgent: c.req.header("user-agent") ?? null,
+    requestId: c.get("requestId") ?? null,
+  };
 }
 
 function validateWebhookRetryConfig(body: {
@@ -340,8 +353,9 @@ webhookRoutes.post("/", async (c) => {
 
   // SEC-017: resolve DNS and reject non-public answers (string checks alone
   // miss public-hostname-to-private-IP and rebinding).
+  const webhookAuthority = currentWebhookRuntimeAuthority();
   const urlError = isNonEmptyString(body.url)
-    ? await validateWebhookUrlResolved(body.url)
+    ? await validateWebhookUrlResolved(body.url, undefined, webhookAuthority)
     : "url is required";
   if (urlError) {
     return c.json<ApiResponse>({ ok: false, error: urlError }, 400);
@@ -368,30 +382,11 @@ webhookRoutes.post("/", async (c) => {
   if (retryConfigError) {
     return c.json<ApiResponse>({ ok: false, error: retryConfigError }, 400);
   }
-  await writeAuditEvent({
-    tenantId,
-    actorType: "user",
-    actorId: c.get("userId") ?? c.get("authType") ?? null,
-    action: "webhook.create.authorized",
-    resourceType: "webhook",
-    resourceId: null,
-    metadata: {
-      url: body.url,
-      events: body.events || [...VALID_EVENTS],
-      enabled: true,
-      maxRetries: body.maxRetries ?? 5,
-      retryBackoffMs: body.retryBackoffMs ?? 60000,
-    },
-    ipAddress: c.req.header("x-forwarded-for") ?? null,
-    userAgent: c.req.header("user-agent") ?? null,
-    requestId: c.get("requestId") ?? null,
-  });
-
+  const rawSecret = generateSecret();
   let webhook: typeof webhookConfigs.$inferSelect;
   try {
-    webhook = await db.transaction(async (tx) => {
-      await lockWebhookConfigTenant(tx, tenantId);
-
+    webhook = await withTenantAuditedTransaction(tenantId, async (txRaw, appendRequiredAudit) => {
+      const tx = txRaw as typeof db;
       const [{ count: existingCount } = { count: 0 }] = await tx
         .select({ count: count() })
         .from(webhookConfigs)
@@ -411,7 +406,21 @@ webhookRoutes.post("/", async (c) => {
         throw new WebhookConfigError("Webhook URL already registered", 409);
       }
 
-      const rawSecret = generateSecret();
+      await appendRequiredAudit(
+        webhookAuditEvent(c, {
+          action: "webhook.create.authorized",
+          resourceType: "webhook",
+          resourceId: null,
+          metadata: {
+            url: body.url,
+            events: body.events || [...VALID_EVENTS],
+            enabled: true,
+            maxRetries: body.maxRetries ?? 5,
+            retryBackoffMs: body.retryBackoffMs ?? 60000,
+          },
+        }),
+      );
+
       const [created] = await tx
         .insert(webhookConfigs)
         .values({
@@ -420,13 +429,27 @@ webhookRoutes.post("/", async (c) => {
           secret: encryptWebhookSecret(rawSecret),
           events: body.events || [...VALID_EVENTS],
           description: body.description,
-          enabled: false,
+          enabled: true,
           maxRetries: body.maxRetries ?? 5,
           retryBackoffMs: body.retryBackoffMs ?? 60000,
         })
         .returning();
 
-      return { ...created, secret: rawSecret };
+      await appendRequiredAudit(
+        webhookAuditEvent(c, {
+          action: "webhook.create",
+          resourceType: "webhook",
+          resourceId: created.id,
+          metadata: {
+            url: created.url,
+            events: created.events,
+            enabled: created.enabled,
+            maxRetries: created.maxRetries,
+            retryBackoffMs: created.retryBackoffMs,
+          },
+        }),
+      );
+      return created;
     });
   } catch (err) {
     if (err instanceof WebhookConfigError) {
@@ -434,43 +457,10 @@ webhookRoutes.post("/", async (c) => {
     }
     throw err;
   }
-  const oneTimeSecret = webhook.secret;
-  try {
-    await writeAuditEvent({
-      tenantId,
-      actorType: "user",
-      actorId: c.get("userId") ?? c.get("authType") ?? null,
-      action: "webhook.create",
-      resourceType: "webhook",
-      resourceId: webhook.id,
-      metadata: {
-        url: webhook.url,
-        events: webhook.events,
-        enabled: true,
-        maxRetries: webhook.maxRetries,
-        retryBackoffMs: webhook.retryBackoffMs,
-      },
-      ipAddress: c.req.header("x-forwarded-for") ?? null,
-      userAgent: c.req.header("user-agent") ?? null,
-      requestId: c.get("requestId") ?? null,
-    });
-  } catch (err) {
-    await db
-      .delete(webhookConfigs)
-      .where(and(eq(webhookConfigs.id, webhook.id), eq(webhookConfigs.tenantId, tenantId)));
-    throw err;
-  }
-  const [enabledWebhook] = await db
-    .update(webhookConfigs)
-    .set({ enabled: true, updatedAt: new Date() })
-    .where(and(eq(webhookConfigs.id, webhook.id), eq(webhookConfigs.tenantId, tenantId)))
-    .returning();
-  webhook = enabledWebhook ?? webhook;
-
   return c.json<ApiResponse>(
     {
       ok: true,
-      data: { ...redactWebhookSecret(webhook), secret: oneTimeSecret },
+      data: { ...redactWebhookSecret(webhook), secret: rawSecret },
     },
     201,
   );
@@ -532,8 +522,9 @@ webhookRoutes.put("/:id", async (c) => {
   }
 
   if (body.url !== undefined) {
+    const webhookAuthority = currentWebhookRuntimeAuthority();
     const urlError = isNonEmptyString(body.url)
-      ? await validateWebhookUrlResolved(body.url)
+      ? await validateWebhookUrlResolved(body.url, undefined, webhookAuthority)
       : "url is required";
     if (urlError) {
       return c.json<ApiResponse>({ ok: false, error: urlError }, 400);
@@ -565,18 +556,15 @@ webhookRoutes.put("/:id", async (c) => {
   if (body.description !== undefined) updates.description = body.description;
   if (body.maxRetries !== undefined) updates.maxRetries = body.maxRetries;
   if (body.retryBackoffMs !== undefined) updates.retryBackoffMs = body.retryBackoffMs;
-  updates.updatedAt = new Date();
-
-  let existing: typeof webhookConfigs.$inferSelect;
   let updated: typeof webhookConfigs.$inferSelect;
   try {
-    const result = await db.transaction(async (tx) => {
-      await lockWebhookConfigTenant(tx, tenantId);
-
+    updated = await withTenantAuditedTransaction(tenantId, async (txRaw, appendRequiredAudit) => {
+      const tx = txRaw as typeof db;
       const [current] = await tx
         .select()
         .from(webhookConfigs)
-        .where(and(eq(webhookConfigs.id, webhookId), eq(webhookConfigs.tenantId, tenantId)));
+        .where(and(eq(webhookConfigs.id, webhookId), eq(webhookConfigs.tenantId, tenantId)))
+        .for("update");
 
       if (!current) {
         throw new WebhookConfigError("Webhook not found", 404);
@@ -592,70 +580,39 @@ webhookRoutes.put("/:id", async (c) => {
         }
       }
 
-      await writeAuditEvent({
-        tenantId,
-        actorType: "user",
-        actorId: c.get("userId") ?? c.get("authType") ?? null,
-        action: "webhook.update.authorized",
-        resourceType: "webhook",
-        resourceId: webhookId,
-        metadata: {
-          before: redactWebhookSecret(current),
-          updates,
-        },
-        ipAddress: c.req.header("x-forwarded-for") ?? null,
-        userAgent: c.req.header("user-agent") ?? null,
-        requestId: c.get("requestId") ?? null,
-      });
+      const committedUpdates = { ...updates, updatedAt: new Date() };
+      await appendRequiredAudit(
+        webhookAuditEvent(c, {
+          action: "webhook.update.authorized",
+          resourceType: "webhook",
+          resourceId: webhookId,
+          metadata: { before: redactWebhookSecret(current), updates: committedUpdates },
+        }),
+      );
 
       const [next] = await tx
         .update(webhookConfigs)
-        .set(updates)
+        .set(committedUpdates)
         .where(and(eq(webhookConfigs.id, webhookId), eq(webhookConfigs.tenantId, tenantId)))
         .returning();
 
-      return { existing: current, updated: next };
+      await appendRequiredAudit(
+        webhookAuditEvent(c, {
+          action: "webhook.update",
+          resourceType: "webhook",
+          resourceId: webhookId,
+          metadata: {
+            before: redactWebhookSecret(current),
+            after: redactWebhookSecret(next),
+          },
+        }),
+      );
+      return next;
     });
-    existing = result.existing;
-    updated = result.updated;
   } catch (err) {
     if (err instanceof WebhookConfigError) {
       return c.json<ApiResponse>({ ok: false, error: err.message }, err.status);
     }
-    throw err;
-  }
-
-  try {
-    await writeAuditEvent({
-      tenantId,
-      actorType: "user",
-      actorId: c.get("userId") ?? c.get("authType") ?? null,
-      action: "webhook.update",
-      resourceType: "webhook",
-      resourceId: webhookId,
-      metadata: {
-        before: redactWebhookSecret(existing),
-        after: redactWebhookSecret(updated),
-      },
-      ipAddress: c.req.header("x-forwarded-for") ?? null,
-      userAgent: c.req.header("user-agent") ?? null,
-      requestId: c.get("requestId") ?? null,
-    });
-  } catch (err) {
-    await db
-      .update(webhookConfigs)
-      .set({
-        url: existing.url,
-        secret: existing.secret,
-        events: existing.events,
-        enabled: existing.enabled,
-        maxRetries: existing.maxRetries,
-        retryBackoffMs: existing.retryBackoffMs,
-        description: existing.description,
-        createdAt: existing.createdAt,
-        updatedAt: existing.updatedAt,
-      })
-      .where(and(eq(webhookConfigs.id, webhookId), eq(webhookConfigs.tenantId, tenantId)));
     throw err;
   }
 
@@ -674,61 +631,43 @@ webhookRoutes.delete("/:id", async (c) => {
   const tenantId = c.get("tenantId");
   const webhookId = c.req.param("id");
 
-  const [existing] = await db
-    .select()
-    .from(webhookConfigs)
-    .where(and(eq(webhookConfigs.id, webhookId), eq(webhookConfigs.tenantId, tenantId)));
-
-  if (!existing) {
-    return c.json<ApiResponse>({ ok: false, error: "Webhook not found" }, 404);
-  }
-
-  await writeAuditEvent({
-    tenantId,
-    actorType: "user",
-    actorId: c.get("userId") ?? c.get("authType") ?? null,
-    action: "webhook.delete.authorized",
-    resourceType: "webhook",
-    resourceId: webhookId,
-    metadata: { deleted: redactWebhookSecret(existing) },
-    ipAddress: c.req.header("x-forwarded-for") ?? null,
-    userAgent: c.req.header("user-agent") ?? null,
-    requestId: c.get("requestId") ?? null,
-  });
-
-  const [deleted] = await db
-    .delete(webhookConfigs)
-    .where(and(eq(webhookConfigs.id, webhookId), eq(webhookConfigs.tenantId, tenantId)))
-    .returning();
-
-  if (!deleted) return c.json<ApiResponse>({ ok: false, error: "Webhook not found" }, 404);
   try {
-    await writeAuditEvent({
-      tenantId,
-      actorType: "user",
-      actorId: c.get("userId") ?? c.get("authType") ?? null,
-      action: "webhook.delete",
-      resourceType: "webhook",
-      resourceId: webhookId,
-      metadata: { deleted: redactWebhookSecret(deleted) },
-      ipAddress: c.req.header("x-forwarded-for") ?? null,
-      userAgent: c.req.header("user-agent") ?? null,
-      requestId: c.get("requestId") ?? null,
+    await withTenantAuditedTransaction(tenantId, async (txRaw, appendRequiredAudit) => {
+      const tx = txRaw as typeof db;
+      const [existing] = await tx
+        .select()
+        .from(webhookConfigs)
+        .where(and(eq(webhookConfigs.id, webhookId), eq(webhookConfigs.tenantId, tenantId)))
+        .for("update");
+      if (!existing) throw new WebhookConfigError("Webhook not found", 404);
+
+      await appendRequiredAudit(
+        webhookAuditEvent(c, {
+          action: "webhook.delete.authorized",
+          resourceType: "webhook",
+          resourceId: webhookId,
+          metadata: { deleted: redactWebhookSecret(existing) },
+        }),
+      );
+      const [deleted] = await tx
+        .delete(webhookConfigs)
+        .where(and(eq(webhookConfigs.id, webhookId), eq(webhookConfigs.tenantId, tenantId)))
+        .returning();
+      if (!deleted) throw new WebhookConfigError("Webhook not found", 404);
+
+      await appendRequiredAudit(
+        webhookAuditEvent(c, {
+          action: "webhook.delete",
+          resourceType: "webhook",
+          resourceId: webhookId,
+          metadata: { deleted: redactWebhookSecret(deleted) },
+        }),
+      );
     });
   } catch (err) {
-    await db.insert(webhookConfigs).values({
-      id: deleted.id,
-      tenantId: deleted.tenantId,
-      url: deleted.url,
-      secret: deleted.secret,
-      events: deleted.events,
-      enabled: deleted.enabled,
-      maxRetries: deleted.maxRetries,
-      retryBackoffMs: deleted.retryBackoffMs,
-      description: deleted.description,
-      createdAt: deleted.createdAt,
-      updatedAt: deleted.updatedAt,
-    });
+    if (err instanceof WebhookConfigError) {
+      return c.json<ApiResponse>({ ok: false, error: err.message }, err.status);
+    }
     throw err;
   }
 
@@ -1057,134 +996,113 @@ webhookRoutes.post("/deliveries/:id/retry", async (c) => {
   const tenantId = c.get("tenantId");
   const deliveryId = c.req.param("id");
 
-  const [delivery] = await db
-    .select()
-    .from(webhookDeliveries)
-    .where(and(eq(webhookDeliveries.id, deliveryId), eq(webhookDeliveries.tenantId, tenantId)));
-
-  if (!delivery) {
-    return c.json<ApiResponse>({ ok: false, error: "Delivery not found" }, 404);
-  }
-
-  if (delivery.status === "delivered") {
-    return c.json<ApiResponse>({ ok: false, error: "Delivery already succeeded" }, 400);
-  }
-  if (
-    delivery.status === "processing" &&
-    delivery.nextRetryAt &&
-    delivery.nextRetryAt > new Date()
-  ) {
-    return c.json<ApiResponse>({ ok: false, error: "Delivery is currently in flight" }, 409);
-  }
-  if (delivery.attempts >= delivery.maxAttempts) {
-    return c.json<ApiResponse>(
-      { ok: false, error: "Delivery retry budget has been exhausted" },
-      409,
-    );
-  }
-
-  if (!delivery.webhookConfigId) {
-    return c.json<ApiResponse>(
-      { ok: false, error: "Delivery cannot be retried because its original webhook is unknown" },
-      409,
-    );
-  }
-
-  const [activeWebhook] = await db
-    .select({ id: webhookConfigs.id, url: webhookConfigs.url, events: webhookConfigs.events })
-    .from(webhookConfigs)
-    .where(
-      and(
-        eq(webhookConfigs.tenantId, tenantId),
-        eq(webhookConfigs.id, delivery.webhookConfigId),
-        eq(webhookConfigs.enabled, true),
-      ),
-    );
-
-  if (!activeWebhook) {
-    return c.json<ApiResponse>(
-      { ok: false, error: "Delivery cannot be retried because the webhook is disabled or deleted" },
-      409,
-    );
-  }
-  if (activeWebhook.url !== delivery.url) {
-    return c.json<ApiResponse>(
-      {
-        ok: false,
-        error: "Delivery cannot be retried because the webhook URL has changed",
-      },
-      409,
-    );
-  }
-  if (!currentWebhookAcceptsDelivery(activeWebhook.events, delivery.eventType)) {
-    return c.json<ApiResponse>(
-      {
-        ok: false,
-        error: "Delivery cannot be retried because the webhook no longer subscribes to this event",
-      },
-      409,
-    );
-  }
-
-  await writeAuditEvent({
-    tenantId,
-    actorType: "user",
-    actorId: c.get("userId") ?? c.get("authType") ?? null,
-    action: "webhook_delivery.retry.authorized",
-    resourceType: "webhook_delivery",
-    resourceId: deliveryId,
-    metadata: { webhookUrl: delivery.url, previousStatus: delivery.status },
-    ipAddress: c.req.header("x-forwarded-for") ?? null,
-    userAgent: c.req.header("user-agent") ?? null,
-    requestId: c.get("requestId") ?? null,
-  });
-
-  // Re-queue for an immediate manual retry without resetting the delivery's
-  // attempt budget. Resetting attempts would let repeated manual retries bypass
-  // the configured maxAttempts cap.
-  const manualRetryAt = new Date();
-  const [updated] = await db
-    .update(webhookDeliveries)
-    .set({
-      status: "pending",
-      nextRetryAt: manualRetryAt,
-      lastError: null,
-    })
-    .where(
-      and(
-        eq(webhookDeliveries.id, deliveryId),
-        eq(webhookDeliveries.tenantId, tenantId),
-        sql`${webhookDeliveries.status} <> 'delivered'`,
-        sql`${webhookDeliveries.attempts} < ${webhookDeliveries.maxAttempts}`,
-        sql`not (${webhookDeliveries.status} = 'processing' and ${webhookDeliveries.nextRetryAt} > ${manualRetryAt})`,
-      ),
-    )
-    .returning();
-  if (!updated) {
-    return c.json<ApiResponse>({ ok: false, error: "Delivery is no longer retryable" }, 409);
-  }
+  let updated: typeof webhookDeliveries.$inferSelect;
   try {
-    await writeAuditEvent({
-      tenantId,
-      actorType: "user",
-      actorId: c.get("userId") ?? c.get("authType") ?? null,
-      action: "webhook_delivery.retry",
-      resourceType: "webhook_delivery",
-      resourceId: deliveryId,
-      metadata: { webhookUrl: delivery.url, previousStatus: delivery.status },
-      ipAddress: c.req.header("x-forwarded-for") ?? null,
-      userAgent: c.req.header("user-agent") ?? null,
-      requestId: c.get("requestId") ?? null,
+    updated = await withTenantAuditedTransaction(tenantId, async (txRaw, appendRequiredAudit) => {
+      const tx = txRaw as typeof db;
+      const [delivery] = await tx
+        .select()
+        .from(webhookDeliveries)
+        .where(and(eq(webhookDeliveries.id, deliveryId), eq(webhookDeliveries.tenantId, tenantId)))
+        .for("update");
+      if (!delivery) throw new WebhookConfigError("Delivery not found", 404);
+      if (delivery.status === "delivered") {
+        throw new WebhookConfigError("Delivery already succeeded", 400);
+      }
+
+      const manualRetryAt = new Date();
+      const manualRetryAtIso = manualRetryAt.toISOString();
+      if (
+        delivery.status === "processing" &&
+        delivery.nextRetryAt &&
+        delivery.nextRetryAt > manualRetryAt
+      ) {
+        throw new WebhookConfigError("Delivery is currently in flight", 409);
+      }
+      if (delivery.attempts >= delivery.maxAttempts) {
+        throw new WebhookConfigError("Delivery retry budget has been exhausted", 409);
+      }
+      if (!delivery.webhookConfigId) {
+        throw new WebhookConfigError(
+          "Delivery cannot be retried because its original webhook is unknown",
+          409,
+        );
+      }
+
+      const [activeWebhook] = await tx
+        .select({ id: webhookConfigs.id, url: webhookConfigs.url, events: webhookConfigs.events })
+        .from(webhookConfigs)
+        .where(
+          and(
+            eq(webhookConfigs.tenantId, tenantId),
+            eq(webhookConfigs.id, delivery.webhookConfigId),
+            eq(webhookConfigs.enabled, true),
+          ),
+        )
+        .for("share");
+      if (!activeWebhook) {
+        throw new WebhookConfigError(
+          "Delivery cannot be retried because the webhook is disabled or deleted",
+          409,
+        );
+      }
+      if (activeWebhook.url !== delivery.url) {
+        throw new WebhookConfigError(
+          "Delivery cannot be retried because the webhook URL has changed",
+          409,
+        );
+      }
+      if (!currentWebhookAcceptsDelivery(activeWebhook.events, delivery.eventType)) {
+        throw new WebhookConfigError(
+          "Delivery cannot be retried because the webhook no longer subscribes to this event",
+          409,
+        );
+      }
+
+      await appendRequiredAudit(
+        webhookAuditEvent(c, {
+          action: "webhook_delivery.retry.authorized",
+          resourceType: "webhook_delivery",
+          resourceId: deliveryId,
+          metadata: { webhookUrl: delivery.url, previousStatus: delivery.status },
+        }),
+      );
+
+      // The row lock fences the retry worker until the pending state and both
+      // required audits commit. Attempts are deliberately preserved.
+      const [next] = await tx
+        .update(webhookDeliveries)
+        .set({ status: "pending", nextRetryAt: manualRetryAt, lastError: null })
+        .where(
+          and(
+            eq(webhookDeliveries.id, deliveryId),
+            eq(webhookDeliveries.tenantId, tenantId),
+            sql`${webhookDeliveries.status} <> 'delivered'`,
+            sql`${webhookDeliveries.attempts} < ${webhookDeliveries.maxAttempts}`,
+            sql`not (${webhookDeliveries.status} = 'processing' and ${webhookDeliveries.nextRetryAt} > ${manualRetryAtIso})`,
+          ),
+        )
+        .returning();
+      if (!next) throw new WebhookConfigError("Delivery is no longer retryable", 409);
+
+      await appendRequiredAudit(
+        webhookAuditEvent(c, {
+          action: "webhook_delivery.retry",
+          resourceType: "webhook_delivery",
+          resourceId: deliveryId,
+          metadata: {
+            webhookUrl: delivery.url,
+            previousStatus: delivery.status,
+            status: next.status,
+          },
+        }),
+      );
+      return next;
     });
   } catch (err) {
-    await db
-      .update(webhookDeliveries)
-      .set({
-        status: delivery.status,
-        nextRetryAt: delivery.nextRetryAt,
-        lastError: delivery.lastError,
-      })
-      .where(and(eq(webhookDeliveries.id, deliveryId), eq(webhookDeliveries.tenantId, tenantId)));
+    if (err instanceof WebhookConfigError) {
+      return c.json<ApiResponse>({ ok: false, error: err.message }, err.status);
+    }
     throw err;
   }
 

@@ -3,6 +3,8 @@ import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
 export const PHANTOM_CHROME_EXTENSION_ID = "bfnaelmomeimhlpmgjnjophhpkkoljpa";
+export const METAMASK_CACHE_ID = "steward-metamask-siwe-v8";
+export const PHANTOM_CACHE_ID = "steward-phantom-siws-v5";
 export const METAMASK_VERSION = "12.20.1";
 export const METAMASK_ARTIFACT_SHA256 =
   "498247c0fe6040652ec4b51ca43461cb6b2a99d389e17216ee48d1670ddc1101";

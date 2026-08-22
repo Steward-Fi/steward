@@ -66,12 +66,20 @@ async function readJsonOrThrow(res: Response): Promise<unknown> {
   const text = await res.text();
   const parsed = text ? JSON.parse(text) : null;
   if (!res.ok) {
-    const code =
-      parsed && typeof parsed === "object" && "error" in parsed
-        ? String((parsed as { error: { code?: string } }).error?.code ?? parsed)
-        : `HTTP ${res.status}`;
     // Non-enumerating 404/403 surfaces as a uniform "not found / not authorized"
     // (SCOPE_RESOURCE_NOT_FOUND and CASE_NOT_FOUND both collapse here, §7.3).
+    let code = `HTTP ${res.status}`;
+    if (res.status === 403 || res.status === 404) {
+      code = "not found / not authorized";
+    } else if (parsed && typeof parsed === "object" && "error" in parsed) {
+      const error = (parsed as { error?: unknown }).error;
+      if (error && typeof error === "object" && "code" in error) {
+        const nestedCode = (error as { code?: unknown }).code;
+        if (typeof nestedCode === "string" && nestedCode.length > 0) code = nestedCode;
+      } else if (typeof error === "string" && error.length > 0) {
+        code = error;
+      }
+    }
     throw new ProviderActionError(code, res.status);
   }
   return parsed;

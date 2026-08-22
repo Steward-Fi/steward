@@ -2,10 +2,12 @@ import { createHash, randomUUID } from "node:crypto";
 import { and, eq, waitUntilRequestDatabaseTask, webhookConfigs, webhookDeliveries } from "@stwd/db";
 import { redactedThrownDiagnostics, type WebhookEvent } from "@stwd/shared";
 import {
+  currentWebhookRuntimeAuthority,
   decryptWebhookSecret,
   encryptWebhookSecret,
   isEncryptedWebhookSecret,
   WebhookDispatcher,
+  type WebhookRuntimeAuthority,
 } from "@stwd/webhooks";
 import { db } from "./context";
 import {
@@ -28,9 +30,10 @@ export function dispatchWebhook(
   type: DispatchableWebhookEventType,
   data: Record<string, unknown>,
 ): void {
+  const webhookAuthority = currentWebhookRuntimeAuthority();
   const configuredType = toConfiguredWebhookEventType(type);
-  // EMISSION-PATH WIDENING (Phase 2b): a plugin-declared event is one that is NOT
-  // a core configured/alias type but IS present in the runtime
+  // A plugin-declared event is not a core configured/alias type but is present
+  // in the runtime
   // WebhookEventRegistry (core ∪ plugin-declared) because the plugin host merged
   // it in. We thread the raw plugin event name into the configured fan-out so a
   // tenant can subscribe to a plugin event specifically (events: ["plugin.evt"]).
@@ -57,14 +60,18 @@ export function dispatchWebhook(
   // existing process-owned fire-and-forget behavior when no request lease is
   // active.
   void waitUntilRequestDatabaseTask(() =>
-    dispatchConfiguredWebhooks(event, configuredType, isPluginEvent ? type : null).catch(
-      (error) => {
-        console.error(
-          "[webhooks] Failed to dispatch configured webhooks",
-          redactedThrownDiagnostics(error),
-        );
-      },
-    ),
+    dispatchConfiguredWebhooks(
+      event,
+      configuredType,
+      isPluginEvent ? type : null,
+      undefined,
+      webhookAuthority,
+    ).catch((error) => {
+      console.error(
+        "[webhooks] Failed to dispatch configured webhooks",
+        redactedThrownDiagnostics(error),
+      );
+    }),
   );
 
   // SEC-101: the unverifiable tenant-route webhookUrl field is retired. The
@@ -81,6 +88,7 @@ export async function dispatchWebhookDurably(
   data: Record<string, unknown>,
   idempotencyKey: string,
 ): Promise<void> {
+  const webhookAuthority = currentWebhookRuntimeAuthority();
   const configuredType = toConfiguredWebhookEventType(type);
   const isPluginEvent = configuredType === null && webhookEventRegistry.has(type);
   await dispatchConfiguredWebhooks(
@@ -94,7 +102,103 @@ export async function dispatchWebhookDurably(
     configuredType,
     isPluginEvent ? type : null,
     idempotencyKey,
+    webhookAuthority,
   );
+}
+
+/**
+ * Persist deterministic webhook deliveries through a caller-owned transaction
+ * without performing network I/O. The persistent retry worker is the sole
+ * sender for these rows, so an enclosing transaction rollback cannot emit an
+ * externally visible event and a crash after commit remains recoverable.
+ */
+export async function enqueueWebhookDurablyWithinTx(
+  tx: typeof db,
+  tenantId: string,
+  agentId: string,
+  type: DispatchableWebhookEventType,
+  data: Record<string, unknown>,
+  idempotencyKey: string,
+  options?: {
+    predecessor?: { type: DispatchableWebhookEventType; idempotencyKey: string };
+  },
+): Promise<void> {
+  const configuredType = toConfiguredWebhookEventType(type);
+  const isPluginEvent = configuredType === null && webhookEventRegistry.has(type);
+  const configs = await tx
+    .select()
+    .from(webhookConfigs)
+    .where(and(eq(webhookConfigs.tenantId, tenantId), eq(webhookConfigs.enabled, true)));
+  const timestamp = new Date();
+
+  for (const config of configs) {
+    const matches = isPluginEvent
+      ? config.events.length === 0 || config.events.includes(type)
+      : configuredType
+        ? acceptsConfiguredWebhookEvent(config.events, configuredType)
+        : config.events.length === 0;
+    if (!matches) continue;
+
+    const signingSecret = decryptWebhookSecret(config.secret);
+    const encryptedSecret = isEncryptedWebhookSecret(config.secret)
+      ? config.secret
+      : encryptWebhookSecret(signingSecret);
+    if (encryptedSecret !== config.secret) {
+      await tx
+        .update(webhookConfigs)
+        .set({ secret: encryptedSecret, updatedAt: new Date() })
+        .where(and(eq(webhookConfigs.id, config.id), eq(webhookConfigs.secret, config.secret)));
+    }
+
+    const eventType = (configuredType ?? type) as WebhookEvent["type"];
+    const deliveryId = deterministicDeliveryId(config.id, eventType, idempotencyKey);
+    const predecessorConfiguredType = options?.predecessor
+      ? toConfiguredWebhookEventType(options.predecessor.type)
+      : null;
+    const predecessorType = options?.predecessor
+      ? (predecessorConfiguredType ?? options.predecessor.type)
+      : null;
+    const configReceivesPredecessor = options?.predecessor
+      ? predecessorConfiguredType
+        ? acceptsConfiguredWebhookEvent(config.events, predecessorConfiguredType)
+        : config.events.length === 0 || config.events.includes(options.predecessor.type)
+      : false;
+    const predecessorDeliveryId =
+      options?.predecessor && configReceivesPredecessor
+        ? deterministicDeliveryId(
+            config.id,
+            predecessorType as string,
+            options.predecessor.idempotencyKey,
+          )
+        : null;
+    const signedAt = Math.floor(timestamp.getTime() / 1000);
+    const event = {
+      type: eventType,
+      tenantId,
+      agentId,
+      data: redactWebhookSecrets(data) as Record<string, unknown>,
+      timestamp,
+      deliveryId,
+      webhookConfigId: config.id,
+      signedAt,
+    };
+    await tx.insert(webhookDeliveries).values({
+      id: deliveryId,
+      tenantId,
+      webhookConfigId: config.id,
+      agentId,
+      eventType,
+      predecessorDeliveryId,
+      payload: event as unknown as Record<string, unknown>,
+      url: config.url,
+      secret: encryptedSecret,
+      events: config.events,
+      status: "pending",
+      attempts: 0,
+      maxAttempts: config.maxRetries + 1,
+      nextRetryAt: new Date(),
+    });
+  }
 }
 
 export async function dispatchTestWebhook(config: {
@@ -105,6 +209,7 @@ export async function dispatchTestWebhook(config: {
   events: string[];
   actorId?: string | null;
 }): Promise<typeof webhookDeliveries.$inferSelect> {
+  const webhookAuthority = currentWebhookRuntimeAuthority();
   const event: WebhookEvent = {
     type: "webhook.test",
     tenantId: config.tenantId,
@@ -117,12 +222,16 @@ export async function dispatchTestWebhook(config: {
     timestamp: new Date(),
   };
 
-  return dispatchConfiguredWebhook(event, {
-    ...config,
-    maxRetries: 0,
-    retryBackoffMs: 0,
-    visibilityTimeoutMs: 0,
-  });
+  return dispatchConfiguredWebhook(
+    event,
+    {
+      ...config,
+      maxRetries: 0,
+      retryBackoffMs: 0,
+      visibilityTimeoutMs: 0,
+    },
+    webhookAuthority,
+  );
 }
 
 export async function dispatchReplayWebhook(config: {
@@ -139,6 +248,7 @@ export async function dispatchReplayWebhook(config: {
   originalAgentId?: string | null;
   originalCreatedAt: Date | string;
 }): Promise<typeof webhookDeliveries.$inferSelect> {
+  const webhookAuthority = currentWebhookRuntimeAuthority();
   const originalTimestamp =
     typeof config.originalPayload.timestamp === "string" ||
     config.originalPayload.timestamp instanceof Date
@@ -160,10 +270,14 @@ export async function dispatchReplayWebhook(config: {
       : originalTimestamp,
   };
 
-  return dispatchConfiguredWebhook(event, {
-    ...config,
-    replayedFromDeliveryId: config.replayedFromDeliveryId,
-  });
+  return dispatchConfiguredWebhook(
+    event,
+    {
+      ...config,
+      replayedFromDeliveryId: config.replayedFromDeliveryId,
+    },
+    webhookAuthority,
+  );
 }
 
 async function dispatchConfiguredWebhooks(
@@ -171,6 +285,7 @@ async function dispatchConfiguredWebhooks(
   configuredType: ConfiguredWebhookEventType | null,
   pluginEventType: string | null = null,
   idempotencyKey?: string,
+  webhookAuthority: WebhookRuntimeAuthority = currentWebhookRuntimeAuthority(),
 ): Promise<void> {
   const configs = await db
     .select()
@@ -191,15 +306,19 @@ async function dispatchConfiguredWebhooks(
           : config.events.length === 0;
       })
       .map((config) =>
-        dispatchConfiguredWebhook(event, {
-          id: config.id,
-          url: config.url,
-          secret: config.secret,
-          events: config.events,
-          maxRetries: config.maxRetries,
-          retryBackoffMs: config.retryBackoffMs,
-          idempotencyKey,
-        }),
+        dispatchConfiguredWebhook(
+          event,
+          {
+            id: config.id,
+            url: config.url,
+            secret: config.secret,
+            events: config.events,
+            maxRetries: config.maxRetries,
+            retryBackoffMs: config.retryBackoffMs,
+            idempotencyKey,
+          },
+          webhookAuthority,
+        ),
       ),
   );
 }
@@ -217,6 +336,7 @@ async function dispatchConfiguredWebhook(
     replayedFromDeliveryId?: string | null;
     idempotencyKey?: string;
   },
+  webhookAuthority: WebhookRuntimeAuthority = currentWebhookRuntimeAuthority(),
 ): Promise<typeof webhookDeliveries.$inferSelect> {
   const signingSecret = decryptWebhookSecret(config.secret);
   // Plaintext compatibility rows are upgraded lazily with a compare-and-set.
@@ -235,6 +355,7 @@ async function dispatchConfiguredWebhook(
   const deliveryId = config.idempotencyKey
     ? deterministicDeliveryId(config.id, event.type, config.idempotencyKey)
     : randomUUID();
+  const claimToken = randomUUID();
   const signedAt = Math.floor(Date.now() / 1000);
   const eventWithDelivery: WebhookEvent & {
     deliveryId: string;
@@ -261,6 +382,7 @@ async function dispatchConfiguredWebhook(
     secret: encryptedSecret,
     events: config.events,
     status: "processing",
+    claimToken,
     attempts: 0,
     maxAttempts: config.maxRetries + 1,
     nextRetryAt:
@@ -287,7 +409,11 @@ async function dispatchConfiguredWebhook(
   // SEC-017: re-validate the destination at delivery time with FRESH DNS
   // answers — registration-time validation cannot see DNS rebinding (public A
   // record at config time, private at fetch time). Fail closed: no fetch.
-  const deliveryUrlError = await validateWebhookUrlResolved(config.url);
+  const deliveryUrlError = await validateWebhookUrlResolved(
+    config.url,
+    undefined,
+    webhookAuthority,
+  );
   if (deliveryUrlError) {
     const [rejected] = await db
       .update(webhookDeliveries)
@@ -296,15 +422,30 @@ async function dispatchConfiguredWebhook(
         attempts: 0,
         lastError: `delivery blocked: ${deliveryUrlError}`,
         payload: eventWithDelivery as unknown as Record<string, unknown>,
+        claimToken: null,
       })
-      .where(eq(webhookDeliveries.id, delivery.id))
+      .where(
+        and(
+          eq(webhookDeliveries.id, delivery.id),
+          eq(webhookDeliveries.status, "processing"),
+          eq(webhookDeliveries.claimToken, claimToken),
+        ),
+      )
       .returning();
-    return rejected ?? delivery;
+    if (rejected) return rejected;
+    const [current] = await db
+      .select()
+      .from(webhookDeliveries)
+      .where(eq(webhookDeliveries.id, delivery.id))
+      .limit(1);
+    return current ?? delivery;
   }
 
   const dispatcher = new WebhookDispatcher({
     maxRetries: 0,
     retryDelayMs: 0,
+    allowPrivateNetwork: webhookAuthority.allowPrivateNetwork,
+    allowInsecureHttp: webhookAuthority.allowInsecureHttp,
   });
   const result = await dispatcher.dispatch(eventWithDelivery, { ...config, secret: signingSecret });
   const retryable = !result.success && config.maxRetries > 0;
@@ -318,11 +459,24 @@ async function dispatchConfiguredWebhook(
       lastError: result.error ?? null,
       nextRetryAt: retryable ? new Date(Date.now() + config.retryBackoffMs) : null,
       payload: eventWithDelivery as unknown as Record<string, unknown>,
+      claimToken: null,
     })
-    .where(eq(webhookDeliveries.id, delivery.id))
+    .where(
+      and(
+        eq(webhookDeliveries.id, delivery.id),
+        eq(webhookDeliveries.status, "processing"),
+        eq(webhookDeliveries.claimToken, claimToken),
+      ),
+    )
     .returning();
 
-  return updated ?? delivery;
+  if (updated) return updated;
+  const [current] = await db
+    .select()
+    .from(webhookDeliveries)
+    .where(eq(webhookDeliveries.id, delivery.id))
+    .limit(1);
+  return current ?? delivery;
 }
 
 function deterministicDeliveryId(configId: string, eventType: string, key: string): string {

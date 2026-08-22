@@ -65,7 +65,7 @@ export const config = {
       // handlers skip the security-header middleware — a future route that
       // merely starts with "api" (e.g. /api-keys) still gets CSP/XFO/HSTS.
       source:
-        "/((?!api/|_next/static|_next/image|favicon.ico|icon-192.png|icon-512.png|apple-touch-icon.png|site.webmanifest).*)",
+        "/((?!api(?:/|$)|_next/static(?:/|$)|_next/image(?:/|$)|favicon\\.ico$|icon-192\\.png$|icon-512\\.png$|apple-touch-icon\\.png$|site\\.webmanifest$).*)",
       missing: [
         { type: "header", key: "next-router-prefetch" },
         { type: "header", key: "purpose", value: "prefetch" },
