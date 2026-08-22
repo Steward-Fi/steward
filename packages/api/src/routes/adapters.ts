@@ -31,6 +31,7 @@ import {
   type BridgeHandoff,
   type BridgeQuote,
   type SparkWallet,
+  type SwapQuote,
   type UnsignedTxIntent,
 } from "@stwd/adapters";
 import { getDb, tenantAppClients, userTenants } from "@stwd/db";
@@ -46,6 +47,7 @@ import {
   type ApiResponse,
   type AppVariables,
   ensureAgentForTenant,
+  priceOracle,
   requireTenantLevel,
   safeJsonParse,
   setNoStoreHeaders,
@@ -320,7 +322,7 @@ function decodeBase64(value: string): Uint8Array | null {
  * Run an unsigned fund-moving intent through the SAME policy gate the trade
  * route uses. We treat the adapter operation as a generic "trade order" against
  * the agent's per-request budget so a deny here blocks the route from returning
- * any signable artifact. `estimatedUsd` is the route's notional estimate.
+ * any signable artifact. `estimatedUsd` is the server-derived notional.
  *
  * The daily cap reserves the server-estimated notional in a dedicated Redis
  * issuance bucket before returning the artifact. The Lua gate binds a required
@@ -534,13 +536,21 @@ async function enforceAdapterIntentPolicy(
   c: Context<{ Variables: AppVariables }>,
   params: {
     agentId: string;
-    estimatedUsd?: number;
+    estimatedUsd: number | null;
     auditAction: string;
     requestAuthority: unknown;
   },
 ): Promise<{ allow: true } | { allow: false; response: Response }> {
   const caps = spendCaps();
-  const estimatedUsd = params.estimatedUsd ?? caps.perOrderCapUsd;
+  if (params.estimatedUsd === null) {
+    const reason = "authoritative USD valuation is unavailable (fail-closed)";
+    await auditAdapterEvent(c, params.auditAction, params.agentId, { reason });
+    return {
+      allow: false,
+      response: c.json({ code: "policy-violation", reason }, 400),
+    };
+  }
+  const estimatedUsd = params.estimatedUsd;
   const gate = await enforceFundMovingPolicy(c, {
     agentId: params.agentId,
     estimatedUsd,
@@ -557,6 +567,59 @@ async function enforceAdapterIntentPolicy(
     allow: false,
     response: c.json({ code: "policy-violation", reason: gate.reason }, 400),
   };
+}
+
+const WBTC_MAINNET = "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599";
+
+async function tokenNotionalUsd(
+  amount: unknown,
+  chainId: unknown,
+  tokenAddress: unknown,
+): Promise<number | null> {
+  if (
+    typeof amount !== "string" ||
+    !/^\d+$/.test(amount) ||
+    typeof chainId !== "number" ||
+    !Number.isSafeInteger(chainId) ||
+    typeof tokenAddress !== "string"
+  ) {
+    return null;
+  }
+  try {
+    const value = await priceOracle.weiToUsd(amount, chainId, tokenAddress);
+    return value !== null && Number.isFinite(value) && value > 0 ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+async function bitcoinNotionalUsd(satoshis: unknown): Promise<number | null> {
+  if (typeof satoshis !== "string" || !/^\d+$/.test(satoshis)) return null;
+  try {
+    const sats = BigInt(satoshis);
+    if (sats <= 0n) return null;
+    const price = await priceOracle.getTokenUsdPrice(1, WBTC_MAINNET);
+    if (price === null || !Number.isFinite(price) || price <= 0) return null;
+    const scale = 100_000_000n;
+    const btc = Number(sats / scale) + Number(sats % scale) / Number(scale);
+    const value = btc * price;
+    return Number.isFinite(value) && value > 0 ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+function rejectCallerValuation(
+  c: Context<{ Variables: AppVariables }>,
+  raw: unknown,
+): Response | null {
+  if (raw !== null && typeof raw === "object" && Object.hasOwn(raw, "estimatedUsd")) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "estimatedUsd is not accepted; valuation is server-derived" },
+      400,
+    );
+  }
+  return null;
 }
 
 async function requireSparkWalletAccess(
@@ -590,22 +653,18 @@ const swapQuoteSchema = z.object({
   amount: z.string().min(1).max(80),
   chainId: z.number().int().positive(),
   slippageBps: z.number().int().min(0).max(10_000).optional(),
-  /** Caller's USD notional estimate for the input amount (for the spend gate). */
-  estimatedUsd: z.number().positive().max(1e12).optional(),
 });
 
 const earnDepositSchema = z.object({
   agentId: z.string().min(1).max(128).optional(),
   vault: z.string().min(1).max(128),
   assets: z.string().min(1).max(80),
-  estimatedUsd: z.number().positive().max(1e12).optional(),
 });
 
 const earnWithdrawSchema = z.object({
   agentId: z.string().min(1).max(128).optional(),
   vault: z.string().min(1).max(128),
   shares: z.string().min(1).max(80),
-  estimatedUsd: z.number().positive().max(1e12).optional(),
 });
 
 const onrampQuoteSchema = z.object({
@@ -663,14 +722,12 @@ const bridgeQuoteSchema = z.object({
   amount: z.string().min(1).max(80),
   recipient: z.string().min(1).max(128),
   slippageBps: z.number().int().min(0).max(10_000).optional(),
-  estimatedUsd: z.number().positive().max(1e12).optional(),
 });
 
 const bridgeBuildSchema = z.object({
   agentId: z.string().min(1).max(128).optional(),
   owner: z.string().min(1).max(128),
   quote: z.record(z.string(), z.unknown()),
-  estimatedUsd: z.number().positive().max(1e12).optional(),
 });
 
 const bridgeSessionSchema = z.object({
@@ -697,7 +754,6 @@ const sparkDepositClaimSchema = z.object({
   agentId: z.string().min(1).max(128).optional(),
   quoteId: z.string().min(1).max(128),
   walletId: z.string().min(1).max(128),
-  estimatedUsd: z.number().positive().max(1e12).optional(),
 });
 
 const sparkLightningInvoiceSchema = z.object({
@@ -712,7 +768,6 @@ const sparkLightningPaymentSchema = z.object({
   walletId: z.string().min(1).max(128),
   paymentRequest: z.string().min(1).max(4096),
   maxFeeSats: z.string().min(1).max(80).optional(),
-  estimatedUsd: z.number().positive().max(1e12).optional(),
 });
 
 const sparkTransferSchema = z.object({
@@ -721,7 +776,6 @@ const sparkTransferSchema = z.object({
   recipient: z.string().min(1).max(192),
   amountSats: z.string().min(1).max(80),
   memo: z.string().min(1).max(280).optional(),
-  estimatedUsd: z.number().positive().max(1e12).optional(),
 });
 
 const sparkTokenTransferSchema = z.object({
@@ -731,7 +785,6 @@ const sparkTokenTransferSchema = z.object({
   tokenId: z.string().min(1).max(128),
   amount: z.string().min(1).max(80),
   memo: z.string().min(1).max(280).optional(),
-  estimatedUsd: z.number().positive().max(1e12).optional(),
 });
 
 const sparkIdentitySignSchema = z.object({
@@ -788,9 +841,11 @@ adapterRoutes.post("/swap/quote", async (c) => {
 
 adapterRoutes.post("/swap/build", async (c) => {
   const raw = (await safeJsonParse<Record<string, unknown>>(c)) ?? {};
+  const valuationError = rejectCallerValuation(c, raw);
+  if (valuationError) return valuationError;
   // Quote must be supplied by the caller (echoed from /swap/quote).
   const quoteInput = raw.quote;
-  const parsed = swapQuoteSchema.pick({ agentId: true, estimatedUsd: true }).safeParse(raw);
+  const parsed = swapQuoteSchema.pick({ agentId: true }).safeParse(raw);
   if (!parsed.success || !quoteInput || typeof quoteInput !== "object") {
     return c.json<ApiResponse>({ ok: false, error: "quote and agentId are required" }, 400);
   }
@@ -810,7 +865,21 @@ adapterRoutes.post("/swap/build", async (c) => {
 
     // Fund-moving: gate BEFORE returning anything signable.
     const caps = spendCaps();
-    const estimatedUsd = parsed.data.estimatedUsd ?? caps.perOrderCapUsd; // assume worst-case if unknown
+    const metadata = intent.metadata ?? {};
+    const estimatedUsd = await tokenNotionalUsd(
+      metadata.amountIn,
+      intent.chainId,
+      (quoteInput as SwapQuote).fromToken?.address,
+    );
+    if (estimatedUsd === null) {
+      return c.json(
+        {
+          code: "policy-violation",
+          reason: "authoritative USD valuation is unavailable (fail-closed)",
+        },
+        400,
+      );
+    }
     const gate = await enforceFundMovingPolicy(c, {
       agentId,
       estimatedUsd,
@@ -866,6 +935,8 @@ adapterRoutes.get("/earn/vaults/:vault/position", async (c) => {
 
 adapterRoutes.post("/earn/deposit", async (c) => {
   const raw = await safeJsonParse(c);
+  const valuationError = rejectCallerValuation(c, raw);
+  if (valuationError) return valuationError;
   const parsed = earnDepositSchema.safeParse(raw);
   if (!parsed.success) {
     return c.json<ApiResponse>({ ok: false, error: parsed.error.message }, 400);
@@ -888,7 +959,20 @@ adapterRoutes.post("/earn/deposit", async (c) => {
     assertUnsigned(intent);
 
     const caps = spendCaps();
-    const estimatedUsd = parsed.data.estimatedUsd ?? caps.perOrderCapUsd;
+    const estimatedUsd = await tokenNotionalUsd(
+      intent.metadata?.assets,
+      intent.chainId,
+      intent.metadata?.asset,
+    );
+    if (estimatedUsd === null) {
+      return c.json(
+        {
+          code: "policy-violation",
+          reason: "authoritative USD valuation is unavailable (fail-closed)",
+        },
+        400,
+      );
+    }
     const gate = await enforceFundMovingPolicy(c, {
       agentId,
       estimatedUsd,
@@ -916,6 +1000,8 @@ adapterRoutes.post("/earn/deposit", async (c) => {
 
 adapterRoutes.post("/earn/withdraw", async (c) => {
   const raw = await safeJsonParse(c);
+  const valuationError = rejectCallerValuation(c, raw);
+  if (valuationError) return valuationError;
   const parsed = earnWithdrawSchema.safeParse(raw);
   if (!parsed.success) {
     return c.json<ApiResponse>({ ok: false, error: parsed.error.message }, 400);
@@ -938,7 +1024,20 @@ adapterRoutes.post("/earn/withdraw", async (c) => {
     assertUnsigned(intent);
 
     const caps = spendCaps();
-    const estimatedUsd = parsed.data.estimatedUsd ?? caps.perOrderCapUsd;
+    const estimatedUsd = await tokenNotionalUsd(
+      intent.metadata?.expectedAssets,
+      intent.chainId,
+      intent.metadata?.asset,
+    );
+    if (estimatedUsd === null) {
+      return c.json(
+        {
+          code: "policy-violation",
+          reason: "authoritative USD valuation is unavailable (fail-closed)",
+        },
+        400,
+      );
+    }
     const gate = await enforceFundMovingPolicy(c, {
       agentId,
       estimatedUsd,
@@ -993,6 +1092,8 @@ adapterRoutes.post("/bridge/quote", async (c) => {
 
 adapterRoutes.post("/bridge/build", async (c) => {
   const raw = await safeJsonParse(c);
+  const valuationError = rejectCallerValuation(c, raw);
+  if (valuationError) return valuationError;
   const parsed = bridgeBuildSchema.safeParse(raw);
   if (!parsed.success) {
     return c.json<ApiResponse>({ ok: false, error: parsed.error.message }, 400);
@@ -1011,14 +1112,23 @@ adapterRoutes.post("/bridge/build", async (c) => {
     else assertUnsigned(result);
 
     const caps = spendCaps();
-    // External handoffs carry a server-derived notional from the provider. A
-    // caller may submit a higher estimate, but can never understate it to bypass
-    // the policy gate. Transaction-building adapters retain the conservative
-    // cap fallback until they expose the same trusted valuation field.
     const estimatedUsd =
       result.kind === "external-handoff"
-        ? Math.max(result.estimatedUsd, parsed.data.estimatedUsd ?? 0)
-        : (parsed.data.estimatedUsd ?? caps.perOrderCapUsd);
+        ? result.estimatedUsd
+        : await tokenNotionalUsd(
+            result.metadata?.amountIn,
+            result.chainId,
+            (parsed.data.quote as unknown as BridgeQuote).fromToken?.address,
+          );
+    if (estimatedUsd === null) {
+      return c.json(
+        {
+          code: "policy-violation",
+          reason: "authoritative USD valuation is unavailable (fail-closed)",
+        },
+        400,
+      );
+    }
     const gate = await enforceFundMovingPolicy(c, {
       agentId,
       estimatedUsd,
@@ -1276,7 +1386,10 @@ adapterRoutes.post("/spark/static-btc-deposits", async (c) => {
 });
 
 adapterRoutes.post("/spark/static-btc-deposits/claim", async (c) => {
-  const parsed = sparkDepositClaimSchema.safeParse(await safeJsonParse(c));
+  const raw = await safeJsonParse(c);
+  const valuationError = rejectCallerValuation(c, raw);
+  if (valuationError) return valuationError;
+  const parsed = sparkDepositClaimSchema.safeParse(raw);
   if (!parsed.success) {
     return c.json<ApiResponse>({ ok: false, error: parsed.error.message }, 400);
   }
@@ -1295,7 +1408,7 @@ adapterRoutes.post("/spark/static-btc-deposits/claim", async (c) => {
     assertUnsigned(intent);
     const gate = await enforceAdapterIntentPolicy(c, {
       agentId: resolution.agentId,
-      estimatedUsd: parsed.data.estimatedUsd,
+      estimatedUsd: await bitcoinNotionalUsd(intent.value),
       auditAction: "adapter.spark.static_btc_deposit.policy-rejected",
       requestAuthority: { request: parsed.data, artifact: intent },
     });
@@ -1347,7 +1460,10 @@ adapterRoutes.get("/spark/lightning/invoices/:invoiceId", async (c) => {
 });
 
 adapterRoutes.post("/spark/lightning/pay", async (c) => {
-  const parsed = sparkLightningPaymentSchema.safeParse(await safeJsonParse(c));
+  const raw = await safeJsonParse(c);
+  const valuationError = rejectCallerValuation(c, raw);
+  if (valuationError) return valuationError;
+  const parsed = sparkLightningPaymentSchema.safeParse(raw);
   if (!parsed.success) {
     return c.json<ApiResponse>({ ok: false, error: parsed.error.message }, 400);
   }
@@ -1365,7 +1481,7 @@ adapterRoutes.post("/spark/lightning/pay", async (c) => {
     assertUnsigned(intent);
     const gate = await enforceAdapterIntentPolicy(c, {
       agentId: resolution.agentId,
-      estimatedUsd: parsed.data.estimatedUsd,
+      estimatedUsd: await bitcoinNotionalUsd(intent.metadata?.amountSats),
       auditAction: "adapter.spark.lightning.pay.policy-rejected",
       requestAuthority: { request: parsed.data, artifact: intent },
     });
@@ -1381,7 +1497,10 @@ adapterRoutes.post("/spark/lightning/pay", async (c) => {
 });
 
 adapterRoutes.post("/spark/transfers", async (c) => {
-  const parsed = sparkTransferSchema.safeParse(await safeJsonParse(c));
+  const raw = await safeJsonParse(c);
+  const valuationError = rejectCallerValuation(c, raw);
+  if (valuationError) return valuationError;
+  const parsed = sparkTransferSchema.safeParse(raw);
   if (!parsed.success) {
     return c.json<ApiResponse>({ ok: false, error: parsed.error.message }, 400);
   }
@@ -1400,7 +1519,7 @@ adapterRoutes.post("/spark/transfers", async (c) => {
     assertUnsigned(intent);
     const gate = await enforceAdapterIntentPolicy(c, {
       agentId: resolution.agentId,
-      estimatedUsd: parsed.data.estimatedUsd,
+      estimatedUsd: await bitcoinNotionalUsd(intent.value),
       auditAction: "adapter.spark.transfer.policy-rejected",
       requestAuthority: { request: parsed.data, artifact: intent },
     });
@@ -1416,7 +1535,10 @@ adapterRoutes.post("/spark/transfers", async (c) => {
 });
 
 adapterRoutes.post("/spark/token-transfers", async (c) => {
-  const parsed = sparkTokenTransferSchema.safeParse(await safeJsonParse(c));
+  const raw = await safeJsonParse(c);
+  const valuationError = rejectCallerValuation(c, raw);
+  if (valuationError) return valuationError;
+  const parsed = sparkTokenTransferSchema.safeParse(raw);
   if (!parsed.success) {
     return c.json<ApiResponse>({ ok: false, error: parsed.error.message }, 400);
   }
@@ -1436,7 +1558,9 @@ adapterRoutes.post("/spark/token-transfers", async (c) => {
     assertUnsigned(intent);
     const gate = await enforceAdapterIntentPolicy(c, {
       agentId: resolution.agentId,
-      estimatedUsd: parsed.data.estimatedUsd,
+      // Spark token identifiers have no vetted price source yet. Until the
+      // provider returns a signed valuation receipt, token transfers fail closed.
+      estimatedUsd: null,
       auditAction: "adapter.spark.token_transfer.policy-rejected",
       requestAuthority: { request: parsed.data, artifact: intent },
     });

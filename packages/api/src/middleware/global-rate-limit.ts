@@ -128,3 +128,6 @@ export function createGlobalRateLimitMiddleware(options?: {
 }
 
 export const globalRateLimit = createGlobalRateLimitMiddleware();
+// Backward-compatible name used by the Worker composition root. The middleware
+// now derives its posture from the immutable runtime snapshot for every request.
+export const workersGlobalRateLimit = globalRateLimit;

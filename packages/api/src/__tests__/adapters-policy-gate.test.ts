@@ -25,10 +25,14 @@ import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { withRuntimeEnvironment } from "@stwd/shared/runtime-env";
 import { and, desc, eq } from "drizzle-orm";
 import { Hono } from "hono";
-import { initRedis, shutdownRedis } from "../middleware/redis";
 import type { AppVariables } from "../services/context";
 
 let adapterRoutesModule: Awaited<typeof import("../routes/adapters")>;
+let initRedis: typeof import("../middleware/redis")["initRedis"];
+let shutdownRedis: typeof import("../middleware/redis")["shutdownRedis"];
+let priceOracle: typeof import("../services/context")["priceOracle"];
+let originalWeiToUsd: typeof priceOracle.weiToUsd;
+let originalTokenPrice: typeof priceOracle.getTokenUsdPrice;
 
 beforeAll(async () => {
   process.env.STEWARD_PGLITE_MEMORY = "true";
@@ -40,6 +44,10 @@ beforeAll(async () => {
   setPGLiteOverride(db, async () => {
     await client.close();
   });
+  ({ initRedis, shutdownRedis } = await import("../middleware/redis"));
+  ({ priceOracle } = await import("../services/context"));
+  originalWeiToUsd = priceOracle.weiToUsd.bind(priceOracle);
+  originalTokenPrice = priceOracle.getTokenUsdPrice.bind(priceOracle);
   // The fund-moving spend gate (enforceFundMovingPolicy → checkAgentSpendLimit)
   // fails CLOSED when Redis is *configured* (REDIS_URL set in this env) but the
   // process never connected. Without an explicit connect, redisAvailable stays
@@ -49,10 +57,18 @@ beforeAll(async () => {
   // the daily-cap evaluator passes and only the per-op cap distinguishes
   // allow/deny — exactly what these assertions exercise.
   await initRedis();
+  priceOracle.weiToUsd = async (amount, _chainId, tokenAddress) => {
+    const decimals = tokenAddress?.toLowerCase() === WETH.address.toLowerCase() ? 18 : 6;
+    return Number(BigInt(amount)) / 10 ** decimals;
+  };
+  priceOracle.getTokenUsdPrice = async (_chainId, tokenAddress) =>
+    tokenAddress.toLowerCase() === "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599" ? 100_000 : null;
   adapterRoutesModule = await import("../routes/adapters");
 }, 120_000);
 
 afterAll(async () => {
+  priceOracle.weiToUsd = originalWeiToUsd;
+  priceOracle.getTokenUsdPrice = originalTokenPrice;
   await closeDb();
 });
 
@@ -201,7 +217,7 @@ async function requestAllMountedFundMovingRoutes(
       chainId: 8453,
     }),
   });
-  expect(swapQuote.status).toBe(200);
+  expect(swapQuote.status, await swapQuote.clone().text()).toBe(200);
   const swapQuoteBody = (await swapQuote.json()) as { data: { quote: unknown } };
 
   const bridgeQuote = await app.request("/adapters/bridge/quote", {
@@ -228,7 +244,6 @@ async function requestAllMountedFundMovingRoutes(
         agentId,
         agentAddress: AGENT_WALLET,
         quote: swapQuoteBody.data.quote,
-        estimatedUsd: 25,
       }),
     }),
     app.request("/adapters/earn/deposit", {
@@ -239,7 +254,6 @@ async function requestAllMountedFundMovingRoutes(
         vault: "0x4626000000000000000000000000000000000001",
         assets: "1050",
         owner: AGENT_WALLET,
-        estimatedUsd: 25,
       }),
     }),
     app.request("/adapters/bridge/build", {
@@ -249,7 +263,6 @@ async function requestAllMountedFundMovingRoutes(
         agentId,
         owner: AGENT_WALLET,
         quote: bridgeQuoteBody.data.quote,
-        estimatedUsd: 25,
       }),
     }),
   ]);
@@ -277,6 +290,15 @@ describe("adapter fund-moving policy gate", () => {
         const responses = await withRuntimeEnvironment(
           {
             ...posture.environment,
+            // This test exercises the durable spend boundary, not custody boot.
+            // Acknowledge the mock local vault so requests reach that boundary.
+            STEWARD_ACK_LOCAL_CUSTODY: "true",
+            STEWARD_MASTER_PASSWORD: "test-master-password",
+            STEWARD_KDF_SALT: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            STEWARD_ALLOW_MOCK_ADAPTERS: "true",
+            STEWARD_SWAP_ADAPTER: "mock",
+            STEWARD_EARN_ADAPTER: "mock",
+            STEWARD_BRIDGE_ADAPTER: "mock",
             STEWARD_ADAPTER_PER_OP_CAP_USD: "1000",
             STEWARD_ADAPTER_DAILY_CAP_USD: "10000",
           },
@@ -295,6 +317,7 @@ describe("adapter fund-moving policy gate", () => {
       const developmentResponses = await withRuntimeEnvironment(
         {
           NODE_ENV: "development",
+          STEWARD_MASTER_PASSWORD: "test-master-password",
           STEWARD_ADAPTER_PER_OP_CAP_USD: "1000",
           STEWARD_ADAPTER_DAILY_CAP_USD: "10000",
         },
@@ -308,8 +331,8 @@ describe("adapter fund-moving policy gate", () => {
     }
   });
 
-  it("DENIES a swap build when the estimated notional exceeds the per-op cap", async () => {
-    process.env.STEWARD_ADAPTER_PER_OP_CAP_USD = "100";
+  it("DENIES a swap build when the server-priced notional exceeds the per-op cap", async () => {
+    process.env.STEWARD_ADAPTER_PER_OP_CAP_USD = "0.5";
     process.env.STEWARD_ADAPTER_DAILY_CAP_USD = "1000";
     const { app, agentId } = await makeApp(`tenant-adapter-deny-${Date.now()}`);
 
@@ -328,7 +351,7 @@ describe("adapter fund-moving policy gate", () => {
     expect(quoteRes.status).toBe(200);
     const { data } = (await quoteRes.json()) as { data: { quote: unknown } };
 
-    // Build with an estimate ABOVE the per-op cap -> must be policy-rejected.
+    // The server prices the quoted 1 USDC input; no caller estimate participates.
     const buildRes = await app.request("/adapters/swap/build", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -336,7 +359,6 @@ describe("adapter fund-moving policy gate", () => {
         agentId,
         agentAddress: AGENT_WALLET,
         quote: data.quote,
-        estimatedUsd: 5000,
       }),
     });
     expect(buildRes.status).toBe(400);
@@ -371,7 +393,6 @@ describe("adapter fund-moving policy gate", () => {
         agentId,
         agentAddress: AGENT_WALLET,
         quote: data.quote,
-        estimatedUsd: 250,
       }),
     });
     expect(buildRes.status).toBe(200);
@@ -384,8 +405,69 @@ describe("adapter fund-moving policy gate", () => {
     expect(body.data.unsignedIntent.category).toBe("swap");
   });
 
+  it("rejects caller-supplied USD valuations instead of trusting an understatement", async () => {
+    const { app, agentId } = await makeApp(`tenant-adapter-caller-price-${Date.now()}`);
+    const quoteRes = await app.request("/adapters/swap/quote", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        agentId,
+        fromToken: USDC,
+        toToken: WETH,
+        amount: "1000000000000",
+        chainId: 8453,
+      }),
+    });
+    const { data } = (await quoteRes.json()) as { data: { quote: unknown } };
+    const response = await app.request("/adapters/swap/build", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        agentId,
+        agentAddress: AGENT_WALLET,
+        quote: data.quote,
+        estimatedUsd: 0.0001,
+      }),
+    });
+    expect(response.status).toBe(400);
+    const body = (await response.json()) as Record<string, unknown>;
+    expect(body.error).toBe("estimatedUsd is not accepted; valuation is server-derived");
+    expect(body.unsignedIntent).toBeUndefined();
+  });
+
+  it("fails closed when the server price authority is unavailable", async () => {
+    const { app, agentId } = await makeApp(`tenant-adapter-price-outage-${Date.now()}`);
+    const quoteRes = await app.request("/adapters/swap/quote", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        agentId,
+        fromToken: USDC,
+        toToken: WETH,
+        amount: "1000000",
+        chainId: 8453,
+      }),
+    });
+    const { data } = (await quoteRes.json()) as { data: { quote: unknown } };
+    const workingOracle = priceOracle.weiToUsd;
+    priceOracle.weiToUsd = async () => null;
+    try {
+      const response = await app.request("/adapters/swap/build", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ agentId, agentAddress: AGENT_WALLET, quote: data.quote }),
+      });
+      expect(response.status).toBe(400);
+      const body = (await response.json()) as Record<string, unknown>;
+      expect(body.reason).toBe("authoritative USD valuation is unavailable (fail-closed)");
+      expect(body.unsignedIntent).toBeUndefined();
+    } finally {
+      priceOracle.weiToUsd = workingOracle;
+    }
+  });
+
   it("DENIES an earn deposit above cap (gate applies to all fund-moving ops)", async () => {
-    process.env.STEWARD_ADAPTER_PER_OP_CAP_USD = "10";
+    process.env.STEWARD_ADAPTER_PER_OP_CAP_USD = "0.0005";
     process.env.STEWARD_ADAPTER_DAILY_CAP_USD = "100";
     const { app, agentId } = await makeApp(`tenant-adapter-earn-${Date.now()}`);
 
@@ -397,7 +479,6 @@ describe("adapter fund-moving policy gate", () => {
         vault: "0x4626000000000000000000000000000000000001",
         assets: "1050",
         owner: AGENT_WALLET,
-        estimatedUsd: 5000,
       }),
     });
     expect(res.status).toBe(400);
@@ -436,7 +517,6 @@ describe("adapter fund-moving policy gate", () => {
         agentId,
         owner: AGENT_WALLET,
         quote: data.quote,
-        estimatedUsd: 250,
       }),
     });
     expect(buildRes.status).toBe(200);
@@ -470,7 +550,6 @@ describe("adapter fund-moving policy gate", () => {
           agentId,
           owner: AGENT_WALLET,
           quote: { quoteId: "test-handoff-quote" },
-          estimatedUsd: 500,
         }),
       });
 
@@ -485,7 +564,7 @@ describe("adapter fund-moving policy gate", () => {
   });
 
   it("DENIES a bridge build above cap before returning a signable artifact", async () => {
-    process.env.STEWARD_ADAPTER_PER_OP_CAP_USD = "10";
+    process.env.STEWARD_ADAPTER_PER_OP_CAP_USD = "0.5";
     process.env.STEWARD_ADAPTER_DAILY_CAP_USD = "100";
     const { app, agentId } = await makeApp(`tenant-adapter-bridge-deny-${Date.now()}`);
 
@@ -511,7 +590,6 @@ describe("adapter fund-moving policy gate", () => {
         agentId,
         owner: AGENT_WALLET,
         quote: data.quote,
-        estimatedUsd: 5000,
       }),
     });
     expect(buildRes.status).toBe(400);
@@ -535,8 +613,6 @@ describe("adapter fund-moving policy gate", () => {
         agentId,
         owner: AGENT_WALLET,
         quote: { quoteId: "test-handoff-quote" },
-        // A malicious caller tries to stay under the $100 policy cap.
-        estimatedUsd: 1,
       }),
     });
 
@@ -576,7 +652,6 @@ describe("adapter fund-moving policy gate", () => {
         agentId,
         owner: AGENT_WALLET,
         quote: { quoteId: "test-handoff-quote" },
-        estimatedUsd: 1,
       }),
     });
 
@@ -703,7 +778,7 @@ describe("adapter fund-moving policy gate", () => {
   });
 
   it("DENIES Spark transfers above cap before returning a signable artifact", async () => {
-    process.env.STEWARD_ADAPTER_PER_OP_CAP_USD = "10";
+    process.env.STEWARD_ADAPTER_PER_OP_CAP_USD = "0.5";
     process.env.STEWARD_ADAPTER_DAILY_CAP_USD = "100";
     const { app, agentId } = await makeApp(`tenant-adapter-spark-deny-${Date.now()}`);
 
@@ -722,7 +797,6 @@ describe("adapter fund-moving policy gate", () => {
         walletId: walletBody.data.wallet.id,
         recipient: "spk_testnet_recipient_123456",
         amountSats: "1000",
-        estimatedUsd: 5000,
       }),
     });
     expect(transferRes.status).toBe(400);
@@ -751,7 +825,6 @@ describe("adapter fund-moving policy gate", () => {
         walletId: walletBody.data.wallet.id,
         recipient: "spk_testnet_recipient_123456",
         amountSats: "1000",
-        estimatedUsd: 5,
       }),
     });
     expect(transferRes.status).toBe(200);
@@ -772,15 +845,22 @@ describe("adapter fund-moving policy gate", () => {
     expect(transferBody.data.unsignedIntent.owner).toBe(agentId);
     expect(transferBody.data.unsignedIntent.metadata.operation).toBe("spark.transfer");
 
+    const invoiceRes = await app.request("/adapters/spark/lightning/invoices", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ walletId: walletBody.data.wallet.id, amountSats: "2500" }),
+    });
+    const invoiceBody = (await invoiceRes.json()) as {
+      data: { invoice: { paymentRequest: string } };
+    };
     const payRes = await app.request("/adapters/spark/lightning/pay", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         agentId,
         walletId: walletBody.data.wallet.id,
-        paymentRequest: "lntb2500n1mockinvoice",
+        paymentRequest: invoiceBody.data.invoice.paymentRequest,
         maxFeeSats: "10",
-        estimatedUsd: 5,
       }),
     });
     expect(payRes.status).toBe(200);
