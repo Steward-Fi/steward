@@ -295,6 +295,8 @@ describe("mounted nonce and OAuth state boundaries", () => {
 
   it("rate-limits challenge allocation without returning an extra nonce", async () => {
     delete process.env.STEWARD_ALLOW_AUTH_RATE_LIMIT_SOFT_FAIL;
+    const originalOutageValveMax = process.env.STEWARD_AUTH_RATE_LIMIT_OUTAGE_VALVE_MAX;
+    process.env.STEWARD_AUTH_RATE_LIMIT_OUTAGE_VALVE_MAX = "0";
     process.env.NODE_ENV = "production";
     try {
       const blocked = await nonce();
@@ -304,6 +306,11 @@ describe("mounted nonce and OAuth state boundaries", () => {
     } finally {
       process.env.NODE_ENV = "test";
       process.env.STEWARD_ALLOW_AUTH_RATE_LIMIT_SOFT_FAIL = "true";
+      if (originalOutageValveMax === undefined) {
+        delete process.env.STEWARD_AUTH_RATE_LIMIT_OUTAGE_VALVE_MAX;
+      } else {
+        process.env.STEWARD_AUTH_RATE_LIMIT_OUTAGE_VALVE_MAX = originalOutageValveMax;
+      }
     }
   });
 });

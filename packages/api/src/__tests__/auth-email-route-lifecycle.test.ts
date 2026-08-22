@@ -103,6 +103,8 @@ describe("mounted email login-code and OTP grant lifecycle", () => {
     expect(wrongPollTenant.response.status).toBe(200);
     expect(wrongPollTenant.json.data.status).not.toBe("pending");
     delete process.env.STEWARD_ALLOW_AUTH_RATE_LIMIT_SOFT_FAIL;
+    const originalOutageValveMax = process.env.STEWARD_AUTH_RATE_LIMIT_OUTAGE_VALVE_MAX;
+    process.env.STEWARD_AUTH_RATE_LIMIT_OUTAGE_VALVE_MAX = "0";
     process.env.NODE_ENV = "production";
     try {
       const limited = await post("/email/status", credentials, TENANT_A);
@@ -111,6 +113,11 @@ describe("mounted email login-code and OTP grant lifecycle", () => {
     } finally {
       process.env.NODE_ENV = "test";
       process.env.STEWARD_ALLOW_AUTH_RATE_LIMIT_SOFT_FAIL = "true";
+      if (originalOutageValveMax === undefined) {
+        delete process.env.STEWARD_AUTH_RATE_LIMIT_OUTAGE_VALVE_MAX;
+      } else {
+        process.env.STEWARD_AUTH_RATE_LIMIT_OUTAGE_VALVE_MAX = originalOutageValveMax;
+      }
     }
     const pending = await post("/email/status", credentials, TENANT_A);
     expect(pending.response.status).toBe(200);
@@ -310,12 +317,14 @@ describe("mounted email login-code and OTP grant lifecycle", () => {
     registration.mockRestore();
   });
 
-  it("fails closed without a shared OTP limiter and never mints a session", async () => {
+  it("fails closed without a shared OTP limiter when the outage valve is disabled", async () => {
     const email = "bounded-otp@example.test";
     expect(
       (await post("/email/otp/send", { email, tenantId: TENANT_A }, TENANT_A)).response.status,
     ).toBe(200);
     delete process.env.STEWARD_ALLOW_AUTH_RATE_LIMIT_SOFT_FAIL;
+    const originalOutageValveMax = process.env.STEWARD_AUTH_RATE_LIMIT_OUTAGE_VALVE_MAX;
+    process.env.STEWARD_AUTH_RATE_LIMIT_OUTAGE_VALVE_MAX = "0";
     process.env.NODE_ENV = "production";
     try {
       const blocked = await post(
@@ -328,6 +337,11 @@ describe("mounted email login-code and OTP grant lifecycle", () => {
     } finally {
       process.env.NODE_ENV = "test";
       process.env.STEWARD_ALLOW_AUTH_RATE_LIMIT_SOFT_FAIL = "true";
+      if (originalOutageValveMax === undefined) {
+        delete process.env.STEWARD_AUTH_RATE_LIMIT_OUTAGE_VALVE_MAX;
+      } else {
+        process.env.STEWARD_AUTH_RATE_LIMIT_OUTAGE_VALVE_MAX = originalOutageValveMax;
+      }
     }
   });
 });
