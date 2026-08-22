@@ -76,6 +76,13 @@ SELECT format('GRANT USAGE, CREATE ON SCHEMA public TO %I', :'steward_migration_
 SELECT format('GRANT USAGE ON SCHEMA public, steward_bootstrap, steward_rls TO %I', :'steward_app_role') \gexec
 SELECT format('GRANT USAGE ON SCHEMA drizzle TO %I', :'steward_app_role') \gexec
 SELECT format('GRANT SELECT ON TABLE drizzle.__drizzle_migrations TO %I', :'steward_app_role') \gexec
+SELECT format('GRANT SELECT ON TABLE %I.%I TO %I', n.nspname, c.relname, :'steward_app_role')
+FROM pg_class c
+JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE n.nspname = 'drizzle'
+  AND c.relkind IN ('r', 'p')
+  AND c.relname LIKE '__drizzle_migrations_plugin\_%' ESCAPE '\'
+ORDER BY c.relname \gexec
 SELECT format('GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA steward_bootstrap, steward_rls TO %I', :'steward_app_role') \gexec
 SELECT format(
   'REVOKE EXECUTE ON FUNCTION '

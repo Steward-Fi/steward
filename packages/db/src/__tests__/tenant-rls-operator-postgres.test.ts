@@ -1,4 +1,4 @@
-import { afterAll, describe, expect, setDefaultTimeout, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { randomUUID } from "node:crypto";
 import postgres from "postgres";
 
@@ -35,8 +35,8 @@ function platformDatabaseUrl(): string {
   return url.toString();
 }
 
-function migrationDatabaseUrl(): string {
-  const url = new URL(databaseUrl(databaseName));
+function migrationDatabaseUrl(database = databaseName): string {
+  const url = new URL(databaseUrl(database));
   url.username = migrationRole;
   url.password = migrationRolePassword;
   return url.toString();
@@ -96,7 +96,7 @@ async function reserveLoopbackPort(): Promise<number> {
   return port;
 }
 
-async function proveRestrictedApiStartupReadiness(platformKey: string) {
+async function proveRestrictedApiStartupReadiness(platformKey: string, expectedStatus = 200) {
   const port = await reserveLoopbackPort();
   const probeToken = `rls-ready-${suffix}`;
   const child = Bun.spawn(["bun", "run", "packages/api/src/index.ts"], {
@@ -112,7 +112,7 @@ async function proveRestrictedApiStartupReadiness(platformKey: string) {
       STEWARD_APP_DATABASE_ROLE: appRole,
       STEWARD_PLATFORM_DATABASE_URL: platformDatabaseUrl(),
       STEWARD_PLATFORM_DATABASE_ROLE: platformRole,
-      STEWARD_PLUGINS: "",
+      STEWARD_PLUGINS: "capabilities",
       STEWARD_ENABLE_TRADING: "false",
       STEWARD_REDIS_REQUIRED: "false",
       REDIS_URL: "",
@@ -152,7 +152,7 @@ async function proveRestrictedApiStartupReadiness(platformKey: string) {
           headers: { "x-steward-probe-token": probeToken },
           signal: AbortSignal.timeout(1_000),
         });
-        if (response.status === 200) {
+        if (response.status === expectedStatus) {
           proof = (await response.json()) as typeof proof;
           break;
         }
@@ -175,9 +175,19 @@ async function proveRestrictedApiStartupReadiness(platformKey: string) {
 
 describeWithPostgres("SEC-169 operator lifecycle on the real Steward schema", () => {
   const admin = postgres(process.env.DATABASE_URL as string, { max: 1 });
+  const hostileSchemaDatabase = `steward_foreign_schema_${suffix}`;
+  const hostileObjectDatabase = `steward_foreign_object_${suffix}`;
+
+  beforeAll(async () => {
+    await admin.unsafe(
+      `CREATE ROLE ${migrationRole} LOGIN PASSWORD '${migrationRolePassword}' NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION`,
+    );
+  });
 
   afterAll(async () => {
     await admin.unsafe(`DROP DATABASE IF EXISTS ${databaseName} WITH (FORCE)`);
+    await admin.unsafe(`DROP DATABASE IF EXISTS ${hostileSchemaDatabase} WITH (FORCE)`);
+    await admin.unsafe(`DROP DATABASE IF EXISTS ${hostileObjectDatabase} WITH (FORCE)`);
     await admin.unsafe(`DROP ROLE IF EXISTS ${appRole}`);
     await admin.unsafe(`DROP ROLE IF EXISTS ${migrationRole}`);
     await admin.unsafe(`DROP ROLE IF EXISTS ${definerRole}`);
@@ -185,25 +195,69 @@ describeWithPostgres("SEC-169 operator lifecycle on the real Steward schema", ()
     await admin.end();
   });
 
+  async function provisionMigrationTarget(targetDatabase: string) {
+    await admin.unsafe(`CREATE DATABASE ${targetDatabase}`);
+    const target = postgres(databaseUrl(targetDatabase), { max: 1 });
+    try {
+      await target.unsafe(`ALTER SCHEMA public OWNER TO ${migrationRole}`);
+      await target.unsafe(`CREATE SCHEMA drizzle AUTHORIZATION ${migrationRole}`);
+      await target.unsafe(`CREATE SCHEMA steward_rls AUTHORIZATION ${migrationRole}`);
+      await target.unsafe(`CREATE SCHEMA steward_bootstrap AUTHORIZATION ${migrationRole}`);
+      // Immutable migration 0111 executes CREATE SCHEMA IF NOT EXISTS; PostgreSQL
+      // requires database CREATE even when the admin already provisioned those
+      // exact schemas. Bound the grant to the release and revoke it below before
+      // any runtime role is activated. NOCREATEDB remains unchanged throughout.
+      await target.unsafe(
+        `GRANT CONNECT, CREATE ON DATABASE ${targetDatabase} TO ${migrationRole}`,
+      );
+    } finally {
+      await target.end();
+    }
+  }
+
+  test("rejects foreign schemas and non-table public objects before creating a ledger", async () => {
+    for (const [targetDatabase, hostileSql] of [
+      [hostileSchemaDatabase, "CREATE SCHEMA unrelated"],
+      [hostileObjectDatabase, "CREATE VIEW public.unrelated_view AS SELECT 1 AS value"],
+    ] as const) {
+      await provisionMigrationTarget(targetDatabase);
+      const target = postgres(databaseUrl(targetDatabase), { max: 1 });
+      try {
+        await target.unsafe(hostileSql);
+      } finally {
+        await target.end();
+      }
+      let rejected: unknown;
+      try {
+        await runCommand(["bun", "run", "--cwd", "packages/api", "migrate"], {
+          DATABASE_URL: migrationDatabaseUrl(targetDatabase),
+          STEWARD_PLUGINS: "capabilities",
+          STEWARD_ENABLE_TRADING: "false",
+          STEWARD_MASTER_PASSWORD: `restricted-migrator-master-${suffix}`,
+        });
+      } catch (error) {
+        rejected = error;
+      }
+      expect(rejected).toBeInstanceOf(Error);
+      const inspect = postgres(databaseUrl(targetDatabase), { max: 1 });
+      try {
+        await inspect.unsafe(`REVOKE CREATE ON DATABASE ${targetDatabase} FROM ${migrationRole}`);
+        const [ledger] = await inspect<{ ledger: string | null }[]>`
+          SELECT to_regclass('drizzle.__drizzle_migrations')::text AS ledger
+        `;
+        expect(ledger?.ledger).toBeNull();
+      } finally {
+        await inspect.end();
+      }
+    }
+  });
+
   test("bootstraps, activates, rolls back, reactivates, and reruns the migrator", async () => {
     const [adminRole] = await admin<{ rolsuper: boolean }[]>`
       SELECT rolsuper FROM pg_roles WHERE rolname = current_user
     `;
     expect(adminRole?.rolsuper).toBe(true);
-    await admin.unsafe(
-      `CREATE ROLE ${migrationRole} LOGIN PASSWORD '${migrationRolePassword}' NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION`,
-    );
-    await admin.unsafe(`CREATE DATABASE ${databaseName}`);
-
-    const emptyDatabase = postgres(databaseUrl(databaseName), { max: 1 });
-    try {
-      await emptyDatabase.unsafe(
-        `GRANT CONNECT, CREATE ON DATABASE ${databaseName} TO ${migrationRole}`,
-      );
-      await emptyDatabase.unsafe(`GRANT USAGE, CREATE ON SCHEMA public TO ${migrationRole}`);
-    } finally {
-      await emptyDatabase.end();
-    }
+    await provisionMigrationTarget(databaseName);
 
     const firstMigration = await runCommand(["bun", "run", "--cwd", "packages/api", "migrate"], {
       DATABASE_URL: migrationDatabaseUrl(),
@@ -216,6 +270,7 @@ describeWithPostgres("SEC-169 operator lifecycle on the real Steward schema", ()
 
     const db = postgres(databaseUrl(databaseName), { max: 1 });
     try {
+      await db.unsafe(`REVOKE CREATE ON DATABASE ${databaseName} FROM ${migrationRole}`);
       const [restrictedRelease] = await db<
         {
           core_rows: number;
@@ -223,6 +278,10 @@ describeWithPostgres("SEC-169 operator lifecycle on the real Steward schema", ()
           migrator_super: boolean;
           migrator_bypassrls: boolean;
           migrator_createrole: boolean;
+          migrator_createdb: boolean;
+          migrator_database_create: boolean;
+          migrator_public_create: boolean;
+          migrator_drizzle_create: boolean;
         }[]
       >`
         SELECT
@@ -233,7 +292,11 @@ describeWithPostgres("SEC-169 operator lifecycle on the real Steward schema", ()
           ) AS plugin_rows,
           role.rolsuper AS migrator_super,
           role.rolbypassrls AS migrator_bypassrls,
-          role.rolcreaterole AS migrator_createrole
+          role.rolcreaterole AS migrator_createrole,
+          role.rolcreatedb AS migrator_createdb,
+          has_database_privilege(${migrationRole}, current_database(), 'CREATE') AS migrator_database_create,
+          has_schema_privilege(${migrationRole}, 'public', 'CREATE') AS migrator_public_create,
+          has_schema_privilege(${migrationRole}, 'drizzle', 'CREATE') AS migrator_drizzle_create
         FROM pg_roles role
         WHERE role.rolname = ${migrationRole}
       `;
@@ -243,6 +306,10 @@ describeWithPostgres("SEC-169 operator lifecycle on the real Steward schema", ()
         migrator_super: false,
         migrator_bypassrls: false,
         migrator_createrole: false,
+        migrator_createdb: false,
+        migrator_database_create: false,
+        migrator_public_create: true,
+        migrator_drizzle_create: true,
       });
 
       const [installed] = await db<{ relations: number; policies: number }[]>`
@@ -292,6 +359,71 @@ describeWithPostgres("SEC-169 operator lifecycle on the real Steward schema", ()
         rolcanlogin: true,
         rolbypassrls: false,
         rolsuper: false,
+      });
+      const [schemaBoundary] = await db<
+        {
+          app_schema_create: boolean;
+          platform_schema_create: boolean;
+          public_schema_create: boolean;
+          migrator_public_create: boolean;
+          migrator_drizzle_create: boolean;
+          migrator_rls_create: boolean;
+          migrator_bootstrap_create: boolean;
+          migrator_other_schema_create: boolean;
+          wrong_relation_owner_count: number;
+        }[]
+      >`
+        SELECT
+          EXISTS (
+            SELECT 1 FROM pg_namespace namespace
+            WHERE namespace.nspname IN ('public', 'drizzle', 'steward_rls', 'steward_bootstrap')
+              AND has_schema_privilege(${appRole}, namespace.nspname, 'CREATE')
+          ) AS app_schema_create,
+          EXISTS (
+            SELECT 1 FROM pg_namespace namespace
+            WHERE namespace.nspname IN ('public', 'drizzle', 'steward_rls', 'steward_bootstrap')
+              AND has_schema_privilege(${platformRole}, namespace.nspname, 'CREATE')
+          ) AS platform_schema_create,
+          EXISTS (
+            SELECT 1 FROM pg_namespace namespace
+            CROSS JOIN LATERAL aclexplode(COALESCE(namespace.nspacl, '{}'::aclitem[])) privilege
+            WHERE namespace.nspname IN ('public', 'drizzle', 'steward_rls', 'steward_bootstrap')
+              AND privilege.grantee = 0
+              AND privilege.privilege_type = 'CREATE'
+          ) AS public_schema_create,
+          has_schema_privilege(${migrationRole}, 'public', 'CREATE') AS migrator_public_create,
+          has_schema_privilege(${migrationRole}, 'drizzle', 'CREATE') AS migrator_drizzle_create,
+          has_schema_privilege(${migrationRole}, 'steward_rls', 'CREATE') AS migrator_rls_create,
+          has_schema_privilege(${migrationRole}, 'steward_bootstrap', 'CREATE') AS migrator_bootstrap_create,
+          EXISTS (
+            SELECT 1 FROM pg_namespace namespace
+            WHERE namespace.nspname NOT IN (
+              'public', 'drizzle', 'steward_rls', 'steward_bootstrap',
+              'pg_catalog', 'information_schema'
+            )
+              AND namespace.nspname !~ '^pg_(toast|temp|toast_temp)'
+              AND has_schema_privilege(${migrationRole}, namespace.nspname, 'CREATE')
+          ) AS migrator_other_schema_create,
+          (
+            SELECT count(*)::int
+            FROM pg_class relation
+            JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+            JOIN pg_roles owner ON owner.oid = relation.relowner
+            WHERE namespace.nspname IN ('public', 'drizzle')
+              AND relation.relkind IN ('r', 'p', 'S')
+              AND owner.rolname <> ${migrationRole}
+          ) AS wrong_relation_owner_count
+      `;
+      expect(schemaBoundary).toEqual({
+        app_schema_create: false,
+        platform_schema_create: false,
+        public_schema_create: false,
+        migrator_public_create: true,
+        migrator_drizzle_create: true,
+        migrator_rls_create: true,
+        migrator_bootstrap_create: false,
+        migrator_other_schema_create: false,
+        wrong_relation_owner_count: 0,
       });
       const appReadinessDb = postgres(appDatabaseUrl(), { max: 1 });
       try {
@@ -359,14 +491,80 @@ describeWithPostgres("SEC-169 operator lifecycle on the real Steward schema", ()
         WHERE n.nspname = 'public' AND p.polname LIKE 'steward_%'
       `;
       expect(activated).toEqual({ enabled: 74, forced: 74, maintenance: 74 });
+      const [maintenanceBoundary] = await db<{ wrong_role_count: number }[]>`
+        SELECT count(*)::int AS wrong_role_count
+        FROM pg_policy policy
+        WHERE policy.polname = 'steward_migration_maintenance'
+          AND policy.polroles <> ARRAY[(SELECT oid FROM pg_roles WHERE rolname = ${migrationRole})]
+      `;
+      expect(maintenanceBoundary?.wrong_role_count).toBe(0);
+
+      const restrictedMigrator = postgres(migrationDatabaseUrl(), { max: 1 });
+      try {
+        for (const forbiddenSql of [
+          `CREATE DATABASE forbidden_${suffix}`,
+          `CREATE ROLE forbidden_${suffix}`,
+          "CREATE EXTENSION hstore SCHEMA public",
+        ]) {
+          let forbiddenError: unknown;
+          try {
+            await restrictedMigrator.unsafe(forbiddenSql);
+          } catch (error) {
+            forbiddenError = error;
+          }
+          expect(forbiddenError).toBeInstanceOf(Error);
+        }
+      } finally {
+        await restrictedMigrator.end();
+      }
 
       const startupPlatformKey = `rls-startup-platform-key-${suffix}`;
       const startupProof = await proveRestrictedApiStartupReadiness(startupPlatformKey);
       expect(startupProof.status).toBe("ready");
       expect(startupProof.checks?.database?.ok).toBe(true);
       expect(startupProof.checks?.migrations?.ok).toBe(true);
+      expect(startupProof.checks?.pluginMigrations?.ok).toBe(true);
       expect(startupProof.checks?.rlsDeployment?.ok).toBe(true);
       expect(startupProof.checks?.authStores?.ok).toBe(true);
+
+      const pluginLedgerRows = await db<
+        { id: number; hash: string; created_at: string | number }[]
+      >`
+        SELECT id, hash, created_at
+        FROM drizzle.__drizzle_migrations_plugin_capabilities
+        ORDER BY id
+      `;
+      expect(pluginLedgerRows.length).toBeGreaterThan(1);
+      await db`TRUNCATE drizzle.__drizzle_migrations_plugin_capabilities`;
+      const missingPluginProof = await proveRestrictedApiStartupReadiness(
+        `${startupPlatformKey}-missing`,
+        503,
+      );
+      expect(missingPluginProof.status).toBe("not_ready");
+      expect(missingPluginProof.checks?.database?.ok).toBe(true);
+      expect(missingPluginProof.checks?.pluginMigrations?.ok).toBe(false);
+      for (const row of pluginLedgerRows) {
+        await db`
+          INSERT INTO drizzle.__drizzle_migrations_plugin_capabilities(id, hash, created_at)
+          VALUES (${row.id}, ${row.hash}, ${row.created_at})
+        `;
+      }
+      const stalePluginRow = pluginLedgerRows.at(-1)!;
+      await db`
+        DELETE FROM drizzle.__drizzle_migrations_plugin_capabilities
+        WHERE id = ${stalePluginRow.id}
+      `;
+      const stalePluginProof = await proveRestrictedApiStartupReadiness(
+        `${startupPlatformKey}-stale`,
+        503,
+      );
+      expect(stalePluginProof.status).toBe("not_ready");
+      expect(stalePluginProof.checks?.database?.ok).toBe(true);
+      expect(stalePluginProof.checks?.pluginMigrations?.ok).toBe(false);
+      await db`
+        INSERT INTO drizzle.__drizzle_migrations_plugin_capabilities(id, hash, created_at)
+        VALUES (${stalePluginRow.id}, ${stalePluginRow.hash}, ${stalePluginRow.created_at})
+      `;
 
       const refreshUserId = randomUUID();
       const sourceTenant = `source-${suffix}`;
@@ -610,10 +808,15 @@ describeWithPostgres("SEC-169 operator lifecycle on the real Steward schema", ()
       expect(rolledBack).toEqual({ enabled: 0, forced: 0 });
 
       await runOperatorScript("rls-activate.sql");
-      const rerun = await runCommand(["bun", "run", "packages/db/src/migrate.ts"], {
-        DATABASE_URL: migrationDatabaseUrl(),
-      });
-      expect(rerun).toContain("Already up to date");
+      const rerun = await runCommand(
+        [
+          "bun",
+          "-e",
+          'import { runMigrations } from "./packages/db/src/migrate.ts"; console.log(JSON.stringify(await runMigrations()));',
+        ],
+        { DATABASE_URL: migrationDatabaseUrl() },
+      );
+      expect(rerun).toContain('"applied":[]');
     } finally {
       await db.end();
     }

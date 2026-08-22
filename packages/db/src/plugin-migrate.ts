@@ -42,6 +42,8 @@
  * nothing.
  */
 
+import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import type { PluginMigrationSource } from "@stwd/shared";
 import { migrate } from "drizzle-orm/postgres-js/migrator";
 
@@ -120,6 +122,36 @@ export function pluginMigrationsTable(id: string): string {
  */
 export function pluginAdvisoryLockKey(id: string): string {
   return `steward_plugin_migrations_${boundedPluginMigrationId(id)}`;
+}
+
+export interface PluginMigrationLedgerExpectation {
+  id: string;
+  migrationsTable: string;
+  entries: Array<{ hash: string; createdAt: number }>;
+}
+
+/** Exact checked-in identities required for an enabled plugin to be ready. */
+export function getPluginMigrationLedgerExpectation(
+  source: PluginMigrationSource,
+): PluginMigrationLedgerExpectation {
+  const journal = JSON.parse(
+    readFileSync(`${source.migrationsFolder}/meta/_journal.json`, "utf8"),
+  ) as { entries?: Array<{ tag?: unknown; when?: unknown }> };
+  if (!Array.isArray(journal.entries) || journal.entries.length === 0) {
+    throw new Error(`plugin migration journal "${source.id}" is empty or malformed`);
+  }
+  const entries = journal.entries.map((entry) => {
+    if (typeof entry.tag !== "string" || !Number.isSafeInteger(entry.when)) {
+      throw new Error(`plugin migration journal "${source.id}" contains a malformed entry`);
+    }
+    return {
+      createdAt: entry.when as number,
+      hash: createHash("sha256")
+        .update(readFileSync(`${source.migrationsFolder}/${entry.tag}.sql`))
+        .digest("hex"),
+    };
+  });
+  return { id: source.id, migrationsTable: pluginMigrationsTable(source.id), entries };
 }
 
 /**
