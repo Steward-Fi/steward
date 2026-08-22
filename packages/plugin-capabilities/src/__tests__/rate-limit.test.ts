@@ -7,6 +7,7 @@ import { createInvokeRoutes } from "../invoke";
 import {
   CAPABILITY_INVOKE_RATE_LIMIT,
   CAPABILITY_ISSUE_RATE_LIMIT,
+  type CapabilityRateResult,
   enforceCapabilityRateLimit,
 } from "../rate-limit";
 import { capabilityInvocations, capabilityRateLimitBuckets } from "../schema";
@@ -73,15 +74,17 @@ describe("enforceCapabilityRateLimit", () => {
       const counts = new Map<string, number>();
       const calls: string[] = [];
       const client = {
-        async eval(_script: string, _keyCount: number, ...args: Array<string | number>) {
+        async eval(script: string, _keyCount: number, ...args: Array<string | number>) {
           const key = String(args[0]);
-          const max = Number(args[3]);
+          const windowMs = Number(args[1]);
+          const max = Number(args[2]);
           calls.push(`${label}:${key}`);
           const prior = counts.get(key) ?? 0;
           const allowed = prior < max;
           const count = allowed ? prior + 1 : prior;
           counts.set(key, count);
-          return [allowed ? 1 : 0, count, String(args[1])];
+          expect(script).toContain("redis.call('TIME')");
+          return [allowed ? 1 : 0, count, "1000000", 1000000, windowMs];
         },
       } as unknown as IoredisLike;
       return { client, calls };
@@ -113,6 +116,73 @@ describe("enforceCapabilityRateLimit", () => {
     ).toBe(false);
     expect(authorityA.calls).toHaveLength(CAPABILITY_ISSUE_RATE_LIMIT.maxRequests + 1);
     expect(authorityB.calls).toHaveLength(1);
+  });
+
+  test("uses one Redis clock across skewed independent application contexts", async () => {
+    const reservations = new Map<string, number[]>();
+    const serverNow = 1_900_000_000_000;
+    function skewHostClient(localNow: number) {
+      return {
+        async eval(script: string, _keyCount: number, ...args: Array<string | number>) {
+          expect(script).toContain("redis.call('TIME')");
+          const key = String(args[0]);
+          const windowMs = Number(args[1]);
+          const max = Number(args[2]);
+          // No caller timestamp/window boundary is accepted by the script.
+          expect(args).toHaveLength(5);
+          expect(args.map(String)).not.toContain(String(localNow));
+          const live = (reservations.get(key) ?? []).filter(
+            (reservedAt) => reservedAt > serverNow - windowMs,
+          );
+          const allowed = live.length < max;
+          if (allowed) live.push(serverNow);
+          reservations.set(key, live);
+          return [allowed ? 1 : 0, live.length, String(serverNow), serverNow, windowMs];
+        },
+      } as unknown as IoredisLike;
+    }
+
+    const tenantId = `tenant-${crypto.randomUUID()}`;
+    const agentId = `agent-${crypto.randomUUID()}`;
+    const farBehindNow = serverNow - 365 * 24 * 60 * 60_000;
+    const farAheadNow = serverNow + 365 * 24 * 60 * 60_000;
+    const farBehind = skewHostClient(farBehindNow);
+    const farAhead = skewHostClient(farAheadNow);
+    const context = (client: IoredisLike) => ({
+      db: null as never,
+      getRedisClient: () => client,
+      isRedisConfigured: () => true,
+    });
+
+    const originalDateNow = Date.now;
+    const attempts: CapabilityRateResult[] = [];
+    try {
+      Date.now = () => farBehindNow;
+      for (let index = 0; index < CAPABILITY_INVOKE_RATE_LIMIT.maxRequests / 2; index += 1) {
+        attempts.push(
+          await enforceCapabilityRateLimit(context(farBehind), "invoke", tenantId, agentId),
+        );
+      }
+      Date.now = () => farAheadNow;
+      for (
+        let index = CAPABILITY_INVOKE_RATE_LIMIT.maxRequests / 2;
+        index <= CAPABILITY_INVOKE_RATE_LIMIT.maxRequests;
+        index += 1
+      ) {
+        attempts.push(
+          await enforceCapabilityRateLimit(context(farAhead), "invoke", tenantId, agentId),
+        );
+      }
+    } finally {
+      Date.now = originalDateNow;
+    }
+    expect(attempts.filter((attempt) => attempt.allowed)).toHaveLength(
+      CAPABILITY_INVOKE_RATE_LIMIT.maxRequests,
+    );
+    expect(attempts.filter((attempt) => !attempt.allowed)).toHaveLength(1);
+    expect(new Set(attempts.map((attempt) => attempt.resetMs))).toEqual(
+      new Set([CAPABILITY_INVOKE_RATE_LIMIT.windowMs]),
+    );
   });
 
   test("permits memory only in explicit test/development posture", async () => {
