@@ -11,7 +11,7 @@ claim that every signing, proxy, or plugin execution path is governed.
 
 # Steward Threat Model
 
-**Status:** Living document. Last reviewed 2026-04-24.
+**Status:** Living document. Last reviewed 2026-08-21.
 **Scope:** Steward v1 (current `develop` branch).
 
 This document enumerates the adversaries Steward is designed to defend
@@ -59,15 +59,17 @@ If any of these fails, the threat model below does not hold.
    provides limited defense.
 6. **Tenant operators are trusted with their own tenant.** A tenant
    admin can read the policies, approvals, and audit log for their
-   tenant. They cannot read another tenant's data. Isolation is
-   enforced at the service layer: every tenant-scoped query filters
-   on `tenantId` and rows carry a composite foreign key to their
-   tenant. It is NOT database row-level security (RLS is not
-   implemented). Steward ships self-hosted only, and the expected
-   topology is one tenant per deployment, where this is trivially
-   true. An operator who chooses to run multiple tenants in a single
-   self-hosted deployment relies on that service-layer scoping and
-   trusts each tenant owner with their own scope.
+   tenant. They cannot read another tenant's data. Every runtime keeps
+   authenticated service-layer `tenantId` predicates and ownership
+   constraints such as composite foreign keys. Production PostgreSQL
+   additionally requires the activated and forced policy inventory,
+   separately provisioned non-owner/`NOBYPASSRLS` application role,
+   and transaction-local trusted tenant context. Bun startup and
+   `/ready`, plus Worker cold start, fail closed if the configured role,
+   protected relations, partitions, or exact policy definitions drift.
+   Local and embedded PGLite do not supply this role/catalog boundary
+   and rely on the service layer. See the
+   [PostgreSQL tenant RLS rollout](./database-rls-rollout.mdx).
 7. **TLS is terminated in front of Steward.** The Compose file binds
    the API to `127.0.0.1`; the expected topology has Caddy / nginx /
    Traefik handling TLS. Steward does not itself terminate TLS in the
@@ -218,7 +220,12 @@ without OS-level code execution on the API host). They see the
   the master password, ciphertext is not decryptable.
 - Per-record random salt forces the attacker to run scrypt once
   per record to test a candidate master password.
-- Secrets stored via `SecretVault` use the same encryption path.
+- Secrets stored via `SecretVault` use a domain-separated scrypt root;
+  each record derives a key from its random salt and authenticates
+  tenant/name/version context as AES-GCM AAD. Wallet records bind their
+  applicable tenant/agent/chain/venue context. These bindings detect
+  ciphertext copied into a different context; they are not stored
+  per-tenant encryption keys.
 - Password hashes (for users who use email + password) are
   stored hashed with the project's password hashing util (not
   plaintext).
@@ -267,9 +274,11 @@ the master password as a crown jewel.
 - Store the master password in a real secret manager (not a
   committed `.env`).
 - Rotate it on suspicion of leak. Rotation means: generate new
-  master password, re-encrypt all stored keys with a migration,
-  retire old password. Tooling for bulk re-encryption is not
-  yet shipped — this is tracked as a follow-up.
+  master password and KDF salt, stop writers, authenticate and
+  re-encrypt the complete supported ciphertext inventory, cut every
+  consumer over together, then retire the old pair. Follow the
+  [root secret key rotation runbook](../runbooks/key-rotation.md);
+  rotation is an offline full-inventory operation, not a tenant-key re-wrap.
 - Use OS-level access controls on the Compose host to limit who
   can read the environment of the API container.
 

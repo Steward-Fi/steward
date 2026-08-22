@@ -4,7 +4,7 @@
  * Aliases let agents use short names instead of full hostnames:
  *   /openai/v1/chat/completions → api.openai.com/v1/chat/completions
  *
- * Per-tenant aliases will be configurable via DB in a future release.
+ * This registry owns the fixed aliases accepted by the proxy.
  */
 
 export const DEFAULT_ALIASES: Record<string, string> = {

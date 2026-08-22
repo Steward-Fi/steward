@@ -1,20 +1,15 @@
 /**
  * plugin-config.ts — deploy-time plugin enablement resolver.
  *
- * WHY THIS EXISTS
- * ---------------
+ * ENABLEMENT CONTRACT
+ * -------------------
  * the composition root (`compose.ts`) assembles the deployable server: the lean
- * core (`createApp()`) plus this deploy's opt-in plugins. historically that set
- * was HARDCODED — `composeApp()` always registered the trading plugin and
- * `runComposedPluginMigrations()` always collected its migrations. that coupled
- * the SHIPPED IMAGE to a single feature profile: every deploy ran trading,
- * whether or not it was wanted.
- *
- * this resolver makes the same image run LEAN (core only) or FULL (core + opt-in
- * plugins) purely by ENVIRONMENT, with NO change to what any plugin does. it only
- * answers ONE question: "which opt-in plugins should the composition root
+ * core (`createApp()`) plus this deploy's opt-in plugins. This resolver makes the
+ * same image run LEAN (core only) or FULL (core + opt-in plugins) purely by
+ * environment. It answers ONE question: "which opt-in plugins should the
+ * composition root
  * register?" the actual registration, ordering, and migration logic is untouched
- * (see compose.ts) — this only gates WHETHER trading is composed in, never HOW.
+ * (see compose.ts) — this gates WHICH plugins are composed in, never HOW.
  *
  * THE CONTRACT
  * ------------

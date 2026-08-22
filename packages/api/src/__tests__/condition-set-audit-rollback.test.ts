@@ -7,15 +7,11 @@ const routeSource = readFileSync(
   "utf8",
 );
 
-describe("condition set audit rollback hardening", () => {
-  it("restores condition sets and items when final audit writes fail", () => {
-    expect(routeSource).toContain("type ConditionSetRow = typeof conditionSets.$inferSelect");
-    expect(routeSource).toContain(
-      "type ConditionSetItemRow = typeof conditionSetItems.$inferSelect",
-    );
-    expect(routeSource).toContain("async function snapshotConditionSetItems");
-    expect(routeSource).toContain("async function restoreConditionSet");
-    expect(routeSource).toContain("async function restoreConditionSetItems");
+describe("condition set audit atomicity", () => {
+  it("uses audited transactions without snapshot restoration for every mutation", () => {
+    expect(routeSource).not.toContain("snapshotConditionSetItems");
+    expect(routeSource).not.toContain("restoreConditionSet");
+    expect(routeSource).not.toContain("restoreConditionSetItems");
 
     const createStart = routeSource.indexOf('conditionSetRoutes.post("/",');
     const createEnd = routeSource.indexOf("conditionSetRoutes.", createStart + 1);
@@ -23,15 +19,13 @@ describe("condition set audit rollback hardening", () => {
     expect(createRoute).toContain("withTenantAuditedTransaction");
     expect(createRoute).toContain("appendRequiredAudit");
 
-    for (const [marker, rollback] of [
-      ['conditionSetRoutes.patch("/:id",', "restoreConditionSet(tenantId, current"],
-      ['conditionSetRoutes.delete("/:id",', "restoreConditionSet(tenantId, current, currentItems)"],
-      ['conditionSetRoutes.post("/:id/items",', "restoreConditionSetItems(tenantId, set.id"],
-      ['conditionSetRoutes.put("/:id/items",', "restoreConditionSetItems(tenantId, set.id"],
-      [
-        'conditionSetRoutes.delete("/:id/items/:itemId",',
-        "restoreConditionSetItems(tenantId, set.id",
-      ],
+    for (const marker of [
+      'conditionSetRoutes.patch("/:id",',
+      'conditionSetRoutes.delete("/:id",',
+      'conditionSetRoutes.post("/:id/items",',
+      'conditionSetRoutes.put("/:id/items",',
+      'conditionSetRoutes.patch("/:id/items/:itemId",',
+      'conditionSetRoutes.delete("/:id/items/:itemId",',
     ] as const) {
       const start = routeSource.indexOf(marker);
       expect(start).toBeGreaterThanOrEqual(0);
@@ -39,8 +33,9 @@ describe("condition set audit rollback hardening", () => {
       // is captured regardless of nested `});` blocks inside the handler.
       const next = routeSource.indexOf("conditionSetRoutes.", start + marker.length);
       const route = routeSource.slice(start, next === -1 ? undefined : next);
-      expect(route).toContain("try {");
-      expect(route).toContain(rollback);
+      expect(route).toContain("withTenantAuditedTransaction");
+      expect(route).toContain("appendRequiredAudit");
+      expect(route).toContain("readLockedConditionSet");
     }
   });
 });

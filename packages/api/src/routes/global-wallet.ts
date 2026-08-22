@@ -20,6 +20,7 @@ import {
   setNoStoreHeaders,
   verifySessionToken,
 } from "../services/context";
+import { resolveRuntimeChainId } from "../services/custody-runtime";
 import { globalWalletFeatureFlags } from "../services/global-wallet-runtime";
 import { isRecentMfaTimestamp } from "../services/recent-mfa";
 import { getConfiguredVault } from "../services/vault-factory";
@@ -105,6 +106,13 @@ async function userSessionAuth(
 }
 
 globalWalletRoutes.use("*", userSessionAuth);
+globalWalletRoutes.use("*", async (c, next) => {
+  // Authenticated global-wallet responses can contain signatures, confirmation
+  // handles, or wallet authority metadata. Apply the contract before any RPC
+  // validation so post-auth failures are non-cacheable too.
+  setNoStoreHeaders(c);
+  await next();
+});
 
 function getVault(): Vault {
   return getConfiguredVault();
@@ -382,7 +390,7 @@ function parseRpcQuantity(value: unknown): bigint | string {
 
 function parseRpcChainId(value: unknown): number | string {
   if (value === undefined || value === null || value === "") {
-    return Number(process.env.CHAIN_ID || "84532");
+    return resolveRuntimeChainId(84532);
   }
   const parsed = parseRpcQuantity(value);
   if (typeof parsed === "string")
@@ -1634,7 +1642,7 @@ globalWalletRoutes.post("/rpc", async (c) => {
   const result =
     method === "eth_accounts"
       ? [wallet.walletAddress]
-      : `0x${Number(process.env.CHAIN_ID || "84532").toString(16)}`;
+      : `0x${resolveRuntimeChainId(84532).toString(16)}`;
   return c.json<ApiResponse>({
     ok: true,
     data: { jsonrpc: body.jsonrpc ?? "2.0", id: body.id ?? null, result },

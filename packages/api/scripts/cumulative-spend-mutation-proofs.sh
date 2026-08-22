@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# #206 cumulativeSpend + configurable-window mutation-strength proofs. Each
+# cumulativeSpend + configurable-window mutation-strength proofs. Each
 # mutation weakens ONE load-bearing guard; a proof is valid iff the named test
 # PASSES clean AND FAILS after the mutation. The target file is restored after
 # each proof.
@@ -87,10 +87,10 @@ proof "M5 drop reservation atomicity (cap check before add)" "$TRACKER" run_trac
   "100 parallel reserves of 100k against a 1M cap admit exactly 10" \
   's/if (sum + amount) > maxv then/if false then/'
 
-# M6: DROP THE OVER-RETENTION WINDOW REJECT (codex P1) - a window beyond the 30d
+# M6: DROP THE OVER-RETENTION WINDOW REJECT - a window beyond the 30d
 # retention would silently clamp + under-enforce; removing the guard lets it
 # reserve, so the over-retention test no longer throws.
-proof "M6 drop over-retention window reject (P1)" "$TRACKER" run_tracker_test \
+proof "M6 drop over-retention window reject" "$TRACKER" run_tracker_test \
   "over-retention window" \
   's/w > 0 \&\& w <= MAX_WINDOW_SECONDS/w > 0/'
 
