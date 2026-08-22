@@ -80,6 +80,10 @@ export interface Env {
   /** Deprecated compatibility fallback for existing Worker deployments. */
   STEWARD_SESSION_SECRET?: string;
   STEWARD_MASTER_PASSWORD?: string;
+  /** Break-glass local/test override. Never configure on a production Worker. */
+  STEWARD_ALLOW_INSECURE_WEBHOOK_URLS?: string;
+  /** Break-glass local/test override. Never configure on a production Worker. */
+  STEWARD_ALLOW_PRIVATE_WEBHOOK_NETWORKS?: string;
   STEWARD_KDF_SALT?: string;
   STEWARD_KMS_PROVIDER?: string;
   STEWARD_KMS_KEY_ID?: string;

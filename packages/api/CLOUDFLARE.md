@@ -117,6 +117,14 @@ rejected before any database handle is selected.
 | `PASSKEY_RP_NAME`               | Display name for the WebAuthn UI.                                      |
 | `PASSKEY_ALLOWED_ORIGINS`       | Optional comma-separated additional origins for multi-tenant passkeys. |
 
+Webhook destinations require HTTPS and public DNS/IP addresses. The optional
+`STEWARD_ALLOW_INSECURE_WEBHOOK_URLS=true` and
+`STEWARD_ALLOW_PRIVATE_WEBHOOK_NETWORKS=true` bindings are independent,
+request-local break-glass acknowledgements for trusted local test harnesses.
+Do not configure either binding in staging or production Worker environments;
+they disable webhook transport and SSRF controls respectively and do not widen
+non-webhook URL consumers.
+
 When asymmetric identity tokens are enabled, put the private key in the
 environment-scoped secret above and configure the matching non-secret
 `STEWARD_IDENTITY_JWT_ALG`, `STEWARD_IDENTITY_JWT_KID`,

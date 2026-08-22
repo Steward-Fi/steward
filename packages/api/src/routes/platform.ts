@@ -51,6 +51,7 @@ import {
   vaultSigningFreezes,
   withTenantAuditedTransactionOnDb,
 } from "@stwd/db";
+import { shouldUsePGLite } from "@stwd/db/pglite";
 import {
   type AgentIdentity,
   type ApiResponse,
@@ -342,6 +343,7 @@ async function lockTenantOwnerLifecycle(
   tx: Pick<ReturnType<typeof getDb>, "execute">,
   tenantId: string,
 ): Promise<void> {
+  if (shouldUsePGLite()) return;
   await tx.execute(
     sql`select pg_advisory_xact_lock(hashtextextended(${tenantOwnerLifecycleLockKey(tenantId)}, 0))`,
   );
@@ -1197,7 +1199,6 @@ platform.post("/tenants/:id/freeze", async (c) => {
   if (!isValidTenantId(tenantId)) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid tenant id format" }, 400);
   }
-
   const [tenant] = await db
     .select({ id: tenants.id })
     .from(tenants)
@@ -1280,7 +1281,6 @@ platform.post("/tenants/:id/unfreeze", async (c) => {
   if (!isValidTenantId(tenantId)) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid tenant id format" }, 400);
   }
-
   const lifted = await db
     .update(vaultSigningFreezes)
     .set({ liftedAt: sql`now()`, liftedByType: "platform", liftedById: "platform" })
@@ -1697,9 +1697,9 @@ platform.get("/tenants/:tenantId/join-mode", async (c) => {
  * tenantId is auto-linked), 'invite' (existing user_tenants link required), or
  * 'closed' (no new members).
  *
- * This is the only application write surface for join_mode. It mirrors the
- * email-config mutation contract: scoped authorization, paired audits,
- * rollback on audit failure, and update-or-insert persistence.
+ * This is the only application write surface for join_mode. It shares the
+ * membership lifecycle lock so join authorization and its required audit
+ * change atomically with the policy that permits new members.
  */
 platform.patch("/tenants/:tenantId/join-mode", async (c) => {
   const scopeResponse = requirePlatformRouteScope(c, "platform:tenant-join-mode:write");
@@ -1710,6 +1710,12 @@ platform.patch("/tenants/:tenantId/join-mode", async (c) => {
 
   if (!isValidTenantId(tenantId)) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid tenant id format" }, 400);
+  }
+  if (isReservedTenantId(tenantId)) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Personal and reserved tenant membership is immutable" },
+      409,
+    );
   }
 
   if (!(await getTenantOr404(tenantId))) {
@@ -1739,23 +1745,22 @@ platform.patch("/tenants/:tenantId/join-mode", async (c) => {
     ...auditCtx(c),
   });
 
-  const previousConfigRow = await snapshotPlatformTenantConfigRow(tenantId);
-  const [existingConfig] = await db
-    .select({ tenantId: tenantConfigs.tenantId })
-    .from(tenantConfigs)
-    .where(eq(tenantConfigs.tenantId, tenantId));
-
-  if (existingConfig) {
-    await db
-      .update(tenantConfigs)
-      .set({ joinMode, updatedAt: new Date() })
+  await withTenantAuditedTransaction(tenantId, async (txRaw, appendRequiredAudit) => {
+    const tx = txRaw as typeof db;
+    await lockTenantOwnerLifecycle(tx, tenantId);
+    const [existingConfig] = await tx
+      .select({ tenantId: tenantConfigs.tenantId })
+      .from(tenantConfigs)
       .where(eq(tenantConfigs.tenantId, tenantId));
-  } else {
-    await db.insert(tenantConfigs).values({ tenantId, joinMode });
-  }
-
-  try {
-    await writeAuditEvent({
+    if (existingConfig) {
+      await tx
+        .update(tenantConfigs)
+        .set({ joinMode, updatedAt: new Date() })
+        .where(eq(tenantConfigs.tenantId, tenantId));
+    } else {
+      await tx.insert(tenantConfigs).values({ tenantId, joinMode });
+    }
+    await appendRequiredAudit({
       tenantId,
       actorType: "platform",
       action: "tenant.join_mode.update",
@@ -1764,10 +1769,7 @@ platform.patch("/tenants/:tenantId/join-mode", async (c) => {
       metadata: { joinMode },
       ...auditCtx(c),
     });
-  } catch (error) {
-    await restorePlatformTenantConfigRow(tenantId, previousConfigRow);
-    throw error;
-  }
+  });
 
   return c.json<ApiResponse<{ tenantId: string; joinMode: string }>>({
     ok: true,
@@ -4705,6 +4707,12 @@ platform.patch("/tenants/:id/users/:userId/metadata", async (c) => {
   if (!isValidTenantId(tenantId)) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid tenant id format" }, 400);
   }
+  if (isReservedTenantId(tenantId)) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Personal and reserved tenant membership is immutable" },
+      409,
+    );
+  }
   if (!isValidUserId(userId)) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid user id format" }, 400);
   }
@@ -4728,22 +4736,25 @@ platform.patch("/tenants/:id/users/:userId/metadata", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: "User not found in tenant" }, 404);
   }
 
-  await writeAuditEvent({
-    tenantId,
-    actorType: "platform",
-    action: "tenant.user.metadata.update",
-    resourceType: "user",
-    resourceId: userId,
-    metadata: {
-      updatedTenant: true,
-    },
-    ...auditCtx(c),
+  await withTenantAuditedTransaction(tenantId, async (txRaw, appendRequiredAudit) => {
+    const tx = txRaw as typeof db;
+    await lockTenantOwnerLifecycle(tx, tenantId);
+    const [updated] = await tx
+      .update(userTenants)
+      .set({ customMetadata: body.tenantCustomMetadata })
+      .where(and(eq(userTenants.tenantId, tenantId), eq(userTenants.userId, userId)))
+      .returning({ id: userTenants.id });
+    if (!updated) throw new Error("Tenant membership changed during metadata update");
+    await appendRequiredAudit({
+      tenantId,
+      actorType: "platform",
+      action: "tenant.user.metadata.update",
+      resourceType: "user",
+      resourceId: userId,
+      metadata: { updatedTenant: true },
+      ...auditCtx(c),
+    });
   });
-
-  await db
-    .update(userTenants)
-    .set({ customMetadata: body.tenantCustomMetadata })
-    .where(and(eq(userTenants.tenantId, tenantId), eq(userTenants.userId, userId)));
   dispatchWebhook(tenantId, userId, "user.updated_account", {
     userId,
     scope: "tenant",
@@ -4885,7 +4896,7 @@ platform.post("/tenants/:id/invitations", async (c) => {
   if (!isValidTenantId(tenantId)) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid tenant id format" }, 400);
   }
-  if (isPersonalTenantId(tenantId)) {
+  if (isReservedTenantId(tenantId)) {
     return c.json<ApiResponse>(
       { ok: false, error: "Personal tenant membership is immutable" },
       409,
@@ -4960,70 +4971,62 @@ platform.post("/tenants/:id/invitations", async (c) => {
     ...auditCtx(c),
   });
 
-  const previousPendingInvitations = await db
-    .select()
-    .from(tenantInvitations)
-    .where(
-      and(
-        eq(tenantInvitations.tenantId, tenantId),
-        eq(tenantInvitations.email, email),
-        eq(tenantInvitations.status, "pending"),
-      ),
-    );
-
-  const invitation = await db.transaction(async (tx) => {
-    const now = new Date();
-    await tx
-      .update(tenantInvitations)
-      .set({ status: "revoked", revokedAt: now, updatedAt: now })
-      .where(
-        and(
-          eq(tenantInvitations.tenantId, tenantId),
-          eq(tenantInvitations.email, email),
-          eq(tenantInvitations.status, "pending"),
-        ),
-      );
-
-    const [created] = await tx
-      .insert(tenantInvitations)
-      .values({ tenantId, email, role, tokenHash, invitedByUserId, expiresAt })
-      .returning({
-        id: tenantInvitations.id,
-        tenantId: tenantInvitations.tenantId,
-        email: tenantInvitations.email,
-        role: tenantInvitations.role,
-        status: tenantInvitations.status,
-        expiresAt: tenantInvitations.expiresAt,
-        createdAt: tenantInvitations.createdAt,
-      });
-    return created;
-  });
-
-  try {
-    await writeAuditEvent({
-      tenantId,
-      actorType: "platform",
-      action: "tenant.invitation.create",
-      resourceType: "tenant_invitation",
-      resourceId: invitation.id,
-      metadata: { email, role, expiresAt: expiresAt.toISOString() },
-      ...auditCtx(c),
-    });
-  } catch (error) {
-    await db.transaction(async (tx) => {
-      await tx.delete(tenantInvitations).where(eq(tenantInvitations.id, invitation.id));
-      for (const previous of previousPendingInvitations) {
-        await tx
-          .update(tenantInvitations)
-          .set({
-            status: previous.status,
-            revokedAt: previous.revokedAt,
-            updatedAt: previous.updatedAt,
-          })
-          .where(eq(tenantInvitations.id, previous.id));
+  const invitation = await withTenantAuditedTransaction(
+    tenantId,
+    async (txRaw, appendRequiredAudit) => {
+      const tx = txRaw as typeof db;
+      await lockTenantOwnerLifecycle(tx, tenantId);
+      if (invitedByUserId) {
+        const [lockedInviterMembership] = await tx
+          .select({ userId: userTenants.userId })
+          .from(userTenants)
+          .where(and(eq(userTenants.tenantId, tenantId), eq(userTenants.userId, invitedByUserId)))
+          .limit(1);
+        if (!lockedInviterMembership) {
+          return null;
+        }
       }
-    });
-    throw error;
+      const now = new Date();
+      await tx
+        .update(tenantInvitations)
+        .set({ status: "revoked", revokedAt: now, updatedAt: now })
+        .where(
+          and(
+            eq(tenantInvitations.tenantId, tenantId),
+            eq(tenantInvitations.email, email),
+            eq(tenantInvitations.status, "pending"),
+          ),
+        );
+
+      const [created] = await tx
+        .insert(tenantInvitations)
+        .values({ tenantId, email, role, tokenHash, invitedByUserId, expiresAt })
+        .returning({
+          id: tenantInvitations.id,
+          tenantId: tenantInvitations.tenantId,
+          email: tenantInvitations.email,
+          role: tenantInvitations.role,
+          status: tenantInvitations.status,
+          expiresAt: tenantInvitations.expiresAt,
+          createdAt: tenantInvitations.createdAt,
+        });
+      await appendRequiredAudit({
+        tenantId,
+        actorType: "platform",
+        action: "tenant.invitation.create",
+        resourceType: "tenant_invitation",
+        resourceId: created.id,
+        metadata: { email, role, expiresAt: expiresAt.toISOString() },
+        ...auditCtx(c),
+      });
+      return created;
+    },
+  );
+  if (!invitation) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Invitation authority changed before commit" },
+      409,
+    );
   }
 
   let emailSent = false;
@@ -5057,7 +5060,7 @@ platform.delete("/tenants/:id/invitations/:invitationId", async (c) => {
   if (!isValidTenantId(tenantId)) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid tenant id format" }, 400);
   }
-  if (isPersonalTenantId(tenantId)) {
+  if (isReservedTenantId(tenantId)) {
     return c.json<ApiResponse>(
       { ok: false, error: "Personal tenant membership is immutable" },
       409,
@@ -5093,45 +5096,41 @@ platform.delete("/tenants/:id/invitations/:invitationId", async (c) => {
     ...auditCtx(c),
   });
 
-  const [invitation] = await db
-    .update(tenantInvitations)
-    .set({ status: "revoked", revokedAt: new Date(), updatedAt: new Date() })
-    .where(
-      and(
-        eq(tenantInvitations.tenantId, tenantId),
-        eq(tenantInvitations.id, invitationId),
-        eq(tenantInvitations.status, "pending"),
-      ),
-    )
-    .returning({
-      id: tenantInvitations.id,
-      email: tenantInvitations.email,
-      role: tenantInvitations.role,
-    });
+  const invitation = await withTenantAuditedTransaction(
+    tenantId,
+    async (txRaw, appendRequiredAudit) => {
+      const tx = txRaw as typeof db;
+      await lockTenantOwnerLifecycle(tx, tenantId);
+      const [revoked] = await tx
+        .update(tenantInvitations)
+        .set({ status: "revoked", revokedAt: new Date(), updatedAt: new Date() })
+        .where(
+          and(
+            eq(tenantInvitations.tenantId, tenantId),
+            eq(tenantInvitations.id, invitationId),
+            eq(tenantInvitations.status, "pending"),
+          ),
+        )
+        .returning({
+          id: tenantInvitations.id,
+          email: tenantInvitations.email,
+          role: tenantInvitations.role,
+        });
+      if (!revoked) return undefined;
+      await appendRequiredAudit({
+        tenantId,
+        actorType: "platform",
+        action: "tenant.invitation.revoke",
+        resourceType: "tenant_invitation",
+        resourceId: revoked.id,
+        metadata: { email: revoked.email, role: revoked.role },
+        ...auditCtx(c),
+      });
+      return revoked;
+    },
+  );
   if (!invitation) {
     return c.json<ApiResponse>({ ok: false, error: "Pending invitation not found" }, 404);
-  }
-
-  try {
-    await writeAuditEvent({
-      tenantId,
-      actorType: "platform",
-      action: "tenant.invitation.revoke",
-      resourceType: "tenant_invitation",
-      resourceId: invitation.id,
-      metadata: { email: invitation.email, role: invitation.role },
-      ...auditCtx(c),
-    });
-  } catch (error) {
-    await db
-      .update(tenantInvitations)
-      .set({
-        status: candidate.status,
-        revokedAt: candidate.revokedAt,
-        updatedAt: candidate.updatedAt,
-      })
-      .where(and(eq(tenantInvitations.tenantId, tenantId), eq(tenantInvitations.id, invitationId)));
-    throw error;
   }
 
   return c.json<ApiResponse>({ ok: true });
@@ -5152,7 +5151,7 @@ platform.post("/tenants/:id/members", async (c) => {
   if (!isValidTenantId(tenantId)) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid tenant id format" }, 400);
   }
-  if (isPersonalTenantId(tenantId)) {
+  if (isReservedTenantId(tenantId)) {
     return c.json<ApiResponse>(
       { ok: false, error: "Personal tenant membership is immutable" },
       409,
@@ -5185,35 +5184,54 @@ platform.post("/tenants/:id/members", async (c) => {
     );
   }
 
-  // Find user now; create after audit if needed so audit failure cannot create identity state.
-  let [user] = await db.select().from(users).where(eq(users.email, email));
-  const [existingMembership] = user
-    ? await db
-        .select({ role: userTenants.role })
-        .from(userTenants)
-        .where(and(eq(userTenants.userId, user.id), eq(userTenants.tenantId, tenantId)))
-    : [undefined];
-  const actualRole = existingMembership?.role ?? role;
-
   await writeAuditEvent({
     tenantId,
     actorType: "platform",
-    action: "tenant.member.add",
+    action: "tenant.member.add.authorized",
     resourceType: "user",
-    resourceId: user?.id ?? email,
-    metadata: { email, role: actualRole, requestedRole: role, isNew: !existingMembership },
+    resourceId: email,
+    metadata: { email, requestedRole: role },
     ...auditCtx(c),
   });
 
-  const createdUser = !user;
-  if (!user) {
-    const [newUser] = await db.insert(users).values({ email, emailVerified: false }).returning();
-    user = newUser;
-  }
-
-  if (!existingMembership) {
-    await db.insert(userTenants).values({ userId: user.id, tenantId, role }).onConflictDoNothing();
-  }
+  const result = await withTenantAuditedTransaction(
+    tenantId,
+    async (txRaw, appendRequiredAudit) => {
+      const tx = txRaw as typeof db;
+      await lockTenantOwnerLifecycle(tx, tenantId);
+      let [user] = await tx.select().from(users).where(eq(users.email, email));
+      const createdUser = !user;
+      if (!user) {
+        const [newUser] = await tx
+          .insert(users)
+          .values({ email, emailVerified: false })
+          .returning();
+        user = newUser;
+      }
+      const [existingMembership] = await tx
+        .select({ role: userTenants.role })
+        .from(userTenants)
+        .where(and(eq(userTenants.userId, user.id), eq(userTenants.tenantId, tenantId)));
+      const actualRole = existingMembership?.role ?? role;
+      if (!existingMembership) {
+        await tx
+          .insert(userTenants)
+          .values({ userId: user.id, tenantId, role })
+          .onConflictDoNothing();
+      }
+      await appendRequiredAudit({
+        tenantId,
+        actorType: "platform",
+        action: "tenant.member.add",
+        resourceType: "user",
+        resourceId: user.id,
+        metadata: { email, role: actualRole, requestedRole: role, isNew: !existingMembership },
+        ...auditCtx(c),
+      });
+      return { user, actualRole, createdUser };
+    },
+  );
+  const { user, actualRole, createdUser } = result;
   if (createdUser) {
     dispatchWebhook(tenantId, user.id, "user.created", {
       userId: user.id,
@@ -5247,7 +5265,7 @@ platform.delete("/tenants/:id/members/:userId", async (c) => {
   if (!isValidTenantId(tenantId)) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid tenant id format" }, 400);
   }
-  if (isPersonalTenantId(tenantId)) {
+  if (isReservedTenantId(tenantId)) {
     return c.json<ApiResponse>(
       { ok: false, error: "Personal tenant membership is immutable" },
       409,
@@ -5284,21 +5302,23 @@ platform.delete("/tenants/:id/members/:userId", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: "Member not found in tenant" }, 404);
   }
 
-  const revokedBefore = await revocationStore.revokeUserTokens(userId);
-
   await writeAuditEvent({
     tenantId,
     actorType: "platform",
-    action: "tenant.member.remove",
+    action: "tenant.member.remove.authorized",
     resourceType: "user",
     resourceId: userId,
-    metadata: { revokedUserTokensIssuedBefore: revokedBefore },
+    metadata: { role: currentMember.role },
     ...auditCtx(c),
   });
 
+  const revokedBefore = Math.floor(Date.now() / 1000) + 1;
+  await revocationStore.revokeUserTokens(userId, revokedBefore);
+
   let deleted: typeof userTenants.$inferSelect | undefined;
   try {
-    deleted = await db.transaction(async (tx) => {
+    deleted = await withTenantAuditedTransaction(tenantId, async (txRaw, appendRequiredAudit) => {
+      const tx = txRaw as typeof db;
       await lockTenantOwnerLifecycle(tx, tenantId);
       await lockUserSession(tx, userId);
       const [current] = await tx
@@ -5315,6 +5335,19 @@ platform.delete("/tenants/:id/members/:userId", async (c) => {
         .delete(userTenants)
         .where(and(eq(userTenants.tenantId, tenantId), eq(userTenants.userId, userId)))
         .returning();
+      if (!row) return undefined;
+      await tx
+        .delete(refreshTokens)
+        .where(and(eq(refreshTokens.tenantId, tenantId), eq(refreshTokens.userId, userId)));
+      await appendRequiredAudit({
+        tenantId,
+        actorType: "platform",
+        action: "tenant.member.remove",
+        resourceType: "user",
+        resourceId: userId,
+        metadata: { role: current.role, revokedUserTokensIssuedBefore: revokedBefore },
+        ...auditCtx(c),
+      });
       return row;
     });
   } catch (err) {
@@ -5326,10 +5359,6 @@ platform.delete("/tenants/:id/members/:userId", async (c) => {
   if (!deleted) {
     return c.json<ApiResponse>({ ok: false, error: "Member not found in tenant" }, 404);
   }
-
-  await db
-    .delete(refreshTokens)
-    .where(and(eq(refreshTokens.tenantId, tenantId), eq(refreshTokens.userId, userId)));
 
   return c.json<ApiResponse>({ ok: true });
 });
@@ -5350,7 +5379,7 @@ platform.patch("/tenants/:id/members/:userId", async (c) => {
   if (!isValidTenantId(tenantId)) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid tenant id format" }, 400);
   }
-  if (isPersonalTenantId(tenantId)) {
+  if (isReservedTenantId(tenantId)) {
     return c.json<ApiResponse>(
       { ok: false, error: "Personal tenant membership is immutable" },
       409,
@@ -5402,6 +5431,16 @@ platform.patch("/tenants/:id/members/:userId", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: "Member not found in tenant" }, 404);
   }
 
+  await writeAuditEvent({
+    tenantId,
+    actorType: "platform",
+    action: "tenant.member.role.update.authorized",
+    resourceType: "user",
+    resourceId: userId,
+    metadata: { previousRole: currentMember.role, role },
+    ...auditCtx(c),
+  });
+
   let updated:
     | {
         row: typeof userTenants.$inferSelect;
@@ -5410,7 +5449,8 @@ platform.patch("/tenants/:id/members/:userId", async (c) => {
       }
     | undefined;
   try {
-    updated = await db.transaction(async (tx) => {
+    updated = await withTenantAuditedTransaction(tenantId, async (txRaw, appendRequiredAudit) => {
+      const tx = txRaw as typeof db;
       await lockTenantOwnerLifecycle(tx, tenantId);
       const [current] = await tx
         .select({ role: userTenants.role })
@@ -5422,10 +5462,15 @@ platform.patch("/tenants/:id/members/:userId", async (c) => {
           throw new Error("Cannot downgrade the sole tenant owner");
         }
       }
+      // Derive the cutoff from the membership protected by the final lifecycle
+      // lock. A preflight member -> concurrent owner -> requested member
+      // interleaving must still revoke credentials before the demotion commits.
       const revokedUserTokensIssuedBefore =
         current.role === role ? null : Math.floor(Date.now() / 1000) + 1;
       if (revokedUserTokensIssuedBefore !== null) {
         await revocationStore.revokeUserTokens(userId, revokedUserTokensIssuedBefore);
+      }
+      if (revokedUserTokensIssuedBefore !== null) {
         await tx
           .delete(refreshTokens)
           .where(and(eq(refreshTokens.tenantId, tenantId), eq(refreshTokens.userId, userId)));
@@ -5435,13 +5480,25 @@ platform.patch("/tenants/:id/members/:userId", async (c) => {
         .set({ role })
         .where(and(eq(userTenants.tenantId, tenantId), eq(userTenants.userId, userId)))
         .returning();
-      return row
-        ? {
-            row,
-            previousRole: current.role,
-            revokedUserTokensIssuedBefore,
-          }
-        : undefined;
+      if (!row) return undefined;
+      await appendRequiredAudit({
+        tenantId,
+        actorType: "platform",
+        action: "tenant.member.role.update",
+        resourceType: "user",
+        resourceId: userId,
+        metadata: {
+          previousRole: current.role,
+          role,
+          revokedUserTokensIssuedBefore,
+        },
+        ...auditCtx(c),
+      });
+      return {
+        row,
+        previousRole: current.role,
+        revokedUserTokensIssuedBefore,
+      };
     });
   } catch (err) {
     if (err instanceof Error && err.message === "Cannot downgrade the sole tenant owner") {
@@ -5451,28 +5508,6 @@ platform.patch("/tenants/:id/members/:userId", async (c) => {
   }
   if (!updated) {
     return c.json<ApiResponse>({ ok: false, error: "Member not found in tenant" }, 404);
-  }
-
-  try {
-    await writeAuditEvent({
-      tenantId,
-      actorType: "platform",
-      action: "tenant.member.role.update",
-      resourceType: "user",
-      resourceId: userId,
-      metadata: {
-        previousRole: updated.previousRole,
-        role,
-        revokedUserTokensIssuedBefore: updated.revokedUserTokensIssuedBefore,
-      },
-      ...auditCtx(c),
-    });
-  } catch (error) {
-    await db
-      .update(userTenants)
-      .set({ role: updated.previousRole })
-      .where(and(eq(userTenants.tenantId, tenantId), eq(userTenants.userId, userId)));
-    throw error;
   }
 
   return c.json<ApiResponse<{ userId: string; tenantId: string; role: string }>>({
