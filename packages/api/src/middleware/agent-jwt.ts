@@ -34,7 +34,11 @@ const DEFAULT_ELIZA_CLOUD_JWKS_URL = "https://milady.shad0w.xyz/.well-known/jwks
 const TRADE_ORDER_SCOPE = "trade:order";
 
 let jwksCache: CacheEntry | null = null;
-let lastJwksMissRefreshAt = 0;
+const lastJwksMissRefreshAt = new Map<string, number>();
+const jwksMissRefreshInFlight = new Map<
+  string,
+  Promise<Map<string, Awaited<ReturnType<typeof importJWK>>>>
+>();
 
 function invalid(c: Context, reason: string, status: 401 = 401) {
   return c.json({ code: "invalid-jwt", reason }, status);
@@ -83,6 +87,27 @@ async function loadJwks(
 
   jwksCache = { url: jwksUrl, keys, expiresAt: now + JWKS_CACHE_MS };
   return keys;
+}
+
+function refreshJwksAfterMiss(
+  jwksUrl: string,
+): Promise<Map<string, Awaited<ReturnType<typeof importJWK>>>> | null {
+  const inFlight = jwksMissRefreshInFlight.get(jwksUrl);
+  if (inFlight) return inFlight;
+
+  const now = Date.now();
+  if (now - (lastJwksMissRefreshAt.get(jwksUrl) ?? 0) < JWKS_MISS_REFRESH_MIN_INTERVAL_MS) {
+    return null;
+  }
+  lastJwksMissRefreshAt.set(jwksUrl, now);
+  let refresh: Promise<Map<string, Awaited<ReturnType<typeof importJWK>>>>;
+  refresh = loadJwks(true, jwksUrl).finally(() => {
+    if (jwksMissRefreshInFlight.get(jwksUrl) === refresh) {
+      jwksMissRefreshInFlight.delete(jwksUrl);
+    }
+  });
+  jwksMissRefreshInFlight.set(jwksUrl, refresh);
+  return refresh;
 }
 
 function getBearer(c: Context): string | null {
@@ -292,11 +317,12 @@ export async function authenticateAgentJwt(
     // Issuers can publish a rotated kid before this process's cache expires.
     // Refresh exactly once on a miss so rotation is prompt while an actually
     // unknown kid remains fail-closed.
-    const now = Date.now();
-    if (!key && hadFreshCache && now - lastJwksMissRefreshAt >= JWKS_MISS_REFRESH_MIN_INTERVAL_MS) {
-      lastJwksMissRefreshAt = now;
-      keys = await loadJwks(true, jwksUrl);
-      key = keys.get(header.kid);
+    if (!key && hadFreshCache) {
+      const refresh = refreshJwksAfterMiss(jwksUrl);
+      if (refresh) {
+        keys = await refresh;
+        key = keys.get(header.kid);
+      }
     }
     if (!key) return { kind: "invalid-token", reason: "unknown kid" };
 
@@ -502,5 +528,6 @@ export async function requireProviderAgentJwt(c: Context<{ Variables: AppVariabl
 
 export function clearAgentJwksCacheForTests() {
   jwksCache = null;
-  lastJwksMissRefreshAt = 0;
+  lastJwksMissRefreshAt.clear();
+  jwksMissRefreshInFlight.clear();
 }

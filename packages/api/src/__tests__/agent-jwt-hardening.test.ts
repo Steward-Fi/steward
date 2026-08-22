@@ -33,6 +33,7 @@ let privateKey1: KeyLike;
 let privateKey2: KeyLike;
 let downstreamCalls = 0;
 let jwksFetches = 0;
+let jwksResponseBarrier: { observed: () => void; release: Promise<void> } | null = null;
 
 type TokenOptions = {
   agentId?: string;
@@ -126,8 +127,13 @@ beforeAll(async () => {
     ],
   });
   jwksBody = firstJwksBody;
-  jwksServer = createServer((_request, response) => {
+  jwksServer = createServer(async (_request, response) => {
     jwksFetches += 1;
+    const barrier = jwksResponseBarrier;
+    if (barrier) {
+      barrier.observed();
+      await barrier.release;
+    }
     response.writeHead(200, { "content-type": "application/json" });
     response.end(jwksBody);
   });
@@ -169,6 +175,7 @@ afterEach(async () => {
   process.env.ELIZA_CLOUD_JWKS_URL = jwksUrl;
   delete process.env.STEWARD_ALLOW_DEFAULT_ELIZA_JWKS;
   jwksBody = firstJwksBody;
+  jwksResponseBarrier = null;
   const { clearAgentJwksCacheForTests } = await import("../middleware/agent-jwt");
   clearAgentJwksCacheForTests();
 });
@@ -276,6 +283,40 @@ describe("external agent JWT trust and scope boundaries", () => {
     const rotated = await signToken({ kid: KID_2, key: privateKey2 });
     expect((await probe(rotated)).status).toBe(200);
     expect(jwksFetches - fetchesBefore).toBe(2);
+  });
+
+  test("shares one forced JWKS refresh across concurrent rotated-token requests", async () => {
+    expect((await probe(await signToken())).status).toBe(200);
+    jwksBody = rotatedJwksBody;
+    let releaseResponse = () => {};
+    let observeRequest = () => {};
+    const requestObserved = new Promise<void>((resolve) => {
+      observeRequest = resolve;
+    });
+    const release = new Promise<void>((resolve) => {
+      releaseResponse = resolve;
+    });
+    jwksResponseBarrier = { observed: observeRequest, release };
+    const fetchesBefore = jwksFetches;
+    const rotated = await signToken({ kid: KID_2, key: privateKey2 });
+    const requests = Array.from({ length: 8 }, () => probe(rotated));
+    await requestObserved;
+    releaseResponse();
+    const responses = await Promise.all(requests);
+    jwksResponseBarrier = null;
+    expect(responses.every((response) => response.status === 200)).toBe(true);
+    expect(jwksFetches - fetchesBefore).toBe(1);
+  });
+
+  test("isolates JWKS miss-refresh throttles between configured trust anchors", async () => {
+    expect((await probe(await signToken())).status).toBe(200);
+    const rotated = await signToken({ kid: KID_2, key: privateKey2 });
+    await denial(await probe(rotated), 401, "unknown kid");
+
+    process.env.ELIZA_CLOUD_JWKS_URL = `${jwksUrl}?anchor=second`;
+    expect((await probe(await signToken())).status).toBe(200);
+    jwksBody = rotatedJwksBody;
+    expect((await probe(rotated)).status).toBe(200);
   });
 
   test("does not retain keys when the configured JWKS trust anchor changes", async () => {
