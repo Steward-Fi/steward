@@ -18,6 +18,8 @@ import { getRedis } from "./client.js";
 // TIME is the authority for every replica: an application host with a skewed
 // clock cannot expire another replica's still-live reservations.
 const RATE_LIMIT_LUA = `
+local cleanup = ARGV[5] == '1'
+local ok, result = pcall(function()
 local redisTime = redis.call('TIME')
 local now = (tonumber(redisTime[1]) * 1000) + math.floor(tonumber(redisTime[2]) / 1000)
 local windowMs = tonumber(ARGV[1])
@@ -36,6 +38,10 @@ local oldestScore = now
 if oldest[2] ~= nil then oldestScore = oldest[2] end
 local resetMs = math.max(0, tonumber(oldestScore) + windowMs - now)
 return {allowed, count, oldestScore, now, resetMs}
+end)
+if cleanup then redis.call('DEL', KEYS[1]) end
+if not ok then return redis.error_reply(tostring(result)) end
+return result
 `;
 
 const RATE_LIMIT_STATUS_LUA = `
@@ -104,8 +110,30 @@ export async function checkRateLimit(
   maxRequests: number,
   client?: ReturnType<typeof getRedis>,
 ): Promise<RateLimitResult> {
+  return executeRateLimit(key, windowMs, maxRequests, client ?? getRedis(), false);
+}
+
+/** Exercise the exact production rate-limit script but atomically remove the
+ * isolated bucket before EVAL returns. This is safe under caller deadlines:
+ * Redis may finish the script late, but it cannot publish a lingering probe
+ * reservation after the timeout path has completed. */
+export async function exerciseRateLimitReadiness(
+  key: string,
+  windowMs: number,
+  maxRequests: number,
+  client: ReturnType<typeof getRedis>,
+): Promise<RateLimitResult> {
+  return executeRateLimit(key, windowMs, maxRequests, client, true);
+}
+
+async function executeRateLimit(
+  key: string,
+  windowMs: number,
+  maxRequests: number,
+  redis: ReturnType<typeof getRedis>,
+  cleanup: boolean,
+): Promise<RateLimitResult> {
   validateRateLimitInput(key, windowMs, maxRequests);
-  const redis = client ?? getRedis();
 
   // Redis supplies the timestamp inside the script. The UUID only distinguishes
   // concurrent reservations that share the same server millisecond.
@@ -119,6 +147,7 @@ export async function checkRateLimit(
     String(maxRequests),
     member,
     String(windowMs + 1000), // TTL = window + 1s buffer
+    cleanup ? "1" : "0",
   )) as [number, number, string, number, number];
   const [allowed, count, _oldestScore, _serverNow, resetMs] = res;
 
