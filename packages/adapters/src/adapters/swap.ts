@@ -55,14 +55,28 @@ export interface SwapAdapter extends BaseAdapter {
   getQuote(request: SwapQuoteRequest): Promise<SwapQuote>;
   /**
    * Produce an unsigned swap transaction for `agentAddress` to sign via the
-   * existing vault/policy path. MUST NOT sign or broadcast.
+   * existing vault/policy path. MUST NOT sign or broadcast. The returned
+   * intent MUST bind its validated input amount, chain, and source-token
+   * address in metadata so policy code never has to trust the echoed quote.
    */
   buildSwap(quote: SwapQuote, agentAddress: string): Promise<UnsignedTxIntent>;
 }
 
 const MOCK_QUOTE_TTL_MS = 60_000;
+const MAX_MOCK_QUOTE_RECEIPTS = 4_096;
 // Deterministic mock pricing: 0.3% fee, 1:1 nominal rate. No external calls.
 const MOCK_FEE_BPS = 30n;
+
+function mockQuoteId(
+  chainId: number,
+  amountIn: string,
+  slippageBps: number,
+  fromToken: string,
+  toToken: string,
+  expiresAt: number,
+): string {
+  return `mock-swap-${chainId}-${amountIn}-${slippageBps}-${fromToken.toLowerCase()}-${toToken.toLowerCase()}-${expiresAt}`;
+}
 
 export class MockSwapAdapter implements SwapAdapter {
   readonly category = "swap" as const;
@@ -70,6 +84,7 @@ export class MockSwapAdapter implements SwapAdapter {
   readonly enabled = true;
 
   private now: () => number;
+  private readonly issuedQuotes = new Map<string, number>();
 
   constructor(options?: { now?: () => number }) {
     this.now = options?.now ?? (() => Date.now());
@@ -79,10 +94,9 @@ export class MockSwapAdapter implements SwapAdapter {
     const chainId = assertChainId(request.chainId);
     const amountIn = assertUint256(request.amount, "amount");
     const slippageBps = assertSlippageBps(request.slippageBps);
-    if (!request.fromToken?.address || !request.toToken?.address) {
-      throw new AdapterValidationError("fromToken and toToken addresses are required");
-    }
-    if (request.fromToken.address === request.toToken.address) {
+    const fromTokenAddress = assertEvmAddress(request.fromToken?.address, "fromToken.address");
+    const toTokenAddress = assertEvmAddress(request.toToken?.address, "toToken.address");
+    if (fromTokenAddress.toLowerCase() === toTokenAddress.toLowerCase()) {
       throw new AdapterValidationError("fromToken and toToken must differ");
     }
 
@@ -91,6 +105,23 @@ export class MockSwapAdapter implements SwapAdapter {
     const amountOut = amount - feeAmount; // deterministic 1:1 minus fee
     const minAmountOut = (amountOut * BigInt(10_000 - slippageBps)) / 10_000n;
 
+    const now = this.now();
+    const expiresAt = now + MOCK_QUOTE_TTL_MS;
+    const quoteId = mockQuoteId(
+      chainId,
+      amountIn,
+      slippageBps,
+      fromTokenAddress,
+      toTokenAddress,
+      expiresAt,
+    );
+    for (const [issuedId, issuedExpiry] of this.issuedQuotes) {
+      if (issuedExpiry <= now) this.issuedQuotes.delete(issuedId);
+    }
+    if (!this.issuedQuotes.has(quoteId) && this.issuedQuotes.size >= MAX_MOCK_QUOTE_RECEIPTS) {
+      throw new AdapterValidationError("mock quote receipt capacity reached; retry later");
+    }
+    this.issuedQuotes.set(quoteId, expiresAt);
     return {
       provider: this.provider,
       fromToken: request.fromToken,
@@ -108,8 +139,8 @@ export class MockSwapAdapter implements SwapAdapter {
       ],
       feeAmount: feeAmount.toString(),
       slippageBps,
-      expiresAt: this.now() + MOCK_QUOTE_TTL_MS,
-      quoteId: `mock-swap-${chainId}-${amountIn}-${slippageBps}`,
+      expiresAt,
+      quoteId,
     };
   }
 
@@ -121,17 +152,29 @@ export class MockSwapAdapter implements SwapAdapter {
     if (quote.expiresAt <= this.now()) {
       throw new AdapterValidationError("quote has expired; request a fresh quote");
     }
-    // Re-validate quote internals (untrusted even though we produced it).
-    assertUint256(quote.amountIn, "quote.amountIn");
+    // Re-validate quote internals and their immutable receipt binding. The
+    // caller round-trips this object and may mutate any field before build.
+    const chainId = assertChainId(quote.chainId);
+    const amountIn = assertUint256(quote.amountIn, "quote.amountIn");
     assertUint256(quote.minAmountOut, "quote.minAmountOut", true);
+    const slippageBps = assertSlippageBps(quote.slippageBps);
+    const fromTokenAddress = assertEvmAddress(quote.fromToken?.address, "quote.fromToken.address");
     const to = assertEvmAddress(quote.toToken.address, "quote.toToken.address");
+    if (
+      quote.provider !== this.provider ||
+      this.issuedQuotes.get(quote.quoteId) !== quote.expiresAt ||
+      quote.quoteId !==
+        mockQuoteId(chainId, amountIn, slippageBps, fromTokenAddress, to, quote.expiresAt)
+    ) {
+      throw new AdapterValidationError("quote binding is invalid; request a fresh quote");
+    }
 
     // The mock targets the toToken contract as a stand-in router. A real adapter
     // would encode the aggregator's calldata. Crucially: this is UNSIGNED.
     return {
       signed: false,
       kind: "evm-tx",
-      chainId: quote.chainId,
+      chainId,
       to,
       value: "0",
       data: "0x",
@@ -140,7 +183,9 @@ export class MockSwapAdapter implements SwapAdapter {
       provider: this.provider,
       metadata: {
         quoteId: quote.quoteId,
-        amountIn: quote.amountIn,
+        amountIn,
+        sourceChainId: chainId,
+        sourceTokenAddress: fromTokenAddress,
         minAmountOut: quote.minAmountOut,
         slippageBps: quote.slippageBps,
       },

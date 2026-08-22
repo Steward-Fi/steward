@@ -121,6 +121,10 @@ export type BridgeBuildResult = UnsignedTxIntent | BridgeHandoff;
 export interface BridgeAdapter extends BaseAdapter {
   readonly category: "bridge";
   getQuote(request: BridgeQuoteRequest): Promise<BridgeQuote>;
+  /**
+   * Unsigned transaction results MUST bind their validated input amount,
+   * source chain, and source-token address in metadata for policy valuation.
+   */
   buildBridge(request: BridgeBuildRequest): Promise<BridgeBuildResult>;
   createSession(
     quote: BridgeQuote,
@@ -130,7 +134,20 @@ export interface BridgeAdapter extends BaseAdapter {
 }
 
 const MOCK_QUOTE_TTL_MS = 60_000;
+const MAX_MOCK_QUOTE_RECEIPTS = 4_096;
 const MOCK_BRIDGE_FEE_BPS = 20n;
+
+function mockQuoteId(
+  fromChainId: number,
+  toChainId: number,
+  amountIn: string,
+  slippageBps: number,
+  fromToken: string,
+  toToken: string,
+  expiresAt: number,
+): string {
+  return `mock-bridge-${fromChainId}-${toChainId}-${amountIn}-${slippageBps}-${fromToken.toLowerCase()}-${toToken.toLowerCase()}-${expiresAt}`;
+}
 
 export class MockBridgeAdapter implements BridgeAdapter {
   readonly category = "bridge" as const;
@@ -138,6 +155,7 @@ export class MockBridgeAdapter implements BridgeAdapter {
   readonly enabled = true;
 
   private readonly sessions = new Map<string, BridgeSession>();
+  private readonly issuedQuotes = new Map<string, number>();
   private readonly now: () => number;
 
   constructor(options?: { now?: () => number }) {
@@ -151,18 +169,35 @@ export class MockBridgeAdapter implements BridgeAdapter {
       throw new AdapterValidationError("fromChainId and toChainId must differ");
     }
     const amountIn = assertUint256(request.amount, "amount");
-    if (!request.fromToken?.address || !request.toToken?.address) {
-      throw new AdapterValidationError("fromToken and toToken addresses are required");
-    }
+    const fromTokenAddress = assertEvmAddress(request.fromToken?.address, "fromToken.address");
+    const toTokenAddress = assertEvmAddress(request.toToken?.address, "toToken.address");
     const recipient = assertEvmAddress(request.recipient, "recipient");
     const slippageBps = assertSlippageBps(request.slippageBps);
     const amount = BigInt(amountIn);
     const feeAmount = (amount * MOCK_BRIDGE_FEE_BPS) / 10_000n;
     const amountOut = amount - feeAmount;
     const minAmountOut = (amountOut * BigInt(10_000 - slippageBps)) / 10_000n;
+    const now = this.now();
+    const expiresAt = now + MOCK_QUOTE_TTL_MS;
+    const quoteId = mockQuoteId(
+      fromChainId,
+      toChainId,
+      amountIn,
+      slippageBps,
+      fromTokenAddress,
+      toTokenAddress,
+      expiresAt,
+    );
+    for (const [issuedId, issuedExpiry] of this.issuedQuotes) {
+      if (issuedExpiry <= now) this.issuedQuotes.delete(issuedId);
+    }
+    if (!this.issuedQuotes.has(quoteId) && this.issuedQuotes.size >= MAX_MOCK_QUOTE_RECEIPTS) {
+      throw new AdapterValidationError("mock quote receipt capacity reached; retry later");
+    }
+    this.issuedQuotes.set(quoteId, expiresAt);
     return {
       provider: this.provider,
-      quoteId: `mock-bridge-${fromChainId}-${toChainId}-${amountIn}-${slippageBps}`,
+      quoteId,
       fromChainId,
       toChainId,
       fromToken: request.fromToken,
@@ -174,19 +209,39 @@ export class MockBridgeAdapter implements BridgeAdapter {
       recipient,
       route: [{ bridge: "mock-bridge", fromChainId, toChainId }],
       slippageBps,
-      expiresAt: this.now() + MOCK_QUOTE_TTL_MS,
+      expiresAt,
     };
   }
 
   async buildBridge(request: BridgeBuildRequest): Promise<UnsignedTxIntent> {
     const quote = validateQuote(request.quote, this.now());
     const owner = assertEvmAddress(request.owner, "owner");
-    const bridgeContract = assertEvmAddress(quote.fromToken.address, "quote.fromToken.address");
+    const sourceTokenAddress = assertEvmAddress(quote.fromToken.address, "quote.fromToken.address");
+    const destinationTokenAddress = assertEvmAddress(
+      quote.toToken.address,
+      "quote.toToken.address",
+    );
+    if (
+      quote.provider !== this.provider ||
+      this.issuedQuotes.get(quote.quoteId) !== quote.expiresAt ||
+      quote.quoteId !==
+        mockQuoteId(
+          quote.fromChainId,
+          quote.toChainId,
+          quote.amountIn,
+          quote.slippageBps,
+          sourceTokenAddress,
+          destinationTokenAddress,
+          quote.expiresAt,
+        )
+    ) {
+      throw new AdapterValidationError("quote binding is invalid; request a fresh quote");
+    }
     return {
       signed: false,
       kind: "evm-tx",
       chainId: quote.fromChainId,
-      to: bridgeContract,
+      to: sourceTokenAddress,
       value: "0",
       data: "0x",
       owner,
@@ -198,6 +253,8 @@ export class MockBridgeAdapter implements BridgeAdapter {
         toChainId: quote.toChainId,
         recipient: quote.recipient,
         amountIn: quote.amountIn,
+        sourceChainId: quote.fromChainId,
+        sourceTokenAddress,
         minAmountOut: quote.minAmountOut,
         slippageBps: quote.slippageBps,
       },
