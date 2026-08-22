@@ -42,9 +42,15 @@ export const WRAPPED_SOL_ON_SOLANA: TokenInfo = Object.freeze({
   website: "https://solana.com",
 });
 
+export const WRAPPED_SOL_ON_SOLANA_DEVNET: TokenInfo = Object.freeze({
+  ...WRAPPED_SOL_ON_SOLANA,
+  chainId: 102,
+});
+
 export const KNOWN_TOKENS: readonly TokenInfo[] = Object.freeze([
   MONERO_ON_SOLANA,
   WRAPPED_SOL_ON_SOLANA,
+  WRAPPED_SOL_ON_SOLANA_DEVNET,
 ]);
 
 /**
