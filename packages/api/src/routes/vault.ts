@@ -3541,6 +3541,7 @@ vaultRoutes.post("/:agentId/actions/transfer", async (c) => {
 
     let completedResult: string | null = null;
     let completedStatus: "broadcast" | "signed" | null = null;
+    let sponsoredTransferStaged = false;
     try {
       await writeVaultAudit(c, {
         tenantId,
@@ -3559,6 +3560,21 @@ vaultRoutes.post("/:agentId/actions/transfer", async (c) => {
           policyResults: evaluation.results,
         },
       });
+      if (sponsorshipPayload?.sponsored === true && !solanaRecoveryBinding) {
+        await db.insert(transactions).values({
+          id: actionId,
+          agentId,
+          status: "pending",
+          toAddress: signRequest.to,
+          value: signRequest.value,
+          data: signRequest.data,
+          chainId: signRequest.chainId,
+          actionType: "transfer",
+          actionPayload: storedTransferActionPayload,
+          policyResults: evaluation.results,
+        });
+        sponsoredTransferStaged = true;
+      }
       const reservationError = await recordSponsoredActionIfNeeded({
         sponsorship: sponsorshipPayload,
         tenantId,
@@ -3570,6 +3586,10 @@ vaultRoutes.post("/:agentId/actions/transfer", async (c) => {
         status: "reserved",
       });
       if (typeof reservationError === "string") {
+        if (sponsoredTransferStaged) {
+          await db.delete(transactions).where(eq(transactions.id, actionId));
+          sponsoredTransferStaged = false;
+        }
         return c.json<ApiResponse>({ ok: false, error: reservationError }, 403);
       }
       let result: string;
@@ -3836,6 +3856,11 @@ vaultRoutes.post("/:agentId/actions/transfer", async (c) => {
         if (!(await markSolanaRecoveryAnchorFailed(actionId, agentId, solanaExecutionToken))) {
           return solanaLostOwnershipResponse(c, actionId, agentId, "transfer");
         }
+      } else if (sponsoredTransferStaged) {
+        await db
+          .update(transactions)
+          .set({ status: "failed", policyResults: evaluation.results })
+          .where(and(eq(transactions.id, actionId), eq(transactions.agentId, agentId)));
       } else {
         await db.insert(transactions).values({
           id: actionId,
