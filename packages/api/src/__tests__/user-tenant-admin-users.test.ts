@@ -12,6 +12,7 @@ import {
 } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { and, eq } from "drizzle-orm";
+import { Hono } from "hono";
 
 const TENANT_ID = "user-tenant-admin-users";
 const OTHER_TENANT_ID = "user-tenant-admin-users-other";
@@ -19,6 +20,7 @@ const OWNER_PERSONAL_TENANT_ID = "personal-user-tenant-admin-owner";
 
 describe("user tenant-admin user directory routes", () => {
   let userRoutes: typeof import("../routes/user").userRoutes;
+  let mountedUserRoutes: Hono;
   let createSessionToken: typeof import("../routes/auth").createSessionToken;
   let verifySessionToken: typeof import("../routes/auth").verifySessionToken;
   let ownerId = "";
@@ -96,7 +98,11 @@ describe("user tenant-admin user directory routes", () => {
         },
       ]);
 
-    ({ userRoutes } = await import("../routes/user"));
+    const userModule = await import("../routes/user");
+    ({ userRoutes } = userModule);
+    mountedUserRoutes = new Hono();
+    mountedUserRoutes.use("/user/*", (c, next) => userModule.userSessionAuth(c as never, next));
+    mountedUserRoutes.route("/user", userRoutes);
     ({ createSessionToken, verifySessionToken } = await import("../routes/auth"));
   });
 
@@ -294,7 +300,7 @@ describe("user tenant-admin user directory routes", () => {
       .returning({ id: tenantInvitations.id });
     const sessionToken = await personalTokenFor(ownerId);
     const accept = () =>
-      userRoutes.request(`/me/tenants/${TENANT_ID}/invitations/accept`, {
+      mountedUserRoutes.request(`/user/me/tenants/${TENANT_ID}/invitations/accept`, {
         method: "POST",
         headers: { Authorization: `Bearer ${sessionToken}`, "Content-Type": "application/json" },
         body: JSON.stringify({ token }),
@@ -333,7 +339,7 @@ describe("user tenant-admin user directory routes", () => {
       });
     const sessionToken = await personalTokenFor(ownerId);
     const join = () =>
-      userRoutes.request(`/me/tenants/${OTHER_TENANT_ID}/join`, {
+      mountedUserRoutes.request(`/user/me/tenants/${OTHER_TENANT_ID}/join`, {
         method: "POST",
         headers: { Authorization: `Bearer ${sessionToken}`, "Content-Type": "application/json" },
         body: JSON.stringify({ token }),
@@ -386,7 +392,7 @@ describe("user tenant-admin user directory routes", () => {
       })
       .returning({ id: tenantInvitations.id });
     const request = (requestTenantId: string, sessionToken: string) =>
-      userRoutes.request(`/me/tenants/${requestTenantId}/invitations/accept`, {
+      mountedUserRoutes.request(`/user/me/tenants/${requestTenantId}/invitations/accept`, {
         method: "POST",
         headers: { Authorization: `Bearer ${sessionToken}`, "Content-Type": "application/json" },
         body: JSON.stringify({ token }),

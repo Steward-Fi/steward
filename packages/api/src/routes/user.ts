@@ -1759,14 +1759,14 @@ export async function userSessionAuth(
   if (!payload.tenantId) {
     return c.json<ApiResponse>({ ok: false, error: "Session token missing tenantId claim" }, 401);
   }
-  // Invitation acceptance is the only user-session flow allowed to move from
-  // the personal session tenant into a different tenant. Do not bind the
-  // personal tenant transaction around those two exact routes: each handler
+  // Joining by invitation or open enrollment is the only user-session flow
+  // allowed to move from the personal session tenant into a different tenant.
+  // Do not bind the personal transaction around those two exact routes: each handler
   // validates the target and token, then opens its own target-tenant RLS
   // transaction with the verified user id as the non-forgeable authority.
   const isInvitationTransition =
     c.req.method === "POST" &&
-    /^\/me\/tenants\/[^/]+\/(?:join|invitations\/accept)$/.test(c.req.path);
+    /^\/(?:user\/)?me\/tenants\/[^/]+\/(?:join|invitations\/accept)$/.test(c.req.path);
   if (isInvitationTransition) {
     await next();
     return undefined;
