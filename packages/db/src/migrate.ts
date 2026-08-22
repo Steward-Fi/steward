@@ -643,11 +643,173 @@ async function assertExactMigrationObjectInventory(db: MigrationQueryExecutor): 
   }
 }
 
+const LEGACY_CAPABILITY_GRANTS_CORE_FENCE_TAG = "0110_agent_delete_lease_lifecycle";
+
+/**
+ * The core 0110 migration intentionally supported one pre-plugin capability
+ * topology: a standalone, five-column `capability_grants` table. It may exist
+ * before 0110 without a trigger, or after 0110 with the exact core-owned agent
+ * fence. Do not treat a same-named or partially plugin-shaped relation as that
+ * historical topology: doing so would let foreign DDL acquire Steward's
+ * migration ownership merely by choosing a known relation name.
+ */
+async function isExactLegacyCapabilityGrantsShape(db: MigrationQueryExecutor): Promise<boolean> {
+  const journalEntry = readJournal().entries.find(
+    ({ tag }) => tag === LEGACY_CAPABILITY_GRANTS_CORE_FENCE_TAG,
+  );
+  if (!journalEntry) {
+    throw new Error(`[migrate] Core journal is missing ${LEGACY_CAPABILITY_GRANTS_CORE_FENCE_TAG}`);
+  }
+
+  const [ledger] = queryRows<{ ledger_exists: boolean }>(
+    await db.execute(
+      sql`SELECT to_regclass('drizzle.__drizzle_migrations') IS NOT NULL AS ledger_exists`,
+    ),
+  );
+  // This legacy plugin shape was supported only on a namespaced core-ledger
+  // deployment. A bare similarly named table is not an adoptable database.
+  if (!ledger?.ledger_exists) return false;
+
+  const [coreFence] = queryRows<{ applied: boolean }>(
+    await db.execute(sql`
+      SELECT EXISTS (
+        SELECT 1
+        FROM drizzle.__drizzle_migrations
+        WHERE hash = ${hashMigration(journalEntry.tag)}
+          AND created_at = ${journalEntry.when}
+      ) AS applied
+    `),
+  );
+
+  const [shape] = queryRows<{ matches: boolean }>(
+    await db.execute(sql`
+      WITH legacy_relation AS (
+        SELECT relation.*
+        FROM pg_class relation
+        JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+        WHERE namespace.nspname = 'public'
+          AND relation.relname = 'capability_grants'
+      ),
+      legacy_columns AS (
+        SELECT
+          count(*)::int AS column_count,
+          array_agg(
+            attribute.attname || ':' || format_type(attribute.atttypid, attribute.atttypmod) ||
+            ':' || attribute.attnotnull::text || ':' ||
+            (attribute.attidentity <> '')::text || ':' ||
+            (attribute.attgenerated <> '')::text || ':' ||
+            (attribute_default.adbin IS NOT NULL)::text
+            ORDER BY attribute.attnum
+          ) AS definitions
+        FROM legacy_relation relation
+        JOIN pg_attribute attribute ON attribute.attrelid = relation.oid
+        LEFT JOIN pg_attrdef attribute_default
+          ON attribute_default.adrelid = relation.oid
+          AND attribute_default.adnum = attribute.attnum
+        WHERE attribute.attnum > 0 AND NOT attribute.attisdropped
+      ),
+      legacy_constraints AS (
+        SELECT
+          count(*)::int AS constraint_count,
+          bool_and(
+            constraint_inventory.conname = 'capability_grants_pkey'
+            AND constraint_inventory.contype = 'p'
+            AND NOT constraint_inventory.condeferrable
+            AND NOT constraint_inventory.condeferred
+            AND constraint_inventory.convalidated
+            AND pg_get_constraintdef(constraint_inventory.oid, false) = 'PRIMARY KEY (id)'
+          ) AS exact
+        FROM legacy_relation relation
+        JOIN pg_constraint constraint_inventory
+          ON constraint_inventory.conrelid = relation.oid
+      ),
+      legacy_indexes AS (
+        SELECT
+          count(*)::int AS index_count,
+          bool_and(
+            index_relation.relname = 'capability_grants_pkey'
+            AND index_inventory.indisprimary
+            AND index_inventory.indisunique
+            AND index_inventory.indisvalid
+            AND index_inventory.indisready
+            AND index_inventory.indpred IS NULL
+            AND index_inventory.indexprs IS NULL
+          ) AS exact
+        FROM legacy_relation relation
+        JOIN pg_index index_inventory ON index_inventory.indrelid = relation.oid
+        JOIN pg_class index_relation ON index_relation.oid = index_inventory.indexrelid
+      ),
+      legacy_triggers AS (
+        SELECT
+          count(*)::int AS trigger_count,
+          bool_and(
+            trigger.tgname = 'capability_grants_agent_fence'
+            AND trigger.tgtype = 23
+            AND trigger.tgenabled = 'O'
+            AND function_namespace.nspname = 'public'
+            AND trigger_function.proname = 'steward_fence_agent_authority_creation'
+            AND pg_get_function_identity_arguments(trigger_function.oid) = ''
+            AND pg_get_triggerdef(trigger.oid, false) =
+              'CREATE TRIGGER capability_grants_agent_fence BEFORE INSERT OR UPDATE OF tenant_id, agent_id, status, secret_route_id ON public.capability_grants FOR EACH ROW WHEN ((new.status = ''active''::text)) EXECUTE FUNCTION steward_fence_agent_authority_creation()'
+          ) AS exact
+        FROM legacy_relation relation
+        JOIN pg_trigger trigger ON trigger.tgrelid = relation.oid AND NOT trigger.tgisinternal
+        JOIN pg_proc trigger_function ON trigger_function.oid = trigger.tgfoid
+        JOIN pg_namespace function_namespace
+          ON function_namespace.oid = trigger_function.pronamespace
+      ),
+      legacy_policies AS (
+        SELECT count(*)::int AS policy_count
+        FROM legacy_relation relation
+        JOIN pg_policy policy ON policy.polrelid = relation.oid
+      )
+      SELECT
+        relation.relkind = 'r'
+        AND pg_get_userbyid(relation.relowner) = current_user
+        AND relation.relacl IS NULL
+        AND NOT relation.relrowsecurity
+        AND NOT relation.relforcerowsecurity
+        AND columns.column_count = 5
+        AND columns.definitions = ARRAY[
+          'id:uuid:true:false:false:false',
+          'tenant_id:text:true:false:false:false',
+          'agent_id:character varying(64):true:false:false:false',
+          'secret_route_id:uuid:false:false:false:false',
+          'status:text:true:false:false:false'
+        ]
+        AND constraints.constraint_count = 1
+        AND constraints.exact
+        AND indexes.index_count = 1
+        AND indexes.exact
+        AND policies.policy_count = 0
+        AND CASE
+          WHEN ${coreFence?.applied === true}
+            THEN triggers.trigger_count = 1 AND triggers.exact
+          ELSE triggers.trigger_count = 0
+        END AS matches
+      FROM legacy_relation relation
+      CROSS JOIN legacy_columns columns
+      CROSS JOIN legacy_constraints constraints
+      CROSS JOIN legacy_indexes indexes
+      CROSS JOIN legacy_triggers triggers
+      CROSS JOIN legacy_policies policies
+    `),
+  );
+  return shape?.matches === true;
+}
+
 async function assertBundledPluginLedgerIntegrity(db: MigrationQueryExecutor): Promise<void> {
   type PluginEffect =
     | { kind: "relation"; schema: string; name: string; relationKind: "r" | "S" }
     | { kind: "routine"; schema: string; name: string }
-    | { kind: "trigger"; schema: string; table: string; name: string }
+    | {
+        kind: "trigger";
+        schema: string;
+        table: string;
+        name: string;
+        functionSchema: string;
+        functionName: string;
+      }
     | { kind: "policy"; schema: string; table: string; name: string };
   type PluginMigrationFingerprint = { tag: string; effects: PluginEffect[] };
   type BundledPlugin = {
@@ -698,12 +860,16 @@ async function assertBundledPluginLedgerIntegrity(db: MigrationQueryExecutor): P
               schema: "public",
               table: "capability_grants",
               name: "capability_grants_agent_fence",
+              functionSchema: "public",
+              functionName: "capability_grants_agent_fence()",
             },
             {
               kind: "trigger",
               schema: "public",
               table: "agents",
               name: "capability_grants_guard_agent_delete",
+              functionSchema: "public",
+              functionName: "capability_grants_guard_agent_delete()",
             },
           ],
         },
@@ -749,6 +915,8 @@ async function assertBundledPluginLedgerIntegrity(db: MigrationQueryExecutor): P
               schema: "public",
               table: "capability_rate_limit_buckets",
               name: "capability_rate_limit_bucket_agent_fence",
+              functionSchema: "public",
+              functionName: "capability_rate_limit_bucket_agent_fence()",
             },
             {
               kind: "policy",
@@ -833,18 +1001,22 @@ async function assertBundledPluginLedgerIntegrity(db: MigrationQueryExecutor): P
     const effectRows = knownEffects.map((effect) => {
       switch (effect.kind) {
         case "relation":
-          return sql`(${effect.kind}, ${effect.schema}, ${effect.name}, ${effect.relationKind}, ${null})`;
+          return sql`(${effect.kind}, ${effect.schema}, ${effect.name}, ${effect.relationKind}, ${null}, ${null}, ${null})`;
         case "routine":
-          return sql`(${effect.kind}, ${effect.schema}, ${effect.name}, ${null}, ${null})`;
+          return sql`(${effect.kind}, ${effect.schema}, ${effect.name}, ${null}, ${null}, ${null}, ${null})`;
         case "trigger":
+          return sql`(${effect.kind}, ${effect.schema}, ${effect.name}, ${null}, ${effect.table}, ${effect.functionSchema}, ${effect.functionName})`;
         case "policy":
-          return sql`(${effect.kind}, ${effect.schema}, ${effect.name}, ${null}, ${effect.table})`;
+          return sql`(${effect.kind}, ${effect.schema}, ${effect.name}, ${null}, ${effect.table}, ${null}, ${null})`;
       }
     });
     const actualEffects = new Set(
       queryRows<{ identity: string }>(
         await db.execute(sql`
-          WITH known_effects(effect_kind, schema_name, object_name, relation_kind, table_name) AS (
+          WITH known_effects(
+            effect_kind, schema_name, object_name, relation_kind, table_name,
+            function_schema, function_name
+          ) AS (
             VALUES ${sql.join(effectRows, sql`, `)}
           )
           SELECT
@@ -879,11 +1051,17 @@ async function assertBundledPluginLedgerIntegrity(db: MigrationQueryExecutor): P
           FROM pg_trigger trigger
           JOIN pg_class relation ON relation.oid = trigger.tgrelid
           JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+          JOIN pg_proc trigger_function ON trigger_function.oid = trigger.tgfoid
+          JOIN pg_namespace function_namespace
+            ON function_namespace.oid = trigger_function.pronamespace
           JOIN known_effects expected
             ON expected.effect_kind = 'trigger'
             AND expected.schema_name = namespace.nspname
             AND expected.table_name = relation.relname
             AND expected.object_name = trigger.tgname
+            AND expected.function_schema = function_namespace.nspname
+            AND expected.function_name = trigger_function.proname || '(' ||
+              pg_get_function_identity_arguments(trigger_function.oid) || ')'
           WHERE NOT trigger.tgisinternal
 
           UNION ALL
@@ -911,6 +1089,14 @@ async function assertBundledPluginLedgerIntegrity(db: MigrationQueryExecutor): P
     );
     if (!shape?.ledger_exists) {
       if (actualEffects.size > 0) {
+        if (
+          plugin.id === "capabilities" &&
+          actualEffects.size === 1 &&
+          actualEffects.has("relation:public.capability_grants:r") &&
+          (await isExactLegacyCapabilityGrantsShape(db))
+        ) {
+          continue;
+        }
         throw new Error(
           `[migrate] Bundled plugin ${plugin.id} objects exist without their checked-in migration ledger`,
         );
