@@ -1,5 +1,5 @@
 /**
- * Google Workspace provider-account OAuth connect routes (#203).
+ * Google Workspace provider-account OAuth connect routes.
  *
  * Mounted under `/v2/provider-accounts/connect/google`. Every route requires a human
  * session (session-jwt) with MFA verified within five minutes AND workspace

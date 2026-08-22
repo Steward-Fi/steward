@@ -294,7 +294,7 @@ if (shouldUsePGLite()) {
       console.log("[steward] Migrations already up to date.");
     }
 
-    // Plugin-owned migrations (Phase 2c): applied AFTER the core migrator so a
+    // Plugin-owned migrations are applied AFTER the core migrator so a
     // plugin migration may reference core tables via FK. Each plugin's migrations
     // land in its OWN namespaced bookkeeping table
     // (drizzle.__drizzle_migrations_plugin_<id>), totally isolated from the core's

@@ -1,5 +1,5 @@
 /**
- * invoke.ts - the AGENT-FACING capability invoke path (W-1c).
+ * invoke.ts - the agent-facing capability invoke path.
  *
  * POST /capabilities/:name/invoke  { args?, body?, query? }
  * POST /capabilities/:name/openai/v1/chat/completions  <OpenAI chat body>
@@ -164,7 +164,7 @@ async function capabilityMapsToGovernedRoute(
 ): Promise<boolean> {
   const { and, eq, gt, isNull, or } = await import("drizzle-orm");
   const now = new Date();
-  // Mirror the proxy's route SELECTION (codex P2): only ENABLED governed routes
+  // Mirror the proxy's route selection: only ENABLED governed routes
   // whose backing secret is currently active (not deleted, not expired) can ever
   // be selected by the proxy, so only those should gate the plugin. A disabled
   // governed route or one backed by a deleted/expired secret is unselectable and
@@ -333,7 +333,7 @@ async function recordAndJson(
 }
 
 /**
- * Shared capability invoke core. This preserves the W-1c invariants for both the
+ * Shared capability invoke core. This preserves the invoke invariants for both the
  * envelope invoke route and the OpenAI-compatible adapter: resolve enabled
  * capability + active grant, count invocations, default-deny capability-intent
  * policy, approval 202, proxy env 503, server-side proxy signing, and exactly one
@@ -447,7 +447,7 @@ export async function invokeCapabilityThroughProxy(
   try {
     await engine.evaluate(capRules, evaluatorCtx);
 
-    // CANONICAL PRECEDENCE (master-plan §5.3): the policy-engine helper composes
+    // CANONICAL PRECEDENCE: the policy-engine helper composes
     // ALL enabled capability-intent rules in the one true order — hard deny
     // (incl. malformed config / failed hard constraint) > approval_required >
     // allow > default-deny. This is the single source of truth: an applicable

@@ -44,7 +44,7 @@ export type {
   PolicyRuleContribution,
   StewardPlugin,
 } from "./types/plugin.js";
-// ─── Trading venues (Sprint 4) ───
+// ─── Trading venues ───
 export * from "./types/venue.js";
 // ─── Runtime-extensible webhook event registry (core ∪ plugin-declared) ───
 export { WebhookEventRegistry } from "./webhook-event-registry.js";
@@ -569,7 +569,7 @@ export interface RawSigningChainConditionConfig {
 }
 
 /**
- * `venue-allowlist` policy config (Sprint 4).
+ * `venue-allowlist` policy config.
  *
  * Allows trades only on the named venues. Evaluator NACKs if the eval
  * context's `venue` is absent or not in the list.
@@ -579,11 +579,11 @@ export interface VenueAllowlistConfig {
 }
 
 /**
- * `leverage-cap` policy config (Sprint 4).
+ * `leverage-cap` policy config.
  *
  * Caps requested leverage at `maxLeverage`. Non-leveraged trades (no
- * `leverage` in eval context) always pass. Per-venue refinement is
- * Phase 2 work; for now this is a single cap per agent.
+ * `leverage` in eval context) always pass. The cap applies per agent rather
+ * than varying by venue.
  */
 export interface LeverageCapConfig {
   maxLeverage: number;
@@ -634,10 +634,9 @@ export interface SignTypedDataRequest {
   agentId: string;
   tenantId: string;
   /**
-   * Sprint 4: optional venue scope. When set, vault.signTypedData will
-   * look up the venue-scoped wallet under (agentId, venue) instead of
-   * the legacy NULL-venue row. Phase 1 is hyperliquid-only; the field is
-   * accepted but not yet routed through the new lookup path.
+   * Optional venue scope. When set, Vault.signTypedData resolves the signing
+   * key by (tenantId, agentId, chainFamily, venue) and enforces that scope;
+   * otherwise it resolves the unscoped wallet.
    */
   venue?: VenueId;
   domain: TypedDataDomain;

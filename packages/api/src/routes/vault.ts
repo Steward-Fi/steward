@@ -4214,10 +4214,8 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
 
       // Compute the replay digest inside a guarded block. The shared normalizer
       // throws ExecutionPayloadNormalizationError on any malformed numeric caller
-      // field (e.g. an unsafe-integer nonce). Previously this threw BEFORE the
-      // failClosed helper and the outer catch only handles GovernedVaultError, so
-      // signing was prevented but no specific rejection audit was produced. We now
-      // convert it into the same fail-closed 409 path with a specific reason.
+      // field (e.g. an unsafe-integer nonce). Convert it into the audited,
+      // fail-closed 409 path with a specific reason.
       let approvalExecutionPayloadDigest: string | null = null;
       let approvalExecutionTarget: Awaited<ReturnType<typeof vault.resolveExecutionTarget>> = {
         backend: "local-vault",

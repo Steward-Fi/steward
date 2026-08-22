@@ -174,9 +174,8 @@ export class StewardService extends Service {
       agentId: settings.agentId ?? env.STEWARD_AGENT_ID ?? runtimeState.agentId ?? "default",
       tenantId: settings.tenantId ?? env.STEWARD_TENANT_ID,
       autoRegister: settings.autoRegister ?? env.STEWARD_AUTO_REGISTER !== "false",
-      // `fallbackLocal` only gates a single informational log line (see connect()):
-      // it does not itself create or expose a local signing key, so the
-      // historical default of `true` is inert and left as-is.
+      // `fallbackLocal` only gates a single informational log line (see connect());
+      // it does not create or expose a local signing key.
       fallbackLocal: settings.fallbackLocal ?? env.STEWARD_FALLBACK_LOCAL !== "false",
     };
   }
