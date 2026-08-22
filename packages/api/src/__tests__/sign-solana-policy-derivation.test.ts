@@ -99,7 +99,7 @@ describe("sign-solana — parser-derived policy wiring", () => {
 
   it("defines the blind-sign flag default-off, mirroring other unsafe flags", () => {
     expect(vaultSource).toContain(
-      'const allowUnsafeSolanaBlindSigning = (): boolean =>\n  process.env.STEWARD_ALLOW_UNSAFE_SOLANA_BLIND_SIGNING === "true"',
+      'const allowUnsafeSolanaBlindSigning = (): boolean =>\n  runtimeCustodyValue("STEWARD_ALLOW_UNSAFE_SOLANA_BLIND_SIGNING") === "true"',
     );
   });
 
