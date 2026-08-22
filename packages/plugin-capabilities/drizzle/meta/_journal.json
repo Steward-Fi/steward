@@ -43,6 +43,13 @@
       "when": 1787250000001,
       "tag": "0005_activated_rls_inheritance",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1787439000001,
+      "tag": "0006_maintenance_policy_reconciliation",
+      "breakpoints": true
     }
   ]
 }

@@ -647,9 +647,30 @@ async function assertBundledPluginLedgerIntegrity(db: MigrationQueryExecutor): P
   type PluginEffect =
     | { kind: "relation"; schema: string; name: string; relationKind: "r" | "S" }
     | { kind: "routine"; schema: string; name: string }
-    | { kind: "trigger"; schema: string; table: string; name: string }
-    | { kind: "policy"; schema: string; table: string; name: string };
-  type PluginMigrationFingerprint = { tag: string; effects: PluginEffect[] };
+    | {
+        kind: "trigger";
+        schema: string;
+        table: string;
+        name: string;
+        functionSchema: string;
+        functionName: string;
+      }
+    | {
+        kind: "policy";
+        schema: string;
+        table: string;
+        name: string;
+        command: "*";
+        permissive: true;
+        roles: "public" | "relation_owner";
+        usingExpression: string;
+        checkExpression: string;
+      };
+  type PluginMigrationFingerprint = {
+    tag: string;
+    effects: PluginEffect[];
+    optionalEffectGroups?: PluginEffect[][];
+  };
   type BundledPlugin = {
     id: string;
     migrationsFolder: string;
@@ -698,12 +719,16 @@ async function assertBundledPluginLedgerIntegrity(db: MigrationQueryExecutor): P
               schema: "public",
               table: "capability_grants",
               name: "capability_grants_agent_fence",
+              functionSchema: "public",
+              functionName: "capability_grants_agent_fence()",
             },
             {
               kind: "trigger",
               schema: "public",
               table: "agents",
               name: "capability_grants_guard_agent_delete",
+              functionSchema: "public",
+              functionName: "capability_grants_guard_agent_delete()",
             },
           ],
         },
@@ -715,18 +740,33 @@ async function assertBundledPluginLedgerIntegrity(db: MigrationQueryExecutor): P
               schema: "public",
               table: "capabilities",
               name: "steward_tenant_isolation",
+              command: "*",
+              permissive: true,
+              roles: "public",
+              usingExpression: "(tenant_id = steward_rls.tenant_id())",
+              checkExpression: "(tenant_id = steward_rls.tenant_id())",
             },
             {
               kind: "policy",
               schema: "public",
               table: "capability_grants",
               name: "steward_tenant_isolation",
+              command: "*",
+              permissive: true,
+              roles: "public",
+              usingExpression: "(tenant_id = steward_rls.tenant_id())",
+              checkExpression: "(tenant_id = steward_rls.tenant_id())",
             },
             {
               kind: "policy",
               schema: "public",
               table: "capability_invocations",
               name: "steward_tenant_isolation",
+              command: "*",
+              permissive: true,
+              roles: "public",
+              usingExpression: "(tenant_id = steward_rls.tenant_id())",
+              checkExpression: "(tenant_id = steward_rls.tenant_id())",
             },
           ],
         },
@@ -749,18 +789,62 @@ async function assertBundledPluginLedgerIntegrity(db: MigrationQueryExecutor): P
               schema: "public",
               table: "capability_rate_limit_buckets",
               name: "capability_rate_limit_bucket_agent_fence",
+              functionSchema: "public",
+              functionName: "capability_rate_limit_bucket_agent_fence()",
             },
             {
               kind: "policy",
               schema: "public",
               table: "capability_rate_limit_buckets",
               name: "steward_tenant_isolation",
+              command: "*",
+              permissive: true,
+              roles: "public",
+              usingExpression: "(tenant_id = steward_rls.tenant_id())",
+              checkExpression: "(tenant_id = steward_rls.tenant_id())",
             },
           ],
         },
         {
           tag: "0005_activated_rls_inheritance",
           effects: [],
+          optionalEffectGroups: [
+            [
+              "capabilities",
+              "capability_grants",
+              "capability_invocations",
+              "capability_rate_limit_buckets",
+            ].map((table) => ({
+              kind: "policy" as const,
+              schema: "public",
+              table,
+              name: "steward_migration_maintenance",
+              command: "*" as const,
+              permissive: true as const,
+              roles: "relation_owner" as const,
+              usingExpression: "true",
+              checkExpression: "true",
+            })),
+          ],
+        },
+        {
+          tag: "0006_maintenance_policy_reconciliation",
+          effects: [
+            "capabilities",
+            "capability_grants",
+            "capability_invocations",
+            "capability_rate_limit_buckets",
+          ].map((table) => ({
+            kind: "policy" as const,
+            schema: "public",
+            table,
+            name: "steward_migration_maintenance",
+            command: "*" as const,
+            permissive: true as const,
+            roles: "relation_owner" as const,
+            usingExpression: "true",
+            checkExpression: "true",
+          })),
         },
       ],
     },
@@ -829,27 +913,41 @@ async function assertBundledPluginLedgerIntegrity(db: MigrationQueryExecutor): P
       );
     }
 
-    const knownEffects = plugin.fingerprints.flatMap((fingerprint) => fingerprint.effects);
+    const knownEffects = [
+      ...new Map(
+        plugin.fingerprints
+          .flatMap((fingerprint) => [
+            ...fingerprint.effects,
+            ...(fingerprint.optionalEffectGroups?.flat() ?? []),
+          ])
+          .map((effect) => [effectIdentity(effect), effect]),
+      ).values(),
+    ];
     const effectRows = knownEffects.map((effect) => {
       switch (effect.kind) {
         case "relation":
-          return sql`(${effect.kind}, ${effect.schema}, ${effect.name}, ${effect.relationKind}, ${null})`;
+          return sql`(${effect.kind}, ${effect.schema}, ${effect.name}, ${effect.relationKind}, ${null}, ${null}, ${null}, ${null}, ${null}, ${null}, ${null}, ${null})`;
         case "routine":
-          return sql`(${effect.kind}, ${effect.schema}, ${effect.name}, ${null}, ${null})`;
+          return sql`(${effect.kind}, ${effect.schema}, ${effect.name}, ${null}, ${null}, ${null}, ${null}, ${null}, ${null}, ${null}, ${null}, ${null})`;
         case "trigger":
+          return sql`(${effect.kind}, ${effect.schema}, ${effect.name}, ${null}, ${effect.table}, ${effect.functionSchema}, ${effect.functionName}, ${null}, ${null}, ${null}, ${null}, ${null})`;
         case "policy":
-          return sql`(${effect.kind}, ${effect.schema}, ${effect.name}, ${null}, ${effect.table})`;
+          return sql`(${effect.kind}, ${effect.schema}, ${effect.name}, ${null}, ${effect.table}, ${null}, ${null}, ${effect.command}, ${effect.permissive}, ${effect.roles}, ${effect.usingExpression}, ${effect.checkExpression})`;
       }
     });
-    const actualEffects = new Set(
-      queryRows<{ identity: string }>(
-        await db.execute(sql`
-          WITH known_effects(effect_kind, schema_name, object_name, relation_kind, table_name) AS (
+    const effectMatches = queryRows<{ identity: string; definition_matches: boolean }>(
+      await db.execute(sql`
+          WITH known_effects(
+            effect_kind, schema_name, object_name, relation_kind, table_name,
+            function_schema, function_name, policy_command, policy_permissive,
+            policy_roles, policy_using, policy_check
+          ) AS (
             VALUES ${sql.join(effectRows, sql`, `)}
           )
           SELECT
             'relation:' || namespace.nspname || '.' || relation.relname || ':' ||
-              relation.relkind::text AS identity
+              relation.relkind::text AS identity,
+            true AS definition_matches
           FROM pg_class relation
           JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
           JOIN known_effects expected
@@ -862,7 +960,8 @@ async function assertBundledPluginLedgerIntegrity(db: MigrationQueryExecutor): P
 
           SELECT
             'routine:' || namespace.nspname || '.' || routine.proname || '(' ||
-              pg_get_function_identity_arguments(routine.oid) || ')' AS identity
+              pg_get_function_identity_arguments(routine.oid) || ')' AS identity,
+            true AS definition_matches
           FROM pg_proc routine
           JOIN pg_namespace namespace ON namespace.oid = routine.pronamespace
           JOIN known_effects expected
@@ -875,10 +974,17 @@ async function assertBundledPluginLedgerIntegrity(db: MigrationQueryExecutor): P
 
           SELECT
             'trigger:' || namespace.nspname || '.' || relation.relname || '.' ||
-              trigger.tgname AS identity
+              trigger.tgname AS identity,
+            expected.function_schema = function_namespace.nspname
+              AND expected.function_name = trigger_function.proname || '(' ||
+                pg_get_function_identity_arguments(trigger_function.oid) || ')'
+              AS definition_matches
           FROM pg_trigger trigger
           JOIN pg_class relation ON relation.oid = trigger.tgrelid
           JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+          JOIN pg_proc trigger_function ON trigger_function.oid = trigger.tgfoid
+          JOIN pg_namespace function_namespace
+            ON function_namespace.oid = trigger_function.pronamespace
           JOIN known_effects expected
             ON expected.effect_kind = 'trigger'
             AND expected.schema_name = namespace.nspname
@@ -890,7 +996,19 @@ async function assertBundledPluginLedgerIntegrity(db: MigrationQueryExecutor): P
 
           SELECT
             'policy:' || namespace.nspname || '.' || relation.relname || '.' ||
-              policy.polname AS identity
+              policy.polname AS identity,
+            COALESCE(
+              policy.polcmd = expected.policy_command
+              AND policy.polpermissive = expected.policy_permissive::boolean
+              AND CASE expected.policy_roles
+                WHEN 'public' THEN policy.polroles = ARRAY[0::oid]
+                WHEN 'relation_owner' THEN policy.polroles = ARRAY[relation.relowner]
+                ELSE false
+              END
+              AND pg_get_expr(policy.polqual, policy.polrelid, false) = expected.policy_using
+              AND pg_get_expr(policy.polwithcheck, policy.polrelid, false) = expected.policy_check,
+              false
+            ) AS definition_matches
           FROM pg_policy policy
           JOIN pg_class relation ON relation.oid = policy.polrelid
           JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
@@ -900,8 +1018,14 @@ async function assertBundledPluginLedgerIntegrity(db: MigrationQueryExecutor): P
             AND expected.table_name = relation.relname
             AND expected.object_name = policy.polname
         `),
-      ).map((row) => row.identity),
     );
+    const malformedEffect = effectMatches.find((effect) => !effect.definition_matches);
+    if (malformedEffect) {
+      throw new Error(
+        `[migrate] Bundled plugin ${plugin.id} contains a malformed checked-in object (${malformedEffect.identity})`,
+      );
+    }
+    const actualEffects = new Set(effectMatches.map((row) => row.identity));
 
     const migrationsTable = `__drizzle_migrations_plugin_${plugin.id}`;
     const [shape] = queryRows<{ ledger_exists: boolean }>(
@@ -936,18 +1060,27 @@ async function assertBundledPluginLedgerIntegrity(db: MigrationQueryExecutor): P
         );
       }
     }
+    const appliedFingerprints = plugin.fingerprints.slice(0, rows.length);
     const expectedEffects = new Set(
-      plugin.fingerprints
-        .slice(0, rows.length)
-        .flatMap((fingerprint) => fingerprint.effects)
-        .map(effectIdentity),
+      appliedFingerprints.flatMap((fingerprint) => fingerprint.effects).map(effectIdentity),
     );
+    const optionalEffectGroups = appliedFingerprints.flatMap(
+      (fingerprint) => fingerprint.optionalEffectGroups ?? [],
+    );
+    const allowedEffects = new Set([
+      ...expectedEffects,
+      ...optionalEffectGroups.flat().map(effectIdentity),
+    ]);
+    const partialOptionalGroup = optionalEffectGroups.find((group) => {
+      const present = group.filter((effect) => actualEffects.has(effectIdentity(effect))).length;
+      return present !== 0 && present !== group.length;
+    });
     const missingEffect = [...expectedEffects].find((identity) => !actualEffects.has(identity));
-    const unappliedEffect = [...actualEffects].find((identity) => !expectedEffects.has(identity));
-    if (missingEffect || unappliedEffect) {
+    const unappliedEffect = [...actualEffects].find((identity) => !allowedEffects.has(identity));
+    if (partialOptionalGroup || missingEffect || unappliedEffect) {
       throw new Error(
         `[migrate] Bundled plugin ${plugin.id} schema does not match its applied migration prefix` +
-          ` (${missingEffect ? `missing ${missingEffect}` : `unapplied ${unappliedEffect}`})`,
+          ` (${partialOptionalGroup ? "partial optional effect group" : missingEffect ? `missing ${missingEffect}` : `unapplied ${unappliedEffect}`})`,
       );
     }
   }
