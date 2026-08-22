@@ -56,6 +56,7 @@ export {
   checkRateLimit,
   getRateLimitStatus,
   type RateLimitResult,
+  rateLimitBucketKey,
 } from "./rate-limiter.js";
 export {
   checkSpendLimit,

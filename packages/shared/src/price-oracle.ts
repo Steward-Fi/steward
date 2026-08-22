@@ -175,6 +175,7 @@ export function createPriceOracle(options?: { cacheTtlMs?: number }): PriceOracl
       case 43114:
         return "avalanche";
       case 101:
+      case 102:
         return "solana";
       default:
         return null;

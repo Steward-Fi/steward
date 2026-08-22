@@ -68,6 +68,10 @@ import {
   normalizeExternalKeyHandleRegistration,
   SolanaBroadcastNotSubmittedError,
 } from "./external-key-custody";
+import {
+  assertGovernedParsedSolanaSigningGrant,
+  type GovernedParsedSolanaSigningGrant,
+} from "./governed-solana-signing";
 import { deriveBitcoinKey, deriveEvmKey, deriveSolanaKey, generateMnemonic } from "./hd-wallet";
 import { type EncryptedKey, KeyStore } from "./keystore";
 import { backendFromKeyStore, type KeystoreBackend } from "./keystore-backend";
@@ -3095,7 +3099,11 @@ export class Vault {
    *
    * Works for both multi-wallet agents (new) and legacy Solana-only agents.
    */
-  async signSolanaTransaction(request: SignSolanaTransactionRequest): Promise<{
+  async signSolanaTransaction(
+    request: SignSolanaTransactionRequest & {
+      governedParsedSign?: GovernedParsedSolanaSigningGrant;
+    },
+  ): Promise<{
     signature: string;
     broadcast: boolean;
     chainId: number;
@@ -3126,16 +3134,18 @@ export class Vault {
     // so the caller must explicitly attest that its own edge policy evaluation
     // approved the transaction. Checked after the signing freeze (a freeze
     // must still report as a freeze) and before any key material is touched.
+    if ((request.expectedTo === undefined) !== (request.expectedValue === undefined)) {
+      throw new Error("Solana transaction policy envelope requires expectedTo and expectedValue");
+    }
     if (request.expectedTo === undefined && request.expectedValue === undefined) {
       if (request.allowBlindSign !== true) {
-        throw new Error(
-          "Solana transaction signing without a policy envelope requires allowBlindSign: true " +
-            "(caller attestation that edge policy approved the transaction)",
+        assertGovernedParsedSolanaSigningGrant(request.governedParsedSign, request);
+      }
+      if (request.allowBlindSign === true) {
+        console.warn(
+          `[Vault] BLIND Solana sign (no policy envelope, caller-attested): tenant=${request.tenantId} agent=${request.agentId} chainId=${request.chainId ?? 101} broadcast=${request.broadcast !== false}`,
         );
       }
-      console.warn(
-        `[Vault] BLIND Solana sign (no policy envelope, caller-attested): tenant=${request.tenantId} agent=${request.agentId} chainId=${request.chainId ?? 101} broadcast=${request.broadcast !== false}`,
-      );
     }
 
     // Resolve Solana key: prefer encryptedChainKeys (multi-wallet), fall back to

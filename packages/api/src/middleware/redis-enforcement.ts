@@ -121,6 +121,17 @@ export function nativePriceFallbackUsd(): number {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : 10_000;
 }
 
+export function conservativeNativeSpendUsd(valueBaseUnits: bigint, chainId: number): number {
+  const decimals = getNativeDecimalsStrict(chainId);
+  if (decimals === null) {
+    throw new Error(`Native-token decimals are not configured for chain ${chainId}`);
+  }
+  const divisor = 10n ** BigInt(decimals);
+  const tokenAmount =
+    Number(valueBaseUnits / divisor) + Number(valueBaseUnits % divisor) / Number(divisor);
+  return tokenAmount * nativePriceFallbackUsd();
+}
+
 /**
  * Run Redis-backed rate limit checks before signing.
  *
@@ -217,6 +228,8 @@ export async function recordVaultSpend(
     eventId?: string;
     occurredAt?: Date | number;
     throwOnError?: boolean;
+    /** SPL/token mint. When present, native-price fallback is forbidden. */
+    tokenAddress?: string;
   } = {},
 ): Promise<void> {
   if (!isRedisAvailable()) {
@@ -242,10 +255,24 @@ export async function recordVaultSpend(
 
   // Convert native wei → USD using the oracle. weiToUsd does bigint-safe scaling
   // (no Number(BigInt) precision loss) and applies the per-chain native price.
-  const usdValue = await priceOracle.weiToUsd(valueWei, chainId);
+  const tokenAddress =
+    options.tokenAddress && options.tokenAddress !== "native" ? options.tokenAddress : undefined;
+  const usdValue = await priceOracle.weiToUsd(valueWei, chainId, tokenAddress);
 
   if (usdValue !== null && usdValue > 0) {
     await recordAgentSpend(agentId, tenantId, usdValue, `chain:${chainId}`, options);
+    return;
+  }
+
+  // A native conservative-price floor cannot value SPL base units: decimals
+  // and market price are mint-specific. Keep the durable recovery effect
+  // pending so a retry can succeed after oracle support/availability returns.
+  if (tokenAddress) {
+    if (options.throwOnError) {
+      throw new Error(
+        `exact token valuation unavailable for chain ${chainId} token ${tokenAddress}`,
+      );
+    }
     return;
   }
 
@@ -255,14 +282,12 @@ export async function recordVaultSpend(
   // the spend with a deliberately HIGH conservative native-price floor so the spend still
   // counts against the same `chain:${chainId}` USD cap and can trip it. Over-counting during
   // an oracle outage is the safe direction; the priced path above is unaffected.
-  const decimals = getNativeDecimalsStrict(chainId);
-  if (decimals === null) {
-    if (options.throwOnError) throw new Error(`unknown native decimals for chain ${chainId}`);
+  let conservativeUsd: number;
+  try {
+    conservativeUsd = conservativeNativeSpendUsd(wei, chainId);
+  } catch (error) {
+    if (options.throwOnError) throw error;
     return;
   }
-  const divisor = 10n ** BigInt(decimals);
-  const tokenAmount = Number(wei / divisor) + Number(wei % divisor) / Number(divisor);
-  const fallbackNativePriceUsd = nativePriceFallbackUsd();
-  const conservativeUsd = tokenAmount * fallbackNativePriceUsd;
   await recordAgentSpend(agentId, tenantId, conservativeUsd, `chain:${chainId}`, options);
 }

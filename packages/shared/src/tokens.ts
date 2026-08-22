@@ -33,7 +33,25 @@ export const MONERO_ON_SOLANA: TokenInfo = Object.freeze({
   website: "https://wxmr.io",
 });
 
-export const KNOWN_TOKENS: readonly TokenInfo[] = Object.freeze([MONERO_ON_SOLANA]);
+export const WRAPPED_SOL_ON_SOLANA: TokenInfo = Object.freeze({
+  address: "So11111111111111111111111111111111111111112",
+  symbol: "wSOL",
+  decimals: 9,
+  chainId: 101,
+  name: "Wrapped SOL",
+  website: "https://solana.com",
+});
+
+export const WRAPPED_SOL_ON_SOLANA_DEVNET: TokenInfo = Object.freeze({
+  ...WRAPPED_SOL_ON_SOLANA,
+  chainId: 102,
+});
+
+export const KNOWN_TOKENS: readonly TokenInfo[] = Object.freeze([
+  MONERO_ON_SOLANA,
+  WRAPPED_SOL_ON_SOLANA,
+  WRAPPED_SOL_ON_SOLANA_DEVNET,
+]);
 
 /**
  * Return exact token metadata when Steward knows the asset. Solana addresses
@@ -79,6 +97,8 @@ export const WRAPPED_NATIVE: Record<number, string> = {
   42161: "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1", // WETH (Arbitrum)
   10: "0x4200000000000000000000000000000000000006", // WETH (Optimism)
   43114: "0xB31f66AA3C1e785363F0875A1B74E27b85FD66c7", // WAVAX
+  101: "So11111111111111111111111111111111111111112", // wrapped SOL (mainnet)
+  102: "So11111111111111111111111111111111111111112", // wrapped SOL (devnet convention)
 };
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────

@@ -128,7 +128,7 @@ describe("vault unsafe signing hardening", () => {
     const routeBody = vaultSource.slice(routeStart, routeEnd);
     const guard = routeBody.indexOf("nativeTransferGasAccountingGuard");
     const policyEvaluation = routeBody.indexOf("policyEngine.evaluate");
-    const signCall = routeBody.indexOf("vault.signTransaction(signRequest");
+    const signCall = routeBody.indexOf(".signTransactionAuthorized(signRequest");
 
     expect(guard).toBeGreaterThanOrEqual(0);
     expect(policyEvaluation).toBeGreaterThan(guard);

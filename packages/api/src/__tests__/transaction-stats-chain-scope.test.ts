@@ -31,6 +31,7 @@ import {
   transactions,
 } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
+import { eq } from "drizzle-orm";
 
 // context.ts reads required env and touches the DB at module import time, so
 // install the PGLite override before importing it.
@@ -139,6 +140,36 @@ describe("getTransactionStats chain scoping (issue #110)", () => {
     const stats = await getTransactionStats(AGENT_ID, SOLANA);
     expect(stats.spentToday.toString()).toBe(SOL_SPEND);
     expect(stats.spentThisWeek.toString()).toBe(SOL_SPEND);
+  });
+
+  it("counts SPL activity but excludes token base units from native SOL spend", async () => {
+    const id = `${AGENT_ID}-spl`;
+    const before = await getTransactionStats(AGENT_ID, SOLANA);
+    await getDb()
+      .insert(transactions)
+      .values({
+        id,
+        agentId: AGENT_ID,
+        status: "broadcast",
+        toAddress: RECIPIENT,
+        value: "9000000000000",
+        chainId: SOLANA,
+        actionType: "transfer",
+        actionPayload: {
+          type: "transfer",
+          token: "So11111111111111111111111111111111111111112",
+        },
+        policyResults: [],
+        signedAt: new Date(),
+      });
+    try {
+      const after = await getTransactionStats(AGENT_ID, SOLANA);
+      expect(after.spentToday).toBe(before.spentToday);
+      expect(after.spentThisWeek).toBe(before.spentThisWeek);
+      expect(after.recentTxCount24h).toBe(before.recentTxCount24h + 1);
+    } finally {
+      await getDb().delete(transactions).where(eq(transactions.id, id));
+    }
   });
 
   it("returns zero spend for a chain the agent has not transacted on", async () => {
