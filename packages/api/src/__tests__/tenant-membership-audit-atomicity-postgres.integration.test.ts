@@ -10,7 +10,7 @@ import {
   users,
   userTenants,
 } from "@stwd/db";
-import { and, eq, inArray } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import { Hono } from "hono";
 import { correlationId } from "../middleware/correlation";
 
@@ -179,6 +179,69 @@ realPostgresDescribe("tenant membership audit atomicity with real PostgreSQL", (
         ),
       );
     expect(completions).toHaveLength(2);
+  });
+
+  it("derives role-change revocation from the final locked membership", async () => {
+    revokeUserTokens?.mockClear();
+    await admin.db
+      .update(userTenants)
+      .set({ role: "member" })
+      .where(and(eq(userTenants.tenantId, tenantId), eq(userTenants.userId, member)));
+    const gate = BigInt(`0x${suffix.slice(0, 14)}`).toString();
+    const gateFunction = `gate_membership_authorized_${suffix}`;
+    const gateTrigger = gateFunction;
+    const locker = await admin.client.reserve();
+    try {
+      await admin.client.unsafe(`
+        create function "${gateFunction}"() returns trigger language plpgsql as $$
+        begin
+          if new.action = 'tenant.member.role.update.authorized' and new.resource_id = '${member}' then
+            perform pg_advisory_xact_lock(${gate});
+          end if;
+          return new;
+        end
+        $$
+      `);
+      await admin.client.unsafe(`
+        create trigger "${gateTrigger}"
+        before insert on audit_events
+        for each row execute function "${gateFunction}"()
+      `);
+      await locker`select pg_advisory_lock(${gate})`;
+      const responsePromise = app.request(`/platform/tenants/${tenantId}/members/${member}`, {
+        method: "PATCH",
+        headers: {
+          "X-Steward-Platform-Key": process.env.STEWARD_PLATFORM_KEYS!,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ role: "member" }),
+      });
+      await waitForAdvisoryWaiters(admin, 1);
+      await admin.db.transaction(async (tx) => {
+        await tx.execute(
+          sql`select pg_advisory_xact_lock(hashtextextended(${`tenant_owner_lifecycle_${tenantId}`}, 0))`,
+        );
+        await tx
+          .update(userTenants)
+          .set({ role: "owner" })
+          .where(and(eq(userTenants.tenantId, tenantId), eq(userTenants.userId, member)));
+      });
+      await locker`select pg_advisory_unlock(${gate})`;
+      const response = await responsePromise;
+      expect(response.status).toBe(200);
+      expect(revokeUserTokens).toHaveBeenCalledTimes(1);
+      expect(revokeUserTokens).toHaveBeenCalledWith(member, expect.any(Number));
+      const [stored] = await admin.db
+        .select({ role: userTenants.role })
+        .from(userTenants)
+        .where(and(eq(userTenants.tenantId, tenantId), eq(userTenants.userId, member)));
+      expect(stored?.role).toBe("member");
+    } finally {
+      await locker`select pg_advisory_unlock(${gate})`;
+      locker.release();
+      await admin.client.unsafe(`drop trigger if exists "${gateTrigger}" on audit_events`);
+      await admin.client.unsafe(`drop function if exists "${gateFunction}"()`);
+    }
   });
 
   it("rolls back the role update when the required completion audit faults", async () => {

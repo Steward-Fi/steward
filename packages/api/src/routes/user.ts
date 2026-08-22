@@ -7983,17 +7983,9 @@ user.post("/me/tenants/:tenantId/join", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: "Tenant not found" }, 404);
   }
 
-  // 2. Check if already a member
-  const [existing] = await db
-    .select({ id: userTenants.id })
-    .from(userTenants)
-    .where(and(eq(userTenants.userId, userId), eq(userTenants.tenantId, tenantId)));
-
-  if (existing) {
-    return c.json({ ok: true, tenantId, role: "member", alreadyMember: true });
-  }
-
-  // 3. Check join_mode
+  // 2. Check join_mode. Invite-mode requests must consume their token before
+  // returning an existing membership; otherwise that token can be replayed
+  // after the membership is later removed.
   const [config] = await db
     .select({ joinMode: tenantConfigs.joinMode })
     .from(tenantConfigs)
@@ -8077,10 +8069,14 @@ user.post("/me/tenants/:tenantId/join", async (c) => {
           )
           .returning({ id: tenantInvitations.id, role: tenantInvitations.role });
         if (!invitation) return null;
-        await tx
-          .insert(userTenants)
-          .values({ userId, tenantId, role: invitation.role })
-          .onConflictDoNothing();
+        const [existingMembership] = await tx
+          .select({ role: userTenants.role })
+          .from(userTenants)
+          .where(and(eq(userTenants.userId, userId), eq(userTenants.tenantId, tenantId)));
+        if (!existingMembership) {
+          await tx.insert(userTenants).values({ userId, tenantId, role: invitation.role });
+        }
+        const actualRole = existingMembership?.role ?? invitation.role;
         await appendRequiredAudit({
           tenantId,
           actorType: "user",
@@ -8088,12 +8084,12 @@ user.post("/me/tenants/:tenantId/join", async (c) => {
           action: "tenant.member.accept_invite",
           resourceType: "tenant_invitation",
           resourceId: invitation.id,
-          metadata: { email, role: invitation.role },
+          metadata: { email, role: actualRole, requestedRole: invitation.role },
           ipAddress: c.req.header("x-forwarded-for") ?? null,
           userAgent: c.req.header("user-agent") ?? null,
           requestId: c.get("requestId") ?? null,
         });
-        return invitation;
+        return { id: invitation.id, role: actualRole };
       },
     );
     if (!accepted) {
@@ -8104,6 +8100,14 @@ user.post("/me/tenants/:tenantId/join", async (c) => {
     }
 
     return c.json({ ok: true, tenantId, role: accepted.role });
+  }
+
+  const [existing] = await db
+    .select({ role: userTenants.role })
+    .from(userTenants)
+    .where(and(eq(userTenants.userId, userId), eq(userTenants.tenantId, tenantId)));
+  if (existing) {
+    return c.json({ ok: true, tenantId, role: existing.role, alreadyMember: true });
   }
 
   if (joinMode !== "open") {

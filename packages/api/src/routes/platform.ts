@@ -5311,12 +5311,6 @@ platform.patch("/tenants/:id/members/:userId", async (c) => {
     ...auditCtx(c),
   });
 
-  const revokedUserTokensIssuedBefore =
-    currentMember.role === role ? null : Math.floor(Date.now() / 1000) + 1;
-  if (revokedUserTokensIssuedBefore !== null) {
-    await revocationStore.revokeUserTokens(userId, revokedUserTokensIssuedBefore);
-  }
-
   let updated:
     | {
         row: typeof userTenants.$inferSelect;
@@ -5337,6 +5331,14 @@ platform.patch("/tenants/:id/members/:userId", async (c) => {
         if ((await activeTenantOwnerCount(tx, tenantId, userId)) < 1) {
           throw new Error("Cannot downgrade the sole tenant owner");
         }
+      }
+      // Derive the cutoff from the membership protected by the final lifecycle
+      // lock. A preflight member -> concurrent owner -> requested member
+      // interleaving must still revoke credentials before the demotion commits.
+      const revokedUserTokensIssuedBefore =
+        current.role === role ? null : Math.floor(Date.now() / 1000) + 1;
+      if (revokedUserTokensIssuedBefore !== null) {
+        await revocationStore.revokeUserTokens(userId, revokedUserTokensIssuedBefore);
       }
       if (revokedUserTokensIssuedBefore !== null) {
         await tx

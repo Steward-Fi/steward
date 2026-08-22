@@ -1,7 +1,15 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { createHash } from "node:crypto";
 
-import { closeDb, getDb, tenantInvitations, tenants, users, userTenants } from "@stwd/db";
+import {
+  closeDb,
+  getDb,
+  tenantConfigs,
+  tenantInvitations,
+  tenants,
+  users,
+  userTenants,
+} from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { and, eq } from "drizzle-orm";
 
@@ -301,6 +309,54 @@ describe("user tenant-admin user directory routes", () => {
       .where(eq(tenantInvitations.id, invitation.id));
     expect(stored?.status).toBe("accepted");
     expect((await accept()).status).toBe(404);
+  });
+
+  it("consumes an invite-mode join token before returning an existing membership", async () => {
+    const token = "b".repeat(64);
+    const tokenHash = createHash("sha256").update(token).digest("hex");
+    const [invitation] = await getDb()
+      .insert(tenantInvitations)
+      .values({
+        tenantId: OTHER_TENANT_ID,
+        email: "owner@example.test",
+        role: "member",
+        tokenHash,
+        expiresAt: new Date(Date.now() + 60_000),
+      })
+      .returning({ id: tenantInvitations.id });
+    await getDb()
+      .insert(tenantConfigs)
+      .values({ tenantId: OTHER_TENANT_ID, joinMode: "invite" })
+      .onConflictDoUpdate({
+        target: tenantConfigs.tenantId,
+        set: { joinMode: "invite", updatedAt: new Date() },
+      });
+    const sessionToken = await personalTokenFor(ownerId);
+    const join = () =>
+      userRoutes.request(`/me/tenants/${OTHER_TENANT_ID}/join`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${sessionToken}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ token }),
+      });
+
+    const first = await join();
+    expect(first.status).toBe(200);
+    expect(await first.json()).toMatchObject({ ok: true, role: "owner" });
+    const [stored] = await getDb()
+      .select({ status: tenantInvitations.status })
+      .from(tenantInvitations)
+      .where(eq(tenantInvitations.id, invitation.id));
+    expect(stored?.status).toBe("accepted");
+
+    await getDb()
+      .delete(userTenants)
+      .where(and(eq(userTenants.tenantId, OTHER_TENANT_ID), eq(userTenants.userId, ownerId)));
+    expect((await join()).status).toBe(403);
+    await getDb().insert(userTenants).values({
+      tenantId: OTHER_TENANT_ID,
+      userId: ownerId,
+      role: "owner",
+    });
   });
 
   it("serializes concurrent owner demotions so exactly one wins", async () => {
