@@ -14,8 +14,8 @@
  *   - Does NOT have any top-level `await` that hits the network at module init.
  *
  * Global rate limiting on this entry is provided by the shared Redis-backed
- * sliding-window limiter that app.ts mounts when it detects the Workers
- * runtime (SEC-068, see middleware/global-rate-limit.ts).
+ * sliding-window limiter that app.ts mounts for every runtime (SEC-068, see
+ * middleware/global-rate-limit.ts).
  *
  * Required bindings (set via `wrangler secret put` or `vars` in wrangler.toml):
  *   - DATABASE_URL                  Neon HTTP connection string
@@ -66,6 +66,7 @@ export interface Env {
   DATABASE_URL: string;
   DATABASE_DRIVER?: string;
   NODE_ENV?: string;
+  STEWARD_ENV?: string;
   STEWARD_APP_DATABASE_ROLE?: string;
   STEWARD_PLATFORM_DATABASE_URL?: string;
   STEWARD_PLATFORM_DATABASE_ROLE?: string;
@@ -79,6 +80,66 @@ export interface Env {
   /** Deprecated compatibility fallback for existing Worker deployments. */
   STEWARD_SESSION_SECRET?: string;
   STEWARD_MASTER_PASSWORD?: string;
+  /** Break-glass local/test override. Never configure on a production Worker. */
+  STEWARD_ALLOW_INSECURE_WEBHOOK_URLS?: string;
+  /** Break-glass local/test override. Never configure on a production Worker. */
+  STEWARD_ALLOW_PRIVATE_WEBHOOK_NETWORKS?: string;
+  STEWARD_KDF_SALT?: string;
+  STEWARD_KMS_PROVIDER?: string;
+  STEWARD_KMS_KEY_ID?: string;
+  STEWARD_AWS_KMS_KEY_ARN?: string;
+  STEWARD_AWS_REGION?: string;
+  AWS_REGION?: string;
+  AWS_ACCESS_KEY_ID?: string;
+  AWS_SECRET_ACCESS_KEY?: string;
+  AWS_SESSION_TOKEN?: string;
+  STEWARD_PKCS11_MODULE?: string;
+  STEWARD_PKCS11_PIN?: string;
+  STEWARD_PKCS11_KEY_LABEL?: string;
+  STEWARD_EXTERNAL_CUSTODY_PROVIDER?: string;
+  STEWARD_EXTERNAL_CUSTODY_AWS_REGION?: string;
+  STEWARD_EXTERNAL_CUSTODY_AWS_MAX_GAS_LIMIT?: string;
+  STEWARD_EXTERNAL_CUSTODY_AWS_MAX_GAS_PRICE_WEI?: string;
+  STEWARD_EXTERNAL_CUSTODY_AWS_MAX_TOTAL_FEE_WEI?: string;
+  STEWARD_ACK_LOCAL_CUSTODY?: string;
+  RPC_URL?: string;
+  CHAIN_ID?: string;
+  STEWARD_SOLANA_PRIORITY_FEES?: string;
+  STEWARD_VAULT_RPC_ALLOWLIST?: string;
+  STEWARD_ALLOW_KEY_EXPORT?: string;
+  STEWARD_ALLOW_PRIVATE_KEY_EXPORT?: string;
+  STEWARD_ALLOW_VAULT_PRIVATE_KEY_EXPORT?: string;
+  STEWARD_ALLOW_USER_PRIVATE_KEY_EXPORT?: string;
+  STEWARD_ALLOW_UNSAFE_MESSAGE_SIGNING?: string;
+  STEWARD_ALLOW_VAULT_UNSAFE_MESSAGE_SIGNING?: string;
+  STEWARD_ALLOW_USER_UNSAFE_MESSAGE_SIGNING?: string;
+  STEWARD_ALLOW_UNSAFE_TYPED_DATA_SIGNING?: string;
+  STEWARD_ALLOW_VAULT_UNSAFE_TYPED_DATA_SIGNING?: string;
+  STEWARD_ALLOW_UNSAFE_RAW_SIGNING?: string;
+  STEWARD_ALLOW_VAULT_UNSAFE_RAW_SIGNING?: string;
+  STEWARD_ALLOW_UNSAFE_CONTRACT_CALL_SIGNING?: string;
+  STEWARD_ALLOW_UNSAFE_USER_OPERATION_SIGNING?: string;
+  STEWARD_ALLOW_UNSAFE_AUTHORIZATION_SIGNING?: string;
+  STEWARD_ALLOW_UNSAFE_SOLANA_BLIND_SIGNING?: string;
+  STEWARD_ALLOW_PRIVATE_KEY_IMPORT?: string;
+  STEWARD_ALLOW_VAULT_PRIVATE_KEY_IMPORT?: string;
+  STEWARD_ALLOW_USER_PRIVATE_KEY_IMPORT?: string;
+  STEWARD_ALLOW_PLAINTEXT_KEY_EXPORT_IN_PRODUCTION?: string;
+  STEWARD_MAX_BITCOIN_PSBT_FEE_SATS?: string;
+  STEWARD_MAX_MONERO_FEE_PICONERO?: string;
+  POLYMARKET_CLOB_API_URL?: string;
+  STEWARD_PM_TEST_CREDS?: string;
+  STEWARD_ALLOW_LEGACY_KEYSTORE_DECRYPT_FALLBACK?: string;
+  STEWARD_SECRET_VAULT_LEGACY_ROOT_FALLBACK?: string;
+  STEWARD_ALLOW_BROAD_SECRET_ROUTES?: string;
+  STEWARD_ALLOW_COOKIE_INJECTION?: string;
+  STEWARD_SECRET_ROUTE_ALLOWED_HOSTS?: string;
+  STEWARD_MONERO_WALLET_RPC_URL?: string;
+  STEWARD_MONERO_WALLET_RPC_LOGIN?: string;
+  STEWARD_MONERO_DAEMON_URL?: string;
+  STEWARD_MONERO_NETWORK?: string;
+  STEWARD_WEBHOOK_SECRET_ENCRYPTION_KEY?: string;
+  STEWARD_WEBHOOK_SECRET_KDF_SALT?: string;
   STEWARD_EMBEDDED?: string;
   STEWARD_EMBEDDED_MODE?: string;
   STEWARD_DB_MODE?: string;
@@ -92,6 +153,7 @@ export interface Env {
   STEWARD_IDENTITY_JWT_AUDIENCE?: string;
   RESEND_API_KEY?: string;
   EMAIL_FROM?: string;
+  STEWARD_EMAIL_CODE_SECRET?: string;
   APP_URL?: string;
   EMAIL_AUTH_REDIRECT_BASE_URL?: string;
   GOOGLE_CLIENT_ID?: string;
@@ -247,8 +309,8 @@ export async function runWorkerGoogleCredentialLifecycleSweep(
   hydrateProcessEnv(env);
   if (
     process.env.STEWARD_GOOGLE_LIFECYCLE_SWEEPER === "false" ||
-    !process.env.GOOGLE_PROVIDER_CLIENT_ID ||
-    !process.env.GOOGLE_PROVIDER_CLIENT_SECRET
+    !env.GOOGLE_PROVIDER_CLIENT_ID ||
+    !env.GOOGLE_PROVIDER_CLIENT_SECRET
   ) {
     return null;
   }
@@ -266,9 +328,9 @@ export async function runWorkerXCredentialLifecycleSweep(
   hydrateProcessEnv(env);
   if (
     process.env.STEWARD_X_LIFECYCLE_SWEEPER === "false" ||
-    !process.env.X_CLIENT_ID ||
-    !process.env.X_CLIENT_SECRET ||
-    !process.env.STEWARD_MASTER_PASSWORD
+    !env.X_CLIENT_ID ||
+    !env.X_CLIENT_SECRET ||
+    !env.STEWARD_MASTER_PASSWORD
   ) {
     return null;
   }
@@ -359,6 +421,11 @@ export function withWorkerJwtAuthority<T>(env: Env, callback: () => T): T {
   return withJwtRuntimeAuthority(authority, callback);
 }
 
+/** Bind the complete immutable Worker environment before custody resolution. */
+export function withWorkerRuntimeAuthority<T>(env: Env, callback: () => T): T {
+  return withRuntimeEnvironment({ ...env, STEWARD_RUNTIME: "workers" }, callback);
+}
+
 function validateWorkerSecurityEnv(): void {
   // The request authority was resolved synchronously from this invocation's
   // bindings. This validation never consults the process.env compatibility
@@ -366,71 +433,87 @@ function validateWorkerSecurityEnv(): void {
   validateJwtSecretEnv();
 }
 
-async function ensureWorkerInit(env: Env): Promise<void> {
+export function assertWorkerRedisReady(redisOk: boolean): void {
+  if (!redisOk) {
+    throw new Error("Durable Redis is required on Workers");
+  }
+}
+
+async function initializeWorker(env: Env): Promise<void> {
+  // Workers bindings are only available inside fetch(). Hydrate process.env
+  // before importing app modules that read required env at module init.
+  hydrateProcessEnv(env);
+  // SEC-134: the Bun entry (index.ts) runs validateJwtSecretEnv() at startup;
+  // run the same validation on the Workers boot path so a bad/missing JWT
+  // secret or malformed AGENT_TOKEN_EXPIRY fails closed at cold start instead
+  // of surfacing at first token sign/verify.
+  validateWorkerSecurityEnv();
+  const expectedRole = env.STEWARD_APP_DATABASE_ROLE?.trim();
+  if (!expectedRole) {
+    throw new Error("STEWARD_APP_DATABASE_ROLE is required on Workers");
+  }
+  await assertRlsDeploymentSafety(getDb(), { expectedRole });
+  const redisOk = await initRedis(env);
+  assertWorkerRedisReady(redisOk);
+  // Auth stores (passkey challenges, magic-link tokens, SIWE/SIWS nonces)
+  // must be initialized too — without this they stay on the lazy memory
+  // backend and one-time state is lost across isolates / cold starts.
+  const { trackAuditEvent } = await import("./services/audit");
+  const { isHstsEnabled } = await import("./middleware/security-headers");
+  const dbUrl = (env.DATABASE_URL || "").toLowerCase();
+  // Best-effort boot telemetry (a one-time observability breadcrumb of the
+  // TLS/HSTS posture at cold start) — NOT a security mutation or a tamper-
+  // evident control event, and there is no client action to deny. A write
+  // failure here must not abort worker init. Security/compliance events use
+  // awaited writeAuditEvent.
+  // Await even this best-effort breadcrumb before releasing a request-owned
+  // WebSocket handle. trackAuditEvent absorbs/logs its own failure, so boot
+  // still proceeds without leaving background DB work on a closed handle.
+  await trackAuditEvent({
+    tenantId: "system",
+    actorType: "system",
+    action: "system.tls.config",
+    metadata: {
+      dbTlsEnforced:
+        dbUrl.includes("sslmode=require") ||
+        dbUrl.includes("sslmode=verify-ca") ||
+        dbUrl.includes("sslmode=verify-full"),
+      hstsEnabled: isHstsEnabled(),
+      insecureDbAllowed: process.env.STEWARD_ALLOW_INSECURE_DB === "true",
+      runtime: "workers",
+    },
+  });
+  const { assertAuthStoresAreSafe, initAuthStores } = await import("./routes/auth");
+  // usePostgres=false: Workers deployments do not run migrations on startup
+  // (SKIP_MIGRATIONS=1 in wrangler.toml) so auth_kv_store may not exist;
+  // Redis is the canonical store on Workers.
+  await initAuthStores(false);
+  assertAuthStoresAreSafe();
+  const { getAuthStoreSources } = await import("./routes/auth");
+  const { importSession } = getAuthStoreSources();
+  if (importSession === "memory") {
+    console.warn(
+      "[steward:workers] encrypted import sessions are using memory storage; configure Redis for durable one-time import sessions across isolates",
+    );
+  }
+}
+
+async function ensureWorkerInit(
+  env: Env,
+  initialize: (env: Env) => Promise<void> = initializeWorker,
+): Promise<void> {
   if (workerInit) return workerInit;
-  workerInit = (async () => {
-    // Workers bindings are only available inside fetch(). Hydrate process.env
-    // before importing app modules that read required env at module init.
-    hydrateProcessEnv(env);
-    // SEC-134: the Bun entry (index.ts) runs validateJwtSecretEnv() at startup;
-    // run the same validation on the Workers boot path so a bad/missing JWT
-    // secret or malformed AGENT_TOKEN_EXPIRY fails closed at cold start instead
-    // of surfacing at first token sign/verify.
-    validateWorkerSecurityEnv();
-    const expectedRole = env.STEWARD_APP_DATABASE_ROLE?.trim();
-    if (!expectedRole) {
-      throw new Error("STEWARD_APP_DATABASE_ROLE is required on Workers");
-    }
-    await assertRlsDeploymentSafety(getDb(), { expectedRole });
-    const redisOk = await initRedis(env);
-    // Auth stores (passkey challenges, magic-link tokens, SIWE/SIWS nonces)
-    // must be initialized too — without this they stay on the lazy memory
-    // backend and one-time state is lost across isolates / cold starts.
-    const { trackAuditEvent } = await import("./services/audit");
-    const { isHstsEnabled } = await import("./middleware/security-headers");
-    const dbUrl = (env.DATABASE_URL || "").toLowerCase();
-    // Best-effort boot telemetry (a one-time observability breadcrumb of the
-    // TLS/HSTS posture at cold start) — NOT a security mutation or a tamper-
-    // evident control event, and there is no client action to deny. A write
-    // failure here must not abort worker init. Security/compliance events use
-    // awaited writeAuditEvent.
-    // Await even this best-effort breadcrumb before releasing a request-owned
-    // WebSocket handle. trackAuditEvent absorbs/logs its own failure, so boot
-    // still proceeds without leaving background DB work on a closed handle.
-    await trackAuditEvent({
-      tenantId: "system",
-      actorType: "system",
-      action: "system.tls.config",
-      metadata: {
-        dbTlsEnforced:
-          dbUrl.includes("sslmode=require") ||
-          dbUrl.includes("sslmode=verify-ca") ||
-          dbUrl.includes("sslmode=verify-full"),
-        hstsEnabled: isHstsEnabled(),
-        insecureDbAllowed: process.env.STEWARD_ALLOW_INSECURE_DB === "true",
-        runtime: "workers",
-      },
-    });
-    const { assertAuthStoresAreSafe, initAuthStores } = await import("./routes/auth");
-    // usePostgres=false: Workers deployments do not run migrations on startup
-    // (SKIP_MIGRATIONS=1 in wrangler.toml) so auth_kv_store may not exist;
-    // Redis is the canonical store on Workers.
-    await initAuthStores(false);
-    assertAuthStoresAreSafe();
-    const { getAuthStoreSources } = await import("./routes/auth");
-    const { importSession } = getAuthStoreSources();
-    if (importSession === "memory") {
-      console.warn(
-        "[steward:workers] encrypted import sessions are using memory storage; configure Redis for durable one-time import sessions across isolates",
-      );
-    }
-    if (!redisOk) {
-      console.warn(
-        "[steward:workers] Redis not initialized — passkey/magic-link/SIWE flows will use in-memory backend per isolate",
-      );
-    }
-  })();
-  return workerInit;
+  const attempt = initialize(env);
+  workerInit = attempt;
+  try {
+    await attempt;
+  } catch (error) {
+    // A transient missing/down binding must fail this invocation closed, but
+    // must not poison the isolate forever. Keep concurrent callers on the same
+    // attempt and clear only if no newer test/runtime authority replaced it.
+    if (workerInit === attempt) workerInit = null;
+    throw error;
+  }
 }
 
 // Compose the deployable app once per isolate: lean core + this repo's opt-in
@@ -443,6 +526,10 @@ export function __setWorkerInitForTests(value: Promise<void> | null): void {
   workerInit = value;
 }
 
+export function __ensureWorkerInitForTests(initialize: () => Promise<void>): Promise<void> {
+  return ensureWorkerInit({ DATABASE_URL: "test://worker-init" }, initialize);
+}
+
 async function getComposedApp() {
   if (composedApp) return composedApp;
   const { composeApp } = await import("./compose");
@@ -452,7 +539,7 @@ async function getComposedApp() {
 
 export default {
   async fetch(request: Request, env: Env, ctx: unknown): Promise<Response> {
-    return withRuntimeEnvironment({ ...env, STEWARD_RUNTIME: "workers" }, async () => {
+    return withWorkerRuntimeAuthority(env, async () => {
       // Keep the legacy bridge for modules not yet migrated to request-local
       // configuration. Security-sensitive OIDC settings use the immutable
       // snapshot above and cannot be replaced by an overlapping request.
@@ -467,6 +554,10 @@ export default {
         return withWorkerRequestDatabase(
           env,
           async () => {
+            // Redis authority is request-generation scoped. Rebind before every
+            // invocation so rotated/removed bindings cannot inherit the first
+            // isolate request's client through workerInit.
+            assertWorkerRedisReady(await initRedis(env));
             await ensureWorkerInit(env);
             const app = await getComposedApp();
             return app.fetch(request, env, ctx as never);
@@ -481,11 +572,14 @@ export default {
     env: Env,
     ctx: { waitUntil(promise: Promise<unknown>): void },
   ) {
-    withRuntimeEnvironment({ ...env, STEWARD_RUNTIME: "workers" }, () => {
+    withWorkerRuntimeAuthority(env, () => {
       return withWorkerJwtAuthority(env, () => {
         hydrateProcessEnv(env);
         validateWorkerSecurityEnv();
-        const scheduledWork = withWorkerRequestDatabase(env, () => ensureWorkerInit(env)).then(() =>
+        const scheduledWork = withWorkerRequestDatabase(env, async () => {
+          assertWorkerRedisReady(await initRedis(env));
+          await ensureWorkerInit(env);
+        }).then(() =>
           Promise.all([
             withWorkerRequestDatabase(env, () => runWorkerUpstreamCredentialLeaseSweep(env)),
             withWorkerRequestDatabase(env, () => runWorkerGoogleCredentialLifecycleSweep(env)),

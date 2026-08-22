@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it, setDefaultTimeout } from "bun:test";
 import { generateApiKey, signAgentToken } from "@stwd/auth";
-import { agents, auditEvents, getDb, tenants, users, userTenants } from "@stwd/db";
+import { agents, auditEvents, getDb, tenants, transactions, users, userTenants } from "@stwd/db";
+import { StewardClient } from "@stwd/sdk";
 import { and, desc, eq } from "drizzle-orm";
 
 setDefaultTimeout(30000);
@@ -242,6 +243,78 @@ describeWithDatabase("agent route scope enforcement", () => {
     // assert containment rather than exact equality.
     expect(ids).toContain(AGENT_A);
     expect(ids).toContain(AGENT_B);
+  });
+
+  it("serves the canonical paginated response through the production SDK client", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (input, init) => {
+      const url = new URL(input instanceof Request ? input.url : String(input));
+      if (url.origin === "https://sdk-contract.steward.test") {
+        return app.request(`${url.pathname}${url.search}`, init);
+      }
+      return originalFetch(input, init);
+    };
+
+    try {
+      const client = new StewardClient({
+        baseUrl: "https://sdk-contract.steward.test",
+        apiKey,
+        tenantId: TENANT_ID,
+      });
+      const firstPage = await client.listAgentsPage({ limit: 1, offset: 0 });
+      const page = await client.listAgentsPage({ limit: 1, offset: 1 });
+
+      expect(firstPage.agents[0]?.id).toBe(AGENT_A);
+      expect(page.limit).toBe(1);
+      expect(page.offset).toBe(1);
+      expect(page.agents).toHaveLength(1);
+      expect(page.agents[0]?.id).toBe(AGENT_B);
+      expect(page.agents[0]?.createdAt).toBeInstanceOf(Date);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("orders equal-timestamp transaction history by id for stable offset pagination", async () => {
+    const createdAt = new Date("2026-08-20T12:00:00.000Z");
+    await getDb()
+      .insert(transactions)
+      .values([
+        {
+          id: "test-ars-history-a",
+          agentId: AGENT_A,
+          status: "pending",
+          toAddress: "0x1111111111111111111111111111111111111111",
+          value: "1",
+          chainId: 8453,
+          policyResults: [],
+          createdAt,
+        },
+        {
+          id: "test-ars-history-b",
+          agentId: AGENT_A,
+          status: "pending",
+          toAddress: "0x1111111111111111111111111111111111111111",
+          value: "1",
+          chainId: 8453,
+          policyResults: [],
+          createdAt,
+        },
+      ])
+      .onConflictDoNothing();
+
+    const fetchPage = async (offset: number) => {
+      const response = await app.request(`/vault/${AGENT_A}/history?limit=1&offset=${offset}`, {
+        headers: { Authorization: `Bearer ${ownerSessionToken}` },
+      });
+      expect(response.status).toBe(200);
+      return (await response.json()) as {
+        data: { transactions: Array<{ id: string }>; limit: number; offset: number };
+      };
+    };
+
+    expect((await fetchPage(0)).data.transactions[0]?.id).toBe("test-ars-history-b");
+    expect((await fetchPage(1)).data.transactions[0]?.id).toBe("test-ars-history-a");
   });
 
   it("rejects a bare tenant API key for agent-token minting unless explicitly opted in (SEC-209)", async () => {

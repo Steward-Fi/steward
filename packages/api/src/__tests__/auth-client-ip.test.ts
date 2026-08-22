@@ -23,6 +23,7 @@ import { SOCKET_PEER_ENV_KEY } from "../services/runtime-gate";
 
 const rateLimitCalls: Array<{ key: string; windowMs: number; max: number }> = [];
 const rateLimitCounts = new Map<string, number>();
+const redisClientEnvironments: Array<Record<string, string | undefined>> = [];
 let forceDenyAll = false;
 
 const checkRateLimitMock = mock(async (key: string, windowMs: number, max: number) => {
@@ -33,10 +34,15 @@ const checkRateLimitMock = mock(async (key: string, windowMs: number, max: numbe
   return { allowed: count <= max, remaining: Math.max(max - count, 0), resetMs: windowMs };
 });
 const pingMock = mock(async () => "PONG");
+const createRedisClientMock = mock((env: Record<string, string | undefined>) => {
+  redisClientEnvironments.push(env);
+  return { ping: pingMock };
+});
 
 mock.module("@stwd/redis", () => ({
   checkRateLimit: checkRateLimitMock,
   checkSpendLimit: async () => ({ allowed: true, spent: 0, remaining: 1 }),
+  createRedisClient: createRedisClientMock,
   createUpstashIoredisAdapter: () => ({ ping: pingMock }),
   disconnectRedis: async () => undefined,
   estimateCost: () => 0,
@@ -130,6 +136,10 @@ async function connectMockRedis(): Promise<void> {
   process.env.REDIS_DRIVER = "ioredis";
   process.env.REDIS_URL = "redis://auth-client-ip.test:6379";
   expect(await redisMiddleware.initRedis()).toBe(true);
+  expect(redisClientEnvironments.at(-1)).toMatchObject({
+    REDIS_DRIVER: "ioredis",
+    REDIS_URL: "redis://auth-client-ip.test:6379",
+  });
 }
 
 function capturedKeys(endpoint: string): string[] {
@@ -310,6 +320,37 @@ describe("clientIpBucket", () => {
 });
 
 describe("auth rate-limit keying (route harness)", () => {
+  it("bounds mounted email OTP verification by exact email and tenant without minting a grant", async () => {
+    await connectMockRedis();
+    process.env.STEWARD_TRUSTED_PROXY_HOPS = "1";
+    const statuses: number[] = [];
+    for (let attempt = 0; attempt < 6; attempt += 1) {
+      const response = await authRoutes.request("/email/otp/verify", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-forwarded-for": "198.51.100.74",
+        },
+        body: JSON.stringify({
+          email: "bounded-route@example.test",
+          code: "000000",
+          tenantId: "default",
+        }),
+      });
+      statuses.push(response.status);
+      expect(
+        ((await response.json()) as { data?: { emailGrant?: string } }).data?.emailGrant,
+      ).toBeUndefined();
+    }
+    expect(statuses).toEqual([401, 401, 401, 401, 401, 429]);
+    const targetCalls = rateLimitCalls.filter((call) =>
+      call.key.startsWith("ratelimit:auth:email-otp-verify-target:"),
+    );
+    expect(targetCalls).toHaveLength(6);
+    expect(new Set(targetCalls.map(({ key }) => key))).toHaveLength(1);
+    expect(new Set(targetCalls.map(({ max }) => max))).toEqual(new Set([5]));
+  });
+
   it("keys per trusted client IP: spoofed prefixes share a bucket, real clients get independent budgets", async () => {
     await connectMockRedis();
     process.env.STEWARD_TRUSTED_PROXY_HOPS = "1";

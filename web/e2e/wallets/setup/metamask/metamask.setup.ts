@@ -10,13 +10,14 @@
  */
 
 import { defineWalletSetup } from "@synthetixio/synpress";
+import { METAMASK_CACHE_ID } from "../../cache-contract";
 
 // The collection-only command imports this module without provisioning
 // credentials. Cache and execution commands run the fail-closed preflight
 // before either value reaches a browser.
 export const SEED_PHRASE = process.env.E2E_METAMASK_SEED_PHRASE?.trim() ?? "";
 export const PASSWORD = process.env.E2E_METAMASK_PASSWORD?.trim() ?? "";
-export const METAMASK_CACHE_ID = "steward-metamask-siwe-v8";
+export { METAMASK_CACHE_ID };
 
 const metamaskSetup = defineWalletSetup(PASSWORD, async (_context, walletPage) => {
   // Synpress 4.1.2's importer targets newer MetaMask onboarding and attempts

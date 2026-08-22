@@ -27,7 +27,7 @@ import type { CapabilitySpec } from "./store";
 const CAPABILITY_NAME = /^[a-z0-9]+([-][a-z0-9]+)*(\.[a-z0-9]+([-][a-z0-9]+)*)*$/;
 const MAX_CAPABILITY_NAME_LENGTH = 200;
 
-/** v1 constraints bag: intentionally small + opaque; the policy layer (W-1b) reads it. */
+/** v1 constraints bag: intentionally small and opaque; the policy layer reads it. */
 const constraintsSchema = z.record(z.string(), z.unknown());
 
 /** create body: the full capability spec (all routing/inject fields required). */

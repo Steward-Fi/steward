@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import { createServer, type IncomingMessage } from "node:http";
 import type { AddressInfo } from "node:net";
 import type { WebhookEvent } from "@stwd/shared";
+import { withRuntimeEnvironment } from "@stwd/shared/runtime-env";
 import { WebhookDispatcher } from "../dispatcher";
 
 const SECRET = "ssrf-literal-test-secret";
@@ -14,12 +15,30 @@ const makeEvent = (): WebhookEvent => ({
   timestamp: new Date("2026-05-30T09:00:00.000Z"),
 });
 
-async function withLoopbackServer() {
+async function withLoopbackServer(
+  options: { holdResponses?: boolean; status?: number; location?: string } = {},
+) {
   let hits = 0;
+  let recordFirstHit!: () => void;
+  const firstHit = new Promise<void>((resolve) => {
+    recordFirstHit = resolve;
+  });
+  let releaseResponse: (() => void) | undefined;
+  const responseGate = options.holdResponses
+    ? new Promise<void>((resolve) => {
+        releaseResponse = resolve;
+      })
+    : Promise.resolve();
   const server = createServer((_req: IncomingMessage, res) => {
     hits += 1;
-    res.writeHead(200, { "Content-Type": "text/plain" });
-    res.end("ok");
+    recordFirstHit();
+    void responseGate.then(() => {
+      res.writeHead(options.status ?? 200, {
+        "Content-Type": "text/plain",
+        ...(options.location ? { Location: options.location } : {}),
+      });
+      res.end("ok");
+    });
   });
   await new Promise<void>((resolve, reject) => {
     server.listen(0, "127.0.0.1", (error?: Error) => {
@@ -31,17 +50,146 @@ async function withLoopbackServer() {
   return {
     port,
     hits: () => hits,
+    firstHit,
+    releaseResponse: () => releaseResponse?.(),
     close: () =>
       new Promise<void>((resolve, reject) => {
         server.close((error) => {
           if (error) reject(error);
           else resolve();
         });
+        server.closeAllConnections();
       }),
   };
 }
 
 describe("WebhookDispatcher SSRF guard for IP-literal URLs", () => {
+  it("re-evaluates omitted private-network policy for every dispatch", async () => {
+    const server = await withLoopbackServer();
+    const dispatcher = new WebhookDispatcher({
+      maxRetries: 0,
+      timeoutMs: 1_000,
+      allowInsecureHttp: true,
+    });
+
+    try {
+      const enabled = await withRuntimeEnvironment(
+        { STEWARD_ALLOW_PRIVATE_WEBHOOK_NETWORKS: "true" },
+        () =>
+          dispatcher.dispatch(makeEvent(), {
+            url: `http://127.0.0.1:${server.port}/hook`,
+            secret: SECRET,
+          }),
+      );
+      expect(enabled.success).toBe(true);
+      expect(server.hits()).toBe(1);
+
+      const removed = await withRuntimeEnvironment({}, () =>
+        dispatcher.dispatch(makeEvent(), {
+          url: `http://127.0.0.1:${server.port}/hook`,
+          secret: SECRET,
+        }),
+      );
+      expect(removed.success).toBe(false);
+      expect(removed.error).toBe("Webhook validation failed");
+      expect(server.hits()).toBe(1);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("re-evaluates omitted insecure-HTTP policy for every dispatch", async () => {
+    const server = await withLoopbackServer();
+    const dispatcher = new WebhookDispatcher({
+      maxRetries: 0,
+      timeoutMs: 1_000,
+      allowPrivateNetwork: true,
+    });
+
+    try {
+      const enabled = await withRuntimeEnvironment(
+        { STEWARD_ALLOW_INSECURE_WEBHOOK_URLS: "true" },
+        () =>
+          dispatcher.dispatch(makeEvent(), {
+            url: `http://127.0.0.1:${server.port}/hook`,
+            secret: SECRET,
+          }),
+      );
+      expect(enabled.success).toBe(true);
+      expect(server.hits()).toBe(1);
+
+      const removed = await withRuntimeEnvironment({}, () =>
+        dispatcher.dispatch(makeEvent(), {
+          url: `http://127.0.0.1:${server.port}/hook`,
+          secret: SECRET,
+        }),
+      );
+      expect(removed.success).toBe(false);
+      expect(removed.error).toBe("Webhook validation failed");
+      expect(server.hits()).toBe(1);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("keeps an enabled delivery isolated from an overlapping disabled request", async () => {
+    const server = await withLoopbackServer();
+    const dispatcher = new WebhookDispatcher({
+      maxRetries: 0,
+      timeoutMs: 1_000,
+      allowInsecureHttp: true,
+    });
+
+    try {
+      const [enabled, disabled] = await Promise.all([
+        withRuntimeEnvironment({ STEWARD_ALLOW_PRIVATE_WEBHOOK_NETWORKS: "true" }, () =>
+          dispatcher.dispatch(makeEvent(), {
+            url: `http://127.0.0.1:${server.port}/hook`,
+            secret: SECRET,
+          }),
+        ),
+        withRuntimeEnvironment({}, () =>
+          dispatcher.dispatch(makeEvent(), {
+            url: `http://127.0.0.1:${server.port}/hook`,
+            secret: SECRET,
+          }),
+        ),
+      ]);
+      expect(disabled.success).toBe(false);
+      expect(server.hits()).toBe(1);
+      expect(enabled.success).toBe(true);
+      expect(server.hits()).toBe(1);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("does not follow an unvalidated redirect destination", async () => {
+    const server = await withLoopbackServer({
+      status: 302,
+      location: "http://169.254.169.254/latest/meta-data",
+    });
+    const dispatcher = new WebhookDispatcher({
+      maxRetries: 0,
+      timeoutMs: 1_000,
+      allowPrivateNetwork: true,
+      allowInsecureHttp: true,
+    });
+
+    try {
+      const result = await dispatcher.dispatch(makeEvent(), {
+        url: `http://127.0.0.1:${server.port}/hook`,
+        secret: SECRET,
+      });
+      expect(result.success).toBe(false);
+      expect(result.statusCode).toBe(302);
+      expect(result.attempts).toBe(1);
+      expect(server.hits()).toBe(1);
+    } finally {
+      await server.close();
+    }
+  });
+
   // Node's http client skips options.lookup for IPv4 literals, so the guarded
   // lookup alone never fired for these forms (SEC-006). The guard must reject
   // the literal hostname before any socket is opened.

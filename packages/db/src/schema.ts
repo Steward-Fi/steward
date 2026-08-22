@@ -776,6 +776,95 @@ export const digitalAssetAccountAggregations = pgTable(
 );
 
 /**
+ * Durable ownership record for wallet agents provisioned while creating or
+ * updating a digital-asset account.  Vault provisioning cannot participate in
+ * the account transaction, so the authority is first fenced here and is only
+ * marked `adopted` in the same audited transaction as its account membership.
+ * Failed attempts remain discoverable (`recoverable`) and may only retire the
+ * authority while their lease still owns it and no account membership exists.
+ */
+export const digitalAssetAccountWalletLifecycles = pgTable(
+  "digital_asset_account_wallet_lifecycles",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    tenantId: varchar("tenant_id", { length: 64 })
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    accountId: varchar("account_id", { length: 64 }).notNull(),
+    walletAgentId: varchar("wallet_agent_id", { length: 64 }).notNull(),
+    chainFamily: chainFamilyEnum("chain_family").notNull(),
+    state: varchar("state", { length: 24 }).notNull().default("staging"),
+    ownerToken: uuid("owner_token").notNull(),
+    leaseExpiresAt: timestamp("lease_expires_at", { withTimezone: true }).notNull(),
+    lastError: text("last_error"),
+    provisionedAt: timestamp("provisioned_at", { withTimezone: true }),
+    adoptedAt: timestamp("adopted_at", { withTimezone: true }),
+    retiredAt: timestamp("retired_at", { withTimezone: true }),
+    ...timestamps,
+  },
+  (table) => ({
+    tenantWalletUniqueIdx: uniqueIndex("digital_asset_account_wallet_lifecycle_wallet_uniq").on(
+      table.tenantId,
+      table.walletAgentId,
+    ),
+    accountIdx: index("digital_asset_account_wallet_lifecycle_account_idx").on(
+      table.tenantId,
+      table.accountId,
+      table.createdAt,
+    ),
+    recoveryIdx: index("digital_asset_account_wallet_lifecycle_recovery_idx").on(
+      table.state,
+      table.leaseExpiresAt,
+    ),
+  }),
+);
+
+/**
+ * Cross-tenant, resumable custody-transfer journal for pregenerated wallets.
+ * It contains bindings and progress only; plaintext key material is never
+ * persisted.  The token hash and target authority are both globally unique so
+ * a retry cannot redirect a consumed token or race a second target.
+ */
+export const pregeneratedWalletClaimLifecycles = pgTable(
+  "pregenerated_wallet_claim_lifecycles",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    claimTokenHash: varchar("claim_token_hash", { length: 64 }).notNull(),
+    originalClaimPlatformId: varchar("original_claim_platform_id", { length: 255 }).notNull(),
+    sourceTenantId: varchar("source_tenant_id", { length: 64 }).notNull(),
+    sourceAgentId: varchar("source_agent_id", { length: 64 }).notNull(),
+    targetTenantId: varchar("target_tenant_id", { length: 64 }).notNull(),
+    targetAgentId: varchar("target_agent_id", { length: 64 }).notNull(),
+    userId: uuid("user_id").notNull(),
+    walletIndex: integer("wallet_index").notNull(),
+    state: varchar("state", { length: 24 }).notNull().default("reserved"),
+    ownerToken: uuid("owner_token"),
+    leaseExpiresAt: timestamp("lease_expires_at", { withTimezone: true }),
+    solanaImported: boolean("solana_imported").notNull().default(false),
+    evmImported: boolean("evm_imported").notNull().default(false),
+    targetAdopted: boolean("target_adopted").notNull().default(false),
+    lastError: text("last_error"),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+    ...timestamps,
+  },
+  (table) => ({
+    tokenUniqueIdx: uniqueIndex("pregenerated_wallet_claim_token_uniq").on(table.claimTokenHash),
+    targetUniqueIdx: uniqueIndex("pregenerated_wallet_claim_target_uniq").on(
+      table.targetTenantId,
+      table.targetAgentId,
+    ),
+    sourceUniqueIdx: uniqueIndex("pregenerated_wallet_claim_source_uniq").on(
+      table.sourceTenantId,
+      table.sourceAgentId,
+    ),
+    recoveryIdx: index("pregenerated_wallet_claim_recovery_idx").on(
+      table.state,
+      table.leaseExpiresAt,
+    ),
+  }),
+);
+
+/**
  * Wallet ownership and delegated signer metadata for an agent wallet/account.
  * This is an authorization graph, not private-key material: signing routes can
  * use it to expose owners, service signers, quorum members, and scoped
@@ -1610,6 +1699,10 @@ export const webhookDeliveries = pgTable(
     }),
     agentId: text("agent_id"),
     eventType: text("event_type").notNull(),
+    // Optional durable dependency used when two externally visible effects
+    // must be delivered in order. The SQL migration owns the self-referencing
+    // FK because declaring the circular table reference here is not type-safe.
+    predecessorDeliveryId: uuid("predecessor_delivery_id"),
     replayedFromDeliveryId: uuid("replayed_from_delivery_id"),
     payload: jsonb("payload").$type<Record<string, unknown>>().notNull(),
     url: text("url").notNull(),
@@ -1619,6 +1712,9 @@ export const webhookDeliveries = pgTable(
     attempts: integer("attempts").notNull().default(0),
     maxAttempts: integer("max_attempts").notNull().default(5),
     nextRetryAt: timestamp("next_retry_at", { withTimezone: true }),
+    // Rotated every time a worker claims/reclaims a delivery. Outcome writes
+    // compare this token so an expired worker cannot overwrite a newer claim.
+    claimToken: uuid("claim_token"),
     lastError: text("last_error"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     deliveredAt: timestamp("delivered_at", { withTimezone: true }),
@@ -1628,6 +1724,7 @@ export const webhookDeliveries = pgTable(
     nextRetryIdx: index("webhook_deliveries_next_retry_idx").on(table.nextRetryAt),
     tenantIdx: index("webhook_deliveries_tenant_idx").on(table.tenantId),
     webhookConfigIdx: index("webhook_deliveries_webhook_config_idx").on(table.webhookConfigId),
+    predecessorIdx: index("webhook_deliveries_predecessor_idx").on(table.predecessorDeliveryId),
     replayedFromIdx: index("webhook_deliveries_replayed_from_idx").on(table.replayedFromDeliveryId),
   }),
 );

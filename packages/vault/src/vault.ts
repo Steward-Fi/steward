@@ -116,8 +116,18 @@ import {
 
 export interface VaultConfig {
   masterPassword: string;
+  /** Explicit deployment KDF salt; request-scoped runtimes must never read it globally. */
+  masterSalt?: string;
+  /** Immutable compatibility decision captured with the custody authority. */
+  allowLegacyKeystoreDecryptFallback?: boolean;
+  /** Immutable runtime classification captured with the custody authority. */
+  nodeEnvironment?: string;
   rpcUrl?: string;
   chainId?: number;
+  /** Immutable request-local priority-fee gate; undefined preserves legacy env lookup. */
+  solanaPriorityFees?: boolean;
+  /** Immutable request-local RPC allowlist; null selects the built-in default. */
+  rpcPassthroughAllowlist?: string | null;
   keystoreBackend?: KeystoreBackend;
   externalKeyCustodyProvider?: ExternalKeyCustodyProvider;
   /**
@@ -535,7 +545,7 @@ export class BackendBindingMismatchError extends Error {
  * one (agent, chain family, venue) tuple. importKey always operates on the
  * venue-less scope, matching the legacy/unscoped key rows it writes.
  */
-function custodyTransitionLockKey(
+export function custodyTransitionLockKey(
   tenantId: string,
   agentId: string,
   chainFamily: string,
@@ -663,7 +673,13 @@ export class Vault {
     // stays decryptable; the SecretVault uses a distinct domain-separated root, so
     // the two roots are cryptographically independent despite sharing masterPassword.
     this.keyStore =
-      config.keystoreBackend ?? backendFromKeyStore(new KeyStore(config.masterPassword));
+      config.keystoreBackend ??
+      backendFromKeyStore(
+        new KeyStore(config.masterPassword, config.masterSalt, undefined, {
+          nodeEnvironment: config.nodeEnvironment,
+          allowLegacyDecryptFallback: config.allowLegacyKeystoreDecryptFallback,
+        }),
+      );
   }
 
   /** Resolve the Monero backend, or fail closed when Monero is unconfigured. */
@@ -1864,7 +1880,10 @@ export class Vault {
         // price, bounded by COMPUTE_BUDGET_BOUNDS). Estimation never throws and
         // falls back to safe defaults on RPC error. Set STEWARD_SOLANA_PRIORITY_FEES=0
         // to revert to the legacy no-compute-budget transfer.
-        computeBudget: process.env.STEWARD_SOLANA_PRIORITY_FEES === "0" ? false : {},
+        computeBudget:
+          (this.config.solanaPriorityFees ?? process.env.STEWARD_SOLANA_PRIORITY_FEES !== "0")
+            ? {}
+            : false,
       });
     } else {
       assertEvmWalletAddressMatches(secretKey, request.walletAddress);
@@ -3847,7 +3866,10 @@ export class Vault {
       throw new Error(`No RPC URL configured for chainId ${chainId}`);
     }
 
-    const configured = process.env.STEWARD_VAULT_RPC_ALLOWLIST;
+    const configured =
+      this.config.rpcPassthroughAllowlist === undefined
+        ? process.env.STEWARD_VAULT_RPC_ALLOWLIST
+        : (this.config.rpcPassthroughAllowlist ?? undefined);
     const configuredMethods = configured
       ?.split(",")
       .map((method) => method.trim())
@@ -4055,6 +4077,11 @@ export class Vault {
     ];
 
     await db.transaction(async (tx) => {
+      if (usesCustodyAdvisoryLock()) {
+        await tx.execute(
+          sql`select pg_advisory_xact_lock(hashtextextended(${custodyTransitionLockKey(tenantId, agentId, chainFamily, venue)}, 0))`,
+        );
+      }
       await tx.insert(encryptedChainKeys).values({
         agentId,
         chainFamily,
@@ -4245,6 +4272,11 @@ export class Vault {
     const createdAt = new Date();
 
     await db.transaction(async (tx) => {
+      if (usesCustodyAdvisoryLock()) {
+        await tx.execute(
+          sql`select pg_advisory_xact_lock(hashtextextended(${custodyTransitionLockKey(agentRow.tenantId, agentId, chainType, venue)}, 0))`,
+        );
+      }
       await tx.insert(encryptedChainKeys).values({
         agentId,
         chainFamily: chainType,
@@ -4279,7 +4311,7 @@ export class Vault {
 
   /**
    * List every wallet an agent owns, across venues and chain families.
-   * Used by the agent dashboard and by Worker A's trade-sessions package
+   * Used by the agent dashboard and the trade-sessions package
    * to enumerate available trading surfaces.
    *
    * Legacy NULL-venue rows are included. Order: legacy first, then

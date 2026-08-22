@@ -16,8 +16,8 @@ import {
   secretRoutes as secretRouteRows,
   tenantConfigs as tenantConfigsTable,
 } from "@stwd/db";
-import { SecretVault, validateSecretRouteConfig } from "@stwd/vault";
-import { and, eq } from "drizzle-orm";
+import { type SecretVault, validateSecretRouteConfig } from "@stwd/vault";
+import { and, eq, inArray } from "drizzle-orm";
 import { type Context, Hono } from "hono";
 import {
   type AuditEventInput,
@@ -29,7 +29,6 @@ import {
   type AppVariables,
   ensureAgentForTenant,
   isNonEmptyString,
-  MASTER_PASSWORD,
   safeJsonParse,
   sanitizeErrorMessage,
   setNoStoreHeaders,
@@ -41,6 +40,7 @@ import {
   lockSecretRouteNamespaces,
   SecretRouteAuthorityConflict,
 } from "../services/secret-route-authority";
+import { getConfiguredSecretVault } from "../services/vault-factory";
 
 export const secretsRoutes = new Hono<{ Variables: AppVariables }>();
 
@@ -299,11 +299,8 @@ function parseSecretRouteCreate(
   };
 }
 
-// Lazily initialised so context.ts can set MASTER_PASSWORD first
-let _secretVault: SecretVault | undefined;
 function getSecretVault(): SecretVault {
-  _secretVault ??= new SecretVault(MASTER_PASSWORD);
-  return _secretVault;
+  return getConfiguredSecretVault();
 }
 
 function requireTenantAdminSession(c: Context<{ Variables: AppVariables }>): boolean {

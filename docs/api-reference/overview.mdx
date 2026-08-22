@@ -105,10 +105,12 @@ All endpoints return a consistent format:
 
 ## Rate Limits
 
-The Bun API entrypoint enforces a process-local global request limit per client
-IP, and sensitive wallet routes can enforce Redis-backed per-agent limits via
-[policies](/guides/policies). Production multi-instance deployments should
-configure Redis for shared auth and wallet-action throttles.
+Both Bun and Workers enforce the global per-client request limit through Redis
+in production, so replicas and restarts share one budget. A guaranteed
+single-instance Bun deployment may explicitly acknowledge a restart-resetting
+memory limiter; development and test use bounded memory by default. Sensitive
+wallet routes can also enforce Redis-backed per-agent limits via
+[policies](/guides/policies).
 
 Rate-limited responses return `429` with `Retry-After`, standard
 `RateLimit-Limit`, `RateLimit-Remaining`, and `RateLimit-Reset` headers, plus

@@ -39,7 +39,7 @@ import {
   secrets,
 } from "@stwd/db";
 import { sql } from "drizzle-orm";
-import { type EncryptedKey, KeyStore } from "./keystore";
+import { type EncryptedKey, KeyStore, type KeyStoreRuntimeOptions } from "./keystore";
 import {
   assertGovernedRouteUpdateIsSafe,
   assertNoOppositeAuthorityOverlap,
@@ -108,12 +108,18 @@ export class SecretVault {
   // {@link migrateLegacyRootSecrets} to re-encrypt legacy rows into the domain
   // root, then disable the fallback (see allowLegacySecretRootFallback).
   private legacyKeyStore: KeyStore;
+  private readonly legacyRootFallback?: boolean;
 
-  constructor(masterPassword: string) {
+  constructor(
+    masterPassword: string,
+    masterSalt?: string,
+    runtimeOptions: KeyStoreRuntimeOptions & { allowLegacySecretRootFallback?: boolean } = {},
+  ) {
     // Domain-separate the secret-vault root from the wallet signing-vault root so
     // compromising one path does not compromise the other (they share masterPassword).
-    this.keyStore = new KeyStore(masterPassword, undefined, "secret-vault");
-    this.legacyKeyStore = new KeyStore(masterPassword);
+    this.keyStore = new KeyStore(masterPassword, masterSalt, "secret-vault", runtimeOptions);
+    this.legacyKeyStore = new KeyStore(masterPassword, masterSalt, undefined, runtimeOptions);
+    this.legacyRootFallback = runtimeOptions.allowLegacySecretRootFallback;
   }
 
   /**
@@ -323,7 +329,7 @@ export class SecretVault {
       // legacy (shared) root. New secrets always use the domain-separated root above.
       // SEC-164: the fallback stays enabled until an operator migrates legacy
       // rows (migrateLegacyRootSecrets) and opts out via env; then it fails closed.
-      if (!allowLegacySecretRootFallback()) throw error;
+      if (!(this.legacyRootFallback ?? allowLegacySecretRootFallback())) throw error;
       return this.legacyKeyStore.decrypt(encrypted, context);
     }
   }

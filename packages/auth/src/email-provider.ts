@@ -56,6 +56,8 @@ export interface EmailProvider {
     html?: string,
     options?: { replyTo?: string },
   ): Promise<EmailDeliveryReceipt>;
+  /** Drop credential-bearing client state when the provider is retired. */
+  destroy?(): void;
 }
 
 // ---------------------------------------------------------------------------
@@ -69,7 +71,7 @@ export interface ResendProviderConfig {
 }
 
 export class ResendProvider implements EmailProvider {
-  private client: Resend;
+  private client: Resend | null;
   private from: string;
   private replyTo?: string;
 
@@ -86,7 +88,9 @@ export class ResendProvider implements EmailProvider {
     html?: string,
     options?: { replyTo?: string },
   ): Promise<EmailDeliveryReceipt> {
-    const { data, error } = await this.client.emails.send({
+    const client = this.client;
+    if (!client) throw new Error("Resend provider has been retired");
+    const { data, error } = await client.emails.send({
       from: this.from,
       to,
       subject,
@@ -103,6 +107,12 @@ export class ResendProvider implements EmailProvider {
     }
 
     return { provider: "resend", id: data.id };
+  }
+
+  destroy(): void {
+    this.client = null;
+    this.from = "";
+    this.replyTo = undefined;
   }
 }
 

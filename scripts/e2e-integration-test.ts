@@ -213,7 +213,7 @@ async function testCloudProvisioning() {
 
   // 1d/1e. Create test agent with wallet + policies via the platform API.
   //
-  // The #79 hardening made tenant-scoped agent create/policy writes
+  // Tenant-scoped agent create/policy writes
   // owner/admin-session-only. Platform operators provision agents (and their
   // initial policy set) through the scoped platform key instead — here via the
   // batch endpoint, which both creates the agent and applies policies in one
@@ -378,7 +378,7 @@ async function testWalletOperations() {
     } else if (status === 200 && data.ok) {
       pass("Sign tx to whitelisted address (signed)");
     } else if (status === 403) {
-      // Hardened model (#79): an agent JWT on its own cannot sign — signing
+      // An agent JWT on its own cannot sign — signing
       // requires either an owner/admin MFA session or signer-bound
       // X-Steward-Signer-Id/X-Steward-Signer-Secret headers. The
       // platform-operator e2e holds neither, so a 403 here confirms the
@@ -482,7 +482,7 @@ async function testSecretManagement() {
 
   // 3a. Create a test secret.
   //
-  // Hardened model (#79): secret management is owner/admin-session-only. The
+  // Secret management is owner/admin-session-only. The
   // platform-operator e2e authenticates with a tenant API key (not an admin
   // session), so the expected outcome here is a 403 confirming the gate is
   // enforced. If the deployment still allows API-key secret management (older

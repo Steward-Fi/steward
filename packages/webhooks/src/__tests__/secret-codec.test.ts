@@ -1,5 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { decryptWebhookSecret, encryptWebhookSecret } from "../secret-codec";
+import { withRuntimeEnvironment } from "@stwd/shared/runtime-env";
+import {
+  decryptWebhookSecret,
+  encryptWebhookSecret,
+  resolveWebhookSecretAuthority,
+} from "../secret-codec";
 
 /**
  * SEC-102: the hardcoded dev key must require BOTH an explicit opt-in flag AND
@@ -11,6 +16,8 @@ describe("webhook secret-codec dev-key gate (SEC-102)", () => {
     "NODE_ENV",
     "STEWARD_WEBHOOK_SECRET_ENCRYPTION_KEY",
     "STEWARD_MASTER_PASSWORD",
+    "STEWARD_KDF_SALT",
+    "STEWARD_WEBHOOK_SECRET_KDF_SALT",
     "STEWARD_ALLOW_DEV_SECRETS",
     "STEWARD_ALLOW_DEV_SECRET",
   ] as const;
@@ -74,5 +81,128 @@ describe("webhook secret-codec dev-key gate (SEC-102)", () => {
     process.env.STEWARD_MASTER_PASSWORD = "a-real-master-password-for-tests";
     const encrypted = encryptWebhookSecret("tenant-secret");
     expect(decryptWebhookSecret(encrypted)).toBe("tenant-secret");
+  });
+
+  it("does not mistake an invalid configured salt for the internal dev default", () => {
+    process.env.STEWARD_MASTER_PASSWORD = "a-real-master-password-for-tests";
+    process.env.STEWARD_WEBHOOK_SECRET_KDF_SALT = "steward-webhook-secret-v1";
+    expect(() => encryptWebhookSecret("tenant-secret")).toThrow(/even-length hexadecimal string/);
+  });
+
+  it("rejects a configured salt with a valid hex prefix and invalid suffix", () => {
+    process.env.STEWARD_MASTER_PASSWORD = "a-real-master-password-for-tests";
+    process.env.STEWARD_WEBHOOK_SECRET_KDF_SALT = `${"ab".repeat(16)}zz`;
+    expect(() => encryptWebhookSecret("tenant-secret")).toThrow(/even-length hexadecimal string/);
+  });
+
+  it("never accepts a whitespace-only Worker webhook encryption root", () => {
+    expect(() =>
+      withRuntimeEnvironment(
+        {
+          STEWARD_RUNTIME: "workers",
+          NODE_ENV: "production",
+          STEWARD_WEBHOOK_SECRET_ENCRYPTION_KEY: "   ",
+          STEWARD_WEBHOOK_SECRET_KDF_SALT: "ab".repeat(16),
+        },
+        () => encryptWebhookSecret("tenant-secret"),
+      ),
+    ).toThrow(/STEWARD_WEBHOOK_SECRET_ENCRYPTION_KEY or STEWARD_MASTER_PASSWORD is required/);
+  });
+
+  it("keeps sequential Worker webhook roots separate across key and KDF rotations", () => {
+    const authorityA = {
+      NODE_ENV: "production",
+      STEWARD_WEBHOOK_SECRET_ENCRYPTION_KEY: "webhook-authority-a",
+      STEWARD_WEBHOOK_SECRET_KDF_SALT: "a1".repeat(16),
+    };
+    const authorityB = {
+      NODE_ENV: "production",
+      STEWARD_WEBHOOK_SECRET_ENCRYPTION_KEY: "webhook-authority-b",
+      STEWARD_WEBHOOK_SECRET_KDF_SALT: "b2".repeat(16),
+    };
+    const encryptedA = withRuntimeEnvironment(authorityA, () => encryptWebhookSecret("secret-a"));
+    const encryptedB = withRuntimeEnvironment(authorityB, () => encryptWebhookSecret("secret-b"));
+
+    expect(
+      withRuntimeEnvironment(authorityA, () => "fingerprint" in resolveWebhookSecretAuthority()),
+    ).toBe(false);
+
+    expect(withRuntimeEnvironment(authorityA, () => decryptWebhookSecret(encryptedA))).toBe(
+      "secret-a",
+    );
+    expect(withRuntimeEnvironment(authorityB, () => decryptWebhookSecret(encryptedB))).toBe(
+      "secret-b",
+    );
+    expect(() =>
+      withRuntimeEnvironment(authorityB, () => decryptWebhookSecret(encryptedA)),
+    ).toThrow();
+    expect(() =>
+      withRuntimeEnvironment(authorityA, () => decryptWebhookSecret(encryptedB)),
+    ).toThrow();
+  });
+
+  it("does not inherit a stale webhook root when the current Worker binding is absent", () => {
+    process.env.STEWARD_WEBHOOK_SECRET_ENCRYPTION_KEY = "stale-isolate-webhook-root";
+    process.env.STEWARD_WEBHOOK_SECRET_KDF_SALT = "cc".repeat(16);
+    expect(() =>
+      withRuntimeEnvironment({ NODE_ENV: "production" }, () =>
+        encryptWebhookSecret("must-fail-closed"),
+      ),
+    ).toThrow(/STEWARD_WEBHOOK_SECRET_ENCRYPTION_KEY or STEWARD_MASTER_PASSWORD is required/);
+  });
+
+  it("classifies a blank Worker NODE_ENV as production", () => {
+    expect(() =>
+      withRuntimeEnvironment(
+        {
+          STEWARD_RUNTIME: "workers",
+          NODE_ENV: "   ",
+          STEWARD_ALLOW_DEV_SECRETS: "true",
+        },
+        () => encryptWebhookSecret("must-not-use-dev-root"),
+      ),
+    ).toThrow(/STEWARD_WEBHOOK_SECRET_ENCRYPTION_KEY or STEWARD_MASTER_PASSWORD is required/);
+  });
+
+  it("preserves webhook authority when A suspends, B runs, then A resumes", async () => {
+    const authorityA = {
+      NODE_ENV: "production",
+      STEWARD_WEBHOOK_SECRET_ENCRYPTION_KEY: "webhook-overlap-a",
+      STEWARD_WEBHOOK_SECRET_KDF_SALT: "d4".repeat(16),
+    };
+    const authorityB = {
+      NODE_ENV: "production",
+      STEWARD_WEBHOOK_SECRET_ENCRYPTION_KEY: "webhook-overlap-b",
+      STEWARD_WEBHOOK_SECRET_KDF_SALT: "e5".repeat(16),
+    };
+    let releaseA: (() => void) | undefined;
+    let signalAStarted: (() => void) | undefined;
+    const started = new Promise<void>((resolve) => {
+      signalAStarted = resolve;
+    });
+    const resume = new Promise<void>((resolve) => {
+      releaseA = resolve;
+    });
+    const requestA = withRuntimeEnvironment(authorityA, async () => {
+      signalAStarted?.();
+      await resume;
+      return encryptWebhookSecret("overlap-secret-a");
+    });
+    await started;
+    const encryptedB = withRuntimeEnvironment(authorityB, () =>
+      encryptWebhookSecret("overlap-secret-b"),
+    );
+    releaseA?.();
+    const encryptedA = await requestA;
+
+    expect(withRuntimeEnvironment(authorityA, () => decryptWebhookSecret(encryptedA))).toBe(
+      "overlap-secret-a",
+    );
+    expect(withRuntimeEnvironment(authorityB, () => decryptWebhookSecret(encryptedB))).toBe(
+      "overlap-secret-b",
+    );
+    expect(() =>
+      withRuntimeEnvironment(authorityB, () => decryptWebhookSecret(encryptedA)),
+    ).toThrow();
   });
 });

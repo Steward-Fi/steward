@@ -6,7 +6,7 @@
  * a `capability-intent` rule governs whether an agent may INVOKE a named
  * capability (e.g. `github.pr.comment`) through Steward's capability layer. it
  * is the per-call-intent policy the credential plane leans on before delegating
- * to the proxy: the invoke route (W-1c) populates `ctx.capability` with the
+ * to the proxy: the invoke route populates `ctx.capability` with the
  * capability name/args/host/path/method, and this rule decides allow / deny /
  * require-approval, plus argument- and rate-constraints.
  *
@@ -15,10 +15,9 @@
  * it is authored AS a {@link PolicyRuleContribution} — the exact shape a plugin
  * registers via the provider-mode registry — so the capability plugin can register
  * it through the plugin host with ZERO rework. but the evaluator + config schema
- * + tests are a library export of `@stwd/policy-engine` (not a route, not a
- * package): W-1b ships the decision logic; the plugin package (W-1a) owns
- * registration; the invoke path (W-1c) owns wiring the context + the effective
- * default-deny (see the INVOKE-LAYER CONTRACT below).
+ * + tests are a library export of `@stwd/policy-engine` (not a route). The
+ * capability plugin owns registration; the invoke path owns context wiring and
+ * the effective default-deny (see the INVOKE-LAYER CONTRACT below).
  *
  * FAIL-CLOSED EVERYWHERE
  * ----------------------
@@ -37,12 +36,12 @@
  *    capabilities it governs; whether an UNGOVERNED capability is allowed is the
  *    invoke layer's default-deny decision, NOT this rule's.
  *
- * INVOKE-LAYER CONTRACT (what W-1c must implement)
- * ------------------------------------------------
+ * INVOKE-LAYER CONTRACT
+ * ---------------------
  * the engine composes all rules with all-must-pass semantics, and this rule
  * passes for any capability it does not name. that means "no rule allows this
  * capability" evaluates to PASS at the engine level. therefore the EFFECTIVE
- * DEFAULT-DENY must live in the INVOKE LAYER (W-1c):
+ * DEFAULT-DENY lives in the invoke layer:
  *   1. resolve the grant fail-closed; if no grant, deny before policy runs.
  *   2. after the engine's decision, REQUIRE that at least one `capability-intent`
  *      rule MATCHED the invoked capability with `effect: "allow"` (and passed).
@@ -102,7 +101,7 @@ export function estimateXPostMicros(hasUrl: boolean): number {
 /** The effect a matching `capability-intent` rule applies. */
 export type CapabilityIntentEffect = "allow" | "deny" | "require-approval";
 
-// ─── Cumulative spend caps (#206, Privy aggregate-limit parity) ───────────────
+// ─── Cumulative spend caps ───────────────────────────────────────────────────
 //
 // A `cumulativeSpend` constraint bounds the TOTAL money an agent may move through
 // a capability over a trailing time window - the canonical agentic-wallet
@@ -219,17 +218,17 @@ export interface CapabilityIntentConstraints {
   /**
    * Max capability INVOKES per trailing hour. Evaluated against
    * `ctx.capabilityInvokeCount1h` (NOT the tx counter). If this is set but the
-   * count is absent, the rule DENIES (fail closed) — the invoke layer (W-1c)
+   * count is absent, the rule DENIES (fail closed) — the invoke layer
    * must wire the count.
    *
-   * BACKWARD COMPAT (#206): this remains the hardcoded-1h count cap and keeps
-   * working unchanged. For a configurable window use {@link maxCalls} +
+   * This is the fixed one-hour count cap. For a configurable window use
+   * {@link maxCalls} +
    * {@link callWindow}. `maxCallsPerHour` and `maxCalls` are mutually exclusive
    * (both set => config error) so there is exactly one count cap per rule.
    */
   readonly maxCallsPerHour?: number;
   /**
-   * Configurable count cap (#206): max capability invokes over the trailing
+   * Configurable count cap: max capability invokes over the trailing
    * window {@link callWindow}. Evaluated against the invoke-count the invoke
    * layer supplies for THAT window; absent count => DENY (fail closed, same as
    * `maxCallsPerHour`). Requires {@link callWindow}. Mutually exclusive with
@@ -243,7 +242,7 @@ export interface CapabilityIntentConstraints {
    */
   readonly callWindow?: string;
   /**
-   * Cumulative (aggregate) spend cap over a trailing window (#206). Evaluated
+   * Cumulative (aggregate) spend cap over a trailing window. Evaluated
    * against the trailing-window spend sum the invoke layer supplies for the
    * configured {@link CumulativeSpendConstraint.aggregateOver} scope; absent
    * aggregate => DENY (fail closed). See {@link CumulativeSpendConstraint}.
@@ -327,8 +326,7 @@ function capabilityMatches(config: CapabilityIntentConfig, name: string): boolea
  * Recover ONLY the capability SELECTOR (the `capabilities` patterns) from an
  * otherwise-malformed rule config, WITHOUT validating the rest of the config.
  *
- * WHY THIS EXISTS (scope isolation, master-plan §5.3 / §"malformed-input
- * precedence applies to GOVERNING rules"):
+ * SCOPE-ISOLATION CONTRACT:
  *   malformed-input precedence must apply to the rules that GOVERN the requested
  *   capability. A rule whose selector is well-formed and demonstrably scoped to a
  *   DIFFERENT capability must not brick an unrelated invoke just because some
@@ -524,7 +522,7 @@ function timeWindowAllows(
  *   count is not fixed, so a spend WINDOW over them would be ambiguous (a money
  *   gate must never rest on an ambiguous window length).
  *
- * OVER-RETENTION REJECTED (codex P1): a window longer than the aggregate store's
+ * OVER-RETENTION REJECTED: a window longer than the aggregate store's
  * retention ({@link MAX_AGGREGATE_WINDOW_SECONDS}, 30d) would SILENTLY under-
  * enforce - entries older than retention are pruned, so a `P90D` cap would
  * behave like a 30d cap and let spend from days 31-90 slip. We reject such a
@@ -817,7 +815,7 @@ function parseConfig(rawInput: unknown): CapabilityIntentConfig | { error: strin
   // `github.*.delete`, `*.delete`, `git*hub`) would be treated by
   // `patternMatches` as an exact literal that can never match, silently making
   // a deny/require-approval rule inert. Reject it at parse so the misconfig
-  // denies instead of passing (codex P2).
+  // denies instead of passing.
   const badPattern = (capabilities as string[]).find(
     (p) => p.includes("*") && !(p.endsWith(".*") && !p.slice(0, -2).includes("*")),
   );
@@ -844,7 +842,7 @@ function parseConfig(rawInput: unknown): CapabilityIntentConfig | { error: strin
     const c = raw.constraints as Record<string, unknown>;
 
     // FAIL CLOSED on unknown constraint keys: a typo like `maxCallPerHour` must
-    // deny, not silently drop the rate cap on an `allow` rule (codex P2).
+    // deny, not silently drop the rate cap on an `allow` rule.
     const unknownConstraint = Object.keys(c).filter((k) => !ALLOWED_CONSTRAINT_KEYS.has(k));
     if (unknownConstraint.length > 0) {
       return {
@@ -865,7 +863,7 @@ function parseConfig(rawInput: unknown): CapabilityIntentConfig | { error: strin
       }
     }
 
-    // Configurable count cap (#206): maxCalls + callWindow. Mutually exclusive
+    // Configurable count cap: maxCalls + callWindow. Mutually exclusive
     // with maxCallsPerHour so there is exactly one count cap per rule (avoid an
     // ambiguous two-window count gate). Both require the other.
     if (c.maxCalls !== undefined || c.callWindow !== undefined) {
@@ -894,7 +892,7 @@ function parseConfig(rawInput: unknown): CapabilityIntentConfig | { error: strin
       }
     }
 
-    // Cumulative spend cap (#206).
+    // Cumulative spend cap.
     if (c.cumulativeSpend !== undefined) {
       const cs = c.cumulativeSpend;
       if (!isPlainObject(cs)) {
@@ -1153,7 +1151,7 @@ function evaluateConstraints(
     }
   }
 
-  // Configurable count cap + cumulativeSpend (#206) are evaluated ONLY on the
+  // Configurable count cap + cumulativeSpend are evaluated ONLY on the
   // provider-action plane (composeProviderActionPolicyDecision), which wires the
   // windowed count + spend aggregate + operation spend declaration. The legacy
   // EvaluatorContext (tx-sign path) carries none of those signals, so a rule
@@ -1289,7 +1287,7 @@ export function evaluateCapabilityIntent(
  *   4. else any matching passing `allow` => ALLOW
  *   5. else (no governing rule matched/passed) => HARD DENY / no governing allow
  *
- * MALFORMED-INPUT PRECEDENCE IS SCOPED TO GOVERNING RULES (master-plan §5.3).
+ * MALFORMED-INPUT PRECEDENCE IS SCOPED TO GOVERNING RULES.
  * A malformed rule config does NOT automatically brick every invoke: if the
  * rule's `capabilities` SELECTOR is well-formed and provably scoped to a
  * DIFFERENT capability, the rule is not governing this request and stays inert
@@ -1352,7 +1350,7 @@ export function composeCapabilityIntentDecision(
     try {
       // Parse the config. A malformed/unknown config CANNOT simply hard-deny
       // every invoke: malformed-input precedence applies to GOVERNING rules only
-      // (master-plan §5.3). A rule scoped (by a well-formed selector) to a
+      // A rule scoped (by a well-formed selector) to a
       // DIFFERENT capability is not governing this request and must stay inert
       // even if the rest of its config is broken. But if the selector itself is
       // unrecoverable, we cannot prove the rule is non-governing, so fail closed.
@@ -1452,7 +1450,7 @@ export function composeCapabilityIntentDecision(
 
 /**
  * The `capability-intent` rule as a {@link PolicyRuleContribution}, ready for the
- * W-1a plugin to register via the plugin host with zero rework. Bound to the
+ * capability plugin to register via the plugin host. Bound to the
  * policy engine's {@link EvaluatorContext}.
  */
 export const capabilityIntentContribution: PolicyRuleContribution<EvaluatorContext> = {
@@ -1497,7 +1495,7 @@ export const PROVIDER_POLICY_REASON = {
   X_RATE_CAP_EXCEEDED: "POLICY_X_RATE_CAP_EXCEEDED",
   X_SPEND_CAP_EXCEEDED: "POLICY_X_SPEND_CAP_EXCEEDED",
   X_QUIET_HOURS: "POLICY_X_QUIET_HOURS",
-  // Cumulative-spend cap reason codes (#206). Bounded, stable set (no unbounded
+  // Cumulative-spend cap reason codes. Bounded, stable set (no unbounded
   // labels): one for the breach, one for a missing declared spend field, one for
   // a currency mismatch. Missing aggregate context reuses INPUT_UNAVAILABLE and a
   // malformed config reuses CONFIGURATION_INVALID (the house allowlist already
@@ -1525,10 +1523,10 @@ export interface ProviderPolicyContext {
    *  unavailable => fail closed (hard_deny, POLICY_INPUT_UNAVAILABLE). */
   readonly invokeCount1h?: number;
   /**
-   * Authoritative invoke counts for configurable count caps (#206), keyed by the
+   * Authoritative invoke counts for configurable count caps, keyed by the
    * per-cap bucket key ({@link windowedInvokeBucketKey}: window+max). Two
    * `maxCalls` rules with DIFFERENT windows each read their OWN count, so a daily
-   * cap can never be evaluated against an hourly count (codex P2). A missing
+   * cap can never be evaluated against an hourly count. A missing
    * entry for a rule's bucket => fail closed (POLICY_INPUT_UNAVAILABLE). Kept
    * separate from `invokeCount1h` so the hardcoded-hour cap and the configurable
    * caps never borrow each other's counter.
@@ -1571,7 +1569,7 @@ export interface ProviderPolicyContext {
     readonly textCodePointLength?: number;
   };
   /**
-   * The operation's DECLARED spend field (#206). The operation - not the caller
+   * The operation's DECLARED spend field. The operation - not the caller
    * - declares which validated `policyArgs` field carries the per-invoke spend
    * amount and what currency it is denominated in. The composer reads the amount
    * ONLY from `args[spendDeclaration.field]` (validated scalars, never raw JSON).
@@ -1589,7 +1587,7 @@ export interface ProviderPolicyContext {
     readonly currency: string;
   };
   /**
-   * Authoritative trailing-window spend aggregates (#206), keyed by a stable
+   * Authoritative trailing-window spend aggregates, keyed by a stable
    * per-cap BUCKET key (see {@link cumulativeSpendBucketKey}). Each entry is the
    * ALREADY-COMMITTED (or reserved-and-committed) integer minor-unit sum over the
    * rule's trailing window for that exact cap, in the operation's currency. The
@@ -1598,7 +1596,7 @@ export interface ProviderPolicyContext {
    * Keying by the FULL cap identity (scope + window + max + currency), NOT just
    * the scope, lets two rules that share a scope but declare DIFFERENT windows /
    * caps each read their OWN trailing-window sum - they never share a bucket, so
-   * the same invoke is never double-counted across distinct caps (codex P2).
+   * the same invoke is never double-counted across distinct caps.
    *
    * A missing entry for a rule's bucket => the aggregate is not wired for that
    * cap => DENY (POLICY_INPUT_UNAVAILABLE). Steward never assumes a zero prior
@@ -1668,7 +1666,7 @@ export interface ProviderPolicyRule {
  * default-deny. Never throws for a policy reason: an unexpected internal error
  * becomes hard_deny/POLICY_EVALUATOR_ERROR.
  *
- * NAMING / COEXISTENCE WITH THE LEGACY-PLANE FIX (#187, merged on develop):
+ * NAMING / COEXISTENCE WITH THE LEGACY PLANE:
  * `composeCapabilityIntentDecision(rules, ctx)` (above) fixes the SAME
  * allow-over-approval precedence bug for the LEGACY invoke.ts plane, reusing
  * `ContributedPolicyRule`/`EvaluatorContext` and returning a
@@ -1713,7 +1711,7 @@ export function composeProviderActionPolicyDecision(
       if ("error" in parsed) {
         // SEC-181: malformed-input precedence is scoped to GOVERNING rules,
         // matching the legacy-plane composer (composeCapabilityIntentDecision)
-        // and master-plan §5.3. A well-formed selector provably scoped to a
+        // and the legacy-plane composer. A well-formed selector provably scoped to a
         // DIFFERENT operation stays inert even though the rest of the config
         // is broken; only a malformed rule that governs THIS operation, or
         // whose selector is unrecoverable (ambiguous scope), hard-denies.
@@ -1892,10 +1890,10 @@ function evaluateProviderConstraints(
     if (count >= constraints.maxCallsPerHour) return PROVIDER_POLICY_REASON.HARD_DENY;
   }
 
-  // Configurable count cap (#206): maxCalls over the trailing callWindow. The
+  // Configurable count cap: maxCalls over the trailing callWindow. The
   // invoke layer supplies the count for THIS EXACT cap (window+max) via
   // ctx.windowedInvokeCounts, keyed by windowedInvokeBucketKey - so two maxCalls
-  // rules with DIFFERENT windows each read their own count (codex P2). Absent =>
+  // rules with DIFFERENT windows each read their own count. Absent =>
   // fail closed (same discipline as maxCallsPerHour). A malformed callWindow is
   // rejected at store time, but re-validate at runtime so a hand-edited row
   // cannot slip an unbounded window past the gate.
@@ -1915,7 +1913,7 @@ function evaluateProviderConstraints(
     if (count >= constraints.maxCalls) return PROVIDER_POLICY_REASON.HARD_DENY;
   }
 
-  // Cumulative spend cap (#206).
+  // Cumulative spend cap.
   if (constraints.cumulativeSpend !== undefined) {
     const csReason = evaluateCumulativeSpend(constraints.cumulativeSpend, ctx);
     if (csReason) return csReason;

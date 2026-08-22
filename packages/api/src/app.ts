@@ -41,7 +41,7 @@ import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { authorizationSignature } from "./middleware/authorization-signature";
 import { correlationId } from "./middleware/correlation";
-import { workersGlobalRateLimit } from "./middleware/global-rate-limit";
+import { globalRateLimit } from "./middleware/global-rate-limit";
 import { idempotencyMiddleware } from "./middleware/idempotency";
 import { requestExpiry } from "./middleware/request-expiry";
 import { requestLogger } from "./middleware/request-logger";
@@ -84,7 +84,7 @@ import {
   type ApiResponse,
   type AppVariables,
   dashboardAuthMiddleware,
-  isWorkersRuntime,
+  setNoStoreHeaders,
   tenantAuth,
 } from "./services/context";
 
@@ -121,14 +121,9 @@ export function createApp(): Hono<{ Variables: AppVariables }> {
 
   // ─── Global middleware ──────────────────────────────────────────────────────
 
-  // SEC-068: the Bun entry enforces a global in-memory IP rate limit
-  // pre-dispatch (index.ts runtimeGate), which is impossible on Workers (no
-  // cross-isolate state). Mount the shared Redis-backed sliding-window limiter
-  // across all routes for the Workers runtime only, so non-auth endpoints
-  // there are no longer unthrottled.
-  if (isWorkersRuntime) {
-    app.use("*", workersGlobalRateLimit);
-  }
+  // SEC-068: production Bun and Workers share Redis state across replicas and
+  // restarts. Explicit local postures may use the bounded memory implementation.
+  app.use("*", globalRateLimit);
 
   app.use("*", securityHeaders);
   app.use("*", tenantCors);
@@ -208,6 +203,10 @@ export function createApp(): Hono<{ Variables: AppVariables }> {
   app.use("/dashboard/*", (c, next) => dashboardAuthMiddleware(c, next));
   app.use("/platform", platformAuthMiddleware());
   app.use("/platform/*", platformAuthMiddleware());
+  app.use("/user/me/wallet/export", async (c, next) => {
+    setNoStoreHeaders(c);
+    await next();
+  });
   app.use("/user", (c, next) => userSessionAuth(c as never, next));
   app.use("/user/*", (c, next) => userSessionAuth(c as never, next));
   app.use("/webhooks", (c, next) => tenantAuth(c, next));

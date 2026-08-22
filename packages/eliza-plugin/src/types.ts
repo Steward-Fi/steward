@@ -12,7 +12,6 @@ export interface StewardPluginConfig {
   agentId: string;
   tenantId?: string;
   autoRegister: boolean;
-  fallbackLocal: boolean;
 }
 
 /** Parsed human-readable transfer amount */

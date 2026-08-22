@@ -1,7 +1,11 @@
 import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
+import type { WebhookRuntimeAuthority } from "@stwd/webhooks";
 
-const ALLOW_INSECURE_WEBHOOK_URLS = process.env.STEWARD_ALLOW_INSECURE_WEBHOOK_URLS === "true";
+const FAIL_CLOSED_WEBHOOK_AUTHORITY: WebhookRuntimeAuthority = Object.freeze({
+  allowInsecureHttp: false,
+  allowPrivateNetwork: false,
+});
 
 function isNonPublicIpv4(hostname: string): boolean {
   const octets = hostname.split(".").map((part) => Number(part));
@@ -149,13 +153,16 @@ function isNonPublicIpv6(hostname: string): boolean {
   );
 }
 
-export function validateWebhookUrl(url: string): string | null {
+export function validateWebhookUrl(
+  url: string,
+  authority: WebhookRuntimeAuthority = FAIL_CLOSED_WEBHOOK_AUTHORITY,
+): string | null {
   try {
     const parsed = new URL(url);
     if (parsed.username || parsed.password) return "url must not include credentials";
 
     if (parsed.protocol !== "https:") {
-      if (!ALLOW_INSECURE_WEBHOOK_URLS || parsed.protocol !== "http:") {
+      if (!authority.allowInsecureHttp || parsed.protocol !== "http:") {
         return "url must use https";
       }
     }
@@ -165,6 +172,7 @@ export function validateWebhookUrl(url: string): string | null {
       .replace(/\.+$/g, "")
       .toLowerCase();
     if (!hostname) return "url must include a host";
+    if (authority.allowPrivateNetwork) return null;
     if (hostname === "localhost" || hostname.endsWith(".localhost")) {
       return "url host must be public";
     }
@@ -211,9 +219,11 @@ function isNonPublicAddress(address: string, family?: number): boolean {
 export async function validateWebhookUrlResolved(
   url: string,
   resolver: DnsResolver = defaultResolver,
+  authority: WebhookRuntimeAuthority = FAIL_CLOSED_WEBHOOK_AUTHORITY,
 ): Promise<string | null> {
-  const stringError = validateWebhookUrl(url);
+  const stringError = validateWebhookUrl(url, authority);
   if (stringError) return stringError;
+  if (authority.allowPrivateNetwork) return null;
 
   let hostname: string;
   try {
