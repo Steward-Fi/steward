@@ -10,6 +10,9 @@
 # should also require reviewer approval.
 name: Deploy Railway (Production)
 
+# Deliberately dispatch-only. A reusable workflow executes in the caller's
+# repository context, so actions/checkout and github.repository would verify
+# the caller's main branch rather than this image-producing repository.
 on:
   workflow_dispatch:
     inputs:
@@ -22,21 +25,6 @@ on:
         required: false
         type: boolean
         default: false
-
-  workflow_call:
-    inputs:
-      main_sha:
-        description: "Full 40-character commit SHA on the caller repository's main branch"
-        required: true
-        type: string
-      dry_run:
-        description: "Dry run (resolve and verify the digest; skip Railway mutation)"
-        required: false
-        type: boolean
-        default: false
-    secrets:
-      RAILWAY_TOKEN:
-        required: true
 
 permissions:
   actions: read
