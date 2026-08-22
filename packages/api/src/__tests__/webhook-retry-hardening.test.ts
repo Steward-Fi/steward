@@ -75,7 +75,7 @@ describe("webhook retry hardening", () => {
     expect(webhookRoutesSource).toContain("${webhookDeliveries.status} = 'processing'");
   });
 
-  it("writes webhook creation authorization before insert and enables only after create audit", () => {
+  it("creates only the final enabled row with both audits in the same transaction", () => {
     const createStart = webhookRoutesSource.indexOf('webhookRoutes.post("/",');
     expect(createStart).toBeGreaterThanOrEqual(0);
     const authorized = webhookRoutesSource.indexOf(
@@ -83,14 +83,13 @@ describe("webhook retry hardening", () => {
       createStart,
     );
     const insert = webhookRoutesSource.indexOf(".insert(webhookConfigs)", createStart);
-    const disabledInsert = webhookRoutesSource.indexOf("enabled: false", insert);
+    const enabledInsert = webhookRoutesSource.indexOf("enabled: true", insert);
     const created = webhookRoutesSource.indexOf('action: "webhook.create"', insert);
-    const enable = webhookRoutesSource.indexOf(".update(webhookConfigs)", created);
     expect(authorized).toBeGreaterThan(createStart);
     expect(authorized).toBeLessThan(insert);
-    expect(disabledInsert).toBeGreaterThan(insert);
+    expect(enabledInsert).toBeGreaterThan(insert);
     expect(created).toBeGreaterThan(insert);
-    expect(enable).toBeGreaterThan(created);
+    expect(webhookRoutesSource.slice(createStart, created)).not.toContain("enabled: false");
   });
 
   it("rejects retired tenant webhook secrets instead of storing them", () => {
