@@ -320,6 +320,14 @@ export class PolymarketExecutionAdapter {
     return client.createOrder(order, options);
   }
 
+  /** Derive the exact CLOB order hash before POST for durable reconciliation. */
+  async orderIdentity(signed: unknown): Promise<string> {
+    const { client } = await this.createClobClient();
+    const builder = client.orderBuilder;
+    if (!builder) throw new Error("Polymarket client does not expose an order hash builder");
+    return builder.buildOrderHash(builder.buildOrderTypedData(signed));
+  }
+
   /**
    * Build + post an order. market/FOK -> FOK (marketable limit at supplied
    * price), otherwise GTC. Returns the venue-neutral result with actual fill.
@@ -419,6 +427,12 @@ export class PolymarketExecutionAdapter {
     return (Array.isArray(raw) ? raw : []).map((o) => openOrderSchema.parse(o));
   }
 
+  /** Query an exact signed order hash, including filled/canceled orders. */
+  async getOrder(orderId: string): Promise<unknown> {
+    const { client } = await this.createClobClient();
+    return client.getOrder(orderId);
+  }
+
   /** Cancel an order by id. */
   async cancelOrder(params: { orderId: string }): Promise<PolymarketCancelResult> {
     const { client } = await this.createClobClient();
@@ -441,6 +455,10 @@ export function createPolymarketExecutionAdapter(
 // ---------------------------------------------------------------------------
 
 interface ClobClientLike {
+  orderBuilder?: {
+    buildOrderTypedData(order: unknown): unknown;
+    buildOrderHash(typedData: unknown): string;
+  };
   createOrder(
     order: {
       tokenID: string;
@@ -454,6 +472,7 @@ interface ClobClientLike {
   ): Promise<unknown>;
   postOrder(signedOrder: unknown, orderType?: unknown): Promise<unknown>;
   getOpenOrders(params?: { market?: string }): Promise<unknown>;
+  getOrder(orderID: string): Promise<unknown>;
   cancelOrder(params: { orderID: string }): Promise<unknown>;
 }
 interface ClobOrderTypeEnum {
