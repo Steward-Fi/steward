@@ -38,6 +38,18 @@ describe("runtime-bound Redis authority", () => {
 });
 
 describe("redis transport security (SEC-032)", () => {
+  test("rejects cleartext remote Redis for unset, staging, and Workers postures", () => {
+    for (const environment of [
+      {},
+      { NODE_ENV: "staging" },
+      { NODE_ENV: "test", STEWARD_RUNTIME: "workers" },
+    ]) {
+      expect(() => assertRedisUrlTls("redis://redis.example.internal:6379", environment)).toThrow(
+        "rediss://",
+      );
+    }
+  });
+
   test("rejects cleartext redis:// to a remote host in production", () => {
     process.env.NODE_ENV = "production";
     delete process.env.STEWARD_ALLOW_INSECURE_REDIS;
@@ -85,6 +97,18 @@ describe("redis transport security (SEC-032)", () => {
 });
 
 describe("upstash REST transport security (SEC-032)", () => {
+  test("rejects cleartext remote REST tokens for unset, staging, and Workers postures", () => {
+    for (const environment of [
+      {},
+      { NODE_ENV: "staging" },
+      { NODE_ENV: "test", STEWARD_RUNTIME: "workers" },
+    ]) {
+      expect(() => assertUpstashRestUrlTls("http://us1-example.upstash.io", environment)).toThrow(
+        "https://",
+      );
+    }
+  });
+
   test("rejects cleartext http:// to a remote host in production", () => {
     process.env.NODE_ENV = "production";
     delete process.env.STEWARD_ALLOW_INSECURE_REDIS;

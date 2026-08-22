@@ -405,7 +405,7 @@ describe("adapter fund-moving policy gate", () => {
     expect(body.code).toBe("policy-violation");
   });
 
-  it("ALLOWS a bridge build within caps and returns an UNSIGNED intent", async () => {
+  it("reserves a bridge build from its parsed request and returns an UNSIGNED intent", async () => {
     process.env.STEWARD_ADAPTER_PER_OP_CAP_USD = "100000";
     process.env.STEWARD_ADAPTER_DAILY_CAP_USD = "1000000";
     const { app, agentId } = await makeApp(`tenant-adapter-bridge-${Date.now()}`);
@@ -428,7 +428,10 @@ describe("adapter fund-moving policy gate", () => {
 
     const buildRes = await app.request("/adapters/bridge/build", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        "Idempotency-Key": "bridge-build-request-authority",
+      },
       body: JSON.stringify({
         agentId,
         owner: AGENT_WALLET,
@@ -447,6 +450,38 @@ describe("adapter fund-moving policy gate", () => {
     expect(body.data.unsignedIntent.signed).toBe(false);
     expect(body.data.unsignedIntent.category).toBe("bridge");
     expect(body.data.unsignedIntent.metadata.toChainId).toBe(42161);
+  });
+
+  it("rejects a regenerated bridge artifact that changed under the same idempotency key", async () => {
+    process.env.STEWARD_ADAPTER_PER_OP_CAP_USD = "1000";
+    process.env.STEWARD_ADAPTER_DAILY_CAP_USD = "10000";
+    const { app, agentId } = await makeApp(`tenant-adapter-bridge-replay-${Date.now()}`);
+    const provider = `test-handoff-replay-${Date.now()}`;
+    const artifact = externalHandoff({ provider, estimatedUsd: 500 });
+    selectBridgeAdapter(provider, artifact);
+    const request = () =>
+      app.request("/adapters/bridge/build", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Idempotency-Key": "bridge-regenerated-artifact",
+        },
+        body: JSON.stringify({
+          agentId,
+          owner: AGENT_WALLET,
+          quote: { quoteId: "test-handoff-quote" },
+          estimatedUsd: 500,
+        }),
+      });
+
+    expect((await request()).status).toBe(200);
+    artifact.feeObservedSlot += 1;
+    const changed = await request();
+    expect(changed.status).toBe(400);
+    const body = (await changed.json()) as { code?: string; reason?: string; data?: unknown };
+    expect(body.code).toBe("policy-violation");
+    expect(body.reason).toContain("idempotency-key");
+    expect(body.data).toBeUndefined();
   });
 
   it("DENIES a bridge build above cap before returning a signable artifact", async () => {

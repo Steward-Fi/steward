@@ -816,7 +816,7 @@ adapterRoutes.post("/swap/build", async (c) => {
       estimatedUsd,
       perOrderCapUsd: caps.perOrderCapUsd,
       dailyCapUsd: caps.dailyCapUsd,
-      requestAuthority: raw,
+      requestAuthority: { request: raw, artifact: intent },
     });
     if (!gate.allow) {
       await auditAdapterEvent(c, "adapter.swap.policy-rejected", agentId, {
@@ -894,7 +894,7 @@ adapterRoutes.post("/earn/deposit", async (c) => {
       estimatedUsd,
       perOrderCapUsd: caps.perOrderCapUsd,
       dailyCapUsd: caps.dailyCapUsd,
-      requestAuthority: raw,
+      requestAuthority: { request: raw, artifact: intent },
     });
     if (!gate.allow) {
       await auditAdapterEvent(c, "adapter.earn.deposit.policy-rejected", agentId, {
@@ -944,7 +944,7 @@ adapterRoutes.post("/earn/withdraw", async (c) => {
       estimatedUsd,
       perOrderCapUsd: caps.perOrderCapUsd,
       dailyCapUsd: caps.dailyCapUsd,
-      requestAuthority: raw,
+      requestAuthority: { request: raw, artifact: intent },
     });
     if (!gate.allow) {
       await auditAdapterEvent(c, "adapter.earn.withdraw.policy-rejected", agentId, {
@@ -992,7 +992,8 @@ adapterRoutes.post("/bridge/quote", async (c) => {
 });
 
 adapterRoutes.post("/bridge/build", async (c) => {
-  const parsed = bridgeBuildSchema.safeParse(await safeJsonParse(c));
+  const raw = await safeJsonParse(c);
+  const parsed = bridgeBuildSchema.safeParse(raw);
   if (!parsed.success) {
     return c.json<ApiResponse>({ ok: false, error: parsed.error.message }, 400);
   }
@@ -1023,7 +1024,7 @@ adapterRoutes.post("/bridge/build", async (c) => {
       estimatedUsd,
       perOrderCapUsd: caps.perOrderCapUsd,
       dailyCapUsd: caps.dailyCapUsd,
-      requestAuthority: raw,
+      requestAuthority: { request: raw, artifact: result },
     });
     if (!gate.allow) {
       await auditAdapterEvent(c, "adapter.bridge.policy-rejected", agentId, {
@@ -1296,7 +1297,7 @@ adapterRoutes.post("/spark/static-btc-deposits/claim", async (c) => {
       agentId: resolution.agentId,
       estimatedUsd: parsed.data.estimatedUsd,
       auditAction: "adapter.spark.static_btc_deposit.policy-rejected",
-      requestAuthority: parsed.data,
+      requestAuthority: { request: parsed.data, artifact: intent },
     });
     if (!gate.allow) return gate.response;
     await auditAdapterEvent(
@@ -1366,7 +1367,7 @@ adapterRoutes.post("/spark/lightning/pay", async (c) => {
       agentId: resolution.agentId,
       estimatedUsd: parsed.data.estimatedUsd,
       auditAction: "adapter.spark.lightning.pay.policy-rejected",
-      requestAuthority: parsed.data,
+      requestAuthority: { request: parsed.data, artifact: intent },
     });
     if (!gate.allow) return gate.response;
     await auditAdapterEvent(c, "adapter.spark.lightning.pay.authorized", resolution.agentId, {
@@ -1401,7 +1402,7 @@ adapterRoutes.post("/spark/transfers", async (c) => {
       agentId: resolution.agentId,
       estimatedUsd: parsed.data.estimatedUsd,
       auditAction: "adapter.spark.transfer.policy-rejected",
-      requestAuthority: parsed.data,
+      requestAuthority: { request: parsed.data, artifact: intent },
     });
     if (!gate.allow) return gate.response;
     await auditAdapterEvent(c, "adapter.spark.transfer.authorized", resolution.agentId, {
@@ -1437,7 +1438,7 @@ adapterRoutes.post("/spark/token-transfers", async (c) => {
       agentId: resolution.agentId,
       estimatedUsd: parsed.data.estimatedUsd,
       auditAction: "adapter.spark.token_transfer.policy-rejected",
-      requestAuthority: parsed.data,
+      requestAuthority: { request: parsed.data, artifact: intent },
     });
     if (!gate.allow) return gate.response;
     await auditAdapterEvent(c, "adapter.spark.token_transfer.authorized", resolution.agentId, {

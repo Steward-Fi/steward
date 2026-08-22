@@ -31,6 +31,7 @@ type RedisBinding = Readonly<{
   restUrl?: string;
   restToken?: string;
   nodeEnv?: string;
+  runtime?: string;
   allowInsecure?: string;
 }>;
 
@@ -51,15 +52,18 @@ function redisBinding(env?: Record<string, unknown>): RedisBinding | null {
   const driver =
     valueFrom(env, "REDIS_DRIVER")?.trim().toLowerCase() === "upstash" ? "upstash" : "ioredis";
   const nodeEnv = valueFrom(env, "NODE_ENV");
+  const runtime = valueFrom(env, "STEWARD_RUNTIME");
   const allowInsecure = valueFrom(env, "STEWARD_ALLOW_INSECURE_REDIS");
   if (driver === "upstash") {
     const restUrl = valueFrom(env, "KV_REST_API_URL") || valueFrom(env, "UPSTASH_REDIS_REST_URL");
     const restToken =
       valueFrom(env, "KV_REST_API_TOKEN") || valueFrom(env, "UPSTASH_REDIS_REST_TOKEN");
-    return restUrl && restToken ? { driver, restUrl, restToken, nodeEnv, allowInsecure } : null;
+    return restUrl && restToken
+      ? { driver, restUrl, restToken, nodeEnv, runtime, allowInsecure }
+      : null;
   }
   const redisUrl = valueFrom(env, "REDIS_URL");
-  return redisUrl ? { driver, redisUrl, nodeEnv, allowInsecure } : null;
+  return redisUrl ? { driver, redisUrl, nodeEnv, runtime, allowInsecure } : null;
 }
 
 function redisBindingKey(binding: RedisBinding): string {
@@ -73,12 +77,14 @@ function redisClientEnvironment(binding: RedisBinding): Record<string, string | 
         KV_REST_API_URL: binding.restUrl,
         KV_REST_API_TOKEN: binding.restToken,
         NODE_ENV: binding.nodeEnv,
+        STEWARD_RUNTIME: binding.runtime,
         STEWARD_ALLOW_INSECURE_REDIS: binding.allowInsecure,
       }
     : {
         REDIS_DRIVER: "ioredis",
         REDIS_URL: binding.redisUrl,
         NODE_ENV: binding.nodeEnv,
+        STEWARD_RUNTIME: binding.runtime,
         STEWARD_ALLOW_INSECURE_REDIS: binding.allowInsecure,
       };
 }
