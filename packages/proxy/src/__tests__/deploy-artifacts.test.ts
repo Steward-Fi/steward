@@ -44,12 +44,15 @@ function readRepositoryFile(...segments: string[]): string {
 describe("#778 self-hosting JWT secret boundary", () => {
   const guide = readRepositoryFile("docs", "guides", "self-hosting.mdx");
 
-  test("non-embedded production requires a dedicated high-entropy JWT secret", () => {
-    expect(guide).toContain("For non-embedded production, `STEWARD_JWT_SECRET` is required");
-    expect(guide).toContain("at least 32 high-entropy characters");
-    expect(guide).toContain("Keep it separate from\n`STEWARD_MASTER_PASSWORD`");
-    expect(guide).toContain("only in embedded/local development mode");
-    expect(guide).toContain("production fails closed");
+  test("documents the canonical secret and temporary migration fallback", () => {
+    expect(guide).toContain("For new non-embedded production deployments, configure the canonical");
+    expect(guide).toContain("`STEWARD_JWT_SECRET` with at least 32 high-entropy characters");
+    expect(guide).toContain("separate from `STEWARD_MASTER_PASSWORD`");
+    expect(guide).toContain("temporarily accepts a 32+ character `STEWARD_SESSION_SECRET`");
+    expect(guide).toContain("that name is deprecated");
+    expect(guide).toContain("Without either sufficiently long signing secret");
+    expect(guide).toContain("non-embedded production fails closed");
+    expect(guide).toContain("only in embedded/local mode");
     expect(guide).not.toContain("Defaults to master password if not set");
   });
 

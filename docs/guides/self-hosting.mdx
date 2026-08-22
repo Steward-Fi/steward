@@ -82,16 +82,19 @@ openssl rand -hex 32
 ```bash
 PORT=3200                                              # API port (default: 3200)
 STEWARD_BIND_HOST=0.0.0.0                              # Bind address
-STEWARD_JWT_SECRET=<paste-64-character-hex-output-here> # Required outside embedded/local mode
+STEWARD_JWT_SECRET=<paste-64-character-hex-output-here> # Canonical for new non-embedded production deployments
 STEWARD_PLATFORM_KEY=your-platform-admin-key           # For platform-level management
 STEWARD_EMBEDDED=false                                  # Set true for PGLite mode
 ```
 
-For non-embedded production, `STEWARD_JWT_SECRET` is required and must contain
-at least 32 high-entropy characters. Keep it separate from
-`STEWARD_MASTER_PASSWORD`. Derivation from the master password is available
-only in embedded/local development mode; production fails closed when the
-dedicated JWT secret is absent or too short.
+For new non-embedded production deployments, configure the canonical
+`STEWARD_JWT_SECRET` with at least 32 high-entropy characters and keep it
+separate from `STEWARD_MASTER_PASSWORD`. During migration, the runtime
+temporarily accepts a 32+ character `STEWARD_SESSION_SECRET` when the canonical
+variable is absent, but that name is deprecated and should be replaced with
+`STEWARD_JWT_SECRET`. Without either sufficiently long signing secret,
+non-embedded production fails closed. Derivation from the master password is
+available only in embedded/local mode.
 
 ### Blockchain
 
