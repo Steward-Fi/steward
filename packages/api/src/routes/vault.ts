@@ -882,19 +882,24 @@ async function findActionByReferenceId(
   return existing ?? null;
 }
 
-async function findActionByIdempotency(agentId: string, actionType: string, keyDigest: string) {
-  const [existing] = await db
+async function findActionByIdempotency(
+  agentId: string,
+  actionType: string,
+  idempotencyKeyDigest: string,
+) {
+  const rows = await db
     .select()
     .from(transactions)
     .where(
       and(
         eq(transactions.agentId, agentId),
         eq(transactions.actionType, actionType),
-        sql`${transactions.actionPayload}->>'idempotencyKeyDigest' = ${keyDigest}`,
+        sql`${transactions.actionPayload}->>'idempotencyKeyDigest' = ${idempotencyKeyDigest}`,
       ),
     )
-    .limit(1);
-  return existing ?? null;
+    .limit(2);
+  if (rows.length > 1) throw new Error("Duplicate action idempotency anchors");
+  return rows[0] ?? null;
 }
 
 function requireBroadcastActionIdempotency(

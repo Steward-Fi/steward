@@ -22,6 +22,13 @@ export type BeginTradeRecoveryResult =
   | { kind: "existing"; row: TradeOrderRecoveryRow }
   | { kind: "conflict"; row: TradeOrderRecoveryRow };
 
+export function isPreparedTradeRecoveryStale(
+  row: TradeOrderRecoveryRow,
+  now = Date.now(),
+): boolean {
+  return row.state === "prepared" && row.claimedAt.getTime() < now - EFFECT_LEASE_MS;
+}
+
 export async function findTradeRecovery(
   db: DbHandle,
   input: {
@@ -89,9 +96,27 @@ export async function beginTradeRecovery(
     )
     .limit(1);
   if (!existing) throw new Error("TRADE_RECOVERY_INSERT_LOST");
-  return existing.bodyHash === input.bodyHash
-    ? { kind: "existing", row: existing }
-    : { kind: "conflict", row: existing };
+  if (existing.bodyHash !== input.bodyHash) return { kind: "conflict", row: existing };
+
+  // No venue I/O can occur before prepared -> submitting. If an owner crashes
+  // in that gap, a retry may safely take over the stale prepared claim. The
+  // token CAS ensures the old owner can no longer checkpoint submission.
+  const reclaimed = await db
+    .update(tradeOrderRecoveries)
+    .set({ claimToken, claimedAt: new Date(), updatedAt: new Date() })
+    .where(
+      and(
+        eq(tradeOrderRecoveries.id, existing.id),
+        eq(tradeOrderRecoveries.bodyHash, input.bodyHash),
+        eq(tradeOrderRecoveries.state, "prepared"),
+        lt(tradeOrderRecoveries.claimedAt, new Date(Date.now() - EFFECT_LEASE_MS)),
+      ),
+    )
+    .returning();
+  const reclaimedRow = reclaimed?.[0];
+  return reclaimedRow
+    ? { kind: "new", row: reclaimedRow, claimToken }
+    : { kind: "existing", row: existing };
 }
 
 export async function checkpointTradeSubmissionStart(

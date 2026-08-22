@@ -161,4 +161,46 @@ describe("durable trade order recovery", () => {
     expect(reconciled.row.venueIdentity).toBe(identity);
     expect(reconciled.row.state).toBe("submitted");
   });
+
+  test("one retry takes over a stale prepared claim before any venue submission", async () => {
+    const db = getDb();
+    const input = {
+      tenantId: "recovery-tenant-prepared",
+      agentId: "recovery-agent-prepared",
+      sessionId: "recovery-session-prepared",
+      venue: "hyperliquid" as const,
+      idempotencyKey: "durable-key-prepared",
+      bodyHash: "c".repeat(64),
+    };
+    const original = await beginTradeRecovery(db, input);
+    if (original.kind !== "new") throw new Error("expected new recovery");
+    await db
+      .update(tradeOrderRecoveries)
+      .set({ claimedAt: new Date(Date.now() - 60_000) })
+      .where(eq(tradeOrderRecoveries.id, original.row.id));
+
+    const contenders = await Promise.all([
+      beginTradeRecovery(db, input),
+      beginTradeRecovery(db, input),
+    ]);
+    const winners = contenders.filter((result) => result.kind === "new");
+    expect(winners).toHaveLength(1);
+    const winner = winners[0];
+    if (!winner || winner.kind !== "new") throw new Error("expected one takeover winner");
+    expect(winner.claimToken).not.toBe(original.claimToken);
+    expect(
+      await checkpointTradeSubmissionStart(db, {
+        id: original.row.id,
+        claimToken: original.claimToken,
+        venueIdentity: "old-owner-must-lose",
+      }),
+    ).toBe(false);
+    expect(
+      await checkpointTradeSubmissionStart(db, {
+        id: winner.row.id,
+        claimToken: winner.claimToken,
+        venueIdentity: "takeover-winner",
+      }),
+    ).toBe(true);
+  });
 });

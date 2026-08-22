@@ -68,6 +68,7 @@ import {
   checkpointTradeSubmissionStart,
   drainTradeRecoveryAudit,
   findTradeRecovery,
+  isPreparedTradeRecoveryStale,
   refreshTradeRecovery,
   tradeRecoveryEnvelope,
   tradeRecoveryHash,
@@ -1145,7 +1146,9 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
         409,
       );
     }
-    if (existingRecovery?.kind === "existing") {
+    const stalePreparedRecovery =
+      existingRecovery?.kind === "existing" && isPreparedTradeRecoveryStale(existingRecovery.row);
+    if (existingRecovery?.kind === "existing" && !stalePreparedRecovery) {
       let recoveryRow = existingRecovery.row;
       let envelope = tradeRecoveryEnvelope(recoveryRow) as TradeIdempotencyResponse | null;
       if (
@@ -1230,7 +1233,14 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
       );
     }
 
-    let idempotency = await getIdempotency(tenantId, agentId, body.idempotencyKey, body);
+    // A stale prepared journal proves the prior owner never crossed the
+    // prepared -> submitting venue-I/O boundary. Let beginTradeRecovery perform
+    // the authoritative DB claim-token CAS below; the old idempotency marker is
+    // deliberately bypassed because it belongs to the crashed owner and the DB
+    // journal now supplies replay/conflict authority for this key.
+    let idempotency = stalePreparedRecovery
+      ? ({} satisfies RouteIdempotency)
+      : await getIdempotency(tenantId, agentId, body.idempotencyKey, body);
     if (idempotency.conflict) {
       return c.json<ApiResponse>(
         { ok: false, error: "Idempotency key reused with a different body" },
