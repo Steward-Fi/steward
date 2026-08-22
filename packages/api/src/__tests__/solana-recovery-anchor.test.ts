@@ -628,7 +628,6 @@ describe("Solana durable recovery anchors", () => {
   });
 
   it("never takes over an expired lease after its parsed claim entered raw custody", async () => {
-    const context = await import("../services/context");
     const originalSign = Vault.prototype.signSolanaTransaction;
     let signCalls = 0;
     let submittedCalls = 0;

@@ -38,6 +38,8 @@ export const BRIDGE_TOKEN_ENV = "STEWARD_SIGNER_BRIDGE_TOKEN";
 /** Enough for Solana's transaction limit plus JSON/hints, while bounding RAM. */
 export const BRIDGE_MAX_BODY_BYTES = 16 * 1024;
 export const BRIDGE_MIN_TOKEN_BYTES = 32;
+/** Bounds configured and presented secrets before hashing or comparison. */
+export const BRIDGE_MAX_TOKEN_BYTES = 1024;
 
 export interface SignerBridgeOptions {
   /** Bind host. Loopback by default; never expose this beyond the machine. */
@@ -49,7 +51,8 @@ export interface SignerBridgeOptions {
    *  (for callers that only speak standard bearer auth, e.g. AgentNet's
    *  remote-wallet client). Omitted: STEWARD_SIGNER_BRIDGE_TOKEN from the
    *  env when set, else a fresh random token per session (read it from the
-   *  returned bridge's `token`). Must contain at least 32 UTF-8 bytes. */
+   *  returned bridge's `token`). Must contain 32-1024 UTF-8 bytes. Bearer
+   *  transport additionally requires the standard token68 character set. */
   token?: string;
 }
 
@@ -61,24 +64,46 @@ export interface SignerBridge {
   close(): Promise<void>;
 }
 
-/** Constant-time header check; hashing first keeps lengths equal. */
-function tokenMatches(presented: string | string[] | undefined, expected: string): boolean {
-  if (typeof presented !== "string") return false;
+/** Constant-time check after a fixed public bound; hashing keeps lengths equal. */
+function tokenMatches(presented: string | undefined, expected: string): boolean {
+  if (presented === undefined || Buffer.byteLength(presented, "utf8") > BRIDGE_MAX_TOKEN_BYTES) {
+    return false;
+  }
   return timingSafeEqual(
     createHash("sha256").update(presented).digest(),
     createHash("sha256").update(expected).digest(),
   );
 }
 
-/** The request's presented secret: the bridge header verbatim, else the token
- *  of a standard `Authorization: Bearer <token>` header. Callers that cannot
- *  set custom headers (AgentNet's remote-wallet client sends only bearer
- *  auth) still authenticate; everyone else keeps the existing header. */
-function presentedToken(req: IncomingMessage): string | string[] | undefined {
-  const custom = req.headers[BRIDGE_TOKEN_HEADER];
-  if (custom !== undefined) return custom;
-  const auth = req.headers.authorization;
-  if (typeof auth === "string" && auth.startsWith("Bearer ")) return auth.slice("Bearer ".length);
+const BEARER_AUTHORIZATION = /^Bearer ([A-Za-z0-9\-._~+/]+={0,})$/i;
+
+function rawHeaderValues(req: IncomingMessage, name: string): string[] {
+  const values: string[] = [];
+  for (let index = 0; index < req.rawHeaders.length; index += 2) {
+    if (req.rawHeaders[index]?.toLowerCase() === name) {
+      values.push(req.rawHeaders[index + 1] ?? "");
+    }
+  }
+  return values;
+}
+
+/** Return one unambiguous secret. `rawHeaders` is intentional: runtimes may
+ *  discard or join duplicate Authorization fields in `headers`, while peers
+ *  and proxies can choose a different occurrence. The custom header retains
+ *  precedence, including when malformed, so it cannot fall through to a
+ *  second credential. */
+function presentedToken(req: IncomingMessage): string | undefined {
+  const custom = rawHeaderValues(req, BRIDGE_TOKEN_HEADER);
+  if (custom.length > 0) return custom.length === 1 ? custom[0] : undefined;
+
+  const authorization = rawHeaderValues(req, "authorization");
+  if (authorization.length !== 1) return undefined;
+  const value = authorization[0];
+  if (Buffer.byteLength(value, "utf8") > BRIDGE_MAX_TOKEN_BYTES + "Bearer ".length) {
+    return undefined;
+  }
+  const match = BEARER_AUTHORIZATION.exec(value);
+  if (match) return match[1];
   return undefined;
 }
 
@@ -156,6 +181,12 @@ export async function startSignerBridge(
     throw new StewardSignerError(
       "api",
       `signer bridge token must contain at least ${BRIDGE_MIN_TOKEN_BYTES} bytes`,
+    );
+  }
+  if (Buffer.byteLength(token, "utf8") > BRIDGE_MAX_TOKEN_BYTES) {
+    throw new StewardSignerError(
+      "api",
+      `signer bridge token must contain at most ${BRIDGE_MAX_TOKEN_BYTES} bytes`,
     );
   }
 

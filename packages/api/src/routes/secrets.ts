@@ -17,7 +17,7 @@ import {
   tenantConfigs as tenantConfigsTable,
 } from "@stwd/db";
 import { type SecretVault, validateSecretRouteConfig } from "@stwd/vault";
-import { and, eq, inArray } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { type Context, Hono } from "hono";
 import {
   type AuditEventInput,

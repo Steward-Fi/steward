@@ -13,13 +13,11 @@ import {
 } from "@stwd/db";
 import { eq } from "drizzle-orm";
 import { type Context, Hono, type Next } from "hono";
-import { withTenantAuditedTransaction, writeAuditEvent } from "../services/audit";
+import { withTenantAuditedTransaction } from "../services/audit";
 import {
   type ApiResponse,
   type AppVariables,
   db,
-  findTenant,
-  getConditionSetReferenceValidationError,
   getTenantPayload,
   isNonEmptyString,
   isValidTenantId,

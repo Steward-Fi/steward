@@ -696,6 +696,8 @@ function transferActionPayload(input: {
   broadcast: boolean;
   referenceId?: string | null;
   sponsorship?: Record<string, unknown>;
+  idempotencyKeyDigest?: string;
+  requestDigest?: string;
 }) {
   return {
     type: "transfer",
@@ -705,6 +707,8 @@ function transferActionPayload(input: {
     broadcast: input.broadcast,
     ...(input.referenceId ? { referenceId: input.referenceId } : {}),
     ...(input.sponsorship ? { sponsorship: input.sponsorship } : {}),
+    ...(input.idempotencyKeyDigest ? { idempotencyKeyDigest: input.idempotencyKeyDigest } : {}),
+    ...(input.requestDigest ? { requestDigest: input.requestDigest } : {}),
   };
 }
 
@@ -872,6 +876,21 @@ async function findActionByReferenceId(
         eq(transactions.agentId, agentId),
         eq(transactions.actionType, actionType),
         sql`(${transactions.actionPayload}->>'referenceId' = ${referenceId} or ${transactions.actionPayload}->>'reference_id' = ${referenceId})`,
+      ),
+    )
+    .limit(1);
+  return existing ?? null;
+}
+
+async function findActionByIdempotency(agentId: string, actionType: string, keyDigest: string) {
+  const [existing] = await db
+    .select()
+    .from(transactions)
+    .where(
+      and(
+        eq(transactions.agentId, agentId),
+        eq(transactions.actionType, actionType),
+        sql`${transactions.actionPayload}->>'idempotencyKeyDigest' = ${keyDigest}`,
       ),
     )
     .limit(1);
@@ -4204,7 +4223,11 @@ vaultRoutes.post("/:agentId/actions/transfer", async (c) => {
           policyResults: evaluation.results,
         },
       });
-      if (sponsorshipPayload?.sponsored === true && !solanaRecoveryBinding) {
+      if (
+        sponsorshipPayload?.sponsored === true &&
+        !solanaRecoveryBinding &&
+        !solanaExecutionToken
+      ) {
         await db.insert(transactions).values({
           id: actionId,
           agentId,
@@ -4266,14 +4289,14 @@ vaultRoutes.post("/:agentId/actions/transfer", async (c) => {
             blockhashKind: "recent" | "durable_nonce" | "unknown";
           }
         | undefined;
+      let solanaSigningResult: SolanaSigningResult | null = null;
       if (isSolanaTokenTransfer) {
         if (!signRequest.data) {
           throw new Error("SPL transfer transaction was not built");
         }
-        // Sponsored actions are pre-staged before the durable reservation so
-        // sponsored_gas_events can satisfy its transaction FK. Reuse that row
-        // for SPL execution instead of inserting the same action id twice.
-        if (!solanaRecoveryBinding && !sponsoredTransferStaged)
+        // Parsed SPL execution is normally pre-staged by the durable Solana
+        // claim above. Only create a row when no claim or sponsorship row did.
+        if (!solanaExecutionToken && !sponsoredTransferStaged)
           await db.insert(transactions).values({
             id: actionId,
             agentId,
@@ -4341,6 +4364,7 @@ vaultRoutes.post("/:agentId/actions/transfer", async (c) => {
             consumeExecutionClaim: consumeParsedSolanaExecutionClaim,
           },
         );
+        solanaSigningResult = { ...signed, caip2: toCaip2(transfer.chainId) };
         result = signed.signature;
         if (signed.artifactSignature && signed.recentBlockhash && signed.blockhashKind) {
           solanaArtifactEvidence = {
@@ -4374,12 +4398,13 @@ vaultRoutes.post("/:agentId/actions/transfer", async (c) => {
       if (
         isSolanaTokenTransfer &&
         solanaExecutionToken &&
-        !(await finalizeSolanaRecoveryAnchor(actionId, agentId, solanaExecutionToken, {
-          signature: result,
-          broadcast: transfer.broadcast,
-          chainId: transfer.chainId,
-          caip2: toCaip2(transfer.chainId),
-        }))
+        (!solanaSigningResult ||
+          !(await finalizeSolanaRecoveryAnchor(
+            actionId,
+            agentId,
+            solanaExecutionToken,
+            solanaSigningResult,
+          )))
       ) {
         return solanaLostOwnershipResponse(c, actionId, agentId, "transfer");
       }
@@ -4414,7 +4439,7 @@ vaultRoutes.post("/:agentId/actions/transfer", async (c) => {
                   eq(transactions.status, txStatus),
                   transfer.broadcast
                     ? eq(transactions.txHash, result)
-                    : sql`${transactions.txHash} is null`,
+                    : eq(transactions.txHash, solanaSigningResult?.artifactSignature ?? ""),
                   sql`${transactions.actionPayload}->>'executionToken' = ${solanaExecutionToken}`,
                 )
               : undefined,
@@ -10221,6 +10246,7 @@ type SolanaRecoveryRow = {
   txHash: string | null;
   chainId: number;
   actionPayload: unknown;
+  signedArtifactEvidence?: unknown;
   actionType?: string | null;
 };
 
@@ -10250,6 +10276,9 @@ function solanaReplayResponse(
     ) as Response;
   }
   if ((row.status === "broadcast" || row.status === "confirmed") && row.txHash) {
+    const evidence = isSignedArtifactEvidence(row.signedArtifactEvidence)
+      ? row.signedArtifactEvidence
+      : null;
     return c.json<ApiResponse<SolanaSigningResult & { txId: string }>>({
       ok: true,
       data: {
@@ -10258,6 +10287,24 @@ function solanaReplayResponse(
         broadcast: true,
         chainId: row.chainId,
         caip2: toCaip2(row.chainId),
+        ...(evidence?.chainFamily === "solana"
+          ? {
+              artifactSignature: evidence.artifactSignature,
+              signer: evidence.signer,
+              recentBlockhash: evidence.recentBlockhash,
+              blockhashKind: evidence.blockhashKind,
+              ...(evidence.lastValidBlockHeight === undefined
+                ? {}
+                : { lastValidBlockHeight: evidence.lastValidBlockHeight }),
+              ...(evidence.durableNonceAccount === undefined
+                ? {}
+                : { durableNonceAccount: evidence.durableNonceAccount }),
+              ...(evidence.durableNonceAuthority === undefined
+                ? {}
+                : { durableNonceAuthority: evidence.durableNonceAuthority }),
+              rawIntentDigest: evidence.rawIntentDigest,
+            }
+          : {}),
       },
     });
   }

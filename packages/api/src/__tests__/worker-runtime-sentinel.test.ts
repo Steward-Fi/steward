@@ -14,8 +14,8 @@ import {
   withTenantTransactionDatabase,
 } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
-import * as redisMiddleware from "../middleware/redis";
 import { withRuntimeEnvironment } from "@stwd/shared/runtime-env";
+import * as redisMiddleware from "../middleware/redis";
 import {
   __resetWorkerRlsReadinessForTests,
   __setWorkerInitForTests,
