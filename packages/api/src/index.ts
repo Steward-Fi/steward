@@ -16,9 +16,9 @@ import { validateJwtSecretEnv } from "@stwd/auth";
 import { assertRlsDeploymentSafety, closeDb, getDb, getMigrationExpectation } from "@stwd/db";
 import { shouldUsePGLite } from "@stwd/db/pglite";
 import { redactedThrownDiagnostics } from "@stwd/shared";
-import { sql } from "drizzle-orm";
-import { composeApp } from "./compose";
+import { composeApp, getComposedPluginMigrationSources } from "./compose";
 import { getRedisClient, initRedis, isRedisConfigured, shutdownRedis } from "./middleware/redis";
+import { readMigrationReadiness } from "./migration-readiness";
 import { resolveEnabledPlugins } from "./plugin-config";
 import { createReadinessHandler, type ReadinessCheck } from "./readiness";
 import { assertAuthStoresAreSafe, getAuthStoreSources, initAuthStores } from "./routes/auth";
@@ -65,6 +65,7 @@ validateJwtSecretEnv();
 // plugin is dynamically imported so the lean core graph never statically pulls
 // in the trading stack. top-level await is supported by the Bun entry.
 const app = await runStartupPhase("compose", () => composeApp());
+const pluginMigrationSources = await getComposedPluginMigrationSources();
 const capabilitiesEnabled = resolveEnabledPlugins().has("capabilities");
 
 // ─── In-memory rate-limit log + shutdown guard ───────────────────────────────
@@ -147,54 +148,16 @@ app.get(
       const checks: Record<string, ReadinessCheck> = {};
       const expectedMigration = getMigrationExpectation();
       checks.migrations = { ok: false, detail: { expected: expectedMigration.tag } };
+      checks.pluginMigrations = {
+        ok: pluginMigrationSources.length === 0,
+        ...(pluginMigrationSources.length === 0 ? { required: false } : {}),
+      };
       try {
         const db = getDb();
-        const pglite = shouldUsePGLite();
-        const result = pglite
-          ? await db.execute(sql`
-          SELECT
-            EXTRACT(EPOCH FROM CURRENT_TIMESTAMP) * 1000 AS database_time_ms,
-            EXISTS(
-              SELECT 1 FROM __steward_migrations WHERE tag = ${expectedMigration.tag}
-            ) AS expected_migration_applied
-        `)
-          : await db.execute(sql`
-          SELECT
-            EXTRACT(EPOCH FROM clock_timestamp()) * 1000 AS database_time_ms,
-            (SELECT MAX(created_at) FROM drizzle.__drizzle_migrations) AS migration_created_at
-        `);
-        const rows = Array.isArray(result)
-          ? result
-          : ((result as unknown as { rows?: unknown[] }).rows ?? []);
-        const row = rows[0] as
-          | { database_time_ms?: string | number; migration_created_at?: string | number | null }
-          | undefined;
-        const databaseTimeMs = Number(row?.database_time_ms);
-        const migrationCreatedAt = Number(row?.migration_created_at);
-        const expectedMigrationApplied =
-          (row as { expected_migration_applied?: unknown } | undefined)
-            ?.expected_migration_applied === true;
-        const databaseSkewMs = Math.abs(Date.now() - databaseTimeMs);
-        checks.database = {
-          ok: Number.isFinite(databaseTimeMs) && databaseSkewMs <= 30_000,
-          detail: { clockSkewMs: Math.round(databaseSkewMs), serverTime: new Date().toISOString() },
-        };
-        checks.migrations = {
-          ok:
-            migrationsRan &&
-            (pglite
-              ? expectedMigrationApplied
-              : migrationCreatedAt === expectedMigration.createdAt),
-          detail: {
-            expected: expectedMigration.tag,
-            expectedCreatedAt: expectedMigration.createdAt,
-            ...(pglite
-              ? { expectedMigrationApplied }
-              : {
-                  actualCreatedAt: Number.isFinite(migrationCreatedAt) ? migrationCreatedAt : null,
-                }),
-          },
-        };
+        Object.assign(
+          checks,
+          await readMigrationReadiness({ db, migrationsRan, pluginMigrationSources }),
+        );
         if (process.env.NODE_ENV === "production") {
           const expectedRole = process.env.STEWARD_APP_DATABASE_ROLE;
           if (!expectedRole) throw new Error("STEWARD_APP_DATABASE_ROLE is required in production");
