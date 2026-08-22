@@ -760,7 +760,16 @@ export function createOperatorRecoveryRoutes(
         .orderBy(desc(auditEvents.seq))
         .limit(1);
       const selected = rows[0];
-      if (!selected) return undefined;
+      if (!selected) {
+        const fullVerification = await verifyAuditChain(tenantId, {
+          requireHead: true,
+          executor: queryDb,
+        });
+        if (!fullVerification.valid) {
+          throw new Error("COLLATERAL_TRANSFER_AUDIT_CHAIN_INVALID");
+        }
+        return undefined;
+      }
       const verification = await verifyAuditChain(tenantId, {
         fromSeq: selected.seq,
         toSeq: selected.seq,
@@ -1586,6 +1595,31 @@ export function createOperatorRecoveryRoutes(
     );
     const replayResponse = operatorIdempotencyResponse(c, idempotency);
     if (replayResponse) return replayResponse;
+
+    // Establish a non-keyed HMAC-chain guard before interpreting absence. If a
+    // prior keyed requested/terminal pair was deleted, full-chain verification
+    // below observes the missing sequence/high-water count and fails closed.
+    const guardActor = operatorActor(c);
+    try {
+      await writeAuditEvent({
+        tenantId,
+        actorType: guardActor.actorType,
+        actorId: guardActor.actorId,
+        action: "trade.recovery.replay_guard",
+        resourceType: "trade",
+        resourceId: agentId,
+        metadata: { requestFingerprint },
+      });
+    } catch (err) {
+      console.error(
+        "[operator-recovery] collateral transfer replay guard failed",
+        redactedThrownDiagnostics(err),
+      );
+      return c.json<ApiResponse>(
+        { ok: false, error: "Collateral transfer replay evidence is unavailable" },
+        503,
+      );
+    }
 
     // The HMAC-chained audit log is the durable replay backstop when Redis or a
     // process-local idempotency cache is unavailable. A requested event without

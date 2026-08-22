@@ -23,7 +23,7 @@ import {
   writeAuditEvent,
 } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
-import { and, asc, eq } from "drizzle-orm";
+import { and, asc, eq, inArray } from "drizzle-orm";
 import { Hono } from "hono";
 import { z } from "zod";
 import { verifyAuditChain } from "../../../api/src/services/audit";
@@ -351,7 +351,7 @@ function transferRequest(
 }
 
 async function transferAudits(tenantId: string, agentId: string) {
-  return getDb()
+  const rows = await getDb()
     .select({
       action: auditEvents.action,
       actorType: auditEvents.actorType,
@@ -363,6 +363,7 @@ async function transferAudits(tenantId: string, agentId: string) {
     .from(auditEvents)
     .where(and(eq(auditEvents.tenantId, tenantId), eq(auditEvents.resourceId, agentId)))
     .orderBy(asc(auditEvents.seq));
+  return rows.filter(({ action }) => action.includes("recovery.transfer"));
 }
 
 async function transferAuditActions(tenantId: string, agentId: string): Promise<string[]> {
@@ -668,6 +669,35 @@ describe("mounted HIP-3 collateral transfer", () => {
       ok: false,
       error: "Collateral transfer replay evidence is unavailable",
     });
+    expect(submitSendAssetCalls).toHaveLength(1);
+  });
+
+  it("fails closed when all keyed replay rows were deleted from the audit chain", async () => {
+    resetSendAssetMock();
+    const tenantId = `tenant-transfer-deleted-${Date.now()}`;
+    const agentId = `agent-transfer-deleted-${Date.now()}`;
+    await seedAgent({ tenantId, agentId });
+    const idempotencyKey = "deleted-replay-evidence";
+    expect(
+      (await transferRequest(await buildTransferApp(), tenantId, agentId, { idempotencyKey }))
+        .status,
+    ).toBe(200);
+
+    await getDb()
+      .delete(auditEvents)
+      .where(
+        and(
+          eq(auditEvents.tenantId, tenantId),
+          inArray(auditEvents.action, [
+            "trade.recovery.transfer.requested",
+            "trade.recovery.transfer.submitted",
+          ]),
+        ),
+      );
+    const replay = await transferRequest(await buildTransferApp(), tenantId, agentId, {
+      idempotencyKey,
+    });
+    expect(replay.status).toBe(503);
     expect(submitSendAssetCalls).toHaveLength(1);
   });
 });

@@ -146,11 +146,12 @@ function transfer(app: Hono, tenantId: string, agentId: string, idempotencyKey: 
 }
 
 async function actions(tenantId: string, agentId: string) {
-  return getDb()
+  const rows = await getDb()
     .select({ action: auditEvents.action, metadata: auditEvents.metadata })
     .from(auditEvents)
     .where(and(eq(auditEvents.tenantId, tenantId), eq(auditEvents.resourceId, agentId)))
     .orderBy(asc(auditEvents.seq));
+  return rows.filter(({ action }) => action.includes("recovery.transfer"));
 }
 
 afterAll(async () => {
