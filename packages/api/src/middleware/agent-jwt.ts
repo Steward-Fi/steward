@@ -288,11 +288,7 @@ export async function authenticateAgentJwt(
     // Refresh exactly once on a miss so rotation is prompt while an actually
     // unknown kid remains fail-closed.
     const now = Date.now();
-    if (
-      !key &&
-      hadFreshCache &&
-      now - lastJwksMissRefreshAt >= JWKS_MISS_REFRESH_MIN_INTERVAL_MS
-    ) {
+    if (!key && hadFreshCache && now - lastJwksMissRefreshAt >= JWKS_MISS_REFRESH_MIN_INTERVAL_MS) {
       lastJwksMissRefreshAt = now;
       keys = await loadJwks(true);
       key = keys.get(header.kid);
