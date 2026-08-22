@@ -11,7 +11,7 @@ import {
   userTenants,
 } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
-import { and, eq } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import { Hono } from "hono";
 
 const TENANT_ID = "user-tenant-admin-users";
@@ -20,6 +20,7 @@ const OWNER_PERSONAL_TENANT_ID = "personal-user-tenant-admin-owner";
 
 describe("user tenant-admin user directory routes", () => {
   let userRoutes: typeof import("../routes/user").userRoutes;
+  let isUserTenantTransitionRequest: typeof import("../routes/user").isUserTenantTransitionRequest;
   let mountedUserRoutes: Hono;
   let createSessionToken: typeof import("../routes/auth").createSessionToken;
   let verifySessionToken: typeof import("../routes/auth").verifySessionToken;
@@ -99,11 +100,30 @@ describe("user tenant-admin user directory routes", () => {
       ]);
 
     const userModule = await import("../routes/user");
-    ({ userRoutes } = userModule);
+    ({ isUserTenantTransitionRequest, userRoutes } = userModule);
     mountedUserRoutes = new Hono();
     mountedUserRoutes.use("/user/*", (c, next) => userModule.userSessionAuth(c as never, next));
     mountedUserRoutes.route("/user", userRoutes);
     ({ createSessionToken, verifySessionToken } = await import("../routes/auth"));
+  });
+
+  it("matches only exact mounted invitation transition routes", () => {
+    expect(isUserTenantTransitionRequest("POST", "/me/tenants/tenant-a/join")).toBe(true);
+    expect(isUserTenantTransitionRequest("POST", "/me/tenants/_tenant-a/join")).toBe(true);
+    expect(
+      isUserTenantTransitionRequest("POST", "/user/me/tenants/tenant-a/invitations/accept"),
+    ).toBe(true);
+    expect(isUserTenantTransitionRequest("GET", "/user/me/tenants/tenant-a/join")).toBe(false);
+    expect(isUserTenantTransitionRequest("POST", "/v1/user/me/tenants/tenant-a/join")).toBe(false);
+    expect(isUserTenantTransitionRequest("POST", "/user/me/tenants/tenant-a/join/extra")).toBe(
+      false,
+    );
+    expect(isUserTenantTransitionRequest("POST", "/user/me/tenants/tenant-a%2Fother/join")).toBe(
+      false,
+    );
+    expect(isUserTenantTransitionRequest("POST", "/user/me/tenants/tenant-a%252Fother/join")).toBe(
+      false,
+    );
   });
 
   afterAll(async () => {
@@ -268,7 +288,7 @@ describe("user tenant-admin user directory routes", () => {
     expect(directoryBody.error).toContain("recent MFA");
   });
 
-  it("rejects reachable tenant-admin invitation mutations for personal tenants", async () => {
+  it("rejects reachable tenant-admin membership mutations for personal tenants", async () => {
     const personalTenantId = `personal-${ownerId}`;
     const token = await personalTokenFor(ownerId);
     const create = await userRoutes.request(`/me/tenants/${personalTenantId}/invitations`, {
@@ -283,6 +303,27 @@ describe("user tenant-admin user directory routes", () => {
       { method: "DELETE", headers: { Authorization: `Bearer ${token}` } },
     );
     expect(revoke.status).toBe(409);
+
+    const role = await userRoutes.request(`/me/tenants/${personalTenantId}/users/${ownerId}/role`, {
+      method: "PATCH",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ role: "owner" }),
+    });
+    expect(role.status).toBe(403);
+    const deactivate = await userRoutes.request(
+      `/me/tenants/${personalTenantId}/users/${ownerId}/deactivate`,
+      {
+        method: "PATCH",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ deactivated: true }),
+      },
+    );
+    expect(deactivate.status).toBe(403);
+    const remove = await userRoutes.request(`/me/tenants/${personalTenantId}/users/${ownerId}`, {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    expect(remove.status).toBe(403);
   });
 
   it("consumes a single-use invitation even when the accepting user is already a member", async () => {
@@ -419,6 +460,68 @@ describe("user tenant-admin user directory routes", () => {
       .from(tenantInvitations)
       .where(eq(tenantInvitations.id, invitation.id));
     expect(stored).toMatchObject({ status: "accepted", acceptedByUserId: ownerId });
+  });
+
+  it("revalidates the locked verified identity before accepting or joining", async () => {
+    const acceptToken = "d".repeat(64);
+    const joinToken = "e".repeat(64);
+    const invitations = await getDb()
+      .insert(tenantInvitations)
+      .values([
+        {
+          tenantId: TENANT_ID,
+          email: "owner@example.test",
+          role: "member",
+          tokenHash: createHash("sha256").update(acceptToken).digest("hex"),
+          expiresAt: new Date(Date.now() + 60_000),
+        },
+        {
+          tenantId: OTHER_TENANT_ID,
+          email: "owner@example.test",
+          role: "member",
+          tokenHash: createHash("sha256").update(joinToken).digest("hex"),
+          expiresAt: new Date(Date.now() + 60_000),
+        },
+      ])
+      .returning({ id: tenantInvitations.id });
+    await getDb()
+      .insert(tenantConfigs)
+      .values({ tenantId: OTHER_TENANT_ID, joinMode: "invite" })
+      .onConflictDoUpdate({
+        target: tenantConfigs.tenantId,
+        set: { joinMode: "invite", updatedAt: new Date() },
+      });
+    const sessionToken = await personalTokenFor(ownerId);
+    const accept = () =>
+      mountedUserRoutes.request(`/user/me/tenants/${TENANT_ID}/invitations/accept`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${sessionToken}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ token: acceptToken }),
+      });
+    const join = () =>
+      mountedUserRoutes.request(`/user/me/tenants/${OTHER_TENANT_ID}/join`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${sessionToken}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ token: joinToken }),
+      });
+
+    await getDb().update(users).set({ emailVerified: false }).where(eq(users.id, ownerId));
+    expect((await accept()).status).toBe(404);
+    expect((await join()).status).toBe(403);
+    const pending = await getDb()
+      .select({ status: tenantInvitations.status })
+      .from(tenantInvitations)
+      .where(
+        inArray(
+          tenantInvitations.id,
+          invitations.map((invitation) => invitation.id),
+        ),
+      );
+    expect(pending.map((invitation) => invitation.status)).toEqual(["pending", "pending"]);
+
+    await getDb().update(users).set({ emailVerified: true }).where(eq(users.id, ownerId));
+    expect((await accept()).status).toBe(200);
+    expect((await join()).status).toBe(200);
   });
 
   it("serializes concurrent owner demotions so exactly one wins", async () => {

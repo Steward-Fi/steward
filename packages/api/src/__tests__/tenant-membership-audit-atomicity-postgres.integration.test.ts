@@ -1,10 +1,12 @@
 import { afterAll, beforeAll, describe, expect, it, spyOn } from "bun:test";
+import { createHash } from "node:crypto";
 import { revocationStore } from "@stwd/auth";
 import {
   __resetAuditHmacKeyCacheForTests,
   auditChainHeads,
   auditEvents,
   createDb,
+  tenantConfigs,
   tenantInvitations,
   tenants,
   users,
@@ -24,10 +26,12 @@ realPostgresDescribe("tenant membership audit atomicity with real PostgreSQL", (
   const ownerA = crypto.randomUUID();
   const ownerB = crypto.randomUUID();
   const member = crypto.randomUUID();
+  const memberPersonalTenantId = `personal-${member}`;
   const triggerFunction = `fail_membership_audit_${suffix}`;
   const triggerName = `fail_membership_audit_${suffix}`;
   let admin: ReturnType<typeof createDb>;
   let app: Hono;
+  let createSessionToken: typeof import("../routes/auth").createSessionToken;
   const revokeUserTokens =
     databaseUrl && !process.env.STEWARD_PGLITE_MEMORY
       ? spyOn(revocationStore, "revokeUserTokens").mockResolvedValue(0)
@@ -54,6 +58,11 @@ realPostgresDescribe("tenant membership audit atomicity with real PostgreSQL", (
       name: tenantId,
       apiKeyHash: `hash-${suffix}`,
     });
+    await admin.db.insert(tenants).values({
+      id: memberPersonalTenantId,
+      name: memberPersonalTenantId,
+      apiKeyHash: `hash-personal-${suffix}`,
+    });
     await admin.db.insert(users).values([
       { id: ownerA, email: `owner-a-${suffix}@example.test`, emailVerified: true },
       { id: ownerB, email: `owner-b-${suffix}@example.test`, emailVerified: true },
@@ -63,9 +72,11 @@ realPostgresDescribe("tenant membership audit atomicity with real PostgreSQL", (
       { userId: ownerA, tenantId, role: "owner" },
       { userId: ownerB, tenantId, role: "owner" },
       { userId: member, tenantId, role: "member" },
+      { userId: member, tenantId: memberPersonalTenantId, role: "owner" },
     ]);
     const { userRoutes } = await import("../routes/user");
     const { platformRoutes } = await import("../routes/platform");
+    ({ createSessionToken } = await import("../routes/auth"));
     app = new Hono();
     app.use("*", correlationId);
     app.route("/user", userRoutes);
@@ -81,7 +92,9 @@ realPostgresDescribe("tenant membership audit atomicity with real PostgreSQL", (
     await admin.db.delete(auditChainHeads).where(eq(auditChainHeads.tenantId, tenantId));
     await admin.db.delete(tenantInvitations).where(eq(tenantInvitations.tenantId, tenantId));
     await admin.db.delete(userTenants).where(eq(userTenants.tenantId, tenantId));
+    await admin.db.delete(userTenants).where(eq(userTenants.tenantId, memberPersonalTenantId));
     await admin.db.delete(tenants).where(eq(tenants.id, tenantId));
+    await admin.db.delete(tenants).where(eq(tenants.id, memberPersonalTenantId));
     await admin.db.delete(users).where(inArray(users.id, [ownerA, ownerB, member]));
     await admin.client.end();
     if (previousJwtSecret === undefined) delete process.env.STEWARD_JWT_SECRET;
@@ -238,6 +251,228 @@ realPostgresDescribe("tenant membership audit atomicity with real PostgreSQL", (
       locker.release();
       await admin.client.unsafe(`drop trigger if exists "${gateTrigger}" on audit_events`);
       await admin.client.unsafe(`drop function if exists "${gateFunction}"()`);
+    }
+  });
+
+  it("revalidates a locked verified email across accept and join races", async () => {
+    await admin.db
+      .insert(tenantConfigs)
+      .values({ tenantId, joinMode: "invite" })
+      .onConflictDoUpdate({
+        target: tenantConfigs.tenantId,
+        set: { joinMode: "invite", updatedAt: new Date() },
+      });
+    const sessionToken = await createSessionToken("", memberPersonalTenantId, {
+      userId: member,
+      tenantId: memberPersonalTenantId,
+      mfaVerifiedAt: Date.now(),
+    });
+    const variants = [
+      {
+        action: "tenant.invitation.accept.authorized",
+        path: `/user/me/tenants/${tenantId}/invitations/accept`,
+        failedStatus: 404,
+      },
+      {
+        action: "tenant.member.accept_invite.authorized",
+        path: `/user/me/tenants/${tenantId}/join`,
+        failedStatus: 403,
+      },
+    ] as const;
+    for (const [index, variant] of variants.entries()) {
+      const rawToken = String(index + 7).repeat(64);
+      const [invitation] = await admin.db
+        .insert(tenantInvitations)
+        .values({
+          tenantId,
+          email: `member-${suffix}@example.test`,
+          role: "member",
+          tokenHash: createHash("sha256").update(rawToken).digest("hex"),
+          expiresAt: new Date(Date.now() + 60_000),
+        })
+        .returning({ id: tenantInvitations.id });
+      const gate = BigInt(`0x${index + 3}${suffix.slice(0, 13)}`).toString();
+      const gateFunction = `gate_identity_${index}_${suffix}`;
+      const locker = await admin.client.reserve();
+      try {
+        await admin.client.unsafe(`
+          create function "${gateFunction}"() returns trigger language plpgsql as $$
+          begin
+            if new.action = '${variant.action}' and new.resource_id = '${invitation.id}' then
+              perform pg_advisory_xact_lock(${gate});
+            end if;
+            return new;
+          end
+          $$
+        `);
+        await admin.client.unsafe(`
+          create trigger "${gateFunction}" before insert on audit_events
+          for each row execute function "${gateFunction}"()
+        `);
+        await locker`select pg_advisory_lock(${gate})`;
+        const responsePromise = app.request(variant.path, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${sessionToken}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ token: rawToken }),
+        });
+        await waitForAdvisoryWaiters(admin, 1);
+        await admin.db.update(users).set({ emailVerified: false }).where(eq(users.id, member));
+        await locker`select pg_advisory_unlock(${gate})`;
+        expect((await responsePromise).status).toBe(variant.failedStatus);
+        const [pending] = await admin.db
+          .select({ status: tenantInvitations.status })
+          .from(tenantInvitations)
+          .where(eq(tenantInvitations.id, invitation.id));
+        expect(pending?.status).toBe("pending");
+      } finally {
+        await locker`select pg_advisory_unlock(${gate})`;
+        locker.release();
+        await admin.client.unsafe(`drop trigger if exists "${gateFunction}" on audit_events`);
+        await admin.client.unsafe(`drop function if exists "${gateFunction}"()`);
+        await admin.db.update(users).set({ emailVerified: true }).where(eq(users.id, member));
+      }
+      const retry = await app.request(variant.path, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${sessionToken}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ token: rawToken }),
+      });
+      expect(retry.status).toBe(200);
+    }
+  });
+
+  it("rejects an owner grant when the requester is demoted after authorization", async () => {
+    revokeUserTokens?.mockClear();
+    await admin.db
+      .update(userTenants)
+      .set({ role: "owner" })
+      .where(and(eq(userTenants.tenantId, tenantId), eq(userTenants.userId, ownerA)));
+    await admin.db
+      .update(userTenants)
+      .set({ role: "member" })
+      .where(and(eq(userTenants.tenantId, tenantId), eq(userTenants.userId, member)));
+    const gate = BigInt(`0x1${suffix.slice(0, 13)}`).toString();
+    const gateFunction = `gate_owner_grant_${suffix}`;
+    const locker = await admin.client.reserve();
+    try {
+      await admin.client.unsafe(`
+        create function "${gateFunction}"() returns trigger language plpgsql as $$
+        begin
+          if new.action = 'tenant.member.role.update.authorized' and new.resource_id = '${member}' then
+            perform pg_advisory_xact_lock(${gate});
+          end if;
+          return new;
+        end
+        $$
+      `);
+      await admin.client.unsafe(`
+        create trigger "${gateFunction}" before insert on audit_events
+        for each row execute function "${gateFunction}"()
+      `);
+      await locker`select pg_advisory_lock(${gate})`;
+      const token = await createSessionToken("", tenantId, {
+        userId: ownerA,
+        tenantId,
+        mfaVerifiedAt: Date.now(),
+      });
+      const responsePromise = app.request(`/user/me/tenants/${tenantId}/users/${member}/role`, {
+        method: "PATCH",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ role: "owner" }),
+      });
+      await waitForAdvisoryWaiters(admin, 1);
+      await admin.db.transaction(async (tx) => {
+        await tx.execute(
+          sql`select pg_advisory_xact_lock(hashtextextended(${`tenant_owner_lifecycle_${tenantId}`}, 0))`,
+        );
+        await tx
+          .update(userTenants)
+          .set({ role: "admin" })
+          .where(and(eq(userTenants.tenantId, tenantId), eq(userTenants.userId, ownerA)));
+      });
+      await locker`select pg_advisory_unlock(${gate})`;
+      expect((await responsePromise).status).toBe(403);
+      const [stored] = await admin.db
+        .select({ role: userTenants.role })
+        .from(userTenants)
+        .where(and(eq(userTenants.tenantId, tenantId), eq(userTenants.userId, member)));
+      expect(stored?.role).toBe("member");
+      expect(revokeUserTokens).toHaveBeenCalledTimes(0);
+    } finally {
+      await locker`select pg_advisory_unlock(${gate})`;
+      locker.release();
+      await admin.client.unsafe(`drop trigger if exists "${gateFunction}" on audit_events`);
+      await admin.client.unsafe(`drop function if exists "${gateFunction}"()`);
+    }
+  });
+
+  it("does not revoke a member when the deleting admin loses authority", async () => {
+    revokeUserTokens?.mockClear();
+    await admin.db
+      .update(userTenants)
+      .set({ role: "admin" })
+      .where(and(eq(userTenants.tenantId, tenantId), eq(userTenants.userId, ownerA)));
+    await admin.db
+      .update(userTenants)
+      .set({ role: "member" })
+      .where(and(eq(userTenants.tenantId, tenantId), eq(userTenants.userId, member)));
+    const gate = BigInt(`0x2${suffix.slice(0, 13)}`).toString();
+    const gateFunction = `gate_member_remove_${suffix}`;
+    const locker = await admin.client.reserve();
+    try {
+      await admin.client.unsafe(`
+        create function "${gateFunction}"() returns trigger language plpgsql as $$
+        begin
+          if new.action = 'tenant.member.remove.authorized' and new.resource_id = '${member}' then
+            perform pg_advisory_xact_lock(${gate});
+          end if;
+          return new;
+        end
+        $$
+      `);
+      await admin.client.unsafe(`
+        create trigger "${gateFunction}" before insert on audit_events
+        for each row execute function "${gateFunction}"()
+      `);
+      await locker`select pg_advisory_lock(${gate})`;
+      const token = await createSessionToken("", tenantId, {
+        userId: ownerA,
+        tenantId,
+        mfaVerifiedAt: Date.now(),
+      });
+      const responsePromise = app.request(`/user/me/tenants/${tenantId}/users/${member}`, {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      await waitForAdvisoryWaiters(admin, 1);
+      await admin.db.transaction(async (tx) => {
+        await tx.execute(
+          sql`select pg_advisory_xact_lock(hashtextextended(${`tenant_owner_lifecycle_${tenantId}`}, 0))`,
+        );
+        await tx
+          .update(userTenants)
+          .set({ role: "member" })
+          .where(and(eq(userTenants.tenantId, tenantId), eq(userTenants.userId, ownerA)));
+      });
+      await locker`select pg_advisory_unlock(${gate})`;
+      expect((await responsePromise).status).toBe(403);
+      const [stored] = await admin.db
+        .select({ role: userTenants.role })
+        .from(userTenants)
+        .where(and(eq(userTenants.tenantId, tenantId), eq(userTenants.userId, member)));
+      expect(stored?.role).toBe("member");
+      expect(revokeUserTokens).toHaveBeenCalledTimes(0);
+    } finally {
+      await locker`select pg_advisory_unlock(${gate})`;
+      locker.release();
+      await admin.client.unsafe(`drop trigger if exists "${gateFunction}" on audit_events`);
+      await admin.client.unsafe(`drop function if exists "${gateFunction}"()`);
+      await admin.db
+        .update(userTenants)
+        .set({ role: "owner" })
+        .where(and(eq(userTenants.tenantId, tenantId), eq(userTenants.userId, ownerA)));
     }
   });
 

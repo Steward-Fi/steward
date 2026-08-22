@@ -1764,14 +1764,19 @@ export async function userSessionAuth(
   // Do not bind the personal transaction around those two exact routes: each handler
   // validates the target and token, then opens its own target-tenant RLS
   // transaction with the verified user id as the non-forgeable authority.
-  const isInvitationTransition =
-    c.req.method === "POST" &&
-    /^\/(?:user\/)?me\/tenants\/[^/]+\/(?:join|invitations\/accept)$/.test(c.req.path);
+  const isInvitationTransition = isUserTenantTransitionRequest(c.req.method, c.req.path);
   if (isInvitationTransition) {
     await next();
     return undefined;
   }
   await continueWithTenantDatabase(payload.tenantId, "user-session-jwt", userId, next, userId);
+}
+
+export function isUserTenantTransitionRequest(method: string, path: string): boolean {
+  return (
+    method === "POST" &&
+    /^\/(?:user\/)?me\/tenants\/[A-Za-z0-9_.:-]{1,64}\/(?:join|invitations\/accept)$/.test(path)
+  );
 }
 
 // ─── Route group ──────────────────────────────────────────────────────────────
@@ -7337,6 +7342,12 @@ user.patch("/me/tenants/:tenantId/users/:targetUserId/role", async (c) => {
   if (!isValidTenantId(tenantId)) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid tenant id format" }, 400);
   }
+  if (isReservedTenantId(tenantId)) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Personal tenant members cannot be modified" },
+      403,
+    );
+  }
   if (!isValidUserId(targetUserId)) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid user id" }, 400);
   }
@@ -7386,6 +7397,9 @@ user.patch("/me/tenants/:tenantId/users/:targetUserId/role", async (c) => {
     updated = await withTenantAuditedTransaction(tenantId, async (txRaw, appendRequiredAudit) => {
       const tx = txRaw as typeof db;
       const lockedRequesterRole = await requireLockedTenantAdmin(tx, tenantId, requesterId);
+      if (nextRole === "owner" && lockedRequesterRole !== "owner") {
+        throw new Error("Only owners can grant owner role");
+      }
       const [membership] = await tx
         .select({ role: userTenants.role })
         .from(userTenants)
@@ -7443,6 +7457,9 @@ user.patch("/me/tenants/:tenantId/users/:targetUserId/role", async (c) => {
       return c.json<ApiResponse>({ ok: false, error: err.message }, 403);
     }
     if (err instanceof Error && err.message === "Only owners can modify owner role") {
+      return c.json<ApiResponse>({ ok: false, error: err.message }, 403);
+    }
+    if (err instanceof Error && err.message === "Only owners can grant owner role") {
       return c.json<ApiResponse>({ ok: false, error: err.message }, 403);
     }
     if (err instanceof Error && err.message === "Cannot demote the sole owner") {
@@ -7560,6 +7577,12 @@ user.patch("/me/tenants/:tenantId/users/:targetUserId/deactivate", async (c) => 
   const targetUserId = c.req.param("targetUserId");
   if (!isValidTenantId(tenantId)) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid tenant id format" }, 400);
+  }
+  if (isReservedTenantId(tenantId)) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Personal tenant members cannot be deactivated" },
+      403,
+    );
   }
   if (!isValidUserId(targetUserId)) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid user id" }, 400);
@@ -7695,6 +7718,12 @@ user.delete("/me/tenants/:tenantId/users/:targetUserId", async (c) => {
   if (!isValidTenantId(tenantId)) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid tenant id format" }, 400);
   }
+  if (isReservedTenantId(tenantId)) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Personal tenant members cannot be removed" },
+      403,
+    );
+  }
   if (!isValidUserId(targetUserId)) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid user id" }, 400);
   }
@@ -7746,8 +7775,6 @@ user.delete("/me/tenants/:tenantId/users/:targetUserId", async (c) => {
     metadata: { role: member.role },
   });
 
-  const revokedBefore = Math.floor(Date.now() / 1000) + 1;
-  await revocationStore.revokeUserTokens(targetUserId, revokedBefore);
   let deleted: {
     membership: {
       id: string;
@@ -7787,6 +7814,8 @@ user.delete("/me/tenants/:tenantId/users/:targetUserId", async (c) => {
           throw new Error("Cannot remove the sole owner");
         }
       }
+      const revokedBefore = Math.floor(Date.now() / 1000) + 1;
+      await revocationStore.revokeUserTokens(targetUserId, revokedBefore);
       const tokenSnapshot = await tx
         .select({
           id: refreshTokens.id,
@@ -7869,26 +7898,17 @@ user.post("/me/tenants/:tenantId/invitations/accept", async (c) => {
     userId,
     async () => {
       const db = getDb();
-      const [userRecord] = await db
-        .select({ email: users.email, emailVerified: users.emailVerified })
-        .from(users)
-        .where(eq(users.id, userId));
-      const email = userRecord?.email?.toLowerCase().trim();
-      if (!email || !userRecord?.emailVerified) {
-        return c.json<ApiResponse>(
-          { ok: false, error: "Invitation acceptance requires a verified email session" },
-          403,
-        );
-      }
-
       const tokenHash = hashSha256Hex(body.token);
       const [candidate] = await db
-        .select({ id: tenantInvitations.id, role: tenantInvitations.role })
+        .select({
+          id: tenantInvitations.id,
+          email: tenantInvitations.email,
+          role: tenantInvitations.role,
+        })
         .from(tenantInvitations)
         .where(
           and(
             eq(tenantInvitations.tenantId, tenantId),
-            eq(tenantInvitations.email, email),
             eq(tenantInvitations.tokenHash, tokenHash),
             eq(tenantInvitations.status, "pending"),
             gte(tenantInvitations.expiresAt, new Date()),
@@ -7905,13 +7925,26 @@ user.post("/me/tenants/:tenantId/invitations/accept", async (c) => {
         action: "tenant.invitation.accept.authorized",
         resourceType: "tenant_invitation",
         resourceId: candidate.id,
-        metadata: { email, role: candidate.role },
+        metadata: { email: candidate.email, role: candidate.role },
       });
 
       const accepted = await withTenantAuditedTransaction(
         tenantId,
         async (txRaw, appendRequiredAudit) => {
           const tx = txRaw as typeof db;
+          const [lockedUser] = await tx
+            .select({ email: users.email, emailVerified: users.emailVerified })
+            .from(users)
+            .where(eq(users.id, userId))
+            .for("update");
+          const email = lockedUser?.email?.toLowerCase().trim();
+          if (
+            !email ||
+            !lockedUser?.emailVerified ||
+            email !== candidate.email.toLowerCase().trim()
+          ) {
+            return null;
+          }
           await lockTenantOwnerLifecycle(tx, tenantId);
           const [invitation] = await tx
             .update(tenantInvitations)
@@ -8032,26 +8065,17 @@ user.post("/me/tenants/:tenantId/join", async (c) => {
           );
         }
 
-        const [userRecord] = await db
-          .select({ email: users.email, emailVerified: users.emailVerified })
-          .from(users)
-          .where(eq(users.id, userId));
-        const email = userRecord?.email?.toLowerCase().trim();
-        if (!email || !userRecord?.emailVerified) {
-          return c.json<ApiResponse>(
-            { ok: false, error: "Tenant invitation acceptance requires a verified email session" },
-            403,
-          );
-        }
-
         const tokenHash = hashSha256Hex(body.token);
         const [candidate] = await db
-          .select({ id: tenantInvitations.id, role: tenantInvitations.role })
+          .select({
+            id: tenantInvitations.id,
+            email: tenantInvitations.email,
+            role: tenantInvitations.role,
+          })
           .from(tenantInvitations)
           .where(
             and(
               eq(tenantInvitations.tenantId, tenantId),
-              eq(tenantInvitations.email, email),
               eq(tenantInvitations.tokenHash, tokenHash),
               eq(tenantInvitations.status, "pending"),
               gte(tenantInvitations.expiresAt, new Date()),
@@ -8071,13 +8095,26 @@ user.post("/me/tenants/:tenantId/join", async (c) => {
           action: "tenant.member.accept_invite.authorized",
           resourceType: "tenant_invitation",
           resourceId: candidate.id,
-          metadata: { email, role: candidate.role },
+          metadata: { email: candidate.email, role: candidate.role },
         });
 
         const accepted = await withTenantAuditedTransaction(
           tenantId,
           async (txRaw, appendRequiredAudit) => {
             const tx = txRaw as typeof db;
+            const [lockedUser] = await tx
+              .select({ email: users.email, emailVerified: users.emailVerified })
+              .from(users)
+              .where(eq(users.id, userId))
+              .for("update");
+            const email = lockedUser?.email?.toLowerCase().trim();
+            if (
+              !email ||
+              !lockedUser?.emailVerified ||
+              email !== candidate.email.toLowerCase().trim()
+            ) {
+              return null;
+            }
             await lockTenantOwnerLifecycle(tx, tenantId);
             const [invitation] = await tx
               .update(tenantInvitations)
