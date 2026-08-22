@@ -36,7 +36,32 @@ const migratedRuntimeAuthorityKeys = [
   "STEWARD_IDEMPOTENCY_MAX_ENTRIES",
   "STEWARD_IDEMPOTENCY_METRICS_TTL_MS",
   "STEWARD_IDEMPOTENCY_TTL_MS",
+  "APP_URL",
+  "PASSKEY_ALLOWED_ORIGINS",
+  "PASSKEY_ORIGIN",
+  "PASSKEY_RP_ID",
+  "PASSKEY_RP_NAME",
+  "SIWE_ALLOWED_DOMAINS",
+  "STEWARD_ALLOW_UNBOUND_OAUTH_PROVIDER_CODE_EXCHANGE",
+  "STEWARD_OAUTH_ALLOWED_REDIRECTS",
+  "STEWARD_OAUTH_REDIRECT_ALLOWLIST",
 ] as const;
+
+const pendingAuthRouteReaders = [
+  "EMAIL_AUTH_REDIRECT_BASE_URL",
+  "FARCASTER_LOGIN_ENABLED",
+  "NODE_ENV",
+  "SMS_PROVIDER",
+  "STEWARD_DB_MODE",
+  "STEWARD_ENABLE_PROD_TEST_ACCOUNT_TOKEN",
+  "STEWARD_PGLITE_MEMORY",
+  "TELEGRAM_BOT_TOKEN",
+  "TOTP_ISSUER",
+  "TWILIO_ACCOUNT_SID",
+  "TWILIO_AUTH_TOKEN",
+  "TWILIO_FROM",
+  "WHATSAPP_OTP_ENABLED",
+];
 
 describe("Worker runtime environment static inventory", () => {
   it("rejects unclassified direct process.env readers in security middleware", () => {
@@ -67,5 +92,11 @@ describe("Worker runtime environment static inventory", () => {
       }
     }
     expect(violations).toEqual([]);
+  });
+
+  it("pins the remaining auth-route mutable-global compatibility inventory", () => {
+    const authSource = readFileSync(join(srcRoot, "routes", "auth.ts"), "utf8");
+    expect(directEnvironmentKeys(authSource)).toEqual(pendingAuthRouteReaders);
+    expect(authSource).not.toMatch(/process\.env\s*\[/);
   });
 });
