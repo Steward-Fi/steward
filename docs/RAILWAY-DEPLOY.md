@@ -212,7 +212,7 @@ Railway picks it up automatically. Watch the build in the dashboard.
 railway up
 ```
 
-### Database release gate
+### Database release sequence
 
 Before every production rollout, run the complete release migrator with the
 same `STEWARD_PLUGINS` selection as the API:
@@ -236,6 +236,23 @@ initial complete migration with the provider operator as `DATABASE_URL`, then
 bootstrap/provision the three login credentials and activate. Subsequent
 releases use the dedicated migrator. Only after this gate passes may the API
 start with `SKIP_MIGRATIONS=true` and be checked at `/health` and `/ready`.
+
+Staging performs this sequence in `deploy-staging.yml` after the exact develop
+SHA has passed CI and Docker validation. The job targets the protected GitHub
+`staging` environment; configure its required reviewers/wait policy and store
+the environment secrets
+`STAGING_MIGRATION_DATABASE_URL`, `STAGING_OPERATOR_DATABASE_URL`, and
+`STAGING_APP_DATABASE_URL`. Configure the exact app, migration, operator,
+bootstrap, and platform identities as `STAGING_*_DATABASE_ROLE` environment
+variables, along with `STAGING_STEWARD_PLUGINS`.
+Set `STAGING_RAILWAY_DIRECT_HEALTH_URL` to the Railway-provided service origin;
+the existing `STAGING_RAILWAY_HEALTH_URL` remains the public/custom origin.
+Never put the migration or operator URLs in the Railway API service. They are
+available only to the automatic release job, which verifies the live role
+behind each credential before mutation and redacts database diagnostics. A
+failed migration, bootstrap, activation, or restricted-role readiness check
+stops the workflow before the image rollout, and both origins must return
+healthy and ready after it.
 
 Watch logs:
 ```bash
