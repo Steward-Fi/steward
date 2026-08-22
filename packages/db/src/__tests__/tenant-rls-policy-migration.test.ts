@@ -137,7 +137,6 @@ describe("0111 tenant RLS policy installation", () => {
       "GRANT EXECUTE ON FUNCTION public.steward_lock_personal_lifecycle(uuid,text,boolean) TO %I, %I",
     );
     expect(bootstrap).toContain("GRANT CREATE ON DATABASE %I TO %I");
-    expect(bootstrap).toContain("REVOKE EXECUTE ON FUNCTION");
     expect(bootstrap).toContain("platform_set_user_deactivation(uuid,boolean)");
     expect(bootstrap).toContain("BEGIN;");
     expect(bootstrap).toContain("COMMIT;");

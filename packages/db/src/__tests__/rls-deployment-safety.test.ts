@@ -256,7 +256,10 @@ function database(options?: {
             (definition) => `function:${definition.identity}:EXECUTE:false`,
           ),
           ...EXPECTED_PUBLIC_RELATIONS.filter(
-            (relation) => relation.policy_group === "core" || options?.capabilities,
+            (relation) =>
+              relation.policy_group === "core" ||
+              (relation.policy_group === "capabilities" && options?.capabilities) ||
+              (relation.policy_group === "trading" && options?.trading),
           ).flatMap((relation) => {
             if (
               relation.relation_name === "retained_user_provider_evidence" ||
@@ -353,12 +356,12 @@ describe("RLS deployment safety gate", () => {
   test("accepts complete optional trading and combined plugin groups", async () => {
     await expect(
       assertRlsDeploymentSafety(database({ trading: true }), {
-        expectedRole: "steward_app",
+        ...roles,
       }),
     ).resolves.toBeUndefined();
     await expect(
       assertRlsDeploymentSafety(database({ capabilities: true, trading: true }), {
-        expectedRole: "steward_app",
+        ...roles,
       }),
     ).resolves.toBeUndefined();
   });
@@ -366,7 +369,7 @@ describe("RLS deployment safety gate", () => {
   test("rejects a partial optional trading group", async () => {
     await expect(
       assertRlsDeploymentSafety(database({ partialTrading: true }), {
-        expectedRole: "steward_app",
+        ...roles,
       }),
     ).rejects.toThrow("RLS_DEPLOYMENT_POLICY_DEFINITION_DRIFT");
   });
