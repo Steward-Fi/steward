@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
 import postgres from "postgres";
 
 const rootDatabaseUrl = process.env.DATABASE_URL;
@@ -53,6 +54,35 @@ async function runMigrator(url: string): Promise<{
   return { exitCode, stdout, stderr };
 }
 
+async function runCapabilitiesMigrator(url: string): Promise<{
+  exitCode: number;
+  stdout: string;
+  stderr: string;
+}> {
+  const migrationsFolder = new URL("../../../plugin-capabilities/drizzle/", import.meta.url)
+    .pathname;
+  const child = Bun.spawn(
+    [
+      "bun",
+      "-e",
+      `import { runPluginMigrations } from "./packages/db/src/plugin-migrate.ts";
+       await runPluginMigrations({ id: "capabilities", migrationsFolder: ${JSON.stringify(migrationsFolder)} });`,
+    ],
+    {
+      cwd: repositoryRoot,
+      env: { ...process.env, DATABASE_URL: url, DATABASE_DRIVER: "postgres-js" },
+      stdout: "pipe",
+      stderr: "pipe",
+    },
+  );
+  const [stdout, stderr, exitCode] = await Promise.all([
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+    child.exited,
+  ]);
+  return { exitCode, stdout, stderr };
+}
+
 async function expectRejectedWithoutMutation(
   target: ReturnType<typeof postgres>,
   result: Awaited<ReturnType<typeof runMigrator>>,
@@ -66,6 +96,19 @@ async function expectRejectedWithoutMutation(
       to_regclass('drizzle.__drizzle_migrations') IS NOT NULL AS ledger_exists
   `;
   expect(shape).toEqual({ drizzle_schema_exists: false, ledger_exists: false });
+}
+
+function pluginLedgerEntries(plugin: "capabilities" | "example") {
+  const folder = new URL(`../../../plugin-${plugin}/drizzle/`, import.meta.url);
+  const journal = JSON.parse(readFileSync(new URL("meta/_journal.json", folder), "utf8")) as {
+    entries: Array<{ tag: string; when: number }>;
+  };
+  return journal.entries.map((entry) => ({
+    hash: createHash("sha256")
+      .update(readFileSync(new URL(`${entry.tag}.sql`, folder)))
+      .digest("hex"),
+    createdAt: entry.when,
+  }));
 }
 
 describeWithPostgres("migration target inventory (real Postgres)", () => {
@@ -248,6 +291,63 @@ describeWithPostgres("migration target inventory (real Postgres)", () => {
       `;
       const unknown = await runMigrator(target.url);
       expect(unknown.exitCode).not.toBe(0);
+    } finally {
+      await target.client.end({ timeout: 5 });
+    }
+  }, 200_000);
+
+  test("rejects plugin ledgers whose applied prefix is missing required schema effects", async () => {
+    const target = await createTarget("plugin_prefix_drift");
+    try {
+      const migrated = await runMigrator(target.url);
+      expect(migrated.exitCode, migrated.stderr || migrated.stdout).toBe(0);
+
+      await target.client`
+        CREATE TABLE drizzle.__drizzle_migrations_plugin_capabilities (
+          id serial PRIMARY KEY,
+          hash text NOT NULL,
+          created_at bigint
+        )
+      `;
+      for (const entry of pluginLedgerEntries("capabilities")) {
+        await target.client`
+          INSERT INTO drizzle.__drizzle_migrations_plugin_capabilities(hash, created_at)
+          VALUES (${entry.hash}, ${entry.createdAt})
+        `;
+      }
+
+      const fullLedgerWithoutObjects = await runMigrator(target.url);
+      expect(fullLedgerWithoutObjects.exitCode).not.toBe(0);
+
+      await target.client`TRUNCATE drizzle.__drizzle_migrations_plugin_capabilities`;
+      const [firstEntry] = pluginLedgerEntries("capabilities");
+      await target.client`
+        INSERT INTO drizzle.__drizzle_migrations_plugin_capabilities(hash, created_at)
+        VALUES (${firstEntry!.hash}, ${firstEntry!.createdAt})
+      `;
+      await target.client`CREATE TABLE public.capabilities (id uuid PRIMARY KEY)`;
+
+      const prefixMissingSibling = await runMigrator(target.url);
+      expect(prefixMissingSibling.exitCode).not.toBe(0);
+      const [shape] = await target.client<
+        Array<{ capabilities_exists: boolean; grants_exists: boolean }>
+      >`
+        SELECT
+          to_regclass('public.capabilities') IS NOT NULL AS capabilities_exists,
+          to_regclass('public.capability_grants') IS NOT NULL AS grants_exists
+      `;
+      expect(shape).toEqual({ capabilities_exists: true, grants_exists: false });
+
+      await target.client`DROP TABLE public.capabilities`;
+      await target.client`DROP TABLE drizzle.__drizzle_migrations_plugin_capabilities`;
+      const pluginMigrated = await runCapabilitiesMigrator(target.url);
+      expect(pluginMigrated.exitCode, pluginMigrated.stderr || pluginMigrated.stdout).toBe(0);
+      await target.client`
+        DROP POLICY steward_tenant_isolation ON public.capability_invocations
+      `;
+
+      const missingSecurityPolicy = await runMigrator(target.url);
+      expect(missingSecurityPolicy.exitCode).not.toBe(0);
     } finally {
       await target.client.end({ timeout: 5 });
     }

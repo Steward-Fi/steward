@@ -557,18 +557,126 @@ async function assertExactMigrationObjectInventory(db: MigrationQueryExecutor): 
 }
 
 async function assertBundledPluginLedgerIntegrity(db: MigrationQueryExecutor): Promise<void> {
-  const bundledPlugins = [
+  type PluginEffect =
+    | { kind: "relation"; schema: string; name: string; relationKind: "r" | "S" }
+    | { kind: "routine"; schema: string; name: string }
+    | { kind: "trigger"; schema: string; table: string; name: string }
+    | { kind: "policy"; schema: string; table: string; name: string };
+  type PluginMigrationFingerprint = { tag: string; effects: PluginEffect[] };
+  type BundledPlugin = {
+    id: string;
+    migrationsFolder: string;
+    fingerprints: PluginMigrationFingerprint[];
+  };
+
+  const bundledPlugins: BundledPlugin[] = [
     {
       id: "capabilities",
       migrationsFolder: new URL("../../plugin-capabilities/drizzle", import.meta.url).pathname,
-      ownedRelations: ["capabilities", "capability_grants", "capability_invocations"],
+      fingerprints: [
+        {
+          tag: "0000_capabilities",
+          effects: [
+            { kind: "relation", schema: "public", name: "capabilities", relationKind: "r" },
+            {
+              kind: "relation",
+              schema: "public",
+              name: "capability_grants",
+              relationKind: "r",
+            },
+          ],
+        },
+        {
+          tag: "0001_capability_invocations",
+          effects: [
+            {
+              kind: "relation",
+              schema: "public",
+              name: "capability_invocations",
+              relationKind: "r",
+            },
+          ],
+        },
+        {
+          tag: "0002_agent_grant_lifecycle",
+          effects: [
+            { kind: "routine", schema: "public", name: "capability_grants_agent_fence()" },
+            {
+              kind: "routine",
+              schema: "public",
+              name: "capability_grants_guard_agent_delete()",
+            },
+            {
+              kind: "trigger",
+              schema: "public",
+              table: "capability_grants",
+              name: "capability_grants_agent_fence",
+            },
+            {
+              kind: "trigger",
+              schema: "public",
+              table: "agents",
+              name: "capability_grants_guard_agent_delete",
+            },
+          ],
+        },
+        {
+          tag: "0003_tenant_rls_policies",
+          effects: [
+            {
+              kind: "policy",
+              schema: "public",
+              table: "capabilities",
+              name: "steward_tenant_isolation",
+            },
+            {
+              kind: "policy",
+              schema: "public",
+              table: "capability_grants",
+              name: "steward_tenant_isolation",
+            },
+            {
+              kind: "policy",
+              schema: "public",
+              table: "capability_invocations",
+              name: "steward_tenant_isolation",
+            },
+          ],
+        },
+      ],
     },
     {
       id: "example",
       migrationsFolder: new URL("../../plugin-example/drizzle", import.meta.url).pathname,
-      ownedRelations: ["example_log"],
+      fingerprints: [
+        {
+          tag: "0000_example_log",
+          effects: [
+            { kind: "relation", schema: "public", name: "example_log", relationKind: "r" },
+            {
+              kind: "relation",
+              schema: "public",
+              name: "example_log_id_seq",
+              relationKind: "S",
+            },
+          ],
+        },
+      ],
     },
   ];
+
+  const effectIdentity = (effect: PluginEffect): string => {
+    switch (effect.kind) {
+      case "relation":
+        return `relation:${effect.schema}.${effect.name}:${effect.relationKind}`;
+      case "routine":
+        return `routine:${effect.schema}.${effect.name}`;
+      case "trigger":
+        return `trigger:${effect.schema}.${effect.table}.${effect.name}`;
+      case "policy":
+        return `policy:${effect.schema}.${effect.table}.${effect.name}`;
+    }
+  };
 
   for (const plugin of bundledPlugins) {
     const pluginJournal = JSON.parse(
@@ -577,8 +685,9 @@ async function assertBundledPluginLedgerIntegrity(db: MigrationQueryExecutor): P
     if (!Array.isArray(pluginJournal.entries) || pluginJournal.entries.length === 0) {
       throw new Error(`[migrate] Bundled plugin ${plugin.id} journal is malformed`);
     }
+    const pluginEntries = pluginJournal.entries;
     const crypto = require("node:crypto") as typeof import("node:crypto");
-    const expectedEntries = pluginJournal.entries.map((entry) => {
+    const expectedEntries = pluginEntries.map((entry) => {
       if (typeof entry.tag !== "string" || !Number.isSafeInteger(entry.when)) {
         throw new Error(`[migrate] Bundled plugin ${plugin.id} journal is malformed`);
       }
@@ -590,26 +699,99 @@ async function assertBundledPluginLedgerIntegrity(db: MigrationQueryExecutor): P
           .digest("hex"),
       };
     });
+    if (
+      plugin.fingerprints.length !== expectedEntries.length ||
+      plugin.fingerprints.some(
+        (fingerprint, index) => fingerprint.tag !== pluginEntries[index]?.tag,
+      )
+    ) {
+      throw new Error(
+        `[migrate] Bundled plugin ${plugin.id} fingerprint is out of sync with its journal`,
+      );
+    }
+
+    const knownEffects = plugin.fingerprints.flatMap((fingerprint) => fingerprint.effects);
+    const effectRows = knownEffects.map((effect) => {
+      switch (effect.kind) {
+        case "relation":
+          return sql`(${effect.kind}, ${effect.schema}, ${effect.name}, ${effect.relationKind}, ${null})`;
+        case "routine":
+          return sql`(${effect.kind}, ${effect.schema}, ${effect.name}, ${null}, ${null})`;
+        case "trigger":
+        case "policy":
+          return sql`(${effect.kind}, ${effect.schema}, ${effect.name}, ${null}, ${effect.table})`;
+      }
+    });
+    const actualEffects = new Set(
+      queryRows<{ identity: string }>(
+        await db.execute(sql`
+          WITH known_effects(effect_kind, schema_name, object_name, relation_kind, table_name) AS (
+            VALUES ${sql.join(effectRows, sql`, `)}
+          )
+          SELECT
+            'relation:' || namespace.nspname || '.' || relation.relname || ':' ||
+              relation.relkind::text AS identity
+          FROM pg_class relation
+          JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+          JOIN known_effects expected
+            ON expected.effect_kind = 'relation'
+            AND expected.schema_name = namespace.nspname
+            AND expected.object_name = relation.relname
+            AND expected.relation_kind = relation.relkind::text
+
+          UNION ALL
+
+          SELECT
+            'routine:' || namespace.nspname || '.' || routine.proname || '(' ||
+              pg_get_function_identity_arguments(routine.oid) || ')' AS identity
+          FROM pg_proc routine
+          JOIN pg_namespace namespace ON namespace.oid = routine.pronamespace
+          JOIN known_effects expected
+            ON expected.effect_kind = 'routine'
+            AND expected.schema_name = namespace.nspname
+            AND expected.object_name = routine.proname || '(' ||
+              pg_get_function_identity_arguments(routine.oid) || ')'
+
+          UNION ALL
+
+          SELECT
+            'trigger:' || namespace.nspname || '.' || relation.relname || '.' ||
+              trigger.tgname AS identity
+          FROM pg_trigger trigger
+          JOIN pg_class relation ON relation.oid = trigger.tgrelid
+          JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+          JOIN known_effects expected
+            ON expected.effect_kind = 'trigger'
+            AND expected.schema_name = namespace.nspname
+            AND expected.table_name = relation.relname
+            AND expected.object_name = trigger.tgname
+          WHERE NOT trigger.tgisinternal
+
+          UNION ALL
+
+          SELECT
+            'policy:' || namespace.nspname || '.' || relation.relname || '.' ||
+              policy.polname AS identity
+          FROM pg_policy policy
+          JOIN pg_class relation ON relation.oid = policy.polrelid
+          JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+          JOIN known_effects expected
+            ON expected.effect_kind = 'policy'
+            AND expected.schema_name = namespace.nspname
+            AND expected.table_name = relation.relname
+            AND expected.object_name = policy.polname
+        `),
+      ).map((row) => row.identity),
+    );
+
     const migrationsTable = `__drizzle_migrations_plugin_${plugin.id}`;
-    const [shape] = queryRows<{ ledger_exists: boolean; owned_objects_exist: boolean }>(
-      await db.execute(sql`
-        SELECT
-          to_regclass(${`drizzle.${migrationsTable}`}) IS NOT NULL AS ledger_exists,
-          EXISTS (
-            SELECT 1
-            FROM pg_class relation
-            JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
-            WHERE namespace.nspname = 'public'
-              AND relation.relname IN (${sql.join(
-                plugin.ownedRelations.map((name) => sql`${name}`),
-                sql`, `,
-              )})
-              AND relation.relkind IN ('r', 'p')
-          ) AS owned_objects_exist
-      `),
+    const [shape] = queryRows<{ ledger_exists: boolean }>(
+      await db.execute(
+        sql`SELECT to_regclass(${`drizzle.${migrationsTable}`}) IS NOT NULL AS ledger_exists`,
+      ),
     );
     if (!shape?.ledger_exists) {
-      if (shape?.owned_objects_exist) {
+      if (actualEffects.size > 0) {
         throw new Error(
           `[migrate] Bundled plugin ${plugin.id} objects exist without their checked-in migration ledger`,
         );
@@ -635,9 +817,18 @@ async function assertBundledPluginLedgerIntegrity(db: MigrationQueryExecutor): P
         );
       }
     }
-    if (shape.owned_objects_exist && rows.length === 0) {
+    const expectedEffects = new Set(
+      plugin.fingerprints
+        .slice(0, rows.length)
+        .flatMap((fingerprint) => fingerprint.effects)
+        .map(effectIdentity),
+    );
+    const missingEffect = [...expectedEffects].find((identity) => !actualEffects.has(identity));
+    const unappliedEffect = [...actualEffects].find((identity) => !expectedEffects.has(identity));
+    if (missingEffect || unappliedEffect) {
       throw new Error(
-        `[migrate] Bundled plugin ${plugin.id} objects exist without an applied checked-in migration`,
+        `[migrate] Bundled plugin ${plugin.id} schema does not match its applied migration prefix` +
+          ` (${missingEffect ? `missing ${missingEffect}` : `unapplied ${unappliedEffect}`})`,
       );
     }
   }

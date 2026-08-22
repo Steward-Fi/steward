@@ -55,6 +55,17 @@ describe("core migration ledger integrity", () => {
     expect(source).toContain("AS user_object_count");
   });
 
+  test("binds bundled plugin ledger prefixes to their durable schema effects", () => {
+    const source = readFileSync(new URL("../migrate.ts", import.meta.url), "utf8");
+    expect(source).toContain('tag: "0000_capabilities"');
+    expect(source).toContain('name: "capability_grants"');
+    expect(source).toContain('tag: "0002_agent_grant_lifecycle"');
+    expect(source).toContain('name: "capability_grants_agent_fence"');
+    expect(source).toContain('tag: "0003_tenant_rls_policies"');
+    expect(source).toContain('kind: "policy"');
+    expect(source).toContain("schema does not match its applied migration prefix");
+  });
+
   test("accepts a genuinely empty database before the first migration", () => {
     expect(() =>
       assertCoreMigrationLedgerIntegrity([], journal, {
