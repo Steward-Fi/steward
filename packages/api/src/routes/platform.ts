@@ -3806,6 +3806,7 @@ platform.patch("/users/:userId/deactivate", async (c) => {
         await tx.execute(
           sql`SELECT pg_advisory_xact_lock(hashtextextended(${"platform_user_account_" + userId}, 0))`,
         );
+        await lockUserSession(tx, userId);
         await appendRequiredAudit({
           tenantId: PLATFORM_AUDIT_TENANT_ID,
           actorType: "platform",
@@ -5168,6 +5169,7 @@ platform.delete("/tenants/:id/members/:userId", async (c) => {
   try {
     deleted = await db.transaction(async (tx) => {
       await lockTenantOwnerLifecycle(tx, tenantId);
+      await lockUserSession(tx, userId);
       const [current] = await tx
         .select({ role: userTenants.role })
         .from(userTenants)

@@ -1134,7 +1134,7 @@ async function rotateRefreshTokenInsideTenant(
       await tx.execute(sql`
         SELECT * FROM steward_bootstrap.auth_rotate_refresh_token(
           ${tokenHash}, ${targetTenantId}, ${successorId},
-          ${newRefreshTokenHash}, ${successorExpiresAt}
+          ${newRefreshTokenHash}, ${successorExpiresAt.toISOString()}::timestamptz
         )
       `),
     );
