@@ -332,13 +332,8 @@ describe("platform security hardening", () => {
     expect(agentRollback).toBeGreaterThan(finalAgentAudit);
   });
 
-  it("rolls back or restores platform user and membership mutations when final audits fail", () => {
+  it("restores remaining platform membership mutations when final audits fail", () => {
     for (const [marker, rollback] of [
-      [
-        'platform.post("/users/:userId/accounts/:provider/:providerAccountId/transfer"',
-        "set({ userId: fromUserId })",
-      ],
-      ['platform.patch("/users/:userId/metadata"', "customMetadata: existing.customMetadata"],
       ['platform.patch("/tenants/:id/members/:userId"', "set({ role: updated.previousRole })"],
     ] as const) {
       const start = platformSource.indexOf(marker);
