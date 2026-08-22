@@ -1,6 +1,5 @@
-import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
-import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
+import { runtimeEnvironmentIdentity, runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 import {
   AwsKmsExternalKeyCustodyProvider,
   createMoneroBackendFromEnv,
@@ -80,7 +79,6 @@ export interface ConfiguredVaultOptions {
 }
 
 export interface CustodyAuthority {
-  readonly fingerprint: string;
   readonly workerRuntime: boolean;
   readonly nodeEnvironment?: string;
   readonly masterPassword: string;
@@ -114,19 +112,24 @@ export interface CustodyAuthority {
   readonly allowLegacySecretRootFallback: boolean;
 }
 
-const vaultsByKey = new Map<string, Vault>();
-const secretVaultsByKey = new Map<string, SecretVault>();
-const keyStoresByKey = new Map<string, KeyStore>();
-const MAX_CACHED_CUSTODY_INSTANCES = 24;
+interface RequestCustodyInstances {
+  vault?: Vault;
+  secretVault?: SecretVault;
+  readonly keyStores: Map<KeyStoreDomain | undefined, KeyStore>;
+}
+
+let custodyInstancesByRequest = new WeakMap<object, RequestCustodyInstances>();
 let warnedDevSecretFallback = false;
 
-function cacheCustodyInstance<T>(cache: Map<string, T>, key: string, value: T): T {
-  if (cache.size >= MAX_CACHED_CUSTODY_INSTANCES) {
-    const oldest = cache.keys().next().value as string | undefined;
-    if (oldest) cache.delete(oldest);
+function requestCustodyInstances(): RequestCustodyInstances | undefined {
+  const identity = runtimeEnvironmentIdentity();
+  if (!identity) return undefined;
+  let instances = custodyInstancesByRequest.get(identity);
+  if (!instances) {
+    instances = { keyStores: new Map() };
+    custodyInstancesByRequest.set(identity, instances);
   }
-  cache.set(key, value);
-  return value;
+  return instances;
 }
 
 function runtimeValue(name: string): string | undefined {
@@ -324,10 +327,6 @@ function resolveMasterPassword(options: ConfiguredVaultOptions): string {
   throw new Error("STEWARD_MASTER_PASSWORD is required");
 }
 
-function authorityFingerprint(authority: Omit<CustodyAuthority, "fingerprint">): string {
-  return createHash("sha256").update(JSON.stringify(authority)).digest("hex");
-}
-
 /** Resolve and freeze the complete custody root from this request's authority. */
 export function resolveCustodyAuthority(options: ConfiguredVaultOptions = {}): CustodyAuthority {
   const mode = configuredMode();
@@ -377,7 +376,7 @@ export function resolveCustodyAuthority(options: ConfiguredVaultOptions = {}): C
     allowLegacySecretRootFallback:
       legacySecretRoot === "true" ||
       (legacySecretRoot !== "false" && nodeEnvironment !== "production"),
-  } satisfies Omit<CustodyAuthority, "fingerprint">;
+  } satisfies CustodyAuthority;
   const usesAws = mode === "kms-envelope:aws" || resolved.externalCustodyProvider === "aws-kms";
   const hasAwsCredentialPart = Boolean(
     resolved.awsAccessKeyId || resolved.awsSecretAccessKey || resolved.awsSessionToken,
@@ -388,7 +387,7 @@ export function resolveCustodyAuthority(options: ConfiguredVaultOptions = {}): C
       "AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY must be configured together for AWS custody",
     );
   }
-  return Object.freeze({ ...resolved, fingerprint: authorityFingerprint(resolved) });
+  return Object.freeze(resolved);
 }
 
 function createVaultForAuthority(authority: CustodyAuthority): Vault {
@@ -436,45 +435,53 @@ export function createConfiguredVault(options: ConfiguredVaultOptions = {}): Vau
 }
 
 export function getConfiguredVault(options: ConfiguredVaultOptions = {}): Vault {
-  const authority = resolveCustodyAuthority(options);
-  let vault = vaultsByKey.get(authority.fingerprint);
-  if (!vault) {
-    vault = cacheCustodyInstance(
-      vaultsByKey,
-      authority.fingerprint,
-      createVaultForAuthority(authority),
-    );
-  }
-  return vault;
+  const instances = requestCustodyInstances();
+  if (!instances) return createConfiguredVault(options);
+  instances.vault ??= createVaultForAuthority(resolveCustodyAuthority(options));
+  return instances.vault;
 }
 
 export function getConfiguredSecretVault(options: ConfiguredVaultOptions = {}): SecretVault {
-  const authority = resolveCustodyAuthority(options);
-  let vault = secretVaultsByKey.get(authority.fingerprint);
-  if (!vault) {
-    vault = new SecretVault(authority.masterPassword, authority.kdfSalt, {
+  const instances = requestCustodyInstances();
+  if (!instances) {
+    const authority = resolveCustodyAuthority(options);
+    return new SecretVault(authority.masterPassword, authority.kdfSalt, {
       nodeEnvironment: authority.nodeEnvironment,
       allowLegacyDecryptFallback: authority.allowLegacyKeystoreDecryptFallback,
       allowLegacySecretRootFallback: authority.allowLegacySecretRootFallback,
     });
-    cacheCustodyInstance(secretVaultsByKey, authority.fingerprint, vault);
   }
-  return vault;
+  if (!instances.secretVault) {
+    const authority = resolveCustodyAuthority(options);
+    instances.secretVault = new SecretVault(authority.masterPassword, authority.kdfSalt, {
+      nodeEnvironment: authority.nodeEnvironment,
+      allowLegacyDecryptFallback: authority.allowLegacyKeystoreDecryptFallback,
+      allowLegacySecretRootFallback: authority.allowLegacySecretRootFallback,
+    });
+  }
+  return instances.secretVault;
 }
 
 export function getConfiguredKeyStore(
   domain?: KeyStoreDomain,
   options: ConfiguredVaultOptions = {},
 ): KeyStore {
-  const authority = resolveCustodyAuthority(options);
-  const key = `${authority.fingerprint}:${domain ?? "legacy"}`;
-  let keyStore = keyStoresByKey.get(key);
+  const instances = requestCustodyInstances();
+  if (!instances) {
+    const authority = resolveCustodyAuthority(options);
+    return new KeyStore(authority.masterPassword, authority.kdfSalt, domain, {
+      nodeEnvironment: authority.nodeEnvironment,
+      allowLegacyDecryptFallback: authority.allowLegacyKeystoreDecryptFallback,
+    });
+  }
+  let keyStore = instances.keyStores.get(domain);
   if (!keyStore) {
+    const authority = resolveCustodyAuthority(options);
     keyStore = new KeyStore(authority.masterPassword, authority.kdfSalt, domain, {
       nodeEnvironment: authority.nodeEnvironment,
       allowLegacyDecryptFallback: authority.allowLegacyKeystoreDecryptFallback,
     });
-    cacheCustodyInstance(keyStoresByKey, key, keyStore);
+    instances.keyStores.set(domain, keyStore);
   }
   return keyStore;
 }
@@ -500,8 +507,19 @@ export function configuredVaultStartupLogLine(): string {
 }
 
 export function _clearConfiguredVaultsForTests(): void {
-  vaultsByKey.clear();
-  secretVaultsByKey.clear();
-  keyStoresByKey.clear();
+  custodyInstancesByRequest = new WeakMap();
   warnedDevSecretFallback = false;
+}
+
+/** Internal behavior hook: only the active request's instances are observable. */
+export function _configuredCustodyInstanceCountForTests(): number {
+  const identity = runtimeEnvironmentIdentity();
+  if (!identity) return 0;
+  const instances = custodyInstancesByRequest.get(identity);
+  if (!instances) return 0;
+  return (
+    Number(Boolean(instances.vault)) +
+    Number(Boolean(instances.secretVault)) +
+    instances.keyStores.size
+  );
 }

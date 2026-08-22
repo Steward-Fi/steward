@@ -135,7 +135,11 @@ import {
   type TenantSamlSsoConfig,
   type TenantTestAccountConfig,
 } from "@stwd/shared";
-import { runtimeEnvironmentSnapshot, runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
+import {
+  runtimeEnvironmentIdentity,
+  runtimeEnvironmentSnapshot,
+  runtimeEnvironmentValue,
+} from "@stwd/shared/runtime-env";
 import { type KeyStore, provisionUserWallet, Vault } from "@stwd/vault";
 import bs58 from "bs58";
 import { and, eq, gte, inArray, isNull, lt, sql } from "drizzle-orm";
@@ -165,7 +169,6 @@ import {
   _clearConfiguredVaultsForTests,
   getConfiguredKeyStore,
   getConfiguredVault,
-  resolveCustodyAuthority,
 } from "../services/vault-factory";
 import { dispatchWebhook } from "../services/webhook-dispatch";
 
@@ -1500,7 +1503,7 @@ export async function initAuthStores(usePostgres = false): Promise<void> {
   // Reset singletons so they pick up the new stores on next use
   phoneAuthByAuthority.clear();
   _passkeyAuthByAuthority.clear();
-  _emailAuthByTenant.clear();
+  _emailAuthByRequest = new WeakMap();
 }
 
 function getChallengeStore(): ChallengeStore {
@@ -1847,7 +1850,7 @@ function getPasskeyAuth(requestOrigin?: string): PasskeyAuth {
 
 // ─── EmailAuth cache ──────────────────────────────────────────────────────────
 
-const _emailAuthByTenant = new Map<string, Map<string, Promise<EmailAuth>>>();
+let _emailAuthByRequest = new WeakMap<object, Map<string, Promise<EmailAuth>>>();
 
 function getEmailKeyStore(): KeyStore {
   return getConfiguredKeyStore(undefined, { allowDevSecretFallback: true });
@@ -2144,40 +2147,45 @@ async function createEmailAuthForTenant(tenantId: string): Promise<EmailAuth> {
 }
 
 export async function getEmailAuthForTenant(tenantId: string): Promise<EmailAuth> {
-  const authorityFingerprint = JSON.stringify([
-    resolveCustodyAuthority({ allowDevSecretFallback: true }).fingerprint,
-    runtimeEnvironmentValue("RESEND_API_KEY") ?? "",
-    runtimeEnvironmentValue("EMAIL_PROVIDER") ?? "",
-    runtimeEnvironmentValue("EMAIL_FROM") ?? "",
-    runtimeEnvironmentValue("APP_URL") ?? "",
-    runtimeEnvironmentValue("NODE_ENV") ?? "",
-    runtimeEnvironmentValue("STEWARD_EMAIL_CODE_SECRET") ?? "",
-    runtimeEnvironmentValue("STEWARD_ALLOW_DEV_SECRETS") ?? "",
-    authStoreAuthorityKey() ?? "bun",
-  ]);
-  let authorities = _emailAuthByTenant.get(tenantId);
-  const cached = authorities?.get(authorityFingerprint);
+  const requestIdentity = runtimeEnvironmentIdentity();
+  if (!requestIdentity) return createEmailAuthForTenant(tenantId);
+
+  let tenants = _emailAuthByRequest.get(requestIdentity);
+  const cached = tenants?.get(tenantId);
   if (cached) return cached;
 
   const pending = createEmailAuthForTenant(tenantId).catch((error) => {
-    authorities?.delete(authorityFingerprint);
-    if (authorities?.size === 0) _emailAuthByTenant.delete(tenantId);
+    tenants?.delete(tenantId);
     throw error;
   });
-  if (!authorities) {
-    authorities = new Map();
-    _emailAuthByTenant.set(tenantId, authorities);
+  if (!tenants) {
+    tenants = new Map();
+    _emailAuthByRequest.set(requestIdentity, tenants);
   }
-  authorities.set(authorityFingerprint, pending);
+  tenants.set(tenantId, pending);
   return pending;
 }
 
 export function invalidateEmailAuthForTenant(tenantId: string): void {
-  _emailAuthByTenant.delete(tenantId);
+  const identity = runtimeEnvironmentIdentity();
+  if (!identity) return;
+  const tenants = _emailAuthByRequest.get(identity);
+  const cached = tenants?.get(tenantId);
+  tenants?.delete(tenantId);
+  void cached?.then(
+    (auth) => auth.disposeProvider(),
+    () => undefined,
+  );
 }
 
 export function clearEmailAuthTenantCacheForTests(): void {
-  _emailAuthByTenant.clear();
+  _emailAuthByRequest = new WeakMap();
+}
+
+/** Internal behavior hook: no cache generations outside the active request are reachable. */
+export function emailAuthRequestCacheSizeForTests(): number {
+  const identity = runtimeEnvironmentIdentity();
+  return identity ? (_emailAuthByRequest.get(identity)?.size ?? 0) : 0;
 }
 
 export function clearOAuthTokenKeyStoreForTests(): void {

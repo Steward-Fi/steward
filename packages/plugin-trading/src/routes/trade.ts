@@ -56,6 +56,120 @@ import { z } from "zod";
 import type { StewardAppContext } from "../context";
 import { DurableIdempotencyStore } from "./idempotency";
 
+const PM_CREDS_KEY_DOMAIN = "steward-kdf:pm-clob-l2-cache:v2";
+const PM_CREDS_CACHE_PREFIX = "stwd_pmclob_v1:";
+
+function polymarketCredentialCacheAuthority(): {
+  password: string;
+  salt: string;
+} | null {
+  const password = runtimeEnvironmentValue("STEWARD_MASTER_PASSWORD")?.trim();
+  if (!password) return null;
+  const salt = runtimeEnvironmentValue("STEWARD_KDF_SALT") ?? "";
+  return { password, salt };
+}
+
+function pmCredsCacheEncryptionKey(): Buffer | null {
+  const authority = polymarketCredentialCacheAuthority();
+  if (!authority) return null;
+  return scryptSync(authority.password, `${PM_CREDS_KEY_DOMAIN}:${authority.salt}`, 32) as Buffer;
+}
+
+/** Encrypt one Redis credential-cache value under the current request authority. */
+export function encryptPolymarketCredentialCacheValue(
+  plaintext: string,
+  cacheKey: string,
+): string | null {
+  const key = pmCredsCacheEncryptionKey();
+  if (!key) return null;
+  try {
+    const iv = randomBytes(12);
+    const cipher = createCipheriv("aes-256-gcm", key, iv);
+    cipher.setAAD(Buffer.from(cacheKey, "utf8"));
+    let ciphertext = cipher.update(plaintext, "utf8", "hex");
+    ciphertext += cipher.final("hex");
+    return `${PM_CREDS_CACHE_PREFIX}${JSON.stringify({
+      ciphertext,
+      iv: iv.toString("hex"),
+      tag: cipher.getAuthTag().toString("hex"),
+    })}`;
+  } finally {
+    key.fill(0);
+  }
+}
+
+/** Decrypt only envelopes authenticated by the current request authority. */
+export function decryptPolymarketCredentialCacheValue(
+  stored: string,
+  cacheKey: string,
+): string | null {
+  if (!stored.startsWith(PM_CREDS_CACHE_PREFIX)) return null;
+  const key = pmCredsCacheEncryptionKey();
+  if (!key) return null;
+  try {
+    const payload = JSON.parse(stored.slice(PM_CREDS_CACHE_PREFIX.length)) as {
+      ciphertext: string;
+      iv: string;
+      tag: string;
+    };
+    const decipher = createDecipheriv("aes-256-gcm", key, Buffer.from(payload.iv, "hex"));
+    decipher.setAAD(Buffer.from(cacheKey, "utf8"));
+    decipher.setAuthTag(Buffer.from(payload.tag, "hex"));
+    let plaintext = decipher.update(payload.ciphertext, "hex", "utf8");
+    plaintext += decipher.final("utf8");
+    return plaintext;
+  } catch {
+    return null;
+  } finally {
+    key.fill(0);
+  }
+}
+
+type PolymarketRuntimeConfig = {
+  clobUrl?: string;
+  testCredentialsRequested: boolean;
+  testCredentialsEnabled: boolean;
+};
+
+function resolvePolymarketRuntimeConfig(): PolymarketRuntimeConfig {
+  const configuredNodeEnvironment = runtimeEnvironmentValue("NODE_ENV")?.trim();
+  const nodeEnvironment =
+    configuredNodeEnvironment ||
+    (runtimeEnvironmentValue("STEWARD_RUNTIME") === "workers" ? "production" : undefined);
+  const testCredentialsRequested = runtimeEnvironmentValue("STEWARD_PM_TEST_CREDS") === "1";
+  const raw = runtimeEnvironmentValue("POLYMARKET_CLOB_API_URL")?.trim();
+  let clobUrl: string | undefined;
+  if (raw) {
+    if (raw.length > 2_048 || /[\u0000-\u001f\u007f]/.test(raw)) {
+      throw new Error("POLYMARKET_CLOB_API_URL is invalid");
+    }
+    const url = new URL(raw);
+    if (url.protocol !== "http:" && url.protocol !== "https:") {
+      throw new Error("POLYMARKET_CLOB_API_URL must use http or https");
+    }
+    if (url.username || url.password || url.search || url.hash) {
+      throw new Error("POLYMARKET_CLOB_API_URL must not contain credentials, query, or fragment");
+    }
+    if (nodeEnvironment === "production" && url.protocol !== "https:") {
+      throw new Error("POLYMARKET_CLOB_API_URL must use https in production");
+    }
+    clobUrl = url.toString().replace(/\/$/, "");
+  }
+  return {
+    ...(clobUrl ? { clobUrl } : {}),
+    testCredentialsRequested,
+    testCredentialsEnabled: testCredentialsRequested && nodeEnvironment !== "production",
+  };
+}
+
+function configuredPolymarketClobUrl(): string | undefined {
+  return resolvePolymarketRuntimeConfig().clobUrl;
+}
+
+/** Internal behavior hook for request-authority isolation tests. */
+export function _polymarketRuntimeConfigForTests(): PolymarketRuntimeConfig {
+  return resolvePolymarketRuntimeConfig();
+}
 // Prediction-market session asset: pm:<tokenId> (a single outcome token) or
 // pm:cond:<conditionId> (a whole market). Mirrors @stwd/trade-sessions'
 // predictionMarketAssetSchema so a Polymarket session can be created through the
@@ -1456,87 +1570,15 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
   // SEC-108: the cached L2 creds carry full trading authority on the venue as
   // the agent (outside Steward's session caps and audit), so they never touch
   // the shared Redis in plaintext. The cache value is AES-256-GCM encrypted
-  // with a key scrypt-derived from STEWARD_MASTER_PASSWORD under a
+  // with a key scrypt-derived from the request-local password + KDF salt under a
   // domain-separated label (same idiom as the webhook secret codec + embedded
   // JWT derivation), so a process or tenant with read access to Redis cannot
   // lift them. If no master password is configured the cache is SKIPPED
   // entirely (fail closed: never write plaintext; re-derive per order).
-  const PM_CREDS_CACHE_PREFIX = "stwd_pmclob_v1:";
-  let pmCredsDerivedKey: { source: string; key: Buffer } | null = null;
-
-  function pmCredsCacheEncryptionKey(): Buffer | null {
-    const masterPassword = runtimeEnvironmentValue("STEWARD_MASTER_PASSWORD");
-    if (!masterPassword) return null;
-    if (pmCredsDerivedKey?.source === masterPassword) return pmCredsDerivedKey.key;
-    const key = scryptSync(masterPassword, "steward-kdf:pm-clob-l2-cache:v1", 32) as Buffer;
-    pmCredsDerivedKey = { source: masterPassword, key };
-    return key;
-  }
-
-  function encryptPmCredsCacheValue(plaintext: string, cacheKey: string): string | null {
-    const key = pmCredsCacheEncryptionKey();
-    if (!key) return null;
-    const iv = randomBytes(12);
-    const cipher = createCipheriv("aes-256-gcm", key, iv);
-    cipher.setAAD(Buffer.from(cacheKey, "utf8"));
-    let ciphertext = cipher.update(plaintext, "utf8", "hex");
-    ciphertext += cipher.final("hex");
-    return `${PM_CREDS_CACHE_PREFIX}${JSON.stringify({
-      ciphertext,
-      iv: iv.toString("hex"),
-      tag: cipher.getAuthTag().toString("hex"),
-    })}`;
-  }
-
-  // Returns null for anything that is not a valid envelope for THIS key —
-  // including legacy plaintext entries — so the caller treats it as a cache
-  // miss, re-derives, and overwrites with an encrypted value.
-  function decryptPmCredsCacheValue(stored: string, cacheKey: string): string | null {
-    if (!stored.startsWith(PM_CREDS_CACHE_PREFIX)) return null;
-    const key = pmCredsCacheEncryptionKey();
-    if (!key) return null;
-    try {
-      const payload = JSON.parse(stored.slice(PM_CREDS_CACHE_PREFIX.length)) as {
-        ciphertext: string;
-        iv: string;
-        tag: string;
-      };
-      const decipher = createDecipheriv("aes-256-gcm", key, Buffer.from(payload.iv, "hex"));
-      decipher.setAAD(Buffer.from(cacheKey, "utf8"));
-      decipher.setAuthTag(Buffer.from(payload.tag, "hex"));
-      let plaintext = decipher.update(payload.ciphertext, "hex", "utf8");
-      plaintext += decipher.final("utf8");
-      return plaintext;
-    } catch {
-      return null;
-    }
-  }
-
   // Optional endpoint override for deterministic integration environments and
   // compatible CLOB gateways. It is deployment configuration, not a test-creds
   // bypass: the real clob-client still performs L1 derivation, EIP-712 signing,
   // L2 HMAC auth, and order serialization against the configured HTTP edge.
-  // SEC-111: in production the override must use https — a stray plain-http
-  // endpoint would send L1-signed derivations + L2 HMAC headers in cleartext.
-  function configuredPolymarketClobUrl(): string | undefined {
-    const raw = runtimeEnvironmentValue("POLYMARKET_CLOB_API_URL")?.trim();
-    if (!raw) return undefined;
-    if (raw.length > 2_048 || /[\u0000-\u001f\u007f]/.test(raw)) {
-      throw new Error("POLYMARKET_CLOB_API_URL is invalid");
-    }
-    const url = new URL(raw);
-    if (url.protocol !== "http:" && url.protocol !== "https:") {
-      throw new Error("POLYMARKET_CLOB_API_URL must use http or https");
-    }
-    if (url.username || url.password || url.search || url.hash) {
-      throw new Error("POLYMARKET_CLOB_API_URL must not contain credentials, query, or fragment");
-    }
-    if (runtimeEnvironmentValue("NODE_ENV") === "production" && url.protocol !== "https:") {
-      throw new Error("POLYMARKET_CLOB_API_URL must use https in production");
-    }
-    return url.toString().replace(/\/$/, "");
-  }
-
   function pmCredsCacheKey(
     tenantId: string,
     agentId: string,
@@ -1621,7 +1663,9 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
     if (redis) {
       try {
         const cached = await redis.get(cacheKey);
-        const cachedPlaintext = cached ? decryptPmCredsCacheValue(cached, cacheKey) : null;
+        const cachedPlaintext = cached
+          ? decryptPolymarketCredentialCacheValue(cached, cacheKey)
+          : null;
         if (cachedPlaintext) {
           const parsed = clobApiCredentialsSchema.safeParse(JSON.parse(cachedPlaintext));
           if (parsed.success) {
@@ -1651,7 +1695,10 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
     if (redis) {
       // Fail closed: without cache encryption key material, skip the write and
       // re-derive per order rather than ever storing the creds in plaintext.
-      const cacheValue = encryptPmCredsCacheValue(JSON.stringify(apiCredentials), cacheKey);
+      const cacheValue = encryptPolymarketCredentialCacheValue(
+        JSON.stringify(apiCredentials),
+        cacheKey,
+      );
       if (cacheValue) {
         await redis.setex(cacheKey, PM_CREDS_CACHE_TTL_SECONDS, cacheValue).catch(() => undefined);
       }

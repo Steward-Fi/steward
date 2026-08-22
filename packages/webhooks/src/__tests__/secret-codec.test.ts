@@ -1,6 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { withRuntimeEnvironment } from "@stwd/shared/runtime-env";
-import { decryptWebhookSecret, encryptWebhookSecret } from "../secret-codec";
+import {
+  decryptWebhookSecret,
+  encryptWebhookSecret,
+  resolveWebhookSecretAuthority,
+} from "../secret-codec";
 
 /**
  * SEC-102: the hardcoded dev key must require BOTH an explicit opt-in flag AND
@@ -100,6 +104,10 @@ describe("webhook secret-codec dev-key gate (SEC-102)", () => {
     };
     const encryptedA = withRuntimeEnvironment(authorityA, () => encryptWebhookSecret("secret-a"));
     const encryptedB = withRuntimeEnvironment(authorityB, () => encryptWebhookSecret("secret-b"));
+
+    expect(
+      withRuntimeEnvironment(authorityA, () => "fingerprint" in resolveWebhookSecretAuthority()),
+    ).toBe(false);
 
     expect(withRuntimeEnvironment(authorityA, () => decryptWebhookSecret(encryptedA))).toBe(
       "secret-a",
