@@ -143,6 +143,8 @@ describe("<StewardLogin /> rules-of-hooks branch coverage", () => {
     );
     expect(html).toContain("welcome");
     expect(html).toContain("passkey");
+    expect(html).toContain('autoComplete="email"');
+    expect(html).not.toContain("webauthn");
   });
 
   test("guest lifecycle state is available through auth context", () => {
