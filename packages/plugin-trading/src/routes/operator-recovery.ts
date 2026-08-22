@@ -1539,6 +1539,11 @@ export function createOperatorRecoveryRoutes(
         destinationDex,
         amountUsdc: String(body.amountUsdc),
         ...redactedThrownDiagnostics(err),
+      }).catch((auditErr) => {
+        console.error(
+          "[operator-recovery] collateral transfer sign-failure audit failed",
+          redactedThrownDiagnostics(auditErr),
+        );
       });
       await idempotency.release?.();
       return c.json<ApiResponse>({ ok: false, error: "Failed to sign collateral transfer" }, 502);
@@ -1549,28 +1554,31 @@ export function createOperatorRecoveryRoutes(
     try {
       result = await adapter.submitSendAsset(signed);
     } catch (err) {
+      const definitelyRejected = isDefiniteVenueRejection(err);
+      const errorBody = {
+        ok: false as const,
+        error: definitelyRejected
+          ? "Hyperliquid rejected collateral transfer"
+          : "Failed to submit collateral transfer",
+      };
+      if (definitelyRejected) await idempotency.release?.();
+      else await idempotency.storeFailure?.(errorBody);
       await auditRecoveryEvent(c, tenantId, agentId, "trade.recovery.transfer.failed", {
         venue,
         walletAddress,
         sourceDex,
         destinationDex,
         amountUsdc: String(body.amountUsdc),
+        definiteRejection: definitelyRejected,
         ...redactedThrownDiagnostics(err),
+      }).catch((auditErr) => {
+        console.error(
+          "[operator-recovery] collateral transfer submit-failure audit failed",
+          redactedThrownDiagnostics(auditErr),
+        );
       });
-      const errorBody = { ok: false as const, error: "Failed to submit collateral transfer" };
-      await idempotency.storeFailure?.(errorBody);
       return c.json<ApiResponse>(errorBody, 502);
     }
-
-    await auditRecoveryEvent(c, tenantId, agentId, "trade.recovery.transfer.submitted", {
-      venue,
-      walletAddress,
-      sourceDex,
-      destinationDex,
-      amountUsdc: String(body.amountUsdc),
-      amountBaseUnits: amountBaseUnits.toString(),
-      action,
-    });
 
     const response = {
       venue,
@@ -1580,7 +1588,24 @@ export function createOperatorRecoveryRoutes(
       amountUsdc: String(body.amountUsdc),
       result,
     };
+    // The venue effect is terminal once submitSendAsset returns. Persist replay
+    // evidence before the completion audit so an audit outage cannot make a
+    // retry submit the same capital movement again.
     await idempotency.store?.(response);
+    await auditRecoveryEvent(c, tenantId, agentId, "trade.recovery.transfer.submitted", {
+      venue,
+      walletAddress,
+      sourceDex,
+      destinationDex,
+      amountUsdc: String(body.amountUsdc),
+      amountBaseUnits: amountBaseUnits.toString(),
+      action,
+    }).catch((auditErr) => {
+      console.error(
+        "[operator-recovery] collateral transfer submitted audit failed",
+        redactedThrownDiagnostics(auditErr),
+      );
+    });
     return c.json<ApiResponse>({ ok: true, data: response });
   });
 

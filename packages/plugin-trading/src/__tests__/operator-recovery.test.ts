@@ -12,8 +12,18 @@
  */
 
 import { afterAll, beforeAll, describe, expect, it, mock, setDefaultTimeout } from "bun:test";
-import { agents, agentWallets, closeDb, getDb, policies as policiesTable, tenants } from "@stwd/db";
+import {
+  agents,
+  agentWallets,
+  auditEvents,
+  closeDb,
+  getDb,
+  policies as policiesTable,
+  tenants,
+  writeAuditEvent,
+} from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
+import { and, asc, eq } from "drizzle-orm";
 import { Hono } from "hono";
 import { z } from "zod";
 
@@ -28,6 +38,16 @@ const updateLeverageCalls: Array<{ coin: string; leverage: number; isCross?: boo
 const addIsolatedMarginCalls: Array<{ coin: string; amountUsdc: string | number }> = [];
 const approveBuilderFeeCalls: Array<{ builder: string; maxFeeRate: string }> = [];
 const usdSendCalls: Array<{ destination: string; amount: string }> = [];
+const signSendAssetCalls: Array<{
+  destination: string;
+  sourceDex: string;
+  destinationDex: string;
+  token?: string;
+  amount: string | number;
+}> = [];
+const submitSendAssetCalls: unknown[] = [];
+let signSendAssetError: Error | undefined;
+let submitSendAssetError: Error | undefined;
 let closeAllPause: Promise<void> | null = null;
 
 class MockHyperliquidAdapter {
@@ -82,6 +102,34 @@ class MockHyperliquidAdapter {
   async submitUsdSend(params: { destination: string; amount: string }) {
     usdSendCalls.push(params);
     return { status: "ok", raw: { response: { type: "default" } } };
+  }
+
+  async signSendAsset(params: {
+    destination: string;
+    sourceDex: string;
+    destinationDex: string;
+    token?: string;
+    amount: string | number;
+  }) {
+    signSendAssetCalls.push(params);
+    if (signSendAssetError) throw signSendAssetError;
+    return {
+      action: {
+        type: "sendAsset",
+        destination: params.destination,
+        sourceDex: params.sourceDex,
+        destinationDex: params.destinationDex,
+        amount: params.amount,
+      },
+      nonce: 1,
+      signature: { r: "0x1", s: "0x2", v: 27 },
+    };
+  }
+
+  async submitSendAsset(signed: unknown) {
+    submitSendAssetCalls.push(signed);
+    if (submitSendAssetError) throw submitSendAssetError;
+    return { status: "ok", response: { type: "default" } };
   }
 }
 
@@ -183,6 +231,96 @@ async function buildApp() {
   return app;
 }
 
+async function buildTransferApp(
+  authType: "platform" | "api-key" | "session-jwt" | "agent-token",
+  failAuditAction?: string,
+) {
+  const { createOperatorRecoveryRoutes } = await import("../routes/operator-recovery");
+  const baseWriteAuditEvent = writeAuditEvent;
+  const app = new Hono();
+  app.use("/v1/trade/*", async (c, next) => {
+    c.set("tenantId", c.req.header("X-Steward-Tenant") || "default");
+    c.set("authType", authType);
+    if (authType === "session-jwt") c.set("userId", "owner-user");
+    if (authType === "agent-token") c.set("agentScope", "agent-scope");
+    return next();
+  });
+  app.route(
+    "/v1/trade",
+    createOperatorRecoveryRoutes({
+      db: getDb(),
+      vault: {
+        getWallet: async () => ({
+          address: "0x00000000000000000000000000000000000000bb",
+        }),
+      },
+      ensureAgentForTenant: async (tenantId: string, agentId: string) => ({
+        id: agentId,
+        tenantId,
+      }),
+      getPolicySet: async () => [],
+      isValidAnyAddress: () => true,
+      policyEngine: { evaluate: async () => ({ approved: true, results: [] }) },
+      priceOracle: {
+        getNativeUsdPrice: async () => 1,
+        weiToUsd: async () => 0,
+        usdToWei: async () => "0",
+      },
+      safeJsonParse: async (c: { req: { json: () => Promise<unknown> } }) => c.req.json(),
+      writeAuditEvent: async (event) => {
+        if (event.action === failAuditAction) throw new Error("forced completion audit failure");
+        await baseWriteAuditEvent(event);
+      },
+      getRedisClient: () => null,
+    } as never),
+  );
+  return app;
+}
+
+function resetSendAssetMock(): void {
+  signSendAssetCalls.length = 0;
+  submitSendAssetCalls.length = 0;
+  signSendAssetError = undefined;
+  submitSendAssetError = undefined;
+}
+
+function transferRequest(
+  app: Hono,
+  tenantId: string,
+  agentId: string,
+  options: {
+    idempotencyKey: string;
+    sourceDex?: string;
+    destinationDex?: string;
+    token?: string;
+  },
+) {
+  return app.request("/v1/trade/hyperliquid/transfer", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Steward-Tenant": tenantId,
+      "Idempotency-Key": options.idempotencyKey,
+    },
+    body: JSON.stringify({
+      agentId,
+      sourceDex: options.sourceDex ?? "xyz",
+      destinationDex: options.destinationDex ?? "",
+      amountUsdc: "12.5",
+      token: options.token,
+    }),
+  });
+}
+
+async function transferAuditActions(tenantId: string, agentId: string): Promise<string[]> {
+  const rows = await getDb()
+    .select({ action: auditEvents.action })
+    .from(auditEvents)
+    .where(and(eq(auditEvents.tenantId, tenantId), eq(auditEvents.resourceId, agentId)))
+    .orderBy(asc(auditEvents.seq));
+  return rows.map(({ action }) => action).filter((action) => action.includes("recovery.transfer"));
+}
+
 describe("operator recovery auth", () => {
   it("rejects close-all with no auth (401)", async () => {
     const app = await buildApp();
@@ -205,6 +343,157 @@ describe("operator recovery auth", () => {
       body: JSON.stringify({ agentId: "agent-x" }),
     });
     expect(res.status).toBe(403);
+  });
+});
+
+describe("mounted HIP-3 collateral transfer", () => {
+  it.each([
+    "api-key",
+    "session-jwt",
+    "agent-token",
+  ] as const)("rejects %s authority before adapter calls", async (authType) => {
+    resetSendAssetMock();
+    const app = await buildTransferApp(authType);
+    const response = await transferRequest(app, "tenant-denied", "agent-denied", {
+      idempotencyKey: `denied-${authType}`,
+    });
+
+    expect(response.status).toBe(403);
+    expect(await response.json()).toEqual({
+      ok: false,
+      error: "Platform key required for collateral transfer",
+    });
+    expect(signSendAssetCalls).toHaveLength(0);
+    expect(submitSendAssetCalls).toHaveLength(0);
+  });
+
+  it.each([
+    ["builder exit", "xyz", "", undefined],
+    ["core allocation", "", "xyz", "USDC"],
+  ] as const)("binds exact adapter inputs for %s", async (_name, sourceDex, destinationDex, token) => {
+    resetSendAssetMock();
+    const tenantId = `tenant-transfer-${Date.now()}-${sourceDex || "core"}`;
+    const agentId = `agent-transfer-${Date.now()}-${sourceDex || "core"}`;
+    await seedAgent({ tenantId, agentId });
+    const app = await buildTransferApp("platform");
+
+    const response = await transferRequest(app, tenantId, agentId, {
+      idempotencyKey: `transfer-${sourceDex || "core"}-${destinationDex || "core"}`,
+      sourceDex,
+      destinationDex,
+      token,
+    });
+
+    expect(response.status).toBe(200);
+    expect(signSendAssetCalls).toEqual([
+      {
+        destination: "0x00000000000000000000000000000000000000bb",
+        sourceDex,
+        destinationDex,
+        token,
+        amount: "12.5",
+      },
+    ]);
+    expect(submitSendAssetCalls).toHaveLength(1);
+    expect(await transferAuditActions(tenantId, agentId)).toEqual([
+      "trade.recovery.transfer.requested",
+      "trade.recovery.transfer.submitted",
+    ]);
+  });
+
+  it("releases a local signing failure for a safe retry and records failed audit state", async () => {
+    resetSendAssetMock();
+    const tenantId = `tenant-transfer-sign-${Date.now()}`;
+    const agentId = `agent-transfer-sign-${Date.now()}`;
+    await seedAgent({ tenantId, agentId });
+    signSendAssetError = new Error("signing secret marker");
+    const app = await buildTransferApp("platform");
+    const request = () =>
+      transferRequest(app, tenantId, agentId, { idempotencyKey: "transfer-sign-failure" });
+
+    expect((await request()).status).toBe(502);
+    expect((await request()).status).toBe(502);
+    expect(signSendAssetCalls).toHaveLength(2);
+    expect(submitSendAssetCalls).toHaveLength(0);
+    expect(await transferAuditActions(tenantId, agentId)).toEqual([
+      "trade.recovery.transfer.requested",
+      "trade.recovery.transfer.failed",
+      "trade.recovery.transfer.requested",
+      "trade.recovery.transfer.failed",
+    ]);
+  });
+
+  it("releases a definite venue rejection but replays ambiguous transport loss", async () => {
+    resetSendAssetMock();
+    const rejectedTenant = `tenant-transfer-rejected-${Date.now()}`;
+    const rejectedAgent = `agent-transfer-rejected-${Date.now()}`;
+    await seedAgent({ tenantId: rejectedTenant, agentId: rejectedAgent });
+    const rejected = new Error("venue rejected");
+    rejected.name = "HyperliquidExchangeRejectedError";
+    submitSendAssetError = rejected;
+    const rejectedApp = await buildTransferApp("platform");
+    const rejectedRequest = () =>
+      transferRequest(rejectedApp, rejectedTenant, rejectedAgent, {
+        idempotencyKey: "definite-rejection",
+      });
+
+    expect(await (await rejectedRequest()).json()).toEqual({
+      ok: false,
+      error: "Hyperliquid rejected collateral transfer",
+    });
+    expect((await rejectedRequest()).status).toBe(502);
+    expect(submitSendAssetCalls).toHaveLength(2);
+
+    resetSendAssetMock();
+    const ambiguousTenant = `tenant-transfer-ambiguous-${Date.now()}`;
+    const ambiguousAgent = `agent-transfer-ambiguous-${Date.now()}`;
+    await seedAgent({ tenantId: ambiguousTenant, agentId: ambiguousAgent });
+    submitSendAssetError = new Error("transport lost after write");
+    const ambiguousApp = await buildTransferApp("platform");
+    const ambiguousRequest = () =>
+      transferRequest(ambiguousApp, ambiguousTenant, ambiguousAgent, {
+        idempotencyKey: "ambiguous-loss",
+      });
+
+    const first = await ambiguousRequest();
+    const retry = await ambiguousRequest();
+    expect(first.status).toBe(502);
+    expect(await first.json()).toEqual({
+      ok: false,
+      error: "Failed to submit collateral transfer",
+    });
+    expect(retry.status).toBe(502);
+    expect(await retry.json()).toEqual({
+      ok: false,
+      error: "Failed to submit collateral transfer",
+    });
+    expect(signSendAssetCalls).toHaveLength(1);
+    expect(submitSendAssetCalls).toHaveLength(1);
+    expect(await transferAuditActions(ambiguousTenant, ambiguousAgent)).toEqual([
+      "trade.recovery.transfer.requested",
+      "trade.recovery.transfer.failed",
+    ]);
+  });
+
+  it("replays terminal success when the completion audit fails after venue submission", async () => {
+    resetSendAssetMock();
+    const tenantId = `tenant-transfer-audit-${Date.now()}`;
+    const agentId = `agent-transfer-audit-${Date.now()}`;
+    await seedAgent({ tenantId, agentId });
+    const app = await buildTransferApp("platform", "trade.recovery.transfer.submitted");
+    const request = () =>
+      transferRequest(app, tenantId, agentId, { idempotencyKey: "completion-audit-failure" });
+
+    const first = await request();
+    const retry = await request();
+    expect(first.status).toBe(200);
+    expect(retry.status).toBe(200);
+    expect(await retry.json()).toEqual(await first.json());
+    expect(signSendAssetCalls).toHaveLength(1);
+    expect(submitSendAssetCalls).toHaveLength(1);
+    expect(await transferAuditActions(tenantId, agentId)).toEqual([
+      "trade.recovery.transfer.requested",
+    ]);
   });
 });
 
