@@ -3,9 +3,8 @@ import type { LookupAddress } from "node:dns";
 import type { RequestOptions } from "node:http";
 import { isIP, type LookupFunction } from "node:net";
 import { redactedThrownDiagnostics, type WebhookEvent } from "@stwd/shared";
-
-import type { WebhookConfig, WebhookDeliveryResult, WebhookDispatcherOptions } from "./types";
 import { currentWebhookRuntimeAuthority } from "./runtime-authority";
+import type { WebhookConfig, WebhookDeliveryResult, WebhookDispatcherOptions } from "./types";
 
 // Signature scheme version. v2 binds timestamp + deliveryId + event type into the HMAC.
 const SIGNATURE_SCHEME = "v2";

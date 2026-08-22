@@ -1,14 +1,14 @@
 export { WebhookDispatcher, WebhookValidationError } from "./dispatcher";
-export {
-  currentWebhookRuntimeAuthority,
-  type WebhookRuntimeAuthority,
-} from "./runtime-authority";
 export type {
   PersistentQueueOptions,
   PersistentQueueStats as PersistentStats,
 } from "./persistent-queue";
 export { PersistentQueue } from "./persistent-queue";
 export { RetryQueue } from "./queue";
+export {
+  currentWebhookRuntimeAuthority,
+  type WebhookRuntimeAuthority,
+} from "./runtime-authority";
 export type { WebhookSecretAuthority } from "./secret-codec";
 export {
   decryptWebhookSecret,

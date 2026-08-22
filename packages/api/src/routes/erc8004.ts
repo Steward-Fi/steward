@@ -13,8 +13,8 @@ import { redactedThrownDiagnostics } from "@stwd/shared";
 import { and, eq, sql } from "drizzle-orm";
 import { Hono } from "hono";
 import { z } from "zod";
-import { writeAuditEvent } from "../services/audit";
 import { validateAgentCardApiUrl } from "../services/agent-card-url";
+import { writeAuditEvent } from "../services/audit";
 import {
   type ApiResponse,
   type AppVariables,
