@@ -52,7 +52,14 @@ function redisBinding(env?: Record<string, unknown>): RedisBinding | null {
   const driver =
     valueFrom(env, "REDIS_DRIVER")?.trim().toLowerCase() === "upstash" ? "upstash" : "ioredis";
   const nodeEnv = valueFrom(env, "NODE_ENV");
-  const runtime = valueFrom(env, "STEWARD_RUNTIME");
+  // STEWARD_RUNTIME is injected into the immutable ALS snapshot by worker.ts;
+  // it is intentionally not a real Worker binding. Fall back only for this
+  // synthetic posture field, never for URLs/tokens omitted by a new binding.
+  const explicitRuntime = env?.STEWARD_RUNTIME;
+  const runtime =
+    typeof explicitRuntime === "string"
+      ? explicitRuntime
+      : runtimeEnvironmentValue("STEWARD_RUNTIME");
   const allowInsecure = valueFrom(env, "STEWARD_ALLOW_INSECURE_REDIS");
   if (driver === "upstash") {
     const restUrl = valueFrom(env, "KV_REST_API_URL") || valueFrom(env, "UPSTASH_REDIS_REST_URL");

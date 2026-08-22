@@ -14,15 +14,21 @@ const checkSpendLimitMock = mock(async () => ({
 const disconnectRedisMock = mock(async () => undefined);
 const pingMock = mock(async () => "PONG");
 const recordSpendMock = mock(async () => undefined);
+const createRedisClientMock = mock((env: Record<string, string | undefined>) => {
+  if (env.STEWARD_RUNTIME === "workers" && env.REDIS_URL?.startsWith("redis://")) {
+    throw new Error("Worker Redis transport must use rediss://");
+  }
+  return {
+    generation: env.REDIS_URL ?? env.KV_REST_API_URL,
+    ping: pingMock,
+    quit: async () => undefined,
+  };
+});
 
 mock.module("@stwd/redis", () => ({
   checkRateLimit: checkRateLimitMock,
   checkSpendLimit: checkSpendLimitMock,
-  createRedisClient: (env: Record<string, string | undefined>) => ({
-    generation: env.REDIS_URL ?? env.KV_REST_API_URL,
-    ping: pingMock,
-    quit: async () => undefined,
-  }),
+  createRedisClient: createRedisClientMock,
   createUpstashIoredisAdapter: () => ({ ping: pingMock }),
   disconnectRedis: disconnectRedisMock,
   estimateCost: () => 0,
@@ -67,6 +73,7 @@ describe("Redis rate-limit wrappers", () => {
     pingMock.mockReset();
     pingMock.mockImplementation(async () => "PONG");
     recordSpendMock.mockReset();
+    createRedisClientMock.mockClear();
     process.env.REDIS_DRIVER = "ioredis";
     process.env.REDIS_URL = "redis://rate-limit-wrapper.test:6379";
     await redisMiddleware.shutdownRedis();
@@ -154,6 +161,7 @@ describe("Redis spend-limit wrapper", () => {
   const originalRedisUrl = process.env.REDIS_URL;
 
   beforeEach(async () => {
+    createRedisClientMock.mockClear();
     checkSpendLimitMock.mockReset();
     checkSpendLimitMock.mockImplementation(async () => ({
       allowed: true,
@@ -260,12 +268,12 @@ describe("Redis spend-limit wrapper", () => {
     const a = {
       NODE_ENV: "test",
       STEWARD_RUNTIME: "workers",
-      REDIS_URL: "redis://overlap-a.test:6379",
+      REDIS_URL: "rediss://overlap-a.test:6379",
     };
     const b = {
       NODE_ENV: "test",
       STEWARD_RUNTIME: "workers",
-      REDIS_URL: "redis://overlap-b.test:6379",
+      REDIS_URL: "rediss://overlap-b.test:6379",
     };
     await Promise.all([
       withRuntimeEnvironment(a, async () => {
@@ -285,12 +293,27 @@ describe("Redis spend-limit wrapper", () => {
     ]);
   });
 
+  it("propagates Worker ALS posture when the bindings object omits the synthetic runtime", async () => {
+    const bindings = { NODE_ENV: "test", REDIS_URL: "redis://worker-cleartext.test:6379" };
+    expect(
+      await withRuntimeEnvironment({ ...bindings, STEWARD_RUNTIME: "workers" }, () =>
+        redisMiddleware.initRedis(bindings),
+      ),
+    ).toBe(false);
+    expect(createRedisClientMock).toHaveBeenCalledTimes(1);
+    expect(createRedisClientMock.mock.calls[0]?.[0]).toMatchObject({
+      NODE_ENV: "test",
+      STEWARD_RUNTIME: "workers",
+      REDIS_URL: bindings.REDIS_URL,
+    });
+  });
+
   it("bounds retained binding generations and fails a new generation closed", async () => {
     for (let index = 0; index < 8; index += 1) {
       const environment = {
         NODE_ENV: "test",
         STEWARD_RUNTIME: "workers",
-        REDIS_URL: `redis://bounded-${index}.test:6379`,
+        REDIS_URL: `rediss://bounded-${index}.test:6379`,
       };
       expect(
         await withRuntimeEnvironment(environment, () => redisMiddleware.initRedis(environment)),
@@ -299,7 +322,7 @@ describe("Redis spend-limit wrapper", () => {
     const overflow = {
       NODE_ENV: "test",
       STEWARD_RUNTIME: "workers",
-      REDIS_URL: "redis://bounded-overflow.test:6379",
+      REDIS_URL: "rediss://bounded-overflow.test:6379",
     };
     expect(await withRuntimeEnvironment(overflow, () => redisMiddleware.initRedis(overflow))).toBe(
       false,
