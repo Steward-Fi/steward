@@ -27,10 +27,11 @@ function redact(input: string): string {
   );
 }
 
-async function fakeRailwayRun(healthyAfter: number, healthTimeout = 4) {
+async function fakeRailwayRun(healthyAfter: number, healthTimeout = 4, readyAfter = 1) {
   const dir = await mkdtemp(join(tmpdir(), "steward-railway-deploy-"));
   temporaryDirectories.push(dir);
   const stateFile = join(dir, "health-attempts");
+  const readyStateFile = join(dir, "ready-attempts");
   const curlLog = join(dir, "curl-arguments");
   const fakeCurl = join(dir, "curl");
   const fakeSleep = join(dir, "sleep");
@@ -47,6 +48,13 @@ case "$args" in
     count=$((count + 1))
     echo "$count" > "$FAKE_HEALTH_STATE"
     if [ "$count" -ge "$FAKE_HEALTHY_AFTER" ]; then printf 200; else printf 000; fi
+    ;;
+  *example.test/ready*)
+    count=0
+    [ ! -f "$FAKE_READY_STATE" ] || count=$(cat "$FAKE_READY_STATE")
+    count=$((count + 1))
+    echo "$count" > "$FAKE_READY_STATE"
+    if [ "$count" -ge "$FAKE_READY_AFTER" ]; then printf 200; else printf 503; fi
     ;;
   *serviceInstanceUpdate*) printf '%s\n' '{"data":{"serviceInstanceUpdate":true}}' ;;
   *serviceInstanceDeployV2*) printf '%s\n' '{"data":{"serviceInstanceDeployV2":"deployment-test"}}' ;;
@@ -67,8 +75,10 @@ esac
       ...Bun.env,
       PATH: `${dir}:${Bun.env.PATH ?? ""}`,
       FAKE_HEALTH_STATE: stateFile,
+      FAKE_READY_STATE: readyStateFile,
       FAKE_CURL_LOG: curlLog,
       FAKE_HEALTHY_AFTER: String(healthyAfter),
+      FAKE_READY_AFTER: String(readyAfter),
       RAILWAY_TOKEN: "test-token",
       RAILWAY_SERVICE_ID: "test-service",
       RAILWAY_ENV_ID: "test-environment",
@@ -167,12 +177,20 @@ describe("Railway staging deployment", () => {
     expect(result.exitCode).toBe(0);
     expect(result.output).toContain("Health check attempt 2: HTTP 000");
     expect(result.output).toContain("Health check passed");
+    expect(result.output).toContain("Readiness check passed");
     for (const call of result.curlArguments
       .split("\n")
       .filter((line) => line.includes("graphql"))) {
       expect(call).toContain("--connect-timeout 5");
       expect(call).toContain("--max-time 20");
     }
+  }, 15_000);
+
+  test("rejects a live deployment whose durable readiness never passes", async () => {
+    const result = await fakeRailwayRun(1, 2, 999);
+    expect(result.exitCode).toBe(1);
+    expect(result.output).toMatch(/Readiness check failed after [1-9][0-9]* attempts? \/ 2s/);
+    expect(result.output).toContain("Railway deployment diagnostics");
   }, 15_000);
 
   test("prints Railway diagnostics when health never becomes ready", async () => {
