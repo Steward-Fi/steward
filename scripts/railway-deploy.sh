@@ -53,6 +53,7 @@ SERVICE_ID="${RAILWAY_SERVICE_ID:-}"
 ENV_ID="${RAILWAY_ENV_ID:-}"
 IMAGE_REPO="${RAILWAY_IMAGE_REPO:-ghcr.io/steward-fi/steward}"
 HEALTH_URL="${RAILWAY_HEALTH_URL:-}"
+HEALTH_URL="${HEALTH_URL%/}"
 TIMEOUT="${DEPLOY_TIMEOUT:-300}"
 HEALTH_TIMEOUT="${RAILWAY_HEALTH_TIMEOUT:-120}"
 HEALTH_INTERVAL="${RAILWAY_HEALTH_INTERVAL:-5}"
@@ -426,45 +427,50 @@ if [[ -z "$HEALTH_URL" ]]; then
   exit 0
 fi
 
-log "Verifying health endpoint: ${HEALTH_URL}/health"
+verify_public_probe() {
+  local path="$1"
+  local label="$2"
+  local http_code="000"
+  local attempt=0
+  local started=$SECONDS
+  local elapsed=0
 
-HEALTH_OK=false
-HTTP_CODE="000"
-HEALTH_ATTEMPT=0
-HEALTH_STARTED=$SECONDS
-HEALTH_ELAPSED=0
-while [[ $HEALTH_ELAPSED -lt $HEALTH_TIMEOUT ]]; do
-  HEALTH_ATTEMPT=$((HEALTH_ATTEMPT + 1))
-  HEALTH_REMAINING=$((HEALTH_TIMEOUT - HEALTH_ELAPSED))
-  REQUEST_TIMEOUT=$((HEALTH_REMAINING < 10 ? HEALTH_REMAINING : 10))
-  CONNECT_TIMEOUT=$((REQUEST_TIMEOUT < 5 ? REQUEST_TIMEOUT : 5))
-  HTTP_CODE=$(curl -sS \
-    --connect-timeout "$CONNECT_TIMEOUT" \
-    --max-time "$REQUEST_TIMEOUT" \
-    -o /dev/null \
-    -w "%{http_code}" \
-    "${HEALTH_URL}/health" 2>/dev/null) || HTTP_CODE="000"
-  if [[ "$HTTP_CODE" == "200" ]]; then
-    HEALTH_OK=true
-    break
-  fi
-  HEALTH_ELAPSED=$((SECONDS - HEALTH_STARTED))
-  warn "  Health check attempt ${HEALTH_ATTEMPT}: HTTP ${HTTP_CODE} (${HEALTH_ELAPSED}s elapsed)"
-  HEALTH_REMAINING=$((HEALTH_TIMEOUT - HEALTH_ELAPSED))
-  if [[ $HEALTH_REMAINING -gt 0 ]]; then
-    sleep "$((HEALTH_REMAINING < HEALTH_INTERVAL ? HEALTH_REMAINING : HEALTH_INTERVAL))"
-  fi
-  HEALTH_ELAPSED=$((SECONDS - HEALTH_STARTED))
-done
+  log "Verifying ${label} endpoint: ${HEALTH_URL}${path}"
+  while [[ $elapsed -lt $HEALTH_TIMEOUT ]]; do
+    attempt=$((attempt + 1))
+    local remaining=$((HEALTH_TIMEOUT - elapsed))
+    local request_timeout=$((remaining < 10 ? remaining : 10))
+    local connect_timeout=$((request_timeout < 5 ? request_timeout : 5))
+    http_code=$(curl -sS \
+      --connect-timeout "$connect_timeout" \
+      --max-time "$request_timeout" \
+      -o /dev/null \
+      -w "%{http_code}" \
+      "${HEALTH_URL}${path}" 2>/dev/null) || http_code="000"
+    if [[ "$http_code" == "200" ]]; then
+      ok "${label} check passed"
+      return 0
+    fi
+    elapsed=$((SECONDS - started))
+    warn "  ${label} check attempt ${attempt}: HTTP ${http_code} (${elapsed}s elapsed)"
+    remaining=$((HEALTH_TIMEOUT - elapsed))
+    if [[ $remaining -gt 0 ]]; then
+      sleep "$((remaining < HEALTH_INTERVAL ? remaining : HEALTH_INTERVAL))"
+    fi
+    elapsed=$((SECONDS - started))
+  done
 
-if $HEALTH_OK; then
-  ok "Health check passed"
-else
-  fail "Health check failed after ${HEALTH_ATTEMPT} attempts / ${HEALTH_TIMEOUT}s (last HTTP: ${HTTP_CODE})"
+  fail "${label} check failed after ${attempt} attempts / ${HEALTH_TIMEOUT}s (last HTTP: ${http_code})"
   fail "Collecting Railway logs for deployment ${DEPLOY_ID} before failing."
   dump_failure
-  exit 1
-fi
+  return 1
+}
+
+verify_public_probe "/health" "Health" || exit 1
+# Liveness alone is insufficient: /ready verifies the migrated ledger, RLS
+# deployment role, Redis/auth stores, and other durable dependencies before a
+# Railway deployment is accepted.
+verify_public_probe "/ready" "Readiness" || exit 1
 
 # ---------------------------------------------------------------------------
 # Summary
