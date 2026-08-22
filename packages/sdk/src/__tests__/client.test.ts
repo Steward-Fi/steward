@@ -14,6 +14,7 @@ import type {
   DigitalAssetAccount as RootDigitalAssetAccount,
   DigitalAssetAccountAggregation as RootDigitalAssetAccountAggregation,
   DigitalAssetAccountMutationInput as RootDigitalAssetAccountMutationInput,
+  LinkedAccountTransferFailureEvidence as RootLinkedAccountTransferFailureEvidence,
   PlatformLinkAccountResult as RootPlatformLinkAccountResult,
   PlatformTenantInvitationCreateResult as RootPlatformTenantInvitationCreateResult,
   PlatformTenantUser as RootPlatformTenantUser,
@@ -204,6 +205,7 @@ describe("root SDK parity exports", () => {
   it("exports platform admin and pregenerated wallet result types from the public entrypoint", () => {
     type PublicParityTypes =
       | RootPlatformLinkAccountResult
+      | RootLinkedAccountTransferFailureEvidence
       | RootPlatformTenantInvitationCreateResult
       | RootPlatformTenantUser
       | RootPlatformUserIdentity
@@ -1464,6 +1466,26 @@ describe("HTTP request building", () => {
     await makeClient({ bearerToken: "user-token" }).unlinkUserAccount("google", "google-1");
     expect(lastCapture?.method).toBe("DELETE");
     expect(lastCapture?.url).toBe("https://api.steward.example/user/me/accounts/google/google-1");
+
+    installMockFetch(
+      {
+        ok: false,
+        error: "Internal server error",
+        data: { accountUnlinked: false, sessionsRevoked: true, issuedBefore: 456 },
+      },
+      500,
+    );
+    try {
+      await makeClient({ bearerToken: "user-token" }).unlinkUserAccount("google", "google-1");
+      throw new Error("expected unlink failure");
+    } catch (error) {
+      expect(error).toBeInstanceOf(StewardApiError);
+      expect((error as StewardApiError).data).toEqual({
+        accountUnlinked: false,
+        sessionsRevoked: true,
+        issuedBefore: 456,
+      });
+    }
   });
 
   it("getUserAccount → GET /user/me/account", async () => {

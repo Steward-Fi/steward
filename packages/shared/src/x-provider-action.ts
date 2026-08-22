@@ -2,8 +2,7 @@
  * x-provider-action.ts — the `x.provider-action.v1` canonicalization profile.
  *
  * This module is the X (Twitter) sibling of the `github.provider-action.v1`
- * profile in provider-action.ts. It defines, for the governed-provider-authority
- * plan (issue #195 workstream B):
+ * profile in provider-action.ts. It defines:
  *   - the X canonical origin (`https://api.x.com`) + host allowlist;
  *   - the X canonical action type (`XCanonicalActionV1`) and profile string;
  *   - the X origin canonicalizer + the thin body/content-type orchestration that

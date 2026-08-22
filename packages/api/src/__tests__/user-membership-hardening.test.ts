@@ -264,7 +264,7 @@ describe("user membership hardening", () => {
       userSource.indexOf('user.delete("/me/accounts/:provider/:providerAccountId"'),
     );
     expect(route).toContain("hasRecentMfaStepUp(session)");
-    expect(route).toContain("user_session_${userId}");
+    expect(route).toContain("lockUserSession(tx, userId)");
     expect(route).toContain("providerAccountId");
     expect(route).toContain("accountId");
     expect(route).toContain('"user.unlinked_account"');

@@ -556,13 +556,11 @@ export async function withTenantAuditedTransactionOnDb<T>(
     if (hasTenantTransactionDatabase({ tenantId, db })) {
       assertRemaining();
       // The authenticated middleware owns the outer tenant transaction. Keep
-      // mutations in a savepoint so a Hono error response cannot accidentally
-      // commit partial route state, while routing raw audit statements through
-      // the request-bound outer executor so deterministic DB fault wrappers
-      // remain reachable. Both handles share the same connection/GUC/socket.
-      const outcome = await db.transaction((tx) =>
-        runOnTransaction(tx as AuditTxLike, db as unknown as AuditTxLike),
-      );
+      // mutations and their required audit writes in the same savepoint. An
+      // audit failure must roll back to that savepoint before the route can
+      // return split-outcome evidence; issuing the audit through the outer
+      // executor leaves the request-owned transaction aborted on PostgreSQL.
+      const outcome = await db.transaction((tx) => runOnTransaction(tx as AuditTxLike));
       observeCommittedEvents(outcome.committedEvents);
       return outcome.result;
     }

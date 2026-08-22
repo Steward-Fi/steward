@@ -2,7 +2,8 @@
  * @stwd/eliza-plugin - Steward wallet management for ElizaOS agents.
  *
  * Policy-enforced signing, balances, and approval flows.
- * Drop-in plugin: add to your character's plugins array and set STEWARD_API_URL.
+ * Add the plugin to a character and explicitly configure its Steward API URL,
+ * authentication credential, and agent identity.
  */
 import type { Plugin } from "@elizaos/core";
 import { callGovernedApiAction } from "./actions/call-governed-api.js";

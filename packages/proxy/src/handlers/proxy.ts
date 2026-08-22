@@ -1378,11 +1378,11 @@ async function handleProxyWithReplayCompletion(
     | undefined;
   // Set once the governed claim is verified against the selected route; the
   // single-use v2 nonce it represents is the replay guard, so a verified governed
-  // dispatch skips the header-based Idempotency-Key claim below (codex P1).
+  // dispatch skips the header-based Idempotency-Key claim below.
   let isVerifiedGovernedDispatch = false;
   if (authorityMode !== "legacy") {
     // The claim must match the SELECTED route by id AND by the exact revision +
-    // secret binding it was minted against (codex P1). A rotated route/secret
+    // secret binding it was minted against. A rotated route/secret
     // after the claim (routeId unchanged) would otherwise decrypt with the CURRENT
     // credential; requiring the claimed authorityRevision + secretId here fails
     // closed on any such drift before the decrypt. The secret VERSION is
@@ -1398,7 +1398,7 @@ async function handleProxyWithReplayCompletion(
       governedClaim.routeRevision === routeRevision &&
       governedClaim.secretId !== undefined &&
       governedClaim.secretId === routeSecretId &&
-      // secretVersion is REQUIRED for a verified governed claim (codex P2): a
+      // secretVersion is REQUIRED for a verified governed claim: a
       // partial claim that omits it must NOT be treated as verified, otherwise the
       // decrypt-time version recheck below (guarded on secretVersion !== undefined)
       // would be skipped and a rotated secret could be decrypted. The live
@@ -1474,7 +1474,7 @@ async function handleProxyWithReplayCompletion(
     return c.json({ ok: false, error: "Approved proxy route no longer matches" }, 409);
   }
   if (route.requiresApproval && !approvalReleaseId && !isVerifiedGovernedDispatch) {
-    // NOTE: a verified governed dispatch is EXCLUDED here (codex P1). A governed
+    // NOTE: a verified governed dispatch is EXCLUDED here. A governed
     // route's approval was already adjudicated by the v2 authority flow (the
     // intent is approved + the binding is execution_ready before the nonce is
     // minted); it must NOT re-enter the legacy proxy-approval hold, which would
@@ -1731,7 +1731,7 @@ async function handleProxyWithReplayCompletion(
   // consumed by the claim) and an approval-release both carry their OWN replay
   // protection, so neither goes through the header Idempotency-Key claim. Without
   // this, mutating governed actions (POST/PUT/PATCH/DELETE) would 400 for a
-  // missing Idempotency-Key AFTER the nonce was already spent (codex P1) — the
+  // missing Idempotency-Key AFTER the nonce was already spent — the
   // provider-action header allowlist does not even permit that header.
   const replayClaim =
     approvalReleaseId || isVerifiedGovernedDispatch

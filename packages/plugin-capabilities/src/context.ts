@@ -11,7 +11,7 @@
  *
  * this shape mirrors `@stwd/api`'s `StewardAppContext` (identical to
  * `@stwd/plugin-trading`'s), so the context the core BUILDS (`buildPluginContext()`)
- * is assignable to it at the W-1c composition root. every member is typed against
+ * is assignable to it at the composition root. every member is typed against
  * the underlying `@stwd/*` package types, never `@stwd/api`.
  */
 

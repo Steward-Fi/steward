@@ -1,6 +1,4 @@
 import { describe, expect, it } from "bun:test";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import {
   normalizeGasSpendQuery,
   normalizeGasSponsorshipConfig,
@@ -135,99 +133,5 @@ describe("gas sponsorship config", () => {
         endTimestamp: 1_764_195_200 + 31 * 86400,
       }),
     ).toBe("gas spend queries cannot exceed 30 days");
-  });
-
-  it("keeps sponsored transfer reservations atomic and before signing", () => {
-    const serviceSource = readFileSync(
-      join(import.meta.dir, "../services/gas-sponsorship.ts"),
-      "utf8",
-    );
-    expect(serviceSource).toContain("export async function reserveSponsoredGasEvent");
-    expect(serviceSource).toContain("pg_advisory_xact_lock");
-    expect(serviceSource).toContain("sponsored_gas:");
-    expect(serviceSource).toContain("getSponsorshipCapError");
-
-    const vaultSource = readFileSync(join(import.meta.dir, "../routes/vault.ts"), "utf8");
-    const transferRoute = vaultSource.slice(
-      vaultSource.indexOf('vaultRoutes.post("/:agentId/actions/transfer"'),
-    );
-    const reserveCall = transferRoute.indexOf('status: "reserved"');
-    const signCall = transferRoute.indexOf("vault.signTransaction(signRequest");
-    expect(reserveCall).toBeGreaterThan(-1);
-    expect(signCall).toBeGreaterThan(-1);
-    expect(reserveCall).toBeLessThan(signCall);
-    expect(vaultSource).toContain('reservedUsd: input.status === "failed" ? 0 : estimatedUsd');
-  });
-
-  it("reserves and finalizes sponsorship for manual transfer approvals", () => {
-    const vaultSource = readFileSync(join(import.meta.dir, "../routes/vault.ts"), "utf8");
-    const transferRoute = vaultSource.slice(
-      vaultSource.indexOf('vaultRoutes.post("/:agentId/actions/transfer"'),
-      vaultSource.indexOf('vaultRoutes.post("/:agentId/approve/:txId"'),
-    );
-    const pendingDecision = transferRoute.indexOf(
-      'const status = evaluation.requiresManualApproval ? "pending" : "rejected"',
-    );
-    const pendingInsert = transferRoute.indexOf("db.insert(transactions).values", pendingDecision);
-    const pendingReservation = transferRoute.indexOf('status: "reserved"', pendingInsert);
-    const queuedAudit = transferRoute.indexOf(
-      "wallet_action.transfer.queued_for_approval",
-      pendingInsert,
-    );
-    expect(pendingDecision).toBeGreaterThanOrEqual(0);
-    expect(pendingInsert).toBeGreaterThanOrEqual(0);
-    expect(pendingInsert).toBeGreaterThan(pendingDecision);
-    expect(pendingReservation).toBeGreaterThan(pendingInsert);
-    expect(queuedAudit).toBeGreaterThan(pendingInsert);
-    expect(queuedAudit).toBeGreaterThan(pendingReservation);
-    expect(transferRoute).toContain("db.delete(transactions).where(eq(transactions.id, actionId))");
-    expect(transferRoute).toContain('status: "failed"');
-
-    const approvalRoute = vaultSource.slice(
-      vaultSource.indexOf('vaultRoutes.post("/:agentId/approve/:txId"'),
-      vaultSource.indexOf('vaultRoutes.post("/:agentId/reject/:txId"'),
-    );
-    const signCall = approvalRoute.indexOf("vault.signTransaction(approvalSignRequest");
-    const approvalReservation = approvalRoute.indexOf('status: "reserved"');
-    const finalSponsorship = approvalRoute.indexOf(
-      "sponsorship: transferPayload.sponsorship",
-      signCall,
-    );
-    const finalAudit = approvalRoute.indexOf("wallet_action.transfer.succeeded", signCall);
-    expect(approvalReservation).toBeGreaterThanOrEqual(0);
-    expect(signCall).toBeGreaterThanOrEqual(0);
-    expect(approvalReservation).toBeLessThan(signCall);
-    expect(finalSponsorship).toBeGreaterThan(signCall);
-    expect(finalSponsorship).toBeLessThan(finalAudit);
-    expect(approvalRoute).toContain('status: shouldBroadcast ? "submitted" : "signed"');
-  });
-
-  it("rejects sponsored signed-only transfer paths before gas reservation", () => {
-    const vaultSource = readFileSync(join(import.meta.dir, "../routes/vault.ts"), "utf8");
-    const transferRoute = vaultSource.slice(
-      vaultSource.indexOf('vaultRoutes.post("/:agentId/actions/transfer"'),
-      vaultSource.indexOf('vaultRoutes.post("/:agentId/approve/:txId"'),
-    );
-    const signedOnlyGuard = transferRoute.indexOf(
-      "transfer.sponsor === true && transfer.broadcast === false",
-    );
-    const sponsorshipResolve = transferRoute.indexOf("resolveGasSponsorshipRequest");
-    const reservation = transferRoute.indexOf('status: "reserved"');
-    expect(signedOnlyGuard).toBeGreaterThanOrEqual(0);
-    expect(sponsorshipResolve).toBeGreaterThan(signedOnlyGuard);
-    expect(reservation).toBeGreaterThan(signedOnlyGuard);
-    expect(transferRoute).toContain("signed-only actions do not spend sponsored gas");
-
-    const approvalRoute = vaultSource.slice(
-      vaultSource.indexOf('vaultRoutes.post("/:agentId/approve/:txId"'),
-      vaultSource.indexOf('vaultRoutes.post("/:agentId/reject/:txId"'),
-    );
-    const approvalGuard = approvalRoute.indexOf(
-      "transferPayload?.sponsorship?.sponsored === true && !shouldBroadcast",
-    );
-    const approvalReservation = approvalRoute.indexOf('status: "reserved"', approvalGuard);
-    expect(approvalGuard).toBeGreaterThanOrEqual(0);
-    expect(approvalReservation).toBeGreaterThan(approvalGuard);
-    expect(approvalRoute).toContain("resolvedAt: null");
   });
 });

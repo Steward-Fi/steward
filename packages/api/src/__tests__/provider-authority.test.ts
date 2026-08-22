@@ -18,6 +18,9 @@ import {
 } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { and, eq, sql } from "drizzle-orm";
+import { Hono } from "hono";
+import { providerAuthorityRoutes } from "../routes/provider-authority";
+import type { AppVariables } from "../services/context";
 import { type AuthorityAudit, ProviderAuthorityStore } from "../services/provider-authority-store";
 
 setDefaultTimeout(120_000);
@@ -835,7 +838,7 @@ describe("provider authority foundation", () => {
     expect(auditEvents.some((event) => event.action === "provider.grant.issue")).toBe(true);
   });
 
-  test("operators can create, list, revise, and disable first-class agent budgets", async () => {
+  test("operators can create, list, revise, disable, and delete first-class agent budgets", async () => {
     await getDb()
       .update(providerRoleBindings)
       .set({ expiresAt: null })
@@ -933,6 +936,81 @@ describe("provider authority foundation", () => {
           event.action === "provider.agent_budget.update" && event.resourceId === notional.id,
       ),
     ).toBe(true);
+    await expect(
+      store.deleteAgentBudget(
+        mutation({
+          actorUserId: ADMIN,
+          tenantRole: "admin",
+          expectedRevision: 1,
+        }),
+        disabled.id,
+      ),
+    ).rejects.toMatchObject({
+      code: "revision_conflict",
+      message: "budget revision conflict",
+      status: 409,
+    });
+    const deleted = await store.deleteAgentBudget(
+      mutation({
+        actorUserId: ADMIN,
+        tenantRole: "admin",
+        expectedRevision: disabled.revision,
+      }),
+      disabled.id,
+    );
+    expect(deleted).toMatchObject({ id: disabled.id, revision: 2, enabled: false });
+    expect(await store.listAgentBudgets("tenant-main", "agent-x")).toHaveLength(1);
+    const deleteAudits = await getDb()
+      .select()
+      .from(persistedAuditEvents)
+      .where(
+        and(
+          eq(persistedAuditEvents.action, "provider.agent_budget.delete"),
+          eq(persistedAuditEvents.resourceId, disabled.id),
+        ),
+      );
+    expect(deleteAudits).toHaveLength(1);
+  });
+
+  test("the public delete boundary returns a stable revision conflict before exact deletion", async () => {
+    const created = await store.createAgentBudget(
+      mutation({ actorUserId: ADMIN, tenantRole: "admin", expectedRevision: 0 }),
+      {
+        agentId: "agent-y",
+        dimension: "count",
+        windowSeconds: 98_765,
+        max: 4,
+      },
+    );
+    const app = new Hono<{ Variables: AppVariables }>();
+    app.use("*", async (c, next) => {
+      c.set("tenantId", "tenant-main");
+      c.set("authType", "session-jwt");
+      c.set("userId", ADMIN);
+      c.set("tenantRole", "admin");
+      c.set("sessionMfaVerifiedAt", Date.now());
+      c.set("requestId", "budget-delete-route");
+      await next();
+    });
+    app.route("/v2", providerAuthorityRoutes);
+    const remove = (expectedRevision: number) =>
+      app.request(`/v2/provider-agent-budgets/${created.id}`, {
+        method: "DELETE",
+        headers: {
+          "Content-Type": "application/json",
+          "Idempotency-Key": `budget-delete-${expectedRevision}`,
+        },
+        body: JSON.stringify({ expectedRevision, reason: "route deletion proof" }),
+      });
+    const stale = await remove(0);
+    expect(stale.status).toBe(409);
+    expect(await stale.json()).toEqual({ ok: false, error: "budget revision conflict" });
+    const deleted = await remove(created.revision);
+    expect(deleted.status).toBe(200);
+    expect(await deleted.json()).toEqual({
+      ok: true,
+      data: expect.objectContaining({ id: created.id }),
+    });
   });
 
   test("workspace admins cannot turn a workspace budget into a tenant-global freeze", async () => {
