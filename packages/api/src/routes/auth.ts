@@ -1957,6 +1957,45 @@ function buildTemplateRenderers(templates: TenantEmailConfig["templates"]): {
   };
 }
 
+function globalEmailMagicLinkBaseUrl(): string {
+  const emailBaseUrl = runtimeEnvironmentValue("EMAIL_MAGIC_LINK_BASE_URL")?.trim();
+  if (emailBaseUrl) {
+    const parsed = new URL(emailBaseUrl);
+    const normalized = emailBaseUrl.replace(/\/$/, "");
+    if (
+      !["http:", "https:"].includes(parsed.protocol) ||
+      parsed.username ||
+      parsed.password ||
+      parsed.search ||
+      parsed.hash ||
+      parsed.origin !== normalized
+    ) {
+      throw new Error("EMAIL_MAGIC_LINK_BASE_URL must be a credential-free HTTP(S) origin");
+    }
+    return parsed.origin;
+  }
+
+  return runtimeEnvironmentValue("APP_URL")?.trim().replace(/\/$/, "") || "https://steward.fi";
+}
+
+function globalEmailMagicLinkCallbackPath(): string | undefined {
+  const callbackPath = runtimeEnvironmentValue("EMAIL_MAGIC_LINK_CALLBACK_PATH")?.trim();
+  if (!callbackPath) return undefined;
+  if (!callbackPath.startsWith("/") || callbackPath.startsWith("//")) {
+    throw new Error("EMAIL_MAGIC_LINK_CALLBACK_PATH must be a root-relative path");
+  }
+  return callbackPath;
+}
+
+function globalEmailBrandName(): string | undefined {
+  const brandName = runtimeEnvironmentValue("EMAIL_BRAND_NAME")?.trim();
+  if (!brandName) return undefined;
+  if (brandName.length > 100 || /[\r\n]/.test(brandName)) {
+    throw new Error("EMAIL_BRAND_NAME must be a single-line string of at most 100 characters");
+  }
+  return brandName;
+}
+
 function buildGlobalEmailAuth(overrides?: {
   baseUrl?: string;
   callbackPath?: string;
@@ -1979,12 +2018,12 @@ function buildGlobalEmailAuth(overrides?: {
 
   return new EmailAuth({
     from: process.env.EMAIL_FROM || "login@steward.fi",
-    baseUrl: overrides?.baseUrl?.replace(/\/$/, "") || process.env.APP_URL || "https://steward.fi",
-    callbackPath: overrides?.callbackPath,
+    baseUrl: overrides?.baseUrl?.replace(/\/$/, "") || globalEmailMagicLinkBaseUrl(),
+    callbackPath: overrides?.callbackPath || globalEmailMagicLinkCallbackPath(),
     provider,
     tokenStore: getTokenStore(),
     templateId: overrides?.templateId,
-    brandName: overrides?.brandName,
+    brandName: overrides?.brandName || globalEmailBrandName(),
     subjectOverride: overrides?.subjectOverride,
     replyTo: overrides?.replyTo,
     ...buildTemplateRenderers(overrides?.templates),
@@ -2065,17 +2104,16 @@ async function createEmailAuthForTenant(tenantId: string): Promise<EmailAuth> {
         })
       : undefined;
 
-  const baseUrl =
-    magicLinkBaseUrl?.replace(/\/$/, "") || process.env.APP_URL || "https://steward.fi";
+  const baseUrl = magicLinkBaseUrl?.replace(/\/$/, "") || globalEmailMagicLinkBaseUrl();
 
   return new EmailAuth({
     from,
     baseUrl,
-    callbackPath,
+    callbackPath: callbackPath || globalEmailMagicLinkCallbackPath(),
     provider,
     tokenStore: getTokenStore(),
     templateId: emailConfig.templateId,
-    brandName: emailConfig.brandName,
+    brandName: emailConfig.brandName || globalEmailBrandName(),
     subjectOverride: emailConfig.subjectOverride,
     replyTo: emailConfig.replyTo,
     ...buildTemplateRenderers(emailConfig.templates),
