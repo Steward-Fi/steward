@@ -5,6 +5,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { Simulate } from "react-dom/test-utils";
 
 const browser = new Window({ url: "https://app.example.test/accounts" });
+const originalFetch = globalThis.fetch;
 Object.assign(globalThis, {
   window: browser,
   document: browser.document,
@@ -21,18 +22,18 @@ Object.assign(globalThis, {
 let authed = true;
 let client: Record<string, ReturnType<typeof mock>>;
 
-mock.module("../hooks/useAuth.js", () => ({
-  useAuth: () => ({
+const { StewardLinkedAccounts } = await import("../components/StewardLinkedAccounts.js");
+const { StewardAuthContext, StewardProvider } = await import("../provider.js");
+
+function authContext() {
+  return {
     isAuthenticated: authed,
     isLoading: false,
     user: { id: "user-1", email: "user@example.test" },
     session: { token: "token", address: "", tenantId: "tenant-1" },
     getToken: () => "token",
-  }),
-}));
-mock.module("../hooks/useSteward.js", () => ({ useSteward: () => ({ client }) }));
-
-const { StewardLinkedAccounts } = await import("../components/StewardLinkedAccounts.js");
+  };
+}
 
 const account = (id: string, provider: string, providerAccountId: string) => ({
   id,
@@ -47,6 +48,7 @@ function linkedResult(id: string, provider: string, providerAccountId: string) {
 
 function resetClient() {
   client = {
+    getBaseUrl: mock(() => "https://api.example.test"),
     listUserAccounts: mock(async () => ({
       accounts: [account("github-1", "github", "octocat")],
       primaryLoginMethods: [{ provider: "email", providerAccountId: "user@example.test" }],
@@ -94,7 +96,19 @@ async function mount(props: Record<string, unknown> = {}) {
   container = browser.document.createElement("div") as unknown as HTMLDivElement;
   browser.document.body.replaceChildren(container as unknown as Node);
   root = createRoot(container);
-  await React.act(async () => root?.render(React.createElement(StewardLinkedAccounts, props)));
+  await React.act(async () =>
+    root?.render(
+      React.createElement(
+        StewardProvider,
+        { client: client as any },
+        React.createElement(
+          StewardAuthContext.Provider,
+          { value: authContext() as any },
+          React.createElement(StewardLinkedAccounts, props),
+        ),
+      ),
+    ),
+  );
 }
 
 function button(label: string): HTMLButtonElement {
@@ -123,11 +137,13 @@ async function change(selector: string, value: string) {
 beforeEach(() => {
   authed = true;
   resetClient();
+  globalThis.fetch = mock(async () => Response.json({ ok: true, data: {} }));
 });
 
 afterEach(async () => {
   if (root) await React.act(async () => root?.unmount());
   root = null;
+  globalThis.fetch = originalFetch;
 });
 
 describe("<StewardLinkedAccounts /> mounted interactions", () => {

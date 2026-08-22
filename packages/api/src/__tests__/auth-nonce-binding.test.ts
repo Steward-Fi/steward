@@ -1,4 +1,5 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, mock } from "bun:test";
+import { createHash } from "node:crypto";
 import { clearOidcJwksCacheForTests } from "@stwd/auth";
 import { closeDb, getDb, tenants } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
@@ -7,6 +8,10 @@ import { exportJWK, generateKeyPair, type JWK, SignJWT } from "jose";
 process.env.NODE_ENV = "test";
 process.env.STEWARD_MASTER_PASSWORD = "nonce-binding-master-password";
 process.env.STEWARD_JWT_SECRET = "nonce-binding-jwt-secret-with-enough-entropy";
+// OAuth success writes the user-created audit event. Keep the mounted fixture
+// truthful when invoked outside packages/api's preload: production correctly
+// fails closed if the audit-chain HMAC authority is absent.
+process.env.STEWARD_AUDIT_HMAC_KEY = "a".repeat(64);
 process.env.STEWARD_PGLITE_MEMORY = "true";
 process.env.SIWE_ALLOWED_DOMAINS = "steward.fi,www.steward.fi";
 process.env.STEWARD_ALLOW_AUTH_RATE_LIMIT_SOFT_FAIL = "true";
@@ -190,6 +195,8 @@ describe("mounted nonce and OAuth state boundaries", () => {
     const publicJwk = (await exportJWK(keyPair.publicKey)) as JWK;
     Object.assign(publicJwk, { kid: "apple-mounted-key", alg: "ES256", use: "sig" });
     let nextToken = "";
+    const codeVerifier = "mounted-apple-pkce-verifier-abcdefghijklmnopqrstuvwxyz0123456789";
+    const codeChallenge = createHash("sha256").update(codeVerifier).digest("base64url");
     globalThis.fetch = mock(async (input: RequestInfo | URL) => {
       const url =
         typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
@@ -207,7 +214,7 @@ describe("mounted nonce and OAuth state boundaries", () => {
     });
 
     const authorize = await auth.authRoutes.request(
-      "/oauth/apple/authorize?redirect_uri=https%3A%2F%2Fapp.example.test%2Fcallback&code_challenge=abcdefghijklmnopqrstuvwxyzABCDEFG0123456789-_&code_challenge_method=S256",
+      `/oauth/apple/authorize?redirect_uri=https%3A%2F%2Fapp.example.test%2Fcallback&code_challenge=${codeChallenge}&code_challenge_method=S256`,
     );
     expect(authorize.status).toBe(302);
     const provider = new URL(authorize.headers.get("location")!);
@@ -259,6 +266,27 @@ describe("mounted nonce and OAuth state boundaries", () => {
     );
     expect(success.status).toBe(302);
     expect(await auth.getAuthChallengeStore().get(`oauth:${state}`)).toBeNull();
+    const callbackRedirect = new URL(success.headers.get("location")!);
+    const exchangeCode = new URLSearchParams(callbackRedirect.hash.slice(1)).get("code");
+    expect(exchangeCode).toBeString();
+    const exchange = await auth.authRoutes.request("/oauth/exchange", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        code: exchangeCode,
+        redirect_uri: "https://app.example.test/callback",
+        code_verifier: codeVerifier,
+      }),
+    });
+    expect(exchange.status).toBe(200);
+    expect(await exchange.json()).toMatchObject({
+      ok: true,
+      token: expect.any(String),
+      refreshToken: expect.any(String),
+      user: {
+        email: "mounted-apple@privaterelay.appleid.com",
+      },
+    });
     expect(
       (await auth.authRoutes.request(`/oauth/apple/callback?code=provider-code&state=${state}`))
         .status,
