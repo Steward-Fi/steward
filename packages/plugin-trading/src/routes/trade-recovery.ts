@@ -64,6 +64,7 @@ export async function beginTradeRecovery(
     venue: TradeRecoveryVenue;
     idempotencyKey: string;
     bodyHash: string;
+    effectMetadata: Record<string, unknown>;
   },
 ): Promise<BeginTradeRecoveryResult> {
   const claimToken = randomUUID();
@@ -77,6 +78,7 @@ export async function beginTradeRecovery(
       venue: input.venue,
       idempotencyKeyHash,
       bodyHash: input.bodyHash,
+      effectMetadata: input.effectMetadata,
       claimToken,
     })
     .onConflictDoNothing()
@@ -198,6 +200,11 @@ export async function checkpointReconciledTradeResult(
   db: DbHandle,
   input: {
     id: string;
+    tenantId: string;
+    agentId: string;
+    venue: TradeRecoveryVenue;
+    bodyHash: string;
+    venueIdentity: string;
     venueResult: Record<string, unknown>;
     envelope: TradeRecoveryEnvelope;
   },
@@ -210,6 +217,11 @@ export async function checkpointReconciledTradeResult(
     .where(
       and(
         eq(tradeOrderRecoveries.id, input.id),
+        eq(tradeOrderRecoveries.tenantId, input.tenantId),
+        eq(tradeOrderRecoveries.agentId, input.agentId),
+        eq(tradeOrderRecoveries.venue, input.venue),
+        eq(tradeOrderRecoveries.bodyHash, input.bodyHash),
+        eq(tradeOrderRecoveries.venueIdentity, input.venueIdentity),
         sql`${tradeOrderRecoveries.state} IN ('submitting','ambiguous')`,
         lt(tradeOrderRecoveries.claimedAt, staleBefore),
       ),

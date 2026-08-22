@@ -3079,6 +3079,7 @@ export const tradeOrderRecoveries = pgTable(
     bodyHash: varchar("body_hash", { length: 64 }).notNull(),
     state: varchar("state", { length: 32 }).notNull().default("prepared"),
     venueIdentity: varchar("venue_identity", { length: 255 }),
+    effectMetadata: jsonb("effect_metadata").$type<Record<string, unknown>>().notNull(),
     venueResult: jsonb("venue_result").$type<Record<string, unknown>>(),
     responseEnvelope: jsonb("response_envelope").$type<Record<string, unknown>>(),
     occurrenceAt: timestamp("occurrence_at", { withTimezone: true }).notNull().defaultNow(),

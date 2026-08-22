@@ -8,6 +8,7 @@ CREATE TABLE "trade_order_recoveries" (
   "body_hash" varchar(64) NOT NULL,
   "state" varchar(32) DEFAULT 'prepared' NOT NULL,
   "venue_identity" varchar(255),
+  "effect_metadata" jsonb NOT NULL,
   "venue_result" jsonb,
   "response_envelope" jsonb,
   "occurrence_at" timestamp with time zone DEFAULT now() NOT NULL,

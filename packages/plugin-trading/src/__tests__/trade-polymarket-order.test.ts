@@ -49,6 +49,7 @@ let getWalletSpy: ReturnType<typeof spyOn> | undefined;
 let buildSpy: ReturnType<typeof spyOn> | undefined;
 let fenceSpy: ReturnType<typeof spyOn> | undefined;
 let orderIdentitySpy: ReturnType<typeof spyOn> | undefined;
+let getOrderSpy: ReturnType<typeof spyOn> | undefined;
 let createTradeRoutesForTest: typeof import("../routes/trade").createTradeRoutes;
 
 // Inject a polymarket venue wallet WITH funder metadata so the creds resolver
@@ -223,9 +224,11 @@ describe("POST /v1/trade/polymarket/order", () => {
     submitSpy?.mockRestore();
     getWalletSpy?.mockRestore();
     buildSpy?.mockRestore();
+    getOrderSpy?.mockRestore();
     submitSpy = undefined;
     getWalletSpy = undefined;
     buildSpy = undefined;
+    getOrderSpy = undefined;
   });
 
   it("rejects an order whose market is not allowlisted (400 policy-violation, no spend)", async () => {
@@ -842,6 +845,51 @@ describe("POST /v1/trade/polymarket/order", () => {
     }
   });
 
+  it("repairs a Polymarket post-submit audit outage on replay without another POST", async () => {
+    const { tenantId, agentId, sessionId } = await seedSession({});
+    let failSubmittedAudit = true;
+    const recoveryRoutes = createTradeRoutesForTest({
+      ...sharedTestContext,
+      writeAuditEvent: async (event) => {
+        if (failSubmittedAudit && event.action === "trade.order.submitted") {
+          throw new Error("injected Polymarket post-submit audit outage");
+        }
+        return sharedTestContext.writeAuditEvent(event);
+      },
+    });
+    const app = makeApp(tenantId, agentId, recoveryRoutes);
+    process.env.STEWARD_PM_TEST_CREDS = "1";
+    stubWallet(true);
+    buildSpy = spyOn(PolymarketExecutionAdapter.prototype, "buildSignedOrder").mockResolvedValue(
+      {} as never,
+    );
+    submitSpy = spyOn(PolymarketExecutionAdapter.prototype, "submitSignedOrder").mockResolvedValue({
+      venue: "polymarket" as const,
+      orderId: "pm-recovered-audit-1",
+      status: "matched",
+      success: true,
+      actualAmount: 20,
+      actualPrice: 0.5,
+    } as Awaited<ReturnType<PolymarketExecutionAdapter["submitSignedOrder"]>>);
+
+    try {
+      const key = crypto.randomUUID();
+      const first = await postOrder(app, sessionId, key);
+      expect(first.status).toBe(200);
+      expect(submitSpy).toHaveBeenCalledTimes(1);
+      expect(await auditCount(tenantId, "trade.order.submitted")).toBe(0);
+
+      failSubmittedAudit = false;
+      const replay = await postOrder(app, sessionId, key);
+      expect(replay.status).toBe(200);
+      expect(replay.headers.get("Idempotency-Replayed")).toBe("true");
+      expect(submitSpy).toHaveBeenCalledTimes(1);
+      expect(await auditCount(tenantId, "trade.order.submitted")).toBe(1);
+    } finally {
+      delete process.env.STEWARD_PM_TEST_CREDS;
+    }
+  });
+
   it("deterministic E2E: real vault wallet -> L2 derive -> policy/session -> SDK sign/post -> audit/idempotency", async () => {
     const suffix = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const tenantId = `pm-e2e-tenant-${suffix}`;
@@ -1171,6 +1219,46 @@ describe("POST /v1/trade/polymarket/order", () => {
       // The order may have landed -> spend is NOT released.
       expect(await dailySpendOf(sessionId)).toBe(10);
       expect(await auditCount(tenantId, "trade.order.submitted")).toBe(0);
+    } finally {
+      delete process.env.STEWARD_PM_TEST_CREDS;
+    }
+  });
+
+  it("reconciles ambiguous venue evidence before a revoked session can block recovery", async () => {
+    const { tenantId, agentId, sessionId } = await seedSession({});
+    const app = makeApp(tenantId, agentId, tradeRoutes);
+    process.env.STEWARD_PM_TEST_CREDS = "1";
+    stubWallet(true);
+    buildSpy = spyOn(PolymarketExecutionAdapter.prototype, "buildSignedOrder").mockResolvedValue(
+      {} as never,
+    );
+    submitSpy = spyOn(PolymarketExecutionAdapter.prototype, "submitSignedOrder").mockRejectedValue(
+      new Error("lost response after POST"),
+    );
+
+    try {
+      const key = crypto.randomUUID();
+      const first = await postOrder(app, sessionId, key);
+      expect(first.status).toBe(502);
+      expect(submitSpy).toHaveBeenCalledTimes(1);
+
+      await getDb()
+        .update(tradeSessions)
+        .set({ status: "revoked", revokedAt: new Date() })
+        .where(eq(tradeSessions.id, sessionId));
+      getOrderSpy = spyOn(PolymarketExecutionAdapter.prototype, "getOrder").mockResolvedValue({
+        id: `0x${"7".repeat(64)}`,
+        status: "matched",
+        size_matched: 20,
+        price: 0.5,
+      });
+
+      const replay = await postOrder(app, sessionId, key);
+      expect(replay.status).toBe(200);
+      expect(replay.headers.get("Idempotency-Replayed")).toBe("true");
+      expect(getOrderSpy).toHaveBeenCalledTimes(1);
+      expect(submitSpy).toHaveBeenCalledTimes(1);
+      expect(await auditCount(tenantId, "trade.order.submitted")).toBe(1);
     } finally {
       delete process.env.STEWARD_PM_TEST_CREDS;
     }

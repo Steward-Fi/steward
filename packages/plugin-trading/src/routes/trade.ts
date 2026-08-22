@@ -1110,15 +1110,6 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
       return c.json<ApiResponse>({ ok: false, error: "Agent JWT required for trading" }, 403);
     }
 
-    const rate = await enforceOrderRateLimit(agentId);
-    if (rate.unavailable) {
-      return c.json<ApiResponse>({ ok: false, error: "Trade order rate limit unavailable" }, 503);
-    }
-    if (!rate.allowed) {
-      c.header("Retry-After", String(Math.ceil(rate.resetMs / 1000)));
-      return c.json<ApiResponse>({ ok: false, error: "Trade order rate limit exceeded" }, 429);
-    }
-
     const raw = await safeJsonParse(c);
     const parsed = submitOrderSchema.safeParse(raw);
     if (!parsed.success) {
@@ -1150,16 +1141,14 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
       existingRecovery?.kind === "existing" && isPreparedTradeRecoveryStale(existingRecovery.row);
     if (existingRecovery?.kind === "existing" && !stalePreparedRecovery) {
       let recoveryRow = existingRecovery.row;
+      let recoveryClaimToken: string | undefined;
       let envelope = tradeRecoveryEnvelope(recoveryRow) as TradeIdempotencyResponse | null;
       if (
         (recoveryRow.state === "ambiguous" || recoveryRow.state === "submitting") &&
         recoveryRow.venueIdentity
       ) {
-        const storedSession = await getSessionManager().getSession({
-          tenantId,
-          id: recoveryRow.sessionId,
-        });
-        if (storedSession?.agentId === agentId && storedSession.venue === "hyperliquid") {
+        const durableWallet = recoveryRow.effectMetadata.walletAddress;
+        if (typeof durableWallet === "string" && durableWallet.length > 0) {
           const vaultClient = {
             signTypedData: (input: Omit<Parameters<typeof vault.signTypedData>[0], "tenantId">) =>
               vault.signTypedData({
@@ -1169,7 +1158,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
                 expectedWalletAddress: storedSession.walletId,
               }),
           };
-          const adapter = new HyperliquidAdapter(vaultClient, agentId, storedSession.walletId);
+          const adapter = new HyperliquidAdapter(vaultClient, agentId, durableWallet);
           try {
             const evidence = await adapter.getOrderStatus(recoveryRow.venueIdentity);
             const candidate =
@@ -1196,11 +1185,17 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
               };
               const reconciled = await checkpointReconciledTradeResult(db, {
                 id: recoveryRow.id,
+                tenantId: recoveryRow.tenantId,
+                agentId: recoveryRow.agentId,
+                venue: "hyperliquid",
+                bodyHash: recoveryRow.bodyHash,
+                venueIdentity: recoveryRow.venueIdentity,
                 venueResult: candidate ?? { order },
                 envelope: reconciledEnvelope,
               });
               if (reconciled) {
                 recoveryRow = reconciled.row;
+                recoveryClaimToken = reconciled.claimToken;
                 envelope = reconciledEnvelope;
               }
             }
@@ -1213,13 +1208,10 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
       if (envelope && (recoveryRow.state === "submitted" || recoveryRow.state === "completed")) {
         await drainTradeRecoveryAudit(db, {
           row: recoveryRow,
+          currentClaimToken: recoveryClaimToken,
           writeAuditEvent,
           details: {
-            sessionId: recoveryRow.sessionId,
-            venue: "hyperliquid",
-            asset: body.coin ?? body.asset,
-            leverage: body.leverage,
-            size: body.size,
+            ...recoveryRow.effectMetadata,
             orderId: recoveryRow.venueIdentity,
           },
         });
@@ -1231,6 +1223,15 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
         { ok: false, error: "Trade submission recovery is in progress" },
         409,
       );
+    }
+
+    const rate = await enforceOrderRateLimit(agentId);
+    if (rate.unavailable) {
+      return c.json<ApiResponse>({ ok: false, error: "Trade order rate limit unavailable" }, 503);
+    }
+    if (!rate.allowed) {
+      c.header("Retry-After", String(Math.ceil(rate.resetMs / 1000)));
+      return c.json<ApiResponse>({ ok: false, error: "Trade order rate limit exceeded" }, 429);
     }
 
     // A stale prepared journal proves the prior owner never crossed the
@@ -1569,6 +1570,16 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
           venue: "hyperliquid",
           idempotencyKey: body.idempotencyKey!,
           bodyHash: durableBodyHash,
+          effectMetadata: {
+            sessionId: session.id,
+            venue: "hyperliquid",
+            walletAddress: session.walletId,
+            asset: parsedAsset.data,
+            leverage: effectiveLeverage,
+            size: body.size,
+            sizeUsd,
+            orderId: order.clientOrderId,
+          },
         });
         if (recovery.kind === "conflict") {
           await getSessionManager().releaseSpend({
@@ -2059,15 +2070,6 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
       return c.json<ApiResponse>({ ok: false, error: "Agent JWT required for trading" }, 403);
     }
 
-    const rate = await enforcePolymarketOrderRateLimit(agentId);
-    if (rate.unavailable) {
-      return c.json<ApiResponse>({ ok: false, error: "Trade order rate limit unavailable" }, 503);
-    }
-    if (!rate.allowed) {
-      c.header("Retry-After", String(Math.ceil(rate.resetMs / 1000)));
-      return c.json<ApiResponse>({ ok: false, error: "Trade order rate limit exceeded" }, 429);
-    }
-
     const raw = await safeJsonParse(c);
     const parsed = pmSubmitOrderSchema.safeParse(raw);
     if (!parsed.success) {
@@ -2113,19 +2115,123 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
             row: existingRecovery.row,
             writeAuditEvent,
             details: {
-              sessionId: existingRecovery.row.sessionId,
-              venue: "polymarket",
-              tokenId: body.tokenId,
-              conditionId: body.conditionId ?? null,
-              side: body.side,
-              amount: Number(body.amount),
-              price: Number(body.price),
+              ...existingRecovery.row.effectMetadata,
               orderId: existingRecovery.row.venueIdentity,
             },
           });
         }
         return tradeReplayResponse(c, envelope);
       }
+    }
+
+    // These are immutable request fields covered by durableBodyHash. Recovery
+    // below does not consult mutable session, policy, rate-limit, or market-book
+    // state before attempting exact venue reconciliation.
+    const amount = Number(body.amount);
+    const price = Number(body.price);
+
+    // Recovery is authorized by the immutable durable tuple, not by mutable
+    // session/policy state. An order may have landed before its session was
+    // revoked or expired; requiring that session to remain active would make
+    // exact venue evidence and its required audit permanently unreachable.
+    if (pendingPolymarketRecovery) {
+      let envelope = tradeRecoveryEnvelope(
+        pendingPolymarketRecovery,
+      ) as TradeIdempotencyResponse | null;
+      const durableWallet = pendingPolymarketRecovery.effectMetadata.walletAddress;
+      if (
+        pendingPolymarketRecovery.venueIdentity &&
+        typeof durableWallet === "string" &&
+        durableWallet.length > 0
+      ) {
+        try {
+          const recoveryCreds = await resolvePolymarketCreds(tenantId, agentId);
+          if (
+            recoveryCreds.ok &&
+            recoveryCreds.walletAddress.toLowerCase() === durableWallet.toLowerCase()
+          ) {
+            const recoverySigner = buildPolymarketVaultSigner(
+              tenantId,
+              agentId,
+              recoveryCreds.walletAddress,
+            );
+            const recoveryAdapter = new PolymarketExecutionAdapter(
+              {
+                apiCredentials: recoveryCreds.apiCredentials,
+                funderAddress: recoveryCreds.funderAddress,
+                signer: recoverySigner,
+                signatureType: recoveryCreds.signatureType,
+              },
+              {
+                builder: resolveBuilderConfig(),
+                ...(recoveryCreds.clobUrl ? { clobUrl: recoveryCreds.clobUrl } : {}),
+              },
+            );
+            const evidence = await recoveryAdapter.getOrder(
+              pendingPolymarketRecovery.venueIdentity,
+            );
+            if (evidence && typeof evidence === "object") {
+              const order = evidence as Record<string, unknown>;
+              const durableNotional = Number(pendingPolymarketRecovery.effectMetadata.notionalUsd);
+              const durablePrice = Number(pendingPolymarketRecovery.effectMetadata.price);
+              if (!Number.isFinite(durableNotional) || !Number.isFinite(durablePrice)) {
+                throw new Error("invalid durable Polymarket effect metadata");
+              }
+              const reconciledEnvelope: TradeIdempotencyResponse = {
+                status: 200,
+                body: responseData({
+                  orderId: pendingPolymarketRecovery.venueIdentity,
+                  status: String(order.status ?? "submitted"),
+                  filledQty: Number(order.size_matched ?? order.matched_size ?? 0),
+                  avgPrice: Number(order.price ?? durablePrice),
+                  notionalUsd: durableNotional,
+                }),
+              };
+              const reconciled = await checkpointReconciledTradeResult(db, {
+                id: pendingPolymarketRecovery.id,
+                tenantId: pendingPolymarketRecovery.tenantId,
+                agentId: pendingPolymarketRecovery.agentId,
+                venue: "polymarket",
+                bodyHash: pendingPolymarketRecovery.bodyHash,
+                venueIdentity: pendingPolymarketRecovery.venueIdentity,
+                venueResult: order,
+                envelope: reconciledEnvelope,
+              });
+              if (reconciled) {
+                await drainTradeRecoveryAudit(db, {
+                  row: reconciled.row,
+                  currentClaimToken: reconciled.claimToken,
+                  writeAuditEvent,
+                  details: {
+                    ...reconciled.row.effectMetadata,
+                    orderId: pendingPolymarketRecovery.venueIdentity,
+                  },
+                });
+                envelope = reconciledEnvelope;
+              }
+            }
+          }
+        } catch {
+          // Absence, credential rotation, timeout, or malformed evidence never
+          // authorizes a second POST. Preserve the durable ambiguous envelope
+          // for a later exact-evidence retry.
+        }
+      }
+      if (envelope) return tradeReplayResponse(c, envelope);
+      c.header("Retry-After", "1");
+      return c.json<ApiResponse>(
+        { ok: false, error: "Trade submission recovery is in progress" },
+        409,
+      );
+    }
+
+    const rate = await enforcePolymarketOrderRateLimit(agentId);
+    if (rate.unavailable) {
+      return c.json<ApiResponse>({ ok: false, error: "Trade order rate limit unavailable" }, 503);
+    }
+    if (!rate.allowed) {
+      c.header("Retry-After", String(Math.ceil(rate.resetMs / 1000)));
+      return c.json<ApiResponse>({ ok: false, error: "Trade order rate limit exceeded" }, 429);
     }
 
     let idempotency = await getPmIdempotency(tenantId, agentId, body.idempotencyKey, body);
@@ -2135,26 +2241,15 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
         409,
       );
     }
-    if (idempotency.response && !pendingPolymarketRecovery) {
-      return tradeReplayResponse(c, idempotency.response);
-    }
-    if (idempotency.inProgress && !pendingPolymarketRecovery) {
+    if (idempotency.response) return tradeReplayResponse(c, idempotency.response);
+    if (idempotency.inProgress) {
       c.header("Retry-After", "1");
       return c.json<ApiResponse>(
         { ok: false, error: "Request with this idempotency key is in progress" },
         409,
       );
     }
-
-    // Validate price + amount as positive finite numbers up front (the policy gate
-    // needs the notional; the adapter re-validates the (0,1) price range).
-    const amount = Number(body.amount);
-    const price = Number(body.price);
-    idempotency = pendingPolymarketRecovery
-      ? {}
-      : idempotency.claim
-        ? await idempotency.claim()
-        : idempotency;
+    idempotency = idempotency.claim ? await idempotency.claim() : idempotency;
     if (idempotency.conflict) {
       return c.json<ApiResponse>(
         { ok: false, error: "Idempotency key reused with a different body" },
@@ -2185,6 +2280,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
       await idempotency.store?.(envelope);
       return c.json(envelope.body, envelope.status);
     }
+
     // SEC-041: a SELL's notional must be floored at the live best bid — a FOK
     // sell at an arbitrarily low limit fills at the bid, so sizing on the
     // caller's price would understate notional and bypass the session caps.
@@ -2412,63 +2508,6 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
       ...(creds.clobUrl ? { clobUrl: creds.clobUrl } : {}),
     });
 
-    if (pendingPolymarketRecovery) {
-      let envelope = tradeRecoveryEnvelope(
-        pendingPolymarketRecovery,
-      ) as TradeIdempotencyResponse | null;
-      if (pendingPolymarketRecovery.venueIdentity) {
-        try {
-          const evidence = await adapter.getOrder(pendingPolymarketRecovery.venueIdentity);
-          if (evidence && typeof evidence === "object") {
-            const order = evidence as Record<string, unknown>;
-            const reconciledEnvelope: TradeIdempotencyResponse = {
-              status: 200,
-              body: responseData({
-                orderId: pendingPolymarketRecovery.venueIdentity,
-                status: String(order.status ?? "submitted"),
-                filledQty: Number(order.size_matched ?? order.matched_size ?? 0),
-                avgPrice: Number(order.price ?? price),
-                notionalUsd,
-              }),
-            };
-            const reconciled = await checkpointReconciledTradeResult(db, {
-              id: pendingPolymarketRecovery.id,
-              venueResult: order,
-              envelope: reconciledEnvelope,
-            });
-            if (reconciled) {
-              await drainTradeRecoveryAudit(db, {
-                row: reconciled.row,
-                currentClaimToken: reconciled.claimToken,
-                writeAuditEvent,
-                details: {
-                  sessionId: reconciled.row.sessionId,
-                  venue: "polymarket",
-                  tokenId: body.tokenId,
-                  conditionId: verifiedConditionId ?? null,
-                  side: body.side,
-                  amount,
-                  price,
-                  notionalUsd,
-                  orderId: pendingPolymarketRecovery.venueIdentity,
-                },
-              });
-              envelope = reconciledEnvelope;
-            }
-          }
-        } catch {
-          // Absence, timeout, or malformed evidence never authorizes a second
-          // POST. Preserve the explicit ambiguous checkpoint for another poll.
-        }
-      }
-      if (envelope) return tradeReplayResponse(c, envelope);
-      c.header("Retry-After", "1");
-      return c.json<ApiResponse>(
-        { ok: false, error: "Trade submission recovery is in progress" },
-        409,
-      );
-    }
-
     const orderRequest: PolymarketOrderRequest = {
       tokenId: body.tokenId,
       side: body.side,
@@ -2599,6 +2638,18 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
           venue: "polymarket",
           idempotencyKey: body.idempotencyKey!,
           bodyHash: durableBodyHash,
+          effectMetadata: {
+            sessionId: session.id,
+            venue: "polymarket",
+            walletAddress: creds.walletAddress,
+            tokenId: body.tokenId,
+            conditionId: verifiedConditionId ?? null,
+            side: body.side,
+            amount,
+            price,
+            notionalUsd,
+            orderId: venueIdentity,
+          },
         });
         if (recovery.kind === "conflict") {
           await getSessionManager().releaseSpend({
@@ -2821,14 +2872,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
           currentClaimToken: recovery.claimToken,
           writeAuditEvent,
           details: {
-            sessionId: session.id,
-            venue: "polymarket",
-            tokenId: body.tokenId,
-            conditionId: verifiedConditionId ?? null,
-            side: body.side,
-            amount,
-            price,
-            notionalUsd,
+            ...checkpointed.effectMetadata,
             orderId: response.orderId,
           },
         });
