@@ -1,5 +1,5 @@
 import { getDb } from "@stwd/db";
-import { checkRateLimit, type IoredisLike, rateLimitBucketKey } from "@stwd/redis";
+import { exerciseRateLimitReadiness, type IoredisLike } from "@stwd/redis";
 import { redactedThrownDiagnostics } from "@stwd/shared";
 import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 import { sql } from "drizzle-orm";
@@ -16,6 +16,8 @@ const READINESS_TENANT_ID = "steward-capability-rate-readiness";
 const REDIS_PROBE_WINDOW_MS = 1_000;
 const REDIS_PROBE_MAX_REQUESTS = 1;
 const REDIS_PROBE_TIMEOUT_MS = 1_000;
+
+const redisProbeFlights = new WeakMap<IoredisLike, Promise<void>>();
 
 interface CapabilityRateLimitReadinessOptions {
   getRedisClient?: () => IoredisLike | null;
@@ -40,6 +42,28 @@ async function withinRedisProbeDeadline<T>(operation: Promise<T>, timeoutMs: num
   }
 }
 
+function exerciseRedisCapabilityBackend(client: IoredisLike): Promise<void> {
+  const pending = redisProbeFlights.get(client);
+  if (pending) return pending;
+
+  const logicalKey = `ratelimit:capability-readiness:${crypto.randomUUID()}`;
+  const operation = (async () => {
+    const result = await exerciseRateLimitReadiness(
+      logicalKey,
+      REDIS_PROBE_WINDOW_MS,
+      REDIS_PROBE_MAX_REQUESTS,
+      client,
+    );
+    if (!result.allowed) throw new Error("capability Redis readiness reservation denied");
+  })();
+  redisProbeFlights.set(client, operation);
+  const clearFlight = () => {
+    if (redisProbeFlights.get(client) === operation) redisProbeFlights.delete(client);
+  };
+  void operation.then(clearFlight, clearFlight);
+  return operation;
+}
+
 function resultRows<T>(result: unknown): T[] {
   return (Array.isArray(result) ? result : ((result as { rows?: T[] } | null)?.rows ?? [])) as T[];
 }
@@ -55,38 +79,21 @@ export async function checkCapabilityRateLimitReadiness(
 ): Promise<CapabilityRateLimitReadiness> {
   const redisClient = (options.getRedisClient ?? getRedisClient)();
   if (redisClient) {
-    const logicalKey = `ratelimit:capability-readiness:${crypto.randomUUID()}`;
-    const physicalKey = rateLimitBucketKey(
-      logicalKey,
-      REDIS_PROBE_WINDOW_MS,
-      REDIS_PROBE_MAX_REQUESTS,
-    );
     const timeoutMs = options.redisProbeTimeoutMs ?? REDIS_PROBE_TIMEOUT_MS;
-    let probeError: unknown;
     try {
-      const result = await withinRedisProbeDeadline(
-        checkRateLimit(logicalKey, REDIS_PROBE_WINDOW_MS, REDIS_PROBE_MAX_REQUESTS, redisClient),
-        timeoutMs,
+      await withinRedisProbeDeadline(exerciseRedisCapabilityBackend(redisClient), timeoutMs);
+      return { ok: true, source: "redis" };
+    } catch (error) {
+      console.error(
+        "[steward:readiness] capability rate-limit Redis exercise failed",
+        redactedThrownDiagnostics(error),
       );
-      if (!result.allowed) throw new Error("capability Redis readiness reservation denied");
-    } catch (error) {
-      probeError = error;
+      return {
+        ok: false,
+        source: "redis",
+        error: "Configured Redis capability rate-limit backend exercise failed",
+      };
     }
-    try {
-      await withinRedisProbeDeadline(redisClient.del(physicalKey), timeoutMs);
-    } catch (error) {
-      probeError ??= error;
-    }
-    if (!probeError) return { ok: true, source: "redis" };
-    console.error(
-      "[steward:readiness] capability rate-limit Redis exercise failed",
-      redactedThrownDiagnostics(probeError),
-    );
-    return {
-      ok: false,
-      source: "redis",
-      error: "Configured Redis capability rate-limit backend exercise failed",
-    };
   }
   if ((options.isRedisConfigured ?? isRedisConfigured)()) {
     return {

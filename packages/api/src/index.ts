@@ -19,6 +19,7 @@ import { redactedThrownDiagnostics } from "@stwd/shared";
 import { composeApp, getComposedPluginMigrationSources } from "./compose";
 import { globalRateLimitRequiresRedis } from "./middleware/global-rate-limit";
 import {
+  checkRedisConnectionReadiness,
   getRedisClient,
   initRedis,
   isRedisConfigured,
@@ -167,7 +168,7 @@ app.get(
       try {
         const redis = getRedisClient();
         return redis
-          ? { ok: (await redis.ping()).toUpperCase() === "PONG" }
+          ? { ok: await checkRedisConnectionReadiness() }
           : isRedisConfigured()
             ? redisRequired
               ? { ok: false, error: "Redis is configured but not connected" }

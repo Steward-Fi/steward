@@ -54,6 +54,7 @@ export {
 } from "./policy-cache.js";
 export {
   checkRateLimit,
+  exerciseRateLimitReadiness,
   getRateLimitStatus,
   type RateLimitResult,
   rateLimitBucketKey,
