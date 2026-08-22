@@ -67,6 +67,7 @@ export interface EvmSimulationResult {
 }
 
 export interface EvmSimulator {
+  isConfigured?(chainId: number): boolean;
   simulate(request: EvmSimulationRequest): Promise<EvmSimulationResult>;
 }
 

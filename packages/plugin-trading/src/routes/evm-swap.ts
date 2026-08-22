@@ -459,7 +459,12 @@ export function createEvmSwapRoutes(ctx: StewardAppContext): Hono<{ Variables: A
         };
       };
 
-      if (!ctx.evmSimulator) return reject(503, "EVM simulator is not configured");
+      if (
+        !ctx.evmSimulator ||
+        (ctx.evmSimulator.isConfigured && !ctx.evmSimulator.isConfigured(parsed.data.chainId))
+      ) {
+        return reject(503, "EVM simulator is not configured");
+      }
       const owner = await resolveEvmWallet(ctx, agent, parsed.data.chainId);
       if (!owner || !isEvmAddress(owner)) return reject(403, "Agent EVM wallet not found");
 
