@@ -48,6 +48,10 @@ import {
 } from "./secret-route-authority";
 import { validateSecretRouteConfig } from "./secret-route-validator";
 
+function isPGLiteRuntime(): boolean {
+  return process.env.STEWARD_DB_MODE === "pglite" || process.env.STEWARD_PGLITE_MEMORY === "true";
+}
+
 export interface SecretMetadata {
   id: string;
   tenantId: string;
@@ -391,7 +395,7 @@ export class SecretVault {
     tenantId: string,
     name: string,
   ): Promise<Secret[]> {
-    if (process.env.STEWARD_PGLITE_MEMORY !== "true") {
+    if (!isPGLiteRuntime()) {
       await tx.execute(
         sql`SELECT pg_advisory_xact_lock(hashtextextended(${`steward_secret_${tenantId}:${name}`}, 0))`,
       );

@@ -27,7 +27,8 @@ describe("secret CRUD audit atomicity", () => {
   let app: Hono<{ Variables: AppVariables }>;
   let vault: SecretVault;
   beforeAll(async () => {
-    process.env.STEWARD_PGLITE_MEMORY = "true";
+    process.env.STEWARD_DB_MODE = "pglite";
+    delete process.env.STEWARD_PGLITE_MEMORY;
     process.env.STEWARD_MASTER_PASSWORD = "secret-audit-atomic-master";
     process.env.STEWARD_AUDIT_HMAC_KEY = "secret-audit-atomic-hmac-key-32-bytes";
     const { db, client } = await createPGLiteDb("memory://");
@@ -64,7 +65,7 @@ describe("secret CRUD audit atomicity", () => {
     await getDb().execute(sql.raw(`DROP TRIGGER IF EXISTS ${trigger} ON audit_events`));
     await getDb().execute(sql.raw(`DROP FUNCTION IF EXISTS ${fn}()`));
     await closeDb();
-    delete process.env.STEWARD_PGLITE_MEMORY;
+    delete process.env.STEWARD_DB_MODE;
     delete process.env.STEWARD_MASTER_PASSWORD;
     delete process.env.STEWARD_AUDIT_HMAC_KEY;
   });
@@ -172,5 +173,39 @@ describe("secret CRUD audit atomicity", () => {
         .from(auditEvents)
         .where(and(eq(auditEvents.tenantId, tenantId), eq(auditEvents.action, "secret.rotate"))),
     ).toHaveLength(0);
+  });
+  it("audits create, rotate, and delete in explicit PGLite mode", async () => {
+    const name = `explicit-pglite-${crypto.randomUUID()}`;
+    await rejectAuditActions(["__never_reject_explicit_pglite__"]);
+    try {
+      const create = await app.request("/secrets", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name, value: "initial-explicit-pglite-value" }),
+      });
+      expect(create.status).toBe(201);
+      const createBody = (await create.json()) as { data: { id: string } };
+
+      const rotate = await app.request(`/secrets/${createBody.data.id}`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ value: "rotated-explicit-pglite-value" }),
+      });
+      expect(rotate.status).toBe(200);
+      const rotateBody = (await rotate.json()) as { data: { id: string } };
+
+      const remove = await app.request(`/secrets/${rotateBody.data.id}`, { method: "DELETE" });
+      expect(remove.status).toBe(200);
+
+      const lifecycle = await getDb()
+        .select({ action: auditEvents.action })
+        .from(auditEvents)
+        .where(and(eq(auditEvents.tenantId, tenantId), eq(auditEvents.resourceType, "secret")));
+      expect(lifecycle.map((row) => row.action)).toEqual(
+        expect.arrayContaining(["secret.create", "secret.rotate", "secret.delete"]),
+      );
+    } finally {
+      await rejectAuditActions(["secret.create", "secret.rotate", "secret.delete"]);
+    }
   });
 });
