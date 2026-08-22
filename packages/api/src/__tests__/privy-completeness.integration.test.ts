@@ -11,6 +11,8 @@ const webhookDispatches: Array<{
 }> = [];
 
 mock.module("@stwd/webhooks", () => ({
+  currentWebhookRuntimeAuthority: () =>
+    Object.freeze({ allowInsecureHttp: false, allowPrivateNetwork: false }),
   encryptWebhookSecret: (secret: string) => `enc:${secret}`,
   decryptWebhookSecret: (secret: string) => secret.replace(/^enc:/, ""),
   isEncryptedWebhookSecret: (secret: string) => secret.startsWith("enc:"),
