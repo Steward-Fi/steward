@@ -1,3 +1,4 @@
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 import { createMiddleware } from "hono/factory";
 import type { ApiResponse, AppVariables } from "../services/context";
 import { isSensitivePath } from "./sensitive-paths";
@@ -7,7 +8,7 @@ const DEFAULT_TIMESTAMP_TTL_MS = 5 * 60 * 1000;
 const MUTATING_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 
 export type RequestExpiryOptions = {
-  required?: boolean;
+  required?: boolean | (() => boolean);
   maxClockSkewMs?: number;
   timestampTtlMs?: number;
   now?: () => number;
@@ -34,23 +35,34 @@ function parseHttpTime(value: string | undefined): number | null {
 }
 
 export function requestExpiry(options?: RequestExpiryOptions) {
-  const required =
-    options?.required ??
-    (process.env.STEWARD_REQUIRE_REQUEST_EXPIRY === "true" ||
-      (process.env.NODE_ENV === "production" &&
-        process.env.STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS !== "true"));
-  const maxClockSkewMs =
-    options?.maxClockSkewMs ??
-    parsePositiveInt(process.env.STEWARD_REQUEST_EXPIRY_MAX_SKEW_MS, DEFAULT_MAX_CLOCK_SKEW_MS);
-  const timestampTtlMs =
-    options?.timestampTtlMs ??
-    parsePositiveInt(process.env.STEWARD_REQUEST_TIMESTAMP_TTL_MS, DEFAULT_TIMESTAMP_TTL_MS);
   const now = options?.now ?? (() => Date.now());
 
   return createMiddleware<{ Variables: AppVariables }>(async (c, next) => {
     if (!MUTATING_METHODS.has(c.req.method.toUpperCase()) || !isSensitivePath(c.req.path)) {
       return next();
     }
+
+    // Resolve the complete freshness authority inside the immutable request
+    // environment. The composed Worker app is cached across binding rotations.
+    const required =
+      typeof options?.required === "function"
+        ? options.required()
+        : (options?.required ??
+          (runtimeEnvironmentValue("STEWARD_REQUIRE_REQUEST_EXPIRY") === "true" ||
+            (runtimeEnvironmentValue("NODE_ENV") === "production" &&
+              runtimeEnvironmentValue("STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS") !== "true")));
+    const maxClockSkewMs =
+      options?.maxClockSkewMs ??
+      parsePositiveInt(
+        runtimeEnvironmentValue("STEWARD_REQUEST_EXPIRY_MAX_SKEW_MS"),
+        DEFAULT_MAX_CLOCK_SKEW_MS,
+      );
+    const timestampTtlMs =
+      options?.timestampTtlMs ??
+      parsePositiveInt(
+        runtimeEnvironmentValue("STEWARD_REQUEST_TIMESTAMP_TTL_MS"),
+        DEFAULT_TIMESTAMP_TTL_MS,
+      );
 
     const expiresAtHeader = c.req.header("X-Steward-Request-Expires-At");
     const timestampHeader = c.req.header("X-Steward-Request-Timestamp");
