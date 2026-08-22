@@ -31,11 +31,13 @@ DO $$
 DECLARE
   mismatch text;
 BEGIN
-  IF (SELECT count(*) FROM steward_expected_rls_policies WHERE relation_name NOT LIKE 'capabilit%') <> 71
-     OR (SELECT sum(expected_policy_count) FROM steward_expected_rls_policies WHERE relation_name NOT LIKE 'capabilit%') <> 73
-     OR (SELECT count(*) FROM steward_expected_rls_policies WHERE relation_name LIKE 'capabilit%') NOT IN (0, 3)
-     OR (SELECT COALESCE(sum(expected_policy_count), 0) FROM steward_expected_rls_policies WHERE relation_name LIKE 'capabilit%') NOT IN (0, 3) THEN
-    RAISE EXCEPTION 'SEC-169 policy inventory must contain core 71/73 and optional capabilities 0/0 or 3/3';
+  IF (SELECT count(*) FROM steward_expected_rls_policy_definitions WHERE policy_group = 'core') <> 73
+     OR (SELECT count(DISTINCT relation_name) FROM steward_expected_rls_policy_definitions WHERE policy_group = 'core') <> 71
+     OR (SELECT count(*) FROM steward_expected_rls_policy_definitions WHERE policy_group = 'capabilities') NOT IN (0, 3)
+     OR (SELECT count(DISTINCT relation_name) FROM steward_expected_rls_policy_definitions WHERE policy_group = 'capabilities') NOT IN (0, 3)
+     OR (SELECT count(*) FROM steward_expected_rls_policy_definitions WHERE policy_group = 'trading') NOT IN (0, 1)
+     OR (SELECT count(DISTINCT relation_name) FROM steward_expected_rls_policy_definitions WHERE policy_group = 'trading') NOT IN (0, 1) THEN
+    RAISE EXCEPTION 'SEC-169 policy inventory must contain core 71/73, optional capabilities 0/0 or 3/3, and optional trading 0/0 or 1/1';
   END IF;
 
   WITH actual AS (

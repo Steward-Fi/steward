@@ -25,6 +25,8 @@ function database(options?: {
   appMembershipDrift?: boolean;
   personalLockDefinitionDrift?: boolean;
   personalLockAclDrift?: boolean;
+  trading?: boolean;
+  partialTrading?: boolean;
 }) {
   let query = 0;
   return {
@@ -66,7 +68,10 @@ function database(options?: {
       if (query === 4) return [{ database_name: "steward" }];
       if (query === 5) {
         let relations = EXPECTED_PUBLIC_RELATIONS.filter(
-          (relation) => relation.policy_group === "core" || options?.capabilities,
+          (relation) =>
+            relation.policy_group === "core" ||
+            (relation.policy_group === "capabilities" && options?.capabilities) ||
+            (relation.policy_group === "trading" && options?.trading),
         ).map(({ policy_group: _group, ...relation }) => ({
           ...relation,
           relrowsecurity: EXPECTED_RLS_POLICY_DEFINITIONS.some(
@@ -88,6 +93,18 @@ function database(options?: {
             ];
           }
         }
+        if (options?.partialTrading) {
+          const trading = EXPECTED_PUBLIC_RELATIONS.find(
+            (relation) => relation.policy_group === "trading",
+          );
+          if (trading) {
+            const { policy_group: _group, ...relation } = trading;
+            relations = [
+              ...relations,
+              { ...relation, relrowsecurity: true, relforcerowsecurity: true },
+            ];
+          }
+        }
         if (options?.relationDrift) {
           relations.push({
             relation_name: "unexpected_tenant_table",
@@ -97,7 +114,9 @@ function database(options?: {
             relforcerowsecurity: true,
           });
         }
-        return relations;
+        return relations.sort((left, right) =>
+          left.relation_name.localeCompare(right.relation_name),
+        );
       }
       if (query === 7) {
         const definitions = EXPECTED_RLS_FUNCTION_DEFINITIONS.map((definition) => ({
@@ -295,7 +314,10 @@ function database(options?: {
       }
       if (query > 17) return [];
       const policies = EXPECTED_RLS_POLICY_DEFINITIONS.filter(
-        (policy) => policy.policy_group === "core" || options?.capabilities,
+        (policy) =>
+          policy.policy_group === "core" ||
+          (policy.policy_group === "capabilities" && options?.capabilities) ||
+          (policy.policy_group === "trading" && options?.trading),
       ).map(({ policy_group: _group, ...policy }) => ({ ...policy }));
       if (options?.policyDrift) policies[0] = { ...policies[0], using_expression: "true" };
       return policies;
@@ -326,6 +348,27 @@ describe("RLS deployment safety gate", () => {
         ...roles,
       }),
     ).rejects.toThrow("RLS_DEPLOYMENT_RELATION_INVENTORY_DRIFT");
+  });
+
+  test("accepts complete optional trading and combined plugin groups", async () => {
+    await expect(
+      assertRlsDeploymentSafety(database({ trading: true }), {
+        expectedRole: "steward_app",
+      }),
+    ).resolves.toBeUndefined();
+    await expect(
+      assertRlsDeploymentSafety(database({ capabilities: true, trading: true }), {
+        expectedRole: "steward_app",
+      }),
+    ).resolves.toBeUndefined();
+  });
+
+  test("rejects a partial optional trading group", async () => {
+    await expect(
+      assertRlsDeploymentSafety(database({ partialTrading: true }), {
+        expectedRole: "steward_app",
+      }),
+    ).rejects.toThrow("RLS_DEPLOYMENT_POLICY_DEFINITION_DRIFT");
   });
 
   test("rejects unsafe roles, same-count policy replacement, and extra relations", async () => {

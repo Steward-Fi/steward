@@ -8,13 +8,31 @@ const quote = (value: string | null) =>
 
 const { db, client } = await createPGLiteDb("memory://");
 try {
-  await runPluginMigrations(
+  const pluginMigrations = [
     {
       id: "capabilities",
       migrationsFolder: resolve(import.meta.dir, "../packages/plugin-capabilities/drizzle"),
     },
-    { db, client, useAdvisoryLock: false, migrateFn: pgliteMigrate as never },
-  );
+    {
+      id: "trading",
+      migrationsFolder: resolve(import.meta.dir, "../packages/plugin-trading/drizzle"),
+    },
+  ] as const;
+  for (const source of pluginMigrations) {
+    await runPluginMigrations(source, {
+      db,
+      client,
+      useAdvisoryLock: false,
+      migrateFn: pgliteMigrate as never,
+    });
+  }
+  const relationGroups = new Map<string, string>([
+    ["capabilities", "capabilities"],
+    ["capability_grants", "capabilities"],
+    ["capability_invocations", "capabilities"],
+    ["trading_order_outcomes", "trading"],
+  ]);
+  const policyGroup = (relationName: string) => relationGroups.get(relationName) ?? "core";
   const relations = await client.query<{
     relation_name: string;
     relation_kind: string;
@@ -71,7 +89,7 @@ try {
     relations.rows
       .map(
         (row, index) =>
-          `  (${quote(row.relation_name.startsWith("capabilit") ? "capabilities" : "core")},${quote(row.relation_name)},${quote(row.relation_kind)},${quote(row.partition_parents)})${
+          `  (${quote(policyGroup(row.relation_name))},${quote(row.relation_name)},${quote(row.relation_kind)},${quote(row.partition_parents)})${
             index === relations.rows.length - 1 ? ";" : ","
           }`,
       )
@@ -85,7 +103,7 @@ try {
     policies.rows
       .map(
         (row, index) =>
-          `  (${quote(row.relation_name.startsWith("capabilit") ? "capabilities" : "core")},${quote(row.relation_name)},${quote(row.policy_name)},${quote(row.command)},${
+          `  (${quote(policyGroup(row.relation_name))},${quote(row.relation_name)},${quote(row.policy_name)},${quote(row.command)},${
             row.permissive
           },${quote(row.roles)},${quote(row.using_expression)},${quote(row.check_expression)})${
             index === policies.rows.length - 1 ? ";" : ","
@@ -103,7 +121,7 @@ try {
         "// biome-ignore format: preserve deterministic JSON generator output",
         `export const EXPECTED_PUBLIC_RELATIONS = ${JSON.stringify(
           relations.rows.map((row) => ({
-            policy_group: row.relation_name.startsWith("capabilit") ? "capabilities" : "core",
+            policy_group: policyGroup(row.relation_name),
             ...row,
           })),
           null,
@@ -112,7 +130,7 @@ try {
         "// biome-ignore format: preserve deterministic JSON generator output",
         `export const EXPECTED_RLS_POLICY_DEFINITIONS = ${JSON.stringify(
           policies.rows.map((row) => ({
-            policy_group: row.relation_name.startsWith("capabilit") ? "capabilities" : "core",
+            policy_group: policyGroup(row.relation_name),
             ...row,
           })),
           null,
