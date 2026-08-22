@@ -127,7 +127,9 @@ interface TrustFixtureOptions {
   tenants?: Array<{ tenantId: string; tenantName: string; role: string }>;
   approvalStatus?: string;
   approvalErrorStatus?: number;
+  approvalDecisionError?: { status: number; body: unknown };
   caseErrorStatus?: number;
+  caseErrorBody?: unknown;
   manifest?: ReturnType<typeof baseCaseManifest> & Record<string, unknown>;
 }
 
@@ -222,6 +224,12 @@ async function mockAccessibilityApis(
         authorization?.startsWith("Bearer ") === true &&
         tenant === "tenant-trust";
       attempts.push({ body, authorization, tenant, accepted });
+      if (options.approvalDecisionError) {
+        return route.fulfill({
+          status: options.approvalDecisionError.status,
+          json: options.approvalDecisionError.body,
+        });
+      }
       if (!accepted) {
         return route.fulfill({
           status: 409,
@@ -235,7 +243,11 @@ async function mockAccessibilityApis(
       if (options.caseErrorStatus) {
         return route.fulfill({
           status: options.caseErrorStatus,
-          json: { ok: false, error: { code: `PRIVATE_${options.caseErrorStatus}` } },
+          json:
+            options.caseErrorBody ?? {
+              ok: false,
+              error: { code: `PRIVATE_${options.caseErrorStatus}` },
+            },
         });
       }
       return route.fulfill({ json: options.manifest ?? caseManifest() });
@@ -796,4 +808,30 @@ test("terminal approvals disable both decisions and errors do not enumerate priv
     "Not found or not authorized not found / not authorized",
     "Not found or not authorized not found / not authorized",
   ]);
+});
+
+test("non-auth provider failures preserve reachable API diagnostics", async ({ browser, page }) => {
+  await mockAccessibilityApis(page, {
+    caseErrorStatus: 500,
+    caseErrorBody: { ok: false, error: "CASE_EXPORT_UNAVAILABLE" },
+  });
+  await page.goto(`/dashboard/actions/${ACTION_ID}`);
+  await expect(page.getByRole("alert")).toContainText("CASE_EXPORT_UNAVAILABLE");
+
+  const approvalContext = await browser.newContext();
+  const approvalPage = await approvalContext.newPage();
+  await seedSession(approvalPage);
+  await mockAccessibilityApis(approvalPage, {
+    approvalDecisionError: {
+      status: 400,
+      body: { ok: false, error: { code: "APPROVAL_FIELD_INVALID" } },
+    },
+  });
+  await approvalPage.goto(`/dashboard/approvals/${ACTION_ID}`);
+  await approvalPage
+    .getByLabel("Reason (required for approve and deny)")
+    .fill("Reviewed but server rejected one field");
+  await approvalPage.getByRole("button", { name: "Approve this provider action" }).click();
+  await expect(approvalPage.getByRole("status")).toContainText("Error: APPROVAL_FIELD_INVALID");
+  await approvalContext.close();
 });
