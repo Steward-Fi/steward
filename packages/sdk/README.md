@@ -96,10 +96,22 @@ getAgent(agentId: string): Promise<AgentIdentity>
 
 ### `listAgents`
 
-List all agents for the authenticated tenant.
+List all agents for the authenticated tenant. The SDK walks stable API pages at
+the maximum page size and fails closed on duplicate or non-progressing pages,
+while retaining the historical array return type.
 
 ```typescript
 listAgents(): Promise<AgentIdentity[]>
+```
+
+Use `listAgentsPage()` when pagination metadata is needed:
+
+```typescript
+listAgentsPage(options?: { limit?: number; offset?: number }): Promise<{
+  agents: AgentIdentity[];
+  limit: number;
+  offset: number;
+}>
 ```
 
 ---
@@ -264,7 +276,8 @@ const bscBalance = await steward.getBalance('scout-1', 56);
 
 ### `getHistory`
 
-Retrieve signing history for an agent.
+Retrieve complete signing history for an agent. The SDK walks every bounded API
+page before returning the historical array result.
 
 ```typescript
 getHistory(agentId: string): Promise<StewardHistoryEntry[]>

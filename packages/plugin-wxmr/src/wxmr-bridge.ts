@@ -116,6 +116,8 @@ export interface WxmrBridgeAdapterOptions {
   randomId?: () => string;
   rpcTimeoutMs?: number;
   getTrustedXmrUsdPrice?: () => Promise<number | null>;
+  /** Authority-free session state shared by request-owned provider instances. */
+  sessions?: Map<string, { session: BridgeSession; expiresAt: number }>;
 }
 
 function assertRpcUrl(value: string): string {
@@ -331,7 +333,7 @@ export class WxmrBridgeAdapter implements BridgeAdapter {
   private readonly randomId: () => string;
   private readonly rpcTimeoutMs: number;
   private readonly getTrustedXmrUsdPrice: () => Promise<number | null>;
-  private readonly sessions = new Map<string, { session: BridgeSession; expiresAt: number }>();
+  private readonly sessions: Map<string, { session: BridgeSession; expiresAt: number }>;
 
   constructor(options: WxmrBridgeAdapterOptions = {}) {
     this.rpcUrl = assertRpcUrl(options.rpcUrl?.trim() || DEFAULT_SOLANA_RPC_URL);
@@ -341,6 +343,7 @@ export class WxmrBridgeAdapter implements BridgeAdapter {
     this.rpcTimeoutMs = options.rpcTimeoutMs ?? DEFAULT_RPC_TIMEOUT_MS;
     this.getTrustedXmrUsdPrice =
       options.getTrustedXmrUsdPrice ?? (() => this.fetchTrustedXmrUsdPrice());
+    this.sessions = options.sessions ?? new Map();
     if (!Number.isSafeInteger(this.rpcTimeoutMs) || this.rpcTimeoutMs <= 0) {
       throw new Error("rpcTimeoutMs must be a positive integer");
     }

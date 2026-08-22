@@ -35,7 +35,6 @@ function configuredService(overrides: Partial<StewardPluginConfig> = {}): Stewar
     tenantId,
     agentId,
     autoRegister: false,
-    fallbackLocal: false,
     ...overrides,
   };
   const service = new StewardService({} as never);

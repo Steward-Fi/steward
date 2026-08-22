@@ -92,13 +92,13 @@ afterEach(() => {
 });
 
 describe("vault factory", () => {
-  it("memoizes configured vaults by effective password", () => {
+  it("does not reuse process-env custody instances across rotations", () => {
     process.env.STEWARD_MASTER_PASSWORD = "factory-master-one";
     delete process.env.STEWARD_KMS_PROVIDER;
 
     const first = getConfiguredVault();
     const second = getConfiguredVault();
-    expect(second).toBe(first);
+    expect(second).not.toBe(first);
 
     process.env.STEWARD_MASTER_PASSWORD = "factory-master-two";
     expect(getConfiguredVault()).not.toBe(first);

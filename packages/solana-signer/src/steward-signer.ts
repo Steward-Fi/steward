@@ -139,7 +139,7 @@ export function toSignerError(err: unknown): StewardSignerError {
 export interface StewardSolanaSignerConfig {
   /** Agent whose vault key signs. */
   agentId: string;
-  /** Steward API base URL, e.g. http://127.0.0.1:3000. Ignored when `client` is given. */
+  /** Steward API base URL, e.g. http://127.0.0.1:3200. Ignored when `client` is given. */
   baseUrl?: string;
   /** Agent-scoped bearer JWT. One of bearerToken, apiKey, or client is required. */
   bearerToken?: string;

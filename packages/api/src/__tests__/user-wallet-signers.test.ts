@@ -369,6 +369,9 @@ describe("user wallet additional signers API", () => {
       const body = (await response.json()) as { ok: boolean; data?: { txHash: string } };
 
       expect(response.status).toBe(200);
+      expect(response.headers.get("Cache-Control")).toBe("no-store, max-age=0");
+      expect(response.headers.get("Pragma")).toBe("no-cache");
+      expect(response.headers.get("Expires")).toBe("0");
       expect(body.ok).toBe(true);
       expect(body.data?.txHash).toBe("0xsigned");
       expect(signSpy).toHaveBeenCalled();
@@ -425,6 +428,9 @@ describe("user wallet additional signers API", () => {
         body: JSON.stringify({ walletIndex: 2, message: "hello from signer" }),
       });
       expect(signed.status).toBe(200);
+      expect(signed.headers.get("Cache-Control")).toBe("no-store, max-age=0");
+      expect(signed.headers.get("Pragma")).toBe("no-cache");
+      expect(signed.headers.get("Expires")).toBe("0");
       expect(signSpy).toHaveBeenCalledWith(
         PERSONAL_TENANT_ID,
         WALLET_AGENT_ID,

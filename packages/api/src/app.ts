@@ -85,6 +85,7 @@ import {
   type AppVariables,
   dashboardAuthMiddleware,
   isWorkersRuntime,
+  setNoStoreHeaders,
   tenantAuth,
 } from "./services/context";
 
@@ -208,6 +209,10 @@ export function createApp(): Hono<{ Variables: AppVariables }> {
   app.use("/dashboard/*", (c, next) => dashboardAuthMiddleware(c, next));
   app.use("/platform", platformAuthMiddleware());
   app.use("/platform/*", platformAuthMiddleware());
+  app.use("/user/me/wallet/export", async (c, next) => {
+    setNoStoreHeaders(c);
+    await next();
+  });
   app.use("/user", (c, next) => userSessionAuth(c as never, next));
   app.use("/user/*", (c, next) => userSessionAuth(c as never, next));
   app.use("/webhooks", (c, next) => tenantAuth(c, next));

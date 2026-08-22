@@ -114,7 +114,7 @@ function removeLegacyRefreshToken(): void {
  * Syncs each new Steward auth JWT into the legacy API client.
  * Uses a ref to avoid reconfiguring the client on unrelated renders.
  */
-function AuthTokenSync({ children }: { children: ReactNode }) {
+export function AuthTokenSync({ children }: { children: ReactNode }) {
   const auth = useAuth();
   const lastToken = useRef<string | null>(null);
   const sessionToken = auth.session?.token ?? null;

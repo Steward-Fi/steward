@@ -219,7 +219,7 @@ proof "M16 governed dispatch back through replay guard (P30)" "packages/proxy" "
 proof "M17 accept mismatched claim routeRevision at gate (P32)" "packages/proxy" "$GOV_TEST" "direct claim whose route revision" "$PROXY" \
   's/governedClaim.routeRevision === routeRevision/true/'
 
-# M18: treat a claim that OMITS secretVersion as verified → P33 (codex P2: a
+# M18: treat a claim that OMITS secretVersion as verified → P33 (a
 #      partial claim without secretVersion would skip the decrypt-time version
 #      recheck, so it must NOT be verified at the gate). Drop the requirement.
 proof "M18 accept claim missing secretVersion at gate (P33)" "packages/proxy" "$GOV_TEST" "governed claim omits the secret version" "$PROXY" \
@@ -241,7 +241,7 @@ proof "M19 governed dispatch re-enters legacy approval hold (P34)" "packages/pro
 # drainBody calls is therefore equivalent for that fixture, not a valid mutation
 # proof, so this runner does not claim it.
 
-# M22: drop the live route↔operation binding check → P2 (codex): a governed route
+# M22: drop the live route↔operation binding check → P2: a governed route
 #      configured for operation A must not inject its credential for a nonce minted
 #      for a DIFFERENT operation B. provider_operations.secret_route_id is not
 #      unique and the authority_revision bump only catches a reconfiguration of the

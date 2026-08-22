@@ -13,6 +13,13 @@
 - `StewardClient`, `StewardAuth`, and `AgentClient` constructors now REJECT a plaintext non-loopback `baseUrl` (fail closed, SEC-048). These clients transmit platform keys, app secrets, bearer tokens, and HMAC-signed credentials, which must never travel cleartext off-loopback — the CLI has always enforced this. `http://localhost`/`127.0.0.1`/`[::1]` stay allowed for local development; operators on trusted private networks can opt out with the new `allowInsecureBaseUrl: true` config (warns loudly at construction). Previously-working insecure configs must pass the flag or switch to HTTPS.
 - `/accounts` and `/global-wallet` mutations are now HMAC-signed when `requestSigningSecret` is configured, aligning the request-signing prefix list with all eight other SDKs (SEC-049). Servers that enforce signatures on these routes previously saw unsigned mutations from this SDK.
 ### Added
+- Add the public `listAgentsPage({ limit, offset })` API with typed
+  `{ agents, limit, offset }` metadata. The historical `listAgents()` and
+  `getTransactionHistory()` array APIs now exhaust stable, bounded server pages
+  and fail closed on malformed offsets, non-progressing pages, or duplicate
+  agent/transaction identities; transaction-history ordering is stabilized by
+  `createdAt` then `id` for deterministic offset traversal.
+- Expose typed linked-account unlink and transfer failure evidence when the irreversible session-revocation cutoff succeeds but the following database/audit transaction fails, so clients can require reauthentication without claiming the account mutation committed.
 - Expose the SigV4 secret-route strategy/config fields in generated API types for governed, region-bound AWS EC2 operations.
 - Add `approveVaultTransaction()` and its typed result so SDK consumers can execute an approved vault transaction through the policy-revalidating vault route.
 - `StewardAuthConfig.authProxyUrl`: optional same-origin auth proxy prefix (e.g. `/api/auth`) that keeps the long-lived refresh token in an HttpOnly, SameSite=Strict cookie instead of JS-readable storage (SEC-018). When set, sign-in deposits the refresh token with the proxy (failing closed if the deposit cannot be completed), and refresh / revoke / tenant-switch calls go through the proxy — only the short-lived access token is kept in `storage`. Unset keeps the previous behavior unchanged.
@@ -28,6 +35,9 @@
 ### Docs
 - Point example `baseUrl` values at a self-hosted instance (`http://localhost:3200`) instead of a hosted `api.steward.fi` URL. Steward is self-host-first today; there is no shared hosted API. JSDoc/README/test-fixture only, no runtime or API change (the SDK `baseUrl` remains a required field with no default).
 - Describe agent bootstrap and custody invariants without repository-internal lane, pillar, or review-history labels. Documentation and comments only; no runtime or API change.
+
+### Tests
+- Replace the JavaScript source inventory for Flutter parity with executable Dart wire-contract coverage for recovery, wallet external IDs, accounts, and global-wallet helpers; no JavaScript SDK runtime behavior changes.
 
 ## 0.10.1
 
