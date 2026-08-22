@@ -164,29 +164,29 @@ COPY packages/webhooks    packages/webhooks
 
 # Create workspace symlinks (Bun 1.3 doesn't auto-link in Docker)
 RUN mkdir -p node_modules/@stwd && \
-    ln -sf ../../../packages/adapters      node_modules/@stwd/adapters && \
-    ln -sf ../../../packages/attestation   node_modules/@stwd/attestation && \
-    ln -sf ../../../packages/shared        node_modules/@stwd/shared && \
-    ln -sf ../../../packages/sdk           node_modules/@stwd/sdk && \
-    ln -sf ../../../packages/auth          node_modules/@stwd/auth && \
-    ln -sf ../../../packages/db            node_modules/@stwd/db && \
-    ln -sf ../../../packages/vault         node_modules/@stwd/vault && \
-    ln -sf ../../../packages/redis         node_modules/@stwd/redis && \
-    ln -sf ../../../packages/proxy         node_modules/@stwd/proxy && \
-    ln -sf ../../../packages/webhooks      node_modules/@stwd/webhooks && \
-    ln -sf ../../../packages/policy-engine     node_modules/@stwd/policy-engine && \
-    ln -sf ../../../packages/plugin-capabilities node_modules/@stwd/plugin-capabilities && \
-    ln -sf ../../../packages/plugin-trading    node_modules/@stwd/plugin-trading && \
-    ln -sf ../../../packages/plugin-wxmr       node_modules/@stwd/plugin-wxmr && \
-    ln -sf ../../../packages/provider-github   node_modules/@stwd/provider-github && \
-    ln -sf ../../../packages/provider-slack    node_modules/@stwd/provider-slack && \
-    ln -sf ../../../packages/provider-google   node_modules/@stwd/provider-google && \
-    ln -sf ../../../packages/provider-aws      node_modules/@stwd/provider-aws && \
-    ln -sf ../../../packages/provider-x         node_modules/@stwd/provider-x && \
-    ln -sf ../../../packages/proxy-client      node_modules/@stwd/proxy-client && \
-    ln -sf ../../../packages/trade-sessions    node_modules/@stwd/trade-sessions && \
-    ln -sf ../../../packages/venue-hyperliquid node_modules/@stwd/venue-hyperliquid && \
-    ln -sf ../../../packages/venue-polymarket  node_modules/@stwd/venue-polymarket
+    ln -sf ../../packages/adapters      node_modules/@stwd/adapters && \
+    ln -sf ../../packages/attestation   node_modules/@stwd/attestation && \
+    ln -sf ../../packages/shared        node_modules/@stwd/shared && \
+    ln -sf ../../packages/sdk           node_modules/@stwd/sdk && \
+    ln -sf ../../packages/auth          node_modules/@stwd/auth && \
+    ln -sf ../../packages/db            node_modules/@stwd/db && \
+    ln -sf ../../packages/vault         node_modules/@stwd/vault && \
+    ln -sf ../../packages/redis         node_modules/@stwd/redis && \
+    ln -sf ../../packages/proxy         node_modules/@stwd/proxy && \
+    ln -sf ../../packages/webhooks      node_modules/@stwd/webhooks && \
+    ln -sf ../../packages/policy-engine     node_modules/@stwd/policy-engine && \
+    ln -sf ../../packages/plugin-capabilities node_modules/@stwd/plugin-capabilities && \
+    ln -sf ../../packages/plugin-trading    node_modules/@stwd/plugin-trading && \
+    ln -sf ../../packages/plugin-wxmr       node_modules/@stwd/plugin-wxmr && \
+    ln -sf ../../packages/provider-github   node_modules/@stwd/provider-github && \
+    ln -sf ../../packages/provider-slack    node_modules/@stwd/provider-slack && \
+    ln -sf ../../packages/provider-google   node_modules/@stwd/provider-google && \
+    ln -sf ../../packages/provider-aws      node_modules/@stwd/provider-aws && \
+    ln -sf ../../packages/provider-x         node_modules/@stwd/provider-x && \
+    ln -sf ../../packages/proxy-client      node_modules/@stwd/proxy-client && \
+    ln -sf ../../packages/trade-sessions    node_modules/@stwd/trade-sessions && \
+    ln -sf ../../packages/venue-hyperliquid node_modules/@stwd/venue-hyperliquid && \
+    ln -sf ../../packages/venue-polymarket  node_modules/@stwd/venue-polymarket
 
 # Build api and proxy (and their deps) via turborepo
 RUN bunx turbo run build --filter=@stwd/api --filter=@stwd/proxy
@@ -280,31 +280,31 @@ COPY --from=build /app/packages/webhooks    packages/webhooks
 
 # Create workspace symlinks manually — bun 1.3 doesn't auto-link workspace packages
 RUN mkdir -p node_modules/@stwd && \
-    ln -sf ../../../packages/adapters      node_modules/@stwd/adapters && \
-    ln -sf ../../../packages/attestation   node_modules/@stwd/attestation && \
-    ln -sf ../../../packages/shared        node_modules/@stwd/shared && \
-    ln -sf ../../../packages/sdk           node_modules/@stwd/sdk && \
-    ln -sf ../../../packages/auth          node_modules/@stwd/auth && \
-    ln -sf ../../../packages/db            node_modules/@stwd/db && \
-    ln -sf ../../../packages/vault         node_modules/@stwd/vault && \
-    ln -sf ../../../packages/redis         node_modules/@stwd/redis && \
-    ln -sf ../../../packages/api           node_modules/@stwd/api && \
-    ln -sf ../../../packages/proxy         node_modules/@stwd/proxy && \
-    ln -sf ../../../packages/webhooks      node_modules/@stwd/webhooks && \
-    ln -sf ../../../packages/policy-engine node_modules/@stwd/policy-engine && \
-    ln -sf ../../../packages/plugin-capabilities node_modules/@stwd/plugin-capabilities && \
-    ln -sf ../../../packages/plugin-trading    node_modules/@stwd/plugin-trading && \
-    ln -sf ../../../packages/plugin-wxmr       node_modules/@stwd/plugin-wxmr && \
-    ln -sf ../../../packages/provider-github   node_modules/@stwd/provider-github && \
-    ln -sf ../../../packages/provider-slack    node_modules/@stwd/provider-slack && \
-    ln -sf ../../../packages/provider-google   node_modules/@stwd/provider-google && \
-    ln -sf ../../../packages/provider-aws      node_modules/@stwd/provider-aws && \
-    ln -sf ../../../packages/provider-x         node_modules/@stwd/provider-x && \
-    ln -sf ../../../packages/proxy-client      node_modules/@stwd/proxy-client && \
-    ln -sf ../../../packages/trade-sessions    node_modules/@stwd/trade-sessions && \
-    ln -sf ../../../packages/venue-hyperliquid node_modules/@stwd/venue-hyperliquid && \
-    ln -sf ../../../packages/venue-polymarket  node_modules/@stwd/venue-polymarket && \
-    ln -sf ../../../packages/eliza-plugin  node_modules/@stwd/eliza-plugin 2>/dev/null; true
+    ln -sf ../../packages/adapters      node_modules/@stwd/adapters && \
+    ln -sf ../../packages/attestation   node_modules/@stwd/attestation && \
+    ln -sf ../../packages/shared        node_modules/@stwd/shared && \
+    ln -sf ../../packages/sdk           node_modules/@stwd/sdk && \
+    ln -sf ../../packages/auth          node_modules/@stwd/auth && \
+    ln -sf ../../packages/db            node_modules/@stwd/db && \
+    ln -sf ../../packages/vault         node_modules/@stwd/vault && \
+    ln -sf ../../packages/redis         node_modules/@stwd/redis && \
+    ln -sf ../../packages/api           node_modules/@stwd/api && \
+    ln -sf ../../packages/proxy         node_modules/@stwd/proxy && \
+    ln -sf ../../packages/webhooks      node_modules/@stwd/webhooks && \
+    ln -sf ../../packages/policy-engine node_modules/@stwd/policy-engine && \
+    ln -sf ../../packages/plugin-capabilities node_modules/@stwd/plugin-capabilities && \
+    ln -sf ../../packages/plugin-trading    node_modules/@stwd/plugin-trading && \
+    ln -sf ../../packages/plugin-wxmr       node_modules/@stwd/plugin-wxmr && \
+    ln -sf ../../packages/provider-github   node_modules/@stwd/provider-github && \
+    ln -sf ../../packages/provider-slack    node_modules/@stwd/provider-slack && \
+    ln -sf ../../packages/provider-google   node_modules/@stwd/provider-google && \
+    ln -sf ../../packages/provider-aws      node_modules/@stwd/provider-aws && \
+    ln -sf ../../packages/provider-x         node_modules/@stwd/provider-x && \
+    ln -sf ../../packages/proxy-client      node_modules/@stwd/proxy-client && \
+    ln -sf ../../packages/trade-sessions    node_modules/@stwd/trade-sessions && \
+    ln -sf ../../packages/venue-hyperliquid node_modules/@stwd/venue-hyperliquid && \
+    ln -sf ../../packages/venue-polymarket  node_modules/@stwd/venue-polymarket && \
+    ln -sf ../../packages/eliza-plugin  node_modules/@stwd/eliza-plugin 2>/dev/null; true
 
 # Install the production dependency closure AFTER copying the built packages.
 # `COPY --from=build /app/packages/*` lines above overwrite each package dir

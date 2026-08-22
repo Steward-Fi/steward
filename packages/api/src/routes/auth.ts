@@ -11183,7 +11183,11 @@ async function getAllowedOAuthRedirectEntries(
     }
   }
 
-  if (!explicitTenantId) {
+  // A deployment-level allowlist is the compatibility fallback when an
+  // explicit tenant has not configured its own redirect URLs yet. Keep a
+  // populated tenant allowlist authoritative so the environment variable
+  // cannot silently broaden an existing tenant boundary.
+  if (!explicitTenantId || entries.size === 0) {
     for (const entry of parseOAuthRedirectAllowlistEnv()) {
       entries.add(entry);
     }

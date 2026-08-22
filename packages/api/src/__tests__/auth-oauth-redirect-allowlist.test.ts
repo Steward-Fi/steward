@@ -169,6 +169,22 @@ describeWithDatabase("OAuth redirect_uri allowlist", () => {
     expect(body.error).toContain("redirect_uri is not allowed");
   });
 
+  it("uses the deployment allowlist when an explicit tenant has no redirect configuration", async () => {
+    const db = getDb();
+    await db.delete(tenantAppClients).where(eq(tenantAppClients.tenantId, TENANT_ID));
+    await db.delete(tenantConfigs).where(eq(tenantConfigs.tenantId, TENANT_ID));
+    process.env.STEWARD_OAUTH_ALLOWED_REDIRECTS = "https://global.example.test/callback";
+
+    const res = await authRoutes.request(
+      `/oauth/google/authorize?tenant_id=${TENANT_ID}&redirect_uri=${encodeURIComponent("https://global.example.test/callback")}${PKCE_QUERY}`,
+    );
+
+    expect(res.status).toBe(302);
+    expect(res.headers.get("location")).toStartWith(
+      "https://accounts.google.com/o/oauth2/v2/auth?",
+    );
+  });
+
   it("rejects tenant origin-only entries for non-root OAuth redirect_uri paths", async () => {
     const db = getDb();
     await db.delete(tenantConfigs).where(eq(tenantConfigs.tenantId, TENANT_ID));
