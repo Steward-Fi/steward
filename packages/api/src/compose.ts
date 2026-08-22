@@ -220,16 +220,14 @@ export async function composeApp(): Promise<Hono<{ Variables: AppVariables }>> {
  * @returns per-plugin results (id + the namespaced table its ledger was written
  *   to). Empty if no opt-in plugin is enabled / declares a migration source.
  */
-export async function runComposedPluginMigrations(): Promise<
-  Array<{ pluginName: string; id: string; migrationsTable: string }>
-> {
+async function buildComposedPluginMigrationHost() {
   // PARITY with composeApp: resolve the SAME enabled set from the SAME resolver,
   // and collect migrations for EXACTLY the plugins composeApp registers. a plugin
   // that is disabled contributes NO migrations (its routes are also not mounted)
   // — the two paths can never drift (both-on or both-off, per plugin).
   const enabled = resolveEnabledPlugins();
   if (enabled.size === 0) {
-    return [];
+    return null;
   }
 
   const ctx = buildPluginContext();
@@ -257,5 +255,17 @@ export async function runComposedPluginMigrations(): Promise<
     host.collectMigrations(wxmrPlugin);
   }
 
-  return host.runMigrations();
+  return host;
+}
+
+export async function getComposedPluginMigrationSources() {
+  const host = await buildComposedPluginMigrationHost();
+  return host ? [...host.pluginMigrationSources] : [];
+}
+
+export async function runComposedPluginMigrations(): Promise<
+  Array<{ pluginName: string; id: string; migrationsTable: string }>
+> {
+  const host = await buildComposedPluginMigrationHost();
+  return host ? host.runMigrations() : [];
 }

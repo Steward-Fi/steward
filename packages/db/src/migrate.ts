@@ -33,7 +33,7 @@ interface CoreMigrationDatabaseShape {
   tenantsExists: boolean;
   auditEventsExists: boolean;
   legacyFingerprintMatches: boolean;
-  publicRelationCount: number;
+  userObjectCount: number;
 }
 
 export interface MigrationTimeouts {
@@ -146,9 +146,9 @@ export function assertCoreMigrationLedgerIntegrity(
       "[migrate] Non-empty database resembles Steward but does not match the complete legacy schema fingerprint; refusing to create migration bookkeeping",
     );
   }
-  if (rows.length === 0 && !database.tenantsExists && database.publicRelationCount > 0) {
+  if (rows.length === 0 && !database.tenantsExists && database.userObjectCount > 0) {
     throw new Error(
-      "[migrate] Non-empty public schema has no Steward migration history; refusing a shared database",
+      "[migrate] Non-empty user schema has no Steward migration history; refusing a shared database",
     );
   }
   const auditMigrationIndex = journal.entries.findIndex(
@@ -280,6 +280,9 @@ export async function runMigrations(): Promise<{ applied: string[] }> {
       const ledgerExists = (await client`
         SELECT to_regclass('drizzle.__drizzle_migrations') AS r
       `) as Array<{ r: string | null }>;
+      const drizzleSchemaExists = (await client`
+        SELECT to_regnamespace('drizzle') AS r
+      `) as Array<{ r: string | null }>;
       const tenantsExists = (await client`
         SELECT to_regclass('public.tenants') AS r
       `) as Array<{ r: string | null }>;
@@ -288,9 +291,27 @@ export async function runMigrations(): Promise<{ applied: string[] }> {
       `) as Array<{ r: string | null }>;
       const databaseInventory = (await client`
         SELECT
-          count(*) FILTER (
-            WHERE namespace.nspname = 'public' AND relation.relkind IN ('r', 'p')
-          )::int AS public_relation_count,
+          (
+            SELECT count(*) FROM pg_namespace candidate
+            WHERE candidate.nspname NOT IN (
+              'public', 'drizzle', 'steward_rls', 'steward_bootstrap',
+              'pg_catalog', 'information_schema'
+            )
+              AND candidate.nspname !~ '^pg_(toast|temp|toast_temp)'
+          ) + (
+            SELECT count(*) FROM pg_class object
+            JOIN pg_namespace candidate ON candidate.oid = object.relnamespace
+            WHERE candidate.nspname IN ('public', 'drizzle', 'steward_rls', 'steward_bootstrap')
+          ) + (
+            SELECT count(*) FROM pg_proc object
+            JOIN pg_namespace candidate ON candidate.oid = object.pronamespace
+            WHERE candidate.nspname IN ('public', 'drizzle', 'steward_rls', 'steward_bootstrap')
+          ) + (
+            SELECT count(*) FROM pg_type object
+            JOIN pg_namespace candidate ON candidate.oid = object.typnamespace
+            WHERE candidate.nspname IN ('public', 'drizzle', 'steward_rls', 'steward_bootstrap')
+              AND object.typtype IN ('c', 'd', 'e', 'm', 'r')
+          ) AS user_object_count,
           (
             SELECT count(*) = 28
             FROM (VALUES
@@ -339,12 +360,12 @@ export async function runMigrations(): Promise<{ applied: string[] }> {
           ) AS legacy_fingerprint_matches
         FROM pg_class relation
         JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
-      `) as Array<{ public_relation_count: number; legacy_fingerprint_matches: boolean }>;
+      `) as Array<{ user_object_count: number; legacy_fingerprint_matches: boolean }>;
       const databaseShape: CoreMigrationDatabaseShape = {
         tenantsExists: Boolean(tenantsExists[0]?.r),
         auditEventsExists: Boolean(auditEventsExists[0]?.r),
         legacyFingerprintMatches: databaseInventory[0]?.legacy_fingerprint_matches === true,
-        publicRelationCount: databaseInventory[0]?.public_relation_count ?? 0,
+        userObjectCount: databaseInventory[0]?.user_object_count ?? 0,
       };
       let existingRows: CoreMigrationLedgerRow[] = [];
       if (ledgerExists[0]?.r) {
@@ -353,16 +374,30 @@ export async function runMigrations(): Promise<{ applied: string[] }> {
         `) as CoreMigrationLedgerRow[];
       }
       assertCoreMigrationLedgerIntegrity(existingRows, journal, databaseShape);
+      if (existingRows.length === journal.entries.length) {
+        assertCoreMigrationLedgerIntegrity(existingRows, journal, databaseShape, {
+          requireComplete: true,
+        });
+        return { applied: [] };
+      }
 
       // Only a verified empty/legacy Steward target may receive the ledger.
-      await client`CREATE SCHEMA IF NOT EXISTS drizzle`;
-      await client`
-        CREATE TABLE IF NOT EXISTS drizzle.__drizzle_migrations (
-          id SERIAL PRIMARY KEY,
-          hash text NOT NULL,
-          created_at bigint
-        )
-      `;
+      // Avoid even idempotent CREATE statements once admin topology/the ledger
+      // exists: PostgreSQL requires database/schema CREATE before checking IF
+      // NOT EXISTS, which would make an already-complete runtime migration
+      // probe depend on a release-only privilege.
+      if (!drizzleSchemaExists[0]?.r) {
+        await client`CREATE SCHEMA drizzle`;
+      }
+      if (!ledgerExists[0]?.r) {
+        await client`
+          CREATE TABLE drizzle.__drizzle_migrations (
+            id SERIAL PRIMARY KEY,
+            hash text NOT NULL,
+            created_at bigint
+          )
+        `;
+      }
 
       // Backfill: legacy DB previously migrated by the psql loop.
       if (existingRows.length === 0 && tenantsExists[0]?.r) {
@@ -460,16 +495,14 @@ export async function runMigrations(): Promise<{ applied: string[] }> {
             ) AS required(index_name)
             WHERE to_regclass('public.' || required.index_name) IS NOT NULL
           ) AS legacy_fingerprint_matches,
-          count(*) FILTER (
-            WHERE namespace.nspname = 'public' AND relation.relkind IN ('r', 'p')
-          )::int AS public_relation_count
+          0::int AS user_object_count
         FROM pg_class relation
         JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
       `) as Array<{
         tenants_exists: boolean;
         audit_events_exists: boolean;
         legacy_fingerprint_matches: boolean;
-        public_relation_count: number;
+        user_object_count: number;
       }>;
       assertCoreMigrationLedgerIntegrity(
         afterRows,
@@ -478,7 +511,7 @@ export async function runMigrations(): Promise<{ applied: string[] }> {
           tenantsExists: postMigrationShape?.tenants_exists ?? false,
           auditEventsExists: postMigrationShape?.audit_events_exists ?? false,
           legacyFingerprintMatches: postMigrationShape?.legacy_fingerprint_matches ?? false,
-          publicRelationCount: postMigrationShape?.public_relation_count ?? 0,
+          userObjectCount: postMigrationShape?.user_object_count ?? 0,
         },
         {
           requireComplete: true,

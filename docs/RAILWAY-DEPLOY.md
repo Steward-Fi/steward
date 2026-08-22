@@ -472,7 +472,7 @@ Common issues:
 
 - Ensure `PORT=3200` is set (Railway uses this to route traffic)
 - Ensure `STEWARD_BIND_HOST=0.0.0.0` (not `127.0.0.1`)
-- The `/ready` endpoint does a deep check (DB + migrations + vault). Use `/health` for the Railway health check (lighter)
+- The `/ready` endpoint does a deep check (DB + exact core and enabled-plugin migration ledgers + vault). Deployment acceptance requires both public `/health` and `/ready` receipts.
 
 ### "Tenant not found" errors
 

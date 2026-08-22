@@ -14,11 +14,17 @@
 
 import { createHash, timingSafeEqual } from "node:crypto";
 import { validateJwtSecretEnv } from "@stwd/auth";
-import { assertRlsDeploymentSafety, closeDb, getDb, getMigrationExpectation } from "@stwd/db";
+import {
+  assertRlsDeploymentSafety,
+  closeDb,
+  getDb,
+  getMigrationExpectation,
+  getPluginMigrationLedgerExpectation,
+} from "@stwd/db";
 import { shouldUsePGLite } from "@stwd/db/pglite";
 import { redactedThrownDiagnostics } from "@stwd/shared";
 import { sql } from "drizzle-orm";
-import { composeApp } from "./compose";
+import { composeApp, getComposedPluginMigrationSources } from "./compose";
 import { getRedisClient, initRedis, isRedisConfigured, shutdownRedis } from "./middleware/redis";
 import { resolveEnabledPlugins } from "./plugin-config";
 import { assertAuthStoresAreSafe, getAuthStoreSources, initAuthStores } from "./routes/auth";
@@ -64,7 +70,10 @@ validateJwtSecretEnv();
 // composeApp() is async because plugin registration may be async + the trading
 // plugin is dynamically imported so the lean core graph never statically pulls
 // in the trading stack. top-level await is supported by the Bun entry.
-const app = await runStartupPhase("compose", () => composeApp());
+const { app, pluginMigrationSources } = await runStartupPhase("compose", async () => ({
+  app: await composeApp(),
+  pluginMigrationSources: await getComposedPluginMigrationSources(),
+}));
 const capabilitiesEnabled = resolveEnabledPlugins().has("capabilities");
 
 // ─── In-memory rate-limit log + shutdown guard ───────────────────────────────
@@ -146,6 +155,10 @@ app.get("/ready", async (c) => {
 
   const expectedMigration = getMigrationExpectation();
   checks.migrations = { ok: false, detail: { expected: expectedMigration.tag } };
+  checks.pluginMigrations = {
+    ok: pluginMigrationSources.length === 0,
+    ...(pluginMigrationSources.length === 0 ? { required: false } : {}),
+  };
 
   try {
     const db = getDb();
@@ -191,6 +204,48 @@ app.get("/ready", async (c) => {
           : { actualCreatedAt: Number.isFinite(migrationCreatedAt) ? migrationCreatedAt : null }),
       },
     };
+    if (pluginMigrationSources.length > 0) {
+      try {
+        const pluginDetails: Array<{ plugin: string; ok: boolean; expectedEntries: number }> = [];
+        for (const { pluginName, source } of pluginMigrationSources) {
+          const expectation = getPluginMigrationLedgerExpectation(source);
+          const result = await db.execute(
+            sql.raw(
+              `SELECT hash, created_at FROM drizzle."${expectation.migrationsTable}" ORDER BY id ASC`,
+            ),
+          );
+          const rows = (
+            Array.isArray(result)
+              ? result
+              : ((result as unknown as { rows?: unknown[] }).rows ?? [])
+          ) as Array<{
+            hash?: unknown;
+            created_at?: unknown;
+          }>;
+          const ok =
+            rows.length === expectation.entries.length &&
+            rows.every(
+              (row, index) =>
+                row.hash === expectation.entries[index]?.hash &&
+                Number(row.created_at) === expectation.entries[index]?.createdAt,
+            );
+          pluginDetails.push({
+            plugin: pluginName,
+            ok,
+            expectedEntries: expectation.entries.length,
+          });
+        }
+        checks.pluginMigrations = {
+          ok: pluginDetails.every((plugin) => plugin.ok),
+          detail: pluginDetails,
+        };
+      } catch {
+        checks.pluginMigrations = {
+          ok: false,
+          error: "Enabled plugin migration ledger check failed",
+        };
+      }
+    }
     if (process.env.NODE_ENV === "production") {
       const expectedRole = process.env.STEWARD_APP_DATABASE_ROLE;
       if (!expectedRole) throw new Error("STEWARD_APP_DATABASE_ROLE is required in production");

@@ -145,8 +145,8 @@ repo configuration. To use them on your own fork/instance, set these GitHub repo
 | name | kind | meaning |
 | --- | --- | --- |
 | `RAILWAY_TOKEN` | secret | Railway API token for your project |
-| `STAGING_RAILWAY_SERVICE_ID` / `_ENV_ID` / `_HEALTH_URL` | vars | your staging service/env/health URL |
-| `PRODUCTION_RAILWAY_SERVICE_ID` / `_ENV_ID` / `_HEALTH_URL` | vars | your production service/env/health URL |
+| `STAGING_RAILWAY_SERVICE_ID` / `_ENV_ID` / `_HEALTH_URL` | vars | your staging service/env and public HTTPS root origin (no path/query/userinfo) |
+| `PRODUCTION_RAILWAY_SERVICE_ID` / `_ENV_ID` / `_HEALTH_URL` | vars | your production service/env and public HTTPS root origin (no path/query/userinfo) |
 
 Branch model the workflows assume: `develop` auto-deploys to **staging** (after a
 green Docker build); `main` is promoted to **production** manually via the gated

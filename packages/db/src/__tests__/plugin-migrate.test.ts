@@ -15,6 +15,7 @@ import { migrate as pgliteMigrate } from "drizzle-orm/pglite/migrator";
 
 import { createPGLiteDb } from "../pglite";
 import {
+  getPluginMigrationLedgerExpectation,
   pluginMigrationsTable,
   runPluginMigrations,
   sanitizePluginMigrationId,
@@ -49,6 +50,19 @@ async function makeMigrationsFolder(tag: string, sql: string): Promise<string> {
 }
 
 describe("plugin migrations: namespaced-journal isolation", () => {
+  test("derives the exact enabled-plugin readiness ledger from checked-in bytes", async () => {
+    const folder = await makeMigrationsFolder("0000_readiness", "SELECT 1;");
+    const expectation = getPluginMigrationLedgerExpectation({
+      id: "readiness-plugin",
+      migrationsFolder: folder,
+    });
+    expect(expectation.id).toBe("readiness-plugin");
+    expect(expectation.migrationsTable).toBe("__drizzle_migrations_plugin_readiness_plugin");
+    expect(expectation.entries).toHaveLength(1);
+    expect(expectation.entries[0]?.hash).toMatch(/^[0-9a-f]{64}$/);
+    expect(Number.isSafeInteger(expectation.entries[0]?.createdAt)).toBe(true);
+  });
+
   test("sanitizePluginMigrationId is injection-safe and fail-closed on empty", () => {
     expect(sanitizePluginMigrationId("Trading")).toBe("trading");
     expect(sanitizePluginMigrationId("a-b.c/d")).toBe("a_b_c_d");

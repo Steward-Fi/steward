@@ -35,7 +35,7 @@ const migratedDatabase = {
   tenantsExists: true,
   auditEventsExists: true,
   legacyFingerprintMatches: true,
-  publicRelationCount: 250,
+  userObjectCount: 250,
 };
 
 describe("core migration ledger integrity", () => {
@@ -45,10 +45,14 @@ describe("core migration ledger integrity", () => {
     const validate = source.indexOf(
       "assertCoreMigrationLedgerIntegrity(existingRows, journal, databaseShape)",
     );
-    const mutate = source.indexOf("CREATE SCHEMA IF NOT EXISTS drizzle");
+    const mutate = source.indexOf("await client`CREATE SCHEMA drizzle`");
     expect(inspect).toBeGreaterThan(0);
     expect(validate).toBeGreaterThan(inspect);
     expect(mutate).toBeGreaterThan(validate);
+    expect(source).toContain("FROM pg_namespace candidate");
+    expect(source).toContain("FROM pg_proc object");
+    expect(source).toContain("FROM pg_type object");
+    expect(source).toContain("AS user_object_count");
   });
 
   test("accepts a genuinely empty database before the first migration", () => {
@@ -57,7 +61,7 @@ describe("core migration ledger integrity", () => {
         tenantsExists: false,
         auditEventsExists: false,
         legacyFingerprintMatches: false,
-        publicRelationCount: 0,
+        userObjectCount: 0,
       }),
     ).not.toThrow();
   });
@@ -111,7 +115,7 @@ describe("core migration ledger integrity", () => {
         tenantsExists: false,
         auditEventsExists: false,
         legacyFingerprintMatches: false,
-        publicRelationCount: 1,
+        userObjectCount: 1,
       }),
     ).toThrow(/shared database/);
 
@@ -123,7 +127,7 @@ describe("core migration ledger integrity", () => {
         tenantsExists: true,
         auditEventsExists: true,
         legacyFingerprintMatches: true,
-        publicRelationCount: 251,
+        userObjectCount: 251,
       }),
     ).not.toThrow();
   });
@@ -140,7 +144,7 @@ describe("core migration ledger integrity", () => {
         tenantsExists: true,
         auditEventsExists: true,
         legacyFingerprintMatches: false,
-        publicRelationCount: 2,
+        userObjectCount: 2,
       }),
     ).toThrow(/does not match the complete legacy schema fingerprint/);
   });
