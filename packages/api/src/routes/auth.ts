@@ -9066,25 +9066,32 @@ auth.post("/email/code/verify", async (c) => {
   }
 
   const emailAuth = await getEmailAuthForTenant(resolvedTenantId);
-  const result = await emailAuth.verifyEmailLoginCode(email, code, resolvedTenantId);
-  if (!result.valid) {
+  const claim = await emailAuth.claimEmailLoginCode(email, code, resolvedTenantId);
+  if (!claim.valid) {
     return c.json<ApiResponse>(
       {
         ok: false,
         error:
-          result.reason === "locked"
+          claim.reason === "locked"
             ? "Too many verification attempts. Try again later."
             : "Invalid or expired code",
       },
-      result.reason === "locked" ? 429 : 401,
+      claim.reason === "locked" ? 429 : 401,
     );
   }
 
-  const authResult = await completeEmailAuth(c, email, body.tenantId);
-  if (!authResult.ok) {
-    return c.json<ApiResponse>({ ok: false, error: authResult.error }, authResult.status);
+  let committed = false;
+  try {
+    const authResult = await completeEmailAuth(c, email, body.tenantId);
+    if (!authResult.ok) {
+      return c.json<ApiResponse>({ ok: false, error: authResult.error }, authResult.status);
+    }
+    await claim.commit();
+    committed = true;
+    return authExchangeJson(c, authResult.response);
+  } finally {
+    if (!committed) await claim.rollback();
   }
-  return authExchangeJson(c, authResult.response);
 });
 
 auth.post("/email/status", async (c) => {
