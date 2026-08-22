@@ -13,7 +13,8 @@ import {
   withIndependentDatabase,
   withTenantTransactionDatabase,
 } from "@stwd/db";
-import { createPGLiteDb } from "@stwd/db/pglite";
+import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
+import * as redisMiddleware from "../middleware/redis";
 import {
   __setWorkerInitForTests,
   assertWorkerMigrationReadiness,
@@ -279,6 +280,7 @@ test("cold Worker cron rejects a hostile database role before starting sweeps", 
     databases += 1;
     return hostileDb;
   });
+  const initRedisSpy = spyOn(redisMiddleware, "initRedis").mockResolvedValue(true);
   let scheduledWork!: Promise<unknown>;
   const env = {
     DATABASE_URL: "postgresql://worker.invalid/steward",
@@ -299,6 +301,7 @@ test("cold Worker cron rejects a hostile database role before starting sweeps", 
     expect(databases).toBe(1);
   } finally {
     __setWorkerInitForTests(null);
+    initRedisSpy.mockRestore();
     createDbSpy.mockRestore();
     for (const [key, value] of previousEnv) {
       if (value === undefined) delete process.env[key];
@@ -317,6 +320,7 @@ test("Worker cron gives every autonomous sweep its own request database", async 
     databaseCount += 1;
     return { marker: `cron-db-${databaseCount}` } as unknown as ReturnType<typeof getDb>;
   });
+  const initRedisSpy = spyOn(redisMiddleware, "initRedis").mockResolvedValue(true);
   const upstreamSpy = spyOn(
     upstreamScheduler,
     "runUpstreamCredentialLeaseSweep",
@@ -365,6 +369,7 @@ test("Worker cron gives every autonomous sweep its own request database", async 
     await scheduledWork;
   } finally {
     __setWorkerInitForTests(null);
+    initRedisSpy.mockRestore();
     createDbSpy.mockRestore();
     upstreamSpy.mockRestore();
     googleSpy.mockRestore();
@@ -384,6 +389,8 @@ test("configured webhook work retains its request database until Worker cleanup"
   const previousDatabaseUrl = process.env.DATABASE_URL;
   process.env.STEWARD_MASTER_PASSWORD = "worker-webhook-test-master-password";
   process.env.DATABASE_URL = "postgresql://worker.invalid/steward";
+  const { db: importDb, client: importClient } = await createPGLiteDb("memory://");
+  setPGLiteOverride(importDb, async () => importClient.close());
   let dispatchWebhook: typeof import("../services/webhook-dispatch").dispatchWebhook;
   let encryptedSecret: string;
   let WebhookDispatcher: typeof import("@stwd/webhooks").WebhookDispatcher;
@@ -393,6 +400,7 @@ test("configured webhook work retains its request database until Worker cleanup"
     WebhookDispatcher = webhooks.WebhookDispatcher;
     encryptedSecret = webhooks.encryptWebhookSecret("worker-webhook-signing-secret");
   } catch (error) {
+    await databaseModule.closeDb();
     if (previousMasterPassword === undefined) delete process.env.STEWARD_MASTER_PASSWORD;
     else process.env.STEWARD_MASTER_PASSWORD = previousMasterPassword;
     throw error;
@@ -475,6 +483,7 @@ test("configured webhook work retains its request database until Worker cleanup"
     expect(closes).toBe(1);
   } finally {
     dispatchSpy.mockRestore();
+    await databaseModule.closeDb();
     if (previousMasterPassword === undefined) delete process.env.STEWARD_MASTER_PASSWORD;
     else process.env.STEWARD_MASTER_PASSWORD = previousMasterPassword;
   }

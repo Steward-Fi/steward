@@ -70,6 +70,7 @@ service where noted, e.g. each service its own DB).
 | `PORT=3200` | required | listen port; `/health` probe targets it | `Dockerfile` (`ENV PORT=3200`), `packages/api/src/index.ts` |
 | `STEWARD_BIND_HOST=0.0.0.0` | required on Railway | default is `127.0.0.1` (loopback only) — Railway's proxy can't reach the container unless it binds `0.0.0.0` | `packages/api/src/index.ts` (`STEWARD_BIND_HOST`) |
 | `STEWARD_TRUSTED_PROXY_HOPS=2` | required on Railway | per-client auth rate limiting: number of trusted proxies APPENDING to `x-forwarded-for` (the entry that many hops from the RIGHT is the client IP). Bare Railway = **2**: `x-forwarded-for` arrives as `<client>, <railway-edge>` and the right-most edge entry rotates between Railway nodes, so `hops=1` scatters a client across buckets while `hops=2` locks onto the stable client entry (verified against prod). Until it is set, auth rate limits fall back to coarse per-host buckets, which are weaker on a directly-exposed (non-Host-locked) service. Never set higher than the real hop count — that re-opens IP spoofing | `packages/api/src/routes/auth.ts` (`trustedClientIp`) |
+| `REDIS_URL` | **[required for production global rate limiting]** | shared global request budgets across Railway replicas and restarts. absent/down fails closed unless a guaranteed single-replica Bun service sets `STEWARD_ACKNOWLEDGE_SINGLE_INSTANCE_GLOBAL_RATE_LIMIT=true`; never acknowledge on a scaled service | `packages/api/src/middleware/global-rate-limit.ts`, `packages/redis` |
 | `DATABASE_URL` | **[boot-fatal in prod]** | Restricted, non-owner `steward_app` connection. Migration/operator credentials are forbidden here. | `packages/api/src/index.ts`, `packages/db/src/rls-deployment-safety.ts` |
 | `STEWARD_APP_DATABASE_ROLE=steward_app` | **[boot-fatal in prod]** | Pins the exact restricted login expected on `DATABASE_URL`. | `packages/api/src/index.ts` |
 | `STEWARD_PLATFORM_DATABASE_URL` | required for destructive platform operations | Separate restricted platform-authority login; never reuse the app URL. | `packages/api/src/services/platform-authority-database.ts` |
@@ -88,7 +89,6 @@ recommended-but-optional (mode-independent), set if the feature is used:
 
 | var | why | source |
 |-----|-----|--------|
-| `REDIS_URL` | rate-limit enforcement, proxy spend tracking, tenant policy cache. unset → in-memory rate limit + spend tracking disabled | `packages/api/src/middleware/redis.ts`, `packages/redis` |
 | `STEWARD_TRUST_CLOUDFLARE` | set `true` ONLY if origin ingress is locked behind Cloudflare; then `cf-connecting-ip` is trusted. leave unset on bare Railway (header is client-forgeable) | `packages/api/src/routes/auth.ts` (`trustedClientIp`) |
 | `STEWARD_AUTH_RATE_LIMIT_OUTAGE_VALVE_MAX` | bounded auth admissions per minute per instance while a CONFIGURED Redis is unreachable (default 300; `0` = strict fail-closed). never-configured Redis in prod always fails closed | `packages/api/src/routes/auth.ts` (`authRateLimitOutageAllow`) |
 | `STEWARD_DEFAULT_TENANT_KEY` | default tenant for single-tenant self-host (no `X-Steward-Tenant` header) | `.env.example` |

@@ -29,6 +29,13 @@ export interface SpendReservation {
   buckets: Array<{ period: SpendPeriod; dateKey: string; key: string }>;
 }
 
+export interface IdempotentSpendReservationResult {
+  allowed: boolean;
+  replayed: boolean;
+  conflict?: boolean;
+  remainingUsd: number;
+}
+
 export interface SpendRecordOptions {
   /** Stable identity used by recovery writers to make the increment idempotent. */
   eventId?: string;
@@ -41,6 +48,7 @@ const TTL_SECONDS: Record<SpendPeriod, number> = {
   week: 691200, // 8 days
   month: 2764800, // 32 days
 };
+const MAX_IDEMPOTENT_RESERVATIONS_PER_BUCKET = 10_000;
 
 // ARGV: reserveUnits, limitUnits, tenantId, ttlSeconds
 // Returns {ok, settled, reservedAfter}. Increments `reserved` only when the
@@ -58,6 +66,37 @@ local after = redis.call('HINCRBY', KEYS[1], 'reserved', reserve)
 redis.call('HSET', KEYS[1], 'tenantId', ARGV[3])
 redis.call('EXPIRE', KEYS[1], tonumber(ARGV[4]))
 return {1, settled, after}
+`;
+
+// KEYS[1]=daily spend bucket. ARGV: reserveUnits, limitUnits, tenantId,
+// bucketTtl, opaque issuance marker field, requestDigest, maxHashFields.
+// The marker and budget increment commit in one script, so overlapping retries
+// cannot double-reserve and distinct requests cannot race past the daily cap.
+const RESERVE_IDEMPOTENT_SPEND_LUA = `
+local prior = redis.call('HGET', KEYS[1], ARGV[5])
+if prior then
+  if prior == ARGV[6] then
+    local settled = tonumber(redis.call('HGET', KEYS[1], 'total') or '0')
+    local reserved = tonumber(redis.call('HGET', KEYS[1], 'reserved') or '0')
+    return {1, 1, settled, reserved}
+  end
+  return {0, -1, 0, 0}
+end
+local reserve = tonumber(ARGV[1])
+local limit = tonumber(ARGV[2])
+local settled = tonumber(redis.call('HGET', KEYS[1], 'total') or '0')
+local reserved = tonumber(redis.call('HGET', KEYS[1], 'reserved') or '0')
+if (settled + reserved + reserve) > limit then
+  return {0, 0, settled, reserved}
+end
+if redis.call('HLEN', KEYS[1]) >= tonumber(ARGV[7]) then
+  return {0, 0, settled, reserved}
+end
+local after = redis.call('HINCRBY', KEYS[1], 'reserved', reserve)
+redis.call('HSET', KEYS[1], 'tenantId', ARGV[3])
+redis.call('EXPIRE', KEYS[1], tonumber(ARGV[4]))
+redis.call('HSET', KEYS[1], ARGV[5], ARGV[6])
+return {1, 0, settled, after}
 `;
 
 // ARGV: releaseUnits. Returns reservedAfter.
@@ -181,11 +220,12 @@ export async function recordSpend(
   costUsd: number,
   host: string,
   options: SpendRecordOptions = {},
+  client?: ReturnType<typeof getRedis>,
 ): Promise<void> {
   const costCents = toSpendUnits(costUsd); // throws on negative/NaN; 0 → no-op below
   if (costCents <= 0) return;
 
-  const redis = getRedis();
+  const redis = client ?? getRedis();
   const now =
     options.occurredAt instanceof Date
       ? new Date(options.occurredAt.getTime())
@@ -242,11 +282,12 @@ export async function reserveSpend(
   tenantId: string,
   reserveUsd: number,
   limits: SpendLimitMap,
+  client?: ReturnType<typeof getRedis>,
 ): Promise<SpendReservation> {
   const reserveUnits = toSpendUnits(reserveUsd);
   if (reserveUnits <= 0) return { reservedUsd: 0, periods: [], buckets: [] };
 
-  const redis = getRedis();
+  const redis = client ?? getRedis();
   const now = new Date();
   const periods = (["day", "week", "month"] as SpendPeriod[]).filter(
     (period) => limits[period] !== undefined,
@@ -293,6 +334,55 @@ export async function reserveSpend(
     reservedUsd: fromSpendUnits(reserveUnits),
     periods: reservedPeriods,
     buckets: reservedBuckets,
+  };
+}
+
+/**
+ * Atomic, idempotent daily reservation for unsigned fund-moving issuance.
+ * This intentionally uses a separate potential-spend bucket from settled
+ * execution spend: issuing an artifact reserves its full notional for the day,
+ * while a later vault execution records actual spend without double-counting
+ * the issuance reservation in the general spend ledger.
+ */
+export async function reserveDailySpendIdempotently(
+  agentId: string,
+  tenantId: string,
+  reserveUsd: number,
+  limitUsd: number,
+  reservationId: string,
+  requestDigest: string,
+  client?: ReturnType<typeof getRedis>,
+): Promise<IdempotentSpendReservationResult> {
+  const reserveUnits = toSpendUnits(reserveUsd);
+  const limitUnits = toSpendUnits(limitUsd);
+  if (reserveUnits <= 0 || limitUnits <= 0) {
+    throw new Error("spend reservation and limit must be positive");
+  }
+  if (!/^[a-f0-9]{64}$/.test(reservationId) || !/^[a-f0-9]{64}$/.test(requestDigest)) {
+    throw new Error("spend reservation identities must be SHA-256 hex digests");
+  }
+  const redis = client ?? getRedis();
+  const dateKey = getDateKey("day");
+  const bucket = `spend:${tenantId}:${agentId}:adapter-issuance:day:${dateKey}`;
+  const markerField = `issuance:${reservationId}`;
+  const result = (await redis.eval(
+    RESERVE_IDEMPOTENT_SPEND_LUA,
+    1,
+    bucket,
+    String(reserveUnits),
+    String(limitUnits),
+    tenantId,
+    String(TTL_SECONDS.day),
+    markerField,
+    requestDigest,
+    String(MAX_IDEMPOTENT_RESERVATIONS_PER_BUCKET),
+  )) as [number, number, number, number];
+  const [allowed, replay, settled, reserved] = result.map(Number);
+  return {
+    allowed: allowed === 1,
+    replayed: replay === 1,
+    ...(replay === -1 ? { conflict: true } : {}),
+    remainingUsd: Math.max(0, limitUsd - fromSpendUnits(settled + reserved)),
   };
 }
 
@@ -371,8 +461,9 @@ export async function checkSpendLimit(
   agentId: string,
   limitUsd: number,
   period: SpendPeriod,
+  client?: ReturnType<typeof getRedis>,
 ): Promise<SpendLimitSnapshot> {
-  const redis = getRedis();
+  const redis = client ?? getRedis();
   const dateKey = getDateKey(period);
   const key = spendKey(agentId, period, dateKey);
   const [totalRaw, reservedRaw] = await Promise.all([

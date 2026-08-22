@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it, setDefaultTimeout } from "bun:test";
-import { agents, closeDb, getDb, refreshTokens, tenants, users } from "@stwd/db";
+import { agents, auditEvents, closeDb, getDb, refreshTokens, tenants, users } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { eq, sql } from "drizzle-orm";
 import { Hono } from "hono";
@@ -10,6 +10,7 @@ setDefaultTimeout(30_000);
 
 describe("platform tenant creation", () => {
   let platformRoutes: Awaited<typeof import("../routes/platform")>["platformRoutes"];
+  let mountedPlatformApp: Hono;
 
   beforeAll(async () => {
     process.env.STEWARD_PGLITE_MEMORY = "true";
@@ -33,6 +34,8 @@ describe("platform tenant creation", () => {
     });
 
     ({ platformRoutes } = await import("../routes/platform"));
+    mountedPlatformApp = new Hono();
+    mountedPlatformApp.route("/platform", platformRoutes);
   });
 
   afterAll(async () => {
@@ -96,7 +99,12 @@ describe("platform tenant creation", () => {
   });
 
   it("rejects tenant default policies instead of acknowledging unenforced policy state", async () => {
-    const createResponse = await platformRoutes.request("/tenants", {
+    const auditRowsBefore = await getDb()
+      .select({ id: auditEvents.id, action: auditEvents.action })
+      .from(auditEvents)
+      .where(eq(auditEvents.tenantId, `${TENANT_ID}-policies`));
+
+    const createResponse = await mountedPlatformApp.request("/platform/tenants", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -111,11 +119,24 @@ describe("platform tenant creation", () => {
       }),
     });
 
-    expect(createResponse.status).toBe(501);
-    await expect(createResponse.json()).resolves.toMatchObject({
+    expect(createResponse.status).toBe(410);
+    await expect(createResponse.json()).resolves.toEqual({
       ok: false,
-      error: expect.stringContaining("not persisted"),
+      error:
+        "defaultPolicies are retired because process-local tenant policy state is not durable; use /policies and durable per-agent policy assignments instead",
     });
+    expect(
+      await getDb()
+        .select()
+        .from(tenants)
+        .where(eq(tenants.id, `${TENANT_ID}-policies`)),
+    ).toHaveLength(0);
+    expect(
+      await getDb()
+        .select({ id: auditEvents.id, action: auditEvents.action })
+        .from(auditEvents)
+        .where(eq(auditEvents.tenantId, `${TENANT_ID}-policies`)),
+    ).toEqual(auditRowsBefore);
 
     await getDb()
       .insert(tenants)
@@ -136,10 +157,11 @@ describe("platform tenant creation", () => {
       ]),
     });
 
-    expect(putResponse.status).toBe(501);
-    await expect(putResponse.json()).resolves.toMatchObject({
+    expect(putResponse.status).toBe(410);
+    await expect(putResponse.json()).resolves.toEqual({
       ok: false,
-      error: expect.stringContaining("not persisted or enforced"),
+      error:
+        "defaultPolicies are retired because process-local tenant policy state is not durable; use /policies and durable per-agent policy assignments instead",
     });
   });
 

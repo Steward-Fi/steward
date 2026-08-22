@@ -1,8 +1,7 @@
 /**
- * runtime-gate.ts — pure logic behind the Bun entry's global rate limiter
- * (index.ts). Extracted so the derivation and eviction rules are unit-testable
- * (index.ts itself boots a server at module scope and cannot be imported by
- * tests).
+ * runtime-gate.ts — pure runtime-facing request identity and bounded memory
+ * rate-limit helpers. The mounted global limiter uses memory only in
+ * development/test or an explicitly acknowledged single-instance Bun deploy.
  *
  * Client-supplied forwarding headers are honored only when the operator
  * declares the trusted proxy-hop count (`STEWARD_TRUSTED_PROXY_HOPS`):
@@ -85,8 +84,8 @@ export function resolveClientIp(
 export type RateLimitVerdict = { limited: false } | { limited: true; retryAfterSeconds: number };
 
 /**
- * Fixed-window in-memory limiter with a hard cap on tracked keys. Only safe
- * for the single-process Bun entry (the Workers entry must not use it).
+ * Fixed-window in-memory limiter with a hard cap on tracked keys. Only safe in
+ * development/test or an explicitly acknowledged single-instance Bun deploy.
  */
 export class InMemoryRateLimiter {
   private readonly log = new Map<string, { count: number; resetAt: number }>();
@@ -97,22 +96,28 @@ export class InMemoryRateLimiter {
     private readonly maxKeys: number = DEFAULT_RATE_LIMIT_MAX_KEYS,
   ) {}
 
-  check(key: string, now: number = Date.now()): RateLimitVerdict {
+  check(
+    key: string,
+    now: number = Date.now(),
+    maxKeys: number = this.maxKeys,
+    maxRequests: number = this.maxRequests,
+    windowMs: number = this.windowMs,
+  ): RateLimitVerdict {
     const current = this.log.get(key);
 
     if (!current || current.resetAt <= now) {
-      if (!current && this.log.size >= this.maxKeys) {
+      if (!current && this.log.size >= maxKeys) {
         this.sweep(now);
-        if (this.log.size >= this.maxKeys) {
+        if (this.log.size >= maxKeys) {
           // Fail closed: rather track nothing new than grow without bound.
-          return { limited: true, retryAfterSeconds: Math.ceil(this.windowMs / 1000) };
+          return { limited: true, retryAfterSeconds: Math.ceil(windowMs / 1000) };
         }
       }
-      this.log.set(key, { count: 1, resetAt: now + this.windowMs });
+      this.log.set(key, { count: 1, resetAt: now + windowMs });
       return { limited: false };
     }
 
-    if (current.count >= this.maxRequests) {
+    if (current.count >= maxRequests) {
       return { limited: true, retryAfterSeconds: Math.ceil((current.resetAt - now) / 1000) };
     }
 

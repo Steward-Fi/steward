@@ -17,29 +17,26 @@ import { assertRlsDeploymentSafety, closeDb, getDb, getMigrationExpectation } fr
 import { shouldUsePGLite } from "@stwd/db/pglite";
 import { redactedThrownDiagnostics } from "@stwd/shared";
 import { composeApp, getComposedPluginMigrationSources } from "./compose";
-import { getRedisClient, initRedis, isRedisConfigured, shutdownRedis } from "./middleware/redis";
+import { globalRateLimitRequiresRedis } from "./middleware/global-rate-limit";
+import {
+  getRedisClient,
+  initRedis,
+  isRedisConfigured,
+  redisEnforcementRequiresDurability,
+  shutdownRedis,
+} from "./middleware/redis";
 import { readMigrationReadiness } from "./migration-readiness";
 import { resolveEnabledPlugins } from "./plugin-config";
 import { createReadinessHandler, type ReadinessCheck } from "./readiness";
 import { assertAuthStoresAreSafe, getAuthStoreSources, initAuthStores } from "./routes/auth";
 import { startAccountWalletLifecycleRecoveryScheduler } from "./services/account-wallet-lifecycle";
-import {
-  API_VERSION,
-  type ApiResponse,
-  RATE_LIMIT_MAX_REQUESTS,
-  RATE_LIMIT_WINDOW_MS,
-} from "./services/context";
+import { checkCapabilityRateLimitReadiness } from "./services/capability-rate-limit-readiness";
+import { API_VERSION, type ApiResponse } from "./services/context";
 import { startGoogleCredentialLifecycleScheduler } from "./services/provider-google-lifecycle-scheduler";
 import { startProviderReservationReconciliationScheduler } from "./services/provider-reservation-reconciliation-scheduler";
 import { startXCredentialLifecycleScheduler } from "./services/provider-x-lifecycle-scheduler";
 import { startRetentionScheduler } from "./services/retention";
-import {
-  InMemoryRateLimiter,
-  parseNonNegativeInt,
-  parsePositiveInt,
-  resolveClientIp,
-  SOCKET_PEER_ENV_KEY,
-} from "./services/runtime-gate";
+import { SOCKET_PEER_ENV_KEY } from "./services/runtime-gate";
 import { startTransactionReceiptPollingScheduler } from "./services/transaction-receipt-poller";
 import {
   getUpstreamCredentialLeaseSchedulerHealth,
@@ -68,23 +65,7 @@ const app = await runStartupPhase("compose", () => composeApp());
 const pluginMigrationSources = await getComposedPluginMigrationSources();
 const capabilitiesEnabled = resolveEnabledPlugins().has("capabilities");
 
-// ─── In-memory rate-limit log + shutdown guard ───────────────────────────────
-//
-// NOT used by the Workers entry — the Workers runtime mounts the shared
-// Redis-backed sliding-window limiter across all routes instead (SEC-068,
-// see middleware/global-rate-limit.ts, gated on isWorkersRuntime in app.ts).
-//
-// SEC-014: the limiter keys on the socket peer unless the operator declares
-// STEWARD_TRUSTED_PROXY_HOPS > 0, in which case the client IP is derived from
-// the rightmost trusted XFF entries (client-supplied XFF prefixes are never
-// trusted). The key space is capped and fails closed when full.
-
-const trustedProxyHops = parseNonNegativeInt(process.env.STEWARD_TRUSTED_PROXY_HOPS, 0);
-const rateLimiter = new InMemoryRateLimiter(
-  RATE_LIMIT_MAX_REQUESTS,
-  RATE_LIMIT_WINDOW_MS,
-  parsePositiveInt(process.env.STEWARD_RATE_LIMIT_MAX_KEYS, 10_000),
-);
+// ─── Shutdown guard ──────────────────────────────────────────────────────────
 let isShuttingDown = false;
 let cancelRetention: (() => void) | undefined;
 let cancelProviderReservationReconciliation: (() => void) | undefined;
@@ -95,30 +76,15 @@ let cancelGoogleCredentialLifecycleScheduler: (() => Promise<void>) | undefined;
 let cancelXCredentialLifecycleScheduler: (() => Promise<void>) | undefined;
 let cancelAccountWalletLifecycleRecoveryScheduler: (() => Promise<void>) | undefined;
 
-function runtimeGate(request: Request, peerAddress: string | null): Response | null {
-  const url = new URL(request.url);
-  if (url.pathname === "/health" || url.pathname === "/ready") return null;
-
+function runtimeGate(): Response | null {
   if (isShuttingDown) {
     return Response.json({ ok: false, error: "Server is shutting down" } satisfies ApiResponse, {
       status: 503,
     });
   }
 
-  const ip = resolveClientIp(request.headers, peerAddress, trustedProxyHops);
-  const verdict = rateLimiter.check(ip);
-  if (verdict.limited) {
-    return Response.json({ ok: false, error: "Rate limit exceeded" } satisfies ApiResponse, {
-      status: 429,
-      headers: { "Retry-After": verdict.retryAfterSeconds.toString() },
-    });
-  }
   return null;
 }
-
-const requestLogCleanupTimer = setInterval(() => {
-  rateLimiter.sweep();
-}, RATE_LIMIT_WINDOW_MS);
 
 // ─── /ready — deep readiness probe ───────────────────────────────────────────
 //
@@ -170,12 +136,27 @@ app.get(
       return checks;
     },
     checkRedis: async () => {
-      const redis = getRedisClient();
-      return redis
-        ? { ok: (await redis.ping()).toUpperCase() === "PONG" }
-        : isRedisConfigured()
-          ? { ok: false, error: "Redis is configured but not connected" }
-          : { ok: false, required: false, error: "Redis is not configured (optional mode)" };
+      const redisRequired = globalRateLimitRequiresRedis() || redisEnforcementRequiresDurability();
+      try {
+        const redis = getRedisClient();
+        return redis
+          ? { ok: (await redis.ping()).toUpperCase() === "PONG" }
+          : isRedisConfigured()
+            ? redisRequired
+              ? { ok: false, error: "Redis is configured but not connected" }
+              : {
+                  ok: false,
+                  required: false,
+                  error: "Redis is configured but not connected (memory acknowledged)",
+                }
+            : redisRequired
+              ? { ok: false, error: "Redis is required for durable production rate limiting" }
+              : { ok: false, required: false, error: "Redis is not configured (optional mode)" };
+      } catch {
+        return redisRequired
+          ? { ok: false, error: "Redis health check failed" }
+          : { ok: false, required: false, error: "Redis health check failed (optional mode)" };
+      }
     },
     checkProxyClock: async () => {
       const proxyUrl = process.env.STEWARD_PROXY_URL?.replace(/\/+$/, "");
@@ -201,9 +182,10 @@ app.get(
     getAuthStoreSources,
     isVaultConfigured: () => Boolean(process.env.STEWARD_MASTER_PASSWORD),
     getAdditionalChecks: capabilitiesEnabled
-      ? () => {
+      ? async () => {
           const health = getUpstreamCredentialLeaseSchedulerHealth();
           return {
+            capabilityRateLimit: await checkCapabilityRateLimitReadiness(),
             upstreamCredentialLeases: {
               ok: health.ok,
               detail: {
@@ -341,10 +323,7 @@ const serverOptions = {
     // Hand the runtime-observed socket peer to the app via Hono's env bag so
     // per-route limiters (auth) can key on it when no trusted forwarding
     // config exists — it cannot be client-influenced, unlike any header.
-    return (
-      runtimeGate(request, peerAddress) ??
-      app.fetch(request, { [SOCKET_PEER_ENV_KEY]: peerAddress })
-    );
+    return runtimeGate() ?? app.fetch(request, { [SOCKET_PEER_ENV_KEY]: peerAddress });
   },
   idleTimeout: 30,
 } as Parameters<typeof Bun.serve>[0] & { hostname?: string };
@@ -357,7 +336,6 @@ const shutdown = async (signal: string) => {
   console.log(`Received ${signal}, shutting down Steward API`);
 
   server.stop(true);
-  clearInterval(requestLogCleanupTimer);
   if (cancelRetention) cancelRetention();
   if (cancelProviderReservationReconciliation) cancelProviderReservationReconciliation();
   if (cancelTransactionReceiptPolling) cancelTransactionReceiptPolling();
@@ -368,7 +346,6 @@ const shutdown = async (signal: string) => {
   if (cancelAccountWalletLifecycleRecoveryScheduler) {
     await cancelAccountWalletLifecycleRecoveryScheduler();
   }
-  rateLimiter.clear();
 
   try {
     await Promise.all([closeDb(), shutdownRedis()]);

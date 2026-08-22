@@ -38,6 +38,7 @@ import {
   secretRoutes,
   secrets,
 } from "@stwd/db";
+import { sql } from "drizzle-orm";
 import { type EncryptedKey, KeyStore, type KeyStoreRuntimeOptions } from "./keystore";
 import {
   assertGovernedRouteUpdateIsSafe,
@@ -131,24 +132,7 @@ export class SecretVault {
     options?: CreateSecretOptions,
   ): Promise<SecretMetadata> {
     const db = getDb();
-    const encrypted = this.keyStore.encrypt(value, { tenantId, name, version: 1 });
-
-    const [row] = await db
-      .insert(secrets)
-      .values({
-        tenantId,
-        name,
-        description: options?.description ?? null,
-        ciphertext: encrypted.ciphertext,
-        iv: encrypted.iv,
-        authTag: encrypted.tag,
-        salt: encrypted.salt,
-        version: 1,
-        expiresAt: options?.expiresAt ?? null,
-      })
-      .returning();
-
-    return this.toMetadata(row);
+    return db.transaction((tx) => this.createSecretWithinTx(tx, tenantId, name, value, options));
   }
 
   /**
@@ -164,6 +148,7 @@ export class SecretVault {
     value: string,
     options?: CreateSecretOptions,
   ): Promise<SecretMetadata> {
+    await this.lockSecretLineageWithinTx(tx, tenantId, name);
     const encrypted = this.keyStore.encrypt(value, { tenantId, name, version: 1 });
     const [row] = await tx
       .insert(secrets)
@@ -209,6 +194,21 @@ export class SecretVault {
         and(eq(secrets.id, secretId), eq(secrets.tenantId, tenantId), isNull(secrets.deletedAt)),
       );
 
+    return row ? this.toMetadata(row) : null;
+  }
+
+  /** Metadata lookup on a caller-owned transaction; never returns plaintext. */
+  async getSecretByIdWithinTx(
+    tx: SecretTxExecutor,
+    tenantId: string,
+    secretId: string,
+  ): Promise<SecretMetadata | null> {
+    const [row] = await tx
+      .select()
+      .from(secrets)
+      .where(
+        and(eq(secrets.id, secretId), eq(secrets.tenantId, tenantId), isNull(secrets.deletedAt)),
+      );
     return row ? this.toMetadata(row) : null;
   }
 
@@ -334,18 +334,10 @@ export class SecretVault {
     newValue: string,
     options?: { allowDeletedCurrent?: boolean },
   ): Promise<SecretMetadata> {
-    const [current] = await tx
-      .select()
-      .from(secrets)
-      .where(
-        and(
-          eq(secrets.tenantId, tenantId),
-          eq(secrets.name, name),
-          options?.allowDeletedCurrent ? undefined : isNull(secrets.deletedAt),
-        ),
-      )
-      .orderBy(desc(secrets.version))
-      .limit(1);
+    const lineage = await this.lockSecretLineageWithinTx(tx, tenantId, name);
+    const current = lineage
+      .filter((row) => options?.allowDeletedCurrent || row.deletedAt === null)
+      .at(-1);
     if (!current) {
       throw new Error(`Secret "${name}" not found for tenant ${tenantId}`);
     }
@@ -382,51 +374,86 @@ export class SecretVault {
     return this.toMetadata(row);
   }
 
+  /** Canonical tenant-audit -> secret-lineage -> version/route lock boundary. */
+  async lockSecretLineageWithinTx(
+    tx: SecretTxExecutor,
+    tenantId: string,
+    name: string,
+  ): Promise<Secret[]> {
+    if (process.env.STEWARD_DB_MODE !== "pglite" && process.env.STEWARD_PGLITE_MEMORY !== "true") {
+      await tx.execute(
+        sql`SELECT pg_advisory_xact_lock(hashtextextended(${`steward_secret_${tenantId}:${name}`}, 0))`,
+      );
+    }
+    const lineage = await tx
+      .select()
+      .from(secrets)
+      .where(and(eq(secrets.tenantId, tenantId), eq(secrets.name, name)))
+      .orderBy(secrets.version)
+      .for("update");
+    const ids = lineage.map((row) => row.id);
+    if (ids.length > 0) {
+      await tx
+        .select({ id: secretRoutes.id })
+        .from(secretRoutes)
+        .where(and(eq(secretRoutes.tenantId, tenantId), inArray(secretRoutes.secretId, ids)))
+        .orderBy(secretRoutes.id)
+        .for("update");
+    }
+    return lineage;
+  }
+
+  /** Soft-delete a full lineage and its routes inside the caller's transaction. */
+  async deleteSecretWithinTx(
+    tx: SecretTxExecutor,
+    tenantId: string,
+    secretId: string,
+    expectedName: string,
+  ): Promise<boolean> {
+    const lineage = await this.lockSecretLineageWithinTx(tx, tenantId, expectedName);
+    if (!lineage.some((row) => row.id === secretId && row.deletedAt === null)) return false;
+    const ids = lineage.map((row) => row.id);
+    if (ids.length > 0) {
+      const governedRoutes = await tx
+        .select({ id: secretRoutes.id })
+        .from(secretRoutes)
+        .where(
+          and(
+            eq(secretRoutes.tenantId, tenantId),
+            inArray(secretRoutes.secretId, ids),
+            sql`(${secretRoutes.authorityMode} = 'governed_v2' OR ${secretRoutes.providerOperationId} IS NOT NULL)`,
+          ),
+        )
+        .limit(1);
+      if (governedRoutes.length > 0) {
+        throw new Error(
+          "Governed secret authority must be revoked through its provider-operation lifecycle",
+        );
+      }
+      await tx
+        .delete(secretRoutes)
+        .where(and(eq(secretRoutes.tenantId, tenantId), inArray(secretRoutes.secretId, ids)));
+    }
+    const now = new Date();
+    await tx
+      .update(secrets)
+      .set({ deletedAt: now, updatedAt: now })
+      .where(
+        and(
+          eq(secrets.tenantId, tenantId),
+          eq(secrets.name, expectedName),
+          isNull(secrets.deletedAt),
+        ),
+      );
+    return true;
+  }
+
   /**
    * Rotate a secret — creates a new version with updated ciphertext.
    */
   async rotateSecret(tenantId: string, name: string, newValue: string): Promise<SecretMetadata> {
     const db = getDb();
-
-    // Find current version
-    const current = await this.getSecret(tenantId, name);
-    if (!current) {
-      throw new Error(`Secret "${name}" not found for tenant ${tenantId}`);
-    }
-
-    const newVersion = current.version + 1;
-    const encrypted = this.keyStore.encrypt(newValue, { tenantId, name, version: newVersion });
-    const now = new Date();
-
-    return db.transaction(async (tx) => {
-      const [row] = await tx
-        .insert(secrets)
-        .values({
-          tenantId,
-          name,
-          description: current.description,
-          ciphertext: encrypted.ciphertext,
-          iv: encrypted.iv,
-          authTag: encrypted.tag,
-          salt: encrypted.salt,
-          version: newVersion,
-          rotatedAt: now,
-          expiresAt: current.expiresAt,
-        })
-        .returning();
-
-      await tx
-        .update(secretRoutes)
-        .set({ secretId: row.id })
-        .where(and(eq(secretRoutes.tenantId, tenantId), eq(secretRoutes.secretId, current.id)));
-
-      await tx
-        .update(secrets)
-        .set({ deletedAt: now, updatedAt: now })
-        .where(and(eq(secrets.id, current.id), eq(secrets.tenantId, tenantId)));
-
-      return this.toMetadata(row);
-    });
+    return db.transaction((tx) => this.rotateSecretWithinTx(tx, tenantId, name, newValue));
   }
 
   /**
@@ -434,49 +461,16 @@ export class SecretVault {
    */
   async deleteSecret(tenantId: string, secretId: string): Promise<boolean> {
     const db = getDb();
-
-    const [row] = await db
-      .select()
-      .from(secrets)
-      .where(
-        and(eq(secrets.id, secretId), eq(secrets.tenantId, tenantId), isNull(secrets.deletedAt)),
-      );
-
-    if (!row) return false;
-
-    const relatedSecretRows = await db
-      .select({ id: secrets.id })
-      .from(secrets)
-      .where(and(eq(secrets.tenantId, tenantId), eq(secrets.name, row.name)));
-
-    const relatedSecretIds = relatedSecretRows.map((secretRow) => secretRow.id);
-    const now = new Date();
-
-    await db.transaction(async (tx) => {
-      if (relatedSecretIds.length > 0) {
-        await tx
-          .delete(secretRoutes)
-          .where(
-            and(
-              eq(secretRoutes.tenantId, tenantId),
-              inArray(secretRoutes.secretId, relatedSecretIds),
-            ),
-          );
-      }
-
-      await tx
-        .update(secrets)
-        .set({ deletedAt: now, updatedAt: now })
+    return db.transaction(async (tx) => {
+      const [row] = await tx
+        .select({ name: secrets.name })
+        .from(secrets)
         .where(
-          and(
-            eq(secrets.tenantId, tenantId),
-            eq(secrets.name, row.name),
-            isNull(secrets.deletedAt),
-          ),
+          and(eq(secrets.id, secretId), eq(secrets.tenantId, tenantId), isNull(secrets.deletedAt)),
         );
+      if (!row) return false;
+      return this.deleteSecretWithinTx(tx, tenantId, secretId, row.name);
     });
-
-    return true;
   }
 
   /**
@@ -917,11 +911,27 @@ export class SecretVault {
 
   async deleteRoute(tenantId: string, routeId: string): Promise<boolean> {
     const db = getDb();
-    const result = await db
-      .delete(secretRoutes)
-      .where(and(eq(secretRoutes.id, routeId), eq(secretRoutes.tenantId, tenantId)))
-      .returning();
-    return result.length > 0;
+    return db.transaction(async (tx) => {
+      const [route] = await tx
+        .select({
+          authorityMode: secretRoutes.authorityMode,
+          providerOperationId: secretRoutes.providerOperationId,
+        })
+        .from(secretRoutes)
+        .where(and(eq(secretRoutes.id, routeId), eq(secretRoutes.tenantId, tenantId)))
+        .for("update");
+      if (!route) return false;
+      if (route.authorityMode === "governed_v2" || route.providerOperationId !== null) {
+        throw new Error(
+          "Governed secret routes must be revoked through their provider-operation lifecycle",
+        );
+      }
+      const result = await tx
+        .delete(secretRoutes)
+        .where(and(eq(secretRoutes.id, routeId), eq(secretRoutes.tenantId, tenantId)))
+        .returning();
+      return result.length > 0;
+    });
   }
 
   // ─── Private helpers ─────────────────────────────────────────────────────────

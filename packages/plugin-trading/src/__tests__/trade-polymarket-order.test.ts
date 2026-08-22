@@ -683,8 +683,10 @@ describe("POST /v1/trade/polymarket/order", () => {
 
     const prevNodeEnv = process.env.NODE_ENV;
     const prevMemoryAck = process.env.STEWARD_ALLOW_MEMORY_TRADING_IDEMPOTENCY;
+    const prevRateLimitMemoryAck = process.env.STEWARD_ALLOW_MEMORY_TRADING_RATE_LIMITS;
     process.env.NODE_ENV = "production";
     process.env.STEWARD_ALLOW_MEMORY_TRADING_IDEMPOTENCY = "true";
+    process.env.STEWARD_ALLOW_MEMORY_TRADING_RATE_LIMITS = "true";
     process.env.STEWARD_PM_TEST_CREDS = "1";
     try {
       const res = await postOrder(app, sessionId, crypto.randomUUID());
@@ -700,6 +702,11 @@ describe("POST /v1/trade/polymarket/order", () => {
       else process.env.NODE_ENV = prevNodeEnv;
       if (prevMemoryAck === undefined) delete process.env.STEWARD_ALLOW_MEMORY_TRADING_IDEMPOTENCY;
       else process.env.STEWARD_ALLOW_MEMORY_TRADING_IDEMPOTENCY = prevMemoryAck;
+      if (prevRateLimitMemoryAck === undefined) {
+        delete process.env.STEWARD_ALLOW_MEMORY_TRADING_RATE_LIMITS;
+      } else {
+        process.env.STEWARD_ALLOW_MEMORY_TRADING_RATE_LIMITS = prevRateLimitMemoryAck;
+      }
       delete process.env.STEWARD_PM_TEST_CREDS;
     }
   });
@@ -726,8 +733,10 @@ describe("POST /v1/trade/polymarket/order", () => {
 
     const prevNodeEnv = process.env.NODE_ENV;
     const prevMemoryAck = process.env.STEWARD_ALLOW_MEMORY_TRADING_IDEMPOTENCY;
+    const prevRateLimitMemoryAck = process.env.STEWARD_ALLOW_MEMORY_TRADING_RATE_LIMITS;
     process.env.NODE_ENV = "production";
     process.env.STEWARD_ALLOW_MEMORY_TRADING_IDEMPOTENCY = "true";
+    process.env.STEWARD_ALLOW_MEMORY_TRADING_RATE_LIMITS = "true";
     process.env.POLYMARKET_CLOB_API_URL = "http://clob.e2e.invalid";
     process.env.STEWARD_PM_TEST_CREDS = "1";
     try {
@@ -743,6 +752,11 @@ describe("POST /v1/trade/polymarket/order", () => {
       else process.env.NODE_ENV = prevNodeEnv;
       if (prevMemoryAck === undefined) delete process.env.STEWARD_ALLOW_MEMORY_TRADING_IDEMPOTENCY;
       else process.env.STEWARD_ALLOW_MEMORY_TRADING_IDEMPOTENCY = prevMemoryAck;
+      if (prevRateLimitMemoryAck === undefined) {
+        delete process.env.STEWARD_ALLOW_MEMORY_TRADING_RATE_LIMITS;
+      } else {
+        process.env.STEWARD_ALLOW_MEMORY_TRADING_RATE_LIMITS = prevRateLimitMemoryAck;
+      }
       delete process.env.POLYMARKET_CLOB_API_URL;
       delete process.env.STEWARD_PM_TEST_CREDS;
     }

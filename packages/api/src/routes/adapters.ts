@@ -21,6 +21,7 @@
  * route in app.ts.
  */
 
+import { createHash } from "node:crypto";
 import {
   AdapterNotConfiguredError,
   AdapterProviderError,
@@ -30,24 +31,23 @@ import {
   type BridgeHandoff,
   type BridgeQuote,
   type SparkWallet,
+  type SwapQuote,
   type UnsignedTxIntent,
 } from "@stwd/adapters";
 import { getDb, tenantAppClients, userTenants } from "@stwd/db";
-import {
-  dailySpendCapEvaluator,
-  evaluateTradeOrder,
-  perOrderCapEvaluator,
-} from "@stwd/policy-engine";
+import { evaluateTradeOrder, perOrderCapEvaluator } from "@stwd/policy-engine";
 import { redactedThrownDiagnostics } from "@stwd/shared";
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 import { and, eq } from "drizzle-orm";
 import { type Context, Hono } from "hono";
 import { z } from "zod";
-import { checkAgentSpendLimit } from "../middleware/redis";
+import { reserveAgentDailySpend } from "../middleware/redis";
 import { type ActorType, writeAuditEvent } from "../services/audit";
 import {
   type ApiResponse,
   type AppVariables,
   ensureAgentForTenant,
+  priceOracle,
   requireTenantLevel,
   safeJsonParse,
   setNoStoreHeaders,
@@ -322,17 +322,15 @@ function decodeBase64(value: string): Uint8Array | null {
  * Run an unsigned fund-moving intent through the SAME policy gate the trade
  * route uses. We treat the adapter operation as a generic "trade order" against
  * the agent's per-request budget so a deny here blocks the route from returning
- * any signable artifact. `estimatedUsd` is the route's notional estimate.
+ * any signable artifact. `estimatedUsd` is the server-derived notional.
  *
- * The daily cap is enforced against the agent's REAL rolling daily USD spend,
- * sourced from the same Redis counter the signing path records into
- * (`recordVaultSpend` → `recordAgentSpend` → `recordSpend`'s `total` field).
- * This is what makes `STEWARD_ADAPTER_DAILY_CAP_USD` actually accumulate across
- * the day instead of evaluating every order in isolation (which would let a
- * caller issue unlimited per-order-cap-sized operations). `checkAgentSpendLimit`
- * fails CLOSED (allowed:false) when Redis is configured but unavailable, and
- * also reports allowed:false once the agent is already at/over the daily cap —
- * both cases must block, consistent with the money-path fail-closed posture.
+ * The daily cap reserves the server-estimated notional in a dedicated Redis
+ * issuance bucket before returning the artifact. The Lua gate binds a required
+ * idempotency key to a canonical request digest, so retries do not double count,
+ * changed requests conflict, and overlapping requests cannot race past the cap.
+ * The issuance bucket is deliberately separate from later settled vault spend:
+ * an artifact consumes potential-spend budget for the day, while execution can
+ * still record its actual spend without double-counting this reservation.
  *
  * Returns `{ allow: true }` when allowed; `{ allow: false, reason }` when denied.
  */
@@ -343,40 +341,88 @@ async function enforceFundMovingPolicy(
     estimatedUsd: number;
     perOrderCapUsd: number;
     dailyCapUsd: number;
+    requestAuthority: unknown;
   },
 ): Promise<{ allow: true } | { allow: false; reason: string }> {
-  const spendStatus = await checkAgentSpendLimit(params.agentId, params.dailyCapUsd, "day");
-  if (!spendStatus.allowed) {
-    return {
-      allow: false,
-      reason:
-        "daily-spend-cap: agent is at or over the daily spend cap, or spend enforcement is unavailable (fail-closed)",
-    };
-  }
   const result = evaluateTradeOrder(
     {
       perOrderCapUsd: params.perOrderCapUsd,
       dailyCapUsd: params.dailyCapUsd,
-      // Real rolling daily spend (USD) for this agent, not a hardcoded 0.
-      dailySpendUsd: spendStatus.spent,
+      dailySpendUsd: 0,
     },
-    {
-      estimatedOrderUsd: params.estimatedUsd,
-    },
-    // Adapter ops are not venue/asset/leverage constrained the way perps are, so
-    // we run ONLY the USD-cap evaluators (per-order + daily). This reuses the
-    // exact same spend-gate code the trade route uses; a deny here blocks the
-    // route from returning any signable artifact.
-    [perOrderCapEvaluator, dailySpendCapEvaluator],
+    { estimatedOrderUsd: params.estimatedUsd },
+    [perOrderCapEvaluator],
   );
-  if (result.allow) return { allow: true };
-  return { allow: false, reason: result.reason ?? "operation violates spend policy" };
+  if (!result.allow) {
+    return { allow: false, reason: result.reason ?? "operation violates spend policy" };
+  }
+
+  const idempotencyKey = c.req.header("idempotency-key")?.trim();
+  if (!idempotencyKey || idempotencyKey.length > 256) {
+    const nodeEnv = runtimeEnvironmentValue("NODE_ENV");
+    if (
+      !idempotencyKey &&
+      runtimeEnvironmentValue("STEWARD_RUNTIME") !== "workers" &&
+      (nodeEnv === "development" || nodeEnv === "test")
+    ) {
+      return { allow: true };
+    }
+    return {
+      allow: false,
+      reason: "idempotency-key: a 1-256 character Idempotency-Key is required",
+    };
+  }
+  const tenantId = c.get("tenantId");
+  if (!tenantId) return { allow: false, reason: "tenant authority is unavailable" };
+  const reservationId = createHash("sha256")
+    .update(`${tenantId}\0${params.agentId}\0${c.req.path}\0${idempotencyKey}`)
+    .digest("hex");
+  const requestDigest = createHash("sha256")
+    .update(
+      canonicalJson({
+        tenantId,
+        agentId: params.agentId,
+        path: c.req.path,
+        estimatedUsd: params.estimatedUsd,
+        request: params.requestAuthority,
+      }),
+    )
+    .digest("hex");
+  const reservation = await reserveAgentDailySpend({
+    agentId: params.agentId,
+    tenantId,
+    amountUsd: params.estimatedUsd,
+    limitUsd: params.dailyCapUsd,
+    reservationId,
+    requestDigest,
+  });
+  if (!reservation.allowed) {
+    return {
+      allow: false,
+      reason: reservation.conflict
+        ? "idempotency-key: key was already used for a different adapter intent"
+        : "daily-spend-cap: atomic spend reservation was denied or unavailable (fail-closed)",
+    };
+  }
+  return { allow: true };
+}
+
+function canonicalJson(value: unknown): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value) ?? "null";
+  if (Array.isArray(value)) {
+    return `[${value.map((entry) => canonicalJson(entry ?? null)).join(",")}]`;
+  }
+  return `{${Object.entries(value as Record<string, unknown>)
+    .filter(([, entry]) => entry !== undefined)
+    .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
+    .map(([key, entry]) => `${JSON.stringify(key)}:${canonicalJson(entry)}`)
+    .join(",")}}`;
 }
 
 /** Per-request spend caps. Configurable via env; conservative defaults. */
 function spendCaps(): { perOrderCapUsd: number; dailyCapUsd: number } {
-  const perOrder = Number(process.env.STEWARD_ADAPTER_PER_OP_CAP_USD);
-  const daily = Number(process.env.STEWARD_ADAPTER_DAILY_CAP_USD);
+  const perOrder = Number(runtimeEnvironmentValue("STEWARD_ADAPTER_PER_OP_CAP_USD"));
+  const daily = Number(runtimeEnvironmentValue("STEWARD_ADAPTER_DAILY_CAP_USD"));
   return {
     perOrderCapUsd: Number.isFinite(perOrder) && perOrder > 0 ? perOrder : 10_000,
     dailyCapUsd: Number.isFinite(daily) && daily > 0 ? daily : 50_000,
@@ -490,17 +536,27 @@ async function enforceAdapterIntentPolicy(
   c: Context<{ Variables: AppVariables }>,
   params: {
     agentId: string;
-    estimatedUsd?: number;
+    estimatedUsd: number | null;
     auditAction: string;
+    requestAuthority: unknown;
   },
 ): Promise<{ allow: true } | { allow: false; response: Response }> {
   const caps = spendCaps();
-  const estimatedUsd = params.estimatedUsd ?? caps.perOrderCapUsd;
+  if (params.estimatedUsd === null) {
+    const reason = "authoritative USD valuation is unavailable (fail-closed)";
+    await auditAdapterEvent(c, params.auditAction, params.agentId, { reason });
+    return {
+      allow: false,
+      response: c.json({ code: "policy-violation", reason }, 400),
+    };
+  }
+  const estimatedUsd = params.estimatedUsd;
   const gate = await enforceFundMovingPolicy(c, {
     agentId: params.agentId,
     estimatedUsd,
     perOrderCapUsd: caps.perOrderCapUsd,
     dailyCapUsd: caps.dailyCapUsd,
+    requestAuthority: params.requestAuthority,
   });
   if (gate.allow) return { allow: true };
   await auditAdapterEvent(c, params.auditAction, params.agentId, {
@@ -511,6 +567,59 @@ async function enforceAdapterIntentPolicy(
     allow: false,
     response: c.json({ code: "policy-violation", reason: gate.reason }, 400),
   };
+}
+
+const WBTC_MAINNET = "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599";
+
+async function tokenNotionalUsd(
+  amount: unknown,
+  chainId: unknown,
+  tokenAddress: unknown,
+): Promise<number | null> {
+  if (
+    typeof amount !== "string" ||
+    !/^\d+$/.test(amount) ||
+    typeof chainId !== "number" ||
+    !Number.isSafeInteger(chainId) ||
+    typeof tokenAddress !== "string"
+  ) {
+    return null;
+  }
+  try {
+    const value = await priceOracle.weiToUsd(amount, chainId, tokenAddress);
+    return value !== null && Number.isFinite(value) && value > 0 ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+async function bitcoinNotionalUsd(satoshis: unknown): Promise<number | null> {
+  if (typeof satoshis !== "string" || !/^\d+$/.test(satoshis)) return null;
+  try {
+    const sats = BigInt(satoshis);
+    if (sats <= 0n) return null;
+    const price = await priceOracle.getTokenUsdPrice(1, WBTC_MAINNET);
+    if (price === null || !Number.isFinite(price) || price <= 0) return null;
+    const scale = 100_000_000n;
+    const btc = Number(sats / scale) + Number(sats % scale) / Number(scale);
+    const value = btc * price;
+    return Number.isFinite(value) && value > 0 ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+function rejectCallerValuation(
+  c: Context<{ Variables: AppVariables }>,
+  raw: unknown,
+): Response | null {
+  if (raw !== null && typeof raw === "object" && Object.hasOwn(raw, "estimatedUsd")) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "estimatedUsd is not accepted; valuation is server-derived" },
+      400,
+    );
+  }
+  return null;
 }
 
 async function requireSparkWalletAccess(
@@ -544,22 +653,18 @@ const swapQuoteSchema = z.object({
   amount: z.string().min(1).max(80),
   chainId: z.number().int().positive(),
   slippageBps: z.number().int().min(0).max(10_000).optional(),
-  /** Caller's USD notional estimate for the input amount (for the spend gate). */
-  estimatedUsd: z.number().positive().max(1e12).optional(),
 });
 
 const earnDepositSchema = z.object({
   agentId: z.string().min(1).max(128).optional(),
   vault: z.string().min(1).max(128),
   assets: z.string().min(1).max(80),
-  estimatedUsd: z.number().positive().max(1e12).optional(),
 });
 
 const earnWithdrawSchema = z.object({
   agentId: z.string().min(1).max(128).optional(),
   vault: z.string().min(1).max(128),
   shares: z.string().min(1).max(80),
-  estimatedUsd: z.number().positive().max(1e12).optional(),
 });
 
 const onrampQuoteSchema = z.object({
@@ -617,14 +722,12 @@ const bridgeQuoteSchema = z.object({
   amount: z.string().min(1).max(80),
   recipient: z.string().min(1).max(128),
   slippageBps: z.number().int().min(0).max(10_000).optional(),
-  estimatedUsd: z.number().positive().max(1e12).optional(),
 });
 
 const bridgeBuildSchema = z.object({
   agentId: z.string().min(1).max(128).optional(),
   owner: z.string().min(1).max(128),
   quote: z.record(z.string(), z.unknown()),
-  estimatedUsd: z.number().positive().max(1e12).optional(),
 });
 
 const bridgeSessionSchema = z.object({
@@ -651,7 +754,6 @@ const sparkDepositClaimSchema = z.object({
   agentId: z.string().min(1).max(128).optional(),
   quoteId: z.string().min(1).max(128),
   walletId: z.string().min(1).max(128),
-  estimatedUsd: z.number().positive().max(1e12).optional(),
 });
 
 const sparkLightningInvoiceSchema = z.object({
@@ -666,7 +768,6 @@ const sparkLightningPaymentSchema = z.object({
   walletId: z.string().min(1).max(128),
   paymentRequest: z.string().min(1).max(4096),
   maxFeeSats: z.string().min(1).max(80).optional(),
-  estimatedUsd: z.number().positive().max(1e12).optional(),
 });
 
 const sparkTransferSchema = z.object({
@@ -675,7 +776,6 @@ const sparkTransferSchema = z.object({
   recipient: z.string().min(1).max(192),
   amountSats: z.string().min(1).max(80),
   memo: z.string().min(1).max(280).optional(),
-  estimatedUsd: z.number().positive().max(1e12).optional(),
 });
 
 const sparkTokenTransferSchema = z.object({
@@ -685,7 +785,6 @@ const sparkTokenTransferSchema = z.object({
   tokenId: z.string().min(1).max(128),
   amount: z.string().min(1).max(80),
   memo: z.string().min(1).max(280).optional(),
-  estimatedUsd: z.number().positive().max(1e12).optional(),
 });
 
 const sparkIdentitySignSchema = z.object({
@@ -742,9 +841,11 @@ adapterRoutes.post("/swap/quote", async (c) => {
 
 adapterRoutes.post("/swap/build", async (c) => {
   const raw = (await safeJsonParse<Record<string, unknown>>(c)) ?? {};
+  const valuationError = rejectCallerValuation(c, raw);
+  if (valuationError) return valuationError;
   // Quote must be supplied by the caller (echoed from /swap/quote).
   const quoteInput = raw.quote;
-  const parsed = swapQuoteSchema.pick({ agentId: true, estimatedUsd: true }).safeParse(raw);
+  const parsed = swapQuoteSchema.pick({ agentId: true }).safeParse(raw);
   if (!parsed.success || !quoteInput || typeof quoteInput !== "object") {
     return c.json<ApiResponse>({ ok: false, error: "quote and agentId are required" }, 400);
   }
@@ -764,12 +865,27 @@ adapterRoutes.post("/swap/build", async (c) => {
 
     // Fund-moving: gate BEFORE returning anything signable.
     const caps = spendCaps();
-    const estimatedUsd = parsed.data.estimatedUsd ?? caps.perOrderCapUsd; // assume worst-case if unknown
+    const metadata = intent.metadata ?? {};
+    const estimatedUsd = await tokenNotionalUsd(
+      metadata.amountIn,
+      intent.chainId,
+      (quoteInput as SwapQuote).fromToken?.address,
+    );
+    if (estimatedUsd === null) {
+      return c.json(
+        {
+          code: "policy-violation",
+          reason: "authoritative USD valuation is unavailable (fail-closed)",
+        },
+        400,
+      );
+    }
     const gate = await enforceFundMovingPolicy(c, {
       agentId,
       estimatedUsd,
       perOrderCapUsd: caps.perOrderCapUsd,
       dailyCapUsd: caps.dailyCapUsd,
+      requestAuthority: { request: raw, artifact: intent },
     });
     if (!gate.allow) {
       await auditAdapterEvent(c, "adapter.swap.policy-rejected", agentId, {
@@ -819,6 +935,8 @@ adapterRoutes.get("/earn/vaults/:vault/position", async (c) => {
 
 adapterRoutes.post("/earn/deposit", async (c) => {
   const raw = await safeJsonParse(c);
+  const valuationError = rejectCallerValuation(c, raw);
+  if (valuationError) return valuationError;
   const parsed = earnDepositSchema.safeParse(raw);
   if (!parsed.success) {
     return c.json<ApiResponse>({ ok: false, error: parsed.error.message }, 400);
@@ -841,12 +959,26 @@ adapterRoutes.post("/earn/deposit", async (c) => {
     assertUnsigned(intent);
 
     const caps = spendCaps();
-    const estimatedUsd = parsed.data.estimatedUsd ?? caps.perOrderCapUsd;
+    const estimatedUsd = await tokenNotionalUsd(
+      intent.metadata?.assets,
+      intent.chainId,
+      intent.metadata?.asset,
+    );
+    if (estimatedUsd === null) {
+      return c.json(
+        {
+          code: "policy-violation",
+          reason: "authoritative USD valuation is unavailable (fail-closed)",
+        },
+        400,
+      );
+    }
     const gate = await enforceFundMovingPolicy(c, {
       agentId,
       estimatedUsd,
       perOrderCapUsd: caps.perOrderCapUsd,
       dailyCapUsd: caps.dailyCapUsd,
+      requestAuthority: { request: raw, artifact: intent },
     });
     if (!gate.allow) {
       await auditAdapterEvent(c, "adapter.earn.deposit.policy-rejected", agentId, {
@@ -868,6 +1000,8 @@ adapterRoutes.post("/earn/deposit", async (c) => {
 
 adapterRoutes.post("/earn/withdraw", async (c) => {
   const raw = await safeJsonParse(c);
+  const valuationError = rejectCallerValuation(c, raw);
+  if (valuationError) return valuationError;
   const parsed = earnWithdrawSchema.safeParse(raw);
   if (!parsed.success) {
     return c.json<ApiResponse>({ ok: false, error: parsed.error.message }, 400);
@@ -890,12 +1024,26 @@ adapterRoutes.post("/earn/withdraw", async (c) => {
     assertUnsigned(intent);
 
     const caps = spendCaps();
-    const estimatedUsd = parsed.data.estimatedUsd ?? caps.perOrderCapUsd;
+    const estimatedUsd = await tokenNotionalUsd(
+      intent.metadata?.expectedAssets,
+      intent.chainId,
+      intent.metadata?.asset,
+    );
+    if (estimatedUsd === null) {
+      return c.json(
+        {
+          code: "policy-violation",
+          reason: "authoritative USD valuation is unavailable (fail-closed)",
+        },
+        400,
+      );
+    }
     const gate = await enforceFundMovingPolicy(c, {
       agentId,
       estimatedUsd,
       perOrderCapUsd: caps.perOrderCapUsd,
       dailyCapUsd: caps.dailyCapUsd,
+      requestAuthority: { request: raw, artifact: intent },
     });
     if (!gate.allow) {
       await auditAdapterEvent(c, "adapter.earn.withdraw.policy-rejected", agentId, {
@@ -943,7 +1091,10 @@ adapterRoutes.post("/bridge/quote", async (c) => {
 });
 
 adapterRoutes.post("/bridge/build", async (c) => {
-  const parsed = bridgeBuildSchema.safeParse(await safeJsonParse(c));
+  const raw = await safeJsonParse(c);
+  const valuationError = rejectCallerValuation(c, raw);
+  if (valuationError) return valuationError;
+  const parsed = bridgeBuildSchema.safeParse(raw);
   if (!parsed.success) {
     return c.json<ApiResponse>({ ok: false, error: parsed.error.message }, 400);
   }
@@ -961,19 +1112,29 @@ adapterRoutes.post("/bridge/build", async (c) => {
     else assertUnsigned(result);
 
     const caps = spendCaps();
-    // External handoffs carry a server-derived notional from the provider. A
-    // caller may submit a higher estimate, but can never understate it to bypass
-    // the policy gate. Transaction-building adapters retain the conservative
-    // cap fallback until they expose the same trusted valuation field.
     const estimatedUsd =
       result.kind === "external-handoff"
-        ? Math.max(result.estimatedUsd, parsed.data.estimatedUsd ?? 0)
-        : (parsed.data.estimatedUsd ?? caps.perOrderCapUsd);
+        ? result.estimatedUsd
+        : await tokenNotionalUsd(
+            result.metadata?.amountIn,
+            result.chainId,
+            (parsed.data.quote as unknown as BridgeQuote).fromToken?.address,
+          );
+    if (estimatedUsd === null) {
+      return c.json(
+        {
+          code: "policy-violation",
+          reason: "authoritative USD valuation is unavailable (fail-closed)",
+        },
+        400,
+      );
+    }
     const gate = await enforceFundMovingPolicy(c, {
       agentId,
       estimatedUsd,
       perOrderCapUsd: caps.perOrderCapUsd,
       dailyCapUsd: caps.dailyCapUsd,
+      requestAuthority: { request: raw, artifact: result },
     });
     if (!gate.allow) {
       await auditAdapterEvent(c, "adapter.bridge.policy-rejected", agentId, {
@@ -1225,7 +1386,10 @@ adapterRoutes.post("/spark/static-btc-deposits", async (c) => {
 });
 
 adapterRoutes.post("/spark/static-btc-deposits/claim", async (c) => {
-  const parsed = sparkDepositClaimSchema.safeParse(await safeJsonParse(c));
+  const raw = await safeJsonParse(c);
+  const valuationError = rejectCallerValuation(c, raw);
+  if (valuationError) return valuationError;
+  const parsed = sparkDepositClaimSchema.safeParse(raw);
   if (!parsed.success) {
     return c.json<ApiResponse>({ ok: false, error: parsed.error.message }, 400);
   }
@@ -1244,8 +1408,9 @@ adapterRoutes.post("/spark/static-btc-deposits/claim", async (c) => {
     assertUnsigned(intent);
     const gate = await enforceAdapterIntentPolicy(c, {
       agentId: resolution.agentId,
-      estimatedUsd: parsed.data.estimatedUsd,
+      estimatedUsd: await bitcoinNotionalUsd(intent.value),
       auditAction: "adapter.spark.static_btc_deposit.policy-rejected",
+      requestAuthority: { request: parsed.data, artifact: intent },
     });
     if (!gate.allow) return gate.response;
     await auditAdapterEvent(
@@ -1295,7 +1460,10 @@ adapterRoutes.get("/spark/lightning/invoices/:invoiceId", async (c) => {
 });
 
 adapterRoutes.post("/spark/lightning/pay", async (c) => {
-  const parsed = sparkLightningPaymentSchema.safeParse(await safeJsonParse(c));
+  const raw = await safeJsonParse(c);
+  const valuationError = rejectCallerValuation(c, raw);
+  if (valuationError) return valuationError;
+  const parsed = sparkLightningPaymentSchema.safeParse(raw);
   if (!parsed.success) {
     return c.json<ApiResponse>({ ok: false, error: parsed.error.message }, 400);
   }
@@ -1313,8 +1481,9 @@ adapterRoutes.post("/spark/lightning/pay", async (c) => {
     assertUnsigned(intent);
     const gate = await enforceAdapterIntentPolicy(c, {
       agentId: resolution.agentId,
-      estimatedUsd: parsed.data.estimatedUsd,
+      estimatedUsd: await bitcoinNotionalUsd(intent.metadata?.amountSats),
       auditAction: "adapter.spark.lightning.pay.policy-rejected",
+      requestAuthority: { request: parsed.data, artifact: intent },
     });
     if (!gate.allow) return gate.response;
     await auditAdapterEvent(c, "adapter.spark.lightning.pay.authorized", resolution.agentId, {
@@ -1328,7 +1497,10 @@ adapterRoutes.post("/spark/lightning/pay", async (c) => {
 });
 
 adapterRoutes.post("/spark/transfers", async (c) => {
-  const parsed = sparkTransferSchema.safeParse(await safeJsonParse(c));
+  const raw = await safeJsonParse(c);
+  const valuationError = rejectCallerValuation(c, raw);
+  if (valuationError) return valuationError;
+  const parsed = sparkTransferSchema.safeParse(raw);
   if (!parsed.success) {
     return c.json<ApiResponse>({ ok: false, error: parsed.error.message }, 400);
   }
@@ -1347,8 +1519,9 @@ adapterRoutes.post("/spark/transfers", async (c) => {
     assertUnsigned(intent);
     const gate = await enforceAdapterIntentPolicy(c, {
       agentId: resolution.agentId,
-      estimatedUsd: parsed.data.estimatedUsd,
+      estimatedUsd: await bitcoinNotionalUsd(intent.value),
       auditAction: "adapter.spark.transfer.policy-rejected",
+      requestAuthority: { request: parsed.data, artifact: intent },
     });
     if (!gate.allow) return gate.response;
     await auditAdapterEvent(c, "adapter.spark.transfer.authorized", resolution.agentId, {
@@ -1362,7 +1535,10 @@ adapterRoutes.post("/spark/transfers", async (c) => {
 });
 
 adapterRoutes.post("/spark/token-transfers", async (c) => {
-  const parsed = sparkTokenTransferSchema.safeParse(await safeJsonParse(c));
+  const raw = await safeJsonParse(c);
+  const valuationError = rejectCallerValuation(c, raw);
+  if (valuationError) return valuationError;
+  const parsed = sparkTokenTransferSchema.safeParse(raw);
   if (!parsed.success) {
     return c.json<ApiResponse>({ ok: false, error: parsed.error.message }, 400);
   }
@@ -1382,8 +1558,11 @@ adapterRoutes.post("/spark/token-transfers", async (c) => {
     assertUnsigned(intent);
     const gate = await enforceAdapterIntentPolicy(c, {
       agentId: resolution.agentId,
-      estimatedUsd: parsed.data.estimatedUsd,
+      // Spark token identifiers have no vetted price source yet. Until the
+      // provider returns a signed valuation receipt, token transfers fail closed.
+      estimatedUsd: null,
       auditAction: "adapter.spark.token_transfer.policy-rejected",
+      requestAuthority: { request: parsed.data, artifact: intent },
     });
     if (!gate.allow) return gate.response;
     await auditAdapterEvent(c, "adapter.spark.token_transfer.authorized", resolution.agentId, {

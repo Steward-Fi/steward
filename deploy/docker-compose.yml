@@ -30,6 +30,10 @@ services:
       # ENV NODE_ENV=production for fail-closed production behavior (SEC-161).
       NODE_ENV: production
       DATABASE_URL: "${DATABASE_URL:-postgresql://steward:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@steward-db:5432/steward}"
+      # The bundled Redis is reachable only on the Compose-internal network.
+      # A production API without this wiring denies every non-probe request.
+      REDIS_URL: "redis://redis:6379"
+      STEWARD_ALLOW_INSECURE_REDIS: "true"
       STEWARD_ALLOW_UNVERIFIED_DB_TLS: "${STEWARD_ALLOW_UNVERIFIED_DB_TLS:-}"
       STEWARD_MASTER_PASSWORD: "${STEWARD_MASTER_PASSWORD:?Set STEWARD_MASTER_PASSWORD in .env}"
       STEWARD_JWT_SECRET: "${STEWARD_JWT_SECRET:?Set STEWARD_JWT_SECRET in .env}"
@@ -57,6 +61,8 @@ services:
       - steward-data:/app/data
     depends_on:
       steward-db:
+        condition: service_healthy
+      redis:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "bun", "-e", "const r=await fetch('http://localhost:3200/health');process.exit(r.ok?0:1)"]
@@ -93,7 +99,10 @@ services:
       # NODE_ENV=production makes request signing + Redis enforcement fail CLOSED,
       # so both REDIS_URL and a request-signing secret are REQUIRED here. Without
       # them the proxy returns 500/429 on 100% of traffic. See deploy/DEPLOYMENT.md.
-      REDIS_URL: "${REDIS_URL:-redis://redis:6379}"
+      REDIS_URL: "redis://redis:6379"
+      # Scoped to the bundled private-network endpoint above. External Redis
+      # belongs in an overlay using rediss:// instead of weakening this guard.
+      STEWARD_ALLOW_INSECURE_REDIS: "true"
       STEWARD_PROXY_REQUEST_SIGNING_SECRETS: "${STEWARD_PROXY_REQUEST_SIGNING_SECRETS:?Set STEWARD_PROXY_REQUEST_SIGNING_SECRETS in .env (proxy signs/verifies every request in production)}"
       NODE_ENV: production
     command: ["bun", "run", "packages/proxy/src/index.ts"]

@@ -145,20 +145,16 @@ describe("control-plane auth hardening", () => {
     }
   });
 
-  it("redacts legacy tenant webhook and default policies from lower-trust tenant reads", () => {
+  it("redacts retired tenant webhook and default policies from every tenant read", () => {
     const getStart = tenantsSource.indexOf('tenantRoutes.get("/:id"');
     expect(getStart).toBeGreaterThanOrEqual(0);
     const getRoute = tenantsSource.slice(
       getStart,
       tenantsSource.indexOf('tenantRoutes.put("/:id/webhook"', getStart),
     );
-    expect(tenantsSource).toContain("function getTenantPayloadForRequest");
-    expect(tenantsSource).toContain("requireTenantAdminSession(c) && hasRecentSessionMfa(c)");
-    expect(tenantsSource).toContain(
-      "const { webhookUrl: _webhookUrl, defaultPolicies: _defaultPolicies, ...redacted } = payload",
-    );
-    expect(getRoute).toContain("getTenantPayloadForRequest(c, tenant)");
-    expect(getRoute).not.toContain("getTenantPayload(tenant)");
+    expect(getRoute).toContain("data: getTenantPayload(tenant)");
+    expect(getRoute).not.toContain("defaultPolicies:");
+    expect(getRoute).not.toContain("webhookUrl:");
   });
 
   it("marks legacy tenant config responses as non-cacheable", () => {

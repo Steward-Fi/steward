@@ -537,9 +537,9 @@ describeConditionSets("condition sets", () => {
     expect(body.error).toContain("condition-set.conditionSetId not found for tenant");
   });
 
-  it("simulates an agent with tenant default policies when no agent policies are stored", async () => {
+  it("does not treat historical process-local tenant defaults as policy authority", async () => {
     const { tenantConfigs } = await import("../services/context");
-    tenantConfigs.set(TENANT_ID, {
+    const historicalProcessLocalConfig = {
       id: TENANT_ID,
       name: "Condition Sets Tenant",
       defaultPolicies: [
@@ -554,7 +554,8 @@ describeConditionSets("condition sets", () => {
           },
         },
       ],
-    });
+    };
+    tenantConfigs.set(TENANT_ID, historicalProcessLocalConfig);
 
     const response = await app.request("/policies/simulate", {
       method: "POST",
@@ -576,8 +577,8 @@ describeConditionSets("condition sets", () => {
       data: { approved: boolean; results: Array<{ passed: boolean; reason?: string }> };
     };
     expect(body.ok).toBe(true);
-    expect(body.data.approved).toBe(false);
-    expect(body.data.results[0].reason).toContain("per-tx limit");
+    expect(body.data.approved).toBe(true);
+    expect(body.data.results).toEqual([]);
   });
 
   it("rejects invalid nested proxy simulation values before evaluation", async () => {

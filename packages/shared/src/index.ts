@@ -64,7 +64,6 @@ export interface TenantConfig {
   id: string;
   name: string;
   webhookUrl?: string;
-  defaultPolicies?: PolicyRule[];
 }
 
 export const WEBHOOK_EVENT_TYPES = [
