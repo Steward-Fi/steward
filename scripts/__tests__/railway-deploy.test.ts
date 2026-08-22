@@ -35,6 +35,7 @@ async function fakeRailwayRun(
   healthUrl: string | null = "https://example.test",
   remoteIp = "1.1.1.1",
   dnsAnswers = "1.1.1.1",
+  imageDigest: string | null = null,
 ) {
   const dir = await mkdtemp(join(tmpdir(), "steward-railway-deploy-"));
   temporaryDirectories.push(dir);
@@ -95,7 +96,9 @@ exec "$REAL_NODE" "$@"
   await writeFile(fakeSleep, '#!/bin/sh\n[ "$1" = "10" ] && exit 0\nexec /bin/sleep "$@"\n');
   await Promise.all([chmod(fakeCurl, 0o755), chmod(fakeNode, 0o755), chmod(fakeSleep, 0o755)]);
 
-  const child = Bun.spawn(["bash", SCRIPT, "sha-test"], {
+  const command = ["bash", SCRIPT];
+  if (imageDigest === null) command.push("sha-test");
+  const child = Bun.spawn(command, {
     cwd: repoRoot,
     env: {
       ...Bun.env,
@@ -114,6 +117,7 @@ exec "$REAL_NODE" "$@"
       RAILWAY_HEALTH_URL: healthUrl ?? "",
       RAILWAY_HEALTH_TIMEOUT: String(healthTimeout),
       RAILWAY_HEALTH_INTERVAL: "1",
+      RAILWAY_IMAGE_DIGEST: imageDigest ?? "",
     },
     stdout: "pipe",
     stderr: "pipe",
@@ -201,6 +205,37 @@ describe("SEC-129 redact_secrets filter", () => {
 });
 
 describe("Railway staging deployment", () => {
+  test("deploys an immutable digest without converting it back to a tag", async () => {
+    const digest = `sha256:${"a".repeat(64)}`;
+    const result = await fakeRailwayRun(
+      1,
+      2,
+      1,
+      "https://example.test",
+      "1.1.1.1",
+      "1.1.1.1",
+      digest,
+    );
+    expect(result.exitCode).toBe(0);
+    expect(result.curlArguments).toContain(`ghcr.io/steward-fi/steward@${digest}`);
+    expect(result.curlArguments).not.toContain(`ghcr.io/steward-fi/steward:${digest}`);
+  });
+
+  test("rejects malformed image digests before the first mutation", async () => {
+    const result = await fakeRailwayRun(
+      1,
+      2,
+      1,
+      "https://example.test",
+      "1.1.1.1",
+      "1.1.1.1",
+      "sha256:not-a-digest",
+    );
+    expect(result.exitCode).toBe(1);
+    expect(result.output).toContain("Invalid image digest");
+    expect(result.curlArguments).not.toContain("serviceInstanceUpdate");
+  });
+
   test("rejects deployment acceptance when no public probe authority is configured", async () => {
     const result = await fakeRailwayRun(1, 2, 1, null);
     expect(result.exitCode).toBe(1);
