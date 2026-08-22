@@ -74,6 +74,15 @@ REVOKE ALL ON ALL FUNCTIONS IN SCHEMA steward_rls FROM PUBLIC;
 SELECT format('GRANT %I TO %I', :'steward_migration_role', current_user) \gexec
 SELECT format('GRANT USAGE, CREATE ON SCHEMA public TO %I', :'steward_migration_role') \gexec
 SELECT format('GRANT USAGE ON SCHEMA public, steward_bootstrap, steward_rls TO %I', :'steward_app_role') \gexec
+SELECT format('GRANT USAGE ON SCHEMA drizzle TO %I', :'steward_app_role') \gexec
+SELECT format('GRANT SELECT ON TABLE drizzle.__drizzle_migrations TO %I', :'steward_app_role') \gexec
+SELECT format('GRANT SELECT ON TABLE %I.%I TO %I', n.nspname, c.relname, :'steward_app_role')
+FROM pg_class c
+JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE n.nspname = 'drizzle'
+  AND c.relkind IN ('r', 'p')
+  AND c.relname LIKE '__drizzle_migrations_plugin\_%' ESCAPE '\'
+ORDER BY c.relname \gexec
 SELECT format('GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA steward_bootstrap, steward_rls TO %I', :'steward_app_role') \gexec
 SELECT format(
   'REVOKE EXECUTE ON FUNCTION '
@@ -212,6 +221,19 @@ BEGIN
      OR has_schema_privilege(current_setting('steward.bootstrap.app_role'), 'steward_bootstrap', 'CREATE')
      OR has_schema_privilege(current_setting('steward.bootstrap.app_role'), 'steward_rls', 'CREATE') THEN
     RAISE EXCEPTION 'SEC-169 app role must not create schema objects';
+  END IF;
+  IF NOT has_schema_privilege(
+       current_setting('steward.bootstrap.app_role'), 'drizzle', 'USAGE'
+     ) OR NOT has_table_privilege(
+       current_setting('steward.bootstrap.app_role'),
+       'drizzle.__drizzle_migrations',
+       'SELECT'
+     ) OR has_table_privilege(
+       current_setting('steward.bootstrap.app_role'),
+       'drizzle.__drizzle_migrations',
+       'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER'
+     ) THEN
+    RAISE EXCEPTION 'SEC-169 app role must have read-only migration readiness access';
   END IF;
   IF NOT has_schema_privilege(
        current_setting('steward.bootstrap.platform_role'), 'steward_rls', 'USAGE'

@@ -7,23 +7,16 @@
  *
  *   - The in-memory IP rate-limit log (only safe in single-process mode)
  *   - `setInterval` GC for expired entries
- *   - The blocking `runMigrations()` call at boot
+ *   - The blocking release-migration call at boot
  *   - The /ready readiness probe (depends on migration state + DB ping)
  *   - `Bun.serve` plus SIGINT/SIGTERM graceful shutdown
  */
 
 import { validateJwtSecretEnv } from "@stwd/auth";
-import {
-  assertRlsDeploymentSafety,
-  closeDb,
-  getDb,
-  getMigrationExpectation,
-  runMigrations,
-} from "@stwd/db";
+import { assertRlsDeploymentSafety, closeDb, getDb, getMigrationExpectation } from "@stwd/db";
 import { shouldUsePGLite } from "@stwd/db/pglite";
 import { redactedThrownDiagnostics } from "@stwd/shared";
-import { sql } from "drizzle-orm";
-import { composeApp } from "./compose";
+import { composeApp, getComposedPluginMigrationSources } from "./compose";
 import { globalRateLimitRequiresRedis } from "./middleware/global-rate-limit";
 import {
   getRedisClient,
@@ -32,6 +25,7 @@ import {
   redisEnforcementRequiresDurability,
   shutdownRedis,
 } from "./middleware/redis";
+import { readMigrationReadiness } from "./migration-readiness";
 import { resolveEnabledPlugins } from "./plugin-config";
 import { createReadinessHandler, type ReadinessCheck } from "./readiness";
 import { assertAuthStoresAreSafe, getAuthStoreSources, initAuthStores } from "./routes/auth";
@@ -50,6 +44,7 @@ import {
 } from "./services/upstream-credential-lease-scheduler";
 import { configuredVaultStartupLogLine, getConfiguredVault } from "./services/vault-factory";
 import { startWebhookRetryScheduler } from "./services/webhook-retry-scheduler";
+import { runStartupPhase } from "./startup-phase";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -66,7 +61,8 @@ validateJwtSecretEnv();
 // composeApp() is async because plugin registration may be async + the trading
 // plugin is dynamically imported so the lean core graph never statically pulls
 // in the trading stack. top-level await is supported by the Bun entry.
-const app = await composeApp();
+const app = await runStartupPhase("compose", () => composeApp());
+const pluginMigrationSources = await getComposedPluginMigrationSources();
 const capabilitiesEnabled = resolveEnabledPlugins().has("capabilities");
 
 // ─── Shutdown guard ──────────────────────────────────────────────────────────
@@ -118,54 +114,16 @@ app.get(
       const checks: Record<string, ReadinessCheck> = {};
       const expectedMigration = getMigrationExpectation();
       checks.migrations = { ok: false, detail: { expected: expectedMigration.tag } };
+      checks.pluginMigrations = {
+        ok: pluginMigrationSources.length === 0,
+        ...(pluginMigrationSources.length === 0 ? { required: false } : {}),
+      };
       try {
         const db = getDb();
-        const pglite = shouldUsePGLite();
-        const result = pglite
-          ? await db.execute(sql`
-          SELECT
-            EXTRACT(EPOCH FROM CURRENT_TIMESTAMP) * 1000 AS database_time_ms,
-            EXISTS(
-              SELECT 1 FROM __steward_migrations WHERE tag = ${expectedMigration.tag}
-            ) AS expected_migration_applied
-        `)
-          : await db.execute(sql`
-          SELECT
-            EXTRACT(EPOCH FROM clock_timestamp()) * 1000 AS database_time_ms,
-            (SELECT MAX(created_at) FROM drizzle.__drizzle_migrations) AS migration_created_at
-        `);
-        const rows = Array.isArray(result)
-          ? result
-          : ((result as unknown as { rows?: unknown[] }).rows ?? []);
-        const row = rows[0] as
-          | { database_time_ms?: string | number; migration_created_at?: string | number | null }
-          | undefined;
-        const databaseTimeMs = Number(row?.database_time_ms);
-        const migrationCreatedAt = Number(row?.migration_created_at);
-        const expectedMigrationApplied =
-          (row as { expected_migration_applied?: unknown } | undefined)
-            ?.expected_migration_applied === true;
-        const databaseSkewMs = Math.abs(Date.now() - databaseTimeMs);
-        checks.database = {
-          ok: Number.isFinite(databaseTimeMs) && databaseSkewMs <= 30_000,
-          detail: { clockSkewMs: Math.round(databaseSkewMs), serverTime: new Date().toISOString() },
-        };
-        checks.migrations = {
-          ok:
-            migrationsRan &&
-            (pglite
-              ? expectedMigrationApplied
-              : migrationCreatedAt === expectedMigration.createdAt),
-          detail: {
-            expected: expectedMigration.tag,
-            expectedCreatedAt: expectedMigration.createdAt,
-            ...(pglite
-              ? { expectedMigrationApplied }
-              : {
-                  actualCreatedAt: Number.isFinite(migrationCreatedAt) ? migrationCreatedAt : null,
-                }),
-          },
-        };
+        Object.assign(
+          checks,
+          await readMigrationReadiness({ db, migrationsRan, pluginMigrationSources }),
+        );
         if (process.env.NODE_ENV === "production") {
           const expectedRole = process.env.STEWARD_APP_DATABASE_ROLE;
           if (!expectedRole) throw new Error("STEWARD_APP_DATABASE_ROLE is required in production");
@@ -256,7 +214,8 @@ if (shouldUsePGLite()) {
 } else {
   try {
     console.log("[steward] Running database migrations...");
-    const { applied } = await runMigrations();
+    const { runConfiguredReleaseMigrations } = await import("./migrate");
+    const { applied, plugins: pluginResults } = await runConfiguredReleaseMigrations();
     migrationsRan = true;
     if (applied.length > 0) {
       console.log(`[steward] Applied ${applied.length} migration(s): ${applied.join(", ")}`);
@@ -278,14 +237,9 @@ if (shouldUsePGLite()) {
       console.log("[steward] Migrations already up to date.");
     }
 
-    // Plugin-owned migrations are applied AFTER the core migrator so a
-    // plugin migration may reference core tables via FK. Each plugin's migrations
-    // land in its OWN namespaced bookkeeping table
-    // (drizzle.__drizzle_migrations_plugin_<id>), totally isolated from the core's
-    // drizzle.__drizzle_migrations journal. Fail-closed: a plugin migration error
-    // aborts boot (we never half-boot with a partially-migrated plugin schema).
-    const { runComposedPluginMigrations } = await import("./compose");
-    const pluginResults = await runComposedPluginMigrations();
+    // The shared release runner applies plugin-owned migrations AFTER core and
+    // uses the same opt-in plugin resolver as app composition. A plugin failure
+    // therefore aborts both this legacy boot path and the out-of-band command.
     if (pluginResults.length > 0) {
       console.log(
         `[steward] Applied plugin migrations: ${pluginResults
@@ -302,60 +256,60 @@ if (shouldUsePGLite()) {
 if (process.env.NODE_ENV === "production" && !shouldUsePGLite()) {
   const expectedRole = process.env.STEWARD_APP_DATABASE_ROLE;
   if (!expectedRole) throw new Error("STEWARD_APP_DATABASE_ROLE is required in production");
-  try {
-    await assertRlsDeploymentSafety(getDb(), { expectedRole });
-  } catch (error) {
-    console.error(
-      "[steward] RLS deployment safety assertion failed — cannot start",
-      redactedThrownDiagnostics(error),
-    );
-    process.exit(1);
-  }
+  await runStartupPhase("rls", () => assertRlsDeploymentSafety(getDb(), { expectedRole }));
 }
 
 // ─── Redis + auth stores (blocking — must complete before serving traffic) ──
 
-let redisOk = false;
-try {
-  redisOk = await initRedis();
-} catch (err) {
-  console.warn(
-    "[steward] Redis initialization failed; trying Postgres auth storage",
-    redactedThrownDiagnostics(err),
-  );
-}
+const redisOk = await runStartupPhase("redis", async () => {
+  try {
+    return await initRedis();
+  } catch (err) {
+    console.warn(
+      "[steward] Redis initialization failed; trying Postgres auth storage",
+      redactedThrownDiagnostics(err),
+    );
+    return false;
+  }
+});
 
 // Postgres is the durable fallback for the long-lived server when Redis is not
 // available. buildBackend probes every namespace; the assertion below turns
 // any production fallback to process-local memory into a startup failure.
-await initAuthStores(migrationsRan && !redisOk);
-assertAuthStoresAreSafe();
+await runStartupPhase("auth-stores", async () => {
+  await initAuthStores(migrationsRan && !redisOk);
+  assertAuthStoresAreSafe();
+});
 
 // ─── Data retention scheduler (SOC2 CC2) ────────────────────────────────────
 
-if (migrationsRan) {
-  cancelAccountWalletLifecycleRecoveryScheduler = startAccountWalletLifecycleRecoveryScheduler();
-  if (process.env.GOOGLE_PROVIDER_CLIENT_ID && process.env.GOOGLE_PROVIDER_CLIENT_SECRET) {
-    cancelGoogleCredentialLifecycleScheduler = startGoogleCredentialLifecycleScheduler();
+await runStartupPhase("schedulers", async () => {
+  if (migrationsRan) {
+    cancelAccountWalletLifecycleRecoveryScheduler = startAccountWalletLifecycleRecoveryScheduler();
+    if (process.env.GOOGLE_PROVIDER_CLIENT_ID && process.env.GOOGLE_PROVIDER_CLIENT_SECRET) {
+      cancelGoogleCredentialLifecycleScheduler = startGoogleCredentialLifecycleScheduler();
+    }
+    if (process.env.X_CLIENT_ID && process.env.X_CLIENT_SECRET) {
+      cancelXCredentialLifecycleScheduler = startXCredentialLifecycleScheduler();
+    }
+    cancelRetention = startRetentionScheduler();
+    if (redisOk) {
+      cancelProviderReservationReconciliation = startProviderReservationReconciliationScheduler();
+    }
+    cancelTransactionReceiptPolling = startTransactionReceiptPollingScheduler();
+    cancelWebhookRetryScheduler = startWebhookRetryScheduler();
+    if (capabilitiesEnabled) {
+      cancelUpstreamCredentialLeaseScheduler = await startUpstreamCredentialLeaseScheduler();
+    }
   }
-  if (process.env.X_CLIENT_ID && process.env.X_CLIENT_SECRET) {
-    cancelXCredentialLifecycleScheduler = startXCredentialLifecycleScheduler();
-  }
-  cancelRetention = startRetentionScheduler();
-  if (redisOk) {
-    cancelProviderReservationReconciliation = startProviderReservationReconciliationScheduler();
-  }
-  cancelTransactionReceiptPolling = startTransactionReceiptPollingScheduler();
-  cancelWebhookRetryScheduler = startWebhookRetryScheduler();
-  if (capabilitiesEnabled) {
-    cancelUpstreamCredentialLeaseScheduler = await startUpstreamCredentialLeaseScheduler();
-  }
-}
+});
 
 // Resolve custody before accepting traffic. A configured backend that cannot
 // initialize throws here, so production never falls back to local AES.
-getConfiguredVault();
-console.log(configuredVaultStartupLogLine());
+await runStartupPhase("custody", () => {
+  getConfiguredVault();
+  console.log(configuredVaultStartupLogLine());
+});
 
 // ─── Server ───────────────────────────────────────────────────────────────────
 

@@ -50,14 +50,19 @@ In the Railway dashboard:
 1. Click **+ New** → **Database** → **PostgreSQL**
 2. Click **+ New** → **Database** → **Redis**
 
-Railway auto-provisions `DATABASE_URL` and `REDIS_URL` as shared variables. Reference them in your service env vars with `${{Postgres.DATABASE_URL}}` and `${{Redis.REDIS_URL}}`.
+Railway auto-provisions provider-admin `DATABASE_URL` and `REDIS_URL` values.
+Use the database URL only in the protected bootstrap job; do not reference that
+admin credential from the API. After bootstrap, configure the API with the
+restricted `steward_app` URL. Redis may remain a normal service reference.
 
 ### Option B: External Neon Postgres + Railway Redis
 
 If using Neon:
 
 1. Create a `steward` database in your Neon project (or use the default `neondb`)
-2. Grab the connection string: `postgresql://user:pass@ep-xxx.us-east-2.aws.neon.tech/steward?sslmode=require`
+2. Grab the operator connection string using authenticated TLS, preferably
+   `sslmode=verify-full`; production rejects unverified `sslmode=require` unless
+   its separate risk acknowledgement is explicitly enabled.
 3. Add Railway Redis as above for rate limiting
 
 ---
@@ -75,10 +80,13 @@ NODE_ENV=production
 STEWARD_BIND_HOST=0.0.0.0
 
 # ─── Database ─────────────────────────────────────────────────────────────────
-# If using Railway Postgres:
-DATABASE_URL=${{Postgres.DATABASE_URL}}
+# Use the restricted application login created by the bootstrap job:
+DATABASE_URL=<restricted steward_app connection URL>
 # If using third-party Neon:
-# DATABASE_URL=postgresql://user:pass@ep-xxx.neon.tech/steward?sslmode=require
+# DATABASE_URL=postgresql://steward_app:pass@ep-xxx.neon.tech/steward?sslmode=verify-full
+STEWARD_APP_DATABASE_ROLE=steward_app
+STEWARD_PLATFORM_DATABASE_URL=<restricted steward_platform connection URL>
+STEWARD_PLATFORM_DATABASE_ROLE=steward_platform
 
 # ─── Security (generate these — do NOT reuse across environments) ─────────────
 # Generate each with: openssl rand -hex 32
@@ -128,8 +136,14 @@ PASSKEY_ORIGIN=https://your-app.com
 # TWITTER_CLIENT_SECRET=
 
 # ─── Migrations ──────────────────────────────────────────────────────────────
-SKIP_MIGRATIONS=false
+# The restricted API login must never own or migrate schema objects.
+SKIP_MIGRATIONS=true
 ```
+
+Keep `STEWARD_MIGRATION_DATABASE_URL` and `STEWARD_OPERATOR_DATABASE_URL`
+outside the API service in a separately protected release job. The operator
+must be a provider-superuser-equivalent capable of managing `BYPASSRLS` roles
+and function ownership; ordinary `CREATEROLE` is insufficient.
 
 Review the [custody-posture guide](security/custody-posture.md) before accepting
 local custody in production.
@@ -198,13 +212,30 @@ Railway picks it up automatically. Watch the build in the dashboard.
 railway up
 ```
 
-### First deploy
+### Database release gate
 
-The first deploy will:
-1. Build the multi-stage Docker image (~2-3 min)
-2. Start the API server on port 3200
-3. Run database migrations automatically (unless `SKIP_MIGRATIONS=true`)
-4. Pass the health check at `/health`
+Before every production rollout, run the complete release migrator with the
+same `STEWARD_PLUGINS` selection as the API:
+
+```bash
+DATABASE_URL="$STEWARD_MIGRATION_DATABASE_URL" bun run --cwd packages/api migrate
+psql "$STEWARD_OPERATOR_DATABASE_URL" \
+  -v steward_app_role=steward_app \
+  -v steward_migration_role=steward_migrator \
+  -v steward_bootstrap_role=steward_bootstrap_owner \
+  -v steward_platform_role=steward_platform \
+  -f scripts/postgres/rls-bootstrap.sql
+psql "$STEWARD_MIGRATION_DATABASE_URL" \
+  -v steward_migration_role=steward_migrator \
+  -f scripts/postgres/rls-activate.sql
+```
+
+The API command applies both core and enabled-plugin journals; the DB-only
+migrator is not a complete release. On a brand-new empty database, run the
+initial complete migration with the provider operator as `DATABASE_URL`, then
+bootstrap/provision the three login credentials and activate. Subsequent
+releases use the dedicated migrator. Only after this gate passes may the API
+start with `SKIP_MIGRATIONS=true` and be checked at `/health` and `/ready`.
 
 Watch logs:
 ```bash
@@ -441,7 +472,7 @@ Common issues:
 
 - Ensure `PORT=3200` is set (Railway uses this to route traffic)
 - Ensure `STEWARD_BIND_HOST=0.0.0.0` (not `127.0.0.1`)
-- The `/ready` endpoint does a deep check (DB + migrations + vault). Use `/health` for the Railway health check (lighter)
+- The `/ready` endpoint does a deep check (DB + exact core and enabled-plugin migration ledgers + vault). Deployment acceptance requires both public `/health` and `/ready` receipts.
 
 ### "Tenant not found" errors
 
@@ -466,7 +497,18 @@ curl -sf "$BASE/platform/tenants" \
 | `PORT` | No | `3200` | API listen port |
 | `STEWARD_BIND_HOST` | No | `127.0.0.1` | Bind host. **Set `0.0.0.0` on Railway** |
 | `NODE_ENV` | No | — | Set `production` |
-| `DATABASE_URL` | **Yes** | — | Postgres connection string |
+| `DATABASE_URL` | **Yes** | — | Restricted, non-owner `steward_app` connection only. |
+| `STEWARD_APP_DATABASE_ROLE` | **Yes in production** | — | Exact role expected on `DATABASE_URL`. |
+| `STEWARD_PLATFORM_DATABASE_URL` | **Yes for destructive platform operations** | — | Separate restricted platform-authority connection. |
+| `STEWARD_PLATFORM_DATABASE_ROLE` | **Yes with platform DB URL** | `steward_platform` | Exact platform login. |
+| `STEWARD_MIGRATION_DATABASE_URL` | **Release job only** | — | Dedicated migrator; never expose to the API. |
+| `STEWARD_MIGRATION_CONNECT_TIMEOUT_SECONDS` | Release job only | `15` | Positive connection deadline in seconds. |
+| `STEWARD_MIGRATION_LOCK_TIMEOUT_MS` | Release job only | `60000` | Positive advisory-lock deadline, no greater than the overall deadline. |
+| `STEWARD_MIGRATION_STATEMENT_TIMEOUT_MS` | Release job only | `300000` | Positive SQL statement deadline, no greater than the overall deadline. |
+| `STEWARD_MIGRATION_OVERALL_TIMEOUT_MS` | Release job only | `600000` | Positive deadline for each complete core or plugin migration attempt. |
+| `STEWARD_STARTUP_PHASE_TIMEOUT_MS` | No | `30000` | Positive default deadline for each pre-listen compose/RLS/Redis/auth-store/scheduler/custody phase. |
+| `STEWARD_STARTUP_<PHASE>_TIMEOUT_MS` | No | phase default | Optional exact override; phases are `COMPOSE`, `RLS`, `REDIS`, `AUTH_STORES`, `SCHEDULERS`, and `CUSTODY`. |
+| `STEWARD_OPERATOR_DATABASE_URL` | **Bootstrap job only** | — | Provider-superuser-equivalent; never expose to the API. |
 | `STEWARD_MASTER_PASSWORD` | **Yes** | — | Vault encryption secret. Keep separate from JWT signing material. |
 | `STEWARD_KDF_SALT` | **Yes in production** | — | Stable deployment KDF salt, at least 16 random bytes. Back it up with the encrypted vault data. |
 | `STEWARD_JWT_SECRET` | **Yes** | — | Canonical server-side signing and verification secret for user, session, and agent JWTs. Must be at least 32 characters in production. |
@@ -496,7 +538,7 @@ curl -sf "$BASE/platform/tenants" \
 | `TWITTER_CLIENT_ID` | No | — | Twitter/X OAuth client ID |
 | `TWITTER_CLIENT_SECRET` | No | — | Twitter/X OAuth client secret |
 | `AGENT_TOKEN_EXPIRY` | No | `24h` | Agent JWT token lifetime |
-| `SKIP_MIGRATIONS` | No | `false` | Skip auto-migrations on startup |
+| `SKIP_MIGRATIONS` | **Yes in production** | `false` | Set `true`; the complete release gate must finish first. |
 | `STEWARD_PROXY_PORT` | No | `8080` | Proxy service listen port |
 | `STEWARD_PROXY_REQUEST_SIGNING_SECRET` / `_SECRETS` | **Yes for production proxy traffic** | — | Dedicated HMAC root used by proxy clients to sign requests and by the proxy to verify them. |
 | `STEWARD_PROXY_URL` | No | — | API-side proxy URL used by `/ready` for the optional proxy clock check. |

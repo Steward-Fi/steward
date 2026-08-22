@@ -1,17 +1,23 @@
 import { expect, spyOn, test } from "bun:test";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import * as databaseModule from "@stwd/db";
 import {
   __resetAuditHmacKeyCacheForTests,
   getDb,
+  getMigrationExpectation,
+  getPluginMigrationLedgerExpectation,
   tenants,
   waitUntilRequestDatabaseTask,
   withIndependentDatabase,
   withTenantTransactionDatabase,
 } from "@stwd/db";
-import { createPGLiteDb } from "@stwd/db/pglite";
+import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import * as redisMiddleware from "../middleware/redis";
 import {
   __setWorkerInitForTests,
+  assertWorkerMigrationReadiness,
   hydrateProcessEnv,
   runWorkerGoogleCredentialLifecycleSweep,
   runWorkerUpstreamCredentialLeaseSweep,
@@ -184,6 +190,50 @@ test("Worker request membrane preserves real Drizzle query execution", async () 
   }
 });
 
+test("Worker boot rejects missing and stale enabled-plugin journals on its request database", async () => {
+  const folder = await mkdtemp(join(tmpdir(), "steward-worker-plugin-ledger-"));
+  const source = { id: "worker-proof", migrationsFolder: folder };
+  try {
+    await mkdir(join(folder, "meta"));
+    await writeFile(
+      join(folder, "meta/_journal.json"),
+      JSON.stringify({ entries: [{ tag: "0000_worker", when: 1_750_000_000_000 }] }),
+    );
+    await writeFile(join(folder, "0000_worker.sql"), "SELECT 1;\n");
+    const core = getMigrationExpectation();
+    const plugin = getPluginMigrationLedgerExpectation(source);
+    let pluginRows: Array<{ hash: string; created_at: number }> = [];
+    let queryIndex = 0;
+    const requestDb = {
+      async execute() {
+        queryIndex += 1;
+        if (queryIndex % 2 === 1) {
+          return [{ database_time_ms: Date.now(), migration_created_at: core.createdAt }];
+        }
+        return pluginRows;
+      },
+    } as unknown as ReturnType<typeof getDb>;
+    const prove = () =>
+      withWorkerRequestDatabase(
+        {
+          DATABASE_URL: "postgresql://worker.invalid/steward",
+          DATABASE_DRIVER: "neon-http",
+          NODE_ENV: "test",
+        },
+        () => assertWorkerMigrationReadiness([{ pluginName: "worker-proof", source }]),
+        { createHttpDb: () => requestDb },
+      );
+
+    await expect(prove()).rejects.toThrow("WORKER_MIGRATION_READINESS_FAILED");
+    pluginRows = [{ hash: "stale", created_at: plugin.entries[0]!.createdAt }];
+    await expect(prove()).rejects.toThrow("WORKER_MIGRATION_READINESS_FAILED");
+    pluginRows = [{ hash: plugin.entries[0]!.hash, created_at: plugin.entries[0]!.createdAt }];
+    await expect(prove()).resolves.toBeUndefined();
+  } finally {
+    await rm(folder, { recursive: true });
+  }
+});
+
 test("Worker database selection rejects missing or unsupported drivers", async () => {
   for (const DATABASE_DRIVER of [undefined, "", "postgres-js", "bogus"]) {
     await expect(
@@ -339,6 +389,8 @@ test("configured webhook work retains its request database until Worker cleanup"
   const previousDatabaseUrl = process.env.DATABASE_URL;
   process.env.STEWARD_MASTER_PASSWORD = "worker-webhook-test-master-password";
   process.env.DATABASE_URL = "postgresql://worker.invalid/steward";
+  const { db: importDb, client: importClient } = await createPGLiteDb("memory://");
+  setPGLiteOverride(importDb, async () => importClient.close());
   let dispatchWebhook: typeof import("../services/webhook-dispatch").dispatchWebhook;
   let encryptedSecret: string;
   let WebhookDispatcher: typeof import("@stwd/webhooks").WebhookDispatcher;
@@ -348,6 +400,7 @@ test("configured webhook work retains its request database until Worker cleanup"
     WebhookDispatcher = webhooks.WebhookDispatcher;
     encryptedSecret = webhooks.encryptWebhookSecret("worker-webhook-signing-secret");
   } catch (error) {
+    await databaseModule.closeDb();
     if (previousMasterPassword === undefined) delete process.env.STEWARD_MASTER_PASSWORD;
     else process.env.STEWARD_MASTER_PASSWORD = previousMasterPassword;
     throw error;
@@ -430,6 +483,7 @@ test("configured webhook work retains its request database until Worker cleanup"
     expect(closes).toBe(1);
   } finally {
     dispatchSpy.mockRestore();
+    await databaseModule.closeDb();
     if (previousMasterPassword === undefined) delete process.env.STEWARD_MASTER_PASSWORD;
     else process.env.STEWARD_MASTER_PASSWORD = previousMasterPassword;
   }
