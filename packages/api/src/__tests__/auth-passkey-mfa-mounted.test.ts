@@ -5,7 +5,8 @@ import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { eq } from "drizzle-orm";
 
 process.env.NODE_ENV = "test";
-process.env.STEWARD_PGLITE_MEMORY = "true";
+const USING_REAL_POSTGRES = Boolean(process.env.DATABASE_URL);
+if (!USING_REAL_POSTGRES) process.env.STEWARD_PGLITE_MEMORY = "true";
 process.env.STEWARD_MASTER_PASSWORD = "passkey-mfa-mounted-master-password";
 process.env.STEWARD_JWT_SECRET = "passkey-mfa-mounted-jwt-secret-with-enough-entropy";
 process.env.STEWARD_AUDIT_HMAC_KEY = "passkey-mfa-mounted-audit-key-with-enough-entropy";
@@ -34,8 +35,10 @@ async function seedChallenge(challengeId: string) {
 }
 
 beforeAll(async () => {
-  const { db, client } = await createPGLiteDb("memory://");
-  setPGLiteOverride(db, async () => client.close());
+  if (!USING_REAL_POSTGRES) {
+    const { db, client } = await createPGLiteDb("memory://");
+    setPGLiteOverride(db, async () => client.close());
+  }
   auth = await import("../routes/auth");
   await getDb().insert(tenants).values({
     id: TENANT_ID,
