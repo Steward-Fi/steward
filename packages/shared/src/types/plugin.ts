@@ -142,9 +142,9 @@ export interface PluginMigrationSource {
  * (mirrors `packages/adapters` categories) so a plugin can supply a real
  * provider integration (a concrete swap/earn/onramp/.../exchange adapter).
  *
- * The host registers each contribution into the core's {@link AdapterRegistry}
- * via its `register(category, provider, adapter)`
- * seam, in `dependsOn` order, FAIL-CLOSED on a `(category, provider)` collision
+ * WIRED in Phase 2d. The host registers each contribution into the core's
+ * {@link AdapterRegistry} via its instance or request-factory registration seam,
+ * in `dependsOn` order, FAIL-CLOSED on a `(category, provider)` collision
  * with another plugin's contribution (the host never silently overwrites a real
  * money-route adapter — see the host's conflict detection). The registry's own
  * fail-closed-in-production RESOLUTION is untouched: a contributed adapter is
@@ -156,8 +156,8 @@ export interface PluginMigrationSource {
  * (`@stwd/adapters` depends on `@stwd/shared`, so importing the concrete
  * per-category adapter types here would create a dependency CYCLE). The category
  * is therefore a plain `string` (assignable to the registry's `AdapterCategory`,
- * validated by the host) and the concrete adapter instance is typed `unknown` —
- * the host casts it to the registry's per-category type at the api boundary,
+ * validated by the host) and the adapter instance/factory result is typed
+ * `unknown` — the host casts it to the registry's per-category type at the api boundary,
  * where `@stwd/adapters` is a legitimate dependency.
  */
 export interface AdapterContribution {
@@ -171,13 +171,17 @@ export interface AdapterContribution {
   /** the provider name this contribution registers under (must be non-empty). */
   readonly provider: string;
   /**
-   * the concrete adapter instance to register under `(category, provider)`.
-   * typed `unknown` at the shared layer to avoid a shared->adapters cycle (the
-   * concrete per-category adapter types live in `@stwd/adapters`); the host
-   * casts it to the registry's expected per-category type when it calls
-   * `adapterRegistry.register(...)`.
+   * A concrete, configuration-free adapter instance. Binding-dependent
+   * providers must use `createAdapter` instead so Worker binding generations
+   * cannot share endpoint or credential authority.
    */
-  readonly adapter: unknown;
+  readonly adapter?: unknown;
+  /**
+   * Request-authority factory. It is invoked only when this provider is selected
+   * under the current request environment; its result is never module-cached by
+   * the registry.
+   */
+  readonly createAdapter?: () => unknown;
 }
 
 export interface StewardPlugin<App = unknown, Ctx = unknown, EvalCtx = unknown> {

@@ -57,8 +57,8 @@ afterAll(async () => {
 
 afterEach(() => {
   // Custom handoff adapters are process-global in this route-level test. Force
-  // the next test back through the built-in mock and invalidate the registry's
-  // cached bridge resolution so later boundary tests remain hermetic.
+  // the next test back through the built-in mock so later boundary tests remain
+  // hermetic; provider implementations stay durably registered.
   process.env.STEWARD_BRIDGE_ADAPTER = "mock";
   adapterRegistry.register("bridge", "policy-test-reset", new MockBridgeAdapter());
 });
