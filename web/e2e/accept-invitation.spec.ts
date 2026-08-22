@@ -1,3 +1,4 @@
+import { createHmac } from "node:crypto";
 import { expect, type Page, type Route, test } from "@playwright/test";
 
 function base64UrlJson(value: unknown): string {
@@ -6,8 +7,8 @@ function base64UrlJson(value: unknown): string {
 
 function sessionToken(tenantId: string, userId: string): string {
   const now = Math.floor(Date.now() / 1000);
-  return [
-    base64UrlJson({ alg: "none", typ: "JWT" }),
+  const unsigned = [
+    base64UrlJson({ alg: "HS256", typ: "JWT" }),
     base64UrlJson({
       email: `${userId}@example.test`,
       exp: now + 3600,
@@ -17,14 +18,35 @@ function sessionToken(tenantId: string, userId: string): string {
       tenantRole: "owner",
       userId,
     }),
-    "test-signature",
   ].join(".");
+  const signature = createHmac("sha256", "steward-invitation-browser-test-signing-key-2026")
+    .update(unsigned)
+    .digest("base64url");
+  return `${unsigned}.${signature}`;
+}
+
+function expectSignedSessionToken(token: string): void {
+  const [header, payload, signature, ...extra] = token.split(".");
+  const expected = createHmac("sha256", "steward-invitation-browser-test-signing-key-2026")
+    .update(`${header}.${payload}`)
+    .digest("base64url");
+  expect(extra).toHaveLength(0);
+  expect(signature).toBe(expected);
+  expect(JSON.parse(Buffer.from(header ?? "", "base64url").toString("utf8"))).toMatchObject({
+    alg: "HS256",
+    typ: "JWT",
+  });
+}
+
+function signedAuthorization(route: Route): string {
+  return route.request().headers().authorization ?? "";
 }
 
 const CLAIM_A = "a".repeat(64);
 const CLAIM_B = "b".repeat(64);
 
 async function seedSession(page: Page, token: string): Promise<void> {
+  expectSignedSessionToken(token);
   await page.addInitScript((value) => {
     if (!window.sessionStorage.getItem("steward_session_token")) {
       window.sessionStorage.setItem("steward_session_token", value);
@@ -50,7 +72,7 @@ test("only explicit acceptance posts once with current encoded inputs and creden
   await page.route("**/user/me/tenants/**/invitations/accept", async (route) => {
     requests.push({
       url: route.request().url(),
-      authorization: route.request().headers().authorization,
+      authorization: signedAuthorization(route),
       body: route.request().postDataJSON(),
     });
     pendingRequest.current = route;
@@ -120,15 +142,18 @@ test("decline, navigation, missing parameters, and load never accept", async ({ 
   expect(requests).toBe(0);
 });
 
-test("route navigation wins over a delayed prior acceptance", async ({ page }) => {
-  const authToken = sessionToken("session-tenant", "invited-user");
-  await seedSession(page, authToken);
+test("session rotation and route navigation win over a delayed prior acceptance", async ({
+  page,
+}) => {
+  const firstAuthToken = sessionToken("tenant-a", "user-a");
+  const secondAuthToken = sessionToken("tenant-b", "user-b");
+  await seedSession(page, firstAuthToken);
   const delayedFirst: { current: Route | null } = { current: null };
   const observed: Array<{ tenant: string; authorization: string | undefined }> = [];
   await page.route("**/user/me/tenants/**/invitations/accept", async (route) => {
     const pathname = new URL(route.request().url()).pathname;
     const tenant = pathname.includes("tenant-a") ? "tenant-a" : "tenant-b";
-    observed.push({ tenant, authorization: route.request().headers().authorization });
+    observed.push({ tenant, authorization: signedAuthorization(route) });
     if (tenant === "tenant-a") {
       delayedFirst.current = route;
       return;
@@ -143,9 +168,13 @@ test("route navigation wins over a delayed prior acceptance", async ({ page }) =
   await page.getByRole("button", { name: "Accept invitation" }).click();
   await expect.poll(() => observed.length).toBe(1);
 
-  await page.evaluate((token) => {
-    window.history.pushState({}, "", `/accept-invitation?tenantId=tenant-b&token=${token}`);
-  }, CLAIM_B);
+  await page.evaluate(
+    ({ claim, session }) => {
+      window.sessionStorage.setItem("steward_session_token", session);
+      window.history.pushState({}, "", `/accept-invitation?tenantId=tenant-b&token=${claim}`);
+    },
+    { claim: CLAIM_B, session: secondAuthToken },
+  );
   await expect(page.getByText(/invited to join tenant-b/)).toBeVisible();
   await delayedFirst.current?.fulfill({
     json: {
@@ -161,8 +190,8 @@ test("route navigation wins over a delayed prior acceptance", async ({ page }) =
   await page.getByRole("button", { name: "Accept invitation" }).click();
   await expect(page.getByText("You've joined tenant-b as member.")).toBeVisible();
   expect(observed).toEqual([
-    { tenant: "tenant-a", authorization: `Bearer ${authToken}` },
-    { tenant: "tenant-b", authorization: `Bearer ${authToken}` },
+    { tenant: "tenant-a", authorization: `Bearer ${firstAuthToken}` },
+    { tenant: "tenant-b", authorization: `Bearer ${secondAuthToken}` },
   ]);
 });
 
@@ -172,7 +201,7 @@ test("the retained document uses the rotated concrete session credential", async
   await seedSession(page, firstToken);
   const observed: Array<string | undefined> = [];
   await page.route("**/user/me/tenants/**/invitations/accept", async (route) => {
-    observed.push(route.request().headers().authorization);
+    observed.push(signedAuthorization(route));
     const pathname = new URL(route.request().url()).pathname;
     const tenant = pathname.includes("tenant-a") ? "tenant-a" : "tenant-b";
     await route.fulfill({
