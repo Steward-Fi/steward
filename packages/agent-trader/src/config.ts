@@ -118,7 +118,7 @@ export function loadConfig(): TraderConfig {
 
   // Merge: file takes precedence, env vars override the connection block
   const steward: StewardConnection = {
-    apiUrl: process.env.STEWARD_API_URL ?? file.steward?.apiUrl ?? "http://localhost:3000",
+    apiUrl: process.env.STEWARD_API_URL ?? file.steward?.apiUrl ?? "http://localhost:3200",
     tenantId: process.env.STEWARD_TENANT_ID ?? file.steward?.tenantId ?? "default",
     apiKey: process.env.STEWARD_API_KEY ?? file.steward?.apiKey ?? "",
   };
@@ -149,6 +149,12 @@ function validate(config: TraderConfig): void {
   }
   if (!config.steward.tenantId) {
     throw new Error("Config error: steward.tenantId is required");
+  }
+  if (
+    config.agents.some((agent) => agent.enabled) &&
+    (typeof config.steward.apiKey !== "string" || config.steward.apiKey.trim().length === 0)
+  ) {
+    throw new Error("Config error: steward.apiKey is required when any agent is enabled");
   }
   if (!config.webhookSecret && !allowUnsignedWebhooks()) {
     throw new Error(
