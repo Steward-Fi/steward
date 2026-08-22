@@ -107,13 +107,13 @@ describe("webhook retry hardening", () => {
     expect(webhookDispatchSource).toContain("isEncryptedWebhookSecret(config.secret)");
     expect(webhookDispatchSource).toContain("encryptWebhookSecret(signingSecret)");
     expect(webhookDispatchSource).toContain("const signedAt = Math.floor(Date.now() / 1000)");
-    const insertIndex = webhookDispatchSource.indexOf(".insert(webhookDeliveries)");
+    const insertIndex = webhookDispatchSource.indexOf(
+      "const deliveryInsert = db.insert(webhookDeliveries)",
+    );
+    expect(insertIndex).toBeGreaterThanOrEqual(0);
     const insertSnapshot = webhookDispatchSource.slice(
       insertIndex,
-      // Anchor on the per-delivery dispatcher construction that follows the
-      // insert, not the legacy tenant-config dispatcher (new WebhookDispatcher())
-      // that appears earlier in the file.
-      webhookDispatchSource.indexOf("const dispatcher = new WebhookDispatcher", insertIndex),
+      webhookDispatchSource.indexOf("const [delivery]", insertIndex),
     );
     expect(insertSnapshot).toContain("secret: encryptedSecret");
     expect(insertSnapshot).toContain("payload: eventWithDelivery");
