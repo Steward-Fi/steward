@@ -758,6 +758,10 @@ async function assertBundledPluginLedgerIntegrity(db: MigrationQueryExecutor): P
             },
           ],
         },
+        {
+          tag: "0005_activated_rls_inheritance",
+          effects: [],
+        },
       ],
     },
     {

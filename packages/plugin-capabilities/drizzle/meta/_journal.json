@@ -36,6 +36,13 @@
       "when": 1787250000000,
       "tag": "0004_capability_rate_limit_buckets",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1787250000001,
+      "tag": "0005_activated_rls_inheritance",
+      "breakpoints": true
     }
   ]
 }
