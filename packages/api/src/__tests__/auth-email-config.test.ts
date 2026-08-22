@@ -123,7 +123,7 @@ describe("getEmailAuthForTenant", () => {
     invalidateEmailAuthForTenant(TEST_TENANT_ID);
   });
 
-  it("uses tenant magicLinkBaseUrl + custom callbackPath when both set", async () => {
+  it("uses tenant branding with its hosted magic-link callback", async () => {
     clearEmailAuthTenantCacheForTests();
 
     const encrypted = new KeyStore(MASTER_PASSWORD).encrypt("tenant-resend-key");
@@ -134,9 +134,10 @@ describe("getEmailAuthForTenant", () => {
       emailConfig: {
         provider: "resend",
         apiKeyEncrypted: JSON.stringify(encrypted),
-        from: "App <noreply@app.example>",
-        magicLinkBaseUrl: "https://app.example.com/",
-        magicLinkCallbackPath: "/login/email-callback",
+        from: "Customer <noreply@customer.example>",
+        brandName: "Customer Cloud",
+        magicLinkBaseUrl: "https://cloud.customer.example/",
+        magicLinkCallbackPath: "/auth/callback/email",
       },
     });
     invalidateEmailAuthForTenant(TEST_TENANT_ID);
@@ -144,8 +145,21 @@ describe("getEmailAuthForTenant", () => {
     const auth = await getEmailAuthForTenant(TEST_TENANT_ID);
 
     // Trailing slash gets stripped from baseUrl
-    expect((auth as any).baseUrl).toBe("https://app.example.com");
-    expect((auth as any).callbackPath).toBe("/login/email-callback");
+    expect((auth as any).baseUrl).toBe("https://cloud.customer.example");
+    expect((auth as any).callbackPath).toBe("/auth/callback/email");
+    expect((auth as any).brandName).toBe("Customer Cloud");
+
+    const rendered = (auth as any).templateRenderer(undefined, {
+      magicLink: `${(auth as any).baseUrl}${(auth as any).callbackPath}?token=fixture`,
+      email: "user@customer.example",
+      tenantName: (auth as any).brandName,
+      expiresInMinutes: 10,
+    });
+    expect(rendered.subject).toBe("Sign in to Customer Cloud");
+    expect(rendered.text).toContain(
+      "https://cloud.customer.example/auth/callback/email?token=fixture",
+    );
+    expect(rendered.html).not.toContain("steward.fi");
 
     await dbHandle.delete(tenantConfigs).where(eq(tenantConfigs.tenantId, TEST_TENANT_ID));
     invalidateEmailAuthForTenant(TEST_TENANT_ID);
