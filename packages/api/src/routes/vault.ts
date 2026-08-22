@@ -4108,6 +4108,7 @@ vaultRoutes.post("/:agentId/actions/transfer", async (c) => {
     let completedResult: string | null = null;
     let completedStatus: "broadcast" | "signed" | null = null;
     let sponsoredTransferStaged = false;
+    let transferActionStaged = false;
     try {
       await writeVaultAudit(c, {
         tenantId,
@@ -4140,6 +4141,7 @@ vaultRoutes.post("/:agentId/actions/transfer", async (c) => {
           policyResults: evaluation.results,
         });
         sponsoredTransferStaged = true;
+        transferActionStaged = true;
       }
       const reservationError = await recordSponsoredActionIfNeeded({
         sponsorship: sponsorshipPayload,
@@ -4155,6 +4157,7 @@ vaultRoutes.post("/:agentId/actions/transfer", async (c) => {
         if (sponsoredTransferStaged) {
           await db.delete(transactions).where(eq(transactions.id, actionId));
           sponsoredTransferStaged = false;
+          transferActionStaged = false;
         }
         return c.json<ApiResponse>({ ok: false, error: reservationError }, 403);
       }
@@ -4176,6 +4179,7 @@ vaultRoutes.post("/:agentId/actions/transfer", async (c) => {
           actionPayload: storedTransferActionPayload,
           policyResults: evaluation.results,
         });
+        transferActionStaged = true;
       }
       let result: string;
       let solanaArtifactEvidence:
@@ -4489,7 +4493,7 @@ vaultRoutes.post("/:agentId/actions/transfer", async (c) => {
         if (!(await markSolanaRecoveryAnchorFailed(actionId, agentId, solanaExecutionToken))) {
           return solanaLostOwnershipResponse(c, actionId, agentId, "transfer");
         }
-      } else if (sponsoredTransferStaged) {
+      } else if (transferActionStaged) {
         await db
           .update(transactions)
           .set({ status: "failed", policyResults: evaluation.results })

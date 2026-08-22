@@ -341,22 +341,59 @@ export const db: DbHandle = new Proxy({} as DbHandle, {
 function activeVault(): Vault {
   return getConfiguredVault();
 }
+// Test method replacements must follow the active database boundary rather
+// than a custody instance. Custody instances are deliberately request-local,
+// so forwarding an assignment to one freshly-created Vault would make the
+// next request see another instance (and unexpectedly reach a live provider).
+// A WeakMap keeps these explicit test replacements isolated between PGLite/
+// Postgres harnesses without caching any authority or Vault in production.
+const vaultMethodOverrides = new WeakMap<object, Map<PropertyKey, unknown>>();
+const vaultInstanceOverrides = new WeakMap<object, Vault>();
+
+/**
+ * Bind a complete Vault replacement to the active test database for one
+ * callback. This is intentionally explicit and scoped: production request
+ * resolution never populates this map, and the replacement is always removed
+ * even when the callback fails.
+ */
+export async function _withVaultOverrideForTests<T>(
+  replacement: Vault,
+  callback: () => T | Promise<T>,
+): Promise<T> {
+  const database = getDb() as object;
+  vaultInstanceOverrides.set(database, replacement);
+  try {
+    return await callback();
+  } finally {
+    vaultInstanceOverrides.delete(database);
+  }
+}
+
 export const vault: Vault = new Proxy({} as Vault, {
   get(_target, property) {
-    const active = activeVault() as unknown as Record<PropertyKey, unknown>;
+    const overrides = vaultMethodOverrides.get(getDb() as object);
+    if (overrides?.has(property)) return overrides.get(property);
+    const active = (vaultInstanceOverrides.get(getDb() as object) ?? activeVault()) as unknown as Record<
+      PropertyKey,
+      unknown
+    >;
     const value = active[property];
     return typeof value === "function"
       ? (value as (...args: unknown[]) => unknown).bind(active)
       : value;
   },
-  // Forward assignments to the live instance. Production never mutates the
-  // vault; this exists so tests that monkeypatch a method (e.g.
-  // `context.vault.getBalance = mock`) and restore it in a `finally` land on
-  // the same per-password instance the get trap resolves — without a set trap
-  // the assignment would silently write to the empty Proxy target and the get
-  // trap would keep returning the real method.
+  // Production never mutates the vault. Tests monkeypatch methods through this
+  // trap; keying replacements to their database handle makes the override
+  // request-safe and prevents one suite from lending provider authority to
+  // another suite.
   set(_target, property, value) {
-    (activeVault() as unknown as Record<PropertyKey, unknown>)[property] = value;
+    const database = getDb() as object;
+    let overrides = vaultMethodOverrides.get(database);
+    if (!overrides) {
+      overrides = new Map();
+      vaultMethodOverrides.set(database, overrides);
+    }
+    overrides.set(property, value);
     return true;
   },
 });

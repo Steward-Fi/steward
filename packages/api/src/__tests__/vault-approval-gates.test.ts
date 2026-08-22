@@ -550,7 +550,17 @@ describe("vault approval gates (real /approve path)", () => {
           blockhashKind: "recent",
         });
         submitted += 1;
-        return { signature: SOLANA_SIGNATURE, broadcast: true, chainId: 101 };
+        return {
+          signature: SOLANA_SIGNATURE,
+          broadcast: true,
+          chainId: 101,
+          artifactSignature: SOLANA_SIGNATURE,
+          signer: "9J9kqM5kV8Fh1Q3b6N2pR4tYwLcXzAaBbCcDdEeFfGg",
+          recentBlockhash: "11111111111111111111111111111111",
+          blockhashKind: "recent",
+          lastValidBlockHeight: 123_456,
+          rawIntentDigest: "a".repeat(64),
+        };
       },
     );
     try {
@@ -733,8 +743,11 @@ describe("vault approval gates (real /approve path)", () => {
       throw new Error("hsm offline");
     };
     try {
+      const { _withVaultOverrideForTests } = await import("../services/context");
       const app = await makeApp({ authType: "session-jwt", role: "owner", mfa: true });
-      const res = await approve(app, AGENT_AUDIT, "tx-audit-order");
+      const res = await _withVaultOverrideForTests(routeVault, () =>
+        approve(app, AGENT_AUDIT, "tx-audit-order"),
+      );
       // The irreversible call failed → request errors out (no signature surfaced).
       expect(res.status).toBe(500);
       const body = (await res.json()) as { ok: boolean; signedTx?: string; txHash?: string };
