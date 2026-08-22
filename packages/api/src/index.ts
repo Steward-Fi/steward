@@ -61,8 +61,10 @@ validateJwtSecretEnv();
 // composeApp() is async because plugin registration may be async + the trading
 // plugin is dynamically imported so the lean core graph never statically pulls
 // in the trading stack. top-level await is supported by the Bun entry.
-const app = await runStartupPhase("compose", () => composeApp());
-const pluginMigrationSources = await getComposedPluginMigrationSources();
+const { app, pluginMigrationSources } = await runStartupPhase("compose", async () => ({
+  app: await composeApp(),
+  pluginMigrationSources: await getComposedPluginMigrationSources(),
+}));
 const capabilitiesEnabled = resolveEnabledPlugins().has("capabilities");
 
 // ─── Shutdown guard ──────────────────────────────────────────────────────────

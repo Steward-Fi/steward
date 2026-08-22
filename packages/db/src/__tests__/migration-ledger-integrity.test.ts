@@ -43,7 +43,7 @@ describe("core migration ledger integrity", () => {
     const source = readFileSync(new URL("../migrate.ts", import.meta.url), "utf8");
     const inspect = source.indexOf("to_regclass('drizzle.__drizzle_migrations')");
     const validate = source.indexOf(
-      "assertCoreMigrationLedgerIntegrity(existingRows, journal, databaseShape)",
+      "assertCoreMigrationLedgerIntegrity(existingRows, journal, databaseShape, {",
     );
     const mutate = source.indexOf("await tx.execute(sql`CREATE SCHEMA drizzle`)");
     expect(inspect).toBeGreaterThan(0);
@@ -119,6 +119,27 @@ describe("core migration ledger integrity", () => {
     expect(() => assertCoreMigrationLedgerIntegrity(missing, journal, migratedDatabase)).toThrow(
       /missing 0111_tenant_rls_policy_install below its recorded cutoff/,
     );
+  });
+
+  test("admits only the shipped 0114/0118 timestamp collision to the repair transaction", () => {
+    const successor = journal.entries.findIndex(
+      (entry) => entry.tag === "0118_generic_intent_execution_delete_fence",
+    );
+    const predecessor = journal.entries.findIndex(
+      (entry) => entry.tag === "0114_durable_wallet_claim_account_audit",
+    );
+    expect(successor).toBeGreaterThan(predecessor);
+    expect(journal.entries[successor]?.when).toBe(journal.entries[predecessor]?.when);
+    const predecessorOnly = rows(journal.entries.slice(0, successor));
+
+    expect(() =>
+      assertCoreMigrationLedgerIntegrity(predecessorOnly, journal, migratedDatabase),
+    ).toThrow(/missing 0118_generic_intent_execution_delete_fence below its recorded cutoff/);
+    expect(() =>
+      assertCoreMigrationLedgerIntegrity(predecessorOnly, journal, migratedDatabase, {
+        allowShippedTimestampCollision: true,
+      }),
+    ).not.toThrow();
   });
 
   test("rejects wrong, shared, and ambiguous legacy database shapes", () => {
