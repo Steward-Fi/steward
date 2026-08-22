@@ -503,12 +503,15 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
+      - name: Install Chromium
+        run: bunx playwright install --with-deps chromium
+
       - name: Build workspace dependencies
         run: bunx turbo run build --filter=@stwd/react --filter=@stwd/sdk --filter=@stwd/shared
 
       - name: Test web/src
         working-directory: web
-        run: bun test src e2e/wallets/wallet-e2e-contract.test.ts
+        run: bun test --isolate src e2e/wallets/wallet-e2e-contract.test.ts
 
   unit-redis:
     name: Unit Tests (packages/redis)

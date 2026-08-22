@@ -243,11 +243,10 @@ async function mockAccessibilityApis(
       if (options.caseErrorStatus) {
         return route.fulfill({
           status: options.caseErrorStatus,
-          json:
-            options.caseErrorBody ?? {
-              ok: false,
-              error: { code: `PRIVATE_${options.caseErrorStatus}` },
-            },
+          json: options.caseErrorBody ?? {
+            ok: false,
+            error: { code: `PRIVATE_${options.caseErrorStatus}` },
+          },
         });
       }
       return route.fulfill({ json: options.manifest ?? caseManifest() });
