@@ -1,12 +1,15 @@
 import { describe, expect, it } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { withRuntimeEnvironment } from "@stwd/shared/runtime-env";
 import { Hono } from "hono";
 import {
   getTenantIdempotencyMetrics,
   idempotencyMiddleware,
   MemoryIdempotencyStore,
+  RedisIdempotencyStore,
   resetIdempotencyMetricsForTests,
+  resolveIdempotencyRuntimeAuthority,
 } from "../middleware/idempotency";
 import type { AppVariables } from "../services/context";
 
@@ -57,6 +60,93 @@ function makeApp() {
 }
 
 describe("idempotencyMiddleware", () => {
+  it("isolates idempotency authority across missing, sequential, and overlapping bindings", async () => {
+    const missing = withRuntimeEnvironment({}, resolveIdempotencyRuntimeAuthority);
+    expect(missing).toMatchObject({
+      ttlMs: 86_400_000,
+      metricsTtlSeconds: 604_800,
+      maxEntries: 10_000,
+      allowMemoryFallback: true,
+    });
+
+    const authorityA = {
+      NODE_ENV: "development",
+      STEWARD_IDEMPOTENCY_TTL_MS: "11000",
+      STEWARD_IDEMPOTENCY_METRICS_TTL_MS: "22000",
+      STEWARD_IDEMPOTENCY_MAX_ENTRIES: "33",
+    };
+    const authorityB = {
+      NODE_ENV: "production",
+      STEWARD_IDEMPOTENCY_TTL_MS: "44000",
+      STEWARD_IDEMPOTENCY_METRICS_TTL_MS: "55000",
+      STEWARD_IDEMPOTENCY_MAX_ENTRIES: "66",
+    };
+    let releaseA!: () => void;
+    const holdA = new Promise<void>((resolve) => {
+      releaseA = resolve;
+    });
+    let startedA!: () => void;
+    const didStartA = new Promise<void>((resolve) => {
+      startedA = resolve;
+    });
+    const pendingA = withRuntimeEnvironment(authorityA, async () => {
+      startedA();
+      await holdA;
+      return resolveIdempotencyRuntimeAuthority();
+    });
+    await didStartA;
+    const observedB = await withRuntimeEnvironment(authorityB, async () => {
+      await Promise.resolve();
+      return resolveIdempotencyRuntimeAuthority();
+    });
+    releaseA();
+    const observedA = await pendingA;
+
+    expect(observedA).toEqual({
+      ttlMs: 11_000,
+      metricsTtlSeconds: 22,
+      maxEntries: 33,
+      allowMemoryFallback: true,
+    });
+    expect(observedB).toEqual({
+      ttlMs: 44_000,
+      metricsTtlSeconds: 55,
+      maxEntries: 66,
+      allowMemoryFallback: false,
+    });
+  });
+
+  it("isolates real fallback capacity generations and fails closed without production Redis", async () => {
+    const store = new RedisIdempotencyStore();
+    const entry = (suffix: number) => ({
+      fingerprint: `fingerprint-${suffix}`,
+      createdAt: Date.now(),
+      expiresAt: Date.now() + 60_000,
+    });
+
+    await withRuntimeEnvironment(
+      { NODE_ENV: "development", STEWARD_IDEMPOTENCY_MAX_ENTRIES: "1" },
+      async () => {
+        await store.reserve?.("a-1", entry(1));
+        await store.reserve?.("a-2", entry(2));
+        expect(await store.get("a-1")).toBeUndefined();
+        expect((await store.get("a-2"))?.fingerprint).toBe("fingerprint-2");
+      },
+    );
+    await withRuntimeEnvironment(
+      { NODE_ENV: "development", STEWARD_IDEMPOTENCY_MAX_ENTRIES: "2" },
+      async () => {
+        await store.reserve?.("b-1", entry(3));
+        await store.reserve?.("b-2", entry(4));
+        expect((await store.get("b-1"))?.fingerprint).toBe("fingerprint-3");
+        expect((await store.get("b-2"))?.fingerprint).toBe("fingerprint-4");
+      },
+    );
+    await expect(
+      withRuntimeEnvironment({ NODE_ENV: "production" }, () => store.get("a-2")),
+    ).rejects.toThrow("Durable idempotency store unavailable");
+  });
+
   it("records tenant-scoped privacy-preserving counters", async () => {
     resetIdempotencyMetricsForTests();
     const { app } = makeApp();
