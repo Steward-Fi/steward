@@ -1,7 +1,15 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
-import { agents, closeDb, conditionSets, getDb, tenants } from "@stwd/db";
+import {
+  agents,
+  auditEvents,
+  closeDb,
+  conditionSetItems,
+  conditionSets,
+  getDb,
+  tenants,
+} from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
-import { and, eq, sql } from "drizzle-orm";
+import { and, count, eq, sql } from "drizzle-orm";
 import { Hono } from "hono";
 import type { AppVariables } from "../services/context";
 
@@ -283,6 +291,156 @@ describeConditionSets("condition sets", () => {
         sql.raw("DROP FUNCTION IF EXISTS fail_condition_set_completion_audit()"),
       );
     }
+  });
+
+  it("rolls back every set and item mutation when its required completion audit fails", async () => {
+    const [set] = await getDb()
+      .insert(conditionSets)
+      .values({
+        tenantId: TENANT_ID,
+        name: "atomic mutation set",
+        description: "original description",
+        ownerId: "atomic-owner",
+      })
+      .returning();
+    const [item] = await getDb()
+      .insert(conditionSetItems)
+      .values({
+        tenantId: TENANT_ID,
+        conditionSetId: set.id,
+        value: "original-value",
+        label: "original-label",
+      })
+      .returning();
+
+    async function withFailingCompletionAudit(action: string, request: () => Promise<Response>) {
+      const [{ total: beforeTotal }] = await getDb()
+        .select({ total: count() })
+        .from(auditEvents)
+        .where(and(eq(auditEvents.tenantId, TENANT_ID), eq(auditEvents.action, action)));
+      await getDb().execute(
+        sql.raw(`
+          CREATE OR REPLACE FUNCTION fail_condition_set_mutation_audit()
+          RETURNS trigger AS $$
+          BEGIN
+            IF NEW.tenant_id = '${TENANT_ID}' AND NEW.action = '${action}' THEN
+              RAISE EXCEPTION 'forced condition set mutation audit failure';
+            END IF;
+            RETURN NEW;
+          END;
+          $$ LANGUAGE plpgsql
+        `),
+      );
+      await getDb().execute(
+        sql.raw(`
+          CREATE TRIGGER condition_set_mutation_audit_failure
+          BEFORE INSERT ON audit_events
+          FOR EACH ROW EXECUTE FUNCTION fail_condition_set_mutation_audit()
+        `),
+      );
+      try {
+        const response = await request();
+        expect(response.status).toBe(500);
+        await expect(response.json()).resolves.toEqual({
+          ok: false,
+          error: "Internal server error",
+        });
+        const [{ total: afterTotal }] = await getDb()
+          .select({ total: count() })
+          .from(auditEvents)
+          .where(and(eq(auditEvents.tenantId, TENANT_ID), eq(auditEvents.action, action)));
+        expect(Number(afterTotal)).toBe(Number(beforeTotal));
+      } finally {
+        await getDb().execute(
+          sql.raw("DROP TRIGGER IF EXISTS condition_set_mutation_audit_failure ON audit_events"),
+        );
+        await getDb().execute(
+          sql.raw("DROP FUNCTION IF EXISTS fail_condition_set_mutation_audit()"),
+        );
+      }
+    }
+
+    await withFailingCompletionAudit("condition_set.update", () =>
+      app.request(`/condition-sets/${set.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ description: "must roll back" }),
+      }),
+    );
+    expect(
+      await getDb()
+        .select({ description: conditionSets.description })
+        .from(conditionSets)
+        .where(eq(conditionSets.id, set.id)),
+    ).toEqual([{ description: "original description" }]);
+
+    await withFailingCompletionAudit("condition_set.item.upsert", () =>
+      app.request(`/condition-sets/${set.id}/items`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ value: "must-not-commit" }),
+      }),
+    );
+    expect(
+      await getDb()
+        .select({ value: conditionSetItems.value })
+        .from(conditionSetItems)
+        .where(eq(conditionSetItems.conditionSetId, set.id)),
+    ).toEqual([{ value: "original-value" }]);
+
+    await withFailingCompletionAudit("condition_set.items.replace", () =>
+      app.request(`/condition-sets/${set.id}/items`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ items: [{ value: "replacement" }] }),
+      }),
+    );
+    expect(
+      await getDb()
+        .select({ value: conditionSetItems.value })
+        .from(conditionSetItems)
+        .where(eq(conditionSetItems.conditionSetId, set.id)),
+    ).toEqual([{ value: "original-value" }]);
+
+    await withFailingCompletionAudit("condition_set.item.update", () =>
+      app.request(`/condition-sets/${set.id}/items/${item.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ label: "must roll back" }),
+      }),
+    );
+    expect(
+      await getDb()
+        .select({ label: conditionSetItems.label })
+        .from(conditionSetItems)
+        .where(eq(conditionSetItems.id, item.id)),
+    ).toEqual([{ label: "original-label" }]);
+
+    await withFailingCompletionAudit("condition_set.item.delete", () =>
+      app.request(`/condition-sets/${set.id}/items/${item.id}`, { method: "DELETE" }),
+    );
+    expect(
+      await getDb()
+        .select({ id: conditionSetItems.id })
+        .from(conditionSetItems)
+        .where(eq(conditionSetItems.id, item.id)),
+    ).toEqual([{ id: item.id }]);
+
+    await withFailingCompletionAudit("condition_set.delete", () =>
+      app.request(`/condition-sets/${set.id}`, { method: "DELETE" }),
+    );
+    expect(
+      await getDb()
+        .select({ id: conditionSets.id })
+        .from(conditionSets)
+        .where(eq(conditionSets.id, set.id)),
+    ).toEqual([{ id: set.id }]);
+    expect(
+      await getDb()
+        .select({ id: conditionSetItems.id })
+        .from(conditionSetItems)
+        .where(eq(conditionSetItems.id, item.id)),
+    ).toEqual([{ id: item.id }]);
   });
 
   it("rejects policy templates that reference missing condition sets", async () => {

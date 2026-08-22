@@ -1,64 +1,150 @@
-// @ts-nocheck
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { unstable_doesMiddlewareMatch } from "next/experimental/testing/server";
+import { NextRequest } from "next/server";
+import { config, middleware } from "../middleware";
 
-const middlewareSource = readFileSync(join(import.meta.dir, "..", "middleware.ts"), "utf8");
-const nextConfigSource = readFileSync(join(import.meta.dir, "..", "..", "next.config.ts"), "utf8");
-const providersSource = readFileSync(
-  join(import.meta.dir, "..", "components", "providers.tsx"),
-  "utf8",
-);
+const EXPECTED_SECURITY_HEADERS = {
+  "Cross-Origin-Opener-Policy": "same-origin-allow-popups",
+  "Cross-Origin-Resource-Policy": "same-origin",
+  "Permissions-Policy": "camera=(), microphone=(), geolocation=(), browsing-topics=(), payment=()",
+  "Referrer-Policy": "strict-origin-when-cross-origin",
+  "Strict-Transport-Security": "max-age=63072000; includeSubDomains; preload",
+  "X-Content-Type-Options": "nosniff",
+  "X-Frame-Options": "DENY",
+} as const;
 
-/**
- * SEC-155/SEC-156: middleware matcher anchoring + cross-origin isolation
- * headers. Source-level assertions mirror the repo's existing web test style
- * (see components/providers.test.ts).
- */
-describe("middleware matcher anchoring (SEC-155)", () => {
-  const matcherMatch = middlewareSource.match(/source:\s*\n?\s*"([^"]+)"/);
-  const pattern = matcherMatch?.[1] ?? "";
+function matchesMiddleware(pathname: string): boolean {
+  return unstable_doesMiddlewareMatch({
+    config,
+    url: `https://steward.test${pathname}`,
+  });
+}
 
-  test("the api exclusion is anchored to api/ only", () => {
-    expect(pattern).toContain("(?!api/|");
-    expect(pattern).not.toContain("(?!api|");
+function configuredHeaders(allowInsecureHttp: boolean) {
+  const webRoot = join(import.meta.dir, "..", "..");
+  const { E2E_ALLOW_INSECURE_HTTP: _ignored, ...cleanEnv } = process.env;
+  const result = Bun.spawnSync({
+    cmd: [
+      process.execPath,
+      "--eval",
+      'const { default: config } = await import("./next.config.ts"); console.log(JSON.stringify(await config.headers?.()));',
+    ],
+    cwd: webRoot,
+    env: allowInsecureHttp ? { ...cleanEnv, E2E_ALLOW_INSECURE_HTTP: "true" } : cleanEnv,
+    stderr: "pipe",
+    stdout: "pipe",
   });
 
-  test("api routes are excluded but api-prefixed pages are not", () => {
-    // The matcher source "/((?!api/|_next/static|...).*)" maps to a regex over
-    // the full pathname: leading slash, then a segment not starting with an
-    // excluded prefix.
-    const regex = new RegExp(`^${pattern}$`);
-    expect(regex.test("/api/auth/refresh")).toBe(false);
-    expect(regex.test("/api/anything")).toBe(false);
-    expect(regex.test("/api-keys")).toBe(true);
-    expect(regex.test("/dashboard")).toBe(true);
-    expect(regex.test("/login")).toBe(true);
-    expect(regex.test("/_next/static/chunk.js")).toBe(false);
+  expect(result.exitCode, result.stderr.toString()).toBe(0);
+  return JSON.parse(result.stdout.toString()) as Array<{
+    source: string;
+    headers: Array<{ key: string; value: string }>;
+  }>;
+}
+
+describe("middleware security contract", () => {
+  test("sets the response security headers and forwards one nonce-bound CSP", () => {
+    const previousApiUrl = process.env.NEXT_PUBLIC_STEWARD_API_URL;
+    process.env.NEXT_PUBLIC_STEWARD_API_URL = "https://api.steward.test";
+
+    try {
+      const response = middleware(
+        new NextRequest("https://steward.test/dashboard", {
+          headers: {
+            "x-nonce": "attacker-controlled",
+            "content-security-policy": "default-src *",
+          },
+        }),
+      );
+
+      for (const [key, value] of Object.entries(EXPECTED_SECURITY_HEADERS)) {
+        expect(response.headers.get(key)).toBe(value);
+      }
+
+      const csp = response.headers.get("Content-Security-Policy");
+      expect(csp).not.toBeNull();
+      expect(csp).toContain("default-src 'self'");
+      expect(csp).toContain("frame-ancestors 'none'");
+      expect(csp).toContain("upgrade-insecure-requests");
+
+      const nonce = csp?.match(/'nonce-([^']+)'/)?.[1];
+      if (!nonce) throw new Error("middleware CSP did not contain a nonce");
+      expect(nonce).toMatch(/^[A-Za-z0-9+/]{22}==$/);
+      expect(nonce).not.toBe("attacker-controlled");
+      expect(response.headers.get("x-middleware-request-x-nonce")).toBe(nonce);
+      expect(response.headers.get("x-middleware-request-content-security-policy")).toBe(csp);
+      expect(response.headers.get("x-middleware-override-headers")?.split(",").sort()).toEqual([
+        "content-security-policy",
+        "x-nonce",
+      ]);
+    } finally {
+      if (previousApiUrl === undefined) delete process.env.NEXT_PUBLIC_STEWARD_API_URL;
+      else process.env.NEXT_PUBLIC_STEWARD_API_URL = previousApiUrl;
+    }
   });
 });
 
-describe("cross-origin isolation headers (SEC-156)", () => {
-  test("middleware sets COOP same-origin-allow-popups (keeps OAuth popup opener)", () => {
-    expect(middlewareSource).toContain(
-      '["Cross-Origin-Opener-Policy", "same-origin-allow-popups"]',
+describe("exported middleware matcher", () => {
+  test.each([
+    "/api/auth/refresh",
+    "/api/anything",
+    "/_next/static/chunk.js",
+    "/_next/image",
+    "/favicon.ico",
+    "/icon-192.png",
+    "/apple-touch-icon.png",
+    "/site.webmanifest",
+  ])("excludes %s", (pathname) => {
+    expect(matchesMiddleware(pathname)).toBe(false);
+  });
+
+  test.each(["/api-keys", "/dashboard", "/login"])("covers %s", (pathname) => {
+    expect(matchesMiddleware(pathname)).toBe(true);
+  });
+
+  test("skips router prefetches through the exported missing-header rules", () => {
+    expect(
+      unstable_doesMiddlewareMatch({
+        config,
+        url: "https://steward.test/dashboard",
+        headers: { purpose: "prefetch" },
+      }),
+    ).toBe(false);
+  });
+});
+
+describe("next.config static security headers", () => {
+  test("matches the middleware header posture by default", () => {
+    const entries = configuredHeaders(false);
+    expect(entries).toHaveLength(1);
+    expect(entries[0]?.source).toBe("/:path*");
+
+    const actualHeaders = Object.fromEntries(
+      (entries[0]?.headers ?? []).map(({ key, value }) => [key, value]),
     );
-    // Must NOT be plain same-origin — that severs window.opener for the OAuth
-    // popup flow once the popup navigates cross-origin.
-    expect(middlewareSource).not.toContain('["Cross-Origin-Opener-Policy", "same-origin"]');
+    expect(actualHeaders).toEqual(EXPECTED_SECURITY_HEADERS);
   });
 
-  test("middleware sets CORP same-origin", () => {
-    expect(middlewareSource).toContain('"Cross-Origin-Resource-Policy"');
-    expect(middlewareSource).toContain('"same-origin"');
-  });
+  test("only omits HSTS under the explicit e2e insecure-HTTP opt-out", () => {
+    const entries = configuredHeaders(true);
+    const actualHeaders = Object.fromEntries(
+      (entries[0]?.headers ?? []).map(({ key, value }) => [key, value]),
+    );
+    const { "Strict-Transport-Security": _hsts, ...expectedWithoutHsts } =
+      EXPECTED_SECURITY_HEADERS;
 
-  test("static-asset headers in next.config.ts mirror COOP/CORP", () => {
-    expect(nextConfigSource).toContain('"Cross-Origin-Opener-Policy"');
-    expect(nextConfigSource).toContain('"Cross-Origin-Resource-Policy"');
+    expect(actualHeaders).toEqual(expectedWithoutHsts);
   });
+});
 
-  test("no stale web/vercel.json CSP references remain", () => {
+describe("security configuration inventory", () => {
+  test("the provider does not retain the retired vercel.json CSP reference", () => {
+    const providersSource = readFileSync(
+      join(import.meta.dir, "..", "components", "providers.tsx"),
+      "utf8",
+    );
     expect(providersSource).not.toContain("vercel.json");
   });
 });

@@ -108,6 +108,9 @@ describe("identity JWKS discovery", () => {
         headers: { Authorization: `Bearer ${sessionToken}` },
       });
       expect(identityResponse.status).toBe(200);
+      expect(identityResponse.headers.get("Cache-Control")).toBe("no-store, max-age=0");
+      expect(identityResponse.headers.get("Pragma")).toBe("no-cache");
+      expect(identityResponse.headers.get("Expires")).toBe("0");
       const identity = (await identityResponse.json()) as { token: string };
 
       const rootJwksResponse = await identityDiscoveryRoutes.request(

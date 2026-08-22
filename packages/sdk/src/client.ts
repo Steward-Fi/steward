@@ -1006,6 +1006,21 @@ export interface UserAccountUnlinkResult {
   issuedBefore: number;
 }
 
+/** Evidence returned when unlink's irreversible session cutoff succeeded but its DB unit failed. */
+export interface UserAccountUnlinkFailureEvidence {
+  accountUnlinked: false;
+  sessionsRevoked: true;
+  issuedBefore: number;
+}
+
+/** Evidence returned when transfer cutoffs succeeded but the ownership/audit unit failed. */
+export interface LinkedAccountTransferFailureEvidence {
+  accountTransferred: false;
+  sessionsRevoked: true;
+  fromIssuedBefore: number;
+  toIssuedBefore: number;
+}
+
 export interface UserEthereumWalletLinkNonce {
   nonce: string;
   message: string;
@@ -1213,7 +1228,15 @@ export interface StewardMfaRequiredErrorData {
   mfaVerifiedAt?: number | null;
 }
 
-export type StewardErrorResponse = { results?: PolicyResult[] } & StewardMfaRequiredErrorData;
+export type StewardErrorResponse = {
+  results?: PolicyResult[];
+  accountUnlinked?: false;
+  accountTransferred?: false;
+  sessionsRevoked?: true;
+  issuedBefore?: number;
+  fromIssuedBefore?: number;
+  toIssuedBefore?: number;
+} & StewardMfaRequiredErrorData;
 
 function errorMessageRequiresMfa(message: string): boolean {
   const normalized = message.toLowerCase();
@@ -3869,7 +3892,12 @@ export class StewardClient {
     return response.data;
   }
 
-  /** Unlink a linked account from the authenticated user. Requires another login method. */
+  /**
+   * Unlink a linked account from the authenticated user. Requires another login method.
+   * The session-revocation cutoff is irreversible: if the following DB/audit transaction
+   * fails, `StewardApiError.data` reports `{ accountUnlinked: false,
+   * sessionsRevoked: true, issuedBefore }` and the caller must sign in again before retrying.
+   */
   async unlinkUserAccount(
     provider: string,
     providerAccountId: string,

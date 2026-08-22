@@ -310,6 +310,37 @@ describe("clientIpBucket", () => {
 });
 
 describe("auth rate-limit keying (route harness)", () => {
+  it("bounds mounted email OTP verification by exact email and tenant without minting a grant", async () => {
+    await connectMockRedis();
+    process.env.STEWARD_TRUSTED_PROXY_HOPS = "1";
+    const statuses: number[] = [];
+    for (let attempt = 0; attempt < 6; attempt += 1) {
+      const response = await authRoutes.request("/email/otp/verify", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-forwarded-for": "198.51.100.74",
+        },
+        body: JSON.stringify({
+          email: "bounded-route@example.test",
+          code: "000000",
+          tenantId: "default",
+        }),
+      });
+      statuses.push(response.status);
+      expect(
+        ((await response.json()) as { data?: { emailGrant?: string } }).data?.emailGrant,
+      ).toBeUndefined();
+    }
+    expect(statuses).toEqual([401, 401, 401, 401, 401, 429]);
+    const targetCalls = rateLimitCalls.filter((call) =>
+      call.key.startsWith("ratelimit:auth:email-otp-verify-target:"),
+    );
+    expect(targetCalls).toHaveLength(6);
+    expect(new Set(targetCalls.map(({ key }) => key))).toHaveLength(1);
+    expect(new Set(targetCalls.map(({ max }) => max))).toEqual(new Set([5]));
+  });
+
   it("keys per trusted client IP: spoofed prefixes share a bucket, real clients get independent budgets", async () => {
     await connectMockRedis();
     process.env.STEWARD_TRUSTED_PROXY_HOPS = "1";

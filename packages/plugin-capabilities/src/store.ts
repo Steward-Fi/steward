@@ -424,7 +424,7 @@ export class CapabilityStore {
 
   /**
    * The capabilities an agent may USE right now: an ACTIVE, unexpired grant to an
-   * ENABLED capability. This is what the W-1c invoke path will consult. Expired
+   * ENABLED capability. This is what the invoke path consults. Expired
    * or revoked grants, and disabled capabilities, are excluded (fail-closed).
    */
   async listUsableCapabilitiesForAgent(

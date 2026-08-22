@@ -97,6 +97,11 @@ import {
   vault,
 } from "../services/context";
 import {
+  isRuntimeVaultRpcMethodAllowed,
+  resolveRuntimeChainId,
+  runtimeCustodyValue,
+} from "../services/custody-runtime";
+import {
   consumeExecutionAuthorization,
   executionPayloadDigestForEvmSign,
   mintExecutionAuthorization,
@@ -174,47 +179,43 @@ async function writeOutcomeUnknownAudit(
     );
   }
 }
-// ─── Unsafe-signing opt-in flags (read LIVE, not captured at module-init) ──────
+// ─── Unsafe-signing opt-in flags (request-local, not module-captured) ──────
 //
-// Each accessor reads its env var on every call instead of freezing the value
-// when this module first loads. In production the relevant env vars are fixed
-// before this module is imported, so a live read returns exactly what a captured
-// `const` would — behavior is identical. Reading live matters only for the api
-// test suite, which runs all ~135 files in ONE `bun test` process: Bun shares
-// the module registry, so a captured const would freeze whichever file imported
-// vault.ts first and ignore every later file's beforeAll/afterAll flag toggles.
-// Live reads let each file exercise BOTH the opt-in path and the fail-closed
-// default within the single process.
+// Each accessor resolves the immutable environment snapshot bound to the active
+// request. Node entrypoints fall back to process.env, while concurrent Worker
+// requests cannot borrow break-glass authority from the isolate-wide compatibility
+// mirror after an await. Call-time resolution also lets the single-process API
+// suite exercise opt-in and fail-closed paths without module-registry leakage.
 //
 // Fail-closed by construction: anything other than the exact string "true"
 // (unset, "false", "1", etc.) yields false, i.e. signing disabled.
 const allowPrivateKeyExport = (): boolean =>
-  process.env.STEWARD_ALLOW_KEY_EXPORT !== "false" &&
-  process.env.STEWARD_ALLOW_PRIVATE_KEY_EXPORT === "true";
+  runtimeCustodyValue("STEWARD_ALLOW_KEY_EXPORT") !== "false" &&
+  runtimeCustodyValue("STEWARD_ALLOW_PRIVATE_KEY_EXPORT") === "true";
 const allowVaultPrivateKeyExport = (): boolean =>
-  process.env.STEWARD_ALLOW_VAULT_PRIVATE_KEY_EXPORT === "true";
+  runtimeCustodyValue("STEWARD_ALLOW_VAULT_PRIVATE_KEY_EXPORT") === "true";
 const allowUnsafeMessageSigning = (): boolean =>
-  process.env.STEWARD_ALLOW_UNSAFE_MESSAGE_SIGNING === "true";
+  runtimeCustodyValue("STEWARD_ALLOW_UNSAFE_MESSAGE_SIGNING") === "true";
 const allowVaultUnsafeMessageSigning = (): boolean =>
-  process.env.STEWARD_ALLOW_VAULT_UNSAFE_MESSAGE_SIGNING === "true";
+  runtimeCustodyValue("STEWARD_ALLOW_VAULT_UNSAFE_MESSAGE_SIGNING") === "true";
 // Audited opt-in for UNCONSTRAINED EIP-712 typed-data signing (no `typed-data`
 // policy required). Both flags must be set. Normally typed-data signing is
 // authorized per-agent by a `typed-data` policy instead; this is the
 // break-glass equivalent of the message-signing flags.
 const allowUnsafeTypedDataSigning = (): boolean =>
-  process.env.STEWARD_ALLOW_UNSAFE_TYPED_DATA_SIGNING === "true";
+  runtimeCustodyValue("STEWARD_ALLOW_UNSAFE_TYPED_DATA_SIGNING") === "true";
 const allowVaultUnsafeTypedDataSigning = (): boolean =>
-  process.env.STEWARD_ALLOW_VAULT_UNSAFE_TYPED_DATA_SIGNING === "true";
+  runtimeCustodyValue("STEWARD_ALLOW_VAULT_UNSAFE_TYPED_DATA_SIGNING") === "true";
 const allowUnsafeRawSigning = (): boolean =>
-  process.env.STEWARD_ALLOW_UNSAFE_RAW_SIGNING === "true";
+  runtimeCustodyValue("STEWARD_ALLOW_UNSAFE_RAW_SIGNING") === "true";
 const allowVaultUnsafeRawSigning = (): boolean =>
-  process.env.STEWARD_ALLOW_VAULT_UNSAFE_RAW_SIGNING === "true";
+  runtimeCustodyValue("STEWARD_ALLOW_VAULT_UNSAFE_RAW_SIGNING") === "true";
 const allowUnsafeContractCallSigning = (): boolean =>
-  process.env.STEWARD_ALLOW_UNSAFE_CONTRACT_CALL_SIGNING === "true";
+  runtimeCustodyValue("STEWARD_ALLOW_UNSAFE_CONTRACT_CALL_SIGNING") === "true";
 const allowUnsafeUserOperationSigning = (): boolean =>
-  process.env.STEWARD_ALLOW_UNSAFE_USER_OPERATION_SIGNING === "true";
+  runtimeCustodyValue("STEWARD_ALLOW_UNSAFE_USER_OPERATION_SIGNING") === "true";
 const allowUnsafeAuthorizationSigning = (): boolean =>
-  process.env.STEWARD_ALLOW_UNSAFE_AUTHORIZATION_SIGNING === "true";
+  runtimeCustodyValue("STEWARD_ALLOW_UNSAFE_AUTHORIZATION_SIGNING") === "true";
 /**
  * Blind-signing opt-in for Solana. When false (default), the sign-solana route
  * refuses any transaction whose instructions cannot all be confidently decoded
@@ -223,17 +224,11 @@ const allowUnsafeAuthorizationSigning = (): boolean =>
  * that policy controls cannot be enforced against the transaction's real effects.
  */
 const allowUnsafeSolanaBlindSigning = (): boolean =>
-  process.env.STEWARD_ALLOW_UNSAFE_SOLANA_BLIND_SIGNING === "true";
+  runtimeCustodyValue("STEWARD_ALLOW_UNSAFE_SOLANA_BLIND_SIGNING") === "true";
 const allowPrivateKeyImport = (): boolean =>
-  process.env.STEWARD_ALLOW_PRIVATE_KEY_IMPORT === "true";
+  runtimeCustodyValue("STEWARD_ALLOW_PRIVATE_KEY_IMPORT") === "true";
 const allowVaultPrivateKeyImport = (): boolean =>
-  process.env.STEWARD_ALLOW_VAULT_PRIVATE_KEY_IMPORT === "true";
-const VAULT_RPC_ALLOWLIST = new Set(
-  (process.env.STEWARD_VAULT_RPC_ALLOWLIST ?? "eth_chainId,eth_blockNumber,eth_getBalance")
-    .split(",")
-    .map((method) => method.trim())
-    .filter(Boolean),
-);
+  runtimeCustodyValue("STEWARD_ALLOW_VAULT_PRIVATE_KEY_IMPORT") === "true";
 const MAX_VAULT_HISTORY_LIMIT = 200;
 const MAX_UINT256_DECIMAL =
   "115792089237316195423570985008687907853269984665640564039457584007913129639935";
@@ -552,7 +547,7 @@ function parseTransferActionInput(body: TransferActionInput): {
   const chainId =
     typeof body.chainId === "number" && Number.isInteger(body.chainId)
       ? body.chainId
-      : parseInt(process.env.CHAIN_ID || "8453", 10);
+      : resolveRuntimeChainId(8453);
   const referenceId = parseReferenceId(body.referenceId);
   const isSolanaTransfer = isSolanaActionChain(chainId);
 
@@ -605,7 +600,7 @@ function parseSendCallsActionInput(body: SendCallsActionInput):
   const chainId =
     typeof body.chainId === "number" && Number.isInteger(body.chainId)
       ? body.chainId
-      : parseInt(process.env.CHAIN_ID || "8453", 10);
+      : resolveRuntimeChainId(8453);
   if (!Number.isSafeInteger(chainId) || chainId <= 0) return "chainId must be a positive integer";
   const referenceId = parseReferenceId(body.referenceId);
   if (referenceId === null) return "referenceId must be a non-empty string up to 128 characters";
@@ -1438,7 +1433,7 @@ function isBitcoinPsbtBase64(value: unknown): value is string {
 }
 
 function maxBitcoinPsbtFeeSats(): bigint {
-  const configured = process.env.STEWARD_MAX_BITCOIN_PSBT_FEE_SATS;
+  const configured = runtimeCustodyValue("STEWARD_MAX_BITCOIN_PSBT_FEE_SATS");
   if (configured && /^\d+$/.test(configured)) return BigInt(configured);
   return DEFAULT_MAX_BITCOIN_PSBT_FEE_SATS;
 }
@@ -1447,7 +1442,7 @@ function maxBitcoinPsbtFeeSats(): bigint {
 const DEFAULT_MAX_MONERO_FEE_PICONERO = 100_000_000_000n;
 
 function maxMoneroFeePiconero(): bigint {
-  const configured = process.env.STEWARD_MAX_MONERO_FEE_PICONERO;
+  const configured = runtimeCustodyValue("STEWARD_MAX_MONERO_FEE_PICONERO");
   if (configured && /^\d+$/.test(configured)) return BigInt(configured);
   return DEFAULT_MAX_MONERO_FEE_PICONERO;
 }
@@ -2096,7 +2091,7 @@ vaultRoutes.post("/:agentId/sign", async (c) => {
     );
   }
 
-  const resolvedChainId = request.chainId || parseInt(process.env.CHAIN_ID || "8453", 10);
+  const resolvedChainId = request.chainId || resolveRuntimeChainId(8453);
   if (!hasCalldata(request.data)) {
     const gasGuard = await nativeTransferGasAccountingGuard(
       c,
@@ -3546,6 +3541,7 @@ vaultRoutes.post("/:agentId/actions/transfer", async (c) => {
 
     let completedResult: string | null = null;
     let completedStatus: "broadcast" | "signed" | null = null;
+    let sponsoredTransferStaged = false;
     try {
       await writeVaultAudit(c, {
         tenantId,
@@ -3564,6 +3560,21 @@ vaultRoutes.post("/:agentId/actions/transfer", async (c) => {
           policyResults: evaluation.results,
         },
       });
+      if (sponsorshipPayload?.sponsored === true && !solanaRecoveryBinding) {
+        await db.insert(transactions).values({
+          id: actionId,
+          agentId,
+          status: "pending",
+          toAddress: signRequest.to,
+          value: signRequest.value,
+          data: signRequest.data,
+          chainId: signRequest.chainId,
+          actionType: "transfer",
+          actionPayload: storedTransferActionPayload,
+          policyResults: evaluation.results,
+        });
+        sponsoredTransferStaged = true;
+      }
       const reservationError = await recordSponsoredActionIfNeeded({
         sponsorship: sponsorshipPayload,
         tenantId,
@@ -3575,6 +3586,10 @@ vaultRoutes.post("/:agentId/actions/transfer", async (c) => {
         status: "reserved",
       });
       if (typeof reservationError === "string") {
+        if (sponsoredTransferStaged) {
+          await db.delete(transactions).where(eq(transactions.id, actionId));
+          sponsoredTransferStaged = false;
+        }
         return c.json<ApiResponse>({ ok: false, error: reservationError }, 403);
       }
       let result: string;
@@ -3841,6 +3856,11 @@ vaultRoutes.post("/:agentId/actions/transfer", async (c) => {
         if (!(await markSolanaRecoveryAnchorFailed(actionId, agentId, solanaExecutionToken))) {
           return solanaLostOwnershipResponse(c, actionId, agentId, "transfer");
         }
+      } else if (sponsoredTransferStaged) {
+        await db
+          .update(transactions)
+          .set({ status: "failed", policyResults: evaluation.results })
+          .where(and(eq(transactions.id, actionId), eq(transactions.agentId, agentId)));
       } else {
         await db.insert(transactions).values({
           id: actionId,
@@ -4214,10 +4234,8 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
 
       // Compute the replay digest inside a guarded block. The shared normalizer
       // throws ExecutionPayloadNormalizationError on any malformed numeric caller
-      // field (e.g. an unsafe-integer nonce). Previously this threw BEFORE the
-      // failClosed helper and the outer catch only handles GovernedVaultError, so
-      // signing was prevented but no specific rejection audit was produced. We now
-      // convert it into the same fail-closed 409 path with a specific reason.
+      // field (e.g. an unsafe-integer nonce). Convert it into the audited,
+      // fail-closed 409 path with a specific reason.
       let approvalExecutionPayloadDigest: string | null = null;
       let approvalExecutionTarget: Awaited<ReturnType<typeof vault.resolveExecutionTarget>> = {
         backend: "local-vault",
@@ -7252,7 +7270,7 @@ vaultRoutes.post("/:agentId/sign-typed-data", async (c) => {
 
   const resolvedChainId =
     (typeof body.domain.chainId === "number" ? body.domain.chainId : 0) ||
-    parseInt(process.env.CHAIN_ID || "8453", 10);
+    resolveRuntimeChainId(8453);
   // Use the EIP-712 domain's verifyingContract as the request `to` so that
   // destination-based policies (approved-addresses, condition-set, contract
   // allowlist) meaningfully gate the contract the typed data authorizes. Falls
@@ -10172,7 +10190,7 @@ vaultRoutes.post("/:agentId/rpc", async (c) => {
   if (!isNonEmptyString(body.method)) {
     return c.json<ApiResponse>({ ok: false, error: "'method' is required" }, 400);
   }
-  if (!VAULT_RPC_ALLOWLIST.has(body.method)) {
+  if (!isRuntimeVaultRpcMethodAllowed(body.method)) {
     return c.json<ApiResponse>({ ok: false, error: "RPC method is not allowlisted" }, 403);
   }
 

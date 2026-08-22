@@ -1508,7 +1508,7 @@ agentRoutes.post("/:agentId/token", async (c) => {
   }
 });
 
-// Create venue-scoped wallet (Sprint 4)
+// Create a venue-scoped wallet.
 //
 // POST /agents/:agentId/wallets
 // Body: { venue?: string, scope?: string, chainType: "evm" | "solana" | "bitcoin", purpose?: string }

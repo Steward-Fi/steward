@@ -13,7 +13,7 @@
  * non-32-byte payload is rejected (400).
  */
 
-import { afterAll, beforeAll, describe, expect, it, mock } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it, mock, setDefaultTimeout } from "bun:test";
 import { createPublicKey, verify as cryptoVerify } from "node:crypto";
 import { closeDb, getDb, policies, tenants } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
@@ -21,6 +21,8 @@ import { Vault } from "@stwd/vault";
 import { Hono } from "hono";
 import { recoverAddress } from "viem";
 import type { AppVariables } from "../services/context";
+
+setDefaultTimeout(30_000);
 
 const dispatchWebhookMock = mock(() => {});
 mock.module("../services/webhook-dispatch", () => ({
@@ -146,6 +148,9 @@ describe("vault cross-curve raw digest signing", () => {
       }),
     });
     expect(response.status).toBe(200);
+    expect(response.headers.get("Cache-Control")).toBe("no-store, max-age=0");
+    expect(response.headers.get("Pragma")).toBe("no-cache");
+    expect(response.headers.get("Expires")).toBe("0");
     const body = (await response.json()) as {
       ok: boolean;
       data: {
@@ -190,6 +195,9 @@ describe("vault cross-curve raw digest signing", () => {
       }),
     });
     expect(response.status).toBe(200);
+    expect(response.headers.get("Cache-Control")).toBe("no-store, max-age=0");
+    expect(response.headers.get("Pragma")).toBe("no-cache");
+    expect(response.headers.get("Expires")).toBe("0");
     const body = (await response.json()) as {
       ok: boolean;
       data: { signature: string; curve: string; payloadHex: typeof DIGEST; publicKey: string };

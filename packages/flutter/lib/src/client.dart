@@ -108,9 +108,14 @@ class StewardClient {
   }) async {
     final canonicalPath = path.startsWith('/') ? path : '/$path';
     final encodedBody = body == null ? null : utf8.encode(jsonEncode(body));
-    final uri = _baseUri.replace(
-      path: _joinBasePath(_baseUri.path, canonicalPath),
-      queryParameters: _cleanQuery(query),
+    // Public helpers percent-encode hostile path segments before they reach
+    // this generic request boundary. Parse that encoded path before resolving
+    // it against the base URL so `%2F` remains one segment instead of becoming
+    // `%252F` through a second encoding pass.
+    final uri = _baseUri.resolveUri(
+      Uri.parse(_joinBasePath(_baseUri.path, canonicalPath)).replace(
+        queryParameters: _cleanQuery(query),
+      ),
     );
     final requestHeaders = _headers(
       canonicalPath,
@@ -309,7 +314,9 @@ class StewardClient {
         throw StewardApiException('Received invalid JSON from Steward API', response.statusCode);
       }
     }
-    if (response.statusCode >= 400 || (payload is Map && payload['ok'] == false)) {
+    if (response.statusCode < 200 ||
+        response.statusCode >= 300 ||
+        (payload is Map && payload['ok'] == false)) {
       final message = payload is Map && payload['error'] is String
           ? payload['error'] as String
           : 'Request failed with status ${response.statusCode}';
