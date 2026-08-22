@@ -369,6 +369,7 @@ async function assertExactMigrationObjectInventory(db: MigrationQueryExecutor): 
         ('public', 'capabilities', 'r'),
         ('public', 'capability_grants', 'r'),
         ('public', 'capability_invocations', 'r'),
+        ('public', 'capability_rate_limit_buckets', 'r'),
         ('public', 'example_log', 'r'),
         ('public', 'example_log_id_seq', 'S')
     ),
@@ -392,6 +393,7 @@ async function assertExactMigrationObjectInventory(db: MigrationQueryExecutor): 
         ('public', 'steward_reject_upstream_lease_evidence_mutation()'),
         ('public', 'capability_grants_agent_fence()'),
         ('public', 'capability_grants_guard_agent_delete()'),
+        ('public', 'capability_rate_limit_bucket_agent_fence()'),
         ('steward_rls', 'tenant_id()'),
         ('steward_rls', 'user_id()'),
         ('steward_bootstrap', 'agent_subject(p_agent_id text, p_tenant_id text, p_jti text)'),
@@ -642,6 +644,34 @@ async function assertBundledPluginLedgerIntegrity(db: MigrationQueryExecutor): P
               kind: "policy",
               schema: "public",
               table: "capability_invocations",
+              name: "steward_tenant_isolation",
+            },
+          ],
+        },
+        {
+          tag: "0004_capability_rate_limit_buckets",
+          effects: [
+            {
+              kind: "relation",
+              schema: "public",
+              name: "capability_rate_limit_buckets",
+              relationKind: "r",
+            },
+            {
+              kind: "routine",
+              schema: "public",
+              name: "capability_rate_limit_bucket_agent_fence()",
+            },
+            {
+              kind: "trigger",
+              schema: "public",
+              table: "capability_rate_limit_buckets",
+              name: "capability_rate_limit_bucket_agent_fence",
+            },
+            {
+              kind: "policy",
+              schema: "public",
+              table: "capability_rate_limit_buckets",
               name: "steward_tenant_isolation",
             },
           ],
