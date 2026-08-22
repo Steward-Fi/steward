@@ -2,7 +2,9 @@ import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 
 import { __resetAuditHmacKeyCacheForTests, closeDb, getDb, tenantConfigs, tenants } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
+import { withRuntimeEnvironment } from "@stwd/shared/runtime-env";
 import { eq } from "drizzle-orm";
+import { clearEmailAuthTenantCacheForTests, getEmailAuthForTenant } from "../routes/auth";
 
 const PLATFORM_KEY = "platform-email-config-key";
 const TENANT_ID = "platform-email-config-tenant";
@@ -135,6 +137,89 @@ describe("platform tenant email config routes", () => {
       .from(tenantConfigs)
       .where(eq(tenantConfigs.tenantId, TENANT_ID));
     expect(afterDelete?.emailConfig ?? null).toBeNull();
+  });
+
+  it("retires cached email authority only after the mounted outer transaction commits", async () => {
+    const { withAuthenticatedTenantDatabase } = await import("../services/context");
+    const dbHandle = getDb();
+    await dbHandle
+      .insert(tenantConfigs)
+      .values({ tenantId: TENANT_ID, emailConfig: { subjectOverride: "Committed authority" } })
+      .onConflictDoUpdate({
+        target: tenantConfigs.tenantId,
+        set: { emailConfig: { subjectOverride: "Committed authority" } },
+      });
+    clearEmailAuthTenantCacheForTests();
+
+    await withRuntimeEnvironment(
+      {
+        NODE_ENV: "test",
+        STEWARD_MASTER_PASSWORD: "platform-email-config-master-password",
+        STEWARD_AUDIT_HMAC_KEY: "platform-email-config-audit-key-with-enough-entropy",
+        STEWARD_PLATFORM_KEYS: PLATFORM_KEY,
+        STEWARD_PLATFORM_KEY_SCOPES: JSON.stringify({
+          [PLATFORM_KEY]: ["platform:tenant-email-config:write"],
+        }),
+        RESEND_API_KEY: "post-commit-resend-key",
+        EMAIL_FROM: "Post Commit <login@post-commit.example>",
+      },
+      async () => {
+        const original = await getEmailAuthForTenant(TENANT_ID);
+        expect((original as any).subjectOverride).toBe("Committed authority");
+
+        await expect(
+          withAuthenticatedTenantDatabase(
+            TENANT_ID,
+            "platform-key",
+            "rollback-cache-regression",
+            async () => {
+              const response = await platformRoutes.request(`/tenants/${TENANT_ID}/email-config`, {
+                method: "PATCH",
+                headers: {
+                  "Content-Type": "application/json",
+                  "X-Steward-Platform-Key": PLATFORM_KEY,
+                },
+                body: JSON.stringify({ subjectOverride: "Must roll back" }),
+              });
+              expect(response.status).toBe(200);
+              // The route's audited unit is only a savepoint here. Authority
+              // remains usable until its owning transaction commits.
+              expect(await getEmailAuthForTenant(TENANT_ID)).toBe(original);
+              throw new Error("force outer rollback");
+            },
+          ),
+        ).rejects.toThrow("force outer rollback");
+
+        expect(await getEmailAuthForTenant(TENANT_ID)).toBe(original);
+        const [rolledBack] = await dbHandle
+          .select({ emailConfig: tenantConfigs.emailConfig })
+          .from(tenantConfigs)
+          .where(eq(tenantConfigs.tenantId, TENANT_ID));
+        expect(rolledBack?.emailConfig?.subjectOverride).toBe("Committed authority");
+
+        await withAuthenticatedTenantDatabase(
+          TENANT_ID,
+          "platform-key",
+          "commit-cache-regression",
+          async () => {
+            const response = await platformRoutes.request(`/tenants/${TENANT_ID}/email-config`, {
+              method: "PATCH",
+              headers: {
+                "Content-Type": "application/json",
+                "X-Steward-Platform-Key": PLATFORM_KEY,
+              },
+              body: JSON.stringify({ subjectOverride: "Replacement authority" }),
+            });
+            expect(response.status).toBe(200);
+            expect(await getEmailAuthForTenant(TENANT_ID)).toBe(original);
+          },
+        );
+
+        const replacement = await getEmailAuthForTenant(TENANT_ID);
+        expect(replacement).not.toBe(original);
+        expect((replacement as any).subjectOverride).toBe("Replacement authority");
+      },
+    );
   });
 
   it("accepts a template-only PATCH (no apiKey) and merges over existing config", async () => {
