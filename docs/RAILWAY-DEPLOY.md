@@ -502,6 +502,10 @@ curl -sf "$BASE/platform/tenants" \
 | `STEWARD_PLATFORM_DATABASE_URL` | **Yes for destructive platform operations** | — | Separate restricted platform-authority connection. |
 | `STEWARD_PLATFORM_DATABASE_ROLE` | **Yes with platform DB URL** | `steward_platform` | Exact platform login. |
 | `STEWARD_MIGRATION_DATABASE_URL` | **Release job only** | — | Dedicated migrator; never expose to the API. |
+| `STEWARD_MIGRATION_CONNECT_TIMEOUT_SECONDS` | Release job only | `15` | Positive connection deadline in seconds. |
+| `STEWARD_MIGRATION_LOCK_TIMEOUT_MS` | Release job only | `60000` | Positive advisory-lock deadline, no greater than the overall deadline. |
+| `STEWARD_MIGRATION_STATEMENT_TIMEOUT_MS` | Release job only | `300000` | Positive SQL statement deadline, no greater than the overall deadline. |
+| `STEWARD_MIGRATION_OVERALL_TIMEOUT_MS` | Release job only | `600000` | Positive deadline for each complete core or plugin migration attempt. |
 | `STEWARD_OPERATOR_DATABASE_URL` | **Bootstrap job only** | — | Provider-superuser-equivalent; never expose to the API. |
 | `STEWARD_MASTER_PASSWORD` | **Yes** | — | Vault encryption secret. Keep separate from JWT signing material. |
 | `STEWARD_KDF_SALT` | **Yes in production** | — | Stable deployment KDF salt, at least 16 random bytes. Back it up with the encrypted vault data. |

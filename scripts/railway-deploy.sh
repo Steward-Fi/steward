@@ -20,6 +20,8 @@ set -euo pipefail
 #   DEPLOY_TIMEOUT      (optional) max seconds to wait for deploy, default: 300
 #   RAILWAY_HEALTH_TIMEOUT  (optional) max seconds to wait for health, default: 120
 #   RAILWAY_HEALTH_INTERVAL (optional) seconds between health probes, default: 5
+#   RAILWAY_API_CONNECT_TIMEOUT (optional) GraphQL connect bound, default: 5
+#   RAILWAY_API_TIMEOUT (optional) GraphQL request bound, default: 20
 #   RAILWAY_ALLOW_REJECTED_DEPLOY (optional, default: fail closed) when "true",
 #                       a deployment Railway rejected before any container ran
 #                       (no build/deploy logs) degrades to a non-fatal warning
@@ -54,6 +56,8 @@ HEALTH_URL="${RAILWAY_HEALTH_URL:-}"
 TIMEOUT="${DEPLOY_TIMEOUT:-300}"
 HEALTH_TIMEOUT="${RAILWAY_HEALTH_TIMEOUT:-120}"
 HEALTH_INTERVAL="${RAILWAY_HEALTH_INTERVAL:-5}"
+API_CONNECT_TIMEOUT="${RAILWAY_API_CONNECT_TIMEOUT:-5}"
+API_TIMEOUT="${RAILWAY_API_TIMEOUT:-20}"
 API="https://backboard.railway.com/graphql/v2"
 
 DRY_RUN=false
@@ -97,8 +101,10 @@ fi
 
 if [[ ! "$TIMEOUT" =~ ^[1-9][0-9]*$ ||
       ! "$HEALTH_TIMEOUT" =~ ^[1-9][0-9]*$ ||
-      ! "$HEALTH_INTERVAL" =~ ^[1-9][0-9]*$ ]]; then
-  fail "DEPLOY_TIMEOUT, RAILWAY_HEALTH_TIMEOUT, and RAILWAY_HEALTH_INTERVAL must be positive integers"
+      ! "$HEALTH_INTERVAL" =~ ^[1-9][0-9]*$ ||
+      ! "$API_CONNECT_TIMEOUT" =~ ^[1-9][0-9]*$ ||
+      ! "$API_TIMEOUT" =~ ^[1-9][0-9]*$ ]]; then
+  fail "deploy, health, and Railway API timeouts must be positive integers"
   exit 1
 fi
 
@@ -117,12 +123,55 @@ fi
 
 FULL_IMAGE="${IMAGE_REPO}:${IMAGE_TAG}"
 
+# Redact every externally supplied diagnostic before it reaches CI. This covers
+# credential-bearing URLs (Postgres, Redis, brokers, generic HTTP userinfo),
+# sensitive query parameters, structured assignments, bearer tokens, Steward
+# keys, and long cryptographic material.
+redact_secrets() {
+  sed -E \
+    -e 's#([A-Za-z][A-Za-z0-9+.-]*://[^/@[:space:]:]*:)[^@/[:space:]]+@#\1…REDACTED…@#g' \
+    -e 's#([A-Za-z][A-Za-z0-9+.-]*://)[^/:@[:space:]]+@#\1…REDACTED…@#g' \
+    -e 's#([?&](access_key|access_token|api_key|apikey|auth|authorization|client_secret|code|credential|key|password|passwd|pwd|secret|signature|sig|token|x-amz-credential|x-amz-security-token|x-amz-signature)=)[^&#"'"'"'[:space:]]+#\1…REDACTED…#gI' \
+    -e 's/(Bearer )[A-Za-z0-9._~+/-]+/\1…REDACTED…/g' \
+    -e 's/(([A-Za-z_][A-Za-z0-9_]*_(URL|URI|DSN)|URL|URI|DSN)"[[:space:]]*:[[:space:]]*")[^"]*/\1…REDACTED…/gI' \
+    -e 's/(([A-Za-z_][A-Za-z0-9_]*_(URL|URI|DSN)|URL|URI|DSN)[[:space:]]*[:=][[:space:]]*")[^"]*/\1…REDACTED…/gI' \
+    -e "s/(([A-Za-z_][A-Za-z0-9_]*_(URL|URI|DSN)|URL|URI|DSN)[[:space:]]*[:=][[:space:]]*')[^']*/\1…REDACTED…/gI" \
+    -e 's/(([A-Za-z_][A-Za-z0-9_]*_(URL|URI|DSN)|URL|URI|DSN)[[:space:]]*[:=][[:space:]]*)[^[:space:],}]+/\1…REDACTED…/gI' \
+    -e 's/((SECRET|SECRETS|PASSWORD|PASS|SALT|TOKEN|KEY|KEYS|HMAC|PRIVATE)[A-Z_]*"[[:space:]]*:[[:space:]]*")[^"]*/\1…REDACTED…/g' \
+    -e 's/((SECRET|SECRETS|PASSWORD|PASS|SALT|TOKEN|KEY|KEYS|HMAC|PRIVATE)[A-Z_]*[[:space:]]*[:=][[:space:]]*")[^"]*/\1…REDACTED…/g' \
+    -e "s/((SECRET|SECRETS|PASSWORD|PASS|SALT|TOKEN|KEY|KEYS|HMAC|PRIVATE)[A-Z_]*[[:space:]]*[:=][[:space:]]*')[^']*/\1…REDACTED…/g" \
+    -e 's/((SECRET|SECRETS|PASSWORD|PASS|SALT|TOKEN|KEY|KEYS|HMAC|PRIVATE)[A-Z_]*[[:space:]]*[:=][[:space:]]*)[^[:space:],}]+/\1…REDACTED…/g' \
+    -e 's/(^|[^A-Za-z0-9_])stw_[A-Za-z0-9]+/\1stw_…REDACTED…/g' \
+    -e 's/(^|[^0-9a-fA-F])[0-9a-fA-F]{48,}([^0-9a-fA-F]|$)/\1…REDACTED…\2/g'
+}
+
+redacted_text() {
+  printf '%s' "${1:-}" | redact_secrets
+}
+
+# Never print a raw GraphQL response: arbitrary provider messages can echo
+# request variables or deployment environment values. Keep only error code and
+# redacted message when the response is valid JSON.
+graphql_diagnostic() {
+  local response="${1:-}"
+  local diagnostic
+  diagnostic=$(printf '%s' "$response" | jq -c \
+    '[.errors[]? | {code: (.extensions.code // "UNKNOWN"), message: (.message // "request failed")}]' \
+    2>/dev/null) || diagnostic=""
+  if [[ -n "$diagnostic" && "$diagnostic" != "[]" ]]; then
+    redacted_text "$diagnostic"
+  else
+    printf '%s' '<no safe GraphQL diagnostic available>'
+  fi
+}
+
 # ---------------------------------------------------------------------------
 # Helper: GraphQL request
 # ---------------------------------------------------------------------------
 gql() {
   local query="$1"
-  curl -sf -X POST "$API" \
+  curl -sf --connect-timeout "$API_CONNECT_TIMEOUT" --max-time "$API_TIMEOUT" \
+    -X POST "$API" \
     -H "Authorization: Bearer ${RAILWAY_TOKEN}" \
     -H "Content-Type: application/json" \
     -d "$query"
@@ -170,13 +219,13 @@ START_TS=$(date -u +%s)
 
 CONNECT_RESULT=$(gql "$CONNECT_PAYLOAD" 2>&1) || {
   fail "serviceInstanceUpdate mutation failed"
-  fail "Response: $CONNECT_RESULT"
+  fail "Response: $(graphql_diagnostic "$CONNECT_RESULT")"
   exit 1
 }
 
 # Check for GraphQL errors
 if echo "$CONNECT_RESULT" | jq -e '.errors' >/dev/null 2>&1; then
-  fail "GraphQL error: $(echo "$CONNECT_RESULT" | jq -r '.errors[0].message')"
+  fail "GraphQL error: $(graphql_diagnostic "$CONNECT_RESULT")"
   exit 1
 fi
 
@@ -195,7 +244,7 @@ DEPLOY_PAYLOAD=$(jq -n \
 
 DEPLOY_TRIGGER=$(gql "$DEPLOY_PAYLOAD" 2>&1) || DEPLOY_TRIGGER=""
 if echo "$DEPLOY_TRIGGER" | jq -e '.errors' >/dev/null 2>&1; then
-  warn "serviceInstanceDeploy returned an error (service may auto-deploy on connect): $(echo "$DEPLOY_TRIGGER" | jq -r '.errors[0].message' 2>/dev/null)"
+  warn "serviceInstanceDeploy returned an error (service may auto-deploy on connect): $(graphql_diagnostic "$DEPLOY_TRIGGER")"
 else
   TRIGGER_DEPLOY_ID=$(echo "$DEPLOY_TRIGGER" | jq -r '.data.serviceInstanceDeployV2 // ""' 2>/dev/null) || TRIGGER_DEPLOY_ID=""
   [[ -n "$TRIGGER_DEPLOY_ID" ]] && ok "Triggered deployment ${TRIGGER_DEPLOY_ID}"
@@ -222,10 +271,11 @@ DEPLOY_ID=""
 # missing required env var on the Railway service) or an image-pull error — the
 # logs below are what tell the operator which. Uses a non-failing curl (the
 # normal gql() helper uses `curl -sf`, which drops the body on any HTTP error)
-# and prints RAW responses so a wrong field name / auth-scope problem is still
-# visible rather than silently swallowed.
+# and reports only whitelisted/redacted diagnostics; raw GraphQL responses may
+# contain echoed variables or provider secrets and are never printed.
 gql_raw() {
-  curl -s -X POST "$API" \
+  curl -s --connect-timeout "$API_CONNECT_TIMEOUT" --max-time "$API_TIMEOUT" \
+    -X POST "$API" \
     -H "Authorization: Bearer ${RAILWAY_TOKEN}" \
     -H "Content-Type: application/json" \
     -d "$1" 2>/dev/null
@@ -237,26 +287,6 @@ gql_raw() {
 # app/code regression). 0 when the container actually produced output (a real
 # crash/health failure that SHOULD fail the pipeline).
 LOGS_EMPTY=0
-
-# Redact obvious secret shapes before printing build/deploy logs to CI
-# stderr: a crash-looped container may have echoed config (DATABASE_URL,
-# STEWARD_* secrets, Bearer tokens) to its logs (SEC-129).
-redact_secrets() {
-  sed -E \
-    -e 's#([A-Za-z][A-Za-z0-9+.-]*://[^/@[:space:]:]*:)[^@/[:space:]]+@#\1…REDACTED…@#g' \
-    -e 's#([?&](access_key|access_token|api_key|apikey|auth|authorization|client_secret|code|credential|key|password|passwd|pwd|secret|signature|sig|token|x-amz-credential|x-amz-security-token|x-amz-signature)=)[^&#"'"'"'[:space:]]+#\1…REDACTED…#gI' \
-    -e 's/(Bearer )[A-Za-z0-9._~+/-]+/\1…REDACTED…/g' \
-    -e 's/(([A-Za-z_][A-Za-z0-9_]*_(URL|URI|DSN)|URL|URI|DSN)"[[:space:]]*:[[:space:]]*")[^"]*/\1…REDACTED…/gI' \
-    -e 's/(([A-Za-z_][A-Za-z0-9_]*_(URL|URI|DSN)|URL|URI|DSN)[[:space:]]*[:=][[:space:]]*")[^"]*/\1…REDACTED…/gI' \
-    -e "s/(([A-Za-z_][A-Za-z0-9_]*_(URL|URI|DSN)|URL|URI|DSN)[[:space:]]*[:=][[:space:]]*')[^']*/\1…REDACTED…/gI" \
-    -e 's/(([A-Za-z_][A-Za-z0-9_]*_(URL|URI|DSN)|URL|URI|DSN)[[:space:]]*[:=][[:space:]]*)[^[:space:],}]+/\1…REDACTED…/gI' \
-    -e 's/((SECRET|SECRETS|PASSWORD|PASS|SALT|TOKEN|KEY|KEYS|HMAC|PRIVATE)[A-Z_]*"[[:space:]]*:[[:space:]]*")[^"]*/\1…REDACTED…/g' \
-    -e 's/((SECRET|SECRETS|PASSWORD|PASS|SALT|TOKEN|KEY|KEYS|HMAC|PRIVATE)[A-Z_]*[[:space:]]*[:=][[:space:]]*")[^"]*/\1…REDACTED…/g' \
-    -e "s/((SECRET|SECRETS|PASSWORD|PASS|SALT|TOKEN|KEY|KEYS|HMAC|PRIVATE)[A-Z_]*[[:space:]]*[:=][[:space:]]*')[^']*/\1…REDACTED…/g" \
-    -e 's/((SECRET|SECRETS|PASSWORD|PASS|SALT|TOKEN|KEY|KEYS|HMAC|PRIVATE)[A-Z_]*[[:space:]]*[:=][[:space:]]*)[^[:space:],}]+/\1…REDACTED…/g' \
-    -e 's/(^|[^A-Za-z0-9_])stw_[A-Za-z0-9]+/\1stw_…REDACTED…/g' \
-    -e 's/(^|[^0-9a-fA-F])[0-9a-fA-F]{48,}([^0-9a-fA-F]|$)/\1…REDACTED…\2/g'
-}
 
 dump_failure() {
   LOGS_EMPTY=0
@@ -276,7 +306,10 @@ dump_failure() {
   q=$(jq -n --arg id "$DEPLOY_ID" \
     '{query: "query($id: String!) { deployment(id: $id) { id status createdAt staticUrl url canRedeploy } }", variables: {id: $id}}')
   resp=$(gql_raw "$q")
-  fail "deployment: ${resp:-<empty response>}"
+  local deployment_summary
+  deployment_summary=$(printf '%s' "${resp:-}" | jq -c \
+    '.data.deployment | {id, status, createdAt, canRedeploy}' 2>/dev/null) || deployment_summary=""
+  fail "deployment: ${deployment_summary:-$(graphql_diagnostic "$resp")}"
 
   q=$(jq -n --arg id "$DEPLOY_ID" \
     '{query: "query($id: String!) { buildLogs(deploymentId: $id, limit: 200) { message } }", variables: {id: $id}}')
@@ -286,7 +319,7 @@ dump_failure() {
   if [[ -n "$build_logs" ]]; then
     echo "$build_logs" | redact_secrets >&2
   else
-    fail "${resp:-<empty response>}"
+    fail "$(graphql_diagnostic "$resp")"
   fi
 
   q=$(jq -n --arg id "$DEPLOY_ID" \
@@ -297,7 +330,7 @@ dump_failure() {
   if [[ -n "$deploy_logs" ]]; then
     echo "$deploy_logs" | redact_secrets >&2
   else
-    fail "${resp:-<empty response>}"
+    fail "$(graphql_diagnostic "$resp")"
   fi
   fail "----------------------------------------"
 

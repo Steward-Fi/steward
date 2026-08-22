@@ -6,6 +6,7 @@ import { createDb } from "./client";
 
 declare const process: {
   argv: string[];
+  env: Record<string, string | undefined>;
   exitCode?: number;
 };
 
@@ -31,7 +32,55 @@ export interface CoreMigrationLedgerRow {
 interface CoreMigrationDatabaseShape {
   tenantsExists: boolean;
   auditEventsExists: boolean;
+  legacyFingerprintMatches: boolean;
   publicRelationCount: number;
+}
+
+export interface MigrationTimeouts {
+  connectSeconds: number;
+  advisoryLockMs: number;
+  statementMs: number;
+  overallMs: number;
+}
+
+function positiveInteger(value: string | undefined, fallback: number, name: string): number {
+  if (value === undefined || value.trim() === "") return fallback;
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+    throw new Error(`[migrate] ${name} must be a positive integer`);
+  }
+  return parsed;
+}
+
+export function resolveMigrationTimeouts(
+  env: Record<string, string | undefined> = process.env,
+): MigrationTimeouts {
+  const connectSeconds = positiveInteger(
+    env.STEWARD_MIGRATION_CONNECT_TIMEOUT_SECONDS,
+    15,
+    "STEWARD_MIGRATION_CONNECT_TIMEOUT_SECONDS",
+  );
+  const advisoryLockMs = positiveInteger(
+    env.STEWARD_MIGRATION_LOCK_TIMEOUT_MS,
+    60_000,
+    "STEWARD_MIGRATION_LOCK_TIMEOUT_MS",
+  );
+  const statementMs = positiveInteger(
+    env.STEWARD_MIGRATION_STATEMENT_TIMEOUT_MS,
+    300_000,
+    "STEWARD_MIGRATION_STATEMENT_TIMEOUT_MS",
+  );
+  const overallMs = positiveInteger(
+    env.STEWARD_MIGRATION_OVERALL_TIMEOUT_MS,
+    600_000,
+    "STEWARD_MIGRATION_OVERALL_TIMEOUT_MS",
+  );
+  if (advisoryLockMs > overallMs || statementMs > overallMs) {
+    throw new Error(
+      "[migrate] migration lock/statement timeouts must not exceed the overall timeout",
+    );
+  }
+  return { connectSeconds, advisoryLockMs, statementMs, overallMs };
 }
 
 /**
@@ -92,6 +141,11 @@ export function assertCoreMigrationLedgerIntegrity(
       "[migrate] Core migration journal exists without public.tenants; refusing the wrong database",
     );
   }
+  if (rows.length === 0 && database.tenantsExists && !database.legacyFingerprintMatches) {
+    throw new Error(
+      "[migrate] Non-empty database resembles Steward but does not match the complete legacy schema fingerprint; refusing to create migration bookkeeping",
+    );
+  }
   if (rows.length === 0 && !database.tenantsExists && database.publicRelationCount > 0) {
     throw new Error(
       "[migrate] Non-empty public schema has no Steward migration history; refusing a shared database",
@@ -103,10 +157,10 @@ export function assertCoreMigrationLedgerIntegrity(
   if (
     auditMigrationIndex !== -1 &&
     recordedIndices.some((index) => index >= auditMigrationIndex) &&
-    !database.auditEventsExists
+    (!database.auditEventsExists || !database.legacyFingerprintMatches)
   ) {
     throw new Error(
-      `[migrate] Journal claims ${LEGACY_BACKFILL_TIP_TAG} but ${LEGACY_BACKFILL_FINGERPRINT_TABLE} is missing`,
+      `[migrate] Journal claims ${LEGACY_BACKFILL_TIP_TAG} but the complete legacy schema fingerprint does not match`,
     );
   }
 
@@ -140,9 +194,10 @@ export function assertCoreMigrationLedgerIntegrity(
 export const LEGACY_BACKFILL_TIP_TAG = "0024_audit_events";
 
 /**
- * Fingerprint proving a legacy DB actually reached the psql-era tip: the
- * newest table 0024 created. `public.tenants` (0000) alone says nothing about
- * how far the psql loop got before the DB was frozen.
+ * The newest table created by the legacy psql-era tip. Before backfilling its
+ * ledger, runMigrations additionally verifies the complete 0000-0024 relation,
+ * migration-specific column, and critical-index fingerprint; this sentinel is
+ * retained for the explicit tip lookup and diagnostics.
  */
 export const LEGACY_BACKFILL_FINGERPRINT_TABLE = "public.audit_events";
 
@@ -182,19 +237,38 @@ function hashMigration(tag: string): string {
  * used to `psql -f` each .sql by hand), we backfill `drizzle.__drizzle_migrations`
  * from the journal so the migrator doesn't try to re-apply non-idempotent DDL.
  * Heuristic: if `__drizzle_migrations` is empty AND `tenants` exists (was
- * created by 0000), the DB came from the psql loop. We then FINGERPRINT the
- * psql-era tip (`LEGACY_BACKFILL_FINGERPRINT_TABLE`, created by 0024) and seed
- * only the entries through that tip — seeding the whole current journal would
- * silently skip every migration between the DB's true tip and now, including
- * constraint-only hardening migrations whose absence produces no runtime error.
+ * created by 0000), the DB may have come from the psql loop. Before accepting
+ * it, verify the complete 0000-0024 relation, migration-specific column, and
+ * critical-index fingerprint. Then seed only entries through that tip —
+ * seeding the whole current journal would silently skip every migration
+ * between the DB's true tip and now, including constraint-only hardening
+ * migrations whose absence produces no runtime error.
  */
 export async function runMigrations(): Promise<{ applied: string[] }> {
-  const { client, db } = createDb();
+  const timeouts = resolveMigrationTimeouts();
+  const { client, db } = createDb(undefined, {
+    max: 1,
+    connectTimeoutSeconds: timeouts.connectSeconds,
+    statementTimeoutMs: timeouts.statementMs,
+    lockTimeoutMs: timeouts.advisoryLockMs,
+    idleInTransactionTimeoutMs: timeouts.statementMs,
+  });
+  let overallTimedOut = false;
+  let deadlineClose: Promise<void> | undefined;
+  const overallTimer = setTimeout(() => {
+    overallTimedOut = true;
+    deadlineClose = client.end({ timeout: 0 });
+    void deadlineClose.catch(() => undefined);
+  }, timeouts.overallMs);
+  let advisoryLockHeld = false;
 
   try {
     // Session-scoped advisory lock spans the whole migrator (which uses its
-    // own transaction). pg_advisory_lock blocks until acquired.
+    // own transaction). Give this wait its own shorter server-side bound.
+    await client`SELECT set_config('statement_timeout', ${`${timeouts.advisoryLockMs}ms`}, false)`;
     await client`SELECT pg_advisory_lock(hashtextextended(${ADVISORY_LOCK_KEY}, 0))`;
+    advisoryLockHeld = true;
+    await client`SELECT set_config('statement_timeout', ${`${timeouts.statementMs}ms`}, false)`;
 
     try {
       const journal = readJournal();
@@ -213,15 +287,63 @@ export async function runMigrations(): Promise<{ applied: string[] }> {
         SELECT to_regclass(${LEGACY_BACKFILL_FINGERPRINT_TABLE}) AS r
       `) as Array<{ r: string | null }>;
       const databaseInventory = (await client`
-        SELECT count(*) FILTER (
-          WHERE namespace.nspname = 'public' AND relation.relkind IN ('r', 'p')
-        )::int AS public_relation_count
+        SELECT
+          count(*) FILTER (
+            WHERE namespace.nspname = 'public' AND relation.relkind IN ('r', 'p')
+          )::int AS public_relation_count,
+          (
+            SELECT count(*) = 28
+            FROM (VALUES
+              ('agents'), ('approval_queue'), ('encrypted_keys'), ('policies'),
+              ('tenants'), ('transactions'), ('accounts'), ('authenticators'), ('sessions'),
+              ('user_tenants'), ('users'), ('agent_wallets'), ('encrypted_chain_keys'),
+              ('webhook_deliveries'), ('secrets'), ('secret_routes'), ('proxy_audit_log'),
+              ('tenant_configs'), ('webhook_configs'), ('auto_approval_rules'),
+              ('auth_kv_store'), ('refresh_tokens'), ('policy_templates'),
+              ('agent_registrations'), ('reputation_cache'), ('registry_index'),
+              ('trade_sessions'), ('audit_events')
+            ) AS required(relation_name)
+            WHERE to_regclass('public.' || required.relation_name) IS NOT NULL
+          ) AND (
+            SELECT count(*) = 21
+            FROM (VALUES
+              ('agents', 'owner_user_id'), ('agents', 'wallet_type'),
+              ('tenant_configs', 'allowed_origins'), ('tenant_configs', 'join_mode'),
+              ('tenant_configs', 'email_config'), ('users', 'wallet_chain'),
+              ('proxy_audit_log', 'reason'),
+              ('accounts', 'access_token_iv'), ('accounts', 'access_token_tag'),
+              ('accounts', 'access_token_salt'), ('accounts', 'refresh_token_iv'),
+              ('accounts', 'refresh_token_tag'), ('accounts', 'refresh_token_salt'),
+              ('encrypted_chain_keys', 'venue'), ('encrypted_chain_keys', 'purpose'),
+              ('agent_wallets', 'venue'),
+              ('audit_events', 'tenant_id'), ('audit_events', 'seq'),
+              ('audit_events', 'prev_hash'), ('audit_events', 'hmac'),
+              ('audit_events', 'action')
+            ) AS required(relation_name, column_name)
+            WHERE EXISTS (
+              SELECT 1
+              FROM information_schema.columns column_inventory
+              WHERE column_inventory.table_schema = 'public'
+                AND column_inventory.table_name = required.relation_name
+                AND column_inventory.column_name = required.column_name
+            )
+          ) AND (
+            SELECT count(*) = 6
+            FROM (VALUES
+              ('auth_kv_store_expires_idx'), ('refresh_tokens_token_hash_idx'),
+              ('agent_registrations_tenant_agent_chain_idx'),
+              ('encrypted_chain_keys_agent_chain_venue_idx'),
+              ('trade_sessions_agent_venue_status_idx'), ('audit_events_tenant_seq_idx')
+            ) AS required(index_name)
+            WHERE to_regclass('public.' || required.index_name) IS NOT NULL
+          ) AS legacy_fingerprint_matches
         FROM pg_class relation
         JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
-      `) as Array<{ public_relation_count: number }>;
+      `) as Array<{ public_relation_count: number; legacy_fingerprint_matches: boolean }>;
       const databaseShape: CoreMigrationDatabaseShape = {
         tenantsExists: Boolean(tenantsExists[0]?.r),
         auditEventsExists: Boolean(auditEventsExists[0]?.r),
+        legacyFingerprintMatches: databaseInventory[0]?.legacy_fingerprint_matches === true,
         publicRelationCount: databaseInventory[0]?.public_relation_count ?? 0,
       };
       let existingRows: CoreMigrationLedgerRow[] = [];
@@ -292,6 +414,52 @@ export async function runMigrations(): Promise<{ applied: string[] }> {
         SELECT
           to_regclass('public.tenants') IS NOT NULL AS tenants_exists,
           to_regclass(${LEGACY_BACKFILL_FINGERPRINT_TABLE}) IS NOT NULL AS audit_events_exists,
+          (
+            SELECT count(*) = 28
+            FROM (VALUES
+              ('agents'), ('approval_queue'), ('encrypted_keys'), ('policies'),
+              ('tenants'), ('transactions'), ('accounts'), ('authenticators'), ('sessions'),
+              ('user_tenants'), ('users'), ('agent_wallets'), ('encrypted_chain_keys'),
+              ('webhook_deliveries'), ('secrets'), ('secret_routes'), ('proxy_audit_log'),
+              ('tenant_configs'), ('webhook_configs'), ('auto_approval_rules'),
+              ('auth_kv_store'), ('refresh_tokens'), ('policy_templates'),
+              ('agent_registrations'), ('reputation_cache'), ('registry_index'),
+              ('trade_sessions'), ('audit_events')
+            ) AS required(relation_name)
+            WHERE to_regclass('public.' || required.relation_name) IS NOT NULL
+          ) AND (
+            SELECT count(*) = 21
+            FROM (VALUES
+              ('agents', 'owner_user_id'), ('agents', 'wallet_type'),
+              ('tenant_configs', 'allowed_origins'), ('tenant_configs', 'join_mode'),
+              ('tenant_configs', 'email_config'), ('users', 'wallet_chain'),
+              ('proxy_audit_log', 'reason'),
+              ('accounts', 'access_token_iv'), ('accounts', 'access_token_tag'),
+              ('accounts', 'access_token_salt'), ('accounts', 'refresh_token_iv'),
+              ('accounts', 'refresh_token_tag'), ('accounts', 'refresh_token_salt'),
+              ('encrypted_chain_keys', 'venue'), ('encrypted_chain_keys', 'purpose'),
+              ('agent_wallets', 'venue'),
+              ('audit_events', 'tenant_id'), ('audit_events', 'seq'),
+              ('audit_events', 'prev_hash'), ('audit_events', 'hmac'),
+              ('audit_events', 'action')
+            ) AS required(relation_name, column_name)
+            WHERE EXISTS (
+              SELECT 1
+              FROM information_schema.columns column_inventory
+              WHERE column_inventory.table_schema = 'public'
+                AND column_inventory.table_name = required.relation_name
+                AND column_inventory.column_name = required.column_name
+            )
+          ) AND (
+            SELECT count(*) = 6
+            FROM (VALUES
+              ('auth_kv_store_expires_idx'), ('refresh_tokens_token_hash_idx'),
+              ('agent_registrations_tenant_agent_chain_idx'),
+              ('encrypted_chain_keys_agent_chain_venue_idx'),
+              ('trade_sessions_agent_venue_status_idx'), ('audit_events_tenant_seq_idx')
+            ) AS required(index_name)
+            WHERE to_regclass('public.' || required.index_name) IS NOT NULL
+          ) AS legacy_fingerprint_matches,
           count(*) FILTER (
             WHERE namespace.nspname = 'public' AND relation.relkind IN ('r', 'p')
           )::int AS public_relation_count
@@ -300,6 +468,7 @@ export async function runMigrations(): Promise<{ applied: string[] }> {
       `) as Array<{
         tenants_exists: boolean;
         audit_events_exists: boolean;
+        legacy_fingerprint_matches: boolean;
         public_relation_count: number;
       }>;
       assertCoreMigrationLedgerIntegrity(
@@ -308,6 +477,7 @@ export async function runMigrations(): Promise<{ applied: string[] }> {
         {
           tenantsExists: postMigrationShape?.tenants_exists ?? false,
           auditEventsExists: postMigrationShape?.audit_events_exists ?? false,
+          legacyFingerprintMatches: postMigrationShape?.legacy_fingerprint_matches ?? false,
           publicRelationCount: postMigrationShape?.public_relation_count ?? 0,
         },
         {
@@ -322,10 +492,21 @@ export async function runMigrations(): Promise<{ applied: string[] }> {
 
       return { applied };
     } finally {
-      await client`SELECT pg_advisory_unlock(hashtextextended(${ADVISORY_LOCK_KEY}, 0))`;
+      if (advisoryLockHeld && !overallTimedOut) {
+        await client`SELECT pg_advisory_unlock(hashtextextended(${ADVISORY_LOCK_KEY}, 0))`;
+      }
     }
+  } catch (error) {
+    if (overallTimedOut) {
+      throw new Error(`[migrate] Migration exceeded the ${timeouts.overallMs}ms overall timeout`, {
+        cause: error,
+      });
+    }
+    throw error;
   } finally {
-    await client.end();
+    clearTimeout(overallTimer);
+    if (deadlineClose) await deadlineClose.catch(() => undefined);
+    else await client.end({ timeout: 0 });
   }
 }
 
