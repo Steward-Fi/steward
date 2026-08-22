@@ -228,6 +228,8 @@ export async function recordVaultSpend(
     eventId?: string;
     occurredAt?: Date | number;
     throwOnError?: boolean;
+    /** SPL/token mint. When present, native-price fallback is forbidden. */
+    tokenAddress?: string;
   } = {},
 ): Promise<void> {
   if (!isRedisAvailable()) {
@@ -253,10 +255,24 @@ export async function recordVaultSpend(
 
   // Convert native wei → USD using the oracle. weiToUsd does bigint-safe scaling
   // (no Number(BigInt) precision loss) and applies the per-chain native price.
-  const usdValue = await priceOracle.weiToUsd(valueWei, chainId);
+  const tokenAddress =
+    options.tokenAddress && options.tokenAddress !== "native" ? options.tokenAddress : undefined;
+  const usdValue = await priceOracle.weiToUsd(valueWei, chainId, tokenAddress);
 
   if (usdValue !== null && usdValue > 0) {
     await recordAgentSpend(agentId, tenantId, usdValue, `chain:${chainId}`, options);
+    return;
+  }
+
+  // A native conservative-price floor cannot value SPL base units: decimals
+  // and market price are mint-specific. Keep the durable recovery effect
+  // pending so a retry can succeed after oracle support/availability returns.
+  if (tokenAddress) {
+    if (options.throwOnError) {
+      throw new Error(
+        `exact token valuation unavailable for chain ${chainId} token ${tokenAddress}`,
+      );
+    }
     return;
   }
 

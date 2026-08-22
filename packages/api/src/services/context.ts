@@ -700,14 +700,25 @@ export async function getTransactionStats(agentId: string, chainId?: number) {
         coalesce(
           sum(
             case
-              when ${transactions.createdAt} >= ${oneDayAgoStr}::timestamptz${chainFilter} then (${transactions.value})::numeric
+              when ${transactions.createdAt} >= ${oneDayAgoStr}::timestamptz${chainFilter}
+                and not (
+                  coalesce(${transactions.actionPayload}->>'type', '') = 'transfer'
+                  and coalesce(${transactions.actionPayload}->>'token', 'native') <> 'native'
+                )
+              then (${transactions.value})::numeric
               else 0
             end
           ),
           0
         )::text
       `,
-      spentThisWeek: sql<string>`coalesce(sum((${transactions.value})::numeric) filter (where true${chainFilter}), 0)::text`,
+      spentThisWeek: sql<string>`coalesce(sum((${transactions.value})::numeric) filter (
+        where true${chainFilter}
+          and not (
+            coalesce(${transactions.actionPayload}->>'type', '') = 'transfer'
+            and coalesce(${transactions.actionPayload}->>'token', 'native') <> 'native'
+          )
+      ), 0)::text`,
       additionalUsdSpentTodayMicros: sql<string>`
         coalesce((
           select sum((${operatorTransferReservations.amountBaseUnits})::numeric)
