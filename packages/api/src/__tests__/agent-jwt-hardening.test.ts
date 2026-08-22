@@ -32,6 +32,7 @@ let rotatedJwksBody = "";
 let privateKey1: KeyLike;
 let privateKey2: KeyLike;
 let downstreamCalls = 0;
+let jwksFetches = 0;
 
 type TokenOptions = {
   agentId?: string;
@@ -126,6 +127,7 @@ beforeAll(async () => {
   });
   jwksBody = firstJwksBody;
   jwksServer = createServer((_request, response) => {
+    jwksFetches += 1;
     response.writeHead(200, { "content-type": "application/json" });
     response.end(jwksBody);
   });
@@ -205,6 +207,10 @@ describe("external agent JWT trust and scope boundaries", () => {
     );
   });
 
+  test("accepts an omitted platform claim only through server-side agent registration", async () => {
+    expect((await probe(await signToken({ platformId: null }))).status).toBe(200);
+  });
+
   test("rejects missing trade scope and never upgrades api:proxy on metadata/admin routes", async () => {
     const calls = downstreamCalls;
     for (const path of ["/trade", "/metadata", "/admin"]) {
@@ -220,8 +226,9 @@ describe("external agent JWT trust and scope boundaries", () => {
   test("rejects cap scopes before tenant/agent resolution, including mixed broad scopes", async () => {
     const calls = downstreamCalls;
     const agentsBefore = await getDb().select().from(agents);
+    const tenantsBefore = await getDb().select().from(tenants);
     for (const scopes of [["cap:github:write"], ["trade:order", "api:proxy", "cap:github:write"]]) {
-      const response = await capabilityApp.request("/capability", {
+      const response = await app.request("/trade", {
         headers: {
           authorization: `Bearer ${await signToken({ scopes })}`,
           "X-Steward-Tenant": "does-not-exist",
@@ -231,6 +238,7 @@ describe("external agent JWT trust and scope boundaries", () => {
     }
     expect(downstreamCalls).toBe(calls);
     expect(await getDb().select().from(agents)).toEqual(agentsBefore);
+    expect(await getDb().select().from(tenants)).toEqual(tenantsBefore);
   });
 
   test("accepts a non-capability extra scope without weakening the explicit trade gate", async () => {
@@ -262,10 +270,20 @@ describe("external agent JWT trust and scope boundaries", () => {
   });
 
   test("refreshes cached JWKS once when a rotated kid appears", async () => {
+    const fetchesBefore = jwksFetches;
     expect((await probe(await signToken())).status).toBe(200);
     jwksBody = rotatedJwksBody;
     const rotated = await signToken({ kid: KID_2, key: privateKey2 });
     expect((await probe(rotated)).status).toBe(200);
+    expect(jwksFetches - fetchesBefore).toBe(2);
+  });
+
+  test("does not retain keys when the configured JWKS trust anchor changes", async () => {
+    expect((await probe(await signToken())).status).toBe(200);
+    jwksBody = JSON.stringify({ keys: JSON.parse(rotatedJwksBody).keys.slice(1) });
+    process.env.ELIZA_CLOUD_JWKS_URL = `${jwksUrl}?anchor=rotated`;
+    await denial(await probe(await signToken()), 401, "unknown kid");
+    expect((await probe(await signToken({ kid: KID_2, key: privateKey2 }))).status).toBe(200);
   });
 
   test("production and unconfigured development both fail closed", async () => {

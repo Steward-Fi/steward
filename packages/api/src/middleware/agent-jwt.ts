@@ -16,6 +16,7 @@ type JwksKey = JsonWebKey & { kid?: string; alg?: string; use?: string };
 type Jwks = { keys?: JwksKey[] };
 
 type CacheEntry = {
+  url: string;
   keys: Map<string, Awaited<ReturnType<typeof importJWK>>>;
   expiresAt: number;
 };
@@ -58,10 +59,12 @@ function resolveJwksUrl(): string {
 
 async function loadJwks(
   forceRefresh = false,
+  jwksUrl = resolveJwksUrl(),
 ): Promise<Map<string, Awaited<ReturnType<typeof importJWK>>>> {
-  const jwksUrl = resolveJwksUrl();
   const now = Date.now();
-  if (!forceRefresh && jwksCache && jwksCache.expiresAt > now) return jwksCache.keys;
+  if (!forceRefresh && jwksCache?.url === jwksUrl && jwksCache.expiresAt > now) {
+    return jwksCache.keys;
+  }
 
   const response = await fetch(jwksUrl, {
     headers: { accept: "application/json" },
@@ -78,7 +81,7 @@ async function loadJwks(
     keys.set(jwk.kid, await importJWK(jwk, jwk.alg ?? "RS256"));
   }
 
-  jwksCache = { keys, expiresAt: now + JWKS_CACHE_MS };
+  jwksCache = { url: jwksUrl, keys, expiresAt: now + JWKS_CACHE_MS };
   return keys;
 }
 
@@ -272,6 +275,7 @@ export function isAgentJwtFailure(
  */
 export async function authenticateAgentJwt(
   c: Context<{ Variables: AppVariables }>,
+  options: { rejectCapabilityScopes?: boolean } = {},
 ): Promise<AgentJwtAuthenticationResult | AgentJwtAuthenticationFailure> {
   const token = getBearer(c);
   if (!token) return { kind: "invalid-token", reason: "missing bearer token" };
@@ -281,8 +285,9 @@ export async function authenticateAgentJwt(
   if (header.alg !== "RS256") return { kind: "invalid-token", reason: "unsupported alg" };
 
   try {
-    const hadFreshCache = Boolean(jwksCache && jwksCache.expiresAt > Date.now());
-    let keys = await loadJwks();
+    const jwksUrl = resolveJwksUrl();
+    const hadFreshCache = Boolean(jwksCache?.url === jwksUrl && jwksCache.expiresAt > Date.now());
+    let keys = await loadJwks(false, jwksUrl);
     let key = keys.get(header.kid);
     // Issuers can publish a rotated kid before this process's cache expires.
     // Refresh exactly once on a miss so rotation is prompt while an actually
@@ -290,7 +295,7 @@ export async function authenticateAgentJwt(
     const now = Date.now();
     if (!key && hadFreshCache && now - lastJwksMissRefreshAt >= JWKS_MISS_REFRESH_MIN_INTERVAL_MS) {
       lastJwksMissRefreshAt = now;
-      keys = await loadJwks(true);
+      keys = await loadJwks(true, jwksUrl);
       key = keys.get(header.kid);
     }
     if (!key) return { kind: "invalid-token", reason: "unknown kid" };
@@ -303,7 +308,7 @@ export async function authenticateAgentJwt(
     const agentId = agentIdFromPayload(payload);
     if (!agentId) return { kind: "invalid-token", reason: "invalid agent claims" };
     const scopes = stringArrayClaim(payload, "scopes", "scope");
-    if (scopes.some((scope) => scope.startsWith("cap:"))) {
+    if (options.rejectCapabilityScopes && scopes.some((scope) => scope.startsWith("cap:"))) {
       return { kind: "invalid-token", reason: "unsupported capability scope" };
     }
     const nowSeconds = Math.floor(Date.now() / 1000);
@@ -410,7 +415,7 @@ export async function installAgentJwtContext(
  * trading endpoints depend on.
  */
 export async function requireAgentJwt(c: Context<{ Variables: AppVariables }>, next: Next) {
-  const auth = await authenticateAgentJwt(c);
+  const auth = await authenticateAgentJwt(c, { rejectCapabilityScopes: true });
   if (isAgentJwtFailure(auth)) {
     // Preserve the EXACT legacy wire behavior per failure kind.
     if (auth.kind === "tenant-not-found") {
@@ -475,7 +480,7 @@ export async function requireCapabilityAgentJwt(
  * bindings/grants, never by token scope. ONLY provider-action routes use this.
  */
 export async function requireProviderAgentJwt(c: Context<{ Variables: AppVariables }>, next: Next) {
-  const auth = await authenticateAgentJwt(c);
+  const auth = await authenticateAgentJwt(c, { rejectCapabilityScopes: true });
   if (isAgentJwtFailure(auth)) {
     // Map onto the spec §8 deny table for provider-action routes.
     if (auth.kind === "token-expired") {

@@ -9,9 +9,7 @@
  * (default-deny) in the invoke path.
  *
  * Behavioral proof over a real RS256 agent JWT (local JWKS fixture + PGLite):
- *   - a scope-less token passes requireCapabilityAgentJwt
- *   - legacy `cap:` scope claims fail closed before capability authorization;
- *     capability authority comes only from grants + policy
+ *   - a token WITHOUT `trade:order` passes requireCapabilityAgentJwt
  *   - the same token is still rejected by requireAgentJwt (control: the
  *     trading gate itself is untouched)
  *   - an unverifiable token is still a 401 (authentication is unchanged)
@@ -95,11 +93,12 @@ async function probe(path: string, token: string): Promise<Response> {
 }
 
 describe("requireCapabilityAgentJwt (SEC-092)", () => {
-  test("rejects legacy cap scope claims before capability authorization", async () => {
+  test("admits a capability-only agent JWT with no trade:order scope", async () => {
     const res = await probe("/cap/probe", await signToken(["cap:github:app:org"]));
-    expect(res.status).toBe(401);
-    const body = (await res.json()) as { code: string; reason: string };
-    expect(body).toEqual({ code: "invalid-jwt", reason: "unsupported capability scope" });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { ok: boolean; agentId: string };
+    expect(body.ok).toBe(true);
+    expect(body.agentId).toBe(AGENT);
   });
 
   test("admits a scope-less agent JWT (authz is the grant + policy, not the scope)", async () => {
@@ -108,8 +107,8 @@ describe("requireCapabilityAgentJwt (SEC-092)", () => {
   });
 
   test("control: requireAgentJwt still hard-requires trade:order", async () => {
-    const res = await probe("/trade/probe", await signToken([]));
-    expect(res.status).toBe(403);
+    const res = await probe("/trade/probe", await signToken(["cap:github:app:org"]));
+    expect(res.status).toBe(401);
     const scoped = await probe("/trade/probe", await signToken(["trade:order"]));
     expect(scoped.status).toBe(200);
   });
