@@ -2,8 +2,10 @@ import { createHash, randomUUID } from "node:crypto";
 import {
   agents,
   agentWallets,
+  createDb,
   encryptedChainKeys,
   encryptedKeys,
+  getDatabaseDriver,
   getDb,
   policies,
   toAgentIdentity,
@@ -643,6 +645,64 @@ function usesCustodyAdvisoryLock(): boolean {
   return process.env.STEWARD_DB_MODE !== "pglite" && process.env.STEWARD_PGLITE_MEMORY !== "true";
 }
 
+const MAX_CUSTODY_SIGNING_CONNECTIONS = 4;
+let availableCustodySigningConnections = MAX_CUSTODY_SIGNING_CONNECTIONS;
+const custodySigningConnectionWaiters: Array<() => void> = [];
+
+async function acquireCustodySigningConnectionSlot(): Promise<() => void> {
+  if (availableCustodySigningConnections > 0) {
+    availableCustodySigningConnections -= 1;
+  } else {
+    await new Promise<void>((resolve) => custodySigningConnectionWaiters.push(resolve));
+  }
+
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    const next = custodySigningConnectionWaiters.shift();
+    if (next) next();
+    else availableCustodySigningConnections += 1;
+  };
+}
+
+/**
+ * Hold a session advisory lock on a bounded, single-connection client and bind
+ * every nested vault DB operation to that same client. Unlike an outer SQL
+ * transaction, autocommit checkpoints remain durable before broadcast; unlike
+ * borrowing a connection from the shared pool, queued custody rotations cannot
+ * exhaust the connections the signer needs to finish and release its lock.
+ */
+type VaultDb = ReturnType<typeof getDb>;
+
+async function withCustodySigningLock<T>(
+  lockKey: string,
+  use: (db: VaultDb) => Promise<T>,
+): Promise<T> {
+  if (getDatabaseDriver() !== "postgres-js") {
+    throw new Error("Custody-fenced transaction signing requires a PostgreSQL session transport");
+  }
+
+  const releaseSlot = await acquireCustodySigningConnectionSlot();
+  let connection: ReturnType<typeof createDb> | undefined;
+  let locked = false;
+  try {
+    connection = createDb(undefined, { max: 1, connectTimeoutSeconds: 10 });
+    const { client, db } = connection;
+    await client`select pg_advisory_lock(hashtextextended(${lockKey}, 0))`;
+    locked = true;
+    return await use(db);
+  } finally {
+    if (locked && connection) {
+      await connection.client`
+        select pg_advisory_unlock(hashtextextended(${lockKey}, 0))
+      `.catch(() => {});
+    }
+    await connection?.client.end({ timeout: 0 }).catch(() => {});
+    releaseSlot();
+  }
+}
+
 interface MnemonicWalletMaterial {
   evmPrivateKey: `0x${string}`;
   evmAddress: string;
@@ -844,19 +904,21 @@ export class Vault {
     return { payload, walletAddress: wallet.address };
   }
 
-  private async getExternalKeyWallet(args: {
-    agentId: string;
-    chainFamily: WalletChainFamily;
-    venue?: string | null;
-  }): Promise<
+  private async getExternalKeyWallet(
+    args: {
+      agentId: string;
+      chainFamily: WalletChainFamily;
+      venue?: string | null;
+    },
+    queryDb: VaultDb = getDb(),
+  ): Promise<
     | {
         address: string;
         metadata: ExternalKeyWalletMetadata;
       }
     | undefined
   > {
-    const db = getDb();
-    const [wallet] = await db
+    const [wallet] = await queryDb
       .select({ address: agentWallets.address, metadata: agentWallets.metadata })
       .from(agentWallets)
       .where(
@@ -973,8 +1035,9 @@ export class Vault {
     hash: string,
     options: SignTransactionOptions,
     signedArtifactEvidence?: SignedArtifactEvidence,
+    queryDb: VaultDb = getDb(),
   ): Promise<void> {
-    const db = getDb();
+    const db = queryDb;
     const txId = options.txId ?? crypto.randomUUID();
     const signedAt = new Date();
     if (shouldBroadcast && options.solanaRecoveryExecutionToken) {
@@ -1742,16 +1805,16 @@ export class Vault {
       };
 
       if (usesCustodyAdvisoryLock()) {
-        return db.transaction(async (tx) => {
-          await tx.execute(
-            sql`select pg_advisory_xact_lock(hashtextextended(${custodyTransitionLockKey(request.tenantId, request.agentId, "evm", venue)}, 0))`,
-          );
-          await assertCurrentVenueWallet(tx);
-          // Retain the transaction-scoped custody lock through provider/RPC
-          // signing and broadcast. A rotation either commits first and fails
-          // this re-read, or waits until this authorized attempt is complete.
-          return this.signTransactionWithResolvedCustody(request, options);
-        });
+        return withCustodySigningLock(
+          custodyTransitionLockKey(request.tenantId, request.agentId, "evm", venue),
+          async (signingDb) => {
+            await assertCurrentVenueWallet(signingDb);
+            // Retain the session custody lock through provider/RPC signing and
+            // broadcast. A rotation either commits first and fails this re-read,
+            // or waits until this authorized attempt is complete.
+            return this.signTransactionWithResolvedCustody(request, options, signingDb);
+          },
+        );
       }
       await assertCurrentVenueWallet(db);
     }
@@ -1762,9 +1825,8 @@ export class Vault {
   private async signTransactionWithResolvedCustody(
     request: SignRequest,
     options: SignTransactionOptions,
+    db: VaultDb = getDb(),
   ): Promise<string> {
-    const db = getDb();
-
     // Verify agent exists for this tenant
     const [agentRow] = await db
       .select({ id: agents.id, walletAddress: agents.walletAddress })
@@ -1787,6 +1849,7 @@ export class Vault {
       chainFamily: chainFamilyToUse,
       venue,
       walletAddress: request.walletAddress,
+      db,
     });
 
     // ── Resolve the correct signing key ─────────────────────────────────
@@ -1826,11 +1889,14 @@ export class Vault {
         },
       );
     } else {
-      const externalWallet = await this.getExternalKeyWallet({
-        agentId: request.agentId,
-        chainFamily: chainFamilyToUse,
-        venue,
-      });
+      const externalWallet = await this.getExternalKeyWallet(
+        {
+          agentId: request.agentId,
+          chainFamily: chainFamilyToUse,
+          venue,
+        },
+        db,
+      );
       if (externalWallet) {
         if (options.expectedBackend !== "external-custody") {
           throw new BackendBindingMismatchError(
@@ -1918,10 +1984,18 @@ export class Vault {
                         "External custody signer changed the prepared transaction hash",
                       );
                     }
-                    await this.recordSignedTransaction(request, chainId, true, transactionHash, {
-                      ...options,
-                      status: "outcome_unknown",
-                    });
+                    await this.recordSignedTransaction(
+                      request,
+                      chainId,
+                      true,
+                      transactionHash,
+                      {
+                        ...options,
+                        status: "outcome_unknown",
+                      },
+                      undefined,
+                      db,
+                    );
                     preparedBroadcastHash = transactionHash;
                   },
                 }
@@ -1956,6 +2030,8 @@ export class Vault {
                   ...options,
                   status: "outcome_unknown",
                 },
+                undefined,
+                db,
               );
             } catch {
               // Deliberately preserve the typed error and its hash. Do not log
@@ -1997,6 +2073,7 @@ export class Vault {
             signed.result,
             options,
             offlineEvidence,
+            db,
           );
         } catch (error) {
           // Once the durable checkpoint has completed, every later failure is
@@ -2133,6 +2210,7 @@ export class Vault {
                 chainId,
                 getPendingNonce: (address) =>
                   publicClient.getTransactionCount({ address, blockTag: "pending" }),
+                db,
               })
             : undefined;
         const nonce = request.nonce ?? (allocatedNonce as number);
@@ -2156,10 +2234,18 @@ export class Vault {
             return client.signTransaction(prepared);
           },
           checkpoint: (transactionHash) =>
-            this.recordSignedTransaction(request, chainId, true, transactionHash, {
-              ...localRecordOptions,
-              status: "outcome_unknown",
-            }),
+            this.recordSignedTransaction(
+              request,
+              chainId,
+              true,
+              transactionHash,
+              {
+                ...localRecordOptions,
+                status: "outcome_unknown",
+              },
+              undefined,
+              db,
+            ),
           broadcast: (serializedTransaction) =>
             publicClient.sendRawTransaction({ serializedTransaction }),
           reconcile: async (transactionHash) => {
@@ -2177,6 +2263,7 @@ export class Vault {
               walletAddress: account.address,
               chainId,
               nonce: allocatedNonce,
+              db,
             });
           },
           finalizeAccepted: async (transactionHash) => {
@@ -2188,12 +2275,21 @@ export class Vault {
                 walletAddress: account.address,
                 chainId,
                 nonce: allocatedNonce,
+                db,
               }).catch(() => {});
             }
-            await this.recordSignedTransaction(request, chainId, true, transactionHash, {
-              ...localRecordOptions,
-              status: localRecordOptions.status ?? "broadcast",
-            });
+            await this.recordSignedTransaction(
+              request,
+              chainId,
+              true,
+              transactionHash,
+              {
+                ...localRecordOptions,
+                status: localRecordOptions.status ?? "broadcast",
+              },
+              undefined,
+              db,
+            );
           },
         });
       } else {
@@ -2211,6 +2307,7 @@ export class Vault {
             chainId,
             getPendingNonce: (address) =>
               publicClient.getTransactionCount({ address, blockTag: "pending" }),
+            db,
           }));
         const gasPrice = await publicClient.getGasPrice();
 
@@ -2245,6 +2342,7 @@ export class Vault {
       hash,
       options,
       shouldBroadcast ? undefined : signedArtifactEvidence,
+      db,
     );
 
     return hash;

@@ -3,6 +3,7 @@ import {
   agentWallets,
   and,
   closeDb,
+  createDb,
   createPostgresClient,
   encryptedChainKeys,
   encryptedKeys,
@@ -10,6 +11,7 @@ import {
   getDb,
   isNull,
   tenants,
+  withRequestDatabase,
 } from "@stwd/db";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import type {
@@ -38,6 +40,7 @@ const externalBeforeImportAgentId = `race-external-first-${suffix}`;
 const importBeforeExternalAgentId = `race-local-first-${suffix}`;
 const typedDataRotationAgentId = `typed-data-rotation-${suffix}`;
 const transactionRotationAgentId = `transaction-rotation-${suffix}`;
+const constrainedPoolAgentId = `constrained-pool-${suffix}`;
 const blocker = databaseUrl ? createPostgresClient(databaseUrl) : null;
 const inspector = databaseUrl ? createPostgresClient(databaseUrl) : null;
 
@@ -619,6 +622,58 @@ suite("custody transitions across real PostgreSQL connections", () => {
     } finally {
       releaseRpc();
       globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("custody-fenced signing does not borrow a second caller-pool connection", async () => {
+    if (!databaseUrl) throw new Error("real PostgreSQL URL is unavailable");
+    const venue = "hyperliquid";
+    const vault = new Vault({ masterPassword: MASTER_PASSWORD });
+    await vault.createAgent(tenantId, constrainedPoolAgentId, "Constrained Pool Agent");
+    const wallet = await vault.provisionVenueWallet({
+      tenantId,
+      agentId: constrainedPoolAgentId,
+      venue,
+      chainFamily: "evm",
+      approvedAddresses: [],
+    });
+    const constrained = createDb(databaseUrl, { max: 1 });
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body)) as { id: number; method: string };
+      if (body.method === "eth_chainId") {
+        return Response.json({ jsonrpc: "2.0", id: body.id, result: "0x2105" });
+      }
+      if (body.method === "eth_gasPrice") {
+        return Response.json({ jsonrpc: "2.0", id: body.id, result: "0x3b9aca00" });
+      }
+      throw new Error(`Unexpected JSON-RPC method: ${body.method}`);
+    }) as typeof fetch;
+
+    try {
+      const signed = await Promise.race([
+        withRequestDatabase(constrained.db, () =>
+          vault.signTransaction({
+            tenantId,
+            agentId: constrainedPoolAgentId,
+            venue,
+            walletAddress: wallet.address,
+            to: "0x1111111111111111111111111111111111111111",
+            value: "1",
+            chainId: 8453,
+            nonce: 0,
+            gasLimit: "21000",
+            broadcast: false,
+          }),
+        ),
+        Bun.sleep(5_000).then(() => {
+          throw new Error("custody-fenced signing exhausted its caller DB pool");
+        }),
+      ]);
+      expect(signed).toMatch(/^0x[0-9a-f]+$/i);
+    } finally {
+      globalThis.fetch = originalFetch;
+      await constrained.client.end({ timeout: 0 });
     }
   });
 });

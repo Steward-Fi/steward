@@ -29,8 +29,9 @@ export async function assertVaultSigningActive(input: {
   venue?: string | null;
   walletAddress?: string | null;
   walletId?: string | null;
+  db?: ReturnType<typeof getDb>;
 }): Promise<void> {
-  const db = getDb();
+  const db = input.db ?? getDb();
   const walletIds = new Set<string>();
 
   if (input.walletId) {
