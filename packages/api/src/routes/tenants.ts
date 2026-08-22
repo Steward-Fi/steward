@@ -18,11 +18,11 @@ import {
   type ApiResponse,
   type AppVariables,
   db,
+  findTenant,
   getConditionSetReferenceValidationError,
   getTenantPayload,
   isNonEmptyString,
   isValidTenantId,
-  type PolicyRule,
   requireTenantLevel,
   safeJsonParse,
   setNoStoreHeaders,
@@ -32,8 +32,8 @@ import {
   tenantConfigs,
   tenants,
 } from "../services/context";
-import { getPolicyRulesValidationError } from "../services/policy-validation";
 import { isRecentMfaTimestamp } from "../services/recent-mfa";
+import { TENANT_DEFAULT_POLICIES_RETIREMENT } from "../services/tenant-policy-retirement";
 
 export const tenantRoutes = new Hono<{ Variables: AppVariables }>();
 const LEGACY_WEBHOOK_DEPRECATION_ERROR =
@@ -116,20 +116,6 @@ function requireRecentTenantAdminMfa(
   );
 }
 
-function getTenantPayloadForRequest(
-  c: Parameters<typeof requireTenantLevel>[0],
-  tenant: Tenant,
-): Omit<Tenant, "apiKeyHash"> & Partial<TenantConfig> {
-  const payload = getTenantPayload(tenant);
-  // Historical webhookUrl values are inert after retirement. Never present one
-  // as an active configuration; /webhooks is the sole signed delivery plane.
-  const { webhookUrl: _webhookUrl, defaultPolicies: _defaultPolicies, ...redacted } = payload;
-  if (requireTenantAdminSession(c) && hasRecentSessionMfa(c)) {
-    return { ...redacted, defaultPolicies: payload.defaultPolicies };
-  }
-  return redacted;
-}
-
 function requirePlatformRouteScope(
   c: Context<{ Variables: AppVariables }>,
   scope: string,
@@ -152,7 +138,7 @@ tenantRoutes.post("/", platformAuthMiddleware(), async (c) => {
     name: string;
     apiKeyHash: string;
     webhookUrl?: string;
-    defaultPolicies?: PolicyRule[];
+    defaultPolicies?: unknown;
   }>(c);
 
   if (!body) {
@@ -186,16 +172,10 @@ tenantRoutes.post("/", platformAuthMiddleware(), async (c) => {
     return c.json<ApiResponse>({ ok: false, error: LEGACY_WEBHOOK_DEPRECATION_ERROR }, 410);
   }
   if (body.defaultPolicies !== undefined) {
-    if (!Array.isArray(body.defaultPolicies)) {
-      return c.json<ApiResponse>({ ok: false, error: "defaultPolicies must be an array" }, 400);
-    }
-    const policiesError = getPolicyRulesValidationError(body.defaultPolicies);
-    if (policiesError) return c.json<ApiResponse>({ ok: false, error: policiesError }, 400);
-    const conditionSetError = await getConditionSetReferenceValidationError(
-      body.id,
-      body.defaultPolicies,
+    return c.json<ApiResponse>(
+      { ok: false, error: TENANT_DEFAULT_POLICIES_RETIREMENT.error },
+      TENANT_DEFAULT_POLICIES_RETIREMENT.status,
     );
-    if (conditionSetError) return c.json<ApiResponse>({ ok: false, error: conditionSetError }, 400);
   }
 
   const apiKeyHash =
@@ -214,7 +194,7 @@ tenantRoutes.post("/", platformAuthMiddleware(), async (c) => {
     const metadata = {
       name: body.name,
       hasWebhook: !!body.webhookUrl,
-      defaultPolicyCount: body.defaultPolicies?.length ?? 0,
+      defaultPolicyCount: 0,
     };
     await appendAudit({
       tenantId: body.id,
@@ -260,8 +240,6 @@ tenantRoutes.post("/", platformAuthMiddleware(), async (c) => {
   tenantConfigs.set(body.id, {
     id: body.id,
     name: body.name,
-    webhookUrl: body.webhookUrl,
-    defaultPolicies: body.defaultPolicies,
   });
 
   return c.json<ApiResponse<Omit<Tenant, "apiKeyHash"> & TenantConfig>>({
@@ -275,7 +253,10 @@ tenantRoutes.get("/:id", requireTenantId, async (c) => {
   const tenant = c.get("tenant");
   return c.json<ApiResponse<Omit<Tenant, "apiKeyHash"> & Partial<TenantConfig>>>({
     ok: true,
-    data: getTenantPayloadForRequest(c, tenant),
+    // Retired process-local webhook/default-policy fields are never presented
+    // as active configuration. Durable control-plane state lives under
+    // /tenants/:id/config; policy authority lives in agent policy rows.
+    data: getTenantPayload(tenant),
   });
 });
 
@@ -284,11 +265,9 @@ tenantRoutes.put("/:id/webhook", requireTenantId, async (c) => {
   const mfaResponse = requireRecentTenantAdminMfa(c, "Tenant webhook updates");
   if (mfaResponse) return mfaResponse;
 
-  const tenant = c.get("tenant");
-  const tenantConfig = c.get("tenantConfig");
   const body = await safeJsonParse<{
     webhookUrl?: string;
-    defaultPolicies?: PolicyRule[];
+    defaultPolicies?: unknown;
   }>(c);
 
   if (!body) {
@@ -299,69 +278,8 @@ tenantRoutes.put("/:id/webhook", requireTenantId, async (c) => {
     return c.json<ApiResponse>({ ok: false, error: LEGACY_WEBHOOK_DEPRECATION_ERROR }, 410);
   }
 
-  if (body.defaultPolicies !== undefined && !Array.isArray(body.defaultPolicies)) {
-    return c.json<ApiResponse>({ ok: false, error: "defaultPolicies must be an array" }, 400);
-  }
-  if (body.defaultPolicies !== undefined) {
-    const policiesError = getPolicyRulesValidationError(body.defaultPolicies);
-    if (policiesError) return c.json<ApiResponse>({ ok: false, error: policiesError }, 400);
-    const conditionSetError = await getConditionSetReferenceValidationError(
-      tenant.id,
-      body.defaultPolicies,
-    );
-    if (conditionSetError) return c.json<ApiResponse>({ ok: false, error: conditionSetError }, 400);
-  }
-
-  const updatedConfig: TenantConfig = {
-    ...tenantConfig,
-    id: tenant.id,
-    name: tenant.name,
-    // Clear any historical inert value when the tenant is next updated.
-    webhookUrl: undefined,
-    defaultPolicies: body.defaultPolicies ?? tenantConfig.defaultPolicies,
-  };
-  const previousConfig: TenantConfig = { ...tenantConfig };
-  await writeAuditEvent({
-    tenantId: tenant.id,
-    actorType: "user",
-    actorId: c.get("userId") ?? tenant.id,
-    action: "tenant.update.authorized",
-    resourceType: "tenant",
-    resourceId: tenant.id,
-    metadata: {
-      webhookUrlChanged: body.webhookUrl !== undefined,
-      defaultPoliciesChanged: body.defaultPolicies !== undefined,
-    },
-    ipAddress: c.req.header("x-forwarded-for") ?? null,
-    userAgent: c.req.header("user-agent") ?? null,
-    requestId: c.get("requestId") ?? null,
-  });
-
-  tenantConfigs.set(tenant.id, updatedConfig);
-
-  try {
-    await writeAuditEvent({
-      tenantId: tenant.id,
-      actorType: "user",
-      actorId: c.get("userId") ?? tenant.id,
-      action: "tenant.update",
-      resourceType: "tenant",
-      resourceId: tenant.id,
-      metadata: {
-        webhookUrlChanged: body.webhookUrl !== undefined,
-        defaultPoliciesChanged: body.defaultPolicies !== undefined,
-      },
-      ipAddress: c.req.header("x-forwarded-for") ?? null,
-      userAgent: c.req.header("user-agent") ?? null,
-      requestId: c.get("requestId") ?? null,
-    });
-  } catch (error) {
-    tenantConfigs.set(tenant.id, previousConfig);
-    throw error;
-  }
-
-  return c.json<ApiResponse<TenantConfig>>({
-    ok: true,
-    data: updatedConfig,
-  });
+  return c.json<ApiResponse>(
+    { ok: false, error: TENANT_DEFAULT_POLICIES_RETIREMENT.error },
+    TENANT_DEFAULT_POLICIES_RETIREMENT.status,
+  );
 });

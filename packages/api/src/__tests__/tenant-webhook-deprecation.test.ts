@@ -1,7 +1,18 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
-import { auditEvents, getDb, tenants, users, userTenants } from "@stwd/db";
+import {
+  __resetAuditHmacKeyCacheForTests,
+  auditEvents,
+  closeDb,
+  getDb,
+  tenants,
+  users,
+  userTenants,
+} from "@stwd/db";
+import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { and, eq, inArray } from "drizzle-orm";
 import { Hono } from "hono";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import type { AppVariables } from "../services/context";
 
 const PLATFORM_KEY = "legacy-webhook-platform-key-with-enough-entropy";
@@ -10,6 +21,15 @@ const CREATE_TENANT_ID = "legacy-webhook-create";
 const LEGACY_URL = "https://attacker.example.test/unsigned";
 const EXPECTED_ERROR =
   "webhookUrl is retired because it cannot provision a receiver-verifiable signing secret; create a webhook with POST /webhooks instead (the secret is returned once)";
+const AUDIT_KEY = "tenant-webhook-deprecation-audit-key-with-enough-entropy";
+const tenantDocs = readFileSync(
+  join(import.meta.dir, "..", "..", "..", "..", "docs", "api-reference", "tenants.mdx"),
+  "utf8",
+);
+const openApi = readFileSync(
+  join(import.meta.dir, "..", "..", "..", "..", "docs", "api-reference", "openapi.json"),
+  "utf8",
+);
 
 let app: Hono<{ Variables: AppVariables }>;
 let tenantConfigs: typeof import("../services/context")["tenantConfigs"];
@@ -17,10 +37,15 @@ let sessionToken: string;
 const USER_ID = "11111111-1111-4111-8111-111111111111";
 
 beforeAll(async () => {
+  process.env.STEWARD_PGLITE_MEMORY = "true";
+  process.env.STEWARD_AUDIT_HMAC_KEY = AUDIT_KEY;
   process.env.STEWARD_PLATFORM_KEYS = PLATFORM_KEY;
   process.env.STEWARD_PLATFORM_KEY_SCOPES = JSON.stringify({
     [PLATFORM_KEY]: ["platform:write", "platform:tenant:create"],
   });
+  __resetAuditHmacKeyCacheForTests();
+  const { db, client } = await createPGLiteDb("memory://");
+  setPGLiteOverride(db, async () => client.close());
 
   const context = await import("../services/context");
   const { tenantRoutes } = await import("../routes/tenants");
@@ -58,8 +83,12 @@ afterAll(async () => {
   await getDb().delete(userTenants).where(eq(userTenants.tenantId, TENANT_ID));
   await getDb().delete(users).where(eq(users.id, USER_ID));
   await getDb().delete(tenants).where(eq(tenants.id, TENANT_ID));
+  await closeDb();
+  delete process.env.STEWARD_PGLITE_MEMORY;
+  delete process.env.STEWARD_AUDIT_HMAC_KEY;
   delete process.env.STEWARD_PLATFORM_KEYS;
   delete process.env.STEWARD_PLATFORM_KEY_SCOPES;
+  __resetAuditHmacKeyCacheForTests();
 });
 
 async function legacyAuditRows() {
@@ -126,5 +155,12 @@ describe("legacy tenant webhook deprecation", () => {
     expect(body.data.webhookUrl).toBeUndefined();
     expect(JSON.stringify(body)).not.toContain(LEGACY_URL);
     expect(response.headers.get("cache-control")).toContain("no-store");
+  });
+
+  it("documents the legacy route as 410-only and keeps it out of OpenAPI", () => {
+    expect(tenantDocs).toContain("returns HTTP 410 for both `webhookUrl`");
+    expect(tenantDocs).toContain("The generated OpenAPI contract likewise");
+    expect(tenantDocs).not.toContain("Update the default policies for a tenant");
+    expect(openApi).not.toContain('\"/tenants/{id}/webhook\"');
   });
 });

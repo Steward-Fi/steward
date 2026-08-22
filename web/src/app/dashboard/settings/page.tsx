@@ -773,9 +773,6 @@ export default function SettingsPage() {
   const { address, tenant } = useAuth();
   const authToken = stewardAuth.getToken();
   const chainId = 8453; // Base mainnet
-  const [webhookUrl, setWebhookUrl] = useState("");
-  const [saving, setSaving] = useState(false);
-  const [saved, setSaved] = useState(false);
   const [showKey, setShowKey] = useState(false);
   const [oidcProviders, setOidcProviders] = useState<OidcProviderForm[]>([]);
   const [oidcLoading, setOidcLoading] = useState(false);
@@ -1495,31 +1492,6 @@ export default function SettingsPage() {
       setTestAccountError(e instanceof Error ? e.message : "Failed to disable test account");
     } finally {
       setTestAccountSaving(false);
-    }
-  }
-
-  async function saveWebhook(e: React.FormEvent) {
-    e.preventDefault();
-    setSaving(true);
-    try {
-      if (!authToken) throw new Error("Sign in again to save settings");
-      const res = await fetch(`${API_URL}/tenants/${encodeURIComponent(TENANT_ID)}/webhook`, {
-        method: "PUT",
-        headers: {
-          Authorization: `Bearer ${authToken}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ webhookUrl: webhookUrl || undefined }),
-      });
-      const data = await res.json();
-      if (data.ok) {
-        setSaved(true);
-        setTimeout(() => setSaved(false), 2000);
-      }
-    } catch (e: unknown) {
-      alert(e instanceof Error ? e.message : "Failed to save");
-    } finally {
-      setSaving(false);
     }
   }
 
@@ -3487,44 +3459,22 @@ const policies = await steward.getPolicies("my-agent")`;
         </div>
       </section>
 
-      {/* Webhook */}
-      <form onSubmit={saveWebhook} className="space-y-4">
+      {/* Webhooks */}
+      <section className="space-y-4">
         <h2 className="font-display text-sm font-600 text-text-secondary tracking-wider uppercase">
           Webhooks
         </h2>
         <p className="text-xs text-text-tertiary max-w-lg">
-          Receive POST requests when transactions need approval or change status. Events include:
-          approval_required, tx_signed, tx_confirmed, tx_failed.
+          Configure receiver-verifiable signed endpoints, event subscriptions, delivery history,
+          retries, and test sends from the dedicated webhook control plane.
         </p>
-        <div>
-          <label className="text-xs text-text-tertiary block mb-1.5">Webhook URL</label>
-          <input
-            type="url"
-            value={webhookUrl}
-            onChange={(e) => setWebhookUrl(e.target.value)}
-            placeholder="https://your-app.com/steward-webhook"
-            className="w-full max-w-lg bg-bg border border-border px-3 py-2 text-sm text-text placeholder:text-text-tertiary focus:outline-none focus:border-accent transition-colors font-mono"
-          />
-        </div>
-        <div className="flex items-center gap-3">
-          <button
-            type="submit"
-            disabled={saving}
-            className="px-4 py-2 text-sm bg-accent text-bg hover:bg-accent-hover transition-colors disabled:opacity-40 font-medium"
-          >
-            {saving ? "Saving..." : "Save Webhook"}
-          </button>
-          {saved && (
-            <motion.span
-              initial={{ opacity: 0, x: -8 }}
-              animate={{ opacity: 1, x: 0 }}
-              className="text-xs text-emerald-400"
-            >
-              Saved
-            </motion.span>
-          )}
-        </div>
-      </form>
+        <a
+          href="/dashboard/webhooks"
+          className="inline-flex px-4 py-2 text-sm bg-accent text-bg hover:bg-accent-hover transition-colors font-medium"
+        >
+          Manage Signed Webhooks
+        </a>
+      </section>
 
       {/* Login Controls */}
       <form onSubmit={saveAuthAbuseControls} className="space-y-4">

@@ -93,6 +93,7 @@ import { normalizeOidcProviders } from "../services/oidc-provider-config";
 import { withPlatformAuthorityDatabase } from "../services/platform-authority-database";
 import { getPolicyRulesValidationError } from "../services/policy-validation";
 import { lockUserSession, lockUserSessions } from "../services/session-lock";
+import { TENANT_DEFAULT_POLICIES_RETIREMENT } from "../services/tenant-policy-retirement";
 import {
   createTenantTestAccountConfig,
   publicTestAccount,
@@ -988,7 +989,7 @@ platform.get("/apps/gas_spend", async (c) => {
 
 /**
  * POST /tenants
- * Body: { id: string; name: string; webhookUrl?: string; defaultPolicies?: PolicyRule[] }
+ * Body: { id: string; name: string; webhookUrl?: string }
  *
  * Creates a new tenant, auto-generates an API key, and returns the raw key
  * (once — it is never stored in plaintext and cannot be retrieved later).
@@ -998,12 +999,13 @@ platform.post("/tenants", async (c) => {
   if (scopeResponse) return scopeResponse;
 
   const db = getDb();
-  const body = await safeJsonParse<{
-    id: string;
-    name: string;
-    webhookUrl?: string;
-    defaultPolicies?: PolicyRule[];
-  }>(c);
+  const body = await safeJsonParse<
+    {
+      id: string;
+      name: string;
+      webhookUrl?: string;
+    } & Record<string, unknown>
+  >(c);
 
   if (!body) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
@@ -1028,14 +1030,10 @@ platform.post("/tenants", async (c) => {
       400,
     );
   }
-  if (body.defaultPolicies !== undefined) {
+  if (body["defaultPolicies"] !== undefined) {
     return c.json<ApiResponse>(
-      {
-        ok: false,
-        error:
-          "defaultPolicies are not persisted by this endpoint; configure per-agent policies instead",
-      },
-      501,
+      { ok: false, error: TENANT_DEFAULT_POLICIES_RETIREMENT.error },
+      TENANT_DEFAULT_POLICIES_RETIREMENT.status,
     );
   }
 
@@ -1108,7 +1106,6 @@ platform.post("/tenants", async (c) => {
       createdAt: Date;
       apiKey: string;
       webhookUrl?: string;
-      defaultPolicies?: PolicyRule[];
     }>
   >(
     {
@@ -2250,13 +2247,8 @@ platform.delete("/tenants/:id", async (c) => {
  * PUT /tenants/:id/policies
  * Body: PolicyRule[]
  *
- * Sets the default policy set for all agents in a tenant.
- * These are applied when an agent has no per-agent policies.
- *
- * Note: Because default policies live in-process (TenantConfig) in the main
- * API, this route stores them as a JSONB blob on the tenant row using a
- * dedicated `default_policies` column convention — integrate with the in-memory
- * tenantConfigs map when mounting in the main app.
+ * Retired compatibility boundary. Tenant defaults were process-local and are
+ * never accepted as policy authority; configure durable per-agent policies.
  */
 platform.put("/tenants/:id/policies", async (c) => {
   const scopeResponse = requirePlatformRouteScope(c, "platform:tenant-policy:write");
@@ -2338,12 +2330,8 @@ platform.put("/tenants/:id/policies", async (c) => {
   }
 
   return c.json<ApiResponse>(
-    {
-      ok: false,
-      error:
-        "Tenant default policies are not persisted or enforced by this endpoint; configure per-agent policies instead",
-    },
-    501,
+    { ok: false, error: TENANT_DEFAULT_POLICIES_RETIREMENT.error },
+    TENANT_DEFAULT_POLICIES_RETIREMENT.status,
   );
 });
 
@@ -2566,7 +2554,7 @@ platform.post("/tenants/:id/agents/batch", async (c) => {
       const identity = await vault().createAgent(tenantId, spec.id, spec.name, spec.platformId);
       createdAgentId = spec.id;
 
-      // Optionally apply default policies
+      // Optionally persist the requested policy set on this agent.
       if (persistedApplyPolicies.length > 0) {
         await db.transaction(async (tx) => {
           await tx.delete(policies).where(eq(policies.agentId, spec.id));

@@ -22,9 +22,13 @@ POST /tenants
   id: string;               // Unique tenant ID (1-64 alphanumeric, _ - . :)
   name: string;             // Display name
   apiKeyHash: string;       // SHA-256 hash of the API key (or raw key — Steward hashes it)
-  defaultPolicies?: PolicyRule[];  // Default policies for new agents
 }
 ```
+
+Tenant-level `defaultPolicies` are retired. Supplying that field returns HTTP
+410 because the historical implementation was process-local and could diverge
+across replicas or disappear after restart. Configure durable policies for each
+agent through the [Policies API](/api-reference/policies).
 
 **Response:**
 
@@ -61,46 +65,44 @@ GET /tenants/:id
   "ok": true,
   "data": {
     "id": "my-org",
-    "name": "My Organization",
-    "defaultPolicies": []
+    "name": "My Organization"
   }
 }
 ```
 
 ---
 
-## Update Default Policies
+## Retired Legacy Update
 
-Update the default policies for a tenant. The historical `webhookUrl` field is retired and returns HTTP 410; it could not securely provision a receiver-known signing secret.
+The historical update route remains only as an explicit fail-closed migration
+boundary. It performs no mutation and returns HTTP 410 for both `webhookUrl`
+and `defaultPolicies` payloads.
 
 ```
 PUT /tenants/:id/webhook
 ```
 
-**Auth:** Tenant API key
+**Auth:** Tenant owner/admin session with recent MFA
 
 **Request Body:**
 
 ```typescript
-{
-  defaultPolicies?: PolicyRule[];  // Default policies for new agents
-}
+{ defaultPolicies: PolicyRule[] }
 ```
 
 **Response:**
 
 ```json
 {
-  "ok": true,
-  "data": {
-    "id": "my-org",
-    "name": "My Organization",
-    "defaultPolicies": [
-      { "type": "spending-limit", "enabled": true, "config": { "maxPerDay": "1000000000000000000" } }
-    ]
-  }
+  "ok": false,
+  "error": "defaultPolicies are retired because process-local tenant policy state is not durable; use /policies and durable per-agent policy assignments instead"
 }
 ```
+
+Use `/policies` and the agent policy-assignment routes for durable policy
+authority. The SDK exposes those supported policy operations directly; it does
+not expose this retired legacy route. The generated OpenAPI contract likewise
+omits the retired route.
 
 ### Webhook Migration and Events
 
@@ -185,13 +187,16 @@ DELETE /platform/tenants/:id
   Deleting a tenant cascades to all agents, wallets, policies, and transactions. This is permanent.
 </Warning>
 
-### Set Default Policies
+### Retired Tenant Default Policy Route
 
 ```
 PUT /platform/tenants/:id/policies
 ```
 
-Sets the default policy template for all agents in the tenant.
+This compatibility route returns HTTP 410 and performs no write. Tenant-wide
+process-local defaults are not policy authority. Use
+`PUT /agents/:agentId/policies` to persist the complete policy set for each
+agent instead.
 
 ---
 
