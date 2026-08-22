@@ -7570,9 +7570,6 @@ user.patch("/me/tenants/:tenantId/users/:targetUserId/deactivate", async (c) => 
     resourceId: targetUserId,
   });
 
-  const issuedBefore = Math.floor(Date.now() / 1000) + 1;
-  await revocationStore.revokeUserTokens(targetUserId, issuedBefore);
-
   const result = await withTenantAuditedTransaction(
       tenantId,
       async (txRaw, appendRequiredAudit) => {
@@ -7612,6 +7609,9 @@ user.patch("/me/tenants/:tenantId/users/:targetUserId/deactivate", async (c) => 
         .where(eq(users.id, targetUserId))
         .limit(1);
       if (!target) return null;
+
+      const issuedBefore = Math.floor(Date.now() / 1000) + 1;
+      await revocationStore.revokeUserTokens(targetUserId, issuedBefore);
 
       await tx
         .update(users)
