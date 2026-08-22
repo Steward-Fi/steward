@@ -1,10 +1,7 @@
 import { describe, expect, it } from "bun:test";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import { signXml } from "@node-saml/node-saml/lib/xml";
 import { type VerifySamlAcsInput, verifySamlAcsResponse } from "../saml";
 
-const ROOT = join(import.meta.dir, "../../../..");
 const IDP_ENTITY_ID = "https://idp.example.test/saml";
 const IDP_SSO_URL = "https://idp.example.test/sso";
 const SP_ENTITY_ID = "https://steward.example.test/saml/metadata";
@@ -62,10 +59,6 @@ xQpVMiAAIZ00Y/Q/hFsXPOLgIFtc3/O0euRQ2zkvk8eqBewjduyaP5dkHfySVfoa
 fDIFQJSzQbapRCV/a6SwPOKV5oD3ElPqkQHIt/U+ezTY0KuCcA==
 -----END CERTIFICATE-----`;
 
-function read(path: string): string {
-  return readFileSync(join(ROOT, path), "utf-8");
-}
-
 function samlTime(offsetMs = 0): string {
   return new Date(Date.now() + offsetMs).toISOString();
 }
@@ -97,7 +90,11 @@ function verifierInput(
   };
 }
 
-function signSamlXml(xml: string, elementName: "Assertion" | "Response"): string {
+function signSamlXml(
+  xml: string,
+  elementName: "Assertion" | "Response",
+  algorithm: "sha1" | "sha256" = "sha256",
+): string {
   return signXml(
     xml,
     `//*[local-name(.)='${elementName}']`,
@@ -108,49 +105,71 @@ function signSamlXml(xml: string, elementName: "Assertion" | "Response"): string
     {
       privateKey: TEST_IDP_PRIVATE_KEY,
       publicCert: TEST_IDP_CERT,
-      signatureAlgorithm: "sha256",
-      digestAlgorithm: "sha256",
+      signatureAlgorithm: algorithm,
+      digestAlgorithm: algorithm,
     },
   );
 }
 
-function signedSamlResponse(): string {
+interface SamlFixtureOptions {
+  assertionSigned?: boolean;
+  responseSigned?: boolean;
+  audience?: string;
+  destination?: string;
+  recipient?: string;
+  assertionIssuer?: string;
+  responseIssuer?: string;
+  inResponseTo?: string;
+  assertionId?: string;
+  algorithm?: "sha1" | "sha256";
+  unsignedResponseAttributes?: string;
+}
+
+function signedSamlResponse(options: SamlFixtureOptions = {}): string {
   const issueInstant = samlTime();
   const notBefore = samlTime(-60_000);
   const notOnOrAfter = samlTime(240_000);
   const assertion = [
-    `<saml:Assertion xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" ID="${ASSERTION_ID}" Version="2.0" IssueInstant="${issueInstant}">`,
-    `<saml:Issuer>${IDP_ENTITY_ID}</saml:Issuer>`,
+    `<saml:Assertion xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" ID="${options.assertionId ?? ASSERTION_ID}" Version="2.0" IssueInstant="${issueInstant}">`,
+    `<saml:Issuer>${options.assertionIssuer ?? IDP_ENTITY_ID}</saml:Issuer>`,
     `<saml:Subject>`,
     `<saml:NameID Format="urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress">${USER_EMAIL}</saml:NameID>`,
     `<saml:SubjectConfirmation Method="urn:oasis:names:tc:SAML:2.0:cm:bearer">`,
-    `<saml:SubjectConfirmationData NotOnOrAfter="${notOnOrAfter}" Recipient="${ACS_URL}"/>`,
+    `<saml:SubjectConfirmationData NotOnOrAfter="${notOnOrAfter}" Recipient="${options.recipient ?? ACS_URL}"/>`,
     `</saml:SubjectConfirmation>`,
     `</saml:Subject>`,
     `<saml:Conditions NotBefore="${notBefore}" NotOnOrAfter="${notOnOrAfter}">`,
-    `<saml:AudienceRestriction><saml:Audience>${SP_ENTITY_ID}</saml:Audience></saml:AudienceRestriction>`,
+    `<saml:AudienceRestriction><saml:Audience>${options.audience ?? SP_ENTITY_ID}</saml:Audience></saml:AudienceRestriction>`,
     `</saml:Conditions>`,
     `<saml:AuthnStatement AuthnInstant="${issueInstant}" SessionIndex="${SESSION_INDEX}">`,
     `<saml:AuthnContext><saml:AuthnContextClassRef>urn:oasis:names:tc:SAML:2.0:ac:classes:PasswordProtectedTransport</saml:AuthnContextClassRef></saml:AuthnContext>`,
     `</saml:AuthnStatement>`,
     `<saml:AttributeStatement>`,
-    `<saml:Attribute Name="ID"><saml:AttributeValue>${ASSERTION_ID}</saml:AttributeValue></saml:Attribute>`,
+    `<saml:Attribute Name="ID"><saml:AttributeValue>${options.assertionId ?? ASSERTION_ID}</saml:AttributeValue></saml:Attribute>`,
     `<saml:Attribute Name="email"><saml:AttributeValue>${USER_EMAIL}</saml:AttributeValue></saml:Attribute>`,
     `<saml:Attribute Name="mail"><saml:AttributeValue>fallback@example.test</saml:AttributeValue></saml:Attribute>`,
     `<saml:Attribute Name="groups"><saml:AttributeValue>engineering</saml:AttributeValue><saml:AttributeValue>security</saml:AttributeValue></saml:Attribute>`,
     `</saml:AttributeStatement>`,
     `</saml:Assertion>`,
   ].join("");
-  const signedAssertion = signSamlXml(assertion, "Assertion");
+  const signedAssertion =
+    options.assertionSigned === false
+      ? assertion
+      : signSamlXml(assertion, "Assertion", options.algorithm);
   const response = [
-    `<samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" ID="${RESPONSE_ID}" Version="2.0" IssueInstant="${issueInstant}" Destination="${ACS_URL}" InResponseTo="${REQUEST_ID}">`,
-    `<saml:Issuer>${IDP_ENTITY_ID}</saml:Issuer>`,
+    `<samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" ID="${RESPONSE_ID}" Version="2.0" IssueInstant="${issueInstant}" Destination="${options.destination ?? ACS_URL}" InResponseTo="${options.inResponseTo ?? REQUEST_ID}">`,
+    `<saml:Issuer>${options.responseIssuer ?? IDP_ENTITY_ID}</saml:Issuer>`,
     `<samlp:Status><samlp:StatusCode Value="urn:oasis:names:tc:SAML:2.0:status:Success"/></samlp:Status>`,
+    options.unsignedResponseAttributes ?? "",
     signedAssertion,
     `</samlp:Response>`,
   ].join("");
 
-  return encodeSamlResponse(signSamlXml(response, "Response"));
+  return encodeSamlResponse(
+    options.responseSigned === false
+      ? response
+      : signSamlXml(response, "Response", options.algorithm),
+  );
 }
 
 describe("SAML ACS verifier hardening", () => {
@@ -201,33 +220,44 @@ describe("SAML ACS verifier hardening", () => {
     ).rejects.toThrow("SAML assertion did not include a verified email attribute");
   });
 
-  it("pins node-saml to signed assertions, signed responses, audience, ACS, and InResponseTo", () => {
-    const source = read("packages/auth/src/saml.ts");
-
-    expect(source).toContain("wantAssertionsSigned: true");
-    expect(source).toContain("wantAuthnResponseSigned: true");
-    expect(source).toContain("audience: input.spEntityId");
-    expect(source).toContain("callbackUrl: input.acsUrl");
-    expect(source).toContain("idpIssuer: input.idpEntityId");
-    expect(source).toContain("ValidateInResponseTo.always");
-    expect(source).toContain("cacheProvider: new ExpectedRequestIdEchoCache");
-    expect(source).toContain('signatureAlgorithm: "sha256"');
-    expect(source).toContain('digestAlgorithm: "sha256"');
-    expect(source).toContain("SAML assertion ID is required for replay protection");
-    expect(source).toContain("export async function buildSamlAuthorizeUrl");
-    expect(source).toContain("generateUniqueId: () => input.requestId");
+  it.each([
+    ["unsigned assertion", { assertionSigned: false }],
+    ["unsigned response", { responseSigned: false }],
+    ["wrong audience", { audience: "https://attacker.example.test/audience" }],
+    ["wrong response destination", { destination: "https://attacker.example.test/acs" }],
+    ["wrong assertion recipient", { recipient: "https://attacker.example.test/acs" }],
+    ["wrong assertion issuer", { assertionIssuer: "https://attacker.example.test/idp" }],
+    ["wrong response issuer", { responseIssuer: "https://attacker.example.test/idp" }],
+    ["wrong request id", { inResponseTo: "_attacker-request" }],
+  ] as const)("rejects a fixture with %s", async (_name, options) => {
+    await expect(
+      verifySamlAcsResponse(verifierInput(signedSamlResponse(options))),
+    ).rejects.toThrow();
   });
 
-  it("does not parse assertion attributes from raw unvalidated XML", () => {
-    const source = read("packages/auth/src/saml.ts");
+  it("rejects SHA-1 signature and digest algorithms", async () => {
+    await expect(
+      verifySamlAcsResponse(verifierInput(signedSamlResponse({ algorithm: "sha1" }))),
+    ).rejects.toThrow();
+  });
 
-    expect(source).toContain(
-      "saml.validatePostResponseAsync({ SAMLResponse: input.samlResponse })",
+  it("requires a signed assertion ID", async () => {
+    await expect(
+      verifySamlAcsResponse(verifierInput(signedSamlResponse({ assertionId: "" }))),
+    ).rejects.toThrow();
+  });
+
+  it("returns only the validated signed profile when unsigned raw attributes disagree", async () => {
+    const assertion = await verifySamlAcsResponse(
+      verifierInput(
+        signedSamlResponse({
+          unsignedResponseAttributes:
+            '<saml:AttributeStatement><saml:Attribute Name="email"><saml:AttributeValue>attacker@example.test</saml:AttributeValue></saml:Attribute></saml:AttributeStatement>',
+        }),
+      ),
     );
-    expect(source).toContain("const profile = result.profile");
-    expect(source).not.toContain("parseString");
-    expect(source).not.toContain("DOMParser");
-    expect(source).not.toContain("getSamlResponseXml()");
-    expect(source).not.toContain("getAssertionXml()");
+
+    expect(assertion.email).toBe(USER_EMAIL);
+    expect(JSON.stringify(assertion.attributes)).not.toContain("attacker@example.test");
   });
 });
