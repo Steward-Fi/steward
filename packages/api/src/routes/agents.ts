@@ -14,6 +14,7 @@ import { agentPolicies, toPersistedPolicyRule } from "@stwd/db";
 import { shouldUsePGLite } from "@stwd/db/pglite";
 import { getSpend, getSpendByHost, invalidateCache, type SpendPeriod } from "@stwd/redis";
 import { redactedThrownDiagnostics } from "@stwd/shared";
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 import { and, eq, gte, inArray, isNull, sql } from "drizzle-orm";
 import { type Context, Hono } from "hono";
 import { isRedisAvailable } from "../middleware/redis";
@@ -305,10 +306,12 @@ function requireTenantAdminOrApiKey(c: Parameters<typeof requireTenantLevel>[0])
  * machine automation can explicitly restore the legacy api-key path via
  * STEWARD_ALLOW_API_KEY_ADMIN_MUTATIONS=true (documented as fully-root).
  */
+export function apiKeyAdminMutationsEnabled(): boolean {
+  return runtimeEnvironmentValue("STEWARD_ALLOW_API_KEY_ADMIN_MUTATIONS") === "true";
+}
+
 function allowApiKeyAdminMutations(c: Parameters<typeof requireTenantLevel>[0]): boolean {
-  return (
-    c.get("authType") === "api-key" && process.env.STEWARD_ALLOW_API_KEY_ADMIN_MUTATIONS === "true"
-  );
+  return c.get("authType") === "api-key" && apiKeyAdminMutationsEnabled();
 }
 
 function requireSensitiveMutationPrincipal(c: Parameters<typeof requireTenantLevel>[0]): boolean {

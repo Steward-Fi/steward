@@ -494,8 +494,8 @@ test("Worker cron gives every autonomous sweep its own request database", async 
     }
   }
 
-  expect(databaseCount).toBe(5);
-  expect(seen.sort()).toEqual(["cron-db-2", "cron-db-3", "cron-db-4", "cron-db-5"]);
+  expect(databaseCount).toBe(6);
+  expect(seen.sort()).toEqual(["cron-db-2", "cron-db-3", "cron-db-4", "cron-db-5", "cron-db-6"]);
 });
 
 test("configured webhook work retains its request database until Worker cleanup", async () => {
@@ -512,7 +512,14 @@ test("configured webhook work retains its request database until Worker cleanup"
     ({ dispatchWebhook } = await import("../services/webhook-dispatch"));
     const webhooks = await import("@stwd/webhooks");
     WebhookDispatcher = webhooks.WebhookDispatcher;
-    encryptedSecret = webhooks.encryptWebhookSecret("worker-webhook-signing-secret");
+    encryptedSecret = withRuntimeEnvironment(
+      {
+        NODE_ENV: "test",
+        STEWARD_MASTER_PASSWORD: "worker-webhook-test-master-password",
+        STEWARD_WEBHOOK_SECRET_KDF_SALT: "ab".repeat(32),
+      },
+      () => webhooks.encryptWebhookSecret("worker-webhook-signing-secret"),
+    );
   } catch (error) {
     await databaseModule.closeDb();
     if (previousMasterPassword === undefined) delete process.env.STEWARD_MASTER_PASSWORD;
@@ -563,28 +570,34 @@ test("configured webhook work retains its request database until Worker cleanup"
       return { success: true, attempts: 1, deliveredAt: new Date() };
     },
   );
-  const owner = withWorkerRequestDatabase(
-    {
-      DATABASE_URL: "postgresql://worker.invalid/steward",
-      DATABASE_DRIVER: "neon-websocket",
-    },
-    async () => {
-      dispatchWebhook("tenant-worker-webhook", "agent-worker-webhook", "tx_signed", {});
-      return new Response("accepted");
-    },
-    {
-      createHandle: () => ({
-        driver: "neon-websocket" as const,
-        db: requestDb as never,
-        async close() {
-          expect(deliveryFinished).toBe(true);
-          closes += 1;
-        },
-      }),
-      waitUntil(promise) {
-        deferredCleanup = promise;
+  const webhookEnv = {
+    DATABASE_URL: "postgresql://worker.invalid/steward",
+    DATABASE_DRIVER: "neon-websocket",
+    NODE_ENV: "test",
+    STEWARD_MASTER_PASSWORD: "worker-webhook-test-master-password",
+    STEWARD_WEBHOOK_SECRET_KDF_SALT: "ab".repeat(32),
+  };
+  const owner = withRuntimeEnvironment(webhookEnv, () =>
+    withWorkerRequestDatabase(
+      webhookEnv,
+      async () => {
+        dispatchWebhook("tenant-worker-webhook", "agent-worker-webhook", "tx_signed", {});
+        return new Response("accepted");
       },
-    },
+      {
+        createHandle: () => ({
+          driver: "neon-websocket" as const,
+          db: requestDb as never,
+          async close() {
+            expect(deliveryFinished).toBe(true);
+            closes += 1;
+          },
+        }),
+        waitUntil(promise) {
+          deferredCleanup = promise;
+        },
+      },
+    ),
   );
 
   try {

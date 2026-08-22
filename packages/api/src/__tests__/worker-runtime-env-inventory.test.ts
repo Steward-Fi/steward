@@ -47,21 +47,9 @@ const migratedRuntimeAuthorityKeys = [
   "STEWARD_OAUTH_REDIRECT_ALLOWLIST",
 ] as const;
 
-const pendingAuthRouteReaders = [
-  "EMAIL_AUTH_REDIRECT_BASE_URL",
-  "FARCASTER_LOGIN_ENABLED",
-  "NODE_ENV",
-  "SMS_PROVIDER",
-  "STEWARD_DB_MODE",
-  "STEWARD_ENABLE_PROD_TEST_ACCOUNT_TOKEN",
-  "STEWARD_PGLITE_MEMORY",
-  "TELEGRAM_BOT_TOKEN",
-  "TOTP_ISSUER",
-  "TWILIO_ACCOUNT_SID",
-  "TWILIO_AUTH_TOKEN",
-  "TWILIO_FROM",
-  "WHATSAPP_OTP_ENABLED",
-];
+// The auth route now resolves every request-sensitive switch and credential
+// through the immutable runtime binding.
+const pendingAuthRouteReaders: string[] = [];
 
 describe("Worker runtime environment static inventory", () => {
   it("rejects unclassified direct process.env readers in security middleware", () => {
