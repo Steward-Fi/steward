@@ -98,6 +98,8 @@ export const INTENTIONALLY_GLOBAL_TABLES = {
   accounts: "global user OAuth identities; tenant access derives through user_tenants",
   authenticators: "global user WebAuthn identities; tenant access derives through user_tenants",
   registry_index: "public chain registry cache, not tenant-owned",
+  retained_user_provider_evidence:
+    "credential-free provider identity evidence retained only for bootstrap lifecycle and compliance access",
   sessions: "global user sessions; tenant membership is checked separately",
   users: "global user identity; tenant access derives through user_tenants",
 } as const;

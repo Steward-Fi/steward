@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { redactedThrownDiagnostics } from "@stwd/shared";
 import { sql } from "drizzle-orm";
+import { readMigrationFiles } from "drizzle-orm/migrator";
 import type { PostgresJsDatabase } from "drizzle-orm/postgres-js";
 import { migrate } from "drizzle-orm/postgres-js/migrator";
 
@@ -216,7 +217,12 @@ export function assertCoreMigrationLedgerIntegrity(
   }
 
   if (options.requireComplete && recordedIdentities.size !== expected.length) {
-    throw new Error("[migrate] Core migrator returned with an incomplete Steward journal");
+    const missingTags = expected
+      .filter((entry) => !recordedIdentities.has(`${entry.when}:${entry.hash}`))
+      .map((entry) => entry.tag);
+    throw new Error(
+      `[migrate] Core migrator returned with an incomplete Steward journal; missing: ${missingTags.join(", ")}`,
+    );
   }
 }
 
@@ -398,6 +404,7 @@ async function assertExactMigrationObjectInventory(db: MigrationQueryExecutor): 
         ('public', 'transactions', 'r'),
         ('public', 'upstream_credential_lease_events', 'r'),
         ('public', 'upstream_credential_leases', 'r'),
+        ('public', 'user_identity_subjects', 'r'),
         ('public', 'user_push_subscriptions', 'r'),
         ('public', 'user_tenants', 'r'),
         ('public', 'user_wallet_app_consents', 'r'),
@@ -406,6 +413,7 @@ async function assertExactMigrationObjectInventory(db: MigrationQueryExecutor): 
         ('public', 'webhook_configs', 'r'),
         ('public', 'webhook_deliveries', 'r'),
         ('public', 'workspaces', 'r'),
+        ('public', 'retained_user_provider_evidence', 'r'),
         ('public', 'agent_registrations_id_seq', 'S'),
         ('public', 'audit_checkpoints_id_seq', 'S'),
         ('public', 'audit_events_id_seq', 'S'),
@@ -433,12 +441,32 @@ async function assertExactMigrationObjectInventory(db: MigrationQueryExecutor): 
         ('public', 'steward_guard_audit_checkpoint_immutability()'),
         ('public', 'steward_guard_generic_intent_execution_delete()'),
         ('public', 'steward_guard_workspace_delete()'),
+        ('public', 'steward_enforce_reserved_tenant_commit_state()'),
+        ('public', 'steward_guard_personal_invitation_write()'),
+        ('public', 'steward_guard_personal_membership_delete()'),
+        ('public', 'steward_guard_personal_membership_write()'),
+        ('public', 'steward_guard_wallet_tenant_owner_update()'),
+        ('public', 'steward_guard_wallet_user_identity_update()'),
+        ('public', 'steward_internal_job_tenant_ids_v2()'),
+        ('public', 'steward_is_authoritative_wallet_identity(p_tenant_id text, p_owner_address text, p_wallet_chain text, p_wallet_address text)'),
+        ('public', 'steward_is_authoritative_wallet_tenant_owner(p_tenant_id text, p_user_id uuid)'),
+        ('public', 'steward_is_reserved_tenant_id(p_tenant_id text)'),
         ('public', 'steward_lock_tenant_deletion(target_tenant text)'),
+        ('public', 'steward_lock_personal_lifecycle(p_user_id uuid, p_tenant_id text, p_tenant_delete boolean)'),
+        ('public', 'steward_platform_delete_user_v2(p_user_id uuid)'),
+        ('public', 'steward_platform_personal_tenant_delete_v2(p_tenant_id text, p_execute boolean)'),
+        ('public', 'steward_platform_provision_user_v1(p_email text, p_email_verified boolean, p_name text, p_custom_metadata jsonb)'),
+        ('public', 'steward_platform_set_user_deactivation_v2(p_user_id uuid, p_deactivated boolean)'),
+        ('public', 'steward_platform_user_identity_v1(p_user_id uuid)'),
         ('public', 'steward_provider_action_binding_guard()'),
         ('public', 'steward_preserve_signed_artifact_evidence()'),
         ('public', 'steward_provider_reservation_generation_guard()'),
         ('public', 'steward_reject_provider_scope_move()'),
         ('public', 'steward_reject_upstream_lease_evidence_mutation()'),
+        ('public', 'steward_register_user_identity_subject()'),
+        ('public', 'steward_reserved_tenant_kind(p_tenant_id text)'),
+        ('public', 'steward_retire_user_identity_subject()'),
+        ('public', 'steward_user_token_revocation_subject_v1(p_user_id uuid)'),
         ('public', 'capability_grants_agent_fence()'),
         ('public', 'capability_grants_guard_agent_delete()'),
         ('public', 'capability_rate_limit_bucket_agent_fence()'),
@@ -455,18 +483,24 @@ async function assertExactMigrationObjectInventory(db: MigrationQueryExecutor): 
         ('steward_bootstrap', 'auth_tenant_subject(p_tenant_id text, p_user_id uuid)'),
         ('steward_bootstrap', 'auth_rotate_refresh_token(p_source_token_hash text, p_target_tenant_id text, p_successor_id text, p_successor_token_hash text, p_successor_expires_at timestamp with time zone)'),
         ('steward_bootstrap', 'ensure_default_tenant(p_api_key_hash text)'),
+        ('steward_bootstrap', 'ensure_default_membership(p_user_id uuid, p_role text)'),
         ('steward_bootstrap', 'ensure_platform_tenant()'),
         ('steward_bootstrap', 'ensure_system_tenant()'),
         ('steward_bootstrap', 'platform_delete_user(p_user_id uuid)'),
+        ('steward_bootstrap', 'platform_personal_tenant_delete(p_tenant_id text, p_execute boolean)'),
+        ('steward_bootstrap', 'platform_provision_user(p_email text, p_email_verified boolean, p_name text, p_custom_metadata jsonb)'),
         ('steward_bootstrap', 'platform_revoke_user_refresh_tokens(p_user_id uuid)'),
         ('steward_bootstrap', 'platform_set_user_deactivation(p_user_id uuid, p_deactivated boolean)'),
+        ('steward_bootstrap', 'tenant_set_user_deactivation(p_tenant_id text, p_actor_id uuid, p_user_id uuid, p_deactivated boolean)'),
         ('steward_bootstrap', 'platform_stats()'),
         ('steward_bootstrap', 'platform_tenants(p_limit integer, p_offset integer)'),
+        ('steward_bootstrap', 'platform_user_identity(p_user_id uuid)'),
         ('steward_bootstrap', 'platform_user_tenant_ids(p_user_id uuid)'),
         ('steward_bootstrap', 'retention_delete_deactivated_users(p_days integer)'),
         ('steward_bootstrap', 'session_subject(p_user_id uuid, p_tenant_id text)'),
         ('steward_bootstrap', 'tenant_api_key_subject(p_tenant_id text)'),
-        ('steward_bootstrap', 'tenant_ids_for_internal_job()')
+        ('steward_bootstrap', 'tenant_ids_for_internal_job()'),
+        ('steward_bootstrap', 'user_token_revocation_subject(p_user_id uuid)')
     ),
     allowed_types(type_name) AS (
       VALUES
@@ -931,7 +965,9 @@ async function assertBundledPluginLedgerIntegrity(db: MigrationQueryExecutor): P
  * between the DB's true tip and now, including constraint-only hardening
  * migrations whose absence produces no runtime error.
  */
-export async function runMigrations(): Promise<{ applied: string[] }> {
+export async function runMigrations(options?: {
+  throughTag?: string;
+}): Promise<{ applied: string[] }> {
   const timeouts = resolveMigrationTimeouts();
   const { client, db } = createDb(undefined, {
     max: 1,
@@ -960,6 +996,12 @@ export async function runMigrations(): Promise<{ applied: string[] }> {
 
     try {
       const journal = readJournal();
+      const throughEntry = options?.throughTag
+        ? journal.entries.find((entry) => entry.tag === options.throughTag)
+        : undefined;
+      if (options?.throughTag && !throughEntry) {
+        throw new Error(`[migrate] Unknown terminal migration tag: ${options.throughTag}`);
+      }
       await assertExactMigrationObjectInventory(db);
       await assertBundledPluginLedgerIntegrity(db);
 
@@ -1536,34 +1578,46 @@ export async function runMigrations(): Promise<{ applied: string[] }> {
           await tx.execute(sql`SELECT count(*)::int AS n FROM drizzle.__drizzle_migrations`),
         )[0].n;
 
-        if (await recoverShippedTimestampCollision(tx, transactionalRows, journal)) {
-          transactionalRows = queryRows<CoreMigrationLedgerRow>(
-            await tx.execute(
-              sql`SELECT id, hash, created_at FROM drizzle.__drizzle_migrations ORDER BY id ASC`,
-            ),
+        if (throughEntry) {
+          const appliedIdentities = new Set(
+            transactionalRows.map((row) => `${Number(row.created_at)}:${row.hash}`),
           );
-          assertCoreMigrationLedgerIntegrity(transactionalRows, journal, databaseShape);
-        }
+          for (const migration of readMigrationFiles({ migrationsFolder: MIGRATIONS_FOLDER })) {
+            if (migration.folderMillis > throughEntry.when) continue;
+            const identity = `${migration.folderMillis}:${migration.hash}`;
+            if (appliedIdentities.has(identity)) continue;
+            for (const statement of migration.sql) await tx.execute(sql.raw(statement));
+            await tx.execute(sql`
+              INSERT INTO drizzle.__drizzle_migrations (hash, created_at)
+              VALUES (${migration.hash}, ${migration.folderMillis})
+            `);
+            appliedIdentities.add(identity);
+          }
+        } else {
+          if (await recoverShippedTimestampCollision(tx, transactionalRows, journal)) {
+            transactionalRows = queryRows<CoreMigrationLedgerRow>(
+              await tx.execute(
+                sql`SELECT id, hash, created_at FROM drizzle.__drizzle_migrations ORDER BY id ASC`,
+              ),
+            );
+            assertCoreMigrationLedgerIntegrity(transactionalRows, journal, databaseShape);
+          }
 
-        // The postgres-js migrator normally opens its own transaction. We are
-        // already inside the ownership-check transaction, so give it the same
-        // dialect with a transaction-local session whose nested transaction is
-        // the current atomic unit. The migrator only requires execute/all/
-        // transaction from this session.
-        const txInternals = tx as unknown as {
-          dialect: unknown;
-        };
-        const migrationDb = {
-          dialect: txInternals.dialect,
-          session: {
-            execute: (query: ReturnType<typeof sql>) => tx.execute(query),
-            all: async (query: ReturnType<typeof sql>) => queryRows(await tx.execute(query)),
-            transaction: async <T>(use: (migrationTx: typeof tx) => Promise<T>) => use(tx),
-          },
-        } as unknown as PostgresJsDatabase<Record<string, unknown>>;
-        await migrate(migrationDb, {
-          migrationsFolder: MIGRATIONS_FOLDER,
-        });
+          // The postgres-js migrator normally opens its own transaction. We are
+          // already inside the ownership-check transaction, so give it the same
+          // dialect with a transaction-local session whose nested transaction is
+          // the current atomic unit.
+          const txInternals = tx as unknown as { dialect: unknown };
+          const migrationDb = {
+            dialect: txInternals.dialect,
+            session: {
+              execute: (query: ReturnType<typeof sql>) => tx.execute(query),
+              all: async (query: ReturnType<typeof sql>) => queryRows(await tx.execute(query)),
+              transaction: async <T>(use: (migrationTx: typeof tx) => Promise<T>) => use(tx),
+            },
+          } as unknown as PostgresJsDatabase<Record<string, unknown>>;
+          await migrate(migrationDb, { migrationsFolder: MIGRATIONS_FOLDER });
+        }
 
         const afterRows = queryRows<CoreMigrationLedgerRow>(
           await tx.execute(sql`
@@ -1633,9 +1687,15 @@ export async function runMigrations(): Promise<{ applied: string[] }> {
         JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
       `),
         );
+        const completionJournal = throughEntry
+          ? {
+              ...journal,
+              entries: journal.entries.slice(0, journal.entries.indexOf(throughEntry) + 1),
+            }
+          : journal;
         assertCoreMigrationLedgerIntegrity(
           afterRows,
-          journal,
+          completionJournal,
           {
             tenantsExists: postMigrationShape?.tenants_exists ?? false,
             auditEventsExists: postMigrationShape?.audit_events_exists ?? false,

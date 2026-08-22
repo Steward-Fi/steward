@@ -11,7 +11,7 @@
  *   { ok: true, data: T }  |  { ok: false, error: string }
  */
 
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import {
   generateApiKey,
   hashSha256Hex,
@@ -50,7 +50,6 @@ import {
   users,
   userTenants,
   vaultSigningFreezes,
-  withTenantAuditedTransaction,
   withTenantAuditedTransactionOnDb,
 } from "@stwd/db";
 import { shouldUsePGLite } from "@stwd/db/pglite";
@@ -81,7 +80,7 @@ import {
 } from "drizzle-orm";
 import { type Context, Hono } from "hono";
 import { deleteAgentAuthority } from "../services/agent-deletion";
-import { writeAuditEvent } from "../services/audit";
+import { withTenantAuditedTransaction, writeAuditEvent } from "../services/audit";
 import {
   type AppVariables,
   continueWithTenantDatabase,
@@ -92,7 +91,10 @@ import {
 } from "../services/context";
 import { normalizeGasSpendQuery, querySponsoredGasSpend } from "../services/gas-sponsorship";
 import { normalizeOidcProviders } from "../services/oidc-provider-config";
-import { withPlatformAuthorityDatabase } from "../services/platform-authority-database";
+import {
+  withPlatformAuthorityDatabase,
+  withPlatformAuthorityTransaction,
+} from "../services/platform-authority-database";
 import { getPolicyRulesValidationError } from "../services/policy-validation";
 import { lockUserSession, lockUserSessions } from "../services/session-lock";
 import { TENANT_DEFAULT_POLICIES_RETIREMENT } from "../services/tenant-policy-retirement";
@@ -375,6 +377,55 @@ function auditCtx(c: {
     userAgent: c.req.header("user-agent") ?? null,
     requestId: (c.get("requestId") as string | undefined) ?? null,
   };
+}
+
+async function applyCommittedTenantDeletionRevocations(input: {
+  auditTenantId: string;
+  jobId: string;
+  tenantId: string;
+  agentIds: string[];
+  userIds: string[];
+  audit: ReturnType<typeof auditCtx>;
+}): Promise<void> {
+  const results = await Promise.allSettled([
+    ...input.agentIds.map((agentId) => revocationStore.revokeAgentTokens(agentId)),
+    ...input.userIds.map((userId) => revocationStore.revokeUserTokens(userId)),
+  ]);
+  const failures = results.filter((result) => result.status === "rejected").length;
+
+  // The transactionally committed tenant.delete event is the durable outbox.
+  // Only append the completion marker after every idempotent cache operation
+  // succeeds. A failure or crash leaves the source job discoverable by the
+  // autonomous retry sweep; no best-effort log is used as recovery state.
+  if (failures > 0) return;
+
+  // The committed database deletion is the authorization boundary: deleted
+  // agents and memberships cannot authenticate even if a cache refresh is
+  // delayed. Record the post-commit cache disposition on the retained platform
+  // audit chain without turning a committed deletion into a false retry.
+  await writeAuditEvent({
+    tenantId: input.auditTenantId,
+    actorType: "platform",
+    action: "tenant.delete.token_revocation_completed",
+    resourceType: "tenant",
+    resourceId: input.tenantId,
+    metadata: {
+      targetTenantId: input.tenantId,
+      revocationJobId: input.jobId,
+      agentTokenRevocationTargets: input.agentIds.length,
+      userTokenRevocationTargets: input.userIds.length,
+      failures: 0,
+    },
+    ...input.audit,
+  }).catch((error) => {
+    // The source tenant.delete event remains the durable pending job. Surface
+    // the deferred completion without returning a false deletion retry to the
+    // caller; the autonomous sweep will append the completion later.
+    console.error(
+      "[tenant-deletion-revocation] completion audit deferred; durable job remains pending",
+      redactedThrownDiagnostics(error),
+    );
+  });
 }
 
 /**
@@ -758,13 +809,7 @@ function errorChainHasExactMessage(error: unknown, expected: string): boolean {
 }
 
 function isPersonalTenantId(tenantId: string): boolean {
-  return tenantId.startsWith("personal-");
-}
-
-function canonicalPersonalTenantOwnerId(tenantId: string): string | null {
-  if (!isPersonalTenantId(tenantId)) return null;
-  const ownerId = tenantId.slice("personal-".length);
-  return isValidUserId(ownerId) && tenantId === `personal-${ownerId}` ? ownerId : null;
+  return tenantId.toLowerCase().startsWith("personal-");
 }
 
 // ─── Route group ─────────────────────────────────────────────────────────────
@@ -881,7 +926,8 @@ export async function bindPlatformTenantDatabase(
   c: Context<{ Variables: AppVariables }>,
   next: () => Promise<void>,
 ) {
-  const match = new URL(c.req.url).pathname.match(/(?:^|\/platform)\/tenants\/([^/]+)(?:\/|$)/);
+  const pathname = new URL(c.req.url).pathname;
+  const match = pathname.match(/(?:^|\/platform)\/tenants\/([^/]+)(?:\/|$)/);
   let tenantId = "";
   try {
     tenantId = match ? decodeURIComponent(match[1]) : "";
@@ -889,6 +935,19 @@ export async function bindPlatformTenantDatabase(
     return next();
   }
   if (!tenantId || !isValidTenantId(tenantId)) return next();
+  // Personal deletion is implemented entirely through the distinct platform
+  // authority connection and records its required evidence in the platform
+  // audit chain. Bind the outer request to that same identity so the app-role
+  // request capability cannot be mistaken for personal-tenant authority.
+  const isRootTenantDelete = /(?:^|\/platform)\/tenants\/[^/]+\/?$/.test(pathname);
+  if (c.req.method === "DELETE" && isRootTenantDelete && isPersonalTenantId(tenantId)) {
+    return continueWithTenantDatabase(
+      PLATFORM_AUDIT_TENANT_ID,
+      "platform-personal-tenant-deletion",
+      "platform",
+      next,
+    );
+  }
   return continueWithTenantDatabase(tenantId, "platform-tenant-operation", "platform", next);
 }
 
@@ -935,7 +994,9 @@ platform.get("/stats", async (c) => {
   const scopeResponse = requirePlatformRouteScope(c, "platform:stats:read");
   if (scopeResponse) return scopeResponse;
 
-  const result = await getDb().execute(sql`SELECT * FROM steward_bootstrap.platform_stats()`);
+  const result = await withPlatformAuthorityDatabase((platformDb) =>
+    platformDb.execute(sql`SELECT * FROM steward_bootstrap.platform_stats()`),
+  );
   const [stats] = (
     Array.isArray(result) ? result : ((result as { rows?: unknown[] }).rows ?? [])
   ) as Array<{ tenant_count: number; agent_count: number; transaction_count: number }> | [];
@@ -1156,8 +1217,8 @@ platform.get("/tenants", async (c) => {
 
   const limit = parseListLimit(c.req.query("limit"));
   const offset = parseListOffset(c.req.query("offset"));
-  const result = await getDb().execute(
-    sql`SELECT * FROM steward_bootstrap.platform_tenants(${limit}, ${offset})`,
+  const result = await withPlatformAuthorityDatabase((platformDb) =>
+    platformDb.execute(sql`SELECT * FROM steward_bootstrap.platform_tenants(${limit}, ${offset})`),
   );
   const rawRows = (
     Array.isArray(result) ? result : ((result as { rows?: unknown[] }).rows ?? [])
@@ -2074,192 +2135,277 @@ platform.delete("/tenants/:id", async (c) => {
   const scopeResponse = requirePlatformRouteScope(c, "platform:tenant:delete");
   if (scopeResponse) return scopeResponse;
 
-  const db = getDb();
   const tenantId = c.req.param("id");
+  const revocationJobId = randomUUID();
 
   if (!isValidTenantId(tenantId)) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid tenant id format" }, 400);
   }
 
-  // Lock the tenant/agent authority graph before taking the tenant audit lock.
-  // Relay routes hold the agent row while committing terminal audit evidence;
-  // taking the audit lock first here would invert that ordering and deadlock.
-  const result = await db.transaction(async (preflightTxRaw) => {
-    const lockedTx = preflightTxRaw as unknown as typeof db;
-    // This advisory fence is also acquired by every lease/provider/route/
-    // capability writer installed by migration 0110. Whichever side wins is
-    // authoritative: a prior writer becomes visible to the preflight; a late
-    // writer waits until the tenant and its parents are gone, then fails.
-    await lockedTx.execute(sql`SELECT public.steward_lock_tenant_deletion(${tenantId})`);
-    const [existing] = await lockedTx
-      .select({ id: tenants.id })
-      .from(tenants)
-      .where(eq(tenants.id, tenantId))
-      .for("update");
-    if (!existing) return { status: "missing" as const };
+  if (isPersonalTenantId(tenantId)) {
+    type PersonalDeleteResult = {
+      status:
+        | "prepared"
+        | "deleted"
+        | "missing"
+        | "blocked_by_lease"
+        | "blocked_by_provider"
+        | "blocked_by_capability_integrity"
+        | "blocked_by_personal_membership";
+      agent_ids: string[];
+      member_ids: string[];
+      active_grants_retired: number;
+      terminal_grants_removed: number;
+      capabilities_removed: number;
+      invocation_evidence_retained: number;
+    };
+    const personalResult = await withPlatformAuthorityDatabase((platformDb) =>
+      withTenantAuditedTransactionOnDb(
+        platformDb,
+        PLATFORM_AUDIT_TENANT_ID,
+        async (txRaw, appendRequiredAudit) => {
+          const tx = txRaw as typeof platformDb;
+          await tx.execute(
+            sql`SELECT set_config('steward.tenant_id', ${PLATFORM_AUDIT_TENANT_ID}, true)`,
+          );
+          const [prepared] = rowsFromExecute<PersonalDeleteResult>(
+            await tx.execute(sql`
+              SELECT * FROM steward_bootstrap.platform_personal_tenant_delete(
+                ${tenantId}, false
+              )
+            `),
+          );
+          if (!prepared) return { status: "missing" as const };
+          if (prepared.status === "deleted") {
+            throw new Error("Personal tenant preflight unexpectedly performed deletion");
+          }
+          if (prepared.status !== "prepared") {
+            return { status: prepared.status };
+          }
 
-    const personalOwnerId = canonicalPersonalTenantOwnerId(tenantId);
-    if (isPersonalTenantId(tenantId)) {
-      if (!personalOwnerId) return { status: "blocked_by_personal_membership" as const };
-      await lockedTx.execute(
-        sql`SELECT pg_advisory_xact_lock(hashtextextended(${
-          "platform_user_account_" + personalOwnerId
-        }, 0))`,
-      );
-      await lockedTx.execute(
-        sql`SELECT pg_advisory_xact_lock(hashtextextended(${
-          "tenant_owner_lifecycle_" + tenantId
-        }, 0))`,
-      );
-      const [owner] = await lockedTx
-        .select({ id: users.id })
-        .from(users)
-        .where(eq(users.id, personalOwnerId))
-        .for("update");
-      const personalMemberships = await lockedTx
-        .select({ userId: userTenants.userId, role: userTenants.role })
-        .from(userTenants)
-        .where(eq(userTenants.tenantId, tenantId))
-        .orderBy(userTenants.userId);
-      if (
-        !owner ||
-        personalMemberships.length !== 1 ||
-        personalMemberships[0]?.userId !== personalOwnerId ||
-        personalMemberships[0]?.role !== "owner"
-      ) {
-        return { status: "blocked_by_personal_membership" as const };
-      }
-    }
-
-    const tenantAgents = await lockedTx
-      .select({ id: agents.id })
-      .from(agents)
-      .where(eq(agents.tenantId, tenantId))
-      .for("update");
-    const tenantMembers = await lockedTx
-      .select({ userId: userTenants.userId })
-      .from(userTenants)
-      .where(eq(userTenants.tenantId, tenantId));
-    const [
-      [unresolvedExecution],
-      [unresolvedLease],
-      [retainedProviderIntent],
-      [retainedProviderBinding],
-    ] = await Promise.all([
-      lockedTx
-        .select({ id: transactions.id })
-        .from(transactions)
-        .innerJoin(agents, eq(agents.id, transactions.agentId))
-        .where(
-          and(
-            eq(agents.tenantId, tenantId),
-            inArray(transactions.status, ["approved", "signed", "broadcast", "outcome_unknown"]),
-          ),
-        )
-        .limit(1),
-      lockedTx
-        .select({ id: upstreamCredentialLeases.id })
-        .from(upstreamCredentialLeases)
-        .where(
-          and(
-            eq(upstreamCredentialLeases.tenantId, tenantId),
-            or(
-              notInArray(upstreamCredentialLeases.status, ["revoked", "expired", "failed"]),
-              isNotNull(upstreamCredentialLeases.tokenHash),
-              isNotNull(upstreamCredentialLeases.tokenCiphertext),
-              isNotNull(upstreamCredentialLeases.tokenIv),
-              isNotNull(upstreamCredentialLeases.tokenAuthTag),
-              isNotNull(upstreamCredentialLeases.tokenSalt),
-            ),
-          ),
-        )
-        .limit(1),
-      lockedTx
-        .select({ id: intents.id })
-        .from(intents)
-        .where(and(eq(intents.tenantId, tenantId), eq(intents.intentType, "provider-action")))
-        .limit(1),
-      lockedTx
-        .select({ intentId: providerActionBindings.intentId })
-        .from(providerActionBindings)
-        .where(eq(providerActionBindings.tenantId, tenantId))
-        .limit(1),
-    ]);
-    if (unresolvedExecution) return { status: "blocked_by_execution" as const };
-    if (unresolvedLease) return { status: "blocked_by_lease" as const };
-    if (retainedProviderIntent || retainedProviderBinding) {
-      return { status: "blocked_by_provider" as const };
-    }
-
-    return withTenantAuditedTransactionOnDb(
-      lockedTx as ReturnType<typeof getDb>,
-      tenantId,
-      async (auditedTxRaw, appendRequiredAudit) => {
-        const tx = auditedTxRaw as typeof db;
-        const capabilityCleanup = await cleanupOptionalTenantCapabilities(tx, tenantId);
-        if (!capabilityCleanup) return { status: "blocked_by_capability_integrity" as const };
-
-        // Establish every externally enforced cutoff while the deletion fence is
-        // held and before any destructive database mutation. A revoker failure
-        // aborts the transaction; a later database rollback can only leave a
-        // conservatively revoked token, never a deleted tenant with live tokens.
-        const [agentRevocationCutoffs, userRevocationCutoffs] = await Promise.all([
-          Promise.all(tenantAgents.map((agent) => revocationStore.revokeAgentTokens(agent.id))),
-          Promise.all(
-            tenantMembers.map((member) => revocationStore.revokeUserTokens(member.userId)),
-          ),
-        ]);
-
-        await appendRequiredAudit({
-          tenantId,
-          actorType: "platform",
-          action: "tenant.delete.authorized",
-          resourceType: "tenant",
-          resourceId: tenantId,
-          metadata: {
-            agentTokenRevocationTargets: tenantAgents.length,
-            userTokenRevocationTargets: tenantMembers.length,
-            capabilityCleanup,
-          },
-          ...auditCtx(c),
-        });
-        await appendRequiredAudit({
-          tenantId,
-          actorType: "platform",
-          action: "tenant.delete.token_revocation_completed",
-          resourceType: "tenant",
-          resourceId: tenantId,
-          metadata: {
-            agentRevocationCutoffsEstablished: agentRevocationCutoffs.length,
-            userRevocationCutoffsEstablished: userRevocationCutoffs.length,
-          },
-          ...auditCtx(c),
-        });
-        await appendRequiredAudit({
-          tenantId,
-          actorType: "platform",
-          action: "tenant.delete",
-          resourceType: "tenant",
-          resourceId: tenantId,
-          metadata: {
-            agentTokenRevocationTargets: tenantAgents.length,
-            userTokenRevocationTargets: tenantMembers.length,
-            capabilityCleanup,
-          },
-          ...auditCtx(c),
-        });
-
-        await tx.delete(refreshTokens).where(eq(refreshTokens.tenantId, tenantId));
-        await tx.delete(secretRoutes).where(eq(secretRoutes.tenantId, tenantId));
-        await tx.delete(secrets).where(eq(secrets.tenantId, tenantId));
-        await tx.delete(proxyAuditLog).where(eq(proxyAuditLog.tenantId, tenantId));
-        await tx.delete(tenants).where(eq(tenants.id, tenantId));
-        return {
-          status: "deleted" as const,
-        };
-      },
+          const capabilityCleanup = {
+            activeGrantsRetired: prepared.active_grants_retired,
+            terminalGrantsRemoved: prepared.terminal_grants_removed,
+            capabilitiesRemoved: prepared.capabilities_removed,
+            invocationEvidenceRetained: prepared.invocation_evidence_retained,
+          };
+          await appendRequiredAudit({
+            tenantId: PLATFORM_AUDIT_TENANT_ID,
+            actorType: "platform",
+            action: "tenant.delete.authorized",
+            resourceType: "tenant",
+            resourceId: tenantId,
+            metadata: {
+              targetTenantId: tenantId,
+              agentTokenRevocationTargets: prepared.agent_ids.length,
+              userTokenRevocationTargets: prepared.member_ids.length,
+              agentIds: prepared.agent_ids,
+              userIds: prepared.member_ids,
+              revocationJobId,
+              capabilityCleanup,
+            },
+            ...auditCtx(c),
+          });
+          await appendRequiredAudit({
+            tenantId: PLATFORM_AUDIT_TENANT_ID,
+            actorType: "platform",
+            action: "tenant.delete",
+            resourceType: "tenant",
+            resourceId: tenantId,
+            metadata: {
+              targetTenantId: tenantId,
+              agentTokenRevocationTargets: prepared.agent_ids.length,
+              userTokenRevocationTargets: prepared.member_ids.length,
+              agentIds: prepared.agent_ids,
+              userIds: prepared.member_ids,
+              revocationJobId,
+              capabilityCleanup,
+            },
+            ...auditCtx(c),
+          });
+          const [deleted] = rowsFromExecute<PersonalDeleteResult>(
+            await tx.execute(sql`
+              SELECT * FROM steward_bootstrap.platform_personal_tenant_delete(
+                ${tenantId}, true
+              )
+            `),
+          );
+          if (deleted?.status !== "deleted") {
+            throw new Error("Personal tenant lifecycle changed while deletion lock was held");
+          }
+          return {
+            status: "deleted" as const,
+            agentIds: prepared.agent_ids,
+            userIds: prepared.member_ids,
+          };
+        },
+      ),
     );
-  });
+
+    if (personalResult.status === "missing") {
+      return c.json<ApiResponse>({ ok: false, error: "Tenant not found" }, 404);
+    }
+    if (personalResult.status === "blocked_by_lease") {
+      return c.json<ApiResponse>(
+        { ok: false, error: "Tenant has unresolved upstream credential leases" },
+        409,
+      );
+    }
+    if (personalResult.status === "blocked_by_provider") {
+      return c.json<ApiResponse>(
+        { ok: false, error: "Tenant has retained provider action evidence" },
+        409,
+      );
+    }
+    if (personalResult.status === "blocked_by_capability_integrity") {
+      return c.json<ApiResponse>(
+        { ok: false, error: "Tenant capability authority has cross-tenant references" },
+        409,
+      );
+    }
+    if (personalResult.status === "blocked_by_personal_membership") {
+      return c.json<ApiResponse>(
+        { ok: false, error: "Personal tenant membership invariant violated" },
+        409,
+      );
+    }
+    if (personalResult.status === "deleted") {
+      await applyCommittedTenantDeletionRevocations({
+        tenantId,
+        auditTenantId: PLATFORM_AUDIT_TENANT_ID,
+        jobId: revocationJobId,
+        agentIds: personalResult.agentIds,
+        userIds: personalResult.userIds,
+        audit: auditCtx(c),
+      });
+    }
+    return c.json<ApiResponse>({ ok: true });
+  }
+
+  const db = getDb();
+
+  const result = await withTenantAuditedTransaction(
+    tenantId,
+    async (txRaw, appendRequiredAudit) => {
+      const tx = txRaw as typeof db;
+      // This fence is shared with lease/provider/capability writers. A prior
+      // writer is visible to preflight; a late writer waits and then fails.
+      await tx.execute(sql`SELECT public.steward_lock_tenant_deletion(${tenantId})`);
+      const [existing] = await tx
+        .select({ id: tenants.id })
+        .from(tenants)
+        .where(eq(tenants.id, tenantId))
+        .for("update");
+      if (!existing) return { status: "missing" as const };
+
+      const tenantAgents = await tx
+        .select({ id: agents.id })
+        .from(agents)
+        .where(eq(agents.tenantId, tenantId))
+        .for("update");
+      const tenantMembers = await tx
+        .select({ userId: userTenants.userId })
+        .from(userTenants)
+        .where(eq(userTenants.tenantId, tenantId));
+      const [
+        [unresolvedExecution],
+        [unresolvedLease],
+        [retainedProviderIntent],
+        [retainedProviderBinding],
+      ] = await Promise.all([
+        tx
+          .select({ id: transactions.id })
+          .from(transactions)
+          .innerJoin(agents, eq(agents.id, transactions.agentId))
+          .where(
+            and(
+              eq(agents.tenantId, tenantId),
+              inArray(transactions.status, ["approved", "signed", "broadcast", "outcome_unknown"]),
+            ),
+          )
+          .limit(1),
+        tx
+          .select({ id: upstreamCredentialLeases.id })
+          .from(upstreamCredentialLeases)
+          .where(
+            and(
+              eq(upstreamCredentialLeases.tenantId, tenantId),
+              or(
+                notInArray(upstreamCredentialLeases.status, ["revoked", "expired", "failed"]),
+                isNotNull(upstreamCredentialLeases.tokenHash),
+                isNotNull(upstreamCredentialLeases.tokenCiphertext),
+                isNotNull(upstreamCredentialLeases.tokenIv),
+                isNotNull(upstreamCredentialLeases.tokenAuthTag),
+                isNotNull(upstreamCredentialLeases.tokenSalt),
+              ),
+            ),
+          )
+          .limit(1),
+        tx
+          .select({ id: intents.id })
+          .from(intents)
+          .where(and(eq(intents.tenantId, tenantId), eq(intents.intentType, "provider-action")))
+          .limit(1),
+        tx
+          .select({ intentId: providerActionBindings.intentId })
+          .from(providerActionBindings)
+          .where(eq(providerActionBindings.tenantId, tenantId))
+          .limit(1),
+      ]);
+      if (unresolvedExecution) return { status: "blocked_by_execution" as const };
+      if (unresolvedLease) return { status: "blocked_by_lease" as const };
+      if (retainedProviderIntent || retainedProviderBinding) {
+        return { status: "blocked_by_provider" as const };
+      }
+
+      const capabilityCleanup = await cleanupOptionalTenantCapabilities(tx, tenantId);
+      if (!capabilityCleanup) return { status: "blocked_by_capability_integrity" as const };
+
+      await appendRequiredAudit({
+        tenantId,
+        actorType: "platform",
+        action: "tenant.delete.authorized",
+        resourceType: "tenant",
+        resourceId: tenantId,
+        metadata: {
+          agentTokenRevocationTargets: tenantAgents.length,
+          userTokenRevocationTargets: tenantMembers.length,
+          agentIds: tenantAgents.map((agent) => agent.id),
+          userIds: tenantMembers.map((member) => member.userId),
+          revocationJobId,
+          capabilityCleanup,
+        },
+        ...auditCtx(c),
+      });
+      await appendRequiredAudit({
+        tenantId,
+        actorType: "platform",
+        action: "tenant.delete",
+        resourceType: "tenant",
+        resourceId: tenantId,
+        metadata: {
+          agentTokenRevocationTargets: tenantAgents.length,
+          userTokenRevocationTargets: tenantMembers.length,
+          agentIds: tenantAgents.map((agent) => agent.id),
+          userIds: tenantMembers.map((member) => member.userId),
+          revocationJobId,
+          capabilityCleanup,
+        },
+        ...auditCtx(c),
+      });
+
+      await tx.delete(refreshTokens).where(eq(refreshTokens.tenantId, tenantId));
+      await tx.delete(secretRoutes).where(eq(secretRoutes.tenantId, tenantId));
+      await tx.delete(secrets).where(eq(secrets.tenantId, tenantId));
+      await tx.delete(proxyAuditLog).where(eq(proxyAuditLog.tenantId, tenantId));
+      await tx.delete(tenants).where(eq(tenants.id, tenantId));
+      return {
+        status: "deleted" as const,
+        agentIds: tenantAgents.map((agent) => agent.id),
+        userIds: tenantMembers.map((member) => member.userId),
+      };
+    },
+  );
 
   if (result.status === "missing") {
     return c.json<ApiResponse>({ ok: false, error: "Tenant not found" }, 404);
@@ -2288,13 +2434,16 @@ platform.delete("/tenants/:id", async (c) => {
       409,
     );
   }
-  if (result.status === "blocked_by_personal_membership") {
-    return c.json<ApiResponse>(
-      { ok: false, error: "Personal tenant membership invariant violated" },
-      409,
-    );
+  if (result.status === "deleted") {
+    await applyCommittedTenantDeletionRevocations({
+      tenantId,
+      auditTenantId: tenantId,
+      jobId: revocationJobId,
+      agentIds: result.agentIds,
+      userIds: result.userIds,
+      audit: auditCtx(c),
+    });
   }
-
   return c.json<ApiResponse>({ ok: true });
 });
 
@@ -2927,12 +3076,15 @@ type PlatformWalletExternalLink = PlatformWalletExternalIdRow & {
   isNew: boolean;
 };
 
-async function linkWalletExternalIdForUser(input: {
-  userId: string;
-  tenantId: string;
-  externalId: string;
-}): Promise<PlatformWalletExternalLink | Error> {
-  const db = getDb();
+async function linkWalletExternalIdForUser(
+  input: {
+    userId: string;
+    tenantId: string;
+    externalId: string;
+  },
+  database: ReturnType<typeof getDb> = getDb(),
+): Promise<PlatformWalletExternalLink | Error> {
+  const db = database;
   const externalId = input.externalId.trim();
   if (!isValidWalletExternalId(externalId)) return new Error("Invalid walletExternalId");
 
@@ -2986,12 +3138,15 @@ async function linkWalletExternalIdForUser(input: {
   return { tenantId: input.tenantId, externalId, isNew: true };
 }
 
-async function insertTenantMembershipIfMissing(input: {
-  userId: string;
-  tenantId: string;
-  role: string;
-}): Promise<boolean> {
-  const [created] = await getDb()
+async function insertTenantMembershipIfMissing(
+  input: {
+    userId: string;
+    tenantId: string;
+    role: string;
+  },
+  database: ReturnType<typeof getDb> = getDb(),
+): Promise<boolean> {
+  const [created] = await database
     .insert(userTenants)
     .values(input)
     .onConflictDoNothing()
@@ -3084,111 +3239,115 @@ platform.post("/users", async (c) => {
     if (metadataError) return c.json<ApiResponse>({ ok: false, error: metadataError }, 400);
   }
 
-  const db = getDb();
   const email = body.email.toLowerCase().trim();
+  const auditTenantId = tenantId ?? PLATFORM_AUDIT_TENANT_ID;
+  let result: PlatformUserCreateData;
+  try {
+    result = await withPlatformAuthorityDatabase((platformDb) =>
+      withTenantAuditedTransactionOnDb(
+        platformDb,
+        auditTenantId,
+        async (txRaw, appendRequiredAudit) => {
+          const tx = txRaw as typeof platformDb;
+          const [provisioned] = rowsFromExecute<{ user_id: string; is_new: boolean }>(
+            await tx.execute(sql`
+              SELECT * FROM steward_bootstrap.platform_provision_user(
+                ${email},
+                ${body.emailVerified ?? false},
+                ${body.name ?? null},
+                ${JSON.stringify(body.customMetadata ?? {})}::jsonb
+              )
+            `),
+          );
+          if (!provisioned) throw new Error("User provisioning did not return a user");
 
-  const [existing] = await db.select({ id: users.id }).from(users).where(eq(users.email, email));
+          if (!provisioned.is_new) {
+            if (tenantId && walletExternalId !== undefined) {
+              const [tenant] = await tx
+                .select({ id: tenants.id })
+                .from(tenants)
+                .where(eq(tenants.id, tenantId));
+              if (!tenant) throw new Error("Tenant not found");
+              await insertTenantMembershipIfMissing(
+                { userId: provisioned.user_id, tenantId, role: "member" },
+                tx,
+              );
+              const linked = await linkWalletExternalIdForUser(
+                { userId: provisioned.user_id, tenantId, externalId: walletExternalId },
+                tx,
+              );
+              if (linked instanceof Error) throw linked;
+            }
+            await appendRequiredAudit({
+              tenantId: auditTenantId,
+              actorType: "platform",
+              action: "user.provision.existing",
+              resourceType: "user",
+              resourceId: provisioned.user_id,
+              metadata: { email, hasWalletExternalId: walletExternalId !== undefined },
+              ...auditCtx(c),
+            });
+            return { userId: provisioned.user_id, isNew: false, tenantId, walletExternalId };
+          }
 
-  if (existing) {
-    if (tenantId && walletExternalId !== undefined) {
-      const [tenant] = await db
-        .select({ id: tenants.id })
-        .from(tenants)
-        .where(eq(tenants.id, tenantId));
-      if (!tenant) return c.json<ApiResponse>({ ok: false, error: "Tenant not found" }, 404);
-      const createdMembership = await insertTenantMembershipIfMissing({
-        userId: existing.id,
-        tenantId,
-        role: "member",
-      });
-      const linked = await linkWalletExternalIdForUser({
-        userId: existing.id,
-        tenantId,
-        externalId: walletExternalId,
-      });
-      if (linked instanceof Error) {
-        if (createdMembership) {
-          await rollbackTenantMembership({ userId: existing.id, tenantId });
-        }
-        return c.json<ApiResponse>(
-          { ok: false, error: linked.message },
-          walletExternalLinkStatus(linked),
-        );
-      }
-    }
-    await writeAuditEvent({
-      tenantId: tenantId ?? PLATFORM_AUDIT_TENANT_ID,
-      actorType: "platform",
-      action: "user.provision.existing",
-      resourceType: "user",
-      resourceId: existing.id,
-      metadata: { email, hasWalletExternalId: walletExternalId !== undefined },
-      ...auditCtx(c),
-    });
-    return c.json<ApiResponse<PlatformUserCreateData>>({
-      ok: true,
-      data: { userId: existing.id, isNew: false, tenantId, walletExternalId },
-    });
-  }
+          if (tenantId) {
+            const [tenant] = await tx
+              .select({ id: tenants.id })
+              .from(tenants)
+              .where(eq(tenants.id, tenantId));
+            if (!tenant) throw new Error("Tenant not found");
+          }
 
-  if (tenantId) {
-    const [tenant] = await db
-      .select({ id: tenants.id })
-      .from(tenants)
-      .where(eq(tenants.id, tenantId));
-    if (!tenant) return c.json<ApiResponse>({ ok: false, error: "Tenant not found" }, 404);
-  }
-
-  await writeAuditEvent({
-    tenantId: tenantId ?? PLATFORM_AUDIT_TENANT_ID,
-    actorType: "platform",
-    action: "user.provision.create",
-    resourceType: "user",
-    resourceId: email,
-    metadata: {
-      email,
-      emailVerified: body.emailVerified ?? false,
-      hasCustomMetadata: !!body.customMetadata,
-      hasWalletExternalId: walletExternalId !== undefined,
-    },
-    ...auditCtx(c),
-  });
-
-  const [newUser] = await db
-    .insert(users)
-    .values({
-      email,
-      emailVerified: body.emailVerified ?? false,
-      name: body.name ?? null,
-      customMetadata: body.customMetadata ?? {},
-    })
-    .returning();
-
-  if (tenantId && walletExternalId !== undefined) {
-    await insertTenantMembershipIfMissing({ userId: newUser.id, tenantId, role: "member" });
-    const linked = await linkWalletExternalIdForUser({
-      userId: newUser.id,
-      tenantId,
-      externalId: walletExternalId,
-    });
-    if (linked instanceof Error) {
-      await db.delete(users).where(eq(users.id, newUser.id));
+          await appendRequiredAudit({
+            tenantId: auditTenantId,
+            actorType: "platform",
+            action: "user.provision.create",
+            resourceType: "user",
+            resourceId: email,
+            metadata: {
+              email,
+              emailVerified: body.emailVerified ?? false,
+              hasCustomMetadata: !!body.customMetadata,
+              hasWalletExternalId: walletExternalId !== undefined,
+            },
+            ...auditCtx(c),
+          });
+          if (tenantId && walletExternalId !== undefined) {
+            await insertTenantMembershipIfMissing(
+              { userId: provisioned.user_id, tenantId, role: "member" },
+              tx,
+            );
+            const linked = await linkWalletExternalIdForUser(
+              { userId: provisioned.user_id, tenantId, externalId: walletExternalId },
+              tx,
+            );
+            if (linked instanceof Error) throw linked;
+          }
+          return { userId: provisioned.user_id, isNew: true, tenantId, walletExternalId };
+        },
+      ),
+    );
+  } catch (error) {
+    if (error instanceof Error && walletExternalLinkStatus(error) !== 500) {
       return c.json<ApiResponse>(
-        { ok: false, error: linked.message },
-        walletExternalLinkStatus(linked),
+        { ok: false, error: error.message },
+        walletExternalLinkStatus(error),
       );
     }
+    throw error;
   }
 
-  dispatchWebhook(tenantId ?? PLATFORM_AUDIT_TENANT_ID, newUser.id, "user.created", {
-    userId: newUser.id,
-    source: "platform.provision",
-    hasEmail: true,
-  });
+  if (result.isNew) {
+    dispatchWebhook(auditTenantId, result.userId, "user.created", {
+      userId: result.userId,
+      source: "platform.provision",
+      hasEmail: true,
+    });
+  }
 
   return c.json<ApiResponse<PlatformUserCreateData>>(
-    { ok: true, data: { userId: newUser.id, isNew: true, tenantId, walletExternalId } },
-    201,
+    { ok: true, data: result },
+    result.isNew ? 201 : 200,
   );
 });
 
@@ -3295,7 +3454,9 @@ platform.post("/users/wallet/external-id/connect-or-create", async (c) => {
   });
   if (linked instanceof Error) {
     if (isNew) {
-      await db.delete(users).where(eq(users.id, userId));
+      await withPlatformAuthorityTransaction((tx) =>
+        tx.execute(sql`SELECT * FROM steward_bootstrap.platform_delete_user(${userId}::uuid)`),
+      );
     } else if (createdMembership) {
       await rollbackTenantMembership({ userId, tenantId });
     }
@@ -3366,41 +3527,27 @@ type PlatformUserIdentity = {
 };
 
 async function serializePlatformUserIdentity(userId: string): Promise<PlatformUserIdentity | null> {
-  const db = getDb();
-  const [user] = await db.select().from(users).where(eq(users.id, userId));
-  if (!user) return null;
-  const [tenantRows, accountRows] = await Promise.all([
-    db
-      .execute(sql`SELECT * FROM steward_bootstrap.platform_user_tenant_ids(${userId}::uuid)`)
-      .then((result) => rowsFromExecute<{ tenant_id: string }>(result)),
-    db
-      .select({
-        id: accounts.id,
-        provider: accounts.provider,
-        providerAccountId: accounts.providerAccountId,
-        expiresAt: accounts.expiresAt,
-      })
-      .from(accounts)
-      .where(eq(accounts.userId, userId)),
-  ]);
-  const tenantIds = tenantRows.map((row) => row.tenant_id);
+  const raw = await withPlatformAuthorityDatabase(async (platformDb) => {
+    const [row] = rowsFromExecute<{ identity: PlatformUserIdentity | null }>(
+      await platformDb.execute(
+        sql`SELECT steward_bootstrap.platform_user_identity(${userId}::uuid) AS identity`,
+      ),
+    );
+    return row?.identity ?? null;
+  });
+  if (!raw) return null;
+  const tenantIds = raw.tenantIds ?? [];
+  const accountRows = raw.linkedAccounts ?? [];
   const walletExternalIds = accountRows
     .filter((row) => row.provider === WALLET_EXTERNAL_ID_PROVIDER)
     .map((row) => parseWalletExternalProviderAccountId(row.providerAccountId, tenantIds))
     .filter((row): row is PlatformWalletExternalIdRow => row !== null);
 
   return {
-    userId: user.id,
-    email: user.email,
-    emailVerified: user.emailVerified,
-    name: user.name,
-    image: user.image,
-    walletAddress: user.walletAddress,
-    walletChain: user.walletChain,
-    customMetadata: user.customMetadata ?? {},
-    deactivatedAt: user.deactivatedAt,
-    createdAt: user.createdAt,
-    updatedAt: user.updatedAt,
+    ...raw,
+    deactivatedAt: raw.deactivatedAt ? new Date(raw.deactivatedAt) : null,
+    createdAt: new Date(raw.createdAt),
+    updatedAt: new Date(raw.updatedAt),
     tenantIds,
     linkedAccounts: accountRows.filter((row) => row.provider !== WALLET_EXTERNAL_ID_PROVIDER),
     walletExternalIds,
@@ -3835,6 +3982,7 @@ platform.patch("/users/:userId/deactivate", async (c) => {
           previous_deactivated_at: Date | null;
           previous_updated_at: Date;
           deactivated_at: Date | null;
+          tokens_revoked_before: number;
         }>(
           await tx.execute(sql`
             SELECT * FROM steward_bootstrap.platform_set_user_deactivation(
@@ -3844,17 +3992,16 @@ platform.patch("/users/:userId/deactivate", async (c) => {
           `),
         );
         if (!updated) throw new Error("User not found");
-        const issuedBefore = await revocationStore.revokeUserTokens(userId);
         await appendRequiredAudit({
           tenantId: PLATFORM_AUDIT_TENANT_ID,
           actorType: "platform",
           action: deactivated ? "user.deactivate" : "user.reactivate",
           resourceType: "user",
           resourceId: userId,
-          metadata: { issuedBefore },
+          metadata: { issuedBefore: Number(updated.tokens_revoked_before) },
           ...auditCtx(c),
         });
-        return { issuedBefore, updated };
+        return { issuedBefore: Number(updated.tokens_revoked_before), updated };
       },
     ),
   ).catch((err: unknown) => {
@@ -3876,6 +4023,9 @@ platform.patch("/users/:userId/deactivate", async (c) => {
   if (result === "Personal tenant membership invariant violated") {
     return c.json<ApiResponse>({ ok: false, error: result }, 409);
   }
+  // Redis is only an acceleration layer; the committed database cutoff is
+  // authoritative and makes both deactivation and reactivation fail closed.
+  await revocationStore.revokeUserTokens(userId, result.issuedBefore).catch(() => undefined);
   return c.json<ApiResponse<{ userId: string; deactivatedAt: Date | null }>>({
     ok: true,
     data: { userId, deactivatedAt: result.updated.deactivated_at },
@@ -3896,7 +4046,7 @@ platform.delete("/users/:userId", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: "Invalid user id format" }, 400);
   }
 
-  const issuedBefore = await withPlatformAuthorityDatabase((platformDb) =>
+  const deletionResult = await withPlatformAuthorityDatabase((platformDb) =>
     withTenantAuditedTransactionOnDb(
       platformDb,
       PLATFORM_AUDIT_TENANT_ID,
@@ -3922,7 +4072,7 @@ platform.delete("/users/:userId", async (c) => {
           `),
         );
         if (!deleted) throw new Error("User not found");
-        const cutoff = await revocationStore.revokeUserTokens(userId);
+        const cutoff = Math.floor(Date.now() / 1000);
         await appendRequiredAudit({
           tenantId: PLATFORM_AUDIT_TENANT_ID,
           actorType: "platform",
@@ -3943,17 +4093,35 @@ platform.delete("/users/:userId", async (c) => {
     if (errorChainHasExactMessage(error, "Personal tenant membership invariant violated")) {
       return "Personal tenant membership invariant violated";
     }
+    if (
+      errorChainHasExactMessage(error, "Personal tenant must be deleted before its user identity")
+    ) {
+      return "Personal tenant must be deleted before its user identity";
+    }
     throw error;
   });
-  if (issuedBefore === null) {
+  if (deletionResult === null) {
     return c.json<ApiResponse>({ ok: false, error: "User not found" }, 404);
   }
-  if (issuedBefore === "Cannot delete the sole active tenant owner") {
-    return c.json<ApiResponse>({ ok: false, error: issuedBefore }, 409);
+  if (deletionResult === "Cannot delete the sole active tenant owner") {
+    return c.json<ApiResponse>({ ok: false, error: deletionResult }, 409);
   }
-  if (issuedBefore === "Personal tenant membership invariant violated") {
-    return c.json<ApiResponse>({ ok: false, error: issuedBefore }, 409);
+  if (deletionResult === "Personal tenant membership invariant violated") {
+    return c.json<ApiResponse>({ ok: false, error: deletionResult }, 409);
   }
+  if (deletionResult === "Personal tenant must be deleted before its user identity") {
+    return c.json<ApiResponse>({ ok: false, error: deletionResult }, 409);
+  }
+
+  // The committed user deletion is the authoritative revocation boundary:
+  // request authentication rejects a missing user. Refresh the distributed
+  // revocation cache afterward as defense in depth, but never turn an already
+  // committed deletion into a misleading 500. Retrying the DELETE is safe.
+  await revocationStore.revokeUserTokens(userId, deletionResult).catch((error: unknown) => {
+    console.error("[Platform] Post-delete token cache refresh failed", {
+      errorClass: error instanceof Error ? error.name : typeof error,
+    });
+  });
 
   return c.json<ApiResponse<{ userId: string; deleted: boolean }>>({
     ok: true,
@@ -5311,6 +5479,7 @@ platform.delete("/tenants/:id/members/:userId", async (c) => {
           throw new Error("Cannot remove the sole tenant owner");
         }
       }
+      const revokedBefore = await revocationStore.revokeUserTokens(userId);
       const [row] = await tx
         .delete(userTenants)
         .where(and(eq(userTenants.tenantId, tenantId), eq(userTenants.userId, userId)))
@@ -5336,6 +5505,7 @@ platform.delete("/tenants/:id/members/:userId", async (c) => {
     }
     throw err;
   }
+
   if (!deleted) {
     return c.json<ApiResponse>({ ok: false, error: "Member not found in tenant" }, 404);
   }
@@ -5437,10 +5607,12 @@ platform.patch("/tenants/:id/members/:userId", async (c) => {
         .from(userTenants)
         .where(and(eq(userTenants.tenantId, tenantId), eq(userTenants.userId, userId)));
       if (!current) return undefined;
-      if (current.role === "owner" && role !== "owner") {
-        if ((await activeTenantOwnerCount(tx, tenantId, userId)) < 1) {
-          throw new Error("Cannot downgrade the sole tenant owner");
-        }
+      if (
+        current.role === "owner" &&
+        role !== "owner" &&
+        (await activeTenantOwnerCount(tx, tenantId, userId)) < 1
+      ) {
+        throw new Error("Cannot downgrade the sole tenant owner");
       }
       // Derive the cutoff from the membership protected by the final lifecycle
       // lock. A preflight member -> concurrent owner -> requested member

@@ -68,6 +68,8 @@ export interface Env {
   NODE_ENV?: string;
   STEWARD_ENV?: string;
   STEWARD_APP_DATABASE_ROLE?: string;
+  STEWARD_BOOTSTRAP_DATABASE_ROLE?: string;
+  STEWARD_MIGRATION_DATABASE_ROLE?: string;
   STEWARD_PLATFORM_DATABASE_URL?: string;
   STEWARD_PLATFORM_DATABASE_ROLE?: string;
   STEWARD_ALLOW_INSECURE_DB?: string;
@@ -366,6 +368,18 @@ export async function runWorkerProviderActionRecoverySweep(
   return result;
 }
 
+export async function runWorkerTenantDeletionRevocationSweep(
+  env: Env,
+  options?: { sweep?: () => Promise<unknown> },
+): Promise<unknown> {
+  hydrateProcessEnv(env);
+  const sweep =
+    options?.sweep ??
+    (await import("./services/tenant-deletion-revocation-scheduler"))
+      .runTenantDeletionRevocationSweep;
+  return sweep();
+}
+
 /**
  * Pull Worker `env` bindings into `globalThis.process.env` so any code that
  * reads `process.env.X` at request time (e.g. JWT secret, RPC URL) can find it.
@@ -410,6 +424,60 @@ export function hydrateProcessEnv(env: Env): void {
 }
 
 let workerInit: Promise<void> | null = null;
+const workerRlsReadyByDatabase = new Map<string, Promise<void>>();
+const MAX_WORKER_RLS_AUTHORITIES = 8;
+
+export function __resetWorkerRlsReadinessForTests(): void {
+  workerRlsReadyByDatabase.clear();
+}
+
+export async function ensureWorkerRlsReady(
+  env: Env,
+  assertReady: typeof assertRlsDeploymentSafety = assertRlsDeploymentSafety,
+): Promise<void> {
+  if (env.NODE_ENV === "development" || env.NODE_ENV === "test") return;
+  const databaseUrl = env.DATABASE_URL?.trim();
+  const expectedRole = env.STEWARD_APP_DATABASE_ROLE?.trim();
+  const expectedPlatformRole = env.STEWARD_PLATFORM_DATABASE_ROLE?.trim();
+  const expectedBootstrapRole = env.STEWARD_BOOTSTRAP_DATABASE_ROLE?.trim();
+  const expectedMigrationRole = env.STEWARD_MIGRATION_DATABASE_ROLE?.trim();
+  if (
+    !databaseUrl ||
+    !expectedRole ||
+    !expectedPlatformRole ||
+    !expectedBootstrapRole ||
+    !expectedMigrationRole
+  ) {
+    throw new Error("WORKER_RLS_DATABASE_AUTHORITY_REQUIRED");
+  }
+  const key = `${env.DATABASE_DRIVER?.trim().toLowerCase() ?? ""}\n${databaseUrl}\n${expectedRole}\n${expectedPlatformRole}\n${expectedBootstrapRole}\n${expectedMigrationRole}`;
+  let ready = workerRlsReadyByDatabase.get(key);
+  if (!ready) {
+    if (workerRlsReadyByDatabase.size >= MAX_WORKER_RLS_AUTHORITIES) {
+      throw new Error("WORKER_RLS_AUTHORITY_CACHE_EXHAUSTED");
+    }
+    ready = assertReady(getDb(), {
+      expectedRole,
+      expectedPlatformRole,
+      expectedBootstrapRole,
+      expectedMigrationRole,
+    }).catch((error) => {
+      workerRlsReadyByDatabase.delete(key);
+      throw error;
+    });
+    workerRlsReadyByDatabase.set(key, ready);
+  }
+  await ready;
+}
+
+export async function runWorkerRlsGuardedTask<T>(
+  env: Env,
+  task: () => Promise<T>,
+  assertReady: typeof assertRlsDeploymentSafety = assertRlsDeploymentSafety,
+): Promise<T> {
+  await ensureWorkerRlsReady(env, assertReady);
+  return task();
+}
 
 function workerJwtEnvironment(env: Env): Readonly<JwtRuntimeEnvironment> {
   return Object.freeze({
@@ -495,10 +563,18 @@ async function initializeWorker(env: Env): Promise<void> {
   // of surfacing at first token sign/verify.
   validateWorkerSecurityEnv();
   const expectedRole = env.STEWARD_APP_DATABASE_ROLE?.trim();
-  if (!expectedRole) {
-    throw new Error("STEWARD_APP_DATABASE_ROLE is required on Workers");
+  const expectedPlatformRole = env.STEWARD_PLATFORM_DATABASE_ROLE?.trim();
+  const expectedBootstrapRole = env.STEWARD_BOOTSTRAP_DATABASE_ROLE?.trim();
+  const expectedMigrationRole = env.STEWARD_MIGRATION_DATABASE_ROLE?.trim();
+  if (!expectedRole || !expectedPlatformRole || !expectedBootstrapRole || !expectedMigrationRole) {
+    throw new Error("STEWARD database role expectations are required on Workers");
   }
-  await assertRlsDeploymentSafety(getDb(), { expectedRole });
+  await assertRlsDeploymentSafety(getDb(), {
+    expectedRole,
+    expectedPlatformRole,
+    expectedBootstrapRole,
+    expectedMigrationRole,
+  });
   await assertWorkerMigrationReadiness();
   const redisOk = await initRedis(env);
   assertWorkerRedisReady(redisOk);
@@ -605,9 +681,11 @@ export default {
             // invocation so rotated/removed bindings cannot inherit the first
             // isolate request's client through workerInit.
             assertWorkerRedisReady(await initRedis(env));
-            await ensureWorkerInit(env);
-            const app = await getComposedApp();
-            return app.fetch(request, env, ctx as never);
+            return runWorkerRlsGuardedTask(env, async () => {
+              await ensureWorkerInit(env);
+              const app = await getComposedApp();
+              return app.fetch(request, env, ctx as never);
+            });
           },
           waitUntil ? { waitUntil } : undefined,
         );
@@ -625,15 +703,20 @@ export default {
         validateWorkerSecurityEnv();
         const scheduledWork = withWorkerRequestDatabase(env, async () => {
           assertWorkerRedisReady(await initRedis(env));
-          await ensureWorkerInit(env);
-        }).then(() =>
-          Promise.all([
+          await runWorkerRlsGuardedTask(env, () => ensureWorkerInit(env));
+        }).then(async () => {
+          const sweepResults = await Promise.allSettled([
             withWorkerRequestDatabase(env, () => runWorkerProviderActionRecoverySweep(env)),
             withWorkerRequestDatabase(env, () => runWorkerUpstreamCredentialLeaseSweep(env)),
             withWorkerRequestDatabase(env, () => runWorkerGoogleCredentialLifecycleSweep(env)),
             withWorkerRequestDatabase(env, () => runWorkerXCredentialLifecycleSweep(env)),
-          ]),
-        );
+            withWorkerRequestDatabase(env, () => runWorkerTenantDeletionRevocationSweep(env)),
+          ]);
+          const failedSweep = sweepResults.find(
+            (result): result is PromiseRejectedResult => result.status === "rejected",
+          );
+          if (failedSweep) throw failedSweep.reason;
+        });
         ctx.waitUntil(scheduledWork);
       });
     });

@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it, spyOn } from "bun:test";
 
 import { hashSha256Hex, revocationStore } from "@stwd/auth";
 import {
@@ -8,6 +8,7 @@ import {
   closeDb,
   getDb,
   refreshTokens,
+  retainedUserProviderEvidence,
   sponsoredGasEvents,
   tenantConfigs,
   tenants,
@@ -15,7 +16,7 @@ import {
   userTenants,
 } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
-import { and, eq, sql } from "drizzle-orm";
+import { and, asc, eq, sql } from "drizzle-orm";
 
 const PLATFORM_KEY = "platform-identity-graph-key";
 const TENANT_ID = "platform-identity-graph-tenant";
@@ -132,12 +133,23 @@ describe("platform global identity graph routes", () => {
         name: `Malformed personal ${extraRole}`,
         apiKeyHash: `malformed-personal-${extraRole}-hash`,
       });
-    await getDb()
-      .insert(userTenants)
-      .values([
-        { userId: owner.id, tenantId, role: "owner" },
-        { userId: extraUser.id, tenantId, role: extraRole },
-      ]);
+    // Reproduce a row shape that could predate 0114. New writes are covered by
+    // a separate invariant test and cannot create this state.
+    await getDb().execute(
+      sql.raw("ALTER TABLE user_tenants DISABLE TRIGGER user_tenants_personal_authority_guard"),
+    );
+    try {
+      await getDb()
+        .insert(userTenants)
+        .values([
+          { userId: owner.id, tenantId, role: "owner" },
+          { userId: extraUser.id, tenantId, role: extraRole },
+        ]);
+    } finally {
+      await getDb().execute(
+        sql.raw("ALTER TABLE user_tenants ENABLE TRIGGER user_tenants_personal_authority_guard"),
+      );
+    }
     await getDb()
       .insert(refreshTokens)
       .values({
@@ -181,6 +193,82 @@ describe("platform global identity graph routes", () => {
     expect(
       await getDb().select().from(refreshTokens).where(eq(refreshTokens.userId, owner.id)),
     ).toHaveLength(1);
+  }
+
+  async function createLifecycleFaultUser(label: string) {
+    const [user] = await getDb()
+      .insert(users)
+      .values({ email: `${label}@example.test`, emailVerified: true })
+      .returning({ id: users.id });
+    await getDb().insert(userTenants).values({
+      userId: user.id,
+      tenantId: TENANT_ID,
+      role: "member",
+    });
+    await getDb()
+      .insert(refreshTokens)
+      .values({
+        id: `${label}-refresh-token`,
+        userId: user.id,
+        tenantId: TENANT_ID,
+        tokenHash: `${label}-refresh-hash`,
+        expiresAt: new Date(Date.now() + 60_000),
+      });
+    return user.id;
+  }
+
+  async function lifecycleDatabaseState(faultUserId: string) {
+    const [user] = await getDb()
+      .select({ deactivatedAt: users.deactivatedAt })
+      .from(users)
+      .where(eq(users.id, faultUserId));
+    const tokens = await getDb()
+      .select({ id: refreshTokens.id })
+      .from(refreshTokens)
+      .where(eq(refreshTokens.userId, faultUserId));
+    const audits = await getDb()
+      .select({ action: auditEvents.action })
+      .from(auditEvents)
+      .where(eq(auditEvents.resourceId, faultUserId))
+      .orderBy(asc(auditEvents.seq));
+    return { audits: audits.map((row) => row.action), tokens, user };
+  }
+
+  async function deactivateUser(faultUserId: string) {
+    return platformRoutes.request(`/users/${faultUserId}/deactivate`, {
+      method: "PATCH",
+      headers: headers(),
+      body: JSON.stringify({ deactivated: true }),
+    });
+  }
+
+  async function installOneShotCompletionAuditFailure(name: string, deferred: boolean) {
+    await getDb().execute(sql.raw(`CREATE SEQUENCE ${name}_seq`));
+    await getDb().execute(
+      sql.raw(`
+      CREATE FUNCTION ${name}_fn() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN
+        IF NEW.action = 'user.deactivate' AND nextval('${name}_seq') = 1 THEN
+          RAISE EXCEPTION '${name}';
+        END IF;
+        RETURN NEW;
+      END
+      $$
+    `),
+    );
+    await getDb().execute(
+      sql.raw(
+        deferred
+          ? `CREATE CONSTRAINT TRIGGER ${name}_trigger AFTER INSERT ON audit_events DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION ${name}_fn()`
+          : `CREATE TRIGGER ${name}_trigger AFTER INSERT ON audit_events FOR EACH ROW EXECUTE FUNCTION ${name}_fn()`,
+      ),
+    );
+  }
+
+  async function removeCompletionAuditFailure(name: string) {
+    await getDb().execute(sql.raw(`DROP TRIGGER IF EXISTS ${name}_trigger ON audit_events`));
+    await getDb().execute(sql.raw(`DROP FUNCTION IF EXISTS ${name}_fn()`));
+    await getDb().execute(sql.raw(`DROP SEQUENCE IF EXISTS ${name}_seq`));
   }
 
   it("gets a global user identity with tenant ids and linked accounts", async () => {
@@ -1087,6 +1175,73 @@ describe("platform global identity graph routes", () => {
     expect(reactivateBody.data.deactivatedAt).toBeNull();
   });
 
+  it("rolls back authorization and mutation when the mounted revoker fails, then retries", async () => {
+    const faultUserId = await createLifecycleFaultUser("platform-revoker-fault");
+    const originalRevoke = revocationStore.revokeUserTokens.bind(revocationStore);
+    let attempts = 0;
+    revocationStore.revokeUserTokens = async (id, issuedBefore, expiresAt) => {
+      attempts += 1;
+      if (attempts === 1) throw new Error("simulated platform revoker failure");
+      return originalRevoke(id, issuedBefore, expiresAt);
+    };
+
+    try {
+      const failed = await deactivateUser(faultUserId);
+      expect(failed.status).toBe(500);
+      expect(await lifecycleDatabaseState(faultUserId)).toEqual({
+        audits: [],
+        tokens: [{ id: "platform-revoker-fault-refresh-token" }],
+        user: { deactivatedAt: null },
+      });
+      expect(await revocationStore.getUserRevokedBefore(faultUserId)).toBeNull();
+
+      const retried = await deactivateUser(faultUserId);
+      expect(retried.status).toBe(200);
+      expect(await lifecycleDatabaseState(faultUserId)).toEqual({
+        audits: ["user.deactivate.authorized", "user.deactivate"],
+        tokens: [],
+        user: { deactivatedAt: expect.any(Date) },
+      });
+      expect(await revocationStore.getUserRevokedBefore(faultUserId)).not.toBeNull();
+    } finally {
+      revocationStore.revokeUserTokens = originalRevoke;
+    }
+  });
+
+  for (const fault of [
+    { deferred: false, label: "completion audit", name: "platform_completion_audit_fault" },
+    { deferred: true, label: "commit", name: "platform_commit_fault" },
+  ]) {
+    it(`rolls back database state on ${fault.label} failure, preserves safe revocation, and retries`, async () => {
+      const faultUserId = await createLifecycleFaultUser(fault.name);
+      await installOneShotCompletionAuditFailure(fault.name, fault.deferred);
+      try {
+        const failed = await deactivateUser(faultUserId);
+        expect(failed.status).toBe(500);
+        expect(await lifecycleDatabaseState(faultUserId)).toEqual({
+          audits: [],
+          tokens: [{ id: `${fault.name}-refresh-token` }],
+          user: { deactivatedAt: null },
+        });
+        const firstCutoff = await revocationStore.getUserRevokedBefore(faultUserId);
+        expect(firstCutoff).not.toBeNull();
+
+        const retried = await deactivateUser(faultUserId);
+        expect(retried.status).toBe(200);
+        expect(await lifecycleDatabaseState(faultUserId)).toEqual({
+          audits: ["user.deactivate.authorized", "user.deactivate"],
+          tokens: [],
+          user: { deactivatedAt: expect.any(Date) },
+        });
+        const retryCutoff = await revocationStore.getUserRevokedBefore(faultUserId);
+        expect(retryCutoff).not.toBeNull();
+        expect(retryCutoff as number).toBeGreaterThanOrEqual(firstCutoff as number);
+      } finally {
+        await removeCompletionAuditFailure(fault.name);
+      }
+    });
+  }
+
   it("hard-deletes users and cascades linked identity rows", async () => {
     const [deleteUser] = await getDb()
       .insert(users)
@@ -1134,21 +1289,131 @@ describe("platform global identity graph routes", () => {
     expect(deletedRefresh).toHaveLength(0);
   });
 
+  it("keeps a committed deletion successful when token-cache refresh fails", async () => {
+    const [deleteUser] = await getDb()
+      .insert(users)
+      .values({ email: "delete-revocation-retry@example.test", emailVerified: true })
+      .returning({ id: users.id });
+    await getDb().insert(accounts).values({
+      userId: deleteUser.id,
+      provider: "github",
+      providerAccountId: "delete-revocation-retry-github",
+    });
+
+    const revoke = spyOn(revocationStore, "revokeUserTokens").mockRejectedValueOnce(
+      new Error("redis provider unavailable"),
+    );
+    try {
+      const response = await platformRoutes.request(`/users/${deleteUser.id}`, {
+        method: "DELETE",
+        headers: headers(),
+      });
+      expect(response.status).toBe(200);
+      expect(await getDb().select().from(users).where(eq(users.id, deleteUser.id))).toHaveLength(0);
+      expect(
+        await getDb()
+          .select()
+          .from(retainedUserProviderEvidence)
+          .where(eq(retainedUserProviderEvidence.deletedUserId, deleteUser.id)),
+      ).toHaveLength(1);
+    } finally {
+      revoke.mockRestore();
+    }
+  });
+
+  it("keeps committed deactivation successful when token-cache refresh fails", async () => {
+    const [target] = await getDb()
+      .insert(users)
+      .values({ email: "deactivate-revocation-retry@example.test", emailVerified: true })
+      .returning({ id: users.id });
+    const revoke = spyOn(revocationStore, "revokeUserTokens").mockRejectedValueOnce(
+      new Error("redis provider unavailable"),
+    );
+    try {
+      const first = await platformRoutes.request(`/users/${target.id}/deactivate`, {
+        method: "PATCH",
+        headers: headers(),
+        body: JSON.stringify({ deactivated: true }),
+      });
+      expect(first.status).toBe(200);
+      const [stored] = await getDb()
+        .select({ deactivatedAt: users.deactivatedAt })
+        .from(users)
+        .where(eq(users.id, target.id));
+      expect(stored?.deactivatedAt).toBeInstanceOf(Date);
+      const completed = await getDb()
+        .select({ action: auditEvents.action })
+        .from(auditEvents)
+        .where(
+          and(eq(auditEvents.resourceId, target.id), eq(auditEvents.action, "user.deactivate")),
+        );
+      expect(completed).toHaveLength(1);
+
+      expect(revoke).toHaveBeenCalledTimes(1);
+    } finally {
+      revoke.mockRestore();
+    }
+  });
+
+  it("keeps committed reactivation successful behind the durable token line", async () => {
+    const [target] = await getDb()
+      .insert(users)
+      .values({
+        email: "reactivate-revocation-retry@example.test",
+        emailVerified: true,
+        deactivatedAt: new Date(),
+      })
+      .returning({ id: users.id });
+    const revoke = spyOn(revocationStore, "revokeUserTokens").mockRejectedValueOnce(
+      new Error("redis provider unavailable"),
+    );
+    try {
+      const first = await platformRoutes.request(`/users/${target.id}/deactivate`, {
+        method: "PATCH",
+        headers: headers(),
+        body: JSON.stringify({ deactivated: false }),
+      });
+      expect(first.status).toBe(200);
+      const [stored] = await getDb()
+        .select({
+          deactivatedAt: users.deactivatedAt,
+          tokensRevokedBefore: users.tokensRevokedBefore,
+        })
+        .from(users)
+        .where(eq(users.id, target.id));
+      expect(stored?.deactivatedAt).toBeNull();
+      expect(stored?.tokensRevokedBefore).toBeGreaterThan(-1);
+      const completed = await getDb()
+        .select({ action: auditEvents.action })
+        .from(auditEvents)
+        .where(
+          and(eq(auditEvents.resourceId, target.id), eq(auditEvents.action, "user.reactivate")),
+        );
+      expect(completed).toHaveLength(1);
+
+      expect(revoke).toHaveBeenCalledTimes(1);
+    } finally {
+      revoke.mockRestore();
+    }
+  });
+
   it("deactivates a personal owner and deletes the tenant before its identity", async () => {
     const [personalUser] = await getDb()
       .insert(users)
       .values({ email: "delete-personal-owner@example.test", emailVerified: true })
       .returning({ id: users.id });
     const personalTenantId = `personal-${personalUser.id}`;
-    await getDb().insert(tenants).values({
-      id: personalTenantId,
-      name: "Personal deletion owner",
-      apiKeyHash: "personal-delete-owner-hash",
-    });
-    await getDb().insert(userTenants).values({
-      userId: personalUser.id,
-      tenantId: personalTenantId,
-      role: "owner",
+    await getDb().transaction(async (tx) => {
+      await tx.insert(tenants).values({
+        id: personalTenantId,
+        name: "Personal deletion owner",
+        apiKeyHash: "personal-delete-owner-hash",
+      });
+      await tx.insert(userTenants).values({
+        userId: personalUser.id,
+        tenantId: personalTenantId,
+        role: "owner",
+      });
     });
     await getDb().insert(accounts).values({
       userId: personalUser.id,
@@ -1197,6 +1462,19 @@ describe("platform global identity graph routes", () => {
         .where(eq(users.email, "personal-extra-member@example.test")),
     ).toHaveLength(0);
 
+    const hostileCaseVariant = `Personal-${personalUser.id}`;
+    const hostileDelete = await platformRoutes.request(`/tenants/${hostileCaseVariant}`, {
+      method: "DELETE",
+      headers: headers(),
+    });
+    expect(hostileDelete.status).toBe(409);
+    expect(((await hostileDelete.json()) as { error: string }).error).toBe(
+      "Personal tenant membership invariant violated",
+    );
+    expect(
+      await getDb().select().from(tenants).where(eq(tenants.id, personalTenantId)),
+    ).toHaveLength(1);
+
     const deactivate = await platformRoutes.request(`/users/${personalUser.id}/deactivate`, {
       method: "PATCH",
       headers: headers(),
@@ -1233,6 +1511,22 @@ describe("platform global identity graph routes", () => {
         .from(accounts)
         .where(eq(accounts.providerAccountId, "google-personal-delete-owner")),
     ).toHaveLength(0);
+    expect(
+      await getDb()
+        .select({
+          deletedUserId: retainedUserProviderEvidence.deletedUserId,
+          provider: retainedUserProviderEvidence.provider,
+          providerAccountId: retainedUserProviderEvidence.providerAccountId,
+        })
+        .from(retainedUserProviderEvidence)
+        .where(eq(retainedUserProviderEvidence.deletedUserId, personalUser.id)),
+    ).toEqual([
+      {
+        deletedUserId: personalUser.id,
+        provider: "google",
+        providerAccountId: "google-personal-delete-owner",
+      },
+    ]);
     expect(
       await getDb().select().from(tenants).where(eq(tenants.id, personalTenantId)),
     ).toHaveLength(0);

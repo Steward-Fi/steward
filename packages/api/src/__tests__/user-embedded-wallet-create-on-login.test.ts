@@ -102,15 +102,15 @@ describe("user embedded wallet create-on-login config", () => {
       .values({ email, emailVerified: true, walletAddress: null })
       .returning({ id: users.id });
     const personalTenantId = `personal-${user.id}`;
-    await getDb()
-      .insert(tenants)
-      .values({ id: personalTenantId, name: email, apiKeyHash: `hash-${user.id}` });
-    await getDb()
-      .insert(userTenants)
-      .values([
+    await getDb().transaction(async (tx) => {
+      await tx
+        .insert(tenants)
+        .values({ id: personalTenantId, name: email, apiKeyHash: `hash-${user.id}` });
+      await tx.insert(userTenants).values([
         { userId: user.id, tenantId: personalTenantId, role: "owner" },
         { userId: user.id, tenantId: appTenantId, role: "member" },
       ]);
+    });
     const token = await createSessionToken(
       "0x0000000000000000000000000000000000000000",
       personalTenantId,
