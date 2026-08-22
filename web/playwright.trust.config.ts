@@ -4,7 +4,7 @@ const WEB = "http://127.0.0.1:3499";
 
 export default defineConfig({
   testDir: "./e2e",
-  testMatch: "provider-trust-ux-a11y.spec.ts",
+  testMatch: ["provider-trust-ux-a11y.spec.ts", "middleware-runtime.spec.ts"],
   fullyParallel: false,
   forbidOnly: true,
   retries: 0,
