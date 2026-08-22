@@ -5,6 +5,16 @@ function userSessionLockKey(userId: string): string {
   return `user_session_${userId}`;
 }
 
+export async function lockPlatformUserAccount(
+  tx: { execute: (query: string | SQLWrapper) => unknown },
+  userId: string,
+) {
+  if (shouldUsePGLite()) return;
+  await tx.execute(
+    sql`select pg_advisory_xact_lock(hashtextextended(${`platform_user_account_${userId}`}, 0))`,
+  );
+}
+
 export async function lockUserSession(
   tx: { execute: (query: string | SQLWrapper) => unknown },
   userId: string,

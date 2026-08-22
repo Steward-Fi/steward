@@ -118,7 +118,7 @@ import {
 } from "../services/gas-sponsorship";
 import { plaintextKeyExportResponseGateError } from "../services/key-export-plaintext-gate";
 import { isRecentMfaTimestamp } from "../services/recent-mfa";
-import { lockUserSession } from "../services/session-lock";
+import { lockPlatformUserAccount, lockUserSession } from "../services/session-lock";
 import { createSignerCredentialHash, verifySignerCredential } from "../services/signer-credentials";
 import { getConfiguredVault } from "../services/vault-factory";
 import { redactWalletMetadataSecrets } from "../services/wallet-metadata";
@@ -7864,6 +7864,8 @@ user.patch("/me/tenants/:tenantId/users/:targetUserId/role", async (c) => {
   try {
     updated = await withTenantAuditedTransaction(tenantId, async (txRaw, appendRequiredAudit) => {
       const tx = txRaw as typeof db;
+      await lockPlatformUserAccount(tx, targetUserId);
+      await lockUserSession(tx, targetUserId);
       const lockedRequesterRole = await requireLockedTenantAdmin(tx, tenantId, requesterId);
       if (nextRole === "owner" && lockedRequesterRole !== "owner") {
         throw new Error("Only owners can grant owner role");
@@ -8082,8 +8084,9 @@ user.patch("/me/tenants/:tenantId/users/:targetUserId/deactivate", async (c) => 
     tenantId,
     async (txRaw, appendRequiredAudit) => {
       const tx = txRaw as typeof db;
-      await lockTenantOwnerLifecycle(tx, tenantId);
+      await lockPlatformUserAccount(tx, targetUserId);
       await lockUserSession(tx, targetUserId);
+      await lockTenantOwnerLifecycle(tx, tenantId);
       await requireLockedTenantAdmin(tx, tenantId, admin.userId);
       const [membership] = await tx
         .select({ role: userTenants.role })
@@ -8216,6 +8219,8 @@ user.delete("/me/tenants/:tenantId/users/:targetUserId", async (c) => {
   let member: { role: string } | null = null;
   try {
     member = await db.transaction(async (tx) => {
+      await lockPlatformUserAccount(tx, targetUserId);
+      await lockUserSession(tx, targetUserId);
       await lockTenantOwnerLifecycle(tx, tenantId);
       const [current] = await tx
         .select({ role: userTenants.role })
@@ -8268,8 +8273,9 @@ user.delete("/me/tenants/:tenantId/users/:targetUserId", async (c) => {
   try {
     deleted = await withTenantAuditedTransaction(tenantId, async (txRaw, appendRequiredAudit) => {
       const tx = txRaw as typeof db;
-      await lockTenantOwnerLifecycle(tx, tenantId);
+      await lockPlatformUserAccount(tx, targetUserId);
       await lockUserSession(tx, targetUserId);
+      await lockTenantOwnerLifecycle(tx, tenantId);
       await requireLockedTenantAdmin(tx, tenantId, admin.userId);
       const [current] = await tx
         .select({
@@ -8763,8 +8769,9 @@ user.delete("/me/tenants/:tenantId/leave", async (c) => {
       tenantId,
       async (txRaw, appendRequiredAudit) => {
         const tx = txRaw as typeof db;
-        await lockTenantOwnerLifecycle(tx, tenantId);
+        await lockPlatformUserAccount(tx, userId);
         await lockUserSession(tx, userId);
+        await lockTenantOwnerLifecycle(tx, tenantId);
         const [membership] = await tx
           .select({ role: userTenants.role })
           .from(userTenants)
