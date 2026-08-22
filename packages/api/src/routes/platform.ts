@@ -3710,7 +3710,6 @@ platform.patch("/users/:userId/metadata", async (c) => {
   const scopeResponse = requirePlatformRouteScope(c, "platform:user:write");
   if (scopeResponse) return scopeResponse;
 
-  const db = getDb();
   const userId = c.req.param("userId");
   if (!isValidUserId(userId)) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid user id format" }, 400);
@@ -3724,12 +3723,6 @@ platform.patch("/users/:userId/metadata", async (c) => {
   const metadataError = getPlatformMetadataValidationError(body.customMetadata, "customMetadata");
   if (metadataError) return c.json<ApiResponse>({ ok: false, error: metadataError }, 400);
 
-  const [existing] = await db
-    .select({ id: users.id, customMetadata: users.customMetadata, updatedAt: users.updatedAt })
-    .from(users)
-    .where(eq(users.id, userId));
-  if (!existing) return c.json<ApiResponse>({ ok: false, error: "User not found" }, 404);
-
   await writeAuditEvent({
     tenantId: PLATFORM_AUDIT_TENANT_ID,
     actorType: "platform",
@@ -3740,30 +3733,39 @@ platform.patch("/users/:userId/metadata", async (c) => {
     ...auditCtx(c),
   });
 
-  const [updated] = await db
-    .update(users)
-    .set({ customMetadata: body.customMetadata, updatedAt: new Date() })
-    .where(eq(users.id, userId))
-    .returning({ id: users.id });
+  const updated = await withPlatformAuthorityDatabase((platformDb) =>
+    withTenantAuditedTransactionOnDb(
+      platformDb,
+      PLATFORM_AUDIT_TENANT_ID,
+      async (txRaw, appendRequiredAudit) => {
+        const tx = txRaw as typeof platformDb;
+        await tx.execute(
+          sql`SELECT set_config('steward.tenant_id', ${PLATFORM_AUDIT_TENANT_ID}, true)`,
+        );
+        const locked = rowsFromExecute<{ id: string }>(
+          await tx.execute(sql`SELECT id FROM users WHERE id = ${userId}::uuid FOR UPDATE`),
+        )[0];
+        if (!locked) return null;
+        const result = await tx
+          .update(users)
+          .set({ customMetadata: body.customMetadata, updatedAt: new Date() })
+          .where(eq(users.id, userId))
+          .returning({ id: users.id });
+        if (!result[0]) return null;
+        await appendRequiredAudit({
+          tenantId: PLATFORM_AUDIT_TENANT_ID,
+          actorType: "platform",
+          action: "user.metadata.update",
+          resourceType: "user",
+          resourceId: userId,
+          metadata: { updatedGlobal: true },
+          ...auditCtx(c),
+        });
+        return result[0];
+      },
+    ),
+  );
   if (!updated) return c.json<ApiResponse>({ ok: false, error: "User not found" }, 404);
-
-  try {
-    await writeAuditEvent({
-      tenantId: PLATFORM_AUDIT_TENANT_ID,
-      actorType: "platform",
-      action: "user.metadata.update",
-      resourceType: "user",
-      resourceId: userId,
-      metadata: { updatedGlobal: true },
-      ...auditCtx(c),
-    });
-  } catch (error) {
-    await db
-      .update(users)
-      .set({ customMetadata: existing.customMetadata, updatedAt: existing.updatedAt })
-      .where(eq(users.id, userId));
-    throw error;
-  }
   dispatchWebhook(PLATFORM_AUDIT_TENANT_ID, userId, "user.updated_account", {
     userId,
     scope: "global",
