@@ -9,29 +9,56 @@ import { API_URL } from "@/lib/api";
 
 type AcceptState = "idle" | "accepting" | "accepted" | "error";
 
-async function acceptInvitation(tenantId: string, token: string, sessionToken: string) {
-  const response = await fetch(
-    `${API_URL}/user/me/tenants/${encodeURIComponent(tenantId)}/invitations/accept`,
-    {
-      method: "POST",
-      headers: {
-        Accept: "application/json",
-        Authorization: `Bearer ${sessionToken}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ token }),
-    },
+const INVITATION_ERROR =
+  "The invitation could not be accepted. Please verify the link and try again.";
+const TENANT_ID_PATTERN = /^[a-zA-Z0-9_\-.:]{1,64}$/;
+const INVITATION_TOKEN_PATTERN = /^[a-f0-9]{64}$/i;
+const TENANT_ROLES = new Set(["owner", "admin", "developer", "billing", "viewer", "member"]);
+
+type AcceptedInvitation = {
+  tenantId: string;
+  role: string;
+  invitationId: string;
+  alreadyMember?: boolean;
+};
+
+function isAcceptedInvitation(value: unknown, tenantId: string): value is AcceptedInvitation {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const candidate = value as Record<string, unknown>;
+  return (
+    candidate.ok === true &&
+    candidate.tenantId === tenantId &&
+    typeof candidate.role === "string" &&
+    TENANT_ROLES.has(candidate.role) &&
+    (candidate.role !== "owner" || candidate.alreadyMember === true) &&
+    typeof candidate.invitationId === "string" &&
+    candidate.invitationId.length > 0 &&
+    (candidate.alreadyMember === undefined || typeof candidate.alreadyMember === "boolean")
   );
-  const body = (await response.json()) as {
-    ok: boolean;
-    data?: { tenantId: string; role: string; invitationId: string; alreadyMember?: boolean };
-    error?: string;
-  };
-  if (!response.ok || !body.ok) {
-    // Do not reflect server/provider details into this public invitation page.
-    throw new Error("The invitation could not be accepted. Please verify the link and try again.");
+}
+
+async function acceptInvitation(tenantId: string, token: string, sessionToken: string) {
+  try {
+    const response = await fetch(
+      `${API_URL}/user/me/tenants/${encodeURIComponent(tenantId)}/invitations/accept`,
+      {
+        method: "POST",
+        headers: {
+          Accept: "application/json",
+          Authorization: `Bearer ${sessionToken}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ token }),
+      },
+    );
+    const body: unknown = await response.json();
+    if (!response.ok || !isAcceptedInvitation(body, tenantId)) throw new Error(INVITATION_ERROR);
+    return body;
+  } catch {
+    // Network, parsing, server, and response-contract failures share one public
+    // message. Never reflect provider/runtime diagnostics into this page.
+    throw new Error(INVITATION_ERROR);
   }
-  return body.data;
 }
 
 function AcceptInvitationInner() {
@@ -66,6 +93,8 @@ function AcceptInvitationInner() {
     if (
       !tenantId ||
       !token ||
+      !TENANT_ID_PATTERN.test(tenantId) ||
+      !INVITATION_TOKEN_PATTERN.test(token) ||
       !sessionToken ||
       activeInvitationKey !== invitationKey ||
       state !== "idle" ||
@@ -83,23 +112,29 @@ function AcceptInvitationInner() {
         if (requestGeneration.current !== generation) return;
         setState("accepted");
         setMessage(
-          result?.alreadyMember
+          result.alreadyMember
             ? `You're already a member of ${tenantId}.`
-            : `You've joined ${tenantId} as ${result?.role ?? "member"}.`,
+            : `You've joined ${tenantId} as ${result.role}.`,
         );
       })
-      .catch((error) => {
+      .catch(() => {
         if (requestGeneration.current !== generation) return;
         acceptingRef.current = false;
         setState("error");
-        setMessage(error instanceof Error ? error.message : "Failed to accept invitation");
+        setMessage(INVITATION_ERROR);
       });
   }
 
   const missingParams = !tenantId || !token;
-  const needsLogin = !missingParams && !auth.getToken();
+  const invalidParams =
+    !missingParams && (!TENANT_ID_PATTERN.test(tenantId) || !INVITATION_TOKEN_PATTERN.test(token));
+  const needsLogin = !missingParams && !invalidParams && !auth.getToken();
   const showConfirm =
-    activeInvitationKey === invitationKey && !missingParams && !needsLogin && state === "idle";
+    activeInvitationKey === invitationKey &&
+    !missingParams &&
+    !invalidParams &&
+    !needsLogin &&
+    state === "idle";
 
   return (
     <div className="min-h-screen bg-bg flex items-center justify-center px-4">
@@ -108,13 +143,15 @@ function AcceptInvitationInner() {
         <div className="mt-3 text-sm leading-6 text-text-secondary">
           {missingParams
             ? "This invitation link is missing required fields."
-            : needsLogin
-              ? "Sign in with the invited email, then reopen this invitation link."
-              : state === "accepting"
-                ? "Accepting invitation..."
-                : showConfirm
-                  ? `You've been invited to join ${tenantId}. Review the tenant before accepting — only continue if you expected this invitation.`
-                  : message}
+            : invalidParams
+              ? "This invitation link contains invalid fields."
+              : needsLogin
+                ? "Sign in with the invited email, then reopen this invitation link."
+                : state === "accepting"
+                  ? "Accepting invitation..."
+                  : showConfirm
+                    ? `You've been invited to join ${tenantId}. Review the tenant before accepting — only continue if you expected this invitation.`
+                    : message}
         </div>
         <div className="mt-6 flex gap-3">
           {needsLogin ? (
@@ -150,7 +187,7 @@ function AcceptInvitationInner() {
               Open dashboard
             </Link>
           ) : null}
-          {state === "error" || missingParams ? (
+          {state === "error" || missingParams || invalidParams ? (
             <Link
               href="/dashboard"
               className="border border-border px-4 py-2 text-sm text-text-secondary hover:text-text transition-colors"

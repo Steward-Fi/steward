@@ -21,6 +21,9 @@ function sessionToken(tenantId: string, userId: string): string {
   ].join(".");
 }
 
+const CLAIM_A = "a".repeat(64);
+const CLAIM_B = "b".repeat(64);
+
 async function seedSession(page: Page, token: string): Promise<void> {
   await page.addInitScript((value) => {
     if (!window.sessionStorage.getItem("steward_session_token")) {
@@ -54,7 +57,7 @@ test("only explicit acceptance posts once with current encoded inputs and creden
   });
 
   await page.goto(
-    `/accept-invitation?tenantId=${encodeURIComponent("tenant / hostile")}&token=${encodeURIComponent("claim&token=1")}`,
+    `/accept-invitation?tenantId=${encodeURIComponent("tenant:current")}&token=${CLAIM_A}`,
   );
   await expect(page.getByRole("button", { name: "Accept invitation" })).toBeVisible();
   await waitForHydration(page);
@@ -72,15 +75,17 @@ test("only explicit acceptance posts once with current encoded inputs and creden
   await pendingRequest.current?.fulfill({
     json: {
       ok: true,
-      data: { tenantId: "tenant / hostile", role: "member", invitationId: "invitation-1" },
+      tenantId: "tenant:current",
+      role: "member",
+      invitationId: "invitation-1",
     },
   });
-  await expect(page.getByText("You've joined tenant / hostile as member.")).toBeVisible();
+  await expect(page.getByText("You've joined tenant:current as member.")).toBeVisible();
   expect(requests).toEqual([
     {
-      url: expect.stringContaining("/tenants/tenant%20%2F%20hostile/invitations/accept"),
+      url: expect.stringContaining("/tenants/tenant%3Acurrent/invitations/accept"),
       authorization: `Bearer ${token}`,
-      body: { token: "claim&token=1" },
+      body: { token: CLAIM_A },
     },
   ]);
   await expect
@@ -96,7 +101,7 @@ test("decline, navigation, missing parameters, and load never accept", async ({ 
     await route.fulfill({ json: { ok: true, data: {} } });
   });
 
-  await page.goto("/accept-invitation?tenantId=tenant-a&token=token-a");
+  await page.goto(`/accept-invitation?tenantId=tenant-a&token=${CLAIM_A}`);
   await waitForHydration(page);
   expect(requests).toBe(0);
   await page.getByRole("link", { name: "Decline" }).click();
@@ -106,6 +111,11 @@ test("decline, navigation, missing parameters, and load never accept", async ({ 
   expect(requests).toBe(0);
   await page.goto("/accept-invitation?tenantId=tenant-a");
   await expect(page.getByText("This invitation link is missing required fields.")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Accept invitation" })).toHaveCount(0);
+  expect(requests).toBe(0);
+
+  await page.goto("/accept-invitation?tenantId=tenant%20with%20spaces&token=not-a-token");
+  await expect(page.getByText("This invitation link contains invalid fields.")).toBeVisible();
   await expect(page.getByRole("button", { name: "Accept invitation" })).toHaveCount(0);
   expect(requests).toBe(0);
 });
@@ -124,23 +134,25 @@ test("route navigation wins over a delayed prior acceptance", async ({ page }) =
       return;
     }
     await route.fulfill({
-      json: { ok: true, data: { tenantId: tenant, role: "member", invitationId: tenant } },
+      json: { ok: true, tenantId: tenant, role: "member", invitationId: tenant },
     });
   });
 
-  await page.goto("/accept-invitation?tenantId=tenant-a&token=claim-a");
+  await page.goto(`/accept-invitation?tenantId=tenant-a&token=${CLAIM_A}`);
   await waitForHydration(page);
   await page.getByRole("button", { name: "Accept invitation" }).click();
   await expect.poll(() => observed.length).toBe(1);
 
-  await page.evaluate(() => {
-    window.history.pushState({}, "", "/accept-invitation?tenantId=tenant-b&token=claim-b");
-  });
+  await page.evaluate((token) => {
+    window.history.pushState({}, "", `/accept-invitation?tenantId=tenant-b&token=${token}`);
+  }, CLAIM_B);
   await expect(page.getByText(/invited to join tenant-b/)).toBeVisible();
   await delayedFirst.current?.fulfill({
     json: {
       ok: true,
-      data: { tenantId: "tenant-a", role: "member", invitationId: "tenant-a" },
+      tenantId: "tenant-a",
+      role: "member",
+      invitationId: "tenant-a",
     },
   });
   await page.waitForTimeout(100);
@@ -154,7 +166,7 @@ test("route navigation wins over a delayed prior acceptance", async ({ page }) =
   ]);
 });
 
-test("a new document uses the rotated concrete session credential", async ({ page }) => {
+test("the retained document uses the rotated concrete session credential", async ({ page }) => {
   const firstToken = sessionToken("tenant-a", "user-a");
   const secondToken = sessionToken("tenant-b", "user-b");
   await seedSession(page, firstToken);
@@ -164,19 +176,21 @@ test("a new document uses the rotated concrete session credential", async ({ pag
     const pathname = new URL(route.request().url()).pathname;
     const tenant = pathname.includes("tenant-a") ? "tenant-a" : "tenant-b";
     await route.fulfill({
-      json: { ok: true, data: { tenantId: tenant, role: "member", invitationId: tenant } },
+      json: { ok: true, tenantId: tenant, role: "member", invitationId: tenant },
     });
   });
 
-  await page.goto("/accept-invitation?tenantId=tenant-a&token=claim-a");
+  await page.goto(`/accept-invitation?tenantId=tenant-a&token=${CLAIM_A}`);
   await waitForHydration(page);
   await page.getByRole("button", { name: "Accept invitation" }).click();
   await expect(page.getByText("You've joined tenant-a as member.")).toBeVisible();
   await page.evaluate((token) => {
     window.sessionStorage.setItem("steward_session_token", token);
   }, secondToken);
-  await page.goto("/accept-invitation?tenantId=tenant-b&token=claim-b");
-  await waitForHydration(page);
+  await page.evaluate((token) => {
+    window.history.pushState({}, "", `/accept-invitation?tenantId=tenant-b&token=${token}`);
+  }, CLAIM_B);
+  await expect(page.getByText(/invited to join tenant-b/)).toBeVisible();
   await page.getByRole("button", { name: "Accept invitation" }).click();
   await expect(page.getByText("You've joined tenant-b as member.")).toBeVisible();
   expect(observed).toEqual([`Bearer ${firstToken}`, `Bearer ${secondToken}`]);
@@ -190,11 +204,55 @@ test("failure text is sanitized and does not expose server details", async ({ pa
       json: { ok: false, error: "database tenant row 42 secret-provider-detail" },
     });
   });
-  await page.goto("/accept-invitation?tenantId=tenant-a&token=claim-a");
+  await page.goto(`/accept-invitation?tenantId=tenant-a&token=${CLAIM_A}`);
   await waitForHydration(page);
   await page.getByRole("button", { name: "Accept invitation" }).click();
   await expect(
     page.getByText("The invitation could not be accepted. Please verify the link and try again."),
   ).toBeVisible();
   await expect(page.getByText(/secret-provider-detail/)).toHaveCount(0);
+});
+
+test("network, parse, and malformed-success failures all use the generic message", async ({
+  page,
+}) => {
+  await seedSession(page, sessionToken("tenant-a", "user-a"));
+  await page.route("**/user/me/tenants/**/invitations/accept", async (route) => {
+    const token = (route.request().postDataJSON() as { token: string }).token;
+    if (token === CLAIM_A) {
+      await route.abort("connectionrefused");
+      return;
+    }
+    if (token === CLAIM_B) {
+      await route.fulfill({
+        status: 502,
+        contentType: "text/plain",
+        body: "proxy diagnostic secret-upstream-host",
+      });
+      return;
+    }
+    await route.fulfill({
+      json: {
+        ok: true,
+        tenantId: "different-tenant",
+        role: "owner",
+        invitationId: "",
+        internal: "secret-malformed-success",
+      },
+    });
+  });
+
+  for (const [tenantId, token] of [
+    ["tenant-a", CLAIM_A],
+    ["tenant-b", CLAIM_B],
+    ["tenant-c", "c".repeat(64)],
+  ] as const) {
+    await page.goto(`/accept-invitation?tenantId=${tenantId}&token=${token}`);
+    await waitForHydration(page);
+    await page.getByRole("button", { name: "Accept invitation" }).click();
+    await expect(
+      page.getByText("The invitation could not be accepted. Please verify the link and try again."),
+    ).toBeVisible();
+    await expect(page.getByText(/secret-upstream-host|secret-malformed-success/)).toHaveCount(0);
+  }
 });
