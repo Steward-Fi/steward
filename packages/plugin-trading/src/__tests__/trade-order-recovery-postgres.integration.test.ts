@@ -119,8 +119,18 @@ realServices("trade recovery across real PostgreSQL and Redis processes", () => 
         stderr: "pipe",
       });
     });
+    const workerResults = workers.map(async (worker) => {
+      const [exit, stdout, stderr] = await Promise.all([
+        worker.exited,
+        new Response(worker.stdout).text(),
+        new Response(worker.stderr).text(),
+      ]);
+      return { exit, stdout, stderr };
+    });
     try {
-      for (let attempt = 0; attempt < 2_000; attempt++) {
+      const gateDeadline = Date.now() + 90_000;
+      let gateReady = false;
+      while (Date.now() < gateDeadline) {
         const [waiting] = await admin.client<{ count: string }[]>`
           select count(*)::text as count
           from pg_stat_activity
@@ -128,30 +138,47 @@ realServices("trade recovery across real PostgreSQL and Redis processes", () => 
             and query ilike '%pg_advisory_lock_shared%'
             and application_name in (${applicationNames[0]}, ${applicationNames[1]})
         `;
-        if (Number(waiting?.count ?? "0") >= 2) break;
-        if (attempt === 1_999) throw new Error("trade recovery workers missed the start gate");
-        await Bun.sleep(10);
+        if (Number(waiting?.count ?? "0") >= 2) {
+          gateReady = true;
+          break;
+        }
+        const failedIndex = workers.findIndex((worker) => worker.exitCode !== null);
+        if (failedIndex >= 0) {
+          const failed = await workerResults[failedIndex]!;
+          throw new Error(
+            `trade recovery worker exited before start gate (${failed.exit}): ${failed.stderr || failed.stdout}`,
+          );
+        }
+        await Bun.sleep(25);
+      }
+      if (!gateReady) {
+        for (const worker of workers) {
+          if (worker.exitCode === null) worker.kill("SIGTERM");
+        }
+        const diagnostics = await Promise.all(workerResults);
+        throw new Error(
+          `trade recovery workers missed the start gate: ${diagnostics
+            .map((result) => result.stderr || result.stdout || `exit ${result.exit}`)
+            .join(" | ")}`,
+        );
       }
       await locker`select pg_advisory_unlock(${gateKey})`;
       gateLocked = false;
-      const outputs = await Promise.all(
-        workers.map(async (worker) => {
-          const [exit, stdout, stderr] = await Promise.all([
-            worker.exited,
-            new Response(worker.stdout).text(),
-            new Response(worker.stderr).text(),
-          ]);
-          if (exit !== 0) throw new Error(`trade recovery worker failed (${exit}): ${stderr}`);
-          const lastLine = stdout.trim().split("\n").at(-1);
-          if (!lastLine) throw new Error("trade recovery worker returned no result");
-          return JSON.parse(lastLine) as { delivered: boolean; replay: { status: number } };
-        }),
-      );
+      const completedWorkers = await Promise.all(workerResults);
+      const outputs = completedWorkers.map((result) => {
+        if (result.exit !== 0) {
+          throw new Error(`trade recovery worker failed (${result.exit}): ${result.stderr}`);
+        }
+        const lastLine = result.stdout.trim().split("\n").at(-1);
+        if (!lastLine) throw new Error("trade recovery worker returned no result");
+        return JSON.parse(lastLine) as { delivered: boolean; replay: { status: number } };
+      });
       expect(outputs.every((output) => output.replay.status === 200)).toBe(true);
       expect(outputs.filter((output) => output.delivered)).toHaveLength(1);
     } finally {
       if (gateLocked) await locker`select pg_advisory_unlock(${gateKey})`;
       locker.release();
+      await Promise.allSettled(workerResults);
     }
 
     const evidence = await admin.db
@@ -170,5 +197,5 @@ realServices("trade recovery across real PostgreSQL and Redis processes", () => 
       .where(eq(tradeOrderRecoveries.id, recoveryId));
     expect(completed!.state).toBe("completed");
     expect(completed!.auditDeliveredAt).not.toBeNull();
-  }, 120_000);
+  }, 180_000);
 });

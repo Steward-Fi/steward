@@ -1,7 +1,6 @@
-import { closeDb, getDb, tradeOrderRecoveries, writeAuditEvent } from "@stwd/db";
+import { closeDb, createDb, getDb, tradeOrderRecoveries, writeAuditEvent } from "@stwd/db";
 import { eq } from "drizzle-orm";
 import Redis from "ioredis";
-import postgres from "postgres";
 import { DurableIdempotencyStore } from "../../routes/idempotency";
 import { drainTradeRecoveryAudit } from "../../routes/trade-recovery";
 
@@ -17,7 +16,7 @@ if (!databaseUrl || !redisUrl || !recoveryId || !scope || !key || !bodyHash) {
 }
 if (!Number.isSafeInteger(gateKey)) throw new Error("invalid recovery worker gate key");
 
-const gate = postgres(databaseUrl, { max: 1 });
+const gate = createDb(databaseUrl).client;
 const redis = new Redis(redisUrl, { maxRetriesPerRequest: 1 });
 try {
   // The parent owns the exclusive form until both processes are observably
