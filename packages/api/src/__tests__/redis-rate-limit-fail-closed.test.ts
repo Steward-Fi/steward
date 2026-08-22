@@ -109,6 +109,22 @@ describe("Redis rate-limit wrappers", () => {
     expect(result).toEqual({ allowed: false, remaining: 0, resetMs: 60_000 });
   });
 
+  it("isolates durable counters when the configured request limit changes", async () => {
+    expect(await redisMiddleware.initRedis()).toBe(true);
+
+    await redisMiddleware.checkProxyRateLimit("agent-proxy", "api.example.test", 60_000, 10);
+    await redisMiddleware.checkProxyRateLimit("agent-proxy", "api.example.test", 60_000, 100);
+    await redisMiddleware.checkAgentRateLimit("agent-vault", 60_000, 3);
+    await redisMiddleware.checkAgentRateLimit("agent-vault", 60_000, 30);
+
+    expect(checkRateLimitMock.mock.calls.map(([key]) => key)).toEqual([
+      "ratelimit:proxy:agent-proxy:api.example.test:60000:10",
+      "ratelimit:proxy:agent-proxy:api.example.test:60000:100",
+      "ratelimit:vault:agent-vault:60000:3",
+      "ratelimit:vault:agent-vault:60000:30",
+    ]);
+  });
+
   it("keeps the unconfigured local-development proxy path permissive", async () => {
     delete process.env.REDIS_URL;
     await redisMiddleware.shutdownRedis();
