@@ -130,6 +130,33 @@ async function startReceiver(statuses: number[]) {
   };
 }
 
+async function startDeduplicatingReceiver() {
+  const requests: CapturedRequest[] = [];
+  const acceptedDeliveryIds = new Set<string>();
+  const firstAccepted = deferred();
+  const server = createServer(async (req, res) => {
+    const body = await readBody(req);
+    requests.push({ headers: req.headers, body });
+    const deliveryId = String(req.headers["x-steward-delivery-id"] ?? "");
+    const duplicate = acceptedDeliveryIds.has(deliveryId);
+    if (!duplicate) acceptedDeliveryIds.add(deliveryId);
+    firstAccepted.resolve();
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ accepted: !duplicate, duplicate }));
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.listen(0, "127.0.0.1", (error?: Error) => (error ? reject(error) : resolve()));
+  });
+  const { port } = server.address() as AddressInfo;
+  return {
+    url: `http://127.0.0.1:${port}/hook`,
+    requests,
+    acceptedDeliveryIds,
+    firstAccepted: firstAccepted.promise,
+    close: () => new Promise<void>((resolve) => server.close(() => resolve())),
+  };
+}
+
 afterAll(async () => {
   if (!HAS_REAL_PG) return;
   for (const tenantId of cleanupTenants) {
@@ -193,6 +220,150 @@ describeWithPostgres("PersistentQueue authority on real PostgreSQL", () => {
       status: "delivered",
       attempts: 1,
     });
+  });
+
+  test("receiver dedup reuses the durable identity after a worker disappears post-accept", async () => {
+    const receiver = await startDeduplicatingReceiver();
+    try {
+      const { tenantId, config } = await seedConfig({ url: receiver.url });
+      const dispatcher = new WebhookDispatcher({
+        maxRetries: 0,
+        timeoutMs: 2_000,
+        allowPrivateNetwork: true,
+        allowInsecureHttp: true,
+      });
+      const dispatchReturned = deferred();
+      const abandonedWorker = new Promise<never>(() => undefined);
+      const crashingQueue = queueWithDispatcher(async (event, webhook) => {
+        const result = await dispatcher.dispatch(event, webhook);
+        dispatchReturned.resolve();
+        // Model abrupt worker loss after the receiver accepted the request but
+        // before processQueue can persist the dispatch result. This promise has
+        // no active handle, just as the vanished worker has no future DB write.
+        await abandonedWorker;
+        return result;
+      });
+      const recoveryQueue = new PersistentQueue(dispatcher, { maxAttempts: 3 });
+      const { deliveryId, event } = await enqueueSnapshot(crashingQueue, tenantId, config);
+
+      // New work is born with its row identity and original timestamp in the
+      // same insert. Also simulate a row queued by the previous build to prove
+      // the atomic claim repairs legacy payloads before external I/O.
+      expect(await recoveryQueue.getDelivery(deliveryId)).toMatchObject({
+        status: "pending",
+        payload: { deliveryId, signedAt: expect.any(Number) },
+      });
+      await getDb()
+        .update(webhookDeliveries)
+        .set({ payload: event as unknown as Record<string, unknown> })
+        .where(eq(webhookDeliveries.id, deliveryId));
+
+      void crashingQueue.processQueue();
+      await receiver.firstAccepted;
+      await dispatchReturned.promise;
+      expect(receiver.requests).toHaveLength(1);
+      expect(receiver.requests[0]?.headers["x-steward-delivery-id"]).toBe(deliveryId);
+      expect(await recoveryQueue.getDelivery(deliveryId)).toMatchObject({
+        status: "processing",
+        attempts: 1,
+        payload: { deliveryId, signedAt: expect.any(Number) },
+      });
+
+      // The visibility lease still fences an early recovery attempt.
+      expect(await recoveryQueue.processQueue()).toEqual([]);
+      expect(receiver.requests).toHaveLength(1);
+
+      // Once visibility expires, a new worker transmits with a fresh signature
+      // timestamp but the same durable delivery identity/body. The receiver's
+      // idempotency set accepts the logical delivery only once.
+      await new Promise((resolve) => setTimeout(resolve, 1_100));
+      await dueNow(deliveryId);
+      expect(await recoveryQueue.processQueue()).toMatchObject([
+        { success: true, attempts: 2, deliveryId },
+      ]);
+      expect(receiver.requests).toHaveLength(2);
+      const [first, retry] = receiver.requests;
+      expect(retry?.headers["x-steward-delivery-id"]).toBe(deliveryId);
+      expect(retry?.headers["x-steward-delivery-id"]).toBe(
+        first?.headers["x-steward-delivery-id"],
+      );
+      expect(retry?.headers["x-steward-sent-at"]).not.toBe(first?.headers["x-steward-sent-at"]);
+      expect(retry?.headers["x-steward-signature"]).not.toBe(
+        first?.headers["x-steward-signature"],
+      );
+      expect(JSON.parse(retry?.body ?? "{}")).toEqual(JSON.parse(first?.body ?? "{}"));
+      expect(receiver.acceptedDeliveryIds).toEqual(new Set([deliveryId]));
+      expect(await recoveryQueue.getDelivery(deliveryId)).toMatchObject({
+        status: "delivered",
+        attempts: 2,
+        payload: { deliveryId, signedAt: expect.any(Number) },
+      });
+    } finally {
+      await receiver.close();
+    }
+  });
+
+  test("post-accept crashes consume the durable maximum before another send", async () => {
+    const receiver = await startDeduplicatingReceiver();
+    try {
+      const { tenantId, config } = await seedConfig({ url: receiver.url });
+      const dispatcher = new WebhookDispatcher({
+        maxRetries: 0,
+        timeoutMs: 2_000,
+        allowPrivateNetwork: true,
+        allowInsecureHttp: true,
+      });
+      const crashAfterAccept = () => {
+        const dispatchReturned = deferred();
+        const abandonedWorker = new Promise<never>(() => undefined);
+        return {
+          dispatchReturned: dispatchReturned.promise,
+          queue: queueWithDispatcher(
+            async (event, webhook) => {
+              const result = await dispatcher.dispatch(event, webhook);
+              dispatchReturned.resolve();
+              await abandonedWorker;
+              return result;
+            },
+            { maxAttempts: 2 },
+          ),
+        };
+      };
+
+      const firstWorker = crashAfterAccept();
+      const { deliveryId } = await enqueueSnapshot(firstWorker.queue, tenantId, config);
+      void firstWorker.queue.processQueue();
+      await firstWorker.dispatchReturned;
+      expect(receiver.requests).toHaveLength(1);
+      expect(await firstWorker.queue.getDelivery(deliveryId)).toMatchObject({
+        status: "processing",
+        attempts: 1,
+      });
+
+      const secondWorker = crashAfterAccept();
+      await dueNow(deliveryId);
+      void secondWorker.queue.processQueue();
+      await secondWorker.dispatchReturned;
+      expect(receiver.requests).toHaveLength(2);
+      expect(await secondWorker.queue.getDelivery(deliveryId)).toMatchObject({
+        status: "processing",
+        attempts: 2,
+      });
+
+      // The next expired-claim scan terminalizes the row without a third POST.
+      await dueNow(deliveryId);
+      const recoveryQueue = new PersistentQueue(dispatcher, { maxAttempts: 2 });
+      expect(await recoveryQueue.processQueue()).toEqual([]);
+      expect(receiver.requests).toHaveLength(2);
+      expect(receiver.acceptedDeliveryIds).toEqual(new Set([deliveryId]));
+      expect(await recoveryQueue.getDelivery(deliveryId)).toMatchObject({
+        status: "dead",
+        attempts: 2,
+        lastError: "Max attempts exceeded",
+      });
+    } finally {
+      await receiver.close();
+    }
   });
 
   test("durable retries keep one delivery id, refresh signatures, and do not retry internally", async () => {
