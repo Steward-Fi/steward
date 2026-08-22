@@ -165,9 +165,10 @@ export async function enforceCapabilityRateLimit(
   const { windowMs, maxRequests } = RATE_LIMITS[surface];
   const key = `ratelimit:capability:${surface}:${tenantId}:${agentId}:${windowMs}`;
 
-  if (ctx.getRedisClient()) {
+  const redisClient = ctx.getRedisClient();
+  if (redisClient) {
     try {
-      const result = await checkRateLimit(key, windowMs, maxRequests);
+      const result = await checkRateLimit(key, windowMs, maxRequests, redisClient);
       return { allowed: result.allowed, resetMs: result.resetMs };
     } catch {
       return { allowed: false, resetMs: windowMs };
