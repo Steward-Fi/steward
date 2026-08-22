@@ -48,6 +48,7 @@ import {
   users,
   userTenants,
   vaultSigningFreezes,
+  withTenantAuditedTransaction,
   withTenantAuditedTransactionOnDb,
 } from "@stwd/db";
 import {

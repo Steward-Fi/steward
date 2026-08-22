@@ -4426,7 +4426,7 @@ vaultRoutes.post("/:agentId/actions/transfer", async (c) => {
                 ? {}
                 : {
                     actionPayload: isSolanaTransfer
-                      ? { ...storedTransferActionPayload, ...solanaArtifactEvidence }
+                      ? storedTransferActionPayload
                       : stageNonSolanaAccountingEffects(storedTransferActionPayload, {
                           txId: actionId,
                           occurredAt: recoveredAt,
