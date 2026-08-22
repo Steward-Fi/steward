@@ -35,6 +35,8 @@ async function fakeRailwayRun(
   healthUrl: string | null = "https://example.test",
   remoteIp = "1.1.1.1",
   dnsAnswers = "1.1.1.1",
+  directHealthUrl: string | null = null,
+  requireDirectHealth = false,
 ) {
   const dir = await mkdtemp(join(tmpdir(), "steward-railway-deploy-"));
   temporaryDirectories.push(dir);
@@ -51,14 +53,14 @@ async function fakeRailwayRun(
 args="$*"
 printf '%s\n' "$args" >> "$FAKE_CURL_LOG"
 case "$args" in
-  *example.test/health*)
+  *example.test/health*|*direct.test/health*)
     count=0
     [ ! -f "$FAKE_HEALTH_STATE" ] || count=$(cat "$FAKE_HEALTH_STATE")
     count=$((count + 1))
     echo "$count" > "$FAKE_HEALTH_STATE"
     if [ "$count" -ge "$FAKE_HEALTHY_AFTER" ]; then printf '200 %s' "$FAKE_REMOTE_IP"; else printf '000 '; fi
     ;;
-  *example.test/ready*)
+  *example.test/ready*|*direct.test/ready*)
     count=0
     [ ! -f "$FAKE_READY_STATE" ] || count=$(cat "$FAKE_READY_STATE")
     count=$((count + 1))
@@ -112,6 +114,8 @@ exec "$REAL_NODE" "$@"
       RAILWAY_SERVICE_ID: "test-service",
       RAILWAY_ENV_ID: "test-environment",
       RAILWAY_HEALTH_URL: healthUrl ?? "",
+      RAILWAY_DIRECT_HEALTH_URL: directHealthUrl ?? "",
+      RAILWAY_REQUIRE_DIRECT_HEALTH: String(requireDirectHealth),
       RAILWAY_HEALTH_TIMEOUT: String(healthTimeout),
       RAILWAY_HEALTH_INTERVAL: "1",
     },
@@ -201,6 +205,52 @@ describe("SEC-129 redact_secrets filter", () => {
 });
 
 describe("Railway staging deployment", () => {
+  test("requires and verifies both direct endpoints when staging requests it", async () => {
+    const missing = await fakeRailwayRun(
+      1,
+      2,
+      1,
+      "https://example.test",
+      "1.1.1.1",
+      "1.1.1.1",
+      null,
+      true,
+    );
+    expect(missing.exitCode).toBe(1);
+    expect(missing.output).toContain("RAILWAY_DIRECT_HEALTH_URL is required");
+    expect(missing.curlArguments).not.toContain("serviceInstanceUpdate");
+
+    const duplicate = await fakeRailwayRun(
+      1,
+      2,
+      1,
+      "https://example.test",
+      "1.1.1.1",
+      "1.1.1.1",
+      "https://example.test",
+      true,
+    );
+    expect(duplicate.exitCode).toBe(1);
+    expect(duplicate.output).toContain("must be distinct");
+    expect(duplicate.curlArguments).not.toContain("serviceInstanceUpdate");
+
+    const result = await fakeRailwayRun(
+      1,
+      2,
+      1,
+      "https://example.test",
+      "1.1.1.1",
+      "1.1.1.1",
+      "https://direct.test",
+      true,
+    );
+    expect(result.exitCode).toBe(0);
+    expect(result.output).toContain("Direct health check passed");
+    expect(result.output).toContain("Direct readiness check passed");
+    expect(result.curlArguments).toContain("https://direct.test/health");
+    expect(result.curlArguments).toContain("https://direct.test/ready");
+  }, 15_000);
+
   test("rejects deployment acceptance when no public probe authority is configured", async () => {
     const result = await fakeRailwayRun(1, 2, 1, null);
     expect(result.exitCode).toBe(1);

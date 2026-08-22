@@ -237,6 +237,36 @@ bootstrap/provision the three login credentials and activate. Subsequent
 releases use the dedicated migrator. Only after this gate passes may the API
 start with `SKIP_MIGRATIONS=true` and be checked at `/health` and `/ready`.
 
+Staging automates this sequence in `deploy-staging.yml` after the exact
+`develop` SHA has passed both CI and Docker validation. Protect the GitHub
+`staging` environment and configure these environment secrets:
+
+- `STAGING_MIGRATION_DATABASE_URL`
+- `STAGING_OPERATOR_DATABASE_URL`
+- `RAILWAY_TOKEN`
+
+Configure `STAGING_RAILWAY_PROJECT_ID`, `STAGING_RAILWAY_SERVICE_ID`,
+`STAGING_RAILWAY_ENV_ID`, `STAGING_RAILWAY_HEALTH_URL`, and
+`STAGING_RAILWAY_DIRECT_HEALTH_URL` as non-secret environment variables, along
+with the exact `STAGING_*_DATABASE_ROLE` identities and
+`STAGING_STEWARD_PLUGINS` selection. The public/custom and direct Railway
+health origins must be distinct.
+
+Do not copy the application `DATABASE_URL` into GitHub. The release job reads
+the service's rendered `DATABASE_URL` through Railway's API without logging it,
+then proves the migration and operator credentials reach that same PostgreSQL
+database using a non-secret server-side fingerprint. The release requires
+`EXECUTE` on `pg_control_system()` for all three identities and fails before
+mutation if the stable cluster identifier is unavailable; it never falls back
+to a proxy-visible host or database OID that could collide.
+
+Migrations must be expand-only and compatible with the currently deployed
+image. After releasing the schema, the job confirms the Railway deployment ID
+and image did not change, then requires the existing image to pass `/health`
+and `/ready` through both the public and direct Railway origins. Only then may
+the workflow change the image. A compatibility failure stops image cutover and
+requires a forward fix; it does not authorize an automatic database rollback.
+
 Watch logs:
 ```bash
 railway logs
