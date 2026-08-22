@@ -23,6 +23,7 @@ import {
 import {
   type AppendRequiredAudit,
   accounts,
+  afterTenantTransactionCommit,
   agents,
   agentWallets,
   approvalQueue,
@@ -102,6 +103,12 @@ import {
 import { getConfiguredKeyStore, getConfiguredVault } from "../services/vault-factory";
 import { dispatchWebhook } from "../services/webhook-dispatch";
 import { getEmailAuthForTenant, invalidateEmailAuthForTenant } from "./auth";
+
+function invalidateEmailAuthAfterTenantCommit(tenantId: string): void {
+  if (!afterTenantTransactionCommit(() => invalidateEmailAuthForTenant(tenantId))) {
+    invalidateEmailAuthForTenant(tenantId);
+  }
+}
 
 const TENANT_MEMBER_ROLES = new Set(["owner", "admin", "member"]);
 const TENANT_INVITATION_ROLES = new Set(["admin", "developer", "billing", "viewer", "member"]);
@@ -1560,8 +1567,9 @@ platform.patch("/tenants/:tenantId/email-config", async (c) => {
     },
   );
 
-  // Consumers may only observe the new authority after mutation + audit commit.
-  invalidateEmailAuthForTenant(tenantId);
+  // The audited helper may be a savepoint inside the middleware-owned tenant
+  // transaction. Retire request-local authority only after that outer commit.
+  invalidateEmailAuthAfterTenantCommit(tenantId);
 
   return c.json<
     ApiResponse<{
@@ -2052,7 +2060,7 @@ platform.delete("/tenants/:tenantId/email-config", async (c) => {
   });
 
   // Cache invalidation follows the durable mutation + completion audit commit.
-  invalidateEmailAuthForTenant(tenantId);
+  invalidateEmailAuthAfterTenantCommit(tenantId);
 
   return c.json<ApiResponse>({ ok: true });
 });

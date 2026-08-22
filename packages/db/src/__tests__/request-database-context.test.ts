@@ -4,6 +4,7 @@ import { live } from "@electric-sql/pglite/live";
 import { eq, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/pglite";
 import {
+  afterTenantTransactionCommit,
   closeDb,
   getDb,
   getSql,
@@ -52,6 +53,32 @@ describe("request-scoped database context", () => {
       });
       expect((getDb() as unknown as { marker: string }).marker).toBe("request");
     });
+  });
+
+  test("queues side effects for the outer commit owner", async () => {
+    const transactionDb = { marker: "tenant-transaction" } as unknown as ReturnType<typeof getDb>;
+    const afterCommitTasks: Array<() => void | Promise<void>> = [];
+    const events: string[] = [];
+
+    await withTenantTransactionDatabase(
+      transactionDb,
+      { tenantId: "tenant-a" },
+      async () => {
+        expect(afterTenantTransactionCommit(() => events.push("committed"))).toBe(true);
+        events.push("callback-complete");
+      },
+      undefined,
+      afterCommitTasks,
+    );
+
+    expect(events).toEqual(["callback-complete"]);
+    expect(afterCommitTasks).toHaveLength(1);
+    await afterCommitTasks[0]?.();
+    expect(events).toEqual(["callback-complete", "committed"]);
+  });
+
+  test("declines commit deferral when no outer owner is present", () => {
+    expect(afterTenantTransactionCommit(() => undefined)).toBe(false);
   });
 
   test("rejects reuse of an active tenant transaction for another tenant or user", async () => {

@@ -721,14 +721,23 @@ export async function withAuthenticatedTenantDatabase<T>(
   if (hasTenantTransactionDatabase({ tenantId, userId, ...characteristics })) return callback();
   const context = tenantContextFromAuthenticatedPrincipal({ tenantId, method, subject, userId });
   const driver = isPGLiteRuntime ? "pglite" : getDatabaseDriver();
-  return withTenantRlsTransaction(
+  const afterCommitTasks: Array<() => void | Promise<void>> = [];
+  const result = await withTenantRlsTransaction(
     getDb() as never,
     driver,
     context,
     async (tx) =>
-      withTenantTransactionDatabase(tx as never, { tenantId, userId }, callback, characteristics),
+      withTenantTransactionDatabase(
+        tx as never,
+        { tenantId, userId },
+        callback,
+        characteristics,
+        afterCommitTasks,
+      ),
     characteristics,
   );
+  for (const task of afterCommitTasks) await task();
+  return result;
 }
 
 /**

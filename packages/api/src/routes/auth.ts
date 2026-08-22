@@ -1777,7 +1777,12 @@ function getPasskeyAuth(requestOrigin?: string): PasskeyAuth {
 
 // ─── EmailAuth cache ──────────────────────────────────────────────────────────
 
-let _emailAuthByRequest = new WeakMap<object, Map<string, Promise<EmailAuth>>>();
+const EMAIL_AUTH_REQUEST_CACHE_TTL_MS = 30_000;
+interface EmailAuthRequestCacheEntry {
+  readonly createdAt: number;
+  readonly pending: Promise<EmailAuth>;
+}
+let _emailAuthByRequest = new WeakMap<object, Map<string, EmailAuthRequestCacheEntry>>();
 
 function getEmailKeyStore(): KeyStore {
   return getConfiguredKeyStore(undefined, { allowDevSecretFallback: true });
@@ -2078,17 +2083,28 @@ export async function getEmailAuthForTenant(tenantId: string): Promise<EmailAuth
 
   let tenants = _emailAuthByRequest.get(requestIdentity);
   const cached = tenants?.get(tenantId);
-  if (cached) return cached;
-
-  const pending = createEmailAuthForTenant(tenantId).catch((error) => {
+  if (cached && Date.now() - cached.createdAt < EMAIL_AUTH_REQUEST_CACHE_TTL_MS) {
+    return cached.pending;
+  }
+  if (cached) {
     tenants?.delete(tenantId);
+    void cached.pending.then(
+      (auth) => auth.disposeProvider(),
+      () => undefined,
+    );
+  }
+
+  let entry: EmailAuthRequestCacheEntry;
+  const pending = createEmailAuthForTenant(tenantId).catch((error) => {
+    if (tenants?.get(tenantId) === entry) tenants.delete(tenantId);
     throw error;
   });
   if (!tenants) {
     tenants = new Map();
     _emailAuthByRequest.set(requestIdentity, tenants);
   }
-  tenants.set(tenantId, pending);
+  entry = { createdAt: Date.now(), pending };
+  tenants.set(tenantId, entry);
   return pending;
 }
 
@@ -2098,7 +2114,7 @@ export function invalidateEmailAuthForTenant(tenantId: string): void {
   const tenants = _emailAuthByRequest.get(identity);
   const cached = tenants?.get(tenantId);
   tenants?.delete(tenantId);
-  void cached?.then(
+  void cached?.pending.then(
     (auth) => auth.disposeProvider(),
     () => undefined,
   );
@@ -2112,6 +2128,15 @@ export function clearEmailAuthTenantCacheForTests(): void {
 export function emailAuthRequestCacheSizeForTests(): number {
   const identity = runtimeEnvironmentIdentity();
   return identity ? (_emailAuthByRequest.get(identity)?.size ?? 0) : 0;
+}
+
+/** Test-only seam for exercising the bounded request-local authority lifetime. */
+export function expireEmailAuthTenantCacheForTests(tenantId: string): void {
+  const identity = runtimeEnvironmentIdentity();
+  if (!identity) return;
+  const tenants = _emailAuthByRequest.get(identity);
+  const cached = tenants?.get(tenantId);
+  if (cached) tenants?.set(tenantId, { ...cached, createdAt: 0 });
 }
 
 export function clearOAuthTokenKeyStoreForTests(): void {

@@ -23,6 +23,7 @@ export {
 } from "./audit-chain";
 export type { DatabaseDriver, NeonTransactionDbHandle } from "./client";
 export {
+  afterTenantTransactionCommit,
   closeDb,
   createDb,
   createDbForRequest,
