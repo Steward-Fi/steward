@@ -640,10 +640,12 @@ export class PluginHost<Ctx> {
                 "empty provider name.",
             );
           }
-          if (contribution.adapter === undefined || contribution.adapter === null) {
+          const hasAdapter = contribution.adapter !== undefined && contribution.adapter !== null;
+          const hasFactory = typeof contribution.createAdapter === "function";
+          if (hasAdapter === hasFactory) {
             throw new PluginHostError(
               `plugin "${plugin.name}" contributes a "${category}" adapter under ` +
-                `provider "${provider}" with no adapter instance.`,
+                `provider "${provider}" with ${hasAdapter ? "both an adapter and a factory" : "neither an adapter nor a factory"}.`,
             );
           }
           const key = `${category}::${provider}`;
@@ -669,11 +671,19 @@ export class PluginHost<Ctx> {
           // the api boundary where @stwd/adapters is a legitimate dependency. The
           // cast is unavoidable (see AdapterContribution's cycle note); the
           // contribution author owns the adapter conforming to its category.
-          hostRegistry.register(
-            category,
-            provider,
-            contribution.adapter as Parameters<AdapterRegistry["register"]>[2],
-          );
+          if (hasFactory) {
+            hostRegistry.registerFactory(
+              category,
+              provider,
+              contribution.createAdapter as Parameters<AdapterRegistry["registerFactory"]>[2],
+            );
+          } else {
+            hostRegistry.register(
+              category,
+              provider,
+              contribution.adapter as Parameters<AdapterRegistry["register"]>[2],
+            );
+          }
           const list = this.adapterContributions.get(plugin.name) ?? [];
           list.push(key);
           this.adapterContributions.set(plugin.name, list);

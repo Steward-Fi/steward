@@ -1,8 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { withRuntimeEnvironment } from "@stwd/shared/runtime-env";
 import { MockSwapAdapter, type SwapAdapter } from "../adapters/swap.js";
-import { AdapterRegistry, adapterRegistry } from "../registry.js";
-import { AdapterNotConfiguredError } from "../types.js";
+import { AdapterRegistry } from "../registry.js";
+import { type AdapterCategory, AdapterNotConfiguredError, type BaseAdapter } from "../types.js";
 
 const FRESH_TOKENS = {
   fromToken: { address: "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48" },
@@ -11,18 +11,57 @@ const FRESH_TOKENS = {
   chainId: 8453,
 };
 
+const CATEGORIES = [
+  "swap",
+  "earn",
+  "onramp",
+  "offramp",
+  "kyc",
+  "tos",
+  "custodial",
+  "push",
+  "bridge",
+  "spark",
+  "exchange",
+] as const satisfies readonly AdapterCategory[];
+
+function selectionEnvironment(provider: string): Record<string, string> {
+  return Object.fromEntries(
+    CATEGORIES.map((category) => [`STEWARD_${category.toUpperCase()}_ADAPTER`, provider]),
+  );
+}
+
+function namedAdapter(category: AdapterCategory, provider: string): BaseAdapter {
+  return { category, provider, enabled: true };
+}
+
 describe("AdapterRegistry resolution", () => {
-  test("default singleton is authority-keyed across A to B to missing", () => {
-    const provider = (env: Record<string, string>) =>
+  test("invokes provider factories under the current request and never retains their adapters", () => {
+    const reg = new AdapterRegistry();
+    let generation = 0;
+    reg.registerFactory("swap", "request-swap", () => ({
+      category: "swap",
+      provider: `request-swap-${++generation}`,
+      enabled: true,
+      async getQuote() {
+        throw new Error("not implemented in test");
+      },
+      async buildSwap() {
+        throw new Error("not implemented in test");
+      },
+    }));
+
+    const resolve = () =>
       withRuntimeEnvironment(
-        { STEWARD_RUNTIME: "workers", ...env },
-        () => adapterRegistry.swap().provider,
+        {
+          STEWARD_RUNTIME: "workers",
+          NODE_ENV: "production",
+          STEWARD_SWAP_ADAPTER: "request-swap",
+        },
+        () => reg.swap(),
       );
-    expect(provider({ STEWARD_SWAP_ADAPTER: "mock", STEWARD_ALLOW_MOCK_ADAPTERS: "true" })).toBe(
-      "mock",
-    );
-    expect(provider({ STEWARD_SWAP_ADAPTER: "not-registered" })).toBe("disabled");
-    expect(provider({})).toBe("disabled");
+    expect(resolve().provider).toBe("request-swap-1");
+    expect(resolve().provider).toBe("request-swap-2");
   });
   test("DEV (no NODE_ENV): returns working mocks", async () => {
     const reg = new AdapterRegistry({ env: {} });
@@ -51,12 +90,20 @@ describe("AdapterRegistry resolution", () => {
     }
   });
 
-  test("PRODUCTION + STEWARD_ALLOW_MOCK_ADAPTERS=true: mocks allowed (staging escape hatch)", () => {
+  test("PRODUCTION mock use requires the current category selection and acknowledgement", () => {
     const reg = new AdapterRegistry({
       env: { NODE_ENV: "production", STEWARD_ALLOW_MOCK_ADAPTERS: "true" },
     });
-    expect(reg.swap().provider).toBe("mock");
-    expect(reg.swap().enabled).toBe(true);
+    expect(reg.swap()).toMatchObject({ provider: "disabled", enabled: false });
+
+    const acknowledged = new AdapterRegistry({
+      env: {
+        NODE_ENV: "production",
+        STEWARD_SWAP_ADAPTER: "mock",
+        STEWARD_ALLOW_MOCK_ADAPTERS: "true",
+      },
+    });
+    expect(acknowledged.swap()).toMatchObject({ provider: "mock", enabled: true });
   });
 
   test("PRODUCTION + env names an unknown provider: FAILS CLOSED (never silently mocks)", () => {
@@ -93,21 +140,25 @@ describe("AdapterRegistry resolution", () => {
     expect(reg.swap().enabled).toBe(true);
   });
 
-  test("a single registered provider without env disambiguation is used", () => {
+  test("production requires an explicit binding even with one durable provider", () => {
     const reg = new AdapterRegistry({ env: { NODE_ENV: "production" } });
     const real = new MockSwapAdapter() as SwapAdapter;
     reg.register("swap", "only", real);
-    expect(reg.swap()).toBe(real);
+    expect(reg.swap()).toMatchObject({ provider: "disabled", enabled: false });
   });
 
-  test("register invalidates a previously-resolved (disabled) instance", async () => {
+  test("late registration remains durable but does not replace production selection policy", () => {
     const reg = new AdapterRegistry({ env: { NODE_ENV: "production" } });
-    // Resolve once -> disabled and cached.
     expect(reg.swap().enabled).toBe(false);
-    // Now register a real provider; the cache must be invalidated.
     const real = new MockSwapAdapter() as SwapAdapter;
     reg.register("swap", "late", real);
-    expect(reg.swap()).toBe(real);
+    expect(reg.swap().enabled).toBe(false);
+
+    const selected = new AdapterRegistry({
+      env: { NODE_ENV: "production", STEWARD_SWAP_ADAPTER: "late" },
+    });
+    selected.register("swap", "late", real);
+    expect(selected.swap()).toBe(real);
   });
 
   test("describe() introspects all adapter categories", () => {
@@ -128,5 +179,129 @@ describe("AdapterRegistry resolution", () => {
         "tos",
       ].sort(),
     );
+  });
+
+  test("Worker binding removal disables every previously-allowed mock category immediately", () => {
+    const requestRegistry = new AdapterRegistry();
+    const allowed = withRuntimeEnvironment(
+      {
+        STEWARD_RUNTIME: "workers",
+        NODE_ENV: "production",
+        STEWARD_ALLOW_MOCK_ADAPTERS: "true",
+        ...selectionEnvironment("mock"),
+      },
+      () => requestRegistry.describe(),
+    );
+    for (const category of CATEGORIES) {
+      expect(allowed[category]).toEqual({ provider: "mock", enabled: true });
+    }
+
+    const removed = withRuntimeEnvironment(
+      { STEWARD_RUNTIME: "workers", NODE_ENV: "production" },
+      () => requestRegistry.describe(),
+    );
+    for (const category of CATEGORIES) {
+      expect(removed[category]).toEqual({ provider: "disabled", enabled: false });
+    }
+
+    const selectionRemovedButAckRemains = withRuntimeEnvironment(
+      {
+        STEWARD_RUNTIME: "workers",
+        NODE_ENV: "production",
+        STEWARD_ALLOW_MOCK_ADAPTERS: "true",
+      },
+      () => requestRegistry.describe(),
+    );
+    for (const category of CATEGORIES) {
+      expect(selectionRemovedButAckRemains[category]).toEqual({
+        provider: "disabled",
+        enabled: false,
+      });
+    }
+  });
+
+  test("all categories rotate durable providers A -> B and fail closed when selection disappears", () => {
+    const requestRegistry = new AdapterRegistry();
+    for (const category of CATEGORIES) {
+      requestRegistry.register(
+        category,
+        "rotation-a",
+        namedAdapter(category, `a-${category}`) as never,
+      );
+      requestRegistry.register(
+        category,
+        "rotation-b",
+        namedAdapter(category, `b-${category}`) as never,
+      );
+    }
+
+    const describeWith = (provider?: string) =>
+      withRuntimeEnvironment(
+        {
+          STEWARD_RUNTIME: "workers",
+          NODE_ENV: "production",
+          ...(provider ? selectionEnvironment(provider) : {}),
+        },
+        () => requestRegistry.describe(),
+      );
+    const selectedA = describeWith("rotation-a");
+    const selectedB = describeWith("rotation-b");
+    const missing = describeWith("removed-provider");
+    for (const category of CATEGORIES) {
+      expect(selectedA[category]).toEqual({ provider: `a-${category}`, enabled: true });
+      expect(selectedB[category]).toEqual({ provider: `b-${category}`, enabled: true });
+      expect(missing[category]).toEqual({ provider: "disabled", enabled: false });
+    }
+  });
+
+  test("hostile overlap keeps each suspended request on its immutable adapter authority", async () => {
+    const requestRegistry = new AdapterRegistry();
+    requestRegistry.register("swap", "overlap-a", namedAdapter("swap", "overlap-a") as never);
+    requestRegistry.register("swap", "overlap-b", namedAdapter("swap", "overlap-b") as never);
+    let releaseA!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      releaseA = resolve;
+    });
+    let startedA!: () => void;
+    const started = new Promise<void>((resolve) => {
+      startedA = resolve;
+    });
+
+    const requestA = withRuntimeEnvironment(
+      {
+        STEWARD_RUNTIME: "workers",
+        NODE_ENV: "production",
+        STEWARD_SWAP_ADAPTER: "overlap-a",
+      },
+      async () => {
+        expect(requestRegistry.swap().provider).toBe("overlap-a");
+        startedA();
+        await gate;
+        expect(requestRegistry.swap().provider).toBe("overlap-a");
+      },
+    );
+    await started;
+    await withRuntimeEnvironment(
+      {
+        STEWARD_RUNTIME: "workers",
+        NODE_ENV: "production",
+        STEWARD_SWAP_ADAPTER: "overlap-b",
+      },
+      async () => {
+        expect(requestRegistry.swap().provider).toBe("overlap-b");
+        releaseA();
+      },
+    );
+    await requestA;
+  });
+
+  test("Workers without NODE_ENV fail closed while Bun retains its development fallback", () => {
+    const requestRegistry = new AdapterRegistry();
+    expect(
+      withRuntimeEnvironment({ STEWARD_RUNTIME: "workers" }, () => requestRegistry.swap().enabled),
+    ).toBe(false);
+    const bunRegistry = new AdapterRegistry({ env: {} });
+    expect(bunRegistry.swap().provider).toBe("mock");
+    expect(bunRegistry.swap().enabled).toBe(true);
   });
 });

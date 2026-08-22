@@ -1,4 +1,5 @@
 /** Opt-in wxmr.io bridge provider for Steward. */
+import { AdapterNotConfiguredError } from "@stwd/adapters";
 import type { StewardPlugin } from "@stwd/shared";
 import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 import { WxmrBridgeAdapter } from "./wxmr-bridge";
@@ -23,7 +24,20 @@ export function resolveRpcUrl(): string | undefined {
   return undefined;
 }
 
-const rpcUrl = resolveRpcUrl();
+// Session records contain no endpoint or credential authority. Keep them
+// separate from request-owned provider instances so the existing create/get
+// session API survives isolate reuse without retaining a prior binding set.
+const sessions = new Map<
+  string,
+  { session: import("@stwd/adapters").BridgeSession; expiresAt: number }
+>();
+
+/** Build one request-owned provider from the current immutable authority. */
+export function createWxmrBridgeAdapter(): WxmrBridgeAdapter {
+  const rpcUrl = resolveRpcUrl();
+  if (!rpcUrl) throw new AdapterNotConfiguredError("bridge");
+  return new WxmrBridgeAdapter({ rpcUrl, sessions });
+}
 
 export const wxmrPlugin: StewardPlugin = {
   name: "wxmr",
@@ -32,7 +46,7 @@ export const wxmrPlugin: StewardPlugin = {
     {
       category: "bridge",
       provider: "wxmr",
-      adapter: new WxmrBridgeAdapter({ rpcUrl }),
+      createAdapter: createWxmrBridgeAdapter,
     },
   ],
 };

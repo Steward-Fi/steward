@@ -79,6 +79,22 @@ describe("PluginHost — adapter contributions (Phase 2d)", () => {
     expect(host.describe().adapterContributions.trading).toEqual(["swap::test-swap"]);
   });
 
+  it("registers request-authority factories without retaining their results", async () => {
+    const registry = new AdapterRegistry({ env: { STEWARD_SWAP_ADAPTER: "factory-swap" } });
+    let generation = 0;
+    const plugin = adapterPlugin("factory-plugin", [
+      {
+        category: "swap",
+        provider: "factory-swap",
+        createAdapter: () => fakeSwapAdapter(`factory-${++generation}`),
+      },
+    ]);
+
+    await new PluginHost<typeof registry>().register(app, ctxWith(registry), plugin);
+    expect(registry.swap().provider).toBe("factory-1");
+    expect(registry.swap().provider).toBe("factory-2");
+  });
+
   it("registers without env disambiguation when a single provider is contributed", async () => {
     // No STEWARD_SWAP_ADAPTER set; a single registered provider is used as-is.
     const registry = new AdapterRegistry({ env: {} });
@@ -183,6 +199,23 @@ describe("PluginHost — adapter contributions (Phase 2d)", () => {
 
     const host = new PluginHost<typeof ctx>();
     await expect(host.register(app, ctx, plugin)).rejects.toThrow(PluginHostError);
+  });
+
+  it("FAILS CLOSED when a contribution supplies both an instance and a factory", async () => {
+    const registry = new AdapterRegistry({ env: {} });
+    const ctx = ctxWith(registry);
+    const plugin = adapterPlugin("ambiguous", [
+      {
+        category: "swap",
+        provider: "x",
+        adapter: fakeSwapAdapter("x"),
+        createAdapter: () => fakeSwapAdapter("x"),
+      },
+    ]);
+
+    await expect(new PluginHost<typeof ctx>().register(app, ctx, plugin)).rejects.toThrow(
+      PluginHostError,
+    );
   });
 
   it("FAILS CLOSED on an empty provider name", async () => {
