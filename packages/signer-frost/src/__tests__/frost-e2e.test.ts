@@ -26,15 +26,21 @@ import { type FrostCluster, readGroupFile, startFrostCluster } from "./harness";
 let cluster: FrostCluster;
 let backend: FrostSignerBackend;
 
-beforeAll(async () => {
-  cluster = await startFrostCluster(2, 3);
-  backend = new FrostSignerBackend({
-    shareEndpoints: cluster.endpoints,
-    shareAuthTokens: cluster.authTokens,
-    threshold: cluster.threshold,
-    groupPublicKeyHex: cluster.groupPublicKeyHex,
-  });
-});
+beforeAll(
+  async () => {
+    cluster = await startFrostCluster(2, 3);
+    backend = new FrostSignerBackend({
+      shareEndpoints: cluster.endpoints,
+      shareAuthTokens: cluster.authTokens,
+      threshold: cluster.threshold,
+      groupPublicKeyHex: cluster.groupPublicKeyHex,
+    });
+  },
+  // A cold release build of the Rust sidecar can exceed the package's 60s
+  // per-test limit on a busy CI runner. Keep this bounded while allowing the
+  // harness to surface a real non-zero Cargo exit through ensureBinary().
+  180_000,
+);
 
 afterAll(() => {
   cluster?.teardown();
