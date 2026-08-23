@@ -218,9 +218,8 @@ describe("user linked account routes", () => {
         { userId: bulkWalletViolationUserId, tenantId: TENANT_ID, role: "member" },
         { userId: bulkWalletOnlyUserId, tenantId: TENANT_ID, role: "member" },
       ]);
-    await getDb()
-      .insert(tenants)
-      .values([
+    await getDb().transaction(async (tx) => {
+      await tx.insert(tenants).values([
         {
           id: `personal-${userId}`,
           name: "Linked Account Personal Tenant",
@@ -232,12 +231,11 @@ describe("user linked account routes", () => {
           apiKeyHash: "personal-account-only-hash",
         },
       ]);
-    await getDb()
-      .insert(userTenants)
-      .values([
+      await tx.insert(userTenants).values([
         { userId, tenantId: `personal-${userId}`, role: "owner" },
         { userId: accountOnlyUserId, tenantId: `personal-${accountOnlyUserId}`, role: "owner" },
       ]);
+    });
     await getDb()
       .insert(tenantConfigs)
       .values([
@@ -1893,21 +1891,21 @@ describe("user linked account routes", () => {
     const personalTenantId = `personal-${auditFailureUserId}`;
     const providerAccountId = "audit-failure-linked";
     const refreshTokenId = `audit-failure-refresh-${auditFailureUserId}`;
-    await getDb()
-      .insert(tenants)
-      .values({
+    await getDb().transaction(async (tx) => {
+      await tx.insert(users).values({
+        id: auditFailureUserId,
+        email: "audit-failure@example.test",
+        emailVerified: true,
+      });
+      await tx.insert(tenants).values({
         id: personalTenantId,
         name: "Audit Failure Personal Tenant",
         apiKeyHash: `audit-failure-${auditFailureUserId}`,
       });
-    await getDb().insert(users).values({
-      id: auditFailureUserId,
-      email: "audit-failure@example.test",
-      emailVerified: true,
+      await tx
+        .insert(userTenants)
+        .values({ userId: auditFailureUserId, tenantId: personalTenantId, role: "owner" });
     });
-    await getDb()
-      .insert(userTenants)
-      .values({ userId: auditFailureUserId, tenantId: personalTenantId, role: "owner" });
     const [linkedAccount] = await getDb()
       .insert(accounts)
       .values({ userId: auditFailureUserId, provider: "google", providerAccountId })
