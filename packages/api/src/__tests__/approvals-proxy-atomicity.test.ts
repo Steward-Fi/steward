@@ -62,7 +62,10 @@ let previousMasterPassword: string | undefined;
 let faultAuditInsert = false;
 
 /** Minimal structural view of a drizzle transaction handle for the fault hook. */
-type TxLike = { execute: (query: unknown) => Promise<unknown> };
+type TxLike = {
+  execute: (query: unknown) => Promise<unknown>;
+  transaction?: (cb: (tx: TxLike) => Promise<unknown>, ...rest: unknown[]) => Promise<unknown>;
+};
 
 function isAuditInsert(dialect: unknown, query: unknown): boolean {
   try {
@@ -83,17 +86,36 @@ function installFaultInjectingDb(db: unknown): unknown {
   const dialect = anyDb.dialect;
   const originalTransaction = anyDb.transaction.bind(anyDb);
 
+  const instrumentTransaction = (tx: TxLike) => {
+    const originalExecute = tx.execute.bind(tx);
+    tx.execute = async (query: unknown) => {
+      if (faultAuditInsert && isAuditInsert(dialect, query)) {
+        faultAuditInsert = false; // fault the first audit insert only
+        throw new Error("injected audit fault");
+      }
+      return originalExecute(query);
+    };
+
+    // Tenant auth owns the outer transaction and audited mutations run in a
+    // nested savepoint. Instrument child transactions too so this proof keeps
+    // targeting the real audit INSERT regardless of transaction depth.
+    if (tx.transaction) {
+      const originalNestedTransaction = tx.transaction.bind(tx);
+      tx.transaction = (cb: (nestedTx: TxLike) => Promise<unknown>, ...rest: unknown[]) =>
+        originalNestedTransaction(
+          async (nestedTx: TxLike) => {
+            instrumentTransaction(nestedTx);
+            return cb(nestedTx);
+          },
+          ...rest,
+        );
+    }
+  };
+
   anyDb.transaction = (cb: (tx: TxLike) => Promise<unknown>, ...rest: unknown[]) => {
     return originalTransaction(
       async (tx: TxLike) => {
-        const originalExecute = tx.execute.bind(tx);
-        tx.execute = async (query: unknown) => {
-          if (faultAuditInsert && isAuditInsert(dialect, query)) {
-            faultAuditInsert = false; // fault the first audit insert only
-            throw new Error("injected audit fault");
-          }
-          return originalExecute(query);
-        };
+        instrumentTransaction(tx);
         return cb(tx);
       },
       ...rest,
