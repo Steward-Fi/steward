@@ -823,7 +823,7 @@ export class StewardAuth {
   // ─── Passkey (WebAuthn) ─────────────────────────────────────────────────────
 
   /**
-   * Sign in with a passkey. Smart flow: tries login first, falls back to registration.
+   * Sign in with an existing discoverable passkey.
    *
    * Requires a browser environment and `@simplewebauthn/browser` installed.
    * Throws `StewardApiError` in Node or when the dependency is missing.
@@ -847,7 +847,9 @@ export class StewardAuth {
       );
     }
 
-    // 1. Try login options. If user has no passkeys (404), fall back to register.
+    // Pre-auth options are deliberately account-independent: an empty
+    // allowCredentials list lets the authenticator offer discoverable
+    // credentials without revealing whether this email has a passkey.
     const loginOptsRes = await authRequest<Record<string, unknown>>(
       this.baseUrl,
       "/auth/passkey/login/options",
@@ -860,15 +862,7 @@ export class StewardAuth {
       },
     );
 
-    if (loginOptsRes.ok) {
-      // User exists with passkeys — run authentication flow
-      return this.completePasskeyLogin(email, loginOptsRes.data, browserLib);
-    }
-
-    if (loginOptsRes.status === 404) {
-      // No account or no passkeys — run registration flow
-      return this.completePasskeyRegister(email, browserLib);
-    }
+    if (loginOptsRes.ok) return this.completePasskeyLogin(email, loginOptsRes.data, browserLib);
 
     throw new StewardApiError(loginOptsRes.error, loginOptsRes.status);
   }
@@ -883,8 +877,8 @@ export class StewardAuth {
    * the user is now on `waifu.fun`) won’t be removed; this just adds a
    * fresh credential bound to the current origin’s RP.
    *
-   * Behavior mirrors `signInWithPasskey` when no credentials exist, except
-   * it skips the login-options probe and goes straight to registration.
+   * Unlike `signInWithPasskey`, this explicitly starts registration. The
+   * login-options endpoint never reveals whether credentials already exist.
    *
    * Requires a browser environment and `@simplewebauthn/browser` installed.
    * Throws `StewardApiError` otherwise.

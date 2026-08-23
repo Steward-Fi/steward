@@ -8,6 +8,7 @@ setDefaultTimeout(120_000);
 const ENABLED_TENANT_ID = "passkey-enumeration-enabled";
 const DISABLED_TENANT_ID = "passkey-enumeration-disabled";
 const KNOWN_EMAIL = "passkey-known@example.test";
+const NO_PASSKEY_EMAIL = "passkey-without-credential@example.test";
 const UNKNOWN_EMAIL = "passkey-unknown@example.test";
 const SECRET_CREDENTIAL_ID = "credential-id-must-never-leave-options-route";
 
@@ -54,6 +55,7 @@ describe("passkey login options privacy", () => {
       .insert(users)
       .values({ email: KNOWN_EMAIL, emailVerified: true })
       .returning({ id: users.id });
+    await getDb().insert(users).values({ email: NO_PASSKEY_EMAIL, emailVerified: true });
     knownUserId = knownUser.id;
     await getDb()
       .insert(authenticators)
@@ -100,21 +102,26 @@ describe("passkey login options privacy", () => {
     expect(options.allowCredentials).toEqual([]);
   }
 
-  it("returns the same non-enumerating shape for known and unknown emails", async () => {
-    const [knownResponse, unknownResponse] = await Promise.all([
+  it("returns the same non-enumerating shape for passkey, no-passkey, and unknown emails", async () => {
+    const [knownResponse, noPasskeyResponse, unknownResponse] = await Promise.all([
       requestOptions(`  ${KNOWN_EMAIL.toUpperCase()}  `),
+      requestOptions(NO_PASSKEY_EMAIL),
       requestOptions(UNKNOWN_EMAIL),
     ]);
     expect(knownResponse.status).toBe(200);
+    expect(noPasskeyResponse.status).toBe(200);
     expect(unknownResponse.status).toBe(200);
 
     const known = (await knownResponse.json()) as LoginOptions;
+    const noPasskey = (await noPasskeyResponse.json()) as LoginOptions;
     const unknown = (await unknownResponse.json()) as LoginOptions;
     assertDiscoverableCredentialShape(known);
+    assertDiscoverableCredentialShape(noPasskey);
     assertDiscoverableCredentialShape(unknown);
+    expect(Object.keys(known).sort()).toEqual(Object.keys(noPasskey).sort());
     expect(Object.keys(known).sort()).toEqual(Object.keys(unknown).sort());
 
-    for (const payload of [known, unknown]) {
+    for (const payload of [known, noPasskey, unknown]) {
       const serialized = JSON.stringify(payload);
       expect(serialized).not.toContain(SECRET_CREDENTIAL_ID);
       expect(serialized).not.toContain("credential-public-key-must-also-remain-private");
@@ -124,6 +131,11 @@ describe("passkey login options privacy", () => {
     expect(
       await getAuthChallengeStore().get(`passkey-login:${KNOWN_EMAIL}:${known.challengeId}`),
     ).toBe(known.challenge);
+    expect(
+      await getAuthChallengeStore().get(
+        `passkey-login:${NO_PASSKEY_EMAIL}:${noPasskey.challengeId}`,
+      ),
+    ).toBe(noPasskey.challenge);
     expect(
       await getAuthChallengeStore().get(`passkey-login:${UNKNOWN_EMAIL}:${unknown.challengeId}`),
     ).toBe(unknown.challenge);
