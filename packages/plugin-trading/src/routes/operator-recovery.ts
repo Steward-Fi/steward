@@ -1660,8 +1660,11 @@ export function createOperatorRecoveryRoutes(
       body.idempotencyKey,
       requestCommitment,
     );
-    const replayResponse = operatorIdempotencyResponse(c, idempotency);
-    if (replayResponse) return replayResponse;
+    // Redis is a fast replay cache, but the HMAC-chained audit log is the
+    // authoritative record of whether a capital movement is terminal. Hold a
+    // cached response until durable evidence has been checked so stale success
+    // cannot override a requested-only (ambiguous) state.
+    const cachedReplayResponse = operatorIdempotencyResponse(c, idempotency);
 
     // Establish a non-keyed HMAC-chain guard before interpreting absence. If a
     // prior keyed requested/terminal pair was deleted, full-chain verification
@@ -1709,6 +1712,7 @@ export function createOperatorRecoveryRoutes(
     }
     const durableResponse = durableTransferResponse(c, durableState, requestFingerprint);
     if (durableResponse) return durableResponse;
+    if (cachedReplayResponse) return cachedReplayResponse;
 
     const agent = await ensureAgentForTenant(tenantId, agentId);
     if (!agent) return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
