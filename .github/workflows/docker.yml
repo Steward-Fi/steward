@@ -16,7 +16,10 @@ on:
       - ".dockerignore"
       - "package.json"
       - "bun.lock"
-      - "packages/**/package.json"
+      - "turbo.json"
+      - "tsconfig.json"
+      - "web/package.json"
+      - "packages/**"
       - ".github/workflows/docker.yml"
 
 # A branch tag is mutable. Do not let a slower build for an older push finish
