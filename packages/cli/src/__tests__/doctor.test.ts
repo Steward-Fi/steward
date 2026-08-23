@@ -108,6 +108,32 @@ describe("describeSecret", () => {
 });
 
 describe("steward doctor secret redaction", () => {
+  test("strict preflight requires an explicit operator-recovery scope or wildcard", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "steward-doctor-"));
+    try {
+      const envPath = join(dir, ".env");
+      writeFileSync(
+        envPath,
+        'STEWARD_PLATFORM_KEY_SCOPES={"key-hash":["platform:tenant:create"]}\n',
+      );
+      const denied = await runDoctor({ envPath, api: stubApi(), strict: true });
+      expect(
+        denied.checks.find((check) => check.name === "strict:operator-recovery-scope")?.ok,
+      ).toBe(false);
+
+      writeFileSync(
+        envPath,
+        'STEWARD_PLATFORM_KEY_SCOPES={"key-hash":["platform:tenant:create","platform:trade:operator"]}\n',
+      );
+      const allowed = await runDoctor({ envPath, api: stubApi(), strict: true });
+      expect(
+        allowed.checks.find((check) => check.name === "strict:operator-recovery-scope")?.ok,
+      ).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test("no long fragment of any secret appears in pretty or JSON output", async () => {
     const dir = mkdtempSync(join(tmpdir(), "steward-doctor-"));
     try {

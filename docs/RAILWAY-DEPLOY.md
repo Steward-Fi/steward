@@ -99,7 +99,7 @@ STEWARD_EXECUTION_AUTH_SECRET=<v1: plus openssl rand -hex 32>
 STEWARD_PLATFORM_KEYS=<stw_platform_ plus 24 random bytes as hex>
 # This bootstrap operator key needs both the generic platform write gate and
 # the route-specific scopes used below. Narrow this list for ongoing operation.
-STEWARD_PLATFORM_KEY_SCOPES={"<same raw platform key>":["platform:write","platform:tenant:create","platform:tenant:read","platform:agent:create","platform:agent-token:create","platform:agent:delete"]}
+STEWARD_PLATFORM_KEY_SCOPES={"<sha256 of same platform key>":["platform:write","platform:tenant:create","platform:tenant:read","platform:agent:create","platform:agent-token:create","platform:agent:delete","platform:trade:operator"]}
 
 # This example uses Steward's built-in local custody. In production that mode
 # decrypts signing keys in application memory and requires an explicit posture
@@ -139,6 +139,14 @@ PASSKEY_ORIGIN=https://your-app.com
 # The restricted API login must never own or migrate schema objects.
 SKIP_MIGRATIONS=true
 ```
+
+Before rolling out a build that enforces scoped operator recovery, update the
+scope map first and run `steward doctor --strict`. Use
+`printf '%s' "$PLATFORM_KEY" | shasum -a 256` locally to obtain the map key;
+never paste the raw credential into tickets or logs. The API remains healthy
+when the scope is absent, but operator recovery fails closed with 403 until an
+operator explicitly grants `platform:trade:operator`. This ordering prevents
+an outage without silently expanding any existing key's authority.
 
 Keep `STEWARD_MIGRATION_DATABASE_URL` and `STEWARD_OPERATOR_DATABASE_URL`
 outside the API service in a separately protected release job. The operator

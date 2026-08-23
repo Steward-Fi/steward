@@ -84,6 +84,7 @@ service where noted, e.g. each service its own DB).
 | `RPC_URL` | [functional] | default EVM RPC for balance/tx; core wallet ops degrade without a real one | `.env.example`, `packages/api/src` (`RPC_URL`) |
 | `CHAIN_ID` | [functional] | default chain id (8453 Base mainnet / 84532 Base Sepolia) | `packages/api/src` (`CHAIN_ID`) |
 | `STEWARD_PLATFORM_KEYS` | [functional] | operator keys for cross-tenant `/platform/*` admin routes; unset = no platform admin access | `packages/api/src` (`STEWARD_PLATFORM_KEYS`) |
+| `STEWARD_PLATFORM_KEY_SCOPES` | required before operator recovery rollout | Deny-by-default scope map. Grant `platform:trade:operator` only to a selected recovery credential (hashed key identifiers are supported), update variables before deploying the enforcing build, and confirm with `steward doctor --strict`. Existing keys are never upgraded implicitly. | `packages/auth/src/platform.ts`, `packages/api/src/middleware/operator-auth.ts` |
 
 recommended-but-optional (mode-independent), set if the feature is used:
 

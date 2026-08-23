@@ -135,7 +135,11 @@ Embedded mode uses PGLite, an in-process PostgreSQL-compatible database through 
 
 To use platform routes, configure both `STEWARD_PLATFORM_KEYS` and explicit
 `STEWARD_PLATFORM_KEY_SCOPES`; an unmapped key authenticates but has no platform
-authorization.
+authorization. Operator recovery routes additionally require the dedicated
+`platform:trade:operator` scope (or a platform wildcard). Existing platform
+keys do not receive it automatically; add it to a deliberately selected
+operator credential before deploying the scoped-auth release, then run
+`steward doctor --strict` as a preflight.
 
 ### Selected environment variables
 

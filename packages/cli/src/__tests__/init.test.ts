@@ -54,6 +54,7 @@ describe("steward init", () => {
       expect(env).toContain("STEWARD_AUDIT_SIGNING_KEY=");
       expect(env).toMatch(/STEWARD_AUDIT_SIGNING_KEY=[0-9a-f]{64}/);
       expect(env).toContain("platform:tenant:create");
+      expect(env).toContain("platform:trade:operator");
       // Auth placeholders emitted for symmetry so operators can fill them in.
       expect(env).toContain("STEWARD_TENANT_ID=");
       expect(env).toContain("STEWARD_TOKEN=");

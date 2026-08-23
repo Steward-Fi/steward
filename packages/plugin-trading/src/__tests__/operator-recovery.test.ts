@@ -12,6 +12,7 @@
  */
 
 import { afterAll, beforeAll, describe, expect, it, mock, setDefaultTimeout } from "bun:test";
+import { createHash } from "node:crypto";
 import {
   agents,
   agentWallets,
@@ -31,6 +32,7 @@ import { verifyAuditChain } from "../../../api/src/services/audit";
 import type { StewardAppContext } from "../context";
 
 const PLATFORM_KEY = "stw_platform_test_operator_key";
+const PLATFORM_KEY_ACTOR = `platform-key:${createHash("sha256").update(PLATFORM_KEY).digest("hex")}`;
 setDefaultTimeout(30_000);
 
 // ── Mock the Hyperliquid adapter (no signing / no network) ─────────────────────
@@ -285,6 +287,7 @@ async function buildTransferApp(failAuditAction?: string, redisClient?: IoredisL
       c.set("tenantId", c.req.header("X-Steward-Tenant") || "default");
       if (c.req.header("X-Steward-Platform-Key") === PLATFORM_KEY) {
         c.set("authType", "platform");
+        c.set("platformKeyHash", createHash("sha256").update(PLATFORM_KEY).digest("hex"));
         return next();
       }
       if (c.req.header("X-Steward-Key")) c.set("authType", "api-key");
@@ -304,9 +307,12 @@ async function buildTransferApp(failAuditAction?: string, redisClient?: IoredisL
   return app;
 }
 
-function createTransferRedisDouble(): IoredisLike {
+function createTransferRedisDouble(): {
+  client: IoredisLike;
+  seedCompleted: (scope: string, key: string, body: unknown, record: unknown) => void;
+} {
   const data = new Map<string, string>();
-  return {
+  const client = {
     get: async (key: string) => data.get(key) ?? null,
     set: async (...args: unknown[]) => {
       const [key, value, mode, , condition] = args as [string, string, string?, number?, string?];
@@ -330,6 +336,21 @@ function createTransferRedisDouble(): IoredisLike {
       return 1;
     },
   } as unknown as IoredisLike;
+  return {
+    client,
+    seedCompleted(scope, key, body, record) {
+      const storageKey = createHash("sha256")
+        .update(`${scope.length}:${scope}${key.length}:${key}`, "utf8")
+        .digest("hex");
+      // DurableIdempotencyStore names this field bodyHash for compatibility,
+      // but its current wire contract stores the canonical JSON commitment.
+      const bodyHash = JSON.stringify(body);
+      data.set(
+        `idempotency:trade:operator:${storageKey}`,
+        JSON.stringify({ state: "completed", bodyHash, record }),
+      );
+    },
+  };
 }
 
 function resetSendAssetMock(): void {
@@ -504,7 +525,7 @@ describe("mounted HIP-3 collateral transfer", () => {
       expect.objectContaining({
         action: "trade.recovery.transfer.requested",
         actorType: "platform",
-        actorId: "platform-operator",
+        actorId: PLATFORM_KEY_ACTOR,
         resourceType: "trade",
         resourceId: agentId,
         metadata: expect.objectContaining({
@@ -517,7 +538,7 @@ describe("mounted HIP-3 collateral transfer", () => {
       expect.objectContaining({
         action: "trade.recovery.transfer.submitted",
         actorType: "platform",
-        actorId: "platform-operator",
+        actorId: PLATFORM_KEY_ACTOR,
         resourceType: "trade",
         resourceId: agentId,
         metadata: expect.objectContaining({
@@ -632,8 +653,8 @@ describe("mounted HIP-3 collateral transfer", () => {
     const tenantId = `tenant-transfer-audit-${Date.now()}`;
     const agentId = `agent-transfer-audit-${Date.now()}`;
     await seedAgent({ tenantId, agentId });
-    const redisClient = createTransferRedisDouble();
-    const app = await buildTransferApp("trade.recovery.transfer.submitted", redisClient);
+    const redis = createTransferRedisDouble();
+    const app = await buildTransferApp("trade.recovery.transfer.submitted", redis.client);
     const request = () =>
       transferRequest(app, tenantId, agentId, { idempotencyKey: "completion-audit-failure" });
 
@@ -651,7 +672,7 @@ describe("mounted HIP-3 collateral transfer", () => {
     expect(await transferAuditActions(tenantId, agentId)).toEqual([
       "trade.recovery.transfer.requested",
     ]);
-    const coldReplayApp = await buildTransferApp("trade.recovery.transfer.submitted", redisClient);
+    const coldReplayApp = await buildTransferApp("trade.recovery.transfer.submitted", redis.client);
     const coldReplay = await transferRequest(coldReplayApp, tenantId, agentId, {
       idempotencyKey: "completion-audit-failure",
     });
@@ -662,6 +683,42 @@ describe("mounted HIP-3 collateral transfer", () => {
       error: "Collateral transfer outcome requires reconciliation",
     });
     expect(submitSendAssetCalls).toHaveLength(1);
+  });
+
+  it("does not treat Redis success as authoritative when durable evidence is absent", async () => {
+    resetSendAssetMock();
+    const tenantId = `tenant-transfer-cache-only-${Date.now()}`;
+    const agentId = `agent-transfer-cache-only-${Date.now()}`;
+    await seedAgent({ tenantId, agentId });
+    const idempotencyKey = "cache-only-success";
+    const requestCommitment = {
+      agentId,
+      venue: "hyperliquid",
+      sourceDex: "xyz",
+      destinationDex: "",
+      amount: "12500000",
+      token: null,
+    };
+    const redis = createTransferRedisDouble();
+    redis.seedCompleted(`${tenantId}:transfer`, idempotencyKey, requestCommitment, {
+      status: 200,
+      body: { ok: true, data: { stale: true } },
+    });
+
+    const response = await transferRequest(
+      await buildTransferApp(undefined, redis.client),
+      tenantId,
+      agentId,
+      { idempotencyKey },
+    );
+    expect(response.status).toBe(409);
+    expect(response.headers.get("Retry-After")).toBe("60");
+    expect(await response.json()).toEqual({
+      ok: false,
+      error: "Collateral transfer replay evidence requires reconciliation",
+    });
+    expect(signSendAssetCalls).toHaveLength(0);
+    expect(submitSendAssetCalls).toHaveLength(0);
   });
 
   it("fails closed instead of replaying tampered durable audit evidence", async () => {
