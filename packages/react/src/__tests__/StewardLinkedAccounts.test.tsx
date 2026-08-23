@@ -20,6 +20,9 @@ Object.assign(globalThis, {
 });
 
 let authed = true;
+let authToken = "token";
+let authUserId = "user-1";
+let authTenantId = "tenant-1";
 let client: Record<string, ReturnType<typeof mock>>;
 
 const { StewardLinkedAccounts } = await import("../components/StewardLinkedAccounts.js");
@@ -29,9 +32,12 @@ function authContext() {
   return {
     isAuthenticated: authed,
     isLoading: false,
-    user: { id: "user-1", email: "user@example.test" },
-    session: { token: "token", address: "", tenantId: "tenant-1" },
-    getToken: () => "token",
+    user: authed ? { id: authUserId, email: `${authUserId}@example.test` } : null,
+    session: authed
+      ? { token: authToken, userId: authUserId, address: "", tenantId: authTenantId }
+      : null,
+    activeTenantId: authed ? authTenantId : null,
+    getToken: () => (authed ? authToken : null),
   };
 }
 
@@ -91,24 +97,32 @@ function resetClient() {
 
 let root: Root | null = null;
 let container: HTMLDivElement;
+let mountedProps: Record<string, unknown> = {};
 
-async function mount(props: Record<string, unknown> = {}) {
-  container = browser.document.createElement("div") as unknown as HTMLDivElement;
-  browser.document.body.replaceChildren(container as unknown as Node);
-  root = createRoot(container);
-  await React.act(async () =>
-    root?.render(
+function renderAccounts() {
+  root?.render(
+    React.createElement(
+      StewardProvider,
+      { client: client as any },
       React.createElement(
-        StewardProvider,
-        { client: client as any },
-        React.createElement(
-          StewardAuthContext.Provider,
-          { value: authContext() as any },
-          React.createElement(StewardLinkedAccounts, props),
-        ),
+        StewardAuthContext.Provider,
+        { value: authContext() as any },
+        React.createElement(StewardLinkedAccounts, mountedProps),
       ),
     ),
   );
+}
+
+async function mount(props: Record<string, unknown> = {}) {
+  mountedProps = props;
+  container = browser.document.createElement("div") as unknown as HTMLDivElement;
+  browser.document.body.replaceChildren(container as unknown as Node);
+  root = createRoot(container);
+  await React.act(async () => renderAccounts());
+}
+
+async function rerender() {
+  await React.act(async () => renderAccounts());
 }
 
 function button(label: string): HTMLButtonElement {
@@ -136,6 +150,10 @@ async function change(selector: string, value: string) {
 
 beforeEach(() => {
   authed = true;
+  authToken = "token";
+  authUserId = "user-1";
+  authTenantId = "tenant-1";
+  mountedProps = {};
   resetClient();
   globalThis.fetch = mock(async () => Response.json({ ok: true, data: {} }));
 });
@@ -298,5 +316,93 @@ describe("<StewardLinkedAccounts /> mounted interactions", () => {
     });
     expect(container.textContent).toContain("new-result");
     expect(container.textContent).not.toContain("stale-result");
+  });
+
+  test("never renders an old user's delayed accounts after sign-out and a new sign-in", async () => {
+    let resolveOldRefresh: ((value: unknown) => void) | undefined;
+    let resolveNewUser: ((value: unknown) => void) | undefined;
+    const oldRefresh = new Promise((resolve) => {
+      resolveOldRefresh = resolve;
+    });
+    const newUser = new Promise((resolve) => {
+      resolveNewUser = resolve;
+    });
+
+    await mount();
+    expect(container.textContent).toContain("octocat");
+    client.listUserAccounts
+      .mockImplementationOnce(() => oldRefresh)
+      .mockImplementationOnce(() => newUser);
+    await click("refresh");
+
+    authed = false;
+    await rerender();
+    expect(container.textContent).toContain("Sign in to manage linked accounts");
+    expect(container.textContent).not.toContain("octocat");
+
+    authed = true;
+    authToken = "new-user-token";
+    authUserId = "user-2";
+    authTenantId = "tenant-2";
+    await rerender();
+    expect(container.textContent).not.toContain("octocat");
+
+    await React.act(async () => {
+      resolveOldRefresh?.({
+        accounts: [account("old", "github", "old-user-result")],
+        primaryLoginMethods: [{ provider: "email", providerAccountId: "old@example.test" }],
+      });
+      await oldRefresh;
+    });
+    expect(container.textContent).not.toContain("old-user-result");
+
+    await React.act(async () => {
+      resolveNewUser?.({
+        accounts: [account("new", "github", "new-user-result")],
+        primaryLoginMethods: [{ provider: "email", providerAccountId: "new@example.test" }],
+      });
+      await newUser;
+    });
+    expect(container.textContent).toContain("new-user-result");
+    expect(container.textContent).not.toContain("old-user-result");
+  });
+
+  test("clears on token rotation and suppresses callbacks from the prior auth epoch", async () => {
+    let resolveUnlink: ((value: { deleted: boolean; issuedBefore: number }) => void) | undefined;
+    let resolveRotatedAccounts: ((value: unknown) => void) | undefined;
+    const oldUnlink = new Promise<{ deleted: boolean; issuedBefore: number }>((resolve) => {
+      resolveUnlink = resolve;
+    });
+    const rotatedAccounts = new Promise((resolve) => {
+      resolveRotatedAccounts = resolve;
+    });
+    client.unlinkUserAccount.mockImplementationOnce(() => oldUnlink);
+    const onUnlink = mock(() => {});
+
+    await mount({ onUnlink });
+    expect(container.textContent).toContain("octocat");
+    await click("unlink");
+
+    authToken = "rotated-token";
+    client.listUserAccounts.mockImplementationOnce(() => rotatedAccounts);
+    await rerender();
+    expect(container.textContent).not.toContain("octocat");
+    const refreshesAfterRotation = client.listUserAccounts.mock.calls.length;
+
+    await React.act(async () => {
+      resolveUnlink?.({ deleted: true, issuedBefore: 2 });
+      await oldUnlink;
+    });
+    expect(onUnlink).toHaveBeenCalledTimes(0);
+    expect(client.listUserAccounts).toHaveBeenCalledTimes(refreshesAfterRotation);
+
+    await React.act(async () => {
+      resolveRotatedAccounts?.({
+        accounts: [account("rotated", "github", "rotated-result")],
+        primaryLoginMethods: [{ provider: "email", providerAccountId: "rotated@example.test" }],
+      });
+      await rotatedAccounts;
+    });
+    expect(container.textContent).toContain("rotated-result");
   });
 });
