@@ -163,7 +163,7 @@ jobs:
           if [ "${{ matrix.package }}" = "packages/sdk" ]; then
             mapfile -t sdk_tests < <(find packages/sdk/src -type f \( -name '*.test.ts' -o -name '*.spec.ts' \) | sort)
             bun test --isolate "${sdk_tests[@]}"
-          elif [ "${{ matrix.package }}" = "packages/plugin-sdk" ] || [ "${{ matrix.package }}" = "packages/plugin-example" ] || [ "${{ matrix.package }}" = "packages/plugin-capabilities" ]; then
+          elif [ "${{ matrix.package }}" = "packages/proxy" ] || [ "${{ matrix.package }}" = "packages/plugin-sdk" ] || [ "${{ matrix.package }}" = "packages/plugin-example" ] || [ "${{ matrix.package }}" = "packages/plugin-capabilities" ]; then
             # These packages own their test-process isolation or package-local
             # preload. Running them from the repository root bypasses that
             # contract and can leak mutable fixtures between files.
