@@ -50,7 +50,6 @@ import { isIP } from "node:net";
 import {
   ACCESS_TOKEN_EXPIRY,
   ACCESS_TOKEN_EXPIRY_SECONDS,
-  type AuthenticatorTransportFuture,
   assertPinnedDnsTransportSupported,
   assertPublicHttpsEndpoint,
   assertTokenNotRevoked,
@@ -8532,10 +8531,9 @@ auth.post("/passkey/register/verify", async (c) => {
 /**
  * POST /passkey/login/options
  * Body: { email }
- * Returns only the credentials bound to the typed email. Unknown accounts and
- * accounts without a passkey share one generic response. This rate-limited
- * pre-auth route deliberately exposes passkey availability so the browser never
- * offers a credential belonging to a different account on the same RP.
+ * Returns privacy-preserving discoverable-credential options. `allowCredentials`
+ * is intentionally empty for every email so this pre-auth route cannot reveal
+ * whether an account or passkey exists.
  */
 auth.post("/passkey/login/options", async (c) => {
   const rl = await checkAuthRateLimit(c, "passkey-options", 60_000, 20);
@@ -8571,36 +8569,11 @@ auth.post("/passkey/login/options", async (c) => {
   );
   if (ssoRequiredResponse) return ssoRequiredResponse;
 
-  const credentials = await getDb()
-    .select({
-      credentialId: authenticators.credentialId,
-      transports: authenticators.transports,
-    })
-    .from(authenticators)
-    .innerJoin(users, eq(authenticators.userId, users.id))
-    .where(eq(users.email, email));
-  if (credentials.length === 0) {
-    return c.json<ApiResponse>(
-      { ok: false, error: "Passkey sign-in is unavailable for this email" },
-      404,
-    );
-  }
-
-  const options = await getPasskeyAuth(c.req.header("origin")).generateAuthenticationOptions(
-    email,
-    {
-      allowCredentials: credentials.map((credential) => ({
-        id: credential.credentialId,
-        ...(credential.transports && credential.transports.length > 0
-          ? { transports: credential.transports as AuthenticatorTransportFuture[] }
-          : {}),
-      })),
-    },
-  );
+  const options = await getPasskeyAuth(c.req.header("origin")).generateAuthenticationOptions(email);
   const challengeId = options.challenge;
   await getChallengeStore().set(`passkey-login:${email}:${challengeId}`, options.challenge);
 
-  return c.json({ ...options, challengeId });
+  return c.json({ ...options, allowCredentials: [], challengeId });
 });
 
 /**

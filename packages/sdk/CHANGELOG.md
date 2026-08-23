@@ -23,6 +23,8 @@
 - Add typed provider-action lifecycle states and complete provider-case evidence contracts.
 
 ### Fixed
+- Use the SimpleWebAuthn v13 `optionsJSON` call contract for passkey login,
+  registration, and MFA ceremonies.
 - In auth-proxy mode, persist an issued access token only after the HttpOnly refresh-token handoff succeeds, so a failed handoff cannot leave a partially authenticated local session.
 
 ### Docs
