@@ -78,7 +78,7 @@ async function withApprovalAuditFailure<T>(operation: () => Promise<T>): Promise
   } finally {
     await getDb().execute(
       sql.raw("DROP TRIGGER IF EXISTS proxy_approval_audit_failure_for_test ON audit_events"),
-// ─── Audit-insert fault injection ────────────────────────────────────────────
+      // ─── Audit-insert fault injection ────────────────────────────────────────────
     );
     await getDb().execute(sql.raw("DROP FUNCTION IF EXISTS fail_proxy_approval_audit_for_test()"));
   }
