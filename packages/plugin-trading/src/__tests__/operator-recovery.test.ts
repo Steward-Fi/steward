@@ -238,6 +238,7 @@ async function buildApp(ctxOverrides: Partial<StewardAppContext> = {}) {
     const tenantId = c.req.header("X-Steward-Tenant") || "default";
     c.set("tenantId", tenantId);
     c.set("authType", "platform");
+    c.set("platformKeyHash", createHash("sha256").update(PLATFORM_KEY).digest("hex"));
     return next();
   });
   app.route("/v1/trade", createOperatorRecoveryRoutes({ ...testCtx(), ...ctxOverrides }));

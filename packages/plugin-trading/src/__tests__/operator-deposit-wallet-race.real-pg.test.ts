@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
+import { createHash } from "node:crypto";
 import {
   agents,
   agentWallets,
@@ -27,6 +28,7 @@ const tenantId = `deposit-wallet-race-tenant-${suffix}`;
 const agentId = `deposit-wallet-race-agent-${suffix}`;
 const MASTER_PASSWORD = "deposit-wallet-race-master-password";
 const PLATFORM_KEY = "stw_platform_deposit_wallet_race";
+const PLATFORM_KEY_HASH = createHash("sha256").update(PLATFORM_KEY).digest("hex");
 const blocker = databaseUrl ? createPostgresClient(databaseUrl) : null;
 const inspector = databaseUrl ? createPostgresClient(databaseUrl) : null;
 
@@ -110,6 +112,7 @@ suite("mounted Hyperliquid deposit wallet rotation on real PostgreSQL", () => {
         return c.json({ ok: false, error: "Invalid platform key" }, 403);
       }
       c.set("authType", "platform");
+      c.set("platformKeyHash", PLATFORM_KEY_HASH);
       return next();
     });
     app.route("/v1/trade", createOperatorRecoveryRoutes(ctx));

@@ -21,6 +21,7 @@
  */
 
 import { afterAll, beforeAll, describe, expect, it, mock, setDefaultTimeout } from "bun:test";
+import { createHash } from "node:crypto";
 import {
   agents,
   agentWallets,
@@ -39,6 +40,7 @@ import { z } from "zod";
 import type { StewardAppContext } from "../context";
 
 const PLATFORM_KEY = "stw_platform_test_operator_gates_key";
+const PLATFORM_KEY_HASH = createHash("sha256").update(PLATFORM_KEY).digest("hex");
 const ARBITRUM_CHAIN_ID = 42161;
 // Deterministic stub ETH price for the spending-limit denomination tests.
 const STUB_ETH_USD = 4000;
@@ -204,6 +206,7 @@ async function buildApp(
     }
     c.set("tenantId", c.req.header("X-Steward-Tenant") || "default");
     c.set("authType", "platform");
+    c.set("platformKeyHash", PLATFORM_KEY_HASH);
     return next();
   });
   app.route("/v1/trade", createOperatorRecoveryRoutes({ ...testCtx(), ...ctxOverrides }, options));
