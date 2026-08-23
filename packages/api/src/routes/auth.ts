@@ -1520,6 +1520,22 @@ async function peekEmailGrant(grant: string, email: string, tenantId: string): P
   }
 }
 
+/**
+ * Test-only seam for exercising verified-email enrollment routes without
+ * sending or scraping an OTP. Production grants are still issued exclusively
+ * by /email/otp/verify.
+ */
+export async function _seedEmailGrantForTests(
+  grant: string,
+  email: string,
+  tenantId: string,
+): Promise<void> {
+  await getEmailGrantStore().set(
+    emailGrantKey(grant),
+    JSON.stringify({ email: email.toLowerCase().trim(), tenantId }),
+  );
+}
+
 const OAUTH_CODE_REDEEM_LOCK_TTL_MS = 10 * 1000;
 const OAUTH_CODE_REDEEM_LOCK_CLEANUP_TIMEOUT_MS = 250;
 
@@ -8191,8 +8207,9 @@ auth.delete("/sessions", async (c) => {
 
 /**
  * POST /passkey/register/options
- * Body: { email }
- * Finds or creates user, returns WebAuthn registration options.
+ * Body: { email, emailGrant? }
+ * Verified-email enrollment returns 409 when the account already has a
+ * passkey, while authenticated sessions can register additional devices.
  */
 auth.post("/passkey/register/options", async (c) => {
   // Pre-auth reachable via the email-grant path — rate limit like the other
@@ -8215,6 +8232,9 @@ auth.post("/passkey/register/options", async (c) => {
   }
   const email = body.email.toLowerCase().trim();
   const db = getDb();
+  const emailGrant =
+    typeof body.emailGrant === "string" && body.emailGrant.length > 0 ? body.emailGrant : null;
+  const usingEmailGrant = emailGrant !== null;
 
   // Two ways in: an authenticated session (add-passkey for logged-in users)
   // or a verified-email grant from /email/otp/verify (Privy-style signup:
@@ -8224,14 +8244,14 @@ auth.post("/passkey/register/options", async (c) => {
   let userEmail: string | null;
   let ssoTenantId: string;
 
-  if (typeof body.emailGrant === "string" && body.emailGrant.length > 0) {
+  if (usingEmailGrant) {
     const resolvedTenantId =
       c.req.header("X-Steward-Tenant")?.trim() || body.tenantId?.trim() || defaultAuthTenantId();
     const methodResponse = await requireTenantLoginMethodAllowed(c, resolvedTenantId, "passkey");
     if (methodResponse) return methodResponse;
     // Peek (not consume): the grant is only burned at register/verify so a
     // cancelled Touch ID prompt doesn't cost the user their verification.
-    const grantOk = await peekEmailGrant(body.emailGrant, email, resolvedTenantId);
+    const grantOk = await peekEmailGrant(emailGrant, email, resolvedTenantId);
     if (!grantOk) {
       return c.json<ApiResponse>({ ok: false, error: "Invalid or expired email grant" }, 401);
     }
@@ -8287,6 +8307,17 @@ auth.post("/passkey/register/options", async (c) => {
     .select({ credentialId: authenticators.credentialId })
     .from(authenticators)
     .where(eq(authenticators.userId, userId));
+
+  if (usingEmailGrant && existingCreds.length > 0) {
+    return c.json<ApiResponse & { code: string }>(
+      {
+        ok: false,
+        error: "A passkey already exists for this email. Sign in with it instead.",
+        code: "passkey_already_registered",
+      },
+      409,
+    );
+  }
 
   const attachment =
     body.authenticatorAttachment === "platform" || body.authenticatorAttachment === "cross-platform"
