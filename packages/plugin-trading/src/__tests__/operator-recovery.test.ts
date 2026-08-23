@@ -23,6 +23,7 @@ import {
   writeAuditEvent,
 } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
+import type { IoredisLike } from "@stwd/redis";
 import { and, asc, eq, inArray } from "drizzle-orm";
 import { Hono } from "hono";
 import { z } from "zod";
@@ -251,7 +252,7 @@ async function buildApp(ctxOverrides: Partial<StewardAppContext> = {}) {
   return app;
 }
 
-async function buildTransferApp(failAuditAction?: string) {
+async function buildTransferApp(failAuditAction?: string, redisClient?: IoredisLike) {
   const { tradingPlugin } = await import("../index");
   const baseWriteAuditEvent = writeAuditEvent;
   const app = new Hono();
@@ -280,7 +281,7 @@ async function buildTransferApp(failAuditAction?: string) {
       await baseWriteAuditEvent(event);
     },
     verifyAuditChain,
-    getRedisClient: () => null,
+    getRedisClient: () => redisClient ?? null,
     requireAgentJwt: async (_c: unknown, next: () => Promise<void>) => next(),
     tenantAuth: async (_c: unknown, next: () => Promise<void>) => next(),
     operatorAuth: async (
@@ -311,6 +312,34 @@ async function buildTransferApp(failAuditAction?: string) {
   } as never;
   tradingPlugin.register(app as never, ctx);
   return app;
+}
+
+function createTransferRedisDouble(): IoredisLike {
+  const data = new Map<string, string>();
+  return {
+    get: async (key: string) => data.get(key) ?? null,
+    set: async (...args: unknown[]) => {
+      const [key, value, mode, , condition] = args as [string, string, string?, number?, string?];
+      if (mode === "PX" && condition === "NX" && data.has(key)) return null;
+      data.set(key, value);
+      return "OK";
+    },
+    eval: async (
+      script: string,
+      _numKeys: number,
+      key: string,
+      claimToken: string,
+      ...args: unknown[]
+    ) => {
+      const raw = data.get(key);
+      if (!raw) return 0;
+      const current = JSON.parse(raw) as { state?: string; claimToken?: string };
+      if (current.state !== "pending" || current.claimToken !== claimToken) return 0;
+      if (script.includes('redis.call("DEL"')) data.delete(key);
+      else data.set(key, args[0] as string);
+      return 1;
+    },
+  } as unknown as IoredisLike;
 }
 
 function resetSendAssetMock(): void {
@@ -608,26 +637,31 @@ describe("mounted HIP-3 collateral transfer", () => {
     expect(JSON.stringify(ambiguousAudits)).not.toContain("transport lost after write");
   });
 
-  it("replays terminal success when the completion audit fails after venue submission", async () => {
+  it("lets durable ambiguity override stale Redis success after completion-audit failure", async () => {
     resetSendAssetMock();
     const tenantId = `tenant-transfer-audit-${Date.now()}`;
     const agentId = `agent-transfer-audit-${Date.now()}`;
     await seedAgent({ tenantId, agentId });
-    const app = await buildTransferApp("trade.recovery.transfer.submitted");
+    const redisClient = createTransferRedisDouble();
+    const app = await buildTransferApp("trade.recovery.transfer.submitted", redisClient);
     const request = () =>
       transferRequest(app, tenantId, agentId, { idempotencyKey: "completion-audit-failure" });
 
     const first = await request();
     const retry = await request();
     expect(first.status).toBe(200);
-    expect(retry.status).toBe(200);
-    expect(await retry.json()).toEqual(await first.json());
+    expect(retry.status).toBe(409);
+    expect(retry.headers.get("Retry-After")).toBe("60");
+    expect(await retry.json()).toEqual({
+      ok: false,
+      error: "Collateral transfer outcome requires reconciliation",
+    });
     expect(signSendAssetCalls).toHaveLength(1);
     expect(submitSendAssetCalls).toHaveLength(1);
     expect(await transferAuditActions(tenantId, agentId)).toEqual([
       "trade.recovery.transfer.requested",
     ]);
-    const coldReplayApp = await buildTransferApp("trade.recovery.transfer.submitted");
+    const coldReplayApp = await buildTransferApp("trade.recovery.transfer.submitted", redisClient);
     const coldReplay = await transferRequest(coldReplayApp, tenantId, agentId, {
       idempotencyKey: "completion-audit-failure",
     });
