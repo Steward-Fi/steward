@@ -512,6 +512,11 @@ export function setPGLiteOverride(
   pgliteOverride = { db, close };
 }
 
+/** Whether getDb() is currently backed by the embedded PGLite override. */
+export function hasPGLiteOverride(): boolean {
+  return pgliteOverride !== undefined;
+}
+
 // ─── Request-scoped database propagation ────────────────────────────────────
 
 type RequestDatabase = ReturnType<typeof createDb>["db"];

@@ -36,6 +36,7 @@ export {
   getDatabaseUrl,
   getDb,
   getSql,
+  hasPGLiteOverride,
   hasTenantTransactionDatabase,
   setPGLiteOverride,
   waitUntilRequestDatabaseTask,

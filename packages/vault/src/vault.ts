@@ -7,6 +7,7 @@ import {
   encryptedKeys,
   getDatabaseDriver,
   getDb,
+  hasPGLiteOverride,
   policies,
   toAgentIdentity,
   transactions,
@@ -642,7 +643,11 @@ export function custodyTransitionLockKey(
  * transitions across replicas/connections cannot interleave check-then-act.
  */
 function usesCustodyAdvisoryLock(): boolean {
-  return process.env.STEWARD_DB_MODE !== "pglite" && process.env.STEWARD_PGLITE_MEMORY !== "true";
+  return (
+    !hasPGLiteOverride() &&
+    process.env.STEWARD_DB_MODE !== "pglite" &&
+    process.env.STEWARD_PGLITE_MEMORY !== "true"
+  );
 }
 
 const MAX_CUSTODY_SIGNING_CONNECTIONS = 4;
