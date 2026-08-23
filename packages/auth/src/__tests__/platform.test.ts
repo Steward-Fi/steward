@@ -1,6 +1,11 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { Hono } from "hono";
-import { getPlatformKeyScopes, isValidPlatformKey, platformAuthMiddleware } from "../platform";
+import {
+  authorizePlatformKey,
+  getPlatformKeyScopes,
+  isValidPlatformKey,
+  platformAuthMiddleware,
+} from "../platform";
 
 const ORIGINAL_PLATFORM_KEY = process.env.STEWARD_PLATFORM_KEY;
 const ORIGINAL_PLATFORM_KEYS = process.env.STEWARD_PLATFORM_KEYS;
@@ -56,6 +61,50 @@ describe("platform key validation", () => {
       "platform:write",
       "platform:tenant:create",
     ]);
+  });
+
+  it("authorizes narrow operator authority and records a non-secret key identity", () => {
+    resetPlatformKeyEnv();
+    const key = "scoped-trading-operator-key-with-enough-entropy";
+    process.env.STEWARD_PLATFORM_KEY = key;
+    process.env.STEWARD_PLATFORM_KEY_SCOPES = JSON.stringify({
+      [key]: ["platform:trade:operator"],
+    });
+
+    const authorization = authorizePlatformKey(key, "platform:trade:operator");
+    expect(authorization).toEqual({
+      ok: true,
+      keyHash: expect.stringMatching(/^[a-f0-9]{64}$/),
+      scopes: ["platform:trade:operator"],
+    });
+  });
+
+  it("denies valid but unscoped or incorrectly scoped operator keys", () => {
+    resetPlatformKeyEnv();
+    const key = "unprivileged-platform-key-with-enough-entropy";
+    process.env.STEWARD_PLATFORM_KEY = key;
+
+    expect(authorizePlatformKey(key, "platform:trade:operator")).toEqual({
+      ok: false,
+      status: 403,
+      error: "Forbidden",
+    });
+
+    process.env.STEWARD_PLATFORM_KEY_SCOPES = JSON.stringify({ [key]: ["platform:read"] });
+    expect(authorizePlatformKey(key, "platform:trade:operator")).toEqual({
+      ok: false,
+      status: 403,
+      error: "Forbidden",
+    });
+  });
+
+  it("accepts the platform wildcard for operator authority", () => {
+    resetPlatformKeyEnv();
+    const key = "wildcard-platform-key-with-enough-entropy";
+    process.env.STEWARD_PLATFORM_KEY = key;
+    process.env.STEWARD_PLATFORM_KEY_SCOPES = JSON.stringify({ [key]: ["platform:*"] });
+
+    expect(authorizePlatformKey(key, "platform:trade:operator")).toMatchObject({ ok: true });
   });
 
   it("preserves an empty scope map only when the configuration is absent or blank", () => {
