@@ -146,7 +146,6 @@ const ACTION: GithubCanonicalActionV1 = {
 async function seedBase() {
   const db = getDb();
   await db.insert(tenants).values({ id: IDS.tenant, name: "Gov", apiKeyHash: "h" });
-  await db.insert(users).values({ id: IDS.user, email: "gov@t.test" });
   await db
     .insert(agents)
     .values({ id: IDS.agent, tenantId: IDS.tenant, name: "A", walletAddress: "0x1" });
@@ -517,6 +516,11 @@ beforeAll(async () => {
     await client.close();
   });
 
+  // Migration 0123 permanently retires deleted user identities. Keep this
+  // authority actor stable across per-test fixture resets instead of deleting
+  // and recreating the same user id/email before every case.
+  await getDb().insert(users).values({ id: IDS.user, email: "gov@t.test" });
+
   proxyMod = await import("../handlers/proxy");
   handleProxy = proxyMod.handleProxy;
   dispatchMod = await import("../handlers/governed-execution");
@@ -623,7 +627,6 @@ beforeEach(async () => {
   await db.delete(secrets);
   await db.delete(workspaces);
   await db.delete(agents);
-  await db.delete(users);
   await db.delete(tenants);
   await seedBase();
 });
