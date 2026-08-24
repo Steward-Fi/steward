@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
-import { StewardAuth } from "../auth";
+import { isStewardPasskeyAlreadyRegisteredError, StewardAuth } from "../auth";
 import type { SessionStorage } from "../auth-types";
 import { StewardApiError } from "../client";
 
@@ -184,6 +184,44 @@ describe("StewardAuth.addPasskey", () => {
     }) as typeof fetch;
     const auth = new StewardAuth({ baseUrl: "https://api.example.test" });
     await expect(auth.addPasskey("shadow@shad0w.xyz")).rejects.toBeInstanceOf(StewardApiError);
+  });
+
+  it("preserves the structured existing-passkey recovery code", async () => {
+    global.fetch = (async (input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url.endsWith("/auth/passkey/register/options")) {
+        return new Response(
+          JSON.stringify({
+            ok: false,
+            error: "A passkey already exists for this email. Sign in with it instead.",
+            code: "passkey_already_registered",
+          }),
+          { status: 409, headers: { "content-type": "application/json" } },
+        );
+      }
+      return new Response("{}", { status: 200 });
+    }) as typeof fetch;
+
+    const auth = new StewardAuth({ baseUrl: "https://api.example.test" });
+    let caught: unknown;
+    try {
+      await auth.addPasskey("shadow@shad0w.xyz", { emailGrant: "reusable-email-grant" });
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toBeInstanceOf(StewardApiError);
+    expect(isStewardPasskeyAlreadyRegisteredError(caught)).toBe(true);
+    if (!isStewardPasskeyAlreadyRegisteredError(caught)) {
+      throw new Error("expected passkey_already_registered error");
+    }
+    expect(caught.status).toBe(409);
+    expect(caught.data).toEqual({
+      ok: false,
+      error: "A passkey already exists for this email. Sign in with it instead.",
+      code: "passkey_already_registered",
+    });
+    expect(startRegistration).not.toHaveBeenCalled();
   });
 
   it("forwards challengeId when completing passkey login", async () => {
