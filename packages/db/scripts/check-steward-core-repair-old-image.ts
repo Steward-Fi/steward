@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { redactedThrownDiagnostics } from "@stwd/shared";
 
 export const STEWARD_PRODUCTION_ROLLBACK_IMAGE =
   "ghcr.io/steward-fi/steward@sha256:51557626b6c3215d432c7f4077b1cf44a059051d5a763384335a88270b371ca1";
@@ -163,7 +164,8 @@ if (isEntrypoint) {
       );
     } catch (error) {
       console.error(
-        `NO-GO: ${error instanceof Error ? error.message : "invalid old-image compatibility receipt"}`,
+        "NO-GO: invalid old-image compatibility receipt",
+        redactedThrownDiagnostics(error),
       );
       process.exitCode = 1;
     }
