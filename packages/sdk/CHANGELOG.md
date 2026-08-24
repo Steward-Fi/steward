@@ -23,6 +23,9 @@
 - Add typed provider-action lifecycle states and complete provider-case evidence contracts.
 
 ### Fixed
+- Passkey sign-in no longer treats a login-options `404` as proof of account
+  state or silently starts registration; callers must use `addPasskey` only
+  after an authenticated session or verified-email grant.
 - Use the SimpleWebAuthn v13 `optionsJSON` call contract for passkey login,
   registration, and MFA ceremonies.
 - In auth-proxy mode, persist an issued access token only after the HttpOnly refresh-token handoff succeeds, so a failed handoff cannot leave a partially authenticated local session.
