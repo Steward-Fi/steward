@@ -1,22 +1,18 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { hashApiKey } from "@stwd/auth";
-import { closeDb, getDb, tenants } from "@stwd/db";
-import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
+import { getDb, tenants } from "@stwd/db";
+import { eq } from "drizzle-orm";
 
 const TENANT_ID = `adapter-app-mount-${Date.now()}`;
 const API_KEY = `stw_adapter_mount_${Date.now()}`;
+const SKIP = !process.env.DATABASE_URL;
 
-describe("adapter app mount", () => {
+describe.skipIf(SKIP)("adapter app mount", () => {
   let app: Awaited<typeof import("../app")>["app"];
 
   beforeAll(async () => {
-    process.env.STEWARD_PGLITE_MEMORY = "true";
     process.env.STEWARD_MASTER_PASSWORD = "adapter-app-mount-master-password";
     process.env.STEWARD_AUDIT_HMAC_KEY = "adapter-app-mount-audit-hmac-key-with-enough-entropy";
-    const { db, client } = await createPGLiteDb("memory://");
-    setPGLiteOverride(db, async () => {
-      await client.close();
-    });
     await getDb()
       .insert(tenants)
       .values({
@@ -28,8 +24,7 @@ describe("adapter app mount", () => {
   }, 120_000);
 
   afterAll(async () => {
-    await closeDb();
-    delete process.env.STEWARD_PGLITE_MEMORY;
+    await getDb().delete(tenants).where(eq(tenants.id, TENANT_ID));
     delete process.env.STEWARD_MASTER_PASSWORD;
     delete process.env.STEWARD_AUDIT_HMAC_KEY;
   });

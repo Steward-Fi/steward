@@ -25,6 +25,7 @@
  */
 
 import { AsyncLocalStorage } from "node:async_hooks";
+import { sql } from "drizzle-orm";
 import { drizzle as drizzleNeon, type NeonHttpDatabase } from "drizzle-orm/neon-http";
 import { drizzle as drizzleNeonWebSocket, type NeonDatabase } from "drizzle-orm/neon-serverless";
 import { drizzle as drizzlePostgres, type PostgresJsDatabase } from "drizzle-orm/postgres-js";
@@ -489,6 +490,8 @@ interface RequestDatabaseContext {
   active: boolean;
   tenantId?: string;
   userId?: string;
+  isolationLevel?: "repeatable read";
+  readOnly?: boolean;
   pendingTasks: Set<Promise<unknown>>;
   guardedObjects: WeakMap<object, object>;
 }
@@ -498,6 +501,9 @@ const tenantTransactionDatabaseStorage = new AsyncLocalStorage<RequestDatabaseCo
 export function hasTenantTransactionDatabase(expected?: {
   tenantId: string;
   userId?: string;
+  db?: RequestDatabase;
+  isolationLevel?: "repeatable read";
+  readOnly?: boolean;
 }): boolean {
   const context = tenantTransactionDatabaseStorage.getStore();
   if (!context?.active || !context.db) return false;
@@ -508,7 +514,37 @@ export function hasTenantTransactionDatabase(expected?: {
   ) {
     throw new Error("RLS_TENANT_DATABASE_CONTEXT_MISMATCH");
   }
+  if (
+    expected &&
+    ((expected.isolationLevel !== undefined &&
+      context.isolationLevel !== expected.isolationLevel) ||
+      (expected.readOnly !== undefined && context.readOnly !== expected.readOnly))
+  ) {
+    throw new Error("RLS_TENANT_DATABASE_CHARACTERISTICS_MISMATCH");
+  }
+  if (expected?.db !== undefined && expected.db !== context.db) return false;
   return true;
+}
+
+/**
+ * Apply a bounded database phase without replacing the active tenant
+ * transaction or its request-owned transport. PostgreSQL timeouts are scoped
+ * to the existing transaction, so the trusted tenant/user GUCs and a Worker's
+ * single WebSocket connection remain authoritative for the whole phase.
+ */
+export async function withTenantTransactionDatabaseDeadline<T>(
+  deadlineAt: number,
+  use: (db: RequestDatabase) => Promise<T>,
+): Promise<T> {
+  const context = tenantTransactionDatabaseStorage.getStore();
+  if (!context) throw new Error("RLS_TENANT_DATABASE_CONTEXT_REQUIRED");
+  assertRequestDatabaseContextActive(context);
+  const remainingMs = deadlineMilliseconds(deadlineAt);
+  const db = context.db;
+  await db.execute(sql.raw(`SET LOCAL statement_timeout = '${remainingMs}ms'`));
+  await db.execute(sql.raw(`SET LOCAL lock_timeout = '${remainingMs}ms'`));
+  await db.execute(sql.raw(`SET LOCAL idle_in_transaction_session_timeout = '${remainingMs}ms'`));
+  return use(db);
 }
 
 function assertRequestDatabaseContextActive(
@@ -631,6 +667,7 @@ export async function withTenantTransactionDatabase<T>(
   transactionDb: RequestDatabase,
   identity: { tenantId: string; userId?: string },
   callback: () => Promise<T>,
+  characteristics?: { isolationLevel?: "repeatable read"; readOnly?: boolean },
 ): Promise<T> {
   if (tenantTransactionDatabaseStorage.getStore()) {
     throw new Error("RLS_TENANT_DATABASE_CONTEXT_NESTED");
@@ -641,6 +678,8 @@ export async function withTenantTransactionDatabase<T>(
     active: true,
     tenantId: identity.tenantId,
     userId: identity.userId,
+    isolationLevel: characteristics?.isolationLevel,
+    readOnly: characteristics?.readOnly,
     pendingTasks: new Set(),
     guardedObjects: new WeakMap(),
   };

@@ -538,9 +538,8 @@ jobs:
   integration:
     name: Integration Tests (Postgres)
     runs-on: ubuntu-latest
-    # 25m: the per-test timeout was raised to 30s to absorb PGLite migration
-    # latency under the concurrent --isolate load, which lengthens worst-case
-    # wall-clock for the full 122-file run. Give the job comfortable headroom.
+    # The serial isolated runner below keeps migration-heavy files from starving
+    # each other. Give the complete API suite enough bounded wall-clock headroom.
     timeout-minutes: 25
     env:
       REDIS_URL: "redis://localhost:6379"
@@ -662,10 +661,11 @@ jobs:
         # size) and each process frees its WASM heap on exit. Reproduced in a
         # 6GB-capped Linux container: the single `--isolate` process is killed
         # at exit 137; a 6-way --shard split still OOMs (25 files/shard is too
-        # much); this runner at TEST_JOBS=2 finishes the full suite with zero
-        # OOM in ~2.3min. TEST_TIMEOUT=30000 absorbs per-file PGLite migration
-        # latency.
-        run: TEST_JOBS=2 TEST_TIMEOUT=30000 bun packages/api/scripts/run-tests-isolated.ts
+        # much). Keep this serial: even two PGLite processes can starve an API
+        # request long enough to hit Bun's per-test timeout. The 120-second
+        # per-file timeout matches push CI and leaves headroom for the
+        # migration-heavy public-boundary suites.
+        run: TEST_JOBS=1 TEST_TIMEOUT=120000 bun packages/api/scripts/run-tests-isolated.ts
         env:
           DATABASE_URL: "postgres://steward:steward_ci@localhost:5432/steward_test"
           PORT: "3299"

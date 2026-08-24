@@ -2,9 +2,8 @@ import { afterAll, beforeAll, describe, expect, it, mock } from "bun:test";
 import { randomUUID } from "node:crypto";
 import { generateTotp, hashSha256Hex } from "@stwd/auth";
 import { agents, closeDb, getDb, tenantConfigs, tenants, users, userTenants } from "@stwd/db";
-import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { isValidMnemonic } from "@stwd/vault";
-import { eq } from "drizzle-orm";
+import { eq, inArray } from "drizzle-orm";
 
 const webhookDispatches: Array<{
   event: { type: string; deliveryId?: string; data?: unknown };
@@ -38,13 +37,14 @@ const EMAIL = `privy-completeness-${TEST_ID}@example.test`;
 const USER_ADDRESS = "0x00000000000000000000000000000000000000cd";
 const RESTORE_MNEMONIC =
   "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+const fixtureUsers = new Set([USER_ID]);
+const fixtureTenants = new Set([TENANT_ID]);
 
-describe("Privy-competitor integration completeness", () => {
+describe.skipIf(!process.env.DATABASE_URL)("Privy-competitor integration completeness", () => {
   let app: Awaited<typeof import("../app")>["app"];
   let createSessionToken: Awaited<typeof import("../routes/auth")>["createSessionToken"];
 
   beforeAll(async () => {
-    process.env.STEWARD_PGLITE_MEMORY = "true";
     process.env.STEWARD_MASTER_PASSWORD = "privy-completeness-master-password";
     process.env.STEWARD_JWT_SECRET = "privy-completeness-jwt-secret-with-enough-entropy";
     process.env.JWT_SECRET = "privy-completeness-jwt-secret-with-enough-entropy";
@@ -53,11 +53,6 @@ describe("Privy-competitor integration completeness", () => {
     process.env.EMAIL_PROVIDER = "mock";
     process.env.STEWARD_ALLOW_UNSAFE_MESSAGE_SIGNING = "true";
     process.env.STEWARD_ALLOW_USER_UNSAFE_MESSAGE_SIGNING = "true";
-
-    const { db, client } = await createPGLiteDb("memory://");
-    setPGLiteOverride(db, async () => {
-      await client.close();
-    });
 
     await getDb().insert(users).values({
       id: USER_ID,
@@ -78,8 +73,13 @@ describe("Privy-competitor integration completeness", () => {
   }, 120_000);
 
   afterAll(async () => {
+    await getDb()
+      .delete(tenants)
+      .where(inArray(tenants.id, [...fixtureTenants]));
+    await getDb()
+      .delete(users)
+      .where(inArray(users.id, [...fixtureUsers]));
     await closeDb();
-    delete process.env.STEWARD_PGLITE_MEMORY;
     delete process.env.STEWARD_MASTER_PASSWORD;
     delete process.env.STEWARD_JWT_SECRET;
     delete process.env.JWT_SECRET;
@@ -113,6 +113,8 @@ describe("Privy-competitor integration completeness", () => {
     const userId = randomUUID();
     const tenantId = `personal-${userId}`;
     const email = `privy-${label}-${userId}@example.test`;
+    fixtureUsers.add(userId);
+    fixtureTenants.add(tenantId);
     await getDb().insert(users).values({
       id: userId,
       email,

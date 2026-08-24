@@ -12,10 +12,19 @@ import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "
 import { generateKeyPairSync } from "node:crypto";
 import { createServer, type Server } from "node:http";
 import { signAccessToken } from "@stwd/auth";
-import { agents, closeDb, secrets, tenants, users, userTenants } from "@stwd/db";
-import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
+import {
+  agents,
+  closeDb,
+  getDb,
+  secretRoutes,
+  secrets,
+  tenants,
+  users,
+  userTenants,
+} from "@stwd/db";
 import { GENERIC_HTTP_PROVIDER_ACTION_PROFILE } from "@stwd/shared";
 import { KeyStore } from "@stwd/vault";
+import { eq, inArray } from "drizzle-orm";
 import type { Hono } from "hono";
 import { exportJWK, generateKeyPair, type KeyLike, SignJWT } from "jose";
 import type { AppVariables } from "../services/context";
@@ -83,9 +92,8 @@ async function expectCreated(response: Response, label: string): Promise<void> {
   }
 }
 
-describe("#201 generic-http true public-boundary E2E", () => {
+describe.skipIf(!process.env.DATABASE_URL)("#201 generic-http true public-boundary E2E", () => {
   beforeAll(async () => {
-    process.env.STEWARD_PGLITE_MEMORY = "true";
     process.env.STEWARD_AUDIT_HMAC_KEY = "0".repeat(64);
     process.env.STEWARD_EXECUTION_AUTH_SECRET = "1".repeat(64);
     process.env.STEWARD_MASTER_PASSWORD = "generic-public-boundary-master-password";
@@ -98,8 +106,7 @@ describe("#201 generic-http true public-boundary E2E", () => {
       .export({ format: "pem", type: "pkcs8" })
       .toString();
 
-    const { db, client } = await createPGLiteDb("memory://");
-    setPGLiteOverride(db, async () => client.close());
+    const db = getDb();
 
     const keyStore = new KeyStore(process.env.STEWARD_MASTER_PASSWORD, undefined, "secret-vault");
     const encrypted = keyStore.encrypt(CREDENTIAL, {
@@ -173,10 +180,22 @@ describe("#201 generic-http true public-boundary E2E", () => {
   });
 
   afterAll(async () => {
+    // Agent deletion is deliberately guarded while an enabled route can still
+    // resolve its secret. Disable first, let the tenant cascade remove all
+    // governed authority rows, then remove the non-FK route/secret records.
+    await getDb()
+      .update(secretRoutes)
+      .set({ enabled: false, authorityMode: "legacy", providerOperationId: null })
+      .where(eq(secretRoutes.tenantId, F.tenant));
+    await getDb().delete(tenants).where(eq(tenants.id, F.tenant));
+    await getDb().delete(secretRoutes).where(eq(secretRoutes.tenantId, F.tenant));
+    await getDb().delete(secrets).where(eq(secrets.tenantId, F.tenant));
+    await getDb()
+      .delete(users)
+      .where(inArray(users.id, [F.owner, F.approver]));
     await closeDb();
     await new Promise<void>((resolve) => jwksServer.close(() => resolve()));
     for (const key of [
-      "STEWARD_PGLITE_MEMORY",
       "STEWARD_AUDIT_HMAC_KEY",
       "STEWARD_EXECUTION_AUTH_SECRET",
       "STEWARD_MASTER_PASSWORD",

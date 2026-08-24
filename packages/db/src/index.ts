@@ -68,6 +68,7 @@ export * from "./schema-auth";
 export {
   assertTenantRlsDriver,
   type TenantRlsDriver,
+  type TenantTransactionCharacteristics,
   type TrustedTenantContext,
   tenantContextForInternalJob,
   tenantContextFromAuthenticatedPrincipal,

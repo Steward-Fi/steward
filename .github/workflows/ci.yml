@@ -451,7 +451,10 @@ jobs:
   integration:
     name: Integration Tests (Postgres)
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # The serial API suite intentionally runs each PGLite-heavy file in a
+    # separate process. Keep the job budget aligned with the documented
+    # 25-minute bound below; 15 minutes cancels healthy hosted runs mid-suite.
+    timeout-minutes: 25
     env:
       REDIS_URL: "redis://localhost:6379"
 
